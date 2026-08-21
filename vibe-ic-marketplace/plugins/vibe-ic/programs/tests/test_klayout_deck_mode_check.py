@@ -74,7 +74,7 @@ def test_structural_with_waiver_passes(tmp_path):
     (tmp_path / "waivers.json").write_text(json.dumps({
         "waivers": [{
             "id": "K01_klayout_structural_only_drc",
-            "rationale": "<NDA-REDACTED-4> <NDA-REDACTED-1> ships no DRC deck — "
+            "rationale": "commercial 180nm PDK ships no DRC deck — "
                          "tracking foundry closure ticket A1; production "
                          "tapeout uses Cadence Quantus full deck",
             "approver": "signoff_engineer",
