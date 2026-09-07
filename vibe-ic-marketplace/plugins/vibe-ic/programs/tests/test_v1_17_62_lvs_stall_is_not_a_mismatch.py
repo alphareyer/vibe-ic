@@ -221,9 +221,20 @@ def test_blocked_still_aggregates_to_fail():
     assert runner._aggregate_verdict([_sr("BLOCKED")]) == "FAIL"
     assert runner._aggregate_verdict([_sr("FAIL")]) == "FAIL"
     assert runner._aggregate_verdict([_sr("PASS")]) == "PASS"
-    # And the catch-all that makes an INVENTED word dangerous — asserted, so
-    # the reason a new status word was NOT introduced is measured, not stated.
-    assert runner._aggregate_verdict([_sr("STALLED")]) == "PASS"
+    # And the danger of an INVENTED word — still asserted, so the reason a new
+    # status word was not introduced here stays MEASURED rather than stated.
+    #
+    # RESTATED BY vibe-ic#2153, and the restatement is a strengthening. This
+    # line used to read `== "PASS"`: it PINNED the catch-all, recording as a
+    # fact of the flow that an unlisted word aggregates to a clean pass. That
+    # is the defect #2153 removes — the aggregator now REFUSES an unclassified
+    # status by name instead of absorbing it. The intent of the assertion is
+    # unchanged (an invented word must not be quietly harmless) and the answer
+    # is now the safe one, so nothing this test guarded has been weakened: the
+    # word `STALLED` was dangerous because it was silent, and it is no longer
+    # silent.
+    assert (runner._aggregate_verdict([_sr("STALLED")])
+            == "UNKNOWN_STATUS:STALLED@lvs")
 
 
 # ---------------------------------------------------------------------------

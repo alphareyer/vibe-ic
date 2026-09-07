@@ -597,6 +597,26 @@ class StepResult:
 _VERDICT_TIERS = ("PASS", "FAIL", "BLOCKED", "SKIP", "WAIVED",
                   "ENV_UNAVAILABLE")
 
+#: vibe-ic#2153 — the prefix of the word `_aggregate_verdict` returns when the
+#: plan carries a status outside its known vocabulary. A REFUSAL, not a
+#: verdict: the aggregator is saying it cannot grade this run, and `main()`
+#: exits non-zero because the word is not in its green tuple.
+#:
+#: DECLARED HERE FOR CONSUMERS; the function itself spells the literal, because
+#: sibling suites exec `_aggregate_verdict` lifted out of this module by source
+#: and a module-global reference would be a NameError inside the very test that
+#: proves the guard works. The two spellings are pinned to each other by
+#: `tests/test_issue2153_phase3_verdict_refuses_unknown_status.py`.
+#:
+#: `_VERDICT_TIERS` above is this module's DECLARED step vocabulary and is
+#: deliberately NOT widened to the aggregator's known set: it is asserted
+#: against real step rows by `test_issue544_declared_signoff_gate_not_checked`,
+#: and widening it would weaken that assertion. What the #2153 test pins
+#: instead is the one-way containment that matters — every word in
+#: `_VERDICT_TIERS` must be classified by the aggregator, or this module
+#: declares a status its own roll-up would refuse.
+UNKNOWN_STATUS_PREFIX = "UNKNOWN_STATUS:"
+
 
 def _preflight_refusal(name: str):
     """Build this runner's OWN refusal row for `step_preflight.gate`.
@@ -55651,18 +55671,135 @@ def _derive_headline_verdict(project: Path, steps_verdict: str
 
 
 def _aggregate_verdict(plan: List[StepResult]) -> str:
-    # BLOCKED ("the check could not run; nothing is known") is grouped with
-    # FAIL here, and this grouping is LOAD-BEARING. The final `return "PASS"`
-    # below is a catch-all: ANY status this function does not enumerate falls
-    # through to it and turns the whole run green. A "cannot verify" step that
-    # produced a green run would be a worse defect than the ambiguity BLOCKED
-    # was introduced to remove, so BLOCKED is named explicitly and lands in
-    # the non-green bucket. The BLOCKED-vs-FAIL distinction is preserved where
-    # triage reads it — the step's own status, its `finding`, and
-    # lvs_verdict.json — while the headline verdict vocabulary
-    # (PASS / PASS_WITH_WAIVERS / FAIL) stays a stable contract for its
-    # existing consumers.
-    if any(s.status in ("FAIL", "BLOCKED") for s in plan):
+    """The run's own-steps verdict. BLOCKING: `main()` returns 0 only for
+    PASS / PASS_WITH_WAIVERS / PASS_WITH_OPEN_SOURCE_CONSTRAINTS, so every
+    other word this function can return — FAIL and the UNKNOWN_STATUS refusal
+    below — exits the runner non-zero.
+
+    vibe-ic#2153 — THERE IS NO CATCH-ALL ANY MORE. This function used to end
+    `return "PASS"`, so any status it did not enumerate turned the whole run
+    green: the system did not recognise something and reported success, which
+    is invisible exactly when a new tier, a renamed status or a typo is
+    introduced. It bit three times in a row by hand — BLOCKED (#544),
+    VACUOUS_PASS (#654), PASS_WITH_ATTRIBUTION (#2148) — each time discovered
+    by an author who happened to look.
+
+    MEASURED at the time of the fix, by walking every `StepResult` construction
+    that reaches this plan: TWO statuses were arriving green through the
+    catch-all with nobody having listed them —
+
+        WARN          `step_prelayout_signoff` (the pre-layout sign-off basis
+                      is UNSUBSTANTIATED), appended to `plan` in `main()`
+        PASS_W_WARN   `design_one_shot_runner.step_dft_lec_chain`'s
+                      `dft_insertion` row, republished verbatim as
+                      `step11_dft_insertion` by `run_step11_dft_after_synth`
+
+    `PASS_W_WARN` is not hypothetical: it is present in the published corpus
+    (caravel_user_project v1.9.43, `step11_dft_insertion`, ATPG rc=1 at 60.5%
+    stuck-at coverage) and contributed nothing to that run's verdict. Both are
+    now classified as QUALIFIED (PASS_WITH_WAIVERS) — a warning is a pass the
+    step itself declined to make clean.
+
+    THE KNOWN SET IS DERIVED, NOT TYPED. `_TIERS` below is the ONE source: the
+    known vocabulary is `union(_TIERS.values())`, so a status cannot be
+    classified-but-unknown or known-but-unclassified, and "someone remembered
+    to update the second list" is not a state this function can be in.
+
+    NOT `_flow_verdict_tiers`. The issue proposed deriving from it; that module
+    is the authority for `flow_compliance_check`'s words, and `StepResult.status`
+    is a different vocabulary — routing these words through that classifier
+    marks bare SKIP and ENV_UNAVAILABLE as qualified-done, which is a different
+    answer than this function's established PASS_WITH_WAIVERS. Tried, measured
+    and rejected once already; the rejection is recorded in the VACUOUS_PASS
+    comment below and stands.
+
+    `_TIERS` is FUNCTION-LOCAL on purpose, and the literal
+    `"UNKNOWN_STATUS:"` is spelled out rather than referenced from
+    `UNKNOWN_STATUS_PREFIX`: sibling suites lift this function out of its
+    module by source and exec it in isolation, where a module-global reference
+    is a NameError in the very test that proves the guard works. The two
+    spellings are pinned to each other by
+    `test_issue2153_phase3_verdict_refuses_unknown_status.py`.
+    """
+    # THE ONE SOURCE. Every word this runner's plan can carry, and the headline
+    # tier it rolls up to. Nothing else enumerates the vocabulary.
+    _TIERS = {
+        # BLOCKED ("the check could not run; nothing is known") is grouped with
+        # FAIL, and this grouping is LOAD-BEARING: a "cannot verify" step that
+        # produced a green run would be a worse defect than the ambiguity
+        # BLOCKED was introduced to remove. The BLOCKED-vs-FAIL distinction is
+        # preserved where triage reads it — the step's own status, its
+        # `finding`, and lvs_verdict.json.
+        #
+        # ORGANIC #654 — a VACUOUS sign-off is not a pass, and fell through
+        # both of the tests that used to sit around it. MEASURED: a step
+        # returning VACUOUS_PASS matched neither the FAIL/BLOCKED test nor the
+        # WAIVED/SKIP/ENV_UNAVAILABLE one, so the run returned "PASS" — which
+        # would have made the unrouted sign-off steps produce a GREEN run, the
+        # defect #654 is about, inside its own fix. Found by a test asserting
+        # the tier, not by reading the code.
+        #
+        # Stated in THIS function's vocabulary on purpose. `_flow_verdict_tiers`
+        # is the authority for `flow_compliance_check`'s words and correctly
+        # ranks VACUOUS-PASS as a QUALIFIED done-claim, but StepResult.status is
+        # a DIFFERENT vocabulary, and routing its words through that classifier
+        # marks bare `SKIP` and `ENV_UNAVAILABLE` as qualified too — both
+        # established PASS_WITH_WAIVERS states here. Tried, measured, and
+        # rejected: borrowing a classifier across two vocabularies is how a fix
+        # acquires a second defect.
+        "FAIL": ("FAIL", "BLOCKED", "VACUOUS_PASS"),
+        # v1.6.54 — ENV_UNAVAILABLE counts toward PASS_WITH_WAIVERS the same
+        # way as WAIVED / SKIP. The verdict tier is preserved at the step level
+        # for diagnostics; the project-level acceptance gate treats both the
+        # same (CLAUDE.md SOLE ACCEPTANCE CRITERION explicitly recognises
+        # PASS_WITH_WAIVERS as a real verdict).
+        #
+        # vibe-ic#2148 — PASS_WITH_ATTRIBUTION is a QUALIFIED tier: a delivery
+        # whose die-level density is the integrator's has NOT closed those
+        # rules, so the run is qualified, never plain PASS.
+        #
+        # vibe-ic#2153 — WARN and PASS_W_WARN join them. Both were reaching the
+        # catch-all and scoring a CLEAN pass, which is strictly weaker than
+        # what the emitting step said about itself:
+        #   WARN         step_prelayout_signoff, when the pre-layout basis is
+        #                unsubstantiated (`pre_pnr_timing.rpt` declares no
+        #                PRE_LAYOUT STA_BASIS).
+        #   PASS_W_WARN  the ATPG producer returned non-zero while coverage was
+        #                still measured. The number stands; the run that
+        #                produced it does not stand clean.
+        # This STRENGTHENS the verdict for both — neither can now yield a bare
+        # "PASS" — and moves no other word.
+        "PASS_WITH_WAIVERS": ("WAIVED", "SKIP", "ENV_UNAVAILABLE",
+                              "PASS_WITH_ATTRIBUTION", "WARN", "PASS_W_WARN"),
+        "PASS": ("PASS",),
+    }
+    _known = {w for words in _TIERS.values() for w in words}
+
+    # REFUSE BY NAME, and FIRST. An aggregator holding a word it cannot
+    # classify does not know what this run's verdict is — not even that the
+    # FAIL beside it is the whole story — so it says so instead of grading.
+    # NOT a silent PASS, and deliberately NOT a silent FAIL either: a silent
+    # FAIL is the same disease with the sign flipped, and it gets switched back
+    # the first time it inconveniences somebody. The word names the exact
+    # unknown string AND the step it came from, so the reader never has to go
+    # looking for which row poisoned the roll-up.
+    _unknown, _seen = [], set()
+    for s in plan:
+        if s.status not in _known and (s.status, s.name) not in _seen:
+            _seen.add((s.status, s.name))
+            _unknown.append(f"{s.status}@{s.name}")
+    if _unknown:
+        # Loud, and on stderr so it survives a caller that reads only stdout.
+        print(f"phase3_one_shot_runner: REFUSING to aggregate a verdict — "
+              f"{len(_unknown)} step status(es) are outside this runner's "
+              f"known vocabulary {sorted(_known)}: {', '.join(_unknown)}. "
+              f"Classify them in `_aggregate_verdict._TIERS` (the one source) "
+              f"before relying on this verdict. This is NOT a pass and it is "
+              f"NOT a design failure; it is the aggregator declining to grade "
+              f"a plan it does not understand.", file=sys.stderr)
+        return "UNKNOWN_STATUS:" + ",".join(_unknown)
+
+    if any(s.status in _TIERS["FAIL"] for s in plan):
         return "FAIL"
     # ORGANIC #654 — a VACUOUS sign-off is not a pass, and fell through both
     # of the tests around it. MEASURED: a step returning VACUOUS_PASS matched
@@ -55679,22 +55816,10 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
     # `ENV_UNAVAILABLE` as qualified too — both established PASS_WITH_WAIVERS
     # states here. Tried, measured, and rejected: borrowing a classifier across
     # two vocabularies is how a fix acquires a second defect.
-    if any(s.status == "VACUOUS_PASS" for s in plan):
-        return "FAIL"
-    # v1.6.54 — ENV_UNAVAILABLE counts toward PASS_WITH_WAIVERS the
-    # same way as WAIVED / SKIP. The verdict tier is preserved at the
-    # step level for diagnostics; the project-level acceptance gate
-    # treats both the same (CLAUDE.md SOLE ACCEPTANCE CRITERION
-    # explicitly recognises PASS_WITH_WAIVERS as a real verdict).
-    # vibe-ic#2148 — PASS_WITH_ATTRIBUTION is a QUALIFIED tier and is
-    # enumerated HERE for the reason the comment at the top of this function
-    # states: the catch-all below returns "PASS" for any status this function
-    # does not know, so a new word that is not listed turns the run green in
-    # silence. A delivery whose die-level density is the integrator's has NOT
-    # closed those rules; the run is qualified, never plain PASS.
-    if any(s.status in ("WAIVED", "SKIP", "ENV_UNAVAILABLE",
-                        "PASS_WITH_ATTRIBUTION") for s in plan):
+    if any(s.status in _TIERS["PASS_WITH_WAIVERS"] for s in plan):
         return "PASS_WITH_WAIVERS"
+    # NOT a catch-all: every word that reaches this line is in `_TIERS["PASS"]`,
+    # because anything else was refused above.
     return "PASS"
 
 

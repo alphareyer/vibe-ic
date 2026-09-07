@@ -66,15 +66,69 @@ def _run_phase(name: str, runner: Path, args: list[str]
 
 
 def _aggregate_verdict(p2: dict, p3: dict, ran_p2: bool, ran_p3: bool) -> str:
-    verdicts: list[str] = []
+    """The chained run's verdict — the WEAKER of the two phase verdicts.
+
+    BLOCKING: `main()` returns 0 only for PASS / PASS_WITH_WAIVERS, so the
+    UNKNOWN_PHASE_VERDICT refusal below exits the runner non-zero.
+
+    vibe-ic#2153, second instance. This function had the same catch-all as
+    `phase3_one_shot_runner._aggregate_verdict`: it named FAIL, named two
+    qualified words, and returned "PASS" for everything else. That is not a
+    separate cosmetic defect — it is the LAUNDRY for the first one:
+
+      * phase 3 now refuses a plan it cannot grade and returns
+        `UNKNOWN_STATUS:<word>@<step>`. Read here, that word matched neither
+        branch and came back out as a CLEAN PASS one level up. A refusal that
+        the next aggregator turns green is not a refusal.
+      * `PASS_WITH_OPEN_SOURCE_CONSTRAINTS` — a real phase-3 headline; it is
+        what `_derive_headline_verdict` returns when the completion audit says
+        so — was ALSO being read as a clean PASS here, though both
+        `phase3_one_shot_runner._VERDICT_RANK` and
+        `flow_compliance_check` rank it as QUALIFIED, at the same level as
+        PASS_WITH_WAIVERS. Two places in this repo already say the word is not
+        clean; this function was the third and disagreed with both. Classifying
+        it with the other qualified words is agreement, not a new policy.
+
+    The known set is DERIVED — `union(_TIERS.values())`, one source — so a
+    phase verdict cannot be classified-but-unknown or known-but-unclassified.
+    """
+    # THE ONE SOURCE. Every verdict word a phase runner can hand up, and the
+    # chained tier it rolls into.
+    _TIERS = {
+        "FAIL": ("FAIL",),
+        # WAIVED is a phase-2 spelling kept from the original list.
+        # PASS_WITH_OPEN_SOURCE_CONSTRAINTS: see the docstring — qualified
+        # everywhere else in the repo, so qualified here.
+        "PASS_WITH_WAIVERS": ("PASS_WITH_WAIVERS", "WAIVED",
+                              "PASS_WITH_OPEN_SOURCE_CONSTRAINTS"),
+        "PASS": ("PASS",),
+    }
+    _known = {w for words in _TIERS.values() for w in words}
+
+    verdicts: list[tuple[str, str]] = []
     if ran_p2:
-        verdicts.append(p2.get("verdict", "FAIL"))
+        verdicts.append(("phase2", p2.get("verdict", "FAIL")))
     if ran_p3:
-        verdicts.append(p3.get("verdict", "FAIL"))
-    if any(v == "FAIL" for v in verdicts):
+        verdicts.append(("phase3", p3.get("verdict", "FAIL")))
+
+    # REFUSE BY NAME, and FIRST — the same rule, for the same reason, as the
+    # phase-3 aggregator this one reads. NOT a silent PASS and NOT a silent
+    # FAIL: the word says which phase produced which unrecognised verdict.
+    unknown = [f"{phase}={v}" for phase, v in verdicts if v not in _known]
+    if unknown:
+        print(f"phase23_one_shot_runner: REFUSING to aggregate — phase "
+              f"verdict(s) outside the known set {sorted(_known)}: "
+              f"{', '.join(unknown)}. A phase that refused to grade itself "
+              f"must not be rolled up as a pass; classify the word in "
+              f"`_aggregate_verdict._TIERS` (the one source) or fix the "
+              f"phase that emitted it.", file=sys.stderr)
+        return "UNKNOWN_PHASE_VERDICT:" + ",".join(unknown)
+
+    if any(v in _TIERS["FAIL"] for _, v in verdicts):
         return "FAIL"
-    if any(v in ("PASS_WITH_WAIVERS", "WAIVED") for v in verdicts):
+    if any(v in _TIERS["PASS_WITH_WAIVERS"] for _, v in verdicts):
         return "PASS_WITH_WAIVERS"
+    # NOT a catch-all: everything else was refused above.
     return "PASS"
 
 
