@@ -803,6 +803,46 @@ report "cheap:scratch-report" "untracked scratch paths in this checkout" \
     python3 "$PROGRAMS/gitignore_scratch_guard.py" --root "$ROOT" \
         --include-worktree
 
+# vibe-ic#2176 — THE HYGIENE TIER DOES NOT RUN ON THE LANDING PATH, SO THE
+# LANDING PATH MUST ASK ITS QUESTION ITSELF.
+#
+# The `--cheap-only` exit immediately below this block happens BEFORE
+# `--- full tier ---` and therefore before `run_capture "full:repo-hygiene"`,
+# the only caller of `tools/ci/repo_hygiene_gates.sh` in this repository. The
+# direct-push landing path uses `--cheap-only`, so the 154-gate hygiene tier
+# has never run at a landing and the gates it owns are measured only by a
+# manual sweep hours later. MEASURED over origin/main across 140 landings on
+# 2026-09-07: six of the seven reds on main were introduced that day by our own
+# landings, and `shipped-path portability` — BLOCKING since 2026-07-20 — went
+# 0 -> 4 (#2158) -> 9 (#2165) without being refused once.
+#
+# A DELTA, NOT THE GATE. Running the gates themselves here refuses every
+# landing: main already carries 9 portability findings and 1 watchdog offender.
+# What must be empty is the DIFFERENCE, which is the rule the test tier has had
+# since #1019 and which `hygiene_finding_delta.py` was written to give the
+# hygiene tier — supplied until now only by `tools/gatekeeper-verify-merge.sh`,
+# the PR path, which the direct-push directive never traverses.
+#
+# RANGE-SCOPED, so it SKIPs over an empty range exactly as the block above
+# does: `gatekeeper-verify-merge.sh` runs this script over `X..X` on the BASE
+# to learn which gates already fail, and a gate that fails vacuously there
+# would let a candidate's real violation be waived as pre-existing.
+#
+# CHEAP, AND MEASURED RATHER THAN FEARED. Two `git archive` extractions
+# (0.54 s, 169 MB each) and two runs of each declared checker. On 8HD-8, this
+# lane's clone, load 3.75-4.13: 23.4 / 23.4 / 23.9 s for one gate and 46.8 s
+# for the two declared. The hygiene tier itself took 563 s on the same host in
+# the same hour, so the whole delta is under 9% of it and the per-gate cost is
+# linear and legible — add a gate, add ~23 s.
+if [ "$GK_RANGE_N" = "0" ]; then
+  echo "  SKIP  hygiene ratchet — range is empty, so this landing introduces nothing"
+  landing_skip "cheap:hygiene-ratchet" "range is empty"
+else
+  run "cheap:hygiene-ratchet" "this landing introduces no hygiene finding" \
+      python3 "$PROGRAMS/landing_hygiene_ratchet_check.py" \
+          --repo "$ROOT" --plugin-root "$PLUGIN" --base "$BASE"
+fi
+
 if [ "$CHEAP_ONLY" = "1" ]; then
   echo "--- full tier SKIPPED (--cheap-only) — no stamp will be written ---"
   exit "$FAILED"

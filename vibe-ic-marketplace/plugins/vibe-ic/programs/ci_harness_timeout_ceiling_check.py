@@ -339,7 +339,7 @@ _LANDING_WINDOW_ANCHOR = "lane_emit_window"
 # top-level `lane_emit_window` call, so the entry-to-anchor prefix moves with
 # the whole file and the three lane bodies do not.
 _LANDING_EXECUTION_PREFIX_SHA256 = (
-    "30e08fceeb43d651bf1ffbe2b32295331eee34fc39cb7893df874298e86994da"
+    "2295ec9ce4db824071c84e87063080d31006b59d32e032536c05542350d51c20"
 )
 # RE-PINNED when the landing gained its runtime PREFLIGHT. Both digests below
 # moved for one reason and it is stated here rather than left to `git log`: the
@@ -842,8 +842,44 @@ _LANDING_EXECUTION_PREFIX_SHA256 = (
 # changed how a population is executed, which it does not: the new unit is a
 # `run_capture` in `lane_corpus`, a sibling of the three, and it adds no pytest
 # invocation, no argument and no `rc` decision to any of them.
+# RE-PINNED for vibe-ic#2176, which wires `landing_hygiene_ratchet_check.py`
+# into the landing path. TWO of the six faces moved and BOTH are re-pinned in
+# this commit. THE SIX WERE ENUMERATED FROM THIS FILE'S OWN CODE, not from the
+# rule's error output and not from the diff: the run printed only the two
+# failures, which cannot tell you whether the other four were checked and
+# passed or never reached, and the diff shows the file that was edited, not
+# every face bound to it. The enumeration walked
+# `landing_semantic_progress_contract` and `_semantic_driver_contract_errors`
+# and recomputed ALL SIX observed values with those same expressions —
+# `_LANDING_WINDOW_ANCHOR` resolved from this module, the lane spans found by
+# this module's own start/end scan — so the four unmoved ones are PROVED
+# unmoved, not inferred from silence.
+#
+#   whole file              90949c4ecc2f… -> 5f7fb3c1b2bb…   MOVED
+#   execution prefix        30e08fceeb43… -> 2295ec9ce4db…   MOVED
+#   run_pytest                      3b3b685c4841…            unmoved (lines 1335-1596)
+#   run_repo_tools_pytest           95de055aebcd…            unmoved (lines 1627-1733)
+#   run_unselectable_pytest         aac62e70f0eb…            unmoved (lines 1770-1882)
+#   _SEMANTIC_DRIVER_SHA256         1912a288b458…            unmoved, untouched
+#
+# WHY EXACTLY THOSE TWO, AND WHY NOT THE LANES. The wired block is inserted at
+# line 806, immediately before the `--cheap-only` exit. That is ahead of the
+# anchor `lane_emit_window` (now line 2373), so the entry-to-anchor prefix moves
+# with it, and the whole file moves with any edit at all. All three lane bodies
+# begin at 1335 or later and their spans are unchanged, so their digests cannot
+# move: the block adds no pytest invocation, no argument and no `rc` decision to
+# any lane. `pytest_per_file_junit.py` is not touched by this lane.
+#
+# THE ORDERING THIS COST US, recorded because it defeats the two-landing shape.
+# The PREPARE for #2176 (v1.19.74) authorised the patched `gatekeeper-land.sh`
+# WITHOUT this re-pin, and landed [PASS]. The ACTIVATE was then refused, because
+# this gate demands a byte change that the authorised `next` tuple does not
+# contain — and installing anything else is the "installs bytes other than the
+# ones `next` records" refusal. A PREPARE authorises BYTES, so every gate that
+# can force a byte change must be satisfied BEFORE the PREPARE is rendered, not
+# between the two landings. See vibe-ic#2202.
 _LANDING_SCRIPT_SHA256 = (
-    "90949c4ecc2fc2055ff6d50845fb582069cefdf0c1cc2b62d6fbb0399aee1ea7"
+    "5f7fb3c1b2bb01ac8d708699bcb678bc4f6647c147074a5c36403f0e21d0f3b6"
 )
 # The helper AST is not enough: a counterfeit CLI can define the expected
 # helper and never call it.  Bind the policy to the complete reviewed driver
