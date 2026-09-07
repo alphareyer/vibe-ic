@@ -161,6 +161,35 @@ _LEDGER = frozenset({
     # That is a defect in what the function DOES, and this test says in its own
     # docstring that it "says nothing about what the function does", so it is
     # filed rather than fixed here. Location decision only.
+    # RECORDED with vibe-ic#2122, which added `seal_ring_die_and_core` — the
+    # pure arithmetic that holds a die's core back from the seal-ring band and
+    # grows an AUTO die by the same amount — and `seal_ring_die_too_small`,
+    # the refusal that arithmetic needs when a PINNED die cannot hold the
+    # margin (its pinned arm would otherwise emit an inverted `-core_area`).
+    # The two are recorded TOGETHER because they answer one question between
+    # them: "where may this die's rows start, and is there room for any". The
+    # classifier routes them to
+    # `_ppa/area.py` on the word "area" in "die_and_core", and that is the
+    # wrong module for it by that module's own rules:
+    #
+    #   1. `_ppa/area.py` is a RECORDS module — it takes AREA METRIC RECORDS in
+    #      and emits a verdict about them (proxy vs physical, kept separate).
+    #      This function takes no record and emits no verdict. It takes four
+    #      integers and a micron margin and returns three integers and a
+    #      sentence, and its answer is a FLOORPLAN INSTRUCTION, not a claim
+    #      about silicon area. Nothing downstream reads it as a metric.
+    #
+    #   2. It makes no comparison at all, so it cannot make the substitution
+    #      that module exists to prevent. It never says one area is smaller
+    #      than another; it says where the rows may start.
+    #
+    # PRECEDENT, and it is exact: `_compute_resized_die`, `_compute_loosened_
+    # die`, `_compute_downsized_die` and `_auto_die_side_um` are already here,
+    # and they are the same shape — bounded die-rectangle arithmetic with the
+    # decision left to the caller. This is one more of those, and the PDK
+    # reading it depends on was extracted, to `_seal_ring_margin.py`, exactly
+    # as the area logic was extracted to `area_total_vs_budget_check.py`.
+    "seal_ring_die_and_core", "seal_ring_die_too_small",
     "_area_budget_um2", "_synth_chip_area",
     "area_retry_is_worth_adopting",
     "_auto_die_side_um", "_auto_pdn_straps_from_techlef",

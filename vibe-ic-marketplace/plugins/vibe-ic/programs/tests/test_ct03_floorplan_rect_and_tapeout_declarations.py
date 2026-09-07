@@ -375,14 +375,18 @@ def seal_absent(monkeypatch):
     monkeypatch.setattr(r, "_docker_exec", lambda *a, **k: (1, "", "no such"))
 
 
-def test_publish_answers_the_five_it_can_and_names_the_one_it_cannot(
+def test_publish_answers_the_six_it_can_and_names_the_one_it_cannot(
         tmp_path, seal_present):
+    """SIX since vibe-ic#2122 added `core_area_um`. The declaration has always
+    ASKED for it — `_tapeout_declaration` refuses a die that pins a die and
+    omits its core — and nothing derived it, so every self-tape-out owed an
+    answer the run had already written into its own floorplan record."""
     project = _project(tmp_path)
     rec = r.publish_tapeout_declarations(
         project, _Pdk(), "c", project / "phase3/stage3/pnr/routed.def", "spm")
     assert set(rec["published"]) == {
         "top_cell", "deliverable", "die_origin_um", "die_area_um",
-        "seal_ring_required"}
+        "core_area_um", "seal_ring_required"}
     # `macro_*` is REFUSED BY NAME on a DIE, not silently absent (vibe-ic#2118).
     assert set(rec["not_determined"]) == {"forbidden_layers", "macro_area_um",
                                           "macro_origin_um"}
@@ -392,10 +396,82 @@ def test_publish_answers_the_five_it_can_and_names_the_one_it_cannot(
     assert td.answer(doc, "deliverable") == td.DELIVERABLE_DIE
     assert td.answer(doc, "die_origin_um") == [0, 0]
     assert td.answer(doc, "die_area_um") == [0, 0, 3162, 3162]
+    # THIS fixture carries a `floorplan_rect_um` that is NOT the die, which is
+    # the rectangle OpenROAD was given as `-core_area`; it is returned verbatim
+    # rather than re-derived from an inset that does not describe it. The other
+    # arm — a die inset by the inset the run used — is asserted below.
+    assert td.answer(doc, "core_area_um") == [381, 381, 2400, 2400]
     assert td.answer(doc, "seal_ring_required") is True
     assert td.answer(doc, td.FORBIDDEN_LAYERS_KEY) == td.NOT_DETERMINED
     # …and the declaration it wrote is still a WELL-FORMED one.
     assert td.validate(doc) == []
+
+
+def test_the_core_is_the_die_inset_by_the_inset_the_run_actually_used(
+        tmp_path):
+    """The no-slot arm. `core_pad_um` is what step_pnr held the core back by —
+    10 um historically, the pad ring's own depth where there is one, and since
+    vibe-ic#2122 the seal ring's band plus the deck's clearance on a die."""
+    _record(tmp_path, fp_rect=None, core_pad=26)
+    core, why = r.declared_core_rect(tmp_path)
+    assert core == [26, 26, 3136, 3136]
+    assert "26 um" in why and r.FLOORPLAN_RECTANGLES_REL in why
+
+
+def test_a_record_that_states_no_inset_refuses_rather_than_choosing_one(
+        tmp_path):
+    """An inset chosen here would be this program deciding where cells may be
+    placed — the defect `_padring_core_inset_um` was written to stop."""
+    _record(tmp_path, fp_rect=None, core_pad=0)
+    import json as _json
+    path = tmp_path / r.FLOORPLAN_RECTANGLES_REL
+    doc = _json.loads(path.read_text())
+    doc.pop("core_pad_um")
+    path.write_text(_json.dumps(doc))
+    core, why = r.declared_core_rect(tmp_path)
+    assert core is None
+    assert "core_pad_um" in why and "deciding where cells" in why
+
+
+def test_a_HARDMACRO_is_not_asked_for_a_core_and_is_refused_BY_NAME(
+        tmp_path, seal_present, monkeypatch):
+    """`core_area_um` is `required_for=(DELIVERABLE_DIE,)`, so publishing it on
+    a macro would be this run answering a question that delivery does not owe,
+    under a name any consumer reads as a die's — exactly what vibe-ic#2118 had
+    just refused one block up for `die_origin_um`/`die_area_um`. The name that
+    does not apply is REFUSED BY NAME, never left silently absent."""
+    project = _project(tmp_path)
+    doc, err = td.load(project / td.DECLARATION_REL)
+    assert err is None
+    doc, _ig = td.merge_answers(doc, {"deliverable": td.DELIVERABLE_HARDMACRO})
+    (project / td.DECLARATION_REL).write_text(json.dumps(doc, indent=2))
+    rec = r.publish_tapeout_declarations(
+        project, _Pdk(), "c", project / "phase3/stage3/pnr/routed.def", "spm")
+    assert "core_area_um" not in rec["published"]
+    why = rec["not_determined"]["core_area_um"]
+    assert "HARDMACRO" in why and "not a question a macro owes" in why
+    doc2, _e = td.load(project / td.DECLARATION_REL)
+    assert td.answer(doc2, "core_area_um") == td.NOT_DETERMINED
+
+
+def test_an_UNDECLARED_delivery_publishes_no_core_and_says_why(tmp_path):
+    """The same rule the size pair obeys: a design that has not said what it is
+    owes every question, and choosing for it would be a guess wearing a
+    derivation's clothes."""
+    project = tmp_path
+    (project / "phase3" / "stage3" / "pnr").mkdir(parents=True)
+    (project / "phase3/stage3/pnr/routed.def").write_text(_DEF)
+    _record(project)
+    rec = r.publish_tapeout_declarations(
+        project, _Pdk(), "c", project / "phase3/stage3/pnr/routed.def", "spm")
+    assert "core_area_um" not in rec["published"]
+    assert td.NOT_DETERMINED in rec["not_determined"]["core_area_um"]
+
+
+def test_an_absent_record_is_a_named_refusal_not_a_core(tmp_path):
+    core, why = r.declared_core_rect(tmp_path)
+    assert core is None
+    assert r.FLOORPLAN_RECTANGLES_REL in why
 
 
 def test_publish_writes_its_record_even_when_it_publishes_nothing(tmp_path,
@@ -412,7 +488,7 @@ def test_publish_writes_its_record_even_when_it_publishes_nothing(tmp_path,
     # BOTH are refused by name — vibe-ic#2118.
     assert set(rec["not_determined"]) == {
         "top_cell", "deliverable", "die_origin_um", "die_area_um",
-        "macro_origin_um", "macro_area_um",
+        "core_area_um", "macro_origin_um", "macro_area_um",
         "seal_ring_required", "forbidden_layers"}
     on_disk = json.loads(
         (project / "reports/phase3/tapeout_declaration_publish.json").read_text())

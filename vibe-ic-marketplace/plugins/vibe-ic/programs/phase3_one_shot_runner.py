@@ -16561,6 +16561,195 @@ def _padring_core_inset_um(project: Optional[Path]
                       "cannot be derived from the ring that exists")
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  THE SEAL RING'S OWN BAND, RESERVED BEFORE THE RING EXISTS  (vibe-ic#2122)
+#
+#  MEASURED (vibeic-eda#189, re-measured in vibe-ic#2122) on one gf180mcuD die:
+#
+#    the PDK's ring alone, on an empty 503 um die            16, all density
+#    that ring around the run's OWN core, which filled       1,359,531
+#      (0,0;503,503) — what this flow actually built
+#    the same core moved 28.5 um inward, same generator,     0
+#      same deck, 560 um die
+#
+#  19,826 core shapes sat inside the 16 um ring band. The generator was right,
+#  the deck was right and the ring was right; the DIE was too small, by exactly
+#  the ring's band plus the deck's own marker clearance, on every edge. This
+#  flow sized the die to the core and then asked for a ring to be added to it.
+#
+#  So on a delivery that IS a die, in a technology that ships a die-seal
+#  generator, the core is held back by that margin and the die grows to keep
+#  the core the auto-sizer asked for. Every number comes from the PDK
+#  (`_seal_ring_margin`); an unreadable link is a NAMED NOT_MEASURED and the
+#  floorplan is left exactly as it is today.
+
+
+def seal_ring_die_and_core(die_w: int, die_h: int, core_pad: int,
+                           margin_um: Optional[float],
+                           die_is_auto: bool
+                           ) -> Tuple[int, int, int, Optional[str]]:
+    """(die_w, die_h, core_pad, note) with the ring's band reserved.
+
+    PURE, so the arithmetic is testable without a PDK, a container or a run.
+
+    `margin_um` None returns today's numbers BYTE FOR BYTE — the technology
+    said nothing and nothing here invents a band.
+
+    A core already held back FURTHER than the margin is left alone: a pad ring
+    is hundreds of microns deep where a seal band is tens (381 um measured on
+    spm against 26 um here), and `_padring_core_inset_um` has already put the
+    core outside it, so the band is inside a keep-out that exists. The inset is
+    `max`, never a sum, and never a replacement.
+
+    THE DIE GROWS ONLY WHEN THIS RUN OWNS IT. An `--die-um`, an L9 `DIE_AREA`,
+    an L19 budget or a shuttle slot is somebody's pinned floorplan, and growing
+    it would replace their die with ours — the same rule
+    `_padring_required_die_um` obeys one screen up. On a pinned die the CORE
+    still moves, because where cells may be placed inside that die is this
+    flow's own choice and always has been (the inset was a flat 10 um), and a
+    core in the band is a die nobody can seal.
+    """
+    if margin_um is None:
+        return die_w, die_h, core_pad, None
+    need = int(math.ceil(float(margin_um)))
+    if need <= core_pad:
+        return die_w, die_h, core_pad, (
+            f"the core is already held {core_pad} um back from the die edge, "
+            f"which covers the {margin_um} um the seal ring and the deck "
+            f"require; the floorplan is unchanged")
+    grow = need - core_pad
+    if die_is_auto:
+        return (die_w + 2 * grow, die_h + 2 * grow, need,
+                f"core inset {core_pad} -> {need} um and the die "
+                f"{die_w}x{die_h} -> {die_w + 2 * grow}x{die_h + 2 * grow} um: "
+                f"the seal ring's band and the deck's clearance are reserved "
+                f"on every edge and the core keeps the area it was sized for")
+    return (die_w, die_h, need,
+            f"core inset {core_pad} -> {need} um inside the PINNED "
+            f"{die_w}x{die_h} um die: the seal ring's band and the deck's "
+            f"clearance are reserved on every edge, and a die somebody pinned "
+            f"is not grown to pay for them")
+
+
+def seal_ring_die_too_small(die_w: int, die_h: int, core_pad: int,
+                            margin_um: Optional[float],
+                            margin_basis: str = "") -> Optional[str]:
+    """The refusal, or None. PURE, so it can be shown to fire AND to not fire.
+
+    `seal_ring_die_and_core`'s pinned arm moves the core without growing the
+    die, and on a die smaller than twice the margin that leaves `-core_area
+    "26 26 14 14"` — an inverted rectangle OpenROAD would be handed as a
+    floorplan. There is no third answer: growing a die somebody pinned would
+    replace their floorplan with ours, which is the rule
+    `PADRING_DIE_TOO_SMALL` already obeys one screen up.
+
+    None when no margin was derived, so a technology that said nothing can
+    never refuse anything.
+    """
+    if margin_um is None:
+        return None
+    if die_w - 2 * core_pad > 0 and die_h - 2 * core_pad > 0:
+        return None
+    return (f"SEALRING_DIE_TOO_SMALL: the die pinned for this run is "
+            f"{die_w}x{die_h} um and its own seal ring needs {core_pad} um of "
+            f"every edge — {margin_basis} — which leaves no core at all. "
+            f"Re-run with a die larger than {2 * core_pad}x{2 * core_pad} um, "
+            f"or answer seal_ring_required=false in the tape-out declaration "
+            f"if the party that takes this layout does not require a ring.")
+
+
+def _seal_ring_core_margin_um(project: Optional[Path], pdk: "PdkConfig",
+                              container: str
+                              ) -> Tuple[Optional[float], Dict[str, Any]]:
+    """(the margin in um, the record) for a delivery that will GET a ring.
+
+    THE PREMISE IS THE PRODUCER'S OWN, not a narrower one. `die_finishing_gen`
+    builds a ring whenever the declaration has not answered
+    `seal_ring_required=false`, the delivery is not a HARDMACRO and the
+    technology ships a generator — and since vibe-ic#2122 it REFUSES to seal a
+    core that is in the band. Sizing on `deliverable == DIE` instead would have
+    left the two on different premises, and MEASURED on the run this issue came
+    from that is not academic: the subservient gf180mcuD tree's own declaration
+    answers `deliverable = NOT_DETERMINED`, so a DIE-only gate reserves nothing
+    on exactly the class of run this issue is about, while the producer still
+    builds the ring and now refuses it. A gate and its producer must be able to
+    be satisfied by the same run. (The counts: 1,359,531 in the issue, on a
+    503 um die; 1,276,840 re-measured here on a 466 um one. Different dies,
+    same defect; neither number is carried across.)
+
+    FOUR THINGS MUST HOLD, and each one that does not is NAMED in the record:
+    the declaration has not said a ring is not required; this is not a
+    hardmacro (which has no die and no ring of its own); the technology ships a
+    generator; and the PDK states BOTH the band and the clearance. Anything
+    else returns (None, record) and the floorplan is left exactly as it is.
+    """
+    rec: Dict[str, Any] = {"applies": False}
+    if project is None:
+        rec["why_not"] = "no project"
+        return None, rec
+
+    _dv, _dv_why = _declared_deliverable(project)
+    _eff = _effective_deliverable(project, _dv)
+    rec["deliverable"] = _eff
+    rec["deliverable_basis"] = _dv_why
+
+    # THE DESIGN'S OWN ANSWER FIRST. A declaration that says no ring is
+    # required is the one authority that can decide it, and `die_finishing_gen`
+    # already treats that answer as final.
+    try:
+        import _tapeout_declaration as _td2                    # noqa: PLC0415
+        _doc, _err = _td2.load(project / _td2.DECLARATION_REL)
+        if _err is None and isinstance(_doc, dict):
+            _ans = _td2.answer(_doc, "seal_ring_required")
+            if _td2.is_answered(_ans) and _ans is False:
+                rec["why_not"] = (
+                    f"the design's own tape-out declaration answers "
+                    f"seal_ring_required=false in {_td2.DECLARATION_REL}: no "
+                    f"ring is inserted, so no band is reserved for one")
+                return None, rec
+    except Exception:                                          # noqa: BLE001
+        pass
+
+    _seal, _seal_why = _declared_seal_ring_required(project, pdk, container,
+                                                    _eff)
+    rec["seal_ring_required"] = _seal
+    rec["seal_ring_basis"] = _seal_why
+    if _seal is not True:
+        rec["why_not"] = _seal_why
+        return None, rec
+
+    try:
+        pdk_dir = _pdk_dir_of(pdk)
+    except Exception as exc:                                   # noqa: BLE001
+        pdk_dir = ""
+        rec["pdk_dir_error"] = str(exc)
+    if not pdk_dir:
+        rec["why_not"] = ("the PDK directory could not be located from the "
+                          "tech LEF, so neither the seal-ring band nor the "
+                          "deck's clearance was read")
+        return None, rec
+
+    def _sh(cmd: str) -> Tuple[int, str]:
+        rc, out, _err = _docker_exec_raw(container, cmd, timeout=180)
+        return int(rc), (out or "")
+
+    _here = str(Path(__file__).resolve().parent)
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+    try:
+        import _seal_ring_margin as _srm                       # noqa: PLC0415
+    except Exception as exc:                                   # noqa: BLE001
+        rec["why_not"] = f"_seal_ring_margin could not be imported: {exc}"
+        return None, rec
+
+    got = _srm.derive(pdk_dir, _sh)
+    rec.update(got)
+    rec["applies"] = got.get("margin_um") is not None
+    if got.get("margin_um") is None:
+        rec["why_not"] = got.get("margin_basis")
+    return got.get("margin_um"), rec
+
+
 def _effective_die_um(die_um_flag: str,
                       project: Optional[Path]
                       ) -> Tuple[str, Optional[str]]:
@@ -17188,9 +17377,16 @@ def _floorplan_rectangles_record(project: Path,
                                  fp_rect: Optional[Sequence[int]],
                                  die_source: str,
                                  core_pad: int,
-                                 ring_inset_um: Optional[float]
+                                 ring_inset_um: Optional[float],
+                                 seal_ring: Optional[Dict[str, Any]] = None
                                  ) -> Dict[str, Any]:
-    """Write both rectangles and say which is which. Written on EVERY run."""
+    """Write both rectangles and say which is which. Written on EVERY run.
+
+    `seal_ring` is vibe-ic#2122's derivation — the band, the deck clearance,
+    the margin they sum to and what it moved, or the NAMED reason each of those
+    was not read. It rides in THIS record rather than a new artefact because it
+    is a fact about these two rectangles: a reader asking why the core is
+    26 um in and not 10 has to be able to find the answer beside the number."""
     rec: Dict[str, Any] = {
         "program": "phase3_one_shot_runner.step_pnr",
         "die_rect_um": [int(v) for v in die_rect],
@@ -17200,6 +17396,7 @@ def _floorplan_rectangles_record(project: Path,
         "floorplan_rect_is_the_die": fp_rect is None,
         "core_pad_um": int(core_pad),
         "ring_inset_um": ring_inset_um,
+        "seal_ring_margin": seal_ring,
         "note": (
             "`floorplan_rect_um` is what OpenROAD was given as BOTH -die_area "
             "and -core_area. When it is not null the DEF's DIEAREA states it "
@@ -17397,6 +17594,76 @@ def declared_die_rect(project: Path
     return ([int(v) for v in rect],
             f"{rec.get('die_source') or 'this run'} "
             f"(via {FLOORPLAN_RECTANGLES_REL})")
+
+
+def declared_core_rect(project: Path
+                       ) -> Tuple[Optional[List[int]], str]:
+    """(the run's own CORE rectangle in um, the basis) or (None, why not).
+
+    THE SAME ONE RECORD `declared_die_rect` reads, and no second opinion. The
+    declaration asks for `core_area_um` and REFUSES a die that omits it —
+    "a file that pins a die and omits the core must be FOUND and refused"
+    (`_tapeout_declaration`) — while nothing derived it, so every self-tape-out
+    owed an answer that the run already had written down two directories away.
+
+    WHY THIS IS A COMPARISON AND NOT A TAUTOLOGY. `step_pnr` writes this record
+    from the numbers it handed OpenROAD; `general_precheck.KLayout.CheckSize`
+    measures the STREAMED LAYOUT. A stream whose rows do not fill the core the
+    floorplan was built on, or a core that was silently re-sized inside the
+    retry loop, is exactly the disagreement that comparison exists to catch —
+    the same rule every other derivation in `publish_tapeout_declarations`
+    obeys, and the same rule that makes the die rectangle publishable.
+
+    ON A SLOT the floorplan rectangle IS the operator's CORE_AREA — the runner
+    hands it to OpenROAD as both `-die_area` and `-core_area` — so it is
+    returned verbatim rather than re-derived from an inset that does not
+    describe it.
+    """
+    path = project / FLOORPLAN_RECTANGLES_REL
+    if not path.is_file():
+        return None, (f"{FLOORPLAN_RECTANGLES_REL} is not on disk; step_pnr "
+                      "writes it on every run and it is not here")
+    try:
+        rec = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
+        return None, f"{FLOORPLAN_RECTANGLES_REL} could not be read: {exc}"
+    if not isinstance(rec, dict):
+        return None, (f"{FLOORPLAN_RECTANGLES_REL}'s top level is "
+                      f"{type(rec).__name__}, not a mapping")
+
+    fp = rec.get("floorplan_rect_um")
+    if (not rec.get("floorplan_rect_is_the_die")
+            and isinstance(fp, list) and len(fp) == 4
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                    for v in fp)
+            and fp[2] > fp[0] and fp[3] > fp[1]):
+        return ([int(v) for v in fp],
+                f"the rectangle this run gave OpenROAD as `-core_area` "
+                f"(via {FLOORPLAN_RECTANGLES_REL}:floorplan_rect_um)")
+
+    die = rec.get("die_rect_um")
+    pad = rec.get("core_pad_um")
+    if not (isinstance(die, list) and len(die) == 4
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                    for v in die)):
+        return None, (f"{FLOORPLAN_RECTANGLES_REL} carries no usable "
+                      f"`die_rect_um` (found {die!r}), so the core cannot be "
+                      f"placed inside it")
+    if not (isinstance(pad, (int, float)) and not isinstance(pad, bool)
+            and pad >= 0):
+        return None, (f"{FLOORPLAN_RECTANGLES_REL} states no usable "
+                      f"`core_pad_um` (found {pad!r}), and an inset chosen "
+                      f"here would be this program deciding where cells may "
+                      f"be placed")
+    core = [int(die[0] + pad), int(die[1] + pad),
+            int(die[2] - pad), int(die[3] - pad)]
+    if not (core[2] > core[0] and core[3] > core[1]):
+        return None, (f"{FLOORPLAN_RECTANGLES_REL}'s die {die} inset by "
+                      f"{pad} um on every edge leaves {core}, which is not a "
+                      f"rectangle")
+    return core, (f"the die this run settled on, inset by the "
+                  f"{pad} um this run held the core back by "
+                  f"(via {FLOORPLAN_RECTANGLES_REL})")
 
 
 _RE_PNR_FLOORPLAN_DIE = re.compile(
@@ -26677,6 +26944,51 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
               f"declared PAD_EDGE_SPACING), not the historical 10 um: a core "
               f"that overlaps the ring places cells under the pads' own "
               f"obstruction", file=sys.stderr)
+
+    # === vibe-ic#2122 — THE SEAL RING'S BAND, RESERVED BEFORE IT EXISTS =====
+    # A DIE in a technology that ships a die-seal generator owes its own ring
+    # the band the ring occupies PLUS the clearance the PDK's deck requires
+    # between the ring's marker and every prime-die layer. Both numbers come
+    # out of the PDK; NOT_MEASURED leaves the floorplan byte-for-byte as it is.
+    # A shuttle slot is excluded outright: the operator pins DIE_AREA and
+    # CORE_AREA per slot and that contract is not this flow's to re-derive.
+    _seal_margin: Optional[float] = None
+    _seal_rec: Dict[str, Any] = {"applies": False,
+                                 "why_not": "not looked for"}
+    if _slot_geometry(project) is None:
+        _seal_margin, _seal_rec = _seal_ring_core_margin_um(
+            project, pdk, container)
+    else:
+        _seal_rec = {"applies": False,
+                     "why_not": ("a shuttle slot pins DIE_AREA and CORE_AREA; "
+                                 "the operator's own rectangles are not "
+                                 "re-derived here")}
+    _die_w0, _die_h0, _core_pad0 = die_w, die_h, core_pad
+    die_w, die_h, core_pad, _seal_note = seal_ring_die_and_core(
+        die_w, die_h, core_pad, _seal_margin, bool(_auto_die_requested))
+    _seal_rec["applied"] = {
+        "die_um_before": f"{_die_w0}x{_die_h0}",
+        "die_um_after": f"{die_w}x{die_h}",
+        "core_pad_before_um": _core_pad0,
+        "core_pad_after_um": core_pad,
+        "die_was_auto": bool(_auto_die_requested),
+        "note": _seal_note,
+    }
+    if _seal_note:
+        print(f"[phase3] seal-ring band reserved: {_seal_note} — "
+              f"{_seal_rec.get('margin_basis')}; {_seal_rec.get('band_basis')}"
+              f"; {_seal_rec.get('clearance_basis')}", file=sys.stderr)
+    elif _seal_rec.get("why_not"):
+        print(f"[phase3] seal-ring band NOT reserved: "
+              f"{_seal_rec['why_not']}", file=sys.stderr)
+
+    # AND A DIE THAT CANNOT HOLD IT IS A CONTRADICTION, NOT A NEGATIVE CORE.
+    _seal_too_small = seal_ring_die_too_small(
+        die_w, die_h, core_pad, _seal_margin,
+        str(_seal_rec.get("margin_basis") or ""))
+    if _seal_too_small:
+        return StepResult("pnr", "FAIL", time.time() - t0, _seal_too_small)
+
     core_w = die_w - 2 * core_pad
     core_h = die_h - 2 * core_pad
 
@@ -26777,7 +27089,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                     f"({_slot['source_file']})" if _slot
                     else f"--die-um {die_w}x{die_h} at the origin"),
         core_pad=core_pad,
-        ring_inset_um=_ring_inset)
+        ring_inset_um=_ring_inset,
+        seal_ring=_seal_rec)
 
     # Pick clock buffer cells: PdkConfig-carried masters win (every registry
     # PDK carries clk_buf_cell/root); otherwise DISCOVER them from the PDK's own
@@ -27943,7 +28256,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                     else f"the die this run settled on, {die_w}x{die_h} um at "
                          f"the origin"),
         core_pad=core_pad,
-        ring_inset_um=_ring_inset)
+        ring_inset_um=_ring_inset,
+        seal_ring=_seal_rec)
 
     def_file = out_dir / f"{top}.def"
     sta_file = out_dir / "sta.rpt"
@@ -33618,6 +33932,13 @@ def publish_database_unit_declaration(project: Path, pdk: "PdkConfig",
 #                       stream that lost geometry, or a fill that never reached
 #                       the die, is a bbox that is not the die — the hollow-die
 #                       shape, caught by comparing two independent things.
+#    core_area_um    <- the rectangle this run gave OpenROAD as `-core_area`,
+#                       or the die inset by the inset it actually used
+#                       (`declared_core_rect`). The rung measures the STREAMED
+#                       layout; a stream whose rows do not fill the core the
+#                       floorplan was built on is that same disagreement one
+#                       rectangle in. The declaration REFUSES a die that omits
+#                       this, and nothing derived it before (vibe-ic#2122).
 #    seal_ring_required <- the TECHNOLOGY: does this PDK ship a die seal-ring
 #                       generator in its own sign-off tech tree? The rung
 #                       measures OUR layout for a ring.
@@ -33640,7 +33961,7 @@ def publish_database_unit_declaration(project: Path, pdk: "PdkConfig",
 #: The four questions this publisher exists for, in ladder order, plus the two
 #: `KLayout.CheckSize` also needs before it can reach any verdict at all.
 _DECLARATION_PUBLISH_KEYS: Tuple[str, ...] = (
-    "top_cell", "deliverable", "die_origin_um", "die_area_um",
+    "top_cell", "deliverable", "die_origin_um", "die_area_um", "core_area_um",
     "macro_origin_um", "macro_area_um",
     "seal_ring_required", "forbidden_layers",
 )
@@ -33967,6 +34288,38 @@ def publish_tapeout_declarations(project: Path, pdk: "PdkConfig",
     elif _size_keys:
         rec["not_determined"][_size_keys[0]] = _rect_why
         rec["not_determined"][_size_keys[1]] = _rect_why
+
+    # 3b — the CORE rectangle. `_tapeout_declaration` REFUSES a die that pins
+    # a die and omits its core, and nothing derived it, so every self-tape-out
+    # owed an answer this run had already written down (vibe-ic#2122). The
+    # rung measures the STREAMED layout against it, which is a different
+    # artefact from the floorplan record this reads.
+    #
+    # AND IT IS ASKED ONLY OF A DIE, on exactly the reasoning the size pair
+    # above was just given (vibe-ic#2118): `core_area_um` is
+    # `required_for=(DELIVERABLE_DIE,)`, so publishing it onto a HARDMACRO — or
+    # onto a delivery that has not said what it is — would be this run
+    # answering a question that delivery does not owe, under a name any
+    # consumer reads as a die's. The name that does not apply is REFUSED BY
+    # NAME, never left silently absent.
+    if _eff_dv == _td2.DELIVERABLE_DIE:
+        _core, _core_why = declared_core_rect(project)
+        if _core:
+            derived["core_area_um"] = {
+                "value": [_core[0], _core[1], _core[2], _core[3]],
+                "basis": f"the run's own core rectangle — {_core_why}"}
+        else:
+            rec["not_determined"]["core_area_um"] = _core_why
+    elif _eff_dv == _td2.DELIVERABLE_HARDMACRO:
+        rec["not_determined"]["core_area_um"] = (
+            "this delivery is HARDMACRO, and a core rectangle is not a "
+            "question a macro owes an answer to — the placeable box inside "
+            "somebody else's die is that die's business (vibe-ic#2118/#2122)")
+    else:
+        rec["not_determined"]["core_area_um"] = (
+            f"`deliverable` is {_eff_dv or _td2.NOT_DETERMINED}, so whether "
+            f"this run owes a core rectangle at all is not known and none is "
+            f"published: {_dv_why}")
 
     # 4 — seal_ring_required, from the technology, AND ONLY FOR A DIE.
     #

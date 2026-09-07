@@ -12,6 +12,13 @@ needs no argv and no sibling imports — the same shape as the ``metal_fill`` an
     SEAL_CELL    (optional) top cell name; default = the layout's own top
     SEAL_MARKER  (optional) "layer/datatype" of the PDK's guard-ring marker
                  layer. When set, that layer must carry geometry in SEAL_OUT.
+    SEAL_CORE_CLEARANCE_UM (optional) how far the core must stay back from
+                 the ring's own INNER edge, in um, as the PDK's DRC deck
+                 states it. When set, the geometry the ring was given is
+                 measured against that rectangle and the result REPORTED as
+                 `core_clearance`. It never moves the seal-ring verdict:
+                 whether a ring is present and whether this core may be
+                 sealed are two questions with two owners (vibe-ic#2122).
     SEAL_ID_CELLS (optional) comma-separated cell names to REPORT the
                  INSTANCE COUNT of. Reported only; it never moves the
                  seal-ring verdict, which is a different question with a
@@ -263,6 +270,117 @@ def main():
         "outer": _box(ob.left, ob.bottom, ob.right, ob.top),
         "inner": (_box(gx[0], gy[0], gx[1], gy[1]) if gx and gy else None),
     }
+
+    # ── WHAT THE DIE OWES THE RING IT IS ABOUT TO BE GIVEN (vibe-ic#2122) ──
+    # A ring is a band at the die edge, and the deck requires a clearance
+    # between its marker and every prime-die layer. A core that reaches into
+    # band + clearance is in violation the moment the ring is added, and the
+    # whole die is: MEASURED on one 503 um die, 1,359,531 sign-off violations
+    # against 16 for the same ring on an empty die, from 19,826 core shapes
+    # inside the 16 um band. So the OPENING is measured against the layout the
+    # ring was given, here, where both layouts are already open.
+    #
+    # REPORTED, NEVER JUDGED HERE, exactly as `id_cells` is: "is a ring
+    # present" and "may this core be sealed" are two questions with two owners,
+    # and folding the second into this verdict would make one half's silence
+    # look like the other half's failure. `die_finishing_gen` owns the refusal.
+    #
+    # THE POPULATION IS THE RING'S OWN LAYERS, discovered above rather than
+    # declared: the deck's ring rules width-check and space-check the layers
+    # the ring is drawn on, so core geometry on those same layers inside the
+    # clearance is what they will fire on. Geometry on every OTHER layer is
+    # counted too and reported separately (`all_layers`), because a marker or
+    # an outline layer spanning the die is not a violation and must not be
+    # allowed to manufacture one.
+    _clr_raw = (os.environ.get("SEAL_CORE_CLEARANCE_UM", "") or "").strip()
+    if _clr_raw:
+        _inner = res["ring_extent"]["inner"]
+        try:
+            _clr_um = float(_clr_raw)
+        except ValueError:
+            _clr_um = None
+        if _clr_um is None or _clr_um < 0:
+            res["core_clearance"] = {
+                "state": "NOT_MEASURED",
+                "reason": ("SEAL_CORE_CLEARANCE_UM=%r is not a non-negative "
+                           "number, so the clearance the core owes the ring "
+                           "was not measured" % (_clr_raw,))}
+        elif _inner is None:
+            res["core_clearance"] = {
+                "state": "NOT_MEASURED",
+                "clearance_um": _clr_um,
+                "reason": ("the ring's INNER extent was not measured (the two "
+                           "scan lines found no opening), so there is no "
+                           "rectangle to hold the core back from")}
+        else:
+            _c = int(round(_clr_um / dbu))
+            _il, _ib, _ir, _it = _inner["dbu"]
+            _keep = pya.Box(_il + _c, _ib + _c, _ir - _c, _it - _c)
+            _degenerate = not (_keep.left < _keep.right
+                               and _keep.bottom < _keep.top)
+            _keep_r = pya.Region() if _degenerate else pya.Region(_keep)
+
+            def _core_of(specs):
+                r = pya.Region()
+                for sp in specs:
+                    if sp in before:
+                        r += before[sp]
+                return r.merged()
+
+            _ring_specs = sorted(p["layer"] for p in per_layer)
+            _shared = [sp for sp in _ring_specs if sp in before]
+            _core = _core_of(_shared)
+            _out = (_core - _keep_r).merged()
+            _all = (_core_of(sorted(before)) - _keep_r).merged()
+            _by_layer = []
+            for sp in _shared:
+                d = (before[sp].merged() - _keep_r).merged()
+                if d.count():
+                    _by_layer.append(
+                        {"layer": sp, "polygons": d.count(),
+                         "area_um2": round(d.area() * dbu * dbu, 3)})
+            _worst = None
+            if _out.count():
+                _ob2 = _out.bbox()
+                _worst = {
+                    "left_um": round((_keep.left - _ob2.left) * dbu, 4),
+                    "bottom_um": round((_keep.bottom - _ob2.bottom) * dbu, 4),
+                    "right_um": round((_ob2.right - _keep.right) * dbu, 4),
+                    "top_um": round((_ob2.top - _keep.top) * dbu, 4)}
+            res["core_clearance"] = {
+                "state": "MEASURED",
+                "clearance_um": _clr_um,
+                "ring_inner_um": _inner["um"],
+                "keep_box_um": (None if _degenerate else
+                                [round(_keep.left * dbu, 4),
+                                 round(_keep.bottom * dbu, 4),
+                                 round(_keep.right * dbu, 4),
+                                 round(_keep.top * dbu, 4)]),
+                "keep_box_degenerate": bool(_degenerate),
+                "ring_layers": _ring_specs,
+                "ring_layers_the_core_also_uses": _shared,
+                # AN EMPTY POPULATION IS NOT A CLEAR CORE. If the layout the
+                # ring was given carries nothing on any layer the ring is drawn
+                # on, `encroaching_polygons` is 0 because there was nothing to
+                # measure, not because the core stands back. The two look
+                # identical in the number and must not read the same.
+                "population_empty": not _shared,
+                # MERGED REGIONS, not shapes: the union across layers joins
+                # what abuts, so this number is smaller than the per-layer
+                # counts beside it and is not a shape count. It is the TRIGGER
+                # (is there any?); the per-layer figures are the size.
+                "encroaching_polygons": _out.count(),
+                "encroaching_area_um2": round(_out.area() * dbu * dbu, 3),
+                "encroaching_by_layer": _by_layer,
+                "worst_encroachment_um": _worst,
+                "all_layers": {
+                    "encroaching_polygons": _all.count(),
+                    "encroaching_area_um2": round(_all.area() * dbu * dbu, 3),
+                    "note": ("every layer of the layout the ring was given, "
+                             "including marker and outline layers the deck's "
+                             "ring rules do not constrain — reported, not "
+                             "judged")},
+            }
 
     if horiz < 2 or vert < 2:
         return emit("FAIL",

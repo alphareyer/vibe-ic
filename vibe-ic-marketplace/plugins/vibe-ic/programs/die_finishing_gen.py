@@ -146,10 +146,12 @@ from _atomic_artefact import write_text as _atomic_write_text
 
 try:
     from . import _klayout_launch as _kl                     # type: ignore
+    from . import _seal_ring_margin as _srm                  # type: ignore
     from . import _tapeout_declaration as _td                # type: ignore
 except ImportError:                                          # standalone gate
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import _klayout_launch as _kl                            # type: ignore
+    import _seal_ring_margin as _srm                         # type: ignore
     import _tapeout_declaration as _td                       # type: ignore
 
 PASS, FAIL, SKIP = 0, 1, 2
@@ -612,6 +614,25 @@ def die_size(project: Path, gds: Path,
                         f"{_DECL_SOURCE}.{_DECL_DIE_AREA} is "
                         f"{_td.NOT_DETERMINED}; caller must pass "
                         "--die-width/--die-height")
+
+
+def pdk_dir_of_script(script: str, pdk_root: Optional[str],
+                     pdk: Optional[str]) -> Tuple[Optional[str], str]:
+    """(the PDK directory the generator belongs to, how it was reached).
+
+    The DECLARED `$PDK_ROOT/$PDK` first, because that is the pair the rest of
+    the flow already passes around. Failing that, the generator's own path: a
+    PDK puts its tools under `<pdk>/libs.tech/...`, so the head of that split
+    IS the PDK directory — structure, not a name, and it resolves for any PDK
+    laid out that way and for none that is not.
+    """
+    if pdk_root and pdk:
+        return f"{str(pdk_root).rstrip('/')}/{pdk}", "$PDK_ROOT/$PDK"
+    head, sep, _tail = str(script or "").partition("/libs.tech/")
+    if sep and head:
+        return head, f"the head of {script} at /libs.tech/"
+    return None, (f"neither $PDK_ROOT/$PDK nor the generator path {script!r} "
+                  f"locates a PDK directory, so the deck could not be read")
 
 
 #: What a `pya-cli` script DECLARES. LibreLane's generic caller passes
@@ -1191,9 +1212,27 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
             + ". No ring was added; the die is unsealed.")
         return done(seal)
 
+    # ── WHAT THIS CORE OWES THE RING (vibe-ic#2122) ───────────────────────
+    # Read from the PDK's OWN deck, in the same environment the generator just
+    # ran in, and handed to the verifier so the opening is measured while both
+    # layouts are open. An unreadable deck is a NAMED NOT_MEASURED carried into
+    # the report — never a default clearance, which would be this flow deciding
+    # where the foundry's ring goes.
+    _pdk_dir, _pdk_dir_why = pdk_dir_of_script(script, pdk_root, pdk)
+    if _pdk_dir:
+        _clear_um, _clear_why = _srm.guard_ring_clearance_um(
+            _pdk_dir, _srm.shell_from_argv(runner.run_argv))
+    else:
+        _clear_um, _clear_why = None, _pdk_dir_why
+    seal["core_clearance_source"] = _clear_why
+    if _clear_um is None:
+        seal["core_clearance_not_measured"] = _clear_why
+
     vrep = rep.parent / "sealring_verify.json"
     venv = {"SEAL_IN": str(gds_path), "SEAL_OUT": str(staged),
             "SEAL_REPORT": str(vrep)}
+    if _clear_um is not None:
+        venv["SEAL_CORE_CLEARANCE_UM"] = f"{float(_clear_um):f}"
     if marker:
         venv["SEAL_MARKER"] = str(marker)
     if id_cells:
@@ -1228,6 +1267,66 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
         pass
 
     if ring_check.get("verdict") == "PASS":
+        # ── REFUSE TO SEAL A CORE THAT IS ALREADY IN THE BAND ──────────────
+        # MEASURED (vibe-ic#2122 / vibeic-eda#189) on one gf180mcuD die: the
+        # same generator and the same deck gave 16 violations for the ring on
+        # an empty 503 um die and 1,359,531 for that ring around this run's own
+        # core, which filled the die to its edge — 19,826 core shapes inside
+        # the 16 um band. Moving the core in by band + clearance took it to 0.
+        # The ring, the generator and the deck were all correct; the die was
+        # too small by exactly that margin, and this step sealed it in place
+        # and reported `seal_ring.state = PASS`.
+        #
+        # So a core inside band + clearance is REFUSED, naming the clearance,
+        # the deck that states it and the extent that offends — not sealed. A
+        # FAIL leaves no `die_finished.def` and no SKIPPED marker (see `done`),
+        # so the step's required outputs stay unsatisfied and the flow says so,
+        # which is the correct answer for a die that cannot be finished.
+        _cc = ring_check.get("core_clearance") or {}
+        _n = _cc.get("encroaching_polygons")
+        if _cc.get("state") == "MEASURED" and isinstance(_n, int) and _n > 0:
+            _keep = _cc.get("keep_box_um")
+            _worst = _cc.get("worst_encroachment_um") or {}
+            _over = ", ".join(
+                f"{k.replace('_um', '')} by {v} um"
+                for k, v in sorted(_worst.items()) if isinstance(v, (int, float))
+                and v > 0) or "on at least one edge"
+            _lay = sorted(_cc.get("encroaching_by_layer") or [],
+                          key=lambda d: -float(d.get("area_um2") or 0))
+            _worst_lay = "; ".join(
+                f"{d['layer']} {d['polygons']} shape(s) {d['area_um2']} um^2"
+                for d in _lay[:5]) or "none named"
+            seal["state"] = "FAIL"
+            seal["reason"] = (
+                f"this core reaches into the seal ring's own keep-out and is "
+                f"NOT sealed. The ring the PDK's generator built has its inner "
+                f"edge at {_cc.get('ring_inner_um')} um, and "
+                f"{_clear_why} — so the core may occupy no more than "
+                f"{_keep} um. It reaches outside that rectangle by {_over}: "
+                f"{_n} merged region(s), {_cc.get('encroaching_area_um2')} "
+                f"um^2, on {len(_lay)} of the ring's own layer(s) — "
+                f"{_worst_lay}"
+                + (" (5 worst by area shown)" if len(_lay) > 5 else "")
+                + f". Sealing it in place would put the ring's marker on top "
+                f"of prime-die geometry and every shape in the band would be "
+                f"in violation; the die must be sized so the core ends at "
+                f"least (ring band + {_cc.get('clearance_um')} um) from every "
+                f"die edge (vibe-ic#2122).")
+            seal["core_clearance"] = _cc
+            seal["gds_out_unpromoted"] = str(staged)
+            return done(seal, ring_check)
+        if _cc:
+            seal["core_clearance"] = _cc
+            if _cc.get("state") == "MEASURED" and _cc.get("population_empty"):
+                # DISCLOSED, not judged. A zero over an empty population is
+                # "nothing was measured", and it reads exactly like "the core
+                # stands back" unless somebody says which one it is.
+                seal["core_clearance_population_empty"] = (
+                    f"the layout this ring was added to carries nothing on any "
+                    f"of the ring's own layers {_cc.get('ring_layers')}, so "
+                    f"the 0 above is an EMPTY POPULATION and not a measured "
+                    f"clearance — nothing on those layers could encroach "
+                    f"because there is nothing on them")
         # PROMOTE ONLY A VERIFIED RING. An unverified sealed layout is never
         # swapped in: the sign-off DRC/LVS would then be measuring geometry
         # nothing has confirmed is a seal ring.
