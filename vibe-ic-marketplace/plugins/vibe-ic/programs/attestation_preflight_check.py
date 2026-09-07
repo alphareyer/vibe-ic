@@ -203,18 +203,45 @@ def remedy_for(*, residues: List[str], drift: Optional[List[str]],
 
     So that case names `-B` on the isolated child, which is where the fix is,
     instead of naming the export the operator has already done.
+
+    AND THE SAME SENTENCE WAS WRONG FOR THE OTHER HALF OF ``RESIDUE_DIRS``.
+    ``.pytest_cache`` / ``.mypy_cache`` are not bytecode: no ``PYTHON*``
+    variable and no ``-B`` suppresses them, because the tool that writes them
+    is not the interpreter. MEASURED on 8HD-9, 2026-09-07, pinned image (label
+    0.3.48): a full ``tools/ci/repo_hygiene_gates.sh`` over a pristine clone
+    left exactly one residue path, ``$ROOT/.pytest_cache``, written by that
+    script's own ``pytest tools/test_liar_census.py`` (130 nodeids, all from
+    that file) — and this gate answered it by telling the operator to pass
+    ``-B`` to an isolated child, which would have fixed nothing. The remedy for
+    a tool cache names the tool's own switch instead, so the two causes stay
+    two answers. Both branches are driven by
+    ``tests/test_issue2102_the_sweep_does_not_seed_its_own_preflight.py``.
     """
     out: List[str] = []
     if residues:
-        if env_value:
+        bytecode = [p for p in residues
+                    if p.endswith(RESIDUE_SUFFIXES)
+                    or Path(p).name == "__pycache__"]
+        tool_cache = [p for p in residues if p not in set(bytecode)]
+        if bytecode and env_value:
             out.append(
                 f"residue exists even though {ENV_FLAG} IS set, so a CHILD "
                 f"ignored the environment rather than the operator omitting it: "
                 f"`python3 -I` implies `-E` and discards every PYTHON* variable, "
                 f"so pass the `-B` FLAG to any isolated child that imports this "
                 f"tree. Removing the listed paths without that fixes one run only")
-        else:
+        elif bytecode:
             out.append("remove the residue paths listed above")
+        if tool_cache:
+            out.append(
+                f"{len(tool_cache)} of the listed path(s) are a TOOL cache, not "
+                f"bytecode ({', '.join(sorted(Path(p).name for p in tool_cache)[:3])}"
+                f"): {ENV_FLAG} and `-B` do not reach them, because the "
+                f"interpreter is not what wrote them. Fix it at the invocation "
+                f"— `pytest -p no:cacheprovider` (or `-o cache_dir=` under "
+                f"$TMPDIR), `mypy --cache-dir=` — for every tool this run "
+                f"spawns with its cwd inside a declared root. Deleting them "
+                f"without that fixes one run only")
     if drift is None:
         out.append("make `git status` answerable for --repo; an unmeasurable "
                    "checkout is not a clean one")

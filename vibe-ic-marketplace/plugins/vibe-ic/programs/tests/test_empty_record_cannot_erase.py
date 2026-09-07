@@ -40,6 +40,7 @@ import atpg_untestable_fault_classify as auc            # noqa: E402
 import dft_test_coverage as dtc                          # noqa: E402
 import payload_bit_position_check as pbp                # noqa: E402
 import per_source_record_merge_check as guard           # noqa: E402
+import sparse_fsm_detect as sfd                         # noqa: E402
 from _source_record_merge import merge_source_records   # noqa: E402
 
 
@@ -597,6 +598,127 @@ def test_macro_supply_stub_planner_richer_keeps_the_wider_blockage():
 # nothing in that function ever read. A value no consumer reads has no
 # observable direction, so no call-site test could have died under the flip;
 # the fold is gone.
+
+
+# ── SITE 5 (vibe-ic#2102): sparse_fsm_detect's design-wide enum table ───────
+#
+# `detect_paths` folded one `_sparse_enum_types` table per RTL file with
+# `enum_table.update(...)`, over a file list built by `sorted()`. Two sources
+# CAN name the same enum type — a design package and a verification or shim
+# package both declaring `probe_state_e` — and last-wins let filename order
+# decide which state codes survive. Those codes are what
+# `sparse_fsm_encoding_check` takes `rtl_width` from before it compares the
+# netlist's state-register width, so the input to a BLOCKING verdict moved when
+# a file was renamed.
+#
+# MEASURED on the base commit, over one directory, renaming ONE file and
+# touching nothing else:
+#     poor package sorts LAST   -> states {StIdle, StGo, StDone}
+#     poor package sorts FIRST  -> states {StIdle, StGo, StDone, StErr}
+# Both answers came from the same three files.
+#
+# FIXTURE: SystemVerilog declaration grammar with invented identifiers only.
+
+_RICH_PKG = """
+package probe_rich_pkg;
+  typedef enum logic [4:0] {
+    StIdle = 5'b00000,
+    StGo   = 5'b01110,
+    StDone = 5'b10101,
+    StErr  = 5'b11011
+  } probe_state_e;
+endpackage
+"""
+
+_POOR_PKG = """
+package probe_poor_pkg;
+  typedef enum logic [4:0] {
+    StIdle = 5'b00000,
+    StGo   = 5'b01110,
+    StDone = 5'b10101
+  } probe_state_e;
+endpackage
+"""
+
+_MACRO_USE = """
+module probe_use (input wire clk, input wire rst_n, output wire busy);
+  logic [4:0] state_d;
+  `PRIM_FLOP_SPARSE_FSM(u_state_regs, state_d, state_q, probe_state_e, StIdle)
+  assign busy = |state_q;
+endmodule
+"""
+
+
+def _sparse_corpus(root, poor_name: str):
+    """The three-file corpus, with the POOR package under a chosen filename."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "a_pkg_rich.sv").write_text(_RICH_PKG, encoding="utf-8")
+    (root / poor_name).write_text(_POOR_PKG, encoding="utf-8")
+    (root / "m_use.sv").write_text(_MACRO_USE, encoding="utf-8")
+    return root
+
+
+def _states_of(root):
+    rep = sfd.detect_paths([root])
+    regs = rep["sparse_state_registers"]
+    assert len(regs) == 1, rep
+    return set(regs[0].get("states") or {})
+
+
+def test_sparse_fsm_enum_table_does_not_depend_on_filename_order(tmp_path):
+    """THE RULE, at this site: the answer must not move when a file is renamed.
+
+    Both filenames are exercised, so a fix that merely reversed the winner
+    would fail this too — the assertion is on the two answers being EQUAL, not
+    on either one alone.
+    """
+    last = _states_of(_sparse_corpus(tmp_path / "last", "z_pkg_poor.sv"))
+    first = _states_of(_sparse_corpus(tmp_path / "first", "0_pkg_poor.sv"))
+    assert last == first, (
+        "renaming one file changed which state codes the detector reports: "
+        f"poor-last={sorted(last)} poor-first={sorted(first)}")
+
+
+def test_sparse_fsm_detect_richer_keeps_the_fuller_state_set(tmp_path):
+    """SITE 5's DIRECTION, through the module's own public entry point.
+
+    Two packages genuinely DISAGREE about `probe_state_e` — one names three
+    codes, one names four — rather than one of them being silent, which is the
+    only input that reaches the branch `on_conflict` controls (`len(distinct)
+    == 1` short-circuits above it). Asserted three ways, as the sites above
+    are: the richer record wins, in BOTH filename orders, and the answer is NOT
+    what `on_conflict="sparser"` would have produced. The third clause is the
+    one a flip to "sparser" actually kills.
+
+    WHY RICHER HERE. The consumer that blocks on this table is
+    `sparse_fsm_encoding_check`, and its dominant error is the FALSE PASS: a
+    state set read too small makes `states` falsy or wrong, the register drops
+    out of the width comparison, and a destroyed sparse encoding goes unseen.
+    """
+    rich_only = {"StIdle", "StGo", "StDone", "StErr"}
+    poor_only = {"StIdle", "StGo", "StDone"}
+    assert rich_only != poor_only, "precondition: the two views really differ"
+
+    for poor_name in ("z_pkg_poor.sv", "0_pkg_poor.sv"):
+        got = _states_of(_sparse_corpus(tmp_path / poor_name[:2], poor_name))
+        assert got == rich_only, (
+            f"[{poor_name}] the fuller state declaration did not win: {sorted(got)}")
+        assert got != poor_only, (
+            f"[{poor_name}] this is the answer on_conflict='sparser' produces")
+
+
+def test_the_sparse_fsm_disagreement_is_reported_not_only_resolved(tmp_path):
+    """Reporting an ambiguity is not the same as resolving it (P3).
+
+    A merge that silently picked a side would pass both tests above. The record
+    has to say a choice existed and which way it was taken, or the next reader
+    cannot tell a genuine single declaration from a resolved collision.
+    """
+    rep = sfd.detect_paths([_sparse_corpus(tmp_path / "c", "z_pkg_poor.sv")])
+    conflicts = rep["enum_type_conflicts"]
+    assert [c["key"] for c in conflicts] == ["probe_state_e"], conflicts
+    assert conflicts[0]["policy"] == "richer"
+    assert conflicts[0]["kept_size"] > min(conflicts[0]["other_sizes"])
 
 
 # ═══════════════════════════════════════════════ 3. THE REVERSE CASE ══════

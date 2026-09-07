@@ -1872,8 +1872,28 @@ run "no gate is left neutered"          "$PLUGIN" python3 programs/neutered_gate
 # only ever fire after the inner bounds had already failed a test — and when it
 # did fire it destroyed the other 107 results. Its removal deletes a backstop
 # whose only reachable behaviour was the destructive one.
+# `-p no:cacheprovider`, AND IT IS NOT COSMETIC. This is the only pytest this
+# script runs itself, its cwd is `$ROOT`, and pytest's cache plugin writes
+# `$ROOT/.pytest_cache` — which `attestation_preflight_check` counts as residue
+# (`RESIDUE_DIRS`) and `.gitignore` hides from `git status`. That is the exact
+# asymmetry the preflight at the top of this file was written from, and this
+# sweep was manufacturing it against ITSELF: the preflight is the FIRST gate,
+# so the directory this line wrote never troubled the run that wrote it and
+# refused the NEXT one.
+#
+# MEASURED on 8HD-9, 2026-09-07, pinned image (label 0.3.48), a full sweep over
+# a pristine clone of 94617408759e:
+#   before the sweep   preflight rc=0  "no residue, no tracked drift" [8058 files]
+#   after  the sweep   preflight rc=1  "1 bytecode/cache artefact(s)" — `.pytest_cache`
+#   the ONE line, alone, cwd=$ROOT      -> .pytest_cache/v/cache/nodeids, 130 nodeids,
+#                                          all `tools/test_liar_census.py::…`
+#   the same line WITH this flag        -> no residue; preflight rc=0 again
+# Same selection both ways: `128 passed, 2 skipped` with and without it, so the
+# flag changes what is WRITTEN and nothing about what is RUN. `-p no:cacheprovider`
+# is the spelling `policy_direction_pin_check.run_pytest` and `liar_census`'s own
+# arm already use for the same reason.
 run "liar census controls still fire"   "$ROOT" env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
-    python3 -m pytest -q \
+    python3 -m pytest -q -p no:cacheprovider \
     "$ROOT/tools/test_liar_census.py"
 # ptmo/2026-08-20 — the tree-wide form of a retirement that had been enforced
 # five times, each time in ONE named file, and had therefore leaked into four
@@ -3028,7 +3048,27 @@ uncheckable_until 2027-02-28 "needs the vibeic-eda CONTAINER IMAGE on the host: 
 run_tolerating_uncheckable "image-gated verifications are not silently skipped" "$PLUGIN" \
   python3 programs/image_gated_verification_check.py
 
-run "an argued direction is pinned" "$PLUGIN" python3 programs/policy_direction_pin_check.py programs --verify-pins --jobs 6 --max-test-files 41
+# `--max-test-files` IS A COST BOUND AND IT HAD GONE STALE. MEASURED on 8HD-9,
+# 2026-09-07 over 94617408759e: 12 argued sites, 7 PINNED, 5 ABSTAIN. Four of
+# the five were one cause elsewhere (a candidate file RED at baseline, repaired
+# in the same batch) and the fifth was this flag: `phase3_one_shot_runner.py:
+# 11472 _detect_pdk(override='sky130A')` selects 43 candidate files and 41
+# refused to look at it. It had already been moved 40 -> 41 once, in a
+# frozen-red repair, with no argument written down.
+#
+# Driven at 43, the site is PINNED — flipped to 'asap7' it is killed by
+# `programs/tests/test_policy_direction_must_be_pinned.py` (rc 1, "1 failed in
+# 2.09 s"), which sorts FIRST in the relevance order, so admitting the
+# selection costs one file rather than 43. The gate was not being protected
+# from a cost; it was declining to state a verdict it had.
+#
+# 43 EXACTLY, with no headroom, and no round number. Slack is what let this go
+# stale silently. `tests/test_policy_direction_must_be_pinned.py::
+# test_the_sweep_caps_at_or_above_what_this_corpus_needs` re-derives the largest
+# selection from the live tree and fails when this literal falls behind it, so
+# the next lane that outgrows it gets a named red in seconds instead of an
+# UNDETERMINED after 867 s.
+run "an argued direction is pinned" "$PLUGIN" python3 programs/policy_direction_pin_check.py programs --verify-pins --jobs 6 --max-test-files 43
 
 # vibe-ic#1241 — WIRED HERE, not left to its own test. The audit
 # (`checker_execution_wiring_audit`) named this checker as one that nothing but

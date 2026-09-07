@@ -379,7 +379,7 @@ class TestCorpusSweepOfTheAdopters:
     #: over an empty adopter set would pass by examining nothing, which is the
     #: finding this whole file is about.
     ADOPTERS = ("perc_corpus_sweep.py", "sweep_reach_check.py",
-                "sweep_reach_survey.py")
+                "sweep_reach_survey.py", "sparse_fsm_detect.py")
 
     def test_every_adopter_imports_the_shared_contract(self):
         for name in self.ADOPTERS:
@@ -401,6 +401,28 @@ class TestCorpusSweepOfTheAdopters:
         empty_dir = tmp_path / "no_programs_here"
         empty_dir.mkdir()
 
+        # The detector's two arms, in ITS unit: an RTL file it reads in full
+        # and decides nothing about, and one carrying a state-encoding
+        # construct. Both are valid, readable SystemVerilog with invented
+        # identifiers; neither is an empty or absent input, which is the
+        # populated-but-unjudged shape this whole file is about.
+        plain_rtl = tmp_path / "probe_comb.v"
+        plain_rtl.write_text(
+            "module probe_comb (input wire a, input wire b, output wire y);\n"
+            "  assign y = a & b;\n"
+            "endmodule\n")
+        fsm_rtl = tmp_path / "probe_fsm.sv"
+        fsm_rtl.write_text(
+            "typedef enum logic [4:0] {\n"
+            "  StIdle = 5'b00000,\n"
+            "  StGo   = 5'b01110,\n"
+            "  StDone = 5'b10101\n"
+            "} probe_state_e;\n"
+            "module probe_fsm (input wire clk, output wire done);\n"
+            "  probe_state_e state_q;\n"
+            "  assign done = (state_q == StDone);\n"
+            "endmodule\n")
+
         # (program, zero-reach argv, reached argv)
         plan = {
             "perc_corpus_sweep.py": (vac_corpus, live_corpus),
@@ -410,6 +432,11 @@ class TestCorpusSweepOfTheAdopters:
             # and reaches something when pointed at a real one.
             "sweep_reach_survey.py": (["--programs-dir", empty_dir],
                                       ["--only", "rom_init_lint.py"]),
+            # vibe-ic#2102 — the detector reads every RTL file it is given and
+            # enters the sparse/dense decision only on a state-encoding
+            # construct. A corpus of ordinary combinational RTL is read in full
+            # and judged not at all.
+            "sparse_fsm_detect.py": ([plain_rtl], [fsm_rtl]),
         }
         observed = {}
         for name in self.ADOPTERS:

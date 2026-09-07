@@ -45,8 +45,17 @@ Usage:
     python3 sparse_fsm_detect.py <file.sv> ... [--json out.json]
 
 Exit codes:
-    0 = ran (whether or not anything was detected; detection is not a verdict)
-    2 = usage / unreadable input
+    0 = ran and ENTERED the sparse/dense decision on at least one state-encoding
+        construct. Detection is still not a verdict: judging three FSMs and
+        finding none of them sparse is rc 0.
+    2 = usage / unreadable input, OR the run READ every target and entered the
+        decision on NOTHING — no state-encoding construct anywhere in the
+        corpus, or no RTL file under the given paths at all. Announced with the
+        `VACUOUS_PASS:` sentinel on stderr (stdout stays the JSON report). It is
+        NOT a pass over the design: before this, a sweep over a corpus with no
+        FSM in it and a sweep over an empty directory both printed
+        `declares_sparse_fsm: false` and exited 0, and no reader or consumer
+        could tell either from a corpus this detector had judged.
 """
 from __future__ import annotations
 
@@ -77,6 +86,8 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from _atomic_artefact import write_text as atomic_write_text  # #1082
 from _hdl_code_text import strip_hdl_comments_and_strings  # #731
+import _source_record_merge as _merge  # vibe-ic#2102 — silence cannot erase
+import _sweep_reach as _sr            # vibe-ic#2102 — say what was reached
 
 # A sparse encoding is defined by its MINIMUM pairwise Hamming distance. The
 # OpenTitan generator's own floor is 3 (`sparse-fsm-encode.py -d 3`), which is
@@ -285,6 +296,49 @@ def detect_text(text: str, source: str = "") -> List[dict]:
     return found
 
 
+def _decision_entries(text: str) -> Dict[str, int]:
+    """How many times ONE RTL text ENTERS this detector's decision path.
+
+    THE DECISION IS NOT "was this file read". It is "is this state encoding
+    Hamming-separated?" for the two constant-group forms, and "did the author
+    already declare this register sparse?" for the three declared forms. A file
+    carrying none of those constructs is READ IN FULL and DECIDED ABOUT
+    NOTHING — and the report over such a corpus used to be indistinguishable
+    from the report over FSMs this detector had judged and found dense. That is
+    the confusion `_sweep_reach` exists to end, which is why the reach unit
+    counts CONSTRUCTS ENTERED rather than files opened.
+
+    Computed from the SAME regexes and the SAME `MIN_STATES` floor
+    `detect_text` classifies with, so a construct counted here is a construct
+    that one would classify. The direction that matters — evidence implies a
+    decision entry, never the reverse — is pinned executably in
+    `tests/test_issue2102_sparse_fsm_detect_discloses_its_reach.py`.
+    """
+    text = _strip_macro_definitions(_strip_comments(text))
+    out: Dict[str, int] = {
+        "sparse_flop_instantiation": 0,
+        "sparse_fsm_macro_use": 0,
+        "fsm_encoding_attribute": 0,
+        "enum_state_group": 0,
+        "localparam_state_group": 0,
+    }
+    for m in _SPARSE_INST_RE.finditer(text):
+        if _STATE_I_RE.search(m.group("tail")):
+            out["sparse_flop_instantiation"] += 1
+    out["sparse_fsm_macro_use"] = sum(1 for _ in _MACRO_RE.finditer(text))
+    out["fsm_encoding_attribute"] = sum(1 for _ in _ATTR_DECL_RE.finditer(text))
+    for m in _ENUM_RE.finditer(text):
+        if sum(1 for _ in _CONST_RE.finditer(m.group("body"))) >= MIN_STATES:
+            out["enum_state_group"] += 1
+    groups: Dict[Tuple[str, int], int] = {}
+    for m in _LOCALPARAM_RE.finditer(text):
+        key = (_module_at(text, m.start()), int(m.group("w")))
+        groups[key] = groups.get(key, 0) + 1
+    out["localparam_state_group"] = sum(1 for n in groups.values()
+                                        if n >= MIN_STATES)
+    return out
+
+
 def collect_rtl(paths: Sequence[Path]) -> List[Path]:
     """Every RTL file under the given files/dirs, sorted, de-duplicated."""
     out: List[Path] = []
@@ -303,23 +357,75 @@ def collect_rtl(paths: Sequence[Path]) -> List[Path]:
 def detect_paths(paths: Sequence[Path]) -> dict:
     """Run the detector over files/dirs. Reports unreadable files by name —
     "could not read it" is never "read it and it was empty"."""
+    return detect_paths_reach(paths)[0]
+
+
+def detect_paths_reach(paths: Sequence[Path]) -> Tuple[dict, "_sr.SweepReach"]:
+    """``(report, reach)`` — the report, and how much of the guard it entered.
+
+    Split out so the CLI routes ONE reach object onto both the exit code and
+    the `VACUOUS_PASS:` sentinel, instead of re-deriving vacuity from the
+    rendered report. `detect_paths` stays the in-process entry every consumer
+    already calls (`sparse_fsm_encoding_check`, `design_one_shot_runner`).
+    """
     files = collect_rtl(paths)
     regs: List[dict] = []
     unreadable: List[str] = []
+    reach = _sr.SweepReach(unit="RTL file")
     # Design-wide enum table. A macro use names its state TYPE, but the
     # `typedef enum` with the constants usually lives in a package file
     # (measured: `aes_ctr_e` is used in aes_ctr_fsm.sv and defined in
     # aes_pkg.sv), so the codes can only be attached by a cross-file join.
-    enum_table: Dict[str, dict] = {}
+    #
+    # ONE PARSED TABLE PER SOURCE, MERGED AFTERWARDS — never folded with
+    # `dict.update` in discovery order. Two files can name the same enum TYPE
+    # with different constants (a package and a shim, a design package and a
+    # verification one), and last-wins let whichever sorted LAST decide. The
+    # codes it decides are what `sparse_fsm_encoding_check` takes `rtl_width`
+    # from, so renaming a file moved the width the netlist is compared against,
+    # which is the input to a BLOCKING verdict. See `_source_record_merge`.
+    per_source_enums: List[Dict[str, dict]] = []
     for f in files:
         try:
             txt = f.read_text(errors="replace")
         except OSError as e:  # pragma: no cover - filesystem-dependent
             unreadable.append(f"{f}: {e}")
+            reach.not_reached(str(f), f"could not be read: {e}")
             continue
-        enum_table.update(_sparse_enum_types(
+        per_source_enums.append(_sparse_enum_types(
             _strip_macro_definitions(_strip_comments(txt))))
         regs.extend(detect_text(txt, source=str(f)))
+        if sum(_decision_entries(txt).values()):
+            reach.reached(str(f))
+        else:
+            reach.not_reached(
+                str(f),
+                "no state-encoding construct: no sparse-FSM flop "
+                "instantiation, no PRIM_FLOP_SPARSE_FSM use, no fsm_encoding "
+                f"attribute and no group of >= {MIN_STATES} equal-width state "
+                "constants, so the Hamming-separation decision was never "
+                "entered")
+    if not files:
+        reach.declare_empty_corpus(
+            "no file with an RTL suffix (" + " ".join(RTL_SUFFIXES) +
+            ") was found under the given paths")
+    # `content=` because the record is a STRUCT whose payload is one field:
+    # `{"min_hamming": d, "states": {...}}` is truthy even when it carries no
+    # codes, so the default truthiness test would read a silent record as
+    # substantive. `on_conflict="richer"` because the consumer that BLOCKS on
+    # this table — `sparse_fsm_encoding_check`, whose refusal is "synthesis
+    # replaced the declared sparse encoding" — is dominated by the FALSE PASS:
+    # a state set read too small drops the register out of the width
+    # comparison entirely (`if not states ... continue`) and the destroyed
+    # encoding goes unseen, whereas a state set read too large leaves the
+    # register IN the comparison, which still has to disagree before anything
+    # is refused. "sparser" is the right floor for a gate that can FABRICATE a
+    # finding out of the extra evidence — see
+    # `macro_obs_geometry_intersect_check.merge_macro_obs`, which argues it for
+    # its own domain — and that is not this one.
+    enum_table, enum_conflicts = _merge.merge_source_records(
+        per_source_enums, content=lambda ev: ev.get("states"),
+        on_conflict="richer")
     for r in regs:
         ev = enum_table.get(r.get("state_type", ""))
         if ev and not r.get("states"):
@@ -345,16 +451,22 @@ def detect_paths(paths: Sequence[Path]) -> dict:
         if r.get("flop_instance"):
             cur["flop_instance"] = r["flop_instance"]
     ordered = [by_key[k] for k in sorted(by_key)]
-    return {
+    rep = {
         "tool": "sparse_fsm_detect",
         "files_scanned": len(files),
         "unreadable": unreadable,
+        # Two sources named the same enum type SUBSTANTIVELY and disagreed.
+        # Published rather than silently resolved: the merge states which way
+        # it went, and reporting an ambiguity is not the same as resolving it.
+        "enum_type_conflicts": enum_conflicts,
         "sparse_state_registers": ordered,
         "register_names": sorted({r["register"] for r in ordered}),
         "flop_instances": sorted({r["flop_instance"] for r in ordered
                                   if r.get("flop_instance")}),
         "declares_sparse_fsm": bool(ordered),
     }
+    _sr.attach(rep, reach)
+    return rep, reach
 
 
 def yosys_setattr_cmd(register_names: Sequence[str],
@@ -421,12 +533,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     if missing:
         print("error: does not exist: " + ", ".join(missing), file=sys.stderr)
         return 2
-    rep = detect_paths(paths)
+    rep, reach = detect_paths_reach(paths)
     txt = json.dumps(rep, indent=2, sort_keys=True)
     if a.json:
         atomic_write_text(Path(a.json), txt + "\n")
     print(txt)
-    return 0
+    # DETECTION IS STILL NOT A VERDICT, so `passed` is unconditionally True and
+    # this CLI never returns rc 1. What the rc now distinguishes is whether the
+    # run entered the decision AT ALL. The sentinel goes to stderr (via
+    # `_vacuous_exit.announce_vacuous`), so stdout stays exactly the JSON
+    # document its readers already parse.
+    reach.announce("sparse_fsm_detect")
+    return reach.exit_code(passed=True)
 
 
 if __name__ == "__main__":

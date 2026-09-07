@@ -20,6 +20,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -1011,3 +1012,110 @@ def test_the_mutant_run_is_exhaustive_and_not_stopped_at_the_first_failure(tmp_p
     assert rc != 0, out
     named = C.failing_files(out)
     assert len(named) == 2, (named, out)
+
+
+# ---------------------------------------------------------------------------
+# THE CAP IS A COST BOUND, AND IT WENT STALE (vibe-ic#2102 row 7)
+# ---------------------------------------------------------------------------
+# MEASURED on 8HD-9, 2026-09-07, over 94617408759e: the blocking sweep reported
+# `7/7 (abstained 5 of 12 argued sites)`. Four of the five abstained for a cause
+# elsewhere — a candidate test file that was RED at baseline, so no kill under
+# the flip could be credited — and the fifth was this flag:
+#
+#     [ABSTAIN] phase3_one_shot_runner.py:11472 _detect_pdk(override='sky130A')
+#               tests=43 -- 43 candidate test files exceeds --max-test-files 41
+#
+# Driven at 43 the same site is PINNED: flipped to 'asap7' it is killed by THIS
+# FILE (rc 1, "1 failed in 2.09 s") — `test_auto_detect_fallback_resolves_to_
+# sky130A_and_not_merely_to_some_pdk`, which sorts FIRST in the relevance order.
+# So the pin existed the whole time and the gate was declining to look at it.
+#
+# The literal had already been moved 40 -> 41 once, inside a frozen-red repair,
+# with no argument written down. These two tests are what stops the third time
+# from being silent as well.
+
+def test_the_cap_abstention_names_the_number_to_raise_it_to(tmp_path):
+    """FAST. The abstention must be actionable at the CALLER, not arithmetic.
+
+    Driven over a synthetic corpus whose candidate set is deliberately larger
+    than the cap it is given, so the assertion is about what the checker SAYS
+    when it declines — the one thing a reader of an 867-second UNDETERMINED
+    has to act on.
+    """
+    files = dict(PINNABLE)
+    for i in range(3):
+        # GREEN at baseline and importable, or the abstention this asserts
+        # would be the RED-BASELINE one and the test would be measuring a
+        # different branch under the same word.
+        files[f"tests/test_user_{i}.py"] = '''
+            import sys
+            sys.path.insert(0, __file__.rsplit("/tests/", 1)[0])
+            from helper import reconcile
+            import user
+
+            def test_go_keeps_the_wider_record():
+                assert user.go([1, 22]) == 22
+        '''
+    root = _corpus(tmp_path / "cap", files)
+    rep = C.build_report(root)
+    site = rep["argued"][0]
+    bt = tmp_path / "bt"
+    bt.mkdir(parents=True, exist_ok=True)
+
+    n = len(C.select_tests(site, root / "tests"))
+    assert n >= 2, f"the corpus must exceed the cap for this to control anything: {n}"
+
+    verdict = C.verify_pin(site, root, root / "tests", n - 1, bt,
+                           extra=["-p", "no:cacheprovider"])
+    assert verdict["state"] == "ABSTAIN", verdict
+    why = verdict["why"]
+    assert "--max-test-files" in why, why
+    assert f"at least {n}" in why, (
+        "the abstention does not name the number to set the caller's cap to, "
+        f"so the reader cannot act on it: {why}")
+    assert "PINNED or UNPINNED" in why, why
+
+    # And with the cap raised to exactly that number it stops abstaining — a
+    # remedy that does not work is worse than none.
+    raised = C.verify_pin(site, root, root / "tests", n, bt,
+                          extra=["-p", "no:cacheprovider"])
+    assert raised["state"] != "ABSTAIN", raised
+
+
+def test_the_sweep_caps_at_or_above_what_this_corpus_needs():
+    """SLOW (~45 s) AND WORTH IT: it fails in seconds' worth of a suite run
+    where the gate it protects fails after 867 s, and it fails with the number.
+
+    The cap in `tools/ci/repo_hygiene_gates.sh` is a hand-written literal over a
+    corpus that grows underneath it. Nothing re-derived it, so it fell behind
+    twice. This re-derives the largest candidate selection from the LIVE tree
+    and requires the declared cap to admit it.
+
+    It cannot go green by examining nothing: the argued population and the
+    parsed flag are both asserted present before the comparison is made.
+    """
+    repo_root = PROGRAMS.parents[3]
+    sweep = repo_root / "tools" / "ci" / "repo_hygiene_gates.sh"
+    text = sweep.read_text(encoding="utf-8")
+    line = next((ln for ln in text.splitlines()
+                 if "policy_direction_pin_check.py" in ln
+                 and not ln.lstrip().startswith("#")), None)
+    assert line, f"{sweep} no longer invokes this gate; delete this test with it"
+    m = re.search(r"--max-test-files\s+(\d+)", line)
+    assert m, f"the sweep does not declare --max-test-files: {line.strip()}"
+    declared = int(m.group(1))
+
+    report = C.build_report(PROGRAMS)
+    argued = report["argued"]
+    assert argued, "no argued direction site was found — empty denominator"
+    sizes = {f"{s['file']}:{s['line']}": len(C.select_tests(s, PROGRAMS / "tests"))
+             for s in argued}
+    worst, largest = max(sizes.items(), key=lambda kv: kv[1])
+
+    assert declared >= largest, (
+        f"tools/ci/repo_hygiene_gates.sh passes --max-test-files {declared}, "
+        f"but {worst} now selects {largest} candidate test files, so the gate "
+        f"will ABSTAIN on it and report UNDETERMINED after several minutes. "
+        f"Raise the literal in that file to {largest} and re-run the gate; the "
+        f"cap is a cost bound, so admitting the selection can only produce "
+        f"PINNED or UNPINNED.")

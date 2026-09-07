@@ -173,10 +173,33 @@ RC_UNDETERMINED = 2
 
 # A site whose candidate test set is larger than this is ABSTAINed rather than
 # guessed at: running it would cost more than the gate is worth, and calling it
-# unpinned without running would be a claim the gate did not earn. 40 is the
-# smallest round number that DECIDES every argued site in this corpus (the
-# largest selection here is 32); a cap that abstained on the one site the sweep
-# found would be a gate that goes green by declining to look.
+# unpinned without running would be a claim the gate did not earn. A cap that
+# abstains on a site the sweep found is a gate that declines to look, so the
+# number has to follow the corpus.
+#
+# IT DID NOT, AND THE MEASUREMENT THAT USED TO STAND HERE WAS THE FIRST
+# CASUALTY. It said "40 is the smallest round number that DECIDES every argued
+# site in this corpus (the largest selection here is 32)". MEASURED on 8HD-9,
+# 2026-09-07, over 94617408759e, the selection sizes are
+#
+#     43  phase3_one_shot_runner.py:11472  _detect_pdk(override=…)
+#     15  matrix_mutation_ledger.py:3750   replay_plan(mode=…)
+#      4  three sites   2  five sites   1  three sites   (all on_conflict=)
+#
+# so 32 has not been the largest for some time, and the sweep had already been
+# bumped 41 once with no argument written down. The outlier is not a site with
+# unusual coverage: `override` is an ordinary English word, so `select_tests`
+# matches 43 test files that name the module and use it in any sense, while
+# every `on_conflict=` site selects 1 to 4.
+#
+# THIS DEFAULT IS THE AD-HOC ONE and it stays at 40. The blocking sweep passes
+# the number this corpus needs and
+# `tests/test_policy_direction_must_be_pinned.py::test_the_sweep_caps_at_or_
+# above_what_this_corpus_needs` re-derives that number from the tree, so the
+# literal at the call site cannot fall behind again without a named red that
+# says which site outgrew it. A cap is a COST bound, never a strictness one:
+# raising it can only turn an ABSTAIN into a PINNED or an UNPINNED, both of
+# which are verdicts this gate earned by running.
 DEFAULT_MAX_TEST_FILES = 40
 
 # Five files currently contain the argued sites.  The default deliberately
@@ -1042,9 +1065,20 @@ def verify_pin(site: Dict[str, Any], root: Path, tests_dir: Path,
         result["why"] = "no test file names this program together with the parameter or callee"
         return result
     if len(candidates) > max_test_files:
+        # NAMES THE ACTION, not only the two numbers. The old sentence stated
+        # the arithmetic and left the reader to work out that the remedy is a
+        # caller-side flag rather than something about this call site — and
+        # this abstention is reached, in practice, when a growing test corpus
+        # walks past a literal nobody re-derived, not when a site is unusual.
+        # A cap is a COST bound: admitting a bigger selection can only turn
+        # this into PINNED or UNPINNED, and both are verdicts the gate earned.
         result["state"] = "ABSTAIN"
         result["why"] = (f"{len(candidates)} candidate test files exceeds "
-                         f"--max-test-files {max_test_files}")
+                         f"--max-test-files {max_test_files}; this is the "
+                         f"CALLER's cost bound and not a property of this call "
+                         f"site. Raise --max-test-files to at least "
+                         f"{len(candidates)} and re-run; the outcome can only "
+                         f"be PINNED or UNPINNED, never a free pass")
         return result
 
     target = root / site["file"]
