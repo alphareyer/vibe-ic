@@ -1166,9 +1166,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="evidence folder(s) v<ver>_<PDK> to validate")
     ap.add_argument("--tree", metavar="ROOT", default=None,
                     help="discover + validate every published cell under ROOT "
-                         "(e.g. benchmark-data or benchmark-data/ic). If "
-                         f"${CORPUS_ENV} is set it OVERRIDES this, because the "
-                         "published corpus now lives in its own repository.")
+                         "(e.g. benchmark-data or benchmark-data/ic). An "
+                         "explicit ROOT that IS a directory OUTRANKS "
+                         f"${CORPUS_ENV}; the pointer supplies the corpus only "
+                         "when ROOT is not there, because the published corpus "
+                         "now lives in its own repository.")
     ap.add_argument("--corpus-may-be-absent", action="store_true",
                     help="the caller asserts this repo need not carry the corpus. "
                          "Turns 'no corpus discoverable anywhere' from UNDETERMINED "
@@ -1188,22 +1190,47 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="write a machine-readable summary JSON here")
     args = ap.parse_args(argv)
 
-    # THE POINTER WINS OVER THE PATH. Both shipped call sites pass the literal
-    # `--tree benchmark-data`, a relative path that no longer exists in this repo.
-    # Rewriting both call sites instead would leave every OTHER caller — agents,
-    # local runs, the benchmark-agent skill — still pointed at a directory that is
-    # gone, and each would have to learn the new location separately.
+    # THE POINTER REPLACES A MISSING CORPUS; IT DOES NOT REPLACE A PRESENT ONE.
+    # Spelled the same way `_corpus_location.resolve()` spells it, so the two
+    # seams cannot disagree about which tree was judged.
     #
-    # The override is announced, because a gate that silently scans a different
-    # tree than the one named on its command line is how `--tree ../../../
+    # An explicit `--tree ROOT` is the caller naming the subject it wants judged.
+    # Letting an environment variable outrank it means the gate answers about a
+    # tree nobody asked for: MEASURED, 28 tests that build a fixture corpus in
+    # tmp_path and pass `--tree <tmp_path>` were silently redirected onto the
+    # real corpus and judged the wrong subject (czcorpus, 2026-09-08).
+    #
+    # But the pointer must keep working where it was earning its keep. Both
+    # shipped call sites pass the literal `--tree benchmark-data`, a relative
+    # path that no longer exists in this repo; for THEM the named root is absent,
+    # the pointer supplies the corpus exactly as before, and rewriting the call
+    # sites would leave every other caller — agents, local runs, the
+    # benchmark-agent skill — pointed at a directory that is gone.
+    #
+    # A caller that passes BOTH a readable root and a pointer to a different tree
+    # has named two subjects. That is the caller's bug and it is SAID OUT LOUD
+    # rather than silently resolved, because a gate that silently scans a tree
+    # other than the one on its command line is how `--tree ../../../
     # benchmark-data` came to report "13/28 conformant" over 9 IC dirs while an
     # absolute path over the same tree found 8 failing and 93 entries (2026-08-11,
     # recorded above). Whatever this gate scanned, it says so.
     _env_tree = os.environ.get(CORPUS_ENV)
     if _env_tree and args.tree:
-        print(f"note: {CORPUS_ENV} overrides --tree {args.tree} -> {_env_tree}",
-              file=sys.stderr)
-        args.tree = _env_tree
+        if Path(args.tree).is_dir():
+            try:
+                _same = Path(_env_tree).resolve() == Path(args.tree).resolve()
+            except OSError:
+                _same = False
+            if not _same:
+                print(f"note: --tree {args.tree} is explicit and readable, so it "
+                      f"outranks {CORPUS_ENV}={_env_tree}. THE TWO DISAGREE — a "
+                      f"caller passing both is naming two subjects; scanning "
+                      f"--tree {args.tree}.", file=sys.stderr)
+        else:
+            print(f"note: --tree {args.tree} is not a directory, so "
+                  f"{CORPUS_ENV} overrides --tree {args.tree} -> {_env_tree}",
+                  file=sys.stderr)
+            args.tree = _env_tree
     elif _env_tree and not args.tree and not args.paths:
         print(f"note: scanning {CORPUS_ENV} -> {_env_tree}", file=sys.stderr)
         args.tree = _env_tree

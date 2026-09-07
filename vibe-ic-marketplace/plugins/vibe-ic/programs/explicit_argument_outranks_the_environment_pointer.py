@@ -19,12 +19,20 @@ arbitrate it.
 
     THE POINTER REPLACES A MISSING CORPUS; IT DOES NOT REPLACE A PRESENT ONE.
 
-Three consumers state the opposite, deliberately, each with its own reasoning
+TWO consumers state the opposite, deliberately, each with its own reasoning
 and its own issue reference:
 
     tracked_symlink_target_present_check.py   "THE POINTER WINS OVER THE PATH,
     tracked_symlink_portability_check.py       ANNOUNCED (#1710)"
-    benchmark_evidence_structure_check.py
+
+A THIRD, `benchmark_evidence_structure_check.py`, was on that list until the
+czcorpus lane (2026-09-08) measured what it cost: 28 tests that build a fixture
+corpus in tmp_path and pass `--tree <tmp_path>` were redirected onto the real
+corpus and judged the wrong subject. It now states the resolver's rule — a
+READABLE explicit root wins, an ABSENT one is a missing corpus the pointer still
+supplies — which keeps both shipped call sites (`--tree benchmark-data`, a
+relative path that is gone) working unchanged. The split is narrower; it is not
+settled, and this program still does not arbitrate it.
 
 Both sides are argued in comments; the resolver's own docstring records that
 letting the pointer win outright turned 15 of 21 tests red for every developer
