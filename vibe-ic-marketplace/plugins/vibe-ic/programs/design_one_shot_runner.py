@@ -6526,6 +6526,118 @@ def step_reused_ip_consume(project: Path,
         extras=res)
 
 
+# ── THE AUTHORING HAND-OFF MUST SERVE BYTES, NOT A NAME (vibe-ic#2193) ───
+#
+# `skills/` of THIS tree, resolved off PROGRAMS_DIR — never the cwd and never
+# an installed plugin cache. The same walk `gen_skill_inventory` and
+# `convergence_doctrine_present_check` use, so it is correct in both the
+# source layout and the `~/.claude/plugins/cache/.../<ver>/` layout.
+SKILLS_DIR = PROGRAMS_DIR.parent / "skills"
+
+# The staged copy's name. Deliberately NOT `<skill>.md`: the author is told to
+# read ONE document per hand-off, and a fixed name is what a downstream reader
+# (and a test) can address without knowing which class it ran on.
+FALLBACK_SKILL_STAGED_NAME = "fallback_skill.md"
+
+
+def _stage_fallback_skill(project: Path,
+                          skill: Optional[str]) -> Tuple[str, Dict[str, Any]]:
+    """Stage THIS TREE's copy of ``skill`` beside the digests and name it.
+
+    WHY (vibe-ic#2193). The hand-off used to end at "AI invokes skill
+    `spec-to-rtl`" — a NAME. A name has no tree in it, so the author's skill
+    loader resolves it against whatever plugin happens to be INSTALLED on the
+    host: `~/.claude/plugins/cache/vibe-ic-marketplace/vibe-ic/<version>/`.
+    A lane measures a clone at a FROZEN base precisely so the installed plugin
+    is not the subject, and no install policy can fix that — two lanes on one
+    host measuring two different bases still share one installed skill set.
+
+    MEASURED at this base (tree 75d478b34c17, v1.19.43) on two hosts, which
+    served two DIFFERENT versions of the same document:
+
+        served copy   8HD-6 -> cache 1.14.8      8hd-3 -> cache 1.14.31
+        membership    70 skills tree / 70 cache, IDENTICAL both hosts
+        content       12 of 70 SKILL.md differ from the tree, both hosts
+        spec-to-rtl   tree 14 `## ` sections; served 12; the two absent are
+                      the ones written FOR the open failures #2089 and #2081
+
+    So the run authored from a document the run cannot name, and the record —
+    which already pins the image digest, the base sha, the tree sha and the
+    plugin version — was silent about the one input that wrote the RTL.
+
+    `lessons.md` in the sibling `_stage_author_knowledge_digests` already
+    solves exactly this, correctly, by copying the tree's own bytes. The skill
+    is the same kind of input and gets the same treatment here.
+
+    ADVISORY, and best-effort by contract: this never blocks a hand-off. A
+    skill this tree does not ship is DISCLOSED (extras
+    ``fallback_skill_staged=False`` plus a named reason, and a line on stderr),
+    never silently redirected — a silent decline reads downstream as "nothing
+    needed doing". `test_fallback_skill_routes_to_a_shipped_skill` is the
+    static half of the same contract; this is the runtime half, and the two
+    now agree about which copy "the skill" means.
+
+    Returns ``(hint_text, extras)``. ``("", {})`` only when no skill is named
+    — there is then no author and nothing to serve.
+    """
+    if not skill:
+        return "", {}
+    src = SKILLS_DIR / str(skill) / "SKILL.md"
+    extras: Dict[str, Any] = {}
+    try:
+        raw = src.read_bytes()
+    except Exception as _err:
+        # DEGRADE LOUDLY. The tree does not ship (or cannot read) the skill it
+        # just told the author to invoke, so the name WILL resolve somewhere
+        # else. Say which name, say where it was looked for, and say what the
+        # consequence is — in the hand-off the author reads AND in the record.
+        reason = (f"{type(_err).__name__}: this tree has no readable "
+                  f"{src.relative_to(SKILLS_DIR.parent).as_posix()}")
+        extras["fallback_skill_staged"] = False
+        extras["fallback_skill_unstaged_reason"] = reason
+        extras["fallback_skill_source"] = str(src)
+        print(f"      fallback skill {skill!r} NOT staged ({reason}); the "
+              f"hand-off names a skill this tree does not ship, so the name "
+              f"resolves to whatever plugin is INSTALLED — which is not this "
+              f"tree", file=sys.stderr)
+        return ("\nWARNING — THE SKILL NAMED ABOVE IS NOT IN THIS TREE: "
+                f"`{skill}` could not be read from this tree ({reason}), so "
+                f"nothing was staged. Invoking it by name resolves to whatever "
+                f"plugin version is INSTALLED on this host, which is NOT the "
+                f"tree being measured. Treat any RTL authored from it as "
+                f"authored from an unrecorded document."), extras
+    sha = hashlib.sha256(raw).hexdigest()
+    try:
+        stage1 = _pl.phase2_stage1_dir(project)
+        stage1.mkdir(parents=True, exist_ok=True)
+        dst = stage1 / FALLBACK_SKILL_STAGED_NAME
+        dst.write_bytes(raw)
+    except Exception as _err:
+        reason = f"{type(_err).__name__}: {_err}"
+        extras["fallback_skill_staged"] = False
+        extras["fallback_skill_unstaged_reason"] = reason
+        extras["fallback_skill_source"] = str(src)
+        extras["fallback_skill_sha256"] = sha
+        print(f"      fallback skill {skill!r} was readable but could not be "
+              f"staged ({reason}); the author will fall back to the INSTALLED "
+              f"copy", file=sys.stderr)
+        return ("\nWARNING — THE SKILL NAMED ABOVE COULD NOT BE STAGED "
+                f"({reason}). This tree's copy is at `{src}` "
+                f"(sha256 {sha}); read THAT, not the installed one."), extras
+    extras["fallback_skill_staged"] = True
+    extras["fallback_skill_path"] = str(dst)
+    extras["fallback_skill_source"] = str(src)
+    extras["fallback_skill_sha256"] = sha
+    extras["fallback_skill_bytes"] = len(raw)
+    return (f"\nREAD THE SKILL AT THIS PATH, NOT BY NAME: `{dst}` is THIS "
+            f"tree's copy of skill `{skill}` ({len(raw)} bytes, sha256 "
+            f"{sha}), staged here the way `lessons.md` is. Invoking `{skill}` "
+            f"by name loads the plugin version INSTALLED on this host, which "
+            f"is a different document from the tree under measurement — on "
+            f"the base this note was written for, 12 of 70 shipped skills "
+            f"differed between the two, `{skill}` among them."), extras
+
+
 def _stage_author_knowledge_digests(project: Path) -> Tuple[str, Dict[str, Any]]:
     """Stage the captured-knowledge digests for an LLM RTL author and return
     ``(hint_text, extras)``.
@@ -7027,15 +7139,18 @@ def _step_rtl_gen_bound(
         # unregistered class is exactly the case where the author has the LEAST
         # scaffolding and needs them MOST.
         _hint, _hint_extras = _stage_author_knowledge_digests(project)
+        # #2193 — serve the skill's BYTES, not just its name.
+        _sk_hint, _sk_extras = _stage_fallback_skill(project, "spec-to-rtl")
         return StepResult(
             "rtl_gen", "WAIVED",
             time.time() - t0,
             f"IC class {ic_class!r} not in ic_class_registry.json. "
             f"Recommended action: AI invokes skill `spec-to-rtl` to "
             f"generate RTL by NL methodology, OR third party adds class "
-            f"entry + generator in their partner plugin." + _hint,
+            f"entry + generator in their partner plugin." + _sk_hint + _hint,
             extras={"fallback_skill": "spec-to-rtl",
                     "class_registry_path": "programs/ic_class_registry.json",
+                    **_sk_extras,
                     **_hint_extras})
 
     gen_name = config.get("rtl_gen")
@@ -7080,10 +7195,14 @@ def _step_rtl_gen_bound(
                 # Authoring handoff (`catalog-glue-author` still authors the
                 # chip_top wrapper by hand) — so it gets the digests too.
                 _hint, _hint_extras = _stage_author_knowledge_digests(project)
+                # #2193 — serve the skill's BYTES, not just its name.
+                _sk_hint, _sk_extras = _stage_fallback_skill(
+                    project, "catalog-glue-author")
                 _extras = {"fallback_skill": "catalog-glue-author",
                            "class_config": config,
                            "staged_vendor_rtl_count": len(_staged),
                            "staged_vendor_rtl_sample": _sample,
+                           **_sk_extras,
                            **_hint_extras}
                 if _mf_emitted:
                     _extras["source_manifest_emitted"] = _mf_emitted
@@ -7094,7 +7213,7 @@ def _step_rtl_gen_bound(
                     f"input/vendor_rtl/ ({len(_staged)} file(s){_more}) — "
                     f"REUSED-IP path: use skill `catalog-glue-author` to "
                     f"author the chip_top wrapper around the staged files."
-                    + _mf_note + _hint,
+                    + _mf_note + _sk_hint + _hint,
                     extras=_extras)
         # Class registered but has no deterministic generator yet.
         # v1.6.570 — for IP catalog integration: query ip-catalog for
@@ -7249,13 +7368,18 @@ def _step_rtl_gen_bound(
                 _declared_reuse = []
         if _declared_reuse:
             skill = "catalog-glue-author"
+        # #2193 — serve the skill's BYTES, not just its name. Staged AFTER the
+        # `_declared_reuse` override above, so the document served is always
+        # the one the hand-off actually recommends.
+        _sk_hint, _sk_extras = _stage_fallback_skill(project, skill)
         return StepResult(
             "rtl_gen", "WAIVED",
             time.time() - t0,
             f"IC class {ic_class!r} registered but rtl_gen=null. "
             f"Recommended action: AI invokes skill `{skill}`."
-            + catalog_hint + lessons_hint,
+            + _sk_hint + catalog_hint + lessons_hint,
             extras={"fallback_skill": skill,
+                    **_sk_extras,
                     "class_config": config,
                     "ip_catalog_matches": catalog_matches_summary,
                     # RB2-01 — WHICH matches (if any) the input docs name as
@@ -7301,6 +7425,9 @@ def _step_rtl_gen_bound(
         project_binding.require_current()
         if _verdict in _rtl_prov.PRESERVE_VERDICTS:
             _skill = config.get("fallback_skill") or "spec-to-rtl"
+            # #2193 — this branch names an author skill too ("to keep
+            # authoring, use skill X"), so it serves the bytes as well.
+            _sk_hint, _sk_extras = _stage_fallback_skill(project, _skill)
             if not _force:
                 # REFUSE. rtl/ is left exactly as the author left it, so
                 # every downstream gate (lint, synth, TB, conformance)
@@ -7317,11 +7444,12 @@ def _step_rtl_gen_bound(
                     f"overwrite it, re-run with --force-rtl-regen (the "
                     f"current tree is copied to a timestamped "
                     f"rtl.authored_backup.* first). To keep authoring, "
-                    f"use skill `{_skill}`.",
+                    f"use skill `{_skill}`." + _sk_hint,
                     extras={"rtl_provenance": _verdict,
                             "rtl_provenance_evidence": _ev,
                             "preserved": True,
                             "fallback_skill": _skill,
+                            **_sk_extras,
                             "override_flag": "--force-rtl-regen",
                             "class_config": config})
             # Override requested: destructive, but EXPLICIT and
@@ -7419,10 +7547,12 @@ def _step_rtl_gen_bound(
     # declared generator ran and could not deliver. Surface it here so a
     # proven-failed generator routes to the author instead of dead-ending.
     _fb = config.get("fallback_skill")
+    # #2193 — a FAIL that names an author is still an authoring hand-off.
+    _sk_hint, _sk_extras = _stage_fallback_skill(project, _fb)
     _fb_note = (f" Generator {gen_name!r} is declared for class "
                 f"{ic_class!r} but did not deliver; class declares "
                 f"fallback_skill={_fb!r} — AI may invoke skill `{_fb}` "
-                f"to author the RTL instead."
+                f"to author the RTL instead." + _sk_hint
                 if _fb else "")
     return StepResult("rtl_gen", "FAIL",
                       time.time() - t0,
@@ -7430,6 +7560,7 @@ def _step_rtl_gen_bound(
                       f"stderr_tail={_evidence_tail(err, 500)}{_fb_note}",
                       extras={"fallback_skill": _fb,
                               "generator_failed": gen_name,
+                              **_sk_extras,
                               "class_config": config} if _fb else None)
 
 
