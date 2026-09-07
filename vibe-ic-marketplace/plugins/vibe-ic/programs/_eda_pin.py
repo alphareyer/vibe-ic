@@ -96,11 +96,16 @@ __all__ = [
     "CONTAINER_NAME_ENV",
     "DIGEST_RE",
     "IMAGE_NOT_PRESENT",
+    "IMAGE_ID_NOT_A_REFERENCE",
     "CONTAINER_IMAGE_MISMATCH",
     "CONTAINER_ABSENT",
     "image_repo",
     "image_reference",
+    "is_bare_image_id",
+    "reference_digest",
+    "repository_of",
     "local_repo_digests",
+    "container_image_reference",
     "pinned_image_present",
     "default_container_name",
     "container_image_digest",
@@ -131,8 +136,19 @@ CONTAINER_NAME_PREFIX = "vibeic-eda"
 #: The only shape accepted as an identity.
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
+#: A CONTENT-ADDRESSED ID, in every spelling docker accepts — including the
+#: truncated prefixes it resolves. Deliberately NOT `DIGEST_RE`: that one is the
+#: exact identity shape and is used to ACCEPT, this one exists to RECOGNISE AND
+#: REFUSE, so it has to match everything that can arrive rather than only the
+#: canonical spelling. `sha256:<hex>` is never a `repository:tag`: docker parses
+#: the `sha256:` prefix as an id before it considers a repository at all, so
+#: there is no repository half to recover and any attempt to split one out
+#: invents one (#2085).
+_IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]+$")
+
 #: Refusal codes. Machine-readable, and each one says a DIFFERENT thing.
 IMAGE_NOT_PRESENT = "IMAGE_NOT_PRESENT"
+IMAGE_ID_NOT_A_REFERENCE = "IMAGE_ID_NOT_A_REFERENCE"
 CONTAINER_IMAGE_MISMATCH = "CONTAINER_IMAGE_MISMATCH"
 CONTAINER_ABSENT = "CONTAINER_ABSENT"
 
@@ -171,6 +187,60 @@ def image_reference(env=None) -> str:
     landing preflight came to name images forty patch releases apart.
     """
     return f"{image_repo(env)}@{IMAGE_DIGEST}"
+
+
+def is_bare_image_id(value) -> bool:
+    """True when `value` is a bare content-addressed id — `sha256:<hex>`.
+
+    THE SHAPE THAT LOOKS LIKE A REFERENCE AND IS NOT, and the reason this
+    predicate is public. `docker run sha256:<id>` works, so a bare Id reaches
+    every site that merely RUNS one without complaint; but it carries no
+    repository half, so it names nothing another host can fetch and a verdict
+    holding it can be neither replayed nor attributed. Worse, it survives the
+    `repository:tag` split that every reference parser starts with: `sha256`
+    becomes the repository and the hex becomes the tag.
+
+    MEASURED 2026-09-07 on 8hd-3 (#2085): the front door exported a container's
+    `.Image` into `VIBEIC_EDA_IMAGE`, `_eda_image` re-attached the pinned digest
+    to that invented repository, and the run handed `docker run` the reference
+    ``sha256@sha256:8c5694…`` -- rc=125, "pull access denied for sha256". The
+    step degraded to NOT_DETERMINED, so a malformed reference and a technology
+    that states no database unit reached the reader as the same answer.
+
+    An Id is a fine ARGUMENT and never an IDENTITY. `image_reference()` composes
+    the identity this plugin runs, and it always carries a repository.
+    """
+    return bool(_IMAGE_ID_RE.match(str(value or "").strip()))
+
+
+def reference_digest(ref) -> Optional[str]:
+    """The digest `<repo>@sha256:<digest>` names, else None.
+
+    BOTH HALVES ARE REQUIRED. A `@` tail that is a digest is not enough with
+    nothing in front of it: a repository-less `@sha256:…` is the same malformed
+    shape as `sha256@sha256:…` and this module refuses to recognise either as a
+    reference.
+    """
+    head, sep, tail = str(ref or "").strip().partition("@")
+    return tail if (sep and head and DIGEST_RE.match(tail)) else None
+
+
+def repository_of(ref) -> str:
+    """The repository half of `ref`, or "" when it has none.
+
+    Returns "" for a bare Id rather than inventing `sha256` from the colon, and
+    that empty string is load-bearing: a caller composing `f"{repo}@{digest}"`
+    must be able to tell "this reference names a place" from "this one does
+    not", because #2085 is exactly what happens when it cannot.
+    """
+    ref = str(ref or "").strip()
+    if is_bare_image_id(ref):
+        return ""
+    head = ref.split("@", 1)[0]
+    name, _, tag = head.rpartition(":")
+    # `host:5000/x` has a colon that is a PORT, not a tag: a tag never contains
+    # a slash.
+    return name if (name and "/" not in tag) else head
 
 
 def local_repo_digests(ref: str) -> Tuple[Tuple[str, ...], str]:
@@ -278,6 +348,54 @@ def container_image_digest(container: str) -> Tuple[Optional[str], str]:
         if DIGEST_RE.match(digest):
             return digest, ""
     return None, (f"{container} runs an image carrying no registry digest"
+                  + (f" ({why})" if why else ""))
+
+
+def container_image_reference(container: str) -> Tuple[Optional[str], str]:
+    """`(reference, why_not)` — a REGISTRY-PORTABLE `<repo>@sha256:<digest>` for
+    the bytes `container` is running, or the reason there is none.
+
+    THE SHAPE A CHILD CAN RUN, which is a different question from
+    `container_image_digest`'s. That one answers WHICH BYTES, and a digest alone
+    is the right answer for a verdict and the wrong one for a value handed to a
+    child that will `docker run` it: a digest is not a reference
+    (`is_bare_image_id`). Both are composed here out of the SAME inspection, so
+    the value a child receives and the identity the provenance record asserts
+    cannot be two different images.
+
+    NO INVENTED REPOSITORY, and no fallback to an Id. A container started from
+    an Id, whose image carries no RepoDigest, has no portable reference and this
+    says so — "I could not name it portably" and "here, run this" must not reach
+    the caller as the same answer (#2085).
+    """
+    rc, out, err = _docker("inspect", "--format",
+                           "{{.Image}}\t{{.Config.Image}}", container)
+    if rc == -1:
+        return None, err
+    if rc != 0:
+        return None, f"{CONTAINER_ABSENT}: no container named {container}"
+    line = out.strip().splitlines()
+    if not line:
+        return None, f"docker inspect {container} printed nothing"
+    image_id, _, config_image = line[0].partition("\t")
+    image_id, config_image = image_id.strip(), config_image.strip()
+    # STARTED FROM A DIGEST-PINNED REFERENCE. docker records it verbatim in
+    # `.Config.Image`, and it is already the answer -- same repository the
+    # operator named, same digest, nothing recomposed.
+    if reference_digest(config_image):
+        return config_image, ""
+    # Started from a tag, or from an Id. Recover the portable reference from the
+    # image's own RepoDigests, preferring the repository the container was
+    # started from so a host holding the same bytes under two names answers with
+    # the one the operator named.
+    digests, why = local_repo_digests(image_id or config_image)
+    want = repository_of(config_image)
+    ranked = sorted(digests, key=lambda d: 0 if repository_of(d) == want else 1)
+    for entry in ranked:
+        if reference_digest(entry):
+            return entry, ""
+    return None, (f"{container} runs an image carrying no registry digest, so "
+                  f"it cannot be named by a reference any other host resolves"
                   + (f" ({why})" if why else ""))
 
 

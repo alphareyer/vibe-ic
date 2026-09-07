@@ -90,12 +90,26 @@ def _capture(monkeypatch_env: dict, rec: dict, tmp: pathlib.Path):
 # ── the propagation ───────────────────────────────────────────────────────
 def test_the_verified_image_is_exported_to_child_docker_run(tmp_path):
     """The fix in one assertion: the image the run VERIFIED becomes the image a
-    child that resolves its own will pick."""
+    child that resolves its own will pick.
+
+    RE-ANCHORED ON THE SHAPE (#2085), and the fixture is the real world rather
+    than a sketch of it. A container started from a digest-pinned reference has
+    that reference verbatim in `.Config.Image`, which is what `image_ref`
+    carries; the assertion below used to demand `image_id` instead — the bare
+    `sha256:<hex>` Id from `.Image` — and that value is not a reference. The far
+    end read it as one, split it into repository `sha256` + tag, and handed
+    `docker run` `sha256@sha256:<digest>`: rc=125, and step 0.5ic published
+    `database_unit_um` as NOT_DETERMINED with nothing saying the reference had
+    been malformed. The property this test was written for is unchanged — the
+    verified image reaches the child — and it is now asserted in the one shape
+    the child can actually run."""
     rec, env = _capture(
-        {}, {"verdict": "PASS", "image_ref": "ghcr.io/vibeic/vibeic-eda:0.2.58",
-             "image_id": "sha256:4e89590fcb9c"}, tmp_path)
-    assert env["VIBEIC_EDA_IMAGE"] == "sha256:4e89590fcb9c"
-    assert rec["propagated_to_child_docker_run"] == "sha256:4e89590fcb9c"
+        {}, {"verdict": "PASS",
+             "image_ref": "ghcr.io/vibeic/vibeic-eda@sha256:" + "4e" * 32,
+             "image_id": "sha256:" + "9f" * 32}, tmp_path)
+    want = "ghcr.io/vibeic/vibeic-eda@sha256:" + "4e" * 32
+    assert env["VIBEIC_EDA_IMAGE"] == want
+    assert rec["propagated_to_child_docker_run"] == want
 
 
 def test_the_child_env_is_snapshotted_AFTER_the_image_capture():
@@ -124,14 +138,60 @@ def test_the_child_env_is_snapshotted_AFTER_the_image_capture():
         "capture that writes VIBEIC_EDA_IMAGE into it")
 
 
-def test_the_content_addressed_id_wins_over_the_tag():
-    """A tag can be re-pointed; the id is exactly what the container runs. The
-    whole defect is an identity resolved by something other than the run's own
-    declaration, so the strongest available identity is the one to propagate."""
-    assert 'rec.get("image_id") or rec.get("image_ref")' in _RUNNER_SRC
+def test_the_immutable_identity_wins_over_the_tag_in_a_shape_that_resolves():
+    """A tag can be re-pointed; the digest is exactly what the container runs.
+    The whole defect is an identity resolved by something other than the run's
+    own declaration, so the strongest available identity is the one to
+    propagate — PROVIDED it is one a child can hand to `docker run`.
+
+    THIS TEST WAS `test_the_content_addressed_id_wins_over_the_tag`, and it
+    pinned `rec.get("image_id") or rec.get("image_ref")` as source text. That
+    expression is #2085: `image_id` is `.Image`, a bare Id, which has no
+    repository half. The reasoning behind preferring it was right about
+    IMMUTABILITY and wrong about SHAPE, and a source-literal assertion could not
+    tell the two apart. Both properties are kept by preferring the
+    registry-portable DIGEST REFERENCE, which is immutable AND resolvable; the
+    behaviour is asserted directly below and in
+    `test_issue2085_the_image_variable_carries_a_reference.py`, and the retired
+    expression is named here so it cannot come back."""
+    assert 'rec.get("image_id") or rec.get("image_ref")' not in _RUNNER_SRC, (
+        "the runner is selecting the container's image Id again; an Id is not "
+        "a reference (#2085)")
+    assert "_propagatable_image" in _RUNNER_SRC
 
 
-def test_the_tag_is_used_when_no_id_was_resolved(tmp_path):
+def test_the_repo_digest_beats_the_tag_the_container_was_started_from(tmp_path):
+    """The behavioural half of the test above: started from a TAG, what
+    propagates is the portable digest of the bytes that tag resolved to."""
+    import _eda_pin as _pin
+    ref = "ghcr.io/vibeic/vibeic-eda@sha256:" + "7c" * 32
+    real = _pin._docker
+
+    def fake(*argv, timeout=None):
+        fmt = list(argv)[list(argv).index("--format") + 1]
+        if "Config.Image" in fmt:
+            return 0, "sha256:%s\tghcr.io/vibeic/vibeic-eda:0.2.58\n" % ("9f" * 32), ""
+        if "RepoDigests" in fmt:
+            return 0, '["%s"]\n' % ref, ""
+        return 1, "", "unexpected format"
+
+    _pin._docker = fake                                      # type: ignore
+    try:
+        _rec, env = _capture(
+            {}, {"verdict": "PASS",
+                 "image_ref": "ghcr.io/vibeic/vibeic-eda:0.2.58",
+                 "image_id": "sha256:" + "9f" * 32}, tmp_path)
+    finally:
+        _pin._docker = real                                  # type: ignore
+    assert env["VIBEIC_EDA_IMAGE"] == ref, env["VIBEIC_EDA_IMAGE"]
+
+
+def test_the_tag_is_used_when_no_portable_digest_could_be_named(tmp_path):
+    """A tag is mutable and is still a REFERENCE. When no registry digest can
+    be recovered — a locally built image, or a container docker will not
+    describe — the tag is what a child can run, and withholding it would revive
+    the very defect this capture exists for: a child resolving an image of its
+    own and landing on upstream iic-osic-tools."""
     _, env = _capture({}, {"verdict": "PASS",
                            "image_ref": "ghcr.io/vibeic/vibeic-eda:0.2.58"},
                       tmp_path)

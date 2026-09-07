@@ -235,12 +235,15 @@ class JudgedImage(NamedTuple):
 
 
 def _repo_of(ref: str) -> str:
-    """The repository half of `ref`, with any tag or digest removed."""
-    head = ref.split("@", 1)[0]
-    name, _, tag = head.rpartition(":")
-    # `host:5000/x` has a colon that is a PORT, not a tag: a tag never contains
-    # a slash.
-    return name if (name and "/" not in tag) else head
+    """The repository half of `ref`, with any tag or digest removed, or "".
+
+    DELEGATED, NOT RE-DERIVED. This used to hold its own `rpartition(":")`, and
+    that copy is #2085: handed the bare Id `sha256:842d64…` it answered
+    `sha256`, because an Id survives a `repository:tag` split intact. The one
+    owner of image identity now answers, and it answers "" for a shape that has
+    no repository — which is what lets `_pinned` refuse to compose one.
+    """
+    return _pin.repository_of(ref)
 
 
 def local_digest(ref: str) -> Tuple[Optional[str], str, str]:
@@ -408,6 +411,23 @@ def judged_image(env=None, *, explicit: Optional[str] = None,
             if chosen:
                 break
     if chosen:
+        # ONE VARIABLE, ONE SHAPE. The override names a REFERENCE; an Id is a
+        # thing `docker run` accepts and not a thing that can be named again.
+        # Refused HERE, at the one point the override is admitted, and refused
+        # by SAYING WHAT ARRIVED -- the previous behaviour spliced it into
+        # `sha256@sha256:<digest>` and reported success (#2085).
+        if _pin.is_bare_image_id(chosen):
+            return JudgedImage(None, None, "", "override", (
+                f"{_pin.IMAGE_ID_NOT_A_REFERENCE}: {chosen} is a bare image Id "
+                f"(sha256:<hex>), not an image reference. An Id has no "
+                f"repository half, so it names nothing another host can fetch "
+                f"and a verdict carrying it can be neither replayed nor "
+                f"attributed; splitting one to recover a repository yields "
+                f"`sha256`, and the reference `sha256@<digest>` that composes "
+                f"is what docker refuses with rc=125. Name the image as a "
+                f"digest-pinned reference instead — <repo>@sha256:<digest>, "
+                f"the shape `_eda_pin.image_reference()` composes and every "
+                f"other site in this tree uses."))
         digest, kind, why = image_digest(chosen)
         if not digest:
             return JudgedImage(None, None, "", "override", (
@@ -473,11 +493,21 @@ def _pinned(ref: str, digest: str, kind: str) -> str:
     `0.3.13` tag). An `.Id` is handed over bare — `docker run sha256:<id>` also
     works — because `repo@<config-id>` is not a reference docker can resolve.
     """
+    # NO REPOSITORY, NO `@` REFERENCE. `f"{repo}@{digest}"` with a repo half
+    # that does not exist is #2085's `sha256@sha256:…` -- a string docker
+    # refuses with rc=125 while every reader of the report takes it for an
+    # image. When `ref` names no place, the digest alone is the honest value:
+    # it is what the caller gave, unembellished, and `judged_image` refuses it
+    # for an override before it can reach a report as an identity.
     if kind == "repo-digest":
-        return f"{_repo_of(ref)}@{digest}"
+        repo = _repo_of(ref)
+        return f"{repo}@{digest}" if repo else digest
     if kind == "image-id":
         return digest
-    return ref if "@" in ref else f"{_repo_of(ref)}@{digest}"
+    if "@" in ref:
+        return ref
+    repo = _repo_of(ref)
+    return f"{repo}@{digest}" if repo else digest
 
 
 class UnidentifiedImage(RuntimeError):

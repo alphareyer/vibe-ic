@@ -60,6 +60,52 @@ import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 PROGRAMS_DIR = Path(__file__).resolve().parent
 
 
+def _propagatable_image(container: str,
+                        rec: Dict[str, Any]) -> Tuple[Optional[str], str]:
+    """`(reference, why_not)` — what to export as `VIBEIC_EDA_IMAGE` for a child
+    that resolves an image of its own.
+
+    A REFERENCE, NEVER AN Id (#2085). This used to be
+    `rec["image_id"] or rec["image_ref"]`, and the reasoning behind preferring
+    the id was right about IDENTITY and wrong about SHAPE: `.Image` is a bare
+    `sha256:<64 hex>`, which `docker run` accepts and which is not a reference.
+    The far end -- `_eda_image.judged_image()` -- reads this variable as one,
+    split it into repository `sha256` + tag, re-attached the pinned digest, and
+    handed `docker run` the string ``sha256@sha256:8c5694…``: rc=125, the
+    gf180mcuD tech LEF unread, and `database_unit_um` published as
+    NOT_DETERMINED with nothing saying the reference had been malformed.
+
+    The preference that keeps BOTH properties -- immutable, and resolvable --
+    is the registry-portable digest reference:
+
+      1. `.Config.Image` when the container was already started from
+         `<repo>@sha256:<digest>`, verbatim: same repository the operator named;
+      2. otherwise that same identity recovered from the image's own
+         RepoDigests (`_eda_pin.container_image_reference`);
+      3. otherwise the recorded `image_ref` IF it is a reference at all -- a tag
+         is mutable, which is the weakness this whole capture exists to correct,
+         but a tag resolves and an Id does not name a place at all;
+      4. otherwise NOTHING, with the reason recorded. Exporting an Id "because
+         it is better than nothing" is what produced a malformed reference that
+         read as a successful one.
+    """
+    ref = str(rec.get("image_ref") or "").strip()
+    if _pin.reference_digest(ref):
+        return ref, ""
+    portable, why = _pin.container_image_reference(container)
+    if portable:
+        return portable, ""
+    if ref and not _pin.is_bare_image_id(ref):
+        return ref, ""
+    if not ref and not rec.get("image_id"):
+        return None, ""          # nothing was identified; nothing to withhold
+    return None, (
+        f"the verified image could not be named by a reference a child can "
+        f"run: the container records image_ref={ref!r} and "
+        f"image_id={str(rec.get('image_id') or '')!r}, and an image Id is not "
+        f"a reference (no repository half). {why or ''}".strip())
+
+
 def _capture_container_image(project: Path, container: str,
                              require_image: Optional[str]) -> Dict[str, Any]:
     """Record WHICH IMAGE `--container` actually executes, into
@@ -110,10 +156,10 @@ def _capture_container_image(project: Path, container: str,
     # So the resolved identity is exported here, at the one place that has
     # already resolved AND verified it. An operator-set VIBEIC_EDA_IMAGE /
     # IIC_EDA_IMAGE always wins (this only fills an EMPTY slot, so it cannot
-    # override a deliberate cross-image experiment). The content-addressed id is
-    # preferred over the tag because it is exactly what the container is running
-    # and cannot drift; the tag is the fallback when no id was resolved.
-    _img = rec.get("image_id") or rec.get("image_ref")
+    # override a deliberate cross-image experiment). What is exported is a
+    # digest-pinned REFERENCE — see `_propagatable_image`, and #2085 for what
+    # exporting the Id instead did to the far end.
+    _img, _why_no_img = _propagatable_image(container, rec)
     if _img and not (os.environ.get("VIBEIC_EDA_IMAGE")
                      or os.environ.get("IIC_EDA_IMAGE")):
         os.environ["VIBEIC_EDA_IMAGE"] = str(_img)
@@ -124,6 +170,15 @@ def _capture_container_image(project: Path, container: str,
         rec["propagated_via"] = (
             "operator env override in force (VIBEIC_EDA_IMAGE/IIC_EDA_IMAGE) — "
             "left as set")
+    elif _why_no_img:
+        # NOT SILENT. The run continues -- the capture is best-effort by
+        # construction -- but a child that resolves its own image will now pick
+        # one, and the record says why this run could not name the verified
+        # image in a shape a child can run. An unpropagated image and a
+        # propagated malformed one are different facts and are recorded as such.
+        rec["propagated_to_child_docker_run"] = None
+        rec["propagated_via"] = None
+        rec["propagation_withheld"] = _why_no_img
     try:
         out = _pl.reports_dir(project) / "container_image.json"
         out.parent.mkdir(parents=True, exist_ok=True)
