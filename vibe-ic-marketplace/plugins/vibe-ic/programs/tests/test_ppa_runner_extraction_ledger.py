@@ -250,6 +250,30 @@ _LEDGER = frozenset({
     # timing artefacts and has no Tcl emitter. This is therefore runner
     # orchestration whose `cts` token only makes its name look like PPA logic.
     "_cts_master_bound_check_tcl",
+    # RECORDED for vibe-ic#2160, which added these two emitters. Growing this
+    # ledger is a decision, not a diff, so here is the decision and its reason.
+    #
+    # Both are PURE TCL-TEXT EMITTERS: `() -> str`, no I/O, no artefact read, no
+    # metric derived in Python. `_clock_path_pre_cts_snapshot_tcl` emits the
+    # `dict set` loop that records instance names before `clock_tree_synthesis`;
+    # `_clock_path_drive_sizing_tcl` emits the block that afterwards asks
+    # OpenSTA for its own clock network (`sta::find_clk_nets`), TRIES each
+    # library sibling of an unowned clock-path cell and keeps the one the TIMER
+    # measured best. Every number in that decision is produced by OpenSTA at run
+    # time, inside the emitted script — Python computes none of it.
+    #
+    # They are flagged only because their names carry the `clock` token. Moving
+    # them to `_ppa/timing.py` would invert the boundary this ledger defends:
+    # that module is an EXTRACTOR that reads completed STA artefacts into rows
+    # and emits no Tcl anywhere. Asking the tool for a fact is the runner's job.
+    #
+    # Precedent, and the closest possible one: `_propagated_clock_tcl` — which
+    # emits the very `set_propagated_clock [all_clocks]` command this pass uses —
+    # is already ledgered here, alongside `_flat_ocv_derate_tcl`,
+    # `_post_route_spef_repair_tcl`, `_report_wns_tcl` and the rest of the
+    # thirteen `*_tcl` emitters the ledger's own note records.
+    "_clock_path_drive_sizing_tcl",
+    "_clock_path_pre_cts_snapshot_tcl",
     "_density_metal_fill", "_derive_metal_fill_density",
     "_design_supply_nets", "_detect_macro_supply_signal_ties",
     "_die_density_fill", "_die_finishing", "_discover_aocv_table",

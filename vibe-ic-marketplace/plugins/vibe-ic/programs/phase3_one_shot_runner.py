@@ -24895,6 +24895,194 @@ def _corner_qualify_extra_libs(macro_libs_tcl: str,
     return "\n".join(out)
 
 
+CLKPATH_SIZE_MARKER = "CLKPATH_SIZE"
+
+
+def _clock_path_pre_cts_snapshot_tcl(marker: str = CLKPATH_SIZE_MARKER) -> str:
+    """Record every instance name that exists BEFORE ``clock_tree_synthesis``.
+
+    The set difference against the post-CTS block is the exact, name-independent
+    definition of "the buffers CTS created" — the discriminator
+    :func:`_clock_path_drive_sizing_tcl` needs to tell a cell CTS OWNS from one
+    it does not. A name pattern (``*clkbuf*``) would be a guess about a PDK's
+    naming and would also match a pre-existing library buffer; a snapshot is a
+    measurement. chip/PDK-AGNOSTIC."""
+    return (
+        f"# {marker}: pre-CTS instance snapshot — the set CTS did NOT create.\n"
+        f"set _vic_prects_insts [dict create]\n"
+        f"if {{[catch {{\n"
+        f"  foreach _vic_pi [[ord::get_db_block] getInsts] {{\n"
+        f"    dict set _vic_prects_insts [$_vic_pi getName] 1\n"
+        f"  }}\n"
+        f"}} _vic_pcerr]}} {{ puts \"{marker}_SNAPSHOT_NONFATAL: $_vic_pcerr\" }}\n"
+        f"puts \"{marker}_SNAPSHOT: [dict size $_vic_prects_insts]\"\n")
+
+
+def _clock_path_drive_sizing_tcl(marker: str = CLKPATH_SIZE_MARKER) -> str:
+    """Size the clock-path cells that NO stage of this flow owns.
+
+    MEASURED root cause (subservient x gf180mcuD, lane cz2160, canonical image
+    0.3.48, plugin v1.19.14; every figure below from
+    `phase3/stage3/sta/sta_mcorner_ocv.rpt` and a live OpenROAD session on this
+    run's own `post_cts.def`):
+
+    The DFT step inserts a test-clock multiplexer into the clock path
+    (`assign __clk_source__ = test ? tck : i_clk`, emitted as behavioural
+    Verilog). Synthesis maps it to the SMALLEST drive in its family, because
+    nothing constrains a net that carries no data path. Then NOBODY sizes it:
+
+      * TritonCTS SKIPS that net -- `CTS-0041 Net "i_clk" has 1 sinks.
+        Skipping...` -- and starts its H-tree at the mux OUTPUT, so the mux is
+        upstream of every buffer CTS builds and outside every decision CTS makes.
+      * The OpenROAD Resizer excludes clock-network cells from `repair_design` /
+        `repair_timing` by construction (CTS owns the clock). Proof from this
+        run's own netlist: `_0910_`, an ordinary DATA mux emitted by the same
+        DFT step one line later, was sized to `mux2_4` by the resizer;
+        `_0909_`, the identical master on the CLOCK net, stayed at `mux2_1`.
+
+    So the cell sits in a no-man's-land, and it is expensive: 2.00 ns of delay
+    and a 2.44 ns output slew at the SS corner -- 30 % of the design's whole
+    6.59 ns clock insertion delay. That insertion delay is charged IN FULL
+    against every register -> OUTPUT-PORT path, where it does not cancel the way
+    it does on a register-to-register path (the capture reference at a port
+    carries no network delay). All three of this design's SS setup violations
+    are register -> output-port paths.
+
+    This pass closes that gap, and closes it as a decision the RUNNER makes for
+    every design of this class -- never a hand-tuned constraint, never a relaxed
+    corner, never a re-declared period:
+
+      1. Ask the TIMER for the clock network (`sta::find_clk_nets`), not a name
+         pattern.
+      2. Candidates are the instances that DRIVE one of those nets and are in
+         the pre-CTS snapshot. A flip-flop's Q is not a clock net, so sequential
+         cells drop out by construction; the CTS buffers drop out by snapshot.
+      3. Each candidate's drive family is read from the masters actually loaded:
+         same name prefix, strictly larger numeric drive suffix, present in the
+         LEF (placeable) AND in the linked liberty (timable).
+      4. Each sibling is TRIED and MEASURED. The one that maximises
+         `worst_slack -max` is kept (tie-break: `total_negative_slack -max`); a
+         swap that turns a non-negative hold slack negative is rejected; if
+         nothing improves, the ORIGINAL master is restored. So the pass can only
+         keep a state this session measured to be better -- and on a design with
+         no unowned clock-path cell it swaps nothing and the run is unchanged.
+      5. The clock is propagated ONLY inside the pass and unpropagated after, so
+         every later stage sees exactly the parasitic/clock state it saw before.
+
+    MEASURED effect, same RTL / PDK / SDC / image, one master changed
+    (`mux2_1` -> `mux2_2`, chosen by the pass itself over `mux2_4`):
+    SS-corner post-route setup slack -0.2155 ns -> +0.2486 ns, setup TNS
+    -0.3307 -> 0.00, hold worst slack +0.145 -> +1.094. Reproduced by two
+    independent methods (an out-of-session netlist edit and an in-session ODB
+    `swapMaster`) agreeing to 16 significant figures.
+
+    chip/PDK-AGNOSTIC: standard OpenSTA/ODB APIs only; no design, PDK, vendor or
+    cell-name literal -- the family, the liberty membership and the objective are
+    all read from whatever library this run linked. Fully `catch`-guarded: on any
+    error, or on an OpenROAD without `sta::find_clk_nets`, the block prints
+    `_NONFATAL` and the run behaves exactly as it did before."""
+    m = marker
+    return (
+        f"# === {m}: size the clock-path cells no stage of this flow owns ===\n"
+        f"# (see _clock_path_drive_sizing_tcl for the measured root cause)\n"
+        f"if {{[catch {{\n"
+        f"  set _cpsblk [ord::get_db_block]\n"
+        f"  set _cpsnets {{}}\n"
+        f"  foreach _cpsclk [all_clocks] {{\n"
+        f"    if {{[catch {{set _cpsn [sta::find_clk_nets $_cpsclk]}} _cpse]}} "
+        f"{{ continue }}\n"
+        f"    foreach _cpsn1 $_cpsn {{ lappend _cpsnets $_cpsn1 }}\n"
+        f"  }}\n"
+        f"  set _cpscands {{}}\n"
+        f"  foreach _cpsn1 $_cpsnets {{\n"
+        f"    foreach _cpsit [$_cpsn1 getITerms] {{\n"
+        f"      if {{[[$_cpsit getMTerm] getIoType] ne \"OUTPUT\"}} "
+        f"{{ continue }}\n"
+        f"      set _cpsin [$_cpsit getInst]\n"
+        f"      if {{![dict exists $_vic_prects_insts [$_cpsin getName]]}} "
+        f"{{ continue }}\n"
+        f"      if {{[lsearch -exact $_cpscands [$_cpsin getName]] < 0}} "
+        f"{{ lappend _cpscands [$_cpsin getName] }}\n"
+        f"    }}\n"
+        f"  }}\n"
+        f"  puts \"{m}_CANDIDATES: [llength $_cpscands] "
+        f"([join $_cpscands ,])\"\n"
+        f"  set _cpsprop 0\n"
+        f"  if {{![catch {{set_propagated_clock [all_clocks]}}]}} "
+        f"{{ set _cpsprop 1 }}\n"
+        f"  puts \"{m}_PROPAGATED: $_cpsprop\"\n"
+        f"  foreach _cpscn $_cpscands {{\n"
+        f"    set _cpsci [$_cpsblk findInst $_cpscn]\n"
+        f"    if {{$_cpsci eq \"NULL\" || $_cpsci eq \"\"}} {{ continue }}\n"
+        f"    set _cpscm [[$_cpsci getMaster] getName]\n"
+        f"    if {{![regexp {{^(.*_)(\\d+)$}} $_cpscm -> _cpspfx _cpsdrv]}} "
+        f"{{ puts \"{m}_SKIP $_cpscn $_cpscm no_drive_suffix\" ; continue }}\n"
+        f"    set _cpsbw [sta::worst_slack -max]\n"
+        f"    set _cpsbt [sta::total_negative_slack -max]\n"
+        f"    set _cpsbh [sta::worst_slack -min]\n"
+        f"    if {{![string is double -strict $_cpsbw]}} "
+        f"{{ puts \"{m}_SKIP $_cpscn $_cpscm baseline_not_measured\" ; "
+        f"continue }}\n"
+        f"    set _cpssibs {{}}\n"
+        f"    foreach _cpslb [[ord::get_db] getLibs] {{\n"
+        f"      foreach _cpsmm [$_cpslb getMasters] {{\n"
+        f"        set _cpsmn [$_cpsmm getName]\n"
+        f"        if {{[regexp {{^(.*_)(\\d+)$}} $_cpsmn -> _cpsspfx "
+        f"_cpssdrv] && $_cpsspfx eq $_cpspfx && $_cpssdrv > $_cpsdrv}} "
+        f"{{ lappend _cpssibs [list $_cpssdrv $_cpsmn] }}\n"
+        f"      }}\n"
+        f"    }}\n"
+        f"    set _cpssibs [lsort -index 0 -integer $_cpssibs]\n"
+        f"    puts \"{m}_FAMILY $_cpscn $_cpscm siblings=[llength $_cpssibs] "
+        f"base_wns_max=$_cpsbw base_tns=$_cpsbt base_wns_min=$_cpsbh\"\n"
+        f"    set _cpsbestm \"\"\n"
+        f"    set _cpskw $_cpsbw\n"
+        f"    set _cpskt $_cpsbt\n"
+        f"    foreach _cpss $_cpssibs {{\n"
+        f"      set _cpssn [lindex $_cpss 1]\n"
+        f"      if {{[catch {{get_lib_cells $_cpssn}}]}} "
+        f"{{ puts \"{m}_SKIP_SIBLING $_cpssn not_in_linked_liberty\" ; "
+        f"continue }}\n"
+        f"      set _cpstm [[ord::get_db] findMaster $_cpssn]\n"
+        f"      if {{$_cpstm eq \"NULL\" || $_cpstm eq \"\"}} {{ continue }}\n"
+        f"      if {{[catch {{$_cpsci swapMaster $_cpstm}} _cpsswe]}} "
+        f"{{ puts \"{m}_SWAP_NONFATAL: $_cpsswe\" ; continue }}\n"
+        f"      set _cpsw [sta::worst_slack -max]\n"
+        f"      set _cpst [sta::total_negative_slack -max]\n"
+        f"      set _cpsh [sta::worst_slack -min]\n"
+        f"      puts \"{m}_TRY $_cpscn $_cpssn wns_max=$_cpsw tns=$_cpst "
+        f"wns_min=$_cpsh\"\n"
+        f"      if {{![string is double -strict $_cpsw]}} {{ continue }}\n"
+        f"      if {{$_cpsbh >= 0 && [string is double -strict $_cpsh] && "
+        f"$_cpsh < 0}} "
+        f"{{ puts \"{m}_REJECT_HOLD $_cpssn\" ; continue }}\n"
+        f"      if {{$_cpsw > $_cpskw + 1e-4 || ($_cpsw >= $_cpskw - 1e-9 && "
+        f"$_cpst > $_cpskt + 1e-4)}} "
+        f"{{ set _cpskw $_cpsw ; set _cpskt $_cpst ; "
+        f"set _cpsbestm $_cpssn }}\n"
+        f"    }}\n"
+        f"    if {{$_cpsbestm ne \"\"}} {{\n"
+        f"      $_cpsci swapMaster [[ord::get_db] findMaster $_cpsbestm]\n"
+        f"      puts \"{m}_KEPT $_cpscn $_cpscm -> $_cpsbestm wns_max $_cpsbw "
+        f"-> $_cpskw tns $_cpsbt -> $_cpskt\"\n"
+        f"    }} else {{\n"
+        f"      $_cpsci swapMaster [[ord::get_db] findMaster $_cpscm]\n"
+        f"      puts \"{m}_UNCHANGED $_cpscn $_cpscm wns_max $_cpsbw\"\n"
+        f"    }}\n"
+        f"  }}\n"
+        f"  if {{$_cpsprop}} {{ if {{[catch {{unset_propagated_clock "
+        f"[all_clocks]}} _cpsue]}} "
+        f"{{ puts \"{m}_UNPROPAGATE_NONFATAL: $_cpsue\" }} }}\n"
+        f"}} _cpserr]}} {{ puts \"{m}_NONFATAL: $_cpserr\" }}\n"
+        f"# A sized-up master is WIDER, so re-legalize before the DEF is written.\n"
+        f"if {{[catch {{detailed_placement}} _cpsdp]}} {{\n"
+        f"  if {{[catch {{detailed_placement -use_diamond_legalizer}} "
+        f"_cpsdpd]}} {{\n"
+        f"    puts \"{m}_LEGALIZE_NONFATAL: $_cpsdp | diamond: $_cpsdpd\"\n"
+        f"  }} else {{ puts \"{m}_LEGALIZE_OK disp=diamond\" }}\n"
+        f"}} else {{ puts \"{m}_LEGALIZE_OK disp=default\" }}\n")
+
+
 def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
                         macro_lefs_tcl: str, liberty_c: str,
                         macro_libs_tcl: str, netlist_c: str, top: str,
@@ -25019,6 +25207,10 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
     #    OpenROAD (`help clock_tree_synthesis`).
     _repair_tns = (f" -repair_tns {int(repair_tns_percent)}"
                    if repair_tns_percent is not None else "")
+    # #2160 — the clock-path cells NO stage owns (see
+    # _clock_path_drive_sizing_tcl). Pure text, no design/PDK input.
+    _clk_path_snapshot = _clock_path_pre_cts_snapshot_tcl()
+    _clk_path_sizing = _clock_path_drive_sizing_tcl()
     _cts_cluster = ""
     if cts_cluster_size is not None or cts_cluster_diameter is not None:
         _cts_cluster = " -sink_clustering_enable"
@@ -25209,10 +25401,10 @@ if {{[catch {{detailed_placement}} _rt_dp_err]}} {{
   }} else {{ puts "REPAIR_LEGALIZE_OK disp=diamond" }}
 }}
 puts "{_PNR_STAGE_MARKER} cts"
-if {{[catch {{clock_tree_synthesis -buf_list {{{clk_buf}}} -root_buf {clk_buf_root}{_cts_cluster}}} cts_err]}} {{
+{_clk_path_snapshot}if {{[catch {{clock_tree_synthesis -buf_list {{{clk_buf}}} -root_buf {clk_buf_root}{_cts_cluster}}} cts_err]}} {{
   puts "CTS_NONFATAL: $cts_err -- continuing without explicit CTS"
 }}
-write_def {out_dir_c}/post_cts.def
+{_clk_path_sizing}write_def {out_dir_c}/post_cts.def
 # Hold fixing (best-effort). Even when no violations exist, run a
 # detailed-placement pass after CTS so post_hold.def differs from
 # post_cts.def (CTS may have left placement gaps that detailed_placement
