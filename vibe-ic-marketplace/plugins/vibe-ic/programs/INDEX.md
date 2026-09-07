@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1296
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1296)
+- **Total programs (excluding helpers / shims):** 1297
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1297)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1287 |
+| `any` | 1288 |
 
 ## Alphabetical listing
 
@@ -551,6 +551,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `ic_expert_db_health_audit` | any | — | periodic HEALTH audit of the IC Expert DB (beyond the ship-blocking consistency gate). |
 | `ic_expert_db_query` | any | — | GENERAL-CORE retrieval over the IC Expert DB. |
 | `ic_release_docs_gen` | any | — | the PRODUCT documents for a signed-off die. |
+| `ic_run_status_derive` | any | — | where does each IC actually stand, DERIVED from the run's own published artefacts. |
 | `iface_conformance_v2` | any | — | prompt→interface conformance gate (ORGANIC #695). |
 | `image_gated_verification_check` | any | — | a skip is green, and 13 of them are a hole (vibe-ic#1128). |
 | `infiniband_protocol_synth` | any | — | InfiniBand Architecture (IBTA) protocol synth helper. |
@@ -1368,7 +1369,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1287 programs)
+### `any` (1288 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1891,6 +1892,7 @@ _(no programs in this group)_
 - `ic_expert_db_health_audit` — periodic HEALTH audit of the IC Expert DB (beyond the ship-blocking consistency gate).
 - `ic_expert_db_query` — GENERAL-CORE retrieval over the IC Expert DB.
 - `ic_release_docs_gen` — the PRODUCT documents for a signed-off die.
+- `ic_run_status_derive` — where does each IC actually stand, DERIVED from the run's own published artefacts.
 - `iface_conformance_v2` — prompt→interface conformance gate (ORGANIC #695).
 - `image_gated_verification_check` — a skip is green, and 13 of them are a hole (vibe-ic#1128).
 - `infiniband_protocol_synth` — InfiniBand Architecture (IBTA) protocol synth helper.
