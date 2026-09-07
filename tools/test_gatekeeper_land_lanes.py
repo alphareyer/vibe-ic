@@ -75,6 +75,10 @@ _SCHEDULER = (
     "lane_resolve",
     "run_emit",
     "fn_emit",
+    # vibe-ic#2142 — `lane_emit_window` calls it, so the harness must define it
+    # or the emit window answers `census_freshness_emit: command not found` and
+    # the journal silently loses a unit. Listed with the other emitters.
+    "census_freshness_emit",
     "run",
     "lane_stamp",
     "lane_stamps_archive",
@@ -95,6 +99,11 @@ _WINDOW = (
     "full:repo-tools-tests",
     "full:unselectable-tests",
     "full:unselectable-census",
+    # vibe-ic#2142 — the 63x8 census, re-derived on the candidate tree, last in
+    # `lane_corpus`. SEVEN, not six: the count in this tuple is not a property
+    # anyone chose, it is the number of units the concurrent window contains,
+    # and the assertion is that the window's MEMBERSHIP is exactly this list.
+    "full:census-freshness",
     "full:repo-hygiene",
     "full:plugin-audit",
 )
@@ -219,9 +228,16 @@ lane_corpus() {
   fn_capture "full:repo-tools-tests"   stage corpus "$C_SEC" "$C_RC"
   fn_capture "full:unselectable-tests" stage corpus2 0.05 0
   run_capture "full:unselectable-census" bash -c 'echo census ok'
+  # vibe-ic#2142 — the lane's LAST stage, mirroring the real `lane_corpus`.
+  # `$CF_RC` is the census `--check` exit code, so this harness can drive the
+  # three-outcome emitter in all three directions: 0 PASS, 1 FAIL (stale), 2
+  # REPORT (could not be measured). Defaulted to 0 so every existing scenario
+  # keeps the verdict it had.
+  run_capture "full:census-freshness" \
+      bash -c 'echo "63x8 stub rc=${CF_RC:-0}"; exit "${CF_RC:-0}"'
 }
 lane_audit()   { run_capture "full:plugin-audit" stage audit "$A_SEC" 0; }
-export WORK T_SEC C_SEC H_SEC A_SEC
+export WORK T_SEC C_SEC H_SEC A_SEC CF_RC
 """
 
 _DRIVER = r"""
@@ -292,7 +308,8 @@ def _run(scheduler: str, work: Path, env: dict[str, str], *,
     full.pop("GATEKEEPER_HYGIENE_JOBS", None)
     full.pop("GATEKEEPER_SKIP_TARGETED_TESTS", None)
     full.update({"WORK": str(work), "T_SEC": "1", "C_SEC": "1", "H_SEC": "1",
-                 "A_SEC": "1", "T_RC": "0", "C_RC": "0", "LANE_WIDTH": "4"})
+                 "A_SEC": "1", "T_RC": "0", "C_RC": "0", "CF_RC": "0",
+                 "LANE_WIDTH": "4"})
     full.update(env)
     return _pr.run(
         ["bash", str(script)], env=full, stdout=subprocess.PIPE,
@@ -756,7 +773,32 @@ def test_every_lane_pytest_invocation_freezes_the_bytecode_stimulus(land_text):
 #: tuple for 23 of 24 units and silently dropped `cheap:scratch-report`, which
 #: shifted every later index by one and would have reported a correct script as
 #: broken.
+#: vibe-ic#2142 adds `census_freshness_emit`, which is a THREE-OUTCOME emitter
+#: (PASS / FAIL on a stale census / REPORT on one that could not be measured)
+#: and therefore cannot be `run_emit`. It takes no unit argument — its unit is
+#: fixed — so `_emission_order` reads it from the assignment in its body, which
+#: is why it is matched separately below rather than added to this tuple.
 _EMITTERS = ("run", "run_emit", "fn_emit", "landing_skip", "report")
+
+
+def _dedicated_emitters(land_text):
+    """``{function name: the unit it emits}`` for emitters whose unit is FIXED.
+
+    `run_emit`/`fn_emit` take their unit as an argument, so `_emission_order`
+    can read it off the call. A three-outcome emitter cannot: its verdict
+    mapping is specific to one unit, so the unit lives in the function
+    (`local unit="…"`). Resolved from the DEFINITION and then counted at the
+    CALL, so the order returned is still the order the lander emits in, and an
+    emitter that is defined and never called contributes nothing.
+    """
+    out = {}
+    for m in re.finditer(r"^([a-z_]+_emit)\(\) \{", land_text, re.MULTILINE):
+        body = _extract(m.group(1), land_text)
+        unit = re.search(r'^\s*local unit="([a-z]+:[a-z0-9-]+)"', body,
+                         re.MULTILINE)
+        if unit:
+            out[m.group(1)] = unit.group(1)
+    return out
 
 
 def _emission_order(land_text):
@@ -769,15 +811,70 @@ def _emission_order(land_text):
     emit = re.compile(
         r'^\s*(?:' + "|".join(_EMITTERS) + r')\s+"([a-z]+:[a-z0-9-]+)"')
     rec = re.compile(r'^\s*landing_record\s+"([a-z]+:[a-z0-9-]+)"\s+PASS')
+    dedicated = _dedicated_emitters(land_text)
+    call = re.compile(r"^\s*([a-z_]+_emit)(?:\s|$)")
     seen, order = set(), []
     for line in land_text.splitlines():
         if line.lstrip().startswith("#"):
             continue
         m = emit.match(line) or rec.match(line)
-        if m and m.group(1) not in seen:
-            seen.add(m.group(1))
-            order.append(m.group(1))
+        unit = m.group(1) if m else None
+        if unit is None:
+            c = call.match(line)
+            unit = dedicated.get(c.group(1)) if c else None
+        if unit and unit not in seen:
+            seen.add(unit)
+            order.append(unit)
     return order
+
+
+@pytest.mark.parametrize(
+    "rc,state,line",
+    [("0", "PASS", "  PASS  63x8 census freshness"),
+     ("1", "FAIL", "  FAIL  63x8 census freshness"),
+     ("2", "REPORT", "  REPORT  63x8 census freshness")])
+def test_the_census_unit_has_three_outcomes_and_only_one_of_them_blocks(
+        scheduler, work, rc, state, line):
+    """PASS / FAIL / REPORT, driven through the real emitter (vibe-ic#2142).
+
+    `run_emit` reads every non-zero as FAIL, and for this unit that is wrong in
+    the expensive direction: `gen_flow_matrix_census --check` exits 2 when it
+    could not look — a non-cell red in one of the nine dimension modules makes
+    the census NORECORD, and that is somebody ELSE'S red on the base. Refusing a
+    landing for it is the ban vibe-ic#1277 measured for this same generator.
+
+    All three arms are driven here rather than asserted about, because a
+    three-outcome branch nobody executes is two outcomes and a comment. The
+    BLOCKING one is checked by `FAILED`: only rc 1 may set it.
+    """
+    proc = _run(scheduler, work, {"CF_RC": rc})
+    assert line in proc.stdout, proc.stdout
+    rows = {r[0]: (r[1], r[2]) for r in _journal(work)}
+    assert rows["full:census-freshness"] == (state, rc), rows
+    assert f"FAILED={1 if rc == '1' else 0}" in proc.stdout, proc.stdout
+
+
+def test_an_earlier_red_in_the_same_lane_does_not_make_the_census_a_norecord(
+        scheduler, work):
+    """NORECORD is not rc 2, and the two must not print the same sentence.
+
+    `lane_resolve` synthesises `EMIT_RC=199` for a unit whose lane was killed.
+    Read as a plain returncode, 199 is "not 0 and not 1" and would fall into the
+    REPORT arm — so a killed lane would publish "the census could not be
+    measured here", the very sentence an honest rc 2 prints, and a reader could
+    not tell them apart. The emitter therefore consults the RESOLUTION before
+    the code; `test_a_killed_lane_reaches_the_verdict_as_failed` drives that
+    path and now covers this unit too, because it is in `_WINDOW`.
+
+    This pins the OTHER half, which the resolution-first rule could break: an
+    ordinary FAILING stage EARLIER in the same lane must leave the census unit's
+    own verdict alone. The lane runs on; the unit reported; it is a PASS.
+    """
+    proc = _run(scheduler, work, {"C_RC": "1", "C_SEC": "0.05"})
+    rows = {r[0]: (r[1], r[2]) for r in _journal(work)}
+    assert rows["full:repo-tools-tests"][0] == "FAIL", rows
+    assert rows["full:census-freshness"] == ("PASS", "0"), rows
+    assert "  PASS  63x8 census freshness" in proc.stdout, proc.stdout
 
 
 def test_the_script_emits_exactly_the_declared_units_in_declared_order(
@@ -813,7 +910,7 @@ def test_landing_record_is_never_called_from_a_lane_body(land_text):
 
     `landing_completion_record.py:200` refuses any label that is not
     `LANDING_PROGRESS_UNITS[len(gates)]`, and `:261` refuses unless the emitted
-    labels equal the complete 27-entry tuple. A lane that recorded from its own
+    labels equal the complete 28-entry tuple. A lane that recorded from its own
     subshell would append out of order AND lose concurrent updates.
     """
     for name in ("lane_targeted", "lane_corpus", "lane_hygiene", "lane_audit",
@@ -825,8 +922,16 @@ def test_landing_record_is_never_called_from_a_lane_body(land_text):
                 f"{name} records from a lane body: {forbidden}")
 
 
-def test_the_window_is_exactly_the_six_contiguous_units(land_text):
-    """The concurrent window may not silently widen past its brackets."""
+def test_the_window_is_exactly_the_declared_contiguous_units(land_text):
+    """The concurrent window may not silently widen past its brackets.
+
+    NAMED FOR THE PROPERTY, NOT FOR THE COUNT (vibe-ic#2142). It was
+    `..._the_six_contiguous_units`, and the window is seven units as of the
+    census unit landing here. A test whose NAME states a population figure is
+    the same register-that-must-be-hand-fed this repo keeps finding: the
+    assertion below compares MEMBERSHIP against `_WINDOW` and never a length, so
+    the number was never the subject and should never have been in the name.
+    """
     units = re.search(r"^LANE_WINDOW_UNITS=\(\n((?:.*?\n)*?)\)$",
                       land_text, re.MULTILINE)
     declared = re.findall(r'"([^"]+)"', units.group(1))

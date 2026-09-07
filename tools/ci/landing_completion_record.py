@@ -68,6 +68,32 @@ LANDING_PROGRESS_UNITS = (
     "full:repo-tools-tests",
     "full:unselectable-tests",
     "full:unselectable-census",
+    # vibe-ic#2142 — emitted at the END of `lane_corpus`, declared here at the
+    # same position. THE POSITION IS THE CONTRACT (see the note above
+    # `cheap:prose-polarity`): `append` refuses any label that is not
+    # `LANDING_PROGRESS_UNITS[len(gates)]`, so a unit emitted here and declared
+    # elsewhere refuses EVERY landing.
+    #
+    # NO DOUBLE QUOTES IN THIS BLOCK, and that is not style. Two readers in
+    # `tools/test_gatekeeper_land_lanes.py` —
+    # `test_the_script_emits_exactly_the_declared_units_in_declared_order` and
+    # `test_the_window_is_exactly_the_declared_contiguous_units` — recover this
+    # with `re.findall` over double-quoted runs across the WHOLE block, comments
+    # included, so a quoted phrase in a comment here becomes a PHANTOM UNIT in
+    # the list they compare against the lander. Measured while adding this entry:
+    # the phantom landed at index 20, between two real units, and the diff named
+    # the wrong index.
+    #
+    # WHY THE LANDING CARRIES IT AT ALL. The 63x8 census freshness gate left
+    # `repo_hygiene_gates.sh` on 2026-08-16 on the premise that the suite would
+    # still catch a stale census, so the figure could not drift unnoticed. Both
+    # halves of that premise were measured false on 2026-09-07 at d644d7fb1: the
+    # figure HAD drifted (one cell of 621 left ENFORCED-undeclared for
+    # ENFORCED-CONTRADICTED, undeclared 405 published against 404 live), and
+    # `landing_merge_verdict` judges the suite DIFFERENTIALLY, so a red already
+    # on the base is absorbed by every landing after it. A published count that
+    # every landing can move must be judged by the landing, not by main.
+    "full:census-freshness",
     "full:repo-hygiene",
     "full:plugin-audit",
     "full:gatekeeper-review",

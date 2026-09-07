@@ -331,8 +331,15 @@ _LANDING_WINDOW_ANCHOR = "lane_emit_window"
 # table above that constant. The cheap tier gains one `run` line ahead of the
 # lanes, so the entry-to-`lane_emit_window` prefix moves with the whole file and
 # the three lane bodies do not.
+# RE-PINNED with `_LANDING_SCRIPT_SHA256` for vibe-ic#2142 — see the six-face
+# table above that constant. The full tier gains the `full:census-freshness`
+# unit: a `run_capture` at the end of `lane_corpus`, a `census_freshness_emit`
+# definition beside the other emitters, its call in `lane_emit_window`, and one
+# more entry in `LANE_WINDOW_UNITS`. Every one of those sits ahead of the
+# top-level `lane_emit_window` call, so the entry-to-anchor prefix moves with
+# the whole file and the three lane bodies do not.
 _LANDING_EXECUTION_PREFIX_SHA256 = (
-    "325c1587fa720ebc7f0227ffd70621e0c1c894307f7769299f1aef8a3a7b17f4"
+    "30e08fceeb43d651bf1ffbe2b32295331eee34fc39cb7893df874298e86994da"
 )
 # RE-PINNED when the landing gained its runtime PREFLIGHT. Both digests below
 # moved for one reason and it is stated here rather than left to `git log`: the
@@ -812,8 +819,31 @@ _LANDING_EXECUTION_PREFIX_SHA256 = (
 # added or removed, no `rc` decision rewritten, and the driver untouched. The
 # new line is a `run` of a checker in the tier that runs before any lane is
 # dispatched; it can REFUSE a landing, and it cannot change how one is measured.
+# RE-PINNED for vibe-ic#2142, and ALL SIX FACES WERE ENUMERATED FROM THIS FILE
+# rather than from the diff — the diff shows only `gatekeeper-land.sh` and would
+# have hidden four of the six. A pin with six faces is re-pinned six times or not
+# at all; three of four is the same as none, which is how a gate stayed red
+# through a landing once before.
+#
+#   whole file              e101d67b27f4… -> 90949c4ecc2f…   MOVED
+#   execution prefix        325c1587fa72… -> 30e08fceeb43…   MOVED
+#   run_pytest                      3b3b685c4841…            unmoved, untouched
+#   run_repo_tools_pytest           95de055aebcd…            unmoved, untouched
+#   run_unselectable_pytest         aac62e70f0eb…            unmoved, untouched
+#   _SEMANTIC_DRIVER_SHA256         1912a288b458…            unmoved, untouched
+#
+# THE TWO MOVED VALUES ARE THE ONES THIS FILE'S OWN RULE PRINTED as `sha256=`
+# when run against the edited tree in the pinned image (0.3.49,
+# sha256:89a8fd72…), never hand-transcribed. THE FOUR UNMOVED ONES WERE PROVED
+# UNMOVED INDEPENDENTLY, not inferred from the rule's silence: each of the three
+# lane bodies and the driver file was extracted from `cc61862b250f` and from the
+# edited tree and compared byte for byte — identical, and each reproduces the
+# constant standing above it. If a lane body HAD moved, this edit would have
+# changed how a population is executed, which it does not: the new unit is a
+# `run_capture` in `lane_corpus`, a sibling of the three, and it adds no pytest
+# invocation, no argument and no `rc` decision to any of them.
 _LANDING_SCRIPT_SHA256 = (
-    "e101d67b27f45b0b5e63276cac9f81c93fc56a42425d6cfa383073e1451397ae"
+    "90949c4ecc2fc2055ff6d50845fb582069cefdf0c1cc2b62d6fbb0399aee1ea7"
 )
 # The helper AST is not enough: a counterfeit CLI can define the expected
 # helper and never call it.  Bind the policy to the complete reviewed driver

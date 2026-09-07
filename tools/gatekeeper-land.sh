@@ -467,6 +467,59 @@ run_emit() {                         # run_emit <unit> <label>
   fi
   landing_record "$unit" "$state" "$rc" "$out"
 }
+census_freshness_emit() {            # census_freshness_emit [--last]
+  # THREE OUTCOMES, NOT TWO, AND rc 2 IS NOT ONE OF THE OTHER TWO.
+  #
+  # `run_emit` reads any non-zero as FAIL. `gen_flow_matrix_census --check`
+  # returns 2 for "I could not look" — NORECORD (a non-cell test in one of the
+  # nine dimension modules is red, so the census is not a record), a tree that
+  # carries no matrix suite (ZERO_DENOMINATOR), or a declared corpus provenance
+  # this host cannot arrange. Refusing a landing on any of those is the ban
+  # vibe-ic#1277 measured for the same generator: its failure modes are
+  # properties of the host and of OTHER people's reds, and a gate that refuses
+  # every landing is a gate operators learn to bypass.
+  #
+  # rc 2 is therefore REPORT — the state this record already has for "ran,
+  # decided nothing, never mistaken for a pass" — with the returncode printed.
+  # It is not SKIP: `landing_completion_record` refuses SKIP with a non-zero rc,
+  # and rightly, because a skip is something nobody attempted.
+  #
+  # rc 1 — the block is STALE — BLOCKS, and that is the whole point of the unit.
+  # The generator names the figures that moved (`census_drift`, #2142), so the
+  # lines quoted under the FAIL say which dimension and which column.
+  #
+  # AND A LANE THAT NEVER REPORTED IS NOT rc 2 EITHER. `lane_resolve` RETURNS
+  # non-zero when it could not read a real verdict — a killed lane, a stage that
+  # died before printing its label — and synthesises `EMIT_RC=199` for it. Read
+  # blindly, 199 would fall into the `else` below and a killed lane would be
+  # published as "the census could not be measured", which is the same sentence
+  # an honest NORECORD prints and would make the two indistinguishable. So the
+  # RESOLUTION is consulted first and an unresolved unit is a FAIL, exactly as
+  # `run_emit` treats it.
+  local unit="full:census-freshness" label="63x8 census freshness" resolved=0
+  lane_resolve "$unit" "${1:-}" || resolved=1
+  if [ "$resolved" -ne 0 ]; then
+    printf '  FAIL  %s — no verdict was recorded for this unit\n' "$label"
+    printf '%s\n' "$EMIT_OUT" | tail -5 | sed 's/^/          /'
+    FAILED=1
+    landing_record "$unit" FAIL "$EMIT_RC" "$EMIT_OUT"
+  elif [ "$EMIT_RC" -eq 0 ]; then
+    printf '  PASS  %s\n' "$label"
+    landing_record "$unit" PASS 0 "$EMIT_OUT"
+  elif [ "$EMIT_RC" -eq 1 ]; then
+    printf '  FAIL  %s — the published census does not re-derive on this tree\n' "$label"
+    printf '%s\n' "$EMIT_OUT" | grep -aE 'stale|committed .* -> live|no PUBLISHED FIGURE' \
+      | head -12 | sed 's/^/          /'
+    FAILED=1
+    landing_record "$unit" FAIL "$EMIT_RC" "$EMIT_OUT"
+  else
+    printf '  REPORT  %s (rc=%s — the census could not be measured here; NOT a pass)\n' \
+      "$label" "$EMIT_RC"
+    printf '%s\n' "$EMIT_OUT" | grep -aE 'NORECORD|ZERO_DENOMINATOR|CROSS_TREE|NOT_MEASURED' \
+      | head -8 | sed 's/^/            /'
+    landing_record "$unit" REPORT "$EMIT_RC" "$EMIT_OUT"
+  fi
+}
 fn_emit() {                          # fn_emit <unit> <label> [--last]
   # THE EMIT FOR A STAGE THAT PRINTS ITS OWN LABEL.
   #
@@ -851,18 +904,26 @@ run "full:write-guard-baseline" "write-guard baseline" \
 
 # ── THE FULL TIER'S INDEPENDENT STAGES RUN AT THE SAME TIME ────────────────
 #
-# The concurrent window is exactly `LANDING_PROGRESS_UNITS[16..21]` — a
-# contiguous six-unit run inside a 24-unit FIXED sequence. Everything before it
-# (units 0-14 and the pytest runtime preflight) and everything after it (units
-# 21-23) stays serial, because both ends are producer/consumer brackets:
+# The concurrent window is exactly `LANDING_PROGRESS_UNITS[17..23]` — a
+# contiguous SEVEN-unit run inside a 28-entry FIXED sequence. Everything before
+# it (units 0-16 and the pytest runtime preflight) and everything after it
+# (units 24-27) stays serial, because both ends are producer/consumer brackets:
 # `cheap:worktree-clean` emits $FP which `full:worktree-fingerprint-final`
 # re-checks, and `full:write-guard-baseline` writes $WG_BASE which
 # `full:write-guard-final` compares. Four lanes:
 #
-#   L1  full:targeted-tests                                     (unit 15)
-#   L2  repo-tools -> unselectable -> unselectable-census       (units 16-18)
-#   L3  full:repo-hygiene                                       (unit 19)
-#   L4  full:plugin-audit                                       (unit 20)
+#   L1  full:targeted-tests                                     (unit 17)
+#   L2  repo-tools -> unselectable -> unselectable-census
+#       -> census-freshness                                     (units 18-21)
+#   L3  full:repo-hygiene                                       (unit 22)
+#   L4  full:plugin-audit                                       (unit 23)
+#
+# EVERY INDEX ON THIS PAGE IS RE-DERIVED FROM THE TUPLE, NEVER INCREMENTED --
+# the rule vibe-ic#2138 wrote down one landing ago, after finding both of its
+# numbers already one behind. vibe-ic#2142 inserts `full:census-freshness` at
+# index 21 and shifts everything after it again. Nothing asserts these ordinals
+# (`test_the_window_is_exactly_the_declared_contiguous_units` locates the window
+# by `order.index`), which is exactly why they rot in silence unless re-derived.
 #
 # L2 IS ONE ORDERED LANE AND THAT IS NOT A CONVENIENCE. Its first two stages
 # each wrap their own WHOLE-REPO `suite_write_guard` snapshot/compare bracket;
@@ -1137,6 +1198,11 @@ LANE_WINDOW_UNITS=(
   "full:repo-tools-tests"
   "full:unselectable-tests"
   "full:unselectable-census"
+  # vibe-ic#2142 — the seventh, and it is IN the window because it is the last
+  # stage of `lane_corpus`. A unit that runs inside a lane and is not listed
+  # here is never reset between the two rounds `lane_window_saw_a_write` can
+  # cause, so its round-1 `.rc` would be read as round 2's verdict.
+  "full:census-freshness"
   "full:repo-hygiene"
   "full:plugin-audit"
 )
@@ -1789,6 +1855,42 @@ lane_corpus() {
   # still prints PASS. rc=1 on either.
   run_capture "full:unselectable-census" \
       python3 "$PROGRAMS/landing_unselectable_pytest_corpus.py" --repo "$ROOT" --audit
+  # vibe-ic#2142 — THE 63x8 CENSUS, RE-DERIVED ON THE CANDIDATE TREE.
+  #
+  # `flow_matrix/README.md` publishes a 621-cell census that EVERY landing can
+  # move: a cell changes state whenever a gate is wired, waived, or goes red. So
+  # the published table is a register that must be hand-fed, and a register like
+  # that goes stale — the only question is who finds out. On 2026-09-07 at
+  # d644d7fb1 the finder was MAIN: the block published `undeclared 405,
+  # contradicted 0` while the tree derived `404, 1`, and it had been red on main
+  # for at least two days.
+  #
+  # NOT IN `repo_hygiene_gates.sh`, and the reason is that dispatcher's own
+  # contract rather than a preference: every gate declared there must arrive with
+  # a can-pass AND a can-fail fixture (`tools/ci/gate_fixture_debt.json`), a
+  # fixture drives the gate against a SYNTHETIC subject tree, and this program
+  # refuses any subject that is not its own checkout by construction (#972 —
+  # ZERO_DENOMINATOR / CROSS_TREE). Neither direction can be authored there, and
+  # the only way in would be a new debt entry, i.e. an exemption.
+  #
+  # NOT IN THE CHEAP TIER either: `test_issue1382_census_derives_at_land.py::
+  # test_the_expensive_check_is_not_moved_into_the_push_hook` asserts it is not
+  # in `pre-push`, and #1382 chose that with measurements on both sides.
+  #
+  # HERE, AND LAST IN THIS LANE, BECAUSE IT COSTS NO WALL CLOCK HERE. The
+  # lane elapsed figures this script's own stopwatch published are targeted
+  # 1736 s, hygiene 1259 s, corpus 518 s, audit 26 s. This check MEASURED 699 s
+  # (11m39s) on 8HD-4, so `corpus` becomes ~1217 s and is still not the critical
+  # path. Anywhere serial it would be twelve minutes on every landing.
+  #
+  # THE FIGURE IS THIS PROGRAM'S, NOT ITS TEST FILE'S. The first draft of this
+  # comment said 559 s, which is what `programs/tests/
+  # test_flow_matrix_census_freshness.py` takes -- a different subject that runs
+  # the same derivation among six other things. 699 s is the one measurement of
+  # THIS program on the tree that ships (the two other runs, 555 s and 531 s,
+  # were over deliberately mutated trees and are not this number).
+  run_capture "full:census-freshness" \
+      python3 "$ROOT/tools/gen_flow_matrix_census.py" "$ROOT" --check
 }
 
 # THE HYGIENE TIER, AND THE RECORD THAT LETS IT BE DIFFERENCED (vibe-ic#1498).
@@ -1913,10 +2015,10 @@ lane_hygiene() {
 # site names explicitly, and `repo_hygiene_gates.sh:180` resolves the same
 # script — so it is tempting to call one a duplicate and delete it. Do not.
 #
-#   * The LABEL is `LANDING_PROGRESS_UNITS[22]`. Removing it refuses every
+#   * The LABEL is `LANDING_PROGRESS_UNITS[23]`. Removing it refuses every
 #     landing driven with `VIBEIC_LANDING_PROGRESS` set, which is exactly how
 #     the B2/A2 arms are driven: `landing_completion_record.finish` refuses
-#     unless the emitted labels equal the complete 27-entry tuple.
+#     unless the emitted labels equal the complete 28-entry tuple.
 #     BOTH NUMBERS WERE ALREADY ONE BEHIND AT 425c6402841d, before this
 #     landing touched anything: the tuple was 26 entries and `full:plugin-audit`
 #     sat at index 21, because the vibe-ic#712 insertion at index 10 shifted
@@ -1924,7 +2026,7 @@ lane_hygiene() {
 #     inserts `cheap:nested-progress-pin` at index 11 and shifts them again, so
 #     these are re-derived from the tuple rather than incremented -- an index
 #     nothing asserts is exactly the kind of number that rots in silence
-#     (`test_the_window_is_exactly_the_six_contiguous_units` locates the window
+#     (`test_the_window_is_exactly_the_declared_contiguous_units` locates it
 #     by `order.index`, never by an ordinal, which is why nothing went red).
 #   * In an ARM they are not the same subject at all. This one runs the
 #     TRUSTED `/runtime` copy of the program; the hygiene tier runs the copy
@@ -2061,7 +2163,8 @@ lane_emit_window() {
     FAILED=1
     landing_record "full:unselectable-tests" FAIL "$EMIT_RC" "unselectable tests failed"
   fi
-  run_emit "full:unselectable-census" "unselectable-test census is not stale" --last
+  run_emit "full:unselectable-census" "unselectable-test census is not stale"
+  census_freshness_emit --last
 
   lane_join hygiene
   run_emit "full:repo-hygiene" "repo hygiene gates" --last
@@ -2144,7 +2247,7 @@ lane_window_saw_a_write() {
 # is deliberately no environment flag that forces either shape.
 #
 # NOT A UNIT, NOT A GATE. `landing_completion_record` refuses any label outside
-# the fixed 27-entry tuple, so this prints plain REPORT lines the way
+# the fixed 28-entry tuple, so this prints plain REPORT lines the way
 # `landing_measured_tree_disclosure` does, and it returns 0 on every path: a
 # subject that could not be prepared is a fact about the run, and the only
 # verdict it can move is its reader's own, in the direction that refuses.

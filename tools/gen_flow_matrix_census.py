@@ -1308,6 +1308,109 @@ def splice(text: str, block: str) -> str:
     return text[:start] + block + text[stop + len(END):]
 
 
+#: THE FIGURE COLUMNS `render` PRINTS, in printed order — the same tuples the
+#: renderer and `_check_table_partitions` already use, reused rather than typed
+#: again so a tenth column cannot exist in one place and not the other.
+_TABLE_COLUMNS = _ENFORCED_COLUMNS + _LABEL_COLUMNS
+
+#: The headline sentence `render` writes: `**621 cells: 541 ENFORCED, 0
+#: ENFORCED-CONTRADICTED, …**`. Parsed back out so a drift that lands in the
+#: headline and not in the table is still NAMED.
+_HEADLINE_RE = re.compile(r"\*\*(?P<cells>\d+) cells: (?P<body>[^*]+)\.\*\*")
+_HEADLINE_ITEM_RE = re.compile(r"(\d+)\s+([A-Z][A-Z_-]*)")
+
+
+def table_figures(block: str) -> Dict[str, Dict[str, int]]:
+    """``{"1": {...}, …, "total": {...}}`` — the census TABLE, read back out.
+
+    WHY A READER AND NOT A DIFF. `--check` compared two blocks and printed
+    "stale"; the operator then had to re-run the generator a second time, by
+    hand, to learn WHICH figure had moved. MEASURED on this repo at
+    ``d644d7fb1``: one cell of 621 had left the ENFORCED-undeclared column for
+    ENFORCED-CONTRADICTED, and the refusal named neither column, neither
+    number and neither dimension. A refusal that cannot say what moved is a
+    refusal the next reader has to reproduce before acting on.
+
+    Keyed by the row's FIRST cell — the dimension number, or ``total`` — and
+    strict about width: a line is a census row only when it carries exactly two
+    leading cells and then one integer per column in `_TABLE_COLUMNS`. The
+    header and the alignment rule both fail that test and are skipped, so this
+    cannot start reading a table it does not understand.
+    """
+    out: Dict[str, Dict[str, int]] = {}
+    for line in block.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != 2 + len(_TABLE_COLUMNS):
+            continue
+        figures = []
+        for cell in cells[2:]:
+            digits = cell.strip("*").strip()
+            if not digits.isdigit():
+                figures = []
+                break
+            figures.append(int(digits))
+        if not figures:
+            continue
+        out[cells[0].strip("*").strip()] = dict(zip(_TABLE_COLUMNS, figures))
+    return out
+
+
+def headline_figures(block: str) -> Dict[str, int]:
+    """``{"cells": 621, "ENFORCED": 540, …}`` — the bold sentence above the table.
+
+    The table is not the whole published census: the headline states the label
+    counts and the ENFORCED split is restated in prose beneath it. A drift that
+    reaches only the headline — a cell moving between two labels that share a
+    table column — moves no figure in `table_figures` and must still be named.
+    """
+    m = _HEADLINE_RE.search(block)
+    if not m:
+        return {}
+    out = {"cells": int(m.group("cells"))}
+    for count, label in _HEADLINE_ITEM_RE.findall(m.group("body")):
+        out[label] = int(count)
+    return out
+
+
+def census_drift(committed: str, rendered: str) -> List[str]:
+    """One line per PUBLISHED FIGURE that moved, ``committed -> live``.
+
+    NEVER an empty list for two blocks that differ. A census block also carries
+    prose, the provenance line and the regenerate recipe, and a change in any of
+    those is real staleness with no figure behind it; reporting nothing there
+    would be this file's own defect — a refusal that names nothing — reached from
+    the other side. So the last line is a fallback that says the drift is outside
+    every figure this reader knows, and the caller still refuses.
+    """
+    if committed == rendered:
+        return []
+    lines: List[str] = []
+    was_h, now_h = headline_figures(committed), headline_figures(rendered)
+    for label in sorted(set(was_h) | set(now_h)):
+        if was_h.get(label) != now_h.get(label):
+            lines.append(
+                f"  headline {label}: committed {was_h.get(label, 'absent')} "
+                f"-> live {now_h.get(label, 'absent')}")
+    was_t, now_t = table_figures(committed), table_figures(rendered)
+    for row in sorted(set(was_t) | set(now_t), key=lambda r: (r == "total", r)):
+        was_row, now_row = was_t.get(row, {}), now_t.get(row, {})
+        for column in _TABLE_COLUMNS:
+            if was_row.get(column) != now_row.get(column):
+                name = "total" if row == "total" else f"d{row}"
+                lines.append(
+                    f"  {name}.{column}: committed "
+                    f"{was_row.get(column, 'absent')} -> live "
+                    f"{now_row.get(column, 'absent')}")
+    if not lines:
+        lines.append(
+            "  no PUBLISHED FIGURE moved: the drift is in the block's prose, "
+            "its `Corpus at generation:` line or its regenerate recipe. The "
+            "block is still stale — re-run the generator and diff it.")
+    return lines
+
+
 def _committed_block(text: str, path: Path) -> str:
     """The GENERATED block of `path`, marker to marker.
 
@@ -1633,11 +1736,20 @@ def _run(args: argparse.Namespace) -> int:
         # block it had just been asked about.
         stale = updated != text
         if stale:
+            # IT NAMES WHAT MOVED (vibe-ic#2142). This used to print the sentence
+            # below and nothing else, so a landing refused by it learned only
+            # that some number on a 40-line block had changed — and the block is
+            # expensive enough to re-derive that "run it again and diff it
+            # yourself" is most of an hour. `census_drift` reads both blocks back
+            # into figures and prints one line per figure that moved.
             sys.stderr.write(
                 f"{path} census block is stale; re-run "
                 f"`python3 tools/gen_flow_matrix_census.py --fix` "
                 f"(the plain run repairs this block but leaves any stale "
                 f"anchored figure, which still exits 1)\n")
+            for line in census_drift(_committed_block(text, path),
+                                     _committed_block(updated, path)):
+                sys.stderr.write(line + "\n")
         if norecord:
             # A FRESHNESS VERDICT COMPUTED FROM A NON-RECORD IS NOT A VERDICT.
             # Before vibe-ic#2004 this arrived as an uncaught AssertionError
