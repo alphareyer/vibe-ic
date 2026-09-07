@@ -330,6 +330,32 @@ def _capacity_probe(runner, rep_dir: Path, gds_path: Path, cfg_path: Path,
         return {"error": f"capacity probe failed: {exc!r}"}
 
 
+def refusal_lines(res: Dict[str, Any]) -> list:
+    """One line per layer the fill engine REFUSED to claim (vibe-ic#2135).
+
+    The engine measures, per layer, how much of the die dummy metal may
+    legally occupy under the deck's own dummy-to-circuit clearance, and
+    reports a `refusals` entry for every layer left under the FOUNDRY floor.
+    This turns those into named operator lines. Before this existed the only
+    thing printed for a below-floor fill was "density target NOT reached on
+    every layer", which names no layer and no number, so a shortfall that no
+    legal fill could have closed read exactly like a fill that under-packed.
+
+    An engine that predates the field (an older `metal_fill.py`, or a report
+    replayed by `--verify-only`) carries no `refusals` key and produces no
+    lines here — absent is absent, never an invented "nothing was refused".
+    """
+    ref = res.get("refusals") if isinstance(res, dict) else None
+    if not isinstance(ref, list):
+        return []
+    out = []
+    for r in ref:
+        if not isinstance(r, dict):
+            continue
+        out.append(f"{r.get('verdict')} — {r.get('reason')}")
+    return out
+
+
 def capacity_summary_lines(res: Dict[str, Any]) -> list:
     """One line per layer that is BELOW the foundry floor, naming the measured
     room and the lattice ceiling, from a report carrying `capacity`."""
@@ -571,11 +597,16 @@ def main(argv=None) -> int:
                   "promoted and the sign-off DRC judges it")
             return PASS
         mono = res.get("promoted_on_monotone_improvement")
+        for _ln in refusal_lines(res):
+            print(f"metal_fill_emit: REFUSED — {_ln}")
         for _ln in capacity_summary_lines(res):
             print(f"metal_fill_emit: CAPACITY — {_ln}")
+        _named = ", ".join(str(r.get("layer")) for r in (res.get("refusals") or [])
+                           if isinstance(r, dict))
         print("metal_fill_emit: FAIL — density target NOT reached on every "
               "layer (achieved densities disclosed above), and at least one "
               "layer is BELOW the foundry floor"
+              + (f" ({_named})" if _named else "")
               + (" — the FILLED GDS is promoted anyway because no layer "
                  "regressed and at least one improved, so the sign-off DRC "
                  "judges the better of the two layouts; the VERDICT is "

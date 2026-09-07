@@ -246,7 +246,18 @@ def _fill_width_for_target(space: float, target: float,
     """Square side that makes the OPEN-area coverage of a `width`-square / `width+space`-
     pitch grid clear the target with headroom: coverage = w^2/(w+space)^2, so for an
     aim slightly above target, w = space*sqrt(aim)/(1-sqrt(aim)). Bounded below by the
-    min routing width, snapped to the manufacturing grid."""
+    min routing width, snapped to the manufacturing grid.
+
+    THIS IS A STARTING WIDTH, NOT A CEILING (vibe-ic#2135). `aim` is capped at
+    0.62 here because this builder reads the PDK's declared files ONLY and has
+    never seen the layout: how much of the die the deck's dummy-to-circuit
+    clearance leaves fillable, and therefore what packing the floor actually
+    demands, is a property of the routed design. A fixed aim was read as a
+    ceiling: on a layer whose drawn metal is 9.5% of the die and whose legal
+    dummy room is 22.3% of it, 0.62 packing tops out at 22.9% against a 30%
+    deck floor. The engine (`metal_fill.lattice_width_for_floor`) now measures
+    that room and widens the top of its own ladder when the floor needs it, so
+    the number here only decides where the search STARTS."""
     # top square of the fill LADDER: aim for a HIGH open-area ceiling (>> target) so the
     # big squares carry density in open regions; the engine's ladder then packs the
     # channels with progressively smaller squares down to the target floor.

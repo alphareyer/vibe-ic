@@ -38,6 +38,24 @@ DRC-safety (why the fill never violates spacing, width or the manufacturing grid
   (fills anchor at layout origin (0,0), so with an on-grid width and pitch no edge is
   off-grid).
 
+Where the lattice comes from (vibe-ic#2135)
+-------------------------------------------
+The square SIZE is not a constant. Per layer the engine measures the room the
+deck actually leaves for dummy metal — the measurement area MINUS circuit metal
+grown by the deck's dummy-to-circuit clearance MINUS the declared keep-outs —
+and reports it (``free_frac``) together with ``ceiling_any_fill`` = drawn + all
+of that room, the hard upper bound for ANY dummy fill on the layout. When a
+layer is under the FOUNDRY floor the config was derived from, the top of the
+ladder is widened towards the width that room and the deck's dummy-to-dummy
+space say the floor needs (``lattice_width_for_floor``) and the family that
+MEASURES best is kept; a layer that already clears the floor is not touched.
+When the floor is still not reached the run REFUSES BY NAME: ``refusals``
+carries one entry per layer with the layer, what the fill achieved, the floor,
+the room and the ceiling, and says which of the two shortfalls it is —
+``UNREACHABLE_BY_ANY_FILL`` (drawn + every legal square micron is still under
+the floor, so only the DRAWN metal can move it) or
+``NOT_REACHED_BY_THIS_LATTICE``.
+
 Density guarantee (iterative densify)
 -------------------------------------
 A single uniform-pitch pass can undershoot (keep-out + margin losses). The tool
@@ -128,6 +146,40 @@ def _worst_window_density(metal, bbox, wd):
         d = (metal & pya.Region(wb)).area() / float(a)
         worst = min(worst, d)
     return worst
+
+
+def lattice_width_for_floor(space, drawn_frac, free_frac, floor):
+    """Square side whose OPEN-FIELD lattice ceiling reaches `floor`, given the
+    MEASURED room on this layer, or None when no width can.
+
+    A square lattice of side w at the deck's dummy-to-dummy space s covers
+    (w/(w+s))**2 of the region it is laid in, and that fraction RISES with w
+    because s is fixed by the deck. The layer needs
+    `(floor - drawn) / free` of its free region covered, so the width the deck
+    permits and the layer needs is s*sqrt(need)/(1-sqrt(need)).
+
+    WHY THIS IS NOT A CONSTANT (vibe-ic#2135). The top of the fill ladder used
+    to come from `metal_fill_config_gen._fill_width_for_target`, which aims at
+    a packing capped at 0.62 REGARDLESS of the layer: on a sparse layer whose
+    drawn metal is 9.5% of the die and whose legal dummy room is 22.3% of it,
+    0.62 packing tops out at 22.9% against a 30% deck floor, so the fill could
+    not close the rule on ANY design however much room it had. The width is a
+    function of the DECK's space, the DECK's floor and the MEASURED room —
+    never of a hard-coded aim.
+
+    Returns 0.0 when the layer is already at or above the floor, and None when
+    even a solid fill of the whole free region cannot reach it (`need >= 1`),
+    which is the case the caller must REFUSE BY NAME rather than fill harder.
+    """
+    if floor is None or free_frac is None or free_frac <= 0.0 or space <= 0.0:
+        return None
+    need = (float(floor) - float(drawn_frac)) / float(free_frac)
+    if need <= 0.0:
+        return 0.0
+    if need >= 1.0:
+        return None
+    r = math.sqrt(need)
+    return float(space) * r / (1.0 - r)
 
 
 def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
@@ -221,60 +273,150 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
     d_before = metal0.area() / float(bbox.area())
     worst_before = _worst_window_density(metal0, bbox, wd)
 
-    pitches = []
-    reached_target = False
-    for si, cur_fwd in enumerate(ladder):
-        if reached_target:
-            break
-        cur_w_um = cur_fwd * dbu
-        min_pitch = _snap_up(cur_fwd + sp)
-        # a SEPARATE cell per size: mutating one cell would retroactively resize the
-        # fills already placed from it.
-        fcell = ly.create_cell(f"FILL_{spec['name']}_{si}")
-        fcell.shapes(fill_lidx).insert(pya.Box(0, 0, cur_fwd, cur_fwd))
-        fcbox = pya.Box(0, 0, cur_fwd, cur_fwd)
-        for _pass in range(max_passes):
-            fill_r = _fill_now()
-            # Non-separate: `fill_r` IS the re-read layer, so it already
-            # carries the fill this loop placed. Reading `drawn` here made
-            # the convergence test blind to its own progress.
-            metal = (drawn + fill_r).merged() if separate else fill_r
-            fill_zone = pya.Region()
-            worst = 1.0
-            for wb in _windows(bbox, wd):
-                a = wb.area()
-                if a <= 0:
-                    continue
-                d = (metal & pya.Region(wb)).area() / float(a)
-                worst = min(worst, d)
-                if d < target:
-                    fill_zone.insert(wb)
-            if fill_zone.is_empty() or worst >= target:
-                reached_target = True
+    def _ladder_for(top_w_fwd):
+        """The fill-size ladder (large -> small) for a given TOP square."""
+        out = []
+        cw = max(top_w_fwd, floor_fwd)
+        while cw > floor_fwd:
+            out.append(cw)
+            nxt = _snap_near(int(cw * 0.5))
+            if nxt >= cw:
                 break
-            fill_zone.merge()
-            # Keep out of ALREADY-PLACED fill too, not just circuit metal:
-            # in the shared-datatype case `fill_r` now includes it.
-            blocked = drawn_block + fill_r.sized(sp)
-            fillable = fill_zone - blocked
-            if fillable.is_empty():
-                break                                   # this size cannot fit -> smaller
-            zone_area = float(fill_zone.area())
-            frac_fillable = fillable.area() / zone_area if zone_area > 0 else 0.0
-            deficit = max(target - worst, 0.0)
-            headroom = 1.35
-            if deficit > 0 and frac_fillable > 0:
-                p_um = cur_w_um * math.sqrt(frac_fillable / (deficit * headroom))
-            else:
-                p_um = cur_w_um + space
-            p = max(_snap_up(int(round(p_um / dbu))), min_pitch)
-            pitches.append(round(p * dbu, 4))
-            n_before = sum(1 for _ in top.begin_shapes_rec(fill_lidx))
-            fillable.fill(top, fcell.cell_index(), fcbox,
-                          pya.Vector(p, 0), pya.Vector(0, p),
-                          pya.Point(0, 0), None, pya.Vector(sp, sp))
-            if sum(1 for _ in top.begin_shapes_rec(fill_lidx)) == n_before:
-                break                                   # size saturated -> go smaller
+            cw = nxt
+        out.append(floor_fwd)
+        return out
+
+    def _run_ladder(rungs, tag):
+        """Lay `rungs` (dbu square sides, large -> small) into whatever room is
+        left. Returns the pitches used. DRC-safety is by CONSTRUCTION and does
+        not depend on the fill engine's own margin handling: `blocked` is
+        recomputed from the geometry ACTUALLY on the layer before every call,
+        so a placed square is >= `space` from prior fill and >= `space_to_metal`
+        from circuit metal whatever origin the lattice lands on."""
+        used = []
+        reached = False
+        for si, cur_fwd in enumerate(rungs):
+            if reached:
+                break
+            cur_w_um = cur_fwd * dbu
+            min_pitch = _snap_up(cur_fwd + sp)
+            # a SEPARATE cell per size: mutating one cell would retroactively resize the
+            # fills already placed from it.
+            fcell = ly.create_cell(f"FILL_{spec['name']}_{tag}{si}")
+            fcell.shapes(fill_lidx).insert(pya.Box(0, 0, cur_fwd, cur_fwd))
+            fcbox = pya.Box(0, 0, cur_fwd, cur_fwd)
+            for _pass in range(max_passes):
+                fill_r = _fill_now()
+                # Non-separate: `fill_r` IS the re-read layer, so it already
+                # carries the fill this loop placed. Reading `drawn` here made
+                # the convergence test blind to its own progress.
+                metal = (drawn + fill_r).merged() if separate else fill_r
+                fill_zone = pya.Region()
+                worst = 1.0
+                for wb in _windows(bbox, wd):
+                    a = wb.area()
+                    if a <= 0:
+                        continue
+                    d = (metal & pya.Region(wb)).area() / float(a)
+                    worst = min(worst, d)
+                    if d < target:
+                        fill_zone.insert(wb)
+                if fill_zone.is_empty() or worst >= target:
+                    reached = True
+                    break
+                fill_zone.merge()
+                # Keep out of ALREADY-PLACED fill too, not just circuit metal:
+                # in the shared-datatype case `fill_r` now includes it.
+                blocked = drawn_block + fill_r.sized(sp)
+                fillable = fill_zone - blocked
+                if fillable.is_empty():
+                    break                               # this size cannot fit -> smaller
+                zone_area = float(fill_zone.area())
+                frac_fillable = fillable.area() / zone_area if zone_area > 0 else 0.0
+                deficit = max(target - worst, 0.0)
+                headroom = 1.35
+                if deficit > 0 and frac_fillable > 0:
+                    p_um = cur_w_um * math.sqrt(frac_fillable / (deficit * headroom))
+                else:
+                    p_um = cur_w_um + space
+                p = max(_snap_up(int(round(p_um / dbu))), min_pitch)
+                used.append(round(p * dbu, 4))
+                n_before = sum(1 for _ in top.begin_shapes_rec(fill_lidx))
+                fillable.fill(top, fcell.cell_index(), fcbox,
+                              pya.Vector(p, 0), pya.Vector(0, p),
+                              pya.Point(0, 0), None, pya.Vector(sp, sp))
+                if sum(1 for _ in top.begin_shapes_rec(fill_lidx)) == n_before:
+                    break                               # size saturated -> go smaller
+        return used
+
+    def _drop_own_fill(tag):
+        """Delete the fill THIS program placed under `tag` — and only that.
+
+        Every square this program emits lives in a `FILL_<layer>_<tag><n>` cell
+        it created itself, so deleting those cells removes exactly this
+        program's own geometry and nothing that was already on the layer."""
+        for _c in list(ly.each_cell()):
+            if _c.name.startswith(f"FILL_{spec['name']}_{tag}"):
+                ly.delete_cell_rec(_c.cell_index())
+
+    # === WHAT ROOM DOES THIS LAYER ACTUALLY HAVE? (vibe-ic#2135) ==============
+    # Measured BEFORE any fill decision, on the same basis the density rule
+    # uses: the die MINUS circuit metal grown by the deck's dummy-to-circuit
+    # clearance MINUS the declared keep-outs. `ceiling_any_fill` is a hard
+    # UPPER bound — every legal square micron turned solid — so a floor above
+    # it cannot be reached by any dummy fill whatsoever, only by the drawn
+    # metal. Reported either way, so a reader never has to infer it.
+    free = pya.Region(bbox) - drawn_block
+    free.merge()
+    free_frac = free.area() / float(bbox.area())
+    drawn_frac0 = drawn.area() / float(bbox.area())
+    ceiling_any = drawn_frac0 + free_frac
+    floor = spec.get("_floor")
+
+    pitches = _run_ladder(ladder, "")
+    families = [{"top_width_um": round(top_fwd * dbu, 4),
+                 "density": round(_measure().area() / float(bbox.area()), 4)}]
+
+    # === THE LATTICE IS DERIVED FROM THE DECK AND THE ROOM, NOT FROM AN AIM ===
+    # The config's `width` targets a fixed open-area packing. When that is not
+    # enough for THIS layer's floor, widen the top of the ladder towards the
+    # width the deck's own dummy-to-dummy space and the measured room say the
+    # layer needs (see `lattice_width_for_floor`), and keep whichever family
+    # measures best. Only layers still under the FOUNDRY floor pay for this,
+    # and only when the fill is on its own datatype (on a shared datatype this
+    # program cannot tell its fill from the design's metal, so it must not
+    # delete anything).
+    _need_um = lattice_width_for_floor(space, drawn_frac0, free_frac, floor)
+    if (floor is not None and separate and _need_um
+            and families[-1]["density"] < float(floor)):
+        best_d, best_top, best_pitches = families[-1]["density"], top_fwd, pitches
+        # `_need_um` is what an OPEN field would need; a fragmented free region
+        # needs more, and how much more is not predictable from the deck — so
+        # the candidates are a geometric widening of the configured square, and
+        # the one that MEASURES best is kept. Widening can only be tried, never
+        # assumed: on the layer this was measured on the widest candidate
+        # scored BELOW a middle one, because squares that no longer fit the
+        # free blobs place nothing.
+        cands = [float(width) * k for k in (2.0, 4.0, 8.0, 16.0)]
+        if _need_um > float(width):
+            cands.append(_need_um)
+        cands = sorted({round(c, 4) for c in cands})[:6]
+        last_top = top_fwd
+        for cw_um in cands:
+            _drop_own_fill("")
+            _tf = max(_snap_near(int(round(cw_um / dbu))), grid_dbu)
+            _pi = _run_ladder(_ladder_for(_tf), "")
+            _d = _measure().area() / float(bbox.area())
+            families.append({"top_width_um": round(_tf * dbu, 4),
+                             "density": round(_d, 4)})
+            last_top = _tf
+            if _d > best_d:
+                best_d, best_top, best_pitches = _d, _tf, _pi
+        if best_top != last_top:
+            # the winner was not the family left in the layout -> lay it again
+            _drop_own_fill("")
+            best_pitches = _run_ladder(_ladder_for(best_top), "")
+        top_fwd, pitches = best_top, best_pitches
 
     metal_after = _measure()
     d_after = metal_after.area() / float(bbox.area())
@@ -297,7 +439,25 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
         "space_um": space, "space_to_metal_um": space_m,
         "top_width_um": round(top_fwd * dbu, 4),
         "min_width_um": round(floor_fwd * dbu, 4),
-        "fill_sizes": len(ladder),
+        "fill_sizes": len(_ladder_for(top_fwd)),
+        # === CAPACITY, MEASURED, ALWAYS REPORTED (vibe-ic#2135) ==============
+        # `free_frac` is the share of the measurement area where dummy metal
+        # may legally exist under the deck's own dummy-to-circuit clearance and
+        # the declared keep-outs; `ceiling_any_fill` is drawn + all of it, i.e.
+        # the hard upper bound for ANY dummy fill on this layout. A reader who
+        # sees `reached: false` can now tell "the fill under-packed" from "no
+        # legal fill could have reached it" without a second tool.
+        "free_frac": round(free_frac, 6),
+        "space_to_metal_um_applied": round(spm * dbu, 4),
+        "ceiling_any_fill": round(ceiling_any, 6),
+        "floor": floor,
+        "lattice_width_needed_um": (round(_need_um, 4)
+                                    if _need_um not in (None, 0.0) else _need_um),
+        "families_tried": families,
+        "below_floor": (None if floor is None
+                        else bool(min(d_after, worst_after) < float(floor) - 1e-9)),
+        "floor_unreachable_by_any_fill": (None if floor is None
+                                          else bool(ceiling_any < float(floor))),
     }
 
 
@@ -384,11 +544,22 @@ def run(gds, cfg, out_gds, cell_name=None):
             keepout_note.append(f"edge:{edge}um:DEGENERATE")
     keepout = keepout.merged()
 
+    # The FOUNDRY floor the config was derived from (`metal_fill_config_gen`
+    # records the deck's own coverage threshold). It is what a REFUSAL is
+    # stated against — this program's own `target` is floor + headroom and is
+    # not a rule. Absent -> no floor is known and nothing is refused.
+    _der = cfg.get("_derivation")
+    _pct = _der.get("density_floor_pct") if isinstance(_der, dict) else None
+    floor = (float(_pct) / 100.0
+             if isinstance(_pct, (int, float)) and not isinstance(_pct, bool)
+             and 0.0 < float(_pct) < 100.0 else None)
+
     layers = []
     for spec in cfg["layers"]:
         spec = dict(spec)
         spec["_bbox"] = bbox
         spec["_keepout"] = keepout
+        spec["_floor"] = floor
         layers.append(fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu))
 
     # A FILL CELL THAT WAS NEVER PLACED IS A SECOND TOP CELL, AND A SECOND TOP
@@ -423,7 +594,48 @@ def run(gds, cfg, out_gds, cell_name=None):
             ly.delete_cell(_c.cell_index())
     ly.write(out_gds)
     reached_all = all(l.get("reached", False) for l in layers if "skipped" not in l)
+    # === REFUSE BY NAME (vibe-ic#2135) =======================================
+    # A shortfall against the FOUNDRY floor is never left as a bare "target not
+    # reached": every such layer is named here with the numbers a reader needs
+    # to place the blame — what the fill achieved, how much of the die dummy
+    # metal may legally occupy at all, and the deck clearance that decides it.
+    # `verdict` says WHICH of the two shortfalls it is:
+    #   UNREACHABLE_BY_ANY_FILL — drawn + every legal square micron is still
+    #       under the floor, so no dummy fill of any shape can close it and
+    #       only the DRAWN metal (a denser die, or a smaller one) can;
+    #   NOT_REACHED_BY_THIS_LATTICE — legal room exists in principle and this
+    #       square lattice at the deck's dummy-to-dummy space did not reach it.
+    refusals = []
+    for l in layers:
+        if l.get("skipped") or not l.get("below_floor"):
+            continue
+        refusals.append({
+            "layer": l.get("name"),
+            "verdict": ("UNREACHABLE_BY_ANY_FILL"
+                        if l.get("floor_unreachable_by_any_fill")
+                        else "NOT_REACHED_BY_THIS_LATTICE"),
+            "floor": l.get("floor"),
+            "achieved": min(l.get("density_after"), l.get("worst_window_after")),
+            "ceiling_any_fill": l.get("ceiling_any_fill"),
+            "free_frac": l.get("free_frac"),
+            "drawn_frac": round(float(l.get("density_before") or 0.0), 6),
+            "space_to_metal_um": l.get("space_to_metal_um"),
+            "space_um": l.get("space_um"),
+            "top_width_um": l.get("top_width_um"),
+            "lattice_width_needed_um": l.get("lattice_width_needed_um"),
+            "reason": (
+                f"{l.get('name')}: fill reached "
+                f"{min(l.get('density_after'), l.get('worst_window_after')):.4f} "
+                f"against a deck floor of {l.get('floor')}. Dummy metal may "
+                f"legally occupy {float(l.get('free_frac') or 0.0):.4f} of the "
+                f"measured area (the die minus circuit metal grown by the "
+                f"deck's {l.get('space_to_metal_um')}um dummy-to-circuit "
+                f"clearance, minus the declared keep-outs), so even a solid "
+                f"legal fill tops out at {l.get('ceiling_any_fill')}"),
+        })
     return {"verdict": "PASS" if reached_all else "PARTIAL",
+            "floor": floor,
+            "refusals": refusals,
             "gds_in": gds, "gds_out": out_gds,
             "window_um": cfg.get("window_um"), "mfg_grid_um": mfg_grid_um,
             # The keep-out is REPORTED, not just applied. A reader has to be
