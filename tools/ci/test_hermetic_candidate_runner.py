@@ -53,7 +53,7 @@ from pathlib import Path
 # describing the operator's registry rather than the runner.
 IMAGE = ((os.environ.get("VIBEIC_EDA_IMAGE_REPO") or "").strip()
          or "ghcr.io/vibeic/vibeic-eda") + \
-    "@sha256:1463dac58116ca6650ec84e9e4b11a73a70f4094c95a9a19e620482251471c57"
+    "@sha256:89a8fd7295208ee6d06e216ade9edc6161d26db52099e9f22ceb77a2d76e3f49"
 IMAGE_ID = "sha256:" + "1" * 64
 CID = "2" * 64
 PREFIX = "VIBEIC_PROGRESS "

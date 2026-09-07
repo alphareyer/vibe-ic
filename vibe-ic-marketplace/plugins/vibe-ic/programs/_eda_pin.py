@@ -119,7 +119,7 @@ __all__ = [
 #: `tests/test_the_run_path_resolves_the_pinned_image.py`, which reads that file
 #: and refuses to let the two drift.
 IMAGE_DIGEST = (
-    "sha256:1463dac58116ca6650ec84e9e4b11a73a70f4094c95a9a19e620482251471c57"
+    "sha256:89a8fd7295208ee6d06e216ade9edc6161d26db52099e9f22ceb77a2d76e3f49"
 )
 IMAGE_REPO_DEFAULT = "ghcr.io/vibeic/vibeic-eda"
 IMAGE_REPO_ENV = "VIBEIC_EDA_IMAGE_REPO"

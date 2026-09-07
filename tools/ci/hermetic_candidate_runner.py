@@ -53,7 +53,7 @@ SCHEMA = 1
 #: that serves the same bytes from elsewhere sets the env; it does NOT edit this
 #: file, and it CANNOT change which bytes are demanded.
 IMAGE_DIGEST = (
-    "sha256:1463dac58116ca6650ec84e9e4b11a73a70f4094c95a9a19e620482251471c57"
+    "sha256:89a8fd7295208ee6d06e216ade9edc6161d26db52099e9f22ceb77a2d76e3f49"
 )
 IMAGE_REPO_DEFAULT = "ghcr.io/vibeic/vibeic-eda"
 IMAGE_REPO_ENV = "VIBEIC_EDA_IMAGE_REPO"
