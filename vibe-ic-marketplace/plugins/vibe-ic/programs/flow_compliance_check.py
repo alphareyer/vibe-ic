@@ -4361,6 +4361,44 @@ def _stdout_signals_vacuous(snippet: str) -> bool:
     return False
 
 
+#: vibe-ic#2098 — the token a gate prints when ONE of its findings is outside
+#: every deferral channel this module owns. Same shape as `VACUOUS_PASS:` (a
+#: line-start token on the gate's own output, printed last so `output_snippet`'s
+#: tail keeps it), and read for the same reason: the alternative is this module
+#: deciding, from a gate name, something only the gate knows about the finding
+#: it just produced.
+_NON_WAIVERABLE_TOKEN = "NON_WAIVERABLE:"
+
+
+def _output_declares_non_waiverable(*streams: Optional[str]) -> str:
+    """The finding's own refusal of every waiver/deferral channel, or "".
+
+    MEASURED, and the reason this exists (#2098): the P0 umbrella and the
+    `advisory_program_exit_zero` arm both demote a whole gate's rc 1 on
+    `_gate_is_two_source_advisory`, which is a statement about the GATE. A gate
+    can be advisory about the debt it usually reports and still produce one
+    finding that is not deferrable — `l6_fsm_scaffold_actionable_check` printed
+    "this blocking applicability finding is not waiverable" while the flow
+    recorded that very step as `WAIVED-DEFERRED: … (ticket=ENFORCEMENT:advisory,
+    review_required=true)`. Two programs, two answers about one finding, and the
+    flow's answer won, so the gate's sentence changed nothing.
+
+    This is a TOKEN, not prose: a line-start sentinel the gate emits
+    deliberately, so `_prose_polarity` has nothing to arbitrate — a gate that
+    merely DISCUSSES waiverability in a sentence never matches, exactly as
+    `_stdout_signals_vacuous` never matches a gate discussing vacuity.
+
+    Conservative in the only direction that matters: absent the token nothing
+    changes, so every gate that is advisory today stays advisory.
+    """
+    for stream in streams:
+        for line in (stream or "").splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith(_NON_WAIVERABLE_TOKEN):
+                return stripped[len(_NON_WAIVERABLE_TOKEN):].strip()[:200]
+    return ""
+
+
 def _stdout_signals_structure_only(snippet: str) -> bool:
     """True iff the gate disclosed that an artefact it certifies carries no
     design-bound content. Same line-start shape as the vacuous sentinel, and
@@ -8669,6 +8707,21 @@ def _run_structural_rtl_gates(project: Path,
                            for d in _L6_FSM_FLOOR_DISCRIMINATORS):
                         _fsm_floor_line = _ln.strip()[:200]
                         break
+            # #2098 — a finding the gate itself declares outside every
+            # deferral channel. Checked BEFORE all three demotion branches
+            # below, on the raw streams rather than `_full_out` (which is
+            # stdout-or-stderr, never both). No token → nothing changes.
+            _non_waiverable = _output_declares_non_waiverable(
+                r.stdout, r.stderr)
+            if _non_waiverable:
+                return _p0_gate_record(
+                    gate_name, "FAIL", first_line,
+                    {"exit_code": 1,
+                     "non_waiverable": _non_waiverable,
+                     "detail": (
+                         "the gate declared this finding NON_WAIVERABLE; the "
+                         "thin-input, reused-IP and two-source-advisory "
+                         "deferrals do not apply to it")})
             # v1.6.97 — thin-input waiver eligibility.
             # v1.6.98 — eligibility shifted to coverage-shape; see
             # _is_thin_input_eligible.
@@ -9736,7 +9789,16 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
             # The refusal is already appended above and carried in the
             # structured record, so it is REPORTED either way; what changes
             # is only whether it flips the step verdict.
-            if _gate_is_two_source_advisory(_gate_name(cmd)):
+            # #2098 — two-source agreement is about the GATE. A finding the
+            # gate declares NON_WAIVERABLE is a third source about THIS
+            # finding, and it is the more specific one: honouring the gate's
+            # advisory class here is what made its own "not waiverable"
+            # sentence decoration.
+            _nw = _output_declares_non_waiverable(out)
+            if _nw:
+                reasons.append(
+                    f"non-waiverable finding (gate declared it): {_nw}")
+            if _gate_is_two_source_advisory(_gate_name(cmd)) and not _nw:
                 return True, reasons
             return False, reasons
         if enforcement == "DISCLOSED_SKIP":

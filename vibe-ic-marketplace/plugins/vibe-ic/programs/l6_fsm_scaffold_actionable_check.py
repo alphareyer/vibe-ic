@@ -1490,6 +1490,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("  Reconcile L6's no-FSM extraction claim with the cited staged "
               "RTL structure; this blocking applicability finding is not "
               "waiverable.")
+        # #2098 — the sentence above was decoration: this gate's flow slot is
+        # `advisory_program_exit_zero`, so `flow_compliance_check` demoted the
+        # whole rc-1 to a WAIVED-DEFERRED advisory entry and the "not
+        # waiverable" claim was one program's opinion the other never read.
+        # State it on the SAME machine-readable channel as the `VACUOUS_PASS:`
+        # sentinel above — stderr, line-start token, printed last so it
+        # survives `output_snippet`'s tail — and the consumer honours it.
+        # It is scoped to THIS finding class only: the ordinary actionability
+        # debt this gate reports (the `transitions: []` producer defect the
+        # flow row's advisory_reason is about) carries no token and stays
+        # advisory exactly as before.
+        print(f"NON_WAIVERABLE: {first_failure}", file=sys.stderr)
         return RC_FAIL
     print("  Fix in L6_CONTROL_LOGIC.json, from the design's OWN input "
           "documents only:")
