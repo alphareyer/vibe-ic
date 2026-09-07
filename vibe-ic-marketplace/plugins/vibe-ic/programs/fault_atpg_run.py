@@ -1237,6 +1237,23 @@ ATPG_NO_CONTAINER_DEADLINE = 0
 #: primitive that has no deadline does not accept and quietly drop one.
 ATPG_DEFAULT_CLIENT_TIMEOUT_S = 600
 
+#: THE `fault cut` BUDGET, AND WHAT IT NOW DOES (vibe-ic#2113 O1).
+#:
+#: This number used to be `_run_docker(..., timeout=120)`, which put coreutils
+#: `timeout -k 5 720` (120 + the flush grace) INSIDE the container as the cut's
+#: own parent — the identical shape vibe-ic#2082 removed from the `fault atpg`
+#: launch one call below, still live on the launch that FEEDS it. A cut that
+#: was still flattening flops at 120 s was signalled, and `run_fault` then
+#: returned `stage: "cut"` with an exit code, i.e. the design has no scan
+#: netlist — a statement about the design, produced by a clock.
+#:
+#: THE NUMBER IS UNCHANGED, on purpose: raising it would be the same defect
+#: with a later date. What changes is what it DOES. It is now the RECORDED
+#: budget of a supervised launch — announced once when crossed, never a
+#: terminator — and the cut is stopped only when every readable
+#: forward-progress signal has sat still for the stall grace.
+ATPG_CUT_BUDGET_S = 120
+
 
 def _atpg_supervision_kw(ceiling_s, ceiling_notice,
                          stall_grace_s=None) -> dict:
@@ -1896,12 +1913,46 @@ def run_fault(
             cut_cmd += ["--reset-active-low"]
     cut_cmd.append(netlist_abs)
 
-    ec, out, err = _run_docker(project, cut_cmd, timeout=120, pdk_dir=pdk_dir)
+    # ── WHAT THE CUT'S BUDGET NOW DOES (vibe-ic#2113 O1) ──────────────────
+    # Same shape as the engine launch below: the declared number is RECORDED
+    # and announced, and nothing terminates on it. `fault cut` on a large
+    # design is a real piece of work (one pseudo-PI/PO pair per flop), and it
+    # is the producer of the netlist every downstream fault model reads — so a
+    # clock that cuts it short does not cost one measurement, it costs the
+    # stuck-at, transition, path-delay and SDD passes at once.
+    _cut_ceiling: dict = {}
+
+    def _cut_ceiling_notice(elapsed_s: float) -> None:
+        """Called ONCE, at the crossing, by the supervisor. The cut continues."""
+        _cut_ceiling["crossed"] = True
+        _cut_ceiling["at_s"] = round(float(elapsed_s), 1)
+        print(f"[fault_atpg_run] RECORDED CEILING CROSSED at "
+              f"{_cut_ceiling['at_s']}s by `fault cut` (declared budget "
+              f"{ATPG_CUT_BUDGET_S}s). The cut is still making forward "
+              f"progress and is NOT stopped: the budget is a record, not a "
+              f"terminator (vibe-ic#2113).", flush=True)
+
+    ec, out, err = _run_docker(project, cut_cmd, pdk_dir=pdk_dir,
+                               supervised=True, ceiling_s=ATPG_CUT_BUDGET_S,
+                               ceiling_notice=_cut_ceiling_notice)
     cut_log = (out + "\n" + err)[-1000:]
     if ec != 0 or not (project / cut_out).exists():
         return 1, {
             "stage": "cut",
             "exit": ec,
+            # None on every ordinary failure. "STALLED" is the ONLY way this
+            # producer stops a cut, and it is a measurement: every readable
+            # forward-progress signal flat across the whole grace window. A
+            # reader that cannot tell it from an engine error would book a
+            # reaped cut as "fault cut cannot cut this design".
+            "stopped_as": ("STALLED" if ec == _wd.RC_STALLED else None),
+            "cut_wall_budget_s": ATPG_CUT_BUDGET_S,
+            "cut_wall_budget_role": (
+                "RECORDED ceiling: announced once when crossed, never a "
+                "terminator (vibe-ic#2113). Only a progress STALL stops the "
+                "cut, and it is reported as stopped_as=STALLED."),
+            "cut_wall_budget_crossed": bool(_cut_ceiling.get("crossed")),
+            "cut_wall_budget_crossed_at_s": _cut_ceiling.get("at_s"),
             "log_tail": cut_log,
         }
 
@@ -2260,6 +2311,14 @@ def run_fault(
                 "engine, and it is reported as atpg_stopped_as=STALLED."),
             "atpg_wall_budget_crossed": bool(_atpg_ceiling.get("crossed")),
             "atpg_wall_budget_crossed_at_s": _atpg_ceiling.get("at_s"),
+            # The SAME pair for the cut that produced the netlist this number
+            # was measured on (vibe-ic#2113 O1). Recorded on the success path
+            # too: "the cut crossed its budget and kept going" is exactly the
+            # fact a reader needs to size the next run, and it is invisible
+            # from a report that only mentions the budget when it failed.
+            "cut_wall_budget_s": ATPG_CUT_BUDGET_S,
+            "cut_wall_budget_crossed": bool(_cut_ceiling.get("crossed")),
+            "cut_wall_budget_crossed_at_s": _cut_ceiling.get("at_s"),
             "atpg_elapsed_s": _atpg_elapsed_s,
             # None on every ordinary path. "STALLED" is the ONLY way this
             # producer stops an engine, and it is a measurement: every readable

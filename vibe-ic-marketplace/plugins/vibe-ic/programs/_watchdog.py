@@ -196,28 +196,92 @@ class ProgressMeter:
         self._log_events = 0.0
         self._last_log = None
         self._last_cpu = 0.0
+        # WHAT WAS ACTUALLY READ, not what was wired (vibe-ic#2113 O3). Counted
+        # per signal across every look, plus whether the LAST look got a
+        # reading, because those answer two different questions a reader has:
+        # "is this probe working now" and "has it been working at all".
+        self._looks = 0
+        self._blind = {"output": 0, "log": 0, "cpu": 0}
+        self._read_last = {"output": False, "log": False, "cpu": False}
+
+    def readings(self) -> dict:
+        """WHAT EACH WIRED SIGNAL ACTUALLY GAVE, machine-readable. PURE.
+
+        One entry per wired signal: ``looks`` (how many times it was asked),
+        ``blind`` (how many of those returned nothing), ``read_last`` (did the
+        most recent look get a reading). A consumer that wants the fact rather
+        than the sentence reads this instead of parsing `watched()`."""
+        return {name: {"looks": self._looks,
+                       "blind": self._blind[name],
+                       "read_last": self._read_last[name]}
+                for name, fn in (("output", self._size_fn),
+                                 ("log", self._log_fn),
+                                 ("cpu", self._cpu_fn)) if fn is not None}
 
     def watched(self) -> str:
-        """The signals this meter was actually WIRED to, as a stable string.
+        """The signals this meter actually READ, as a stable string.
 
         "killed as hung" is not a finding a reader can check unless it also
         says what was looked at. A meter with only `size_fn` supervises a job
         on OUTPUT alone -- so a CPU-bound silent phase is a stall by
         CONSTRUCTION, and that is a property of the WIRING, not of the job.
-        Naming it turns "we watched nothing useful" from an invisible default
-        into a readable one. PURE."""
-        names = [n for n, fn in (("output", self._size_fn),
-                                 ("log", self._log_fn),
-                                 ("cpu", self._cpu_fn)) if fn is not None]
-        return "+".join(names) if names else "NOTHING"
+        Naming the wiring turns "we watched nothing useful" from an invisible
+        default into a readable one.
+
+        NAMING THE WIRING IS NOT ENOUGH (vibe-ic#2113 O3). This line reported
+        `watched=output+cpu` on a run whose CPU probe returned None on 7 of 12
+        looks: every one of those looks was supervised on captured OUTPUT
+        alone, during exactly the long silent solve the CPU probe exists to
+        see, and the record said the probe was there. A wired-but-blind probe
+        is indistinguishable from a working one in that sentence, which is the
+        one place a reader would look to catch it.
+
+        NOR IS THE LAST LOOK ALONE. Had the twelfth look happened to read the
+        probe, a last-look-only report would still print `output+cpu` and the
+        measured case would survive the fix. So the blind LOOK COUNT rides the
+        line too, and the grammar separates the two questions:
+
+            output                 wired, and read at every one of N looks
+            cpu:blind(7/12)        read at the last look; 7 of 12 gave nothing
+            cpu:unreadable(8/12)   the LAST look gave nothing (8 of 12 blind)
+            cpu:unread             wired, but no look has been taken yet
+            NOTHING                nothing wired at all
+
+        A fully healthy meter is BYTE-IDENTICAL to what this returned before,
+        so nothing that reads the happy path moves. PURE."""
+        parts = []
+        for name, fn in (("output", self._size_fn),
+                         ("log", self._log_fn),
+                         ("cpu", self._cpu_fn)):
+            if fn is None:
+                continue
+            if self._looks == 0:
+                parts.append(f"{name}:unread")
+                continue
+            blind = self._blind[name]
+            if not self._read_last[name]:
+                parts.append(f"{name}:unreadable({blind}/{self._looks})")
+            elif blind:
+                parts.append(f"{name}:blind({blind}/{self._looks})")
+            else:
+                parts.append(name)
+        return "+".join(parts) if parts else "NOTHING"
 
     def sample(self) -> float:
+        # Every branch below already knew whether it got a reading; it simply
+        # threw the answer away. Recording it is what lets `watched()` name
+        # what was READ instead of what was wired (vibe-ic#2113 O3). The score
+        # arithmetic is UNTOUCHED -- a change to the fusion would be a change
+        # to when jobs are reaped, which this is not.
+        self._looks += 1
         score = 0.0
         if self._size_fn is not None:
             try:
                 score += float(self._size_fn() or 0)
+                self._read_last["output"] = True
             except Exception:  # nosec — a probe error is just "no reading"
-                pass
+                self._read_last["output"] = False
+                self._blind["output"] += 1
         if self._log_fn is not None:
             try:
                 sig = self._log_fn()
@@ -227,6 +291,9 @@ class ProgressMeter:
                 if self._last_log is not None and sig != self._last_log:
                     self._log_events += 1.0
                 self._last_log = sig
+            self._read_last["log"] = sig is not None
+            if sig is None:
+                self._blind["log"] += 1
         score += self._log_events
         if self._cpu_fn is not None:
             try:
@@ -235,6 +302,9 @@ class ProgressMeter:
                 cpu = None
             if cpu is not None and cpu > self._last_cpu:
                 self._last_cpu = cpu
+            self._read_last["cpu"] = cpu is not None
+            if cpu is None:
+                self._blind["cpu"] += 1
         score += self._last_cpu
         return score
 
@@ -585,6 +655,9 @@ def run_supervised(cmd, *, log_path=None, output_progress: bool = True,
         abort_probe=(_abort_capture if abort_probe is not None else None),
         observations=_obs, ceiling_notice=ceiling_notice)
     _obs["watched"] = meter.watched()
+    # The same facts as numbers, so a consumer never has to parse the sentence
+    # (vibe-ic#2113 O3).
+    _obs["signal_reads"] = meter.readings()
     _obs["stall_grace_s"] = stall_grace_s
     _obs["hard_ceiling_s"] = hard_ceiling_s
 

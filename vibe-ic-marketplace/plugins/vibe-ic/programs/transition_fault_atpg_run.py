@@ -514,14 +514,25 @@ def _announce_local_tdf_route(project: Path) -> None:
 
 def _run_in_docker(project: Path, shell_cmd: str, timeout: int,
                    pdk_dir: Path | None = None,
-                   extra_mounts: list[tuple[str, str]] | None = None
+                   extra_mounts: list[tuple[str, str]] | None = None,
+                   stall_grace_s: float | None = None,
                    ) -> tuple[int, str, str]:
     """Run a shell command inside vibeic-eda with project mounted at /work and
     yosys/fault on PATH. Reuses the pinned image from fault_atpg_run.
 
     extra_mounts: additional (host, container) bind mounts — used when a
     liberty/PDK file resolves (via symlink) to a path OUTSIDE the project, so
-    a fresh `docker run -v project:/work` container can still read it."""
+    a fresh `docker run -v project:/work` container can still read it.
+
+    `timeout` is the caller's declared BUDGET and it terminates nothing
+    (vibe-ic#2051): it is passed to the supervisor as `hard_ceiling_s`, which
+    announces the crossing once and keeps supervising.
+
+    `stall_grace_s` is a DIFFERENT quantity — the stillness window, how long
+    every readable forward-progress signal may sit flat before the job is
+    called hung. Unset it is `_watchdog`'s calibrated default. The two used to
+    be the same number (vibe-ic#2113 O2); see the launch below for what that
+    cost in each direction."""
     # A unique --name so that if the watchdog's stall kill fires we can REAP
     # the container: killing the `docker run` CLIENT leaves the yosys process
     # inside the container orphaned and burning a full CPU indefinitely
@@ -571,6 +582,17 @@ def _run_in_docker(project: Path, shell_cmd: str, timeout: int,
     #
     # Nothing about the container route changes: with a docker client present
     # the argv below is byte-identical to what it has always been.
+    _ceiling_crossed: list = []
+
+    def _ceiling_notice(elapsed_s: float) -> None:
+        """Called ONCE, at the crossing, by the supervisor. The job continues."""
+        _ceiling_crossed.append(round(float(elapsed_s), 1))
+        print(f"[transition_fault_atpg_run] RECORDED CEILING CROSSED at "
+              f"{_ceiling_crossed[0]}s (declared budget {float(timeout):g}s). "
+              f"The job is still making forward progress and is NOT stopped: "
+              f"the budget is a record, not a terminator (vibe-ic#2051, "
+              f"vibe-ic#2113).", flush=True)
+
     if _CE.no_container_route():
         _announce_local_tdf_route(project)
         local_cmd = ["bash", "-c",
@@ -579,7 +601,17 @@ def _run_in_docker(project: Path, shell_cmd: str, timeout: int,
         # host CPU probe reads it directly and the default kill reaches the
         # whole process group. The ephemeral-container probe and reap below
         # would both be addressing a container that was never created.
-        res = _wd.run_host_supervised(local_cmd, stall_grace_s=float(timeout))
+        # THE SAME BUDGET/GRACE SEPARATION AS THE CONTAINER ROUTE BELOW
+        # (vibe-ic#2113 O2). This surface arrived with vibe-ic#2063 after that
+        # fix was written, carrying `stall_grace_s=float(timeout)` — the very
+        # shape O2 removes — so the producer would have shipped the fix on the
+        # route that needs a docker client and NOT on the route that runs
+        # in-image, which is the only one #2063 exists to serve. One contract,
+        # both surfaces; `_far._atpg_supervision_kw` is the single spelling.
+        res = _wd.run_host_supervised(
+            local_cmd,
+            **_far._atpg_supervision_kw(float(timeout), _ceiling_notice,
+                                        stall_grace_s))
         if res.outcome == "launch_error":
             return 127, "", "bash not found in PATH"
         return res.rc, res.out, _CE.annotate_local_exec(res.rc, res.err,
@@ -615,16 +647,44 @@ def _run_in_docker(project: Path, shell_cmd: str, timeout: int,
     # measurement.
 
     # PROGRESS supervision, not a runtime guess (v1.3.47 / owner directive).
-    # `timeout` becomes the STALL GRACE: how long every forward-progress
-    # signal of the yosys tree (CPU, captured output) may sit flat before the
-    # job is called hung. A long-but-WORKING SAT solve on a large design — the
-    # case a fixed wall destroyed, booking a false exit-124 ERROR — now runs
-    # to completion however long it legitimately takes, while a genuine
-    # deadlock is still killed and reported as such under its OWN rc.
+    #
+    # A BUDGET IS NOT A GRACE (vibe-ic#2113 O2). `timeout` used to be spent as
+    # `stall_grace_s`, and the two are different quantities that happened to
+    # share one number:
+    #
+    #   * the BUDGET is how long the caller expected the job to need. Its
+    #     caller is `_run_batch`, which passes `max(30, int(wall))` where
+    #     `wall = _scaled_wall_budget(timeout, scan_flops)` — a size-scaled
+    #     number that starts at 1800 s. Since vibe-ic#2051 it stops nothing;
+    #     it is RECORDED, announced once at the crossing, and the job runs on.
+    #   * the GRACE is the STILLNESS WINDOW: how long every readable
+    #     forward-progress signal may sit flat before the job is called hung.
+    #     It is not a runtime bound — a job that is progressing resets it at
+    #     every look and can never reach it, at any value.
+    #
+    # Spending one as the other cost BOTH. The declared budget was recorded
+    # NOWHERE, so a reader could not tell a run that crossed it from one that
+    # never came near; and the stillness window silently became whatever the
+    # budget happened to be — 1800 s and up for the SAT batch, 120 s for the
+    # solver probe — so the number that decides "is this job hung" was never
+    # anybody's answer to that question. They are threaded separately now.
+    #
+    # `stall_grace_s` left unset is `_watchdog`'s calibrated default. DIRECTION
+    # OF THE CHANGE, stated rather than left to be discovered: for the short
+    # probes that passed a small `timeout` the stillness window gets LONGER,
+    # which can only delay the reap of a genuinely hung probe — never cut a
+    # working one, which is the failure this whole class exists to remove.
+    #
+    # The kwargs are built by `fault_atpg_run._atpg_supervision_kw` rather than
+    # spelled here, for the reason the probe and the reap above are imported
+    # and not copied: two spellings of one supervision contract is how the two
+    # producers drift apart.
     res = _wd.run_host_supervised(
-        docker_cmd, stall_grace_s=float(timeout),
+        docker_cmd,
         kill=_dwd.ephemeral_container_reap(cname),
-        cpu_probe=_dwd.ephemeral_container_cpu_probe(cname))
+        cpu_probe=_dwd.ephemeral_container_cpu_probe(cname),
+        **_far._atpg_supervision_kw(float(timeout), _ceiling_notice,
+                                    stall_grace_s))
     if res.outcome == "launch_error":
         return 127, "", "docker binary not found in PATH"
     # On a stall the partial stdout yosys emitted before the kill is still
