@@ -95,22 +95,69 @@ def test_container_cat_fallback_reads_container_only_techlef(monkeypatch):
     """Simulate a /foss/pdks container-only path: the host read fails, but a
     stubbed `docker exec cat` returns the techlef. The reader the via-
     analyzer now calls must return that content (the old host-only read
-    would have returned nothing → analyzer silently skipped)."""
+    would have returned nothing → analyzer silently skipped).
+
+    THE STUB DESCRIBES THE MODEL THE READER HAS, AND IT NEVER RAISES —
+    vibe-ic#2130. This stub replaced the SHARED `subprocess.run` and ASSERTED
+    that the argv was the one call it knew about. The reader has since grown a
+    SECOND docker call AHEAD of that one: `_container_exec.docker_exec_argv`
+    makes the pin/attach check, which shells out `docker inspect` through
+    `_eda_pin._docker`. MEASURED 2026-09-07 on 8hd-3, the stub intercepted
+    ``['docker', 'inspect', '--format', '{{.Image}}\\t{{.Config.Image}}']``
+    first, its assertion fired, `_eda_pin._docker` catches only
+    `(OSError, SubprocessError)` so the AssertionError travelled up, and the
+    reader's own blanket `except Exception: pass` SWALLOWED THE TEST'S OWN
+    FAILURE and returned None — "assert None == '…VIA VIA12 DEFAULT…'", on a
+    reader that is working.
+
+    So nothing is asserted INSIDE the stub any more. Every call is RECORDED and
+    answered: the attach check is answered truthfully for a container that does
+    not exist (there is no `vibeic-test` on any host and there is not meant to
+    be — this is a no-container unit test, and that name is a deliberate fiction
+    rather than a stale pin literal), the `cat` is answered with the techlef, and
+    ANY OTHER route is recorded as undeclared and refused with a non-zero rc.
+    The verdict is then taken OUTSIDE the reader, where no `except` of the
+    program's can convert it into a None.
+    """
     container_path = "/foss/pdks/sky130A/libs.ref/sky130_fd_sc_hd/techlef/x.tlef"
+    container = "vibeic-test"
+    cat_argv = ["docker", "exec", container, "cat", container_path]
 
     class _CP:
-        returncode = 0
-        stdout = _MULTICUT_TLEF
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    calls: list = []
+    undeclared: list = []
 
     def _fake_run(cmd, *a, **k):
-        # Must be invoked as `docker exec <container> cat <path>`.
-        assert cmd[:3] == ["docker", "exec", "vibeic-test"]
-        assert cmd[3] == "cat"
-        assert cmd[4] == container_path
-        return _CP()
+        argv = [str(c) for c in cmd]
+        calls.append(argv)
+        # THE ATTACH CHECK the guarded argv builder makes first. Answered as a
+        # host with no such container answers it, which is the truth here: that
+        # is CONTAINER_ABSENT → UNREADABLE → no refusal → the argv is built,
+        # exactly as on a real host.
+        if argv[:2] == ["docker", "inspect"]:
+            return _CP(1, "", f"Error: No such object: {container}")
+        if argv == cat_argv:
+            return _CP(0, _MULTICUT_TLEF, "")
+        undeclared.append(argv)
+        return _CP(125, "", "a route this stub does not describe")
 
     monkeypatch.setattr(r.subprocess, "run", _fake_run)
-    text = r._v1_6_604_read_text_or_container_cat(container_path, "vibeic-test")
+    text = r._v1_6_604_read_text_or_container_cat(container_path, container)
+    # Asserted OUT HERE, so a blanket `except` in the reader cannot eat it.
+    assert not undeclared, (
+        f"the reader took a docker route this stub does not describe: "
+        f"{undeclared}. Give it its own arm above — a stub that answers "
+        f"nothing is swallowed into a None by the reader's own `except "
+        f"Exception` and reads as a broken reader (vibe-ic#2130)")
+    # NOT VACUOUS: the `docker exec … cat` this reader EXISTS for has to have
+    # been made. A reader that returned the right text without ever asking the
+    # container would satisfy the next line and prove nothing.
+    assert cat_argv in calls, (
+        f"the reader never ran `docker exec {container} cat {container_path}`; "
+        f"it ran {calls}")
     assert text == _MULTICUT_TLEF
     # And the analyzer over that text produces a restriction bound: only
     # VIA12 is single-cut, VIA56 (the upper via) is multi-cut-only, so the

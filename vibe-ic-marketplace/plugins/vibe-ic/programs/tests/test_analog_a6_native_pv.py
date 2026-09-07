@@ -18,9 +18,13 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import analog_a6_native_pv as PV               # noqa: E402
 import analog_a6_block_pv_check as A6           # noqa: E402
+import _container_exec as _ce                   # noqa: E402 — the guarded argv
+import _eda_pin as _pin                         # noqa: E402 — the ONE pin
 
 
 def _mk_project(tmp_path: Path, block: str = "u_ldo",
@@ -54,6 +58,30 @@ def _a6_verdict(project: Path, block: str) -> str:
 # ── invocation shape ────────────────────────────────────────────────────────
 
 def test_runner_receives_resolved_deck_and_gds():
+    """The runners receive the resolved deck, the block GDS — and THE CONTAINER
+    THE PRODUCER ITSELF SELECTED.
+
+    THE NAME IS DERIVED, NOT WRITTEN DOWN — vibe-ic#2130. This test named the
+    container by the literal `vibeic-eda`, which was the shared default until
+    `_eda_pin.default_container_name` began deriving it from the required digest
+    (`vibeic-eda-<digest12>`) precisely so two different pins cannot be one
+    container. A literal is therefore a STALE MODEL of the producer's own
+    choice, and on a fleet host the name it froze resolves to whatever container
+    somebody left behind: measured 2026-09-07 on 8hd-3, `vibeic-eda` was an
+    exited container running sha256:06537f7e… against a pin of sha256:1463dac5…,
+    so the guarded `docker exec` argv builder refused and this test was red for
+    a reason that had nothing to do with the deck or the GDS.
+
+    So the producer's OWN selection is driven — no container is passed at all —
+    and what the runners received is compared against the same derivation the
+    producer uses. A pin move re-derives both sides together; a producer that
+    hands its runners some other container is what goes red.
+
+    A MEASURED MISMATCH IS REFUSED BY NAME. If the derived container does exist
+    on this host and runs bytes other than the pinned ones, that is an operator
+    fact and it is reported as one, rather than arriving as an assertion about a
+    deck path.
+    """
     seen = {}
 
     def drc_runner(deck, gds, blk, ctn):
@@ -64,16 +92,35 @@ def test_runner_receives_resolved_deck_and_gds():
         seen["lvs"] = (gds, nl, blk, ctn)
         return "MATCH", {"method": "klayout_pdk_lvs"}
 
+    selected = _pin.default_container_name()
+
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         p = _mk_project(Path(td))
-        st = PV.run_block_pv(p, "u_ldo", _res(), "vibeic-eda",
-                             drc_runner=drc_runner, lvs_runner=lvs_runner)
+        try:
+            st = PV.run_block_pv(p, "u_ldo", _res(),
+                                 drc_runner=drc_runner, lvs_runner=lvs_runner)
+        except _ce.ContainerImageMismatch as exc:
+            pytest.fail(
+                f"{_pin.CONTAINER_IMAGE_MISMATCH}: the container this producer "
+                f"selected, {selected}, exists on this host and runs bytes "
+                f"other than the pinned ones, so nothing was measured about "
+                f"the deck or the GDS. This is a fact about the host, not "
+                f"about the producer — remove or re-create that container. "
+                f"The refusal, verbatim: {exc}")
     assert st["ran"] is True
+    # NOT VACUOUS: the DRC and LVS paths both have to have reached a runner.
+    assert set(seen) == {"drc", "lvs"}, (
+        f"the producer reached no runner, so nothing below is a measurement "
+        f"of the invocation shape; it reached: {sorted(seen)}")
     # DRC runner saw the RESOLVED staged deck path + the block GDS
     assert seen["drc"][0] == "/pdk/calibre/foundry_DRC.rule"
     assert seen["drc"][1].endswith("u_ldo.gds")
-    assert seen["drc"][2] == "u_ldo" and seen["drc"][3] == "vibeic-eda"
+    assert seen["drc"][2] == "u_ldo"
+    # …and the container the PRODUCER chose, derived from the pin the same way
+    # the producer derives it. Never a literal: see the docstring.
+    assert seen["drc"][3] == selected
+    assert seen["lvs"][3] == selected
     # LVS runner saw the block GDS + the block source netlist
     assert seen["lvs"][0].endswith("u_ldo.gds")
     assert seen["lvs"][1].endswith("u_ldo.sp")

@@ -16,6 +16,13 @@ left to emit, because it holds no per-type deck table.
 Nothing here reaches into the producer's internals: the programs are driven
 as subprocesses and every assertion is about an artefact on disk or the rc of
 a shipped checker.
+
+ONE import is not an exception to that, and is worth saying out loud: the skip
+guard below READS `analog_a3_netlist_emit.DEFAULT_CONTAINER` — the name the
+producer will enter — because spelling that name a second time here is exactly
+what vibe-ic#2130 was. It is a PARAMETER of the run, not an internal, and
+nothing asserts about it except that the guard probed that container and no
+other.
 """
 from __future__ import annotations
 
@@ -25,7 +32,11 @@ import re
 
 import pytest
 
-from not_verified_tier import PROBE_PRESENT, probe, probe_skip_reason
+from not_verified_tier import (PROBE_ABSENT, PROBE_PRESENT, probe,
+                               probe_skip_reason)
+import analog_a3_netlist_emit as A3_PRODUCER   # the ONE container default
+import _container_exec as _ce                  # the ONE guarded docker-exec argv
+import _eda_pin as _pin                        # the ONE pin
 from _analog_producer_fixture import (
     A1, A2, A3, GATE_A3, NETLIST_CHECKERS, block, make_project, run_prog,
     bdir, read_json, all_sp_files)
@@ -305,16 +316,79 @@ def test_an_unreachable_simulator_is_recorded_and_not_faked(tmp_path):
 # replaces recorded a probe that never finished as a container that is not
 # there, so a saturated host silently turned the only ngspice-backed proof in
 # this file into a green skip that claimed a fact about the host.
-_CONTAINER_NAME = os.environ.get("VIBEIC_ANALOG_CONTAINER", "vibeic-eda")
-_CONTAINER_STATE, _CONTAINER_DETAIL = probe(
-    ["docker", "exec", _CONTAINER_NAME, "true"])
+#
+# vibe-ic#2130 — AND IT MUST PROBE THE CONTAINER THE PRODUCER ENTERS. The name
+# was spelled TWICE, and the two diverged the moment the default moved: this
+# guard read `os.environ.get("VIBEIC_ANALOG_CONTAINER", "vibeic-eda")` while
+# `analog_a3_netlist_emit.DEFAULT_CONTAINER` reads
+# `os.environ.get("VIBEIC_ANALOG_CONTAINER") or _eda_pin.default_container_name()`,
+# which since the pin is derived from the digest (`vibeic-eda-<digest12>`).
+# MEASURED 2026-09-07 on 8hd-3: guard `vibeic-eda`, producer
+# `vibeic-eda-1463dac58116`. A guard bound to another container is wrong in BOTH
+# directions — on a host running the shared name it says PRESENT and the test
+# FAILS inside the producer ("container vibeic-eda-1463dac58116 is not
+# reachable") instead of skipping, and on a host holding only the derived one it
+# says ABSENT and skips a verification that could have run. The two spellings
+# also disagreed about an EMPTY value: `get(k, default)` hands the guard `""`
+# where `get(k) or default` hands the producer the derived name.
+#
+# So the name is READ FROM THE PRODUCER, not re-spelled. There is one definition
+# and this asks it.
+_CONTAINER_NAME = A3_PRODUCER.DEFAULT_CONTAINER
 RUN_REMEDY = "bash tools/vibeic-eda/restart-eda.sh"
+
+#: The argv the guard ACTUALLY probed, recorded so the test below can assert
+#: about an observation rather than restate the assignment above.
+_PROBED_ARGV: list = []
+
+
+def _reachability_of(container: str):
+    """`(state, detail)` for the container the PRODUCER will enter.
+
+    Built through `_container_exec.docker_exec_argv`, which is the same guarded
+    builder the producer's own `_docker_ok` uses, so the reachability this
+    records is the reachability the producer will meet. A container running
+    bytes other than the pinned ones is ABSENT here and says why: the producer
+    cannot use it either, so "not reachable" is the truthful answer and a skip
+    naming it is a fact a reader can act on — a mismatch that surfaced later, as
+    an exception out of the producer, would reach the reader as a broken test.
+    """
+    try:
+        argv = list(_ce.docker_exec_argv(container, "true"))
+    except _ce.ContainerImageMismatch as exc:
+        _PROBED_ARGV.append(["docker", "exec", container, "true"])
+        return PROBE_ABSENT, f"{container}: {exc}"
+    _PROBED_ARGV.append(argv)
+    return probe(argv)
+
+
+_CONTAINER_STATE, _CONTAINER_DETAIL = _reachability_of(_CONTAINER_NAME)
+
+
+def test_the_skip_guard_probes_the_container_the_producer_enters():
+    """vibe-ic#2130. The guard's answer is only worth anything about the
+    container the producer actually enters, and the two were spelled separately
+    until they disagreed. Asserted against what was PROBED — the recorded argv —
+    so putting the literal back is red rather than merely inconsistent."""
+    entered = A3_PRODUCER.DEFAULT_CONTAINER
+    assert _PROBED_ARGV, (
+        "the guard probed nothing, so its state is not a measurement of this "
+        "host at all")
+    assert _PROBED_ARGV[0][:3] == ["docker", "exec", entered], (
+        f"the guard probed {_PROBED_ARGV[0][:3]} and the producer enters "
+        f"{entered!r}; a guard bound to another container answers about the "
+        f"wrong subject in both directions — it skips a run that could have "
+        f"happened, or it lets one start that cannot (vibe-ic#2130)")
+    # …and that name is the one config point plus the pin, never a literal.
+    assert entered == (os.environ.get("VIBEIC_ANALOG_CONTAINER")
+                       or _pin.default_container_name())
 
 
 @pytest.mark.skipif(
     _CONTAINER_STATE != PROBE_PRESENT,
     reason=probe_skip_reason(_CONTAINER_STATE, _CONTAINER_DETAIL,
-                             "EDA container with ngspice not reachable",
+                             f"EDA container with ngspice not reachable "
+                             f"({_CONTAINER_NAME})",
                              RUN_REMEDY))
 def test_every_library_class_renders_a_netlist_that_actually_converges(
         tmp_path):

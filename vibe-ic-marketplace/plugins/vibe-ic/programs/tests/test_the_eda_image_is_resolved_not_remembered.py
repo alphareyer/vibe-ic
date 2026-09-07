@@ -436,17 +436,139 @@ def test_judged_image_makes_no_registry_call_unless_asked(monkeypatch):  # noqa:
     assert j.source == "pinned"
 
 
+#: The leaf that answers the PIN-BY-DIGEST rung, named once so the test below
+#: can require that the rung was actually ASKED rather than merely stubbed.
+_PIN_LEAF = "_eda_pin.local_repo_digests"
+
+
+def _nothing_local(monkeypatch):
+    """Make "nothing local" actually nothing local, and return what was asked.
+
+    WHY A MODEL AND NOT TWO STUBS — vibe-ic#2130. The test below stubbed
+    `local_tags` alone, which WAS the whole of `judged_image`'s local rung when
+    it was written. The resolver then grew "THE PIN, RESOLVED BY DIGEST" AHEAD
+    of it, and that rung asks docker through `_eda_pin`, not through
+    `local_tags`. So on every fleet host that has pulled the pinned digest —
+    the NORMAL state of all five — the resolver answered with the pinned
+    reference while this test asserted `None`. The test was red and the program
+    was right: it was asserting about the HOST, not about the resolver.
+
+    A hand-listed set of rungs goes stale exactly the way that one did, so the
+    model is installed at the two things a rung can ASK — what this host holds,
+    and what the registry says — and every other route to the daemon is a
+    REFUSAL that names the argv it saw. A rung added tomorrow either goes
+    through one of these leaves and is told the host holds nothing, or it trips
+    the refusal and this file says so by name. What it cannot do is quietly
+    answer from the machine the suite happens to be running on.
+
+    The registry leaves FAIL rather than returning nothing, because reaching
+    the registry without `allow_pull` is the other half of what this test is
+    for: a gate that starts a multi-gigabyte fetch is a gate people switch off.
+
+    Returns the list of leaf names the resolver actually reached, so the caller
+    can require that the model was CONSULTED and not merely present — a stub
+    nothing asks proves nothing.
+    """
+    asked: list = []
+
+    def _holds_nothing(name, answer):
+        def leaf(*_a, **_k):
+            asked.append(name)
+            return answer
+        return leaf
+
+    def _not_without_allow_pull(name):
+        def leaf(*_a, **_k):
+            asked.append(name)
+            pytest.fail(f"{name} reached the registry, and this call passed no "
+                        f"allow_pull; that is the fetch this test forbids")
+        return leaf
+
+    def _undeclared(where):
+        def leaf(*argv, **_k):
+            pytest.fail(
+                f"{where} was reached by a route this 'nothing local' model "
+                f"does not describe: {list(argv)}. The resolver has grown a "
+                f"rung that asks the daemon directly — give it its own leaf in "
+                f"`_nothing_local`, or this test is asserting about whatever "
+                f"images this host happens to hold (vibe-ic#2130).")
+        return leaf
+
+    # WHAT THIS HOST HOLDS — nothing, in every spelling the resolver asks it.
+    # `local_repo_digests` rather than `pinned_image_present`: the refusal the
+    # caller reads is then composed by the PROGRAM, from its own IMAGE_NOT_
+    # PRESENT text, and only the premise is supplied here.
+    monkeypatch.setattr(_pin, "local_repo_digests",
+                        _holds_nothing(_PIN_LEAF,
+                                       ((), "this host holds no image")))
+    monkeypatch.setattr(M, "local_digest",
+                        _holds_nothing("local_digest",
+                                       (None, "", "this host holds no image")))
+    monkeypatch.setattr(M, "local_tags", _holds_nothing("local_tags", []))
+    monkeypatch.setattr(M, "local_version_label",
+                        _holds_nothing("local_version_label",
+                                       (None, "this host holds no image")))
+    # WHAT THE REGISTRY SAYS — a route this call has not been given.
+    monkeypatch.setattr(M, "registry_digest",
+                        _not_without_allow_pull("registry_digest"))
+    monkeypatch.setattr(M, "registry_version_label",
+                        _not_without_allow_pull("registry_version_label"))
+    # EVERY OTHER ROUTE TO THE DAEMON, in both modules that own one.
+    monkeypatch.setattr(M, "_run", _undeclared("_eda_image._run"))
+    monkeypatch.setattr(_pin, "_docker", _undeclared("_eda_pin._docker"))
+    return asked
+
+
 def test_with_nothing_local_it_refuses_rather_than_starting_a_pull(monkeypatch):
     """`docker run` on an absent reference FETCHES. Measured 2026-08-21: the
     anchored image was absent on this host and `docker run` began pulling it,
     inside a hygiene gate. A gate that does that gets switched off."""
-    monkeypatch.setattr(M, "local_tags", lambda *a, **k: [])
-    monkeypatch.setattr(M, "registry_digest",
-                        lambda *a, **k: pytest.fail("must not ask without allow_pull"))
+    asked = _nothing_local(monkeypatch)
     j = M.judged_image(env={})
     assert j.ref is None
     assert "does not pull" in j.why_not
     assert "--allow-pull" in j.why_not
+    # NOT VACUOUS. The pin-by-digest rung has to have been ASKED and answered
+    # by the model above; a resolver that stops asking is answering from
+    # somewhere this test does not control, which is #2130 itself.
+    assert _PIN_LEAF in asked, (
+        f"`judged_image` never asked {_PIN_LEAF}, so 'nothing local' was not "
+        f"the premise it answered under. It asked: {asked}")
+
+
+def test_the_nothing_local_model_refuses_a_route_it_does_not_describe():
+    """THE MODEL'S OWN POSITIVE CONTROL — a stub that answers nothing must
+    FAIL, never pass and never skip.
+
+    `_nothing_local` is only worth anything if its refusals fire, so they are
+    fired here on purpose: an undeclared daemon call in either module, and a
+    registry read without `allow_pull`. Without this, a helper whose stubs had
+    stopped being installed would leave the test above green while it silently
+    went back to measuring the host.
+    """
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        _nothing_local(monkeypatch)
+        for reach, expect in (
+                (lambda: M._run("docker", "image", "inspect", "x"),
+                 "_eda_image._run"),
+                (lambda: _pin._docker("image", "inspect", "x"),
+                 "_eda_pin._docker"),
+                (lambda: M.registry_digest(), "registry_digest"),
+                (lambda: M.registry_version_label("x"),
+                 "registry_version_label"),
+        ):
+            with pytest.raises(pytest.fail.Exception) as caught:
+                reach()
+            assert expect in str(caught.value)
+        # And the local half ANSWERS rather than failing: "nothing here" is a
+        # measurement, and the resolver has to be able to receive it.
+        assert _pin.local_repo_digests("anything")[0] == ()
+        assert M.local_tags() == []
+        assert M.local_digest("anything")[0] is None
+        assert M.local_version_label("anything")[0] is None
+    finally:
+        monkeypatch.undo()
 
 
 def test_allow_pull_is_the_way_to_reach_the_registry(monkeypatch):
