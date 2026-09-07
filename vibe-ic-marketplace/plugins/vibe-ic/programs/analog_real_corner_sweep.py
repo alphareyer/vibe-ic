@@ -65,6 +65,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 import _atomic_artefact as _aa  # noqa: E402  (vibe-ic#1082)
 import _designs_root as _dr  # noqa: E402  (host mount root, measured)
+import analog_resolution_stimulus as _ars  # noqa: E402  (vibe-ic#2188)
 
 try:
     from . import _container_exec                            # type: ignore
@@ -1955,11 +1956,81 @@ def _pdk_has_section(container, pdk_lib, section):
     return section.lower() in sections
 
 
+# ── the resolution stimulus (vibe-ic#2188) ─────────────────────────────────
+def stamp_resolution_stimulus(project, block, container, host_root, deck,
+                              sp_host, sink):
+    """Give ONE corner deck the coherent tone and the transient dump a
+    converter's effective resolution has to be fitted from, and return the
+    deck. See `analog_resolution_stimulus`.
+
+    THE RECORD IS APPENDED ON EVERY CORNER, APPLIED OR NOT. `analog_adc_enob_
+    corner_check` measured nine real corners of a real modulator as UNMEASURED
+    because no deck in the A-track ever carried either property; a reader who
+    is told the record holds 512 converter samples where 12288 are needed can
+    go and change the conversion window, and a reader told only "no wrdata"
+    goes looking in the wrong producer. Silence here is the defect.
+
+    Never raises: a corner is not lost because its resolution stimulus could
+    not be stamped, and the deck is returned unchanged with the cause named.
+    """
+    bdir = project / "phase3" / "analog" / block
+    def _read(path):
+        try:
+            return json.loads(path.read_text(encoding="utf-8",
+                                             errors="replace"))
+        except (OSError, ValueError):
+            return None
+    wr_host = Path(sp_host).with_name(Path(sp_host).stem + ".resolution.wrdata")
+    try:
+        ref = _container_path(container, host_root, wr_host)
+    except Exception as exc:                       # noqa: BLE001 — see above
+        sink.append({"producer": _ars.PRODUCER, "applied": False,
+                     "reason": "dump_path_not_reachable_in_the_container",
+                     "detail": f"{exc.__class__.__name__}: {str(exc)[:200]}"})
+        return deck
+    try:
+        out, rec = _ars.apply(deck, _read(bdir / "spec.json"),
+                              _read(bdir / "topology.json"), ref)
+    except Exception as exc:                       # noqa: BLE001 — see above
+        sink.append({"producer": _ars.PRODUCER, "applied": False,
+                     "reason": "resolution_stimulus_producer_error",
+                     "detail": f"{exc.__class__.__name__}: {str(exc)[:200]}"})
+        return deck
+    rec["deck"] = Path(sp_host).name
+    sink.append(rec)
+    return out
+
+
+def resolution_stimulus_summary(records):
+    """The ONE record `corner_results.json` publishes for the block.
+
+    Every corner deck of a block is the same deck at a different corner, so the
+    transform's answer is the same for all of them — but that is an assumption,
+    and an assumption that stopped being true would vanish into the last write.
+    So the summary carries the DISTINCT reasons and how many decks each covers,
+    and a block whose corners disagreed says so instead of reporting one."""
+    if not records:
+        return None
+    applied = [r for r in records if r.get("applied")]
+    reasons = {}
+    for r in records:
+        reasons[str(r.get("reason") or "applied")] = \
+            reasons.get(str(r.get("reason") or "applied"), 0) + 1
+    head = dict(records[0])
+    head.pop("deck", None)
+    head["decks_stamped"] = len(applied)
+    head["decks_seen"] = len(records)
+    head["reasons"] = reasons
+    head["uniform_across_corners"] = len(reasons) == 1
+    return head
+
+
 def _run_pvt_corners(project, container, host_root, sl_dir, btype, block, pdk,
                      pdk_lib, knob, val, deck_overrides, subst_header, base_tt,
                      process_corners=None, devices=None, typ_section="tt",
                      device_terminals=None, device_geometry_units=None,
-                     origin=None, render=None, metric_key=None):
+                     origin=None, render=None, metric_key=None,
+                     resolution_records=None):
     """Attempt a REAL ngspice sim at each PVT corner (real .lib section + real
     .temp) for the sized sweep point. Returns `(real_sims, not_completed)`.
 
@@ -2010,6 +2081,9 @@ def _run_pvt_corners(project, container, host_root, sl_dir, btype, block, pdk,
                                       device_terminals=device_terminals,
                                       device_geometry_units=device_geometry_units)
             sp = sl_dir / f"pvt_{proc}_{tlbl}.sp"
+            deck = stamp_resolution_stimulus(
+                project, block, container, host_root, deck, sp,
+                resolution_records if resolution_records is not None else [])
             sp.write_text(deck_origin_header(origin or {})
                           + (subst_header or "") + deck)
             # THE DECK REACHES THE CALL. MEASURED (vibe-ic#2062): this call
@@ -2983,6 +3057,8 @@ def _run_block(project, block, container, pdk, topology_override):
         l5_overrides_not_applied = {}
 
     runs = []
+    # vibe-ic#2188 — one record per corner deck, applied or refused.
+    resolution_records: list[dict] = []
     # #464 — accumulate per-block partial-measurement evidence across runs.
     block_sim_warnings: list[str] = []
     block_failed_analyses: set[str] = set()
@@ -3008,8 +3084,13 @@ def _run_block(project, block, container, pdk, topology_override):
             return 2
         # #496 (round-2): structured PDK-substitution disclosure goes FIRST so
         # it lands in the deck head (the gate scans the first 24 lines).
-        tb = deck_origin_header(origin) + subst_header + tb
         sp_host = sl_dir / f"run_{knob}_{val}.sp"
+        # vibe-ic#2188 — the typ/27C corner IS a corner: `_run_pvt_corners`
+        # reuses this run for it, so a deck stamped only in the loop below
+        # would leave exactly one of the nine unable to yield a resolution.
+        tb = stamp_resolution_stimulus(project, block, container, host_root,
+                                       tb, sp_host, resolution_records)
+        tb = deck_origin_header(origin) + subst_header + tb
         sp_host.write_text(tb)
         ok, meas, raw, sim_status = _run_ngspice(
             container, _container_path(container, host_root, sp_host),
@@ -3121,7 +3202,8 @@ def _run_block(project, block, container, pdk, topology_override):
         process_corners=grid_corners, devices=devices, typ_section=typ_section,
         device_terminals=device_terminals,
         device_geometry_units=device_geometry_units, origin=origin,
-        render=_render, metric_key=target["key"])
+        render=_render, metric_key=target["key"],
+        resolution_records=resolution_records)
     pvt_grid, corners_executed = build_pvt_grid(
         base, base_log, real_sims, target.get("tol"),
         process_corners=grid_corners, not_completed=corner_not_completed)
@@ -3294,6 +3376,13 @@ def _run_block(project, block, container, pdk, topology_override):
         "corner_deadline_s": 0,
         "corner_runs_to_completion": True,
         "full_pvt_sweep_executed": full_pvt,
+        # vibe-ic#2188 — whether the corner decks this sweep ran can yield an
+        # effective resolution at all, and when they cannot, WHICH property is
+        # missing with the arithmetic behind it. Published for every block, so
+        # `analog_adc_enob_corner_check` reports the producer's own cause
+        # rather than re-deriving a weaker one from the deck's shape.
+        "resolution_stimulus": resolution_stimulus_summary(
+            resolution_records),
         "corners": pvt_grid,
         "best_corner": {
             "name": f"{typ_section}_27c", "value": best.get(target["key"]),

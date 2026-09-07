@@ -123,6 +123,19 @@ _UNMEASURABLE_NO_TONE = ("stimulus_not_a_coherent_tone: the deck drives the "
                          "signal bin against everything else")
 _UNMEASURABLE_SHORT = "transient_too_short_for_{n}_signal_cycles"
 _UNMEASURABLE_NO_ROWS = "transient_dump_present_but_carries_no_rows"
+#: An OVERSAMPLED converter is graded over its signal band, and the band is
+#: `fclk / (2 * OSR)` — so without the clock there is no band, and the only
+#: spectrum left to integrate is the whole Nyquist span. For a 1-bit modulator
+#: that span is dominated by the noise it deliberately shaped OUT of the band:
+#: the number it yields is near 0 dB for a converter that is working perfectly.
+#: Reporting that as an effective resolution would be a FALSE FAIL, so the
+#: honest answer is that the band could not be established. (vibe-ic#2188)
+_UNMEASURABLE_NO_CLOCK = ("oversampled_but_sample_clock_not_in_the_deck: OSR "
+                          "is declared and the deck names no single pulse "
+                          "source, so the signal band cannot be established")
+_UNMEASURABLE_OUT_OF_BAND = ("tone_outside_the_graded_band: the deck's tone "
+                             "sits above `fclk / (2 * OSR)`, where an "
+                             "oversampled converter is not graded")
 
 #: The fewest whole signal cycles an FFT-based SNDR is taken over here. Below
 #: this the signal bin is too coarse for the noise floor around it to mean
@@ -136,6 +149,10 @@ _SIN_RE = re.compile(
 _WRDATA_RE = re.compile(r"(?im)^\s*wrdata\s+(\S+)\s+(.+?)\s*$")
 _TRAN_RE = re.compile(
     r"(?im)^\s*\.?tran\s+\S+\s+([0-9.eE+-]+)\s*([munpf]?)s?\b")
+#: `pulse(v1 v2 td tr tf pw per)` on a top-level source — the converter's own
+#: sample clock, read off the DECK THIS CORNER RAN like everything else here.
+_PULSE_RE = re.compile(
+    r"(?im)^\s*v\w*\s+\S+\s+\S+\s+pulse\s*\(([^)]*)\)")
 _T_SCALE = {"": 1.0, "m": 1e-3, "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15}
 
 
@@ -219,8 +236,29 @@ def _resample_pow2(times: List[float], vals: List[float],
     return out
 
 
+def sample_clock_hz(deck_text: str) -> Optional[float]:
+    """The converter's sample rate from the ONE top-level pulse source the
+    deck drives, or None when the deck names none or more than one.
+
+    Read off the deck rather than the spec on purpose: the deck is what RAN,
+    and a spec `fclk` the deck did not honour would put the band edge
+    somewhere the spectrum never was."""
+    periods = []
+    for body in _PULSE_RE.findall(deck_text or ""):
+        fields = body.split()
+        if len(fields) < 7:
+            continue
+        per = _si(fields[6])
+        if per and per > 0:
+            periods.append(per)
+    if len(periods) != 1:
+        return None
+    return 1.0 / periods[0]
+
+
 def sndr_db_from_transient(deck_text: str, dump_text: str,
-                           column: int = 1) -> Tuple[Optional[float], dict]:
+                           column: int = 1, osr: float = 1.0
+                           ) -> Tuple[Optional[float], dict]:
     """SNDR in dB from one corner's transient, or (None, {"reason": ...}).
 
     The method the brief names and the one every converter datasheet uses:
@@ -229,8 +267,18 @@ def sndr_db_from_transient(deck_text: str, dump_text: str,
     in the spectrum except DC. Coherent sampling makes a rectangular window
     correct; the bin the tone lands in is `cycles`, exactly, by construction.
 
-    chip-AGNOSTIC: the signal frequency, the window and the dump path all come
-    from the DECK THIS CORNER RAN, never from a table here.
+    `osr` IS THE WHOLE DIFFERENCE FOR AN OVERSAMPLED CONVERTER (vibe-ic#2188).
+    An oversampling converter's resolution is defined over its SIGNAL BAND,
+    `fclk / (2 * OSR)`; that is what oversampling MEANS, and it is why the
+    modulator is allowed to push its quantisation noise out of that band. Sum
+    the whole Nyquist span instead and a 1-bit modulator that is working
+    perfectly measures near 0 dB, because almost all the power in that span is
+    the noise it shaped out on purpose. With `osr` at its default of 1 the
+    integration is the full span, which is right for a Nyquist-rate converter
+    and is what this function did before.
+
+    chip-AGNOSTIC: the signal frequency, the window, the sample clock and the
+    dump path all come from the DECK THIS CORNER RAN, never from a table here.
     """
     m = _SIN_RE.search(deck_text or "")
     if not m:
@@ -285,26 +333,46 @@ def sndr_db_from_transient(deck_text: str, dump_text: str,
     if not (1 <= bin_sig < half):
         return None, {"reason": _UNMEASURABLE_SHORT.format(
             n=_MIN_SIGNAL_CYCLES), "signal_bin": bin_sig, "bins": half}
+    # THE BAND THE CONVERTER IS GRADED OVER. The resampled grid spans
+    # `cycles / f_sig` seconds, so its bin k is at `k * f_sig / cycles` Hz and
+    # the band edge `fclk / (2 * OSR)` lands at `band_hz * cycles / f_sig`.
+    band_hz: Optional[float] = None
+    top = half - 1
+    if osr and osr > 1.0:
+        f_clk = sample_clock_hz(deck_text)
+        if not f_clk:
+            return None, {"reason": _UNMEASURABLE_NO_CLOCK, "osr": osr}
+        band_hz = f_clk / (2.0 * osr)
+        top = min(top, int(band_hz * cycles / f_sig))
+        if top < bin_sig + 1:
+            return None, {"reason": _UNMEASURABLE_OUT_OF_BAND,
+                          "osr": osr, "signal_hz": f_sig,
+                          "band_hz": band_hz, "signal_bin": bin_sig,
+                          "band_edge_bin": top}
+    if top < 1:
+        return None, {"reason": _UNMEASURABLE_NO_ROWS, "rows": len(times)}
     # The tone plus its two immediate neighbours: a whole-cycle window puts the
     # tone in one bin, and taking the neighbours with it makes the answer
     # robust to a solver whose last step lands a hair off the boundary. They
     # are removed from the noise sum too, so no power is counted twice.
     sig_bins = {b for b in (bin_sig - 1, bin_sig, bin_sig + 1)
-                if 1 <= b < half}
+                if 1 <= b <= top}
     p_sig = sum(power[b - 1] for b in sig_bins)
-    p_noise = sum(power) - p_sig
+    p_noise = sum(power[b - 1] for b in range(1, top + 1)) - p_sig
     if p_sig <= 0 or p_noise <= 0:
         return None, {"reason": _UNMEASURABLE_NO_ROWS, "rows": len(times)}
     return 10.0 * math.log10(p_sig / p_noise), {
-        "method": "fft_signal_bin_vs_rest",
-        "signal_hz": f_sig, "signal_bin": bin_sig,
+        "method": ("fft_signal_bin_vs_in_band_rest" if band_hz
+                   else "fft_signal_bin_vs_rest"),
+        "signal_hz": f_sig, "signal_bin": bin_sig, "band_hz": band_hz,
+        "osr": osr, "band_edge_bin": top,
         "cycles": cycles, "fft_points": n, "rows_read": len(times),
     }
 
 
 def _measure_corner_from_transient(block_dir: Path, project: Path,
-                                   corner: dict) -> Tuple[Optional[float],
-                                                          dict]:
+                                   corner: dict, osr: float = 1.0
+                                   ) -> Tuple[Optional[float], dict]:
     """Measure this corner's SNDR from the transient IT names, or say — by
     name — which precondition it does not have."""
     log = corner.get("ngspice_log")
@@ -331,7 +399,7 @@ def _measure_corner_from_transient(block_dir: Path, project: Path,
     if not dump.is_file():
         return None, {"reason": _UNMEASURABLE_NO_DUMP, "declared": md.group(1)}
     sndr, meta = sndr_db_from_transient(
-        text, dump.read_text(encoding="utf-8", errors="replace"))
+        text, dump.read_text(encoding="utf-8", errors="replace"), osr=osr)
     if sndr is None:
         return None, meta
     meta["sndr_db"] = round(sndr, 3)
@@ -379,6 +447,28 @@ def _enob_target(spec: dict) -> Optional[float]:
     return None
 
 
+def _declared_osr(spec: dict) -> float:
+    """The oversampling ratio the block's spec declares, else 1.0.
+
+    1.0 is the Nyquist-rate case and makes the SNDR integration the whole
+    span, which is what it has always been. A converter that declares an OSR
+    is graded over `fclk / (2 * OSR)` instead — see `sndr_db_from_transient`
+    and vibe-ic#2188."""
+    if not isinstance(spec, dict):
+        return 1.0
+    for row in (spec.get("specs") or []):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("name", "")).strip().lower() != "osr":
+            continue
+        for key in ("target", "min"):
+            value = row.get(key)
+            if (isinstance(value, (int, float)) and math.isfinite(value)
+                    and value >= 1.0):
+                return float(value)
+    return 1.0
+
+
 def _corner_enob(corner: dict) -> Optional[float]:
     """Read/derive one corner's ENOB, or None when unmeasured here."""
     if not isinstance(corner, dict):
@@ -409,6 +499,24 @@ def _check_block(project: Path, block_dir: Path
     if not isinstance(corners, list) or not corners:
         return "UNMEASURED", {"block": block_dir.name, "reason": "no_corner_data",
                         "enob_target": target}
+    osr = _declared_osr(spec or {})
+    # THE PRODUCER'S OWN CAUSE OUTRANKS THIS GATE'S INFERENCE (vibe-ic#2188).
+    # `analog_resolution_stimulus` is the step that decides whether a corner
+    # deck can carry a tone and a dump at all, and when it refuses it records
+    # WHY with the arithmetic — "the record holds 512 converter samples where
+    # 12288 are needed". Re-deriving "no wrdata" from the deck's shape here
+    # would be true and would send the reader to the wrong producer. Read what
+    # the producer said; fall back to the deck only when it said nothing.
+    stim = corners_doc.get("resolution_stimulus") if corners_doc else None
+    producer_refusal: Optional[dict] = None
+    if isinstance(stim, dict) and not stim.get("applied") and stim.get("reason"):
+        producer_refusal = {"reason": str(stim["reason"]),
+                            "producer": stim.get("producer"),
+                            "detail": stim.get("detail")}
+        for key in ("samples_available", "samples_required", "band_bins",
+                    "osr", "record_s", "fclk_hz"):
+            if stim.get(key) is not None:
+                producer_refusal[key] = stim[key]
 
     measured: List[dict] = []
     failing: List[dict] = []
@@ -424,9 +532,11 @@ def _check_block(project: Path, block_dir: Path
             # measure; one that was not completed is already accounted for by
             # its own cause upstream, and re-reporting it here as an ENOB hole
             # would double-count one absence as two.
-            if c.get("simulator_run") is True:
+            if producer_refusal is not None:
+                meta = dict(producer_refusal)
+            elif c.get("simulator_run") is True:
                 enob, meta = _measure_corner_from_transient(
-                    block_dir, project, c)
+                    block_dir, project, c, osr=osr)
                 source = "fft_of_a4_transient"
             else:
                 meta = {"reason": "corner_not_executed",
@@ -453,6 +563,8 @@ def _check_block(project: Path, block_dir: Path
                        else "no_sndr_or_enob"),
             "reasons": reasons,
             "enob_target": target,
+            "osr": osr,
+            "resolution_stimulus": stim if isinstance(stim, dict) else None,
             "corners_seen": len(corners),
             "unmeasurable_corners": unmeasurable,
         }
@@ -460,6 +572,7 @@ def _check_block(project: Path, block_dir: Path
     detail = {
         "block": block_dir.name,
         "enob_target": target,
+        "osr": osr,
         "corners_measured": len(measured),
         "corners_unmeasured": len(unmeasurable),
         "measured_corners": measured,
