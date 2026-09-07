@@ -848,7 +848,21 @@ def _professional_tb_exec_site(container: str) -> Optional[str]:
     cocotb were all on the local PATH. A check that lies: Step 4 FAILed on
     a toolchain that was present. chip-AGNOSTIC tool-locality plumbing.
     """
-    if container and _tool_in_container(container, "iverilog"):
+    # ASK THE CONTAINER QUESTION ONLY WHERE THERE IS A CONTAINER (vibe-ic#2146).
+    # `_tool_in_container` answers through `_docker_exec_raw`, which in LOCAL
+    # exec mode (no docker client on PATH — the shape of a run INSIDE the
+    # image) executes on THIS filesystem. So it answered True for a container
+    # nothing had entered, this function returned "container", and the run was
+    # then dispatched through `_docker_exec(..., marker=...)` — a real
+    # `docker exec` argv, because that supervised path builds its own.
+    # MEASURED 2026-09-07 in the pinned image: rc=127, no cocotb_run.log, no
+    # results.xml, and the gate recorded `cocotb_exec_site: "container"` for a
+    # container that does not exist. The same bundle run natively passes
+    # 208/208. `_local_exec_mode()` is the ONE predicate for "is there a
+    # container route at all"; consulting it here keeps the site honest
+    # without changing what either branch does when there is one.
+    if (container and not _local_exec_mode()
+            and _tool_in_container(container, "iverilog")):
         return "container"
     if _local_cocotb_toolchain_present():
         return "host"
@@ -8010,6 +8024,100 @@ def _cocotb_xml_summary(out_dir: Path) -> Optional[Dict[str, int]]:
     return total if found else None
 
 
+#: The name a generated professional-TB bundle carries when the producer could
+#: not run it. One filename, written where the bundle lives, so "this suite was
+#: not measured" reaches a reader at the suite and not only in a gate record
+#: somewhere else in the tree (vibe-ic#2146).
+PROFESSIONAL_TB_REFUSAL_FILE = "professional_tb_refusal.json"
+
+
+def _professional_tb_refuse(out_dir: Path, reason: str, *,
+                            dut_kind: str = "",
+                            exec_site: str = "none") -> Dict[str, Any]:
+    """NAME, IN THE BUNDLE, a generated suite this run did not measure.
+
+    vibe-ic#2146. `professional_tb_gen.generate()` writes a complete cocotb
+    bundle — `tb_<top>.py`, `Makefile`, the L28 coverage model, the L29 SVA and
+    the verification plan — into `phase2/stage1/sim_professional/<top>/`.
+    Whenever the producer then did NOT run it, the only trace was the ABSENCE
+    of a `results.xml`, and absence is exactly what a downstream reader cannot
+    distinguish from "the suite ran and produced nothing". MEASURED 2026-09-07
+    over every project root on one host carrying a `sim_professional` tree —
+    346 roots, of which 145 carry a GENERATED professional bundle (a Makefile
+    beside a `tb_<top>.py`) that produced no transcript, and 3 of those 145
+    were PASS at Step 4 on a sibling unit-TB suite alone.
+
+    So a bundle the producer cannot run is REFUSED BY NAME: the suite, the
+    reason and the execution site are written into the bundle directory. The
+    returned record is also folded into `reports/phase2/gates/
+    professional_tb.json`, so the same sentence reaches both readers.
+
+    A refusal that could not be WRITTEN must not read as a refusal that was, so
+    the write error is carried in the record instead of being swallowed.
+    chip-AGNOSTIC: a directory name and a reason, never a chip/vendor literal.
+    """
+    rec: Dict[str, Any] = {
+        "schema": "vibeic.professional_tb.refusal.v1",
+        "suite": out_dir.name,
+        "bundle_dir": str(out_dir),
+        "refused_by": "design_one_shot_runner.step_professional_tb_gen",
+        "dut_kind": dut_kind or "",
+        "exec_site": exec_site or "none",
+        "reason": reason,
+    }
+    try:
+        (out_dir / PROFESSIONAL_TB_REFUSAL_FILE).write_text(
+            json.dumps(rec, indent=2) + "\n")
+    except OSError as e:
+        rec["refusal_not_recorded"] = str(e)
+    return rec
+
+
+def _last_meaningful_line(text: str, limit: int = 240) -> str:
+    """The last non-empty line of a tool transcript, bounded.
+
+    A refusal that says only "rc=2" sends a reader to a log they have to find.
+    The compiler's own last word — "No rule to make target ...", "Include file
+    ... not found" — is the actionable half and it costs one line. The image's
+    login-shell `[INFO]` banner lines are dropped: they are the runner's own
+    voice, not the tool's, and a guard that quotes them names the wrong
+    subject."""
+    for line in reversed((text or "").splitlines()):
+        s = line.strip()
+        if s and not s.startswith("[INFO]"):
+            return s[:limit]
+    return "no output"
+
+
+def _professional_tb_clear_refusal(out_dir: Path) -> None:
+    """Drop a refusal a PREVIOUS pass recorded for a bundle that has now been
+    measured. A stale refusal beside a live transcript is a second answer to
+    the one question this file exists to answer."""
+    try:
+        (out_dir / PROFESSIONAL_TB_REFUSAL_FILE).unlink()
+    except OSError:
+        pass
+
+
+def professional_tb_bundle_accounted(out_dir: Path) -> Tuple[bool, str]:
+    """(accounted, how) — did this bundle end the step with a TRANSCRIPT or a
+    NAMED REFUSAL?
+
+    The invariant vibe-ic#2146 exists to hold, stated once so it can be
+    asserted rather than re-derived: a generated bundle is never left silently
+    unrun. `"transcript"` — a parsable JUnit is present; `"refusal"` — the
+    producer wrote why it could not run it; `"silent"` — neither, which is the
+    defect itself and must never be reported as a result."""
+    if not out_dir.is_dir():
+        return False, "no bundle directory"
+    import _sim_results_bridge as _srb
+    if _srb.parse_junit(out_dir / "results.xml") is not None:
+        return True, "transcript"
+    if (out_dir / PROFESSIONAL_TB_REFUSAL_FILE).is_file():
+        return True, "refusal"
+    return False, "silent"
+
+
 def step_professional_tb_gen(project: Path, top_name: str = "",
                              container: str = _pin.default_container_name()) -> StepResult:
     """NEW TB PATH (professional_tb_gen, 2026-07-11) wired into Phase-2.
@@ -8090,98 +8198,165 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
                 "professional_tb_gen", "FAIL", time.time() - t0,
                 "stale professional results.xml could not be invalidated")
 
-    # Run cocotb ONLY for classes with a genuine reference model. The generic
-    # class emits a reference HOOK that RAISES until filled — generate() already
-    # wrote it; the program-first route then hands that explicit gap to the
-    # testbench-gen expert fallback. It is INCOMPLETE until the hook is filled,
-    # never a class waiver.
-    if dut_kind in ("serial_stream", "parallel_arith", "expert_reference") \
-            and out_dir.is_dir():
-        _exec_site = _professional_tb_exec_site(container)
-        if _exec_site is not None:
-            log_path = out_dir / "cocotb_run.log"
-            cmd = f"cd '{out_dir}' && make SIM=icarus"
-            if _exec_site == "container":
-                rc, so, se = _docker_exec(container, cmd, timeout=1200,
-                                          marker=str(out_dir),
-                                          log_path=str(log_path))
-            else:
-                # Host / in-container-native mode: the pinned toolchain IS
-                # the local PATH (see _professional_tb_exec_site).
-                rc, so, se = _run(["bash", "-lc", cmd], cwd=out_dir,
-                                  timeout=1200)
-                try:
-                    log_path.write_text((so or "") + "\n" + (se or ""))
-                except OSError:
-                    pass
-            rec["cocotb_exec_site"] = _exec_site
-            combined = (so or "") + "\n" + (se or "")
-            pass_marker = "PROFESSIONAL_TB PASS" in combined
-            xml_summary = _cocotb_xml_summary(out_dir)
-            xml_fail = (xml_summary["failures"] + xml_summary["errors"]
-                        if xml_summary is not None else None)
-            rec.update({"ran_cocotb": True, "cocotb_rc": rc,
-                        "cocotb_pass_marker": pass_marker,
-                        "cocotb_xml_failures": xml_fail,
-                        "cocotb_test_denominator": xml_summary})
-            if xml_fail is not None and xml_fail > 0:
-                rec["functional_mismatch"] = True
-                _write({**rec, "status": "FAIL"})
-                return StepResult(
-                    "professional_tb_gen", "FAIL", time.time() - t0,
-                    detail=(f"{dut_kind} cocotb functional MISMATCH "
-                            f"({xml_fail} vectors) — close-loop"))
-            if (pass_marker and xml_summary is not None
-                    and xml_summary["tests"] > 0
-                    and xml_summary["passed"] > 0
-                    and xml_summary["failures"] == 0
-                    and xml_summary["errors"] == 0):
-                _write({**rec, "status": "PASS"})
-                return StepResult(
-                    "professional_tb_gen", "PASS", time.time() - t0,
-                    detail=(f"{dut_kind} cocotb functional PASS over "
-                            f"{xml_summary['passed']}/{xml_summary['tests']} "
-                            "test(s) (streaming scoreboard)"))
-            gap = ("cocotb run produced no non-zero self-checking JUnit "
-                   "denominator and clean pass marker")
+    # RUN WHAT WE GENERATED (vibe-ic#2146). cocotb used to be run ONLY for
+    # `dut_kind in (serial_stream, parallel_arith, expert_reference)`. Every
+    # other class had its bundle GENERATED — testbench, Makefile, coverage
+    # model, SVA, verification plan — and then left, with nothing in the bundle
+    # saying so. MEASURED 2026-09-07 over 346 project roots carrying a
+    # `sim_professional` tree on one host: 145 carry a GENERATED bundle that
+    # produced no transcript, and 3 of those were PASS at Step 4 on their
+    # sibling unit-TB suite alone. A step that emits a testbench and does not
+    # run it has produced evidence it never used.
+    #
+    # So EVERY generated bundle goes to the simulator, and a bundle that cannot
+    # be run is REFUSED BY NAME, in the bundle, with the reason. This does not
+    # move a verdict on its own: the unfilled reference hook still raises, the
+    # transcript records SKIP (0 passed), and the INCOMPLETE below is the same
+    # INCOMPLETE with the same handoff sentence — what changes is that the hook
+    # is now PROVED to have been reached instead of asserted.
+    _hook_unfilled = dut_kind not in ("serial_stream", "parallel_arith",
+                                      "expert_reference")
+    # The reference-model handoff, kept verbatim: it is the sentence an author
+    # acts on, and it names the file the loader reads and the conditions it
+    # enforces.
+    _unfilled_gap = (
+        "reference-model hook is unfilled; functional tests did not run "
+        "(0-test denominator). Author the filled testbench as "
+        "`expert_reference_tb.py` beside the generated tb_<top>.py (which is "
+        "regenerated every run and must NOT be edited); it is accepted only "
+        "when it carries no TestSkip, prints the token PROFESSIONAL_TB PASS, "
+        "and asserts against dut in a @cocotb.test()")
+    if out_dir.is_dir():
+        # A BUNDLE WITH NOTHING TO ELABORATE. `emit_makefile` falls back to
+        # `$(PWD)/<top>.v` when the project has no RTL source, so the make can
+        # only fail with "No rule to make target" — a reason nobody can act on.
+        # Say what is actually missing. `.get` keeps a generator that does not
+        # report the population (an older record, a stub) on the dispatch path
+        # exactly as before: only a MEASURED zero refuses.
+        if gen.get("rtl_files") == 0:
+            gap = ("the generated bundle has no RTL to elaborate: the "
+                   "project's rtl directory holds no .v/.sv source, so the "
+                   "emitted Makefile names a file that does not exist")
+            rec["run_refusal"] = _professional_tb_refuse(
+                out_dir, gap, dut_kind=str(dut_kind), exec_site="none")
             _write({**rec, "status": "INCOMPLETE", "reason": gap,
                     "fallback_skill": "testbench-gen"})
             return StepResult(
                 "professional_tb_gen", "INCOMPLETE", time.time() - t0,
-                detail=(f"{dut_kind} TB generated; functional run INCOMPLETE "
-                        f"(rc={rc}, tests="
-                        f"{(xml_summary or {}).get('tests', 0)}); "
+                detail=(f"{dut_kind} TB generated; bundle {out_dir.name!r} "
+                        f"REFUSED BY NAME — {gap}; "
                         "fallback_skill=testbench-gen"),
                 extras={"fallback_skill": "testbench-gen",
                         "program_first": "professional_tb_gen"})
-        gap = ("iverilog/cocotb not reachable in the configured container "
-               "nor on the local PATH")
+        _exec_site = _professional_tb_exec_site(container)
+        if _exec_site is None:
+            gap = ("iverilog/cocotb not reachable in the configured container "
+                   "nor on the local PATH")
+            rec["run_refusal"] = _professional_tb_refuse(
+                out_dir, gap, dut_kind=str(dut_kind), exec_site="none")
+            _write({**rec, "status": "INCOMPLETE", "reason": gap,
+                    "fallback_skill": "testbench-gen"})
+            return StepResult(
+                "professional_tb_gen", "INCOMPLETE", time.time() - t0,
+                detail=(f"{dut_kind} TB generated; bundle {out_dir.name!r} "
+                        f"REFUSED BY NAME — {gap}; "
+                        "fallback_skill=testbench-gen"),
+                extras={"fallback_skill": "testbench-gen",
+                        "program_first": "professional_tb_gen"})
+
+        log_path = out_dir / "cocotb_run.log"
+        cmd = f"cd '{out_dir}' && make SIM=icarus"
+        if _exec_site == "container":
+            rc, so, se = _docker_exec(container, cmd, timeout=1200,
+                                      marker=str(out_dir),
+                                      log_path=str(log_path))
+        else:
+            # Host / in-container-native mode: the pinned toolchain IS
+            # the local PATH (see _professional_tb_exec_site).
+            rc, so, se = _run(["bash", "-lc", cmd], cwd=out_dir,
+                              timeout=1200)
+            try:
+                log_path.write_text((so or "") + "\n" + (se or ""))
+            except OSError:
+                pass
+        rec["cocotb_exec_site"] = _exec_site
+        combined = (so or "") + "\n" + (se or "")
+        pass_marker = "PROFESSIONAL_TB PASS" in combined
+        xml_summary = _cocotb_xml_summary(out_dir)
+        xml_fail = (xml_summary["failures"] + xml_summary["errors"]
+                    if xml_summary is not None else None)
+        rec.update({"ran_cocotb": True, "cocotb_rc": rc,
+                    "cocotb_pass_marker": pass_marker,
+                    "cocotb_xml_failures": xml_fail,
+                    "cocotb_test_denominator": xml_summary})
+
+        if xml_summary is None:
+            # DISPATCHED AND NOTHING CAME BACK. That is a different fact from
+            # "the suite ran and found nothing", and the only one a reader
+            # downstream cannot recover from the tree — so name the bundle and
+            # say which of the two it was, distinguishing a simulate path that
+            # never started (rc 127 / COMMAND_NOT_FOUND, the signal
+            # `_compiler_was_not_found` already owns) from a run that started
+            # and wrote no readable JUnit.
+            why = (("the simulate path could not be dispatched — "
+                    f"COMMAND_NOT_FOUND (rc={rc})")
+                   if _compiler_was_not_found(rc, so, se) else
+                   ("the run produced no readable JUnit results.xml "
+                    f"(rc={rc}): {_last_meaningful_line(combined)}"))
+            rec["run_refusal"] = _professional_tb_refuse(
+                out_dir, why, dut_kind=str(dut_kind), exec_site=_exec_site)
+            _write({**rec, "status": "INCOMPLETE", "reason": why,
+                    "fallback_skill": "testbench-gen"})
+            return StepResult(
+                "professional_tb_gen", "INCOMPLETE", time.time() - t0,
+                detail=(f"{dut_kind} TB generated and RUN; bundle "
+                        f"{out_dir.name!r} REFUSED BY NAME — {why}; "
+                        "fallback_skill=testbench-gen"),
+                extras={"fallback_skill": "testbench-gen",
+                        "program_first": "professional_tb_gen"})
+
+        # Measured. A refusal a previous pass recorded for this bundle is now
+        # stale and must not outlive the transcript that answers it.
+        _professional_tb_clear_refusal(out_dir)
+
+        if xml_fail > 0:
+            rec["functional_mismatch"] = True
+            _write({**rec, "status": "FAIL"})
+            return StepResult(
+                "professional_tb_gen", "FAIL", time.time() - t0,
+                detail=(f"{dut_kind} cocotb functional MISMATCH "
+                        f"({xml_fail} vectors) — close-loop"))
+        if (pass_marker
+                and xml_summary["tests"] > 0
+                and xml_summary["passed"] > 0
+                and xml_summary["failures"] == 0
+                and xml_summary["errors"] == 0):
+            _write({**rec, "status": "PASS"})
+            return StepResult(
+                "professional_tb_gen", "PASS", time.time() - t0,
+                detail=(f"{dut_kind} cocotb functional PASS over "
+                        f"{xml_summary['passed']}/{xml_summary['tests']} "
+                        "test(s) (streaming scoreboard)"))
+        gap = (_unfilled_gap if _hook_unfilled else
+               ("cocotb run produced no non-zero self-checking JUnit "
+                "denominator and clean pass marker"))
         _write({**rec, "status": "INCOMPLETE", "reason": gap,
                 "fallback_skill": "testbench-gen"})
         return StepResult(
             "professional_tb_gen", "INCOMPLETE", time.time() - t0,
-            detail=(f"{dut_kind} TB generated; functional run INCOMPLETE — "
-                    f"{gap}; fallback_skill=testbench-gen"),
+            detail=(f"{dut_kind} TB generated and RUN; functional run "
+                    f"INCOMPLETE (rc={rc}, tests={xml_summary['tests']}, "
+                    f"skipped={xml_summary['skipped']}); "
+                    "fallback_skill=testbench-gen"),
             extras={"fallback_skill": "testbench-gen",
                     "program_first": "professional_tb_gen"})
 
-    # Generic reference-hook class (or missing out_dir): the deterministic
-    # program has exhausted what can be derived. Record the explicit expert
-    # handoff and keep the step non-green until that model runs.
-    # NAME THE FILE THE CONSUMER READS. This message used to say only "fill
-    # the reference-model hook", and the scaffold it points at (`tb_<top>.py`)
-    # is REGENERATED on every runner invocation — so an author who followed it
-    # literally lost the work and the results.xml with it, and the handoff
-    # could never be consumed. `professional_tb_gen._load_expert_reference_tb`
-    # reads `expert_reference_tb.py` and never overwrites it; that is the path
-    # the instruction has to carry, along with the three conditions the loader
-    # actually enforces.
-    gap = ("reference-model hook is unfilled; functional tests did not run "
-           "(0-test denominator). Author the filled testbench as "
-           "`expert_reference_tb.py` beside the generated tb_<top>.py (which is "
-           "regenerated every run and must NOT be edited); it is accepted only "
-           "when it carries no TestSkip, prints the token PROFESSIONAL_TB PASS, "
-           "and asserts against dut in a @cocotb.test()")
+    # The generator reported a bundle that is not on disk. There is nothing to
+    # run and nowhere to record a refusal, so say THAT — reporting it as an
+    # unfilled reference hook would send an author to fill a file in a
+    # directory that does not exist.
+    gap = ("the generator declared a bundle at a path that is not a "
+           f"directory: {out_dir}")
     _write({**rec, "status": "INCOMPLETE", "reason": gap,
             "fallback_skill": "testbench-gen"})
     return StepResult(

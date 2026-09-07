@@ -731,7 +731,30 @@ def emit_generic_tb(shape: dict) -> str:
     NEVER a silent vacuous pass)."""
     header = _emit_common_header(shape)
     top = shape["top"]
+    # THE UNFILLED HOOK HAS TO BE EXPRESSIBLE IN THE TOOLCHAIN THAT RUNS IT
+    # (vibe-ic#2146). This TB declared its unfilled state by raising
+    # `cocotb.result.TestSkip`, which cocotb 1.x carried and cocotb 2.x does
+    # not: `cocotb.result` survives as an empty compatibility shim, so the
+    # raise becomes `AttributeError: module 'cocotb' has no attribute 'result'`
+    # and the transcript records failures=1 — a FUNCTIONAL FAILURE OF THE
+    # DESIGN for a testbench that never reached the design. MEASURED on the
+    # pinned image (cocotb 2.2.0.dev, Icarus 14.0): the generated bundle for a
+    # generic-class DUT produced exactly that, tests=1 failures=1. Nobody saw
+    # it because the producer never ran what it generated. Bind the skip to
+    # whichever API the running cocotb actually has — 1.x's exception class,
+    # else the `pytest.skip` exception cocotb 2.x records as SKIP
+    # (`cocotb/regression.py`: `isinstance(exc, pytest.skip.Exception)` ->
+    # `_record_test_skipped`). Either way the suite is tests=1 skipped=1
+    # passed=0 failures=0: MEASURED and not credited, which is what an
+    # unfilled hook is.
     return header + f'''
+
+try:                                   # cocotb 1.x carried the skip exception
+    from cocotb.result import TestSkip as _UNFILLED_HOOK
+except ImportError:                    # cocotb 2.x records pytest's skip as SKIP
+    import pytest as _pytest
+    _UNFILLED_HOOK = _pytest.skip.Exception
+
 
 @cocotb.test()
 async def professional_smoke_test(dut):
@@ -752,7 +775,7 @@ async def professional_smoke_test(dut):
     for _ in range(20):
         await RisingEdge(getattr(dut, CLK))
     # reference_model hook — RAISES until filled (never a vacuous pass)
-    raise cocotb.result.TestSkip(
+    raise _UNFILLED_HOOK(
         "reference_model hook unfilled for {top}: author the filled testbench "
         "as `expert_reference_tb.py` in this directory (NOT this file, which is "
         "regenerated every run); it must carry no TestSkip, print the token "
@@ -870,6 +893,15 @@ def generate(project: Path, out_dir: Optional[Path] = None) -> dict:
         json.dumps(vplan, indent=2) + "\n")
     return {"status": "PASS", "ic_class": ic_class, "dut_kind": run_kind,
             "reference_model_tier": ref_tier, "out_dir": str(out),
+            # HOW MANY SOURCES THE EMITTED MAKEFILE WILL COMPILE. With none,
+            # `emit_makefile` falls back to `$(PWD)/<top>.v`, which is not
+            # there, and the bundle can never elaborate. The producer's runner
+            # refuses that bundle BY NAME instead of dispatching a make that
+            # can only say "No rule to make target" (vibe-ic#2146). MEASURED
+            # over 145 corpus roots carrying an unrun bundle: 89 are exactly
+            # this shape — a professional TB generated for a project whose
+            # phase2/stage1/rtl holds no .v/.sv at all.
+            "rtl_files": len(rtl),
             "files": [f"tb_{top}.py", f"{top}_coverage_model.json",
                       f"{top}_assertions.sva", "Makefile",
                       "verification_plan.json"]}
