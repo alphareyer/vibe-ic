@@ -1184,12 +1184,29 @@ def _docker_exec_raw(container: str, cmd: str, timeout: int = 1800
     before the caller returns rc=124. Falls back gracefully if the container
     has no `timeout` binary. Chip-AGNOSTIC."""
     cmd = _tool_status_not_the_log_sinks(cmd)
-    _inner = max(1, timeout - 5)
-    _wrapped = (
-        f"if command -v timeout >/dev/null 2>&1; then "
-        f"exec timeout --kill-after=5 {_inner} bash -lc {shlex.quote(cmd)}; "
-        f"else exec bash -lc {shlex.quote(cmd)}; fi"
-    )
+    # ONE PRODUCER FOR THE IN-CONTAINER WRAP (vibe-ic#2099). The seven lines
+    # this replaces spelled, BYTE FOR BYTE, what
+    # `_docker_watchdog.wrap_with_container_timeout(cmd, timeout)` returns —
+    # measured across the `max(1, …)` edges (timeout 0/1/5) and quoted commands,
+    # identical on every one. Two copies of a string is one defect in two files:
+    # the `--kill-after=5` escalation, the `margin_s` lead and the
+    # no-`timeout`-binary fallback would each have to be edited twice, and the
+    # copy that was missed would fail exactly where nobody was looking. The reap
+    # and the CPU probe were already delegated to that module; this was the last
+    # piece that was not.
+    #
+    # THIS PATH KEEPS ITS DEADLINE, AND THAT IS NOT THE THING #2051 REMOVED.
+    # `_docker_exec_raw` is the SHORT, BOUNDED probe (`command -v`, `ls`, `ps`,
+    # the identity reap): a fixed budget is its documented contract, and the
+    # container-side deadline is what makes the host's real — without it a host
+    # `subprocess.run` timeout kills only the `docker exec` CLIENT and orphans
+    # the tool. What #2051 removed is the OUTER CLOCK on the SUPERVISED path,
+    # where a still-converging job was SIGKILLed at a budget; that path now
+    # RECORDS its ceiling and is stopped only by the progress-stall reap
+    # (`supervised_container_command`, no clock). Do not "fix" this line by
+    # deleting its deadline — the two paths are different contracts, and
+    # `watchdog_ceiling_semantics_check` judges only the supervised one.
+    _wrapped = _dwd.wrap_with_container_timeout(cmd, timeout)
     full = _exec_argv(container, _wrapped)
 
     # v0.2.36 — on TimeoutExpired, subprocess may hand back partial
@@ -1287,6 +1304,16 @@ def _docker_exec(container: str, cmd: str, timeout: int = 1800, *,
         "" if _local_exec_mode() else container,
         _tool_status_not_the_log_sinks(cmd), marker,
         docker_exec_raw=_docker_exec_raw,
+        # THE SEAM TRAVELS WITH THE DISPATCH (vibe-ic#2099). Moving this branch
+        # onto the shared path at v1.18.43 left `_exec_argv` behind, so the
+        # supervised entry point went back to building its own argv — losing
+        # `-e IIC_OSIC_TOOLS_QUIET=1` on the container route and the
+        # `IIC_OSIC_TOOLS_QUIET` default on the local one, which is precisely
+        # the disagreement between the two entry points the seam was written to
+        # make impossible. Injected the same way `docker_exec_raw` already is:
+        # the shared dispatch stays route-agnostic, and this file keeps exactly
+        # one answer to "where does a tool run".
+        exec_argv=_exec_argv,
         log_path=log_path,
         stall_grace_s=grace, poll_s=poll, hard_ceiling_s=ceiling,
         term_grace_s=_WATCHDOG_TERM_GRACE_S,

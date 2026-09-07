@@ -26,6 +26,7 @@ PROG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROG))
 import unanchored_process_kill_check as GATE  # noqa: E402
 import _docker_watchdog as DW  # noqa: E402
+import phase3_one_shot_runner as R  # noqa: E402
 
 # The two reapers exactly as they shipped at main 40d0e14c. Kept verbatim so
 # the gate is exercised against the real defect, not a paraphrase of it.
@@ -244,16 +245,102 @@ def test_reaped_pids_ignores_the_image_login_banner():
 
 # ── the duplicate is gone: ONE implementation, not two ───────────────────
 def test_phase3_delegates_the_reap_instead_of_reimplementing_it():
-    """Two byte-equivalent reapers is one defect in two files: fixing either
-    alone leaves the other live, which is exactly how this one survived. The
-    CPU probe was already shared this way; the reap now is too."""
+    """ONE producer for the in-container wrap, and NO clock on the supervised
+    path. Two byte-equivalent copies of a string is one defect in two files:
+    fixing either alone leaves the other live, which is exactly how this one
+    survived.
+
+    WHAT THIS TEST USED TO ASSERT, AND WHY IT MOVED (vibe-ic#2099).  It required
+    two literals in phase3's source, `_dwd.kill_supervised_job(` and
+    `_dwd.wrap_with_container_timeout(`, and then read a `def _kill` closure out
+    of that source by index.  All three went stale at once, for two DIFFERENT
+    reasons, which is why the red was hard to read:
+
+      * The reap and the closure: v1.18.43 deleted phase3's private `_kill`
+        entirely and moved the dispatch to `_docker_watchdog.
+        run_docker_supervised`, which does the reap itself.  Delegation became
+        MORE complete and the source probe could see LESS of it -- so the
+        assertion failed on the tree that satisfied its own docstring best.
+      * The wrap: `git show 460a0ffc3` settles where that single call lived --
+        the SUPERVISED path, as the outer clock #2051 removed.  So the literal
+        went away with the clock, and the assertion was pinning a contract the
+        ruling had deliberately retired.
+
+    But the second literal was ALSO, by accident, the only thing in the repo
+    standing near a real defect: `_docker_exec_raw` had ALWAYS inlined its own
+    copy of that wrap string, byte for byte identical to the helper.  Deleting
+    the assertion would have deleted the only pressure on that duplication.  So
+    it is not deleted -- it is aimed at the RAW path, where the duplication
+    actually was, and paired with the clock property in the place the ruling put
+    it.  Nothing here is loosened: the file goes from three source literals to
+    one behavioural comparison plus two source guards that each kill a mutation.
+    """
     src = (PROG / "phase3_one_shot_runner.py").read_text()
-    assert "_dwd.kill_supervised_job(" in src
-    assert "_dwd.wrap_with_container_timeout(" in src
-    body = src[src.index("    def _kill(_proc, reason):"):]
-    body = body[:body.index("\n    _t0 = time.monotonic()")]
-    assert "docker_exec_raw(container, f\"" not in body, (
-        "phase3 is building its own kill command again")
+
+    # (a) ONE PRODUCER, ASKED OF THE RUNNING CODE.  `_docker_exec_raw` must hand
+    #     the container the string the shared helper builds -- not a copy of it
+    #     that happens to agree today.  Compared against the helper called with
+    #     the SAME normalisation the runner applies first, so this is the real
+    #     command and not a re-typed guess at it.
+    seen = []
+
+    class _CP:
+        returncode, stdout, stderr = 0, "", ""
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(R.subprocess, "run",
+                   lambda argv, **_kw: (seen.append(list(argv)), _CP())[1])
+        mp.setattr(R.shutil, "which", lambda n, *a, **k: None)   # local route:
+        mp.setattr(R, "_LOCAL_EXEC_MODE", None, raising=False)   # no host read
+        R._docker_exec_raw("cz2099_no_such_container", "yosys -V", timeout=600)
+    assert seen, "the raw entry point launched nothing"
+    launched = seen[-1][-1]
+    assert launched == DW.wrap_with_container_timeout(
+        R._tool_status_not_the_log_sinks("yosys -V"), 600), (
+        "`_docker_exec_raw` is not building its in-container command through "
+        "`_docker_watchdog.wrap_with_container_timeout`: it launched %r"
+        % (launched,))
+
+    # (b) AND EXACTLY ONE SHIPPED PROGRAM BUILDS THAT STRING.  (a) passes just
+    #     as well against a re-inlined byte-identical copy -- that is precisely
+    #     how this duplication survived -- so the PRODUCER SET is asserted, the
+    #     same way `test_only_one_module_implements_the_reap` below does it for
+    #     the reap.  Keyed on the CONSTRUCTION (`… --kill-after=5 {`, with the
+    #     interpolation) and not on the bare literal: `_watchdog.py` and
+    #     `watchdog_ceiling_semantics_check.py` both quote a measured `ps` line
+    #     containing `timeout --kill-after=5 86395` in their DOCSTRINGS, and a
+    #     check that cannot tell prose from code would name them as offenders.
+    builders = [f.name for f in sorted(PROG.glob("*.py"))
+                if "exec timeout --kill-after=5 {" in f.read_text()]
+    assert builders == ["_docker_watchdog.py"], (
+        "more than one shipped program builds the container-timeout wrap: %s. "
+        "There is one producer, `_docker_watchdog.wrap_with_container_timeout`; "
+        "a second copy means the `--kill-after` escalation, the margin and the "
+        "no-`timeout`-binary fallback have to be edited twice." % (builders,))
+    assert "_dwd.wrap_with_container_timeout(" in src, (
+        "phase3 must reach that producer by name")
+
+    # (c) NO CLOCK ON THE SUPERVISED PATH (#2051) -- where the retired literal
+    #     used to be, so the property it guarded is kept rather than dropped.
+    #     A long tool run is stopped by the progress-stall reap and by nothing
+    #     else; the ceiling is a recorded budget.  The RAW path above keeps its
+    #     deadline on purpose: a short bounded probe is a different contract.
+    dispatched = []
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(R._dwd, "run_docker_supervised",
+                   lambda container, cmd, marker, **kw:
+                   (dispatched.append(cmd), (0, "", ""))[1])
+        R._docker_exec("cz2099_no_such_container", "openroad -exit r.tcl",
+                       timeout=600, marker="r.tcl")
+    assert dispatched, "the supervised entry point dispatched nothing"
+    assert "timeout" not in dispatched[-1], (
+        "an outer clock is back on the supervised path: %r" % (dispatched[-1],))
+    assert "--kill-after" not in dispatched[-1], dispatched[-1]
+
+    # (d) AND THE REAP IS STILL NOT REBUILT HERE.  The closure this used to read
+    #     by index is gone; what must stay gone is phase3 composing a kill
+    #     command of its own.
+    assert "pkill" not in src, "phase3 is building its own kill command again"
 
 
 def test_only_one_module_implements_the_reap():

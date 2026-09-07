@@ -54,6 +54,11 @@ _TERM_GRACE_S = 10        # SIGTERM → SIGKILL escalation window
 # type of the injected raw exec: (container, cmd, timeout) -> (rc, out, err)
 RawExec = Callable[..., Tuple[int, str, str]]
 
+# type of the injected argv seam: (container, wrapped_shell_cmd) -> argv list.
+# A caller that owns ONE place deciding where its tools run injects it the same
+# way it already injects `docker_exec_raw`; see `run_docker_supervised`.
+ExecArgv = Callable[[str, str], Any]
+
 
 def parse_cputime_hms(tok: str) -> Optional[float]:
     """Parse a ps `cputime` token ``[[DD-]HH:]MM:SS`` → total seconds."""
@@ -676,6 +681,7 @@ def supervised_container_command(cmd: str, pidfile: str) -> str:
 
 def run_docker_supervised(container: str, cmd: str, marker: str, *,
                           docker_exec_raw: RawExec,
+                          exec_argv: Optional[ExecArgv] = None,
                           log_path: Optional[Path] = None,
                           telemetry_path: Optional[Path] = None,
                           telemetry_stage_probe: Optional[Callable[[str], str]] = None,
@@ -705,7 +711,19 @@ def run_docker_supervised(container: str, cmd: str, marker: str, *,
     process table, which is strictly worse than the container-scoped version of
     the same bug. Identity selection removes the distinction: the stamp names
     one process in whichever namespace the job was started in, so native mode
-    and container mode reap exactly the job they launched and nothing else."""
+    and container mode reap exactly the job they launched and nothing else.
+
+    `exec_argv` is the CALLER'S OWN ROUTE SEAM (vibe-ic#2099), injected exactly
+    like `docker_exec_raw` and for the same reason: this module must not assume
+    a particular exec implementation. A caller that has ONE place deciding
+    where its tools run — and what that route carries — passes it here so its
+    supervised entry point and its raw entry point cannot drift apart. MEASURED:
+    when `phase3_one_shot_runner`'s supervised dispatch moved onto this shared
+    path at v1.18.43 it stopped going through its own `_exec_argv`, and with it
+    silently lost `-e IIC_OSIC_TOOLS_QUIET=1` on the container route and the
+    `IIC_OSIC_TOOLS_QUIET` default on the local one — the exact drift that seam
+    exists to prevent. Default `None` is byte-identical to before for every
+    caller that injects nothing."""
     # Per-invocation identity stamp: written by the job itself at spawn, read
     # back by the reap. This is what replaces `pkill -f <marker>`.
     pidfile = new_job_pidfile()
@@ -742,7 +760,14 @@ def run_docker_supervised(container: str, cmd: str, marker: str, *,
     # NO OUTER CLOCK on the supervised path (vibe-ic#2051). The stamp is what
     # the reap needs; nothing else is imposed on the tool.
     wrapped = supervised_container_command(cmd, pidfile)
-    if container in ("", "host"):
+    if exec_argv is not None:
+        # THE CALLER'S SEAM DECIDES THE ROUTE, not a second copy of the branch
+        # below (vibe-ic#2099). Its `container` argument is the one this
+        # function was called with, so "where does this run" is answered in
+        # exactly one place per caller and the flags that route carries travel
+        # with it.
+        full = list(exec_argv(container, wrapped))
+    elif container in ("", "host"):
         full = ["bash", "-lc", wrapped]
     else:
         full = _ce.docker_exec_argv(container, "bash", "-lc", wrapped)
