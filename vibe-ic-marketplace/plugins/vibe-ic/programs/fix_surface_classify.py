@@ -36,6 +36,11 @@ unverified producer fix as artifact-first.
 Usage
 -----
   fix_surface_classify.py <issue-number | commit-sha>   # resolve via git
+      An issue number resolves to the newest commit that CLAIMS it — a
+      `Closes|Fixes|Resolves #N` trailer, or `#N` in the SUBJECT's trailing
+      parenthetical group — over the whole history. A prose mention is a
+      reference, not a claim, and nothing claiming it is a refusal, not a
+      fallback to the newest mention (vibe-ic#2145).
   fix_surface_classify.py --diff-file <unified.diff>    # offline / test
   fix_surface_classify.py 600 --json
   fix_surface_classify.py --repo-root /path/to/repo 601
@@ -425,17 +430,77 @@ def _git(repo_root: Path, *args: str) -> Optional[str]:
         return None
 
 
+#: The RIGHTMOST parenthetical group of a subject line — this repo's own
+#: place for the issues a commit CLAIMS to close: `... (#2111 #2106)`,
+#: `... (#599 D1 + step 14) [v1.9.20]`. The negative lookahead is what makes it
+#: the LAST group rather than the first: `fix(#2014 D1): ... (#987)` claims 987.
+_TRAILING_ISSUE_GROUP_RE = re.compile(r"\(([^()]*)\)(?![^()]*\()")
+
+#: GitHub's closing keywords, as a POSIX ERE for `git log --grep -E -i`. The
+#: `([^0-9]|$)` tail is `\b` written in a dialect git's regex engine has.
+_CLOSES_TRAILER_ERE = (
+    "(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]:]*#%s([^0-9]|$)")
+
+
+def _subject_claims_issue(subject: str, num: str) -> bool:
+    """True when `subject`'s TRAILING issue group names issue `num`."""
+    m = _TRAILING_ISSUE_GROUP_RE.search(subject)
+    if not m:
+        return False
+    return re.search(rf"#\s*{re.escape(num)}(?!\d)", m.group(1)) is not None
+
+
 def resolve_commit(arg: str, repo_root: Path) -> Optional[str]:
-    """An all-digit arg is an issue number → newest commit whose message
-    references it; a hex arg is a commit sha."""
+    """An all-digit arg is an issue number → the newest commit that CLAIMS to
+    have fixed it; a hex arg is a commit sha.
+
+    A CLAIM, NOT A MENTION, AND THAT IS THE WHOLE POINT (vibe-ic#2145). This
+    resolver used to return the newest commit whose SUBJECT contained `#N`
+    anywhere, within a 400-commit window. Both halves were wrong, and both were
+    measured on this repo's own history:
+
+      * MENTION. `ebb00b1b4`'s subject reads "... the #599 label probe pinned to
+        a dict's LAST key ... (#2111 #2106)". It closes #2111 and #2106 and
+        discusses #599 in prose. Under the old rule `resolve_commit("599")`
+        returned it, so `fix_surface_classify 599` classified a commit nobody
+        asked about — MIXED, i.e. "justified re-run", about the wrong subject.
+        A verdict that decides a 40-minute re-run must be about the commit the
+        caller named.
+      * WINDOW. The real #599 commit (`b81ee38dfecc`, "rollup: there was no word
+        between PASS and VACUOUS-PASS (#599 D1 + step 14)") is 3094 commits back
+        — outside 400 — so the honest answer was unreachable at the same moment
+        the decoy became reachable. A cap that turns "older than N commits" into
+        "not in this history" is "could not read it" reported as "it is not
+        there", which is the one substitution this repo holds every input to.
+
+    So a commit claims an issue exactly two ways, and both are conventions this
+    repo already writes: a `Closes|Fixes|Resolves #N` trailer in the message
+    body, or `#N` inside the SUBJECT's trailing parenthetical group. A prose
+    `#N` anywhere else is a reference, and references are not claims.
+
+    DEGRADES LOUDLY: when nothing claims the issue this returns None and
+    `diff_for` says "could not resolve", which is the truth. It never falls back
+    to the newest mention — a wrong answer is worse than no answer here, because
+    only the wrong answer is actionable.
+
+    Chip/PDK/tool-AGNOSTIC: nothing here names a design, a PDK or a tool.
+    """
     if re.fullmatch(r"\d+", arg):
-        log = _git(repo_root, "log", "--format=%H %s", "-n", "400")
+        # The claim by TRAILER, asked of git so the whole message is searched
+        # over the WHOLE history without carrying every body back into python.
+        trailer = _git(repo_root, "log", "--format=%H",
+                       "--extended-regexp", "--regexp-ignore-case",
+                       "--grep=" + (_CLOSES_TRAILER_ERE % re.escape(arg)))
+        claimed = set((trailer or "").split())
+        # ONE ordered walk decides WHICH claim is newest, so a trailer claim and
+        # a subject claim are ranked against each other rather than by which
+        # query ran first.
+        log = _git(repo_root, "log", "--format=%H %s")
         if not log:
             return None
-        pat = re.compile(rf"#\s*{re.escape(arg)}\b")
         for line in log.splitlines():
             sha, _, subj = line.partition(" ")
-            if pat.search(subj):
+            if sha in claimed or _subject_claims_issue(subj, arg):
                 return sha
         return None
     if re.fullmatch(r"[0-9a-fA-F]{7,40}", arg):

@@ -171,16 +171,43 @@ def _repo_root():
 
 
 def test_real_issue599_commit_is_consumer_only():
+    """The classifier, over the REAL #599 commit, says CONSUMER_ONLY.
+
+    THE SKIP THAT USED TO STAND HERE WAS NEVER A PASS (vibe-ic#2145). It read
+    "#599 commit not in history" and fired on every checkout, because
+    `resolve_commit` only looked 400 commits back and #599's commit is 3094
+    back — so this canary had never once been exercised. Then `ebb00b1b4`
+    landed with "the #599 label probe" in its SUBJECT while closing #2111 and
+    #2106; it entered the window, the old resolver returned it, and this test
+    failed on its FIRST EVER exercise against a commit that is not #599's.
+
+    Both halves are fixed in `resolve_commit` (a CLAIM, not a mention; no
+    window), so the skip is gone in both directions: the resolution is now
+    ASSERTED. If a future history genuinely carries no #599 claim, this goes
+    RED and names it, rather than reporting green by not looking.
+
+    THE SUBJECT IS ANCHORED BY CONTENT, NOT BY SHA. A sha literal does not
+    survive a history rewrite — the sibling #600 canary below hardcodes
+    `6a73bad1` and has been silently skipping since the 2026-09-07 rewrite. The
+    real #599 commit is the one that turned `phase1_expert_parse_track`'s
+    printed `VACUOUS_PASS:` into `INCOMPLETE:` (see the tie-break test in
+    test_v0_3_51_...), so requiring that file in the diff is what makes this a
+    canary over #599 rather than over whatever the resolver happened to return.
+    `ebb00b1b4`, the decoy, does not touch it.
+    """
     import pytest
     root = _repo_root()
     if not root:
         pytest.skip("not in a git checkout")
     sha = F.resolve_commit("599", root)
-    if not sha:
-        pytest.skip("#599 commit not in history")
+    assert sha, ("no commit in this history CLAIMS #599 — resolve_commit "
+                 "returned None; this canary cannot be exercised and is not "
+                 "reported as a pass")
     diff = F._git(root, "show", sha, "--format=", "--unified=3")
-    if not diff:
-        pytest.skip("git show failed")
+    assert diff, f"git show {sha} produced no diff"
+    assert "programs/phase1_expert_parse_track.py" in diff, (
+        f"resolve_commit('599') returned {sha}, whose diff does not touch "
+        "phase1_expert_parse_track.py — that is not #599's commit")
     assert F.classify_diff(diff)["verdict"] == "CONSUMER_ONLY"
 
 

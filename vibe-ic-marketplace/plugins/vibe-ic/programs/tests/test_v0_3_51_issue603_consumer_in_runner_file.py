@@ -149,14 +149,30 @@ def _root():
 
 
 def test_real_issue599_still_consumer_only():
+    """The #603 vocabulary widening did not move #599 off CONSUMER_ONLY.
+
+    Same repair as the twin canary in
+    `test_v0_3_50_issue602_round2_neutral_exclusion.py`, and it is a twin on
+    purpose: this one guards the widening in THIS file, that one guards the
+    neutral-exclusion in #602's, and a single canary could not tell which of
+    the two moved the verdict. The "#599 not in history" skip is gone —
+    `resolve_commit` now resolves a CLAIM over the whole history (vibe-ic#2145)
+    — and the commit is pinned by the file its diff must touch, not by a sha
+    that a history rewrite invalidates.
+    """
     import pytest
     root = _root()
     if not root:
         pytest.skip("not a git checkout")
     sha = F.resolve_commit("599", root)
-    if not sha:
-        pytest.skip("#599 not in history")
+    assert sha, ("no commit in this history CLAIMS #599 — resolve_commit "
+                 "returned None; this canary cannot be exercised and is not "
+                 "reported as a pass")
     diff = F._git(root, "show", sha, "--format=", "--unified=3")
+    assert diff, f"git show {sha} produced no diff"
+    assert "programs/phase1_expert_parse_track.py" in diff, (
+        f"resolve_commit('599') returned {sha}, whose diff does not touch "
+        "phase1_expert_parse_track.py — that is not #599's commit")
     assert F.classify_diff(diff)["verdict"] == "CONSUMER_ONLY"
 
 
