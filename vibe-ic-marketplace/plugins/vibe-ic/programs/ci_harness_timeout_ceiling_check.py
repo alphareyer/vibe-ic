@@ -327,8 +327,12 @@ _LANDING_WINDOW_ANCHOR = "lane_emit_window"
 # the anchor moved 2173 -> 2191, so every byte of the prefix moved with it. See
 # the "CHEAP TIER GAINED THE POLARITY RATCHET" block below for the full account
 # and for the enumeration of all six faces at the base and at the candidate.
+# RE-PINNED with `_LANDING_SCRIPT_SHA256` for vibe-ic#2138 — see the derivation
+# table above that constant. The cheap tier gains one `run` line ahead of the
+# lanes, so the entry-to-`lane_emit_window` prefix moves with the whole file and
+# the three lane bodies do not.
 _LANDING_EXECUTION_PREFIX_SHA256 = (
-    "08be699b4bf97f88e8d638252f3492118390d35989485f90e25371fa5ca50016"
+    "325c1587fa720ebc7f0227ffd70621e0c1c894307f7769299f1aef8a3a7b17f4"
 )
 # RE-PINNED when the landing gained its runtime PREFLIGHT. Both digests below
 # moved for one reason and it is stated here rather than left to `git log`: the
@@ -743,7 +747,7 @@ _LANDING_EXECUTION_PREFIX_SHA256 = (
 #   run_pytest                  3b3b685c4841…            unmoved, untouched
 #   run_repo_tools_pytest       95de055aebcd…            unmoved, untouched
 #   run_unselectable_pytest     aac62e70f0eb…            unmoved, untouched
-#   _SEMANTIC_DRIVER_SHA256     a50922ce5e5c…            unmoved, untouched
+#   _SEMANTIC_DRIVER_SHA256     1912a288b458…            unmoved, untouched
 #                               (that was TRUE of the landing above; the
 #                                driver moved later, under #2104 — see the
 #                                re-pin block at `_SEMANTIC_DRIVER_SHA256`)
@@ -767,8 +771,49 @@ _LANDING_EXECUTION_PREFIX_SHA256 = (
 # added or removed, no `rc` decision rewritten, and the driver untouched. The
 # new line is a `run` of a checker in the tier that runs before any lane is
 # dispatched; it can REFUSE a landing, and it cannot change how one is measured.
+# RE-PINNED FOR THE CHEAP TIER GAINING THE NESTED-PROGRESS PIN GATE (vibe-ic#2138).
+# TWO of the six faces moved and BOTH are re-pinned in this commit — the same
+# two, for the same reason, as the vibe-ic#712 re-pin recorded directly above.
+# THE SIX WERE ENUMERATED FROM THIS FILE'S OWN CODE, never from the diff and
+# never from the two the gate printed in its refusal:
+# `landing_semantic_progress_contract` hashes the whole script, the
+# entry-to-`lane_emit_window` prefix and the three lane bodies;
+# `_semantic_driver_contract_errors` hashes the driver. Each was DERIVED at the
+# base and again over the edited tree by re-running that same code. Main moved
+# under this lane while the work was verified (425c6402841d -> 26a49a9460e6, four
+# landings), so the derivation was repeated at the new base; 26a49a9460e6 DID
+# move `_SEMANTIC_DRIVER_SHA256` (a50922ce5e5c -> 1912a288b458, its own re-pin)
+# and did NOT touch `gatekeeper-land.sh`, so the five landing-script values below
+# are identical at both bases and the driver row names the new one:
+#
+#   whole file          254734ed2710… -> e101d67b27f4…   MOVED
+#   execution prefix    08be699b4bf9… -> 325c1587fa72…   MOVED
+#   run_pytest                  3b3b685c4841…            unmoved, untouched
+#   run_repo_tools_pytest       95de055aebcd…            unmoved, untouched
+#   run_unselectable_pytest     aac62e70f0eb…            unmoved, untouched
+#   _SEMANTIC_DRIVER_SHA256     1912a288b458…            unmoved, untouched
+#
+# The base column reproduces the six constants standing at 26a49a9460e6 byte for
+# byte, which is what makes the candidate column a measurement of this edit
+# rather than of my arithmetic.
+#
+# WHAT MOVED, and why it is exactly two. `tools/gatekeeper-land.sh` gains ONE
+# `run` line in the CHEAP tier just after `cheap:prose-polarity` and outside the
+# range block, invoking `nested_progress_pin_check.py` so no landing can install
+# a tree whose `HERMETIC_TEST_PROGRESS` item pins disagree with what that tree
+# collects. Adding lines there pushes the `lane_emit_window` anchor from 2191 to
+# 2230, so the entry-to-anchor prefix moved with the whole file — the same
+# signature every earlier edit to the control flow ahead of the lanes left, and
+# the reason the two are always re-pinned as a pair.
+#
+# WHAT DID NOT MOVE, which is the part this pin exists to protect: the three
+# lane bodies are byte-identical, which is this file's own independent witness
+# that no population's execution changed — no pytest INVOCATION, no argument
+# added or removed, no `rc` decision rewritten, and the driver untouched. The
+# new line is a `run` of a checker in the tier that runs before any lane is
+# dispatched; it can REFUSE a landing, and it cannot change how one is measured.
 _LANDING_SCRIPT_SHA256 = (
-    "254734ed2710124a1efc5208501d18311d1f3768ea1f0f7a6abb98634df78461"
+    "e101d67b27f45b0b5e63276cac9f81c93fc56a42425d6cfa383073e1451397ae"
 )
 # The helper AST is not enough: a counterfeit CLI can define the expected
 # helper and never call it.  Bind the policy to the complete reviewed driver

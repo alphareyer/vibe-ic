@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1288
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1288)
+- **Total programs (excluding helpers / shims):** 1289
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1289)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1279 |
+| `any` | 1280 |
 
 ## Alphabetical listing
 
@@ -754,6 +754,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `nba_shift_register_same_cycle_read_check` | any | Wave 12 | v0.119.44 (Wave 12) plugin gate. |
 | `nda_diff_scan_check` | any | — | NDA guard for a PR's DIFF CONTENT (added lines + added/renamed file PATHS), across the WHOLE change-set. |
 | `nda_tracked_tree_scan` | any | — | the NDA guards all scan CHANGES; nothing scanned what is already HERE. |
+| `nested_progress_pin_check` | any | — | the LANDING refuses a stale nested-progress item pin, so a stale one can never reach main. |
 | `netlist_src_coord_canonicalize` | any | — | make a synthesised netlist reproducible (ORGANIC-20260531-yosys-write-verilog-nondeterministic-line-tagged-net-names). |
 | `neutered_gate_tree_check` | any | — | is a gate in this checkout unable to fail? |
 | `nextstate_misc_synth` | any | — | deterministic SOLVER for the remaining mechanically- complete VerilogEval shapes the existing FSM / K-map family still SKIPs. |
@@ -1360,7 +1361,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1279 programs)
+### `any` (1280 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2085,6 +2086,7 @@ _(no programs in this group)_
 - `nba_shift_register_same_cycle_read_check` — v0.119.44 (Wave 12) plugin gate.  _[Wave 12]_
 - `nda_diff_scan_check` — NDA guard for a PR's DIFF CONTENT (added lines + added/renamed file PATHS), across the WHOLE change-set.
 - `nda_tracked_tree_scan` — the NDA guards all scan CHANGES; nothing scanned what is already HERE.
+- `nested_progress_pin_check` — the LANDING refuses a stale nested-progress item pin, so a stale one can never reach main.
 - `netlist_src_coord_canonicalize` — make a synthesised netlist reproducible (ORGANIC-20260531-yosys-write-verilog-nondeterministic-line-tagged-net-names).
 - `neutered_gate_tree_check` — is a gate in this checkout unable to fail?
 - `nextstate_misc_synth` — deterministic SOLVER for the remaining mechanically- complete VerilogEval shapes the existing FSM / K-map family still SKIPs.

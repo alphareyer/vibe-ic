@@ -245,7 +245,34 @@ HERMETIC_TEST_PROGRESS = {
         # `test_external_corpus_tracking_refuses_an_untracked_fixture`, item
         # 37, so the one scheduled replay producer remains item 19 and its
         # domain total remains 8.  Only the collection cardinality moves.
-        "items": 37,
+        #
+        # 37 -> 38 (vibe-ic#2138), re-derived the same way -- ONE
+        # `pytest --collect-only -q -p no:cacheprovider` from the plugin root
+        # with `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` and
+        # `PYTHONDONTWRITEBYTECODE=1`, on 8HD-9 in the pinned image, both env
+        # arms.  `f5474d758` added
+        # `test_an_absent_corpus_is_refused_by_name_and_not_by_errno` and did
+        # not move this number, so the guard fired on MAIN:
+        # `test_nested_progress_schedule_matches_live_pytest_collection` read
+        # `assert 38 == 37`.
+        #
+        # THE ORDINAL DOES NOT MOVE WITH IT, and that is measured rather than
+        # assumed: the added item collects at position 34, AFTER the scheduled
+        # replay producer at 19, so item 19 is still
+        # `test_lock2_the_replay_reproduces_the_recorded_verdict
+        # [ART-DRC-ROUTER-SUMMARY]` and its domain total is still 8.  (Compare
+        # the `HERMETIC_MUTATION_FILE` note below, where an item arriving
+        # BEFORE the witness moved both numbers: which of the two happens is a
+        # property of where the item lands, never of the fact that one landed.)
+        #
+        # AND THE STALENESS IS NOW CLOSED AT THE LANDING, not here.  A pin
+        # guarding a population that moves on every landing must go stale, so
+        # `programs/nested_progress_pin_check.py` runs in the cheap tier of
+        # `tools/gatekeeper-land.sh` and refuses a landing whose live
+        # collection disagrees with this table, naming the file and BOTH
+        # numbers.  Deriving this number instead was considered and refused;
+        # that program's docstring records why.
+        "items": 38,
         # EVERY PRODUCER ITEM MUST APPEAR IN EXACTLY ONE OF TWO LISTS, and
         # this is the second. It is NOT a claim that these items are short:
         # it is the MEASURED set of producer items carrying no schedule at

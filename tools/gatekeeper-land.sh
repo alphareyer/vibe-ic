@@ -619,6 +619,36 @@ run "cheap:version-sync" "marketplace <-> plugin version sync" python3 "$PROGRAM
 # the offender and its owning lane, never a flag that banks it.
 run "cheap:prose-polarity" "prose polarity — no landing adds an unregistered offender" \
   python3 "$PROGRAMS/prose_polarity_consulted_check.py" --ratchet
+
+# vibe-ic#2138 — A HAND-FED COUNT GUARDING A POPULATION THAT MOVES EVERY
+# LANDING MUST GO STALE, SO THE LANDING IS WHERE IT IS CAUGHT.
+#
+# `tools/ci/trusted_test_selection.py::HERMETIC_TEST_PROGRESS` pins the exact
+# collection denominator of four protected test files. `f5474d758` added an item
+# to one of them and did not move its pin, and nothing here refused: the guard
+# that knows — `tools/ci/test_trusted_test_selection.py::
+# test_nested_progress_schedule_matches_live_pytest_collection` — lives in
+# `full:repo-tools-tests`, minutes away and skipped entirely by `--cheap-only`,
+# which is the pre-push hook's path. So the stale pin reached main and the guard
+# fired THERE, where nobody can fix it by pushing again.
+#
+# WHOLE-TREE, so it sits outside the range block with `version-sync` and
+# `prose-polarity`: the question is what the tree that ships contains, not what
+# this push touched.
+#
+# BOTH SIDES FROM THE SUBJECT ($ROOT/$PLUGIN), the program from the instrument
+# ($PROGRAMS) — a landing that adds a test AND moves the pin must be green, and
+# reading the pin from the BASE would refuse exactly that landing. The subject
+# cannot cheat: the schedule is a protected path and only PREPARE/ACTIVATE moves
+# it.
+#
+# CHEAP: one `pytest --collect-only` over four files. MEASURED on 8HD-9 in the
+# pinned image (0.3.48), this lane's clone, three consecutive runs at load
+# 12.3-12.7: 4.47 s / 4.27 s / 4.41 s.
+run "cheap:nested-progress-pin" "nested-progress item pins match live collection" \
+  python3 "$PROGRAMS/nested_progress_pin_check.py" \
+      --schedule "$ROOT/tools/ci/trusted_test_selection.py" \
+      --plugin-root "$PLUGIN"
 # A landing is normally ONE commit. A batch is legitimate when several
 # independent changes land together — NO-MIX forces a benchmark-data fix and a
 # plugin change into separate commits, for instance — and the gate accepts that
@@ -821,7 +851,7 @@ run "full:write-guard-baseline" "write-guard baseline" \
 
 # ── THE FULL TIER'S INDEPENDENT STAGES RUN AT THE SAME TIME ────────────────
 #
-# The concurrent window is exactly `LANDING_PROGRESS_UNITS[15..20]` — a
+# The concurrent window is exactly `LANDING_PROGRESS_UNITS[16..21]` — a
 # contiguous six-unit run inside a 24-unit FIXED sequence. Everything before it
 # (units 0-14 and the pytest runtime preflight) and everything after it (units
 # 21-23) stays serial, because both ends are producer/consumer brackets:
@@ -1883,10 +1913,19 @@ lane_hygiene() {
 # site names explicitly, and `repo_hygiene_gates.sh:180` resolves the same
 # script — so it is tempting to call one a duplicate and delete it. Do not.
 #
-#   * The LABEL is `LANDING_PROGRESS_UNITS[20]`. Removing it refuses every
+#   * The LABEL is `LANDING_PROGRESS_UNITS[22]`. Removing it refuses every
 #     landing driven with `VIBEIC_LANDING_PROGRESS` set, which is exactly how
 #     the B2/A2 arms are driven: `landing_completion_record.finish` refuses
-#     unless the emitted labels equal the complete 25-entry tuple.
+#     unless the emitted labels equal the complete 27-entry tuple.
+#     BOTH NUMBERS WERE ALREADY ONE BEHIND AT 425c6402841d, before this
+#     landing touched anything: the tuple was 26 entries and `full:plugin-audit`
+#     sat at index 21, because the vibe-ic#712 insertion at index 10 shifted
+#     every later index and re-stated only the window line above. vibe-ic#2138
+#     inserts `cheap:nested-progress-pin` at index 11 and shifts them again, so
+#     these are re-derived from the tuple rather than incremented -- an index
+#     nothing asserts is exactly the kind of number that rots in silence
+#     (`test_the_window_is_exactly_the_six_contiguous_units` locates the window
+#     by `order.index`, never by an ordinal, which is why nothing went red).
 #   * In an ARM they are not the same subject at all. This one runs the
 #     TRUSTED `/runtime` copy of the program; the hygiene tier runs the copy
 #     resolved against the candidate-controlled `/subject`. Two different
@@ -2105,7 +2144,7 @@ lane_window_saw_a_write() {
 # is deliberately no environment flag that forces either shape.
 #
 # NOT A UNIT, NOT A GATE. `landing_completion_record` refuses any label outside
-# the fixed 25-entry tuple, so this prints plain REPORT lines the way
+# the fixed 27-entry tuple, so this prints plain REPORT lines the way
 # `landing_measured_tree_disclosure` does, and it returns 0 on every path: a
 # subject that could not be prepared is a fact about the run, and the only
 # verdict it can move is its reader's own, in the direction that refuses.

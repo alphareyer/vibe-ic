@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The landing tier's concurrent window, asserted on the scheduler itself.
 
-`tools/gatekeeper-land.sh` runs `LANDING_PROGRESS_UNITS[15..20]` as four lanes.
+`tools/gatekeeper-land.sh` runs `LANDING_PROGRESS_UNITS[16..21]` as four lanes.
 Everything here drives THAT SCHEDULER -- the real `lane_launch`, `lane_join`,
 `lane_resolve`, `run_capture`, `fn_capture`, `run_emit`, `lane_run_window` and
 `lane_emit_window` function bodies, extracted verbatim from the script by
@@ -813,7 +813,7 @@ def test_landing_record_is_never_called_from_a_lane_body(land_text):
 
     `landing_completion_record.py:200` refuses any label that is not
     `LANDING_PROGRESS_UNITS[len(gates)]`, and `:261` refuses unless the emitted
-    labels equal the complete 25-entry tuple. A lane that recorded from its own
+    labels equal the complete 27-entry tuple. A lane that recorded from its own
     subshell would append out of order AND lose concurrent updates.
     """
     for name in ("lane_targeted", "lane_corpus", "lane_hygiene", "lane_audit",

@@ -53,6 +53,12 @@ LANDING_PROGRESS_UNITS = (
     # `test_the_script_emits_exactly_the_declared_units_in_declared_order`,
     # which is what caught this entry being missing.
     "cheap:prose-polarity",
+    # vibe-ic#2138, added with the `run` line the cheap tier now carries just
+    # after prose-polarity. Declared at index 11 because that is where
+    # `gatekeeper-land.sh` emits it; see the note above prose-polarity for why
+    # a unit declared anywhere else refuses EVERY landing rather than only its
+    # own.
+    "cheap:nested-progress-pin",
     "cheap:landing-shape",
     "cheap:competing-claims-report",
     "cheap:worktree-clean",

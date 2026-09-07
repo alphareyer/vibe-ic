@@ -248,29 +248,44 @@ def test_progress_plan_interleaves_only_parent_owned_matrix_module_units():
     assert len(expected) == len(set(expected))
 
 
+# THE COLLECTION IS ISSUED IN ONE PLACE (vibe-ic#2138).
+#
+# This test used to build its own `pytest --collect-only` command line. So does
+# the landing gate that now asks the same question of the tree that ships
+# (`programs/nested_progress_pin_check.py`, wired into the cheap tier of
+# `tools/gatekeeper-land.sh`), and two command lines are two definitions of "the
+# collection denominator" — an env token or a `-p` that drifts on one side moves
+# a count on that side only, and the disagreement would surface as a landing
+# refusing a tree this test calls correct. The gate owns the command; this test
+# calls it and keeps its own ORDINAL assertions, which the gate does not make.
+#
+# IMPORTED BY PATH, not by name, and lazily: `_import_from` is defined further
+# down this file, and a module-level call here would NameError at collection.
+def _nested_pin_module():
+    return _import_from(
+        HERE.parent.parent / S.PLUGIN_REL
+        / "programs/nested_progress_pin_check.py",
+        "_tts_probe_nested_progress_pin_check")
+
+
 def test_nested_progress_schedule_matches_live_pytest_collection():
     plugin_root = HERE.parent.parent / S.PLUGIN_REL
-    env = os.environ.copy()
-    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    proc = _pr.run(
-        [sys.executable, "-m", "pytest", "--collect-only", "-q",
-         "-p", "no:cacheprovider", *S.HERMETIC_TEST_PROGRESS],
-        cwd=plugin_root, env=env, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, check=False)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    collected = [
-        line.strip() for line in proc.stdout.splitlines()
-        if any(line.startswith(test_file + "::")
-               for test_file in S.HERMETIC_TEST_PROGRESS)
-    ]
+    collected = _nested_pin_module().collect_nodeids(
+        plugin_root, sorted(S.HERMETIC_TEST_PROGRESS))
     for test_file, spec in S.HERMETIC_TEST_PROGRESS.items():
-        nodes = [nodeid for nodeid in collected
-                 if nodeid.startswith(test_file + "::")]
+        nodes = collected[test_file]
         assert len(nodes) == spec["items"], (
             test_file, spec["items"], len(nodes))
         for ordinal, nodeid, _scope, _total in spec["domains"]:
             assert nodes[ordinal - 1] == nodeid
+
+
+def test_the_landing_gate_reads_the_same_pins_this_file_asserts():
+    """The gate's own view of the table, against the imported module's."""
+    schedule = HERE / "trusted_test_selection.py"
+    pinned = _nested_pin_module().pinned_items(schedule)
+    assert pinned == {test_file: spec["items"]
+                      for test_file, spec in S.HERMETIC_TEST_PROGRESS.items()}
 
 
 def test_every_nested_progress_producer_has_one_exact_base_owned_schedule():
