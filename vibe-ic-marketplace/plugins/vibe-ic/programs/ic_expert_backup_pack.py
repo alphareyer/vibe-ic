@@ -29,10 +29,41 @@ by invoking the `vibe-ic:ic-expert-agent` subagent on the emitted pack — the
 hand-off JSON names exactly that invocation, so an orchestrator (a benchmark
 driver, `phase1-orchestrate`, or a human) runs it identically. Reads ONLY the
 supplied prompt + interface — never any oracle/harness.
+
+CLASS-FIRST ASSEMBLY, AND A PACK THAT REFUSES TO CLAIM IT IS ASSEMBLED (#2094).
+A pack assembled for a design whose REGISTERED `ic_class` the expert DB PROFILES
+is `ic_class`-driven end to end:
+
+  * its `db_classes` come from the profile — the class SELECTS, the phrase only
+    RANKS within the selection (`ic_expert_db_query.query(..., ic_class=...)`);
+  * its `interface_contract` is the profile's `integration_contract` — the field
+    set this class's generated integration/constraints layers must carry;
+  * its `target_module` is recovered from the design INPUT when the caller has
+    none to give;
+  * and if, after all that, it still carries no target module and no contract,
+    it is stamped `assembly_status: NOT_ASSEMBLED` and says why.
+
+That last point is the actual defect this closes. MEASURED on a crypto
+accelerator: the pack carried `target_module: null`, `interface_contract: null`,
+`expert_skills: []` and five db_classes none of which was crypto — and it was
+handed on as a pack, so a 46-expectation review was recorded as having had an
+expert pack in hand when the pack contained nothing about the design's class. A
+null pack that READS AS ASSEMBLED is worse than no pack: it launders an empty
+context into a credited one. So the status is computed and stated.
+
+An `ic_class` the DB does not profile (including the classifier's terminal
+CATCH-ALL, whose registry entry says in its own words that designs landing there
+"are UNCLASSIFIED, not classified") is left exactly as before: no confinement,
+no contract substitution, no refusal, and a byte-identical descriptor. Refusing
+a pack for a class nobody has profiled would score the classifier's uncertainty
+as the design's deficiency. Profiling the remaining registered classes moves
+every design's pack at once and belongs in its own change, on its own corpus
+sweep — the gap is DECLARED in the DB, class by class, not left implicit.
 """
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -55,10 +86,73 @@ def iface_to_contract_v(iface: List[Dict[str, Any]], target: str) -> str:
     return f"module {target} (\n" + ",\n".join(body) + "\n);\nendmodule\n"
 
 
-def _db_hits(prompt: str, k: int) -> List[Dict[str, Any]]:
+# The design INPUT's own way of naming its top module. Two GENERAL spec
+# conventions, no design/vendor literal: an explicit "top-level module: `x`",
+# and a prose sentence that names "the module `x`" / "the module **`x`**". Used
+# ONLY to fill a `target` the caller does not have; a caller-supplied target
+# always wins.
+_TARGET_RES = [
+    re.compile(r"\btop[-_ ]?(?:level[-_ ]?)?module\b[^\n`]{0,20}[`*]+([A-Za-z_]\w*)[`*]+",
+               re.I),
+    re.compile(r"\bmodule\b[^\n`]{0,12}[`*]*`([A-Za-z_]\w*)`", re.I),
+]
+
+
+def recover_target_module(prompt: str) -> Optional[str]:
+    """The top-module name the design INPUT states, or None. Input-only.
+
+    POLARITY-AWARE (#712's one vocabulary, `_prose_polarity`). A spec sentence
+    is as likely to RETRACT a module name as to declare one — "the module `x`
+    is not the top level here", "`x` is no longer the wrapper" — and an
+    extractor that takes the first match writes the denied name into the pack's
+    `target_module`, where it then reads as the design's own declaration. So
+    each candidate is checked against the SENTENCE it sits in, and a denied one
+    is skipped rather than returned. Line-wrapped prose gets `LINE_END_BREAKS`:
+    a spec written one sentence per line ends sentences with ".\n", and a scope
+    that runs past it borrows the neighbouring sentence's polarity."""
+    text = prompt or ""
+    try:
+        import _prose_polarity as _pp
+    except Exception:  # noqa: BLE001
+        _pp = None
+    for rx in _TARGET_RES:
+        for m in rx.finditer(text):
+            if _pp is not None:
+                lo, hi = _pp.sentence_scope(text, m.start(), m.end(),
+                                            extra_breaks=_pp.LINE_END_BREAKS)
+                if _pp.is_denied(text[lo:hi]):
+                    continue
+            return m.group(1)
+    return None
+
+
+def integration_contract_md(ic_class: str, requirements: List[str]) -> str:
+    """The class-level CONTRACT a layer-expectation hand-off must satisfy: what
+    this registered class's generated integration / constraints layers have to
+    carry. The analogue of `iface_to_contract_v` for a hand-off whose target is
+    a document rather than a module — requirements only, no answers."""
+    lines = [f"# Integration contract — registered ic_class `{ic_class}`", "",
+             "The generated integration (L9) and constraints (L19) layers for a design",
+             "of this class must carry each of the following. These are REQUIREMENTS on",
+             "the layers, not answers about this design; read the design input for the",
+             "answers.", ""]
+    for r in requirements:
+        lines.append(f"- {r}")
+    return "\n".join(lines) + "\n"
+
+
+def _db_hits(prompt: str, k: int, ic_class=None) -> List[Dict[str, Any]]:
     try:
         import ic_expert_db_query as _db
-        hits = _db.query(prompt, k=k) or []
+        hits = _db.query(prompt, k=k, ic_class=ic_class) or []
+    except KeyError:
+        # A class profile naming an entry the DB does not carry. This one is
+        # NOT swallowed: the blanket `return []` below is the right answer for
+        # "retrieval found nothing", and the wrong one for "the class-first
+        # configuration is broken" — it would turn a mis-declared profile into
+        # a silently empty pack, which is the failure the raise exists to
+        # prevent. It reaches the caller, which records it as a stated ERROR.
+        raise
     except Exception:
         return []
     out = []
@@ -143,10 +237,52 @@ def _spec_requirements(prompt: str,
     return reqs
 
 
+def class_first_disposition(ic_class) -> Dict[str, Any]:
+    """What CLASS-FIRST did, or did not do, for `ic_class` — for a CONSUMER's
+    record, not for the agent's pack.
+
+    Three states, kept apart on purpose. `PROFILED` (the DB declares the class's
+    db_classes and integration contract, so retrieval was confined and the pack
+    has a defined shape); `NOT_PROFILED` (the class is registered and the DB
+    declares no profile for it — retrieval was the unconfined lexical ranking
+    and the pack is not refused); `NOT_A_REGISTERED_CLASS` (the caller passed
+    something the registry does not name, including the absent/unknown case).
+    Collapsing the middle state into the last is how an unprofiled class goes
+    silent: the record would say "no class" where the truth is "a class nobody
+    has profiled yet"."""
+    try:
+        import ic_expert_db_query as _dbq
+        profile = _dbq.registered_class_profile(ic_class)
+        registered = _dbq.is_registered_class(ic_class)
+    except Exception as exc:  # noqa: BLE001
+        return {"ic_class": ic_class, "profile": "NOT_MEASURED",
+                "reason": f"the expert DB could not be read: {exc}"}
+    if profile:
+        return {"ic_class": ic_class, "registered": True, "profile": "PROFILED",
+                "db_class_selection": "CLASS_CONFINED",
+                "db_classes": list(profile.get("db_classes") or []),
+                "reason": ("the registered class selected the db entries; lexical "
+                           "phrase retrieval only ranked within them")}
+    if registered:
+        return {"ic_class": ic_class, "registered": True, "profile": "NOT_PROFILED",
+                "db_class_selection": "LEXICAL_UNCONFINED", "db_classes": [],
+                "reason": ("the expert DB declares no profile for this registered "
+                           "class, so there is no class-level statement of what an "
+                           "assembled pack for it contains. Retrieval and assembly "
+                           "are unchanged and the pack is NOT refused — refusing on "
+                           "an unprofiled class would score the absence of a profile "
+                           "as the design's deficiency")}
+    return {"ic_class": ic_class, "registered": False,
+            "profile": "NOT_A_REGISTERED_CLASS",
+            "db_class_selection": "LEXICAL_UNCONFINED", "db_classes": [],
+            "reason": ("no registered ic_class was supplied, or the name is not one "
+                       "the registry carries")}
+
+
 def assemble(prompt: str, iface: Optional[List[Dict[str, Any]]], target: Optional[str],
              expert_skills: List[str], verify_gates: List[str],
              out_dir: Path, k: int = 5, context_keys=None,
-             output_target: str = "rtl.sv") -> Dict[str, Any]:
+             output_target: str = "rtl.sv", ic_class=None) -> Dict[str, Any]:
     """Assemble the IC-Expert-Agent AI-backup pack into `out_dir`. Returns the
     hand-off descriptor (also written to `out_dir/ic_expert_agent_handoff.json`).
     `context_keys` (optional) = the record's `input.context` file paths, used for
@@ -158,25 +294,73 @@ def assemble(prompt: str, iface: Optional[List[Dict[str, Any]]], target: Optiona
     contract, emit the descriptor) is target-agnostic, so the Phase-1 expert
     PARSE track reuses it verbatim with `l_doc_expectations.json`. Same dual-
     track hand-off, different question asked of it — reusing it is what keeps
-    one measured mechanism instead of two similar ones drifting apart."""
+    one measured mechanism instead of two similar ones drifting apart.
+
+    `ic_class` is the design's REGISTERED class. Default None → every field is
+    computed exactly as before, so a caller that does not know the class gets a
+    byte-identical descriptor. When it names a class the expert DB PROFILES, the
+    assembly becomes CLASS-FIRST and the descriptor carries a `class_first`
+    block stating what the class selected and whether the pack is assembled at
+    all. See the module docstring for why the refusal exists."""
     out_dir.mkdir(parents=True, exist_ok=True)
     prompt = prompt or ""
+
+    # ── class-first selection ───────────────────────────────────────────────
+    # `profile` is a dict only for a class the DB PROFILES. A registered class
+    # mapped to null and a name that is not a class at all are both "no
+    # profile" for selection purposes, but they are DIFFERENT facts and the
+    # descriptor keeps them apart.
+    profile = registered = None
+    try:
+        import ic_expert_db_query as _dbq
+        profile = _dbq.registered_class_profile(ic_class)
+        registered = _dbq.is_registered_class(ic_class)
+    except Exception:  # noqa: BLE001
+        profile, registered = None, None
 
     # expert-SKILLS digest (Track 1) + expert-DB digest (Track 2).
     n_skills = n_db = 0
     try:
         import _lesson_digest as _ld
         n_skills = _ld.render_lesson_digest(out_dir)
-        n_db = _ld.render_ic_expert_db_digest(out_dir, prompt, k=k)
+        # SAME ic_class as the descriptor below. `ic_expert_db.md` is the file
+        # the agent READS; `db_classes` is only a note about it. Rendering the
+        # digest unconfined while the descriptor lists the confined classes
+        # would leave the pack DESCRIBING one selection and DELIVERING another.
+        n_db = _ld.render_ic_expert_db_digest(out_dir, prompt, k=k,
+                                              ic_class=ic_class)
+    except KeyError:
+        raise
     except Exception:
         pass
-    db_classes = _db_hits(prompt, k)
+    db_classes = _db_hits(prompt, k, ic_class=ic_class)
+
+    # TARGET MODULE, resolved FIRST because the contract choice depends on it.
+    # A caller-supplied target always wins; only a profiled class falls back to
+    # recovering the name the design INPUT states, because turning recovery on
+    # for every class changes every design's pack at once.
+    if not target and profile:
+        target = recover_target_module(prompt)
 
     # interface CONTRACT (the load-bearing spec the body must honour).
     contract_rel = None
+    contract_kind = None
     if iface and target:
         (out_dir / "contract.v").write_text(iface_to_contract_v(iface, target))
         contract_rel = "contract.v"
+        contract_kind = "module_header_v"
+    elif profile:
+        # No recovered port list, but the CLASS has a declared contract: what
+        # this class's generated integration/constraints layers must carry.
+        # That is a real contract for a layer-expectation hand-off, and it is
+        # the one thing a null pack was missing.
+        reqs = [r for r in (profile.get("integration_contract") or [])
+                if isinstance(r, str)]
+        if reqs:
+            (out_dir / "contract.md").write_text(
+                integration_contract_md(str(ic_class), reqs))
+            contract_rel = "contract.md"
+            contract_kind = "class_integration_contract_md"
 
     handoff = {
         "subagent_type": SUBAGENT_TYPE,
@@ -201,6 +385,72 @@ def assemble(prompt: str, iface: Optional[List[Dict[str, Any]]], target: Optiona
         },
         "output_target": output_target,
     }
+
+    # ── assembly status ─────────────────────────────────────────────────────
+    # Emitted only for a class the DB PROFILES: only there is "assembled"
+    # defined, and only there can the absence of a target/contract be the
+    # pack's fault rather than the classifier's silence. For every other class
+    # the descriptor is byte-identical to the pre-#2094 one.
+    if profile:
+        in_class = sorted({h.get("ic_class") for h in db_classes
+                           if isinstance(h, dict) and h.get("ic_class")})
+        missing = []
+        if not target:
+            missing.append("target_module")
+        if not contract_rel:
+            missing.append("interface_contract")
+        # THREE states, not two, and the middle one is the reason.
+        #   ASSEMBLED             both present.
+        #   ASSEMBLED_INCOMPLETE  one present, one missing. The pack DOES carry
+        #                         class knowledge; a named field is absent.
+        #   NOT_ASSEMBLED         NEITHER present, i.e. nothing class-specific
+        #                         at all — the state that was measured.
+        # Collapsing the middle into NOT_ASSEMBLED would make this module's own
+        # refusal text ("the pack contributed no class knowledge") FALSE for a
+        # pack that carries a full class contract and merely could not recover a
+        # module name. A refusal that overstates its grounds is the same defect
+        # as a pack that overstates its contents, pointed the other way.
+        if not missing:
+            status = "ASSEMBLED"
+        elif len(missing) == 2:
+            status = "NOT_ASSEMBLED"
+        else:
+            status = "ASSEMBLED_INCOMPLETE"
+        cf: Dict[str, Any] = {
+            "ic_class": ic_class,
+            "registered": True,
+            "profile": "DECLARED",
+            "db_class_selection": "CLASS_CONFINED",
+            "db_classes_selected_by_class": list(profile.get("db_classes") or []),
+            "db_classes_in_pack": in_class,
+            "contract_kind": contract_kind,
+            "assembly_status": status,
+            "missing_fields": missing,
+        }
+        if status == "NOT_ASSEMBLED":
+            cf["not_assembled_reason"] = (
+                f"the registered ic_class {ic_class!r} is PROFILED, so this pack "
+                f"has a defined shape, and it carries NEITHER a target_module NOR "
+                f"an interface_contract. A pack with nothing class-specific in it "
+                f"must not be handed on as an assembled pack: a consumer that "
+                f"credits it records a review as having had expert context it "
+                f"never had. Supply the interface (or state the top module in the "
+                f"design input) and re-assemble.")
+        elif status == "ASSEMBLED_INCOMPLETE":
+            cf["incomplete_reason"] = (
+                f"the pack carries this class's knowledge and is missing "
+                f"{missing}. Stated rather than refused: it is not an empty pack, "
+                f"and calling it one would overstate the grounds.")
+        handoff["class_first"] = cf
+    # An unprofiled class adds NO key: the descriptor is the AGENT's reading
+    # surface, and "we did not confine the retrieval" is not something the
+    # agent can act on. It is something the RECORD must state, so the consumer
+    # calls `class_first_disposition()` and writes it into its own record —
+    # which is where a reader looks to learn what context the track had. That
+    # keeps the pack for an unprofiled class byte-identical to the pre-#2094
+    # one, so a change to a profiled class can never be confused with drift
+    # somewhere else.
+
     if output_target == "l_doc_expectations.json":
         # Phase-1 expectation authors compare generated L-docs. State the
         # generated schema explicitly: source documents may use different
@@ -250,6 +500,10 @@ def main(argv=None) -> int:
     ap.add_argument("--skills", default="", help="comma list of expert skills")
     ap.add_argument("--verify", default="", help="comma list of verify gates")
     ap.add_argument("--k", type=int, default=5)
+    ap.add_argument("--ic-class", default=None,
+                    help="the design's REGISTERED ic_class; when the expert DB "
+                         "profiles it, assembly is CLASS-FIRST and the pack states "
+                         "whether it is assembled at all")
     a = ap.parse_args(argv)
     prompt = a.prompt
     if prompt.startswith("@"):
@@ -257,7 +511,7 @@ def main(argv=None) -> int:
     h = assemble(prompt, None, a.target,
                  [s for s in a.skills.split(",") if s],
                  [s for s in a.verify.split(",") if s],
-                 Path(a.out), k=a.k)
+                 Path(a.out), k=a.k, ic_class=a.ic_class)
     print(json.dumps(h, indent=2, ensure_ascii=False))
     return 0
 

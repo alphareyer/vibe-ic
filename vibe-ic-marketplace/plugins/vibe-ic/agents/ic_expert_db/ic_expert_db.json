@@ -3,8 +3,38 @@
  "_schema": "entries[].{ic_class, lesson_count, lessons[], related?[] (optional cross-links to sibling ic_class names sharing a core craft)}",
  "_source": "distilled from proven-correct (officially-scored PASS) reference designs, plus owner-reviewed general-convention distills from fail-mode triage prose (see capture_log.md); benchmark identifiers scrubbed at build time (blindness); §4.05 ORACLE-SOURCE ban enforced by ic_expert_db_consistency_check.py.",
  "_consistency": "lessons are DESIGN-CRAFT ADVICE for the AI author; they add knowledge, they do NOT assert hard rules that a gate/program checks. No lesson may contradict a deterministic gate.",
- "classes": 102,
- "total_lessons": 203,
+ "registered_class_profiles": {
+  "_doc": "CLASS-FIRST retrieval. The REGISTERED ic_class (programs/ic_class_registry.json) SELECTS which entries[] a context pack may carry; lexical phrase retrieval then RANKS and ADDS within that selection and can never substitute an out-of-class entry for an in-class one. Measured cause: on a crypto-accelerator input the sentence \"the multipliers are implemented in a serial-parallel fashion\" scored the serial-parallel-multiplier entry into a crypto pack, where its craft (authoring a golden for a serial-parallel multiplier DESIGN) has no referent — a literal phrase collision, not a design-family match. A profile also declares the integration_contract the class's generated integration/constraints layers must carry, which is what a pack for a profiled class hands the expert author in place of a null contract. A registered class mapped to null is NOT YET PROFILED: retrieval falls back to the unconfined lexical ranking (behaviour unchanged) and a pack for it is neither class-confined nor refused. null is a DECLARED gap, never an omission — every name in ic_class_registry.json appears here, and a test fails when a newly registered class does not.",
+  "aid_class_half_duplex_single_wire": null,
+  "digital_cmd_driven": null,
+  "mixed_signal_otp": null,
+  "pure_analog": null,
+  "data_converter": null,
+  "bare_fpga": null,
+  "bus_interconnect_protocol": null,
+  "serial_peripheral_protocol": null,
+  "digital_arithmetic_primitive": null,
+  "processor_cpu": null,
+  "bus_peripheral": null,
+  "crypto_accelerator": {
+   "db_classes": [
+    "block-cipher-accelerator",
+    "gf-matrix-cipher-pipeline",
+    "secure-register-bank-fsm"
+   ],
+   "integration_contract": [
+    "the algorithm datapath's compile-time parameter set, with every stated coupling between two parameters carried as a PAIR (a countermeasure switch and the datapath variant it selects are one requirement, not two)",
+    "the software-visible register interface: its bus device port, its clock, and every ADDITIONAL clock named as a separate domain — a second clock input is a domain crossing, not a derived clock and not an alternate clock source to select between",
+    "the entropy/randomness interface, and — when the input permits tying it off — the sequencing consequence for the ready/idle status bit that a documented post-reset reseed gates",
+    "key and secret-material register handling: the software-unreadable / write-only access attributes, the sharing scheme if the key is split, and the clear-on-completion rule",
+    "the implementation variant actually selected for this run's target technology when the input states a target-conditional recommendation, named beside every published area or timing figure",
+    "the mode/operation set this run scopes, AND the register fields that stay in the map for modes outside that scope — an out-of-scope mode with an in-map register is an unresolved scope question, not an absent feature"
+   ]
+  },
+  "unknown_protocol_class": null
+ },
+ "classes": 103,
+ "total_lessons": 206,
  "entries": [
   {
    "ic_class": "accumulator-datapath",
@@ -234,6 +264,19 @@
    ]
   },
   {
+   "ic_class": "block-cipher-accelerator",
+   "lesson_count": 3,
+   "lessons": [
+    "Source-sentence class: \"when <countermeasure> is turned off, a <variant> implementation also needs to be selected using the corresponding compile-time parameter\". A countermeasure parameter that gates a datapath variant is COUPLED to a second parameter naming the variant, and a spec sentence whose verb is \"needs to be selected\" states a hard obligation, not a convention. Setting the countermeasure parameter to 0 while leaving the variant parameter at its countermeasure-bearing default leaves the protected sub-block (a masked S-box, a shared/split datapath) instantiated with no source, and elaboration stops on an unresolved sub-module rather than on anything the author wrote. Carry BOTH halves of a stated parameter coupling into the integration layer: a layer that records only the switch has recorded half a requirement, and the half it dropped is the half that breaks the build.",
+    "Source-sentence class: \"it is recommended to use the A or B variant for ASIC or FPGA targets, respectively\" — one distributive sentence binding one implementation variant per implementation target. Two different statements hide in it: the OBLIGATION (a variant of this kind must be selected at all) and the RECOMMENDATION (which one, conditioned on the target technology). Meeting the obligation with the other target's variant is legal and still builds, so nothing downstream ever objects — but it is a different netlist with different area and timing, and every PPA figure it produces then belongs to a build the input did not recommend. Resolve the target-conditional mapping against the run's actual target, record it in the constraints layer, and name the selected variant beside any published area or timing number.",
+    "Source-sentence class: a spec that states BOTH (a) a post-reset entropy or randomness reseed that must complete before the ready/idle status bit asserts, and (b) permission to tie off the entropy interface when the randomness feature is not used. The two sentences contradict each other at the sequencing level: with the entropy request never answered the reseed never completes, the idle bit never asserts, and the first transaction waits on a status poll forever — a hang with no error bit and no red verdict anywhere to attribute it to. When an input states both and resolves neither, the integration layer must record the conflict AND the chosen resolution explicitly (answer the reseed request, or state that the status bit is not gated on it in this configuration); an unrecorded conflict is rediscovered as a first-transaction hang in simulation, at the price of a full debug cycle."
+   ],
+   "related": [
+    "gf-matrix-cipher-pipeline",
+    "secure-register-bank-fsm"
+   ]
+  },
+  {
    "ic_class": "bst-rank-search-fsm",
    "lesson_count": 1,
    "lessons": [
@@ -452,6 +495,9 @@
    "lesson_count": 1,
    "lessons": [
     "For a pipelined GF(2^8) MixColumns-style cipher with a fixed \"N-cycle from i_valid to o_valid\" latency, the valid flag and the data must flow through EXACTLY the same number of register stages so o_valid and o_data are asserted on the same cycle — do the combinational cipher math once on a registered copy of the inputs and pipe a parallel s1_valid->s2_valid->o_valid chain, gating o_data with the matching valid so it is zero when not valid; a naive author under-pipelines valid (or samples data one stage off), producing the classic one-cycle-early/late o_valid and stale/held o_data seen in the buggy vectors. Also anchor the two algorithm invariants a naive implementation gets wrong: xtime uses XOR 0x1B (0x11B truncated to 8 bits) only when bit7 is set, and encrypt XORs the key AFTER MixColumns while decrypt XORs the key BEFORE the inverse MixColumns."
+   ],
+   "related": [
+    "block-cipher-accelerator"
    ]
   },
   {
@@ -873,6 +919,7 @@
     "For a sequence-gated (multi-step unlock) register bank, model unlock as an explicit FSM whose state advances only on CONSECUTIVE matching operations and re-locks on ANY deviation: a wrong code, a write/read to a non-sequence address mid-sequence, or a read that interrupts the two unlock writes must all fall through to the LOCKED state. Because the sole clock is the strobe (i_capture_pulse) with async active-low reset, evaluate state transitions and register storage in one clocked block; guard both reads and writes with the unlocked state, make special/reserved addresses (0,1) write-only (read as 0), and default o_data_out to 0 on every write and every disallowed read so stale data is never exposed."
    ],
    "related": [
+    "block-cipher-accelerator",
     "nvm-fuse-array"
    ]
   },

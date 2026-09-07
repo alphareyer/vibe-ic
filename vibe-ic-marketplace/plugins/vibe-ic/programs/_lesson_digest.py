@@ -141,18 +141,29 @@ def render_lesson_digest(run_p: Path,
     return len(lessons)
 
 
-def render_ic_expert_db_digest(run_p: Path, prompt_text: str, k: int = 5) -> int:
+def render_ic_expert_db_digest(run_p: Path, prompt_text: str, k: int = 5,
+                               ic_class=None) -> int:
     """Render the RELEVANT IC Expert DB design-class knowledge for this design's
     prompt into ``run_p/ic_expert_db.md`` — a SEPARATE artifact for an
     INDEPENDENT dual-track (second) author, NOT folded into the main lessons
     digest (measured to dilute a single author; see render_lesson_digest note).
     Best-effort: returns 0 (no file written) if the DB / query module is absent
-    or nothing matches. Deterministic — the LLM only consumes the result."""
+    or nothing matches. Deterministic — the LLM only consumes the result.
+
+    `ic_class` is the design's REGISTERED class and it is CLASS-FIRST
+    (vibe-ic#2094). This is the file the agent actually READS; the hand-off
+    descriptor's `db_classes` is only a note about it. Retrieving the digest
+    unconfined while the descriptor listed the confined classes would leave the
+    pack DESCRIBING one selection and DELIVERING another — the colliding lesson
+    still in front of the author, and a reader of the descriptor unable to see
+    it. Default None → byte-identical to the pre-#2094 render."""
     if not prompt_text or not prompt_text.strip():
         return 0
     try:
         import ic_expert_db_query as _db  # sibling program (general-core)
-        hits = _db.query(prompt_text, k=k)
+        hits = _db.query(prompt_text, k=k, ic_class=ic_class)
+    except KeyError:
+        raise
     except Exception:  # noqa: BLE001
         return 0
     if not hits:

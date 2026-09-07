@@ -242,6 +242,14 @@ RULE_AI_ANSWER_SCHEMA_MISMATCH = "EXPERT_TRACK_AI_ANSWER_SCHEMA_MISMATCH"
 # The agent answered, and its `expectations` list was genuinely empty. A real
 # reading, and a real zero — reported so it can never be read as coverage.
 RULE_AI_ANSWER_EMPTY = "EXPERT_TRACK_AI_ANSWER_EMPTY"
+# The PACK ITSELF was not assembled (#2094). Its own rule id and `about:
+# "track"`, because nothing about the DESIGN is in question: the hand-off went
+# out carrying no target module and no interface contract for a class the
+# expert DB profiles, i.e. an empty context that READS as an assembled pack.
+# Every expectation the agent then writes is authored from the design input
+# alone; a record that does not say so credits the pack for coverage it did not
+# supply.
+RULE_PACK_NOT_ASSEMBLED = "EXPERT_TRACK_PACK_NOT_ASSEMBLED"
 
 # ── the AI sub-track's status vocabulary ────────────────────────────────────
 #
@@ -427,16 +435,40 @@ def input_text(project: Path) -> str:
     return "\n".join(parts)[:_INPUT_TEXT_CAP]
 
 
-def retrieved_classes(prompt: str, k: int = 5) -> List[Dict[str, Any]]:
+def registered_ic_class(project: Path) -> Optional[str]:
+    """The design's REGISTERED ic_class, or None when it has not been detected.
+
+    Read through `ic_class_profile.detect_ic_class`, which returns the profile
+    PERSISTED at `reports/ic_class.json` when one exists (#435's persist-once
+    contract) — this track must see the class the run itself detected, not a
+    second inference taken at a different point in the run. `"unknown"` is the
+    classifier's fail-closed answer and is NOT a class: returning it would make
+    the expert DB look up a profile for a name that means "we do not know".
+    """
+    try:
+        import ic_class_profile as _icp
+        cls = (_icp.detect_ic_class(project) or {}).get("ic_class")
+    except Exception:  # noqa: BLE001 — a missing class is context, never a fail
+        return None
+    return cls if cls and cls != "unknown" else None
+
+
+def retrieved_classes(prompt: str, k: int = 5, ic_class=None) -> List[Dict[str, Any]]:
     """What the expert DB surfaces for THIS design — recorded so a reviewer can
-    see which knowledge the track had in hand, including when it had none."""
+    see which knowledge the track had in hand, including when it had none.
+
+    CLASS-FIRST (#2094): when `ic_class` names a class the DB profiles, this is
+    the CONFINED retrieval, so the record shows the same classes the pack
+    carried. Recording an unconfined list beside a confined pack would make the
+    record disagree with the artefact it describes."""
     if not prompt.strip():
         return []
     try:
         import ic_expert_db_query as _db
         return [{"ic_class": h.get("ic_class"),
                  "score": round(float(h.get("score", 0) or 0), 2)}
-                for h in (_db.query(prompt, k=k) or []) if isinstance(h, dict)]
+                for h in (_db.query(prompt, k=k, ic_class=ic_class) or [])
+                if isinstance(h, dict)]
     except Exception:  # noqa: BLE001 — retrieval is context, never a hard fail
         return []
 
@@ -726,7 +758,8 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
 
 # ── the AI sub-track ────────────────────────────────────────────────────────
 
-def ai_subtrack(project: Path, prompt: str, out_dir: Path) -> Dict[str, Any]:
+def ai_subtrack(project: Path, prompt: str, out_dir: Path,
+                ic_class=None) -> Dict[str, Any]:
     """Hand the open-ended reading to the IC Expert Agent.
 
     Uses `ic_expert_backup_pack` — the assembler this doctrine already built
@@ -767,12 +800,29 @@ def ai_subtrack(project: Path, prompt: str, out_dir: Path) -> Dict[str, Any]:
 
     try:
         import ic_expert_backup_pack as _pack
+        # CLASS-FIRST (#2094). The design's REGISTERED class goes in, so the
+        # pack's db_classes are selected by the class and only ranked by the
+        # phrase — and so the pack can say whether it is assembled at all.
+        # `iface=None, target=None` stays: this hand-off asks for L-doc
+        # expectations, not an RTL body, so there is no recovered port list to
+        # hand over. Whether that leaves the pack empty is now the pack's own
+        # stated verdict rather than something a reader has to notice.
         handoff = _pack.assemble(
             prompt=prompt, iface=None, target=None,
             expert_skills=[], verify_gates=[PROGRAM],
             out_dir=out_dir, k=5,
-            output_target="l_doc_expectations.json")
+            output_target="l_doc_expectations.json",
+            ic_class=ic_class)
         status["handoff"] = handoff
+        # The disposition is recorded for EVERY design, profiled or not: the
+        # pack file only gains a `class_first` block when there was a profile
+        # to confine it with, so without this the unprofiled case would leave
+        # no trace anywhere and "we did not confine" would be indistinguishable
+        # from "there was nothing to confine".
+        status["class_first"] = _pack.class_first_disposition(ic_class)
+        status["pack_assembly_status"] = (
+            (handoff.get("class_first") or {}).get("assembly_status")
+            or "NOT_EVALUATED")
     except Exception as exc:  # noqa: BLE001
         status.update(status="ERROR", reason=f"pack assembly failed: {exc}")
         return status
@@ -833,8 +883,9 @@ def evaluate(project: Path) -> Dict[str, Any]:
     out_dir = _pl.report_path(project, "phase1/expert_parse_track").parent \
         / "expert_parse_track_pack"
 
+    ic_class = registered_ic_class(project)
     rules = [fn(project) for fn in DETERMINISTIC_RULES]
-    ai = ai_subtrack(project, prompt, out_dir)
+    ai = ai_subtrack(project, prompt, out_dir, ic_class=ic_class)
 
     findings: List[Dict[str, Any]] = []
     for r in rules:
@@ -900,6 +951,27 @@ def evaluate(project: Path) -> Dict[str, Any]:
                 + (f" Grounds: {'; '.join(str(e) for e in c['evidence'])}."
                    if c["evidence"] else "")),
             "expert_source": c.get("expert_source"),
+        })
+
+    if ai.get("pack_assembly_status") == "NOT_ASSEMBLED":
+        cf = (ai.get("handoff") or {}).get("class_first") or {}
+        findings.append({
+            "severity": "REVIEW",
+            # About the TRACK. The design is not what is in question: the
+            # hand-off this track emitted carried no class-specific context,
+            # and everything the agent writes from it is authored from the
+            # design input alone.
+            "about": "track",
+            "rule": RULE_PACK_NOT_ASSEMBLED,
+            "message": (
+                f"The expert pack for registered ic_class "
+                f"{cf.get('ic_class')!r} is NOT_ASSEMBLED: "
+                f"{cf.get('not_assembled_reason')} Anything the AI half "
+                f"returns for this run was authored from the design input "
+                f"alone; the pack contributed no class knowledge to it. "
+                f"Reported rather than left implicit — a null pack that reads "
+                f"as an assembled one is credited as context that was never "
+                f"there. Pack: {out_dir / 'ic_expert_agent_handoff.json'}."),
         })
 
     if ai["status"] == AI_SCHEMA_MISMATCH:
@@ -1022,7 +1094,12 @@ def evaluate(project: Path) -> Dict[str, Any]:
             "credited": False,
             "exit_code": AWAITING_EXIT_CODE,
         } if awaiting else None),
-        "retrieved_expert_classes": retrieved_classes(prompt),
+        "retrieved_expert_classes": retrieved_classes(prompt, ic_class=ic_class),
+        # WHICH classes the expert DB was allowed to offer, and why. Without
+        # this a reader sees a list of db_classes with no way to tell whether
+        # the design's own class chose them or a phrase collided.
+        "class_first": ai.get("class_first"),
+        "pack_assembly_status": ai.get("pack_assembly_status", "NOT_EVALUATED"),
         # A PASS must say how much it looked at. This is that number, split by
         # half so a reader can see WHICH half contributed it — a total of 4
         # means something different when the AI half supplied 0 of it.
