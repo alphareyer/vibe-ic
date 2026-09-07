@@ -391,16 +391,54 @@ def test_the_wiring_that_counts_is_the_INVOCATION_not_the_DECLARATION():
     restoring them returns it to `36 (baseline 36)` rc 0.
 
     Fast on purpose — it hands each file's own source to the reader that owns
-    its kind instead of sweeping ~1500 wiring sources."""
+    its kind instead of sweeping ~1500 wiring sources.
+
+    THE STAGE MAP IS NOT OPTIONAL (vibe-ic#2189). Under `invocation.v1` this
+    arm called `py_invocations(source, names)` and that was the whole call: any
+    reference to any symbol the module exports credited it. `invocation.v2`
+    (#2141) asks a stricter question — does the reference reach the gate's
+    VERDICT — and it answers that from the gate's own `verdict_path`, handed in
+    as `stages`. Omitting the argument does not relax the question, it makes it
+    unanswerable: every gate resolves to `(set(), True)`, `refs & set()` is
+    empty and only a literal `main` can credit. MEASURED on ce4206dc0ce5 by
+    direct call — `py_invocations(<runner source>, names)` returned `{}` for
+    both consumers, and `_credits({"scan"}, set(), True, consumed)` returned
+    None for `consumed` either way — so this arm read "the runners no longer
+    invoke the checker" about two files that demonstrably do. The stage map is
+    built here exactly as `gate_is_wired_check.wiring()` builds it, from the
+    gate's own source, which is the only construction the resolver is
+    specified against.
+
+    The credit is asserted BY ITS REASON, not merely by membership: `verdict
+    consumed (scan)` is the invocation.v2 answer, and a future rule that went
+    back to crediting library use would satisfy an `in found` assertion while
+    destroying the property this arm exists to pin."""
     import gate_is_wired_check as GIW
     names = {"counter_decode_lookahead_phase_check"}
 
+    #: `wiring()` reads each gate's verdict path from the gate's OWN source
+    #: once, and hands the map to every reader. Same construction here, over
+    #: the one gate this file is about.
+    stages = {
+        name: GIW.verdict_path(
+            (_PROGRAMS / f"{name}.py").read_text(encoding="utf-8"))
+        for name in names
+    }
+    assert stages["counter_decode_lookahead_phase_check"][0], (
+        "the checker exports no public stage at all — the stage map would be "
+        "empty and every assertion below would be vacuous")
+
     for consumer in ("design_one_shot_runner.py", "gate_directed_rtl_repair.py"):
         found = GIW.py_invocations(
-            (_PROGRAMS / consumer).read_text(encoding="utf-8"), names)
+            (_PROGRAMS / consumer).read_text(encoding="utf-8"), names, stages)
         assert "counter_decode_lookahead_phase_check" in found, (
             f"{consumer} no longer INVOKES the checker; a mention would not "
             f"bring it back")
+        how = found["counter_decode_lookahead_phase_check"]
+        assert "verdict consumed" in how, (
+            f"{consumer} reaches the checker, but not its VERDICT: {how!r}. "
+            f"Library use of a gate's module is not running the gate — that "
+            f"is the whole of invocation.v2 (#2141).")
 
     flow = (_PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml")
     text = flow.read_text(encoding="utf-8")
