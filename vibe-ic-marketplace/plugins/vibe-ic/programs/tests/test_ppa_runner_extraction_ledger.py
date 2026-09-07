@@ -584,6 +584,19 @@ _LEDGER = frozenset({
                                     # `clock_tree_synthesis`, plus HOW they
                                     # were chosen. `_ppa/timing.py` judges
                                     # slack records; it does not pick cells.
+    # RECORDED with the commit that adds it (#2172). `_i2172_cts_buf_family`
+    # is the SAME decision one rung further: instead of naming one master it
+    # returns every drive strength of that master's own family, so
+    # `clock_tree_synthesis -buf_list` can choose per level. It reads a
+    # Liberty's pin models and returns cell NAMES; it reads no STA artefact,
+    # emits no slack, and produces no verdict. `_ppa/timing.py` is a per-view
+    # EXTRACTOR over timing records — a cell chooser that produces no row
+    # would sit in it as a stranger, and splitting the two halves of one CTS
+    # buffer-selection decision across two modules is exactly the reviewing
+    # cost this ledger exists to prevent.
+    "_i2172_cts_buf_family",        # (liberty_text, leaf, root) -> every drive
+                                    # strength of the leaf master's own
+                                    # structural buffer family, for -buf_list.
     #
     # 9. PAD-RING DIE SIZE is read off another producer's record.
     "_padring_required_die_um",     # (project) -> the die side the pad ring

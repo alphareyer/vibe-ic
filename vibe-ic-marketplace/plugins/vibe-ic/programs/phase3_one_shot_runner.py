@@ -11987,6 +11987,73 @@ def _i1958_pick_cts_buffers(
     return buf, root, how
 
 
+# === vibe-ic#2172 — hand CTS the WHOLE buffer family, not one pinned master ===
+# `clock_tree_synthesis -buf_list` accepts a LIST. The flow passed exactly one
+# cell -- whatever `clk_buf` resolved to, either the registry's `clk_buf_cell`
+# or #1958's median-drive pick -- so every level of the tree, root aside, was
+# built from ONE drive strength. MEASURED (subservient x gf180mcuD, lane
+# cz2160): a five-deep tree of a single leaf master accounted for 4.56 ns of a
+# 6.53 ns insertion delay against a DECLARED 20 ns period, while the library
+# ships eight drive strengths of that same family.
+#
+# The list is DERIVED, never named: `_i1958_liberty_buffer_cells` already
+# decides what a buffer IS from its own pin model, and `_i1958_drive_and_base`
+# already groups those cells into families. This function only returns the
+# family the resolved leaf master ALREADY BELONGS TO, in full. So the choice
+# moves when the library moves, and a library that ships one drive strength
+# gets exactly the behaviour it had before.
+#
+# It refuses rather than guesses: when the resolved leaf cell is not itself a
+# structural buffer of the Liberty being read (an unreadable Liberty, a stub
+# with no pin model, a registry cell that does not exist in the active
+# library), it returns `([], "")` and the caller keeps the single master. A
+# family of one member likewise returns `([], "")` -- there is nothing to
+# choose from and a one-element list would only make the deck differ.
+def _i2172_cts_buf_family(
+        liberty_text: str, leaf_cell: Optional[str],
+        root_cell: Optional[str] = None) -> Tuple[List[str], str]:
+    """Every drive strength of `leaf_cell`'s own buffer family, as
+    `(names ascending by drive, how)`.
+
+    `names` is what belongs in `clock_tree_synthesis -buf_list`. Membership is
+    structural (one input, one output, output function == the input) and the
+    family key is the name with its trailing drive-strength integer removed --
+    the two tests #1958 already established. No cell, vendor, library or PDK
+    literal appears anywhere in it.
+
+    Returns `([], "")` when the family cannot be established or has a single
+    member, which is the caller's signal to keep the single pinned master."""
+    if not liberty_text or not leaf_cell:
+        return [], ""
+    cells = _i1958_liberty_buffer_cells(liberty_text)
+    if not cells:
+        return [], ""
+    families: Dict[str, List[Tuple[Optional[int], float, str]]] = {}
+    for name, area in cells:
+        base, drive = _i1958_drive_and_base(name)
+        families.setdefault(base, []).append((drive, area, name))
+    base, _ = _i1958_drive_and_base(leaf_cell)
+    if base not in families or leaf_cell not in [
+            t[2] for t in families[base]]:
+        # The resolved leaf is not a buffer of THIS Liberty. Say nothing and
+        # change nothing -- a guessed family would be exactly the "a proxy
+        # stands in for the property" shape #561 and #1958 were about.
+        return [], ""
+    members = sorted(families[base],
+                     key=lambda t: (t[0] if t[0] is not None else -1, t[1],
+                                    t[2]))
+    if len(members) < 2:
+        return [], ""
+    names = [t[2] for t in members]
+    drives = [str(t[0]) for t in members if t[0] is not None]
+    how = (f"derived from the PDK's own Liberty: the resolved leaf master "
+           f"{leaf_cell!r} belongs to structural buffer family {base!r}, "
+           f"which the library ships in {len(members)} drive strength(s)"
+           + (f" ({'/'.join(drives)})" if drives else "")
+           + f"; all of them go to -buf_list, -root_buf stays {root_cell!r}")
+    return names, how
+
+
 # v1.6.596 — for #404 P3 ORGANIC. Post-synth net-rename pass.
 # Defence-in-depth: if Yosys somehow emits a named tie net despite
 # hilomap (some Yosys versions emit intermediate named nets between
@@ -25118,6 +25185,7 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
                         spare_protection_tcl: str,
                         spare_postfix_tcl: str, clk_buf: str,
                         clk_buf_root: str, routing_constraint_tcl: str,
+                        cts_buf_list: Optional[Sequence[str]] = None,
                         pg_cleanup_block: str, spef_repair_block: str,
                         antenna_repair_block: str,
                         filler_block: str,
@@ -25232,6 +25300,34 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
     # _clock_path_drive_sizing_tcl). Pure text, no design/PDK input.
     _clk_path_snapshot = _clock_path_pre_cts_snapshot_tcl()
     _clk_path_sizing = _clock_path_drive_sizing_tcl()
+    # vibe-ic#2172, the SECOND half — WHY `-sink_clustering_size` STAYS PINNED.
+    # OpenROAD prints `[INFO CTS-0205] Better solution may be possible if
+    # either -sink_clustering_size, -sink_clustering_max_diameter, or both
+    # options are omitted to enable automatic clustering`, and the issue asked
+    # that the advice be taken OR the pinned value be justified. It is
+    # justified, and the reason is that this value is not a pin at all:
+    #   * a reference-flow `CTS_CLUSTER_SIZE` is an explicit operator choice
+    #     and wins outright (`_reference_flow_pnr_knobs`);
+    #   * absent one, the value is `_cts_fanout_target` — the SAME
+    #     `set_max_fanout` the SDC and sign-off DRV checks enforce, itself
+    #     resolved from the design's L9, its RTL replication bound, or the
+    #     LIBERTY's own `default_max_fanout`, in that order. Nothing here is a
+    #     literal.
+    # Omitting the flag would let TritonCTS size leaf clusters against no cap,
+    # and a leaf whose fanout exceeds the library's DECLARED maximum is a DRV
+    # violation the rest of the flow then has to repair — MEASURED (spm x
+    # ihp-sg13g2, recorded above): the SDC alone did NOT constrain
+    # `clock_tree_synthesis`, and CTS built a 16-sink leaf against the
+    # library's declared 8 until this value reached the flag directly.
+    # CTS-0205 is advice about the CLUSTERING SEARCH; it is not aware that the
+    # number it is offered to drop is a library limit. So the advice is
+    # recorded and declined, and what #2172 actually frees is the BUFFER
+    # CHOICE below — the thing that was a single pinned name.
+    # vibe-ic#2172 — `-buf_list` takes a LIST of masters. When the caller
+    # derived the whole family from the Liberty, hand CTS all of it so the
+    # tool picks a drive strength per level; absent that, the single resolved
+    # master, byte-identical to the pre-fix deck.
+    _cts_buf_list = " ".join(cts_buf_list) if cts_buf_list else clk_buf
     _cts_cluster = ""
     if cts_cluster_size is not None or cts_cluster_diameter is not None:
         _cts_cluster = " -sink_clustering_enable"
@@ -25422,7 +25518,7 @@ if {{[catch {{detailed_placement}} _rt_dp_err]}} {{
   }} else {{ puts "REPAIR_LEGALIZE_OK disp=diamond" }}
 }}
 puts "{_PNR_STAGE_MARKER} cts"
-{_clk_path_snapshot}if {{[catch {{clock_tree_synthesis -buf_list {{{clk_buf}}} -root_buf {clk_buf_root}{_cts_cluster}}} cts_err]}} {{
+{_clk_path_snapshot}if {{[catch {{clock_tree_synthesis -buf_list {{{_cts_buf_list}}} -root_buf {clk_buf_root}{_cts_cluster}}} cts_err]}} {{
   puts "CTS_NONFATAL: $cts_err -- continuing without explicit CTS"
 }}
 {_clk_path_sizing}write_def {out_dir_c}/post_cts.def
@@ -27841,6 +27937,30 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     if clk_buf is not None and _clk_buf_how:
         print(f"[phase3] CTS buffers: -buf_list {{{clk_buf}}} -root_buf "
               f"{clk_buf_root} — {_clk_buf_how}", file=sys.stderr)
+    # vibe-ic#2172 — the leaf master is now the family's REPRESENTATIVE, not
+    # the whole answer. Read the SAME Liberty again (the block above reads it
+    # only when the registry declared nothing) and expand `clk_buf` into every
+    # drive strength of its own family, so CTS chooses per level instead of
+    # being handed one size for the whole tree. `[]` means "keep the single
+    # master" and the emitted deck is then byte-identical to the pre-fix one.
+    clk_buf_list: List[str] = []
+    _clk_buf_list_how = ""
+    try:
+        _i2172_lib_text = _v1_6_604_read_text_or_container_cat(
+            str(pdk.liberty), container) or ""
+        clk_buf_list, _clk_buf_list_how = _i2172_cts_buf_family(
+            _i2172_lib_text, clk_buf, clk_buf_root)
+    except Exception as _i2172_err:      # pragma: no cover - defensive
+        clk_buf_list, _clk_buf_list_how = [], ""
+        print(f"[phase3] CTS buf_list NOT DERIVED ({_i2172_err}); keeping the "
+              f"single master {clk_buf!r}", file=sys.stderr)
+    if clk_buf_list:
+        print(f"[phase3] CTS buf_list: {' '.join(clk_buf_list)} — "
+              f"{_clk_buf_list_how}", file=sys.stderr)
+    else:
+        print(f"[phase3] CTS buf_list: single master {clk_buf!r} — no "
+              f"multi-drive family could be derived from {pdk.liberty}",
+              file=sys.stderr)
     if clk_buf is None:
         # The scan found nothing. Name the guess rather than making it silently:
         # this cell exists only in sky130, so on any other PDK the note is the
@@ -28512,6 +28632,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         spef_repair_estimate_block=spef_repair_estimate_block,
         openroad_threads=_openroad_thread_count(),
         repair_tns_percent=_rf_map.get("repair_tns_percent"),
+        cts_buf_list=clk_buf_list,
         # A reference-flow-declared knob is an explicit operator choice and
         # wins outright; absent that, fall back to the same fanout cap the
         # SDC/sign-off now use (`_cts_fanout_target`, set above in EITHER
@@ -32290,6 +32411,7 @@ __SPARE_SAFE_CLEAR__
   if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }
   if {[catch {detailed_route -droute_end_iter __SHIP_DR_ITERS__ {*}$_vic_drc_opt} e]} { puts "SHIP_CVG_DR_NONFATAL: $e"; incr _ship_dr_failed }
 }
+__SHIP_ANT_WINDOW__
 # FINAL honest post-reroute real-SPEF measurement (the number the sign-off
 # independently re-derives, and the one the promotion gate keys on).
 catch {define_process_corner -ext_model_index 0 X}
@@ -32349,8 +32471,94 @@ if {$_ship_dr_failed > 0} {
 _SHIP_POSTROUTE_CVG_MAX_PASSES = 8
 
 
+# G-SHIP-ANTENNA — the antenna window on the route that actually SHIPS.
+#
+# MEASURED (subservient x gf180mcuD, vibe-ic#2172, image 0.3.49): `pnr.tcl`
+# ends antenna-CLEAN — its own written `routed.def` re-reads as 0 net / 0 pin
+# violations in a fresh session. `signoff_spef_repair` then re-opens that DEF,
+# CLEARS the routing of 3232 nets, re-routes, and PROMOTES the result over
+# `routed.def` / `<top>.def` (and unlinks `<top>.gds` so the GDS is re-derived
+# from it). That promoted route carried TWO antenna violations — i_clk at a
+# Metal3 side-area ratio of 871.94 and net828 at 401.02, both against a limit
+# of 400 — which the KLayout sign-off deck then reported as 7 ANT.16_ii_ANT.4
+# items on the shipped GDS. The step's own TCL contained no `check_antennas`
+# and no `repair_antennas`, so the LAST routing operation in the flow was the
+# one nothing antenna-checked.
+#
+# The window goes HERE, after the convergence loop's last reroute and BEFORE
+# the refill: `remove_fillers` has already run in this session, so
+# `repair_antennas` has legal sites (without it DPL-0038 "impossible to
+# legalize" — OpenROAD names the missing step itself one line above, in
+# DPL-0037). It is also before the FINAL real-SPEF measurement below, so
+# `SHIP_WNS_POSTROUTE` — the number the promotion gate keys on — describes the
+# route that ships, antenna repair included.
+#
+# Proven both directions on the lane's own inputs, same image, same base: the
+# UNMODIFIED step replayed to a `routed_repaired.def` byte-identical to the
+# shipped one (md5 e078bdb7516bd24fb5e5f014096f41c1) carrying 2 net
+# violations; with this window and nothing else changed the same replay reached
+# SHIP_ANT_SEQUENCE "2 0" and its DEF carries 0, at a setup cost of 6 ps
+# (SHIP_WNS_POSTROUTE -1.234340664617269 -> -1.2403163291940147).
+#
+# Shape is the base flow's antenna loop, deliberately: one `repair_antennas
+# -iterations 1 ... -reroute` per turn with an escalating `-ratio_margin`, stop
+# on 0 or on a turn that did not shrink the count, and PUBLISH the sequence.
+# ADVISORY here, never a waiver: nothing is skipped or relaxed, and a residual
+# is named (`SHIP_ANT_NOT_CONVERGED`) so `_emit_antenna_report` reports the
+# shipped route instead of a superseded one.
+_SHIP_ANT_WINDOW_MAX_TURNS = 6
+
+
+def _ship_antenna_window_tcl(antenna_diode_cell: Optional[str],
+                             cap: int = _SHIP_ANT_WINDOW_MAX_TURNS) -> str:
+    """The post-promotion antenna window. Empty (with a disclosure) when the
+    PDK declares no antenna diode cell — the same condition under which the
+    base PnR antenna repair is SKIPPED, so a design is never silently left
+    both unrepaired and unmeasured. chip/PDK-AGNOSTIC: the diode master is the
+    PDK's own `antenna_diode_cell`, no design or vendor literal."""
+    if not antenna_diode_cell:
+        return ('puts "SHIP_ANT_SKIPPED: this PDK declares no antenna diode '
+                'cell, so the promoted route is neither antenna-repaired nor '
+                'antenna-measured here"\n')
+    return (
+        'puts "SHIP_ANT_BEGIN"\n'
+        'set _sa_margin 0\n'
+        'set _sa_seq {}\n'
+        'set _sa_stop CAP\n'
+        f'for {{set _sa_i 0}} {{$_sa_i < {int(cap)}}} {{incr _sa_i}} {{\n'
+        '  set _sa_nv -1\n'
+        '  if {[catch {set _sa_nv [check_antennas]} _sa_e]} {\n'
+        '    puts "SHIP_ANT_CHECK_NONFATAL: $_sa_e"\n'
+        '    set _sa_stop CHECK_FAILED\n'
+        '    break\n'
+        '  }\n'
+        '  lappend _sa_seq $_sa_nv\n'
+        '  puts "SHIP_ANT_ITER: iter=$_sa_i nets=$_sa_nv margin=$_sa_margin"\n'
+        '  if {$_sa_nv == 0} { set _sa_stop CONVERGED; break }\n'
+        '  if {$_sa_i > 0 && $_sa_nv >= [lindex $_sa_seq end-1]} {\n'
+        '    set _sa_stop NO_PROGRESS\n'
+        '    break\n'
+        '  }\n'
+        f'  if {{[catch {{repair_antennas {antenna_diode_cell} -iterations 1 '
+        '-ratio_margin $_sa_margin -reroute} _sa_r]} {\n'
+        '    puts "SHIP_ANT_REPAIR_NONFATAL: $_sa_r"\n'
+        '    set _sa_stop REPAIR_FAILED\n'
+        '    break\n'
+        '  }\n'
+        '  if {$_sa_margin < 40} { set _sa_margin [expr {$_sa_margin + 10}] }\n'
+        '}\n'
+        'puts "SHIP_ANT_SEQUENCE: $_sa_seq"\n'
+        'if {$_sa_stop ne "CONVERGED"} {\n'
+        '  puts "SHIP_ANT_NOT_CONVERGED: stop=$_sa_stop sequence={$_sa_seq} '
+        '-- the route this step PROMOTES still carries antenna violations"\n'
+        '}\n'
+        'puts "SHIP_ANT_END"\n'
+    )
+
+
 def _ship_postroute_convergence_tcl(max_captable_c: str, pnr_dir_c: str,
-                                    bound: int = _SHIP_POSTROUTE_CVG_MAX_PASSES
+                                    bound: int = _SHIP_POSTROUTE_CVG_MAX_PASSES,
+                                    antenna_diode_cell: Optional[str] = None
                                     ) -> str:
     """POST-REROUTE real-SPEF setup-closure loop appended to the shipped signoff
     repair (see _SHIP_POSTROUTE_CVG_TCL). Sentinel-token replacement (not
@@ -32362,6 +32570,8 @@ def _ship_postroute_convergence_tcl(max_captable_c: str, pnr_dir_c: str,
                      _spare_safe_routing_clear_tcl("SHIP_CVG").rstrip())
             .replace("__ROUTING_INTEGRITY_CHECK__",
                      _routing_integrity_check_tcl("SHIP").rstrip())
+            .replace("__SHIP_ANT_WINDOW__",
+                     _ship_antenna_window_tcl(antenna_diode_cell).rstrip())
             .replace("__BOUND__", str(int(bound)))
             .replace("__SHIP_DR_ITERS__", str(_SHIP_REROUTE_MAX_DROUTE_ITERS))
             .replace("__CAP__", max_captable_c)
@@ -32529,7 +32739,8 @@ def _ship_signoff_spef_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
                                   fanout_root_buffer_cell: Optional[str] = None,
                                   slot_pinned_core: bool = False,
                                   design_declared_die: bool = False,
-                                  sparse_active_row_fill: bool = False
+                                  sparse_active_row_fill: bool = False,
+                                  antenna_diode_cell: Optional[str] = None
                                   ) -> str:
     """Fresh-session post-route SETUP repair against the REAL max-RC SPEF at the
     SLOW (SS) sign-off corner, writing routed_repaired.def / <top>_pnr_repaired.v.
@@ -32732,7 +32943,14 @@ def _ship_signoff_spef_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         # closes SS setup on the parasitics the sign-off judges, and emit the
         # honest SHIP_WNS_POSTROUTE the promotion gate keys on. Explicit +
         # concatenation: the helper returns a COMPUTED str, not a literal.
-        + _ship_postroute_convergence_tcl(max_captable_c, pnr_dir_c)
+        # G-SHIP-ANTENNA — the window travels with the convergence loop so it
+        # lands after that loop's last reroute and before the refill. This
+        # session already ran `remove_fillers` (SHIP_RMFILL above) and it is
+        # the session whose route is PROMOTED over the shipped DEF, so it is
+        # the one that has to be antenna-clean.
+        + _ship_postroute_convergence_tcl(
+            max_captable_c, pnr_dir_c,
+            antenna_diode_cell=antenna_diode_cell)
         # DPL-0038 re-fill (restore decap/fill tiling cleared above), AFTER the
         # reroute exactly like the base flow places fill after detailed_route.
         + f"{refill_block}"
@@ -33560,7 +33778,10 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
         design_declared_die=_repair_declared_die,
         sparse_active_row_fill=bool(
             _repair_ring_inset is not None and _repair_slot is None
-            and not _repair_declared_die))
+            and not _repair_declared_die),
+        # G-SHIP-ANTENNA — the PDK's own diode master, the same one the base
+        # PnR antenna repair uses. None => the window discloses and does not run.
+        antenna_diode_cell=pdk.antenna_diode_cell)
     tcl_path = pnr_out / "signoff_spef_repair.tcl"
     tcl_path.write_text(tcl)
     tcl_c = _to_container_path(str(tcl_path), container)
@@ -51042,6 +51263,26 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
     # and would mis-report the repaired design as still-violating). When the PnR log
     # carries the ANTENNA_POSTROUTE_DONE sentinel, parse its authoritative
     # ANT-0002/ANT-0001 counts directly and skip the lossy re-route below.
+    # G-SHIP-ANTENNA — THE PnR SESSION IS NOT THE LAST ROUTING SESSION.
+    # `signoff_spef_repair` re-opens the routed DEF in a fresh OpenROAD, CLEARS
+    # the routing of every non-spare net, re-routes, and PROMOTES its result
+    # over `routed.def` / `<top>.def` (writing `routed_base_prerepair.def` as it
+    # does so, and unlinking `<top>.gds` so the GDS is re-derived from it).
+    # MEASURED (subservient x gf180mcuD, vibe-ic#2172, image 0.3.49): pnr.tcl's
+    # own written DEF re-reads as 0 net / 0 pin violations, while the PROMOTED
+    # DEF carries 2 — i_clk at a Metal3 side-area ratio of 871.94 and net828 at
+    # 401.02 against a limit of 400 — which the KLayout sign-off deck reports as
+    # 7 `ANT.16_ii_ANT.4` items on the shipped GDS. This report said
+    # `antenna clean: YES` for that design, because it read the PnR log while
+    # stamping the PROMOTED DEF as its own measured subject: the subject and the
+    # measurement were two different states of the design.
+    # So when a promotion happened, the counts come from the session that
+    # produced the route that ships.
+    _ship_log = pnr_out / "signoff_spef_repair.log"
+    _promoted = (pnr_out / "routed_base_prerepair.def").is_file()
+    _ship_txt = (_ship_log.read_text(errors="ignore")
+                 if (_promoted and _ship_log.is_file()) else "")
+    _ship_measured = "SHIP_ANT_END" in _ship_txt
     pnr_log = pnr_out / "openroad.log"
     if pnr_log.is_file():
         log_txt = pnr_log.read_text(errors="ignore")
@@ -51087,24 +51328,61 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
             # exists OR routing demonstrably failed. Only when NEITHER holds (sentinel
             # present but no counts and no failure marker — a surprising state) do we
             # fall through to the re-global_route fallback below.
-            if have_counts or routing_incomplete:
+            if have_counts or routing_incomplete or _promoted:
                 if have_counts:
                     net_viol = int(nets[-1])  # last pair = post-repair check
                     pin_viol = int(pins[-1])
                 else:
                     net_viol = -1  # could not measure (ANT-0008 after failed route)
                     pin_viol = -1
+                # G-SHIP-ANTENNA — override with the SHIPPING session's counts.
+                _measured_on = "the PnR route"
+                _shipped_unmeasured = False
+                if _promoted and _ship_measured:
+                    _s_nets = re.findall(r"Found\s+(\d+)\s+net violations",
+                                         _ship_txt)
+                    _s_pins = re.findall(r"Found\s+(\d+)\s+pin violations",
+                                         _ship_txt)
+                    if _s_nets and _s_pins:
+                        net_viol = int(_s_nets[-1])
+                        pin_viol = int(_s_pins[-1])
+                        have_counts = True
+                        _measured_on = ("the PROMOTED signoff_spef_repair route "
+                                        "(the one that ships)")
+                    else:
+                        _shipped_unmeasured = True
+                elif _promoted:
+                    _shipped_unmeasured = True
+                if _shipped_unmeasured:
+                    # A promotion replaced the route this count describes and
+                    # nothing measured antennas on the replacement. That is not
+                    # a clean design; it is an unmeasured one, and a gate whose
+                    # whole job is to say the SHIPPED route is antenna-clean may
+                    # not answer YES about a route it never read.
+                    have_counts = False
+                    net_viol = -1
+                    pin_viol = -1
+                    _measured_on = ("NOTHING — signoff_spef_repair PROMOTED a "
+                                    "re-routed design over the shipped DEF and "
+                                    "no antenna check ran on it")
                 if routing_incomplete:
+                    clean = False
+                    verdict = "FAIL"
+                elif _shipped_unmeasured:
                     clean = False
                     verdict = "FAIL"
                 else:
                     total = net_viol + pin_viol
                     clean = total == 0
                     verdict = "PASS" if clean else "FAIL"
-                _count_str = (f"{net_viol} net violations, {pin_viol} pin violations"
-                              if have_counts
-                              else "unmeasured (detailed_route aborted; "
-                                   "check_antennas found no routing, ANT-0008)")
+                _count_str = (
+                    f"{net_viol} net violations, {pin_viol} pin violations"
+                    if have_counts
+                    else ("unmeasured (signoff_spef_repair promoted a re-routed "
+                          "design over the shipped DEF and no antenna check ran "
+                          "on it)" if _shipped_unmeasured
+                          else "unmeasured (detailed_route aborted; "
+                               "check_antennas found no routing, ANT-0008)"))
                 # WHAT THE LOOP DID, not just where it stopped.
                 _loop = antenna_loop_trace(log_txt)
                 antenna_rpt.parent.mkdir(parents=True, exist_ok=True)
@@ -51123,9 +51401,17 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     "# OpenROAD antenna check (gate-oxide protection) — IN-SESSION\n"
                     "# post-repair result captured during PnR (incremental loop:\n"
                     "# repair_antennas -iterations 1 -> incremental detailed_route ->\n"
-                    "# check_antennas, until 0). This is\n"
-                    "# the faithful measurement of the realized, antenna-repaired\n"
-                    "# routing; a separate re-read cannot credit the jumpers\n"
+                    "# check_antennas, until 0), and — when a promotion replaced\n"
+                    "# that route — from the promoting session instead; the\n"
+                    "# `antenna measured on:` line below says which.\n"
+                    "# The old rationale here read \"a separate re-read cannot\n"
+                    "# credit the jumpers\", and it is FALSE at this base:\n"
+                    "# `read_lef` x2 + `read_def` + `check_antennas`, with NO\n"
+                    "# global_route, reads the DEF\'s own detailed routing and\n"
+                    "# reproduces this number — measured on both arms of #2172,\n"
+                    "# and corroborated by the KLayout sign-off deck on the GDS\n"
+                    "# derived from that same DEF (871.94 vs 872.933, 0.11%%).\n"
+                    "# What it cannot do is credit a route that was REPLACED,\n"
                     # RESOLVED, NOT TYPED. This sentence used to name a fixed
                     # path while the subject block above it named the RESOLVED
                     # log, so the artefact carried two source claims and the
@@ -51135,6 +51421,7 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     f"# (ANT-0008). Source: {_rel_to_project(pnr_log, project)}.\n"
                     f"antenna check: {_count_str}\n"
                     f"antenna clean: {'YES' if clean else 'NO'}\n"
+                    f"antenna measured on: {_measured_on}\n"
                     f"routing complete: {'NO' if routing_incomplete else 'YES'}\n"
                     + (f"repair loop converged: "
                        f"{'YES' if _loop['converged'] else 'NO'}\n"
@@ -51176,6 +51463,12 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     "net_violations": net_viol if have_counts else None,
                     "pin_violations": pin_viol if have_counts else None,
                     "clean": clean,
+                    # G-SHIP-ANTENNA — WHICH state of the design the numbers
+                    # above describe. A count and the route it was taken on are
+                    # two facts; publishing only the first is how a clean PnR
+                    # route came to certify a promoted one that was not.
+                    "measured_on": _measured_on,
+                    "shipped_route_measured": not _shipped_unmeasured,
                     "routing_incomplete": routing_incomplete,
                     # #552 — its own field, not folded into routing_incomplete.
                     "pins_unaccessed": pins_unaccessed,
@@ -51192,10 +51485,15 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     "verdict": verdict,
                 }, indent=2) + "\n")
                 notes.append(
-                    f"antenna: in-session post-repair check {_count_str}"
+                    f"antenna: in-session post-repair check {_count_str} "
+                    f"(measured on {_measured_on})"
                     + (" — ROUTING INCOMPLETE (detailed_route aborted; "
                        "reported FAIL, not a clean pass on an unrouted design)"
-                       if routing_incomplete else ""))
+                       if routing_incomplete else "")
+                    + (" — SHIPPED ROUTE UNMEASURED (a promotion replaced the "
+                       "route this count was taken on; reported FAIL, not a "
+                       "clean pass on a route nothing read)"
+                       if _shipped_unmeasured else ""))
                 return True
     mp = pdk.metal_prefix
     def_c = _to_container_path(str(def_file), container)
