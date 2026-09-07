@@ -21,6 +21,14 @@ all-analog `top_ports` set with NO digital clock/reset/data INPUT port is a
 steps to N/A / SKIPPED-CONDITION (exactly as the analog A-steps skip on a
 digital-only design), instead of WAIVE→spec-to-rtl→FAIL.
 
+A SECOND disjunct (lane czadcrtl, 2026-09-08) reaches the same verdict for the
+case this one structurally cannot: an interface whose only digital INPUT is a
+CLOCK — timing, not information — carrying no data and no reset input, on a
+design whose Phase-1 extraction declares no digital behaviour at all. That
+disjunct lives in `digital_datapath_absent()` and delegates its second signal
+to `digital_rtl_subject_census`; `classify_top_ports` and every regex here are
+UNCHANGED by it.
+
 A data_converter that DOES expose a digital clk/rst/data interface (real
 on-chip decimation) is UNCHANGED — it keeps authoring RTL.
 
@@ -65,11 +73,19 @@ from typing import Any, Dict, List, Optional, Tuple
 # CK4/CK5/CK6 "modulator clocks" had them classified as DATA.
 #
 # SCOPE, stated so this is not over-read: fixing the regex does NOT by itself
-# reroute such a design. `digital_datapath_absent` is
-# `not (has_clk or has_rst or has_data)`, so ANY clock still forces the digital
-# track. A clocked-but-logic-free SC modulator (clock in, bitstream out, no
-# data, no reset) is exactly the case that predicate cannot express. That is a
-# separate design decision and is deliberately NOT bundled here.
+# reroute such a design. `classify_top_ports`'s own
+# `digital_datapath_absent` field is `not (has_clk or has_rst or has_data)`, so
+# ANY clock still forces the digital track there. A clocked-but-logic-free SC
+# modulator (clock in, bitstream out, no data, no reset) is exactly the case
+# that predicate cannot express.
+#
+# THAT SEPARATE DESIGN DECISION WAS TAKEN, lane czadcrtl 2026-09-08, and it is
+# NOT taken by widening this predicate: the port-level field above still means
+# exactly what it meant. It is taken one level up, in the project-level
+# `digital_datapath_absent()`, as a SECOND disjunct that requires a second and
+# independent signal — `digital_rtl_subject_census`, the flow's own Phase-1
+# extraction finding no digital behaviour anywhere in the design. An interface
+# read ALONE never reroutes a clocked design; see that function's docstring.
 _CLK_RE = re.compile(
     r"(?i)^(clk|clock|ck|phi|sclk|aclk|hclk|pclk|mclk|refclk|xclk|clkin)"
     r"(\d+)?"
@@ -215,9 +231,35 @@ def read_l9_top_ports(project: Path) -> Optional[List[Any]]:
 
 
 def digital_datapath_absent(project: Path) -> Tuple[bool, str, Dict[str, Any]]:
-    """(is_absent, reason, evidence). is_absent True ONLY when the L9 top
-    interface exposes NO digital clock/reset/data INPUT (all-analog). When L9
-    is missing/empty the answer is fail-SAFE False (cannot assert → keep RTL)."""
+    """(is_absent, reason, evidence). True when this design has no digital
+    datapath for an author to author. TWO disjuncts, and a reason that always
+    names which one fired:
+
+      (i)  ALL-ANALOG (#141, unchanged) — the L9 top interface exposes no
+           digital clock/reset/data INPUT at all.
+
+      (ii) NO RTL SUBJECT (lane czadcrtl, 2026-09-08) — the case (i) cannot
+           express, named in this module's own `_CLK_RE` comment before it was
+           closed: "a clocked-but-logic-free SC modulator (clock in, bitstream
+           out, no data, no reset)". `digital_datapath_absent` is
+           `not (has_clk or has_rst or has_data)`, so ONE clock pin re-asserted
+           a digital datapath the rest of the pinout denied, and the runner
+           WAIVED `rtl_gen` to `spec-to-rtl` for a design whose input contains
+           nothing to author. Measured on the live tip (main e2b3c08170b5,
+           tree 75d478b34c17, host 8HD-4): four byte-identical WAIVEs, no
+           `phase2/stage1/rtl/` ever created, phase-2 FAIL.
+
+           (ii) is DELIBERATELY not a widening of (i)'s predicate. It requires
+           a SECOND, independent signal — the flow's own Phase-1 extraction
+           finding no digital behaviour anywhere — because an interface read
+           alone is what (i)'s fail-safe bias exists to distrust. It is
+           delegated whole to `digital_rtl_subject_census`, which owns that
+           argument and its evidence; this module keeps owning what a PORT is.
+
+    Fail-SAFE in both disjuncts, in the same direction as #141: when L9 is
+    missing/empty, when any census field cannot be read, or when the census
+    module is unavailable, the answer is False (cannot assert → keep RTL).
+    """
     ports = read_l9_top_ports(project)
     if not ports:
         return (False, "no L9 top_ports to classify (cannot assert all-analog)",
@@ -228,6 +270,22 @@ def digital_datapath_absent(project: Path) -> Tuple[bool, str, Dict[str, Any]]:
                 "all-analog top interface: no digital clock/reset/data INPUT "
                 "port — digital RTL steps are N/A (analog track owns silicon)",
                 ev)
+    # (ii) — the clocked-but-logic-free case. Best-effort by contract: an
+    # unavailable or raising census leaves (i)'s answer exactly as it was.
+    subject_absent = False
+    try:
+        import digital_rtl_subject_census as _census      # noqa: PLC0415
+        subject_absent, subject_why, subject_ev = \
+            _census.digital_rtl_subject_absent(project)
+    except Exception as exc:                              # noqa: BLE001
+        ev["rtl_subject_census"] = {"unavailable": f"{type(exc).__name__}: {exc}"}
+    else:
+        ev["rtl_subject_census"] = {"absent": subject_absent,
+                                    "reason": subject_why,
+                                    "evidence": subject_ev}
+        if subject_absent:
+            ev["digital_datapath_absent"] = True
+            return (True, subject_why, ev)
     present = [k for k in ("has_digital_clock_input", "has_digital_reset_input",
                            "has_digital_data_input") if ev[k]]
     return (False,

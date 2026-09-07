@@ -6566,10 +6566,10 @@ def _digital_backend_is_na(project: Path) -> Tuple[bool, str]:
         if absent:
             result = (
                 True,
-                f"analog-applicable class {ic_class!r} with an all-analog top "
-                f"interface ({why}); no digital RTL — digital backend "
-                f"(stages 1-4) + mixed-signal replaced by the analog A1..A9 "
-                f"track")
+                f"analog-applicable class {ic_class!r} with no digital "
+                f"datapath to author ({why}); no digital RTL — digital "
+                f"backend (stages 1-4) + mixed-signal replaced by the analog "
+                f"A1..A9 track")
     except Exception as e:
         result = (False, f"interface-aware N/A detection unavailable: {e}")
     _ANALOG_IFACE_NA_CACHE[key] = result

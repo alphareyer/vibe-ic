@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1293
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1293)
+- **Total programs (excluding helpers / shims):** 1294
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1294)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1284 |
+| `any` | 1285 |
 
 ## Alphabetical listing
 
@@ -329,6 +329,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `diff_verify_harness` | any | — | independent DIFFERENTIAL self-verification (N-version) for blind RTL authoring (ORGANIC #700). |
 | `digital_hardmacro_check` | any | — | the gate of record for flow step 37.5ip. |
 | `digital_hardmacro_gen` | any | — | the PRODUCER for flow step 37.5ip. |
+| `digital_rtl_subject_census` | any | — | is there a digital datapath to AUTHOR? |
 | `dispatch_fetch_loop_population_check` | any | — | Stub multi-frame fetch loop detector. |
 | `dispatch_handler_completeness` | aid_class_half_duplex, digital_cmd_driven, mixed_signal_otp | Wave 58 | Wave 58 / BACKLOG-v12 P0.2 plugin gate. |
 | `dispatch_register_default_reset_check` | any | — | Response register reset at frame boundaries. |
@@ -1365,7 +1366,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1284 programs)
+### `any` (1285 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1667,6 +1668,7 @@ _(no programs in this group)_
 - `diff_verify_harness` — independent DIFFERENTIAL self-verification (N-version) for blind RTL authoring (ORGANIC #700).
 - `digital_hardmacro_check` — the gate of record for flow step 37.5ip.
 - `digital_hardmacro_gen` — the PRODUCER for flow step 37.5ip.
+- `digital_rtl_subject_census` — is there a digital datapath to AUTHOR?
 - `dispatch_fetch_loop_population_check` — Stub multi-frame fetch loop detector.
 - `dispatch_register_default_reset_check` — Response register reset at frame boundaries.
 - `dispatcher_awake_gate_check` — v0.114 (BACKLOG-v7 P2.2).  _[v0.114]_

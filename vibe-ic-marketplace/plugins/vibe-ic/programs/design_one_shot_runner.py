@@ -1952,8 +1952,12 @@ def _analog_rtl_track_absent(project: Path,
       (a) STATIC — the IC class is a *pure-analog* registry entry
           (analog_applicable=True, rtl_gen=null, fallback_skill=null); OR
       (b) RUNTIME (ORGANIC #148, residual of #141) — the class is
-          analog-APPLICABLE and its ACTUAL L9 top interface is ALL-ANALOG (no
-          digital clock/reset/data INPUT). This is the SAME structural signal
+          analog-APPLICABLE and `analog_interface_classify` says this design
+          has no digital datapath: either its ACTUAL L9 top interface is
+          ALL-ANALOG (no digital clock/reset/data INPUT), or (lane czadcrtl,
+          2026-09-08) its only digital INPUT is a CLOCK and the flow's own
+          Phase-1 extraction declares no digital behaviour anywhere
+          (`digital_rtl_subject_census`). This is the SAME structural signal
           that made step_rtl_gen WAIVE-to-analog-track, so it catches a class
           like `data_converter` that carries a spec-to-rtl fallback_skill
           (making (a) False) yet whose concrete pinout has no digital datapath
@@ -1982,8 +1986,8 @@ def _analog_rtl_track_absent(project: Path,
             absent, why = (False, "")
         if absent:
             return (True,
-                    f"class {ic_class!r} is analog-applicable with an "
-                    f"all-analog top interface ({why}) — no digital RTL by "
+                    f"class {ic_class!r} is analog-applicable and has no "
+                    f"digital datapath to author ({why}) — no digital RTL by "
                     f"design; RTL-dependent digital steps defer to the analog "
                     f"A1..A8 track (/vibe-ic-analog): N/A, NOT a rtl/-missing "
                     f"FAIL")
@@ -7059,13 +7063,22 @@ def _step_rtl_gen_bound(
             except Exception as _e:
                 _absent, _why, _ev = (False, f"classifier unavailable: {_e}", {})
             if _absent:
+                # THE REASON IS THE CLASSIFIER'S, NOT THIS SITE'S. This message
+                # used to assert "its top interface is ALL-ANALOG" and then
+                # print the classifier's reason inside brackets. Since lane
+                # czadcrtl (2026-09-08) the classifier has a SECOND disjunct —
+                # a clocked-but-logic-free interface whose Phase-1 extraction
+                # declares no digital content — and for that one the asserted
+                # half was simply false: the design has three clock INPUTs.
+                # A site that restates a verdict it did not compute will
+                # eventually restate it wrongly; this one now quotes.
                 return StepResult(
                     "rtl_gen", "WAIVED",
                     time.time() - t0,
-                    f"IC class {ic_class!r} is analog-applicable and its top "
-                    f"interface is ALL-ANALOG ({_why}) — no digital RTL to "
-                    f"author. Digital RTL steps route to the analog A1..A8 "
-                    f"track (/vibe-ic-analog): N/A, NOT spec-to-rtl.",
+                    f"IC class {ic_class!r} is analog-applicable and has no "
+                    f"digital datapath to author ({_why}) — digital RTL steps "
+                    f"route to the analog A1..A8 track (/vibe-ic-analog): "
+                    f"N/A, NOT spec-to-rtl.",
                     extras={"fallback_skill": None,
                             "deferred_to": "analog_track",
                             "digital_datapath_absent": True,

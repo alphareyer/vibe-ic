@@ -295,11 +295,11 @@ def _is_pure_analog_no_rtl_track(project: Path) -> Tuple[bool, str]:
             absent, dda_reason, _ev = _dda(project)
             if absent:
                 return (True,
-                        f"class {ic_class!r} is analog-applicable and its top "
-                        f"interface is all-analog ({dda_reason}); rtl/ empty — "
-                        f"digital backend (synth/PnR/GDS) deferred to the "
-                        f"analog A5..A6 layout track (consistent with phase-2 "
-                        f"rtl_gen WAIVE)")
+                        f"class {ic_class!r} is analog-applicable and has no "
+                        f"digital datapath to author ({dda_reason}); rtl/ "
+                        f"empty — digital backend (synth/PnR/GDS) deferred to "
+                        f"the analog A5..A6 layout track (consistent with "
+                        f"phase-2 rtl_gen WAIVE)")
         except Exception as e:
             # Fail-SAFE: cannot assert all-analog → keep the digital backend.
             return (False,
