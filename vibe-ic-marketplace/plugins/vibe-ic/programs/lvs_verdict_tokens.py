@@ -389,6 +389,23 @@ _PROPERTY_ERR_RE = re.compile(r"property\s+errors?\s+were\s+found", re.I)
 # benign bucket is never reachable by elimination.
 _PIN_MATCH_FAIL_RE = re.compile(r"failed\s+pin\s+matching", re.I)
 
+# vibe-ic#2181 — netgen's OWN top-level marker, which this module did not model.
+# netgen appends `**Mismatch**` to the rows IT flags in the summary and the
+# top-level correspondence table, e.g. (both shapes measured on real reports in
+# this fleet's run corpus):
+#
+#     Number of nets: 365 **Mismatch**           |Number of nets: 367 **Mismatch**
+#     VGND                                       |VPWR **Mismatch**
+#     VDD                                        |x[14] **Mismatch**
+#
+# The distinction from the benign artifact is SEMANTIC, not statistical: the
+# power-unaware-netlist artifact prints `VPWR |(no matching pin)` — the
+# schematic has no such port AT ALL — whereas a `**Mismatch**` row says netgen
+# DID find a counterpart and it is the WRONG one (rails swapped, a rail matched
+# to a signal, two different net counts). Absence is the waivable setup
+# artifact; wrong correspondence never is.
+_PORT_MISMATCH_RE = re.compile(r"^.*\*\*Mismatch\*\*.*$", re.M)
+
 
 def _is_power_token(tok: str) -> bool:
     """True iff `tok` names a power/ground/tie net (sky130 VPWR/VGND/VPB/VNB,
@@ -426,15 +443,19 @@ def mismatch_class(blob: str, json_report: JsonSource = None) -> str:
     """Sub-classify a netgen report → for triage ONLY (the classify() verdict is
     authoritative and unchanged). Returns:
       * 'NONE'                 — not a MISMATCH (MATCH / INCOMPLETE).
-      * 'SIGNAL_NET_MISMATCH'  — a MISMATCH with real signal-net evidence
-                                 (a `(no pin, node is …)` row, a NON-power
-                                 `(no matching pin)` port, or a property error).
+      * 'SIGNAL_NET_MISMATCH'  — a MISMATCH with real evidence (a `(no pin,
+                                 node is …)` row, a row netgen itself flagged
+                                 `**Mismatch**`, a NON-power `(no matching pin)`
+                                 port, or a property error).
                                  NEVER a benign class — a reviewed waiver must not
                                  wave this through.
-      * 'POWER_PIN_ONLY'       — a MISMATCH whose evidence is EXCLUSIVELY power/tie
-                                 nets (the universal power-unaware-netlist OSS
-                                 SETUP artifact) — a reviewed-waiver CANDIDATE, not
-                                 a silent pass.
+      * 'POWER_PIN_ONLY'       — a MISMATCH whose evidence is EXCLUSIVELY the
+                                 ABSENCE of power/tie ports (the universal
+                                 power-unaware-netlist OSS SETUP artifact) — a
+                                 reviewed-waiver CANDIDATE, not a silent pass.
+                                 A power row netgen flagged `**Mismatch**` is
+                                 the opposite fact — a WRONG correspondence, not
+                                 an absence — and is never this class (#2181).
     POSITIVE-EVIDENCE INVERSION (the demotion gate is CLOSED): `POWER_PIN_ONLY`
     is now REACHABLE ONLY by earning it — the E1 structured counts must show no
     real defect (when a report exists) AND the transcript must carry BOTH the
@@ -462,6 +483,20 @@ def mismatch_class(blob: str, json_report: JsonSource = None) -> str:
         return "SIGNAL_NET_MISMATCH"
     if _PIN_NODE_RE.search(blob):                 # `(no pin, node is …)` rows
         return "SIGNAL_NET_MISMATCH"
+    # vibe-ic#2181 — a row netgen ITSELF flagged `**Mismatch**` is a WRONG
+    # correspondence (a rail matched to the other rail or to a signal, or two
+    # different net/device counts), never the absence the benign bucket is for.
+    # Measured on this fleet's corpus of 2362 netgen reports: 218 carry such a
+    # row, 0 of them classify MATCH, 217 were already SIGNAL_NET_MISMATCH by
+    # elimination, and ONE reached POWER_PIN_ONLY — a report carrying
+    # `Number of nets: 365 **Mismatch** |Number of nets: 367 **Mismatch**` plus
+    # `VGND |VPWR **Mismatch**` / `VPWR |VGND **Mismatch**` (the power rails
+    # SWAPPED and a two-net difference), which the runner then converts to
+    # `LVS_MATCH_POWER_AWARE` = PASS and `lvs_tapeout_signoff_check` reports as
+    # a waiver candidate. This check closes that: the benign bucket keeps its
+    # documented meaning and cannot be reached by a defect netgen has named.
+    if _PORT_MISMATCH_RE.search(blob):
+        return "SIGNAL_NET_MISMATCH"
     # POSITIVE evidence that this mismatch is the pin-correspondence failure at
     # all. Any OTHER failure — including one worded in tokens we do not know —
     # is REAL, not a waiver candidate.
@@ -484,13 +519,30 @@ def pin_mismatch_evidence(blob: str, max_lines: int = 8) -> List[str]:
     """Extract the netgen pin-correspondence mismatch lines (the readable
     evidence of WHICH pins failed matching) — at most `max_lines`, stripped.
 
-    Prefers the `(no pin, node is …)` rows (top-level-failure-only shape) and
-    takes them from the report TAIL, where the top-level table sits — the
-    front of a big report is hundreds of benign subcell `(no matching pin)`
-    power-pin rows that would otherwise drown the real evidence."""
+    Preference order, all taken from the report TAIL where the top-level table
+    sits: the `(no pin, node is …)` rows (top-level-failure-only shape), then
+    the rows netgen itself flagged `**Mismatch**` (#2181), then the
+    `(no matching pin)` rows. The front of a big report is hundreds of benign
+    subcell `(no matching pin)` power-pin rows that would otherwise drown the
+    real evidence, and on a report with no `(no pin, node is …)` row at all
+    those benign rows used to be ALL the reader was given."""
     node_rows = [m.group(0).strip() for m in _PIN_NODE_RE.finditer(blob)]
     if node_rows:
         return node_rows[-max_lines:]
+    # vibe-ic#2181 — before falling back to `(no matching pin)`, surface the rows
+    # netgen ITSELF flagged. On a `Final result: Netlists do not match.` report
+    # there is no `(no pin, node is …)` row at all, and the fallback then returned
+    # whatever `(no matching pin)` rows happened to sit at the tail — which are
+    # the benign sub-cell abstraction rows this module's own `mismatch_class`
+    # refuses to classify on. Measured on two real spm reports in this fleet's
+    # corpus: the evidence handed to every reader was `ZN |(no matching pin)`
+    # twice, while netgen's own flagged rows read `VDD |x[14] **Mismatch**` and
+    # `VSS |x[28] **Mismatch**` — a top-level port-correspondence failure. That
+    # substitution is how a power/well row that is NOT the cause gets read as the
+    # cause. Evidence only: no verdict is computed here.
+    flagged_rows = [m.group(0).strip() for m in _PORT_MISMATCH_RE.finditer(blob)]
+    if flagged_rows:
+        return flagged_rows[-max_lines:]
     nomatch_rows = [m.group(0).strip()
                     for m in _PIN_NOMATCH_RE.finditer(blob)]
     return nomatch_rows[-max_lines:]

@@ -34447,6 +34447,51 @@ def _gds_reference_counts(path: Path, top: str) -> Dict[str, int]:
     return counts
 
 
+def _gds_structure_element_counts(path: Path) -> Dict[str, int]:
+    """Geometry elements written INTO each GDS structure, by structure name.
+
+    vibe-ic#2181. `_gds_reference_counts` answers "what does this structure
+    INSTANTIATE"; this answers "what does it CONTAIN". The pair separates the
+    two ways a ring master can report zero references, which are opposite facts
+    and were indistinguishable:
+
+      * the stream-out wrote the design FLAT — no structure reference to any
+        master, and the top structure holds the geometry (MEASURED at v1.19.43
+        on a chip-path gf180mcuD run: 14 structures, 18,178,737 elements in the
+        top);
+      * the stream-out wrote NOTHING — the named cell was absent from the
+        database and an empty structure was created and written in its place
+        (MEASURED and documented in `test_kspm43_streamout_top_cell_is_the_def_
+        design`: 106 bytes, one empty structure).
+
+    Counts BOUNDARY / PATH / BOX / TEXT / NODE elements. Same fail-closed record
+    walk as `_gds_reference_counts`; a malformed stream raises.
+    """
+    counts: Dict[str, int] = {}
+    current: Optional[str] = None
+    _ELEMENTS = (0x08, 0x09, 0x2D, 0x0C, 0x15)   # BOUNDARY PATH BOX TEXT NODE
+    with path.open("rb") as fh:
+        while True:
+            head = fh.read(4)
+            if not head:
+                break
+            if len(head) != 4:
+                raise ValueError("truncated GDS record header")
+            size = int.from_bytes(head[:2], "big")
+            if size < 4 or size % 2:
+                raise ValueError(f"invalid GDS record length {size}")
+            data = fh.read(size - 4)
+            if len(data) != size - 4:
+                raise ValueError("truncated GDS record payload")
+            rtype = head[2]
+            if rtype == 0x06:                     # STRNAME
+                current = data.rstrip(b"\x00").decode("ascii")
+                counts.setdefault(current, 0)
+            elif rtype in _ELEMENTS and current is not None:
+                counts[current] = counts.get(current, 0) + 1
+    return counts
+
+
 def step_pad_ring_final_evidence(project: Path, top: str,
                                  gds_result: StepResult) -> StepResult:
     """BLOCKING proof that the routed DEF and streamed GDS carry the ring.
@@ -34484,12 +34529,20 @@ def step_pad_ring_final_evidence(project: Path, top: str,
     def_paths = [pnr_dir / "padring.def", pnr_dir / "routed.def",
                  final_def]
     def_evidence: Dict[str, object] = {}
+    #: vibe-ic#2181 — every master the FINAL DEF places, so the GDS proof below
+    #: can tell "this stream-out kept no cell hierarchy at all" from "the ring
+    #: was dropped". Populated from the same parse the DEF chain already does.
+    final_def_masters: set = set()
     for path in def_paths:
         if not path.is_file():
             findings.append(f"PADRING_DEF_STAGE_MISSING: {path.name}")
             continue
         try:
             parsed = _pr.read_def(path) if _pr is not None else None
+            if parsed is not None and path == final_def:
+                final_def_masters = {
+                    str(c.master) for c in parsed.components.values()
+                    if getattr(c, "master", None)}
             missing = []
             for rec in records:
                 inst = str(rec.get("instance") or "")
@@ -34540,6 +34593,7 @@ def step_pad_ring_final_evidence(project: Path, top: str,
     if not gds.is_file() or gds.stat().st_size <= 0:
         findings.append("PADRING_GDS_MISSING_OR_EMPTY")
     gds_refs: Optional[Dict[str, int]] = None
+    _padring_gds_flat = False
     if gds.is_file() and records:
         try:
             gds_refs = _gds_reference_counts(gds, physical_top)
@@ -34553,7 +34607,50 @@ def step_pad_ring_final_evidence(project: Path, top: str,
                              "reachable_references": gds_refs.get(master, 0)}
                     for master, count in expected_by_master.items()
                     if gds_refs.get(master, 0) < count}
-            if lost:
+            # vibe-ic#2181 — REFERENCES_LOST is a claim about the RING, and it
+            # is only sayable when this GDS carries a cell hierarchy to lose the
+            # ring FROM. A stream-out that writes the design FLAT has no
+            # structure reference to ANY master, ring or core, by construction —
+            # so a zero there is "the reference axis does not exist in this
+            # file", not "the ring is gone". MEASURED on a chip-path gf180mcuD
+            # run at v1.19.43: klayout stream-out, 14 structures, 18,178,737
+            # shapes in the top structure, 0 references to any of the final
+            # DEF's 22768 placed masters — while the ring's geometry is present
+            # (107,645 shapes inside the SW corner pad's placed footprint,
+            # 90,421 inside the supply pad's, 0 outside the die). The gate
+            # accused the ring of being lost and was describing the hierarchy.
+            # BOTH remain findings: nothing here turns a FAIL into a PASS, and
+            # the ring is still NOT PROVEN in the GDS. Only the name and the
+            # disclosed reason change, so the next reader chases the stream-out
+            # instead of the ring.
+            # A flat stream-out and an EMPTY one both reference nothing. They
+            # are opposite facts, so the flat reading has to be EARNED: the
+            # physical top must actually CONTAIN geometry. Without that check
+            # the 106-byte empty-cell stream-out documented in
+            # `test_kspm43_streamout_top_cell_is_the_def_design` -- a real,
+            # total loss -- would be relabelled as a harmless hierarchy fact.
+            _no_master_referenced = bool(
+                lost and final_def_masters
+                and not any(gds_refs.get(m, 0) > 0 for m in final_def_masters))
+            _padring_gds_flat = bool(
+                _no_master_referenced
+                and _gds_structure_element_counts(gds).get(physical_top, 0) > 0)
+            if _padring_gds_flat:
+                findings.append(
+                    "PADRING_GDS_HIERARCHY_ABSENT: this GDS references NONE of "
+                    f"the {len(final_def_masters)} master(s) the final DEF "
+                    "places, so it was streamed FLAT and carries no structure "
+                    "reference for ANY cell -- the ring included. The ring is "
+                    "therefore NOT PROVEN in the GDS, but reference counting "
+                    "cannot say whether it is present. This is a fact about how "
+                    "this FILE was written -- stream-out, the grid snap's "
+                    "`nonorthogonal > 0` flatten fallback and the density fill "
+                    "each re-write it and any of them can drop the hierarchy -- "
+                    "not about the ring, whose DEF chain matched "
+                    f"{len(records)}/{len(records)} at every stage. Streamed by "
+                    f"{gds_result.extras.get('streamout_engine')}; which step "
+                    "dropped the hierarchy is NOT MEASURED here.")
+            elif lost:
                 findings.append(f"PADRING_GDS_REFERENCES_LOST:{lost}")
         except (OSError, UnicodeError, ValueError) as exc:
             findings.append(f"PADRING_GDS_HIERARCHY_UNREADABLE:{exc}")
@@ -34576,6 +34673,10 @@ def step_pad_ring_final_evidence(project: Path, top: str,
         "gds_evidence": gds_evidence,
         "logical_top": top,
         "physical_top": physical_top,
+        "gds_hierarchy": ("flat" if _padring_gds_flat else
+                          ("hierarchical" if gds_refs is not None
+                           else "NOT_MEASURED")),
+        "final_def_master_count": len(final_def_masters),
         "gds_source_def": f"phase3/stage3/pnr/{top}.def",
         "gds_source_def_sha256": (
             _sha256_file(pnr_dir / f"{top}.def")
