@@ -77,13 +77,74 @@ and still exits 1. Only the absence of a readable record declines to attribute.
 (`tools/ci/repo_hygiene_gates.sh`) and #693's tests keep working verbatim; it
 now selects nothing, because the behaviour it selected is the only behaviour.
 
+AND A COUNT IS ONLY COMPARABLE TO A FLOOR OVER THE SAME POPULATION (vibe-ic#2174)
+--------------------------------------------------------------------------------
+The comparison above subtracts two numbers. It is meaningful only when both
+describe the same population. It did not check that, so
+`silent_decline_audit.py <one file>` measured ONE file and compared it against
+the WHOLE-TREE floor. MEASURED on `main` a7707989e, on files this lane had not
+touched::
+
+    $ python3 programs/silent_decline_audit.py programs/lec_run.py --ratchet
+    files scanned : 1
+    silent declines: 2
+    [PASS] 15 -> 2; lower the baseline ...                          rc 0
+
+    $ python3 programs/silent_decline_audit.py programs/flow_compliance_check.py
+    files scanned : 1
+    silent declines: 0
+    [PASS] 15 -> 0; lower the baseline ...                          rc 0
+
+The arithmetic cannot be right. The recorded 15 is a corpus-wide total and no
+single file holds more than 6 of it, so EVERY one of the 1395 files in the wired
+population reads as an improvement it did not earn — measured, all 1395, the
+complement empty. A subset improving on a whole-tree floor is a property of
+subsets, not of the tree.
+
+So the record's own population is honoured. `by_file` cannot supply a subset's
+share (it is keyed by basename and omits every file with no finding), and this
+change may re-derive nothing, so the one population statement available is
+`scanned`:
+
+  * a scan covering AT LEAST the recorded population -> compare exactly as
+    before. Being at or below the floor over a LARGER population is a strictly
+    stronger statement than the record makes, and growth over it is real
+    growth. The wired `programs --ratchet` run is this case (1395 >= 1091);
+  * a scan SMALLER than the recorded population -> NOT COMPARABLE, exit 2. "I
+    cannot judge one file against a whole-tree floor" is the honest answer;
+  * a record that states no population at all claims none, so it is compared
+    as before. A baseline of `{"count": 0}` still makes the first decline NEW.
+
+`--write-baseline` refuses in the same case. Overwriting a whole-tree floor with
+a number derived from one file is the exact damage the invitation invited, and
+removing the words while leaving the trapdoor open is half a fix.
+
+This is the shape `step_internal_fail_bubble_up_check` already carries for the
+same reason (vibe-ic#1223, its `corpus_population` guard at ~L1590): "a count
+over one population is not a line to hold over another", and a record stating
+no population is left to ratchet exactly as it did rather than silently
+reinterpreted as agreeing. Only the population descriptor differs — a corpus
+key there, a file count here.
+
+AND THE GATE NO LONGER ASKS FOR A FLOOR TO BE MOVED (vibe-ic#2174)
+------------------------------------------------------------------
+`[PASS] 15 -> 2; lower the baseline` was an instruction, and the standing rule
+is that a gate asking for `--write-baseline` is a FINDING and not an
+instruction. Acting on it converts a defect into a standing waiver and makes
+every later comparison read against a floor nobody measured. A gate reports
+what it measured. Whether a floor moves is a ruling with evidence behind it,
+so no branch of this program asks for one to be written or lowered — the
+counts, the population and the path are all still printed, which is the
+evidence such a ruling would need.
+
 chip-AGNOSTIC: pure Python AST. No design, PDK or vendor literals.
 
 Exit codes:
     0  audit completed at or below the recorded baseline
     1  --strict with any finding, or the count GREW past the baseline
-    2  I/O error, an empty scan, or NO READABLE BASELINE to compare against
-       (NOT CHECKED — never a quiet pass)
+    2  I/O error, an empty scan, NO READABLE BASELINE to compare against, or a
+       scan SMALLER than the population the baseline describes
+       (NOT CHECKED / NOT COMPARABLE — never a quiet pass)
 """
 from __future__ import annotations
 
@@ -269,6 +330,44 @@ def _load_baseline(p: Path) -> Optional[int]:
     return n
 
 
+def _load_baseline_population(p: Path) -> Optional[int]:
+    """The FILE COUNT the recorded measurement was taken over, or ``None``.
+
+    ``None`` means the record makes no claim about its population — an older
+    or hand-written baseline that carries only ``count``. It is deliberately
+    NOT treated as zero and not treated as "any": a record that states no
+    population cannot be contradicted by one, so such a record is compared
+    exactly as it was before vibe-ic#2174.
+
+    Read with the same strictness as ``count``: ``bool`` is excluded because
+    ``True`` is an ``int``, and a negative population is a corrupt record
+    rather than a measurement.
+    """
+    if not p.is_file():
+        return None
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    n = d.get("scanned")
+    if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+        return None
+    return n
+
+
+def _population_shortfall(scanned: int, base_pop: Optional[int]) -> bool:
+    """Is this scan SMALLER than the population the record describes?
+
+    The one predicate vibe-ic#2174 turns on. ``True`` means the two numbers
+    the ratchet would subtract describe different populations and the
+    subtraction says nothing — a subset almost always reads as an improvement
+    because it holds a small share of the total.
+    """
+    return base_pop is not None and scanned < base_pop
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="Find remedy decisions whose refusal is silent (#313 §6).")
@@ -312,6 +411,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     bl = (Path(a.baseline) if a.baseline
           else Path(__file__).resolve().parent / BASELINE_NAME)
     if a.write_baseline:
+        if _population_shortfall(rep["scanned"], _load_baseline_population(bl)):
+            print(f"[NOT COMPARABLE] refusing to overwrite {bl}: it records a "
+                  f"measurement over {_load_baseline_population(bl)} file(s) "
+                  f"and this run scanned {rep['scanned']}. A floor derived "
+                  f"from a subset is a floor nobody measured (vibe-ic#2174); "
+                  f"the record is left exactly as it was.", file=sys.stderr)
+            return 2
         by_file: dict = {}
         for f in rep["silent_declines"]:
             by_file[Path(f["file"]).name] = by_file.get(Path(f["file"]).name, 0) + 1
@@ -345,19 +451,32 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"[NOT CHECKED] no silent-decline baseline states a readable "
               f"measurement at {bl} — absent, unreadable or truncated is not a "
               f"measurement of zero, so the {rep['count']} finding(s) above "
-              f"can be called neither new nor recorded. Measure this tree and "
-              f"record it with --write-baseline before asking this audit to "
-              f"attribute anything. See vibe-ic#1705.")
+              f"can be called neither new nor recorded. Establishing a floor "
+              f"for this tree is an evidenced decision and not something this "
+              f"gate asks for; until a readable record exists at that path "
+              f"this audit attributes nothing. See vibe-ic#1705, #2174.")
+        return 2
+    base_pop = _load_baseline_population(bl)
+    if _population_shortfall(rep["scanned"], base_pop):
+        print(f"[NOT COMPARABLE] this run scanned {rep['scanned']} file(s); "
+              f"the baseline at {bl} records {base} finding(s) measured over "
+              f"{base_pop} file(s). A count from a SUBSET cannot be judged "
+              f"against a floor over the whole population: a subset holds a "
+              f"small share of the total, so almost any subset reads as an "
+              f"improvement it did not earn. The {rep['count']} finding(s) "
+              f"above stand as measured and are neither new nor recorded. "
+              f"Scan the population the record describes. See vibe-ic#2174.")
         return 2
     if rep["count"] > base:
         print(f"[FAIL] silent remedy declines GREW {base} -> "
               f"{rep['count']}: a new remedy can now refuse with nobody "
-              f"told. Disclose the decline path, or triage the existing "
-              f"backlog and lower the baseline.")
+              f"told. Disclose the decline path.")
         return 1
     if rep["count"] < base:
-        print(f"[PASS] {base} -> {rep['count']}; lower the baseline so the "
-              f"recorded number stops claiming debt that is paid.")
+        print(f"[PASS] {rep['count']} silent remedy decline(s) over "
+              f"{rep['scanned']} file(s), below the recorded {base}. Reported, "
+              f"not acted on: whether a floor moves is a ruling with evidence "
+              f"behind it, never a line of this gate's output (vibe-ic#2174).")
         return 0
     print(f"[PASS] no NEW silent remedy decline ({rep['count']} recorded "
           f"over {rep['scanned']} file(s))")
