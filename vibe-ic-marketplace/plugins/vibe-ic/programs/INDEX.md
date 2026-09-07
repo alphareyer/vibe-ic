@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1285
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1285)
+- **Total programs (excluding helpers / shims):** 1286
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1286)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1276 |
+| `any` | 1277 |
 
 ## Alphabetical listing
 
@@ -649,6 +649,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `l_doc_consumer_contract` | any | — | shared derivation helpers for the SEMANTIC L-doc completeness gates (batch layergate-7: L20 / L22 / L23). |
 | `l_doc_cross_consistency_check` | any | — | D3 program-first capture of the ``phase1-output-verify`` skill's "Cross-doc consistency" checklist (item 3). |
 | `l_doc_evidence_util` | any | — | the "evidence path + read-back value" primitive. |
+| `l_doc_field_ownership_map` | any | — | WHICH LAYER DECLARES A FIELD OF THIS NAME. |
 | `l_doc_field_producer_check` | any | — | a field a checker READS must have a PRODUCER. |
 | `l_doc_generator_stamp` | any | v0.1.51 | every emitted L document records WHICH RELEASE produced it, and a consumer can act on that. |
 | `l_doc_parity_diff` | any | v0.1.51 | L-doc parity diff (program-extracted vs fresh-agent-extracted). |
@@ -1357,7 +1358,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1276 programs)
+### `any` (1277 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1977,6 +1978,7 @@ _(no programs in this group)_
 - `l_doc_consumer_contract` — shared derivation helpers for the SEMANTIC L-doc completeness gates (batch layergate-7: L20 / L22 / L23).
 - `l_doc_cross_consistency_check` — D3 program-first capture of the ``phase1-output-verify`` skill's "Cross-doc consistency" checklist (item 3).
 - `l_doc_evidence_util` — the "evidence path + read-back value" primitive.
+- `l_doc_field_ownership_map` — WHICH LAYER DECLARES A FIELD OF THIS NAME.
 - `l_doc_field_producer_check` — a field a checker READS must have a PRODUCER.
 - `l_doc_generator_stamp` — every emitted L document records WHICH RELEASE produced it, and a consumer can act on that.  _[v0.1.51]_
 - `l_doc_parity_diff` — L-doc parity diff (program-extracted vs fresh-agent-extracted).  _[v0.1.51]_

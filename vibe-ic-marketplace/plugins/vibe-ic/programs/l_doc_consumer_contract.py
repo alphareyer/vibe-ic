@@ -304,8 +304,24 @@ _INPUT_GLOBS = (
 
 # Binary / model files that are inputs but not prose. Reading a 4MB
 # cell model as "requirement text" is how a gate invents requirements.
+#
+# `.svg` IS ONE OF THEM, and it is the only one here that is textual. A
+# vector drawing is an ASSET, not a document: its text is coordinates,
+# transform matrices, path data and font metadata, plus whatever labels the
+# drawing carries. Every consumer of `input_doc_texts` treats what it returns
+# as the design's OWN PROSE — `framed_hits` looks for requirement framing in
+# it, `l19_constraint_token_emit` lifts `KEY = value` bindings out of it — and
+# neither question is meaningful over a path element.
+#
+# MEASURED before adding it, because a shared reader has a wide blast radius:
+# on a published Phase-1 root the two block diagrams are 142280 and 138293
+# bytes of markup read as requirement text on every pass; and across the
+# published corpus, 0 of 2262 emitted L19 provenance records cite an `.svg`
+# source (806 `.txt`, 717 `.json`, 699 `.md`, 40 `.loc`). So this closes a
+# latent hazard and changes no published record — which is the whole claim,
+# and it is a measurement rather than an expectation.
 _SKIP_SUFFIXES = {".gds", ".lef", ".lib", ".db", ".png", ".pdf", ".gz",
-                  ".zip", ".vcd", ".fst", ".bin", ".hex"}
+                  ".zip", ".vcd", ".fst", ".bin", ".hex", ".svg"}
 _MAX_BYTES = 4_000_000
 
 
