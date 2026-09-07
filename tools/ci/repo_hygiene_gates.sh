@@ -1077,6 +1077,48 @@ run_tolerating_uncheckable "citation routing is true" "$ROOT" python3 "$PG/citat
 uncheckable_until 2027-02-28 "SUBJECT ABSENT: protocol_parity/ is a PUBLISHED SWEEP TREE and left this repository with the rest of the corpus in v1.10.56. rc 2 here is the program's own not-a-directory refusal, which NAMES the path it looked for -- it is not a claim that any record is honest. The INSTRUMENT is proved continuously by tools/ci/gate_fixtures/phase1_parity_source_tier_record.py, which drives it over a two-protocol record whose RESULT markdown agrees with its data and over the same record with ONE published count moved. Closes the day a parity sweep is published in-tree. rc 1 is UNAFFECTED and still blocks: an exemption converts only rc 2, so this gate reading a record and finding it dishonest still refuses the landing."
 run_tolerating_uncheckable "phase1 parity source-tier record" "$ROOT" python3 "$PG/phase1_parity_source_tier_check.py" protocol_parity
 
+# vibe-ic#2175 — AND IT GOES FIRST OF THE WIRING FAMILY, because 491 programs
+# in this tree read another program by LOADING IT BY PATH, and a load that
+# silently degrades makes every one of those verdicts a statement about a module
+# that never finished importing.
+#
+# `checker_execution_wiring_audit` — the very next line — is one of the 491
+# (`gate_is_wired_check` and `program_reachability_check` are not; they read
+# source, not modules). It resolves a checker with
+# `importlib.util.spec_from_file_location`, which does
+# NOT put the file's directory on `sys.path` the way running it as `__main__`
+# does. A bare sibling import then raises `ModuleNotFoundError`, and where the
+# author wrapped it in `try: ... except ImportError:` with a degraded fallback
+# it raises nothing at all and the caller measures a stub. `lec_equivalence_check`
+# did exactly that and went on emitting a FALSE diagnosis with nothing in its
+# output saying the classifier was absent (#2104). The failure is also
+# ORDER-DEPENDENT — any program loaded earlier that does fix `sys.path` repairs
+# it for everything after — which is why it stayed latent long enough to reach
+# 470 of 1385 programs before anyone measured it.
+#
+# THE GATE ITSELF HAD NO CALL SITE UNTIL THIS LINE (#2175). It shipped BLOCKING
+# in #2104 with `grep -rl` over `tools/` and `programs/` returning exactly two
+# paths — the program and its own test — so no landing, no hygiene tier and no
+# CI path ever reached its verdict. Two REGISTERS named it
+# (`gate_is_wired_baseline.json`, which recorded it as known-unwired, and
+# `INDEX.md`), and a register is a record of wiring, not wiring.
+#
+# MEASURED HERE BEFORE WIRING, over this repo at a1f3685837ca: 1395 program(s)
+# loaded by path, 0 offenders, 0 unmeasured, 0 not-this-gate's-subject —
+# rc 0. So this adds a gate that passes rather than a new red, and #2104's
+# sweep is confirmed complete by the instrument rather than by its author.
+#
+# `--jobs 8` and ONE CHILD PER FILE: the in-process version of this sweep exits
+# 139 (SIGSEGV) partway through the directory inside the pinned image and writes
+# no report. See the program's docstring. 1395 children cost 12.5 s at
+# `--jobs 8` on a 32-core host.
+#
+# The subject is `$ROOT`-anchored and the executable is `$PG`, so the RUNTIME's
+# program sweeps the SUBJECT's tree — the split `every program is reachable`
+# below spells out, and the substitution the mutation-fixture engine performs.
+run "programs load when loaded by path" "$ROOT" \
+  python3 "$PG/program_path_load_check.py" \
+  --programs "$ROOT/vibe-ic-marketplace/plugins/vibe-ic/programs" --jobs 8
 # vibe-ic#381 — a checker only its own unit test ever runs has zero coverage of
 # real inputs: the fixture proves the logic, never the artefacts.
 run "checker execution wiring"          "$ROOT" python3 "$PG/checker_execution_wiring_audit.py"

@@ -201,8 +201,29 @@ def sweep(programs: Path, jobs: int = 1) -> Dict[str, list]:
     unmeasured: List[dict] = []
 
     def run_one(p: Path) -> tuple:
+        # `-B` ON THE CHILD, AND IT IS NOT BELT-AND-BRACES. This gate READS a
+        # tree; it must not write into it. Each child IMPORTS a program of the
+        # subject, and CPython writes `<subject>/__pycache__/*.pyc` for every
+        # one of them unless bytecode writing is off IN THAT PROCESS.
+        # `sys.dont_write_bytecode` does not propagate to a child and neither
+        # does the parent's `-B` flag, so without this the sweep leaves 1395
+        # files' worth of residue in the directory it was asked to measure.
+        #
+        # MEASURED on a two-program subject with `PYTHONDONTWRITEBYTECODE`
+        # unset: `<subject>/programs/__pycache__` present after the sweep;
+        # with `-B` here, absent. The residue is invisible to `git status`
+        # (`.gitignore`) and visible to the drift instrument, which is exactly
+        # the 13-of-39 differential `attestation_preflight_check` was written
+        # from — and whose REMEDY line names this shape: "pass the `-B` FLAG
+        # to any isolated child that imports this tree".
+        #
+        # `repo_hygiene_gates.sh:52` exports `PYTHONDONTWRITEBYTECODE=1`, so
+        # under the dispatcher the children were already quiet. That made the
+        # gate depend on an ambient variable for a property it can hold on its
+        # own, and the gate is also run directly — by its own test file, and by
+        # any operator pointing it at a tree.
         proc = subprocess.run(
-            [sys.executable, str(Path(__file__).resolve()),
+            [sys.executable, "-B", str(Path(__file__).resolve()),
              "--one", str(p), "--programs", str(programs)],
             stdin=subprocess.DEVNULL, capture_output=True, text=True)
         return p, proc
@@ -254,7 +275,35 @@ def main(argv=None) -> int:
 
     result = sweep(programs, jobs=max(1, a.jobs))
     if a.json_out:
-        Path(a.json_out).write_text(json.dumps(result, indent=2))
+        # vibe-ic#2154: this report is a DECLARED destination, and a plain
+        # `.write_text` leaves a half-written file under its final name — the
+        # #1082 class, in the gate written to keep the tree honest about its
+        # own loads.
+        #
+        # THE HELPER IS IMPORTED HERE AND NOT AT MODULE LEVEL, and that is not
+        # style. MEASURED on a two-program subject holding `_atomic_artefact`
+        # and one bare `from _atomic_artefact import ...` beside it:
+        #
+        #   module-level import in this file  ->  [PASS] rc 0   (0 offenders)
+        #   deferred to this line             ->  [FAIL] rc 1   (1 offender)
+        #
+        # `--one` runs in the SAME interpreter that has already executed this
+        # file's module body, so anything imported up there is in the child's
+        # `sys.modules` before `load_isolated` snapshots it. `finally` then
+        # deletes only what the load ADDED, so a pre-seeded sibling is never
+        # removed and every bare import of it in the tree under test resolves
+        # for free. Blocking `sys.path` cannot help: the module object is
+        # already there. The gate would have answered PASS over the exact
+        # offence it exists to name — which is `_child`'s own recorded lesson,
+        # one import statement further up.
+        #
+        # `main` returns before this line in `--one` mode, so the child never
+        # executes it and the sweep keeps measuring an unseeded interpreter.
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
+        from _atomic_artefact import write_json as atomic_write_json
+        atomic_write_json(Path(a.json_out), result)
 
     print(f"{GATE}: loaded {result['measured']} program(s) by path from "
           f"{programs}")

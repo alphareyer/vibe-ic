@@ -29,7 +29,6 @@
     "page_states_one_figure_twice_check",
     "phase1_loop_stop_condition_check",
     "plugin_change_pytest_gate",
-    "program_path_load_check",
     "regression_issue_intake_check",
     "reports_subfolder_taxonomy_check",
     "rtl_signal_name_semantic_check",

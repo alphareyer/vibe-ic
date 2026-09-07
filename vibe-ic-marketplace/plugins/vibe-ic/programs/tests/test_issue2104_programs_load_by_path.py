@@ -348,3 +348,123 @@ def test_load_isolated_restores_sys_path_and_sys_modules(tmp_path):
     assert verdict == "ok"
     assert sys.path == before_path
     assert set(sys.modules) == before_mods
+
+
+# ---------------------------------------------------------------------------
+# 4. THE CHECKER'S OWN IMPORTS MAY NOT SEED THE CHILD  (vibe-ic#2154 / #2175)
+# ---------------------------------------------------------------------------
+#
+# `test_one_program_may_not_repair_the_next` pins the property BETWEEN two
+# programs of the subject; these two pin it between the CHECKER and the subject,
+# which is a different door into the same room and was open.
+#
+# MEASURED while making the `--json` write atomic for #2154. The obvious repair
+# — `from _atomic_artefact import write_json` at module level, the shape every
+# other converted program in this tree uses — was applied and driven over a
+# two-program subject holding `_atomic_artefact.py` and one bare import of it:
+#
+#     module-level import in program_path_load_check  ->  [PASS] rc 0, 0 offenders
+#     deferred to the write site                      ->  [FAIL] rc 1, 1 offender
+#
+# `--one` runs in the same interpreter that has already executed the checker's
+# module body, so anything imported up there is in `sys.modules` before
+# `load_isolated` snapshots it; the `finally` deletes only what the load ADDED,
+# so a pre-seeded sibling survives and every bare import of it in the tree under
+# test resolves for free. Removing the directory from `sys.path` cannot help —
+# the module object is already there.
+#
+# Nothing in the file above would have caught it: every fixture sibling here is
+# named `a`, `b`, `c` or `_path_layout`, and the checker imports none of those.
+def test_a_module_the_checker_imports_is_not_pre_seeded_for_the_subject(tmp_path):
+    """A subject sibling sharing a name with one of the checker's own imports
+    must still be an offence. `_atomic_artefact` is the live instance."""
+    d = _tree(tmp_path, {
+        "_atomic_artefact.py": "def write_json(p, o):\n    return p\n",
+        "zz_bare_user.py": "from _atomic_artefact import write_json\n",
+    })
+    out = tmp_path / "r.json"
+    r = _run(d, out)
+    doc = _doc(r, out)
+    assert [o["program"] for o in doc["offenders"]] == ["zz_bare_user.py"], doc
+    assert doc["offenders"][0]["unresolved_sibling"] == "_atomic_artefact", doc
+    assert r.returncode == 1, r.stdout[-2000:]
+
+
+def test_the_checker_imports_nothing_from_its_own_directory_at_module_level():
+    """THE GUARD FOR THE TEST ABOVE, because that test only covers the ONE name
+    that happens to be imported today.
+
+    A future sibling import added at module scope re-opens the hole for its own
+    name, and the behavioural test above cannot see it. So the rule is stated
+    over the module's own syntax: `program_path_load_check` imports only the
+    standard library at module scope, and any sibling helper it needs is
+    imported inside the function that uses it — after `--one` has returned.
+    """
+    import ast
+    import sys as _sys
+
+    tree = ast.parse(_SCRIPT.read_text())
+    siblings = C.sibling_names(_PROGRAMS)
+    stdlib = getattr(_sys, "stdlib_module_names", frozenset())
+    module_level = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            module_level += [a.name.split(".")[0] for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            module_level.append(node.module.split(".")[0])
+        elif isinstance(node, ast.ImportFrom) and node.level:
+            module_level.append("." * node.level)
+    offending = sorted(n for n in module_level
+                       if n in siblings or n.startswith("."))
+    assert not offending, (
+        f"{_SCRIPT.name} imports {offending} at MODULE level. Every one of "
+        "those names is seeded into `sys.modules` before `--one` sweeps a "
+        "file, so a subject program that bare-imports a sibling of that name "
+        "resolves it for free and the gate answers PASS over the exact offence "
+        "it exists to name. Import it inside the function that uses it.")
+    # And the assertion above is not vacuous only because the sibling set is
+    # real: `stdlib` is checked so a future rename of `sibling_names` that
+    # returned nothing would be caught here rather than passing silently.
+    assert siblings and "argparse" not in siblings, sorted(siblings)[:5]
+    assert not stdlib or "json" in stdlib
+
+
+# ---------------------------------------------------------------------------
+# 5. THE SWEEP READS ITS SUBJECT AND DOES NOT WRITE INTO IT  (vibe-ic#2175)
+# ---------------------------------------------------------------------------
+def test_the_sweep_leaves_no_bytecode_in_the_tree_it_measures(tmp_path,
+                                                              monkeypatch):
+    """A gate that only needs to READ a tree must not write into it.
+
+    Each child IMPORTS a program of the subject, so CPython writes
+    `<subject>/__pycache__/*.pyc` for every one of them unless bytecode writing
+    is off IN THAT PROCESS. `sys.dont_write_bytecode` does not cross a
+    subprocess boundary and neither does the parent's `-B`, so the flag has to
+    be on the child's own argv.
+
+    MEASURED before the flag was added, on this fixture: `__pycache__` present
+    in the subject after the sweep. The residue is invisible to `git status`
+    (`.gitignore`) and visible to `attestation_preflight_check`, which is the
+    13-of-39 differential that gate was written from.
+
+    `PYTHONDONTWRITEBYTECODE` is REMOVED from this test's environment on
+    purpose. `repo_hygiene_gates.sh:52` exports it, so inheriting it would make
+    this test pass on the dispatcher's behalf and say nothing about the gate —
+    and the gate is also run directly, by the file above and by any operator.
+    """
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    d = _tree(tmp_path, {
+        "leaf_mod.py": "VALUE = 1\n",
+        "user_mod.py": _GUARD + "from leaf_mod import VALUE\n",
+    })
+    out = tmp_path / "r.json"
+    r = _run(d, out)
+    doc = _doc(r, out)
+    assert doc["offenders"] == [] and doc["measured"] == 2, doc
+    residue = sorted(str(p.relative_to(tmp_path))
+                     for p in tmp_path.rglob("__pycache__"))
+    assert not residue, (
+        "the sweep wrote bytecode into the tree it was asked to measure: "
+        f"{residue}. Pass `-B` on the child's argv — the parent's flag and "
+        "`sys.dont_write_bytecode` do not cross a subprocess boundary.")
+    assert r.returncode == 0, r.stdout[-2000:]
