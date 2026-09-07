@@ -26,23 +26,58 @@ R = importlib.util.module_from_spec(_RUNTIME_SPEC)
 _RUNTIME_SPEC.loader.exec_module(R)
 
 def _pinned_runner_image() -> str:
-    """The runner reference this tree demands, COMPOSED, never copied.
+    """The COMMITTED runner reference a manifest must carry: COMPOSED from the
+    pin and the DEFAULT repository, and INDEPENDENT of the environment.
 
     vibe-ic#2100.  This file used to carry the literal
     `ghcr.io/vibeic/vibeic-eda@sha256:8c5694…`, which is TWO values welded
-    together and each of them wrong to spell here for a different reason:
+    together, and the DIGEST half is still wrong to spell here: the digest is
+    the pin, and a second copy of a pinned value is a second definition of it.
+    The 0.3.48 pin move had to hand-edit that line, and a rebase that touched
+    the pin conflicted on exactly it.  That half of the change stands, and it
+    is why this reads rather than copies.
 
-      * the DIGEST is the pin, and a second copy of a pinned value is a second
-        definition of it.  The 0.3.48 pin move had to hand-edit this line, and
-        a rebase that touched the pin conflicted on exactly it.
-      * the REPOSITORY is deployment configuration, not identity.  The same
-        bytes are served from the published registry and from a LAN one, and
-        which a host can reach is a fact about the network.  The PROGRAM under
-        test composes `RUNNER_IMAGE` from `$VIBEIC_EDA_IMAGE_REPO`; the literal
-        here did not, so on every host that exports it the two disagreed.
-        MEASURED 2026-09-07 on 8HD-4: 18 ids in this file red with the env SET
-        and all 60 green with it unset — a whole file reporting the operator's
-        network configuration as a defect in a landing gate.
+    THE REPOSITORY HALF WAS DECIDED THE OTHER WAY, AND THE LANDED CONTRACT WINS.
+    This function used to resolve the repository through
+    `$VIBEIC_EDA_IMAGE_REPO`, on the reasoning that "the PROGRAM under test
+    composes `RUNNER_IMAGE` from `$VIBEIC_EDA_IMAGE_REPO`".  IT NO LONGER DOES.
+    `febacf0edd6` (v1.18.57) split that constant in two, for the reason it
+    states beside them:
+
+        RUNNER_IMAGE          what a MANIFEST records, and what
+                              `_runner_profile` requires it to record.  A
+                              manifest is a COMMITTED artefact, so the only
+                              reference it can carry is the CANONICAL one — a
+                              deployment address in the tree is precisely what
+                              this repository forbids.  NEVER env-resolved.
+        RUNNER_IMAGE_RUNTIME  what THIS deployment will actually start, same
+                              digest, whatever repository this host is told to
+                              serve those bytes from.
+
+    So after that landing the FIXTURE was the stale side, and it produced the
+    mirror of the defect that landing fixed: with `VIBEIC_EDA_IMAGE_REPO`
+    exported — the documented configuration on every host of this fleet — this
+    function composed a deployment address, `_runner_profile` refused it with
+    `manifest.runner.image is not the BASE-owned runner image`, and a landing
+    gate reported the operator's network configuration as a defect.  MEASURED
+    2026-09-07 on 8hd-9, on `6877e777f0`, per file:
+
+        VIBEIC_EDA_IMAGE_REPO SET      transition 29 red / 27 passed
+                                       rename     10 red /  1 passed
+        VIBEIC_EDA_IMAGE_REPO UNSET    both files  0 red
+
+    A fixture that answers a different question in each env arm cannot be a
+    drift net over a COMMITTED value, because the committed value has one
+    answer.  `test_the_fixture_image_is_the_committed_one_in_every_env_arm`
+    below pins that, and its mutation arm restores the env composition and
+    watches those reds come back.
+
+    THE RUNTIME REFERENCE IS NOT LOST, and it is asserted a few tests down:
+    `test_manifest_and_runtime_use_one_exact_base_owned_image` binds
+    `P.RUNNER_IMAGE_RUNTIME` to `hermetic_candidate_runner.IMAGE` — the
+    env-composed pair — and binds every copy to the ONE digest that is the
+    image's identity.  What moved here is which of the two references this
+    fixture stands for, not whether the configured one is checked at all.
 
     READ, NOT IMPORTED, and read from `hermetic_candidate_runner.py` rather
     than from the module under test.  `P.RUNNER_IMAGE` would be circular — the
@@ -71,9 +106,11 @@ def _pinned_runner_image() -> str:
     assert not missing, (
         f"hermetic_candidate_runner.py pins no {', '.join(missing)}; this file "
         "reads the pin and deliberately keeps no copy to fall back to")
-    repo = (os.environ.get("VIBEIC_EDA_IMAGE_REPO") or "").strip() \
-        or found["IMAGE_REPO_DEFAULT"]
-    return f"{repo}@{found['IMAGE_DIGEST']}"
+    # THE DEFAULT REPOSITORY, NEVER THE ENVIRONMENT.  This is the COMMITTED
+    # reference — the one `_runner_profile` requires a manifest to carry — and
+    # a committed reference cannot depend on which registry the host running
+    # the test happens to be configured for.  See the docstring above.
+    return f"{found['IMAGE_REPO_DEFAULT']}@{found['IMAGE_DIGEST']}"
 
 
 _RUNNER_IMAGE = _pinned_runner_image()
@@ -497,6 +534,82 @@ def test_the_program_and_the_pin_name_one_runner_image():
         "the landing validator and the pinned runtime name different images: "
         f"program {P.RUNNER_IMAGE} vs pin {_RUNNER_IMAGE}")
     assert "@sha256:" in _RUNNER_IMAGE, _RUNNER_IMAGE
+
+
+#: The repository a fleet host serves the pinned bytes from. Any address that
+#: is NOT the default will do — what is under test is that the fixture's image
+#: does not follow it, so the value only has to be distinguishable.
+_A_CONFIGURED_REPOSITORY = "registry.example.invalid:5000/vibeic-eda"
+
+
+def test_the_fixture_image_is_the_committed_one_in_every_env_arm():
+    """THE CONTRACT `febacf0edd6` LANDED, ASSERTED HERE.
+
+    `_runner_profile` accepts exactly one image in a manifest — the COMMITTED
+    `RUNNER_IMAGE`, composed from the DEFAULT repository and never from the
+    environment.  This fixture stands for that value, so it must answer the
+    same string in every env arm; a fixture that follows `$VIBEIC_EDA_IMAGE_
+    REPO` is asserting a runtime fact against a committed one, which is the
+    defect that landing removed from the program.
+
+    MEASURED on `6877e777f0` before this change, 8hd-9: with the variable
+    exported, 29 ids in this file and 10 in `test_protected_landing_rename.py`
+    failed on `manifest.runner.image is not the BASE-owned runner image`; with
+    it unset, 0.  Same tree, same bytes, two verdicts.
+    """
+    for env in ({}, {"VIBEIC_EDA_IMAGE_REPO": _A_CONFIGURED_REPOSITORY},
+                {"VIBEIC_EDA_IMAGE_REPO": ""},
+                {"VIBEIC_EDA_IMAGE_REPO": "  "}):
+        with mock.patch.dict(os.environ, env, clear=True):
+            got = _pinned_runner_image()
+        assert got == _RUNNER_IMAGE, (
+            f"the fixture image moved with the environment {env!r}: {got}")
+        assert _A_CONFIGURED_REPOSITORY not in got, got
+    # ...and the value it answers is the one the validator will demand.
+    assert _RUNNER_IMAGE == P.RUNNER_IMAGE == (
+        f"{P.RUNNER_IMAGE_REPO_DEFAULT}@{P.RUNNER_IMAGE_DIGEST}")
+
+
+def test_MUTANT_composing_the_fixture_image_from_the_env_is_refused_again():
+    """THE MUTATION ARM, and it drives the REFUSAL rather than a string.
+
+    Compose the fixture's runner image from `$VIBEIC_EDA_IMAGE_REPO` again —
+    the one thing this change removed — and hand the resulting runner row to
+    the validator the landing uses.  It must refuse, with the sentence those
+    39 ids were failing on.  Without this arm, the test above would pass just
+    as well against a fixture that had stopped composing anything at all.
+
+    THE ENV MUST ACTUALLY BE SET FOR THE MUTATION TO MEAN ANYTHING, so the
+    premise is asserted first: under an unset variable the old form answers the
+    same string as the new one and the arm would prove nothing.
+    """
+    with mock.patch.dict(os.environ,
+                         {"VIBEIC_EDA_IMAGE_REPO": _A_CONFIGURED_REPOSITORY},
+                         clear=True):
+        mutant = _pinned_runner_image_composed_from_the_environment()
+    assert mutant != _RUNNER_IMAGE, (
+        "the mutation changed nothing, so this arm proves nothing")
+    assert mutant.startswith(_A_CONFIGURED_REPOSITORY + "@")
+    assert mutant.endswith("@" + P.RUNNER_IMAGE_DIGEST), (
+        "the mutation moved the DIGEST as well as the repository; it must move "
+        "exactly the one variable this change is about")
+    with pytest.raises(P.Refusal) as caught:
+        P._runner_profile({**_RUNNER, "image": mutant})
+    assert "is not the BASE-owned runner image" in str(caught.value)
+
+
+def _pinned_runner_image_composed_from_the_environment() -> str:
+    """The PRE-`febacf0edd6` form of `_pinned_runner_image`, kept HERE and used
+    by exactly one test: the mutation arm above.
+
+    It is a function rather than a patch of the real one so the arm cannot
+    accidentally leave the fixture composing from the env for the rest of the
+    session, and so the difference between the two forms is one readable line
+    instead of a monkeypatch a reader has to reconstruct.
+    """
+    repo = (os.environ.get("VIBEIC_EDA_IMAGE_REPO") or "").strip() \
+        or P.RUNNER_IMAGE_REPO_DEFAULT
+    return f"{repo}@{P.RUNNER_IMAGE_DIGEST}"
 
 
 def test_prepare_cannot_replace_the_base_owned_runner_digest(tmp_path):
