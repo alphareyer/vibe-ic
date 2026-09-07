@@ -59,6 +59,13 @@ Heuristic, per module (chip-AGNOSTIC, purely structural):
   5. Mitigation markers (any → the chain is assumed already structured):
        csa, carry_save, carry_select, kogge, brent_kung, han_carlson,
        sklansky, prefix, pipelin, dsp, wallace, dadda, compressor, ladner.
+     READ FROM THE CODE ONLY — the module name and the comment-STRIPPED body
+     (vibe-ic#2192). A comment naming a strategy is prose about the problem,
+     not evidence the code implements it, and this program's own printed
+     recommendation pasted in as a `// TODO:` used to silence this program.
+     A module the marker silences is DISCLOSED, never dropped in silence: the
+     headline says how many modules were suppressed and how many rows were
+     withheld, and each one prints a `[SUPPRESSED]` line naming the marker.
 
 Recommendation emitted with every finding: replace the ripple chain with a
 carry-save / carry-select adder, a parallel-prefix adder, or pipeline the add.
@@ -140,14 +147,63 @@ def collect_rtl_files(paths: List[str], rtl_dir: str | None) -> List[Path]:
 
 
 # Leading word-boundary only (no trailing \b) so the abbreviations also match
-# as name prefixes — `csa_s`, `csa_c`, `cpa_q`, `compressor_tree`, etc. Detected
-# against the RAW module text (comments included): if the author documents a
-# carry-save / carry-select / prefix / pipelined strategy, this advisory trusts
-# it and stays quiet. Naive undocumented wide `+` chains still fire.
+# as name prefixes — `csa_s`, `csa_c`, `cpa_q`, `compressor_tree`, etc.
+#
+# MATCHED AGAINST THE CODE, NEVER AGAINST A COMMENT (vibe-ic#2192). This scan
+# used to run over the RAW module text on the premise that a comment naming
+# the strategy is evidence the code implements it. A comment is not a
+# structure, and this marker set contains words that appear in ordinary prose
+# ABOUT the problem — a rejected alternative, a design note, a header
+# describing a different variant of the same generator. MEASURED on the frozen
+# base e2b3c08170b5: one SHA-256 round module written as the naive chained
+# `t1 = h + Sigma1(e) + Ch + K[t] + W[t]` ripple, three arms differing in ONE
+# COMMENT and in no byte of code — a comment reading `carry-save reduced` gave
+# 0 findings, the same comment with that word changed to `restructured` gave 6
+# HIGH, and adding this program's OWN printed recommendation as
+# `// TODO: consider a carry-save / carry-select / parallel-prefix adder or
+# pipelining.` returned it to 0. An author acting on the advice in the most
+# natural way — recording it where the work is — deleted the evidence that the
+# work was owed.
+#
+# So the marker now means AN IDENTIFIER IN THE CODE, which is the only thing a
+# structural heuristic can stand behind: `wire [31:0] csa_s, csa_c;` still
+# reads clean with no exemption, and no sentence anywhere silences anything.
 MITIGATIONS = re.compile(
     r'\b(csa|cpa|carry[_-]?save|carry[_-]?select|carryselect|kogge|'
     r'brent[_-]?kung|han[_-]?carlson|sklansky|prefix[_-]?adder|prefix[_-]?add|'
     r'pipelin|dsp|wallace|dadda|compressor|ladner|fischer|3:2|3to2)', re.I)
+
+
+def mitigation_marker(name: str, body: str) -> str | None:
+    """The mitigation identifier that silences this module, or None.
+
+    `body` MUST be the comment-stripped module body (vibe-ic#2192): a marker
+    that is only ever spoken about in prose is not a mitigation. Returns the
+    matched text so a suppression can be disclosed by NAME rather than as a
+    bare boolean — a reader has to be able to see which word did it.
+    """
+    m = MITIGATIONS.search(name) or MITIGATIONS.search(body)
+    return m.group(0) if m else None
+
+
+@dataclass
+class Suppression:
+    """A module whose risk rows were WITHHELD by a mitigation marker.
+
+    vibe-ic#2192. Silence is not a verdict. Before this record existed, a
+    module that had been silenced and a module with no wide adders in it
+    produced byte-identical output — `findings: 0 (0 HIGH, 0 MED …)` — so the
+    one fact a reader needed (rows were withheld, and by which word) was the
+    one fact the report did not carry. A module is listed here only when the
+    marker actually withheld something: `withheld` is the number of rows the
+    same analysis produces with the marker ignored, and a module that would
+    have been clean anyway is not a suppression and is not listed.
+    """
+    file: str
+    line: int
+    module: str
+    marker: str
+    withheld: int
 
 
 #: The basis word for a row derived from RTL structure with no timing run
@@ -278,10 +334,23 @@ def _expr_carry_width(lhs: str, rhs: str, widths: Dict[str, int]) -> int:
 
 
 def analyse_module(name: str, body: str, base_line: int, path: str,
-                   warn_w: int, high_w: int, raw_body: str = '') -> List[Finding]:
+                   warn_w: int, high_w: int, raw_body: str = '',
+                   suppressed: List['Suppression'] | None = None
+                   ) -> List[Finding]:
+    """Risk rows for one module.
+
+    `body` is the COMMENT-STRIPPED module body and is what every decision here
+    is taken on, the mitigation lookup included (vibe-ic#2192). `raw_body` is
+    accepted for call-compatibility and deliberately reads NOTHING: it is the
+    text that used to be able to silence this analysis.
+
+    The mitigation marker is applied at the END, over the rows the analysis
+    actually produced, rather than folded into each tier test. Same rows out —
+    a suppressed module returned [] before and returns [] now — but the count
+    of what was withheld is knowable, and is appended to `suppressed`.
+    """
     widths = _width_table(body)
-    mitigated = bool(MITIGATIONS.search(name)) or \
-        bool(MITIGATIONS.search(raw_body or body))
+    marker = mitigation_marker(name, body)
     # for-loop induction (`for(i=0;i<N;i=i+1)`) is not a datapath adder.
     body = _FOR_HEADER.sub(' ', body)
     # The module header (`#(parameter ...) (ports);`) ends at the first ';';
@@ -323,17 +392,16 @@ def analyse_module(name: str, body: str, base_line: int, path: str,
         line = base_line + body[:m.start()].count('\n')
 
         risk = None
-        if has_mul and width >= warn_w and not mitigated:
+        if has_mul and width >= warn_w:
             risk = 'HIGH'
             kind = 'wide-mult-comb'
             why = f"{width}-bit combinational multiply"
-        elif not mitigated and (width >= high_w or
-                                (width >= warn_w and add_depth >= 3)):
+        elif width >= high_w or (width >= warn_w and add_depth >= 3):
             risk = 'HIGH'
             kind = 'wide-ripple-add'
             why = (f"{width}-bit add/compare chain (depth {add_depth}) in a "
                    f"single-cycle path")
-        elif not mitigated and width >= warn_w:
+        elif width >= warn_w:
             risk = 'MED'
             kind = 'ripple-add'
             why = f"{width}-bit add/compare chain (depth {add_depth})"
@@ -365,17 +433,24 @@ def analyse_module(name: str, body: str, base_line: int, path: str,
             f"(Reproduced on this repo's corpus for a 32-bit round-adder "
             f"datapath; a carry-save array containing no +/-/* is invisible "
             f"to this heuristic.)"))
+    if marker and findings:
+        # WITHHELD, not clean. The rows are dropped exactly as they were
+        # before; what is new is that the drop leaves a record (vibe-ic#2192).
+        if suppressed is not None:
+            suppressed.append(Suppression(path, base_line, name, marker,
+                                          len(findings)))
+        return []
     return findings
 
 
-def lint_file(path: Path, warn_w: int, high_w: int) -> List[Finding]:
+def lint_file(path: Path, warn_w: int, high_w: int,
+              suppressed: List['Suppression'] | None = None) -> List[Finding]:
     raw = path.read_text(errors='replace')
     src = strip_comments(raw)
-    raw_mods = {nm: b for nm, b, _ in _segment_modules(raw)}
     out: List[Finding] = []
     for name, body, line in _segment_modules(src):
         out += analyse_module(name, body, line, str(path), warn_w, high_w,
-                              raw_mods.get(name, ''))
+                              suppressed=suppressed)
     return out
 
 
@@ -431,9 +506,11 @@ def main(argv: List[str] | None = None) -> int:
         return 2
 
     findings: List[Finding] = []
+    suppressed: List[Suppression] = []
     for f in files:
         try:
-            findings += lint_file(f, args.warn_width, args.high_width)
+            findings += lint_file(f, args.warn_width, args.high_width,
+                                  suppressed=suppressed)
         except Exception as e:  # noqa: BLE001
             print(f'arith_ss_corner_risk_check: parse error in {f}: {e}',
                   file=sys.stderr)
@@ -447,12 +524,26 @@ def main(argv: List[str] | None = None) -> int:
     # Advisory default never prints the token FAIL (keeps the MCP PASS contract).
     verdict = 'FAIL' if fail else 'PASS'
     note = '' if fail else ' (advisory)'
+    # vibe-ic#2192 — A SILENCED MODULE MAY NOT RENDER AS A CLEAN ONE. The
+    # clause is appended only when something was actually withheld, so a run
+    # over a corpus with no suppression prints exactly the headline it always
+    # printed.
+    withheld = sum(sp.withheld for sp in suppressed)
+    supp_note = (f"; {len(suppressed)} module(s) suppressed by a mitigation "
+                 f"marker in code, {withheld} row(s) withheld"
+                 if suppressed else "")
     print(f"arith_ss_corner_risk_check: {verdict}{note} — findings: "
           f"{len(findings)} ({len(high)} HIGH, {len(med)} MED; "
           f"{len(predicted)} PREDICTED from RTL structure, "
-          f"{len(findings) - len(predicted)} MEASURED)")
+          f"{len(findings) - len(predicted)} MEASURED){supp_note}")
     for fd in sorted(findings, key=lambda x: (x.file, x.line)):
         print(f"  {fd.file}:{fd.line}: [{fd.risk}] {fd.rule}: {fd.message}")
+    for sp in sorted(suppressed, key=lambda x: (x.file, x.line)):
+        print(f"  {sp.file}:{sp.line}: [SUPPRESSED] mitigation-marker: module "
+              f"'{sp.module}': {sp.withheld} risk row(s) withheld because the "
+              f"code carries the mitigation marker '{sp.marker}'. The marker "
+              f"is read from the code only; a comment claiming a mitigation "
+              f"no longer silences this analysis (vibe-ic#2192).")
     if args.json:
         outp = Path(args.json)
         outp.parent.mkdir(parents=True, exist_ok=True)
