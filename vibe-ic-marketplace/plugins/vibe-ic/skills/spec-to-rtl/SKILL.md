@@ -538,6 +538,79 @@ controller. If your first table mismatches its self-TB, RE-READ THE PROMPT (neve
 the hidden reference) to fix the offending transition/output.
 
 
+## Target-conditional variant recommendations — pick by the DECLARED target, or say why not (#2089)
+
+A design input that ships several implementation variants of one block behind a
+compile-time parameter usually also says WHICH ONE to pick, and makes that
+conditional on the implementation target:
+
+> "When disabling masking, it is recommended to use the unmasked Canright or LUT
+> S-Box implementation for ASIC or FPGA targets, respectively."
+
+MEASURED (#2089 F21): the authored variant was the FPGA one for a design whose
+declared target is an open ASIC PDK. Nothing was wrong with the reading of the
+RTL — the recommendation had never left the document, so there was nothing to
+read it against.
+
+**The deterministic half is already done for you.** Phase 1 extracts every such
+sentence into `L8_RTL_CONSTANTS.target_conditional_recommendations[]`, one row
+per target, each carrying `target`, `recommends`, the whole `sentence` and its
+`source`. "A or B for X or Y, respectively" is distributed (`distributive:
+true`); a sentence that DENIES a recommendation ("this is NOT recommended") is
+dropped before it reaches you. Do NOT re-read the prose for this — read the rows.
+
+**One case is already program-decided — do not re-decide it.** Where the
+variant is selected by a compile-time parameter whose losing variants the cell
+EXCLUDES from staging, the chip_top emitter now derives the value itself: it
+narrows to the variants that are staged and consistent with what the input
+declared, and among those it takes the one the recommendation names for the
+declared target, recording `tie_break: "the design input's target-conditional
+recommendation"` with the sentence in `rtl/.<top>__param_resolution.json`.
+
+READ THAT SIDECAR BEFORE AUTHORING, AND READ ITS `tie_break`. It says which of
+three things happened, and they are not the same answer:
+
+  * `the design input's target-conditional recommendation` — the wrapper
+    carries the variant the input recommends. Re-deciding it in the RTL you
+    author is how the two disagree; don't.
+  * `consuming module's own declared default` — the recommendation decided
+    NOTHING here (no declared target, no row for it, no word that separates the
+    survivors, or more than one survivor matched) and the value is a FALLBACK.
+    The judgement is yours again: check it against the rows yourself and say so
+    if you disagree with it.
+  * a `refusals` entry instead of a `resolved` one — nothing was chosen and the
+    step will FAIL by name. Declare the parameter; never weaken the check.
+
+**What is yours, and why the rest cannot be a program.** Everywhere else,
+pairing a row with THIS design needs the target and the prose together: the
+declared target comes from L1's tapeout target / L9 / the PDK the run is pointed
+at, and the recommendation names a variant in the document's own words, not in
+the RTL's parameter vocabulary. So:
+
+1. Read the declared target for this run. An open ASIC PDK is an `ASIC` target;
+   a bitstream flow is `FPGA`.
+2. If a row's `target` matches it, author THAT variant and cite the row's
+   `sentence` in your handoff. Two rows for the same target that disagree is a
+   finding to report, not a coin to flip.
+3. If you author something else — the recommended variant is not staged, the
+   design input contradicts itself, the parameter has no such value — SAY SO in
+   one line, naming the row you did not follow. Silently authoring the other
+   variant is the defect this section exists to close.
+4. If no row matches the declared target, author nothing on this basis and say
+   the input made no recommendation for it. An unconditional recommendation is
+   NOT a row here on purpose.
+
+**This pairs with the coupling refusal.** The same input that recommends a
+variant usually also says that setting one parameter obliges another, and the
+chip_top emitter REFUSES when the first is satisfied and the second is met by
+NOTHING — neither stated by the input nor derived by the resolver above
+(`COUPLED_PARAMETER_NOT_STATED`; the record's `satisfied_parameters` names the
+set it judged). A DERIVED value satisfies the obligation, so you will not see
+this refusal on a design whose variant the resolver could work out. When you do
+meet it, the fix is to DECLARE the coupled parameter — with the value this
+section's rows recommend for the declared target — never to weaken the check.
+
+
 ## Compliance gate (mandatory)
 
 After producing your output, save it to a file and run:

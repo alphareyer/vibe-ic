@@ -43573,6 +43573,19 @@ def gen_l8_timing_waveform(project: Path,
     _v1_14_50_extract_prose_param_overrides(
         project, extracted, content, evidence)
 
+    # vibe-ic#2089 — a parameter override the input STATES may OBLIGE another.
+    # The producer above carries what the input sets and nothing about what
+    # setting it requires as well, so a coupled parameter kept its vendor
+    # default and the build was impossible before a tool was started.
+    _v2089_extract_param_couplings(
+        project, extracted, content, evidence)
+
+    # vibe-ic#2089 F21 — and the input often names WHICH value, conditional on
+    # whether the design is heading for an ASIC or an FPGA. Extracted here;
+    # paired with this design's declared target by the authoring step.
+    _v2089_extract_target_recommendations(
+        project, extracted, content, evidence)
+
     return _write_l_doc(project, "L8_RTL_CONSTANTS", content, evidence)
 
 
@@ -43661,6 +43674,354 @@ def _v1_14_50_extract_prose_param_overrides(
                     "v1.14.50_prose_override_grounded_in_staged_rtl")
             except Exception:  # noqa: BLE001 — evidence is best-effort
                 pass
+
+
+# ── vibe-ic#2089 — parameter COUPLING stated in prose ─────────────────────
+# The producer above carries what the design input SETS. It carries nothing
+# about what setting it OBLIGES, and an input that states one half of a
+# coupled pair is the ordinary case rather than a rare one: the coupling is
+# written as English one sentence away from the value.
+#
+# MEASURED (opentitan_aes, #2089). The input stated a masking parameter off
+# and said, in the next paragraph, that "when disabling the masking, also an
+# unmasked S-Box implementation needs to be selected using the corresponding
+# compile-time Verilog parameter". Only the first reached L8. The wrapper
+# applied the stated override alone, the coupled parameter kept its vendor
+# default, that default names a variant the cell EXCLUDES from staging, and
+# yosys aborted with `Module `\\aes_sbox_dom' ... is not part of the design`.
+# The abort was triaged as a synthesis failure and, one step further on, as a
+# ZERO denominator — eight testbenches "errored at elaboration".
+#
+# WHAT IS EXTRACTED, AND WHAT IS NOT. This records the RELATION, not a value:
+# an override that satisfies the trigger and leaves the obligation unstated is
+# something the emitter must REFUSE (see
+# `design_one_shot_runner._l8_param_coupling_refusals`), and refusing needs
+# only the relation and the sentence. Choosing the coupled parameter's VALUE
+# stays exactly where #586 put it — with the operator — and nothing here
+# proposes one.
+#
+# THE GRAMMAR IS SMALL AND IT IS NOT VOCABULARY:
+#
+#     when <disabling|enabling|setting|…> <TRIGGER> , … also … <OBLIGATION> .
+#
+# and the sentence must SAY it is about a parameter. That last clause is the
+# grounding — the same rule the override producer above uses, for the same
+# reason — and it is what keeps this off the population of ordinary
+# "when X, Y" English. MEASURED over the 1,550 .md/.txt/.rst documents in
+# this repo and its benchmark corpus: the shape without `also` matches 29
+# sentences, requiring `also` leaves 2 — the reproduction sentence and its
+# copy in the same cell's `phase1/input_doc/` — and both are grounded, so
+# the grounding clause is currently carrying no rejection of its own. It is
+# kept because the population it guards against is the one a WIDER grammar
+# reaches, and this grammar is expected to widen before it narrows.
+#
+# POLARITY. `_prose_is_denied` decides whether the sentence DENIES the
+# coupling ("when disabling the masking, no other parameter needs to be
+# set"). A denied sentence is DROPPED and counted, never published as a
+# requirement — vibe-ic#712's rule, consulted here rather than re-implemented.
+_V2089_COUPLING_RE = re.compile(
+    r"\bwhen\s+(?P<verb>disabling|disabled|enabling|enabled|setting|set|"
+    r"selecting|selected|using|use|configuring|configured)\s+"
+    r"(?P<trigger>[^,.;:!?]{1,80}?)\s*,\s*"
+    r"(?P<pre>[^.!?]{0,120}?)\balso\b(?P<oblig>[^.!?]{1,240}?)[.!?]",
+    re.IGNORECASE)
+#: Leading determiners a trigger phrase carries and a parameter name never
+#: does. Stripped so "the masking" and "masking" resolve identically.
+_V2089_DETERMINERS = ("the ", "a ", "an ", "this ", "that ", "its ", "any ")
+_V2089_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+#: Same splitter as the chip_top emitter's own concept matcher, so a phrase
+#: and an identifier are stemmed by ONE rule on both sides of the flow.
+_V2089_WORD_SPLIT_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+|\d+")
+
+
+def _v2089_concept_stems(text) -> set:
+    """Stemmed word tokens of a phrase or an identifier.
+
+    Deliberately the same stemming
+    `design_one_shot_runner._chip_top_concept_stems` applies: a concept match
+    that means one thing in Phase 1 and another in the emitter is worse than
+    no match at all."""
+    stems = set()
+    for tok in _V2089_WORD_SPLIT_RE.findall(text or ""):
+        s = tok.lower()
+        for suf in ("ing", "ed", "es", "s"):
+            if s.endswith(suf) and len(s) - len(suf) >= 4:
+                s = s[:-len(suf)]
+                break
+        if len(s) >= 4:
+            stems.add(s)
+    return stems
+
+
+def _v2089_resolve_parameter(phrase, declared, preferred) -> str:
+    """The parameter NAME a phrase speaks about, or "".
+
+    TWO PASSES, AND BOTH REFUSE ON AMBIGUITY. A phrase naming a declared
+    parameter OUTRIGHT is taken as written; otherwise the CONCEPT is matched
+    against `preferred` — the parameters this design's own input already
+    states, a handful of names — and nothing else.
+
+    THERE WAS A THIRD PASS, over every parameter the staged RTL declares, and
+    it is removed because it is a lottery. MEASURED against the reproduction
+    input's own 933 declared names: of 12 ordinary obligation clauses that
+    name no parameter at all, it bound one — `KEYMGR_DEBUG_OFFSET`, off the
+    single word "debug" in "also the debug interface has to be turned off with
+    the relevant compile parameter" — and of 12 ordinary trigger phrases it
+    bound one, `VH_REGISTER_ADDRESS_OFFSET` for "address decoding". A name
+    invented from one incidental word is worse than no name: the consumer
+    degrades honestly on "" (it says the input names no second parameter),
+    and on a wrong name it REFUSES A BUILD while naming a parameter the
+    sentence never mentioned.
+
+    `preferred` is safe where that was not because it is the set the check
+    actually compares against, and it is small: the concept "masking" matches
+    13 of the 933 declared names and exactly 1 of the stated ones."""
+    tokens = _V2089_IDENT_RE.findall(phrase or "")
+    exact = [t for t in tokens if t in declared]
+    if len(set(exact)) == 1:
+        return exact[0]
+    pstems = _v2089_concept_stems(phrase)
+    if not pstems:
+        return ""
+    hits = sorted({n for n in (preferred or ())
+                   if pstems & _v2089_concept_stems(n)})
+    return hits[0] if len(hits) == 1 else ""
+
+
+def _v2089_extract_param_couplings(
+        project, extracted, content, evidence) -> None:
+    declared = _v1_14_50_declared_rtl_parameters(project)
+    if not declared:
+        return
+    stated = [str(p.get("name") or "").strip()
+              for p in (content.get("parameters") or [])
+              if isinstance(p, dict) and p.get("override")]
+    stated = [n for n in stated if n]
+    couplings = content.setdefault("parameter_couplings", [])
+    seen = {(str(c.get("trigger_phrase")), str(c.get("required_phrase")))
+            for c in couplings if isinstance(c, dict)}
+    denied = 0
+    for fname, text in sorted((extracted or {}).items()):
+        for m in _V2089_COUPLING_RE.finditer(text or ""):
+            sentence = " ".join(m.group(0).split())
+            obligation = " ".join(
+                (m.group("pre") + " also " + m.group("oblig")).split())
+            # THE GROUNDING. A sentence that never says "parameter" is not a
+            # statement about parameters, whatever else its shape suggests.
+            if "parameter" not in obligation.lower():
+                continue
+            # vibe-ic#712 — a DENIED coupling is not a coupling. Dropped and
+            # counted, so the retraction is visible rather than silent.
+            if _prose_is_denied(sentence):
+                denied += 1
+                continue
+            trigger_phrase = " ".join(m.group("trigger").split())
+            low = trigger_phrase.lower()
+            for det in _V2089_DETERMINERS:
+                if low.startswith(det):
+                    trigger_phrase = trigger_phrase[len(det):]
+                    break
+            key = (trigger_phrase, obligation)
+            if key in seen:
+                continue
+            seen.add(key)
+            verb = m.group("verb").lower()
+            polarity = ("disabled" if verb.startswith("disabl") else
+                        "enabled" if verb.startswith("enabl") else "any")
+            couplings.append({
+                "trigger_parameter": _v2089_resolve_parameter(
+                    trigger_phrase, declared, stated),
+                "trigger_phrase": trigger_phrase,
+                "trigger_polarity": polarity,
+                # The obligation is resolved against the DECLARED names only.
+                # `stated` is the set this coupling exists to say is
+                # INCOMPLETE, so narrowing the obligation by it would let the
+                # gap resolve itself away.
+                "required_parameter": _v2089_resolve_parameter(
+                    obligation, declared, ()),
+                "required_phrase": obligation,
+                "sentence": sentence,
+                "source": fname,
+                "extraction_strategy":
+                    "vibe_ic_2089_prose_parameter_coupling_grounded",
+            })
+            try:
+                _v1_6_395_push_l8_evidence(
+                    evidence, fname, sentence,
+                    "vibe_ic_2089_prose_parameter_coupling_grounded")
+            except Exception:  # noqa: BLE001 — evidence is best-effort
+                pass
+    if denied:
+        content.setdefault("extraction_strategy", {})[
+            "vibe_ic_2089_couplings_dropped_as_denied"] = denied
+
+
+# ── vibe-ic#2089 — a recommendation the input makes CONDITIONAL ON THE
+# TARGET ──────────────────────────────────────────────────────────────────
+# The coupling above says a second parameter must be stated. The input often
+# says, in the very next sentence, WHICH value to give it — and makes that
+# conditional on whether the design is heading for an ASIC or an FPGA:
+#
+#     "When disabling masking, it is recommended to use the unmasked Canright
+#      or LUT S-Box implementation for ASIC or FPGA targets, respectively."
+#
+# MEASURED (opentitan_aes, #2089 F21). The lane authored the FPGA variant for
+# a design whose declared target is an open ASIC PDK. Nothing was wrong with
+# the author's reading of the RTL; the recommendation simply never left the
+# document, so there was nothing to read it against.
+#
+# THIS EXTRACTS, IT DOES NOT CHOOSE. Pairing a recommendation with THIS
+# design's declared target, and authoring the variant, needs the target and
+# the prose together and stays with the authoring step (`skills/spec-to-rtl`,
+# "Target-conditional variant recommendations"). What a program can do
+# without guessing is carry the recommendation, its target condition and its
+# sentence out of the document — and that is all this does.
+#
+# "RESPECTIVELY" IS A DISTRIBUTIVE MARKER, NOT DECORATION. "A or B for X or Y,
+# respectively" pairs A with X and B with Y, and dropping the marker inverts
+# half of every such sentence. It is honoured ONLY when the two lists are the
+# same length; when they are not, the pairing is left UNMADE (`distributive:
+# false`, every target carrying the whole phrase) rather than guessed.
+#
+# ASIC and FPGA are the vocabulary of the TECHNOLOGY, not of any chip — the
+# same class of literal `l8_clock_domains_typed_check` uses for "MHz" — and
+# they are the two implementation targets this flow's own steps distinguish.
+#
+# MEASURED over the 218 input documents of this repo's benchmark corpus: 8
+# rows, all from the one cell whose document actually carries a
+# target-conditional recommendation — and 2 sentences DROPPED by the polarity
+# consult, both of them
+#
+#     "…can also be used for FPGA synthesis, but this is NOT recommended as
+#      FPGAs usually do not well support latches"
+#
+# which without `_prose_is_denied` would have published the discouraged
+# implementation as the FPGA recommendation. That is #712's failure exactly,
+# in a second field, and it is live in this corpus rather than hypothetical.
+_V2089_TARGET_RE = re.compile(r"\b(ASIC|FPGA)\b")
+_V2089_RECOMMEND_RE = re.compile(
+    r"\brecommend(?:ed|s|ation|ations|ing)?\b", re.IGNORECASE)
+#: Lead-ins between the recommendation word and the thing recommended.
+_V2089_REC_LEADINS = ("to use ", "using ", "that ", "to select ",
+                      "selecting ", "to ", ": ", "is ", "are ")
+#: A CONDITION, never the thing recommended. Stripping these is what makes
+#: "recommended WHEN TARGETING <target>" fall through to the subject the
+#: sentence put before the word, instead of publishing its own condition as
+#: the recommendation.
+_V2089_REC_CONDITIONS = ("when targeting ", "when targeting", "when used ",
+                         "for use ", "when ", "for ", "on ", "in ", "if ")
+#: A sentence may END AT A LINE END, and `SENTENCE_BREAKS` does not say so.
+#: Every document this reads is one-sentence-per-line prose, so without this
+#: the scope reaches back over the full stop into the sentence above.
+_V2089_LINE_END_BREAKS = (".\n", "!\n", "?\n")
+
+
+def _v2089_trim_recommendation(phrase: str) -> str:
+    """`phrase` with its lead-in and its trailing target clause removed."""
+    out = " ".join((phrase or "").split()).strip(" ,;:")
+    low = out.lower()
+    for lead in _V2089_REC_LEADINS:
+        if low.startswith(lead):
+            out = out[len(lead):]
+            break
+    for tail in (" for", " when targeting", " when", " on", " in"):
+        if out.lower().endswith(tail):
+            out = out[: -len(tail)]
+            break
+    low = out.lower()
+    for cond in _V2089_REC_CONDITIONS:
+        if low.startswith(cond):
+            out = out[len(cond):]
+            break
+    return out.strip(" ,;:")
+
+
+def _v2089_recommendation_subject(head: str) -> str:
+    """The SUBJECT of a labelled bullet — "<name>: <notes>" -> "<name>".
+
+    A bullet list names the thing first and qualifies it after the colon, so
+    without this the recommendation reads as the qualification. Applied only
+    when the label really looks like one: non-empty, short, and carrying no
+    clause break of its own."""
+    out = _v2089_trim_recommendation(head)
+    label = out.split(":", 1)[0].strip() if ":" in out else ""
+    if label and len(label) <= 60 and "," not in label:
+        return label
+    return out
+
+
+def _v2089_extract_target_recommendations(
+        project, extracted, content, evidence) -> None:
+    recs = content.setdefault("target_conditional_recommendations", [])
+    seen = {(str(r.get("target")), str(r.get("recommends")))
+            for r in recs if isinstance(r, dict)}
+    denied = 0
+    for fname, text in sorted((extracted or {}).items()):
+        text = text or ""
+        for m in _V2089_RECOMMEND_RE.finditer(text):
+            lo, hi = _prose_sentence_scope(
+                text, m.start(), m.end(),
+                extra_breaks=_V2089_LINE_END_BREAKS)
+            # STRIP THE TERMINATOR. `sentence_scope` breaks BEFORE a full
+            # stop that is followed by a newline and AFTER one that ends the
+            # text, so the same sentence would be recorded two ways depending
+            # on how its document happens to wrap. The field is quoted, and a
+            # quote that changes with the line ending is not a stable one.
+            sentence = " ".join(text[lo:hi].split()).strip(" -*").rstrip(".!?")
+            rm = _V2089_RECOMMEND_RE.search(sentence)
+            if rm is None:
+                continue
+            targets = []
+            for t in _V2089_TARGET_RE.findall(sentence):
+                if t not in targets:
+                    targets.append(t)
+            if not targets:
+                continue
+            # vibe-ic#712 — "an ASIC target is NOT recommended here" must not
+            # publish a recommendation. Dropped and counted.
+            if _prose_is_denied(sentence):
+                denied += 1
+                continue
+            tail = sentence[rm.end():]
+            tm = _V2089_TARGET_RE.search(tail)
+            phrase = _v2089_trim_recommendation(
+                tail[: tm.start()] if tm else tail)
+            if len(phrase) < 3:
+                # The recommendation's SUBJECT sits before the word, as it
+                # does in a bullet: "X: only use when …, recommended when
+                # targeting ASIC". Falling back to the head is what keeps
+                # that shape from publishing an empty recommendation.
+                phrase = _v2089_recommendation_subject(sentence[: rm.start()])
+            if len(phrase) < 3:
+                continue
+            alts, distributive = [phrase] * len(targets), False
+            if "respectively" in sentence.lower() and len(targets) > 1:
+                split = [a.strip() for a in re.split(r"\s+or\s+", phrase)]
+                if len(split) == len(targets) and all(split):
+                    alts, distributive = split, True
+            for target, what in zip(targets, alts):
+                if (target, what) in seen:
+                    continue
+                seen.add((target, what))
+                recs.append({
+                    "target": target,
+                    "recommends": what,
+                    "recommends_full_phrase": phrase,
+                    "distributive": distributive,
+                    "sentence": sentence,
+                    "source": fname,
+                    "extraction_strategy":
+                        "vibe_ic_2089_target_conditional_recommendation",
+                })
+                try:
+                    _v1_6_395_push_l8_evidence(
+                        evidence, fname, sentence,
+                        "vibe_ic_2089_target_conditional_recommendation")
+                except Exception:  # noqa: BLE001 — evidence is best-effort
+                    pass
+    if denied:
+        content.setdefault("extraction_strategy", {})[
+            "vibe_ic_2089_recommendations_dropped_as_denied"] = denied
 
 
 # v1.6.561 — for #381 P3 ORGANIC. L8 fmax_mhz scalar promotion helper.

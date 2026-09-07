@@ -13744,6 +13744,200 @@ def _apply_l8_param_overrides(project, param_block: str):
     return param_block, applied, unapplied
 
 
+# ── vibe-ic#2089 — an override that satisfies a COUPLING'S TRIGGER and not
+# its OBLIGATION ──────────────────────────────────────────────────────────
+# `_apply_l8_param_overrides` above honours every value the input STATES. A
+# design input can state one half of a coupled pair, and it is the ordinary
+# case rather than a rare one, because the coupling is written as English one
+# sentence away from the value: "when disabling the masking, also an unmasked
+# S-Box implementation needs to be selected using the corresponding
+# compile-time Verilog parameter."
+#
+# MEASURED (opentitan_aes, #2089). The stated half was applied, the coupled
+# half kept the vendor default, that default names a variant the cell
+# EXCLUDES from staging, and yosys aborted with
+# `Module `\aes_sbox_dom' referenced ... is not part of the design`. The abort
+# read as a synthesis failure and, a step later, as a ZERO denominator — eight
+# testbenches "errored at elaboration", which is not a functional result at
+# all.
+#
+# WHAT SATISFIES THE OBLIGATION, AND WHY IT IS NOT ONLY THE OVERRIDE SET.
+# MEASURED on THIS tree (cd83d08a933c) against the reproduction input:
+# `_chip_top_resolve_excluded_variant_params` below DOES resolve the coupled
+# parameter, deriving it from the declared trigger and the RTL's own guard
+# structure with full provenance. That derivation is a selection — it is
+# exactly what the sentence demands — so refusing over it would stop a build
+# the flow can honestly produce and send the operator to hand-declare a value
+# the flow just derived on better evidence than they have. The satisfied set
+# this reader is handed is therefore the overrides the input STATED plus the
+# defaults the resolver DERIVED, and the refusal is for the case neither
+# reaches. What that same measurement DID expose is a different defect, and
+# it is #2089's F21: the derivation's last step is a tie-break on "the
+# consuming module's own declared default", which picked the FPGA variant for
+# a design targeting an ASIC process while the input recommends the other one
+# by name. That is fixed where it lives, in the resolver.
+#
+# THIS FUNCTION READS NO PROSE. Phase 1 owns the sentence, consults
+# `_prose_polarity` on it (vibe-ic#712) and publishes the RELATION; this is
+# set arithmetic over that relation and the applied overrides. Keeping the two
+# apart is deliberate: a second reader of the same English is a second
+# vocabulary, and this repo has already paid for that twice.
+#
+# IT NEVER PICKS A VALUE. #586's refusal is untouched — the outcome here is a
+# REFUSAL naming both parameters and quoting the input's own sentence, so the
+# operator supplies the missing declaration. An unreadable trigger value is
+# NOT a violation: an override whose value this cannot classify as on/off is
+# recorded as undetermined and lets the emit through, because refusing on a
+# value we could not read would stop every design that spells a parameter in
+# a form this does not know.
+
+#: Parameter value tokens that mean off / on. Not a vocabulary of English —
+#: these are the literals a Verilog parameter carries, and the caller treats
+#: anything else as UNDETERMINED rather than as either.
+_L8_COUPLING_OFF = frozenset(("0", "false", "off", "disabled"))
+_L8_COUPLING_ON = frozenset(("1", "true", "on", "enabled"))
+
+
+def _l8_coupling_bool(value):
+    """``True`` / ``False`` / ``None`` for a Verilog parameter value token.
+
+    ``None`` is load-bearing and means "this is not a boolean I can read" —
+    never "false"."""
+    tok = str(value if value is not None else "").strip().strip('"').lower()
+    if "'" in tok:
+        # `4'b0`, `1'B1`, `8'd0` — drop the size and the base character.
+        tail = tok.split("'", 1)[1]
+        tok = tail[1:] if tail[:1] in ("b", "h", "d", "o") else tail
+        tok = tok.replace("_", "").lstrip("0") or "0"
+    if tok in _L8_COUPLING_OFF:
+        return False
+    if tok in _L8_COUPLING_ON:
+        return True
+    return None
+
+
+def _l8_param_coupling_refusals(project, satisfied):
+    """REFUSE a parameter set that satisfies a stated coupling's TRIGGER and
+    leaves its OBLIGATION met by nothing.
+
+    ``satisfied`` is ``{name: value}`` for every parameter the wrapper's
+    header will carry a NON-DEFAULT value for — the overrides the input
+    STATED plus the defaults the excluded-variant resolver DERIVED. It is
+    deliberately not called `applied`: the caller hands it both, and a
+    record that named it after only one of them would say the input had
+    stated a value it did not.
+
+    Returns ``(refusals, undetermined)``. Both are lists of records; the
+    second is what could not be classified and is reported rather than
+    silently treated as clean. Fail-open on any read problem, for the same
+    reason `_apply_l8_param_overrides` is: a wrapper this function crashed on
+    is no build at all."""
+    refusals, undetermined = [], []
+    if not satisfied:
+        return refusals, undetermined
+    try:
+        import _path_layout as _pl2
+        l8 = _pl2.generated_docs_dir(Path(project)) / "L8_RTL_CONSTANTS.json"
+        if not l8.is_file():
+            return refusals, undetermined
+        doc = json.loads(l8.read_text(errors="replace"))
+    except Exception:  # noqa: BLE001 — never fail the emit on the sidecar
+        return refusals, undetermined
+    for c in (doc.get("parameter_couplings") or []):
+        if not isinstance(c, dict):
+            continue
+        trigger = str(c.get("trigger_parameter") or "").strip()
+        if not trigger or trigger not in satisfied:
+            continue
+        polarity = str(c.get("trigger_polarity") or "any").strip()
+        got = _l8_coupling_bool(satisfied[trigger])
+        if polarity in ("disabled", "enabled"):
+            want = (polarity == "enabled")
+            if got is None:
+                undetermined.append({
+                    "trigger_parameter": trigger,
+                    "trigger_value": satisfied[trigger],
+                    "trigger_polarity": polarity,
+                    "sentence": c.get("sentence"),
+                    "source": c.get("source"),
+                    "reason": "TRIGGER_VALUE_NOT_BOOLEAN",
+                    "message": (
+                        f"the input couples {trigger} to another parameter "
+                        f"when it is {polarity}, and the value "
+                        f"{satisfied[trigger]!r} is not a boolean this check "
+                        f"can read — so whether the coupling APPLIES is "
+                        f"unknown and no refusal is made on it.")})
+                continue
+            if got is not want:
+                continue
+        required = str(c.get("required_parameter") or "").strip()
+        if required:
+            if required in satisfied:
+                continue
+            named = required
+            missing = (f"the coupled parameter {required} is neither stated "
+                       f"by the input nor derived by this emitter")
+        else:
+            # The sentence DESCRIBES the coupled parameter instead of naming
+            # it, which is the measured case. The weakest honest reading is
+            # then "some OTHER parameter must also have been stated", and it
+            # is enough to separate the defect from the fix: the run that
+            # died had exactly one override.
+            if set(satisfied) - {trigger}:
+                continue
+            named = trigger
+            missing = ("the input names no second parameter, and no other "
+                       "parameter was stated or derived at all, so the "
+                       "coupled parameter — whichever it is — keeps its "
+                       "vendor default")
+        refusals.append({
+            "parameter": named,
+            "trigger_parameter": trigger,
+            "trigger_value": satisfied[trigger],
+            "trigger_polarity": polarity,
+            "required_parameter": required or None,
+            "required_phrase": c.get("required_phrase"),
+            "sentence": c.get("sentence"),
+            "source": c.get("source"),
+            # NAMED FOR WHAT IT HOLDS. This is the stated overrides AND the
+            # derived defaults; calling it `applied_overrides` would tell a
+            # reader the input had stated a value the emitter worked out.
+            "satisfied_parameters": dict(sorted(satisfied.items())),
+            "reason": "COUPLED_PARAMETER_NOT_STATED",
+            "message": (
+                f"the design input states {trigger} = {satisfied[trigger]} "
+                f"and, "
+                f"in {c.get('source')}, that setting it obliges another "
+                f"compile-time parameter as well — \"{c.get('sentence')}\" — "
+                f"but {missing}. The wrapper would be emitted with the stated "
+                f"half applied and the coupled half at its vendor default, "
+                f"which is a build the design input did NOT ask for and may "
+                f"not be able to elaborate at all. This flow does not choose "
+                f"the coupled value for you (#586): DECLARE it in the design "
+                f"input.")})
+    return refusals, undetermined
+
+
+def _chip_top_coupling_refusals(rtl_dir, synth_top=None):
+    """Every coupling refusal recorded in ``rtl_dir``.
+
+    EVERY sidecar, not the one named after this step's ``synth_top`` — the
+    same measurement `_chip_top_param_refusals` records: the wrapper is
+    emitted by whichever step gets there first, and a refusal filed under one
+    name and looked up under another is a refusal nobody makes."""
+    out = []
+    try:
+        for sc in sorted(Path(rtl_dir).glob(".*__param_couplings.json")):
+            try:
+                out.extend(json.loads(sc.read_text(errors="replace"))
+                           .get("refusals") or [])
+            except Exception:  # noqa: BLE001 — one bad sidecar is not a verdict
+                continue
+    except Exception:  # noqa: BLE001 — a missing rtl_dir is no refusal
+        return []
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # EXCLUDED-VARIANT PARAMETER RESOLUTION (chip-AGNOSTIC)
 #
@@ -14036,6 +14230,142 @@ def _chip_top_declares_predicate(pred_name, declared_names):
     return hits[0] if len(hits) == 1 else None
 
 
+# ── vibe-ic#2089 F21 — the input NAMED the variant, and named it FOR A
+# TARGET ──────────────────────────────────────────────────────────────────
+# The derivation above narrows the candidate set by what the input DECLARED
+# and then, when more than one survives, takes "the consuming module's own
+# declared default". That last step is a fallback, not a statement by the
+# design — and MEASURED on the reproduction input it is wrong: the survivors
+# are an unmasked Canright variant and an unmasked LUT variant, the module's
+# own default is the LUT one, and the design input says
+#
+#     "When disabling masking, it is recommended to use the unmasked Canright
+#      or LUT S-Box implementation for ASIC or FPGA targets, respectively."
+#
+# The run targets an open ASIC PDK. So the flow derived the FPGA variant for
+# an ASIC build while the input recommended the other one by name, and the
+# lane that reported it (#2089 F21) was blamed for authoring it.
+#
+# ONLY EVER A TIE-BREAK, AND ONLY EVER WITHIN THE SURVIVORS. This cannot
+# introduce a value: it chooses among candidates the structural derivation has
+# already proved are in the staged closure and consistent with what the input
+# declared. It runs BEFORE the module-default fallback and defers to it
+# whenever it cannot name exactly one — no target declared, no recommendation
+# for that target, no distinctive word, or more than one candidate matched.
+# Every one of those leaves the pre-#2089 behaviour byte for byte.
+#
+# THE TARGET MUST BE DECLARED. "" means NOT DETERMINED and is never read as
+# FPGA: a run that declares no process gets the old fallback, not a guess.
+
+
+def _chip_top_word_tokens(text) -> set:
+    """Lowercased word tokens of an identifier or a phrase.
+
+    CamelCase splits at the case boundary, everything else at any
+    non-alphanumeric, and tokens under three characters are dropped. Written
+    without `re` on purpose: this reads a RECORD Phase 1 wrote, and the one
+    place prose is read for this fact is Phase 1's own extractor, which
+    consults `_prose_polarity` (vibe-ic#712). A second matcher over the same
+    English here would be a second vocabulary."""
+    out, cur, prev_lower = set(), "", False
+    for ch in str(text or ""):
+        if ch.isalnum():
+            if ch.isupper() and prev_lower and cur:
+                if len(cur) >= 3:
+                    out.add(cur.lower())
+                cur = ch
+            else:
+                cur += ch
+            prev_lower = ch.islower() or ch.isdigit()
+        else:
+            if len(cur) >= 3:
+                out.add(cur.lower())
+            cur, prev_lower = "", False
+    if len(cur) >= 3:
+        out.add(cur.lower())
+    return out
+
+
+def _chip_top_declared_target(project) -> str:
+    """``"ASIC"`` when the design DECLARES a process to tape out on, else "".
+
+    A declared PDK target is a declaration that this build is an ASIC build.
+    There is no equivalent DECLARED field for an FPGA build in the L docs, so
+    this never returns ``"FPGA"`` — and the caller treats "" as "do not
+    consult the recommendation", never as the other target."""
+    try:
+        import _path_layout as _pl2
+        for doc in sorted(
+                _pl2.generated_docs_dir(Path(project)).glob("L19_*.json")):
+            try:
+                data = json.loads(doc.read_text(errors="replace"))
+            except Exception:  # noqa: BLE001 — one bad L doc is not a verdict
+                continue
+            if not isinstance(data, dict):
+                continue
+            for holder in (data.get("fields"), data):
+                if not isinstance(holder, dict):
+                    continue
+                tgt = holder.get("pdk_target")
+                if isinstance(tgt, str) and tgt.strip():
+                    return "ASIC"
+    except Exception:  # noqa: BLE001 — never fail the emit on the sidecar
+        return ""
+    return ""
+
+
+def _chip_top_recommended_variant(project, candidates):
+    """``(value, provenance)`` — the surviving candidate the design input
+    RECOMMENDS for the declared target, or ``("", None)``.
+
+    DISTINCTIVE WORDS ONLY. Every candidate for one parameter shares most of
+    its name (`SBoxImplCanright` / `SBoxImplLut` share `sbox` and `impl`), so
+    matching on any shared word would match all of them and decide nothing.
+    The words that separate them are what a recommendation has to mention, and
+    exactly one candidate must be mentioned — two is an ambiguity, and this
+    refuses one rather than picking."""
+    cands = [c for c in (candidates or []) if c]
+    if len(cands) < 2:
+        return "", None
+    target = _chip_top_declared_target(project)
+    if not target:
+        return "", None
+    try:
+        import _path_layout as _pl2
+        l8 = _pl2.generated_docs_dir(Path(project)) / "L8_RTL_CONSTANTS.json"
+        if not l8.is_file():
+            return "", None
+        rows = [r for r in (json.loads(l8.read_text(errors="replace"))
+                            .get("target_conditional_recommendations") or [])
+                if isinstance(r, dict)
+                and str(r.get("target") or "").strip().upper() == target]
+    except Exception:  # noqa: BLE001 — never fail the emit on the sidecar
+        return "", None
+    if not rows:
+        return "", None
+    toks = {c: _chip_top_word_tokens(c) for c in cands}
+    shared = set.intersection(*toks.values())
+    hits = {}
+    for row in rows:
+        phrase = _chip_top_word_tokens(row.get("recommends"))
+        for c in cands:
+            # THE WORDS THAT ACTUALLY DECIDED, kept rather than re-derived.
+            # The provenance names them, and naming the candidate's whole
+            # distinctive set instead would tell a reader the recommendation
+            # mentioned words it never contained.
+            matched = (toks[c] - shared) & phrase
+            if matched:
+                hits.setdefault(c, (row, sorted(matched)))
+    if len(hits) != 1:
+        return "", None
+    value, (row, matched) = next(iter(hits.items()))
+    return value, {"declared_target": target,
+                   "recommends": row.get("recommends"),
+                   "sentence": row.get("sentence"),
+                   "source": row.get("source"),
+                   "matched_words": matched}
+
+
 def _chip_top_param_refusals(rtl_dir, synth_top=None):
     """Every emission-time parameter refusal recorded in ``rtl_dir``.
 
@@ -14303,13 +14633,37 @@ def _chip_top_resolve_excluded_variant_params(project, rtl_dir, param_block,
                 continue
 
             # 3. RESOLVE, or refuse with the survivors named.
+            #
+            # vibe-ic#2089 F21 — THE INPUT'S OWN RECOMMENDATION FIRST. The
+            # module default below is a fallback, not a statement by the
+            # design; a target-conditional recommendation IS one, and taking
+            # the fallback over it is how the FPGA variant was derived for an
+            # ASIC build. Only ever a tie-break among the survivors, and it
+            # defers to the fallback whenever it cannot name exactly one.
+            recommended = None
+            if len(narrowed) > 1:
+                _pick, recommended = _chip_top_recommended_variant(
+                    project, narrowed)
+                if _pick:
+                    narrowed = [_pick]
             own = own_defaults.get(param, "").split("::")[-1]
             if len(narrowed) > 1 and own in narrowed:
                 narrowed = [own]
             # The design's OWN declared default for the parameter is a
             # statement by the design, so it can be adopted even where an arm
             # is unnameable. Anything else must have a COMPLETE set behind it.
-            if len(narrowed) == 1 and unnameable and narrowed[0] != own:
+            #
+            # vibe-ic#2089 F21 — AND SO IS THE INPUT'S OWN RECOMMENDATION, by
+            # the same reasoning and more directly: this guard exists because
+            # CHOOSING out of a set that cannot be enumerated is a silent
+            # pick, and a variant the design input NAMES for this design's
+            # declared target is not a choice this flow made. Without this the
+            # consult above turns a run that used to resolve into an
+            # INCOMPLETE_CANDIDATE_SET refusal — MEASURED on the reproduction
+            # input, where an `else` arm no value token names is exactly why
+            # `unnameable` is non-empty.
+            if (len(narrowed) == 1 and unnameable and narrowed[0] != own
+                    and not recommended):
                 refusals.append({
                     "parameter": param, "wrapper_default": cur,
                     "excluded_modules": hit_excluded,
@@ -14340,8 +14694,12 @@ def _chip_top_resolve_excluded_variant_params(project, rtl_dir, param_block,
                     "in_closure_candidates": in_closure,
                     "derivation": provenance,
                     "unnameable_in_closure_variants": unnameable,
-                    "tie_break": ("consuming module's own declared default"
-                                  if len(in_closure) > 1 else None)}
+                    "recommendation": recommended,
+                    "tie_break": (
+                        "the design input's target-conditional recommendation"
+                        if recommended else
+                        "consuming module's own declared default"
+                        if len(in_closure) > 1 else None)}
             else:
                 refusals.append({
                     "parameter": param, "wrapper_default": cur,
@@ -14663,6 +15021,42 @@ def _autoemit_chip_top_wrapper(project: Path, rtl_dir: Path,
         for _r in _var_refusals:
             print(f"      chip_top param REFUSED: {_r['reason']}: "
                   f"{_r['message']}")
+    # vibe-ic#2089 — AND THEN: did the input say only HALF of what it said?
+    # A coupling is a question about the SATISFIED SET, so it cannot be asked
+    # one override at a time, and it is asked HERE rather than beside the
+    # override pass because a value the resolver DERIVED satisfies the
+    # obligation exactly as a stated one does — it is a selection, made from
+    # the design's own RTL and recorded with its provenance. Refusing over a
+    # derivation would stop a build this flow can honestly produce.
+    _cpl_satisfied = dict(_ovr_applied)
+    for _n, _i in (_var_resolved or {}).items():
+        _cpl_satisfied.setdefault(_n, str(_i.get("value")))
+    _cpl_refusals, _cpl_undetermined = [], []
+    try:
+        _cpl_refusals, _cpl_undetermined = _l8_param_coupling_refusals(
+            project, _cpl_satisfied)
+    except Exception:  # noqa: BLE001 — analysis must never break the emit
+        _cpl_refusals, _cpl_undetermined = [], []
+    if _cpl_refusals or _cpl_undetermined:
+        try:
+            (rtl_dir / f".{synth_top}__param_couplings.json").write_text(
+                json.dumps({"refusals": _cpl_refusals,
+                            "undetermined": _cpl_undetermined,
+                            "stated_overrides": _ovr_applied,
+                            "derived_defaults": {
+                                _n: str(_i.get("value")) for _n, _i
+                                in (_var_resolved or {}).items()},
+                            "satisfied": _cpl_satisfied,
+                            "source": "L8_RTL_CONSTANTS.parameter_couplings"},
+                           indent=2))
+        except OSError:
+            pass
+        for _r in _cpl_refusals:
+            print(f"      chip_top param REFUSED: {_r['reason']}: "
+                  f"{_r['message']}")
+        for _u in _cpl_undetermined:
+            print(f"      chip_top coupling UNDETERMINED: {_u['reason']}: "
+                  f"{_u['message']}")
     param_header = f" {param_block.strip()}" if param_block.strip() else ""
     # Re-emit the DUT header's package imports on the wrapper so package-scoped
     # param types/defaults (`sbox_impl_e SecSBoxImpl = SBoxImplDom`) and port
@@ -15046,6 +15440,31 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
                          for r in _refusals[:4]),
             [str(rtl_dir / f".{synth_top}__param_resolution.json")],
             extras={"param_refusals": _refusals})
+    # vibe-ic#2089 — SAME PLACE, DIFFERENT QUESTION. The refusal above is
+    # about a value the wrapper CARRIES; this one is about a value that was
+    # neither stated by the input nor derived by the resolver, although the
+    # input's own text says setting the other half obliges it. Reported
+    # separately because "unresolved" and "half of a coupled pair reached
+    # nothing" are different things to fix, and a message that names the wrong
+    # one sends the operator to the wrong file.
+    #
+    # THE HEADLINE NAMES THE PARAMETER THAT IS MISSING, and when the input only
+    # DESCRIBES it there is no name to give — so it says so, rather than
+    # putting the TRIGGER's name where the reader expects the coupled one.
+    _cpl = _chip_top_coupling_refusals(rtl_dir, synth_top)
+    if _cpl:
+        _cnamed = ", ".join(sorted({
+            (r.get("required_parameter")
+             or (f"the parameter coupled to {r['trigger_parameter']}"
+                 if r.get("trigger_parameter") else r["parameter"]))
+            for r in _cpl}))
+        return StepResult(
+            "yosys_synth", "FAIL", time.time() - t0,
+            f"COUPLED PARAMETER NOT STATED ({_cnamed}) — refused at chip_top "
+            f"emission, before yosys: "
+            + " | ".join(f"{r['reason']}: {r['message']}" for r in _cpl[:4]),
+            [str(rtl_dir / f".{synth_top}__param_couplings.json")],
+            extras={"coupling_refusals": _cpl})
     # ORGANIC #639 — REUSED-IP / catalog-glue staging has no
     # instantiation-closure pruning or duplicate-module dedup. A flat
     # vendor RTL dump (no per-IP rtl_files manifest) stages every *.sv/*.v
