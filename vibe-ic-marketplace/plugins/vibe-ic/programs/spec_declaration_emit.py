@@ -24,8 +24,23 @@ IS      a contract-DRIVEN emitter.  The field list, the required/informational
         same clause shape; a hard-coded field list is a per-design patch, not a
         capability.
 
+        A spec table that DESIGNATES one of the values it lists — one
+        value marked ``(primary)`` beside its alternates — has stated the
+        choice, and the field list, the required-ness marker and that
+        designation all come out of the same row of the same table.  Reading
+        two of the three and discarding the third told a design whose spec
+        designates its width, and which the flow had already built, verified,
+        equivalence-checked and synthesised at that width, that the width was
+        "a REQUIRED free choice not declared".  See
+        ``_PRIMARY_VALUE_MARKERS``.  A menu the spec designates nothing in is
+        still refused — that part has not moved.
+
 IS NOT  an inference engine.  It will not read an ``always`` block and conclude
-        a reset polarity, nor scan a whole RTL file for an ``LSB-first`` token.
+        a reset polarity, nor scan a whole RTL file for an ``LSB-first`` token,
+        nor read an elaborated ``parameter`` out of the RTL and call it a
+        declaration — the elaborated value is the CONSEQUENCE of the choice,
+        not a record of it, and a build that ran at a wrong value would then
+        certify itself.
         That is exactly the recovery-from-prose this program exists to retire.
         The ONLY prose source it will touch is an explicit, opt-in, key=value
         DECLARATION block (``--from-rtl-declaration``) — the designer's own
@@ -188,6 +203,50 @@ _FIELD_HEADERS = (
     "欄位", "字段", "鍵", "名稱",
     "field", "key", "name", "attribute",
 )
+
+# --------------------------------------------------------------------------- #
+# Value-DESIGNATION vocabulary
+# --------------------------------------------------------------------------- #
+# A spec's value column usually offers a MENU: `"LSB_first"` / `"MSB_first"`.
+# Two correct designs disagree, the document did not choose, and picking one
+# would be this program inventing a free choice — see `_extract_examples`.
+#
+# But a spec can also DESIGNATE one of the listed values, in the same table
+# and in the same voice it uses to mark a field REQUIRED:
+#
+#     | `<field>` | ✅ | `A`(primary)/ `B / C`(secondary) | ... |
+#     | `<field>` | ✅ | `A`(primary)或 `B`/`C`/`D` |
+#
+# (Both shapes are real: the alternates may carry an explicit secondary marker
+# or no marker at all.  Only the PRIMARY one has to be recognized.)
+#
+# That is not a menu.  The document has stated WHICH value this design is,
+# with the rest listed as alternates it does not sign off at.  Reading the
+# required-ness marker out of column 2 while refusing to read the designation
+# marker out of column 3 is the same table being trusted and distrusted at
+# once, and it is why a design whose spec designates its width was told the
+# width was "a REQUIRED free choice not declared".
+#
+# Vocabulary, not design content — extend freely, exactly as with
+# `_REQUIRED_MARKERS`.
+_PRIMARY_VALUE_MARKERS = (
+    "primary",
+    "主要",     # "principal"
+    "首選",     # "first choice"
+)
+_SECONDARY_VALUE_MARKERS = (
+    "secondary", "alternate", "alternative",
+    "次要",     # "secondary"
+    "備選",     # "alternate"
+)
+# The annotation must be a BRACKETED span sitting immediately after the value
+# it designates — `(primary)`, `（主要）`, `[primary]` — so it is attached to ONE
+# value rather than to the cell.  What stops a trailing parenthetical SENTENCE
+# from designating the value it happens to follow is `_classify_designation`,
+# which requires the marker to BE the whole annotation; the length cap here
+# only keeps a long note from being carried around as one.
+_DESIGNATION_RE = re.compile(
+    r"^[ \t]*[(\uff08\[]\s*([^)\uff09\]]{1,40}?)\s*[)\uff09\]]")
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]*$")
 _SEP_CELL_RE = re.compile(r"^:?-{2,}:?$")
@@ -371,18 +430,76 @@ def _classify_required(marker: str) -> Tuple[bool, bool]:
     return True, False
 
 
+def _classify_designation(text: str) -> Optional[bool]:
+    """``True`` designated primary, ``False`` explicitly secondary, ``None`` none.
+
+    THE MARKER MUST BE THE WHOLE ANNOTATION, not a substring of it —
+    deliberately STRICTER than `_classify_required`, which matches its
+    vocabulary as a substring.  The two fail in opposite directions: an
+    unreadable required-ness marker fails closed by assuming REQUIRED, so a
+    loose match there costs nothing, while an unreadable designation fails
+    closed by REFUSING TO PICK, so a loose match there would let this program
+    invent a choice — the one thing it exists to prevent.  Under a substring
+    rule, ``(primary is decided in L3)`` would designate whichever value that
+    sentence happened to follow.  An annotation that says more than the
+    designation is prose, and prose does not choose.
+
+    ``None`` for anything unrecognized, and for an annotation that somehow
+    reads as both.  Both keep the field UNDETERMINED.
+    """
+    t = (text or "").strip().lower().strip(" \t*_-.,;:\u3002\uff0c")
+    if not t:
+        return None
+    hit_pri = t in _PRIMARY_VALUE_MARKERS
+    hit_sec = t in _SECONDARY_VALUE_MARKERS
+    if hit_pri and hit_sec:
+        return None
+    if hit_pri:
+        return True
+    if hit_sec:
+        return False
+    return None
+
+
+def _extract_example_entries(cell: str) -> List[Tuple[str, str]]:
+    """``(token, annotation)`` for every backticked token in an example cell.
+
+    `annotation` is the BRACKETED word immediately following the token's
+    closing backtick, verbatim and unclassified (``""`` when there is none) —
+    kept as text so the contract file records what the spec actually said
+    rather than only this program's reading of it.
+    """
+    out: List[Tuple[str, str]] = []
+    seen: set = set()
+    for m in re.finditer(r"`([^`]+)`", cell):
+        tok = m.group(1).strip()
+        if not tok or tok in seen:
+            continue
+        seen.add(tok)
+        d = _DESIGNATION_RE.match(cell[m.end():])
+        out.append((tok, d.group(1).strip() if d else ""))
+    return out
+
+
 def _extract_examples(cell: str) -> List[str]:
     """Backticked tokens in an example cell, in order, de-duplicated.
 
     Advisory only.  Never used to CHOOSE a value — a spec example is what a
     reference implementation happened to pick, not what this designer chose.
+    A value the spec DESIGNATES is a different statement and is carried
+    separately; see `_designated_values`.
     """
-    out: List[str] = []
-    for m in re.finditer(r"`([^`]+)`", cell):
-        tok = m.group(1).strip()
-        if tok and tok not in out:
-            out.append(tok)
-    return out
+    return [tok for tok, _ in _extract_example_entries(cell)]
+
+
+def _designated_values(entries: List[Tuple[str, str]]) -> List[str]:
+    """The tokens this cell designates as THE value, in order.
+
+    A caller may adopt the result ONLY when it holds exactly one token: zero is
+    a menu the document never chose from, and two or more is the document
+    contradicting itself.  Both stay UNDETERMINED.
+    """
+    return [tok for tok, note in entries if _classify_designation(note) is True]
 
 
 def _parse_field_table(text: str, start: int) -> Optional[Dict[str, Any]]:
@@ -444,12 +561,20 @@ def _parse_field_table(text: str, start: int) -> Optional[Dict[str, Any]]:
             marker = r[req_col] if req_col < len(r) else ""
             required, recognized = _classify_required(marker)
         ex_cell = r[ex_col] if (ex_col is not None and ex_col < len(r)) else ""
+        entries = _extract_example_entries(ex_cell)
         fields.append({
             "name": name,
             "required": required,
             "required_marker": _clean_cell(marker),
             "required_marker_recognized": recognized,
-            "example_values": _extract_examples(ex_cell),
+            "example_values": [tok for tok, _ in entries],
+            # What the spec wrote beside each value, verbatim and
+            # unclassified, so the contract file records the document rather
+            # than only this program's reading of it.
+            "value_annotations": {tok: note for tok, note in entries if note},
+            # The subset the spec DESIGNATES as THE value.  Adopted only when
+            # it holds exactly one token (see `resolve`).
+            "designated_values": _designated_values(entries),
             "row": [_clean_cell(c) for c in r],
         })
     if not fields:
@@ -919,10 +1044,15 @@ def resolve(contract: Dict[str, Any],
       2. a value already present in the declaration file (someone declared it
          before; re-running the emitter must not silently discard it)
       3. an opt-in `key = value` line from an RTL COMMENT block
-      4. UNDETERMINED
+      4. the value the SPEC'S OWN TABLE designates — and only when it
+         designates exactly one (see `_designated_values`)
+      5. UNDETERMINED
 
-    There is no fifth tier.  A value this program cannot trace to something the
-    designer wrote is not produced.
+    There is no sixth tier.  A value this program cannot trace to something the
+    designer wrote is not produced — and tier 4 is the designer writing it, in
+    the same table row that made the field REQUIRED.  It is emphatically NOT
+    the example column: a menu with no designation still resolves to
+    UNDETERMINED, which is what `_designated_values` returns for it.
 
     Tier 2 is a file THIS PROGRAM WROTE, so its provenance is CARRIED from
     `prior` (the previous run's sidecar) rather than re-derived — see the
@@ -937,11 +1067,13 @@ def resolve(contract: Dict[str, Any],
     status: Dict[str, Any] = {}
     for f in contract["fields"]:
         name = f["name"]
+        designated = list(f.get("designated_values") or [])
         entry: Dict[str, Any] = {
             "required": f["required"],
             "required_marker": f["required_marker"],
             "required_marker_recognized": f["required_marker_recognized"],
             "spec_example_values": f["example_values"],
+            "spec_designated_values": designated,
         }
         if name in overrides and overrides[name] is UNDETERMINED:
             entry.update(
@@ -1034,6 +1166,28 @@ def resolve(contract: Dict[str, Any],
                         "designer meant; declare it with `--set %s=<value>`."
                         % (entry.get("provenance_detail", "an RTL comment"),
                            rtl_declared[name][0], name)))
+            # The same rule for a stamp naming the SPEC TABLE.  A spec that
+            # has since re-designated (or stopped designating) no longer says
+            # what the sidecar claims, and the file legitimately outranks the
+            # table, so the value stands and the STAMP is demoted — otherwise
+            # this program would go on attesting "the spec designated this"
+            # about a spec that does not.
+            if entry.get("provenance") == "spec_designated_value":
+                now = (_coerce(designated[0]) if len(designated) == 1
+                       else UNDETERMINED)
+                if now is UNDETERMINED or not _same_declared_value(
+                        now, existing[name]):
+                    entry.update(
+                        provenance_verified=False,
+                        provenance_diverged=True,
+                        provenance_note=(
+                            "this value is stamped as designated by %s, but "
+                            "that document now designates %s. Nothing "
+                            "verifies which one the designer meant; declare "
+                            "it with `--set %s=<value>`."
+                            % (contract.get("source", "the spec"),
+                               ("no value" if now is UNDETERMINED
+                                else repr(now)), name)))
         elif name in rtl_declared:
             value, src = rtl_declared[name]
             entry.update(status="determined", value=value,
@@ -1041,12 +1195,65 @@ def resolve(contract: Dict[str, Any],
                          provenance_detail=src,
                          recovered_from_prose=True,
                          provenance_verified=True)
+        elif len(designated) == 1:
+            # TIER 4 — THE SPEC ITSELF DESIGNATED THE VALUE.
+            #
+            # This is NOT the example column being adopted (that stays
+            # forbidden, and `_designated_values` returns nothing for a plain
+            # menu).  It is the spec's own table saying WHICH of the values it
+            # lists this design is, in the same voice and the same row that
+            # made the field REQUIRED.  Refusing to read it while reading the
+            # required-ness marker two cells to its left is the same document
+            # being trusted and distrusted at once — and it produced the
+            # refusal this tier exists to retire: a design whose spec marks
+            # `32` primary, and which the flow had already built, verified and
+            # synthesised at 32, was told 32 was a free choice nobody made.
+            #
+            # Exactly one designated value, or none is taken: zero is a menu
+            # the document never chose from, and two is the document
+            # contradicting itself.  Both keep refusing.
+            #
+            # It ranks BELOW the author's own declaration, below the
+            # declaration already on disk and below an RTL declaration block:
+            # a spec default never overrides a person who said otherwise.
+            value = _coerce(designated[0])
+            if value is UNDETERMINED:
+                entry.update(
+                    status="undetermined",
+                    reason=("the spec designates %r for this field, which "
+                            "states no value" % designated[0]),
+                    recovered_from_prose=False)
+            else:
+                entry.update(
+                    status="determined", value=value,
+                    provenance="spec_designated_value",
+                    provenance_detail=(
+                        "%s designates %r as the value for this field "
+                        "(annotation %r); the other listed values are "
+                        "alternates"
+                        % (contract.get("source", "the spec"), designated[0],
+                           (f.get("value_annotations") or {}).get(
+                               designated[0], ""))),
+                    recovered_from_prose=False,
+                    provenance_verified=True)
         else:
+            why = ("no author declaration supplied, none already recorded "
+                   "in the declaration file, and no `%s = <value>` line in "
+                   "an RTL comment block" % name)
+            # Say WHY the spec's own table did not settle it either, so the
+            # author is told which of three different situations they are in
+            # rather than only that nothing was found.
+            if len(designated) > 1:
+                why += ("; the spec's value cell designates %d values (%s), "
+                        "and a document that designates more than one has not "
+                        "chosen" % (len(designated), ", ".join(designated)))
+            elif f["example_values"]:
+                why += ("; the spec lists %d value(s) but designates none of "
+                        "them, so it is a menu and not a choice"
+                        % len(f["example_values"]))
             entry.update(
                 status="undetermined",
-                reason=("no author declaration supplied, none already recorded "
-                        "in the declaration file, and no `%s = <value>` line in "
-                        "an RTL comment block" % name),
+                reason=why,
                 recovered_from_prose=False)
 
         if entry["status"] == "determined":
@@ -1098,8 +1305,15 @@ def _print_contract(contracts: List[Dict[str, Any]], out_path: Path,
             if not f["required_marker_recognized"]:
                 tier += " (marker %r unrecognized -> assumed required)" % (
                     f["required_marker"],)
-            ex = (" e.g. " + ", ".join(f["example_values"][:3])
-                  if f["example_values"] else "")
+            designated = f.get("designated_values") or []
+            if len(designated) == 1:
+                ex = " DESIGNATED by the spec: %s" % designated[0]
+            elif len(designated) > 1:
+                ex = (" %d values designated (%s) — contradictory, so none is "
+                      "taken" % (len(designated), ", ".join(designated)))
+            else:
+                ex = (" e.g. " + ", ".join(f["example_values"][:3])
+                      if f["example_values"] else "")
             print("      - %-28s %s%s" % (f["name"], tier, ex))
     print("  Contract: %s" % out_path)
 

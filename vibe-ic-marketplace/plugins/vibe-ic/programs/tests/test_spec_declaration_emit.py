@@ -1393,3 +1393,271 @@ def test_the_block_closes_at_the_next_heading(tmp_path):
         assert "acc = acc + x" not in bodies[ln], "ALGORITHM prose is in scope"
         assert "999" not in bodies[ln], "the prose latency line is in scope"
     assert any("bit_order" in bodies[ln] for ln in inside)
+
+
+# --------------------------------------------------------------------------- #
+# 6. A value the SPEC DESIGNATES is a stated choice, not a menu item
+# --------------------------------------------------------------------------- #
+# vibe-ic#2184.  MEASURED on a real front-door run (base 2692e510fae5,
+# v1.19.40): the spec's own table marked one of the listed widths `(primary)`,
+# the run had already authored, functionally verified, equivalence-checked and
+# synthesised the design at exactly that width, and the emitter still refused
+# it as "a REQUIRED free choice not declared" — because `_extract_examples`
+# kept the backticked tokens and threw the designation away, so a DESIGNATED
+# value reached the resolver as an undesignated two-item menu.
+# `spec_required_artifact_check` then FAILed and Phase 2 halted.
+#
+# These tests fix the direction in BOTH senses.  The one that must never
+# regress is the SECOND: a genuine menu is still refused.  A fix that made the
+# emitter adopt an example would have turned this gate green against a value
+# nobody chose, which is the whole reason the program is fail-closed.
+
+DESIGNATED_CONTRACT = """# L7
+
+The Plugin MUST declare `{path}` before authoring:
+
+| Field | Required | Example |
+|---|---|---|
+| `width_choice` | Yes | `32`(primary)/ `8 / 16`(secondary) |
+"""
+
+# The same designation with NO marker on the alternates, and a non-ASCII
+# separator between them — the second real shape in the corpus.
+DESIGNATED_BARE_ALTERNATES_CONTRACT = """# L7
+
+The Plugin MUST declare `{path}` before authoring:
+
+| Field | Required | Example |
+|---|---|---|
+| `width_choice` | Yes | `1024`(primary)或 `256`/`512` |
+"""
+
+# THE MUTANT: byte-identical to DESIGNATED_CONTRACT except the designation is
+# gone.  Same field, same values, same required-ness.
+UNDESIGNATED_MENU_CONTRACT = """# L7
+
+The Plugin MUST declare `{path}` before authoring:
+
+| Field | Required | Example |
+|---|---|---|
+| `width_choice` | Yes | `32` / `8 / 16` |
+"""
+
+TWO_DESIGNATED_CONTRACT = """# L7
+
+The Plugin MUST declare `{path}` before authoring:
+
+| Field | Required | Example |
+|---|---|---|
+| `width_choice` | Yes | `32`(primary)/ `16`(primary) |
+"""
+
+# An annotation that is NOT a designation: it describes the value, it does not
+# elect it.  Measured shapes from the corpus: `(含 GPIO)`, `(來自 ...tcl)`.
+ANNOTATED_NOT_DESIGNATED_CONTRACT = """# L7
+
+The Plugin MUST declare `{path}` before authoring:
+
+| Field | Required | Example |
+|---|---|---|
+| `top_choice` | Yes | `"with_extra"` (includes the extra) or `"plain"` (no extra) |
+"""
+
+# A SENTENCE that merely mentions the vocabulary. Under a substring rule this
+# would designate `"b"` — the value the sentence happens to follow.
+SENTENCE_MENTIONING_PRIMARY_CONTRACT = """# L7
+
+The Plugin MUST declare `{path}` before authoring:
+
+| Field | Required | Example |
+|---|---|---|
+| `width_choice` | Yes | `32` / `16` (primary is decided in L3) |
+"""
+
+DESIGNATED_PLACEHOLDER_CONTRACT = """# L7
+
+The Plugin MUST declare `{path}` before authoring:
+
+| Field | Required | Example |
+|---|---|---|
+| `width_choice` | Yes | `TBD`(primary)/ `32`(secondary) |
+"""
+
+
+def test_a_spec_designated_value_is_declared_and_unhalts_the_gate(tmp_path):
+    """vibe-ic#2184, the defect direction.
+
+    `(primary)` beside one of the listed values is the document stating WHICH
+    value this design is — in the same row, and the same voice, that made the
+    field REQUIRED.  Reading the required-ness marker and discarding the
+    designation is the same table trusted and distrusted at once.
+    """
+    p = _make_project(tmp_path, DESIGNATED_CONTRACT, "designated")
+    r = _run_emit(p)
+    assert r.returncode == 0, r.stderr
+    assert _declaration(p)["width_choice"] == 32, _declaration(p)
+
+    prov = _provenance(p)["fields"]["width_choice"]
+    assert prov["provenance"] == "spec_designated_value", prov
+    assert prov["recovered_from_prose"] is False
+    assert prov["spec_designated_values"] == ["32"], prov
+    # The alternates are still carried as what they are.
+    assert prov["spec_example_values"] == ["32", "8 / 16"], prov
+
+    # ...and the gate that halted Phase 2 is satisfied.
+    assert _run_gate(p).returncode == 0
+
+
+def test_designation_is_read_when_the_alternates_carry_no_marker(tmp_path):
+    """The other real corpus shape: only the primary is marked."""
+    p = _make_project(tmp_path, DESIGNATED_BARE_ALTERNATES_CONTRACT, "bare")
+    assert _run_emit(p).returncode == 0
+    assert _declaration(p)["width_choice"] == 1024
+
+
+def test_an_undesignated_menu_is_still_refused(tmp_path):
+    """THE MUTATION.  Drop the designation and nothing else; it must go red.
+
+    If this ever passes, the fix for #2184 has blinded the gate: the emitter
+    would be picking a value out of the example column, which is what the
+    document author happened to type rather than what this designer chose.
+    """
+    p = _make_project(tmp_path, UNDESIGNATED_MENU_CONTRACT, "menu")
+    r = _run_emit(p)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "width_choice" in r.stderr
+    assert not (p / DECL_PATH).exists(), "a refusal must write no declaration"
+    assert _run_gate(p).returncode == 1, "the required-artifact gate must FAIL"
+
+
+def test_two_designated_values_are_a_contradiction_and_refused(tmp_path):
+    """A document that designates two values has not chosen."""
+    p = _make_project(tmp_path, TWO_DESIGNATED_CONTRACT, "twoprimary")
+    r = _run_emit(p)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "designates 2 values" in r.stderr, r.stderr
+    assert not (p / DECL_PATH).exists()
+
+
+def test_an_annotation_that_describes_is_not_a_designation(tmp_path):
+    """`(includes the extra)` says what a value MEANS, not that it is chosen."""
+    p = _make_project(tmp_path, ANNOTATED_NOT_DESIGNATED_CONTRACT, "annot")
+    r = _run_emit(p)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert not (p / DECL_PATH).exists()
+
+
+def test_a_sentence_mentioning_the_vocabulary_does_not_designate(tmp_path):
+    """The marker must BE the annotation, not appear inside it.
+
+    Under a substring match this cell designates `16` — the value the
+    parenthetical happens to follow — and the emitter would invent a choice
+    from a sentence that explicitly defers the choice to another document.
+    """
+    p = _make_project(tmp_path, SENTENCE_MENTIONING_PRIMARY_CONTRACT, "sent")
+    r = _run_emit(p)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert not (p / DECL_PATH).exists()
+
+
+def test_a_designated_placeholder_is_not_a_declaration(tmp_path):
+    """`TBD` marked primary is UNDETERMINED with extra steps."""
+    p = _make_project(tmp_path, DESIGNATED_PLACEHOLDER_CONTRACT, "tbdprimary")
+    r = _run_emit(p)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert not (p / DECL_PATH).exists()
+
+
+def test_the_author_outranks_the_spec_designation(tmp_path):
+    """A designation is the weakest determined tier, not the strongest.
+
+    A spec that designates a value must never overwrite the designer who said
+    otherwise — the whole point of the artifact is to record THIS designer's
+    choice.
+    """
+    p = _make_project(tmp_path, DESIGNATED_CONTRACT, "authorwins")
+    assert _run_emit(p, "--set", "width_choice=8").returncode == 0
+    assert _declaration(p)["width_choice"] == 8
+    prov = _provenance(p)["fields"]["width_choice"]
+    assert prov["provenance"] == "author_declared", prov
+
+
+def test_an_explicit_abstention_beats_the_spec_designation(tmp_path):
+    """`--set <field>=null` is the author retracting the choice, out loud.
+
+    A designation that survived it would make the abstention unstateable for
+    exactly the fields a spec happens to designate.
+    """
+    p = _make_project(tmp_path, DESIGNATED_CONTRACT, "abstain")
+    r = _run_emit(p, "--set", "width_choice=null")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert not (p / DECL_PATH).exists()
+
+
+def test_designation_parse_keeps_the_cell_verbatim(tmp_path):
+    """Unit-level: what was parsed, and what was thrown away.
+
+    The defect was invisible for as long as it was because the contract file
+    recorded only the tokens, so nothing downstream could tell a designated
+    value from a menu item.  The contract now carries the annotation text.
+    """
+    sys.path.insert(0, str(PROGRAMS_DIR))
+    import spec_declaration_emit as M
+
+    entries = M._extract_example_entries("`32`(primary)/ `8 / 16`(secondary)")
+    assert entries == [("32", "primary"), ("8 / 16", "secondary")], entries
+    assert M._designated_values(entries) == ["32"]
+    # The old accessor is unchanged, so every existing reader still works.
+    assert M._extract_examples("`32`(primary)/ `8 / 16`(secondary)") == [
+        "32", "8 / 16"]
+
+    assert M._classify_designation("primary") is True
+    assert M._classify_designation("Primary") is True
+    assert M._classify_designation("secondary") is False
+    assert M._classify_designation("") is None
+    assert M._classify_designation("primary is decided in L3") is None
+    assert M._classify_designation("includes the extra") is None
+
+
+def test_a_rerun_carries_the_designation_stamp_unchanged(tmp_path):
+    """Idempotence: the second, byte-identical run must not relabel the field.
+
+    Re-deriving provenance on every run is what emptied `recovered_from_prose`
+    once already (see the module docstring); the same trap is open to any new
+    tier that resolves from a document the emitter re-reads each time.
+    """
+    p = _make_project(tmp_path, DESIGNATED_CONTRACT, "rerun")
+    assert _run_emit(p).returncode == 0
+    first = (p / DECL_PATH).read_text()
+    assert _run_emit(p).returncode == 0
+    assert (p / DECL_PATH).read_text() == first
+    prov = _provenance(p)["fields"]["width_choice"]
+    assert prov["provenance"] == "spec_designated_value", prov
+    assert prov["provenance_verified"] is True, prov
+    assert prov.get("provenance_diverged") is not True, prov
+
+
+def test_a_designation_stamp_is_demoted_when_the_spec_moves(tmp_path):
+    """The stamp names a SOURCE; when the source changes, the stamp is stale.
+
+    The declaration file legitimately outranks the spec table, so the VALUE
+    stands.  What must not stand is this program going on attesting "the spec
+    designated this" about a spec that now designates something else.
+    """
+    p = _make_project(tmp_path, DESIGNATED_CONTRACT, "specmoved")
+    assert _run_emit(p).returncode == 0
+    assert _declaration(p)["width_choice"] == 32
+
+    doc = p / "input" / "docs" / "L7_verification_plan.md"
+    doc.write_text(
+        DESIGNATED_CONTRACT.format(path=DECL_PATH).replace(
+            "`32`(primary)/ `8 / 16`(secondary)",
+            "`8 / 16`(primary)/ `32`(secondary)"), encoding="utf-8")
+
+    r = _run_emit(p)
+    assert r.returncode == 0, r.stderr
+    assert _declaration(p)["width_choice"] == 32, "the declared value must stand"
+    prov = _provenance(p)["fields"]["width_choice"]
+    assert prov["provenance_verified"] is False, prov
+    assert prov["provenance_diverged"] is True, prov
+    assert "PROVENANCE UNVERIFIED" in r.stdout, r.stdout
