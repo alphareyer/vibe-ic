@@ -638,3 +638,142 @@ def test_phase3_imports_the_container_helper_under_ONE_alias():
 
 if __name__ == "__main__":
     sys.exit(subprocess.call([sys.executable, "-m", "pytest", "-q", __file__]))
+
+
+# ── 9. ONE IMAGE IDENTITY SHAPE, END TO END ON THE RUN PATH (#2101) ──────────
+#
+# Both halves were left deliberately by lane cz2085 after #2085 fixed the NAME
+# path, and both are about the same thing: an identity that is one shape at one
+# door and another shape at the next.
+
+class _Inspect:
+    """A stand-in for `docker image inspect --format '{{json .RepoDigests}}\t{{.Id}}'`.
+
+    Deliberately the REAL two-field shape rather than a bare list: taking the
+    whole line instead of the first tab field is a defect this tree has already
+    had once (`_eda_pin.local_repo_digests`), and a fake that does not reproduce
+    the shape cannot catch it coming back.
+    """
+
+    def __init__(self, repo_digests, image_id):
+        self.returncode = 0
+        self.stdout = json.dumps(repo_digests) + "\t" + image_id
+        self.stderr = ""
+
+
+_OTHER = "other.registry.example:5000/vibeic-eda"
+_ID = "sha256:" + "1" * 64
+_FOREIGN_DIGEST = "sha256:" + "2" * 64
+_MINE_DIGEST = "sha256:" + "3" * 64
+
+
+def test_local_digest_refuses_a_repo_digest_from_another_repository(monkeypatch):
+    """The first half of #2101.
+
+    The entries were RANKED — a matching repository sorted first — so with NO
+    match the first foreign entry was still returned, and returned as kind
+    `repo-digest`, which is the claim "this is registry-portable". `_pinned`
+    then composes `f"{_repo_of(ref)}@{digest}"`: THIS repository paired with
+    THAT repository's manifest digest, a reference naming bytes nobody serves,
+    written into a report as the identity the verdict replays against.
+
+    WRITTEN LAZILY this test would have asserted only that the answer is not
+    the foreign digest — which an implementation returning `(None, "", why)`
+    would also satisfy while destroying the local identity that IS available.
+    So it asserts the fallback POSITIVELY: the Id, labelled `image-id`.
+    """
+    ref = f"{P.IMAGE_REPO_DEFAULT}@{_MINE_DIGEST}"
+    monkeypatch.setattr(
+        EI, "_run",
+        lambda *a, **k: _Inspect([f"{_OTHER}@{_FOREIGN_DIGEST}"], _ID))
+    digest, kind, why = EI.local_digest(ref)
+    assert digest == _ID, (digest, kind, why)
+    assert kind == "image-id"
+    assert digest != _FOREIGN_DIGEST
+    # AND THE COMPOSED REFERENCE IS THE POINT. `repo@<foreign digest>` is the
+    # string that used to reach a report.
+    assert EI._pinned(ref, digest, kind) == _ID
+    assert _FOREIGN_DIGEST not in EI._pinned(ref, digest, kind)
+
+
+def test_local_digest_still_prefers_the_matching_repository_half(monkeypatch):
+    """THE OTHER DIRECTION, and the one a refusal-shaped fix breaks.
+
+    A filter that is too eager throws away the portable identity that was
+    right there. The matching entry is placed SECOND on purpose: an
+    implementation that reverted to `repo_digests[0]` passes the test above and
+    fails this one.
+    """
+    ref = f"{P.IMAGE_REPO_DEFAULT}:latest"
+    monkeypatch.setattr(EI, "_run", lambda *a, **k: _Inspect(
+        [f"{_OTHER}@{_FOREIGN_DIGEST}",
+         f"{P.IMAGE_REPO_DEFAULT}@{_MINE_DIGEST}"], _ID))
+    digest, kind, why = EI.local_digest(ref)
+    assert (digest, kind) == (_MINE_DIGEST, "repo-digest"), (digest, kind, why)
+
+
+def test_local_digest_keeps_a_repo_digest_when_the_ref_names_no_repository(monkeypatch):
+    """A bare Id has no repository half to contradict, so its RepoDigest is a
+    strictly BETTER identity than the Id and is still taken. The filter is
+    about a repository that DISAGREES, never about one that is absent."""
+    monkeypatch.setattr(EI, "_run", lambda *a, **k: _Inspect(
+        [f"{_OTHER}@{_FOREIGN_DIGEST}"], _ID))
+    digest, kind, _ = EI.local_digest(_ID)
+    assert (digest, kind) == (_FOREIGN_DIGEST, "repo-digest")
+
+
+def test_a_bare_image_id_override_never_reaches_the_run_path(monkeypatch, capsys):
+    """The second half of #2101.
+
+    `judged_image` refuses a bare Id; `resolve()` returned it VERBATIM, and
+    `docker run sha256:<id>` works — so the identity that cannot be named was
+    refused at the naming door and admitted at the running one. Normalised to
+    the pinned reference now, out loud.
+    """
+    monkeypatch.setattr(P, "pinned_image_present",
+                        lambda env=None: (P.image_reference(env), ""))
+    ref = EI.resolve(env={"VIBEIC_EDA_IMAGE": _ID})
+    assert ref == P.image_reference({})
+    assert not P.is_bare_image_id(ref)
+    err = capsys.readouterr().err
+    assert P.IMAGE_ID_NOT_A_REFERENCE in err, err
+    assert _ID in err, "the refusal must say what arrived"
+
+
+def test_a_reference_shaped_override_still_runs_unchanged(monkeypatch):
+    """The direction that proves the fix is a NORMALISATION and not a seizure.
+    Naming an image by hand stays the operator's deliberate call."""
+    named = f"{_OTHER}@{_FOREIGN_DIGEST}"
+    assert EI.resolve(env={"VIBEIC_EDA_IMAGE": named}) == named
+    assert EI.local_image(env={"IIC_EDA_IMAGE": named}) == named
+
+
+def test_local_image_does_not_hand_back_a_bare_image_id(monkeypatch, capsys):
+    """`local_image` answers "is a runnable image already HERE". It honoured
+    the override without asking, so a bare Id came back as a present-and-
+    runnable answer that no other host could ask for."""
+    monkeypatch.setattr(P, "pinned_image_present",
+                        lambda env=None: (None, "IMAGE_NOT_PRESENT: x"))
+    assert EI.local_image(env={"VIBEIC_EDA_IMAGE": _ID}) is None
+    assert P.IMAGE_ID_NOT_A_REFERENCE in capsys.readouterr().err
+    monkeypatch.setattr(P, "pinned_image_present",
+                        lambda env=None: (P.image_reference(env), ""))
+    assert EI.local_image(env={"VIBEIC_EDA_IMAGE": _ID}) == P.image_reference({})
+
+
+def test_both_doors_refuse_a_bare_id_with_the_SAME_code(monkeypatch):
+    """MEMBERSHIP, not counts: the gate path and the run path must reject the
+    same shape by the same machine-readable code, from one spelling. Two
+    spellings drift, and a drifted refusal is how a shape gets admitted at one
+    door again."""
+    monkeypatch.setattr(P, "pinned_image_present",
+                        lambda env=None: (P.image_reference(env), ""))
+    env = {"VIBEIC_EDA_IMAGE": _ID}
+    judged = EI.judged_image(env=env)
+    assert judged.ref is None
+    assert judged.why_not == EI.image_id_refusal(_ID)
+    assert P.IMAGE_ID_NOT_A_REFERENCE in judged.why_not
+    # ONE SPELLING. Grep-proof: the sentence exists once in the module.
+    src = (_PROGRAMS / "_eda_image.py").read_text(encoding="utf-8")
+    assert src.count("is a bare image Id ") == 1
+    assert EI.resolve(env=env) != _ID

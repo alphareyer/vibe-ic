@@ -170,6 +170,51 @@ def local_tags(repo: str = IMAGE_REPO) -> list[str]:
                   reverse=True)
 
 
+def image_id_refusal(chosen: str) -> str:
+    """Why a bare image Id is not an image reference — the ONE spelling.
+
+    Extracted so the GATE path and the RUN path refuse the same input with the
+    same sentence and the same machine-readable code. Two spellings of one
+    refusal is how a shape comes to be refused at one door and admitted at
+    another, which is the whole of #2101's second half.
+    """
+    return (
+        f"{_pin.IMAGE_ID_NOT_A_REFERENCE}: {chosen} is a bare image Id "
+        f"(sha256:<hex>), not an image reference. An Id has no "
+        f"repository half, so it names nothing another host can fetch "
+        f"and a verdict carrying it can be neither replayed nor "
+        f"attributed; splitting one to recover a repository yields "
+        f"`sha256`, and the reference `sha256@<digest>` that composes "
+        f"is what docker refuses with rc=125. Name the image as a "
+        f"digest-pinned reference instead — <repo>@sha256:<digest>, "
+        f"the shape `_eda_pin.image_reference()` composes and every "
+        f"other site in this tree uses.")
+
+
+def _override(env) -> Tuple[Optional[str], str]:
+    """`(override, why_it_is_not_usable)` from the environment.
+
+    ONE IDENTITY, ONE SHAPE, END TO END. `judged_image` already refuses a bare
+    Id, because a verdict has to be able to name what it judged. The RUN path
+    did not: it returned whatever the env said, verbatim, and `docker run`
+    ACCEPTS a bare Id — so the same host could RUN an image under one name and
+    NAME it under another, and only the naming half complained. That is not a
+    stricter door and a looser one; it is two answers to "which image is this".
+
+    A reference-shaped override is still honoured unchanged — naming an image
+    by hand is the operator's deliberate call and always was. Only the shape
+    that cannot be named again is refused, and the caller says out loud what it
+    runs instead.
+    """
+    for key in _ENV_KEYS:
+        chosen = (env.get(key) or "").strip()
+        if chosen:
+            if _pin.is_bare_image_id(chosen):
+                return None, f"{key}: {image_id_refusal(chosen)}"
+            return chosen, ""
+    return None, ""
+
+
 def local_image(repo: str = IMAGE_REPO, env=None) -> Optional[str]:
     """A ref this machine can run WITHOUT a registry pull, else None.
 
@@ -184,10 +229,16 @@ def local_image(repo: str = IMAGE_REPO, env=None) -> Optional[str]:
     caller named that image on purpose and may well intend it to be pulled.
     """
     env = os.environ if env is None else env
-    for key in _ENV_KEYS:
-        override = (env.get(key) or "").strip()
-        if override:
-            return override
+    override, why_unusable = _override(env)
+    if override:
+        return override
+    if why_unusable:
+        # NOT ANSWERED WITH THE Id. "Is a runnable image already here" is now
+        # asked about the pinned bytes, so the refusal cannot be laundered into
+        # a present-and-runnable answer naming something no other host can ask
+        # for.
+        _note(f"{why_unusable} Ignoring the override; answering about the "
+              f"pinned reference {_pin.image_reference(env)} instead.")
     # THE PINNED BYTES, OR NOTHING. The newest local semver tag used to be the
     # answer here, and it answers a different question -- "what does this
     # machine happen to have?" -- which is how a host holding the pinned image
@@ -272,13 +323,31 @@ def local_digest(ref: str) -> Tuple[Optional[str], str, str]:
         repo_digests = json.loads(raw) or []
     except ValueError:
         repo_digests = []
+    # A RepoDigest FROM ANOTHER REPOSITORY IS NOT THIS REFERENCE'S IDENTITY.
+    # The entries were merely RANKED here, so a match sorted first and a
+    # non-match was still returned when there was no match at all -- and the
+    # caller that receives `("repo-digest", <digest>)` composes
+    # `f"{_repo_of(ref)}@{digest}"` (`_pinned`), which on a host holding the
+    # same bytes pulled from two registries pairs THIS repository with THAT
+    # repository's manifest digest. The composed reference names bytes that
+    # repository does not serve under that digest, and it is written into a
+    # report as the identity a verdict is replayed against.
+    #
+    # So the match is now a FILTER, not a preference. With no match the honest
+    # answer is the `.Id` below, which is content-addressed and says so by its
+    # KIND: "this digest is local" is a weaker claim than "this digest is
+    # portable", and a weaker true claim beats a stronger false one.
     want = _repo_of(ref)
-    ranked = sorted(repo_digests,
-                    key=lambda d: 0 if d.split("@", 1)[0] == want else 1)
-    for entry in ranked:
+    matching = [d for d in repo_digests
+                if not want or d.split("@", 1)[0] == want]
+    for entry in matching:
         _, _, digest = entry.partition("@")
         if DIGEST_RE.match(digest):
             return digest, "repo-digest", ""
+    if want and repo_digests:
+        _note(f"{ref}: none of this image's RepoDigests names the repository "
+              f"{want} ({list(repo_digests)}); falling back to its image Id, "
+              f"which identifies these bytes on this host only")
     image_id = image_id.strip()
     if DIGEST_RE.match(image_id):
         return image_id, "image-id", ""
@@ -417,17 +486,8 @@ def judged_image(env=None, *, explicit: Optional[str] = None,
         # by SAYING WHAT ARRIVED -- the previous behaviour spliced it into
         # `sha256@sha256:<digest>` and reported success (#2085).
         if _pin.is_bare_image_id(chosen):
-            return JudgedImage(None, None, "", "override", (
-                f"{_pin.IMAGE_ID_NOT_A_REFERENCE}: {chosen} is a bare image Id "
-                f"(sha256:<hex>), not an image reference. An Id has no "
-                f"repository half, so it names nothing another host can fetch "
-                f"and a verdict carrying it can be neither replayed nor "
-                f"attributed; splitting one to recover a repository yields "
-                f"`sha256`, and the reference `sha256@<digest>` that composes "
-                f"is what docker refuses with rc=125. Name the image as a "
-                f"digest-pinned reference instead — <repo>@sha256:<digest>, "
-                f"the shape `_eda_pin.image_reference()` composes and every "
-                f"other site in this tree uses."))
+            return JudgedImage(None, None, "", "override",
+                               image_id_refusal(chosen))
         digest, kind, why = image_digest(chosen)
         if not digest:
             return JudgedImage(None, None, "", "override", (
@@ -563,15 +623,24 @@ def _note(message: str) -> None:
 def resolve(env=None, *, repo: str = IMAGE_REPO) -> str:
     """A runnable image reference for the vibeic-eda toolchain.
 
-    Order: explicit override → the registry's current `latest`, by digest →
-    the newest locally-present tag → the legacy upstream image. Every step past the registry is announced. Never returns a bare `:latest`, which is the one answer that
-    can silently mean "whatever this machine happened to pull months ago".
+    Order: an explicit override IN REFERENCE SHAPE → the pinned reference. A
+    bare image Id override is refused with `IMAGE_ID_NOT_A_REFERENCE` and the
+    pinned reference is run instead, announced: `docker run` accepts an Id, so
+    this is the one door that would otherwise have let a shape the gate path
+    refuses reach the toolchain unremarked (#2101). Never returns a bare
+    `:latest`, which is the one answer that can silently mean "whatever this
+    machine happened to pull months ago".
     """
     env = os.environ if env is None else env
-    for key in _ENV_KEYS:
-        override = (env.get(key) or "").strip()
-        if override:
-            return override
+    override, why_unusable = _override(env)
+    if override:
+        return override
+    if why_unusable:
+        # NORMALISED BEFORE DOCKER SEES IT, and announced. `docker run` accepts
+        # a bare Id, so nothing downstream would have complained -- the run
+        # would simply have been about bytes the report could not name.
+        _note(f"{why_unusable} Running the pinned reference "
+              f"{_pin.image_reference(env)} instead.")
 
     # THE RUN PATH READS THE SAME PIN THE GATE PATH DOES, from the same config
     # point. It used to ask the registry what `latest` meant and then walk down
