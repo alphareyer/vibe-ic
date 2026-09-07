@@ -145,7 +145,7 @@ IMAGE_RE = re.compile(
 #: this one, the runtime one, the runner module's, and the manifest's — to ONE
 #: digest, and binds the two COMMITTED ones byte for byte.
 RUNNER_IMAGE_DIGEST = (
-    "sha256:8c5694abdf5c269c1d9def5368704e0c4b51c869d1d9c9380e123e07657fe9eb")
+    "sha256:1463dac58116ca6650ec84e9e4b11a73a70f4094c95a9a19e620482251471c57")
 #: The one env, and the one default. Same names `hermetic_candidate_runner` uses.
 RUNNER_IMAGE_REPO_ENV = "VIBEIC_EDA_IMAGE_REPO"
 RUNNER_IMAGE_REPO_DEFAULT = "ghcr.io/vibeic/vibeic-eda"
