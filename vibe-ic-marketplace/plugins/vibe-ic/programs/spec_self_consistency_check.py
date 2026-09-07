@@ -26,6 +26,16 @@ Two real benchmark misses motivate every rule here:
     bench-correct. `reset-mode-contradiction` / `reset-polarity-contradiction` catch
     the inconsistency inside the spec text.
 
+  • vibe-ic#2168: one Phase-1 L2 document stated "66 cycles after the accepted
+    command" as observable FSM behaviour AND, in its own "not constrained by L2"
+    list, declared the latency cycle count unconstrained. Both citations are in the
+    SAME document. Nothing saw it: every rule above compares the spec's interface
+    against the spec's body, and this contradiction is between two PROSE sections —
+    a value asserted as binding in one place and disclaimed in another. A reader who
+    does not already know the document contradicts itself cannot tell which reading
+    binds, and the two readings admit different implementations (66-cycle iterative
+    vs an unrolled or pipelined arm). `unconstrained-value-contradiction` catches it.
+
 Findings (verdict tiers):
   ERROR (fails the gate):
     reset-mode-contradiction     : spec asserts BOTH synchronous AND asynchronous reset.
@@ -43,6 +53,15 @@ Findings (verdict tiers):
                       consumed" yet no `res_ready`-style input is declared). Detected from
                       the spec ALONE — the behaviour prose vs the declared interface — never
                       from the testbench that happens to drive the missing port.
+    unconstrained-value-contradiction : the spec declares a numeric quantity NOT
+                      constrained (an explicit "not specified / 不指定 ..." clause, or a
+                      bullet under a "not constrained" heading) and elsewhere states an
+                      EXACT, unhedged value for that same quantity as if it bound the
+                      design (vibe-ic#2168). Hedged ("~66 cycles"), bounded ("at most
+                      4096 cycles") and explicitly illustrative ("66 cycles — reference")
+                      statements are NOT contradictions and do not fire: the shape being
+                      caught is a bare assertion standing against the document's own
+                      disclaimer.
 
 chip-AGNOSTIC: detection is purely textual/structural over the spec — no IC-, bus-,
 or protocol-specific knowledge. Spec may be a natural-language prompt, a markdown
@@ -187,6 +206,166 @@ def _interface_signals(text: str, is_json: bool) -> Dict[str, set]:
 
 
 
+# ── unconstrained-value-contradiction (vibe-ic#2168) ──────────────────────
+# A document that DISCLAIMS a numeric quantity ("the latency cycle count is not
+# specified") and, elsewhere in the same document, states an EXACT value for that
+# same quantity as a bare assertion ("the FSM returns to IDLE 66 cycles after the
+# accepted command") contradicts itself about whether the number binds. Both
+# readings admit different implementations, so a builder cannot choose without
+# guessing which section is authoritative.
+#
+# Detection is spec-INTERNAL and purely textual/structural — it compares two
+# sections of the SAME document. It never consults a testbench, golden, oracle or
+# reference implementation, and it carries no chip-, PDK-, bus- or protocol-specific
+# knowledge: the join key is a generic engineering unit noun.
+#
+# THE THREE NON-CONTRADICTIONS, which is where the precision comes from. A stated
+# value is NOT in conflict with a disclaimer when it is:
+#   hedged        — "~66 cycles", "約 66 cycles", "approximately 66 cycles"
+#   bounded       — "at most 4096 cycles", "最大 latency = 32 cycles", "≤ 16 cycles"
+#   illustrative  — "66 cycles per block — reference", "e.g. 8 stages", "typical"
+# All three already say the number does not bind. Only a BARE assertion does.
+
+#: Headings that open a section whose bullets are non-constraints. `自由度`
+#: ("design freedom") headings are deliberately EXCLUDED: those list the choices a
+#: builder MAY take, each with its own value, which is the opposite shape.
+_UNCONSTRAINED_HDR = re.compile(
+    r'不(?:在[^\n]{0,16})?(?:約束|指定|限制|規範)'
+    r'|not\s+constrained|not\s+specified|unconstrained'
+    r'|out\s+of\s+scope|no\s+constraints?\s+on', re.I)
+#: A clause that, on its own line, declares something not constrained.
+_UNCONSTRAINED_CLAUSE = re.compile(
+    r'不(?:指定|約束|限制|規範)'
+    r'|(?:not|never)\s+(?:constrained|specified|fixed|mandated)'
+    r'|does\s+not\s+(?:specify|constrain|mandate|fix)'
+    r'|no\s+constraints?\s+on|unconstrained', re.I)
+_MD_HEADING = re.compile(r'^(#{1,6})\s+(.*)$')
+#: A disclaimer that cites another document by `name:line` is QUOTING that
+#: document, not declaring a non-constraint of its own. Measured: the one and only
+#: false positive over 566 tracked .md/.txt in the published corpus + 571 in this
+#: repo was a campaign REPORT that quoted this very L2 bullet as evidence.
+_CITATION = re.compile(r'(?<![A-Za-z0-9_])[A-Za-z_]\w*:\d+')
+
+#: Generic engineering unit nouns — the join key between a disclaimer and a value.
+_UNIT_NOUNS = (
+    'cycles?', 'clocks?', 'ns', 'us', 'ps', 'ms', 'mhz', 'khz', 'ghz', 'hz',
+    'bits?', 'bytes?', 'words?', 'stages?', 'entries', 'entry', 'levels?',
+    'rounds?', 'iterations?', 'ports?', 'channels?', 'lanes?', 'beats?',
+    'slots?', 'taps?', 'banks?', 'ways?',
+)
+#: Nouns that ARE a number by themselves — no count marker needed to know the
+#: disclaimer is about a quantity.
+_QUANTITY_NOUNS = ('latency', 'depth', 'width', 'period', 'frequency',
+                   'throughput', 'count', 'size', 'length')
+_UNIT_OR_QTY = re.compile(
+    r'(?<![A-Za-z0-9_])(' + '|'.join(_UNIT_NOUNS + _QUANTITY_NOUNS) +
+    r')(?![A-Za-z0-9_])', re.I)
+#: `<number> <unit>` — the exact-value shape.
+_VALUE_WITH_UNIT = re.compile(
+    r'(?<![\w.])(\d+(?:\.\d+)?)\s*[-\s]?\s*(' + '|'.join(_UNIT_NOUNS) +
+    r')(?![A-Za-z0-9_])', re.I)
+#: "how many of them" immediately after a unit noun — `cycle 數`, `cycle count`.
+_COUNT_MARKER = re.compile(r'數量?|個數|count|number\s+of|how\s+many', re.I)
+#: Approximation / bound markers, looked for in the text IMMEDIATELY BEFORE the
+#: number (a bound qualifies the number it precedes, not the whole line).
+_APPROX_OR_BOUND = re.compile(
+    r'[~≈≤≥<>]|約|最多|最少|最大|最小|最長|最短|至少|至多|上限|下限|不超過|以上|以下'
+    r'|up\s+to|at\s+most|at\s+least|no\s+more\s+than|max|min|bound', re.I)
+#: Illustrative markers, looked for anywhere on the line — "66 cycles per block,
+#: low area — reference 採用" is disclaimed by a word that trails the number.
+_ILLUSTRATIVE = re.compile(
+    r'reference|參考|參照|例如|e\.g\.|for\s+example|such\s+as|typical|預設|default'
+    r'|可選|自選|informative|illustrat', re.I)
+#: How far back to look for a bound/approximation marker qualifying a number.
+_QUALIFIER_WINDOW = 30
+
+
+def _canonical_unit(token: str) -> str:
+    """Singularise a unit noun so `cycles` and `cycle` are one join key."""
+    t = token.lower()
+    if t.endswith('ies'):
+        return t[:-3] + 'y'
+    if t.endswith('s') and len(t) > 3:
+        return t[:-1]
+    return t
+
+
+def _disclaimer_lines(lines: List[str]) -> set:
+    """0-based indices of lines that state a NON-constraint: every line inside a
+    section opened by an "unconstrained" heading, plus any standalone line whose
+    own wording disclaims a constraint."""
+    marked: set = set()
+    open_level: Optional[int] = None
+    for i, line in enumerate(lines):
+        h = _MD_HEADING.match(line)
+        if h:
+            level = len(h.group(1))
+            if open_level is not None and level <= open_level:
+                open_level = None
+            if open_level is None and _UNCONSTRAINED_HDR.search(h.group(2)):
+                open_level = level
+                marked.add(i)
+                continue
+        if open_level is not None:
+            marked.add(i)
+    for i, line in enumerate(lines):
+        if _UNCONSTRAINED_CLAUSE.search(line):
+            marked.add(i)
+    return marked
+
+
+def _unconstrained_quantities(lines: List[str], marked: set) -> Dict[str, Tuple[int, str]]:
+    """{canonical unit or quantity noun: (1-based line, clause text)} for every
+    NUMERIC quantity the document declares unconstrained."""
+    out: Dict[str, Tuple[int, str]] = {}
+    for i in sorted(marked):
+        line = lines[i]
+        if _MD_HEADING.match(line) or _CITATION.search(line):
+            continue
+        for m in _UNIT_OR_QTY.finditer(line):
+            token = m.group(1)
+            if token.lower() in _QUANTITY_NOUNS:
+                is_quantity = True
+            else:
+                # a bare unit noun is only a QUANTITY when the clause counts it
+                is_quantity = bool(_COUNT_MARKER.search(line[m.end():m.end() + 8]))
+            if is_quantity:
+                out.setdefault(_canonical_unit(token), (i + 1, line.strip()))
+    return out
+
+
+def _unconstrained_value_contradictions(text: str) -> List[Finding]:
+    lines = text.splitlines()
+    marked = _disclaimer_lines(lines)
+    unconstrained = _unconstrained_quantities(lines, marked)
+    if not unconstrained:
+        return []
+    findings: List[Finding] = []
+    for i, line in enumerate(lines):
+        if i in marked:
+            continue
+        for m in _VALUE_WITH_UNIT.finditer(line):
+            unit = _canonical_unit(m.group(2))
+            if unit not in unconstrained:
+                continue
+            if _ILLUSTRATIVE.search(line):
+                continue
+            if _APPROX_OR_BOUND.search(line[max(0, m.start() - _QUALIFIER_WINDOW):m.start()]):
+                continue
+            decl_line, decl_text = unconstrained[unit]
+            findings.append(Finding(
+                "unconstrained-value-contradiction", "WARN",
+                f"line {i + 1} states '{m.group(1)} {m.group(2)}' as an exact, unhedged "
+                f"value, but line {decl_line} of this same document declares that "
+                f"quantity NOT constrained ({decl_text[:90]!r}). One of the two readings "
+                f"binds and the document does not say which: a builder cannot tell "
+                f"whether {m.group(1)} is required behaviour or the reference's own "
+                f"figure. Either drop the quantity from the not-constrained list and "
+                f"say what checks the value, or mark line {i + 1} as illustrative "
+                f"(‘~’ / ‘reference’) and leave one declaration."))
+    return findings
+
+
 def check_spec(text: str, is_json: bool = False) -> List[Finding]:
     findings: List[Finding] = []
     contract = extract_spec_contract(text, is_json=is_json)
@@ -268,6 +447,12 @@ def check_spec(text: str, is_json: bool = False) -> List[Finding]:
                 "a builder cannot know when to retire the result. Name the missing "
                 "consume/ready input (e.g. res_ready) or state the result is "
                 "free-running / never back-pressured."))
+
+    # ── unconstrained-value-contradiction (#2168) ─────────────────────────────
+    # A value asserted as binding in one section and disclaimed in another, inside
+    # ONE document. Prose-vs-prose, so it runs on text form only.
+    if not is_json:
+        findings.extend(_unconstrained_value_contradictions(text))
 
     # ── reset-semantics contradictions inside the spec (phrase-bound) ─────────
     low = strip_comments(text).lower() if not is_json else ""

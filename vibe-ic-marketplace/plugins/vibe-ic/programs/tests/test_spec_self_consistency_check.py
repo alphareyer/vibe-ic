@@ -285,3 +285,206 @@ Implementation:
 """
     res, f = run(tmp_path, spec)
     assert 'handshake-consume-undeclared' not in codes(f)
+
+
+# ---- unconstrained-value-contradiction : the vibe-ic#2168 signature --------
+# One Phase-1 L2 document stated "66 cycles after the accepted command" as
+# observable FSM behaviour AND, in its own "not constrained by L2" list, declared
+# the latency cycle count unconstrained. Both citations are in the SAME document,
+# and nothing saw it: every other rule here compares the interface against the
+# body, while this contradiction is between two PROSE sections.
+#
+# The fixture reproduces the real document's SHAPE (bilingual headings, the ❌
+# bullet list) without carrying any design-specific content beyond the numbers
+# that make the contradiction observable.
+CONTRADICTED_LATENCY = """\
+Implement a hash engine with a register interface.
+ - input  clk
+ - input  reset_n
+ - output ready
+
+## Control state machine (externally observable)
+
+- On reset the state machine is in IDLE (ready = 1).
+- The FSM transitions from BUSY to IDLE when the block computation completes,
+  66 cycles after the accepted command (ready = 1).
+
+## Not constrained by this layer
+
+- The round function hierarchy is not specified.
+- The latency cycle count is not specified (any number of cycles that produces
+  the standard result is acceptable).
+"""
+
+
+def test_unconstrained_value_contradiction_fires(tmp_path):
+    res, f = run(tmp_path, CONTRADICTED_LATENCY)
+    assert 'unconstrained-value-contradiction' in codes(f)
+    # WARN, so the gate still PASSes (exit 0) without --strict
+    assert res.returncode == 0
+    msg = next(x['message'] for x in f
+               if x['code'] == 'unconstrained-value-contradiction')
+    # the finding must name BOTH citations by line, or a reader cannot resolve it
+    assert '66 cycles' in msg
+    assert 'not constrained' in msg.lower()
+
+
+def test_unconstrained_value_contradiction_strict_refuses(tmp_path):
+    """The REFUSED direction the issue asks for: a document carrying the
+    contradiction does not get a clean exit under --strict."""
+    res, _ = run(tmp_path, CONTRADICTED_LATENCY, '.md', '--strict')
+    assert res.returncode == 1
+
+
+def test_unconstrained_value_contradiction_names_every_site(tmp_path):
+    """The real document stated the number TWICE outside the disclaimer. Both
+    sites must be named — resolving one and leaving the other still leaves a
+    document that contradicts itself."""
+    spec = CONTRADICTED_LATENCY.replace(
+        "## Not constrained by this layer",
+        "Software polls the status register until ready = 1 (66 cycles later).\n\n"
+        "## Not constrained by this layer")
+    _, f = run(tmp_path, spec)
+    hits = [x for x in f if x['code'] == 'unconstrained-value-contradiction']
+    assert len(hits) == 2, [x['message'] for x in hits]
+
+
+# ACCEPTED direction 1: the value is stated in ONE place only — no disclaimer.
+def test_unconstrained_value_no_disclaimer_is_accepted(tmp_path):
+    spec = CONTRADICTED_LATENCY.split("## Not constrained by this layer")[0]
+    res, f = run(tmp_path, spec)
+    assert 'unconstrained-value-contradiction' not in codes(f)
+    assert res.returncode == 0
+
+
+# ACCEPTED direction 2: the disclaimer stands alone — the document never states
+# an exact count. This is the single-declaration document the issue calls correct.
+def test_unconstrained_declared_but_never_valued_is_accepted(tmp_path):
+    spec = CONTRADICTED_LATENCY.replace(
+        "  66 cycles after the accepted command (ready = 1).",
+        "  the block computation completes (ready = 1).")
+    res, f = run(tmp_path, spec)
+    assert 'unconstrained-value-contradiction' not in codes(f)
+    assert res.returncode == 0
+
+
+# NEGATIVE 1 (hedged): "~66 cycles" already says the number does not bind.
+def test_unconstrained_value_hedged_no_fire(tmp_path):
+    spec = CONTRADICTED_LATENCY.replace("  66 cycles after", "  ~66 cycles after")
+    _, f = run(tmp_path, spec)
+    assert 'unconstrained-value-contradiction' not in codes(f)
+
+
+# NEGATIVE 2 (bounded): a ceiling is not an exact value, and a disclaimer that
+# grants a bound is consistent with the bound being stated elsewhere.
+def test_unconstrained_value_bounded_no_fire(tmp_path):
+    spec = CONTRADICTED_LATENCY.replace("  66 cycles after", "  at most 66 cycles after")
+    _, f = run(tmp_path, spec)
+    assert 'unconstrained-value-contradiction' not in codes(f)
+
+
+# NEGATIVE 3 (illustrative): the number is labelled the reference's own figure.
+def test_unconstrained_value_illustrative_no_fire(tmp_path):
+    spec = CONTRADICTED_LATENCY.replace(
+        "  66 cycles after the accepted command (ready = 1).",
+        "  66 cycles after the accepted command in the reference (ready = 1).")
+    _, f = run(tmp_path, spec)
+    assert 'unconstrained-value-contradiction' not in codes(f)
+
+
+# NEGATIVE 4 (design-freedom menu): a "choices you may take" list is the OPPOSITE
+# shape — each option legitimately carries its own value. This is the mutation
+# that proves the rule keys on a NON-CONSTRAINT clause, not on any bullet list.
+def test_design_freedom_menu_is_not_a_disclaimer(tmp_path):
+    spec = """\
+ - input  clk
+ - output ready
+
+## Control state machine
+
+- The FSM returns to IDLE 66 cycles after the accepted command.
+
+## Design freedom
+
+- Iterative single-cycle round: the cycle count is 66 per block, low area.
+- Unrolled round: the cycle count drops to between 1 and 64, larger area.
+"""
+    _, f = run(tmp_path, spec)
+    assert 'unconstrained-value-contradiction' not in codes(f)
+
+
+# NEGATIVE 5 (citation): a document QUOTING another document's disclaimer by
+# `name:line` is reporting it, not declaring it. Measured: this was the one and
+# only false positive over the published corpus — a campaign report that quoted
+# the very L2 bullet this rule exists to catch.
+def test_quoted_disclaimer_with_line_citation_no_fire(tmp_path):
+    spec = """\
+ - input  clk
+ - output ready
+
+Post-mortem: the counter settled in 12 cycles from reset with no mismatch.
+
+| `pipelining` | `FREE` | `L2_architecture:89` — "the latency cycle count is not specified" |
+"""
+    _, f = run(tmp_path, spec)
+    assert 'unconstrained-value-contradiction' not in codes(f)
+
+
+# The rule is language-shaped, not chip-shaped: the published corpus writes its
+# disclaimer lists in Chinese, and the same document states the value in English.
+def test_unconstrained_value_contradiction_zh_disclaimer(tmp_path):
+    spec = """\
+ - input  clk
+ - output ready
+
+- The FSM transitions from BUSY to IDLE 66 cycles after the accepted command.
+
+## 不在 L2 約束的事
+
+- ❌ 不指定 W memory 是 shift register / RAM
+- ❌ 不指定 latency cycle 數
+"""
+    _, f = run(tmp_path, spec)
+    assert 'unconstrained-value-contradiction' in codes(f)
+
+
+# NEGATIVE 6 (unit named, not counted): a disclaimer that MENTIONS a unit noun
+# without declaring HOW MANY ("reserved bit behaviour is not specified") does not
+# put every bit-count in the document in conflict. This is the mutation that
+# proves the join key is a COUNTED quantity, not any unit word: it was measured as
+# a false positive on a real register-map document before the count marker was
+# required.
+def test_unit_mentioned_but_not_counted_no_fire(tmp_path):
+    spec = """\
+ - input  clk
+ - output ready
+
+- The digest register file holds 256 bits.
+
+## Not constrained by this layer
+
+- Reserved bit behaviour is not specified (reads may return 0 or a fixed value).
+"""
+    _, f = run(tmp_path, spec)
+    assert 'unconstrained-value-contradiction' not in codes(f)
+
+
+# NEGATIVE 7 (the disclaimer's own parenthetical): a non-constraint clause is
+# allowed to explain itself with a number — "the latency cycle count is not
+# specified (bit-serial is inherently 32 cycles per 32-bit operation)". The clause
+# does not contradict itself, and a rule that read its own disclaimer back as a
+# binding statement would fire on every self-explaining exclusion in the corpus.
+def test_number_inside_the_disclaimer_itself_no_fire(tmp_path):
+    spec = """\
+ - input  clk
+ - output ready
+
+- The core is bit-serial and reports completion through ready.
+
+## Not constrained by this layer
+
+- The latency cycle count is not specified (bit-serial is inherently
+  32 cycles per 32-bit operation, so no separate figure is needed).
+"""
+    _, f = run(tmp_path, spec)
+    assert 'unconstrained-value-contradiction' not in codes(f)
