@@ -25,6 +25,7 @@ The two tests the change may not land without:
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -55,6 +56,16 @@ _LAND = _ROOT / "tools" / "gatekeeper-land.sh"
 # The scheduler, by name. Extracted rather than duplicated: a copy of these
 # bodies in a test would keep passing after the original stopped matching it.
 _SCHEDULER = (
+    # `gk_cleanup` CALLS this, twice, and bash resolves a function name when the
+    # call runs -- so leaving it out did not make the harness smaller, it made
+    # the harness's own EXIT trap answer `gk_subject_release: command not found`
+    # twice on every single run (vibe-ic#2095). The script itself is asserted
+    # against exactly this shape by
+    # `test_every_function_the_exit_trap_calls_is_defined_before_the_trap`; the
+    # harness that drives the script was carrying the defect the script is
+    # forbidden to have. Listed BEFORE `gk_cleanup`, mirroring the hoist in
+    # `tools/gatekeeper-land.sh`.
+    "gk_subject_release",
     "gk_cleanup",
     "lane_write",
     "lane_reported",
@@ -229,22 +240,36 @@ echo "FAILED=$FAILED"
 """
 
 
-def _harness(scheduler: str, work: Path, body: str = _DRIVER) -> str:
+def _harness(scheduler: str, body: str = _DRIVER) -> str:
+    # No work directory is interpolated into the text: the script reads `$WORK`
+    # from the environment `_run` builds, so a path never has to survive being
+    # pasted into shell source. The parameter this used to take was never read
+    # (vibe-ic#2095).
     return _HARNESS.replace("__SCHEDULER__", scheduler) + body
 
 
-# 60 s AND NOT MORE, and the number is not free. `ci_harness_timeout_ceiling_check`
-# derives a per-call ceiling from the harness bound the workflow declares --
-# `harness / CEILING_DIVISOR` -- and on this tree that is 60. Four sites below
-# used to pass `timeout=120`; every one of them was flagged, and correctly: the
-# harness kills the whole file before a 120 s inner bound can fire, so the larger
-# number was a bound that could never be reached, read by the next author as a
-# real allowance. The stubs these drive sleep 6 s and 3 s, so 60 is still 6x the
-# work; raising it again is a change to the harness bound, not to this line.
+# NO WALL-CLOCK BOUND HERE, AND NOT BY OVERSIGHT (vibe-ic#2095).
+#
+# This helper used to declare `timeout: int = 60`, defended by eight lines
+# justifying the NUMBER against `ci_harness_timeout_ceiling_check`. The number
+# was never the problem: `_pr.run` has no `timeout` parameter at all -- it is
+# this repo's replacement for `subprocess.run(..., timeout=N)` and its own
+# conversion recipe is "delete the `timeout=`" -- so the declaration reached
+# nothing. MEASURED before it was removed: `timeout=1` handed to this helper
+# over stages that sleep 6 s returned rc 0 after 6.2 s. A parameter shaped like
+# a bound that bounds nothing is worse than no parameter, because the next
+# author budgets against it and the reviewer reads it as a guarantee.
+#
+# What supervises these runs instead is `_pr.run`'s forward-progress watch: a
+# harness whose stages have gone silent AND idle across `stall_looks`
+# consecutive looks raises `Stalled`, which is a finding about the child rather
+# than a statement about this host. Do not put a clock back. If this file ever
+# needs a longer allowance under CI, that is a change to the harness bound the
+# workflow declares, not to this call.
 def _run(scheduler: str, work: Path, env: dict[str, str], *,
-         body: str = _DRIVER, timeout: int = 60) -> subprocess.CompletedProcess:
+         body: str = _DRIVER) -> subprocess.CompletedProcess:
     script = work / "harness.sh"
-    script.write_text(_harness(scheduler, work, body), encoding="utf-8")
+    script.write_text(_harness(scheduler, body), encoding="utf-8")
     programs = work / "programs"
     programs.mkdir(exist_ok=True)
     hygiene = work / "tools" / "ci"
@@ -522,7 +547,7 @@ echo "PIDS=$LANE_LIVE_PIDS"
 """
     proc = _run(scheduler, work, {"LANE_WIDTH": "4", "H_SEC": "60",
                                   "T_SEC": "60", "C_SEC": "60", "A_SEC": "60"},
-                body=body, timeout=60)
+                body=body)
     pids = [p for p in re.search(r"PIDS=(.*)", proc.stdout).group(1).split()]
     assert pids, proc.stdout
     time.sleep(0.5)
@@ -849,6 +874,138 @@ def _shell_code_only(body: str) -> str:
             cut = re.search(r"\s#", line[cut.start() + 1:])
         out.append(line)
     return "\n".join(out)
+
+
+def test_this_harness_declares_no_parameter_it_does_not_consume():
+    """A parameter this file declares and never reads is a bound nobody honours.
+
+    vibe-ic#2095. `_run` carried `timeout: int = 60` and passed it nowhere:
+    `_pr.run` has no `timeout` parameter, because it is the repo's replacement
+    for `subprocess.run(..., timeout=N)` and supervises by forward progress
+    instead. The declaration was defended by eight lines arguing the NUMBER,
+    which is exactly how a dead bound survives review -- the argument is about
+    60 versus 120 and nobody asks whether either reaches a call. Handing this
+    helper `timeout=1` over stages that sleep 6 s returned rc 0 after 6.2 s.
+
+    `_harness` carried the same defect in a second spelling: a `work: Path` it
+    never read, while the script it builds gets `$WORK` from the environment.
+    Both were found by this scan, not by reading, which is the point of having
+    it: the class is invisible at the call site, where the argument is passed
+    and looks consumed.
+
+    The assertion is the GENERAL invariant over THIS file: every declared
+    parameter is named somewhere in its own body. If a future test wants a
+    fixture purely for its side effect, request it with
+    `@pytest.mark.usefixtures(...)` rather than as an unread parameter -- that
+    spelling says "for the side effect" out loud, which an unread name does not.
+    """
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    dead = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        args = node.args
+        declared = [a.arg for a in
+                    (args.posonlyargs + args.args + args.kwonlyargs)]
+        read = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+        dead += [f"{node.name}({name}) at line {node.lineno}"
+                 for name in declared if name not in read]
+    # The scan is not supposed to be inert: this file must actually declare
+    # parameters, or a rename could empty the population and read as clean.
+    total = sum(len(n.args.args) for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef))
+    assert total > 20, f"only {total} parameters scanned -- is this file parsed?"
+    assert not dead, (
+        "these parameters are declared and never read in their own body, so "
+        "whatever they look like they promise, they deliver nothing: "
+        + ", ".join(dead))
+
+
+#: A single-quoted or double-quoted run, so prose inside a shell STRING is not
+#: read as a call. `lane_resolve` writes "…did not reach its own report…" into
+#: its NORECORD message, and a scan that kept it would demand a `report`
+#: member of `_SCHEDULER` that nothing calls.
+_SHELL_STRING = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", re.DOTALL)
+
+
+def _shell_names(body: str) -> set[str]:
+    """Every bare word in `body` that could name a function.
+
+    ARGUMENT POSITION COUNTS AS MUCH AS COMMAND POSITION, and that is not
+    caution — it is the only way to see the lanes at all. `lane_run_window`
+    names them as arguments (`lane_launch corpus lane_corpus`), so a scan that
+    read only the first word of each command would find no lane body anywhere
+    and report a clean closure over a scheduler missing all four.
+    """
+    code = _SHELL_STRING.sub(" ", _shell_code_only(body))
+    return set(re.findall(r"(?<![\w-])([A-Za-z_][A-Za-z0-9_]*)(?![\w-])", code))
+
+
+def test_the_scheduler_carries_every_function_its_bodies_call(land_text):
+    """`_SCHEDULER` is a closure, not a list — a callee left out is not defined.
+
+    vibe-ic#2095. `gk_cleanup` was extracted and `gk_subject_release`, which it
+    calls twice, was not. Bash resolves a function name when the call RUNS, so
+    the harness's own EXIT trap answered `gk_subject_release: command not
+    found` twice on every run — measured, exactly two lines. Nothing failed,
+    which is the whole problem: the missing member was the one that removes the
+    linked-worktree REGISTRATIONS the real script mints, so what the harness
+    was silently not exercising was a cleanup that partially fails, which is
+    how a leaked subject stays leaked.
+
+    `tools/gatekeeper-land.sh` is already forbidden this exact shape by
+    `test_every_function_the_exit_trap_calls_is_defined_before_the_trap`. This
+    is the same invariant applied to the HARNESS that drives the script, which
+    is where it was actually broken.
+
+    A name is satisfied by membership in `_SCHEDULER` or by a stub `_HARNESS`
+    defines — those two are the only ways a function reaches the generated
+    script.
+    """
+    defined = set(re.findall(
+        r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{", land_text, re.MULTILINE))
+    assert "gk_cleanup" in defined, sorted(defined)
+    stubbed = set(re.findall(
+        r"^([A-Za-z_][A-Za-z0-9_]*)\(\)\s*\{", _HARNESS, re.MULTILINE))
+    supplied = set(_SCHEDULER) | stubbed
+
+    missing: dict[str, list[str]] = {}
+    for name in _SCHEDULER:
+        for callee in sorted(_shell_names(_extract(name, land_text)) & defined):
+            if callee != name and callee not in supplied:
+                missing.setdefault(callee, []).append(name)
+    # Not inert: the scan must actually be resolving names across the extracted
+    # bodies, or an `_extract` that started returning "" would read as clean.
+    seen = set().union(*(_shell_names(_extract(n, land_text)) for n in _SCHEDULER))
+    assert len(seen & defined) >= len(_SCHEDULER) // 2, sorted(seen & defined)
+    assert not missing, (
+        "these functions `tools/gatekeeper-land.sh` defines are CALLED by an "
+        "extracted scheduler body but are neither extracted nor stubbed, so "
+        "the generated harness answers `command not found` when the call runs: "
+        + ", ".join(f"{callee}() <- {', '.join(callers)}"
+                    for callee, callers in sorted(missing.items())))
+
+
+def test_the_harness_exit_trap_finds_everything_it_calls(scheduler, work):
+    """The runtime half of the closure, because the static half is a regex.
+
+    `_shell_names` can be wrong in either direction; bash cannot. This runs the
+    generated harness and reads what its own EXIT trap said. On the tree that
+    omitted `gk_subject_release` this printed two `command not found` lines and
+    the run still exited 0 — a cleanup that partially fails, reported as a
+    clean exit.
+    """
+    proc = _run(scheduler, work, {"LANE_WIDTH": "4"})
+    assert proc.returncode == 0, proc.stdout
+    # The trap fires at EXIT, after the driver's last line, and `_run` merges
+    # stderr into stdout — so if it complained, it is in here.
+    assert "FAILED=0" in proc.stdout, proc.stdout
+    complaints = [line for line in proc.stdout.splitlines()
+                  if "command not found" in line]
+    assert not complaints, (
+        "the harness's EXIT trap called something the generated script never "
+        "defines — add it to `_SCHEDULER` or stub it in `_HARNESS`: "
+        + "; ".join(complaints))
 
 
 def test_every_function_the_exit_trap_calls_is_defined_before_the_trap(
