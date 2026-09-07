@@ -44,6 +44,38 @@ path; the Step-4 gate, `coverage_closure` and `fpga_verification_audit`
 all read it. Nothing about the checker's standard changed — it still
 refuses anything that is not a real tool-generated measurement.
 
+ONE NAMESPACE PER DOCUMENT (#2180)
+==================================
+This report is composed on the host, stored on the host and read on the host,
+so every path in it is a HOST path. Most of them are that by construction:
+`coverage_dat`, `testbench` and `rtl_sources` are composed here from inputs
+this program was handed.
+
+`per_file`'s keys — and therefore `scope_files`, which is derived from them —
+are the ONLY values that come from somewhere else: they are the source files
+VERILATOR named, in the namespace Verilator ran in. When the flow dispatches
+the instrumented build into the pinned image, that namespace is the
+CONTAINER's, and writing it verbatim produced one document carrying two
+namespaces with nothing in it saying which field was which:
+
+    rtl_sources  ["<project>/phase2/stage1/rtl/<top>.v"]              host
+    scope_files  ["/foss/designs/<project>/phase2/stage1/rtl/<top>.v"] container
+
+Same bytes, two spellings, three keys apart. `_cov_project_root` below reads
+both keys to locate the project, and `project_outputs_in_tree_check` blocks on
+the container half — correctly, because on the machine the report is read on
+that file does not exist.
+
+So tool-reported paths are normalised at INGEST, in `parse_coverage_dat`,
+before anything persists them, using the container's own mount table through
+`_designs_root.host_spelling` — the module that already owns the forward
+translation, so there is no second answer to a question the repo has answered
+once. `path_namespace` in the payload states what happened, including the two
+cases that are NOT a translation: a path with no host spelling at all (an
+image-internal source, a PDK cell) is left in the tool's namespace and NAMED,
+and a run that declared no container is recorded as not examined rather than
+as a document full of host paths.
+
 SCOPE — the DESIGN, not the testbench
 =====================================
 A testbench is driven top to bottom by construction, so folding its points
@@ -118,7 +150,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 # ----- measurement --------------------------------------------------
@@ -400,11 +432,113 @@ def _file_v4(blob: str) -> Optional[str]:
     return parts[1] if len(parts) > 1 else None
 
 
-def parse_coverage_dat(path: str) -> Dict[str, Any]:
+#: The namespace every path in this program's report is written in. Stated as
+#: a value so the payload can carry it and a reader never has to infer it.
+REPORT_PATH_NAMESPACE = "host"
+
+
+def host_path_namespace(
+        paths: Sequence[str],
+        mounts: Optional[Sequence[Tuple[Path, str]]],
+) -> Tuple[Dict[str, str], Dict[str, Any]]:
+    """Map tool-reported paths to the HOST spelling, plus what was done.
+
+    #2180. Verilator answers in the namespace it ran in. When the flow
+    dispatches it into the pinned image, every source it names is a CONTAINER
+    path, and writing that verbatim into a report composed on the host makes
+    one document carry two namespaces with nothing in it saying which field is
+    which. MEASURED on this repo's own corpus: `scope_files` held
+    `/foss/designs/<project>/…` while `rtl_sources`, three keys away, held the
+    host path to the SAME bytes.
+
+    The rule is not "rewrite anything that looks like a container path". It is
+    the container's own mount table, read through the ONE module that owns
+    host<->container translation (`_designs_root.host_spelling`), so this
+    program does not maintain a second answer to a question already answered.
+
+    Returns ``(mapping, disclosure)``. A path with no host spelling is NOT in
+    the mapping and IS in ``disclosure['untranslated']``: keeping it in the
+    tool's namespace is the honest outcome for a file that has none here (an
+    image-internal source, a PDK cell), and naming it is what stops that from
+    reading like a host path.
+    """
+    mapping: Dict[str, str] = {}
+    counts = {"already_host": 0, "translated_from_container": 0}
+    untranslated: List[str] = []
+    collisions: List[List[str]] = []
+    if mounts is not None:
+        import _designs_root as _dr                    # noqa: PLC0415
+        taken: Dict[str, str] = {}
+        basis_of: Dict[str, str] = {}
+        for src in paths:
+            tr = _dr.host_spelling(src, mounts=mounts)
+            if tr.path is None:
+                untranslated.append(src)
+                continue
+            if tr.path in taken and taken[tr.path] != src:
+                # Two tool-reported paths that would become ONE host path. A
+                # silent merge would delete a measured file's row, so both are
+                # left in the tool's namespace and the collision is named.
+                # The withdrawn one's basis is decremented with it: a
+                # disclosure whose counts and `untranslated` do not add up to
+                # the paths examined is the same defect this program is
+                # fixing, one level down.
+                first = taken.pop(tr.path)
+                collisions.append(sorted([first, src]))
+                mapping.pop(first, None)
+                counts[basis_of[first]] -= 1
+                untranslated.extend([first, src])
+                continue
+            taken[tr.path] = src
+            mapping[src] = tr.path
+            basis_of[src] = tr.basis
+            counts[tr.basis] = counts.get(tr.basis, 0) + 1
+    disclosure: Dict[str, Any] = {
+        "reported_in": REPORT_PATH_NAMESPACE,
+        "examined": mounts is not None,
+        "mounts_consulted": len(list(mounts or ())),
+        **counts,
+        "untranslated": sorted(set(untranslated)),
+    }
+    if mounts is None:
+        # NOT "examined and they were all host paths". No caller declared that
+        # the tool ran elsewhere, so nothing was compared against anything and
+        # the counts above stay at zero rather than being filled with a
+        # default. `None` and `[]` are kept apart on purpose: this branch is
+        # "the tool ran here", the one below is "it ran over there and I could
+        # not read the mount table", and answering the second with the first
+        # is how an untranslatable path comes to render as a host path.
+        disclosure["note"] = (
+            "no container was declared, so the tool-reported paths were "
+            "neither examined nor rewritten; the tool ran on this filesystem "
+            "and its paths are this machine's")
+    elif not mounts:
+        disclosure["note"] = (
+            "a container was declared and its mount table could not be read, "
+            "so no path could be translated; every one below is left in the "
+            "TOOL's namespace and named rather than presented as a host path")
+    if collisions:
+        disclosure["collisions"] = collisions
+    return mapping, disclosure
+
+
+def parse_coverage_dat(
+        path: str,
+        *,
+        mounts: Optional[Sequence[Tuple[Path, str]]] = None,
+) -> Dict[str, Any]:
     """Parse Verilator coverage.dat into per-category counts + per-file
     breakdown. Auto-detects 4.x vs 5.x record format on the first
     classifiable record so a single coverage.dat from either version
-    works without a flag."""
+    works without a flag.
+
+    `mounts` is the container's ``(host source, container destination)`` bind
+    mounts when the instrumented run was dispatched into a container. Given
+    them, the per-file keys — the only values in this payload that come from
+    the TOOL rather than being composed here — are normalised to the host
+    spelling before anything persists them (#2180). Omit them and nothing is
+    rewritten, which is correct for a run whose Verilator executed here.
+    """
     cats = {"line": [0, 0], "toggle": [0, 0], "branch": [0, 0], "other": [0, 0]}
     per_file: Dict[str, Dict[str, List[int]]] = {}
     classifier = None  # set on first successful classification
@@ -444,6 +578,8 @@ def parse_coverage_dat(path: str) -> Dict[str, Any]:
                     if hits > 0:
                         pf[head][0] += 1
 
+    host_of, disclosure = host_path_namespace(list(per_file), mounts)
+
     def pct(pair: List[int]) -> float:
         return round(100.0 * pair[0] / pair[1], 2) if pair[1] > 0 else 0.0
 
@@ -454,10 +590,13 @@ def parse_coverage_dat(path: str) -> Dict[str, Any]:
             "branch": {"covered": cats["branch"][0], "total": cats["branch"][1], "pct": pct(cats["branch"])},
         },
         "per_file": {
-            src: {k: {"covered": v[0], "total": v[1], "pct": pct(v)} for k, v in pf.items()}
+            host_of.get(src, src):
+                {k: {"covered": v[0], "total": v[1], "pct": pct(v)}
+                 for k, v in pf.items()}
             for src, pf in per_file.items()
         },
         "format_detected": classifier or "unknown",
+        "path_namespace": disclosure,
     }
 
 
@@ -588,9 +727,27 @@ def classify_coverage_artefact(path: Path) -> Tuple[str, str, Dict[str, Any]]:
 # ----- CLI ----------------------------------------------------------
 
 
+def _mounts_for(container: str) -> Optional[List[Tuple[Path, str]]]:
+    """The named container's bind mounts, or None when none was named.
+
+    None and `[]` are different answers and are kept apart: None means the
+    caller did not say the tool ran elsewhere, `[]` means it did and the mount
+    table could not be read. The second is disclosed by
+    `host_path_namespace` as `mounts_consulted: 0` with every path left in the
+    tool's namespace, rather than silently treated as a local run.
+    """
+    if not container:
+        return None
+    try:
+        import _designs_root as _dr                    # noqa: PLC0415
+        return list(_dr.container_mounts(container))
+    except Exception:                                  # noqa: BLE001
+        return []
+
+
 def cmd_measure(args: argparse.Namespace) -> int:
     dat = verilate_and_run(args.rtl_dir, args.top, args.main, args.build_dir)
-    cov = parse_coverage_dat(dat)
+    cov = parse_coverage_dat(dat, mounts=_mounts_for(getattr(args, "container", "")))
     out = {
         "tool": "verilator",
         "coverage_dat": dat,
@@ -731,7 +888,8 @@ def cmd_measure_tb(args: argparse.Namespace) -> int:
     run_dir = args.run_dir or build_dir
     dat = verilate_tb_and_run(rtl, tb, build_dir, run_dir,
                               build_jobs=args.build_jobs)
-    cov = parse_coverage_dat(dat)
+    cov = parse_coverage_dat(dat,
+                             mounts=_mounts_for(getattr(args, "container", "")))
     scope = args.scope_file or rtl
     scoped = scope_totals(cov, scope)
     if scoped is None:
@@ -749,6 +907,7 @@ def cmd_measure_tb(args: argparse.Namespace) -> int:
         "scope_files": scoped["scope_files"],
         "per_file": cov["per_file"],
         "format_detected": cov["format_detected"],
+        "path_namespace": cov["path_namespace"],
     }
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(out, indent=2))
@@ -1171,6 +1330,7 @@ def build_parser() -> argparse.ArgumentParser:
     m.add_argument("--min-line", type=float, default=70.0)
     m.add_argument("--min-toggle", type=float, default=60.0)
     m.add_argument("--min-branch", type=float, default=70.0)
+    m.add_argument("--container", default="", help='name of the container the instrumented run was dispatched into. Given, its bind mounts translate the paths VERILATOR reports back to the host spelling this report is written in (#2180). Omit for a run whose Verilator executed here — nothing is then rewritten and nothing is claimed.')
     m.set_defaults(func=cmd_measure)
 
     mt = sub.add_parser(
@@ -1192,6 +1352,7 @@ def build_parser() -> argparse.ArgumentParser:
     mt.add_argument("--min-line", type=float, default=70.0)
     mt.add_argument("--min-toggle", type=float, default=60.0)
     mt.add_argument("--min-branch", type=float, default=70.0)
+    mt.add_argument("--container", default="", help='name of the container the instrumented run was dispatched into. Given, its bind mounts translate the paths VERILATOR reports back to the host spelling this report is written in (#2180). Omit for a run whose Verilator executed here — nothing is then rewritten and nothing is claimed.')
     mt.set_defaults(func=cmd_measure_tb)
 
     c = sub.add_parser("check", help="Verify an existing coverage measurement")

@@ -316,6 +316,96 @@ def translate(host_path,
         f"no bind mount covers {hp}. Mounts seen:\n{listing}")
 
 
+# ---- the INVERSE question: a path a tool reported, spelled for the host -----
+#
+# #2180. `translate()` above answers "where will the container see this file?".
+# Every caller that dispatches a tool into the container needs the OTHER half
+# as well, because the tool ANSWERS in its own namespace: verilator names the
+# sources it instrumented, OpenROAD names the LEF it read, klayout echoes the
+# argv it ran. When that answer is written into a persistent report — a file
+# composed on the host, stored on the host, and read on the host — the document
+# ends up carrying two namespaces at once, and nothing in it says which field
+# is in which.
+#
+# MEASURED on 8HD-9 over 11890 published run roots (lane cz2180): FOUR report
+# files carry a container-namespace absolute path BESIDE a host-spelled one in
+# the same document — `reports/phase2/coverage/coverage_verilator.json`
+# (`scope_files[]` and the `per_file` keys), `reports/phase3/die_finishing.json`
+# (`seal_ring.argv[]`), `reports/phase3/pnr/macro_obs_load_parity.json`
+# (`tech_lef_named_by_tool_log[]`) and `reports/orchestrator/phase3_one_shot.json`
+# (`steps[].detail`). #2158 repaired a fifth site by hand and #2180 was the
+# second found by a run rather than by a search; two producers of one condition
+# is a shared-layer question, so the answer lives here, next to the forward
+# translation it inverts, and not in a fifth private copy.
+#
+# THREE OUTCOMES, NEVER TWO. "I translated it", "it was already a host path"
+# and "no mount covers it" are three different facts, and collapsing the third
+# into either of the others is exactly how a container path came to render as a
+# host path. `host_spelling` returns the outcome in `Translation.basis`; a
+# caller that must not guess checks it.
+#: The path was already in the host namespace — a mount SOURCE covers it, so
+#: the tool ran here (or on a path the host and the container spell alike).
+NS_ALREADY_HOST = "already_host"
+#: A mount DESTINATION covers it; the host spelling is the mount's Source side.
+NS_TRANSLATED = "translated_from_container"
+#: Neither side covers it. NOT an error and NOT a host path: a PDK root, a
+#: toolchain root or an image-internal file legitimately has no host spelling,
+#: and a caller is told so rather than handed the input back as if it did.
+NS_NO_MOUNT = "no_mount_covers_it"
+
+
+def host_spelling(path,
+                  *,
+                  mounts: Optional[Sequence[Tuple[Path, str]]] = None,
+                  ) -> Translation:
+    """The HOST spelling of `path`, as reported by a tool inside the container.
+
+    The exact inverse of :func:`translate`, and deliberately the same shape:
+    longest matching prefix wins (the rule the kernel applies to the visible
+    namespace), and the result carries HOW it was reached.
+
+    The SOURCE side is consulted first. A path already under a mount source is
+    already a host path and is returned unchanged under
+    :data:`NS_ALREADY_HOST` — without that arm a run whose tool executed on the
+    host would be reported as untranslatable, which is a false alarm about a
+    document that was never mixed.
+
+    With no mount covering either side the result's ``path`` is None, never the
+    input: "I could not translate it" and "it is a host path" must not reach a
+    reader as the same answer.
+    """
+    s = str(path)
+    if not s.startswith("/"):
+        return Translation(None, NS_NO_MOUNT,
+                           f"{s!r} is not an absolute path")
+    pairs = list(mounts or ())
+
+    def _covers(prefix: str) -> bool:
+        pr = prefix.rstrip("/")
+        return bool(pr) and (s == pr or s.startswith(pr + "/"))
+
+    best_src = max((str(src) for src, _dst in pairs if _covers(str(src))),
+                   key=len, default=None)
+    best_dst = max((dst for _src, dst in pairs if _covers(dst)),
+                   key=len, default=None)
+    # A mount whose source and destination are the same path satisfies both
+    # arms and is a no-op either way; longest-prefix keeps the more specific
+    # mount, and ALREADY_HOST wins a tie because it changes nothing.
+    if best_src is not None and (best_dst is None
+                                 or len(best_src.rstrip("/"))
+                                 >= len(best_dst.rstrip("/"))):
+        return Translation(s, NS_ALREADY_HOST)
+    if best_dst is not None:
+        src = max((str(x) for x, d in pairs if d == best_dst), key=len)
+        tail = s[len(best_dst.rstrip("/")):]
+        return Translation(src.rstrip("/") + tail, NS_TRANSLATED)
+    listing = ("\n".join(f"    {s_} -> {d}" for s_, d in pairs)
+               or "    (none reported)")
+    return Translation(
+        None, NS_NO_MOUNT,
+        f"no bind mount covers {s} on either side. Mounts seen:\n{listing}")
+
+
 def help_text(container: str = DEFAULT_CONTAINER) -> str:
     return (
         "Cannot tell which host directory the EDA container can see. "

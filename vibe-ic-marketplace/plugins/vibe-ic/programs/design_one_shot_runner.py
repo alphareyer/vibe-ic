@@ -3990,6 +3990,108 @@ def _phase1_remap_stage_value(
     return value
 
 
+#: Files the staged transaction may rewrite on publish. A staged artefact is
+#: TEXT it authored; a GDS, a database or a compiled object is not something a
+#: path remap has any business touching, and restricting by suffix keeps the
+#: rewrite from ever reaching one. Deliberately a list of what IS eligible, not
+#: of what is excluded: a new binary artefact type must not become eligible by
+#: nobody remembering to exclude it.
+_STAGE_PUBLISH_TEXT_SUFFIXES = frozenset({
+    ".json", ".md", ".txt", ".yaml", ".yml", ".log", ".csv", ".jsonl",
+})
+
+#: A staged file is not rewritten past this size. The artefacts in scope are
+#: reports; a multi-megabyte one is not a report and reading it into memory to
+#: search for a prefix is not a cost this transaction should pay.
+_STAGE_PUBLISH_REWRITE_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _phase1_remap_stage_tree(stage_project: Path, project: Path,
+                             baseline: Dict[str, _Phase1TreeEntry],
+                             ) -> List[str]:
+    """Rewrite the STAGE path out of the files this transaction will publish.
+
+    #2158 / #2183 — THE HALF THE FIRST REPAIR DID NOT COVER, and the reason
+    both issues have one root.
+
+    `step_rtl_gen` snapshots the project into `<TMPDIR>/vibeic-rtl-step-XXXX/
+    <name>`, runs every generator against THAT root, and commits the delta back.
+    #2158 made `_phase1_remap_stage_value` boundary-correct and applied it to
+    `result.detail`, `result.output_files` and `result.extras`. Those three are
+    the StepResult. They are not the FILES the transaction publishes, and no
+    remap ever reached those — so a generator that records its own project root
+    inside an artefact writes the scratch directory, and the commit copies that
+    string into the canonical tree, where it outlives the directory it names.
+
+    MEASURED on this base by driving the real runner (lane cz2180): both
+    `phase2/stage1/declaration_contract.json` (`spec_declaration_emit.
+    stage_contract`, `"project": str(project)`) and
+    `phase2/stage1/lessons_scoring_record.json` (`lesson_consumption_check`,
+    `rec["project"] = str(project)`) came out of a clean run carrying
+    `/tmp/vibeic-rtl-step-1jyxxaff/demo_proj`, a directory that does not exist
+    by the time anything reads them.
+
+    WHY A TREE REWRITE RATHER THAN A PARAMETER PER WRITER. Threading a
+    "record it as this instead" argument down to each writer fixes the writers
+    that exist today and silently omits the next one; there are three call
+    sites into `_stage_author_knowledge_digests` alone. The stage IS the
+    project, at an address that expires, so the substitution is correct for
+    every file uniformly — and doing it once, here, is what makes this a repair
+    of the class rather than a third patch.
+
+    NARROW BY CONSTRUCTION, in four ways, because a blind rewrite inside a
+    held transaction is the dangerous version of this idea:
+      * only files whose content this transaction CHANGED (compared against
+        `baseline`) — an untouched file is published byte-identical;
+      * only the suffixes in `_STAGE_PUBLISH_TEXT_SUFFIXES`;
+      * only files that decode as UTF-8 and actually CONTAIN the stage path;
+      * the same `_phase1_remap_stage_text` #2158 wrote, so the PATH-BOUNDARY
+        rule is stated once and cannot drift between the StepResult and the
+        files beside it.
+
+    Runs BEFORE the publish manifest is taken, so the manifest describes the
+    bytes that are actually committed. Returns the project-relative names it
+    rewrote, for the caller to disclose.
+    """
+    stage_text, project_text = str(stage_project), str(project)
+    rewritten: List[str] = []
+    for path in sorted(stage_project.rglob("*")):
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.suffix not in _STAGE_PUBLISH_TEXT_SUFFIXES:
+                continue
+            rel = path.relative_to(stage_project).as_posix()
+            entry = baseline.get(rel)
+            stat_info = path.stat()
+            if stat_info.st_size > _STAGE_PUBLISH_REWRITE_MAX_BYTES:
+                continue
+            raw = path.read_bytes()
+            if entry is not None and entry.kind == "file" and entry.digest:
+                # Unchanged content is published as it was read. Compared by
+                # the transaction's OWN manifest digest — the same SHA-256
+                # `_phase1_tree_manifest_fd` records — never by mtime.
+                if hashlib.sha256(raw).hexdigest() == entry.digest:
+                    continue
+            if stage_text.encode("utf-8") not in raw:
+                continue
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            fixed = _phase1_remap_stage_text(text, stage_text, project_text)
+            if fixed == text:
+                continue
+            path.write_text(fixed, encoding="utf-8")
+            rewritten.append(rel)
+        except OSError:
+            # A file this transaction cannot read is left exactly as it is.
+            # "I could not open it" is not "I opened it and it needed nothing",
+            # and the caller is told which by the name never appearing here.
+            continue
+    return rewritten
+
+
 def _phase1_stamp_held_session(
         binding: _Phase1ProjectBinding, generator: str) -> None:
     """Finish deferred provenance through isolation + held-dirfd commit."""
@@ -6665,6 +6767,17 @@ def step_rtl_gen(project: Path, ic_class: str,
                 stage_project, ic_class, force_regen, t0, stage_binding,
                 snapshot_manifest=baseline)
             stage_binding.require_current()
+            # #2183 — THE FILES, not only the StepResult. Every generator above
+            # ran against `stage_project` and any of them may have recorded
+            # that root inside an artefact this transaction is about to
+            # publish. #2158 remapped `result.detail`/`output_files`/`extras`
+            # three lines below and nothing ever remapped the files, so the
+            # scratch directory reached the canonical tree and outlived itself.
+            # Runs BEFORE the publish manifest so `final` describes the bytes
+            # that are actually committed.
+            _stage_rewrites = _phase1_remap_stage_tree(
+                stage_project, project, baseline)
+            stage_binding.require_current()
             final = _phase1_tree_manifest_fd(
                 stage_binding.project_fd, project)
             # PASS and WAIVED branches intentionally publish deterministic RTL
@@ -6706,6 +6819,13 @@ def step_rtl_gen(project: Path, ic_class: str,
                     result.output_files, stage_project, project)
                 result.extras = _phase1_remap_stage_value(
                     result.extras, stage_project, project)
+                if _stage_rewrites:
+                    # Named, not counted: a reader of this run needs to know
+                    # WHICH published artefacts had the staging root rewritten
+                    # out of them, and a bare number cannot be checked.
+                    if not isinstance(result.extras, dict):
+                        result.extras = {}
+                    result.extras["stage_path_rewritten_in"] = _stage_rewrites
                 if session_claimed:
                     replacement_binding = binding.duplicate()
                 # TemporaryDirectory cleanup is deliberately completed while
@@ -19585,7 +19705,26 @@ def step_verilator_coverage(project: Path, top_name: str = "",
             [str(x) for x in rtl], str(tb), str(build_dir), str(build_dir),
             exec_fn=_verilator_stage_exec(container),
             build_jobs=_eda_thread_count())
-        cov = _vcm.parse_coverage_dat(dat)
+        # #2180 — VERILATOR ANSWERS IN THE NAMESPACE IT RAN IN. The exec above
+        # dispatches the build into `container`, so every source path in the
+        # coverage.dat it produced is a CONTAINER path, while `coverage_dat`,
+        # `testbench` and `rtl_sources` three lines below are composed here and
+        # are HOST paths. Written as they came, one report carried two
+        # namespaces and nothing in it said which field was which — and the
+        # container half named files that do not exist on the machine the
+        # report is read on, which `project_outputs_in_tree_check` blocks on,
+        # correctly. The mount table is handed to the parser so the tool's
+        # answer is normalised at INGEST, before anything persists it.
+        #
+        # None and [] are DIFFERENT answers here and are kept apart. None says
+        # "the tool ran on this filesystem, so there is nothing to translate";
+        # [] says "it ran in a container and the mount table could not be
+        # read", which leaves every reported path untranslatable and NAMED as
+        # such in the payload instead of passing for a host path.
+        _cov_mounts = (None if (not container or _local_exec_mode())
+                       else [(Path(_s), _d)
+                             for _s, _d in _container_mounts(container)])
+        cov = _vcm.parse_coverage_dat(dat, mounts=_cov_mounts)
         scoped = _vcm.scope_totals(cov, [str(x) for x in rtl])
     except SystemExit as exc:
         return StepResult("verilator_coverage", "SKIP", time.time() - t0,
@@ -19606,6 +19745,7 @@ def step_verilator_coverage(project: Path, top_name: str = "",
         "scope_files": scoped["scope_files"],
         "per_file": cov["per_file"],
         "format_detected": cov["format_detected"],
+        "path_namespace": cov["path_namespace"],
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _aa.write_text(out_path, json.dumps(payload, indent=2) + "\n")
