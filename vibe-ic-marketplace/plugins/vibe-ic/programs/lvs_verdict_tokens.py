@@ -405,6 +405,45 @@ _PIN_MATCH_FAIL_RE = re.compile(r"failed\s+pin\s+matching", re.I)
 # to a signal, two different net counts). Absence is the waivable setup
 # artifact; wrong correspondence never is.
 _PORT_MISMATCH_RE = re.compile(r"^.*\*\*Mismatch\*\*.*$", re.M)
+# vibe-ic#2195 — netgen's SUMMARY COUNT rows, which this module never read.
+# netgen prints, once per compared cell, the two sides' totals side by side:
+#
+#     Number of devices: 333                     |Number of devices: 333
+#     Number of nets: 365 **Mismatch**           |Number of nets: 367 **Mismatch**
+#
+# A difference between those two numbers is STRUCTURAL: the two netlists do not
+# contain the same number of things. `POWER_PIN_ONLY` is a claim about WHICH
+# nets differ — that the same set of nets is present on both sides and only the
+# power/tie ports are named differently or absent from the netlist — so a count
+# difference FALSIFIES that claim outright. It can never be a pin-naming
+# difference, and the benign bucket must refuse it.
+#
+# Read as NUMBERS, deliberately, not via netgen's `**Mismatch**` marker: the
+# marker is wording (a future netgen, or an older one, need not print it) while
+# the counts are the observable, per this module's own "decide on an observable
+# OUTCOME, use wording only to EXPLAIN" rule.
+#
+# The right-hand label is a BACKREFERENCE, so a `nets` row can only ever be
+# compared against a `nets` row. A design CAN in principle impersonate this
+# shape with an escaped identifier containing spaces (the class this module
+# documents for `Final result:`) — but only in the FAIL-SAFE direction: the
+# worst it can do is refuse its own waiver. A design can never name its way
+# INTO the benign class through this rule.
+_COUNT_ROW_RE = re.compile(
+    r"^[ \t]*Number\s+of\s+(nets|devices)\s*:\s*(\d+)[^|\n]*"
+    r"\|[ \t]*Number\s+of\s+\1\s*:\s*(\d+)", re.M | re.I)
+
+
+def _text_counts_disagree(blob: str) -> bool:
+    """True iff any of netgen's `Number of nets/devices:` row-pairs reports two
+    DIFFERENT totals for the two circuits.
+
+    Absence of a count row is NOT a disagreement — it is no answer at all, and
+    a report that never printed the totals is left exactly where the other
+    evidence puts it. Only a pair we could actually READ, whose two numbers
+    differ, refuses the benign class."""
+    return any(m.group(2) != m.group(3)
+               for m in _COUNT_ROW_RE.finditer(blob or ""))
 
 
 def _is_power_token(tok: str) -> bool:
@@ -435,6 +474,26 @@ def _e1_says_real_defect(obj: Dict[str, Any]) -> bool:
             v = g.get(side)
             if not isinstance(v, int) or v > 0:
                 return True
+    # vibe-ic#2195 — the E1 summary's TOTALS, which this function never read.
+    # `unmatched_nets` counts nets netgen could find NO counterpart for; two
+    # netlists can hold DIFFERENT numbers of nets while every net it looked at
+    # was paired (each to the wrong one — swapped rails are exactly that), and
+    # then every field above reads zero. The totals are the structural fact,
+    # and on the JSON path they are the ONLY place it is recorded: an E1 report
+    # carries no `**Mismatch**` text for a marker-based rule to find.
+    # Absent totals are NOT a defect — the fork need not emit that dimension
+    # (a shipped report with `devices` and no `nets` is in this repo's own
+    # test corpus) — but totals we can see and cannot read are, per this
+    # function's rule above: benign is earned from counts we actually read.
+    for grp in ("nets", "devices"):
+        if grp not in s:
+            continue
+        g = s.get(grp)
+        if not isinstance(g, dict):
+            return True
+        a, b = g.get("ckt1"), g.get("ckt2")
+        if not isinstance(a, int) or not isinstance(b, int) or a != b:
+            return True
     # D5 ranked property mismatches — present means real, ranked deltas exist.
     return bool(obj.get("property_mismatches") or s.get("property_error_cells"))
 
@@ -456,6 +515,10 @@ def mismatch_class(blob: str, json_report: JsonSource = None) -> str:
                                  A power row netgen flagged `**Mismatch**` is
                                  the opposite fact — a WRONG correspondence, not
                                  an absence — and is never this class (#2181).
+                                 REFUSED too when the two netlists' net/device
+                                 TOTALS disagree (#2195): that is a structural
+                                 difference, and this class is a claim about
+                                 WHICH nets differ, not how many there are.
     POSITIVE-EVIDENCE INVERSION (the demotion gate is CLOSED): `POWER_PIN_ONLY`
     is now REACHABLE ONLY by earning it — the E1 structured counts must show no
     real defect (when a report exists) AND the transcript must carry BOTH the
@@ -496,6 +559,20 @@ def mismatch_class(blob: str, json_report: JsonSource = None) -> str:
     # a waiver candidate. This check closes that: the benign bucket keeps its
     # documented meaning and cannot be reached by a defect netgen has named.
     if _PORT_MISMATCH_RE.search(blob):
+        return "SIGNAL_NET_MISMATCH"
+    # vibe-ic#2195 — netgen's own summary totals disagree. The two netlists do
+    # not contain the same number of nets (or devices), which is a STRUCTURAL
+    # difference and cannot be a pin-naming one. `POWER_PIN_ONLY` claims the
+    # only difference is WHICH power/tie ports are named; a count difference
+    # says the sets themselves are not the same size, so the claim is false and
+    # the benign bucket is refused. Measured on this host's 5025-report corpus:
+    # 818 reports carry a differing count pair and ALL 818 already classify
+    # MISMATCH; ZERO reports classified MATCH carry one, so this rule cannot
+    # fire on a clean compare. Of the 318 genuinely benign-shaped reports that
+    # print totals, 316 have totals that AGREE exactly — netgen counts the
+    # power nets on both sides, so the power-unaware-netlist artifact does NOT
+    # move these numbers and the benign class is not blinded.
+    if _text_counts_disagree(blob):
         return "SIGNAL_NET_MISMATCH"
     # POSITIVE evidence that this mismatch is the pin-correspondence failure at
     # all. Any OTHER failure — including one worded in tokens we do not know —
