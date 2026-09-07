@@ -348,6 +348,14 @@ _STOPPED_TAIL = (
 _PASS_TAIL = ("equiv_status: Found 9 $equiv cells in equiv:\n"
               "  Of those cells 9 are proven and 0 are unproven.\n"
               "  Equivalence successfully proven!\n")
+# A leg that finished its own rung and neither stopped nor completed the proof.
+# The ladder now runs ONE RUNG PER PROCESS (vibe-ic#2194), so `stop_after_rung`
+# has to name the leg that STOPS rather than every leg the run makes: without
+# this the stop tail rode on the FIRST leg, and the fixture would declare a run
+# stopped at a rung that leg had never reached. NO ASSERTION BELOW CHANGED —
+# only which invocation the stub declares stopped.
+_CONTINUE_TAIL = ("equiv_status: Found 9 $equiv cells in equiv:\n"
+                  "  Of those cells 5 are proven and 4 are unproven.\n")
 
 
 def _project(tmp_path):
@@ -391,10 +399,13 @@ def _install_fake_yosys(monkeypatch, scripts, *, stop_after_rung, tail,
                 rung = line.rsplit(":", 1)[1]
                 out.append(line[len("log "):])
                 if stop_after_rung is not None and rung == stop_after_rung:
-                    return _emit(out)
-        return _emit(out)
+                    return _emit(out, tail)
+        # THIS leg did not reach the rung the caller says the run stops at, so
+        # it did not stop. Only the leg that reaches it wears the caller's tail.
+        return _emit(out, _CONTINUE_TAIL if stop_after_rung is not None
+                     else tail)
 
-    def _emit(out):
+    def _emit(out, tail):
         text = "\n".join(out) + "\n" + tail
         if _live_box.get("path"):
             try:
@@ -461,10 +472,25 @@ def test_e2e_a_second_invocation_resumes_at_the_next_rung(monkeypatch,
     assert legs["carried"]["sha256"].startswith("sha256:"), legs
     assert legs["carried"]["through_rung"] == "equiv_simple_full", legs
     assert legs["this_invocation"]["sha256"].startswith("sha256:"), legs
-    # And a from-zero run says so, with one leg.
+    # And a from-zero run says so, with one evidence leg.
     assert first["proof_execution"]["path"] == "from-zero"
-    assert first["proof_execution"]["canonical_recipe_sha256"] == \
-        first["proof_execution"]["equivalence_script_sha256_executed"]
+    # THE REPAIR SPLIT THE EXECUTION (vibe-ic#2194). A from-zero run no longer
+    # runs the canonical ladder as ONE script — it runs it ONE RUNG PER
+    # PROCESS, so no single executed script equals the canonical recipe and the
+    # old `executed == canonical` equality cannot hold. The canonical recipe is
+    # still the IDENTITY (asserted unchanged above), and what replaces the
+    # equality is stronger rather than weaker: every leg's bytes are RECORDED,
+    # the legs are the canonical ladder's rungs IN ORDER, and none of them is
+    # missing.
+    assert first["lec_ladder"]["per_rung_processes"] is True
+    # `first` is the invocation the stub STOPPED after rung 0, so it made
+    # exactly ONE leg — the same rung its `rungs_recorded_this_run` names above.
+    assert [lg["rung"] for lg in first["lec_ladder"]["legs"]] == \
+        ["equiv_simple_full"], first["lec_ladder"]["legs"]
+    assert first["proof_execution"]["ladder_leg_script_sha256s"] == \
+        [lg["script_sha256"] for lg in first["lec_ladder"]["legs"]]
+    assert first["proof_execution"]["equivalence_script_sha256_executed"] == \
+        first["lec_ladder"]["legs"][0]["script_sha256"]
     assert [leg["leg"] for leg in first["proof_execution"]["evidence_legs"]] \
         == ["this_invocation"]
 

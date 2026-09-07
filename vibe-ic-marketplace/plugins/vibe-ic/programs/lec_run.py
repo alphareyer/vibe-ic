@@ -124,6 +124,11 @@ LEC_CHECKPOINT_SCHEMA_VERSION = "vibeic.lec.checkpoint.v1"
 #: legs it reached its verdict from. It is REPORT-ONLY: nothing here is hashed
 #: into a key, and nothing here can make a cache entry hit or miss.
 LEC_PROOF_EXECUTION_SCHEMA_VERSION = "vibeic.lec.proof-execution.v1"
+LEC_LADDER_SCHEMA_VERSION = "vibeic.lec.ladder.v1"
+#: `_ladder_stop` when the loop climbed every rung. Named, not spelled
+#: twice: it is also what tells the parser the closing `equiv_status` is
+#: the LADDER's and not some intermediate leg's.
+_LADDER_COMPLETE = "the ladder is complete"
 DEFAULT_CACHE_REL = "reports/lec_pass_cache"
 DEFAULT_CHECKPOINT_REL = "reports/lec_checkpoints"
 
@@ -508,6 +513,94 @@ def resume_status_counts(raw: str) -> Optional[Dict[str, int]]:
     if induct is not None and induct.start() < first.start():
         return None
     return {"proved": int(first.group(1)), "unproven": int(first.group(2))}
+
+
+def final_status_counts(raw: str) -> Optional[Dict[str, int]]:
+    """proved/unproven as the LAST `equiv_status` in `raw` reported them.
+
+    The LAST, for the same reason `parse_equiv_output` reads the last one: a
+    recipe that prints `equiv_status` more than once — every resumed leg does,
+    once at the read-back and once at the end — has to be read at the state it
+    FINISHED in, not the one it started from.
+
+    Returns None, never a fabricated zero, when the text carries no status line
+    at all: a leg that was killed before its closing `equiv_status` did not
+    measure a position, and "could not read it" is not "read it and it was
+    empty".
+    """
+    finals = list(_FINAL_RE.finditer(raw or ""))
+    if not finals:
+        return None
+    return {"proved": int(finals[-1].group(1)),
+            "unproven": int(finals[-1].group(2))}
+
+
+def leg_peak_rss_kib(telemetry_path: Optional[Path],
+                     attempt_number: int) -> Optional[int]:
+    """The MAX rss the supervisor sampled during ONE ladder leg.
+
+    This is the per-rung figure vibe-ic#2194 turns on. With one rung per
+    process the ladder's peak is the MAX of these; with the whole ladder in one
+    process there is a single leg and the figure is their ACCUMULATION, which
+    is the defect. The supervisor already tags every sample with the attempt it
+    was taken under, and a leg is one attempt, so this needs no new instrument.
+
+    None means NOT MEASURED — no sidecar, or a `ps` with no rss support (the
+    supervisor flags that itself as `resource_probe_degraded`), or a leg
+    shorter than the sampling interval. It is never replaced by a 0, which a
+    reader would take for "measured, and it was empty".
+    """
+    if telemetry_path is None:
+        return None
+    try:
+        doc = json.loads(Path(telemetry_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    peaks = [int(sample["rss_kib"])
+             for sample in (doc.get("samples") or [])
+             if isinstance(sample, dict)
+             and sample.get("attempt") == attempt_number
+             and isinstance(sample.get("rss_kib"), int)]
+    return max(peaks) if peaks else None
+
+
+def proof_state_carry(legs: List[Dict]) -> Dict:
+    """Did the PROVED SET survive each process boundary? (vibe-ic#2194)
+
+    A restart from a checkpoint that had lost what was already proved would
+    silently re-prove it and LOOK EXACTLY LIKE PROGRESS — same passes, same
+    log shape, more wall clock. So this is MEASURED on every run instead of
+    assumed: leg k+1 reads its own position back out of its LEADING
+    `equiv_status` (`proved_at_entry`), and that must equal what leg k's
+    CLOSING `equiv_status` reported (`proved_at_exit`).
+
+    `carried` is True only when every boundary was measured AND agreed, False
+    as soon as one measured boundary disagrees, and None — NOT_MEASURED, never
+    a default True — when nothing disagreed but a boundary could not be read.
+    """
+    boundaries = []
+    for prev, cur in zip(legs, legs[1:]):
+        exit_p = prev.get("proved_at_exit")
+        entry_p = cur.get("proved_at_entry")
+        boundaries.append({
+            "from_rung": prev.get("rung"), "to_rung": cur.get("rung"),
+            "proved_at_exit": exit_p, "proved_at_entry": entry_p,
+            "carried": (None if exit_p is None or entry_p is None
+                        else exit_p == entry_p),
+        })
+    verdicts = [b["carried"] for b in boundaries]
+    if any(v is False for v in verdicts):
+        carried = False
+    elif verdicts and all(v is True for v in verdicts):
+        carried = True
+    else:
+        carried = None
+    return {
+        "boundaries": boundaries,
+        "boundaries_measured": sum(1 for v in verdicts if v is not None),
+        "boundaries_total": len(boundaries),
+        "carried": carried,
+    }
 
 
 def recover_orphan_checkpoints(ckpt_dir: Path, key: str,
@@ -1850,7 +1943,8 @@ def finalize_after_slang_retry(parsed: Dict, slang_retry_failed: bool) -> Dict:
     return out
 
 
-def parse_equiv_output(text: str) -> Dict:
+def parse_equiv_output(text: str, *,
+                       ladder_complete: Optional[bool] = None) -> Dict:
     """Parse raw Yosys equiv_status stdout into a structured verdict.
 
     Returns a dict with:
@@ -2241,7 +2335,28 @@ def parse_equiv_output(text: str) -> Dict:
         # a real result, and `_EXECUTION_STOP_RE` is written only by this
         # producer's kill paths, so a naturally completed run is untouched.
         _execution_stopped = bool(_EXECUTION_STOP_RE.search(text))
-        _measured_verdict = bool(_FINAL_RE.search(text))
+        # A COUNT FROM AN UNFINISHED LADDER IS A POSITION, NOT A VERDICT
+        # (vibe-ic#2194). The rule above is exactly right while ONE process
+        # runs the whole ladder: there is then a single `equiv_status`, at the
+        # very end, so a `_FINAL_RE` line existing IS the ladder having
+        # finished. Once each rung runs in its OWN process every leg prints an
+        # `equiv_status` — a leading one at its read-back and a closing one of
+        # its own — so a `_FINAL_RE` line can belong to a leg the ladder never
+        # climbed past. Reading THAT as "attempted and left unproven" would
+        # report a ladder cut off at -seq 16 as a design that "may genuinely
+        # differ", on points that -seq 64 was still going to discharge. That is
+        # the #2182 mislabel, arriving by a new road.
+        #
+        # `ladder_complete` is therefore a fact the TEXT CANNOT CARRY, supplied
+        # by the driver that knows it. None — every caller that predates this,
+        # and the single-process path, where the old equivalence still holds —
+        # leaves the conjunct exactly as it was. Only an explicit False, which
+        # only the per-rung driver passes and only when it stopped early, can
+        # move a verdict, and it moves it towards NOT MEASURED, never towards
+        # a PASS: `_has_ctrex` and `_noconv` remain separate conjuncts, so a
+        # recorded counterexample still keeps its FAIL.
+        _measured_verdict = (bool(_FINAL_RE.search(text))
+                             and ladder_complete is not False)
         if _execution_stopped and not _measured_verdict and not _has_ctrex \
                 and not _noconv:
             _noconv = True
@@ -2877,7 +2992,8 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
                        gold_wrapper_v: str = "",
                        fsm_encfile: Optional[str] = None,
                        checkpoint_dir: Optional[str] = None,
-                       resume_from: Optional[Dict] = None) -> str:
+                       resume_from: Optional[Dict] = None,
+                       ladder_rungs: Optional[int] = None) -> str:
     """Build the Yosys RTL(gold)≡synth-netlist(gate) equiv script.
 
     `checkpoint_dir` — emit an RTLIL CHECKPOINT after every ladder rung, into
@@ -3023,7 +3139,8 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
             # SAY WHERE WE RESUMED, in the run's own log.
             f"equiv_status\n"
             + _emit_ladder(checkpoint_dir,
-                           start_index=int(resume_from["rung_index"]) + 1)
+                           start_index=int(resume_from["rung_index"]) + 1,
+                           rungs=ladder_rungs)
             + "equiv_status\n"
         )
 
@@ -3139,7 +3256,8 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
         # `lec_post_layout_check.build_yosys_equiv_script`) derives its SAT
         # strategy from. It returns exactly the lines this call site used to
         # spell inline, so the pre-layout script is byte-identical.
-        + equiv_proof_tail(checkpoint_dir=checkpoint_dir, start_index=0)
+        + equiv_proof_tail(checkpoint_dir=checkpoint_dir, start_index=0,
+                           rungs=ladder_rungs)
     )
 
 
@@ -3174,6 +3292,7 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
 def equiv_proof_tail(seq_depths: Optional[List[int]] = None, *,
                      checkpoint_dir: Optional[str] = None,
                      start_index: int = 0,
+                     rungs: Optional[int] = None,
                      induction: bool = True) -> str:
     """The SAT strategy every LEC path shares: `stat`, `equiv_struct`, the
     rung ladder, `equiv_status`.
@@ -3191,13 +3310,22 @@ def equiv_proof_tail(seq_depths: Optional[List[int]] = None, *,
         # as an answer about the design.
         if checkpoint_dir is not None:
             raise ValueError("equiv_proof_tail: a screen writes no checkpoint")
+        if rungs is not None:
+            raise ValueError("equiv_proof_tail: a screen has no rung ladder "
+                             "to bound")
         ladder = LEC_LADDER[0][1]
     elif seq_depths is None:
-        ladder = _emit_ladder(checkpoint_dir, start_index=start_index)
+        ladder = _emit_ladder(checkpoint_dir, start_index=start_index,
+                              rungs=rungs)
     else:
         # Ascending, de-duplicated, positive — each rung only re-attempts the
         # cells still unproven, so shallow-first keeps the common case cheap.
         depths = sorted({int(d) for d in seq_depths if int(d) > 0})
+        if rungs is not None:
+            # `rungs` indexes LEC_LADDER, which a caller-chosen depth list is
+            # not. Refusing loudly beats silently bounding the wrong ladder.
+            raise ValueError("equiv_proof_tail: rungs is supported only for "
+                             "the shipped ladder (seq_depths=None)")
         if checkpoint_dir is not None:
             # Checkpoints are keyed on LEC_LADDER's rung NAMES; a caller-chosen
             # depth has no name in that vocabulary. Refusing loudly beats
@@ -3241,15 +3369,25 @@ def equiv_proof_tail(seq_depths: Optional[List[int]] = None, *,
     )
 
 
-def _emit_ladder(checkpoint_dir: Optional[str], start_index: int) -> str:
+def _emit_ladder(checkpoint_dir: Optional[str], start_index: int,
+                 rungs: Optional[int] = None) -> str:
     """The rungs from `start_index` on, each followed by its checkpoint.
 
     With `checkpoint_dir` None this returns exactly the five command lines the
     recipe has always ended with, so the no-checkpoint script is a control and
     not a re-implementation of one.
+
+    `rungs` — emit AT MOST this many rungs (vibe-ic#2194). None means "every
+    rung from `start_index` to the top", which is what every caller before
+    #2194 asked for and what the un-checkpointed control still asks for, so
+    that text does not move. `rungs=1` is what the per-rung driver uses: ONE
+    rung per yosys PROCESS, so the ladder's peak memory bounds by its WORST
+    SINGLE RUNG instead of accumulating all four in one address space.
     """
     out = []
-    for idx in range(max(0, start_index), len(LEC_LADDER)):
+    stop = (len(LEC_LADDER) if rungs is None
+            else min(len(LEC_LADDER), max(0, start_index) + max(0, int(rungs))))
+    for idx in range(max(0, start_index), stop):
         rung, commands = LEC_LADDER[idx]
         out.append(commands)
         if checkpoint_dir:
@@ -4594,6 +4732,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         "statement": None,
     }
 
+    # THE PER-RUNG TABLE (vibe-ic#2194), published on every run so the ceiling
+    # property is a standing measurement and not a one-off in a lane's notes.
+    ladder_record: Dict[str, Any] = {
+        "schema_version": LEC_LADDER_SCHEMA_VERSION,
+        "rungs": list(LEC_CHECKPOINT_RUNGS),
+        "per_rung_processes": None,
+        "legs": [],
+        "stopped_because": None,
+        "peak_rss_kib": None,
+        "peak_rss_kib_source": None,
+        "sum_of_rung_peaks_kib": None,
+        "proof_state_carry": None,
+    }
+
     proof_execution: Dict[str, Any] = {
         "schema_version": LEC_PROOF_EXECUTION_SCHEMA_VERSION,
         "path": None,
@@ -4607,7 +4759,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     def _make_script(frontend: str, slang_prefix: str, defines: str, *,
                      checkpoint_dir: Optional[str] = None,
-                     resume_from: Optional[Dict] = None) -> str:
+                     resume_from: Optional[Dict] = None,
+                     ladder_rungs: Optional[int] = None) -> str:
         return build_equiv_script(
             gold_files, gate_abs, resolved_top, liberty,
             blackbox_v=macro_blackbox_v or None,
@@ -4623,7 +4776,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             # `_identity_for` -> script_sha256, so a run WITH a translation and
             # a run WITHOUT one can never share a PASS-cache entry.
             fsm_encfile=fsm_encfile_beside_netlist(gate_abs),
-            checkpoint_dir=checkpoint_dir, resume_from=resume_from)
+            checkpoint_dir=checkpoint_dir, resume_from=resume_from,
+            ladder_rungs=ladder_rungs)
 
     def _identity_for(script: str, frontend: str, defines: str,
                       slang_prefix: str) -> Dict:
@@ -4744,13 +4898,30 @@ def main(argv: Optional[List[str]] = None) -> int:
             resume_from = select_resume_checkpoint(
                 ckpt_dir, ckpt_key,
                 _sha256_bytes(canonical_script.encode("utf-8")))
+        # ONE RUNG PER PROCESS whenever there is a checkpoint to restart from
+        # (vibe-ic#2194). `_per_rung` is the SAME condition the promote/resume
+        # block below already keys on. With checkpointing OFF there is nothing
+        # to restart from, so the ladder stays in ONE process and the emitted
+        # recipe is byte-identical to the pre-#2194 one — that path remains a
+        # control rather than a second implementation.
+        _per_rung = (checkpoint_enabled and ckpt_dir is not None
+                     and ckpt_key is not None)
+        # THE ENTRY STATE — what a PREVIOUS INVOCATION left behind, as distinct
+        # from the checkpoints this invocation is about to write for itself.
+        # Every field that has always meant "did this invocation resume" stays
+        # bound to this, so a from-zero run does not begin reporting
+        # `resumed: true` merely because its own rung 2 reads its own rung 1.
+        _entry_resume_from = resume_from
         if resume_from is not None:
             script = _make_script(frontend, slang_prefix, defines,
                                   checkpoint_dir=str(ckpt_dir),
-                                  resume_from=resume_from)
+                                  resume_from=resume_from,
+                                  ladder_rungs=1 if _per_rung else None)
+        elif _per_rung:
+            script = _make_script(frontend, slang_prefix, defines,
+                                  checkpoint_dir=str(ckpt_dir), ladder_rungs=1)
         else:
             script = canonical_script
-        ys_host.write_text(script, encoding="utf-8")
         # THE PROOF IDENTITY IS THE RECIPE, NOT THE PATH TAKEN THROUGH IT.
         # `canonical_script` — the FROM-ZERO ladder — is what the identity is
         # built from on every run, resumed or not, so a PASS reached by
@@ -4808,82 +4979,268 @@ def main(argv: Optional[List[str]] = None) -> int:
         # "RESUMING the proof at rung equiv_induct_seq64" on stderr while
         # lec.json correctly recorded `resumed: false`. Measured on a real PASS
         # design, invocations 4 and 5. An operator reads the stderr.
-        if resume_from is not None:
+        if _entry_resume_from is not None:
             print(f"[lec_run] RESUMING the proof at rung "
-                  f"{resume_from['rung']} (index {resume_from['rung_index']}) "
-                  f"from {resume_from['checkpoint_sha256']} "
-                  f"({resume_from['checkpoint_bytes']} bytes) — the rungs "
-                  "before it are NOT re-proved.", file=sys.stderr)
-        # THE TOTAL, NOT A FRESH COPY. Handing `args.timeout` here is the defect
-        # measured on 2026-08-27: it re-armed the deadline on every attempt.
-        # Every attempt now draws from the SAME StepBudget deadline.
-        _attempt_budget = budget.next_attempt_budget()
-        _started = budget.elapsed_s()
-        _kill_cause: Dict = {}
-        _launched, _raw = run_yosys_equiv(container, ys_in_container,
-                                          kill_cause=_kill_cause,
-                                          timeout=_attempt_budget,
-                                          workdir=equiv_workdir,
-                                          live_log_path=live_log_path,
-                                          telemetry_path=telemetry_path,
-                                          telemetry_context={
-                                              "schema_version":
-                                                  LEC_TELEMETRY_SCHEMA_VERSION,
-                                              "invocation_id": invocation_id,
-                                              "invocation_timestamp":
-                                                  invocation_timestamp,
-                                              "attempt": len(budget.attempts) + 1,
-                                              "frontend": frontend,
-                                              "defines": defines,
-                                          })
-        budget.record(frontend, defines, _attempt_budget,
-                      budget.elapsed_s() - _started, _launched,
-                      bool(_TIMEOUT_RE.search(_raw)),
-                      kill_cause=_kill_cause)
-        if checkpoint_enabled and ckpt_dir is not None and ckpt_key is not None:
-            _recorded = promote_and_record_checkpoints(
-                ckpt_dir, ckpt_key,
-                _sha256_bytes(canonical_script.encode("utf-8")), _raw,
-                yosys_version=runtime_yosys_version,
-                image_digest=runtime_image_digest,
-                invocation_id=invocation_id,
-                resumed_from_rung=(resume_from or {}).get("rung"),
-                evidence_log=live_log_path)
-            resume_record["rungs_recorded_this_run"] = _recorded
-            resume_record["resumed"] = resume_from is not None
-            # PRUNE ONLY ONCE THIS LADDER HAS LANDED SOMETHING. Superseding is
-            # a statement that a NEWER ladder now owns this directory, and the
-            # evidence for that statement is a rung this ladder recorded. Doing
-            # it before the run (at selection time) would let an attempt that
-            # dies in its first pass delete a complete ladder and leave nothing
-            # in its place.
-            if _recorded:
-                _pruned = prune_superseded_ladders(
+                  f"{_entry_resume_from['rung']} "
+                  f"(index {_entry_resume_from['rung_index']}) "
+                  f"from {_entry_resume_from['checkpoint_sha256']} "
+                  f"({_entry_resume_from['checkpoint_bytes']} bytes) — the "
+                  "rungs before it are NOT re-proved.", file=sys.stderr)
+        # ------------------------------------------------------------------
+        # THE RUNG LOOP — ONE RUNG PER PROCESS (vibe-ic#2194)
+        # ------------------------------------------------------------------
+        # THE DEFECT. `_emit_ladder` emitted EVERY remaining rung into ONE
+        # script, so ONE yosys process ran the whole ladder and its peak memory
+        # was the ACCUMULATION of all four rungs rather than the worst of them.
+        # MEASURED on opentitan_aes: an OOM kill at a 48 GiB cgroup cap
+        # (`OOMKilled=true`, `memory.events oom_kill 1`), while the very rung
+        # that died reaches the SAME 57873326 clauses and 22024817 variables at
+        # 16.3 GB with `oom_kill 0` when it is the only rung in the process. So
+        # 48 GiB was never that rung's footprint.
+        #
+        # WHY A BIGGER CEILING IS NOT THE REPAIR. It buys exactly one more rung
+        # and then dies again — a limit moved to fit the job it just failed,
+        # the same shape as a 600 s bound on a 983 s gate (#2177). A ladder
+        # whose memory grows with the NUMBER OF RUNGS can only be sized for a
+        # machine, and then only until the next design.
+        #
+        # THE REPAIR. Each rung runs in a FRESH process, resuming from the
+        # previous rung's checkpoint, so peak bounds by the WORST SINGLE RUNG
+        # and scales with the design instead of with the host.
+        #
+        # THE PROOF STATE TRAVELS IN THE CHECKPOINT, not beside it: yosys marks
+        # a `$equiv` point proven by REWIRING that cell's \\B to its \\A, which
+        # is ordinary RTLIL, so `write_rtlil`/`read_rtlil` round-trips the
+        # proven SET across a process boundary. That is not assumed here —
+        # `proved_at_entry` below measures it at every boundary, because a
+        # restart that had silently lost the proven set would redo the work and
+        # look exactly like progress.
+        ladder_legs: List[Dict[str, Any]] = []
+        _leg_raws: List[str] = []
+        _all_recorded: List[str] = []
+        _launched = False
+        _ladder_stop: Optional[str] = None
+        while True:
+            _start_index = (0 if resume_from is None
+                            else int(resume_from["rung_index"]) + 1)
+            _at_top = _start_index >= len(LEC_LADDER)
+            if _at_top and ladder_legs:
+                _ladder_stop = _LADDER_COMPLETE
+                break
+            # `_at_top` with NO legs yet: a PREVIOUS invocation already
+            # checkpointed every rung. One leg still has to run — it reads the
+            # position back and STATES it — or this invocation launches nothing
+            # and reaches no verdict at all, where the single-process ladder
+            # would have returned the completed proof. The entry script built
+            # above is already the right one: bounded from a start index past
+            # the top rung, it emits `read_rtlil`, `stat` and `equiv_status`
+            # and no rung.
+            _rung_name = None if _at_top else LEC_LADDER[_start_index][0]
+            if ladder_legs:
+                # Leg 1's script was built above (it is the one the identity
+                # and the PASS-cache lookup were computed from); every later
+                # leg is derived here from the checkpoint the previous one left.
+                script = _make_script(frontend, slang_prefix, defines,
+                                      checkpoint_dir=str(ckpt_dir),
+                                      resume_from=resume_from, ladder_rungs=1)
+            ys_host.write_text(script, encoding="utf-8")
+            # THE TOTAL, NOT A FRESH COPY. Handing `args.timeout` here is the
+            # defect measured on 2026-08-27: it re-armed the deadline on every
+            # attempt. Every attempt — and every RUNG — draws from the SAME
+            # StepBudget deadline, so splitting the ladder across four
+            # processes cannot buy it four budgets.
+            _attempt_budget = budget.next_attempt_budget()
+            if _attempt_budget <= 0:
+                budget.skipped(frontend, defines,
+                               "the step budget was spent before rung "
+                               f"{_rung_name} could be launched")
+                _ladder_stop = ("the step budget was spent before rung "
+                                f"{_rung_name} could be launched")
+                break
+            _attempt_no = len(budget.attempts) + 1
+            _started = budget.elapsed_s()
+            # PER LEG, not per invocation: each rung's process has its own kill
+            # cause, so "which rung was killed and why" survives the split.
+            _kill_cause: Dict = {}
+            _leg_launched, _leg_raw = run_yosys_equiv(
+                container, ys_in_container,
+                kill_cause=_kill_cause,
+                timeout=_attempt_budget,
+                workdir=equiv_workdir,
+                live_log_path=live_log_path,
+                telemetry_path=telemetry_path,
+                telemetry_context={
+                    "schema_version": LEC_TELEMETRY_SCHEMA_VERSION,
+                    "invocation_id": invocation_id,
+                    "invocation_timestamp": invocation_timestamp,
+                    "attempt": _attempt_no,
+                    "ladder_leg": len(ladder_legs) + 1,
+                    "rung": _rung_name,
+                    "frontend": frontend,
+                    "defines": defines,
+                })
+            budget.record(frontend, defines, _attempt_budget,
+                          budget.elapsed_s() - _started, _leg_launched,
+                          bool(_TIMEOUT_RE.search(_leg_raw)),
+                          kill_cause=_kill_cause)
+            _launched = _launched or _leg_launched
+            _leg_raws.append(_leg_raw)
+            # ENTRY counts come from THIS leg's own LEADING `equiv_status` (the
+            # read-back position); EXIT counts from its closing one. Comparing
+            # leg k+1's entry against leg k's exit is what demonstrates that
+            # the PROOF STATE, and not merely the netlist, crossed the process
+            # boundary.
+            _entry_counts = (resume_status_counts(_leg_raw)
+                             if resume_from is not None else None)
+            _exit_counts = final_status_counts(_leg_raw)
+            _leg: Dict[str, Any] = {
+                "leg": len(ladder_legs) + 1,
+                "rung": _rung_name,
+                "rung_index": None if _at_top else _start_index,
+                "position_read_back_only": _at_top,
+                "attempt": _attempt_no,
+                "rungs_in_this_process": (
+                    0 if _at_top else
+                    (1 if _per_rung else len(LEC_LADDER) - _start_index)),
+                "resumed_from_rung": (resume_from or {}).get("rung"),
+                "script_sha256": _sha256_bytes(script.encode("utf-8")),
+                "budget_sec": _attempt_budget,
+                "elapsed_sec": round(budget.elapsed_s() - _started, 2),
+                "launched": _leg_launched,
+                "proved_at_entry": (_entry_counts or {}).get("proved"),
+                "unproven_at_entry": (_entry_counts or {}).get("unproven"),
+                "proved_at_exit": (_exit_counts or {}).get("proved"),
+                "unproven_at_exit": (_exit_counts or {}).get("unproven"),
+                "peak_rss_kib": leg_peak_rss_kib(telemetry_path, _attempt_no),
+                "stopped": run_was_stopped(_leg_raw),
+                "checkpoint_recorded": [],
+            }
+            if _per_rung:
+                _recorded = promote_and_record_checkpoints(
                     ckpt_dir, ckpt_key,
-                    _sha256_bytes(canonical_script.encode("utf-8")))
-                if _pruned:
-                    resume_record["superseded_ladder_files_removed"] = _pruned
-                    print("[lec_run] pruned a superseded ladder's checkpoints "
-                          f"in {ckpt_dir.name}: {_pruned}", file=sys.stderr)
-            if resume_from is not None:
-                _at = resume_status_counts(_raw)
-                resume_record["resumed_from"] = {
-                    "rung": resume_from["rung"],
-                    "rung_index": resume_from["rung_index"],
-                    "checkpoint_sha256": resume_from["checkpoint_sha256"],
-                    "checkpoint_bytes": resume_from["checkpoint_bytes"],
-                    "checkpoint_written_timestamp":
-                        resume_from.get("written_timestamp"),
-                    "evidence_log": resume_from.get("evidence_log"),
-                    "evidence_log_sha256":
-                        resume_from.get("evidence_log_sha256"),
-                    # MEASURED from this run's OWN leading equiv_status, not
-                    # remembered from the run that wrote the checkpoint. None
-                    # is NOT_MEASURED and is never replaced by a zero.
-                    "proved_at_checkpoint": (_at or {}).get("proved"),
-                    "unproven_at_checkpoint": (_at or {}).get("unproven"),
-                    "counts_measured": _at is not None,
-                }
+                    _sha256_bytes(canonical_script.encode("utf-8")), _leg_raw,
+                    yosys_version=runtime_yosys_version,
+                    image_digest=runtime_image_digest,
+                    invocation_id=invocation_id,
+                    resumed_from_rung=(resume_from or {}).get("rung"),
+                    evidence_log=live_log_path)
+                _leg["checkpoint_recorded"] = _recorded
+                for _r in _recorded:
+                    if _r not in _all_recorded:
+                        _all_recorded.append(_r)
+                # PRUNE ONLY ONCE THIS LADDER HAS LANDED SOMETHING. Superseding
+                # is a statement that a NEWER ladder now owns this directory,
+                # and the evidence for that statement is a rung this ladder
+                # recorded. Doing it before the run (at selection time) would
+                # let an attempt that dies in its first pass delete a complete
+                # ladder and leave nothing in its place.
+                if _recorded:
+                    _pruned = prune_superseded_ladders(
+                        ckpt_dir, ckpt_key,
+                        _sha256_bytes(canonical_script.encode("utf-8")))
+                    if _pruned:
+                        resume_record["superseded_ladder_files_removed"] = _pruned
+                        print("[lec_run] pruned a superseded ladder's "
+                              f"checkpoints in {ckpt_dir.name}: {_pruned}",
+                              file=sys.stderr)
+            ladder_legs.append(_leg)
+            if _at_top:
+                _ladder_stop = _LADDER_COMPLETE
+                break
+            # A LEG THAT WAS CUT OFF ENDS THE LADDER. `run_was_stopped` is this
+            # producer's OWN predicate for "cut off, as opposed to finished and
+            # decided" — three places already ask it and its docstring says
+            # they must not be able to answer differently, so this is its
+            # fourth caller and not a fourth spelling. Climbing on in a fresh
+            # process after a stop is precisely how a restart would HIDE a real
+            # exhaustion: the stop would scroll past, a later rung would write
+            # a checkpoint, and the run would look like it had simply gone
+            # further. It stops, and it says which rung it stopped on.
+            if run_was_stopped(_leg_raw):
+                _ladder_stop = (
+                    f"the leg running rung {_rung_name} was CUT OFF (this "
+                    "producer's own stop marker), so the ladder stopped there "
+                    "and nothing beyond it was attempted")
+                break
+            if not _per_rung:
+                _ladder_stop = ("checkpointing is unavailable, so the whole "
+                                "ladder ran in one process")
+                break
+            # FORWARD PROGRESS, OR STOP AND SAY SO. The next leg may only start
+            # ABOVE the rung this one was asked to climb. A rung that genuinely
+            # exceeds the ceiling writes no checkpoint, so the furthest valid
+            # one does not move, and the ladder STOPS here with its reason
+            # recorded — it is never re-attempted in a loop, and the verdict
+            # stays whatever this leg's own log earned (a killed leg carries
+            # its stop marker into the parse below and classifies as a
+            # disclosed non-PASS). A restart must not be able to hide a real
+            # exhaustion.
+            resume_from = select_resume_checkpoint(
+                ckpt_dir, ckpt_key,
+                _sha256_bytes(canonical_script.encode("utf-8")))
+            _next_index = (0 if resume_from is None
+                           else int(resume_from["rung_index"]) + 1)
+            if _next_index <= _start_index:
+                _ladder_stop = (
+                    f"rung {_rung_name} recorded no checkpoint, so the ladder "
+                    "stopped there; the verdict below is what that leg's own "
+                    "log earned and nothing was re-attempted")
+                break
+        # THE WHOLE LADDER'S OUTPUT, IN ORDER. `parse_equiv_output` already
+        # reads the LAST `equiv_status` (it was made resume-aware for exactly
+        # this reason), so a concatenation of the legs is read at the state the
+        # ladder finished in, not the state its first leg started from.
+        _raw = "".join(_leg_raws)
+        if _per_rung:
+            resume_record["rungs_recorded_this_run"] = _all_recorded
+        resume_record["resumed"] = _entry_resume_from is not None
+        if _entry_resume_from is not None:
+            _first_leg = ladder_legs[0] if ladder_legs else {}
+            resume_record["resumed_from"] = {
+                "rung": _entry_resume_from["rung"],
+                "rung_index": _entry_resume_from["rung_index"],
+                "checkpoint_sha256": _entry_resume_from["checkpoint_sha256"],
+                "checkpoint_bytes": _entry_resume_from["checkpoint_bytes"],
+                "checkpoint_written_timestamp":
+                    _entry_resume_from.get("written_timestamp"),
+                "evidence_log": _entry_resume_from.get("evidence_log"),
+                "evidence_log_sha256":
+                    _entry_resume_from.get("evidence_log_sha256"),
+                # MEASURED from this run's OWN leading equiv_status, not
+                # remembered from the run that wrote the checkpoint. None is
+                # NOT_MEASURED and is never replaced by a zero.
+                "proved_at_checkpoint": _first_leg.get("proved_at_entry"),
+                "unproven_at_checkpoint": _first_leg.get("unproven_at_entry"),
+                "counts_measured": _first_leg.get("proved_at_entry") is not None,
+            }
+        # EVERY SCRIPT THAT ACTUALLY RAN. `equivalence_script_sha256_executed`
+        # above names the FIRST leg's bytes — which is the whole of what ran on
+        # the single-process path, and the entry of what ran on the per-rung
+        # one. The rest are named here rather than left unstated.
+        proof_execution["ladder_leg_script_sha256s"] = [
+            lg["script_sha256"] for lg in ladder_legs]
+        _rung_peaks = [lg["peak_rss_kib"] for lg in ladder_legs
+                       if lg.get("peak_rss_kib") is not None]
+        ladder_record.update({
+            "per_rung_processes": _per_rung,
+            "legs": ladder_legs,
+            "processes_launched": sum(1 for lg in ladder_legs if lg["launched"]),
+            "stopped_because": _ladder_stop,
+            # THE CEILING PROPERTY, stated as a number a reader can check: with
+            # one rung per process the ladder's peak is the MAX of the rungs;
+            # the SUM is published beside it because that is what the peak used
+            # to be, and their difference is the defect this closed.
+            "peak_rss_kib": max(_rung_peaks) if _rung_peaks else None,
+            "sum_of_rung_peaks_kib": sum(_rung_peaks) if _rung_peaks else None,
+            "peak_rss_kib_source": ("max over per-rung processes" if _per_rung
+                                    else "one process ran every rung"),
+            "proof_state_carry": proof_state_carry(ladder_legs),
+            "processes": len(ladder_legs),
+            # Did the ladder climb EVERY rung? None on the single-process path,
+            # where the parser's own rule already answers it correctly and this
+            # must not disturb it.
+            "complete": (_ladder_stop == _LADDER_COMPLETE) if _per_rung else None,
+        })
         # BOTH LEGS, HASH-BOUND. A resumed PASS is stored under the same key a
         # from-zero PASS would use, so the entry has to carry the evidence for
         # the whole proof and not just for the half this process ran. The
@@ -4891,12 +5248,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         # this leg is the log this invocation produced. Named and hashed here,
         # so a reader of the cached report can re-check either one.
         _legs: List[Dict[str, Any]] = []
-        if resume_from is not None and resume_from.get("evidence_log"):
+        # THE ENTRY CHECKPOINT, not the one the rung loop last advanced to.
+        # `resume_from` is rebound on every leg, so reading it here would name
+        # the checkpoint this invocation ENDED on and call it the evidence it
+        # CARRIED IN — which is the opposite of what a carried leg is.
+        if (_entry_resume_from is not None
+                and _entry_resume_from.get("evidence_log")):
             _legs.append({
                 "leg": "carried",
-                "path": Path(resume_from["evidence_log"]).name,
-                "sha256": resume_from.get("evidence_log_sha256"),
-                "through_rung": resume_from["rung"],
+                "path": Path(_entry_resume_from["evidence_log"]).name,
+                "sha256": _entry_resume_from.get("evidence_log_sha256"),
+                "through_rung": _entry_resume_from["rung"],
             })
         try:
             if live_log_path is not None and Path(live_log_path).is_file():
@@ -4942,7 +5304,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     slang_retry_failed = False
     gold_frontend_reason = ""
     if launched:
-        _p1 = parse_equiv_output(raw)
+        _p1 = parse_equiv_output(
+            raw, ladder_complete=ladder_record.get("complete"))
         _retry_gold, gold_frontend_reason = should_retry_gold_with_slang(
             _p1, raw, gold_requires_sv2017(gold_files))
         if _retry_gold and budget.next_attempt_budget() == 0:
@@ -4969,7 +5332,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                   file=sys.stderr)
             launched2, raw2 = _run("slang", slang_prefix, gold_defines)
             if launched2:
-                _p2 = parse_equiv_output(raw2)
+                _p2 = parse_equiv_output(
+                    raw2, ladder_complete=ladder_record.get("complete"))
                 raw = raw2
                 gold_frontend = "slang"
                 if not _p2["parse_error"]:
@@ -5043,7 +5407,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                               "synth #668).", file=sys.stderr)
                         launched3, raw3 = _run("slang", slang_prefix, gold_defines)
                         if launched3:
-                            _p3 = parse_equiv_output(raw3)
+                            _p3 = parse_equiv_output(
+                                raw3,
+                                ladder_complete=ladder_record.get("complete"))
                             raw = raw3
                             if _p3["parse_error"]:
                                 slang_retry_failed = True
@@ -5124,6 +5490,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             resolved_top, gate_abs, liberty, liberty_source)
         diag = annotate_step_budget(diag, budget, stopped=stopped_this_run)
         diag["lec_resume"] = resume_record
+        diag["lec_ladder"] = ladder_record
         _telemetry_finish("tool_unavailable", verdict=diag["verdict"],
                           equivalent=False,
                           current_pass=lec_stage_from_output(raw))
@@ -5131,7 +5498,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         _atomic_write_json(json_out, diag)
         return 1
 
-    parsed = parse_equiv_output(raw)
+    parsed = parse_equiv_output(
+        raw, ladder_complete=ladder_record.get("complete"))
     if cache_hit_report is not None:
         report = copy.deepcopy(cache_hit_report)
         report.pop("_cache_source_rpt", None)
@@ -5233,6 +5601,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "nothing to resume from — a restart starts over, and that is "
                 "a measured fact about this run rather than a default")
     report["lec_resume"] = resume_record
+    # THE PER-RUNG TABLE (vibe-ic#2194): which rung ran in which process, what
+    # each one peaked at, and whether the proved set survived every boundary.
+    report["lec_ladder"] = ladder_record
     # WHAT RAN, beside WHAT WAS PROVED. `proof_identity` is the recipe — the
     # key a PASS is cached under, identical for a from-zero and a resumed run
     # of the same design — so the bytes this invocation actually executed and
