@@ -23,15 +23,48 @@ is replaced by a recorder and the test asserts it was never ENTERED. Asserting
 "no results were written" would pass just as well if the workers ran and their
 output was discarded, which is the outcome that actually happened in #2120.
 
-THE REAL-IMAGE ARM. Two images that BOTH label themselves ``0.3.48`` exist on
-this fleet, and the same-version/different-digest case cannot be constructed
-honestly from a stub: a stub proves the code reads a field, and the report is
-about two real builds a human could not tell apart. Those tests skip — never
-pass — when either image is absent.
+THE REAL-IMAGE ARM. A stub proves the code reads a field; the report is about two
+real builds a human could not tell apart, so the mismatch is also driven against
+two containers created from two real digests. Those tests skip — never pass —
+when either image is absent from this host.
+
+WHICH DIGEST IS "THE OTHER BUILD", AND WHY IT IS NOT WRITTEN DOWN (#2163)
+========================================================================
+It used to be, and that literal is the second defect this file has carried. The
+constant was ``_OTHER_0348 = sha256:1463dac5…``, documented as "a DIFFERENT build
+from the pin". It was, for nine minutes: #2120 landed at 13:10 naming it, and
+#2115 moved ``IMAGE_DIGEST`` ONTO that exact digest at 13:19. From then until
+#2149 moved the pin off it, every arm here that expects a RUNTIME_PAIR_MISMATCH
+was comparing the pin with itself — eight ids red on pristine main, on every host
+holding the image, and nothing said WHY. A drift net could not have caught it
+either: the pinned-digest net reads DECLARATIONS (``*IMAGE_DIGEST`` assignments,
+``runner.image``), and a constant that means "not the pin" is invisible to it.
+
+So neither of the two "other" digests here is a literal that a later pin move can
+land on:
+
+  * the STUB arms take ``_NOT_THE_PIN``, a SYNTHETIC digest. It is not any build
+    and never will be one, so no pin move can ever silence them. Those arms only
+    ever needed "some other bytes"; nothing they assert wanted a real image.
+  * the REAL arms take ``_previous_pin()``, DERIVED by reading
+    ``IMAGE_DIGEST`` out of ``tools/ci/hermetic_candidate_runner.py`` — the
+    authority every other copy of the pin is a copy OF — at each commit that
+    touched it, and taking the newest value that is not the current one. After
+    any pin move the previous pin is, by construction, not the pin; and it is the
+    build a host is most likely to still be holding. When the checkout is not a
+    git work tree the derivation says so and those arms SKIP: "I could not read
+    it" is not "I read it and it was the pin".
+
+``_refuse_a_collided_other`` states the failure in one sentence for both, and
+``test_MUTANT_…`` points an "other" digest at the pin to prove that sentence
+fires — because an arm that can be satisfied by the pin compared with itself is
+an arm that measures nothing.
 """
 from __future__ import annotations
 
+import ast
 import json
+import re
 import subprocess
 import sys
 import uuid
@@ -45,11 +78,193 @@ import _eda_pin as P  # noqa: E402
 import _runtime_pair_preflight as R  # noqa: E402
 import benchmark_dispatch as BD  # noqa: E402
 
-#: The canonical published 0.3.48. A DIFFERENT build from the pin, carrying the
-#: SAME version label — the whole point of #2120 and the reason a version
-#: literal may not stand in for a digest anywhere in this repo.
-_OTHER_0348 = ("sha256:1463dac58116ca6650ec84e9e4b11a73a70f4094"
-               "c95a9a19e620482251471c57")
+_DIGEST_RE = re.compile(r"\Asha256:[0-9a-f]{64}\Z")
+
+#: THE STUB ARMS' OTHER BUILD. Synthetic, and that is the point: it names no
+#: image, so no pin move can ever land on it and quietly turn a mismatch arm into
+#: the pin compared with itself (#2163). Every arm that takes it is testing
+#: composition, ordering or a refusal's wording, and none of them ever needed the
+#: other digest to be a real build — the REAL arms below are what that is for.
+_NOT_THE_PIN = "sha256:" + "0" * 64
+
+#: The file the whole repository pins with. Read, never copied — the same
+#: authority `test_the_run_path_resolves_the_pinned_image._runner_pin` reads, by
+#: the same means, so the two cannot disagree about WHERE the pin lives.
+_PIN_AUTHORITY = "tools/ci/hermetic_candidate_runner.py"
+
+
+def _repo_root():
+    """The checkout root, or None when this is not run from a full checkout."""
+    for parent in [_PROGRAMS, *_PROGRAMS.parents]:
+        if (parent / _PIN_AUTHORITY).is_file():
+            return parent
+    return None
+
+
+def _declared_digest(source: str):
+    """`IMAGE_DIGEST` as the authority DECLARES it, by AST.
+
+    By AST and not by regex for the reason the drift net gives: this file quotes
+    digests in prose that it does not declare, and a text scan cannot tell the
+    two apart.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not (isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            continue
+        for target in node.targets:
+            if getattr(target, "id", "") == "IMAGE_DIGEST":
+                return node.value.value
+    return None
+
+
+def _pin_history(limit: int = 40):
+    """Every value `IMAGE_DIGEST` has held in the authority, newest first.
+
+    Consecutive duplicates are collapsed, so the list is the sequence of PINS and
+    not the sequence of commits: a commit that touched the file without moving
+    the pin does not put a second copy of the same digest in it.
+    """
+    root = _repo_root()
+    if root is None:
+        return []
+    log = subprocess.run(
+        ["git", "-C", str(root), "log", "--format=%H", "-n", str(limit),
+         "--", _PIN_AUTHORITY],
+        capture_output=True, text=True, timeout=120)
+    if log.returncode != 0:
+        return []
+    values: list[str] = []
+    for sha in log.stdout.split():
+        blob = subprocess.run(
+            ["git", "-C", str(root), "show", f"{sha}:{_PIN_AUTHORITY}"],
+            capture_output=True, text=True, timeout=120)
+        if blob.returncode != 0:
+            continue
+        digest = _declared_digest(blob.stdout)
+        if digest and (not values or values[-1] != digest):
+            values.append(digest)
+    return values
+
+
+def _previous_pin():
+    """THE REAL ARMS' OTHER BUILD: the pin this repository held before this one.
+
+    None when it cannot be READ — not a git work tree, no earlier value, or a
+    history whose newest declared value is not the digest the plugin actually
+    pins (which would mean this function is reading the wrong thing and must not
+    answer at all).
+    """
+    history = _pin_history()
+    if not history or history[0] != P.IMAGE_DIGEST:
+        return None
+    for digest in history[1:]:
+        if digest != P.IMAGE_DIGEST:
+            return digest
+    return None
+
+
+def _refuse_a_collided_other(digest, where: str) -> None:
+    """The one sentence #2163 exists to make possible.
+
+    Without it, an "other" digest that has become the pin surfaces as eight
+    unrelated-looking assertion failures about health lines, worker counts and
+    run roots — none of which says that the file has stopped measuring anything.
+    """
+    assert digest != P.IMAGE_DIGEST, (
+        f"{where} IS the pin ({digest}), so every arm that expects a "
+        f"RUNTIME_PAIR_MISMATCH here is comparing the pin with itself and this "
+        f"file measures nothing. This is not a stub that broke. It happened: "
+        f"#2120 named the then-other build at 13:10 and #2115 moved the pin onto "
+        f"that digest at 13:19, and eight ids stayed red until #2149 moved the "
+        f"pin off it. Point {where} at a digest that is not the pin.")
+
+
+# ── #2163: the "other" digest can never quietly become the pin ──────────────
+
+def test_the_declared_other_digest_is_NEVER_the_pin():
+    """THE GUARD, in the direction that decays silently.
+
+    A literal that means "not the pin" is invisible to every drift net in this
+    repo — those read DECLARATIONS (`*IMAGE_DIGEST`, `runner.image`), and this is
+    the opposite of a declaration. So the binding has to be an assertion or it is
+    nothing, and it has to be its OWN id: when the collision happened the only
+    signal was eight arms failing about health lines and worker counts, none of
+    which said the file had stopped measuring anything.
+    """
+    assert _DIGEST_RE.match(_NOT_THE_PIN), _NOT_THE_PIN
+    _refuse_a_collided_other(_NOT_THE_PIN, "_NOT_THE_PIN")
+
+
+def test_the_DERIVED_previous_pin_is_READ_from_the_authority_and_is_not_the_pin():
+    """NON-VACUITY of the derivation, and the proof it reads the right file.
+
+    `history[0] == P.IMAGE_DIGEST` is the load-bearing half: a derivation that
+    walked some other file, or parsed nothing, would answer with a digest that
+    is not the pin just as happily, and this arm would pass while measuring the
+    wrong thing entirely.
+    """
+    history = _pin_history()
+    if not history:
+        pytest.skip(f"the history of {_PIN_AUTHORITY} is UNREADABLE here — it "
+                    "is not in this checkout, or this checkout is not a git "
+                    "work tree. NOT MEASURED, and nothing is assumed in its "
+                    "place")
+    assert history[0] == P.IMAGE_DIGEST, (
+        f"the newest digest declared in {_PIN_AUTHORITY} is {history[0]} but the "
+        f"plugin pins {P.IMAGE_DIGEST}; this derivation is reading something "
+        "that is not the authority, so nothing it returns can be trusted")
+    other = _previous_pin()
+    assert other is not None, (
+        f"{_PIN_AUTHORITY} declares only one digest in the last "
+        f"{len(history)} value(s) of its history, so there is no previous pin "
+        "to drive the real arms with")
+    assert _DIGEST_RE.match(other), other
+    _refuse_a_collided_other(other, "_previous_pin()")
+
+
+def test_MUTANT_an_other_digest_equal_to_the_pin_is_REFUSED_and_cannot_pass(
+        monkeypatch):
+    """THE MUTATION ARM. Point the "other" digest at the pin — the only mutation
+    that matters here, because it is the one that happened — and BOTH halves
+    must hold:
+
+      1. the guard refuses it BY NAME, so a reader is told what is wrong rather
+         than left to infer it from eight unrelated-looking failures;
+      2. and even with the guard removed, the arms still could not pass: the
+         preflight answers RUNTIME_PAIR_MATCH for a container running the pinned
+         bytes, which is the opposite of what every mismatch arm asserts.
+
+    Without (2) this test would only prove that an assertion I just wrote fires.
+    """
+    with pytest.raises(AssertionError) as refusal:
+        _refuse_a_collided_other(P.IMAGE_DIGEST, "_NOT_THE_PIN")
+    assert "IS the pin" in str(refusal.value)
+    assert P.IMAGE_DIGEST in str(refusal.value)
+
+    monkeypatch.setattr(P, "pinned_image_present",
+                        lambda env=None: ("repo@" + P.IMAGE_DIGEST, ""))
+    monkeypatch.setattr(P, "container_image_digest",
+                        lambda c: (P.IMAGE_DIGEST, ""))
+    rec = R.preflight()
+    assert rec["verdict"] == R.RUNTIME_PAIR_MATCH, (
+        "the mutation must produce a MATCH — that is exactly why the mismatch "
+        "arms went red instead of silently green, and why a collided constant "
+        "can never be mistaken for a working test")
+    assert rec["verdict"] != R.RUNTIME_PAIR_MISMATCH
+    assert rec["disagreed"] is None
+
+
+def test_CONTROL_the_guard_accepts_a_digest_that_is_not_the_pin():
+    """A check that cannot pass is not a check either: the guard must accept the
+    ordinary case, or it would refuse every value and prove nothing."""
+    _refuse_a_collided_other("sha256:" + "f" * 64, "_a_control_digest")
 
 
 # ── the module: three checks, three codes ────────────────────────────────────
@@ -103,10 +318,10 @@ def test_the_health_line_carries_the_two_digests_and_never_a_repository(monkeypa
     line that lands in a report, an artefact, or a paste."""
     monkeypatch.setattr(P, "pinned_image_present",
                         lambda env=None: ("some.registry.example/x@" + P.IMAGE_DIGEST, ""))
-    monkeypatch.setattr(P, "container_image_digest", lambda c: (_OTHER_0348, ""))
+    monkeypatch.setattr(P, "container_image_digest", lambda c: (_NOT_THE_PIN, ""))
     line = R.pair_line(R.preflight())
     assert R.RUNTIME_PAIR_MISMATCH in line
-    assert P.IMAGE_DIGEST in line and _OTHER_0348 in line
+    assert P.IMAGE_DIGEST in line and _NOT_THE_PIN in line
     assert "disagreed=container_matches_pin" in line
     assert "/" not in line and "registry" not in line, line
 
@@ -116,7 +331,7 @@ def test_the_evidence_is_the_refusal_VERBATIM(monkeypatch):
     instead of the mismatch, and the reader re-runs it to see for themselves."""
     monkeypatch.setattr(P, "pinned_image_present",
                         lambda env=None: ("repo@" + P.IMAGE_DIGEST, ""))
-    monkeypatch.setattr(P, "container_image_digest", lambda c: (_OTHER_0348, ""))
+    monkeypatch.setattr(P, "container_image_digest", lambda c: (_NOT_THE_PIN, ""))
     rec = R.preflight()
     expected = P.container_matches_pin(rec["container"])
     assert expected, "the fixture must produce a refusal for this to measure"
@@ -160,7 +375,7 @@ def test_a_mismatched_pair_launches_ZERO_workers(monkeypatch, tmp_path, capsys):
     must never be ENTERED, because in #2120 they ran and their provenance was
     about the wrong container."""
     rc, recorder, run_p = _solve(
-        monkeypatch, tmp_path, lambda c: (_OTHER_0348, ""))
+        monkeypatch, tmp_path, lambda c: (_NOT_THE_PIN, ""))
     assert rc == 2
     assert recorder.entered == 0, "the dispatcher fanned out over a bad pair"
     err = capsys.readouterr().err
@@ -186,7 +401,7 @@ def test_the_refusal_is_recorded_OUTSIDE_the_run_root(monkeypatch, tmp_path):
     the record into the run root would make the next `--solve` refuse it as a
     non-empty clean room, and the operator would read the clean-room message
     instead of the mismatch that caused it."""
-    _, _, run_p = _solve(monkeypatch, tmp_path, lambda c: (_OTHER_0348, ""))
+    _, _, run_p = _solve(monkeypatch, tmp_path, lambda c: (_NOT_THE_PIN, ""))
     sibling = run_p.parent / f"{run_p.name}.runtime_pair_preflight.json"
     assert sibling.is_file(), sorted(p.name for p in tmp_path.iterdir())
     assert not run_p.exists() or not any(run_p.iterdir())
@@ -231,7 +446,7 @@ def test_the_gate_is_asked_before_the_run_root_is_built(monkeypatch, tmp_path):
     monkeypatch.setattr(BD, "_ordered_parallel_map", _NeverEntered())
     monkeypatch.setattr(P, "pinned_image_present",
                         lambda env=None: ("repo@" + P.IMAGE_DIGEST, ""))
-    monkeypatch.setattr(P, "container_image_digest", lambda c: (_OTHER_0348, ""))
+    monkeypatch.setattr(P, "container_image_digest", lambda c: (_NOT_THE_PIN, ""))
     assert BD._cmd_solve_locked("rtllm", str(tmp_path / "d"),
                                 str(tmp_path / "run")) == 2
     assert seen == [], "the clean room was built for a run that could not start"
@@ -244,10 +459,27 @@ def _have(digest: str) -> bool:
     return bool(P.local_repo_digests(ref)[0])
 
 
-def _requires_both_builds():
-    if not _have(P.IMAGE_DIGEST) or not _have(_OTHER_0348):
-        pytest.skip("both 0.3.48 builds must be present to measure the "
-                    "same-version/different-digest case")
+def _other_build():
+    """The real not-the-pin digest these arms drive, or a SKIP saying why not.
+
+    Three different reasons to be unable to measure, and none of them is a pass:
+    the derivation could not run, the pinned image is not on this host, or the
+    other build is not. Each says which.
+    """
+    other = _previous_pin()
+    if other is None:
+        pytest.skip(
+            f"the previous pin cannot be READ here — {_PIN_AUTHORITY} has no "
+            "earlier declared IMAGE_DIGEST reachable from this checkout (not a "
+            "git work tree, or a history that does not reach one). NOT "
+            "MEASURED; nothing is assumed in its place")
+    _refuse_a_collided_other(other, "_previous_pin()")
+    if not _have(P.IMAGE_DIGEST):
+        pytest.skip(f"the pinned build {P.IMAGE_DIGEST} is not on this host")
+    if not _have(other):
+        pytest.skip(f"the previous pin {other} is not on this host, so the "
+                    "two-real-builds case cannot be constructed")
+    return other
 
 
 @pytest.fixture()
@@ -272,17 +504,23 @@ def real_container():
                        capture_output=True, timeout=120)
 
 
-def test_REAL_two_builds_labelled_0348_are_not_interchangeable(real_container,
-                                                               monkeypatch):
-    """Both images answer `0.3.48` to the question a human asks. The digests are
-    what the runtime is, and this is the pair the report was written about."""
-    _requires_both_builds()
-    other = real_container(_OTHER_0348)
-    monkeypatch.setenv(P.CONTAINER_NAME_ENV, other)
+def test_REAL_the_pin_and_the_PREVIOUS_pin_are_not_interchangeable(real_container,
+                                                                  monkeypatch):
+    """RENAMED from `test_REAL_two_builds_labelled_0348_are_not_interchangeable`
+    (#2163). The old name was a fact about two particular builds and stopped
+    being true the moment the pin moved; this one names the RELATION the arm
+    actually drives, and stays true across every future move.
+
+    A version label is what a human reads and it is not the runtime — that was
+    #2120's whole finding, and it does not need both builds to share a label to
+    be measured. The digests are what the runtime IS."""
+    other = _other_build()
+    name = real_container(other)
+    monkeypatch.setenv(P.CONTAINER_NAME_ENV, name)
     rec = R.preflight()
     assert rec["verdict"] == R.RUNTIME_PAIR_MISMATCH
-    assert rec["container"] == other
-    assert rec["found_digest"] == _OTHER_0348
+    assert rec["container"] == name
+    assert rec["found_digest"] == other
     assert rec["disagreed"] == "container_matches_pin"
     assert R.evidence_text(rec).startswith(P.CONTAINER_IMAGE_MISMATCH)
 
@@ -290,7 +528,7 @@ def test_REAL_two_builds_labelled_0348_are_not_interchangeable(real_container,
 def test_REAL_the_pinned_build_is_a_MATCH(real_container, monkeypatch):
     """The control on real bytes. Without it the test above is satisfied by code
     that calls every container a mismatch."""
-    _requires_both_builds()
+    _other_build()
     name = real_container(P.IMAGE_DIGEST)
     monkeypatch.setenv(P.CONTAINER_NAME_ENV, name)
     rec = R.preflight()
@@ -302,7 +540,7 @@ def test_REAL_the_issue_acceptance_assertion_passes_on_a_matching_pair(
         real_container, monkeypatch):
     """The read-only assertion #2120 asks for, run VERBATIM against the
     container the runner actually chooses."""
-    _requires_both_builds()
+    _other_build()
     monkeypatch.setenv(P.CONTAINER_NAME_ENV, real_container(P.IMAGE_DIGEST))
     run = subprocess.run(
         [sys.executable, "-c",
@@ -318,8 +556,8 @@ def test_REAL_the_issue_acceptance_assertion_passes_on_a_matching_pair(
 def test_REAL_the_acceptance_assertion_fails_BY_NAME_on_the_other_build(
         real_container, monkeypatch):
     """A read-only assertion that cannot fail proves nothing about the pair."""
-    _requires_both_builds()
-    monkeypatch.setenv(P.CONTAINER_NAME_ENV, real_container(_OTHER_0348))
+    other = _other_build()
+    monkeypatch.setenv(P.CONTAINER_NAME_ENV, real_container(other))
     run = subprocess.run(
         [sys.executable, "-c",
          'import _eda_pin as p; ref, why = p.pinned_image_present(); '
@@ -329,7 +567,7 @@ def test_REAL_the_acceptance_assertion_fails_BY_NAME_on_the_other_build(
         cwd=str(_PROGRAMS), capture_output=True, text=True, timeout=180)
     assert run.returncode != 0
     assert P.CONTAINER_IMAGE_MISMATCH in run.stderr
-    assert _OTHER_0348 in run.stderr and P.IMAGE_DIGEST in run.stderr
+    assert other in run.stderr and P.IMAGE_DIGEST in run.stderr
 
 
 # ── resume: the coordinator whose fan-outs are CONDITIONAL ──────────────────
@@ -337,7 +575,7 @@ def test_REAL_the_acceptance_assertion_fails_BY_NAME_on_the_other_build(
 def _mismatched(monkeypatch):
     monkeypatch.setattr(P, "pinned_image_present",
                         lambda env=None: ("repo@" + P.IMAGE_DIGEST, ""))
-    monkeypatch.setattr(P, "container_image_digest", lambda c: (_OTHER_0348, ""))
+    monkeypatch.setattr(P, "container_image_digest", lambda c: (_NOT_THE_PIN, ""))
 
 
 def test_resume_refuses_at_a_fan_out_that_has_work(monkeypatch, tmp_path, capsys):

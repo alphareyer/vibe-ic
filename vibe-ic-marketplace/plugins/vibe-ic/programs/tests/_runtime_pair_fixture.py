@@ -25,9 +25,10 @@ WHAT THIS DOES NOT DO. It does not touch the gate, the pin, or any threshold,
 and it is deliberately per-module rather than an autouse fixture in a shared
 `conftest`: a suite-wide stub would silently disable the check for every test
 written after it, including one written to exercise it. The MISMATCH direction —
-absent container, same-version/different-digest container, matching pair — is
-measured in `test_issue2120_runtime_pair_preflight.py`, against the two real
-0.3.48 builds.
+absent container, a container running a build that is not the pin, matching
+pair — is measured in `test_issue2120_runtime_pair_preflight.py`, against the
+pin and the PREVIOUS pin. Neither of those is a literal any more: a version
+label, and the digest that carried it, both went stale under a pin move (#2163).
 """
 from __future__ import annotations
 

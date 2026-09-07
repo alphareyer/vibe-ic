@@ -29,8 +29,8 @@ def _matching_runtime_pair(monkeypatch):
     these assertions about the code rather than about which containers this host
     happens to be holding, and keeps `_eda_pin` out of the `subprocess.run`
     fakes below. See `_runtime_pair_fixture` for why this is a precondition and
-    not a weakening; the mismatch direction is measured against the two real
-    same-version builds in `test_issue2120_runtime_pair_preflight.py`."""
+    not a weakening; the mismatch direction is measured against the pin and the
+    PREVIOUS pin in `test_issue2120_runtime_pair_preflight.py`."""
     _rt_pair.assume_matching_runtime_pair(monkeypatch)
 
 
