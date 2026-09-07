@@ -70,6 +70,7 @@ import analog_block_list_emit_check as _block_list_schema
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
+import _analog_producer_common as _pc  # noqa: E402 — the producer exit tiers
 import _progress_run as _pr  # noqa: E402
 
 PROGRAMS_DIR = Path(__file__).resolve().parent
@@ -312,6 +313,14 @@ _ENV_GAP_MARKERS = (
     "BLOCKED on host mount root",
 )
 
+#: The LINE-START sentinel a producer prints on `_pc.EX_ENV_REFUSED`. Matched
+#: with `startswith`, not as a substring: a token that may appear anywhere in a
+#: line is a token a NEGATED mention of it also matches, and this one is read
+#: to decide that nothing about the design was learned. A sentinel at the start
+#: of its own line cannot be a negation of itself, which is why this needs no
+#: `_prose_polarity` reading while the substrings above do.
+_ENV_REFUSED_SENTINEL = _pc.ENV_REFUSED_TOKEN
+
 
 def _producer_env_gap(cp):
     """The sub-producer's own sentence when it could not REACH its tool, else
@@ -322,9 +331,51 @@ def _producer_env_gap(cp):
     blob = ((cp.stderr or "") + "\n" + (cp.stdout or "")) if cp else ""
     for line in blob.splitlines():
         line = line.strip()
+        if line.startswith(_ENV_REFUSED_SENTINEL):
+            return line[:400]
         if line and any(m in line for m in _ENV_GAP_MARKERS):
             return line[:400]
     return None
+
+
+#: THE ONE PLACE THIS RUN REMEMBERS AN ENVIRONMENT REFUSAL, keyed
+#: `(block, step)` and holding the refusal's OWN line (vibe-ic#2088).
+#:
+#: WHY THE RUN HAS TO REMEMBER IT. A refusal at A3 is invisible three steps
+#: later: what A4..A7 can see is a MISSING `.sp`, and "missing" is a statement
+#: about the design. MEASURED on u_hawaii_adc (lane czacctb2, 2026-09-07): one
+#: full front-door run and a three-probe bisect to get from `A4 BLOCKED: no
+#: *.sp` back to `CONTAINER_IMAGE_MISMATCH` at A3 — a line the producer had
+#: printed, exactly and actionably, and that nothing carried forward.
+#:
+#: PER-RUN, and cleared at the top of `main`. It is module state because the
+#: nine dispatch sites are written out one per step on purpose (see the loop
+#: in `main`), and threading a ledger through all nine would make that list
+#: harder to read than the thing it is protecting.
+_ENV_REFUSALS: Dict[tuple, str] = {}
+
+#: Steps whose product IS A3's netlist. A refusal at A3 makes each of them
+#: report an absence it did not cause.
+_A3_DEPENDENTS = ("A4_corner_sweep", "A5_layout", "A6_block_pv",
+                  "A7_post_layout_resim")
+
+
+def reset_env_refusals() -> None:
+    """Start a run with no inherited refusals. Called once from `main`."""
+    _ENV_REFUSALS.clear()
+
+
+def record_env_refusal(block: str, step: str, line: str) -> None:
+    _ENV_REFUSALS[(str(block), str(step))] = str(line).strip()
+
+
+def upstream_env_refusal(block: str, step: str) -> Optional[tuple]:
+    """`(upstream_step, refusal_line)` when `step` depends on a step this run
+    already recorded an environment refusal for, else None."""
+    if step not in _A3_DEPENDENTS:
+        return None
+    line = _ENV_REFUSALS.get((str(block), "A3_netlist_gen"))
+    return ("A3_netlist_gen", line) if line else None
 
 
 def _corner_results_exists(project: Path, block: str) -> bool:
@@ -985,6 +1036,28 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
     out_dir = _pl.analog_dir(project) / bname
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── AN ABSENCE THIS STEP DID NOT CAUSE (vibe-ic#2088) ─────────────────
+    # A3 refused because of the ENVIRONMENT, so its `.sp` was never written.
+    # What A4..A7 can see is a missing file, and every one of them reported it
+    # as a verdict about the design — MEASURED on a real run: A4 FAIL
+    # "netlist_source … cannot be read now", and A5, A6, A7 each PASS, for a
+    # block whose netlist was never produced.
+    #
+    # GUARDED ON THE ARTEFACT, not on the refusal alone. A block whose deck was
+    # emitted by an EARLIER run still has one on disk, and these steps can
+    # legitimately grade it; short-circuiting there would refuse work that can
+    # actually be done. The short-circuit fires only where the product really
+    # is missing — which is exactly the measured case.
+    _up = upstream_env_refusal(bname, step_name)
+    if _up and not (out_dir / f"{bname}.sp").is_file():
+        _ustep, _uline = _up
+        return StepResult(
+            step_name, bname, _spf.REFUSAL_STATUS, time.time() - t0,
+            f"upstream {_ustep} refused: {_uline}",
+            extras={"verdict_tier": "ENV_UNAVAILABLE",
+                    "env_refused_upstream": _ustep,
+                    "env_refused_detail": _uline})
+
     # v1.6.35: every A1-A9 step now has a deterministic
     # artefact-presence + substance gate. Missing artefact → rc=2,
     # which the runner translates to WAIVED (caller should invoke
@@ -1421,6 +1494,31 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     # still WAIVED; what changes is that the record now says
                     # the producer ERRORED and names the code, instead of
                     # reporting the gate's "artefact missing, invoke skill".
+                    # AN ENVIRONMENT REFUSAL IS NOT A WAIVER, AND IT IS NOT A
+                    # PRODUCER DEFECT (vibe-ic#2088). `WAIVED` reads "not
+                    # produced yet, invoke the skill"; no skill can supply a
+                    # container running the pinned image, so the advice cannot
+                    # be acted on, and the row rounds up to a green verdict.
+                    # The producer says so in its EXIT CODE — `EX_ENV_REFUSED`,
+                    # its own tier — so this is decided on a number and not on
+                    # prose. The row is `_spf.REFUSAL_STATUS` (in
+                    # `_FAIL_STATUSES`, so it cannot be green), carries the
+                    # refusal's OWN line, and is remembered for the steps
+                    # downstream that would otherwise report an absence this
+                    # producer never caused.
+                    if pcp is not None and pcp.returncode == _pc.EX_ENV_REFUSED:
+                        _lines = (pcp.stderr or "").strip().splitlines()
+                        why = (_producer_env_gap(pcp) or (_lines[-1] if _lines
+                               else "the producer reported an environment "
+                                    "refusal and printed nothing"))
+                        record_env_refusal(bname, step_name, why)
+                        return StepResult(
+                            step_name, bname, _spf.REFUSAL_STATUS,
+                            time.time() - t0, why,
+                            extras={"producer": prod["program"],
+                                    "producer_rc": pcp.returncode,
+                                    "verdict_tier": "ENV_UNAVAILABLE",
+                                    "env_refused": True})
                     if pcp is not None and pcp.returncode not in (0, 2):
                         return StepResult(
                             step_name, bname, "WAIVED", time.time() - t0,
@@ -2017,6 +2115,8 @@ def main() -> int:
             + "\n", encoding="utf-8")
 
     plan: List[StepResult] = []
+    # No refusal is inherited from a previous run of this process.
+    reset_env_refusals()
 
     def _dispatched(sr: StepResult) -> None:
         plan.append(sr)

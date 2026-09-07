@@ -737,6 +737,12 @@ def resolve_pdk_context(project: Path, pdk: str, container: str,
                 if declared:
                     res = _apa.resolve_pdk(declared, project=project,
                                            container=container)
+            except _ce.ContainerImageMismatch:
+                # AN ENVIRONMENT REFUSAL IS NOT A RESOLVER OUTCOME. See the
+                # re-raise below for the measurement; this inner handler is the
+                # one that would have turned it into `res = None`, i.e. into a
+                # PDK the design never declared.
+                raise
             except Exception:
                 res = None
         # vibe-ic#906 — ASK FOR EVERY ROLE THE IR ACTUALLY USES.
@@ -775,6 +781,15 @@ def resolve_pdk_context(project: Path, pdk: str, container: str,
         device_terminals = dict(ctx_json.get("device_terminals") or {})
         geometry_units = dict(ctx_json.get("device_geometry_units") or {})
         work_items = list(ctx_json.get("work_items") or [])
+    except _ce.ContainerImageMismatch:
+        # THE ONE EXCEPTION THIS BROAD HANDLER MAY NOT ABSORB (vibe-ic#2076,
+        # vibe-ic#2088). `NEEDS_NATIVE_TEMPLATE` is a statement about the PDK:
+        # it says the resolver looked and this family has no native template.
+        # An image mismatch means the resolver was never allowed to look, and
+        # recording it as the former is exactly the laundering of a host
+        # condition into a verdict about the design that #2088 names. It is
+        # re-raised so `emit_for_block` can record it in its own tier.
+        raise
     except Exception as exc:                                  # pragma: no cover
         status = "NEEDS_NATIVE_TEMPLATE"
         work_items = [f"deck-context resolver unavailable: {exc}"]
@@ -1571,7 +1586,8 @@ def _docker_ok(container: str) -> bool:
     with a stale container got a traceback where the flow documents a capability
     gap. The REASON is not lost by answering False — `container_image_refusal`
     below is what the caller reports, and it is a different status from an
-    absent container because they are different facts.
+    absent container because they are different facts, and
+    `container_refusal_result` is the ONE place that record is composed.
     """
     try:
         cp = _pr.run_best_effort(_ce.docker_exec_argv(container, "true"),
@@ -1593,6 +1609,34 @@ def container_image_refusal(container: str) -> str:
     to the ordinary unreachable path below and docker reports its own failure.
     """
     return _pin.container_attach_refusal(container)
+
+#: The simulation status when the container this producer was told to use is
+#: PROVABLY not the pinned image, so NOTHING was run in it (vibe-ic#2076).
+#:
+#: SPELLED APART FROM `NOT_VERIFIED_NO_SIMULATOR` ON PURPOSE, and the distance
+#: between them is the whole point. "The simulator is not installed" is a
+#: capability gap this flow already knows how to carry: the deck is emitted
+#: with `simulation_verified: false` and a reader knows no simulator existed.
+#: "The container is running a toolchain the repo does not name" is a
+#: different fact — a simulator WAS there and WAS usable, and using it would
+#: have produced a verdict about a tool version nobody pinned. The first is a
+#: measurement that could not be taken; the second is a measurement that must
+#: not be taken.
+CONTAINER_IMAGE_MISMATCH_STATUS = "NOT_VERIFIED_CONTAINER_IMAGE_MISMATCH"
+
+
+def container_refusal_result(why: str) -> Dict[str, Any]:
+    """The `verify_with_ngspice` result for a refused container.
+
+    `env_refused` is the machine-readable half — `emit_for_block` routes on it
+    rather than on the status string — and `detail` carries the refusal's OWN
+    line, which names both digests and is therefore actionable without a
+    second lookup.
+    """
+    return {"simulation_verified": False,
+            "simulation_status": CONTAINER_IMAGE_MISMATCH_STATUS,
+            "env_refused": True,
+            "detail": str(why).strip()}
 
 
 #: How far outside a rail a node may sit before the operating point is called
@@ -1774,6 +1818,17 @@ def tran_rail_report(log_text: str, supply_v: Optional[float],
         "nodes_not_measured": sorted(set(req) - set(answered)),
     }
 
+#: THE RECORDED BUDGET for one A3 testbench run. It stops NOTHING
+#: (vibe-ic#2051): crossing it prints one `VIBEIC_CEILING_CROSSED` line and the
+#: simulator runs on. It is the 900 s this call used to be KILLED at, kept as
+#: the number a reader is told about rather than deleted -- MEASURED on the
+#: delta-sigma modulator testbench, ~14 m 50 s on a loaded host, i.e. the old
+#: clock was a coin toss and losing it reported a simulator that RAN as a
+#: simulator that was ABSENT (vibe-ic#2117, and the landing that preceded it).
+#: A crossing is therefore EXPECTED on a big block and is information, not a
+#: fault.
+SIMULATION_CEILING_S = 900.0
+
 
 def verify_with_ngspice(container: str, block: str, sp_text: str,
                         tb_text: str,
@@ -1792,13 +1847,26 @@ def verify_with_ngspice(container: str, block: str, sp_text: str,
     # not there, which is a different sentence and sends the reader to fix a
     # different thing. Asked FIRST, because the reachability probe below cannot
     # tell the two apart — it answers False for both.
+    #
+    # COMPOSED BY `container_refusal_result` (vibe-ic#2076), not inline: the
+    # record has to carry `env_refused`, which is what `emit_for_block` routes
+    # on to make sure NOTHING is emitted off a run the environment refused. A
+    # status string alone falls through to the emit at the end of that function
+    # and publishes the deck stamped `simulation_verified=false`.
     _refusal = container_image_refusal(container)
     if _refusal:
-        return {"simulation_verified": False,
-                "simulation_status": "NOT_VERIFIED_CONTAINER_IMAGE_MISMATCH",
-                "detail": _refusal,
-                "container": container,
-                "required_digest": _pin.IMAGE_DIGEST}
+        return dict(container_refusal_result(_refusal),
+                    container=container, required_digest=_pin.IMAGE_DIGEST)
+    # NO SECOND CATCH FOR THE RAISED FORM HERE, and its absence is measured.
+    # This lane shipped a `try/except _ce.ContainerImageMismatch` around the
+    # probe below; once vibe-ic#2156 landed the catch INSIDE `_docker_ok`, the
+    # only expression left on this line that could raise it no longer does, and
+    # the mutation arm proved it: deleting the handler reddened NOTHING (52
+    # passed). A guard no test can make fire is not a guard, so it is gone
+    # rather than kept as reassurance. The raised form is still handled where
+    # it can still arrive — the staging `mkdir`, the ngspice probe and the
+    # cleanup `rm` all build their argv through the guarded builder, and the
+    # `except` on the big `try` below catches all three.
     if shutil.which("docker") is None or not _docker_ok(container):
         return {"simulation_verified": False,
                 "simulation_status": "NOT_VERIFIED_NO_SIMULATOR",
@@ -1899,30 +1967,52 @@ def verify_with_ngspice(container: str, block: str, sp_text: str,
         # a run that is legitimately slow is never cut off, and a run that is
         # genuinely wedged raises `Stalled`, which is a finding about the child.
         #
-        # `container_deadline_argv` + `_pr.run`, NOT `run_in_container`, and the
-        # difference is deliberate: the wrapper ALSO refuses a container whose
-        # image is not the pin. That refusal is correct and A4/A6 already carry
-        # it, but it is a DIFFERENT change with a fleet-wide blast radius --
-        # MEASURED on 8HD-6, the shared `vibeic-eda` container holds
-        # `sha256:06537f7e` (0.3.46) while the pin names `sha256:8da785a8`
-        # (0.3.47), so adopting it here turns `test_analog_a3_netlist_emit::
-        # test_every_library_class_renders_a_netlist_that_actually_converges`
-        # red on this host. Removing the wall clock does not require it, and
-        # smuggling it in under this change would hide it.
-        try:
-            cp = _pr.run(
-                _ce.container_deadline_argv(
-                    container, f"cd {stage} && {ng} -b tb_{block}.sp 2>&1",
-                    deadline_s=0, shell=("bash", "-lc")),
-                capture_output=True, text=True, errors="replace")
-        except _pr.Stalled as exc:
+        # `run_in_container_supervised`, and it replaced `container_deadline_argv`
+        # + `_pr.run` (vibe-ic#2117). The previous shape carried
+        # `deadline_s=0` -- GNU `timeout`'s documented "disable the associated
+        # timeout" -- so no clock actually fired; what it lacked was the other
+        # half. `_pr.run` raised `Stalled` and this function RETURNED, leaving
+        # the still ngspice running inside the container as exactly the orphan
+        # the whole module exists to prevent: reported as stalled here, holding
+        # its cores there, and invisible to the next caller. The supervised
+        # helper reaps BY IDENTITY -- the launching shell stamps its own
+        # (pid, starttime) and then `exec`s the simulator, so the stamp IS the
+        # simulator and a stranger sharing a command line can never be
+        # selected.
+        #
+        # IT ALSO CARRIES THE ATTACH CHECK, which is the second half of
+        # vibe-ic#2076: a container running bytes the repo does not pin cannot
+        # produce this verdict. That is handled as an rc below rather than as a
+        # crash -- see `container_refusal_result`.
+        cp = _ce.run_in_container_supervised(
+            container, f"cd {stage} && {ng} -b tb_{block}.sp 2>&1",
+            ceiling_s=SIMULATION_CEILING_S, shell=("bash", "-lc"))
+        if cp.returncode == _ce.STALLED_RC:
             # A STOPPED JOB HAS ITS OWN NAME. It is not an absent simulator and
             # it is not a netlist that did not converge -- every readable
             # progress signal sat still while we looked. Naming it anything
-            # else charges the design for a host condition.
+            # else charges the design for a host condition. The reap evidence
+            # (`VIBEIC_REAP` / `VIBEIC_REAP_SKIP` lines, naming the pids that
+            # were signalled) travels with it, because "we stopped it" and "we
+            # gave up on it" are different facts and only one of them leaves
+            # the host clean.
             return {"simulation_verified": False,
                     "simulation_status": "SIMULATION_STALLED",
-                    "detail": f"the simulator stopped making progress: {exc}"}
+                    "detail": ("the simulator stopped making progress: "
+                               + (cp.stderr or "").strip()[-1200:])}
+        # THE REFUSAL ARRIVES TWO WAYS AND IS ONE FACT. `docker_exec_argv`
+        # RAISES on a measured mismatch (the staging calls above take that
+        # route); the run wrappers RETURN `IMAGE_MISMATCH_RC` with the refusal
+        # on stderr, because a branch whose contract is to return an rc cannot
+        # raise out of it. Both mean NOTHING WAS RUN, so both get the one
+        # status -- and neither may fall through to the log reader below,
+        # which would parse an empty log and answer DID_NOT_CONVERGE about a
+        # simulator that was never started.
+        if cp.returncode == _ce.IMAGE_MISMATCH_RC:
+            return container_refusal_result(
+                (cp.stderr or "").strip() or
+                _pin.container_matches_pin(container) or
+                f"container `{container}` is not the pinned image")
         out = (cp.stdout or "") + (cp.stderr or "")
         # A RUN THAT WAS STOPPED IS NOT A RUN THAT ANSWERED. `_container_exec`
         # returns 124 when a deadline fires -- which cannot happen here, since
@@ -1943,8 +2033,17 @@ def verify_with_ngspice(container: str, block: str, sp_text: str,
                 "simulator: this is a run that was STOPPED, not a measurement "
                 "that came back empty")
         elif cp.returncode == _ce.TIMEOUT_UNAVAILABLE_RC:
-            not_a_verdict = ("SIMULATION_INVOCATION_FAILED",
-                             _ce.describe_result(cp, 0))
+            # 127 IS STILL NOT A VERDICT, and since the supervised conversion
+            # (vibe-ic#2117) it no longer means what `describe_result` says it
+            # means: there is no GNU `timeout` on this path to be missing. It
+            # is the shell's "command not found", raised at `exec` time for a
+            # binary the probe above had just seen answer -- which is a
+            # statement about the image, not about the deck.
+            not_a_verdict = (
+                "SIMULATION_INVOCATION_FAILED",
+                f"the container shell could not execute `{ng}` (rc 127) "
+                f"although the probe found it a moment earlier: this run "
+                f"never started, so it produced no measurement")
         else:
             not_a_verdict = None
         if not_a_verdict is not None:
@@ -2028,6 +2127,12 @@ def verify_with_ngspice(container: str, block: str, sp_text: str,
             "log_tail": tail,
             **tran_fields,
         }
+    except _ce.ContainerImageMismatch as exc:
+        # The staging `mkdir`, the ngspice probe and the cleanup `rm` all build
+        # their argv through the guarded builder, so any of them can raise this
+        # after the reachability probe passed -- a container can be replaced
+        # under a run. Recorded, never absorbed into a verdict about the deck.
+        return container_refusal_result(exc)
     except (OSError, subprocess.SubprocessError) as exc:
         # NOT_VERIFIED_NO_SIMULATOR IS OWED ONLY WHEN THE BINARY IS ABSENT --
         # the two returns above this `try` are the only places that can say it.
@@ -2042,7 +2147,13 @@ def verify_with_ngspice(container: str, block: str, sp_text: str,
             _pr.run_best_effort(
                 _ce.docker_exec_argv(container, "rm", "-rf", stage),
                 capture_output=True, text=True)
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError,
+                _ce.ContainerImageMismatch):
+            # A REFUSAL IN A `finally` WOULD REPLACE THE RETURN. There is
+            # nothing to clean up in a container we were refused entry to, and
+            # raising here would discard the refusal result the handler above
+            # just composed and put the traceback back -- which is the defect,
+            # restored by the cleanup path.
             pass
 
 
@@ -2103,11 +2214,45 @@ def _drop_stale(bdir: Path, block: str) -> List[str]:
 #: who is only told "no netlist" will re-run the same command.
 PDK_NOT_BOUND_BY_BLOCK = "PDK_NOT_BOUND_BY_BLOCK"
 
+#: The verdict when the ENVIRONMENT refused this producer (vibe-ic#2076,
+#: vibe-ic#2088): the container it was told to use is provably not the pinned
+#: image, so nothing about the design was learned and nothing may be emitted.
+#: Reported at `_pc.EX_ENV_REFUSED`, never as a gap and never as a crash.
+CONTAINER_IMAGE_MISMATCH = "CONTAINER_IMAGE_MISMATCH"
+
+#: The `action` such a record carries. A reader scanning `records[]` for
+#: `gap` / `refused` / `emitted` must not silently miss this one, which is why
+#: it is a fourth value rather than a flag on an existing one.
+ACTION_ENV_REFUSED = "env_refused"
+
 
 def emit_for_block(project: Path, entry: Dict[str, Any], pdk: str,
                    container: str, verify_sim: bool,
                    domain: Optional[Any] = None,
                    pdk_explicit: bool = False) -> Dict[str, Any]:
+    """One block's record. NEVER raises for an environment refusal.
+
+    A `ContainerImageMismatch` from ANY container entry inside this call is
+    caught here and returned as an `ACTION_ENV_REFUSED` record. Before
+    vibe-ic#2076 it left this function as an exception, exited the producer 1
+    with a traceback, and wrote neither a gap file nor a `--json` report -- so
+    the one line that named the two digests reached the run record nowhere.
+    """
+    try:
+        return _emit_for_block(project, entry, pdk, container, verify_sim,
+                               domain, pdk_explicit=pdk_explicit)
+    except _ce.ContainerImageMismatch as exc:
+        return {"block": str(entry.get("name") or entry.get("block")
+                             or entry.get("type")),
+                "action": ACTION_ENV_REFUSED, "emitted": False,
+                "status": CONTAINER_IMAGE_MISMATCH,
+                "reason": str(exc).strip()}
+
+
+def _emit_for_block(project: Path, entry: Dict[str, Any], pdk: str,
+                    container: str, verify_sim: bool,
+                    domain: Optional[Any] = None,
+                    pdk_explicit: bool = False) -> Dict[str, Any]:
     name = str(entry.get("name") or entry.get("block") or entry.get("type"))
     bdir = project / _CANONICAL_ANALOG / name
     sp_path = bdir / f"{name}.sp"
@@ -2369,6 +2514,18 @@ def emit_for_block(project: Path, entry: Dict[str, Any], pdk: str,
             container, name, sp_text, tb_text, real_project=project,
             supply_v=(float(_supply) if isinstance(_supply, (int, float))
                       else None))
+        # BEFORE EVERY OTHER SIMULATION OUTCOME. `env_refused` means the
+        # simulator was never started, so none of the branches below have an
+        # observation to judge -- and the fall-through at the end of this
+        # function would EMIT the deck stamped `simulation_verified=false`,
+        # publishing an artefact off a run the environment refused.
+        if sim.get("env_refused"):
+            _drop_stale(bdir, name)
+            rec.update(action=ACTION_ENV_REFUSED, emitted=False,
+                       status=CONTAINER_IMAGE_MISMATCH,
+                       reason=str(sim.get("detail") or "").strip(),
+                       simulation_status=sim.get("simulation_status"))
+            return rec
         if sim.get("simulation_status") == "DID_NOT_CONVERGE":
             _drop_stale(bdir, name)
             gap = write_gap(bdir, project, name, btype,
@@ -2581,6 +2738,30 @@ def run(project: Path, only: Optional[str], pdk: str, container: str,
     kept = [r for r in records if r.get("action") == "kept_preexisting"]
     gaps = [r for r in records if r.get("action") == "gap"]
     refused = [r for r in records if r.get("action") == "refused"]
+    env_refused = [r for r in records
+                   if r.get("action") == ACTION_ENV_REFUSED]
+    # AN ENVIRONMENT REFUSAL OUTRANKS EVERYTHING, INCLUDING THE PDK REFUSAL
+    # BELOW (vibe-ic#2076, vibe-ic#2088). Every other verdict in this report is
+    # a statement ABOUT THE DESIGN; this one says the producer was never
+    # allowed to look, and reporting a design verdict alongside it would let a
+    # host condition be read as something the design did. It is its own exit
+    # tier, `_pc.EX_ENV_REFUSED`, so a caller can tell it from an honest gap
+    # (rc 2), from a usage error (rc 64) and from a crash -- which it was.
+    if env_refused:
+        return _pc.EX_ENV_REFUSED, {
+            "producer": PRODUCER,
+            "producer_fingerprint": producer_fingerprint(),
+            "block_list_source": src,
+            "verdict": CONTAINER_IMAGE_MISMATCH,
+            # THE REFUSAL'S OWN LINE, unchanged. It names both digests, which
+            # is what makes it actionable without a second lookup.
+            "reason": "; ".join(str(r.get("reason")) for r in env_refused),
+            "container": container,
+            "blocks_env_refused": [r["block"] for r in env_refused],
+            "blocks_total": len(records),
+            "blocks_emitted": 0,
+            "records": records,
+        }
     # A REFUSED REQUEST OUTRANKS EVERY OTHER VERDICT IN THIS REPORT. The other
     # blocks of the same invocation may have emitted perfectly well, and saying
     # EMITTED because they did would let the one refusal be read as noise on a
@@ -2674,6 +2855,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"NO netlist emitted — {report['blocks_gap']} netlist_gap.json "
             f"written ({report['gap_status']}); invoke skill `{SKILL}`"),
             file=sys.stderr)
+    elif rc == _pc.EX_ENV_REFUSED:
+        print(_pc.env_refused_line(PRODUCER, str(report.get("reason"))),
+              file=sys.stderr)
+        print(f"{_pc.ENV_REFUSED_TOKEN} nothing was emitted and NO gap file "
+              f"was written: this is NOT a statement about the design. "
+              f"Blocks not examined: "
+              f"{report.get('blocks_env_refused')}", file=sys.stderr)
     elif report.get("verdict") == PDK_NOT_BOUND_BY_BLOCK:
         print(f"{PRODUCER}: {PDK_NOT_BOUND_BY_BLOCK} — requested "
               f"`{report.get('requested_pdk')}`, "

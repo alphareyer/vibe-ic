@@ -84,17 +84,54 @@ def test_j1_the_simulator_call_carries_no_wall_clock():
 
 
 def test_j1_the_simulator_is_entered_through_the_shared_container_primitive():
-    """The SAME argv A4's `run_to_completion` uses — `deadline_s=0`, which GNU
-    `timeout` documents as "disable the associated timeout" — so there is one
-    container-entry shape in the analog track and not two."""
+    """ONE container-entry shape for the simulator, and it is the SUPERVISED
+    one (vibe-ic#2117).
+
+    RE-ANCHORED, AND STRICTLY STRONGER THAN WHAT IT REPLACED. This asserted
+    exactly one `container_deadline_argv(..., deadline_s=0)` — GNU `timeout`'s
+    documented "disable the associated timeout". No clock fired, so J1's own
+    property held; what that shape could not give was the other half. On a
+    stall, `_pr.run` raised and this function RETURNED, leaving the still
+    ngspice running inside the container: the orphan `_container_exec` exists
+    to prevent, now with a `SIMULATION_STALLED` verdict written about it.
+    `run_in_container_supervised` takes NO deadline parameter at all — the
+    number the old assertion had to pin to zero cannot be typed here — and
+    reaps by IDENTITY where the tool lives.
+
+    The old call is asserted ABSENT rather than left unmentioned, so restoring
+    it (with any deadline, zero or not) reddens this test."""
     tree = ast.parse(_verify_fn_source())
-    calls = [n for n in ast.walk(tree)
-             if isinstance(n, ast.Call)
-             and ast.unparse(n.func).endswith("container_deadline_argv")]
-    assert len(calls) == 1, ast.unparse(tree)[:400]
-    deadlines = [ast.literal_eval(kw.value) for kw in calls[0].keywords
-                 if kw.arg == "deadline_s"]
-    assert deadlines == [0], deadlines
+    supervised = [n for n in ast.walk(tree)
+                  if isinstance(n, ast.Call)
+                  and ast.unparse(n.func).endswith(
+                      "run_in_container_supervised")]
+    assert len(supervised) == 1, ast.unparse(tree)[:400]
+    old_shape = [ast.unparse(n)[:90] for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and ast.unparse(n.func).endswith(
+                     ("container_deadline_argv", "run_in_container"))
+                 and not ast.unparse(n.func).endswith(
+                     "run_in_container_supervised")]
+    assert old_shape == [], old_shape
+    # ... and the budget it is given is a RECORD. `ceiling_s` is the only
+    # time-shaped argument the supervised primitive takes and it stops nothing;
+    # asserting it is PRESENT is what keeps the crossing observable.
+    ceilings = [kw.arg for kw in supervised[0].keywords]
+    assert "ceiling_s" in ceilings, ceilings
+    assert "deadline_s" not in ceilings and "timeout" not in ceilings, ceilings
+
+
+def test_j1_a_stalled_simulator_is_reaped_where_it_lives():
+    """The stall path must not merely RETURN. Before the supervised
+    conversion, `except _pr.Stalled: return {...SIMULATION_STALLED...}` walked
+    away from a live ngspice inside the container — the verdict was recorded
+    and the orphan was left. The reap is the primitive's, so what this asserts
+    is that A3 routes through the primitive that has one and reads its rc."""
+    src = _verify_fn_source()
+    assert "STALLED_RC" in src, src[:200]
+    assert "except _pr.Stalled" not in src, (
+        "a handler that returns on Stalled bypasses the supervised primitive's "
+        "reap, which is the whole reason for the conversion")
 
 
 @pytest.mark.parametrize("status", ["SIMULATION_STALLED",

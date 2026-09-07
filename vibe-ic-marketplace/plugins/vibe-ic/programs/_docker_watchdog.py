@@ -53,7 +53,8 @@ import subprocess  # nosec B404 — the ephemeral-container probe/reap below
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Set, Tuple
+from typing import (Any, Callable, Dict, List, Optional, Sequence,
+                    Set, Tuple)
 
 import _watchdog as _wd
 import sys
@@ -363,12 +364,78 @@ _REAP_TAIL = (
     "while(c){c=0; for(i=1;i<=n;i++) "
     "if(!(p[i] in s) && (q[i] in s)){s[p[i]]=1; c=1}} "
     "for(k in s) if(k!=r) printf \"%s \", k}'); "
+    # THE IDENTITIES, RECORDED BEFORE THE SIGNAL. The caller needs them
+    # because the pass AFTER this one is gated on the ROOT still being alive,
+    # and the root is the thing most likely to have died -- see
+    # `kill_supervised_job`. A pid alone would be an invitation to signal a
+    # stranger that inherited the number; the starttime is what keeps the
+    # follow-up a reap BY IDENTITY.
+    "for VK in \"$VPID\" $VKIDS; do "
+    "printf 'VIBEIC_REAP_ID %s:%s\\n' \"$VK\" \"$(__vic_st \"$VK\")\"; "
+    "done; "
     "VPG=$(ps -o pgid= -p \"$VPID\" 2>/dev/null | tr -d ' '); "
     "if [ \"$VPG\" = \"$VPID\" ]; then "
     "kill -__SIG__ -- \"-$VPID\" 2>/dev/null || :; fi; "
     "kill -__SIG__ \"$VPID\" $VKIDS 2>/dev/null || :; "
+    # A STOPPED PROCESS CANNOT ACT ON A TERM. SIGTERM to a job in state `T` is
+    # queued and nothing happens; the grace below then elapses against a
+    # process that was never able to answer. MEASURED 2026-09-07 on 8HD-9 in
+    # the pinned image (vibe-ic#2117): ngspice SIGSTOPped mid-run, reaped, and
+    # the reap reported `VIBEIC_REAP TERM 143 162` -- and pid 162 was still
+    # there, state T, after the whole sequence. CONT is sent to the same set
+    # so the signal we just queued is delivered. It cannot revive anything a
+    # KILL reaches, and it is the difference between a reap and a report of
+    # one.
+    "if [ __SIG__ = TERM ]; then "
+    "kill -CONT \"$VPID\" $VKIDS 2>/dev/null || :; fi; "
     "echo VIBEIC_REAP __SIG__ \"$VPID\" $VKIDS; "
 )
+
+
+def _sweep_command(pairs: Sequence[Tuple[int, str]], sig: str) -> str:
+    """Shell that signals each ``(pid, starttime)`` that is STILL that job.
+
+    THE PASS THE ROOT GATE CANNOT MAKE. `_IDENTITY_GATE` refuses to proceed
+    unless the STAMPED pid is still alive, which is right for the first pass
+    and wrong for the escalation: by then the root is exactly the process most
+    likely to have exited, and `already_gone` was reported for a job whose
+    descendants were still running. Identity is preserved because each pid
+    carries the starttime read a moment before it was signalled.
+    """
+    if sig not in ("TERM", "KILL"):
+        raise ValueError("sig must be TERM or KILL, got %r" % (sig,))
+    if not pairs:
+        return _ST_FN + "echo VIBEIC_SWEEP_SKIP no_identities; "
+    body = ["VSEEN=''; "]
+    for pid, st in pairs:
+        body.append(
+            "VC=$(__vic_st %s); "
+            "if [ \"$VC\" = %s ]; then kill -%s %s 2>/dev/null || :; "
+            "VSEEN=\"$VSEEN %s\"; fi; "
+            % (shlex.quote(str(int(pid))), shlex.quote(str(st)), sig,
+               shlex.quote(str(int(pid))), shlex.quote(str(int(pid)))))
+    # `$VSEEN` is unquoted HERE ON PURPOSE: word-splitting collapses the
+    # accumulator's leading blank so the line reads `VIBEIC_SWEEP KILL 62` and
+    # `VIBEIC_SWEEP KILL` when nothing matched — one shape a reader and a
+    # parser can both take literally.
+    body.append("echo VIBEIC_SWEEP %s $VSEEN; " % (sig,))
+    return _ST_FN + "".join(body)
+
+
+def reap_identities(reap_output: str) -> List[Tuple[int, str]]:
+    """The ``(pid, starttime)`` pairs a `reap_command` recorded.
+
+    Pairs with an empty starttime are dropped: a process that could not be
+    read a moment before it was signalled cannot be identified a moment after.
+    """
+    out: List[Tuple[int, str]] = []
+    for line in (reap_output or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "VIBEIC_REAP_ID":
+            pid, _, st = parts[1].partition(":")
+            if pid.isdigit() and st.isdigit():
+                out.append((int(pid), st))
+    return out
 
 
 def new_job_pidfile() -> str:
@@ -458,10 +525,30 @@ def kill_supervised_job(container: str, pidfile: str, *,
         _rc, out, _err = docker_exec_raw(
             container, reap_command(pidfile, "TERM"), timeout=timeout)
         seen.append(out or "")
+        # WHO WAS THERE, read a moment before the TERM. Harvested here because
+        # the KILL pass below cannot re-derive it: `_IDENTITY_GATE` refuses to
+        # walk the tree at all once the STAMPED pid is gone, and that is the
+        # pid most likely to have obeyed the TERM.
+        pairs = reap_identities(out or "")
         time.sleep(min(term_grace_s, 30))
         _rc, out, _err = docker_exec_raw(
             container, reap_command(pidfile, "KILL"), timeout=timeout)
         seen.append(out or "")
+        # THE SURVIVOR SWEEP, and it is not belt-and-braces (vibe-ic#2117).
+        # MEASURED 2026-09-07 on 8HD-9, image sha256:8c5694ab, a real ngspice
+        # SIGSTOPped mid-run: TERM killed the launching shell (the stamped
+        # root) and could not touch the stopped simulator; the KILL pass then
+        # read the stamp, found the root gone, printed
+        # `VIBEIC_REAP_SKIP already_gone` and signalled NOTHING. The reap
+        # reported success and left the orphan the whole mechanism exists to
+        # prevent. A root that exits is the NORMAL case, not the exception:
+        # `supervised_container_command` execs `bash -lc <cmd>`, so the
+        # stamped pid is that shell whenever the command is anything but a
+        # single simple command, and the tool is its child.
+        if pairs:
+            _rc, out, _err = docker_exec_raw(
+                container, _sweep_command(pairs, "KILL"), timeout=timeout)
+            seen.append(out or "")
     except Exception:  # nosec — best-effort reap; never mask the tool's rc
         pass
     return "".join(seen)

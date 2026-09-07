@@ -83,6 +83,8 @@ __all__ = [
     "container_tree_probe",
     "container_id",
     "run_in_container_supervised",
+    "default_ceiling_notice",
+    "CEILING_CROSSED_MARK",
     "STALLED_RC",
     "docker_exec_argv",
     "ContainerImageMismatch",
@@ -441,11 +443,39 @@ def _raw_exec(container: str, cmd: str, timeout: int = 15):
     return cp.returncode, cp.stdout or "", cp.stderr or ""
 
 
+#: The line a supervised container run prints ONCE when its recorded budget is
+#: crossed. A stable, greppable prefix so a log reader can find the crossing
+#: without parsing prose, and so a test can assert the announcement happened.
+CEILING_CROSSED_MARK = "VIBEIC_CEILING_CROSSED"
+
+
+def default_ceiling_notice(container: str, ceiling_s: float, out=None):
+    """The notice `run_in_container_supervised` installs when given none.
+
+    ANNOUNCE AND CONTINUE. The budget stops nothing (vibe-ic#2051); its whole
+    value is that a reader watching a long run learns, at the moment it
+    happens, that this job has passed the time the flow used to allow it — and
+    that it is still working. Written to stderr because that is where a
+    supervisor's remarks about a run belong; the tool's own stdout stays
+    exactly what the tool wrote.
+    """
+    stream = out if out is not None else sys.stderr
+
+    def notice(elapsed_s: float) -> None:
+        print(f"{CEILING_CROSSED_MARK} container={container} "
+              f"ceiling_s={float(ceiling_s):.0f} elapsed_s={float(elapsed_s):.0f}"
+              f" — the budget is a RECORD, not a kill: this job was NOT "
+              f"signalled and is still running.", file=stream, flush=True)
+    return notice
+
+
 def run_in_container_supervised(container: str,
                                 cmd: str,
                                 ceiling_s: float = 86_400.0,
                                 shell: Sequence[str] = ("bash", "-lc"),
                                 stall_looks: int = _pr.DEFAULT_STALL_LOOKS,
+                                ceiling_notice=None,
+                                poll_s: Optional[float] = None,
                                 ) -> subprocess.CompletedProcess:
     """Run ``cmd`` in ``container`` with NO CLOCK: reaped only on STILLNESS.
 
@@ -474,7 +504,23 @@ def run_in_container_supervised(container: str,
         is reaped where it lives, a computing one is never cut.
 
     ``ceiling_s`` is a RECORDED BUDGET and stops nothing (vibe-ic#2051):
-    `_watchdog` announces the crossing once and the job runs on.
+    the crossing is announced ONCE, on stderr, and the job runs on. The
+    announcement is this function's to install (vibe-ic#2117): `_watchdog`
+    calls an INJECTED `ceiling_notice`, `_progress_run.run` forwards one, and
+    until both halves were wired every `ceiling_s` handed to this function was
+    a budget whose crossing nothing outside the supervisor could observe --
+    recorded in `observations`, carried back on nothing, printed nowhere.
+    Pass `ceiling_notice=` to route it somewhere other than stderr.
+
+    `poll_s` is the OBSERVATION CADENCE, not a bound on anything. `None` keeps
+    the host-measured default (30 s here), which is right for a job measured in
+    minutes and is also why the crossing of a small budget by a short job is
+    not seen: the supervisor only looks between polls, so a job that finishes
+    inside the first look after the budget is never observed to have crossed
+    it. Exposed so a test can drive the announcement path against a REAL
+    container command instead of asserting that it exists. The stall grace is
+    `stall_looks * poll_s`, so a test that tightens the cadence must widen the
+    look count or it has quietly built a clock.
 
     Returns the tool's own `CompletedProcess`, or one carrying `STALLED_RC`
     with the stall reason AND the reap evidence on `.stderr` — never the tool's
@@ -496,6 +542,10 @@ def run_in_container_supervised(container: str,
     try:
         return _pr.run(argv, capture_output=True, text=True, errors="replace",
                        stall_looks=stall_looks, hard_ceiling_s=ceiling_s,
+                       ceiling_notice=(ceiling_notice or
+                                       default_ceiling_notice(container,
+                                                              ceiling_s)),
+                       **({} if poll_s is None else {"poll_s": float(poll_s)}),
                        progress_probe=container_tree_probe(container))
     except _pr.Stalled as exc:
         # REAP WHERE THE TOOL LIVES. The host-side supervisor has stopped

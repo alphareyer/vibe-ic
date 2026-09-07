@@ -396,6 +396,7 @@ def run(cmd, *, cwd=None, env=None, input=None,  # noqa: A002
         stall_looks: int = DEFAULT_STALL_LOOKS,
         poll_s: Optional[float] = None,
         hard_ceiling_s: float = HARD_CEILING_S,
+        ceiling_notice: Optional[Callable[[float], None]] = None,
         progress_probe: Optional[Callable[[Dict[str, bool]],
                                           Callable[[object], Optional[float]]]]
         = None,
@@ -533,6 +534,17 @@ def run(cmd, *, cwd=None, env=None, input=None,  # noqa: A002
             stall_grace_s=stall_looks * poll_s,
             poll_s=poll_s,
             hard_ceiling_s=hard_ceiling_s,
+            # THE HALF THAT MADE THE BUDGET OBSERVABLE, and it was missing
+            # (vibe-ic#2117). `_watchdog` records the crossing in its own
+            # `observations` and calls `ceiling_notice` ONCE -- and this
+            # function, the entry point every `run_in_container_supervised`
+            # caller reaches the supervisor through, passed no notice and does
+            # not carry `observations` back on the `CompletedProcess`. So a
+            # `ceiling_s` handed to `run_in_container_supervised` was a budget
+            # whose crossing NOTHING could observe: declared, recorded inside
+            # the supervisor, and announced to nobody. Forwarded verbatim; a
+            # caller that passes nothing behaves exactly as before.
+            ceiling_notice=ceiling_notice,
             cpu_probe=probe,
             popen_factory=popen_factory,
             env=env,
