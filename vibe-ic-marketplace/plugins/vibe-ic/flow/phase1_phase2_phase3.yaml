@@ -845,6 +845,39 @@ steps:
         # the two tracks needs converging, not an automatic stop); running is
         # not. A missing/unparseable report exits 1 here, because a second
         # track that can quietly not run is the same as no second track.
+        #
+        # IT RUNS AFTER THIS STEP'S OWN L DOCUMENTS, AND THAT IS AN OBLIGATION,
+        # NOT AN ACCIDENT OF WHERE THE CLAUSE SITS (#2144). The track selects
+        # its expert pack CLASS-FIRST (#2094): the design's registered
+        # `ic_class` chooses which expert-DB entries the pack may carry, and
+        # lexical phrase retrieval only RANKS within them. It learns that class
+        # from `ic_class_profile.detect_ic_class`, which classifies from
+        # `phase1/generated_docs/L1_*`, `L2_*` and `L3_*` — this step's own
+        # `required_outputs` above. An INTRA-step order, so no `blocks_on` edge
+        # can carry it: `blocks_on` orders STEPS and both halves are D1.
+        #
+        # ASKED BEFORE THOSE DOCUMENTS EXIST the classifier returns at its
+        # `no_l1_l2_l3_docs` branch with `unknown`, the class-first selection
+        # cannot fire, and a PROFILED class silently receives the unconfined
+        # phrase-selected pack with a null target module and a null interface
+        # contract — the #2094 defect, restored, with the runner still exiting
+        # 0. MEASURED: hoisting `run_phase1_second_track` above the
+        # doc-extraction call in `phase1_one_shot_runner.main` takes a profiled
+        # class from CLASS_CONFINED/ASSEMBLED to
+        # LEXICAL_UNCONFINED/NOT_A_REGISTERED_CLASS, and before #2144 that
+        # reorder moved NO test in the impacted selection.
+        #
+        # THE OTHER REMEDY WAS REFUSED BY MEASUREMENT, not by preference:
+        # classifying early from the design INPUT prose instead. Run over the
+        # classifier's own unmodified cascade it re-classes 13 of the 51
+        # already-classed corpus roots that carry an `input/` directory,
+        # including the only class the expert DB profiles. A non-`unknown`
+        # class is PERSISTED on first sight and every later call returns it
+        # (#435), so an early input-derived class is not wrong once — it is
+        # frozen for the run.
+        #
+        # PINNED BOTH WAYS by
+        # `programs/tests/test_issue2144_expert_track_runs_after_the_l_docs.py`.
         - program_exit_zero: "phase1_expert_parse_track ."
         # The CLAUSE that reads the two extraction-coverage entries moved here
         # from step 1 (#1219). Without it, moving the declaration alone would

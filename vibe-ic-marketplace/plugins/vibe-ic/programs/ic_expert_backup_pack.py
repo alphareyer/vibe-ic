@@ -253,7 +253,7 @@ def _spec_requirements(prompt: str,
     return reqs
 
 
-def class_first_disposition(ic_class) -> Dict[str, Any]:
+def class_first_disposition(ic_class, availability=None) -> Dict[str, Any]:
     """What CLASS-FIRST did, or did not do, for `ic_class` — for a CONSUMER's
     record, not for the agent's pack.
 
@@ -265,7 +265,17 @@ def class_first_disposition(ic_class) -> Dict[str, Any]:
     something the registry does not name, including the absent/unknown case).
     Collapsing the middle state into the last is how an unprofiled class goes
     silent: the record would say "no class" where the truth is "a class nobody
-    has profiled yet"."""
+    has profiled yet".
+
+    `availability` (#2144) is the CALLER's statement of why it had no class to
+    pass, as `phase1_expert_parse_track.registered_ic_class_disposition` returns
+    it. This function is handed a NAME and cannot itself tell "the classifier
+    read the design and could not place it" from "the classifier had not run
+    yet" — so the last state above absorbed both, and a reader of a pack
+    assembled too early was told the registry did not carry the name. When the
+    caller supplies it, it is recorded verbatim under `class_availability` and
+    the state's `reason` names it. Omitted (the default) the returned dict is
+    byte-identical to the pre-#2144 one, so no existing consumer moves."""
     try:
         import ic_expert_db_query as _dbq
         profile = _dbq.registered_class_profile(ic_class)
@@ -288,11 +298,21 @@ def class_first_disposition(ic_class) -> Dict[str, Any]:
                            "are unchanged and the pack is NOT refused — refusing on "
                            "an unprofiled class would score the absence of a profile "
                            "as the design's deficiency")}
-    return {"ic_class": ic_class, "registered": False,
-            "profile": "NOT_A_REGISTERED_CLASS",
-            "db_class_selection": "LEXICAL_UNCONFINED", "db_classes": [],
-            "reason": ("no registered ic_class was supplied, or the name is not one "
-                       "the registry carries")}
+    out = {"ic_class": ic_class, "registered": False,
+           "profile": "NOT_A_REGISTERED_CLASS",
+           "db_class_selection": "LEXICAL_UNCONFINED", "db_classes": [],
+           "reason": ("no registered ic_class was supplied, or the name is not one "
+                      "the registry carries")}
+    if isinstance(availability, dict) and availability.get("reason_class"):
+        # STATED, never substituted: the sentence above stays exactly as it was
+        # (it is what this function, holding only a name, can say) and the
+        # caller's reason is added beside it. Overwriting it would trade one
+        # under-determined record for another.
+        out["class_availability"] = dict(availability)
+        out["reason"] = (
+            f"{out['reason']}. The caller states why it had none: "
+            f"{availability['reason_class']} — {availability.get('reason', '')}")
+    return out
 
 
 def assemble(prompt: str, iface: Optional[List[Dict[str, Any]]], target: Optional[str],

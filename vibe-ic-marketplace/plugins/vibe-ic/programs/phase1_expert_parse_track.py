@@ -500,6 +500,109 @@ def input_text(project: Path) -> str:
     return "\n".join(parts)[:_INPUT_TEXT_CAP]
 
 
+#: `registered_ic_class_disposition` reason codes. See its docstring: these
+#: are THREE different zeros and the record must not spell them the same way.
+CLASS_CLASSIFIED = "CLASSIFIED"
+CLASS_NOT_YET_CLASSIFIABLE = "NOT_YET_CLASSIFIABLE"
+CLASS_UNCLASSIFIABLE = "UNCLASSIFIABLE"
+CLASS_NOT_MEASURED = "NOT_MEASURED"
+
+#: The L-doc prefixes `ic_class_profile._detect_ic_class_infer` requires before
+#: any classification branch can be reached: with L1, L2 and L3 all absent it
+#: returns at its own `no_l1_l2_l3_docs` branch without consulting a single
+#: feature. Named here so this module asks the question STRUCTURALLY (do those
+#: documents exist?) instead of matching the classifier's `decisive_evidence`
+#: prose — prose cannot distinguish "the classifier had nothing to read" from
+#: "the classifier read and was unconvinced", which is the very distinction
+#: this disposition exists to make.
+_CLASSIFIER_REQUIRED_L_DOCS = ("L1_", "L2_", "L3_")
+
+
+def _classifier_has_documents(project: Path) -> bool:
+    """True when this tree carries something the classifier can classify FROM.
+
+    Either a class already persisted at `reports/ic_class.json` (#435 — then the
+    answer is knowable by definition), or at least one of the three L documents
+    the inference needs before it can reach any branch.
+    """
+    if (project / "reports" / "ic_class.json").is_file():
+        return True
+    try:
+        docs = _pl.generated_docs_dir(project)
+    except Exception:  # noqa: BLE001 — an unreadable layout is not a class fact
+        return False
+    if not docs.is_dir():
+        return False
+    return any(next(docs.glob(f"{pfx}*.json"), None) is not None
+               for pfx in _CLASSIFIER_REQUIRED_L_DOCS)
+
+
+def registered_ic_class_disposition(project: Path) -> Dict[str, Any]:
+    """The design's REGISTERED ic_class AND, when there is none, WHY.
+
+    `registered_ic_class` returns `None` for three different reasons and the
+    consumer's record spelled all three the same way — "no registered ic_class
+    was supplied, or the name is not one the registry carries". Only one of the
+    three is a statement about the DESIGN:
+
+      CLASSIFIED            a registered class was detected; class-first fires.
+      NOT_YET_CLASSIFIABLE  this tree carries no persisted class and none of the
+                            L documents the classifier reads, so the class is
+                            not KNOWABLE at this point in the run. That is an
+                            ORDERING fact about when the track was asked — the
+                            L docs are step D1's own `required_outputs` and the
+                            track is D1's own gate clause, so a run that reaches
+                            the track through the flow has them. Reported under
+                            its own name because a reader who sees the flat
+                            "no registered ic_class" cannot tell this apart from
+                            a design the classifier genuinely could not place,
+                            and the two need opposite responses: this one is
+                            fixed by asking later, that one never is.
+      UNCLASSIFIABLE        the classifier DID read L documents and still
+                            answered `unknown` — its fail-closed verdict, and a
+                            real reading. `unknown` is not a class: handing it
+                            to the expert DB would look up a profile for a name
+                            that means "we do not know".
+      NOT_MEASURED          the classifier could not be consulted at all. Never
+                            defaulted to one of the other three: "could not read
+                            it" is not "read it and there was nothing".
+
+    #2144. §4.05: reads the classifier's answer about the project, never an
+    oracle or golden output.
+    """
+    try:
+        import ic_class_profile as _icp
+        profile = _icp.detect_ic_class(project) or {}
+    except Exception as exc:  # noqa: BLE001 — a missing class is context, never a fail
+        return {"ic_class": None, "reason_class": CLASS_NOT_MEASURED,
+                "reason": (f"the classifier could not be consulted ({exc}); "
+                           f"this is an unread classifier, not an unclassified "
+                           f"design")}
+    cls = profile.get("ic_class")
+    if cls and cls != "unknown":
+        return {"ic_class": cls, "reason_class": CLASS_CLASSIFIED,
+                "reason": "the run's own detected class"}
+    if not _classifier_has_documents(project):
+        return {
+            "ic_class": None,
+            "reason_class": CLASS_NOT_YET_CLASSIFIABLE,
+            "reason": (
+                "this tree carries no persisted class and none of the "
+                f"{'/'.join(p.rstrip('_') for p in _CLASSIFIER_REQUIRED_L_DOCS)} "
+                "documents the classifier reads, so the class is not knowable "
+                "HERE — the expert track was asked before step D1 produced the "
+                "L documents it classifies from. The class-first pack selection "
+                "cannot fire on this tree, and that is a fact about WHEN the "
+                "track ran, not about the design"),
+        }
+    return {
+        "ic_class": None,
+        "reason_class": CLASS_UNCLASSIFIABLE,
+        "reason": ("the classifier read the L documents and answered "
+                   "`unknown` — its fail-closed verdict, and a real reading"),
+    }
+
+
 def registered_ic_class(project: Path) -> Optional[str]:
     """The design's REGISTERED ic_class, or None when it has not been detected.
 
@@ -509,13 +612,12 @@ def registered_ic_class(project: Path) -> Optional[str]:
     second inference taken at a different point in the run. `"unknown"` is the
     classifier's fail-closed answer and is NOT a class: returning it would make
     the expert DB look up a profile for a name that means "we do not know".
+
+    WHY None was returned is `registered_ic_class_disposition` (#2144). This
+    function keeps its single-value contract — every caller of it wants a class
+    or nothing — and the reason goes in the RECORD, where a reader looks.
     """
-    try:
-        import ic_class_profile as _icp
-        cls = (_icp.detect_ic_class(project) or {}).get("ic_class")
-    except Exception:  # noqa: BLE001 — a missing class is context, never a fail
-        return None
-    return cls if cls and cls != "unknown" else None
+    return registered_ic_class_disposition(project).get("ic_class")
 
 
 def retrieved_classes(prompt: str, k: int = 5, ic_class=None) -> List[Dict[str, Any]]:
@@ -1113,7 +1215,7 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
 # ── the AI sub-track ────────────────────────────────────────────────────────
 
 def ai_subtrack(project: Path, prompt: str, out_dir: Path,
-                ic_class=None) -> Dict[str, Any]:
+                ic_class=None, class_availability=None) -> Dict[str, Any]:
     """Hand the open-ended reading to the IC Expert Agent.
 
     Uses `ic_expert_backup_pack` — the assembler this doctrine already built
@@ -1173,7 +1275,8 @@ def ai_subtrack(project: Path, prompt: str, out_dir: Path,
         # to confine it with, so without this the unprofiled case would leave
         # no trace anywhere and "we did not confine" would be indistinguishable
         # from "there was nothing to confine".
-        status["class_first"] = _pack.class_first_disposition(ic_class)
+        status["class_first"] = _pack.class_first_disposition(
+            ic_class, availability=class_availability)
         status["pack_assembly_status"] = (
             (handoff.get("class_first") or {}).get("assembly_status")
             or "NOT_EVALUATED")
@@ -1237,9 +1340,11 @@ def evaluate(project: Path) -> Dict[str, Any]:
     out_dir = _pl.report_path(project, "phase1/expert_parse_track").parent \
         / "expert_parse_track_pack"
 
-    ic_class = registered_ic_class(project)
+    availability = registered_ic_class_disposition(project)
+    ic_class = availability.get("ic_class")
     rules = [fn(project) for fn in DETERMINISTIC_RULES]
-    ai = ai_subtrack(project, prompt, out_dir, ic_class=ic_class)
+    ai = ai_subtrack(project, prompt, out_dir, ic_class=ic_class,
+                     class_availability=availability)
 
     findings: List[Dict[str, Any]] = []
     for r in rules:

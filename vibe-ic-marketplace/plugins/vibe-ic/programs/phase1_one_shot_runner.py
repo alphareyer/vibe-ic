@@ -1207,7 +1207,20 @@ def _run_step_0_5ic(project: Path, pdk: str = "") -> int:
 def run_phase1_second_track(project: Path, rc_in: int) -> int:
     """The second track, run after the L-docs exist. Returns the exit code
     Phase 1 should report: a track that did not run overrides a clean backend
-    run, and a backend failure is never masked by the track passing."""
+    run, and a backend failure is never masked by the track passing.
+
+    THE ORDER IS LOAD-BEARING, AND IT IS THE WHOLE OF #2144. This call must
+    stay BELOW the doc-extraction call in `main`. The track selects its expert
+    pack CLASS-FIRST (#2094), and it learns the class from
+    `ic_class_profile.detect_ic_class`, which classifies from the L documents
+    step D1 emits — they are D1's own `required_outputs` and this track is D1's
+    own gate clause, which is where `flow/phase1_phase2_phase3.yaml` states the
+    obligation. Hoisted above them the classifier answers `unknown`, a PROFILED
+    class's pack falls back to the unconfined phrase-selected one with a null
+    target module and a null contract, and the run still exits 0 — measured.
+    `test_issue2144_expert_track_runs_after_the_l_docs` is the pin; before it,
+    that reorder moved no test in the impacted selection.
+    """
     print("[phase1] expert track (second track) ...")
     rc_track = _run_expert_track(project)
     return max(int(rc_in or 0), rc_track)
