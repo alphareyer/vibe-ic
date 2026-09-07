@@ -28,6 +28,7 @@ from typing import Callable, Iterable, TypeVar
 
 from _atomic_artefact import write_json as _atomic_write_json
 from _atomic_artefact import write_text as _atomic_write_text
+import _runtime_pair_preflight as _runtime_pair
 
 HARNESS = Path(__file__).resolve().parent.parent / "benchmark"
 REGISTRY = HARNESS / "BENCHMARK_REGISTRY.json"
@@ -3538,6 +3539,90 @@ def _prepare_general_solve_run(bench: str, dataset: Path, run_p: Path,
               "scored or published as a benchmark result")
 
 
+#: Where a coordinator records what it reconciled before it launched anything.
+#: A run directory, never a committed artefact -- which is why the VERBATIM
+#: refusal, repository and all, may live in it.
+_RUNTIME_PAIR_RECORD = "runtime_pair_preflight.json"
+
+
+def _write_runtime_pair_record(run_p: Path, record: dict) -> None:
+    """Record the reconciliation where the run that used it can be read with it."""
+    with contextlib.suppress(OSError):
+        run_p.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(run_p / _RUNTIME_PAIR_RECORD, record)
+
+
+def _runtime_pair_before_fan_out(rows, run_p: Path, operation: str) -> int | None:
+    """`None` to fan out over `rows`; `2` to launch ZERO workers.
+
+    THE FAN-OUT SITE, for the coordinator whose fan-outs are CONDITIONAL.
+    `--solve` always launches workers and asks the pair at its front door;
+    `--resume` does not. Most of what resume does — accepting a review,
+    refusing a re-entry under a stale source identity, writing a worklist — is
+    bookkeeping that needs no container at all, and refusing all of it on the
+    state of the machine would answer a routing question with a deployment one.
+
+    An empty `rows` is NOT a fan-out: `_ordered_parallel_map` never enters the
+    worker for it. Asking the pair there would make a resume with nothing to run
+    depend on a container it was never going to use.
+    """
+    if not rows:
+        return None
+    rc, _record = _runtime_pair_gate(run_p, operation)
+    return rc
+
+
+def _runtime_pair_gate(run_p: Path, operation: str,
+                       pristine: bool = False) -> tuple[int | None, dict]:
+    """`(None, record)` to fan out; `(2, record)` to launch ZERO workers.
+
+    THE PAIR IS ASKED BEFORE THE FIRST WORKER, and that placement is the whole
+    fix. #2120: the pin required one digest, the shared container ran another
+    build carrying the SAME version label, a freshly started MCP answered
+    "16/16 checks passed" about it, and this dispatcher fanned out anyway. Every
+    worker then recorded provenance about a container that was not the one the
+    pin demands; the batch had to be stopped and excluded from results.
+
+    Asking per worker would be worse, not better: N identical refusals, N
+    partially-built projects, and a run root that has to be reasoned about
+    before it can be thrown away. One question, before anything exists.
+
+    A MISMATCH IS AN INFRASTRUCTURE VERDICT (`RUNTIME_INFRASTRUCTURE_NOT_READY`)
+    and is recorded as one. No problem was attempted, so there is no design to
+    FAIL and nothing for an AI repair task to repair -- charging a deployment's
+    state to a design is how a machine problem becomes a score.
+
+    `pristine` says the run root is still a clean room that has not been built
+    yet. A refusal must not be the thing that stops the CORRECTED re-run: the
+    record then goes to a SIBLING path, because dropping a file into the run
+    root would make the next `--solve` refuse it as non-empty and the operator
+    would read the clean-room message instead of the mismatch.
+    """
+    record = _runtime_pair.preflight()
+    record["operation"] = operation
+    if record["verdict"] == _runtime_pair.RUNTIME_PAIR_MATCH:
+        print(_runtime_pair.pair_line(record))
+        return None, record
+    record["failure_class"] = _runtime_pair.RUNTIME_INFRASTRUCTURE_NOT_READY
+    record["workers_launched"] = 0
+    if pristine:
+        with contextlib.suppress(OSError):
+            _atomic_write_json(
+                run_p.parent / f"{run_p.name}.{_RUNTIME_PAIR_RECORD}", record)
+    else:
+        _write_runtime_pair_record(run_p, record)
+    print(f"{_runtime_pair.RUNTIME_INFRASTRUCTURE_NOT_READY}: "
+          f"{_runtime_pair.pair_line(record)}", file=sys.stderr)
+    # VERBATIM. `_eda_pin` composed these; re-wording one would hand the reader
+    # a summary of a mismatch instead of the mismatch itself.
+    for line in record["evidence"]:
+        print(line, file=sys.stderr)
+    print(f"0 worker(s) launched; the runtime pair was reconciled before "
+          f"fan-out and {record['disagreed']} disagreed. This is NOT a design "
+          f"result: no problem was attempted.", file=sys.stderr)
+    return 2, record
+
+
 def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                       jobs: int = 1, heavy_jobs: int | None = None,
                       worker_threads: int = 0) -> int:
@@ -3591,7 +3676,11 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
         return 2
 
     ds, run_p = Path(dataset).resolve(), Path(run).resolve()
+    gate_rc, pair_record = _runtime_pair_gate(run_p, "solve", pristine=True)
+    if gate_rc is not None:
+        return gate_rc
     _prepare_general_solve_run(bench, ds, run_p, fmt, limit)
+    _write_runtime_pair_record(run_p, pair_record)
     runner = Path(__file__).resolve().parent / "vibe_ic_one_shot_runner.py"
     runner_budget = _RunnerBudget(jobs, heavy_jobs, worker_threads)
     problem_rows = []
@@ -4070,6 +4159,9 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                 "project": (run_p / "projects" /
                             re.sub(r"[^\w.-]", "_", pid)),
             })
+    gate_rc = _runtime_pair_before_fan_out(retry_plans, run_p, "resume:retry")
+    if gate_rc is not None:
+        return gate_rc
     retry_outcomes = _ordered_parallel_map(
         [(p["id"], p["project"], False, p["result"].get("entry"),
           p["result"].get("exit"))
@@ -4201,6 +4293,10 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         })
 
     backup_run_plans = [p for p in backup_plans if p["kind"] == "run"]
+    gate_rc = _runtime_pair_before_fan_out(backup_run_plans, run_p,
+                                           "resume:ai-backup")
+    if gate_rc is not None:
+        return gate_rc
     backup_outcomes = iter(_ordered_parallel_map(
         [(p["id"], p["project"], True, None, p["result"].get("exit"))
          for p in backup_run_plans],
@@ -4439,6 +4535,10 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         })
 
     repair_run_plans = [p for p in repair_plans if p["kind"] == "run"]
+    gate_rc = _runtime_pair_before_fan_out(repair_run_plans, run_p,
+                                           "resume:repair")
+    if gate_rc is not None:
+        return gate_rc
     repair_outcomes = iter(_ordered_parallel_map(
         [(p["id"], p["project"], True, None, p["result"].get("exit"))
          for p in repair_run_plans],

@@ -6367,6 +6367,70 @@ function _containerImageIdentity(inspect = _spawnSync) {
   return { ok: true, detail: `${named}; newest local image` };
 }
 
+// TOOL AVAILABILITY IS NOT EXECUTION READINESS, and #2120 is the measurement.
+//
+// A newly started MCP reported `16/16 checks passed` against an upgraded shared
+// container. Sixteen tools were present and every one of them worked. None of
+// that says the general runner would SELECT that container, or accept its
+// digest — and it did not:
+//
+//     the installed pin required            sha256:8c5694ab…
+//     a fresh pull of the published :latest sha256:1463dac5…
+//     …whose own version label ALSO read    0.3.48
+//
+// Same version, different build, different bytes. The dispatcher fanned out,
+// every worker recorded provenance about a container the pin does not name, and
+// the batch had to be stopped and excluded from results. A human reading two
+// `0.3.48`s beside "16/16 checks passed" had nothing to see.
+//
+// So the PAIR gets its own line, separate from every `tool_*` row, and it is
+// HARD: `allOk` is what a reader turns into "I can run". A soft line here would
+// reproduce exactly the report that was already misread once.
+//
+// The pin lives in `programs/_eda_pin.py` and is stated ONCE. This asks that
+// module rather than re-spelling the digest in JavaScript — a second copy of a
+// runtime identity is the defect `_eda_pin` was written to end, not a shortcut
+// worth taking to avoid a subprocess.
+//
+// DIGESTS AND A CONTAINER NAME, NEVER A REPOSITORY. `pair_line()` composes the
+// line, and a deployment's registry address is configuration that does not
+// belong in a report an operator may paste anywhere.
+const _RUNTIME_PAIR_PY =
+  "import json,sys;" +
+  "sys.path.insert(0,'.');" +
+  "import _runtime_pair_preflight as R;" +
+  "r=R.preflight();" +
+  "print(json.dumps({'ok': r['verdict']==R.RUNTIME_PAIR_MATCH," +
+  "'line': R.pair_line(r), 'disagreed': r['disagreed']}))";
+
+function _runtimePairIdentity(spawn = _spawnSync) {
+  const r = spawn("python3", ["-c", _RUNTIME_PAIR_PY],
+    { cwd: VIBE_IC_PROGRAMS_DIR, encoding: "utf-8", timeout: 60000 });
+  if (!r || r.status !== 0 || !r.stdout) {
+    // COULD-NOT-ASK IS NOT A MATCH. The one substitution this check exists to
+    // refuse is a clean-looking report about a pair nobody reconciled.
+    const why = String((r && (r.stderr || r.stdout)) || "python3 did not run")
+      .trim().split("\n").slice(-1)[0];
+    return { ok: false, detail:
+      `RUNTIME_PAIR_NOT_MEASURED: could not reconcile the approved image, the ` +
+      `selected container and the pinned digest (${why}). Tool availability ` +
+      `above says nothing about whether the runner will accept this runtime.` };
+  }
+  let out;
+  try {
+    out = JSON.parse(String(r.stdout).trim().split("\n").slice(-1)[0]);
+  } catch (e) {
+    return { ok: false, detail:
+      `RUNTIME_PAIR_NOT_MEASURED: the preflight answer did not parse: ${e.message}` };
+  }
+  if (out.ok) return { ok: true, detail: out.line };
+  return { ok: false, detail:
+    `${out.line}. The approved image, the container the runner selects and the ` +
+    `pinned digest do not form a runnable pair, so this runtime is NOT ` +
+    `execution-ready however many tools answered above. Reconcile the release ` +
+    `pair; do not weaken the pin.` };
+}
+
 // ─── Tool: eda_doctor (v2.5.0) ───
 server.tool(
   "eda_doctor",
@@ -6417,6 +6481,19 @@ server.tool(
         detail: img.detail,
         soft: img.ok ? undefined : true,
       });
+    }
+
+    // 1d. THE PAIR. Separate from every `tool_*` row below and HARD, because
+    //     "16/16 checks passed" was read as execution-ready about a container
+    //     the pin does not name (#2120).
+    if (probe.ok) {
+      const pair = _runtimePairIdentity();
+      checks.push({
+        check: "runtime_pair_match",
+        ok: pair.ok,
+        detail: pair.detail,
+      });
+      if (!pair.ok) allOk = false;
     }
 
     // 2. Per-tool binaries (only if docker ok). v0.26.5 (was v2.6.5): SOFT_TOOLS now maps

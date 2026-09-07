@@ -16,6 +16,25 @@ sys.path.insert(0, str(PROGRAMS))
 import benchmark_dispatch as bd                         # noqa: E402
 import benchmark_io_adapter as bio                      # noqa: E402
 
+import sys as _rt_sys
+from pathlib import Path as _rt_path
+_rt_sys.path.insert(0, str(_rt_path(__file__).resolve().parent))
+import _runtime_pair_fixture as _rt_pair  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _matching_runtime_pair(monkeypatch):
+    """This module measures the coordinator AFTER fan-out; #2120 gates fan-out
+    on a live runtime-pair check (the pinned image is here, the container a run
+    selects exists, its digest IS the pin). Stating that precondition here keeps
+    these assertions about the code rather than about which containers this host
+    happens to be holding, and keeps `_eda_pin` out of the `subprocess.run`
+    fakes below. See `_runtime_pair_fixture` for why this is a precondition and
+    not a weakening; the mismatch direction is measured against the two real
+    same-version builds in `test_issue2120_runtime_pair_preflight.py`."""
+    _rt_pair.assume_matching_runtime_pair(monkeypatch)
+
+
 
 def _simulator_absent() -> str:
     """Why this host cannot EXECUTE a verification challenge, or "" if it can.

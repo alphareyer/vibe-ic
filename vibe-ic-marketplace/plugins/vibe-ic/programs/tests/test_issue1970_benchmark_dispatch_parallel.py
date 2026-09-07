@@ -28,6 +28,7 @@ import benchmark_io_adapter as bio                      # noqa: E402
 import flow_phase_attribution as fpa                    # noqa: E402
 import task_nature_route as tnr                         # noqa: E402
 from _hostpaths import require_repo                     # noqa: E402
+import _runtime_pair_fixture as _rt_pair                # noqa: E402
 
 
 def _phase_record() -> dict:
@@ -40,6 +41,11 @@ def _phase_record() -> dict:
 
 
 def _install_common_fakes(monkeypatch) -> None:
+    # A MATCHING RUNTIME PAIR, because these fixtures are about what the
+    # coordinator does AFTER it fans out (#2120 gates fan-out on the pair) and
+    # `fake_run` below replaces `subprocess.run` on the module object, which is
+    # how `_eda_pin` reaches docker. See `_runtime_pair_fixture`.
+    _rt_pair.assume_matching_runtime_pair(monkeypatch)
     monkeypatch.setattr(bes, "audit", lambda _root: {
         "verdict": "PASS", "findings": []})
     monkeypatch.setattr(bd, "_completeness_adapters", lambda: {})
