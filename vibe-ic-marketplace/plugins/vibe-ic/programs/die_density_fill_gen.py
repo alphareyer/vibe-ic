@@ -140,6 +140,11 @@ _REPORT_REL = "reports/phase3/die_density_fill.json"
 #: what the layout carries.
 _DRIVER_REL = "density_fill/pdk_fill_driver.rb"
 _MEASURE_REL = "density_fill/die_density_measure.py"
+#: Where those two engines are STAGED when the KLayout runner cannot reach the
+#: plugin's own installation (vibe-ic#2107). Beside the GDS, whose reachability
+#: this program has already PROVEN with `runner.covers`, and in a subdirectory
+#: so the basenames stay what every message and every report already names.
+_STAGE_REL = "density_fill"
 
 
 def _bridge(project: Path) -> Dict[str, Any]:
@@ -197,6 +202,50 @@ def resolve_script(project: Path, explicit: Optional[str],
         return cand, "$PDK_ROOT/$PDK/" + _PDK_SCRIPT_REL, tried
     tried.append("$PDK_ROOT/$PDK/" + _PDK_SCRIPT_REL + " (PDK_ROOT/PDK not set)")
     return None, "", tried
+
+
+def stage_engine(runner, path: Path, into: Path) -> Tuple[Path, Optional[str]]:
+    """`path` as the RUNNER can open it — a copy under `into` when it cannot.
+
+    THE DEFECT THIS EXISTS FOR (vibe-ic#2107). `path` is a HOST path under this
+    plugin's own installation, and the runner may be a CONTAINER. The plugin
+    tree is not one of the mounts the repo's own container helper creates —
+    `tools/vibeic-eda/restart-eda.sh` binds the designs directory and nothing
+    else — so on a container built exactly the way this repo says to build one
+    the host file exists, the container has no such path, and the failure
+    surfaced two layers down as KLayout's own
+    `Unable to open file: .../density_fill/die_density_measure.py (errno=2)`,
+    below a guard that had already answered "the engine is present".
+
+    Copying is sound because both engines are self-contained: the driver
+    `load`s the PDK's own generator by an absolute path taken from the
+    environment and pulls in no sibling of its own, and the measurement imports
+    only `json`, `os`, `sys` and `pya`. A copy of either is the same program.
+    Same remedy, and for the same measured reason, as `metal_fill_emit.run`.
+
+    Returns (path_for_the_runner, error_or_None). The error is NEVER folded
+    into a skip or a pass: an engine the runner cannot open is this program
+    failing, not the design failing and not the step being unsupported.
+    """
+    if runner.covers(path):
+        return path, None
+    dest = into / path.name
+    try:
+        into.mkdir(parents=True, exist_ok=True)
+        # ATOMIC, and not `dest.write_bytes` (vibe-ic#1082): a copy interrupted
+        # halfway leaves a TRUNCATED engine at a path that exists, and KLayout
+        # would then fail on a syntax error inside this program's own engine —
+        # a failure indistinguishable from a defect in the engine itself.
+        atomic_write_bytes(dest, path.read_bytes())
+    except OSError as exc:                                   # noqa: BLE001
+        return path, (f"{path} is not reachable from the {runner.kind} KLayout "
+                      f"environment ({runner.detail}) and could not be staged "
+                      f"into {into}: {exc}")
+    if not runner.covers(dest):
+        return dest, (f"neither {path} nor a copy of it at {dest} is reachable "
+                      f"from the {runner.kind} KLayout environment "
+                      f"({runner.detail})")
+    return dest, None
 
 
 def measure(runner, engine: Path, gds: Path, out_json: Path,
@@ -331,6 +380,10 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
         if not p.is_file():
             return done({"state": "FAIL",
                          "reason": f"this program's own engine is missing: {p}"})
+    # The loop above is a statement about THIS INSTALLATION, on the host that
+    # imported this module. It is NOT the check that matters for the open: the
+    # engines are handed to a KLayout that may live in a container. That second
+    # check is `stage_engine`, below, once the runner is known — see #2107.
 
     script, src, tried = resolve_script(project, script, pdk_root, pdk)
     if not script:
@@ -360,6 +413,26 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
             f"the GDS at {gds_path} is not reachable from the {runner.kind} "
             f"KLayout environment ({runner.detail}) — no fill was deposited",
             script=script, script_source=src))
+    # NOW the engines can be checked on the side that will OPEN them, and
+    # staged into the project tree — which `runner.covers(gds_path)` above has
+    # just proven the runner reaches — when they are not reachable where they
+    # are. vibe-ic#2107.
+    engines_staged: List[str] = []
+    resolved: List[Path] = []
+    for label, orig in (("fill driver", driver), ("density engine", engine)):
+        got, why = stage_engine(runner, orig, gds_path.parent / _STAGE_REL)
+        if why:
+            return done({"state": "FAIL",
+                         "runner": f"{runner.kind}:{runner.detail}",
+                         "script": script, "script_source": src,
+                         "reason": (f"this program's {label} is present on this "
+                                    f"host but cannot be opened where KLayout "
+                                    f"runs: {why}")})
+        if got != orig:
+            engines_staged.append(str(got))
+        resolved.append(got)
+    driver, engine = resolved
+
     if not runner.exists(script):
         # Same distinction `die_finishing_gen` draws, and for the same reason:
         # a path the PDK/project DECLARED and that is not there is a broken
@@ -391,6 +464,7 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
     common = {"script": script, "script_source": src,
               "runner": f"{runner.kind}:{runner.detail}",
               "gds_in": str(gds_path),
+              "engines_staged": engines_staged or None,
               "die_um": die, "die_source": die_source,
               "skipped_passes": skip_passes,
               "skipped_passes_reason": (

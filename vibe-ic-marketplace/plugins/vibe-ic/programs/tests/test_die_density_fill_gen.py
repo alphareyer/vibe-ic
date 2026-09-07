@@ -493,3 +493,126 @@ def test_the_runner_tells_the_program_which_layers_its_own_filler_owns():
     src = _RUNNER.read_text()
     assert 'metal_fill_density_cfg.json' in src
     assert '"--owned-layer"' in src
+
+
+# ── vibe-ic#2107: the engine is CHECKED on the host and OPENED in the container ──
+#
+# The program shipped a host `Path.is_file()` guard over its two engines and
+# then handed those same host paths to a KLayout that, on every normal flow
+# run, lives inside a container. The plugin tree is not one of the mounts the
+# repo's own `tools/vibeic-eda/restart-eda.sh` creates (lines 194-195 bind the
+# designs directory and nothing else), so the guard passed, the open failed,
+# and the run recorded
+#
+#   state  = FAIL
+#   reason = could not measure the die BEFORE filling: the density measurement
+#            wrote no report (rc=1): ERROR: Unable to open file:
+#            .../programs/density_fill/die_density_measure.py (errno=2)
+#   runner = container:<name>:klayout
+#
+# — a die-density number that is NOT_MEASURED-by-the-plugin reading as a
+# non-PASS of the layout. The two tests below are the two directions: the
+# engines must be reachable where KLayout runs, and an engine that genuinely
+# cannot be reached there must FAIL by name rather than skip or pass.
+
+class _ContainerFakeRunner(_FakeRunner):
+    """`_FakeRunner`, but it can only open what its bind mounts cover.
+
+    Everything the real `ContainerRunner` does that matters here: `covers` is a
+    prefix test over the mount list, and a script outside it is not a script
+    this runner can execute — KLayout answers `Unable to open file: … (errno=2)`
+    and writes nothing, which is exactly what the reported run recorded.
+    """
+
+    kind = "container"
+
+    def __init__(self, mount, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._mount = str(mount).rstrip("/")
+        self.detail = "fake:klayout"
+        self.refused = []
+
+    def covers(self, p):
+        q = str(p)
+        return q == self._mount or q.startswith(self._mount + "/")
+
+    def exists(self, p):
+        # The PDK's own generator lives in the container's tree, not the host's.
+        return True
+
+    def run(self, script, env, *, path_keys=(), timeout=1800):
+        if not self.covers(script):
+            self.refused.append(str(script))
+            return 1, "", f"ERROR: Unable to open file: {script} (errno=2)"
+        return super().run(script, env, path_keys=path_keys, timeout=timeout)
+
+
+def test_the_engines_are_made_reachable_where_klayout_actually_runs(tmp_path, monkeypatch):
+    """THE DEFECT (#2107). The engines live under the plugin install, which the
+    container does not mount; the GDS lives in the project, which it does. The
+    step must reach the engines from the side that opens them — and it must not
+    hand the runner a single path the runner cannot open."""
+    gds = _project(tmp_path)
+    before = _measurement(DIE, DIE, {34: 404500.0})
+    after = _measurement(DIE, DIE, {34: 1566500.0})
+    runner = _ContainerFakeRunner(tmp_path, [before, after])
+    monkeypatch.setattr(DDF._kl, "find_runner", lambda *a, **k: runner)
+    res = DDF.run(tmp_path, str(gds), "/pdk/fill_all.rb", None, "somepdk",
+                  1936, 2531, "spm", 8, False, None, True, None, 60)
+    fill = res["fill"]
+    assert runner.refused == [], runner.refused
+    assert fill["state"] == "PASS", fill
+    # …and it says so in the report, because a copy that is never disclosed is
+    # indistinguishable from an engine that was reachable all along.
+    staged = fill.get("engines_staged") or []
+    assert len(staged) == 2, fill
+    for q in staged:
+        assert runner.covers(q), q
+        assert Path(q).is_file(), q
+    by_name = {Path(q).name: Path(q).read_bytes() for q in staged}
+    assert by_name[_DRIVER.name] == _DRIVER.read_bytes()
+    assert by_name[_MEASURE.name] == _MEASURE.read_bytes()
+
+
+def test_an_engine_the_runner_still_cannot_open_is_a_named_failure(tmp_path, monkeypatch):
+    """The other direction, so the test above cannot be satisfied by a step that
+    always passes. A runner that reaches the GDS but nothing beside it — docker
+    binds single files as readily as directories — leaves the engines
+    unreachable even after staging. That is this program failing, and it must
+    be recorded as FAIL with the engine named: never a DISCLOSED_SKIP (which
+    would read as "this PDK ships no filler") and never a PASS."""
+    gds = _project(tmp_path)
+    before = _measurement(DIE, DIE, {34: 404500.0})
+    after = _measurement(DIE, DIE, {34: 1566500.0})
+
+    class _OnlyTheGds(_ContainerFakeRunner):
+        def covers(self, p):
+            return str(p) == str(gds)
+
+    runner = _OnlyTheGds(tmp_path, [before, after])
+    monkeypatch.setattr(DDF._kl, "find_runner", lambda *a, **k: runner)
+    res = DDF.run(tmp_path, str(gds), "/pdk/fill_all.rb", None, "somepdk",
+                  1936, 2531, "spm", 8, False, None, True, None, 60)
+    fill = res["fill"]
+    assert fill["state"] == "FAIL", fill
+    assert "cannot be opened where KLayout runs" in fill["reason"], fill
+    assert _MEASURE.name in fill["reason"] or _DRIVER.name in fill["reason"], fill
+    assert runner.refused == [], "it must refuse BEFORE launching the engine"
+
+
+def test_a_runner_that_already_reaches_the_engines_stages_nothing(tmp_path):
+    """A host KLayout covers every path there is; copying its engines would be
+    a second copy of a file that was already the right one."""
+    into = tmp_path / "stage"
+    got, why = DDF.stage_engine(_FakeRunner([]), _MEASURE, into)
+    assert why is None
+    assert got == _MEASURE
+    assert not into.exists()
+
+
+def test_an_unreachable_engine_is_staged_into_a_directory_that_is_reachable(tmp_path):
+    into = tmp_path / "stage"
+    got, why = DDF.stage_engine(_ContainerFakeRunner(tmp_path, []), _MEASURE, into)
+    assert why is None
+    assert got == into / _MEASURE.name
+    assert got.read_bytes() == _MEASURE.read_bytes()
