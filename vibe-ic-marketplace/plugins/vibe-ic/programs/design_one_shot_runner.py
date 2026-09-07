@@ -14458,7 +14458,21 @@ def _chip_top_resolve_excluded_variant_params(project, rtl_dir, param_block,
         import staged_rtl_closure_preflight as _pf
     except Exception:  # noqa: BLE001 — never fail the emit on the analyser
         return param_block, resolved, refusals
-    files = _pf._gather([str(rtl_dir)])
+    # BLANKED, NOT JUST DE-COMMENTED. `_pf._gather` strips COMMENTS and leaves
+    # STRING LITERALS intact, and a Verilog string mints a declaration exactly
+    # as a comment does. MEASURED on this function (#2102): a body carrying
+    #     initial $display("this variant is not used here: parameter
+    #                       sbox_impl_e SecSBoxImpl = SBoxImplCanright");
+    # survives the gatherer, is read by `_pf._PARAM_RE` as the module's OWN
+    # declared default, and RESOLVES the wrapper parameter to `SBoxImplCanright"`
+    # -- a value with the closing quote still on it, spliced into the emitted
+    # wrapper as broken Verilog, and derived from an English sentence that
+    # DENIES it. That is #706/#711 arriving through a string instead of a
+    # sentence, so the same shared blanker that guards `param_block` guards
+    # every file read here. It is length-preserving and idempotent over the
+    # comments the gatherer already removed, so nothing else moves.
+    files = {_p: _hdl_code_text.strip_hdl_comments_and_strings(_t)
+             for _p, _t in _pf._gather([str(rtl_dir)]).items()}
     if not files:
         return param_block, resolved, refusals
     defined = set()

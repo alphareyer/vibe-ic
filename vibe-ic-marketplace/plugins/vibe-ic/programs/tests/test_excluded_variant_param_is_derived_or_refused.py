@@ -359,6 +359,13 @@ _NP_POSITIONS = [
     ("sbox_module_comment", "sbox", "// {s}\n"),
     ("sbox_cond_comment", "sbox", "  // {s}\n"),
     ("top_inst_comment", "top", "  // {s}\n"),
+    # A VERILOG STRING LITERAL IN THE RTL, which `_pf._gather` does NOT blank.
+    # This position was ADDED after the other ten passed and it was the one
+    # that failed: the sentence survived the gatherer, `_pf._PARAM_RE` read it
+    # as the module's own declared default, and the wrapper resolved to
+    # `SBoxImplCanright"` -- closing quote included -- out of a sentence that
+    # DENIES it. The function now blanks strings on this path too.
+    ("sbox_string_literal", "sbox", "  initial $display(\"{s}\");\n"),
 ]
 _NP_PAYLOAD = {
     # A second `parameter` record for the SAME name, later in the block: read
@@ -384,6 +391,8 @@ _NP_PAYLOAD = {
     # A guarded instantiation of the excluded module at the integration top.
     "top_inst_comment": ("if (SecMasking == 0) begin : gen_m "
                          "thing_sbox_dom u_dom (.a(a), .b(b)); end"),
+    "sbox_string_literal":
+        "parameter sbox_impl_e SecSBoxImpl = SBoxImplCanright",
 }
 _NP_ANCHOR = {
     "sbox_param_comment":
@@ -396,6 +405,7 @@ _NP_ANCHOR = {
     "sbox_module_comment": "\nmodule thing_sbox #(",
     "sbox_cond_comment": "  if (!Masked) begin : gen_unmasked\n",
     "top_inst_comment": ") (input logic a, output logic b);\n",
+    "sbox_string_literal": ") (input logic a, output logic b);\n",
 }
 #: The positions the CODE arm proves live. Pinned as a SET, not a count: a
 #: change that quietly makes one of them unable to move the answer turns its
@@ -407,6 +417,7 @@ _NP_LIVE = {
     "wrapper_line_comment", "wrapper_block_comment", "wrapper_string_default",
     "sbox_param_comment", "sbox_block_comment", "sbox_inst_comment",
     "sbox_localparam_comment", "sbox_cond_comment", "top_inst_comment",
+    "sbox_string_literal",
 }
 
 
@@ -446,7 +457,7 @@ def _np_build_code(pos):
     nothing in the prose arm, however green that arm looked."""
     s = _NP_PAYLOAD[pos]
     param, sbox, top = WRAPPER_BLOCK, SBOX_SV, THING_TOP
-    if pos.startswith("wrapper_"):
+    if pos.startswith("wrapper_"):  # noqa: E501 — the wrapper header, not a file
         return (param.replace(
             "  parameter sbox_impl_e  SecSBoxImpl = SBoxImplDom\n",
             "  parameter sbox_impl_e  SecSBoxImpl = SBoxImplDom,\n"
@@ -541,3 +552,109 @@ def test_the_wrapper_param_reader_strips_its_own_inputs_not_via_a_caller():
         "every RTL file this function matches arrives through `_gather`; if "
         "that stops stripping, prose reaches the scans and the `_NOT_PROSE` "
         "entry is false")
+
+
+# --------------------------------------------------------------------------
+# THE FOURTH INPUT — the exclusion MARKER FILENAME, whose `why` slot is the
+# only free human text this function reads that is not HDL at all.
+# --------------------------------------------------------------------------
+# The `_NOT_PROSE` entry claims NO SENTENCE REACHES ANY REGEX HERE, and that is
+# a claim about EVERY input, so every input has to be enumerated and probed.
+# Three are covered above (`param_block`, the gathered RTL, and `declared`).
+# The fourth is `_EXCLUDED_VARIANT_FILE_RE`:
+#
+#     ^(?P<mod>[A-Za-z_]\w*)\.(?:sv|v)\.unused-[\w.+-]*excluded$
+#
+# `[\w.+-]*` is a slot an operator fills with a hyphenated phrase explaining WHY
+# the variant was staged out, and a phrase is where a denial lives.
+#
+# THE ANSWER IS NOT "STRIP IT" — IT IS THAT A CONSULT HERE WOULD BE A DEFECT.
+# The marker's meaning comes from the NAMING CONVENTION, not from the English
+# inside it: `foo.sv.unused-not-excluded-at-all-excluded` is still a file the
+# operator moved out of the staged tree, and a flow that read the `not` and then
+# IGNORED the marker would stage a variant the operator had deliberately
+# removed — the exact failure this whole mechanism exists to prevent, arrived at
+# by "consulting polarity". So both directions are pinned: the vocabulary is
+# inert in the slot, AND the marker still fires when the slot denies it.
+def _why_spellable(tok):
+    """Can the filename grammar even carry this token? `[\\w.+-]*` cannot."""
+    return all(ch.isalnum() or ch == "_" or ch in ".+-" for ch in tok)
+
+
+def _run_with_why(why):
+    """Rename the marker's WHY clause, then run the production."""
+    root, rtl = _project()
+    (root / "input" / "thing_sbox_dom.sv.unused-masked-scan-excluded").rename(
+        root / "input" / f"thing_sbox_dom.sv.unused-{why}-excluded")
+    try:
+        _b, resolved, refusals = \
+            D._chip_top_resolve_excluded_variant_params(
+                root, rtl, WRAPPER_BLOCK, {"SecMasking": "0"})
+        return ({k: v["value"] for k, v in resolved.items()},
+                sorted(r["reason"] for r in refusals),
+                sorted(resolved["SecSBoxImpl"]["excluded_files"])
+                if "SecSBoxImpl" in resolved else [])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_denial_in_the_exclusion_marker_why_clause_changes_nothing():
+    """Every denial token the filename grammar can spell, in the `why` slot."""
+    toks = [t for t in _denial_tokens() if _why_spellable(t)]
+    dropped = [t for t in _denial_tokens() if not _why_spellable(t)]
+    assert dropped, (
+        "at least one vocabulary token must be UNSPELLABLE in `[\\w.+-]*` -- "
+        "if that stops being true this test's population claim has moved")
+    assert len(toks) >= 15, f"only {len(toks)} tokens are spellable here"
+    # Every one of them is still a denial when read as the phrase it is.
+    not_denied = [t for t in toks if not _PP.NEGATION_RE.search(t)]
+    assert not_denied == [], f"these stopped reading as denials: {not_denied}"
+
+    base = _run_with_why("masked-scan")
+    assert base[0] == {"SecSBoxImpl": "SBoxImplLut"} and base[1] == []
+    moved = [t for t in toks
+             if _run_with_why(f"masked-scan-{t}")[:2] != base[:2]]
+    assert moved == [], (
+        f"a denial in the marker's `why` slot changed what this function "
+        f"published: {moved!r}. The `_NOT_PROSE` entry claims no sentence "
+        f"reaches any regex here; delete the entry rather than this test")
+
+
+def test_the_marker_still_fires_when_its_why_clause_denies_the_exclusion():
+    """THE DIRECTION A POLARITY CONSULT WOULD BREAK. The convention says the
+    file is staged out; the prose in the slot does not get a vote, and must
+    not, or an operator's deliberate exclusion is silently undone."""
+    got = _run_with_why("not-excluded-at-all")
+    assert got[0] == {"SecSBoxImpl": "SBoxImplLut"}, (
+        "the exclusion marker stopped firing because its `why` clause denies "
+        "the exclusion -- that is a variant the operator REMOVED being staged "
+        "back in")
+    assert got[2] == [
+        "input/thing_sbox_dom.sv.unused-not-excluded-at-all-excluded"], \
+        "the refusal/derivation must still cite the marker it actually read"
+
+
+def test_the_convention_keyword_is_itself_in_the_denial_vocabulary():
+    """WHY A CONSULT HERE IS NOT MERELY UNNECESSARY BUT DESTRUCTIVE.
+
+    `_EXCLUDED_VARIANT_FILE_RE` REQUIRES the filename to end in `excluded`, and
+    `excluded` is a member of `_prose_polarity`'s own vocabulary
+    (`\bexclud\w*\b`). So a polarity consult on this input does not merely
+    fire on the rare denying `why` clause -- it fires on EVERY marker of EVERY
+    design, because the token that makes a marker a marker is the same token
+    the vocabulary reads as a denial, and the whole mechanism switches off.
+
+    MEASURED: planting that consult reddens this file's four core direction
+    tests, not just the one above. That is what makes the `_NOT_PROSE` entry a
+    claim about the grammar rather than a convenience.
+    """
+    assert _PP.NEGATION_RE.search("excluded"), (
+        "the convention's own terminal keyword is no longer in the denial "
+        "vocabulary; the argument in the `_NOT_PROSE` entry has to be "
+        "re-measured, not assumed")
+    assert D._EXCLUDED_VARIANT_FILE_RE.match(
+        "thing_sbox_dom.sv.unused-masked-scan-excluded"), \
+        "the marker grammar moved; re-derive which token it requires"
+    assert not D._EXCLUDED_VARIANT_FILE_RE.match(
+        "thing_sbox_dom.sv.unused-masked-scan"), \
+        "`excluded` must be REQUIRED, or the argument above does not hold"
