@@ -611,6 +611,70 @@ meet it, the fix is to DECLARE the coupled parameter — with the value this
 section's rows recommend for the declared target — never to weaken the check.
 
 
+## The sign-off corner is the SLOW corner, and a chain of adds is what misses it (#2081)
+
+A single-cycle datapath authored so that it "looks like the algorithm" reads as
+correct and closes at the typical corner. The corner the design input declares
+for sign-off is the SLOW one, and there the SAME netlist misses — not by a
+margin a resizer can find, but by the delay of carry chains you put in series
+without deciding to.
+
+MEASURED (#2081, an iterative hash round, sky130A `ss_100C_1v60`, the period the
+input DECLARES): the authored round wrote its multi-operand sums the way the
+standard writes them --
+
+    t1 = h + Sigma1(e) + Ch(e,f,g) + K[t] + W[t];   // four `+` in series
+    t2 = Sigma0(a) + Maj(a,b,c);
+    a  = t1 + t2;                                    // a fifth
+
+-- and synthesis mapped every `+` to its own ripple carry, so the register-to-
+register path traversed TWO full 32-bit carry chains end to end. Post-route at
+the declared period the slow corner read setup -2.25 ns (TNS -50.78) while the
+typical corner and the nominal-RC corner both read MET. The run reached that
+verdict eighteen hours in, on a design whose route converged, whose DRC was 0
+and whose LVS matched.
+
+**Two rewrites recover it, both equivalence-preserving, neither touching the
+spec.** Measured on one instrument, same netlist flow, same corner, same period,
+full design placed + repaired + CTS + globally routed:
+
+| arm | slow-corner setup WNS | delta | area |
+|---|---|---|---|
+| as authored | -0.974 ns | — | 109 409 um^2 |
+| carry-save + pre-add | **+3.421 ns** | **+4.395 ns** | 112 692 um^2 (+3.0 %) |
+
+1. **CARRY-SAVE the multi-operand sum.** `a + b + c + d + e` is not four adds.
+   Reduce with 3:2 compressors -- `s = a^b^c`, `c_out = maj(a,b,c) << 1`, whose
+   two outputs sum to exactly `a+b+c` -- until two vectors remain, then do ONE
+   carry-propagate add. Fold a consumer into the same tree rather than adding
+   after it: `e_next = d + t1` becomes one more compressor level on t1's two
+   vectors, not a second CPA behind the first.
+
+2. **PRE-ADD what is already known a cycle early.** An operand that is a
+   register output, a counter-indexed constant, or the next entry of a shift
+   window is available in the PREVIOUS cycle. Sum those into one register there
+   and the round reads a single operand instead of three. This is retiming: it
+   adds registers, it does NOT add cycles.
+
+**The cycle count is the thing you must not quietly move.** Both rewrites above
+keep it exactly. Before considering any rewrite that does move it, read what the
+input actually constrains -- and read the whole document, because the layer that
+NARRATES a cycle count is often the same layer that declines to constrain it.
+Where the input declares an observable latency, a rewrite that changes it is a
+spec conflict to REPORT, not a trade to make. Where the input declares a
+required period and a required corner and the microarchitecture cannot meet both
+at any latency the input permits, that is a Phase-1 finding — say it there, with
+the period that IS achievable and the measurement behind it. Discovering it in
+Phase 3 is the failure this section exists to prevent.
+
+**Prove the rewrite, do not assert it.** A carry-save tree and a retimed pre-add
+are both easy to get subtly wrong and neither shows up in a lint. Drive the
+authored version and the rewrite from IDENTICAL stimulus and compare every
+observable output EVERY CYCLE, and count the command-to-done latency in BOTH --
+then break one deliberately and confirm the comparison goes red. A comparison
+that has never failed has not been shown to be a comparison.
+
+
 ## Compliance gate (mandatory)
 
 After producing your output, save it to a file and run:

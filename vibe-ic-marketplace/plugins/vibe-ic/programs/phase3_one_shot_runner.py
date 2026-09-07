@@ -40511,12 +40511,42 @@ _DECLARED_SIGNOFF_GATES = (
 _ASSUMED_CLOCK_DISCLOSURE_STEP = "sta_clock_disclosure"
 
 
+#: The keys a declared sign-off gate uses to say WHY, in the order this reader
+#: prefers them. `reasons` (plural) and `reason` (singular) are BOTH in live
+#: use across the declared population and neither is being renamed here: a
+#: reader that knows only one spelling silently drops the other gate's whole
+#: explanation, which is the defect this list exists to close, and renaming a
+#: gate's output key would change an artefact other readers already parse.
+_GATE_REASON_KEYS = ("reasons", "reason")
+
+
 def _gate_detail(out_json: Path, stdout: str, stderr: str) -> str:
     """A readable one-line reason, preferring the verdict JSON's own findings.
 
     The `eda_report_audit` wrappers print their whole report to stdout, so a
     raw tail shows the trailing summary dict and drops the findings that say
     WHY. Read the file the gate just wrote and surface the rules/reasons.
+
+    vibe-ic#2081 — READ BOTH SPELLINGS OF "why". This read `findings` and
+    `reasons` (plural) only, and fell through to echoing the verdict WORD when
+    it found neither. Three of the six programs behind the declared sign-off
+    table write `reason` (SINGULAR) instead — `drv_promotion_corroboration_
+    check`, `tapeout_precheck`, and one branch of `sta_corner_record_
+    completeness_check` — so a FAIL from any of them reached the step log as
+    the bare word it already had:
+
+        FAIL   drv_promotion_corroboration FAIL
+
+    while the two gates beside it printed their numbers. MEASURED, sha256 x
+    sky130A (lane rbsha2, `run_waive_served.log:145`): that line was the whole
+    account of a blocking gate whose own JSON said "the promotion claimed it
+    ended at 136 DRV violation(s) from its own session, but the sign-off report
+    the acceptance gate reads shows 287". The reader was told a route had been
+    rejected and not one number about why.
+
+    NOTHING ELSE MOVES. This is the reader, not a verdict: no exit code, no
+    PASS/FAIL and no gate output changes, and the verdict-word fallback stays
+    exactly where it was for a gate that offers no explanation at all.
     """
     try:
         doc = json.loads(out_json.read_text())
@@ -40528,8 +40558,16 @@ def _gate_detail(out_json: Path, stdout: str, stderr: str) -> str:
             parts.append(f"{f.get('rule', '?')}: {str(f.get('message', ''))[:160]}")
         else:
             parts.append(str(f)[:160])
-    for r in (doc.get("reasons") or [])[:6]:
-        parts.append(str(r)[:200])
+    for key in _GATE_REASON_KEYS:
+        val = doc.get(key)
+        if isinstance(val, str):
+            # `reason` (singular) is one sentence, not a list of them: a bare
+            # string is the value, never something to iterate character-wise.
+            if val.strip():
+                parts.append(val.strip()[:200])
+        elif isinstance(val, (list, tuple)):
+            for r in list(val)[:6]:
+                parts.append(str(r)[:200])
     if not parts:
         verdict = doc.get("verdict") or doc.get("status")
         if verdict:
