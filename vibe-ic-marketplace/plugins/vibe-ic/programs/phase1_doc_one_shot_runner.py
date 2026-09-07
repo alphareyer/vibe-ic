@@ -11045,12 +11045,81 @@ def _v455_interface_pins(extracted: Dict[str, str]) -> List[dict]:
     return out
 
 
-def _v455_sanitize_and_merge_pins(pins: List[dict],
-                                  extracted: Dict[str, str],
-                                  self_name: Optional[str] = None
-                                  ) -> List[dict]:
+# ORGANIC #2090 — ONE IDENTITY, TWO TABLES. A name the input declares in a
+# REGISTER-MAP table is a register of the design; it is not a pin of the chip.
+# The backtick walker above promotes every backticked identifier that falls
+# inside a port-context heading range, and a programmer's guide writes its
+# register names exactly that way ("write to [`CTRL_SHADOWED`](...)"), so three
+# registers landed in `L1.pin_table` on the opentitan_aes input. They are not in
+# `L9.ports` — nothing declares them as ports — so
+# `l_doc_cross_consistency_check R_pin_table_subset_ports` FAILed the run at
+# `final_audit`, correctly, naming L1_PIN_TABLE_NON_PORT.
+#
+# The gate is right and stays exactly as it is. This is the extractor half: the
+# pin table refuses a name the SAME INPUT's register-map extraction already owns.
+#
+# NOT PROSE — and this is why no `_prose_polarity` consultation belongs here.
+# `regmap_table_extractor.extract_regmap_table` reads ADDRESS-COLUMN TABLES: the
+# dash-separated `0xNN r name - desc` form, the whitespace-column form, the GFM
+# pipe table and the reST grid table. Every one of them requires a literal hex
+# address cell beside the name cell. A sentence cannot satisfy that shape, and a
+# table gives no way to write "0x74 is NOT CTRL_SHADOWED" — a row is present or
+# it is absent, and ABSENT IS ALREADY HOW THIS FUNCTION REPORTS IT: the name
+# never enters the returned mapping and the pin is kept. MEASURED on this lane's
+# fixture, not asserted: over the ten extracted documents of the reproduction
+# input, the nine PROSE documents (README, theory-of-operation, programmer's
+# guide, checklist, interfaces, four diagram dumps) return ZERO rows between
+# them, and every one of the 35 names comes from the single document that prints
+# an offset table. The falsifier is
+# `tests/test_issue2090_l1_pin_table_is_not_a_register_map.py::
+#  test_the_not_prose_claim_for_the_register_table_reader_is_falsifiable`,
+# which fails the day a prose document starts yielding register rows here.
+def _v2090_input_declared_register_names(
+        extracted: Dict[str, str]) -> Dict[str, str]:
+    """Upper-cased register name -> the document whose register-map table
+    declares it, over the same extracted documents the pin walkers read.
+
+    Empty when the input declares no register table at all, which is the
+    common case and leaves every pin untouched."""
+    owned: Dict[str, str] = {}
+    if not isinstance(extracted, dict) or not extracted:
+        return owned
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from regmap_table_extractor import extract_regmap_table
+    except Exception:  # nosec — a naming census must never break the pin pass
+        return owned
+    for fname, text in extracted.items():
+        if not isinstance(text, str) or not text:
+            continue
+        try:
+            rows = extract_regmap_table(text, f"input/docs/{fname}")
+        except Exception:  # nosec — one unreadable doc is not a verdict
+            continue
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            nm = str(row.get("name") or "").strip()
+            if not nm:
+                continue
+            owned.setdefault(nm.upper(), str(fname))
+    return owned
+
+
+def _v455_sanitize_and_merge_pins(
+        pins: List[dict],
+        extracted: Dict[str, str],
+        self_name: Optional[str] = None,
+        register_exclusions_out: Optional[List[Dict[str, Any]]] = None,
+) -> List[dict]:
     """#455 final pin pass: drop uncorroborated ALL-CAPS prose pins,
-    merge the backticked-interface pins (banked ranges expanded)."""
+    merge the backticked-interface pins (banked ranges expanded).
+
+    #2090 — also drop a pin whose name the same input's register-map
+    table owns. `register_exclusions_out`, when a list is supplied,
+    receives one provenance record per dropped name so L1 can NAME the
+    exclusion instead of the pin merely vanishing.
+    """
     bodies = [b for b in (extracted or {}).values() if b]
     backticked: set = set()
     for b in bodies:
@@ -11115,6 +11184,76 @@ def _v455_sanitize_and_merge_pins(pins: List[dict],
         if isinstance(_nm, str) and _nm and _nm != "UNKNOWN_IC":
             _self_names.add(_nm)
 
+    # #2090 — the names this input's own register-map tables own. Computed
+    # once; empty for every input that declares no register table, in which
+    # case the guard below is inert.
+    _v2090_reg_owned = _v2090_input_declared_register_names(extracted)
+    _v2090_excluded_seen: Set[str] = set()
+
+    def _v2090_register_owner(entry: dict) -> Optional[str]:
+        """The document whose register-map table owns this entry's name, or
+        None.
+
+        DELIBERATELY NARROW, for the same reason the self-name rejector above
+        is: it must not be able to mask a real missing port. An L1 pin promotes
+        into L9.top_ports and from there into the generated chip-top, so a
+        wrong drop here removes a port from the design — the very defect
+        `l_doc_cross_consistency_check` calls L9_PORT_LIST_INCOMPLETE.
+
+          * EXACT name identity, case-folded. A port that legitimately shares
+            a STEM with a register (`ctrl_shadowed_i` beside a
+            `CTRL_SHADOWED` register) is a different name and is never
+            touched. MEASURED end to end on a document pair written for this:
+            `ctrl_shadowed_i`, `status_flags_o` and `data_in_0_i` all survive.
+          * a DIRECTION protects the pin — with one exception, below. Every
+            genuine port reaches this pass with mode in {input, output,
+            inout}: a port-table row carries its own direction cell, a prose
+            bullet resolves one per clause. `mode=unspecified` is the
+            signature of a bare identifier mention, which is exactly what a
+            register name in a programmer's guide is.
+          * THE EXCEPTION, and it was found by the stem control above rather
+            than reasoned to. A register row `| DATA_IN_0 | 0x08 | 4 | Input
+            Data Register. |` makes a walker infer mode=input from the word
+            "Input" in the register's OWN DESCRIPTION, and stamp
+            `evidence=input/docs/<the register document>`. That is a reading
+            of the register table, not a port declaration, and the pin then
+            promoted a register into L9.top_ports where the cross-consistency
+            gate cannot see it (both sides agree). So a direction stops
+            protecting the pin when the ONLY document behind the entry IS the
+            document whose register table owns the name. A port declared in
+            any OTHER document keeps its protection.
+        """
+        name = str(entry.get("name") or "").strip()
+        owner = _v2090_reg_owned.get(name.upper())
+        if owner is None:
+            return None
+        if str(entry.get("mode") or "").lower() not in ("input", "output",
+                                                        "inout"):
+            return owner
+        if str(entry.get("evidence") or "") == f"input/docs/{owner}":
+            return owner
+        return None
+
+    def _v2090_record_exclusion(name: str, owner: str) -> None:
+        """Name the exclusion in L1's provenance. A pin that merely vanished
+        would leave a reader unable to tell an extractor that refused a
+        register from an extractor that never saw the document."""
+        if name in _v2090_excluded_seen:
+            return
+        _v2090_excluded_seen.add(name)
+        if register_exclusions_out is None:
+            return
+        register_exclusions_out.append({
+            "name": name,
+            "owned_by": f"input/docs/{owner}",
+            "rule": "l1_pin_is_not_a_register_v2090",
+            "basis": "regmap_table_extractor.extract_regmap_table",
+            "reason": ("the same input declares this name in a register-map "
+                       "address table, and no walker established a direction "
+                       "for it — it is a register of the design, not a pin "
+                       "of the chip"),
+        })
+
     kept: List[dict] = []
     for entry in pins:
         name = str(entry.get("name") or "")
@@ -11131,6 +11270,13 @@ def _v455_sanitize_and_merge_pins(pins: List[dict],
             if any(_v1_6_478_reject_top_module_name(name, _s)
                    for _s in _self_names):
                 continue  # the module's own name, with no direction
+        # #2090 — a register of this design, with no direction. See
+        # `_v2090_register_owner` for why the two conditions together cannot
+        # reach a real port.
+        _v2090_owner = _v2090_register_owner(entry)
+        if _v2090_owner is not None:
+            _v2090_record_exclusion(name, _v2090_owner)
+            continue
         if name.isupper() and name.isalpha():
             if name in _PIN_PROSE_DENY and name not in backticked:
                 continue  # ALL-CAPS English prose word — hallucination
@@ -11149,6 +11295,15 @@ def _v455_sanitize_and_merge_pins(pins: List[dict],
                 not in ("input", "output", "inout")
                 and any(_v1_6_478_reject_top_module_name(extra["name"], _s)
                         for _s in _self_names)):
+            continue
+        # #2090 — same guard on the re-add path, and for the same reason the
+        # self-name guard is repeated here: this walker is where the register
+        # mention is promoted in the first place, so a drop above that is not
+        # repeated here would be undone one loop later.
+        _v2090_extra_owner = _v2090_register_owner(extra)
+        if _v2090_extra_owner is not None:
+            _v2090_record_exclusion(str(extra.get("name") or ""),
+                                    _v2090_extra_owner)
             continue
         have.add(extra["name"])
         kept.append(extra)
@@ -22799,7 +22954,12 @@ def gen_l1_datasheet(project: Path,
             _pin["from_port_table"] = True
             pins.append(_pin)
 
-    pins = _v455_sanitize_and_merge_pins(pins, extracted, ic_name)
+    # ORGANIC #2090 — collect the register-name exclusions the merge pass makes
+    # so L1 can NAME them (see the emit below the content dict).
+    _v2090_register_exclusions: List[Dict[str, Any]] = []
+    pins = _v455_sanitize_and_merge_pins(
+        pins, extracted, ic_name,
+        register_exclusions_out=_v2090_register_exclusions)
 
     content = {
         "schema_version": 2,
@@ -22828,6 +22988,23 @@ def gen_l1_datasheet(project: Path,
         "tapeout_metadata": _v1_6_295_tapeout_metadata,
         "no_tapeout_metadata_in_input": _v1_6_295_tapeout_metadata is None,
     }
+
+    # ORGANIC #2090 — NAME THE EXCLUSION. Emitted only when at least one pin
+    # was actually refused (the established convention here: an absent key is
+    # the honest "nothing happened", never a fabricated empty). Without this a
+    # reader cannot tell a pin table that REFUSED a register from one whose
+    # extractor never read the register document at all.
+    if _v2090_register_exclusions:
+        content["pin_table_register_name_exclusions"] = (
+            _v2090_register_exclusions)
+        evidence.setdefault(
+            "L1_pin_table.register_name_exclusions", []
+        ).append({
+            "literal": str(_v2090_register_exclusions[0].get("name"))[:80],
+            "label": ("L1.pin_table entries refused: the same input's "
+                      "register-map table owns the name"),
+            "count": len(_v2090_register_exclusions),
+        })
     if desc:
         content["description"] = desc
         if desc_ev:
