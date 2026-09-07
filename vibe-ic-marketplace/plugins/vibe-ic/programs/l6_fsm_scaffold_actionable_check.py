@@ -183,14 +183,79 @@ documents one, and the ``l6_fsm_scaffold_degraded_intentional`` waiver
 asserts an intentional simplification when nothing was simplified. Both
 would be false statements. A disclosed skip is the only honest shape.
 
+An input-level claim needs input-level evidence (#2087)
+=======================================================
+``no_fsm_in_input`` is a statement about the design's INPUT DOCUMENTS, and the
+#1977 cross-check above is what stops that statement from disarming this gate
+when the input plainly contains an FSM. But the cross-check read every ``.v``
+/``.sv`` under ``phase2/stage1/rtl`` and called all of it "staged", and that
+tree carries two different things:
+
+  * for a REUSED-IP design it is populated FROM the input —
+    ``reused_ip_rtl_consume`` / ``ip_catalog_pull`` copy the staged
+    implementation in and leave the keystone
+    ``SOURCE_MANIFEST.json{reused_ip:true}``. This is the tree #1977 measured,
+    and an FSM in it that L6 says is not in the input IS a contradiction: the
+    extractor was blind to something the design brought with it.
+  * for an ``rtl_gen: null`` class that stages NOTHING, the runner WAIVES
+    ``step_rtl_gen`` to ``spec-to-rtl`` and the author writes that tree. The
+    RTL is this flow's OUTPUT. An FSM in it contradicts nothing the input said,
+    because for these classes the input deliberately hands the control
+    structure to the implementer — an authored control FSM is the CONFORMING
+    outcome, and it is the normal shape of a CPU, a command-driven block or any
+    multi-cycle datapath.
+
+So the same project returned SKIP before its RTL was written and BLOCKING
+after, with the same L6 and the same input. The fix is to answer the question
+the finding's own name asks: is this file part of the INPUT? Provenance is read
+through the ONE shared reader (``_reused_ip_predicate``) in
+``_rtl_files_by_provenance``, every evidence record carries it, and:
+
+  * INPUT-side FSM evidence → ``EXTRACTION_APPLICABILITY_CONTRADICTION``,
+    BLOCKING, rc 1, not waiverable — #1977 unchanged.
+  * AUTHORED FSM evidence → ``AUTHORED_FSM_NO_INPUT_SCAFFOLD``, ADVISORY, no
+    failure, no rc of its own. The observation is published in ``warnings`` and
+    in ``authored_fsm_advisories``; the verdict class is the one the project
+    had before the RTL existed.
+
+Two properties of that split are deliberate and are asserted in
+``tests/test_issue2087_no_fsm_in_input_is_a_claim_about_the_input.py``:
+
+  * it is COARSE — per tree, not per file. On the catalog-pull path the
+    input-side files land directly in ``phase2/stage1/rtl`` and never appear
+    under ``input/vendor_rtl``, so no per-file record exists to read. A design
+    that staged ANY reused RTL therefore keeps its whole phase-2 tree
+    input-side, glue included.
+  * it is FAIL-CLOSED — an unimportable or raising ``_reused_ip_predicate``
+    answers INPUT, which keeps the blocking finding rather than losing it, and
+    the unreadable predicate is reported as a warning so the reason is never
+    silent.
+
+AND THE VERDICT LINE NOW LEADS, ON EVERY TIER. ``phase1_doc_one_shot_runner``
+echoes ``_gate_cp.stdout.strip().splitlines()[0]`` — one line — into the phase-1
+run log. Warnings were printed BEFORE the verdict, which nobody had noticed
+because no project reached a warning on a verdict path anyone read; #2087's
+advisory does, and in its first form it displaced the ``[SKIP]`` line entirely,
+so the log said only that an advisory existed and never that the gate had
+skipped. ``_emit_warnings()`` is now called after each verdict print instead of
+before all of them. ``test_issue504_l6_reused_ip_consumer_model`` already
+asserted this for the VACUOUS_PASS tier; it holds for every tier now by
+construction rather than by luck.
+
+The promotion condition at the top of this docstring is unaffected in kind, and
+sharpened in fact: this class of red was never "driven by designs" — it was
+driven by reading an output as an input.
+
 Fail-safe / no-false-positive design
 ====================================
 * No L6 file → SKIP(2).
 * ``ic_class`` in {pure_analog, bare_fpga} → SKIP (no control FSM), unless
   staged RTL structurally contradicts that absence.
-* L6 positively declares no FSM in the input → Part A SKIPs only when
-  staged RTL contains no structural FSM evidence. A contradiction is a
+* L6 positively declares no FSM in the input → Part A SKIPs unless
+  INPUT-SIDE RTL contains structural FSM evidence. That contradiction is a
   blocking extraction/applicability finding, not a waiverable absence.
+  FSM structure in RTL THIS FLOW AUTHORED is an ADVISORY only — see
+  "An input-level claim needs input-level evidence" below.
 * No ``reject_rules[]`` → Part B SKIPs.
 * If the consuming programs cannot be imported the gate SKIPs rather
   than guessing at their contract.
@@ -372,12 +437,189 @@ _strip_verilog_comments = _rtlfsm.strip_verilog_comments
 _enum_fsm_state_count = _rtlfsm.enum_fsm_state_count
 
 
-def _staged_rtl_fsm_evidence(project: Path) -> List[Dict[str, Any]]:
+#: The two provenances an RTL file under this project can have, for the ONE
+#: question #2087 turns on: is this file part of the design's INPUT, or is it
+#: something the flow itself authored? Named once so the record field, the
+#: finding names and the prose cannot drift apart.
+PROV_INPUT = "input"
+PROV_AUTHORED = "authored"
+
+
+def _rtl_files_by_provenance(
+        project: Path) -> List[Tuple[str, List[Path]]]:
+    """Every RTL file this gate can see, grouped by whether it is INPUT.
+
+    #2087 — ``no_fsm_in_input`` is a claim about the design's INPUT DOCUMENTS.
+    An input-level claim can only be contradicted by input-level evidence, so
+    before this gate may call a file's FSM a contradiction it has to know
+    whether the design BROUGHT that file or whether the flow WROTE it.
+
+    Two roots, and the difference between them is the whole fix:
+
+      * ``input/vendor_rtl/`` is INPUT by definition — it is where a design
+        stages the implementation it arrives with. Read through
+        ``_reused_ip_predicate.staged_vendor_rtl_files`` rather than re-globbed
+        here, so this gate and the rest of the tree agree on what "staged"
+        means by construction.
+      * ``phase2/stage1/rtl/`` is the flow's own tree and carries BOTH kinds.
+        For a reused-IP design ``reused_ip_rtl_consume`` / ``ip_catalog_pull``
+        populate it from the input and leave the keystone
+        ``SOURCE_MANIFEST.json{reused_ip:true}``; for an ``rtl_gen=null`` class
+        with no staged IP the runner WAIVES to ``spec-to-rtl`` and the RTL in
+        it is AUTHORED. ``staged_rtl_is_reused_ip`` is the ONE reader of that
+        question in this tree, so it decides here too — no second copy.
+
+    FAIL-CLOSED, and stated because the direction is not obvious: when the
+    shared predicate cannot be imported or raises, this returns the phase-2
+    tree as ``PROV_INPUT``. That keeps the #1977 contradiction blocking on a
+    project whose provenance we could not read, which is the direction every
+    other probe in this file already fails in ("a broken probe never relaxes a
+    gate"). The caller reports the unreadable predicate as a warning, so the
+    reason a project blocked is never silent.
+    """
+    groups: List[Tuple[str, List[Path]]] = []
+
+    vendor: List[Path] = []
+    if _reused_ip is not None:
+        try:
+            vendor = list(_reused_ip.staged_vendor_rtl_files(project))
+        except Exception:  # noqa: BLE001 — unreadable input tree is simply empty
+            vendor = []
+    if vendor:
+        groups.append((PROV_INPUT, sorted(set(vendor))))
+
+    rtl_dir = _pl.rtl_dir(project)
+    if rtl_dir.is_dir():
+        staged = sorted({*rtl_dir.rglob("*.v"), *rtl_dir.rglob("*.sv")})
+        if staged:
+            groups.append((_phase2_tree_provenance(project), staged))
+    return groups
+
+
+def _provenance_unmeasurable(project: Path) -> Optional[str]:
+    """Why this project's RTL provenance could not be MEASURED, or None.
+
+    ONE concept, because there turned out to be more than one instance of it.
+    The rule underneath both is the same and is worth stating once: a thing
+    that is ABSENT is a measurement; a thing that is PRESENT but unreadable is
+    a FAILURE to measure, and the two must not collapse into the same answer.
+
+    Both instances below were fail-OPEN holes in the first version of this fix,
+    each found by probing rather than by reading. They share a root: this gate
+    delegates to ``_reused_ip_predicate``, whose fail-closed direction is
+    ``False`` = "not reused IP" — the OPPOSITE of this gate's, where INPUT is
+    what keeps a #1977 contradiction blocking. Every delegation across that
+    polarity boundary has to be checked, not assumed.
+
+      * the keystone ``SOURCE_MANIFEST.json`` PRESENT but not parseable as an
+        object (truncated mid-write, empty, a JSON list). Its presence is
+        evidence of staging.
+      * ``input/vendor_rtl/`` PRESENT but not enumerable (permissions). Its
+        presence is evidence of staging.
+
+    A THIRD instance is handled differently and deliberately: an individual RTL
+    FILE that cannot be read. That one was PRE-EXISTING and wholly SILENT — the
+    scanner dropped it with ``except: continue`` — so a staged FSM behind a
+    permission error looked exactly like a tree with no FSM in it. It is NOT
+    routed through this function, because the remedy is not the same: with no
+    text to cite the gate cannot raise a contradiction, and manufacturing one
+    would be fabricating evidence. It is RECORDED and WARNED instead, so the
+    verdict stops reading as a clean bill for a file nobody read. Changing a
+    silence into a sentence alters no verdict, which is the point.
+
+    ABSENT stays a measurement in both cases: no manifest and no vendor tree is
+    what a design the runner WAIVED to ``spec-to-rtl`` actually looks like, and
+    it must keep answering AUTHORED. An explicit, readable ``reused_ip: false``
+    is a statement too, and is honoured.
+
+    Returns a human reason (used verbatim in the warning) so a fail-closed
+    verdict always names the measurement it lost."""
+    vdir = None
+    try:
+        vdir = _reused_ip.vendor_rtl_dir(project)
+    except Exception:  # noqa: BLE001
+        vdir = None
+    if vdir is not None and vdir.is_dir():
+        try:
+            next(iter(vdir.iterdir()), None)
+        except Exception as exc:  # noqa: BLE001 — present and unenumerable
+            return (f"input/vendor_rtl/ is PRESENT but cannot be enumerated "
+                    f"({type(exc).__name__}), so whether this design stages "
+                    "reused RTL could not be measured")
+    if _keystone_manifest_unreadable(project):
+        return (f"phase2/stage1/rtl/{_reused_ip.MANIFEST_NAME} is PRESENT but "
+                "cannot be read as an object, so this tree's provenance could "
+                "not be measured")
+    return None
+
+
+def _keystone_manifest_unreadable(project: Path) -> bool:
+    """The keystone manifest EXISTS but cannot be read as an object.
+
+    ABSENT IS NOT UNREADABLE, and the difference is the whole point. A design
+    the runner WAIVED to ``spec-to-rtl`` writes no manifest at all — that
+    absence is a true statement that nothing was staged, and it must keep
+    answering AUTHORED. A manifest that is PRESENT is the keystone artefact the
+    two staging paths leave behind (``ip_catalog_pull``,
+    ``staged_rtl_reused_ip_manifest_emit``); its presence is evidence of
+    staging, so being unable to read it is a failure to measure, not a licence
+    to assume.
+
+    MEASURED, and the reason this exists: ``_reused_ip_predicate``'s own
+    fail-closed direction is False = "not reused IP", which is the OPPOSITE of
+    this gate's (INPUT = keep the blocking finding). Delegating without this
+    check let a truncated, empty or wrongly-typed manifest downgrade a #1977
+    contradiction to an advisory — a fail-OPEN hole in the middle of a
+    fail-closed design. An explicit, readable ``reused_ip: false`` is a
+    different thing entirely: that is a statement, and it is honoured."""
+    try:
+        mf = _pl.rtl_dir(project) / _reused_ip.MANIFEST_NAME
+    except Exception:  # noqa: BLE001 — unusable path is not an unreadable file
+        return False
+    if not mf.is_file():
+        return False
+    try:
+        data = json.loads(mf.read_text(encoding="utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001 — present and unparseable
+        return True
+    return not isinstance(data, dict)
+
+
+def _phase2_tree_provenance(project: Path) -> str:
+    """Is ``phase2/stage1/rtl/`` this design's INPUT, or this flow's output?
+
+    Delegates the whole question to the shared reader, EXCEPT for the one case
+    where that reader's fail-closed direction is the opposite of this gate's —
+    see ``_keystone_manifest_unreadable``. Fail-closed to ``PROV_INPUT``
+    otherwise too: see ``_rtl_files_by_provenance``."""
+    if _reused_ip is None:
+        return PROV_INPUT
+    try:
+        if _provenance_unmeasurable(project) is not None:
+            return PROV_INPUT
+        return (PROV_INPUT if _reused_ip.staged_rtl_is_reused_ip(project)
+                else PROV_AUTHORED)
+    except Exception:  # noqa: BLE001 — a broken probe never relaxes a gate
+        return PROV_INPUT
+
+
+def _staged_rtl_fsm_evidence(
+        project: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Find multi-state FSM structure in canonical staged RTL.
 
-    A filename containing ``fsm`` is not evidence. Each returned record is
+    Returns ``(records, unreadable)``.
+
+    ``records`` — a filename containing ``fsm`` is not evidence. Each record is
     backed by comment-stripping typedef-enum/state-signal/case structure or an
-    edge-driven named state register with distinct next states.
+    edge-driven named state register with distinct next states, and carries the
+    ``provenance`` that decides whether it can contradict an input-level claim
+    (#2087; see ``_rtl_files_by_provenance``).
+
+    ``unreadable`` — the relative path and error class of every file that could
+    NOT be read. Previously these were dropped by a bare ``except: continue``,
+    which made a staged FSM behind a permission error indistinguishable from a
+    tree that contains no FSM. They are returned rather than turned into a
+    finding because the gate cites text it has read; the caller warns.
     """
     def encoded_state_count(text: str) -> int:
         """Recognize a named state register with real sequential movement.
@@ -423,41 +665,56 @@ def _staged_rtl_fsm_evidence(project: Path) -> List[Dict[str, Any]]:
                 best = max(best, len(assignments))
         return best
 
-    rtl_dir = _pl.rtl_dir(project)
-    if not rtl_dir.is_dir():
-        return []
     lec_path, lec_strings = _lec_rtl_references(project)
     evidence: List[Dict[str, Any]] = []
-    files = sorted({*rtl_dir.rglob("*.v"), *rtl_dir.rglob("*.sv")})
-    for path in files:
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-            enum_state_count = _enum_fsm_state_count(text)
-            encoded_count = encoded_state_count(text)
-            state_count = max(enum_state_count, encoded_count)
-        except Exception:
-            continue
-        if state_count < 2:
-            continue
-        rel = path.relative_to(project).as_posix()
-        lec_ref = any(rel in value or path.name in value
-                      for value in lec_strings)
-        enum_wins = enum_state_count >= encoded_count
-        record: Dict[str, Any] = {
-            "rtl_path": rel,
-            "structural_rule": (
-                "typed state enum bound to FSM state signal"
-                if enum_wins else
-                "edge-driven state register with distinct next states"),
-        }
-        if enum_wins:
-            record["state_count"] = enum_state_count
-        else:
-            record["distinct_next_state_expressions"] = encoded_count
-        if lec_ref and lec_path is not None:
-            record["lec_reference"] = lec_path.relative_to(project).as_posix()
-        evidence.append(record)
-    return evidence
+    unreadable: List[str] = []
+    for provenance, files in _rtl_files_by_provenance(project):
+        for path in files:
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+                enum_state_count = _enum_fsm_state_count(text)
+                encoded_count = encoded_state_count(text)
+                state_count = max(enum_state_count, encoded_count)
+            except Exception as exc:  # noqa: BLE001
+                # PRE-EXISTING and SILENT until #2087: a file that cannot be
+                # read was dropped here with no record, so a staged FSM behind
+                # a permission error was indistinguishable from a tree with no
+                # FSM in it — the third instance of the species
+                # `_provenance_unmeasurable` names, and the only one that said
+                # nothing at all. It is recorded rather than fabricated into a
+                # verdict: the gate has no text to cite, so it cannot raise a
+                # contradiction; what it CAN do is refuse to be read as a
+                # clean bill. See the caller's warning.
+                unreadable.append(
+                    f"{path.relative_to(project).as_posix()} "
+                    f"({type(exc).__name__})")
+                continue
+            if state_count < 2:
+                continue
+            rel = path.relative_to(project).as_posix()
+            lec_ref = any(rel in value or path.name in value
+                          for value in lec_strings)
+            enum_wins = enum_state_count >= encoded_count
+            record: Dict[str, Any] = {
+                "rtl_path": rel,
+                "structural_rule": (
+                    "typed state enum bound to FSM state signal"
+                    if enum_wins else
+                    "edge-driven state register with distinct next states"),
+                # #2087 — INPUT-side or AUTHORED. Only INPUT-side evidence can
+                # contradict an input-level extraction claim. See
+                # _rtl_files_by_provenance for how the two are told apart.
+                "provenance": provenance,
+            }
+            if enum_wins:
+                record["state_count"] = enum_state_count
+            else:
+                record["distinct_next_state_expressions"] = encoded_count
+            if lec_ref and lec_path is not None:
+                record["lec_reference"] = (
+                    lec_path.relative_to(project).as_posix())
+            evidence.append(record)
+    return evidence, unreadable
 
 
 def _state_entries(l6: dict) -> List[Any]:
@@ -694,6 +951,10 @@ def evaluate(project: Path) -> Dict[str, Any]:
         # #1977 — named, blocking contradictions between an extraction-side
         # absence declaration and independently staged implementation evidence.
         "applicability_findings": [],
+        # #2087 — advisory-only observations about RTL the FLOW authored.
+        # Never a failure: an input-level claim and an authored artefact are
+        # claims about different objects and cannot contradict each other.
+        "authored_fsm_advisories": [],
         # #504 — Part A's consumer model, made explicit in the report rather
         # than assumed. True means phase2_scaffold_gen.emit_fsm_v() really is
         # what builds this design's FSM, so Part A's requirements bind.
@@ -733,8 +994,56 @@ def evaluate(project: Path) -> Dict[str, Any]:
     # #1977 — an extraction declaration may narrow applicability only while
     # implementation evidence agrees. The trigger is staged RTL STRUCTURE;
     # LEC file names are cited only as optional corroboration.
-    staged_fsm = (_staged_rtl_fsm_evidence(project)
-                  if _l6_declares_no_fsm(l6) else [])
+    all_fsm_evidence, _unreadable_rtl = (
+        _staged_rtl_fsm_evidence(project) if _l6_declares_no_fsm(l6)
+        else ([], []))
+    # #2087 — SPLIT BY PROVENANCE BEFORE JUDGING. `no_fsm_in_input` is a claim
+    # about the INPUT, so only INPUT-side RTL can contradict it. RTL the flow
+    # AUTHORED (an `rtl_gen=null` class the runner WAIVED to `spec-to-rtl`)
+    # disagrees with nothing the input said: the input left the control
+    # structure free and the author took it, which is the conforming outcome.
+    staged_fsm = [e for e in all_fsm_evidence
+                  if e.get("provenance") == PROV_INPUT]
+    authored_fsm = [e for e in all_fsm_evidence
+                    if e.get("provenance") == PROV_AUTHORED]
+    _unmeasurable = (_provenance_unmeasurable(project)
+                     if (_reused_ip is not None and _l6_declares_no_fsm(l6))
+                     else None)
+    if _reused_ip is None and _l6_declares_no_fsm(l6):
+        warnings.append(
+            "_reused_ip_predicate is not importable, so the provenance of "
+            "phase2/stage1/rtl could not be read; its contents are treated as "
+            "INPUT-side (fail-closed), which keeps any FSM there blocking")
+    if _unreadable_rtl:
+        # ADDITIVE ONLY: this changes no verdict. It makes an existing silence
+        # audible, which is the whole of the defect here.
+        warnings.append(
+            f"{len(_unreadable_rtl)} RTL file(s) under the scanned tree(s) "
+            "could NOT be read, so any FSM structure in them was not measured "
+            f"— {', '.join(_unreadable_rtl[:4])}. This gate cites text it has "
+            "read, so it raises no finding for them; its verdict is NOT a "
+            "clean bill for those files")
+
+    if _unmeasurable is not None:
+        # SAY WHAT HAPPENED, NOT WHAT THE POLICY IS. An earlier version of this
+        # warning promised "treated as INPUT-side, which keeps any FSM there
+        # blocking" unconditionally — but when the unreadable thing is the
+        # staged tree ITSELF there is no readable RTL to block on, and the gate
+        # SKIPs. A message that asserts a fail-closed action which did not
+        # occur is exactly the overclaim this gate exists to stop.
+        if staged_fsm:
+            warnings.append(
+                f"{_unmeasurable}; the RTL that COULD be read is treated as "
+                "INPUT-side (fail-closed), which is what keeps the finding "
+                "below blocking. Repair or remove the unreadable artefact "
+                "rather than leaving it unreadable")
+        else:
+            warnings.append(
+                f"{_unmeasurable}, AND no readable RTL was found there — so "
+                "this gate examined nothing on the staged side and its verdict "
+                "is NOT a clean bill for that tree. A thing that is PRESENT "
+                "but unreadable is a failure to measure, not an absence")
+
     if staged_fsm:
         declared = {key: l6.get(key) for key in _NO_FSM_KEYS
                     if l6.get(key) is True}
@@ -763,6 +1072,35 @@ def evaluate(project: Path) -> Dict[str, Any]:
             f"contains {structural_summary}"
             f"{lec_note}; the no-FSM declaration cannot disarm this gate")
         parts_run.append("fsm_applicability")
+    elif authored_fsm:
+        # #2087 — ADVISORY, never a contradiction. The input declared no FSM
+        # and the flow authored one. Those two statements are about different
+        # objects, so they cannot disagree; what the reader is owed is the
+        # OBSERVATION that the authored control structure has no counterpart in
+        # the input, and nothing more. It carries no failure and no rc: the
+        # verdict class must be the one this project had BEFORE the RTL existed.
+        first = authored_fsm[0]
+        metric = (f"{first['state_count']} state(s)"
+                  if "state_count" in first else
+                  f"{first['distinct_next_state_expressions']} distinct "
+                  "next-state expression(s)")
+        out["authored_fsm_advisories"] = [{
+            "name": "AUTHORED_FSM_NO_INPUT_SCAFFOLD",
+            "severity": "ADVISORY",
+            "declaration": {
+                "path": l6p.relative_to(project).as_posix(),
+                "fields": {key: l6.get(key) for key in _NO_FSM_KEYS
+                           if l6.get(key) is True},
+            },
+            "authored_rtl_evidence": authored_fsm,
+        }]
+        warnings.append(
+            "AUTHORED_FSM_NO_INPUT_SCAFFOLD: authored FSM with no input "
+            f"scaffold — {first['rtl_path']} carries {metric}, while L6 "
+            "records that the INPUT documents no FSM. Advisory: the RTL under "
+            "phase2/stage1/rtl is this flow's own output (no staged vendor RTL "
+            "and no reused-IP manifest), so it is not evidence about the "
+            "input and cannot contradict an input-level extraction claim")
 
     # ---------------- Part A — FSM skeleton ----------------
     psg = _load_scaffold_gen()
@@ -958,6 +1296,10 @@ def evaluate(project: Path) -> Dict[str, Any]:
                         f"condition={cond[:70]!r}")
 
     if not parts_run:
+        # #2087 — the SKIP still carries whatever was observed. An advisory
+        # that only survives on the FAIL path is an advisory nobody reads on
+        # the path it was written for.
+        out["warnings"] = warnings
         out["reason"] = (
             "L6 positively declares no FSM in the input and declares no "
             "reject_rules[] — nothing this gate can hold it to")
@@ -1066,14 +1408,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         except OSError:
             pass
 
-    for w in res.get("warnings", []):
-        print(f"[WARN] l6_fsm_scaffold_actionable_check: {w}")
+    # THE VERDICT LINE IS PRINTED FIRST, ALWAYS (#2087). `phase1_doc_one_shot_
+    # runner` echoes `_gate_cp.stdout.strip().splitlines()[0]` — ONE line — into
+    # the phase-1 run log, so whatever stands first IS this gate's report to
+    # every reader of that log. Warnings used to be printed before it, which was
+    # invisible only because no project reached a warning on a verdict path
+    # anyone read; #2087's advisory does, and it displaced the `[SKIP]` verdict
+    # entirely. `test_issue504_l6_reused_ip_consumer_model` already asserts the
+    # first line is the verdict for the VACUOUS_PASS tier; this makes that true
+    # by construction for every tier instead of by luck.
+    def _emit_warnings() -> None:
+        for w in res.get("warnings", []):
+            print(f"[WARN] l6_fsm_scaffold_actionable_check: {w}")
 
     if res["verdict"] == "SKIP":
         print(f"[SKIP] l6_fsm_scaffold_actionable_check: {res['reason']}")
+        _emit_warnings()
         return RC_VACUOUS
     if res["verdict"] == "PASS":
         print(f"[PASS] l6_fsm_scaffold_actionable_check: {res['reason']}")
+        _emit_warnings()
         return RC_PASS
     if res["verdict"] == "VACUOUS_PASS":
         # The FIRST stdout line is what `phase1_doc_one_shot_runner` echoes
@@ -1081,6 +1435,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # disclosure on its own — not point at a report nobody opens.
         print("[VACUOUS_PASS] l6_fsm_scaffold_actionable_check: "
               f"{res['reason']}")
+        _emit_warnings()
         for f in res.get("deferred_to_staged_rtl", [])[:8]:
             print(f"  • NOT CHECKED: {f}")
         denom = res.get(_gd.DENOMINATOR_KEY) or {}
@@ -1101,6 +1456,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("[PASS] l6_fsm_scaffold_actionable_check: waived by "
               f"waivers.{WAIVER_KEY} ({len(res['failures'])} suppressed): "
               f"{rationale[:70]}…")
+        _emit_warnings()
         for f in res["failures"][:6]:
             print(f"  • {f}")
         return RC_PASS
@@ -1120,6 +1476,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         first_failure = res["reason"]
     print(f"[FAIL] l6_fsm_scaffold_actionable_check: {first_failure}")
+    _emit_warnings()
     for f in res["failures"][:8]:
         print(f"  • {f}")
     # A FAIL on Part B does not un-disclose Part A: if the FSM half was
