@@ -17,7 +17,33 @@ improves a hook takes effect with no re-install.
 | Hook | When it runs | What it blocks |
 |------|--------------|----------------|
 | `commit-msg` | as a commit is created | an NDA foundry / SKU / process token in the commit **message** |
-| `pre-push` | before a push reaches the remote | the same token in **any** commit message in the range being pushed, plus the cheap governance gates and — pushing to `main` — a commit with no matching `gatekeeper-land.sh` stamp |
+| `pre-push` | before a push reaches the remote | the same token in **any** commit message in the range being pushed, plus the cheap governance gates, a **version bump in the branch's own delta** (see below), and — pushing to `main` — a commit with no matching `gatekeeper-land.sh` stamp |
+
+## A branch may not carry its own version bump (vibe-ic#2096)
+
+The version is assigned **at landing**, by the lander. Running the plugin test
+suite WRITES the six version-bearing files — `plugin.json`, both
+`marketplace.json`s and the three shipped READMEs — and `git add -A` then sweeps
+them into the commit. A lane measured exactly that on 2026-09-07 and caught it by
+hand; nothing in the hook or the landing gate would have.
+
+`pre-push` therefore runs
+`vibe-ic-marketplace/plugins/vibe-ic/programs/branch_version_bump_guard.py`,
+which refuses a push whose HEAD declares a version value the **merge base with
+`main`** did not declare at that site, and names every file:
+
+```
+pre-push: FAILED — branch carries no version bump (the lander assigns it)
+    [FAIL] vibe-ic-marketplace/plugins/vibe-ic/.claude-plugin/plugin.json
+        x plugin.json version: this branch declares 1.18.53 where cf316de71 declares 1.18.52
+    ...
+    x restore: git checkout cf316de71 -- <file>
+```
+
+`refs/heads/main` and the landing branch (`refs/heads/land/<short-sha>`) are
+exempt — they carry the lander's own assignment. Editing a README **without**
+touching its version claim is not refused, and neither is a branch cut from an
+older `main`: the comparison is against the fork point, not `main`'s tip.
 
 ## A HOOK CANNOT SEE A MERGE. Use `tools/gatekeeper-verify-merge.sh`.
 

@@ -107,6 +107,12 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
 
   PUSH_RANGE="$RANGE"
   PUSH_BASE="$remote_sha"
+  # The COMMIT and the DESTINATION, carried out of the loop the same way
+  # `PUSH_BASE` already is. `branch_version_bump_guard` needs both: the commit
+  # to read the version claims at, and the destination to decide whether this
+  # push is one that may state a version at all (vibe-ic#2096).
+  PUSH_HEAD="$local_sha"
+  PUSH_DEST_REF="$_remote_ref"
   [ "$remote_sha" = "$ZERO" ] && PUSH_BASE="origin/main"
   # WHERE this push LANDS decides which gates apply (vibe-ic#636). `_remote_ref`
   # was read and discarded, so `refs/heads/main` and `refs/heads/feat/anything`
@@ -289,6 +295,22 @@ if [ -n "${PUSH_RANGE:-}" ]; then
   fi
   run_gate "agent check-in scope" \
            agent_checkin_scope_guard.py --role core-agent --base "$PUSH_BASE"
+  # A BRANCH MAY NOT CARRY ITS OWN VERSION (vibe-ic#2096). The suite WRITES the
+  # six version-bearing files and `git add -A` sweeps them into the commit; a
+  # lane caught that by hand on 2026-09-07 and nothing else would have. The gate
+  # above is the complement of this one and cannot cover it: under
+  # `--version-by-gatekeeper` a FORWARD bump must PASS, because on the landing
+  # path a forward bump is exactly what is wanted, and it reads only plugin.json
+  # plus one marketplace.json — the three shipped READMEs state the version in
+  # prose and were read by nothing.
+  #
+  # The destination decides, and the PROGRAM decides on the destination rather
+  # than this hook: `refs/heads/main` and `refs/heads/land/*` carry the lander's
+  # own assignment and are exempt; every other destination — including one this
+  # hook could not parse — is guarded.
+  run_gate "branch carries no version bump (the lander assigns it)" \
+           branch_version_bump_guard.py --repo "$REPO_ROOT" \
+           --head "${PUSH_HEAD:-HEAD}" --dest-ref "${PUSH_DEST_REF:-}"
   # BENCHMARK EVIDENCE IS A LANDING CONCERN — AND IT ALREADY RUNS THERE.
   # These two ran HERE and in `gatekeeper-land.sh` (lines 81 and 86) with identical
   # arguments: one policy, implemented twice, free to drift apart. Push means "publish this

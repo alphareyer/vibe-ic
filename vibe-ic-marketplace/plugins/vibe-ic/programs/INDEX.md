@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1282
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1282)
+- **Total programs (excluding helpers / shims):** 1283
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1283)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1273 |
+| `any` | 1274 |
 
 ## Alphabetical listing
 
@@ -168,6 +168,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `bram_init_portable_compat_check` | any | v0.116 | Detect `$readmemh` / `$readmemb` BRAM initialisation that is silently |
 | `bram_pdob_combinational_check` | any | v0.116 | BACKLOG-v11 P1.3 (WARNING-class). |
 | `bram_read_latency_consume_alignment_check` | any | Wave 26 | Wave 26 (v0.119.58) gate. |
+| `branch_version_bump_guard` | any | — | refuse a push of a contributor branch that carries its own version bump — the version is assigned by the lander, at landing, and a branch... |
 | `break_framing_vs_l3_check` | any | v0.108 | Verify RX command parser uses break-to-break framing when L3 CMD_PROTOCOL specifies break-delimited frames. |
 | `break_handler_safety_check` | any | v0.108 | Verify that FSM break/reset handlers do NOT fire during active response-processing states. |
 | `bringup_plan_gen` | any | — | emit bring-up plan from L13_LAB_CALIBRATION. |
@@ -1354,7 +1355,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1273 programs)
+### `any` (1274 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1498,6 +1499,7 @@ _(no programs in this group)_
 - `bram_init_portable_compat_check` — Detect `$readmemh` / `$readmemb` BRAM initialisation that is silently  _[v0.116]_
 - `bram_pdob_combinational_check` — BACKLOG-v11 P1.3 (WARNING-class).  _[v0.116]_
 - `bram_read_latency_consume_alignment_check` — Wave 26 (v0.119.58) gate.  _[Wave 26]_
+- `branch_version_bump_guard` — refuse a push of a contributor branch that carries its own version bump — the version is assigned by the lander, at landing, and a branch...
 - `break_framing_vs_l3_check` — Verify RX command parser uses break-to-break framing when L3 CMD_PROTOCOL specifies break-delimited frames.  _[v0.108]_
 - `break_handler_safety_check` — Verify that FSM break/reset handlers do NOT fire during active response-processing states.  _[v0.108]_
 - `bringup_plan_gen` — emit bring-up plan from L13_LAB_CALIBRATION.

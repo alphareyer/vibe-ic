@@ -175,8 +175,21 @@ def test_no_live_code_still_routes_anyone_to_the_removed_flag():
 # against the REAL hook, in a synthetic repo whose gate programs are stubs — the
 # stamp block is what is under test, not the eight gates ahead of it.
 
+# THIS LIST IS THE FIXTURE'S COMPLETENESS, NOT A POLICY. `run_gate` treats a
+# program that is not on disk as NOT CHECKED and sets FAILED — correctly, because
+# a gate that is absent has not passed — so a gate added to the hook and not added
+# here turns the two rc-0 arms below red for a reason that has nothing to do with
+# the stamp block they are about. That is exactly what happened when
+# `branch_version_bump_guard.py` (vibe-ic#2096) was wired in: the two
+# stamp-ACCEPTED tests failed with "branch_version_bump_guard.py absent" while the
+# stamp logic they test was untouched.
+#
+# So: WHEN YOU ADD A `run_gate` CALL TO `tools/git-hooks/pre-push`, ADD ITS PROGRAM
+# HERE. Stubbing it is not weakening this file — the four rc-1 arms below assert the
+# stamp block's own message, which a stub cannot produce.
 _HOOK_PROGRAMS = (
-    "agent_checkin_scope_guard.py", "commit_msg_nda_check.py",
+    "agent_checkin_scope_guard.py", "branch_version_bump_guard.py",
+    "commit_msg_nda_check.py",
     "git_prohibition_guard.py", "landing_collateral_revert_check.py",
     "marketplace_version_sync_check.py", "nda_diff_scan_check.py",
     "plugin_full_audit.py", "version_bump_monotonic_check.py",
