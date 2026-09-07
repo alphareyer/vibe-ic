@@ -140,6 +140,15 @@ try:
 except ImportError:  # packaged
     from ._prose_polarity import is_denied as _prose_is_denied  # type: ignore
 
+# The ONE offset-preserving blanker for HDL comments AND string literals
+# (vibe-ic#731). `_SRC.strip_comments` blanks comments only, and a Verilog
+# string mints a declaration exactly as a comment does — see the block above
+# `_rtl_declared_widths` for the measurement that made this import necessary.
+try:
+    import _hdl_code_text as _HDL
+except ImportError:  # packaged
+    from . import _hdl_code_text as _HDL  # type: ignore
+
 # CVDP enhance — program-first STRUCTURAL extractors for the four artifact classes
 # the legacy checklist extractor missed (register-map, enumerated-mode literal map +
 # outside-set boundary, FSM transition graph, worked-example I/O pairs, rounding/
@@ -948,6 +957,271 @@ def _rtl_signed_operand_names(rtl_text: Optional[str]) -> set:
                              txt):
             aliases.add(m.group(1))
     return names | aliases
+
+
+# #2167 — the COARSE `signedness` obligation is the same defect as #2152 one
+# level up: its coverage token is the LITERAL SPEC WORD ("signed"/"unsigned"/
+# "two's complement"), it is RTL-corroborated by `_rtl_declares_signed`, and it
+# therefore BLOCKS. Measured on cbc934c22fb9: an `alu` testbench that drives
+# 32'hFFFFFFFF against 32'h00000001 through SLT vs SLTU and 32'h80000000 through
+# SRA — i.e. one that really exercises the two's-complement reading — is scored
+# UNCOVERED and BLOCKS, while the SAME testbench with `reg signed [31:0] a, b;`
+# instead of `reg [31:0] a, b;` is scored COVERED. The obligation is discharged
+# by a SPELLING rather than by the behaviour, exactly like #2152's noun.
+#
+# The structural analogue (the `overflow` / `handshake` / `byte_order` shape
+# already shipped in attribute_coverage): a testbench EXERCISES signedness when
+# it drives, into a signal the RTL structurally treats as a SIGNED operand, a
+# literal whose SIGNED and UNSIGNED readings DIFFER (a negative literal, or one
+# whose MSB is set at the operand's declared width), AND it checks the DUT's
+# response with an equality assertion tied to the DUT. Both halves are required:
+# a drive with nothing asserted has not verified the signed reading, and an
+# assertion with no MSB-set/negative stimulus never distinguishes the two
+# readings. A TB that does neither still GAPs and still BLOCKs — §4.05 no-leak.
+#
+# chip-AGNOSTIC: pure Verilog declaration / literal / assignment / equality
+# grammar. No design, PDK or vendor literal anywhere.
+
+# A width-carrying declaration of one or more identifiers. The optional
+# `signed`/`unsigned` qualifier sits BEFORE the range in Verilog
+# (`input signed [31:0] a`), and the name list may be comma-separated.
+_RTL_DECL_WIDTH_RE = re.compile(
+    r"\b(?:input|output|inout|wire|reg|logic|var|bit)\b"
+    r"(?:\s+(?:wire|reg|logic|var|bit))?"
+    r"(?:\s+(?:signed|unsigned))?"
+    r"\s*(\[[^\]\n]*\])?"
+    r"\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*(?=[;,=)\n])",
+    re.IGNORECASE)
+_RANGE_LITERAL_RE = re.compile(r"^\[\s*(\d+)\s*:\s*(\d+)\s*\]$")
+
+
+def _rtl_declared_widths(rtl_text: Optional[str]) -> dict:
+    """Lower-cased identifier -> declared bit WIDTH, for every RTL declaration
+    whose range is a pair of plain integer bounds. A parameterised range
+    (`[WIDTH-1:0]`) yields no entry (width UNKNOWN, never a guessed default).
+
+    NO SENTENCE REACHES THE REGEX. Comments AND string literals are blanked
+    first, in `_hdl_code_text`'s ONE left-to-right alternation, because a
+    Verilog string mints a declaration exactly as a comment does. MEASURED
+    before that blanking landed: an English sentence that DENIES the width,
+    inside `$display("port a is NOT four bits wide: input signed [3:0] a;")`,
+    was read as `a`'s own declaration, set its width to 4, and flipped this
+    file's #2167 signedness verdict from EXERCISED to NOT — the #706/#711
+    defect arriving through a string. `_SRC.strip_comments` alone does not
+    close it (it blanks comments only), and running it BEFORE the blanker
+    would get the nesting backwards (a `//` inside a string is not a comment),
+    so it runs SECOND, on residue, where it still truncates an UNTERMINATED
+    block comment that the blanker deliberately leaves alone.
+
+    THE ONE PATH THE TWO STRIPS LEAVE OPEN IS CLOSED HERE. The blanker leaves
+    an UNTERMINATED string alone by design, and `_SRC.strip_comments` does not
+    read quotes at all, so `$display("NO such port: input [7:0] plant_sig;`
+    with no closing quote still minted `plant_sig -> 8`. Every `"` surviving
+    both strips is an unterminated opener, so the text is CUT there — the same
+    discipline `_SRC.strip_comments` already applies to an unterminated `/*`,
+    and it drops declarations rather than inventing one (width UNKNOWN, the
+    safe direction). This is done HERE and not in `_hdl_code_text`, whose
+    offset-preserving contract three other call sites depend on.
+
+    A strip that RAISES yields `{}` — could-not-read is not read-and-empty, and
+    falling back to the raw text is the one direction that would publish a
+    declaration minted from prose. chip-AGNOSTIC."""
+    if not rtl_text:
+        return {}
+    try:
+        txt = _SRC.strip_comments(_HDL.strip_hdl_comments_and_strings(rtl_text))
+    except Exception:
+        return {}
+    cut = txt.find('"')
+    if cut != -1:
+        txt = txt[:cut]
+    widths: dict = {}
+    for m in _RTL_DECL_WIDTH_RE.finditer(txt):
+        rng, names = m.group(1), m.group(2)
+        if rng:
+            rm = _RANGE_LITERAL_RE.match(rng.replace(" ", ""))
+            if not rm:
+                continue
+            w = abs(int(rm.group(1)) - int(rm.group(2))) + 1
+        else:
+            w = 1
+        for nm in names.split(","):
+            nm = nm.strip().lower()
+            if nm and nm not in widths:
+                widths[nm] = w
+    return widths
+
+
+def _rtl_signed_operand_widths(rtl_text: Optional[str]) -> dict:
+    """Lower-cased name -> declared width (or None) for every signal the RTL
+    structurally treats as a SIGNED operand (`_rtl_signed_operand_names`)."""
+    widths = _rtl_declared_widths(rtl_text)
+    return {nm.lower(): widths.get(nm.lower())
+            for nm in _rtl_signed_operand_names(rtl_text)}
+
+
+# A literal DRIVE STATEMENT: `name = <literal>;` / `name <= <literal>;` /
+# `name[hi:lo] = <literal>;`. The trailing `;` is what separates an ASSIGNMENT
+# from a COMPARISON — `if (a <= 32'hFFFFFFFF)` closes with `)`, never `;` — so a
+# magnitude test can never be misread as a stimulus.
+_TB_LITERAL_DRIVE_RE = re.compile(
+    r"(?<![\w$.])([A-Za-z_]\w*)\s*(?:\[[^\]\n]*\])?\s*"
+    r"(?<![=!<>+\-*/%&|^~])(<=|=)(?!=)\s*"
+    r"(-?\s*(?:\d+\s*'\s*[sS]?[bdhoBDHO][0-9A-Fa-f_xXzZ?]+"
+    r"|0[xXbB][0-9A-Fa-f_]+|\d+))\s*;")
+
+
+def _inside_parens(text: str, pos: int, window: int = 240) -> bool:
+    """True iff `pos` sits inside an UNCLOSED `(` within the preceding window —
+    i.e. inside an `if (...)` / `while (...)` / `for (...)` header rather than at
+    statement level. `<=` is both nonblocking assignment and less-than-or-equal,
+    and a `for (i = 0; x <= LIT; ...)` condition even carries the trailing `;` an
+    assignment has, so paren nesting is what separates a STIMULUS from a
+    COMPARISON. Bounded lookback: a false "inside" only ever WITHHOLDS coverage
+    (the safe direction). chip-AGNOSTIC."""
+    depth = 0
+    for ch in reversed(text[max(0, pos - window):pos]):
+        if ch == ")":
+            depth += 1
+        elif ch == "(":
+            if depth == 0:
+                return True
+            depth -= 1
+    return False
+
+
+_SIZED_LITERAL_RE = re.compile(
+    r"^(\d+)'([sS]?)([bdhoBDHO])([0-9A-Fa-f_xXzZ?]+)$")
+_BASES = {"b": 2, "o": 8, "d": 10, "h": 16}
+
+
+def _literal_readings_differ(lit: str, operand_width: Optional[int]) -> bool:
+    """True iff this literal's SIGNED and UNSIGNED readings differ when driven
+    into an operand of `operand_width` bits — i.e. it is negative, or its MSB is
+    set at that width. `operand_width` None falls back to the literal's OWN
+    declared size (a sized literal carries its width); an unsized literal with no
+    known operand width is NOT judged (False — never a guessed default).
+
+    A 1-bit operand is excluded: `1'b1` is the whole unsigned range and reading
+    it as -1 is a degenerate case, not a signedness exercise."""
+    lit = re.sub(r"\s+", "", lit or "")
+    if not lit:
+        return False
+    if lit.startswith("-"):
+        return True                       # a negative literal is unambiguous
+    m = _SIZED_LITERAL_RE.match(lit)
+    if m:
+        size = int(m.group(1))
+        digits = re.sub(r"[xXzZ?]", "0", m.group(4)).replace("_", "")
+        try:
+            val = int(digits, _BASES[m.group(3).lower()])
+        except (ValueError, KeyError):
+            return False
+        width = operand_width if operand_width else size
+    else:
+        if not operand_width:
+            return False                  # unsized literal, width UNKNOWN
+        v = lit.replace("_", "")
+        try:
+            val = (int(v, 16) if v.lower().startswith("0x")
+                   else int(v, 2) if v.lower().startswith("0b") else int(v))
+        except ValueError:
+            return False
+        width = operand_width
+    if width < 2:
+        return False
+    val &= (1 << width) - 1               # truncate / zero-extend to the operand
+    return bool((val >> (width - 1)) & 1)
+
+
+# An equality-family check whose LEFT operand is an identifier and whose RIGHT
+# operand is an identifier or a literal — `r !== exp`, `dout === 32'hF8000000`.
+_TB_EQ_CHECK_RE = re.compile(
+    r"\b([A-Za-z_]\w*)(?:\s*\[[^\]\n]*\])?\s*(?:===|!==|==|!=)\s*"
+    r"(?:([A-Za-z_]\w*)(?:\s*\[[^\]\n]*\])?|-?\s*\d+\s*'\s*[sS]?"
+    r"[bdhoBDHO][0-9A-Fa-f_xXzZ?]+|-?\s*\d+|0[xXbB][0-9A-Fa-f_]+)")
+
+
+def _signedness_drive_targets(
+        tb_clean: str,
+        rtl_signed_operands: dict,
+        rtl_ports_lower: Optional[set] = None) -> tuple:
+    """`(targets, dut_tied)` for the signedness structural check.
+
+    `targets` maps each name a signedness STIMULUS may be driven into -> that
+    operand's declared width (or None): every signal the RTL treats as a signed
+    operand, PLUS the testbench net bound to it at instantiation by a named port
+    connection `.port(net)`, because a testbench drives its own net, not the DUT
+    port's name. `dut_tied` is the set an ASSERTION operand may name for the
+    check to be about the DUT: its ports, widened the same way.
+
+    Exposed rather than inlined so the evidence a reader is shown is built by
+    the SAME code the verdict is: a report that rebuilds this set by hand can
+    disagree with the gate and did — the alias hop was missing from the first
+    draft of this lane's RTL-read document while the gate resolved it correctly.
+    chip-AGNOSTIC."""
+    ports = {p.lower() for p in (rtl_ports_lower or set())}
+    conn: dict = {}
+    for m in _TB_PORT_CONN_RE.finditer(tb_clean or ""):
+        conn.setdefault(m.group(1).lower(), set()).add(m.group(2).lower())
+    targets: dict = {}
+    for nm, w in (rtl_signed_operands or {}).items():
+        targets.setdefault(nm.lower(), w)
+        for net in conn.get(nm.lower(), ()):
+            targets.setdefault(net, w)
+    dut_tied = set(ports)
+    for pname, nets in conn.items():
+        if not ports or pname in ports:
+            dut_tied |= nets
+    return targets, dut_tied
+
+
+def _tb_exercises_signedness_region(
+        tb_clean: str,
+        rtl_signed_operands: Optional[dict],
+        rtl_ports_lower: Optional[set] = None) -> bool:
+    """True iff the TB structurally exercises the SIGNED reading of an operand
+    the RTL treats as signed. Requires BOTH:
+
+      (1) a literal DRIVE STATEMENT into one of those operands (or into the TB
+          net bound to it by a named port connection `.port(net)`) whose signed
+          and unsigned readings DIFFER — negative, or MSB set at the operand's
+          declared width; and
+      (2) an equality-family CHECK one of whose operands is a DUT port (resolved
+          through the same named-connection aliases), i.e. the TB asserts the
+          DUT's response rather than merely wiggling an input.
+
+    §4.05 no-leak: a TB that drives only MSB-clear vectors, or that drives a
+    negative operand and never checks anything, is NOT covering — the signedness
+    gap is real and STILL reported. chip-AGNOSTIC, comment-stripped grammar."""
+    if not tb_clean or not rtl_signed_operands:
+        return False
+    targets, dut_tied = _signedness_drive_targets(
+        tb_clean, rtl_signed_operands, rtl_ports_lower)
+
+    drives = False
+    for m in _TB_LITERAL_DRIVE_RE.finditer(tb_clean):
+        nm = m.group(1).lower()
+        if nm not in targets:
+            continue
+        # A drive is a STATEMENT. Inside an `if (...)` / `while (...)` /
+        # `for (...)` header the same text is a COMPARISON — and a for-loop
+        # condition `for (i = 0; x <= LIT; ...)` even ends in the `;` an
+        # assignment ends in, so the trailing `;` alone cannot separate them.
+        if _inside_parens(tb_clean, m.start()):
+            continue
+        if _literal_readings_differ(m.group(3), targets[nm]):
+            drives = True
+            break
+    if not drives:
+        return False
+    for m in _TB_EQ_CHECK_RE.finditer(tb_clean):
+        operands = {m.group(1).lower()}
+        if m.group(2):
+            operands.add(m.group(2).lower())
+        if (not dut_tied) or (operands & dut_tied):
+            return True
+    return False
 
 
 def _split_sentences(low: str) -> List[str]:
@@ -2168,14 +2442,20 @@ def _is_single_signal_concat_assignment(spec_text: str, brace_match) -> bool:
 def attribute_coverage(items: List[ChecklistItem], tb_text: Optional[str],
                        enum_members_all: List[str],
                        rtl_ports_lower: Optional[set] = None,
-                       ambiguous_ports: Optional[set] = None) -> None:
+                       ambiguous_ports: Optional[set] = None,
+                       rtl_signed_operands: Optional[dict] = None) -> None:
     """Set .covered / .coverage_note for each checklist item based on whether
     the authored TB exercises it. No TB => everything UNCOVERED.
 
     `rtl_ports_lower` (ORGANIC #770 r2 Step-2.7) is the RTL's port-name set; the
     handshake structural-coverage check restricts its toggle detection to actual
     DUT-interface ports so a decoy local control reg (dma_req/internal_req/…)
-    toggling in the TB cannot spuriously satisfy the protocol-handshake item."""
+    toggling in the TB cannot spuriously satisfy the protocol-handshake item.
+
+    `rtl_signed_operands` (#2167) maps each signal the RTL structurally treats as
+    a SIGNED operand to its declared width (or None when the range is
+    parameterised); it drives the signedness structural-coverage check. None /
+    empty leaves the signedness item on its historical literal-word token path."""
     if tb_text is None:
         for it in items:
             it.covered = False
@@ -2284,6 +2564,46 @@ def attribute_coverage(items: List[ChecklistItem], tb_text: Optional[str],
             else:
                 it.coverage_note = ("no TB toggle of a valid/ready handshake "
                                     f"signal and no reference to {it.coverage_tokens}")
+            continue
+        # #2167: the coarse signedness item is a STRUCTURAL-STIMULUS requirement,
+        # not a vocabulary one — the same defect #2152 closed for the FINE
+        # `signed_operand` kind, one level up. The shipped attribute_coverage()
+        # marked it covered ONLY when the TB literally contains the spec WORD
+        # ("signed"/"unsigned"/"two's complement"), so a directed-vector TB that
+        # drives 32'hFFFFFFFF through SLT vs SLTU and 32'h80000000 through SRA —
+        # a faithful two's-complement exercise — was scored UNCOVERED and, being
+        # RTL-corroborated, hard-BLOCKED; the identical TB with `reg signed`
+        # passed. Mark covered iff the TB structurally EXERCISES the signed
+        # reading (an MSB-set / negative literal driven into a signal the RTL
+        # treats as a signed operand, together with an equality check on the
+        # DUT), OR it names a spec token. The token path is KEPT: `reg signed` in
+        # a TB is real structural evidence, so this change is purely ADDITIVE and
+        # nothing that is covered today becomes uncovered. A TB that drives no
+        # MSB-set/negative stimulus into a signed operand, and never names the
+        # token, still GAPs — §4.05 no-leak.
+        if it.kind == "signedness":
+            token_hit = any(
+                tok.strip()
+                and re.search(r"\b" + re.escape(tok.strip().lower()) + r"\b",
+                              tb_low)
+                for tok in it.coverage_tokens)
+            region = _tb_exercises_signedness_region(
+                tb_clean, rtl_signed_operands, rtl_ports_lower)
+            it.covered = bool(region or token_hit)
+            if region and token_hit:
+                it.coverage_note = ("TB drives an MSB-set/negative literal into "
+                                    "an RTL-signed operand with a DUT equality "
+                                    "check, and names the spec token")
+            elif region:
+                it.coverage_note = ("TB drives an MSB-set/negative literal into "
+                                    "an RTL-signed operand and checks the DUT "
+                                    "result (signed vs unsigned readings differ)")
+            elif token_hit:
+                it.coverage_note = ("TB names the signedness spec token")
+            else:
+                it.coverage_note = ("no TB stimulus whose signed and unsigned "
+                                    "readings differ on an RTL-signed operand "
+                                    f"and no reference to {it.coverage_tokens}")
             continue
         # ORGANIC R13C3 (cvdp_copilot_ir_receiver_0001): the byte_order item is a
         # STRUCTURAL-STIMULUS requirement, not a vocabulary one. A faithful
@@ -2497,7 +2817,12 @@ def run(stations: dict, rtl_text: Optional[str], tb_text: Optional[str],
     attribute_coverage(
         items, tb_text, enum_members_all,
         _rtl_port_name_set(rtl_text, tb_text) if rtl_text else None,
-        _ambiguous_port_names(rtl_text, tb_text) if rtl_text else None)
+        _ambiguous_port_names(rtl_text, tb_text) if rtl_text else None,
+        # #2167 — the signed operands (name -> declared width) the coarse
+        # signedness item is attributed structurally against. `rtl_signed_names`
+        # is already computed above for the #2152 retarget; the widths come from
+        # the same RTL declarations.
+        _rtl_signed_operand_widths(rtl_text) if rtl_text else None)
 
     # ── ORGANIC #770 — provenance / confidence tagging ──────────────────────
     # Tag each item STRUCTURAL vs PROSE_HEURISTIC and compute whether the RTL
