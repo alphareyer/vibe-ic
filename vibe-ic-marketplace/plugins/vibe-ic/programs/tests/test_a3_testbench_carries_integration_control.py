@@ -62,7 +62,7 @@ sys.path.insert(0, str(PROGRAMS))
 import analog_a2_topology_emit as A2LIB          # noqa: E402
 import analog_a3_netlist_emit as A3MOD           # noqa: E402
 from _analog_producer_fixture import (           # noqa: E402
-    A1, A2, A3, block, make_project, run_prog)
+    A1, A2, A3, block, make_project, run_prog, stage_custom_pdk)
 
 #: ngspice / SPICE3 ship this. Stated HERE, not imported from the producer, so
 #: that editing the producer's own copy of the default cannot move the bound
@@ -112,6 +112,13 @@ def _emit(tmp_path):
     blocks = [block(f"blk_{i}", btype, specs=SPECS)
               for i, btype in enumerate(classes)]
     project = make_project(tmp_path, blocks)
+    # vibe-ic#2139 — a context that names ONE PDK. `PDK` is a family this host
+    # neither stages nor installs, and the binder now refuses to bind it
+    # against another family's model library rather than emitting a deck that
+    # ngspice rejects with `unknown subckt`. Every assertion below is about
+    # what was WRITTEN into the testbench and none of them reads a device name
+    # or a library path, so this changes the context and not the subject.
+    stage_custom_pdk(project, PDK)
     run_prog(A1, project)
     run_prog(A2, project, "--pdk", PDK)
     run_prog(A3, project, "--pdk", PDK)

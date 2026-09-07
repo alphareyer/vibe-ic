@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
+import pdk_family_identity as _ident  # noqa: E402 — the ONE family matcher
 
 DEFAULT_PDKS_ROOT = "/foss/pdks"
 
@@ -313,11 +314,30 @@ def _rung2_deck_candidates(lister: Callable[[str], List[str]],
 # ── family matching ──────────────────────────────────────────────────────
 
 def _norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", s.lower())
+    return _ident.normalise(s)
 
 
 def _tokens(s: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", s.lower())
+
+
+def _family_id(target: str) -> str:
+    """The spelling this resolver REPORTS for a rung-2 target.
+
+    vibe-ic#2139 — this used to be `_norm(target)` unconditionally, and that
+    is how the resolver came to hand its own consumers a spelling they could
+    not resolve: `ihp-sg13g2` was reported as `ihpsg13g2`, which matched no
+    registry entry, so the family's curated device map, its measured process
+    constants and its layout minima all read as absent and the producers
+    refused a design whose PDK the registry describes in full.
+
+    The registry's own `name` is the published spelling, so that is what is
+    reported for a family the registry knows. A family it does not know — an
+    installed PDK nobody has written an entry for — keeps exactly the
+    normalised spelling it had before, because there is no published name to
+    report and inventing one would be worse than the punctuation.
+    """
+    return _ident.canonical_or_normalised(target)
 
 
 def families_agree(a: Optional[str], b: Optional[str]) -> Optional[bool]:
@@ -328,37 +348,27 @@ def families_agree(a: Optional[str], b: Optional[str]) -> Optional[bool]:
     token long enough to identify a family. `None` is NOT `False`: a caller
     must not report a contradiction it could not actually observe.
 
-    Matching is the same structural token containment `_match_installed`
-    already uses against installed directory names, so a declaration and a
-    flag are compared exactly the way a flag is compared to a PDK on disk:
-
         ihp-sg13g2 vs sg13g2   -> True   (the L19 target is the bare family)
         sky130A    vs sky130   -> True   (the installed dir carries a suffix)
         sky130A    vs sg13g2   -> False
         ""         vs sg13g2   -> None
 
-    No family literal appears here; the rule is purely structural, so a PDK
-    this repo has never heard of compares by the same rule as the open ones.
+    vibe-ic#2139 — THE RULE ITSELF NOW LIVES IN ONE PLACE. This function used
+    to carry its own copy of the structural token rule, and three other
+    readers carried three more; the four disagreed, and the spelling THIS
+    MODULE PRODUCES (`family`, punctuation stripped) resolved in none of the
+    other three. `pdk_family_identity` is the single authority now, and it
+    answers this question by the published family name whenever the registry
+    knows one — so two spellings of one family agree here for the same reason
+    they resolve to one registry entry everywhere else. The four published
+    cases above are unchanged, and so is every case in
+    `tests/test_czadc25_analog_pdk_binding.py::test_families_agree`.
+
+    No family literal appears here or there; the rule is purely structural, so
+    a PDK this repo has never heard of compares by the same rule as the open
+    ones.
     """
-    an, bn = _norm(a or ""), _norm(b or "")
-    if not an or not bn:
-        return None
-    if an == bn:
-        return True
-    a_toks = [t for t in _tokens(a or "") if len(t) >= 4]
-    b_toks = [t for t in _tokens(b or "") if len(t) >= 4]
-    if not a_toks and len(an) >= 4:
-        a_toks = [an]
-    if not b_toks and len(bn) >= 4:
-        b_toks = [bn]
-    if not a_toks or not b_toks:
-        # Nothing on one side is specific enough to name a family. Saying
-        # "they contradict" here would invent a finding out of a string too
-        # short to carry one.
-        return None
-    if any(t in bn for t in a_toks) or any(t in an for t in b_toks):
-        return True
-    return False
+    return _ident.same_family(a, b)
 
 
 def _match_installed(target: str, installed: List[str]) -> Optional[str]:
@@ -604,7 +614,8 @@ def resolve_pdk(target: Optional[str], project=None,
             # CI-nondeterministic). Rung 2 is not probeable here → fall through
             # to substitution. chip-AGNOSTIC + CI-safe.
             res = {"available": False, "probe_ok": False, "target": target,
-                   "source": None, "rung": None, "family": _norm(tnorm),
+                   "source": None, "rung": None,
+                   "family": _family_id(tnorm),
                    "matched_dir": None, "pdk_root": None, "installed": [],
                    "tech_present": {}, "reason": (
                        "rung 2 not probeable — no container/lister and the "
@@ -625,7 +636,7 @@ def resolve_pdk(target: Optional[str], project=None,
     if not matched:
         res = {"available": False, "probe_ok": probe_ok, "target": target,
                "source": None, "rung": None,
-               "family": _norm(tnorm), "matched_dir": None,
+               "family": _family_id(tnorm), "matched_dir": None,
                "pdk_root": None, "installed": installed,
                "tech_present": {}, "reason": (
                    "target neither staged (input/pdk/) nor installed "
@@ -660,7 +671,7 @@ def resolve_pdk(target: Optional[str], project=None,
         "source": "container_installed" if available else None,
         "rung": 2 if available else None,
         "target": target,
-        "family": _norm(tnorm),
+        "family": _family_id(tnorm),
         "matched_dir": matched,
         "pdk_root": pdk_root,
         "installed": installed,

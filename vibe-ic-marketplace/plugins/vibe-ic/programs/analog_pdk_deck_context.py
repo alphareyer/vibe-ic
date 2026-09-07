@@ -35,6 +35,7 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
+import pdk_family_identity as _ident  # noqa: E402 — the ONE family matcher
 
 # ── canonical sky130 device tokens the corner templates are authored against ──
 # These are the tokens the deck emitter REMAPS to the resolved family's device
@@ -897,6 +898,39 @@ def map_corner_sections(sections: List[str]
 
 # ── context builders ────────────────────────────────────────────────────────
 
+#: The template a selector with no authored family of its own falls back to.
+#: ORGANIC #410 pinned this fallback in place deliberately — see
+#: `known_family_context` — and #2139 did not move it; what #2139 moved is
+#: which selectors REACH it.
+_FALLBACK_TEMPLATE_FAMILY = "sky130"
+
+
+def known_family_key(selector: str) -> Optional[str]:
+    """The `_KNOWN_FAMILIES` key that is the SAME FAMILY as `selector`, else
+    None.
+
+    vibe-ic#2139 — this table is keyed on the bare process token, and the
+    lookup used to be `selector in _KNOWN_FAMILIES`, i.e. one exact spelling
+    per family. MEASURED on c54016beddc3: `--pdk gf180mcuD` — the spelling
+    `programs/pdk_registry.json` PUBLISHES for that family — missed the table
+    and fell through to the other family's template, so the context carried
+    one open PDK's model library while its cap and res tokens came from the
+    other's registry entry. `--pdk gf180` on the same run got the right
+    library. One family, two spellings, two different processes.
+
+    So the key is resolved by FAMILY through `pdk_family_identity`, the tree's
+    one authority on that question, and never by string identity. A selector
+    naming a family this table has no entry for still gets None — that case
+    is #410's, and it is unchanged.
+    """
+    if selector in _KNOWN_FAMILIES:
+        return selector
+    for key in _KNOWN_FAMILIES:
+        if _ident.same_family(selector, key) is True:
+            return key
+    return None
+
+
 def known_family_context(selector: str) -> DeckContext:
     """The open-PDK fast path (sky130 / gf180) — keeps the sky130 regression
     bit-identical (device_map + sections + lib from the known table, no parse).
@@ -922,8 +956,8 @@ def known_family_context(selector: str) -> DeckContext:
     than today's honest stop. What changes is only that the context now says
     which template it actually carries.
     """
-    fam = _KNOWN_FAMILIES.get(selector, _KNOWN_FAMILIES["sky130"])
-    _template_family = selector if selector in _KNOWN_FAMILIES else "sky130"
+    _template_family = known_family_key(selector) or _FALLBACK_TEMPLATE_FAMILY
+    fam = _KNOWN_FAMILIES[_template_family]
     typ, process = map_corner_sections(list(fam["corner_sections"]))
     return DeckContext(
         status="OK", source="known_family", family=selector,
@@ -959,7 +993,7 @@ def known_family_context(selector: str) -> DeckContext:
         disclosure=(
             f"known open PDK '{selector}' — device map + corner sections "
             f"from the plugin's authored template family (no lib parse)."
-            if _template_family == selector else
+            if known_family_key(selector) else
             f"NO authored template family for '{selector}' — this context "
             f"carries the '{_template_family}' device map, corner sections "
             f"and model lib. It does NOT describe '{selector}'. A consumer "

@@ -44,6 +44,9 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pdk_family_identity as _ident  # noqa: E402 — the ONE family matcher
+
 _REGISTRY_PATH = Path(__file__).resolve().parent / "pdk_registry.json"
 
 
@@ -55,8 +58,18 @@ def load_registry(path: Optional[Path] = None) -> dict:
 
 
 def _pdk_entry(reg: dict, pdk: str) -> Optional[dict]:
+    """The entry `pdk` names.
+
+    vibe-ic#2139 — this matched the registry `name` EXACTLY and nothing else,
+    which made it the strictest of the tree's four family matchers: the
+    curated device map of the one fully-populated family was unreachable under
+    every spelling but one, including the punctuation-free spelling the PDK
+    resolver itself reports. It now asks the same authority as every other
+    reader, so a selector that resolves anywhere resolves here.
+    """
+    canon = _ident.canonical_family(pdk)
     for entry in reg.get("pdks", []):
-        if isinstance(entry, dict) and entry.get("name") == pdk:
+        if isinstance(entry, dict) and entry.get("name") in (pdk, canon):
             return entry
     return None
 

@@ -138,6 +138,7 @@ import _analog_a_check_common as _acc  # noqa: E402
 # a broken reader must break this producer loudly, not silently drop back to
 # the substring heuristic and bind a role by name order.
 import pdk_device_map as _pdm  # noqa: E402
+import pdk_family_identity as _ident  # noqa: E402 — the ONE family matcher
 # The FLOOR the connectivity checker applies, read from the checker rather
 # than restated here — see `_validate_ir`.
 import analog_netlist_connectivity_check as _conncheck  # noqa: E402
@@ -404,16 +405,16 @@ def spec_values(spec: Dict[str, Any]) -> Dict[str, float]:
 
 # ── PDK binding ───────────────────────────────────────────────────────────
 def _registry_entry(selector: str) -> Tuple[Optional[str], Dict[str, Any]]:
-    data = _read_json(_REGISTRY)
-    sel = str(selector or "").strip().lower()
-    for ent in (data or {}).get("pdks") or []:
-        if not isinstance(ent, dict):
-            continue
-        name = str(ent.get("name") or "")
-        if name and (name.lower() == sel or name.lower().startswith(sel)
-                     or sel.startswith(name.lower())):
-            return name, ent
-    return None, {}
+    """The registry entry `selector` names, through the ONE family matcher.
+
+    vibe-ic#2139 — this carried its own prefix-only rule, which is why
+    `_registry_entry('sg13g2')` answered None while
+    `pdk_analog_layout_minima.resolve_family('sg13g2')` answered `ihp-sg13g2`
+    on the same string in the same process. Two readers of one registry
+    disagreeing about which entry a name denotes is how one PDK's device
+    tokens came to be bound against another PDK's model library.
+    """
+    return _ident.canonical_entry(selector, _REGISTRY)
 
 
 def _pdk_token(selector: Optional[str]) -> str:
@@ -571,6 +572,126 @@ def resolve_role_models(family_entry: Dict[str, Any], roles: List[str],
     return out, unresolved, bound_by
 
 
+#: vibe-ic#2139 — the status a context takes when it cannot name ONE PDK.
+#: A deck built from it would load one process's models and instantiate
+#: another's devices, which is the `unknown subckt` death, and the refusal is
+#: what the caller gets instead of that deck.
+PDK_CROSS_BINDING = "PDK_CROSS_BINDING"
+
+#: Where each half of a resolved context comes from, for attribution. The
+#: deck resolver's model library and its device map are ONE declaration — the
+#: authored table entry, or the parse of the libs one family resolved — so a
+#: token it bound is attributable to whichever family that declaration is.
+#: Every other binding comes from the REGISTRY entry, which is a different
+#: declaration and may be a different family.
+_LIB_BOUND = frozenset({BOUND_BY_DECK_CONTEXT})
+
+
+def context_library_family(ctx_json: Dict[str, Any], pdk: str) -> Optional[str]:
+    """WHICH PDK the model library in `ctx_json` belongs to.
+
+    Not the same question as "which PDK was asked for", and that is the whole
+    point. `analog_pdk_deck_context.known_family_context` records the request
+    in `family` and the template it actually carries in `template_family`; a
+    parsed context has no template and its library was read out of the family
+    it resolved. So the library's owner is `template_family` when there is
+    one, and the resolved family otherwise.
+    """
+    return (ctx_json.get("template_family")
+            or ctx_json.get("family") or pdk or None)
+
+
+def cross_pdk_bindings(named_family: Optional[str],
+                       lib_family: Optional[str],
+                       model_lib: Optional[str],
+                       role_models: Dict[str, str],
+                       bound_by: Dict[str, str],
+                       registry_family: Optional[str],
+                       ) -> List[Dict[str, Any]]:
+    """Every element of this context that belongs to a DIFFERENT PDK than the
+    model library does. Empty when the context names one PDK throughout.
+
+    THE INVARIANT, stated once: a deck loads exactly one process's models, so
+    every device token it instantiates and the library it loads must come from
+    the SAME declaration. vibe-ic#2139 measured what happens when they do not
+    — a project declaring no L19 asked for one open PDK, the deck resolver had
+    no authored template for it and handed back ANOTHER open PDK's model
+    library under the requested name, `resolve_role_models` filled the roles
+    that library does not cover from the REQUESTED family's registry entry,
+    and the emitted deck loaded one process and instantiated the other's
+    devices. `analog_a3_netlist_emit` reported `1 netlist(s) emitted and
+    verified`, rc 0; ngspice reported `unknown subckt` and simulated nothing.
+
+    Two things can disagree and both are checked:
+
+      * the LIBRARY against the family the context NAMES — this is the
+        fall-through, and it is a disagreement even when every token happens
+        to come from the library's own family, because the artefact still
+        publishes one process's values under another's name;
+      * each TOKEN against the library — this is the mix that kills the deck,
+        and it names the token that will die.
+
+    `None` FROM THE COMPARATOR IS NOT A DISAGREEMENT. `same_family` answers
+    None when the question cannot be asked at all (a side empty, or too short
+    to name a family), and refusing on that would charge a design for a
+    comparison nobody made. Only an observed contradiction refuses.
+
+    chip-AGNOSTIC: no family, node or device literal appears here — every name
+    in the refusal comes from the context and the registry.
+    """
+    if not model_lib:
+        # No library was bound, so there is no library for anything to
+        # disagree WITH. The caller's own `status != OK` branch owns that.
+        return []
+    out: List[Dict[str, Any]] = []
+    lib_id = _ident.canonical_or_normalised(lib_family) or str(lib_family)
+    named_id = _ident.canonical_or_normalised(named_family) or str(named_family)
+    if _ident.same_family(lib_family, named_family) is False:
+        out.append({
+            "kind": "model_library",
+            "role": None,
+            "element": model_lib,
+            "element_pdk": lib_id,
+            "model_lib": model_lib,
+            "model_lib_pdk": lib_id,
+            "named_pdk": named_id,
+            "sentence": (
+                f"this context is named `{named_id}` but the model library it "
+                f"would load is `{model_lib}`, which belongs to `{lib_id}`. "
+                f"There is no authored deck template for `{named_id}`, and "
+                f"another PDK's library is not a default to fall through to: "
+                f"a deck built from it would characterise `{lib_id}` and "
+                f"publish the numbers under `{named_id}`."),
+        })
+    for role in sorted(role_models):
+        token = role_models[role]
+        if not token:
+            continue
+        token_family = (lib_family if bound_by.get(role) in _LIB_BOUND
+                        else registry_family)
+        if _ident.same_family(token_family, lib_family) is not False:
+            continue
+        token_id = (_ident.canonical_or_normalised(token_family)
+                    or str(token_family))
+        out.append({
+            "kind": "device_token",
+            "role": role,
+            "element": token,
+            "element_pdk": token_id,
+            "model_lib": model_lib,
+            "model_lib_pdk": lib_id,
+            "named_pdk": named_id,
+            "bound_by": bound_by.get(role),
+            "sentence": (
+                f"device token `{token}` (role `{role}`) is declared by "
+                f"`{token_id}`, but the model library this deck would load is "
+                f"`{model_lib}`, which belongs to `{lib_id}`. `{lib_id}` does "
+                f"not define `{token}`, so the deck loads one process and "
+                f"instantiates another's device."),
+        })
+    return out
+
+
 def resolve_pdk_context(project: Path, pdk: str, container: str,
                         roles: List[str],
                         domain: Optional[Any] = None,
@@ -661,6 +782,20 @@ def resolve_pdk_context(project: Path, pdk: str, container: str,
     fam_name, fam_entry = _registry_entry(family or pdk)
     models, unresolved, bound_by = resolve_role_models(
         fam_entry, roles, device_map, domain, family=fam_name)
+    # vibe-ic#2139 — THE LIBRARY AND THE TOKENS MUST BE ONE PDK'S.
+    # This is the last point at which both halves are visible: the deck
+    # resolver has said which library it carries and `resolve_role_models` has
+    # just said where every token came from. A disagreement here is refused BY
+    # NAME and the library is DROPPED — a context that cannot name one PDK
+    # must not hand its caller another PDK's library to emit against, which is
+    # what "falls through to a default" meant and what killed the deck.
+    lib_family = context_library_family(ctx_json, pdk)
+    cross = cross_pdk_bindings(family or pdk, lib_family, model_lib,
+                               models, bound_by, fam_name)
+    if cross:
+        status = PDK_CROSS_BINDING
+        work_items = list(work_items) + [c["sentence"] for c in cross]
+        model_lib = None
     return {
         "status": status,
         "family": family,
@@ -700,6 +835,12 @@ def resolve_pdk_context(project: Path, pdk: str, container: str,
             k: v for k, v in (fam_entry.get("analog_device_params") or
                               {}).items() if k != _pdp.MEASURED_KEY},
         "work_items": work_items,
+        # vibe-ic#2139 — the STRUCTURED half of the refusal above: which
+        # element, which role, which two PDKs. Empty on every context that
+        # names one PDK throughout, which is every context that was already
+        # correct.
+        "cross_pdk_bindings": cross,
+        "library_family": lib_family,
         "deck_context": ctx_json,
     }
 
@@ -2009,16 +2150,28 @@ def emit_for_block(project: Path, entry: Dict[str, Any], pdk: str,
                            f"emitted for it."))
         return rec
     if pdkctx["status"] != "OK":
+        # vibe-ic#2139 — THE GAP CARRIES THE STATUS THE RESOLVER ACTUALLY
+        # RETURNED. This wrote NEEDS_NATIVE_TEMPLATE for every non-OK status,
+        # which was the only one there was; PDK_CROSS_BINDING is a different
+        # finding with a different remedy — the context named two PDKs, and
+        # the reader needs to be told WHICH element belonged to which — so
+        # flattening it into the older word would delete the answer.
         _drop_stale(bdir, name)
-        gap = write_gap(bdir, project, name, btype, "NEEDS_NATIVE_TEMPLATE",
-                        ("the declared PDK target resolves to a family whose "
-                         "deck context is incomplete; emitting one foundry's "
-                         "device tokens against another's model library is "
-                         "forbidden"),
+        cross = list(pdkctx.get("cross_pdk_bindings") or [])
+        status = str(pdkctx["status"])
+        reason = ("the declared PDK target resolves to a family whose "
+                  "deck context is incomplete; emitting one foundry's "
+                  "device tokens against another's model library is "
+                  "forbidden")
+        if status == PDK_CROSS_BINDING:
+            reason = ("the resolved context does not name ONE PDK: " +
+                      " ".join(c["sentence"] for c in cross))
+        gap = write_gap(bdir, project, name, btype, status, reason,
                         deck_context=pdkctx.get("deck_context"),
+                        cross_pdk_bindings=cross,
                         work_items=pdkctx.get("work_items"))
         rec.update(action="gap", emitted=False,
-                   status="NEEDS_NATIVE_TEMPLATE",
+                   status=status,
                    gap_path=str(gap.relative_to(project)))
         return rec
 

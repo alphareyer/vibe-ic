@@ -1312,6 +1312,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 2
 
+    # vibe-ic#2139 — the binder REFUSED to name one PDK, and it says which
+    # element belonged to which. Reported before NO_MODEL_LIB, which is what
+    # the dropped library would otherwise look like from here: "no lib was
+    # bound" and "a lib was bound and it was the wrong process's" are
+    # different findings with different remedies, and this program exists to
+    # publish a process's constants under that process's name.
+    if ctx.get("status") == _a3.PDK_CROSS_BINDING:
+        report["status"] = _a3.PDK_CROSS_BINDING
+        report["work_items"] = list(ctx.get("work_items") or [])
+        report["cross_pdk_bindings"] = list(
+            ctx.get("cross_pdk_bindings") or [])
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 2
+
     loads = deck_loads_for(ctx)
     if not loads:
         report["status"] = "NO_MODEL_LIB"

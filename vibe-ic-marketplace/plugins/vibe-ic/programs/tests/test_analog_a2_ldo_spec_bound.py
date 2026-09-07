@@ -51,7 +51,7 @@ import pytest
 
 from _analog_producer_fixture import (
     A1, A2, A3, GATE_A2, PROGRAMS, bdir, block, make_project, read_json,
-    run_prog)
+    run_prog, stage_custom_pdk)
 
 # Every name and number here is invented; what is copied is only the SHAPE of
 # a regulator row a datasheet table actually carries, so
@@ -77,6 +77,16 @@ def ldo_specs(vout=1.2, iq=50.0, iq_unit="µA", vout_unit="V", vref=None,
 def a2(tmp_path, tag="d", pdk="ihp-sg13g2", **kw):
     root = make_project(tmp_path / tag,
                         [block(BLK, "ldo", ldo_specs(**kw))])
+    # vibe-ic#2139 — give the producers a context that names ONE PDK. Without
+    # it `--pdk` names a family this host neither stages nor installs, and the
+    # binder now REFUSES rather than handing back another family's model
+    # library with this family's device tokens against it (the deck that came
+    # out of that used to be read by the tests below and could never
+    # simulate). Nothing about what these tests assert changes: the divider
+    # sizing they measure comes from two bound spec rows and the MEASURED
+    # sheet resistance in this family's registry entry, none of which this
+    # staging touches.
+    stage_custom_pdk(root, pdk)
     assert run_prog(A1, root).returncode == 0
     res = run_prog(A2, root, "--pdk", pdk)
     return bdir(root, BLK), res, root
@@ -91,9 +101,18 @@ def _legs(d):
     return by, exprs
 
 
-def _sized(d, root):
-    """Run A3 and return (provenance, the two leg lengths it rendered)."""
-    res = run_prog(A3, root, "--pdk", "ihp-sg13g2")
+def _sized(d, root, pdk="ihp-sg13g2"):
+    """Run A3 and return (provenance, the two leg lengths it rendered).
+
+    vibe-ic#2139 — `pdk` is a PARAMETER now. It was the default spelling,
+    hardcoded, while `a2` above took the family as an argument, so the one
+    test that asks about a DIFFERENT family drove A2 with that family and A3
+    with this one. Nothing noticed, because on a host that neither stages nor
+    installs either of them the request bound whatever was asked for. Now that
+    the project declares its family, a request for a different one is the
+    refusal `pdk_request_is_bound` exists to make.
+    """
+    res = run_prog(A3, root, "--pdk", pdk)
     prov = read_json(d / "netlist_provenance.json")["_provenance"]
     text = (d / f"{BLK}.sp").read_text(encoding="utf-8")
     lens = {}
@@ -290,7 +309,7 @@ def test_a_process_with_no_measured_sheet_keeps_the_disclosure(tmp_path):
     if "rsheet_ohm_per_sq" in (ir.get("pdk_measured_params") or {}):
         pytest.skip("this family carries a measured sheet; not the case "
                     "under test")
-    a3res, prov, _ = _sized(d, root)
+    a3res, prov, _ = _sized(d, root, pdk="gf180mcuD")
     assert a3res.returncode == 0, a3res.stderr
     assert prov["design_content"] == "structure_only", prov
     assert prov["spec_bound_params"] == [], prov

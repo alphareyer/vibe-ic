@@ -72,6 +72,54 @@ def make_project(root: Path, blocks: List[Dict[str, Any]],
     return root
 
 
+def stage_custom_pdk(root: Path, family: str) -> Path:
+    """Stage a rung-1 project-custom PDK for `family` and declare it in L19.
+
+    WHY A TEST THAT IS NOT ABOUT PDKs NEEDS THIS (vibe-ic#2139). A producer
+    driven with `--pdk <family>` on a host where that family is neither staged
+    nor installed used to be handed ANOTHER family's model library under the
+    requested name, and the roles that library does not cover were filled from
+    the requested family's registry entry. The deck that came out loaded one
+    process and instantiated another's devices; ngspice refused it with
+    `unknown subckt`, and every test that only read the artefact was green.
+
+    `analog_a3_netlist_emit.resolve_pdk_context` now refuses that binding
+    instead of emitting it, so a test that wants a RENDERED netlist for a
+    family has to give the producer a context that names one PDK. This is the
+    cheapest honest way to do that with no container and no PDK tree: one
+    sectioned model lib on disk under the project's own `input/pdk/`, which is
+    rung 1 of `analog_pdk_availability.resolve_pdk` — the same shape a project
+    staging its own process assets uses.
+
+    The device names are synthetic and carry only the STRUCTURAL role tokens
+    `analog_pdk_deck_context._ROLE_TOKENS` assigns by, so nothing here names a
+    foundry device. Roles this lib does not carry still resolve from the
+    family's own registry entry, which is the SAME family, so the context
+    still names one PDK.
+    """
+    # TERMINAL COUNT IS PART OF THE CONTRACT, not decoration: the deck
+    # emitter refuses an IR whose instance line has fewer nodes than the
+    # resolved subckt declares ("Too few parameters for subcircuit"), so the
+    # staged devices carry the terminal counts the topology IR writes — four
+    # for the MOS pair, three for a resistor, two for a capacitor.
+    devices = [("stg_nmos_dev", "d g s b"), ("stg_pmos_dev", "d g s b"),
+               ("stg_res_x_dev", "p1 p2 b"), ("stg_cap_x_dev", "p1 p2")]
+    body = "\n".join(f".subckt {name} {nodes} w=1 l=1\n.ends"
+                      for name, nodes in devices)
+    text = "* staged model lib\n"
+    for section in ("ss", "tt", "ff"):
+        text += f".lib {section}\n{body}\n.endl\n"
+    lib = root / "input" / "pdk" / "spice" / "staged_models.lib"
+    lib.parent.mkdir(parents=True, exist_ok=True)
+    lib.write_text(text, encoding="utf-8")
+    gen = root / "phase1" / "generated_docs"
+    gen.mkdir(parents=True, exist_ok=True)
+    (gen / "L19_CONSTRAINTS_PDK.json").write_text(
+        json.dumps({"fields": {"pdk_target": family}}, indent=2),
+        encoding="utf-8")
+    return lib
+
+
 def run_prog(prog: Path, project: Path, *args: str,
              stall_grace_s: Optional[float] = None
              ) -> subprocess.CompletedProcess:

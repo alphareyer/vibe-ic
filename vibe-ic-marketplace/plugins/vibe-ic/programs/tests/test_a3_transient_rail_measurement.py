@@ -64,7 +64,8 @@ sys.path.insert(0, str(PROGRAMS))
 import analog_a2_topology_emit as A2LIB          # noqa: E402
 import analog_a3_netlist_emit as A3              # noqa: E402
 from _analog_producer_fixture import (           # noqa: E402
-    A1, A2, A3 as A3PROG, block, make_project, run_prog)
+    A1, A2, A3 as A3PROG, block, make_project, run_prog,
+    stage_custom_pdk)
 
 #: The same union of sizing rows the integration-control file binds, for the
 #: same reason: one synthetic block per class is then admissible and the
@@ -108,6 +109,13 @@ def _emit(tmp_path):
     blocks = [block(f"blk_{i}", btype, specs=SPECS)
               for i, btype in enumerate(classes)]
     project = make_project(tmp_path, blocks)
+    # vibe-ic#2139 — a context that names ONE PDK. `PDK` is a family this host
+    # neither stages nor installs, and the binder now REFUSES to bind it
+    # against another family's model library rather than emitting a deck
+    # ngspice rejects with `unknown subckt`. Every assertion below is about the
+    # rail-measurement cards WRITTEN into the deck; none reads a device name or
+    # a library path, so this changes the context and not the subject.
+    stage_custom_pdk(project, PDK)
     run_prog(A1, project)
     run_prog(A2, project, "--pdk", PDK)
     run_prog(A3PROG, project, "--pdk", PDK)

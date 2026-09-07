@@ -57,7 +57,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 from typing import Any, Dict, Optional, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pdk_family_identity as _ident  # noqa: E402 — the ONE family matcher
 
 _REGISTRY = Path(__file__).resolve().parent / "pdk_registry.json"
 
@@ -89,24 +93,19 @@ def resolve_family(selector: str, path: Optional[Path] = None
     Exact, then prefix either way, then containment either way: an L-doc
     commonly declares the family by its bare process token while the registry
     entry carries a vendor prefix, and prefix matching ALONE answered None for
-    exactly that declared-target case. This is the one matcher — the analog
-    producers share it so a selector that resolves for one of them cannot
-    silently fail to resolve for another.
+    exactly that declared-target case.
+
+    vibe-ic#2139 — THE MATCHER ITSELF MOVED TO `pdk_family_identity`, which is
+    now the tree's one answer to "which family is that?".  This docstring used
+    to call the rule below "the one matcher"; it was one of four, and it was
+    the only one that compared the strings WITHOUT dropping punctuation, so
+    the punctuation-free spelling `analog_pdk_availability` reports for every
+    rung-2 family resolved here to None.  A family whose registry entry states
+    its measured process constants in full was therefore refused for carrying
+    none.  Delegating keeps this function's published answers exactly as they
+    were and adds the spelling that was missing.
     """
-    sel = str(selector or "").strip().lower()
-    if not sel:
-        return None, {}
-    for ent in _read_registry(path).get("pdks") or []:
-        if not isinstance(ent, dict):
-            continue
-        name = str(ent.get("name") or "")
-        if not name:
-            continue
-        low = name.lower()
-        if (low == sel or low.startswith(sel) or sel.startswith(low)
-                or sel in low or low in sel):
-            return name, ent
-    return None, {}
+    return _ident.canonical_entry(selector, path or _REGISTRY)
 
 
 def layout_minima(selector: str, path: Optional[Path] = None
