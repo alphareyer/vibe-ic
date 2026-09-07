@@ -77,8 +77,8 @@ import tempfile
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path, PurePosixPath
-from typing import (Any, Callable, Dict, FrozenSet, Iterable, List, Optional,
-                    Sequence, Set, Tuple)
+from typing import (Any, Callable, Dict, FrozenSet, Iterable, List,
+                    NamedTuple, Optional, Sequence, Set, Tuple)
 import _path_layout as _pl
 import _runner_measurement as _rmeas
 import _reference_flow_boundary as _rfb
@@ -25966,6 +25966,88 @@ def _drop_empty_antenna_reports(out_dir: Path) -> List[str]:
               f"as clean or as absent, so the iteration is left with no "
               f"report, which is true")
     return dropped
+
+
+class CachedStageDecision(NamedTuple):
+    """Whether a cached phase-3 stage artefact may be reused, and why.
+
+    `reason` is the composed disclosure the PnR site publishes; `producer_reason`
+    is the producer-identity half alone, which is what the GDS site has always
+    published. Both are returned so neither call site has to recompute the other
+    half, and so this function can be the ONE place the decision is made.
+    `dropped` names any unreadable artefact this decision removed.
+    """
+    accept: bool
+    reason: str
+    producer_reason: str
+    dropped: Tuple[str, ...]
+
+
+def _cached_stage_decision(project: Path, out_dir: Path, artefact: Path, *,
+                           kind: str, top: str, die_um: str, util: float,
+                           blocked_by: str = "") -> CachedStageDecision:
+    """THE cache-reuse decision for a phase-3 stage, as a function.
+
+    WHY IT IS A FUNCTION AT ALL — vibe-ic#2166.  This decision used to be
+    written twice inline in `main()`, and `main()` is not drivable: a test
+    cannot reach it with a prepared directory, so nothing about the decision
+    could be asserted except by reading the source.  #2157 measured what that
+    costs: four assertions that grepped the runner's Python for the spelling of
+    a fix were ALL GREEN on the tree that carried the escape the fix was
+    supposed to prevent.  The point of this extraction is that the caller is now
+    a two-line call and the decision is reachable from a test with a directory
+    on disk.
+
+    WHAT IT DECIDES, unchanged from the two inline copies it replaces:
+      * `_pnr_cache_valid_for` — the REQUESTED floorplan geometry (#593/#596);
+      * `_producer_cache_valid_for(kind)` — which BUILD of the recipe wrote it;
+      * for `kind == "pnr"` only, and only on a chip path, the pad-ring route
+        evidence (the GDS site never carried this clause and still does not);
+      * `blocked_by`, a caller-supplied refusal already decided elsewhere —
+        the GDS site's `_pnr_reran`, which is a fact about THIS run's plan and
+        not about the directory;
+      * and last, that the artefact actually exists.
+
+    WHAT IT ADDS — the sweep, at the only correct instant.  Accepting a cached
+    directory is the moment the flow ADOPTS its contents as THIS run's evidence.
+    #2157 removed 0-byte antenna reports inside `step_pnr`'s approach loop, and
+    on this path `step_pnr` is never called at all, so a cached directory
+    carrying `antenna_iter_*.rpt` at 0 bytes shipped it to the audit — a state
+    a consumer can read as neither "clean" nor "absent".  The sweep therefore
+    runs HERE, on ACCEPT, and never on a reject: a rejected directory is about
+    to be rebuilt by `step_pnr`, whose own sweep owns it.
+
+    Nothing is relaxed and nothing is loosened.  The file removed is the one
+    `eda_report_audit` already refuses to read; a report WITH CONTENT is never
+    touched; and a removal is NAMED in `dropped` and appended to the disclosure
+    the step publishes, so a reused directory can never quietly differ from the
+    one that was cached.
+
+    ADVISORY / DISCLOSURE-ONLY with respect to the tools: it changes no step
+    status by itself — it answers a question the caller was already asking, and
+    the caller still owns what to do with the answer.
+    """
+    ok, reason = _pnr_cache_valid_for(out_dir, die_um, util)
+    prod_ok, prod_reason = _producer_cache_valid_for(out_dir, kind)
+    ok = ok and prod_ok
+    reason = f"{reason}; {prod_reason}"
+    if kind == "pnr" and (_chip_path_requests_pad_ring(project)
+                          and not _pad_ring_route_cache_valid(project, top)):
+        ok = False
+        reason += ("; chip-path pad-ring route evidence absent, stale or "
+                   "hash-mismatched")
+    if blocked_by:
+        ok = False
+        reason += f"; {blocked_by}"
+    if not ok or not artefact.is_file():
+        return CachedStageDecision(False, reason, prod_reason, ())
+    dropped = tuple(_drop_empty_antenna_reports(out_dir))
+    if dropped:
+        note = ("; dropped %d unreadable 0-byte antenna report(s) inherited "
+                "from the cached run: %s" % (len(dropped), ", ".join(dropped)))
+        reason += note
+        prod_reason += note
+    return CachedStageDecision(True, reason, prod_reason, dropped)
 
 
 def _pnr_resume_after_fatal_signal(*, project: Path, top: str, container: str,
@@ -54012,23 +54094,19 @@ def main() -> int:
             # re-dispatch with a bigger die must re-run, not silently
             # no-op on the stale geometry.
             _pnr_out = _pl.pnr_dir(project)
-            _cache_ok, _cache_msg = _pnr_cache_valid_for(
-                _pnr_out, args.die_um, args.util)
-            # PRODUCER-IDENTITY key (call site 2 of 3). Folded into
-            # `_cache_ok` rather than added as a separate conjunct so the ONE
-            # variable the reuse decision reads carries BOTH keys — a second
-            # conjunct is how a later edit reinstates the geometry-only test.
-            _pnr_prod_ok, _pnr_prod_msg = _producer_cache_valid_for(
-                _pnr_out, "pnr")
-            _cache_ok = _cache_ok and _pnr_prod_ok
-            _cache_msg = f"{_cache_msg}; {_pnr_prod_msg}"
-            if (_chip_path_requests_pad_ring(project)
-                    and not _pad_ring_route_cache_valid(
-                        project, effective_top)):
-                _cache_ok = False
-                _cache_msg += ("; chip-path pad-ring route evidence absent, "
-                               "stale or hash-mismatched")
-            if def_existing.is_file() and _cache_ok:
+            # PRODUCER-IDENTITY key (call site 2 of 3). Folded into the ONE
+            # decision rather than added as a separate conjunct here so a later
+            # edit cannot reinstate the geometry-only test — and the whole
+            # decision now lives in `_cached_stage_decision`, which a test can
+            # DRIVE with a prepared directory (vibe-ic#2166). That is also
+            # where a 0-byte antenna report inherited from the cached run is
+            # removed: on this path `step_pnr` never runs, so #2157's sweep,
+            # which lives inside its approach loop, is never reached.
+            _pnr_cache = _cached_stage_decision(
+                project, _pnr_out, def_existing, kind="pnr",
+                top=effective_top, die_um=args.die_um, util=args.util)
+            _cache_msg = _pnr_cache.reason
+            if _pnr_cache.accept:
                 plan.append(StepResult(
                     "pnr", "PASS", 0.0,
                     f"DEF already present: {def_existing.name} (skipped "
@@ -54240,16 +54318,21 @@ def main() -> int:
             # snapshot taken by NAME above, not `plan[-1]` — see the
             # provenance-snapshot comment there.
             _pnr_out = _pl.pnr_dir(project)
-            _cache_ok, _ = _pnr_cache_valid_for(
-                _pnr_out, args.die_um, args.util)
             # PRODUCER-IDENTITY key (call site 3 of 3). Recorded under its OWN
             # kind, not the PnR one: the stream-out recipe (grid snap, density
             # fill, label restore, substance gate) can change while the router
-            # does not, and a shared record could not express that.
-            _gds_prod_ok, _gds_prod_msg = _producer_cache_valid_for(
-                _pnr_out, "gds")
-            _cache_ok = _cache_ok and _gds_prod_ok
-            if gds_existing.is_file() and _cache_ok and not _pnr_reran:
+            # does not, and a shared record could not express that. The same
+            # DRIVABLE decision as the PnR site above (vibe-ic#2166), with
+            # `_pnr_reran` — a fact about THIS run's plan, not about the
+            # directory — passed in as the caller-owned refusal, and the same
+            # inherited-0-byte-antenna-report sweep on ACCEPT.
+            _gds_cache = _cached_stage_decision(
+                project, _pnr_out, gds_existing, kind="gds",
+                top=effective_top, die_um=args.die_um, util=args.util,
+                blocked_by=("PnR re-ran in this session, so a cached GDS is "
+                            "from the previous DEF" if _pnr_reran else ""))
+            _gds_prod_msg = _gds_cache.producer_reason
+            if _gds_cache.accept:
                 _gds_dispatched = StepResult(
                     "gds", "PASS", 0.0,
                     f"GDS already present: {gds_existing.name} (skipped "

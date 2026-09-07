@@ -11,6 +11,7 @@ die/util match the sidecar (absent sidecar = stale-unknown → re-run);
 the orchestrator's cache-skip and the disclosure line consult it.
 """
 import inspect
+import textwrap
 import sys
 from pathlib import Path
 
@@ -78,9 +79,30 @@ def test_step_pnr_writes_geometry_sidecar():
 
 def test_orchestrator_cache_skip_is_geometry_aware():
     src = inspect.getsource(R.main)
-    assert "_pnr_cache_valid_for" in src
-    # DEF existence alone no longer authorizes the skip
-    assert "def_existing.is_file() and _cache_ok" in src
+    # vibe-ic#2166 — the decision `main()` makes here is now ONE named function
+    # instead of two inline copies, so that a test can DRIVE it with a prepared
+    # directory (test_issue2166_the_cache_hit_branch_is_drivable_and_sweeps.py
+    # is that test). This tripwire therefore follows the call one level: the
+    # geometry key must still be what authorizes the skip, wherever the skip is
+    # decided.
+    assert "_cached_stage_decision" in src, (
+        "main() no longer routes its cache skip through the drivable decision")
+    # PARSED, NOT GREPPED. The substring form of this assertion was VACUOUS:
+    # `_pnr_cache_valid_for` also appears in the decision's own docstring, so
+    # deleting the CALL left the test green (measured here, mutation R2). A
+    # guard that a comment can satisfy is not a guard.
+    import ast as _ast
+    dec = inspect.getsource(R._cached_stage_decision)
+    _tree = _ast.parse(textwrap.dedent(dec))
+    _calls = {n.func.id for n in _ast.walk(_tree)
+              if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)}
+    assert "_pnr_cache_valid_for" in _calls, (
+        "the cache skip stopped consulting the requested geometry — #593; "
+        f"the decision calls {sorted(_calls)}")
+    # artefact existence alone no longer authorizes the skip
+    assert "not artefact.is_file()" in dec
+    assert ".accept" in src, (
+        "the skip must be gated on the decision's verdict, not on existence")
     # the GDS skip is invalidated when PnR re-ran
     assert "_pnr_reran" in src
     # A PERMANENTLY-FALSE `_pnr_reran` satisfies the assertion above, and

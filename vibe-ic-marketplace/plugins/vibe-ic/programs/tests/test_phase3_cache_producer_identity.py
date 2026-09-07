@@ -400,6 +400,30 @@ def _producer_kinds(src: str, fn: str):
     return kinds, unreadable
 
 
+#: The functions `main()` may consult the producer key THROUGH.
+#:
+#: vibe-ic#2166 moved the PnR and GDS reuse decisions out of `main()` into
+#: `_cached_stage_decision`, because `main()` is not reachable from a test with
+#: a prepared directory and so nothing about those decisions could be asserted
+#: except by reading the source — the shape #2157 measured the cost of. The
+#: `kind` LITERAL is still written at the call site in `main()`, so this guard
+#: still reads it there and still fails on a producing kind that arrives with
+#: no reuse consult. What moved is the NAME of the function the literal is
+#: handed to, not the property. Both names are listed so a re-inline of either
+#: call site is covered by the same population.
+_CONSULTING_CALLS = ("_producer_cache_valid_for", "_cached_stage_decision")
+
+
+def _consulted_kinds(src: str):
+    """(kinds, unreadable) unioned over every consulting call `main()` makes."""
+    kinds, unreadable = [], []
+    for fn in _CONSULTING_CALLS:
+        k, u = _producer_kinds(src, fn)
+        kinds += k
+        unreadable += u
+    return kinds, unreadable
+
+
 def test_all_three_call_sites_are_wired():
     """Tripwire for a fourth producing KIND being added without the key —
     the #755 shape ('fixed one site' vs 'fixed the class').
@@ -411,7 +435,7 @@ def test_all_three_call_sites_are_wired():
     """
     src = inspect.getsource(R.main)
     stamped, stamp_bad = _producer_kinds(src, "_write_producer_identity")
-    consulted, consult_bad = _producer_kinds(src, "_producer_cache_valid_for")
+    consulted, consult_bad = _consulted_kinds(src)
 
     assert not stamp_bad and not consult_bad, (
         "a producer call site names a kind this guard cannot read, so it "

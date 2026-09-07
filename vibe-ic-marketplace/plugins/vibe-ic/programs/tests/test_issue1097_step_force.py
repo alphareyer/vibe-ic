@@ -74,10 +74,33 @@ def test_the_declared_kinds_match_the_runner():
     """A fourth producer added at a call site must fail HERE rather than
     silently becoming unforceable — which would be a flag that looks like it
     covers the flow and does not."""
+    # PARSED, NOT GREPPED, and over BOTH consulting names. vibe-ic#2166 moved
+    # the PnR and GDS reuse decisions out of `main()` into
+    # `_cached_stage_decision` so that a test could DRIVE them with a prepared
+    # directory at all; the `kind` literal is still written at the call site,
+    # but it is now handed to that function and the old regex — which pinned
+    # the callee's NAME and the argument's POSITION — read only `synth` and
+    # said the runner had lost two forceable kinds it had not lost. The
+    # property is unchanged: every kind `step_force` declares must be a kind
+    # the runner actually consults on reuse.
+    import ast as _ast
     src = (_PROGRAMS / "phase3_one_shot_runner.py").read_text(encoding="utf-8")
-    used = set(re.findall(r"_producer_cache_valid_for\(\s*[^,]+,\s*\"(\w+)\"",
-                          src))
-    assert used, "no _producer_cache_valid_for call sites found — parse broke"
+    _consulting = {"_producer_cache_valid_for", "_cached_stage_decision"}
+    used = set()
+    for _n in _ast.walk(_ast.parse(src)):
+        if not isinstance(_n, _ast.Call):
+            continue
+        _name = (_n.func.id if isinstance(_n.func, _ast.Name)
+                 else getattr(_n.func, "attr", None))
+        if _name not in _consulting:
+            continue
+        _kind = _n.args[1] if len(_n.args) > 1 else None
+        for _kw in _n.keywords:
+            if _kw.arg == "kind":
+                _kind = _kw.value
+        if isinstance(_kind, _ast.Constant) and isinstance(_kind.value, str):
+            used.add(_kind.value)
+    assert used, "no producer-key consult call sites found — parse broke"
     assert used == set(SF.KNOWN_KINDS), (
         f"runner uses {sorted(used)}, step_force declares "
         f"{sorted(SF.KNOWN_KINDS)}")
