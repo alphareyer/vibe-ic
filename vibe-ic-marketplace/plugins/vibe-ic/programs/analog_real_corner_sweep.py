@@ -2834,6 +2834,12 @@ def _run_block(project, block, container, pdk, topology_override):
     # known open PDKs (sky130 / gf180) take the byte-identical fast path.
     ctx = _deck_context(project, container, pdk, btype, block=block)
     if ctx is None or ctx.source == "known_family":
+        # vibe-ic#2161 — a KNOWN family refuses here too.
+        if ctx is not None and ctx.status != "OK":
+            _write_native_template_gap(bdir, block, btype, ctx)
+            print(f"[real_sim] block={block}: {ctx.status} "
+                  f"(family={ctx.family}) — {ctx.work_items}", file=sys.stderr)
+            return 2
         pdk_lib = PDK_LIB.get(pdk)
         devices = None
         device_terminals = None

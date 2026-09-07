@@ -220,13 +220,50 @@ def test_the_binder_refuses_before_any_simulator_is_reached(tmp_path):
 
 def test_a_context_that_names_one_pdk_is_not_refused():
     """THE OTHER DIRECTION — green on both arms, deliberately. A check that
-    refuses everything is not a check: the two published open PDKs must still
-    bind, under both of their spellings."""
-    for sel in (OPEN_SKY, OPEN_GF, KEY_SKY, KEY_GF):
+    refuses everything is not a check: a published open PDK that HAS an
+    authored device template must still bind, under both of its spellings.
+
+    AMENDED BY vibe-ic#2161. This loop used to run over BOTH published open
+    PDKs. It could, because the other one's entry declared THIS one's MOS
+    tokens as its own device map — so it "bound", and what it bound was the
+    wrong process. #2161 measured that end to end (the deck it produced died
+    in ngspice) and made that entry refuse by name. Its half of this
+    assertion did not disappear: it moved to
+    `test_the_family_with_no_authored_template_refuses_by_name` below, which
+    asks for MORE than this one did. The "a check that only refuses is not a
+    check" guarantee this test exists for is carried by the family that does
+    have a template, which is the only family that could ever have carried
+    it honestly."""
+    for sel in (OPEN_SKY, KEY_SKY):
         ctx = _bind(sel)
         assert ctx["status"] == "OK", (sel, ctx["work_items"])
         assert _cross(ctx) == [], sel
         assert ctx["model_lib"], sel
+
+
+def test_the_family_with_no_authored_template_refuses_by_name():
+    """vibe-ic#2161 — the OTHER published open PDK's half of the test above,
+    at the ruling that replaced it. Stricter, not looser: the context must
+    refuse, must carry NO device map at all, must name the family and the
+    library in its work items, and — the assertion the old form could not
+    make — must not carry the other open PDK's device tokens ANYWHERE."""
+    for sel in (OPEN_GF, KEY_GF):
+        ctx = _bind(sel)
+        assert ctx["status"] == "NEEDS_NATIVE_TEMPLATE", (sel, ctx["status"])
+        assert _cross(ctx) == [], sel
+        joined = " | ".join(ctx.get("work_items") or [])
+        assert "NOT_AVAILABLE" in joined, sel
+        assert KEY_GF in joined, sel
+        assert Path(ctx["model_lib"]).name in joined, sel
+        dctx = APDC.known_family_context(sel)
+        assert dctx.device_map == {}, (sel, dctx.device_map)
+        blob = repr(dctx.as_json())
+        for token in APDC.SKY130_DEVICES.values():
+            assert token not in blob, (sel, token)
+        # and the roles it DOES report are this family's own, from the
+        # registry that publishes them — never the other PDK's.
+        for role, model in (ctx.get("role_models") or {}).items():
+            assert not model.startswith("sky130_fd_pr__"), (sel, role, model)
 
 
 # ── one canonical spelling per PDK ────────────────────────────────────────
@@ -342,18 +379,34 @@ def test_the_published_sky130A_and_gf180mcuD_analog_roots_are_unchanged():
     library the PUBLISHED spelling resolves to — is a different assertion, in
     `test_the_published_open_pdk_spellings_reach_their_own_template`, and it
     is a fix, not a drift."""
+    #: AMENDED BY vibe-ic#2161, and only in the two places where the fix
+    #: DELIBERATELY moved something. Everything else stays pinned by name.
+    #: `status` and `bound_by` for the family with no authored device template:
+    #: it used to report OK with nmos/pmos bound by the deck context, and what
+    #: that context carried was the OTHER open PDK's tokens against this
+    #: family's library. It now refuses, and the roles bind from THIS family's
+    #: own registry entry. Measured on the branch, both spellings:
+    #:   role_models nmos/pmos: sky130_fd_pr__nfet_01v8/pfet_01v8 -> the
+    #:   family's own nfet/pfet; bound_by nmos/pmos: deck_context -> registry.
+    _EXPECT = {
+        OPEN_SKY: ("OK", {"cap": A3.BOUND_BY_REGISTRY,
+                          "nmos": A3.BOUND_BY_DECK_CONTEXT,
+                          "pmos": A3.BOUND_BY_DECK_CONTEXT,
+                          "res": A3.BOUND_BY_REGISTRY}),
+        OPEN_GF: ("NEEDS_NATIVE_TEMPLATE", {"cap": A3.BOUND_BY_REGISTRY,
+                                            "nmos": A3.BOUND_BY_REGISTRY,
+                                            "pmos": A3.BOUND_BY_REGISTRY,
+                                            "res": A3.BOUND_BY_REGISTRY}),
+    }
     for family, key in ((OPEN_SKY, KEY_SKY), (OPEN_GF, KEY_GF)):
         ctx = _bind(key)                     # the bare token: never moved
-        assert ctx["status"] == "OK", family
+        want_status, want_bound = _EXPECT[family]
+        assert ctx["status"] == want_status, (family, ctx["status"])
         assert ctx["model_lib"] == APDC._KNOWN_FAMILIES[key]["model_lib"]
         assert ctx["corner_sections"] == ["ss", "tt", "ff"], family
         assert sorted(ctx["role_models"]) == ROLES, family
         assert ctx["unresolved_roles"] == [], family
-        assert ctx["role_model_election"]["bound_by"] == {
-            "cap": A3.BOUND_BY_REGISTRY,
-            "nmos": A3.BOUND_BY_DECK_CONTEXT,
-            "pmos": A3.BOUND_BY_DECK_CONTEXT,
-            "res": A3.BOUND_BY_REGISTRY}, family
+        assert ctx["role_model_election"]["bound_by"] == want_bound, family
         # the registry side of the root: the declared populations, by NAME.
         name, entry = A3._registry_entry(family)
         assert name == family

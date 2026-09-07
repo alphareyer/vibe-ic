@@ -39,18 +39,51 @@ import pdk_family_identity as _ident  # noqa: E402 — the ONE family matcher
 
 # ── canonical sky130 device tokens the corner templates are authored against ──
 # These are the tokens the deck emitter REMAPS to the resolved family's device
-# names (see analog_real_corner_sweep.render_deck). They double as the known
-# open-PDK fast-path device map (sky130 stays byte-identical; gf180 keeps the
-# historical sky130 device names — its native template is a separate work item,
-# out of scope for this family-agnostic consumption batch).
+# names (see analog_real_corner_sweep.render_deck). They are ALSO the sky130
+# family's own authored device map — and, by the grounding below, that is a
+# claim this module CHECKS against sky130's own model library rather than
+# merely asserts.
 SKY130_DEVICES = {
     "nmos": "sky130_fd_pr__nfet_01v8",
     "pmos": "sky130_fd_pr__pfet_01v8",
 }
 
+#: A family entry that has NO authored native device template says so BY NAME
+#: instead of borrowing another PDK's tokens (vibe-ic#2161). The reason is
+#: carried alongside in `device_map_not_available` and reaches the context's
+#: work items and disclosure, so a refusal names what is missing and why.
+NOT_AVAILABLE = "NOT_AVAILABLE"
+
+
+class PdkFamilyDeclarationError(RuntimeError):
+    """A `_KNOWN_FAMILIES` entry declares a device token that is not its own
+    family's. Raised at LOAD TIME (module import), naming the family, the role,
+    the token, the family the token actually belongs to, and the library the
+    entry binds — so a wrong declaration cannot be shipped again (vibe-ic#2161).
+    """
+
+
 # Known OPEN-PDK families (the corner templates' authored targets). Keyed on the
-# `--pdk` selector value used by analog_real_corner_sweep. NOT a probe of a
-# proprietary node — purely the two open PDKs already hardcoded across the plugin.
+# `--pdk` selector value used by analog_real_corner_sweep, which is the same
+# string each PDK publishes as `per_pdk_table_key` in `pdk_registry.json`. NOT a
+# probe of a proprietary node — purely the two open PDKs already hardcoded
+# across the plugin.
+#
+# vibe-ic#2161 — A FAMILY'S TOKENS MUST COME FROM ITS OWN LIBRARY.
+# `gf180` used to declare `dict(SKY130_DEVICES)` as its device map, so
+# `--pdk gf180` bound gf180mcuD's model library and instantiated the OTHER open
+# PDK's `nfet`/`pfet` against it. That is one declaration, not two, so the
+# cross-binding guard cannot fire on it: the declaration itself was wrong.
+# Measured on the pinned image (0.3.48), pristine main, real ngspice:
+#   * the deck as shipped  → `ERROR, library file …/design.ngspice, section
+#     definition tt not found`, rc=1 — the declared corner sections are not
+#     defined by the declared library either;
+#   * the same tokens against that family's own device library
+#     → `Error: unknown subckt: … sky130_fd_pr__nfet_01v8`, rc=1;
+#   * the sky130 entry, own library and own tokens → converged, rc=0.
+# The declared library defines NOTHING to derive from — 0 `.subckt`, 0
+# `.model`, 0 `.include`/`.lib` targets, 0 section definitions — so the honest
+# entry is NOT_AVAILABLE with the reason, never a borrowed token map.
 _KNOWN_FAMILIES = {
     "sky130": {
         "device_map": dict(SKY130_DEVICES),
@@ -58,13 +91,123 @@ _KNOWN_FAMILIES = {
         "model_lib": "/foss/pdks/sky130A/libs.tech/ngspice/sky130.lib.spice",
     },
     "gf180": {
-        # historical behaviour preserved: gf180 kept the sky130 device tokens
-        # (its own native template was never authored). Unchanged here.
-        "device_map": dict(SKY130_DEVICES),
+        "device_map": NOT_AVAILABLE,
+        "device_map_not_available": (
+            "no native device template was authored for this family, and its "
+            "declared model library defines nothing to derive one from "
+            "(measured: 0 `.subckt`, 0 `.model`, 0 `.include`/`.lib` targets, "
+            "0 corner-section definitions — the declared file is the family's "
+            "global switch/parameter deck, not its device library). The other "
+            "open PDK's MOS tokens stood here until vibe-ic#2161; a deck built "
+            "from them cannot elaborate against this family's library."),
         "corner_sections": ["ss", "tt", "ff"],
         "model_lib": "/foss/pdks/gf180mcuD/libs.tech/ngspice/design.ngspice",
     },
 }
+
+
+def family_device_map(entry: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """The entry's AUTHORED device map, or None when it declares none
+    (NOT_AVAILABLE). None means "derive it from the family's own library, and
+    refuse by name if the library defines nothing" — never "use a default"."""
+    dm = entry.get("device_map")
+    if dm is None or dm == NOT_AVAILABLE:
+        return None
+    return dict(dm)
+
+
+def family_not_available_reason(entry: Dict[str, Any]) -> Optional[str]:
+    """Why this family has no authored device template, or None when it has
+    one. Never a bare "missing" — the entry states the measured reason."""
+    if family_device_map(entry) is not None:
+        return None
+    return (entry.get("device_map_not_available")
+            or "the entry declares no device map and states no reason")
+
+
+# ── vibe-ic#2161: the LOAD-TIME half — a token that is not this family's ─────
+# The grounding below reads the family's own model LIBRARY, which only exists
+# where the PDK is installed. This guard needs no PDK at all: the plugin's own
+# `pdk_registry.json` publishes, per family, the `device_model_prefix` that
+# family's devices carry and the `per_pdk_table_key` this table is keyed on. A
+# declared token carrying ANOTHER registered family's prefix is that family's
+# device, wherever it is typed — so it is refused BY NAME at import, before any
+# caller can bind it. A registry that cannot be read is NOT_MEASURED: the guard
+# then refuses nothing and says so, because "could not read it" is not "read it
+# and it was clean".
+_REGISTRY_UNREADABLE = "registry-not-readable"
+
+
+def _registry_families() -> Optional[List[Tuple[str, str, str]]]:
+    """[(table_key, registry_name, device_model_prefix)] for every registered
+    PDK that publishes both, or None when the registry cannot be read."""
+    try:
+        import pdk_device_map as _pdm            # local: no import cycle
+        reg = _pdm.load_registry()
+    except Exception:
+        return None
+    out: List[Tuple[str, str, str]] = []
+    for e in (reg.get("pdks") or []):
+        if not isinstance(e, dict):
+            continue
+        key = e.get("per_pdk_table_key")
+        pref = e.get("device_model_prefix")
+        if isinstance(key, str) and isinstance(pref, str) and key and pref:
+            out.append((key, str(e.get("name") or key), pref))
+    return out
+
+
+def foreign_device_tokens(families: Optional[Dict[str, Any]] = None
+                          ) -> Optional[List[Dict[str, str]]]:
+    """Every declared device token that carries ANOTHER registered family's
+    device-model prefix, as [{family, role, token, owned_by, library}].
+
+    `[]` means measured and clean. `None` means the registry could not be read,
+    so nothing was measured — never silently the same as clean."""
+    fams = _KNOWN_FAMILIES if families is None else families
+    reg = _registry_families()
+    if reg is None:
+        return None
+    out: List[Dict[str, str]] = []
+    for key, entry in fams.items():
+        dm = family_device_map(entry) or {}
+        own = [p for k, _n, p in reg if k == key]
+        for role, token in sorted(dm.items()):
+            if not isinstance(token, str):
+                continue
+            for other_key, other_name, pref in reg:
+                if other_key == key or pref in own:
+                    continue
+                if token.startswith(pref):
+                    out.append({
+                        "family": key, "role": role, "token": token,
+                        "owned_by": other_name, "prefix": pref,
+                        "library": str(entry.get("model_lib") or ""),
+                    })
+                    break
+    return out
+
+
+def assert_families_declare_their_own_devices(
+        families: Optional[Dict[str, Any]] = None) -> str:
+    """Refuse BY NAME at load time when a family entry types another family's
+    device token. Returns the measurement state: "clean", or
+    `_REGISTRY_UNREADABLE` when the registry could not be read."""
+    foreign = foreign_device_tokens(families)
+    if foreign is None:
+        return _REGISTRY_UNREADABLE
+    if foreign:
+        raise PdkFamilyDeclarationError("; ".join(
+            f"family '{f['family']}' declares device token '{f['token']}' for "
+            f"role '{f['role']}', which is a device of '{f['owned_by']}' "
+            f"(prefix '{f['prefix']}'), not of '{f['family']}' — the library "
+            f"this entry binds is {f['library']}" for f in foreign))
+    return "clean"
+
+
+#: Measurement state of the load-time guard for the SHIPPED table, recorded so
+#: a reader can tell "checked and clean" from "could not check".
+KNOWN_FAMILY_DECLARATION_STATE = assert_families_declare_their_own_devices()
 
 # Generic device-ROLE token sets (chip-AGNOSTIC — structural device-class tokens
 # every foundry SPICE lib uses, not any vendor/SKU literal). A `.subckt` name is
@@ -931,7 +1074,90 @@ def known_family_key(selector: str) -> Optional[str]:
     return None
 
 
-def known_family_context(selector: str) -> DeckContext:
+# ── vibe-ic#2161: the DERIVATION half — what the family's own library says ──
+# The entry above is a CLAIM about a model library. This reads that library and
+# says what it actually defines: which declared device tokens exist in its
+# transitive closure, which declared corner sections it defines, and — when the
+# entry authors no map at all — what device map elects out of it. The library
+# only exists where the PDK is installed, so an unreadable library is reported
+# as NOT MEASURED and changes nothing; it is never read as "defines nothing".
+_GROUNDING_CACHE: Dict[Tuple[str, int], Dict[str, Any]] = {}
+
+
+def grounding_cache_clear() -> None:
+    """Drop the memoised library reads (tests that swap readers call this)."""
+    _GROUNDING_CACHE.clear()
+
+
+def family_library_grounding(selector: str,
+                             reader: Optional[Callable[[str], Optional[str]]] = None,
+                             families: Optional[Dict[str, Any]] = None,
+                             required: Tuple[str, ...] = _REQUIRED_ROLES_DEFAULT,
+                             ) -> Dict[str, Any]:
+    """What `selector`'s OWN declared model library defines, measured by
+    parsing it (following its `.include` / `.lib <path> <section>` closure).
+
+    Keys:
+      measured            False when the library could not be read at all.
+      library             the path the entry declares.
+      declared_tokens     {role: token} the entry authors ({} when none).
+      undefined_tokens    [(role, token)] the library does NOT define.
+      declared_sections   the corner sections the entry authors.
+      undefined_sections  the ones the library does not define.
+      derived_device_map  {role: subckt} elected FROM the library.
+      n_subckts           size of the library's transitive device closure.
+    """
+    fams = _KNOWN_FAMILIES if families is None else families
+    entry = fams.get(selector) or {}
+    lib = str(entry.get("model_lib") or "")
+    rd = reader or _default_reader
+    key = (lib, id(rd))
+    hit = _GROUNDING_CACHE.get(key)
+    declared = family_device_map(entry) or {}
+    declared_sections = [str(x) for x in (entry.get("corner_sections") or [])]
+    if hit is None:
+        txt = rd(lib) if lib else None
+        if txt is None:
+            hit = {"measured": False, "n_subckts": 0, "subckts": {},
+                   "sections": []}
+        else:
+            tsub = transitive_subckts(lib, txt, rd)
+            own = parse_devices(txt)
+            names = dict(tsub)
+            for m in (own.get("models") or {}):
+                names.setdefault(m, 0)
+            hit = {"measured": True, "n_subckts": len(tsub), "subckts": names,
+                   "sections": parse_sections(txt)}
+        _GROUNDING_CACHE[key] = hit
+    defined = hit["subckts"]
+    secs_lower = {str(x).lower() for x in hit["sections"]}
+    out: Dict[str, Any] = {
+        "measured": bool(hit["measured"]),
+        "library": lib,
+        "declared_tokens": dict(declared),
+        "declared_sections": list(declared_sections),
+        "n_subckts": hit["n_subckts"],
+        "undefined_tokens": [],
+        "undefined_sections": [],
+        "derived_device_map": {},
+    }
+    if not hit["measured"]:
+        return out
+    out["undefined_tokens"] = [(r, t) for r, t in sorted(declared.items())
+                               if t not in defined]
+    out["undefined_sections"] = [x for x in declared_sections
+                                 if str(x).lower() not in secs_lower]
+    if not declared:
+        dmap, _unres, _notes, _elec = elect_device_roles(
+            {k: v for k, v in defined.items() if v}, required, None)
+        out["derived_device_map"] = {r: d for r, d in dmap.items()
+                                     if r in required}
+    return out
+
+
+def known_family_context(selector: str,
+                         reader: Optional[Callable[[str], Optional[str]]] = None,
+                         ) -> DeckContext:
     """The open-PDK fast path (sky130 / gf180) — keeps the sky130 regression
     bit-identical (device_map + sections + lib from the known table, no parse).
 
@@ -959,15 +1185,69 @@ def known_family_context(selector: str) -> DeckContext:
     _template_family = known_family_key(selector) or _FALLBACK_TEMPLATE_FAMILY
     fam = _KNOWN_FAMILIES[_template_family]
     typ, process = map_corner_sections(list(fam["corner_sections"]))
+
+    # ── vibe-ic#2161 — the map this context carries is GROUNDED, not asserted ──
+    # An authored map is CHECKED against the family's own library and refused by
+    # name when the library does not define it; an entry with NO authored map
+    # (NOT_AVAILABLE) DERIVES one from that library, and refuses by name with the
+    # entry's stated reason when the library defines nothing to derive from.
+    # An unreadable library measures nothing and changes nothing: the authored
+    # map stands exactly as before (this is the host case, and it is why the
+    # sky130 fast path is unchanged everywhere it was already correct).
+    _declared = family_device_map(fam)
+    _gr = family_library_grounding(_template_family, reader,
+                                   required=tuple(_REQUIRED_ROLES_DEFAULT))
+    _work: List[str] = []
+    _basis = ELECTION_BASIS_KNOWN_TABLE
+    if _declared is not None:
+        device_map = dict(_declared)
+        if _gr["measured"] and _gr["undefined_tokens"]:
+            _work += [
+                f"NOT_AVAILABLE: family '{_template_family}' declares device "
+                f"token '{tok}' for role '{role}', which its OWN model library "
+                f"{_gr['library']} does not define — a deck built from it "
+                f"cannot elaborate (vibe-ic#2161)"
+                for role, tok in _gr["undefined_tokens"]]
+            device_map = {}
+        if _gr["measured"] and _gr["undefined_sections"] and not _work:
+            _work += [
+                f"NOT_AVAILABLE: family '{_template_family}' declares corner "
+                f"section '{sec}', which its OWN model library {_gr['library']} "
+                f"does not define (vibe-ic#2161)"
+                for sec in _gr["undefined_sections"]]
+            device_map = {}
+    else:
+        device_map = dict(_gr["derived_device_map"])
+        if device_map:
+            _basis = ELECTION_BASIS_NAME_ORDER
+        else:
+            _reason = family_not_available_reason(fam)
+            _work.append(
+                f"NOT_AVAILABLE: family '{_template_family}' has no device map "
+                f"this context may carry — {_reason} (library "
+                f"{_gr['library']}; "
+                + ("that library defines "
+                   f"{_gr['n_subckts']} device subckt(s) and none elects to the "
+                   f"required roles {list(_REQUIRED_ROLES_DEFAULT)}"
+                   if _gr["measured"] else
+                   "that library was NOT READABLE here, so nothing could be "
+                   "derived from it — this is not a claim that it is empty")
+                + "). Borrowing another PDK's tokens is what this replaces "
+                  "(vibe-ic#2161).")
+    _status = "OK" if not _work else "NEEDS_NATIVE_TEMPLATE"
+
     return DeckContext(
-        status="OK", source="known_family", family=selector,
+        status=_status, source="known_family", family=selector,
         model_lib=fam["model_lib"], model_lib_includes=[fam["model_lib"]],
         corner_sections=list(fam["corner_sections"]),
         typ_section=typ, process_corners=process,
-        device_map=dict(fam["device_map"]),
+        device_map=dict(device_map),
+        unresolved_roles=[r for r in _REQUIRED_ROLES_DEFAULT
+                          if r not in device_map],
+        work_items=list(_work),
         # the open-PDK device templates are 4-terminal (d g s b) — no extra
         # substrate/well node injection (keeps the sky130 deck byte-identical).
-        device_terminals={role: 4 for role in fam["device_map"]},
+        device_terminals={role: 4 for role in device_map},
         template_family=_template_family,
         # vibe-ic#903 — no DEVICE election happens on this path either: the
         # device map is the plugin's authored table. Stated positively rather
@@ -976,12 +1256,12 @@ def known_family_context(selector: str) -> DeckContext:
         device_election={
             "scope": ELECTION_SCOPE_KNOWN_TABLE,
             "roles": {role: {"elected": dev,
-                             "basis": ELECTION_BASIS_KNOWN_TABLE,
+                             "basis": _basis,
                              "rejected": [],
                              "voltage_domains": (
                                  [name_voltage_domain(dev)]
                                  if name_voltage_domain(dev) else [])}
-                      for role, dev in fam["device_map"].items()},
+                      for role, dev in device_map.items()},
             "multi_domain_roles": [],
             # the authored table holds ONE device per role, so there is no
             # domain to scope to and nothing a block could differ on.
@@ -990,14 +1270,23 @@ def known_family_context(selector: str) -> DeckContext:
         },
         # no election happens on this path — the lib comes from the table.
         primary_policy=PRIMARY_BY_KNOWN_TABLE,
-        disclosure=(
-            f"known open PDK '{selector}' — device map + corner sections "
-            f"from the plugin's authored template family (no lib parse)."
-            if known_family_key(selector) else
-            f"NO authored template family for '{selector}' — this context "
-            f"carries the '{_template_family}' device map, corner sections "
-            f"and model lib. It does NOT describe '{selector}'. A consumer "
-            f"must not read these as that PDK's values (vibe-ic#410)."),
+        disclosure=((
+            (f"known open PDK '{selector}' — device map + corner sections "
+             f"from the plugin's authored template family"
+             + (", grounded against that family's own model library "
+                f"{_gr['library']} ({_gr['n_subckts']} device subckt(s) in "
+                f"its closure)" if _gr["measured"] else
+                "; its model library was not readable here, so the authored "
+                "map was NOT re-measured against it")
+             + "."
+             if known_family_key(selector) else
+             f"NO authored template family for '{selector}' — this context "
+             f"carries the '{_template_family}' device map, corner sections "
+             f"and model lib. It does NOT describe '{selector}'. A consumer "
+             f"must not read these as that PDK's values (vibe-ic#410)."))
+            if not _work else
+            (f"known open PDK '{selector}' is NOT natively emittable: "
+             + " | ".join(_work))),
     )
 
 
@@ -1444,4 +1733,12 @@ def resolve_deck_context(pdk_selector: str,
             # an UNKNOWN installed family → parse it (family-agnostic).
             if not any(k in matched for k in _KNOWN_FAMILIES):
                 return custom_family_context(res, required, reader, domain)
-    return known_family_context(pdk_selector)
+    # vibe-ic#2161 — the known-family path is grounded against the family's
+    # OWN model library too, so it is handed whatever reader this call has.
+    # None keeps `_default_reader`, which reads the real PDK when this runs
+    # INSIDE the image and measures nothing on a host that has no /foss/pdks
+    # (unchanged behaviour there — never a default supplied for an unread
+    # library). A container reader is NOT synthesised here on purpose: the
+    # closure of an open PDK's corner lib is dozens of files, and one
+    # `docker exec cat` per file would put that cost on every resolve.
+    return known_family_context(pdk_selector, reader)
