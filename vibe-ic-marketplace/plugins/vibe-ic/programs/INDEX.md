@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1291
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1291)
+- **Total programs (excluding helpers / shims):** 1292
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1292)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1282 |
+| `any` | 1283 |
 
 ## Alphabetical listing
 
@@ -214,6 +214,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `clock_plan_check` | any | — | Step 16 (Clock planning) substance gate. |
 | `clock_scale_consistency_check` | any | — | Catch un-rescaled threshold values. |
 | `clock_target_provenance` | any | — | say WHERE the clock period a run signs off against came from, and mark it ASSUMED when the design never stated one. |
+| `clock_target_record_agreement_check` | any | — | ONE RUN, ONE CLOCK-TARGET ANSWER. |
 | `closed_loop_edge_check` | any | — | a declared `closed_loop` must be an edge something can actually take, or the declaration is decoration. |
 | `closed_loop_executable_coverage_check` | any | — | a line of YAML is not a loop. |
 | `closed_loop_executed_reentry_census` | any | — | which loops does the tree RUN? |
@@ -1363,7 +1364,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1282 programs)
+### `any` (1283 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1552,6 +1553,7 @@ _(no programs in this group)_
 - `clock_plan_check` — Step 16 (Clock planning) substance gate.
 - `clock_scale_consistency_check` — Catch un-rescaled threshold values.
 - `clock_target_provenance` — say WHERE the clock period a run signs off against came from, and mark it ASSUMED when the design never stated one.
+- `clock_target_record_agreement_check` — ONE RUN, ONE CLOCK-TARGET ANSWER.
 - `closed_loop_edge_check` — a declared `closed_loop` must be an edge something can actually take, or the declaration is decoration.
 - `closed_loop_executable_coverage_check` — a line of YAML is not a loop.
 - `closed_loop_executed_reentry_census` — which loops does the tree RUN?

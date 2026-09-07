@@ -264,6 +264,12 @@ def test_runner_exposes_every_declared_signoff_gate():
         # never stated could not be refused anywhere. Named here BY NAME, not
         # counted: the set equality is the whole point of this test.
         "sta_assumed_clock_disclosure_check.py",
+        # vibe-ic#2159. ONE RUN, ONE CLOCK-TARGET ANSWER: the run's own
+        # provenance record and L19 named DIFFERENT PDKs and DIFFERENT tiers
+        # for the same 20.0 ns, and the design's own table gave the PDK L19
+        # named a different number entirely. Registering the new member here is
+        # the intended response to this set equality, not a repair of it.
+        "clock_target_record_agreement_check.py",
     }, wired
 
 

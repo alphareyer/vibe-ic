@@ -5495,6 +5495,32 @@ steps:
         # period against anything, and cannot move a PASS or a FAIL; its only
         # opinion is whether an ASSUMED period was disclosed in the record.
         - program_exit_zero: "sta_assumed_clock_disclosure_check . --json reports/phase3/sta/assumed_clock_disclosure.json"
+        # vibe-ic#2159 — ONE RUN, ONE CLOCK-TARGET ANSWER. Measured on
+        # `subservient`: the run's own provenance record read
+        # `pdk=gf180mcuD, tier=declared_pdk_table, 20.0 ns` citing the design's
+        # constraint document, while L19 read `pdk=sky130, tier=l8_declared`
+        # for the same 20.0 ns — and that cited document's own table gives
+        # sky130's library 10 ns. A PDK name written beside a period claims the
+        # period belongs to that PDK; there it did not, so one of the two
+        # records contradicted its own source and two readers of the same run
+        # came away with different beliefs about where the backend's number
+        # came from. That disagreement is exactly what #2091's provenance
+        # exists to prevent.
+        #
+        # The AUTHORITATIVE record is the one naming the PDK the run actually
+        # BUILT AGAINST (#2136's ruling for the area baseline, applied to the
+        # clock target). L19 then records the same pdk and tier, or NOT_STATED
+        # — never another PDK's tier carrying this PDK's number. This clause
+        # and the `clock_target_agreement` entry in
+        # `phase3_one_shot_runner._DECLARED_SIGNOFF_GATES` are the same wiring
+        # stated in the flow's two declaration surfaces.
+        #
+        # UNCONDITIONAL, for the reason the two gates above are: the condition
+        # one would write here is true precisely when the gate has something to
+        # say. It reads two records and nothing else — no slack, no verdict, no
+        # SDC — and it is silent on a run whose L19 records an explicit absence
+        # or names no technology at all.
+        - program_exit_zero: "clock_target_record_agreement_check . --json reports/phase3/clock_target_record_agreement.json"
         # vibe-ic#306 — a route promoted on its OWN in-session re-measurement
         # must be corroborated by the sign-off report it claims to improve
         # (#293: the promotion read 330->178 while this step's own

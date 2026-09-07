@@ -40937,6 +40937,30 @@ _DECLARED_SIGNOFF_GATES = (
     # the arm reports NOT_APPLICABLE before any dispatch is attempted.
     ("tapeout_precheck", "tapeout_precheck.py",
      "reports/phase3/tapeout_precheck.json", ()),
+    # vibe-ic#2159 — ONE RUN, ONE CLOCK-TARGET ANSWER.
+    #
+    # MEASURED on `subservient` (lane rbsub6, 8HD-9): the run's own record read
+    # `pdk=gf180mcuD, tier=declared_pdk_table, period_ns=20.0` citing the
+    # design's constraint doc, while L19 read `pdk=sky130, tier=l8_declared`
+    # for the same 20.0 ns — and the design's own table in that cited file
+    # gives sky130's library 10 ns. A PDK name beside a period is a claim that
+    # the period belongs to that PDK; there it did not, so one of the two
+    # records contradicted the document it came from.
+    #
+    # This row is the enforcement side. It reads the two records only — no
+    # subprocess, no docker, no `shutil.which` — so it joins the gates that
+    # cannot hit an ENV_UNAVAILABLE, and it has an opinion in exactly one
+    # case: both records name a technology / tier / period for the SAME run
+    # and they differ. An L19 that records NOT_STATED, or that names no
+    # technology at all (the ordinary shape before Phase 3 has published
+    # anything), passes — refusing those would redden every run for the flow's
+    # own ordering rather than for anything about the design.
+    #
+    # It sits BEFORE the disclosure row because that row must stay last (see
+    # below): this gate reads `clock_target_provenance.json`, which
+    # `step_declared_signoff_gates` emits before the loop begins.
+    ("clock_target_agreement", "clock_target_record_agreement_check.py",
+     "reports/phase3/clock_target_record_agreement.json", ()),
     # vibe-ic#2126 — STEP 23's DISCLOSURE GATE, AND IT MUST BE LAST.
     #
     # `sta_assumed_clock_disclosure_check` landed with #2091 and was PRODUCED

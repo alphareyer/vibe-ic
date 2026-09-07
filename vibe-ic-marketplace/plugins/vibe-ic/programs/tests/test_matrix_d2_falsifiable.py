@@ -917,6 +917,58 @@ def _f_assumed_clock_undisclosed(p: Path) -> None:
     })
 
 
+def _f_clock_target_records_disagree(p: Path) -> None:
+    """TWO records of one run's clock target naming DIFFERENT technologies and
+    DIFFERENT provenance tiers — vibe-ic#2159's defect, measured.
+
+    On `subservient` (lane rbsub6): the run's own record read
+    ``pdk=gf180mcuD, tier=declared_pdk_table, 20.0 ns`` citing the design's
+    constraint document, and L19 read ``pdk=sky130, tier=l8_declared`` for the
+    same 20.0 ns — while that cited document's own table gives sky130's
+    library 10 ns. A PDK name beside a period claims the period belongs to
+    that PDK; there it did not.
+
+    EMPTY cannot redden this and must not: with neither record published the
+    gate answers rc 0 NOT_APPLICABLE — there is no second claim to contradict
+    a first — which is not an answer to "can this gate fail?". Its FAIL arm
+    needs BOTH records present and DISAGREEING.
+
+    MEASURED through the exact clause command on this tree:
+
+        EMPTY  rc 0  NOT_APPLICABLE — this run publishes no
+                     reports/phase3/clock_target_provenance.json
+        THIS   rc 1  FAIL — "PDK: the run built against 'gf180mcuD' ... and
+                     phase1/generated_docs/L19_CONSTRAINTS_PDK.json names
+                     'sky130' for the same run"
+
+    The other direction (agreeing records pass; an L19 that records an explicit
+    absence passes) lives in
+    `test_issue2159_clock_target_record_agreement.py`.
+    """
+    _w(p, "reports/phase3/clock_target_provenance.json", {
+        "program": "clock_target_provenance",
+        "pdk": "gf180mcuD",
+        "period_ns": 20.0,
+        "tier": "declared_pdk_table",
+        "assumed": False,
+        "cite": "input/docs/L9_constraints_floorplan.md:34",
+    })
+    _w(p, "phase1/generated_docs/L19_CONSTRAINTS_PDK.json", {
+        "doc_id": "L19",
+        "fields": {
+            "pdk_target": "sky130",
+            "clock_target": {
+                "status": "DECLARED",
+                "period_ns": 20.0,
+                "pdk": "sky130",
+                "tier": "l8_declared",
+                "evidence": "phase1/generated_docs/L8_RTL_CONSTANTS.json"
+                            "::clock_mhz",
+            },
+        },
+    })
+
+
 def _f_gds_bad(p: Path) -> None:
     """A 0-byte GDS deliverable and a 0-byte member inside the handoff pack."""
     _w(p, "phase3/stage4/gds/top.gds", "")
@@ -2253,6 +2305,7 @@ FIXTURES: Dict[str, Callable[[Path], None]] = {
     "HOLD_CORNER_CONTRADICTED": _f_hold_corner_contradicted,
     "DRV_PROMOTION_CONTRADICTED": _f_drv_promotion_contradicted,
     "ASSUMED_CLOCK_UNDISCLOSED": _f_assumed_clock_undisclosed,
+    "CLOCK_TARGET_RECORDS_DISAGREE": _f_clock_target_records_disagree,
     "GDS_BAD": _f_gds_bad,
     "GDS_NO_LABELS": _f_gds_no_labels,
     "MFG_BAD": _f_mfg_bad,
@@ -2318,6 +2371,14 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
     ("23", "sta_assumed_clock_disclosure_check . --json "
            "reports/phase3/sta/assumed_clock_disclosure.json"):
         "ASSUMED_CLOCK_UNDISCLOSED",
+    # vibe-ic#2159 wired `clock_target_record_agreement_check` BLOCKING on step
+    # 23. EMPTY answers rc 0 NOT_APPLICABLE — correctly: a run that publishes
+    # neither record has made no second claim that could contradict a first —
+    # so the falsifiable arm needs the two records present and disagreeing.
+    # The fixture's docstring carries the measurement for both.
+    ("23", "clock_target_record_agreement_check . --json "
+           "reports/phase3/clock_target_record_agreement.json"):
+        "CLOCK_TARGET_RECORDS_DISAGREE",
     # Step 4 promoted this clause from advisory to required only after its N/A
     # contract became executable. EMPTY still correctly means "L3 absent, no
     # verdict"; a falsifiable blocking arm must instead declare a non-zero

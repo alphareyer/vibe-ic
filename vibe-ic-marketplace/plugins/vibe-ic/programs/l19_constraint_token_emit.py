@@ -170,6 +170,10 @@ _PRESENCE_KEY = "constraints_present"
 #: vibe-ic#2091 — the layer's own record of the design's clock target, INCLUDING
 #: when there is not one. See `_clock_target_record`.
 _CLOCK_TARGET_KEY = "clock_target"
+#: The ONE tier of the period ladder that is keyed by the run's library/PDK.
+#: Every other tier answers without consulting a PDK at all, so a PDK name
+#: written beside a period they produced is an unbacked claim (vibe-ic#2159).
+_PDK_KEYED_TIER = "declared_pdk_table"
 #: vibe-ic#2128 — the layer's record of WHICH design documents this emitter
 #: actually read, INCLUDING the ones that yielded nothing. See
 #: `_documents_consulted`.
@@ -465,6 +469,31 @@ def collect(project: Path) -> List[Dict[str, Any]]:
     return out
 
 
+def _run_bound_provenance(project: Path, _ctp) -> Optional[Dict[str, Any]]:
+    """The RUN's own clock-target record, when this project has one.
+
+    vibe-ic#2159 — WHICH RECORD IS AUTHORITATIVE, AND WHY IT IS THIS ONE.
+    ``reports/phase3/clock_target_provenance.json`` is written by the Phase-3
+    runner with the PDK the run ACTUALLY BUILT AGAINST (`pdk_name`, the
+    resolved technology), so it is the one record whose PDK name is bound to
+    the number by construction.  #2136 settled the same question for the area
+    baseline: the denominator belongs to the technology the run used, never to
+    a technology named somewhere in the documents.  L19 therefore mirrors this
+    record when it exists rather than re-deriving a second opinion.
+
+    Returns None when there is no readable run record — which is NOT_MEASURED,
+    not "the run named nothing".
+    """
+    try:
+        rep = json.loads((project / _ctp.PROVENANCE_REL).read_text(
+            errors="replace"))
+    except Exception:
+        return None
+    if not isinstance(rep, dict) or rep.get("period_ns") is None:
+        return None
+    return rep
+
+
 def _clock_target_record(project: Path, fields: Dict[str, Any]
                          ) -> Optional[Dict[str, Any]]:
     """L19's record of the clock target — or of its ABSENCE (vibe-ic#2091).
@@ -484,6 +513,34 @@ def _clock_target_record(project: Path, fields: Dict[str, Any]
     record.  Nothing is defaulted here: when nothing is stated, no number is
     published — only the fact that nothing is stated.
 
+    WHY THIS RECORD DOES NOT NAME A PDK OF ITS OWN (vibe-ic#2159)
+    =============================================================
+    Measured on `subservient` (lane rbsub6, 8HD-9): this record read
+    ``pdk: "sky130", tier: "l8_declared", period_ns: 20.0`` while the run's own
+    record read ``pdk: "gf180mcuD", tier: "declared_pdk_table",
+    period_ns: 20.0`` citing ``L9_constraints_floorplan.md:34`` — and the
+    design's own table in that very file gives ``sky130_fd_sc_hd -> 10 ns``.
+    So "sky130 -> 20 ns" contradicted the document it was derived beside.
+
+    The mechanism was this function: it read the PDK from L19's own
+    ``pdk_target`` — the technology the DOCUMENTS name as intended — and then
+    stamped that name onto a period that the PDK-keyed tier had not produced
+    (``l8_declared`` is a PDK-INDEPENDENT tier: an L8 ``clock_mhz``).  A PDK
+    name beside a number is a claim that the number belongs to that PDK, and
+    here it did not.
+
+    The contract this now follows:
+
+      * when the RUN has published its own provenance, L19 records the SAME
+        pdk, tier and period — one run, one answer;
+      * otherwise L19 names a PDK only when the tier that answered is itself
+        PDK-KEYED (`declared_pdk_table` matched a row for that library);
+      * in every other case the pdk is ``NOT_STATED``.  The document-declared
+        intent is preserved under ``pdk_target_declared``, which no reader can
+        mistake for "the PDK this number belongs to".
+
+    Never another PDK's tier carrying this PDK's number.
+
     Returns None when the provenance reader is unavailable, which is
     NOT_MEASURED and must not be written as an absence.
     """
@@ -497,6 +554,30 @@ def _clock_target_record(project: Path, fields: Dict[str, Any]
         if isinstance(val, str) and val.strip():
             pdk = val.strip()
             break
+
+    def _rel_cite(cite):
+        if not (isinstance(cite, str) and cite):
+            return cite
+        path, _, tail = cite.rpartition(":")
+        rel, _outside = _ldc.project_relative_source(path or cite, project)
+        return f"{rel}:{tail}" if path else rel
+
+    # ── the run's own record wins, when there is one ────────────────────────
+    run = _run_bound_provenance(project, _ctp)
+    if run is not None:
+        return {"status": "DECLARED",
+                "period_ns": float(run["period_ns"]),
+                "pdk": (run.get("pdk") or "") or None,
+                "tier": run.get("tier"),
+                "assumed": bool(run.get("assumed")),
+                "pdk_source": "run_provenance",
+                "pdk_target_declared": pdk or None,
+                "evidence": _rel_cite(run.get("cite")) or _ctp.PROVENANCE_REL,
+                "row": run.get("row", ""),
+                "note": ("mirrors the run's own clock-target provenance at "
+                         f"{_ctp.PROVENANCE_REL}; the PDK named here is the "
+                         "one the run built against")}
+
     try:
         rep = _ctp.resolve(project, pdk=pdk)
     except Exception:
@@ -508,20 +589,24 @@ def _clock_target_record(project: Path, fields: Dict[str, Any]
         # because its own consumer is a RUN RECORD; the split is
         # `l_doc_consumer_contract.project_relative_source`'s, and the emitter
         # side of it is this line.
-        cite = rep.get("cite")
-        if isinstance(cite, str) and cite:
-            path, _, tail = cite.rpartition(":")
-            rel, _outside = _ldc.project_relative_source(path or cite, project)
-            cite = f"{rel}:{tail}" if path else rel
+        cite = _rel_cite(rep.get("cite"))
+        pdk_keyed = rep["tier"] == _PDK_KEYED_TIER
         return {"status": "DECLARED",
                 "period_ns": rep["period_ns"],
-                "pdk": pdk,
+                # NOT the document's intent: only a PDK the answering tier
+                # actually keyed on. See the docstring (#2159).
+                "pdk": pdk if (pdk_keyed and pdk) else None,
+                "pdk_source": ("declared_pdk_table_match" if pdk_keyed
+                               else "NOT_STATED"),
+                "pdk_target_declared": pdk or None,
                 "tier": rep["tier"],
                 "evidence": cite,
                 "row": rep.get("row", "")}
     return {"status": "NOT_STATED",
             "period_ns": None,
-            "pdk": pdk,
+            "pdk": None,
+            "pdk_source": "NOT_STATED",
+            "pdk_target_declared": pdk or None,
             "tiers_consulted": rep.get("tiers_consulted", []),
             "reason": rep.get("would_have_stated", ""),
             "note": ("recorded as an EXPLICIT absence; any period a later "
