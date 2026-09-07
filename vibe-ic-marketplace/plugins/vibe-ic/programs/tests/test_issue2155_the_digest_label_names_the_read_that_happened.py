@@ -78,6 +78,13 @@ def _no_docker_at_all(monkeypatch, calls):
                         _record("local_digest", (None, "", "nothing local")))
     monkeypatch.setattr(_pin, "local_repo_digests",
                         _record("local_repo_digests", ((), "nothing local")))
+    # THE DIGEST-WIDE RUNG (#2170). `pinned_image_present` asks a second
+    # question of this host -- "does any local image carry the pinned digest,
+    # under any repository" -- because the repository half is configuration and
+    # not identity. It is modelled here for the same reason every other leaf
+    # is: unmodelled, it answers out of whatever this host happens to hold.
+    monkeypatch.setattr(_pin, "local_references_for_digest",
+                        _record("local_references_for_digest", ((), "")))
     monkeypatch.setattr(M, "image_version",
                         _record("image_version", (None, "", "nothing local")))
     return calls
@@ -167,6 +174,11 @@ def test_judged_image_reports_the_kind_it_was_handed(monkeypatch, kind):
     entry in the table, not only of the one that was measured."""
     monkeypatch.setattr(_pin, "local_repo_digests",
                         lambda ref: ((), "nothing local"))
+    # The digest-wide rung of `pinned_image_present` (#2170); without it this
+    # parametrisation reads the host's real image list and reports whatever
+    # kind that produced.
+    monkeypatch.setattr(_pin, "local_references_for_digest",
+                        lambda digest: ((), ""))
     monkeypatch.setattr(M, "image_digest",
                         lambda ref, **kw: (_pin.IMAGE_DIGEST, kind, ""))
     monkeypatch.setattr(M, "image_version",

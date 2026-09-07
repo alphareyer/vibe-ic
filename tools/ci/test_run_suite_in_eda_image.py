@@ -600,3 +600,219 @@ def test_the_harness_states_the_defect_it_closes():
     assert "vibe-ic#2123" in text
     assert "no tests ran in 0.07s" in text, (
         "the harness must keep the measurement that produced this rule")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# THE PIN IS RESOLVED BY DIGEST HERE TOO (vibe-ic#2170)
+#
+# This harness composed `<configured repo>@<pinned digest>` and handed that
+# STRING to `docker run`. That is the same composition defect #2170 repaired in
+# `hermetic_candidate_runner`, one call site over, and it was not in the
+# measured red set only because nothing had exercised it on a host that would
+# fail. It has no red to reproduce, so it is DRIVEN: a stub Docker states what
+# the host holds, and the harness's own behaviour is read off its output.
+#
+# Worse here than a refusal, which is why the arms below assert it: there is no
+# `--pull=never` on the `docker run` calls, so an unresolvable reference starts
+# fetching a ~22 GB image inside a landing gate rather than failing fast.
+# ══════════════════════════════════════════════════════════════════════════
+
+_RESOLVE_STUB = """#!/bin/sh
+# A stand-in for the Docker CLI that STATES what this host holds.
+#   VIBEIC_STUB_HELD   — newline-separated `repo@sha256:…` rows for `image ls`
+#   VIBEIC_STUB_HAVE   — the one reference `image inspect` resolves ("" = none)
+# Every argv is appended to $VIBEIC_STUB_LOG so an arm can assert what was
+# ASKED: "it refused" and "it refused without starting a fetch" are different
+# claims and only the argv separates them.
+printf '%s\\n' "$*" >> "$VIBEIC_STUB_LOG"
+case "$1 $2" in
+  "image inspect")
+    [ -n "$VIBEIC_STUB_HAVE" ] || { echo "Error: No such image: $3" >&2; exit 1; }
+    [ "$3" = "$VIBEIC_STUB_HAVE" ] || { echo "Error: No such image: $3" >&2; exit 1; }
+    echo '[]'; exit 0 ;;
+  "image ls")
+    # TAGGED vs UNTAGGED, because `docker image ls` lists tagged images ONLY and
+    # an image pulled by digest carries no tag (#2170). A stub that ignores the
+    # flag is more capable than the command and cannot fail.
+    case " $* " in
+      *" -a "*|*" --all "*) printf '%s\\n' "$VIBEIC_STUB_HELD_ALL" ;;
+      *)                    printf '%s\\n' "$VIBEIC_STUB_HELD_TAGGED" ;;
+    esac
+    exit 0 ;;
+esac
+for a in "$@"; do
+  case "$a" in
+    /etc/passwd) echo "root:x:0:0:root:/root:/bin/sh"; exit 0 ;;
+    /headless/.bashrc) echo "# stub"; exit 0 ;;
+  esac
+done
+exit ${VIBEIC_STUB_RC:-0}
+"""
+
+
+_ABS_SELECTOR = str(_HARNESS.parent / "test_run_suite_in_eda_image.py")
+
+
+def _resolve_case(held, have, repo_env="registry.published.invalid/vibeic-eda",
+                  tagged=None):
+    """Drive the harness with the engine ON and a stated host.
+
+    The engine arm needs a UNIX socket to exist, and this makes its OWN rather
+    than borrowing `/var/run/docker.sock`: an arm whose premise is "this host
+    runs Docker" asserts something different on a host that does not.
+    """
+    import os
+    import socket
+    import stat
+    import tempfile
+    root = tempfile.mkdtemp(dir="/tmp", prefix="vibeic-pinresolve-")
+    stub = os.path.join(root, "docker")
+    with open(stub, "w", encoding="utf-8") as fh:
+        fh.write(_RESOLVE_STUB)
+    os.chmod(stub, os.stat(stub).st_mode | stat.S_IXUSR)
+    sock_path = os.path.join(root, "docker.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(sock_path)
+    log = os.path.join(root, "argv.log")
+    open(log, "w", encoding="utf-8").close()
+    env = {"VIBEIC_SUITE_DOCKER_BIN": stub,
+           "DOCKER_HOST": "unix://" + sock_path,
+           "VIBEIC_STUB_LOG": log,
+           "VIBEIC_STUB_HELD_ALL": "\n".join(held),
+           "VIBEIC_STUB_HELD_TAGGED": "\n".join(tagged if tagged is not None
+                                                 else held),
+           "VIBEIC_STUB_HAVE": have or "",
+           "VIBEIC_STUB_RC": "0"}
+    env["VIBEIC_EDA_IMAGE_REPO"] = repo_env
+    try:
+        # AN ABSOLUTE SELECTOR, which this harness passes through untouched.
+        # A repo-root-relative one is refused before any container is
+        # considered, and that refusal would end every arm below at the
+        # selector check instead of at the thing being measured.
+        proc = _run("--scratch", os.path.join(root, "scratch"), "--", "-q",
+                    "--collect-only", _ABS_SELECTOR, env_extra=env)
+    finally:
+        srv.close()
+    with open(log, encoding="utf-8") as fh:
+        argv = fh.read()
+    return proc, argv
+
+
+def _pin_digest():
+    return _pinned_parts()["IMAGE_DIGEST"]
+
+
+def test_the_harness_runs_the_pinned_digest_held_under_another_repository():
+    """The measured fleet state: 8HD-9 holds the pin under the mirror only.
+
+    The configured reference does not resolve, an image carrying the pinned
+    digest does, and the harness runs THAT one -- naming both, so the operator
+    learns the repository they configured is absent here.
+    """
+    mirror = f"registry.invalid:5000/vibeic-eda@{_pin_digest()}"
+    proc, argv = _resolve_case(held=[mirror], have=None)
+    assert "[DISCLOSURE]" in proc.stderr, (
+        f"the substitution was silent; VIBEIC_EDA_IMAGE_REPO is decorative if a "
+        f"fallback is not announced. stderr:\n{proc.stderr[-2000:]}")
+    assert mirror in proc.stderr and _pin_digest() in proc.stderr
+    assert f"run " in argv and mirror in argv, (
+        f"the resolved reference is not the one that was run: {argv[-2000:]}")
+
+
+def test_the_harness_refuses_when_no_local_image_carries_the_pinned_digest():
+    """And refuses WITHOUT starting a fetch, which is the point.
+
+    A different digest is present, under exactly the published name, so this
+    arm fails on identity and not on the lookup — and nothing may be widened to
+    let it through.
+    """
+    other = "sha256:" + "b" * 64
+    proc, argv = _resolve_case(held=[f"ghcr.io/vibeic/vibeic-eda@{other}"],
+                               have=None)
+    assert proc.returncode != 0
+    assert _pin_digest() in proc.stderr, (
+        f"the refusal does not name the digest it wanted: {proc.stderr[-2000:]}")
+    assert "pull" not in argv.split("image ls")[-1], (
+        f"a fetch was started by the refusal path: {argv}")
+    assert "\nrun " not in "\n" + argv, (
+        f"the container was started anyway: {argv}")
+
+
+def test_the_harness_says_nothing_when_the_configured_reference_resolves():
+    """The disclosure is CONDITIONAL, and this is the control that proves it.
+
+    Without this arm, a harness that printed `[DISCLOSURE]` unconditionally
+    would pass the test above while telling every operator their configuration
+    had been overridden.
+    """
+    repo = "registry.invalid:5000/vibeic-eda"
+    configured = f"{repo}@{_pin_digest()}"
+    proc, _argv = _resolve_case(held=[configured], have=configured,
+                                repo_env=repo)
+    assert "[DISCLOSURE]" not in proc.stderr, proc.stderr[-2000:]
+
+
+def test_an_explicit_image_is_the_operators_own_and_is_never_resolved_away():
+    """`--image` is the operator naming a runtime themselves.
+
+    Resolving that to something else would be this harness overruling a person,
+    which is a different act from resolving its own pin.
+    """
+    import os
+    import socket
+    import stat
+    import tempfile
+    root = tempfile.mkdtemp(dir="/tmp", prefix="vibeic-pinresolve-")
+    stub = os.path.join(root, "docker")
+    with open(stub, "w", encoding="utf-8") as fh:
+        fh.write(_RESOLVE_STUB)
+    os.chmod(stub, os.stat(stub).st_mode | stat.S_IXUSR)
+    sock_path = os.path.join(root, "docker.sock")
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(sock_path)
+    log = os.path.join(root, "argv.log")
+    open(log, "w", encoding="utf-8").close()
+    mine = "my.registry.invalid/thing:1.2.3"
+    try:
+        proc = _run("--image", mine, "--scratch", os.path.join(root, "scratch"),
+                    "--", "-q", "--collect-only", _ABS_SELECTOR,
+                    env_extra={"VIBEIC_SUITE_DOCKER_BIN": stub,
+                               "DOCKER_HOST": "unix://" + sock_path,
+                               "VIBEIC_STUB_LOG": log,
+                               "VIBEIC_STUB_HELD_ALL": "",
+                               "VIBEIC_STUB_HELD_TAGGED": "",
+                               "VIBEIC_STUB_HAVE": "",
+                               "VIBEIC_STUB_RC": "0"})
+    finally:
+        srv.close()
+    with open(log, encoding="utf-8") as fh:
+        argv = fh.read()
+    assert "[DISCLOSURE]" not in proc.stderr
+    assert mine in argv, f"the operator's own image was not the one run: {argv}"
+
+
+def test_the_harness_finds_the_pin_when_it_is_held_UNTAGGED():
+    """THE FLEET'S REAL STATE (#2170, isolated on 8HD-9).
+
+    Pulled by digest, so no tag, so `docker image ls` does not list it. This
+    arm holds the pin ONLY in the `-a` listing, which is what a digest-pinned
+    host actually looks like — and it is the arm that fails if the flag is
+    dropped.
+    """
+    mirror = f"registry.invalid:5000/vibeic-eda@{_pin_digest()}"
+    proc, argv = _resolve_case(held=[mirror], tagged=[], have=None)
+    assert "[DISCLOSURE]" in proc.stderr, (
+        f"the pin is held untagged and was not found: {proc.stderr[-2000:]}")
+    assert mirror in argv
+
+
+def test_the_harness_lists_ALL_images_when_it_resolves_the_pin():
+    """The argv, asserted, so a future edit that drops `-a` reddens."""
+    mirror = f"registry.invalid:5000/vibeic-eda@{_pin_digest()}"
+    _proc, argv = _resolve_case(held=[mirror], tagged=[], have=None)
+    listings = [ln for ln in argv.splitlines() if ln.startswith("image ls")]
+    assert listings, f"the harness never listed images: {argv}"
+    for ln in listings:
+        assert " -a " in f" {ln} " or " --all " in f" {ln} ", (
+            f"`docker image ls` without `-a` cannot see an image pulled by "
+            f"digest: {ln}")

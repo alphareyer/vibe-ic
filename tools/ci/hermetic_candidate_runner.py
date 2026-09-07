@@ -748,8 +748,82 @@ class Resources:
             self.volume = None
 
 
+def reference_digest(ref: Any) -> str | None:
+    """The registry digest `<repo>@sha256:<hex>` names, else None.
+
+    BOTH HALVES ARE REQUIRED: a `@sha256:` tail with nothing in front of it is
+    not a reference, it is a malformed string, and recognising one as an
+    identity is how a bare image Id came to be handed to `docker run` (#2085).
+    """
+    head, sep, tail = str(ref or "").strip().partition("@")
+    if not (sep and head and tail.startswith("sha256:")):
+        return None
+    return tail if _HEX64.fullmatch(tail[7:]) else None
+
+
+def carries_pinned_digest(ref: Any) -> bool:
+    """True when `ref` is a reference whose digest IS the pin.
+
+    THE DIGEST IS THE IDENTITY; THE REPOSITORY IS DEPLOYMENT CONFIGURATION
+    (#2170). This is the ONLY comparison in this file that decides whether a
+    reference names the pinned runtime, and it is exactly as strict as a full
+    string comparison about the thing that carries identity: a different digest
+    is refused. What it stops asserting is which registry name the same bytes
+    were fetched under, which is a fact about a host's network.
+    """
+    return reference_digest(ref) == IMAGE_DIGEST
+
+
+def _local_reference_carrying_pin(docker: Docker) -> str | None:
+    """A LOCAL reference whose digest is the pin, under any repository, or None.
+
+    MEASURED 2026-09-07 on 8HD-9: the pinned bytes were held as
+    `<fleet-registry>/vibeic-eda@<pin>` and this runner asked docker for
+    `ghcr.io/vibeic/vibeic-eda@<pin>`, which is the same runtime under the name
+    of a registry that host does not pull from. Docker answered "No such image"
+    and 23 engine-driving cases recorded NORECORD about an image that was
+    present. Local metadata only -- this never reaches the network, so it can
+    never turn a refusal into a pull.
+
+    THE `-a` IS LOAD-BEARING. An image pulled by digest and never tagged is
+    DANGLING, and plain `docker image ls` hides it -- which is precisely the
+    state a digest pin produces. Without the flag this found nothing on exactly
+    the hosts the fallback exists for (#2170).
+    """
+    proc = docker.call(["image", "ls", "-a", "--digests", "--no-trunc",
+                        "--format", "{{.Repository}}@{{.Digest}}"])
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.decode("utf-8", "replace").splitlines():
+        entry = line.strip()
+        if carries_pinned_digest(entry) and entry.split("@", 1)[0] not in (
+                "", "<none>"):
+            return entry
+    return None
+
+
 def _image_profile(docker: Docker) -> dict[str, Any]:
+    """Bind the pinned runtime, and name it the way THIS host can run it.
+
+    RESOLUTION IS BY DIGEST, REFUSAL IS BY DIGEST (#2170). The configured
+    repository is tried first, because that is the name the operator set and
+    the one they want to read back. When this host does not hold the bytes
+    under that name, the question is re-asked correctly -- "which local
+    reference carries the pinned digest" -- and the answer, if there is one,
+    becomes the reference every container below is started from, so the
+    provenance record and the thing actually run cannot be two images. When
+    there is no such reference the ORIGINAL refusal stands: an absent digest is
+    refused exactly as strictly as before, and nothing here pulls.
+    """
+    global IMAGE, IMAGE_REPO_DIGEST
+    configured = IMAGE
     proc = docker.call(["image", "inspect", IMAGE])
+    if proc.returncode != 0:
+        held = _local_reference_carrying_pin(docker)
+        if held is not None:
+            IMAGE = held
+            IMAGE_REPO_DIGEST = held
+            proc = docker.call(["image", "inspect", IMAGE])
     doc = _load_one_json_output(proc, "fixed image inspection")
     image_id = doc.get("Id")
     if (not isinstance(image_id, str) or not image_id.startswith("sha256:")
@@ -757,12 +831,25 @@ def _image_profile(docker: Docker) -> dict[str, Any]:
         raise Refusal("fixed image has no exact content ID")
     repo_digests = doc.get("RepoDigests")
     if (not isinstance(repo_digests, list)
-            or IMAGE_REPO_DIGEST not in repo_digests
-            or not all(isinstance(item, str) for item in repo_digests)):
+            or not all(isinstance(item, str) for item in repo_digests)
+            or not any(carries_pinned_digest(item) for item in repo_digests)):
         raise Refusal("fixed image inspection does not bind the requested digest")
     if doc.get("Os") != "linux" or doc.get("Architecture") != "amd64":
         raise Refusal("fixed image platform differs from linux/amd64")
+    if IMAGE != configured:
+        # DISCLOSED BY NAME, NEVER SILENT. The digest decides identity, but the
+        # configured repository still has to MEAN something: an operator who
+        # sets VIBEIC_EDA_IMAGE_REPO and is quietly served the same bytes from
+        # somewhere else has been given a knob that does nothing, and would
+        # never learn that the name they configured is not present on this
+        # host. Both references are named, here and in the receipt, so the
+        # substitution is auditable after the fact rather than inferable.
+        print(f"[DISCLOSURE] the configured runtime reference {configured} is "
+              f"not present on this host; the pinned digest {IMAGE_DIGEST} was "
+              f"found under {IMAGE} and that is what will be run",
+              file=sys.stderr)
     return {
+        "configured_reference": configured,
         "id": image_id,
         "platform": PLATFORM,
         "reference": IMAGE,
@@ -829,7 +916,7 @@ def _validate_container_profile(
     if not isinstance(config, dict) or not isinstance(host, dict):
         raise Refusal("candidate container inspection lacks configuration")
     if (config.get("User") != USER or config.get("WorkingDir") != WORKDIR
-            or config.get("Image") != IMAGE
+            or not carries_pinned_digest(config.get("Image"))
             or config.get("Entrypoint") != ["/usr/bin/env"]
             or config.get("Cmd") != [
                 "-i", "--", *process_environment, *command
@@ -956,7 +1043,8 @@ def _validate_exporter_profile(
             or doc.get("Name") not in {name, "/" + name}
             or doc.get("Image") != image["id"]
             or not isinstance(config, dict) or not isinstance(host, dict)
-            or config.get("Image") != IMAGE or config.get("User") != USER
+            or not carries_pinned_digest(config.get("Image"))
+            or config.get("User") != USER
             or config.get("WorkingDir") != "/"
             or config.get("Entrypoint") != [copy_command[0]]
             or config.get("Cmd") != copy_command[1:]
@@ -1053,7 +1141,8 @@ def _validate_provisioner_profile(
             or doc.get("Name") not in {name, "/" + name}
             or doc.get("Image") != image["id"]
             or not isinstance(config, dict) or not isinstance(host, dict)
-            or config.get("Image") != IMAGE or config.get("User") != USER
+            or not carries_pinned_digest(config.get("Image"))
+            or config.get("User") != USER
             or config.get("WorkingDir") != "/"
             or config.get("Entrypoint") != ["/usr/bin/env"]
             or config.get("Cmd") != [
@@ -1495,10 +1584,17 @@ def validate_receipt(doc: Any) -> dict[str, Any]:
     if re.fullmatch(r"[0-9a-f]{24}", run_id) is None:
         raise ValueError("receipt run ID is malformed")
     image = _exact_keys(receipt["image"], {
-        "id", "platform", "reference", "repo_digest"
+        "configured_reference", "id", "platform", "reference", "repo_digest"
     },
                         "receipt image")
-    if (image["reference"] != IMAGE or image["repo_digest"] != IMAGE
+    # `configured_reference` is the DISCLOSURE, and it is mandatory rather than
+    # optional-when-it-differs: a key that appears only on the substituted arm
+    # is a key a reader has to notice the ABSENCE of, and absence is exactly
+    # what nobody audits. It records what was asked for; `reference` records
+    # what was used; the digest is what both are held to.
+    if (not carries_pinned_digest(image["reference"])
+            or not carries_pinned_digest(image["repo_digest"])
+            or not carries_pinned_digest(image["configured_reference"])
             or image["platform"] != PLATFORM
             or not isinstance(image["id"], str)
             or not image["id"].startswith("sha256:")

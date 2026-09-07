@@ -105,6 +105,7 @@ __all__ = [
     "reference_digest",
     "repository_of",
     "local_repo_digests",
+    "local_references_for_digest",
     "container_image_reference",
     "pinned_image_present",
     "default_container_name",
@@ -271,14 +272,62 @@ def local_repo_digests(ref: str) -> Tuple[Tuple[str, ...], str]:
     return tuple(str(e) for e in entries), ""
 
 
+
+def local_references_for_digest(digest: str) -> Tuple[Tuple[str, ...], str]:
+    """`(references, why_not)` — every LOCAL reference carrying `digest`, under
+    ANY repository name.
+
+    THE DIGEST IS THE IDENTITY; THE REPOSITORY IS CONFIGURATION (#2170). The
+    same bytes, pushed to a second registry and pulled from it, are the same
+    runtime: they carry the same repo digest and differ only in the half that
+    says WHERE they were fetched. Asking "is this exact reference present"
+    therefore answers a question about this host's network, not about the
+    runtime, and MEASURED 2026-09-07 on 8HD-9 it answered NO about an image
+    that was right there — `<fleet-mirror>/vibeic-eda@<pin>` was held and
+    `ghcr.io/vibeic/vibeic-eda@<pin>` was the string being compared.
+
+    THIS DOES NOT WIDEN ANYTHING. A reference is returned only when its digest
+    IS the requested one, so an image whose digest differs is refused exactly
+    as strictly as before; the only thing that stopped mattering is which
+    repository name the bytes arrived under. Local metadata only — never the
+    network, so no caller can be made to start a pull.
+
+    THE `-a` IS LOAD-BEARING AND WAS MISSING (#2170, isolated by lane czpinconf
+    on 8HD-9). An image pulled BY DIGEST and never tagged is DANGLING, and plain
+    `docker image ls` lists tagged images only — it HIDES exactly the state a
+    digest-pinned deployment produces. Measured on 8HD-9, which holds the pin
+    under one name and no tag: 0 rows without `-a`, 1 row with it. So this
+    returned `((), "")` — EMPTY, WITH NO ERROR, the worst possible pair — about a
+    host that demonstrably held the pinned image, and no caller could tell
+    "nothing carries it" from "I did not ask for it".
+    """
+    rc, out, err = _docker("image", "ls", "-a", "--digests", "--no-trunc",
+                           "--format", "{{.Repository}}@{{.Digest}}")
+    if rc == -1:
+        return (), err
+    if rc != 0:
+        return (), "docker image ls could not be read"
+    found = []
+    for line in out.splitlines():
+        entry = line.strip()
+        # `<none>@<none>` and untagged rows carry no reference; `reference_digest`
+        # already refuses anything without BOTH halves.
+        if reference_digest(entry) == digest and repository_of(entry) not in (
+                "", "<none>"):
+            found.append(entry)
+    return tuple(dict.fromkeys(found)), ""
+
+
 def pinned_image_present(env=None) -> Tuple[Optional[str], str]:
     """`(ref, why_not)` — the pinned reference IF this host holds those bytes.
 
-    Resolved by DIGEST, never by tag. The question asked is exactly "do this
-    host's RepoDigests for the pinned reference contain
-    ``<configured repo>@<pinned digest>``", because that is the identity the
-    registry would also use and therefore the one a verdict can be replayed
-    against on another host.
+    Resolved by DIGEST, never by tag AND NEVER BY REPOSITORY (#2170). The
+    question asked is exactly "does this host hold an image whose registry
+    digest is ``<pinned digest>``", under whatever repository name it was
+    pulled from. The digest is the identity a verdict can be replayed against
+    on another host; the repository is where that host was told to fetch the
+    bytes, and on a fleet serving them from a mirror it is a different string
+    for the same runtime.
 
     There is deliberately NO fallback here. Not the newest local semver tag, not
     `:latest`, not the upstream image: every one of those answers a DIFFERENT
@@ -287,16 +336,26 @@ def pinned_image_present(env=None) -> Tuple[Optional[str], str]:
     """
     ref = image_reference(env)
     digests, why = local_repo_digests(ref)
-    if why:
-        return None, f"{IMAGE_NOT_PRESENT}: {ref} ({why})"
-    if ref in digests:
+    if not why and any(reference_digest(d) == IMAGE_DIGEST for d in digests):
+        # The configured repository holds the pinned bytes. Answer with the
+        # reference the operator named, so a reader sees the name they set.
         return ref, ""
-    # `docker image inspect <repo>@<digest>` resolving while that exact
-    # RepoDigest is absent would mean docker matched something else. Say what
-    # was found rather than accepting it.
-    return None, (f"{IMAGE_NOT_PRESENT}: {ref} (this host resolved that "
-                  f"reference to an image whose RepoDigests are "
-                  f"{list(digests) or 'empty'})")
+    # THE CONFIGURED REPOSITORY IS NOT THE IDENTITY (#2170). Either that name
+    # is not held here, or docker resolved it to bytes carrying a different
+    # digest. Both are answered by the same question, asked correctly: does
+    # THIS HOST hold an image whose digest is the pinned one, under ANY name?
+    held, why_ls = local_references_for_digest(IMAGE_DIGEST)
+    if held:
+        return held[0], ""
+    if why_ls:
+        # "Could not read it" is not "read it and it was absent".
+        return None, (f"{IMAGE_NOT_PRESENT}: {IMAGE_DIGEST} (this host could "
+                      f"not be asked what it holds: {why_ls})")
+    return None, (f"{IMAGE_NOT_PRESENT}: {IMAGE_DIGEST} (no image on this host "
+                  f"carries that digest under any repository; {ref} "
+                  + (f"is not present: {why}" if why else
+                     f"resolved to an image whose RepoDigests are "
+                     f"{list(digests) or 'empty'}") + ")")
 
 
 def default_container_name(env=None) -> str:

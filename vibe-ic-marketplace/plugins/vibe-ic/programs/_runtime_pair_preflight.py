@@ -31,8 +31,10 @@ number cannot tell.
 
 THREE CHECKS, IN THIS ORDER, EACH KEEPING ITS OWN CODE
 ======================================================
-  1. ``pinned_image_present``   — the configured repository holds the pinned
-     bytes on THIS host.                     refuses ``IMAGE_NOT_PRESENT``
+  1. ``pinned_image_present``   — THIS host holds the pinned bytes, under the
+     configured repository or under any other name it pulled them from: the
+     digest is the identity and the repository is configuration (#2170).
+                                             refuses ``IMAGE_NOT_PRESENT``
   2. ``default_container_name`` — which container a run would actually select,
      honouring ``VIBEIC_EDA_CONTAINER``, and whether it exists at all.
                                              refuses ``CONTAINER_ABSENT``

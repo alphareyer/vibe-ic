@@ -1119,13 +1119,32 @@ def test_image_profile_accepts_the_configured_repo_at_the_pinned_digest():
     assert profile["reference"] == runner.IMAGE
 
 
-def test_image_profile_refuses_the_right_digest_under_the_wrong_repository():
-    """Right bytes, repository nobody configured. The digest matching is not
-    enough: an unconfigured registry is an unreviewed distribution path."""
-    wrong = f"registry.example.invalid/vibeic-eda@{PINNED_DIGEST}"
-    assert wrong != runner.IMAGE
-    with pytest.raises(runner.Refusal, match="does not bind the requested digest"):
-        runner._image_profile(_StubDocker(_inspect_doc([wrong])))
+def test_image_profile_accepts_the_right_digest_under_any_repository():
+    """Right bytes, repository nobody configured. THE DIGEST IS THE IDENTITY.
+
+    THIS TEST ASSERTED THE OPPOSITE UNTIL vibe-ic#2170, on the reasoning that
+    "an unconfigured registry is an unreviewed distribution path". That
+    reasoning does not survive what was measured: the SAME image, published
+    once and mirrored to a fleet registry, carries BOTH names in its
+    RepoDigests on a host that has seen both and only ONE on a host that pulled
+    from the mirror. 8HD-8 holds it under both; 8HD-9 under the mirror alone.
+    So the old rule made the verdict depend on which of two equivalent names a
+    host happened to pull under -- 23 engine-driving cases in
+    `test_landing_merge_verdict` recorded `[NORECORD] ... No such image` about
+    an image that was on the machine.
+
+    An unreviewed distribution path is a real hazard, and it is not this check
+    that guards it: a mirror serving DIFFERENT bytes cannot produce this
+    digest, and that is what the two tests below still refuse. What was given
+    up here is a claim about the NAME, which review never rested on.
+
+    Owner ruling, 2026-09-07 (#2170): the digest is the identity, the
+    repository is configuration and is never part of the identity comparison.
+    """
+    elsewhere = f"registry.example.invalid/vibeic-eda@{PINNED_DIGEST}"
+    assert elsewhere != runner.IMAGE
+    profile = runner._image_profile(_StubDocker(_inspect_doc([elsewhere])))
+    assert runner.carries_pinned_digest(profile["repo_digest"])
 
 
 def test_image_profile_refuses_the_right_repository_at_the_wrong_digest():
@@ -1158,20 +1177,31 @@ def test_image_profile_still_refuses_an_image_with_no_content_id():
         runner._image_profile(_StubDocker(doc))
 
 
-def test_the_configured_repository_moves_what_is_accepted_but_never_the_digest(
-        monkeypatch):
+def test_the_configured_repository_names_where_but_never_which(monkeypatch):
     """The one config point does exactly one thing: it changes WHERE the bytes
-    may come from. It cannot change WHICH bytes."""
+    are fetched from. It cannot change WHICH bytes, and it is not asked to
+    decide whether a set of bytes IS the pinned runtime -- the digest is
+    (#2170).
+
+    The second limb of this test used to require that the PUBLISHED repository
+    be REFUSED once a mirror was configured. That is the same image, and
+    refusing it made the answer depend on the name rather than on the bytes;
+    it is asserted the other way now, and the digest limb -- the one that
+    actually protects the runtime -- is unchanged above it.
+    """
     lan = _fresh_runner(monkeypatch, repo="registry.example.invalid:5000/vibeic-eda")
     assert lan.IMAGE_DIGEST == PINNED_DIGEST, "the env must not move the digest"
     assert lan.IMAGE == f"registry.example.invalid:5000/vibeic-eda@{PINNED_DIGEST}"
 
     # accepted under the configured repository ...
     assert lan._image_profile(_StubDocker(_inspect_doc([lan.IMAGE])))
-    # ... and the PUBLISHED repository is now the wrong one, at the same digest.
+    # ... and equally under the published one: same digest, same runtime.
     published = f"{lan.IMAGE_REPO_DEFAULT}@{PINNED_DIGEST}"
+    assert lan._image_profile(_StubDocker(_inspect_doc([published])))
+    # ... while the configured repository at ANOTHER digest is still refused,
+    # which is the assertion this file exists for.
     with pytest.raises(lan.Refusal, match="does not bind the requested digest"):
-        lan._image_profile(_StubDocker(_inspect_doc([published])))
+        lan._image_profile(_StubDocker(_inspect_doc([f"{lan.IMAGE.split('@')[0]}@{OTHER_DIGEST}"])))
 
 
 def test_with_no_env_the_pin_is_the_published_repository(monkeypatch):
@@ -1185,3 +1215,44 @@ def test_an_empty_repo_env_is_not_a_repository(monkeypatch):
     onto nothing."""
     blank = _fresh_runner(monkeypatch, repo="")
     assert blank.IMAGE == f"{blank.IMAGE_REPO_DEFAULT}@{PINNED_DIGEST}"
+
+
+def test_the_receipt_discloses_the_configured_reference_and_the_verifier_requires_it(
+        case):
+    """THE DISCLOSURE, DRIVEN END TO END (#2170).
+
+    The digest is the identity, so the same bytes under another repository are
+    accepted -- and the price of that is that `VIBEIC_EDA_IMAGE_REPO` could
+    become decorative: an operator sets a mirror, the mirror is not on this
+    host, the published copy is used instead and nobody is ever told. The
+    receipt therefore records BOTH names, and this asserts the field on a
+    receipt the runner actually produced.
+
+    Both directions, because a field nobody enforces is a field a later
+    producer can silently stop emitting: dropping it is refused, and so is a
+    `configured_reference` carrying a digest that is not the pin.
+    """
+    import copy
+
+    proc = invoke(case)
+    assert proc.returncode == 0, proc.stderr
+    receipt = runner.strict_load_receipt(case["receipt"])
+    assert receipt["image"]["configured_reference"] == runner.IMAGE
+    assert receipt["image"]["reference"] == runner.IMAGE, (
+        "nothing was substituted on this arm, so the two names must agree; if "
+        "they do not, this fixture is no longer the control it claims to be")
+
+    doc = json.loads(Path(case["receipt"]).read_text(encoding="utf-8"))
+    assert runner.validate_receipt(copy.deepcopy(doc)), (
+        "the unmutated receipt must validate, or the two refusals below prove "
+        "nothing about the mutation")
+
+    dropped = copy.deepcopy(doc)
+    del dropped["image"]["configured_reference"]
+    with pytest.raises(ValueError):
+        runner.validate_receipt(dropped)
+
+    foreign = copy.deepcopy(doc)
+    foreign["image"]["configured_reference"] = f"other.example/eda@{OTHER_DIGEST}"
+    with pytest.raises(ValueError):
+        runner.validate_receipt(foreign)

@@ -266,6 +266,14 @@ def test_pinned_image_present_refuses_an_image_whose_repo_digest_differs(monkeyp
     monkeypatch.setattr(
         P, "local_repo_digests",
         lambda ref: (("other.example/eda@sha256:" + "b" * 64,), ""))
+    # AND THIS HOST HOLDS NOTHING ELSE. `pinned_image_present` asks a second
+    # question when the configured repository does not answer -- "does any
+    # local image carry the pinned digest, under any repository" (#2170) -- and
+    # an unmodelled second rung would answer out of the fleet's real image
+    # list, which on 8HD-8 does hold the pin. Modelled, the refusal below is
+    # about the stub above and not about the machine.
+    monkeypatch.setattr(P, "local_references_for_digest",
+                        lambda digest: ((), ""))
     ref, why = P.pinned_image_present({})
     assert ref is None
     assert P.IMAGE_NOT_PRESENT in why and "b" * 64 in why

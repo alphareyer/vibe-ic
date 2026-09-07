@@ -283,6 +283,55 @@ if [ "$ENGINE" = "1" ]; then
   SOCK_GID="$(stat -c %g "$DOCKER_SOCK")" || die "cannot stat $DOCKER_SOCK"
 fi
 
+# ── the pinned image, RESOLVED BY DIGEST, before anything is started ───────
+# THE SAME COMPOSITION DEFECT AS vibe-ic#2170, ONE CALL SITE OVER. The lines
+# above compose `<configured repo>@<pinned digest>` and hand that STRING to
+# `docker run`. The digest is the identity; the repository half says only where
+# a host was told to fetch the bytes. MEASURED 2026-09-07: 8HD-8 holds the pin
+# under both `ghcr.io/vibeic/vibeic-eda` and the fleet mirror, 8HD-9 under the
+# mirror alone -- so with no env exported, 8HD-9 does not resolve the composed
+# string for an image that is on the machine.
+#
+# AND HERE IT IS WORSE THAN A REFUSAL. There is no `--pull=never` on the
+# `docker run` calls below, so an unresolvable reference does not fail fast: it
+# starts fetching a ~22 GB image inside a landing gate. This block asks the
+# right question first -- "does this host hold an image whose repo digest IS
+# the pin, under ANY repository" -- and answers it from LOCAL metadata only.
+#
+# NOT WIDENED: only a reference whose digest is the pin is accepted, so a
+# different digest is refused exactly as strictly as before, and if nothing
+# local carries it this dies rather than pulling.
+#
+# NOT SILENT: a substitution names BOTH references. An operator who sets
+# VIBEIC_EDA_IMAGE_REPO and is quietly served the same bytes from elsewhere has
+# been given a knob that does nothing.
+#
+# AN EXPLICIT --image / VIBEIC_SUITE_IMAGE IS NEVER TOUCHED. That is the
+# operator naming a runtime themselves, which is a different act from this
+# harness resolving its own pin.
+if [ "$ENGINE" = "1" ] && [ "$IMAGE" = "$IMAGE_DEFAULT" ] && [ -n "$_PIN_DIGEST" ]; then
+  if ! "${DOCKER_BIN:-docker}" image inspect "$IMAGE" >/dev/null 2>&1; then
+    # `-a`: an image pulled BY DIGEST and never tagged is DANGLING, and plain
+    # `docker image ls` hides it. Without the flag this finds nothing on exactly
+    # the hosts the resolution exists for (#2170).
+    _HELD="$("${DOCKER_BIN:-docker}" image ls -a --digests --no-trunc \
+               --format '{{.Repository}}@{{.Digest}}' 2>/dev/null \
+             | grep -F -- "@$_PIN_DIGEST" | grep -v '^<none>@' | head -n 1)"
+    [ -n "$_HELD" ] || die "the pinned runtime is not on this host.
+    No local image carries the digest
+        $_PIN_DIGEST
+    under any repository name, and the configured reference
+        $IMAGE
+    does not resolve either. This harness will not start a pull: the pinned
+    image is roughly 22 GB and there is no --pull=never on the runs below, so a
+    fetch begun here would run inside a landing gate. Pull it deliberately, or
+    point VIBEIC_EDA_IMAGE_REPO at a repository this host already holds."
+    printf '[DISCLOSURE] the configured runtime reference %s is not present on this host; the pinned digest %s was found under %s and that is what will be run\n' \
+      "$IMAGE" "$_PIN_DIGEST" "$_HELD" >&2
+    IMAGE="$_HELD"
+  fi
+fi
+
 # ── the selectors, checked on the host, before any container is started ────
 # The working directory this harness sets is the PLUGIN directory, not the
 # repository root. A caller who types a repo-root-relative selector after --

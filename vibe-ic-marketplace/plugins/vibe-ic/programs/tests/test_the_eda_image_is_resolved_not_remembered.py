@@ -501,6 +501,16 @@ def _nothing_local(monkeypatch):
     monkeypatch.setattr(_pin, "local_repo_digests",
                         _holds_nothing(_PIN_LEAF,
                                        ((), "this host holds no image")))
+    # THE DIGEST-WIDE RUNG (#2170). `pinned_image_present` no longer asks only
+    # about the CONFIGURED repository -- an image whose digest is the pin is
+    # the pinned runtime under whatever name it was pulled from. That is a
+    # second question this host can be asked, so it gets its own leaf here and
+    # is told the same thing: this host holds nothing. Without it the rung
+    # trips `_undeclared` and this file says so by name, which is the model
+    # working as designed.
+    monkeypatch.setattr(_pin, "local_references_for_digest",
+                        _holds_nothing("_eda_pin.local_references_for_digest",
+                                       ((), "")))
     monkeypatch.setattr(M, "local_digest",
                         _holds_nothing("local_digest",
                                        (None, "", "this host holds no image")))
