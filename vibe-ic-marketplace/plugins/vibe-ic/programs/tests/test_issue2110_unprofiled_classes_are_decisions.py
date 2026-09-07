@@ -40,16 +40,16 @@ is re-measured here rather than quoted:
                                      defines it by having NO silicon target, and
                                      the classifier reaches it when there are no
                                      L docs yet. A context pack has no subject.
-  digital_cmd_driven                 the one remaining class that HAS craft in
-                                     the DB and no readable corpus design: seven
-                                     classified doc-sets, zero with an input the
-                                     retrieval can read. Its decision is a
-                                     conjunction one of whose conjuncts is
-                                     itself a disjunction, so "the features
-                                     alone determine it" — the condition under
-                                     which a no-corpus class may be profiled —
-                                     is a judgement, not a reading. REFERRED UP,
-                                     not decided here.
+  digital_cmd_driven                 REFERRED UP here, and ANSWERED since: both
+                                     grounds were re-measured and neither held.
+                                     "Zero readable corpus designs" was a fact
+                                     about the corpus one lane could reach —
+                                     six are readable on a fuller one; and the
+                                     disjunct the referral turned on is
+                                     `has_analog`, which is craft-inert, so the
+                                     two routes cannot select differently. It is
+                                     PROFILED, and it left the dict below. See
+                                     `test_issue2110_digital_cmd_driven_class_profile`.
 
 chip-AGNOSTIC: the checks read the shipped DB and registry only.
 """
@@ -81,8 +81,6 @@ _SKIPPED = {
     "digital_arithmetic_primitive": "the classifier's terminal catch-all",
     "unknown_protocol_class": "means 'detection failed'; nothing to select for",
     "bare_fpga": "not a design family; defined by having no silicon target",
-    "digital_cmd_driven": "no readable corpus design; the features-alone "
-                          "condition is a judgement, referred up",
 }
 
 
@@ -187,11 +185,19 @@ def test_bare_fpga_is_defined_by_having_no_silicon_target():
 
 
 def test_digital_cmd_driven_does_have_craft_which_is_why_it_is_referred_up():
-    """The one skip that is NOT "there is nothing to select". Asserting the
-    craft EXISTS is what keeps this an open question rather than a closed one:
-    if it were empty, the reason would be the same as pure_analog's and no
-    ruling would be needed."""
+    """The referral this file opened, kept under its own name so the record is
+    continuous, and now RESOLVED. The craft it asserted still exists — that was
+    always the true half — and the class has been profiled from it, so the
+    assertion is strengthened rather than dropped: the craft exists AND it is
+    now the class's declared selection rather than something the phrase path
+    might or might not reach. The two grounds the referral rested on are
+    re-measured in `test_issue2110_digital_cmd_driven_class_profile`."""
     assert _entry_text_matches(r"command-driven|command\s+protocol|opcode")
+    prof = _db()["registered_class_profiles"]["digital_cmd_driven"]
+    assert isinstance(prof, dict), (
+        "digital_cmd_driven is null again; the referral has been re-opened and "
+        "this file's account of it is out of date")
+    assert "command-driven-memory-controller-fsm" in prof["db_classes"]
 
 
 # ── and the skipped classes really are left alone ─────────────────────────

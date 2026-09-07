@@ -6,7 +6,22 @@
  "registered_class_profiles": {
   "_doc": "CLASS-FIRST retrieval. The REGISTERED ic_class (programs/ic_class_registry.json) SELECTS which entries[] a context pack may carry; lexical phrase retrieval then RANKS and ADDS within that selection and can never substitute an out-of-class entry for an in-class one. Measured cause: on a crypto-accelerator input the sentence \"the multipliers are implemented in a serial-parallel fashion\" scored the serial-parallel-multiplier entry into a crypto pack, where its craft (authoring a golden for a serial-parallel multiplier DESIGN) has no referent — a literal phrase collision, not a design-family match. A profile also declares the integration_contract the class's generated integration/constraints layers must carry, which is what a pack for a profiled class hands the expert author in place of a null contract. A registered class mapped to null is NOT YET PROFILED: retrieval falls back to the unconfined lexical ranking (behaviour unchanged) and a pack for it is neither class-confined nor refused. null is a DECLARED gap, never an omission — every name in ic_class_registry.json appears here, and a test fails when a newly registered class does not.",
   "aid_class_half_duplex_single_wire": null,
-  "digital_cmd_driven": null,
+  "digital_cmd_driven": {
+   "db_classes": [
+    "command-driven-memory-controller-fsm",
+    "fsm-controller",
+    "fsm-register-interface",
+    "mmio-register-controlled-counter"
+   ],
+   "integration_contract": [
+    "the command SET this build implements, enumerated: every opcode with its encoding, the parameters it carries, and whether it returns a response — AND what the chip does with an encoding the set does not contain. A layer that lists only the commands the design accepts has specified half the dispatcher, because the reject path is the first one a host exercises and the one a silent implementation gets wrong",
+    "the TRANSPORT the commands arrive on, named, with its direction and its framing, and whether this build DISPATCHES them (the target) or ISSUES them (the initiator) — this class spans framed-serial and memory-mapped-parallel command interfaces, which have different pin surfaces and different post-reset line states, so a layer that names a command set without naming the transport it is carried on has specified neither",
+    "the command LIFECYCLE in cycles rather than in prose: the edge on which a command is accepted, the state the dispatcher occupies while it runs, the point after which its parameters may no longer change, and the cycle on which its completion becomes observable — a dispatcher whose layer says only that 'the command executes' leaves the accept-to-first-effect latency to whoever writes the RTL, and that latency is exactly what a cycle-accurate checker measures",
+    "every command that changes software-visible state, PAIRED with the register field it changes and that field's post-reset value, and by name the state a command does NOT reset — a command whose effect on the register map is unstated is indistinguishable from one that has no effect, and the two are checked by different gates",
+    "what happens to a command that arrives while another is still running, and to one that never completes: whether the new command is rejected, queued or preempts, which side raises the error, the bound after which the dispatcher gives up, and the state it is left in — concurrency and timeout are the two behaviours a command interface may not leave to the implementation, because both are silent when they are wrong",
+    "the command-visible ERROR set: every error the dispatcher can raise, the output that carries each one and whether it is a LEVEL or a PULSE, the command or register write that clears it, and the commands this build scopes OUT — an out-of-scope command whose opcode stays in the table is an unresolved scope question, not an absent feature"
+   ]
+  },
   "mixed_signal_otp": null,
   "pure_analog": null,
   "data_converter": {
