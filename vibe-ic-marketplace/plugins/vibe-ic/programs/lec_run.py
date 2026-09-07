@@ -1030,6 +1030,50 @@ _SAT_ABORT_RE = re.compile(
 # Best-effort per-instance unproven cell list.
 _UNPROVEN_LIST_RE = re.compile(r"Unproven\s+\$equiv\s+cells:\s*([^\n]+)")
 
+# SECONDARY SOURCE for the same list (vibe-ic#2182). `_UNPROVEN_LIST_RE` reads
+# the closing `equiv_status` summary -- which a run that never REACHES
+# `equiv_status` does not print. Both blocked benchmark ICs measured on
+# 2026-09-07 are exactly that shape: opentitan_aes stopped inside
+# `equiv_induct -seq 64` (rc=137) with `unproven_points: 3`, and sha256 was
+# still inside the ladder with 34 -- and BOTH published `unproven_cells: []`
+# while their own raw log named every one of those cells, at column 2, in the
+# `equiv_induct` workset block:
+#
+#     Proof for induction step failed. Trying to prove individual $equiv from workset.
+#       Trying to prove $equiv for \u_dut...u_reg_status_key_init.clean_d: failed.
+#
+# A count with no names is what forced a human to read a 10 MB log to learn
+# three identifiers the program already had in hand. So: when the primary
+# summary line is ABSENT, read the names from the LAST workset block instead --
+# last, for the same reason `_INDUCT_FOUND_RE` takes the last residual line
+# (each rung re-reports what is STILL unproven, so the furthest state the run
+# reached is the last one it printed). The name may contain spaces
+# (`\read_data [0]`), so the pattern anchors on the `: failed.` suffix at
+# end-of-line rather than on whitespace. This NEVER overrides the primary
+# source and NEVER invents: with neither present the list stays empty, which
+# is the honest "could not read it", not a default.
+_INDUCT_WORKSET_MARK = ("Proof for induction step failed. "
+                        "Trying to prove individual $equiv from workset.")
+_INDUCT_WORKSET_FAIL_RE = re.compile(
+    r"^[ \t]+Trying to prove \$equiv for (.+?): failed\.[ \t]*$", re.M)
+
+
+def unproven_cells_from_induct_workset(text: str) -> List[str]:
+    """Names of the $equiv cells the LAST induction workset failed to prove.
+
+    Order-preserving and de-duplicated; empty when the log has no workset
+    block, which is the same "no names available" the primary source reports.
+    """
+    text = text or ""
+    cut = text.rfind(_INDUCT_WORKSET_MARK)
+    scanned = text[cut:] if cut >= 0 else text
+    out: List[str] = []
+    for m in _INDUCT_WORKSET_FAIL_RE.finditer(scanned):
+        name = m.group(1).strip()
+        if name and name not in out:
+            out.append(name)
+    return out
+
 # BUDGET-EXHAUSTED marker (#155 POSITIVE timeout discriminator). run_yosys_equiv
 # (below) writes this EXACT string into the raw log ITSELF when the yosys
 # subprocess is KILLED by the wall budget — it is NOT tool output a design could
@@ -1929,9 +1973,12 @@ def parse_equiv_output(text: str) -> Dict:
     ]
 
     ml = _UNPROVEN_LIST_RE.search(text)
-    unproven_cells = (
-        [t for t in re.split(r"[,\s]+", ml.group(1)) if t][:50] if ml else []
-    )
+    if ml:
+        unproven_cells = [t for t in re.split(r"[,\s]+", ml.group(1)) if t][:50]
+    else:
+        # #2182 -- the run never reached `equiv_status`; the workset block is
+        # the only place the names survive. Same 50-name cap as the primary.
+        unproven_cells = unproven_cells_from_induct_workset(text)[:50]
 
     success_line = bool(_SUCCESS_RE.search(text))
 
@@ -3221,6 +3268,141 @@ def _emit_ladder(checkpoint_dir: Optional[str], start_index: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# WHICH RESOURCE ACTUALLY RAN OUT (vibe-ic#2182)
+# ---------------------------------------------------------------------------
+# THE DEFECT THIS EXISTS TO PREVENT, measured 2026-09-07 on opentitan_aes:
+#
+#     lec_equivalence_check.json   exhausted_resource: "wall_clock_seconds"
+#     docker inspect …             State.OOMKilled = true
+#     /sys/fs/cgroup/memory.events oom_kill 1   (memory.max = 51539607552)
+#
+# The proof was KILLED FOR MEMORY at a 48 GiB cgroup limit, and the step
+# reported that it had run out of TIME. `exhausted_resource` was assigned the
+# literal "wall_clock_seconds" whenever the ADMISSION budget was spent, and
+# never asked what stopped the process. Every reader of that field — human or
+# machine — is sent to the wrong repair: raise the budget, which cannot help a
+# proof that never reached a deadline, and which this repo has already ruled is
+# not a fix (#2177). The label cost a whole lane its framing.
+#
+# rc=137 CANNOT settle it on its own: `_CONTAINER_TIMEOUT_RCS` folds GNU
+# `timeout`'s `--kill-after` SIGKILL escalation and a cgroup OOM kill into the
+# same number, and the code says so itself. So ASK THE MEMORY CONTROLLER. The
+# kernel keeps an exact count of OOM kills per cgroup; sampling it either side
+# of an attempt turns "it was killed, we don't know why" into a measurement,
+# and when the counter cannot be read the honest answer is NOT_MEASURED with
+# the reason named — never a default, and never the old literal.
+EXHAUSTED_WALL_CLOCK = "wall_clock_seconds"
+EXHAUSTED_MEMORY = "memory_bytes"
+EXHAUSTED_NOT_MEASURED = "not_measured"
+
+# cgroup v2 first (what this fleet runs), then the v1 layout. Both are plain
+# reads of a kernel-maintained counter -- no tool, no parsing of tool output.
+_OOM_PROBE_CMD = (
+    "cat /sys/fs/cgroup/memory.events 2>/dev/null "
+    "|| cat /sys/fs/cgroup/memory/memory.oom_control 2>/dev/null")
+_MEMORY_MAX_PROBE_CMD = (
+    "cat /sys/fs/cgroup/memory.max 2>/dev/null "
+    "|| cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null")
+_OOM_KILL_RE = re.compile(r"^oom_kill\s+(\d+)\s*$", re.M)
+
+
+def parse_oom_kill_count(text: str) -> Optional[int]:
+    """The `oom_kill` counter out of a cgroup `memory.events` / `oom_control`.
+
+    None when the text carries no such line — which is "could not read it",
+    not "it was zero". PURE.
+    """
+    m = _OOM_KILL_RE.search(text or "")
+    return int(m.group(1)) if m else None
+
+
+def parse_memory_max_bytes(text: str) -> Optional[int]:
+    """The cgroup memory ceiling in bytes, or None for `max` / unreadable.
+
+    cgroup v2 writes the literal `max` when there is NO limit, and v1 writes a
+    sentinel so large it means the same thing. Both become None: a ceiling that
+    does not exist cannot be the resource that ran out. PURE.
+    """
+    t = (text or "").strip().split("\n")[0].strip()
+    if not t or t == "max":
+        return None
+    try:
+        v = int(t)
+    except ValueError:
+        return None
+    # v1's "no limit" sentinel is PAGE_COUNTER_MAX * PAGE_SIZE; anything within
+    # a factor of a machine's addressable memory of that is not a real cap.
+    return v if 0 < v < (1 << 62) else None
+
+
+def probe_cgroup_memory(container: str, exec_raw=None) -> Dict:
+    """Sample the container cgroup's OOM counter and ceiling.
+
+    Returns ``{"oom_kills": int|None, "memory_max_bytes": int|None}``. A probe
+    that cannot run leaves BOTH None, which the classifier reads as
+    NOT_MEASURED rather than as an absence of OOM.
+    """
+    runner = exec_raw or _docker_exec_raw
+    out: Dict[str, Optional[int]] = {"oom_kills": None,
+                                     "memory_max_bytes": None}
+    try:
+        rc, so, _ = runner(container, _OOM_PROBE_CMD, 30)
+        if rc == 0:
+            out["oom_kills"] = parse_oom_kill_count(so)
+        rc, so, _ = runner(container, _MEMORY_MAX_PROBE_CMD, 30)
+        if rc == 0:
+            out["memory_max_bytes"] = parse_memory_max_bytes(so)
+    except Exception:                                   # noqa: BLE001
+        # A probe is EVIDENCE-GATHERING, never a gate. If it explodes the run
+        # still has a verdict to publish; it simply says NOT_MEASURED.
+        pass
+    return out
+
+
+def classify_exhausted_resource(*, budget_exhausted: bool, stopped: bool,
+                                returncode: Optional[int] = None,
+                                oom_kill_delta: Optional[int] = None,
+                                memory_max_bytes: Optional[int] = None
+                                ) -> Tuple[Optional[str], str]:
+    """Name the resource that ACTUALLY ran out, and the evidence for it. PURE.
+
+    Order is deliberate: what KILLED the process outranks what the admission
+    budget did, because a proof that was killed never reached the deadline.
+    """
+    if oom_kill_delta is not None and oom_kill_delta > 0:
+        cap = (f", cgroup memory.max = {memory_max_bytes} bytes"
+               if memory_max_bytes else ", cgroup had no memory ceiling set")
+        return (EXHAUSTED_MEMORY,
+                f"the container cgroup's oom_kill counter rose by "
+                f"{oom_kill_delta} during this attempt{cap}")
+    if not budget_exhausted and not stopped:
+        return (None, "")
+    if returncode == 124:
+        # GNU `timeout`'s SIGTERM expiry is unambiguous: the clock ended it.
+        return (EXHAUSTED_WALL_CLOCK,
+                "the container-side backstop expired (rc=124, SIGTERM)")
+    if returncode == 137:
+        if oom_kill_delta == 0:
+            return (EXHAUSTED_WALL_CLOCK,
+                    "rc=137 (SIGKILL) with the cgroup oom_kill counter "
+                    "UNCHANGED, so the kill came from the container-side "
+                    "backstop's --kill-after escalation and not from the "
+                    "memory controller")
+        return (EXHAUSTED_NOT_MEASURED,
+                "rc=137 (SIGKILL) is the container-side backstop's "
+                "--kill-after escalation AND a cgroup OOM kill; the cgroup "
+                "oom_kill counter could not be read, so which resource ran "
+                "out was not measured")
+    if stopped:
+        return (EXHAUSTED_NOT_MEASURED,
+                f"this attempt was stopped (rc={returncode}) and no probe "
+                "identified the resource")
+    return (EXHAUSTED_WALL_CLOCK,
+            "the step's attempt-admission budget was spent and no attempt was "
+            "killed")
+
+
+# ---------------------------------------------------------------------------
 # STEP WALL BUDGET — measured ONCE, from the FIRST attempt, across ALL retries.
 # ---------------------------------------------------------------------------
 # THE DEFECT THIS EXISTS TO PREVENT (measured 2026-08-27 on the VerilogEval-Human
@@ -3287,8 +3469,15 @@ class StepBudget:
         return self.next_attempt_budget() == 0
 
     def record(self, frontend: str, defines: str, budget_s: int,
-               elapsed_s: float, launched: bool, timed_out: bool) -> None:
-        """Record an attempt that WAS launched."""
+               elapsed_s: float, launched: bool, timed_out: bool,
+               kill_cause: Optional[Dict] = None) -> None:
+        """Record an attempt that WAS launched.
+
+        `kill_cause` — what `run_yosys_equiv` OBSERVED about this attempt's
+        ending (#2182): its return code and the cgroup OOM-counter delta across
+        it. Absent on every caller predating the probe, in which case the
+        classifier says NOT_MEASURED for an ambiguous rc rather than guessing.
+        """
         self.attempts.append({
             "attempt": len(self.attempts) + 1,
             "gold_frontend": frontend,
@@ -3297,6 +3486,7 @@ class StepBudget:
             "elapsed_sec": round(elapsed_s, 2),
             "launched": launched,
             "killed_by_budget": timed_out,
+            "kill_cause": dict(kill_cause) if kill_cause else None,
         })
 
     def skipped(self, frontend: str, defines: str, why: str) -> None:
@@ -3341,8 +3531,25 @@ def annotate_step_budget(report: Dict, budget: "StepBudget", *,
     report["step_budget_sec"] = budget.total_s
     report["step_elapsed_sec"] = round(budget.elapsed_s(), 2)
     report["step_budget_exhausted"] = budget.exhausted()
-    report["exhausted_resource"] = (
-        "wall_clock_seconds" if budget.exhausted() else None)
+    # WHICH RESOURCE ACTUALLY RAN OUT (#2182). This used to be the literal
+    # "wall_clock_seconds" whenever the admission budget was spent, which
+    # reported TIME for a proof the kernel had killed for MEMORY. It is now
+    # derived from what the attempt's own ending was observed to be, and says
+    # `not_measured` -- with the reason -- when nothing could settle it.
+    _stopped_now = (
+        bool(stopped) if stopped is not None
+        else any(a.get("killed_by_budget") for a in budget.attempts
+                 if a.get("launched")))
+    _cause = next((a.get("kill_cause") for a in reversed(budget.attempts)
+                   if a.get("launched") and a.get("kill_cause")), None) or {}
+    _resource, _evidence = classify_exhausted_resource(
+        budget_exhausted=budget.exhausted(),
+        stopped=_stopped_now,
+        returncode=_cause.get("returncode"),
+        oom_kill_delta=_cause.get("oom_kill_delta"),
+        memory_max_bytes=_cause.get("memory_max_bytes"))
+    report["exhausted_resource"] = _resource
+    report["exhausted_resource_evidence"] = _evidence or None
     # THE FIELD THAT SAYS WHICH OF THE TWO IT WAS. `step_budget_exhausted`
     # answers "is the ADMISSION budget spent" and stays exactly what it was --
     # true of a proof that legitimately ran long and then DECIDED as much as of
@@ -3441,8 +3648,17 @@ def run_yosys_equiv(container: str, ys_path_in_container: str,
                     workdir: Optional[str] = None, *,
                     live_log_path: Optional[Path] = None,
                     telemetry_path: Optional[Path] = None,
-                    telemetry_context: Optional[Dict] = None):
+                    telemetry_context: Optional[Dict] = None,
+                    kill_cause: Optional[Dict] = None):
     """Run `yosys -s <ys>` in the container. Returns (launched, raw_output).
+
+    `kill_cause` — an OUT parameter (#2182). When a dict is passed it is filled
+    with what this attempt's ending was OBSERVED to be: the return code, and
+    the container cgroup's `oom_kill` counter sampled BEFORE and AFTER, so a
+    memory kill can be told apart from the wall-clock backstop that shares its
+    rc. A delta, not an absolute, because the counter is cumulative over the
+    container's whole life and other jobs share it. Nothing here can change the
+    verdict; it only lets the report name the right resource.
 
     launched=False means Docker/Yosys could not run at all (the caller then
     returns 1 for a disclosed-skip). launched=True means Yosys emitted output
@@ -3469,6 +3685,32 @@ def run_yosys_equiv(container: str, ys_path_in_container: str,
                + shlex.quote(str(Path(live_log_path).resolve())))
     if workdir:
         cmd = f"cd {shlex.quote(workdir)} && " + cmd
+    # BEFORE-sample. Taken even when the attempt goes on to succeed: a probe
+    # that only runs on failure cannot produce a delta, and a delta is the only
+    # form of this counter that says anything about THIS attempt.
+    _mem_before = (probe_cgroup_memory(container)
+                   if kill_cause is not None else
+                   {"oom_kills": None, "memory_max_bytes": None})
+    if kill_cause is not None:
+        kill_cause.update(oom_kills_before=_mem_before["oom_kills"],
+                          memory_max_bytes=_mem_before["memory_max_bytes"],
+                          oom_kill_delta=None, returncode=None)
+
+    def _sample_after(rc: Optional[int]) -> None:
+        if kill_cause is None:
+            return
+        kill_cause["returncode"] = rc
+        after = probe_cgroup_memory(container)
+        kill_cause["oom_kills_after"] = after["oom_kills"]
+        if after["memory_max_bytes"] is not None:
+            kill_cause["memory_max_bytes"] = after["memory_max_bytes"]
+        before = _mem_before["oom_kills"]
+        # BOTH ends must have been read for a delta to mean anything. "Could
+        # not read it" is not "it was zero".
+        kill_cause["oom_kill_delta"] = (
+            after["oom_kills"] - before
+            if after["oom_kills"] is not None and before is not None else None)
+
     try:
         _extra = {}
         if live_log_path is not None or telemetry_path is not None:
@@ -3485,12 +3727,16 @@ def run_yosys_equiv(container: str, ys_path_in_container: str,
         out = exc.stdout or ""
         if isinstance(out, bytes):
             out = out.decode("utf-8", "replace")
+        # The HOST deadline fired: unambiguously the clock, and recorded as
+        # such so the classifier never has to fall back to NOT_MEASURED here.
+        _sample_after(124)
         return (bool(_strip_login_banner(out).strip()),
                 _strip_login_banner(out)
                 + f"\n{_TIMEOUT_MARKER} after {timeout}s")
     except (subprocess.SubprocessError, OSError) as exc:
         return False, f"[lec_run] ERROR: could not exec yosys: {exc}"
 
+    _sample_after(getattr(r, "returncode", None))
     out = _strip_login_banner(r.stdout or "")
     # Launched iff we saw genuine Yosys output (banner or an equiv/error line);
     # a docker-daemon / no-such-container failure yields no Yosys banner.
@@ -4573,7 +4819,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Every attempt now draws from the SAME StepBudget deadline.
         _attempt_budget = budget.next_attempt_budget()
         _started = budget.elapsed_s()
+        _kill_cause: Dict = {}
         _launched, _raw = run_yosys_equiv(container, ys_in_container,
+                                          kill_cause=_kill_cause,
                                           timeout=_attempt_budget,
                                           workdir=equiv_workdir,
                                           live_log_path=live_log_path,
@@ -4590,7 +4838,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                           })
         budget.record(frontend, defines, _attempt_budget,
                       budget.elapsed_s() - _started, _launched,
-                      bool(_TIMEOUT_RE.search(_raw)))
+                      bool(_TIMEOUT_RE.search(_raw)),
+                      kill_cause=_kill_cause)
         if checkpoint_enabled and ckpt_dir is not None and ckpt_key is not None:
             _recorded = promote_and_record_checkpoints(
                 ckpt_dir, ckpt_key,

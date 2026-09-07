@@ -521,6 +521,31 @@ def audit(project: Path) -> AuditResult:
     # exhaustion is untouched, so every existing verdict in this file stands.
     _exhausted = budget_exhausted_resource(lc)
     _decided = verdict_was_decided(lc, equivalent, non_equiv)
+    # THE REMEDY MUST MATCH THE RESOURCE (vibe-ic#2182). This finding used to
+    # end with "Re-run the step with a budget it can finish inside" whatever
+    # the producer named, so a proof the kernel OOM-killed at a 48 GiB cgroup
+    # limit was answered with advice about the clock. A remedy aimed at the
+    # wrong resource is the same defect as the wrong label, one sentence later.
+    _evidence = str(lc.get("exhausted_resource_evidence") or "").strip()
+    if _exhausted == "memory_bytes":
+        _remedy = ("The resource that ran out is MEMORY, not time: raising the "
+                   "time budget cannot help, and the proof never reached a "
+                   "deadline. Re-run it where the cgroup ceiling admits the "
+                   "peak this proof needs -- measured, not guessed -- or close "
+                   "the remainder with a method that does not unroll the whole "
+                   "miter.")
+    elif _exhausted == "not_measured":
+        _remedy = ("WHICH resource ran out was NOT MEASURED, so no remedy is "
+                   "named here: do not assume the clock. Establish the cause "
+                   "first (the container cgroup's oom_kill counter settles "
+                   "it), then repair the resource that actually ran out.")
+    else:
+        _remedy = ("Re-run the step with a budget it can finish inside, or "
+                   "close it with a sign-off LEC that reaches a verdict. The "
+                   "budget itself stays a RECORDING ceiling -- do NOT shorten "
+                   "it, and do NOT turn it into a kill.")
+    if _evidence:
+        _remedy += f" Evidence for the named resource: {_evidence}."
     if _exhausted is not None and not _decided:
         res.not_measured = True
         res.inconclusive = False
@@ -538,11 +563,7 @@ def audit(project: Path) -> AuditResult:
                      "waiver row and must NOT be credited in the completion "
                      "audit: a waiver accepts a known outcome, and here there "
                      "is no outcome to accept. The IC cannot be "
-                     "PASS_WITH_WAIVERS while this step stands. Re-run the "
-                     "step with a budget it can finish inside, or close it "
-                     "with a sign-off LEC that reaches a verdict. The budget "
-                     "itself stays a RECORDING ceiling -- do NOT shorten it, "
-                     "and do NOT turn it into a kill."),
+                     "PASS_WITH_WAIVERS while this step stands. " + _remedy),
             file=LEC_JSON_REL))
         return res
 
