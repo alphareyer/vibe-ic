@@ -36542,7 +36542,17 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
     try:
         import die_level_deck_rule_attribution as _dla
         _deck_src, _deck_why = _pdk_deck_sources(pdk, container)
-        _att = _dla.run(project, dict(per_rule), _deck_src)
+        # vibe-ic#2148 — the RDB is handed in EXPLICITLY. The canonical mirror
+        # at reports/phase3/drc_signoff.rpt is written further down this
+        # function, so the default path would be the PREVIOUS run's report or
+        # absent, and this measurement must be of the report this step just
+        # produced. The fill report is read from the project by the module.
+        _rdb_text = None
+        try:
+            _rdb_text = rpt.read_text(errors="replace") if rpt.is_file() else None
+        except OSError:
+            _rdb_text = None
+        _att = _dla.run(project, dict(per_rule), _deck_src, None, _rdb_text)
         if _deck_src is None:
             _att.setdefault("not_measured", {})["deck_sources"] = _deck_why
         else:
@@ -36554,6 +36564,34 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
             extras["die_level_rules"] = _att["die_level_rules"]
             extras["design_remainder_violations"] = _att["other_violations"]
             detail = _dla.summarize(_att) + " | " + detail
+        elif _att.get("verdict") == _dla.DENSITY_ATTRIBUTED:
+            # THE DIE-LEVEL DENSITY RULES ARE THE INTEGRATOR'S, AND THE MACRO
+            # HANDS THEM UP (vibe-ic#2148). A hard macro is placed inside
+            # somebody else's die and that die's top-level fill is what closes
+            # a rule whose window IS the die. This is NOT a waiver and NOT a
+            # pass: the tier is its own word, the numbers travel with the
+            # delivery, and one unattributed violation keeps the FAIL.
+            extras["attributed_density_rules"] = _att["attributed_density_rules"]
+            extras["attributed_density_violations"] = \
+                _att["attributed_density_violations"]
+            extras["density_disclosure"] = _att["density_disclosure"]
+            extras["unattributed_violations"] = _att["unattributed_total"]
+            detail = _dla.summarize(_att) + " | " + detail
+            try:
+                _hm = project / "phase3" / "stage4" / "hardmacro"
+                _hm.mkdir(parents=True, exist_ok=True)
+                _ho = _hm / _dla.HANDOFF_NAME
+                _ho.write_text(json.dumps(_dla.handoff_record(_att),
+                                          indent=2) + "\n")
+                extras["integrator_requirements"] = str(_ho)
+                _att["handoff_record"] = str(_ho)
+            except OSError as _exc:
+                # NAMED. `flow_compliance_check` refuses a HARDMACRO delivery
+                # whose attributed rules carry no handoff record, so a record
+                # that could not be written must not read as one that was.
+                extras["integrator_requirements_unwritable"] = str(_exc)
+            if _att.get("drc_tier") == _dla.TIER_PASS_WITH_ATTRIBUTION:
+                status = _dla.TIER_PASS_WITH_ATTRIBUTION
         try:
             _ar = project / "reports" / "phase3" / \
                 "die_level_rule_attribution.json"
@@ -54457,7 +54495,14 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
     # step level for diagnostics; the project-level acceptance gate
     # treats both the same (CLAUDE.md SOLE ACCEPTANCE CRITERION
     # explicitly recognises PASS_WITH_WAIVERS as a real verdict).
-    if any(s.status in ("WAIVED", "SKIP", "ENV_UNAVAILABLE") for s in plan):
+    # vibe-ic#2148 — PASS_WITH_ATTRIBUTION is a QUALIFIED tier and is
+    # enumerated HERE for the reason the comment at the top of this function
+    # states: the catch-all below returns "PASS" for any status this function
+    # does not know, so a new word that is not listed turns the run green in
+    # silence. A delivery whose die-level density is the integrator's has NOT
+    # closed those rules; the run is qualified, never plain PASS.
+    if any(s.status in ("WAIVED", "SKIP", "ENV_UNAVAILABLE",
+                        "PASS_WITH_ATTRIBUTION") for s in plan):
         return "PASS_WITH_WAIVERS"
     return "PASS"
 

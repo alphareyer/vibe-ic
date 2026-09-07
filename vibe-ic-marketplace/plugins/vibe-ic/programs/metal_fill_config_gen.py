@@ -57,6 +57,10 @@ import sys
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 from _atomic_artefact import writing as atomic_writing  # vibe-ic#1082 (helper from PR #1094)
+#: The ONE derivation of "which of this deck's rules measure over the die".
+#: Importing it is deliberate: a second copy here is a second place for the
+#: two to disagree, and they would disagree silently.
+import die_level_deck_rule_attribution as _dla  # noqa: E402
 
 _DEFAULT_FLOOR_PCT = 30.0
 _DEFAULT_MARGIN = 0.05          # fill target = floor + margin, so >floor with headroom
@@ -389,6 +393,115 @@ def parse_metal_keepout_layers(deck_text: str, metal_prefix: str,
     return [[num, dt, margin] for (num, dt), margin in best.items()]
 
 
+def density_rule_layer_identifiers(deck_text: str) -> Dict[str, List[str]]:
+    """{die-level density rule id: the layer identifier(s) whose area it
+    measures}, read from the deck and from nothing else.
+
+    THE RULE SET comes from `die_level_deck_rule_attribution` — the deck's own
+    whole-die area identifier, and the `# Rule` blocks that read it — so there
+    is exactly ONE derivation of "which rules measure over the die" in this
+    repository and this file does not acquire a second.
+
+    THE LAYER comes from the block, in the two shapes both open decks in this
+    image use:
+      * inline, `<layer>.area / <die area>` in the block itself;
+      * named, `<x>_area = <layer>.area` at deck scope with the block
+        referencing `<x>_area`.
+    Identifiers are merged across every block that carries the same rule id: a
+    deck that emits one rule from a loop spells the layer once, outside it.
+
+    Nothing here is a layer name, a rule name or a PDK. MEASURED on the two
+    open decks in the pinned image:
+        gf180mcuD  M1.4..M5.4 -> metal1..metal5, MT.3/MT30.7 -> top_metal,
+                   PL.8 -> poly2_result
+        ihp-sg13g2 AFil.g/g1 -> activ, GFil.g -> poly, Mn.j/k -> metal1,
+                   TM1.c/d -> topmetal1, TM2.c/d -> topmetal2, LBE.i -> lbe_drw
+    """
+    die_names, _why = _dla.die_area_identifiers(deck_text)
+    if not die_names:
+        return {}
+    family = _dla.die_level_density_rules(deck_text, die_names)
+    if not family:
+        return {}
+    ident = r"[A-Za-z_][A-Za-z0-9_]*"
+    # NO SENTENCE REACHES ANY REGEX BELOW. A deck's rule block carries English —
+    # the `# Rule` header, the `##` notes, and the human-readable violation
+    # message the rule prints — and an identifier read out of THAT is a value
+    # taken from a sentence that may DENY it (#706/#711). `deck_code_only`
+    # blanks every quoted string and every comment first, keeping offsets, so
+    # what is matched here is deck CODE and the polarity question has no
+    # referent. The direction of the loss is the safe one: an identifier that
+    # exists only in a comment is no longer read, and the caller's answer to
+    # "no identifier" is a named refusal, never a supplied value.
+    code_text = _dla.deck_code_only(deck_text)
+    area_of: Dict[str, str] = {}
+    for line in code_text.splitlines():
+        m = re.match(r"\s*(" + ident + r")\s*=\s*(" + ident + r")\s*\.\s*area\b",
+                     line)
+        if m and m.group(1) not in die_names:
+            area_of[m.group(1)] = m.group(2)
+    out: Dict[str, List[str]] = {r: [] for r in family}
+    for rid, _where, body in _dla._rule_blocks(deck_text):
+        if rid not in out:
+            continue
+        code = _dla.deck_code_only(body)
+        found = set(re.findall(r"(" + ident + r")\s*\.\s*area\b", code))
+        found -= set(die_names)
+        for word in set(re.findall(ident, code)):
+            if word in area_of:
+                found.add(area_of[word])
+        out[rid] = sorted(set(out[rid]) | found)
+    return out
+
+
+def density_rule_coverage(deck_text: str, layers: List[dict]
+                          ) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+    """(covered, uncovered) — {rule: identifiers} split by whether THIS config
+    emits a fill entry the rule can point at.
+
+    WHY THIS EXISTS. The config carried whatever the streamout layermap and the
+    tech LEF between them produced, and nothing ever asked whether that set
+    covers the layers the DECK has a density rule for. On the run that
+    motivated this the config carried five metals; the deck also states a
+    coverage rule for the stack's TOP metal and one for poly, and neither has
+    an entry here. The metal top may be an alias the deck resolves at run time
+    to a level this config does fill — this cannot see a Ruby alias and does
+    not pretend to. Which is the point: the gap is REPORTED BY NAME, with the
+    rule and the identifier the rule names, instead of being invisible.
+
+    The pairing is by NAME, and the two names come from the same PDK: the
+    deck's rule says `metal2.area`, and this builder keys its layers off the
+    PDK's own streamout layermap entry for `Metal2`. A rule whose identifier
+    matches none of them is UNCOVERED — never assumed covered.
+    """
+    names = {str(sp.get("name")) for sp in layers if sp.get("name")}
+    covered: Dict[str, List[str]] = {}
+    uncovered: Dict[str, List[str]] = {}
+    for rid, idents in sorted(density_rule_layer_identifiers(deck_text).items()):
+        (covered if (set(idents) & names) else uncovered)[rid] = idents
+    return covered, uncovered
+
+
+def density_coverage_refusal(uncovered: Dict[str, List[str]]) -> Optional[str]:
+    """The named refusal, or None. A density-ruled layer with no fill entry is
+    a layer this generator will never raise, so the rule can only be closed by
+    the drawn metal or by another program — and a reader has to be told which
+    rule and which layer, not handed a total."""
+    if not uncovered:
+        return None
+    parts = []
+    for rid, idents in sorted(uncovered.items()):
+        what = ", ".join(idents) or "an identifier this could not read"
+        parts.append(f"{rid} (measures {what})")
+    return ("the deck states a die-level density rule for a layer this config "
+            "emits NO fill entry for: " + "; ".join(parts) +
+            ". This fill cannot raise those layers; the rule can only be "
+            "closed by the drawn metal, by a different fill program, or the "
+            "identifier is an alias the deck resolves at run time to a layer "
+            "this config does carry — which this cannot see and does not "
+            "assume.")
+
+
 def build_metal_fill_config(layermap_text: str, techlef_text: str, deck_text: str,
                             metal_prefix: Optional[str] = None,
                             margin: float = _DEFAULT_MARGIN,
@@ -449,6 +562,7 @@ def build_metal_fill_config(layermap_text: str, techlef_text: str, deck_text: st
 
     if not layers:
         return None
+    _dens_covered, _dens_uncovered = density_rule_coverage(deck_text, layers)
     # The deck's OWN keep-out rules (see `parse_metal_keepout_layers`). Emitted
     # ALWAYS, `[]` included, so "this deck states none" and "this config was
     # built before the concept existed" are distinguishable to a consumer.
@@ -475,6 +589,13 @@ def build_metal_fill_config(layermap_text: str, techlef_text: str, deck_text: st
             "layers_derived": len(layers),
             "dummy_datatype_found": sum(1 for s in layers if "fill_datatype" in s),
             "keepout_layers_derived": len(keepout_layers),
+            # WHICH OF THE DECK'S OWN DENSITY RULES THIS CONFIG CAN SERVE.
+            # Emitted ALWAYS, `{}` included, so "this deck states none" and
+            # "this config was built before the concept existed" are
+            # distinguishable to a consumer — the same rule the keep-out list
+            # above already follows.
+            "density_rules_covered": _dens_covered,
+            "density_rules_without_fill_entry": _dens_uncovered,
             # The deck's own NAME for each keep-out, so a reader can check the
             # derivation against the rule instead of against a layer number.
             "keepout_layer_names": [
@@ -522,6 +643,18 @@ def main(argv=None) -> int:
         with atomic_writing(ns.out) as f:
             f.write(text)
     print(text)
+    # REFUSE BY NAME, on stderr so it survives a caller that consumes stdout as
+    # the config. rc 3 is its own code: the config IS usable and was written —
+    # what is being refused is the CLAIM that it covers the deck's density
+    # rules. rc 2 already means "no routing metal derivable", a different
+    # thing, and folding the two would make a caller unable to tell a config
+    # that could not be built from one that does not cover everything.
+    _why = density_coverage_refusal(
+        (cfg.get("_derivation") or {}).get("density_rules_without_fill_entry")
+        or {})
+    if _why:
+        sys.stderr.write(f"metal_fill_config_gen: REFUSED — {_why}\n")
+        return 3
     return 0
 
 

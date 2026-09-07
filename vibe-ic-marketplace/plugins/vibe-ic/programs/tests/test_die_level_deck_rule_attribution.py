@@ -225,7 +225,18 @@ def test_end_to_end_on_a_hardmacro_that_got_a_ring(tmp_path):
     assert rec["verdict"] == "DIE_LEVEL_RULES_ON_A_HARDMACRO"
     assert rec["die_level_marker_layers"] == ["37/0", "167/5"]
     assert set(rec["die_level_rules"]) == {"GR.4", "GR.2"}
-    assert rec["not_measured"] == {}
+    # EVERY LINK OF THE MARKER FAMILY WAS MADE — which is what this line has
+    # always been about. It used to say `== {}`, and vibe-ic#2148 added a
+    # SECOND family (die-level DENSITY) with links of its own; this fixture
+    # supplies none of that family's inputs, so those links are honestly
+    # NOT_MEASURED and the empty-dict form stopped meaning what it said.
+    # Naming the marker family's keys keeps the assertion falsifiable in the
+    # direction it was written for, and the density family's keys are asserted
+    # PRESENT below so the count of facts pinned here goes up, not down.
+    for _k in ("deliverable", "die_level_marker_layers", "die_level_rules"):
+        assert _k not in rec["not_measured"], rec["not_measured"].get(_k)
+    for _k in ("die_level_density_rules", "fill_report", "violation_shapes"):
+        assert _k in rec["not_measured"] and rec["not_measured"][_k]
 
 
 def test_end_to_end_on_the_same_tree_declared_a_die(tmp_path):

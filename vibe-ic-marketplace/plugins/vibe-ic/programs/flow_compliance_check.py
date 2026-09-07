@@ -13923,6 +13923,73 @@ def _attribute_cascade_verdicts(
     return info
 
 
+#: The attribution's own report and the record that must travel with the
+#: delivery. Both names are owned by `die_level_deck_rule_attribution`; they
+#: are re-stated here only as relative paths, never as a second definition of
+#: what the record contains.
+_ATTRIBUTION_REL = "reports/phase3/die_level_rule_attribution.json"
+_HANDOFF_REL = "phase3/stage4/hardmacro/integrator_requirements.json"
+
+
+def hardmacro_handoff_refusal(project: Path) -> Optional[str]:
+    """The refusal when a HARDMACRO delivery attributes die-level rules to its
+    integrator and does NOT hand them over — or None when there is nothing to
+    refuse. vibe-ic#2148.
+
+    WHY THIS IS BLOCKING. Attribution is the difference between "this design
+    did not close the rule" and "this rule is not this design's to close". The
+    second claim is only true if the next flow up is TOLD: a note in a report
+    nobody downstream opens is indistinguishable from a waiver, and a waiver is
+    exactly what the attribution is not. So the record beside the abstract is
+    part of the delivery, and a delivery without it is refused.
+
+    FAIL-CLOSED IN BOTH DIRECTIONS:
+      * no attribution report, or a verdict that attributes nothing -> None.
+        There is no claim to back up, so there is nothing to refuse.
+      * an attribution that names rules -> the record must EXIST, be readable,
+        and name EVERY rule attributed. A record naming a subset is refused by
+        the names it is missing, because a partial handoff hands part of the
+        problem to nobody.
+    """
+    try:
+        att = json.loads((project / _ATTRIBUTION_REL).read_text(
+            errors="replace"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(att, dict):
+        return None
+    import die_level_deck_rule_attribution as _dla                # noqa: PLC0415
+    if att.get("verdict") != _dla.DENSITY_ATTRIBUTED:
+        return None
+    attributed = att.get("attributed_density_rules")
+    if not isinstance(attributed, dict) or not attributed:
+        return None
+    names = sorted(str(k) for k in attributed)
+    ho = project / _HANDOFF_REL
+    if not ho.is_file():
+        return (f"HARDMACRO delivery attributes {len(names)} die-level "
+                f"rule(s) to the integrator ({', '.join(names)}) and carries "
+                f"no handoff record at {_HANDOFF_REL}. An attributed rule "
+                f"that the delivery does not hand over is a waiver wearing "
+                f"another word.")
+    try:
+        rec = json.loads(ho.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
+        return (f"HARDMACRO delivery attributes {', '.join(names)} to the "
+                f"integrator and its handoff record {_HANDOFF_REL} could not "
+                f"be read ({exc}) — unreadable is not present.")
+    stated = {str(r.get("rule")) for r in (rec.get("requirements") or [])
+              if isinstance(r, dict)}
+    missing = [n for n in names if n not in stated]
+    if missing:
+        return (f"HARDMACRO delivery attributes {', '.join(names)} to the "
+                f"integrator but its handoff record {_HANDOFF_REL} names only "
+                f"{', '.join(sorted(stated)) or 'nothing'} — missing "
+                f"{', '.join(missing)}. A partial handoff hands part of the "
+                f"problem to nobody.")
+    return None
+
+
 def _published_tree_advisory(project: Path) -> Optional[str]:
     """Warn when `project` looks like a PUBLISHED benchmark-data evidence
     folder rather than a live run directory (informational only — changes
@@ -16347,6 +16414,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         structural_fail_lines.append(
             f"gate census does not name every failure: "
             f"{_gate_recon['refusal']}")
+
+    # vibe-ic#2148 — a HARDMACRO delivery that attributes die-level rules to
+    # its integrator must HAND THEM OVER. BLOCKING, and declared so: see
+    # `hardmacro_handoff_refusal` for why a note in a report is not a handoff.
+    _ho_refusal = hardmacro_handoff_refusal(project)
+    if _ho_refusal:
+        structural_fail_lines.append(_ho_refusal)
 
     # Verdict triage. Waivers are NOT pass — they are deferred to
     # foundry sign-off / production tapeout review. Emit a distinct
