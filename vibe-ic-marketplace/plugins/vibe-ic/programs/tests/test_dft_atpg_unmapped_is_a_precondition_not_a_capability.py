@@ -96,10 +96,17 @@ def _strip_comments(block: str) -> str:
 
 
 def _stuck_at_dispatch() -> str:
-    """The three-way `if _atpg_sig_death / elif / else` that chooses what the
-    step-11 stuck-at not-run record claims."""
+    """The `if / elif / elif / else` that chooses what the step-11 stuck-at
+    not-run record claims.
+
+    ANCHORED ON THE CLASSIFICATION, not on one arm's spelling. It used to start
+    at the literal `_atpg_sig_death = bool(`, which stopped existing when
+    vibe-ic#2082 moved that decision into `_dft_atpg_stop_class` and added a
+    fourth arm (a STALL, ahead of the signal-death one because RC_STALLED is
+    199 and would otherwise be read as a crash). Every property below is
+    unchanged; only the locator moved."""
     src = _src()
-    i = src.index("_atpg_sig_death = bool(")
+    i = src.index("_atpg_stop = _dft_atpg_stop_class(cov)")
     j = src.index("_dft_disclose_skip(", i)
     return src[i:j]
 

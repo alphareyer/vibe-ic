@@ -548,7 +548,11 @@ def test_step11_tv_json_is_not_implied_by_the_declared_artefacts(tmp_path,
 
     calls = []
 
-    def _fake_docker(project, cmd, timeout=600, pdk_dir=None):
+    # `**_kw` — the ATPG launch now also passes supervised= / ceiling_s= /
+    # ceiling_notice= (vibe-ic#2082). A stub that pins the caller's exact
+    # signature stops driving the subject the moment the subject grows a
+    # parameter, and reports that as the subject being broken.
+    def _fake_docker(project, cmd, timeout=600, pdk_dir=None, **_kw):
         joined = " ".join(cmd)
         calls.append(joined)
         if joined.startswith("fault cut"):

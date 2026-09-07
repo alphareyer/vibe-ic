@@ -17224,6 +17224,66 @@ def _dft_atpg_crash_reason(pdk: Optional[str], exit_code: int,
     )
 
 
+def _dft_atpg_stop_class(cov: dict) -> Optional[str]:
+    """How the stuck-at ATPG STOPPED, from the producer's own report.
+
+    ``'stalled'`` | ``'signal_death'`` | ``None`` (it exited on its own).
+
+    A pure function so the ORDER — the load-bearing part — is executable rather
+    than only readable. `_watchdog.RC_STALLED` is 199, which is >= 128, so the
+    signal-death fallback would claim every stall as a crash; the producer's own
+    `atpg_stopped_as` declaration therefore has to be asked FIRST. Both labels
+    exist to keep a run's failure off the engine's capability record, and
+    swapping one mislabel for another would waste them both.
+    """
+    if cov.get("atpg_stopped_as") == "STALLED":
+        return "stalled"
+    ec = cov.get("atpg_exit")
+    if bool(cov.get("atpg_signal_death")) or (isinstance(ec, int) and ec >= 128):
+        return "signal_death"
+    return None
+
+
+def _dft_atpg_stall_reason(elapsed_s, budget_s, crossed,
+                           label: Optional[str] = None) -> str:
+    """Prose reason for a step-11 ATPG the PRODUCER stopped as a STALL.
+
+    vibe-ic#2082. The producer no longer has a wall clock: `fault_atpg_run`
+    supervises the engine on its own forward progress, so the only way it stops
+    one is `_watchdog.RC_STALLED` — every readable signal (captured output, the
+    container's own CPU) flat for the whole grace window. That is a measurement
+    about THIS RUN and it must not be dressed as either of the two labels that
+    would otherwise catch it:
+
+      * NOT a capability gap. The engine was launched and ran; nothing about
+        what Fault can do is in question (the #581 argument, unchanged).
+      * NOT an engine crash. `RC_STALLED` is 199, which is >= 128 and would
+        fall straight into the signal-death arm — 199 = 128 + 71 and there is
+        no signal 71. The producer's own `atpg_signal_death` already says
+        False; this reason is what the runner says instead.
+
+    The declared budget is REPORTED here rather than blamed: it no longer stops
+    anything, so "it was crossed" is a fact about how long the run took, next
+    to the finding that the engine then stopped moving. chip/PDK-AGNOSTIC.
+    """
+    detected = label or "the mapped netlist"
+    took = f"{elapsed_s}s" if elapsed_s is not None else "an unrecorded time"
+    budget = (f"; its declared budget was {budget_s}s and was "
+              f"{'CROSSED' if crossed else 'not reached'}"
+              if budget_s is not None else "")
+    return (
+        f"OSS Fault ATPG STOPPED MAKING FORWARD PROGRESS on {detected} and was "
+        f"reaped after {took}{budget}. Every readable progress signal — the "
+        f"engine's captured output and its own in-container CPU — sat still "
+        f"for the whole grace window, so this is a finding about THIS RUN: "
+        f"the engine was launched, it ran, and it then went nowhere. It is "
+        f"NOT a capability gap (the engine's ability is not in question, "
+        f"vibe-ic#581) and NOT a crash (nothing killed it by signal; the "
+        f"supervisor stopped it on evidence, vibe-ic#2082). Re-drive the run "
+        f"and, if it stalls again at the same point, that point is the defect."
+    )
+
+
 def _dft_atpg_gap_reason(pdk: Optional[str], label: Optional[str] = None) -> str:
     """Prose reason for the step-11 ATPG disclosed-skip, naming THIS run's PDK.
 
@@ -17833,9 +17893,35 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                 # on that branch for the same reason: a crash must not be
                 # bookkept against a capability the engine HAS.
                 _atpg_ec = cov.get("atpg_exit")
-                _atpg_sig_death = bool(cov.get("atpg_signal_death")) or (
-                    isinstance(_atpg_ec, int) and _atpg_ec >= 128)
-                if _atpg_sig_death:
+                # vibe-ic#2082 — READ THE PRODUCER'S OWN DECLARATION FIRST.
+                # `atpg_stopped_as` is the only way this producer stops an
+                # engine, and it must be read BEFORE the `>= 128` fallback
+                # below: RC_STALLED is 199, so a stall would otherwise be
+                # reported as a crash — the same mislabel, one arm over. A
+                # producer that declares something no consumer reads is a
+                # missing consumer, not a spare field.
+                _atpg_stop = _dft_atpg_stop_class(cov)
+                _atpg_stalled = _atpg_stop == "stalled"
+                _atpg_sig_death = _atpg_stop == "signal_death"
+                if _atpg_stalled:
+                    _reason = _dft_atpg_stall_reason(
+                        cov.get("atpg_elapsed_s"),
+                        cov.get("atpg_wall_budget_s"),
+                        cov.get("atpg_wall_budget_crossed"), pdk_label)
+                    _extra_flag = {
+                        "stopped_as": "STALLED",
+                        "not_run_stage": "engine_stalled",
+                        "atpg_elapsed_s": cov.get("atpg_elapsed_s"),
+                        # The budget is REPORTED, never blamed: since #2082 it
+                        # stops nothing, and a reader has to be able to tell
+                        # "it ran long" from "it was cut off".
+                        "atpg_wall_budget_s": cov.get("atpg_wall_budget_s"),
+                        "atpg_wall_budget_crossed":
+                            cov.get("atpg_wall_budget_crossed"),
+                        "atpg_wall_budget_role":
+                            cov.get("atpg_wall_budget_role"),
+                    }
+                elif _atpg_sig_death:
                     _reason = _dft_atpg_crash_reason(
                         pdk, _atpg_ec, cov.get("atpg_attempt_exits"),
                         pdk_label)
@@ -17883,6 +17969,13 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                 # back out through the console.
                 results.append(StepResult(
                     "dft_insertion", "SKIP", time.time() - t0,
+                    # vibe-ic#2082 — a stall is neither of the other two, and
+                    # the console line is where a reader looks first.
+                    (f"DFT scan inserted; stuck-at ATPG STOPPED MAKING "
+                     f"FORWARD PROGRESS after "
+                     f"{cov.get('atpg_elapsed_s')}s → disclosed-skip "
+                     f"(a stall, not a capability and not a clock)")
+                    if _atpg_stalled else
                     (f"DFT scan inserted; stuck-at ATPG NEVER RAN — no "
                      f"library-mapped netlist yet "
                      f"({_ATPG_MAPPED_NETLIST_GLOB} is written later) → "
