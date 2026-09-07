@@ -53,8 +53,15 @@ Given an OpenROAD / P&R log (or a run directory to scan for one):
 
   1. Collect every `SHIP_WNS_CVG_PASS<i>` / `SHIP_DRV_CVG_PASS<i>` pair.
   2. Find a terminal marker. If one is present the loop ended on its OWN
-     policy -> PASS; the published number is a policy-terminated number and the
-     residual, whatever it is, is the design's.
+     policy -> PASS; the published number is a policy-terminated number, and
+     the LAST TRANSITION it rests on is published with it (gain, DRV, and how
+     many passes the exit declined to spend). What that exit establishes is
+     SCOPED to the marker: `SHIP_CVG_CLOSED` leaves no residual to attribute;
+     `SHIP_CVG_PLATEAU` fires on `gain <= PLATEAU_WNS_GAIN_NS`, so a STRICTLY
+     POSITIVE gain ends the loop there and whether the residual is the DESIGN'S
+     is not something this exit measured (vibe-ic#2160);
+     `SHIP_CVG_NONNUMERIC` measured nothing at all -- the loop could not read
+     its own worst slack.
   3. If NO terminal marker is present and the observed pass count equals the
      bound, the BACKSTOP ended the loop. Apply the plateau predicate to the last
      observed transition:
@@ -276,6 +283,91 @@ def still_converging(prev: Pass, last: Pass) -> Tuple[Optional[bool], str]:
     return converging, reason
 
 
+def annotate_last_transition(summary: dict, passes: List[Pass], bound: int
+                             ) -> Tuple[Optional[bool], str]:
+    """Publish the LAST TRANSITION on EVERY exit, and return it to the caller.
+
+    vibe-ic#2160. This program used to compute the last transition on ONE of its
+    two exits. The bound-exhausted exit computed it, published the gain in a
+    reason string, and REFUSED to let its number be triaged as a design floor.
+    The policy exit computed nothing, left ``still_converging_at_exit`` at None,
+    and asserted the opposite conclusion -- "any residual violation is the
+    design's" -- with no number behind it.
+
+    MEASURED TWICE on subservient x gf180mcuD, from the flow's own markers:
+
+      * the #2160 fix arm (image 0.3.48): passes -2.0617, -1.3118, -0.4644,
+        -0.3191, -0.2794; SHIP_CVG_PLATEAU; 5 of 8 passes used; the transition
+        the exit rests on GAINED +0.0397 ns.
+      * the live tip (image 0.3.49, plugin e2b3c08170b5): passes -1.8036,
+        -0.9816, -0.5692, -0.4975; SHIP_CVG_PLATEAU; 4 of 8 passes used; the
+        transition GAINED +0.0717 ns -- 72 % of the threshold.
+
+    Both records said the residual was the design's and showed neither the gain
+    nor the unused passes. A reader could not tell those runs apart from a run
+    that had genuinely stopped moving. So: one helper, called on both exits, so
+    the two can no longer publish different amounts of evidence for the same
+    kind of claim."""
+    summary["passes_unused"] = max(int(bound) - len(passes), 0)
+    if len(passes) < 2:
+        # Not "no gain" -- NO TRANSITION. Left as None on purpose: a single
+        # pass is unmeasured, and unmeasured is never zero.
+        summary["last_transition_gain_ns"] = None
+        summary["last_transition_reason"] = (
+            f"only {len(passes)} pass(es) measured — there is no transition to "
+            f"judge")
+        return None, summary["last_transition_reason"]
+    prev, last = passes[-2], passes[-1]
+    converging, reason = still_converging(prev, last)
+    summary["still_converging_at_exit"] = converging
+    summary["last_transition_gain_ns"] = (
+        None if prev.wns is None or last.wns is None else last.wns - prev.wns)
+    summary["last_transition_reason"] = reason
+    return converging, reason
+
+
+def _terminal_exit_detail(terminal: str, observed: int, bound: int,
+                          summary: dict) -> str:
+    """The policy-exit sentence, SCOPED to what each marker actually establishes.
+
+    vibe-ic#2160. All four markers used to share one sentence, and it claimed
+    the residual for the design. Only ``SHIP_CVG_CLOSED`` leaves no residual to
+    claim; ``SHIP_CVG_PLATEAU`` fires on a series that may still be improving,
+    just below the threshold; and ``SHIP_CVG_NONNUMERIC`` fires because the
+    loop could not READ a slack, which measures nothing at all."""
+    unused = summary.get("passes_unused")
+    gain = summary.get("last_transition_gain_ns")
+    reason = summary.get("last_transition_reason") or "no transition measured"
+    head = (f"loop broke on {terminal} after {observed} pass(es) of a bound of "
+            f"{bound} ({unused} unused) — the published number is "
+            f"policy-terminated, not backstop-terminated, so raising the pass "
+            f"bound alone cannot change it: the break fires before the bound. "
+            f"THE TRANSITION THIS EXIT RESTS ON: {reason}.")
+    if terminal == "SHIP_CVG_CLOSED":
+        return (f"{head} The loop met its OWN closure test (setup non-negative "
+                f"with DRV measured at zero), so there is no residual for this "
+                f"exit to attribute.")
+    if terminal == "SHIP_CVG_CLOSED_DRV_UNMEASURED":
+        return (f"{head} The loop met its closure test on SETUP while the DRV "
+                f"violation-count probe could not run. UNMEASURED is not ZERO: "
+                f"the design-rule axis of this closure is unproven.")
+    if terminal == "SHIP_CVG_NONNUMERIC":
+        return (f"{head} The loop stopped because its own worst-slack probe "
+                f"returned something that is not a number — this exit MEASURED "
+                f"NOTHING about the design, and the published number is "
+                f"whatever the previous pass left behind.")
+    if terminal == "SHIP_CVG_PLATEAU":
+        gain_txt = ("a gain that could not be measured" if gain is None
+                    else f"a gain of {gain:+.4f} ns")
+        return (f"{head} The plateau break fires on {gain_txt} against a "
+                f"threshold of {PLATEAU_WNS_GAIN_NS} ns, which is a statement "
+                f"about the LOOP'S POLICY and not about the design: a strictly "
+                f"positive gain below the threshold ends the loop here. "
+                f"Whether the residual is the design's is NOT established by "
+                f"this exit and needs its own measurement.")
+    return head
+
+
 def audit(raw: str, bound: int = DEFAULT_BOUND
           ) -> Tuple[str, List[Finding], dict]:
     """Return (verdict, findings, summary). Verdict is PASS / FAIL / ERROR."""
@@ -297,6 +389,11 @@ def audit(raw: str, bound: int = DEFAULT_BOUND
         "estimate_wns_after": _to_float(estimate.group(1)) if estimate else None,
         "bound_exhausted": False,
         "still_converging_at_exit": None,
+        # vibe-ic#2160 -- the numbers the exit's own claim rests on, published
+        # on EVERY exit rather than on one of the two.
+        "last_transition_gain_ns": None,
+        "last_transition_reason": None,
+        "passes_unused": None,
         # Tri-state on purpose. True: passes were measured. False: the emitter
         # disclosed it did not enter the block. None: neither — silence, which
         # is a truncated log and stays an error.
@@ -333,12 +430,26 @@ def audit(raw: str, bound: int = DEFAULT_BOUND
         return "ERROR", findings, summary
 
     if terminal:
+        # === vibe-ic#2160 — PUBLISH THE MEASUREMENT THE CLAIM RESTS ON =======
+        # This branch used to end EVERY policy exit with the same sentence:
+        # "any residual violation is the design's, and raising the pass bound
+        # cannot change it" — and it published no number to stand behind it.
+        # `still_converging_at_exit` stayed None here while the bound exit
+        # below computed exactly that transition, printed its gain, and REFUSED
+        # to let its number be triaged as a design floor.
+        #
+        # The second half of that sentence is true of every policy exit: the
+        # break fires before the bound, so the bound is not the actionable
+        # constant. The FIRST half is a statement about the DESIGN, and
+        # SHIP_CVG_PLATEAU does not establish it: the loop's break fires on
+        # `wns_now <= wns_prev + PLATEAU_WNS_GAIN_NS`, so a pass that gained a
+        # strictly POSITIVE amount below that threshold ends the loop. That is
+        # the loop's policy speaking, not the design.
+        # MEASURED — see `annotate_last_transition` for both transcripts.
+        _conv, _reason = annotate_last_transition(summary, passes, bound)
         findings.append(Finding(
             "INFO", "loop_ended_on_own_policy",
-            f"loop broke on {terminal} after {len(passes)} pass(es) — the "
-            f"published number is policy-terminated, not backstop-terminated; "
-            f"any residual violation is the design's, and raising "
-            f"the pass bound cannot change it."))
+            _terminal_exit_detail(terminal, len(passes), bound, summary)))
         return "PASS", findings, summary
 
     # No terminal marker: the loop either ran out of passes or died abnormally.
@@ -359,8 +470,7 @@ def audit(raw: str, bound: int = DEFAULT_BOUND
             f"pass(es) — no transition to judge convergence against."))
         return "ERROR", findings, summary
 
-    converging, reason = still_converging(passes[-2], passes[-1])
-    summary["still_converging_at_exit"] = converging
+    converging, reason = annotate_last_transition(summary, passes, bound)
 
     if converging is None:
         findings.append(Finding(
