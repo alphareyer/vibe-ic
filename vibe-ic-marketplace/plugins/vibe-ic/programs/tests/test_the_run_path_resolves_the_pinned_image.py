@@ -548,37 +548,197 @@ def test_the_refusal_path_RETURNS_rc_and_never_RAISES(monkeypatch):
     assert P.CONTAINER_IMAGE_MISMATCH in cp.stderr
 
 
-# ── 5. the pin has FOUR copies and they are all bound ───────────────────────
+# ── 5. every copy of the pin that STILL EXISTS is bound to every other ──────
+#
+# THE SET IS DERIVED, NOT LISTED.  This block used to name four files and grep
+# `"@(sha256:…)"` out of `tools/ci/protected_landing_transition.py`.  That
+# spelling was a fact about ONE line of ONE file, and v1.18.57 deleted the line
+# ON PURPOSE — the runner-image comparison became repository-neutral, so the
+# committed reference is now composed from a bare `RUNNER_IMAGE_DIGEST` and no
+# `@` is spelled beside it.  The net went RED on pristine main while the tree it
+# guards had not drifted at all: a drift net reporting its own staleness as a
+# drift is worse than no net, because the first thing anyone does with it is
+# stop reading it.
+#
+# So the roster comes from the tree.  A file CARRIES A COPY when it DECLARES the
+# runner digest, in one of the two machine-recognisable forms this repository
+# actually uses, and a file that no longer declares one simply is not in the set:
+#
+#   python  a module-level assignment to `IMAGE_DIGEST` (or `<PREFIX>_IMAGE_
+#           DIGEST`) whose value is the string `sha256:<64 hex>`
+#   json    a `runner.image` value of the form `<reference>@sha256:<64 hex>`
+#
+# A DECLARATION, NOT AN OCCURRENCE, and that distinction is load-bearing rather
+# than fussy: `programs/_eda_pin.py`'s module docstring quotes the PREVIOUS
+# pin's digest while narrating how the run path came to name the wrong image,
+# and `tools/ci/` fixtures carry content hashes of their own.  Reading text
+# would make both of those a drift.  `ast` reads only the assignment, so a
+# digest in a comment, a docstring or a fixture is invisible here — which is the
+# correct answer about all three.
+#
+# WHAT THIS REFUSES, AND ONLY THIS: two PRESENT copies that disagree.
 
-def test_every_copy_of_the_pinned_digest_is_bound_to_every_other():
-    """THE QUESTION I GOT WRONG, answered in one place.
+_PIN_DECLARATION_NAME = re.compile(r"\A(?:[A-Z0-9_]+_)?IMAGE_DIGEST\Z")
 
-    I reported `tools/ci/protected_landing_transition.py` as an UNBOUND third
-    copy of the digest. It was not: `test_manifest_and_runtime_use_one_exact_
-    base_owned_image` had bound it to the runner and to the manifest all along.
-    The chain is a star around `hermetic_candidate_runner.IMAGE_DIGEST`, and a
-    reader should not have to reconstruct it from two files to see that.
+#: The star centre.  Every other copy is a copy OF this one, and a derivation
+#: that lost it would be binding a set with no authority in it.
+_PIN_AUTHORITY = "tools/ci/hermetic_candidate_runner.py"
+
+
+def _declared_digests(path: str, text: str) -> dict:
+    """Every DECLARATION of the runner digest in one file, `site -> digest`."""
+    if path.endswith(".py"):
+        if "IMAGE_DIGEST" not in text:          # cheap pre-filter, not a rule
+            return {}
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return {}
+        found = {}
+        for node in tree.body:
+            if not isinstance(node, ast.Assign):
+                continue
+            value = node.value
+            if not (isinstance(value, ast.Constant)
+                    and isinstance(value.value, str)
+                    and _DIGEST.match(value.value)):
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) \
+                        and _PIN_DECLARATION_NAME.match(target.id):
+                    found[target.id] = value.value
+        return found
+    if path.endswith(".json"):
+        if '"runner"' not in text:
+            return {}
+        try:
+            document = json.loads(text)
+        except ValueError:
+            return {}
+        if not isinstance(document, dict):
+            return {}
+        runner = document.get("runner")
+        image = runner.get("image") if isinstance(runner, dict) else None
+        if isinstance(image, str) and "@" in image:
+            digest = image.split("@", 1)[1]
+            if _DIGEST.match(digest):
+                return {"runner.image": digest}
+    return {}
+
+
+def _tracked_sources(repo: pathlib.Path):
+    """Every tracked `.py` / `.json` in the checkout, as `(path, text)`.
+
+    TRACKED, so a scratch tree, a stray clone or an evidence directory left in
+    the working copy cannot join the roster and invent a drift.
     """
+    listed = subprocess.run(["git", "-C", str(repo), "ls-files", "*.py", "*.json"],
+                            capture_output=True, text=True)
+    if listed.returncode != 0:
+        pytest.skip("this checkout is not a git work tree, so the roster this "
+                    "test derives is UNAVAILABLE here -- not verified")
+    for name in listed.stdout.split("\n"):
+        if not name:
+            continue
+        try:
+            yield name, (repo / name).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+
+def _derive_copies(sources) -> dict:
+    """`path -> {site: digest}` for every file that still declares a copy."""
+    return {path: declared for path, text in sources
+            if (declared := _declared_digests(path, text))}
+
+
+def _disagreements(copies: dict) -> dict:
+    """`digest -> [where it is declared]`, for a set with more than one value."""
+    values = {}
+    for path, declared in copies.items():
+        for site, digest in declared.items():
+            values.setdefault(digest, []).append(f"{path}:{site}")
+    return values if len(values) > 1 else {}
+
+
+def test_every_present_copy_of_the_pinned_digest_agrees_with_every_other():
+    """THE DRIFT NET.  Only a PRESENT copy that disagrees is a finding."""
+    copies = _derive_copies(_tracked_sources(_repo_root()))
+    disagreement = _disagreements(copies)
+    assert not disagreement, (
+        "the pinned digest has drifted between the copies that declare it: "
+        + json.dumps(disagreement, indent=2, sort_keys=True))
+
+
+def test_the_derivation_finds_the_authority_and_at_least_one_other_site():
+    """NON-VACUITY.  A net over zero or one copy binds nothing and would pass
+    over any tree at all, which is precisely how the previous spelling could
+    have failed silently instead of loudly."""
+    copies = _derive_copies(_tracked_sources(_repo_root()))
+    assert _PIN_AUTHORITY in copies, (
+        f"{_PIN_AUTHORITY} declares no digest; every other copy is a copy OF "
+        "that one, so the roster has no authority in it: " + repr(sorted(copies)))
+    assert len(copies) >= 2, (
+        "only one file declares the pin, so this test compares nothing: "
+        + repr(copies))
+
+
+def test_a_digest_that_is_NOT_a_declaration_is_not_read():
+    """THE REAL CASE, in the tree today.  `programs/_eda_pin.py` quotes the
+    PREVIOUS pin's digest in its module docstring while explaining how the run
+    path came to name the wrong image.  A text scan would call that a drift and
+    demand the history be edited; the declaration reader sees exactly one
+    digest in that file."""
+    pin = _repo_root() / "vibe-ic-marketplace/plugins/vibe-ic/programs/_eda_pin.py"
+    text = pin.read_text(encoding="utf-8")
+    occurrences = set(re.findall(r"sha256:[0-9a-f]{64}", text))
+    declared = set(_declared_digests(
+        "vibe-ic-marketplace/plugins/vibe-ic/programs/_eda_pin.py", text).values())
+    assert len(declared) == 1, declared
+    assert declared < occurrences, (
+        "this arm has stopped measuring anything: the file no longer quotes a "
+        "digest it does not declare, so put the arm on a file that does or "
+        "delete it -- do not leave it asserting a tautology")
+
+
+def test_a_site_that_STOPS_declaring_a_copy_is_not_a_red():
+    """THE REGRESSION THIS BLOCK WAS REWRITTEN FOR.  v1.18.57 removed the
+    digest from `tools/ci/protected_landing_transition.py`'s composed reference
+    on purpose.  A removed copy leaves the roster; it does not fail it."""
     repo = _repo_root()
-    runner = _runner_pin()["IMAGE_DIGEST"]
-    copies = {"tools/ci/hermetic_candidate_runner.py": runner,
-              "programs/_eda_pin.py": P.IMAGE_DIGEST}
+    sources = list(_tracked_sources(repo))
+    victim = "tools/ci/protected_landing_transition.py"
+    assert victim in _derive_copies(sources), (
+        "the fixture for this arm no longer declares a copy, so the arm is "
+        "asserting nothing about removal")
+    thinned = [(path, "" if path == victim else text) for path, text in sources]
+    copies = _derive_copies(thinned)
+    assert victim not in copies
+    assert not _disagreements(copies), (
+        "removing one copy turned the remaining copies into a drift: " + repr(copies))
+    assert _PIN_AUTHORITY in copies and len(copies) >= 2
 
-    plt = (repo / "tools/ci/protected_landing_transition.py").read_text(
-        encoding="utf-8")
-    m = re.search(r'"@(sha256:[0-9a-f]{64})"', plt)
-    assert m, "protected_landing_transition.py names no digest"
-    copies["tools/ci/protected_landing_transition.py"] = m.group(1)
 
-    manifest = json.loads(
-        (repo / "tools/ci/protected_landing_transition.json").read_text(
-            encoding="utf-8"))
-    image = manifest.get("runner", {}).get("image", "")
-    assert "@" in image, f"manifest runner image is not digest-pinned: {image!r}"
-    copies["tools/ci/protected_landing_transition.json"] = image.split("@", 1)[1]
-
-    assert len(set(copies.values())) == 1, (
-        f"the pinned digest has drifted between its copies: {copies}")
+def test_MUTANT_altering_one_present_copy_IS_a_red():
+    """THE MUTATION ARM.  Change one declared digest — nothing else — and the
+    net must refuse and NAME both sides.  Without this the arms above pass just
+    as well against a derivation that finds nothing."""
+    repo = _repo_root()
+    sources = list(_tracked_sources(repo))
+    victim = "vibe-ic-marketplace/plugins/vibe-ic/programs/_eda_pin.py"
+    original = dict(sources)[victim]
+    live = sorted(_declared_digests(victim, original).values())
+    assert len(live) == 1, live
+    other = "sha256:" + "0" * 64
+    assert other != live[0]
+    mutated = [(path, original.replace(live[0], other) if path == victim else text)
+               for path, text in sources]
+    copies = _derive_copies(mutated)
+    assert copies.get(victim) == {"IMAGE_DIGEST": other}, copies.get(victim)
+    disagreement = _disagreements(copies)
+    assert disagreement, "a copy was moved and the net did not notice"
+    assert set(disagreement) == {live[0], other}, disagreement
+    assert any(row.startswith(victim) for row in disagreement[other]), disagreement
 
 
 # ── 6. the route and the argv are two decisions, composed ───────────────────

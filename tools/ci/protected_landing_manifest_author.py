@@ -108,13 +108,27 @@ to be silenced.
 
 NO SECOND DEFINITION
 ====================
-Path/role policy and the runner profile are COPIED from the manifest already in
-the tree — they are policy, not observation, and re-deriving them here would be
-a second opinion about what is protected.  The tuples are observed through
-`protected_landing_transition._observe_files`, the same function the verifier
-uses, and the finished object is handed back to `parse_manifest` before it is
-written.  A manifest this program emits and the verifier refuses is a bug in
-this program, and it is refused here rather than committed.
+Path/role policy and the runner profile are DERIVED FROM THE VERIFIER --
+`derived_paths()` and `derived_runner()` -- because a path is protected BECAUSE
+THE VERIFIER READS IT, and re-stating either here would be a second opinion
+about what is protected.  (They were copied out of whatever manifest was
+already in the tree until `7581f9555`, and a copy of a rule is a rule that can
+drift from itself: at v1.13.3 the copy was v1.12.39's.)  The tuples are observed
+through `protected_landing_transition._observe_files`, the same function the
+verifier uses, and the finished object is handed back to `parse_manifest` before
+it is written.  A manifest this program emits and the verifier refuses is a bug
+in this program, and it is refused here rather than committed.
+
+THE VERIFIER IT DERIVES FROM IS THE ONE ON DISK, WHICH IS THE FUTURE ONE.
+`_load_transition` imports the sibling file from the working tree, so during a
+PREPARE that MOVES `protected_landing_transition.py` -- an image pin, a policy
+change -- the policy written into the manifest is the policy the ACTIVATE will
+install.  That is the only reading that works: after the ACTIVATE it is the new
+verifier that reads the register, and `_runner_profile` refuses a manifest
+naming any other runner image.  `protected_landing_prepare.sh` therefore
+authors BEFORE it reverts the protected paths (vibe-ic#2078); it did the
+opposite, and the register came out naming the runner image the pin was moving
+away from.
 
 chip-AGNOSTIC: repository landing machinery only; no design, PDK or vendor name.
 """
@@ -294,17 +308,21 @@ def render(*, repo: Path, commit: str, transition_id: str, current_id: str,
             "a move renames onto an already-protected path, which would merge "
             "two register rows into one and drop a file: " + ", ".join(collide))
     move_rows = [{"from": src, "to": renames[src]} for src in sorted(renames)]
-    # THE VERIFIER BESIDE THIS PROGRAM MAY PREDATE `moves`.
+    # THE VERIFIER BESIDE THIS PROGRAM MAY NOT SPEAK `moves`.
     #
-    # `_load_transition` imports the sibling FILE, and during a PREPARE the
-    # ceremony restores every protected path -- the verifier included -- to the
-    # base's bytes before it authors.  MEASURED while authoring
-    # `protected-path-may-be-renamed-v1`: the restore put the pre-`moves`
-    # verifier back and this program died with
-    # `AttributeError: ... has no attribute 'apply_moves'` on a manifest that
-    # declared no rename at all.  So the identity case must not depend on the
-    # capability, and the rename case must refuse in a sentence that names what
-    # is missing rather than in a traceback.
+    # `_load_transition` imports the sibling FILE, whatever it currently holds.
+    # MEASURED while authoring `protected-path-may-be-renamed-v1`: the ceremony
+    # was reverting every protected path -- the verifier included -- to the
+    # base's bytes BEFORE it authored, which put the pre-`moves` verifier back,
+    # and this program died with `AttributeError: ... has no attribute
+    # `apply_moves`` on a manifest that declared no rename at all.  That
+    # ORDERING was itself the defect and is fixed (vibe-ic#2078,
+    # `protected_landing_prepare.sh` now authors first), so the sibling is
+    # normally the operator's own edited copy -- but this program is also run
+    # by hand, against older trees and from other checkouts, and a capability
+    # only one side can speak is still a capability that can be missing.  So
+    # the identity case must not depend on it, and the rename case must refuse
+    # in a sentence that names what is missing rather than in a traceback.
     apply_moves = getattr(transition, "apply_moves", None)
     if apply_moves is None:
         if move_rows:

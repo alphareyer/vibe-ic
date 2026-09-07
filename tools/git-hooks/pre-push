@@ -70,6 +70,7 @@ if [ ! -f "$CHECKER" ]; then
 fi
 
 FAILED=0
+PUSH_REFS=()
 while read -r _local_ref local_sha _remote_ref remote_sha; do
   # Branch deletion — nothing new is published.
   [ "$local_sha" = "$ZERO" ] && continue
@@ -105,14 +106,37 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
     NDA_MSG_FAILED=1
   fi
 
-  PUSH_RANGE="$RANGE"
+  # ONE RECORD PER REF, GATED ONE AT A TIME (vibe-ic#2121).
+  #
+  # These five facts used to be plain assignments here, and the gate set ran
+  # ONCE, AFTER the loop — so a push of several refs was gated by whichever ref
+  # the loop happened to see LAST. MEASURED on 94617408759e, through this hook,
+  # with a `next/x` whose only difference from `main` is a swept version bump
+  # and a `next/y` carrying an ordinary commit:
+  #
+  #     next/x alone                      rc 1   gate named
+  #     next/y alone                      rc 0
+  #     next/x THEN next/y, ONE push      rc 0   <- the offending ref slips past
+  #     next/y THEN next/x, ONE push      rc 1   gate named
+  #
+  # `git push origin next/x next/y` is one push with two ref lines on stdin, and
+  # so are `git push --all` and `git push origin branch main`. Both orders are
+  # damage and neither is the safe one: a BRANCH bundled behind `main` is judged
+  # by MAIN's rules and asked for a stamp no contributor can mint, while `main`
+  # bundled behind a branch is judged by the BRANCH's rules — no stamp demanded,
+  # the version gate deferred to a gatekeeper who is not in this push.
+  #
+  # A RECORD RATHER THAN A CALL, and the gates stay at TOP LEVEL in a `for` loop
+  # below. Moving them into a function would put them out of reach of the `ERR`
+  # trap installed above — this file runs deliberately WITHOUT `set -E` — and a
+  # hook that dies silently is the exact failure that trap exists for
+  # (vibe-ic#1254). It also keeps the gates off this loop's stdin, which is the
+  # ref list git is still feeding it.
+  #
+  # TAB-SEPARATED, WITH THE RANGE LAST: for a new branch the range is
+  # `<sha> --not --remotes`, three git arguments in one string, so it is the one
+  # field that may contain spaces.
   PUSH_BASE="$remote_sha"
-  # The COMMIT and the DESTINATION, carried out of the loop the same way
-  # `PUSH_BASE` already is. `branch_version_bump_guard` needs both: the commit
-  # to read the version claims at, and the destination to decide whether this
-  # push is one that may state a version at all (vibe-ic#2096).
-  PUSH_HEAD="$local_sha"
-  PUSH_DEST_REF="$_remote_ref"
   [ "$remote_sha" = "$ZERO" ] && PUSH_BASE="origin/main"
   # WHERE this push LANDS decides which gates apply (vibe-ic#636). `_remote_ref`
   # was read and discarded, so `refs/heads/main` and `refs/heads/feat/anything`
@@ -129,6 +153,12 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
     refs/heads/main) PUSH_TO_MAIN=1 ;;
     *)               PUSH_TO_MAIN=0 ;;
   esac
+  # The COMMIT and the DESTINATION travel with the base.
+  # `branch_version_bump_guard` needs both: the commit to read the version
+  # claims at, and the destination to decide whether this push is one that may
+  # state a version at all (vibe-ic#2096).
+  PUSH_REFS+=("$(printf '%s\t%s\t%s\t%s\t%s' \
+      "$_remote_ref" "$local_sha" "$PUSH_BASE" "$PUSH_TO_MAIN" "$RANGE")")
 done
 
 # --- the gates gatekeeper-ci.yml would have run as required status checks -----
@@ -262,7 +292,25 @@ run_gate() {                       # run_gate <label> <program> [args…]
   fi
 }
 
-if [ -n "${PUSH_RANGE:-}" ]; then
+# --- every ref of this push, one at a time (vibe-ic#2121) --------------------
+# `PUSH_RANGE` / `PUSH_BASE` / `PUSH_HEAD` / `PUSH_DEST_REF` / `PUSH_TO_MAIN`
+# keep their names and their meanings; what changed is that they now describe
+# the ref currently being gated instead of whichever one the loop stopped on.
+# With a single ref — every ordinary push — this runs exactly the gates it ran
+# before, in the same order, against the same values.
+#
+# `${PUSH_REFS[@]+...}` because this file runs under `set -u` and an empty array
+# is an unset variable to bash 4.3 and older. A push that publishes no new
+# commit (a deletion, a re-push of an already-published tip) collects no record
+# and reaches no gate here, exactly as it did before.
+for _push_ref_record in ${PUSH_REFS[@]+"${PUSH_REFS[@]}"}; do
+  IFS=$'\t' read -r PUSH_DEST_REF PUSH_HEAD PUSH_BASE PUSH_TO_MAIN PUSH_RANGE \
+      <<<"$_push_ref_record"
+  # NAME THE REF WHEN THERE IS MORE THAN ONE. With one ref the output is what it
+  # always was; with several, a reader has to know which ref a finding is about
+  # before they can act on it.
+  [ "${#PUSH_REFS[@]}" -gt 1 ] && \
+    echo "pre-push: gating $PUSH_DEST_REF (${PUSH_HEAD:0:9})" >&2
   run_gate "NDA tokens in added content or paths" \
            nda_diff_scan_check.py --rev-range "$PUSH_RANGE"
   # 2026-08-03 — a commit of this push must not erase what an EARLIER commit of
@@ -356,139 +404,156 @@ if [ -n "${PUSH_RANGE:-}" ]; then
     FAILED=1
   fi
   rm -f "$PUSH_TEXT" "$PUSH_TEXT.err"
-fi
-run_gate "marketplace <-> plugin version sync" marketplace_version_sync_check.py
 
-# --- the expensive tier, enforced by stamp rather than by waiting -------------
-# `repo_hygiene_gates.sh` (37 gates) and `plugin_full_audit.py` take minutes.
-# Running them in a hook would make the hook slow enough to be bypassed, and a
-# bypassed hook enforces nothing. Instead `tools/gatekeeper-land.sh` runs them
-# and writes the verified commit into `.git/gatekeeper-stamp`; this checks the
-# stamp names the commit actually being pushed. Amend or add a commit and the
-# stamp stops matching, so it cannot be reused.
-#
-# MAIN ONLY (vibe-ic#636, third layer). The stamp is written by
-# `gatekeeper-land.sh` — the LANDING tool — so requiring it on a feature-branch
-# push demands the landing procedure from someone who is not landing. That is
-# the same shape as the version gate above: a required gate the documented
-# contributor flow cannot pass. Off-main the cheap tier still runs in full
-# (measured: 7 run_gate calls in BOTH directions); the expensive tier runs where
-# it belongs, at the merge, and a push to `main` without a matching stamp is
-# refused exactly as before.
-if [ -n "${PUSH_RANGE:-}" ] && [ "${PUSH_TO_MAIN:-1}" = "1" ]; then
-  # `--absolute-git-dir`, not "$REPO_ROOT/.git": in a worktree `.git` is a FILE,
-  # so this looked for a stamp inside a path that is not a directory, found
-  # none, and refused every push from a worktree. Same expression as the writer
-  # in gatekeeper-land.sh — one way to name the stamp, so the two cannot drift.
-  STAMP="$(git rev-parse --absolute-git-dir)/gatekeeper-stamp"
-  HEAD_SHA="$(git rev-parse HEAD)"
-  # LINE 1 IS THE COMMIT, AND ONLY THE COMMIT. `gatekeeper-land.sh` writes a
-  # one-line stamp. `gatekeeper-land-differential.sh` used to write the same
-  # first line and then `base=`, `tier=`, `host=`; it was REMOVED 2026-08-28, so
-  # nothing in this repo writes the tail any more. Reading line 1 still keeps
-  # both shapes valid here, and the tail parsing below is KEPT deliberately: a
-  # stamp written before the removal can still be on disk, and a hook that
-  # silently stopped applying the staleness rule to it would be the unsafe
-  # direction of this change.
-  if [ ! -f "$STAMP" ]; then
-    echo "pre-push: FAILED — the full suites have not been run for this commit" >&2
-    echo "    run: tools/gatekeeper-land.sh" >&2
-    FAILED=1
-  elif [ "$(head -1 "$STAMP")" != "$HEAD_SHA" ]; then
-    echo "pre-push: FAILED — the gatekeeper stamp is for a different commit" >&2
-    echo "    stamped: $(head -1 "$STAMP" | cut -c1-9)   pushing: ${HEAD_SHA:0:9}" >&2
-    echo "    re-run:  tools/gatekeeper-land.sh" >&2
-    FAILED=1
-  else
-    # A DIFFERENTIAL VERDICT IS ABOUT A PAIR, NOT A COMMIT.
-    #
-    # A stamp carrying `base=` was written by the two-arm differential, which
-    # answered "does this commit break anything the BASE does not". If `main`
-    # moved between that gate and the push, the pass describes a comparison
-    # against a tree nobody is about to create — the same staleness
-    # `gatekeeper-verify-merge.sh --reassert` exists to catch on the merge path,
-    # and one the single-SHA stamp could not express at all. The remote tip is
-    # already in hand: git hands it to this hook on stdin as `remote_sha`, which
-    # `PUSH_BASE` carries out of the loop.
-    #
-    # The differential was REMOVED 2026-08-28, so nothing writes `base=` any
-    # more and this branch is unreachable for any stamp minted after that date.
-    # It is KEPT rather than deleted because an older stamp can still be on
-    # disk, and the failure direction matters: keeping it makes a stale pair
-    # verdict refuse, while deleting it would make that same stamp silently
-    # authorise a push. Refusing something obsolete is cheap; accepting it is
-    # not.
-    #
-    # Only checked when the stamp DECLARES a base. A plain one-line stamp is the
-    # absolute tier, which claims nothing about a base and is unaffected.
-    # A MILESTONE MAY NOT BE SATISFIED BY A STAMP EARNED AT PATCH CADENCE.
-    #
-    # The stamp proves the suites ran against this commit. It did not, until
-    # now, say WHICH TIER of suites — so a FULL x.y.0 milestone was satisfiable
-    # by a stamp bought with the 101-file TARGETED subset, and the one-way rule
-    # in `gatekeeper_review.test_cadence_gate` ("a FULL cadence cannot be
-    # satisfied by a subset") stopped at the review and never reached the push.
-    #
-    # THE DIRECTION IS ONE-WAY AND STAYS THAT WAY:
-    #   required FULL     + stamp FULL       -> allowed
-    #   required FULL     + stamp TARGETED   -> REFUSED (this block)
-    #   required TARGETED + stamp FULL       -> allowed; running MORE than the
-    #                                           tier demands is never a defect,
-    #                                           and refusing it would punish
-    #                                           someone for being thorough.
-    #
-    # AN ABSENT `cadence=` LINE READS AS THE WEAKER TIER, never the stronger. A
-    # stamp written before this line existed cannot know what it ran, and the
-    # safe reading of "unknown" is the one that cannot let a milestone through.
-    # The required cadence is derived HERE, from the commit being pushed, by the
-    # same program the landing used — not read from the stamp, which is the
-    # artefact under suspicion.
-    STAMP_CADENCE="$(sed -n 's/^cadence=//p' "$STAMP" | tail -1)"
-    [ -n "$STAMP_CADENCE" ] || STAMP_CADENCE="TARGETED"
-    # POSITIVE IDENTIFICATION, not a default. `--milestone-check` answers
-    # yes|no|unknown, and only "yes" refuses here. The strict "assume FULL when
-    # in doubt" default lives on the LANDING side, where it costs time and
-    # nothing else; applying it HERE would refuse every push from any checkout
-    # where this program cannot run -- including the synthetic repos the hook's
-    # own tests drive -- and a hook that refuses everything gets bypassed.
-    # The milestone hole stays closed regardless, because the landing MINTS the
-    # stamp and defaults an unreadable tree to FULL: an x.y.0 tree cannot
-    # acquire a TARGETED stamp unless this program ran and said TARGETED for it.
-    # `|| true`, AND A GUARD, BECAUSE THIS FILE RUNS UNDER `set -e`.
-    # Without them a checkout that has no `landing_cadence.py` — every synthetic
-    # repo the hook's own tests build, and any tree older than this change —
-    # exits 2 from `python3 <missing file>`, `pipefail` promotes it to the
-    # substitution's status, and `set -e` ABORTS THE HOOK. Measured: three
-    # differential hook tests came back "pre-push: ABORTED — the hook itself
-    # failed", which refuses the push while asserting nothing about the commit.
-    # An empty answer here is not "yes", so it changes no verdict.
-    IS_MILESTONE=""
-    if [ -f "$PROGRAMS/landing_cadence.py" ]; then
-      IS_MILESTONE="$(python3 "$PROGRAMS/landing_cadence.py" --milestone-check \
-          --repo "$REPO_ROOT" --base "${PUSH_BASE:-origin/main}" --head "$HEAD_SHA" \
-          2>/dev/null | sed -n 's/^LANDING_MILESTONE=//p' || true)"
-    fi
-    if [ "$IS_MILESTONE" = "yes" ] && [ "$STAMP_CADENCE" != "FULL" ]; then
-      echo "pre-push: FAILED — this is an x.y.0 MILESTONE and the stamp was earned at ${STAMP_CADENCE} cadence" >&2
-      echo "    A milestone runs the WHOLE programs/tests tree; a patch runs the" >&2
-      echo "    diff-derived subset. The subset cannot certify the milestone." >&2
+  # --- the expensive tier, enforced by stamp rather than by waiting -------------
+  # `repo_hygiene_gates.sh` (37 gates) and `plugin_full_audit.py` take minutes.
+  # Running them in a hook would make the hook slow enough to be bypassed, and a
+  # bypassed hook enforces nothing. Instead `tools/gatekeeper-land.sh` runs them
+  # and writes the verified commit into `.git/gatekeeper-stamp`; this checks the
+  # stamp names the commit actually being pushed. Amend or add a commit and the
+  # stamp stops matching, so it cannot be reused.
+  #
+  # MAIN ONLY (vibe-ic#636, third layer). The stamp is written by
+  # `gatekeeper-land.sh` — the LANDING tool — so requiring it on a feature-branch
+  # push demands the landing procedure from someone who is not landing. That is
+  # the same shape as the version gate above: a required gate the documented
+  # contributor flow cannot pass. Off-main the cheap tier still runs in full
+  # (measured: 7 run_gate calls in BOTH directions); the expensive tier runs where
+  # it belongs, at the merge, and a push to `main` without a matching stamp is
+  # refused exactly as before.
+  if [ -n "${PUSH_RANGE:-}" ] && [ "${PUSH_TO_MAIN:-1}" = "1" ]; then
+    # `--absolute-git-dir`, not "$REPO_ROOT/.git": in a worktree `.git` is a FILE,
+    # so this looked for a stamp inside a path that is not a directory, found
+    # none, and refused every push from a worktree. Same expression as the writer
+    # in gatekeeper-land.sh — one way to name the stamp, so the two cannot drift.
+    STAMP="$(git rev-parse --absolute-git-dir)/gatekeeper-stamp"
+    # THE COMMIT BEING PUSHED TO MAIN, NOT THE ONE THAT HAPPENS TO BE CHECKED
+    # OUT (vibe-ic#2121, second layer). `git rev-parse HEAD` answers about the
+    # working tree, and in `git push origin next/x main` the working tree is on
+    # `next/x` while the ref under judgement is `main` at another commit — so
+    # the stamp was compared against a commit nobody was publishing, in both
+    # directions: a correctly stamped main tip refused because HEAD is
+    # elsewhere, and an UNSTAMPED main tip accepted because HEAD happened to
+    # carry the stamp. git already hands the ref's own commit to this hook on
+    # stdin, and `PUSH_HEAD` carries it here. The fallback keeps the previous
+    # answer for a caller that reaches this block without a record — the hook's
+    # own tests drive it directly with `HEAD_SHA` pre-set, above this line.
+    HEAD_SHA="${PUSH_HEAD:-$(git rev-parse HEAD)}"
+    # LINE 1 IS THE COMMIT, AND ONLY THE COMMIT. `gatekeeper-land.sh` writes a
+    # one-line stamp. `gatekeeper-land-differential.sh` used to write the same
+    # first line and then `base=`, `tier=`, `host=`; it was REMOVED 2026-08-28, so
+    # nothing in this repo writes the tail any more. Reading line 1 still keeps
+    # both shapes valid here, and the tail parsing below is KEPT deliberately: a
+    # stamp written before the removal can still be on disk, and a hook that
+    # silently stopped applying the staleness rule to it would be the unsafe
+    # direction of this change.
+    if [ ! -f "$STAMP" ]; then
+      echo "pre-push: FAILED — the full suites have not been run for this commit" >&2
+      echo "    run: tools/gatekeeper-land.sh" >&2
+      FAILED=1
+    elif [ "$(head -1 "$STAMP")" != "$HEAD_SHA" ]; then
+      echo "pre-push: FAILED — the gatekeeper stamp is for a different commit" >&2
+      echo "    stamped: $(head -1 "$STAMP" | cut -c1-9)   pushing: ${HEAD_SHA:0:9}" >&2
       echo "    re-run:  tools/gatekeeper-land.sh" >&2
       FAILED=1
-    fi
-    STAMP_BASE="$(sed -n 's/^base=//p' "$STAMP" | tail -1)"
-    if [ -n "$STAMP_BASE" ] && [ -n "${PUSH_BASE:-}" ] \
-       && [ "$PUSH_BASE" != "origin/main" ] && [ "$STAMP_BASE" != "$PUSH_BASE" ]; then
-      echo "pre-push: FAILED — the differential was measured against a base that has moved" >&2
-      echo "    verified against: ${STAMP_BASE:0:9}" >&2
-      echo "    the remote is at: ${PUSH_BASE:0:9}" >&2
-      echo "    Commits landed in between, so 'this breaks nothing new' was" >&2
-      echo "    decided about a different tree. That stamp predates the removal" >&2
-      echo "    of the two-arm differential (2026-08-28). Rebase and re-run:" >&2
-      echo "    tools/gatekeeper-land.sh" >&2
-      FAILED=1
+    else
+      # A DIFFERENTIAL VERDICT IS ABOUT A PAIR, NOT A COMMIT.
+      #
+      # A stamp carrying `base=` was written by the two-arm differential, which
+      # answered "does this commit break anything the BASE does not". If `main`
+      # moved between that gate and the push, the pass describes a comparison
+      # against a tree nobody is about to create — the same staleness
+      # `gatekeeper-verify-merge.sh --reassert` exists to catch on the merge path,
+      # and one the single-SHA stamp could not express at all. The remote tip is
+      # already in hand: git hands it to this hook on stdin as `remote_sha`, which
+      # `PUSH_BASE` carries out of the loop.
+      #
+      # The differential was REMOVED 2026-08-28, so nothing writes `base=` any
+      # more and this branch is unreachable for any stamp minted after that date.
+      # It is KEPT rather than deleted because an older stamp can still be on
+      # disk, and the failure direction matters: keeping it makes a stale pair
+      # verdict refuse, while deleting it would make that same stamp silently
+      # authorise a push. Refusing something obsolete is cheap; accepting it is
+      # not.
+      #
+      # Only checked when the stamp DECLARES a base. A plain one-line stamp is the
+      # absolute tier, which claims nothing about a base and is unaffected.
+      # A MILESTONE MAY NOT BE SATISFIED BY A STAMP EARNED AT PATCH CADENCE.
+      #
+      # The stamp proves the suites ran against this commit. It did not, until
+      # now, say WHICH TIER of suites — so a FULL x.y.0 milestone was satisfiable
+      # by a stamp bought with the 101-file TARGETED subset, and the one-way rule
+      # in `gatekeeper_review.test_cadence_gate` ("a FULL cadence cannot be
+      # satisfied by a subset") stopped at the review and never reached the push.
+      #
+      # THE DIRECTION IS ONE-WAY AND STAYS THAT WAY:
+      #   required FULL     + stamp FULL       -> allowed
+      #   required FULL     + stamp TARGETED   -> REFUSED (this block)
+      #   required TARGETED + stamp FULL       -> allowed; running MORE than the
+      #                                           tier demands is never a defect,
+      #                                           and refusing it would punish
+      #                                           someone for being thorough.
+      #
+      # AN ABSENT `cadence=` LINE READS AS THE WEAKER TIER, never the stronger. A
+      # stamp written before this line existed cannot know what it ran, and the
+      # safe reading of "unknown" is the one that cannot let a milestone through.
+      # The required cadence is derived HERE, from the commit being pushed, by the
+      # same program the landing used — not read from the stamp, which is the
+      # artefact under suspicion.
+      STAMP_CADENCE="$(sed -n 's/^cadence=//p' "$STAMP" | tail -1)"
+      [ -n "$STAMP_CADENCE" ] || STAMP_CADENCE="TARGETED"
+      # POSITIVE IDENTIFICATION, not a default. `--milestone-check` answers
+      # yes|no|unknown, and only "yes" refuses here. The strict "assume FULL when
+      # in doubt" default lives on the LANDING side, where it costs time and
+      # nothing else; applying it HERE would refuse every push from any checkout
+      # where this program cannot run -- including the synthetic repos the hook's
+      # own tests drive -- and a hook that refuses everything gets bypassed.
+      # The milestone hole stays closed regardless, because the landing MINTS the
+      # stamp and defaults an unreadable tree to FULL: an x.y.0 tree cannot
+      # acquire a TARGETED stamp unless this program ran and said TARGETED for it.
+      # `|| true`, AND A GUARD, BECAUSE THIS FILE RUNS UNDER `set -e`.
+      # Without them a checkout that has no `landing_cadence.py` — every synthetic
+      # repo the hook's own tests build, and any tree older than this change —
+      # exits 2 from `python3 <missing file>`, `pipefail` promotes it to the
+      # substitution's status, and `set -e` ABORTS THE HOOK. Measured: three
+      # differential hook tests came back "pre-push: ABORTED — the hook itself
+      # failed", which refuses the push while asserting nothing about the commit.
+      # An empty answer here is not "yes", so it changes no verdict.
+      IS_MILESTONE=""
+      if [ -f "$PROGRAMS/landing_cadence.py" ]; then
+        IS_MILESTONE="$(python3 "$PROGRAMS/landing_cadence.py" --milestone-check \
+            --repo "$REPO_ROOT" --base "${PUSH_BASE:-origin/main}" --head "$HEAD_SHA" \
+            2>/dev/null | sed -n 's/^LANDING_MILESTONE=//p' || true)"
+      fi
+      if [ "$IS_MILESTONE" = "yes" ] && [ "$STAMP_CADENCE" != "FULL" ]; then
+        echo "pre-push: FAILED — this is an x.y.0 MILESTONE and the stamp was earned at ${STAMP_CADENCE} cadence" >&2
+        echo "    A milestone runs the WHOLE programs/tests tree; a patch runs the" >&2
+        echo "    diff-derived subset. The subset cannot certify the milestone." >&2
+        echo "    re-run:  tools/gatekeeper-land.sh" >&2
+        FAILED=1
+      fi
+      STAMP_BASE="$(sed -n 's/^base=//p' "$STAMP" | tail -1)"
+      if [ -n "$STAMP_BASE" ] && [ -n "${PUSH_BASE:-}" ] \
+         && [ "$PUSH_BASE" != "origin/main" ] && [ "$STAMP_BASE" != "$PUSH_BASE" ]; then
+        echo "pre-push: FAILED — the differential was measured against a base that has moved" >&2
+        echo "    verified against: ${STAMP_BASE:0:9}" >&2
+        echo "    the remote is at: ${PUSH_BASE:0:9}" >&2
+        echo "    Commits landed in between, so 'this breaks nothing new' was" >&2
+        echo "    decided about a different tree. That stamp predates the removal" >&2
+        echo "    of the two-arm differential (2026-08-28). Rebase and re-run:" >&2
+        echo "    tools/gatekeeper-land.sh" >&2
+        FAILED=1
+      fi
     fi
   fi
-fi
+done
+
+# REF-INDEPENDENT, SO IT RUNS ONCE. This gate reads the working tree's two
+# manifests and asks whether they agree with each other; it takes no range, no
+# base and no destination, so running it per ref would repeat one answer. It
+# also runs when the push publishes no new commit at all, which is where it sat
+# before and where it still sits.
+run_gate "marketplace <-> plugin version sync" marketplace_version_sync_check.py
 
 if [ "$FAILED" -ne 0 ]; then
   echo "pre-push: BLOCKED — see the gate(s) named above." >&2

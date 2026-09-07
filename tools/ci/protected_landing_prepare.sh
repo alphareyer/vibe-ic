@@ -47,19 +47,10 @@ printf '    %s\n' "${MOVED[@]}"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT
 ARGS=(); for p in "${MOVED[@]}"; do
   f="$STAGE/$(printf '%s' "$p" | tr / _)"; cp "$p" "$f"; ARGS+=(--next-file "$p=$f")
-  # FROM HEAD, NOT FROM THE INDEX. `git checkout -- <path>` restores the INDEX
-  # copy, so an operator who had already `git add`ed the edit got a PREPARE that
-  # CARRIED THE NEW BYTES -- the one thing the PREPARE half must never do. The
-  # split exists so `current` is a state the repository actually had; a PREPARE
-  # holding the future bytes describes a tree nobody ever ran. MEASURED here
-  # while authoring `protected-path-may-be-renamed-v1`: with the edit staged,
-  # the PREPARE commit was `protected_landing_transition.json | 2 +-` AND
-  # `protected_landing_transition.py | 301 ++++`, and nothing said so.
-  git checkout -q HEAD -- "$p" || exit 2
 done
 
 # THE EDITS ARE RESTORED ON EVERY EXIT, INCLUDING A REFUSAL.
-# Between the restore above and the ACTIVATE half below, the ONLY copy of the
+# Between the revert below and the ACTIVATE half, the ONLY copy of the
 # operator's work is $STAGE -- and $STAGE is removed by the EXIT trap. MEASURED
 # while authoring `protected-path-may-be-renamed-v1`: the author refused, this
 # script exited, the trap fired, and a 301-line edit to a protected file was
@@ -68,6 +59,44 @@ done
 restore_edits() { local q; for q in "${MOVED[@]}"; do
   cp "$STAGE/$(printf '%s' "$q" | tr / _)" "$q"; done; }
 
+# FROM HEAD, NOT FROM THE INDEX. `git checkout -- <path>` restores the INDEX
+# copy, so an operator who had already `git add`ed the edit got a PREPARE that
+# CARRIED THE NEW BYTES -- the one thing the PREPARE half must never do. The
+# split exists so `current` is a state the repository actually had; a PREPARE
+# holding the future bytes describes a tree nobody ever ran. MEASURED while
+# authoring `protected-path-may-be-renamed-v1`: with the edit staged, the
+# PREPARE commit was `protected_landing_transition.json | 2 +-` AND
+# `protected_landing_transition.py | 301 ++++`, and nothing said so.
+revert_to_head() { local q; for q in "${MOVED[@]}"; do
+  git checkout -q HEAD -- "$q" || exit 2; done; }
+
+# THE AUTHOR RUNS FIRST, ON THE FUTURE BYTES (vibe-ic#2078).
+#
+# This revert used to happen in the loop ABOVE, before the author was called --
+# and `protected_landing_manifest_author.render` reads POLICY from the modules
+# ON DISK: `derived_paths()` and `derived_runner()` come from
+# `protected_landing_transition.py`, which is itself one of the protected paths.
+# So for any transition that MOVES that file the author was handed the BASE's
+# policy and recorded it as the future.
+#
+# MEASURED by lane czimage48 (2026-09-07, IMG48-13) on the 0.3.48 image pin: the
+# manifest came out naming the OLD runner image, and after the ACTIVATE the
+# verifier -- now the NEW file -- refused its own register with
+# `manifest.runner.image is not the BASE-owned runner image`. The lane had to
+# bypass this script and call the author directly. The landed PREPARE
+# (`427ce72cd9`) shows what the right answer looks like: the manifest names the
+# NEW image while the tree still holds the OLD verifier, which is exactly what a
+# PREPARE is -- `current` observed at HEAD, `next` describing the commit that
+# has not happened yet.
+#
+# THE COMMIT IS STILL `HEAD` AND `current` IS STILL OBSERVED FROM IT: the author
+# reads the tuples out of the commit, not off the disk, so moving the revert
+# changes the POLICY it applies and nothing else.
+#
+# A CONSEQUENCE WORTH STATING: the author now EXECUTES the operator's edited
+# `protected_landing_transition.py`. If that edit does not import, the author
+# refuses -- which is right. A manifest describing a future the verifier cannot
+# load is a manifest nobody can spend.
 python3 tools/ci/protected_landing_manifest_author.py --repo . --commit HEAD \
   --transition-id "$TID" --current-id "$CID" --next-id "$TID-next" \
   "${ARGS[@]}" --out "$MANIFEST" || {
@@ -76,6 +105,10 @@ python3 tools/ci/protected_landing_manifest_author.py --repo . --commit HEAD \
     echo "  REFUSE: the manifest could not be authored"
     echo "  (your edits to the protected path(s) are back in the working tree)"
     exit 1; }
+
+# ONLY NOW. The PREPARE commit must carry the manifest ALONE, so the protected
+# paths go back to the base's bytes before anything is staged.
+revert_to_head
 
 git add "$MANIFEST"
 git commit -q --no-gpg-sign -m "landing(PREPARE): $TID — ${#MOVED[@]} protected path(s) move
