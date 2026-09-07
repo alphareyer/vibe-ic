@@ -5435,6 +5435,33 @@ steps:
         # A run that declares and records no corner at all self-reports
         # NOT_APPLICABLE (rc 0), so pre-phase3 and analog runs are unaffected.
         - program_exit_zero: "sta_corner_record_completeness_check . --json reports/phase3/sta/sta_corner_record_completeness.json"
+        # vibe-ic#2126 — THE SIGN-OFF SAYS WHOSE NUMBER IT WAS MEASURED
+        # AGAINST. #2091 measured, on opentitan_aes x sky130A, a post-route
+        # sign-off reported against a 10 ns period the input never states
+        # anywhere, with WNS -42.140 ns — and no artefact of that sign-off said
+        # the 10 ns had not come from the design. A reader cannot tell "this
+        # design missed its target" from "this design was never given a target
+        # and the flow supplied one", and the two demand opposite actions: a
+        # closure problem, or a Phase-1 question.
+        #
+        # #2091 built the checker and the flow never ran it: it was absent from
+        # `phase3_one_shot_runner._DECLARED_SIGNOFF_GATES`, so no step invoked
+        # it and nothing could refuse on it. This clause and that table entry
+        # (step name `sta_clock_disclosure`) are the same wiring stated in the
+        # flow's two declaration surfaces, exactly as the two clauses above are.
+        #
+        # UNCONDITIONAL, for the reason the record-completeness gate above is:
+        # the condition one would write here (`does a provenance report exist`)
+        # is true precisely when the gate has something to say, so gating on it
+        # would be the self-disabling shape (#210). The gate decides its own
+        # applicability on the PROJECT's evidence — a design-owned period is an
+        # rc-0 PASS with nothing to disclose — which is the repo's declared home
+        # for "this does not apply to this run".
+        #
+        # IT NEVER TOUCHES A TIMING VERDICT. It reads no slack, compares no
+        # period against anything, and cannot move a PASS or a FAIL; its only
+        # opinion is whether an ASSUMED period was disclosed in the record.
+        - program_exit_zero: "sta_assumed_clock_disclosure_check . --json reports/phase3/sta/assumed_clock_disclosure.json"
         # vibe-ic#306 — a route promoted on its OWN in-session re-measurement
         # must be corroborated by the sign-off report it claims to improve
         # (#293: the promotion read 330->178 while this step's own

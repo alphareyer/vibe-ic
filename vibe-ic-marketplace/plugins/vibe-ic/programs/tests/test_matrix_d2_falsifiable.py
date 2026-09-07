@@ -196,7 +196,7 @@ RUN
 ``PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`` is mandatory in this tree (a stray
 ``pytest_ethereum`` plugin otherwise breaks collection).
 
-LIVE, not remembered: 187<!--figure:blocking_clauses--> blocking clauses over
+LIVE, not remembered: 188<!--figure:blocking_clauses--> blocking clauses over
 68<!--figure:gated_steps--> gated steps. This is the denominator a reader
 wants, and it moves with the yaml: the digits are written by
 ``tools/gen_flow_matrix_census.py`` and the ``<!--figure:...-->`` anchors name
@@ -863,6 +863,58 @@ def _f_drv_promotion_contradicted(p: Path) -> None:
        "Found 1 slew violations.\n"
        "Found 0 capacitance violations.\n")
     _w(p, _DRV_SIGNOFF_RPT, _drv_signoff_report(3))
+
+
+def _f_assumed_clock_undisclosed(p: Path) -> None:
+    """A sign-off record measured against a clock period NOBODY STATED, which
+    does not say so — vibe-ic#2091's defect, and the input #2126's clause needs.
+
+    `sta_assumed_clock_disclosure_check` was wired blocking on step 23 by
+    vibe-ic#2126. EMPTY cannot redden it and must not: with no provenance
+    report the gate answers rc 2 NOT CHECKED ("this gate has no input, which is
+    not a pass"), which is this flow's disclosed-skip tier and is not an answer
+    to "can this gate fail?". Its FAIL arm needs BOTH halves present and
+    DISAGREEING: a provenance report that says the period was assumed, and a
+    sign-off record that carries neither the machine-readable flag nor the
+    disclosure sentence.
+
+    That is exactly the shape #2091 measured in the field: a post-route
+    sign-off reported against a period the design input states nowhere, in a
+    record phrased throughout as a verdict about a specification.
+
+    MEASURED through the exact clause command on this tree:
+
+        EMPTY  rc 2  NOT_CHECKED — no readable
+                     reports/phase3/clock_target_provenance.json
+        THIS   rc 1  FAIL — "the run signed off timing against a period the
+                     design never stated (20.0 ns, tier 'plugin_default') and
+                     the sign-off record does not say so"
+
+    THE DISCLOSURE SENTENCE IS NOT WRITTEN HERE, deliberately: this fixture
+    builds the record that OMITS it. The one place it is spelled is
+    `clock_target_provenance.ASSUMED_DISCLOSURE`, which the checker imports
+    rather than re-typing, so writer and checker cannot drift into asserting
+    different strings — and a fixture that re-typed it would be a third
+    spelling. The two-sided control (a record that DOES disclose passes) lives
+    in `test_issue2126_assumed_clock_disclosure_is_wired.py`, driven through
+    the runner's real dispatcher.
+    """
+    _w(p, "reports/phase3/clock_target_provenance.json", {
+        "program": "clock_target_provenance",
+        "assumed": True,
+        "period_ns": 20.0,
+        "tier": "plugin_default",
+        "cite": "",
+    })
+    # The sign-off record: a plausible post-route summary that is silent about
+    # whose number it was measured against. No `clock_period_assumed`, no
+    # sentence — which is the whole finding.
+    _w(p, "reports/phase3/sta/post_route_summary.json", {
+        "program": "eda_report_audit:sta",
+        "passed": True,
+        "worst_slack_max_ns": 0.421,
+        "worst_slack_min_ns": 0.112,
+    })
 
 
 def _f_gds_bad(p: Path) -> None:
@@ -2200,6 +2252,7 @@ FIXTURES: Dict[str, Callable[[Path], None]] = {
     "PNR_TCL_HOLD_ONLY": _f_pnr_tcl_hold_only,
     "HOLD_CORNER_CONTRADICTED": _f_hold_corner_contradicted,
     "DRV_PROMOTION_CONTRADICTED": _f_drv_promotion_contradicted,
+    "ASSUMED_CLOCK_UNDISCLOSED": _f_assumed_clock_undisclosed,
     "GDS_BAD": _f_gds_bad,
     "GDS_NO_LABELS": _f_gds_no_labels,
     "MFG_BAD": _f_mfg_bad,
@@ -2257,6 +2310,14 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
     # operator's own pad list, not on a malformed file — and it survives the
     # fold path, so it is not a red a bond-out decision could remove.
     ("2", "slot_pad_budget_check . --json reports/phase2/gates/slot_pad_budget.json"): "SLOT_PAD_OVER_BUDGET",
+    # vibe-ic#2126 wired `sta_assumed_clock_disclosure_check` BLOCKING on step
+    # 23. EMPTY answers rc 2 NOT CHECKED — correctly, since a gate with no
+    # provenance report to read certifies nothing (#1140) — so the falsifiable
+    # arm needs the two halves present and disagreeing. The fixture's docstring
+    # carries the measurement for both.
+    ("23", "sta_assumed_clock_disclosure_check . --json "
+           "reports/phase3/sta/assumed_clock_disclosure.json"):
+        "ASSUMED_CLOCK_UNDISCLOSED",
     # Step 4 promoted this clause from advisory to required only after its N/A
     # contract became executable. EMPTY still correctly means "L3 absent, no
     # verdict"; a falsifiable blocking arm must instead declare a non-zero

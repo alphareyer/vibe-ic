@@ -40282,7 +40282,55 @@ _DECLARED_SIGNOFF_GATES = (
     # the arm reports NOT_APPLICABLE before any dispatch is attempted.
     ("tapeout_precheck", "tapeout_precheck.py",
      "reports/phase3/tapeout_precheck.json", ()),
+    # vibe-ic#2126 — STEP 23's DISCLOSURE GATE, AND IT MUST BE LAST.
+    #
+    # `sta_assumed_clock_disclosure_check` landed with #2091 and was PRODUCED
+    # but never RUN: the disclosure was stamped into the sign-off records and
+    # nothing ever read it back, so no run could refuse on it. A guard nothing
+    # invokes is not a guard (#2103's shape, one gate later). This entry is the
+    # invocation.
+    #
+    # WHY IT IS THE LAST ROW, and why that is a correctness constraint rather
+    # than a cosmetic one. The subject of this gate is
+    # `clock_target_provenance.SIGNOFF_RELS`, and TWO of those three records —
+    # `reports/phase3/sta/post_route_summary.json` and
+    # `reports/phase3/sta/post_route_signoff_corner.json` — are written by
+    # `sta_signoff` and `sta_corner` ABOVE, in this same loop. The disclosure is
+    # stamped into them by `clock_target_provenance.stamp_signoff_records`,
+    # which therefore has to run after those two and before this gate reads
+    # them. `step_declared_signoff_gates` performs the stamp immediately before
+    # dispatching THIS row (see `_ASSUMED_CLOCK_DISCLOSURE_STEP` there); placed
+    # anywhere but last, the gate would read a record whose disclosure had not
+    # been written yet and FAIL every assumed-period run for the flow's own
+    # ordering rather than for anything about the design.
+    #
+    # BLAST RADIUS, and how it was measured. This gate reads reports only — no
+    # `subprocess`, no `docker`, no `shutil.which` — so it joins the five that
+    # cannot hit an ENV_UNAVAILABLE. It has an opinion in exactly one case:
+    # `clock_target_provenance` reports `assumed: true` AND a sign-off record on
+    # disk does not carry both `clock_period_assumed: true` and the disclosure
+    # sentence. A design-owned period passes unconditionally, and an assumed
+    # period passes as soon as the stamp above has run — which is why wiring
+    # this changes no verdict on a run that completes the sign-off. It goes
+    # non-green exactly where #2091 said the record was silent.
+    #
+    # I could not measure it over the published run-roots: the corpus reachable
+    # from this host (`benchmark-data/ic`) carries ONE `reports/phase3` tree
+    # (`ic/spm/v1.9.96_gf180mcuD`) and it holds no STA sign-off record at all,
+    # so the 14-root population the four gates above were measured over is not
+    # available to me. That is a NOT_MEASURED, not a zero, and it is recorded
+    # here as one. What IS measured is the runner's own clean-project fixture
+    # (`test_step23_25_signoff_gates_wired`) and the two-sided control in
+    # `test_issue2126_assumed_clock_disclosure_is_wired.py`.
+    ("sta_clock_disclosure", "sta_assumed_clock_disclosure_check.py",
+     "reports/phase3/sta/assumed_clock_disclosure.json", ()),
 )
+
+#: The declared sign-off step whose INPUT is written by the rows above it —
+#: `step_declared_signoff_gates` stamps the disclosure into the sign-off records
+#: immediately before dispatching this row. Named here so the loop below and the
+#: table above cannot drift into disagreeing about which row that is.
+_ASSUMED_CLOCK_DISCLOSURE_STEP = "sta_clock_disclosure"
 
 
 def _gate_detail(out_json: Path, stdout: str, stderr: str) -> str:
@@ -40534,15 +40582,25 @@ def step_declared_signoff_gates(project: Path,
         print(f"[phase3] clock-target provenance emit non-fatal: {_exc}")
     out: List[StepResult] = []
     for name, program, out_rel, extra_argv in _DECLARED_SIGNOFF_GATES:
+        if name == _ASSUMED_CLOCK_DISCLOSURE_STEP:
+            # vibe-ic#2126 — STAMP, THEN ASK. The stamp used to run after the
+            # whole loop, which was correct while nothing read it back. Now that
+            # `sta_clock_disclosure` reads it, the stamp has to happen after the
+            # rows that WRITE the sign-off records (`sta_signoff`, `sta_corner`)
+            # and before the row that AUDITS them. The disclosure row is last in
+            # the table, so this is the same instant the stamp happened before:
+            # every record the old placement stamped is stamped here too, and no
+            # gate above observes a byte it did not observe previously.
+            try:
+                import clock_target_provenance as _ctp
+                _ctp.stamp_signoff_records(project)
+            except Exception as _exc:
+                print("[phase3] assumed-clock disclosure stamp non-fatal: "
+                      f"{_exc}")
         if pdk_name and name in _PDK_AWARE_SIGNOFF_GATES:
             extra_argv = tuple(extra_argv) + ("--pdk", pdk_name)
         out.append(_run_declared_signoff_gate(
             project, name, program, out_rel, extra_argv))
-    try:
-        import clock_target_provenance as _ctp
-        _ctp.stamp_signoff_records(project)
-    except Exception as _exc:
-        print(f"[phase3] assumed-clock disclosure stamp non-fatal: {_exc}")
     return _reconcile_sta_verdict(out)
 
 

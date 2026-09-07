@@ -259,6 +259,11 @@ def test_runner_exposes_every_declared_signoff_gate():
         # entry: no runner invoked the gate, so a phase-3 verdict was reached
         # with no authority having read the GDS.
         "tapeout_precheck.py",
+        # vibe-ic#2126. Step 23's disclosure gate: #2091 built it and nothing
+        # invoked it, so a sign-off measured against a clock period the design
+        # never stated could not be refused anywhere. Named here BY NAME, not
+        # counted: the set equality is the whole point of this test.
+        "sta_assumed_clock_disclosure_check.py",
     }, wired
 
 
