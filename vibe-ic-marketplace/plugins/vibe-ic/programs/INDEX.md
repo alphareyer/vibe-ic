@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1292
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1292)
+- **Total programs (excluding helpers / shims):** 1293
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1293)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1283 |
+| `any` | 1284 |
 
 ## Alphabetical listing
 
@@ -902,6 +902,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `port_parser` | any | — | the SHARED interface-port reader for the deterministic solvers. |
 | `post_layout_sim_check` | any | — | Verify post-layout gate-level simulation with SDF back-annotation. |
 | `post_route_signoff_corner_check` | any | — | Step-23 multi-corner sign-off SLACK gate. |
+| `postroute_cvg_best_pass_select` | any | — | WHICH pass of the post-route convergence loop is the one that should SHIP, and whether the run shipped it. |
 | `postroute_timing_repair_audit` | any | — | Audit the post-route timing repair pass's log for completeness. |
 | `postroute_timing_repair_decision` | any | — | The shared Step 32 post-route timing-repair trigger decision. |
 | `postroute_timing_repair_status_gen` | any | — | Emit the Step 32 post-route timing-repair status artefact. |
@@ -1364,7 +1365,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1283 programs)
+### `any` (1284 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2237,6 +2238,7 @@ _(no programs in this group)_
 - `port_parser` — the SHARED interface-port reader for the deterministic solvers.
 - `post_layout_sim_check` — Verify post-layout gate-level simulation with SDF back-annotation.
 - `post_route_signoff_corner_check` — Step-23 multi-corner sign-off SLACK gate.
+- `postroute_cvg_best_pass_select` — WHICH pass of the post-route convergence loop is the one that should SHIP, and whether the run shipped it.
 - `postroute_timing_repair_audit` — Audit the post-route timing repair pass's log for completeness.
 - `postroute_timing_repair_decision` — The shared Step 32 post-route timing-repair trigger decision.
 - `postroute_timing_repair_status_gen` — Emit the Step 32 post-route timing-repair status artefact.

@@ -80,6 +80,7 @@ from pathlib import Path, PurePosixPath
 from typing import (Any, Callable, Dict, FrozenSet, Iterable, List,
                     NamedTuple, Optional, Sequence, Set, Tuple)
 import _path_layout as _pl
+import _prose_polarity as _pp
 import _runner_measurement as _rmeas
 import _reference_flow_boundary as _rfb
 import _source_record_merge as _srm  # per-source merge: silence cannot erase
@@ -32232,6 +32233,26 @@ for {set _cvg 0} {$_cvg < __BOUND__} {incr _cvg} {
   catch {set _cvg_drv [expr {[sta::max_slew_violation_count] + [sta::max_capacitance_violation_count]}]}
   puts "SHIP_WNS_CVG_PASS${_cvg}: $_cvg_wns"
   puts "SHIP_DRV_CVG_PASS${_cvg}: $_cvg_drv"
+  # vibe-ic#2171 -- HOLD, measured per pass. The selector refuses to trade a MET
+  # hold for setup, and it cannot refuse on an axis nobody measured. `catch`
+  # leaves the value at the UNMEASURED sentinel rather than at a number: an
+  # unmeasured hold neither disqualifies a pass nor certifies one.
+  set _cvg_hold UNMEASURED
+  catch {set _cvg_hold [sta::worst_slack -min]}
+  puts "SHIP_HOLD_CVG_PASS${_cvg}: $_cvg_hold"
+  # vibe-ic#2171 -- CHECKPOINT EVERY PASS, unconditionally. The loop's job is to
+  # KEEP the geometry; choosing among the passes is
+  # `postroute_cvg_best_pass_select`'s, in Python, in one place. Implementing the
+  # selection rule a second time here is how the emitter and the selector drift
+  # apart, and a "best number" kept without the DEF that produced it is the
+  # defect this issue is about, not a fix for it.
+  # The marker is emitted ONLY when write_def actually succeeded, so a pass can
+  # never advertise a checkpoint that is not on disk.
+  if {[catch {write_def __PNR__/ship_cvg_pass${_cvg}.def} e]} {
+    puts "SHIP_CVG_CKPT_NONFATAL: pass=$_cvg $e"
+  } else {
+    puts "SHIP_CVG_CKPT: pass=$_cvg def=__PNR__/ship_cvg_pass${_cvg}.def wns=$_cvg_wns drv=$_cvg_drv hold=$_cvg_hold"
+  }
   if {![string is double -strict $_cvg_wns]} { puts "SHIP_CVG_NONNUMERIC"; break }
   if {$_cvg_wns >= -0.001 && $_cvg_drv == 0} { puts "SHIP_CVG_CLOSED"; break }
   if {$_cvg_wns >= -0.001 && $_cvg_drv < 0} { puts "SHIP_CVG_CLOSED_DRV_UNMEASURED"; break }
@@ -32272,6 +32293,17 @@ catch {estimate_parasitics -detailed_routing}
 # only the ones that happen to be called *spare*. The promotion gate refuses
 # any repaired route that leaves one unrouted.
 __ROUTING_INTEGRITY_CHECK__
+# vibe-ic#2171 -- the FINAL state is measured on the SAME three axes as every
+# pass, so the selector compares like with like. Without these two the final
+# state arrived with DRV and hold UNMEASURED and could only ever be compared on
+# setup -- which is how a pass that is worse on DRV wins a comparison it should
+# have lost.
+set _cvg_fin_drv -1
+catch {set _cvg_fin_drv [expr {[sta::max_slew_violation_count] + [sta::max_capacitance_violation_count]}]}
+puts "SHIP_CVG_FINAL_DRV: $_cvg_fin_drv"
+set _cvg_fin_hold UNMEASURED
+catch {set _cvg_fin_hold [sta::worst_slack -min]}
+puts "SHIP_CVG_FINAL_HOLD: $_cvg_fin_hold"
 if {$_ship_dr_failed > 0} {
   puts "SHIP_REROUTE_INCOMPLETE: $_ship_dr_failed"
   catch {puts "SHIP_WNS_UNROUTED: [sta::worst_slack -max]"}
@@ -32697,6 +32729,314 @@ def _ship_signoff_spef_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         f"puts \"SHIP_WV_NONFATAL: $e\" }}\n"
         "puts \"SHIP_SIGNOFF_REPAIR_DONE\"\n"
     )
+
+
+def _ship_cvg_restore_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
+                          ss_liberty_c: str, pnr_dir_c: str,
+                          max_captable_c: str, metal_prefix: str,
+                          thread_count: int, checkpoint_def_c: str,
+                          filler_masters: Optional[List[str]] = None,
+                          extra_lefs_c: Optional[Sequence[str]] = None,
+                          extra_liberties_c: Optional[Sequence[str]] = None,
+                          slot_pinned_core: bool = False,
+                          design_declared_die: bool = False,
+                          sparse_active_row_fill: bool = False
+                          ) -> str:
+    """vibe-ic#2171 — RESTORE the convergence loop's winning pass, in a FRESH
+    session, and re-measure it.
+
+    The loop leaves its LAST pass in memory, and everything downstream describes
+    that state. When `postroute_cvg_best_pass_select` says an EARLIER pass won,
+    this is how its geometry comes back.
+
+    WHY A SECOND SESSION AND NOT A ROLLBACK. A mid-session rollback is MEASURED
+    to be unavailable on this toolchain — from the antenna loop in this same
+    file, in the same image, against a control that survives::
+
+        `odb::dbChip_destroy [[ord::get_db] getChip]` + `read_db` restores the
+        routing (check_antennas agrees, 3 == 3) and then
+        `report_worst_slack -max` dies with `[CRITICAL ORD-2008] unknown master
+        term type`; WITHOUT the restore the same session answers 12.26 and
+        finishes.
+
+    and ODB's ECO journal restores neither state. A fresh session reading the
+    checkpoint DEF has a clean STA network by construction — which is exactly
+    what `_ship_signoff_spef_repair_tcl` itself is, over `routed.def`.
+
+    NOTHING IS REPAIRED HERE. This session re-reads, re-extracts, re-measures
+    and re-emits the shipped artefacts. It runs no `repair_design`, no
+    `repair_timing`, no `global_route` and no `detailed_route`, so the design it
+    writes is the checkpoint's design and the number it publishes is a
+    measurement of THAT design — the whole point being that the published number
+    and the shipped netlist describe one tree.
+
+    THE MEASUREMENT BASIS IS COPIED, NOT RE-CHOSEN. Derates, process corner,
+    captable, the write/read SPEF round-trip and the propagated clock are the
+    SAME statements the repair session used, in the same order. A restore
+    measured on a different basis could not reproduce the winning pass's number
+    even when it restored the right design, and the verification would then
+    refuse a correct restore.
+
+    The fill and min-area patch that the repair session applies AFTER the loop
+    are applied here too, for the same reason they are applied there: the
+    checkpoint is taken inside the loop, before either.
+
+    PROVEN BY RUN, subservient x gf180mcuD in the pinned image: the loop
+    checkpointed pass 0 at setup -0.47528204939182533 ns / hold
+    0.042967852714256675 ns / DRV 0, and this session, reading that checkpoint
+    DEF, answered -0.47528204939182533 / 0.042967852714256675 / 0 — all three
+    axes to every digit printed, in ~60 s, with both shipped artefacts written.
+
+    chip/PDK-AGNOSTIC: standard OpenROAD APIs; every PDK fact is an argument."""
+    refill_block = _build_sparse_die_aware_filler_tcl(
+        filler_masters or [], slot_pinned_core=slot_pinned_core,
+        design_declared_die=design_declared_die,
+        sparse_active_row_fill=sparse_active_row_fill)
+    return (
+        f"set_thread_count {thread_count}\n"
+        f"read_lef {tech_lef_c}\n"
+        f"read_lef {cell_lef_c}\n"
+        + _extra_lef_read_block(extra_lefs_c) +
+        f"read_liberty {ss_liberty_c}\n"
+        + _extra_liberty_read_block(extra_liberties_c, ss_liberty_c) +
+        f"read_def {checkpoint_def_c}\n"
+        f"read_sdc {pnr_dir_c}/constraint.sdc\n"
+        # The SAME wire-load model the repair session set. It is superseded for
+        # every net the SPEF covers, and it is the fallback for any net the SPEF
+        # does not — so omitting it is a DIFFERENT timing basis on exactly the
+        # nets where the two could disagree, and the verification would then
+        # refuse a correct restore for a reason that has nothing to do with the
+        # design. Same two-step fallback for a build without `-signal`.
+        f"if {{[catch {{set_wire_rc -signal -layer {metal_prefix}1}} e]}} {{ "
+        f"if {{[catch {{set_wire_rc -layer {metal_prefix}1}} e2]}} {{ "
+        f"puts \"SHIP_RESTORE_SWR_SIG_NONFATAL: $e2\" }} }}\n"
+        f"if {{[catch {{set_wire_rc -clock -layer {metal_prefix}5}} e]}} {{ "
+        f"puts \"SHIP_RESTORE_SWR_CLK_NONFATAL: $e\" }}\n"
+        # Same derates as the repair session. These are part of the basis, not
+        # decoration: measured with different derates the same design answers a
+        # different slack, and the verification would read that as a failed
+        # restore.
+        "set_timing_derate -early 0.95\n"
+        "set_timing_derate -late 1.05\n"
+        "catch {define_process_corner -ext_model_index 0 X}\n"
+        f"if {{[catch {{extract_parasitics -ext_model_file {max_captable_c} "
+        f"-corner_cnt 1 -max_res 50 -coupling_threshold 0.1}} e]}} {{ "
+        f"puts \"SHIP_RESTORE_EXT_NONFATAL: $e\" }}\n"
+        # A SEPARATE SPEF name. Writing the repair session's
+        # `signoff_repair_max.spef` would overwrite the parasitics that belong
+        # to the run's own evidence with a different design's, and a restore
+        # that is later REFUSED would have destroyed it for nothing.
+        f"catch {{write_spef {pnr_dir_c}/ship_cvg_restored_max.spef}}\n"
+        f"if {{[catch {{read_spef {pnr_dir_c}/ship_cvg_restored_max.spef}} e]}} {{ "
+        f"puts \"SHIP_RESTORE_RDSPEF_NONFATAL: $e\" }}\n"
+        "if {[catch {estimate_parasitics -detailed_routing} e]} { "
+        "puts \"SHIP_RESTORE_EST_NONFATAL: $e\" }\n"
+        + _propagated_clock_tcl(
+            reason=("The restored checkpoint is post-CTS and real max-RC "
+                    "parasitics are annotated"))
+        # The three axes the selector chose on, re-derived on the design that
+        # will actually ship. `SHIP_RESTORE_WNS` is what `verify_restore`
+        # requires to reproduce the winning pass's own number.
+        + "catch {puts \"SHIP_RESTORE_WNS: [sta::worst_slack -max]\"}\n"
+        "set _rst_hold UNMEASURED\n"
+        "catch {set _rst_hold [sta::worst_slack -min]}\n"
+        "puts \"SHIP_RESTORE_HOLD: $_rst_hold\"\n"
+        "set _rst_drv -1\n"
+        "catch {set _rst_drv [expr {[sta::max_slew_violation_count] + "
+        "[sta::max_capacitance_violation_count]}]}\n"
+        "puts \"SHIP_RESTORE_DRV: $_rst_drv\"\n"
+        # The same routing-integrity measurement the repair session takes, under
+        # the SHIP_ prefix the promotion gate already reads, so the gate judges
+        # the restored route rather than the one it replaces.
+        + _routing_integrity_check_tcl("SHIP")
+        + f"{refill_block}"
+        + _min_area_patch_tcl("SHIP_RESTORE_MIN_AREA")
+        + f"if {{[catch {{write_def {pnr_dir_c}/routed_cvg_restored.def}} e]}} {{ "
+        f"puts \"SHIP_RESTORE_WD_NONFATAL: $e\" }}\n"
+        f"if {{[catch {{write_verilog {pnr_dir_c}/{top}_pnr_cvg_restored.v}} e]}} {{ "
+        f"puts \"SHIP_RESTORE_WV_NONFATAL: $e\" }}\n"
+        "puts \"SHIP_CVG_RESTORE_DONE\"\n"
+    )
+
+
+#: The checkpoint DEFs the convergence loop writes, one per pass. Named here so
+#: the emitter, the pruner and the restore all spell it once.
+_CVG_CKPT_GLOB = "ship_cvg_pass*.def"
+
+
+def _cvg_checkpoint_host_path(pnr_out: Path, pass_label) -> Optional[Path]:
+    """The HOST path of a pass's checkpoint, derived from the pass index rather
+    than from the marker's own string.
+
+    The marker records a CONTAINER path, which is what the emitter could see and
+    is the right thing for it to state. Re-deriving the host path here — and
+    cross-checking the BASENAME against what the emitter said — means a
+    container/host mount change can never silently point the restore at a file
+    that does not exist, and can never point it at a different one either."""
+    try:
+        idx = int(pass_label)
+    except (TypeError, ValueError):
+        return None
+    return pnr_out / f"ship_cvg_pass{idx}.def"
+
+
+def _cvg_restore_decision(pnr_out: Path, log: str) -> dict:
+    """vibe-ic#2171 — which pass should ship, and is its geometry actually here?
+
+    `postroute_cvg_best_pass_select.decide` reads the transcript; this adds the
+    one thing a transcript cannot state, namely whether the checkpoint DEF is on
+    THIS filesystem and non-empty. A marker saying a checkpoint was written and
+    a checkpoint that can be read are different facts, and a restore may only
+    key on the second."""
+    try:
+        import postroute_cvg_best_pass_select as _sel
+        decision = _sel.decide(log or "")
+    except Exception as exc:
+        # RECORDED, never swallowed: a selector that could not run must not
+        # read as a selector that found nothing to restore.
+        return {"verdict": "ERROR", "detail": f"{type(exc).__name__}: {exc}",
+                "winner": None, "gain_ns": None, "restore_def": None}
+    if decision.get("verdict") != "RESTORE":
+        return decision
+    win = (decision.get("winner") or {}).get("label")
+    host = _cvg_checkpoint_host_path(pnr_out, win)
+    stated = decision.get("restore_def") or ""
+    if host is None or not host.is_file() or host.stat().st_size == 0:
+        decision["verdict"] = "BEST_UNRESTORABLE"
+        decision["detail"] = (
+            f"pass {win} wins under the declared rule and its checkpoint "
+            f"{host} is missing or empty on this host, so the winning geometry "
+            f"cannot be read back. Reported, not rounded down to "
+            f"'the last pass won'.")
+        return decision
+    if stated and Path(stated).name != host.name:
+        decision["verdict"] = "BEST_UNRESTORABLE"
+        decision["detail"] = (
+            f"pass {win}'s checkpoint marker names {stated!r} while this step "
+            f"derives {host.name!r} — the emitter and the reader disagree about "
+            f"which file holds the winning geometry, so neither may be shipped.")
+        return decision
+    decision["restore_def_host"] = str(host)
+    return decision
+
+
+def _cvg_apply_restore(pnr_out: Path, top: str, decision: dict,
+                       restore_log: str, parsed: dict) -> Tuple[bool, str]:
+    """Promote the RESTORED artefacts — only after the re-measurement agrees.
+
+    Acceptance for this issue is explicit that the restore is proven by
+    re-measuring the restored design, not by the loop's own bookkeeping. So the
+    order here is: verify the number FIRST, check the artefacts exist SECOND,
+    and only then move them over the ones the last pass wrote. A refusal leaves
+    every session-1 artefact exactly as it was.
+
+    On success `parsed` is updated IN PLACE so that every number the step goes
+    on to publish — and every clause the promotion gate goes on to judge —
+    describes the tree that will ship, which is the whole point of the issue."""
+    try:
+        import postroute_cvg_best_pass_select as _sel
+    except Exception as exc:
+        return False, f"the selector could not be loaded ({exc!r})"
+    ok, reason = _sel.verify_restore(decision, restore_log or "")
+    if not ok:
+        return False, reason
+    # The restored route's OWN DRC count has to be a number before it may ship.
+    # None means the transcript never stated it, and an unstated count is not a
+    # clean route. Refusing HERE rather than letting the promotion gate refuse
+    # later is deliberate: this path would otherwise replace `routed_repaired
+    # .def` with a route the gate then declines, turning a run that main would
+    # have promoted into one that keeps the base route. A restore that cannot
+    # be judged is simply not taken, and the run behaves exactly as it did.
+    if decision.get("winner_route_violations") is None:
+        return False, ("the restored route's own DRC violation count was never "
+                       "stated in the transcript, so the route cannot be judged "
+                       "— it is not taken, and the last pass stands")
+    src_def = pnr_out / "routed_cvg_restored.def"
+    src_v = pnr_out / f"{top}_pnr_cvg_restored.v"
+    for src in (src_def, src_v):
+        if not src.is_file() or src.stat().st_size == 0:
+            return False, (f"the restore re-measurement agreed but {src.name} "
+                           f"is missing or empty — a verified number with no "
+                           f"artefact behind it is exactly what this issue is "
+                           f"about, so nothing was promoted")
+    shutil.copy2(src_def, pnr_out / "routed_repaired.def")
+    shutil.copy2(src_v, pnr_out / f"{top}_pnr_repaired.v")
+    # The published post-reroute number is now the RESTORED design's, measured
+    # on the restored design, in the restore session's own log.
+    # POLARITY (vibe-ic#712) on both reads below. This transcript carries the
+    # flow's own English beside its markers — `SHIP_REPAIR_NOOP: 1 (repair
+    # changed no instance; base route kept rather than re-routed for nothing)`
+    # is a `puts` of prose into the same stream — so a sentence can reach these
+    # regexes, and a value its own RECORD denies is not a measurement. Records
+    # here are lines, declared through `extra_breaks` so the scoping rule stays
+    # in the one module that owns it.
+    def _undenied(pattern: str):
+        _mm = re.search(pattern, restore_log or "", re.M)
+        if _mm is None:
+            return None
+        _lo, _hi = _pp.sentence_scope(restore_log or "", _mm.start(), _mm.end(),
+                                      extra_breaks=("\n",))
+        if _pp.is_denied((restore_log or "")[_lo:_hi]):
+            return None
+        return _mm
+    _m = _undenied(r"^\s*SHIP_RESTORE_WNS:\s*(\S+)")
+    if _m:
+        try:
+            parsed["wns_postroute"] = float(_m.group(1))
+        except ValueError:
+            pass
+    # Routing integrity is re-measured on the restored route under the same
+    # SHIP_ prefix, so the gate's own clause judges the tree that ships. Absent
+    # marker leaves the previous value untouched — UNMEASURED is not zero.
+    _u = _undenied(r"^\s*SHIP_UNROUTED_NETS:\s*(\d+)")
+    if _u:
+        parsed["unrouted_nets"] = int(_u.group(1))
+    # DRC belongs to the route inside the checkpoint, not to the route it
+    # replaces. `winner_route_violations` is None when the transcript never
+    # stated one, and that is carried through as None — "not stated" refuses
+    # the promotion gate's `route_violations != 0` clause, which is the
+    # fail-safe direction.
+    parsed["route_violations"] = decision.get("winner_route_violations")
+    parsed["cvg_restored_from_pass"] = (decision.get("winner") or {}).get("label")
+    return True, reason
+
+
+def _cvg_prune_checkpoints(pnr_out: Path, keep: Optional[Path] = None) -> int:
+    """Drop the per-pass checkpoints once the choice is made.
+
+    They exist to make the winner restorable, and after the decision only the
+    winner has a job. On a large design eight routed DEFs is real disk, and a
+    step that leaves them behind trades one defect for a slower one. Returns how
+    many were removed; failures are ignored, never reported as removals."""
+    n = 0
+    for f in sorted(pnr_out.glob(_CVG_CKPT_GLOB)):
+        if keep is not None and f == keep:
+            continue
+        try:
+            f.unlink()
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
+def _cvg_best_pass_report(project: Path, decision: dict,
+                          outcome: Optional[dict] = None) -> None:
+    """Publish the selection, whatever it decided.
+
+    Written on EVERY path, including LAST_IS_BEST. A report that appears only
+    when something was restored makes "nothing needed restoring" and "the
+    selector never ran" leave identical evidence — the shape this file keeps
+    paying for."""
+    out = project / "reports/phase3/ship_cvg_best_pass.json"
+    payload = dict(decision or {})
+    if outcome is not None:
+        payload["restore_outcome"] = outcome
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2, default=str))
+    except OSError:
+        pass          # an unwritable report dir must never fail the step
 
 
 def _ship_convergence_exhaustion_report(project: Path, log: str) -> None:
@@ -33223,6 +33563,67 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
     (pnr_out / "signoff_spef_repair.log").write_text(log)
     _ship_convergence_exhaustion_report(project, log)
     parsed = _parse_ship_repair_log(log)
+    # === vibe-ic#2171 — SHIP THE BEST PASS, NOT THE LAST ONE ================
+    # The convergence loop leaves whatever its LAST pass produced in memory, and
+    # `routed_repaired.def` above is that state. MEASURED across this fleet's
+    # published run trees, a pass that had already measured BETTER is thrown
+    # away on a real fraction of runs — 0.287 ns on one subservient arm, and on
+    # one caravel run a pass that had CLOSED setup (+0.291 ns) was replaced by a
+    # VIOLATED one (-0.727 ns). Nothing goes red on any of them, because the
+    # loop's plateau break fires ON the pass that got worse, with that pass's
+    # geometry in memory.
+    #
+    # The loop now checkpoints every pass. `postroute_cvg_best_pass_select`
+    # owns the declared rule (setup WNS decides, subject to a hold refusal and
+    # a met-state DRV refinement) and is the ONLY implementation of it. When it
+    # says an earlier pass won, its geometry is restored in a FRESH session —
+    # a mid-session rollback is measured to be unavailable on this toolchain
+    # (ORD-2008; see `_ship_cvg_restore_tcl`) — and the restored design is
+    # RE-MEASURED. A restore whose re-measurement disagrees with the winning
+    # pass's own number is REFUSED, and the run keeps the last pass.
+    _cvg_decision = _cvg_restore_decision(pnr_out, log)
+    _cvg_outcome = None
+    if _cvg_decision.get("verdict") == "RESTORE":
+        _ckpt_host = Path(_cvg_decision["restore_def_host"])
+        _rtcl = _ship_cvg_restore_tcl(
+            top,
+            _to_container_path(str(pdk.tech_lef), container),
+            _to_container_path(str(pdk.cell_lef), container),
+            ss_lib, _to_container_path(str(pnr_out), container),
+            cap, pdk.metal_prefix, _openroad_thread_count(),
+            _to_container_path(str(_ckpt_host), container),
+            filler_masters=_filler_masters_for_pdk(pdk),
+            extra_lefs_c=_def_reopen_extra_lefs_c(routed, pdk, container),
+            extra_liberties_c=extra_liberties_c,
+            slot_pinned_core=_repair_slot is not None,
+            design_declared_die=_repair_declared_die,
+            sparse_active_row_fill=bool(
+                _repair_ring_inset is not None and _repair_slot is None
+                and not _repair_declared_die))
+        _rtcl_path = pnr_out / "ship_cvg_restore.tcl"
+        _rtcl_path.write_text(_rtcl)
+        _rtcl_c = _to_container_path(str(_rtcl_path), container)
+        try:
+            _rrc, _rout, _rerr = _docker_exec(
+                container, f"openroad -no_init -exit {_rtcl_c}",
+                marker=_rtcl_c)
+            _rlog = (_rout or "") + "\n" + (_rerr or "")
+        except Exception as exc:
+            # "the restore could not be attempted" is not "the restore was
+            # wrong". Both keep the last pass; only one of them is a finding.
+            _rlog = ""
+            _cvg_outcome = {"restored": False,
+                            "reason": f"the restore session could not be run "
+                                      f"({type(exc).__name__}: {exc})"}
+        (pnr_out / "ship_cvg_restore.log").write_text(_rlog)
+        if _cvg_outcome is None:
+            _rok, _rwhy = _cvg_apply_restore(pnr_out, top, _cvg_decision,
+                                             _rlog, parsed)
+            _cvg_outcome = {"restored": _rok, "reason": _rwhy}
+        _cvg_prune_checkpoints(pnr_out, keep=_ckpt_host)
+    else:
+        _cvg_prune_checkpoints(pnr_out)
+    _cvg_best_pass_report(project, _cvg_decision, _cvg_outcome)
     repaired_def = pnr_out / "routed_repaired.def"
     repaired_v = pnr_out / f"{top}_pnr_repaired.v"
     def_ok = repaired_def.is_file() and repaired_def.stat().st_size > 0
@@ -33250,6 +33651,15 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
             f"{parsed['wns_before']}->{parsed.get('wns_postroute', parsed['wns_after_repair'])} "
             f"ns (honest post-reroute real-SPEF), reroute "
             f"DRC-clean (0 violations); promoted as sign-off route. "
+            # vibe-ic#2171 — when the shipped geometry is a RESTORED earlier
+            # pass, the note says so and names it. A number that came from a
+            # different pass than the netlist is the defect; a number that came
+            # from the same pass, silently, is unreadable evidence.
+            + (f"Geometry is the RESTORED convergence pass "
+               f"{parsed['cvg_restored_from_pass']} (the loop's last pass was "
+               f"worse under the declared best-pass rule; the restored design "
+               f"was re-measured and reproduced that pass's own number). "
+               if parsed.get("cvg_restored_from_pass") is not None else "")
             + _PG_STALE_AFTER_PROMOTION,
             [str(routed), str(_pnr_v)],
             extras={"pg_net_ownership_stale": True,
