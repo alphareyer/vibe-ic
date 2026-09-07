@@ -2,9 +2,7 @@
   "_comment": "Gates no automatic verdict INVOKES (vibe-ic#693, rule re-derived under vibe-ic#2065). MAY ONLY SHRINK. A gate here produces no verdict, and the tree looks the same either way. `skill_only` is recorded because a skill mention runs the gate only if an agent remembers to \u2014 which for a gate that catches a vacuous pass is the same as absent at the moment it matters.",
   "measured_under": "invocation.v1",
   "unwired": [
-    "agent_report_presence_check",
     "analog_a8_before_floorplan_check",
-    "analog_block_list_emit_check",
     "analog_corner_margin_check",
     "analog_per_block_pv_completeness_check",
     "benchmark_result_md_lint",
@@ -18,7 +16,6 @@
     "corner_yield_vs_spec_check",
     "coverage_metric_check",
     "defect_artifact_fixture_check",
-    "eda_log_check",
     "flow_step_executor_coverage_check",
     "foundry_signoff_plan_check",
     "fpga_pullup_lint",
@@ -41,7 +38,6 @@
   ],
   "skill_only": [
     "analog_a8_before_floorplan_check",
-    "analog_block_list_emit_check",
     "analog_per_block_pv_completeness_check",
     "benchmark_result_md_lint",
     "benchmark_score_cwd_guard",

@@ -92,6 +92,32 @@ def test_positive_fail_missing_project(tmp_path):
     assert "not a directory" in cp.stderr
 
 
+#: THE PER-BLOCK POPULATION, BY NAME. Read from the runner's own dispatch order
+#: rather than retyped, so an A-step that is renamed or dropped fails here
+#: instead of being absorbed by a count that still adds up.
+_A_STEPS = frozenset({
+    "A1_spec_extract", "A2_topology_select", "A3_netlist_gen",
+    "A4_corner_sweep", "A5_layout", "A6_block_pv", "A7_post_layout_resim",
+    "A8_hardmacro_gen", "A9_hw_verify",
+})
+
+
+def _a_step_names(body):
+    """The A1-A9 rows in the published ledger, as a SET of names."""
+    return {s["name"] for s in body["steps"] if s["name"] in _A_STEPS}
+
+
+def _project_row_names(body):
+    """Every row that is NOT one of the nine per-block A-steps.
+
+    These are the project-level rows — today exactly one, the vibe-ic#2080
+    block-list schema gate. Returned as a set so a second one arriving
+    unannounced fails the assertions above rather than moving a total nobody
+    reads.
+    """
+    return {s["name"] for s in body["steps"] if s["name"] not in _A_STEPS}
+
+
 def test_pass_with_waivers_one_block(tmp_path):
     project = tmp_path / "proj"
     project.mkdir(parents=True, exist_ok=True)
@@ -102,8 +128,14 @@ def test_pass_with_waivers_one_block(tmp_path):
     body = json.loads(
         (project / "reports" / "phase3" / "analog_one_shot.json").read_text())
     assert "tst_bandgap" in body["blocks"]
-    # 9 A* steps × 1 block = 9 step entries (A1-A9 canonical).
-    assert len(body["steps"]) == 9
+    # 9 A* steps × 1 block, PLUS the project-level block-list schema row
+    # (vibe-ic#2080). Counted by MEMBERSHIP rather than as one total: the
+    # A1-A9 population and the project-level population are different
+    # questions, and a single `len(...) == 9` could not tell "an A-step
+    # disappeared" from "a project-level row was added". Both are pinned, so
+    # either change fails here by name.
+    assert _a_step_names(body) == _A_STEPS
+    assert _project_row_names(body) == {"block_list_schema"}
     # The top-level verdict and the exit code are UNCHANGED by the
     # `required_inputs` pre-flight: FAIL / rc 1, exactly as before.
     assert body["verdict"] == "FAIL"
@@ -179,8 +211,12 @@ def test_edge_blocks_filter(tmp_path):
     body = json.loads(
         (project / "reports" / "phase3" / "analog_one_shot.json").read_text())
     assert body["blocks"] == ["tst_ldo"]
-    # 9 steps × 1 selected block (A1-A9 canonical).
-    assert len(body["steps"]) == 9
+    # 9 A* steps × 1 SELECTED block, plus the project-level block-list schema
+    # row (vibe-ic#2080). Membership, for the reason given above: `--blocks`
+    # narrows the PER-BLOCK population and must not silently drop or duplicate
+    # the project-level one.
+    assert _a_step_names(body) == _A_STEPS
+    assert _project_row_names(body) == {"block_list_schema"}
 
 
 # ---------------------------------------------------------------------------

@@ -49,6 +49,8 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -60,6 +62,11 @@ from typing import Any, Dict, List, Optional
 import _path_layout as _pl
 import _analog_a_check_common as _acc
 import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch site
+# vibe-ic#2080 — the master block-list SCHEMA gate. `main()` already refuses an
+# ABSENT list and SKIPs an explicitly-empty one; PRESENT-BUT-BROKEN was the
+# state neither covered, and this gate — the only thing that judges it — was
+# credited by a sentence inside a string in `analog_flow_compliance_check`.
+import analog_block_list_emit_check as _block_list_schema
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
@@ -1745,6 +1752,97 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                       f"caller should invoke skill `{skill}`")
 
 
+def step_block_list_schema(project: Path) -> StepResult:
+    """RUN `analog_block_list_emit_check` over the master block list this track
+    ran on, and put its verdict in the ledger. vibe-ic#2080.
+
+    WHY IT WAS UNWIRED. Under the old NAME rule it read as consulted on the
+    strength of a sentence inside a string in another program:
+
+        analog_flow_compliance_check.py:451
+            "analog_block_list_emit_check for whether a list SHOULD ..."
+
+    That is advice prose, not a call. `gate_is_wired_check`'s invocation.v1 rule
+    made it visible, and nothing in the shipped tree executed it — so the ONE
+    file every A-gate below reads (`_analog_a_check_common.load_block_list`)
+    had its schema checked by nobody.
+
+    WHY HERE. `main()` already refuses the ABSENT list by name (rc 2,
+    FAIL_NO_BLOCK_LIST) and SKIPs the explicitly-empty one. The state neither of
+    those covers is PRESENT-BUT-BROKEN, which is precisely this gate's subject.
+    It is dispatched AFTER the A1-A9 loop rather than before it because A1 is
+    what emits each block's `spec.json`: asked first, the `spec_file`
+    resolution arm would be answering about a tree the run had not built yet.
+
+    ADVISORY, per vibe-ic#2080 (BLOCKING only where the gate's own docstring
+    says so; this one's does not). `_aggregate_verdict` reaches its tiers
+    through `_FAIL_STATUSES`, `VACUOUS_PASS`, `PASS_STRUCTURE_ONLY`,
+    `WAIVED`/`SKIP` and `PASS`, and `ADVISORY` is none of them, so this row
+    cannot move the analog verdict in any direction. That neutrality is pinned
+    by a test rather than left as a reading of the ladder.
+
+    THE ROW IS WRITTEN WHENEVER THE TRACK RAN, carrying PASS / FINDING /
+    VACUOUS / NOT_MEASURED. `--project` is used, not file mode: the whole point
+    of the gate's project arm is that it resolves each declared `spec_file` on
+    disk, and file mode would report a clean schema over a list promising
+    artefacts nothing produced.
+    """
+    t0 = time.time()
+    project = Path(project)
+    row: Dict[str, Any] = {
+        "gate": "analog_block_list_emit_check",
+        "blocking": False,
+        "why_advisory_here":
+            "vibe-ic#2080 wires a recorded-unwired gate ADVISORY unless its own "
+            "docstring declares it BLOCKING; this one's does not",
+    }
+    out = _pl.report_path(project, "analog/block_list_schema.json")
+    buf_out, buf_err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf_out), \
+                contextlib.redirect_stderr(buf_err):
+            rc = _block_list_schema.main(
+                [str(project), "--project", "--json", str(out)])
+    except SystemExit as exc:
+        rc = exc.code if isinstance(exc.code, int) else 2
+    except Exception as exc:                                 # noqa: BLE001
+        row["verdict"] = "NOT_MEASURED"
+        row["reason"] = f"{type(exc).__name__}: {exc}"
+        return StepResult("block_list_schema", "", "ADVISORY",
+                          time.time() - t0,
+                          f"block-list schema NOT_MEASURED — the gate raised "
+                          f"{type(exc).__name__}: {exc}",
+                          extras={"block_list_schema": row})
+    row["rc"] = rc
+    try:
+        rep = json.loads(out.read_text())
+    except (OSError, ValueError):
+        rep = {}
+    row["status"] = rep.get("status")
+    row["findings"] = rep.get("findings") or []
+    row["block_list"] = rep.get("block_list")
+    if rc == 2:
+        row["verdict"] = "NOT_MEASURED"
+        row["reason"] = (buf_err.getvalue().strip().splitlines() or ["rc 2"])[0]
+        detail = f"block-list schema NOT_MEASURED — {row['reason']}"
+    elif rep.get("status") == "VACUOUS_PASS":
+        row["verdict"] = "VACUOUS"
+        detail = ("block-list schema VACUOUS — no analog_block_list.json under "
+                  "this project; there is nothing to validate")
+    elif rc == 0:
+        row["verdict"] = "PASS"
+        detail = (f"block-list schema PASS — {rep.get('block_count')} block(s), "
+                  f"schema + consistency + spec_file resolution OK")
+    else:
+        row["verdict"] = "FINDING"
+        detail = ("block-list schema FINDING (ADVISORY, never changes this "
+                  "run's verdict) — " + "; ".join(str(f) for f in
+                                                  row["findings"][:4]))
+    return StepResult("block_list_schema", "", "ADVISORY", time.time() - t0,
+                      detail, output_files=[str(out)],
+                      extras={"block_list_schema": row})
+
+
 def _aggregate_verdict(plan: List[StepResult]) -> str:
     """The analog track's top-level verdict.
 
@@ -1900,8 +1998,22 @@ def main() -> int:
     block_list_path = _pl.analog_dir(project) / "analog_block_list.json"
     if not block_list_path.is_file():
         block_list_path.parent.mkdir(parents=True, exist_ok=True)
+        # `block_count` IS PART OF THE DECLARED SCHEMA, and this writer omitted
+        # it. The `analog-spec-extract` skill's master-list rule — the rule
+        # `analog_block_list_emit_check` was extracted from — requires
+        # `block_count` and requires it to equal `len(blocks)`. Nothing noticed
+        # because nothing ran that gate (vibe-ic#2080): this runner
+        # materialised a list its own schema gate rejects, and the tree looked
+        # the same either way. `len(blocks)` is the only value it can be.
+        #
+        # `spec_file` is deliberately NOT invented here. The schema asks each
+        # entry to name the block's `spec.json`, and this writer has not seen
+        # one — A1 is what emits them. A materialisation that promised a path
+        # it never looked for would be a fabricated record, and the gate is
+        # right to report the absence instead.
         block_list_path.write_text(
-            json.dumps({"blocks": blocks}, indent=2, ensure_ascii=False)
+            json.dumps({"blocks": blocks, "block_count": len(blocks)},
+                       indent=2, ensure_ascii=False)
             + "\n", encoding="utf-8")
 
     plan: List[StepResult] = []
@@ -1976,6 +2088,13 @@ def main() -> int:
             _preflight_refusal("A9_hw_verify", _bname),
             step_for_block, project, blk, "A9_hw_verify", args=args,
             _preflight_note=_note))
+
+    # vibe-ic#2080 — the master block list every A-gate above read, judged at
+    # last by the gate written for it. AFTER the loop: A1 is what emits each
+    # block's spec.json, so asking before it would answer about a tree this run
+    # had not built. ADVISORY — the status is "ADVISORY", which no tier of
+    # `_aggregate_verdict` names, so the row cannot move the analog verdict.
+    _dispatched(step_block_list_schema(project))
 
     verdict = _aggregate_verdict(plan)
     structure_only = [s for s in plan if s.status == "PASS_STRUCTURE_ONLY"]

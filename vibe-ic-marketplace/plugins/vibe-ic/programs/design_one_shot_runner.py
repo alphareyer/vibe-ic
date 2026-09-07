@@ -101,6 +101,7 @@ import contextlib
 import ctypes
 import errno
 import hashlib
+import io
 import json
 import os
 import re
@@ -130,9 +131,24 @@ import _port_width  # shared port-width resolver: evaluate over the DUT's params
 # the deterministic half: the SAME staging site that renders the digest now
 # scores it against this design's own spec and NAMES the strongly-matched
 # sections in the handoff, so 'staged' becomes 'named to you, acknowledge or
-# reject each one'. Library use only (parse_digest / match_sections); no
-# verdict is taken here and no WAIVE is ever blocked.
+# reject each one'. At the STAGING site this is library use only
+# (parse_digest / match_sections / build_scoring_record): no verdict is taken
+# there and no WAIVE is ever blocked. The GATE itself — the verdict, and the
+# only read of `lessons_ack.json` in this tree — runs at
+# `step_lesson_consumption`, one invocation later, where the author's ack
+# exists to be read (vibe-ic#2103).
 import lesson_consumption_check as _lesson_consumed
+# vibe-ic#2080 — the presence half of the run's report card. Its SIBLING
+# `agent_report_sha256_attestation_check` is wired (registered in
+# `flow_compliance_check._STRUCTURAL_RTL_GATES`) and DEFERS the "no report file
+# at all" case to this gate by name; this gate was reachable from nothing, so
+# that case reached no verdict. Run at `step_agent_report_presence`, ADVISORY.
+import agent_report_presence_check as _agent_report_presence
+# vibe-ic#2080 — the EDA log/report checker. Its own #1347 triage names this
+# home: "Takes --log-file, so it is per-design and belongs ... at the step
+# that produces the log it should read." That step is `step_yosys_synth`,
+# and `step_synth_log_audit` runs it over the log that step writes.
+import eda_log_check as _eda_log
 import spec_declaration_emit as _decl  # the spec's FREE-CHOICE declaration contract
 import _runner_lock  # ORGANIC #588 — single-driver lock (all 4 runners)
 import rtl_provenance as _rtl_prov  # authored-RTL guard for phase2/stage1/rtl/
@@ -5196,6 +5212,156 @@ def step_determinism_gates(project: Path, top_name: str = "") -> StepResult:
         pass_extras["worked_example_oracle"] = worked_example_skip
     return StepResult("determinism_gates", "PASS", time.time() - t0, detail,
                       extras=pass_extras or None)
+
+
+def step_lesson_consumption(project: Path) -> StepResult:
+    """RUN `lesson_consumption_check` over the authored RTL's own run, and put
+    its verdict in the ledger. vibe-ic#2103.
+
+    WHY THIS STEP EXISTS. The staging site
+    (`_stage_author_knowledge_digests`) renders the digest, scores it against
+    this design's spec, NAMES the strongly-matched sections in the WAIVE
+    handoff, writes `lessons_scoring_record.json` and prints the command that
+    verifies it. Every one of those is a message to the author. NOTHING ran the
+    gate and NOTHING read `lessons_ack.json`, so the acknowledgement the handoff
+    demands was owed to a reader that did not exist: an author who wrote no ack
+    at all, and an author who acknowledged every section, produced runs that
+    were byte-identical in the published report. `--strict` gained the power to
+    refuse a vacuous run under vibe-ic#2086 and nothing asked it to.
+
+    WHY HERE. This is the FIRST site that sees authored RTL — the re-invocation
+    after the spec-to-rtl WAIVE — and it is downstream of every input the gate
+    reads: the digest and the record were written by the staging site in the
+    PREVIOUS invocation, and the ack is written by the author between the two.
+    It sits after the `rtl_validate` span (determinism gates) and before the
+    remaining Step-2 checks, so the acknowledgement question is asked at the
+    same point the RTL itself starts being judged.
+
+    WHY NOT A FLOW GATE CLAUSE. The flow file already answers this, in Step 1's
+    own `required_outputs` comment: `required_outputs` is UNCONDITIONAL, while
+    the digest is staged ONLY at an authoring WAIVE, so declaring it reds Step 1
+    on every design whose RTL came from a deterministic generator. A clause that
+    read the digest was withdrawn for exactly that. The consumer belongs in the
+    runner, where "was a digest staged at all" is a fact in hand rather than an
+    unconditional obligation.
+
+    ADVISORY, AND THAT IS THE FLOW CONTRACT'S ANSWER, NOT CAUTION. The status is
+    always `ADVISORY` — enumerated in `_aggregate_verdict._GREEN_STATUSES`, so
+    this step cannot move the run verdict in either direction. The gate scores
+    natural-language overlap; a design whose author judged a strongly-matched
+    section inapplicable and said so in prose somewhere other than the ack file
+    is not a broken design, and a determinism-grade refusal over that signal
+    would be turned off within a week. What the row buys is that the two states
+    the published report could not tell apart — acknowledged and never asked —
+    are now different bytes.
+
+    THE ROW IS WRITTEN ON EVERY RUN, INCLUDING WHEN THERE IS NOTHING TO ENFORCE.
+    `verdict` is one of PASS / FINDING / NOT_APPLICABLE / NOT_MEASURED, and the
+    step never returns SKIP: a row that appears only on a finding cannot
+    distinguish "the gate ran and found nothing" from "the gate was never
+    wired", which is the whole defect #2103 names. `NOT_MEASURED` is reserved
+    for the gate REFUSING (rc 2 — an unreadable ack, a scoring record whose
+    subject is not this run's spec) and is never laundered into a SKIP or a
+    PASS.
+
+    THE ARGV IS THE ONE THE HANDOFF PRINTS. `--project` (not `--prompt`), the
+    staged digest, the ack, the scoring record when present, and `--strict` —
+    so the step verifies the SAME denominator the author was handed, which is
+    the property vibe-ic#2086 built the record for. Its rc is the gate's own
+    verdict; this step demotes it to advisory rather than reinterpreting it.
+    """
+    t0 = time.time()
+    project = Path(project)
+    stage1 = _pl.phase2_stage1_dir(project)
+    digest = stage1 / "lessons.md"
+    ack = stage1 / "lessons_ack.json"
+    record = stage1 / _lesson_consumed.SCORING_RECORD_NAME
+    row: Dict[str, Any] = {
+        "gate": "lesson_consumption_check",
+        "blocking": False,
+        "why_advisory_here":
+            "the signal is natural-language term overlap and the flow contract "
+            "keeps this consumer out of a gate clause (flow Step 1 "
+            "required_outputs); the row exists so 'acknowledged' and 'never "
+            "asked' are different bytes, not to refuse a design",
+        "digest": str(digest),
+        "digest_present": digest.is_file(),
+        "ack": str(ack),
+        "ack_present": ack.is_file(),
+        "scoring_record": str(record) if record.is_file() else None,
+    }
+    if not digest.is_file():
+        # NOT a SKIP: the run is fully judged, and the answer is that this
+        # design staged no digest (a deterministic generator produced its RTL),
+        # so there is no acknowledgement to owe. Recorded, not silent.
+        row["verdict"] = "NOT_APPLICABLE"
+        row["reason"] = (f"no staged lesson digest at {digest} — the digest is "
+                         f"rendered only at an authoring WAIVE")
+        return StepResult(
+            "lesson_consumption", "ADVISORY", time.time() - t0,
+            "lesson consumption NOT_APPLICABLE — no staged lesson digest "
+            "(nothing was handed to an author, so nothing is owed)",
+            extras={"lesson_consumption": row})
+    out = _pl.report_path(project, "gates/lesson_consumption.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    argv = ["--project", str(project), "--digest", str(digest),
+            "--json", str(out)]
+    if ack.is_file():
+        argv += ["--ack", str(ack)]
+    if record.is_file():
+        argv += ["--scoring-record", str(record)]
+    argv.append("--strict")
+    row["argv"] = argv
+    buf_out, buf_err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf_out), \
+                contextlib.redirect_stderr(buf_err):
+            rc = _lesson_consumed.main(argv)
+    except SystemExit as exc:                    # argparse, on a bad argv
+        rc = exc.code if isinstance(exc.code, int) else 2
+    except Exception as exc:                     # noqa: BLE001
+        # NEVER a SKIP and never a PASS: the gate did not reach a verdict, and
+        # saying so is the whole contract of this row.
+        row["verdict"] = "NOT_MEASURED"
+        row["reason"] = f"{type(exc).__name__}: {exc}"
+        return StepResult(
+            "lesson_consumption", "ADVISORY", time.time() - t0,
+            f"lesson consumption NOT_MEASURED — the gate raised "
+            f"{type(exc).__name__}: {exc}",
+            extras={"lesson_consumption": row})
+    row["rc"] = rc
+    stderr = buf_err.getvalue().strip()
+    stdout = buf_out.getvalue().strip()
+    try:
+        rep = json.loads(out.read_text())
+    except (OSError, ValueError):
+        rep = {}
+    row["sections_in_digest"] = rep.get("sections_in_digest")
+    row["strong_matches"] = rep.get("strong_matches")
+    row["unacknowledged"] = rep.get("unacknowledged")
+    row["spec_source"] = rep.get("spec_source")
+    row["verified_against_record"] = rep.get("verified_against_record")
+    if rc == 2:
+        row["verdict"] = "NOT_MEASURED"
+        row["reason"] = stderr.splitlines()[0] if stderr else "rc 2, no reason"
+        detail = (f"lesson consumption NOT_MEASURED — the gate REFUSED: "
+                  f"{row['reason']}")
+    elif rc == 1 or (row["unacknowledged"] or 0) > 0:
+        row["verdict"] = "FINDING"
+        row["reason"] = (stderr or stdout).splitlines()[-1] if (stderr or stdout) \
+            else "unacknowledged strongly-matched section(s)"
+        detail = (f"lesson consumption FINDING (ADVISORY, never changes this "
+                  f"run's verdict) — {row['unacknowledged']} of "
+                  f"{row['strong_matches']} strongly-matched section(s) "
+                  f"unacknowledged in {ack}")
+    else:
+        row["verdict"] = "PASS"
+        detail = (f"lesson consumption PASS — {row['strong_matches']} strongly-"
+                  f"matched section(s) of {row['sections_in_digest']} in the "
+                  f"digest, none unacknowledged")
+    return StepResult("lesson_consumption", "ADVISORY", time.time() - t0,
+                      detail, output_files=[str(out)],
+                      extras={"lesson_consumption": row})
 
 
 def step_leaf_typo_aliases(project: Path) -> StepResult:
@@ -16271,6 +16437,147 @@ def _has_board_harness_top(project: Path) -> bool:
     return False
 
 
+#: The EDA log this runner produces, and the tool's OWN accounting inside it.
+#:
+#: `step_yosys_synth` builds a yosys script ending in `stat` and dropped `-q`
+#: under v1.6.193 specifically so that table reaches the log, then writes
+#: `out + "\n" + err` to `phase2/stage2/synth/yosys.log`. So the marker below is
+#: the tool's own record of having done the work, not a string this runner
+#: hopes for: if it is absent, either yosys did not get as far as `stat` or the
+#: capture that was written to disk did not contain what the runner believed it
+#: did. `_ystat.emit_stats_json` in that same step already names the second
+#: case — "the docker-fallback path can return rc=0 with an empty stdout
+#: capture" — and refuses to emit accounting for it. NOTHING made the same
+#: statement about the LOG, which is the artefact every later reader has.
+_SYNTH_LOG_REL = "phase2/stage2/synth/yosys.log"
+_SYNTH_LOG_EXPECT = "Number of cells|Number of wires"
+
+#: Statuses that mean SYNTHESIS WAS NOT ATTEMPTED. A log absent after one of
+#: these is not a finding — there was no run to leave one. Any other status
+#: means the step believed it ran a tool, and then the log must be there and
+#: must carry the tool's own accounting.
+_SYNTH_NOT_ATTEMPTED = frozenset({
+    "SKIP", "SKIPPED-CONDITION", "SKIPPED-BY-ENTRY", "SKIPPED-BY-EXIT",
+    _spf.REFUSAL_STATUS,
+})
+
+
+def step_synth_log_audit(project: Path, synth: StepResult) -> StepResult:
+    """RUN `eda_log_check` over the log `step_yosys_synth` just wrote, and put
+    its verdict in the ledger. vibe-ic#2080.
+
+    WHY IT WAS UNWIRED. `checker_execution_wiring_baseline.json` recorded the
+    whole of it under #1347: "Never wired; held up solely by the fragment
+    `eda_log_check)` at the end of a sentence in `openroad_tcl_deprecation_
+    check`'s deprecation table." One closing parenthesis inside a string, and
+    two wiring registers read it as an execution path. Its own note names the
+    home: "Takes --log-file, so it is per-design and belongs ... at the step
+    that produces the log it should read."
+
+    THIS IS THAT STEP. The log is `phase2/stage2/synth/yosys.log`, written
+    unconditionally by `step_yosys_synth`, and the gate's own docstring example
+    is this exact shape (`--log-file reports/synth.log --expect-pattern "Number
+    of cells|Chip area"`).
+
+    WHAT THE ROW BUYS, MEASURED FROM THIS RUNNER'S OWN COMMENTS. Nothing in the
+    tree asked whether that file exists, is non-empty, or carries the tool's
+    own `stat` table. `_ystat.emit_stats_json` reads the IN-MEMORY capture and
+    refuses to write accounting when it holds no stat line — it says so of the
+    docker-fallback path, "can return rc=0 with an empty stdout capture" — but
+    the capture and the FILE are two artefacts, and only the file survives the
+    process. A zero-byte `yosys.log` beside a netlist has read exactly like a
+    complete one ever since the step was written.
+
+    IT IS NOT A SECOND OPINION ON THE NETLIST. `synth_netlist_check` owns
+    whether the netlist is real; this row owns whether the tool's own record of
+    producing it reached disk. NO reject-pattern is passed, and that is
+    deliberate rather than an omission: deciding which strings in a synthesis
+    log are fatal is a contract about the tool, the design and the frontend
+    (this step has a slang fallback whose diagnostics are legitimately full of
+    the word `error`), and inventing one here would manufacture findings on
+    correct runs. Presence, emptiness and the tool's own accounting are
+    answerable without that contract.
+
+    ADVISORY, per vibe-ic#2080 — the gate's docstring declares no BLOCKING —
+    and the status is always `ADVISORY`, which `_aggregate_verdict` enumerates
+    as green.
+
+    NOT_APPLICABLE IS DECIDED BY THE SYNTH STEP'S OWN VERDICT, never by the
+    log's absence. A pure-analog design has no digital RTL, `step_yosys_synth`
+    answers SKIP by design, and there is no run that owed a log. Reading the
+    absence itself would report a FINDING on every such design, and reading it
+    the other way — treating a missing log as a skip — is the laundering this
+    row exists to prevent. The synth step's status is the discriminator, and it
+    is passed in rather than re-derived.
+    """
+    t0 = time.time()
+    project = Path(project)
+    log = project / _SYNTH_LOG_REL
+    row: Dict[str, Any] = {
+        "gate": "eda_log_check",
+        "blocking": False,
+        "why_advisory_here":
+            "vibe-ic#2080 wires a recorded-unwired gate ADVISORY unless its own "
+            "docstring declares it BLOCKING; this one's does not",
+        "log_file": str(log),
+        "expect_pattern": _SYNTH_LOG_EXPECT,
+        "reject_pattern": None,
+        "synth_status": synth.status,
+    }
+    if synth.status in _SYNTH_NOT_ATTEMPTED:
+        row["verdict"] = "NOT_APPLICABLE"
+        row["reason"] = (f"yosys_synth answered {synth.status} — no synthesis "
+                         f"was attempted, so no run owed a log")
+        return StepResult(
+            "synth_log_audit", "ADVISORY", time.time() - t0,
+            f"synth log audit NOT_APPLICABLE — yosys_synth {synth.status}",
+            extras={"synth_log_audit": row})
+    out = _pl.report_path(project, "gates/synth_log_audit.json")
+    buf_out, buf_err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf_out), \
+                contextlib.redirect_stderr(buf_err):
+            rc = _eda_log.main(["--log-file", str(log),
+                                "--expect-pattern", _SYNTH_LOG_EXPECT,
+                                "--json", str(out)])
+    except SystemExit as exc:
+        rc = exc.code if isinstance(exc.code, int) else 2
+    except Exception as exc:                                 # noqa: BLE001
+        row["verdict"] = "NOT_MEASURED"
+        row["reason"] = f"{type(exc).__name__}: {exc}"
+        return StepResult(
+            "synth_log_audit", "ADVISORY", time.time() - t0,
+            f"synth log audit NOT_MEASURED — the gate raised "
+            f"{type(exc).__name__}: {exc}",
+            extras={"synth_log_audit": row})
+    row["rc"] = rc
+    try:
+        rep = json.loads(out.read_text())
+    except (OSError, ValueError):
+        rep = {}
+    summary = rep.get("summary") or {}
+    row["line_count"] = summary.get("line_count")
+    row["expect_matched"] = summary.get("expect_matched")
+    row["categories"] = sorted({f.get("category")
+                                for f in (rep.get("findings") or [])
+                                if f.get("severity") == "ERROR"})
+    if rc == 0:
+        row["verdict"] = "PASS"
+        detail = (f"synth log audit PASS — {row['line_count']} line(s) in "
+                  f"{_SYNTH_LOG_REL}, carrying yosys's own stat accounting")
+    else:
+        row["verdict"] = "FINDING"
+        row["reason"] = "; ".join(
+            str(f.get("message")) for f in (rep.get("findings") or [])
+            if f.get("severity") == "ERROR")[:400]
+        detail = (f"synth log audit FINDING (ADVISORY, never changes this "
+                  f"run's verdict) — {', '.join(row['categories']) or 'rc 1'}: "
+                  f"{row['reason'][:160]}")
+    return StepResult("synth_log_audit", "ADVISORY", time.time() - t0,
+                      detail, output_files=[str(out)],
+                      extras={"synth_log_audit": row})
+
+
 def step_qsf_gen(project: Path, top_name: str = "chip_top",
                  ic_class: Optional[str] = None) -> StepResult:
     t0 = time.time()
@@ -20126,6 +20433,123 @@ def step_final_audit(project: Path, phase: int = 3,
                       extras={"structural_measurement": meas})
 
 
+def step_agent_report_presence(project: Path) -> StepResult:
+    """RUN `agent_report_presence_check` over the finished run and put its
+    verdict in the ledger. vibe-ic#2080 (one of the ten made visible by
+    `gate_is_wired_check`'s invocation.v1 rule).
+
+    WHY THIS GATE WAS UNWIRED, AND WHAT THAT COST. Under the old NAME rule it
+    read as consulted on the strength of ONE token inside an error message that
+    another program prints — `"; agent_report_presence_check owns that failure
+    mode."` in `agent_report_sha256_attestation_check`. That is not a call, and
+    `checker_execution_wiring_baseline.json` has said so since vibe-ic#1347.
+
+    The consequence is not abstract. Its SIBLING **is** wired — registered in
+    `flow_compliance_check._STRUCTURAL_RTL_GATES` — and its docstring says, of
+    the case where no report file exists at any canonical location:
+
+        "AGENT_REPORT.md missing — `agent_report_presence_check` handles that
+         as FAIL; this gate stays out of the way and emits VACUOUS."
+
+    So the wired gate DEFERS the presence question, and it defers it to a gate
+    nothing runs. A project that finished with no final report card at all
+    reached NO verdict in this tree: one gate declined on the ground that the
+    other owned it, and the other was never asked.
+
+    ADVISORY, per vibe-ic#2080's rule (BLOCKING only where the gate's own
+    docstring says so; this one's does not) and per vibe-ic#1253 — wiring a red
+    gate BLOCKING turns "unverified" into "blocking", which is a different
+    repair from this one.
+
+    AND IT IS RED HERE, WHICH IS THE POINT OF THE ROW. Measured on this tree:
+    NOTHING in the shipped flow writes `AGENT_REPORT.md`. The canonical report
+    card moved to `reports/final_summary.md` in v1.6.32 (`final_report_generate`,
+    wired into all five one-shot runners), the sibling attestation gate was
+    widened to accept EITHER location in v1.6.34, and this gate was never
+    re-pointed — it still asks only about `AGENT_REPORT.md` and states "NO
+    VACUOUS_PASS — there is no 'this IC class doesn't need a report'
+    exception". So on a real run this row reports FINDING.
+
+    THE ROW THEREFORE CARRIES BOTH FACTS AND CONFUSES NEITHER. `verdict` is the
+    GATE's own verdict, unchanged and unsoftened. `canonical_report` is a
+    separate field recording whether the report the flow actually produces is
+    on disk, read from the SIBLING's own candidate list rather than restated
+    here, so a reader can tell "this run produced no report card at all" from
+    "this run produced the v1.6.32 one and this gate has not been re-pointed at
+    it". Nothing here widens the gate: re-pointing its population is a decision
+    about what a report card IS, and it belongs to whoever owns that contract.
+    """
+    t0 = time.time()
+    project = Path(project)
+    row: Dict[str, Any] = {
+        "gate": "agent_report_presence_check",
+        "blocking": False,
+        "why_advisory_here":
+            "vibe-ic#2080 wires a recorded-unwired gate ADVISORY unless its own "
+            "docstring declares it BLOCKING; this one's does not. vibe-ic#1253: "
+            "making a red gate blocking is a different repair from wiring it",
+        "delegated_by": "agent_report_sha256_attestation_check "
+                        "(emits VACUOUS_PASS when no report file exists, on the "
+                        "stated ground that this gate owns that failure mode)",
+    }
+    # The report the flow DOES produce, read from the sibling's own register so
+    # a rename there breaks this loudly instead of drifting silently.
+    try:
+        import agent_report_sha256_attestation_check as _arsa  # noqa: PLC0415
+        candidates = list(_arsa._REPORT_CANDIDATE_REL_PATHS)
+    except Exception:                                        # noqa: BLE001
+        candidates = []
+    row["canonical_report"] = {
+        rel: (project / rel).is_file() for rel in candidates}
+    # NOT mkdir'd here, and that is load-bearing: the gate's own `--json`
+    # handler creates the parent, and creating it from this side would bring
+    # the PROJECT directory into existence — turning the gate's rc 2 ("project
+    # dir not found", the one refusal it has) into a confident FINDING about a
+    # tree that does not exist. Measured while writing this step's own
+    # NOT_MEASURED control.
+    out = _pl.report_path(project, "gates/agent_report_presence.json")
+    buf_out, buf_err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf_out), \
+                contextlib.redirect_stderr(buf_err):
+            rc = _agent_report_presence.main([str(project), "--json", str(out)])
+    except SystemExit as exc:
+        rc = exc.code if isinstance(exc.code, int) else 2
+    except Exception as exc:                                 # noqa: BLE001
+        row["verdict"] = "NOT_MEASURED"
+        row["reason"] = f"{type(exc).__name__}: {exc}"
+        return StepResult(
+            "agent_report_presence", "ADVISORY", time.time() - t0,
+            f"agent report presence NOT_MEASURED — the gate raised "
+            f"{type(exc).__name__}: {exc}",
+            extras={"agent_report_presence": row})
+    row["rc"] = rc
+    try:
+        rep = json.loads(out.read_text())
+    except (OSError, ValueError):
+        rep = {}
+    row["diagnostics"] = rep.get("diagnostics") or []
+    row["required_sections"] = rep.get("required_sections")
+    if rc == 2:
+        row["verdict"] = "NOT_MEASURED"
+        row["reason"] = (buf_err.getvalue().strip().splitlines() or ["rc 2"])[0]
+        detail = f"agent report presence NOT_MEASURED — {row['reason']}"
+    elif rc == 0:
+        row["verdict"] = "PASS"
+        detail = ("agent report presence PASS — AGENT_REPORT.md carries all "
+                  "five required sections")
+    else:
+        row["verdict"] = "FINDING"
+        detail = ("agent report presence FINDING (ADVISORY, never changes this "
+                  "run's verdict) — " + "; ".join(row["diagnostics"][:3])
+                  + " | the report this flow does produce: "
+                  + ", ".join(f"{k}={'present' if v else 'absent'}"
+                              for k, v in row["canonical_report"].items()))
+    return StepResult("agent_report_presence", "ADVISORY", time.time() - t0,
+                      detail, output_files=[str(out)],
+                      extras={"agent_report_presence": row})
+
+
 # -------------------------------------------------------------------------
 # Driver
 # -------------------------------------------------------------------------
@@ -20550,6 +20974,23 @@ def main() -> int:
             _preflight_refusal("rtl_validate"),
             step_determinism_gates, project, args.top_name))
 
+    # vibe-ic#2103 — RUN `lesson_consumption_check` and put its verdict in the
+    # ledger. Until this dispatch the gate was author-invoked only: the WAIVE
+    # handoff named the strongly-matched sections, printed the verification
+    # command and wrote `lessons_scoring_record.json`, and NOTHING read
+    # `lessons_ack.json`, so a run whose author acknowledged every section and
+    # a run whose author wrote no ack at all published identical bytes.
+    # Placed HERE — the first site that sees authored RTL, after the
+    # rtl_validate span and before the remaining Step-2 checks — because both
+    # of the gate's inputs are on disk by now: the digest and the record were
+    # written by the previous invocation's staging site, and the ack is
+    # written by the author between the two invocations. ADVISORY by contract
+    # (status is always "ADVISORY", so it cannot move `_aggregate_verdict`),
+    # and NOT a flow gate clause: the flow's own Step-1 `required_outputs`
+    # comment records why a clause cannot own this — `required_outputs` is
+    # unconditional and the digest is staged only at an authoring WAIVE.
+    plan.append(step_lesson_consumption(project))
+
     # Flow Step 2, clause 1 — cross-layer rewrite fidelity. Unconditional: the
     # judge itself decides applicability and WRITES the verdict, so a design
     # that ran no cross-layer search leaves a NOT_APPLICABLE record rather than
@@ -20890,6 +21331,14 @@ def main() -> int:
             _preflight_not_applicable=(_analog_reason if _analog_absent
                                        else None)))
 
+    # vibe-ic#2080 — the log `step_yosys_synth` just wrote, judged at last by
+    # the gate written for it. Dispatched immediately after that step and
+    # handed its StepResult: "synthesis was not attempted" and "synthesis ran
+    # and left no usable log" are different facts, and only the step's own
+    # verdict can tell them apart. ADVISORY — the status is always "ADVISORY",
+    # which `_aggregate_verdict` enumerates as green.
+    plan.append(step_synth_log_audit(project, plan[-1]))
+
     # Step 4b — QSF / SDC auto-gen (Wave 72). Runs even when --skip-hardware
     # so the QSF/SDC artefacts are present for downstream lints/audits.
     plan.append(step_qsf_gen(project, args.top_name, ic_class))
@@ -21057,6 +21506,14 @@ def main() -> int:
     # spurious FAIL on CVDP-class atomic runs (captured from v0.1.57).
     _pl.emit_final_summary(project, PROGRAMS_DIR)
     plan.append(step_final_audit(project, phase=2, skip_analog=args.skip_analog))
+
+    # vibe-ic#2080 — the run's report card, asked by a gate that nothing ran.
+    # Dispatched right after the final audit, where the report card is the
+    # subject and `emit_final_summary` above has already written the v1.6.32
+    # canonical report, so the row describes the tree as this run is leaving
+    # it. ADVISORY: the status is always "ADVISORY", which
+    # `_aggregate_verdict` enumerates as green, so it cannot move the verdict.
+    plan.append(step_agent_report_presence(project))
 
     # #497 ROUND-2 — the final audit just drove flow_compliance_check.py, which
     # ran the YAML gate checkers that (over)write reports/phase2/gates/*.json +
