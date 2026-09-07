@@ -51,6 +51,40 @@ except Exception:  # pragma: no cover - _path_layout always present in-tree
 PROPERTY_CONTRACT = "property_contract.json"
 AUTHORING_REQUEST = "formal_authoring_request.json"
 
+# ── #2183 — THREE INPUT STATES THAT USED TO PRINT THE SAME SENTENCE ─────────
+#
+# `declaration_obligations` reported one thing — "<L> declaration is absent;
+# applicability and property are unknown" — for three states that are not the
+# same statement about the design:
+#
+#   1. the Phase-1 declaration ROOT does not exist at all, so nothing was read;
+#   2. the root exists and holds an `L*.json` that could NOT be parsed or
+#      opened (`json.loads` / `read_text` raised, and the exception was
+#      swallowed by a bare `continue`);
+#   3. the root exists, every file in it was read, and the design genuinely
+#      declares nothing for that layer.
+#
+# Only (3) is "absent". (1) and (2) are "I could not read it", and reporting
+# them as (3) is what left vibe-ic#2183 unable to name its own mechanism: the
+# run's own `property_contract.json` said the design's L3/L6/L8 declarations
+# were absent while they were present and yielded four obligations, and the
+# artefact carried nothing that could say WHICH root had been read. Every
+# contract below now names that root, so the next reader of a phantom
+# denominator can see the directory it was measured against.
+#
+# Never greener: each state is still an UNRESOLVED row on an INCOMPLETE
+# verdict, and an unreadable file adds a row where it used to add silence.
+DECLARATION_MISSING = "DECLARATION_MISSING"
+DECLARATION_ROOT_ABSENT = "DECLARATION_ROOT_ABSENT"
+DECLARATION_UNREADABLE = "DECLARATION_UNREADABLE"
+
+#: The layers `_read_l_docs` reads. L3/L6/L8 carry the authoring denominator;
+#: L22 carries the GLOBAL applicability declaration, so an unreadable L22 is
+#: also unresolved work — the design may have declared formal inapplicable and
+#: nobody can tell.
+DECLARATION_LAYERS = ("L3", "L6", "L8", "L22")
+DENOMINATOR_LAYERS = ("L3", "L6", "L8")
+
 
 def _norm_applicability(value: Any) -> Tuple[str, str]:
     """Return (status, reason) from a small, explicit declaration dialect.
@@ -73,22 +107,47 @@ def _norm_applicability(value: Any) -> Tuple[str, str]:
     return "UNDECLARED", reason
 
 
-def _read_l_docs(project: Optional[Path]) -> Dict[str, List[Tuple[Path, dict]]]:
-    """Read only canonical Phase-1 L3/L6/L8/L22 declarations."""
+def _read_l_docs(project: Optional[Path]) -> Tuple[
+        Dict[str, List[Tuple[Path, dict]]], Optional[Path], bool,
+        List[Dict[str, str]]]:
+    """Read the canonical Phase-1 L3/L6/L8/L22 declarations, and SAY WHAT HAPPENED.
+
+    Returns ``(docs, root, root_present, unreadable)``:
+
+    * ``root`` — the directory that was actually globbed, or None when there is
+      no project to derive one from. It is returned so every caller can put the
+      path it read into the artefact it writes (#2183).
+    * ``root_present`` — whether that directory exists. "There is no such
+      directory" and "the directory holds no L3" are different findings.
+    * ``unreadable`` — one row per ``L*.json`` that exists but could not be
+      opened or parsed, naming the file and the error. This used to be a bare
+      ``continue``: an unparseable declaration was indistinguishable from an
+      undeclared one, which is the same error as reporting a failed read as an
+      empty result anywhere else in this flow.
+
+    A file that parses to something that is not a JSON object is NOT an
+    unreadable file — it was read, and it declares nothing this schema can use.
+    """
     out: Dict[str, List[Tuple[Path, dict]]] = {
-        "L3": [], "L6": [], "L8": [], "L22": []}
+        layer: [] for layer in DECLARATION_LAYERS}
+    unreadable: List[Dict[str, str]] = []
     if project is None or _pl is None:
-        return out
+        return out, None, False, unreadable
     root = _pl.generated_docs_dir(project)
+    if not root.is_dir():
+        return out, root, False, unreadable
     for layer in out:
         for path in sorted(root.glob(f"{layer}*.json")):
             try:
                 data = json.loads(path.read_text(errors="replace"))
-            except (OSError, ValueError):
+            except (OSError, ValueError) as exc:
+                unreadable.append({
+                    "layer": layer, "path": str(path),
+                    "error": f"{type(exc).__name__}: {exc}"})
                 continue
             if isinstance(data, dict):
                 out[layer].append((path, data))
-    return out
+    return out, root, True, unreadable
 
 
 def _global_formal_applicability(
@@ -205,18 +264,31 @@ def declaration_obligations(project: Optional[Path]) -> dict:
         # Pure/standalone authoring has no L-document denominator to assess.
         # The canonical in-flow caller always supplies a project.
         return {"applicability": "APPLICABLE", "obligations": [],
-                "missing_declarations": [], "layer_not_applicable": []}
-    docs = _read_l_docs(project)
+                "missing_declarations": [], "layer_not_applicable": [],
+                "declaration_root": None, "declaration_root_present": False,
+                "unreadable_declarations": []}
+    docs, root, root_present, unreadable = _read_l_docs(project)
+    read_state = {
+        "declaration_root": str(root) if root is not None else None,
+        "declaration_root_present": root_present,
+        "unreadable_declarations": unreadable,
+    }
     explicit_na = _global_formal_applicability(docs)
     if explicit_na:
         return {"applicability": "NOT_APPLICABLE",
                 "declaration": explicit_na, "obligations": [],
-                "missing_declarations": [], "layer_not_applicable": []}
+                "missing_declarations": [], "layer_not_applicable": [],
+                **read_state}
 
     obligations: List[dict] = []
-    missing = [layer for layer in ("L3", "L6", "L8") if not docs[layer]]
+    # #2183: a layer whose file could not be READ is not a layer the design
+    # left undeclared. It gets its own row below and must not also be counted
+    # here, or one unreadable file would be reported as an absent declaration.
+    unreadable_layers = {row["layer"] for row in unreadable}
+    missing = [layer for layer in DENOMINATOR_LAYERS
+               if not docs[layer] and layer not in unreadable_layers]
     layer_na: List[dict] = []
-    for layer in ("L3", "L6", "L8"):
+    for layer in DENOMINATOR_LAYERS:
         for path, data in docs[layer]:
             na = _layer_is_not_applicable(path, data)
             if na:
@@ -268,6 +340,7 @@ def declaration_obligations(project: Optional[Path]) -> dict:
         "obligations": list(uniq.values()),
         "missing_declarations": missing,
         "layer_not_applicable": layer_na,
+        **read_state,
     }
 
 
@@ -289,6 +362,14 @@ def _write_property_contract(project: Optional[Path], contract: dict) -> None:
             "authored_property_count": contract.get("authored_property_count", 0),
             "unresolved_obligations": unresolved,
             "missing_declarations": contract.get("missing_declarations", []),
+            # #2183 — the hand-off names the root it measured. A request built
+            # on a directory that does not exist asks an expert to author
+            # properties for declarations that are not missing.
+            "declaration_root": contract.get("declaration_root"),
+            "declaration_root_present": contract.get(
+                "declaration_root_present"),
+            "unreadable_declarations": contract.get(
+                "unreadable_declarations", []),
             "reason": (
                 "applicable formal obligations remain without a sound property; "
                 "invoke formal-verify on these exact IDs and record each authored "
@@ -1040,6 +1121,61 @@ def _pick_provable(rtl_files: List[Path], top_name: Optional[str],
     return None
 
 
+def _declaration_read_state(decl: dict) -> dict:
+    """The three keys every contract carries so it names the root it read."""
+    return {
+        "declaration_root": decl.get("declaration_root"),
+        "declaration_root_present": bool(decl.get("declaration_root_present")),
+        "unreadable_declarations": list(decl.get("unreadable_declarations") or []),
+    }
+
+
+def _unresolved_declaration_rows(decl: dict) -> List[dict]:
+    """One row per declaration this run could not turn into an obligation.
+
+    #2183 — the row SAYS WHICH of the three states it is in, and an absent
+    root names the directory that was globbed. Before this, a run measuring a
+    directory that does not exist and a design that declares nothing wrote the
+    same three rows and the same sentence, so a phantom denominator was
+    indistinguishable from an honest one.
+    """
+    rows: List[dict] = []
+    root = decl.get("declaration_root")
+    root_present = bool(decl.get("declaration_root_present"))
+    for layer in decl.get("missing_declarations") or []:
+        if root_present:
+            rows.append({
+                "id": f"{layer}.declaration_missing", "layer": layer,
+                "source": None,
+                "description": (f"{layer} declaration is absent; applicability "
+                                f"and property are unknown"),
+                "author": "formal-verify", "status": DECLARATION_MISSING,
+            })
+        else:
+            rows.append({
+                "id": f"{layer}.declaration_root_absent", "layer": layer,
+                "source": root,
+                "description": (
+                    f"the Phase-1 declaration root {root!r} does not exist, so "
+                    f"{layer} was never read; this is NOT a statement that the "
+                    f"design declares no {layer}"),
+                "author": "formal-verify", "status": DECLARATION_ROOT_ABSENT,
+            })
+    for row in decl.get("unreadable_declarations") or []:
+        layer = row.get("layer", "L?")
+        name = Path(str(row.get("path", ""))).name or "?"
+        rows.append({
+            "id": f"{layer}.declaration_unreadable.{name}", "layer": layer,
+            "source": row.get("path"),
+            "description": (
+                f"{layer} declaration {row.get('path')!r} exists but could not "
+                f"be read: {row.get('error')}; it was NOT read as declaring "
+                f"nothing"),
+            "author": "formal-verify", "status": DECLARATION_UNREADABLE,
+        })
+    return rows
+
+
 def generate(project: Optional[Path] = None, top: Optional[str] = None,
              rtl: Optional[List[Path]] = None,
              out: Optional[Path] = None,
@@ -1058,6 +1194,7 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
             "declaration": decl["declaration"], "property_denominator": 0,
             "authored_property_count": 0, "unresolved_obligations": [],
             "missing_declarations": [],
+            **_declaration_read_state(decl),
         }
         _write_property_contract(project, contract)
         return {"verdict": "NOT_APPLICABLE", "rc": 2,
@@ -1065,14 +1202,7 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
                 "declaration": decl["declaration"],
                 "property_denominator": 0}
 
-    declared = list(decl["obligations"])
-    for layer in decl["missing_declarations"]:
-        declared.append({
-            "id": f"{layer}.declaration_missing", "layer": layer,
-            "source": None,
-            "description": f"{layer} declaration is absent; applicability and property are unknown",
-            "author": "formal-verify", "status": "DECLARATION_MISSING",
-        })
+    declared = list(decl["obligations"]) + _unresolved_declaration_rows(decl)
     rtl_files = list(rtl) if rtl else (
         _discover_rtl(_pl.rtl_dir(project)) if (project and _pl) else [])
     if not rtl_files:
@@ -1091,6 +1221,7 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
             "unresolved_obligations": unresolved,
             "missing_declarations": decl["missing_declarations"],
             "layer_not_applicable": decl["layer_not_applicable"],
+            **_declaration_read_state(decl),
         }
         _write_property_contract(project, contract)
         return {"verdict": "INCOMPLETE", "rc": 2,
@@ -1128,6 +1259,7 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
             "unresolved_obligations": unresolved,
             "missing_declarations": decl["missing_declarations"],
             "layer_not_applicable": decl["layer_not_applicable"],
+            **_declaration_read_state(decl),
         }
         _write_property_contract(project, contract)
         return {"verdict": "INCOMPLETE", "rc": 2, "reason": reason,
@@ -1168,6 +1300,7 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
         "missing_declarations": decl["missing_declarations"],
         "layer_not_applicable": decl["layer_not_applicable"],
         "fallback_skill": "formal-verify" if unresolved else None,
+        **_declaration_read_state(decl),
     }
     _write_property_contract(project, contract)
     return {
