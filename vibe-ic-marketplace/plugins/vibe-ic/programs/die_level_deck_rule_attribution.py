@@ -95,6 +95,31 @@ TIER_PASS_WITH_ATTRIBUTION = "PASS_WITH_ATTRIBUTION"
 #: Where the macro's delivery carries what the integrator must close.
 HANDOFF_NAME = "integrator_requirements.json"
 
+#: THE HANDOFF HAS TO SAY WHAT THE RECEIVER MUST DO (vibe-ic#2196).
+#:
+#: MEASURED, lane cz2196, in the image `_eda_pin.IMAGE_DIGEST` names, with an
+#: open PDK's own deck run on a die that INSTANTIATES the unmodified macro:
+#:
+#:   macro alone                253009 um2   -> both coverage rules FIRE
+#:   the same macro in 289444 um2 of die     -> both still FIRE
+#:   the same macro in 358801 um2 of die     -> both SILENT
+#:   the same macro in 488601 um2 of die     -> both SILENT
+#:   FOUR copies of it, 1012036 um2 of die   -> both FIRE again
+#:
+#: The last row is the one that makes this block necessary. A die-window rule
+#: is ONE ratio over the whole die, so it is the AREA-WEIGHTED MEAN of the
+#: macro and everything around it: a bigger die does nothing, a DENSER
+#: surround closes it. Both facts are invisible in a record that publishes
+#: only achieved / floor / legal ceiling, and the third of those actively
+#: misleads — `legal_ceiling` is the most the MACRO's own fillable room could
+#: ever reach, and an integrator who reads it as the die's ceiling concludes
+#: the shortfall is unfixable by anybody, which is the opposite of measured.
+#:
+#: So every attributed rule now carries the requirement itself: the coverage
+#: the REST of the die must reach, as a formula over the receiver's own die
+#: area and as a worked ladder they can read without evaluating it.
+_CLOSURE_MULTIPLES = (1.5, 2.0, 3.0, 5.0)
+
 NOT_MEASURED = "NOT_MEASURED"
 
 if str(Path(__file__).resolve().parent) not in sys.path:
@@ -577,10 +602,20 @@ def fill_report_facts(report: Optional[Dict[str, Any]]
                               cap.get("floor"), cap_floor)
         ceiling = _first_number(lay.get("ceiling_any_fill"),
                                 cap.get(_CAPACITY_CEILING_KEY))
+        # `achieved` is the WORST of the two figures and is what the delivery
+        # is judged on. The CLOSURE arithmetic needs the other one: a die-window
+        # rule divides by the die, so only the whole-die ratio shares its
+        # denominator, and multiplying a worst-WINDOW fraction by the die area
+        # would state a covered area the layout does not have. The producer
+        # computes `density_after` as `metal.area() / bbox.area()` on every
+        # path, windowed or not, so it is the whole-die figure by construction
+        # -- and it is read, never re-derived from `achieved`.
+        whole = _number(lay.get("density_after"))
         facts[name] = {
             "achieved": min(vals),
             "floor": NOT_MEASURED if floor is None else floor,
             "legal_ceiling": NOT_MEASURED if ceiling is None else ceiling,
+            "whole_die": NOT_MEASURED if whole is None else whole,
         }
     why = None
     if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
@@ -591,8 +626,85 @@ def fill_report_facts(report: Optional[Dict[str, Any]]
     return (list(bbox) if bbox else None), facts, why
 
 
+def closure_condition(whole_die: Any, floor: Any, die_area_um2: Any
+                      ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """(what the PARENT die must reach, why-not) for one whole-die-ratio rule.
+
+    A rule is in the attributed family only because its own deck block divides
+    by the deck's whole-die AREA identifier -- so its measure is one ratio over
+    the die, which is the area-weighted mean of the macro and everything else
+    on that die. Write A for the receiver's total die area, `a` for this
+    macro's, `c` for what this macro achieved and `f` for the floor. The mean
+    clears the floor exactly when
+
+        (a*c + (A-a)*rest) / A  >=  f     i.e.   rest >= f + (f-c)*a/(A-a)
+
+    and that inequality, with `a`, `c` and `f` filled in, IS the requirement
+    the integrator is being handed. Every row of the ladder is that formula at
+    one die size; none of them is a target this flow chose.
+
+    Returns (None, reason) rather than a partial block: an integrator handed
+    half a requirement is handed a number they cannot act on, which is the
+    defect this whole record exists to prevent.
+    """
+    c = _number(whole_die)
+    f = _number(floor)
+    a = _number(die_area_um2)
+    missing = [word for word, val in (("the whole-die coverage this macro "
+                                       "achieved", c),
+                                      ("the deck's floor", f),
+                                      ("this macro's own die area", a))
+               if val is None]
+    if missing:
+        return None, (
+            f"{' and '.join(missing)} is not a number in what was read, so "
+            f"what the parent die must reach cannot be stated -- and it must "
+            f"not be guessed")
+    if a <= 0:
+        return None, (f"this macro's own die area reads {a}, which is not an "
+                      f"area, so the requirement has no denominator")
+    if c >= f:
+        return None, (f"the whole-die coverage {c} already meets the floor "
+                      f"{f}, so this rule states nothing for the parent to "
+                      f"close")
+    rows = []
+    for m in _CLOSURE_MULTIPLES:
+        rows.append({
+            "die_area_um2": round(m * a, 4),
+            "die_area_multiple_of_macro": m,
+            "rest_of_die_coverage_required": round(f + (f - c) / (m - 1.0), 6),
+        })
+    return {
+        "measure": "whole-die ratio",
+        "why": ("this rule's own deck block divides by the deck's whole-die "
+                "area, so its verdict is the area-weighted mean of this macro "
+                "and everything else on the die it is placed in"),
+        "macro_die_area_um2": round(a, 4),
+        "macro_covered_area_um2": round(c * a, 4),
+        "macro_whole_die_coverage": c,
+        "floor": f,
+        "requirement": (
+            f"in a die of total area A um2 holding this macro, the coverage "
+            f"of the die OUTSIDE it must be at least "
+            f"{f} + {round(f - c, 6)} * {round(a, 4)} / (A - {round(a, 4)})"),
+        "worked": rows,
+        "a_bigger_die_alone_does_not_close_it": (
+            "the mean of equal values is that value: a die made of more of "
+            "this same macro carries this same coverage at any size, so it is "
+            "the coverage of the surrounding area that closes this, not the "
+            "die's size"),
+        "legal_ceiling_is_this_macros_not_the_dies": (
+            "the `legal_ceiling` disclosed beside this is the most THIS "
+            "macro's own fillable room could ever reach. It is not a bound on "
+            "the parent die, whose own area is fillable on its own terms, and "
+            "a required coverage above it is not a contradiction"),
+    }, None
+
+
 def density_disclosure(rules: Dict[str, str], deck_sources: Optional[str],
-                       facts: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+                       facts: Dict[str, Dict[str, Any]],
+                       die_area_um2: Optional[float] = None
+                       ) -> List[Dict[str, Any]]:
     """One record per rule: what the integrator is being asked to close.
 
     Every number comes from the fill report. A rule whose layer this cannot
@@ -627,13 +739,28 @@ def density_disclosure(rules: Dict[str, str], deck_sources: Optional[str],
                     f"name either of its two schemas uses "
                     f"({'; '.join(_FLOOR_NAMES + _CEILING_NAMES)}), so it is "
                     f"unknown rather than absent")
+            # WHAT THE RECEIVER MUST DO (vibe-ic#2196), on the whole-die
+            # figure and this macro's own die area -- both read, neither
+            # derived from `achieved`, which may be a worst-WINDOW number.
+            rec["whole_die_coverage"] = f.get("whole_die", NOT_MEASURED)
+            closure, cwhy = closure_condition(
+                f.get("whole_die"), f["floor"], die_area_um2)
+            rec["closure"] = closure or NOT_MEASURED
+            if cwhy:
+                rec["closure_not_measured"] = cwhy
         else:
             rec["achieved"] = rec["floor"] = rec["legal_ceiling"] = NOT_MEASURED
+            rec["whole_die_coverage"] = NOT_MEASURED
+            rec["closure"] = NOT_MEASURED
             rec["not_measured"] = (
                 f"no layer the density fill measured "
                 f"({', '.join(sorted(facts)) or 'none'}) is named in this "
                 f"rule's own deck block, so its achieved / floor / legal "
                 f"ceiling are unknown rather than absent")
+            rec["closure_not_measured"] = (
+                f"the same unpaired layer leaves the whole-die coverage and "
+                f"the floor unknown, so what the parent die must reach cannot "
+                f"be stated")
         out.append(rec)
     return out
 
@@ -656,6 +783,7 @@ def handoff_record(rec: Dict[str, Any]) -> Dict[str, Any]:
                    "what closes them. They are NOT closed here and are NOT "
                    "waived — they are the integrator's to close."),
         "die_bbox_um": rec.get("die_bbox_um"),
+        "die_area_um2": rec.get("die_area_um2", NOT_MEASURED),
         "requirements": rec.get("density_disclosure") or [],
         "unattributed_violations": rec.get("unattributed_total"),
         "tier": rec.get("drc_tier"),
@@ -744,8 +872,20 @@ def attribute(per_rule: Dict[str, int], family: Dict[str, str],
         "die_bbox_um": die_bbox_um,
         "not_measured": dict(not_measured),
     }
+    # The die AREA the closure requirement is stated over is the SAME box the
+    # fill measured its coverage on (`keepout.measurement_bbox_um`), so the
+    # covered area and the fraction share a denominator by construction rather
+    # than by assumption. A bbox that is not four numbers yields no area, and
+    # the requirement then says so by name instead of inventing one.
+    die_area = None
+    if isinstance(die_bbox_um, (list, tuple)) and len(die_bbox_um) == 4:
+        nums = [_number(v) for v in die_bbox_um]
+        if all(n is not None for n in nums):
+            die_area = abs((nums[2] - nums[0]) * (nums[3] - nums[1]))
+    rec["die_area_um2"] = die_area if die_area else NOT_MEASURED
     rec["density_disclosure"] = density_disclosure(
-        {k: density_family[k] for k in attributed}, deck_sources, facts)
+        {k: density_family[k] for k in attributed}, deck_sources, facts,
+        die_area)
     rec["unattributed_total"] = total - fam_total - att_total
     if att_total and is_macro:
         rec["verdict"] = DENSITY_ATTRIBUTED
