@@ -157,10 +157,49 @@ assumption. Match the stem on WORD BOUNDARIES and nothing else.
 chip-AGNOSTIC: operates on this repo's own layout. No design, PDK or
 vendor literal appears here.
 
+AN IMPORT IS NOT AN INVOCATION (vibe-ic#2169)
+---------------------------------------------
+`PROG` and `TOOLS` are the two haystacks read for SHAPE, and until v1.19.32
+`_py_evidence` decided the python half of that shape like this:
+
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            invoked.add(alias.name.split(".")[0])
+
+The name entered `invoked` ON THE IMPORT STATEMENT ALONE. Nothing asked whether
+the module was then referenced at all, let alone whether the reference reached
+the checker rather than some helper that happens to share its file. Its sibling
+instrument `gate_is_wired_check` has refused a dead import since
+`invocation.v1`, so the two gates that audit the same question could — and did
+— give different answers about the same file. Deleting the last real call and
+leaving the `import` line behind is the most ordinary way for a checker to stop
+being run, and this audit would have reported it as still wired.
+
+The decision now comes from `_invocation_credit`, the ONE definition site,
+which `gate_is_wired_check.py::py_invocations` calls too — read it for what
+credits and why, and read the `invocation.v2` functions it holds for the
+measured false accusations each of their clauses was written from.
+
+Here it changed nothing that was not a genuine library use — MEASURED on
+a1f3685837ca, 10 PROG credits withdrawn, every one a reference to a
+`_`-private helper, to a module CONSTANT, to a bare alias handed to `getattr`,
+or to two stages chained with no verdict read:
+
+    test_only         6 -> 7    + opcode_field_width_consistency_check
+    skill_only       26 -> 28   + acceptance_evidence_in_fix_comment_check
+                                + hardware_pass_attestation_check
+    no_runner_at_all  0 -> 0      not_determined  0 -> 0
+
+and all three of those names were ALREADY in `gate_is_wired_baseline.json`.
+This register was the only one still crediting them, which is the divergence
+vibe-ic#2169 is about, stated as a membership. It grew by the one test-only
+name through `--migrate-rule-id`, which may only ADD.
+
 USAGE
 -----
     python3 checker_execution_wiring_audit.py [--repo-root DIR]
                                               [--json OUT] [--write-baseline]
+                                              [--migrate-rule-id FROM]
 
 EXIT CODES
 ----------
@@ -185,11 +224,12 @@ import sys
 import tokenize
 import warnings
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _derived_corpus_figure import CorpusFigures  # noqa: E402
+import _invocation_credit as _credit  # noqa: E402
 
 _BASELINE_NAME = "checker_execution_wiring_baseline.json"
 #: Checker-shaped filename suffixes. See "THE POPULATION IS A FILENAME GLOB".
@@ -471,14 +511,42 @@ def _executed_scripts(hay: Dict[str, Dict[str, "_Source"]]) -> Set[str]:
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 
+#: The gates beside THIS file. Used only when a caller does not supply a
+#: resolver — `audit` always does, rooted at the plugin UNDER AUDIT, so a
+#: `--repo-root` run reads that tree's gates and not this one's.
+_DEFAULT_STAGES = None
 
-def _py_evidence(tree: "ast.AST"):
+
+def _default_stages():
+    global _DEFAULT_STAGES
+    if _DEFAULT_STAGES is None:
+        _DEFAULT_STAGES = _credit.Stages(Path(__file__).resolve().parent)
+    return _DEFAULT_STAGES
+
+
+def _py_evidence(tree: "ast.AST", stages_of=None, rule=None,
+                 population=None):
     """`(invoked, undetermined)` stems, decided on the RAW parse tree.
 
     ONE walk. Whether the module is a DISPATCHER is only known once the whole
     tree has been seen, so bare-name literals are held aside and resolved at
     the end rather than by walking twice.
+
+    AN IMPORT IS NOT AN INVOCATION (vibe-ic#2169). Until v1.19.32 this function
+    added the name to `invoked` on the IMPORT STATEMENT ALONE — it never asked
+    whether the module was referenced at all, let alone whether the reference
+    reached the gate. `gate_is_wired_check` has refused a dead import since
+    `invocation.v1` and derives credit under `invocation.v2` since
+    vibe-ic#2141, so the two instruments that audit the same thing gave
+    different answers about the same file. The decision now comes from
+    `_invocation_credit.credited`, which is the ONE definition site and is what
+    `gate_is_wired_check.py::py_invocations` calls too; see that module for
+    what credits and why. `stages_of` defaults to the gates beside THIS file,
+    and `rule` to `invocation.v2` — the superseded credit-on-import rule is
+    reachable only from `--migrate-rule-id`.
     """
+    if stages_of is None:
+        stages_of = _default_stages()
     invoked: Set[str] = set()
     pending: Set[str] = set()
     docstrings: Set[int] = set()
@@ -517,13 +585,7 @@ def _py_evidence(tree: "ast.AST"):
                 # `ast.walk` is breadth-first, so a docstring's parent is
                 # always seen before the docstring itself.
                 docstrings.add(id(first.value))
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                invoked.add(alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom):
-            if node.module and not node.level:
-                invoked.add(node.module.split(".")[0])
-        elif isinstance(node, ast.Call):
+        if isinstance(node, ast.Call):
             fn = node.func
             name = (fn.attr if isinstance(fn, ast.Attribute)
                     else fn.id if isinstance(fn, ast.Name) else "")
@@ -550,6 +612,17 @@ def _py_evidence(tree: "ast.AST"):
             if (isinstance(r, ast.Constant) and isinstance(r.value, str)
                     and r.value.strip().endswith(".py")):
                 dispatcher = True
+    # THE IMPORTS, ADJUDICATED BY THE SHARED RESOLVER (vibe-ic#2169). Not by a
+    # rule written here: `gate_is_wired_check` asks the same question of the
+    # same files, and the whole point is that neither of them composes the
+    # answer any more. `population` is the audited set — nothing outside it can
+    # change a verdict here, and bounding the names is also what stops
+    # `stages_of` reading the source of every stdlib module the corpus imports
+    # (measured: 4.6s of a 33s run, the same eager parsing `_Index` already
+    # refuses to do — vibe-ic#1241).
+    names = (population if population is not None
+             else _credit.imported_stems(tree))
+    invoked |= set(_credit.credited(tree, names, stages_of, rule))
     if dispatcher:
         # A registry a dispatcher executes IS an execution path.
         return invoked | pending, set()
@@ -604,19 +677,26 @@ class _FileFacts:
     against one — so its tree is never walked. That is most of the corpus.
     """
 
-    __slots__ = ("tokens", "_kind", "_src", "_shapes", "_executed")
+    __slots__ = ("tokens", "_kind", "_src", "_shapes", "_executed",
+                 "_stages_of", "_rule", "_population")
 
     def __init__(self, kind: str, src: "_Source", tokens: Set[str],
-                 executed: Set[str] = frozenset()):
+                 executed: Set[str] = frozenset(), stages_of=None, rule=None,
+                 population=None):
         self.tokens = tokens
         self._kind = kind
         self._src = src
         self._shapes = None
         self._executed = executed
+        self._stages_of = stages_of
+        self._rule = rule
+        self._population = population
 
     def _resolve(self):
         if self._shapes is None:
-            self._shapes = _shapes(self._kind, self._src, self._executed)
+            self._shapes = _shapes(self._kind, self._src, self._executed,
+                                   self._stages_of, self._rule,
+                                   self._population)
         return self._shapes
 
     @property
@@ -702,7 +782,8 @@ def _haystacks(plugin: Path, repo_root: Path) -> Dict[str, Dict[str, "_Source"]]
 
 
 def _shapes(kind: str, src: "_Source",
-            executed: Set[str] = frozenset()):
+            executed: Set[str] = frozenset(), stages_of=None, rule=None,
+            population=None):
     """`(invoked, undetermined)` for one file — the INVOCATION/MENTION split."""
     if src.path.suffix == ".py":
         tree = src.tree()
@@ -710,7 +791,7 @@ def _shapes(kind: str, src: "_Source",
             # Nothing was parsed, so nothing here is a shape. Every name
             # present is NOT DETERMINED rather than silently either verdict.
             return set(), set(src.tokens_of())
-        return _py_evidence(tree)
+        return _py_evidence(tree, stages_of, rule, population)
     if _SHELL_DISPATCH_RE.search(src.stripped) and src.path.name in executed:
         # A dispatcher executes the names it holds: `GATES=(...)` then
         # `python3 "$PROGRAMS/${gate}.py"`. Over-counting inside one such file
@@ -730,9 +811,13 @@ def _shapes(kind: str, src: "_Source",
     return invoked, set()
 
 
-def _tokenise(hay: Dict[str, Dict[str, "_Source"]]) -> Dict[str, Dict[str, "_FileFacts"]]:
+def _tokenise(hay: Dict[str, Dict[str, "_Source"]], stages_of=None,
+              rule=None, population=None
+              ) -> Dict[str, Dict[str, "_FileFacts"]]:
     executed = _executed_scripts(hay)
-    return {k: {p: _FileFacts(k, s, s.tokens_of(), executed) for p, s in v.items()}
+    return {k: {p: _FileFacts(k, s, s.tokens_of(), executed, stages_of, rule,
+                              population)
+                for p, s in v.items()}
             for k, v in hay.items()}
 
 
@@ -963,10 +1048,16 @@ CORPUS_FIGURES = CorpusFigures({
 })
 
 
-def audit(plugin: Path, repo_root: Path) -> dict:
+def audit(plugin: Path, repo_root: Path, rule=None) -> dict:
+    """The report. `rule` selects the credit rule from `_invocation_credit`;
+    the default is the one this build measures under (`_RULE_ID`), and the only
+    caller that passes anything else is the one-shot `--migrate-rule-id` path,
+    which measures the SUPERSEDED rule as well so it can say which additions
+    the rule change produced (vibe-ic#2169)."""
     programs = plugin / "programs"
     checkers = checker_population(programs)
-    hay = _tokenise(_haystacks(plugin, repo_root))
+    hay = _tokenise(_haystacks(plugin, repo_root), _credit.Stages(programs),
+                    rule, {n[:-3] for n in checkers})
     test_only: List[str] = []
     unrun: List[str] = []
     skill_only: List[str] = []
@@ -1281,12 +1372,161 @@ def _load_baseline(p: Path):
     return sorted(set(k))
 
 
+def _baseline_rule(p: Path) -> Optional[str]:
+    """The rule id the register on disk was MEASURED under, or ``None``.
+
+    ``None`` is "this document was written before any rule was stamped", which
+    is a different fact from "written under a rule that no longer exists" — the
+    migration below distinguishes them and refuses to guess.
+    """
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    v = d.get("measured_under") if isinstance(d, dict) else None
+    return v if isinstance(v, str) else None
+
+
 def _resolve(repo_root: Path):
     plugin = repo_root / "vibe-ic-marketplace" / "plugins" / "vibe-ic"
     if (plugin / "programs").is_dir():
         return plugin
     here = Path(__file__).resolve().parent.parent
     return here if (here / "programs").is_dir() else None
+
+
+#: The credit rule this build measures under, stamped into the register and
+#: compared on every run. See `_invocation_credit` and `--migrate-rule-id`.
+_RULE_ID = _credit.RULE_ID
+
+
+def _migrate(bl: Path, prev, now, plugin: Path, root: Path,
+             migrate_from: str, excused: Set[str]) -> int:
+    """`--migrate-rule-id` — the ONE door through which this register may GROW.
+
+    WHY A SEPARATE DOOR (vibe-ic#2169). When the CREDIT RULE changes, the
+    register on disk answers a different question: checkers it never counted
+    become visible without any checker having lost a runner. Refusing the write
+    would leave the gate permanently red and un-landable, which is how a gate
+    ends up switched off. `--write-baseline` is the wrong instrument for it —
+    it records whatever THIS run measured, the departures and the arrivals
+    alike, so on the day a rule change and a real regression land together it
+    erases the regression.
+
+    So this path is deliberately narrower than a rewrite, in four ways:
+
+      * IT MEASURES BOTH RULES. `before` is this tree under the rule the
+        register was written under; `now` is this tree under the current one.
+        Only `now - before` — the names the RULE CHANGE made visible — may be
+        added. A checker that was ALREADY unwired under the old rule and is not
+        in the register is a debt that was never recorded, it is NOT a
+        population change, and it stays outstanding and still fails the gate.
+        MEASURED on cbc934c22fb9: `program_path_load_check.py` is exactly that
+        checker, and this path leaves it red.
+      * IT MAY ONLY ADD. The recorded set is `prev | additions`; nothing is
+        dropped, so a name whose debt was paid still has to leave through the
+        gate's own shrink report where a reader sees it.
+      * IT REFUSES ON ANY LOSS. If a recorded name is no longer unwired, or if
+        the new rule credits anything the old one did not — which would make
+        the change something other than a tightening — it writes nothing.
+      * IT PRINTS EVERY ADDITION BY NAME, never as a count.
+
+    The stamp is what shuts the door again: after this run the register records
+    `measured_under = _RULE_ID`, and asking to migrate FROM that id is refused.
+    """
+    if prev is None:
+        print("[FAIL] --migrate-rule-id: no readable register to migrate. An "
+              "absent measurement is not a population change.", file=sys.stderr)
+        return 1
+    if migrate_from == _RULE_ID:
+        print(f"[FAIL] --migrate-rule-id {migrate_from}: that is the rule this "
+              f"build measures. There is no population change to migrate, and "
+              f"adding under this door with the stamp already matching is "
+              f"exactly the laundering it exists to prevent.", file=sys.stderr)
+        return 1
+    if migrate_from not in _credit.RULES:
+        print(f"[FAIL] --migrate-rule-id {migrate_from}: this build cannot "
+              f"evaluate that rule, so it cannot say which names the change "
+              f"made visible. Known: "
+              f"{', '.join(sorted(_credit.RULES))}", file=sys.stderr)
+        return 1
+    stamp = _baseline_rule(bl)
+    if stamp is None and migrate_from != _credit.PRIOR_RULE_ID:
+        print(f"[FAIL] --migrate-rule-id {migrate_from}: the register at {bl} "
+              f"carries no `measured_under`, which means it was written before "
+              f"any rule was stamped — under {_credit.PRIOR_RULE_ID} and "
+              f"nothing else.", file=sys.stderr)
+        return 1
+    if stamp is not None and stamp != migrate_from:
+        print(f"[FAIL] --migrate-rule-id {migrate_from}: the register at {bl} "
+              f"records measured_under={stamp!r}. Migrating FROM a rule it was "
+              f"not measured under would attribute the difference to the wrong "
+              f"change.", file=sys.stderr)
+        return 1
+
+    old_rep = audit(plugin, root, rule=_credit.RULES[migrate_from])
+    before = sorted(set(old_rep["test_only"] + old_rep["no_runner_at_all"])
+                    - excused)
+
+    lost = sorted(set(prev) - set(now))
+    if lost:
+        print(f"[FAIL] --migrate-rule-id: {len(lost)} recorded checker(s) are "
+              f"no longer unwired on this tree. A migration may not quietly "
+              f"drop them — shrink the register through the gate's own report "
+              f"so the paid debt is read by a human:", file=sys.stderr)
+        for c in lost:
+            print(f"   (resolved) {c}", file=sys.stderr)
+        return 1
+    credited = sorted(set(before) - set(now))
+    if credited:
+        print(f"[FAIL] --migrate-rule-id: {len(credited)} checker(s) that "
+              f"{migrate_from} called unwired are CREDITED by {_RULE_ID}. That "
+              f"is not a tightening, and this door only records a tightening:",
+              file=sys.stderr)
+        for c in credited:
+            print(f"   (newly credited) {c}", file=sys.stderr)
+        return 1
+
+    additions = sorted(set(now) - set(before))
+    outstanding = sorted(set(now) - set(prev) - set(additions))
+    record = sorted(set(prev) | set(additions))
+    print(f"[POPULATION CHANGE] the register at {bl} was measured under "
+          f"{migrate_from} and this build measures {_RULE_ID}.")
+    print(f"  {migrate_from}: {len(before)} unwired    "
+          f"{_RULE_ID}: {len(now)} unwired    register {len(prev)} -> "
+          f"{len(record)}")
+    if additions:
+        print(f"  {len(additions)} checker(s) become visible that the previous "
+              f"rule could not see — each one is a checker NOTHING but its own "
+              f"test runs, not one that stopped being run:")
+        for c in additions:
+            print(f"   + {c}")
+    else:
+        print("  no checker becomes visible under the new rule.")
+    if outstanding:
+        print(f"  {len(outstanding)} checker(s) are unwired under BOTH rules "
+              f"and are NOT in the register. They are debt that was never "
+              f"recorded, not a population change, and this door leaves them "
+              f"outstanding — the gate still fails on them:")
+        for c in outstanding:
+            print(f"   (still failing, not migrated) {c}")
+    # EVERY OTHER CLAIM IN THE DOCUMENT IS CARRIED THROUGH UNTOUCHED. `triage`
+    # and `scope_expanded` are separate statements about how this register got
+    # to where it is; a migration that may only ADD to `known` has measured
+    # nothing about either, and pruning them here would delete a recorded
+    # reason under cover of a rule change. `--write-baseline` prunes `triage`
+    # to what it measured, which is the right behaviour for a rewrite and the
+    # wrong one for this door.
+    try:
+        doc = json.loads(bl.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        doc = {}
+    doc.update({"previous_size": len(prev),
+                "measured_under": _RULE_ID,
+                "known": record})
+    bl.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    print(f"wrote {bl} ({len(record)} entr(ies), measured_under={_RULE_ID})")
+    return 0
 
 
 def main(argv=None) -> int:
@@ -1301,6 +1541,15 @@ def main(argv=None) -> int:
                          "scope finds pre-existing debt; that is not a "
                          "regression). Requires a reason >=30 chars, recorded "
                          "in the baseline beside the previous size")
+    ap.add_argument("--migrate-rule-id", dest="migrate_from", metavar="FROM",
+                    help="ONE-SHOT re-derivation after the CREDIT RULE changed "
+                         "(vibe-ic#2169). FROM names the rule the register on "
+                         "disk was measured under; both rules are measured and "
+                         "only the names the RULE CHANGE made visible are "
+                         "ADDED, each printed by name. It refuses if any "
+                         "recorded name would LOSE its unwired status, and it "
+                         "never removes. Not --write-baseline, which records "
+                         "whatever this run measured, arrivals included")
     ap.add_argument("--refresh-triage", action="store_true",
                     help="with --write-baseline: re-MEASURE each entry by "
                          "running it with no arguments (opt-in; it executes "
@@ -1364,6 +1613,10 @@ def main(argv=None) -> int:
     now = sorted(set(rep["test_only"] + rep["no_runner_at_all"])
                  - _excused_names)
 
+    if a.migrate_from:
+        return _migrate(bl, base, now, plugin, root, a.migrate_from,
+                        _excused_names)
+
     if a.write_baseline:
         if a.scope_expanded is not None and len(a.scope_expanded.strip()) < 30:
             print("[FAIL] --scope-expanded needs a real reason (>=30 chars) "
@@ -1394,6 +1647,7 @@ def main(argv=None) -> int:
                           "wrong repair is to delete the test so the entry "
                           "disappears."),
              "previous_size": None if prev is None else len(prev),
+             "measured_under": _RULE_ID,
              "scope_expanded": a.scope_expanded,
              "known": now,
              "triage": {k: v for k, v in prev_triage.items() if k in now},
@@ -1446,11 +1700,22 @@ def main(argv=None) -> int:
     # Printed unconditionally now, so a reader can distinguish "I looked and
     # found none" from "this line is missing because nobody looked".
     nd = rep.get("not_determined") or []
+    recorded_rule = _baseline_rule(bl)
+    if recorded_rule != _RULE_ID:
+        # SAID OUT LOUD, ALWAYS. A register measured under another credit rule
+        # can be compared with this run's set only as a category error, and the
+        # reader has to know that before reading the numbers (vibe-ic#2169).
+        print(f"  [RULE MISMATCH] the register records measured_under="
+              f"{recorded_rule!r}; this build measures {_RULE_ID!r}. The two "
+              f"sets answer different questions. Re-derive ONCE with "
+              f"--migrate-rule-id {recorded_rule or _credit.PRIOR_RULE_ID}, "
+              f"which adds only what the rule change made visible and prints "
+              f"every addition by name.")
     print(f"  population     : test-only {len(rep['test_only'])}, "
           f"no-runner-at-all {len(rep['no_runner_at_all'])}, "
           f"skill-only {len(so)}, not-determined {len(nd)}, "
           f"baseline {0 if base is None else len(base)} "
-          f"— stated even at zero (#1130)")
+          f"— stated even at zero (#1130)   rule: {_RULE_ID}")
     for c in rep["no_runner_at_all"][:10]:
         print(f"   (no runner at all) {c}")
     # REPORTED, never blocking — the point of the population is that this gate

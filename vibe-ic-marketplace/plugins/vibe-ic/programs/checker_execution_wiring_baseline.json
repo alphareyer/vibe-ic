@@ -1,9 +1,10 @@
 {
   "_comment": "Checkers that NOTHING but their own unit test ever runs (vibe-ic#381). MAY ONLY SHRINK — each entry is a checker with zero coverage of real inputs. `triage` records why an entry is still here; the wrong repair is to delete the test so the entry disappears.",
-  "previous_size": 5,
+  "previous_size": 4,
   "scope_expanded": "vibe-ic#1347: the audit now reads the SHAPE of each reference (invocation vs mention) on the raw source, not merely whether the name is one of the file's tokens; three checkers held up only by another program's message text are now visible as test-only.",
   "known": [
     "analog_corner_margin_check.py",
+    "opcode_field_width_consistency_check.py",
     "phase23_completion_self_audit_check.py",
     "rtl_signal_name_semantic_check.py",
     "sv_compat_check.py"
@@ -32,7 +33,8 @@
     "skill_doc_section_present_check.py": "rc=2 SKIPs / refuses without its input — [--json JSON]",
     "sv_compat_check.py": "vibe-ic#1347. Never wired; held up by three sentences in `yosys_script_template_check` telling a reader to run it. The only `sv_compat_check.py` anywhere is a description string in `skills/synth-doctor/compliance.yaml` — prose, and not in any haystack. Takes --rtl-dir/--out-dir, so it is per-design and belongs in `flow_compliance_check.py`'s registry at the synthesis step, measured green on real RTL first (#1253).",
     "synth_wrapper_check.py": "unwired for lack of a CALLER, not for lack of an input — requires only nothing, which a real run always has. The previous note said it 'skips without its input', which describes running it bare from a shell; that is not a state the flow is ever in (vibe-ic#659).",
-    "waiver_growth_check.py": "unwired for lack of a CALLER, not for lack of an input — requires only project_dir, which a real run always has. The previous note said it 'skips without its input', which describes running it bare from a shell; that is not a state the flow is ever in (vibe-ic#659)."
+    "waiver_growth_check.py": "unwired for lack of a CALLER, not for lack of an input — requires only project_dir, which a real run always has. The previous note said it 'skips without its input', which describes running it bare from a shell; that is not a state the flow is ever in (vibe-ic#659).",
+    "opcode_field_width_consistency_check.py": "vibe-ic#2169. Never wired; credited until v1.19.32 because `l15_encoding_tables_contract_check` imports it. That consumer takes `_iter_l15_name_hex`, `_hexval` and `_l3_name_hex` — three `_`-PRIVATE parsers — and reconciles the L15 table itself; it never reaches this gate's `main` and never reads a verdict out of it, and no other file in any haystack invokes it. `gate_is_wired_check` has recorded it as unwired since vibe-ic#2141 under the same rule; this register only caught up when the two stopped answering separately. Wireable at the step that already reads L15: it takes --l15/--l3 and emits a verdict, so it belongs in `flow_compliance_check.py`'s registry beside the L15 contract check, measured green on a real design first."
   },
   "unwired_by_decision": {
     "checkpoint_gate_check.py": "ROTTED, not merely unwired (vibe-ic#693). It runs without crashing but addresses a directory layout the flow abandoned. MEASURED over the 46 run trees on a working checkout: 46/46 FAIL at checkpoint 1, 46/46 at checkpoint 2, 46/46 at checkpoint 3 - 100 percent, and every red is path rot, not a defect. On one real DRC-clean Phase-3 run (9050 measured shapes in the layout it consumed) CP1 reports 8 MISSING of 9 because phase1_spec/01_prompt.md..05_appnote.md do not exist - the run uses phase1/generated_docs/ - and only l_layer_docs PASSes. CP2 reports 5 MISSING + 1 FAIL of 12 including two ACTIVE MIS-READS: the required-file glob for RTL resolves to the FORMAL file ([PASS] file:rtl -> phase2/stage1/formal/formal_spm.sv, a false MATCH rather than a false miss), and cell_count reports 0 cell(s) on a run that placed real cells. No insertion point exists either: grep -c checkpoint over flow/phase1_phase2_phase3.yaml is 0 - the flow has no checkpoint concept, only per-step gates. Its substance is already covered: CP1 L-doc presence by phase1_doc_presence_check (the one sub-check that passes), CP2 synth/DEF/GDS/DRC by flow steps 14/16/31/37 (gds_substance_check, drc_report_check, provenance_check), CP3 FPGA sign-off by step 37 plus the FPGA cap-gap waiver machinery. Wiring it in ANY form, blocking or reporting, is an outage that trains readers to ignore it. The repair is to rewrite the checklist against the current layout or delete the program - not to wire it. Tracked as the checkpoint-gate SKILL rot noted in skills/checkpoint-gate/SKILL.md.",
@@ -45,5 +47,6 @@
         "measured_at": "bc82135d56786c9e26040720197552c88d8bd3c3"
       }
     }
-  }
+  },
+  "measured_under": "invocation.v2"
 }
