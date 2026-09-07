@@ -302,6 +302,42 @@ RULE_AI_FIELD_PATH_UNDECLARED = "EXPERT_TRACK_AI_EXPECTATION_FIELD_PATH_UNDECLAR
 # MEASURED on the same run: 11 of 43 disagreements — including 5 of the 10 the
 # issue classifies as asking the wrong layer — have such a layer.
 RULE_AI_MISSCOPED = "EXPERT_TRACK_AI_EXPECTATION_MISSCOPED"
+# An expectation naming a layer THE L-DOC TAXONOMY DOES NOT DECLARE (#2150).
+# `about: "track"`, its own rule id, and deliberately NARROW.
+#
+# The wider reading was tried first and is wrong. "The root has no such
+# document" is NOT by itself a track defect: `l_doc_taxonomy` declares 28
+# layers, and a layer it declares that the root does not carry is the PROGRAM
+# TRACK failing to emit a document its own taxonomy says applies — a real
+# disagreement, and issue #312 pinned it as one on the grounds that silence
+# there would be the original defect exactly. That test is right and this
+# landing leaves its verdict alone.
+#
+# What the taxonomy CANNOT account for is a layer that does not exist in the
+# contract at all. Then nothing was pointed at: the expectation addresses a
+# document this plugin never emits for any class, so the miss is a fact about
+# the EXPECTATION (or about the artefact it was computed from), and filing it
+# as a design gap says the tree lacks a fact whose home the tree has never
+# had. That is #2150 F11's shape — a decision table computed over a different
+# Phase-1 root, whose OWNER cells name leaves the judged artefact lacks.
+#
+# MEASURED on the surviving opentitan_aes root (24 files / 23 codes; the
+# taxonomy declares 28): `L24_SIGNOFF` IS declared by the taxonomy, so it
+# stays a disagreement and only gains the taxonomy fact and an owning-layer
+# answer; a name the taxonomy does not declare is refused here by name.
+RULE_AI_LAYER_ABSENT = "EXPERT_TRACK_AI_EXPECTATION_LAYER_ABSENT"
+# A SPLIT expectation whose grammar is self-contradictory or empty (#2150).
+# Reuses `RULE_AI_UNUSABLE` rather than inventing a token: an expectation the
+# comparator cannot decide is one situation, and it already has a name. What
+# is new is that a split can be undecidable in ways a single expectation
+# cannot — no branches, a branch with no layer, a branch that itself splits,
+# or a parent that states BOTH a split and its own `expected_tokens`.
+SPLIT_KEY = "sub_expectations"
+#: `field_path_status` / `layer_present` on a SPLIT parent. The parent
+#: addresses no single field and no single layer, so answering DECLARED or
+#: True for it would be a reading of one branch reported as a reading of the
+#: expectation. The branches carry their own, per branch.
+SPLIT_MARKER = "SPLIT"
 # An expectation the author has WITHDRAWN, with the reason it was withdrawn
 # (#2127, second addendum; the disposition #2132 reaches for 12 of its 30 rows).
 # A withdrawn expectation is a DECISION, and a decision that leaves no trace is
@@ -1162,6 +1198,294 @@ def emitted_layer_files(project: Path) -> List[Path]:
     return []
 
 
+#: How deep an authoring schema enumerates. Two segments is what an
+#: expectation writes in practice (`fields.notes`, `records.offset`) and it
+#: keeps the pack bounded; the DEPTH IS STATED in the schema, so a reader
+#: knows a path is absent from the list because it is deeper, not because the
+#: layer does not declare it.
+AUTHORING_PATH_DEPTH = 2
+#: Per-layer cap, also stated. A truncated list that did not say so would be
+#: read as "these are all the paths", which is the exact defect this schema
+#: exists to end, one level over.
+AUTHORING_PATHS_PER_LAYER = 200
+
+
+def declared_field_paths(blob: Any, layer: Any = None,
+                         max_depth: int = AUTHORING_PATH_DEPTH) -> List[str]:
+    """The dotted paths this layer document declares, to `max_depth`.
+
+    SELF-VERIFIED AGAINST `subtree_at`, which is what `field_path_status` —
+    the guard — resolves with. Every candidate this walk produces is resolved
+    before it is emitted, and one that does not resolve is dropped: the schema
+    an author is handed must be exactly the set the guard accepts, and this
+    module has already measured what two answers about one path cost. An
+    earlier revision of the #2127 landing collected "the paths this document
+    declares" in a second walk, the two disagreed within a day, and a path
+    read DECLARED and then fell back to a whole-layer search anyway.
+
+    So this is not a second authority. It is a candidate generator whose
+    output is filtered by the one authority there is.
+    """
+    out: List[str] = []
+
+    def walk(node: Any, prefix: str, depth: int) -> None:
+        if depth > max_depth:
+            return
+        if isinstance(node, list):
+            for v in node:
+                walk(v, prefix, depth)
+            return
+        if not isinstance(node, dict):
+            return
+        for k, v in node.items():
+            path = f"{prefix}.{k}" if prefix else str(k)
+            out.append(path)
+            walk(v, path, depth + 1)
+
+    walk(blob, "", 1)
+    seen: set = set()
+    kept: List[str] = []
+    for path in out:
+        if path in seen:
+            continue
+        seen.add(path)
+        if subtree_at(blob, path, layer) is not None:
+            kept.append(path)
+    return sorted(kept)
+
+
+def authoring_schema(project: Path) -> Dict[str, Any]:
+    """THE DECLARATION AN EXPECTATION AUTHOR IS HANDED (#2150 F5).
+
+    THE DEFECT THIS CLOSES, measured on the pack this track itself emits.
+    `ic_expert_backup_pack` wrote a HARD-CODED two-entry contract —
+    `{"L9": "integration specification", "L19": "constraints and
+    implementation context"}` — for a project whose Phase-1 root carries 24
+    layer documents, and an `answer_contract` documenting `field_path` as
+    `"optional field path"` and nothing else. An author handed that pack can
+    address only two of the twenty-four layers, and can only INVENT a path out
+    of the two prose words it was given. That is where `integration.*` and
+    `constraints.*` came from, and why the #2127 guard then refused 46 of 46
+    field_paths as undeclared: the pack manufactured the very authoring defect
+    the guard was built to catch, and the guard reported the author.
+
+    A guard that refuses at review time and a schema that refuses at authoring
+    time are the same declaration read at two moments. This is that
+    declaration, derived from the project's own emitted L-docs and filtered
+    through `subtree_at` — so a path this schema lists is a path the guard
+    accepts, by construction rather than by agreement.
+
+    NOT_MEASURED when no L-doc is readable: an empty schema would be an author
+    told that no layer declares anything, which is a false statement about the
+    root rather than an absent one.
+    """
+    files = emitted_layer_files(project)
+    if not files:
+        return {"status": "NOT_MEASURED",
+                "reason": ("no L-doc was found under "
+                           f"{list(_L_DOC_DIRS)}, so no authoring schema can "
+                           "be derived — this is 'could not read the root', "
+                           "never 'read it and no layer declares anything'"),
+                "layers": {}}
+
+    import l_doc_taxonomy as _tax
+    purpose = {}
+    for spec in _tax.L_DOCS_V2:
+        purpose[spec.full_name] = f"{spec.title} — {spec.description}"
+
+    layers: Dict[str, Any] = {}
+    unreadable: List[str] = []
+    for f in files:
+        try:
+            blob = json.loads(f.read_text(errors="replace"))
+        except (OSError, ValueError) as exc:
+            # Named, never silently absent: a layer nobody could read is not a
+            # layer that declares nothing.
+            unreadable.append(f"{f.stem}: {exc.__class__.__name__}")
+            continue
+        paths = declared_field_paths(blob, f.stem)
+        layers[f.stem] = {
+            "purpose": purpose.get(f.stem, "no taxonomy entry declares this "
+                                           "layer name"),
+            "declared_field_path_count": len(paths),
+            "declared_field_paths": paths[:AUTHORING_PATHS_PER_LAYER],
+            "truncated": len(paths) > AUTHORING_PATHS_PER_LAYER,
+        }
+    return {
+        "status": "OK",
+        "schema": "vibeic.phase1-expert-expectation-authoring.v1",
+        "phase1_root": phase1_root_identity(project),
+        "unreadable": unreadable,
+        "enumeration": {
+            "max_depth": AUTHORING_PATH_DEPTH,
+            "per_layer_cap": AUTHORING_PATHS_PER_LAYER,
+            "basis": ("every path here was resolved with the SAME resolver "
+                      "the review-time guard uses, so a path this schema "
+                      "lists is a path the guard accepts. A path absent from "
+                      "a layer's list is either deeper than max_depth or not "
+                      "declared — the counts say which"),
+        },
+        "rule": ("an expectation's `field_path` MUST be one this schema lists "
+                 "for the layer it addresses, or be omitted entirely. A path "
+                 "no layer declares is refused BY NAME at review time and the "
+                 "reading silently falls back to the whole layer, so the "
+                 "finding then describes a field nothing looked at"),
+        "layers": layers,
+    }
+
+
+def refuse_undeclared_field_path(schema: Dict[str, Any], layer: Any,
+                                 field_path: Any) -> Optional[str]:
+    """The AUTHORING-time half of the guard: why this path may not be written.
+
+    `None` when the path is acceptable. A REASON when it is not — never a
+    bare boolean, because the author has to be told which layer was consulted
+    and what it does declare, or the refusal costs more than it saves.
+
+    An ABSENT field_path is acceptable: the expectation then addresses the
+    whole layer and says so. That is a weaker claim, not an authoring error,
+    and refusing it here would make this schema stricter than the guard it is
+    supposed to be the other reading of.
+    """
+    if schema.get("status") != "OK":
+        return None          # nothing was read; refusing on that is a guess
+    if not str(field_path or "").strip():
+        return None
+    layers = schema.get("layers") or {}
+    stem = None
+    want = str(layer or "").strip().lower()
+    if want:
+        # TWO PASSES, EXACT FIRST — mirroring `resolve_layer_file`, which
+        # tries the exact filename before falling back to the `L<number>`
+        # token. One pass is not the same function: two layer documents share
+        # a numeric prefix (`L8_RTL_CONSTANTS` and `L8_TIMING_WAVEFORM`), so a
+        # single loop that accepts either match returns whichever sorts first
+        # and answers about the wrong document. MEASURED on a 504-path sweep
+        # of a real root: 502 agreed with the guard and the 2 that did not
+        # were both L8, both this collision. Compare identities, not names.
+        exact = [n for n in sorted(layers) if n.lower() == want]
+        stem = exact[0] if exact else None
+        if stem is None:
+            m = re.match(r"^\s*(l\s*\d+)", want)
+            key = re.sub(r"\s+", "", m.group(1)) if m else None
+            if key:
+                pref = [n for n in sorted(layers)
+                        if n.lower() == key or n.lower().startswith(key + "_")]
+                stem = pref[0] if pref else None
+    if stem is None:
+        return (f"no layer named {layer!r} is in this Phase-1 root; it "
+                f"carries {sorted(layers)}")
+    declared = layers[stem]["declared_field_paths"]
+    norm = _normalise_field_path(field_path, layer)
+    if any(_normalise_field_path(d) == norm for d in declared):
+        return None
+    if layers[stem]["truncated"]:
+        # The list is not the whole set, so a miss is not a proof. Say so
+        # rather than refuse on an enumeration that admits it is partial.
+        return None
+    return (f"{stem} declares no field_path {field_path!r}. It declares "
+            f"{declared[:20]}"
+            + (" (first 20 of "
+               f"{layers[stem]['declared_field_path_count']})"
+               if len(declared) > 20 else "")
+            + ". Address a path this layer declares, or omit `field_path` and "
+              "state that the expectation is about the whole layer.")
+
+
+def taxonomy_layer_stems() -> List[str]:
+    """Every L-doc stem `l_doc_taxonomy` declares — the ONE roster.
+
+    Read from the taxonomy module rather than re-listed here: a second list of
+    the layers that exist is a second answer to a question this repo already
+    answers in one place, and the two drift on the first extension.
+    `NOT_MEASURED` is impossible — the roster is a module constant — but an
+    import failure must not be spelled as an empty roster, so it raises.
+    """
+    import l_doc_taxonomy as _tax
+    return list(_tax.all_l_doc_full_names())
+
+
+def layer_declared_by_taxonomy(layer: Any) -> bool:
+    """Does the taxonomy declare a layer of this name?
+
+    Matched the way `resolve_layer_file` matches a document — on the leading
+    `L<number>` token, plus the exact stem — so a spelling the resolver
+    accepts is a spelling this answers for. Two matchers for one question is
+    how a layer comes to be present for one reader and absent for the other.
+    """
+    want = (layer or "").strip()
+    if not want:
+        return False
+    stems = [s.lower() for s in taxonomy_layer_stems()]
+    if want.lower() in stems:
+        return True
+    m = re.match(r"^\s*(l\s*\d+)", want.lower())
+    if not m:
+        return False
+    key = re.sub(r"\s+", "", m.group(1))
+    return any(s == key or s.startswith(key + "_") for s in stems)
+
+
+def phase1_root_identity(project: Path) -> Dict[str, Any]:
+    """WHICH Phase-1 root this run judged, as a value a later reader can check.
+
+    Every artefact in the #2127/#2132/#2150 chain — a classification, a
+    decision table, a repaired corpus — is an answer ABOUT one Phase-1 root,
+    and none of them said which. MEASURED (#2150 F11, re-measured here): the
+    table computed for #2132 names `L24_SIGNOFF` as an owning layer and the
+    published opentitan_aes root has 23 layer codes in 24 files and no `L24`
+    at all, so two of its OWNER cells address a document that does not exist.
+    Reading such a table against this root does not disagree with it — it
+    silently answers a different question.
+
+    So the root is IDENTIFIED, by MEMBERSHIP (the layer stems) and by CONTENT
+    (a digest over each layer's bytes). Membership is the half a substitution
+    cannot disturb, and content is the half a re-run can. Both are recorded;
+    neither is reduced to the other.
+
+    `NOT_MEASURED` when no L-doc is readable — never an empty root presented
+    as a root that was read.
+    """
+    files = emitted_layer_files(project)
+    if not files:
+        return {"status": "NOT_MEASURED",
+                "reason": ("no L-doc was found under "
+                           f"{list(_L_DOC_DIRS)} — this is 'could not read "
+                           "the Phase-1 root', never 'read it and it was "
+                           "empty'"),
+                "layers": [], "digest": None}
+    import hashlib
+    per = []
+    for p in files:
+        try:
+            raw = p.read_bytes()
+        except OSError:
+            per.append((p.stem, "UNREADABLE"))
+            continue
+        per.append((p.stem, hashlib.sha256(raw).hexdigest()))
+    joined = "\n".join(f"{stem} {dig}" for stem, dig in sorted(per))
+    present = sorted(stem for stem, _ in per)
+    declared = taxonomy_layer_stems()
+    return {
+        "status": "OK",
+        "layers": present,
+        "layer_count": len(per),
+        # WHICH declared layers this root does NOT carry. The half that makes
+        # a cross-root artefact readable: an expectation, a classification or
+        # a decision table naming one of these was computed against a root
+        # that had it, and this one does not — which is a different question
+        # from a disagreement, and reads identically without this list.
+        "taxonomy_layer_count": len(declared),
+        "taxonomy_layers_absent": sorted(set(declared) - set(present)),
+        "digest": hashlib.sha256(joined.encode("utf-8")).hexdigest(),
+        "digest_basis": ("sha256 over the sorted `<layer stem> <sha256 of the "
+                         "layer file>` lines — membership and content, kept "
+                         "separable so a reader can see which of the two "
+                         "moved"),
+        "root_dir": str(files[0].parent),
+    }
+
+
 def owning_layers(project: Path, tokens: List[str],
                   exclude: Optional[Path] = None) -> List[str]:
     """The layers that carry EVERY one of these tokens — the scope answer.
@@ -1201,12 +1525,173 @@ def owning_layers(project: Path, tokens: List[str],
     return sorted(out)
 
 
+def _split_refusal(base: Dict[str, Any], why: str) -> Dict[str, Any]:
+    """A split this comparator cannot decide. `usable` stays False."""
+    base["split"] = True
+    base["observed"] = why
+    return base
+
+
+def _converge_split(project: Path, base: Dict[str, Any], exp: Any,
+                    raw: Any) -> Dict[str, Any]:
+    """Decide a SPLIT expectation: N scoped branches, ALL of which must agree.
+
+    Every refusal here is a refusal to DECIDE, never a verdict: an ill-formed
+    split is `usable: False` and is reported under `RULE_AI_UNUSABLE`, the
+    same way an ill-formed single expectation is. Silently treating a broken
+    split as "not met" would put a design finding on the record for an
+    authoring mistake, which is the family of defect this whole issue is.
+    """
+    base["split"] = True
+    base["field_path_status"] = SPLIT_MARKER
+    base["layer_present"] = SPLIT_MARKER
+    base["scope"] = SPLIT_MARKER
+
+    if not base["id"]:
+        return _split_refusal(base, "the split expectation names no id, so "
+                                    "there is nothing to compare it against")
+    # A parent that states BOTH grammars is ambiguous by construction: each
+    # would produce a verdict and the report could not say which one decided.
+    if exp.get("expected_tokens") or exp.get("layer") or exp.get("field_path"):
+        return _split_refusal(
+            base,
+            f"the expectation states BOTH a {SPLIT_KEY!r} list and its own "
+            f"layer/field_path/expected_tokens. Those are two grammars, each "
+            f"of which would decide the row, and a report that carried one "
+            f"verdict could not say which of them produced it. State the "
+            f"split alone: every address belongs to a branch")
+    if not isinstance(raw, list):
+        return _split_refusal(
+            base, f"{SPLIT_KEY!r} is a {json_type_name(raw)}, not a list of "
+                  f"branches, so no branch can be read from it")
+    if not raw:
+        return _split_refusal(
+            base, f"{SPLIT_KEY!r} is an empty list. A split with no branches "
+                  f"decides nothing, and a denominator of zero cannot be an "
+                  f"agreement")
+
+    branches: List[Dict[str, Any]] = []
+    for i, sub in enumerate(raw):
+        if not isinstance(sub, dict):
+            return _split_refusal(
+                base, f"branch {i} is a {json_type_name(sub)}, not an object")
+        if sub.get(SPLIT_KEY) is not None:
+            return _split_refusal(
+                base, f"branch {i} carries its own {SPLIT_KEY!r}. A split is "
+                      f"exactly one level deep: a nested one would make the "
+                      f"row's denominator depend on a shape no reader of the "
+                      f"report can see")
+        # The branch inherits what it did not state. `requirement` and
+        # `evidence` belong to the FACT, which is one fact however many layers
+        # carry it; `layer`, `field_path` and `expected_tokens` are the
+        # branch's own address and are never inherited.
+        child = {
+            "id": f"{base['id']}#{i}",
+            "layer": sub.get("layer"),
+            "field_path": sub.get("field_path"),
+            "requirement": sub.get("requirement") or base["requirement"],
+            "evidence": sub.get("evidence") or base["evidence"],
+            "expert_source": sub.get("expert_source") or base.get(
+                "expert_source"),
+            "expected_tokens": sub.get("expected_tokens"),
+        }
+        res = converge_ai_expectation(project, child)
+        if not res["usable"]:
+            return _split_refusal(
+                base, f"branch {i} ({child['id']}) cannot be converged: "
+                      f"{res['observed']}. A split is decided only when every "
+                      f"branch is")
+        branches.append(res)
+
+    base["usable"] = True
+    base["sub_results"] = branches
+    base["sub_layers"] = [b["layer"] for b in branches]
+
+    # A branch addressing a layer this Phase-1 root does not contain (#2150,
+    # first commit) makes the whole conjunction undecidable about the DESIGN:
+    # one conjunct was never opened. Propagated to the parent so the row is
+    # refused ONCE, under the layer-absent rule, naming the branch — rather
+    # than decided `met: False` and published as a design gap.
+    absent = [b for b in branches if b["layer_present"] is False]
+    if absent:
+        base["layer_present"] = False
+        base["layers_in_root"] = absent[0].get("layers_in_root") or []
+        # A conjunction containing a term NO root can ever satisfy is refused
+        # as a track finding; one whose absent terms are all declared layers
+        # is the program track not emitting documents its contract applies,
+        # which is #312's disagreement and stays one. ANY undeclared term is
+        # enough: a single unanswerable branch makes the whole conjunction
+        # unanswerable, however well-formed the rest of it is.
+        base["layer_in_taxonomy"] = all(b["layer_in_taxonomy"]
+                                        for b in absent)
+        # The parent states no `layer` of its own, so the finding would name
+        # none. Name the branches that are actually missing.
+        base["layer"] = ", ".join(b["layer"] for b in absent)
+        base["owning_layers"] = (
+            sorted({L for b in absent for L in b["owning_layers"]})
+            if all(b["owning_layers"] for b in absent) else [])
+        base["observed"] = (
+            f"{len(absent)} of {len(branches)} branch(es) of this split "
+            f"address a layer this Phase-1 root does not contain "
+            f"({[b['layer'] for b in absent]}), so the conjunction was never "
+            f"evaluated: " + "; ".join(f"[{b['id']}] {b['observed']}"
+                                       for b in absent))
+        return base
+
+    # THE CONJUNCTION. Every branch, never any.
+    base["met"] = all(b["met"] for b in branches)
+    failed = [b for b in branches if not b["met"]]
+    base["missing_tokens"] = sorted({t for b in failed
+                                     for t in (b.get("missing_tokens") or [])})
+    # The parent's owning-layer answer is the answer for the branches that
+    # MISSED, and only when every one of them has one: a split whose failing
+    # halves are each carried elsewhere is a re-scope, and one whose failing
+    # half is carried nowhere is a disagreement about the design. Mixing the
+    # two would let one re-scopable branch launder a real gap.
+    base["owning_layers"] = (
+        sorted({L for b in failed for L in (b["owning_layers"] or [])})
+        if failed and all(b["owning_layers"] for b in failed) else [])
+    if base["met"]:
+        base["observed"] = (
+            f"all {len(branches)} branch(es) of this split agree: "
+            + "; ".join(f"{b['layer']}.{b['field_path']} carries "
+                        f"{b['expected_tokens']}" for b in branches))
+    else:
+        base["observed"] = (
+            f"{len(failed)} of {len(branches)} branch(es) of this split "
+            f"disagree — a split is met only when EVERY branch is: "
+            + "; ".join(f"[{b['id']}] {b['observed']}" for b in failed))
+    return base
+
+
 def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
     """Decide ONE AI expectation against what the program track actually wrote.
 
     Returns the expectation enriched with `met` / `observed` / `usable`. Any
     `met` the answer carried is DISCARDED before the decision — see the module
     docstring on why the AI half must not score itself.
+
+    TWO GRAMMARS (#2150). An expectation is either SINGLE — one `layer`, one
+    optional `field_path`, one `expected_tokens` list — or SPLIT: a
+    `sub_expectations` list of branches, each with its own layer, field_path
+    and tokens, ALL of which must agree. A split is decided branch by branch
+    through exactly the same single-expectation machinery, so scoping, the
+    field_path guard and the owning-layer answer apply per branch, unchanged.
+
+    WHY A SPLIT HAD TO EXIST. MEASURED on the surviving opentitan_aes Phase-1
+    root: an expectation whose two halves the program track extracted into two
+    DIFFERENT layers (the FSM encoding in L1, the power budget in L19) is
+    `met: False` in either layer, and `owning_layers` is empty because no
+    single layer carries every token. It is therefore published as
+    `about: "design"` — "the program track is missing this" — about a fact the
+    program track has, in full, twice over. A conjunction that cannot be
+    written down is not a fact the corpus lacks; it is a sentence the grammar
+    cannot say, and the report blames the design for the difference.
+
+    THE SPLIT IS A CONJUNCTION, NOT A DISJUNCTION. Every branch must agree.
+    An "any branch" form would make a two-branch expectation EASIER to satisfy
+    than either of its halves, which is a comparator that gets weaker as an
+    author writes more — the opposite of what this track is for.
     """
     base: Dict[str, Any] = {
         "id": None, "layer": None, "field_path": None, "requirement": None,
@@ -1224,6 +1709,15 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
         # None = the expectation was not withdrawn. "" = it was withdrawn with
         # no usable reason, which is refused. A non-empty string is the reason.
         "withdrawn_reason": None,
+        # #2150. Whether the Phase-1 root CONTAINS the layer this expectation
+        # addresses. NOT_MEASURED until the lookup is done, for the same
+        # reason `field_path_status` is: an expectation refused before the
+        # root was consulted was never checked against one.
+        "layer_present": "NOT_MEASURED",
+        # Whether the L-doc TAXONOMY declares a layer of this name. Only
+        # consulted when the root does not carry the document, so it stays
+        # NOT_MEASURED whenever the question did not arise.
+        "layer_in_taxonomy": "NOT_MEASURED",
     }
     if not isinstance(exp, dict):
         base["observed"] = ("the answer contained an entry that is not an "
@@ -1262,6 +1756,14 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
         # fall through: a reasonless withdrawal is not honoured, so the
         # expectation is decided exactly as if it had never carried one.
 
+    # ── SPLIT or SINGLE (#2150) ────────────────────────────────────────────
+    # Dispatched HERE: after the withdrawal (a split can be withdrawn like any
+    # other row) and before the single-expectation checks, whose `layer` and
+    # `expected_tokens` requirements a split parent deliberately does not meet.
+    raw_split = exp.get(SPLIT_KEY)
+    if raw_split is not None:
+        return _converge_split(project, base, exp, raw_split)
+
     if not base["id"] or not base["layer"]:
         base["observed"] = ("the expectation names no id and/or no layer, so "
                             "there is nothing to compare it against")
@@ -1276,9 +1778,39 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
     base["usable"] = True
     path = resolve_layer_file(project, base["layer"])
     if path is None:
-        base["observed"] = (f"the program track produced no "
-                            f"{base['layer']} layer at all")
+        # #2150 — the LAYER is absent from the Phase-1 root. Recorded as its
+        # own fact rather than left to fall through: the whole-layer reading
+        # never happened, so `met: False` here is not a statement about the
+        # design and the caller must not file it as one.
+        base["layer_present"] = False
+        base["layers_in_root"] = [q.stem for q in emitted_layer_files(project)]
+        # Is this a layer the CONTRACT declares? The two cases need different
+        # readers: a declared layer the root does not carry is the program
+        # track not emitting a document its own taxonomy applies (#312's
+        # disagreement, kept), and an undeclared one is an expectation
+        # addressing a document this plugin never emits (#2150, refused).
+        base["layer_in_taxonomy"] = layer_declared_by_taxonomy(base["layer"])
+        # Asked even though the addressed layer is missing: a fact that lives
+        # wholly in a layer the root DOES carry is a re-scope with a named
+        # destination. `exclude=None` — there is no addressed file to exclude.
+        # Additive: it cannot make a row agree, only say where the fact is.
+        base["owning_layers"] = owning_layers(project, base["expected_tokens"])
+        # The FIRST sentence is unchanged from before this landing. Downstream
+        # readers (and #312's own test) quote it, and a landing that rewords a
+        # sentence it did not need to change makes itself unreviewable.
+        base["observed"] = (
+            f"the program track produced no {base['layer']} layer at all"
+            + (" — and the L-doc taxonomy declares no layer of that name, so "
+               "no document of this kind is emitted for any ic_class"
+               if not base["layer_in_taxonomy"] else
+               f" (the taxonomy DOES declare it; this Phase-1 root carries "
+               f"{len(base['layers_in_root'])} layer document(s) and not "
+               f"that one)")
+            + (f"; {base['owning_layers']} carries every one of the "
+               f"{len(base['expected_tokens'])} expected token(s)"
+               if base["owning_layers"] else ""))
         return base
+    base["layer_present"] = True
     try:
         blob = json.loads(path.read_text(errors="replace"))
     except (OSError, ValueError) as exc:
@@ -1392,12 +1924,21 @@ def ai_subtrack(project: Path, prompt: str, out_dir: Path,
         # expectations, not an RTL body, so there is no recovered port list to
         # hand over. Whether that leaves the pack empty is now the pack's own
         # stated verdict rather than something a reader has to notice.
+        # #2150 F5 — the pack carries the AUTHORING schema, derived from this
+        # project's own emitted L-docs and filtered through the resolver the
+        # review-time guard uses. Passed rather than hard-coded in the pack:
+        # the pack cannot see the project, and a contract that names two
+        # layers for a root that has two dozen is what made every expectation
+        # address one of those two.
+        schema = authoring_schema(project)
+        status["authoring_schema_status"] = schema["status"]
+        status["authoring_schema_layer_count"] = len(schema.get("layers") or {})
         handoff = _pack.assemble(
             prompt=prompt, iface=None, target=None,
             expert_skills=[], verify_gates=[PROGRAM],
             out_dir=out_dir, k=5,
             output_target="l_doc_expectations.json",
-            ic_class=ic_class)
+            ic_class=ic_class, authoring_schema=schema)
         status["handoff"] = handoff
         # The disposition is recorded for EVERY design, profiled or not: the
         # pack file only gains a `class_first` block when there was a profile
@@ -1579,6 +2120,75 @@ def evaluate(project: Path) -> Dict[str, Any]:
                     f"would make the AI half look like it agreed."),
             })
             continue
+
+        # ── the field_path guard, PER BRANCH, for a SPLIT (#2150) ─────────
+        # The guard is ADDITIVE and independent of the verdict, so it is
+        # emitted per branch and named `<parent id>#<i>`: a split whose third
+        # branch names an undeclared path has ONE repairable branch, and a
+        # refusal naming only the parent would send the author to re-read all
+        # of them. The parent's own `field_path_status` is SPLIT — it
+        # addresses no single field, and answering DECLARED for it would
+        # report a reading of one branch as a reading of the expectation.
+        for b in (c.get("sub_results") or []):
+            if b["field_path_status"] != "UNDECLARED":
+                continue
+            findings.append({
+                "severity": "REVIEW",
+                "about": "track",
+                "rule": f"{RULE_AI_FIELD_PATH_UNDECLARED}::{b['id']}",
+                "layer": b["layer"],
+                "field_path": b["field_path"],
+                "message": (
+                    f"Branch {b['id']} of this split expectation named "
+                    f"field_path {b['field_path']!r} in {b['layer']}, and "
+                    f"that layer declares no such path. It declares "
+                    f"{b.get('layer_declares') or '(no top-level keys)'}. "
+                    f"The branch is REFUSED by name rather than left to "
+                    f"appear as a field that was checked: that branch's "
+                    f"reading was decided over the WHOLE layer. Repair the "
+                    f"branch's field_path to a path its layer declares."),
+            })
+
+        # ── the layer is not in the CONTRACT at all (#2150) ────────────────
+        # Refused BY NAME and `about: "track"`, and only for a layer the
+        # L-doc taxonomy does not declare. A DECLARED layer this root does not
+        # carry stays the disagreement #312 made it: the program track did not
+        # emit a document its own taxonomy applies, and silence there was the
+        # original defect. What is refused here is an expectation addressing a
+        # document this plugin never emits for any ic_class — the shape a
+        # decision table computed over a DIFFERENT Phase-1 root produces, and
+        # a shape no extractor can ever repair.
+        if c["layer_present"] is False and c["layer_in_taxonomy"] is False:
+            findings.append({
+                "severity": "REVIEW",
+                "about": "track",
+                "rule": f"{RULE_AI_LAYER_ABSENT}::{c['id']}",
+                "layer": c["layer"],
+                "field_path": c["field_path"],
+                "owning_layers": c["owning_layers"],
+                "layers_in_root": c.get("layers_in_root") or [],
+                "message": (
+                    f"The AI sub-track addressed layer {c['layer']!r}, and "
+                    f"the L-doc taxonomy declares no layer of that name — so "
+                    f"no Phase-1 root of any design carries it and no "
+                    f"extractor can produce it. This root carries "
+                    f"{c.get('layers_in_root') or '(no layer document)'}. "
+                    f"The miss is a fact about the EXPECTATION, not about the "
+                    f"design"
+                    + (f"; {c['owning_layers']} carries every one of the "
+                       f"{len(c['expected_tokens'])} expected token(s), so "
+                       f"the repair is to re-scope the expectation there"
+                       if c["owning_layers"] else
+                       ". Either re-scope it to a layer the taxonomy "
+                       "declares, or state that the expectation was computed "
+                       "over a DIFFERENT artefact than the one being judged "
+                       "— an expectation naming a layer that does not exist "
+                       "answers a different question rather than "
+                       "disagreeing with this one") + "."),
+                "expert_source": c.get("expert_source"),
+            })
+            continue
+
         # ── the field_path guard (#2127) ───────────────────────────────
         # ADDITIVE and independent of the verdict: the expectation named a
         # path the layer does not declare, and until this refusal that path
@@ -1801,6 +2411,19 @@ def evaluate(project: Path) -> Dict[str, Any]:
             "credited": False,
             "exit_code": AWAITING_EXIT_CODE,
         } if awaiting else None),
+        # WHICH Phase-1 root this run judged (#2150 F11). Every artefact the
+        # expert track produces is an answer ABOUT one root, and until now
+        # none of them said which — so a classification, a decision table and
+        # a repaired corpus computed over three different roots read as three
+        # answers to one question. Membership AND content, so a later reader
+        # can tell a root that GREW from a root that CHANGED.
+        "phase1_root": phase1_root_identity(project),
+        # WHETHER the author was handed the declaration (#2150 F5). A run
+        # whose pack could not carry one produced expectations authored
+        # against two prose words, and a reader has to be able to see that
+        # rather than infer it from the field_paths that came back.
+        "authoring_schema_status": ai.get("authoring_schema_status",
+                                          "NOT_EVALUATED"),
         "retrieved_expert_classes": retrieved_classes(prompt, ic_class=ic_class),
         # #2164. WHETHER that list is a measurement. An empty list from an
         # empty query and an empty list from a query that found nothing are the

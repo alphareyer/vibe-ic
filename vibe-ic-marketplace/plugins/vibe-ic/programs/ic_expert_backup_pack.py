@@ -318,7 +318,8 @@ def class_first_disposition(ic_class, availability=None) -> Dict[str, Any]:
 def assemble(prompt: str, iface: Optional[List[Dict[str, Any]]], target: Optional[str],
              expert_skills: List[str], verify_gates: List[str],
              out_dir: Path, k: int = 5, context_keys=None,
-             output_target: str = "rtl.sv", ic_class=None) -> Dict[str, Any]:
+             output_target: str = "rtl.sv", ic_class=None,
+             authoring_schema=None) -> Dict[str, Any]:
     """Assemble the IC-Expert-Agent AI-backup pack into `out_dir`. Returns the
     hand-off descriptor (also written to `out_dir/ic_expert_agent_handoff.json`).
     `context_keys` (optional) = the record's `input.context` file paths, used for
@@ -498,29 +499,103 @@ def assemble(prompt: str, iface: Optional[List[Dict[str, Any]]], target: Optiona
         input_name = "design_input.txt"
         (out_dir / input_name).write_text(prompt)
         handoff["read_design_input_from"] = input_name
-        handoff["generated_layer_contract"] = {
-            "L9": "integration specification",
-            "L19": "constraints and implementation context",
+        # THE LAYER CONTRACT (#2150 F5). Two entries were hard-coded here —
+        # `{"L9": ..., "L19": ...}` — for projects whose Phase-1 root carries
+        # two dozen layer documents. An author handed that pack can address
+        # only those two layers, so every expectation was scoped to one of
+        # them whatever layer actually owned the fact; and `field_path` was
+        # documented as "optional field path" with no vocabulary at all, so
+        # the only paths an author could write were invented out of the two
+        # prose descriptions. MEASURED: `integration.*` on L9 and
+        # `constraints.*` on L19, 46 of 46 refused by the #2127 guard as
+        # undeclared. The pack manufactured the authoring defect the guard
+        # then reported.
+        #
+        # So the caller may supply the schema DERIVED from the project's own
+        # emitted L-docs, and it replaces both halves. When it does not, the
+        # descriptor is byte-identical to the pre-#2150 one: a pack for a
+        # caller that cannot derive a schema must not change shape, or a
+        # change here becomes indistinguishable from drift somewhere else.
+        derived = (authoring_schema or {}) if \
+            (authoring_schema or {}).get("status") == "OK" else {}
+        if derived:
+            handoff["generated_layer_contract"] = {
+                stem: info["purpose"]
+                for stem, info in sorted(derived["layers"].items())}
+            (out_dir / "authoring_schema.json").write_text(
+                json.dumps(derived, indent=2, ensure_ascii=False))
+            handoff["authoring_schema"] = {
+                "file": "authoring_schema.json",
+                "schema": derived["schema"],
+                "layer_count": len(derived["layers"]),
+                "declared_field_path_count": sum(
+                    i["declared_field_path_count"]
+                    for i in derived["layers"].values()),
+                "phase1_root_digest": (derived.get("phase1_root")
+                                       or {}).get("digest"),
+                "rule": derived["rule"],
+            }
+        else:
+            handoff["generated_layer_contract"] = {
+                "L9": "integration specification",
+                "L19": "constraints and implementation context",
+            }
+        shape = {
+            "id": "stable rule-and-subject identifier",
+            "layer": "generated L-layer name",
+            "field_path": ("a field path THIS LAYER DECLARES, per "
+                           "authoring_schema.json — or omitted, which states "
+                           "that the expectation is about the whole layer"
+                           if derived else "optional field path"),
+            "requirement": "what the input requires the layer to carry",
+            "evidence": ["input-only evidence supporting the expectation"],
+            "expected_tokens": ["one or more tokens to compare"],
+        }
+        # THE SPLIT FORM (#2150 class 3). Advertised here because a grammar
+        # the author is never shown is a grammar nobody writes: the two rows
+        # that needed it were filed as design gaps for exactly as long as the
+        # pack described one layer per expectation.
+        split_shape = {
+            "id": "stable rule-and-subject identifier",
+            "requirement": "what the input requires, as ONE fact",
+            "evidence": ["input-only evidence supporting the expectation"],
+            "sub_expectations": [{
+                "layer": "generated L-layer name",
+                "field_path": "a field path THAT layer declares, or omitted",
+                "expected_tokens": ["one or more tokens to compare"],
+            }],
         }
         handoff["answer_contract"] = {
             "schema": "vibeic.phase1-expert-expectations.v1",
             "minimum_expectations": 1,
-            "shape": {
-                "expectations": [{
-                    "id": "stable rule-and-subject identifier",
-                    "layer": "generated L-layer name",
-                    "field_path": "optional field path",
-                    "requirement": "what the input requires the layer to carry",
-                    "evidence": ["input-only evidence supporting the expectation"],
-                    "expected_tokens": ["one or more tokens to compare"],
-                }],
+            "shape": {"expectations": [shape]},
+            "split_shape": {
+                "when": ("the fact is ONE fact and the layers that carry it "
+                         "are more than one — every branch must agree, and a "
+                         "branch is scoped and guarded exactly as a single "
+                         "expectation is"),
+                "expectations": [split_shape],
+                "not_a_disjunction": ("all branches must agree; a split is "
+                                      "never easier to satisfy than any one "
+                                      "of its halves"),
             },
             "rules": [
                 "read only design_input.txt plus the two expert digests",
                 "never read an oracle, harness, golden artifact, or hidden answer",
                 "write the JSON object to l_doc_expectations.json",
                 "an empty expectations list is incomplete, not a completed review",
-            ],
+            ] + ([
+                "address a layer this pack's generated_layer_contract names — "
+                "it lists EVERY layer this project emitted, not a subset",
+                "a `field_path` must be one authoring_schema.json lists for "
+                "the layer you address, or be omitted; an undeclared path is "
+                "refused by name at review time and the reading then falls "
+                "back to the whole layer, so the finding would describe a "
+                "field nothing looked at",
+                "state one fact per expectation; when its halves live in "
+                "different layers use split_shape rather than naming one "
+                "layer and listing every token",
+            ] if derived else []),
         }
     (out_dir / "ic_expert_agent_handoff.json").write_text(
         json.dumps(handoff, indent=2, ensure_ascii=False))
