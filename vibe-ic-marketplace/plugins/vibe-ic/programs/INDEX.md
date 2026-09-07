@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1294
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1294)
+- **Total programs (excluding helpers / shims):** 1295
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1295)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1285 |
+| `any` | 1286 |
 
 ## Alphabetical listing
 
@@ -663,6 +663,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `l_doc_unique_content_check` | any | Wave 31 | gate (Wave 31, v0.119.63). |
 | `landing_cadence` | any | — | wire the 2026-06-17 test-cadence policy into the LANDING. |
 | `landing_collateral_revert_check` | any | — | a squash must not silently revert work that landed alongside it in the same push. |
+| `landing_hygiene_ratchet_check` | any | — | the LANDING refuses a hygiene finding that this landing INTRODUCES, even under a label that is already red. |
 | `landing_is_one_commit_check` | any | — | a landing is ONE commit, not two. |
 | `landing_merge_verdict` | any | — | the REFUSAL DECISION for the merge path, in one function, because `gh pr merge` runs no gate at all. |
 | `landing_noop_verdict_check` | any | — | "nothing to land" is a claim about the TWO TREES, and a merge tool can only answer for its own staging area. |
@@ -1366,7 +1367,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1285 programs)
+### `any` (1286 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2000,6 +2001,7 @@ _(no programs in this group)_
 - `l_doc_unique_content_check` — gate (Wave 31, v0.119.63).  _[Wave 31]_
 - `landing_cadence` — wire the 2026-06-17 test-cadence policy into the LANDING.
 - `landing_collateral_revert_check` — a squash must not silently revert work that landed alongside it in the same push.
+- `landing_hygiene_ratchet_check` — the LANDING refuses a hygiene finding that this landing INTRODUCES, even under a label that is already red.
 - `landing_is_one_commit_check` — a landing is ONE commit, not two.
 - `landing_merge_verdict` — the REFUSAL DECISION for the merge path, in one function, because `gh pr merge` runs no gate at all.
 - `landing_noop_verdict_check` — "nothing to land" is a claim about the TWO TREES, and a merge tool can only answer for its own staging area.

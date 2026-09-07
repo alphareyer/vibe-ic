@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""landing_hygiene_ratchet_check.py — the LANDING refuses a hygiene finding
+that this landing INTRODUCES, even under a label that is already red.
+
+THIS GATE BLOCKS (rc=1), AND REFUSES RATHER THAN GUESSES (rc=2).
+
+THE DEFECT (vibe-ic#2176), MEASURED ON MAIN
+===========================================
+`tools/gatekeeper-land.sh --cheap-only` prints
+
+    --- full tier SKIPPED (--cheap-only) — no stamp will be written ---
+
+at line 807 and exits at line 808 — BEFORE `--- full tier ---` at line 811 and
+therefore before `run_capture "full:repo-hygiene"` at line 2004, which is the
+only thing in this repository that runs `tools/ci/repo_hygiene_gates.sh`.  The
+direct-push landing path uses `--cheap-only`.  So the 154-gate hygiene tier,
+the ONLY instrument that measures the hygiene gates, never runs at landing.
+
+The consequence, measured over `origin/main` on 2026-09-07 across 140 landings
+(v1.17.99 -> v1.19.38): of the seven hygiene gates red on main, SIX were made
+red that same day by this repository's own landings.  `shipped-path
+portability` — BLOCKING since 2026-07-20 — went
+
+    577fb50d3^  0 non-portable paths
+    577fb50d3   4     (#2158)
+    dbba4729c   9     (#2165)
+
+green -> red across a landing, then worse across a second, and the landing gate
+said `LAND GATE OK` both times.  This lane re-measured the endpoint on 8HD-8 in
+its own clone of `a1f3685837ca`: 9 findings in 5860 files.  Nothing is wrong
+with the gate; the process that was supposed to run it did not.
+
+WHY THIS IS A DELTA AND NOT THE GATE ITSELF
+===========================================
+The obvious repair — run `shipped_path_portability_check.py` as a cheap landing
+gate — refuses EVERY landing, because main already carries 9 findings.  A bar
+that is red every day is the bar people learn to bypass, which is how this
+repository got `--no-verify` on the evening of 2026-08-29.
+
+The rule that is both true and enforceable is the one the TEST tier has had
+since vibe-ic#1019 and `hygiene_finding_delta.py` was written to give the
+hygiene tier: main is red, so a landing is refused when its finding set is NOT
+a SUBSET of the base's.  What must be empty is the DIFFERENCE, never the count.
+
+This program is that rule at the granularity of ONE GATE, computed from two
+arms of the same instrument, cheaply enough to run on the landing path.  It
+does not replace the hygiene tier and it does not make the tier cheaper: the
+tier still runs every one of its gates, unchanged, wherever it runs today.
+
+WHY A COUNT APPEARS HERE AND WHY IT IS NOT A COUNT RATCHET
+==========================================================
+Identity is `(path, rule)` — deliberately NOT `(path, line, rule)`.  A line
+number is not a property of the finding; inserting an unrelated import above an
+offender moves every line below it, and a line-keyed identity would present the
+whole tail of a file as introduced by a landing that touched none of it.
+
+But `(path, rule)` alone is too coarse for the very landing this gate exists
+for: `dbba4729c` added `legacy_external_reference_debt.py:52` and `:54` to a
+file that ALREADY held `:14`, so all three collapse to one key and the landing
+would read as introducing nothing.  So the per-key OCCURRENCE COUNT is compared
+too, and a key whose count GREW is an introduction.
+
+That is not the count ratchet this repository forbids.  A count ratchet pins a
+whole-population number, so REMOVING an offender elsewhere pays for ADDING one
+here and tightening a rule is punished.  This compares per-key counts in ONE
+direction only: growth blocks, shrinkage is free, and a key that disappears is
+never mentioned.  There is no total, so there is nothing to trade against.
+
+BOTH ARMS ARE THE SAME POPULATION, BY CONSTRUCTION
+==================================================
+Both arms are materialised with `git archive <rev> | tar -x`, so both are the
+tracked tree at their own revision and neither can see a worktree leftover.
+This matters concretely: `shipped_path_portability_check.py` enumerates
+git-tracked files when it is pointed at a git checkout and falls back to a
+filesystem walk when it is not.  Measured on this lane's clone, the two modes
+report the SAME population and the SAME findings over the same commit —
+`9 non-portable path(s) in 5860 file(s) scanned (git-tracked)` and
+`... (filesystem-walk)` — but relying on that coincidence would leave the two
+arms asking subtly different questions.  Archiving both makes them one question.
+
+THE INSTRUMENT IS THE CANDIDATE'S; THE SUBJECT IS EACH ARM'S OWN
+================================================================
+The checker program is taken from `--plugin-root` (the candidate) for BOTH
+arms.  Taking each arm's own copy of the checker would mean a landing that
+TIGHTENS a rule reports every pre-existing offender the tightened rule now sees
+as introduced, and would be refused for improving the gate.  Only the subject
+tree varies between arms; the question does not.
+
+EVERY REFUSAL BLOCKS
+====================
+If either arm cannot be run, or its output cannot be parsed into the shape this
+program declares, the verdict is rc=2 REFUSED and the landing stops.  "Could
+not measure it" is never reported as "measured it and it was clean" — a landing
+gate that cannot measure must never report that it measured.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from collections import Counter
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+GATE = "landing_hygiene_ratchet_check"
+
+# ── THE REGISTRY ──────────────────────────────────────────────────────────
+#
+# `label`   the gate's label EXACTLY as `tools/ci/repo_hygiene_gates.sh` runs
+#           it.  `programs/tests/test_issue2176_landing_hygiene_ratchet.py`
+#           asserts every label here is still wired there, so a rename in the
+#           hygiene tier makes this registry fail loudly instead of silently
+#           ratcheting a gate that no longer exists.
+# `argv`    the checker, formatted with {plugin} and {root} of the arm.
+# `finding` a regex over stdout+stderr whose named groups `path` and `rule`
+#           are the finding's identity.  A gate whose output does not match it
+#           at all, while the checker reported a failure, is a REFUSAL.
+_RATCHETED_GATES: Tuple[Dict[str, object], ...] = (
+    {
+        "label": "shipped-path portability",
+        "argv": ("python3", "{plugin}/programs/shipped_path_portability_check.py", "{plugin}"),
+        "finding": re.compile(
+            r"^\s+(?P<path>\S+?):\d+\s+\[(?P<rule>[A-Za-z0-9_]+)\]", re.M),
+    },
+    # THE SUBJECT IS PASSED EXPLICITLY, AND IT HAS TO BE. Run with no argument
+    # this checker defaults its root to `Path(__file__).resolve().parent` --
+    # the INSTRUMENT's own directory. Since the instrument is the candidate's
+    # for both arms (see above), a bare invocation would scan the SAME tree
+    # twice, report an identical set both times, and pass vacuously forever.
+    # Every entry added here must name its subject on the command line, and
+    # `test_the_subject_of_every_entry_moves_with_the_arm` proves it does.
+    {
+        "label": "watchdog compliance",
+        "argv": ("python3", "{plugin}/programs/loop_watchdog_compliance_check.py",
+                 "{plugin}/programs"),
+        "finding": re.compile(
+            r"^\s+(?P<path>\S+?):\d+\s+\[(?P<rule>[A-Za-z0-9_]+)\]", re.M),
+    },
+)
+
+
+class Refusal(Exception):
+    """Raised for anything this program cannot answer.  Always rc=2."""
+
+
+def _archive(repo: Path, rev: str, dest: Path) -> None:
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        tar = subprocess.run(["git", "-C", str(repo), "archive", rev],
+                             capture_output=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refusal(f"could not archive {rev}: {exc}") from exc
+    if tar.returncode != 0:
+        raise Refusal(
+            f"could not archive {rev} (git archive rc={tar.returncode}): "
+            f"{tar.stderr.decode('utf-8', 'replace').strip()[:400]}")
+    try:
+        untar = subprocess.run(["tar", "-x", "-C", str(dest)], input=tar.stdout,
+                               capture_output=True, timeout=300)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refusal(f"could not extract {rev}: {exc}") from exc
+    if untar.returncode != 0:
+        raise Refusal(
+            f"could not extract {rev} (tar rc={untar.returncode}): "
+            f"{untar.stderr.decode('utf-8', 'replace').strip()[:400]}")
+
+
+def _findings(entry: Dict[str, object], instrument_plugin: Path,
+              arm_root: Path, arm_name: str) -> Counter:
+    """Run one checker over one arm and return Counter[(path, rule)]."""
+    label = str(entry["label"])
+    # The INSTRUMENT is the candidate's; only {root}/{plugin} of the SUBJECT
+    # move between arms.  `{plugin}` in an argv slot that names the checker
+    # itself is resolved against the instrument, never against the arm.
+    argv: List[str] = []
+    for i, tok in enumerate(entry["argv"]):  # type: ignore[union-attr]
+        if i == 1:
+            argv.append(tok.format(plugin=instrument_plugin, root=arm_root))
+        else:
+            argv.append(tok.format(
+                plugin=arm_root / "vibe-ic-marketplace/plugins/vibe-ic",
+                root=arm_root))
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              cwd=str(arm_root), timeout=900)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Refusal(f"[{label}] {arm_name} arm could not be run: {exc}") from exc
+    out = (proc.stdout or "") + (proc.returncode and (proc.stderr or "") or "")
+    if proc.returncode not in (0, 1):
+        raise Refusal(
+            f"[{label}] {arm_name} arm exited {proc.returncode}, which is "
+            f"neither clean (0) nor a finding report (1): "
+            f"{(proc.stderr or proc.stdout or '').strip()[:400]}")
+    pat = entry["finding"]
+    found = Counter()
+    for m in pat.finditer(out):  # type: ignore[union-attr]
+        found[(m.group("path"), m.group("rule"))] += 1
+    if proc.returncode == 1 and not found:
+        raise Refusal(
+            f"[{label}] {arm_name} arm reported a failure (rc=1) but not one "
+            f"line matched the declared finding shape — this program cannot "
+            f"say what it found, so it does not say it found nothing. "
+            f"First 400 chars: {out.strip()[:400]}")
+    return found
+
+
+def compare(base: Counter, cand: Counter) -> List[Tuple[Tuple[str, str], int, int]]:
+    """Keys the candidate INTRODUCES: new keys, and keys whose count grew.
+
+    One direction only.  A key that shrank or vanished is not reported, so
+    removing an offender can never pay for adding one.
+    """
+    introduced = []
+    for key, n in sorted(cand.items()):
+        was = base.get(key, 0)
+        if n > was:
+            introduced.append((key, was, n))
+    return introduced
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="refuse a landing that introduces a hygiene finding, "
+                    "even under an already-red label")
+    ap.add_argument("--repo", required=True, type=Path,
+                    help="the repository being landed from")
+    ap.add_argument("--plugin-root", required=True, type=Path,
+                    help="the CANDIDATE plugin root — supplies the instrument "
+                         "for both arms")
+    ap.add_argument("--base", required=True,
+                    help="the revision this landing is measured against")
+    ap.add_argument("--head", default="HEAD",
+                    help="the revision being landed (default HEAD)")
+    ap.add_argument("--only", action="append", default=None,
+                    help="restrict to these labels (repeatable); "
+                         "for tests and for triage, never for a landing")
+    ap.add_argument("--json", type=Path, help="write the comparison as JSON")
+    args = ap.parse_args(argv)
+
+    entries = list(_RATCHETED_GATES)
+    if args.only:
+        entries = [e for e in entries if str(e["label"]) in set(args.only)]
+        missing = set(args.only) - {str(e["label"]) for e in _RATCHETED_GATES}
+        if missing:
+            print(f"{GATE}: REFUSED — --only names no declared gate: "
+                  f"{sorted(missing)}", file=sys.stderr)
+            return 2
+    if not entries:
+        print(f"{GATE}: REFUSED — nothing declared to ratchet. An empty "
+              f"registry is a wiring error, not a clean tree.", file=sys.stderr)
+        return 2
+
+    tmp = Path(tempfile.mkdtemp(prefix="hygratchet."))
+    record: Dict[str, object] = {"base": args.base, "head": args.head,
+                                 "gates": {}}
+    try:
+        try:
+            base_root = tmp / "base"
+            cand_root = tmp / "cand"
+            _archive(args.repo, args.base, base_root)
+            _archive(args.repo, args.head, cand_root)
+        except Refusal as r:
+            print(f"{GATE}: REFUSED — {r}", file=sys.stderr)
+            return 2
+
+        introduced_any = False
+        for entry in entries:
+            label = str(entry["label"])
+            try:
+                b = _findings(entry, args.plugin_root, base_root, "base")
+                c = _findings(entry, args.plugin_root, cand_root, "candidate")
+            except Refusal as r:
+                print(f"{GATE}: REFUSED — {r}", file=sys.stderr)
+                return 2
+            new = compare(b, c)
+            record["gates"][label] = {
+                "base_findings": sum(b.values()),
+                "candidate_findings": sum(c.values()),
+                "introduced": [{"path": k[0], "rule": k[1],
+                                "base_count": was, "candidate_count": now}
+                               for k, was, now in new],
+            }
+            if new:
+                introduced_any = True
+                print(f"{GATE}: FAIL — [{label}] this landing INTRODUCES "
+                      f"{len(new)} finding key(s) "
+                      f"(base {sum(b.values())} -> candidate {sum(c.values())}):")
+                for (path, rule), was, now in new:
+                    print(f"  {path}  [{rule}]  {was} -> {now}")
+                print(f"  The label is already red, which excuses what was "
+                      f"ALREADY there and excuses nothing added here. Remove "
+                      f"the new occurrence(s); never write a baseline, widen "
+                      f"the gate, or acknowledge the row.")
+            else:
+                print(f"{GATE}: PASS — [{label}] introduces nothing "
+                      f"(base {sum(b.values())} -> candidate {sum(c.values())})")
+
+        if args.json:
+            args.json.write_text(json.dumps(record, indent=2, sort_keys=True))
+        return 1 if introduced_any else 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
