@@ -78,11 +78,26 @@ def _db() -> dict:
     return json.loads(_DB.read_text())
 
 
+# THE SUBJECT OF THIS FILE, NAMED (#2110). This helper used to return "the
+# first profiled class in the map", which was an unambiguous way of saying
+# `crypto_accelerator` for exactly as long as that was the only profiled class.
+# The moment a SECOND class was profiled the helper started returning the other
+# one, and every assertion below — the collision, the contract, the refusal —
+# went on passing while measuring a design family this file was never written
+# about. Measured, not imagined: with `processor_cpu` profiled, this file ran
+# 19/19 green against `processor_cpu`. A file that keeps passing after its
+# subject is swapped out from under it is not testing what it says it is, so
+# the subject is now spelled, and its being profiled is asserted rather than
+# assumed.
+_SUBJECT_CLASS = "crypto_accelerator"
+
+
 def _profiled_class() -> str:
     prof = _db()["registered_class_profiles"]
-    named = [k for k, v in prof.items() if not k.startswith("_") and v]
-    assert named, "the DB profiles no registered class at all"
-    return named[0]
+    assert prof.get(_SUBJECT_CLASS), (
+        f"{_SUBJECT_CLASS!r} is the class this regression is about and the DB "
+        f"no longer profiles it")
+    return _SUBJECT_CLASS
 
 
 # ── 1. class-first, both directions ────────────────────────────────────────

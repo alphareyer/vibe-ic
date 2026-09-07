@@ -86,15 +86,31 @@ def iface_to_contract_v(iface: List[Dict[str, Any]], target: str) -> str:
     return f"module {target} (\n" + ",\n".join(body) + "\n);\nendmodule\n"
 
 
-# The design INPUT's own way of naming its top module. Two GENERAL spec
+# The design INPUT's own way of naming its top module. THREE GENERAL spec
 # conventions, no design/vendor literal: an explicit "top-level module: `x`",
-# and a prose sentence that names "the module `x`" / "the module **`x`**". Used
-# ONLY to fill a `target` the caller does not have; a caller-supplied target
-# always wins.
+# a prose sentence that names "the module `x`" / "the module **`x`**", and the
+# same statement written the other way round — "`x` is the top-level module",
+# "`x` provides two top module options". Used ONLY to fill a `target` the caller
+# does not have; a caller-supplied target always wins.
+#
+# ORDER IS THE CONTRACT (#2110). The list is tried in order and the first
+# undenied match wins, so a convention APPENDED here can only answer for an
+# input on which every earlier one already answered nothing. Measured on the
+# 71 corpus projects carrying an `input/` tree: adding the third convention
+# moves EXACTLY ONE of them (a processor-core SoC whose spec states the name
+# before the phrase, `None` -> the name), and leaves the other 70 — including
+# every design that already recovered a name — byte-identical. Prepending it
+# instead would have re-answered designs that were already right.
 _TARGET_RES = [
     re.compile(r"\btop[-_ ]?(?:level[-_ ]?)?module\b[^\n`]{0,20}[`*]+([A-Za-z_]\w*)[`*]+",
                re.I),
     re.compile(r"\bmodule\b[^\n`]{0,12}[`*]*`([A-Za-z_]\w*)`", re.I),
+    # NAME BEFORE PHRASE. The gap excludes the newline, the quoting characters
+    # and the table pipe: a spec states this in prose, and a gap allowed to
+    # cross a `|` would bind a name from one table cell to a phrase in the
+    # next one, which is not a statement anybody wrote.
+    re.compile(r"[`*]+([A-Za-z_]\w*)[`*]+[^\n`*|]{0,24}?"
+               r"\btop[-_ ]?(?:level[-_ ]?)?module\b", re.I),
 ]
 
 

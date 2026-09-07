@@ -14,7 +14,22 @@
   "bus_interconnect_protocol": null,
   "serial_peripheral_protocol": null,
   "digital_arithmetic_primitive": null,
-  "processor_cpu": null,
+  "processor_cpu": {
+   "db_classes": [
+    "processor-cpu-core",
+    "microcoded-datapath-sequencer",
+    "load-store-unit",
+    "alu-datapath"
+   ],
+   "integration_contract": [
+    "the core CONFIGURATION this run builds — pipeline shape, multiply/divide implementation, register-file implementation, cache presence and the privilege modes — named beside every published area, timing or performance figure: a core is a family of configurations and a figure belongs to exactly one of them, so a configuration-less figure names no design",
+    "the base instruction-set family AND the optional extension set this build actually selects, recorded affirmatively in the run's own structured declaration: an extension the input names as optional is a requirement only when the build declares it, and a build that declares nothing has left the question open rather than answered it 'no'",
+    "the reset and boot interface as THREE facts rather than one — the reset polarity and whether it is synchronous, the reset vector the first instruction fetch starts from, and the bound within which that first instruction-memory access must appear after reset release; and, when the input states that the instruction memory already holds its contents at reset release, the path that loads them, which is an integration requirement on the layer and not an absent feature",
+    "the instruction-side and the data-side memory interfaces as SEPARATE ports of the core, and — when one physical memory backs more than one of instruction memory, data memory and the architectural register file — the sharing itself as an integration requirement (port count and arbitration), never as a memory-size fact",
+    "the address ranges the core itself drives and the ranges left to the integrator, with every split the input explicitly leaves as an implementation choice carried AS a declared free choice: an unrecorded split reads as an omission and an invented one reads as a specification, and a later reader cannot tell those two apart",
+    "every interrupt and exception input the core exposes, together with the privilege modes this build implements and the read-only architectural identity values the integrator has to choose — an interrupt or exception port present in the interface but outside the modes this build scopes is an unresolved scope question, not an absent feature"
+   ]
+  },
   "bus_peripheral": null,
   "crypto_accelerator": {
    "db_classes": [
