@@ -806,13 +806,58 @@ def unreadable_rule_messages(attribution: Dict[str, Any]) -> List[str]:
     return sorted(m for m in own if rule_id(m) is None)
 
 
+#: The tier a second-engine record carries when the engine did not grade
+#: anything. A reader routes on this; `reason` is the sentence they act on.
+SECOND_ENGINE_NOT_MEASURED = "NOT_MEASURED"
+
+
+def second_engine_not_measured(reason: str = "", *, container: str = "",
+                               refusal: str = "") -> Dict[str, Any]:
+    """The record for "the second engine did not grade anything", BY NAME.
+
+    ONE SHAPE, ONE PLACE — vibe-ic#2156. This record used to be composed in the
+    caller with a fixed sentence, and the runner's own `why` was dropped on the
+    floor one frame below (`attribution, why = run(...)` and then
+    `if attribution is None: return None`). So every way the engine could fail
+    to run — an absent container, a docker that would not start, and a container
+    running bytes other than the pinned ones — reached the report as the same
+    sentence, and the wrong-image case did not reach it at all: a
+    `ContainerImageMismatch` is a `RuntimeError` and nothing on this path caught
+    it, so it escaped `run_block_pv` and took the whole A6 producer down.
+
+    `refusal` is set exactly when the engine was REFUSED rather than merely
+    unavailable — the container was reached and it is the wrong image — and it
+    carries the refusal `_eda_pin` composed, which names both digests. "I could
+    not look" and "I looked and was refused" are different facts and this keeps
+    them different.
+    """
+    record: Dict[str, Any] = {
+        "engine": "magic drc(full)",
+        "result": SECOND_ENGINE_NOT_MEASURED,
+        "reason": reason or ("the second engine could not run; the rules "
+                             "the sign-off deck does not grade are "
+                             "UNGRADED, not clean"),
+    }
+    if container:
+        record["container"] = container
+    if refusal:
+        record["refusal"] = _pin.CONTAINER_IMAGE_MISMATCH
+        record["refusal_detail"] = refusal
+        record["required_digest"] = _pin.IMAGE_DIGEST
+    return record
+
+
 def second_engine_drc(project: Path, block: str, container: str,
                       lyrdb_text: str, *, runner: Optional[Callable] = None
-                      ) -> Optional[Dict[str, Any]]:
+                      ) -> Dict[str, Any]:
     """Grade, with the second engine, the rules the sign-off deck does not.
 
-    Returns None when the second engine could not run — the caller then says
-    so instead of crediting silence as cleanliness."""
+    ALWAYS RETURNS A RECORD. When the engine could not grade anything the record
+    is `second_engine_not_measured(...)` — `result` is NOT_MEASURED and `reason`
+    is the runner's own sentence — so the caller states what happened instead of
+    crediting silence as cleanliness, and instead of stating one fixed sentence
+    for every different way it failed (vibe-ic#2156).
+    """
     run = runner
     if run is None:
         def run(proj, blk, ctn):
@@ -829,13 +874,23 @@ def second_engine_drc(project: Path, block: str, container: str,
                 if not out.is_file():
                     return None, "the attribution program wrote no report"
                 return json.loads(out.read_text()), ""
+            except _ce.ContainerImageMismatch as exc:
+                # A REFUSAL, NOT AN ABSENCE, and never an escape. The guarded
+                # argv builder raises this when the container it was asked for
+                # runs bytes other than the pinned ones; the refusal already
+                # names the container and BOTH digests, so it is relayed
+                # verbatim rather than summarised.
+                return None, str(exc)
             except (OSError, ValueError, SystemExit) as exc:
                 return None, f"the second engine did not run: {exc}"
             finally:
                 shutil.rmtree(host, ignore_errors=True)
     attribution, why = run(str(project), block, container)
     if attribution is None:
-        return None
+        why = str(why or "")
+        return second_engine_not_measured(
+            why, container=container,
+            refusal=why if _pin.CONTAINER_IMAGE_MISMATCH in why else "")
     if isinstance(attribution.get("blocks"), dict):
         attribution = attribution["blocks"].get(block, attribution)
     graded = graded_rule_ids(lyrdb_text)
@@ -944,15 +999,13 @@ def run_block_pv(project: Path, block: str, res: Dict[str, Any],
             second = second_engine_drc(project, block, container, lyrdb_text,
                                        runner=second_engine_runner)
             total = int(violations)
-            if second is None:
-                meta["second_engine"] = {
-                    "engine": "magic drc(full)", "result": "NOT_MEASURED",
-                    "reason": ("the second engine could not run; the rules "
-                               "the sign-off deck does not grade are "
-                               "UNGRADED, not clean"),
-                }
-            else:
-                meta["second_engine"] = second
+            # `second_engine_drc` always answers with a record now, and the
+            # record says which tier it is. `or` covers an injected runner that
+            # answers None outright, so a stub cannot put a bare None into the
+            # report (vibe-ic#2156).
+            second = second or second_engine_not_measured(container=container)
+            meta["second_engine"] = second
+            if second.get("result") != SECOND_ENGINE_NOT_MEASURED:
                 total += int(second["violations"])
             _write_drc_report(bdir, block, total, meta)
             ran = True

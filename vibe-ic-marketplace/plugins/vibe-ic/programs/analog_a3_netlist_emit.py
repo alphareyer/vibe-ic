@@ -1562,12 +1562,37 @@ def verify_with_checkers(block: str, sp_text: str, tb_text: Optional[str],
 
 
 def _docker_ok(container: str) -> bool:
+    """Can this process actually run something in `container`?
+
+    A `ContainerImageMismatch` is caught HERE and answered `False` — vibe-ic
+    #2156. It is a `RuntimeError` raised by the guarded argv builder when the
+    container is the wrong image, and it was in no `except` clause on this path,
+    so it escaped `verify_with_ngspice` and every caller above it: an operator
+    with a stale container got a traceback where the flow documents a capability
+    gap. The REASON is not lost by answering False — `container_image_refusal`
+    below is what the caller reports, and it is a different status from an
+    absent container because they are different facts.
+    """
     try:
         cp = _pr.run_best_effort(_ce.docker_exec_argv(container, "true"),
                             capture_output=True, text=True)
         return cp.returncode == 0
+    except _ce.ContainerImageMismatch:
+        return False
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def container_image_refusal(container: str) -> str:
+    """The refusal when `container` PROVABLY runs bytes other than the pinned
+    ones, else "".
+
+    Delegated to `_eda_pin.container_attach_refusal`, which is the one place
+    that judgement is made: a digest that could NOT be read is not a mismatch
+    and must not be reported as one, so an unreadable container falls through
+    to the ordinary unreachable path below and docker reports its own failure.
+    """
+    return _pin.container_attach_refusal(container)
 
 
 #: How far outside a rail a node may sit before the operating point is called
@@ -1761,6 +1786,19 @@ def verify_with_ngspice(container: str, block: str, sp_text: str,
     `dc_op_rail_excursions`. `None` leaves the rail invariant unevaluated and
     says so (an empty `rail_excursions` list is then NOT a claim that the
     operating point was checked -- `rail_invariant` records which it was)."""
+    # REFUSED IS NOT ABSENT — vibe-ic#2156. A container that is there and runs
+    # bytes other than the pinned ones is a MEASURED disagreement, and it is
+    # owed a status of its own: `NOT_VERIFIED_NO_SIMULATOR` says the binary is
+    # not there, which is a different sentence and sends the reader to fix a
+    # different thing. Asked FIRST, because the reachability probe below cannot
+    # tell the two apart — it answers False for both.
+    _refusal = container_image_refusal(container)
+    if _refusal:
+        return {"simulation_verified": False,
+                "simulation_status": "NOT_VERIFIED_CONTAINER_IMAGE_MISMATCH",
+                "detail": _refusal,
+                "container": container,
+                "required_digest": _pin.IMAGE_DIGEST}
     if shutil.which("docker") is None or not _docker_ok(container):
         return {"simulation_verified": False,
                 "simulation_status": "NOT_VERIFIED_NO_SIMULATOR",

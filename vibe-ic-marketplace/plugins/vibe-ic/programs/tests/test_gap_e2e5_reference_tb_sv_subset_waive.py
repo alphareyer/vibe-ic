@@ -12,19 +12,49 @@ SV-construct/syntax signature (NOT a missing-module / port structural defect) AN
 (b) the project is REUSED-IP (SOURCE_MANIFEST reused_ip:true). An authored
 (non-reused) RTL, or a real structural error, still hard-FAILs.
 
+THE CONTAINER IS DERIVED, NOT WRITTEN DOWN — vibe-ic#2130's class, fifth
+instance. This file handed `_run_oracle_tb` the literal `vibeic-eda`, which was
+the shared default until `_eda_pin.default_container_name` began deriving the
+name from the required digest (`vibeic-eda-<digest12>`). On a host where that
+literal names somebody else's container, `_iverilog_available` builds a guarded
+`docker exec` argv, `_container_exec.docker_exec_argv` measures the disagreement
+and raises, and nothing on this path catches it — so all three ids below went RED
+with a `ContainerImageMismatch` traceback that has nothing to do with the SV
+subset they are about. Named independently by lanes cz2146 and czsimbridge on
+8HD-6 (that container running 0.3.46 against a pin of 0.3.48); reproduced here at
+the pin read, without touching any shared container.
+
+NO SKIP IS ADDED, DELIBERATELY. The A3 ngspice guard that this rule was written
+for needs its container to be PRESENT; this file does not — the compile is
+injected and `_iverilog_available` is answered from the host, so every id here
+passes with the derived container absent, which is the normal state of every
+host. A skip keyed on presence would delete three passing verifications
+everywhere. What the derived name buys is that the argv builder is asked about
+the container the PRODUCER would enter, and a measured mismatch on it is
+REFUSED BY NAME instead of arriving as a traceback about a subset waiver.
+
 chip-AGNOSTIC: synthetic fixtures + the shared signature set.
 """
 from __future__ import annotations
 
+import ast
 import json
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
 if str(_PROGRAMS) not in sys.path:
     sys.path.insert(0, str(_PROGRAMS))
 
 import design_one_shot_runner as D   # noqa: E402
+import _container_exec as _ce        # noqa: E402 — the guarded docker-exec argv
+import _eda_pin as _pin              # noqa: E402 — the ONE pin
+
+#: The container the producer's own CLI default names, derived the same way.
+_CONTAINER = _pin.default_container_name()
 
 
 def _mk_project(tmp_path, reused_ip: bool) -> Path:
@@ -60,7 +90,15 @@ def _drive_oracle_with_compile(monkeypatch, tmp_path, reused_ip, compile_err):
     monkeypatch.setattr(
         D, "_iverilog_compile_with_sv_fallback",
         lambda *a, **k: (2, "", compile_err, "iverilog_g2012"))
-    return D._run_oracle_tb(project, "dut", tb, "test", 0.0, "vibeic-eda")
+    try:
+        return D._run_oracle_tb(project, "dut", tb, "test", 0.0, _CONTAINER)
+    except _ce.ContainerImageMismatch as exc:
+        pytest.fail(
+            f"{_pin.CONTAINER_IMAGE_MISMATCH}: the container this producer "
+            f"would enter, {_CONTAINER}, exists on this host and runs bytes "
+            f"other than the pinned ones, so nothing was measured about the SV "
+            f"subset. This is a fact about the host, not about the waiver — "
+            f"remove or re-create that container. Verbatim: {exc}")
 
 
 _SV_SUBSET_ERR = "aes_pkg.sv:19: sorry: constant selects not supported"
@@ -84,3 +122,58 @@ def test_real_defect_on_reused_ip_still_fails(monkeypatch, tmp_path):
     # waived even on a REUSED-IP design.
     r = _drive_oracle_with_compile(monkeypatch, tmp_path, True, _REAL_DEFECT_ERR)
     assert r is not None and r.status == "FAIL"
+
+
+# ── the container this file drives ─────────────────────────────────────────
+
+def test_the_container_this_file_drives_is_derived_from_the_pin():
+    """vibe-ic#2130's rule, applied here. A literal is a stale model of the
+    producer's own choice, and it resolves to whatever somebody left behind."""
+    # THE FORBIDDEN NAME IS READ FROM WHERE IT IS DEFINED, never re-typed here.
+    # Typed as a literal, this scan found ITSELF — the comparison string is a
+    # constant in this file too — and a check that fires on its own text is a
+    # check nobody can satisfy. `_eda_pin.CONTAINER_NAME_PREFIX` is the one
+    # place that name exists.
+    shared = _pin.CONTAINER_NAME_PREFIX
+    literals = [n.value for n in ast.walk(ast.parse(
+        Path(__file__).read_text(encoding="utf-8")))
+        if isinstance(n, ast.Constant) and n.value == shared]
+    assert not literals, (
+        f"this file names the shared container literal {shared!r} again; "
+        f"derive it from the pin with _eda_pin.default_container_name()")
+    named = (os.environ.get(_pin.CONTAINER_NAME_ENV) or "").strip()
+    if named:
+        assert _CONTAINER == named
+    else:
+        assert _CONTAINER.endswith(_pin.IMAGE_DIGEST.split(":", 1)[1][:12]), (
+            f"{_CONTAINER} carries no part of the pinned digest, so it is a "
+            f"name somebody wrote down rather than one derived from the pin")
+
+
+def test_a_wrong_image_container_is_refused_by_name(monkeypatch, tmp_path):
+    """A MEASURED mismatch on the derived container is a fact about the host and
+    is reported as one — not as a `ContainerImageMismatch` traceback out of a
+    test about an SV subset. This is the red cz2146 and czsimbridge measured,
+    driven at the pin read rather than by touching a shared container."""
+    other = "sha256:" + "9" * 64
+    monkeypatch.setattr(_pin, "container_image_digest",
+                        lambda c: (other, "") if c == _CONTAINER
+                        else (None, f"{_pin.CONTAINER_ABSENT}: {c}"))
+    with pytest.raises(pytest.fail.Exception) as caught:
+        _drive_oracle_with_compile(monkeypatch, tmp_path, True, _SV_SUBSET_ERR)
+    said = str(caught.value)
+    assert _pin.CONTAINER_IMAGE_MISMATCH in said
+    assert _CONTAINER in said and other in said and _pin.IMAGE_DIGEST in said
+
+
+def test_the_waiver_still_holds_with_the_pinned_container_present(monkeypatch,
+                                                                 tmp_path):
+    """RUN WHEN PRESENT. With the derived container present AND running the
+    pinned bytes, nothing about the subset verdict changes — the paired control
+    that stops the refusal above being paid for in the case this file is for."""
+    monkeypatch.setattr(_pin, "container_image_digest",
+                        lambda c: (_pin.IMAGE_DIGEST, "") if c == _CONTAINER
+                        else (None, f"{_pin.CONTAINER_ABSENT}: {c}"))
+    r = _drive_oracle_with_compile(monkeypatch, tmp_path, True, _SV_SUBSET_ERR)
+    assert r is not None and r.status == "WAIVED"
+    assert r.extras.get("sv_subset_waived") is True

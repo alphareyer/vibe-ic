@@ -11591,29 +11591,85 @@ _V1_6_596_RE_CELL_DECL = re.compile(
 # and `detailed_route` flags as DRT-0305 not-routable. Adding the
 # container-cat fallback closes the gap without depending on host
 # PDK mirroring. Chip-AGNOSTIC.
+#: The reason prefix a read that was REFUSED carries, as against one that
+#: simply found nothing. vibe-ic#2156: these two were the same `None`.
+READ_REFUSED = "READ_REFUSED"
+
+
+def read_text_or_container_cat(path: str, container: str = ""
+                               ) -> Tuple[Optional[str], str]:
+    """`(text, why_not)` — host read first, then `docker exec <container> cat`.
+
+    THE (value, why) PRIMITIVE, and the reason it exists — vibe-ic#2156. The
+    wrapper below returns text or `None`, and a blanket `except Exception: pass`
+    around the container read meant that "the pin check could not be made" and
+    "the file is not there" arrived at the caller as the SAME `None`. Measured
+    2026-09-07 on 8hd-3: a stubbed `subprocess.run` raised inside
+    `_container_exec.docker_exec_argv`'s attach check, this function swallowed
+    it, and a working reader reported an absent file — which is the one rule
+    every other input in this repo is held to ("I could not read it" is not "I
+    read it and it was empty").
+
+    So every failure is CLASSIFIED and none is swallowed:
+
+      * a `ContainerImageMismatch` is a REFUSAL — the container was reached and
+        it runs the wrong bytes — and its `why` is prefixed `READ_REFUSED` and
+        carries the refusal `_eda_pin` composed, which names both digests;
+      * a docker that could not be run says so;
+      * anything else is still caught (this must never take a runner down) and
+        is reported BY ITS TYPE rather than discarded.
+
+    `why_not` is non-empty exactly when `text` is None.
+    """
+    host_why = ""
+    try:
+        return Path(path).read_text(errors="ignore"), ""
+    except Exception as exc:                       # noqa: BLE001 — classified
+        host_why = f"host read of {path} failed: {type(exc).__name__}"
+    if not container:
+        return None, f"{host_why}, and no container was named to read it from"
+    try:
+        argv = _cex.docker_exec_argv(container, "cat", path)
+    except _cex.ContainerImageMismatch as exc:
+        return None, (f"{READ_REFUSED}: {path} was not read because the "
+                      f"container it would be read from is the wrong image — "
+                      f"{exc}")
+    try:
+        r = subprocess.run(
+            argv, capture_output=True, text=True, timeout=30,
+            errors="ignore",
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, (f"{READ_REFUSED}: {host_why}, and `docker exec "
+                      f"{container} cat` could not be run: "
+                      f"{type(exc).__name__}: {exc}")
+    except Exception as exc:                       # noqa: BLE001 — never unhandled
+        return None, (f"{READ_REFUSED}: {host_why}, and reading it from "
+                      f"container {container} raised "
+                      f"{type(exc).__name__}: {exc}")
+    if r.returncode == 0:
+        return r.stdout, ""
+    return None, (f"{host_why}, and `docker exec {container} cat {path}` "
+                  f"exited {r.returncode}")
+
+
 def _v1_6_604_read_text_or_container_cat(
         path: str, container: str = "") -> Optional[str]:
     """v1.6.604 — Try host read first; fall back to
     `docker exec <container> cat <path>` when the path lives only
     inside the container. Returns None when both fail. Chip-AGNOSTIC.
+
+    The fourteen callers of this name want the text, so the shape is unchanged.
+    What changed (vibe-ic#2156) is that a read which was REFUSED rather than
+    merely empty now SAYS SO, once, on stderr — a refusal that reaches nobody is
+    the same defect as a refusal that was swallowed. An ordinary "it is not
+    there" stays quiet; ask `read_text_or_container_cat` when the reason
+    matters to the caller.
     """
-    try:
-        return Path(path).read_text(errors="ignore")
-    except Exception:
-        pass
-    if not container:
-        return None
-    try:
-        r = subprocess.run(
-            _cex.docker_exec_argv(container, "cat", path),
-            capture_output=True, text=True, timeout=30,
-            errors="ignore",
-        )
-        if r.returncode == 0:
-            return r.stdout
-    except Exception:
-        pass
-    return None
+    text, why = read_text_or_container_cat(path, container)
+    if text is None and why.startswith(READ_REFUSED):
+        print(f"[NOT_MEASURED] {why}", file=sys.stderr)
+    return text
 
 
 def _v1_6_596_discover_tie_cells(liberty_path: str,

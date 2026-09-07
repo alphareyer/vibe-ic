@@ -642,10 +642,15 @@ def test_an_absent_image_is_a_REASON_not_a_silent_None(monkeypatch):
 
 
 def test_a_reference_that_is_already_a_digest_is_taken_as_given(monkeypatch):
+    """…and the KIND says so: the digest came out of the reference string and
+    nothing was read to learn it. Spelled `reference-digest` since vibe-ic#2155;
+    it used to be `given`, which named who supplied it rather than what was
+    read, and the caller that relabelled it as a registry read had no word to
+    contradict."""
     monkeypatch.setattr(M, "_run",
                         lambda *a, **k: pytest.fail("asked docker about a digest"))
     ref = f"{M.IMAGE_REPO}@sha256:{'b' * 64}"
-    assert M.image_digest(ref) == ("sha256:" + "b" * 64, "given", "")
+    assert M.image_digest(ref) == ("sha256:" + "b" * 64, "reference-digest", "")
 
 
 # ── 4c. the version label ───────────────────────────────────────────────────

@@ -91,7 +91,8 @@ def test_the_image_is_RESOLVED_to_a_digest_and_never_a_floating_tag(monkeypatch)
     monkeypatch.setattr(C._img, "judged_image",
                         lambda **kw: seen.update(kw) or C._img.JudgedImage(
                             "x/y@sha256:" + "b" * 64, "sha256:" + "b" * 64,
-                            "given", "override", "", "9.9.9", "local-label", ""))
+                            "reference-digest", "override", "", "9.9.9",
+                            "local-label", ""))
     assert C.pinned_image("x/y:1.2.3")[0] == "x/y@sha256:" + "b" * 64
     assert seen.get("explicit") == "x/y:1.2.3", seen
 

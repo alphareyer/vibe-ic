@@ -134,6 +134,29 @@ DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 #: fork's own version, and nothing here changes when that happens.
 VERSION_LABEL = "org.opencontainers.image.version"
 
+#: EVERY SPELLING `digest_kind` MAY CARRY, AND WHAT EACH ONE CLAIMS WAS READ.
+#:
+#: A kind is not decoration and it is not the name of the rung that answered —
+#: it is a CLAIM ABOUT A READ, and a reader acts on it. MEASURED 2026-09-07 on
+#: 8hd-3 (vibe-ic#2155): `judged_image(allow_pull=True)` returned
+#: `digest_kind="registry-manifest"` while `registry_digest` was NEVER CALLED —
+#: `image_digest` short-circuits on a reference that already carries a digest,
+#: and the rung threw that answer away and asserted its own label. The registry
+#: had not been consulted at all, and nothing in the report said so.
+#:
+#: So the label is DERIVED from the read, at the one place each read happens,
+#: and every producer of a kind is required to spell it from this table.
+DIGEST_KINDS = {
+    "reference-digest": ("the digest was already in the reference string; "
+                         "NOTHING was read to learn it"),
+    "repo-digest": ("read from this host's local image metadata (RepoDigests); "
+                    "registry-portable, so a verdict carrying it replays"),
+    "image-id": ("read from this host's local image Id; content-addressed but "
+                 "meaningless on any other host"),
+    "registry-manifest": ("read from the REGISTRY — `registry_digest` ran and "
+                          "answered"),
+}
+
 
 def _run(*argv: str, timeout: int = _TIMEOUT_S):
     return _pr.run_best_effort(argv, capture_output=True, text=True)
@@ -261,8 +284,9 @@ class JudgedImage(NamedTuple):
     """
     ref: Optional[str]
     digest: Optional[str]
-    #: "repo-digest" (registry-portable, read locally) | "image-id"
-    #: (content-addressed, this host only) | "registry-manifest" | "given".
+    #: WHICH READ PRODUCED THE DIGEST — one of `DIGEST_KINDS`, never the rung
+    #: that returned it. See that constant: this field is a CLAIM ABOUT A READ,
+    #: and vibe-ic#2155 is what happens when it is asserted rather than derived.
     digest_kind: str
     #: "override" | "local" | "registry" | "" when nothing was found.
     source: str
@@ -356,10 +380,17 @@ def local_digest(ref: str) -> Tuple[Optional[str], str, str]:
 
 def image_digest(ref: str, *, allow_registry: bool = True
                  ) -> Tuple[Optional[str], str, str]:
-    """`(digest, kind, why_not)` — local first, then the registry if permitted."""
+    """`(digest, kind, why_not)` — local first, then the registry if permitted.
+
+    THE KIND NAMES THE READ THAT HAPPENED, and each `return` below is the one
+    place its own kind may be spelled (`DIGEST_KINDS`). The first arm reads
+    NOTHING — the digest was already in the string the caller handed in — and
+    saying so is the whole of vibe-ic#2155: a caller that relabels this arm as a
+    registry read is asserting a network round-trip that never occurred.
+    """
     _, _, tail = ref.partition("@")
     if tail and DIGEST_RE.match(tail):
-        return tail, "given", ""
+        return tail, "reference-digest", ""
     digest, kind, why = local_digest(ref)
     if digest:
         return digest, kind, why
@@ -513,10 +544,19 @@ def judged_image(env=None, *, explicit: Optional[str] = None,
         # The registry is asked about THE PINNED DIGEST, never about `latest`.
         # Opting into a pull is opting into fetching the bytes that were
         # pinned, and cannot become opting into whichever bytes are newest.
-        remote, _kind, _why = image_digest(ref, allow_registry=True)
+        #
+        # THE LABEL IS THE CALLEE'S, NOT THIS RUNG'S — vibe-ic#2155. This line
+        # read `remote, _kind, _why = …` and then asserted "registry-manifest"
+        # of its own accord. `image_digest` short-circuits on a reference that
+        # already carries a digest, which `_pin.image_reference()` ALWAYS does,
+        # so `registry_digest` was never called and every report out of this
+        # rung claimed a registry read that had not happened. `source` still
+        # names the RUNG that answered; `digest_kind` names the READ, and only
+        # the function that performed it may say which one that was.
+        remote, kind, _why = image_digest(ref, allow_registry=True)
         if remote == _pin.IMAGE_DIGEST:
             return _with_version(JudgedImage(ref, _pin.IMAGE_DIGEST,
-                                             "registry-manifest", "registry", ""))
+                                             kind, "registry", ""))
 
     # NO FALLBACK. Not another tag, not another version, not the upstream
     # image: each of those is an answer about a DIFFERENT toolchain, and
