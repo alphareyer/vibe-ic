@@ -364,8 +364,14 @@ def identity_stamp_prelude(pidfile: str) -> str:
     """Shell that records ``<pid> <starttime>`` of the about-to-exec job.
 
     Runs in the same shell that then `exec`s the tool, so the recorded pid IS
-    the pid the tool inherits (exec replaces the image, keeping the pid), and
-    with GNU `timeout` in front that pid is also the process-GROUP leader."""
+    the pid the tool inherits (exec replaces the image, keeping the pid). That
+    pid is ALSO the process-group leader with nothing in front of it: `docker
+    exec` starts each exec in its own session, so this stamping shell already
+    leads the group and `exec` hands it to the tool. The sentence here used to
+    read "with GNU `timeout` in front" — the supervised path has had no
+    `timeout` in front since vibe-ic#2051, and `wrap_with_container_timeout`
+    (the one caller that still puts one there) is a different, host-side
+    mechanism (vibe-ic#2097)."""
     return (_ST_FN + "printf '%s %s\\n' \"$$\" \"$(__vic_st $$)\" > "
             + shlex.quote(pidfile) + " 2>/dev/null || :; ")
 

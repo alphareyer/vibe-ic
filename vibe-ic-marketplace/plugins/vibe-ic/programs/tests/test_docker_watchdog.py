@@ -6,11 +6,23 @@ Covers the docker-specific pieces INJECTED into the general supervisor:
   • container_cpu_seconds      — marker-matched CPU sum via an injected raw exec
                                  (cputimes fast-path + cputime hms fallback +
                                  None when unavailable).
-  • run_docker_supervised      — builds the ceiling `timeout` wrap + host/
-                                 container argv, threads cpu_probe/kill into
-                                 run_supervised, propagates (rc,out,err); the
-                                 kill callback reaps BY IDENTITY (the stamped
-                                 pid + /proc starttime) via the raw exec.
+  • run_docker_supervised      — builds the SUPERVISED in-container command
+                                 (identity stamp then `exec`, NO outer clock)
+                                 + host/container argv, threads cpu_probe/
+                                 kill/ceiling_notice into run_supervised,
+                                 propagates (rc,out,err); the kill callback
+                                 reaps BY IDENTITY (the stamped pid + /proc
+                                 starttime) via the raw exec.
+
+The dispatch assertion below used to read
+``"timeout --kill-after=5" in captured["cmd"][-1]`` — it pinned a contract
+vibe-ic#2051 had already removed. That landing took the GNU `timeout` off the
+supervised path (a still-converging proof was SIGKILLed at the budget) but did
+not reach this file, so main carried the red from 2026-09-07 (vibe-ic#2097).
+The assertion is now the OPPOSITE and stricter: no clock reaches the tool at
+all, the dispatched string IS what `supervised_container_command` builds, the
+tool is the direct target of `exec`, and the ceiling the dispatch threads in is
+a NOTICE that reaps nothing.
 
 The kill assertion below used to read `any("pkill" in c and marker in c)` —
 it asserted the defect. A marker is a path in the tool's argv, so that reap
@@ -21,6 +33,7 @@ stronger: the reap must still fire, must carry the stamp, and must NOT carry
 the marker.
 No real docker: the raw exec and run_supervised are injected fakes.
 """
+import shlex
 import sys
 from pathlib import Path
 
@@ -28,6 +41,10 @@ PROG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROG))
 import _docker_watchdog as DW  # noqa: E402
 import _watchdog as W  # noqa: E402
+
+# A stamp path pinned for the dispatch assertions; the real one carries a
+# fresh nonce (`new_job_pidfile`), so it is pinned rather than predicted.
+PIDFILE = "/tmp/.vibeic-job-0123456789abcdef.pid"
 
 
 def test_parse_cputime_hms():
@@ -95,22 +112,76 @@ def test_run_docker_supervised_threads_callbacks_and_wraps(monkeypatch):
         return W.SupervisedResult(0, "out", "err", "natural", 1.0)
 
     monkeypatch.setattr(W, "run_supervised", fake_supervised)
+    # Pin the per-invocation stamp so the DISPATCHED string can be compared
+    # against its producer byte for byte rather than pattern-matched.
+    monkeypatch.setattr(DW, "new_job_pidfile", lambda: PIDFILE)
     raw_calls = []
 
     def raw(c, cmd, timeout=15):
         raw_calls.append(cmd)
         return (0, "", "")
 
+    tool = "sta -no_init -exit /p/x.tcl"
     rc, out, err = DW.run_docker_supervised(
-        "cont", "sta -no_init -exit /p/x.tcl", "/p/x.tcl",
-        docker_exec_raw=raw, stall_grace_s=1800)
+        "cont", tool, "/p/x.tcl",
+        docker_exec_raw=raw, stall_grace_s=1234.0, hard_ceiling_s=4321.0)
     assert (rc, out, err) == (0, "out", "err")
-    # container argv + ceiling timeout wrap
-    assert captured["cmd"][:3] == ["docker", "exec", "cont"]
-    assert "timeout --kill-after=5" in captured["cmd"][-1]
-    assert captured["kw"]["stall_grace_s"] == 1800
+    # CONTAINER ARGV, PINNED SO OPTS CANNOT BREAK IT. This read
+    # `captured["cmd"][:3] == ["docker", "exec", "cont"]`, which assumes the
+    # dispatch passes NO `opts` — and `_container_exec.docker_exec_argv` builds
+    # `["docker", "exec", *opts, container, *rest]`, so the first `-e`/`-w` any
+    # caller adds moves the container off index 2. vibe-ic#2105 is exactly that
+    # landing: it must put `-e IIC_OSIC_TOOLS_QUIET=1` back on this shared path
+    # (the flag was lost when phase3's private dispatch moved here), and `opts=`
+    # is the only sanctioned way to add one. Verified by building both argvs.
+    # The container is therefore named by its position relative to the TAIL,
+    # which `docker_exec_argv` fixes at `bash -lc <wrapped>`, and the verb is
+    # asserted separately — both hold with and without opts.
+    assert captured["cmd"][:2] == ["docker", "exec"], captured["cmd"]
+    assert captured["cmd"][-4:-2] == ["cont", "bash"], captured["cmd"]
+
+    # NO OUTER CLOCK ON THE DISPATCHED COMMAND (vibe-ic#2051).
+    # `test_docker_exec_timeout_orphan.py` holds the same property on the
+    # PRODUCER (`supervised_container_command`) and on the source of
+    # `run_docker_supervised`; this is the complementary end-to-end look — the
+    # argv `run_docker_supervised` actually hands to the supervisor, which is
+    # the only place a re-wrap applied AFTER the producer would show up.
+    inner = captured["cmd"][-1]
+    assert "timeout" not in inner, inner
+    assert "--kill-after" not in inner, inner
+    # the tool is the DIRECT target of `exec`: nothing is interposed in front
+    # of it, so the stamped pid is the tool's own pid.
+    assert inner.rstrip().endswith("exec bash -lc " + shlex.quote(tool)), inner
+    # ...and the stamp the reap selects on is what is there instead of a clock.
+    assert PIDFILE in inner, inner
+    assert "/proc/$1/stat" in inner, inner
+    # the dispatch goes through the supervised producer, not a second spelling
+    assert inner == DW.supervised_container_command(tool, PIDFILE), inner
+
+    # NEITHER WINDOW MAY BE A DEFAULT. This line read `== 1800`, which is
+    # exactly `DEFAULT_STALL_GRACE_S`, so it passed even when the caller's
+    # value was dropped on the floor — measured: with both windows replaced by
+    # their defaults inside `run_docker_supervised`, all 21 tests over this
+    # file and `test_v1_3_47_stall_watchdog.py` still passed (vibe-ic#2097).
+    # The values below are deliberately not the defaults.
+    assert captured["kw"]["stall_grace_s"] == 1234.0
+    assert DW.DEFAULT_STALL_GRACE_S != 1234.0, "the window went back to a default"
+    # the ceiling is still THREADED — as a recorded budget, not a deadline.
+    assert captured["kw"]["hard_ceiling_s"] == 4321.0
+    assert DW.DEFAULT_HARD_CEILING_S != 4321.0, "the budget went back to a default"
     assert callable(captured["kw"]["cpu_probe"])
     assert callable(captured["kw"]["kill"])
+    assert callable(captured["kw"]["ceiling_notice"])
+
+    # THE CEILING CROSSING IS RECORDED, NEVER A KILL. Firing the notice the
+    # dispatch threaded in must issue no reap through the raw exec: at this
+    # seam the budget cannot terminate anything. (What the crossing RECORDS,
+    # driven through the real supervisor, is
+    # `test_issue2051_the_ceiling_is_a_record_not_a_kill.py`.)
+    before = len(raw_calls)
+    captured["kw"]["ceiling_notice"](99999.0)
+    assert not [c for c in raw_calls[before:] if "VIBEIC_REAP" in c], raw_calls
+
     # cpu_probe delegates to the injected raw exec (ps)
     captured["kw"]["cpu_probe"](object())
     assert any("cputime" in c for c in raw_calls)
