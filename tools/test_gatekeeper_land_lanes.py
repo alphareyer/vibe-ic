@@ -48,6 +48,7 @@ for _anc in Path(__file__).resolve().parents:
         continue
     break
 import _progress_run as _pr  # noqa: E402
+import _watchdog as _wd  # noqa: E402
 
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -1079,6 +1080,52 @@ def test_no_marker_probe_asks_its_question_through_a_pipe(land_text):
         f"read as a non-match: {offenders}")
 
 
+#: THE 60 s IS THE SAME NUMBER AND NO LONGER A CLOCK (vibe-ic#2131, #2051).
+#:
+#: The probe below used to run under `subprocess.run(..., timeout=60)` — the
+#: last terminating wall-clock in this file, and exactly the shape
+#: `_progress_run` exists to replace. `ci_harness_timeout_ceiling_check` was
+#: silent about it and was RIGHT to be: its own PASS line says "bounded at or
+#: under the ceiling that applies to it", and 60 is exactly `180 // 3`. That
+#: gate judges MAGNITUDE — can one call outlive the SESSION — and never
+#: mechanism, so a bound at the ceiling is a permitted spend, not a hole.
+#:
+#: What was wrong here is the mechanism. Under #2051 a budget RECORDS the
+#: crossing, ANNOUNCES it once, and the child RUNS ON; only stillness may stop
+#: a job. So the number stays and becomes what it always should have been.
+_PROBE_BUDGET_S = 60.0
+
+#: HOW OFTEN THE SUPERVISOR LOOKS, which is not how long it will wait. The
+#: watchdog's own default is 30 s, which is right for a forty-minute gate and
+#: needlessly coarse for a probe that finishes in one second: with it, the
+#: crossing of a 60 s budget is first observable at the third look. Tightening
+#: the cadence changes nothing about what may stop a job.
+_PROBE_POLL_S = 1.0
+
+
+def _supervised_bash(script: Path, *, budget_s: float = _PROBE_BUDGET_S):
+    """`bash <script>` under the progress supervisor. Returns `(result, crossed)`.
+
+    `_pr.run` is the usual drop-in, but it does not forward a `ceiling_notice`
+    and returns a plain `CompletedProcess`, so the budget it passes down is
+    recorded where no caller can read it — which is the same defect #2095
+    removed from this file in its dead form. `_wd.run_supervised` is the
+    harness's own supervised runner and hands both halves back: `crossed`
+    collects the ANNOUNCEMENT, `result.supervision` carries the RECORD.
+
+    Nothing here terminates on elapsed time. A job that goes silent AND idle
+    for `stall_grace_s` is still killed — on evidence, by the stall path.
+    """
+    crossed: list[float] = []
+    result = _wd.run_supervised(
+        ["bash", str(script)],
+        hard_ceiling_s=budget_s,
+        poll_s=_PROBE_POLL_S,
+        ceiling_notice=crossed.append,
+        as_text=True)
+    return result, crossed
+
+
 def test_the_pipe_form_really_does_lose_a_match(tmp_path):
     """The negative control, EXECUTED rather than asserted from memory.
 
@@ -1093,12 +1140,82 @@ def test_the_pipe_form_really_does_lose_a_match(tmp_path):
         "printf '%s\\n' \"$out\" | grep -qa '^AGGREGATE_NORECORD'; echo \"pipe=$?\"\n"
         'grep -qa \'^AGGREGATE_NORECORD\' <<<"$out"; echo "here=$?"\n',
         encoding="utf-8")
-    proc = subprocess.run(["bash", str(script)], stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL, text=True, timeout=60,
-                          check=False)
-    assert "pipe=141" in proc.stdout, (
-        "the pipe form no longer loses the match on this shell: " + proc.stdout)
-    assert "here=0" in proc.stdout, proc.stdout
+    res, crossed = _supervised_bash(script)
+    assert res.outcome == "natural", (res.outcome, res.supervision, res.err)
+    # A one-second probe cannot cross a sixty-second budget. If it ever does,
+    # the announcement says so instead of the run being torn down for it.
+    assert crossed == [], (crossed, res.supervision)
+    assert "pipe=141" in res.out, (
+        "the pipe form no longer loses the match on this shell: " + res.out)
+    assert "here=0" in res.out, res.out
+
+
+def test_the_probe_budget_is_recorded_and_never_terminates(tmp_path):
+    """A subject still writing PAST the budget must finish, and be SAID to have.
+
+    vibe-ic#2131. This is the property the converted call above cannot show on
+    its own, because it finishes in a second: the number is now a BUDGET, and a
+    budget that quietly kept killing would look exactly like one that does not.
+
+    The subject writes a line a second for 65 s against a 60 s budget, so it is
+    demonstrably alive at 61 s. Three things are asserted, and they are the
+    three halves of #2051's ruling:
+
+      * CONTINUES -- outcome `natural`, rc 0, and the LAST line the subject
+        writes is in the output. Absence of a kill is not the assertion; the
+        subject's own completion marker is, because a killed job also returns.
+      * RECORDED  -- `supervision['hard_ceiling_exceeded']`, with the budget
+        that was crossed, on the result the caller holds. A budget nobody can
+        read is not a ceiling (the #2095 ruling), which is why this is asserted
+        on the RESULT and not merely passed in.
+      * ANNOUNCED -- the injected notice fired EXACTLY ONCE, with an elapsed
+        past the budget. Once, because a per-poll notice would be a log flood
+        rather than an event.
+
+    Under the `subprocess.run(..., timeout=60)` this replaced, the subject is
+    killed at 60 s and `TimeoutExpired` escapes: no completion marker, no
+    record, no notice. That is the mutation arm, and it is the whole point.
+    """
+    script = tmp_path / "slow.sh"
+    # `sleep 1` in a loop rather than one long `sleep`, so the subject is
+    # PRODUCING OUTPUT the whole time. A silent sleeper would be indistinguishable
+    # from a corpse to the stall path, and this test would be measuring the wrong
+    # branch of the supervisor.
+    script.write_text(
+        "set -u\n"
+        "i=0\n"
+        "while [ \"$i\" -lt 65 ]; do echo \"still writing $i\"; sleep 1; "
+        "i=$((i + 1)); done\n"
+        "echo SUBJECT_FINISHED\n",
+        encoding="utf-8")
+    started = time.monotonic()
+    res, crossed = _supervised_bash(script)
+    elapsed = time.monotonic() - started
+
+    # It really did outlive the budget -- otherwise everything below is vacuous.
+    assert elapsed > _PROBE_BUDGET_S, (
+        f"the subject finished in {elapsed:.1f}s, inside the "
+        f"{_PROBE_BUDGET_S}s budget, so this test proved nothing about what "
+        "happens when the budget is crossed")
+
+    # CONTINUES.
+    assert res.outcome == "natural", (res.outcome, res.supervision, res.err)
+    assert res.rc == 0, (res.rc, res.err, res.out[-400:])
+    assert "SUBJECT_FINISHED" in res.out, (
+        "the subject was stopped before it finished -- the budget is being "
+        f"spent as a terminator again: outcome={res.outcome} rc={res.rc} "
+        f"supervision={res.supervision} tail={res.out[-400:]!r}")
+
+    # RECORDED, on the result the caller holds.
+    assert res.supervision.get("hard_ceiling_exceeded") is True, res.supervision
+    assert res.supervision.get("hard_ceiling_s") == _PROBE_BUDGET_S, \
+        res.supervision
+    assert res.supervision.get("hard_ceiling_crossed_s", 0) > _PROBE_BUDGET_S, \
+        res.supervision
+
+    # ANNOUNCED, exactly once.
+    assert len(crossed) == 1, crossed
+    assert crossed[0] > _PROBE_BUDGET_S, (crossed, _PROBE_BUDGET_S)
 
 
 def test_the_hygiene_lane_is_TOLD_the_checkout_is_shared(land_text):
