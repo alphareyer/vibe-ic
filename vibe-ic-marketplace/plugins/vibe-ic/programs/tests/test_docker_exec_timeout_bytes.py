@@ -43,12 +43,45 @@ def test_docker_exec_timeout_bytes_stdout_returns_str() -> None:
 
 def test_docker_exec_normal_bytes_streams_decoded() -> None:
     """Even on the success path, a bytes stdout/stderr (text=False
-    fallback) is decoded to str."""
-    class _CP:
+    fallback) is decoded to str.
+
+    THE STUB ANSWERS THE ARGV IT IS ASKED (vibe-ic#2106). `_docker_exec` no
+    longer reaches `subprocess.run` first: `_exec_argv` now builds the argv
+    through `_container_exec.docker_exec_argv`, which asks `_eda_pin` whether
+    the container is running the pinned bytes, and that probe is a
+    `docker inspect` of its own. A blanket `return_value=` handed THAT caller
+    a bytes stdout it can never receive in life — it asks with `text=True`,
+    where CPython decodes for it — and the probe died with
+    `TypeError: a bytes-like object is required, not 'str'` at
+    `_eda_pin.container_image_digest`, before the subject under test ran at
+    all. Red on pristine main in both env arms.
+
+    So the stub distinguishes the two callers by their argv, and each gets an
+    answer its real caller could actually receive:
+
+      * `docker exec …` — THE SUBJECT. Bytes on a `text=True` call, which is
+        exactly the condition this test exists for and the one CPython really
+        produces when a stream is killed mid-decode.
+      * anything else — the pin probe. `rc=1` with STR streams is docker's own
+        "no such container", which `container_pin_state` classifies UNREADABLE.
+        Deliberately not a MISMATCH: `docker_exec_argv` RAISES on a measured
+        mismatch, so a stub that faked a wrong image would replace this test's
+        subject with the refusal path and never decode anything.
+    """
+    class _ExecCP:
         returncode = 0
         stdout = b"ok-bytes"
         stderr = bytearray(b"warn-bytes")
-    with patch("subprocess.run", return_value=_CP()):
+
+    class _NoSuchContainerCP:
+        returncode = 1
+        stdout = ""
+        stderr = "Error: No such object: vibeic-eda"
+
+    def _answer(argv, *_a, **_kw):
+        return _ExecCP() if "exec" in list(argv) else _NoSuchContainerCP()
+
+    with patch("subprocess.run", side_effect=_answer):
         rc, out, err = _docker_exec("vibeic-eda", "echo ok")
     assert (rc, isinstance(out, str), isinstance(err, str)) == (0, True, True)
     assert out == "ok-bytes"

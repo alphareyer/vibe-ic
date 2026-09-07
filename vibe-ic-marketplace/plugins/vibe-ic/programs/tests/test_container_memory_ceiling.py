@@ -231,6 +231,52 @@ def test_caravel_harden_argv_carries_the_ceiling(tmp_path):
     assert argv.index("--memory") < argv.index("img:1")
 
 
+def test_technology_facts_argv_carries_the_ceiling(monkeypatch):
+    """The tech-LEF read in `submission_template_fetch` (vibe-ic#2111).
+
+    The structural sweep above names the site; this drives it, because the
+    splice has a second property the sweep cannot see. The image is entered
+    through its own entrypoint, whose help says `--skip` is ignored anywhere
+    but FIRST — so the flags have to land BEFORE the image and never between
+    the image and `--skip`. A splice that satisfied the sweep by putting them
+    after the digest would run the entrypoint's full startup instead of the
+    command, and the sweep would still be green.
+    """
+    import submission_template_fetch as stf
+
+    class _Judged:
+        ref = "repo@sha256:" + "0" * 64
+        digest = "sha256:" + "0" * 64
+        version = "0.0.0"
+        why_not = ""
+
+    seen = {}
+
+    def _fake_run(argv, timeout=None):
+        seen["argv"] = list(argv)
+        return 3, "NO_TECH_LEF\n", ""
+
+    monkeypatch.setattr(stf, "_run", _fake_run)
+    import _eda_image
+    monkeypatch.setattr(_eda_image, "judged_image",
+                        lambda **kw: _Judged(), raising=True)
+
+    stf.technology_facts("ihp-sg13g2", image="", allow_pull=False)
+    argv = seen.get("argv")
+    assert argv, "technology_facts never reached its `docker run`"
+    assert argv[:2] == ["docker", "run"], argv
+    assert "--memory" in argv and "--memory-swap" in argv, argv
+    assert argv[argv.index("--memory") + 1] == \
+        argv[argv.index("--memory-swap") + 1], argv
+    image_at = argv.index(_Judged.ref)
+    assert argv.index("--memory") < image_at, (
+        f"the ceiling was spliced AFTER the image, so it is an argument to "
+        f"the entrypoint and not to docker: {argv}")
+    assert argv[image_at + 1] == "--skip", (
+        f"`--skip` is no longer the first argument after the image; the "
+        f"image entrypoint ignores it anywhere else: {argv}")
+
+
 def test_the_installer_script_refuses_without_the_helper(tmp_path):
     """tools/vibeic-eda/restart-eda.sh must not fall back to unbounded when the
     helper it reads the ceiling from is absent."""

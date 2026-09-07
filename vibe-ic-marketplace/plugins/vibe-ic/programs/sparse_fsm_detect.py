@@ -95,7 +95,7 @@ _MODULE_RE = re.compile(r"(?m)^\s*module\s+(\w+)")
 
 
 def _strip_macro_definitions(text: str) -> str:
-    """Remove ``\`define`` bodies (continued with trailing backslashes).
+    r"""Remove ``\`define`` bodies (continued with trailing backslashes).
 
     MEASURED on the opentitan_aes corpus cell: `prim_flop_macros.sv` DEFINES
     ``PRIM_FLOP_SPARSE_FSM``, and its body instantiates
@@ -142,7 +142,7 @@ def min_pairwise_hamming(codes: Sequence[str]) -> Optional[int]:
 
 
 def _module_at(text: str, pos: int) -> str:
-    """Name of the module enclosing character offset `pos` ('' when none).
+    r"""Name of the module enclosing character offset `pos` ('' when none).
 
     vibe-ic#731: `// this module drives the round counter` matches
     `^\s*module\s+(\w+)` and mints an enclosing module that does not exist,

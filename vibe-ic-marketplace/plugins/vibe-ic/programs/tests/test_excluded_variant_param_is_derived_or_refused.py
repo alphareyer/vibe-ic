@@ -635,7 +635,7 @@ def test_the_marker_still_fires_when_its_why_clause_denies_the_exclusion():
 
 
 def test_the_convention_keyword_is_itself_in_the_denial_vocabulary():
-    """WHY A CONSULT HERE IS NOT MERELY UNNECESSARY BUT DESTRUCTIVE.
+    r"""WHY A CONSULT HERE IS NOT MERELY UNNECESSARY BUT DESTRUCTIVE.
 
     `_EXCLUDED_VARIANT_FILE_RE` REQUIRES the filename to end in `excluded`, and
     `excluded` is a member of `_prose_polarity`'s own vocabulary

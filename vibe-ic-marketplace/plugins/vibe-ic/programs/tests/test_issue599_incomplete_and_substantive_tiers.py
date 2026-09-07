@@ -160,11 +160,81 @@ def test_the_new_hints_are_held_out_of_the_displayed_reasons(tmp_path,
         f"an internal hint marker reached the displayed reasons: {leaked}")
 
 
+#: The four maps #599 requires, read out of `main` BY NAME instead of by a
+#: byte sequence. Every one of the four assertions this replaced was a literal
+#: that included the character AFTER the value — `'"INCOMPLETE": 0}'`,
+#: `'"INCOMPLETE": "INCOMPLETE"}'` — so each of them was really asserting
+#: "INCOMPLETE is the LAST key in this dict", which is not a contract #599
+#: states and not one anybody maintains. MEASURED: `3341a0d32` appended
+#: `"NOT-MEASURED": "NOT-MEASURED"` to the display-label map, the label for
+#: INCOMPLETE was untouched and still correct, and this test went red on main
+#: (vibe-ic#2111). Parsed, the same widening is invisible; a label that is
+#: actually WRONG or actually GONE still fails.
+def _main_dict(name: str) -> dict:
+    """The dict literal `main` assigns to `name`, parsed, never imported.
+
+    `main` is a several-thousand-line function that takes a whole project on
+    disk; the tiers it prints are decided by these three literals and by the
+    one interpolation below, so those are what is read. A dict `main` builds
+    by comprehension is not this — the tally initialiser is the ALL-ZERO
+    literal, and it is selected by that property rather than by line number.
+    """
+    import ast
+    tree = ast.parse(SRC)
+    main = next(n for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    for node in ast.walk(main):
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        if getattr(node.targets[0], "id", None) != name:
+            continue
+        if not isinstance(node.value, ast.Dict):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except ValueError:
+            continue
+        if name == "counts" and set(value.values()) != {0}:
+            continue
+        return value
+    raise AssertionError(
+        f"flow_compliance_check.main assigns no dict literal named {name!r}; "
+        f"the #599 tier is decided there and this check cannot see it")
+
+
 def test_incomplete_is_counted_labelled_and_rendered():
-    assert '"INCOMPLETE": 0}' in SRC, "not in the tally"
-    assert '"INCOMPLETE": "INCOMPLETE"}' in SRC, "no display label"
-    assert '"INCOMPLETE": "…"' in SRC, "no icon, so it renders as `?`"
+    assert _main_dict("counts").get("INCOMPLETE") == 0, "not in the tally"
+    assert _main_dict("_label").get("INCOMPLETE") == "INCOMPLETE", \
+        "no display label"
+    icon = _main_dict("_icon").get("INCOMPLETE")
+    assert icon and icon != "?", "no icon, so it renders as `?`"
     assert "incomplete_str" in SRC, "absent from the summary line"
+
+
+def test_the_incomplete_clause_actually_reaches_the_printed_summary():
+    """THE SIBLING ARM the literal above never had.
+
+    `"incomplete_str" in SRC` is satisfied by the assignment alone: the clause
+    could be computed and then interpolated into nothing, and the tally line
+    would silently drop the tier while this file stayed green. So the f-string
+    that `main` PRINTS is located and the name has to appear inside it.
+    """
+    import ast
+    main = next(n for n in ast.parse(SRC).body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    printed = []
+    for node in ast.walk(main):
+        if not (isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "print"):
+            continue
+        for arg in node.args:
+            for sub in ast.walk(arg):
+                if isinstance(sub, ast.FormattedValue):
+                    printed.append(ast.unparse(sub.value))
+    assert "incomplete_str" in printed, (
+        "`incomplete_str` is computed but never interpolated into a printed "
+        f"summary line, so the #599 tier is tallied and then not shown; the "
+        f"names that do reach a print are {sorted(set(printed))}")
 
 
 def test_it_is_a_disclosure_tier_not_a_failure():

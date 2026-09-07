@@ -583,7 +583,17 @@ def technology_facts(pdk: str, image: str,
               f'[ -n "$f" ] || {{ echo "NO_TECH_LEF"; exit 3; }}; '
               f'echo "FILE=$f"; grep -n "DATABASE[[:space:]]\\+MICRONS" "$f" '
               f'| head -1')
-    rc, out, err = _run(["docker", "run", "--rm", digest, "--skip",
+    # THE CEILING GOES HERE TOO, and it is not a formality because the command
+    # is one `grep` (vibe-ic#2111). `test_no_docker_run_escapes_the_ceiling`
+    # states the rule with no allowlist on purpose: "this one is small" is a
+    # judgement that has to be re-made correctly at every edit, and the site
+    # that gets it wrong is unbounded on a machine whose OOM killer picks by
+    # `oom_score_adj` — it takes the desktop session, not the run that caused
+    # the pressure. Spliced immediately after the run verb, exactly as the one
+    # other `docker run` in this file does.
+    rc, out, err = _run(["docker", "run", "--rm",
+                         *_dmem.docker_memory_flags(),
+                         digest, "--skip",
                          "bash", "-lc", script], timeout=600)
     path, line_no, statement = None, None, None
     for raw in (out or "").splitlines():

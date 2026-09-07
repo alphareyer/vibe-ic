@@ -286,7 +286,7 @@ def nda_regex_family_roles() -> List[str]:
 
 
 def _token_alt(token: str) -> str:
-    """One token as a regex ALTERNATIVE: escaped, separator-insensitive.
+    r"""One token as a regex ALTERNATIVE: escaped, separator-insensitive.
 
     `[\s_\-]*` and not `[\s_\-]+`: `nda_content_regex`'s docstring claims a
     multi-word brand's "spaced / unspaced / hyphenated / underscored spellings
