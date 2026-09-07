@@ -13,6 +13,11 @@ route emits exactly this marker; under a `*.log` sweep it then vouches for the
 approach that actually shipped. #2108 could only dodge that from its own side,
 by naming the archives `openroad.approach<N>.log.txt`, which leaves any OTHER
 writer of a `.log` under the PnR directory able to launder the same downgrade.
+(That is the name #2108 gave them. `step_pnr` writes
+`openroad.inv<K>.approach<N>.log.txt` today: vibe-ic#2133 added the invocation
+key so a second `step_pnr` into one out_dir cannot overwrite the first one's
+archives. The narrowing this module pins is what makes the sweep independent of
+either spelling.)
 
 Both directions, and the two properties the narrowing must NOT cost:
 

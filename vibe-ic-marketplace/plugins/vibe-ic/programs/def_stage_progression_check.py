@@ -346,10 +346,15 @@ def _is_global_route_only(project: Path) -> bool:
         #
         # #2108 could only avoid that from the far side, by naming its
         # archives `openroad.approach<N>.log.txt` so this glob would miss
-        # them. That left the defect intact for any OTHER writer of a `.log`
-        # under the PnR directory. Narrow the sweep to the file the comment
-        # names. `rglob` is kept, so a canonical log in a nested run
-        # directory is still read; only foreign `.log` files stop counting.
+        # them. (That is what #2108 named them; the file `step_pnr` writes
+        # TODAY is `openroad.inv<K>.approach<N>.log.txt` — vibe-ic#2133 added
+        # the invocation key so a second `step_pnr` into one out_dir cannot
+        # overwrite the first one's archives. Both spellings end `.log.txt`
+        # and are outside this sweep under either rule.) That left the defect
+        # intact for any OTHER writer of a `.log` under the PnR directory.
+        # Narrow the sweep to the file the comment names. `rglob` is kept, so
+        # a canonical log in a nested run directory is still read; only
+        # foreign `.log` files stop counting.
         for log in pnr_dir.rglob(_GLOBAL_ROUTE_LOG_NAME):
             try:
                 with log.open(errors="replace") as f:

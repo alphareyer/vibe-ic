@@ -25983,29 +25983,196 @@ _PNR_METRICS = "openroad.metrics.json"
 #: every existing `*.log` sweep exactly as it is, and
 #: `openroad.approaches.json` is the aggregate that names which archive backs
 #: which approach.
-_PNR_APPROACH_LOG_FMT = "openroad.approach{index}.log.txt"
+#:
+#: AND WHY THE NAME CARRIES AN INVOCATION KEY (vibe-ic#2133 — #2108's class one
+#: level up). The archive index above is `_retry_i`, which is local to ONE
+#: `step_pnr` call and restarts at 0 on the next one. `step_pnr` IS called more
+#: than once into the SAME `out_dir` — `main` re-dispatches it after the PDN-EM
+#: first-pass resize — so with an approach-only name the second call's approach
+#: 0 lands on top of the first call's approach 0, and the rest of the first
+#: call's archives are orphaned from a manifest that no longer mentions them.
+#:
+#: MEASURED (an open PDK, a real front-door run, 2026-09-07): 12:37 wrote
+#: `approach0` sha b545fd04... 7913 B and `approach1` 100012 B carrying the two
+#: `[INFO DRT-0702] Post-route verification: 0 violation(s).` lines — the proof
+#: the design routed clean; 12:44 wrote `approach0` sha 87ae65dd..., ALSO
+#: 7913 B, so no size and no count could see the loss; at 13:01 `approach1`
+#: went 100012 -> 242545 B. The manifest stayed internally SELF-CONSISTENT
+#: throughout (recorded sha == current file), so nothing in the tree signalled
+#: that a record had been destroyed.
+#:
+#: The invocation key is therefore part of the NAME, not only of the manifest.
+#: A manifest is exactly what this defect rewrites; a name that cannot collide
+#: is what survives it. The manifest carries the key too, and additionally
+#: REFUSES: `_preserve_pnr_approach_log` never writes over an archive that is
+#: already on disk, whatever the key says.
+#:
+#: COST OF THE UNIFORM SPELLING, stated rather than left to be discovered: a
+#: run that makes exactly ONE invocation now writes `openroad.inv0.approach0.
+#: log.txt` where it used to write `openroad.approach0.log.txt`. No consumer in
+#: this repository reads either name — `openroad.approaches.json` is the only
+#: documented way in, and `def_stage_progression_check` no longer sweeps `*.log`
+#: at all: vibe-ic#2116 narrowed it to `rglob("openroad.log")`, so both
+#: spellings are outside it for a second, independent reason. (The paragraph
+#: above names the archives in their pre-#2133 spelling because that is the
+#: name #2108 chose. Where that spelling was DESCRIBING how the tree behaves
+#: rather than citing what #2108 did — the comment in
+#: `def_stage_progression_check` and #2116's test docstring — this commit adds
+#: the current name beside it, because a description that this commit falsifies
+#: is a lie sitting where the next reader will trust it. Neither account of
+#: what #2108 or #2116 DID is altered.) The
+#: alternative — key the SECOND invocation only — asks every future reader to
+#: know an asymmetric rule in order to tell a complete record from a truncated
+#: one. The pre-#2133 spelling is still READ, below, so a directory an older
+#: plugin wrote is recognised, not overwritten.
+_PNR_APPROACH_LOG_FMT = "openroad.inv{invocation}.approach{index}.log.txt"
+_PNR_APPROACH_LOG_RE = re.compile(
+    r"^openroad\.inv(?P<invocation>\d+)\.approach(?P<index>\d+)\.log\.txt$")
+#: The pre-#2133 spelling. READ only, never written, so an `out_dir` an older
+#: plugin wrote is recognised as invocation 0 instead of being overwritten by
+#: this one. No verdict is derived from it.
+_PNR_APPROACH_LOG_LEGACY_RE = re.compile(
+    r"^openroad\.approach(?P<index>\d+)\.log\.txt$")
 _PNR_APPROACH_MANIFEST = "openroad.approaches.json"
 
 
-def _write_pnr_approach_manifest(out_dir: Path,
-                                 history: List[Dict[str, Any]]) -> None:
-    """Write the aggregate that names which archive backs which approach.
+def _next_pnr_invocation_index(out_dir: Path) -> int:
+    """The invocation key for the `step_pnr` call that is about to start.
 
-    `canonical_log_is_approach` is the load-bearing field. `openroad.log` is
-    whatever the LAST approach happened to leave behind, and without this a
-    reader cannot tell which of the archives beside it that duplicates.
+    Derived from what is ALREADY ON DISK in `out_dir`, from two INDEPENDENT
+    sources, taking the larger:
 
-    Rewritten in full from `history` on every call rather than merged with
-    whatever is already on disk: a step re-run into a directory that already
-    holds a longer run's manifest must not inherit its extra rows, which would
-    attribute approaches to this run that this run never made.
+      * every archive filename carrying an invocation key, plus every
+        pre-#2133 archive (invocation 0 by construction); and
+      * every invocation the manifest on disk names.
+
+    Two sources because either can be absent while the other is present — a
+    manifest can be deleted while the archives it names remain, and a
+    partially copied tree can carry a manifest whose files did not come with
+    it — and the cost of guessing LOW is exactly the overwrite this closes.
+
+    Never raises. An `out_dir` that cannot be read yields 0 with a loud line
+    saying so: the guess is then wrong in the unsafe direction, and
+    `_preserve_pnr_approach_log` REFUSES the resulting collision BY NAME
+    rather than trusting this number. That refusal is what makes it safe for
+    this function to degrade at all.
     """
-    doc = {
-        "canonical_log": "openroad.log",
-        "canonical_log_is_approach": (history[-1]["approach"]
-                                      if history else None),
+    seen: List[int] = []
+    try:
+        entries = list(out_dir.iterdir())
+    except OSError as exc:
+        print(f"[pnr] PNR_APPROACH_INVOCATION_INDEX_UNDERIVED dir={out_dir} "
+              f"reason={type(exc).__name__}: {exc}; assuming 0 — a collision "
+              f"is refused by name, never resolved by this number",
+              file=sys.stderr)
+        return 0
+    for _p in entries:
+        _m = _PNR_APPROACH_LOG_RE.match(_p.name)
+        if _m:
+            seen.append(int(_m.group("invocation")))
+        elif _PNR_APPROACH_LOG_LEGACY_RE.match(_p.name):
+            seen.append(0)
+    try:
+        _doc = json.loads(
+            (out_dir / _PNR_APPROACH_MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        _doc = None
+    if isinstance(_doc, dict):
+        _invs = _doc.get("invocations")
+        if isinstance(_invs, list):
+            for _inv in _invs:
+                if isinstance(_inv, dict) and isinstance(
+                        _inv.get("invocation"), int):
+                    seen.append(int(_inv["invocation"]))
+        elif _doc.get("approaches"):
+            # A pre-#2133 manifest describes invocation 0 and nothing else.
+            seen.append(0)
+    return (max(seen) + 1) if seen else 0
+
+
+def _write_pnr_approach_manifest(out_dir: Path,
+                                 history: List[Dict[str, Any]],
+                                 invocation: int = 0) -> None:
+    """Write the aggregate that names which archive backs which approach OF
+    WHICH INVOCATION.
+
+    `canonical_archive` / `canonical_log_is_approach` are the load-bearing
+    fields. `openroad.log` is whatever the LAST approach of the LAST
+    invocation happened to leave behind, and without them a reader cannot tell
+    which of the archives beside it that duplicates.
+
+    THIS INVOCATION'S ROWS ARE REBUILT IN FULL from `history` on every call
+    rather than merged with whatever is already on disk: a step re-run into a
+    directory that already holds a longer run's rows must not inherit its
+    extra approaches, which would attribute approaches to this invocation that
+    it never made.
+
+    THAT RULE USED TO APPLY TO THE WHOLE FILE, and applying it to the whole
+    file is vibe-ic#2133: the second invocation's manifest silently DROPPED
+    the first invocation's approaches while their archives sat on disk with
+    nothing pointing at them. Earlier invocations are therefore carried
+    forward, each under its OWN invocation key — which is what makes carrying
+    them forward honest, because nothing is attributed to this invocation —
+    and only where the archive a row names is still on disk. A row whose file
+    has since gone is DROPPED rather than promised, and counted in that
+    invocation's `approaches_dropped_absent`, because a record that quietly
+    shrinks is this defect wearing the other hat.
+    """
+    prior: List[Dict[str, Any]] = []
+    try:
+        _old = json.loads(
+            (out_dir / _PNR_APPROACH_MANIFEST).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        _old = None
+    if isinstance(_old, dict):
+        _old_invs = _old.get("invocations")
+        if not isinstance(_old_invs, list):
+            # Pre-#2133 manifest: it describes invocation 0 and nothing else.
+            _old_invs = ([{"invocation": 0,
+                           "approaches": _old.get("approaches") or []}]
+                         if _old.get("approaches") else [])
+        for _inv in _old_invs:
+            if not isinstance(_inv, dict):
+                continue
+            if _inv.get("invocation") == int(invocation):
+                continue        # rebuilt from `history`, never merged
+            _rows = [r for r in (_inv.get("approaches") or [])
+                     if isinstance(r, dict)]
+            _kept = [r for r in _rows
+                     if r.get("log") and (out_dir / str(r["log"])).is_file()]
+            _entry = dict(_inv)
+            _entry["canonical"] = False
+            _entry["approaches"] = _kept
+            _entry["approach_count"] = len(_kept)
+            _entry["approaches_dropped_absent"] = len(_rows) - len(_kept)
+            prior.append(_entry)
+    _current = {
+        "invocation": int(invocation),
+        "canonical": True,
         "approach_count": len(history),
         "approaches": list(history),
+        "approaches_dropped_absent": 0,
+    }
+    _invocations = sorted(
+        prior + [_current],
+        key=lambda e: (e.get("invocation")
+                       if isinstance(e.get("invocation"), int) else -1))
+    doc = {
+        "canonical_log": "openroad.log",
+        "canonical_invocation": int(invocation),
+        "canonical_log_is_approach": (history[-1]["approach"]
+                                      if history else None),
+        # None when the canonical approach was NOT preserved: the archive it
+        # would have been named is somebody else's file, and pointing
+        # `openroad.log` at it would be a fresh lie in the record written to
+        # stop one.
+        "canonical_archive": (history[-1]["log"]
+                              if history and history[-1].get("preserved")
+                              else None),
+        "approach_count": len(history),
+        "approaches": list(history),
+        "invocation_count": len(_invocations),
+        "invocations": _invocations,
     }
     try:
         (out_dir / _PNR_APPROACH_MANIFEST).write_text(
@@ -26017,9 +26184,11 @@ def _write_pnr_approach_manifest(out_dir: Path,
 
 def _preserve_pnr_approach_log(out_dir: Path, log_path: Path, index: int,
                                rc: Optional[int],
-                               history: List[Dict[str, Any]]
+                               history: List[Dict[str, Any]],
+                               invocation: int = 0
                                ) -> Dict[str, Any]:
-    """Archive ONE PnR approach's log, then rewrite the manifest.
+    """Archive ONE PnR approach's log of ONE invocation, then rewrite the
+    manifest.
 
     ADVISORY / DISCLOSURE-ONLY, stated here rather than left to a default.
     Nothing in this function or its manifest can stop the flow, change a step
@@ -26042,6 +26211,16 @@ def _preserve_pnr_approach_log(out_dir: Path, log_path: Path, index: int,
     error, and printed to stderr, because a record that silently fails to be
     kept is this very defect wearing the other hat.
 
+    IT REFUSES BY NAME (vibe-ic#2133). An archive already on disk is NEVER
+    written over: the row comes back ``preserved: false`` with ``refused:
+    true``, the existing archive is kept byte-for-byte, and the refusal is
+    printed. `invocation` is what normally makes the name unique, but a name
+    is a claim and this is the check — reached when `out_dir` could not be
+    read at the moment the key was derived, or when a caller restarts the
+    index. Refusing loses THIS approach's log, which is the newer of the two
+    and the one a re-run can produce again; overwriting loses the earlier one,
+    which nothing can. Both losses are disclosed; only one is recoverable.
+
     The manifest is rewritten after EVERY approach rather than at the end of
     the step: `step_pnr` returns from more than a dozen places between this
     loop and its tail, so an aggregate written at the tail is exactly the
@@ -26049,37 +26228,52 @@ def _preserve_pnr_approach_log(out_dir: Path, log_path: Path, index: int,
     approaches matter most.
     """
     row: Dict[str, Any] = {
+        "invocation": int(invocation),
         "approach": int(index),
-        "log": _PNR_APPROACH_LOG_FMT.format(index=int(index)),
+        "log": _PNR_APPROACH_LOG_FMT.format(invocation=int(invocation),
+                                            index=int(index)),
         "rc": rc,
         "preserved": False,
+        "refused": False,
     }
     dest = out_dir / row["log"]
-    try:
-        shutil.copyfile(log_path, dest)
-    except OSError as exc:
-        row["error"] = f"{type(exc).__name__}: {exc}"
+    if dest.exists():
+        # REFUSE BY NAME — vibe-ic#2133. Overwriting here is the defect.
+        row["error"] = (f"PNR_APPROACH_ARCHIVE_EXISTS: {dest.name} is already "
+                        f"on disk and is not this approach's copy")
+        row["refused"] = True
+        print(f"[pnr] PNR_APPROACH_ARCHIVE_REFUSED_OVERWRITE "
+              f"invocation={row['invocation']} approach={row['approach']} "
+              f"archive={dest} source={log_path} — the archive already on "
+              f"disk is KEPT and this approach's log is NOT archived",
+              file=sys.stderr)
     else:
-        row["preserved"] = True
-        _h = hashlib.sha256()
-        _n = 0
         try:
-            with dest.open("rb") as _fh:
-                for _chunk in iter(lambda: _fh.read(1 << 20), b""):
-                    _h.update(_chunk)
-                    _n += len(_chunk)
+            shutil.copyfile(log_path, dest)
         except OSError as exc:
-            row["digest_error"] = f"{type(exc).__name__}: {exc}"
+            row["error"] = f"{type(exc).__name__}: {exc}"
         else:
-            row["bytes"] = _n
-            row["sha256"] = _h.hexdigest()
-    if not row["preserved"]:
+            row["preserved"] = True
+            _h = hashlib.sha256()
+            _n = 0
+            try:
+                with dest.open("rb") as _fh:
+                    for _chunk in iter(lambda: _fh.read(1 << 20), b""):
+                        _h.update(_chunk)
+                        _n += len(_chunk)
+            except OSError as exc:
+                row["digest_error"] = f"{type(exc).__name__}: {exc}"
+            else:
+                row["bytes"] = _n
+                row["sha256"] = _h.hexdigest()
+    if not row["preserved"] and not row["refused"]:
         # DEGRADE LOUDLY, NEVER SILENTLY.
         print(f"[pnr] PNR_APPROACH_LOG_NOT_PRESERVED "
+              f"invocation={row['invocation']} "
               f"approach={row['approach']} source={log_path} "
               f"reason={row.get('error', 'unknown')}", file=sys.stderr)
     history.append(row)
-    _write_pnr_approach_manifest(out_dir, history)
+    _write_pnr_approach_manifest(out_dir, history, invocation)
     return row
 
 
@@ -28380,6 +28574,14 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # `_preserve_pnr_approach_log` for why this cannot wait for the tail
     # of the step.
     _pnr_approach_logs: List[Dict[str, Any]] = []
+    # vibe-ic#2133 — the key that makes THIS invocation's archive names unique
+    # against every invocation that has already written into this out_dir.
+    # `_retry_i` below restarts at 0 on every `step_pnr` call and `main`
+    # re-dispatches this step into the same directory after the PDN-EM
+    # first-pass resize, so without this the second call overwrites the first
+    # call's archives. Derived ONCE, before the loop, from the directory as it
+    # stands; a collision is still refused by name inside the preserver.
+    _pnr_invocation = _next_pnr_invocation_index(out_dir)
     # Loop budget = initial run + over-util upsize (own counter) + a single
     # over-sparse downsize + the ROUTING-FEEDBACK loosen ladder. Each mutation
     # path is INDEPENDENTLY bounded (upsize by `_PNR_UPSIZE_RETRIES` + the die
@@ -28403,7 +28605,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         # the stall/ceiling `break` below: a killed approach's partial
         # log is evidence too, and it is the one a reader most wants.
         _preserve_pnr_approach_log(out_dir, _pnr_logp, _retry_i, rc,
-                                   _pnr_approach_logs)
+                                   _pnr_approach_logs,
+                                   invocation=_pnr_invocation)
         # vibe-ic#2157 — AND THIS APPROACH'S EMPTY ANTENNA REPORTS, WHICH
         # THE TCL'S OWN CLEANUP CANNOT ALWAYS REACH. Same placement and the
         # same reason as the archive above: the moment the tool returns, ahead
