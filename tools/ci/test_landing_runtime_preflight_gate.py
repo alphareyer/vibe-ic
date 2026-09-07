@@ -100,6 +100,51 @@ sys.path.insert(0, str(_PROGRAMS))
 import _watchdog                                              # noqa: E402
 
 
+def _pinned_runner_image() -> str:
+    """The digest-pinned runtime reference, COMPOSED the way the runtime does.
+
+    vibe-ic#2100.  Two assertions in this file used to spell the literal
+    `"ghcr.io/vibeic/vibeic-eda@sha256:"`.  The digest half was absent, so the
+    stale-pin trap did not apply — but the REPOSITORY half is deployment
+    configuration, and `landing_pytest_runtime_preflight` composes it from
+    `$VIBEIC_EDA_IMAGE_REPO` exactly as everything else on the run path does.
+    MEASURED 2026-09-07 on 8HD-4:
+    `test_the_full_tier_refuses_once_when_it_cannot_run_the_test_runtime` red
+    with the env SET ("the refusal does not name the digest-pinned runner
+    image" — it did, at the fleet registry) and green with it unset.  A gate
+    test that fails on the hosts that carry the fleet configuration is
+    reporting the network, not the gate.
+
+    READ by `ast` from `hermetic_candidate_runner.py`, the ONE place this repo
+    pins the runtime, rather than from `_eda_pin` — the module the program
+    under test composes through.  Reading the subject's own source to check the
+    subject is how two definitions move together unnoticed; reading the other
+    definition makes this a drift net.  No fallback literal: an unreadable pin
+    is a refusal, because a fallback is how the second copy comes back.
+    """
+    import ast
+    wanted = ("IMAGE_DIGEST", "IMAGE_REPO_DEFAULT")
+    tree = ast.parse((_ROOT / "tools" / "ci" / "hermetic_candidate_runner.py")
+                     .read_text(encoding="utf-8"))
+    found = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            name = getattr(target, "id", "")
+            if name in wanted and name not in found:
+                found[name] = ast.literal_eval(node.value)
+    missing = [name for name in wanted if name not in found]
+    assert not missing, (
+        f"hermetic_candidate_runner.py pins no {', '.join(missing)}")
+    repo = (os.environ.get("VIBEIC_EDA_IMAGE_REPO") or "").strip() \
+        or found["IMAGE_REPO_DEFAULT"]
+    return f"{repo}@{found['IMAGE_DIGEST']}"
+
+
+_RUNNER_IMAGE = _pinned_runner_image()
+
+
 def _run(argv: list[str], *, grace: int, env: dict[str, str] | None = None,
          cwd: str | None = None) -> subprocess.CompletedProcess:
     """Launch under progress-stall supervision instead of an elapsed bound.
@@ -403,8 +448,12 @@ def test_the_full_tier_refuses_once_when_it_cannot_run_the_test_runtime(tmp_path
     assert "cannot import the test runner" in combined
     assert "trusted_pytest_entry.py" in combined
     # BOTH remedies, because a refusal with no way forward is a wall.
-    assert "ghcr.io/vibeic/vibeic-eda@sha256:" in combined, (
-        "the refusal does not name the digest-pinned runner image")
+    # THE WHOLE REFERENCE, not a repository prefix: what makes the remedy
+    # actionable is the digest, and asserting the composed reference is
+    # strictly more than the prefix this line used to look for.
+    assert _RUNNER_IMAGE in combined, (
+        "the refusal does not name the digest-pinned runner image "
+        f"{_RUNNER_IMAGE}")
     assert f"{_HOST_LANE_ENV}=auto" in combined, (
         "the refusal does not name the host lane")
     # ONCE. Not once per file, not once per arm — which is the whole finding.
@@ -481,7 +530,7 @@ def test_the_preflight_program_owns_the_cause_and_the_remedy():
     program = _PROGRAMS / "landing_pytest_runtime_preflight.py"
     assert program.is_file(), f"{program} is absent"
     _, block = _preflight_block()
-    for token in ("ghcr.io/vibeic/vibeic-eda@sha256:", _HOST_LANE_ENV,
+    for token in (_RUNNER_IMAGE, "@sha256:", _HOST_LANE_ENV,
                   "isolated mode"):
         assert token not in block, (
             f"gatekeeper-land.sh restates {token!r} instead of delegating the "

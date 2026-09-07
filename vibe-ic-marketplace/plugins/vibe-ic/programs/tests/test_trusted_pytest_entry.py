@@ -8,12 +8,32 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import not_verified_tier as NV  # noqa: E402
+import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 ENTRY = PROGRAMS / "trusted_pytest_entry.py"
-IMAGE = ("ghcr.io/vibeic/vibeic-eda@sha256:"
-         "8c5694abdf5c269c1d9def5368704e0c4b51c869d1d9c9380e123e07657fe9eb")
+
+#: THE REFERENCE IS COMPOSED, NOT COPIED (vibe-ic#2100).
+#:
+#: This was the literal `ghcr.io/vibeic/vibeic-eda@sha256:8c5694…`, which welds
+#: the pinned DIGEST (identity) to a REPOSITORY (deployment configuration).  The
+#: digest half is a second definition of the pin; the repository half is simply
+#: wrong on any host that reaches the same bytes elsewhere.
+#:
+#: MEASURED 2026-09-07 on 8HD-4 with `VIBEIC_EDA_IMAGE_REPO` exported: the
+#: pinned bytes were present under the configured repository and absent under
+#: `ghcr.io`, so `docker image inspect` failed and
+#: `test_image_entry_ignores_subject_shadow` reported
+#: "exact hermetic landing image is not locally available" — a SKIP, in
+#: pytest's green bucket, on every host that carries the fleet configuration.
+#: The one test that proves the landing runtime cannot be shadowed inside the
+#: image had quietly stopped running there, and nothing said so.
+#:
+#: `_eda_pin` is a different module from the subject (`trusted_pytest_entry`),
+#: so reading it here is not circular; it is the same composition every other
+#: run-path site performs.
+IMAGE = _pin.image_reference()
 
 #: THE STREAM THIS FILE'S CHILDREN MUST NOT JOIN.
 #:

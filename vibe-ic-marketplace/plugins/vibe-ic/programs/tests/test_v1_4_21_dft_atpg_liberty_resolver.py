@@ -136,10 +136,32 @@ import pytest
 import _eda_image as _img
 
 
-def _local_eda_image():
-    """The probe must name an image this machine actually has — a pinned
-    literal went stale the moment the anchor stopped being written."""
-    return _img.local_image() or _img.IMAGE_REPO + ":latest"  # noqa: E402
+def _run_image():
+    """THE IMAGE THE PRODUCER WILL ACTUALLY START — not one like it.
+
+    vibe-ic#2100.  What stood here was
+    `_img.local_image() or _img.IMAGE_REPO + ":latest"`, and the `or` arm is
+    the whole defect: the skip guard probed a reference the run does NOT use.
+    `fault_atpg_run` starts `_eda_image.resolve()`, which is the pinned
+    `<configured repo>@<digest>`; the guard asked about
+    `ghcr.io/vibeic/vibeic-eda:latest`, a floating tag naming whatever this
+    machine last pulled under that name.
+
+    MEASURED 2026-09-07 on 8HD-4 with `VIBEIC_EDA_IMAGE_REPO` UNSET: the pinned
+    reference was not present (the fleet holds those bytes under a different
+    repository), `local_image()` answered None, the `:latest` fallback WAS
+    present as an unrelated 0.3.x image, so the guard declared the image
+    available and the test ran — and `fault cut` came back
+    `exit 125: Unable to find image '<pinned ref>' locally … manifest unknown`.
+    A guard that answers about a different image than the run is worse than no
+    guard: it converts "this verification did not happen" into a red that
+    blames the producer.
+
+    There is deliberately NO fallback.  A host that does not hold the pinned
+    bytes cannot run this proof, and it says so by name through the skip reason
+    below — the same rule `_eda_pin` holds every image answer to.
+    """
+    return _img.resolve()  # noqa: E402
 # vibe-ic#1128 — these skips mean A VERIFICATION DID NOT HAPPEN, not that
 # one passed. Declared through `not_verified_tier` so the run's roll-up
 # cannot count them under `passed`; see that module's docstring.
@@ -151,18 +173,22 @@ def _local_eda_image():
 # not available" about an image whose presence it never established.
 from not_verified_tier import (PROBE_PRESENT, probe,  # noqa: E402
                                probe_skip_reason)
-PULL_REMEDY = 'docker pull ghcr.io/vibeic/vibeic-eda:latest'  # the repo stores no version to cat
+# The remedy names the reference the run demands, composed the same way the
+# run composes it — never a tag, which is how a host ends up holding bytes
+# nobody pinned while a probe reports success.
+PULL_REMEDY = 'docker pull ' + _run_image()
 RUN_REMEDY = 'bash tools/vibeic-eda/restart-eda.sh'
 
 _IMAGE_STATE, _IMAGE_DETAIL = probe(
-    ["docker", "image", "inspect", _local_eda_image()])
+    ["docker", "image", "inspect", _run_image()])
 
 
 @pytest.mark.skipif(
     _IMAGE_STATE != PROBE_PRESENT,
     reason=probe_skip_reason(_IMAGE_STATE, _IMAGE_DETAIL,
-                             "vibeic-eda container not available",
-                             RUN_REMEDY))
+                             "the pinned vibeic-eda image is not on this host: "
+                             + _run_image(),
+                             RUN_REMEDY + '  |  ' + PULL_REMEDY))
 def test_sky130_fault_cut_produces_real_scan_pairs(tmp_path, monkeypatch):
     import fault_atpg_run as far  # noqa: E402
     _supervise_docker(monkeypatch)

@@ -25,12 +25,64 @@ assert _RUNTIME_SPEC and _RUNTIME_SPEC.loader
 R = importlib.util.module_from_spec(_RUNTIME_SPEC)
 _RUNTIME_SPEC.loader.exec_module(R)
 
+def _pinned_runner_image() -> str:
+    """The runner reference this tree demands, COMPOSED, never copied.
+
+    vibe-ic#2100.  This file used to carry the literal
+    `ghcr.io/vibeic/vibeic-eda@sha256:8c5694…`, which is TWO values welded
+    together and each of them wrong to spell here for a different reason:
+
+      * the DIGEST is the pin, and a second copy of a pinned value is a second
+        definition of it.  The 0.3.48 pin move had to hand-edit this line, and
+        a rebase that touched the pin conflicted on exactly it.
+      * the REPOSITORY is deployment configuration, not identity.  The same
+        bytes are served from the published registry and from a LAN one, and
+        which a host can reach is a fact about the network.  The PROGRAM under
+        test composes `RUNNER_IMAGE` from `$VIBEIC_EDA_IMAGE_REPO`; the literal
+        here did not, so on every host that exports it the two disagreed.
+        MEASURED 2026-09-07 on 8HD-4: 18 ids in this file red with the env SET
+        and all 60 green with it unset — a whole file reporting the operator's
+        network configuration as a defect in a landing gate.
+
+    READ, NOT IMPORTED, and read from `hermetic_candidate_runner.py` rather
+    than from the module under test.  `P.RUNNER_IMAGE` would be circular — the
+    validator would be checked against its own constant, and the two could move
+    together without a single test noticing.  The runner is the ONE place this
+    repo pins the runtime and is a DIFFERENT module, so reading it here is a
+    drift net between the two definitions instead of a restatement of one.
+    `ast` rather than `import`: this must not run that module's imports, and it
+    must not execute anything to learn a constant.  A read that fails is a
+    REFUSAL, never a fallback literal, because a fallback is how the second
+    copy comes back.
+    """
+    import ast
+    wanted = ("IMAGE_DIGEST", "IMAGE_REPO_DEFAULT")
+    tree = ast.parse((_HERE / "hermetic_candidate_runner.py").read_text(
+        encoding="utf-8"))
+    found = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            name = getattr(target, "id", "")
+            if name in wanted and name not in found:
+                found[name] = ast.literal_eval(node.value)
+    missing = [name for name in wanted if name not in found]
+    assert not missing, (
+        f"hermetic_candidate_runner.py pins no {', '.join(missing)}; this file "
+        "reads the pin and deliberately keeps no copy to fall back to")
+    repo = (os.environ.get("VIBEIC_EDA_IMAGE_REPO") or "").strip() \
+        or found["IMAGE_REPO_DEFAULT"]
+    return f"{repo}@{found['IMAGE_DIGEST']}"
+
+
+_RUNNER_IMAGE = _pinned_runner_image()
+
 _RUNNER = {
     "schema": 1,
     "profile_id": "vibeic-landing-hermetic-v1",
     "engine": "docker",
-    "image": ("ghcr.io/vibeic/vibeic-eda@sha256:"
-              "8c5694abdf5c269c1d9def5368704e0c4b51c869d1d9c9380e123e07657fe9eb"),
+    "image": _RUNNER_IMAGE,
     "platform": "linux/amd64",
     "user": "65534:65534",
     "network": "none",
@@ -429,6 +481,22 @@ def test_prepare_cannot_change_path_roles_or_reuse_next_id(tmp_path):
         P.build_receipt(
             object_repo=repo, base=base, candidate=candidate,
             candidate_gates=gates, candidate_tests=tests)
+
+
+def test_the_program_and_the_pin_name_one_runner_image():
+    """The drift net the literal used to be, with the copy removed.
+
+    Two definitions remain by design — `hermetic_candidate_runner.IMAGE_DIGEST`
+    (the pin) and `protected_landing_transition.RUNNER_IMAGE` (what a landing
+    validates against).  This asserts they are one, in whichever env arm the
+    run is in, so a pin move that reaches only one of them fails HERE, once,
+    by name — instead of surfacing as a file-wide red that says nothing about
+    the cause.
+    """
+    assert P.RUNNER_IMAGE == _RUNNER_IMAGE, (
+        "the landing validator and the pinned runtime name different images: "
+        f"program {P.RUNNER_IMAGE} vs pin {_RUNNER_IMAGE}")
+    assert "@sha256:" in _RUNNER_IMAGE, _RUNNER_IMAGE
 
 
 def test_prepare_cannot_replace_the_base_owned_runner_digest(tmp_path):

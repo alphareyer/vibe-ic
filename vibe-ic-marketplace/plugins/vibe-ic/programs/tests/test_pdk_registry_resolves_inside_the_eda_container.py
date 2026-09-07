@@ -46,14 +46,82 @@ still decides the answer.
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
+if str(PROGRAMS) not in sys.path:
+    sys.path.insert(0, str(PROGRAMS))
 
 # A container name that cannot exist, so the docker branch is guaranteed to
 # fail: the ONLY way a path comes back is the local branch under test.
 _NO_SUCH_CONTAINER = "cza-no-such-container-000"
+
+
+@pytest.fixture
+def in_image(monkeypatch):
+    """STAGE the in-image condition; never inherit it from the host.
+
+    vibe-ic#2100.  Every assertion below is about the LOCAL branch, and that
+    branch is selected by exactly one predicate — `_container_exec.
+    no_container_route()`, i.e. "there is no `docker` client on PATH".  This
+    file used to state that condition only in its prose and then take whatever
+    the machine happened to be, which made it a test about the HOST:
+
+      * on a bare host with no Docker CLI it measured the local branch;
+      * under `tools/ci/run_suite_in_eda_image.sh`, which BINDS the host's
+        docker binary and socket into the container on purpose, `shutil.which`
+        answers `/usr/bin/docker`, the CONTAINER branch runs, the deliberately
+        absent `cza-no-such-container-000` is unreachable, and a present asset
+        resolves to None.  MEASURED 2026-09-07 on 8HD-4 in both env arms:
+        `test_glob_resolves_from_the_local_filesystem_without_docker` and
+        `test_literal_path_resolves_from_the_local_filesystem` red, with
+        "a present asset resolved to None" — a message about the harness.
+
+    The NO-LEAK tests were worse off than the two reds: on such a host they
+    PASSED for the wrong reason.  `None` came back because the container was
+    unreachable, not because the local branch had refused, so the containment
+    they exist to pin was never exercised.  Staging the condition is therefore
+    a STRENGTHENING of this file, not a relaxation of it.
+
+    `shutil.which` is substituted on `_container_exec`, which is where the one
+    predicate reads it, and the phase-3 module's memoised answer is cleared on
+    both sides of the test so no ordering can leak a cached route.
+    """
+    import _container_exec as _cex
+    m = _p3()
+    real_which = shutil.which
+
+    def _no_docker(name, *a, **k):
+        return None if name == "docker" else real_which(name, *a, **k)
+
+    monkeypatch.setattr(_cex.shutil, "which", _no_docker)
+    monkeypatch.setattr(m, "_LOCAL_EXEC_MODE", None, raising=False)
+    monkeypatch.setattr(_cex, "_ANNOUNCED", set(), raising=False)
+    assert m._local_exec_mode() is True, (
+        "the in-image condition was not staged; these tests would measure the "
+        "host instead of the local branch")
+    yield
+    m._LOCAL_EXEC_MODE = None
+
+
+@pytest.fixture
+def beside_a_container(monkeypatch):
+    """The other route, staged the same way: a docker client IS on PATH."""
+    import _container_exec as _cex
+    m = _p3()
+    real_which = shutil.which
+    monkeypatch.setattr(
+        _cex.shutil, "which",
+        lambda n, *a, **k: ("/usr/bin/docker" if n == "docker"
+                            else real_which(n, *a, **k)))
+    monkeypatch.setattr(m, "_LOCAL_EXEC_MODE", None, raising=False)
+    assert m._local_exec_mode() is False
+    yield
+    m._LOCAL_EXEC_MODE = None
 
 
 def _p3():
@@ -83,7 +151,7 @@ def _fake_pdk(tmp_path: Path) -> Path:
     return root
 
 
-def test_glob_resolves_from_the_local_filesystem_without_docker(tmp_path):
+def test_glob_resolves_from_the_local_filesystem_without_docker(in_image, tmp_path):
     """THE DEFECT: the assets are right here, and no docker is needed to see
     them."""
     m = _p3()
@@ -94,7 +162,7 @@ def test_glob_resolves_from_the_local_filesystem_without_docker(tmp_path):
     assert got.endswith("scl__tt_025C_1v80.lib"), got
 
 
-def test_literal_path_resolves_from_the_local_filesystem(tmp_path):
+def test_literal_path_resolves_from_the_local_filesystem(in_image, tmp_path):
     """The non-glob branch too — registry entries use both forms."""
     m = _p3()
     root = _fake_pdk(tmp_path)
@@ -103,7 +171,7 @@ def test_literal_path_resolves_from_the_local_filesystem(tmp_path):
     assert got is not None and got.endswith("scl.lef"), got
 
 
-def test_absent_root_still_resolves_to_none(tmp_path):
+def test_absent_root_still_resolves_to_none(in_image, tmp_path):
     """NO-LEAK: the caller must still be able to REFUSE."""
     m = _p3()
     got = m._registry_glob_one(
@@ -112,7 +180,7 @@ def test_absent_root_still_resolves_to_none(tmp_path):
     assert got is None, got
 
 
-def test_glob_matching_nothing_still_resolves_to_none(tmp_path):
+def test_glob_matching_nothing_still_resolves_to_none(in_image, tmp_path):
     """NO-LEAK: a present root does not excuse an absent asset."""
     m = _p3()
     root = _fake_pdk(tmp_path)
@@ -130,7 +198,7 @@ def test_a_candidate_outside_the_pdk_root_is_rejected(tmp_path):
     assert m._registry_path_under_root(str(root) + "/", str(outside)) is False
 
 
-def test_a_dotdot_pattern_that_starts_under_the_root_is_rejected(tmp_path):
+def test_a_dotdot_pattern_that_starts_under_the_root_is_rejected(in_image, tmp_path):
     """NO-LEAK: the half a textual prefix test cannot make — end to end, on
     the route the resolver actually takes."""
     m = _p3()
@@ -145,10 +213,18 @@ def test_a_dotdot_pattern_that_starts_under_the_root_is_rejected(tmp_path):
         _NO_SUCH_CONTAINER, str(root), "../outside.lef") is None
 
 
-def test_a_root_that_is_not_on_this_filesystem_resolves_to_none(tmp_path):
+@pytest.mark.parametrize("route", ["in_image", "beside_a_container"])
+def test_a_root_that_is_not_on_this_filesystem_resolves_to_none(
+        route, request, tmp_path):
     """A PDK root that is not here resolves to nothing, whichever route runs:
-    on a host the named container decides, and in-image the probe runs on this
-    filesystem and finds no such directory. Either way the caller REFUSES."""
+    beside a container the named container decides, and in-image the probe runs
+    on this filesystem and finds no such directory. Either way the caller
+    REFUSES.
+
+    BOTH routes are now STAGED and both are RUN (vibe-ic#2100).  The sentence
+    above was already claiming both; what the file did was take one of them by
+    accident and never name which."""
+    request.getfixturevalue(route)
     m = _p3()
     assert m._registry_glob_one(
         _NO_SUCH_CONTAINER, "/foss/pdks/definitely_not_here",
