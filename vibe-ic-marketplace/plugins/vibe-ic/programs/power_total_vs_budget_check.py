@@ -322,7 +322,8 @@ def _worst_record(reports: List[Dict[str, Any]],
     return worst[1], worst[2], None
 
 
-def evaluate(project: Path, budget_override: Optional[float]
+def evaluate(project: Path, budget_override: Optional[float],
+             library: str = "", pdk: str = ""
              ) -> Tuple[str, Dict[str, Any]]:
     """Return ``(verdict, report)``; verdict in {PASS, FAIL, INCOMPLETE}."""
     rep: Dict[str, Any] = {"program": TOOL, "version": VERSION,
@@ -337,7 +338,12 @@ def evaluate(project: Path, budget_override: Optional[float]
     rep["unreadable_reports"] = [d["file"] for d in disclosures
                                  if not d.get("readable")]
 
-    res = _pw.resolve_power_requirement(project, budget_uw=budget_override)
+    # vibe-ic#2147 — the RESOLVED technology travels with the request. A
+    # caller that knows the library this run built against says so; when it
+    # does not, the resolver reads the run's own synthesis artefact and refuses
+    # if even that cannot single out one technology.
+    res = _pw.resolve_power_requirement(project, budget_uw=budget_override,
+                                        library=library, pdk=pdk)
     requirement = res["requirement"]
     rep["requirement"] = requirement
     rep["requirement_sources"] = res["sources"]
@@ -460,6 +466,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--budget-uw", type=float, default=None,
                     help="power budget in uW, overriding the contract (for "
                          "callers that carry the requirement themselves)")
+    ap.add_argument("--library", default="",
+                    help="the std-cell library this run built against. When "
+                         "given it decides which technology's L7 sign-off row "
+                         "may apply; when omitted the run's own synthesis "
+                         "artefact is read and an unresolvable technology "
+                         "refuses rather than picking one (vibe-ic#2147)")
+    ap.add_argument("--pdk", default="", help="the PDK this run resolved")
     ap.add_argument("--json", default=None, help="JSON report output path")
     args = ap.parse_args(argv)
 
@@ -471,7 +484,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("ERROR: --budget-uw must be positive", file=sys.stderr)
         return RC_ARG
 
-    verdict, rep = evaluate(project, args.budget_uw)
+    verdict, rep = evaluate(project, args.budget_uw,
+                            library=args.library, pdk=args.pdk)
     if args.json:
         out = Path(args.json)
         out.parent.mkdir(parents=True, exist_ok=True)

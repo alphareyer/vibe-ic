@@ -517,8 +517,95 @@ def read_area_declaration(project: Path) -> Dict[str, Any]:
     return out
 
 
+#: The basis a comparison was made on. TWO DIFFERENT QUANTITIES, never merged:
+#: a cell-area ceiling in um^2 is not two die dimensions in um, and this file
+#: has said so since it was written. What changed in vibe-ic#2147 is that the
+#: second one now reaches a verdict instead of being named and dropped.
+BASIS_DECLARED_DIE = "declared_die"
+BASIS_CELL_SIGNOFF = "l7_standard_cell_ceiling"
+
+
+def resolve_cell_signoff(project: Path, library: str = "",
+                         pdk: str = "") -> Dict[str, Any]:
+    """The design's own standard-cell area ceiling, FOR THIS RUN's technology.
+
+    vibe-ic#2147. The design that declines a die can still gate its
+    standard-cell area, and the measured one does: the L7 row is a REQUIREMENT
+    the design wrote down, and until now no gate read it, so a run that
+    exceeded it was reported as a vacuous pass.
+
+    The resolution is delegated whole. This file does not learn to read an
+    L-document — `area_signoff_baseline` owns that for both metrics and returns
+    a NAMED refusal instead of a number when the row's baseline belongs to
+    another technology, which is the only reason the row is usable at all.
+    """
+    try:
+        import area_signoff_baseline as _asb          # noqa: PLC0415
+    except Exception as exc:                          # pragma: no cover
+        return {"available": False, "determined": False,
+                "reason": "resolver_unavailable",
+                "note": f"the L7 sign-off resolver is unavailable ({exc})"}
+    rep = _asb.resolve_for_project(project, metric=_asb.METRIC_CELL_AREA,
+                                   library=library, pdk=pdk)
+    rep["available"] = True
+    return rep
+
+
+def _cell_signoff_comparison(rep: Dict[str, Any], usable: List[Dict[str, Any]],
+                             signoff: Dict[str, Any]
+                             ) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """The verdict against the design's own standard-cell ceiling, or None.
+
+    None means "this basis has nothing to say" — no resolved ceiling, or no
+    area figure whose unit is established. It is never a PASS: a basis that
+    could not look does not get to green a run (the whole shape of #2147).
+    """
+    if not (signoff.get("determined") and usable):
+        return None
+    worst = max(usable, key=lambda d: d["chip_area"])
+    cell_um2 = float(worst["chip_area"])
+    limit = float(signoff["threshold_um2"])
+    rep["comparison"] = {
+        "basis": BASIS_CELL_SIGNOFF,
+        "cell_area_um2": cell_um2,
+        "cell_area_unit": "um^2",
+        "cell_ceiling_um2": limit,
+        "ceiling_source": (f"{signoff.get('source')}:{signoff.get('line')}"
+                           if signoff.get("line") else signoff.get("source")),
+        "ceiling_tier": signoff.get("tier"),
+        "ceiling_technology": signoff.get("matched_name"),
+        "baseline_um2": signoff.get("baseline_um2"),
+        "baseline_source": (f"{signoff.get('baseline_source')}:"
+                            f"{signoff.get('baseline_line')}"
+                            if signoff.get("baseline_line") else None),
+        "ratio": signoff.get("ratio"),
+        "stated_in": worst["file"],
+        "selection_rule": worst["selection_rule"],
+        "utilization": cell_um2 / limit,
+        "limit": 1.0,
+        "limit_basis": ("the design's own L7 standard-cell area sign-off row, "
+                        "resolved for the technology this run built against"),
+        "over": cell_um2 > limit,
+    }
+    if cell_um2 > limit:
+        rep["findings"].append({
+            "severity": "ERROR", "rule": "CELL_AREA_OVER_DECLARED_SIGNOFF",
+            "message": (f"synthesised standard-cell area {cell_um2:.4e} um^2 "
+                        f"({worst['file']}) exceeds the design's own declared "
+                        f"standard-cell ceiling {limit:.4e} um^2 "
+                        f"({rep['comparison']['ceiling_source']}, tier "
+                        f"{signoff.get('tier')}, technology "
+                        f"{signoff.get('matched_name')!r}) by "
+                        f"{cell_um2 / limit:.4g}x")})
+        rep["verdict"] = "FAIL"
+        return "FAIL", rep
+    rep["verdict"] = "PASS"
+    return "PASS", rep
+
+
 def evaluate(project: Path, ceiling_override: Optional[str],
-             unit_override: bool) -> Tuple[str, Dict[str, Any]]:
+             unit_override: bool, library: str = "", pdk: str = ""
+             ) -> Tuple[str, Dict[str, Any]]:
     """Return ``(verdict, report)`` including explicit NOT_APPLICABLE."""
     rep: Dict[str, Any] = {"program": TOOL, "version": VERSION,
                            "project": str(project), "findings": []}
@@ -569,6 +656,11 @@ def evaluate(project: Path, ceiling_override: Optional[str],
     rep["area_budget_authority"] = declaration
     rep["die_area_um2"] = die_um2
     rep["die_area_wxh_um"] = wxh
+    # vibe-ic#2147 — the SECOND authority, always resolved and always
+    # published, so a reader can see what it said whichever basis decided.
+    cell_signoff = resolve_cell_signoff(project, library, pdk)
+    rep["cell_area_signoff"] = cell_signoff
+    usable_now = [a for a in areas if a["unit_established"]]
 
     disagreeing = sorted({s["wxh"] for s in sources
                           if s["die_area_um2"] is not None})
@@ -586,12 +678,32 @@ def evaluate(project: Path, ceiling_override: Optional[str],
                 f"{[s.get('wxh') for s in stated_ceilings]}; the design-owned "
                 "authorities conflict and neither may silently win")
             return "INCOMPLETE", rep
+        # THE DIE IS DISPOSED. THE STANDARD-CELL AREA MAY STILL BE GATED, and
+        # on the measured design it is: the same input that declines to state a
+        # die states an absolute standard-cell ceiling. Returning
+        # NOT_APPLICABLE here while that row existed is the vacuous pass
+        # vibe-ic#2147 names — the gate said "no ceiling applies" about a design
+        # that had written one down.
+        cell_verdict = _cell_signoff_comparison(rep, usable_now, cell_signoff)
+        if cell_verdict is not None:
+            rep["die_comparison_disposition"] = {
+                "status": "NOT_APPLICABLE",
+                "source": declaration["source"],
+                "rationale": declaration["rationale"],
+            }
+            return cell_verdict
         rep["verdict"] = "NOT_APPLICABLE"
         rep["disposition"] = {
             "status": "NOT_APPLICABLE",
             "source": declaration["source"],
             "rationale": declaration["rationale"],
             "measured_area_figures_observed": len(areas),
+            # NEVER SILENT about the second basis. "the design declined a die"
+            # and "the design declined a die AND its cell row could not be
+            # resolved for this technology" are different findings.
+            "cell_signoff": {"determined": bool(cell_signoff.get("determined")),
+                             "reason": cell_signoff.get("reason"),
+                             "note": cell_signoff.get("note")},
         }
         return "NOT_APPLICABLE", rep
 
@@ -632,14 +744,31 @@ def evaluate(project: Path, ceiling_override: Optional[str],
               "gate will not assert it either")
 
     if lacks:
+        # vibe-ic#2147 — before refusing, ask the OTHER authority. A design that
+        # declared no die but DID declare a standard-cell ceiling has stated a
+        # requirement, and INCOMPLETE over it is a refusal to read what the
+        # design wrote. The die half's own shortfall is still recorded.
+        cell_verdict = _cell_signoff_comparison(rep, usable, cell_signoff)
+        if cell_verdict is not None:
+            rep["die_comparison_incomplete"] = "; ".join(lacks)
+            return cell_verdict
         rep["verdict"] = "INCOMPLETE"
+        # NEVER PASS ON A NULL, and never refuse without saying that the second
+        # authority was asked and what it answered.
+        lacks.append(
+            "the design's own L7 standard-cell area sign-off row ("
+            + (str(cell_signoff.get("note"))
+               if cell_signoff.get("reason") else
+               "no standard-cell area sign-off is stated in the design input")
+            + ")")
         rep["missing_authority"] = "; ".join(lacks)
         return "INCOMPLETE", rep
 
     worst = max(usable, key=lambda d: d["chip_area"])
     cell_um2 = worst["chip_area"]
     ceiling_files = [s["file"] for s in sources if s.get("wxh") == wxh]
-    rep["comparison"] = {"cell_area_um2": cell_um2,
+    rep["comparison"] = {"basis": BASIS_DECLARED_DIE,
+                         "cell_area_um2": cell_um2,
                          "cell_area_unit": "um^2",
                          "die_area_um2": die_um2,
                          "die_area_unit": "um^2",
@@ -683,6 +812,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "library's area unit is known outside the artefact; "
                          "without it an artefact that declines to name its unit "
                          "is an INCOMPLETE, never an assumption")
+    ap.add_argument("--library", default="",
+                    help="the std-cell library this run built against. When "
+                         "given it decides which technology's L7 standard-cell "
+                         "sign-off row may apply; when omitted the run's own "
+                         "synthesis artefact is read, and a technology that "
+                         "cannot be singled out refuses rather than borrowing "
+                         "another one's number (vibe-ic#2147)")
+    ap.add_argument("--pdk", default="", help="the PDK this run resolved")
     ap.add_argument("--json", default=None, help="JSON report output path")
     args = ap.parse_args(argv)
 
@@ -697,7 +834,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                   f"(got {args.die_area_um!r})", file=sys.stderr)
             return RC_ARG
 
-    verdict, rep = evaluate(project, args.die_area_um, args.area_unit_um2)
+    verdict, rep = evaluate(project, args.die_area_um, args.area_unit_um2,
+                            library=args.library, pdk=args.pdk)
     if args.json:
         out = Path(args.json)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -712,6 +850,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         for f in rep["findings"]:
             print(f"  - {f.get('rule')}: {f.get('message')}")
         return RC_FINDINGS
+
+    if verdict in ("PASS", "FAIL") and \
+            rep.get("comparison", {}).get("basis") == BASIS_CELL_SIGNOFF:
+        c = rep["comparison"]
+        head = "[FAIL]" if verdict == "FAIL" else "[PASS]"
+        if verdict == "FAIL":
+            print(f"{head} {TOOL}: {scope}")
+            for f in rep["findings"]:
+                print(f"  - {f.get('rule')}: {f.get('message')}")
+            return RC_FINDINGS
+        print(f"{head} {TOOL}: {scope}. Compared synthesised standard-cell "
+              f"area {c['cell_area_um2']:.4e} um^2 ({c['stated_in']}) against "
+              f"the design's own DECLARED standard-cell ceiling "
+              f"{c['cell_ceiling_um2']:.4e} um^2 ({c['ceiling_source']}, tier "
+              f"{c['ceiling_tier']}, technology {c['ceiling_technology']!r}); "
+              f"utilization {c['utilization']:.4f}, limit 1.0 "
+              f"({c['limit_basis']})")
+        return RC_OK
 
     if verdict == "PASS":
         c = rep["comparison"]

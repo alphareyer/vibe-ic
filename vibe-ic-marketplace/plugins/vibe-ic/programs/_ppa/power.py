@@ -815,6 +815,12 @@ L19_GLOBS: Tuple[str, ...] = (
 AUTHORITY_CONTRACT = "ppa_contract"
 AUTHORITY_L19 = "L19.power_budget_uw"
 AUTHORITY_CLI = "--budget-uw"
+#: The design's own L7 sign-off row, resolved FOR THE TECHNOLOGY THIS RUN BUILT
+#: AGAINST (vibe-ic#2147). It sits BELOW L19 because L19 is a typed field a
+#: consuming layer owns, and this is a row read out of a document — but it is
+#: above nothing, which is what it was worth before: on the measured run L19
+#: declared no budget and the L7 row that DID declare one reached no gate.
+AUTHORITY_L7_SIGNOFF = "L7.signoff_row"
 
 _MICRO = 1e-6
 #: The metric names a power requirement may be written against, and the factor
@@ -940,8 +946,42 @@ def l19_power_budgets(project: Path) -> List[Dict[str, Any]]:
     return out
 
 
+def _l7_signoff_requirement(project: Path, library: str, pdk: str
+                            ) -> Tuple[Optional[Dict[str, Any]], Optional[str],
+                                       Optional[Dict[str, Any]]]:
+    """``(requirement, refusal, report)`` from the design's L7 sign-off row.
+
+    THE TECHNOLOGY IS THE WHOLE QUESTION (vibe-ic#2136/#2147). The row states an
+    absolute in watts that is the product of a baseline measured on ONE library;
+    applying it to a run built on another is a verdict about a design that was
+    never judged. `area_signoff_baseline` owns that resolution for both metrics
+    and returns a NAMED refusal rather than a number when it cannot answer, so
+    this function never has to decide what "close enough" means.
+    """
+    try:
+        import area_signoff_baseline as _asb          # noqa: PLC0415
+    except Exception as exc:                          # pragma: no cover
+        return None, f"the L7 sign-off resolver is unavailable ({exc})", None
+    rep = _asb.resolve_for_project(project, metric=_asb.METRIC_TOTAL_POWER,
+                                   library=library, pdk=pdk)
+    if not rep.get("signoff_row_found"):
+        return None, None, rep
+    if not rep.get("determined"):
+        return None, (f"the design's L7 total-power sign-off row is "
+                      f"NOT_DETERMINED for this run ({rep.get('reason')}): "
+                      f"{rep.get('note')}"), rep
+    uw = float(rep["threshold"])
+    req = {"authority": AUTHORITY_L7_SIGNOFF,
+           "file": rep.get("source") or "L7", "line": rep.get("line"),
+           "metric": "power.total_uw", "unit": "uW",
+           "max_w": uw * _MICRO, "max_uw": uw, "scope": {},
+           "tier": rep.get("tier"), "note": rep.get("note")}
+    return req, None, rep
+
+
 def resolve_power_requirement(project: Path, *,
-                              budget_uw: Optional[float] = None
+                              budget_uw: Optional[float] = None,
+                              library: str = "", pdk: str = ""
                               ) -> Dict[str, Any]:
     """The single total-power requirement in force, or a stated refusal.
 
@@ -951,6 +991,11 @@ def resolve_power_requirement(project: Path, *,
          states one has taken the authority on itself, and is entitled to.
       2. A `vibeic.ppa.contract.v1` requirement on `power.total_w`.
       3. L19 `fields.power_budget_uw`.
+      4. The design's own L7 sign-off row, resolved for the technology THIS RUN
+         built against (vibe-ic#2147). It answers only when the higher tiers
+         declared nothing — a design that typed a budget is not overruled by a
+         document row — and it refuses BY NAME rather than applying another
+         technology's number.
 
     A higher authority SUPERSEDES a lower one and the superseded value is
     disclosed, not discarded — a contract exists so that it can override the
@@ -1009,12 +1054,38 @@ def resolve_power_requirement(project: Path, *,
                 "refusal": (f"L19 copies disagree: "
                             f"{[round(v / _MICRO, 6) for v in stated]} uW"),
                 "superseded": []}
+    # ── the L7 sign-off row, LAST and only when nothing above declared ─────
+    #
+    # MEASURED (vibe-ic#2147): on the subservient run L19's power_budget_uw is
+    # null and the design's own L7 table states a total-power ceiling. Before
+    # this tier the gate answered INCOMPLETE — a correct refusal over a
+    # requirement the design HAD written down, which is the whole finding.
+    l7_req, l7_refusal, l7_rep = _l7_signoff_requirement(project, library, pdk)
+    if l7_rep is not None:
+        sources.append({"file": l7_rep.get("source") or "L7",
+                        "authority": AUTHORITY_L7_SIGNOFF,
+                        "tier": l7_rep.get("tier"),
+                        "determined": bool(l7_rep.get("determined")),
+                        "reason": l7_rep.get("reason"),
+                        "max_uw": l7_rep.get("threshold"),
+                        "max_w": ((l7_rep.get("threshold") or 0) * _MICRO
+                                  if l7_rep.get("determined") else None),
+                        "note": l7_rep.get("note")})
+    if l7_req is not None:
+        return {"requirement": l7_req, "sources": sources, "refusal": None,
+                "superseded": []}
+
     unset = len([s for s in l19 if s.get("max_w") is None])
     bits = [f"L19_CONSTRAINTS_PDK.json fields.power_budget_uw (unset in "
             f"{unset} of {len(l19)} published copy/copies)"]
     if unreadable:
         bits.append(f"{len(unreadable)} {CONTRACT_SCHEMA} requirement(s) "
                     f"unreadable: {unreadable[0]['unreadable']}")
+    if l7_refusal:
+        bits.append(l7_refusal)
+    else:
+        bits.append("the design's own L7 documents state no total-power "
+                    "sign-off row either")
     return {"requirement": None, "sources": sources,
             "refusal": "; ".join(bits), "superseded": []}
 

@@ -14715,9 +14715,45 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     _area_verdict = ""
     _area_prog = PROGRAMS_DIR / "area_total_vs_budget_check.py"
     if _area_stats is not None and _area_prog.is_file():
+        # ── THE RESOLVED LIBRARY TRAVELS WITH THE CALL (vibe-ic#2147) ───────
+        #
+        # This step is the one that KNOWS what the run built against: `pdk` is
+        # the config the synthesis above loaded, and the same liberty is
+        # interpolated into `stat -liberty`. The design's own L7 sign-off row
+        # states a standard-cell ceiling derived from a baseline measured on
+        # ONE library, so the gate cannot apply it without being told which
+        # library this is — and the L-docs cannot tell it: the measured design
+        # names two open families in L19 and has chosen neither there.
+        #
+        # Passing it here is not a convenience. Without it the gate falls back
+        # to reading the run's own artefact, which is correct but is a SECOND
+        # derivation of a fact this scope already holds; with it, the caller
+        # that resolved the library is the one that states it.
+        # THE ARGV NAMES THE GATE'S OWN PATH LOCAL, IN THE SPAWN CALL ITSELF,
+        # and that is load-bearing rather than style. `closed_loop_executable_
+        # coverage_check._gate_spawn_results` follows exactly TWO hops — a local
+        # bound to an expression whose source names the gate module, and a spawn
+        # whose argv names that local — because edge 9 -> 9's REMEASURED tier is
+        # proved off this call site. MEASURED: hoisting the whole argv into a
+        # second local broke the second hop (`_area_argv`'s own assignment never
+        # spells the gate's name), the edge fell back to DECLARED_ONLY, and nine
+        # tests in `test_closed_loop_executable_coverage` went red naming
+        # CLC-EVIDENCE-MISSING. The FLAGS may be hoisted; the path may not.
+        try:
+            import declared_clock_period as _dcp_area   # noqa: PLC0415
+            _area_lib = _dcp_area.library_name_from_liberty(
+                str(getattr(pdk, "liberty", "") or ""))
+        except Exception:                                # noqa: BLE001
+            _area_lib = ""
+        _area_pdk = str(getattr(pdk, "name", "") or "")
+        _area_flags: List[str] = []
+        if _area_lib:
+            _area_flags += ["--library", _area_lib]
+        if _area_pdk:
+            _area_flags += ["--pdk", _area_pdk]
         try:
             _acp = subprocess.run(
-                [sys.executable, str(_area_prog), str(project)],
+                [sys.executable, str(_area_prog), str(project)] + _area_flags,
                 capture_output=True, text=True, timeout=120)
         except Exception as _exc:                                # noqa: BLE001
             _area_verdict = f" area_budget=NOT_CHECKED({_exc.__class__.__name__})"
