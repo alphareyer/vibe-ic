@@ -153,12 +153,16 @@ import _prose_polarity as _polarity  # noqa: E402
 import _atomic_artefact as _aa  # noqa: E402
 # The L-document write chokepoint — records the producing release.
 import l_doc_generator_stamp as _stamp  # noqa: E402
+import l_doc_consumer_contract as _ldc  # noqa: E402
 
 TOOL = "l19_constraint_token_emit"
 
 _L19_NAME = "L19_CONSTRAINTS_PDK.json"
 _DECL_KEY = "constraint_declarations"
 _PRESENCE_KEY = "constraints_present"
+#: vibe-ic#2091 — the layer's own record of the design's clock target, INCLUDING
+#: when there is not one. See `_clock_target_record`.
+_CLOCK_TARGET_KEY = "clock_target"
 
 # Explicit prose declarations that belong to L19's implementation-context
 # contract.  These are domain words, never a design, PDK, tool, standard or
@@ -450,6 +454,70 @@ def collect(project: Path) -> List[Dict[str, Any]]:
     return out
 
 
+def _clock_target_record(project: Path, fields: Dict[str, Any]
+                         ) -> Optional[Dict[str, Any]]:
+    """L19's record of the clock target — or of its ABSENCE (vibe-ic#2091).
+
+    WHY AN ABSENCE IS A RECORD
+    ==========================
+    Measured on opentitan_aes x sky130A: the input states no target clock
+    period anywhere, L19 said nothing about that, and the flow went on to sign
+    off post-route timing against a period it supplied itself (WNS -42.140 ns)
+    with no artefact anywhere saying the number was never asked for.
+
+    A layer that is SILENT about a missing constraint and a layer that is
+    silent about a constraint it simply did not read are indistinguishable
+    downstream, and only one of them is a question for the user.  So the
+    absence is written down, with the sentence the input would have had to
+    contain, exactly as `clock_target_provenance` phrases it for the STA
+    record.  Nothing is defaulted here: when nothing is stated, no number is
+    published — only the fact that nothing is stated.
+
+    Returns None when the provenance reader is unavailable, which is
+    NOT_MEASURED and must not be written as an absence.
+    """
+    try:
+        import clock_target_provenance as _ctp
+    except Exception:
+        return None
+    pdk = ""
+    for key in ("pdk_target", "pdk", "pdk_name"):
+        val = fields.get(key)
+        if isinstance(val, str) and val.strip():
+            pdk = val.strip()
+            break
+    try:
+        rep = _ctp.resolve(project, pdk=pdk)
+    except Exception:
+        return None
+    if rep.get("period_ns") is not None:
+        # An L document is a DESIGN artefact the flow diffs across runs, so its
+        # provenance must be project-relative — an absolute path records the
+        # checkout and the machine. `clock_target_provenance` cites absolutely
+        # because its own consumer is a RUN RECORD; the split is
+        # `l_doc_consumer_contract.project_relative_source`'s, and the emitter
+        # side of it is this line.
+        cite = rep.get("cite")
+        if isinstance(cite, str) and cite:
+            path, _, tail = cite.rpartition(":")
+            rel, _outside = _ldc.project_relative_source(path or cite, project)
+            cite = f"{rel}:{tail}" if path else rel
+        return {"status": "DECLARED",
+                "period_ns": rep["period_ns"],
+                "pdk": pdk,
+                "tier": rep["tier"],
+                "evidence": cite,
+                "row": rep.get("row", "")}
+    return {"status": "NOT_STATED",
+            "period_ns": None,
+            "pdk": pdk,
+            "tiers_consulted": rep.get("tiers_consulted", []),
+            "reason": rep.get("would_have_stated", ""),
+            "note": ("recorded as an EXPLICIT absence; any period a later "
+                     "stage uses is an ASSUMPTION and must be reported as "
+                     "one, never as this design's specification")}
+
+
 def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
     l19_path = _generated_docs(project) / _L19_NAME
     if not l19_path.is_file():
@@ -502,8 +570,15 @@ def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
 
     context_emitted_count = sum(len(v) for v in context_emitted.values())
 
+    # vibe-ic#2091 — never overwrite a record another producer already owns;
+    # this only fills a field that is absent.
+    clock_target = (None if _CLOCK_TARGET_KEY in fields
+                    else _clock_target_record(project, fields))
+
     wrote = False
-    if (emitted or context_emitted_count) and not dry_run:
+    if (emitted or context_emitted_count or clock_target) and not dry_run:
+        if clock_target:
+            fields[_CLOCK_TARGET_KEY] = clock_target
         if emitted:
             fields[_DECL_KEY] = existing + emitted
         # The layer now carries the design's constraints, so the presence
@@ -540,6 +615,7 @@ def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
         "context_emitted_count": context_emitted_count,
         "emitted": emitted,
         "context_emitted": context_emitted,
+        "clock_target": clock_target,
         "doc_written": str(l19_path) if wrote else None,
     }
 

@@ -222,7 +222,64 @@ _QUESTIONS = {
              "If so, what should that timing signal be called?",
     "reset": "Is there a way to put this part back to a known starting state? "
              "Should it return to that state when the signal is on, or off?",
+    # vibe-ic#2091. A design whose input states no speed target had one
+    # supplied by the flow and then signed off against it as though it were a
+    # requirement (opentitan_aes x sky130A: 10 ns asked, WNS -42.140 ns
+    # reported, nothing saying the 10 ns was never asked for). The gate stays
+    # ADVISORY — its own contract says the deterministic track never blocks on
+    # clock — but the question now gets ASKED, and the second sentence tells
+    # the user what happens if they cannot answer, so silence is an informed
+    # choice rather than an invisible default.
+    "clock_rate": "How fast does this part need to run — how many times a "
+                  "second should its timing beat tick? If you are not sure, "
+                  "say so and we will write down the figure we used as an "
+                  "assumption rather than as a requirement.",
 }
+
+
+def _clock_records_declared(layers: Dict[str, Any]) -> bool:
+    """Do the layers declare a clock RECORD (as opposed to naming a port)?
+
+    A non-empty `clocks` / `clock_domains` list anywhere in the layer JSON.
+    """
+    def scan(node: Any) -> bool:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k in ("clocks", "clock_domains") and isinstance(v, list) \
+                        and any(isinstance(e, dict) for e in v):
+                    return True
+                if scan(v):
+                    return True
+        elif isinstance(node, list):
+            return any(scan(v) for v in node)
+        return False
+
+    return scan(layers)
+
+
+def _clock_rate_declared(layers: Dict[str, Any]) -> bool:
+    """Does any layer state a RATE for a clock — a period or a frequency?
+
+    Structural only: a record that carries a positive `period_ns`,
+    `freq_mhz`, `freq_hz` or a positive scalar `clock_mhz` anywhere in the
+    layer JSON. A clock that is merely NAMED is not a rate, and that is
+    exactly the #2091 shape: L8 carried `clk_i` with no target of its own.
+    """
+    keys = ("period_ns", "freq_mhz", "freq_hz", "clock_mhz", "clock_period_ns")
+
+    def scan(node: Any) -> bool:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k in keys and isinstance(v, (int, float)) \
+                        and not isinstance(v, bool) and v > 0:
+                    return True
+                if scan(v):
+                    return True
+        elif isinstance(node, list):
+            return any(scan(v) for v in node)
+        return False
+
+    return scan(layers)
 
 
 def _width_completeness_advisories(doc_text: str, port_names: List[str]
@@ -355,6 +412,20 @@ def check(path: Path, doc_text: str = "",
     if sequential:
         conditional.append(_item("clock", has_clock))
         conditional.append(_item("reset", has_reset))
+    # vibe-ic#2091 — a NAMED clock with no stated rate is the gap that became a
+    # silent default. The condition is a DECLARED CLOCK, not `sequential`:
+    # `sequential` is inferred from a port NAME through `_CLOCK_RE`, whose
+    # word boundary does not fire on the `<name>_i` suffix convention (`clk_i`
+    # reads as no clock at all), and #2091 was measured on exactly such a
+    # design. Asking about a clock the layers themselves declare cannot
+    # over-demand on a combinational part, which is what the `sequential`
+    # guard exists to prevent.
+    #
+    # Advisory, like its siblings: the question is surfaced for the dialogue
+    # track, and the doc-only track proceeds with the figure RECORDED AS AN
+    # ASSUMPTION (see `clock_target_provenance`), never blocked.
+    if has_clock or _clock_records_declared(layers):
+        conditional.append(_item("clock_rate", _clock_rate_declared(layers)))
 
     missing_required = [i for i in required if not i["present"]]
     missing_conditional = [i for i in conditional if not i["present"]]

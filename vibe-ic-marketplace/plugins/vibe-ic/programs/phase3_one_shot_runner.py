@@ -40044,12 +40044,44 @@ def step_declared_signoff_gates(project: Path,
     resolved; `tapeout_precheck.resolve_pdk` still owns deciding what to do when
     nobody says.
     """
+    # ── vibe-ic#2091 — a sign-off measured against an ASSUMED clock says so ──
+    #
+    # MEASURED, opentitan_aes x sky130A: the input states no target clock period
+    # anywhere for the sky130A build; the run signed off post-route timing
+    # against 10 ns and reported WNS -42.140 ns; and no artefact of that sign-off
+    # contains a line saying the 10 ns was never asked for. A reader cannot tell
+    # a design that MISSED its target from one that was never given a target, and
+    # the two demand opposite actions.
+    #
+    # THE LOGIC LIVES IN `clock_target_provenance`, NOT HERE. This runner
+    # orchestrates: it resolves the period it already resolves, hands it to the
+    # module, and lets the module write and stamp. `test_ppa_runner_extraction
+    # _ledger` is the gate that says so, and it is right — a `clock`-named
+    # helper defined in the runner is timing logic in the orchestrator.
+    #
+    # THE VERDICT IS NEVER TOUCHED: nothing here reads slack, moves a PASS/FAIL,
+    # rewrites an SDC or changes the resolved period, and every call swallows its
+    # own exception so a report can never break a sign-off.
+    try:
+        import clock_target_provenance as _ctp
+        _applied, _ = _resolve_clock_spec(project, pdk_name=pdk_name)
+        _prov = _ctp.emit_report(project, pdk=pdk_name,
+                                 applied_period_ns=float(_applied))
+        if _prov.get("assumed"):
+            print(f"[phase3] CLOCK TARGET ASSUMED — {_prov.get('note')}")
+    except Exception as _exc:
+        print(f"[phase3] clock-target provenance emit non-fatal: {_exc}")
     out: List[StepResult] = []
     for name, program, out_rel, extra_argv in _DECLARED_SIGNOFF_GATES:
         if pdk_name and name in _PDK_AWARE_SIGNOFF_GATES:
             extra_argv = tuple(extra_argv) + ("--pdk", pdk_name)
         out.append(_run_declared_signoff_gate(
             project, name, program, out_rel, extra_argv))
+    try:
+        import clock_target_provenance as _ctp
+        _ctp.stamp_signoff_records(project)
+    except Exception as _exc:
+        print(f"[phase3] assumed-clock disclosure stamp non-fatal: {_exc}")
     return out
 
 
