@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1287
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1287)
+- **Total programs (excluding helpers / shims):** 1288
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1288)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1278 |
+| `any` | 1279 |
 
 ## Alphabetical listing
 
@@ -112,6 +112,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `antenna_report_check` | any | — | Antenna report check — wrapper for eda_report_audit --mode antenna. |
 | `arbiter_starvation_check` | any | v0.116 | Detect fixed-priority arbiters whose high-priority requester is |
 | `arch_dse_pareto` | any | — | arch_dse_pareto.py -- Deterministic micro-architecture design-space exploration. |
+| `area_signoff_baseline` | any | — | resolve the standard-cell AREA a design signs off against FOR THE TECHNOLOGY THIS RUN BUILDS AGAINST, or refuse by name. |
 | `area_total_vs_budget_check` | any | — | the synthesised area figure must reach a COMPARISON, or the step must REFUSE and name the authority it lacks. |
 | `argparse_help_format_check` | any | — | pin the bare-% argparse help-string class. |
 | `arinc429_protocol_synth` | any | v0.1.83 | ARINC 429 (Mark 33 DITS) protocol synth helper. |
@@ -1359,7 +1360,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1278 programs)
+### `any` (1279 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1447,6 +1448,7 @@ _(no programs in this group)_
 - `antenna_report_check` — Antenna report check — wrapper for eda_report_audit --mode antenna.
 - `arbiter_starvation_check` — Detect fixed-priority arbiters whose high-priority requester is  _[v0.116]_
 - `arch_dse_pareto` — arch_dse_pareto.py -- Deterministic micro-architecture design-space exploration.
+- `area_signoff_baseline` — resolve the standard-cell AREA a design signs off against FOR THE TECHNOLOGY THIS RUN BUILDS AGAINST, or refuse by name.
 - `area_total_vs_budget_check` — the synthesised area figure must reach a COMPARISON, or the step must REFUSE and name the authority it lacks.
 - `argparse_help_format_check` — pin the bare-% argparse help-string class.
 - `arinc429_protocol_synth` — ARINC 429 (Mark 33 DITS) protocol synth helper.  _[v0.1.83]_

@@ -40397,6 +40397,60 @@ def gen_l7_test_debug(project: Path,
                                     source=_readme_src or "input/docs/README.md")
         if _parsed.supported_modes:
             content["supported_modes"] = _parsed.supported_modes
+    # vibe-ic#2136 — RECORD THE AREA BASELINE THIS L7 WOULD BE JUDGED BY,
+    # AND WHERE IT CAME FROM.
+    #
+    # An L7 verification plan states a standard-cell area ceiling as an
+    # ABSOLUTE ("<= N um^2"), and that absolute is a PRODUCT of a baseline the
+    # same document measured on ONE technology. The baseline row is attributed
+    # — it names the library it was measured on; the sign-off row is not, it
+    # carries only the product. Measured (#2136): a run of the same design on a
+    # different, physically larger open technology mapped to 3.4x the ceiling,
+    # and no artefact anywhere said whether that was a fact about the DESIGN or
+    # a fact about the TECHNOLOGY. The lane declined to report pass/fail, which
+    # was the correct answer; nothing in the emitted L7 said why.
+    #
+    # So L7 now records the baseline it resolved AND its source, or refuses by
+    # name with NOT_DETERMINED — never a cross-technology PASS and never a
+    # cross-technology FAIL, both of which are false statements about a design
+    # that was not judged at all.
+    #
+    # A design that declares NO standard-cell area sign-off gets no key at all,
+    # so every such L7 document stays byte-identical: this is a disclosure
+    # added exactly where there is something to disclose, not a schema change.
+    # THE WHOLE INPUT CORPUS IS HANDED OVER, UNFILTERED, and that is a
+    # correction of this block's first shape rather than a shortcut.
+    #
+    # It filtered by `_L7_FILE_KEYWORDS.search(<filename>)` before handing the
+    # texts over, and that was wrong twice. Substantively: a design is free to
+    # state its sign-off table in an L1 or L9 document, and a filename filter
+    # would silently read less than the design wrote — the reader's own rules
+    # (a row whose FIRST CELL names the metric, an attribution its heading
+    # carries) are what decide relevance, and they do not need the filename's
+    # help. Mechanically: `prose_polarity_consulted_check` measured that filter
+    # as a search-gated write of document text into a published field, which is
+    # the #706/#711 shape, and it was RIGHT to — the selection of which prose to
+    # believe was being made here, in a function that consults no polarity,
+    # rather than in the reader that does. Measured: 210 offenders on
+    # `eb5f863cb` and 211 with the filter, this name being the difference.
+    #
+    # WHAT THIS SITE DOES NOW IS COPY A RECORD. `for_l7` returns typed fields —
+    # threshold, baseline, ratio, tier, source, line, reason — every one of them
+    # resolved by `area_signoff_baseline`, which consults `_prose_polarity` on
+    # every row and every prose line it reads. No sentence is interpreted here.
+    _asb = None
+    _area_block = None
+    try:
+        import area_signoff_baseline as _asb  # noqa: F811
+        _area_block = _asb.for_l7(
+            project,
+            [(f"input/docs/{_afn}", _atx) for _afn, _atx in extracted.items()
+             if isinstance(_atx, str) and _atx])
+    except Exception:
+        _area_block = None
+    if _asb is not None and _area_block is not None:
+        content[_asb.L7_FIELD] = _area_block
+
     return _write_l_doc(project, "L7_TEST_DEBUG", content, evidence)
 
 
