@@ -128,6 +128,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _atomic_artefact as _aa  # noqa: E402 — vibe-ic#1082
+import _gate_denominator as _den  # noqa: E402 — no clean list without a denominator
 import _path_layout as _pl  # noqa: E402
 import analog_a5_pdk_device_limits as _lim  # noqa: E402
 from _analog_a_check_common import load_block_list  # noqa: E402
@@ -1033,6 +1034,25 @@ class Plan:
         # clearance record that cannot see the thing the routing is closest
         # to is not a record.
         self.device_shapes: List[dict] = []
+        # ── the bulk-tap check's own denominator (vibe-ic#2056 item 3) ────
+        # An empty `deviations` list is read as "the bulk-tap clearance floor
+        # was met". On this PDK it means the floor was NEVER EVALUATED:
+        # `ring_layer_of` answers None on every one of its gencell children,
+        # because the ring sits inside a WELL rectangle wider than itself and
+        # so fails the "encloses the cell" test it is judged by — so
+        # `choose_tap`, `bulk_tap_clearance_lambda` and
+        # `bulk_tap_row_separation_lambda` never run on a real device. That
+        # was MEASURED and reported (lanes czadc28/czadc29, u_hawaii_adc,
+        # ihp-sg13g2) and the correction was measured NOT to buy a verdict
+        # (v1.17.93: a label-anchored ring runs the search and adds 240 bulk-
+        # tap shortfalls the sign-off deck then contradicts). What is left is
+        # the SILENCE, and that is what these three fields end: a run in
+        # which the check examined nothing says so, in the repo's own
+        # zero-denominator shape, instead of publishing an empty shortfall
+        # list that reads as cleanliness.
+        self.bulk_tap_considered = 0
+        self.bulk_tap_examined = 0
+        self.bulk_tap_unexamined: List[dict] = []
 
     def paint(self, net: str, layer: str, x1: int, y1: int, x2: int, y2: int
               ) -> None:
@@ -1568,6 +1588,18 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
                 n_above += 1
                 g["escape_y"] = by2 + n_above * pitch
 
+        plan.bulk_tap_considered += 1
+        if ring_labels:
+            plan.bulk_tap_examined += 1
+        else:
+            plan.bulk_tap_unexamined.append({
+                "device": dev.get("name"), "model": dev.get("model"),
+                "ring_layer": ring,
+                "reason": ("ring_layer_of identifies no guard-ring layer in "
+                           "this gencell's output" if ring is None else
+                           f"the gencell emits no terminal label on the "
+                           f"guard-ring layer {ring}"),
+            })
         if ring_labels:
             others = [(l["x"] - pad_half, l["y"] - pad_half,
                        l["x"] + pad_half, l["y"] + pad_half)
@@ -2286,6 +2318,10 @@ def emit_block(project: Path, block: str, stage: Stage, magicrc: str,
     report["shapes_painted"] = len(plan.shapes)
     report["deviations"] = plan.deviations
     report["deviation_summary"] = _summarise(plan.deviations)
+    # Beside the shortfall list, never inside it: what the bulk-tap search
+    # actually examined. An empty `deviations` with `examined == 0` is a
+    # check that did not run, and the two must not read the same.
+    report["bulk_tap"] = bulk_tap_denominator(plan)
     report["layout_mag"] = str(bdir / "layout.mag")
     report["layout_gds"] = str(bdir / f"{block}.gds") if ok_gds else None
 
@@ -2318,6 +2354,53 @@ def emit_block(project: Path, block: str, stage: Stage, magicrc: str,
             "netlist was not drawn.")
         return RC_FORBIDDEN, report
     return RC_OK, report
+
+
+def bulk_tap_denominator(plan: "Plan") -> dict:
+    """WHAT THE BULK-TAP CHECK ACTUALLY EXAMINED (vibe-ic#2056 item 3).
+
+    `deviations` answers "did I find a shortfall?". It does not answer "did I
+    look at anything?", and for this particular check the two have been
+    conflated since the check was written: `choose_tap`, the clearance floor
+    and `bulk_tap_row_separation_lambda` run only for a device whose guard
+    ring `ring_layer_of` identifies, and on this PDK's gencell children it
+    identifies none. Every such run published an empty shortfall list, which
+    reads as "the floor was met" and means "the floor was never applied".
+
+    So the count is stated in the repo's own zero-denominator shape
+    (`_gate_denominator.Denominator`), whose constructor REFUSES a zero with
+    no reason — a silence cannot be reintroduced by omission here, only by
+    writing down a reason, and a written reason is reviewable.
+
+    This is a DISCLOSURE, not a verdict: no exit code, no gate and no
+    deviation depends on it. Nested under its own key rather than the
+    canonical top-level `denominator`, because this producer is an emitter
+    and does not claim to be one of the registered gates that key sweeps.
+
+    chip-AGNOSTIC: nothing here names a device, a layer or a PDK; the reason
+    quotes the layer the gencell itself emitted, when there was one."""
+    considered = int(getattr(plan, "bulk_tap_considered", 0))
+    examined = int(getattr(plan, "bulk_tap_examined", 0))
+    unexamined = list(getattr(plan, "bulk_tap_unexamined", []))
+    reason = ""
+    if examined == 0:
+        if considered == 0:
+            reason = ("no device reached the bulk-tap search: this block "
+                      "routed no device at all")
+        else:
+            why = sorted({str(r.get("reason")) for r in unexamined})
+            reason = (
+                f"the bulk-tap search ran on 0 of {considered} routed "
+                f"device(s), so the clearance floor and the row-separation "
+                f"check were NOT EVALUATED — which is not the same as met. "
+                f"Reason(s) given by the devices themselves: "
+                + "; ".join(why))
+    return _den.Denominator(
+        unit="routed devices whose guard ring the bulk-tap search could enter",
+        examined=examined, considered=considered,
+        not_applicable_reason=reason,
+        details={"unexamined": unexamined} if unexamined else {},
+    ).as_dict()
 
 
 #: The deviation quantity `clearance_deviations` writes for a drawn short.

@@ -119,6 +119,7 @@ if str(_HERE) not in sys.path:
 import _watchdog as _wd  # noqa: E402  progress-stall supervision (v1.3.47)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _docker_watchdog as _dwd  # noqa: E402 — the ephemeral-container probe + reap
+import _container_exec as _CE  # noqa: E402 — the ONE in-image route predicate
 
 try:  # sibling module; programs/ is on sys.path when run as a script
     import _docker_memory as _dmem
@@ -485,6 +486,32 @@ def _as_text(v) -> str:
     return str(v)
 
 
+#: Announced ONCE per process, so a transcript records which route the
+#: at-speed engine took without one line per tool call.
+_LOCAL_TDF_ROUTE_ANNOUNCED = False
+
+
+def _announce_local_tdf_route(project: Path) -> None:
+    """Say, once, that the at-speed engine is running on this filesystem.
+
+    Deliberately does NOT name `_far.DOCKER_IMAGE`: in-image that constant is
+    whatever `_resolve_docker_image` fell back to when the registry was
+    unreachable, so printing it would put an image that was never started —
+    and the WRONG one — into the transcript. The same reasoning as
+    `fault_atpg_run._announce_local_atpg_route`, which is why the wording
+    matches it."""
+    global _LOCAL_TDF_ROUTE_ANNOUNCED
+    if _LOCAL_TDF_ROUTE_ANNOUNCED:
+        return
+    _LOCAL_TDF_ROUTE_ANNOUNCED = True
+    import shutil as _sh
+    print("[dft] EXEC ROUTE = LOCAL: no docker client on PATH, so the "
+          "at-speed ATPG engine runs on THIS filesystem (yosys=%s) instead of "
+          "in a sibling container. The project is read at %s, not at %s."
+          % (_sh.which("yosys") or "NOT ON PATH", project, _far._WORK_MOUNT),
+          file=sys.stderr)
+
+
 def _run_in_docker(project: Path, shell_cmd: str, timeout: int,
                    pdk_dir: Path | None = None,
                    extra_mounts: list[tuple[str, str]] | None = None
@@ -501,6 +528,63 @@ def _run_in_docker(project: Path, shell_cmd: str, timeout: int,
     # (observed). Naming it lets the kill handler `docker rm -f` the orphan by
     # IDENTITY, never by matching a command line.
     cname = _dwd.ephemeral_container_name("vibeic_tdf")
+    # THE MOUNT TABLE, built ONCE and used by BOTH routes: `-v` on the
+    # container route, and the local rewrite below. Held as
+    # (container_mount, host_path) — the direction `localise_mounted_paths`
+    # reads — so the two can never disagree about which host file a given
+    # container-absolute argument means.
+    mounts: list[tuple[str, str]] = [(_far._WORK_MOUNT, str(project))]
+    for host, ctr in (extra_mounts or []):
+        mounts.append((str(ctr), str(host)))
+    if pdk_dir is not None and pdk_dir.exists():
+        mounts.append((_far._PDK_MOUNT, str(pdk_dir)))
+    preamble = (
+        "export FAULT_IVERILOG=/foss/tools/iverilog/bin/iverilog && "
+        "export FAULT_YOSYS=/foss/tools/bin/yosys && "
+        "export PATH=/foss/tools/yosys/bin:/foss/tools/iverilog/bin:"
+        "/foss/tools/bin:$PATH && "
+        "export LD_LIBRARY_PATH=/foss/tools/iverilog/lib:${LD_LIBRARY_PATH:-} && "
+    )
+
+    # ── LOCAL ROUTE (vibe-ic#2063 RB2-07) ────────────────────────────────
+    # THIS FUNCTION IS THE THIRD `docker run` SURFACE IN THIS REPO, and it is
+    # the ONLY route the at-speed producers have: DT1 calls it six times and
+    # `path_delay_fault_atpg_run` (DT2) calls it twice, so when it cannot
+    # start a container NOTHING at-speed is graded.
+    #
+    # `_container_exec.no_container_route()` is the one definition of "can
+    # this process reach any container at all", and it is False in exactly one
+    # situation that matters here: the flow is running INSIDE the EDA image,
+    # where there is no docker client on PATH — and where yosys, iverilog and
+    # fault are all sitting on this very filesystem at the absolute paths the
+    # preamble above already exports. MEASURED 2026-09-06 (lane rbsub2,
+    # subservient through the front door, in-image): every call through here
+    # returned `127 docker binary not found in PATH` while the stuck-at
+    # producer beside it — taught the same route on the same day — routed
+    # locally and graded. Two producers of the same family disagreeing about
+    # whether a step can run is the defect; the coverage numbers that follow
+    # are downstream of it.
+    #
+    # THE IMAGE IT WOULD START IS THE IMAGE IT IS ALREADY IN, so this is the
+    # same build, not a substitution — the identical argument
+    # `fault_atpg_run._run_docker` records for its own local branch.
+    #
+    # Nothing about the container route changes: with a docker client present
+    # the argv below is byte-identical to what it has always been.
+    if _CE.no_container_route():
+        _announce_local_tdf_route(project)
+        local_cmd = ["bash", "-c",
+                     _CE.localise_mounted_paths(preamble + shell_cmd, mounts)]
+        # The engine IS a descendant on this route, so the watchdog's DEFAULT
+        # host CPU probe reads it directly and the default kill reaches the
+        # whole process group. The ephemeral-container probe and reap below
+        # would both be addressing a container that was never created.
+        res = _wd.run_host_supervised(local_cmd, stall_grace_s=float(timeout))
+        if res.outcome == "launch_error":
+            return 127, "", "bash not found in PATH"
+        return res.rc, res.out, _CE.annotate_local_exec(res.rc, res.err,
+                                                        tag="tdf")
+
     docker_cmd = [
         "docker", "run", "--rm", "--name", cname,
         *_dmem.docker_memory_flags(),
@@ -511,13 +595,6 @@ def _run_in_docker(project: Path, shell_cmd: str, timeout: int,
         docker_cmd += ["-v", f"{host}:{ctr}"]
     if pdk_dir is not None and pdk_dir.exists():
         docker_cmd += ["-v", f"{pdk_dir}:/pdk"]
-    preamble = (
-        "export FAULT_IVERILOG=/foss/tools/iverilog/bin/iverilog && "
-        "export FAULT_YOSYS=/foss/tools/bin/yosys && "
-        "export PATH=/foss/tools/yosys/bin:/foss/tools/iverilog/bin:"
-        "/foss/tools/bin:$PATH && "
-        "export LD_LIBRARY_PATH=/foss/tools/iverilog/lib:${LD_LIBRARY_PATH:-} && "
-    )
     docker_cmd += [_far.DOCKER_IMAGE, "-c", preamble + shell_cmd]
 
     # THE PROBE AND THE REAP AN EPHEMERAL `docker run` NEEDS, both taken from

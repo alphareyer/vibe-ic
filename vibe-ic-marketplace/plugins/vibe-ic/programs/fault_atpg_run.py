@@ -1286,14 +1286,19 @@ def _localise_mounted_paths(shell: str, project: Path,
     Anchored on the mount point followed by `/` or by a word boundary, so a
     token that merely CONTAINS "/work" (a design named `network`, a path like
     `/opt/workspace`) is not rewritten. Substitution is longest-prefix-first
-    for the same reason `_to_container_path` sorts its mounts."""
+    for the same reason `_to_container_path` sorts its mounts.
+
+    THE MECHANICS MOVED, THE CONTRACT DID NOT (vibe-ic#2063 RB2-07). The
+    at-speed producer enters a container the same `docker run` way and needs
+    the identical rewrite for THREE mounts rather than two, so the rewrite
+    itself now lives once in `_container_exec.localise_mounted_paths` and this
+    function is the stuck-at producer's mount table for it. Two copies of a
+    path rewrite is how two producers come to disagree about which files a
+    local run read."""
     subs = [(_WORK_MOUNT, str(project))]
     if pdk_dir is not None:
         subs.append((_PDK_MOUNT, str(pdk_dir)))
-    subs.sort(key=lambda t: len(t[0]), reverse=True)
-    for mount, real in subs:
-        shell = re.sub(re.escape(mount) + r"(?=/|\b)", real.rstrip("/"), shell)
-    return shell
+    return _CE.localise_mounted_paths(shell, subs)
 
 
 def _announce_local_atpg_route(project: Path) -> None:

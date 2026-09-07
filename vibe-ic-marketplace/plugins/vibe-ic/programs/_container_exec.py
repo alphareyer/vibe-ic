@@ -687,3 +687,35 @@ def local_copy(src: str, dst: str, container: str = "") -> tuple:
         return 0, "", ""
     except Exception as e:                                   # noqa: BLE001
         return 1, "", "LOCAL_COPY failed %s -> %s: %s" % (s, d, e)
+
+
+def localise_mounted_paths(shell: str,
+                           mounts: Sequence[tuple]) -> str:
+    """Rewrite the container-absolute paths in `shell` to THIS filesystem.
+
+    A `docker run` site writes its command against the mount points it is
+    about to create (`/work`, `/pdk`, a private `/libmnt`). On the LOCAL route
+    no mount is created, so the same command must name the same files under
+    their REAL paths.  `mounts` is the site's own mount table as
+    `(container_mount, host_path)` pairs — the site already has it, because it
+    is what it hands to `-v`.
+
+    ONE definition, here, for the same reason `no_container_route` is one:
+    `fault_atpg_run` learned this rewrite first for `/work` + `/pdk`, and the
+    at-speed producer needs it for those TWO PLUS the private liberty mount it
+    adds when a `.lib` resolves outside the project.  A second copy is how the
+    two would come to disagree about which files a local run read.
+
+    Anchored on the mount point followed by `/` or by a word boundary, so a
+    token that merely CONTAINS the mount name (a design called `network`, a
+    path like `/opt/workspace`) is not rewritten.  Longest prefix first, so a
+    `/work` substitution can never eat the head of a longer `/workdir` mount.
+
+    Tool/PDK/chip-AGNOSTIC: nothing here names a tool, a PDK or a design."""
+    import re as _re
+    subs = [(str(m), str(h)) for m, h in mounts if m and h]
+    subs.sort(key=lambda t: len(t[0]), reverse=True)
+    for mount, real in subs:
+        shell = _re.sub(_re.escape(mount) + r"(?=/|\b)",
+                        real.rstrip("/"), shell)
+    return shell
