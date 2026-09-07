@@ -447,6 +447,94 @@ def marker_layers_from_die_finishing(report: Dict[str, Any]
 #: measure and publish both; nothing here re-derives or re-types either.
 FILL_REPORT_REL = "reports/phase3/cmp_fill_emit.json"
 
+#: THE SAME TWO FIGURES ARRIVE UNDER TWO SETS OF NAMES, and reading only one
+#: set publishes `None` for both on the runs that matter most.
+#:
+#: `metal_fill_emit` stages its engine through `_klayout_launch.find_engine`,
+#: whose documented order puts `$VIBEIC_KLAYOUT_TOOLS/<subdir>/<name>` — an
+#: engine baked into the container image — AHEAD of the copy vendored beside
+#: this plugin. MEASURED, lane czsubdrc 2026-09-07 on 8HD-4, against the
+#: image this tree pins (`0.3.49`,
+#: sha256:89a8fd7295208ee6d06e216ade9edc6161d26db52099e9f22ceb77a2d76e3f49):
+#: that image carries `metal-fill/metal_fill.py` at the override path, the
+#: hyphen spelling `_subdir_spellings` tries, so the override RESOLVES and the
+#: image's engine runs. It is 390 lines to the vendored copy's 681 and it
+#: predates vibe-ic#2135: `ceiling_any_fill`, `free_frac` and the per-layer
+#: `floor` appear in it zero times. A fall-through to an OLDER engine is
+#: silent by construction — `find_engine` names a miss on stderr only when the
+#: override carries no such engine at all, never when it carries an older one.
+#:
+#: `metal_fill_emit` already compensates: on a below-floor verdict it attaches
+#: a `capacity` block measured by `_metal_fill_capacity`, and its sibling
+#: consumer `metal_fill_emit.capacity_summary_lines` reads the pair from
+#: exactly there. This module read only the engine-native spelling, so on
+#: every such run — which is every run this module attributes on, because the
+#: block is attached precisely WHEN a layer is below the floor — the
+#: integrator's handoff carried `floor: None, legal_ceiling: None`.
+#:
+#: THE TWO CEILING NAMES ARE ONE QUANTITY, and that is read from the two
+#: producers rather than asserted here: `metal_fill.py` writes
+#: `ceiling_any_fill` = "drawn + all of it [the free region], i.e. the hard
+#: upper bound for ANY dummy fill on this layout", and `_metal_fill_capacity`
+#: writes `absolute_ceiling` = `round(drawn_frac + free_frac, 6)`. Same
+#: formula, same basis, same rounding. The cross-check is in this repo's own
+#: tree: `test_issue2148_...` hard-codes 0.318139 and 0.331869 as
+#: `ceiling_any_fill`, and those are byte-for-byte the `absolute_ceiling` of
+#: the two shortfall layers in the capacity report of the run it was written
+#: from.
+_CAPACITY_REL = "capacity"
+_CAPACITY_CEILING_KEY = "absolute_ceiling"
+#: Every name, in the order tried, that either schema uses for the pair — so
+#: the NOT_MEASURED sentence can say what was looked for instead of only that
+#: it was not found.
+_FLOOR_NAMES = ("the layer's own `floor`", "the report's `floor`",
+                f"the layer's `floor` under `{_CAPACITY_REL}`",
+                f"`{_CAPACITY_REL}.floor`")
+_CEILING_NAMES = ("the layer's own `ceiling_any_fill`",
+                  f"the layer's `{_CAPACITY_CEILING_KEY}` under "
+                  f"`{_CAPACITY_REL}`")
+
+
+def _number(value: Any) -> Optional[float]:
+    """`value` as a float when it IS a number, else None.
+
+    `bool` is excluded on purpose: `True` is an `int` in Python and a floor of
+    `1.0` minted from a flag would be a supplied value wearing a measurement's
+    clothes, which is the whole class of defect this module exists to refuse.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _first_number(*values: Any) -> Optional[float]:
+    """The first of `values` that is a number, else None. Absent is skipped
+    rather than defaulted — a `None` sitting explicitly in one schema must
+    not stop the next schema being asked."""
+    for v in values:
+        n = _number(v)
+        if n is not None:
+            return n
+    return None
+
+
+def capacity_rows(report: Optional[Dict[str, Any]]
+                  ) -> Tuple[Dict[str, Dict[str, Any]], Any]:
+    """({layer name: its capacity row}, the probe's own floor).
+
+    The `capacity` block `metal_fill_emit` attaches when the fill left a layer
+    below the foundry floor. Absent block, absent layers, or a layer with no
+    name yield nothing rather than a placeholder.
+    """
+    cap = (report or {}).get(_CAPACITY_REL)
+    if not isinstance(cap, dict):
+        return {}, None
+    rows: Dict[str, Dict[str, Any]] = {}
+    for lay in cap.get("layers") or []:
+        if isinstance(lay, dict) and lay.get("name"):
+            rows[str(lay["name"])] = lay
+    return rows, cap.get("floor")
+
 
 def fill_report_facts(report: Optional[Dict[str, Any]]
                       ) -> Tuple[Optional[List[float]], Dict[str, Dict[str, Any]],
@@ -458,6 +546,14 @@ def fill_report_facts(report: Optional[Dict[str, Any]]
     uses, so the number disclosed to the integrator is the one the fill was
     judged on. A layer that carries no numeric density yields no entry rather
     than a zero.
+
+    BOTH SCHEMAS ARE ASKED, engine-native first and the `capacity` block
+    second — see `_CAPACITY_CEILING_KEY` for the measured reason the second
+    one is the only carrier on the image this tree pins. A figure NEITHER
+    schema states becomes `NOT_MEASURED`, never `None`: this module's whole
+    contract is that "I could not read it" and "it is not there" must not
+    arrive wearing the same sentence, and a bare `None` in the record that
+    travels with the macro reads as the latter.
     """
     if not isinstance(report, dict):
         return None, {}, (f"{FILL_REPORT_REL} was not read as a mapping, so "
@@ -465,6 +561,7 @@ def fill_report_facts(report: Optional[Dict[str, Any]]
                           f"floor / legal-ceiling figure is available")
     bbox = ((report.get("keepout") or {}).get("measurement_bbox_um")
             if isinstance(report.get("keepout"), dict) else None)
+    cap_rows, cap_floor = capacity_rows(report)
     facts: Dict[str, Dict[str, Any]] = {}
     for lay in report.get("layers") or []:
         if not isinstance(lay, dict) or not lay.get("name"):
@@ -474,10 +571,16 @@ def fill_report_facts(report: Optional[Dict[str, Any]]
                 if isinstance(v, (int, float)) and not isinstance(v, bool)]
         if not vals:
             continue
-        facts[str(lay["name"])] = {
+        name = str(lay["name"])
+        cap = cap_rows.get(name) or {}
+        floor = _first_number(lay.get("floor"), report.get("floor"),
+                              cap.get("floor"), cap_floor)
+        ceiling = _first_number(lay.get("ceiling_any_fill"),
+                                cap.get(_CAPACITY_CEILING_KEY))
+        facts[name] = {
             "achieved": min(vals),
-            "floor": lay.get("floor", report.get("floor")),
-            "legal_ceiling": lay.get("ceiling_any_fill"),
+            "floor": NOT_MEASURED if floor is None else floor,
+            "legal_ceiling": NOT_MEASURED if ceiling is None else ceiling,
         }
     why = None
     if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
@@ -509,6 +612,21 @@ def density_disclosure(rules: Dict[str, str], deck_sources: Optional[str],
             rec["achieved"] = f["achieved"]
             rec["floor"] = f["floor"]
             rec["legal_ceiling"] = f["legal_ceiling"]
+            # A PAIRED LAYER CAN STILL BE MISSING A FIGURE, and saying which
+            # is the point. The legal ceiling is the load-bearing one: under
+            # the floor it is the sentence "this cannot be closed inside the
+            # macro either", and an integrator handed the shortfall without it
+            # is handed a number they cannot act on.
+            absent = [word for word, key in (("floor", "floor"),
+                                             ("legal ceiling", "legal_ceiling"))
+                      if rec[key] == NOT_MEASURED]
+            if absent:
+                rec["not_measured"] = (
+                    f"the density fill's report states no "
+                    f"{' and no '.join(absent)} for layer {layer} under any "
+                    f"name either of its two schemas uses "
+                    f"({'; '.join(_FLOOR_NAMES + _CEILING_NAMES)}), so it is "
+                    f"unknown rather than absent")
         else:
             rec["achieved"] = rec["floor"] = rec["legal_ceiling"] = NOT_MEASURED
             rec["not_measured"] = (
