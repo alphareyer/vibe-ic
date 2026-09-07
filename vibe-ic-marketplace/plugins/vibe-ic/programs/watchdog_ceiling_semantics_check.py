@@ -660,6 +660,27 @@ def scan_supervised_dispatch(path: Path, *, primitive: bool,
 #: required to remove its entry too.
 _RAW_KILL_REGISTER = "watchdog_raw_clock_kill_baseline.json"
 
+#: The register of CONTAINER-SIDE DEADLINE call sites, same shrink-only shape.
+#:
+#: `_container_exec.run_in_container` hands the tool a `timeout -k 5 <deadline>`
+#: INSIDE the container. That was the right answer to the orphan defect and it
+#: is the wrong answer for a long tool run: it SIGTERMs a job that may be
+#: working perfectly, which is the class vibe-ic#2051 removed everywhere the
+#: supervisor could reach. MEASURED (vibe-ic#2083, 8HD-8, pinned image): the
+#: magic LEF extraction of a 35 MB GDS needs 5187 s and finishes cleanly, so the
+#: 900 s deadline that site carried was cutting it at 17.4% and booking "did not
+#: complete" about a healthy tool.
+#:
+#: The remedy is `_container_exec.run_in_container_supervised` — identity stamp,
+#: `exec`, NO clock, reaped only on stillness and only by identity. This
+#: register names the sites that still carry the deadline so a clean verdict
+#: never implies work that was not done, and so that ADDING one back is refused.
+_CONTAINER_DEADLINE_REGISTER = "watchdog_container_deadline_baseline.json"
+
+#: The two entry points that build a container-side deadline. Matched on the
+#: attribute NAME, so `_ce.` / `_container_exec.` / a bare import all count.
+_CONTAINER_DEADLINE_CALLS = ("run_in_container", "container_deadline_argv")
+
 #: A signal that stops a job. `kill` is matched as a SUBSTRING because the real
 #: call sites spell it `os.killpg`, `_kill_process_group`, `proc.kill` — the same
 #: substring test `_is_ceiling_kill` already uses one class up.
@@ -845,8 +866,45 @@ def scan_raw_clock_kill(path: Path, rel: str, *, tree: ast.AST,
     return rows
 
 
-def _load_raw_kill_register(programs_dir: Path) -> Tuple[Dict[str, str], str]:
-    """``({key: remedy note}, problem)`` from the shrink-only register."""
+def scan_container_deadline(path: Path, rel: str, *, tree) -> List[Row]:
+    """Every call that gives an in-container command a WALL-CLOCK deadline.
+
+    The population is deliberately the call, not the value: a deadline is a
+    clock at any number, and "the number was big enough this time" is the
+    reasoning the whole ruling exists to refuse.
+    """
+    rows: List[Row] = []
+    for fn in [n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        for c in ast.walk(fn):
+            if not isinstance(c, ast.Call):
+                continue
+            name = (c.func.attr if isinstance(c.func, ast.Attribute)
+                    else getattr(c.func, "id", ""))
+            if name not in _CONTAINER_DEADLINE_CALLS:
+                continue
+            expr = f"{rel}::{fn.name}::{name}"
+            rows.append(Row(
+                rel, c.lineno, fn.name, "container_deadline", expr, None,
+                "OFFENDER",
+                "an in-container command given a GNU `timeout` deadline. A "
+                "deadline stops a job because time passed, not because the job "
+                "stopped working — vibe-ic#2051 for the container side. Use "
+                "`_container_exec.run_in_container_supervised`: identity stamp, "
+                "`exec`, no clock, reaped only on a progress stall and only by "
+                "identity, so the orphan the deadline prevented is still "
+                "prevented."))
+    return rows
+
+
+def _load_register(programs_dir: Path, _RAW_KILL_REGISTER: str
+                   ) -> Tuple[Dict[str, str], str]:
+    """``({key: remedy note}, problem)`` from a shrink-only register.
+
+    ONE loader for both registers: two copies would be free to disagree about
+    what an unreadable register means, and the answer — every site is refused —
+    is the load-bearing half.
+    """
     path = programs_dir / _RAW_KILL_REGISTER
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
@@ -858,6 +916,10 @@ def _load_raw_kill_register(programs_dir: Path) -> Tuple[Dict[str, str], str]:
     if not isinstance(entries, dict):
         return {}, f"{_RAW_KILL_REGISTER} has no `recorded` object"
     return {str(k): str(v) for k, v in entries.items()}, ""
+
+
+def _load_raw_kill_register(programs_dir: Path) -> Tuple[Dict[str, str], str]:
+    return _load_register(programs_dir, _RAW_KILL_REGISTER)
 
 
 def _raw_kill_population(programs_dir: Path) -> List[Tuple[Path, str]]:
@@ -883,13 +945,26 @@ def scan(programs_dir: Path) -> Tuple[List[Row], float]:
     backstop = _default_hard_ceiling_s(programs_dir)
     rows: List[Row] = []
     recorded, register_problem = _load_raw_kill_register(programs_dir)
+    cd_recorded, cd_problem = _load_register(programs_dir,
+                                             _CONTAINER_DEADLINE_REGISTER)
     seen_keys: set = set()
+    cd_seen: set = set()
     for path, rel in _raw_kill_population(programs_dir):
         try:
             src = path.read_text(encoding="utf-8", errors="replace")
             tree = ast.parse(src)
         except (OSError, SyntaxError):
             continue
+        # The module that DEFINES both entry points is not a call site.
+        if path.name != "_container_exec.py":
+            for r in scan_container_deadline(path, rel, tree=tree):
+                cd_seen.add(r.expr)
+                if r.expr in cd_recorded:
+                    r.verdict = "RESIDUAL_CONTAINER_DEADLINE"
+                    r.detail = f"{cd_recorded[r.expr]} {r.detail}"
+                elif cd_problem:
+                    r.detail = f"{cd_problem}. {r.detail}"
+                rows.append(r)
         for r in scan_raw_clock_kill(path, rel, tree=tree,
                                      src_lines=src.splitlines()):
             if r.verdict == "EXEMPT":
@@ -913,6 +988,12 @@ def scan(programs_dir: Path) -> Tuple[List[Row], float]:
                         key, None, "TIGHTEN",
                         f"recorded in {_RAW_KILL_REGISTER} but no longer "
                         f"present in the tree — remove this entry; the "
+                        f"register may only ever shrink"))
+    for key in sorted(set(cd_recorded) - cd_seen):
+        rows.append(Row(key.split("::")[0], 0, "-", "container_deadline_register",
+                        key, None, "TIGHTEN",
+                        f"recorded in {_CONTAINER_DEADLINE_REGISTER} but no "
+                        f"longer present in the tree — remove this entry; the "
                         f"register may only ever shrink"))
     for path in sorted(programs_dir.glob("*.py")):
         if path.name == _SELF:
@@ -985,6 +1066,8 @@ def main(argv=None) -> int:
     budgets = [r for r in rows if r.verdict == "BUDGET"]
     residual = [r for r in rows if r.verdict == "RESIDUAL_CONTAINER_CLOCK"]
     raw_residual = [r for r in rows if r.verdict == "RESIDUAL_RAW_CLOCK_KILL"]
+    cd_residual = [r for r in rows
+                   if r.verdict == "RESIDUAL_CONTAINER_DEADLINE"]
     tighten = [r for r in rows if r.verdict == "TIGHTEN"]
     clean = [r for r in rows if r.verdict == "CLEAN"]
 
@@ -997,6 +1080,7 @@ def main(argv=None) -> int:
     print(f"    CLEAN {len(clean)}   BUDGET {len(budgets)}   "
           f"EXEMPT {len(exempt)}   UNJUDGED {len(unjudged)}   "
           f"RESIDUAL {len(residual)}   RAW_CLOCK_KILL {len(raw_residual)}   "
+          f"CONTAINER_DEADLINE {len(cd_residual)}   "
           f"OFFENDER {len(offenders)}")
 
     if args.table:
@@ -1030,6 +1114,13 @@ def main(argv=None) -> int:
         print(f"\n--- RAW CLOCK KILLS ALREADY ON THE RECORD "
               f"({_RAW_KILL_REGISTER}, shrink-only) ---")
         for r in raw_residual:
+            print(f"  {r.file}:{r.line} {r.callee}  [{r.kind}]")
+            print(f"      {r.detail}")
+
+    if cd_residual:
+        print(f"\n--- CONTAINER-SIDE DEADLINES ALREADY ON THE RECORD "
+              f"({_CONTAINER_DEADLINE_REGISTER}, shrink-only) ---")
+        for r in cd_residual:
             print(f"  {r.file}:{r.line} {r.callee}  [{r.kind}]")
             print(f"      {r.detail}")
 

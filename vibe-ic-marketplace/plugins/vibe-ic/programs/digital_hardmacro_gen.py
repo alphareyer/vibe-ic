@@ -909,15 +909,35 @@ class MagicSite:
         return (rc == 0 and dst.is_file()), (err or out).strip()[:200]
 
     def sh(self, cmd: str, timeout: int = 900) -> Tuple[int, str, str]:
+        """Run `cmd` where magic is. `timeout` is a RECORDED BUDGET, not a kill.
+
+        THE REAP GOES WHERE THE TOOL IS, AND ONLY STILLNESS TRIPS IT.
+        A client-side timeout kills the `docker exec` client and leaves the
+        tool running, holding its cores and never finishing the file the caller
+        waits for — the measured defect `_container_exec` exists for. The first
+        answer to that was a container-side `timeout -k 5 <deadline>`, which
+        removed the orphan and introduced a worse thing: a raw wall-clock
+        SIGTERM of a job that may be working perfectly.
+
+        MEASURED 2026-09-07 on 8HD-8 in the pinned image, this exact
+        extraction, run with nothing in front of it: **5187.5 s (86 min 27 s)**
+        at a steady 1.000 CPU-second per second, exit 0,
+        `DIGITAL_LEF_WRITE_DONE`, a 21494-byte abstract with 84 pins. The
+        shipped 900 s deadline lands at 17.4% of that job. Every LEF this step
+        was asked for on a design this size was being cut in the middle and
+        booked as "did not complete".
+
+        So the launch is SUPERVISED (owner ruling, vibe-ic#2083): an identity
+        stamp then `exec`, no clock at all, and the only thing that stops the
+        tool is a progress STALL — read from the container's own work, not from
+        the client that cannot see it — after which it is reaped BY IDENTITY
+        where it lives, so the orphan contract is kept.
+        """
         if not self.in_container:
             return _sh(["bash", "-lc", cmd], timeout=timeout)
-        # THE DEADLINE GOES WHERE THE TOOL IS. A client-side timeout kills
-        # the `docker exec` client and leaves the tool running, holding its
-        # cores and never finishing the file the caller waits for — the
-        # measured defect `_container_exec` exists for.
         try:
-            cp = _container_exec.run_in_container(self.container, cmd,
-                                                  deadline_s=int(timeout))
+            cp = _container_exec.run_in_container_supervised(
+                self.container, cmd, ceiling_s=float(timeout))
         except (subprocess.SubprocessError, OSError) as exc:
             # A wedged container, or no docker client at all: NOT a verdict
             # about the design. Surfaced as a non-zero rc with the reason.
@@ -1155,9 +1175,15 @@ def _write_lef_in_container(site: "MagicSite", top: str, gds: Path,
                    f"magic -noconsole -dnull -rcfile {shlex.quote(magicrc)} "
                    f"{shlex.quote(work + '/lef.tcl')}")
             rc, out, err = site.sh(cmd, timeout=timeout_s)
-            if rc == _container_exec.TIMEOUT_EXPIRED_RC:
-                return False, (f"magic did not complete: the {timeout_s}s "
-                               f"deadline expired in {site.where}")
+            if rc == _container_exec.STALLED_RC:
+                # NOT "it took too long" — every readable signal sat still.
+                # `timeout_s` is only the recorded budget now, so it is not
+                # named here: quoting a number that stopped nothing would tell
+                # the reader the run was cut when it was not.
+                why = _container_exec.describe_result(
+                    subprocess.CompletedProcess(cmd, rc), int(timeout_s))
+                return False, (f"magic made no forward progress in "
+                               f"{site.where}: {why}")
             produced = host_tmp / f"{top}.lef"
             got, why = site.get(f"{top}.lef", produced)
             if not got:

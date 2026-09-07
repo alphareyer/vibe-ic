@@ -81,12 +81,13 @@ def test_the_container_is_asked_when_this_environment_has_no_magic(monkeypatch):
                         lambda n: "/usr/bin/docker" if n == "docker" else None)
     asked = {}
 
-    def fake_run_in_container(container, cmd, deadline_s=120, **_k):
+    def fake_run_in_container(container, cmd, ceiling_s=120.0, **_k):
         asked["container"] = container
         asked["cmd"] = cmd
         return subprocess.CompletedProcess([], 0, "", "")
 
-    monkeypatch.setattr(mod._container_exec, "run_in_container",
+    monkeypatch.setattr(mod._container_exec,
+                        "run_in_container_supervised",
                         fake_run_in_container)
 
     site = mod.find_magic_site("eda_ctr")
@@ -110,14 +111,15 @@ def test_the_technology_is_listed_where_the_tool_will_read_it(monkeypatch):
     site = mod.MagicSite("eda_ctr")
     listed = []
 
-    def fake_run_in_container(container, cmd, deadline_s=120, **_k):
+    def fake_run_in_container(container, cmd, ceiling_s=120.0, **_k):
         listed.append(cmd)
         out = ("[INFO] Final PATH variable: /headless/.local/bin\n"
                "/pdks/somepdk/libs.tech/magic/somepdk.magicrc\n"
                if "/*/libs.tech" in cmd else "[INFO] Final PATH variable: /x\n")
         return subprocess.CompletedProcess([], 0, out, "")
 
-    monkeypatch.setattr(mod._container_exec, "run_in_container",
+    monkeypatch.setattr(mod._container_exec,
+                        "run_in_container_supervised",
                         fake_run_in_container)
     got = site.magicrc("/pdks")
     assert got == "/pdks/somepdk/libs.tech/magic/somepdk.magicrc", got
@@ -166,7 +168,7 @@ def test_the_lef_is_written_in_the_container_and_comes_back(tmp_path, monkeypatc
             return 0, "", ""
         raise AssertionError(f"unexpected client call: {argv}")
 
-    def fake_run_in_container(container, cmd, deadline_s=120, **_k):
+    def fake_run_in_container(container, cmd, ceiling_s=120.0, **_k):
         if "command -v magic" in cmd:
             return subprocess.CompletedProcess([], 0, "", "")
         if cmd.startswith("ls -1d"):
@@ -185,7 +187,8 @@ def test_the_lef_is_written_in_the_container_and_comes_back(tmp_path, monkeypatc
     monkeypatch.setattr(mod.shutil, "which",
                         lambda n: "/usr/bin/docker" if n == "docker" else None)
     monkeypatch.setattr(mod, "_sh", fake_sh)
-    monkeypatch.setattr(mod._container_exec, "run_in_container",
+    monkeypatch.setattr(mod._container_exec,
+                        "run_in_container_supervised",
                         fake_run_in_container)
 
     gds = tmp_path / "in.gds"
@@ -213,7 +216,7 @@ def test_a_container_that_has_no_magic_is_still_the_capability_gap(monkeypatch):
     monkeypatch.setattr(mod.shutil, "which",
                         lambda n: "/usr/bin/docker" if n == "docker" else None)
     monkeypatch.setattr(
-        mod._container_exec, "run_in_container",
+        mod._container_exec, "run_in_container_supervised",
         lambda *_a, **_k: subprocess.CompletedProcess([], 1, "", ""))
     assert mod.find_magic_site("eda_ctr") is None
     why = mod.magic_absent_reason("eda_ctr")

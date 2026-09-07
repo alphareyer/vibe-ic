@@ -65,6 +65,7 @@ it is given.
 """
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -79,6 +80,10 @@ import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 __all__ = [
     "run_in_container",
     "container_deadline_argv",
+    "container_tree_probe",
+    "container_id",
+    "run_in_container_supervised",
+    "STALLED_RC",
     "docker_exec_argv",
     "ContainerImageMismatch",
     "TIMEOUT_EXPIRED_RC",
@@ -166,6 +171,149 @@ def _unguarded_exec_argv(container: str, *rest: str,
     return ["docker", "exec", *opts, container, *rest]
 
 
+# ---------------------------------------------------------------------------
+# THE PROGRESS SIGNAL HAS TO POINT AT THE TOOL, NOT AT THE CLIENT
+# ---------------------------------------------------------------------------
+#
+# The deadline defect this module opens with has a twin, and it was measured on
+# the same shape. `docker exec` supervision watches the LOCAL CLIENT: its CPU,
+# its I/O, and the bytes it relays. The tool is not its child -- it is parented
+# by the container runtime's shim -- so none of those three counters describe
+# the work at all.
+#
+# MEASURED 2026-09-07 on 8HD-8 (vibe-ic#2083), a magic LEF extraction of a
+# 35 MB GDS through this exact call, sampled every 5 s from the host:
+#
+#     t+29s  magic cpu= 28.8s rss=1.15GB | client cpu=0.01 io=0/0 out=0 new bytes
+#     t+99s  magic cpu= 99.2s rss=2.35GB | client cpu=0.01 io=0/0 out=0 new bytes
+#     t+124s magic cpu=124.3s rss=2.31GB | client cpu=0.01 io=0/0 out=0 new bytes
+#
+# magic was pinned at a full 1.00 CPU-second per second and growing its heap by
+# tens of megabytes a second. Every signal the supervisor could see sat exactly
+# still -- the longest window with client CPU, client I/O and relayed output ALL
+# flat was 351.9 s, against a 180 s grace -- and the run was declared
+# `STALLED: no forward progress ...` and the hard macro was never produced.
+#
+# LEFT ALONE, that same extraction finished: 5187.5 s (86 min 27 s), exit 0,
+# `DIGITAL_LEF_WRITE_DONE`, a 21494-byte abstract with 84 pins. The stall
+# verdict had fired at 13.6% of the real job. The tool was never the subject of
+# that verdict; the client was.
+#
+# So a `docker exec` launch supervises the CONTAINER as well. The probe below
+# sums CPU and I/O over the host processes that belong to this container and
+# that started after the launch -- the exec's own work, not the container's
+# idle main process and not a sibling that was already running. It is fused
+# with the client probe rather than replacing it, so this can only ever add a
+# reason to keep waiting.
+#
+# DEGRADE LOUDLY. `container_id` failing is recorded as the `container` signal
+# staying False, and `Stalled` already prints which signals were readable, so a
+# stall observed with no container channel reads differently from one observed
+# with it.
+
+_CLK_TCK = float(os.sysconf("SC_CLK_TCK")) if hasattr(os, "sysconf") else 100.0
+
+
+def container_id(container: str) -> Optional[str]:
+    """The container's full id, or None when it cannot be read.
+
+    None is NOT "no such container" -- it is "I could not tell", which is why
+    the caller degrades to the client-only signals and says so rather than
+    treating the container as empty.
+    """
+    if not container or container == "host":
+        return None
+    try:
+        cp = subprocess.run(  # nosec B603,B607 — fixed argv, no shell
+            ["docker", "inspect", "-f", "{{.Id}}", container],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    cid = (cp.stdout or "").strip()
+    return cid if cp.returncode == 0 and len(cid) >= 12 else None
+
+
+def _uptime_ticks() -> Optional[float]:
+    try:
+        with open("/proc/uptime", "rb") as fh:
+            return float(fh.read().split()[0]) * _CLK_TCK
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _in_container(pid: int, cid: str) -> bool:
+    try:
+        with open(f"/proc/{pid}/cgroup", "rb") as fh:
+            return cid.encode("ascii") in fh.read()
+    except OSError:
+        return False
+
+
+def _stat_fields(pid: int):
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            data = fh.read()
+        return data[data.rfind(b")") + 2:].split()
+    except (OSError, IndexError):
+        return None
+
+
+def container_tree_probe(container: str):
+    """A `_progress_run` probe factory watching the WORK inside `container`.
+
+    Returns ``factory(signals) -> probe(proc)``; the ``container`` key of
+    ``signals`` records whether the channel was actually readable, so a stall
+    reported with it missing can be told from one reported with it present.
+    """
+    def factory(signals):
+        cid = container_id(container)
+        # The launch instant, in the same units /proc/<pid>/stat field 22 uses.
+        # Processes older than this belong to somebody else's work in the same
+        # container and must not vouch for ours.
+        since = _uptime_ticks()
+
+        def probe(_proc) -> Optional[float]:
+            if cid is None or since is None:
+                return None
+            total, seen = 0.0, False
+            try:
+                pids = [int(e) for e in os.listdir("/proc") if e.isdigit()]
+            except OSError:
+                return None
+            for pid in pids:
+                f = _stat_fields(pid)
+                if not f or len(f) < 22:
+                    continue
+                try:
+                    if float(f[19]) < since:      # field 22: starttime
+                        continue
+                except ValueError:
+                    continue
+                if not _in_container(pid, cid):
+                    continue
+                try:
+                    total += (int(f[11]) + int(f[12])) / _CLK_TCK
+                    seen = True
+                except (ValueError, IndexError):
+                    continue
+                try:
+                    with open(f"/proc/{pid}/io", "rb") as fh:
+                        for line in fh:
+                            if line.startswith((b"read_bytes:", b"write_bytes:")):
+                                total += float(line.split()[1]) / 1e6
+                except (OSError, ValueError, IndexError):
+                    # Another uid's process: /proc/<pid>/io is 0400. CPU from
+                    # `stat` is world-readable and still counts, which is the
+                    # measured case -- the tool runs as the image's own user.
+                    pass
+            if seen:
+                signals["container"] = True
+                return total
+            return None
+        return probe
+    return factory
+
+
 def container_deadline_argv(container: str,
                             cmd: str,
                             deadline_s: int,
@@ -226,7 +374,104 @@ def run_in_container(container: str,
             stderr=f"_container_exec: refused, nothing was run: {why}\n")
     return _pr.run(
         container_deadline_argv(container, cmd, deadline_s, kill_grace_s, shell),
-        capture_output=True, text=True, errors="replace")
+        capture_output=True, text=True, errors="replace",
+        progress_probe=container_tree_probe(container))
+
+
+#: The rc a supervised container run reports when the TOOL stopped moving.
+#: Inherited from `_progress_run` so the whole repo spells this outcome one way,
+#: and distinct from `TIMEOUT_EXPIRED_RC` on purpose: "it stopped moving" and
+#: "the clock ran out" are different findings and only one of them is about the
+#: tool.
+STALLED_RC = _pr.RC_STALLED
+
+
+def _raw_exec(container: str, cmd: str, timeout: int = 15):
+    """A SHORT probe into the container, for the identity reap only.
+
+    This one keeps a `timeout=`, and that is not the defect the ruling removes.
+    A probe is a sub-second `kill -0`/`printf`; bounding it stops a wedged
+    docker daemon from wedging the supervisor that is trying to reap, and it
+    never carries a tool's verdict. The precedent is already in
+    `watchdog_ceiling_semantics_check`, which exempts exactly this shape and
+    says why.
+    """
+    try:
+        cp = subprocess.run(  # nosec B603 — fixed argv, no shell
+            _unguarded_exec_argv(container, "bash", "-lc", cmd),
+            capture_output=True, text=True, errors="replace", timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 127, "", str(exc)
+    return cp.returncode, cp.stdout or "", cp.stderr or ""
+
+
+def run_in_container_supervised(container: str,
+                                cmd: str,
+                                ceiling_s: float = 86_400.0,
+                                shell: Sequence[str] = ("bash", "-lc"),
+                                stall_looks: int = _pr.DEFAULT_STALL_LOOKS,
+                                ) -> subprocess.CompletedProcess:
+    """Run ``cmd`` in ``container`` with NO CLOCK: reaped only on STILLNESS.
+
+    THE DIFFERENCE FROM :func:`run_in_container`, and why it exists (owner
+    ruling 2026-09-07, vibe-ic#2083). That function gives the tool a container-
+    side `timeout -k 5 <deadline>`, which is a raw clock kill of a job that may
+    be working perfectly — the class vibe-ic#2051 removed everywhere else. It
+    is right for a call whose deadline really is a deadline; it is wrong for a
+    long EDA run. MEASURED on 8HD-8 in the pinned image: the magic LEF
+    extraction of a 35 MB GDS needs **5187 s** and finishes cleanly, so the
+    shipped 900 s deadline would SIGTERM it at 17.4% of the job and the step
+    would report "did not complete" about a tool that was never in trouble.
+
+    The shape here is the one the supervised path already uses elsewhere:
+
+      * `_docker_watchdog.supervised_container_command` — the shell records its
+        own (pid, starttime) IDENTITY STAMP and then `exec`s the tool, so the
+        stamped pid IS the tool's pid and is the leader of its process group.
+        No `timeout`, no outer clock of any kind.
+      * `_progress_run.run` with `container_tree_probe` — the stillness signal,
+        which reads the CONTAINER's work rather than the `docker exec` client
+        that cannot see it.
+      * on a stall, `_docker_watchdog.kill_supervised_job` — TERM then KILL, by
+        IDENTITY, so the reap can never select a stranger that happens to match
+        a command line. THE ORPHAN CONTRACT IS KEPT AND SHARPENED: a still tool
+        is reaped where it lives, a computing one is never cut.
+
+    ``ceiling_s`` is a RECORDED BUDGET and stops nothing (vibe-ic#2051):
+    `_watchdog` announces the crossing once and the job runs on.
+
+    Returns the tool's own `CompletedProcess`, or one carrying `STALLED_RC`
+    with the stall reason AND the reap evidence on `.stderr` — never the tool's
+    rc for an outcome the tool did not reach.
+    """
+    why = _pin.container_attach_refusal(container)
+    if why:
+        return subprocess.CompletedProcess(
+            args=_unguarded_exec_argv(container, *shell, cmd),
+            returncode=IMAGE_MISMATCH_RC, stdout="",
+            stderr=f"_container_exec: refused, nothing was run: {why}\n")
+    # Imported HERE, not at module scope: `_docker_watchdog` imports this
+    # module for `docker_exec_argv`, so a top-level import would be a cycle.
+    import _docker_watchdog as _dw  # noqa: PLC0415
+
+    pidfile = _dw.new_job_pidfile()
+    wrapped = _dw.supervised_container_command(cmd, pidfile)
+    argv = docker_exec_argv(container, *shell, wrapped)
+    try:
+        return _pr.run(argv, capture_output=True, text=True, errors="replace",
+                       stall_looks=stall_looks, hard_ceiling_s=ceiling_s,
+                       progress_probe=container_tree_probe(container))
+    except _pr.Stalled as exc:
+        # REAP WHERE THE TOOL LIVES. The host-side supervisor has stopped
+        # watching; without this the tool would be exactly the orphan the
+        # container-side deadline used to prevent.
+        reap = _dw.kill_supervised_job(container, pidfile,
+                                       docker_exec_raw=_raw_exec)
+        return subprocess.CompletedProcess(
+            argv, STALLED_RC, exc.stdout or "",
+            (exc.stderr or "") + "\n" + str(exc) + "\n" + (reap or "").strip())
+    finally:
+        _dw.cleanup_job_pidfile(container, pidfile, _raw_exec)
 
 
 def describe_result(cp: subprocess.CompletedProcess,
@@ -241,6 +486,11 @@ def describe_result(cp: subprocess.CompletedProcess,
     if cp.returncode == TIMEOUT_EXPIRED_RC:
         return (f"container-side deadline of {deadline_s}s expired; the tool "
                 f"was signalled inside the container and produced no result")
+    if cp.returncode == STALLED_RC:
+        return ("the tool made no forward progress in the container — every "
+                "readable signal (its own CPU and I/O inside the container, "
+                "and the bytes it wrote) sat still while the supervisor "
+                "looked; it was reaped by identity and no orphan remains")
     if cp.returncode == TIMEOUT_UNAVAILABLE_RC:
         return ("`timeout` is not available in this image, so NO deadline "
                 "could be enforced; the command may have run unbounded")
