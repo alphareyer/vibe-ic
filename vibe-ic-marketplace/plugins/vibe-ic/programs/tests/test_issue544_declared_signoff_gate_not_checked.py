@@ -324,7 +324,21 @@ def test_the_absent_gates_are_the_only_reason_the_run_did_not_release(
     corner = results["sta_corner"]
     assert corner.status == "FAIL", corner
     assert "-72.07" in corner.detail, corner.detail
-    assert not any(r.status == "BLOCKED" for r in results.values()), results
+    # NOT-CHECKED must not be reachable from a COMPLETE deployment. Stated per
+    # ROW rather than as a blanket `no BLOCKED anywhere`, because vibe-ic#2134
+    # added a second, disclosed route to BLOCKED that has nothing to do with a
+    # deployment fault: with the multi-corner gates refusing this very corner,
+    # `sta_signoff`'s own report discloses STA_SINGLE_CORNER_ONLY and its row
+    # DEFERS instead of rendering a third answer about the same timing. That is
+    # the intended behaviour of this fixture's shape, so the control now asserts
+    # what it always meant — no gate went unchecked because the runner could not
+    # run it — and is strictly more specific than the line it replaces.
+    for name, r in results.items():
+        if r.status != "BLOCKED":
+            continue
+        assert name == "sta_signoff", (name, r)
+        assert "DEFERRED-TO-" in r.detail, r.detail
+        assert "gate program not present" not in r.detail, r.detail
 
 
 def test_absent_gate_program_blocks_the_drv_promotion_step_too(

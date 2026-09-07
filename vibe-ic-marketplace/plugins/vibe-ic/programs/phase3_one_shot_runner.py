@@ -40507,8 +40507,126 @@ def step_declared_signoff_gates(project: Path,
         _ctp.stamp_signoff_records(project)
     except Exception as _exc:
         print(f"[phase3] assumed-clock disclosure stamp non-fatal: {_exc}")
-    return out
+    return _reconcile_sta_verdict(out)
 
+
+# ---------------------------------------------------------------------------
+# vibe-ic#2134 — ONE DESIGN, ONE STA ANSWER.
+#
+# MEASURED, on the #544 fixture with `violated_corner=True` (the shape the
+# field run carried), pinned image, this tree before the change:
+#
+#   sta_signoff  PASS  STA_SINGLE_CORNER_ONLY: no multi-corner POST_ROUTE STA
+#                      evidence (>=2 distinct POST_ROUTE per-corner reports)
+#   sta_corner   FAIL  setup worst-slack -72.070 ns at the sign-off (max-RC)
+#                      corner is VIOLATED
+#   sta_record   FAIL  R3 SIGN-OFF corner 'max' (rc axis, role setup) is
+#                      VIOLATED
+#   roll-up      "3 of 5 declared sign-off gate(s) PASSED; 2 FAILED:
+#                 sta_corner, sta_record"
+#
+# The record says the SAME design both passed and failed sign-off STA, and the
+# `N of M ... PASSED` numerator counts the PASS produced by the gate whose own
+# report says it never looked at the axis the violation lives on.
+#
+# THE CONTRACT DECIDES IT, AND THE CONTRACT SAYS (a). #2134 states the choice:
+# either (a) `sta_signoff`'s verdict becomes a non-PASS tier when its coverage
+# is single-corner and a declared multi-corner sign-off gate FAILs, or (b)
+# `sta_signoff` becomes the single owner of the STA verdict and CONSUMES the
+# multi-corner result. (a) is what this flow's own contract already says, in
+# three places that would all have to be rewritten to reach (b):
+#
+#   * `_DECLARED_SIGNOFF_GATES` scopes `sta_signoff` with `_STEP23_STA_SCOPE`
+#     = `--under phase3/stage3/sta/post_route_timing.rpt` — ONE report. Its
+#     scope is a property of its declaration, not an accident; making it
+#     consume `sta_corner`'s and `sta_record`'s artefacts would un-scope the
+#     gate that #755's step-scoping change deliberately scoped.
+#   * every declared gate here reads ONLY its own inputs and answers ONLY its
+#     own question; cross-gate arbitration has no home inside a report reader,
+#     and giving one gate authority over another's report is the third STA
+#     answer, not a removal of one.
+#   * #913 (closed) already ruled on the shape one layer down: "a gate whose
+#     scope covers only one of the declared sign-off axes must not emit an
+#     unqualified PASS". #2134 is the same rule at the RUN level, where the
+#     other axis is not merely unanalysed but is on the record as VIOLATED.
+#
+# So the arbitration lives HERE, in the one place that sees every declared
+# gate of one run, and it DEMOTES rather than re-judges: nothing reads slack,
+# no assertion is weakened, no threshold moves, and `sta_corner` and
+# `sta_record` keep refusing exactly as they did. The demoted row is BLOCKED
+# carrying `_SIGNOFF_NOT_CHECKED` — this module's existing word for "nothing is
+# known about the design; never green" — so `_aggregate_verdict` puts it in the
+# non-green bucket and `declared_signoff_rollup` moves it out of the numerator
+# into the named `not_checked` clause. NO NEW TIER AND NO FOURTH SPELLING, for
+# the reason the block comment above `_signoff_not_checked` gives.
+#
+# NARROW ON PURPOSE. It fires only when `sta_signoff` PASSED, its own report
+# discloses `STA_SINGLE_CORNER_ONLY`, and a declared multi-corner gate FAILed.
+# A `sta_signoff` PASS with NO single-corner disclosure beside a FAILing
+# `sta_corner` is a DIFFERENT defect — two gates disagreeing about the same
+# coverage — and is deliberately left alone rather than covered by a rule that
+# has not measured it.
+# ---------------------------------------------------------------------------
+
+#: The declared sign-off gate that renders this run's STA verdict.
+_STA_VERDICT_GATE = "sta_signoff"
+
+#: The declared sign-off gates whose scope IS the multi-corner sign-off that
+#: `_STA_VERDICT_GATE`'s single-report scope cannot cover. Named, not derived:
+#: a gate that reads STA reports is not automatically a multi-corner authority,
+#: and a table that guessed would silently grow the rule.
+_STA_MULTICORNER_GATES = ("sta_corner", "sta_record")
+
+#: `eda_report_audit`'s OWN self-disclosure rule for a single-corner analysis
+#: (#442). The disclosure is read from the gate's report rather than inferred,
+#: so this defers to the gate's own statement about its coverage.
+_STA_SINGLE_CORNER_RULE = "STA_SINGLE_CORNER_ONLY"
+
+
+def _sta_single_corner_disclosed(row: StepResult) -> bool:
+    """Did `sta_signoff`'s OWN report disclose single-corner coverage?
+
+    Reads the verdict JSON the gate just wrote, from the path the step
+    recorded. A report that cannot be read returns False: this helper decides
+    whether to DEMOTE a PASS, and "could not read it" is not evidence that the
+    coverage was partial.
+    """
+    for out in row.output_files:
+        try:
+            doc = json.loads(Path(out).read_text())
+        except (OSError, ValueError):
+            continue
+        for f in (doc.get("findings") or []):
+            if isinstance(f, dict) and f.get("rule") == _STA_SINGLE_CORNER_RULE:
+                return True
+    return False
+
+
+def _reconcile_sta_verdict(rows: List[StepResult]) -> List[StepResult]:
+    """One design, one STA answer: a disclosed single-corner PASS defers.
+
+    See the block comment above. Returns the rows unchanged in every case but
+    the measured one, and never turns a non-PASS into a PASS.
+    """
+    by = {r.name: r for r in rows}
+    verdict_row = by.get(_STA_VERDICT_GATE)
+    if verdict_row is None or verdict_row.status != "PASS":
+        return rows
+    refusing = [n for n in _STA_MULTICORNER_GATES
+                if n in by and by[n].status == "FAIL"]
+    if not refusing or not _sta_single_corner_disclosed(verdict_row):
+        return rows
+    deferred = StepResult(
+        verdict_row.name, "BLOCKED", verdict_row.duration_s,
+        f"{_SIGNOFF_NOT_CHECKED}: DEFERRED-TO-{'+'.join(refusing)} — this "
+        f"gate's own report discloses {_STA_SINGLE_CORNER_RULE}, and the "
+        f"declared multi-corner sign-off gate(s) {', '.join(refusing)} FAILed "
+        f"on this design. A single-corner result is a disclosed PARTIAL "
+        f"measurement, not a sign-off STA verdict, so this row states no "
+        f"verdict and the run's one STA answer is the multi-corner refusal "
+        f"(vibe-ic#2134). Its own finding was: {verdict_row.detail[:240]}",
+        list(verdict_row.output_files), dict(verdict_row.extras))
+    return [deferred if r.name == _STA_VERDICT_GATE else r for r in rows]
 
 #: Every step name this module plans as a DECLARED sign-off gate, in plan order.
 #: `_DRV_PROMOTION_GATE` first because `main()` appends it first.
