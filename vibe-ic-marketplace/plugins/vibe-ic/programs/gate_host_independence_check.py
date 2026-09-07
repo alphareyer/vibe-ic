@@ -90,6 +90,43 @@ to REPORT how much stimulus a run actually had, so that a comparison between
 two identical trees can never again be read as coverage. A run with no stimulus
 is NOT_CHECKED (rc 2), never a pass.
 
+THE STIMULUS IS NOW PLANTED, NOT AWAITED (vibe-ic#2140)
+=======================================================
+#539's rule was right and its KEY was the weather. Keying the refusal on what
+the host happened to leave behind made this probe's coverage a function of how
+dirty the operator's tree was that day — and left it blind in the one
+environment it exists to protect. Over a pristine CI clone the ONLY leftover
+was the `.pytest_cache` the hygiene sweep wrote ITSELF (its own pytest over
+`tools/test_liar_census.py`, cwd `$ROOT`, no cache suppression). The probe was
+measuring host-independence on the pollution it is meant to be independent of,
+and the moment the sweep stopped polluting (`-p no:cacheprovider`, vibe-ic#2102)
+this row went NOT CHECKED on every clean run. MEASURED, same commit, same host:
+
+    sweep leaves .pytest_cache   FAIL, 6 of 144 NON_DETERMINISTIC
+    sweep leaves nothing         NO_STIMULUS — "This is not a pass"
+
+`plant_stimulus` therefore creates one leftover per class #539 enumerates — an
+interpreter cache, a test-runner cache, a scratch file — in the fresh worktree,
+before any gate is driven, and asks git which class each landed in. The only
+route to NO_STIMULUS is now that planting FAILING, named path by path: an
+honest "the experiment could not be set up", never "nobody left anything here".
+
+IN THE WORKTREE, NEVER IN THE CHECKOUT. The comparison only needs the two trees
+to differ and which side carries the difference is arithmetic — but writing into
+the checkout would make this program do the exact thing #2102 stopped the sweep
+doing, and under the shipped `--jobs` wiring arm A is a record the outer sweep
+already produced, so there is nothing here to write into anyway.
+
+AND IT IS A FLOOR, NOT A UNIVERSAL DETECTOR. The planted classes are the ones a
+gate reading RUN LEFTOVERS sees. A gate reading some other shape of local state
+is still only caught when that shape is present — which is why `dirt` is still
+collected, still counted and still reported, and why the advice to run this
+where the leftovers actually are has not changed. What is gone is the ability
+to reach a verdict of NOT CHECKED merely by being tidy.
+`tests/test_gate_host_independence.py::test_2140_the_clean_worktree_ROUTE_has_a
+_stimulus_but_still_sees_only_its_own_tree` measures that boundary rather than
+leaving it to be assumed.
+
 THE SCRATCH WORKTREE OUTLIVES THE PROBE (measured 2026-08-04)
 =============================================================
 The comparison needs a second tree, so this program creates one — a `mkdtemp`
@@ -460,6 +497,35 @@ class Dirt(NamedTuple):
                 f"the checkout and not in a fresh worktree")
 
 
+class Planted(NamedTuple):
+    """The stimulus THIS RUN created, as git classified it after the fact.
+
+    `Dirt` is what the host happened to leave lying about; this is what the
+    probe put there on purpose. The two are carried separately because they
+    answer different questions — "did this run have a stimulus" must not be
+    answerable by "the host was dirty today" (vibe-ic#2140).
+
+    CLASSIFIED BY ASKING GIT, never by assuming. Whether a planted path lands
+    in the untracked or the ignored class is a property of the SUBJECT's
+    `.gitignore`, not of this program's intent, and a run that claimed a class
+    it did not achieve would be the same over-claim as the count `probed` vs
+    `declared` exists to prevent.
+    """
+    untracked: List[str]
+    ignored: List[str]
+    failed: List[Tuple[str, str]]      # (relpath, why)
+
+    @property
+    def total(self) -> int:
+        return len(self.untracked) + len(self.ignored)
+
+    def describe(self) -> str:
+        if not self.total:
+            return "nothing could be planted"
+        return (f"{len(self.untracked)} untracked + {len(self.ignored)} "
+                f"ignored path(s) planted by the probe")
+
+
 class Audit(NamedTuple):
     """The probe's result, with its own denominator attached.
 
@@ -495,6 +561,15 @@ class Audit(NamedTuple):
     #: built POSITIONALLY, so a field inserted above `unattributed` would silently
     #: re-bind the last argument of each of them.
     pointer: Optional[Dict] = None
+    #: What `plant_stimulus` put in the fresh worktree and how git classified it
+    #: (vibe-ic#2140): `{"untracked": [...], "ignored": [...], "failed": [[path,
+    #: why]], "total": int}`, or None when the result was decided before the
+    #: worktree existed. This is the number that decides NO_STIMULUS now, so it
+    #: is published rather than implied — a reader must be able to see WHICH
+    #: classes this run actually achieved, not just that it claimed some.
+    #:
+    #: APPENDED LAST, for the reason the line above gives.
+    planted: Optional[Dict] = None
 
 
 def corpus_gates(script: Path) -> List[Gate]:
@@ -868,6 +943,110 @@ def checkout_dirt(repo_root: Path, timeout: int = 600) -> Optional[Dirt]:
          else ignored if ln.startswith("!!")
          else tracked).append(ln)
     return Dirt(tracked, untracked, ignored, ignored_reported)
+
+
+#: THE STIMULUS THIS PROBE PLANTS FOR ITSELF (vibe-ic#2140).
+#:
+#: One entry per class #539 enumerates, shaped like the RUN LEFTOVERS the probe
+#: was designed around and NOT like source: an interpreter cache directory, a
+#: test-runner cache directory, and a scratch file with an extension no gate in
+#: this repository scans. A plausible `.py` or `.v` here would be read by the
+#: source gates for a perfectly good reason and every one of them would be
+#: reported host-dependent — a probe that fires on its own stimulus, which is
+#: the failure mode `_norm` and the reproducibility retry already exist to
+#: refuse in their own shapes.
+#:
+#: FIXED NAMES, NEVER A RUN ID. A disagreement is only evidence once it
+#: REPRODUCES, and the retry drives both arms a second time; a path carrying a
+#: random token would make a gate that echoes it differ on every round and be
+#: filed as NON_DETERMINISTIC rather than as what it is.
+_STIMULUS_PLANTS: Tuple[Tuple[str, str], ...] = (
+    ("__pycache__/hostindep_stimulus.cpython-0.pyc", "interpreter cache"),
+    (".pytest_cache/v/cache/hostindep_stimulus", "test-runner cache"),
+    ("hostindep_stimulus.leftover", "scratch file"),
+)
+
+
+def plant_stimulus(tree: Path, timeout: int = 600) -> Planted:
+    """Create the probe's OWN stimulus inside `tree`, then ask git what it is.
+
+    WHY THE PROBE HAS TO PLANT (vibe-ic#2140). Until now the stimulus was
+    whatever the host had left lying about, so the one environment the probe is
+    MEANT to protect — a pristine CI clone — was the one environment in which it
+    could detect nothing. Over such a clone the only leftover was the
+    `.pytest_cache` the hygiene sweep wrote ITSELF, and the moment that stopped
+    (`-p no:cacheprovider`, vibe-ic#2102) the row went NO_STIMULUS. A probe
+    whose coverage is a function of how dirty the operator's tree happens to be
+    is not a check; it is a coin.
+
+    PLANTED IN THE FRESH WORKTREE, NEVER IN THE CHECKOUT. The comparison only
+    needs the two trees to DIFFER; which side carries the difference is
+    arithmetic. Writing into the working checkout would make this program do
+    the exact thing #2102 stopped the sweep doing — leave residue in the tree
+    the run is attesting — and under the CI wiring it is not even possible,
+    because arm A is a record the outer sweep already produced.
+
+    Returns what was planted, classified by `git status` AFTER the fact, and
+    the entries that could not be created at all. The caller decides what a
+    partial planting means; this function does not editorialise.
+    """
+    created: List[str] = []
+    failed: List[Tuple[str, str]] = []
+    for rel, kind in _STIMULUS_PLANTS:
+        p = tree / rel
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"vibe-ic#2140 planted stimulus: " +
+                          kind.encode() + b"\n")
+            created.append(rel)
+        except OSError as exc:
+            failed.append((rel, f"{kind}: {type(exc).__name__}: {exc}"))
+    if not created:
+        return Planted([], [], failed)
+
+    def _status(extra: List[str]) -> Optional[List[str]]:
+        try:
+            st = _pr.run(["git", "-C", str(tree), "status", "--porcelain",
+                          *extra], capture_output=True, text=True)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return ([ln for ln in st.stdout.splitlines() if ln.strip()]
+                if st.returncode == 0 else None)
+
+    lines = _status(["--ignored=traditional"])
+    if lines is None:
+        # The paths ARE on disk; what could not be established is which class
+        # each fell into. Reported as a planting failure rather than guessed:
+        # claiming a class git did not confirm is the over-claim this whole
+        # function exists to avoid.
+        return Planted([], [], failed + [
+            (rel, "created, but `git status` did not answer so its class "
+                  "could not be established") for rel in created])
+
+    untracked: List[str] = []
+    ignored: List[str] = []
+    for rel in created:
+        # `--ignored=traditional` collapses a directory into ONE entry, so a
+        # planted file inside `__pycache__/` is reported as `!! __pycache__/`.
+        # Match on the prefix rather than on equality for exactly that reason.
+        hit = None
+        for ln in lines:
+            path = ln[3:].strip().strip('"')
+            if rel == path or rel.startswith(path.rstrip("/") + "/"):
+                hit = ln
+                break
+        if hit is None:
+            failed.append((rel, "created, but git reported it in no class — "
+                                "it may be covered by a tracked path"))
+        elif hit.startswith("!!"):
+            ignored.append(rel)
+        elif hit.startswith("??"):
+            untracked.append(rel)
+        else:
+            failed.append((rel, f"created, but git classified it as tracked "
+                                f"drift ({hit[:2]!r}), which invalidates the "
+                                f"comparison rather than driving it"))
+    return Planted(untracked, ignored, failed)
 
 
 def _unregister_worktree(scratch: Path) -> None:
@@ -1431,6 +1610,13 @@ def audit(repo_root: Path, timeout: int = 600,
                           (r.stderr or r.stdout or "").strip()[:300],
                           dirt, declared, scratch)
 
+        # THE PROBE PLANTS ITS OWN STIMULUS (vibe-ic#2140), before a single
+        # gate is driven, so that the two trees DIFFER by construction instead
+        # of by luck. `dirt` — whatever the host happened to leave in the
+        # checkout — is still collected and still reported, and it still counts;
+        # it is simply no longer the only thing that can make this run mean
+        # something.
+        planted = plant_stimulus(wt, timeout)
         plugin_rel = Path("vibe-ic-marketplace") / "plugins" / "vibe-ic"
         for label, wd_tok, cmd, excluded, templated in gates:
             # NEVER probe ITSELF. The gate list is unfiltered by design, so it
@@ -1870,26 +2056,42 @@ def audit(repo_root: Path, timeout: int = 600,
     probed = declared - len(not_probed)
     pointer = {"bound": pointer_bound, "probed": pointer_probed,
                "not_probed": [list(x) for x in pointer_not_probed]}
+    planted_doc = {"untracked": planted.untracked, "ignored": planted.ignored,
+                   "failed": [list(x) for x in planted.failed],
+                   "total": planted.total}
     if findings:
         return Audit("FAIL", findings, dirt, declared, probed, not_probed,
-                     scratch, unattributed, pointer)
-    # NO STIMULUS IS NOT A PASS (#539). Every gate agreeing across two trees
-    # that carry the same bytes is arithmetic, not evidence: the leftovers this
-    # probe detects a gate READING were absent from both sides, so the run had
-    # nothing it could have detected. Reported at the rc-2 vacuous tier — the
-    # `_vacuous_exit` convention — so a consumer sees NOT CHECKED rather than a
-    # pass, and so the one configuration this probe is blind in announces
-    # itself instead of printing the same green sentence as a real run.
+                     scratch, unattributed, pointer, planted_doc)
+    # NO STIMULUS IS NOT A PASS (#539), AND IT IS NOW A STATEMENT ABOUT THIS
+    # PROGRAM RATHER THAN ABOUT THE HOST (vibe-ic#2140).
+    #
+    # Every gate agreeing across two trees that carry the same bytes is
+    # arithmetic, not evidence. #539 established that and keyed the refusal on
+    # `dirt` — what the host had left lying about — which made the probe's
+    # coverage a function of how dirty the operator's tree happened to be, and
+    # left it blind in the one environment it exists to protect: over a
+    # pristine CI clone the only leftover was the `.pytest_cache` the hygiene
+    # sweep wrote itself, and when that stopped (vibe-ic#2102) this row went
+    # NOT CHECKED on every clean run.
+    #
+    # So the condition is now the PLANTING, not the weather. `plant_stimulus`
+    # creates one leftover per class #539 enumerates in the fresh worktree
+    # before any gate is driven, and the only way to reach NO_STIMULUS is for
+    # that to fail — a real "I could not set up the experiment", named path by
+    # path, instead of "nobody happened to leave anything here".
+    #
+    # `dirt` is unchanged and still counted: a checkout that DOES carry
+    # leftovers gives the run more stimulus than the planting alone, and the
+    # record reports both. What is gone is the ability to reach a verdict of
+    # NOT CHECKED merely by being tidy.
     #
     # rc 2 and not rc 1: nothing is WRONG with the tree or the gates, and a
-    # permanently red gate is a gate that gets skipped. `--ignored` unreported
-    # keeps the PASS: we cannot then prove the stimulus was zero, and inventing
-    # a NOT_CHECKED out of an unknown is the mirror of inventing a pass.
-    if dirt is not None and dirt.ignored_reported and dirt.stimulus == 0:
+    # permanently red gate is a gate that gets skipped.
+    if planted.total == 0:
         return Audit("NO_STIMULUS", [], dirt, declared, probed, not_probed,
-                     scratch, unattributed, pointer)
+                     scratch, unattributed, pointer, planted_doc)
     return Audit("PASS", findings, dirt, declared, probed, not_probed,
-                 scratch, unattributed, pointer)
+                 scratch, unattributed, pointer, planted_doc)
 
 
 def _audit_doc(res: Audit, selected: Optional[List[str]] = None) -> Dict:
@@ -1912,6 +2114,8 @@ def _audit_doc(res: Audit, selected: Optional[List[str]] = None) -> Dict:
             "untracked": len(res.dirt.untracked),
             "ignored": len(res.dirt.ignored),
             "ignored_reported": res.dirt.ignored_reported}),
+        #: The stimulus this RUN created, separate from the weather above.
+        "planted_stimulus": res.planted,
         "findings": res.findings,
     }
 
@@ -2000,11 +2204,21 @@ def precomputed_audit(repo_root: Path, checkout_attestations: Path,
     if findings:
         return Audit("FAIL", findings, dirt, declared, probed, not_probed,
                      scratch, None, pointer)
+    # THIS PATH CANNOT PLANT, AND SAYS SO RATHER THAN IMPLYING IT DID.
+    # `audit()` creates its own stimulus (vibe-ic#2140) because it owns the
+    # fresh worktree; here BOTH arms arrived as records produced elsewhere, so
+    # this process drove nothing, wrote nothing and has no way to establish
+    # that the two arms differed at all. Its only observable is still `dirt`,
+    # which is exactly the host-dependent signal #2140 replaced — so the
+    # condition below is UNCHANGED on purpose (changing it would invent a
+    # verdict from an unknown) and the `planted` record is None, which is the
+    # difference between "nothing was planted" and "planting was never
+    # attempted here".
     if dirt.ignored_reported and dirt.stimulus == 0:
         return Audit("NO_STIMULUS", [], dirt, declared, probed, not_probed,
-                     scratch, None, pointer)
+                     scratch, None, pointer, None)
     return Audit("PASS", [], dirt, declared, probed, not_probed, scratch,
-                 None, pointer)
+                 None, pointer, None)
 
 
 def supervise_one_worker(argv, progress_path, **supervision):
@@ -2225,6 +2439,16 @@ def parallel_audit(repo_root: Path, jobs: int,
     pointer_bound = os.environ.get(POINTER_ENV, "").strip()
     pointer_probed = 0
     pointer_not_probed: List[Tuple[str, str]] = []
+    #: SUMMED FROM THE WORKERS, for the same reason the pointer denominator is.
+    #: Each worker owns its own fresh worktree and plants its own stimulus
+    #: (vibe-ic#2140), so the parent has none of its own to report — and a
+    #: parent that left this null would publish "how much stimulus did this run
+    #: have" as UNANSWERABLE on the one path the hygiene sweep actually uses,
+    #: which is the defect this issue is about, one level up. A worker that
+    #: reported no planting record is NAMED, never defaulted.
+    planted_untracked: List[str] = []
+    planted_ignored: List[str] = []
+    planted_failed: List[List[str]] = []
     problems: List[str] = []
     seen: List[str] = []
     probed = 0
@@ -2303,6 +2527,17 @@ def parallel_audit(repo_root: Path, jobs: int,
             if cw:
                 claim_by_worker.append((i, float(cw.get("waited_s") or 0.0),
                                         int(float(cw.get("claims") or 0))))
+            pl = doc.get("planted_stimulus")
+            if pl is None:
+                planted_failed.append([
+                    f"(worker {i})",
+                    "returned no planting record, so the stimulus behind the "
+                    "gates it drove is not established by this run"])
+            else:
+                planted_untracked.extend(str(x) for x in pl.get("untracked") or [])
+                planted_ignored.extend(str(x) for x in pl.get("ignored") or [])
+                planted_failed.extend([str(a), str(b)] for a, b in
+                                      (pl.get("failed") or []))
             arm = doc.get("pointer_arm")
             if arm is None:
                 pointer_not_probed.append(
@@ -2349,6 +2584,10 @@ def parallel_audit(repo_root: Path, jobs: int,
         problems.append("labels driven by no worker: " + ", ".join(missing[:6]))
     if extra:
         problems.append("unplanned labels were driven: " + ", ".join(extra[:6]))
+    planted_doc = {"untracked": planted_untracked,
+                   "ignored": planted_ignored,
+                   "failed": planted_failed,
+                   "total": len(planted_untracked) + len(planted_ignored)}
     if problems:
         return Audit(
             "PARALLEL_INCOMPLETE",
@@ -2356,7 +2595,7 @@ def parallel_audit(repo_root: Path, jobs: int,
               "detail": p, "checkout": "-", "worktree": "-"}
              for p in problems],
             dirt, declared, probed, not_probed,
-            {"workers": scratch_rows}, unattributed, pointer)
+            {"workers": scratch_rows}, unattributed, pointer, planted_doc)
     if any(v not in ("PASS", "NO_STIMULUS", "FAIL") for v in verdicts):
         return Audit(
             "PARALLEL_INCOMPLETE",
@@ -2364,13 +2603,13 @@ def parallel_audit(repo_root: Path, jobs: int,
               "detail": "worker setup/refusal verdict(s): " + ", ".join(verdicts),
               "checkout": "-", "worktree": "-"}],
             dirt, declared, probed, not_probed,
-            {"workers": scratch_rows}, unattributed, pointer)
+            {"workers": scratch_rows}, unattributed, pointer, planted_doc)
     if findings or "FAIL" in verdicts:
         return Audit("FAIL", findings, dirt, declared, probed, not_probed,
-                     {"workers": scratch_rows}, unattributed, pointer)
+                     {"workers": scratch_rows}, unattributed, pointer, planted_doc)
     if verdicts and all(v == "NO_STIMULUS" for v in verdicts):
         return Audit("NO_STIMULUS", [], dirt, declared, probed, not_probed,
-                     {"workers": scratch_rows}, unattributed, pointer)
+                     {"workers": scratch_rows}, unattributed, pointer, planted_doc)
     if any(v == "NO_STIMULUS" for v in verdicts):
         return Audit(
             "PARALLEL_INCOMPLETE",
@@ -2378,9 +2617,9 @@ def parallel_audit(repo_root: Path, jobs: int,
               "detail": "workers disagreed about whether stimulus existed",
               "checkout": "-", "worktree": "-"}],
             dirt, declared, probed, not_probed,
-            {"workers": scratch_rows}, unattributed, pointer)
+            {"workers": scratch_rows}, unattributed, pointer, planted_doc)
     return Audit("PASS", [], dirt, declared, probed, not_probed,
-                 {"workers": scratch_rows}, unattributed, pointer)
+                 {"workers": scratch_rows}, unattributed, pointer, planted_doc)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -2539,6 +2778,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"  [POINTER ARM NOT PROBED] {label} — {why}", file=sys.stderr)
 
     stim = res.dirt.describe() if res.dirt is not None else "unknown stimulus"
+    pl = res.planted or {}
+    stim += (f"; planted by the probe: {len(pl.get('untracked') or [])} "
+             f"untracked + {len(pl.get('ignored') or [])} ignored"
+             + (f", {len(pl.get('failed') or [])} could NOT be planted"
+                if pl.get("failed") else "")) if res.planted is not None else ""
     if res.findings:
         # Split by KIND rather than totalling them. Reporting a gate that met
         # an inner deadline as "HOST-DEPENDENT" sends the reader to look for
@@ -2556,13 +2800,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     if res.verdict == "NO_STIMULUS":
         # The sentence a two-pristine-tree run has always deserved and never
         # printed.
-        print(f"NO_STIMULUS: host-independence was NOT checked — the checkout "
-              f"carried no untracked and no ignored path, so it and the fresh "
-              f"worktree held the same bytes and all {res.probed} probed "
-              f"gate(s) agreed by construction. A comparison with nothing on "
-              f"one side that is not on the other cannot detect a gate reading "
-              f"local state. This is not a pass. Run it in the working tree "
-              f"the leftovers accumulate in.", file=sys.stderr)
+        why = "; ".join(f"{path}: {reason}"
+                        for path, reason in (pl.get("failed") or [])[:4])
+        print(f"NO_STIMULUS: host-independence was NOT checked — this probe "
+              f"could not PLANT a stimulus of any class in the fresh worktree, "
+              f"so it and the checkout held the same bytes and all "
+              f"{res.probed} probed gate(s) agreed by construction. A "
+              f"comparison with nothing on one side that is not on the other "
+              f"cannot detect a gate reading local state. This is not a pass, "
+              f"and since vibe-ic#2140 it is not something a tidy checkout can "
+              f"cause either: it means the experiment could not be set up. "
+              f"What failed: {why or 'not recorded'}", file=sys.stderr)
         return 2
     print(f"[PASS] all {res.probed} probed corpus-scanning gate(s) "
           f"({res.declared} declared) give the same verdict in a working "

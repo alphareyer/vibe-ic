@@ -193,23 +193,110 @@ def test_a_gate_that_reads_an_IGNORED_leftover_is_caught(tmp_path):
 # --------------------------------------------------------------------------
 # #539 — the comparison must disclose whether it could have detected anything
 # --------------------------------------------------------------------------
-def test_539_two_identical_trees_are_NOT_CHECKED_rather_than_a_pass(tmp_path):
-    """#539. With no leftover on either side the checkout and the worktree hold
-    the same bytes, so every gate agrees BY CONSTRUCTION. That is arithmetic,
-    not evidence, and it used to print the same green sentence as a real run.
+def test_2140_a_pristine_checkout_is_CHECKED_because_the_probe_plants(tmp_path):
+    """#2140. #539's rule was right and its KEY was the host's weather.
 
-    rc 2 / NOT_CHECKED rather than rc 1: nothing is wrong with the tree or the
-    gates, and a permanently red gate is a gate that gets skipped.
+    "Two identical trees are not a pass" is preserved exactly — what changed is
+    that the probe no longer WAITS for someone to make them differ. On a
+    pristine checkout it plants its own leftover, so the run is CHECKED, and
+    the classes it achieved are published rather than implied.
+
+    The old assertion for this shape (NO_STIMULUS on a clean tree) is not
+    deleted: it is the MUTATION below, reachable only by taking the planting
+    away, which is the one thing that can make this probe blind again.
     """
     r = _counter_repo(tmp_path, ignore_dat=False)
-    assert not _porcelain(r)
+    assert not _porcelain(r), "the CHECKOUT is pristine — the whole point"
+    res = G.audit(r, timeout=_T)
+    assert res.verdict == "PASS", res
+    assert res.dirt.stimulus == 0, "the host left nothing; this run made its own"
+    assert res.planted["total"] > 0, res.planted
+    assert res.planted["failed"] == [], res.planted
+
+
+def test_2140_MUTATION_removing_the_planting_brings_NO_STIMULUS_back(
+        tmp_path, monkeypatch):
+    """THE CONTROL, and it must fail to be one.
+
+    With `_STIMULUS_PLANTS` emptied the probe is exactly what it was before
+    #2140 — a comparison of two identical trees — and it must say so. If this
+    ever passes with the planting intact, the verdict is not keyed on the
+    planting at all and the test above is measuring nothing.
+    """
+    r = _counter_repo(tmp_path, ignore_dat=False)
+    monkeypatch.setattr(G, "_STIMULUS_PLANTS", ())
     res = G.audit(r, timeout=_T)
     assert res.verdict == "NO_STIMULUS", res
     assert res.findings == []
-    assert res.dirt.stimulus == 0
+    assert res.planted["total"] == 0, res.planted
 
 
-def test_539_the_clean_worktree_ROUTE_reports_NOT_CHECKED_not_PASS(tmp_path):
+def test_2140_a_gate_reading_the_PLANTED_leftover_is_refused_by_name(tmp_path):
+    """THE POSITIVE CONTROL FOR THE PLANTING ITSELF.
+
+    The two controls above establish that the verdict follows the planting.
+    Neither shows that the planted bytes are the kind a disk-reading gate can
+    SEE — a stimulus nothing can read would satisfy both and detect nothing,
+    which is #539's defect wearing this issue's clothes.
+
+    So: a gate that counts what the planting actually creates, over a checkout
+    carrying no leftover of its own. It must be named, by label, as a finding.
+    """
+    r = _repo_with(tmp_path, 'run "cachecounter" "$ROOT" python3 cachecounter.py\n')
+    (r / "cachecounter.py").write_text(
+        "import pathlib\n"
+        "print('PASS', len(list(pathlib.Path('.').rglob('hostindep_stimulus*'))))\n")
+    subprocess.run(["git", "-C", str(r), "add", "cachecounter.py"], check=True)
+    subprocess.run(["git", "-C", str(r), "commit", "-qm", "c"], check=True)
+    assert not _porcelain(r), "the checkout carries no leftover of its own"
+
+    res = G.audit(r, timeout=_T)
+    assert res.verdict == "FAIL", res
+    assert [f["gate"] for f in res.findings] == ["cachecounter"], res.findings
+    assert res.findings[0]["kind"] == "HOST_DEPENDENT_VERDICT", res.findings
+
+
+def test_2140_the_planted_classes_are_measured_not_asserted(tmp_path):
+    """Which class a planted path lands in is a property of the SUBJECT's
+    .gitignore, not of this program's intent — so it is read back from git.
+
+    Driven both ways over the same plant set: with the cache directories
+    ignored they are reported IGNORED, and without they are reported
+    UNTRACKED. A version that hard-coded the classes passes the first arm and
+    fails the second.
+    """
+    plain = _counter_repo(tmp_path, ignore_dat=False, name="plain")
+    res_plain = G.audit(plain, timeout=_T)
+    assert res_plain.planted["ignored"] == [], res_plain.planted
+    assert len(res_plain.planted["untracked"]) == len(G._STIMULUS_PLANTS)
+
+    ign = _counter_repo(tmp_path, ignore_dat=False, name="ign")
+    (ign / ".gitignore").write_text("__pycache__/\n.pytest_cache/\n")
+    subprocess.run(["git", "-C", str(ign), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(ign), "commit", "-qm", "ig"], check=True)
+    res_ign = G.audit(ign, timeout=_T)
+    assert len(res_ign.planted["ignored"]) == 2, res_ign.planted
+    assert len(res_ign.planted["untracked"]) == 1, res_ign.planted
+
+
+def test_2140_the_probe_plants_in_the_WORKTREE_never_in_the_checkout(tmp_path):
+    """It must not do to the checkout what vibe-ic#2102 stopped the sweep doing.
+
+    The comparison only needs the two trees to differ; writing the difference
+    into the tree under attestation would leave residue behind — the defect
+    `attestation_preflight_check` refuses and the one that made this probe
+    depend on the sweep's own pollution in the first place.
+    """
+    r = _counter_repo(tmp_path, ignore_dat=False)
+    before = sorted(x.name for x in r.iterdir())
+    res = G.audit(r, timeout=_T)
+    assert res.planted["total"] > 0, res.planted
+    assert sorted(x.name for x in r.iterdir()) == before, (
+        "the probe wrote its stimulus into the CHECKOUT")
+    assert not _porcelain(r), "the checkout is not clean after the probe ran"
+
+
+def test_2140_the_clean_worktree_ROUTE_has_a_stimulus_but_still_sees_only_its_own_tree(tmp_path):
     """#539, THE ONE THAT OVERTURNS THE WORKAROUND.
 
     The pre-push habit was `git worktree add --detach <path> HEAD` followed by
@@ -233,9 +320,42 @@ def test_539_the_clean_worktree_ROUTE_reports_NOT_CHECKED_not_PASS(tmp_path):
                     str(wt), "HEAD"], check=True)
     assert not list(wt.glob("*.dat")), "a fresh worktree carries no leftover"
 
+    # AFTER #2140 THE ROUTE HAS A STIMULUS OF ITS OWN, so it is no longer
+    # reported as having looked at nothing — and this test is also where the
+    # BOUNDARY of that repair is written down, because it would otherwise be
+    # read as more than it is.
+    #
+    # WHAT THE PLANTING FIXES: "this run had no stimulus at all" is gone. The
+    # probe creates one leftover per class in the tree it drives, so the two
+    # trees differ by construction and a gate reading THOSE classes is caught
+    # on any host, tidy or not.
+    #
+    # WHAT IT DOES NOT FIX, MEASURED RIGHT HERE: it does not make one tree
+    # carry another tree's leftovers. `r` has a `*.dat` file and `wt` does
+    # not, and the counter gate reads `*.dat` — so pointed at `wt` this run
+    # still cannot see the defect that is sitting in `r`. It reports PASS over
+    # a stimulus it really did have, which is an honest answer to the question
+    # actually asked, and it is NOT the #539 failure of reporting PASS over no
+    # stimulus at all.
+    #
+    # The habit the docstring above describes is therefore still the wrong
+    # habit, for a reason that survives this issue: run the probe where the
+    # leftovers are, because the planted floor is a floor and not a substitute
+    # for the tree under test.
     res = G.audit(wt, timeout=_T)
-    assert res.verdict == "NO_STIMULUS", res
-    assert res.verdict != "PASS", "the route must not certify what it cannot see"
+    assert res.planted["total"] > 0, res.planted
+    assert res.verdict == "PASS", res
+    assert res.dirt.stimulus == 0, "the worktree carries no leftover of its own"
+    assert G.audit(r, timeout=_T).verdict == "FAIL", (
+        "the defect is still real and still only visible from the tree that "
+        "carries it")
+
+    # ...and the pre-#2140 outcome is one mutation away: take the planting
+    # away and this route goes back to certifying over nothing at all.
+    import unittest.mock as _mock
+    with _mock.patch.object(G, "_STIMULUS_PLANTS", ()):
+        blind = G.audit(wt, timeout=_T)
+    assert blind.verdict == "NO_STIMULUS", blind
 
 
 def test_539_the_stimulus_is_reported_ON_THE_PASS_LINE(tmp_path, capsys):
@@ -268,14 +388,23 @@ def test_539_the_cli_says_NOT_CHECKED_and_exits_2_with_no_stimulus(tmp_path,
     verdict that never reaches either is not a verdict."""
     r = _counter_repo(tmp_path, ignore_dat=False)
     out = tmp_path / "rec.json"
-    rc = G.main([str(r), "--json", str(out)])
+    # #2140: the only way to reach this verdict is now for the PLANTING to
+    # fail, so that is what the test creates. A tidy checkout no longer causes
+    # it, and the sentence must not go on saying it does.
+    import unittest.mock as _mock
+    with _mock.patch.object(G, "_STIMULUS_PLANTS", ()):
+        rc = G.main([str(r), "--json", str(out)])
     err = capsys.readouterr().err
     assert rc == 2, err
     assert "NO_STIMULUS" in err and "not a pass" in err
+    assert "could not PLANT" in err, err
+    assert "tidy checkout" in err, (
+        "the sentence still blames the checkout for a planting failure")
     doc = json.loads(out.read_text())
     assert doc["verdict"] == "NO_STIMULUS"
     assert doc["stimulus"] == {"untracked": 0, "ignored": 0,
                                "ignored_reported": True}
+    assert doc["planted_stimulus"]["total"] == 0, doc["planted_stimulus"]
 
 
 # --------------------------------------------------------------------------
@@ -1494,3 +1623,31 @@ def test_the_pointer_denominator_is_published_in_the_machine_record(tmp_path,
     doc = G._audit_doc(G.audit(r, timeout=_T, tmp_root=tmp_path, pointer_arm=True))
     assert doc["pointer_arm"]["probed"] == 1, doc["pointer_arm"]
     assert doc["pointer_arm"]["bound"] == str(tmp_path / "corpus")
+
+
+def test_2140_the_PARALLEL_path_publishes_the_planting_it_summed(tmp_path):
+    """THE AGGREGATION HOLE, and it shipped for one measurement.
+
+    `--jobs N` is the wiring `repo_hygiene_gates.sh` actually uses, and the
+    parent takes no claim and owns no worktree: every worker plants its own
+    stimulus and the parent must SUM those records. The first version of #2140
+    did not, so the aggregated document carried `planted_stimulus: null` —
+    measured on the real 144-gate corpus, verdict FAIL, planting null. The
+    verdict was right and the evidence behind it was unpublished, which is
+    "how much stimulus did this run have" going unanswerable on the one path
+    that ships: this issue's own defect, one level up.
+
+    A worker that reports no planting record is NAMED in `failed`, never
+    defaulted to zero and never to "all of them".
+    """
+    r = _repo_with(tmp_path, 'run "a" "$ROOT" python3 -c "print(1)"\n'
+                             'run "b" "$ROOT" python3 -c "print(2)"\n')
+    res = G.parallel_audit(r, jobs=2, checkout_attestations=None)
+    assert res.verdict in ("PASS", "FAIL"), res
+    assert res.planted is not None, "the parallel path published no planting"
+    assert res.planted["total"] > 0, res.planted
+    # Two workers, each planting the full set in its OWN worktree: the parent
+    # reports the SUM, so the total is a multiple of the plant set rather than
+    # one worker's copy silently overwriting the other's.
+    assert res.planted["total"] == 2 * len(G._STIMULUS_PLANTS), res.planted
+    assert res.planted["failed"] == [], res.planted
