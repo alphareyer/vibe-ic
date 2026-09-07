@@ -129,17 +129,66 @@ def test_an_agreeing_run_passes(tmp_path):
     assert rep["pdk_match"] == "equal", rep
 
 
-def test_a_family_name_and_its_variant_are_the_same_technology(tmp_path):
-    """A prefix relation is agreement, and the relation is REPORTED. Refusing
-    it would manufacture reds out of a naming convention, not a defect."""
+def test_a_family_name_and_its_variant_are_NOT_the_same_technology(tmp_path):
+    """RULED IN #2159's OWN LANDING COMMIT, judgement call (1): "A PDK-name
+    PREFIX relation is no longer accepted as agreement: family-versus-variant
+    now REFUSES and the relation is still reported so a reader sees why."  That
+    ruling landed in the message and NOT in the code — the checker and this test
+    both shipped accepting a prefix.  This is the ruling carried into the
+    artefact, and this test is the inversion that carries it.
+
+    WHY the ruling is right: a prefix relation is a GUESS that two names mean
+    the same thing, and this whole defect is a technology name landing beside a
+    number it did not own — accepting a prefix is that error one notch smaller.
+
+    The relation is still REPORTED (`pdk_match: family_prefix`), so a reader of
+    the refusal sees how close the two names were and why it refused anyway.
+
+    MEASURED BEFORE THIS RULE SHIPPED — membership, not a count: over the run
+    corpus reachable on this fleet, 106 roots publish EITHER record, ZERO
+    publish BOTH, and so ZERO change verdict.  The instrument was validated on a
+    planted family-and-variant root first, which it reports in the delta.
+    """
     proj = _project(tmp_path, "family")
     _run_record(proj, pdk="gf180mcuD", period_ns=20.0,
                 tier="declared_pdk_table", assumed=False)
     _l19(proj, clock_target={"status": "DECLARED", "period_ns": 20.0,
                              "pdk": "gf180mcu", "tier": "declared_pdk_table"})
     rep = gate.check(proj)
-    assert rep["verdict"] == "PASS", rep
+    assert rep["verdict"] == "FAIL", rep
+    # The relation is reported, not swallowed: the refusal says how close.
     assert rep["pdk_match"] == "family_prefix", rep
+    assert "family_prefix" in rep["reason"], rep
+    assert "gf180mcuD" in rep["reason"] and "gf180mcu'" in rep["reason"], rep
+
+
+def test_only_an_exact_name_is_agreement(tmp_path):
+    """The other direction of the ruling: an exact name, differing only in case
+    and surrounding space, IS the same technology and must still pass — the
+    strict rule must not become a rule that refuses everything."""
+    proj = _project(tmp_path, "exact_casefold")
+    _run_record(proj, pdk="gf180mcuD", period_ns=20.0,
+                tier="declared_pdk_table", assumed=False)
+    _l19(proj, clock_target={"status": "DECLARED", "period_ns": 20.0,
+                             "pdk": " GF180mcuD ", "tier": "declared_pdk_table"})
+    rep = gate.check(proj)
+    assert rep["verdict"] == "PASS", rep
+    assert rep["pdk_match"] == "equal", rep
+
+
+def test_a_prefix_relation_does_not_make_the_tier_comparable(tmp_path):
+    """The relation gates the TIER comparison too: a record that names a merely
+    CLOSE technology is not bound to this run, so it must be refused on the PDK
+    — not quietly compared tier-to-tier as if it were the same build."""
+    proj = _project(tmp_path, "prefix_tier")
+    _run_record(proj, pdk="gf180mcuD", period_ns=20.0,
+                tier="declared_pdk_table", assumed=False)
+    _l19(proj, clock_target={"status": "DECLARED", "period_ns": 20.0,
+                             "pdk": "gf180mcu", "tier": "l8_declared"})
+    rep = gate.check(proj)
+    assert rep["verdict"] == "FAIL", rep
+    assert [d for d in rep["disagreements"] if d.startswith("PDK:")], rep
+    assert not [d for d in rep["disagreements"] if d.startswith("tier:")], rep
 
 
 def test_an_explicit_absence_in_l19_passes(tmp_path):

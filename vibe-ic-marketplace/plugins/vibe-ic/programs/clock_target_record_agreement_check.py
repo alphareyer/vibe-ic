@@ -58,12 +58,32 @@ NOT compared:
     and refusing it would redden every ordinary run for the flow's own
     ordering rather than for anything about the design.
 
-PDK NAME COMPARISON.  Names agree when they are equal ignoring case, or when
-one is a prefix of the other (a family name and one of its variants, e.g. a
-family vs its `...D` variant).  A prefix is treated as agreement deliberately:
-the harm #2159 measured is two DIFFERENT families, and a stricter rule would
-manufacture refusals out of the one naming convention the fleet already uses.
-The relation used is reported in ``pdk_match`` so the judgement is visible.
+PDK NAME COMPARISON — ONLY AN EXACT NAME IS AGREEMENT.  Two technology names
+agree when they are equal ignoring surrounding space and case, and never
+otherwise.  A PREFIX RELATION IS NOT AGREEMENT: reading a family name and one
+of its variants as the same technology is a GUESS that two names mean the same
+thing, and this entire defect is a technology name landing beside a number it
+did not own — accepting a prefix is that same error one notch smaller.  The
+relation is still COMPUTED and reported in ``pdk_match`` (``family_prefix``
+when one name is a prefix of the other, ``different`` otherwise), so a reader
+of a refusal can see exactly WHY it refused and how close the two names were.
+A merely-close name also stops making the TIER comparable: a record not bound
+to this run's technology is refused on the PDK, never quietly compared
+tier-to-tier as if it described the same build.
+
+THE COST OF THE STRICT RULE, MEASURED BEFORE IT SHIPPED — membership, not a
+count.  Over the run corpus reachable on this fleet (the published corpus at
+its `benchmark-data` tree 3e16f0c7ef, plus a fleet-wide sweep for the run
+record): 106 roots publish EITHER record, ZERO publish BOTH, and so ZERO roots
+change verdict under this rule.  The zero carries its own reason rather than
+standing as a sweep — nothing in the corpus is judgeable by EITHER rule, because
+the #2091 provenance machinery post-dates every published run tree, and the one
+run record found off-corpus is an archived reports directory with no L19 beside
+it.  THE INSTRUMENT WAS VALIDATED ON A KNOWN ANSWER FIRST: a planted root whose
+two records are a family and its variant reports PASS under the old rule and
+FAIL under this one and lands in the delta, while planted equal-name and
+different-family roots stay out of it.  A census that cannot report a non-empty
+delta is not a census.
 
 ABSENT VERSUS UNREADABLE, AND WHY THEY GET DIFFERENT VERDICTS
 =============================================================
@@ -124,16 +144,24 @@ def _load(path: Path) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
-def _names_agree(a: str, b: str) -> Optional[str]:
-    """Return the relation when two technology names agree, else None."""
+def _pdk_relation(a: str, b: str) -> str:
+    """The relation between two technology names — reported, never guessed.
+
+    Only ``equal`` means the two records name the same technology.
+    ``family_prefix`` is REPORTED, not accepted: it is how close the two names
+    were, which is what a reader of the refusal needs, and nothing more.
+    """
     x, y = a.strip().casefold(), b.strip().casefold()
-    if not x or not y:
-        return None
-    if x == y:
+    if x and y and x == y:
         return "equal"
-    if x.startswith(y) or y.startswith(x):
+    if x and y and (x.startswith(y) or y.startswith(x)):
         return "family_prefix"
-    return None
+    return "different"
+
+
+#: The one relation that is agreement. Spelled once so the comparison and the
+#: tier-comparability test below cannot drift apart.
+_AGREEING_RELATION = "equal"
 
 
 def _num(v) -> Optional[float]:
@@ -212,19 +240,21 @@ def check(project: Path) -> Dict[str, object]:
 
     dis: List[str] = []
     if run["pdk"] and l19["pdk"]:
-        rel = _names_agree(run["pdk"], l19["pdk"])
-        rep["pdk_match"] = rel or "different"
-        if rel is None:
+        rel = _pdk_relation(run["pdk"], l19["pdk"])
+        rep["pdk_match"] = rel
+        if rel != _AGREEING_RELATION:
             dis.append(
                 f"PDK: the run built against '{run['pdk']}' "
                 f"({_PROVENANCE_REL}) and {L19_REL} names '{l19['pdk']}' for "
-                f"the same run — one of them does not own this number")
+                f"the same run (relation: {rel}) — one of them does not own "
+                "this number, and a name that is merely CLOSE is not the same "
+                "technology")
     elif not l19["pdk"]:
         rep["pdk_match"] = "l19_names_none"
 
     # A tier is only comparable when L19 has bound itself to the run's
     # technology; see the module docstring.
-    bound = rep["pdk_match"] in ("equal", "family_prefix")
+    bound = rep["pdk_match"] == _AGREEING_RELATION
     if bound and run["tier"] and l19["tier"] and run["tier"] != l19["tier"]:
         dis.append(
             f"tier: the run records provenance tier '{run['tier']}'"
