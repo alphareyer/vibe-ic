@@ -25891,6 +25891,83 @@ def _preserve_pnr_approach_log(out_dir: Path, log_path: Path, index: int,
     return row
 
 
+#: The per-iteration antenna reports the PnR Tcl opens, and nothing else.
+#: `_antenna_repair_tcl` writes exactly `antenna_iter_$_i.rpt` (loop) and
+#: `antenna_iter_final.rpt` (cap path); this glob is that pair and no wider.
+#: It deliberately does NOT match the other reports in the same directory that
+#: are legitimately empty and are read as such -- `sdr_drv.rpt`,
+#: `routed_router.drc.rpt`, `*_fanout_root_candidates.rpt` -- where 0 bytes IS
+#: the answer "nothing to report". For an antenna report it is not: see
+#: `_drop_empty_antenna_reports`.
+_PNR_ANTENNA_ITER_REPORT_GLOB = "antenna_iter_*.rpt"
+
+
+def _drop_empty_antenna_reports(out_dir: Path) -> List[str]:
+    """Remove any 0-byte antenna iteration report left in the PnR directory.
+
+    WHY THIS EXISTS OUTSIDE THE TCL, MEASURED.  The Tcl loop already removes
+    its own empty report (`_vic_ant_rm_empty`, three call sites), and that
+    cleanup is INSIDE the OpenROAD session.  vibe-ic#2157: a published run
+    carried `phase3/stage3/pnr/antenna_iter_0.rpt` and `_1.rpt` at 0 bytes
+    each, with that cleanup an ancestor of the run.  Two facts about that run
+    are what this function answers, and neither is reachable from inside a Tcl
+    session:
+
+      * `step_pnr` ran TWICE (`.pdn_em_resize_done`: the run's own measured
+        current needed wider straps than it drew, so PnR was re-run once).  The
+        two empty reports were written at 15:10:46 and 15:10:47 by the FIRST
+        invocation; the second invocation started at 15:11:17 and both of its
+        antenna stages printed `ANTENNA_ALREADY_CLEAN`, so it never entered the
+        loop and nothing in the flow ever looked at the leftovers again.  A
+        cleanup that lives in the loop cannot remove a file the loop is never
+        going to re-open.
+      * Every exit from an OpenROAD session that is not a normal return --
+        a stall kill (`_RC_STALLED`), the pathological ceiling (124), a fatal
+        signal, an uncaught Tcl error in a stage -- leaves whatever the session
+        had written.  The in-session cleanup is by construction unreachable on
+        exactly those paths.
+
+    WHY REMOVING IT IS THE CORRECT ANSWER, not a widened tolerance.  A 0-byte
+    antenna report is the ONE state a consumer cannot read as either "clean" or
+    "absent", the two answers it is entitled to; `eda_report_audit` already
+    judges it NOT_MEASURED and writes ERROR findings about it, which is right.
+    Absent is a legitimate, readable state -- the iteration simply has no
+    report.  Nothing here relaxes a check: the file that is removed is the one
+    the audit refuses to read, and a report WITH CONTENT is never touched, so a
+    run that has antenna violations still ships its report.  That is the
+    control.
+
+    ADVISORY / DISCLOSURE-ONLY.  Never raises, never changes a step status and
+    never changes a route verdict.  Returns the names it removed, and says out
+    loud both when it removed something and when it FAILED to.
+    """
+    dropped: List[str] = []
+    try:
+        candidates = sorted(out_dir.glob(_PNR_ANTENNA_ITER_REPORT_GLOB))
+    except OSError as exc:
+        print(f"[pnr] ANTENNA_EMPTY_REPORT_SWEEP_FAILED dir={out_dir} "
+              f"reason={type(exc).__name__}: {exc}", file=sys.stderr)
+        return dropped
+    for rpt in candidates:
+        try:
+            if not rpt.is_file() or rpt.stat().st_size != 0:
+                continue
+            rpt.unlink()
+        except OSError as exc:
+            # DEGRADE LOUDLY, NEVER SILENTLY.  A sweep that quietly fails to
+            # remove the file is this very defect wearing the other hat.
+            print(f"[pnr] ANTENNA_EMPTY_REPORT_NOT_DROPPED file={rpt.name} "
+                  f"reason={type(exc).__name__}: {exc}", file=sys.stderr)
+            continue
+        dropped.append(rpt.name)
+    if dropped:
+        print(f"[pnr] ANTENNA_EMPTY_REPORT_DROPPED: {' '.join(dropped)} -- "
+              f"a 0-byte antenna report is not a verdict a consumer can read "
+              f"as clean or as absent, so the iteration is left with no "
+              f"report, which is true")
+    return dropped
+
+
 def _pnr_resume_after_fatal_signal(*, project: Path, top: str, container: str,
                                    out_dir: Path, out_dir_c: str,
                                    pnr_tcl: Path, diag: Dict[str, Any],
@@ -28053,6 +28130,13 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         # log is evidence too, and it is the one a reader most wants.
         _preserve_pnr_approach_log(out_dir, _pnr_logp, _retry_i, rc,
                                    _pnr_approach_logs)
+        # vibe-ic#2157 — AND THIS APPROACH'S EMPTY ANTENNA REPORTS, WHICH
+        # THE TCL'S OWN CLEANUP CANNOT ALWAYS REACH. Same placement and the
+        # same reason as the archive above: the moment the tool returns, ahead
+        # of the stall/ceiling `break`, so a killed approach is swept too — and
+        # so the FIRST approach of a re-invoked `step_pnr` sweeps whatever the
+        # previous invocation left behind. See `_drop_empty_antenna_reports`.
+        _drop_empty_antenna_reports(out_dir)
         if rc in (_RC_STALLED, 124):
             # Genuinely hung route (stall) or the 24h+ pathological ceiling —
             # isolate the half-written final DEF so a downstream step never
