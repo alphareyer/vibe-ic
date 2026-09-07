@@ -593,4 +593,10 @@ def test_a_real_checked_in_phase1_artifact_completes_with_a_valid_answer(
         "consumed": 1, "agreed": 1, "disagreed": 0, "undecidable": 0,
         # #2127 sub-populations, kept inside the exact-dict assertion.
         "misscoped": 0, "field_path_undeclared": 0, "unscoped_readings": 0,
+        # #2191. DECLARED here rather than escaped by relaxing this to a
+        # subset check: the exact dict is the ledger's stated shape and this
+        # assertion exists to catch a column appearing or vanishing, so a
+        # landing that adds one says so. 0 because the row AGREED — the
+        # ownership question is only ever asked on a miss.
+        "ownership_undecidable": 0,
         "withdrawn": 0}

@@ -214,6 +214,30 @@ The remedy for a mis-scoped expectation is its `field_path`, or a stated
 layer-contract defect — never an extractor. A program cannot decide which of
 the two, so the finding names both and decides neither.
 
+AND THE OWNERSHIP ANSWER ITSELF CAN BE FALSE (#2191)
+----------------------------------------------------
+That misscope directive — "this is NOT a missing extraction and must not be
+repaired in an extractor" — is only as good as the ownership test it rests on,
+and the test had no floor. It read the WHOLE emitted document, envelope
+included, and accepted any token. MEASURED (lane cz2191, host 8HD-4,
+2026-09-08) over 482 distinct Phase-1 roots / 13,496 L documents, sampling
+9,600 tokens from 120 of them: 58.3% of every (layer, token) ownership relation
+was carried ONLY by text the emitter writes ABOUT the document — its
+classification stamp, its provenance, the hints it gives an extractor, the
+paths of the files it read — and 323 of the 9,600 tokens were carried by EVERY
+layer of their root while still being able to assert ownership. On one
+`opentitan_aes` root the single token `crypto_accelerator`, a bare `ic_class`
+stamp, made all nine of L19..L27 OWN a fact about mechanical transduction that
+none of them states.
+
+So the ownership answer is read over `_ownership_units` — the document minus
+its envelope — and it needs a token that can tell one layer from another. When
+no expected token can, the answer is REFUSED (`RULE_AI_OWNERSHIP_UNDECIDABLE`,
+`about: "track"`) rather than returned as an empty list, because an empty list
+already means "no layer carries this fact" and is published as a gap in the
+DESIGN. `met` is untouched: it is still decided over the whole document, so no
+verdict moves and none can be blamed on this guard.
+
 On NOT writing the AI-patch sidecar
 -----------------------------------
 This track deliberately does NOT write
@@ -302,6 +326,17 @@ RULE_AI_FIELD_PATH_UNDECLARED = "EXPERT_TRACK_AI_EXPECTATION_FIELD_PATH_UNDECLAR
 # MEASURED on the same run: 11 of 43 disagreements — including 5 of the 10 the
 # issue classifies as asking the wrong layer — have such a layer.
 RULE_AI_MISSCOPED = "EXPERT_TRACK_AI_EXPECTATION_MISSCOPED"
+# The ownership question could not be ASKED (#2191). Every expected token is
+# carried by more than half the layers searched, so no token can tell one
+# layer from another and the answer would decide nothing while reading as
+# though it decided everything. `about: "track"`, its own rule id, and NOT
+# `RULE_AI_UNMET`: an empty owning-layer list means "no layer carries this
+# fact" and is published as a gap in the design, so answering a question that
+# could not be asked with a design finding is the exact substitution this
+# track exists to prevent. MEASURED on 482 Phase-1 roots (lane cz2191): before
+# the content/floor guards, 323 of 9,600 sampled tokens were carried by EVERY
+# layer of their root and every one of them could assert ownership.
+RULE_AI_OWNERSHIP_UNDECIDABLE = "EXPERT_TRACK_AI_OWNERSHIP_UNDECIDABLE"
 # An expectation naming a layer THE L-DOC TAXONOMY DOES NOT DECLARE (#2150).
 # `about: "track"`, its own rule id, and deliberately NARROW.
 #
@@ -1486,8 +1521,132 @@ def phase1_root_identity(project: Path) -> Dict[str, Any]:
     }
 
 
-def owning_layers(project: Path, tokens: List[str],
-                  exclude: Optional[Path] = None) -> List[str]:
+# ── the OWNERSHIP haystack: the layer's CONTENT, not its envelope (#2191) ────
+#
+# MEASURED on 8HD-4 (lane cz2191, 2026-09-08) over 482 distinct Phase-1 roots
+# / 13,496 L documents found on that host, and over a random sample of 9,600
+# tokens drawn from 120 of those roots:
+#
+#   * 58.3% of every (layer, token) ownership relation was supported ONLY by
+#     text the emitter writes ABOUT the document — its identity, its
+#     classification stamp, its provenance, the hints it gives an extractor,
+#     and the paths of the files it read. Not by anything the layer states.
+#   * 323 of the 9,600 sampled tokens were carried by EVERY layer of their
+#     root. A token every layer carries cannot say which layer owns the fact.
+#     After this exclusion, zero tokens are.
+#   * the `ic_class` stamp: 489 distinct (root, value) pairs owned 4,576
+#     layers between them; 452 of the 489 (92.4%) own NOTHING once the
+#     envelope is out, and the 37 that remain are the roots whose content
+#     genuinely names the class.
+#   * the emitter's own VERSION STRINGS are the widest offender: on the
+#     `opentitan_aes` root the bare token `1` was carried by all 28 layers,
+#     and in 21 of them by the envelope ALONE — `_generator.plugin_version`
+#     ("1.9.62"), a `schema_version` / `emitted_by` version suffix, or an
+#     `extraction_strategy` gate key. Seven layers carry it in content, and
+#     those seven are the answer this function should have been giving.
+#
+# So the envelope is excluded from the ownership reading BY NAME. Top level
+# only: these are the keys the emitter writes around the payload, and a
+# content field that happens to share one of these names at depth is content.
+#
+# NOT applied to `met`. The addressed-layer verdict is decided over the whole
+# document exactly as it was before this landing, so no verdict moves here and
+# a moved verdict can never be attributed to this change (the same separation
+# #2127 kept between its field_path guard and its verdict).
+_L_DOC_ENVELOPE_KEYS = frozenset({
+    "doc_id", "doc_name", "doc_class", "schema_version",
+    "applicability", "ic_class", "class_path", "ic_name",
+    "emitted_by", "_generator", "extraction_status",
+    "extraction_hints", "extraction_strategy", "source_documents",
+})
+
+# `extraction_evidence` is the one envelope member that also carries CONTENT:
+# it is keyed by SOURCE PATH and each entry quotes the input under `literal`
+# with a `label` naming the field and the file:line it came from. The quote is
+# a fact the layer recorded; the path and the label are provenance. MEASURED:
+# reading the whole subtree is how `L6_CONTROL_LOGIC` came to OWN the token
+# `GHASH` — its only two matches were the source filenames
+# `input/docs/ghash_masked_algorithm.svg` and
+# `input/docs/ghash_masked_block_diagram.svg`, in a layer that states nothing
+# about it. Dropping the subtree WHOLESALE was measured too and costs 2.6% of
+# tokens their only owner; keeping the values and dropping the path keys and
+# the labels costs 0.7%. A design fact is not owned by the name of the file it
+# was read from — but it IS owned by a line the layer quoted.
+_EVIDENCE_KEY = "extraction_evidence"
+_EVIDENCE_PROVENANCE_KEYS = frozenset({"label"})
+
+# A token that MORE of the searched layers carry than not is a property of the
+# root, not of a layer: it cannot distinguish one layer from another, and an
+# ownership answer built on it decides nothing while reading as though it
+# decided everything. MEASURED after the envelope exclusion above, only seven
+# distinct tokens in the 9,600-token sample still clear this line, and every
+# one of them is structural rather than a design fact: `input`, `fields`,
+# `in`, `evidence`, `Input:`, `True`, `False` — the last two being exactly the
+# coincidence #2128 measured when an unrelated boolean key made the token
+# "false" score.
+_TOKEN_BREADTH_CEILING = 0.5
+
+# SCOPE BOUNDARY, stated rather than hidden. The envelope is dropped by NAME at
+# the TOP LEVEL, and two shapes it does NOT reach were measured and are left
+# for their own issue rather than guessed at:
+#
+#   * emitter rule/version markers that reach CONTENT fields. The marker
+#     `gfm_multitable_header_role_v0_3_2` sitting inside an L1 `pin_table`
+#     value satisfies the token `32`, and no top-level name can exclude it
+#     because the field it is in is genuinely content.
+#   * an ownership question where ZERO layers were searched. `[]` is then a
+#     real zero over an empty population, and it is NOT separately statused —
+#     `searched_layers` records the population, but a caller that reads only
+#     `layers` cannot tell an empty corpus from an answered question.
+#
+# Both are the same class as the defect this landing fixes and neither is
+# fixed here. Measuring them is a separate issue; do not read their absence as
+# a claim that they do not exist.
+
+
+def _ownership_units(blob: Any) -> List[str]:
+    """The layer's CONTENT as haystack units — the document minus its
+    envelope. See `_L_DOC_ENVELOPE_KEYS` for what is dropped and why."""
+    if not isinstance(blob, dict):
+        return _haystack_units(blob)
+    out: List[str] = []
+    for key, value in blob.items():
+        if key in _L_DOC_ENVELOPE_KEYS:
+            continue
+        if key == _EVIDENCE_KEY:
+            # values only: the source-path keys are provenance, not content.
+            for entry in (value.values() if isinstance(value, dict)
+                          else [value]):
+                out.extend(_evidence_units(entry))
+            continue
+        out.append(str(key))
+        out.extend(_haystack_units(value))
+    return out
+
+
+def _evidence_units(node: Any) -> List[str]:
+    """`_haystack_units` over one evidence entry, minus its `label`."""
+    out: List[str] = []
+
+    def walk(cur: Any) -> None:
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if k in _EVIDENCE_PROVENANCE_KEYS:
+                    continue
+                out.append(str(k))
+                walk(v)
+        elif isinstance(cur, list):
+            for v in cur:
+                walk(v)
+        elif cur is not None:
+            out.append(str(cur))
+
+    walk(node)
+    return out
+
+
+def owning_layers_answer(project: Path, tokens: List[str],
+                         exclude: Optional[Path] = None) -> Dict[str, Any]:
     """The layers that carry EVERY one of these tokens — the scope answer.
 
     An expectation the addressed layer does not satisfy is an extraction gap
@@ -1508,10 +1667,50 @@ def owning_layers(project: Path, tokens: List[str],
     never addressed, which nothing supplies — and asking it strictly would turn
     "the fact is here, one layer over" back into "the design is missing it",
     which is the defect this function exists to end.
+
+    READ OVER CONTENT, AND WITH A FLOOR (#2191). Two guards this answer did
+    not have, both of which it needed for the same reason: an ownership answer
+    that cannot be wrong is not an answer, and the finding built on it
+    (`RULE_AI_MISSCOPED`) tells its reader in as many words that the miss
+    "is NOT a missing extraction and must not be repaired in an extractor".
+
+      * the haystack is the layer's CONTENT — `_ownership_units`, not
+        `_haystack_units`. MEASURED (see that roster): 58.3% of ownership
+        relations on this fleet's corpus were carried by the emitter's own
+        envelope, and the `ic_class` stamp alone — a bare unit in 9 of the 28
+        emitted documents of an `opentitan_aes` root — made `L20_DFT_SCAN_
+        TOPOLOGY` and `L27_MEMORY_MODULE_SPD` own a fact about mechanical
+        transduction that neither states.
+      * a token more of the searched layers carry than not is REFUSED, and
+        when no expected token clears that line the whole answer is refused as
+        `NO_DISCRIMINATING_TOKEN`. A rule that matches everything decides
+        nothing, and the refusal must be a STATUS rather than an empty list:
+        `[]` already means "no layer carries this fact", which the caller
+        publishes as a finding about the DESIGN. Answering "could not decide"
+        with "read it and nothing was there" is the substitution this repo
+        keeps measuring the cost of.
+
+    The answer also records WHERE each owning layer carried each token — the
+    unit text itself — so the claim can be falsified by reading the report
+    rather than by re-running the comparator.
     """
+    answer: Dict[str, Any] = {
+        "status": "OK",
+        "layers": [],
+        "searched_layers": 0,
+        "token_breadth": {},
+        "non_discriminating_tokens": [],
+        "evidence": {},
+        "refusal": None,
+    }
     if not tokens:
-        return []
-    out: List[str] = []
+        return answer
+
+    # Read every searched layer ONCE. An unreadable document is not content
+    # and is not counted in the denominator either: it was never searched, and
+    # inflating the population with it would make a token look narrower than
+    # the corpus can show.
+    searched: List[tuple] = []
     for p in emitted_layer_files(project):
         if exclude is not None and p == exclude:
             continue
@@ -1519,10 +1718,48 @@ def owning_layers(project: Path, tokens: List[str],
             blob = json.loads(p.read_text(errors="replace"))
         except (OSError, ValueError):
             continue          # unreadable content is not content
-        units = _haystack_units(blob)
-        if all(present_in_units(t, units) for t in tokens):
-            out.append(p.stem)
-    return sorted(out)
+        searched.append((p.stem, _ownership_units(blob)))
+    answer["searched_layers"] = len(searched)
+    if not searched:
+        return answer
+
+    # ONE pass, ONE predicate. Breadth, ownership and the evidence text are
+    # three readings of the same question — "does this layer carry this token,
+    # and where" — and asking it twice is how two answers to one question come
+    # to disagree on the first extension.
+    wanted = set(tokens)
+    hits: Dict[str, Dict[str, str]] = {}
+    for stem, units in searched:
+        found = {}
+        for t in wanted:
+            where = next((u for u in units if phrase_present(t, u)), None)
+            if where is not None:
+                found[t] = where if len(where) <= 200 else where[:200] + "…"
+        hits[stem] = found
+    breadth = {t: sum(1 for f in hits.values() if t in f) for t in wanted}
+    answer["token_breadth"] = breadth
+
+    wide = sorted(t for t in wanted
+                  if breadth[t] > _TOKEN_BREADTH_CEILING * len(searched))
+    answer["non_discriminating_tokens"] = wide
+    if len(wide) == len(wanted):
+        answer["status"] = "NO_DISCRIMINATING_TOKEN"
+        answer["refusal"] = (
+            f"every expected token is carried by more than half of the "
+            f"{len(searched)} layer(s) searched ("
+            + ", ".join(f"{t!r} by {breadth[t]}" for t in wide)
+            + ") — a token more layers carry than not says which ROOT this "
+              "is, not which layer owns the fact, so this answer would decide "
+              "nothing while reading as though it decided everything. The "
+              "ownership question is REFUSED rather than answered with an "
+              "empty list, which would be published as a gap in the design")
+        return answer
+
+    # EVERY token, never some — the property this function had before #2191
+    # and keeps unchanged.
+    answer["layers"] = sorted(s for s, f in hits.items() if len(f) == len(wanted))
+    answer["evidence"] = {s: hits[s] for s in answer["layers"]}
+    return answer
 
 
 def _split_refusal(base: Dict[str, Any], why: str) -> Dict[str, Any]:
@@ -1530,6 +1767,35 @@ def _split_refusal(base: Dict[str, Any], why: str) -> Dict[str, Any]:
     base["split"] = True
     base["observed"] = why
     return base
+
+
+def _propagate_ownership_status(base: Dict[str, Any],
+                                branches: List[Dict[str, Any]]) -> None:
+    """Carry the branches' ownership STATUS up to the split parent (#2191).
+
+    A conjunction is only as decided as its least decided term: if the
+    ownership question was REFUSED for any branch that missed, the parent's
+    answer is refused too, and the empty `owning_layers` it now carries must
+    not be read as "no layer carries this fact" — which is what the consumer
+    publishes as a gap in the design. The refusals are named branch by branch
+    so a reader can repair the branch rather than the design.
+    """
+    refused = [b for b in branches
+               if b.get("owning_layers_status") == "NO_DISCRIMINATING_TOKEN"]
+    if refused:
+        base["owning_layers"] = []
+        base["owning_layers_status"] = "NO_DISCRIMINATING_TOKEN"
+        base["owning_layers_refusal"] = "; ".join(
+            f"[{b['id']}] {b['owning_layers_refusal']}" for b in refused)
+        base["owning_layers_evidence"] = {}
+        return
+    if branches and all(b.get("owning_layers_status") == "OK"
+                        for b in branches):
+        base["owning_layers_status"] = "OK"
+    base["owning_layers_evidence"] = {
+        stem: hits for b in branches
+        for stem, hits in (b.get("owning_layers_evidence") or {}).items()
+        if stem in base["owning_layers"]}
 
 
 def _converge_split(project: Path, base: Dict[str, Any], exp: Any,
@@ -1630,6 +1896,7 @@ def _converge_split(project: Path, base: Dict[str, Any], exp: Any,
         base["owning_layers"] = (
             sorted({L for b in absent for L in b["owning_layers"]})
             if all(b["owning_layers"] for b in absent) else [])
+        _propagate_ownership_status(base, absent)
         base["observed"] = (
             f"{len(absent)} of {len(branches)} branch(es) of this split "
             f"address a layer this Phase-1 root does not contain "
@@ -1651,6 +1918,7 @@ def _converge_split(project: Path, base: Dict[str, Any], exp: Any,
     base["owning_layers"] = (
         sorted({L for b in failed for L in (b["owning_layers"] or [])})
         if failed and all(b["owning_layers"] for b in failed) else [])
+    _propagate_ownership_status(base, failed)
     if base["met"]:
         base["observed"] = (
             f"all {len(branches)} branch(es) of this split agree: "
@@ -1875,6 +2143,20 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
         # a schema, and recording it as UNDECLARED would report a reading that
         # did not happen. `owning_layers` is [] only where it was computed.
         "field_path_status": "NOT_MEASURED", "owning_layers": [],
+        # #2191. WHETHER the ownership question was answered at all.
+        # NOT_MEASURED until it is asked; OK when it was decided;
+        # NO_DISCRIMINATING_TOKEN when it was REFUSED because no expected
+        # token can tell one layer from another. The third state exists
+        # because `owning_layers: []` already means "no layer carries this",
+        # which the consumer publishes as a finding about the DESIGN — and a
+        # question that could not be asked must never be answered with a
+        # design gap.
+        "owning_layers_status": "NOT_MEASURED",
+        "owning_layers_refusal": None,
+        # WHERE each owning layer carried each token — the unit text — so the
+        # ownership claim can be falsified from the report rather than only by
+        # re-running the comparator.
+        "owning_layers_evidence": {},
         # WHERE the token search happened: `field_path` when the named path
         # resolved, `whole_layer` when it did not. NOT_MEASURED until a layer
         # document is in hand.
@@ -1967,7 +2249,11 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
         # wholly in a layer the root DOES carry is a re-scope with a named
         # destination. `exclude=None` — there is no addressed file to exclude.
         # Additive: it cannot make a row agree, only say where the fact is.
-        base["owning_layers"] = owning_layers(project, base["expected_tokens"])
+        _own = owning_layers_answer(project, base["expected_tokens"])
+        base["owning_layers"] = _own["layers"]
+        base["owning_layers_status"] = _own["status"]
+        base["owning_layers_refusal"] = _own["refusal"]
+        base["owning_layers_evidence"] = _own["evidence"]
         # The FIRST sentence is unchanged from before this landing. Downstream
         # readers (and #312's own test) quote it, and a landing that rewords a
         # sentence it did not need to change makes itself unreviewable.
@@ -1981,7 +2267,11 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
                f"that one)")
             + (f"; {base['owning_layers']} carries every one of the "
                f"{len(base['expected_tokens'])} expected token(s)"
-               if base["owning_layers"] else ""))
+               if base["owning_layers"] else
+               f"; and WHERE ELSE the fact lives was not decided — "
+               f"{base['owning_layers_refusal']}"
+               if base["owning_layers_status"] == "NO_DISCRIMINATING_TOKEN"
+               else ""))
         return base
     base["layer_present"] = True
     try:
@@ -2041,12 +2331,24 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
         # Asked ONLY on a miss: on a hit there is nothing to re-scope, and
         # walking every layer for an expectation already satisfied would be
         # work whose answer nobody reads.
-        base["owning_layers"] = owning_layers(
+        _own = owning_layers_answer(
             project, base["expected_tokens"], exclude=path)
+        base["owning_layers"] = _own["layers"]
+        base["owning_layers_status"] = _own["status"]
+        base["owning_layers_refusal"] = _own["refusal"]
+        base["owning_layers_evidence"] = _own["evidence"]
         # #2150. WHERE the missing tokens live, and under what KIND of path.
         # Asked over the MISSING tokens alone: a token the addressed layer
         # already carries has no carriage question, and folding it in would
         # let a satisfied token supply a named field for an unsatisfied fact.
+        #
+        # #2191 ADDS BESIDE THIS, NEVER INSTEAD OF IT. `carriage` reads the
+        # WHOLE document, envelope included, and answers a different question
+        # — under what KIND of path a token sits — while the ownership answer
+        # above now reads CONTENT ONLY and answers WHICH layer owns it. Both
+        # are kept and neither is derived from the other: a carriage verdict
+        # computed off the ownership haystack would silently change what
+        # #2150 landed, and #2150 is the contract here.
         base["carriage"] = token_carriage(project, missing, exclude=path)
     return base
 
@@ -2357,6 +2659,10 @@ def evaluate(project: Path) -> Dict[str, Any]:
                        f"{len(c['expected_tokens'])} expected token(s), so "
                        f"the repair is to re-scope the expectation there"
                        if c["owning_layers"] else
+                       f"; and WHERE ELSE the fact lives could not be "
+                       f"determined — {c['owning_layers_refusal']}"
+                       if c["owning_layers_status"] ==
+                       "NO_DISCRIMINATING_TOKEN" else
                        ". Either re-scope it to a layer the taxonomy "
                        "declares, or state that the expectation was computed "
                        "over a DIFFERENT artefact than the one being judged "
@@ -2406,6 +2712,48 @@ def evaluate(project: Path) -> Dict[str, Any]:
         # were recorded as extraction gaps while the register layer carried
         # the registers. `about: "track"`, because the repair is to the
         # expectation's scope or to the layer contract, never to an extractor.
+        # ── the ownership question could not be ASKED (#2191) ──────────────
+        # Checked BEFORE the misscope branch, and it does not fall through to
+        # `RULE_AI_UNMET`: a refused ownership answer carries an empty
+        # `owning_layers`, and letting it reach the design column would file
+        # "the program track is missing this" on the strength of a question
+        # nobody could answer. `about: "track"` — the repair is to the
+        # expectation's tokens.
+        if c["owning_layers_status"] == "NO_DISCRIMINATING_TOKEN":
+            findings.append({
+                "severity": "REVIEW",
+                "about": "track",
+                "rule": f"{RULE_AI_OWNERSHIP_UNDECIDABLE}::{c['id']}",
+                "layer": c["layer"],
+                "field_path": c["field_path"],
+                "owning_layers": [],
+                "expected_tokens": c["expected_tokens"],
+                "message": (
+                    f"The AI sub-track asked {c['layer']}"
+                    f"{'.' + c['field_path'] if c['field_path'] else ''} for: "
+                    f"{c['requirement']}. That layer does not carry it. "
+                    f"WHETHER ANOTHER LAYER DOES was NOT decided: "
+                    f"{c['owning_layers_refusal']}. So this row is neither a "
+                    f"re-scope nor a gap in the design — it is an expectation "
+                    f"whose tokens cannot distinguish one layer from another. "
+                    f"Repair the expectation to name at least one token that "
+                    f"can, then the ownership question becomes answerable."),
+                "expert_source": c.get("expert_source"),
+            })
+            continue
+
+        # NO `carriage` ON THIS FINDING, AND THAT IS THE RULED ANSWER, NOT AN
+        # OVERSIGHT (#2191 / #2150, owner ruling 2026-09-08). `carriage` is
+        # surfaced only on the `RULE_AI_UNMET` finding below; the
+        # `RULE_AI_MISSCOPED` branch that follows has never carried one
+        # either, and this branch is its sibling — both are `about: "track"`.
+        # `base["carriage"]` IS still computed for these rows, so nothing is
+        # lost from the record, only from this finding's prose. Making a track
+        # finding carry the carriage sentence is a change to #2150's scope and
+        # needs #2150's own evidence: WHICH rows, and what the sentence would
+        # even say when the ownership answer was REFUSED. Asked and deferred —
+        # do not re-derive it.
+
         if c["owning_layers"]:
             findings.append({
                 "severity": "REVIEW",
@@ -2414,6 +2762,12 @@ def evaluate(project: Path) -> Dict[str, Any]:
                 "layer": c["layer"],
                 "field_path": c["field_path"],
                 "owning_layers": c["owning_layers"],
+                # WHERE each owner carried each token (#2191). The half that
+                # makes the claim falsifiable: until this landing a reader was
+                # told a layer "DOES" carry the fact and had to re-run the
+                # comparator to see that the only match was the emitter's own
+                # class stamp or the name of a file it had read.
+                "owning_layers_evidence": c["owning_layers_evidence"],
                 "message": (
                     f"The AI sub-track asked {c['layer']}"
                     f"{'.' + c['field_path'] if c['field_path'] else ''} for: "
@@ -2668,6 +3022,17 @@ def evaluate(project: Path) -> Dict[str, Any]:
             "misscoped": len([c for c in converged
                               if c["usable"] and not c["met"]
                               and c["owning_layers"]]),
+            # #2191 — rows whose ownership question was REFUSED for want of a
+            # token that can tell one layer from another. Counted separately
+            # from `misscoped` and from the design column both, because it is
+            # neither: a row here is a fact about the EXPECTATION. A count is
+            # the only way a reader sees the population without opening each
+            # finding, and before this landing every one of these rows was
+            # published as a confident re-scope.
+            "ownership_undecidable": len(
+                [c for c in converged
+                 if c["usable"] and not c["met"]
+                 and c["owning_layers_status"] == "NO_DISCRIMINATING_TOKEN"]),
             "field_path_undeclared": len(
                 [c for c in converged
                  if c["field_path_status"] == "UNDECLARED"]),

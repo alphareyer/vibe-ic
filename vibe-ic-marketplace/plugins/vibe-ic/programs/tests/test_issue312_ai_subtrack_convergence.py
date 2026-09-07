@@ -344,6 +344,11 @@ def test_a_prose_only_expectation_is_undecidable_not_agreed(tmp_path):
         # comparison is here to catch. An undecidable entry never reaches the
         # layer document, so all three are 0.
         "misscoped": 0, "field_path_undeclared": 0, "unscoped_readings": 0,
+        # #2191. DECLARED, not escaped by relaxing the comparison: this
+        # assertion exists to catch a column appearing, and one did. 0
+        # because an UNDECIDABLE row never reaches a layer document, so the
+        # ownership question is never asked.
+        "ownership_undecidable": 0,
         "withdrawn": 0}
 
 
@@ -377,6 +382,12 @@ def test_the_ledger_counts_agreements_not_only_disagreements(tmp_path):
         # refused; both are read at whole-layer scope. The disagreeing one is
         # not misscoped because no other layer carries its tokens either.
         "misscoped": 0, "field_path_undeclared": 0, "unscoped_readings": 2,
+        # #2191. 0, and here it is the INFORMATIVE zero: the disagreeing
+        # row's ownership question WAS asked and answered — `TRIMSEL` is
+        # specific enough to discriminate, and no layer carries it — so the
+        # row stays a finding about the DESIGN, which is the property the
+        # ownership floor must never take away.
+        "ownership_undecidable": 0,
         "withdrawn": 0}
 
 
