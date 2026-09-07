@@ -13869,6 +13869,533 @@ def p0_gate_census(records: Optional[List[Dict[str, Any]]]
     }
 
 
+#: The one bucket in a gate census that is NOT part of `invoked`. Spelt once,
+#: read by `gate_population_equation`, and derived from nothing — it is the
+#: token `_p0_not_invocable_count` matches.
+NOT_INVOCABLE_VERDICT = "NOT_INVOCABLE"
+
+
+#: The equations `audit_reconciliation` checks, so a consumer can key on the
+#: ID rather than on the sentence. It is the DECLARED roster, and
+#: `test_a_clean_artefact_reconciles` asserts the ids the function actually
+#: emits are exactly these — an equation added without a name here reddens
+#: that row rather than arriving unannounced.
+AUDIT_EQUATIONS: Tuple[str, ...] = ("E1", "E2", "E3", "E4")
+
+
+def audit_reconciliation(audit: Dict[str, Any]) -> Dict[str, Any]:
+    """A FRAME CANARY BEFORE THE NUMBERS — do this artefact's own claims agree?
+
+    vibe-ic#2092. Every number in `phase23_completion_audit.json` is produced
+    by a different code path and, until this function, nothing checked that
+    they agree with each other. Measured on ONE artefact (lane icaes,
+    opentitan_aes, 8HD-4): a FAIL naming nothing, a 246-gate denominator whose
+    published buckets summed to 186, and a `tally_delta` between two tallies
+    that counted 13 and 69 steps. Each was internally consistent inside the
+    path that produced it. None of them was checked against the artefact it
+    was written into.
+
+    THE FOUR EQUATIONS, each owned by the function that publishes its terms:
+
+      E1  the red names its cause, and the tally projects the records
+          — `failed_gate_count == len(failed_gates)`;
+          — `step_counts` is the census of `steps[]`;
+          — a red `run_status` names at least one cause (`verdict_causes`).
+      E2  the gate counts are the partition of the umbrella's own records
+          (`gate_population_equation`).
+      E3  `tally_delta`'s prior is a PREVIOUS RUN of this measurement, or it
+          is absent (`design_input_digest.prior_is_a_previous_run`).
+      E4  every "reported, NOT gating" disclosure names steps that are rows in
+          this artefact's step table (`informational_disclosures`).
+
+    A ``None`` from any of those is NOT_MEASURED and never a break: it means
+    the question was not asked in this scope, and it is reported as such.
+
+    WHAT A BREAK IS. It is a defect in THIS AUDIT — the same class as
+    `p0_gate_census`'s `closes` and `gate_population_reconciliation`'s
+    refusal, and it is treated the same way: the report is still WRITTEN, with
+    `reconciled: false` and the broken equation named, and the run exits
+    non-zero. Refusing to write it would destroy the evidence of the break;
+    writing it silently would let it be quoted. `run_status` is untouched —
+    what changes is that the artefact stops CERTIFYING its own arithmetic.
+
+    Pure: one audit dict in, one dict out. chip-AGNOSTIC — arithmetic over
+    counts and names.
+    """
+    checks: List[Dict[str, Any]] = []
+
+    def _c(eid: str, name: str, holds: Optional[bool],
+           detail: str) -> None:
+        checks.append({"id": eid, "equation": name, "holds": holds,
+                       "detail": detail})
+
+    # ── E1 ───────────────────────────────────────────────────────────────
+    fg = audit.get("failed_gates")
+    fgc = audit.get("failed_gate_count")
+    if not isinstance(fg, list) or not isinstance(fgc, int):
+        _c("E1", "failed_gate_count == len(failed_gates)", None,
+           "the artefact carries no failed-gate census to check")
+    elif fgc != len(fg):
+        _c("E1", "failed_gate_count == len(failed_gates)", False,
+           f"failed_gate_count {fgc} != len(failed_gates) {len(fg)}")
+    else:
+        _c("E1", "failed_gate_count == len(failed_gates)", True, "")
+
+    steps = audit.get("steps")
+    counts = audit.get("step_counts")
+    if not isinstance(steps, list) or not isinstance(counts, dict):
+        _c("E1", "step_counts is the census of steps[]", None,
+           "the artefact carries no step table or no step tally")
+    else:
+        seen: Dict[str, int] = {}
+        for st in steps:
+            w = str((st or {}).get("status"))
+            seen[w] = seen.get(w, 0) + 1
+        drift = sorted(
+            f"{w}: tally {counts.get(w, 0)} vs {seen.get(w, 0)} row(s)"
+            for w in set(counts) | set(seen)
+            if int(counts.get(w, 0) or 0) != seen.get(w, 0))
+        if drift:
+            _c("E1", "step_counts is the census of steps[]", False,
+               f"the tally and the rows it counted disagree: {drift}")
+        else:
+            _c("E1", "step_counts is the census of steps[]", True, "")
+
+    vc = audit.get("verdict_causes")
+    if not isinstance(vc, dict):
+        _c("E1", "a red run names its cause", None,
+           "the artefact carries no `verdict_causes` block")
+    elif vc.get("names_its_cause") is False:
+        # DERIVED FROM THE BLOCK, not restated. An earlier draft of this
+        # sentence enumerated four term kinds by hand and went stale the day a
+        # fifth was added — the exact defect one layer down from the one this
+        # function exists to catch.
+        _terms = ", ".join(
+            f"{k} {v}" for k, v in sorted(vc.items())
+            if isinstance(v, int) and k.endswith("_count")
+            and k != "named_cause_count")
+        _c("E1", "a red run names its cause", False,
+           f"run_status {audit.get('run_status')!r} names NO cause: "
+           f"{len(vc.get('failed_gates') or [])} failed gate(s), "
+           f"{len(vc.get('non_green_steps') or [])} non-green step(s), "
+           f"{_terms or 'no other term'}")
+    else:
+        _c("E1", "a red run names its cause",
+           True if vc.get("names_its_cause") else None,
+           "" if vc.get("names_its_cause") else str(vc.get("note", "")))
+
+    # ── E2 ───────────────────────────────────────────────────────────────
+    ge = audit.get("gate_population_equation")
+    if not isinstance(ge, dict):
+        _c("E2", "invoked == every named bucket but NOT_INVOCABLE", None,
+           "the artefact carries no `gate_population_equation` block")
+    elif ge.get("holds") is False:
+        _c("E2", "invoked == every named bucket but NOT_INVOCABLE", False,
+           "; ".join(ge.get("breaks") or []))
+    else:
+        _c("E2", "invoked == every named bucket but NOT_INVOCABLE",
+           ge.get("holds"),
+           "" if ge.get("holds") else str(ge.get("not_measured", "")))
+
+    # ── E3 ───────────────────────────────────────────────────────────────
+    td = audit.get("tally_delta")
+    if not isinstance(td, dict):
+        _c("E3", "tally_delta's prior is a previous run of this measurement",
+           None, "this run published no `tally_delta`")
+    elif td.get("prior") is None:
+        _c("E3", "tally_delta's prior is a previous run of this measurement",
+           True, "prior ABSENT, and the record says why")
+    else:
+        elig = td.get("prior_eligibility")
+        if not isinstance(elig, dict):
+            _c("E3",
+               "tally_delta's prior is a previous run of this measurement",
+               None,
+               "a prior is published with no eligibility record beside it")
+        elif elig.get("comparable") is False:
+            _c("E3",
+               "tally_delta's prior is a previous run of this measurement",
+               False,
+               "a prior tally is PUBLISHED that is not a previous run of "
+               "this measurement: " + "; ".join(elig.get("reasons") or []))
+        else:
+            _c("E3",
+               "tally_delta's prior is a previous run of this measurement",
+               True if elig.get("comparable") else None,
+               "" if elig.get("comparable") else str(elig.get(
+                   "not_measured", "")))
+
+    # ── E4 ───────────────────────────────────────────────────────────────
+    inf = audit.get("informational_disclosures")
+    if not isinstance(inf, dict):
+        _c("E4", "every disclosed step is a row in the step table", None,
+           "the artefact carries no `informational_disclosures` block")
+    elif inf.get("every_disclosed_step_is_a_row") is False:
+        _c("E4", "every disclosed step is a row in the step table", False,
+           f"disclosure(s) name step(s) that are in no row of this "
+           f"artefact's step table: "
+           f"{inf.get('steps_missing_from_the_step_table')}")
+    else:
+        _c("E4", "every disclosed step is a row in the step table",
+           inf.get("every_disclosed_step_is_a_row"),
+           "" if inf.get("every_disclosed_step_is_a_row")
+           else "nothing was disclosed in this run, so nothing was checked")
+
+    broken = [c for c in checks if c["holds"] is False]
+    unchecked = [c for c in checks if c["holds"] is None]
+    return {
+        "schema_version": 1,
+        "declared": (
+            "BLOCKING — a report whose own equations do not hold is written "
+            "with `reconciled: false` and exits non-zero. `run_status` is "
+            "untouched; what is withdrawn is this artefact's certification "
+            "of its own arithmetic."),
+        # DEDUPED, IN ORDER. E1 is three terms and would otherwise appear
+        # three times in the roster a consumer reads; the three terms are all
+        # in `checks`, which is where a reader looks for them.
+        "equations_checked": list(dict.fromkeys(c["id"] for c in checks)),
+        "checks": checks,
+        "reconciled": not broken,
+        "broken": [{"id": c["id"], "equation": c["equation"],
+                    "detail": c["detail"]} for c in broken],
+        "not_measured": [{"id": c["id"], "equation": c["equation"],
+                          "detail": c["detail"]} for c in unchecked],
+        "note": (
+            "NOT_MEASURED is not a pass and is not a break: it names an "
+            "equation this scope did not ask. `reconciled` is about the "
+            "equations that WERE asked."),
+    }
+
+
+def informational_disclosures(
+    *,
+    strict_structural_only: bool,
+    step_artifact_fail_lines: Sequence[str],
+    step_artifact_fail_step_ids: Sequence[str],
+    ordering_fail_lines: Sequence[str],
+    ordering_gating_lines: Sequence[str],
+    ordering_informational_step_ids: Sequence[str],
+    self_skipped_signoff_step_ids: Sequence[str],
+    step_ids_in_table: Sequence[str],
+) -> Dict[str, Any]:
+    """EVERY "reported, NOT gating" sentence this run prints, as a record.
+
+    vibe-ic#2092 (lane icaes F19). MEASURED — `reports/audit/
+    flow_compliance_check.log:215` on the opentitan_aes run (8HD-4):
+
+        Step-level gates (informational, not gating --strict-structural):
+        3 step(s) FAIL/MISSING
+          • step2 …: MISSING — …
+          • step4 …: FAIL — …
+          • step5 …: FAIL — …
+
+    beside ``Overall: PASS_WITH_WAIVERS``. The three steps ARE rows in that
+    log's step table — and the sentence reached nothing else. It is in no
+    field of `phase23_completion_audit.json`, so no consumer can read it; and
+    it is printed 130+ lines before the end of stdout, while
+    `design_one_shot_runner.step_final_audit` keeps only the FINAL 25 lines as
+    the step's detail, so the one consumer that needs it never sees it either.
+    `reports/final_summary.md` for that run contains the word "informational"
+    zero times.
+
+    So the disclosure becomes a RECORD: named kinds, the step ids each one
+    names, and — checked, not assumed — whether every one of those ids is a
+    row in the step table this same artefact publishes. A disclosure naming a
+    step that is in no table is a step a reader cannot look up, which is the
+    same defect one layer down.
+
+    `every_disclosed_step_is_a_row` is ``None`` when there is nothing to
+    disclose. That is not a pass; there was no question.
+
+    chip-AGNOSTIC — step ids and counts. Pure: lists in, one dict out.
+    """
+    table = {str(i) for i in step_ids_in_table}
+    out: List[Dict[str, Any]] = []
+
+    def _add(kind: str, headline: str, ids: Sequence[str],
+             lines: Sequence[str], ids_project_the_step_table: bool) -> None:
+        """`ids_project_the_step_table` — DECLARED per kind, and it decides
+        whether an id that is not a row is a DEFECT or a REFERENCE.
+
+        A disclosure built by walking `results` names step ids that are rows
+        BY CONSTRUCTION; one of those missing is a defect in this audit. A
+        disclosure that reports on the FLOW GRAPH — the step-ordering guard —
+        names ids from `blocks_on` edges, and under a narrowed `--phase` /
+        `--stage` scope an edge legitimately reaches a step this run has no
+        row for. MEASURED: `test_issue1429_ordering_guard_is_scoped_not_
+        disabled.py::test_an_out_of_scope_violation_alone_does_not_red`, whose
+        whole subject is a violation OUTSIDE the verdict scope, was turned red
+        by the first draft of this function for naming step `9`. The
+        out-of-table ids are recorded either way; what the declaration changes
+        is whether E4 treats them as a break.
+        """
+        named = [str(i) for i in ids]
+        not_rows = [i for i in named if i not in table]
+        out.append({
+            "kind": kind,
+            "headline": headline,
+            "count": len(lines) if lines else len(named),
+            "step_ids": named,
+            "lines": list(lines),
+            "gating": False,
+            "ids_project_the_step_table": ids_project_the_step_table,
+            "step_ids_not_in_the_step_table": not_rows,
+            # The BREAK population: only a kind that claims its ids are rows
+            # can be wrong about it.
+            "steps_missing_from_the_step_table": (
+                not_rows if ids_project_the_step_table else []),
+        })
+
+    if strict_structural_only and step_artifact_fail_lines:
+        _add("step_level_gates_not_gating_strict_structural",
+             (f"Step-level gates (informational, not gating "
+              f"--strict-structural): {len(step_artifact_fail_lines)} "
+              f"step(s) FAIL/MISSING"),
+             step_artifact_fail_step_ids, step_artifact_fail_lines,
+             ids_project_the_step_table=True)
+
+    _n_info_ordering = len(ordering_fail_lines) - len(ordering_gating_lines)
+    if _n_info_ordering > 0:
+        _add("step_ordering_violation_outside_the_verdict_scope",
+             (f"{_n_info_ordering} of {len(ordering_fail_lines)} "
+              f"step-execution ordering violation(s) reported, NOT gating: "
+              f"the dependency named is outside this run's verdict scope"),
+             ordering_informational_step_ids,
+             [""] * _n_info_ordering,
+             # FLOW-GRAPH references, not a projection of this run's rows.
+             ids_project_the_step_table=False)
+
+    if self_skipped_signoff_step_ids:
+        _add("signoff_step_self_skipped",
+             (f"{len(self_skipped_signoff_step_ids)} SIGN-OFF step(s) "
+              f"SELF-SKIPPED on a disclosed capability gap — review "
+              f"required"),
+             self_skipped_signoff_step_ids, [],
+             ids_project_the_step_table=True)
+
+    missing = sorted({i for d in out
+                      for i in d["steps_missing_from_the_step_table"]})
+    referenced = sorted({i for d in out
+                         for i in d["step_ids_not_in_the_step_table"]})
+    _asserting = [d for d in out if d["ids_project_the_step_table"]]
+    every_is_a_row: Optional[bool] = None if not _asserting else not missing
+    return {
+        "declared": (
+            "BLOCKING — refuses when a disclosure whose ids PROJECT the step "
+            "table names one that is not a row (`audit_reconciliation` "
+            "equation E4). A disclosure that references the FLOW GRAPH "
+            "declares so and is not asserted against the table; its "
+            "out-of-table ids are recorded under "
+            "`step_ids_not_in_the_step_table`."),
+        "disclosures": out,
+        "disclosed_step_count": sum(len(d["step_ids"]) for d in out),
+        "steps_missing_from_the_step_table": missing,
+        "step_ids_not_in_the_step_table": referenced,
+        "every_disclosed_step_is_a_row": every_is_a_row,
+        "note": (
+            "Every entry here was PRINTED as reported-but-not-gating. It is "
+            "recorded so a consumer of this artefact — and the final 25 "
+            "lines of this run's stdout, which is all `step_final_audit` "
+            "keeps — carries the same sentence the step table does."),
+    }
+
+
+def informational_disclosure_lines(block: Dict[str, Any]) -> List[str]:
+    """The disclosure, in the LAST lines of stdout — where the consumer looks.
+
+    `design_one_shot_runner.step_final_audit` keeps only the final 25 lines of
+    this program's stdout as the step's detail. A disclosure printed beside
+    `Overall:` is 130+ lines earlier and never reaches it. This is the same
+    sentence, emitted after the gate ledger. Advisory by construction: it
+    moves no verdict and no exit code.
+    """
+    ds = (block or {}).get("disclosures") or []
+    if not ds:
+        return []
+    lines = ["", "INFORMATIONAL DISCLOSURES (reported, NOT gating) — "
+                 f"{len(ds)}, also in reports/audit/"
+                 "phase23_completion_audit.json under "
+                 "`informational_disclosures`:"]
+    for d in ds:
+        ids = ", ".join(str(i) for i in d["step_ids"]) or "no step named"
+        lines.append(f"  • {d['headline']}  [steps: {ids}]")
+        if d["steps_missing_from_the_step_table"]:
+            lines.append(
+                f"    ✗ not a row in this run's step table: "
+                f"{d['steps_missing_from_the_step_table']}")
+        elif d["step_ids_not_in_the_step_table"]:
+            lines.append(
+                f"    (flow-graph reference outside this run's step table: "
+                f"{d['step_ids_not_in_the_step_table']})")
+    return lines
+
+
+def gate_population_equation(
+    census: Optional[Dict[str, Any]],
+    registered: Optional[int],
+    invoked: Optional[int],
+    not_invocable: Optional[int],
+    passed: Optional[int],
+) -> Dict[str, Any]:
+    """THE EQUATION, WITH ITS TERMS — and a break when it does not hold.
+
+    vibe-ic#2092 (lane icaes F06). MEASURED on the opentitan_aes artefact
+    (8HD-4, v1.17.38), three rounds on one tree:
+
+        registered_gate_count 246   invoked_gate_count 246
+        passed_gate_count     186   failed_gate_count   0
+        not_invocable_gate_count 0
+
+    186 + 0 + 0 is not 246, and the artefact named no third thing for the
+    other 60 to be. `p0_gate_census` since answers WHERE they went — it
+    publishes the complete partition of the umbrella's records — but nothing
+    ever CHECKED that the four published counts are that partition, so "246
+    invoked" could still be quoted as coverage and be wrong by 60 gates that
+    made no statement about this design.
+
+    THE EQUATIONS ARE OVER THE RECORDS, and every right-hand side is derived
+    from `census["by_verdict"]` rather than enumerated here, so a verdict word
+    introduced later is in the equation the day it is introduced:
+
+        sum(by_verdict)  == invoked + not_invocable
+        invoked          == sum(by_verdict except NOT_INVOCABLE)
+        not_invocable    == by_verdict[NOT_INVOCABLE]
+        passed           == by_verdict[PASS]
+
+    TWO DENOMINATORS, AND THE REGISTRY IS NOT THE ONE TO ASSERT ON. This
+    function first read `registered == sum(by_verdict)` and it was WRONG —
+    MEASURED by `test_flow_compliance_check_gate.py::test_strict_structural_
+    only_structural_gates`, which the first draft turned red. Under `--phase 2
+    --strict-structural` on a thin tree the umbrella dispatches 2 of 246
+    registered gates and the run says so itself: "registered=246 invoked=2
+    no_verdict=244 — PARTIAL". 244 gates leaving no record there is not COUNT
+    DRIFT; it is the dispatch loop correctly not invoking gates whose inputs
+    this scope does not contain, and `invoked_gate_count: 2` is the honest
+    number. An equation that cannot tell that from drift fires on the sound
+    case, and a check that fires on the sound case is worse than no check.
+
+    So the REGISTRY GAP is DISCLOSED, by name, as
+    `registered_gates_with_no_record` — never asserted to be zero. What is
+    asserted is that the published counts PROJECT THE RECORDS, which is the
+    thing that can silently stop being true. The one registry statement that
+    IS incoherent rather than merely narrow — more records than there are
+    registered gates — stays a break.
+
+    `holds` is ``None`` — NOT_MEASURED, never a pass — when the umbrella did
+    not run (stage 3/4: no census, no counts). Pure: counts in, one dict out.
+    chip-AGNOSTIC.
+    """
+    if census is None or registered is None or invoked is None:
+        return {
+            "declared": (
+                "BLOCKING — refuses when the published gate counts are not "
+                "the partition the umbrella's own records make."),
+            "holds": None,
+            "not_measured": (
+                "the P0 umbrella did not run in this scope, so there are no "
+                "records to partition and no counts to check against them. "
+                "NOT_MEASURED is not a pass."),
+            "terms": None,
+            "breaks": [],
+        }
+    by = dict(census.get("by_verdict") or {})
+    by_total = sum(by.values())
+    invoked_buckets = {k: v for k, v in by.items()
+                       if k != NOT_INVOCABLE_VERDICT}
+    invoked_total = sum(invoked_buckets.values())
+    breaks: List[str] = []
+    # A CENSUS OVER NO RECORDS IS NOT A CENSUS OF ZERO — `p0_gate_census`'s
+    # own sentence, and it decides this branch. MEASURED on an empty tree:
+    # `registered 246 / invoked 0 / not_invocable 0` over an umbrella that
+    # dispatched NOTHING. `registered == invoked + not_invocable` is not FALSE
+    # there; it is not well posed, because there is no partition to be the
+    # projection of. The run already declares that state — the STRUCTURAL
+    # MEASUREMENT line says "NONE of the 246 registered structural sub-gate(s)
+    # returned a verdict", and #2063 gave the step its own word — so the gap
+    # is NAMED here and asserted nowhere. A PARTIAL population is the opposite
+    # case and stays a break: 200 records under a 246 registry is exactly the
+    # drift this equation exists for.
+    if by_total == 0 and registered:
+        return {
+            "declared": (
+                "BLOCKING — refuses when the published gate counts are not "
+                "the partition the umbrella's own records make."),
+            "holds": None,
+            "not_measured": (
+                f"the P0 umbrella dispatched NOTHING in this run: 0 record(s) "
+                f"under a registry of {registered}. A census over no records "
+                f"is not a census of zero, so there is no partition for the "
+                f"published counts to be the projection of. "
+                f"NOT_MEASURED is not a pass — {registered} registered "
+                f"gate(s) "
+                f"made no statement about this design."),
+            "registered_gates_with_no_record": registered,
+            "terms": {
+                "registered_gate_count": registered,
+                "invoked_gate_count": invoked,
+                "not_invocable_gate_count": not_invocable,
+                "passed_gate_count": passed,
+                "by_verdict": {},
+                "by_verdict_total": 0,
+            },
+            "breaks": [],
+        }
+    if by_total > registered:
+        breaks.append(
+            f"the umbrella recorded {by_total} gate(s) under a registry of "
+            f"{registered}: more records than there are registered gates is "
+            f"incoherent, and every count published over that denominator is "
+            f"over the wrong one")
+    if not_invocable is not None and by_total != invoked + not_invocable:
+        breaks.append(
+            f"sum(gate_census.by_verdict) {by_total} != invoked_gate_count "
+            f"{invoked} + not_invocable_gate_count {not_invocable}: the two "
+            f"published counts do not partition the records they project")
+    _summed = " + ".join(f"{k} {v}"
+                         for k, v in sorted(invoked_buckets.items()))
+    if invoked != invoked_total:
+        breaks.append(
+            f"invoked_gate_count {invoked} != {_summed} = {invoked_total}")
+    if not_invocable is not None and \
+            not_invocable != by.get(NOT_INVOCABLE_VERDICT, 0):
+        breaks.append(
+            f"not_invocable_gate_count {not_invocable} != "
+            f"by_verdict[{NOT_INVOCABLE_VERDICT}] "
+            f"{by.get(NOT_INVOCABLE_VERDICT, 0)}")
+    if passed is not None and passed != by.get("PASS", 0):
+        breaks.append(
+            f"passed_gate_count {passed} != by_verdict[PASS] "
+            f"{by.get('PASS', 0)}")
+    return {
+        "declared": (
+            "BLOCKING — refuses when the published gate counts are not the "
+            "partition the umbrella's own records make."),
+        "equation": (
+            "sum(by_verdict) == invoked + not_invocable ; "
+            "invoked == sum(by_verdict except NOT_INVOCABLE) ; "
+            "passed == by_verdict[PASS]  "
+            "(the REGISTRY gap is disclosed as registered_gates_with_no_"
+            "record, never asserted)"),
+        "terms": {
+            "registered_gate_count": registered,
+            "invoked_gate_count": invoked,
+            "not_invocable_gate_count": not_invocable,
+            "passed_gate_count": passed,
+            "by_verdict": dict(sorted(by.items())),
+            "by_verdict_total": by_total,
+            "invoked_buckets": dict(sorted(invoked_buckets.items())),
+            "invoked_bucket_total": invoked_total,
+        },
+        "registered_gates_with_no_record": registered - by_total,
+        "printed": (
+            f"invoked {invoked} = {_summed} ; "
+            f"not_invocable {not_invocable} ; registered {registered}"),
+        "invoked_is_not_coverage": census.get("invoked_is_not_coverage"),
+        "holds": not breaks,
+        "breaks": breaks,
+    }
+
+
 def published_failed_gate_names(
         records: Optional[List[Dict[str, Any]]],
         ledger: Optional[List[Dict[str, Any]]]) -> List[str]:
@@ -14001,6 +14528,130 @@ def gate_population_reconciliation(
         f"{missing}. A census that reports a subset as THE count is a "
         f"criterion that does not follow the run it describes.")
     return out
+
+
+#: The run words that are NOT a red — exactly the tiers this program exits 0
+#: on, and nothing else. Spelt once here so `verdict_causes` and the exit-code
+#: decision at the bottom of `main` cannot drift apart;
+#: `test_the_green_tiers_are_the_ones_main_exits_zero_on` reads that decision
+#: out of the source and asserts it. `INSUFFICIENT_DATA` is deliberately NOT
+#: here: it is a REFUSAL, the run is still red, and `verdict_causes` handles it
+#: through `verdict_refusal_reason` — a refusal names nothing on purpose,
+#: which is a different sentence from "there was nothing to name".
+GREEN_RUN_STATUSES: Tuple[str, ...] = (
+    "PASS", "PASS_WITH_WAIVERS", "PASS_WITH_OPEN_SOURCE_CONSTRAINTS")
+
+
+def verdict_causes(
+    run_status: str,
+    failed_gates: Sequence[str],
+    steps: Sequence[Dict[str, Any]],
+    structural_fail_lines: Sequence[str],
+    step_artifact_fail_lines: Sequence[str],
+    verdict_refusal_reason: Optional[str] = None,
+    ordering_gating_lines: Sequence[str] = (),
+    self_skipped_signoff_steps: Sequence[Any] = (),
+) -> Dict[str, Any]:
+    """WHAT THE RED IS FOR, by name, in the artefact that publishes the red.
+
+    vibe-ic#2092 (lane icaes F15). MEASURED on the opentitan_aes R3 artefact,
+    twice on one tree:
+
+        verdict FAIL   failed_gate_count 0   failed_gates []
+
+    and there is no other field in the file naming a cause. A reader — the
+    mcp-eda pre-burn guard, a dashboard, a human — is told the run is red and
+    is told, by every list the file publishes, that nothing failed.
+
+    THE FAIL WAS NOT UNCAUSED. That same artefact carries 35 non-green steps
+    (12 FAIL, 16 MISSING, 7 PASS_VOIDED_BY_DEPENDENCY) in `steps[]`, which is
+    exactly what `overall` was computed from. What was missing is the SENTENCE:
+    `failed_gates` answers "which GATES failed", the verdict answers "is this
+    run red", and no field joined them, so the natural reading of the two
+    together — a red that names nothing — was the wrong one.
+
+    So this states the join. `failed_gates` is one term and the non-green STEPS
+    are another; `_flow_verdict_tiers.NON_GREEN` owns which words those are, so
+    a tier added later is a cause here the day it is added rather than the day
+    somebody remembers to list it. The last two terms are the lists `main`
+    actually sets `forced_fail` from — the structural / step-artifact failure
+    lines, and the GATING ordering violations. All four are enumerated from
+    the four `forced_fail = True` sites, not guessed: a run FAILed only by an
+    ordering violation names no failed gate and no non-green step, and a cause
+    set that stopped at the first two would have called that legitimate FAIL
+    uncaused. The fifth term is `oss_blocked_skipped`, which `ok` reads and
+    which wears an EXCUSED word (`SKIPPED-CONDITION`), so it reaches the cause
+    set through neither the statuses nor the lines.
+
+    WHAT THIS IS NOT. It does not invent a gate name, it does not move
+    `run_status`, and it does not make a step-caused FAIL into a gate-caused
+    one. `names_its_cause` is False when a red run really does name nothing,
+    which is a defect in THIS AUDIT and is reported as one.
+
+    A REFUSAL NAMES NOTHING ON PURPOSE. When `completion_audit_verdict` has
+    already written `INSUFFICIENT_DATA` the audit has said, in the artefact,
+    that it made no finding; `names_its_cause` is then None — NOT_MEASURED,
+    never a pass — and the reconciliation reads it as disclosed rather than
+    broken.
+
+    chip-AGNOSTIC — set algebra over step statuses and gate names.
+    """
+    non_green = [
+        {"step_id": str(st.get("id")), "step_name": st.get("name"),
+         "status": st.get("status")}
+        for st in (steps or [])
+        if _T.is_non_green(st.get("status"))
+    ]
+    gates = sorted({str(g) for g in (failed_gates or [])})
+    n = (len(gates) + len(non_green) + len(structural_fail_lines or [])
+         + len(step_artifact_fail_lines or [])
+         + len(ordering_gating_lines or [])
+         + len(self_skipped_signoff_steps or []))
+    red = str(run_status) not in GREEN_RUN_STATUSES
+    if not red:
+        names: Optional[bool] = None
+        note = ("the run is green; a green verdict is not required to name a "
+                "cause and this field asserts nothing about it.")
+    elif verdict_refusal_reason:
+        names = None
+        note = ("this audit REFUSED rather than reported a finding, so it "
+                "names no cause on purpose. NOT_MEASURED is not a pass.")
+    else:
+        names = n > 0
+        note = ("a run this audit publishes as red names its cause here, or "
+                "it names none and that is a defect in the audit.")
+    return {
+        "declared": (
+            "BLOCKING — a red run that names no cause is refused by "
+            "`audit_reconciliation` equation E1."),
+        "run_status": run_status,
+        "run_is_red": red,
+        "failed_gates": gates,
+        "non_green_steps": non_green,
+        "structural_fail_line_count": len(structural_fail_lines or []),
+        "step_artifact_fail_line_count": len(step_artifact_fail_lines or []),
+        # THE THIRD LIST `forced_fail` READS, and the one that is neither a
+        # step status nor a gate name. Four `forced_fail = True` sites read
+        # three lists: the two failure-line lists above, and this one — a
+        # hand-off step marked done while a step it `blocks_on` had not
+        # delivered. A cause set that omitted it would report `names_its_cause:
+        # false` on a run whose FAIL is entirely correct and entirely
+        # explained, and the frame canary would then redden a legitimate run
+        # over the audit's own blind spot.
+        "ordering_gating_line_count": len(ordering_gating_lines or []),
+        # THE FIFTH, and it wears an EXCUSED word. `ok` is false when
+        # `oss_blocked_skipped` is non-empty, and those rows are
+        # SKIPPED-CONDITION — a status `_flow_verdict_tiers` puts in EXCUSED,
+        # not in NON_GREEN. So a run red for this reason alone has no failed
+        # gate, no non-green step and no failure line, and a cause set built
+        # from the first four terms would call it uncaused. The audit already
+        # publishes this population as `open_source_blocked_self_skipped_
+        # steps`; this is the same list, counted as the cause it is.
+        "self_skipped_signoff_step_count": len(self_skipped_signoff_steps or []),
+        "named_cause_count": n,
+        "names_its_cause": names,
+        "note": note,
+    }
 
 
 def completion_audit_verdict(
@@ -15447,6 +16098,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Wave 91 / v1.6.15 — id key for the umbrella was renamed -1 → "P0".
     structural_fail_lines: List[str] = []
     step_artifact_fail_lines: List[str] = []
+    step_artifact_fail_step_ids: List[str] = []
     if args.phase == "2" and (
             args.strict_structural or args.strict_step_artifacts):
         for r in results:
@@ -15479,6 +16131,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 first_reason = r.reasons[0] if r.reasons else r.status
                 step_artifact_fail_lines.append(
                     f"step{r.id} ({r.name}): {r.status} — {first_reason}")
+                # vibe-ic#2092 — the ID, beside the rendered line. The line is
+                # prose for a human; a consumer that had to recover the id
+                # from it would be the prose scrape this file has already
+                # removed twice.
+                step_artifact_fail_step_ids.append(str(r.id))
 
     # ── THE CENSUS MUST CLOSE ────────────────────────────────────────────
     # BLOCKING, and declared so. `_gate_census` partitions the umbrella's own
@@ -15554,6 +16211,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # the open-source-constraints promotion so it cannot be softened away).
     ordering_fail_lines: List[str] = []
     ordering_gating_lines: List[str] = []
+    ordering_informational_step_ids: List[str] = []
     try:
         import flow_step_execution_coverage_check as _cov
         _cov_graph = {
@@ -15665,15 +16323,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         _no_verdict_ids = {str(r.id) for r in scoped
                            if _T.says_nothing_was_measured(
                                r.status)}
+        # vibe-ic#2092 — ONE predicate, TWO projections. The gating lines and
+        # the ids of the violations held informational were derived by two
+        # copies of this condition; a second copy is a second place for the
+        # printed disclosure and the recorded one to disagree about which
+        # violations they describe.
+        _ordering_is_gating = [
+            (str(v['signoff_id']) in _scoped_ids
+             or str(v['terminal_id']) in _no_verdict_ids)
+            for v in _ordering_violations]
         ordering_gating_lines = [
-            line for line, v in zip(ordering_fail_lines, _ordering_violations)
-            if str(v['signoff_id']) in _scoped_ids
-            or str(v['terminal_id']) in _no_verdict_ids]
+            line for line, g in zip(ordering_fail_lines, _ordering_is_gating)
+            if g]
+        ordering_informational_step_ids = [
+            str(v['terminal_id'])
+            for v, g in zip(_ordering_violations, _ordering_is_gating)
+            if not g]
         if ordering_gating_lines:
             forced_fail = True
     except Exception:  # nosec — additive enforcement must never crash the audit
         ordering_fail_lines = []
         ordering_gating_lines = []
+        ordering_informational_step_ids = []
         _ordering_violations = []
 
     if not ok or forced_fail:
@@ -16078,6 +16749,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     # 14 real FAILs in the v0.119.61 35th-attempt). The artifact is
     # always written; missing => agent never ran the audit => burn
     # blocked by mcp-eda guard.
+    # vibe-ic#2092 — set by the frame canary below when this artefact's own
+    # equations do not hold. Declared out here because the audit-emission block
+    # swallows every exception, and a canary a swallowed exception can hide is
+    # not a canary.
+    _audit_did_not_reconcile: Optional[Dict[str, Any]] = None
+
+    # vibe-ic#2092 — the disclosure record, computed BEFORE the audit block so
+    # the final stdout lines carry it even on the run where the audit emission
+    # itself fails. See `informational_disclosures`.
+    _informational = informational_disclosures(
+        strict_structural_only=structural_only_verdict,
+        step_artifact_fail_lines=step_artifact_fail_lines,
+        step_artifact_fail_step_ids=step_artifact_fail_step_ids,
+        ordering_fail_lines=ordering_fail_lines,
+        ordering_gating_lines=ordering_gating_lines,
+        ordering_informational_step_ids=ordering_informational_step_ids,
+        self_skipped_signoff_step_ids=[str(r.id) for r in oss_blocked_skipped],
+        step_ids_in_table=[str(r.id) for r in results],
+    )
+
     try:
         # Per-gate verdicts from the P0 (structural-RTL) umbrella so the
         # JSON is self-contained.
@@ -16241,6 +16932,29 @@ def main(argv: Optional[List[str]] = None) -> int:
             structural_registered_count,
         )
 
+        # vibe-ic#2092 — THE JOIN between the red and what caused it. Computed
+        # from the SAME objects the dict publishes (`_step_rows` below is the
+        # `steps` field, not a second projection of `results`), so the field a
+        # reader keys on and the field that explains it cannot disagree.
+        _gate_equation = gate_population_equation(
+            _gate_census,
+            structural_registered_count,
+            structural_invoked_count,
+            structural_not_invocable_count,
+            passed_gate_count,
+        )
+        _step_rows = [asdict(r) for r in results]
+        _verdict_causes = verdict_causes(
+            overall,
+            _published_failed_gates,
+            _step_rows,
+            structural_fail_lines,
+            step_artifact_fail_lines,
+            _audit_refusal,
+            ordering_gating_lines,
+            oss_blocked_skipped,
+        )
+
         from datetime import datetime, timezone
         audit = {
             "schema_version": 1,
@@ -16312,6 +17026,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             # TWO POPULATIONS this file carries, told apart. See
             # `p0_gate_census` / `gate_population_reconciliation`.
             "gate_census": _gate_census,
+            # vibe-ic#2092 — and the EQUATION over those buckets, with its
+            # terms. The partition existed; nothing checked that the four
+            # counts above are it, so `invoked 246` could still be quoted as
+            # coverage while 60 gates made no statement about this design.
+            "gate_population_equation": _gate_equation,
             "gate_population_reconciliation": _gate_recon,
             "step_counts": counts,
             # vibe-ic#1969 — the tally and the records it counted travel in
@@ -16321,9 +17040,19 @@ def main(argv: Optional[List[str]] = None) -> int:
             # scrape human stdout and create a second, drifting tally.
             # Both values project the SAME final `results` objects after
             # ordering/cascade re-tiering, immediately before this write.
-            "steps": [asdict(r) for r in results],
+            "steps": _step_rows,
+            # vibe-ic#2092 — and WHAT THE RED IS FOR, joined to the two lists
+            # above rather than left for a reader to join. See
+            # `verdict_causes`.
+            "verdict_causes": _verdict_causes,
             "structural_fail_lines": structural_fail_lines,
             "step_artifact_fail_lines": step_artifact_fail_lines,
+            # vibe-ic#2092 — every "reported, NOT gating" sentence this run
+            # PRINTED, as a record: which steps each one names, and whether
+            # every one of them is a row in `steps` above. Until this field
+            # the disclosure existed only in stdout, 130+ lines before the
+            # end, where the one consumer that keeps a tail never saw it.
+            "informational_disclosures": _informational,
             "missing_required_artifacts": missing_required,
             # v1.6.210 (#91) — surface OS-constraints deferral list in
             # the audit JSON so downstream tooling can render the
@@ -16377,6 +17106,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 audit["tally_delta"] = {
                     "classification": "NOT_COMPARABLE",
                     "statement": f"comparison failed: {_exc}"}
+        # vibe-ic#2092 — THE FRAME CANARY, over the finished dict and before
+        # it is written. It is computed LAST because it reads `tally_delta`,
+        # which is set above; every other term is already in the dict.
+        audit["reconciliation"] = audit_reconciliation(audit)
+        if not audit["reconciliation"]["reconciled"]:
+            _audit_did_not_reconcile = audit["reconciliation"]
+
         audit_path.parent.mkdir(parents=True, exist_ok=True)
         audit_path.write_text(
             json.dumps(audit, indent=2, ensure_ascii=False))
@@ -16415,9 +17151,42 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(structural_measurement_line(structural_registered_count,
                                       structural_invoked_count))
 
+    # vibe-ic#2092 — AND THE DISCLOSURES, IN THE SAME FINAL BLOCK, for the same
+    # reason: `step_final_audit` keeps the final 25 lines of this stdout, and a
+    # "reported, NOT gating" sentence emitted beside `Overall:` is 130+ lines
+    # earlier. Advisory by construction — it moves no verdict and no exit code;
+    # it states what the verdict did NOT count.
+    for _line in informational_disclosure_lines(_informational):
+        print(_line)
+
     # v1.6.210 (#91) — PASS_WITH_OPEN_SOURCE_CONSTRAINTS exits 0 (it is
     # a recognised verdict tier, not a FAIL). PASS, PASS_WITH_WAIVERS,
     # and PASS_WITH_OPEN_SOURCE_CONSTRAINTS all exit 0; FAIL exits 1.
+    # vibe-ic#2092 — AND THE CANARY, LAST. A report whose own equations do not
+    # hold has been written (destroying it would destroy the evidence of the
+    # break) and carries `reconciled: false` with the broken equation named.
+    # What it may NOT do is exit 0 and be quoted: the arithmetic a consumer
+    # would read is the arithmetic this audit has just withdrawn.
+    #
+    # `overall` and `run_status` are UNTOUCHED — the gate decisions are exactly
+    # what they were, and the artefact still records them. This is the same
+    # class as `p0_gate_census`'s `closes` and
+    # `gate_population_reconciliation`'s refusal — a defect in the AUDIT, not a
+    # finding about the design — and it is given the same rc 1 those take
+    # through `structural_fail_lines`, rather than a new code no caller of this
+    # program knows how to read.
+    if _audit_did_not_reconcile is not None:
+        print("\nflow_compliance_check: THIS REPORT DOES NOT RECONCILE — "
+              f"{len(_audit_did_not_reconcile['broken'])} of "
+              f"{len(_audit_did_not_reconcile['equations_checked'])} "
+              "equation(s) over its own numbers are false. The report was "
+              "still written, with `reconciled: false`; do not quote its "
+              "counts.")
+        for _b in _audit_did_not_reconcile["broken"]:
+            print(f"  ✗ [{_b['id']}] {_b['equation']} — {_b['detail']}")
+        print(f"  (the run's own status is unchanged and still {overall}.)")
+        return 1
+
     if overall in ("PASS", "PASS_WITH_WAIVERS",
                    "PASS_WITH_OPEN_SOURCE_CONSTRAINTS"):
         return 0

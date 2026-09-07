@@ -2047,6 +2047,54 @@ def _render(project: Path, run_audit: bool = True,
                   f"treat its per-step table as a converged view until the "
                   f"producer artifact is repaired.")
         md.append("")
+    # vibe-ic#2092 — THE TWO SENTENCES THE PRODUCER WROTE AND THIS SUMMARY
+    # NEVER CARRIED.
+    #
+    # MEASURED on the icaes opentitan_aes run (8HD-4):
+    # `flow_compliance_check.log:215` printed "3 step(s) FAIL/MISSING
+    # (informational, not gating --strict-structural)" beside
+    # `Overall: PASS_WITH_WAIVERS`, and this file — the summary a reader
+    # actually reads — contained the word "informational" ZERO times. A
+    # disclosure a run makes and its own summary does not repeat is a
+    # disclosure to nobody.
+    #
+    # `reconciliation` is the other half: when the producer's own equations
+    # over its own numbers are false, every count rendered below is a count it
+    # has withdrawn, and that must be the FIRST thing under Verdict rather
+    # than a field a reader would have to open the JSON to find.
+    if isinstance(audit_snapshot, dict):
+        _rec = audit_snapshot.get("reconciliation")
+        if isinstance(_rec, dict) and _rec.get("reconciled") is False:
+            md.append(f"> ⛔ **The audit does not reconcile** — "
+                      f"{len(_rec.get('broken') or [])} of "
+                      f"{len(_rec.get('equations_checked') or [])} equation(s) "
+                      f"over `reports/audit/phase23_completion_audit.json`'s "
+                      f"OWN numbers are false. Do not quote the counts below "
+                      f"until the producer artifact is repaired.")
+            for _b in (_rec.get("broken") or []):
+                md.append(f">   - `[{_b.get('id')}]` {_b.get('equation')} — "
+                          f"{_b.get('detail')}")
+            md.append("")
+        _inf = audit_snapshot.get("informational_disclosures")
+        _ds = (_inf or {}).get("disclosures") or [] \
+            if isinstance(_inf, dict) else []
+        if _ds:
+            md.append(f"> ℹ️ **Reported, NOT gating** — this run made "
+                      f"{len(_ds)} disclosure(s) that the Overall verdict "
+                      f"above did NOT count. They are steps whose state is "
+                      f"known and was held informational, not steps that "
+                      f"passed.")
+            for _d in _ds:
+                _ids = ", ".join(f"`{i}`" for i in (_d.get("step_ids") or [])) \
+                    or "no step named"
+                md.append(f">   - {_d.get('headline')} — steps: {_ids}")
+                if _d.get("steps_missing_from_the_step_table"):
+                    md.append(
+                        f">     ⚠️ named step(s) that are in NO row of the "
+                        f"audit's own step table: "
+                        f"{_d['steps_missing_from_the_step_table']}")
+            md.append("")
+
     # #461 / #1969: every count below comes from the SINGLE producer-owned
     # `step_counts` snapshot via `snap` — never a stdout parse or per-step
     # recount, never a divergent PASS definition.

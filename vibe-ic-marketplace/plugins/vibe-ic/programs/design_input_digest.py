@@ -157,6 +157,30 @@ RULER_FLAGS: Tuple[str, ...] = (
     "stage_id",
 )
 
+#: The ruler flags that change WHICH STEPS are judged, as opposed to how they
+#: are judged. A SUBSET of `RULER_FLAGS` — every name here is also there, and
+#: `test_prior_tally_is_a_previous_run` asserts that.
+#:
+#: vibe-ic#2092 (lane icaes F07). Two audits of ONE run directory, 2.16 s
+#: apart, were published as a `tally_delta`: the prior tally counted 13 steps,
+#: the current 69, and `classify` reported ``MEASUREMENT_CHANGE`` — "the tally
+#: moved while the design stayed BYTE-IDENTICAL; what changed is the ruler".
+#: Every word of that sentence is true and the record is still wrong, because
+#: 69 minus 13 is not a movement in a tally: the two numbers count DIFFERENT
+#: STEP POPULATIONS, so their difference is not a delta at all. The artefact
+#: recorded no scope for the prior either, so a reader could not see that.
+#:
+#: `MEASUREMENT_CHANGE` keeps the case it exists for — the SAME population
+#: judged by a different ruler (a plugin version, a strict flag). What is
+#: taken away from it is the case where the question itself changed.
+POPULATION_FLAGS: Tuple[str, ...] = (
+    "flow",
+    "phase",
+    "stage",
+    "stage_id",
+    "exclude_step",
+)
+
 #: Options that do not change the question asked, each with the reason.
 NON_RULER_FLAGS: Dict[str, str] = {
     "help": "argparse builtin",
@@ -445,6 +469,125 @@ def _measurement_id(audit: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _flow_def_sha(audit: Dict[str, Any]) -> Optional[str]:
+    blk = audit.get("measurement")
+    if isinstance(blk, dict):
+        sha = blk.get("flow_def_sha256")
+        return sha if isinstance(sha, str) and sha else None
+    return None
+
+
+def _ruler_flags(audit: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    blk = audit.get("measurement")
+    if isinstance(blk, dict):
+        rf = blk.get("ruler_flags")
+        if isinstance(rf, dict):
+            return rf
+    return None
+
+
+def _step_population(audit: Dict[str, Any]) -> Optional[int]:
+    """How many steps this audit's tally counted, or None when it says."""
+    counts = audit.get("step_counts")
+    if not isinstance(counts, dict):
+        return None
+    total = 0
+    for v in counts.values():
+        if not isinstance(v, int):
+            return None
+        total += v
+    return total
+
+
+def prior_is_a_previous_run(prior: Dict[str, Any],
+                            current: Dict[str, Any]) -> Dict[str, Any]:
+    """Is `prior` a PREVIOUS RUN of the same measurement, or another question?
+
+    vibe-ic#2092 (lane icaes F07) — `classify`'s prior used to be whatever
+    audit happened to sit at the path being overwritten. On a run that audits
+    one tree twice under two different scopes that is the same path 2 s older,
+    judging a DIFFERENT question, and subtracting its tally from this one
+    produces a "delta" between two numbers that were never comparable: the
+    measured pair counted 13 steps and 69.
+
+    TWO REJECTIONS, each measurable from the two artefacts alone:
+
+      * DIFFERENT QUESTION — the two differ on a `POPULATION_FLAGS` value, so
+        they judged different STEP POPULATIONS.
+      * DIFFERENT POPULATION SIZE UNDER ONE FLOW DEFINITION — the two tallies
+        count a different number of steps while naming the SAME
+        `flow_def_sha256`. The guard is load-bearing: a flow definition that
+        gained a step legitimately changes the population size, and that is a
+        ruler change over one run directory, not an incomparable pair.
+
+    NOT a rejection: a different plugin version, flow definition or strict
+    flag. Those are the ruler changing over ONE population — the case
+    `MEASUREMENT_CHANGE` was built for, and it keeps it. Nor is an identical
+    `run_at`: it is minted per invocation from the clock, so two audits that
+    share one are a fixture, not a producer state, and `UNCHANGED` /
+    `UNEXPLAINED_TALLY_MOVE` already own that pair.
+
+    `comparable` is ``None`` — NOT_MEASURED, and never a pass — when neither
+    rejection could be evaluated: no ruler flags on both sides AND no shared
+    flow definition to size the populations under. Pure: two dicts in, one
+    dict out.
+    """
+    p_rf, c_rf = _ruler_flags(prior), _ruler_flags(current)
+    p_pop, c_pop = _step_population(prior), _step_population(current)
+    p_flow, c_flow = _flow_def_sha(prior), _flow_def_sha(current)
+    reasons: List[str] = []
+    scope_diff: Dict[str, Any] = {}
+    evaluated = False
+
+    if p_rf is not None and c_rf is not None:
+        evaluated = True
+        for k in POPULATION_FLAGS:
+            if p_rf.get(k) != c_rf.get(k):
+                scope_diff[k] = {"prior": p_rf.get(k), "current": c_rf.get(k)}
+        if scope_diff:
+            reasons.append(
+                f"the two audits judged DIFFERENT step populations: "
+                f"{sorted(scope_diff)} differ, so their tallies answer "
+                f"different questions and their difference is not a delta")
+
+    if (p_pop is not None and c_pop is not None
+            and p_flow is not None and p_flow == c_flow):
+        evaluated = True
+        if p_pop != c_pop:
+            reasons.append(
+                f"the prior tally counts {p_pop} step(s) and this one "
+                f"{c_pop}, under one and the same flow definition; a "
+                f"difference between two different populations is not a "
+                f"movement in one")
+
+    comparable: Optional[bool]
+    if reasons:
+        comparable = False
+    elif evaluated:
+        comparable = True
+    else:
+        comparable = None
+
+    out: Dict[str, Any] = {
+        "comparable": comparable,
+        "reasons": reasons,
+        "population_flags_differing": scope_diff,
+        "prior_step_population": p_pop,
+        "current_step_population": c_pop,
+        "prior_flow_def_sha256": p_flow,
+        "current_flow_def_sha256": c_flow,
+        "prior_run_at": prior.get("run_at"),
+        "current_run_at": current.get("run_at"),
+    }
+    if comparable is None:
+        out["not_measured"] = (
+            "neither audit records the ruler flags, and they name no common "
+            "flow definition to size their populations under, so whether "
+            "they judged the same population could not be established. "
+            "NOT_MEASURED is not a pass.")
+    return out
+
+
 def classify(prior: Optional[Dict[str, Any]],
              current: Dict[str, Any]) -> Dict[str, Any]:
     """Which of the two — the design or the ruler — moved.
@@ -467,13 +610,33 @@ def classify(prior: Optional[Dict[str, Any]],
             "measurement_id": _measurement_id(current),
             "tally": _tally_of(current),
             "run_at": current.get("run_at"),
+            # vibe-ic#2092 — the SCOPE, beside the tally. Without it a reader
+            # holding two of these records cannot see that they answered
+            # different questions, which is how a 13-step tally and a 69-step
+            # tally were published as one movement.
+            "ruler_flags": _ruler_flags(current),
         },
     }
 
+    out["prior_eligibility"] = None
     if not isinstance(prior, dict):
         out["statement"] = (
             "No prior audit was available at this path, so this tally cannot "
             "be compared with anything.")
+        return out
+
+    # vibe-ic#2092 — WHAT IS AT THIS PATH IS NOT AUTOMATICALLY THE PREVIOUS
+    # RUN. When it is not, `prior` stays ABSENT and says so by name; a delta
+    # between two tallies that counted different populations is not a delta,
+    # and publishing one is the defect this record exists to prevent.
+    elig = prior_is_a_previous_run(prior, current)
+    out["prior_eligibility"] = elig
+    if elig["comparable"] is False:
+        out["classification"] = "NOT_COMPARABLE"
+        out["statement"] = (
+            "The audit found at this path is NOT a previous run of this "
+            "measurement, so there is no prior tally to compare with and "
+            "none is published: " + "; ".join(elig["reasons"]) + ".")
         return out
 
     out["prior"] = {
@@ -481,6 +644,7 @@ def classify(prior: Optional[Dict[str, Any]],
         "measurement_id": _measurement_id(prior),
         "tally": _tally_of(prior),
         "run_at": prior.get("run_at"),
+        "ruler_flags": _ruler_flags(prior),
     }
 
     p_design, c_design = _design_sha(prior), _design_sha(current)
