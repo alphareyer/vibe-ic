@@ -1054,6 +1054,106 @@ _TB_INTEGRATION_OPTIONS = (
 #: stays legal and silently dropping it cannot.
 _NGSPICE_DEFAULT_TRTOL = 7.0
 
+#: The instance name the emitted testbench gives the block. Stated ONCE:
+#: `transient_rail_measurement` writes `v(<instance>.<net>)` cards and
+#: `render_testbench` writes the instance line, and a literal in each is free
+#: to drift into a deck whose measurements name a device that is not there --
+#: which ngspice reports as `no such vector` and then measures nothing, on a
+#: run that still exits 0.
+_TB_DUT_INSTANCE = "xdut"
+
+#: The prefix every transient rail measurement this producer emits carries.
+#: It is what makes the emitter's cards and the consumer's rows the SAME
+#: population: `transient_rail_measurement` writes it and
+#: `tran_rail_report` reads it, so a renamed prefix cannot leave the reader
+#: silently matching nothing and reporting a clean transient.
+_RAIL_MEAS_PREFIX = "railx"
+
+
+# ── the transient rail measurement the emitted testbench carries ──────────
+# WHY A `.meas` CARD AND NOT THE OPERATING-POINT TABLE (vibe-ic#2077).
+#
+# MEASURED (lane czdsm3, 2026-09-07): `delta_sigma` put +3.34 V and +2.99 V on
+# its own internal nodes on a block powered between 0 and 1.2 V, and the
+# operating point was CLEAN throughout -- `nn1` and `nn2` sit at 6.8e-07 V and
+# at 0.036 / 1.055 V in the same run. So `dc_op_rail_excursions`, which reads
+# the table ngspice prints above the analysis, could never have seen it: the
+# excursion lives in the TRANSIENT, and reproduces to three figures by
+# deleting the `.options trtol=1` card above. Nobody read it either, because
+# the emitted testbench measured the block's OUTPUT and nothing else; the
+# excursion was visible only by opening the waveform by hand.
+#
+# THE COST THAT WAS PAID FOR IT. czdsm3 chose byte-identity of the emitted
+# decks over adding cards, which is why this landed as an open issue rather
+# than as part of that change. The decks DO differ now, and every deck says so
+# in its own provenance (`transient_rail_measurement=`) rather than differing
+# quietly -- including the decks that get NO cards, which state why.
+#
+# WHY IT IS EMITTED FOR EVERY BLOCK AND EVERY INTERNAL NET. A per-class list of
+# "interesting" nodes is the template table this producer exists to not be, and
+# the node that went out of range here was not one anybody would have listed.
+# The population is the IR's own `internal_nets`, so a class added later is
+# covered by construction.
+#
+# WHY ONLY A DECK THAT RUNS A TRANSIENT. `meas tran` reads the vector a
+# transient produced; on the `op`-only decks in this library (`ldo`, `pull`)
+# it has nothing to read and ngspice answers `no such vector`. An absent
+# measurement that is NAMED as absent is honest; one that is emitted and fails
+# would be 2N error lines per deck and a reader with no way to tell that from
+# a node that really could not be measured.
+def _control_runs_a_transient(control_lines: Any) -> bool:
+    """True when the deck's own `.control` block issues a transient analysis.
+
+    Read off the control lines THIS producer is about to write, not off the
+    IR's `analyses_implied` -- the cards have to follow the analysis that
+    actually runs, and those are two different declarations that have been
+    measured to disagree (`ldo` implies `op`, `dc` and `ac` and runs `op`)."""
+    for ln in (control_lines or []):
+        if not isinstance(ln, str):
+            continue
+        head = ln.strip().split()
+        if head and head[0].lower() == "tran":
+            return True
+    return False
+
+
+def transient_rail_measurement(ir: Dict[str, Any]
+                               ) -> Tuple[List[str], str]:
+    """`(cards, provenance)` for the block's transient rail measurement.
+
+    ONE function for both, deliberately: the cards and the sentence the deck
+    makes about them cannot then disagree, and a deck that gets NO cards still
+    carries a sentence saying which of the three reasons applies. "Could not
+    measure it" and "measured it and it was inside the rails" are different
+    answers, and this is the first half of keeping them apart -- the second is
+    `tran_rail_report`, which grades what came back against what was asked."""
+    tb = ir.get("testbench")
+    if not isinstance(tb, dict):
+        return [], ("transient_rail_measurement=none (the topology IR "
+                    "declares no testbench, so no deck is emitted to measure)")
+    if not _control_runs_a_transient(tb.get("control")):
+        return [], ("transient_rail_measurement=none (this deck runs no "
+                    "transient, so there is no transient to measure; its "
+                    "operating point is still graded by "
+                    "`dc_op_rail_excursions`)")
+    rails = {v for v in (ir.get("rails") or {}).values() if isinstance(v, str)}
+    nets = [n for n in (ir.get("internal_nets") or [])
+            if isinstance(n, str) and n and n not in rails]
+    if not nets:
+        return [], ("transient_rail_measurement=none (the topology IR "
+                    "declares no internal net for this block)")
+    cards: List[str] = []
+    for n in nets:
+        node = f"{_TB_DUT_INSTANCE}.{n}"
+        cards.append(f"meas tran {_RAIL_MEAS_PREFIX}_max_{n} max v({node})")
+        cards.append(f"meas tran {_RAIL_MEAS_PREFIX}_min_{n} min v({node})")
+    return cards, (
+        f"transient_rail_measurement={len(nets)} internal node(s), max and "
+        f"min over the whole transient, refused outside this block's own "
+        f"rails by `tran_rail_report` at a margin of "
+        f"{TRAN_RAIL_MARGIN_FRACTION} x the supply the deck drives")
+
+
 def render_testbench(ir: Dict[str, Any], pdkctx: Dict[str, Any],
                      env: Dict[str, Any], prov_lines: List[str]
                      ) -> Tuple[Optional[str], Dict[str, Any], List[str]]:
@@ -1102,7 +1202,7 @@ def render_testbench(ir: Dict[str, Any], pdkctx: Dict[str, Any],
     ports = []
     for p in ir["ports"]:
         ports.append("0" if p == (ir.get("rails") or {}).get("vss") else p)
-    L.append(f"xdut {' '.join(ports)} {block}")
+    L.append(f"{_TB_DUT_INSTANCE} {' '.join(ports)} {block}")
     for ln in tb.get("cards") or []:
         L.append(ln.format(**fmt))
     # TOP LEVEL, before `.control`: an `.options` card inside a `.control`
@@ -1112,6 +1212,15 @@ def render_testbench(ir: Dict[str, Any], pdkctx: Dict[str, Any],
     L.append(".control")
     for ln in tb.get("control") or []:
         L.append(ln.format(**fmt))
+    # AFTER the analysis and INSIDE `.control`: `meas tran` reads the vector
+    # the transient above produced, so the same cards one block higher measure
+    # nothing at all — the mirror image of the `.options` placement rule a few
+    # lines up, and the two are wrong in opposite directions.
+    _rail_cards, _rail_prov = transient_rail_measurement(ir)
+    if _rail_cards:
+        L.append("* the transient rail measurement this producer refuses on "
+                 "— see `transient_rail_measurement`")
+        L.extend(_rail_cards)
     L.append(".endc")
     L.append(".end")
     L.append("")
@@ -1393,6 +1502,113 @@ def dc_op_rail_excursions(log_text: str, supply_v: Optional[float]
     return sorted(worst.items(), key=lambda kv: -abs(kv[1]))
 
 
+#: How far outside a rail an internal node may go AT ANY POINT IN THE
+#: TRANSIENT before the run is refused. A FULL SUPPLY of headroom on each
+#: side, i.e. four times the DC margin, and the width is the argument:
+#:
+#:   * a transient legitimately goes where a DC operating point cannot. Every
+#:     bootstrap, charge-pump and clock-coupled node in this library's classes
+#:     is DESIGNED to reach about twice its own rail for part of a cycle, and a
+#:     rule that refuses those refuses working circuits.
+#:   * a node that reaches TWICE the supply because nothing holds it there
+#:     keeps going. MEASURED on the block this bound was written for: 3.34 V
+#:     on a 1.2 V rail — 2.78x the supply, i.e. clear of a 2x bound by more
+#:     than half a supply, not by a rounding.
+#:
+#: So the bound is set where a designed excursion ends and an unheld one does
+#: not, and it is a FRACTION of the block's own supply for the same reason the
+#: DC one is: the same rule then reads a 1.2 V core and a 5 V I/O domain.
+#: Tool/PDK/chip-AGNOSTIC.
+TRAN_RAIL_MARGIN_FRACTION = 1.0
+
+#: One answered `meas` row, as ngspice-47 prints it. TWO SPELLINGS, measured
+#: in the pinned image: a short name is padded to a column and the `=` is a
+#: separate token (`railx_max_mid            =  4.40543e-01 at=  1.5185e-07`),
+#: a long one runs straight into it (`railx_max_<32 chars>=  4.40543e-01
+#: at=  …`). `\s*=` covers both. The trailing `at=` is deliberately NOT
+#: required: a measurement that came back is a measurement whether or not this
+#: build prints where it happened.
+_RAIL_MEAS_ROW_RE = re.compile(
+    r"^\s*" + _RAIL_MEAS_PREFIX + r"_(max|min)_(\S+?)\s*=\s*"
+    r"(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b")
+
+#: One EMITTED card, read back off the deck. The requested population is taken
+#: from the deck rather than recomputed from the IR so that the consumer grades
+#: what the simulator was actually asked, and a card the emitter never wrote
+#: cannot be counted as a node that came back clean.
+_RAIL_MEAS_CARD_RE = re.compile(
+    r"^\s*meas\s+tran\s+" + _RAIL_MEAS_PREFIX +
+    r"_(?:max|min)_(\S+)\s+(?:max|min)\s", re.IGNORECASE)
+
+
+def rail_meas_nodes_requested(tb_text: Optional[str]) -> List[str]:
+    """Every internal node the EMITTED testbench asks a rail measurement for.
+
+    Read off the deck, so `tran_rail_report` can compare MEMBERSHIP — asked
+    against answered — instead of counting rows. A `meas` ngspice refuses
+    (`no such vector`) prints an error and the run still exits 0, so a reader
+    that only collected the rows it got would report a clean transient for a
+    block none of whose nodes were measured at all."""
+    seen: Dict[str, None] = {}
+    for raw in (tb_text or "").splitlines():
+        m = _RAIL_MEAS_CARD_RE.match(raw)
+        if m:
+            seen.setdefault(m.group(1).lower(), None)
+    return list(seen)
+
+
+def tran_rail_report(log_text: str, supply_v: Optional[float],
+                     requested: Optional[List[str]] = None
+                     ) -> Dict[str, Any]:
+    """INTERNAL nodes the TRANSIENT put outside the block's rails.
+
+    THE INVARIANT, AND HOW IT DIFFERS FROM THE DC ONE. `dc_op_rail_excursions`
+    asks whether the SOLUTION the solver settled on is one the circuit holds.
+    This asks whether the block STAYED inside its own rails while it ran —
+    which is a different question with a different answer, measured: the block
+    this was written for had a clean operating point on every node and put
+    +3.34 V on two of them during the transient (vibe-ic#2077).
+
+    READS THE MEASUREMENTS THE DECK ASKED FOR, and says which it did not get.
+    Returns `invariant` = CHECKED / NOT_MEASURED_NO_SUPPLY / NOT_MEASURED_NO_CARDS,
+    `excursions` worst-first, and the asked-against-answered split. An empty
+    `excursions` is NOT on its own a claim that the transient was checked — the
+    caller reads `invariant` and `nodes_not_measured`, exactly as it already
+    does for the DC table."""
+    req = [n.lower() for n in (requested or [])]
+    if not req:
+        return {"invariant": "NOT_MEASURED_NO_CARDS", "excursions": [],
+                "nodes_measured": [], "nodes_not_measured": []}
+    if not isinstance(supply_v, (int, float)) or supply_v <= 0:
+        return {"invariant": "NOT_MEASURED_NO_SUPPLY", "excursions": [],
+                "nodes_measured": [], "nodes_not_measured": sorted(req)}
+    margin = abs(float(supply_v)) * TRAN_RAIL_MARGIN_FRACTION
+    hi, lo = float(supply_v) + margin, -margin
+    answered: Dict[str, None] = {}
+    worst: Dict[str, float] = {}
+    for raw in (log_text or "").splitlines():
+        m = _RAIL_MEAS_ROW_RE.match(raw)
+        if not m:
+            continue
+        node = m.group(2).lower()
+        try:
+            v = float(m.group(3))
+        except ValueError:
+            continue
+        answered.setdefault(node, None)
+        if v > hi or v < lo:
+            # `max` and `min` of the same node are two rows; keep the one that
+            # is further outside, so the node is reported once with its worst.
+            if abs(v) > abs(worst.get(node, 0.0)):
+                worst[node] = v
+    return {
+        "invariant": "CHECKED",
+        "excursions": sorted(worst.items(), key=lambda kv: -abs(kv[1])),
+        "nodes_measured": sorted(answered),
+        "nodes_not_measured": sorted(set(req) - set(answered)),
+    }
+
+
 def verify_with_ngspice(container: str, block: str, sp_text: str,
                         tb_text: str,
                         real_project: Optional[Path] = None,
@@ -1570,6 +1786,20 @@ def verify_with_ngspice(container: str, block: str, sp_text: str,
         # table on every `-b` run; reading it costs nothing and answers a
         # question no other gate asks -- see `dc_op_rail_excursions`.
         rails = dc_op_rail_excursions(out, supply_v)
+        # THE TRANSIENT RAIL INVARIANT (vibe-ic#2077), a DIFFERENT question
+        # from the one above and one the table above cannot answer: the block
+        # this was written for had a clean operating point on every node and
+        # went to +3.34 V on two of them while it ran. It is graded on EVERY
+        # return below, including the ones that refuse for another reason, so
+        # the node is named whether or not the run also failed to converge.
+        tran = tran_rail_report(out, supply_v,
+                                rail_meas_nodes_requested(tb_text))
+        tran_fields = {
+            "tran_rail_excursions": tran["excursions"],
+            "tran_rail_invariant": tran["invariant"],
+            "tran_rail_nodes_measured": len(tran["nodes_measured"]),
+            "tran_rail_nodes_not_measured": tran["nodes_not_measured"],
+        }
         if cp.returncode == 0 and not bad and rails:
             return {
                 "simulation_verified": False,
@@ -1582,6 +1812,29 @@ def verify_with_ngspice(container: str, block: str, sp_text: str,
                            " node(s) outside the supply rails: " +
                            ", ".join(f"{n}={v:.6g}V" for n, v in rails[:8])),
                 "log_tail": tail,
+                **tran_fields,
+            }
+        # SECOND, AND ONLY WHEN THE DC TABLE IS CLEAN. The operating point is
+        # the solution every other number was computed from, so when BOTH are
+        # wrong the DC fact is the one that explains the transient and it keeps
+        # the verdict; the transient nodes are carried in the record either way.
+        if cp.returncode == 0 and not bad and tran["excursions"]:
+            exc = tran["excursions"]
+            return {
+                "simulation_verified": False,
+                "simulation_status": "TRAN_NODE_OUTSIDE_RAIL",
+                "ngspice_rc": cp.returncode,
+                "measurements": meas,
+                "rail_excursions": rails,
+                "rail_invariant": ("CHECKED"
+                                   if isinstance(supply_v, (int, float))
+                                   else "NOT_MEASURED_NO_SUPPLY"),
+                "detail": ("the transient takes " + str(len(exc)) +
+                           " node(s) outside the supply rails: " +
+                           ", ".join(f"{n}={v:.6g}V" for n, v in exc[:8]) +
+                           "; the operating point was inside them"),
+                "log_tail": tail,
+                **tran_fields,
             }
         return {
             "simulation_verified": (cp.returncode == 0 and not bad),
@@ -1594,6 +1847,7 @@ def verify_with_ngspice(container: str, block: str, sp_text: str,
             "rail_invariant": ("CHECKED" if isinstance(supply_v, (int, float))
                                else "NOT_MEASURED_NO_SUPPLY"),
             "log_tail": tail,
+            **tran_fields,
         }
     except (OSError, subprocess.SubprocessError) as exc:
         # NOT_VERIFIED_NO_SIMULATOR IS OWED ONLY WHEN THE BINARY IS ABSENT --
@@ -1886,6 +2140,15 @@ def emit_for_block(project: Path, entry: Dict[str, Any], pdk: str,
         "_provenance: device geometry above is the topology library nominal "
         "EXCEPT the spec_bound_params listed; sizing to the bound spec is "
         "skill `analog-sizing`, not this producer")
+    # vibe-ic#2077 — THE DECK SAYS WHAT IT MEASURES, AND SAYS SO WHEN IT
+    # MEASURES NOTHING. Adding `.meas` cards is the one thing that makes an
+    # emitted deck differ from the byte-identical decks that preceded it, so
+    # the difference is stated here rather than left for a reader to diff:
+    # every deck carries this line, including the `op`-only ones, whose
+    # sentence names WHY they carry no cards. Emitted UNCONDITIONALLY on
+    # purpose — a provenance line that only appears when there is something to
+    # boast about says nothing when it appears.
+    prov_lines.append(f"_provenance: {transient_rail_measurement(ir)[1]}")
 
     sp_text = render_netlist(ir, pdkctx, prov_lines, overrides, bdir)
     tb_text, tb_env, tb_notes = render_testbench(ir, pdkctx, env, prov_lines)
@@ -1948,6 +2211,26 @@ def emit_for_block(project: Path, entry: Dict[str, Any], pdk: str,
                        status="NETLIST_DC_OP_OUTSIDE_RAILS",
                        gap_path=str(gap.relative_to(project)),
                        rail_excursions=sim.get("rail_excursions"))
+            return rec
+        # BLOCKING, same tier and for the same reason one step later in time:
+        # a run that took the block's own nodes outside its own rails while it
+        # ran has not verified the netlist either, and every measurement the
+        # same log reports was taken across that excursion. vibe-ic#2077.
+        if sim.get("simulation_status") == "TRAN_NODE_OUTSIDE_RAIL":
+            _drop_stale(bdir, name)
+            gap = write_gap(bdir, project, name, btype,
+                            "NETLIST_TRAN_OUTSIDE_RAILS",
+                            ("the rendered netlist passed every static check "
+                             "and the simulator ran it to the end, but the "
+                             "transient takes node(s) of the block outside "
+                             "its own supply rails, so the window every "
+                             "measurement was taken over is not one the "
+                             "circuit holds"),
+                            checker_findings=findings, simulation=sim)
+            rec.update(action="gap", emitted=False,
+                       status="NETLIST_TRAN_OUTSIDE_RAILS",
+                       gap_path=str(gap.relative_to(project)),
+                       tran_rail_excursions=sim.get("tran_rail_excursions"))
             return rec
     elif verify_sim and not tb_text:
         sim = {"simulation_verified": False,
