@@ -2535,6 +2535,17 @@ def _docker_exec3(container: str, cmd: str):
 
 
 def _container_available(container: str) -> bool:
+    """Can this process run anything in `container`?
+
+    `ContainerImageMismatch` IS DELIBERATELY NOT CAUGHT HERE (vibe-ic#2173).
+    It is not an availability answer: the container is right there, yosys is
+    right there, and what was refused is the RIGHT to use bytes this repo does
+    not pin. Answering `False` would report it as the "container not available
+    — runner should disclosed-skip" case one line below, which is a capability
+    gap this flow deliberately carries and a completely different sentence.
+    `main`'s door guard below catches it and reports the refusal in its own
+    tier; `entry` is the backstop for the container touches further down.
+    """
     try:
         return _docker(container, "true", timeout=30).returncode == 0
     except (subprocess.SubprocessError, OSError):
@@ -3928,6 +3939,77 @@ def _resolve_gold_top(gold_files: List[str], top: str,
     return resolved, note
 
 
+def _drop_started_artefacts(*paths) -> List[str]:
+    """Remove the files `main` had already created, and name what it removed.
+
+    A run the environment refused wrote nothing about the design, so it must
+    leave nothing that looks like the beginning of one: an operator who finds
+    a live log and a telemetry sidecar with no report cannot tell a refused run
+    from a killed one. Best-effort by design — a file that cannot be removed is
+    not worth failing a refusal over, and the returned list says which ones
+    actually went.
+    """
+    dropped: List[str] = []
+    for pth in paths:
+        try:
+            if pth is not None and Path(pth).is_file():
+                Path(pth).unlink()
+                dropped.append(str(pth))
+        except OSError:
+            pass
+    return dropped
+
+
+def _report_env_refusal(exc: BaseException, dropped: List[str]) -> int:
+    """The ONE place this program says "the environment refused me".
+
+    vibe-ic#2173. `ContainerImageMismatch` is a `RuntimeError` and MEASURED
+    2026-09-07 on 8HD-6 against `a1f3685837ca` NOTHING on this path caught it:
+    `lec_run <project> --top top --container vibeic-eda` against a container
+    whose digest is not the pin exited 1 with a traceback ending in
+    `_container_exec.ContainerImageMismatch`, wrote no `reports/lec.json`, and
+    left `reports/lec.live.*.rpt` + `reports/lec.telemetry.*.json` behind. The
+    one line naming BOTH digests -- the only line a reader can act on --
+    reached the exit code as a bare 1 and the run record nowhere at all.
+
+    So it is reported as a REFUSAL and not as any of the things it is not: not
+    the "container not available -- runner should disclosed-skip" case (yosys
+    is there and is usable; the RIGHT to use it is what was refused), not a
+    verdict about the design, and not the tool's own rc.
+    """
+    print(f"{_ce.IMAGE_REFUSAL_MARK}{exc}", file=sys.stderr)
+    print(f"[lec_run] ENV_REFUSED: no equivalence was attempted and NO "
+          f"reports/lec.json was written: this is NOT a statement about the "
+          f"design, and NOT a missing toolchain — the container holds the "
+          f"wrong bytes."
+          + (f" Started artefacts removed: {dropped}." if dropped else ""),
+          file=sys.stderr)
+    return _ce.EX_ENV_REFUSED
+
+
+def entry(argv: Optional[List[str]] = None) -> int:
+    """`main`, with the environment refusal lifted out of the body.
+
+    THE BACKSTOP, and it is a WRAPPER rather than a rename. `main` keeps its
+    name and its whole body because three shipped guards read that body --
+    `inspect.getsource(lec_run.main)` in `test_lec_proof_checkpoint_resume`
+    among them -- and moving it under another name is a rename those guards
+    cannot follow: MEASURED here, it turned
+    `test_recovery_runs_before_the_prune_in_main` red for a reason that had
+    nothing to do with checkpoint recovery.
+
+    The door guard inside `main` (`_container_available`) is where a mismatch
+    is reached on every ordinary run, and it cleans up the two files `main` has
+    already opened. This wrapper is the backstop for the container touches
+    further down: a refusal from ANY of them is still a refusal, and this
+    program must never hand one to a caller as a traceback again.
+    """
+    try:
+        return main(argv)
+    except _ce.ContainerImageMismatch as exc:
+        return _report_env_refusal(exc, [])
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="Step 13 LEC PRODUCER — real Yosys RTL≡gate equivalence "
@@ -3999,7 +4081,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     container = args.container
-    if not _container_available(container):
+    try:
+        _reachable = _container_available(container)
+    except _ce.ContainerImageMismatch as exc:
+        # THE DOOR GUARD. Caught HERE and not only in `entry` because the two
+        # files above are already on disk: a refused run must take them back
+        # with it, or a reader finds the opening of a run that never happened.
+        return _report_env_refusal(
+            exc, _drop_started_artefacts(live_log_path, telemetry_path))
+    if not _reachable:
         print(f"[lec_run] ERROR: container '{container}' not available "
               "(docker/yosys cannot run) — runner should disclosed-skip.",
               file=sys.stderr)
@@ -4995,4 +5085,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 if __name__ == "__main__":
     # A stall is not a verdict about the subject: it reaches the exit
     # code as rc 2 (UNDETERMINED), announced, never as a finding.
-    sys.exit(_pr.exit_undetermined_on_stall(main))
+    sys.exit(_pr.exit_undetermined_on_stall(entry))

@@ -89,6 +89,10 @@ __all__ = [
     "TIMEOUT_EXPIRED_RC",
     "TIMEOUT_UNAVAILABLE_RC",
     "IMAGE_MISMATCH_RC",
+    "IMAGE_REFUSAL_MARK",
+    "EX_ENV_REFUSED",
+    "image_refusal",
+    "raise_on_image_refusal",
     "DEFAULT_KILL_GRACE_S",
     "CLIENT_GRACE_S",
 ]
@@ -109,6 +113,38 @@ TIMEOUT_UNAVAILABLE_RC = 127
 #: already has will route -- the same reasoning that made an expired deadline
 #: rc 124 rather than an exception thrown past callers that never expected one.
 IMAGE_MISMATCH_RC = 125
+
+#: The line-start every refusal this module composes carries, and the thing a
+#: reader keys on. `IMAGE_MISMATCH_RC` is 125 because that is docker's own "the
+#: run could not be started" code -- which is exactly why the rc ALONE is not
+#: the measurement: a TOOL is free to exit 125 for its own reasons, and
+#: `describe_result` used to answer "the container does not hold the pinned
+#: image ...; nothing was run" for one that did. MEASURED 2026-09-07 on 8HD-6
+#: against a1f3685837ca, with a `CompletedProcess(rc=125, stderr="")`::
+#:
+#:     describe_result(cp, 5)
+#:     'the container does not hold the pinned image
+#:      (CONTAINER_IMAGE_MISMATCH); nothing was run'
+#:
+#: which is a mismatch nobody measured. So the refusal is identified by the rc
+#: AND by this mark, both of which only this module writes.
+IMAGE_REFUSAL_MARK = "_container_exec: refused, nothing was run: "
+
+#: THE EXIT CODE OF A STEP THE ENVIRONMENT REFUSED. `sysexits.h` EX_UNAVAILABLE.
+#:
+#: An environment refusal is not a weaker result -- it is the ABSENCE of one, and
+#: it is owed a tier of its own so a caller can route on it (vibe-ic#2173). It is
+#: NOT the ordinary failure rc (nothing failed), NOT a "defer"/"skip" rc (a skip
+#: says the subject was examined and found not to need this step), and NOT the
+#: tool's own rc (the tool never ran).
+#:
+#: DEFINED HERE, in the module that COMPOSES the refusal, because both a digital
+#: and an analog program can hit it and neither should import the other's tier
+#: table. A producer-tier table that wants this value must ALIAS this name --
+#: `EX_ENV_REFUSED = _container_exec.EX_ENV_REFUSED` -- never restate the
+#: literal: two spellings of one fact drift, and the whole point of a tier is
+#: that a caller can compare against it.
+EX_ENV_REFUSED = 69
 
 #: Seconds between SIGTERM and the SIGKILL escalation.
 DEFAULT_KILL_GRACE_S = 5
@@ -371,7 +407,7 @@ def run_in_container(container: str,
                 container, "timeout", "-k", str(int(kill_grace_s)),
                 str(int(deadline_s)), *shell, cmd),
             returncode=IMAGE_MISMATCH_RC, stdout="",
-            stderr=f"_container_exec: refused, nothing was run: {why}\n")
+            stderr=f"{IMAGE_REFUSAL_MARK}{why}\n")
     return _pr.run(
         container_deadline_argv(container, cmd, deadline_s, kill_grace_s, shell),
         capture_output=True, text=True, errors="replace",
@@ -449,7 +485,7 @@ def run_in_container_supervised(container: str,
         return subprocess.CompletedProcess(
             args=_unguarded_exec_argv(container, *shell, cmd),
             returncode=IMAGE_MISMATCH_RC, stdout="",
-            stderr=f"_container_exec: refused, nothing was run: {why}\n")
+            stderr=f"{IMAGE_REFUSAL_MARK}{why}\n")
     # Imported HERE, not at module scope: `_docker_watchdog` imports this
     # module for `docker_exec_argv`, so a top-level import would be a cycle.
     import _docker_watchdog as _dw  # noqa: PLC0415
@@ -474,6 +510,66 @@ def run_in_container_supervised(container: str,
         _dw.cleanup_job_pidfile(container, pidfile, _raw_exec)
 
 
+def image_refusal(cp: subprocess.CompletedProcess) -> str:
+    """The refusal line when this run NEVER HAPPENED because the container
+    provably holds bytes other than the pinned ones -- else ``""``.
+
+    THE RETURNED FORM OF THE REFUSAL, AND THE READER IT HAD NONE OF.
+    `docker_exec_argv` RAISES on a mismatch and `run_in_container*` RETURN
+    `IMAGE_MISMATCH_RC`; both mean the same thing -- nothing ran. MEASURED
+    2026-09-07 on 8HD-6 against `a1f3685837ca`: outside this module and its own
+    tests, NOTHING in the shipped tree read `IMAGE_MISMATCH_RC` at all, so every
+    caller of the returned form read the refusal as the tool's own answer:
+
+      * `analog_real_corner_sweep._resolve_ngspice` walked its candidate list,
+        saw rc != 0 on each, and answered `None` -- "ngspice is absent". Through
+        `_ngspice_available` that reached A4 as "ngspice not in container",
+        `analog_mc_yield_run` as **verdict SKIP**, and
+        `analog_loop_liveness_samples_emit` as "ngspice is not reachable".
+      * `_area_unit.ContainerReader.exists()` answered `False` -- "the file is
+        not there" -- and `.read()` answered `None`, for a container it was
+        never allowed to enter.
+      * `digital_hardmacro_gen` reported "magic exited 125 and wrote no LEF".
+
+    Every one of those is the vibe-ic#2173 shape: a simulator/tool that WAS
+    there and WAS usable, reported as a CAPABILITY GAP. The right to use it is
+    what was refused, and that is a statement about this HOST, never about the
+    design or the image's contents.
+
+    IDENTIFIED BY THE MARK AS WELL AS THE RC, because 125 is docker's own
+    "could not start" code and a tool is free to exit 125 having really run.
+    Only this module writes `IMAGE_REFUSAL_MARK`.
+    """
+    if cp.returncode != IMAGE_MISMATCH_RC:
+        return ""
+    err = cp.stderr or ""
+    if IMAGE_REFUSAL_MARK not in err:
+        return ""
+    return err.split(IMAGE_REFUSAL_MARK, 1)[1].strip()
+
+
+def raise_on_image_refusal(cp: subprocess.CompletedProcess
+                           ) -> subprocess.CompletedProcess:
+    """Return `cp`, or raise `ContainerImageMismatch` when it is a refusal.
+
+    FOR A CALLER WHOSE ANSWER IS A BARE VALUE. A function that returns `bool`,
+    `Optional[str]` or a path has NO room for "I was not allowed to look", and
+    every one of them measured above filled that room with the FALSE half of
+    its own domain. Raising puts the two forms of the refusal back into one
+    shape at the boundary of the module that reads it, so the caller that must
+    report it is the caller that has a place to report it.
+
+    A raise is not the end of the story -- vibe-ic#2156 measured what an
+    uncaught `ContainerImageMismatch` costs. Every site that calls this owes a
+    handler that reports the refusal in a tier (`EX_ENV_REFUSED`), and the
+    tests beside each one are what prove it has one.
+    """
+    why = image_refusal(cp)
+    if why:
+        raise ContainerImageMismatch(why)
+    return cp
+
+
 def describe_result(cp: subprocess.CompletedProcess,
                     deadline_s: int) -> Optional[str]:
     """A one-line operator-facing reason when the run did not complete normally.
@@ -494,13 +590,26 @@ def describe_result(cp: subprocess.CompletedProcess,
     if cp.returncode == TIMEOUT_UNAVAILABLE_RC:
         return ("`timeout` is not available in this image, so NO deadline "
                 "could be enforced; the command may have run unbounded")
+    # The refusal already names both digests; it is relayed verbatim rather
+    # than summarised, because "the container is the wrong image" is only
+    # actionable when the reader is told WHICH wrong image. Asked through
+    # `image_refusal`, which keys on the MARK as well as the rc: the previous
+    # rc-only test answered "the container does not hold the pinned image;
+    # nothing was run" for any run that exited 125 with an empty stderr,
+    # including a TOOL that ran and chose 125 itself -- a mismatch nobody
+    # measured, which is the one thing this module exists not to say.
+    refused = image_refusal(cp)
+    if refused:
+        return f"{IMAGE_REFUSAL_MARK}{refused}"
     if cp.returncode == IMAGE_MISMATCH_RC:
-        # The refusal already names both digests; it is relayed verbatim rather
-        # than summarised, because "the container is the wrong image" is only
-        # actionable when the reader is told WHICH wrong image.
-        return (cp.stderr or "").strip() or (
-            f"the container does not hold the pinned image "
-            f"({_pin.CONTAINER_IMAGE_MISMATCH}); nothing was run")
+        # 125 WITHOUT the mark is docker's own "the run could not be started"
+        # -- a wedged, stopped or absent container. Still not the tool's answer,
+        # so it is still named; but naming it a MISMATCH would be asserting a
+        # measurement that was never made.
+        detail = (cp.stderr or cp.stdout or "").strip().splitlines()
+        return ("`docker exec` exited 125: the run could not be started, so "
+                "the tool produced no result"
+                + (f" -- {detail[0]}" if detail else ""))
     return None
 
 

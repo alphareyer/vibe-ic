@@ -42,6 +42,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import analog_real_corner_sweep as _ars  # noqa: E402  (docker/ngspice helpers)
+import _container_exec  # noqa: E402 — the tier and the refusal reader
 import _designs_root as _dr  # noqa: E402  (host mount root, measured)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
@@ -266,12 +267,31 @@ def _assert_single_model_family(wrap_text: str, mc_include_line: str) -> None:
         "native MC deck must not overlay an open-PDK (sky130/gf180) model lib")
 
 
+#: The verdict of a run the ENVIRONMENT refused. Deliberately not `SKIP` and
+#: not `UNSCOREABLE`: both of those are statements about the SUBJECT (this
+#: block does not need the step / this block cannot be scored), and a refusal
+#: is a statement about this HOST. vibe-ic#2173.
+ENV_REFUSED_VERDICT = "ENV_REFUSED"
+
+
 def run_block(project: Path, block: str, container: str, pdk: str,
               n: int) -> dict:
     """Entry point. A path the container cannot be shown to see is a structured
-    SKIP naming what IS mounted — never a traceback, never a guessed path."""
+    SKIP naming what IS mounted — never a traceback, never a guessed path.
+
+    A CONTAINER RUNNING THE WRONG BYTES IS NOT A SKIP (vibe-ic#2173). A SKIP
+    says the subject was examined and this step was not needed for it; this
+    program was never allowed to examine anything, so it reports a REFUSAL —
+    its own verdict, its own rc — and writes no yield number of any kind.
+    """
     try:
         return _run_block(project, block, container, pdk, n)
+    except _container_exec.ContainerImageMismatch as exc:
+        return {"verdict": ENV_REFUSED_VERDICT,
+                "rc": _container_exec.EX_ENV_REFUSED, "mc_runs": 0,
+                "reason": (f"{_container_exec.IMAGE_REFUSAL_MARK}{exc} — "
+                           f"nothing was simulated; this is NOT a statement "
+                           f"about the design and NOT a missing simulator")}
     except _dr.MountRootUnresolved as exc:
         st = exc.status
         return {"verdict": st["verdict"], "rc": 2, "mc_runs": 0,

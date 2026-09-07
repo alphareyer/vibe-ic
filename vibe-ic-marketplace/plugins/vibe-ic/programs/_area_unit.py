@@ -200,7 +200,16 @@ class ContainerReader:
         # cannot run says so by raising; `_resolve_area_unit` records the
         # failure as evidence, which is the only place it can be read.
         import _container_exec as _ce
-        return _ce.run_in_container(self.container, cmd, deadline_s=60)
+        # AND THE REFUSAL IS RAISED FOR THE SAME REASON (vibe-ic#2173). A
+        # container running bytes other than the pinned ones comes back as
+        # `IMAGE_MISMATCH_RC` with NOTHING RUN, and every answer this class
+        # gives is a bare value with no room for "I was not allowed to look":
+        # `exists()` would have said False and `read()` None -- "the file is not
+        # there" -- about a container this process never entered. That is the
+        # same class of published falsehood the paragraph above is about, and it
+        # takes the same remedy: say so by raising.
+        return _ce.raise_on_image_refusal(
+            _ce.run_in_container(self.container, cmd, deadline_s=60))
 
     def exists(self, path: str) -> bool:
         return self._run(f"test -e {shlex.quote(path)}").returncode == 0

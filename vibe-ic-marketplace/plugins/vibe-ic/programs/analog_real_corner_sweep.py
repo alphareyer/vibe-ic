@@ -850,6 +850,24 @@ def _resolve_ngspice(container):
     ]
     for probe in candidates:
         r = _docker(container, probe)
+        # "I WAS NOT ALLOWED TO LOOK" IS NOT "IT IS NOT THERE" (vibe-ic#2173).
+        # A container running bytes other than the pinned ones comes back as
+        # `IMAGE_MISMATCH_RC` with NOTHING RUN, and a bare `rc != 0: continue`
+        # spends the whole candidate list on it and then answers None -- which
+        # every reader of this function spells as the SIMULATOR BEING ABSENT:
+        # `_run_block` below, `analog_mc_yield_run` as a SKIP verdict, and
+        # `analog_loop_liveness_samples_emit` as an unreachable simulator. Each
+        # of those tells an operator to install a tool that IS installed.
+        #
+        # (No reader's exact sentence is quoted here on purpose: two shipped
+        # guards LOCATE their subject by finding one of those sentences in this
+        # source and reading the lines that follow, so a comment repeating one
+        # verbatim moves the guard onto itself -- measured, this one turned
+        # `test_sweep_exits_non_zero_when_it_cannot_reach_ngspice` red.)
+        #
+        # The refusal has no room in an `Optional[str]` return, so it is raised
+        # and the entry points below report it as its own tier.
+        _container_exec.raise_on_image_refusal(r)
         if r.returncode != 0:
             continue
         # v1.6.219 (#95 follow-up) — iic-osic-tools' `bash -lc` login
@@ -2761,9 +2779,23 @@ def _worst_corner_of(pvt_grid, target_center, tol):
 
 def run_block(project, block, container, pdk, topology_override):
     """Entry point. A path the container cannot be shown to see is a BLOCKED
-    verdict naming what IS mounted — never a traceback, never a guessed path."""
+    verdict naming what IS mounted — never a traceback, never a guessed path.
+
+    AND AN ENVIRONMENT REFUSAL IS ITS OWN TIER (vibe-ic#2173). A container
+    running bytes other than the pinned ones is not a defer and not a gap: this
+    program was never allowed to look at the design, so it says nothing about
+    it, writes NO artefact, and exits `EX_ENV_REFUSED` so a caller can route on
+    a refusal instead of reading one as a result.
+    """
     try:
         return _run_block(project, block, container, pdk, topology_override)
+    except _container_exec.ContainerImageMismatch as exc:
+        print(f"{_container_exec.IMAGE_REFUSAL_MARK}{exc}", file=sys.stderr)
+        print(f"[real_sim] block={block} ENV_REFUSED: nothing was simulated "
+              f"and NO artefact was written: this is NOT a statement about the "
+              f"design, and NOT a missing simulator — the container holds the "
+              f"wrong bytes.", file=sys.stderr)
+        return _container_exec.EX_ENV_REFUSED
     except _dr.MountRootUnresolved as exc:
         print(f"[real_sim] block={block} BLOCKED on host mount root: "
               f"{exc.status['reason']}", file=sys.stderr)

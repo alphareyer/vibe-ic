@@ -82,6 +82,7 @@ import _atomic_artefact as _aa                      # noqa: E402
 import _analog_producer_common as _pc               # noqa: E402
 import analog_a2_topology_emit as _a2               # noqa: E402
 import analog_real_corner_sweep as _rcs             # noqa: E402
+import _container_exec as _ce                       # noqa: E402
 import _designs_root as _dr                         # noqa: E402
 
 PRODUCER = "analog_loop_liveness_samples_emit"
@@ -425,6 +426,21 @@ def emit(project: Path, block: str, container: str,
         rec["verdict"] = "EMITTED"
         rec["checker_argv"] = argv
         return _pc.RC_OK, rec
+    except _ce.ContainerImageMismatch as exc:
+        # AN ENVIRONMENT REFUSAL IS NOT AN HONEST GAP (vibe-ic#2173). A
+        # `Refusal` here is a statement about the DESIGN — a node this block
+        # does not declare, a deck with no transient. A container running bytes
+        # other than the pinned ones says nothing about the design at all: it
+        # says this HOST was not allowed to run the simulator that is sitting
+        # right there, and reporting it as `ngspice is not reachable` sends the
+        # reader to install a tool that is already installed.
+        if samples_out.is_file():
+            samples_out.unlink()
+            rec["stale_samples_removed"] = str(samples_out)
+        rec.update(verdict="ENV_REFUSED",
+                   reason=f"{_ce.IMAGE_REFUSAL_MARK}{exc}",
+                   env_refused=True)
+        return _ce.EX_ENV_REFUSED, rec
     except Refusal as exc:
         # A stale samples file is exactly as good as an empty one to a checker
         # that cannot tell how old it is.
@@ -456,7 +472,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(json.dumps(rec, indent=2))
     if a.json:
         _aa.write_text(a.json, json.dumps(rec, indent=2) + "\n")
-    if rc == _pc.RC_HONEST_GAP:
+    if rc == _ce.EX_ENV_REFUSED:
+        print(f"ENV_REFUSED: {PRODUCER}: {rec.get('reason', '')}",
+              file=sys.stderr)
+        print(f"ENV_REFUSED: nothing was exported and NO samples file was "
+              f"written: this is NOT a statement about the design.",
+              file=sys.stderr)
+    elif rc == _pc.RC_HONEST_GAP:
         print(_pc.honest_gap_line(PRODUCER, rec.get("reason", "")),
               file=sys.stderr)
     return rc
