@@ -43,7 +43,7 @@ none of those.
 
 RULED (owner, 2026-09-07): wired-ness is derived from an INVOCATION — a call
 site reachable from a runner step — never from a declaration alone. That is
-`_RULE_ID = "invocation.v1"`, and it is what `py_invocations`,
+`_RULE_ID = "invocation.v2"`, and it is what `py_invocations`,
 `flow_invocations` and `shell_invocations` each define for their own file kind:
 
     python   an import that is then REFERENCED, or the entry named as a whole
@@ -218,13 +218,26 @@ import _ratchet_baseline as _ratchet  # noqa: E402
 _GATE_RE = re.compile(r"_(check|lint|audit|guard|gate)$")
 _BASELINE_NAME = "gate_is_wired_baseline.json"
 
+#: `invocation.v2` (vibe-ic#2141) — AN IMPORT MUST REACH THE VERDICT ENTRY.
+#:
+#: `invocation.v1` credited a gate for ANY reference to ANY symbol its module
+#: exports, so a module that is BOTH a library AND a gate read as wired on its
+#: library use alone: the register could not tell "imported as a library" from
+#: "run as a gate". That is vibe-ic#2080's shape one rung up — #2080 removed
+#: credit-by-declaration and credit-by-prose, this removes credit-by-import.
+#: The rule is `verdict_path` + `_credits`; MEASURED on 577fb50d3831 the
+#: unwired set went 34 -> 42, a strict SUPERSET (0 gates gained credit), and
+#: the eight are named in the commit body. Not among them is
+#: `lesson_consumption_check`, the instance #2141 names: vibe-ic#2103 wired it
+#: to `main` and it stays credited, now as `verdict entry (main)`.
+#:
 #: THE RULE ID THIS REGISTER WAS MEASURED UNDER.
 #:
 #: It is written into the baseline document and compared on every run. It is
 #: what makes a POPULATION CHANGE — the instrument starting to measure a
 #: different question — distinguishable from a debt that grew, and it is the
 #: only condition under which `--write-baseline` may ADD. See `main`.
-_RULE_ID = "invocation.v1"
+_RULE_ID = "invocation.v2"
 
 #: Where a reference means the gate can be REACHED without a human choosing to.
 #: `skills/` is deliberately NOT here — see the module docstring.
@@ -299,7 +312,9 @@ def _entry_stem(token: str) -> str:
     return base[:-3] if base.endswith(".py") else base
 
 
-def py_invocations(text: str, names: Set[str]) -> Dict[str, str]:
+def py_invocations(text: str, names: Set[str],
+                   stages: Optional[Dict[str, Tuple[Set[str], bool]]] = None
+                   ) -> Dict[str, str]:
     """{gate: how} for the gates THIS python source invokes.
 
     Parsed from the ORIGINAL source, never from the comment-stripped copy:
@@ -346,30 +361,50 @@ def py_invocations(text: str, names: Set[str]) -> Dict[str, str]:
         if (isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
                 and isinstance(n.value.value, str)):
             doc_ids.add(id(n.value))
-    bound: Dict[str, str] = {}
+    parent = {}
+    for node in ast.walk(tree):
+        for kid in ast.iter_child_nodes(node):
+            parent[id(kid)] = node
+    #: alias -> (gate, symbol) — `symbol` is None for `import g [as X]`, where
+    #: what is referenced can only be read off the ATTRIBUTE at the use site.
+    bound: Dict[str, Tuple[str, Optional[str]]] = {}
     import_lines = set()
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
             import_lines.add(n.lineno)
             for al in n.names:
                 if al.name in names:
-                    bound.setdefault(al.asname or al.name, al.name)
+                    bound.setdefault(al.asname or al.name, (al.name, None))
         elif isinstance(n, ast.ImportFrom):
             import_lines.add(n.lineno)
             if n.module in names:
                 for al in n.names:
-                    bound.setdefault(al.asname or al.name, n.module)
+                    bound.setdefault(al.asname or al.name, (n.module, al.name))
+    refs: Dict[str, Set[str]] = {}
     for n in ast.walk(tree):
         if (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                 and n.lineno not in import_lines):
-            g = bound.get(n.id)
-            if g:
-                out.setdefault(g, "imported+referenced")
+            b = bound.get(n.id)
+            if not b:
+                continue
+            g, sym = b
+            seen = refs.setdefault(g, set())
+            if sym is not None:
+                seen.add(sym)
+            else:
+                # `import g as X` — the symbol is the ATTRIBUTE. A bare `X`
+                # with no attribute (handed to `getattr`, or to another
+                # module) names nothing in particular and credits nothing.
+                par = parent.get(id(n))
+                if isinstance(par, ast.Attribute):
+                    seen.add(par.attr)
+    consumers = _verdict_consumers(tree, parent, bound, stages or {})
+    for g, seen in refs.items():
+        st, composed = (stages or {}).get(g, (set(), True))
+        how = _credits(seen, st, composed, g in consumers)
+        if how:
+            out.setdefault(g, f"imported+referenced: {how}")
     if any(tok in text for tok in _SPAWN_TOKENS):
-        parent = {}
-        for node in ast.walk(tree):
-            for kid in ast.iter_child_nodes(node):
-                parent[id(kid)] = node
         for n in ast.walk(tree):
             if not (isinstance(n, ast.Constant)
                     and isinstance(n.value, str)) or id(n) in doc_ids:
@@ -396,6 +431,324 @@ def py_invocations(text: str, names: Set[str]) -> Dict[str, str]:
                            ast.BinOp, ast.JoinedStr)):
                 out.setdefault(stem, "spawned entry literal")
     return out
+
+
+
+def verdict_path(gate_src: str) -> Tuple[Set[str], bool]:
+    """`(stages, composed)` — the PUBLIC symbols on a gate's verdict path, and
+    whether the gate COMPOSES that verdict itself (it defines `main`).
+
+    vibe-ic#2141. `invocation.v1` credited a gate for ANY reference to ANY
+    symbol it exports, so a module that is BOTH a library AND a gate read as
+    wired on the strength of its library use alone. The register could not tell
+    "imported as a library" from "run as a gate" — #2080's shape one rung up:
+    credit-by-import.
+
+    A gate's verdict entry point is `main`, which is what a flow gate clause, a
+    shell argv and a spawned entry literal all ultimately name. `main` composes
+    the verdict out of the module's own definitions; those are its STAGES, and
+    this returns them: every PUBLIC function or class defined in the module and
+    reached from `main` through the module's own references, transitively.
+    `_`-private helpers are traversed but never returned, and module CONSTANTS
+    are not definitions at all — referencing either is library use by
+    construction.
+
+    TWO SHAPES THIS HAD TO GET RIGHT, each found by a false accusation the
+    first version made:
+
+    * A GATE WITH NO `main`. `url_oracle_guard` and `spec_conformance_gate`
+      have no CLI and never did: their PUBLIC API *is* the check surface, there
+      is no composition for a caller to re-implement, and denying every
+      reference would have accused two gates their callers demonstrably run.
+      With no `main`, every public definition is an entry.
+
+    * `check_text`. `benchmark/cvdp_gate._structural_finding_gate` consumes
+      exactly that name from four gates and BLOCKS a delivery on any
+      ERROR-severity finding it returns — a verdict, produced by the gate. In
+      `valid_ready_independence_check` it is NOT on `main`'s path (the CLI
+      walks files through `audit_file`), so the traversal alone would have
+      accused a gate the benchmark runs on every delivery. It is named here as
+      the driver interface it is.
+    """
+    try:
+        tree = ast.parse(gate_src)
+    except SyntaxError:
+        return set(), True
+    defined: Dict[str, ast.AST] = {}
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined[n.name] = n
+    extra = {"check_text"} & set(defined)
+    if "main" not in defined:
+        return {n for n in defined if not n.startswith("_")} | extra, False
+    seen = {"main"}
+    stack = ["main"]
+    while stack:
+        node = defined.get(stack.pop())
+        if node is None:
+            continue
+        for c in ast.walk(node):
+            if isinstance(c, ast.Name) and c.id in defined and c.id not in seen:
+                seen.add(c.id)
+                stack.append(c.id)
+    return ({n for n in seen if not n.startswith("_") and n != "main"} | extra,
+            True)
+
+
+#: A field name whose value IS the gate's answer. Reading one of these out of
+#: a stage's return is the caller CONSUMING a verdict the gate produced; the
+#: caller that instead takes data and decides pass/fail from parts has
+#: re-implemented the gate. See `_credits`.
+_VERDICT_WORDS = frozenset((
+    "verdict", "passed", "status", "ok", "rc", "returncode", "exit_code",
+    "findings", "violations", "blocked", "result", "severity"))
+
+
+def _is_verdict_word(name: object) -> bool:
+    """`overall_verdict`, `exit_code`, `n_violations` — a verdict field is not
+    always spelled as the bare word. MEASURED: `signoff_ladder_run` reads
+    `rep.overall_verdict` off `mpw_precheck_result_gate.evaluate`, and exact
+    matching called that gate unconsumed."""
+    if not isinstance(name, str):
+        return False
+    low = name.lower()
+    return any(w in low for w in _VERDICT_WORDS)
+
+
+def _target_names(node) -> Set[str]:
+    if isinstance(node, ast.Name):
+        return {node.id}
+    if isinstance(node, (ast.Tuple, ast.List)):
+        out: Set[str] = set()
+        for e in node.elts:
+            out |= _target_names(e)
+        return out
+    return set()
+
+
+def _called_gate(node, bound: Dict[str, Tuple[str, Optional[str]]],
+                 stages: Dict[str, Tuple[Set[str], bool]]) -> Optional[str]:
+    """The gate whose STAGE this Call invokes, or None."""
+    if not isinstance(node, ast.Call):
+        return None
+    fn = node.func
+    if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name):
+        b = bound.get(fn.value.id)
+        if b and b[1] is None and fn.attr in stages.get(b[0], (set(), True))[0]:
+            return b[0]
+    elif isinstance(fn, ast.Name):
+        b = bound.get(fn.id)
+        if b and b[1] is not None and b[1] in stages.get(b[0], (set(), True))[0]:
+            return b[0]
+    return None
+
+
+def _verdict_consumers(tree, parent, bound, stages) -> Set[str]:
+    """The gates whose RETURN VALUE this source reads AS A VERDICT.
+
+    vibe-ic#2141, ruling 2. The question a wiring register must ask is not how
+    many of a gate's functions a caller touches — that proxy could not be
+    defended at its own boundary — it is WHO PRODUCES THE VERDICT. A caller
+    that hands inputs to the gate's core and takes the core's answer is running
+    the gate, however many input-preparation calls it also makes. A caller that
+    takes the gate's DATA and decides pass/fail itself has re-implemented the
+    gate, and #2080's ladder exists to stop that reading as wired.
+
+    MEASURED, the two call sites that decided this rule:
+
+        phase3_one_shot_runner.py:36652
+            _grid_um = _dmg.read_mfg_grid_um(pdk.tech_lef)      # input prep
+            _src     = _dmg.classify_def(_routed_def.read_text(...), _grid_um)
+            extras["offgrid_source"] = _src.get("verdict")      # CONSUMED
+
+        benchmark/cvdp_gate.py:2828
+            rc, report = _ppa_area_run(original=..., optimized=..., top=...)
+            verdict = report.get("verdict")
+            if rc == 1 and verdict == "BLOCK": return False, ...  # CONSUMED
+
+    Both are WIRED, and the ">= 2 stages" proxy had called both library use.
+    Against them, the shape this rule refuses:
+
+        design_one_shot_runner.py:6523 (as it stood before vibe-ic#2103)
+            _sections = _lesson_consumed.parse_digest(...)
+            _matches  = _lesson_consumed.match_sections(_spec_scored, _sections)
+            strong_titles = [m["section"] for m in _matches if m["strong"]]
+            _rec = _lesson_consumed.build_scoring_record(...); write_json(...)
+
+    — three stages in, a list comprehension deciding what is strong, a file
+    written, and not one verdict read. The runner was the second implementation
+    of that check, which is why #2103 had to wire `main` for the gate to run at
+    all.
+    """
+    out: Set[str] = set()
+    # PER SCOPE, NEVER WHOLE-FILE. `verdict` and `rep` are the names a ladder
+    # gives EVERY tier's result: `signoff_ladder_run` binds
+    # `verdict, rep = ag.evaluate(...)` in one function and
+    # `verdict, rep = th.evaluate(...)` in another. A single file-wide map is
+    # last-writer-wins, so the branch that reads `verdict == "FAIL"` was
+    # attributed to `thermal_screen_check` and `aging_derate_sta_check` read as
+    # never consumed — a false accusation, measured, against a gate the ladder
+    # runs on every signoff.
+    scopes = [n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    scopes.append(tree)
+    for scope in scopes:
+        out |= _scope_consumers(scope, parent, bound, stages)
+    return out
+
+
+def _scope_consumers(tree, parent, bound, stages) -> Set[str]:
+    """The gates this ONE scope both runs and reads an answer from.
+
+    Returns the gates that are NOT re-implemented here: a gate is
+    re-implemented when the scope CHAINS two or more of its stages — feeds one
+    stage's return into another stage of the SAME gate — and never reads a
+    verdict out of any of them. That is the scope reproducing `main`'s
+    composition and judging for itself, which is exactly what
+    `design_one_shot_runner` did to `lesson_consumption_check` before
+    vibe-ic#2103 and what `regression_issue_intake_check` does to
+    `acceptance_evidence_in_fix_comment_check` today. A single core call whose
+    answer the scope reads is the gate RUNNING, however the answer is spelled.
+    """
+    owners: Dict[str, str] = {}
+    out: Set[str] = set()
+    chained: Set[str] = set()
+    called: Set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign):
+            g = _called_gate(n.value, bound, stages)
+            if g:
+                for arg in ast.walk(n.value):
+                    if (isinstance(arg, ast.Name)
+                            and owners.get(arg.id) == g):
+                        chained.add(g)     # a stage fed by another stage
+                for t in n.targets:
+                    for nm in _target_names(t):
+                        owners[nm] = g
+        elif isinstance(n, (ast.Return, ast.Await)) and getattr(n, "value", None):
+            g = _called_gate(n.value, bound, stages)
+            if g:
+                out.add(g)
+        elif isinstance(n, ast.Call):
+            g = _called_gate(n, bound, stages)
+            if g:
+                # TRACKED EVEN WHEN NOTHING IS ASSIGNED. `flow_compliance_check`
+                # writes `_cov0.analyze(_r0, _g0).get("ordering_violations")`,
+                # a stage call read for a verdict field with no name in
+                # between; keying this off assignments alone accused a gate
+                # whose only caller reads its answer on one line.
+                called.add(g)
+                par = parent.get(id(n))
+                if isinstance(par, ast.Attribute):
+                    if _is_verdict_word(par.attr):
+                        out.add(g)
+                    elif par.attr == "get":
+                        c2 = parent.get(id(par))
+                        if (isinstance(c2, ast.Call) and c2.args
+                                and isinstance(c2.args[0], ast.Constant)
+                                and _is_verdict_word(c2.args[0].value)):
+                            out.add(g)
+                elif isinstance(par, ast.Subscript):
+                    sl = par.slice
+                    if isinstance(sl, ast.Constant) and _is_verdict_word(sl.value):
+                        out.add(g)
+            # `sys.exit(gate.core(...))` — the caller's whole outcome IS it.
+            f = n.func
+            if ((isinstance(f, ast.Attribute) and f.attr == "exit")
+                    or (isinstance(f, ast.Name) and f.id == "exit")):
+                for a in n.args:
+                    g = _called_gate(a, bound, stages)
+                    if g:
+                        out.add(g)
+            # HANDED TO A DRIVER. `benchmark/cvdp_gate` does
+            #     from fsm_state_output_check import check_text as _f
+            #     ... _structural_finding_gate(_f, label, completion)
+            # and that driver calls `_f` and BLOCKS on any ERROR finding it
+            # returns. The gate produces the verdict and the driver consumes
+            # it, with no Call node of its own at this site — measured: four
+            # gates the benchmark runs on every delivery, accused by a rule
+            # that looked only for a call.
+            for a in list(n.args) + [k.value for k in n.keywords]:
+                if isinstance(a, ast.Name):
+                    b = bound.get(a.id)
+                    if (b and b[1] is not None
+                            and b[1] in stages.get(b[0], (set(), True))[0]):
+                        out.add(b[0])
+    for nm, g in owners.items():
+        # THE CALLER NAMED IT THE VERDICT. `verdict, rep = ag.evaluate(...)`,
+        # `rc, report = _ppa_area_run(...)` — a binding is a statement about
+        # what the value IS.
+        if _is_verdict_word(nm):
+            out.add(g)
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)):
+            continue
+        g = owners.get(n.id)
+        if not g or g in out:
+            continue
+        par = parent.get(id(n))
+        # A VERDICT FIELD READ OFF THE RESULT, and nothing looser. `if _sec:`
+        # is a None-check, not a verdict; an early version counted every
+        # branch on a stage result and re-credited four gates whose callers
+        # demonstrably assemble the answer themselves.
+        if isinstance(par, ast.Attribute):
+            if _is_verdict_word(par.attr):
+                out.add(g)
+            elif par.attr == "get":
+                call = parent.get(id(par))
+                if (isinstance(call, ast.Call) and call.args
+                        and isinstance(call.args[0], ast.Constant)
+                        and _is_verdict_word(call.args[0].value)):
+                    out.add(g)
+        elif isinstance(par, ast.Subscript):
+            sl = par.slice
+            if isinstance(sl, ast.Constant) and _is_verdict_word(sl.value):
+                out.add(g)
+        elif isinstance(par, ast.Return):
+            out.add(g)
+    for g in (called | set(owners.values())) - chained:
+        # Ran a stage, chained nothing: the gate composed its own answer and
+        # this scope took it.
+        out.add(g)
+    return out
+
+
+def _credits(refs: Set[str], stages: Set[str], composed: bool = True,
+             consumed: bool = False) -> Optional[str]:
+    """Does referencing `refs` of a gate INVOKE the gate? `how`, or None.
+
+    THREE WAYS TO REACH A GATE'S VERDICT, and nothing else counts:
+
+    * `main` is referenced — the verdict entry point itself, the thing a flow
+      gate clause, a shell argv and a spawned entry literal all name.
+
+    * A STAGE is referenced AND ITS ANSWER IS CONSUMED (`_verdict_consumers`).
+      The gate produced the verdict; the caller read it. One extra
+      input-preparation call does not change who produced it.
+
+    * The gate defines NO `main` at all. `url_oracle_guard` and
+      `spec_conformance_gate` have no CLI and never did: their public API IS
+      the check surface, they compose nothing, and there is nothing for a
+      caller to re-implement. Denying every reference would have accused two
+      gates their callers demonstrably run.
+
+    Everything else is LIBRARY USE and credits nothing: a module constant, a
+    `_`-private helper (`signoff_audit` takes `MIN_REASON_LEN` and
+    `_is_placeholder` from `waivers_schema_check`; `l13_bringup_contract_check`
+    reads `hardware_pass_attestation_check._CRITERIA` through `getattr`), a
+    bare module handed on, a dead import, and — the case vibe-ic#2141 is about
+    — a caller that takes the gate's DATA and assembles the pass/fail itself.
+    """
+    if "main" in refs:
+        return "verdict entry (main)"
+    hit = refs & stages
+    if not hit:
+        return None
+    if not composed:
+        return f"library gate API ({', '.join(sorted(hit))})"
+    if consumed:
+        return f"verdict consumed ({', '.join(sorted(hit))})"
+    return None
 
 
 def _gate_blocks(node):
@@ -630,6 +983,16 @@ def wiring(plugin: Path, repo: Path) -> Dict[str, Dict[str, List[str]]]:
     and files whose whole format is declaration are not read at all.
     """
     g = gates(plugin)
+    #: Each gate's own verdict path, read from its own source once. This is
+    #: what separates "run as a gate" from "imported as a library" — see
+    #: `verdict_path` and `_credits` (vibe-ic#2141).
+    stages: Dict[str, Tuple[Set[str], bool]] = {}
+    for name in g:
+        try:
+            stages[name] = verdict_path(
+                (plugin / "programs" / f"{name}.py").read_text(errors="replace"))
+        except OSError:
+            stages[name] = (set(), True)
     execs = _texts(plugin, repo, _EXECUTABLE_GLOBS, _REPO_GLOBS)
     skills = _texts(plugin, repo, _SKILL_GLOBS)
     out: Dict[str, Dict[str, List[str]]] = {
@@ -651,7 +1014,8 @@ def wiring(plugin: Path, repo: Path) -> Dict[str, Dict[str, List[str]]]:
         if f.suffix == ".py":
             # The ORIGINAL bytes, not `t`: see `py_invocations`.
             try:
-                found = py_invocations(f.read_text(errors="replace"), names)
+                found = py_invocations(f.read_text(errors="replace"), names,
+                                       stages)
             except OSError:
                 continue
         elif f.suffix in (".yaml", ".yml"):
@@ -705,6 +1069,13 @@ def main(argv=None) -> int:
     ap.add_argument("--write-baseline", action="store_true",
                     help="record the CURRENT set. Refused if that would ADD "
                          "any entry — a debt register is not a waiver list")
+    ap.add_argument("--migrate-rule-id", action="store_true",
+                    help="re-derive the register under a NEW rule id. Refused "
+                         "unless the recorded rule differs from this build's, "
+                         "and refused if the new set would REMOVE any name: a "
+                         "rule that got stricter may only ADD. Every addition "
+                         "is printed. This is the ONLY migration path; "
+                         "--write-baseline can also remove and is not it")
     ap.add_argument(_ratchet.RECORD_FLAG, dest="record_shrink",
                     action="store_true",
                     help="record a measured TIGHTENING: write `previous & "
@@ -752,6 +1123,67 @@ def main(argv=None) -> int:
         return 2
 
     bpath = Path(a.baseline) if a.baseline else plugin / "programs" / _BASELINE_NAME
+
+    if a.migrate_rule_id:
+        # A RULE THAT GOT STRICTER MUST NOT NEED A HUMAN TO PRESS A BUTTON.
+        # vibe-ic#2141, owner ruling. `--write-baseline`'s rule-change door can
+        # ADD **and REMOVE**; a migration needs one that can only ADD, and the
+        # asymmetry belongs in the program, not in a judgement call at landing
+        # time. Otherwise a rule change leaves the gate red until somebody
+        # opens the door that can also launder a real regression away — which
+        # is how an instrument gets turned off.
+        prev = _load_baseline(bpath)
+        prev_rule = _baseline_rule(bpath)
+        if prev is None:
+            print(f"[FAIL] --migrate-rule-id: no readable register at {bpath}. "
+                  f"There is nothing to migrate FROM, and inventing one would "
+                  f"record every current offender as accepted debt.",
+                  file=sys.stderr)
+            return 1
+        if prev_rule == _RULE_ID:
+            print(f"nothing to migrate: {bpath} is already measured under "
+                  f"{_RULE_ID}. A same-rule difference is a DEBT that moved, "
+                  f"and this flag deliberately cannot record one.")
+            return 0
+        removed = sorted(set(prev) - set(now))
+        if removed:
+            # STRICT SUPERSET OR NOTHING. A name leaving the register means a
+            # gate stopped being unwired, which is a TIGHTENING and belongs to
+            # `--record-shrink` — reported, measured, and never bundled into a
+            # migration where it would be invisible among the additions.
+            print(f"[FAIL] --migrate-rule-id: the new set is NOT a superset of "
+                  f"the register. {len(removed)} name(s) would be REMOVED, and "
+                  f"a rule migration may only ADD:", file=sys.stderr)
+            for n in removed:
+                print(f"   - {n}", file=sys.stderr)
+            print(f"  Each of those is a gate the register calls unwired and "
+                  f"this build calls wired. If that is real it is a "
+                  f"TIGHTENING: record it with {_ratchet.RECORD_FLAG}, which "
+                  f"can only remove, and migrate afterwards.", file=sys.stderr)
+            return 1
+        added = sorted(set(now) - set(prev))
+        doc = {
+            "_comment": "Gates no automatic verdict INVOKES (vibe-ic#693, rule "
+                        "re-derived under vibe-ic#2141). MAY ONLY SHRINK once "
+                        "recorded. A gate here produces no verdict, and the "
+                        "tree looks the same either way.",
+            "measured_under": _RULE_ID,
+            "unwired": now,
+            "skill_only": sorted(n for n in now if w.get(n, {}).get("skill")),
+        }
+        print(f"[MIGRATE] {prev_rule} -> {_RULE_ID}: {len(prev)} -> {len(now)} "
+              f"unwired, a strict superset. {len(added)} gate(s) become "
+              f"visible that the previous rule could not see — every one is a "
+              f"gate NOTHING INVOKES, not a gate that stopped being invoked:")
+        for n in added:
+            print(f"   + {n}")
+        try:
+            _ratchet.write_shrunk(bpath, doc, previous_by_register={})
+        except _ratchet.ShrinkRefused as exc:
+            print(f"[FAIL] gate_is_wired migration: {exc}", file=sys.stderr)
+            return 1
+        print(f"wrote {bpath} ({len(now)} unwired, measured_under {_RULE_ID})")
+        return 0
     if a.write_baseline or a.record_shrink:
         # `have_prev` is "a register EXISTS and parsed", not "it holds names".
         # An EMPTY register used to take the same branch as a missing one and
