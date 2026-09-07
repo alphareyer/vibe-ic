@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1281
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1281)
+- **Total programs (excluding helpers / shims):** 1282
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1282)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1272 |
+| `any` | 1273 |
 
 ## Alphabetical listing
 
@@ -321,6 +321,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `die_density_fill_gen` | any | — | DIE-WIDE dummy fill, by the PDK's OWN generator. |
 | `die_finishing_check` | any | — | the Step 26.5ic gate. |
 | `die_finishing_gen` | any | — | Step 26.5ic producer: the PDK's own seal ring, and the die-identification half's honest state. |
+| `die_level_deck_rule_attribution` | any | — | vibe-ic#2112. |
 | `diff_verify_harness` | any | — | independent DIFFERENTIAL self-verification (N-version) for blind RTL authoring (ORGANIC #700). |
 | `digital_hardmacro_check` | any | — | the gate of record for flow step 37.5ip. |
 | `digital_hardmacro_gen` | any | — | the PRODUCER for flow step 37.5ip. |
@@ -1353,7 +1354,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1272 programs)
+### `any` (1273 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1647,6 +1648,7 @@ _(no programs in this group)_
 - `die_density_fill_gen` — DIE-WIDE dummy fill, by the PDK's OWN generator.
 - `die_finishing_check` — the Step 26.5ic gate.
 - `die_finishing_gen` — Step 26.5ic producer: the PDK's own seal ring, and the die-identification half's honest state.
+- `die_level_deck_rule_attribution` — vibe-ic#2112.
 - `diff_verify_harness` — independent DIFFERENTIAL self-verification (N-version) for blind RTL authoring (ORGANIC #700).
 - `digital_hardmacro_check` — the gate of record for flow step 37.5ip.
 - `digital_hardmacro_gen` — the PRODUCER for flow step 37.5ip.

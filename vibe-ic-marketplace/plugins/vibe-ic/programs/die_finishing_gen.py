@@ -91,6 +91,13 @@ Read out of `librelane/steps/klayout.py` in the pinned image, not remembered:
          LibreLane's, so there is nothing upstream to copy for that half — which
          is part of why it is NOT_DETERMINED rather than merely unimplemented.
 
+WHEN IT DOES NOT RUN AT ALL. A seal ring is a DIE structure, and so is the
+die-level marker layer the generator draws it under. When the design's own
+declaration answers `deliverable=HARDMACRO` this step is SKIPPED BY THAT
+DECLARATION, recorded and named — the parent die the macro is placed in owns
+its ring and its markers. See `_hardmacro_skip` for the measurement that made
+this explicit (vibe-ic#2112).
+
 WHERE IT RUNS. At stream-out, after the layer merge and BEFORE the fill passes,
 the density checks and the sign-off DRC/LVS consume the GDS — LibreLane's own
 chip-flow order (SealRing -> Filler -> Density). Adding the ring after Step 31
@@ -294,6 +301,11 @@ _DECL_MARKER = "seal_ring_marker_layer"
 #: Section 2A, and the ONE question outside 2C this program reads. See
 #: `die_size` for why it is the LAST source there and not the first.
 _DECL_DIE_AREA = "die_area_um"
+#: Section 2A's FIRST question — "is what leaves this flow a DIE that will be
+#: fabricated, or a HARDMACRO that somebody else will place?" — and the one
+#: that decides whether section 2C is a question this delivery owes an answer
+#: to at all. See `_hardmacro_skip`.
+_DECL_DELIVERABLE = "deliverable"
 _DECL_SOURCE = f"{_td.DECLARATION_REL}:answers"
 
 #: Appended to a no-generator skip when the design DECLARED a ring is
@@ -309,9 +321,10 @@ _REQUIRED_AND_ABSENT = (
 def _declaration(project: Path) -> Tuple[Dict[str, Any], Optional[str]]:
     """(the answers this program reads, why-the-file-could-not-be-read).
 
-    FOUR keys, not three: section 2C's whole set, plus `die_area_um` from
-    section 2A — see `die_size` for why that one is read here and why it is
-    the LAST source when it is.
+    FIVE keys, not three: section 2C's whole set, plus TWO from section 2A —
+    `die_area_um` (see `die_size` for why that one is read here and why it is
+    the LAST source when it is) and `deliverable`, which decides whether
+    section 2C applies to this delivery at all (see `_hardmacro_skip`).
 
     An ABSENT declaration is `({}, None)`: this program predates the
     declaration and must keep working on a tree that has none. A declaration
@@ -333,13 +346,82 @@ def _declaration(project: Path) -> Tuple[Dict[str, Any], Optional[str]]:
         return {}, f"{_td.DECLARATION_REL}: the top level is not a mapping"
     return {k: _td.answer(doc, k)
             for k in (_DECL_REQUIRED, _DECL_SCRIPT, _DECL_MARKER,
-                      _DECL_DIE_AREA)}, None
+                      _DECL_DIE_AREA, _DECL_DELIVERABLE)}, None
 
 
 def _declared(answers: Dict[str, Any], key: str) -> Optional[Any]:
     """The answer to `key`, or None when it is unanswered. Never a default."""
     v = answers.get(key)
     return v if _td.is_answered(v) else None
+
+
+#: Recorded on the hardmacro skip so a reader can tell WHICH question this
+#: step declined, not merely that it declined one.
+SKIPPED_BY_DELIVERABLE = "SKIPPED_BY_DECLARATION:deliverable"
+
+
+def _hardmacro_skip(decl: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The skip a HARDMACRO delivery earns, or None when this is a die.
+
+    A SEAL RING IS A DIE STRUCTURE, and so is the die-level marker layer the
+    generator draws it under. A hardmacro is delivered INTO somebody else's
+    die; that parent die owns its ring and its die-level markers, and a macro
+    that carries its own is carrying a second one into a die that already has
+    one. The declaration's own schema says exactly this and has since it was
+    written: every question of section 2C is declared
+    `required_for=(DELIVERABLE_DIE,)`, so on a hardmacro `seal_ring_required`
+    is NOT_APPLICABLE rather than unanswered — and until vibe-ic#2112 nothing
+    on this side read `deliverable` back.
+
+    MEASURED, vibe-ic#2112, on a front-door run of a design whose own step
+    0.5ic had ALREADY said "it is delivered, not fabricated ... needs no pad
+    ring, seal ring or submission check": the ring was built into the shipped
+    GDS anyway and brought a die-sized guard-ring marker with it, so the
+    sign-off deck evaluated the whole routed design as guard-ring metal —
+    GR.4 1,299,340 + GR.2 24,652 + GR.6 1,022 of 1,359,528 violations, 97.5%
+    of the sign-off DRC total, against a layout whose own contribution is
+    34,514.
+
+    `marker=True`: this is `_skip`'s "considered and legitimately does not
+    apply", the same class as "this PDK ships no generator", so it earns
+    `die_finishing.SKIPPED.txt`.
+
+    AN ANSWERED `seal_ring_required` DOES NOT SILENCE THIS AND DOES NOT
+    OVERRIDE IT. `deliverable` is the stronger fact — `_tapeout_declaration`
+    routes the whole delivery off it — and 2C is inapplicable to a hardmacro
+    by that same module's schema. So the answer is CARRIED into the skip,
+    named, in `seal_ring_required_not_applicable`, rather than either obeyed
+    or dropped: a reader who wrote `true` there sees that it was read, and
+    sees why a hardmacro still ships no die ring.
+    """
+    delivery = _declared(decl, _DECL_DELIVERABLE)
+    if delivery != _td.DELIVERABLE_HARDMACRO:
+        return None
+    required = _declared(decl, _DECL_REQUIRED)
+    extra: Dict[str, Any] = {"deliverable": delivery,
+                             "skipped_by": SKIPPED_BY_DELIVERABLE,
+                             "declaration": dict(decl)}
+    tail = ""
+    if required is not None:
+        extra["seal_ring_required_not_applicable"] = required
+        tail = (f". The declaration also answers {_DECL_REQUIRED}={required!r}"
+                f", which is a question section {_td.SECTION_SEAL_RING} asks "
+                f"only of a {_td.DELIVERABLE_DIE} "
+                f"(`required_for=({_td.DELIVERABLE_DIE},)` in "
+                f"`_tapeout_declaration.QUESTIONS`); it is read and reported "
+                f"here, and it does not make a macro into a die")
+    return _skip(
+        f"the design's own tape-out declaration answers "
+        f"{_DECL_DELIVERABLE}={_td.DELIVERABLE_HARDMACRO} in "
+        f"{_td.DECLARATION_REL}: what leaves this flow is a macro somebody "
+        f"else places, not a die that will be fabricated. A seal ring and the "
+        f"die-level marker layer it is drawn under belong to the PARENT die, "
+        f"which owns them; a hardmacro that carries its own would carry a "
+        f"second ring into a die that already has one, and its die-sized "
+        f"marker would put the whole delivery inside the die-level rules of "
+        f"the sign-off deck. So no ring is inserted and none is claimed — a "
+        f"DECLARED not-applicable, not an absence of evidence" + tail,
+        marker=True, **extra)
 
 
 def resolve_script(project: Path, explicit: Optional[str],
@@ -867,6 +949,13 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
                                f"not be read, so section "
                                f"{_td.SECTION_SEAL_RING} is unknown rather "
                                f"than unanswered: {decl_why}"})
+    # WHAT LEAVES THIS FLOW DECIDES WHETHER SECTION 2C IS EVEN ASKED, so it is
+    # read FIRST — before the "started and abandoned" refusal below, which
+    # would otherwise fail a hardmacro for leaving a question unanswered that
+    # the declaration's own schema never asks of it. vibe-ic#2112.
+    hardmacro = _hardmacro_skip(decl)
+    if hardmacro is not None:
+        return done(hardmacro)
     seal_required = _declared(decl, _DECL_REQUIRED)
     answered_2c = [k for k in (_DECL_REQUIRED, _DECL_SCRIPT, _DECL_MARKER)
                    if _declared(decl, k) is not None]

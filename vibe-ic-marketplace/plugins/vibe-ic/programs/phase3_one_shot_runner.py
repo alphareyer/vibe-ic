@@ -33493,8 +33493,35 @@ def _declared_deliverable(project: Path) -> Tuple[Optional[str], str]:
         f"enough to say a die is what leaves this flow")
 
 
+def _effective_deliverable(project: Path,
+                           derived: Optional[str]) -> Optional[str]:
+    """What this delivery IS, by the same ordering the publisher merges with.
+
+    The declaration's OWN answer first — that is the party who has to accept
+    the result, and `publish_tapeout_declarations` already refuses to overwrite
+    it — then the derivation. Returns None when neither has said, which is the
+    only safe answer: an UNDECLARED delivery owes every question, exactly as
+    `_tapeout_declaration.applicable` says.
+    """
+    _here = str(Path(__file__).resolve().parent)
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+    try:
+        import _tapeout_declaration as _td                      # noqa: PLC0415
+        doc, err = _td.load(project / _td.DECLARATION_REL)
+        if err is None and isinstance(doc, dict):
+            got = _td.answer(doc, "deliverable")
+            if _td.is_answered(got):
+                return str(got)
+    except Exception:                                          # noqa: BLE001
+        pass
+    return derived
+
+
 def _declared_seal_ring_required(project: Path, pdk: "PdkConfig",
-                                 container: str) -> Tuple[Optional[bool], str]:
+                                 container: str,
+                                 deliverable: Optional[str] = None
+                                 ) -> Tuple[Optional[bool], str]:
     """(True, basis) when the TECHNOLOGY ships a die seal-ring generator.
 
     NEVER False. "This PDK ships no generator" is not the technology saying a
@@ -33503,7 +33530,38 @@ def _declared_seal_ring_required(project: Path, pdk: "PdkConfig",
     "the PDK not shipping a generator is not this design getting it wrong".
     So this authority can only ever ANSWER, never DENY, and a design that owes
     no ring has to say so itself.
+
+    AND IT ONLY ANSWERS FOR A DIE. The basis sentence below opens "a die in a
+    process whose own sign-off tech tree carries a die-seal generator" — the
+    premise is A DIE, and a delivery that is a HARDMACRO does not meet it. The
+    technology shipping a generator is a fact about the PROCESS; it is not a
+    fact about what this delivery is, and reading it as one is how a macro
+    acquires a die structure nobody asked for. `_tapeout_declaration` already
+    holds the same ordering in its schema — every section-2C question is
+    `required_for=(DELIVERABLE_DIE,)` — so on a hardmacro this question is
+    NOT_APPLICABLE and there is nothing here for the technology to answer.
+
+    MEASURED, vibe-ic#2112: on a run that had already derived
+    `deliverable=HARDMACRO` five lines above this one, this authority
+    published `seal_ring_required=true` into the declaration anyway, die
+    finishing built the ring into the shipped GDS, and the die-sized
+    guard-ring marker it brought took the sign-off DRC total from 34,514 to
+    1,359,528. The producer-side guard for that lives in
+    `die_finishing_gen._hardmacro_skip`; this is the same fact refused one
+    step earlier, at the point where the wrong premise was actually taken.
     """
+    _here0 = str(Path(__file__).resolve().parent)
+    if _here0 not in sys.path:
+        sys.path.insert(0, _here0)
+    import _tapeout_declaration as _td0                         # noqa: PLC0415
+    if deliverable == _td0.DELIVERABLE_HARDMACRO:
+        return None, ("this delivery declares deliverable=HARDMACRO — a macro "
+                      "somebody else places, not a die that will be "
+                      "fabricated. A seal ring and its die-level marker "
+                      "belong to the PARENT die; the technology shipping a "
+                      "die-seal generator is a fact about the process and not "
+                      "a fact about what this delivery is, so the technology "
+                      "has nothing to say here (vibe-ic#2112)")
     _here = str(Path(__file__).resolve().parent)
     if _here not in sys.path:
         sys.path.insert(0, _here)
@@ -33643,8 +33701,17 @@ def publish_tapeout_declarations(project: Path, pdk: "PdkConfig",
         rec["not_determined"]["die_origin_um"] = _rect_why
         rec["not_determined"]["die_area_um"] = _rect_why
 
-    # 4 — seal_ring_required, from the technology.
-    _seal, _seal_why = _declared_seal_ring_required(project, pdk, container)
+    # 4 — seal_ring_required, from the technology, AND ONLY FOR A DIE.
+    #
+    # WHICH DELIVERABLE THIS IS is settled the same way the merge below settles
+    # every key: an answer already in the declaration OUTRANKS a derivation, so
+    # the declared answer wins and `_dv` is the fall-back. Without this the
+    # technology's answer was published on top of a `deliverable=HARDMACRO`
+    # this same function had already recorded as `already_answered`, two lines
+    # of one artefact disagreeing about what leaves the flow. vibe-ic#2112.
+    _eff_dv = _effective_deliverable(project, _dv)
+    _seal, _seal_why = _declared_seal_ring_required(project, pdk, container,
+                                                    _eff_dv)
     if _seal is True:
         derived["seal_ring_required"] = {"value": True, "basis": _seal_why}
     else:
@@ -34572,6 +34639,58 @@ def _rule_is_spacing_or_width(rule: str) -> bool:
     if any(r.startswith(p) for p in _SPACING_WIDTH_LAYER_PREFIXES):
         return any(r.endswith(tok) for tok in (".1", ".2", ".3", ".4"))
     return False
+
+
+#: How much rule-deck source `_pdk_deck_sources` will carry back. A deck tree
+#: is a few hundred KB; the cap exists so a PDK that vendors something enormous
+#: beside its deck degrades to a NAMED NOT_MEASURED instead of to a stalled
+#: step. vibe-ic#2112.
+_DECK_SOURCE_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _pdk_deck_sources(pdk: "PdkConfig", container: str
+                      ) -> Tuple[Optional[str], str]:
+    """(the PDK's own rule-deck sources, basis) or (None, why not).
+
+    THE DECK IS THE ONLY AUTHORITY on which of its rules are gated on which
+    layer, so `die_level_deck_rule_attribution` reads it rather than carrying a
+    rule-name list. Everything beside the sign-off deck and one level below it
+    is collected — decks split their rules across a `rule_decks/` directory —
+    each file preceded by the separator that module declares, so a rule block
+    can never bleed from one file into the next.
+    """
+    deck = str(getattr(pdk, "drc_deck", "") or "")
+    if not deck:
+        return None, "this PDK config names no sign-off DRC deck"
+    _here = str(Path(__file__).resolve().parent)
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+    import die_level_deck_rule_attribution as _dla              # noqa: PLC0415
+    d = shlex.quote(str(PurePosixPath(deck).parent))
+    sep = shlex.quote(_dla.FILE_SEP)
+    cmd = (f"for f in {d}/*.rb {d}/*/*.rb {d}/*.drc {d}/*/*.drc; do "
+           f"[ -f \"$f\" ] || continue; echo {sep}\"$f\"; cat \"$f\"; done")
+    rc, out, err = _docker_exec(container, cmd)
+    if rc != 0 or not out.strip():
+        return None, (f"the deck sources beside {deck} could not be read in "
+                      f"the runner (rc={rc}): {(err or out or '')[-200:]}")
+    # THE SOURCES BEGIN AT THE FIRST SEPARATOR. `_docker_exec` runs the command
+    # under `bash -lc`, and this image's login shell prints an `[INFO]` banner
+    # before anything the command says — measured elsewhere on this fleet, one
+    # of those banner lines was once taken for a file name. Cutting to the
+    # first separator makes "what the deck said" independent of what the shell
+    # said, in one place, instead of hoping the parser downstream is immune.
+    _cut = out.find(_dla.FILE_SEP)
+    if _cut < 0:
+        return None, (f"the deck sources beside {deck} came back with no "
+                      f"{_dla.FILE_SEP.strip()!r} separator, so nothing in "
+                      f"that directory was read as a rule deck")
+    out = out[_cut:]
+    if len(out) > _DECK_SOURCE_MAX_BYTES:
+        return None, (f"the deck sources beside {deck} are {len(out)} bytes, "
+                      f"over the {_DECK_SOURCE_MAX_BYTES}-byte ceiling this "
+                      f"reads, so they were not parsed")
+    return out, f"the PDK's own rule-deck sources beside {deck}"
 
 
 def _klayout_deck_exec(gds: Path, rpt: Path, top: str, pdk: PdkConfig,
@@ -35756,6 +35875,43 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
                 pass
     except Exception:  # nosec — classification is provenance-only
         pass
+    # vibe-ic#2112 — ATTRIBUTE the die-level deck rules. A HARDMACRO is placed
+    # inside somebody else's die, and that parent die owns the seal ring and
+    # the die-level marker layer the ring is drawn under. When such a marker is
+    # in the GDS this deck read, the deck's die-level rules evaluate the whole
+    # routed design as die structure — MEASURED on the motivating run: 1,325,014
+    # of 1,359,528 violations, 97.5%, against a layout whose own contribution is
+    # 5. The producer-side guard (`die_finishing_gen._hardmacro_skip`) stops the
+    # ring being generated; this says so in the SUMMARY whenever such a rule
+    # fires anyway, so the number is never folded into the design's silently.
+    # It takes no verdict: the PASS/FAIL above is already decided.
+    try:
+        import die_level_deck_rule_attribution as _dla
+        _deck_src, _deck_why = _pdk_deck_sources(pdk, container)
+        _att = _dla.run(project, dict(per_rule), _deck_src)
+        if _deck_src is None:
+            _att.setdefault("not_measured", {})["deck_sources"] = _deck_why
+        else:
+            _att["deck_sources"] = _deck_why
+        extras["die_level_rule_attribution"] = _att
+        if _att.get("verdict") == "DIE_LEVEL_RULES_ON_A_HARDMACRO":
+            extras["die_level_rule_violations"] = \
+                _att["die_level_rule_violations"]
+            extras["die_level_rules"] = _att["die_level_rules"]
+            extras["design_remainder_violations"] = _att["other_violations"]
+            detail = _dla.summarize(_att) + " | " + detail
+        try:
+            _ar = project / "reports" / "phase3" / \
+                "die_level_rule_attribution.json"
+            _ar.parent.mkdir(parents=True, exist_ok=True)
+            _ar.write_text(json.dumps(_att, indent=2) + "\n")
+        except OSError as _exc:
+            extras["die_level_rule_attribution_unwritable"] = str(_exc)
+    except Exception as _exc:                                  # noqa: BLE001
+        # NAMED, never swallowed: a classification that could not run and a
+        # classification that found nothing are different facts.
+        extras["die_level_rule_attribution_error"] = f"{type(_exc).__name__}: {_exc}"
+
     # Emit the DRC report at the CANONICAL sign-off path the flow gate
     # ("Physical Verification (DRC+LVS+ERC+Density)") requires:
     # reports/phase3/drc_signoff.rpt. step_drc historically wrote ONLY
