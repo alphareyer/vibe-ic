@@ -20,6 +20,17 @@ knowledge. It must NOT:
      the design (craft about the observable contract); they may not name the
      oracle files/variables as an INPUT to the authoring decision.
 
+SCANNED SURFACES (#2143). The four families above are applied to `entries[]`
+lessons AND to every text field of `registered_class_profiles.*`. The second
+surface is not decoration: a class profile's `integration_contract` prose is
+written verbatim into the `contract.md` that `ic_expert_backup_pack` hands the
+IC Expert Agent, so it is the same §4.05 channel a lesson is, reached by a
+different field — and it was unscanned from the day the field was added (#2094)
+until this gate covered it. The report carries `profile_text_fields`, the count
+of profile strings actually read; a map that is present but yields zero, or a
+PROFILED class whose text the walk never reached, is a FINDING, because a scan
+that reads nothing and a subject that is clean look identical from the verdict.
+
 Structural invariants also checked: the DB parses, every entry has ic_class +
 non-empty lessons, and lesson_count matches. The OPTIONAL `related[]` cross-link
 field (sibling ic_class names sharing a core craft — the lightweight concept
@@ -70,6 +81,55 @@ _ORACLE_SOURCE_RES = [
 ]
 
 
+def _scan_text(text: str, label: str) -> list:
+    """The four scan families, in ONE implementation, applied to one string.
+
+    #2143. Before this, the families lived inline inside the `entries[]` loop
+    and nothing else in the DB was ever scanned. A second call site that
+    re-typed the regex list would drift from this one silently — the two would
+    disagree the first time a family is tightened and nobody would see it — so
+    the second surface (`registered_class_profiles`, below) calls THIS, and the
+    entry loop's own finding strings are produced here unchanged."""
+    out = []
+    for rx in _ID_RES:
+        m = rx.search(text)
+        if m:
+            out.append(f"[{label}] BLINDNESS: design-id '{m.group(0)}' in lesson")
+    if _ORACLE_RE.search(text):
+        out.append(f"[{label}] ORACLE-LEAK: named-design→value in lesson")
+    if _OVERRIDE_RE.search(text):
+        out.append(f"[{label}] OVERRIDE: lesson tries to disable/override a gate "
+                   f"(advisory boundary)")
+    for rx in _ORACLE_SOURCE_RES:
+        m = rx.search(text)
+        if m:
+            out.append(f"[{label}] ORACLE-SOURCE: lesson keys on the hidden-scorer "
+                       f"artifact '{m.group(0)}' (§4.05 ban — advice must be "
+                       f"actionable from the spec/input alone)")
+            break
+    return out
+
+
+def _profile_text_fields(node, path: str):
+    """Every STRING LEAF under `registered_class_profiles`, with the path that
+    names it. Yields (path, text).
+
+    Walks the whole subtree rather than an enumerated list of keys: the field
+    set has already grown once (a profile carries `db_classes` and
+    `integration_contract` today, and #2094 wrote the map's `_doc` beside them),
+    and a hand-written key list is exactly how the next field added arrives
+    unscanned. A dict KEY is a class or field name, never prose, so only values
+    are scanned."""
+    if isinstance(node, str):
+        yield path, node
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            yield from _profile_text_fields(v, f"{path}.{k}")
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            yield from _profile_text_fields(v, f"{path}[{i}]")
+
+
 def check(db_path: Path):
     findings = []
     try:
@@ -103,24 +163,47 @@ def check(db_path: Path):
                         findings.append(f"[{cls}] related link '{r}' names no existing ic_class (dangling)")
         for les in lessons:
             total += 1
-            for rx in _ID_RES:
-                m = rx.search(les)
-                if m:
-                    findings.append(f"[{cls}] BLINDNESS: design-id '{m.group(0)}' in lesson")
-            if _ORACLE_RE.search(les):
-                findings.append(f"[{cls}] ORACLE-LEAK: named-design→value in lesson")
-            if _OVERRIDE_RE.search(les):
-                findings.append(f"[{cls}] OVERRIDE: lesson tries to disable/override a gate "
-                                f"(advisory boundary)")
-            for rx in _ORACLE_SOURCE_RES:
-                m = rx.search(les)
-                if m:
-                    findings.append(f"[{cls}] ORACLE-SOURCE: lesson keys on the hidden-scorer "
-                                    f"artifact '{m.group(0)}' (§4.05 ban — advice must be "
-                                    f"actionable from the spec/input alone)")
-                    break
+            findings.extend(_scan_text(les, cls))
+
+    # ── registered_class_profiles (#2143) ──────────────────────────────────
+    # THE SECOND §4.05 CHANNEL. A class profile's `integration_contract` prose
+    # is written into `contract.md` by `ic_expert_backup_pack.assemble` and
+    # handed to the IC Expert Agent VERBATIM — the same destination as a
+    # lesson, reached by a different field. Until now nothing scanned it: the
+    # families above were bound to `entries[]`, so a profile requirement
+    # carrying a design identifier or an oracle-sourced instruction would have
+    # shipped through a gate that reported PASS.
+    prof = db.get("registered_class_profiles")
+    n_profile_fields = 0
+    if isinstance(prof, dict):
+        per_class = {}
+        for path, text in _profile_text_fields(prof, "registered_class_profiles"):
+            n_profile_fields += 1
+            top = path.split(".")[1] if path.count(".") >= 1 else None
+            if top:
+                per_class[top] = per_class.get(top, 0) + 1
+            findings.extend(_scan_text(text, path))
+        # A ZERO IS A FINDING, NOT A PASS — but only where zero is impossible
+        # to reach honestly. A DB that predates class-first has no map at all
+        # and is not accused of anything; a map that IS there and yields no
+        # text, or a PROFILED class none of whose text the walk reached, is the
+        # silent zero this check exists to stop.
+        if n_profile_fields == 0:
+            findings.append(
+                "[registered_class_profiles] PRESENT but 0 text fields were "
+                "scanned — a profile's contract prose reaches the agent through "
+                "contract.md, so scanning none of it is a broken scan, not a "
+                "clean one")
+        for cname, pv in prof.items():
+            if isinstance(pv, dict) and per_class.get(cname, 0) == 0:
+                findings.append(
+                    f"[registered_class_profiles.{cname}] PROFILED but 0 text "
+                    f"fields were scanned — its contract text reaches the agent "
+                    f"unscanned")
     return {"pass": not findings, "classes": len(entries),
-            "total_lessons": total, "findings": findings}
+            "total_lessons": total,
+            "profile_text_fields": n_profile_fields,
+            "findings": findings}
 
 
 def main(argv=None) -> int:
@@ -134,7 +217,8 @@ def main(argv=None) -> int:
         a.json.write_text(json.dumps(rep, indent=2))
     verdict = "PASS" if rep["pass"] else "FAIL"
     print(f"ic_expert_db_consistency: {verdict} "
-          f"(classes={rep.get('classes','?')} lessons={rep.get('total_lessons','?')})")
+          f"(classes={rep.get('classes','?')} lessons={rep.get('total_lessons','?')} "
+          f"profile_text_fields={rep.get('profile_text_fields','?')})")
     for f in rep.get("findings", []):
         print(f"  ! {f}")
     return 0 if rep["pass"] else 1

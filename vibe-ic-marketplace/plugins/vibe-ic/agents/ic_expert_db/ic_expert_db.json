@@ -9,10 +9,58 @@
   "digital_cmd_driven": null,
   "mixed_signal_otp": null,
   "pure_analog": null,
-  "data_converter": null,
+  "data_converter": {
+   "db_classes": [
+    "sigma-delta-modulator",
+    "decimator-peak-detect"
+   ],
+   "integration_contract": [
+    "the conversion this build performs with its resolution and its OUTPUT word rate, AND the oversampling ratio that relates the modulator clock to that word rate — a converter whose layer states an output rate and no oversampling ratio has not specified the clock its digital datapath runs on, which is the one number every downstream timing constraint is derived from",
+    "the boundary between the analog block and the digital datapath, written as a port list: which signals cross it, in which direction, and on which clock — this class exists precisely because the design has BOTH halves, and a layer that describes only one of them describes half a chip",
+    "the digital output's own format: word width, bit order, signed or unsigned, and how a word narrower than the bus that carries it is aligned — an unstated justification is decided by whoever writes the RTL rather than by the specification",
+    "the decimation or filter chain the readout implements STAGE BY STAGE, with the rate change and the word growth at each stage; a chain given as a single overall ratio hides the intermediate widths, and those widths are what the area and the truncation behaviour are made of",
+    "the reference and the full-scale definition, together with what the digital output reads as AT, ABOVE and BELOW full scale — saturation or wrap — because an out-of-range code with no stated behaviour is not an absent feature, it is a decision nobody recorded",
+    "the calibration or trim interface when the input names one, and — where the input permits leaving it un-trimmed — the readout behaviour that a documented power-up calibration gates; a trim path with no stated post-reset state is an unresolved question, not an absent feature"
+   ]
+  },
   "bare_fpga": null,
-  "bus_interconnect_protocol": null,
-  "serial_peripheral_protocol": null,
+  "bus_interconnect_protocol": {
+   "db_classes": [
+    "handshake-valid-ready",
+    "axi-stream",
+    "axi-stream-width-downsizer",
+    "axi-stream-datawidth-upsizer",
+    "bus-arbiter",
+    "axi-interconnect-timeout",
+    "bus-protocol-bridge"
+   ],
+   "integration_contract": [
+    "every CHANNEL this build implements, named, with its direction and the payload it carries — an interconnect protocol is a set of typed channels and a layer that describes 'the bus' as one thing has not described the protocol",
+    "the handshake rule on each channel stated as an INVARIANT, not as prose: what may change while valid is asserted and ready is not, whether ready may depend combinationally on valid, and the cycle on which the transfer is considered to have happened",
+    "the role each port plays — manager/initiator or subordinate/target — and, when the build carries more than one of either, the arbitration rule between them including its tie-break direction; an arbitration described as 'fair' without a tie-break is a rule two implementations will resolve differently",
+    "the burst and beat structure this build supports: the legal burst lengths and sizes, whether a burst may cross a boundary, and the ordering guarantee between responses on different channels — an ordering guarantee left unstated is one a checker will assume and the RTL will not provide",
+    "the topology this build sits in — point-to-point, shared, or crossbar — with the width conversion, buffering or bridging stage on each path, because each such stage costs latency the layer must account for rather than discover",
+    "what happens when a transaction does NOT complete: the timeout or error-response behaviour, which side raises it, and the state the channel is left in — an interconnect whose layer states only the success path has specified the half that never needs debugging"
+   ]
+  },
+  "serial_peripheral_protocol": {
+   "db_classes": [
+    "serial-parity-link",
+    "serial-to-parallel-deserializer",
+    "serial-in-parallel-out",
+    "serial-link-serdes",
+    "spi-serializer-fsm",
+    "integer-clock-divider"
+   ],
+   "integration_contract": [
+    "which ROLE this build implements — controller/transmitter, target/receiver, or both — and, when only one, the other end's behaviour that this build assumes: a peripheral built as one role has a different pin surface and a different post-reset line state from the other, and a layer that names the protocol without naming the role has specified neither",
+    "the external wire surface: every pin with its direction and its IDLE level, and for any line that more than one device can drive, whether it is open-drain or tri-stated and who holds it when nobody is transmitting — a shared line with no stated idle owner is an unresolved question, not an absent feature",
+    "the bit timing as a PAIR of facts, not one: the bit rate or bit time this build targets together with the reference it is divided from and the tolerance the protocol allows, AND the phase of the first bit after reset release — a period alone does not pin a serial link, because two implementations with the same average rate can differ by one reference edge forever",
+    "the frame this build transmits and accepts: its delimiters (start/stop bits, or start-of-frame and end-of-frame markers), the bit order within the frame, and the named error output the receiver raises for each framing violation it can observe — a violation the layer describes but gives no output for is unobservable",
+    "where in the bit cell the receiver samples and how it stays aligned to the transmitter — an oversampling factor and sample point, an edge-resynchronisation rule, or a forwarded clock — stated as a count of reference-clock periods rather than as prose, because the sample point is what a cycle-accurate checker measures",
+    "the protocol modes and speeds this run implements and the ones it does not, with every pin or register that stays in the interface for an out-of-scope mode named as an unresolved scope question rather than left to read as an absent feature"
+   ]
+  },
   "digital_arithmetic_primitive": null,
   "processor_cpu": {
    "db_classes": [
@@ -30,7 +78,24 @@
     "every interrupt and exception input the core exposes, together with the privilege modes this build implements and the read-only architectural identity values the integrator has to choose — an interrupt or exception port present in the interface but outside the modes this build scopes is an unresolved scope question, not an absent feature"
    ]
   },
-  "bus_peripheral": null,
+  "bus_peripheral": {
+   "db_classes": [
+    "apb-mmio-register-file",
+    "apb-mmio-register-file-peripheral",
+    "apb-peripheral-mmio",
+    "axi4lite-register-slave",
+    "apb-csr-shift-register",
+    "bus-interface-defaults"
+   ],
+   "integration_contract": [
+    "the bus this peripheral attaches to, NAMED, with its data and address widths and the fact that this build is the SUBORDINATE on it — a layer that carries a register map without naming the bus the map is reached through has specified the map and not the interface, and the two are checked by different gates",
+    "the complete address map: every offset this build decodes, AND what an access outside the decoded set does — an error response, a read of a defined value, or a fall-through to a backing region — because an undecoded access with no stated behaviour is the first transaction a bus checker issues",
+    "the access attributes of every field: read/write, read-only, write-only, write-one-to-clear, and the reserved bits, together with the value a read returns for a reserved or unimplemented field; 'reserved' is a value question, not a documentation one, and a read-only register that silently accepts a write is indistinguishable from one that does not exist",
+    "the post-reset value of every software-readable register, and, by name, the registers that are NOT reset — a register whose reset value the layer leaves unstated cannot be checked at time zero, which is the one cycle every bench samples",
+    "the handshake this build implements: zero-wait-state or the wait-state count, the bus phase in which each response signal is valid, and what the response outputs read as OUTSIDE an access — a response the input calls 'undefined' is a licence for a checker to sample it, never permission to leave it floating",
+    "every interrupt or event output the peripheral raises, whether each is a LEVEL or a PULSE, the register write that clears it, and the polarity/sense configuration with its bit encoding — an interrupt whose clear path is unstated is the one that latches forever, and an unstated polarity encoding is decided by whoever writes the RTL rather than by the specification"
+   ]
+  },
   "crypto_accelerator": {
    "db_classes": [
     "block-cipher-accelerator",
