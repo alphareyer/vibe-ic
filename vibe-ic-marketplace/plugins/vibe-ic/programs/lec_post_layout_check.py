@@ -60,6 +60,16 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# ONE LEC RECIPE (vibe-ic#2151). The SAT strategy this gate runs is the one
+# `lec_run` ships — `lec_run.equiv_proof_tail`, the same function the
+# pre-layout LEC derives its tail from — never a second copy. The import is
+# DELIBERATELY UNGUARDED: a try/except that fell back to a local copy of the
+# recipe would silently recreate exactly the divergence this closes (the
+# post-layout step ran the pre-v1.18.0 strategy for 98 versions because
+# nothing tied the two paths together).
+import lec_run as _lec_run  # noqa: E402
+
 GATE = "lec_post_layout_check"
 
 # Artefact the phase3 runner writes (relative to the project root).
@@ -399,7 +409,9 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
                              constant_gold_wires: Optional[Dict[str, int]] = None,
                              functional_lib: bool = False,
                              blacklist: Optional[str] = None,
-                             gate_renames: Optional[List[Tuple[str, str]]] = None
+                             gate_renames: Optional[List[Tuple[str, str]]] = None,
+                             fsm_encfile: Optional[str] = None,
+                             screen_only: bool = False
                              ) -> str:
     """Emit the Yosys .ys that structurally proves gold_v == gate_v.
 
@@ -460,6 +472,32 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
                  it (else the unsound-but-available `-lib` path, functional_lib
                  False, is used and RECORDED). See functional_read_liberty_aborted.
 
+    fsm_encfile : optional path (in the tool's filesystem view) of the FSM
+                 old->new encoding table `synth -encfile` wrote beside the gate
+                 netlist. `equiv_make -encfile <f>` READS it and builds the
+                 encoder/decoder that pairs a RE-ENCODED state register with
+                 its gold counterpart correctly. On that path `splitnets -ports`
+                 is DROPPED, because `-encfile` is keyed on the WHOLE signal
+                 name (`.fsm <module> <signal>`) which a bit-blasted design no
+                 longer has, and `equiv_make` already emits one `$equiv` per
+                 BIT so no key point is lost. This is `lec_run`'s own #2050
+                 rule, applied here rather than re-derived. Absent (every
+                 caller until a gate netlist carries one) -> both strings are
+                 the pre-change literals and the recipe is byte-identical.
+
+    screen_only : emit the SCREEN — rung 0 (`equiv_struct` + `equiv_simple`)
+                 and NO `equiv_induct` (vibe-ic#2151). Its purpose is to
+                 ENUMERATE the points that survive the cheap proof, cheaply, so
+                 the pin-permutation classifier can run on them BEFORE the
+                 induction ladder is spent on points a rename would have paired
+                 correctly. MEASURED on the sha256 post-route netlist: the full
+                 ladder spent 43289.65 s — 99% of it in three `equiv_induct`
+                 rungs — on 134 points that no depth can prove, and the very
+                 same netlists prove 12124/12124 in 90.60 s once those points
+                 are paired. A SCREEN IS NOT A VERDICT: it never runs
+                 induction, so its UNPROVEN says nothing about the design, and
+                 the caller must reach its verdict from a full-ladder run.
+
     All paths are used verbatim (caller translates host->container). Same
     engine shape as `eda_lvs mode=yosys_equiv`."""
     bb = "\n".join(_read_blackbox_cmd(q) for q in (blackbox_v or []))
@@ -499,13 +537,20 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
     gold_strip_block = (gold_strip + "opt_clean\n") if gold_strip else ""
     gate_strip_block = (gate_strip + "opt_clean\n") if gate_strip else ""
     depths = list(seq_depths) if seq_depths else list(DEFAULT_SEQ_DEPTHS)
-    # Ascending, de-duplicated, positive; each pass only works the still-unproven
-    # cells, so the shallow-first order keeps the common case cheap.
-    depths = sorted({int(d) for d in depths if int(d) > 0})
-    induct = "\n".join(f"equiv_induct -seq {d}" for d in depths) or "equiv_induct"
+    # THE PROOF TAIL COMES FROM `lec_run` (vibe-ic#2151) — `stat`, the SAT-free
+    # `equiv_struct` pre-reduction, the rung ladder and `equiv_status`, emitted
+    # by the SAME function the pre-layout LEC uses. Ascending/de-duplicated/
+    # positive ordering of the depths is that function's job now, so there is
+    # one place that decides what a rung ladder looks like.
+    proof_tail = _lec_run.equiv_proof_tail(depths, induction=not screen_only)
     em = ("equiv_make"
+          + (f" -encfile {fsm_encfile}" if fsm_encfile else "")
           + (f" -blacklist {blacklist}" if blacklist else "")
           + " gold gate equiv")
+    # #2050 (via lec_run): `-encfile` is keyed on whole signal names, which a
+    # `splitnets`-blasted design no longer has. Dropped on that path ONLY;
+    # with no encfile this is the pre-change literal.
+    splitnets = "" if fsm_encfile else "splitnets -ports\n"
 
     if functional_lib:
         # FUNCTIONAL (SOUND) recipe. Per-side, three GOTCHAs make functional
@@ -540,7 +585,7 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
                     f"opt -purge\n"
                     f"opt_clean -purge\n"
                     f"{renames}"
-                    f"splitnets -ports\n"
+                    f"{splitnets}"
                     f"design -stash {stash}\n")
         # MERGE of two independent fixes, both kept:
         #  * v1.17.31 (main) pairs a permuted pin's cut point instead of
@@ -561,9 +606,7 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
             f"design -copy-from gate -as gate {top}\n"
             f"{em}\n"
             "hierarchy -top equiv\n"
-            "equiv_simple\n"
-            f"{induct}\n"
-            "equiv_status\n")
+            f"{proof_tail}")
 
     # BLACKBOX `-lib` recipe (available on ANY yosys; UNSOUND — equiv_make
     # assumes matched cells equal, so NAND≡NOR false-passes). Used only as the
@@ -576,24 +619,19 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
 {bb_block}read_verilog -sv {gold_v}
 prep -top {top}
 {_constant_block(constant_gold_wires)}
-{gold_strip_block}splitnets -ports
-design -stash gold
+{gold_strip_block}{splitnets}design -stash gold
 
 {_read_liberties(False).rstrip()}
 {bb_block}read_verilog -sv {gate_v}
 prep -top {top}
 {_constant_block(constant_gate_wires)}
-{gate_strip_block}{_rename_block(gate_renames, top)}splitnets -ports
-design -stash gate
+{gate_strip_block}{_rename_block(gate_renames, top)}{splitnets}design -stash gate
 
 design -copy-from gold -as gold {top}
 design -copy-from gate -as gate {top}
 {em}
 hierarchy -top equiv
-equiv_simple
-{induct}
-equiv_status
-"""
+{proof_tail}"""
 
 
 # ---------------------------------------------------------------------------

@@ -47035,6 +47035,50 @@ def _lec_post_layout_module():
         return None
 
 
+def _lec_run_module():
+    """Lazy import of `lec_run` — the module that OWNS the LEC recipe.
+
+    The post-layout step derives its proof tail and its FSM-encfile locator
+    from this module (vibe-ic#2151), so there is ONE definition of each and
+    not a second copy that can drift for 98 versions."""
+    import importlib
+    return importlib.import_module("lec_run")
+
+
+# THE POST-LAYOUT LEC STEP BUDGET — RECORDED, NEVER TERMINATING (#2151/#2051).
+#
+# Default: `lec_run.DEFAULT_YOSYS_TIMEOUT_S` (7200 s), the SAME figure the
+# pre-layout LEC step calls its budget, so the two LEC steps do not disagree
+# about the scale of a normal proof. Override with
+# `VIBEIC_POST_LAYOUT_LEC_BUDGET_S` — symmetric with the pre-layout step's
+# `VIBEIC_LEC_YOSYS_TIMEOUT_S`, which is also honoured here when the
+# post-layout-specific variable is unset.
+#
+# WHAT CROSSING IT DOES: `run_supervised` records `hard_ceiling_exceeded`,
+# announces it ONCE, and the job runs on to its own end. It is not a kill, it
+# cannot shorten a converging proof, and it is not a `timeout` wrapper. What it
+# buys is DISCLOSURE: a 12-hour post-layout LEC is stated while it is
+# happening instead of being visible only in the log afterwards.
+POST_LAYOUT_LEC_BUDGET_ENV = "VIBEIC_POST_LAYOUT_LEC_BUDGET_S"
+
+
+def _post_layout_lec_step_budget_s() -> float:
+    for _name in (POST_LAYOUT_LEC_BUDGET_ENV, "VIBEIC_LEC_YOSYS_TIMEOUT_S"):
+        try:
+            _v = float(os.environ.get(_name, "") or 0)
+        except ValueError:
+            _v = 0.0
+        if _v > 0:
+            return _v
+    try:
+        return float(_lec_run_module().DEFAULT_YOSYS_TIMEOUT_S)
+    except Exception:  # pragma: no cover - defensive
+        # NOT a default supplied for a value we could not read: the shared
+        # supervised ceiling is what the step had before this budget existed,
+        # so falling back to it changes nothing rather than inventing a bound.
+        return float(_WATCHDOG_HARD_CEILING_S)
+
+
 def _discover_blackbox_verilog(pdk: PdkConfig, container: str,
                                netlists: Optional[Sequence[Path]] = None,
                                notes: Optional[List[str]] = None,
@@ -47882,8 +47926,48 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                                container)
     log_host = out_json.parent / "lec_post_layout.log"
 
+    # THE STEP'S OWN RECORDED BUDGET (vibe-ic#2151).
+    #
+    # Until now the post-layout LEC had exactly ONE bound: the shared 24 h
+    # `hard_ceiling_s` every supervised container command carries. MEASURED on
+    # the sha256 post-route netlist (8HD-8): the first pass ran 43289.65 s —
+    # 12 hours, 99% of it inside three `equiv_induct` rungs, 17.7 GB peak — and
+    # NOTHING in the step said so while it happened. A budget nobody records is
+    # a budget nobody can act on.
+    #
+    # THIS IS A RECORDED BUDGET, NOT A KILL. Since #2051 `hard_ceiling_s` is a
+    # crossing the supervisor NOTES (`observations['hard_ceiling_exceeded']`,
+    # announced once) and then lets the job run on to its own end. Passing the
+    # step's own, smaller value therefore changes WHEN the disclosure happens,
+    # never WHETHER the proof finishes: a converging LEC still converges, and a
+    # long one is now disclosed at the recipe's expected scale instead of a day
+    # later. Nothing here wraps the LEC in `timeout` and nothing kills it.
+    _lec_budget_s = _post_layout_lec_step_budget_s()
+    _lec_budget_note = (
+        f"post-layout LEC: recorded step budget {_lec_budget_s:g}s "
+        f"(RECORDED, not a kill — crossing it is announced and the proof "
+        f"continues; see vibe-ic#2051).")
+    notes.append(_lec_budget_note)
+    # FSM RE-ENCODING TABLE, read with lec_run's OWN locator so there is one
+    # answer to "where does the encfile live" (vibe-ic#2050/#2151). Present
+    # only when the synth step wrote one beside the gate netlist; absent on
+    # every netlist that carries none, in which case the recipe is
+    # byte-identical to the pre-change one.
+    _fsm_encfile_host = None
+    try:
+        _fsm_encfile_host = _lec_run_module().fsm_encfile_beside_netlist(
+            str(gate))
+    except Exception as exc:                       # pragma: no cover - defensive
+        notes.append(f"post-layout LEC: FSM encfile lookup skipped ({exc}).")
+    _fsm_encfile_c = (_to_container_path(_fsm_encfile_host, container)
+                      if _fsm_encfile_host else None)
+    if _fsm_encfile_c:
+        notes.append("post-layout LEC: pairing re-encoded FSM state registers "
+                     f"through equiv_make -encfile {_fsm_encfile_host}.")
+
     def _run_lec(functional_lib: bool, blacklist_c: Optional[str] = None,
-                 gate_renames: Optional[List[Tuple[str, str]]] = None):
+                 gate_renames: Optional[List[Tuple[str, str]]] = None,
+                 screen_only: bool = False):
         """Build the recipe (functional or -lib), run yosys, return log text.
         `blacklist_c` (container path) is set ONLY by the pin-permutation
         re-proof below, on points that classification proved to be naming
@@ -47895,6 +47979,10 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
         _kw = {"blacklist": blacklist_c} if blacklist_c else {}
         if gate_renames:
             _kw["gate_renames"] = gate_renames
+        if _fsm_encfile_c:
+            _kw["fsm_encfile"] = _fsm_encfile_c
+        if screen_only:
+            _kw["screen_only"] = True
         ys = mod.build_yosys_equiv_script(gold_c, gate_c, lib_c, top,
                                           blackbox_v=blackbox,
                                           strip_gate_ports=strip_gate_ports,
@@ -47910,7 +47998,9 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
         cmd = (f"export PATH={TOOLS_IN_CONTAINER}/yosys/bin:"
                f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
                f"yosys -s {ys_c} 2>&1 | tee {log_c}")
-        rc, out, err = _docker_exec(container, cmd, marker=ys_c)
+        rc, out, err = _docker_exec(container, cmd, marker=ys_c,
+                                    log_path=log_host,
+                                    hard_ceiling_s=_lec_budget_s)
         text = (log_host.read_text(errors="replace")
                 if log_host.is_file() else (out or "") + (err or ""))
         return rc, text
@@ -47959,19 +48049,96 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
     lec_recipe = "functional"
     functional_lib = True
     if _func_ok:
-        rc, log_text = _run_lec(functional_lib=True)
+        pass
     elif not mod.liberty_input_is_usable(_lib_exists, _lib_nonempty):
         # Input defect — run the SOUND recipe anyway so the failure is honest.
         # Falling back to the unsound compare here would let a liberty we never
         # read produce a "match".
         notes.append(f"post-layout LEC: {_func_reason}; keeping the SOUND "
                      f"functional recipe so the failure stays honest.")
-        rc, log_text = _run_lec(functional_lib=True)
     else:
         notes.append(f"post-layout LEC: {_func_reason}")
         lec_recipe = "blackbox_lib_fallback"
         functional_lib = False
-        rc, log_text = _run_lec(functional_lib=False)
+
+    # ---------------------------------------------------------------------
+    # THE PERMUTATION SCREEN, BEFORE THE INDUCTION LADDER (vibe-ic#2151).
+    #
+    # The pin-permutation re-proof below has always been able to pair a
+    # post-route pin swap correctly — but it only ever saw the unproven points
+    # AFTER the full ladder had run. MEASURED on the sha256 post-route netlist
+    # (8HD-8, pinned image): the first pass spent 43289.65 s, 99% of it in
+    # three `equiv_induct` rungs, proving NOTHING (`Proved 0` on each) about
+    # 134 points that a permuted pin makes unprovable at ANY depth — and the
+    # very same netlists then proved 12124/12124 in 90.60 s once those points
+    # were paired. Twelve hours of SAT to learn what the classifier reads
+    # structurally in seconds.
+    #
+    # So the points are enumerated FIRST, by a SCREEN: rung 0 only
+    # (`equiv_struct` + `equiv_simple`), no induction. A screen is NOT a
+    # verdict and is never read as one — the authoritative run below is a FULL
+    # ladder, exactly as before, and it is the only thing `parsed` comes from.
+    # The screen can only ADD gate-side renames, and a rename changes no logic
+    # and adds or removes no point, so it cannot turn a real mismatch into a
+    # pass: a point the classifier rejects keeps its cut point and stays
+    # unproven. On a design with no permutation the screen finds no rename,
+    # the authoritative run is byte-identical to the pre-change one, and the
+    # cost is one extra `equiv_simple`.
+    _screen: Optional[Dict[str, Any]] = None
+    _pre_renames: List[Tuple[str, str]] = []
+    if hasattr(mod, "classify_pin_permutation_points"):
+        _t_screen = time.monotonic()
+        _s_rc, _s_log = _run_lec(functional_lib=functional_lib,
+                                 screen_only=True)
+        _s_parsed = mod.parse_equiv_log(_s_log)
+        _screen = {
+            "ran": True,
+            "seconds": round(time.monotonic() - _t_screen, 3),
+            "yosys_rc": _s_rc,
+            "survivors": _s_parsed.get("unproven"),
+            "total_points": _s_parsed.get("total"),
+            # SAID OUT LOUD: a screen runs no induction, so this is not a
+            # statement about the design.
+            "is_a_verdict": False,
+        }
+        if (_s_parsed.get("unproven") or 0) > 0:
+            try:
+                _s_names = mod.parse_unproven_points(_s_log)
+                _s_libtext = _v1_6_604_read_text_or_container_cat(
+                    str(pdk.liberty), container) or ""
+                _s_cls = mod.classify_pin_permutation_points(
+                    _s_names,
+                    gold.read_text(errors="replace") if gold.is_file() else "",
+                    gate.read_text(errors="replace") if gate.is_file() else "",
+                    _s_libtext)
+                _pre_renames, _s_recs = mod.build_pin_correspondence_renames(
+                    _s_cls.get("accepted") or [], _s_names)
+            except Exception as exc:  # noqa: BLE001 — best-effort, recorded
+                _s_cls, _s_recs = {"error": repr(exc)}, []
+                _pre_renames = []
+            _screen.update({
+                "survivor_points": _s_names,
+                "accepted": _s_cls.get("accepted") or [],
+                "rejected": _s_cls.get("rejected") or [],
+                "classifier_error": _s_cls.get("error"),
+                "renames": _pre_renames,
+                "rename_records": _s_recs,
+            })
+        _screen_log = out_json.parent / "lec_post_layout.screen.log"
+        try:
+            _screen_log.write_text(_s_log)
+            _screen["log"] = str(_screen_log)
+        except OSError as exc:
+            _screen["log_write_error"] = repr(exc)
+        notes.append(
+            "post-layout LEC: permutation screen (rung 0, NO induction) "
+            f"{_screen['seconds']:g}s — {_screen.get('survivors')} of "
+            f"{_screen.get('total_points')} points survived equiv_simple; "
+            f"{len(_pre_renames)} gate-side pin rename(s) carried into the "
+            "full ladder. A screen is not a verdict.")
+
+    rc, log_text = _run_lec(functional_lib=functional_lib,
+                            gate_renames=_pre_renames or None)
     parsed = mod.parse_equiv_log(log_text)
     # ROUND-3 (subservient x gf180mcuD, 2026-09-02) — PIN-PERMUTATION RE-PROOF.
     # The flattened functional recipe names every cell pin `<inst>.<pin>` and
@@ -48158,6 +48325,19 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
         # upgrades to functional after the fork image rebuild).
         "lec_recipe": lec_recipe,
         "functional_read_liberty": functional_lib,
+        # THE RECIPE THIS PROOF RAN, and the step budget it ran under
+        # (vibe-ic#2151). The proof tail is `lec_run.equiv_proof_tail` — the
+        # SAME function the pre-layout LEC derives its strategy from — so a
+        # reader can tell from the record alone which recipe produced the
+        # verdict. `step_budget_s` is RECORDED, never terminating.
+        "proof_tail_source": "lec_run.equiv_proof_tail",
+        "step_budget_s": _lec_budget_s,
+        "step_budget_is_a_kill": False,
+        "fsm_encfile": _fsm_encfile_host,
+        # The rung-0 screen that enumerated the equiv_simple survivors before
+        # the induction ladder ran, and the renames it carried in. None when
+        # the classifier is unavailable. Never a verdict (`is_a_verdict`).
+        "permutation_screen": _screen,
         # WHICH netlist this record is about, as a field a machine can read
         # instead of a path a reader has to recognise.
         "gate_kind": gate_kind,

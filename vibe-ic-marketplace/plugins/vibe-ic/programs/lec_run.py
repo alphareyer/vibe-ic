@@ -3074,26 +3074,111 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
         # induction wall explains this", which turned every combinational
         # mismatch into a non-blocking INCONCLUSIVE. `stat` mutates no design
         # and costs no solver time.
-        f"stat\n"
-        # SAT-FREE structural pre-reduction BEFORE any SAT is spent. equiv_struct
-        # merges the $equiv key-points whose driving cones are structurally
-        # identical across gold and gate (the majority of a name-mapped
-        # RTL-vs-synth miter) by structural hashing alone — no solver call. This
+        # THE SHARED PROOF TAIL. `stat`, the SAT-free `equiv_struct`
+        # pre-reduction, the rung ladder and the closing `equiv_status` are
+        # emitted by `equiv_proof_tail` — the ONE function every LEC path in
+        # this plugin (pre-layout here, post-layout in
+        # `lec_post_layout_check.build_yosys_equiv_script`) derives its SAT
+        # strategy from. It returns exactly the lines this call site used to
+        # spell inline, so the pre-layout script is byte-identical.
+        + equiv_proof_tail(checkpoint_dir=checkpoint_dir, start_index=0)
+    )
+
+
+# ---------------------------------------------------------------------------
+# THE ONE PROOF TAIL, SHARED BY EVERY LEC PATH (vibe-ic#2151)
+# ---------------------------------------------------------------------------
+# WHY THIS FUNCTION EXISTS. Until v1.18.98 this plugin ran TWO LEC recipes:
+# `build_equiv_script` above (pre-layout, RTL vs synth netlist) and a SECOND,
+# INDEPENDENT copy in `lec_post_layout_check.build_yosys_equiv_script`
+# (post-layout, reference netlist vs routed netlist). The v1.18.0 LEC-recipe
+# fix — `stat` + the SAT-free `equiv_struct` pre-reduction ahead of any SAT
+# spend, and the `equiv_simple -short` first rung — landed in THIS file only.
+# The post-layout copy kept the pre-v1.18.0 strategy (`equiv_simple` straight
+# into `equiv_induct -seq 4/16/64`), so the fix never reached the step that
+# proves the ROUTED netlist. MEASURED on the sha256 post-route netlist
+# (8HD-8, rbsha2's own run): the post-layout first pass spent 43289.65 s —
+# 99% of it in 3x `equiv_induct`, 17.7 GB peak — to arrive at 134 unproven,
+# because every structurally-identical cone was handed to the SAT engine
+# instead of being collapsed by `equiv_struct` first.
+#
+# WHAT IT GUARANTEES. One function emits the strategy, so a future rung, a
+# future pre-reduction or a future budget marker cannot land on one path and
+# miss the other. `test_lec_one_recipe.py` pins that both builders derive
+# from this function and that the pre-layout text did not move.
+#
+# `seq_depths=None` -> the shipped `LEC_LADDER` verbatim (the pre-layout
+# caller). An explicit ascending depth list -> the same first rung followed by
+# one `equiv_induct` per depth; that is the post-layout caller's
+# already-documented `--seq-depths` knob, and with its default (4, 16, 64) the
+# emitted text is IDENTICAL to the ladder. Deeper induction is sound (it only
+# proves more), so a caller-chosen depth cannot weaken the proof.
+def equiv_proof_tail(seq_depths: Optional[List[int]] = None, *,
+                     checkpoint_dir: Optional[str] = None,
+                     start_index: int = 0,
+                     induction: bool = True) -> str:
+    """The SAT strategy every LEC path shares: `stat`, `equiv_struct`, the
+    rung ladder, `equiv_status`.
+
+    Returns the exact lines `build_equiv_script` used to spell inline, which
+    is what makes this a shared definition rather than a re-implementation.
+    """
+    if not induction:
+        # THE SCREEN (vibe-ic#2151). Rung 0 only: the SAT-free structural
+        # pre-reduction plus the cheap cone proof, and NO induction. It is not
+        # a verdict — `equiv_induct` is where a sequentially-equivalent design
+        # is proven — it is the cheapest complete enumeration of the points
+        # that survive `equiv_simple`, which is the input the pin-permutation
+        # classifier needs. Nothing downstream may treat a screen's UNPROVEN
+        # as an answer about the design.
+        if checkpoint_dir is not None:
+            raise ValueError("equiv_proof_tail: a screen writes no checkpoint")
+        ladder = LEC_LADDER[0][1]
+    elif seq_depths is None:
+        ladder = _emit_ladder(checkpoint_dir, start_index=start_index)
+    else:
+        # Ascending, de-duplicated, positive — each rung only re-attempts the
+        # cells still unproven, so shallow-first keeps the common case cheap.
+        depths = sorted({int(d) for d in seq_depths if int(d) > 0})
+        if checkpoint_dir is not None:
+            # Checkpoints are keyed on LEC_LADDER's rung NAMES; a caller-chosen
+            # depth has no name in that vocabulary. Refusing loudly beats
+            # writing a checkpoint no resume could ever select.
+            raise ValueError("equiv_proof_tail: checkpoint_dir is supported "
+                             "only for the shipped ladder (seq_depths=None)")
+        ladder = LEC_LADDER[0][1] + "".join(
+            f"equiv_induct -seq {d}\n" for d in depths)
+        if not depths:
+            ladder = LEC_LADDER[0][1] + "equiv_induct\n"
+    return (
+        # READ-ONLY report pass. It prints the miter's cell histogram, which is
+        # the OBSERVABLE `miter_is_stateless` reads to decide whether temporal
+        # induction could have had anything to unroll. Without it the parser
+        # has to guess, and the guess it used to make was "assume a flat
+        # induction wall explains this", which turned every combinational
+        # mismatch into a non-blocking INCONCLUSIVE. `stat` mutates no design
+        # and costs no solver time.
+        "stat\n"
+        # SAT-FREE structural pre-reduction BEFORE any SAT is spent.
+        # equiv_struct merges the $equiv key-points whose driving cones are
+        # structurally identical across gold and gate (the majority of a
+        # name-mapped miter) by structural hashing alone — no solver call. This
         # is SOUND: it only collapses provably-identical structure, so it can
-        # NEVER launder a real mismatch into a proof (a genuinely different cone
-        # survives to equiv_simple/equiv_induct below). Without it, equiv_simple
-        # SAT-hammers EVERY key-point including the trivially-identical ones, so a
-        # large design (measured: a 31 850-point AES miter) exhausts the wall
-        # clock mid-equiv_simple and yields a false INCONCLUSIVE. equiv_struct
-        # AUGMENTS, never REPLACES, the SAT stages that follow — it only shrinks
-        # the set they must decide (measured 31 850 -> 3 333, a 10x cut). This is
-        # the same pre-pass yosys's own `equiv_opt` runs. chip/PDK-AGNOSTIC.
-        f"equiv_struct\n"
+        # NEVER launder a real mismatch into a proof (a genuinely different
+        # cone survives to equiv_simple/equiv_induct below). Without it,
+        # equiv_simple SAT-hammers EVERY key-point including the trivially
+        # identical ones, so a large design (measured: a 31 850-point AES
+        # miter) exhausts the wall clock mid-equiv_simple and yields a false
+        # INCONCLUSIVE. equiv_struct AUGMENTS, never REPLACES, the SAT stages
+        # that follow — it only shrinks the set they must decide (measured
+        # 31 850 -> 3 333, a 10x cut). This is the same pre-pass yosys's own
+        # `equiv_opt` runs. chip/PDK-AGNOSTIC.
+        "equiv_struct\n"
         # Cheap bounded cone proof first. This can discharge local points
         # quickly, but is never treated as a complete result: every survivor
-        # still flows into the original full simple pass and 4/16/64 induction
-        # ladder below. Soundness therefore remains exactly the full recipe's.
-        + _emit_ladder(checkpoint_dir, start_index=0)
+        # still flows into the full simple pass and the induction ladder.
+        # Soundness therefore remains exactly the full recipe's.
+        + ladder
         + "equiv_status\n"
     )
 
