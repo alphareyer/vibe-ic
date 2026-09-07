@@ -1664,6 +1664,179 @@ def _converge_split(project: Path, base: Dict[str, Any], exp: Any,
     return base
 
 
+# ── WHERE the fact actually lives (#2150, the layer-contract ruling) ────────
+#
+# `owning_layers` answers "does any layer carry every token", and that answer
+# is a layer NAME. It cannot tell the two cases a layer contract has to keep
+# apart, because they produce the same layer name:
+#
+#   * the fact sits in a field NAMED for it — `L8.clock_domains[].name`,
+#     `L4.registers[].reset_value`, `L22.checklist_milestones[].id`. A consumer
+#     that wants the fact reads that path. The contract question is only WHICH
+#     layer owns it.
+#   * the fact sits in a GENERIC bucket — a comparison-table row, a discovered
+#     identifier, an evidence literal, a prose section. It is findable only by
+#     someone who already knows it is there, which is the same shape as an
+#     undeclared fact.
+#
+# THE RULING (#2150, owner, 2026-09-07): a generic bucket does NOT satisfy a
+# layer obligation unless a consumer actually reads it by that path. And the
+# repair is NOT to promote every such fact to a field — #2132's rule stands,
+# nothing is promoted without a MEASURED consumer. So a fact present in the
+# root but declared by no layer is RECORDED as a disagreement with its reason,
+# and never rounded up to an agreement.
+#
+# This block is that recording, and nothing more. It is ADVISORY and strictly
+# ADDITIVE: `met` is decided exactly where it was decided before, so a moved
+# verdict can never be attributed to it. Measured on a freshly generated
+# 28-layer Phase-1 root, lane cz2150b.
+#
+# The vocabulary below names the plugin's OWN generated-L-doc containers — it
+# is a statement about this repo's schema, not about any design, PDK or
+# vendor. A container qualifies when its elements are undifferentiated: a row,
+# a literal, a discovered name, a prose section. A named record's own field
+# (`registers.fields.encoding.description`) is NOT generic — the path says
+# what the value is.
+GENERIC_CARRIAGE_SEGMENTS = frozenset({
+    "auto_cited_sections",
+    "auto_discovered_identifiers",
+    "auto_discovered_literals",
+    "comparison_tables",
+    "corroborating_evidence",
+    "evidence",
+    "extraction_evidence",
+    "frs_sections",
+    "notes",
+    "raw",
+    # a raw table ROW, undifferentiated exactly as `comparison_tables.rows` is
+    "rows",
+    # a source SENTENCE lifted whole (`parameter_couplings.sentence`)
+    "sentence",
+    # the container that says in its own name that it is not structured
+    "unstructured",
+    "vendor_short_literals",
+})
+
+#: the three row-level answers, and the one that means the reading did not run.
+CARRIAGE_NOWHERE = "NOWHERE"
+CARRIAGE_GENERIC_ONLY = "GENERIC_ONLY"
+CARRIAGE_NAMED_FIELD = "NAMED_FIELD_ELSEWHERE"
+
+CARRIAGE_RULE = (
+    "a generic bucket does not satisfy a layer obligation unless a consumer "
+    "reads it by that path; a fact present in the root but declared by no "
+    "layer is recorded as a disagreement with its reason, never rounded up "
+    "to an agreement (#2150)"
+)
+
+
+def is_generic_carriage_path(path: str) -> bool:
+    """Does this dotted path pass through a generic container?
+
+    ANY segment, not just the first: `fields.tables.rows` is as generic at
+    depth three as `comparison_tables.rows` is at depth two, and reading only
+    the head would call the deeper one a named field.
+    """
+    return any(seg.strip().lower() in GENERIC_CARRIAGE_SEGMENTS
+               for seg in str(path or "").split("."))
+
+
+def token_paths(blob: Any, token: str) -> List[str]:
+    """Every dotted path in this document whose SCALAR carries the token.
+
+    List indices are elided — `registers[7].reset_value` and
+    `registers[8].reset_value` are one path, because the question is which
+    FIELD carries the fact and not how many records do. Uses the same
+    `phrase_present` the comparator uses, so the two can never disagree about
+    whether a token is present.
+    """
+    hits: List[str] = []
+
+    def walk(node: Any, path: List[str]) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, path + [str(k)])
+        elif isinstance(node, list):
+            for v in node:
+                walk(v, path)
+        elif node is not None and phrase_present(token, str(node)):
+            hits.append(".".join(path))
+
+    walk(blob, [])
+    return sorted(set(hits))
+
+
+def token_carriage(project: Path, tokens: List[str],
+                   exclude: Optional[Path] = None) -> Dict[str, Any]:
+    """WHERE each token lives across the layers, split named vs generic.
+
+    `exclude` is the layer the expectation already addressed: it has been read
+    and found wanting, and counting it as somewhere-else would answer the
+    question with the layer that raised it.
+    """
+    per_token: Dict[str, Dict[str, Any]] = {}
+    for tok in tokens:
+        per_token[tok] = {"named": {}, "generic": {}}
+    if not tokens:
+        return {"verdict": CARRIAGE_NOWHERE, "per_token": per_token,
+                "rule": CARRIAGE_RULE}
+
+    for p in emitted_layer_files(project):
+        if exclude is not None and p == exclude:
+            continue
+        try:
+            blob = json.loads(p.read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue          # unreadable content is not content
+        for tok in tokens:
+            paths = token_paths(blob, tok)
+            named = [q for q in paths if not is_generic_carriage_path(q)]
+            generic = [q for q in paths if is_generic_carriage_path(q)]
+            if named:
+                per_token[tok]["named"][p.stem] = named
+            if generic:
+                per_token[tok]["generic"][p.stem] = generic
+
+    if any(v["named"] for v in per_token.values()):
+        verdict = CARRIAGE_NAMED_FIELD
+    elif any(v["generic"] for v in per_token.values()):
+        verdict = CARRIAGE_GENERIC_ONLY
+    else:
+        verdict = CARRIAGE_NOWHERE
+    # WHICH tokens the verdict is made of. The verdict above is an OR over
+    # tokens — one token in a named field makes the row NAMED_FIELD_ELSEWHERE
+    # even where the rest are nowhere — and a reader who cannot see the split
+    # would read it as a statement about the whole fact. State it instead of
+    # implying it.
+    carried = sorted(t for t, v in per_token.items() if v["named"] or v["generic"])
+    return {"verdict": verdict, "per_token": per_token, "rule": CARRIAGE_RULE,
+            "tokens_carried_elsewhere": carried,
+            "tokens_in_no_layer": sorted(set(per_token) - set(carried))}
+
+
+def carriage_sentence(carriage: Dict[str, Any]) -> str:
+    """The one sentence a finding adds, in the words of the ruling."""
+    v = carriage.get("verdict")
+    if v == CARRIAGE_NOWHERE:
+        return ("Carriage: the missing token(s) are in NO other layer either, "
+                "so this is a content gap and not a scoping one.")
+    per = carriage.get("per_token") or {}
+    if v == CARRIAGE_GENERIC_ONLY:
+        where = sorted({f"{stem}.{q}"
+                        for t in per.values()
+                        for stem, qs in t["generic"].items() for q in qs})
+        return ("Carriage: the fact is in the root ONLY under a generic "
+                f"bucket ({', '.join(where[:4])}) and under no field named "
+                "for it. Recorded as a DISAGREEMENT, not promoted: "
+                + CARRIAGE_RULE + ".")
+    where = sorted({f"{stem}.{q}"
+                    for t in per.values()
+                    for stem, qs in t["named"].items() for q in qs})
+    return ("Carriage: a field NAMED for the fact carries it in another "
+            f"layer ({', '.join(where[:4])}), so this is a layer-contract "
+            "question — which layer owns it — and not a content gap.")
+
+
 def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
     """Decide ONE AI expectation against what the program track actually wrote.
 
@@ -1870,6 +2043,11 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
         # work whose answer nobody reads.
         base["owning_layers"] = owning_layers(
             project, base["expected_tokens"], exclude=path)
+        # #2150. WHERE the missing tokens live, and under what KIND of path.
+        # Asked over the MISSING tokens alone: a token the addressed layer
+        # already carries has no carriage question, and folding it in would
+        # let a satisfied token supply a named field for an unsatisfied fact.
+        base["carriage"] = token_carriage(project, missing, exclude=path)
     return base
 
 
@@ -2266,8 +2444,16 @@ def evaluate(project: Path) -> Dict[str, Any]:
                 f"{c['requirement']}. The program track produced: "
                 f"{c['observed']}."
                 + (f" Grounds: {'; '.join(str(e) for e in c['evidence'])}."
-                   if c["evidence"] else "")),
+                   if c["evidence"] else "")
+                # #2150 — APPENDED, never woven in: the sentences above are
+                # what every existing reader parses, and the ruling is a
+                # separate statement that must be readable on its own.
+                + (" " + carriage_sentence(c["carriage"])
+                   if c.get("carriage") else "")),
             "expert_source": c.get("expert_source"),
+            # The machine-readable half of the same sentence, so a consumer
+            # never has to parse prose to learn the carriage verdict.
+            "carriage": c.get("carriage"),
         })
 
     if ai.get("pack_assembly_status") == "NOT_ASSEMBLED":
