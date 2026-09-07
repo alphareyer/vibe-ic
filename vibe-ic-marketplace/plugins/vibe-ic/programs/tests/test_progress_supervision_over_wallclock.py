@@ -48,6 +48,7 @@ well and would take hours to do it.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -123,15 +124,57 @@ def test_a_progressing_job_outlives_the_declared_lec_step_budget(tmp_path):
         "not exercise what it claims")
 
 
+#: A container name that CANNOT be running anywhere. The subject of the test
+#: below is the kwargs `lec_run._docker` hands its supervisor; the container is
+#: scaffolding, and `run_docker_supervised` is stubbed so nothing is launched.
+#: Naming a container that DOES exist made the verdict depend on what the host
+#: happened to be running: on 8HD-4 a long-lived shared container named
+#: `vibeic-eda` runs an image other than the pinned one, so
+#: `_container_exec.docker_exec_argv` raised `ContainerImageMismatch` while
+#: building the returned `CompletedProcess` and this test died BEFORE reaching
+#: any assertion of its own (vibe-ic#2100's class). A name that cannot resolve
+#: is NOT_MEASURED rather than a mismatch, so the test now measures the
+#: producer instead of the host.
+_NO_SUCH_CONTAINER = "vibeic-lec-structural-probe-not-a-running-container"
+
+
 def test_lec_docker_does_not_hand_the_step_budget_to_the_hard_ceiling(
         monkeypatch):
     """The structural half of the same finding, so a regression is named at the
     call site instead of only as a slow behavioural surprise.
 
-    The declared budget must not arrive as `hard_ceiling_s`. Asserting only
-    "!= 73" would pass on any other bounded number, so the assertion is on the
-    PROPERTY: whatever ceiling is used must be at least the primitive's own
-    pathological backstop.
+    ONE DOCTRINE FOR `hard_ceiling_s` (vibe-ic#2125, decided from #2051)
+    -------------------------------------------------------------------
+    This test used to assert ``ceiling >= DEFAULT_HARD_CEILING_S`` — "never
+    hand a step budget to the ceiling". That was the RIGHT assertion when it
+    was written and is a PRE-#2051 RELIC now, because it constrains a number
+    that can no longer do anything while saying nothing about the mechanism
+    that could:
+
+      * `_watchdog.supervise` crossing `hard_ceiling_s` records
+        ``hard_ceiling_exceeded``, calls `ceiling_notice` ONCE, and the job
+        CONTINUES; `RC_CEILING` is no longer produced by that module at all.
+      * `_docker_watchdog.supervised_container_command` is an identity stamp
+        and an `exec` with NO OUTER CLOCK — the
+        `wrap_with_container_timeout` that once turned the ceiling into a
+        container-side ``timeout -k 5`` is not on the supervised path.
+
+    Both halves are asserted below rather than cited, because a doctrine that
+    is only written down is the thing that went stale here in the first place.
+
+    WHY THE RELIC HAD TO GO RATHER THAN BE KEPT "TO BE SAFE". It is not a
+    harmless extra: it is the OTHER of two live doctrines for one field. The
+    landed #2082 ATPG sites and #2113's `_atpg_supervision_kw` RECORD their
+    step budget as `hard_ceiling_s` precisely so the number keeps meaning
+    something; an assertion that refuses a recorded budget tells every producer
+    to state its budget NOWHERE, which is exactly the defect #2113's O2 hit. A
+    ceiling that cannot stop a job is not a deadline wearing the watchdog's
+    clothes — it is the run's declared budget, on the record.
+
+    So the property asserted is the one #2051 actually ruled: the budget is
+    RECORDED and ANNOUNCED, and NOTHING TERMINATES ON IT. Whether this
+    particular producer declares a ceiling or leaves the backstop is a free
+    choice, and this test no longer forces it either way.
     """
     seen = {}
 
@@ -141,14 +184,57 @@ def test_lec_docker_does_not_hand_the_step_budget_to_the_hard_ceiling(
         return 0, "Yosys 0.68\n", ""
 
     monkeypatch.setattr(_dw, "run_docker_supervised", fake_supervised)
-    lec_run._docker("vibeic-eda", "yosys -s /work/equiv.ys", timeout=73,
+    lec_run._docker(_NO_SUCH_CONTAINER, "yosys -s /work/equiv.ys", timeout=73,
                     marker="/work/equiv.ys")
 
+    # (1) WHATEVER THE CEILING IS, IT IS A NUMBER — recorded, never a kill.
     ceiling = seen.get("hard_ceiling_s", _wd.DEFAULT_HARD_CEILING_S)
-    assert ceiling >= _wd.DEFAULT_HARD_CEILING_S, (
-        f"the LEC step budget (73 s) reached the watchdog's pathological "
-        f"backstop as {ceiling} — a wall-clock deadline wearing the "
-        f"watchdog's clothes")
+    assert isinstance(ceiling, (int, float)) and ceiling > 0, (
+        f"the LEC launch declared {ceiling!r} as its recorded budget; a "
+        f"budget that is not a positive number cannot be recorded or "
+        f"announced")
+
+    # (2) NOTHING TERMINATES ON IT — the half that actually protects a running
+    #     proof, and the half the old `>= 86400` assertion never checked.
+    #
+    # READ AS CODE, NOT AS TEXT. `_watchdog.py`'s own docstring QUOTES the line
+    # #2051 deleted (`kill_fn(proc, "ceiling")`) to explain what it removed, so
+    # a substring search over the source reports the kill as present on a tree
+    # that does not have it. Parsing is the difference between "this file
+    # mentions the kill" and "this file performs it".
+    wd = ast.parse((PROGRAMS / "_watchdog.py").read_text(encoding="utf-8"))
+    supervise = next(n for n in ast.walk(wd)
+                     if isinstance(n, ast.FunctionDef) and n.name == "supervise")
+    kills_on_the_ceiling = [
+        n for n in ast.walk(supervise)
+        if isinstance(n, ast.Call)
+        and "kill" in ast.dump(n.func)
+        and any(isinstance(a, ast.Constant) and a.value == "ceiling"
+                for a in n.args)]
+    assert not kills_on_the_ceiling, (
+        f"`supervise` kills at the ceiling again (line "
+        f"{[n.lineno for n in kills_on_the_ceiling]}) — vibe-ic#2051 removed "
+        f"exactly that call, and with it back the recorded budget IS a "
+        f"wall-clock deadline once more")
+    announces = [n for n in ast.walk(supervise)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == "ceiling_notice"]
+    assert announces, (
+        "the crossing is no longer ANNOUNCED: `supervise` never calls "
+        "`ceiling_notice`. A budget that is neither enforced nor announced is "
+        "a number nobody will ever read, which is the state the pre-#2051 "
+        "assertion pushed every producer towards")
+
+    # (3) AND NO OUTER CLOCK REPLACES IT container-side.
+    dwd = (PROGRAMS / "_docker_watchdog.py").read_text(encoding="utf-8")
+    supervised_fn = dwd.split("def supervised_container_command", 1)[1]
+    supervised_fn = supervised_fn.split("\ndef ", 1)[0]
+    assert "wrap_with_container_timeout" not in supervised_fn.split(
+            '"""')[-1], (
+        "the supervised container command wraps an outer GNU `timeout` again; "
+        "the ceiling would then SIGKILL a proof that is still converging, "
+        "which is the measured 2026-09-06 failure vibe-ic#2051 removed")
+
     assert seen["marker"] == "/work/equiv.ys", (
         "the CPU/progress marker must still be the exact yosys script")
 

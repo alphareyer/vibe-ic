@@ -535,3 +535,209 @@ def test_an_absent_primitive_is_not_an_offence(tmp_path):
     assert not (tmp_path / "programs" / "_docker_watchdog.py").exists()
     assert rc == 0, out
     assert "OFFENDER 0" in out, out
+
+
+# ---------------------------------------------------------------------------
+# vibe-ic#2125 — THE RESOLVER FOLLOWS A `**kwargs` SPLAT TO ITS CONSTRUCTION
+# SITE, and the census is COMPUTED rather than written down.
+#
+# The gate printed `BUDGET 0` on a tree whose flagship recorded budget was
+# right there, because it read only the keywords written AT the call. The two
+# #2082 ATPG launches spell theirs `run_host_supervised(..., **_sup_kw)`, and
+# `_sup_kw` comes out of `_atpg_supervision_kw` three hundred lines away. A
+# site that DECLARES a ceiling was therefore reported as `<default>` — "no
+# ceiling declared" — which is a false statement about the code rather than a
+# gap in coverage, and a reader had to disbelieve a clean row to find it.
+# ---------------------------------------------------------------------------
+def _recorded_section(out: str) -> str:
+    """The RECORDED BUDGETS census, or '' when the gate printed none."""
+    if "--- RECORDED BUDGETS" not in out:
+        return ""
+    return out.split("--- RECORDED BUDGETS", 1)[1].split("\n---", 1)[0]
+
+
+def _recorded_count(out: str) -> int:
+    for line in out.splitlines():
+        if "RECORDED_BUDGETS" in line:
+            return int(line.split("RECORDED_BUDGETS", 1)[1].split()[0])
+    return -1
+
+
+#: A ceiling that reaches the supervisor ONLY through a splat, built by a
+#: helper — the exact shape of `fault_atpg_run._atpg_supervision_kw`, reduced
+#: to the two things that matter: the dict is built in another function, and
+#: the helper names its parameter differently from the caller.
+_SPLAT_VIA_HELPER = """
+import _watchdog as _wd
+
+def _supervision_kw(budget_s):
+    kw = {}
+    kw["hard_ceiling_s"] = float(budget_s)
+    return kw
+
+def go(cmd, wall_s=7200):
+    _sup = _supervision_kw(wall_s)
+    return _wd.run_host_supervised(cmd, **_sup)
+"""
+
+#: The same ceiling written where the gate could always see it. The two trees
+#: declare the SAME budget; only the spelling differs, so any difference in the
+#: census is the resolver's blindness and nothing else.
+_SPLAT_WRITTEN_OUT = """
+import _watchdog as _wd
+
+def go(cmd, wall_s=7200):
+    return _wd.run_host_supervised(cmd, hard_ceiling_s=float(wall_s))
+"""
+
+
+def test_a_ceiling_carried_only_by_a_splat_is_counted(tmp_path):
+    """THE DEFECT vibe-ic#2125 NAMES, at its smallest.
+
+    Before the fix this tree printed `<default>` and `BUDGET 0`: the gate said
+    the call declared no ceiling, and it declares 7200.
+    """
+    rc, out = _run(_tree(tmp_path, _SPLAT_VIA_HELPER))
+    assert rc == 0, out
+    assert _recorded_count(out) == 1, out
+    sec = _recorded_section(out)
+    assert "subject.py:11" in sec, sec   # the `run_host_supervised` line
+    assert "_supervision_kw()" in sec, (
+        "the census must name the site that BUILT the dict, not only the "
+        "call that splatted it — a reader who cannot find the construction "
+        "site cannot check the value\n" + sec)
+    assert "7200" in sec, sec
+
+
+def test_the_splat_spelling_and_the_written_out_spelling_agree(tmp_path):
+    """ONE budget, two spellings, one census. This is the property that makes
+    the count mean something: if the resolver reads only one of the two, the
+    number is a fact about the style the tree happens to be written in."""
+    _, out_splat = _run(_tree(tmp_path / "a", _SPLAT_VIA_HELPER))
+    _, out_plain = _run(_tree(tmp_path / "b", _SPLAT_WRITTEN_OUT))
+    assert _recorded_count(out_splat) == _recorded_count(out_plain) == 1, (
+        out_splat + "\n=====\n" + out_plain)
+    assert "7200" in _recorded_section(out_splat)
+    assert "7200" in _recorded_section(out_plain)
+
+
+def test_a_ceiling_hidden_behind_a_FRESH_splat_is_still_counted(tmp_path):
+    """THE MUTATION THE ISSUE ASKS FOR: hide a ceiling behind a splat the tree
+    did not have before. The census must not drop.
+
+    A resolver hard-coded to the splat NAMES that exist today would pass every
+    test above and fail this one, which is why the dict here is built inline at
+    the call and named nothing like `_sup_kw`."""
+    body = """
+import _watchdog as _wd
+
+def go(cmd):
+    hidden = {"hard_ceiling_s": 1200, "stall_grace_s": 30}
+    return _wd.run_host_supervised(cmd, **hidden)
+"""
+    rc, out = _run(_tree(tmp_path, body))
+    assert rc == 0, out
+    assert _recorded_count(out) == 1, out
+    assert "1200" in _recorded_section(out), out
+
+
+def test_a_passthrough_kwargs_is_not_reported_as_declaring_no_ceiling(tmp_path):
+    """`gate_host_independence_check.supervise_one_worker` is this shape: the
+    splat IS the function's own `**kwargs`, so a ceiling may arrive and its
+    value is the CALLER's.
+
+    "I could not read it" is not "there was nothing to read". Before the fix
+    this printed `<default> -> 86400 CLEAN`, which answers a question the file
+    cannot answer."""
+    body = """
+import _watchdog as _wd
+
+def go(cmd, **supervision):
+    return _wd.run_host_supervised(cmd, **supervision)
+"""
+    rc, out = _run(_tree(tmp_path, body))
+    assert rc == 0, out
+    assert "carried to the caller: 1" in out, out
+    assert "<default>" not in out.split("--- CENSUS ---", 1)[-1], (
+        "a pass-through must not be reported as declaring no ceiling\n" + out)
+
+
+def test_removing_the_splat_following_makes_the_census_DROP(tmp_path):
+    """THE OTHER DIRECTION, on the RESOLVER itself rather than on a subject
+    tree: neuter `_splat_ceiling` in a COPY of the gate and the same tree must
+    stop being counted.
+
+    Without this the four tests above prove only that the gate prints a number;
+    they cannot tell a resolver that followed the splat from one that found the
+    ceiling some other way. A check that cannot be made to fail is not a check.
+    """
+    src = GATE.read_text(encoding="utf-8")
+    anchor = ("    for k in node.keywords:\n"
+              "        if k.arg is not None:\n"
+              "            continue\n"
+              "        v = k.value\n"
+              "        if isinstance(v, ast.Dict):\n")
+    assert src.count(anchor) == 1, (
+        "the mutation anchor moved — re-point it at `_splat_ceiling`'s body "
+        "rather than deleting this test")
+    mutated = tmp_path / "gate_without_splat_following.py"
+    mutated.write_text(src.replace(anchor, "    return None, None\n" + anchor,
+                                   1), encoding="utf-8")
+
+    d = _tree(tmp_path, _SPLAT_VIA_HELPER)
+    live = subprocess.run(
+        [sys.executable, str(GATE), "--programs-dir", str(d), "--table"],
+        capture_output=True, text=True)
+    blind = subprocess.run(
+        [sys.executable, str(mutated), "--programs-dir", str(d), "--table"],
+        capture_output=True, text=True)
+
+    assert _recorded_count(live.stdout) == 1, live.stdout
+    assert _recorded_count(blind.stdout) == 0, (
+        "the pre-#2125 resolver counted a splat-carried ceiling — then the "
+        "splat-following added here is not what makes the census see it, and "
+        "the fix is not proven\n" + blind.stdout)
+    assert "<default>" in blind.stdout, (
+        "the blinded gate must still make its OLD false claim, otherwise this "
+        "mutation changed something other than the splat-following\n"
+        + blind.stdout)
+
+
+def test_the_shipped_tree_records_the_budgets_it_actually_declares():
+    """THE CENSUS OVER THE REAL TREE — named sites, not a count.
+
+    MEASURED at v1.18.79 (main 6877e777f091) on 8HD-4: `RECORDED_BUDGETS 11`,
+    where SIX were invisible before this landing. The three the issue names:
+
+      fault_atpg_run.py      x2  `**_sup_kw`, built by `_atpg_supervision_kw()`
+                                 — the #2082 ATPG launches
+      _container_exec.py     x1  `hard_ceiling_s=` on `_pr.run`, the supervised
+                                 container path the whole #2083 conversion uses
+
+    Asserted by MEMBERSHIP (file + carrier), never by line number or by a
+    count alone: a line moves on every landing above it, and a count is the one
+    summary a substitution cannot disturb.
+    """
+    cp = subprocess.run(
+        [sys.executable, str(GATE), "--programs-dir", str(PROGRAMS)],
+        capture_output=True, text=True)
+    out = cp.stdout + cp.stderr
+    assert cp.returncode == 0, out
+    sec = _recorded_section(out)
+    assert sec, "the gate printed no RECORDED BUDGETS census at all\n" + out
+
+    for site, carrier in (
+            ("fault_atpg_run.py", "built by _atpg_supervision_kw()"),
+            ("_container_exec.py",
+             "hard_ceiling_s= on the progress-run primitive")):
+        assert site in sec, (
+            f"{site} declares a recorded budget and is absent from the "
+            f"census\n{sec}")
+        assert carrier in sec, (
+            f"the census does not say HOW {site}'s ceiling arrives; without "
+            f"the carrier a reader cannot check it\n{sec}")
+
+    assert sec.count("fault_atpg_run.py") == 2, (
+        "both #2082 ATPG launches (local route and docker route) carry the "
+        "budget; the census must name both\n" + sec)
+    assert _recorded_count(out) >= 3, out

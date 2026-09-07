@@ -104,11 +104,26 @@ RESIDUAL BOUNDARIES, STATED RATHER THAN LEFT SILENT
     MEASURED on this tree: ZERO files use that form, so the rule covers the
     whole population today -- but it covers it by luck of style, not by
     construction, and a reader is entitled to know which.
-  * a ``**kwargs`` splat into a supervised launch could carry a ceiling this
-    file cannot see. MEASURED on this tree: TWO splat sites exist -- one inside
-    `_watchdog` itself (outside this scan by construction) and one in
-    `gate_discloses_denominator_check`, whose dict is built two lines above the
-    call and carries only ``poll_s``. So no ceiling hides in a splat today.
+  * a ``**kwargs`` splat into a supervised launch IS FOLLOWED to the site that
+    built the dict (vibe-ic#2125): a dict display, an incremental
+    ``kw["hard_ceiling_s"] = ...`` build, or a call to a same-file helper that
+    returns the dict -- whose parameter names are rewritten into the caller's
+    before the value is resolved. A splat that is the enclosing function's OWN
+    ``**kwargs`` is a PASS-THROUGH: the value belongs to the caller, so the row
+    is printed as such and never counted clean.
+
+    THIS PARAGRAPH USED TO CARRY A HAND-WRITTEN CENSUS, AND IT WENT STALE.
+    It read "TWO splat sites exist ... so no ceiling hides in a splat today".
+    Measured at v1.18.79 there were FIVE (`_watchdog.py`,
+    `fault_atpg_run.py` twice, `gate_discloses_denominator_check.py`,
+    `gate_host_independence_check.py`), and the two `fault_atpg_run` ones --
+    the #2082 ATPG launches, through `_atpg_supervision_kw` -- DO carry the
+    tree's flagship recorded budget. The gate reported them as
+    ``<default>``, i.e. "no ceiling declared", which is a false statement about
+    the code and the reason it printed `BUDGET 0`. A written-down count is a
+    measurement with no way to notice it has expired, so there is no longer one
+    here: the ``RECORDED_BUDGETS`` line and its section ARE the census, computed
+    every run over the same population the verdict is computed over.
   * the same-file function resolver keys on the function NAME. Two
     module-level functions sharing a name in one file resolve to the last
     definition. Every row is printed with its file and line, so a wrong
@@ -272,6 +287,143 @@ def _returns_of(fn: ast.AST) -> List[ast.AST]:
             if isinstance(n, ast.Return) and n.value is not None]
 
 
+#: The sentinel a splat resolver returns when the dict is the enclosing
+#: function's OWN ``**kwargs``. The ceiling is then the CALLER's and no amount
+#: of reading this file can decide it — which is a different statement from
+#: "there is no ceiling here", and the two must not collapse into one row.
+_PASSTHROUGH = object()
+
+
+def _dict_literal_get(node: ast.Dict, key: str) -> Optional[ast.AST]:
+    """The value for a CONSTANT string key in a dict DISPLAY, or None."""
+    for k, v in zip(node.keys, node.values):
+        if isinstance(k, ast.Constant) and k.value == key:
+            return v
+    return None
+
+
+def _dict_key_expr(scope: ast.AST, name: str, key: str) -> Optional[ast.AST]:
+    """The expression bound to ``name[key]`` inside `scope`.
+
+    Two spellings, because real call sites use both: a dict DISPLAY
+    (``kw = {"hard_ceiling_s": x}``) and the incremental build this repo
+    prefers (``kw = {}`` … ``kw["hard_ceiling_s"] = x``), which is what
+    `_atpg_supervision_kw` and `gate_discloses_denominator_check` both write.
+    """
+    for node in ast.walk(scope):
+        if not isinstance(node, ast.Assign):
+            continue
+        for t in node.targets:
+            if (isinstance(t, ast.Subscript) and isinstance(t.value, ast.Name)
+                    and t.value.id == name
+                    and isinstance(t.slice, ast.Constant)
+                    and t.slice.value == key):
+                return node.value
+            if isinstance(t, ast.Name) and t.id == name and \
+                    isinstance(node.value, ast.Dict):
+                got = _dict_literal_get(node.value, key)
+                if got is not None:
+                    return got
+    return None
+
+
+def _substitute(expr: ast.AST, binding: Dict[str, ast.AST]) -> ast.AST:
+    """`expr` with every bound NAME replaced by the caller's expression.
+
+    A helper writes ``kw["hard_ceiling_s"] = float(ceiling_s)`` in ITS OWN
+    parameter names; the resolver runs in the CALLER's scope, where that name
+    may not exist or may mean something else. Rewriting the expression at the
+    boundary is what lets one resolver read both.
+    """
+    import copy
+
+    class _T(ast.NodeTransformer):
+        def visit_Name(self, node):  # noqa: N802 — ast API
+            repl = binding.get(node.id)
+            return copy.deepcopy(repl) if repl is not None else node
+
+    return _T().visit(copy.deepcopy(expr))
+
+
+def _helper_built_ceiling(call: ast.Call, ctx: "_Ctx"
+                          ) -> Optional[Tuple[ast.AST, str]]:
+    """A same-file helper that BUILDS the supervision kwargs dict.
+
+    `fault_atpg_run._atpg_supervision_kw` is the shape this exists for: the two
+    #2082 ATPG launches spell their recorded budget as
+    ``run_host_supervised(..., **_sup_kw)`` where ``_sup_kw`` came out of a
+    helper three hundred lines away. Following only a dict LITERAL would read
+    those two sites as declaring no ceiling at all — which is precisely what
+    this gate did, and why it printed `BUDGET 0` over a tree whose flagship
+    recorded budget is exactly there.
+    """
+    fname = _callee(call)
+    if "." in fname:            # not a bare same-file name
+        return None
+    fn = ctx.funcs.get(fname)
+    if fn is None:
+        return None
+    inner = _dict_key_expr(fn, _returned_dict_name(fn), "hard_ceiling_s")
+    if inner is None:
+        return None
+    a = fn.args
+    params = [x.arg for x in
+              list(getattr(a, "posonlyargs", [])) + list(a.args)]
+    binding: Dict[str, ast.AST] = {}
+    for pname, arg in zip(params, call.args):
+        binding[pname] = arg
+    for kw in call.keywords:
+        if kw.arg is not None:
+            binding[kw.arg] = kw.value
+    return _substitute(inner, binding), fn.name
+
+
+def _returned_dict_name(fn: ast.AST) -> str:
+    """The NAME the helper returns, so the search for ``name["ceiling"] = …``
+    reads the dict that actually leaves the function rather than any local
+    that happens to be subscripted."""
+    for r in _returns_of(fn):
+        if isinstance(r, ast.Name):
+            return r.id
+    return ""
+
+
+def _splat_ceiling(node: ast.Call, ctx: "_Ctx", enclosing: Optional[ast.AST]
+                   ) -> Tuple[Optional[ast.AST], Optional[str]]:
+    """The `hard_ceiling_s` a ``**splat`` carries into this call.
+
+    Returns `(expr, carrier)`, `(_PASSTHROUGH, carrier)` when the dict is the
+    enclosing function's own ``**kwargs`` (the value is the CALLER's and this
+    file cannot see it), or `(None, None)` when no splat carries a ceiling.
+    """
+    for k in node.keywords:
+        if k.arg is not None:
+            continue
+        v = k.value
+        if isinstance(v, ast.Dict):
+            got = _dict_literal_get(v, "hard_ceiling_s")
+            if got is not None:
+                return got, "**{…} written at the call"
+            continue
+        if not isinstance(v, ast.Name):
+            continue
+        name = v.id
+        kwarg = getattr(getattr(enclosing, "args", None), "kwarg", None)
+        if kwarg is not None and kwarg.arg == name:
+            return _PASSTHROUGH, f"**{name} — this function's own **kwargs"
+        if enclosing is not None:
+            got = _dict_key_expr(enclosing, name, "hard_ceiling_s")
+            if got is not None:
+                return got, f"**{name}, built in this function"
+        bound = ctx.locals_.get(name)
+        if isinstance(bound, ast.Call):
+            built = _helper_built_ceiling(bound, ctx)
+            if built is not None:
+                expr, hname = built
+                return expr, f"**{name}, built by {hname}()"
+    return None, None
+
+
 def _resolve(expr: ast.AST, ctx: "_Ctx", _depth: int = 0) -> Optional[float]:
     """A float, or None when this file cannot decide. None is NEVER treated as
     clean — the caller reports it as UNJUDGED."""
@@ -349,13 +501,20 @@ def _exempted(src_lines: List[str], node: ast.AST) -> Optional[str]:
 
 
 class Row:
+    #: `carrier` is HOW the ceiling reached the call — a plain keyword, a
+    #: ``**splat`` and the site that built it, or a `_progress_run` keyword.
+    #: Without it a reader cannot tell a site that declares no ceiling from one
+    #: whose ceiling this file simply could not follow, and those two were the
+    #: same row until vibe-ic#2125.
     __slots__ = ("file", "line", "callee", "kind", "expr", "value", "verdict",
-                 "detail")
+                 "detail", "carrier")
 
-    def __init__(self, file, line, callee, kind, expr, value, verdict, detail):
+    def __init__(self, file, line, callee, kind, expr, value, verdict, detail,
+                 carrier=None):
         self.file, self.line, self.callee = file, line, callee
         self.kind, self.expr, self.value = kind, expr, value
         self.verdict, self.detail = verdict, detail
+        self.carrier = carrier
 
     def as_dict(self):
         return {s: getattr(self, s) for s in self.__slots__}
@@ -438,6 +597,23 @@ def scan_file(path: Path, backstop: float, *, src: Optional[str] = None,
             # supervision". A count that cannot rise when supervision spreads
             # cannot fall when it retreats either, so the check was answering a
             # question about a population it did not contain.
+            # A RECORDED BUDGET REACHES THIS PRIMITIVE TOO. `_progress_run.run`
+            # accepts `hard_ceiling_s=` (it is in the signature, defaulted to
+            # the module backstop), so a ceiling declared here is as real as one
+            # declared on `run_host_supervised` — and until vibe-ic#2125 this
+            # branch returned CLEAN before ever looking at it. MEASURED: that
+            # hid `_container_exec.py`'s `run_in_container_supervised`, the
+            # supervised container path the whole #2083 conversion routes
+            # through, from the census the ruling asks this gate to compute.
+            _prk = next((k for k in node.keywords
+                         if k.arg == "hard_ceiling_s"), None)
+            if _prk is not None:
+                _pre = ast.unparse(_prk.value)
+                _prv = _resolve(_prk.value, ctx)
+                rows.append(_ceiling_row(
+                    path, node, "progress_run_ceiling", _pre, _prv, backstop,
+                    carrier="hard_ceiling_s= on the progress-run primitive"))
+                continue
             rows.append(Row(
                 path.name, node.lineno, _callee(node), "progress_run", "-",
                 None, "CLEAN",
@@ -449,41 +625,80 @@ def scan_file(path: Path, backstop: float, *, src: Optional[str] = None,
         if not _is_supervisor_call(node):
             continue
         kw = next((k for k in node.keywords if k.arg == "hard_ceiling_s"), None)
+        carrier = "hard_ceiling_s= at the call"
         if kw is None:
-            rows.append(Row(path.name, node.lineno, _callee(node), "ceiling",
-                            "<default>", backstop, "CLEAN",
-                            "no ceiling declared — the primitive's own backstop"))
-            continue
-        expr = ast.unparse(kw.value)
-        val = _resolve(kw.value, ctx)
-        if val is None:
-            rows.append(Row(path.name, node.lineno, _callee(node), "ceiling",
-                            expr, None, "UNJUDGED",
-                            "value not statically resolvable in this file"))
-        elif val >= backstop:
-            rows.append(Row(path.name, node.lineno, _callee(node), "ceiling",
-                            expr, val, "CLEAN",
-                            "at or above the module backstop — the default "
-                            "budget, declared explicitly"))
+            # FOLLOW THE SPLAT TO WHERE THE DICT WAS BUILT (vibe-ic#2125).
+            # Reading only the keywords written AT the call is what made this
+            # gate report `<default>` — i.e. "no ceiling declared" — over the
+            # two #2082 ATPG launches that do declare one, through
+            # `**_sup_kw`. `<default>` is a CLAIM about the code, and it was
+            # false; a resolver that cannot follow the spelling real call sites
+            # use is `ci_harness_timeout_ceiling_check`'s #1277 lesson
+            # unlearned one layer up.
+            _sp, carrier = _splat_ceiling(node, ctx, fn)
+            if _sp is _PASSTHROUGH:
+                # NOT "no ceiling": the value is the CALLER's. Printed as
+                # UNJUDGED so a reader sees a question this file cannot answer
+                # instead of inferring an answer from a clean row.
+                rows.append(Row(
+                    path.name, node.lineno, _callee(node), "ceiling",
+                    "<caller's>", None, "UNJUDGED",
+                    "a ceiling may arrive through this function's own "
+                    "**kwargs; its value belongs to the caller and cannot be "
+                    "read here", carrier=carrier))
+                continue
+            if _sp is None:
+                rows.append(Row(
+                    path.name, node.lineno, _callee(node), "ceiling",
+                    "<default>", backstop, "CLEAN",
+                    "no ceiling declared — the primitive's own backstop",
+                    carrier="none"))
+                continue
+            expr = ast.unparse(_sp)
+            val = _resolve(_sp, ctx)
         else:
-            # NOT AN OFFENCE SINCE vibe-ic#2051. This row used to read
-            # OFFENDER, on the true-at-the-time ground that "the supervisor
-            # kills at it regardless of forward progress". It does not any
-            # more: crossing the ceiling writes a `hard_ceiling` event, the
-            # notice fires once, and the job runs on. The number is a declared
-            # BUDGET, so it is resolved and PRINTED — a reader gets every
-            # caller and its value — and it refuses nothing.
-            rows.append(Row(
-                path.name, node.lineno, _callee(node), "ceiling", expr, val,
-                "BUDGET",
-                f"a declared budget of {val:g}s (below the {backstop:g}s "
-                f"module default). Since vibe-ic#2051 this value cannot stop "
-                f"the job: at the crossing the supervisor records a "
-                f"`hard_ceiling` event, notifies, and CONTINUES. Only a "
-                f"progress STALL stops a job; a job that is busy but going "
-                f"nowhere is stopped by an `abort_probe` over its OWN output "
-                f"(rc RC_ABORTED), which is a measurement rather than a clock."))
+            expr = ast.unparse(kw.value)
+            val = _resolve(kw.value, ctx)
+        rows.append(_ceiling_row(path, node, "ceiling", expr, val, backstop,
+                                 carrier=carrier))
     return rows
+
+
+def _ceiling_row(path: Path, node: ast.Call, kind: str, expr: str,
+                 val: Optional[float], backstop: float, *,
+                 carrier: Optional[str]) -> Row:
+    """Classify ONE resolved ceiling. Shared by the supervisor branch and the
+    `_progress_run` branch so the two can never drift into judging the same
+    number by two different rules — which is how a census ends up disagreeing
+    with the verdict computed over it."""
+    if val is None:
+        return Row(path.name, node.lineno, _callee(node), kind,
+                   expr, None, "UNJUDGED",
+                   "value not statically resolvable in this file",
+                   carrier=carrier)
+    if val >= backstop:
+        return Row(path.name, node.lineno, _callee(node), kind,
+                   expr, val, "CLEAN",
+                   "at or above the module backstop — the default "
+                   "budget, declared explicitly", carrier=carrier)
+    # NOT AN OFFENCE SINCE vibe-ic#2051. This row used to read
+    # OFFENDER, on the true-at-the-time ground that "the supervisor
+    # kills at it regardless of forward progress". It does not any
+    # more: crossing the ceiling writes a `hard_ceiling` event, the
+    # notice fires once, and the job runs on. The number is a declared
+    # BUDGET, so it is resolved and PRINTED — a reader gets every
+    # caller and its value — and it refuses nothing.
+    return Row(
+        path.name, node.lineno, _callee(node), kind, expr, val,
+        "BUDGET",
+        f"a declared budget of {val:g}s (below the {backstop:g}s "
+        f"module default). Since vibe-ic#2051 this value cannot stop "
+        f"the job: at the crossing the supervisor records a "
+        f"`hard_ceiling` event, notifies, and CONTINUES. Only a "
+        f"progress STALL stops a job; a job that is busy but going "
+        f"nowhere is stopped by an `abort_probe` over its OWN output "
+        f"(rc RC_ABORTED), which is a measurement rather than a clock.",
+        carrier=carrier)
 
 
 #: The supervision primitives, scanned by class (0) ONLY — the mechanism that
@@ -1070,6 +1285,19 @@ def main(argv=None) -> int:
                    if r.verdict == "RESIDUAL_CONTAINER_DEADLINE"]
     tighten = [r for r in rows if r.verdict == "TIGHTEN"]
     clean = [r for r in rows if r.verdict == "CLEAN"]
+    # THE RECORDED-BUDGET CENSUS (vibe-ic#2125). Every site that hands a
+    # `hard_ceiling_s` to a supervised launch BY ANY SPELLING — a keyword at
+    # the call, a `**splat` whose dict was built elsewhere, or the keyword on
+    # the `_progress_run` primitive. This number is the answer to "how many
+    # recorded budgets does this tree have", and it is COMPUTED here rather
+    # than written into a docstring, because the sentence it replaces ("TWO
+    # splat sites exist … so no ceiling hides in a splat today") was measured
+    # once, went stale, and then read as a live claim: at v1.18.79 there were
+    # FIVE splat sites and two of them carried the tree's flagship budget.
+    recorded = [r for r in rows
+                if r.kind in ("ceiling", "progress_run_ceiling")
+                and r.expr not in ("<default>", "<caller's>")]
+    caller_borne = [r for r in rows if r.expr == "<caller's>"]
 
     print(f"watchdog_ceiling_semantics_check — {pdir}")
     print(f"  backstop read from _watchdog.DEFAULT_HARD_CEILING_S: "
@@ -1082,6 +1310,24 @@ def main(argv=None) -> int:
           f"RESIDUAL {len(residual)}   RAW_CLOCK_KILL {len(raw_residual)}   "
           f"CONTAINER_DEADLINE {len(cd_residual)}   "
           f"OFFENDER {len(offenders)}")
+    print(f"    RECORDED_BUDGETS {len(recorded)} "
+          f"(carried to the caller: {len(caller_borne)})")
+
+    if recorded:
+        print("\n--- RECORDED BUDGETS: every `hard_ceiling_s` this tree "
+              "declares, by every spelling ---")
+        for r in sorted(recorded, key=lambda x: (x.file, x.line)):
+            shown = (f"{r.value:g}s" if isinstance(r.value, float)
+                     and math.isfinite(r.value)
+                     else "inf" if r.value == math.inf else "UNJUDGED here")
+            print(f"  {r.file}:{r.line} {r.callee} "
+                  f"hard_ceiling_s={r.expr} -> {shown}")
+            print(f"      carried by: {r.carrier}")
+    if caller_borne:
+        print("\n--- A CEILING MAY ARRIVE FROM THE CALLER (value not in this "
+              "file) ---")
+        for r in sorted(caller_borne, key=lambda x: (x.file, x.line)):
+            print(f"  {r.file}:{r.line} {r.callee} — carried by: {r.carrier}")
 
     if args.table:
         print("\n--- CENSUS ---")
