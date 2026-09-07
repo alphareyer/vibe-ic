@@ -349,8 +349,8 @@ def test_skips_and_waivers_are_still_listed_verbatim(tmp_path, monkeypatch):
     in the channel that carries it. Asserting only the first would be satisfied
     by dropping the waiver on the floor.
     """
-    waiver = {"gate": "gate_w", "ticket": "T-1", "first_line": "why",
-              "review_required": True}
+    waiver = {"gate": "gate_w", "ticket": _flow._THIN_INPUT_WAIVER_TICKET,
+              "first_line": "why", "review_required": True}
     rc, report = _run_main(
         tmp_path, monkeypatch,
         [_flow._p0_gate_record("gate_s", "SKIP", "class N/A",
@@ -361,7 +361,8 @@ def test_skips_and_waivers_are_still_listed_verbatim(tmp_path, monkeypatch):
     assert p0 is not None and p0["status"] == "PASS"
     assert p0["reasons"] == [
         "SKIP: gate_s (SKIP: class N/A)",
-        "WAIVED-DEFERRED: gate_w — thin-input (ticket=T-1, "
+        "WAIVED-DEFERRED: gate_w — thin-input "
+        f"(ticket={_flow._THIN_INPUT_WAIVER_TICKET}, "
         "review_required=true): why",
     ]
     assert report["counts"]["WAIVED"] == 0, (

@@ -4386,6 +4386,45 @@ def _stdout_signals_vacuous(snippet: str) -> bool:
 #: it just produced.
 _NON_WAIVERABLE_TOKEN = "NON_WAIVERABLE:"
 
+# ── vibe-ic#2124 — the token's WIRING, written down beside the reader ────────
+# `VACUOUS_PASS:` has one place a reader goes to learn who writes the token and
+# who acts on it: `_vacuous_exit` names the emit helper and its consumers, and
+# `gate_skip_routing_check` DERIVES its matcher from that module rather than
+# re-typing the token. `NON_WAIVERABLE:` arrived with #2098 carrying neither —
+# one gate emitted it, two sites honoured it, and nothing named either, so the
+# wiring could not be checked because there was nothing to check it against.
+#
+# THE SAME CONTRACT, NOT A SECOND ONE. Emission stays OPEN, exactly as
+# `VACUOUS_PASS:` is: a gate that declares a finding non-waiverable is honoured
+# on the spot, registered or not, because the alternative is this module
+# deciding from a gate NAME something only the gate knows about the finding it
+# just produced — the very inversion #2098 fixed. What the register adds is the
+# direction the vacuous contract also holds: the wiring is AUDITED and may not
+# rot. An emitter in the tree that no entry names is refused BY NAME, and an
+# entry naming a program or a consumer that no longer carries the token is
+# refused by name too (the rule `checker_execution_wiring_audit` states for its
+# own registers: an entry may not outlive what it describes). Both directions,
+# and the negative control for each, are in
+# `tests/test_issue2124_waiver_branch_label_and_non_waiverable_wiring.py`.
+# Nothing here changes what any flow run honours.
+_NON_WAIVERABLE_EMITTERS: Tuple[str, ...] = (
+    # the #1977 applicability contradiction — the one finding class this gate
+    # declares outside every deferral channel; its ordinary transitions-debt
+    # carries no token and stays advisory.
+    "l6_fsm_scaffold_actionable_check",
+)
+
+#: The reader, and BOTH demotion sites that consult it. Naming one of the two
+#: would read as a complete disclosure while half the honouring went unnamed.
+_NON_WAIVERABLE_CONSUMERS: Tuple[str, ...] = (
+    "flow_compliance_check._output_declares_non_waiverable",
+    # the P0 structural umbrella, ahead of the thin-input / reused-IP /
+    # two-source-advisory branches
+    "flow_compliance_check._eval_gate_worker",
+    # the `advisory_program_exit_zero` step arm
+    "flow_compliance_check._evaluate_gate",
+)
+
 
 def _output_declares_non_waiverable(*streams: Optional[str]) -> str:
     """The finding's own refusal of every waiver/deferral channel, or "".
@@ -4617,7 +4656,53 @@ _THIN_INPUT_WAIVER_GATES = (
     "l9_submodule_conformance_check",
     "metadata_content_substance_check",
 )
-_THIN_INPUT_WAIVER_TICKET = "thin-input-v1.6.97"
+# ─── vibe-ic#2124 — ONE definition per P0 waiver branch ──────────────────────
+# The ticket and the rendered operator reason are the SAME fact about a waiver:
+# WHICH BRANCH granted it. They used to be two facts. The ticket came from the
+# branch that fired; the reason line said `thin-input` for all three, because
+# the label was a literal inside the renderer. So a real shipped line read
+#
+#     WAIVED-DEFERRED: l6_… — thin-input (ticket=ENFORCEMENT:advisory, …)
+#
+# naming two different branches in one sentence, and a reader deciding whether
+# that waiver is legitimate was told the wrong reason. No verdict ever moved,
+# which is exactly why it survived: nothing but a human reads the label.
+#
+# This tuple is where a branch is DEFINED, once. The ticket constants below are
+# read out of it rather than typed beside it, and `_p0_waiver_branch_label`
+# renders the label for the ticket the waiver actually carries — so it is not a
+# second table to keep in step with the tickets, it is the table the tickets
+# come from. Adding a fourth branch means adding one row here.
+_P0_WAIVER_BRANCHES: Tuple[Tuple[str, str], ...] = (
+    # (operator-facing label, ticket)
+    ("thin-input", "thin-input-v1.6.97"),
+    ("reused-IP", "reused-ip-rtl-only-fsm-v1.6.708"),
+    ("two-source-advisory", "ENFORCEMENT:advisory"),
+)
+
+#: What a waiver whose ticket names no registered branch renders as. It does
+#: NOT fall back to any branch name: a label that guesses is how the defect
+#: above read as a fact for three branches. It degrades loudly, in the one
+#: channel a human reads, and the ticket is printed beside it either way.
+_P0_UNREGISTERED_BRANCH_LABEL = "unregistered-waiver-branch"
+
+
+def _p0_waiver_branch_label(ticket: Any) -> str:
+    """The branch label for a P0 waiver carrying ``ticket``.
+
+    Derived from the same row the ticket is, so the label and the ticket in one
+    rendered line cannot name two different branches.
+    """
+    for label, branch_ticket in _P0_WAIVER_BRANCHES:
+        if ticket == branch_ticket:
+            return label
+    return _P0_UNREGISTERED_BRANCH_LABEL
+
+
+_P0_WAIVER_TICKET_BY_LABEL: Dict[str, str] = {
+    label: ticket for label, ticket in _P0_WAIVER_BRANCHES}
+
+_THIN_INPUT_WAIVER_TICKET = _P0_WAIVER_TICKET_BY_LABEL["thin-input"]
 
 # v0.1.57: absolute-size threshold for the "100% capture of a tiny input"
 # case. The existing predicate (any doc <100%) doesn't fire when the
@@ -4648,7 +4733,8 @@ TINY_INPUT_TOTAL_RAW_TOKENS = 100
 # the L6 fsm_states floor FAIL. It NEVER touches _is_thin_input_eligible (which
 # owns the < 100% regime). All FOUR keys must hold (see
 # _reused_ip_rtl_only_fsm_cap_eligible); a single false key keeps the FAIL.
-_REUSED_IP_RTL_ONLY_FSM_CAP_TICKET = "reused-ip-rtl-only-fsm-v1.6.708"
+_REUSED_IP_RTL_ONLY_FSM_CAP_TICKET = _P0_WAIVER_TICKET_BY_LABEL[
+    "reused-IP"]
 _REUSED_IP_RTL_ONLY_FSM_CAP_GATE = "l_doc_structured_field_count_check"
 # Tokens that mark the L6 FSM-states floor detail line (case-insensitive). The
 # L6 floor FAIL reads uniquely:
@@ -5260,8 +5346,12 @@ def _compose_p0_reasons(s_fails: List[str],
     # WAIVED via --allow-thin-input. Each waiver entry remains
     # explicit (review_required: true; ticket id) — they are
     # DEFERRED open work, not silent passes.
+    # #2124 — the label names the branch that granted THIS waiver. It was a
+    # literal `thin-input` for all three branches; the ticket beside it already
+    # named the real one, so the line contradicted itself for two of the three.
     waiver_lines = [
-        (f"WAIVED-DEFERRED: {w['gate']} — thin-input "
+        (f"WAIVED-DEFERRED: {w['gate']} — "
+         f"{_p0_waiver_branch_label(w.get('ticket'))} "
          f"(ticket={w['ticket']}, review_required=true): "
          f"{w['first_line']}")
         for w in s_waivers
@@ -8806,7 +8896,8 @@ def _run_structural_rtl_gates(project: Path,
                 # denominator is unchanged: the gate ran and returned.
                 return _p0_waiver_record({
                     "gate": gate_name,
-                    "ticket": "ENFORCEMENT:advisory",
+                    "ticket": _P0_WAIVER_TICKET_BY_LABEL[
+                        "two-source-advisory"],
                     "review_required": True,
                     "reason": (
                         "gate declares `ENFORCEMENT: advisory` in its own "

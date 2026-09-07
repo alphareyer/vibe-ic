@@ -159,11 +159,17 @@ def test_the_incomplete_line_has_no_dangling_separator():
 
 
 def test_waived_deferred_shape():
-    w = {"gate": "alpha_check", "review_required": True, "ticket": "T-9",
+    # #2124 — the ticket is the REGISTERED thin-input one, and the label is
+    # rendered from it. It was a synthetic `T-9` beside a hardcoded
+    # `thin-input` label, which is exactly the pair that could not disagree
+    # while the label was a literal.
+    w = {"gate": "alpha_check", "review_required": True,
+         "ticket": F._THIN_INPUT_WAIVER_TICKET,
          "evidence": "why-detail", "reason": "thin-input",
          "first_line": "the gate said this"}
     assert _reasons([F._p0_waiver_record(w)]) == [
-        "WAIVED-DEFERRED: alpha_check — thin-input (ticket=T-9, "
+        "WAIVED-DEFERRED: alpha_check — thin-input "
+        f"(ticket={F._THIN_INPUT_WAIVER_TICKET}, "
         "review_required=true): the gate said this"]
 
 
@@ -235,7 +241,8 @@ def test_the_umbrella_note_never_enters_the_per_gate_skip_population(
 
 def test_all_shapes_at_once_keep_their_order():
     """Failures, then the disclosure, then skips, then waivers."""
-    w = {"gate": "wv_check", "review_required": True, "ticket": "T-1",
+    w = {"gate": "wv_check", "review_required": True,
+         "ticket": F._THIN_INPUT_WAIVER_TICKET,
          "evidence": "d", "reason": "thin-input", "first_line": "why"}
     got = _reasons([
         _rec("a_check", "FAIL", "boom", exit_code=1),
@@ -251,7 +258,8 @@ def test_all_shapes_at_once_keep_their_order():
         "  - b_check — bang",
         GI.format_not_invocable_heading(1, 6),
         f"  - {GI.format_not_invocable_entry('ni_check', 'argparse said no')}",
-        "WAIVED-DEFERRED: wv_check — thin-input (ticket=T-1, "
+        "WAIVED-DEFERRED: wv_check — thin-input "
+        f"(ticket={F._THIN_INPUT_WAIVER_TICKET}, "
         "review_required=true): why",
         # SEVENTH SHAPE, and it comes LAST on purpose: #1978's
         # process-provenance lines are appended after the per-gate buckets by
