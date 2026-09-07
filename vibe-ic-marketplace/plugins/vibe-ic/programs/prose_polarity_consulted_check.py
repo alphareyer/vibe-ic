@@ -118,6 +118,59 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "design_one_shot_runner::_chip_top_resolve_excluded_variant_params":
+        "SYSTEMVERILOG MODULE-ITEM GRAMMAR, read to decide whether a wrapper "
+        "parameter default selects a variant the design EXCLUDED from staging "
+        "(#731, v1.17.85). The productions it matches are all HDL syntax -- "
+        "`parameter <type tokens> <NAME> = <VALUE>` "
+        "(`staged_rtl_closure_preflight._PARAM_RE`, and the flagged write is "
+        "`wrapper_defaults[_m.group(1)] = _real.group(2).strip()`), module "
+        "instantiations, `module <NAME>` definitions, `localparam <NAME> = "
+        "<expr>` and generate conditions of the form `<PARAM> == <VALUE>` -- "
+        "and there is no form in that grammar that DENIES a default: "
+        "SystemVerilog gives no way to write `SecSBoxImpl is NOT SBoxImplDom`. "
+        "NO SENTENCE REACHES ANY REGEX HERE, WHICH IS WHY THE POLARITY "
+        "QUESTION HAS NO REFERENT. The two inputs are stripped before a single "
+        "match runs: the wrapper header is matched on "
+        "`_hdl_code_text.strip_hdl_comments_and_strings(param_block)`, which "
+        "blanks comments AND string literals offset-preservingly (the ORIGINAL "
+        "is what gets sliced, so the emitted wrapper keeps its comments byte "
+        "for byte), and every RTL file arrives through "
+        "`staged_rtl_closure_preflight._gather`, which applies "
+        "`_strip_comments` to each file it returns. ABSENT IS ALREADY HOW THIS "
+        "FUNCTION REPORTS IT, and its refusals are BY NAME rather than "
+        "silent: a parameter no declaration names never enters "
+        "`wrapper_defaults`, a guard it cannot evaluate is `UNREADABLE_GUARD`, "
+        "an undeclared choice is `UNDECLARED_FREE_CHOICE`, and a set it can "
+        "only partly spell is `INCOMPLETE_CANDIDATE_SET` -- so `decided` and "
+        "`could not decide` already reach the reader as different answers, and "
+        "the step that would have run yosys FAILs on either refusal. Its other "
+        "input, `declared`, is not prose either: it is the L8 override RECORD, "
+        "and a value that does not match `^(?:1'b)?([01])$` is ignored rather "
+        "than interpreted. MEASURED, not asserted: all 21 denial tokens of "
+        "`_prose_polarity`'s own vocabulary, placed in 10 positions a sentence "
+        "can physically occupy in this production -- both comment forms and a "
+        "Verilog string literal, in the wrapper header and in each of the two "
+        "RTL files that decide anything -- each carrying a "
+        "DECLARATION-SHAPED payload, INVERTED 0 values over 210 trials (210 "
+        "UNCHANGED, 0 refused, 0 lost), while the IDENTICAL 210 strings read "
+        "as PROSE carry 210 denials. THE ZERO CARRIES A NEGATIVE CONTROL: the "
+        "same payloads spliced in as CODE move the published answer at 9 of "
+        "the 10 positions (189 live trials), so it is a statement about the "
+        "grammar and not about a fixture that could not have moved; the tenth "
+        "reads `_MODULE_DEF_RE` into `defined`, which a sentence can only ADD "
+        "to and where adding never withdraws a candidate, and it is recorded "
+        "rather than counted. The grammar is inert, not the vocabulary, so "
+        "consulting `_prose_polarity` here would add a branch that can never "
+        "fire, and a call that can never fire is a green light rather than a "
+        "check. The direct precedents are the other HDL-grammar readers in "
+        "this register: `sparse_fsm_detect::_sparse_enum_types`, "
+        "`crosslayer_rewrite_equivalence::module_ports` and "
+        "`digital_hardmacro_gen::read_interface`. Falsifier: "
+        "`test_excluded_variant_param_is_derived_or_refused.py"
+        "::test_the_not_prose_claim_for_the_wrapper_param_reader_is_"
+        "falsifiable`, which RE-MEASURES the sweep and the negative control on "
+        "every run rather than quoting the numbers above.",
     "analog_a3_netlist_emit::dc_op_rail_excursions":
         "NGSPICE OPERATING-POINT TABLE, the `<node> <voltage>` block the "
         "simulator prints on every `-b` run under `Initial Transient "
@@ -1027,13 +1080,16 @@ def _consults_polarity(fn: ast.AST, aliases: Set[str]) -> bool:
 #: The gate printing an errand that points at a write flag is what made the
 #: previous shape unusable — a lane fixing one offender was invited to record
 #: every other offender that run happened to see as accepted debt.
-_OFFENDER_REGISTER: Dict[str, str] = {
-    "design_one_shot_runner::_chip_top_resolve_excluded_variant_params":
-        "OWNER: lane czaes1. ADDED BY v1.17.85 (af94a508b, 'a wrapper default "
-        "naming an excluded variant is derived or refused'). Delete this entry "
-        "in the commit that fixes it -- an entry that outlives its offender is "
-        "itself an offender and this gate refuses it.",
-}
+#:
+#: EMPTY, AND THAT IS THE MEANING OF THE RULE, NOT A GAP IN IT. The sole entry
+#: (`design_one_shot_runner::_chip_top_resolve_excluded_variant_params`, owner
+#: lane czaes1, added by v1.17.85) was deleted in the commit that resolved its
+#: offender -- as a `_NOT_PROSE` entry with its argument and its falsifier
+#: (#2102 row 2), the function reading SystemVerilog module-item grammar out of
+#: text its own two gatherers have already stripped. An entry that outlives its
+#: offender is itself an offender and `_ratchet_verdict` refuses it, so leaving
+#: this one behind would have moved the red rather than closed it.
+_OFFENDER_REGISTER: Dict[str, str] = {}
 
 
 def scan(root: Path) -> List[str]:

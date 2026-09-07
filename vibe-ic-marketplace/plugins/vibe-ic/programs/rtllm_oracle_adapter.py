@@ -32,8 +32,9 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import _hdl_code_text  # offset-preserving comment/string blanker (#731)
+
 _MODULE_DECL_RE = re.compile(r"^[ \t]*module\s+(\w+)", re.M)
-_COMMENT_RE = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
 _SPEC_MODULE_RE = re.compile(r"Module\s*name\s*:\s*\n?\s*([A-Za-z_]\w*)")
 
 
@@ -63,8 +64,30 @@ def _golden_file(design_dir: Path, entry: dict) -> Path:
 
 def top_module(text: str, preferred: list[str]) -> str:
     """The golden's top module name. `preferred` is tried first, then the
-    structural rule (the module nothing else instantiates)."""
-    decls = _MODULE_DECL_RE.findall(text)
+    structural rule (the module nothing else instantiates).
+
+    EVERY read here is on the CODE, never on a sentence (vibe-ic#731). The
+    declaration scan used to run on the raw text while only the instantiation
+    scan was stripped. `_MODULE_DECL_RE` is anchored `^[ \t]*module`, so the
+    shape that mints a phantom through it is the BLOCK-COMMENTED-OUT MODULE --
+    an old implementation left in the file inside `/* ... */`, whose own header
+    sits at the start of its line. MEASURED, and stated this precisely because
+    a `//` line comment does NOT match this pattern and a fixture written with
+    one passes without the fix.
+
+    What the phantom cost: with one real module the early `len(decls) == 1`
+    return was lost; with the phantom carrying the name `preferred` asks for,
+    it was returned AS THE TOP, so the adapter renamed nothing and
+    `_slice_module` seeded the stub from inside the comment; and otherwise it
+    joined `roots` -- nothing instantiates a module that does not exist -- and
+    the adapter RAISED `cannot decide the top module` on a golden it can read.
+    One blanked copy, used by both scans, is what makes the two agree.
+
+    `_hdl_code_text` BLANKS rather than deletes, so line starts (which `^` in
+    both patterns depends on) and offsets are those of the original.
+    """
+    code = _hdl_code_text.strip_hdl_comments_and_strings(text)
+    decls = _MODULE_DECL_RE.findall(code)
     if not decls:
         raise ValueError("the golden declares no module")
     if len(decls) == 1:
@@ -72,10 +95,9 @@ def top_module(text: str, preferred: list[str]) -> str:
     for name in preferred:
         if name in decls:
             return name
-    body = _COMMENT_RE.sub(" ", text)
     instantiated = {n for n in decls
                     if re.search(rf"^(?![ \t]*module\b)[ \t]*{re.escape(n)}\s"
-                                 r"*(?:#\s*\(.*?\))?\s*\w+\s*\(", body,
+                                 r"*(?:#\s*\(.*?\))?\s*\w+\s*\(", code,
                                  re.M | re.S)}
     roots = [n for n in decls if n not in instantiated]
     if len(roots) == 1:
@@ -92,11 +114,22 @@ def _rename_module(text: str, old: str, new: str) -> str:
 
 def _slice_module(text: str, name: str) -> str:
     """Just `module <name> … endmodule`, for seeding the constant stub. A
-    multi-module golden must not seed the stub from a helper module."""
-    m = re.search(rf"^[ \t]*module\s+{re.escape(name)}\b", text, re.M)
+    multi-module golden must not seed the stub from a helper module.
+
+    THE SAME RULE AS `top_module`, one level down and with the offsets load
+    bearing. Both patterns here are anchored `^[ \t]*`, so what moves either
+    end of this span is a BLOCK comment whose content starts a line: a
+    commented-out `module <name>` ahead of the real header, or a commented-out
+    `endmodule` inside the body, and the stub is then seeded from bytes that
+    are not the module. The BLANKED copy chooses the span; the ORIGINAL
+    supplies the bytes — `_hdl_code_text` is length-preserving, so the two
+    indices are the same indices.
+    """
+    code = _hdl_code_text.strip_hdl_comments_and_strings(text)
+    m = re.search(rf"^[ \t]*module\s+{re.escape(name)}\b", code, re.M)
     if not m:
         raise ValueError(f"module {name} not found for stub seeding")
-    end = re.search(r"^[ \t]*endmodule", text[m.start():], re.M)
+    end = re.search(r"^[ \t]*endmodule", code[m.start():], re.M)
     if not end:
         raise ValueError(f"module {name} has no endmodule")
     return text[m.start(): m.start() + end.end()] + "\n"
@@ -120,7 +153,11 @@ def golden_candidate(dataset: Path, pid: str, entry: dict):
         required = spec_name
     else:
         required = leaf
-    others = [d for d in _MODULE_DECL_RE.findall(text) if d != top]
+    # On the CODE, for the reason `top_module` states: a phantom declaration
+    # minted out of a comment would raise the collision refusal below against
+    # a helper module that does not exist.
+    code = _hdl_code_text.strip_hdl_comments_and_strings(text)
+    others = [d for d in _MODULE_DECL_RE.findall(code) if d != top]
     if required in others:
         raise ValueError(
             f"renaming the top {top!r} to {required!r} would collide with a "

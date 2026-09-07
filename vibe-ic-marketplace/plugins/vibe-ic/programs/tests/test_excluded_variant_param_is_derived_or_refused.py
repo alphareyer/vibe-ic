@@ -28,6 +28,7 @@ NAME, at emission, before a tool is started.
 Both directions are pinned below, plus the two controls that must be NO-OPS
 byte for byte, plus the two mutations that must re-redden.
 """
+import inspect
 import re
 import shutil
 import sys
@@ -37,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import design_one_shot_runner as D  # noqa: E402
+import staged_rtl_closure_preflight as _pf  # noqa: E402
 
 WRAPPER_BLOCK = """#(
   parameter bit          SecMasking  = 0,
@@ -294,3 +296,248 @@ def test_the_step_refuses_by_name_whatever_the_sidecar_is_called():
     res = D.step_yosys_synth(root, "chip_top", container="no-such-container")
     assert "PARAMETER UNRESOLVED" not in (res.detail or "")
     shutil.rmtree(root, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------
+# THE `_NOT_PROSE` CLAIM — its falsifier. vibe-ic#2102, row 2.
+# --------------------------------------------------------------------------
+# `prose_polarity_consulted_check._NOT_PROSE` classifies
+# `design_one_shot_runner::_chip_top_resolve_excluded_variant_params` as reading
+# a FORMAL GRAMMAR rather than prose, so it is exempt from consulting the
+# polarity vocabulary. That is a CLASSIFICATION, not an allowlist, and it has to
+# be checkable. The claim is NOT that a denial is read and correctly overruled;
+# it is that NO SENTENCE REACHES ANY REGEX HERE — the wrapper header is blanked
+# by `_hdl_code_text.strip_hdl_comments_and_strings` and every RTL file arrives
+# through `staged_rtl_closure_preflight._gather`, which strips comments.
+#
+# If a sentence CAN change what this function publishes, the classification is
+# false and the instruction is to DELETE THE ENTRY and consult `_prose_polarity`
+# — never to relax anything below.
+#
+# THE SWEEP IS RE-MEASURED HERE RATHER THAN QUOTED. A number written into the
+# register's prose stops tracking the thing it counts; this recomputes it on
+# every run, and the register cites this test by name.
+import _prose_polarity as _PP  # noqa: E402
+
+
+def _denial_tokens():
+    """The vocabulary's own tokens, DERIVED from its regex source.
+
+    Derived, not transcribed: a token list typed here would silently stop
+    covering the vocabulary the moment a word is added to it, and this file is
+    English-only while that vocabulary is not.
+    """
+    out = []
+    for src in (_PP._DENIAL_CORE, _PP._DENIAL_RETIRED):
+        for alt in src.split("|"):
+            w = re.sub(r"^\\b|\\b$", "", alt.strip())
+            w = w.replace(r"\w*", "").replace("-?", "")
+            if w and w not in out:
+                out.append(w)
+    bad = [w for w in out if not _PP.NEGATION_RE.search(w)]
+    assert not bad, f"derived tokens the vocabulary does not match: {bad}"
+    return out
+
+
+def _sentence(tok, payload):
+    return f"this variant is {tok} used here: {payload}"
+
+
+#: Every position a sentence can physically occupy in the two inputs this
+#: function reads — both comment forms and the Verilog string literal, in the
+#: wrapper header and in each of the two RTL files that decide anything.
+#: The PAYLOAD of each is declaration-shaped and chosen so that READING it
+#: would move the published answer; `_CODE_ARM` below proves that per position.
+_NP_POSITIONS = [
+    ("wrapper_line_comment", "param", "// {s}\n"),
+    ("wrapper_block_comment", "param", "/* {s} */\n"),
+    ("wrapper_string_default", "param", None),
+    ("sbox_param_comment", "sbox", "  // {s}\n"),
+    ("sbox_block_comment", "sbox", "  /* {s} */\n"),
+    ("sbox_inst_comment", "sbox", "    // {s}\n"),
+    ("sbox_localparam_comment", "sbox", "  // {s}\n"),
+    ("sbox_module_comment", "sbox", "// {s}\n"),
+    ("sbox_cond_comment", "sbox", "  // {s}\n"),
+    ("top_inst_comment", "top", "  // {s}\n"),
+]
+_NP_PAYLOAD = {
+    # A second `parameter` record for the SAME name, later in the block: read
+    # as a declaration it OVERWRITES `wrapper_defaults` and the whole mechanism
+    # silently no-ops, so the emitted wrapper keeps the EXCLUDED variant — the
+    # defect this file exists for, arriving through a comment.
+    "wrapper_line_comment": "parameter sbox_impl_e SecSBoxImpl = SBoxImplLut",
+    "wrapper_block_comment": "parameter sbox_impl_e SecSBoxImpl = SBoxImplLut",
+    "wrapper_string_default": "parameter sbox_impl_e SecSBoxImpl = SBoxImplLut",
+    # The consuming module's OWN declared default, which feeds both the
+    # candidate set and the tie-break.
+    "sbox_param_comment": "parameter sbox_impl_e SecSBoxImpl = SBoxImplCanright",
+    "sbox_block_comment": "parameter sbox_impl_e SecSBoxImpl = SBoxImplCanright",
+    # An instantiation of the EXCLUDED module in an arm that IS reached.
+    "sbox_inst_comment": "thing_sbox_dom u_sbox2 (.a(a), .b(b));",
+    # A redefinition of the very predicate the derivation is read from.
+    "sbox_localparam_comment":
+        "localparam bit Masked = (SecSBoxImpl == SBoxImplLut) ? 1'b1 : 1'b0;",
+    # A whole extra module definition, which would enter `defined`.
+    "sbox_module_comment": "module thing_sbox_dom (input logic a);",
+    # A generate condition naming the excluded variant.
+    "sbox_cond_comment": "if (SecSBoxImpl == SBoxImplDom) begin : gen_x",
+    # A guarded instantiation of the excluded module at the integration top.
+    "top_inst_comment": ("if (SecMasking == 0) begin : gen_m "
+                         "thing_sbox_dom u_dom (.a(a), .b(b)); end"),
+}
+_NP_ANCHOR = {
+    "sbox_param_comment":
+        "  parameter sbox_impl_e SecSBoxImpl = SBoxImplLut\n",
+    "sbox_block_comment":
+        "  parameter sbox_impl_e SecSBoxImpl = SBoxImplLut\n",
+    "sbox_inst_comment": "    end else begin : gen_lut\n",
+    "sbox_localparam_comment":
+        "                           SecSBoxImpl == SBoxImplDom) ? 1'b1 : 1'b0;\n",
+    "sbox_module_comment": "\nmodule thing_sbox #(",
+    "sbox_cond_comment": "  if (!Masked) begin : gen_unmasked\n",
+    "top_inst_comment": ") (input logic a, output logic b);\n",
+}
+#: The positions the CODE arm proves live. Pinned as a SET, not a count: a
+#: change that quietly makes one of them unable to move the answer turns its
+#: trials into observations of nothing, and this is the only thing that says so.
+#: `sbox_module_comment` is deliberately absent — `_MODULE_DEF_RE` feeds
+#: `defined`, a read a sentence can only ADD to, and adding a name never
+#: withdraws a candidate. Recorded rather than counted.
+_NP_LIVE = {
+    "wrapper_line_comment", "wrapper_block_comment", "wrapper_string_default",
+    "sbox_param_comment", "sbox_block_comment", "sbox_inst_comment",
+    "sbox_localparam_comment", "sbox_cond_comment", "top_inst_comment",
+}
+
+
+def _np_build(pos, tok):
+    """(param_block, sbox_sv, top_sv, sentence) — the sentence AS PROSE."""
+    s = _sentence(tok, _NP_PAYLOAD[pos])
+    param, sbox, top = WRAPPER_BLOCK, SBOX_SV, THING_TOP
+    if pos == "wrapper_string_default":
+        # A Verilog STRING literal mints declarations exactly as a comment
+        # does, which is why the shared blanker blanks both in one alternation.
+        return (param.replace(
+            "  parameter bit          SecMasking  = 0,\n",
+            "  parameter bit          SecMasking  = 0,\n"
+            f'  parameter string       Note = "{s}",\n'), sbox, top, s)
+    fmt = [f for (n, _w, f) in _NP_POSITIONS if n == pos][0]
+    where = [w for (n, w, _f) in _NP_POSITIONS if n == pos][0]
+    text = fmt.format(s=s)
+    if where == "param":
+        param = param.replace(
+            "  parameter sbox_impl_e  SecSBoxImpl = SBoxImplDom\n",
+            "  parameter sbox_impl_e  SecSBoxImpl = SBoxImplDom\n" + text)
+    elif where == "sbox":
+        a = _NP_ANCHOR[pos]
+        assert a in sbox, pos
+        sbox = sbox.replace(a, a + text if not a.startswith("\nmodule")
+                            else text + a, 1)
+    else:
+        a = _NP_ANCHOR[pos]
+        assert a in top, pos
+        top = top.replace(a, a + text, 1)
+    return param, sbox, top, s
+
+
+def _np_build_code(pos):
+    """THE NEGATIVE CONTROL: the SAME payload as CODE, no comment markers and
+    outside any string. A position whose answer does not move here observed
+    nothing in the prose arm, however green that arm looked."""
+    s = _NP_PAYLOAD[pos]
+    param, sbox, top = WRAPPER_BLOCK, SBOX_SV, THING_TOP
+    if pos.startswith("wrapper_"):
+        return (param.replace(
+            "  parameter sbox_impl_e  SecSBoxImpl = SBoxImplDom\n",
+            "  parameter sbox_impl_e  SecSBoxImpl = SBoxImplDom,\n"
+            f"  {s}\n"), sbox, top)
+    where = [w for (n, w, _f) in _NP_POSITIONS if n == pos][0]
+    a = _NP_ANCHOR[pos]
+    if where == "sbox":
+        assert a in sbox, pos
+        sbox = (sbox.replace(a, a + "  " + s + "\n", 1)
+                if not a.startswith("\nmodule")
+                else sbox.replace(a, "\n" + s + "\nendmodule\n" + a, 1))
+    else:
+        assert a in top, pos
+        top = top.replace(a, a + "  " + s + "\n", 1)
+    return param, sbox, top
+
+
+def _np_run(param, sbox, top):
+    root, rtl = _project()
+    (rtl / "thing_sbox.sv").write_text(sbox)
+    (rtl / "thing_top.sv").write_text(top)
+    try:
+        _blk, resolved, refusals = \
+            D._chip_top_resolve_excluded_variant_params(
+                root, rtl, param, {"SecMasking": "0"})
+        return ({k: v["value"] for k, v in resolved.items()},
+                sorted(r["reason"] for r in refusals))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_not_prose_claim_for_the_wrapper_param_reader_is_falsifiable():
+    """Every denial token of the vocabulary, in every position a sentence can
+    occupy in this production, carrying a payload that WOULD move the answer.
+
+    The failure instruction is in the assertion message, and it is not
+    "loosen this": it is to delete the `_NOT_PROSE` entry and make the
+    function consult `_prose_polarity`.
+    """
+    toks = _denial_tokens()
+    base = _np_run(WRAPPER_BLOCK, SBOX_SV, THING_TOP)
+    assert base == ({"SecSBoxImpl": "SBoxImplLut"}, []), (
+        "the baseline this sweep differences against has moved; every verdict "
+        "below is about a different question until it is restored")
+
+    # THE NEGATIVE CONTROL FIRST, so a green sweep cannot be a green fixture.
+    live = {pos for pos, _w, _f in _NP_POSITIONS
+            if _np_run(*_np_build_code(pos)) != base}
+    assert live == _NP_LIVE, (
+        f"the set of positions whose payload can move the published answer "
+        f"changed: {sorted(live)!r}. The sweep's zero is only evidence over "
+        f"positions that could have moved — repair the payloads, do not "
+        f"shrink the claim")
+
+    inverted, unchanged, denials = [], 0, 0
+    for pos, _w, _f in _NP_POSITIONS:
+        for tok in toks:
+            param, sbox, top, sentence = _np_build(pos, tok)
+            if _PP.is_denied(sentence):
+                denials += 1
+            got = _np_run(param, sbox, top)
+            if got == base:
+                unchanged += 1
+            else:
+                inverted.append((pos, tok, got))
+
+    total = len(toks) * len(_NP_POSITIONS)
+    assert inverted == [], (
+        f"a SENTENCE changed what this function published: {inverted[:3]!r}. "
+        f"The `_NOT_PROSE` entry for design_one_shot_runner::_chip_top_"
+        f"resolve_excluded_variant_params claims no prose reaches it, and "
+        f"that claim is now false — DELETE the entry and consult "
+        f"`_prose_polarity`, rather than weakening this test")
+    assert unchanged == total
+    # ...and the vocabulary half: the identical strings, read AS PROSE, are
+    # denials. The grammar is inert, not the vocabulary.
+    assert denials == total, (
+        f"only {denials} of {total} injected sentences are read as denials by "
+        f"`_prose_polarity`; the sweep is no longer driving the vocabulary")
+
+
+def test_the_wrapper_param_reader_strips_its_own_inputs_not_via_a_caller():
+    """The claim must be a property of THIS function and of the gatherer it
+    calls — not of whoever happens to hand it text. Both halves, named."""
+    src = inspect.getsource(D._chip_top_resolve_excluded_variant_params)
+    assert "_hdl_code_text.strip_hdl_comments_and_strings(param_block)" in src, (
+        "the wrapper header is matched on a blanked copy; if that has moved, "
+        "the `_NOT_PROSE` claim has to be re-measured")
+    assert "_pf._gather(" in src
+    gsrc = inspect.getsource(_pf._gather)
+    assert "_strip_comments(" in gsrc, (
+        "every RTL file this function matches arrives through `_gather`; if "
+        "that stops stripping, prose reaches the scans and the `_NOT_PROSE` "
+        "entry is false")

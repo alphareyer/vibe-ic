@@ -26,6 +26,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import _hdl_code_text  # offset-preserving comment/string blanker (#731)
+
 GOLDEN_MODULE = "RefModule"
 CANDIDATE_MODULE = "TopModule"
 
@@ -41,7 +43,15 @@ def golden_candidate(dataset: Path, pid: str, entry: dict):
     """(sample relpath, candidate text, stub seed text) for ARM G."""
     ref = Path(dataset) / f"{pid}{entry['layout']['ref_suffix']}"
     text = ref.read_text(errors="replace")
-    decls = _MODULE_DECL_RE.findall(text)
+    # THE DECLARATION IS COUNTED ON CODE, NEVER ON A SENTENCE (vibe-ic#731).
+    # A block-commented-out old reference carries its own `module ...` header
+    # at the start of a line, which is exactly what `^[ \t]*module\s+(\w+)`
+    # matches: the phantom makes `decls` two long and this adapter REFUSES a
+    # golden it can map, naming a module the file does not contain. Blanked,
+    # not deleted: `_hdl_code_text` preserves offsets, so the names read here
+    # are exactly the ones the original text declares.
+    code = _hdl_code_text.strip_hdl_comments_and_strings(text)
+    decls = _MODULE_DECL_RE.findall(code)
     if decls != [GOLDEN_MODULE]:
         raise ValueError(
             f"{ref.name} declares {decls!r}; this adapter maps a single "
