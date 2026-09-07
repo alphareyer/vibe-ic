@@ -87,6 +87,13 @@ These are L19 implementation context, not constraints, so they do not set
 `constraints_present`.  They carry the same project-relative source, line,
 evidence and extraction-strategy provenance as constraint declarations.
 
+Whether or not anything is lifted, the layer records THE READ SET —
+`documents_consulted[]`, every input document this emitter opened with a
+`yielded` flag — outside `fields`, because reading a document is not
+extracting from it. Without it a layer that carries only prompt-stated facts
+is indistinguishable from one whose emitter never opened the design
+documents, and the two were in fact confused (vibe-ic#2128).
+
 `constraints_present` becomes True — and ONLY on evidence. With no
 declaration found, this emitter writes nothing at all and the layer keeps
 whatever the file-based ingests and the overlay put there, which is the
@@ -163,6 +170,10 @@ _PRESENCE_KEY = "constraints_present"
 #: vibe-ic#2091 — the layer's own record of the design's clock target, INCLUDING
 #: when there is not one. See `_clock_target_record`.
 _CLOCK_TARGET_KEY = "clock_target"
+#: vibe-ic#2128 — the layer's record of WHICH design documents this emitter
+#: actually read, INCLUDING the ones that yielded nothing. See
+#: `_documents_consulted`.
+_CONSULTED_KEY = "documents_consulted"
 
 # Explicit prose declarations that belong to L19's implementation-context
 # contract.  These are domain words, never a design, PDK, tool, standard or
@@ -518,6 +529,44 @@ def _clock_target_record(project: Path, fields: Dict[str, Any]
                      "one, never as this design's specification")}
 
 
+# ─────────────────────────────────────────────────────────────────────
+# THE READ SET — vibe-ic#2128
+# ─────────────────────────────────────────────────────────────────────
+# `source_documents` records only the documents that YIELDED a record. A
+# document read and found to state nothing therefore leaves no trace at all,
+# and when a design states nothing anywhere this emitter writes NOTHING, so
+# the layer cannot distinguish:
+#
+#     (a) the design documents were read and state no constraint, from
+#     (b) the design documents were never opened.
+#
+# Measured: on `benchmark-data/ic/opentitan_aes` this emitter opens all eight
+# design documents under `input/docs/` and every record it emits nevertheless
+# cites the prompt, because the prompt is the only input that states a
+# declaration in an admitted shape. Read from the layer alone that is
+# indistinguishable from (b) — and it was read as (b), and filed as a defect
+# (vibe-ic#2128). The read set is the one field that separates them.
+#
+# It is provenance, never a constraint: it is written outside `fields`, it
+# never sets `constraints_present`, and it never advances `extraction_status`
+# — reading a document is not extracting from it.
+def _documents_consulted(project: Path,
+                         yielding: set) -> List[Dict[str, Any]]:
+    """Every input document this emitter read, and whether it yielded.
+
+    Derived from the SAME `input_doc_texts` call the collectors use, so the
+    record cannot drift from the read it describes.
+    """
+    out: List[Dict[str, Any]] = []
+    for path, _text in input_doc_texts(project):
+        src, outside = project_relative_source(path, project)
+        rec: Dict[str, Any] = {"source": src, "yielded": src in yielding}
+        if outside:
+            rec["source_outside_project"] = True
+        out.append(rec)
+    return out
+
+
 def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
     l19_path = _generated_docs(project) / _L19_NAME
     if not l19_path.is_file():
@@ -575,8 +624,24 @@ def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
     clock_target = (None if _CLOCK_TARGET_KEY in fields
                     else _clock_target_record(project, fields))
 
+    # vibe-ic#2128 — the read set. Computed from every record this emitter
+    # would publish (pre-existing ones included: they came from this same
+    # read), so "yielded" answers "did THIS document state anything L19
+    # carries", not "did this run happen to add something new".
+    yielding = {r.get("source") for r in existing if isinstance(r, dict)}
+    yielding |= {r["source"] for r in found}
+    yielding |= {r["source"] for rows in context_found.values() for r in rows}
+    yielding.discard(None)
+    consulted = _documents_consulted(project, yielding)
+    # Never reshape a key some other producer already owns as a non-list.
+    consulted_current = doc.get(_CONSULTED_KEY)
+    consulted_owned = (consulted_current is None
+                       or isinstance(consulted_current, list))
+    consulted_changed = consulted_owned and consulted_current != consulted
+
     wrote = False
-    if (emitted or context_emitted_count or clock_target) and not dry_run:
+    emitted_anything = bool(emitted or context_emitted_count or clock_target)
+    if (emitted_anything or consulted_changed) and not dry_run:
         if clock_target:
             fields[_CLOCK_TARGET_KEY] = clock_target
         if emitted:
@@ -591,15 +656,23 @@ def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
                 continue
             current = fields.get(field)
             fields[field] = (current if isinstance(current, list) else []) + records
-        doc["fields"] = fields
-        # Provenance the layer did not have: which inputs it was read from.
-        srcs = doc.get("source_documents")
-        srcs = list(srcs) if isinstance(srcs, list) else []
-        for r in emitted + [r for rows in context_emitted.values() for r in rows]:
-            if r["source"] not in srcs:
-                srcs.append(r["source"])
-        doc["source_documents"] = srcs
-        if doc.get("extraction_status") == "NOT_YET_EXTRACTED":
+        # A read-set-only write touches provenance and nothing else: it must
+        # not create or reshape `fields`, nor restate `source_documents`.
+        if emitted_anything:
+            doc["fields"] = fields
+            # Provenance the layer did not have: which inputs it was read from.
+            srcs = doc.get("source_documents")
+            srcs = list(srcs) if isinstance(srcs, list) else []
+            for r in emitted + [r for rows in context_emitted.values()
+                                for r in rows]:
+                if r["source"] not in srcs:
+                    srcs.append(r["source"])
+            doc["source_documents"] = srcs
+        if consulted_changed:
+            doc[_CONSULTED_KEY] = consulted
+        # Reading a document is not extracting from it: a read-set-only write
+        # must never advance the layer's extraction status.
+        if emitted_anything and doc.get("extraction_status") == "NOT_YET_EXTRACTED":
             doc["extraction_status"] = "PARTIALLY_EXTRACTED"
         _stamp.dump(l19_path, doc)
         wrote = True
@@ -616,6 +689,10 @@ def run(project: Path, dry_run: bool = False) -> Dict[str, Any]:
         "emitted": emitted,
         "context_emitted": context_emitted,
         "clock_target": clock_target,
+        "documents_consulted": consulted,
+        "documents_consulted_count": len(consulted),
+        "documents_consulted_yielded": sum(1 for r in consulted
+                                           if r.get("yielded")),
         "doc_written": str(l19_path) if wrote else None,
     }
 
@@ -661,7 +738,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         print(f"{TOOL}: no constraint declaration to lift "
               f"({rep.get('found_count', 0)} found, "
-              f"{rep.get('pre_existing', 0)} already present)")
+              f"{rep.get('pre_existing', 0)} already present) — "
+              f"read {rep.get('documents_consulted_count', 0)} input "
+              f"document(s), {rep.get('documents_consulted_yielded', 0)} of "
+              f"which state one")
     return 0
 
 
