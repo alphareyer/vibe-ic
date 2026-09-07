@@ -33624,6 +33624,7 @@ def publish_database_unit_declaration(project: Path, pdk: "PdkConfig",
 #: `KLayout.CheckSize` also needs before it can reach any verdict at all.
 _DECLARATION_PUBLISH_KEYS: Tuple[str, ...] = (
     "top_cell", "deliverable", "die_origin_um", "die_area_um",
+    "macro_origin_um", "macro_area_um",
     "seal_ring_required", "forbidden_layers",
 )
 
@@ -33881,28 +33882,82 @@ def publish_tapeout_declarations(project: Path, pdk: "PdkConfig",
     else:
         rec["not_determined"]["deliverable"] = _dv_why
 
-    # 3 — the die rectangle, which `KLayout.CheckSize` needs in both halves.
+    # WHICH DELIVERABLE THIS IS, needed from here down. Settled the same way
+    # the merge below settles every key: an answer already in the declaration
+    # OUTRANKS a derivation, so the declared answer wins and `_dv` is the
+    # fall-back.
+    _eff_dv = _effective_deliverable(project, _dv)
+    _here_p = str(Path(__file__).resolve().parent)
+    if _here_p not in sys.path:
+        sys.path.insert(0, _here_p)
+    import _tapeout_declaration as _td2                        # noqa: PLC0415
+
+    # 3 — the size rectangle, which `KLayout.CheckSize` needs in both halves,
+    # UNDER THE NAME THAT IS TRUE OF THIS DELIVERY (vibe-ic#2118).
+    #
+    # `die_area_um` / `die_origin_um` are `required_for=(DELIVERABLE_DIE,)` in
+    # `_tapeout_declaration`, and this publisher wrote them onto a HARDMACRO
+    # anyway — a delivery answering a question it does not owe, with a number
+    # that any consumer believing the name reads as A DIE. The rectangle
+    # `declared_die_rect` returns on a macro run IS the macro's own floorplan
+    # box, so the number was never wrong; the CLAIM around it was. This is the
+    # seal-ring class of vibe-ic#2112 one step up: the same wrong premise —
+    # "what leaves this flow is a die" — taken about size instead of about a
+    # ring.
+    #
+    # So the pair is published under `macro_*` on a HARDMACRO and under `die_*`
+    # on a DIE, and the names that do not apply are REFUSED BY NAME in
+    # `not_determined` rather than left silently absent: a key nobody published
+    # and a key somebody declined are different facts.
+    #
+    # AN UNDECLARED DELIVERABLE PUBLISHES NEITHER. `applicable` already says a
+    # design that has not stated what it is owes EVERY question, and this
+    # program cannot answer that one for it — publishing both names would be
+    # this run asserting a die AND a macro, and choosing one would be a guess
+    # wearing a derivation's clothes.
     _rect, _rect_why = declared_die_rect(project)
-    if _rect:
-        derived["die_origin_um"] = {
-            "value": [_rect[0], _rect[1]],
-            "basis": f"the run's own die rectangle — {_rect_why}"}
-        derived["die_area_um"] = {
-            "value": [_rect[0], _rect[1], _rect[2], _rect[3]],
-            "basis": f"the run's own die rectangle — {_rect_why}"}
+    if _eff_dv == _td2.DELIVERABLE_HARDMACRO:
+        _size_keys, _other_keys, _noun = (
+            ("macro_origin_um", "macro_area_um"),
+            ("die_origin_um", "die_area_um"), "macro")
+    elif _eff_dv == _td2.DELIVERABLE_DIE:
+        _size_keys, _other_keys, _noun = (
+            ("die_origin_um", "die_area_um"),
+            ("macro_origin_um", "macro_area_um"), "die")
     else:
-        rec["not_determined"]["die_origin_um"] = _rect_why
-        rec["not_determined"]["die_area_um"] = _rect_why
+        _size_keys, _other_keys, _noun = (
+            (), ("die_origin_um", "die_area_um",
+                 "macro_origin_um", "macro_area_um"), "")
+    for _k in _other_keys:
+        if _size_keys:
+            rec["not_determined"][_k] = (
+                f"this delivery is {_eff_dv}, and {_k} is not a question a "
+                f"{_noun} owes an answer to — the run's own rectangle is "
+                f"published as {_size_keys[0].split('_')[0]}_* instead "
+                f"(vibe-ic#2118)")
+        else:
+            rec["not_determined"][_k] = (
+                f"`deliverable` is {_eff_dv or _td2.NOT_DETERMINED}, so whether this "
+                f"run's rectangle is a die or a macro is not known and "
+                f"neither name is published: {_dv_why}")
+    if _size_keys and _rect:
+        derived[_size_keys[0]] = {
+            "value": [_rect[0], _rect[1]],
+            "basis": f"the run's own {_noun} rectangle — {_rect_why}"}
+        derived[_size_keys[1]] = {
+            "value": [_rect[0], _rect[1], _rect[2], _rect[3]],
+            "basis": f"the run's own {_noun} rectangle — {_rect_why}"}
+    elif _size_keys:
+        rec["not_determined"][_size_keys[0]] = _rect_why
+        rec["not_determined"][_size_keys[1]] = _rect_why
 
     # 4 — seal_ring_required, from the technology, AND ONLY FOR A DIE.
     #
-    # WHICH DELIVERABLE THIS IS is settled the same way the merge below settles
-    # every key: an answer already in the declaration OUTRANKS a derivation, so
-    # the declared answer wins and `_dv` is the fall-back. Without this the
-    # technology's answer was published on top of a `deliverable=HARDMACRO`
-    # this same function had already recorded as `already_answered`, two lines
-    # of one artefact disagreeing about what leaves the flow. vibe-ic#2112.
-    _eff_dv = _effective_deliverable(project, _dv)
+    # `_eff_dv` is resolved above, before the size pair that also needs it.
+    # Without this ordering the technology's answer was published on top of a
+    # `deliverable=HARDMACRO` this same function had already recorded as
+    # `already_answered`, two lines of one artefact disagreeing about what
+    # leaves the flow. vibe-ic#2112.
     _seal, _seal_why = _declared_seal_ring_required(project, pdk, container,
                                                     _eff_dv)
     if _seal is True:

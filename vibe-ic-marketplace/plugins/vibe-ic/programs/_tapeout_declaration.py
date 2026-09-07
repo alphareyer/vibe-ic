@@ -150,7 +150,7 @@ SECTION_SEAL_RING = "2C_seal_ring"
 # --------------------------------------------------------------------------- #
 # WHO IS ENTITLED TO ANSWER A QUESTION (#2070)
 #
-# Seventeen of the eighteen questions ask the DESIGN about itself. One does
+# Nineteen of the twenty questions ask the DESIGN about itself. One does
 # not. `database_unit_um` asks what the TECHNOLOGY FILE declares, and a design
 # has no standing to answer that: the number is a property of the PDK the run
 # targets, published by that PDK's own tech LEF.
@@ -202,7 +202,7 @@ class Question:
     required_for: Tuple[str, ...] = DELIVERABLES
     choices: Tuple[str, ...] = ()
     note: str = ""
-    #: WHO is entitled to answer. `ANSWERED_BY_DESIGN` for the seventeen
+    #: WHO is entitled to answer. `ANSWERED_BY_DESIGN` for the nineteen
     #: questions about the design itself; `ANSWERED_BY_TECHNOLOGY` for the one
     #: that asks what a technology file declares. Declared as a field rather
     #: than kept as a list of keys somewhere else, so the entitlement travels
@@ -261,6 +261,29 @@ _2A: Tuple[Question, ...] = (
              "hard-coded to [0,0] so the check compares a measurement against "
              "a DECLARATION, like every other check here, instead of against "
              "a constant of ours."),
+    Question(
+        "macro_area_um", SECTION_DIE_SIZE,
+        "The macro rectangle [llx, lly, urx, ury] in microns — the bounding "
+        "box of the hardmacro this flow delivers.",
+        "rect_um", "general_precheck", (DELIVERABLE_HARDMACRO,),
+        note="THE HARDMACRO'S OWN SIZE, and the reason `die_area_um` is not "
+             "it (vibe-ic#2118). A macro is placed inside somebody else's die "
+             "and has no die of its own, so a delivery that answered "
+             "`die_area_um` was answering a question it does not owe — with a "
+             "number that, read by any consumer that believes the name, is a "
+             "die. Same number, different claim; only one of them is true "
+             "here. `general_precheck`'s size rung compares the streamed "
+             "extent against THIS on a hardmacro and against `die_area_um` on "
+             "a die, so the rung still reaches a verdict either way."),
+    Question(
+        "macro_origin_um", SECTION_DIE_SIZE,
+        "Where is the delivered macro's lower-left corner, in microns?",
+        "point_um", "general_precheck", (DELIVERABLE_HARDMACRO,),
+        note="RECORDED, NOT ENFORCED. A hardmacro's geometry may sit off the "
+             "cell origin because its LEF ORIGIN declares the offset — that is "
+             "why the origin rung does not refuse on a macro — but the offset "
+             "is still a fact the delivery states rather than one a consumer "
+             "has to re-derive from the stream."),
     Question(
         "database_unit_um", SECTION_DIE_SIZE,
         "What database unit, in microns, does the technology file declare?",
@@ -386,16 +409,17 @@ _2C: Tuple[Question, ...] = (
 
 QUESTIONS: Tuple[Question, ...] = _2A + _2B + _2C
 
-#: 7 + 8 + 3. Asserted at import so a question added to a section without the
+#: 9 + 8 + 3. Asserted at import so a question added to a section without the
 #: section's count being revisited is a loud failure, not a silent drift.
-SECTION_COUNTS = {SECTION_DIE_SIZE: 7, SECTION_PAD_RING: 8, SECTION_SEAL_RING: 3}
+#: 2A went 7 -> 9 with `macro_area_um` / `macro_origin_um` (vibe-ic#2118).
+SECTION_COUNTS = {SECTION_DIE_SIZE: 9, SECTION_PAD_RING: 8, SECTION_SEAL_RING: 3}
 for _sec, _n in SECTION_COUNTS.items():
     _have = sum(1 for q in QUESTIONS if q.section == _sec)
     if _have != _n:                                            # pragma: no cover
         raise AssertionError(
             f"section {_sec} declares {_n} question(s) but carries {_have}")
 
-#: Contract fields outside the 18 physical-deliverable questions. See the
+#: Contract fields outside the 20 physical-deliverable questions. See the
 #: module-level explanation above.
 FORBIDDEN_LAYERS_KEY = "forbidden_layers"
 SYNTHESIS_AREA_BUDGET_KEY = "synthesis_area_budget"
@@ -422,7 +446,7 @@ def question(key: str) -> Optional[Question]:
 
 
 def blank_declaration() -> Dict[str, Any]:
-    """All 18 questions plus contract fields, all `NOT_DETERMINED`.
+    """All 20 questions plus contract fields, all `NOT_DETERMINED`.
 
     This is the ONLY constructor. There is no variant that pre-fills anything,
     because the moment one exists somebody calls it.

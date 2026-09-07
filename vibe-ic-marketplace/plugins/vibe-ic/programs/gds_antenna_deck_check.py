@@ -54,11 +54,12 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     from . import _klayout_launch as _kl                     # type: ignore
 except ImportError:                                          # standalone gate
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
     import _klayout_launch as _kl                            # type: ignore
+from _atomic_artefact import write_bytes as _atomic_write_bytes  # vibe-ic#1082
 
 PASS, FAIL, SKIP = 0, 1, 2
 
@@ -87,6 +88,10 @@ _ROUTER_GLOBS = (
     "**/antenna*.rpt",
 )
 # See the naming note in run(): these must NOT match `*antenna*.json`.
+#: Where an engine the runner cannot reach is STAGED to, relative to the
+#: GDS directory. Must not contain the substring "antenna" for the same
+#: reason the report names do not -- see the naming note in run().
+_STAGE_REL = "gate_oxide_deck"
 _RAW_REPORT_NAME = "gate_oxide_geom_deck_raw.json"
 _MATERIALISED_CFG_NAME = "gate_oxide_geom_deck_config.json"
 
@@ -143,6 +148,50 @@ def _load_module(path: Path, name: str):
     return mod
 
 
+def stage_engine(runner, path: Path, into: Path):
+    """`path` as the RUNNER can open it — a copy under `into` when it cannot.
+
+    THE DEFECT THIS EXISTS FOR (vibe-ic#2119). `path` is a HOST path under this
+    plugin's own installation, and the runner may be a CONTAINER. The plugin
+    tree is not one of the mounts the repo's own container helper creates —
+    `tools/vibeic-eda/restart-eda.sh` binds the designs directory and nothing
+    else — so on a container built exactly the way this repo says to build one
+    the host file exists, the container has no such path, and this gate
+    DISCLOSED_SKIPped on every PDK and every design: the one INDEPENDENT
+    antenna opinion in the flow never ran, and said so in a line nobody had to
+    act on. After vibe-ic#2107 this was the ONLY one of the four KLayout-engine
+    callers that did not stage.
+
+    Copying is sound because the engine is self-contained: `antenna_check.py`
+    imports only `json`, `os`, `sys` and `pya` and pulls in no sibling of its
+    own, so a copy of it is the same program. Same remedy, and for the same
+    measured reason, as `die_density_fill_gen.stage_engine`.
+
+    Returns (path_for_the_runner, error_or_None). The error is NEVER folded
+    into a skip or a pass: an engine the runner cannot open is this program
+    failing, not the design failing and not the deck being undeclared.
+    """
+    if runner.covers(path):
+        return path, None
+    dest = into / path.name
+    try:
+        into.mkdir(parents=True, exist_ok=True)
+        # ATOMIC, and not `dest.write_bytes` (vibe-ic#1082): a copy interrupted
+        # halfway leaves a TRUNCATED engine at a path that exists, and KLayout
+        # would then fail on a syntax error inside this program's own engine —
+        # a failure indistinguishable from a defect in the engine itself.
+        _atomic_write_bytes(dest, path.read_bytes())
+    except OSError as exc:                                   # noqa: BLE001
+        return path, (f"{path} is not reachable from the {runner.kind} KLayout "
+                      f"environment ({runner.detail}) and could not be staged "
+                      f"into {into}: {exc}")
+    if not runner.covers(dest):
+        return dest, (f"neither {path} nor a copy of it at {dest} is reachable "
+                      f"from the {runner.kind} KLayout environment "
+                      f"({runner.detail})")
+    return dest, None
+
+
 def run(project: Path, gds: Optional[str], config: Optional[str],
         router: Optional[str], cell: Optional[str]) -> Dict[str, Any]:
     """Return a verdict dict. Verdicts: PASS / FAIL / DISCLOSED_SKIP."""
@@ -188,12 +237,26 @@ def run(project: Path, gds: Optional[str], config: Optional[str],
     if cfg_path is None or not runner.covers(cfg_path):
         cfg_path = work / _MATERIALISED_CFG_NAME
         cfg_path.write_text(json.dumps(deck, indent=2))
-    for label, p in (("GDS", gds_path), ("engine", engine),
-                     ("report dir", work)):
+    for label, p in (("GDS", gds_path), ("report dir", work)):
         if not runner.covers(p):
             return skip(f"{label} path is not reachable by the KLayout runner "
                         f"({runner.kind}: {runner.detail}): {p}",
                         config_source=cfg_src)
+    # NOW the engine can be checked on the side that will OPEN it, and staged
+    # into the GDS directory — which the loop above has just proven the runner
+    # reaches — when it is not reachable where it is. vibe-ic#2119.
+    engine_staged = None
+    _orig_engine = engine
+    engine, _why = stage_engine(runner, engine, gds_path.parent / _STAGE_REL)
+    if _why:
+        return {"verdict": "FAIL", "check": "gds_geometry_antenna_deck",
+                "config_source": cfg_src, "gds": str(gds_path),
+                "runner": f"{runner.kind}:{runner.detail}",
+                "reason": (f"this program's antenna geometry engine "
+                           f"({_orig_engine.name}) is present on this host but "
+                           f"cannot be opened where KLayout runs: {_why}")}
+    if engine != _orig_engine:
+        engine_staged = str(engine)
 
     env = {"ANT_GDS": str(gds_path), "ANT_CONFIG": str(cfg_path),
            "ANT_OUT": str(out_json)}
@@ -208,6 +271,7 @@ def run(project: Path, gds: Optional[str], config: Optional[str],
         return {"verdict": "FAIL", "check": "gds_geometry_antenna_deck",
                 "reason": "antenna geometry deck produced no report",
                 "config_source": cfg_src, "gds": str(gds_path),
+                "engine_staged": engine_staged,
                 "runner": f"{runner.kind}:{runner.detail}", "rc": rc,
                 "stderr": (err or "")[-600:], "stdout": (out or "")[-600:]}
     deck_res = json.loads(out_json.read_text())
@@ -216,6 +280,7 @@ def run(project: Path, gds: Optional[str], config: Optional[str],
         "check": "gds_geometry_antenna_deck",
         "runner": f"{runner.kind}:{runner.detail}",
         "config_source": cfg_src, "gds": str(gds_path),
+        "engine_staged": engine_staged,
         "worst_ratio": deck_res.get("worst_ratio"),
         "violations": deck_res.get("violations"),
         "deck": deck_res,

@@ -334,8 +334,13 @@ def _l19_contract(project: Path, records: List[Dict[str, str]], l19: dict
     answers = (declaration.get("answers")
                if isinstance(declaration, dict)
                and isinstance(declaration.get("answers"), dict) else {})
+    # `macro_*` is the HARDMACRO half of the size pair (vibe-ic#2118): a macro
+    # delivery declares its own bounding box under a name that says so, and a
+    # carry-through that listed only the `die_*` half would report a hardmacro's
+    # geometry contract as empty.
     geometry_keys = ("deliverable", "top_cell", "die_area_um", "core_area_um",
-                     "fp_sizing", "die_origin_um", "database_unit_um")
+                     "fp_sizing", "die_origin_um", "macro_area_um",
+                     "macro_origin_um", "database_unit_um")
     geometry = {key: answers[key] for key in geometry_keys
                 if key in answers and not (
                     isinstance(answers[key], str)

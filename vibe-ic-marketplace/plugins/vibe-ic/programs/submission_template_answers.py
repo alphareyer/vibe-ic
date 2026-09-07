@@ -32,7 +32,7 @@ is exactly what makes the check downstream mean something.
 
 THE SPLIT, AND WHY IT IS NOT NEGOTIABLE
 =======================================
-Of the declaration's 18 questions, the operator answers SOME and the DESIGN
+Of the declaration's 20 questions, the operator answers SOME and the DESIGN
 answers the rest. Answering a design question from the operator's template
 would be inventing an answer the design never gave — the same defect one layer
 up — so the design's questions are left `NOT_DETERMINED` and stay a non-pass

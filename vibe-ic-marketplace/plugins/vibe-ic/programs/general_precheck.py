@@ -59,7 +59,7 @@ THREE CLASSES OF CHECK, AND WHERE THE TRUTH COMES FROM
                    operator's container stronger than anything we write.
     DECLARED       Needs something a human wrote down: the die size, whether a
                    seal ring is required, which layers are forbidden. Compared
-                   against `_tapeout_declaration`'s 18 questions. An
+                   against `_tapeout_declaration`'s 20 questions. An
                    unanswered question is NOT_DETERMINED here — never a pass,
                    and never a default.
 
@@ -643,15 +643,32 @@ def _step_top_level(ev: StepEvidence, geom: Optional[Dict[str, Any]],
 
 
 def _step_size(ev: StepEvidence, geom: Optional[Dict[str, Any]],
-               deliverable: Any, origin: Any, die_area: Any) -> None:
-    """THE ORIGIN CHECK, and the declared-die-size check beside it."""
+               deliverable: Any, origin: Any, die_area: Any,
+               macro_origin: Any = None, macro_area: Any = None) -> None:
+    """THE ORIGIN CHECK, and the declared-size check beside it.
+
+    TWO NAMES FOR THE SIZE, AND WHICH ONE APPLIES IS THE DELIVERABLE'S TO SAY
+    (vibe-ic#2118). `die_area_um`/`die_origin_um` are `required_for=(DIE,)` in
+    the declaration's own schema; a HARDMACRO is placed inside somebody else's
+    die and states `macro_area_um`/`macro_origin_um` instead. This rung reads
+    the pair that belongs to the delivery in hand, so it still reaches a
+    verdict on a macro — against the MACRO's box, which is what was declared —
+    and a `die_*` answer is never silently consumed as if a macro had a die.
+    """
+    if deliverable == _decl.DELIVERABLE_HARDMACRO:
+        origin, die_area = macro_origin, macro_area
+        _origin_key, _area_key = "macro_origin_um", "macro_area_um"
+    else:
+        _origin_key, _area_key = "die_origin_um", "die_area_um"
     if geom is None:
         ev.evidence = "the layout was not read, so its extent is unknown"
         return
     bbox = geom.get("bbox_um")
     dbu = geom.get("dbu_um")
-    ev.measured = {"bbox_um": bbox, "declared_die_origin_um": origin,
-                   "declared_die_area_um": die_area,
+    ev.measured = {"bbox_um": bbox, "declared_origin_um": origin,
+                   "declared_area_um": die_area,
+                   "declared_origin_key": _origin_key,
+                   "declared_area_key": _area_key,
                    "deliverable": deliverable,
                    "bbox_complete": geom.get("bbox_complete"),
                    "bbox_cycles": geom.get("bbox_cycles"),
@@ -697,7 +714,9 @@ def _step_size(ev: StepEvidence, geom: Optional[Dict[str, Any]],
     else:
         checked.append(
             "origin not checked: a HARDMACRO's geometry may sit off the cell "
-            "origin because its LEF ORIGIN declares the offset")
+            "origin because its LEF ORIGIN declares the offset"
+            + (f" (declared `macro_origin_um` {origin})"
+               if origin != _decl.NOT_DETERMINED else ""))
 
     if die_area == _decl.NOT_DETERMINED:
         if deliverable == _decl.DELIVERABLE_DIE:
@@ -709,12 +728,12 @@ def _step_size(ev: StepEvidence, geom: Optional[Dict[str, Any]],
             if problems:
                 ev.verdict = FAIL
                 ev.evidence = ("; ".join(problems)
-                               + "; `die_area_um` was additionally not "
+                               + f"; `{_area_key}` was additionally not "
                                  "declared, so the dimensions were not checked "
                                  "at all")
             else:
                 ev.evidence = ("; ".join(checked) +
-                               "; `die_area_um` was not declared, so the die "
+                               f"; `{_area_key}` was not declared, so the "
                                "dimensions have nothing to be compared against")
             return
     else:
@@ -1168,7 +1187,9 @@ def evaluate(project: Path,
         elif step.step_id == "KLayout.CheckSize":
             _step_size(ev, geom, deliverable,
                        _decl.answer(doc, "die_origin_um"),
-                       _decl.answer(doc, "die_area_um"))
+                       _decl.answer(doc, "die_area_um"),
+                       _decl.answer(doc, "macro_origin_um"),
+                       _decl.answer(doc, "macro_area_um"))
         elif step.step_id == "Checker.KLayoutZeroAreaPolygons":
             _step_zero_area(ev, geom)
         elif step.step_id == "General.ForbiddenLayers":

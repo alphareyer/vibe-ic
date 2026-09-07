@@ -96,7 +96,7 @@ NO_DECLARATION_REL = "input/submission_template/NO_DECLARATION.txt"
 #: `DESIGN_ANSWERS_REL` is the design's OWN side of step 0.5ic: where its
 #: operator template really is (when not staged in the default place), which
 #: slot it declares, why an absent template is a genuine not-applicable for it,
-#: and its answers to `_tapeout_declaration`'s 18 questions. NOTHING in this
+#: and its answers to `_tapeout_declaration`'s 20 questions. NOTHING in this
 #: file is inferred by any program: a design that stages no answers gets an
 #: absent template with NO stated reason and an entirely NOT_DETERMINED
 #: declaration, which is a step 0.5ic that FAILS -- honestly, naming what the

@@ -29,7 +29,7 @@ WHAT CHANGED UNDER IT
 The input it went without now exists. Step 0.5ic writes
 `input/submission_template/tapeout_declaration.json` on EVERY route, and its
 section 2B is `_pad_ring.REQUIRED_VARS` grouped into the 8 things a human
-decides — `_tapeout_declaration.py` says so where it derives the 18 questions,
+decides — `_tapeout_declaration.py` says so where it derives the 20 questions,
 naming `pad_ring_gen` as the `consumer` of every one of the 8. The consumer
 was never wired to the answers. This program is that wiring and nothing more.
 

@@ -383,7 +383,9 @@ def test_publish_answers_the_five_it_can_and_names_the_one_it_cannot(
     assert set(rec["published"]) == {
         "top_cell", "deliverable", "die_origin_um", "die_area_um",
         "seal_ring_required"}
-    assert set(rec["not_determined"]) == {"forbidden_layers"}
+    # `macro_*` is REFUSED BY NAME on a DIE, not silently absent (vibe-ic#2118).
+    assert set(rec["not_determined"]) == {"forbidden_layers", "macro_area_um",
+                                          "macro_origin_um"}
     doc, err = td.load(project / td.DECLARATION_REL)
     assert err is None
     assert td.answer(doc, "top_cell") == "spm"
@@ -406,15 +408,19 @@ def test_publish_writes_its_record_even_when_it_publishes_nothing(tmp_path,
     rec = r.publish_tapeout_declarations(
         project, _Pdk(), "c", project / "phase3/stage3/pnr/routed.def", "")
     assert rec["published"] == []
+    # With `deliverable` NOT_DETERMINED neither size name is published, and
+    # BOTH are refused by name — vibe-ic#2118.
     assert set(rec["not_determined"]) == {
         "top_cell", "deliverable", "die_origin_um", "die_area_um",
+        "macro_origin_um", "macro_area_um",
         "seal_ring_required", "forbidden_layers"}
     on_disk = json.loads(
         (project / "reports/phase3/tapeout_declaration_publish.json").read_text())
     assert on_disk["published"] == []
     assert on_disk["record"] == str(
         project / "reports/phase3/tapeout_declaration_publish.json")
-    assert r.FLOORPLAN_RECTANGLES_REL in on_disk["not_determined"]["die_area_um"]
+    # `deliverable` is unknown here, so the refusal names THAT, not the record.
+    assert "not known" in on_disk["not_determined"]["die_area_um"]
 
 
 def test_an_existing_answer_outranks_the_derivation_and_is_never_overwritten(
