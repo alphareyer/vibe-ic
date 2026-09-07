@@ -163,18 +163,62 @@ def classify_module(path: Path) -> dict:
         return {"file": str(path), "error": f"{type(exc).__name__}: {exc}",
                 "tests": [], "real": [], "synthetic": []}
 
-    funcs: Dict[str, ast.AST] = {}
-    fixtures: Set[str] = set()
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            funcs[node.name] = node
-            for dec in node.decorator_list:
-                # `@pytest.fixture` / `@fixture` / `@pytest.fixture(...)`
-                d = dec.func if isinstance(dec, ast.Call) else dec
-                name = (d.attr if isinstance(d, ast.Attribute)
-                        else getattr(d, "id", ""))
-                if name == "fixture":
-                    fixtures.add(node.name)
+    # vibe-ic#2116 — the call graph includes methods, resolved IN THEIR OWN
+    # CLASS SCOPE.
+    #
+    # `tests` below is collected with `ast.walk`, so a test METHOD inside a
+    # class has always been ENUMERATED. `funcs` was collected from
+    # `tree.body`, so that same method was never a node of the call graph:
+    # `reaches(name)` returned False at `name not in funcs` before it looked
+    # at a single call. A class-based module was therefore reported SYNTHETIC
+    # no matter what it read — including when the method calls `require_repo`
+    # directly. The lane that filed this worked around it by writing a
+    # module-level test instead, which is the wrong direction: the classifier
+    # exists to tell a reviewer what the suite really reads.
+    #
+    # `_calls_in` records attribute TAILS, so `self._corpus()` arrives as the
+    # bare name `_corpus`. Putting EVERY method into one flat table would
+    # therefore let a helper named `_corpus` in one class answer for an
+    # unrelated `self._corpus()` in another — an OVER-claim, and over-claiming
+    # is the exact failure this program exists to prevent (see the module
+    # docstring). So each function resolves against module scope PLUS the
+    # methods of the class that encloses it, and nothing else.
+    _MODULE = None                      # scope key for module-level defs
+
+    def _collect(body, scope, out_funcs, out_fixtures, out_scope):
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out_funcs.setdefault(scope, {})[node.name] = node
+                out_scope[id(node)] = scope
+                for dec in node.decorator_list:
+                    # `@pytest.fixture` / `@fixture` / `@pytest.fixture(...)`
+                    d = dec.func if isinstance(dec, ast.Call) else dec
+                    name = (d.attr if isinstance(d, ast.Attribute)
+                            else getattr(d, "id", ""))
+                    if name == "fixture":
+                        out_fixtures.setdefault(scope, set()).add(node.name)
+                # A def nested inside a function keeps its enclosing scope.
+                _collect(node.body, scope, out_funcs, out_fixtures, out_scope)
+            elif isinstance(node, ast.ClassDef):
+                _collect(node.body, node, out_funcs, out_fixtures, out_scope)
+
+    by_scope: dict = {}
+    fx_by_scope: dict = {}
+    scope_of: dict = {}
+    _collect(tree.body, _MODULE, by_scope, fx_by_scope, scope_of)
+
+    def _visible(scope):
+        """Module-level defs plus the methods of the enclosing class."""
+        seen = dict(by_scope.get(_MODULE, {}))
+        if scope is not _MODULE:
+            seen.update(by_scope.get(scope, {}))
+        return seen
+
+    def _visible_fixtures(scope):
+        seen = set(fx_by_scope.get(_MODULE, set()))
+        if scope is not _MODULE:
+            seen |= fx_by_scope.get(scope, set())
+        return seen
 
     # Module-level statements count too: a test can be backed by a constant
     # resolved once at import (`_CORPUS = require_repo("benchmark-data")`).
@@ -185,14 +229,14 @@ def classify_module(path: Path) -> dict:
             module_level |= _calls_in(node)
     module_backed = bool(module_level & _REAL_ACCESSORS)
 
-    def reaches(name: str, seen: Set[str]) -> bool:
+    def reaches(name: str, seen: Set[str], funcs: Dict[str, ast.AST]) -> bool:
         if name in seen or name not in funcs:
             return False
         seen.add(name)
         called = _calls_in(funcs[name])
         if called & _REAL_ACCESSORS:
             return True
-        return any(reaches(c, seen) for c in called if c in funcs)
+        return any(reaches(c, seen, funcs) for c in called if c in funcs)
 
     tests, real, synthetic = [], [], []
     for node in ast.walk(tree):
@@ -201,7 +245,9 @@ def classify_module(path: Path) -> dict:
         if not node.name.startswith("test_"):
             continue
         tests.append(node.name)
-        backed = module_backed or reaches(node.name, set())
+        funcs = _visible(scope_of.get(id(node), _MODULE))
+        fixtures = _visible_fixtures(scope_of.get(id(node), _MODULE))
+        backed = module_backed or reaches(node.name, set(), funcs)
         kind = "helper" if backed else ""
         if not backed and _sweeps_repo_data(node, funcs):
             backed, kind = True, "ad-hoc path"
@@ -211,8 +257,13 @@ def classify_module(path: Path) -> dict:
             # A pytest FIXTURE the test requests by parameter name is part of
             # what drives it. Missing this would misreport every test whose
             # real artefact arrives through a fixture — the idiomatic shape.
-            params = [a.arg for a in node.args.args]
-            backed = any(p in fixtures and reaches(p, set()) for p in params)
+            # `self` / `cls` are the receiver, never a fixture request; a
+            # module that happened to define a `self` fixture would otherwise
+            # back every method in the file (#2116).
+            params = [a.arg for a in node.args.args
+                      if a.arg not in ("self", "cls")]
+            backed = any(p in fixtures and reaches(p, set(), funcs)
+                         for p in params)
             if backed:
                 kind = "fixture"
         (real if backed else synthetic).append(

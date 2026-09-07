@@ -45,6 +45,23 @@ CLI:
   asap7_finfet_lvs.py batch   <gds> --golden-cdl asap7sc7p5t_28_R.cdl [--json out.json]
 Requires the KLayout Python module ('pya', inside vibeic-eda); exits 3 if absent.
 """
+
+# --- sibling-import path (vibe-ic#2104) ------------------------------------
+# `programs/` is a flat directory whose modules import each other by BARE
+# name. Python puts a file's own directory on `sys.path` only when that file
+# is run as `__main__`; under `importlib.util.spec_from_file_location` — how
+# the gates, the wiring audit and much of the suite load a program — it does
+# not, so every bare sibling import below raises ModuleNotFoundError. Measured
+# on the base tree: 454 of the 1385 top-level programs died that way. Restore
+# the condition the file is written for. Idempotent, and the same shape the
+# sibling programs that already carry it use.
+import os as _os                                                    # noqa: E402
+import sys as _sys                                                  # noqa: E402
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# ---------------------------------------------------------------------------
+
 import sys, os, re, json, argparse
 from _atomic_artefact import writing as atomic_writing  # vibe-ic#1082 (helper from PR #1094)
 

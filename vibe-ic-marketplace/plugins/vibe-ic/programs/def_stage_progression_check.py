@@ -50,6 +50,23 @@ Added 2026-04-22 after <benchmark> v0.47 pilot where a subagent copied
 """
 from __future__ import annotations
 
+# --- sibling-import path (vibe-ic#2104) ------------------------------------
+# `programs/` is a flat directory whose modules import each other by BARE
+# name. Python puts a file's own directory on `sys.path` only when that file
+# is run as `__main__`; under `importlib.util.spec_from_file_location` — how
+# the gates, the wiring audit and much of the suite load a program — it does
+# not, so every bare sibling import below raises ModuleNotFoundError. Measured
+# on the base tree: 454 of the 1385 top-level programs died that way. Restore
+# the condition the file is written for. Idempotent, and the same shape the
+# sibling programs that already carry it use.
+import os as _os                                                    # noqa: E402
+import sys as _sys                                                  # noqa: E402
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# ---------------------------------------------------------------------------
+
+
 import argparse
 import hashlib
 import json
@@ -252,6 +269,10 @@ def _count_route_segments(path: Path) -> int:
 # chip-AGNOSTIC: the marker is a structural property of the PnR
 # log, never a chip-class string literal.
 _GLOBAL_ROUTE_LOG_MARKER = "DETAILED_ROUTE_NONFATAL:"
+#: The ONLY file name the implicit marker is read from. The runner writes the
+#: shipping approach's transcript to `<pnr>/openroad.log`; every other `.log`
+#: in that tree belongs to something else (see `_is_global_route_only`).
+_GLOBAL_ROUTE_LOG_NAME = "openroad.log"
 _GLOBAL_ROUTE_JSON_KEY = "mode"
 _GLOBAL_ROUTE_JSON_VAL = "global_only"
 
@@ -311,7 +332,25 @@ def _is_global_route_only(project: Path) -> bool:
     pnr_dir = _pl.pnr_dir(project) if hasattr(_pl, "pnr_dir") else (
         project / "phase3" / "stage3" / "pnr")
     if pnr_dir.is_dir():
-        for log in pnr_dir.rglob("*.log"):
+        # vibe-ic#2116 — the sweep names `openroad.log`, not `*.log`.
+        #
+        # The block above has always DOCUMENTED this as "any openroad.log
+        # under `phase3/stage3/pnr/`", and the code swept every `*.log` in
+        # that tree instead. The difference is not cosmetic: `step_pnr`
+        # retries the route from a bounded ladder and ARCHIVES each
+        # superseded approach's log next to the canonical one (#2108). A
+        # superseded approach that emitted `DETAILED_ROUTE_NONFATAL:` would
+        # therefore demote a `no-routing-geometry` ERROR raised about the
+        # approach that actually SHIPPED down to a warning — the shipped run
+        # vouched for by a run that was thrown away.
+        #
+        # #2108 could only avoid that from the far side, by naming its
+        # archives `openroad.approach<N>.log.txt` so this glob would miss
+        # them. That left the defect intact for any OTHER writer of a `.log`
+        # under the PnR directory. Narrow the sweep to the file the comment
+        # names. `rglob` is kept, so a canonical log in a nested run
+        # directory is still read; only foreign `.log` files stop counting.
+        for log in pnr_dir.rglob(_GLOBAL_ROUTE_LOG_NAME):
             try:
                 with log.open(errors="replace") as f:
                     for line in f:

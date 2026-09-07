@@ -744,6 +744,9 @@ _LANDING_EXECUTION_PREFIX_SHA256 = (
 #   run_repo_tools_pytest       95de055aebcd…            unmoved, untouched
 #   run_unselectable_pytest     aac62e70f0eb…            unmoved, untouched
 #   _SEMANTIC_DRIVER_SHA256     a50922ce5e5c…            unmoved, untouched
+#                               (that was TRUE of the landing above; the
+#                                driver moved later, under #2104 — see the
+#                                re-pin block at `_SEMANTIC_DRIVER_SHA256`)
 #
 # The base column reproduces the six constants that were standing here byte for
 # byte, which is what makes the candidate column a measurement of this edit
@@ -842,8 +845,53 @@ _LANDING_SCRIPT_SHA256 = (
 #
 # Timeouts, the JUnit contract, and the `-p no:cacheprovider` / no-`--timeout`
 # argv shape this file checks are all untouched.
+# RE-PINNED for the sibling-import path guard (vibe-ic#2104). WHAT MOVED IN THE
+# DRIVER: eighteen lines PREPENDED, between the module docstring's closing
+# `"""` and the first `import`, and nothing else — `git diff` against the base
+# is one hunk, 18 insertions, 0 deletions, 0 context lines altered.
+#
+# The lines are the guard every other program in this directory now carries:
+# `programs/` is a flat directory whose modules import each other by BARE name,
+# and Python puts a file's own directory on `sys.path` only when that file runs
+# as `__main__` — not under `importlib.util.spec_from_file_location`, which is
+# how the gates and much of the suite load a program. 470 of 1385 programs
+# raised ModuleNotFoundError on a by-path load; this driver is one of them.
+#
+# WHAT DID NOT MOVE, which is what this pin exists to protect: nothing this
+# file checks. No `pytest` invocation, no argument added or removed, no `rc`
+# decision, no timeout, no stall grace, no `DEFAULT_STALL_AFTER`, no JUnit
+# contract, no supervision. `_run_progress_supervised` — the function the
+# structural half of `_semantic_driver_contract_errors` parses right after
+# this digest — is byte-identical, and the guard executes before any of it at
+# import time and touches only `sys.path`.
+#
+# HOW THAT WAS PROVED rather than asserted: the driver's own five test modules
+# (test_pytest_per_file_junit, test_the_eight_unknowns_have_verdicts,
+# test_recovery_arm_is_not_a_fail_fast_run,
+# test_collect_scan_progress_is_observable,
+# test_domain_progress_scope_guard_scales) plus this file's own
+# test_ci_harness_timeout_ceiling_check, run in the pinned image before and
+# after the re-pin. Before: the only failures attributable to this change were
+# the digest refusals themselves. After: green, with the two reds that are red
+# on pristine main named in the lane's handback rather than absorbed here.
+#
+# A PIN WITH N FACES IS RE-PINNED N TIMES OR NOT AT ALL. Enumerated from this
+# file's own code, not from a diff: six digest constants stand here, and
+# `_SEMANTIC_DRIVER_SHA256` is the ONLY one whose subject is the driver — the
+# other five hash `tools/gatekeeper-land.sh` (whole file, entry-to-anchor
+# execution prefix, and the three lane bodies), which this branch does not
+# touch. The driver's SECOND face is outside this file: its `sha256` row in
+# `tools/ci/protected_landing_transition.json`, re-authored from disk by the
+# PREPARE half of the protected-landing ceremony. Both faces moved together.
+#
+#   whole file (gatekeeper-land.sh)     254734ed2710…   unmoved, untouched
+#   execution prefix                    08be699b4bf9…   unmoved, untouched
+#   run_pytest                          3b3b685c4841…   unmoved, untouched
+#   run_repo_tools_pytest               95de055aebcd…   unmoved, untouched
+#   run_unselectable_pytest             aac62e70f0eb…   unmoved, untouched
+#   _SEMANTIC_DRIVER_SHA256   a50922ce5e5c… -> 1912a288b458…      MOVED
 _SEMANTIC_DRIVER_SHA256 = (
-    "a50922ce5e5c78985050eeeef5ca06ad3e24d918729cbba7bff574de12d285a3"
+    "1912a288b458a164d577d63a8ab921b3d28ef86d894f33dcefb1840930941cab"
 )
 #: `pip install pytest-timeout` names the plugin, not a bound; it carries no
 #: `--timeout=N` and so cannot match, but the negative is stated because a
