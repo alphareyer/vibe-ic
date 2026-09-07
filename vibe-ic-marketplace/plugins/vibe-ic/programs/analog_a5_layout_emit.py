@@ -123,7 +123,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -679,13 +679,49 @@ _MOS_LETTERS = ("D", "G", "S", "B")
 _ORDINAL_TERMINAL_RE = re.compile(r"\d$")
 
 
-def ring_layer_of(cell: dict) -> Optional[str]:
-    """The layer the device's guard ring is drawn on, or None.
+def _extent(rects: Sequence[Tuple[int, int, int, int]]
+            ) -> Tuple[int, int, int, int]:
+    """The bounding box of a set of rectangles."""
+    return (min(r[0] for r in rects), min(r[1] for r in rects),
+            max(r[2] for r in rects), max(r[3] for r in rects))
 
-    A guard ring is the layer whose rectangles enclose the device: it spans
-    (almost) the whole cell in BOTH axes and is drawn as several bars rather
-    than one. Read from the gencell's own output, so this file never names a
-    ring layer of any PDK."""
+
+def body_contact_layers(cell: dict) -> List[str]:
+    """Every section of this gencell child that the PDK's OWN layer map
+    declares to be a BODY connection, sorted.
+
+    A body connection is a CONTACT — the technology file's `contact` section
+    gives it two residues — at least one of whose residues sits on a plane
+    that carries no routing level: diffusion, a well, a device plate. That is
+    `LayerIdentity.device_electrode_contact`, and it is the technology file's
+    answer rather than a name this program recognises. Measured on the three
+    open PDKs in the pinned image, straight from each one's own `.tech`, with
+    no name pattern anywhere: ihp-sg13g2 selects 20 of 26 declared contact
+    types and declines its 6 vias; gf180mcuD 22 of 27; sky130A 24 of 28. The
+    families disagree about the borderline cases — gf180mcuD calls its MiM
+    contact metal-to-metal and ihp-sg13g2 does not — which is exactly the
+    point: each PDK's file answers for itself.
+
+    Empty when the cell carries no layer table, which is `ring_layer_of`'s
+    signal to fall back to the geometry-only rule (see there)."""
+    layers = cell.get("layers")
+    if layers is None:
+        return []
+    return sorted(ly for ly in cell["sections"]
+                  if layers.knows(ly) and layers.device_electrode_contact(ly))
+
+
+def _ring_by_cell_coverage(cell: dict) -> Optional[str]:
+    """The ORIGINAL rule, unchanged, kept for a cell with no layer table.
+
+    It asks one geometric question of every section — does this layer's
+    extent cover >= 90% of the CELL bounding box in both axes while filling
+    only a fraction of its area? — and it is right about a bare ring and
+    wrong about a ring inside a wider well (vibe-ic#2056 item 3). It is
+    UNREACHABLE FROM THE PRODUCER, which always has the table (`read_pdk`
+    refuses ENV_UNAVAILABLE without it), and exists so that `parse_cell`
+    stays a pure function of one `.mag`: the same arrangement `parse_cell`
+    already makes for metal levels."""
     bx1, by1, bx2, by2 = cell["bbox"]
     span_x, span_y = bx2 - bx1, by2 - by1
     if span_x <= 0 or span_y <= 0:
@@ -700,12 +736,89 @@ def ring_layer_of(cell: dict) -> Optional[str]:
         cover_y = (max(ys) - min(ys)) / span_y
         if cover_x >= 0.9 and cover_y >= 0.9:
             area = sum((r[2] - r[0]) * (r[3] - r[1]) for r in rects)
-            # the ring is the ENCLOSING frame, so it covers the cell extent
-            # while filling only a fraction of the cell area
             if area < 0.5 * span_x * span_y and (best is None
                                                  or area < best[1]):
                 best = (layer, area)
     return best[0] if best else None
+
+
+def ring_layer_of(cell: dict) -> Optional[str]:
+    """The layer the device's guard ring is drawn on, or None.
+
+    TWO QUESTIONS, AND ONLY ONE OF THEM IS GEOMETRY.
+
+      1. WHICH LAYERS COULD BE A RING — the PDK's answer, through
+         `body_contact_layers`: a ring is a body connection, so it is drawn
+         on a contact type whose residues reach a non-routing plane.
+      2. WHICH OF THOSE IS THE RING — geometry, asked only of that short
+         list, and a different question from the one below: a ring is drawn
+         as several BARS (>= 3 rectangles) that fill only a fraction of their
+         own extent, and it ENCLOSES the cell's other body contacts, because
+         that is what a guard ring is for.
+
+    THE DEFECT THIS REPLACES, measured (vibe-ic#2129, the ROOT of #2056
+    item 3). The old rule is `_ring_by_cell_coverage` above: it asked one
+    geometric question of every section — does this layer cover >= 90% of the
+    CELL bounding box in both axes? — and on this PDK's own gencell children
+    the answer is no for the ring and yes for nothing, because the WELL
+    rectangle the ring sits in is WIDER than the ring. It returned None on
+    34 of 34 children across u_hawaii_adc's two analog blocks (8 in `ldo`,
+    26 in `delta_sigma`; ihp-sg13g2, image sha256:1463dac58116, lambda
+    100/um), so `build_plan`'s bulk-tap block never entered on ANY device and
+    `choose_tap`, the tap-clearance floor and `bulk_tap_row_separation_lambda`
+    were unreachable code on real silicon.
+
+    The ring's coverage of the CELL was never the property that identifies
+    it; the numbers say so. On `sg13_lv_nmos w=2 l=0.5` the substrate ring
+    covers 0.730 x 0.815 of the cell — under the old 0.9 in both axes — while
+    it covers 1.000 x 1.000 of the drain, source and gate contacts it
+    encloses. ENCLOSURE OF THE OTHER BODY CONTACTS is the property, and it is
+    scale-free: the well can be as wide as it likes.
+
+    NOT A LABEL. The attempt refused at 8353c69a2 anchored the ring on the
+    layer the bulk LABEL sits on; it ran the search and added 240 bulk-tap
+    shortfalls the sign-off deck then contradicted, because a label is a name
+    the gencell chose and not a statement about what the geometry IS. Nothing
+    here reads a label. Measured through the general A1..A9 flow with this
+    resolver in place: 560 rules graded, 0 violations, on BOTH blocks.
+
+    NO PDK IS NAMED. Every input is either the technology file's own
+    types/contact table or the gencell's own rectangles.
+
+    Returns None when the child carries no such frame. A device with no body
+    connection at all — this PDK's MiM capacitor draws one body contact as
+    one solid rectangle — is a legitimate None, and `build_plan` records the
+    difference between "no ring" and "not searched" rather than reporting
+    either as silence."""
+    cands = body_contact_layers(cell)
+    if not cands:
+        # No table (or a table that declares none of these types): the cell
+        # is not a PDK gencell child this program probed, and the old
+        # geometry-only rule is the only honest answer available.
+        return _ring_by_cell_coverage(cell)
+    frames: List[Tuple[str, int]] = []
+    for layer in cands:
+        rects = cell["sections"].get(layer) or []
+        if len(rects) < 3:
+            continue                       # a ring is drawn as bars
+        ex = _extent(rects)
+        span = (ex[2] - ex[0]) * (ex[3] - ex[1])
+        if span <= 0:
+            continue
+        area = sum((r[2] - r[0]) * (r[3] - r[1]) for r in rects)
+        if area >= 0.5 * span:
+            continue                       # a frame is hollow, not a plate
+        others = [_extent(cell["sections"][o]) for o in cands
+                  if o != layer and cell["sections"].get(o)]
+        if not all(ex[0] <= o[0] and ex[1] <= o[1]
+                   and ex[2] >= o[2] and ex[3] >= o[3] for o in others):
+            continue                       # it does not enclose them
+        frames.append((layer, area))
+    if not frames:
+        return None
+    # Two frames can only both enclose each other with identical extents;
+    # take the smaller-area one so the answer is a function of the bytes.
+    return min(frames, key=lambda t: (t[1], t[0]))[0]
 
 
 def terminal_map(dev: dict, cell: dict
@@ -1053,6 +1166,13 @@ class Plan:
         self.bulk_tap_considered = 0
         self.bulk_tap_examined = 0
         self.bulk_tap_unexamined: List[dict] = []
+        # MEMBERSHIP, added with the resolver that made the search run at
+        # all (vibe-ic#2129). A count says how many; only a NAME lets a
+        # reader check that every shortfall the record publishes came from a
+        # device the search actually entered. Without it "177 shortfalls"
+        # and "177 shortfalls of a search that never ran" are the same line.
+        self.bulk_tap_searched: List[str] = []          # device names
+        self.bulk_tap_ring_layer: Dict[str, str] = {}   # device -> layer
 
     def paint(self, net: str, layer: str, x1: int, y1: int, x2: int, y2: int
               ) -> None:
@@ -1591,10 +1711,22 @@ def build_plan(devs: Sequence[dict], ports: Sequence[str],
         plan.bulk_tap_considered += 1
         if ring_labels:
             plan.bulk_tap_examined += 1
+            plan.bulk_tap_searched.append(dev.get("name"))
+            plan.bulk_tap_ring_layer[dev.get("name")] = ring or ""
         else:
+            # TAPPABLE separates the two zeroes. A device whose gencell child
+            # draws two or more of the body-contact types the technology file
+            # declares has a body connection distinct from its own signal
+            # contacts, so a ring it does not have is a MISS. One that draws
+            # fewer has nothing to tap, and its zero is a property of the
+            # device. Measured on u_hawaii_adc: every MOS draws 3, every
+            # resistor 2, every MiM capacitor 1.
+            cands = body_contact_layers(cell)
             plan.bulk_tap_unexamined.append({
                 "device": dev.get("name"), "model": dev.get("model"),
                 "ring_layer": ring,
+                "body_contact_layers": cands,
+                "tappable": len(cands) >= 2,
                 "reason": ("ring_layer_of identifies no guard-ring layer in "
                            "this gencell's output" if ring is None else
                            f"the gencell emits no terminal label on the "
@@ -2322,6 +2454,15 @@ def emit_block(project: Path, block: str, stage: Stage, magicrc: str,
     # actually examined. An empty `deviations` with `examined == 0` is a
     # check that did not run, and the two must not read the same.
     report["bulk_tap"] = bulk_tap_denominator(plan)
+    why_refused = bulk_tap_refusal(report["bulk_tap"])
+    if why_refused:
+        # The layout has been written by now; the record says the search that
+        # was supposed to grade its bulk taps entered no device, so the exit
+        # code says the same rather than leaving an empty shortfall list to
+        # be read as a clean one (vibe-ic#2129).
+        report["result"] = BULK_TAP_VACUOUS
+        report["reason"] = why_refused
+        return RC_REFUSED, report
     report["layout_mag"] = str(bdir / "layout.mag")
     report["layout_gds"] = str(bdir / f"{block}.gds") if ok_gds else None
 
@@ -2395,12 +2536,65 @@ def bulk_tap_denominator(plan: "Plan") -> dict:
                 f"check were NOT EVALUATED — which is not the same as met. "
                 f"Reason(s) given by the devices themselves: "
                 + "; ".join(why))
+    searched = list(getattr(plan, "bulk_tap_searched", []))
+    quantities = ("bulk_tap_clearance_lambda",
+                  "bulk_tap_row_separation_lambda")
+    shortfall = sorted({d.get("device") for d in getattr(plan, "deviations", ())
+                        if d.get("quantity") in quantities})
+    details: Dict[str, Any] = {
+        # MEMBERSHIP (vibe-ic#2129): the population by name, so the shortfall
+        # list is CHECKABLE as a subset of it rather than compared by count.
+        "searched": searched,
+        "ring_layer": dict(getattr(plan, "bulk_tap_ring_layer", {})),
+        "shortfall_devices": shortfall,
+        "shortfall_quantities": list(quantities),
+        "tappable_not_searched": [r.get("device") for r in unexamined
+                                  if r.get("tappable")],
+        "not_tappable": [r.get("device") for r in unexamined
+                         if not r.get("tappable")],
+        "membership_note": (
+            "`shortfall_devices` is a SUBSET of `searched` by construction; "
+            "a name here that is not in `searched` would be a shortfall of a "
+            "search that never ran"),
+    }
+    if unexamined:
+        details["unexamined"] = unexamined
     return _den.Denominator(
         unit="routed devices whose guard ring the bulk-tap search could enter",
         examined=examined, considered=considered,
         not_applicable_reason=reason,
-        details={"unexamined": unexamined} if unexamined else {},
+        details=details,
     ).as_dict()
+
+
+#: The result A5 reports when the bulk-tap search examined nothing while a
+#: device the PDK says HAS a body connection went unsearched.
+BULK_TAP_VACUOUS = "BULK_TAP_SEARCH_EXAMINED_NOTHING"
+
+
+def bulk_tap_refusal(bulk_tap: dict) -> str:
+    """The reason A5 refuses this bulk-tap disclosure, or "" to accept it.
+
+    THE ONE PLACE THE DISCLOSURE BECOMES A VERDICT, and only in the direction
+    #2129 asks for. `bulk_tap_denominator` above is bookkeeping and stays
+    that way: it moves no exit code on its own, which is what
+    `test_the_disclosure_changes_no_verdict` holds. What moves here is
+    narrower — a search that examined NOTHING while the PDK says at least one
+    device HAS a body connection is the #2129 defect reproducing, and a run
+    that writes a layout and exits 0 on it publishes an empty shortfall list
+    that reads as a clean bulk-tap result. That is the shape this issue
+    exists to make impossible.
+
+    THE CONTROL is the other zero, and it is not refused: a block whose every
+    device carries no body connection at all — a capacitor bank — examines
+    nothing for a reason that is a property of the devices. It says so in the
+    same record. Without that split the refusal would fire on every such
+    block and could not be trusted anywhere."""
+    if int(bulk_tap.get("examined", 0)) != 0:
+        return ""
+    if bulk_tap.get("details", {}).get("tappable_not_searched"):
+        return str(bulk_tap.get("not_applicable_reason", ""))
+    return ""
 
 
 #: The deviation quantity `clearance_deviations` writes for a drawn short.

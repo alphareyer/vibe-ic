@@ -484,10 +484,27 @@ def _map(child, nets, cls):
 
 
 def test_i_the_ring_layer_is_not_found_on_the_pdks_own_resistor():
-    """The premise the old rule rested on, measured: `ring_layer_of` answers
-    NONE here. The ring is real and four bars wide; it fails the "encloses
-    the cell" test because the WELL rectangle it sits in is wider than it."""
+    """`ring_layer_of` answers NONE here, and since vibe-ic#2129 it answers
+    it for a REASON THIS FIXTURE STATES rather than by a geometric accident.
+
+    The ring in `RES_CHILD` is real and four bars wide. The rule that used to
+    reject it — "does this layer cover 90% of the CELL bounding box?" — was
+    rejecting it because the WELL rectangle it sits in is wider than it is,
+    which is a property of every gencell child of every PDK and is why the
+    bulk-tap search never ran on real silicon (#2129).
+
+    The resolver now asks the technology file which drawn types could be a
+    body connection AT ALL before geometry gets a say, and `TECH` above
+    declares only metals, a via and a cap plate — no diffusion, no contact to
+    one. So there is no candidate here, and the answer is None because
+    nothing in the table says otherwise. That is the resolver declining to
+    guess from a layer NAME, which is the arm this file now contributes; a
+    fixture whose table DOES declare the diffusion contacts resolves the ring
+    (`test_issue2129_bulk_tap_ring_resolver.py`)."""
     cell = A5E.parse_cell(RES_CHILD, _table())
+    assert A5E.body_contact_layers(cell) == [], (
+        "this file's TECH declares no contact to a non-routing plane, so the "
+        "PDK offers no candidate and the None below is that, not geometry")
     assert A5E.ring_layer_of(cell) is None
     assert [l["name"] for l in cell["labels"]] == ["B", "R1", "R2"], (
         "and the gencell lists the substrate tap FIRST, which is not the "
