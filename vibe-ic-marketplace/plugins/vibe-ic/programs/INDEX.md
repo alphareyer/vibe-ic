@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1290
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1290)
+- **Total programs (excluding helpers / shims):** 1291
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1291)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1281 |
+| `any` | 1282 |
 
 ## Alphabetical listing
 
@@ -677,6 +677,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `lec_gate_netlist_select` | any | — | Truthful diagnosis of a structural LEC abort. |
 | `lec_post_layout_check` | any | — | POST-LAYOUT logic-equivalence gate. |
 | `lec_run` | any | — | Step 13 LEC PRODUCER (RTL ≡ synthesized gate netlist). |
+| `legacy_external_reference_debt` | any | — | decide, record and MEASURE the legacy external-reference debt that #2158's blocking gate made visible (#2165). |
 | `lesson_consumption_check` | any | — | staged != CONSUMED, enforced by a program. |
 | `lessons_corpus_consistency_check` | any | — | ORGANIC #741 |
 | `level_hysteresis_flag_oracle_check` | any | — | prompt-derived oracle for the thermometer-level-controller class with a history-dependent (hysteresis) flag. |
@@ -1362,7 +1363,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1281 programs)
+### `any` (1282 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2010,6 +2011,7 @@ _(no programs in this group)_
 - `lec_gate_netlist_select` — Truthful diagnosis of a structural LEC abort.
 - `lec_post_layout_check` — POST-LAYOUT logic-equivalence gate.
 - `lec_run` — Step 13 LEC PRODUCER (RTL ≡ synthesized gate netlist).
+- `legacy_external_reference_debt` — decide, record and MEASURE the legacy external-reference debt that #2158's blocking gate made visible (#2165).
 - `lesson_consumption_check` — staged != CONSUMED, enforced by a program.
 - `lessons_corpus_consistency_check` — ORGANIC #741
 - `level_hysteresis_flag_oracle_check` — prompt-derived oracle for the thermometer-level-controller class with a history-dependent (hysteresis) flag.
