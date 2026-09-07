@@ -84,7 +84,11 @@ def test_the_census_line_names_the_second_population(capsys):
     assert C.main(["--db", str(_DB)]) == 0
     out = capsys.readouterr().out
     assert "profile_text_fields=" in out
-    n = int(out.split("profile_text_fields=")[1].split(")")[0])
+    # Parsed as a FIELD, not as the tail of the line: this figure was the last
+    # thing on the census line when it was written, and #2164 added two more
+    # after it. A test that reads "everything up to the closing bracket" pins
+    # the field's POSITION, which is not what it is about.
+    n = int(out.split("profile_text_fields=")[1].split()[0].rstrip(")"))
     assert n == C.check(_DB)["profile_text_fields"] and n > 0
 
 

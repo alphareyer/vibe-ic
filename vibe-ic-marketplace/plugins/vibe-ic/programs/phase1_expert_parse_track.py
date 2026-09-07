@@ -316,6 +316,12 @@ RULE_AI_WITHDRAWN = "EXPERT_TRACK_AI_EXPECTATION_WITHDRAWN"
 # marker that says only that something was deleted.
 RULE_AI_WITHDRAWN_NO_REASON = "EXPERT_TRACK_AI_EXPECTATION_WITHDRAWN_WITHOUT_REASON"
 
+#: #2164. The retrieval query was built from a design input this reader could
+#: not open. About the TRACK, never about the design: a pack assembled from
+#: nothing says nothing about the chip, and the number derived from it is not a
+#: measurement of the expert DB's coverage.
+RULE_INPUT_NOT_READABLE = "EXPERT_TRACK_DESIGN_INPUT_NOT_READABLE"
+
 # ── the AI sub-track's status vocabulary ────────────────────────────────────
 #
 # FIVE tokens, not three, because the three collapsed two pairs of genuinely
@@ -473,31 +479,154 @@ def expert_db_lesson(ic_class: str,
     return None
 
 
+#: `input_text_report` status codes (#2164). FIVE states, and the reason there
+#: are five is that four of them used to be spelled as the same empty string.
+#: "I could not read it" and "I read it and it was empty" are different facts,
+#: and a retrieval query built from the first is not a measurement of anything.
+INPUT_READ = "READ"                       #: at least one character was read
+INPUT_NO_TREE = "NO_INPUT_TREE"           #: <project>/input does not exist
+INPUT_NO_FILES = "NO_FILES_AT_ALL"        #: the tree exists and holds no files
+INPUT_UNREADABLE_FORMAT = "UNREADABLE_FORMAT"   #: files, none in a read format
+INPUT_READ_AND_EMPTY = "READ_AND_EMPTY"   #: readable files, all of them empty
+
+#: why a file under `input/` contributed nothing.
+SKIP_UNSUPPORTED_FORMAT = "UNSUPPORTED_FORMAT"
+SKIP_ORACLE_PATH = "ORACLE_PATH"          #: deliberate §4.05 exclusion
+SKIP_UNREADABLE = "UNREADABLE"            #: the file exists and would not open
+
+
+def input_text_report(project: Path) -> Dict[str, Any]:
+    """The design-input prose AND an account of what was left out.
+
+    THE DEFECT THIS CLOSES, MEASURED (#2164). `input_text` returned a string
+    and nothing else, so a project whose entire design input is a PDF returned
+    `""` — indistinguishable from a project with no input at all, and from one
+    whose files are genuinely empty. That empty string was then handed to
+    `ic_expert_db_query.query` as a retrieval QUERY and to the AI sub-track as
+    a PROMPT, and every consumer read the result as a measurement. Measured on
+    the published corpus: TWELVE projects across five registered classes are in
+    that state today, and one of them is a design of a class whose expert-pack
+    profile was landed on a population that counted it.
+
+    Returns the text (identical to what `input_text` returns) plus `status`,
+    the files that were READ, the files that were SKIPPED with the reason and
+    the size of each, and the unsupported suffixes with their counts. The
+    account is what makes a zero legible: a caller can say WHICH formats it
+    could not read instead of reporting an empty query as an empty design.
+    INPUT only (§4.05) — the oracle exclusion is itself recorded, as a
+    deliberate skip rather than as a failure."""
+    parts: List[str] = []
+    read: List[str] = []
+    skipped: List[Dict[str, Any]] = []
+    total = 0
+    truncated = False
+    root = project / "input"
+    if not root.is_dir():
+        return {"text": "", "chars": 0, "status": INPUT_NO_TREE,
+                "files_read": [], "files_skipped": [],
+                "unsupported_suffixes": {}, "truncated": False,
+                "input_root": str(root)}
+    n_files = 0
+    for q in sorted(root.rglob("*")):
+        if not q.is_file():
+            continue
+        n_files += 1
+        try:
+            rel = q.relative_to(root)
+        except ValueError:
+            continue
+        try:
+            size = q.stat().st_size
+        except OSError:
+            size = None
+        if _nps._is_oracle_parts(rel.parts):
+            skipped.append({"path": str(rel), "suffix": q.suffix.lower(),
+                            "bytes": size, "reason": SKIP_ORACLE_PATH})
+            continue
+        if q.suffix.lower() not in _INPUT_TEXT_EXTS:
+            skipped.append({"path": str(rel), "suffix": q.suffix.lower(),
+                            "bytes": size, "reason": SKIP_UNSUPPORTED_FORMAT})
+            continue
+        try:
+            t = q.read_text(errors="replace")
+        except OSError:
+            skipped.append({"path": str(rel), "suffix": q.suffix.lower(),
+                            "bytes": size, "reason": SKIP_UNREADABLE})
+            continue
+        read.append(str(rel))
+        parts.append(t)
+        total += len(t)
+        if total >= _INPUT_TEXT_CAP:
+            truncated = True
+            break
+    text = "\n".join(parts)[:_INPUT_TEXT_CAP]
+    unsupported: Dict[str, int] = {}
+    for sk in skipped:
+        if sk["reason"] == SKIP_UNSUPPORTED_FORMAT:
+            unsupported[sk["suffix"] or "<none>"] = \
+                unsupported.get(sk["suffix"] or "<none>", 0) + 1
+    if text:
+        status = INPUT_READ
+    elif n_files == 0:
+        status = INPUT_NO_FILES
+    elif read:
+        # Files WERE opened and read; they simply had no characters. This is
+        # the only empty that is a fact about the design rather than about the
+        # reader, and it is the one that must not be lumped in with the others.
+        status = INPUT_READ_AND_EMPTY
+    else:
+        status = INPUT_UNREADABLE_FORMAT
+    return {"text": text, "chars": len(text), "status": status,
+            "files_read": read, "files_skipped": skipped,
+            "unsupported_suffixes": unsupported, "truncated": truncated,
+            "input_root": str(root)}
+
+
 def input_text(project: Path) -> str:
     """Concatenated design-input prose — the retrieval query and the AI
-    sub-track's prompt. INPUT only (§4.05)."""
-    parts: List[str] = []
-    total = 0
-    root = project / "input"
-    if root.is_dir():
-        for p in sorted(root.rglob("*")):
-            if not p.is_file() or p.suffix.lower() not in _INPUT_TEXT_EXTS:
-                continue
-            try:
-                rel = p.relative_to(root)
-            except ValueError:
-                continue
-            if _nps._is_oracle_parts(rel.parts):
-                continue
-            try:
-                t = p.read_text(errors="replace")
-            except OSError:
-                continue
-            parts.append(t)
-            total += len(t)
-            if total >= _INPUT_TEXT_CAP:
-                break
-    return "\n".join(parts)[:_INPUT_TEXT_CAP]
+    sub-track's prompt. INPUT only (§4.05).
+
+    Kept as-is for every caller that only wants the text; it is
+    `input_text_report(project)["text"]` and nothing else. A caller that has to
+    tell an unreadable input from an empty one — which is every caller that
+    reports a number derived from it — uses the report."""
+    return input_text_report(project)["text"]
+
+
+def input_readability_disposition(report: Dict[str, Any]) -> Dict[str, Any]:
+    """What a CONSUMER must record about the query it was given.
+
+    Three answers, and they are not interchangeable. `MEASURED` — there was
+    text and the retrieval ran on it. `NOT_MEASURED` — there was no text, and
+    the reason names the formats that were skipped, so a reader learns "the
+    spec is a PDF this reader cannot open" rather than "the expert DB offered
+    nothing". `MEASURED_EMPTY` — files were read and were genuinely empty,
+    which IS a fact about the design and is the only zero that may be reported
+    as one."""
+    st = report.get("status")
+    if st == INPUT_READ:
+        return {"retrieval_input": "MEASURED", "chars": report.get("chars", 0)}
+    if st == INPUT_READ_AND_EMPTY:
+        return {"retrieval_input": "MEASURED_EMPTY", "chars": 0,
+                "reason": ("every readable design-input file was opened and "
+                           "contained no characters — an empty design input, "
+                           "not an unreadable one")}
+    unsup = report.get("unsupported_suffixes") or {}
+    if st == INPUT_UNREADABLE_FORMAT:
+        listed = ", ".join(f"{k} x{v}" for k, v in sorted(unsup.items())) or "none"
+        why = (f"the design input holds {len(report.get('files_skipped') or [])} "
+               f"file(s), NONE of them in a format this reader opens "
+               f"({listed}); readable formats are "
+               f"{', '.join(_INPUT_TEXT_EXTS)}")
+    elif st == INPUT_NO_TREE:
+        why = (f"there is no design-input tree at "
+               f"{report.get('input_root')} to read")
+    else:
+        why = (f"the design-input tree at {report.get('input_root')} holds no "
+               f"files at all")
+    return {"retrieval_input": "NOT_MEASURED", "chars": 0, "reason": why,
+            "unsupported_suffixes": unsup,
+            "readable_formats": list(_INPUT_TEXT_EXTS)}
 
 
 #: `registered_ic_class_disposition` reason codes. See its docstring: these
@@ -1336,7 +1465,12 @@ def ai_subtrack(project: Path, prompt: str, out_dir: Path,
 # ── evaluate ────────────────────────────────────────────────────────────────
 
 def evaluate(project: Path) -> Dict[str, Any]:
-    prompt = input_text(project)
+    # THE REPORT, not just the string (#2164): every number below that is
+    # derived from the design input has to be able to say whether the input was
+    # readable, and a bare `""` cannot.
+    input_report = input_text_report(project)
+    prompt = input_report["text"]
+    readability = input_readability_disposition(input_report)
     out_dir = _pl.report_path(project, "phase1/expert_parse_track").parent \
         / "expert_parse_track_pack"
 
@@ -1347,6 +1481,24 @@ def evaluate(project: Path) -> Dict[str, Any]:
                      class_availability=availability)
 
     findings: List[Dict[str, Any]] = []
+    # #2164, FIRST, because everything after it is derived from the query this
+    # names. Reported rather than raised: the deterministic half of the track
+    # reads the L documents and is unaffected, so the run is not void — but the
+    # AI half's pack was assembled from nothing and no reader may credit it.
+    if readability["retrieval_input"] == "NOT_MEASURED":
+        findings.append({
+            "severity": "REVIEW",
+            "about": "track",
+            "rule": RULE_INPUT_NOT_READABLE,
+            "message": (
+                f"The expert retrieval query is 0 characters because "
+                f"{readability['reason']}. Everything downstream of it — the "
+                f"retrieved expert classes, the phrase ranking inside the "
+                f"class-first selection, and the prompt the AI sub-track was "
+                f"handed — is NOT_MEASURED, not measured-as-empty. This is "
+                f"about the READER, not about the design: the design input is "
+                f"there and this track cannot open it."),
+        })
     for r in rules:
         for e in r["expectations"]:
             if e["met"]:
@@ -1650,6 +1802,17 @@ def evaluate(project: Path) -> Dict[str, Any]:
             "exit_code": AWAITING_EXIT_CODE,
         } if awaiting else None),
         "retrieved_expert_classes": retrieved_classes(prompt, ic_class=ic_class),
+        # #2164. WHETHER that list is a measurement. An empty list from an
+        # empty query and an empty list from a query that found nothing are the
+        # same JSON and opposite facts; the status is what separates them, and
+        # the reason names the formats this reader could not open.
+        "retrieval_input": {
+            **readability,
+            "status": input_report["status"],
+            "files_read": len(input_report["files_read"]),
+            "files_skipped": input_report["files_skipped"],
+            "truncated": input_report["truncated"],
+        },
         # WHICH classes the expert DB was allowed to offer, and why. Without
         # this a reader sees a list of db_classes with no way to tell whether
         # the design's own class chose them or a phrase collided.
@@ -1740,6 +1903,8 @@ def evaluate(project: Path) -> Dict[str, Any]:
             "ai_patch_sidecar_path": str(sidecar),
             "ai_patch_sidecar_present": sidecar.is_file(),
             "input_text_chars": len(prompt),
+            # A zero here means one of five things and the status says which.
+            "input_text_status": input_report["status"],
         },
     }
 
@@ -1748,12 +1913,29 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("project_dir", type=Path)
     ap.add_argument("--json", default=None)
+    ap.add_argument("--input-readability", action="store_true",
+                    help="print ONLY whether this project's design input can "
+                         "be read, and what was skipped — the census a "
+                         "corpus-wide loop needs (#2164). Exit 0 either way: "
+                         "an unreadable input is a fact to report, not a run "
+                         "that failed.")
     args = ap.parse_args(argv)
     if not args.project_dir.is_dir():
         print(f"ERROR: not a directory: {args.project_dir}", file=sys.stderr)
         return 1
 
     project = args.project_dir.resolve()
+    if args.input_readability:
+        rep = input_text_report(project)
+        disp = input_readability_disposition(rep)
+        print(f"{disp['retrieval_input']}\t{rep['status']}\t"
+              f"chars={rep['chars']}\tread={len(rep['files_read'])}\t"
+              f"skipped={len(rep['files_skipped'])}\t"
+              f"unsupported={json.dumps(rep['unsupported_suffixes'], sort_keys=True)}"
+              f"\t{project}")
+        if disp["retrieval_input"] == "NOT_MEASURED":
+            print(f"  reason: {disp['reason']}")
+        return 0
     try:
         rep = evaluate(project)
     except Exception as exc:  # noqa: BLE001

@@ -142,13 +142,20 @@ def test_mutation_reverting_the_profile_brings_the_out_of_class_pack_back(tmp_pa
 
 def test_the_class_decides_membership_not_the_phrase():
     """Every in-class entry is offered even when the brief never uses its
-    words — membership is the CLASS's decision. `load-store-unit` is the one
-    that falls off the k=5 ranking on this brief, which is exactly why it is the
-    one worth asserting at k=99."""
+    words — membership is the CLASS's decision.
+
+    The second assertion USED to be `"load-store-unit" not in` the k=5 pack,
+    and it was true: under the old allocator the ranking deduped per LESSON, so
+    `processor-cpu-core`'s two lessons and `alu-datapath`'s two took four of the
+    five slots and the load/store entry fell off. That was a fact about the
+    BUDGET, not about membership, and #2164 changed the budget — the k slots
+    are ENTRY slots now, so this class's four selected entries all fit. The
+    assertion is re-taken as what is now true, which is also the stronger
+    statement: the pack the author reads IS the class's whole selection."""
     allowed = set(_profile()["db_classes"])
     assert {h["ic_class"] for h in Q.query("a design.", k=99, ic_class=_CLASS)} == allowed
-    assert "load-store-unit" not in {h["ic_class"] for h in
-                                     Q.query(_CPU_PROMPT, k=5, ic_class=_CLASS)}
+    assert {h["ic_class"] for h in
+            Q.query(_CPU_PROMPT, k=5, ic_class=_CLASS)} == allowed
 
 
 def test_related_graph_cannot_reopen_this_class_boundary():

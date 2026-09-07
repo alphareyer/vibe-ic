@@ -111,6 +111,37 @@ def is_registered_class(ic_class, db_path=None) -> bool:
     return isinstance(prof, dict) and ic_class in prof
 
 
+def rank_lessons(prompt: str, entries, keep_zero_scores: bool = False):
+    """Every candidate lesson scored against `prompt`, best first.
+
+    Split out of `query` (#2164) so the SLOT ALLOCATOR below and any control
+    that has to reproduce a previous allocator consume the SAME ranking. A
+    control that re-typed this scorer would agree today and drift the first
+    time a weight moves, and the drift would show up as the control quietly
+    ceasing to reproduce the behaviour it exists to reproduce.
+
+    `keep_zero_scores` is the class-first rule, not a tuning knob: outside
+    class-first a zero score means "the phrase never reached this entry" and
+    dropping it is the tuned behaviour, while INSIDE class-first the entry was
+    selected by the CLASS, so a zero means only "the prompt did not happen to
+    use these words" — a ranking fact, not a membership one, and dropping it
+    would let the phrase decide membership again through the back door."""
+    q_fn, q_kw = _fn(prompt), _kw(prompt)
+    ranked = []
+    for e in entries:
+        cls = e.get("ic_class", "")
+        c_fn = _fn(cls)
+        for les in e.get("lessons", []):
+            l_fn = _fn(cls + " " + les)
+            fn_ov = len(q_fn & l_fn)
+            kw_ov = len(q_kw & _kw(les))
+            score = 12.0 * len(q_fn & c_fn) + 4.0 * fn_ov + 0.5 * kw_ov
+            if score > 0 or keep_zero_scores:
+                ranked.append((score, cls, les))
+    ranked.sort(key=lambda x: -x[0])
+    return ranked
+
+
 def query(prompt: str, k: int = 5, db_path=None,
           expand_related: bool = False, ic_class=None):
     """Retrieve the top-k relevant lessons for `prompt`.
@@ -154,34 +185,42 @@ def query(prompt: str, k: int = 5, db_path=None,
                     f"registered_class_profiles[{ic_class!r}].db_classes names "
                     f"{missing}, which entries[] does not carry")
             entries = [e for e in entries if e.get("ic_class") in allowed]
-    q_fn, q_kw = _fn(prompt), _kw(prompt)
-    ranked = []
-    for e in entries:
-        cls = e.get("ic_class", "")
-        c_fn = _fn(cls)
-        for les in e.get("lessons", []):
-            l_fn = _fn(cls + " " + les)
-            fn_ov = len(q_fn & l_fn)
-            kw_ov = len(q_kw & _kw(les))
-            score = 12.0 * len(q_fn & c_fn) + 4.0 * fn_ov + 0.5 * kw_ov
-            # Outside class-first, a zero score means "the phrase never reached
-            # this entry" and dropping it is the tuned behaviour. INSIDE
-            # class-first the entry was selected by the CLASS, so a zero score
-            # means only "the prompt did not happen to use these words" — that
-            # is a ranking fact, not a membership one, and dropping it would let
-            # the phrase decide membership again through the back door.
-            if score > 0 or profile:
-                ranked.append((score, cls, les))
-    ranked.sort(key=lambda x: -x[0])
-    # dedup identical lessons, keep top-k
-    out, seen = [], set()
-    for s, cls, les in ranked:
-        if les in seen:
+    ranked = rank_lessons(prompt, entries, keep_zero_scores=bool(profile))
+    # ── the k slots are ENTRY slots (#2164) ─────────────────────────────────
+    # Scoring is per LESSON, and the dedup used to be per lesson too — so an
+    # entry carrying four lessons could occupy four of the five slots and push
+    # four other entries out of the pack entirely. MEASURED: on six of the ten
+    # readable corpus designs of one profiled class, a single four-lesson entry
+    # took three or four slots and the class's shift-register and framing craft
+    # never reached the author. That is a RANKING defect, not a membership one:
+    # the class-first selection was right and the budget spent it on one entry.
+    #
+    # So the first pass gives each ENTRY at most one slot — its own best-scoring
+    # lesson — in score order. FIVE SLOTS THEREFORE MEAN UP TO FIVE ENTRIES.
+    #
+    # The second pass exists because "at most one each" is the wrong rule when
+    # there is nothing to displace: a class with two entries and k=5 would
+    # otherwise hand back a two-item pack and leave three slots empty while its
+    # own craft sat unread. So once every available entry has had a slot, the
+    # remainder is filled from the same ranking with lesson-level dedup, which
+    # is exactly the old behaviour applied to the space no other entry wants.
+    out, seen, entry_seen = [], set(), set()
+    for sc, cls, les in ranked:
+        if les in seen or cls in entry_seen:
             continue
         seen.add(les)
-        out.append({"ic_class": cls, "score": round(s, 2), "lesson": les})
+        entry_seen.add(cls)
+        out.append({"ic_class": cls, "score": round(sc, 2), "lesson": les})
         if len(out) >= k:
             break
+    if len(out) < k:
+        for sc, cls, les in ranked:
+            if les in seen:
+                continue
+            seen.add(les)
+            out.append({"ic_class": cls, "score": round(sc, 2), "lesson": les})
+            if len(out) >= k:
+                break
     if expand_related and out:
         by_class = {e.get("ic_class"): e for e in entries}
         seed = out[0]["ic_class"]

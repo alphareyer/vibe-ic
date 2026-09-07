@@ -134,9 +134,17 @@ def test_mutation_reverting_the_profile_brings_the_out_of_class_pack_back(tmp_pa
     assert not (got & allowed), (
         f"the mutation did not reproduce the defect — still in-class: "
         f"{sorted(got & allowed)}")
-    assert got <= _EXCLUDED | {"integer-clock-divider"}, (
-        f"the mutation arm returned something this test does not account for: "
-        f"{sorted(got - (_EXCLUDED | {'integer-clock-divider'}))}")
+    # The measured HARM, stated positively. This assertion used to enumerate
+    # the whole mutation-arm pack and require it to be a subset — which pinned
+    # the CONTENTS of an unconfined ranking rather than anything about the
+    # profile, and #2164's entry-slot allocator legitimately changed those
+    # contents (repeats replaced by two further out-of-class entries). What the
+    # arm is actually FOR is that the function-behind-the-bus family the
+    # profile deliberately excludes is what a bus-peripheral design gets
+    # instead of its own craft, so that is what is asserted.
+    assert got & _EXCLUDED, (
+        f"the mutation arm returned no entry from the family this profile "
+        f"exists to displace: {sorted(got)}")
 
 
 def test_the_class_decides_membership_not_the_phrase():

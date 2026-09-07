@@ -20,6 +20,14 @@ knowledge. It must NOT:
      the design (craft about the observable contract); they may not name the
      oracle files/variables as an INPUT to the authoring decision.
 
+MIS-FILING (#2164). An entry MAY declare `craft_subjects` — the subject tokens
+its craft is about — and a lesson naming none of them is refused BY NAME. A
+lesson filed in the wrong entry inherits that entry's whole audience, because
+class-first retrieval selects by ENTRY; three such lessons were found and moved.
+The guard is EXACT rather than lexical on purpose, and the report carries
+`entries_with_declared_craft` and `lessons_craft_checked` so its coverage is a
+number a reader sees rather than one the verdict implies.
+
 SCANNED SURFACES (#2143). The four families above are applied to `entries[]`
 lessons AND to every text field of `registered_class_profiles.*`. The second
 surface is not decoration: a class profile's `integration_contract` prose is
@@ -141,6 +149,7 @@ def check(db_path: Path):
         return {"pass": False, "findings": ["DB has no entries[]"]}
     all_classes = {e.get("ic_class") for e in entries if e.get("ic_class")}
     total = 0
+    n_declared = n_craft_checked = 0
     for e in entries:
         cls = e.get("ic_class")
         lessons = e.get("lessons")
@@ -161,8 +170,45 @@ def check(db_path: Path):
                 for r in rel:
                     if r not in all_classes:
                         findings.append(f"[{cls}] related link '{r}' names no existing ic_class (dangling)")
-        for les in lessons:
+        # ── the lesson sits in the entry that owns it (#2164) ──────────
+        # MEASURED, three times: an AXI-Lite register-read lesson inside the
+        # clock-divider entry, and a learning-rate formula plus a lint-review
+        # self-gate inside the decimator entry. Each was then DELIVERED to
+        # every design of a profiled class, because class-first selects by
+        # ENTRY and a lesson filed in the wrong entry inherits that entry's
+        # whole audience.
+        #
+        # THE GUARD IS EXACT, NOT A HEURISTIC, AND THAT IS PAID FOR IN
+        # COVERAGE. Three lexical detectors were built and measured against the
+        # three known instances first: class-name stem intersection flagged 44
+        # of 206 lessons; a best-other-class margin had ZERO power over two of
+        # the three at any threshold that was not itself noise; a
+        # self-consistency retrieval caught all three and flagged 138 of 206.
+        # None of them is a gate. So an entry DECLARES its craft subjects and a
+        # lesson naming none of them is refused — which judges only the entries
+        # that declare, and reports how many those are rather than implying it
+        # judged the rest.
+        subjects = e.get("craft_subjects")
+        if subjects is not None:
+            if (not isinstance(subjects, list) or not subjects
+                    or not all(isinstance(t, str) and t.strip()
+                               for t in subjects)):
+                findings.append(f"[{cls}] craft_subjects must be a non-empty "
+                                f"list of non-empty strings")
+                subjects = None
+            else:
+                n_declared += 1
+        for i, les in enumerate(lessons):
             total += 1
+            if subjects:
+                n_craft_checked += 1
+                low = les.lower()
+                if not any(t.lower() in low for t in subjects):
+                    findings.append(
+                        f"[{cls}] MIS-FILED: lesson {i} names none of this "
+                        f"entry's declared craft subjects {sorted(subjects)} "
+                        f"— a lesson in the wrong entry inherits that entry's "
+                        f"whole audience, because class-first selects by ENTRY")
             findings.extend(_scan_text(les, cls))
 
     # ── registered_class_profiles (#2143) ──────────────────────────────────
@@ -203,6 +249,11 @@ def check(db_path: Path):
     return {"pass": not findings, "classes": len(entries),
             "total_lessons": total,
             "profile_text_fields": n_profile_fields,
+            # THE COVERAGE, printed rather than implied. This guard judges only
+            # the entries that declare their craft; a verdict that did not say
+            # how many those are would read as though it had checked them all.
+            "entries_with_declared_craft": n_declared,
+            "lessons_craft_checked": n_craft_checked,
             "findings": findings}
 
 
@@ -218,7 +269,10 @@ def main(argv=None) -> int:
     verdict = "PASS" if rep["pass"] else "FAIL"
     print(f"ic_expert_db_consistency: {verdict} "
           f"(classes={rep.get('classes','?')} lessons={rep.get('total_lessons','?')} "
-          f"profile_text_fields={rep.get('profile_text_fields','?')})")
+          f"profile_text_fields={rep.get('profile_text_fields','?')} "
+          f"craft_declared={rep.get('entries_with_declared_craft','?')}"
+          f"/{rep.get('classes','?')} "
+          f"lessons_craft_checked={rep.get('lessons_craft_checked','?')})")
     for f in rep.get("findings", []):
         print(f"  ! {f}")
     return 0 if rep["pass"] else 1

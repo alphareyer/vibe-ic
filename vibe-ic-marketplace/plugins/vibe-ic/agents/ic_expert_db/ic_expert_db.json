@@ -323,10 +323,21 @@
   },
   {
    "ic_class": "axi4lite-register-slave",
-   "lesson_count": 2,
+   "craft_subjects": [
+    "axi",
+    "register",
+    "slave",
+    "read",
+    "write",
+    "handshake",
+    "memory-mapped",
+    "mmio"
+   ],
+   "lesson_count": 3,
    "lessons": [
     "An AXI4-Lite slave register file must implement each channel as an independent, self-clearing handshake FSM: assert *ready only until the corresponding *valid fires (one-shot, then de-assert), latch the address into a holding register at accept time, and hold bvalid/rvalid asserted until the master's bready/rready acknowledges before dropping it — otherwise responses are lost or the bus double-fires. Decode on the LATCHED address (not the live bus), honor write-strobe semantics (full-strobe = update, partial = ack-without-modify), and always return an error response (SLVERR) for writes to read-only or undefined offsets rather than silently completing OKAY.",
-    "Self-TB for an AXI4-Lite register peripheral must drive real handshaked read-after-write transactions AND advance sim time to assert dynamic behavior (running counter has decremented by read-back time, elapsed increments after zero, IRQ edge at threshold), not just static write/read-back. Static-only self-verification passes a DUT whose time-dependent counter/IRQ semantics are wrong. (Note: fail_log truncation prevented naming the precise failing assertion.)"
+    "Self-TB for an AXI4-Lite register peripheral must drive real handshaked read-after-write transactions AND advance sim time to assert dynamic behavior (running counter has decremented by read-back time, elapsed increments after zero, IRQ edge at threshold), not just static write/read-back. Static-only self-verification passes a DUT whose time-dependent counter/IRQ semantics are wrong. (Note: fail_log truncation prevented naming the precise failing assertion.)",
+    "For memory-mapped / AXI-Lite register reads, make the read-data mux COMBINATIONAL (zero-latency, keyed on the address) so a read reflects the live register value in the same cycle it is addressed. A registered/pipelined axi_rdata adds one cycle of latency and returns STALE data, failing read-after-write and live-counter read-back checks. Verified: replacing the draft's `always@(posedge clk)` read block with a combinational `always@(*)` mux makes the case PASS."
    ]
   },
   {
@@ -458,11 +469,16 @@
   },
   {
    "ic_class": "decimator-peak-detect",
-   "lesson_count": 3,
+   "craft_subjects": [
+    "decimat",
+    "sub-sample",
+    "peak",
+    "reduction",
+    "packed-bus"
+   ],
+   "lesson_count": 1,
    "lessons": [
-    "For packed-bus DSP blocks (decimation/reduction over N sub-samples), nail three things a naive author gets wrong: (1) sub-sample indexing — slot s lives at bits [DATA_WIDTH*s +: DATA_WIDTH] with slot 0 = LSB, so decimated output slot q must map to input slot q*DEC_FACTOR, and the packing must match the checker's convention exactly (spec concat prose can be misleading; follow the reference model). (2) Signed extremum — peak/min comparisons must use $signed() on each slice and a $signed accumulator, else negative samples compare as large unsigned values. (3) Latency discipline — 'latency = 1 cycle' means register the input bus AND valid together (async reset clears both), then do decimation/peak/packing purely combinationally from the registered data, so data_out and peak_value are valid the same cycle valid_out asserts.",
-    "Normative equations override worked-example numbers: prompt states delta_b = LEARNING_RATE*error, but its example prints b=10 (should be 20) which the draft over-fit via an unstated shift. When formula conflicts with an example figure, implement the formula and treat the example number as suspect.",
-    "For any LINT-review-class task (prompt asks for 'lint-clean RTL'), add a deterministic self-gate running `verilator --lint-only -Wall` and close-loop to zero warnings. Specifically catch UNUSEDSIGNAL from over-wide intermediates: after fixing a width-truncation by slicing (temp_y[15:0]), the still-32-bit temp_y leaves bits[31:16] unread; size the reg to the used width so a width fix does not create a new unused-bits warning."
+    "For packed-bus DSP blocks (decimation/reduction over N sub-samples), nail three things a naive author gets wrong: (1) sub-sample indexing — slot s lives at bits [DATA_WIDTH*s +: DATA_WIDTH] with slot 0 = LSB, so decimated output slot q must map to input slot q*DEC_FACTOR, and the packing must match the checker's convention exactly (spec concat prose can be misleading; follow the reference model). (2) Signed extremum — peak/min comparisons must use $signed() on each slice and a $signed accumulator, else negative samples compare as large unsigned values. (3) Latency discipline — 'latency = 1 cycle' means register the input bus AND valid together (async reset clears both), then do decimation/peak/packing purely combinationally from the registered data, so data_out and peak_value are valid the same cycle valid_out asserts."
    ]
   },
   {
@@ -612,10 +628,18 @@
   },
   {
    "ic_class": "integer-clock-divider",
-   "lesson_count": 4,
+   "craft_subjects": [
+    "divider",
+    "divid",
+    "tick",
+    "prescal",
+    "duty",
+    "first-tick",
+    "clock divider"
+   ],
+   "lesson_count": 3,
    "lessons": [
     "Integer clock divider: divided-clock outputs described as 'toggled'/'reset-initialized' are REGISTERS, not a combinational decode of the current count. The CANONICAL odd-divisor 50%-duty divider is the OR of a posedge half-rate LEVEL and a negedge half-rate LEVEL: use one counter cnt1 on posedge and cnt2 on negedge, each counting 0..NUM_DIV-1, and register each level as `clk_div_k <= (cnt_k < NUM_DIV/2)` (a LEVEL that is high for the first floor(NUM_DIV/2) counts, NOT a single toggle-at-a-point — a lone toggle every NUM_DIV counts would divide by 2*NUM_DIV, not NUM_DIV). The reset value of each clk_div_k is DERIVED, not guessed: cnt resets to 0 and 0 < NUM_DIV/2, so the level is 1 at reset — reset clk_div_k to 1'b1 to match its own cnt==0 level. Combine with `clk_div = clk_div1 | clk_div2`. A combinational `assign clk_div=(cnt<LIMIT)` or a toggle-on-limit form shifts the phase and fails a cycle-accurate check even when the average ratio is right.",
-    "For memory-mapped / AXI-Lite register reads, make the read-data mux COMBINATIONAL (zero-latency, keyed on the address) so a read reflects the live register value in the same cycle it is addressed. A registered/pipelined axi_rdata adds one cycle of latency and returns STALE data, failing read-after-write and live-counter read-back checks. Verified: replacing the draft's `always@(posedge clk)` read block with a combinational `always@(*)` mux makes the case PASS.",
     "For an N-cycle divider that emits a one-cycle tick, getting the PERIOD right is the easy half; the half that fails cycle-exact benches is the absolute PHASE — which clk edge after reset-release carries the first tick. A counter running 0..N-1 with a combinational `cnt == N-1` tick and a counter that reaches its compare value one edge sooner both average exactly N cycles per tick and are indistinguishable by any period measurement, yet they differ by one edge forever, and a bench that samples a rollover boundary on an exact edge sees only that difference. So: (a) treat the first-tick phase as a spec question, not a style question — mine the prompt for a waveform, a stated first-output latency, or a cycle table and pin the phase from it; when the spec is genuinely silent, write the assumption down in the RTL rather than leaving it implicit; (b) build a cycle-accurate probe that logs the clk-cycle INDEX of every tick from reset-release and asserts the interval is exactly N across reset-release, across each pause/resume, and across the terminal-count rollovers — a rollover boundary is where a phase error first becomes visible, and an interval-only check passes both conventions; (c) present the counter's new value on the tick edge itself, never a cycle later, so the visible counter never lags its own divider; (d) size the divider counter from what it is COMPARED against, not from the parameter — $clog2(N) is right for a counter compared to N-1 and truncates for one compared to N; and (e) freeze the divider phase on pause so partial progress survives, while keeping the tick a single-cycle enable rather than a derived clock.",
     "A tick-driven counter cascade has TWO bench-distinguishable update conventions even after the tick's period and phase are right: (1) enable-form — counters advance on the master-clock edge where the tick condition holds, so the new count settles in the same NBA batch as the registered tick and an observer synchronized to the tick's rising edge reads the POST-update count; (2) pulse-clocked form — counters advance on the tick's own posedge, so a tick-edge-synchronized observer reads the PRE-update count and sees the new value one master-clock later. A spec sentence assigning updates to \"the posedge of the generated pulse\", or any bench that can await the pulse net by name (whitebox), selects form (2); the derived-clock hygiene preference for enables applies only when the spec is silent about the update edge. The discriminating probes are an expected-count read AT the pulse edge (form 1 reads i, form 2 reads i-1) and a rollover read one master-clock after the terminal-value pulse (form 1 still shows the terminal value there)."
    ]
@@ -651,13 +675,24 @@
   },
   {
    "ic_class": "iterative-training-datapath",
-   "lesson_count": 5,
+   "craft_subjects": [
+    "train",
+    "weight",
+    "learning",
+    "perceptron",
+    "converg",
+    "delta",
+    "microcode",
+    "iterat"
+   ],
+   "lesson_count": 6,
    "lessons": [
     "For iterative weight-update trainers (Hebbian / perceptron / Fausett-style), the convergence/stop criterion is that the weight DELTAS are all zero on a pass — not that two consecutive weight snapshots happen to be equal. Test the update magnitude, not snapshot equality, or a coincidental repeat halts training early.",
     "Microcode/FSM lesson: a microinstruction spec'd as 'signal stop and branch, no change to other signals' must NOT clobber accumulated datapath regs (draft's action-4 zeroes weights on stop; spec says retain), and accumulator state must live in sequential regs, not an always_comb block that reads/writes its own outputs (combinational feedback = no cross-cycle retention). Honor each action's explicit 'other signals unchanged' contract.",
     "When a spec says to EXTEND an existing microcode-ROM state machine with a new phase (e.g. a post-training test loop), implement it as additional ROM states advanced one-microinstruction-per-clock so per-step outputs stay observable at the same cadence as the existing phase; do NOT collapse it into a single-cycle combinational sweep that races to 'done' and only leaves the final result visible.",
     "A convergence/stop flag must be TERMINAL: once raised, freeze both the sequencer and the trained registers until reset. The specific trap is the BRANCH TARGET — a microcode spec that says 'signal a stop condition and move to address 0' does not authorize re-EXECUTING address 0's initialization action; if the address register keeps stepping, that init microinstruction re-zeroes the converged weights and the next stimulus starts an unwanted second training pass, so the checker reads garbage even though the design converged correctly. Gate BOTH the address update and the action decode on !stop, and make stop sticky. Recognize it in a waveform before blaming the learning rule: the correct converged values appear, the stop flag pulses, and then the values are destroyed later in the same run — that is a halt-discipline bug, not a convergence-criterion bug, and re-tuning the stop criterion will not fix it. Corollary: the value a checker reads at the END of the run is the only one that counts, so any state the design still owns after the stop must be read-only.",
-    "When an iterative trainer/search datapath is verified by a testbench that applies stimulus on a fixed clock cadence (one vector per loop pass, no handshake), every pass through the control loop must consume exactly one stimulus slot — the loop's cycle count is part of the contract even though no spec sentence states it. Two disciplines follow: (1) an iteration counter whose spec declares a value domain ('takes values 0..N-1') must wrap modulo N at the increment site itself; parking the wrap in a separate recovery state lets the counter transiently leave its domain and inserts a dead pass with a null selection. (2) A dead pass is invisible in the first epoch — outputs still match the worked example — and first corrupts results at the wrap boundary, where the design starts pairing stimulus k with the selection for k-1; so hand-trace one full wrap boundary against the worked example before trusting a first-epoch match. Symptom signature: convergence to plausible-but-wrong values with the done/stop flag still correctly asserted at the checker's read time — a cadence bug, not a learning-rule bug."
+    "When an iterative trainer/search datapath is verified by a testbench that applies stimulus on a fixed clock cadence (one vector per loop pass, no handshake), every pass through the control loop must consume exactly one stimulus slot — the loop's cycle count is part of the contract even though no spec sentence states it. Two disciplines follow: (1) an iteration counter whose spec declares a value domain ('takes values 0..N-1') must wrap modulo N at the increment site itself; parking the wrap in a separate recovery state lets the counter transiently leave its domain and inserts a dead pass with a null selection. (2) A dead pass is invisible in the first epoch — outputs still match the worked example — and first corrupts results at the wrap boundary, where the design starts pairing stimulus k with the selection for k-1; so hand-trace one full wrap boundary against the worked example before trusting a first-epoch match. Symptom signature: convergence to plausible-but-wrong values with the done/stop flag still correctly asserted at the checker's read time — a cadence bug, not a learning-rule bug.",
+    "Normative equations override worked-example numbers: prompt states delta_b = LEARNING_RATE*error, but its example prints b=10 (should be 20) which the draft over-fit via an unstated shift. When formula conflicts with an example figure, implement the formula and treat the example number as suspect."
    ]
   },
   {
@@ -727,10 +762,19 @@
   },
   {
    "ic_class": "lint-code-review",
-   "lesson_count": 2,
+   "craft_subjects": [
+    "lint",
+    "warning",
+    "verilator",
+    "blocking",
+    "non-blocking",
+    "clean"
+   ],
+   "lesson_count": 3,
    "lessons": [
     "For a LINT clean-up of clocked RTL, enforce assignment-type consistency by intent: every state/output update inside an always_ff must use non-blocking (<=); blocking (=) is legal ONLY for local loop indices/temporaries (e.g. `int i` in for-loops), and the two must never be mixed on the same sequential storage — mixing causes simulation-vs-synthesis race/mismatch. Separately, prune every declared-but-unassigned/unread signal and unused parameter (dead nets, extra localparams, unused array ports), since dangling drivers are the other canonical lint class. The trap: leaving a genuinely-used loop iterator blocking looks like a violation but is correct, so classify by whether the LHS is persistent state, not by the operator alone.",
-    "For a LINT-cleanup review task, the deliverable is functionally-identical RTL with only the flagged violations removed — never a rewrite. Two recurring traps: (1) never mix blocking (=) and non-blocking (<=) assignments to the same variable across a design's sequential logic — use <= consistently in every clocked always block (blocking only in initial/combinational); (2) delete every truly-unused parameter/package/typedef the linter flags, but preserve parameters that are used indirectly (e.g. to size localparams or derive other params) since removing those breaks elaboration. Change nothing that alters behavior or port/parameter interface visible to the testbench."
+    "For a LINT-cleanup review task, the deliverable is functionally-identical RTL with only the flagged violations removed — never a rewrite. Two recurring traps: (1) never mix blocking (=) and non-blocking (<=) assignments to the same variable across a design's sequential logic — use <= consistently in every clocked always block (blocking only in initial/combinational); (2) delete every truly-unused parameter/package/typedef the linter flags, but preserve parameters that are used indirectly (e.g. to size localparams or derive other params) since removing those breaks elaboration. Change nothing that alters behavior or port/parameter interface visible to the testbench.",
+    "For any LINT-review-class task (prompt asks for 'lint-clean RTL'), add a deterministic self-gate running `verilator --lint-only -Wall` and close-loop to zero warnings. Specifically catch UNUSEDSIGNAL from over-wide intermediates: after fixing a width-truncation by slicing (temp_y[15:0]), the still-32-bit temp_y leaves bits[31:16] unread; size the reg to the used width so a width fix does not create a new unused-bits warning."
    ],
    "related": [
     "line-encoder",

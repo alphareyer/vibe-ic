@@ -504,7 +504,15 @@ def test_expert_track_clean_when_the_design_is_correct(tmp_path):
     unmet = [f for f in rep["findings"]
              if f["rule"].startswith("EXPERT_TRACK_EXPECTATION_UNMET")]
     assert unmet == []
-    assert rc == 0 and rep["verdict"] == "PASS"
+    # #2164. This fixture's design INPUT is a LEF and a Verilog file — neither
+    # is a format the expert reader opens — so its retrieval query is 0
+    # characters, and the track now SAYS so instead of reporting `verdict:
+    # PASS, findings: 0` from a run whose AI half was handed nothing. The
+    # verdict word moves; what this test is about does not, and the assertion
+    # is now the stronger one: nothing was found IN THE DESIGN, and every
+    # finding present is about the TRACK.
+    assert rc == 0 and rep["verdict"] == "FINDINGS"
+    assert all(f["about"] == "track" for f in rep["findings"]), rep["findings"]
 
 
 # ── the knowledge payload ───────────────────────────────────────────────────
@@ -568,8 +576,14 @@ def test_a_track_finding_and_a_design_finding_are_different_things(tmp_path):
                           "fields": {"power_rails": ["VDDC", "VPROG"]}})
     _run_track(clean)
     rep = json.loads(_track_report(clean).read_text())
-    assert [f["rule"] for f in rep["findings"]] == [
-        "EXPERT_TRACK_AI_SUBTRACK_SKIPPED"]
+    # #2164 adds the second track-level fact about the same run: this
+    # fixture's design input is a LEF plus Verilog, so the expert retrieval
+    # query was 0 characters and that is now stated rather than left as an
+    # empty query nobody flagged. Both are `about: "track"`, which is the
+    # distinction this test exists to pin.
+    assert sorted(f["rule"] for f in rep["findings"]) == [
+        "EXPERT_TRACK_AI_SUBTRACK_SKIPPED",
+        "EXPERT_TRACK_DESIGN_INPUT_NOT_READABLE"]
     assert all(f["about"] == "track" for f in rep["findings"])
     # The evidence check must read this as "ran, found nothing", not "ran,
     # found one thing" — and must still carry WHY coverage was partial.
