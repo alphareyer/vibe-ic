@@ -3,8 +3,7 @@
 MEASURED (u_hawaii_adc / ihp-sg13g2 / image 0.3.46). This library sized
 `delta_sigma`'s capacitors from the noise budget and got drawn lengths of
 34.75 to 629.08 um against a gencell that states `lmax 30.0`. A magic gencell
-asked for more does NOT refuse the way one below `lmin` does — it CLAMPS to
-the maximum and draws — so twelve netlist capacitors came back as TWO drawn
+asked for more does NOT refuse — it CLAMPS to the maximum and draws — so twelve netlist capacitors came back as TWO drawn
 cells, the largest device 21x smaller than the netlist asks for. DRC was
 clean, the A5 gate passed, magic's attribution said DEVICE_ONLY, and the only
 artefact that noticed was the sign-off LVS six steps later, whose
@@ -13,6 +12,13 @@ cross-reference named exactly those eight devices as differing in `l` alone.
 Every number below is one of that block's own capacitors and the PDK's own
 measured constants, so a change that breaks the split breaks against the case
 it was built from.
+
+CORRECTION (vibe-ic#2187). This docstring used to say the gencell "does NOT
+refuse the way one below `lmin` does". Re-measured against the SOURCE in the
+pinned image: `sg13g2::cap_check` (libs.tech/magic/ihp-sg13g2-cap.tcl:727-746)
+clamps at all FOUR bounds and refuses at none of them, so the asymmetry that
+sentence asserted does not exist. The clamp above the maximum — the thing this
+file is about — is unchanged and is what those lines measure.
 """
 from __future__ import annotations
 

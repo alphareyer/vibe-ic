@@ -4189,12 +4189,24 @@ def expand_stages(lib: Dict[str, Any], spec_values: Dict[str, float]
 # THE DEFECT THIS CLOSES, MEASURED (u_hawaii_adc / ihp-sg13g2 / image 0.3.46).
 # This library sized `delta_sigma`'s capacitors from the noise budget and got
 # lengths of 34.75 to 629.08 um. The PDK's own gencell states `lmax 30.0`, and
-# a magic gencell asked for more does not refuse the way one below `lmin`
-# does: it CLAMPS to the maximum and draws. So twelve netlist capacitors came
-# back as TWO drawn cells, the largest device 21x smaller than the netlist
-# asks for; DRC was clean, the A5 gate passed, and the only artefact that
-# noticed was the sign-off LVS six steps later, whose cross-reference named
-# exactly those eight devices as differing in `l` alone.
+# a magic gencell asked for more does not refuse: it CLAMPS to the maximum
+# and draws. So twelve netlist capacitors came back as TWO drawn cells, the
+# largest device 21x smaller than the netlist asks for; DRC was clean, the A5
+# gate passed, and the only artefact that noticed was the sign-off LVS six
+# steps later, whose cross-reference named exactly those eight devices as
+# differing in `l` alone.
+#
+# CORRECTION (vibe-ic#2187, re-measured against the SOURCE in the pinned image
+# 0.3.49, sha256:89a8fd7295208ee6d06e216ade9edc6161d26db52099e9f22ceb77a2d76e3f49).
+# These lines used to add "the way one below `lmin` does", asserting that the
+# gencell refuses at the minimum and clamps only at the maximum. IT DOES NOT.
+# `sg13g2::cap_check` (libs.tech/magic/ihp-sg13g2-cap.tcl:727-746) handles all
+# FOUR bounds identically — `w < wmin`, `l < lmin`, `w > wmax`, `l > lmax` each
+# `puts stderr` a sentence, `dict set` the parameter to the bound, and the proc
+# returns normally. NEITHER END REFUSES. That makes the statement STRONGER, not
+# weaker: nothing downstream may rely on the gencell stopping at either bound,
+# so the flow has to pre-empt both itself — which is exactly what it does,
+# `floor_geometry_to_pdk` at the minimum and this split at the maximum.
 #
 # A capacitor above the gencell's maximum is not a broken design. It is the
 # ordinary analog answer — N unit devices in parallel — and the place to say
@@ -4288,6 +4300,49 @@ def unit_capacitor_split(w_um: float, l_um: float, *,
         f"{target:.6g}fF at width {w_um}u")
 
 
+#: The two places a capacitor's DRAWN LENGTH can come from. Named, because
+#: the record says WHICH, and because a reader who cannot tell them apart is
+#: the reader this whole round is about.
+LENGTH_FROM_EXPR = "device_param_expr"
+LENGTH_FROM_LIBRARY = "library_nominal"
+
+
+def capacitor_drawn_length_um(device: Dict[str, Any],
+                              expr: Optional[Dict[str, Any]],
+                              env: Dict[str, Any],
+                              ) -> Tuple[Optional[float], Optional[str]]:
+    """``(l_um, source)`` — the drawn length the netlist will RENDER for
+    `device`, and which of the two places it came from.
+
+    ``(None, None)`` when this pass cannot know it, which is NOT MEASURED and
+    never a default: an expression it cannot resolve is one the later pass
+    owns, and a device that states no length at all states nothing to compare
+    against a ceiling.
+
+    WHY THIS FUNCTION EXISTS (vibe-ic#2187). `analog_a3_netlist_emit` renders
+    ``overrides.get(name, {}).get(p, d.get(p))`` — a `device_param_exprs`
+    entry when there is one, and the device record's own number when there is
+    not. Both reach the gencell as a drawn length, so both are subject to the
+    PDK's ceiling; the split read only the first and therefore applied the
+    ceiling to only half the capacitors in the netlist. MEASURED on a real
+    front-door run: seven capacitors sized from the noise budget were split
+    correctly and one library-nominal capacitor at 60.0u went to a gencell
+    whose own tcl states ``lmax 30.0``. It did not refuse — it CLAMPED and
+    drew — so the block's sign-off LVS reported a mismatch on a die with zero
+    DRC violations, and A5/A6 were two rows of that one cause.
+    """
+    if expr is not None:
+        try:
+            return float(_safe_eval(str(expr["expr"]), dict(env))), \
+                LENGTH_FROM_EXPR
+        except Exception:
+            return None, None
+    l_um = device.get("l")
+    if isinstance(l_um, (int, float)) and not isinstance(l_um, bool):
+        return float(l_um), LENGTH_FROM_LIBRARY
+    return None, None
+
+
 class CapacitorNotRealisable(ValueError):
     """A capacitor this entry sizes cannot be drawn on this PDK at all.
 
@@ -4310,6 +4365,14 @@ def split_oversize_capacitors(devices: List[Dict[str, Any]],
                                         List[Dict[str, Any]],
                                         List[str]]:
     """Replace every capacitor the PDK cannot draw with N that it can.
+
+    THE PREDICATE IS THE PDK CEILING, and it is applied to the length the
+    netlist will actually RENDER — a `device_param_exprs` entry when the
+    device has one, and the device record's own number when it does not. Both
+    reach the gencell the same way (`analog_a3_netlist_emit` renders
+    `overrides.get(name, {}).get(p, d.get(p))`), so both are subject to the
+    same maximum. See `capacitor_drawn_length_um` for what this cost when only
+    the first was read.
 
     Returns `(devices, param_exprs, records, refusals)`. `records` is one
     entry per device that was split, with N, the unit length, the constants it
@@ -4350,21 +4413,26 @@ def split_oversize_capacitors(devices: List[Dict[str, Any]],
         # BY NAME, naming the constant that is missing. A device that is NOT
         # oversize is untouched: a refusal that fires on a family whose
         # capacitors are all legal would be a false accusation about the PDK.
+        #
+        # vibe-ic#2187 — the length is read through `capacitor_drawn_length_um`,
+        # so this path is blind to neither source. It read `param_exprs` alone
+        # and therefore could not refuse the very device class the split could
+        # not see either: a library-nominal capacitor above the ceiling was
+        # invisible to BOTH halves of this function at once.
         refusals: List[str] = []
         by_l = {str(e.get("device")): e for e in param_exprs
                 if e.get("param") == "l"}
         for d in devices:
-            e = by_l.get(str(d.get("name")))
-            if d.get("role") != CAP_ROLE or e is None:
+            if d.get("role") != CAP_ROLE:
                 continue
-            try:
-                l_um = float(_safe_eval(str(e["expr"]), dict(env)))
-            except Exception:
+            l_um, _src = capacitor_drawn_length_um(
+                d, by_l.get(str(d.get("name"))), env)
+            if l_um is None:
                 continue                 # unresolvable here: not this pass's
             if l_um <= float(lmax):
                 continue
             refusals.append(
-                f"{d.get('name')}: this entry sizes it to a drawn length of "
+                f"{d.get('name')}: this entry draws it at a length of "
                 f"{l_um:.6g}u, above the {lmax:g}u maximum this family states "
                 f"for a {CAP_ROLE!r} device, and the family carries no "
                 f"measured `cap_area_ff_per_um2`, so the unit array that would "
@@ -4388,15 +4456,19 @@ def split_oversize_capacitors(devices: List[Dict[str, Any]],
     for d in devices:
         expr = by_dev.get(str(d.get("name")))
         w = d.get("w")
-        if d.get("role") != CAP_ROLE or expr is None \
-                or not isinstance(w, (int, float)):
+        if d.get("role") != CAP_ROLE or not isinstance(w, (int, float)):
             out_devs.append(d)
             continue
-        try:
-            l_um = float(_safe_eval(str(expr["expr"]), dict(env)))
-        except Exception:
-            # NOT MEASURED, never a default: an expression this pass cannot
-            # resolve is one it has nothing to say about, and it is left
+        # vibe-ic#2187 — THE PREDICATE IS THE CEILING, NOT THE PROVENANCE OF
+        # THE NUMBER. This used to `continue` on `expr is None`, so a
+        # capacitor whose drawn length is a plain number on its own device
+        # record never reached the comparison at all and was handed to a
+        # gencell that clamps it silently.
+        l_um, l_src = capacitor_drawn_length_um(d, expr, env)
+        if l_um is None:
+            # NOT MEASURED, never a default: a length this pass cannot read —
+            # an expression it cannot resolve, or a device that states none —
+            # is one it has nothing to say about, and the device is left
             # exactly as it was for the pass that can.
             out_devs.append(d)
             continue
@@ -4441,16 +4513,35 @@ def split_oversize_capacitors(devices: List[Dict[str, Any]],
         # only the PDK constants are substituted numerically, because they are
         # what this pass has already measured the split against and a NAME
         # that a family does not carry would resolve to nothing downstream.
-        base = str(expr["expr"])
-        wt = repr(float(w))
-        at, bt = repr(float(carea)), repr(cperi)
-        lu_expr = (f"(({at} * {wt} * ({base}) + 2 * {bt} * ({wt} + ({base}))) "
-                   f"/ {n} - 2 * {bt} * {wt}) / ({at} * {wt} + 2 * {bt})")
-        out_exprs = [e for e in out_exprs if e is not expr]
+        # ...AND EACH UNIT IS WRITTEN IN THE IDIOM ITS OWN LENGTH CAME IN.
+        # A capacitor sized by an expression keeps an expression, so a reader
+        # can still follow it back to the budget that sized it; one carrying a
+        # library nominal keeps a NUMBER, because inventing an expression for
+        # it would assert a derivation the library never made. Both render
+        # through the same two lines of `analog_a3_netlist_emit`, which reads
+        # the override when there is one and the device's own number when
+        # there is not.
+        if expr is not None:
+            base = str(expr["expr"])
+            wt = repr(float(w))
+            at, bt = repr(float(carea)), repr(cperi)
+            lu_expr = (
+                f"(({at} * {wt} * ({base}) + 2 * {bt} * ({wt} + ({base}))) "
+                f"/ {n} - 2 * {bt} * {wt}) / ({at} * {wt} + 2 * {bt})")
+            out_exprs = [e for e in out_exprs if e is not expr]
         for i in range(n):
             unit = dict(d)
             unit["name"] = f"{d['name']}_u{i}"
+            # The unit's OWN drawn length, whichever way it is carried. Set on
+            # the record in both cases: a unit that kept the parent's `l` and
+            # relied on the override alone would render the parent's length in
+            # any reader that looks at the device record — which is what
+            # `floor_geometry_to_pdk` and every artefact reading `devices[].l`
+            # do.
+            unit["l"] = lu
             out_devs.append(unit)
+            if expr is None:
+                continue
             e = dict(expr)
             e["device"] = unit["name"]
             e["expr"] = lu_expr
@@ -4469,6 +4560,11 @@ def split_oversize_capacitors(devices: List[Dict[str, Any]],
             "device": d.get("name"), "role": CAP_ROLE,
             "units": n, "unit_w_um": float(w), "unit_l_um": lu,
             "library_l_um": l_um,
+            # vibe-ic#2187 — WHICH of the two places the drawn length came
+            # from. Stated, not inferred: the two used to be treated
+            # differently by this pass and a reader of the artefact had no way
+            # to see that they were.
+            "length_source": l_src,
             "pdk_max_l_um": lmax, "pdk_max_w_um": wmax,
             "target_ff": target, "realised_ff": got,
             "relative_value_error": (abs(got - target) / target
