@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1297
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1297)
+- **Total programs (excluding helpers / shims):** 1298
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1298)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1288 |
+| `any` | 1289 |
 
 ## Alphabetical listing
 
@@ -1165,6 +1165,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `spi_protocol_synth` | any | v0.1.77 | SPI-class protocol synth helper. |
 | `spice_correlation_check` | any | — | canonical Step-30 post-layout SPICE correlation |
 | `sta_achievable_fmax_report` | any | — | honest achievable-Fmax measurement (Step 23 STA). |
+| `sta_architectural_residual_check` | any | — | a sign-off setup violation that NO placement, routing, resizing or clock-tree work can close is a re-authoring request, and the flow must... |
 | `sta_assumed_clock_disclosure_check` | any | — | a timing sign-off that was measured against a clock the DESIGN NEVER STATED must say so, in the record. |
 | `sta_continue_on_error_guard` | any | — | REFUSE a tree that turns OpenSTA's error-abort off. |
 | `sta_corner_record_completeness_check` | any | — | the timing RECORD-completeness gate. |
@@ -1369,7 +1370,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1288 programs)
+### `any` (1289 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2503,6 +2504,7 @@ _(no programs in this group)_
 - `spi_protocol_synth` — SPI-class protocol synth helper.  _[v0.1.77]_
 - `spice_correlation_check` — canonical Step-30 post-layout SPICE correlation
 - `sta_achievable_fmax_report` — honest achievable-Fmax measurement (Step 23 STA).
+- `sta_architectural_residual_check` — a sign-off setup violation that NO placement, routing, resizing or clock-tree work can close is a re-authoring request, and the flow must...
 - `sta_assumed_clock_disclosure_check` — a timing sign-off that was measured against a clock the DESIGN NEVER STATED must say so, in the record.
 - `sta_continue_on_error_guard` — REFUSE a tree that turns OpenSTA's error-abort off.
 - `sta_corner_record_completeness_check` — the timing RECORD-completeness gate.

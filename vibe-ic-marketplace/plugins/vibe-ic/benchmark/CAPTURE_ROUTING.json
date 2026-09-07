@@ -206,6 +206,15 @@
       "bucket_A_program": "programs/phase3_one_shot_runner.py",
       "bucket_B_skill_file": "skills/sta-review/SKILL.md"
     },
+    "phase3.sta.architectural_residual": {
+      "description": "A Phase-3 sign-off setup violation that exceeds every physical remedy's upper bound (re-buffering + a perfectly balanced clock). Distinct from phase3.sta, which routes the timing report to the STA runner and the sta-review skill — both PHYSICAL remedies. This finding is a RE-AUTHORING request: placement and routing cannot remove a combinational depth the architecture implies, so it routes to step 1 (Spec-to-RTL). One-sided: it fires only when the residual is proven, and never certifies the converse. vibe-ic#2081.",
+      "bucket_A_program": "programs/sta_architectural_residual_check.py",
+      "bucket_A_related": [
+        "programs/sta_triage_classify.py",
+        "programs/sta_corner_record_completeness_check.py"
+      ],
+      "bucket_B_skill_file": "skills/spec-to-rtl/SKILL.md"
+    },
     "phase3.ir_drop": {
       "bucket_A_program": "programs/phase3_one_shot_runner.py",
       "bucket_B_skill_file": "skills/ir-drop-triage/SKILL.md"

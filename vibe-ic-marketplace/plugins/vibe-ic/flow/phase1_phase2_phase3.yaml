@@ -5315,6 +5315,7 @@ steps:
       # admissible run roots (caravel_user_project/v1.9.43_sky130A,
       # sha256/clean_run_v1427_20260715, spm/v1.9.96_gf180mcuD).
       - "reports/phase3/sta/post_route_signoff_corner.json"
+      - "reports/phase3/sta/architectural_residual.json"
       # WITHDRAWN, NOT FORGOTTEN — the two multi-corner STANCE files
       # (`reports/phase3/multi_corner_spef_stance.json`,
       # `reports/phase3/mcorner_ocv_stance.json`) belong here on the merits:
@@ -5488,6 +5489,31 @@ steps:
         # A run that declares and records no corner at all self-reports
         # NOT_APPLICABLE (rc 0), so pre-phase3 and analog runs are unaffected.
         - program_exit_zero: "sta_corner_record_completeness_check . --json reports/phase3/sta/sta_corner_record_completeness.json"
+        # vibe-ic#2081 — A SIGN-OFF VIOLATION THAT NO PHYSICAL REMEDY CAN
+        # CLOSE IS A RE-AUTHORING REQUEST, AND IT MUST BE ROUTED AS ONE.
+        # This step's own `closed_loop.fallback_to` is 32 (post-route timing
+        # REPAIR) and step 10's is 7 (constraints). Both are physical. NO step
+        # in this file routes a Phase-3 STA verdict to step 1, Spec-to-RTL, and
+        # `benchmark/CAPTURE_ROUTING.json`'s `phase3.sta` routed to the STA
+        # runner and the sta-review skill — physical as well. So on sha256 x
+        # sky130A the flow reached the end of Phase 3 (route converged,
+        # sign-off DRC 0, LVS MATCH, LEC PROVEN_EQUIVALENT), discovered that a
+        # one-round-per-cycle compressor's 32-bit ripple carry cannot meet the
+        # period at the SS sign-off corner, and had nowhere to put it.
+        #
+        # This gate bounds, from the sign-off report alone, what re-buffering
+        # and a perfectly balanced clock could still recover, and REFUSES on
+        # the excess. BLOCKING, not advisory, and it costs a clean run nothing:
+        # it can only fire on a design whose sign-off setup ALREADY violates,
+        # in which case this step is already failing. What it adds is the
+        # REASON and the ROUTE.
+        #
+        # One-sided by construction: firing proves the violation is
+        # architectural; not firing proves nothing. Measured on the #2081 run
+        # itself (image digest recorded in that issue): 1 of 3 violating
+        # sign-off paths proven architectural at a residual of +0.88 ns, and
+        # zero findings across four other real runs in the corpus.
+        - program_exit_zero: "sta_architectural_residual_check . --json reports/phase3/sta/architectural_residual.json"
         # vibe-ic#2126 — THE SIGN-OFF SAYS WHOSE NUMBER IT WAS MEASURED
         # AGAINST. #2091 measured, on opentitan_aes x sky130A, a post-route
         # sign-off reported against a 10 ns period the input never states

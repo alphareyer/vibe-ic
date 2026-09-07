@@ -613,6 +613,34 @@ section's rows recommend for the declared target — never to weaken the check.
 
 ## The sign-off corner is the SLOW corner, and a chain of adds is what misses it (#2081)
 
+### How this finding REACHES you (#2081, second half)
+
+Until v1.19.x nothing routed a Phase-3 timing verdict here. Step 23's
+`closed_loop.fallback_to` is 32 — post-route timing REPAIR — and step 10's is 7,
+constraint setup; both are physical remedies, and neither is this step.
+`benchmark/CAPTURE_ROUTING.json`'s `phase3.sta` pointed at the STA runner and
+`sta-review`, also physical. So a run could prove at sign-off that the
+ARCHITECTURE cannot meet the period and have nowhere to put the discovery.
+
+`programs/sta_architectural_residual_check.py`, blocking at step 23, is that
+route. It reads the run's own post-route sign-off report and, per violating
+setup path, bounds what any physical remedy could still recover — the delay on
+buffer/inverter arcs, plus the adverse clock-tree insertion a perfectly
+balanced tree would remove. Slack beyond that bound is delay on LOGIC arcs, and
+`reports/phase3/sta/architectural_residual.json` names it as `residual_ns`,
+under routing key `phase3.sta.architectural_residual`, addressed to this skill.
+
+Read it as an INSTRUCTION with data, not as a number: the record carries the
+corner, both endpoints, the arc count, and the residual. `residual_ns` is the
+minimum you must remove from the path's combinational depth — the rewrites
+below are what removes it.
+
+The gate is ONE-SIDED. Firing proves the violation is architectural. NOT firing
+proves nothing: a violation it passes may still be architectural by a mechanism
+this bound does not see, so a silent gate is not a licence to keep the depth.
+And the residual is NAMED, never waived — do not answer it by re-declaring the
+period, dropping the sign-off corner, or moving the target to one that passes.
+
 A single-cycle datapath authored so that it "looks like the algorithm" reads as
 correct and closes at the typical corner. The corner the design input declares
 for sign-off is the SLOW one, and there the SAME netlist misses — not by a
