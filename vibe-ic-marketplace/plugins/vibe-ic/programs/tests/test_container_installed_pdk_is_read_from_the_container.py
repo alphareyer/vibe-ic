@@ -29,6 +29,8 @@ from pathlib import Path
 PROGRAMS = Path(__file__).resolve().parents[1]
 if str(PROGRAMS) not in sys.path:
     sys.path.insert(0, str(PROGRAMS))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _container_route as _route  # noqa: E402
 
 
 def _mod():
@@ -52,13 +54,23 @@ def test_a_container_reader_falls_back_to_docker_exec(monkeypatch, tmp_path):
     calls = []
 
     class _R:
+        """A `CompletedProcess` STAND-IN, and it has to carry `stderr`.
+
+        It did not, and that alone was this test's failure: `docker_exec_argv`
+        now runs the ATTACH GUARD (`_eda_pin.container_attach_refusal`) before
+        it returns an argv, the guard reads `r.stderr` off its own
+        `subprocess.run`, and this double intercepts that call too. The
+        AttributeError was swallowed by the reader's `except Exception` and
+        surfaced as `None` — a stale double reading as a broken reader."""
         returncode = 0
         stdout = "FROM-CONTAINER"
+        stderr = ""
 
     def _fake_run(argv, **kw):
         calls.append(argv)
         return _R()
 
+    _route.pin_container_route(monkeypatch)   # the subject is the CONTAINER read
     monkeypatch.setattr(m.subprocess, "run", _fake_run)
     read = m.container_reader("some_container")
 
@@ -70,8 +82,15 @@ def test_a_container_reader_falls_back_to_docker_exec(monkeypatch, tmp_path):
 
     # host-invisible file: falls back
     assert read("/foss/pdks/only/in/container.lib") == "FROM-CONTAINER"
-    assert calls and calls[0][:3] == ["docker", "exec", "some_container"]
-    assert calls[0][3] == "cat"
+    # The attach guard runs FIRST and is not optional — asserted, not skipped
+    # past, so removing it would redden this test rather than merely renumber
+    # the calls.
+    assert any(c[:2] == ["docker", "inspect"] and "some_container" in c
+               for c in calls), calls
+    execs = [c for c in calls if c[:2] == ["docker", "exec"]]
+    assert len(execs) == 1, calls
+    assert execs[0][:3] == ["docker", "exec", "some_container"]
+    assert execs[0][3] == "cat"
 
 
 def test_no_container_means_no_fallback_and_no_crash(tmp_path):

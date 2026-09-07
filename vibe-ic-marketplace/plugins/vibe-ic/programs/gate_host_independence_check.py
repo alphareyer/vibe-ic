@@ -435,6 +435,12 @@ def declares_a_checkout_write(cmd: str) -> bool:
 #: never mistaken for a stopped one.
 _CLAIM_NOTE_EVERY_S = 10.0
 
+#: One poll of the claim lock. It is a NAMED constant because the iteration
+#: cap on the wait loop is derived from it (`wait_s / poll` + slack): a poll
+#: interval and a bound that drift apart would silently shorten or lengthen a
+#: wait the caller asked for in seconds.
+_CLAIM_POLL_S = 0.25
+
 #: A gate may DECLARE itself out of this comparison, on the line above its own
 #: `run` line, in the script where it is wired:
 #:
@@ -1308,46 +1314,57 @@ class _CheckoutClaim:
         started = time.monotonic()
         deadline = started + self.wait_s
         since_note = 0.0
-        while True:
+        # The wait is bounded TWICE, on purpose. The wall-clock `deadline` is
+        # the contract the caller asked for (`wait_s`); the iteration cap is
+        # the structural one, so the loop terminates even if the clock is
+        # stepped backwards or `time.sleep` returns early under load. A
+        # `while True:` that polls could only ever promise the first.
+        max_polls = int(self.wait_s / _CLAIM_POLL_S) + 2
+        granted = False
+        for _ in _wd.loop_guard(f"checkout_claim:{word}", max_iter=max_polls):
             try:
                 fcntl.flock(fh.fileno(), mode | fcntl.LOCK_NB)
             except OSError:
                 if time.monotonic() >= deadline:
-                    fh.close()
-                    self.waited_s = time.monotonic() - started
-                    _CLAIM_CENSUS["claims"] += 1
-                    _CLAIM_CENSUS["gave_up"] += 1
-                    _CLAIM_CENSUS["waited_s"] += self.waited_s
-                    _CLAIM_CENSUS["max_wait_s"] = max(
-                        _CLAIM_CENSUS["max_wait_s"], self.waited_s)
-                    self.why = (f"another driver held a conflicting claim on "
-                                f"this checkout for {self.wait_s:g}s")
-                    return self
+                    break
                 # STILL QUEUED, and that is a real event: this worker is
                 # alive, correctly blocked, and has not stopped. Without it a
                 # worker that is not holding the claim looks frozen to any
                 # generic progress signal.
-                since_note += 0.25
+                since_note += _CLAIM_POLL_S
                 if since_note >= _CLAIM_NOTE_EVERY_S:
                     since_note = 0.0
                     note_worker_progress(
                         f"claim: still queued ({word}) for "
                         f"{self.repo_root.name}")
-                time.sleep(0.25)
+                time.sleep(_CLAIM_POLL_S)
                 continue
-            self._fh = fh
-            self.held = True
-            self.why = "held"
+            granted = True
+            break
+        if not granted:
+            fh.close()
             self.waited_s = time.monotonic() - started
             _CLAIM_CENSUS["claims"] += 1
-            _CLAIM_CENSUS[word] += 1
+            _CLAIM_CENSUS["gave_up"] += 1
             _CLAIM_CENSUS["waited_s"] += self.waited_s
-            _CLAIM_CENSUS["max_wait_s"] = max(_CLAIM_CENSUS["max_wait_s"],
-                                              self.waited_s)
-            note_worker_progress(
-                f"claim: held ({word}) for {self.repo_root.name} after "
-                f"{self.waited_s:.2f}s queued")
+            _CLAIM_CENSUS["max_wait_s"] = max(
+                _CLAIM_CENSUS["max_wait_s"], self.waited_s)
+            self.why = (f"another driver held a conflicting claim on "
+                        f"this checkout for {self.wait_s:g}s")
             return self
+        self._fh = fh
+        self.held = True
+        self.why = "held"
+        self.waited_s = time.monotonic() - started
+        _CLAIM_CENSUS["claims"] += 1
+        _CLAIM_CENSUS[word] += 1
+        _CLAIM_CENSUS["waited_s"] += self.waited_s
+        _CLAIM_CENSUS["max_wait_s"] = max(_CLAIM_CENSUS["max_wait_s"],
+                                          self.waited_s)
+        note_worker_progress(
+            f"claim: held ({word}) for {self.repo_root.name} after "
+            f"{self.waited_s:.2f}s queued")
+        return self
 
     def __exit__(self, *exc) -> bool:
         if self._fh is not None:

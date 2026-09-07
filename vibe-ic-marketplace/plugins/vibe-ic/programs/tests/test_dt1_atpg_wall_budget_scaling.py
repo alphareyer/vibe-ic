@@ -29,6 +29,7 @@ assert SCRIPT.exists()
 
 sys.path.insert(0, str(PROG))
 import transition_fault_atpg_run as tdf  # noqa: E402
+import _container_route as _route  # noqa: E402
 
 _SRC = SCRIPT.read_text()
 
@@ -182,6 +183,13 @@ def test_run_in_docker_salvages_partial_stdout_on_a_stall(monkeypatch, tmp_path)
                 "not advance for > 1s — killed as hung, not slow.",
             outcome="stalled", elapsed_s=1.0)
 
+    # THE SUBJECT IS THE CONTAINER ROUTE — the reap handler under test exists
+    # only on it (`docker rm -f` on a named ephemeral container). Which route
+    # `_run_in_docker` takes is otherwise read off the MACHINE
+    # (`_CE.no_container_route()` = no docker client on PATH), so without this
+    # pin the test asserted a property of the host and reported it as one of
+    # the tree: green on a host with a docker client, red inside the image.
+    _route.pin_container_route(monkeypatch)
     monkeypatch.setattr(tdf._wd, "run_host_supervised", fake_supervised)
     ec, out, err = tdf._run_in_docker(tmp_path, "yosys /work/x.ys", timeout=1)
     assert ec == tdf._wd.RC_STALLED

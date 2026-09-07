@@ -23,6 +23,7 @@ _PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROGRAMS))
 
 import design_one_shot_runner as R          # noqa: E402
+import _container_route as _route            # noqa: E402
 
 
 def _stage_proj(tmp_path):
@@ -75,6 +76,12 @@ def test_unmounted_container_routes_through_staging(tmp_path, monkeypatch):
     cleaned up — and the step PASSes."""
     proj = _stage_proj(tmp_path)
     synth_dir = R._pl.synth_dir(proj)
+    # THE SUBJECT IS THE CONTAINER FALLBACK — staging in, exec, copy back.
+    # `step_yosys_synth` reaches it only when there is a docker client on
+    # PATH (`_local_exec_mode()`), which is a fact about the MACHINE. Unpinned,
+    # this test reported that fact as a property of the tree: green on a host
+    # with docker, red inside the pinned image, same commit.
+    _route.pin_container_route(monkeypatch)
     rec = _RunRecorder(synth_dir)
     monkeypatch.setattr(R, "_run", rec)
     monkeypatch.setattr(R, "_path_in_container", lambda p, c: False)
@@ -131,6 +138,12 @@ def test_mounted_container_behavior_frozen(tmp_path, monkeypatch):
             return 0, "Number of cells: 44", ""
         return 0, "", ""
 
+    # THE SUBJECT IS THE CONTAINER FALLBACK — staging in, exec, copy back.
+    # `step_yosys_synth` reaches it only when there is a docker client on
+    # PATH (`_local_exec_mode()`), which is a fact about the MACHINE. Unpinned,
+    # this test reported that fact as a property of the tree: green on a host
+    # with docker, red inside the pinned image, same commit.
+    _route.pin_container_route(monkeypatch)
     monkeypatch.setattr(R, "_run", fake_run)
     monkeypatch.setattr(R, "_path_in_container", lambda p, c: True)
     res = R.step_yosys_synth(proj, "counter", container="test-eda")

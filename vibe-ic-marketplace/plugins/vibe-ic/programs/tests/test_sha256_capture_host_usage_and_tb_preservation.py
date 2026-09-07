@@ -34,6 +34,7 @@ import l12_sequences_in_consumed_layer_check as L12C    # noqa: E402
 import l12_sequence_implementation_check as L12I        # noqa: E402
 import testbench_gen as TBG                              # noqa: E402
 import design_one_shot_runner as DOSR                    # noqa: E402
+import _container_route as _route                        # noqa: E402
 
 
 README = (
@@ -179,6 +180,12 @@ def test_scaffold_still_carrying_the_marker_is_refreshed(tmp_path):
 # 3. professional TB runs where the toolchain actually is
 # ---------------------------------------------------------------------------
 def test_exec_site_prefers_container_then_host(monkeypatch):
+    # THE SUBJECT IS THE ORDER (container first, then host) — which only
+    # exists when there IS a container route. `_professional_tb_exec_site`
+    # asks `_local_exec_mode()`, i.e. the MACHINE, so unpinned this test
+    # reported the host's docker client as a property of the tree: green
+    # where one is installed, red inside the image where none is.
+    _route.pin_container_route(monkeypatch)
     monkeypatch.setattr(DOSR, "_tool_in_container", lambda c, t: True)
     monkeypatch.setattr(DOSR, "_local_cocotb_toolchain_present", lambda: True)
     assert DOSR._professional_tb_exec_site("eda") == "container"

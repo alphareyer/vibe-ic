@@ -34,6 +34,7 @@ from pathlib import Path
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 import design_one_shot_runner as dosr  # noqa: E402
+import _container_route as _route  # noqa: E402
 
 _QUIET = "IIC_OSIC_TOOLS_QUIET=1"
 
@@ -59,6 +60,7 @@ class _Recorder:
 def test_sim_docker_exec_passes_the_images_quiet_knob(monkeypatch):
     """THE #902 FOLLOW-ON ASSERTION. Fails against the program without the
     knob (the banner then reaches the sim transcript), passes with it."""
+    _route.pin_container_route(monkeypatch)   # the subject is the CONTAINER argv
     rec = _Recorder()
     monkeypatch.setattr(subprocess, "run", rec)
     dosr._docker_exec_raw("c_probe", "iverilog -V", timeout=30)
@@ -80,6 +82,7 @@ def test_guard_docker_exec_still_dispatches_unchanged(monkeypatch):
     """PAIRED GUARD - must PASS ON BOTH SIDES, so the assertion above cannot
     be satisfied by breaking dispatch. The command still reaches the named
     container through a login shell, and rc/stdout still pass through."""
+    _route.pin_container_route(monkeypatch)   # the subject is the CONTAINER argv
     rec = _Recorder(stdout="BANNERLESS")
     monkeypatch.setattr(subprocess, "run", rec)
     rc, out, err = dosr._docker_exec_raw("c_probe", "iverilog -V", timeout=30)
