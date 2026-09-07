@@ -153,6 +153,10 @@ def test_positive_sim_full_stack_tb_is_discovered_and_functional_passes(
         "tests_passed": 1,
         "tests_failed": 0,
         "tests_skipped": 0,
+        # #2073 — the population the denominator could NOT count. Empty here
+        # because the one sibling suite produced a transcript; a suite that
+        # produced none is named in this list rather than dropped in silence.
+        "not_measured": [],
     }
     assert rec["declared_denominator"]["total_declared_rows"] == 3
     assert rec["coverage"]["measured"] is True

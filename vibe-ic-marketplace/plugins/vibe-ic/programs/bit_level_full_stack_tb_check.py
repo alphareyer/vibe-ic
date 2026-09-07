@@ -945,15 +945,20 @@ def main():
                     # AGNOSTIC: keyed on the JUnit result structure.
                     _pro = _srb.find_professional_tb_pass(proj)
                     if _pro:
+                        _nm = _srb.union_disclosure(
+                            _srb.professional_tb_union(proj))
                         _msg = (
                             "PASS: register-map functional verification "
                             "ACHIEVED by the professional cocotb testbench "
-                            f"({_pro['rel_path']}: tests={_pro['tests']} "
+                            f"({';'.join(_pro['rel_paths'])} — the UNION of "
+                            f"{len(_pro['rel_paths'])} sibling suite(s): "
+                            f"tests={_pro['tests']} "
                             f"passed={_pro['passed']} "
                             f"failures={_pro['failures']} "
                             f"errors={_pro['errors']}). The register-map "
                             "full-stack functional pillar is satisfied by this "
-                            "real functional PASS.")
+                            "real functional PASS."
+                            + (f" [{_nm}]" if _nm else ""))
                         _res = {
                             "pass": True,
                             "vacuous_pass": False,

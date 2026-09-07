@@ -9041,6 +9041,77 @@ def _resolve_skip_analog_anchor(project: Path) -> Optional[str]:
 # not see. chip/PDK-AGNOSTIC: structural paths + JUnit structure, no chip literal.
 _SIM_STEP4_CANONICAL_RESULTS = "phase2/stage1/sim/results.xml"
 
+#: The step whose `required_outputs` DECLARE where Step-4 simulation evidence
+#: lives. Read from the flow YAML, never re-spelled.
+_SIM_STEP4_STEP_ID = "4"
+
+
+class Step4EvidenceUndeclared(LookupError):
+    """The flow declares no step-4 simulation-evidence entry this reader can
+    resolve. Raised, never defaulted: a silent empty alternative list would
+    turn "the declaration is broken" into "the run produced nothing", and the
+    caller would charge the design for a defect in the flow definition."""
+
+
+def step4_sim_evidence_alternatives(
+        flow_def: Optional[Path] = None) -> List[str]:
+    """The paths the FLOW YAML declares as Step-4 simulation evidence.
+
+    ORGANIC #2074 — THE INLINE STEP WAS A SECOND SPELLING. `flow/
+    phase1_phase2_phase3.yaml` declares step 4's evidence as ONE requirement in
+    the shapes the supported TB paths emit::
+
+        phase2/stage1/sim/*.log OR phase2/stage1/sim/results.xml
+        OR phase2/stage1/sim/pass.flag
+        OR phase2/stage1/sim_professional/**/results.xml
+
+    while `design_one_shot_runner.step_step4_functional_evidence` looked only at
+    `phase2/stage1/sim/results.xml`. A JUnit written to the professional path
+    (the analog-acceptance producer's, #2064) therefore satisfied the gate and
+    not the inline step, and the inline verdict could not move. This function is
+    the ONE derivation both consume; the gate resolves the very same entry
+    through `_resolve_required_output`.
+
+    The entry is identified by CONTENT, not by position: it is the step-4
+    `required_outputs` entry whose alternatives include the canonical
+    `phase2/stage1/sim/results.xml`. Raises `Step4EvidenceUndeclared` when the
+    flow carries no such entry — degrade loudly, never silently."""
+    path = Path(flow_def) if flow_def else DEFAULT_FLOW_DEF
+    try:
+        doc = yaml.safe_load(Path(path).read_text(errors="replace"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise Step4EvidenceUndeclared(
+            f"flow definition unreadable at {path}: {exc}") from exc
+    for step in ((doc or {}).get("steps") or []):
+        if not isinstance(step, dict) or str(step.get("id")) != _SIM_STEP4_STEP_ID:
+            continue
+        for entry in (step.get("required_outputs") or []):
+            alts = [a.strip() for a in str(entry).split(" OR ") if a.strip()]
+            if _SIM_STEP4_CANONICAL_RESULTS in alts:
+                return alts
+        raise Step4EvidenceUndeclared(
+            f"step {_SIM_STEP4_STEP_ID} of {path} declares no required_outputs "
+            f"entry naming {_SIM_STEP4_CANONICAL_RESULTS}")
+    raise Step4EvidenceUndeclared(
+        f"{path} declares no step {_SIM_STEP4_STEP_ID}")
+
+
+def step4_sim_evidence(project: Path,
+                       flow_def: Optional[Path] = None) -> List[str]:
+    """Every DECLARED Step-4 simulation-evidence path that resolves in
+    ``project``, project-relative, in declaration order.
+
+    Resolution goes through `_glob_first` — the same function `check_step`'s
+    `required_outputs` probe and the `files_exist` gate use — so the inline step
+    and the gate cannot answer "does this artefact exist" differently. Empty
+    means the run produced evidence at NONE of the declared paths."""
+    hits: List[str] = []
+    for alt in step4_sim_evidence_alternatives(flow_def):
+        for rel in _glob_first(project, alt):
+            if rel not in hits:
+                hits.append(rel)
+    return hits
+
 
 def _sim_files_superseded_by_professional_tb(
         project: Path, missing_patterns: List[str]) -> Optional[str]:
@@ -9055,15 +9126,19 @@ def _sim_files_superseded_by_professional_tb(
     if not any(_SIM_STEP4_CANONICAL_RESULTS in (p or "")
                for p in missing_patterns):
         return None
+    union = _srb.professional_tb_union(project)
     pro = _srb.find_professional_tb_pass(project)
     if not pro:
         return None
+    _nm = _srb.union_disclosure(union)
     return (f"Step-4 sim evidence: canonical {_SIM_STEP4_CANONICAL_RESULTS} / "
             f"pass.flag absent, but a REAL professional_tb functional PASS is "
-            f"present at {pro.get('rel_path')} (tests={pro.get('tests')}, "
+            f"present at {';'.join(pro.get('rel_paths') or [])} — the UNION of "
+            f"{len(pro.get('rel_paths') or [])} sibling suite(s): "
+            f"tests={pro.get('tests')}, "
             f"failures={pro.get('failures')}, errors={pro.get('errors')}, "
-            f"passed={pro.get('passed')}) — accepted as Step-4 functional-sim "
-            f"evidence (#171).")
+            f"passed={pro.get('passed')} — accepted as Step-4 functional-sim "
+            f"evidence (#171)." + (f" [{_nm}]" if _nm else ""))
 
 
 def _maybe_forward_skip_analog(project: Path, cmd_str: str,

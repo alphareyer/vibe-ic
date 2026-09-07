@@ -19,11 +19,28 @@ It is deliberately a pure, side-effect-free parser:
     ``<testsuite>`` in a cocotb/JUnit ``results.xml``. Returns None for a
     non-JUnit document (e.g. the ``<results><verdict>…`` connectivity bridge),
     so it can NEVER mistake the connectivity waiver for a functional PASS.
-  * ``find_professional_tb_pass(project)`` — glob the professional-TB result(s)
-    and return a summary ONLY when a real functional PASS is present
-    (``tests > 0`` AND ``failures == 0`` AND ``errors == 0``). Globs on ``*``
+  * ``professional_tb_union(project)`` — EVERY sibling suite under
+    ``phase2/stage1/sim_professional/``, counted when it produced a JUnit and
+    NAMED as ``not_measured`` when it did not. The Step-4 verdict is a function
+    of this union.
+  * ``find_professional_tb_pass(project)`` — the union's summary, returned ONLY
+    when the union is a real functional PASS (``tests > 0`` AND
+    ``failures == 0`` AND ``errors == 0`` AND ``passed > 0``). Globs on ``*``
     (the DUT sub-dir) so it is chip-AGNOSTIC — it keys on the JUnit structure
     and the standard path, never on a chip / vendor / SKU literal.
+
+#2073 — IT WAS FIRST-PASS-WINS ACROSS SIBLING SUITES. More than one producer
+writes into this slot (the cocotb professional TB, the L10 unit-TB executor,
+the analog acceptance TB), so a project legitimately carries SEVERAL sibling
+suite directories. The reader returned the FIRST one that passed and never
+looked at the rest: measured through the front door on a mixed analog/digital
+project (lane czacctb, #2064), where an analog
+acceptance suite with 10 failures beside a 7-test green digital suite published
+verdict PASS while the SAME record's ``functional_test_denominator`` — which
+already summed the union — read ``tests_run 17 / passed 7 / failed 10``. A
+verdict that contradicts its own denominator in one record is a defect of this
+reader, not of either suite. The union is now the subject of the predicate, and
+a suite that produced no parsable JUnit is named, never silently skipped.
 
 Anti-fabrication (§4.05): this module only ADDS recognition of a REAL passing
 transcript. A missing / unparsable / failing / vacuous (zero-test) professional
@@ -37,6 +54,21 @@ from typing import Any, Dict, List, Optional
 
 # Standard emission path for professional_tb_gen: sim_professional/<top>/results.xml
 _PROFESSIONAL_GLOB = "phase2/stage1/sim_professional/*/results.xml"
+
+#: The sibling SUITE directories the glob above draws its results from. A suite
+#: that exists here and produced no parsable JUnit is a NOT_MEASURED fact the
+#: union reports by name — the glob alone cannot see it, which is how a suite
+#: could be skipped in silence.
+_PROFESSIONAL_SUITE_GLOB = "phase2/stage1/sim_professional/*"
+
+#: The union verdicts. ABSENT (no suite tree at all) and NOT_MEASURED (suites
+#: exist, none produced a readable JUnit) are DIFFERENT facts and must not
+#: collapse: "could not read it" is not "read it and it was empty".
+UNION_PASS = "PASS"
+UNION_FAIL = "FAIL"
+UNION_VACUOUS = "VACUOUS"
+UNION_NOT_MEASURED = "NOT_MEASURED"
+UNION_ABSENT = "ABSENT"
 
 
 def parse_junit(path: Path) -> Optional[Dict[str, Any]]:
@@ -98,32 +130,137 @@ def parse_junit(path: Path) -> Optional[Dict[str, Any]]:
     }
 
 
-def find_professional_tb_pass(project: Path) -> Optional[Dict[str, Any]]:
-    """Return a summary of the professional cocotb TB result IFF it is a real
-    functional PASS, else ``None``.
+def professional_tb_union(project: Path) -> Dict[str, Any]:
+    """Every sibling suite under ``phase2/stage1/sim_professional/``, COUNTED
+    when it produced a JUnit and NAMED when it did not.
 
-    "Real functional PASS" = a JUnit ``results.xml`` under
-    ``phase2/stage1/sim_professional/<top>/`` with ``tests > 0`` AND
-    ``failures == 0`` AND ``errors == 0``. A vacuous (zero-test), failing, or
-    all-skipped result returns ``None`` — the professional path did not close
-    functional verification, so the caller keeps its prior verdict.
+    The Step-4 functional verdict is a function of this union and of nothing
+    smaller. Returned keys:
 
-    Summary keys: ``rel_path`` (POSIX, project-relative), ``tests``,
-    ``failures``, ``errors``, ``skipped``, ``passed``. chip-AGNOSTIC."""
-    for cand in sorted(project.glob(_PROFESSIONAL_GLOB)):
-        summ = parse_junit(cand)
-        if not summ:
+      ``suites``        one entry per suite that produced a parsable JUnit,
+                        each ``{rel_path, suite_names, tests, failures,
+                        errors, skipped, passed}``.
+      ``not_measured``  one entry per suite DIRECTORY that produced no parsable
+                        JUnit, each ``{rel_dir, reason}``. This is the half a
+                        glob over ``*/results.xml`` cannot see: a suite that
+                        never ran is absent from the glob and was therefore
+                        skipped in silence.
+      ``rel_paths``     the measured transcripts, project-relative POSIX.
+      ``suite_names``   the ``<testsuite name=…>`` of every measured suite.
+      ``failing``       one reviewable sentence per suite that carries a
+                        failure or an error — "every failure named".
+      ``tests`` / ``failures`` / ``errors`` / ``skipped`` / ``passed``
+                        the UNION totals, the same sums
+                        ``cpu_functional_oracle_waiver_check``'s
+                        ``functional_test_denominator`` publishes.
+      ``verdict``       one of ``PASS`` (tests > 0, failures == errors == 0,
+                        passed > 0), ``FAIL`` (a failure or an error anywhere in
+                        the union), ``VACUOUS`` (measured, but nothing passed),
+                        ``NOT_MEASURED`` (suites exist, none produced a readable
+                        JUnit) or ``ABSENT`` (no suite tree at all).
+
+    Pure and side-effect-free. chip-AGNOSTIC: the standard path and the JUnit
+    structure, never a chip / vendor / SKU literal."""
+    measured: List[Dict[str, Any]] = []
+    not_measured: List[Dict[str, str]] = []
+    try:
+        suite_dirs = sorted(d for d in project.glob(_PROFESSIONAL_SUITE_GLOB)
+                            if d.is_dir())
+    except OSError:
+        suite_dirs = []
+    for d in suite_dirs:
+        try:
+            rel_dir = d.relative_to(project).as_posix()
+        except ValueError:                        # pragma: no cover — defensive
+            rel_dir = d.as_posix()
+        res = d / "results.xml"
+        summ = parse_junit(res)
+        if summ is None:
+            # NAME IT. Absent and unreadable are both "we did not measure this
+            # suite", and neither may be spent as a pass or as a failure.
+            not_measured.append({
+                "rel_dir": rel_dir,
+                "reason": ("produced no results.xml" if not res.is_file() else
+                           "results.xml is not a readable JUnit document"),
+            })
             continue
-        if (summ["tests"] > 0
-                and summ["failures"] == 0
-                and summ["errors"] == 0
-                and summ["passed"] > 0):
-            try:
-                rel = cand.relative_to(project).as_posix()
-            except ValueError:
-                rel = cand.as_posix()
-            return {"rel_path": rel, **summ}
-    return None
+        measured.append({"rel_path": f"{rel_dir}/results.xml", **summ})
+
+    totals = {k: sum(int(m.get(k, 0) or 0) for m in measured)
+              for k in ("tests", "failures", "errors", "skipped", "passed")}
+    failing = [f"{m['rel_path']}: tests={m['tests']} failures={m['failures']} "
+               f"errors={m['errors']}"
+               for m in measured if (m["failures"] or m["errors"])]
+    suite_names: List[str] = []
+    for m in measured:
+        suite_names.extend(m.get("suite_names") or [])
+
+    if not measured and not not_measured:
+        verdict = UNION_ABSENT
+    elif not measured:
+        verdict = UNION_NOT_MEASURED
+    elif totals["failures"] or totals["errors"]:
+        verdict = UNION_FAIL
+    elif totals["tests"] > 0 and totals["passed"] > 0:
+        verdict = UNION_PASS
+    else:
+        verdict = UNION_VACUOUS
+
+    return {
+        "suites": measured,
+        "not_measured": not_measured,
+        "rel_paths": [m["rel_path"] for m in measured],
+        "suite_names": suite_names,
+        "failing": failing,
+        "verdict": verdict,
+        **totals,
+    }
+
+
+def union_disclosure(union: Dict[str, Any]) -> str:
+    """One reviewable clause naming what the union could NOT measure, or "".
+
+    Every caller that CREDITS or REFUSES on this union appends it, so a suite
+    that produced no transcript reaches the reader by name instead of being
+    dropped between the glob and the sentence."""
+    nm = union.get("not_measured") or []
+    if not nm:
+        return ""
+    return ("NOT_MEASURED: " + "; ".join(
+        f"{e.get('rel_dir')} ({e.get('reason')})" for e in nm))
+
+
+def find_professional_tb_pass(project: Path) -> Optional[Dict[str, Any]]:
+    """Return a summary of the professional cocotb TB result IFF the UNION of
+    every sibling suite is a real functional PASS, else ``None``.
+
+    "Real functional PASS" = across EVERY suite under
+    ``phase2/stage1/sim_professional/<top>/`` that produced a JUnit
+    ``results.xml``: ``tests > 0`` AND ``failures == 0`` AND ``errors == 0``
+    AND ``passed > 0``. A vacuous (zero-test), failing, or all-skipped union
+    returns ``None`` — the professional path did not close functional
+    verification, so the caller keeps its prior verdict. #2073: a FAILING
+    sibling can no longer be out-sorted by a passing one.
+
+    Summary keys: ``rel_path`` (POSIX, project-relative — the first measured
+    transcript, kept single because callers dereference it), ``rel_paths``
+    (every measured transcript), ``not_measured`` (every suite that produced
+    none, by name), ``suite_names``, and the UNION ``tests``, ``failures``,
+    ``errors``, ``skipped``, ``passed``. chip-AGNOSTIC."""
+    union = professional_tb_union(project)
+    if union["verdict"] != UNION_PASS:
+        return None
+    return {
+        "rel_path": union["rel_paths"][0],
+        "rel_paths": list(union["rel_paths"]),
+        "not_measured": list(union["not_measured"]),
+        "suite_names": list(union["suite_names"]),
+        "tests": union["tests"],
+        "failures": union["failures"],
+        "errors": union["errors"],
+        "skipped": union["skipped"],
+        "passed": union["passed"],
+    }
 
 
 def substantiated_functional_evidence(project: Path,

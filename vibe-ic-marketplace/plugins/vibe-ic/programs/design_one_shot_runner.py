@@ -8256,11 +8256,71 @@ def step_step4_functional_evidence(project: Path,
 
     sim_results = _pl.sim_dir(project) / "results.xml"
     if not sim_results.is_file():
+        # ORGANIC #2074 — THE INLINE STEP WAS THE SECOND SPELLING. It looked
+        # only at `phase2/stage1/sim/results.xml`, while the flow YAML's step-4
+        # `required_outputs` declares that path OR a `*.log` OR a `pass.flag`
+        # OR `phase2/stage1/sim_professional/**/results.xml`. A JUnit at the
+        # professional path (the analog-acceptance producer's, #2064) satisfied
+        # the gate and not this step, so the inline verdict could not move —
+        # and the step's own reason named the absence of a file the flow does
+        # not require. The declaration is now read from the flow YAML through
+        # `flow_compliance_check.step4_sim_evidence`, which resolves it with the
+        # SAME `_glob_first` the gate's probe uses.
+        try:
+            import flow_compliance_check as _fcc_local
+            import _sim_results_bridge as _srb_step4
+            _declared = _fcc_local.step4_sim_evidence_alternatives()
+            _found = _fcc_local.step4_sim_evidence(project)
+        except Exception as exc:                             # noqa: BLE001
+            # A broken/unreadable declaration is a defect of the FLOW, and it
+            # must not be charged to the design as "no evidence". Say which.
+            return StepResult(
+                "step4_functional_evidence", "FAIL", time.time() - t0,
+                f"NOT_MEASURED: step-4 evidence declaration unreadable: {exc}",
+                [str(vacuous_report.relative_to(project))])
+        if not _found:
+            return StepResult(
+                "step4_functional_evidence", "FAIL", time.time() - t0,
+                "INCOMPLETE: no step-4 simulation evidence at any path the "
+                f"flow declares ({' OR '.join(_declared)}); functional tests "
+                "did not produce a denominator",
+                [str(vacuous_report.relative_to(project))])
+        # Evidence exists at a declared path other than the canonical
+        # `sim/results.xml`, so `cpu_functional_oracle_waiver_check` has no
+        # connectivity record to classify (it returns its VACUOUS_PASS rc=2)
+        # and cannot own this verdict. The functional verdict comes from the
+        # transcripts themselves — the UNION of every sibling professional
+        # suite (#2073), never one of them.
+        _union = _srb_step4.professional_tb_union(project)
+        _nm = _srb_step4.union_disclosure(_union)
+        _outputs = [str(vacuous_report.relative_to(project))]
+        if _union["verdict"] != _srb_step4.UNION_PASS:
+            return StepResult(
+                "step4_functional_evidence", "FAIL", time.time() - t0,
+                f"INCOMPLETE: step-4 evidence is present at {_found} but the "
+                f"functional verdict over "
+                f"{len(_union['rel_paths'])} professional sibling suite(s) is "
+                f"{_union['verdict']}: tests={_union['tests']} "
+                f"passed={_union['passed']} failures={_union['failures']} "
+                f"errors={_union['errors']}"
+                + (f"; failing: {'; '.join(_union['failing'])}"
+                   if _union["failing"] else "")
+                + (f"; {_nm}" if _nm else ""),
+                _outputs,
+                extras={"fallback_skill": "testbench-gen",
+                        "program_first": "professional_tb_gen"})
         return StepResult(
-            "step4_functional_evidence", "FAIL", time.time() - t0,
-            "INCOMPLETE: no phase2/stage1/sim/results.xml; functional tests "
-            "did not produce a denominator",
-            [str(vacuous_report.relative_to(project))])
+            "step4_functional_evidence", "PASS", time.time() - t0,
+            "Step 4 TB and functional evidence passed at the declared "
+            f"professional path(s) {';'.join(_union['rel_paths'])} — the UNION "
+            f"of {len(_union['rel_paths'])} sibling suite(s): "
+            f"tests={_union['tests']} passed={_union['passed']} "
+            f"failures={_union['failures']} errors={_union['errors']}"
+            + (f" [{_vacuous_skip}]" if _vacuous_skip else "")
+            + (f" [{_nm}]" if _nm else ""),
+            _outputs,
+            extras=({"vacuous_disclosed_skip": _vacuous_skip}
+                    if _vacuous_skip else {}))
 
     oracle_report = _pl.report_path(
         project, "gates/cpu_functional_oracle_waiver.json")
@@ -10631,7 +10691,9 @@ def _emit_connectivity_sim_bridge(project: Path, transcript: Path,
             f"<waiver_reason>{track_reason}; the AID reference TB cannot bind "
             "this interface family, and the functional verification it defers "
             "to WAS PERFORMED in this run: "
-            f"{_prof['rel_path']} — tests={_prof['tests']} "
+            f"{';'.join(_prof['rel_paths'])} — the UNION of "
+            f"{len(_prof['rel_paths'])} sibling suite(s): "
+            f"tests={_prof['tests']} "
             f"passed={_prof['passed']} failures={_prof['failures']} "
             f"errors={_prof['errors']}. The cap:cpu_functional_oracle marker "
             "is retained because it names the per-L10-case oracle gap, which a "
@@ -17567,6 +17629,15 @@ def _v1_6_609_functional_tb_pass_payload(project: Path):
     tests = int(summ["tests"])
     failures = int(summ["failures"])
     errors = int(summ["errors"])
+    # #2073 — when the counts come from the professional slot they are the UNION
+    # of every sibling suite, and `res` is only the first of them. A note that
+    # prints union counts beside ONE path misattributes the other suites' tests
+    # to that file, so name every transcript the numbers were summed from.
+    try:
+        counted_from = (";".join(summ.get("rel_paths") or [])
+                        or res.relative_to(project).as_posix())
+    except ValueError:                          # pragma: no cover — defensive
+        counted_from = res.as_posix()
     try:
         txt = res.read_text(errors="replace")
     except OSError:
@@ -17598,7 +17669,7 @@ def _v1_6_609_functional_tb_pass_payload(project: Path):
         "scenarios_covered": sorted(set(cases))[:24],
         "l10_conformance": {"ok": ok, "total": total},
         "note": ("authored self-checking functional TB PASS "
-                 f"({rel_evidence} "
+                 f"({counted_from} "
                  f"tests={tests}/failures={failures}/errors={errors}, "
                  "L10 execution evidence ok==total>0); scenarios are the TB's own "
                  "testcase names (#609; #436: never another design's canned "

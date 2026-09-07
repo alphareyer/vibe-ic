@@ -277,12 +277,10 @@ def _evidence_summary(project: Path) -> dict:
     l12 = _list_denominator(
         gd / "L12_BEHAVIORAL_SEQUENCES.json",
         ("sequences", "behavioral_sequences"))
-    professional_results = []
-    for result in sorted(project.glob(
-            "phase2/stage1/sim_professional/*/results.xml")):
-        parsed = _srb.parse_junit(result)
-        if parsed is not None:
-            professional_results.append((result, parsed))
+    # #2073 — ONE reader of the professional slot, and it is the UNION. This
+    # loop already summed every sibling suite; what it could not see is a suite
+    # that produced NO transcript, which is now disclosed by name below.
+    union = _srb.professional_tb_union(project)
 
     sim_results = _pl.sim_dir(project) / "results.xml"
     xml = ""
@@ -303,19 +301,18 @@ def _evidence_summary(project: Path) -> dict:
         "tests_passed": 0,
         "tests_failed": 0,
         "tests_skipped": 0,
+        # #2073 — a sibling suite that produced no parsable JUnit is NOT
+        # measured, and a denominator that omits it reads as though the suite
+        # did not exist. Named here so the record carries the whole population.
+        "not_measured": list(union["not_measured"]),
     }
-    if professional_results:
-        pro = {key: sum(int(summary.get(key, 0) or 0)
-                        for _, summary in professional_results)
-               for key in ("tests", "failures", "errors", "skipped", "passed")}
-        sources = [str(path.relative_to(project))
-                   for path, _ in professional_results]
+    if union["rel_paths"]:
         functional.update({
-            "source": ";".join(sources),
-            "tests_run": pro["tests"],
-            "tests_passed": pro["passed"],
-            "tests_failed": pro["failures"] + pro["errors"],
-            "tests_skipped": pro["skipped"],
+            "source": ";".join(union["rel_paths"]),
+            "tests_run": union["tests"],
+            "tests_passed": union["passed"],
+            "tests_failed": union["failures"] + union["errors"],
+            "tests_skipped": union["skipped"],
         })
     elif vectors_total > 0:
         functional.update({
@@ -460,18 +457,22 @@ def _evaluate(project: Path) -> "tuple[int, str]":
     # step aside (rc=0). This remains chip-AGNOSTIC and anti-fabrication-safe:
     # a missing, failing, or vacuous professional result returns None and the
     # blocking INCOMPLETE verdict below remains in force.
+    union = _srb.professional_tb_union(project)
     pro = _srb.find_professional_tb_pass(project)
     if pro:
+        _nm = _srb.union_disclosure(union)
         return 0, (
             "PASS: functional verification ACHIEVED by the professional-TB "
             "result slot (producer: "
             + (", ".join(pro.get("suite_names") or []) or "unnamed suite")
-            + f") — {pro['rel_path']}: tests="
+            + f") — {';'.join(pro['rel_paths'])}: tests="
             f"{pro['tests']} passed={pro['passed']} failures={pro['failures']} "
-            f"errors={pro['errors']}. The connectivity-PASS capability record "
+            f"errors={pro['errors']} over {len(pro['rel_paths'])} sibling "
+            f"suite(s). The connectivity-PASS capability record "
             f"({CAP_CPU_FUNCTIONAL_ORACLE}) is "
             "SUPERSEDED by this real functional PASS; Step 4 is a genuine "
-            "functional simulation PASS, not WAIVED-DEFERRED.")
+            "functional simulation PASS, not WAIVED-DEFERRED."
+            + (f" [{_nm}]" if _nm else ""))
 
     denom = _evidence_summary(project)["declared_denominator"]
     # A functional transcript that EXISTS and did not pass is not the same fact
@@ -479,27 +480,27 @@ def _evaluate(project: Path) -> "tuple[int, str]":
     # "0 functional tests ran". Name the executed population when there is one:
     # the reader must be able to tell "nobody ran the testbenches" from "the
     # testbenches ran and the design failed them".
-    ran = []
-    for cand in sorted(project.glob(_srb._PROFESSIONAL_GLOB)):
-        summ = _srb.parse_junit(cand)
-        if summ and summ["tests"] > 0:
-            ran.append((cand, summ))
-    if ran:
-        cand, summ = ran[0]
-        try:
-            rel = cand.relative_to(project).as_posix()
-        except ValueError:
-            rel = cand.as_posix()
+    # #2073 — NAME EVERY FAILURE, over the union. This used to report
+    # `sorted(...)[0]` — the first transcript with tests > 0 — as "the"
+    # transcript that did not pass. With sibling suites that is a coin toss:
+    # when the PASSING suite sorts first the sentence named a green transcript
+    # and said it did NOT pass, which is a lie about the file it cites.
+    _nm = _srb.union_disclosure(union)
+    if union["tests"] > 0:
         return 1, (
             f"INCOMPLETE: {_waiver_track_class_label(xml)} — connectivity-only "
             f"evidence reached FULL_STACK_TB_DONE (evidence: {evidence}), and "
-            f"a functional transcript EXISTS but did NOT pass: {rel} — "
-            f"tests={summ['tests']} passed={summ['passed']} "
-            f"failures={summ['failures']} errors={summ['errors']} "
+            f"a functional transcript EXISTS but did NOT pass, over the "
+            f"union of {len(union['rel_paths'])} sibling suite(s): "
+            f"tests={union['tests']} passed={union['passed']} "
+            f"failures={union['failures']} errors={union['errors']} "
             f"(errors = testbenches that never ran) for "
             f"{denom['total_declared_rows']} declared L10/L12 row(s)"
-            f"{_row_kind_disclosure(project)}. "
-            f"No waiver is granted.")
+            f"{_row_kind_disclosure(project)}"
+            + (f"; failing: {'; '.join(union['failing'])}"
+               if union["failing"] else "")
+            + (f"; {_nm}" if _nm else "")
+            + ". No waiver is granted.")
     return 1, (
         f"INCOMPLETE: {_waiver_track_class_label(xml)} — connectivity-only "
         f"evidence reached FULL_STACK_TB_DONE (evidence: {evidence}), but 0 "
@@ -508,7 +509,8 @@ def _evaluate(project: Path) -> "tuple[int, str]":
         "a functional oracle. Run the "
         "program-first professional_tb_gen route, then fill unsupported "
         "design-specific reference semantics with the testbench-gen expert "
-        "fallback and re-run Step 4. No waiver is granted.")
+        "fallback and re-run Step 4. No waiver is granted."
+        + (f" [{_nm}]" if _nm else ""))
 
 
 def main(argv: "list[str] | None" = None) -> int:
