@@ -174,7 +174,7 @@ def test_every_blocking_reference_is_named_and_counted(tmp_path, stray):
     head = r.stdout.splitlines()[0]
     assert head.startswith("[FAIL]"), head
     assert "2 blocking external-storage reference(s)" in head, head
-    assert "(1 live, 1 dangling)" in head, head
+    assert "(1 live, 1 dangling, 0 outside-root)" in head, head
     assert str(stray) in r.stdout
     assert "/tmp/i2084-gone/floor.def" in r.stdout
 
@@ -292,7 +292,7 @@ def test_the_deciding_line_still_fits_when_the_counts_are_large(tmp_path):
     head = r.stdout.splitlines()[0]
     assert head.startswith("[FAIL]"), head
     assert "1024 blocking external-storage reference(s)" in head, head
-    assert "(0 live, 1024 dangling)" in head, head
+    assert "(0 live, 1024 dangling, 0 outside-root)" in head, head
     # the point: a four-digit population still fits, and the audit publishes
     # the WHOLE deciding line rather than a prefix of it.
     assert len(head) <= 200, (

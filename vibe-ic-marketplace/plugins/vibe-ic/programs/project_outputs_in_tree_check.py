@@ -41,6 +41,20 @@ This gate is **chip-AGNOSTIC**:
     The fix is for the agent to copy live artifacts to canonical
     locations under <project>/ before claiming completion.
 
+    #2158: THE POPULATION IS NOT THE PREFIX LIST. Those four directories
+    are one common way to land in this condition, not the condition. A
+    third blocking class is derived from the RUN ROOT instead of from a
+    list: an absolute path cited in a canonical declaration file that
+    resolves OUTSIDE the project and is NOT ON DISK — a location this run
+    used and did not preserve — whatever prefix it carries. Measured on
+    two lanes at the same plugin tip, the same lost-scratch-path defect
+    FAILED under `TMPDIR=/tmp/lane.<lane>` and PASSED under a TMPDIR
+    beneath `$HOME`; the verdict turned on the operator's environment.
+    Deliberately narrow: an outside path that IS on disk (a toolchain
+    root, a PDK, another checkout) is untouched, because it names
+    something a reader can still follow. `_PATH_RE` itself is unchanged —
+    `collect_external_outputs.py` imports it to decide what to COPY.
+
 Honors waiver ``project_artifacts_external_storage_intentional`` (>=60
 chars per offending path).
 
@@ -72,7 +86,8 @@ Exit codes:
        OR every citation is waived)
     1  FAIL (a /tmp-class reference in a canonical declaration file — live
        (artifact still on disk, copy it in) or dangling (already swept, the
-       evidence is gone). Both block; the split states the remedy, not
+       evidence is gone), OR (#2158) a reference to any path outside the
+       project root that is not on disk. All three block; the split states the remedy, not
        whether there is a finding. The FIRST line of stdout is always the
        `[FAIL]` line naming the blocking population, because
        `flow_compliance_check._p0_first_line` publishes line 0 as the
@@ -118,6 +133,129 @@ _SCAN_GLOBS = (
 _PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_/])(/(?:tmp|var/tmp|dev/shm|run)/[A-Za-z0-9_./-]+)"
 )
+
+# ── #2158 — THE POPULATION IS "A PATH THAT WILL NOT EXIST AFTER THE RUN" ─────
+#
+# `_VOLATILE_PREFIXES` / `_PATH_RE` above are a HARD LIST of four directories.
+# They are not the definition of the thing this gate is for; they are one
+# common way to land in it. The fleet's own standing brief mandates
+# `TMPDIR=/tmp/lane.<lane>/`, and lanes that follow it were caught while a lane
+# whose TMPDIR sat under `$HOME` was equally dangling and completely invisible.
+#
+# MEASURED (lanes rbsub5 and rbsub6, 8HD-9, 2026-09-07, same plugin tip): both
+# runs recorded a scratch path in `reports/orchestrator/phase2_one_shot.json`
+# that no longer existed. rbsub6's began `/tmp/lane.rbsub6/…` and FAILED this
+# gate; rbsub5's began `/home/reyerchu/…` and PASSED it. The only variable
+# between the two verdicts was where TMPDIR happened to point — a property of
+# the operator's environment, not of the run's honesty.
+#
+# THE DERIVED POPULATION. Rather than lengthening the list of prefixes, which
+# can only ever chase the last environment someone used, the gate derives the
+# class from the RUN ROOT it was given: an absolute path cited in a canonical
+# declaration file, resolving OUTSIDE the project root, that is NOT ON DISK, is
+# a dangling reference to something the run cannot produce again — whatever
+# directory it lived in. That is the same finding `dangling` already blocks on
+# for `/tmp`, stated by its meaning instead of by its spelling.
+#
+# WHY NON-EXISTENCE IS PART OF THE DEFINITION AND NOT A SOFTENING OF IT. A path
+# outside the tree that IS on disk is the enormous, mostly-legitimate class of
+# system and toolchain references (`/usr/bin/…`, a PDK root, another checkout);
+# blocking on those would make the gate unusable and would say nothing about
+# lost evidence. A path outside the tree that is GONE is, by construction,
+# either evidence that was swept or a location that never existed — and either
+# way a reader following it gets nothing. Only the second class is added here.
+#
+# `_PATH_RE` IS DELIBERATELY NOT WIDENED. `collect_external_outputs.py` imports
+# it (`_gate._PATH_RE`) to decide which LIVE artefacts to copy into the tree;
+# widening it there would send that collector after `/usr/bin/...`. The new
+# population gets its own expression, and the volatile-prefix behaviour — live
+# and dangling alike — is byte-identical to before.
+# THE LOOKBEHIND IS WIDER THAN `_PATH_RE`'S, AND THE CENSUS IS WHY. Measured
+# over 6847 published run roots on 8HD-8 (2026-09-07, lane cz2158): reusing
+# `_PATH_RE`'s `(?<![A-Za-z0-9_/])` admits a `/` preceded by `.`, `~` or `-`,
+# so the TAIL of a RELATIVE path reads as an absolute one — `../../edn/README.md`
+# came back as `/../edn/README.md`, `~/.claude/plugins/cache` as
+# `/.claude/plugins/cache`. Those are the same reference, mis-cut.
+_ANY_ABS_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_/.~-])(/[A-Za-z0-9_.-][A-Za-z0-9_./-]*[A-Za-z0-9_-])"
+)
+
+
+# ── #2158 — WHAT "WILL NOT EXIST AFTER THE RUN" IS DERIVED FROM ─────────────
+#
+# TWO CANDIDATE DERIVATIONS WERE MEASURED, AND THE FIRST ONE FAILED. The
+# obvious reading — "outside the project root and not on disk" — was
+# implemented and censused over all 6847 published run roots on this host:
+#
+#     verdict rc 0 -> rc 1 : 2222 roots   (first draft, `_PATH_RE` lookbehind)
+#     verdict rc 0 -> rc 1 : 1659 roots   (after the lookbehind fix above)
+#
+# and the surviving population was almost entirely two classes that are not
+# lost evidence at all:
+#
+#   * SPEC PROSE. `/K/CS/CF/HD/SCR/JESDV/SUBCLASSV`, `/ARP/PMBus`, `/J/K`,
+#     `/AIP/CLOSE/BREAK/DONE` — slash-separated field and signal alternatives
+#     written by a protocol spec, in 55+ roots each. Nothing distinguishes them
+#     from a pathname by shape.
+#   * CONTAINER-INTERNAL TOOLCHAIN ROOTS. `/foss/pdks/...`, `/foss/designs/...`
+#     — real, correct, still-mounted paths that simply are not on the HOST
+#     filesystem the gate runs on. "Not on disk" is a statement about WHERE THE
+#     GATE RAN, not about whether the run preserved anything, and using it as
+#     the definition would make the gate's verdict depend on whether it was
+#     invoked inside or outside the image.
+#
+# So existence is kept as a NECESSARY condition and is not sufficient. The
+# derivation that actually comes from the RUN ROOT is this: the ephemeral
+# location a run leaks is a COPY OF THE RUN ROOT ITSELF, somewhere else.
+# `step_rtl_gen` stages the project as `<TMPDIR>/vibeic-rtl-step-XXXX/<name>`;
+# every staging, snapshot and scratch shape in this flow has the same property,
+# because that is what staging IS. A path that carries the run root's own
+# directory name as one of its components, resolves OUTSIDE the run root, and
+# is not on disk, is a reference to a relocated copy of this very project — and
+# a reader following it gets nothing.
+#
+# `/foss/pdks/...` carries no such component, and neither does `/K/CS/CF/HD`;
+# `/tmp/lane.rbsub6/vibeic-rtl-step-6k_pkx29/subservient` and
+# `$HOME/_lane_x/stage/subservient/phase2/...` both do. The prefix is never
+# consulted, which is the whole point of the issue.
+#
+# `_PATH_RE` IS DELIBERATELY NOT WIDENED. `collect_external_outputs.py` imports
+# it (`_gate._PATH_RE`) to decide which LIVE artefacts to copy into the tree;
+# widening it there would send that collector after `/usr/bin/...`. The new
+# population gets its own expression, and the volatile-prefix behaviour — live
+# and dangling alike — is byte-identical to before.
+
+# A reference has to look like a FILESYSTEM path, not a slash-prefixed prose
+# fragment: at least three parts (`/a/b`), and no empty or `..` component — the
+# census also surfaced literal text like `/A//F`, which `Path.parts` silently
+# normalizes into a plausible-looking three-component path.
+_MIN_DERIVED_COMPONENTS = 3
+
+
+def _derived_ephemeral(path_str: str, project: Path) -> bool:
+    """True when `path_str` names a relocated copy of THIS run root that is gone.
+
+    Three conditions, all necessary:
+      (1) it is shaped like a pathname, not like slash-separated prose;
+      (2) one of its components is the run root's own directory name — so it is
+          this project, staged or copied somewhere else. DERIVED from the run
+          root; no prefix list is consulted, so a TMPDIR under `$HOME`, under
+          `/scratch`, or anywhere else is caught identically;
+      (3) it is not on disk, so there is nothing left for a reader to follow.
+
+    The caller has already established that the path resolves OUTSIDE the run
+    root, is not a pinned plugin source, and was not claimed by `_PATH_RE`.
+    """
+    if "//" in path_str:
+        return False
+    parts = Path(path_str).parts
+    if len(parts) < _MIN_DERIVED_COMPONENTS or ".." in parts:
+        return False
+    name = project.name
+    if not name or name not in parts[1:]:
+        return False
+    return not Path(path_str).exists()
+
 
 # `_docker_watchdog.py` owns this exact private namespace.  The file is a
 # process-lifetime coordination marker, deliberately removed when the supervised
@@ -269,6 +407,10 @@ def main() -> int:
     # In-tree self-references: absolute paths that resolve INSIDE the project
     # being audited (counted only, never a finding — see _inside_project).
     in_tree_self = 0
+    # #2158 — the DERIVED ephemeral class: an absolute path outside the
+    # project root that is not on disk, whatever prefix it carries.
+    # (file, path) — always dangling by construction.
+    derived: List[Tuple[str, str]] = []
     # THE SCAN SIZE, kept because the exit code alone cannot carry it
     # (#511/#564). `no /tmp ... paths referenced` is a statement about the
     # FINDING and is exactly as true of a project with nothing in it as of a
@@ -276,6 +418,11 @@ def main() -> int:
     # about having opened zero files.
     scanned = 0
     seen: Set[str] = set()
+    # #2158 — paths the derived pass has already decided about. Kept apart from
+    # `seen` so the volatile-prefix pass keeps deciding first and its verdicts
+    # are byte-identical to before.
+    seen_derived: Set[str] = set()
+    ephemeral_derived: List[Tuple[str, str]] = []
     for pat in _SCAN_GLOBS:
         for f in project.glob(pat):
             if not f.is_file():
@@ -310,6 +457,33 @@ def main() -> int:
                 exists = Path(p).exists()
                 findings.append(
                     (str(f.relative_to(project)), p, exists, from_log))
+
+            # ── #2158 — the SAME question, asked of every prefix ────────────
+            # A second pass over the identical text, admitting any absolute
+            # path. A path already classified above keeps that classification
+            # (`seen`); what is left is the class the hard list could not name:
+            # outside the tree, and already gone.
+            for m in _ANY_ABS_PATH_RE.finditer(txt):
+                p = m.group(1).rstrip(".,;:)")
+                if p in seen or p in seen_derived:
+                    continue
+                if _inside_project(p, project):
+                    in_tree_self += 1
+                    seen_derived.add(p)
+                    continue
+                if _pinned_plugin_root(p) is not None:
+                    seen_derived.add(p)
+                    continue
+                if not _derived_ephemeral(p, project):
+                    continue
+                seen_derived.add(p)
+                if from_log:
+                    # Same rule as #622: a log cites transient tool paths by
+                    # nature. Disclosed, non-blocking.
+                    ephemeral_derived.append(
+                        (str(f.relative_to(project)), p))
+                    continue
+                derived.append((str(f.relative_to(project)), p))
 
     # ── #619 / #564 — A SCAN THAT OPENED NOTHING IS NOT A CLEAN SCAN ────────
     #
@@ -470,12 +644,24 @@ def main() -> int:
             block.append(f"  ... +{len(ephemeral)-5} more")
         notes.append("\n".join(block))
 
+    if ephemeral_derived:
+        block = [f"[INFO] project_outputs_in_tree_check: "
+                 f"{len(ephemeral_derived)} log-sourced dangling reference(s) "
+                 f"outside the project root (#2158 derived class, found in "
+                 f"*.log) — non-blocking, same rule as #622: logs cite "
+                 f"transient tool paths by nature:"]
+        for f, pth in ephemeral_derived[:5]:
+            block.append(f"  - {f} → {pth}")
+        if len(ephemeral_derived) > 5:
+            block.append(f"  ... +{len(ephemeral_derived)-5} more")
+        notes.append("\n".join(block))
+
     def _emit_notes() -> None:
         """The non-blocking disclosures, AFTER the verdict line that decides."""
         for note in notes:
             print(note)
 
-    if not nonlog:
+    if not nonlog and not derived:
         # The scan size leads, and the sentence that follows is phrased so it
         # reads as a statement about the POPULATION rather than about the
         # finding: `no such reference found` is false of a scan that read a
@@ -486,7 +672,11 @@ def main() -> int:
               f"reference(s) examined — no such reference found: no /tmp / "
               f"/var/tmp / /dev/shm / /run paths referenced in RESULT.md / "
               f"waivers.json / reports/ / generated_docs/ (log-only ephemeral "
-              f"tool paths and supervised watchdog pidfiles excluded)")
+              f"tool paths and supervised watchdog pidfiles excluded), and no "
+              f"absolute path outside {project} that is already gone "
+              f"(#2158: the population is 'a path that will not exist after "
+              f"the run', derived from the run root, not a list of four "
+              f"directories)")
         _emit_notes()
         return 0
 
@@ -496,7 +686,7 @@ def main() -> int:
     dangling = [(f, p) for (f, p, e) in nonlog if not e]
 
     waiver_n = _waiver_count(project)
-    fail_count = len(live) + len(dangling)
+    fail_count = len(live) + len(dangling) + len(derived)
 
     if waiver_n >= fail_count:
         print(f"[PASS_WITH_WAIVER] "
@@ -510,10 +700,19 @@ def main() -> int:
     # function is about to exit with. It states the blocking population — the
     # number the exit code is a function of — so a reader that takes only this
     # line still gets the reason and the size of it.
+    # THE 200-CHARACTER BUDGET IS PART OF THE CONTRACT (#2084). `_p0_first_line`
+    # publishes at most 200 characters of this line, and #2084 pins that the
+    # WHOLE deciding sentence survives it — including at four-digit counts. The
+    # first draft of the #2158 third term ("N dangling outside the run root")
+    # pushed the 1024-reference case to 209 characters and truncated the
+    # published reason mid-word; the term is spelled `outside-root` here and
+    # written out in full in its own block below. Measured worst case, all three
+    # counts four digits: 199 characters.
     print(f"[FAIL] project_outputs_in_tree_check: "
           f"{fail_count} blocking external-storage reference(s) in this "
-          f"project's own declaration file(s) "
-          f"({len(live)} live, {len(dangling)} dangling) — this is what the "
+          f"project's declaration file(s) "
+          f"({len(live)} live, {len(dangling)} dangling, "
+          f"{len(derived)} outside-root) — this is what the "
           f"gate exits 1 on:")
 
     if live:
@@ -539,6 +738,23 @@ def main() -> int:
             print(f"  - {f} → {p} (NOT found on disk)")
         if len(dangling) > 5:
             print(f"  ... +{len(dangling)-5} more")
+
+    if derived:
+        # #2158 — the class the hard prefix list could not name. Blocking for
+        # the same reason `dangling` is: the reference points at nothing, so a
+        # reader following it learns nothing, and there is no artefact left to
+        # copy in. It is separated from `dangling` only to say WHERE the run
+        # put it, because that is the part the four-directory list got wrong.
+        print(f"[FAIL] project_outputs_in_tree_check: "
+              f"{len(derived)} dangling reference(s) to a path outside "
+              f"{project} that is NOT on disk — an ephemeral location this "
+              f"run used and did not preserve (a TMPDIR under $HOME or "
+              f"anywhere else counts; the population is derived from the run "
+              f"root, not from a list of volatile prefixes):")
+        for f, pth in derived[:8]:
+            print(f"  - {f} → {pth} (NOT found on disk)")
+        if len(derived) > 8:
+            print(f"  ... +{len(derived)-8} more")
 
     _emit_notes()
 

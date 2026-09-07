@@ -3927,13 +3927,53 @@ def _phase1_commit_staged_tree(
             detail += f"; rollback errors: {rollback_errors}"
         raise _Phase1RtlOutputRefused(
             "RTL_TRANSACTION_COMMIT_REFUSED", binding.project, detail) from exc
+# ── #2158 — A STAGE PATH ONLY EVER SURVIVED WHEN IT HAD A CHILD ──────────────
+#
+# `step_rtl_gen` runs the generator against an isolated copy of the project
+# under `tempfile.TemporaryDirectory(prefix="vibeic-rtl-step-")`, then remaps
+# every stage pathname in the result back to the live project before the result
+# is written into the PERSISTENT report `reports/orchestrator/phase2_one_shot.json`.
+# The remap replaced `<stage>/` and the bare-equal string, and nothing else — so
+# an occurrence of the stage root followed by anything OTHER than a separator
+# (a space, a quote, a newline, end-of-string) was left in the report verbatim.
+#
+# MEASURED (lane rbsub6, 8HD-9, 2026-09-07, `d/subservient`): `steps[3].detail`
+# carried, side by side, the correct live path for the two arguments that had a
+# child component and the stage path for the one that did not —
+#
+#     --project /tmp/lane.rbsub6/vibeic-rtl-step-6k_pkx29/subservient \
+#     --digest  /home/reyerchu/_lane_rbsub6/d/subservient/phase2/stage1/lessons.md
+#
+# — from a single f-string. `--digest <stage>/phase2/...` matched
+# `stage_text + os.sep` and was remapped; `--project <stage> ` did not and was
+# not. The report therefore instructs its reader to run a command against a
+# directory the run itself deleted, and `project_outputs_in_tree_check` reads
+# that as a dangling external-storage reference (vibe-ic#2158).
+#
+# THE REPLACEMENT IS BOUNDARY-AWARE, not separator-only: the stage root is
+# remapped wherever the following character cannot extend its last path
+# component. `<stage>/x`, `<stage> `, `<stage>"`, `<stage>.` at end of a
+# sentence and `<stage>` at end of string all remap; `<stage>_other` and
+# `<stage>.json` — genuinely different pathnames that merely share a prefix —
+# do not. Behaviour for every input the old two branches accepted is unchanged;
+# what changed is that the third shape stops leaking.
+_STAGE_PATH_BOUNDARY = r"(?![A-Za-z0-9_-]|\.[A-Za-z0-9_-])"
+
+
+def _phase1_remap_stage_text(value: str, stage_text: str,
+                             project_text: str) -> str:
+    """Replace `stage_text` with `project_text` at every PATH boundary."""
+    if stage_text not in value:
+        return value
+    return re.sub(re.escape(stage_text) + _STAGE_PATH_BOUNDARY,
+                  lambda _m: project_text, value)
+
+
 def _phase1_remap_stage_value(
         value: Any, stage_project: Path, project: Path) -> Any:
     if isinstance(value, str):
-        stage_text = str(stage_project)
-        if value == stage_text or value.startswith(stage_text + os.sep):
-            return str(project) + value[len(stage_text):]
-        return value.replace(stage_text + os.sep, str(project) + os.sep)
+        return _phase1_remap_stage_text(
+            value, str(stage_project), str(project))
     if isinstance(value, list):
         return [_phase1_remap_stage_value(v, stage_project, project)
                 for v in value]
