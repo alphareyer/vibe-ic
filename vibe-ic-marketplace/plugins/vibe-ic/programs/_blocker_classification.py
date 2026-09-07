@@ -83,6 +83,7 @@ __all__ = [
     "GATE_RAN_PREFIXES",
     "ENV_UNAVAILABLE_MARKER",
     "is_blocker",
+    "predecessor_delivered_outputs",
     "classify",
     "build_blockers",
     "class_counts",
@@ -143,6 +144,20 @@ _ABSENCE_PREFIXES = ("no required_outputs found",
 #: tier added to the producer lands on `no-rule-matched` — visible — rather
 #: than being quietly absorbed by a substring test.
 _DISCLOSURE_TIERS = frozenset({"VACUOUS-PASS", "STRUCTURE-ONLY", "INCOMPLETE"})
+
+#: The producer's words for "this step RAN and reached a verdict of its own".
+#: Read by `predecessor_delivered_outputs`, which is what rule 7 tests instead
+#: of a bare verdict word (vibe-ic#2186). Every OTHER status is a step that did
+#: not run to a verdict here — `MISSING`, the two `SKIPPED-*` words,
+#: `DEFERRED-BY-UPSTREAM`, `PASS-VOIDED-BY-DEPENDENCY`, `OUT-OF-SCOPE-BY-ENTRY`
+#: — and a consumer of one of those really is reading an incomplete tree.
+#: `WAIVED` is deliberately NOT here: a waiver says the gate was not enforced,
+#: which is silent about whether the artefact exists. Listed positively so a
+#: status word invented tomorrow lands on the CONSERVATIVE side (rule 7 keeps
+#: firing) rather than being silently promoted to DESIGN_FACT.
+_PREDECESSOR_REACHED_VERDICT_STATUSES = frozenset({
+    "FAIL", "INCOMPLETE", "NOT-MEASURED", "VACUOUS-PASS",
+    "STRUCTURE-ONLY", "PARTIALLY-VACUOUS"})
 
 #: Hint markers filtered out of the operator-facing `observed` text. They are
 #: control signals for the producer's own tier promotion, not observations.
@@ -237,10 +252,60 @@ def derived_from(step: Any) -> List[str]:
     return out
 
 
+# ── did a predecessor DELIVER what it declared? ─────────────────────────────
+def predecessor_delivered_outputs(
+        step: Any, flow_step: Optional[Mapping[str, Any]] = None) -> bool:
+    """True when this non-PASS predecessor still handed its consumers every
+    declared output.
+
+    THE PREDICATE RULE 7 ACTUALLY NEEDS (vibe-ic#2186). Rule 7's own
+    justification is "a gate that ran, and failed, on a step whose declared
+    input NEVER ARRIVED produced a number about an incomplete tree". Its test
+    was the predecessor's VERDICT, and those are different questions: a step
+    can be non-PASS and have produced every artefact it declares. Measured on
+    `u_hawaii_adc` (lane rbadc3, 8HD-8, 2026-09-07): step A4 is INCOMPLETE
+    because ONE sub-gate returned `UNMEASURED / ZERO_DENOMINATOR`, while both
+    of its declared `corner_results.json` outputs are present with nine real
+    ngspice corners each. On the verdict test, A5 and A6 — which drew two
+    layouts, passed 560 KLayout sign-off rules with zero violations on both
+    blocks, and found one genuine LVS mismatch — were reclassified out of
+    DESIGN_FACT, and that run published `DESIGN_FACT=0`.
+
+    Every clause below reads a field the producer already emits deliberately;
+    none reads a message and guesses:
+
+      * the status word must be one the producer uses for a step that RAN to a
+        verdict (`_PREDECESSOR_REACHED_VERDICT_STATUSES`). `MISSING` — the word
+        `flow_compliance_check` assigns when the declared outputs are not
+        there — is not one, which keeps the calibration example
+        (`si_mcf_sta_check` under a MISSING step 22) on rule 7;
+      * a crashed or stalled predecessor never reached its writes;
+      * an absence line (`_ABSENCE_PREFIXES`) is the producer stating an
+        artefact is not present;
+      * and when the flow definition declares `required_outputs` for the
+        predecessor, its `evidence` — the resolved outputs — must be non-empty.
+
+    Conservative by construction: every path that cannot positively establish
+    delivery returns False, which leaves rule 7 firing exactly as before.
+    """
+    status = _T.normalize(_field(step, "status"))
+    if status not in _PREDECESSOR_REACHED_VERDICT_STATUSES:
+        return False
+    if _has_marker(step, CRASH_MARKER) or _has_marker(step, TIMEOUT_MARKER):
+        return False
+    if any(_starts_with_any(r, _ABSENCE_PREFIXES) for r in _reasons(step)):
+        return False
+    if flow_step and (flow_step.get("required_outputs") or []):
+        if not (_field(step, "evidence", []) or []):
+            return False
+    return True
+
+
 # ── the classification itself ───────────────────────────────────────────────
 def classify(step: Any,
              *,
              non_pass_predecessors: Optional[Sequence[Any]] = None,
+             predecessors_missing_outputs: Optional[Sequence[Any]] = None,
              oss_tool: str = "") -> Tuple[str, str, str]:
     """Return ``(classification, basis, note)`` for one blocker.
 
@@ -256,6 +321,14 @@ def classify(step: Any,
     design that is missing the input this step reads" — the second is not a
     fact about the design, and calling it one is precisely how a tally starts
     describing something other than the design.
+
+    `predecessors_missing_outputs` is the subset of those that did NOT deliver
+    their declared outputs (see `predecessor_delivered_outputs`), and it is the
+    set rule 7 blocks on. THREE-STATE: ``None`` means the caller did not
+    determine delivery, and then every non-PASS predecessor blocks — the
+    pre-#2186 behaviour, kept because "undetermined" must not be read as
+    "delivered". An explicit ``[]`` means the caller looked and every
+    predecessor delivered.
     """
     status = _T.normalize(_field(step, "status"))
     reasons = _reasons(step)
@@ -313,10 +386,26 @@ def classify(step: Any,
     #    incomplete tree. `si_mcf_sta_check` reporting `NO_SPEF` while step 22
     #    (parasitic extraction) is MISSING is the calibration example — a
     #    substantive-looking FAIL that is not a fact about the design.
+    #
+    #    IT TESTS WHAT THAT PARAGRAPH SAYS (vibe-ic#2186): the predecessor's
+    #    declared output being ABSENT, not its verdict word. Until #2186 the
+    #    test was "did the predecessor PASS", and a predecessor that is
+    #    non-PASS while having delivered every declared output took its whole
+    #    downstream out of DESIGN_FACT with it — on `u_hawaii_adc` that was two
+    #    steps which had drawn real layouts and run native DRC/LVS on them, and
+    #    the run published `DESIGN_FACT=0`. A predecessor that delivered leaves
+    #    its consumers eligible for rule 8; the `derived_from` attribution is
+    #    unaffected, because which step this is a consequence OF and what this
+    #    step IS are different questions and are separate fields.
     preds = list(non_pass_predecessors or [])
     inherited = derived_from(step)
-    if preds or inherited:
-        named = ", ".join(str(p) for p in (preds or inherited))
+    if predecessors_missing_outputs is None:
+        blocking = preds
+    else:
+        undelivered = {str(p) for p in predecessors_missing_outputs}
+        blocking = [p for p in preds if str(p) in undelivered]
+    if blocking or inherited:
+        named = ", ".join(str(p) for p in (blocking or inherited))
         return ("UNCLASSIFIED", "derived-from-upstream",
                 f"a step this one declares it depends on did not pass "
                 f"({named}); nothing here measures this design until that is "
@@ -510,6 +599,7 @@ def build_blockers(results: Sequence[Any],
             by_id[fs["id"]] = fs
     status_by_id: Dict[Any, str] = {
         _field(r, "id"): _T.normalize(_field(r, "status")) for r in results}
+    result_by_id: Dict[Any, Any] = {_field(r, "id"): r for r in results}
     oss_blocked = oss_blocked or {}
 
     out: List[Dict[str, Any]] = []
@@ -519,12 +609,22 @@ def build_blockers(results: Sequence[Any],
         sid = _field(r, "id")
         flow_step = by_id.get(sid)
         preds: List[Any] = []
+        undelivered: Optional[List[Any]] = None
         if flow_step:
+            undelivered = []
             for dep in (flow_step.get("blocks_on") or []):
                 if dep in status_by_id and status_by_id[dep] != _T.FULL_PASS:
                     preds.append(dep)
+                    # vibe-ic#2186 — rule 7 blocks on the predecessors that did
+                    # not DELIVER, and a predecessor whose own result we do not
+                    # hold counts as undelivered (absence of evidence is not
+                    # evidence of delivery).
+                    if not predecessor_delivered_outputs(
+                            result_by_id.get(dep), by_id.get(dep)):
+                        undelivered.append(dep)
         cls, basis, note = classify(
             r, non_pass_predecessors=preds,
+            predecessors_missing_outputs=undelivered,
             oss_tool=str(oss_blocked.get(sid, "")))
         out.append({
             "step_id": sid,
