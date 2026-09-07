@@ -51,6 +51,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tupl
 import _watchdog as _wd
 import _semantic_child_progress as _semantic_progress
 import gate_process_attestation as _attest
+import _gate_inflight_progress as _inflight
 from _atomic_artefact import write_json
 
 _PR_SET_CHILD_SUBREAPER = 36
@@ -567,6 +568,7 @@ def run_owned(argv: Sequence[str], cwd: Path, env: Dict[str, str], *,
               expected_progress_labels: Optional[Sequence[str]] = None,
               semantic_progress_monitor: Optional[
                   _semantic_progress.ParentMonitor] = None,
+              inflight_path: Optional[Path] = None,
               pending_notifier: Optional[PendingNotifier] = None
               ) -> OwnedRunResult:
     """Run one job and return only after its final owned census is zero."""
@@ -598,6 +600,21 @@ def run_owned(argv: Sequence[str], cwd: Path, env: Dict[str, str], *,
             "without a semantic progress channel",
             "policy_refused", False, False, [], [],
             "orphan expected-progress manifest")
+    # vibe-ic#2177 — THE IN-FLIGHT CHANNEL IS AN ADDITION TO THE ATTESTATION
+    # ONE, NEVER A REPLACEMENT FOR IT. The attestation channel is what proves a
+    # gate REACHED A VERDICT; this one only proves the gate in flight is still
+    # advancing through its own declared sub-units. Accepting it alone would
+    # let a run renew its lease forever while completing nothing, which is the
+    # state the supervisor exists to stop. Refused rather than ignored: a
+    # caller who thinks it wired a progress channel and silently got none would
+    # read the result as covering something it does not.
+    if inflight_path is not None and progress_path is None:
+        return OwnedRunResult(
+            _PROTOCOL, 2, "",
+            "INVALID_PROGRESS_POLICY: an in-flight sub-unit channel is "
+            "accepted only alongside the completed-gate attestation channel",
+            "policy_refused", False, False, [], [],
+            "orphan in-flight progress channel")
     capability_error = _capability_error()
     if capability_error:
         return OwnedRunResult(
@@ -691,11 +708,35 @@ def run_owned(argv: Sequence[str], cwd: Path, env: Dict[str, str], *,
             _AttestationProgressProbe(
                 progress_path, list(expected_progress_labels or ()))
             if progress_path is not None else None)
+        # vibe-ic#2177 — the SECOND renewal source, and the reason the lease
+        # stopped being a wall clock for any single gate. The attestation probe
+        # advances once per COMPLETED gate; this one advances once per declared
+        # sub-unit of the gate CURRENTLY RUNNING. Their scores are summed, so a
+        # gate that is working through 140 probes renews 140 times and a gate
+        # that has stopped renews not at all — the two are finally different
+        # observations rather than the same silence.
+        inflight_probe = (
+            _inflight.InflightReader(
+                str(inflight_path), tuple(expected_progress_labels or ()))
+            if inflight_path is not None and attestation_probe is not None
+            else None)
+
+        def _combined_progress() -> int:
+            score = attestation_probe.sample()
+            if inflight_probe is not None:
+                # A CORRUPT IN-FLIGHT CHANNEL MUST NOT RENEW, and must not
+                # crash the supervisor either. `InflightReader.sample` latches
+                # its error and then returns a FROZEN score, so a channel that
+                # goes bad stops contributing renewals from that moment on and
+                # the run falls back to completed-gate progress alone.
+                score += inflight_probe.sample()
+            return score
+
         result = _wd.run_supervised(
             list(argv), env=env, log_path=None,
             output_progress=output_progress,
             domain_progress_probe=(
-                attestation_probe.sample if attestation_probe is not None
+                _combined_progress if attestation_probe is not None
                 else semantic_progress_monitor.sample
                 if semantic_progress_monitor is not None else None),
             abort_probe=(
@@ -773,9 +814,29 @@ def run_owned(argv: Sequence[str], cwd: Path, env: Dict[str, str], *,
                 problems.append(
                     "SEMANTIC_PROGRESS_NORECORD: " + progress_error)
         if result.outcome != "natural":
-            problems.append(
-                f"progress watchdog outcome={result.outcome}, rc={result.rc}; "
-                "the shard did not complete naturally")
+            # vibe-ic#2177 — A KILL MUST NAME ITS SUBJECT. "the shard did not
+            # complete naturally" sends the reader to the whole assigned set,
+            # and the three landing logs of 2026-08-27 that this issue was
+            # filed from show exactly what that costs: sixteen "wiring errors"
+            # reported about the TREE when the whole cause was one healthy gate
+            # killed mid-flight. The supervisor knows which gate held the lease
+            # and how far into its own declared work it had got.
+            detail = (f"progress watchdog outcome={result.outcome}, "
+                      f"rc={result.rc}; the shard did not complete naturally")
+            supervision = getattr(result, "supervision", None) or {}
+            since = supervision.get("since_last_progress_s")
+            elapsed = supervision.get("elapsed_s")
+            if since is not None:
+                detail += (f"; no forward progress for {since}s of a "
+                           f"{stall_grace_s:g}s stall lease")
+            if elapsed is not None:
+                detail += f"; elapsed_s={elapsed}"
+            if inflight_probe is not None:
+                detail += "; " + inflight_probe.describe()
+                if inflight_probe.error:
+                    detail += (" [in-flight channel stopped renewing: "
+                               f"{inflight_probe.error}]")
+            problems.append(detail)
         if leaked_after_natural:
             problems.append(
                 "LIVE_DESCENDANTS_CLEANED: natural exit left owned work; "
@@ -827,6 +888,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "stdout/CPU cannot renew the no-record lease")
     progress_mode.add_argument("--semantic-progress-manifest", type=Path)
     parser.add_argument("--expected-progress-labels", type=Path)
+    # vibe-ic#2177. NOT in `progress_mode`: this is not a fourth renewal POLICY,
+    # it is a finer-grained second source INSIDE the attestation policy, and
+    # `run_owned` refuses it without `--progress` rather than silently ignoring
+    # it.
+    parser.add_argument(
+        "--inflight-progress", type=Path,
+        help="sub-unit progress channel for the gate currently in flight; "
+             "renews the stall lease alongside completed-gate attestations")
     parser.add_argument("--stall-grace", type=float, required=True)
     parser.add_argument("--poll", type=float, required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -952,6 +1021,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             semantic_progress=args.progress is not None,
             expected_progress_labels=expected_progress_labels,
             semantic_progress_monitor=semantic_monitor,
+            inflight_path=args.inflight_progress,
             pending_notifier=notify_pending)
     except SystemExit as exc:
         # A failed private relay requests helper shutdown.  The signal handler

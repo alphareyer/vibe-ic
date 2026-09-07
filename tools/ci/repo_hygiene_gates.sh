@@ -62,6 +62,14 @@ if [ -z "${GATE_DISPATCH_ATTESTATION_FILE:-}" ]; then
 fi
 GATE_DISPATCH_ATTESTATION_HELPER="$PG/gate_process_attestation.py"
 export GATE_DISPATCH_ATTESTATION_FILE GATE_DISPATCH_ATTESTATION_HELPER
+# vibe-ic#2177 — the sub-unit channel's writer. `$PG`, the RUNTIME copy, for
+# the same reason the attestation helper above uses it: the instrument must not
+# come from the tree under judgement. Unlike the attestation file this script
+# never OWNS the channel — it is created only by a supervisor that is listening
+# (`repo_hygiene_parallel` sets `GATE_DISPATCH_INFLIGHT_FILE`), and with the
+# variable unset every line of the mechanism is inert.
+GATE_DISPATCH_INFLIGHT_HELPER="$PG/_gate_inflight_progress.py"
+export GATE_DISPATCH_INFLIGHT_FILE GATE_DISPATCH_INFLIGHT_HELPER
 _gate_attestation_cleanup() {
   # `.lock` is the flock target the concurrent workers serialise their appends on
   # (see `_gate_attest_locked`). It is swept with the file it guards.

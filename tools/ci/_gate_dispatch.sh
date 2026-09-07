@@ -171,6 +171,26 @@ GATE_DISPATCH_ATTESTATION_HELPER="${GATE_DISPATCH_ATTESTATION_HELPER:-}"
 # receives the same complete records as soon as each owned gate finishes, so a
 # supervisor waits on measured progress instead of a guessed whole-run timeout.
 GATE_DISPATCH_PROGRESS_FILE="${GATE_DISPATCH_PROGRESS_FILE:-}"
+# vibe-ic#2177 — THE IN-FLIGHT CHANNEL. Both files above carry ONE record per
+# COMPLETED gate, so the finest thing a supervisor watching them can see is a
+# whole gate, and the stall lease therefore becomes a wall clock for any single
+# gate. This repo's own shipped cost profile records two gates above the graces
+# in force (`gates are host-independent` 2556 s, `an argued direction is
+# pinned` 646 s, against 300 s direct / 1800 s through the review), so the kill
+# is arithmetic rather than bad luck.
+#
+# This third channel carries `gate_started` / `gate_finished` written HERE, and
+# `gate_unit` rows written by the gate itself through
+# `programs/_gate_inflight_progress.py`. Unset (a fixture, a hand-run, an
+# unsupervised set) it is inert: nothing is written and the execution path is
+# byte-for-byte the historical one.
+GATE_DISPATCH_INFLIGHT_FILE="${GATE_DISPATCH_INFLIGHT_FILE:-}"
+GATE_DISPATCH_INFLIGHT_HELPER="${GATE_DISPATCH_INFLIGHT_HELPER:-}"
+#: How many gates this dispatch will RUN, and how many it has started. The
+#: reader needs N-of-M to say "gate 3 of 9 was in flight" instead of naming a
+#: label with no place in a queue.
+GATE_DISPATCH_INFLIGHT_TOTAL=0
+GATE_DISPATCH_INFLIGHT_INDEX=0
 GATE_DISPATCH_ATTESTATION_FAILED=0
 #: `--shard I/N` (vibe-ic#1144). -1 = not sharded, run everything.
 GATE_DISPATCH_SHARD_I=-1
@@ -886,11 +906,157 @@ _gate_attest_locked() {
 }
 
 
+#: `_gate_inflight_ready` — is the sub-unit channel wired AND able to state an
+#: N-of-M? Both halves are required, and the second is the reason this is a
+#: function rather than a `[ -n ... ]`: `gate 3 of ?` is not a progress report,
+#: and a channel that cannot say how many gates it was assigned would let the
+#: reader's own `1 <= index <= of` bound mean nothing.
+#:
+#: The total is the count of SHARD LABELS, which is a superset of what actually
+#: executes (scope may skip some). That direction is deliberate: `index` then
+#: never exceeds `of`, and "gate 3 of 9 assigned" is a claim the reader can
+#: check against the labels file, while "gate 3 of however many happened to
+#: run" is a number nothing outside this process could reproduce.
+_gate_inflight_ready() {
+  [ -n "$GATE_DISPATCH_INFLIGHT_FILE" ] || return 1
+  [ -n "$GATE_DISPATCH_INFLIGHT_HELPER" ] || return 1
+  [ -f "$GATE_DISPATCH_INFLIGHT_HELPER" ] || return 1
+  if [ "$GATE_DISPATCH_INFLIGHT_TOTAL" -eq 0 ]; then
+    GATE_DISPATCH_INFLIGHT_TOTAL="$(printf '%s\n' "$GATE_DISPATCH_SHARD_LABELS" \
+      | grep -c '[^[:space:]]' || true)"
+  fi
+  [ "${GATE_DISPATCH_INFLIGHT_TOTAL:-0}" -ge 1 ] || return 1
+  return 0
+}
+
+#: `_gate_inflight_event <gate_started|gate_finished> <label>` — announce one
+#: dispatcher-side transition on the sub-unit channel.
+#:
+#: EVERY FAILURE IS SWALLOWED, AND SAYS SO ONCE. A gate must not change its
+#: verdict, its output or its exit code because a liveness row could not be
+#: written; the cost of a lost row is a lease that is not renewed, which the
+#: supervisor already reports honestly as a stall naming this gate. Refusing
+#: the gate instead would turn a progress-channel fault into a tree finding,
+#: which is the exact inversion vibe-ic#2177 is about.
+GATE_DISPATCH_INFLIGHT_BROKEN=0
+_gate_inflight_event() {
+  _gate_inflight_ready || return 0
+  local flag="--started"
+  [ "$1" = "gate_started" ] || flag="--finished"
+  if ! python3 "$GATE_DISPATCH_INFLIGHT_HELPER" \
+        --path "$GATE_DISPATCH_INFLIGHT_FILE" --label "$2" \
+        --of "$GATE_DISPATCH_INFLIGHT_TOTAL" "$flag" >/dev/null 2>&1; then
+    if [ "$GATE_DISPATCH_INFLIGHT_BROKEN" -eq 0 ]; then
+      GATE_DISPATCH_INFLIGHT_BROKEN=1
+      echo "   ^^ IN-FLIGHT PROGRESS NOT RECORDED: the sub-unit channel at" \
+           "$GATE_DISPATCH_INFLIGHT_FILE refused a row for '$2'. This run" \
+           "still reports one record per COMPLETED gate, so a gate slower" \
+           "than the stall lease may be killed as hung — said once" >&2
+    fi
+  fi
+  return 0
+}
+
+#: How often the liveness poller looks at the gate in flight. An OBSERVATION
+#: CADENCE, never a bound: no value of it can stop anything, and a slower one
+#: only means the outer lease is renewed later than it could have been. 5 s is
+#: `repo_hygiene_parallel.DEFAULT_POLL_S`, which is how often the supervisor on
+#: the other end looks.
+GATE_DISPATCH_INFLIGHT_POLL_S="${GATE_DISPATCH_INFLIGHT_POLL_S:-5}"
+GATE_DISPATCH_INFLIGHT_POLLER=0
+
+#: `_gate_inflight_poller_start <label> <capture-path>` — watch the gate that is
+#: about to run and renew the outer lease WHILE IT IS STILL WORKING.
+#:
+#: WHY THIS EXISTS BESIDE THE SEMANTIC UNITS. `gate_unit` rows are the strong
+#: signal, but only a gate that knows its own denominator can emit them, and on
+#: the frozen base exactly two of 154 do. MEASURED on 8HD-6 at load1 ~30,
+#: `repo_hygiene_parallel --stall-grace 300` over a pristine a1f3685837ca: FOUR
+#: shards killed at rc 199 across the two arms, and for two of them the gate in
+#: flight was `every program is reachable` — a gate the shipped cost profile
+#: does not list among its heavy rows at all. A per-gate fix would not have
+#: saved it, and neither would a bigger number: under load ANY gate can outlive
+#: any wall clock somebody picked.
+#:
+#: WHAT IT OBSERVES is what `_watchdog` already accepts for every other
+#: supervised job in this repo — captured output growing, or the gate's process
+#: tree consuming CPU. The helper REFUSES to write a row whose two counters both
+#: equal the previous row's, and the reader refuses one too, so a poller cannot
+#: renew a lease by merely existing. The poller's own subtree is excluded from
+#: the CPU census for exactly that reason.
+_gate_inflight_poller_start() {
+  GATE_DISPATCH_INFLIGHT_POLLER=0
+  _gate_inflight_ready || return 0
+  # ONLY WHEN THIS SHELL'S PROCESS TREE *IS* THE GATE. The CPU census is rooted
+  # at `$$`, so with a parallel pool running several gates at once the busiest
+  # of them would renew the lease of a wedged peer — an observation attributed
+  # to the wrong subject, which is worse than no observation. The supervised
+  # shape is always serial (`repo_hygiene_parallel.SHARD_DISPATCH_JOBS = "1"`,
+  # forwarded as `GATEKEEPER_HYGIENE_JOBS`), and every non-serial shape has the
+  # channel switched off entirely, so this refuses a state that does not occur
+  # today rather than one that does — which is the point of writing it down
+  # before it can.
+  [ "${GATE_DISPATCH_JOBS:-1}" -le 1 ] || return 0
+  local label="$1" capture="$2" parent=$$
+  (
+    # `$BASHPID`, not `$$`: inside this subshell `$$` is still the parent's
+    # pid, and excluding the parent would exclude the gate itself.
+    while :; do
+      sleep "$GATE_DISPATCH_INFLIGHT_POLL_S"
+      python3 "$GATE_DISPATCH_INFLIGHT_HELPER" \
+        --path "$GATE_DISPATCH_INFLIGHT_FILE" --label "$label" \
+        --of "$GATE_DISPATCH_INFLIGHT_TOTAL" --capture "$capture" \
+        --root-pid "$parent" --exclude-pid "$BASHPID" --alive \
+        >/dev/null 2>&1 || true
+    done
+  ) &
+  GATE_DISPATCH_INFLIGHT_POLLER=$!
+  return 0
+}
+
+#: `_gate_inflight_poller_stop` — by the PID WE RECORDED, and never by a
+#: pattern. Every agent on this fleet runs the same script names, and
+#: `unanchored_process_kill_check` forbids a pattern kill in shipped code for
+#: precisely that reason.
+_gate_inflight_poller_stop() {
+  [ "${GATE_DISPATCH_INFLIGHT_POLLER:-0}" -gt 0 ] || return 0
+  kill "$GATE_DISPATCH_INFLIGHT_POLLER" 2>/dev/null || true
+  wait "$GATE_DISPATCH_INFLIGHT_POLLER" 2>/dev/null || true
+  GATE_DISPATCH_INFLIGHT_POLLER=0
+  return 0
+}
+
+#: `_gate_inflight_export <label>` — give ONE gate the sub-unit channel and the
+#: label its rows will be attributed to (vibe-ic#2177), so a gate that knows its
+#: own finite work (`gate_host_independence_check` probes N gates;
+#: `policy_direction_pin_check` verifies N pins) can prove it is ADVANCING
+#: rather than merely running.
+#:
+#: Called inside each launch subshell, so the export dies with the gate and no
+#: later gate can inherit another gate's label. A gate that emits nothing is
+#: unaffected; with the variables unset `_gate_inflight_progress.emit` is a
+#: byte-for-byte no-op, which is what every hand-run and every fixture sees.
+#:
+#: ALWAYS TRUE. It sits in an `&&` chain before the gate itself, so a non-zero
+#: return here would silently SKIP the gate — the one failure mode a progress
+#: channel must never have.
+_gate_inflight_export() {
+  if _gate_inflight_ready; then
+    export VIBE_IC_GATE_INFLIGHT_FILE="$GATE_DISPATCH_INFLIGHT_FILE"
+    export VIBE_IC_GATE_INFLIGHT_LABEL="$1"
+  fi
+  return 0
+}
+
 _gate_execute() {
   local tolerate="$1" may_write="$2" label="$3" shown="$4"
   local ex_until="$5" ex_why="$6" wd="$7"; shift 7
   _GX_STATE=""; _GX_SECS=0
   echo "── $shown"
+  # vibe-ic#2177 — SAY WHICH GATE IS IN FLIGHT, BEFORE IT RUNS. Everything
+  # else on this path speaks only when a gate has FINISHED, and a supervisor
+  # that hears nothing else cannot tell a 2556 s gate from a wedged one.
+  _gate_inflight_event gate_started "$label"
   local t0="$SECONDS" rc=0 before="" after="" watched=1 capture=""
   before="$(_gate_dispatch_corpus_state)" || watched=0
   # `|| rc=$?` and NOT a bare `( ... ); rc=$?` — the caller runs under `set -e`,
@@ -906,12 +1072,15 @@ _gate_execute() {
       # One combined stream is intentional: it is the process evidence a human
       # sees in the landing log, and tee keeps that stream live while the helper
       # derives the machine record from the exact same bytes.
-      if ( cd "$wd" && export GATEKEEPER_HYGIENE_JOBS=1 && "$@" ) 2>&1 \
+      _gate_inflight_poller_start "$label" "$capture"
+      if ( cd "$wd" && export GATEKEEPER_HYGIENE_JOBS=1 \
+             && _gate_inflight_export "$label" && "$@" ) 2>&1 \
            | tee "$capture"; then
         _pipe_rc=("${PIPESTATUS[@]}")
       else
         _pipe_rc=("${PIPESTATUS[@]}")
       fi
+      _gate_inflight_poller_stop
       rc="${_pipe_rc[0]}"
       if [ "${_pipe_rc[1]:-1}" -ne 0 ]; then
         GATE_DISPATCH_ATTESTATION_FAILED=1
@@ -943,17 +1112,28 @@ _gate_execute() {
       fi
       rm -f -- "$capture"
     else
-      ( cd "$wd" && export GATEKEEPER_HYGIENE_JOBS=1 && "$@" ) || rc=$?
+      _gate_inflight_poller_start "$label" ""
+      ( cd "$wd" && export GATEKEEPER_HYGIENE_JOBS=1 \
+        && _gate_inflight_export "$label" && "$@" ) || rc=$?
+      _gate_inflight_poller_stop
       GATE_DISPATCH_ATTESTATION_FAILED=1
       echo "   ^^ PROCESS ATTESTATION FAILED: $label — helper missing at" \
            "${GATE_DISPATCH_ATTESTATION_HELPER:-<unset>}; this run cannot" \
            "certify a tree from console prose" >&2
     fi
   else
-    ( cd "$wd" && export GATEKEEPER_HYGIENE_JOBS=1 && "$@" ) || rc=$?
+    _gate_inflight_poller_start "$label" ""
+    ( cd "$wd" && export GATEKEEPER_HYGIENE_JOBS=1 \
+        && _gate_inflight_export "$label" && "$@" ) || rc=$?
+    _gate_inflight_poller_stop
   fi
   local secs=$(( SECONDS - t0 ))
   _GX_SECS="$secs"
+  # vibe-ic#2177 — placed HERE and not at each `return`, because every exit
+  # path below this line passes through it and a finish emitted per-branch
+  # would be one `return` away from being forgotten. The gate's process is
+  # over at this point; what follows is classification.
+  _gate_inflight_event gate_finished "$label"
   if [ "$watched" -eq 0 ]; then
     if [ "$GATE_DISPATCH_CORPUS_BLIND" -eq 0 ]; then
       GATE_DISPATCH_CORPUS_BLIND=1

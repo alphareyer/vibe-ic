@@ -451,6 +451,7 @@ def _write_jsonl(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
 def _run(argv: List[str], cwd: Path, env: Dict[str, str], *,
          progress_path: Path | None = None,
          expected_progress_labels: Sequence[str] | None = None,
+         inflight_path: Path | None = None,
          stall_grace_s: float = DEFAULT_STALL_GRACE_S,
          atomic: bool = False,
          owned_result_sink: Dict[str, Any] | None = None,
@@ -552,6 +553,11 @@ def _run(argv: List[str], cwd: Path, env: Dict[str, str], *,
                 "--expected-progress-labels",
                 str(expected_progress_path.resolve()),
             ])
+            # vibe-ic#2177 — the second, finer renewal source. Only meaningful
+            # beside `--progress`, and `run_owned` refuses it on its own.
+            if inflight_path is not None:
+                helper_argv.extend(
+                    ["--inflight-progress", str(inflight_path.resolve())])
         elif atomic:
             helper_argv.append("--atomic")
         if semantic_plan is not None:
@@ -1340,6 +1346,10 @@ def main(argv=None) -> int:
         list_json = tmp / "list.json"
         list_env = os.environ.copy()
         list_env.pop("GATE_DISPATCH_ATTESTATION_FILE", None)
+        # …and the in-flight channel with it (vibe-ic#2177). `--list` runs no
+        # gate, so a channel inherited from an outer run would be written by a
+        # process this one does not supervise.
+        list_env.pop("GATE_DISPATCH_INFLIGHT_FILE", None)
         list_rc, list_out, list_err = _run(
             ["bash", str(script), "--list", "--summary-json", str(list_json)],
             root, list_env, stall_grace_s=args.stall_grace)
@@ -1451,8 +1461,16 @@ def main(argv=None) -> int:
             for arm, arm_root in (("A", root), ("B", fresh_root)):
                 summary = tmp / f"summary-{arm}-{i}.json"
                 attest = tmp / f"attest-{arm}-{i}.jsonl"
+                inflight = tmp / f"inflight-{arm}-{i}.jsonl"
                 env = shard_env(os.environ.copy())
                 env["GATE_DISPATCH_ATTESTATION_FILE"] = str(attest)
+                # vibe-ic#2177. PER SHARD AND PER ARM, unlike the attestation
+                # file: nothing downstream reads this channel, so there is no
+                # consumer that needs one shared path, and a private file makes
+                # the reader's append-only/identity checks meaningful (two
+                # shards appending to one file would look like a rewritten
+                # history to both).
+                env["GATE_DISPATCH_INFLIGHT_FILE"] = str(inflight)
                 if arm == "A" and progress_path is not None:
                     env["GATE_DISPATCH_PROGRESS_FILE"] = str(progress_path)
                 else:
@@ -1463,13 +1481,15 @@ def main(argv=None) -> int:
                           f"{i}/{total_shards}", "--shard-labels",
                           str(labels_path), "--summary-json", str(summary)]
                 workers.append((arm, i, bucket, arm_root, summary, attest,
-                                argv_i, env))
+                                inflight, argv_i, env))
 
         def run_worker(row):
-            arm, i, bucket, arm_root, summary, attest, argv_i, env = row
+            (arm, i, bucket, arm_root, summary, attest, inflight,
+             argv_i, env) = row
             rc, out, err = _run(
                 argv_i, arm_root, env, progress_path=attest,
                 expected_progress_labels=expected_executed_labels(bucket),
+                inflight_path=inflight,
                 stall_grace_s=args.stall_grace)
             return arm, i, bucket, summary, attest, rc, out, err
 
@@ -1495,8 +1515,10 @@ def main(argv=None) -> int:
             for arm, arm_root in (("A", root), ("B", fresh_root)):
                 summary = tmp / f"summary-{arm}-sensitive.json"
                 attest = tmp / f"attest-{arm}-sensitive.jsonl"
+                inflight = tmp / f"inflight-{arm}-sensitive.jsonl"
                 env = shard_env(os.environ.copy())
                 env["GATE_DISPATCH_ATTESTATION_FILE"] = str(attest)
+                env["GATE_DISPATCH_INFLIGHT_FILE"] = str(inflight)
                 if arm == "A" and progress_path is not None:
                     env["GATE_DISPATCH_PROGRESS_FILE"] = str(progress_path)
                 else:
@@ -1508,7 +1530,7 @@ def main(argv=None) -> int:
                           str(labels_path), "--summary-json", str(summary)]
                 sensitive_workers.append(
                     (arm, sensitive_i, sensitive, arm_root, summary, attest,
-                     argv_i, env))
+                     inflight, argv_i, env))
             for row in sensitive_workers:
                 results.append(run_worker(row))
 

@@ -159,6 +159,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -166,6 +167,7 @@ import _crash_safe_scratch as _scratch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
+import _gate_inflight_progress as _inflight  # noqa: E402
 
 RC_OK = 0
 RC_UNPINNED = 1
@@ -1391,11 +1393,42 @@ def verify_pins_parallel(
                         record_error = f"unreadable JSON: {exc}"
                 rows.append((name, line, proc.returncode, child_doc,
                              proc.stdout, proc.stderr, record_error))
+                _note_unit()
             return index, rows, []
         except (OSError, subprocess.SubprocessError) as exc:
             return index, rows, [f"worker exception: {type(exc).__name__}: {exc}"]
         finally:
             _release_parallel_worktree(res, repo)
+
+    # vibe-ic#2177 — PROVE THIS GATE IS ADVANCING, not merely running.
+    #
+    # This gate is `an argued direction is pinned` and this repo's own shipped
+    # cost profile (`hygiene_gate_profile.json`) records it at 646 s, against a
+    # 300 s hygiene stall lease. Its supervisor's only other signal is one
+    # attestation row per COMPLETED gate, so between this gate starting and
+    # this gate finishing it says NOTHING and is killed as hung. MEASURED on
+    # 8HD-6, three landing logs of 2026-08-27: `arm A shard 0:
+    # PROGRESS_PROTOCOL_INCOMPLETE: attestation progress ended before assigned
+    # gates completed: an argued direction is pinned; ... rc=199`, and the
+    # landing then reported sixteen "wiring errors" that were entirely the
+    # fallout of that one kill.
+    #
+    # ONE UNIT PER VERIFIED PIN SITE, counted against a total fixed before the
+    # pool starts. `units` is finite and declared, so this cannot renew the
+    # lease indefinitely: at most `len(units)` renewals exist, and then the
+    # gate must finish. A worker that wedges emits nothing and is still killed,
+    # now by name.
+    _inflight_total = len(units)
+    _inflight_done = [0]
+    _inflight_lock = threading.Lock()
+
+    def _note_unit() -> None:
+        if not _inflight.enabled():
+            return
+        with _inflight_lock:
+            _inflight_done[0] += 1
+            done = _inflight_done[0]
+        _inflight.emit(done, _inflight_total)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
         futures = [pool.submit(worker, i, bucket)

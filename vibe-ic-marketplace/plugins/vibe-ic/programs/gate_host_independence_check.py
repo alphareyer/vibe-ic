@@ -226,6 +226,7 @@ import sys
 
 import _watchdog
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Set, Tuple
@@ -264,6 +265,14 @@ from hygiene_shard_plan import load_profile, plan          # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
 import _watchdog as _wd  # noqa: E402
+import _gate_inflight_progress as _inflight  # noqa: E402
+
+#: How often the in-flight relay re-counts the workers' own earned event lines
+#: (vibe-ic#2177). NOT a bound on anything: no value of it can stop a job, and
+#: a slower cadence only means the outer lease is renewed later than it could
+#: have been. 5 s matches `repo_hygiene_parallel.DEFAULT_POLL_S`, which is how
+#: often the outer supervisor looks.
+_INFLIGHT_RELAY_POLL_S = 5.0
 
 #: Scratch prefix.  UNCHANGED from the leaking version on purpose — the reaper
 #: keys on it, so the directories a pre-fix build already left behind are the
@@ -2377,8 +2386,64 @@ def run_workers_supervised(specs, jobs: int, run_fn=None):
             return i, labels, json_path, None, "", "", str(exc)
         return i, labels, json_path, cp.returncode, cp.stdout, cp.stderr, ""
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-        return sorted(pool.map(one, specs), key=lambda row: row[0])
+    # vibe-ic#2177 — RELAY THIS GATE'S OWN EARNED EVENTS TO THE HYGIENE
+    # SUPERVISOR ONE LEVEL UP.
+    #
+    # The block above is the reason this gate is `hygiene_gate_profile.json`'s
+    # most expensive row at 2556 s, and 2556 s is above BOTH graces in force
+    # (300 s for a direct `repo_hygiene_parallel`, 1800 s through
+    # `gatekeeper_review`). The hygiene supervisor's only other signal is one
+    # attestation row per COMPLETED gate, so for the whole of that time this
+    # gate is silent and indistinguishable from a wedged one — and the kill is
+    # then reported as a finding about the tree.
+    #
+    # Nothing new is measured here. `note_worker_progress` already writes one
+    # EARNED line per semantic event into each worker's channel, and this
+    # thread does nothing but count the `label done:` ones and forward the
+    # count outward. So the outer unit is a PROBED GATE, the total is the
+    # denominator this run already derived, and the stream is finite by
+    # construction: at most `total` renewals exist and then the gate must end.
+    #
+    # A DAEMON THREAD THAT CANNOT CHANGE A VERDICT. It reads files, emits, and
+    # every failure is swallowed; the pool below is joined exactly as before
+    # and the returned rows are byte-for-byte what they were.
+    total = sum(len(spec[1]) for spec in specs)
+    relay_stop = threading.Event()
+
+    def _relay() -> None:
+        seen = 0
+        paths = [Path(str(spec[2]) + ".progress") for spec in specs]
+        while not relay_stop.is_set():
+            done = 0
+            for path in paths:
+                try:
+                    with open(path, "r", encoding="utf-8",
+                              errors="replace") as handle:
+                        done += sum(1 for line in handle
+                                    if line.startswith("label done:"))
+                except OSError:
+                    continue
+            if done > seen:
+                # One emit per newly finished label, never a batch: the reader
+                # requires `unit` to advance strictly, and a jump would hide
+                # how many labels the jump covered.
+                for unit in range(seen + 1, min(done, total) + 1):
+                    _inflight.emit(unit, total)
+                seen = min(done, total)
+            relay_stop.wait(_INFLIGHT_RELAY_POLL_S)
+
+    relay = None
+    if total >= 1 and _inflight.enabled():
+        relay = threading.Thread(target=_relay, name="hostindep-inflight",
+                                 daemon=True)
+        relay.start()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+            return sorted(pool.map(one, specs), key=lambda row: row[0])
+    finally:
+        relay_stop.set()
+        if relay is not None:
+            relay.join(timeout=5)
 
 
 def parallel_audit(repo_root: Path, jobs: int,
