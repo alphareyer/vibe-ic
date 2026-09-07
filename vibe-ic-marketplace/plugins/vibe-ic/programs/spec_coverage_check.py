@@ -257,6 +257,12 @@ class ChecklistItem:
     # (the prose-heuristic worked_example has no structural backing as a data
     # pair). Default False (a genuine in->out example stays blocking). chip-AGNOSTIC.
     we_structural_artifact: bool = False
+    # #2152 — a `signed_operand` item whose prose noun resolved to NO signal in
+    # the design. The extractor records the fact so run() keeps the obligation
+    # ADVISORY: the requirement is disclosed with its phrase, but an English noun
+    # ("wires", "division") is never a blocking coverage token. Default False (a
+    # resolved, named operand keeps its historical blocking power).
+    unresolved_operand: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -903,6 +909,47 @@ _NEG_TOKENS_RE = re.compile(
     r"n/?a|not\s+applicable)\b")
 
 
+# #2152 — the names the RTL structurally treats as SIGNED operands: every
+# identifier introduced by a `signed` declaration, and every identifier handed to
+# `$signed(...)`. Plus, for each of those, the identifier it is a direct ALIAS of
+# (`wire signed [31:0] sa = a;` / `assign sa = a;` -> `a`), because a testbench
+# drives the DUT PORT, not the internal alias. chip-AGNOSTIC: pure Verilog
+# signedness/assignment grammar, no design literal.
+_RTL_SIGNED_DECL_NAMES_RE = re.compile(
+    r"\b(?:input|output|inout|wire|reg|logic|var|bit)\b"
+    r"(?:\s+(?:wire|reg|logic|var|bit))?"
+    r"\s+signed\s*(?:\[[^\]\n]*\]\s*)*"
+    r"([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)",
+    re.IGNORECASE)
+_RTL_SIGNED_CAST_RE = re.compile(r"\$signed\s*\(\s*([A-Za-z_]\w*)", re.IGNORECASE)
+
+
+def _rtl_signed_operand_names(rtl_text: Optional[str]) -> set:
+    """The set of REAL signal names the RTL treats as signed operands, plus the
+    identifiers they directly alias. Empty set when no RTL / no signed operand."""
+    if not rtl_text:
+        return set()
+    try:
+        txt = _SRC.strip_comments(rtl_text)
+    except Exception:
+        txt = rtl_text
+    names: set = set()
+    for m in _RTL_SIGNED_DECL_NAMES_RE.finditer(txt):
+        for nm in m.group(1).split(","):
+            nm = nm.strip()
+            if nm:
+                names.add(nm)
+    for m in _RTL_SIGNED_CAST_RE.finditer(txt):
+        names.add(m.group(1))
+    # follow one alias hop: `sa = a;` / `assign sa = a;`
+    aliases: set = set()
+    for nm in names:
+        for m in re.finditer(r"\b" + re.escape(nm) + r"\s*=\s*([A-Za-z_]\w*)\s*[;,)]",
+                             txt):
+            aliases.add(m.group(1))
+    return names | aliases
+
+
 def _split_sentences(low: str) -> List[str]:
     return [s for s in re.split(r"(?<=[.\n;:])", low) if s.strip()]
 
@@ -1538,7 +1585,8 @@ def extract_checklist(spec_text: str) -> List[ChecklistItem]:
                     evidence=str(d.get("evidence", ""))[:200],
                     coverage_tokens=list(d.get("coverage_tokens", []) or []),
                     provenance=str(d.get("provenance", "STRUCTURAL")),
-                    block_eligible=bool(d.get("block_eligible", True))))
+                    block_eligible=bool(d.get("block_eligible", True)),
+                    unresolved_operand=bool(d.get("unresolved_operand", False))))
         except Exception:
             # an extractor must never break the canonical checklist — §4.05 it stays
             # additive; a malformed extractor result is dropped, not propagated.
@@ -2412,6 +2460,22 @@ def run(stations: dict, rtl_text: Optional[str], tb_text: Optional[str],
                     if nm not in it.coverage_tokens:
                         it.coverage_tokens.append(nm)
 
+    # --- #2152: an UNRESOLVED signedness obligation is attributed STRUCTURALLY --
+    # The spec's phrase names no signal ("the signed wires", "unsigned
+    # division"), so the obligation carries no coverage token and never blocks.
+    # But the requirement is real, so point it at the operands the RTL ACTUALLY
+    # treats as signed (`wire signed [31:0] sa = a;` -> sa, a) — the same shape as
+    # the reset retarget above. A faithful TB that drives those operands is then
+    # recorded as covering the obligation WITHOUT writing the prose noun into
+    # code; it stays ADVISORY either way, so this can never block a TB.
+    rtl_signed_names = _rtl_signed_operand_names(rtl_text)
+    if rtl_signed_names:
+        for it in items:
+            if it.kind == "signed_operand" and it.unresolved_operand:
+                for nm in sorted(rtl_signed_names):
+                    if nm not in it.coverage_tokens:
+                        it.coverage_tokens.append(nm)
+
     # --- (#752 → #751 adversarial-review remediation) -----------------------
     # An EARLIER version of this fix DROPPED any spec-derived `port` checklist
     # item absent from the authored RTL port set, to suppress prose-fabricated
@@ -2587,6 +2651,16 @@ def run(stations: dict, rtl_text: Optional[str], tb_text: Optional[str],
                     corr = _prov.CORROBORATED
                 else:
                     corr = _prov.CONTRADICTED
+            elif it.kind == "signed_operand":
+                # #2152 — a per-signal signedness obligation blocks only when its
+                # operand RESOLVED to a real signal. An unresolvable prose noun
+                # ("the signed wires", "unsigned division") has no structural
+                # backing as an operand -> NO_CORROBORATION -> ADVISORY, so a
+                # faithful signed testbench is never forced to write the noun into
+                # code to be accepted. A resolved operand keeps UNKNOWN (no-leak
+                # biased: its historical blocking power is untouched).
+                corr = (_prov.NO_CORROBORATION if it.unresolved_operand
+                        else _prov.UNKNOWN)
             elif it.kind == "signedness":
                 # ORGANIC R13C3 + #770 (R13C1) — signedness shares the byte_order
                 # gap: it is in _PROSE_HEURISTIC_KINDS with no corroboration branch,

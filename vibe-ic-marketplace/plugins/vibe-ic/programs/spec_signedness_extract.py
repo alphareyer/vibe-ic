@@ -72,6 +72,24 @@ CONTRACT
       "block_eligible":  True,                     # (optional)
     }
 
+  #2152 — an ADVISORY variant is emitted when the prose states a signedness
+  requirement whose NOUN resolves to no declared signal in the doc. It carries
+  the same kind, the phrase in "evidence", and:
+
+      "coverage_tokens":    [],            # NEVER the prose noun
+      "provenance":         "PROSE_HEURISTIC",
+      "signal":             None,
+      "block_eligible":     False,         # disclosed, never blocking
+      "unresolved_operand": True,
+      "unresolved_phrase":  <the noun the prose used>
+
+  Making the English noun the coverage token forced a faithful testbench to
+  write that noun into code to be accepted ("wires", "division"), which is
+  indistinguishable — to the gate — from a real coverage improvement.
+  `spec_coverage_check.run()` retargets the advisory item onto the operands the
+  RTL actually treats as signed (a `wire signed [N:0] sa = a;` alias resolves to
+  both `sa` and `a`), so a faithful TB is credited for what it really drives.
+
 CLI
     python3 spec_signedness_extract.py <prompt.txt> [--json]
     cat prompt.txt | python3 spec_signedness_extract.py -
@@ -119,9 +137,48 @@ def _is_signal_name(tok: str) -> bool:
     return tok.lower() not in _NON_SIGNAL_WORDS
 
 
+# A REAL declaration head: a direction/type keyword that STARTS a declaration —
+# at a line start, or after a `;` / `,` / `(` / a list bullet / a table pipe. The
+# anchor is the whole point: without it the clause `input|output|...` matches any
+# ENGLISH SENTENCE that merely contains a direction word earlier on the line
+# ("the input operands to the signed wires", "8-bit input signal representing the
+# dividend for division"), and the prose then CORROBORATES ITSELF (#2152).
+_DECL_HEAD = (r"(?:^|[;,(\n])[ \t]*(?:[-*+\u2022>]|\|)?[ \t]*"
+              r"(?:(?:input|output|inout)\b(?:[ \t]+(?:wire|reg|logic|var|bit))?"
+              r"|(?:wire|reg|logic|var|bit|integer)\b)"
+              r"(?:[ \t]+(?:signed|unsigned))?"
+              r"(?:[ \t]*\[[^\]\n]*\])*"
+              r"[ \t]*")
+# the comma-separated identifier list a declaration head introduces
+_DECL_NAMES = r"(" + _IDENT + r"(?:[ \t]*,[ \t]*" + _IDENT + r")*)"
+# ... and the name list must END a declaration. A LINE THAT BEGINS WITH A
+# DIRECTION WORD IS STILL ORDINARY ENGLISH HALF THE TIME — "Input signals are the
+# signed signals of the datapath" would otherwise "declare" `signals` and
+# reproduce #2152 with a different noun (measured). A real declaration stops at
+# `,` `;` `)` `=` `[`, a markdown cell `|`, or the end of the line; English
+# carries on into a verb.
+_DECL_TAIL = r"[ \t]*(?=[,;)=\[|]|$)"
+_DECL_RE = re.compile(_DECL_HEAD + _DECL_NAMES + _DECL_TAIL,
+                      re.IGNORECASE | re.MULTILINE)
+
+
+def _declared_names(text: str) -> set:
+    """Every identifier introduced by a REAL declaration head in `text`.
+
+    chip-AGNOSTIC: pure Verilog/port-table declaration grammar."""
+    out = set()
+    for m in _DECL_RE.finditer(text):
+        for nm in m.group(1).split(","):
+            nm = nm.strip()
+            if nm and _IDENT_RE.fullmatch(nm):
+                out.add(nm)
+    return out
+
+
 def _declared_signal(name: str, text: str) -> bool:
     """True iff `name` is corroborated as a REAL declared/used signal in the doc:
-    a Verilog port/signal declaration, a backtick `name`, or a bus-index `name[..`.
+    a Verilog port/signal declaration whose DECLARED IDENTIFIER is `name`, a
+    backtick `name`, or a bus-index `name[..`.
 
     §4.05 NO-LEAK: a deny-set alone cannot enumerate every English noun, so a
     PROSE signedness phrase ("unsigned integers", "the unsigned add result") would
@@ -129,13 +186,21 @@ def _declared_signal(name: str, text: str) -> bool:
     signed/unsigned. Requiring the captured token to ALSO appear as a declared /
     bracket-indexed / backtick signal kills that leak: `add`/`integers` are not
     declared signals; `coeff`/`acc`/`din` are. A Verilog `signed [..] name`
-    declaration is self-corroborating and bypasses this gate (it IS a decl)."""
+    declaration is self-corroborating and bypasses this gate (it IS a decl).
+
+    #2152: the declaration clause is ANCHORED at a declaration head. The
+    unanchored form accepted any line on which a direction word appeared BEFORE
+    the noun, so an English sentence corroborated itself — `wires` "declared" by
+    "the input operands to the signed wires", `division` by "8-bit input signal
+    representing the dividend for division". Both then became the blocking
+    coverage token of a signedness obligation no faithful testbench can satisfy
+    without writing the noun into code."""
     esc = re.escape(name)
-    return bool(
-        re.search(r"`\s*" + esc + r"\s*`", text) or                       # backtick
-        re.search(r"\b" + esc + r"\s*\[", text) or                        # name[..]
-        re.search(r"(?:input|output|inout|wire|reg|logic)\b[^\n;]*\b"
-                  + esc + r"\b", text, re.I))                              # port decl
+    if re.search(r"`\s*" + esc + r"\s*`", text):          # backtick `name`
+        return True
+    if re.search(r"\b" + esc + r"\s*\[", text):           # bus index name[..]
+        return True
+    return name in _declared_names(text)                  # real declaration
 
 
 # ---------------------------------------------------------------------------
@@ -151,12 +216,32 @@ def _declared_signal(name: str, text: str) -> bool:
 # operand). We capture the FIRST identifier that follows `signed` (+ optional
 # range + optional type/qualifier words), skipping type/qualifier deny-words.
 # §4.05: the `signed` keyword MUST be present and bound to a real name.
-_SIGNED_DECL_RE = re.compile(
+# #2152: the `signed` keyword ALONE, followed by any word, is not a declaration —
+# it is also ordinary English ("assigns the input operands to the signed wires").
+# The unqualified form made the PROSE NOUN `wires` a self-corroborating "declared
+# signal" and then the blocking coverage token of a signedness obligation. A
+# self-corroborating declaration must carry a real Verilog marker, so we accept
+# only two shapes:
+#   (a) a PACKED RANGE sits between `signed` and the name — `signed [15:0] coeff`,
+#       `input wire signed [N-1:0] a`. A range is unambiguous Verilog.
+#   (b) NO range, but `signed` is introduced by a direction/type keyword AND the
+#       name ends the declaration (`,` `;` `=` `)` `[` or end of line) —
+#       `input signed s;`, `wire signed sa = a,`.
+# Everything else falls through to the PROSE patterns below, which must
+# corroborate the captured name against a REAL declaration (`_declared_signal`).
+_SIGNED_DECL_RANGE_RE = re.compile(
     r"\bsigned\b"
-    r"(?:\s*\[[^\]\n]*\])?"          # optional packed range [hi:lo]
+    r"\s*\[[^\]\n]*\]"              # REQUIRED packed range [hi:lo]
     r"\s+"
     r"(" + _IDENT + r")",            # the candidate name immediately after
     re.IGNORECASE)
+_SIGNED_DECL_SCALAR_RE = re.compile(
+    r"\b(?:input|output|inout|wire|reg|logic|var|bit)\b"
+    r"(?:\s+(?:wire|reg|logic|var|bit))?"
+    r"\s+signed\s+"
+    r"(" + _IDENT + r")"             # the candidate name
+    r"\s*(?=[,;=)\[]|$)",            # ... ending a declaration
+    re.IGNORECASE | re.MULTILINE)
 
 # Also catch the `<qualifier> signed <range> <name>` where a type word sits
 # BEFORE `signed` (input/output/wire/reg/logic signed ...). The name capture is
@@ -234,12 +319,28 @@ def _norm_polarity(word: str) -> str:
 # ---------------------------------------------------------------------------
 # Collection
 # ---------------------------------------------------------------------------
-def _collect(text: str) -> List[Tuple[str, str, str]]:
-    """Return [(signal_name, polarity, evidence)] for every EXPLICIT per-signal
-    signedness binding. De-duplicated by (signal, polarity); the FIRST evidence
-    is kept. §4.05: only a NAMED signal bound to a signedness word is emitted —
-    a bare topic mention with no name yields nothing here."""
-    found: Dict[Tuple[str, str], str] = {}
+# A POSITIVE `signed` statement somewhere in the doc — the "explicit contrast"
+# the module doctrine carves out for an UNSIGNED polarity word. `\b` never fires
+# inside "unsigned" (both neighbours are word characters), so this matches only a
+# real signed sibling. chip-AGNOSTIC.
+_POSITIVE_SIGNED_RE = re.compile(r"\bsigned\b|\btwo'?s\s+complement\b", re.I)
+
+
+def _collect(text: str) -> List[Tuple[str, str, str, bool]]:
+    """Return [(signal_name, polarity, evidence, resolved)] for every EXPLICIT
+    per-signal signedness binding. De-duplicated by (signal, polarity); the FIRST
+    evidence is kept. §4.05: only a NAMED signal bound to a signedness word is
+    emitted — a bare topic mention with no name yields nothing here.
+
+    #2152 — a PROSE noun that does NOT resolve to a real declared signal is no
+    longer silently dropped: it is carried with resolved=False so `extract()` can
+    DISCLOSE the signedness requirement as an ADVISORY item (never blocking, and
+    never with the noun as a coverage token) instead of either (a) minting the
+    noun as a blocking coverage token, or (b) losing the requirement entirely.
+    An UNSIGNED unresolvable noun is disclosed only when the doc also carries a
+    POSITIVE signed statement — an "unsigned" word with no signed sibling is the
+    Verilog default, which this module deliberately does not carry as a fact."""
+    found: Dict[Tuple[str, str], Tuple[str, bool]] = {}
 
     def _add(name: str, polarity: str, evidence: str,
              corroborate: bool = False) -> None:
@@ -248,19 +349,23 @@ def _collect(text: str) -> List[Tuple[str, str, str]]:
             return
         # §4.05: a PROSE-derived name must be corroborated as a real declared/used
         # signal (a Verilog `signed [..] name` decl is self-corroborating and
-        # passes corroborate=False). This drops phantom common-noun operands
-        # ("unsigned integers", "the unsigned add") that no deny-set can enumerate.
-        if corroborate and not _declared_signal(nm, text):
-            return
+        # passes corroborate=False). An uncorroborated common-noun operand
+        # ("unsigned integers", "the unsigned add", "the signed wires") is NOT a
+        # signal: it is carried resolved=False and can only ever be advisory.
+        resolved = (not corroborate) or _declared_signal(nm, text)
+        if not resolved:
+            if polarity == "unsigned" and not _POSITIVE_SIGNED_RE.search(text):
+                return          # a bare unsigned default with no signed sibling
         key = (nm, polarity)
-        if key not in found:
-            found[key] = evidence.strip()[:140]
+        if key not in found or (resolved and not found[key][1]):
+            found[key] = (evidence.strip()[:140], resolved)
 
     # (A) Verilog `signed [range] name` declarations — always signed polarity
     #     (the keyword `signed` is, by definition, a positive signed assertion).
     #     Self-corroborating: the match IS a declaration.
-    for m in _SIGNED_DECL_RE.finditer(text):
-        _add(m.group(1), "signed", m.group(0))
+    for _rx in (_SIGNED_DECL_RANGE_RE, _SIGNED_DECL_SCALAR_RE):
+        for m in _rx.finditer(text):
+            _add(m.group(1), "signed", m.group(0))
 
     # (B1..B4) PROSE bindings — corroborate the captured NAME against a real decl.
     # (B1) "signed/unsigned <role> <name>"
@@ -281,7 +386,12 @@ def _collect(text: str) -> List[Tuple[str, str, str]]:
     for m in _PROSE_TWOS_AFTER_RE.finditer(text):
         _add(m.group(1), "signed", m.group(0), corroborate=True)
 
-    return [(nm, pol, ev) for (nm, pol), ev in found.items()]
+    # a name resolved under ANY polarity is a real signal: drop its unresolved
+    # twins so one binding is never reported both ways.
+    _resolved_names = {nm for (nm, _p), (_e, r) in found.items() if r}
+    return [(nm, pol, ev, res)
+            for (nm, pol), (ev, res) in found.items()
+            if res or nm not in _resolved_names]
 
 
 # ===========================================================================
@@ -299,12 +409,44 @@ def extract(prompt_text: str) -> List[dict]:
     "<name> is signed" / "treat <name> as signed" / "two's complement <name>").
     A bare "signed arithmetic" with NO named signal returns [] (that coarse
     topic is spec_coverage_check's kind="signedness", not ours). chip-AGNOSTIC.
+
+    #2152 — a prose signedness statement whose noun resolves to NO declared
+    signal is neither dropped nor minted as a coverage token: it is emitted as
+    the ADVISORY variant documented in the module CONTRACT above (block_eligible
+    False, coverage_tokens []). An UNSIGNED noun with no positive `signed`
+    sibling in the doc still returns nothing — that is the Verilog default, not
+    a fact this module carries.
     """
     if not prompt_text or not isinstance(prompt_text, str):
         return []
 
     items: List[dict] = []
-    for name, polarity, evidence in _collect(prompt_text):
+    for name, polarity, evidence, resolved in _collect(prompt_text):
+        if not resolved:
+            # #2152 — the prose names no signal that exists in the design. The
+            # signedness REQUIREMENT is real and is disclosed with its phrase,
+            # but it carries NO coverage token: making the English noun the token
+            # is what forced a faithful testbench to write the noun into code to
+            # be accepted. ADVISORY (block_eligible=False) — never blocking.
+            items.append({
+                "kind": "signed_operand",
+                "requirement": (
+                    f"the spec states a {polarity} requirement in the phrase "
+                    f"\"{evidence}\", but \"{name}\" is not a signal declared in "
+                    f"the design: the operand cannot be resolved, so this "
+                    f"obligation is ADVISORY — the TB must still exercise "
+                    f"{polarity}-relevant stimulus, but no named operand can be "
+                    f"attributed and the phrase noun is NOT a coverage token."),
+                "evidence": evidence,
+                "coverage_tokens": [],
+                "provenance": "PROSE_HEURISTIC",
+                "signal": None,
+                "polarity": polarity,
+                "block_eligible": False,
+                "unresolved_operand": True,
+                "unresolved_phrase": name,
+            })
+            continue
         req = (f"operand {name} is declared {polarity}; the design must treat "
                f"{name} as a {polarity} value (sign-extension / "
                f"{'signed' if polarity == 'signed' else 'unsigned'} "
@@ -360,10 +502,20 @@ def _main(argv: Optional[List[str]] = None) -> int:
               "arithmetic' is spec_coverage_check's coarse kind)")
         return 0
 
-    print("SIGNED OPERANDS (" + str(len(items)) + "):")
-    for it in items:
-        print("  - " + it["signal"] + " [" + it["polarity"] + "]   ["
-              + it["evidence"][:70] + "]")
+    resolved = [it for it in items if not it.get("unresolved_operand")]
+    advisory = [it for it in items if it.get("unresolved_operand")]
+    if resolved:
+        print("SIGNED OPERANDS (" + str(len(resolved)) + "):")
+        for it in resolved:
+            print("  - " + str(it["signal"]) + " [" + it["polarity"] + "]   ["
+                  + it["evidence"][:70] + "]")
+    if advisory:
+        print("ADVISORY — signedness stated, operand UNRESOLVED ("
+              + str(len(advisory)) + "):")
+        for it in advisory:
+            print("  - phrase [" + it["evidence"][:70] + "] names \""
+                  + str(it.get("unresolved_phrase")) + "\", which is not a "
+                  "declared signal; non-blocking, no coverage token")
     return 0
 
 
