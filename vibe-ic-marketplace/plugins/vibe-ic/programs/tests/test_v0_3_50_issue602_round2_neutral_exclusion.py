@@ -27,7 +27,10 @@ from pathlib import Path
 
 PROG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROG))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pytest  # noqa: E402
 import fix_surface_classify as F  # noqa: E402
+import _issue600_producing_commits as _P  # noqa: E402
 
 
 # ── the field agent's real-commit shape: a consumer change + the MANDATORY
@@ -212,12 +215,38 @@ def test_real_issue599_commit_is_consumer_only():
 
 
 def test_real_issue600_commit_is_producer():
-    import pytest
+    """ORGANIC #600 — the classifier over REAL commits that PRODUCE the artefact.
+
+    ANCHORED BY CONTENT, NOT BY A SHA (vibe-ic#2162). This canary used to read
+    `git show 6a73bad1`. That sha is gone -- the pre-v1.0.0 history was squashed
+    into one "initial public release" commit -- so it had been SKIPPING on every
+    checkout, silently, for as long as that squash has existed. A skip is not a
+    pass, and a canary that stopped watching without anyone noticing is worse
+    than no canary.
+
+    Rewiring it to the ISSUE NUMBER is the obvious repair and it is wrong,
+    measured: `resolve_commit("600")` reaches `311f8fc81bcf`, a CONSUMER_ONLY
+    commit, so it would turn a silent skip into a red that says nothing about
+    the classifier. An issue number is no more durable than a sha; both name a
+    commit, and this canary is about a KIND of commit.
+
+    So the subject is a PREDICATE over the diff -- see
+    `_issue600_producing_commits`, which selects by the enclosing symbol of the
+    hunks and never by `classify_diff` (selecting with the classifier and then
+    asserting its answer is a tautology). MEASURED on this history (main
+    89f66304f5a0): 37 commits qualify -- 31 MIXED, 6 PRODUCER, 0 CONSUMER_ONLY.
+
+    This file's half guards the #602 NEUTRAL EXCLUSION: every one of those 37
+    also bumps the version manifests and ships test files, and before #602 that
+    alone made each of them MIXED-by-ambiguity. Its twin in the #603 file guards
+    the widened consumer vocabulary. Two canaries, because one could not say
+    which of the two rules moved a verdict."""
     root = _repo_root()
     if not root:
         pytest.skip("not in a git checkout")
-    # the v0.3.48 #600 round-2 commit touched the streamout producer
-    diff = F._git(root, "show", "6a73bad1", "--format=", "--unified=3")
-    if not diff:
-        pytest.skip("#600 commit not in this checkout")
-    assert F.classify_diff(diff)["verdict"] == "PRODUCER"
+    pop, why = _P.producing_commits(root)
+    assert pop, why
+    verdicts = {sha: F.classify_diff(diff)["verdict"] for sha, diff in pop}
+    _P.assert_population_is_safe_and_producer_is_reachable(verdicts)
+
+

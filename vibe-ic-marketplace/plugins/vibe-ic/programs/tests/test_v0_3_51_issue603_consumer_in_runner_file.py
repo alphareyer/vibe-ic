@@ -27,7 +27,10 @@ from pathlib import Path
 
 PROG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROG))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pytest  # noqa: E402
 import fix_surface_classify as F  # noqa: E402
+import _issue600_producing_commits as _P  # noqa: E402
 
 
 # ── the field agent's exact case: a consumer function in a runner file ──────
@@ -177,22 +180,25 @@ def test_real_issue599_still_consumer_only():
 
 
 def test_real_issue600_still_producer():
-    import pytest
+    """ORGANIC #600 — the widened vocabulary did not make a producer consumer.
+
+    Same anchor and same population as the twin in
+    `test_v0_3_50_issue602_round2_neutral_exclusion.py`; see it for why a sha
+    and an issue number are both the wrong anchor, and for the measurement.
+    This half is the one that matters for THIS file: #603 widened the CONSUMER
+    vocabulary to the emitter/verdict/message/note family, and the round-1
+    version of that widening pulled a geometry producer to consumer on the bare
+    English word "note" in a docstring. What follows is the live-history
+    counterpart of `test_producer_docstring_with_word_note_stays_producer`
+    above: on real commits that change the producer, CONSUMER_ONLY never wins."""
     root = _root()
     if not root:
-        pytest.skip("not a git checkout")
-    diff = F._git(root, "show", "6a73bad1", "--format=", "--unified=3")
-    if not diff:
-        pytest.skip("#600 not in this checkout")
-    assert F.classify_diff(diff)["verdict"] == "PRODUCER"
+        pytest.skip("not in a git checkout")
+    pop, why = _P.producing_commits(root)
+    assert pop, why
+    verdicts = {sha: F.classify_diff(diff)["verdict"] for sha, diff in pop}
+    _P.assert_population_is_safe_and_producer_is_reachable(verdicts)
 
-
-# --- the verdict-token TIE-BREAK (v1.9.63) ---------------------------------
-# `phase1_expert_parse_track.py::main` changed a printed `VACUOUS_PASS:` to
-# `INCOMPLETE:` and nothing else — the most on-the-nose consumer change in
-# #599 — and no pattern recognised it: the file is not `*_check.py` and the
-# lines carry no `verdict` / `classif` / `_emit` identifier. It read `unknown`
-# -> ambiguous -> MIXED, which is a 40-minute re-run for a changed word.
 
 def test_a_verdict_token_alone_makes_an_otherwise_unknown_hunk_consumer():
     r = F.classify_hunk("programs/phase1_expert_parse_track.py", "main",
