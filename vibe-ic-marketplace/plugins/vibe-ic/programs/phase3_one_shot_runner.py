@@ -25363,6 +25363,158 @@ _PNR_RESUME_LOG = "openroad_resume.log"
 _PNR_METRICS = "openroad.metrics.json"
 
 
+#: vibe-ic#2108 — WHERE EACH PnR APPROACH'S LOG IS KEPT ONCE THE NEXT APPROACH
+#: HAS TRUNCATED THE SHARED SINK.
+#:
+#: `step_pnr` composes its route command ONCE and re-runs it: the over-util
+#: UPSIZE, the over-sparse DOWNSIZE and the ROUTING-FEEDBACK loosen ladder all
+#: re-enter the same `for _retry_i in _pnr_loop` body with the same string.
+#: That string ends `... 2>&1 | tee <out_dir>/openroad.log`, and `tee` without
+#: `-a` TRUNCATES its file at open — so approach N destroys approach N-1's log
+#: before it has written a single line of its own.
+#:
+#: MEASURED (an open PDK, a real front-door run, 2026-09-07): the same
+#: `openroad.log` read 1830+ lines carrying two
+#: `[INFO DRT-0702] Post-route verification: 0 violation(s).` lines at 08:14,
+#: and 723 lines carrying none of them three minutes later; an
+#: `[ERROR GPL-0301] Utilization ... exceeds 100%` line that a live tail had
+#: just printed was ALREADY absent from the file when it was grepped for. That
+#: run made SIX approaches, FIVE of which reached a clean post-route
+#: verification, and the shipped tree could not show a reader that any of them
+#: ever had. Those numbers survive only because somebody happened to be
+#: tailing the file as it was written.
+#:
+#: The loss is ASYMMETRIC, which is what makes it a reporting-integrity defect
+#: rather than a cosmetic one: when a later approach ends WORSE than an earlier
+#: one, the published record shows only the worse outcome and nothing left in
+#: the tree contradicts it. The route verdict itself is unaffected and stays
+#: exactly where it was (the FINAL count decides, the in-loop count is
+#: diagnostic); this is about whether the evidence BEHIND that verdict is still
+#: readable afterwards.
+#:
+#: WHY NOT `tee -a`, WHICH IS THE ONE-WORD FIX. It makes `openroad.log` the
+#: concatenation of every approach, and every post-loop reader in this file is
+#: written for "the log of the approach that shipped":
+#:   * `_cts_geometrically_complete` accepts a CTS breadcrumb found ANYWHERE in
+#:     `openroad.log`, so an early approach's CTS lines would vouch for a final
+#:     approach that never reached CTS;
+#:   * `_pnr_fatal_signal_diagnosis` is handed the whole text together with the
+#:     LAST approach's `rc`, so an earlier approach's crash text would be
+#:     diagnosed against a return code that did not produce it.
+#: Appending would trade a DESTROYED record for a LAUNDERED one. Each approach
+#: is archived BESIDE the canonical log instead, which leaves the canonical log
+#: — and therefore every existing consumer of it — byte-identical.
+#:
+#: AND WHY THE ARCHIVES ARE NOT NAMED `*.log`. `def_stage_progression_check`
+#: sweeps `pnr_dir.rglob("*.log")` for `DETAILED_ROUTE_NONFATAL:` and DEMOTES
+#: its `no-routing-geometry` finding from error to warning wherever it finds
+#: it. An archive named `openroad.approach3.log` would let a SUPERSEDED
+#: approach's marker demote a finding about the approach that actually shipped
+#: — the same laundering `tee -a` was rejected for, arriving through the back
+#: door of somebody else's glob. The `.txt` suffix leaves the population of
+#: every existing `*.log` sweep exactly as it is, and
+#: `openroad.approaches.json` is the aggregate that names which archive backs
+#: which approach.
+_PNR_APPROACH_LOG_FMT = "openroad.approach{index}.log.txt"
+_PNR_APPROACH_MANIFEST = "openroad.approaches.json"
+
+
+def _write_pnr_approach_manifest(out_dir: Path,
+                                 history: List[Dict[str, Any]]) -> None:
+    """Write the aggregate that names which archive backs which approach.
+
+    `canonical_log_is_approach` is the load-bearing field. `openroad.log` is
+    whatever the LAST approach happened to leave behind, and without this a
+    reader cannot tell which of the archives beside it that duplicates.
+
+    Rewritten in full from `history` on every call rather than merged with
+    whatever is already on disk: a step re-run into a directory that already
+    holds a longer run's manifest must not inherit its extra rows, which would
+    attribute approaches to this run that this run never made.
+    """
+    doc = {
+        "canonical_log": "openroad.log",
+        "canonical_log_is_approach": (history[-1]["approach"]
+                                      if history else None),
+        "approach_count": len(history),
+        "approaches": list(history),
+    }
+    try:
+        (out_dir / _PNR_APPROACH_MANIFEST).write_text(
+            json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:  # noqa: BLE001 — never fatal to the PnR verdict
+        print(f"[pnr] PNR_APPROACH_MANIFEST_NOT_WRITTEN dir={out_dir} "
+              f"reason={type(exc).__name__}: {exc}", file=sys.stderr)
+
+
+def _preserve_pnr_approach_log(out_dir: Path, log_path: Path, index: int,
+                               rc: Optional[int],
+                               history: List[Dict[str, Any]]
+                               ) -> Dict[str, Any]:
+    """Archive ONE PnR approach's log, then rewrite the manifest.
+
+    ADVISORY / DISCLOSURE-ONLY, stated here rather than left to a default.
+    Nothing in this function or its manifest can stop the flow, change a step
+    status, or alter a route verdict: it only makes evidence that a run
+    already produced still readable after the run. The route verdict is
+    unchanged and stays where it was — the FINAL count decides, the in-loop
+    count is diagnostic. The one thing it does say out loud is when it FAILED
+    to keep a record; see the stderr line below.
+
+    Called once per approach, the moment the tool returns and before anything
+    can re-enter the loop. That ordering IS the mechanism: after the next
+    `tee` opens the file there is nothing left to copy.
+
+    A FULL copy, never a truncated or sampled one — an archive that keeps only
+    part of a log reintroduces the defect it was written to close, just with a
+    smaller cut. The whole archive set is bounded by `_PNR_RETRY_ITERS`.
+
+    Never raises and never changes a verdict. A preservation failure is
+    recorded as a manifest row with ``preserved: false`` carrying the OS
+    error, and printed to stderr, because a record that silently fails to be
+    kept is this very defect wearing the other hat.
+
+    The manifest is rewritten after EVERY approach rather than at the end of
+    the step: `step_pnr` returns from more than a dozen places between this
+    loop and its tail, so an aggregate written at the tail is exactly the
+    record a FAILING run would lose — and a failing run is when the earlier
+    approaches matter most.
+    """
+    row: Dict[str, Any] = {
+        "approach": int(index),
+        "log": _PNR_APPROACH_LOG_FMT.format(index=int(index)),
+        "rc": rc,
+        "preserved": False,
+    }
+    dest = out_dir / row["log"]
+    try:
+        shutil.copyfile(log_path, dest)
+    except OSError as exc:
+        row["error"] = f"{type(exc).__name__}: {exc}"
+    else:
+        row["preserved"] = True
+        _h = hashlib.sha256()
+        _n = 0
+        try:
+            with dest.open("rb") as _fh:
+                for _chunk in iter(lambda: _fh.read(1 << 20), b""):
+                    _h.update(_chunk)
+                    _n += len(_chunk)
+        except OSError as exc:
+            row["digest_error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            row["bytes"] = _n
+            row["sha256"] = _h.hexdigest()
+    if not row["preserved"]:
+        # DEGRADE LOUDLY, NEVER SILENTLY.
+        print(f"[pnr] PNR_APPROACH_LOG_NOT_PRESERVED "
+              f"approach={row['approach']} source={log_path} "
+              f"reason={row.get('error', 'unknown')}", file=sys.stderr)
+    history.append(row)
+    _write_pnr_approach_manifest(out_dir, history)
+    return row
+
+
 def _pnr_resume_after_fatal_signal(*, project: Path, top: str, container: str,
                                    out_dir: Path, out_dir_c: str,
                                    pnr_tcl: Path, diag: Dict[str, Any],
@@ -27450,6 +27602,11 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # `_pnr_hard_ceiling_s` is a 24h+ pathological backstop, not a kill budget.
     _pnr_ceiling = _pnr_hard_ceiling_s(placed_cells_est)
     _pnr_logp = out_dir / "openroad.log"
+    # vibe-ic#2108 — one row per approach, rewritten to
+    # `openroad.approaches.json` after each one. See
+    # `_preserve_pnr_approach_log` for why this cannot wait for the tail
+    # of the step.
+    _pnr_approach_logs: List[Dict[str, Any]] = []
     # Loop budget = initial run + over-util upsize (own counter) + a single
     # over-sparse downsize + the ROUTING-FEEDBACK loosen ladder. Each mutation
     # path is INDEPENDENTLY bounded (upsize by `_PNR_UPSIZE_RETRIES` + the die
@@ -27465,6 +27622,15 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         rc, out, err = _docker_exec(
             container, cmd, marker=pnr_tcl_c, log_path=_pnr_logp,
             hard_ceiling_s=_pnr_ceiling)
+        # vibe-ic#2108 — THIS APPROACH'S LOG, BEFORE THE NEXT ONE
+        # TRUNCATES IT. `cmd` pipes into `tee` (not `tee -a`), so the
+        # next iteration reopens `openroad.log` for writing and this
+        # copy is the only thing standing between the approach that just
+        # ran and the destruction of its evidence. Deliberately AHEAD of
+        # the stall/ceiling `break` below: a killed approach's partial
+        # log is evidence too, and it is the one a reader most wants.
+        _preserve_pnr_approach_log(out_dir, _pnr_logp, _retry_i, rc,
+                                   _pnr_approach_logs)
         if rc in (_RC_STALLED, 124):
             # Genuinely hung route (stall) or the 24h+ pathological ceiling —
             # isolate the half-written final DEF so a downstream step never
