@@ -378,6 +378,95 @@ def test_d7_required_outputs_list_is_complete(cell, record_property):
 
 
 # ──────────────────────────────────────────────────────────────────────
+# `program_outputs:` — the flow's SECOND, non-blocking producer declaration
+# ──────────────────────────────────────────────────────────────────────
+#: The two artefacts #2063 (RB2-04) taught step 2's `spec_conformance_check` to
+#: read, and which no step named a producer for until step 1 got its
+#: `program_outputs:` block. Named here so this file states the case it was
+#: written from rather than testing an abstraction.
+_PROGRAM_OUTPUT_ANCHORS = (
+    "phase2/stage1/rtl/SOURCE_MANIFEST.json",
+    "plugin_output/declaration.json",
+)
+
+
+def test_program_outputs_rows_are_read_as_producer_declarations():
+    """POSITIVE: every `program_outputs:` row in the live yaml is visible here.
+
+    `flow_compliance_check._collect_program_output_records` reads this key on
+    every run and stamps each record `role: PRODUCER_OUTPUT, enforcement:
+    NOT_A_GATE`; dimensions 1 and 5 already read it as a producer declaration.
+    This dimension read only `required_outputs`, so a path whose producer the
+    flow names in the channel built for exactly that purpose still counted as
+    "declared by nobody" — which is how #2063's two reads arrived as a
+    W2 finding against step 2, a step that writes neither file.
+    """
+    decls = G.program_output_declarations()
+    rows = [(F.normalize_id(sid), program, path)
+            for sid in F.step_ids()
+            for program, path in F.program_output_paths(sid)]
+    assert rows, "the live flow declares no program_outputs at all"
+    for sid, program, path in rows:
+        assert f"{sid}:{program}" in decls.get(path, frozenset()), (
+            f"step {sid} declares {program} as the writer of {path} and the "
+            f"d7 declaration index does not carry it")
+        assert G.declaring_entry(path) is not None, (
+            f"{path} has a named producer in the flow and declaring_entry "
+            f"still reports it undeclared")
+
+
+def test_the_two_artefacts_step2_reads_have_a_named_producer_and_no_promise():
+    """The fix in BOTH directions at once, on the case it was written from.
+
+    Each anchor must be DECLARED (a producer is named, so W2's "declared by
+    nobody" is answered) and must NOT be in `required_outputs` (which is
+    unconditional ALL-of-N: `flow_compliance_check` returns MISSING the moment
+    a declared entry is absent, on every project, with no escape).
+
+    MEASURED on benchmark-data @0e5d7b85f0b2, which is why the second half is
+    asserted and not merely intended: `phase2/stage1/rtl/SOURCE_MANIFEST.json`
+    is present in 0 of the 17 published roots that carry step 1's declared RTL,
+    and `plugin_output/declaration.json` in 0 of the 90 that carry D1's
+    L1_DATASHEET.json. A `required_outputs` entry for either would turn every
+    published root MISSING — the same trap the step-1 yaml records for
+    `phase2/stage1/lessons.md`.
+    """
+    for path in _PROGRAM_OUTPUT_ANCHORS:
+        assert G.program_output_declarations().get(path), (
+            f"{path} is read by step 2's gate and no step names a producer "
+            f"for it")
+        assert path not in G._all_declared(), (
+            f"{path} is written conditionally and has been promised "
+            f"unconditionally in some step's required_outputs")
+        assert not G.findings_for("2"), (
+            f"step 2 still carries a W2 finding: {G.findings_for('2')}")
+
+
+def test_a_program_outputs_declaration_captures_its_own_path_and_no_other():
+    """NEGATIVE CONTROL: the new capture is EXACT and never widens.
+
+    `declaring_entry`'s weakest existing rule is the basename relaxation, which
+    treats any path sharing a basename with a `required_outputs` entry as
+    declared. A `program_outputs` row deliberately does NOT feed that set: if
+    it did, naming one producer would buy an exemption for every same-named
+    artefact anywhere in the tree, and this dimension's whole subject is the
+    artefact nothing declares.
+    """
+    for path in _PROGRAM_OUTPUT_ANCHORS:
+        base = os.path.basename(path)
+        assert base not in G._all_declared_basenames(), (
+            f"{base} reached the basename relaxation; a program_outputs row "
+            f"must not")
+        twin = "some/other/place/" + base
+        assert G.declaring_entry(twin) is None, (
+            f"{twin} shares only a basename with a program_outputs-declared "
+            f"path and declaring_entry captured it anyway")
+    # And a path the flow names nowhere is still undeclared, so the new branch
+    # cannot be answering `None` into a `not None`.
+    assert G.declaring_entry("reports/phase3/sta_mcorner_ocv.rpt") is None
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Guards on the analysis itself
 # ──────────────────────────────────────────────────────────────────────
 def test_artifact_indices_resolve_known_anchors():

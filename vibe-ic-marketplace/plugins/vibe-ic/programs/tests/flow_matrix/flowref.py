@@ -428,6 +428,29 @@ def program_output_programs(step_id: StepId) -> Tuple[str, ...]:
     return tuple(seen)
 
 
+def program_output_paths(step_id: StepId) -> Tuple[Tuple[str, str], ...]:
+    """``((program, path), ...)`` the step declares under ``program_outputs:``.
+
+    The sibling of :func:`program_output_programs`, which answers "WHICH
+    programs" and drops the path. A caller asking "does the flow name a
+    producer for THIS artefact" needs the pair, and rebuilding it from the raw
+    step dict at the call site is how the second copy of a reader arrives.
+
+    Rows with either half missing are dropped: a declaration that does not name
+    both a program and a path declares nothing.
+    """
+    rows = step_by_id(step_id).get("program_outputs") or ()
+    out: List[Tuple[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        program = str(row.get("program") or "").strip()
+        path = str(row.get("path") or "").strip()
+        if program and path and (program, path) not in out:
+            out.append((program, path))
+    return tuple(out)
+
+
 def declared_skills(step_id: StepId) -> Tuple[str, ...]:
     return tuple(step_by_id(step_id).get("skills") or ())
 

@@ -159,6 +159,25 @@ ROLLUP_ORDER = (
     # qualified done-claim tier split by a count, so it belongs next to the
     # word it splits and before the other qualified tiers.
     "VACUOUS-PASS", "PARTIALLY-VACUOUS", "STRUCTURE-ONLY", "INCOMPLETE",
+    # RB2-03 (#2063) registered NOT-MEASURED in `_flow_verdict_tiers.
+    # PRODUCER_STATUSES` and stopped there. `_TALLY_LABEL_TO_BUCKET` is DERIVED
+    # from that set, so the word became emittable the same commit; this list is
+    # a presentation order and cannot be derived, so it stayed one word short
+    # and a populated NOT-MEASURED bucket had no print slot at all.
+    #
+    # HERE, and not down beside FAIL/MISSING, for the reason the tier module
+    # states in its own words: NOT-MEASURED is in neither `EXCUSED` nor
+    # `NON_GREEN`, so by that module's derivation it is a QUALIFIED DONE-CLAIM,
+    # and this list's order is "full pass, then qualified done-claims, then
+    # excused, then non-green". Printing it in the non-green run of the ladder
+    # would say, in the one table a reader actually looks at, that the step
+    # failed — which is the opposite of what the word adjudicates.
+    #
+    # IMMEDIATELY AFTER `INCOMPLETE` for the same reason PARTIALLY-VACUOUS sits
+    # beside VACUOUS-PASS above: it was SPLIT OUT of INCOMPLETE ("0 of N
+    # sub-gates answered" vs "some of N did"), it only ever replaces INCOMPLETE,
+    # and it belongs next to the word it splits.
+    "NOT-MEASURED",
     "WAIVED", "WAIVED-DEFERRED", "DEFERRED-BY-UPSTREAM",
     # Beside the other EXCUSED words, because it is one: a step the run declared
     # OUT of its scope via --entry-step. Registering the status in

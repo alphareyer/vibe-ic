@@ -1502,16 +1502,67 @@ def _all_declared_basenames() -> FrozenSet[str]:
     return frozenset(os.path.basename(d) for d in _all_declared() if d)
 
 
-def declaring_entry(path: str) -> Optional[str]:
-    """The ``required_outputs`` entry that captures *path*, or ``None``.
+@lru_cache(maxsize=1)
+def program_output_declarations() -> Dict[str, FrozenSet[str]]:
+    """``{path: {"<step>:<program>", ...}}`` from every ``program_outputs:`` row.
 
-    Three ways to be captured, weakest last:
-      1. exact string equality;
+    THE FLOW'S SECOND, NON-BLOCKING PRODUCER DECLARATION, which this module
+    could not see. ``required_outputs`` answers "this step MUST have written
+    it"; ``program_outputs`` answers "THIS program of this step writes it", and
+    `flow_compliance_check._collect_program_output_records` reads it "without
+    executing a gate", stamping each record ``role: PRODUCER_OUTPUT,
+    enforcement: NOT_A_GATE`` and reporting an absent file as
+    ``produced: false`` rather than MISSING.
+
+    WHY THIS DIMENSION HAS TO READ IT. W2's sentence is "produced, depended on,
+    and declared by NOBODY", and `declaring_entry` answered it by asking only
+    about ``required_outputs`` -- so a path whose producer the flow names in the
+    channel built for exactly that purpose still read as undeclared. The
+    asymmetry was this module's alone: dimension 1 already reads
+    ``program_outputs`` (`flowref.program_output_programs`, and
+    `ORPHAN_DECLARED_PROGRAMS` counts what it finds) and dimension 5 already
+    treats a `program_outputs:` writer as a declared producer.
+
+    IT IS NOT A WEAKER SPELLING OF ``required_outputs`` AND MUST NOT BECOME
+    ONE. It closes exactly one question -- "does the flow name a producer" --
+    and it is deliberately kept out of :func:`_all_declared_basenames`, so it
+    can never buy a DIFFERENT path an exemption through the basename
+    relaxation. `required_outputs` keeps its meaning intact: a step that owes
+    an artefact unconditionally still owes it there, and moving such an entry
+    down here would be visible as a `required_outputs` deletion in d3/d4.
+
+    WHY IT IS THE RIGHT ANSWER FOR A CONDITIONALLY-WRITTEN ARTEFACT. The
+    module docstring's "THE FLOW'S OWN OPTIONALITY" section says
+    ``required_outputs`` is ALL-of-N and unconditional, so it cannot truthfully
+    describe a path the flow legitimately may not produce -- and W2 had no
+    other way for the flow to speak. It does now, and the absence is REPORTED
+    (as `NOT-PRODUCED` on the producing step's own record) rather than
+    invisible, which is the whole of what this dimension asks.
+    """
+    acc: Dict[str, Set[str]] = {}
+    for sid in F.step_ids():
+        key = F.normalize_id(sid)
+        for program, path in F.program_output_paths(sid):
+            acc.setdefault(path.strip().lstrip("./"), set()).add(
+                f"{key}:{program}")
+    return {k: frozenset(v) for k, v in acc.items()}
+
+
+def declaring_entry(path: str) -> Optional[str]:
+    """The flow declaration that captures *path*, or ``None``.
+
+    Four ways to be captured, weakest last:
+      1. exact string equality with a ``required_outputs`` entry;
       2. ``fnmatch`` against a declared GLOB (``phase1/generated_docs/L13_*.json``)
          or the reverse, when the probed path is itself a glob;
-      3. same BASENAME as some declared entry — the deliberate relaxation
-         documented in the module docstring, which keeps location drift (a d3 /
-         d4 question) out of this dimension's findings.
+      3. an exact ``program_outputs:`` producer declaration -- the flow naming
+         WHICH program of WHICH step writes this path (see
+         :func:`program_output_declarations`). EXACT ONLY: it never feeds the
+         basename relaxation below, so it can close the question about its own
+         path and no other;
+      4. same BASENAME as some ``required_outputs`` entry — the deliberate
+         relaxation documented in the module docstring, which keeps location
+         drift (a d3 / d4 question) out of this dimension's findings.
     """
     declared = _all_declared()
     if path in declared:
@@ -1519,6 +1570,9 @@ def declaring_entry(path: str) -> Optional[str]:
     for d in declared:
         if fnmatch.fnmatch(path, d) or fnmatch.fnmatch(d, path):
             return d
+    producers = program_output_declarations().get(path)
+    if producers:
+        return f"<program_outputs producer declared: {' '.join(sorted(producers))}>"
     base = os.path.basename(path)
     if base and base in _all_declared_basenames():
         return f"<same basename declared: {base}>"

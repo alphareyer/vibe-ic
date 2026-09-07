@@ -244,6 +244,97 @@ def test_rollup_order_covers_every_bucket_the_checker_can_emit():
         f"buckets with no print slot: {sorted(emitted - set(F.ROLLUP_ORDER))}")
 
 
+def _rendered_stage_step_ids(n):
+    """`n` step ids from ONE stage the Stage-breakdown table actually renders.
+
+    Taken from `F.STAGE_TITLE`, not from the head of the flow: the flow's first
+    two steps are `stage_phase1`, which that table has no row for, so marking
+    "the first n steps" marks steps the table never prints and the assertion
+    below would fail for a reason that is not the one under test.
+    """
+    steps = _real_flow()["steps"]
+    for stage, _title in F.STAGE_TITLE:
+        ids = [str(s["id"]) for s in steps if s.get("stage") == stage]
+        if len(ids) >= n:
+            return ids[:n]
+    raise AssertionError(f"no rendered stage carries {n} steps")
+
+
+def _audit_for_real_flow_with(word, marked_ids):
+    """Verdicts for every real flow step, with `marked_ids` wearing `word` and
+    the rest PASS, and a tally that stays TRUE to the per-step lines."""
+    steps = _real_flow()["steps"]
+    marked = set(marked_ids)
+    labels = {str(s["id"]): (word if str(s["id"]) in marked else "PASS")
+              for s in steps}
+    tally = {"PASS": sum(1 for v in labels.values() if v == "PASS"),
+             "FAIL": 0, "MISSING": 0, "WAIVED-DEFERRED": 0}
+    tally[word] = sum(1 for v in labels.values() if v == word)
+    return _audit_text(labels, tally=tally)
+
+
+def _stage_breakdown_counts(md, word):
+    """How many steps the Stage-breakdown table's `Other` column attributes to
+    `word`, summed over its rows. That table is the second of the renderer's
+    two ROLLUP_ORDER walks and the one with NO fallback branch."""
+    sym = F.VERDICT_SYM.get(word, word)
+    body = md.split("## Stage breakdown", 1)[1].split("\n## ", 1)[0]
+    total = 0
+    for ln in body.splitlines():
+        if not ln.startswith("| ") or "---" in ln:
+            continue
+        for bit in ln.rsplit("|", 2)[1].split():
+            k, _, v = bit.partition("=")
+            if k == sym and v.isdigit():
+                total += int(v)
+    return total
+
+
+def test_a_populated_not_measured_bucket_reaches_the_stage_breakdown(
+        monkeypatch, tmp_path):
+    """A PRINT SLOT IS THE POINT, NOT MEMBERSHIP OF A TUPLE.
+
+    The test above asks whether the word is IN `ROLLUP_ORDER`. That is the
+    necessary half. This is the sufficient half, and it is a different loop:
+    the Verdict roll-up table appends an unknown bucket after everything else,
+    but the **Stage-breakdown** table walks `ROLLUP_ORDER` and has no fallback
+    at all, so a populated bucket with no slot there is not mis-ordered — it is
+    ABSENT, and the stage rows stop accounting for the steps they count.
+
+    MEASURED on 0fe74ebc325a (tree 98f2cf217d76), the tree that shipped
+    `NOT-MEASURED` in `_flow_verdict_tiers.PRODUCER_STATUSES` and not in
+    `ROLLUP_ORDER`: this render attributed 0 of its 3 NOT-MEASURED steps to any
+    stage row.
+    """
+    marked = _rendered_stage_step_ids(3)
+    md = _render_with(monkeypatch, tmp_path,
+                      _audit_for_real_flow_with("NOT-MEASURED", marked))
+    assert C.parse_rollup_table(md).get("NOT-MEASURED") == 3
+    assert _stage_breakdown_counts(md, "NOT-MEASURED") == 3, (
+        "3 steps wear NOT-MEASURED and the Stage-breakdown table attributes "
+        "none of them to it; that loop walks ROLLUP_ORDER and has no fallback")
+
+
+def test_the_not_measured_slot_sits_among_the_qualified_done_claims():
+    """WHERE the slot is, asserted against the classification rather than
+    against a remembered index.
+
+    `_flow_verdict_tiers` puts NOT-MEASURED in neither `EXCUSED` nor
+    `NON_GREEN`, which by that module's own derivation makes it a QUALIFIED
+    DONE-CLAIM. `ROLLUP_ORDER` is ordered "full pass, then qualified
+    done-claims, then excused, then non-green", so a slot below `FAIL` would
+    print, in the one table a reader opens, that the step failed.
+    """
+    import _flow_verdict_tiers as T
+    assert T.is_qualified_done("NOT-MEASURED")
+    order = list(F.ROLLUP_ORDER)
+    non_green = [order.index(w) for w in T.NON_GREEN if w in order]
+    excused = [order.index(w) for w in T.EXCUSED if w in order]
+    assert order.index("NOT-MEASURED") < min(non_green + excused)
+    # Split out of INCOMPLETE, so it prints beside the word it splits.
+    assert order.index("NOT-MEASURED") == order.index("INCOMPLETE") + 1
+
+
 # ─── 6. end-to-end render: the two roll-ups in one document ──────────────
 
 def _render_with(monkeypatch, tmp_path, audit_text):

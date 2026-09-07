@@ -1438,6 +1438,47 @@ steps:
     # simulation / formal) and the P0 structural-RTL gates. Do not re-flag as a
     # missing checker.
     skills: [spec-to-rtl]
+    # THE TWO ARTEFACTS THIS STEP MAY PRODUCE AND CANNOT PROMISE.
+    #
+    # `program_outputs:` is the flow's NON-BLOCKING producer declaration —
+    # `flow_compliance_check._collect_program_output_records` reads it "without
+    # executing a gate" and stamps every record `role: PRODUCER_OUTPUT,
+    # enforcement: NOT_A_GATE`, so an absent file is reported as
+    # `produced: false / NOT-PRODUCED` on the step's own record and never as
+    # MISSING. That is the only truthful thing this flow can say about either
+    # path below, and the lessons.md note under `required_outputs` is the
+    # measured precedent for why: `required_outputs` is UNCONDITIONAL, so
+    # declaring a conditionally-written artefact there reds this step on every
+    # project that legitimately did not write it.
+    #
+    # MEASURED on benchmark-data @0e5d7b85f0b2 (8744 tracked files):
+    #   phase2/stage1/rtl/SOURCE_MANIFEST.json   0 of the 17 roots that carry
+    #                                            this step's declared RTL
+    #   plugin_output/declaration.json           0 of the 90 roots that carry
+    #                                            D1's L1_DATASHEET.json
+    # — so a `required_outputs` entry for either would turn EVERY published
+    # root MISSING. Both producers are conditional by construction:
+    # `ip_catalog_pull` / `staged_rtl_reused_ip_manifest_emit` write the
+    # manifest only on the reused-IP / catalog-glue arm of this step, and
+    # `arith_declaration_emit` is FAIL-CLOSED — when a field is not derivable
+    # it writes no file and exits rc=1, which the runner reports as SKIP.
+    #
+    # WHY THEY ARE DECLARED AT ALL. Step 2's `spec_conformance_check` READS
+    # both (#2063 RB2-04), and until this block existed no step named a
+    # producer for either, so dimension 7 reported them as
+    # `W2:produced_consumed_undeclared` — produced by the flow, read by a gate,
+    # declared by nobody — and charged them to step 2, which produces neither.
+    # Naming the producer here is what makes an absence VISIBLE, which is the
+    # whole of what d7 asks; asserting the file is always there is not.
+    program_outputs:
+      - program: ip_catalog_pull
+        path: "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+      - program: staged_rtl_reused_ip_manifest_emit
+        path: "phase2/stage1/rtl/SOURCE_MANIFEST.json"
+      - program: ip_catalog_pull
+        path: "plugin_output/declaration.json"
+      - program: arith_declaration_emit
+        path: "plugin_output/declaration.json"
     required_outputs:
       - "phase2/stage1/rtl/*.sv OR phase2/stage1/rtl/*.v"
       # `phase2/stage1/lessons.md` IS NOT DECLARED HERE, and the reason is the
