@@ -77,8 +77,23 @@ def run(tmp_path, sv, name='dut.v'):
     res = subprocess.run(
         [sys.executable, str(SCRIPT), '--json', str(jf), str(f)],
         capture_output=True, text=True)
-    findings = json.loads(jf.read_text()) if jf.exists() else []
-    return res, findings
+    if not jf.exists():
+        return res, []
+    report = json.loads(jf.read_text())
+    # THE ARTEFACT IS A REPORT OBJECT, not a bare list (vibe-ic#2178, which
+    # landed after this file and had to change the container so
+    # `flow_compliance_check._command_json_report` — `data if isinstance(data,
+    # dict) else None` — could read it at all). Only the extraction moved; not
+    # one assertion in this file was touched, and the rows are the same rows.
+    #
+    # The shape is ASSERTED rather than defaulted on purpose. Half the tests
+    # below assert `rows == []`, so a helper that quietly fell back to `[]`
+    # when the key went missing would make them pass for the wrong reason —
+    # which is precisely the failure mode this file's own docstring is about.
+    assert isinstance(report, dict) and 'findings' in report, (
+        'the --json artefact must be a report object carrying `findings`; got '
+        f'{type(report).__name__}')
+    return res, report['findings']
 
 
 def _key(rows):

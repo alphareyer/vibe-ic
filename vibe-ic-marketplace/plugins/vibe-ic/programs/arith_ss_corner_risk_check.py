@@ -443,15 +443,39 @@ def analyse_module(name: str, body: str, base_line: int, path: str,
     return findings
 
 
-def lint_file(path: Path, warn_w: int, high_w: int,
-              suppressed: List['Suppression'] | None = None) -> List[Finding]:
-    raw = path.read_text(errors='replace')
+def analyse_text(raw: str, path: str = '<rtl>',
+                 warn_w: int = 16, high_w: int = 32,
+                 suppressed: List['Suppression'] | None = None
+                 ) -> List[Finding]:
+    """Every finding in one RTL SOURCE STRING.
+
+    The text-level entry point, so a consumer that already holds the RTL — the
+    phase-2 determinism dispatch and `gate_directed_rtl_repair`'s router
+    (vibe-ic#2178) — reads THIS analyser rather than a second copy of its
+    heuristic. `lint_file` is this function plus a read, which is what keeps
+    the two callers from drifting apart.
+
+    IT READS THE COMMENT-STRIPPED SOURCE AND NOTHING ELSE, and passes
+    `suppressed` straight through, because that is what `lint_file` does since
+    vibe-ic#2192 landed. This entry point was first authored against the older
+    raw-body mitigation lookup; that half is dropped in favour of the rule that
+    landed first, so a router reading this function cannot be silenced by a
+    sentence the file-path caller is already immune to, and a module this
+    function withholds rows from is disclosed to its caller rather than
+    rendered as a clean one.
+    """
     src = strip_comments(raw)
     out: List[Finding] = []
     for name, body, line in _segment_modules(src):
-        out += analyse_module(name, body, line, str(path), warn_w, high_w,
+        out += analyse_module(name, body, line, path, warn_w, high_w,
                               suppressed=suppressed)
     return out
+
+
+def lint_file(path: Path, warn_w: int, high_w: int,
+              suppressed: List['Suppression'] | None = None) -> List[Finding]:
+    return analyse_text(path.read_text(errors='replace'), str(path),
+                        warn_w, high_w, suppressed)
 
 
 def strict_failing_rows(findings: List[Finding]) -> List[Finding]:
@@ -521,8 +545,24 @@ def main(argv: List[str] | None = None) -> int:
     predicted = [f for f in findings if not f.measured]
     strict_rows = strict_failing_rows(findings)
     fail = args.strict and bool(strict_rows)
+    # THE VERDICT CARRIES THE COUNT (vibe-ic#2178). Two real authoring outputs
+    # of the same design, one with 13 HIGH rows and one with 0, both produced
+    # rc 0 and the single word `PASS`, so every downstream reader of this gate
+    # — including the flow's own advisory recorder — saw byte-identical
+    # evidence for a design that was warned and one that had nothing to warn
+    # about. A detector returning the same verdict at thirteen findings and at
+    # none is discarding the only signal it has.
+    #
+    # `PASS-WITH-ADVISORIES` is chosen from the vocabulary the recorder ALREADY
+    # treats as non-blocking (`flow_compliance_check._ADVISORY_NONBLOCKING_
+    # VERDICTS`), so the count reaches the record WITHOUT this gate gaining the
+    # power to refuse. That is deliberate and is the ruling on #2178: a risk
+    # signal that blocks becomes a waiver factory. rc is UNCHANGED in both
+    # directions — see the `--strict` note above and #2063.
     # Advisory default never prints the token FAIL (keeps the MCP PASS contract).
-    verdict = 'FAIL' if fail else 'PASS'
+    verdict = ('FAIL' if fail
+               else 'PASS-WITH-ADVISORIES' if high
+               else 'PASS')
     note = '' if fail else ' (advisory)'
     # vibe-ic#2192 — A SILENCED MODULE MAY NOT RENDER AS A CLEAN ONE. The
     # clause is appended only when something was actually withheld, so a run
@@ -545,9 +585,35 @@ def main(argv: List[str] | None = None) -> int:
               f"is read from the code only; a comment claiming a mitigation "
               f"no longer silences this analysis (vibe-ic#2192).")
     if args.json:
+        # A REPORT OBJECT, not a bare list, and that is the whole repair on
+        # this side. `flow_compliance_check._command_json_report` reads the
+        # path this gate's own flow command already passes and then returns
+        # `data if isinstance(data, dict) else None` — so a list was invisible
+        # to the recorder by construction, and `_advisory_execution_record`
+        # fell back to rc, which is identical in both directions. The rows are
+        # unchanged and still carry `measured` / `basis` on every one.
+        #
+        # The suppression census travels WITH the counts, for the reason
+        # vibe-ic#2192 gave about the headline: a silenced module may not
+        # render as a clean one. That rule landed against stdout, and this
+        # object is a second channel to the same reader — dropping the
+        # disclosure here would reopen the hole in the machine-readable half
+        # while stdout stayed honest. `suppressed_modules` is 0 and
+        # `suppressed_rows_withheld` is 0 on any corpus with nothing withheld,
+        # so a clean run's report gains two zeroes and no other change.
         outp = Path(args.json)
         outp.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(outp, json.dumps([asdict(f) for f in findings], indent=2))
+        atomic_write_text(outp, json.dumps({
+            'verdict': verdict,
+            'high': len(high),
+            'med': len(med),
+            'predicted': len(predicted),
+            'measured': len(findings) - len(predicted),
+            'suppressed_modules': len(suppressed),
+            'suppressed_rows_withheld': withheld,
+            'suppressed': [asdict(sp) for sp in suppressed],
+            'findings': [asdict(f) for f in findings],
+        }, indent=2))
     return 1 if fail else 0
 
 

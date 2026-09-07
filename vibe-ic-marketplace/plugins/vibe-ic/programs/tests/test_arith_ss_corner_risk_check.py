@@ -23,8 +23,24 @@ def run(tmp_path, sv, *extra):
     res = subprocess.run(
         [sys.executable, str(SCRIPT), '--json', str(jf), *extra, str(f)],
         capture_output=True, text=True)
-    findings = json.loads(jf.read_text()) if jf.exists() else []
-    return res, findings
+    report = json.loads(jf.read_text()) if jf.exists() else {}
+    # The `--json` artefact is a REPORT OBJECT (vibe-ic#2178), not a bare list:
+    # `flow_compliance_check._command_json_report` returns `data if
+    # isinstance(data, dict) else None`, so a list was invisible to the flow's
+    # own advisory recorder. `report_of` below pins that shape directly.
+    return res, report.get('findings', [])
+
+
+def run_report(tmp_path, sv, *extra):
+    """The same invocation, returning the whole report object."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    f = tmp_path / 'dut.v'
+    f.write_text(sv)
+    jf = tmp_path / 'out.json'
+    res = subprocess.run(
+        [sys.executable, str(SCRIPT), '--json', str(jf), *extra, str(f)],
+        capture_output=True, text=True)
+    return res, json.loads(jf.read_text())
 
 
 WIDE_RIPPLE = """
@@ -246,3 +262,147 @@ def test_the_finding_does_not_claim_the_case_it_cannot_reproduce(tmp_path):
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
+# ── vibe-ic#2178: THE VERDICT MUST CARRY THE COUNT ──────────────────────────
+# MEASURED on two real authoring outputs of the same design (lane rbsha5 arms
+# A2/A3, re-measured by lane cz2178 on 2026-09-07): 13 HIGH rows and 0 HIGH
+# rows produced rc 0 and the single headline word `PASS` in BOTH. Every reader
+# downstream — including the flow's own advisory recorder — saw byte-identical
+# evidence for a design that was warned and one with nothing to warn about.
+
+QUIET = """
+module narrow(input clk, input [3:0] a, input [3:0] b, output reg [3:0] s);
+  always @(posedge clk) s <= a + b;
+endmodule
+"""
+
+
+def test_headline_and_verdict_move_with_the_high_count(tmp_path):
+    hot, _ = run_report(tmp_path / 'hot', WIDE_RIPPLE)
+    cold, _ = run_report(tmp_path / 'cold', QUIET)
+    # the count is IN the headline, both ways. The field ORDER is the one
+    # vibe-ic#2192 left on this line, not the reordering #2178's branch
+    # carried: that branch was authored before #2192 landed a `supp_note`
+    # clause onto the same print, and the count was already in the headline on
+    # both sides, so the reorder was cosmetic and the line that landed first
+    # is the contract. What #2178 adds here is the VERDICT WORD.
+    assert '(1 HIGH, 0 MED;' in hot.stdout.splitlines()[0], hot.stdout
+    assert '(0 HIGH, 0 MED;' in cold.stdout.splitlines()[0], cold.stdout
+    # and the VERDICT WORD itself differs, which is what a reader that only
+    # keeps the verdict (the compliance record) can see
+    assert hot.stdout.splitlines()[0].split(':')[1].strip().startswith(
+        'PASS-WITH-ADVISORIES')
+    assert cold.stdout.splitlines()[0].split(':')[1].strip().startswith('PASS ')
+    assert hot.stdout.splitlines()[0] != cold.stdout.splitlines()[0]
+    # NEITHER may block. That is the ruling on #2178, not a preference.
+    assert hot.returncode == 0 and cold.returncode == 0
+    assert 'FAIL' not in hot.stdout and 'FAIL' not in cold.stdout
+
+
+def test_json_is_a_report_object_that_names_the_rows(tmp_path):
+    res, rep = run_report(tmp_path, WIDE_RIPPLE)
+    assert isinstance(rep, dict)                      # NOT a bare list
+    assert rep['verdict'] == 'PASS-WITH-ADVISORIES'
+    assert rep['high'] == 1 and rep['med'] == 0
+    assert rep['predicted'] == 1 and rep['measured'] == 0
+    assert len(rep['findings']) == 1                  # the rows are NAMED
+    assert rep['findings'][0]['risk'] == 'HIGH'
+    assert rep['findings'][0]['symbol'] == 'sum'
+    assert res.returncode == 0
+
+
+def test_the_flow_recorder_reads_the_count_and_still_does_not_block(tmp_path):
+    """END TO END through the recorder that actually consumes this gate.
+
+    Not a grep: `_advisory_execution_record` is the function the
+    `advisory_program_exit_zero` slot builds its record with. The NEGATIVE
+    CONTROL is the point — the same rows written in the OLD bare-list shape are
+    invisible to it and both arms record `PASS`, which is the defect #2178
+    names.
+    """
+    fc = pytest.importorskip('flow_compliance_check')
+    cmd = ('arith_ss_corner_risk_check --strict phase2/stage1/rtl '
+           '--json reports/phase2/gates/arith_ss_corner_risk.json')
+    proj = tmp_path / 'proj'
+    dest = proj / 'reports/phase2/gates/arith_ss_corner_risk.json'
+    dest.parent.mkdir(parents=True)
+
+    def record_for(sv):
+        _res, rep = run_report(tmp_path / f'w{abs(hash(sv))}', sv)
+        dest.write_text(json.dumps(rep))
+        return fc._advisory_execution_record(
+            cmd, len(fc._GATE_LEDGER), True, '', proj), rep
+
+    hot, hot_rep = record_for(WIDE_RIPPLE)
+    cold, _ = record_for(QUIET)
+    assert hot['verdict'] == 'PASS-WITH-ADVISORIES'
+    assert cold['verdict'] == 'PASS'
+    assert hot['verdict'] != cold['verdict']          # the record CARRIES it
+    assert hot['exit_code'] == cold['exit_code'] == 0  # rc is unchanged
+    assert hot['enforcement'] == 'NON_BLOCKING_ADVISORY'   # and never blocks
+
+    # NEGATIVE CONTROL — the pre-#2178 shape, same rows, same rc.
+    dest.write_text(json.dumps(hot_rep['findings']))
+    stale = fc._advisory_execution_record(
+        cmd, len(fc._GATE_LEDGER), True, '', proj)
+    assert stale['verdict'] == 'PASS', (
+        'the bare-list report must be invisible to the recorder — if this '
+        'passes as PASS-WITH-ADVISORIES the control is not testing anything')
+
+
+# ── the #2178/#2192 SEAM ────────────────────────────────────────────────────
+# `analyse_text` is #2178's text-level entry point, added so the router and the
+# phase-2 dispatch read THIS analyser instead of a second copy of the
+# heuristic. It was first authored against the raw-body mitigation lookup that
+# #2192 had already replaced on main. #2192 landed first and is the contract,
+# so `analyse_text` reads the COMMENT-STRIPPED source like `lint_file` does.
+# These two tests are what stops the older half creeping back in through the
+# new entry point.
+
+COMMENT_ONLY_MARKER = """
+module wide_sum(input clk, input [31:0] a, input [31:0] b,
+                output reg [31:0] sum);
+  // carry-save reduced -- prose only; no identifier below says so.
+  always @(posedge clk) sum <= a + b;
+endmodule
+"""
+
+CODE_MARKER = """
+module wide_sum(input clk, input [31:0] a, input [31:0] b,
+                output reg [31:0] sum);
+  wire [31:0] csa_s, csa_c;
+  always @(posedge clk) sum <= a + b;
+endmodule
+"""
+
+
+def test_analyse_text_is_not_silenced_by_a_comment(tmp_path):
+    ass = pytest.importorskip('arith_ss_corner_risk_check')
+    rows = [f for f in ass.analyse_text(COMMENT_ONLY_MARKER) if f.risk == 'HIGH']
+    assert rows, ('a marker that appears only in a comment must not silence '
+                  'the text entry point either (vibe-ic#2192)')
+    # the other direction: a marker in CODE still silences, and says so
+    supp = []
+    coded = ass.analyse_text(CODE_MARKER, '<rtl>', suppressed=supp)
+    assert coded == []
+    assert len(supp) == 1 and supp[0].withheld >= 1
+    assert supp[0].marker.lower().startswith('csa')
+
+
+def test_the_report_object_discloses_what_a_marker_withheld(tmp_path):
+    """#2192's rule holds in #2178's new machine-readable channel too.
+
+    A module silenced by a marker and a module with no wide adders in it must
+    not produce the same report. Without these two keys the object would be
+    byte-identical for both, which is the exact shape #2178 exists to refuse.
+    """
+    _res, hidden = run_report(tmp_path / 'hidden', CODE_MARKER)
+    _res2, clean = run_report(tmp_path / 'clean', QUIET)
+    assert hidden['high'] == clean['high'] == 0
+    assert hidden['suppressed_modules'] == 1
+    assert hidden['suppressed_rows_withheld'] >= 1
+    assert hidden['suppressed'][0]['module'] == 'wide_sum'
+    assert clean['suppressed_modules'] == 0
+    assert clean['suppressed'] == []
+    assert hidden != clean

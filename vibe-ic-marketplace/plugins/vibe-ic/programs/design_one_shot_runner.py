@@ -5090,6 +5090,7 @@ def step_determinism_gates(project: Path, top_name: str = "") -> StepResult:
         import clock_divider_ratio_oracle_check as _cdr  # noqa: E402
         import edge_history_reset_phantom_check as _ehr  # noqa: E402
         import counter_decode_lookahead_phase_check as _cdl  # noqa: E402
+        import arith_ss_corner_risk_check as _ass  # noqa: E402
     except Exception as e:  # pragma: no cover — defensive import guard
         return StepResult("determinism_gates", "SKIP", time.time() - t0,
                           f"gate modules unavailable: {e}")
@@ -5103,6 +5104,9 @@ def step_determinism_gates(project: Path, top_name: str = "") -> StepResult:
     # deleted, which is the identical false record this wiring exists to remove
     # — MEASURED by deleting the invocation and re-running a real project.
     lookahead_scanned = 0
+    arith_ss_advisories: List[Dict[str, object]] = []
+    arith_ss_suppressed: List[Dict[str, object]] = []
+    arith_ss_scanned = 0
     repairs: List[str] = []
     worked_example_skip: Optional[Dict[str, object]] = None
     n_checked = 0
@@ -5156,6 +5160,39 @@ def step_determinism_gates(project: Path, top_name: str = "") -> StepResult:
             lookahead_scanned += 1
             for _f in _hits:
                 lookahead_advisories.append(dict(_f, file=f.name))
+        except Exception:
+            pass
+        # THIRD ADVISORY member — a full-width single-cycle add / compare /
+        # multiply chain, which closes at the typical corner and misses the
+        # SLOW one (vibe-ic#2178). Per FILE for the same reason as the three
+        # above. ADVISORY on the checker's own written enforcement
+        # (`ENFORCEMENT: advisory`) and on a stronger one: every row it emits
+        # carries `measured=false` / `basis=predicted-from-rtl-structure`, and
+        # a prediction may not buy a refusal (#2063). So the result goes to
+        # `arith_ss_advisories`, NEVER to `findings`.
+        #
+        # `_supp` is collected and published for vibe-ic#2192's rule, which
+        # landed on this checker's stdout before this dispatch existed: a
+        # module SILENCED by a mitigation marker may not render as a clean
+        # one. This row is a second reader of the same analysis, so it owes
+        # the same disclosure — without it a marker'd module and a module with
+        # no wide adders in it would produce the identical `high_findings: 0`,
+        # which is the shape #2178 is about in the first place.
+        try:
+            _supp: List = []
+            _arows = [_f for _f in _ass.analyse_text(txt, f.name,
+                                                     suppressed=_supp)
+                      if _f.risk == 'HIGH']
+            arith_ss_scanned += 1
+            for _f in _arows:
+                arith_ss_advisories.append(
+                    {"file": f.name, "symbol": _f.symbol, "line": _f.line,
+                     "rule": _f.rule, "width": _f.width, "depth": _f.depth,
+                     "measured": _f.measured, "basis": _f.basis})
+            for _sp in _supp:
+                arith_ss_suppressed.append(
+                    {"file": f.name, "module": _sp.module, "line": _sp.line,
+                     "marker": _sp.marker, "withheld": _sp.withheld})
         except Exception:
             pass
     # spec WORKED-EXAMPLE oracle runs ONCE, on the TOP/DUT module ONLY. The
@@ -5334,6 +5371,65 @@ def step_determinism_gates(project: Path, top_name: str = "") -> StepResult:
             + (f" (+{len(lookahead_advisories) - 4} more)"
                if len(lookahead_advisories) > 4 else ""))
 
+    # THIRD CLASS, SAME SHAPE, AND THE ROW CARRIES THE COUNT.
+    #
+    # vibe-ic#2178: this checker ran at Step 2 in an `advisory_program_exit_
+    # zero` slot, wrote every row to `reports/phase2/gates/arith_ss_corner_
+    # risk.json`, and was read by NOTHING — measured on two real authoring
+    # outputs of the same design, 13 HIGH against 0 HIGH, both rc 0 with the
+    # headline word PASS. `high_findings` is on the row because a verdict that
+    # is the same at thirteen and at none discards the only signal it has.
+    #
+    # Written even when the scan is CLEAN, for the reason the class above
+    # states: a row that appears only on a finding cannot tell "ran and found
+    # nothing" from "never ran".
+    #
+    # The routing is read from `gate_directed_rtl_repair`'s own register rather
+    # than restated here, so deleting that entry breaks this dispatch loudly
+    # instead of leaving the step printing a route nobody honours any more.
+    arith_ss_extra: Optional[Dict[str, object]] = None
+    if arith_ss_scanned:
+        arith_ss_extra = {
+            "defect": "slow-corner-wide-arithmetic",
+            "verdict": "FINDING" if arith_ss_advisories else "PASS",
+            "high_findings": len(arith_ss_advisories),
+            "files_scanned": arith_ss_scanned,
+            "blocking": False,
+            "findings": arith_ss_advisories,
+            # vibe-ic#2192 — silence is not a verdict. Both keys are present
+            # on every row, 0 and [] when nothing was withheld, so a reader
+            # never has to tell an absent key from a clean scan.
+            "suppressed_modules": len(arith_ss_suppressed),
+            "suppressed": arith_ss_suppressed,
+        }
+        try:
+            import gate_directed_rtl_repair as _gdr3  # noqa: E402
+            _route3 = _gdr3.NOT_REPAIRABLE["slow-corner-wide-arithmetic"]
+            arith_ss_extra["gate"] = _route3["gate"]
+            arith_ss_extra["router_verdict"] = (
+                "ESCALATE" if arith_ss_advisories else "NOT_APPLICABLE")
+            arith_ss_extra["why_advisory_here"] = (
+                "every row is PREDICTED from RTL structure and none is "
+                "measured, and the property at stake — slow-corner setup "
+                "slack — is only measurable after synthesis and routing; see "
+                "gate_directed_rtl_repair.NOT_REPAIRABLE")
+            arith_ss_extra["why_not_bucket_a"] = _route3["why_not_bucket_a"]
+            arith_ss_extra["escalate_to"] = _route3["escalate_to"]
+        except Exception:
+            arith_ss_extra["gate"] = "arith_ss_corner_risk_check"
+            arith_ss_extra["router_verdict"] = "UNAVAILABLE"
+    if arith_ss_advisories:
+        advisory_note += (
+            " | ADVISORY (never changes this verdict) — HIGH "
+            f"{len(arith_ss_advisories)}: full-width single-cycle arithmetic "
+            "is a slow-corner closure risk, routed ESCALATE by "
+            "gate_directed_rtl_repair: "
+            + "; ".join(f"{a['file']}:{a['line']} {a['symbol']}"
+                        f" ({a['width']}b depth {a['depth']})"
+                        for a in arith_ss_advisories[:4])
+            + (f" (+{len(arith_ss_advisories) - 4} more)"
+               if len(arith_ss_advisories) > 4 else ""))
+
     if findings:
         _extras: Dict[str, object] = {
             "gate": "determinism_gates",
@@ -5343,6 +5439,8 @@ def step_determinism_gates(project: Path, top_name: str = "") -> StepResult:
             _extras["edge_history_reset_advisory"] = advisory_extra
         if lookahead_extra:
             _extras["counter_decode_lookahead_advisory"] = lookahead_extra
+        if arith_ss_extra:
+            _extras["arith_ss_corner_risk_advisory"] = arith_ss_extra
         if worked_example_skip:
             _extras["worked_example_oracle"] = worked_example_skip
         return StepResult(
@@ -5368,6 +5466,8 @@ def step_determinism_gates(project: Path, top_name: str = "") -> StepResult:
         pass_extras["edge_history_reset_advisory"] = advisory_extra
     if lookahead_extra:
         pass_extras["counter_decode_lookahead_advisory"] = lookahead_extra
+    if arith_ss_extra:
+        pass_extras["arith_ss_corner_risk_advisory"] = arith_ss_extra
     if worked_example_skip:
         pass_extras["worked_example_oracle"] = worked_example_skip
     return StepResult("determinism_gates", "PASS", time.time() - t0, detail,

@@ -1799,12 +1799,7 @@ steps:
         # the flow invokes.
         #
         # The `advisory_program_exit_zero` slot RUNS it and RECORDS the verdict
-        # and can never fail the step. `--strict` is present because that slot
-        # judges by EXIT CODE ONLY: without it the program always exits 0 and
-        # the compliance record reads the single word `ok` whether the design
-        # has 0 findings or 85 — the disclosure would be discarded at the
-        # moment of recording. rc=1 is the only channel that emits a FINDING
-        # line, and it still cannot block. It is a sub-gate of `all_of` rather
+        # and can never fail the step. It is a sub-gate of `all_of` rather
         # than a sibling key, because `_evaluate_gate` returns inside the
         # blocking branch and an advisory beside a blocking key never runs.
         #
@@ -1815,9 +1810,34 @@ steps:
         # waiver channel (3 of the 11 are third-party vendor RTL the flow does
         # not author), then a re-measure, then a per-step promotion with the
         # new number stated.
+        #
+        # RE-MEASURED 2026-09-07 (#2178) on benchmark-data 0e5d7b85f0b2, which
+        # is a DIFFERENT population from the 40-root one above: the corpus now
+        # publishes 17 `phase2/stage1/rtl` roots, and exactly ONE of them emits
+        # a HIGH — `protocol_parity/qspi_ospi`, 2 rows, both on `csr_rdata` at
+        # qspi_ctrl.v:475 and :477 (32-bit, depth 1). The two figures are not
+        # comparable and neither is retracted; they cover different corpora.
+        # Separately, only TWO published runs carry this gate's report at all
+        # (both `ic/spm/*`), and both are an empty list — so the one root that
+        # WOULD be warned has no warning in its published record.
+        #
+        # CORRECTED 2026-09-07 (#2178). The paragraph above used to say this
+        # slot "judges by EXIT CODE ONLY" and that "rc=1 is the only channel".
+        # Both were false of the recorder as written:
+        # `flow_compliance_check._advisory_execution_record` calls
+        # `_command_json_report`, which reads the `--json` path THIS command
+        # already passes — and then returns `data if isinstance(data, dict)
+        # else None`. This gate wrote a bare LIST, so its report was invisible
+        # by construction and the record fell back to rc. MEASURED on two real
+        # authoring outputs of one design: 13 HIGH and 0 HIGH both recorded
+        # `PASS`. The gate now writes a report OBJECT and the recorder reads
+        # `PASS-WITH-ADVISORIES` against `PASS` — a verdict that carries the
+        # count, with rc UNCHANGED (0 both ways) and enforcement
+        # NON_BLOCKING_ADVISORY. It still cannot fail the step, and that is the
+        # ruling: a risk signal that blocks becomes a waiver factory.
         - advisory_program_exit_zero:
               command: "arith_ss_corner_risk_check --strict phase2/stage1/rtl --json reports/phase2/gates/arith_ss_corner_risk.json"
-              advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
+              advisory_reason: "ADVISORY BY DESIGN, not a ratchet position. Every row this gate emits carries `measured=false` / `basis=predicted-from-rtl-structure`, and a prediction may not buy a refusal (#2063); the property it stands for -- slow-corner setup slack -- is only measurable by a multi-corner STA run on a placed and routed netlist, which is Phase 3. Its HIGH rows are routed to `gate_directed_rtl_repair` as `slow-corner-wide-arithmetic` (ESCALATE, never a rewrite) and its count reaches the compliance record through the report OBJECT this command's `--json` writes. Promoting it to blocking would refuse deliveries on a prediction and manufacture a waiver channel."
         # RTL BUG DENSITY — the count half of this step's RTL-bug accounting.
         # `rtl_bug_report_schema_check` above grades the SHAPE of each claimed
         # RTL bug; nothing counted how many the candidate RTL actually needed.

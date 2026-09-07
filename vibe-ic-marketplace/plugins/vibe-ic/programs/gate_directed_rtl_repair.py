@@ -204,6 +204,54 @@ NOT_REPAIRABLE: Dict[str, Dict[str, str]] = {
             "value, because the `always @(posedge)` block already registers; "
             "if it is, the lookahead is the intent and nothing needs changing.",
     },
+    "slow-corner-wide-arithmetic": {
+        "gate": "arith_ss_corner_risk_check",
+        "why_not_bucket_a":
+            "The gate names the defect precisely — file, line, the symbol the "
+            "sum feeds, the carry width and the chain depth — and there is "
+            "still no candidate this module may emit, for a reason its own "
+            "rows measure rather than assert. On the authoring output this "
+            "class was distilled from, 11 of the 13 HIGH rows have "
+            "add-chain depth 1: a SINGLE full-width add, HIGH on WIDTH alone. "
+            "No source-level rewrite this module could perform — "
+            "re-association of a `+` chain into a balanced tree, the one "
+            "transform that is bit-exact at a fixed modular width — shortens "
+            "a single carry chain at all, so it would leave 11 of 13 rows "
+            "exactly where they were. What the gate asks for instead is a "
+            "DATAPATH REBUILD: reduce the multi-operand sum with 3:2 "
+            "compressors to two vectors and carry-propagate once, or retime "
+            "an operand that is already known a cycle early. That invents "
+            "logic, which this module's invariant forbids, and it is not "
+            "decidable from the RTL text whether the cycle count and the "
+            "operand availability the rebuild needs are permitted — that "
+            "lives in the input's latency and corner declarations. "
+            "The ACCEPTANCE is missing too, and the same way it is for the "
+            "classes above: the property this gate stands for is SLOW-CORNER "
+            "SETUP SLACK, which is measured by a multi-corner STA run on a "
+            "placed and routed netlist. This step runs BEFORE synthesis, so "
+            "no oracle reachable here can accept a candidate. The gate's own "
+            "rows say so in the field the flow can read: every one of them "
+            "carries `measured=false` and "
+            "`basis=predicted-from-rtl-structure`. Worse, the gate's cheapest "
+            "syntactic satisfaction is to add a MITIGATION MARKER: naming a "
+            "wire `csa_s` silences every row in the module, and no structure "
+            "has to change for it to work. vibe-ic#2192 closed the cheaper "
+            "half of that — the marker is now read from the module name and "
+            "the COMMENT-STRIPPED body, so a sentence no longer counts — and "
+            "the remaining identifier form is still exactly the "
+            "pattern-stops-matching non-repair this module exists to refuse. "
+            "The suppression is at least disclosed now, by that same issue, "
+            "which is what makes it reviewable rather than silent.",
+        "escalate_to":
+            "the RTL author (and agents/ic-expert-agent.md, `### Skill: "
+            "multi-operand sums and the slow corner`) — decide from the "
+            "input's declared period and sign-off corner whether the "
+            "full-width chain can stand; if it cannot, reduce the "
+            "multi-operand sum with 3:2 compressors to a single "
+            "carry-propagate add, or pre-add the operands already available a "
+            "cycle early, and prove the rewrite cycle-by-cycle against the "
+            "original before trusting it.",
+    },
 }
 
 
@@ -681,6 +729,51 @@ def repair(rtl: str, spec: str) -> dict:
                        evidence={"gate": info["gate"],
                                  "finding": _lookahead[0],
                                  "further_findings": len(_lookahead) - 1},
+                       why_not_bucket_a=info["why_not_bucket_a"],
+                       escalate_to=info["escalate_to"])
+            return res
+    except Exception:
+        pass
+
+    # ── non-repairable class: a full-width single-cycle add / compare /
+    # multiply chain, which closes at the typical corner and misses the SLOW
+    # one. vibe-ic#2178: `arith_ss_corner_risk_check` shipped in the Step-2
+    # `advisory_program_exit_zero` slot, wrote every row to
+    # `reports/phase2/gates/arith_ss_corner_risk.json`, and was read by NOTHING
+    # — measured on two real authoring outputs of the same design, 13 HIGH
+    # against 0 HIGH, both rc 0 with the headline word PASS. This branch and
+    # the phase-2 dispatch in `design_one_shot_runner.step_determinism_gates`
+    # are the two places that now read its verdict.
+    #
+    # Ordered LAST, after the three classes that were here first, for the
+    # reason each of those is ordered after its predecessor: a design that
+    # trips two signatures keeps the routing it already had. This class is the
+    # one most likely to co-occur, because a wide datapath is common.
+    #
+    # ESCALATE, and neither a repair nor a FAIL. The candidate is a datapath
+    # rebuild this module may not invent, the acceptance is a slow-corner STA
+    # run that does not exist before synthesis, and every row the gate emits
+    # says `measured=false` on its own face — a prediction may not buy a
+    # refusal (#2063). See NOT_REPAIRABLE above.
+    try:
+        import arith_ss_corner_risk_check as _ass
+        _rows = [f for f in _ass.analyse_text(rtl, "<rtl>")
+                 if f.risk == "HIGH"]
+        if _rows:
+            info = NOT_REPAIRABLE["slow-corner-wide-arithmetic"]
+            r0 = _rows[0]
+            res.update(verdict="ESCALATE",
+                       defect="slow-corner-wide-arithmetic",
+                       evidence={"gate": info["gate"],
+                                 "high_findings": len(_rows),
+                                 "finding": {"rule": r0.rule,
+                                             "symbol": r0.symbol,
+                                             "line": r0.line,
+                                             "width": r0.width,
+                                             "depth": r0.depth,
+                                             "measured": r0.measured,
+                                             "basis": r0.basis},
+                                 "further_findings": len(_rows) - 1},
                        why_not_bucket_a=info["why_not_bucket_a"],
                        escalate_to=info["escalate_to"])
             return res

@@ -3736,3 +3736,74 @@ remaining cycles agreed with the candidate throughout.
 **Why this is GENERAL**: it is simulator-semantics craft about `x`-to-value
 transitions at time zero, independent of design, PDK, vendor or benchmark. It
 applies to any Verilog testbench that reasons about the first edge.
+
+### Skill: multi-operand sums and the slow corner — reduce with compressors, not with more adders
+
+A single-cycle datapath authored so that it "looks like the algorithm" reads as
+correct and closes at the typical corner. The corner the design input declares
+for sign-off is the SLOW one, and there the SAME netlist misses — not by a
+margin a resizer can find, but by the delay of carry chains put in series
+without anyone deciding to.
+
+**When to apply**: any register-to-register path that computes a sum of THREE OR
+MORE operands, or that feeds one sum into another, at the datapath's full word
+width — and any design whose input declares both a required period and a slow
+sign-off corner. Written the way an algorithm specification writes it, each `+`
+maps to its own ripple carry and the path traverses them end to end. A
+full-width ripple carry can be a large fraction of a whole clock period at a
+slow corner, so two in series is a miss that no amount of buffering recovers. It
+will not show up at the typical corner, and it will not show up until post-route
+STA on a design whose route converged, whose DRC was 0 and whose LVS matched.
+
+**What to do** — two rewrites recover it, both equivalence-preserving, neither
+touching the spec:
+
+1. **CARRY-SAVE the multi-operand sum.** `a + b + c + d + e` is not four adds.
+   Reduce with 3:2 compressors (a full-adder row) — `s = a^b^c`,
+   `c_out = ((a&b) | (a&c) | (b&c)) << 1`, whose two outputs sum to exactly
+   `a+b+c` — until two vectors remain, then do ONE
+   carry-propagate add. Fold a consumer into the same tree rather than adding
+   after it: a second sum that consumes the first becomes one more compressor
+   level on its two vectors, not a second CPA behind the first.
+
+2. **PRE-ADD what is already known a cycle early.** An operand that is a
+   register output, a counter-indexed constant, or the next entry of a shift
+   window is available in the PREVIOUS cycle. Sum those into one register there
+   and the path reads a single operand instead of three. This is retiming: it
+   adds registers, it does NOT add cycles.
+
+**The cycle count is the thing you must not quietly move.** Both rewrites above
+keep it exactly. Before considering any rewrite that does move it, read what the
+input actually constrains — and read the whole document, because the layer that
+NARRATES a cycle count is often the same layer that declines to constrain it.
+Where the input declares an observable latency, a rewrite that changes it is a
+spec conflict to REPORT, not a trade to make. Where the input declares a
+required period and a required corner and the microarchitecture cannot meet both
+at any latency the input permits, that is a Phase-1 finding — say it there, with
+the period that IS achievable and the measurement behind it. Discovering it in
+Phase 3 is the failure this section exists to prevent.
+
+**Prove the rewrite, do not assert it.** A carry-save tree and a retimed pre-add
+are both easy to get subtly wrong and neither shows up in a lint. Drive the
+authored version and the rewrite from IDENTICAL stimulus and compare every
+observable output EVERY CYCLE, and count the command-to-done latency in BOTH —
+then break one deliberately and confirm the comparison goes red. A comparison
+that has never failed has not been shown to be a comparison.
+
+**The flow already tells you where to look.** `arith_ss_corner_risk_check` names
+every full-width single-cycle chain it can see, with the symbol the sum feeds,
+the carry width and the chain depth, and `gate_directed_rtl_repair` routes those
+rows here as `slow-corner-wide-arithmetic` — ESCALATE, never a rewrite, because
+the rebuild is yours to author and its acceptance is a slow-corner STA run that
+does not exist before synthesis. Its rows are PREDICTIONS from RTL structure,
+not measurements: treat them as a place to look, and confirm on the corner run.
+That check goes quiet when the module NAME or its comment-stripped body carries
+a reduction identifier — `csa_s`, `carry_select`, a prefix-adder name — which
+means naming a wire silences it whether or not the tree behind that wire exists.
+Do not reach for that. The suppression is disclosed in the report by module and
+by marker, so it reads as what it is; and the chain is either reduced or it is
+not, which only the corner run can say.
+
+**Why this is GENERAL**: it is arithmetic-datapath craft about carry propagation
+and corner derating. It names no design, no algorithm, no vendor and no PDK, and
+applies to any full-width multi-operand sum in any clocked design.

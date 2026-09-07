@@ -260,3 +260,217 @@ def test_module_is_chip_agnostic():
     for tok in ("rtllm", "cvdp", "verilogeval", "freq_div", "signal_generator",
                 "ring_counter"):
         assert tok not in code.lower(), tok
+
+
+# ── vibe-ic#2178: the slow-corner wide-arithmetic class is ROUTED ────────────
+# `arith_ss_corner_risk_check` ran at Step 2, wrote every row to
+# `reports/phase2/gates/arith_ss_corner_risk.json`, and was read by NOTHING —
+# while its step-mate `counter_decode_lookahead_phase_check` was routed here.
+# MEASURED by lane cz2178 (2026-09-07) on two real authoring outputs of one
+# design: 13 HIGH against 0 HIGH, and this module returned NOT_APPLICABLE / rc 0
+# on BOTH. These tests drive the router, they do not grep the wiring — that
+# distinction is the whole lesson of #2166.
+
+_WIDE_ARITH_RTL = """
+module round_dp(input clk, input rst_n,
+                input [31:0] a, input [31:0] b, input [31:0] c,
+                input [31:0] d, input [31:0] e,
+                output reg [31:0] t1);
+  always @(posedge clk) begin
+    if (!rst_n) t1 <= 32'd0;
+    else        t1 <= a + b + c + d + e;
+  end
+endmodule
+"""
+
+# The SAME datapath with the chain reduced. It carries a mitigation marker, so
+# the checker is quiet on it — which is what makes this a control and not a
+# second copy of the first case.
+#
+# THE MARKER IS AN IDENTIFIER IN THE CODE, NEVER A COMMENT (vibe-ic#2192).
+# This control was first written with `// carry_save: reduced with 3:2
+# compressors` and nothing else, which silenced the module on the tree #2178's
+# branch was authored against. #2192 landed first and removed exactly that: the
+# marker is now matched over the module NAME and the COMMENT-STRIPPED body, so
+# the old control would have produced a HIGH row and this pair would have been
+# two copies of the same case rather than a control. `wire [31:0] csa_s,
+# csa_c;` is the form that still silences after #2192, and the direction that
+# issue preserved on purpose.
+_REDUCED_RTL = """
+module round_dp(input clk, input rst_n,
+                input [31:0] a, input [31:0] b, output reg [31:0] t1);
+  wire [31:0] csa_s, csa_c;
+  always @(posedge clk) begin
+    if (!rst_n) t1 <= 32'd0;
+    else        t1 <= a + b;
+  end
+endmodule
+"""
+
+# A SECOND control with no marker at all, so "the router said NOT_APPLICABLE"
+# is proved once by a module whose rows were WITHHELD and once by a module that
+# never produced a row. Without this one, every NOT_APPLICABLE below could be
+# resting on the suppression path alone.
+_NARROW_RTL = """
+module round_dp(input clk, input rst_n,
+                input [7:0] a, input [7:0] b, output reg [7:0] t1);
+  always @(posedge clk) begin
+    if (!rst_n) t1 <= 8'd0;
+    else        t1 <= a + b;
+  end
+endmodule
+"""
+
+
+def test_wide_arithmetic_is_routed_ESCALATE_with_its_count():
+    res = G.repair(_WIDE_ARITH_RTL, SPEC)
+    assert res["verdict"] == "ESCALATE", res
+    assert res["defect"] == "slow-corner-wide-arithmetic"
+    ev = res["evidence"]
+    assert ev["gate"] == "arith_ss_corner_risk_check"
+    # the COUNT reaches the router, not just the fact of a finding
+    assert ev["high_findings"] == 1
+    assert ev["finding"]["symbol"] == "t1"
+    assert ev["finding"]["width"] == 32
+    # and the row's own honesty survives the trip: this is a PREDICTION
+    assert ev["finding"]["measured"] is False
+    assert ev["finding"]["basis"] == "predicted-from-rtl-structure"
+    assert res["escalate_to"] and res["why_not_bucket_a"]
+
+
+def test_the_routing_MOVES_on_this_checker_alone():
+    """The direction that makes it a wiring and not a label: with the chain
+    reduced, the same module reaches NOT_APPLICABLE — proved on both shapes of
+    quiet, a module whose rows a code marker WITHHELD and a module that never
+    produced a row at all."""
+    assert G.repair(_REDUCED_RTL, SPEC)["verdict"] == "NOT_APPLICABLE"
+    assert G.repair(_NARROW_RTL, SPEC)["verdict"] == "NOT_APPLICABLE"
+
+
+def test_the_control_is_quiet_for_the_reason_it_claims():
+    """A control that is quiet for the WRONG reason proves nothing about the
+    branch above it. `_REDUCED_RTL` must be quiet because a marker IN CODE
+    withheld its rows (vibe-ic#2192) and `_NARROW_RTL` because it has no rows,
+    and the same text with the marker demoted to a comment must be LOUD."""
+    ass = pytest.importorskip("arith_ss_corner_risk_check")
+    withheld = []
+    assert ass.analyse_text(_REDUCED_RTL, "<rtl>", suppressed=withheld) == []
+    assert len(withheld) == 1 and withheld[0].withheld >= 1
+
+    never = []
+    assert [f for f in ass.analyse_text(_NARROW_RTL, "<rtl>", suppressed=never)
+            if f.risk == "HIGH"] == []
+    assert never == []
+
+    commented = _REDUCED_RTL.replace(
+        "  wire [31:0] csa_s, csa_c;\n", "  // carry_save reduced\n")
+    assert [f for f in ass.analyse_text(commented) if f.risk == "HIGH"], (
+        "a mitigation named only in a comment must not silence the module "
+        "(vibe-ic#2192) — if this is empty the control above is quiet for a "
+        "reason that no longer exists")
+
+
+def test_the_class_is_never_a_repair_and_never_a_FAIL():
+    """It may not rewrite RTL and it may not refuse a delivery. Every row the
+    gate emits is PREDICTED, and a prediction may not buy a refusal (#2063)."""
+    res = G.repair(_WIDE_ARITH_RTL, SPEC)
+    assert res["rtl"] is None and res["transform"] is None
+    assert res["verdict"] != "REPAIRED"
+
+
+def test_the_register_entry_is_what_the_dispatches_read():
+    """`design_one_shot_runner.step_determinism_gates` looks this entry up
+    rather than restating the routing, so removing it must break that dispatch
+    loudly. Pin the KEY and the two fields both readers use."""
+    entry = G.NOT_REPAIRABLE["slow-corner-wide-arithmetic"]
+    assert entry["gate"] == "arith_ss_corner_risk_check"
+    assert entry["why_not_bucket_a"] and entry["escalate_to"]
+
+
+def test_removing_the_routing_branch_goes_red(tmp_path):
+    """THE MUTATION CONTROL, run against a real copy of the module with the
+    branch deleted. Without this, every test above could be passing because
+    some OTHER branch happens to answer — the check would not be a check."""
+    src = (_PROGRAMS / "gate_directed_rtl_repair.py").read_text()
+    marker = "        import arith_ss_corner_risk_check as _ass\n"
+    assert src.count(marker) == 1, "the mutation has nothing to remove"
+    start = src.index(marker)
+    end = src.index("    except Exception:\n        pass\n", start) + len(
+        "    except Exception:\n        pass\n")
+    mutated = src[:start - len("    try:\n")] + src[end:]
+    mod_dir = tmp_path / "progs"
+    shutil.copytree(_PROGRAMS, mod_dir, dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns("tests", "__pycache__"))
+    (mod_dir / "gate_directed_rtl_repair.py").write_text(mutated)
+    sys.path.insert(0, str(mod_dir))
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_gdr_mutated", mod_dir / "gate_directed_rtl_repair.py")
+        mut = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mut)
+    finally:
+        sys.path.remove(str(mod_dir))
+    got = mut.repair(_WIDE_ARITH_RTL, SPEC)["verdict"]
+    assert got == "NOT_APPLICABLE", (
+        "with the routing branch deleted the router must fall back to "
+        f"NOT_APPLICABLE — got {got}. If this is still ESCALATE the tests "
+        "above are passing for a reason other than the branch they name.")
+
+
+# ── the phase-2 dispatch that reads the register above ──────────────────────
+# The second consumer. `step_determinism_gates` looks the routing up in
+# `NOT_REPAIRABLE` rather than restating it, so deleting the entry breaks this
+# dispatch loudly instead of leaving the step printing a route nobody honours.
+
+def _run_determinism(tmp_path, rtl_by_name):
+    import design_one_shot_runner as R  # noqa: E402
+    proj = tmp_path / "proj"
+    rtl_dir = proj / "phase2" / "stage1" / "rtl"
+    rtl_dir.mkdir(parents=True)
+    for name, text in rtl_by_name.items():
+        (rtl_dir / name).write_text(text)
+    res = R.step_determinism_gates(proj)
+    return res, (getattr(res, "extras", None) or {}).get(
+        "arith_ss_corner_risk_advisory")
+
+
+def test_phase2_dispatch_reports_the_count_and_routes_it(tmp_path):
+    res, row = _run_determinism(tmp_path, {"dp.v": _WIDE_ARITH_RTL})
+    assert row is not None, "the row must be written"
+    assert row["verdict"] == "FINDING"
+    assert row["high_findings"] == 1          # THE COUNT, on the row
+    assert row["files_scanned"] == 1
+    assert row["router_verdict"] == "ESCALATE"
+    assert row["gate"] == "arith_ss_corner_risk_check"
+    assert row["blocking"] is False
+    assert row["findings"][0]["symbol"] == "t1"
+
+
+def test_phase2_dispatch_writes_the_row_even_when_the_scan_is_clean(tmp_path):
+    """A row that appears only on a finding cannot tell `ran and found
+    nothing` from `never ran` — which is the exact defect #2178 names."""
+    res, row = _run_determinism(tmp_path / "withheld", {"dp.v": _REDUCED_RTL})
+    assert row is not None
+    assert row["verdict"] == "PASS"
+    assert row["high_findings"] == 0
+    assert row["router_verdict"] == "NOT_APPLICABLE"
+    # and it is not written as a CLEAN one: vibe-ic#2192's rule holds in this
+    # row too, so a module a marker silenced is distinguishable from one with
+    # no wide adders in it.
+    assert row["suppressed_modules"] == 1
+    assert row["suppressed"][0]["module"] == "round_dp"
+    assert row["suppressed"][0]["withheld"] >= 1
+
+    _res2, clean = _run_determinism(tmp_path / "clean", {"dp.v": _NARROW_RTL})
+    assert clean is not None
+    assert clean["verdict"] == "PASS" and clean["high_findings"] == 0
+    assert clean["suppressed_modules"] == 0 and clean["suppressed"] == []
+    assert clean != row
+
+
+def test_phase2_dispatch_never_moves_the_step_verdict(tmp_path):
+    """The advisory may not refuse a delivery, in either direction."""
+    hot, _ = _run_determinism(tmp_path / "hot", {"dp.v": _WIDE_ARITH_RTL})
+    cold, _ = _run_determinism(tmp_path / "cold", {"dp.v": _REDUCED_RTL})
+    assert hot.status == cold.status
