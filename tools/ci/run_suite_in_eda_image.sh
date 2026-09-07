@@ -283,6 +283,89 @@ if [ "$ENGINE" = "1" ]; then
   SOCK_GID="$(stat -c %g "$DOCKER_SOCK")" || die "cannot stat $DOCKER_SOCK"
 fi
 
+# ── the selectors, checked on the host, before any container is started ────
+# The working directory this harness sets is the PLUGIN directory, not the
+# repository root. A caller who types a repo-root-relative selector after --
+# therefore hands pytest a path that resolves under the plugin directory, where
+# it does not exist. MEASURED 2026-09-07 on 8hd-3 (vibe-ic#2123), pinned image,
+# from the repository root:
+#
+#     ./tools/ci/run_suite_in_eda_image.sh -- -q tools/ci/test_gatekeeper_status_poller.py
+#         [PASS] suite_write_guard: this pytest session wrote nothing ...
+#         no tests ran in 0.07s
+#         ERROR: file or directory not found: tools/ci/test_gatekeeper_status_poller.py
+#         rc 4
+#
+# The last verdict-shaped line in that stream is a PASS, the summary names no
+# failure, and a scrape reads the run as clean. Nothing ran.
+#
+# THIS IS A REFUSAL, NOT A REMAPPING, for the same reason no bind in this file
+# is remapped: resolving the string against a second directory gives one path
+# two meanings and picks one silently, and the caller never learns which. The
+# selector is named back, the directory it was resolved against is named, and
+# when the file does exist at the repository root the absolute form to type is
+# printed. Nothing is guessed.
+#
+# ASKED AFTER THE SCRATCH AND ENGINE QUESTIONS, deliberately: those are facts
+# about the operator's environment and they keep their precedence, so an
+# operator with no engine is told about the engine rather than about a
+# placeholder argument. It is still before the first container start, which is
+# what "before anything is started" has to mean for an argument.
+PLUGIN_DIR="$REPO_ROOT/vibe-ic-marketplace/plugins/vibe-ic"
+PYTEST_ARGS=()
+_await_value=0
+for _arg in "$@"; do
+  if [ "$_await_value" = 1 ]; then
+    PYTEST_ARGS+=("$_arg"); _await_value=0; continue
+  fi
+  case "$_arg" in
+    # Options whose SEPARATE value is not a selector. Their value is passed
+    # through untouched, so a -k expression or an --ignore-glob PATTERN that
+    # happens to look like a path is never read as one. The attached forms
+    # (-kEXPR, --tb=short, --ignore-glob=x/*) fall to the -* branch below and
+    # need no entry here.
+    #
+    # --ignore and --deselect are deliberately NOT in this list: their values
+    # ARE selectors, and one that names nothing removes nothing, silently. The
+    # cost of the list being short somewhere else is a LOUD refusal naming the
+    # token, which an operator answers with the attached form or an absolute
+    # path. It fails closed, which is the direction this whole file fails in.
+    -k|-m|-p|-o|-c|-n|-r|-W|--tb|--maxfail|--durations|--timeout|--rootdir\
+      |--basetemp|--junitxml|--junit-xml|--junit-prefix|--override-ini\
+      |--log-file|--log-level|--log-cli-level|--capture|--import-mode\
+      |--assert|--ignore-glob|--stall-after)
+      PYTEST_ARGS+=("$_arg"); _await_value=1; continue ;;
+    -*) PYTEST_ARGS+=("$_arg"); continue ;;
+  esac
+  # A node id is <path>::<node>; only the path half is a filesystem question.
+  _sel="${_arg%%::*}"
+  case "$_sel" in
+    /*) PYTEST_ARGS+=("$_arg"); continue ;;   # absolute: the caller has said where
+  esac
+  if [ -e "$PLUGIN_DIR/$_sel" ]; then
+    PYTEST_ARGS+=("$_arg"); continue
+  fi
+  _where="    It does not exist under the repository root either:
+        $REPO_ROOT"
+  if [ -e "$REPO_ROOT/$_sel" ]; then
+    _where="    It DOES exist under the repository root. Pass it absolute:
+        $REPO_ROOT/$_arg"
+  fi
+  die "the selector '$_arg' names nothing this run could collect.
+    Relative selectors are resolved by pytest against the working directory
+    this harness sets, which is the PLUGIN directory and not the repository
+    root:
+        $PLUGIN_DIR
+$_where
+    NOTHING WAS RUN. Left alone this is pytest exit 4 with a file-or-directory
+    not-found error and no test result at all, whose output carries no failure
+    for a scrape to find and reads as a clean run (vibe-ic#2123).
+    This harness REMAPS NOTHING. A relative path silently re-resolved against a
+    second directory is one string with two meanings, which is the same trap the
+    identical-path rule at the top of this file refuses for binds."
+done
+set -- "${PYTEST_ARGS[@]}"
+
 # The image has no passwd entry for uid 1000. Supply one whose home EXISTS at
 # the same path on both sides, so `_home_path()`'s strict resolve succeeds.
 PASSWD="$SCRATCH/passwd"
@@ -313,7 +396,7 @@ DOCKER_ARGS=(
   -v "$REPO_ROOT:$REPO_ROOT"
   -v /tmp:/tmp
   -v "$PASSWD:/etc/passwd:ro"
-  -w "$REPO_ROOT/vibe-ic-marketplace/plugins/vibe-ic"
+  -w "$PLUGIN_DIR"
   -e "HOME=$HOME_IN"
   -e "TMPDIR=$SCRATCH/tmp"
   -e "VIBEIC_SUITE_NSS=$SCRATCH"
@@ -452,4 +535,71 @@ fi
     fi
     exec python3 -m pytest "$@"' bash "$@"
 EXIT_RC=$?
+
+# ── THE SUMMARY LINE, AND THE TWO EXIT CODES THAT MEAN NOTHING RAN ────────
+# This harness used to end here, handing pytest's exit code back with nothing of
+# its own to say. That is what made vibe-ic#2123 readable as clean: the last
+# verdict-shaped line in the stream belonged to the in-suite write guard
+# ([PASS] suite_write_guard: ...), the summary said "no tests ran", and no line
+# in the whole output said the harness itself had produced no verdict.
+#
+# So every run now ends with ONE line of this harness's own, and the two exit
+# codes that mean the session collected nothing are REFUSALS.
+#
+#     4  pytest's usage error — what a selector naming no file produces
+#     5  pytest's EXIT_NO_TESTS_COLLECTED — an empty collection, including one
+#        emptied by -k / -m / --deselect after collection
+#
+# rc 4 IS NOT A HYPOTHETICAL AND IT IS NOT ONLY #2123's OWN REPRODUCER. MEASURED
+# 2026-09-07 on 8hd-3, through this harness, on the pinned digest:
+#
+#     -- -q --timeout=30 <an absolute selector that exists>
+#     __main__.py: error: unrecognized arguments: --timeout=30       rc 4
+#
+# pytest-timeout is not installed in that image, so a CI command line carrying
+# `--timeout=` runs NOTHING and, before this block, said so only in a line no
+# scrape reads. Stated as a measurement with its date because it is one: if the
+# image later ships the plugin, this paragraph is still true about the digest it
+# names, and the refusal above claims nothing about any particular option.
+#
+# Both are non-zero already; being non-zero was never the problem. The problem
+# is that their OUTPUT is indistinguishable from a clean run to everything that
+# reads it by text, and this stream is read by text:
+#
+#   tools/core_agent/covered_by.py::classify_run          - FAILED on "no tests ran"
+#   tools/ci/gatekeeper_status_poller.py::classify        - error on _NOTHING_RAN
+#   programs/pytest_per_file_junit.py::_zero_collect      - rc 5 recorded, never green
+#
+# Those three already refuse a zero-collect run; they are named here so that the
+# harness's own line agrees with them instead of being the one reader that does
+# not. `programs/tests/test_bidirectional_controls_are_executed.py` asks the
+# same question of a file rather than of a run.
+#
+# The exit code becomes 2 — this harness's own REFUSED code, the one `die` uses
+# — and the original pytest code is named in the text so nothing is lost.
+case "$EXIT_RC" in
+  4)
+    echo "$PROG: REFUSED — pytest exited 4 (usage error): it could not use the" >&2
+    echo "    arguments after --, so 0 collected and no tests ran." >&2
+    echo "    NOTHING WAS RUN, and a run that ran nothing is not a verdict" >&2
+    echo "    about this tree — it is the absence of one. Read the output for" >&2
+    echo "    the argument it could not use. TWO SHAPES REACH THIS: an absolute" >&2
+    echo "    selector that names no file, and an option this image's pytest does" >&2
+    echo "    not have." >&2
+    exit 2 ;;
+  5)
+    echo "$PROG: REFUSED — pytest exited 5 (no tests ran): the selection was" >&2
+    echo "    collected and came to 0 collected. NOTHING WAS RUN, and an empty" >&2
+    echo "    selection is not a green one — a -k, -m or --deselect that removes" >&2
+    echo "    every test leaves exactly this shape, with no failure in the" >&2
+    echo "    output for a scrape to find." >&2
+    exit 2 ;;
+  0)
+    echo "$PROG: pytest exited 0 — the selection ran and reported no failure." >&2 ;;
+  1)
+    echo "$PROG: pytest exited 1 — the selection ran and reported failures." >&2 ;;
+  *)
+    echo "$PROG: pytest exited $EXIT_RC — not a completed test session; read the" >&2
+    echo "    output above before reading this as any kind of verdict." >&2 ;;
+esac
 exit "$EXIT_RC"

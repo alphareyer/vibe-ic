@@ -224,7 +224,7 @@ def _launch_kwargs(src: str) -> list:
     could not see that would be blind to the very thing it checks.
 
     EVERY LAUNCH, NOT THE LAUNCH. This helper asserted `len(calls) == 1` until
-    vibe-ic#2063 RB2-07 (v1.18.87) added a SECOND supervised surface to this
+    vibe-ic#2063 RB2-07 (v1.18.88) added a SECOND supervised surface to this
     function — the local route taken when there is no docker client, i.e. the
     only route an in-image run has. It arrived carrying
     `stall_grace_s=float(timeout)`, the exact shape O2 removes, and a

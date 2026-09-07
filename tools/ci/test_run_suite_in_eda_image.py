@@ -23,6 +23,16 @@ WHAT THIS FILE REFUSES
 4. **An absent engine reported as anything other than a refusal.** "I could not
    look" is not a test verdict, and a `which("docker")` skip in the suite would
    delete the landing gate's only end-to-end proof.
+5. **A session that collected nothing, read as a clean one** (vibe-ic#2123). The
+   harness runs pytest with the PLUGIN directory as the working directory, so a
+   repo-root-relative selector after `--` resolves under the plugin directory,
+   where it does not exist. MEASURED 2026-09-07 on 8hd-3 in the pinned image:
+   `-- -q tools/ci/test_gatekeeper_status_poller.py` ended
+   `[PASS] suite_write_guard: ...` / `no tests ran in 0.07s` /
+   `ERROR: file or directory not found: ...`, rc 4. Nothing ran, no line said
+   so, and the last verdict-shaped line was a PASS. A selector that names
+   nothing here is now refused BY NAME before any container starts, and pytest
+   exit 4 and exit 5 are refusals with a line of the harness's own.
 """
 from __future__ import annotations
 
@@ -360,3 +370,233 @@ def test_the_harness_refuses_when_the_pin_cannot_be_read():
 
 if __name__ == "__main__":
     sys.exit(subprocess.call([sys.executable, "-m", "pytest", "-q", __file__]))
+
+
+# ── vibe-ic#2123: a session that collected nothing is not a clean session ──
+#
+# Everything below drives the harness itself. The two arms that need a
+# container are given a STUB `docker` through `VIBEIC_SUITE_DOCKER_BIN`, which
+# is the only way to fix pytest's exit code from outside: the question here is
+# what the HARNESS does with an exit code, not what pytest does with a
+# selection, and a 31 GB image is not needed to ask it. The end-to-end
+# measurements against the real pinned image are recorded in the lane evidence
+# named in the landing note; these are the arms that run anywhere.
+
+#: WITHHELD ON PURPOSE, in every arm that drives the harness PAST the selector
+#: check. An arm that reaches the container starts the real suite the moment the
+#: check it is testing is mutated away — MEASURED in this lane: dropping the
+#: selector check turned the `--deselect` arm into a full `programs/tests` run
+#: inside the pinned image, which had to be killed by container id. A test whose
+#: negative arm is a 20-minute suite run is not a test.
+_NO_ENGINE_AT_ALL = {"VIBEIC_SUITE_DOCKER_BIN": "/no/such/docker"}
+
+_STUB = """#!/bin/sh
+# A stand-in for the Docker CLI. Serves the two files the harness reads out of
+# the image, and exits with $VIBEIC_STUB_RC for the run that would be the suite.
+for a in "$@"; do
+  case "$a" in
+    /etc/passwd) echo "root:x:0:0:root:/root:/bin/sh"; exit 0 ;;
+    /headless/.bashrc) echo "# stub"; exit 0 ;;
+  esac
+done
+exit ${VIBEIC_STUB_RC:-0}
+"""
+
+
+def _stub_docker() -> tuple[str, str]:
+    """`(scratch, stub_path)` — both under /tmp, both this call's own.
+
+    `tempfile.mkdtemp(dir="/tmp")` rather than pytest's `tmp_path`: the scratch
+    root has to be under a volatile prefix whoever runs this and wherever their
+    TMPDIR points, and in this image `tmp_path` has been measured carrying a
+    newline.
+    """
+    import os
+    import stat
+    import tempfile
+    root = tempfile.mkdtemp(dir="/tmp", prefix="vibeic-2123-")
+    stub = os.path.join(root, "docker")
+    with open(stub, "w", encoding="utf-8") as fh:
+        fh.write(_STUB)
+    os.chmod(stub, os.stat(stub).st_mode | stat.S_IXUSR)
+    return os.path.join(root, "scratch"), stub
+
+
+def _stub_run(*args, rc: int):
+    scratch, stub = _stub_docker()
+    return _run("--no-engine", "--scratch", scratch, "--", *args,
+                env_extra={"VIBEIC_SUITE_DOCKER_BIN": stub,
+                           "VIBEIC_STUB_RC": str(rc)})
+
+
+def test_a_relative_selector_that_names_nothing_here_is_refused_by_name():
+    """THE DEFECT. `tools/ci/...` is a real path from the repository root and
+    nothing at all from the plugin directory the harness runs in."""
+    sel = "tools/ci/test_gatekeeper_status_poller.py"
+    r = _run("--no-engine", "--scratch", "/var/tmp/vibeic-harness-selftest",
+             "--", "-q", sel, env_extra=_NO_ENGINE_AT_ALL)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "REFUSED" in r.stderr, r.stderr
+    # BY NAME: the selector, and the directory it was resolved against.
+    assert sel in r.stderr, r.stderr
+    assert "vibe-ic-marketplace/plugins/vibe-ic" in r.stderr, r.stderr
+    assert "NOTHING WAS RUN" in r.stderr, r.stderr
+    # and, because this one does exist at the repository root, the form to type
+    assert str(_REPO / sel) in r.stderr, r.stderr
+
+
+def test_the_selector_is_refused_and_never_silently_remapped():
+    """A relative path re-resolved against a second directory is one string with
+    two meanings; the caller never learns which one ran. The harness refuses for
+    the same reason it refuses a remapped bind."""
+    sel = "tools/ci/test_gatekeeper_status_poller.py"
+    r = _run("--no-engine", "--scratch", "/var/tmp/vibeic-harness-selftest",
+             "--", "-q", sel, env_extra=_NO_ENGINE_AT_ALL)
+    assert "REMAPS NOTHING" in r.stderr, r.stderr
+    # It stopped. A remap would have gone on to start a container.
+    assert r.returncode == 2, r.stdout + r.stderr
+
+
+def test_a_relative_selector_that_does_exist_here_is_not_refused():
+    """THE NEGATIVE CONTROL for the selector check. A rule that refuses every
+    relative selector is a ban, not a rule — `programs/tests/...` is how this
+    suite is normally selected and it must still pass straight through.
+
+    The engine is deliberately named as absent, so the run stops at the first
+    thing AFTER the selector question — reading /etc/passwd out of the image —
+    and that refusal is the evidence the selector check let it by.
+    """
+    sel = "programs/tests"
+    assert (_REPO / "vibe-ic-marketplace/plugins/vibe-ic" / sel).is_dir(), (
+        "this control needs a selector that really does exist under the plugin "
+        "directory; it proves nothing otherwise")
+    r = _run("--no-engine", "--scratch", "/var/tmp/vibeic-harness-selftest",
+             "--", "-q", sel,
+             env_extra={"VIBEIC_SUITE_DOCKER_BIN": "/no/such/docker"})
+    assert "names nothing this run could collect" not in r.stderr, r.stderr
+    assert "cannot read /etc/passwd" in r.stderr, r.stderr
+
+
+def test_a_pattern_valued_option_is_not_read_as_a_selector():
+    """THE FALSE-REFUSAL CONTROL. `--ignore-glob` takes a PATTERN, and a pattern
+    that looks like a path must not be adjudicated as one — a check that refuses
+    a legal invocation is a worse harness than the one it replaced."""
+    r = _run("--no-engine", "--scratch", "/var/tmp/vibeic-harness-selftest",
+             "--", "-q", "--ignore-glob", "tools/ci/*.py", "programs/tests",
+             env_extra={"VIBEIC_SUITE_DOCKER_BIN": "/no/such/docker"})
+    assert "names nothing this run could collect" not in r.stderr, r.stderr
+    assert "cannot read /etc/passwd" in r.stderr, r.stderr
+
+
+def test_a_deselect_that_names_nothing_here_is_refused_like_any_selector():
+    """`--ignore` and `--deselect` take SELECTORS, and one that names nothing
+    removes nothing — silently. They are checked, not skipped, and the refusal
+    says so when the path is nowhere at all rather than pointing at a root."""
+    r = _run("--no-engine", "--scratch", "/var/tmp/vibeic-harness-selftest",
+             "--", "-q", "--deselect", "tools/ci/test_no_such_file.py::test_x",
+             "programs/tests/test_covered_by.py", env_extra=_NO_ENGINE_AT_ALL)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "tools/ci/test_no_such_file.py::test_x" in r.stderr, r.stderr
+    assert "does not exist under the repository root either" in r.stderr, r.stderr
+
+
+def test_an_absolute_selector_is_the_callers_own_and_is_passed_through():
+    """The escape hatch the refusal points at has to work. An absolute path is
+    unambiguous, so the harness does not adjudicate it — including one that does
+    not exist, which is pytest's rc 4 and is refused by the arm below."""
+    r = _stub_run("-q", "/nonexistent-cz2123/test_x.py", rc=0)
+    assert "names nothing this run could collect" not in r.stderr, r.stderr
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_pytest_exit_4_is_a_refusal_and_names_that_nothing_ran():
+    """rc 4 is pytest's usage error — what a selector naming no file produces.
+    It is non-zero, and being non-zero was never the problem: its OUTPUT reads
+    as a clean run to everything that scrapes it by text."""
+    r = _stub_run("-q", "/nonexistent-cz2123/test_x.py", rc=4)
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert "REFUSED" in r.stderr, r.stderr
+    assert "pytest exited 4" in r.stderr, r.stderr
+    assert "0 collected" in r.stderr, r.stderr
+    assert "NOTHING WAS RUN" in r.stderr, r.stderr
+
+
+def test_pytest_exit_5_zero_collected_is_a_refusal_not_a_green():
+    """rc 5 is `EXIT_NO_TESTS_COLLECTED` — an empty collection, including one
+    emptied by `-k`, `-m` or `--deselect` AFTER collection. MEASURED against
+    the real pinned image: `-k zzz_matches_nothing` printed
+    `17 deselected in 0.05s` and no failure at all."""
+    r = _stub_run("-q", "/nonexistent-cz2123/test_x.py", rc=5)
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert "REFUSED" in r.stderr, r.stderr
+    assert "pytest exited 5" in r.stderr, r.stderr
+    assert "0 collected" in r.stderr, r.stderr
+
+
+def test_an_ordinary_run_is_not_turned_into_a_refusal():
+    """THE OTHER DIRECTION. A refusal that fires on a real result would delete
+    the harness. rc 0 and rc 1 must both come back unchanged."""
+    green = _stub_run("-q", "/nonexistent-cz2123/test_x.py", rc=0)
+    assert green.returncode == 0, (green.returncode, green.stdout, green.stderr)
+    assert "REFUSED" not in green.stderr, green.stderr
+    red = _stub_run("-q", "/nonexistent-cz2123/test_x.py", rc=1)
+    assert red.returncode == 1, (red.returncode, red.stdout, red.stderr)
+    assert "REFUSED" not in red.stderr, red.stderr
+
+
+def test_every_run_ends_with_a_line_of_the_harness_own():
+    """WHY THE DEFECT WAS READABLE AS CLEAN: the last verdict-shaped line in the
+    stream belonged to the in-suite write guard (`[PASS] suite_write_guard`),
+    and the harness said nothing at all about whether it had produced a verdict.
+    Now it always does — on the green run too, or the line's presence would
+    itself be the signal."""
+    for rc, phrase in ((0, "pytest exited 0"), (1, "pytest exited 1"),
+                       (3, "pytest exited 3")):
+        r = _stub_run("-q", "/nonexistent-cz2123/test_x.py", rc=rc)
+        assert phrase in r.stderr, (rc, r.stderr)
+
+
+def test_the_zero_collect_readers_the_harness_names_all_refuse_it():
+    """The harness is not the only thing that reads this stream, and it must not
+    be the one reader that disagrees with the rest. Every reader named in its
+    exit-code block is called here, so the naming cannot go stale.
+    """
+    text = _HARNESS.read_text(encoding="utf-8")
+    for named in ("tools/core_agent/covered_by.py",
+                  "tools/ci/gatekeeper_status_poller.py",
+                  "programs/pytest_per_file_junit.py"):
+        assert named in text, (
+            f"the harness no longer names {named} as a reader of this stream")
+
+    def _load(rel, name):
+        spec = importlib.util.spec_from_file_location(name, _REPO / rel)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    covered_by = _load("tools/core_agent/covered_by.py", "_cz2123_covered_by")
+    assert covered_by.classify_run("no tests ran in 0.01s\n", 5) == \
+        covered_by.FAILED
+
+    poller = _load("tools/ci/gatekeeper_status_poller.py", "_cz2123_poller")
+    state, _why = poller.classify(
+        4, "ERROR: file or directory not found: tools/ci/x.py\n"
+           "\nno tests ran in 0.07s\n")
+    assert state == "error", state
+
+    # The JUnit driver is read rather than imported: it is a several-thousand
+    # line program with a CLI, and the property wanted here is one predicate.
+    junit = (_REPO / "vibe-ic-marketplace/plugins/vibe-ic/programs"
+             / "pytest_per_file_junit.py").read_text(encoding="utf-8")
+    assert "def _zero_collect(" in junit, (
+        "the per-file JUnit driver no longer separates a zero-collect file from "
+        "a green one; the harness names it as a reader that refuses this shape")
+
+
+def test_the_harness_states_the_defect_it_closes():
+    """A refusal whose reason is not written down is deleted by the next person
+    who finds it inconvenient."""
+    text = _HARNESS.read_text(encoding="utf-8")
+    assert "vibe-ic#2123" in text
+    assert "no tests ran in 0.07s" in text, (
+        "the harness must keep the measurement that produced this rule")
