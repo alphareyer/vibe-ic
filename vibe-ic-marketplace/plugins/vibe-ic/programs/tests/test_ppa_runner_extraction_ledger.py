@@ -429,6 +429,76 @@ _LEDGER = frozenset({
     # so only this rung reaches the gate. Splitting one chain across two modules
     # is the reviewing cost this ledger exists to prevent, not an instance of it.
     "_sta_link_top",
+    # RECORDED with vibe-ic#2134, REOPENED because its own fix (c281a9ed4)
+    # reached the runner without this decision. The two names below are that
+    # fix's whole runner surface and they are recorded TOGETHER because they
+    # answer ONE question between them: "does this run's single STA verdict
+    # row still state a verdict, given what every other declared sign-off gate
+    # of the same run just said". `_sta_single_corner_disclosed` is the input
+    # half; `_reconcile_sta_verdict` is the transform. Ledgering one and not
+    # the other would split one decision across two modules, which is the
+    # reviewing cost this ledger exists to prevent.
+    #
+    # The classifier routes both to `_ppa/timing.py` on the `sta` token, and
+    # that is the wrong module for them by that module's own rules rather than
+    # by convenience. Measured over `_ppa/timing.py` as it stands (1178 lines):
+    # `StepResult`, `plan`, `output_files`, `findings`, `"rule"` and `BLOCKED`
+    # return ZERO hits each, and it imports only the standard library plus
+    # `_ppa.canonical_json` and `_ppa.backends.opensta`. The same six tokens
+    # return zero across `_ppa/signoff.py`, `_ppa/power.py` and `_ppa/area.py`
+    # too, so there is no `_ppa` module these could move to.
+    #
+    #   1. `_reconcile_sta_verdict(rows: List[StepResult]) -> List[StepResult]`
+    #      takes the RUN PLAN'S OWN ROWS and returns them with at most one row
+    #      demoted. `StepResult` is a runner-local dataclass (this file's
+    #      subject, line ~573) carrying the runner's verdict-tier vocabulary;
+    #      no `_ppa` module can express the type this signature is written in.
+    #
+    #      That is the decisive half, and it is the CONTRACT and not a type
+    #      inconvenience. `_ppa/timing.py`'s first docstring line is "Per-VIEW
+    #      timing rows out of STA artefacts" -- it sees ONE artefact at a time
+    #      and its stated refusal is to return a verdict at all. This function
+    #      arbitrates between THREE declared gates of one run, which is why the
+    #      block comment above it says the arbitration "lives HERE, in the one
+    #      place that sees every declared gate of one run". A per-view reader
+    #      cannot hold a cross-gate rule; installing one there would be option
+    #      (b) of #2134 -- one gate consuming another's artefact -- which that
+    #      issue's fix explicitly REJECTED and the commit states as rejected.
+    #      Moving it would re-open the defect the move was meant to serve.
+    #
+    #   2. `_sta_single_corner_disclosed(row: StepResult) -> bool` reads NO STA
+    #      artefact. Its input is the GATE'S OWN verdict JSON -- the
+    #      `findings[].rule == "STA_SINGLE_CORNER_ONLY"` self-disclosure
+    #      `eda_report_audit` wrote (#442) -- reached through `row.output_files`,
+    #      a `StepResult` field. It returns no slack, no WNS/TNS, no row and no
+    #      verdict: a bool about a sibling gate's disclosure. `_ppa/timing.py`
+    #      has no reader for a gate verdict document (`findings`: zero hits) and
+    #      would have to be given one to host it. Its `sta` token is the only
+    #      thing that makes the name look like PPA logic.
+    #
+    # PRECEDENT, not a one-off, and it is exact: the runner's `_sta_*` cluster is
+    # already ledgered here for the SAME measured reason -- `_sta_extra_liberties`
+    # ("that module is a per-view EXTRACTOR ... it holds no PDK handle and no
+    # library-path reader"), `_sta_link_top` ("a name resolver that produced no
+    # row would sit in it as a stranger"), `_sta_blackboxed_masters`, and
+    # `_clock_port_against_the_design`, recorded as "SDC CONSTRUCTION, not timing
+    # extraction". Those are the PRE-invocation rungs of the STA chain; these two
+    # are the POST-verdict rung of the same chain, and neither end of it reads a
+    # slack number.
+    #
+    # ON THE RECORD, because this ledger is a record and not an absolution:
+    # `_sta_single_corner_disclosed` swallows an unreadable output file
+    # (`except (OSError, ValueError): continue`) and returns the same `False` it
+    # returns for a report it read and found no disclosure in, so "I could not
+    # look" and "I looked and the coverage was not disclosed" are one answer.
+    # Its docstring argues the direction is the safe one -- the helper decides
+    # whether to DEMOTE a PASS, and it declines to demote on absent evidence --
+    # and it is right that no PASS is invented by it; but the demotion this run
+    # owed can be silently skipped and nothing says so. That is a defect in what
+    # the function DOES, and this test's own docstring says it "says nothing
+    # about what the function does", so it is recorded rather than fixed here.
+    # Location decision only.
+    "_reconcile_sta_verdict", "_sta_single_corner_disclosed",
     "_staged_sdc_not_consumed_note",
     "_staged_sdc_survey", "_staged_timing_exceptions",
     "_stamp_sdc_provenance", "_try_power_aware_lvs",
