@@ -34,14 +34,31 @@ operator's mental model):
   * measured droop  <  budget                           → PASS (rc 0)
   * path not found at all                               → rc 2 (IO/arg)
   * EXPLICIT honest-skip marker + no droop value        → SKIPPED_CONDITION (rc 0)
+  * the emitter says the analysis was ATTEMPTED and the
+    tool failed (an `ERROR_*` status)                   → TOOL_ERROR (rc 1)
+
+A TOOL ERROR IS ITS OWN VERDICT CLASS, AND IT BLOCKS (#2109). The emitter writes
+the SAME structural flag `dynamic_ir_report_emitted:false` for two different
+worlds — "there was nothing to analyse" (a legitimate skip) and "the analysis ran
+and the tool could not answer" (`ERROR_TOOL` = openroad wedged / unlaunchable,
+`ERROR_NO_PSM_IR` = PSM solved nothing: grid disconnected / solver error). Only
+the `status` separates them, so the structural flag ALONE can never decide: it
+qualifies as a skip only on a payload that carries no status to contradict it.
+Reading a solver error as a skip is exactly the vacuous pass §4.05 forbids —
+*could not measure it* reaching the reader as *measured and fine* — and step 24
+declares this gate blocking, so it must not exit 0 on a tool failure.
+
+rc 1, NOT rc 2: `flow_compliance_check` credits rc 2 as VACUOUS_PASS and marks
+the step DONE, which would launder the tool error a second time.
 
 Skip is recognised ONLY by an explicit marker (a `status` in _SKIP_STATUS_VALUES,
-or `dynamic_ir_report_emitted:false`) that the VCD-vectored emitter
-(dynamic_ir_vectored_emit.py) writes when there is genuinely no switching profile
-to analyze (no VCD / no PDN / missing inputs). A design with NO switching VCD is
-legitimately not in scope for VCD-vectored dynamic IR — the static IR sign-off
-(ir_drop.json) still stands. This is NOT a vacuous pass on absence: a garbage
-report, or one merely missing its droop value with no skip marker, still FAILs.
+or, on a status-less legacy payload, `dynamic_ir_report_emitted:false`) that the
+VCD-vectored emitter (dynamic_ir_vectored_emit.py) writes when there is genuinely
+no switching profile to analyze (no VCD / no PDN / missing inputs). A design with
+NO switching VCD is legitimately not in scope for VCD-vectored dynamic IR — the
+static IR sign-off (ir_drop.json) still stands. This is NOT a vacuous pass on
+absence: a garbage report, or one merely missing its droop value with no skip
+marker, still FAILs.
 
 chip-AGNOSTIC: generic report schemas only; no design knowledge.
 
@@ -89,15 +106,51 @@ _SKIP_STATUS_VALUES = frozenset({
 })
 
 
+# A status the emitter writes when the transient analysis WAS ATTEMPTED and the
+# tool could not answer: `ERROR_TOOL` (openroad wedged or unlaunchable) and
+# `ERROR_NO_PSM_IR` (PSM ran and produced no droop line — grid disconnected / no
+# valid resistance map / solver error). Matched by PREFIX, so any further
+# `ERROR_*` the emitter grows blocks by default instead of being silently
+# laundered into a skip the way `ERROR_NO_PSM_IR` was (#2109).
+_TOOL_ERROR_STATUS_PREFIX = "ERROR"
+
+
+def _is_tool_error(d: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """Return `(status, the tool's own line)` if `d` says the analysis was
+    ATTEMPTED and the tool failed, else None.
+
+    Consulted BEFORE the skip marker and independently of whether a droop value
+    is present: an error payload carries the same
+    `dynamic_ir_report_emitted:false` structural flag as an honest skip, so the
+    status is the ONLY thing that separates "nothing to analyse" from "the tool
+    errored". A tool failure is not a skip and not a pass — it is its own
+    verdict class, and it blocks."""
+    status = d.get("status")
+    if isinstance(status, str) and \
+            status.strip().upper().startswith(_TOOL_ERROR_STATUS_PREFIX):
+        return status.strip().upper(), str(d.get("reason") or status)
+    return None
+
+
 def _is_honest_skip(d: Dict[str, Any]) -> Optional[str]:
     """Return the skip reason if `d` carries an EXPLICIT honest-skip marker AND no
-    dynamic-IR number, else None. Only an explicit marker qualifies."""
+    dynamic-IR number, else None. Only an explicit marker qualifies.
+
+    A PRESENT status decides on its own: if the emitter said why it produced no
+    number, that word is the answer, and only a word in `_SKIP_STATUS_VALUES`
+    means "nothing to analyse". The structural flag is consulted only on a
+    status-less (legacy) payload, where there is nothing to contradict it —
+    before #2109 it was consulted even when the status said `ERROR_*`, which let
+    a solver error exit 0 through step 24's declared-blocking clause."""
     status = d.get("status")
-    if isinstance(status, str) and status.strip().upper() in _SKIP_STATUS_VALUES:
-        return str(d.get("reason") or status)
-    # `dynamic_ir_report_emitted: false` is the emitter's structural skip flag.
+    if isinstance(status, str):
+        if status.strip().upper() in _SKIP_STATUS_VALUES:
+            return str(d.get("reason") or status)
+        return None
+    # Legacy: `dynamic_ir_report_emitted: false` with no status at all. No
+    # emitter path writes this today (`skip_result` always names a status).
     if d.get("dynamic_ir_report_emitted") is False:
-        return str(d.get("reason") or d.get("status") or
+        return str(d.get("reason") or
                    "dynamic_ir_report_emitted=false (no vectored droop produced)")
     return None
 
@@ -179,6 +232,27 @@ def check(report: Path, vdd: Optional[float],
     except (json.JSONDecodeError, ValueError):
         droop_mv = _extract_from_rpt(raw)
 
+    # TOOL ERROR first (#2109): the analysis was attempted and the tool could
+    # not answer. That is neither a skip nor a pass, and it must reach the
+    # reader with the tool's own line, not as an honest-looking SKIP.
+    if parsed is not None:
+        tool_err = _is_tool_error(parsed)
+        if tool_err is not None:
+            status, tool_line = tool_err
+            res: Dict[str, object] = {
+                "verdict": "TOOL_ERROR",
+                "status": status,
+                "detail": (f"the dynamic-IR analysis was ATTEMPTED and the tool "
+                           f"failed ({status}) — this is a tool failure, not a "
+                           f"skip: {tool_line}"),
+                "tool_line": tool_line,
+                "report": str(report),
+            }
+            tail = parsed.get("log_tail")
+            if isinstance(tail, str) and tail.strip():
+                res["tool_log_tail_line"] = tail.strip().splitlines()[-1]
+            return res
+
     # Honest SKIP: an explicit skip marker with no droop value is a
     # SKIPPED-CONDITION (rc 0), never a FAIL. (A marker that ALSO carries a real
     # droop number falls through to the normal budget check below.)
@@ -238,7 +312,11 @@ def main(argv: List[str]) -> int:
     if res["verdict"] == "IO_ERROR":
         return 2
     # PASS and an explicit honest SKIPPED-CONDITION are both rc 0 (the tier is
-    # not a blocker); only a real over-budget / missing-evidence result is rc 1.
+    # not a blocker); a real over-budget / missing-evidence result, AND a
+    # TOOL_ERROR, are rc 1. TOOL_ERROR must never join the rc-0 tier: step 24
+    # declares this clause blocking, and rc 0 on a tool failure is the #2109
+    # laundering. It is rc 1 rather than rc 2 because `flow_compliance_check`
+    # credits rc 2 as VACUOUS_PASS and would mark the step DONE.
     return 0 if res["verdict"] in ("PASS", "SKIPPED_CONDITION") else 1
 
 

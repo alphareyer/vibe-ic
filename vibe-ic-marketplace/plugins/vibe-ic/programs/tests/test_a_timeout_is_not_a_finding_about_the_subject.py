@@ -54,6 +54,7 @@ Run: python3 -m pytest programs/tests/test_a_timeout_is_not_a_finding_about_the_
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -458,12 +459,34 @@ def test_a_wedged_openroad_is_named_as_wedged_and_not_as_a_failed_run(
     assert "did not finish within its bound" not in payload["reason"]
 
 
-def test_the_wedged_report_still_reads_as_a_skip_downstream():
-    """THE HALF THAT MUST NOT MOVE. `dynamic_ir_drop_check` must still treat the
-    report as a skip and read no droop number out of it."""
+def test_the_wedged_report_reads_as_a_tool_error_downstream(tmp_path):
+    """THE HALF THAT MUST NOT MOVE — and #2109 corrected which half that is.
+
+    This test used to assert the wedged report "still reads as a SKIP
+    downstream". That was the wrong invariant, and it pinned the defect: a
+    WEDGED openroad exited 0 through step 24's declared-blocking clause. The
+    half that genuinely must not move is the one this file is named for — a
+    tool that was stopped is a measured fact ABOUT THE TOOL, and it must reach
+    the reader saying so. So: no droop number is read out of it, the WEDGED
+    wording survives, and the verdict is a tool error that BLOCKS.
+
+    (Renamed from `test_the_wedged_report_still_reads_as_a_skip_downstream`.)"""
     payload = {"status": "ERROR_TOOL", "dynamic_ir_report_emitted": False,
                "reason": ("the openroad transient run made no forward progress "
                           "for 1800s and was stopped. openroad was WEDGED.")}
-    why = DIC._is_honest_skip(payload)
-    assert why is not None, "the report stopped reading as a skip"
+    j = tmp_path / "dynamic_ir.json"
+    j.write_text(json.dumps(payload))
+    res = DIC.check(j, 1.8)
+    # The VALUE comparison first, so the pre-fix arm fails on a concrete pair
+    # (['SKIPPED_CONDITION', None]) rather than on an `is None` sentinel.
+    assert [res.get("verdict"), res.get("status")] == \
+        ["TOOL_ERROR", "ERROR_TOOL"], res
+    assert "WEDGED" in res.get("tool_line", ""), res
+    # it is NOT an honest skip — that is what let it exit 0
+    assert DIC._is_honest_skip(payload) is None, "a wedged tool still skips"
+    status, why = DIC._is_tool_error(payload)
+    assert status == "ERROR_TOOL"
     assert "WEDGED" in why, why
+    # no droop number is read out of it (the original property, kept)
+    assert "worst_transient_droop_mv" not in res, res
+    assert DIC.main([str(j)]) == 1

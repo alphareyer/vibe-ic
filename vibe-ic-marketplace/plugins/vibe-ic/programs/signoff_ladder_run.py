@@ -1092,7 +1092,11 @@ def check_tier_dynamic_ir(project_dir: Path,
       FAIL     -> FAIL     (droop at/over budget, OR a report present but with
                   no extractable transient droop value — missing evidence)
       IO_ERROR -> NOT_RUN  (no dynamic-IR report → §4.05 SKIP; the static
-                  ir_drop report is never read as a dynamic sign-off)"""
+                  ir_drop report is never read as a dynamic sign-off)
+      TOOL_ERROR -> FAIL   (the analysis was ATTEMPTED and the tool failed —
+                  #2109. Named explicitly rather than left to the default so
+                  the tier can never be re-tuned into a NOT_RUN: a tool failure
+                  is not an absence.)"""
     import dynamic_ir_drop_check as dic
     rpt = _find_dynamic_ir_report(project_dir)
     if rpt is None:
@@ -1102,7 +1106,7 @@ def check_tier_dynamic_ir(project_dir: Path,
                   "never the static ir_drop report as a dynamic sign-off")
     res = dic.check(rpt, vdd, budget_pct)
     v = res.get("verdict")
-    ladder = {"PASS": "PASS", "FAIL": "FAIL",
+    ladder = {"PASS": "PASS", "FAIL": "FAIL", "TOOL_ERROR": "FAIL",
               "IO_ERROR": "NOT_RUN"}.get(v, "FAIL")
     notes = ""
     if ladder == "FAIL":

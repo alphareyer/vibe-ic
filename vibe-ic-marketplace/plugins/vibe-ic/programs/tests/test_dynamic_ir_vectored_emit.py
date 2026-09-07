@@ -362,14 +362,26 @@ def test_gate_honors_no_pdn_skip(tmp_path):
     assert G.check(j, 1.8)["verdict"] == "SKIPPED_CONDITION"
 
 
-def test_gate_no_psm_line_error_is_honest_skip(tmp_path):
-    # ERROR_NO_PSM_IR sets dynamic_ir_report_emitted False → the gate treats the
-    # dynamic tier as a non-blocking SKIP (static IR sign-off stays authoritative).
+def test_gate_no_psm_line_error_is_a_tool_error_not_a_skip(tmp_path):
+    """#2109 — INVERTED. This test previously asserted SKIPPED_CONDITION, i.e.
+    it pinned the defect: `ERROR_NO_PSM_IR` means PSM RAN and could not solve
+    (grid disconnected / no valid resistance map / solver error), and the gate
+    exited 0 on it through step 24's declared-blocking clause. "Could not
+    measure it" was reaching the reader as "measured and fine". The static IR
+    sign-off is a different dimension and cannot stand in for the dynamic one.
+
+    (Renamed from `test_gate_no_psm_line_error_is_honest_skip`.)"""
     j = tmp_path / "dynamic_ir.json"
     j.write_text(json.dumps({"status": "ERROR_NO_PSM_IR",
                              "dynamic_ir_report_emitted": False,
                              "reason": "grid disconnected"}))
-    assert G.check(j, 1.8)["verdict"] == "SKIPPED_CONDITION"
+    res = G.check(j, 1.8)
+    assert res["verdict"] == "TOOL_ERROR", res
+    # the tool's own line survives into the record, not just a verdict word
+    assert "grid disconnected" in res["tool_line"], res
+    # and it BLOCKS: rc 1, never the rc-0 skip tier, and never rc 2 (which
+    # `flow_compliance_check` credits as VACUOUS_PASS).
+    assert G.main([str(j)]) == 1
 
 
 def test_gate_garbage_without_marker_still_fails(tmp_path):
