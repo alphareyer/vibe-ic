@@ -245,3 +245,108 @@ def test_the_docstring_no_longer_declares_a_narrower_rule_than_the_code():
         not in doc
     assert "dangling" in doc, (
         "the exit-code table must name the dangling half it blocks on")
+
+
+def test_the_deciding_line_survives_the_published_message_cap(tmp_path,
+                                                              stray):
+    """`_p0_first_line` truncates to 200 chars, so the reason must FIT.
+
+    The whole point of putting the verdict on line 0 is that the audit
+    publishes line 0. A deciding line that overflows the cap is published
+    cut mid-sentence — which is how `testbench_exists_check` came to publish
+    `"{"` (see `_p0_first_line`'s own docstring). Measured here rather than
+    argued: the sentence is fixed-length apart from three integers, so the
+    worst realistic case is a large count, and it still fits.
+    """
+    proj = _project(tmp_path, [f"gds at {stray}",
+                               "def at /tmp/i2084-gone/floor.def"])
+    r = _run(proj)
+    assert r.returncode == 1, r.stdout + r.stderr
+    published = F._p0_first_line(r.stdout)
+    head = r.stdout.splitlines()[0]
+    assert published == head, (
+        "the published reason is not the whole deciding line — it was "
+        f"truncated at {len(published)} chars:\n{published}")
+    assert head.endswith(":"), head
+
+
+def test_the_deciding_line_still_fits_when_the_counts_are_large(tmp_path):
+    """The same cap at FOUR-DIGIT counts, driven through the REAL gate.
+
+    THIS TEST WAS A CHECK THAT COULD NOT FAIL, and Step-2.7 adversarial review
+    caught it. It used to assert against a copy of the sentence PASTED INTO THE
+    TEST, so it measured the paste, not the program: lengthening the gate's
+    actual message left it green while the audit truncated for real. Measured
+    — mutate `main()`'s deciding sentence and the gate emits a 282-char first
+    line, over the 200-char cap, and the old form of this test still passed.
+
+    So the counts are made large the only honest way: by giving the gate a
+    declaration file that really does cite 1000+ external paths, and reading
+    the line it really emits. The width of the count field is what this test
+    is about, and it is now the gate's own arithmetic that produces it.
+    """
+    refs = [f"/tmp/i2084-bulk/art{i:04d}.gds" for i in range(1024)]
+    proj = _project(tmp_path, refs)
+    r = _run(proj)
+    assert r.returncode == 1, r.stdout + r.stderr
+    head = r.stdout.splitlines()[0]
+    assert head.startswith("[FAIL]"), head
+    assert "1024 blocking external-storage reference(s)" in head, head
+    assert "(0 live, 1024 dangling)" in head, head
+    # the point: a four-digit population still fits, and the audit publishes
+    # the WHOLE deciding line rather than a prefix of it.
+    assert len(head) <= 200, (
+        f"the deciding line is {len(head)} chars at a 4-digit count and "
+        f"`_p0_first_line` caps at 200 — the audit would publish it truncated")
+    assert F._p0_first_line(r.stdout) == head
+
+
+# ── 5. A REAL IN-REPO ARTEFACT, not a fixture authored beside this change ───
+
+def test_a_real_in_repo_declaration_file_is_read_and_classified(tmp_path):
+    """flow-change-acceptance §4: a suite that is 100% self-authored fixtures
+    "cannot distinguish itself from its own absence".
+
+    `real_artefact_test_backing_check` reported this module as 0 of 10 tests
+    driven by a checked-in artefact, and the doctrine's measured case is exactly
+    that shape: mutating a guard killed 10 of 31 tests, every one hand-typed in
+    the same commits, while all 4 tests reading a checked-in artefact survived.
+
+    So this one reads a declaration file THIS REPO ships and was not written for
+    this test, copies it into a scratch project unmodified, and asserts the gate
+    classifies it — then injects one external reference into a SECOND copy of the
+    same real file and asserts the verdict moves. One variable, real input.
+
+    `require_repo` skips (rather than passing) when the artefact is absent, so a
+    checkout that does not carry it says "could not look" instead of vouching.
+    """
+    from _hostpaths import require_repo
+    real = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic",
+                        "programs", "INDEX.md")
+    body = real.read_text(encoding="utf-8", errors="ignore")
+
+    clean = tmp_path / "clean"
+    (clean / "reports").mkdir(parents=True)
+    (clean / "reports" / "real.md").write_text(body, encoding="utf-8")
+    r = _run(clean)
+    assert r.returncode in (0, 1), r.stdout + r.stderr
+    assert r.stdout.splitlines()[0].startswith(("[PASS]", "[FAIL]")), r.stdout
+    baseline_rc = r.returncode
+
+    # the SAME real file, plus one external reference: the verdict must move to
+    # FAIL and the deciding line must lead.
+    dirty = tmp_path / "dirty"
+    (dirty / "reports").mkdir(parents=True)
+    (dirty / "reports" / "real.md").write_text(
+        body + "\n\nGDS written to /tmp/i2084-real-artefact/chip.gds\n",
+        encoding="utf-8")
+    r2 = _run(dirty)
+    assert r2.returncode == 1, r2.stdout + r2.stderr
+    head = r2.stdout.splitlines()[0]
+    assert head.startswith("[FAIL]"), head
+    assert "/tmp/i2084-real-artefact/chip.gds" in r2.stdout
+    assert F._p0_first_line(r2.stdout) == head
+    if baseline_rc == 0:
+        assert r2.returncode != baseline_rc, (
+            "injecting one reference into the same real file must move the "
+            "verdict; it did not")

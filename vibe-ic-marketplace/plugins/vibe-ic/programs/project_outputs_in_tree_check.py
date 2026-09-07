@@ -44,6 +44,26 @@ This gate is **chip-AGNOSTIC**:
 Honors waiver ``project_artifacts_external_storage_intentional`` (>=60
 chars per offending path).
 
+ENFORCEMENT: **BLOCKING.** A rc-1 from this gate STOPS the run — it does not
+merely record and continue. Stated here because `flow-change-acceptance` §5 is
+explicit that silence is not neutral: an unstated default of "advisory" is how
+62 of 72 gates in this repo ended up unable to stop anything, which is not what
+any of their authors intended.
+
+PROVEN BY RUN, not inferred from the wiring (§3; the doctrine's own measured
+warning is `cts_quality_check`, which returned FAIL with no waiver on three
+consecutive versions while the flow shipped a routed DEF anyway). Scoping
+`_STRUCTURAL_RTL_GATES` to this gate alone and varying ONE thing — whether a
+blocking external reference is present — moves the umbrella:
+
+    clean tree     -> gate PASS, umbrella passed=True,  status=PASS
+    one reference  -> gate FAIL, umbrella passed=False, status=FAIL
+
+The unscoped form of that experiment is VACUOUS and was run first: on a minimal
+synthetic tree other gates fail too, so the umbrella reads FAIL on both arms and
+the comparison says nothing. The scoped control is the one that measures this
+gate.
+
 Usage:
     python3 project_outputs_in_tree_check.py <project_dir>
 
