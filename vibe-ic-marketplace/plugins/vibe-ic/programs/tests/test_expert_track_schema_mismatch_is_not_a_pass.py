@@ -526,10 +526,21 @@ def test_the_runner_credits_a_consumed_evidence_linked_answer(tmp_path):
     assert rep["ai_convergence"]["consumed"] == 1
     assert rep["denominator"]["ai"] == 1
     assert rep["denominator"]["total"] >= 1
+    # Pinned to the UNMET rule specifically, not to a suffix. #2127 added
+    # `EXPERT_TRACK_AI_EXPECTATION_FIELD_PATH_UNDECLARED::<same subject>`,
+    # which shares the subject and is a DIFFERENT finding; a suffix match
+    # counts both and would say the disagreement was reported twice.
     named = [f for f in rep["findings"]
-             if f["rule"].endswith("external_reference::REFHI")]
+             if f["rule"] == f"{T.RULE_AI_UNMET}::external_reference::REFHI"]
     assert len(named) == 1
     assert "input/docs/spec.md: external reference on REFHI" in named[0]["message"]
+    # and the #2127 refusal is present ONCE, about the track, for the same
+    # subject: this fixture's field_path `fields.pinout` is not a path
+    # L1_DATASHEET declares.
+    refused = [f for f in rep["findings"]
+               if f["rule"] == (f"{T.RULE_AI_FIELD_PATH_UNDECLARED}"
+                                f"::external_reference::REFHI")]
+    assert len(refused) == 1 and refused[0]["about"] == "track"
 
 
 def test_the_emitted_handoff_contains_input_contract_and_dispatch_instruction(
@@ -579,4 +590,7 @@ def test_a_real_checked_in_phase1_artifact_completes_with_a_valid_answer(
     assert rc == 0
     assert rep["verdict"] == "PASS"
     assert rep["ai_convergence"] == {
-        "consumed": 1, "agreed": 1, "disagreed": 0, "undecidable": 0}
+        "consumed": 1, "agreed": 1, "disagreed": 0, "undecidable": 0,
+        # #2127 sub-populations, kept inside the exact-dict assertion.
+        "misscoped": 0, "field_path_undeclared": 0, "unscoped_readings": 0,
+        "withdrawn": 0}

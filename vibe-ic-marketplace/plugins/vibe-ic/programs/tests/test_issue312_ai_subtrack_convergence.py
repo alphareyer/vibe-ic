@@ -336,8 +336,15 @@ def test_a_prose_only_expectation_is_undecidable_not_agreed(tmp_path):
     # about the TRACK: it says nothing about the design, so it must not be
     # counted as something the expert track found in the design
     assert fs[0]["about"] == "track"
-    assert rep["ai_convergence"] == {"consumed": 1, "agreed": 0,
-                                     "disagreed": 0, "undecidable": 1}
+    assert rep["ai_convergence"] == {
+        "consumed": 1, "agreed": 0, "disagreed": 0, "undecidable": 1,
+        # #2127 sub-populations. Kept in the EXACT-DICT assertion rather than
+        # relaxed to a subset check: this is the ledger's declared shape, and a
+        # field silently appearing or disappearing is exactly what an exact
+        # comparison is here to catch. An undecidable entry never reaches the
+        # layer document, so all three are 0.
+        "misscoped": 0, "field_path_undeclared": 0, "unscoped_readings": 0,
+        "withdrawn": 0}
 
 
 def test_a_malformed_answer_entry_is_reported_not_dropped(tmp_path):
@@ -365,7 +372,12 @@ def test_the_ledger_counts_agreements_not_only_disagreements(tmp_path):
     ])
     _run_track(p)
     assert _report(p)["ai_convergence"] == {
-        "consumed": 3, "agreed": 1, "disagreed": 1, "undecidable": 1}
+        "consumed": 3, "agreed": 1, "disagreed": 1, "undecidable": 1,
+        # #2127: the two decidable entries name no field_path, so neither is
+        # refused; both are read at whole-layer scope. The disagreeing one is
+        # not misscoped because no other layer carries its tokens either.
+        "misscoped": 0, "field_path_undeclared": 0, "unscoped_readings": 2,
+        "withdrawn": 0}
 
 
 def test_an_ai_disagreement_reaches_the_live_evidence_consumer(tmp_path):

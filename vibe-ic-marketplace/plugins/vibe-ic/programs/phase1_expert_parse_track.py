@@ -179,6 +179,41 @@ that cannot be read as either credit or a stated wait, 0 for a real reading.
 See `AI_AWAITING_STATES`. The pending set is an ALLOW-LIST: a new failure state
 inherits 1.
 
+THE EXPECTATION'S OWN SCOPE IS CHECKED (#2127)
+----------------------------------------------
+An expectation carries a `layer` and a `field_path`. The comparator read the
+first and printed the second. MEASURED on a published Phase-1 run: all 46
+consumed expectations named a `field_path` under a top-level key
+(`integration.` on L9, `constraints.` on L19) that the addressed layer document
+does not declare at any depth — so every finding said
+
+    expected L9.integration.register_map.offsets to carry: <requirement>.
+    The program track produced: L9 does not carry [...]
+
+about a field nothing had looked at. The whole layer was searched; the path was
+decoration. Two consequences, both closed here:
+
+  * THE PATH IS CHECKED. `field_path_status` compares it against the paths the
+    layer document declares, and an expectation naming an undeclared one is
+    REFUSED BY NAME (`RULE_AI_FIELD_PATH_UNDECLARED`), `about: "track"`. The
+    refusal is ADDITIVE — `met` is still decided over the whole layer — because
+    a guard that also moved verdicts could not be told apart from a comparator
+    change. MEASURED: 46 of 46 refused on that run; every one of them is an
+    authoring defect that had no name.
+
+  * A MISS IS NOT AUTOMATICALLY AN EXTRACTION GAP. When the addressed layer
+    misses and ANOTHER layer the program track wrote carries every expected
+    token, the fact WAS extracted and the expectation asked the wrong layer.
+    That is `RULE_AI_MISSCOPED`, `about: "track"`, naming the owning layer —
+    never `about: "design"`. MEASURED on the same run: 11 of 43 disagreements,
+    with owners L1_DATASHEET, L2_FRS and L4_REGMAP. Reporting those as missing
+    extractions said the tree lacked facts it demonstrably had, and pointed a
+    reader at an extractor for a defect that lives in the expectation.
+
+The remedy for a mis-scoped expectation is its `field_path`, or a stated
+layer-contract defect — never an extractor. A program cannot decide which of
+the two, so the finding names both and decides neither.
+
 On NOT writing the AI-patch sidecar
 -----------------------------------
 This track deliberately does NOT write
@@ -250,6 +285,36 @@ RULE_AI_ANSWER_EMPTY = "EXPERT_TRACK_AI_ANSWER_EMPTY"
 # alone; a record that does not say so credits the pack for coverage it did not
 # supply.
 RULE_PACK_NOT_ASSEMBLED = "EXPERT_TRACK_PACK_NOT_ASSEMBLED"
+# An expectation whose `field_path` names a path the layer it addresses does
+# NOT declare (#2127). Its own rule id and `about: "track"`, because nothing
+# about the DESIGN is in question: the expectation asked for a field that does
+# not exist, and until #2127 the path was carried straight into the finding
+# text as though it had been checked. MEASURED on a published Phase-1 run: all
+# 46 consumed expectations named a `field_path` under a top-level key
+# (`integration.` / `constraints.`) that neither addressed layer declares, and
+# the findings read "expected L9.integration.register_map.offsets to carry ..."
+# — an authoritative sentence about a field nothing ever looked at.
+RULE_AI_FIELD_PATH_UNDECLARED = "EXPERT_TRACK_AI_EXPECTATION_FIELD_PATH_UNDECLARED"
+# An expectation the addressed layer does not satisfy, where ANOTHER layer the
+# program track wrote carries every one of its expected tokens (#2127). Its own
+# rule id and `about: "track"`, because the fact IS extracted: reporting it as
+# a design finding says the tree is missing something it demonstrably has.
+# MEASURED on the same run: 11 of 43 disagreements — including 5 of the 10 the
+# issue classifies as asking the wrong layer — have such a layer.
+RULE_AI_MISSCOPED = "EXPERT_TRACK_AI_EXPECTATION_MISSCOPED"
+# An expectation the author has WITHDRAWN, with the reason it was withdrawn
+# (#2127, second addendum; the disposition #2132 reaches for 12 of its 30 rows).
+# A withdrawn expectation is a DECISION, and a decision that leaves no trace is
+# indistinguishable from an expectation the agent never wrote — so it is
+# recorded, named and counted, and it is `about: "track"` because nothing about
+# the design is in question.
+RULE_AI_WITHDRAWN = "EXPERT_TRACK_AI_EXPECTATION_WITHDRAWN"
+# A withdrawal carrying NO reason. REFUSED: the expectation is converged as if
+# it had never been withdrawn, AND the refusal is named. Withdrawal is the one
+# operation that can remove a row from what this track reports, so it is the
+# one that must not be silent — "never silently delete" is not satisfied by a
+# marker that says only that something was deleted.
+RULE_AI_WITHDRAWN_NO_REASON = "EXPERT_TRACK_AI_EXPECTATION_WITHDRAWN_WITHOUT_REASON"
 
 # ── the AI sub-track's status vocabulary ────────────────────────────────────
 #
@@ -663,6 +728,103 @@ def _layer_haystack(blob: Any) -> str:
     return " ".join(out)
 
 
+def _haystack_units(blob: Any) -> List[str]:
+    """The layer's searchable text as INDEPENDENT UNITS — one per key, one per
+    scalar — rather than as one joined document (#2127 addendum, #2128).
+
+    `_layer_haystack` joins every key and every scalar with spaces, and
+    `phrase_present` then matches any CONTIGUOUS run of that joined stream. The
+    join is not a boundary, so a phrase can be assembled out of parts that
+    belong to different fields. MEASURED on neutral fixtures:
+
+        {"x": ["power", "domain"]}   phrase "power domain"  -> True
+        {"mode": "fast"}             phrase "mode fast"     -> True
+        {"busy": {}, "mode": {}}     phrase "busy mode"     -> True
+
+    None of those three documents states the phrase. A run's expected token
+    list is then satisfied by an accident of ADJACENCY, and the accident is
+    invisible because the report prints the phrase, not where it matched.
+
+    Matching per UNIT keeps every property `phrase_present` was built for — a
+    phrase still cannot match inside a token (`REF` does not match `REFHI`),
+    and a separator difference is still not a disagreement (`1.8 V` matches
+    `1.8V` within one unit) — and removes only the cross-field assembly."""
+    out: List[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                out.append(str(k))
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+        elif node is not None:
+            out.append(str(node))
+
+    walk(blob)
+    return out
+
+
+def present_in_units(phrase: str, units: List[str]) -> bool:
+    """Is the phrase present WITHIN ONE unit? Never assembled across two."""
+    return any(phrase_present(phrase, u) for u in units)
+
+
+def subtree_at(blob: Any, field_path: Any, layer: Any = None) -> Optional[list]:
+    """The node(s) the expectation's `field_path` addresses, or None.
+
+    A list on the way down contributes each of its ELEMENTS, so
+    `registers.offset` on a list of register records resolves to every
+    record's `offset` — the reading the expectation means. Returns None (not
+    []) when the path does not resolve, because "the path is not there" and
+    "the path is there and empty" are different answers and this repo has
+    measured what happens when a program supplies one for the other.
+    """
+    key = _normalise_field_path(field_path, layer)
+    if not key:
+        return None
+    # The emitter nests the payload under `fields`; some protocol synthesizers
+    # write it flat (`l_doc_consumer_contract.l_doc_fields` accepts both). An
+    # expectation may spell either, and a spelling difference between a schema
+    # and an expectation is not a defect — this repo has measured what scoring
+    # one as a defect does to an advisory channel. Both spellings are tried,
+    # HERE and only here, so the resolver and the status can never disagree.
+    for candidate in _field_path_spellings(key):
+        nodes = _walk_field_path(blob, candidate)
+        if nodes is not None:
+            return nodes
+    return None
+
+
+def _field_path_spellings(key: str) -> List[str]:
+    """The one path, in both the nested and the flat spelling."""
+    if key.startswith("fields."):
+        return [key, key[len("fields."):]]
+    return [key, "fields." + key]
+
+
+def _walk_field_path(blob: Any, key: str) -> Optional[list]:
+    """One literal walk of one spelling. `None` when a segment is absent."""
+    nodes: List[Any] = [blob]
+    for seg in key.split("."):
+        nxt: List[Any] = []
+        for node in nodes:
+            stack = [node]
+            while stack:
+                cur = stack.pop()
+                if isinstance(cur, list):
+                    stack.extend(cur)
+                elif isinstance(cur, dict):
+                    for k, v in cur.items():
+                        if str(k).lower() == seg:
+                            nxt.append(v)
+        if not nxt:
+            return None
+        nodes = nxt
+    return nodes
+
+
 def resolve_layer_file(project: Path, layer: str) -> Optional[Path]:
     """The L-doc the AI half named, tolerating how it spelled the layer.
 
@@ -691,6 +853,123 @@ def resolve_layer_file(project: Path, layer: str) -> Optional[Path]:
     return None
 
 
+
+# ── the field_path guard (#2127) ────────────────────────────────────────────
+#
+# `field_path` was carried into the finding text and read by nothing. That is
+# not a cosmetic gap: the sentence a reader gets is
+#
+#     expected L9.integration.register_map.offsets to carry: <requirement>.
+#     The program track produced: L9 does not carry [...]
+#
+# which states that a NAMED field of a NAMED layer is empty. MEASURED on a
+# published Phase-1 run: `L9_INTEGRATION_SPEC.json` has no `integration` key at
+# any depth, so no such field was ever looked at — the whole layer was searched
+# and the path was decoration. An expectation can therefore name any path at
+# all and the report will repeat it as fact.
+#
+# So the path is CHECKED against what the layer document declares, and an
+# expectation naming an undeclared one is refused BY NAME. The refusal is
+# ADDITIVE — `met` is decided exactly as before, over the whole layer — because
+# a guard that also moved verdicts could not be told apart from a comparator
+# change, and this one has to be readable on its own.
+
+
+def _normalise_field_path(field_path: Any, layer: Any = None) -> str:
+    """The path as a comparable key: no indices, no layer prefix, lower case.
+
+    A layer-qualified path (`L4_REGMAP.registers[].offset`) means the same
+    field as the bare one, and refusing the qualified spelling would refuse
+    exactly the repair this guard exists to ask for — an expectation re-scoped
+    onto the layer that owns the fact naturally writes that layer into the
+    path.
+    """
+    text = re.sub(r"\[[^\]]*\]", "", str(field_path or "")).strip().strip(".")
+    if not text:
+        return ""
+    parts = [seg for seg in text.split(".") if seg.strip()]
+    if (len(parts) > 1
+            and re.match(r"^l\d+[a-z]?(_[a-z0-9_]+)?$", parts[0].lower())):
+        parts = parts[1:]          # a leading layer token is addressing, not a field
+    return ".".join(parts).lower()
+
+
+def field_path_status(blob: Any, field_path: Any, layer: Any = None) -> str:
+    """`DECLARED`, `UNDECLARED`, or `ABSENT` when the expectation named none.
+
+    DERIVED FROM `subtree_at`, and deliberately not from a second walk that
+    collects "the paths this document declares". One convention, one
+    evaluation: an earlier revision of this landing had exactly that second
+    walk, and the two answers disagreed within a day — the collector accepted
+    a `fields.`-elided path that the resolver could not reach, so a path read
+    DECLARED and then fell back to a whole-layer search anyway. Two answers
+    about one path is the same disease as a field_path nothing reads.
+
+    Nothing here looks at the path's VALUE: an empty declared field is a design
+    question, an undeclared one is an authoring question, and conflating them
+    is how the second became invisible.
+    """
+    if not _normalise_field_path(field_path, layer):
+        return "ABSENT"
+    return "DECLARED" if subtree_at(blob, field_path, layer) is not None \
+        else "UNDECLARED"
+
+
+def emitted_layer_files(project: Path) -> List[Path]:
+    """Every L-doc the program track wrote for this project, in one list.
+
+    The FIRST readable `_L_DOC_DIRS` entry wins outright. Two directories are a
+    staging difference, not two layer sets, and merging them would let a stale
+    copy of a layer answer for the live one.
+    """
+    for rel in _L_DOC_DIRS:
+        d = project / rel
+        if d.is_dir():
+            files = sorted(p for p in d.glob("*.json") if p.is_file())
+            if files:
+                return files
+    return []
+
+
+def owning_layers(project: Path, tokens: List[str],
+                  exclude: Optional[Path] = None) -> List[str]:
+    """The layers that carry EVERY one of these tokens — the scope answer.
+
+    An expectation the addressed layer does not satisfy is an extraction gap
+    ONLY if no layer satisfies it. When one does, the fact was extracted and
+    the expectation asked the wrong layer, and saying "the design is missing
+    it" is false about the design. Returns the layer file STEMS, sorted, so a
+    reader is told where to point the `field_path`.
+
+    EVERY token, never some: a layer carrying part of the fact does not own it,
+    and scoring a partial match as ownership would launder a real gap into a
+    scope finding the moment one token happened to appear anywhere.
+
+    DELIBERATELY ASYMMETRIC. The addressed layer is read at the field the
+    expectation names; the other layers are read whole. The two questions are
+    different: the first is "does the layer say it WHERE this expectation says
+    it should", the second is "does the program track have this fact AT ALL".
+    Scoping the second would need a field_path for a layer the expectation
+    never addressed, which nothing supplies — and asking it strictly would turn
+    "the fact is here, one layer over" back into "the design is missing it",
+    which is the defect this function exists to end.
+    """
+    if not tokens:
+        return []
+    out: List[str] = []
+    for p in emitted_layer_files(project):
+        if exclude is not None and p == exclude:
+            continue
+        try:
+            blob = json.loads(p.read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue          # unreadable content is not content
+        units = _haystack_units(blob)
+        if all(present_in_units(t, units) for t in tokens):
+            out.append(p.stem)
+    return sorted(out)
+
+
 def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
     """Decide ONE AI expectation against what the program track actually wrote.
 
@@ -702,6 +981,18 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
         "id": None, "layer": None, "field_path": None, "requirement": None,
         "evidence": [], "expected_tokens": [],
         "usable": False, "met": False, "observed": "",
+        # #2127. `field_path_status` is NOT_MEASURED until a layer document is
+        # in hand: an expectation refused before that was never checked against
+        # a schema, and recording it as UNDECLARED would report a reading that
+        # did not happen. `owning_layers` is [] only where it was computed.
+        "field_path_status": "NOT_MEASURED", "owning_layers": [],
+        # WHERE the token search happened: `field_path` when the named path
+        # resolved, `whole_layer` when it did not. NOT_MEASURED until a layer
+        # document is in hand.
+        "scope": "NOT_MEASURED",
+        # None = the expectation was not withdrawn. "" = it was withdrawn with
+        # no usable reason, which is refused. A non-empty string is the reason.
+        "withdrawn_reason": None,
     }
     if not isinstance(exp, dict):
         base["observed"] = ("the answer contained an entry that is not an "
@@ -718,6 +1009,27 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
         "expected_tokens": [t for t in (exp.get("expected_tokens") or [])
                             if isinstance(t, str) and t.strip()],
     })
+
+    # #2127 second addendum — a WITHDRAWAL is read before anything is decided.
+    # `withdrawn` may be the reason string itself or an object carrying one;
+    # both spellings are accepted, and a reason that is absent, blank or not a
+    # string leaves `withdrawn_reason` as "", which the caller REFUSES.
+    wd = exp.get("withdrawn")
+    if wd is not None and wd is not False:
+        reason = wd.get("reason", "") if isinstance(wd, dict) else wd
+        # ONLY A STRING IS A REASON. `withdrawn: true` is the bare marker this
+        # refusal exists to catch, and an earlier revision of this block ran it
+        # through `str()` and recorded the reason as "True" — a withdrawal that
+        # refused nothing, spelled exactly like one that stated something. Its
+        # own test caught it.
+        base["withdrawn_reason"] = reason.strip() if isinstance(reason, str) \
+            else ""
+        if base["withdrawn_reason"]:
+            base["observed"] = (f"WITHDRAWN by the author: "
+                                f"{base['withdrawn_reason']}")
+            return base
+        # fall through: a reasonless withdrawal is not honoured, so the
+        # expectation is decided exactly as if it had never carried one.
 
     if not base["id"] or not base["layer"]:
         base["observed"] = ("the expectation names no id and/or no layer, so "
@@ -744,15 +1056,57 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
                             f"is not content")
         return base
 
-    hay = _layer_haystack(blob)
-    missing = [t for t in base["expected_tokens"] if not phrase_present(t, hay)]
+    # #2127 — the guard. Read BEFORE the token search and kept independent of
+    # it: `met` is decided over the whole layer exactly as it was, so a moved
+    # verdict can never be attributed to this check.
+    base["field_path_status"] = field_path_status(
+        blob, base["field_path"], base["layer"])
+    if base["field_path_status"] == "UNDECLARED":
+        base["layer_declares"] = sorted(
+            blob.keys() if isinstance(blob, dict) else [])
+
+    # #2127 addendum (#2128) — WHERE the tokens are looked for.
+    #
+    # The reading is SCOPED to the field the expectation names whenever that
+    # path resolves. Unscoped, any field of the layer can satisfy any token:
+    # MEASURED on a real run, adding an unrelated boolean key to L19 made the
+    # token "false" score and moved a row from 2-missing to 1-missing, on a
+    # coincidence. A coincidence can score as agreement in both directions.
+    #
+    # When the path does NOT resolve there is nowhere to scope to, and the
+    # whole-layer reading is kept — moving those verdicts is a much larger
+    # decision than this one and would need its own landing — but the scope is
+    # RECORDED, so a `met` obtained without scoping is visibly the weaker
+    # claim it is rather than passing for a reading at the named field.
+    subtree = subtree_at(blob, base["field_path"], base["layer"])
+    if subtree is None:
+        base["scope"] = "whole_layer"
+        units = _haystack_units(blob)
+    else:
+        base["scope"] = "field_path"
+        units = [u for node in subtree for u in _haystack_units(node)]
+
+    missing = [t for t in base["expected_tokens"]
+               if not present_in_units(t, units)]
     base["met"] = not missing
     base["missing_tokens"] = missing
+    where = (f"{base['layer']}.{base['field_path']}"
+             if base["scope"] == "field_path" else
+             f"{base['layer']} (WHOLE LAYER — the expectation's field_path "
+             f"{base['field_path']!r} does not resolve, so the reading is "
+             f"UNSCOPED and any field of the layer could satisfy a token)")
     base["observed"] = (
-        f"{base['layer']} carries all of {base['expected_tokens']}"
+        f"{where} carries all of {base['expected_tokens']}"
         if not missing else
-        f"{base['layer']} does not carry {missing} "
+        f"{where} does not carry {missing} "
         f"(checked {len(base['expected_tokens'])} expected token(s))")
+    if missing:
+        # Where else in the program track's own output does this fact live?
+        # Asked ONLY on a miss: on a hit there is nothing to re-scope, and
+        # walking every layer for an expectation already satisfied would be
+        # work whose answer nobody reads.
+        base["owning_layers"] = owning_layers(
+            project, base["expected_tokens"], exclude=path)
     return base
 
 
@@ -918,6 +1272,40 @@ def evaluate(project: Path) -> Dict[str, Any]:
                  for e in (ai.get("expectations") or [])]
     ai["converged"] = converged
     for c in converged:
+        if c["withdrawn_reason"] == "":
+            findings.append({
+                "severity": "REVIEW",
+                "about": "track",
+                "rule": f"{RULE_AI_WITHDRAWN_NO_REASON}::{c['id'] or '<unnamed>'}",
+                "layer": c["layer"],
+                "message": (
+                    "The answer marks this expectation WITHDRAWN and states no "
+                    "reason. The withdrawal is REFUSED and the expectation is "
+                    "converged below exactly as if it had never carried one: "
+                    "withdrawal is the one operation that can remove a row "
+                    "from what this track reports, so it is the one that must "
+                    "not be silent, and a marker saying only THAT something "
+                    "was withdrawn is not a record of the decision."),
+            })
+            # deliberately NOT `continue` — the row is still decided.
+        elif c["withdrawn_reason"]:
+            findings.append({
+                "severity": "REVIEW",
+                "about": "track",
+                "rule": f"{RULE_AI_WITHDRAWN}::{c['id']}",
+                "layer": c["layer"],
+                "field_path": c["field_path"],
+                "message": (
+                    f"The expectation is WITHDRAWN by its author, and the "
+                    f"reason is recorded here rather than the row being "
+                    f"deleted: {c['withdrawn_reason']} It is NOT converged "
+                    f"against the design and is not a design finding; it "
+                    f"remains in the denominator so a reader can see that a "
+                    f"decision was taken, not that an expectation was never "
+                    f"written."),
+            })
+            continue
+
         if not c["usable"]:
             findings.append({
                 "severity": "REVIEW",
@@ -934,8 +1322,70 @@ def evaluate(project: Path) -> Dict[str, Any]:
                     f"would make the AI half look like it agreed."),
             })
             continue
+        # ── the field_path guard (#2127) ───────────────────────────────
+        # ADDITIVE and independent of the verdict: the expectation named a
+        # path the layer does not declare, and until this refusal that path
+        # was repeated verbatim in the finding text as though it had been
+        # read. Refused BY NAME so the author can repair the ONE expectation,
+        # and `about: "track"` so it never counts as something found in the
+        # design.
+        if c["field_path_status"] == "UNDECLARED":
+            findings.append({
+                "severity": "REVIEW",
+                "about": "track",
+                "rule": f"{RULE_AI_FIELD_PATH_UNDECLARED}::{c['id']}",
+                "layer": c["layer"],
+                "field_path": c["field_path"],
+                "message": (
+                    f"The AI sub-track named field_path "
+                    f"{c['field_path']!r} in {c['layer']}, and that layer "
+                    f"declares no such path. It declares "
+                    f"{c.get('layer_declares') or '(no top-level keys)'}. "
+                    f"The expectation is REFUSED by name rather than left to "
+                    f"appear in a finding as a field that was checked: the "
+                    f"verdict below was decided over the WHOLE layer, so a "
+                    f"reader told that {c['layer']}.{c['field_path']} is "
+                    f"empty is being told about a field nothing looked at. "
+                    f"Repair the expectation's field_path to a path the "
+                    f"owning layer declares."),
+            })
+
         if c["met"]:
             continue
+
+        # ── the fact IS extracted, one layer over (#2127) ──────────────────
+        # A miss the addressed layer does not explain: another layer the
+        # program track wrote carries EVERY expected token. Reporting that as
+        # a design finding says the tree is missing something it demonstrably
+        # has — which is how ten expectations asking L9 for a register map
+        # were recorded as extraction gaps while the register layer carried
+        # the registers. `about: "track"`, because the repair is to the
+        # expectation's scope or to the layer contract, never to an extractor.
+        if c["owning_layers"]:
+            findings.append({
+                "severity": "REVIEW",
+                "about": "track",
+                "rule": f"{RULE_AI_MISSCOPED}::{c['id']}",
+                "layer": c["layer"],
+                "field_path": c["field_path"],
+                "owning_layers": c["owning_layers"],
+                "message": (
+                    f"The AI sub-track asked {c['layer']}"
+                    f"{'.' + c['field_path'] if c['field_path'] else ''} for: "
+                    f"{c['requirement']}. That layer does not carry it, and "
+                    f"{c['owning_layers']} DOES — every one of the "
+                    f"{len(c['expected_tokens'])} expected token(s). So the "
+                    f"fact was extracted and the expectation named the wrong "
+                    f"layer; this is NOT a missing extraction and must not be "
+                    f"repaired in an extractor. Either re-scope the "
+                    f"expectation to the layer that owns the fact, or — if "
+                    f"the layer contract really does put it in {c['layer']} "
+                    f"— record that as a layer-contract defect in its own "
+                    f"right."),
+                "expert_source": c.get("expert_source"),
+            })
+            continue
+
         findings.append({
             "severity": "REVIEW",
             "about": "design",
@@ -1121,7 +1571,39 @@ def evaluate(project: Path) -> Dict[str, Any]:
             "agreed": len([c for c in converged if c["usable"] and c["met"]]),
             "disagreed": len([c for c in converged
                               if c["usable"] and not c["met"]]),
-            "undecidable": len([c for c in converged if not c["usable"]]),
+            # UNDECIDABLE excludes a WITHDRAWN row. Both are "not decided", and
+            # they are not the same event: one is an answer this comparator
+            # could not read, the other is a decision its author took and
+            # stated. Under one column a reader cannot tell them apart, which
+            # is the two-zeros conflation this whole track exists to prevent.
+            "undecidable": len([c for c in converged
+                                if not c["usable"] and not c["withdrawn_reason"]]),
+            # #2127 — two SUB-populations of `disagreed`, recorded so they can
+            # be counted rather than read out of finding prose. Neither moves
+            # `agreed`/`disagreed`: `met` is decided exactly as before.
+            #   misscoped              the addressed layer misses it and
+            #                          another layer the program track wrote
+            #                          carries every expected token
+            #   field_path_undeclared  the expectation named a path its layer
+            #                          does not declare (counted over every
+            #                          expectation whose layer was readable,
+            #                          met or not)
+            "misscoped": len([c for c in converged
+                              if c["usable"] and not c["met"]
+                              and c["owning_layers"]]),
+            "field_path_undeclared": len(
+                [c for c in converged
+                 if c["field_path_status"] == "UNDECLARED"]),
+            # How many readings could NOT be scoped to the field the
+            # expectation named. Every one of them is a weaker claim than the
+            # report's wording suggests, and a count is the only way a reader
+            # sees that without opening each finding.
+            "unscoped_readings": len(
+                [c for c in converged if c["scope"] == "whole_layer"]),
+            # Withdrawn WITH a reason. A reasonless withdrawal is refused and
+            # is therefore NOT counted here — it is still decided, and counting
+            # it would make a refused withdrawal look like an honoured one.
+            "withdrawn": len([c for c in converged if c["withdrawn_reason"]]),
         },
         "findings": findings,
         # #312's own rule turned on this landing's scope decision. The
