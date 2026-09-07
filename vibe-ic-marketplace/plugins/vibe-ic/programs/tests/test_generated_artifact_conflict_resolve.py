@@ -411,7 +411,16 @@ def test_both_derived_paths_together_are_resolvable():
 
 
 def test_a_foreign_path_still_refuses_the_whole_resolution():
-    """The registry grew; the refusal must not have weakened."""
+    """The registry grew; the refusal must not have weakened.
+
+    `vibe-ic-marketplace/README.md` is a COUNTER DOCUMENT since the #2137
+    addendum, so it is no longer foreign by nature — it is foreign HERE because
+    this call supplies neither the partial registry nor the conflict text, and
+    a resolver that cannot read a conflict must refuse it rather than assume it
+    is only counters. That is the default the addendum deliberately left alone;
+    `test_issue2137_addendum_counter_conflicts_classify_per_line.py` drives the
+    other side.
+    """
     v = G.decide([_INDEX, _INVENTORY, "vibe-ic-marketplace/README.md"])
     assert v.code == 1, f"{v.code}: {v.reason}"
     assert "vibe-ic-marketplace/README.md" in v.foreign

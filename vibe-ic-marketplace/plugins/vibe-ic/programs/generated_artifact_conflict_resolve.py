@@ -103,6 +103,9 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import collections
+import importlib
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -183,14 +186,259 @@ REGISTRY: tuple[DerivedArtifact, ...] = (
 )
 
 
+# ─── the PARTIAL registry ───────────────────────────────────────────
+#: `vibe-ic-marketplace/` is where `gen_program_inventory` names its documents
+#: from; the whole-file REGISTRY above spells the same prefix out, and this
+#: keeps the two halves of one file talking about paths the same way.
+_MKT = "vibe-ic-marketplace/"
+
+
+@dataclass(frozen=True)
+class PartialArtifact:
+    """A HAND-AUTHORED document a generator owns SOME LINES of.
+
+    Unlike a `DerivedArtifact`, its correct bytes are not a pure function of the
+    tree — only its counter lines are — so it can never be regenerated from
+    scratch, and "is this conflict resolvable?" is not a question about the
+    PATH. It is a question about the LINES the two sides disagree about.
+
+    WHY THIS EXISTS (vibe-ic#2137 addendum, lane czrailmeas / #2077)
+    ---------------------------------------------------------------
+    The two READMEs carry the tree-wide counters `gen_program_inventory` writes,
+    embedded in prose it does not. Two branches that add a different NUMBER of
+    programs produce different counters, git conflicts on them, and — classified
+    per PATH — both READMEs were named `CONFLICT (real)` and the WHOLE
+    resolution refused, including the INDEX.md/PROGRAM_INVENTORY.json half that
+    was resolvable. Reproduced on this tree (a 1-program branch merged with a
+    2-program-plus-1-test branch): rc=1, both READMEs named, and every single
+    conflicting line one of these counters.
+
+    Fail-closed, so nothing wrong was ever committed — but every such rebase
+    paid a hand-resolve, and the one tool written for this conflict class did
+    not cover the two files its own docstring names first.
+    """
+
+    path: str
+    generator: str
+    regenerate: tuple[str, ...]
+    check: tuple[str, ...]
+    owned: tuple[re.Pattern, ...]
+
+
+def _inventory_claim_patterns() -> dict[str, tuple[re.Pattern, ...]]:
+    """{repo-relative document: the line forms `gen_program_inventory` WRITES}.
+
+    DERIVED FROM THE WRITER — `gen_program_inventory._CLAIMS` is the list that
+    program uses to find and rewrite each stated count, so it is the same
+    authority that produced the conflicting lines in the first place. A regex
+    typed HERE would be a second implementation of that rule, and the file this
+    lives in already carries the lesson: "two implementations of one rule give
+    two answers to that merge, and the weaker one was the one with a caller".
+    A claim form added to the generator is inside this boundary automatically.
+
+    `_NOT_A_POPULATION_COUNT` is deliberately NOT included. Those are numbers
+    the generator explicitly does NOT own, so a disagreement on one is a real
+    disagreement.
+
+    Returns `{}` when the generator cannot be imported (the flattened plugin
+    cache has no `programs/` sibling). That empties the partial registry, and
+    an empty partial registry is exactly the behaviour that shipped before this
+    existed: the paths are foreign and the whole resolution is refused. The
+    degradation is fail-closed by construction, not by a branch that remembers.
+    """
+    try:
+        gpi = importlib.import_module("gen_program_inventory")
+        claims = gpi._CLAIMS
+    except Exception:
+        return {}
+    out: dict[str, list[re.Pattern]] = {}
+    for entry in claims:
+        try:
+            rel, _key, pattern = entry
+            rx = re.compile(pattern)
+        except (TypeError, ValueError, re.error):
+            # One unusable entry must not silently shrink the authority: an
+            # incomplete pattern set would call a real disagreement resolvable.
+            return {}
+        out.setdefault(_MKT + rel, []).append(rx)
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def build_partial_registry() -> tuple[PartialArtifact, ...]:
+    """The partial artefacts, or `()` when the writer could not be consulted."""
+    patterns = _inventory_claim_patterns()
+    return tuple(
+        PartialArtifact(
+            path=path,
+            generator=_INV,
+            # The prose-writing run, NOT `--artifact-only`: these lines ARE the
+            # prose. The full `--check` for the same reason — here it is the
+            # right question, where for PROGRAM_INVENTORY.json it was the wrong
+            # one (see that entry).
+            regenerate=("python3", _INV),
+            check=("python3", _INV, "--check"),
+            owned=owned,
+        )
+        for path, owned in sorted(patterns.items())
+    )
+
+
+PARTIAL_REGISTRY: tuple[PartialArtifact, ...] = build_partial_registry()
+
+
+# ─── conflict hunks, and what a side actually disputes ──────────────
+def parse_conflict_hunks(text: str):
+    """`[(ours, theirs)]` per conflict region, or `None` if unparseable.
+
+    `None` is not "no hunks". A file whose markers do not nest the way git
+    writes them has not been read, and the caller must refuse rather than
+    conclude that nothing is disputed — the forgiving direction here commits
+    somebody else's edit.
+
+    The `|||||||` base section of a diff3/zdiff3 conflict is discarded: it is
+    the common ancestor, not a side, and neither side is being asked to keep it.
+    """
+    hunks = []
+    ours = theirs = None
+    where = None            # None | "ours" | "base" | "theirs"
+    for line in text.splitlines():
+        if line.startswith("<<<<<<< "):
+            if where is not None:
+                return None
+            ours, theirs, where = [], [], "ours"
+        elif line.startswith("|||||||") and where == "ours":
+            where = "base"
+        elif line.startswith("=======") and where in ("ours", "base"):
+            where = "theirs"
+        elif line.startswith(">>>>>>> "):
+            if where != "theirs":
+                return None
+            hunks.append((ours, theirs))
+            ours = theirs = where = None
+        elif where == "ours":
+            ours.append(line)
+        elif where == "theirs":
+            theirs.append(line)
+        elif where == "base":
+            pass
+    return None if where is not None else hunks
+
+
+def disputed_lines(ours, theirs) -> list[str]:
+    """The lines the two sides actually disagree about.
+
+    A MULTISET difference both ways, so a line present on both sides drops out
+    wherever it sits in the hunk — which is the whole point: git puts prose
+    IDENTICAL on both sides inside a conflict region whenever it lies between
+    two lines that differ, and per-path classification then reads that prose as
+    disagreement. Counting rather than set-differencing means a line duplicated
+    on one side only is still disputed.
+    """
+    a, b = collections.Counter(ours), collections.Counter(theirs)
+    out = []
+    for line, n in (a - b).items():
+        out.extend([line] * n)
+    for line, n in (b - a).items():
+        out.extend([line] * n)
+    return out
+
+
+def owned_lines(document: str, owned) -> set:
+    """The LINES of `document` a claim pattern covers, by content.
+
+    MATCHED THE WAY THE WRITER MATCHES, then mapped down to lines — not applied
+    line by line. Two of `gen_program_inventory`'s own claim forms span a
+    newline (`It is \\*\\*(N) top-level Python\\nprograms\\*\\*` and
+    `the other\\n(N) are helper modules and shims`), so a per-line regex sees
+    neither, calls both halves unowned, and refuses a conflict that is nothing
+    but counters. Measured: with per-line matching the reproduction below still
+    refused `plugins/vibe-ic/README.md` on exactly those two forms.
+
+    The document handed in is the WHOLE side, every hunk already resolved to it,
+    so a claim that starts inside a hunk and ends outside it is still found. A
+    line no pattern covers is simply not in the set, and the caller refuses —
+    the truncating direction here is the safe one.
+    """
+    lines = document.splitlines()
+    covered = set()
+    for rx in owned:
+        for m in rx.finditer(document):
+            first = document.count("\n", 0, m.start())
+            last = document.count("\n", 0, m.end())
+            covered.update(range(first, last + 1))
+    return {lines[i] for i in covered if 0 <= i < len(lines)}
+
+
+def conflict_is_generated_only(text: str, owned) -> Optional[bool]:
+    """Is every line the two sides disagree about one the generator writes?
+
+    `None` when the markers do not parse — not `False`, because the caller must
+    be able to tell "this conflict is a real disagreement" from "this conflict
+    was never read". Both refuse; only one of them is a fact about the file.
+    """
+    hunks = parse_conflict_hunks(text)
+    if hunks is None:
+        return None
+    ours_doc, theirs_doc = take_ours(text), take_theirs(text)
+    if ours_doc is None or theirs_doc is None:
+        return None
+    ours_owned = owned_lines(ours_doc, owned)
+    theirs_owned = owned_lines(theirs_doc, owned)
+    for ours, theirs in hunks:
+        for line in disputed_lines(ours, theirs):
+            if line not in ours_owned and line not in theirs_owned:
+                return False
+    return True
+
+
+def _take_side(text: str, keep: str) -> Optional[str]:
+    """`text` with every conflict region replaced by one side, or `None`.
+
+    For the WRITE this is only ever called with `keep="ours"`, and only on a
+    file already proved generated-only, where the two sides differ ONLY on
+    lines the generator is about to overwrite — so which side is taken cannot
+    decide anything, and the regeneration that follows, not this choice, is
+    what puts the right numbers in. Taking a side there is marker removal, not
+    conflict resolution. Both sides are also built for READING, to match the
+    generator's claim patterns against a whole document.
+    """
+    out, where = [], None
+    for line in text.splitlines(keepends=True):
+        bare = line.rstrip("\n")
+        if bare.startswith("<<<<<<< "):
+            if where is not None:
+                return None
+            where = "ours"
+        elif bare.startswith("|||||||") and where == "ours":
+            where = "base"
+        elif bare.startswith("=======") and where in ("ours", "base"):
+            where = "theirs"
+        elif bare.startswith(">>>>>>> "):
+            if where != "theirs":
+                return None
+            where = None
+        elif where is None or where == keep:
+            out.append(line)
+    return None if where is not None else "".join(out)
+
+
+def take_ours(text: str) -> Optional[str]:
+    return _take_side(text, "ours")
+
+
+def take_theirs(text: str) -> Optional[str]:
+    return _take_side(text, "theirs")
+
+
 # ─── the verdict ────────────────────────────────────────────────────
 @dataclass
 class Verdict:
     code: int                       # 0 RESOLVED / 1 REFUSED / 2 UNMEASURABLE
     reason: str
     conflicted: tuple[str, ...] = ()
-    derived: tuple[str, ...] = ()   # conflicted AND registered
-    foreign: tuple[str, ...] = ()   # conflicted AND not registered
+    derived: tuple[str, ...] = ()   # conflicted AND registered (whole-file)
+    partial: tuple[str, ...] = ()   # conflicted AND every disputed line is generated
+    foreign: tuple[str, ...] = ()   # conflicted AND carrying a real disagreement
     regenerated: list[str] = field(default_factory=list)
     staged: list[str] = field(default_factory=list)
 
@@ -201,6 +449,7 @@ class Verdict:
             "reason": self.reason,
             "conflicted": list(self.conflicted),
             "derived": list(self.derived),
+            "partial": list(self.partial),
             "foreign": list(self.foreign),
             "regenerated": list(self.regenerated),
             "staged": list(self.staged),
@@ -210,6 +459,8 @@ class Verdict:
 def decide(
     conflicted: Sequence[str],
     registry: Sequence[DerivedArtifact] = REGISTRY,
+    partial_registry: Sequence[PartialArtifact] = (),
+    conflict_text: Optional[dict] = None,
 ) -> Verdict:
     """THE DECISION, in one function, with no side effects.
 
@@ -217,9 +468,22 @@ def decide(
     has exactly one site to neuter and has to leave every other line standing —
     which is the only way to show the tests read the DECISION and not the
     plumbing.
+
+    PER PATH, THEN PER LINE (#2137 addendum). A whole-file derived artefact is
+    resolvable because of WHAT IT IS. A partial artefact is resolvable only
+    because of WHAT THIS CONFLICT SAYS, so it needs the conflict: pass its
+    parsed hunks in `hunks_by_path` (`{path: [(ours, theirs)] | None}`).
+
+    THE DEFAULT IS THE OLD BEHAVIOUR, deliberately. With no partial registry
+    and no hunks — the signature every existing caller and test uses — a
+    partial path is foreign and the whole resolution is refused, exactly as
+    before. Every widening here has to be asked for, and a path whose conflict
+    could not be read (`None`) is refused rather than assumed benign: "I could
+    not read the conflict" is not "the conflict is only counters".
     """
     conflicted = tuple(sorted(set(conflicted)))
     known = {a.path for a in registry}
+    partial_by_path = {a.path: a for a in partial_registry}
     if not conflicted:
         return Verdict(
             2,
@@ -228,7 +492,22 @@ def decide(
             "not perform is worse than one that refuses",
         )
     derived = tuple(p for p in conflicted if p in known)
-    foreign = tuple(p for p in conflicted if p not in known)
+
+    partial: list[str] = []
+    foreign: list[str] = []
+    for rel in conflicted:
+        if rel in known:
+            continue
+        art = partial_by_path.get(rel)
+        text = (conflict_text or {}).get(rel)
+        if art is None or text is None:
+            foreign.append(rel)
+            continue
+        if conflict_is_generated_only(text, art.owned) is True:
+            partial.append(rel)
+        else:
+            foreign.append(rel)
+
     if foreign:
         return Verdict(
             1,
@@ -237,7 +516,18 @@ def decide(
             f"derived half cannot hide them",
             conflicted=conflicted,
             derived=derived,
-            foreign=foreign,
+            partial=tuple(partial),
+            foreign=tuple(foreign),
+        )
+    if partial:
+        return Verdict(
+            0,
+            f"every conflicted path is regenerable: {len(derived)} derived "
+            f"artefact(s), and {len(partial)} document(s) whose every disputed "
+            f"line is a counter the generator writes",
+            conflicted=conflicted,
+            derived=derived,
+            partial=tuple(partial),
         )
     return Verdict(
         0,
@@ -280,17 +570,38 @@ def _has_markers(p: Path) -> bool:
     )
 
 
+def _conflict_text_for(root: Path, paths: Sequence[str],
+                       partial_registry: Sequence[PartialArtifact]) -> dict:
+    """`{path: raw text | None}` for each conflicted PARTIAL path.
+
+    `None` for a file that could not be read; `decide` refuses on `None`, so an
+    unreadable conflict never reaches the resolvable side.
+    """
+    known = {a.path for a in partial_registry}
+    out = {}
+    for rel in paths:
+        if rel not in known:
+            continue
+        try:
+            out[rel] = (root / rel).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            out[rel] = None
+    return out
+
+
 def resolve(
     root: Path,
     registry: Sequence[DerivedArtifact] = REGISTRY,
     dry_run: bool = False,
+    partial_registry: Sequence[PartialArtifact] = PARTIAL_REGISTRY,
 ) -> Verdict:
     """Read the conflicted set, decide, and — only on a RESOLVED decision and
     only when not a dry run — regenerate, verify, and stage."""
     paths = conflicted_paths(root)
     if paths is None:
         return Verdict(2, f"git could not report the unmerged paths under {root}")
-    v = decide(paths, registry)
+    v = decide(paths, registry, partial_registry,
+               _conflict_text_for(root, paths, partial_registry))
     if v.code != 0 or dry_run:
         if dry_run and v.code == 0:
             v.reason += " (dry run — nothing was regenerated or staged)"
@@ -377,6 +688,178 @@ def resolve(
             )
         v.staged.append(rel)
 
+    # ── the PARTIAL pass (#2137 addendum) ───────────────────────────
+    # Runs AFTER the whole-file artefacts, because the generator invoked here
+    # writes PROGRAM_INVENTORY.json too and the derived pass has just verified
+    # and staged it: a second write of identical bytes is a no-op, and a write
+    # of different bytes is a fact this pass must not leave unstaged.
+    if v.partial:
+        by_partial = {a.path: a for a in partial_registry}
+        art = by_partial[v.partial[0]]
+        # Same generator for every partial path by construction (they are the
+        # documents of ONE writer), asserted rather than assumed.
+        others = [by_partial[r].generator for r in v.partial[1:]]
+        if any(g != art.generator for g in others):
+            return Verdict(
+                2,
+                "the partial artefacts name more than one generator; this pass "
+                "runs the writer ONCE and cannot say which run owns which line",
+                conflicted=v.conflicted, derived=v.derived, partial=v.partial,
+                regenerated=v.regenerated, staged=v.staged,
+            )
+        if not (root / art.generator).exists():
+            return Verdict(
+                2,
+                f"the counter documents' generator {art.generator} is not "
+                f"present under {root}; their conflicts cannot be regenerated "
+                f"here",
+                conflicted=v.conflicted, derived=v.derived, partial=v.partial,
+                regenerated=v.regenerated, staged=v.staged,
+            )
+
+        # WHAT WAS ALREADY DIRTY, recorded BEFORE anything is written. The
+        # boundary below asks "what did THIS RUN write", and a worktree diff
+        # taken only afterwards cannot answer that: it also names every file
+        # the operator had modified before invoking the resolver, and refusing
+        # a resolvable conflict because of an unrelated edit is a false
+        # refusal. Measured while proving this pass: the copy of THIS FILE
+        # under test was dirty in the reproduction tree and was reported as a
+        # path the generator wrote.
+        pre = _git(root, "diff", "--name-only")
+        if pre.returncode != 0:
+            return Verdict(
+                2, f"git could not report the worktree changes before "
+                   f"regeneration: {pre.stderr.strip()[:200]}",
+                conflicted=v.conflicted, derived=v.derived, partial=v.partial,
+                regenerated=v.regenerated, staged=v.staged,
+            )
+        already_dirty = {q for q in pre.stdout.splitlines() if q.strip()}
+
+        # Marker removal FIRST — the generator rewrites counts in place and
+        # would otherwise be asked to parse a file with `<<<<<<<` in it.
+        for rel in v.partial:
+            src = root / rel
+            try:
+                cleaned = take_ours(src.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError) as e:
+                return Verdict(
+                    2, f"{rel}: could not be read to remove its markers: {e}",
+                    conflicted=v.conflicted, derived=v.derived,
+                    partial=v.partial, regenerated=v.regenerated,
+                    staged=v.staged,
+                )
+            if cleaned is None:
+                return Verdict(
+                    2,
+                    f"{rel}: its conflict markers did not parse on the second "
+                    f"reading, though they did on the first; the file changed "
+                    f"underneath this resolution",
+                    conflicted=v.conflicted, derived=v.derived,
+                    partial=v.partial, regenerated=v.regenerated,
+                    staged=v.staged,
+                )
+            src.write_text(cleaned)
+
+        try:
+            cp = _pr.run(art.regenerate, cwd=str(root), capture_output=True,
+                         text=True)
+        except _pr.Stalled:
+            return Verdict(
+                2,
+                f"{' '.join(art.regenerate)} STOPPED MAKING PROGRESS and was "
+                f"killed; the counter documents were not regenerated",
+                conflicted=v.conflicted, derived=v.derived, partial=v.partial,
+                regenerated=v.regenerated, staged=v.staged,
+            )
+        except OSError as e:
+            return Verdict(
+                2, f"{' '.join(art.regenerate)} could not be run: {e}",
+                conflicted=v.conflicted, derived=v.derived, partial=v.partial,
+                regenerated=v.regenerated, staged=v.staged,
+            )
+        if cp.returncode != 0:
+            return Verdict(
+                2,
+                f"{' '.join(art.regenerate)} exited {cp.returncode}; an "
+                f"unmeasured tree is not a clean one. "
+                f"{(cp.stderr or cp.stdout).strip()[:300]}",
+                conflicted=v.conflicted, derived=v.derived, partial=v.partial,
+                regenerated=v.regenerated, staged=v.staged,
+            )
+        v.regenerated.extend(v.partial)
+
+        for rel in v.partial:
+            if _has_markers(root / rel):
+                return Verdict(
+                    2,
+                    f"{rel}: conflict markers SURVIVED both the marker removal "
+                    f"and the regeneration",
+                    conflicted=v.conflicted, derived=v.derived,
+                    partial=v.partial, regenerated=v.regenerated,
+                    staged=v.staged,
+                )
+
+        # THE BOUNDARY (#1029). The writer may legitimately have corrected a
+        # counter in a document that was NOT conflicted — the correct count is
+        # a function of the MERGED tree, which neither side had. Every such
+        # path must be a DECLARED surface of this resolver and must be staged,
+        # because a correct edit left unstaged and outside the verdict is the
+        # failure mode this program exists to avoid. Anything else it touched
+        # is a refusal, printed with the path.
+        declared = {a.path for a in registry} | {a.path for a in partial_registry}
+        dirty = _git(root, "diff", "--name-only")
+        if dirty.returncode != 0:
+            return Verdict(
+                2, f"git could not report the worktree changes after "
+                   f"regeneration: {dirty.stderr.strip()[:200]}",
+                conflicted=v.conflicted, derived=v.derived, partial=v.partial,
+                regenerated=v.regenerated, staged=v.staged,
+            )
+        touched = [q for q in dirty.stdout.splitlines() if q.strip()
+                   and (q not in already_dirty or q in v.partial)]
+        outside = sorted(q for q in touched if q not in declared)
+        if outside:
+            return Verdict(
+                2,
+                f"{' '.join(art.regenerate)} wrote {len(outside)} path(s) "
+                f"outside this resolver's declared surfaces "
+                f"({', '.join(outside[:5])}); nothing further was staged",
+                conflicted=v.conflicted, derived=v.derived, partial=v.partial,
+                regenerated=v.regenerated, staged=v.staged,
+            )
+
+        try:
+            chk = subprocess.run(art.check, cwd=str(root), capture_output=True,
+                                 text=True, timeout=SUBPROCESS_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError) as e:
+            return Verdict(
+                2, f"{' '.join(art.check)} could not be run: {e}",
+                conflicted=v.conflicted, derived=v.derived, partial=v.partial,
+                regenerated=v.regenerated, staged=v.staged,
+            )
+        if chk.returncode != 0:
+            return Verdict(
+                2,
+                f"the counter documents were regenerated, but "
+                f"{' '.join(art.check)} is still rc={chk.returncode} — the "
+                f"bytes written are not the bytes the freshness gate demands. "
+                f"{(chk.stderr or chk.stdout).strip()[:300]}",
+                conflicted=v.conflicted, derived=v.derived, partial=v.partial,
+                regenerated=v.regenerated, staged=v.staged,
+            )
+
+        for rel in sorted(set(v.partial) | set(touched)):
+            add = _git(root, "add", "--", rel)
+            if add.returncode != 0:
+                return Verdict(
+                    2, f"{rel}: git add failed: {add.stderr.strip()[:300]}",
+                    conflicted=v.conflicted, derived=v.derived,
+                    partial=v.partial, regenerated=v.regenerated,
+                    staged=v.staged,
+                )
+            if rel not in v.staged:
+                v.staged.append(rel)
+
     left = conflicted_paths(root)
     if left is None:
         return Verdict(
@@ -443,6 +926,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     elif v.code == 2:
         print(f"[UNMEASURABLE] {v.reason}", file=sys.stderr)
     else:
+        for p in v.partial:
+            print(f"  counters only         {p}", file=sys.stderr)
         for p in v.staged:
             print(f"  regenerated + staged  {p}", file=sys.stderr)
         print(f"[RESOLVED] {v.reason}.", file=sys.stderr)
