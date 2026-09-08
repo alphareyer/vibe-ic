@@ -411,7 +411,8 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
                              blacklist: Optional[str] = None,
                              gate_renames: Optional[List[Tuple[str, str]]] = None,
                              fsm_encfile: Optional[str] = None,
-                             screen_only: bool = False
+                             screen_only: bool = False,
+                             wire_inventory_paths: Optional[Dict[str, str]] = None
                              ) -> str:
     """Emit the Yosys .ys that structurally proves gold_v == gate_v.
 
@@ -584,6 +585,10 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
                     f"async2sync\n"
                     f"opt -purge\n"
                     f"opt_clean -purge\n"
+                    + (f"write_json {wire_inventory_paths[stash]}\n"
+                       if wire_inventory_paths and stash in wire_inventory_paths
+                       else "")
+                    +
                     f"{renames}"
                     f"{splitnets}"
                     f"design -stash {stash}\n")
@@ -1021,7 +1026,9 @@ def resolve_through_buffers(instances: Dict[str, Tuple[str, Dict[str, str]]],
 
 def build_pin_correspondence_renames(
         accepted: List[Dict[str, object]],
-        unproven_names: List[str]) -> Tuple[List[Tuple[str, str]],
+        unproven_names: List[str],
+        native_wire_names: Optional[Dict[str, List[str]]] = None
+        ) -> Tuple[List[Tuple[str, str]],
                                             List[Dict[str, object]]]:
     """(gate-side [(old_wire, new_wire), ...], per-instance records).
 
@@ -1039,14 +1046,23 @@ def build_pin_correspondence_renames(
     SAFETY.  A rename is emitted only for a record `classify_pin_permutation_
     points` ACCEPTED, i.e. only where the cell's Liberty function was proven
     symmetric under that exact permutation by exhaustive truth table and the
-    instance's output nets are unchanged.  In addition every pin the permutation
+    instance's output attachment is unchanged or connected through uniquely
+    driven, Liberty-proven transparent buffers. Without a native wire inventory,
+    every pin the permutation
     MOVED must itself appear in `unproven_names`: those names came from a real
     `equiv_status`, so the wire is known to exist on BOTH sides of the miter that
     produced them, and a `rename` of an absent object is a hard yosys error.  An
     instance whose gold pins do not carry distinct nets is skipped (the
     correspondence would be ambiguous), as is a mapping that is not a bijection.
     Points the classifier rejected keep their cut point and stay unproven, so a
-    partial application can never turn a real failure into a pass."""
+    partial application can never turn a real failure into a pass.
+
+    With native per-side prepared-wire inventories, aliases elided differently
+    on the two sides can be handled without guessing wire existence. The rename
+    remains a bijection over existing gate names; its intersection with gold is
+    unchanged. Each existing matched pin receives its true gate signal, while
+    displaced aliases use only names absent from gold. The full native proof
+    still judges every retained point."""
     unproven = set(unproven_names or [])
     by_inst: Dict[str, Dict[str, object]] = {}
     for rec in accepted or []:
@@ -1087,6 +1103,38 @@ def build_pin_correspondence_renames(
             records.append(out)
             continue
         moved = [p for p, q in sigma.items() if p != q]
+        if native_wire_names is not None:
+            # opt_clean can retain different aliases on the two sides. Pair
+            # every already-matched pin with its true existing gate wire,
+            # then bijectively park the displaced aliases only under names
+            # absent from gold. No logic changes; no name enters/leaves the
+            # gate namespace or the gold/gate intersection.
+            gw = set(native_wire_names.get("gold", []))
+            tw = set(native_wire_names.get("gate", []))
+            available = {p for p in sigma if f"{inst}.{p}" in tw}
+            matched = {p for p in available if f"{inst}.{p}" in gw}
+            inverse = {q: p for p, q in sigma.items()}
+            if any(inverse[p] not in available for p in matched):
+                out["skipped"] = "native gate alias for a matched pin is absent"
+                records.append(out)
+                continue
+            partial = {inverse[p]: p for p in matched}
+            spare_sources = sorted(available - set(partial))
+            spare_targets = sorted(available - set(partial.values()))
+            if any(f"{inst}.{p}" in gw for p in spare_targets):
+                out["skipped"] = "displaced alias would change a matched point"
+                records.append(out)
+                continue
+            partial.update(zip(spare_sources, spare_targets))
+            pairs = [(f"{inst}.{p}", f"{inst}.{q}")
+                     for p, q in sorted(partial.items()) if p != q]
+            renames.extend(pairs)
+            out.update({"permutation": sigma, "renames": pairs,
+                        "native_gate_pins": sorted(available),
+                        "native_matched_pins": sorted(matched),
+                        "method": "native_alias_bijection"})
+            records.append(out)
+            continue
         missing = [p for p in moved if f"{inst}.{p}" not in unproven]
         if missing:
             out["skipped"] = ("moved pin(s) " + ",".join(sorted(missing))
@@ -1100,6 +1148,52 @@ def build_pin_correspondence_renames(
                     "renames": pairs})
         records.append(out)
     return renames, records
+
+
+def output_buffer_path(downstream: str, upstream: str,
+                       instances: Dict[str, Tuple[str, Dict[str, str]]],
+                       lib: Dict[str, Dict[str, object]],
+                       buffers: Dict[str, Tuple[str, str]]
+                       ) -> Optional[List[Dict[str, str]]]:
+    """Prove an output attachment through a unique transparent driver chain.
+
+    Output buffering moves the cell output to a new internal net while the
+    original net remains on the buffer output. Walk that exact direction.
+    Unknown cells conservatively count every connected pin as a possible
+    driver; duplicate drivers, cycles and non-buffer drivers refuse the walk.
+    This proves only correspondence. The full miter still proves the logic.
+    """
+    if not downstream or not upstream:
+        return None
+    drivers: Dict[str, List[Tuple[str, str, Dict[str, str]]]] = {}
+    for inst, (cell, pins) in instances.items():
+        outputs = lib[cell].get("outputs", {}) if cell in lib else pins
+        for pin in outputs:
+            net = pins.get(pin)
+            if net:
+                drivers.setdefault(net, []).append((inst, cell, pins))
+    path: List[Dict[str, str]] = []
+    seen = set()
+    cur = downstream
+    while cur != upstream:
+        if cur in seen:
+            return None
+        seen.add(cur)
+        candidates = drivers.get(cur, [])
+        if len(candidates) != 1:
+            return None
+        inst, cell, pins = candidates[0]
+        bp = buffers.get(cell)
+        if bp is None:
+            return None
+        ip, op = bp
+        nxt = pins.get(ip, "")
+        if pins.get(op) != cur or not nxt:
+            return None
+        path.append({"instance": inst, "cell": cell, "input_pin": ip,
+                     "output_pin": op, "input_net": nxt, "output_net": cur})
+        cur = nxt
+    return path
 
 
 def classify_pin_permutation_points(names: List[str], gold_text: str,
@@ -1168,9 +1262,16 @@ def classify_pin_permutation_points(names: List[str], gold_text: str,
             _no(rec, "the gate instance's input nets are not a permutation of "
                      "the gold instance's input nets (a rewire, not a swap)")
             continue
-        if any(gpins.get(o) != tpins.get(o) for o in gl["outputs"]):
+        output_paths = {
+            o: output_buffer_path(gpins.get(o, ""), tpins.get(o, ""),
+                                  gate_i, lib, buffers)
+            for o in gl["outputs"] if gpins.get(o) != tpins.get(o)
+        }
+        if any(path is None for path in output_paths.values()):
             _no(rec, "an output net of the instance differs between gold and gate")
             continue
+        if output_paths:
+            rec["output_buffer_paths"] = output_paths
         if gin.get(pin) == tin.get(pin):
             # NEGATIVE CONTROL that found this test missing: a pin the
             # permutation did NOT move carries the same-named net on both

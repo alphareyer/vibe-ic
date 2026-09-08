@@ -49712,6 +49712,13 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
         notes.append("post-layout LEC: pairing re-encoded FSM state registers "
                      f"through equiv_make -encfile {_fsm_encfile_host}.")
 
+    _native_inventory = {side: out_json.parent / f"lec_post_layout.{side}.prepared.json"
+                         for side in ("gold", "gate")}
+
+    def _native_wire_names():
+        return {side: list(json.loads(path.read_text())["modules"][top]["netnames"])
+                for side, path in _native_inventory.items()}
+
     def _run_lec(functional_lib: bool, blacklist_c: Optional[str] = None,
                  gate_renames: Optional[List[Tuple[str, str]]] = None,
                  screen_only: bool = False):
@@ -49730,6 +49737,10 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
             _kw["fsm_encfile"] = _fsm_encfile_c
         if screen_only:
             _kw["screen_only"] = True
+        if functional_lib:
+            _kw["wire_inventory_paths"] = {
+                side: _to_container_path(str(path), container)
+                for side, path in _native_inventory.items()}
         ys = mod.build_yosys_equiv_script(gold_c, gate_c, lib_c, top,
                                           blackbox_v=blackbox,
                                           strip_gate_ports=strip_gate_ports,
@@ -49859,7 +49870,8 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                     gate.read_text(errors="replace") if gate.is_file() else "",
                     _s_libtext)
                 _pre_renames, _s_recs = mod.build_pin_correspondence_renames(
-                    _s_cls.get("accepted") or [], _s_names)
+                    _s_cls.get("accepted") or [], _s_names,
+                    native_wire_names=_native_wire_names())
             except Exception as exc:  # noqa: BLE001 — best-effort, recorded
                 _s_cls, _s_recs = {"error": repr(exc)}, []
                 _pre_renames = []
@@ -49933,7 +49945,8 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
         # application can never turn a real failure into a pass.
         try:
             _ren, _ren_recs = mod.build_pin_correspondence_renames(
-                _cls.get("accepted") or [], _names)
+                _cls.get("accepted") or [], _names,
+                native_wire_names=_native_wire_names())
         except Exception as exc:  # noqa: BLE001 — best-effort, recorded
             _ren, _ren_recs = [], [{"error": repr(exc)}]
         pin_perm = {
