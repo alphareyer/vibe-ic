@@ -321,7 +321,8 @@ def test_a_table_with_no_address_column_at_all_discloses_nothing():
 #
 # Everything above is a fixture. These re-derive L4 from a real design's staged
 # `input/docs/` through the same two functions the runner calls, because the
-# load-bearing numbers (5 gone, 42 kept) are pipeline numbers: `gen_l4_regmap`
+# load-bearing identities (five non-registers gone, all declared CSRs kept)
+# cross two producers: `gen_l4_regmap`
 # owns the specialised CSR reader and `_post_emit_pdf_regmap_table_rows` owns
 # the extractor + the address dedup between them.
 
@@ -355,17 +356,48 @@ def _by_strategy(registers):
 def test_real_design_keeps_its_csr_rows_and_drops_the_five(tmp_path):
     """BOTH directions on one re-derivation of the real documents.
 
-    Before: 150 registers — 102 HDL-enum, 42 CSR-table, 5 grid-table (2 of them
-    nameless), 1 rowspan. After: the same 102 / 42 / 1, and the 5 are gone.
-    The 42 is the constraint that makes this falsifiable in the other
-    direction — a rule broad enough to also take the real CSR table would be
-    caught here, and the two tables sit in the same document set.
+    The INPUT names 43 CSRs, including mip at 0x344. The old 42 CSR / 1
+    rowspan census described extraction ownership, not 42 distinct CSRs:
+    address dedup now keeps mip's canonical name and its four field rows.
+    Require every documented identity exactly once, independent of which
+    extractor owns it, and reject all five original non-register addresses.
     """
     docs = require_repo("benchmark-data", "ic", "ibex", "input", "docs")
     _proj, regs = _rederive_l4(tmp_path, docs)
+    # Read the verbatim summary table, not an extractor's output or strategy.
+    lines = (docs / "ibex_cs_registers.rst").read_text().splitlines()
+    header = next(i for i, line in enumerate(lines)
+                  if [c.strip() for c in line.split("|")[1:-1]]
+                  == ["Address", "Name", "Access", "Description"])
+    expected = []
+    for line in lines[header + 1:]:
+        if not line.startswith(("|", "+")):
+            break
+        cells = [c.strip() for c in line.split("|")[1:-1]]
+        if len(cells) == 4 and cells[0].lower().startswith("0x"):
+            expected.append((cells[1].strip("`"), int(cells[0], 16)))
+    assert expected and len(expected) == len(set(expected)), expected
+
+    def address(reg):
+        value = reg.get("address") or reg.get("addr_hex")
+        return int(value, 0) if isinstance(value, str) else value
+
+    documented_addresses = {addr for _name, addr in expected}
+    actual = [(r.get("name"), address(r)) for r in regs
+              if address(r) in documented_addresses]
+    assert collections.Counter(actual) == collections.Counter(expected), (
+        f"documented CSR identities changed: missing={set(expected) - set(actual)}, "
+        f"unexpected={set(actual) - set(expected)}, actual={actual}")
+    mip, = [r for r in regs if address(r) == 0x344]
+    assert mip["name"] == "mip"
+    assert collections.Counter((f.get("msb"), f.get("lsb"))
+                               for f in mip.get("fields", [])) == collections.Counter(
+        [(30, 16), (11, 11), (7, 7), (3, 3)]), mip
+    # Interrupt cause values and Debug Module defaults are not CSR addresses,
+    # even if a regression supplies a name or a different extraction strategy.
+    non_registers = {0xffffffe0, 0x8000001f, 0x1a110000, 0x1a110800, 0x1a110808}
+    assert not non_registers.intersection(address(r) for r in regs), regs
     census = _by_strategy(regs)
-    assert census["rst_grid_csr_v1_6_566"] == 42, (
-        f"the real CSR table changed; census={dict(census)}")
     assert census["rst_grid_table_match"] == 0, (
         "grid-table non-registers survived; "
         f"{[(r.get('addr_hex'), r.get('name')) for r in regs if (r.get('evidence') or {}).get('extraction_strategy') == 'rst_grid_table_match']}")

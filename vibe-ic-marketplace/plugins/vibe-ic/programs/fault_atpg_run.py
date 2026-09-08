@@ -2254,6 +2254,8 @@ def run_fault(
     except Exception as _tc_exc:   # measurement-only: never fail the run on it
         test_coverage = {"computed": False, "reason": f"exception: {_tc_exc}"}
 
+    output_activation_recovery = None
+
     def _assemble_report(transition_block):
         rep = {
             "tool": "fault",
@@ -2276,6 +2278,7 @@ def run_fault(
             # so neither stands in for the other, and the snapshot carries
             # both from the moment stuck-at is first measured.
             "test_coverage": test_coverage,
+            "output_activation_recovery": output_activation_recovery,
             # THE COMPLETE #615 FIELD SET, taken from that PR verbatim
             # rather than retyped: `dft_atpg_coverage_check` reads
             # `test_coverage_pct` by NAME, and a hand-copied subset had
@@ -2366,6 +2369,69 @@ def run_fault(
         faults_total=faults_total, min_coverage=min_coverage,
         trans_line=_pending_trans, cov_out=cov_out, tv_out=tv_out)
     _write_coverage_json(json_out_path, _assemble_report(None))
+
+    # Preserve the completed random-pattern measurement above before trying
+    # directed stimulus. SAT supplies patterns, never a detection count or an
+    # untestable-fault exclusion. Fault regrades from zero on the same sites.
+    if ec == 0 and coverage_measured and coverage_ratio < min_coverage:
+        try:
+            import yaml
+            import fault_output_activation as activation
+            _native = yaml.safe_load(cov_text)
+            _vectors = json.loads((project / tv_out).read_text())
+            if activation.activation_targets(_native, _vectors["outputs"]):
+                _activation_lib = _atpg_liberty_container_path(
+                    project, cell_model, pdk_dir)
+                if _activation_lib:
+                    _activation_root = "/work"
+                    if _CE.no_container_route():
+                        _activation_root = str(project)
+                        _activation_lib = _localise_mounted_paths(
+                            _activation_lib, project, pdk_dir)
+                    output_activation_recovery = activation.recover(
+                        project, cut_rel=cut_out, tv_rel=tv_out,
+                        coverage_rel=cov_out, liberty=_activation_lib,
+                        cell_model=eff_cell_model, clock=clock,
+                        target=min_coverage,
+                        mounted_root=_activation_root,
+                        execute=lambda argv: _run_docker(
+                            project, argv, pdk_dir=pdk_dir, supervised=True))
+                    if output_activation_recovery["verdict"] == "RECOVERED":
+                        shutil.copyfile(output_activation_recovery["coverage_path"], cov_file)
+                        shutil.copyfile(output_activation_recovery["vectors_path"], project / tv_out)
+                        cov_text = cov_file.read_text()
+                        _recovery_dir = Path(output_activation_recovery["work_dir"])
+                        atpg_log = (_recovery_dir / "fault.log").read_text()
+                        parsed = parse_atpg_coverage(cov_text, atpg_log, 0)
+                        coverage_ratio = parsed["coverage_pct"]
+                        faults_total = parsed["faults_total"]
+                        faults_covered = parsed["faults_covered"]
+                        coverage_source = parsed["coverage_source"]
+                        faults_total_source = parsed["faults_total_source"]
+                        coverage_measured = parsed["coverage_measured"]
+                        # The old test-coverage number describes the old
+                        # vectors. Recompute it, or leave it unmeasured so
+                        # the gate judges the new raw >=95% measurement.
+                        test_coverage = None
+                        if "_dirs" in locals():
+                            try:
+                                test_coverage = _dtc.compute(
+                                    project / cut_out, cov_file, directions=_dirs)
+                                (project / "phase2/stage2/dft/test_coverage.json").write_text(
+                                    json.dumps(test_coverage, indent=2))
+                            except Exception as exc:
+                                test_coverage = {"computed": False, "reason": str(exc)}
+        except Exception as exc:
+            # A failed recovery cannot turn the completed original FAIL into
+            # missing evidence or a passing result.
+            output_activation_recovery = {
+                "verdict": "UNMEASURED", "error": f"{type(exc).__name__}: {exc}"}
+        _write_coverage_rpt(
+            project / rpt_out, clock=clock, netlist_rel=netlist_rel, pdk=pdk,
+            coverage_ratio=coverage_ratio, faults_covered=faults_covered,
+            faults_total=faults_total, min_coverage=min_coverage,
+            trans_line=_pending_trans, cov_out=cov_out, tv_out=tv_out)
+        _write_coverage_json(json_out_path, _assemble_report(None))
 
     # ── Transition (at-speed) fault model — SECOND model, own target ──
     transition = None

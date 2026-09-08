@@ -263,6 +263,10 @@ def run(argv: Sequence[str]) -> int:
     plugin = importlib.util.module_from_spec(spec)
     sys.modules[PROGRESS_PLUGIN_NAME] = plugin
     spec.loader.exec_module(plugin)
+    # Existing producers resolve this public name for finite semantic relays.
+    # Keep one module/callback: importing a second instance loses its claimed
+    # stream, while an absent alias silently drops nested progress altogether.
+    sys.modules["_pytest_progress_plugin"] = plugin
 
     identity = {
         "schema": 1,

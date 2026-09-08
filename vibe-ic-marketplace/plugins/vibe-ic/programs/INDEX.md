@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1299
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1299)
+- **Total programs (excluding helpers / shims):** 1300
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1300)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1290 |
+| `any` | 1291 |
 
 ## Alphabetical listing
 
@@ -388,6 +388,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `fastercap_extract` | any | — | Real 3D field-solved coupling extraction via FasterCap on the routed geometry. |
 | `fault_atpg_run` | any | — | Open-source ATPG via Fault (cloudv-io/fault). |
 | `fault_cut_async_observe` | any | — | restore OBSERVABILITY of a sequential cell's ASYNCHRONOUS set/reset inputs in a `fault cut` full-scan ATPG model. |
+| `fault_output_activation` | any | — | Recover random-pattern starvation using SAT-generated output activations. |
 | `fault_scan_chain_insert` | any | — | REAL scan-chain insertion via `fault chain`. |
 | `fetch_round_trip_sentinel_check` | any | — | P0.1 deterministic gate |
 | `ff_truth_table_synth` | any | — | deterministic SOLVER for a flip-flop truth table. |
@@ -1371,7 +1372,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1290 programs)
+### `any` (1291 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1731,6 +1732,7 @@ _(no programs in this group)_
 - `fastercap_extract` — Real 3D field-solved coupling extraction via FasterCap on the routed geometry.
 - `fault_atpg_run` — Open-source ATPG via Fault (cloudv-io/fault).
 - `fault_cut_async_observe` — restore OBSERVABILITY of a sequential cell's ASYNCHRONOUS set/reset inputs in a `fault cut` full-scan ATPG model.
+- `fault_output_activation` — Recover random-pattern starvation using SAT-generated output activations.
 - `fault_scan_chain_insert` — REAL scan-chain insertion via `fault chain`.
 - `fetch_round_trip_sentinel_check` — P0.1 deterministic gate
 - `ff_truth_table_synth` — deterministic SOLVER for a flip-flop truth table.

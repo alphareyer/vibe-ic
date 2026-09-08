@@ -61,7 +61,13 @@ def test_isolated_entry_ignores_subject_pytest_and_progress_plugin(tmp_path):
         "raise AssertionError('subject progress shadow loaded')\n",
         encoding="utf-8")
     (tmp_path / "test_ok.py").write_text(
-        "def test_ok():\n    assert True\n", encoding="utf-8")
+        "import sys\n"
+        "def test_ok():\n"
+        "    legacy = sys.modules.get('_pytest_progress_plugin')\n"
+        "    protected = sys.modules['_vibeic_protected_pytest_progress']\n"
+        "    assert legacy is protected\n"
+        "    assert legacy.domain_progress is protected.domain_progress\n",
+        encoding="utf-8")
     env = {key: value for key, value in os.environ.items()
            if key not in {"PYTHONPATH", "PYTHONHOME"}
            and not key.startswith(_PROGRESS_ENV_PREFIX)}
