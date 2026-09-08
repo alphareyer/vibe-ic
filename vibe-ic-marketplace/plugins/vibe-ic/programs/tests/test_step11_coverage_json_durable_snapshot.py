@@ -27,6 +27,8 @@ fail; run it against origin/main to confirm.
 chip-AGNOSTIC / PDK-AGNOSTIC: the fixture uses a synthetic netlist, a synthetic
 coverage.yml, and no design/PDK literal in the assertions.
 """
+import ast
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -38,6 +40,9 @@ sys.path.insert(0, str(PROGRAMS))
 
 import fault_atpg_run as far  # noqa: E402
 import _path_layout as _pl    # noqa: E402
+
+# Capture the real callable before a test replaces the container boundary.
+_REAL_RUN_DOCKER = far._run_docker
 
 
 # A minimal `fault atpg` coverage.yml the producer's own parser reads as a real
@@ -61,6 +66,9 @@ def _fake_docker_measuring(project, cmd, timeout=600, pdk_dir=None, *,
     # The real cut and ATPG calls are supervised. Their budgets are recorded
     # ceilings with a notification callback, not container wall deadlines.
     # Keep an explicit signature so an unknown caller keyword still fails.
+    inspect.signature(_REAL_RUN_DOCKER).bind(
+        project, cmd, timeout=timeout, pdk_dir=pdk_dir, supervised=supervised,
+        ceiling_s=ceiling_s, ceiling_notice=ceiling_notice)
     assert supervised is True
     assert isinstance(ceiling_s, (int, float)) and ceiling_s > 0
     assert callable(ceiling_notice)
@@ -132,6 +140,30 @@ def test_run_fault_writes_coverage_json_in_process(tmp_path, monkeypatch):
     assert doc.get("coverage_measured") is True
     assert 49.0 <= doc.get("coverage_pct", 0.0) <= 51.0
     assert ec == 1   # 50% < 95% floor → honest FAIL
+
+    # Remove only supervised from the actual producer signature, not from the
+    # double. Drive run_fault again: binding must reject before mock output.
+    mutant_ast = ast.parse(inspect.getsource(_REAL_RUN_DOCKER))
+    args = mutant_ast.body[0].args
+    index = next(i for i, arg in enumerate(args.args) if arg.arg == "supervised")
+    default_index = index - (len(args.args) - len(args.defaults))
+    assert default_index >= 0
+    del args.args[index]
+    del args.defaults[default_index]
+    namespace = dict(_REAL_RUN_DOCKER.__globals__)
+    exec(compile(mutant_ast, "<run_docker_without_supervised>", "exec"), namespace)
+    rejected = tmp_path / "signature_mutant"
+    mutant_netlist = _mk_project(rejected)
+    with monkeypatch.context() as control:
+        control.setitem(globals(), "_REAL_RUN_DOCKER", namespace["_run_docker"])
+        with pytest.raises(TypeError, match="supervised"):
+            far.run_fault(
+                rejected, mutant_netlist, clock="clk", pdk="__none__",
+                min_coverage=95.0, tv_count=8,
+                cell_model_override="/work/cells.v", dff_cells_override="MYLIB_DFF",
+                run_transition=False)
+    assert not (rejected / "phase2/stage2/dft/cut_netlist.v").exists()
+    assert not _pl.report_path(rejected, "dft/coverage.json").exists()
 
 
 def test_json_out_honours_custom_destination(tmp_path, monkeypatch):

@@ -108,6 +108,40 @@ def test_tree_is_exactly_the_whole_tree_lookup_it_replaced():
     assert checked >= 5, f"only {checked} programs actually compared"
 
 
+def test_index_progress_is_finite_and_work_derived(tmp_path, monkeypatch):
+    events = []
+    monkeypatch.setattr(G, "_publish_ast_index_progress", lambda *args: events.append(args))
+    # The actual three index builders consume a frozen, neutral input tree.
+    # Two full strides plus one partial stride must be reported exactly once.
+    count = 2 * G._AST_INDEX_PROGRESS_STRIDE + 1
+    for number in range(count):
+        (tmp_path / f"program_{number}.py").write_text(
+            'from pathlib import Path\nPath("reports/result.json").write_text("ok")\n')
+    monkeypatch.setattr(F, "PROGRAMS_DIR", tmp_path)
+    caches = (G._tree, G._trees, G.write_index, G.literal_index)
+    for function in caches:
+        function.cache_clear()
+    try:
+        assert len(G._trees()) == count
+        writes, literals = G.write_index(), G.literal_index()
+        assert writes and literals
+        for scope in ("d7-program-ast-index", "d7-write-index", "d7-literal-index"):
+            assert [row[1:] for row in events if row[0] == scope] == [(1, 3), (2, 3), (3, 3)]
+        saved = list(events)
+        assert G.write_index() == writes and G.literal_index() == literals
+        assert events == saved  # Cached reads are not new work.
+        step = G._stride_publisher("no-new-work", count)
+        for seen in (1, 1, 0, 24, 24):
+            step(seen)
+        assert events == saved
+        for seen in (25, 25, 24):
+            step(seen)
+        assert events == saved + [("no-new-work", 1, 3)]
+    finally:
+        for function in caches:
+            function.cache_clear()
+
+
 def test_tree_returns_none_for_everything_that_is_not_a_program():
     """The three ways `_trees().get()` returned None must still return None.
 

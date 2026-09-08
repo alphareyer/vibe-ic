@@ -676,14 +676,51 @@ def _tree(program: str) -> Optional[ast.AST]:
         return None      # is dimension 2's problem, not this module's
 
 
+_AST_INDEX_PROGRESS_STRIDE = 25
+
+
+def _publish_ast_index_progress(scope: str, completed: int, total: int) -> None:
+    try:
+        from _pytest_progress_plugin import domain_progress
+    except ImportError:
+        return
+    domain_progress(scope, completed, total)
+
+
+def _stride_publisher(scope: str, n_units: int):
+    """Credit completed work, including the last partial stride, never a clock.
+
+    Each caller enumerates a frozen input population. Repeated observations do
+    not renew progress; a parse or walk stuck within one unit remains silent.
+    """
+    stride = _AST_INDEX_PROGRESS_STRIDE
+    total = (n_units + stride - 1) // stride
+    emitted = 0
+    last_seen = 0
+
+    def step(seen: int) -> None:
+        nonlocal emitted, last_seen
+        if seen <= last_seen or seen > n_units:
+            return
+        last_seen = seen
+        completed = total if seen == n_units else seen // stride
+        while emitted < completed <= total:
+            emitted += 1
+            _publish_ast_index_progress(scope, emitted, total)
+    return step
+
+
 @lru_cache(maxsize=1)
 def _trees() -> Dict[str, ast.AST]:
-    """Every parsed program. Use :func:`_tree` when you want ONE."""
+    """Every parsed program; long scans report finite work to the supervisor."""
+    paths = sorted(F.PROGRAMS_DIR.glob("*.py"))
+    step = _stride_publisher("d7-program-ast-index", len(paths))
     out: Dict[str, ast.AST] = {}
-    for path in sorted(F.PROGRAMS_DIR.glob("*.py")):
+    for seen, path in enumerate(paths, start=1):
         tree = _tree(path.stem)
         if tree is not None:
             out[path.stem] = tree
+        step(seen)
     return out
 
 
@@ -691,9 +728,12 @@ def _trees() -> Dict[str, ast.AST]:
 def write_index() -> Dict[Tuple[str, ...], FrozenSet[str]]:
     """``{tail_segments: {program basenames that write it}}`` for the whole tree."""
     acc: Dict[Tuple[str, ...], Set[str]] = {}
-    for name, tree in _trees().items():
+    trees = _trees()
+    step = _stride_publisher("d7-write-index", len(trees))
+    for seen, (name, tree) in enumerate(trees.items(), start=1):
         for tail in _collect_writes(tree):
             acc.setdefault(tail, set()).add(name)
+        step(seen)
     return {k: frozenset(v) for k, v in acc.items()}
 
 
@@ -701,9 +741,12 @@ def write_index() -> Dict[Tuple[str, ...], FrozenSet[str]]:
 def literal_index() -> Dict[str, FrozenSet[str]]:
     """``{path literal: {program basenames whose source names it}}``."""
     acc: Dict[str, Set[str]] = {}
-    for name, tree in _trees().items():
+    trees = _trees()
+    step = _stride_publisher("d7-literal-index", len(trees))
+    for seen, (name, tree) in enumerate(trees.items(), start=1):
         for lit in _collect_path_literals(tree):
             acc.setdefault(lit, set()).add(name)
+        step(seen)
     return {k: frozenset(v) for k, v in acc.items()}
 
 

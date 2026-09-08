@@ -482,6 +482,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -4609,6 +4610,83 @@ def test_the_guard_notices_a_launcher_it_does_not_cover():
 # the host-dependence the published artefact makes unnecessary.
 
 
+_AUDIT_PROGRESS_BUDGET = 120
+_AUDIT_PROGRESS_RESCAN_S = 1.0
+
+
+def _audit_artefact_probe(dst: Path, scope: str):
+    """Observe new audit paths once; deletion/recreation is not forward work.
+
+    Audit reports arrive before the final stdout report. Relay their creation
+    to the outer supervisor without a heartbeat or a larger timeout. Existing
+    inputs, rewrites and repeated observations cannot spend this finite budget.
+    """
+    seen = {p.relative_to(dst) for p in dst.rglob("*") if p.is_file()}
+    state = {"emitted": 0, "at": None, "score": 0.0}
+
+    def factory(signals):
+        def probe(_proc) -> Optional[float]:
+            now = time.monotonic()
+            if state["at"] is not None and now - state["at"] < _AUDIT_PROGRESS_RESCAN_S:
+                return state["score"]
+            state["at"] = now
+            try:
+                current = {p.relative_to(dst) for p in dst.rglob("*") if p.is_file()}
+            except OSError:
+                return None
+            signals["audit_artefacts"] = True
+            new = current - seen
+            if new:
+                seen.update(new)
+                state["score"] += len(new)
+                if state["emitted"] < _AUDIT_PROGRESS_BUDGET:
+                    state["emitted"] += 1
+                    try:
+                        from _pytest_progress_plugin import domain_progress
+                    except ImportError:
+                        return state["score"]
+                    domain_progress(scope, state["emitted"], _AUDIT_PROGRESS_BUDGET)
+            return state["score"]
+        return probe
+    return factory
+
+
+def test_audit_progress_credits_new_paths_not_file_churn(tmp_path, monkeypatch):
+    import _pytest_progress_plugin as progress
+
+    clock = [0.0]
+    events = []
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(progress, "domain_progress", lambda *args: events.append(args))
+    existing = tmp_path / "existing"
+    existing.write_text("input")
+    signals = {}
+    probe = _audit_artefact_probe(tmp_path, "audit-fixture")(signals)
+
+    def sample():
+        clock[0] += _AUDIT_PROGRESS_RESCAN_S
+        return probe(None)
+
+    assert sample() == 0 and events == []
+    existing.unlink()
+    assert sample() == 0 and events == []
+    existing.write_text("input")
+    assert sample() == 0 and events == []
+    report = tmp_path / "report.json"
+    report.write_text("{}")
+    assert sample() == 1 and events == [("audit-fixture", 1, _AUDIT_PROGRESS_BUDGET)]
+    report.unlink()
+    assert sample() == 1 and len(events) == 1
+    report.write_text("{}")
+    assert sample() == 1 and len(events) == 1
+    for number in range(_AUDIT_PROGRESS_BUDGET + 1):
+        (tmp_path / f"report-{number}.json").write_text("{}")
+        sample()
+    assert len(events) == _AUDIT_PROGRESS_BUDGET
+    assert [row[1] for row in events] == list(range(1, _AUDIT_PROGRESS_BUDGET + 1))
+    assert signals == {"audit_artefacts": True}
+
+
 @needs_corpus
 def test_d3_the_compliance_audit_does_not_create_declared_outputs():
     """THE SELF-CERTIFICATION GUARD. An audit must not write its own evidence.
@@ -4648,7 +4726,8 @@ def test_d3_the_compliance_audit_does_not_create_declared_outputs():
             before = {p.relative_to(dst) for p in dst.rglob("*") if p.is_file()}
             _pr.run(
                 [sys.executable, str(fcc_path), str(dst)],
-                capture_output=True, text=True)
+                capture_output=True, text=True,
+                progress_probe=_audit_artefact_probe(dst, f"d3-selfcert-audit-{completed}"))
             after = {p.relative_to(dst) for p in dst.rglob("*") if p.is_file()}
             created = after - before
             hits = set()
