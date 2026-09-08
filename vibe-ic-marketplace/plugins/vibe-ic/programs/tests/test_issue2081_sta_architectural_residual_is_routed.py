@@ -336,3 +336,59 @@ def test_inline_signoff_executes_the_architectural_gate(tmp_path, monkeypatch, b
         assert runner._aggregate_verdict(rows) not in ("PASS", "PASS_WITH_WAIVERS")
     else:
         assert runner._aggregate_verdict(rows) == "PASS"
+
+
+@pytest.mark.parametrize("body, expected_rc, expected_verdict",
+                         [(_ARCH, 1, "FAIL"), (_MET, 0, "PASS"),
+                          (None, 2, "INCOMPLETE")],
+                         ids=["violated", "met", "missing"])
+@pytest.mark.parametrize("existing_report", [False, True],
+                         ids=["absent-report", "existing-report"])
+def test_compliance_audit_preserves_producer_output(
+        tmp_path, body, expected_rc, expected_verdict, existing_report):
+    """The actual YAML/FCC consumer may check, but may not self-certify.
+
+    Tiny report reductions exercise the real checker subprocess. A prior
+    producer report is deliberately different from the current timing inputs:
+    its existence must neither suppress re-checking nor authorize replacement.
+    """
+    import flow_compliance_check as fcc
+
+    project = _project(tmp_path, body) if body is not None else tmp_path
+    report = project / "reports/phase3/sta/architectural_residual.json"
+    if existing_report:
+        report.parent.mkdir(parents=True)
+        report.write_bytes(b'{"verdict":"PASS","producer_receipt":"original"}\n')
+
+    def files():
+        return {str(p.relative_to(project)): p.read_bytes()
+                for p in project.rglob("*") if p.is_file()}
+
+    before = files()
+    flow = yaml.safe_load(
+        (PLUGIN / "flow/phase1_phase2_phase3.yaml").read_text())
+    step = next(s for s in flow["steps"] if str(s["id"]) == "23")
+    commands = []
+
+    def find_commands(value):
+        if isinstance(value, dict):
+            cmd = value.get("program_exit_zero", "")
+            if isinstance(cmd, str) and cmd.split()[0:1] == ["sta_architectural_residual_check"]:
+                commands.append(cmd)
+            for child in value.values():
+                find_commands(child)
+        elif isinstance(value, list):
+            for child in value:
+                find_commands(child)
+
+    find_commands(step["gate"])
+    assert len(commands) == 1
+    result = fcc._check_program_exit_zero(project, commands[0])
+    assert result.exit_code == expected_rc
+    assert result.verdict == expected_verdict
+    after = files()
+    if existing_report:
+        assert report.read_bytes() == before[str(report.relative_to(project))]
+    else:
+        assert len(after) == len(before), "audit created a producer-owned output"
+    assert after == before, "audit changed project evidence"

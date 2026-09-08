@@ -5515,7 +5515,9 @@ steps:
         # itself (image digest recorded in that issue): 1 of 3 violating
         # sign-off paths proven architectural at a residual of +0.88 ns, and
         # zero findings across four other real runs in the corpus.
-        - program_exit_zero: "sta_architectural_residual_check . --json reports/phase3/sta/architectural_residual.json"
+        # The inline sign-off runner owns the required JSON output. Auditing
+        # must re-check the timing inputs without creating or replacing it.
+        - program_exit_zero: "sta_architectural_residual_check ."
         # vibe-ic#2126 — THE SIGN-OFF SAYS WHOSE NUMBER IT WAS MEASURED
         # AGAINST. #2091 measured, on opentitan_aes x sky130A, a post-route
         # sign-off reported against a 10 ns period the input never states

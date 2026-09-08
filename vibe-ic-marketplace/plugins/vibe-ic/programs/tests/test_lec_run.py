@@ -1795,7 +1795,8 @@ _E2E_PASS = ("equiv_status: Found 4 $equiv cells in equiv:\n"
 _E2E_READ_FAIL = "ERROR: syntax error, unexpected TOK_PACKAGE\n"
 
 
-def _drive_lec(monkeypatch, tmp_path, stub, timeout_s, spend_per_attempt=0.0):
+def _drive_lec(monkeypatch, tmp_path, stub, timeout_s, spend_per_attempt=0.0,
+               observed_kill_cause=None):
     """Run the REAL lec_run.main() with yosys stubbed and a fake clock."""
     clk = _FakeClock()
     calls = []
@@ -1806,6 +1807,10 @@ def _drive_lec(monkeypatch, tmp_path, stub, timeout_s, spend_per_attempt=0.0):
             super().__init__(total_s, floor_s=floor_s, clock=clk)
 
     def _fake_yosys(container, ys, timeout=None, workdir=None, **_telemetry):
+        if observed_kill_cause is not None:
+            # The producer reports the observed stop separately from its log.
+            # A spent fake admission clock alone is not evidence of a timeout.
+            _telemetry["kill_cause"].update(observed_kill_cause)
         script = Path(ys).read_text(encoding="utf-8")
         frontend = "slang" if "read_slang" in script else "verilog"
         calls.append({"budget": timeout, "frontend": frontend})
@@ -1839,7 +1844,8 @@ def test_e2e_a_ground_out_proof_stops_instead_of_starting_over(monkeypatch,
     rc, rep, calls = _drive_lec(
         monkeypatch, tmp_path,
         lambda n, fe: (True, _E2E_GRIND + lec_run._TIMEOUT_MARKER + " after 600s\n"),
-        timeout_s=600, spend_per_attempt=600.0)
+        timeout_s=600, spend_per_attempt=600.0,
+        observed_kill_cause={"returncode": 124, "oom_kill_delta": 0})
 
     assert len(calls) == 1, f"a SECOND attempt was launched: {calls}"
     assert rep["lec_attempts"] == 1

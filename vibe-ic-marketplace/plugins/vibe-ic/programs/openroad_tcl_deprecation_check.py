@@ -435,6 +435,15 @@ def scan(search_dir: Path) -> Tuple[List[Finding], int]:
             continue
         examined += 1
         suffix = fpath.suffix.lower()
+        text = "".join(lines)
+        # Every rule declares the exact token its pattern can report. A file
+        # containing none cannot yield a finding, but is still examined.
+        # Avoid tokenizing all unrelated Python source before asking that
+        # necessary question. Use literal containment, not a whole-text regex:
+        # a regex's whitespace lookahead can cross lines while the real scan
+        # below is line-wise, so such a prefilter could hide a genuine hit.
+        if not any(dep.token in text for dep in _DEPRECATIONS):
+            continue
         # A .py file is TCL only inside a string literal (see "CONTEXT, NOT
         # BASENAME" above). str_spans is None for every other suffix, and
         # also for a .py file we could not tokenize -- in which case we fall
@@ -443,7 +452,7 @@ def scan(search_dir: Path) -> Tuple[List[Finding], int]:
         str_spans: Optional[Dict[int, List[Tuple[int, int]]]] = None
         if suffix == ".py":
             try:
-                str_spans = _py_string_content_mask("".join(lines))
+                str_spans = _py_string_content_mask(text)
             except Exception as exc:   # noqa: BLE001 - see below
                 # Deliberately broad: tokenize raises SyntaxError,
                 # IndentationError AND tokenize.TokenError ("unexpected EOF in
