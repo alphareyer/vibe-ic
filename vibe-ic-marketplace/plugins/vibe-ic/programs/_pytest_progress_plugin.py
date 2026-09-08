@@ -118,6 +118,13 @@ _WORKER_ID_OK = frozenset(
 #: ``_emit`` would deadlock.  A miscount cannot manufacture progress -- the
 #: parent's exact-stride clause rejects any value that is not the next one.
 COLLECT_SCAN_STRIDE = 1000
+COLLECT_SCAN_PATHS_PER_UNIT = 8192
+COLLECT_SCAN_FLOOR = 1_000_000
+
+
+def collect_scan_ceiling(scan_units: int) -> int:
+    """Finite scan allowance shared by the inner probe and outer relay."""
+    return max(COLLECT_SCAN_FLOOR, scan_units * COLLECT_SCAN_PATHS_PER_UNIT)
 
 _scanned = 0
 _scan_emitted = 0

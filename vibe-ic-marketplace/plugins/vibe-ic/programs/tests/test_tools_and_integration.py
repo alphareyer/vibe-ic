@@ -2,9 +2,9 @@
 
 Covers:
 - bootstrap_compliance.py helpers (pattern detection, YAML emit)
-- gen_compliance_tests.py (pattern_to_satisfier etc.)
+- gen_compliance_tests.py (shared cases and preservation of existing tests)
 - add_compliance_gate.py (first application AND idempotency)
-- Integration: every one of the 55 skills passes the synthetic-audit pipeline
+- Integration: declared contracts remain valid and refuse missing evidence
 """
 import hashlib
 import shutil
@@ -25,6 +25,7 @@ sys.path.insert(0, str(PLUGIN / "programs"))
 import skill_compliance_check as scc  # noqa: E402
 import suite_write_guard as _swg  # noqa: E402
 import bootstrap_compliance as bc      # noqa: E402
+import skill_authoring as authoring     # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
@@ -59,8 +60,8 @@ def _seed_plugin_copy(tmp_path, *scripts):
     """Seed a throwaway plugin tree from the real one. Returns its plugin dir."""
     plugin = tmp_path / "plugins" / "vibe-ic"
     (plugin / "_shared").mkdir(parents=True)
-    for name in scripts:
-        shutil.copy2(PLUGIN / "_shared" / name, plugin / "_shared" / name)
+    for source in (PLUGIN / "_shared").glob("*.py"):
+        shutil.copy2(source, plugin / "_shared" / source.name)
     shutil.copytree(PLUGIN / "skills", plugin / "skills")
     return plugin
 
@@ -156,6 +157,54 @@ def _digest_tree(root):
 _SHIPPED_SKILLS_MD5_AT_IMPORT = _digest_tree(PLUGIN / "skills")
 
 
+def _authoring_fixture(tmp_path):
+    """Two private subjects: ordinary guidance and one real authored contract."""
+    plugin = tmp_path / "plugins" / "vibe-ic"
+    shutil.copytree(PLUGIN / "_shared", plugin / "_shared")
+    shutil.copytree(PLUGIN / "skills" / "hold-fix", plugin / "skills" / "hold-fix")
+    (plugin / "skills" / "hold-fix" / "tests" / "test_compliance.py").unlink()
+    advice = plugin / "skills" / "local-advice"
+    advice.mkdir()
+    (advice / "SKILL.md").write_text(
+        "---\nname: local-advice\ndescription: Explain a local tradeoff.\n---\n"
+        "Explain the available choices using the supplied constraints.\n")
+    return plugin
+
+
+def _footprint(root):
+    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in root.rglob("*") if p.is_file() and "__pycache__" not in p.parts}
+
+
+def _author(plugin, script, *args):
+    import json
+    import time
+    argv = [sys.executable, str(plugin / "_shared" / script), *args]
+    before = _footprint(plugin / "skills")
+    started = time.monotonic()
+    result = subprocess.run(argv, cwd=plugin, capture_output=True, text=True, timeout=30)
+    with (plugin.parent / "authoring-calls.jsonl").open("a") as evidence:
+        evidence.write(json.dumps({"argv": argv, "rc": result.returncode,
+                                   "stdout": result.stdout, "stderr": result.stderr,
+                                   "wall_seconds": time.monotonic() - started,
+                                   "before": before, "after": _footprint(plugin / "skills")}) + "\n")
+    return result
+
+
+@pytest.mark.parametrize("script", ["bootstrap_compliance.py", "add_compliance_gate.py", "gen_compliance_tests.py"])
+def test_ordinary_guidance_does_not_trigger_automatic_authoring(tmp_path, script):
+    plugin = _authoring_fixture(tmp_path)
+    before = _footprint(plugin / "skills")
+    result = _author(plugin, script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    after = _footprint(plugin / "skills")
+    assert after == before, {
+        "script": script, "created": sorted(after.keys() - before.keys()),
+        "changed": sorted(k for k in before.keys() & after.keys() if before[k] != after[k]),
+        "stdout": result.stdout,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Bootstrap
 # ---------------------------------------------------------------------------
@@ -176,7 +225,7 @@ class TestBootstrap:
         assert any(r[0] == "R_next_step_section" for r in reqs)
 
     def test_gen_yaml_is_valid(self):
-        yaml = bc.gen_yaml("my-skill", [("R_x", "desc x", r"XYZ")])
+        yaml = bc.gen_yaml("my-skill", [("R_x", 'describes "x"', r"XYZ")])
         # Round-trip through our parser
         import tempfile
         with tempfile.NamedTemporaryFile("w", suffix=".yaml",
@@ -184,47 +233,58 @@ class TestBootstrap:
             f.write(yaml); path = f.name
         d = scc._load_yaml(Path(path))
         assert d["skill"] == "my-skill"
-        assert len(d["requirements"]) >= 1  # one custom + common
+        assert [r["id"] for r in d["requirements"]] == ["R_x"]
 
-    def test_gen_yaml_empty_detected_still_has_common_reqs(self):
-        yaml = bc.gen_yaml("empty", [])
-        assert "R_next_step" in yaml
-        assert "R_status_or_summary" in yaml
+    def test_gen_yaml_empty_detected_does_not_invent_requirements(self, tmp_path):
+        draft = tmp_path / "draft.yaml"
+        draft.write_text(bc.gen_yaml("empty", []))
+        assert scc._load_yaml(draft)["requirements"] == []
 
 
 # ---------------------------------------------------------------------------
-# Integration: every skill passes basic audit
+# Integration: validate declared contracts; guidance needs no generated files
 # ---------------------------------------------------------------------------
 class TestEndToEndAllSkills:
-    def test_every_skill_has_compliance_yaml(self):
-        skills = [d for d in (PLUGIN / "skills").iterdir() if d.is_dir()]
-        missing = [s.name for s in skills if not (s / "compliance.yaml").exists()]
-        assert missing == [], f"Skills missing compliance.yaml: {missing}"
+    def test_declared_contracts_are_available_and_well_formed(self):
+        # Guidance needs no contract; authored contracts and concrete references
+        # still have to be readable and consumable by the existing engine.
+        for skill in (PLUGIN / "skills").iterdir():
+            if (skill / "SKILL.md").is_file():
+                authoring.validate_skill_contracts(skill)
 
-    def test_every_skill_has_test_file(self):
-        skills = [d for d in (PLUGIN / "skills").iterdir()
-                  if d.is_dir() and (d / "compliance.yaml").exists()]
-        missing = [s.name for s in skills
-                   if not (s / "tests" / "test_compliance.py").exists()]
-        assert missing == [], f"Skills missing test_compliance.py: {missing}"
+    def test_plain_guidance_does_not_need_generated_files(self, tmp_path):
+        plugin = _authoring_fixture(tmp_path)
+        advice = plugin / "skills" / "local-advice"
+        before = _footprint(advice)
+        authoring.validate_skill_contracts(advice)
+        assert _footprint(advice) == before
+        assert set(before) == {"SKILL.md"}
 
-    def test_every_compliance_yaml_loads(self):
-        failures = []
-        for y in (PLUGIN / "skills").glob("*/compliance.yaml"):
-            try:
-                d = scc._load_yaml(y)
-                assert d.get("skill") == y.parent.name, (
-                    f"skill field mismatch in {y}: got {d.get('skill')}")
-                assert isinstance(d.get("requirements"), list), (
-                    f"requirements must be a list in {y}")
-                assert len(d["requirements"]) > 0, (
-                    f"no requirements in {y}")
-            except Exception as e:
-                failures.append(f"{y.parent.name}: {e}")
-        assert not failures, "\n".join(failures)
+    @pytest.mark.parametrize("problem", ["missing-reference", "bad-pattern", "bad-rule", "wrong-skill"])
+    def test_invalid_declared_contract_is_refused(self, tmp_path, problem):
+        plugin = _authoring_fixture(tmp_path)
+        skill = plugin / "skills" / "local-advice"
+        md = skill / "SKILL.md"
+        md.write_text(md.read_text() + "\nReport contract: [schema](compliance.yaml).\n")
+        if problem != "missing-reference":
+            import yaml
+            spec = {"skill": skill.name, "requirements": [{"id": "R_measurement", "pattern": "measured"}]}
+            if problem == "bad-pattern":
+                spec["requirements"][0]["pattern"] = "["
+            elif problem == "bad-rule":
+                spec["cross_checks"] = [{"id": "X_measurement", "rule": "not_a_rule"}]
+            else:
+                spec["skill"] = "wrong-skill"
+            (skill / "compliance.yaml").write_text(yaml.safe_dump(spec))
+        with pytest.raises(authoring.ContractError):
+            authoring.validate_skill_contracts(skill)
+        before = _footprint(plugin / "skills")
+        result = _author(plugin, "add_compliance_gate.py", "--skill", "local-advice")
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert _footprint(plugin / "skills") == before
 
     def test_every_skill_empty_output_fails_audit(self, tmp_path):
-        """For every skill, an empty string must fail the audit. This
+        """For every authored contract, an empty string must fail the audit. This
         proves the driver can process the compliance.yaml at runtime."""
         failures = []
         for y in (PLUGIN / "skills").glob("*/compliance.yaml"):
@@ -246,195 +306,222 @@ class TestEndToEndAllSkills:
 # ---------------------------------------------------------------------------
 class TestMaintenanceTools:
     def test_bootstrap_is_idempotent(self, tmp_path):
-        """Running bootstrap twice must not duplicate or alter existing files."""
-        plugin = _seed_plugin_copy(tmp_path, "bootstrap_compliance.py")
-        skills = plugin / "skills"
-        before = _snapshot(skills, "*/compliance.yaml")
-        # Not `assert before`: the collapsed dict was truthy too. The claim is
-        # "every skill was compared", so the denominator is asserted against the
-        # skill count, and it is in the message when it is not met.
-        assert len(before) == _skill_count(skills), (
-            f"compared {len(before)} compliance.yaml, expected one per skill "
-            f"({_skill_count(skills)}) — the comparison is not skill-wide")
-        res = subprocess.run(
-            [sys.executable, str(plugin / "_shared" / "bootstrap_compliance.py")],
-            capture_output=True, text=True, cwd=str(plugin))
-        assert res.returncode == 0, res.stderr
-        after = _snapshot(skills, "*/compliance.yaml")
-        assert before == after, "bootstrap mutated existing files"
+        plugin = _authoring_fixture(tmp_path)
+        result = _author(plugin, "bootstrap_compliance.py", "--skill", "local-advice")
+        assert result.returncode == 0, result.stderr
+        before = _footprint(plugin / "skills")
+        result = _author(plugin, "bootstrap_compliance.py", "--skill", "local-advice", "--skill", "hold-fix")
+        assert result.returncode == 0, result.stderr
+        assert _footprint(plugin / "skills") == before
 
-    def test_bootstrap_writes_the_missing_compliance_yaml(self, tmp_path):
-        """The FIRST application. `test_bootstrap_is_idempotent` cannot see it:
-        every shipped skill already has a compliance.yaml, so both runs are
-        no-ops and the assertion holds against a tool that does nothing."""
-        plugin = _seed_plugin_copy(tmp_path, "bootstrap_compliance.py")
-        victim = sorted((plugin / "skills").glob("*/compliance.yaml"))[0]
-        name = victim.parent.name
-        victim.unlink()
-        res = subprocess.run(
-            [sys.executable, str(plugin / "_shared" / "bootstrap_compliance.py")],
-            capture_output=True, text=True, cwd=str(plugin))
-        assert res.returncode == 0, res.stderr
-        assert victim.exists(), (
-            f"bootstrap did NOT create skills/{name}/compliance.yaml on first "
-            f"application. stdout:\n{res.stdout}")
-        assert f"WROTE: skills/{name}/compliance.yaml" in res.stdout
+    def test_bootstrap_explicitly_writes_only_a_draft(self, tmp_path):
+        plugin = _authoring_fixture(tmp_path)
+        before = _footprint(plugin / "skills")
+        result = _author(plugin, "bootstrap_compliance.py", "--skill", "local-advice")
+        assert result.returncode == 0, result.stderr
+        after = _footprint(plugin / "skills")
+        assert after.keys() - before.keys() == {"local-advice/compliance.draft.yaml"}
+        assert all(after[k] == v for k, v in before.items())
+        draft = plugin / "skills/local-advice/compliance.draft.yaml"
+        assert scc._load_yaml(draft)["requirements"] == []
+        for tool in ("add_compliance_gate.py", "gen_compliance_tests.py"):
+            refusal = _author(plugin, tool, "--skill", "local-advice")
+            assert refusal.returncode == 2, refusal.stdout + refusal.stderr
+            assert _footprint(plugin / "skills") == after
 
-    def test_add_gate_first_application_appends_the_section(self, tmp_path):
-        """The FIRST application — the case whose absence let #1029 sit.
-
-        `test_add_gate_is_idempotent` measures the run AFTER the section is
-        already present, which is a no-op for a correct tool and equally a
-        no-op for a tool that does nothing at all. Nothing measured the run
-        that has work to do.
-        """
-        plugin = _seed_plugin_copy(tmp_path, "add_compliance_gate.py")
-        script = plugin / "_shared" / "add_compliance_gate.py"
-
-        # Strip the gate off one COPIED skill so the first application always
-        # has work, rather than depending on the shipped tree still carrying a
-        # gate-less skill (today exactly one does: fork-gatekeeper-loop).
-        victim = sorted((plugin / "skills").glob("*/SKILL.md"))[0]
-        name = victim.parent.name
-        base = victim.read_text(errors="replace").split(
-            "## Compliance gate (mandatory)")[0].rstrip() + "\n"
-        assert "Compliance gate" not in base, (
-            f"{name}/SKILL.md names the gate outside the appended section; "
-            "the first-application probe cannot be seeded from it")
-        victim.write_text(base)
-        untouched_before = _snapshot(plugin / "skills", "*/SKILL.md")
-
-        res = subprocess.run([sys.executable, str(script)],
-                             capture_output=True, text=True, cwd=str(plugin))
-        assert res.returncode == 0, res.stderr
-
-        got = victim.read_text(errors="replace")
-        assert "## Compliance gate (mandatory)" in got, (
-            "add_compliance_gate did NOT append the section on FIRST "
-            f"application to skills/{name}/SKILL.md. stdout:\n{res.stdout}")
-        assert got.startswith(base.rstrip()), "the prior body was not preserved"
-        assert f"plugins/vibe-ic/skills/{name}/compliance.yaml" in got, (
-            "the appended section did not interpolate the skill name")
-        assert f"UPDATED: plugins/vibe-ic/skills/{name}/SKILL.md" in res.stdout
-
-        # ...and it touched EXACTLY the files that needed it, no others.
-        need = {rel for rel, text in untouched_before.items()
-                if "Compliance gate" not in text}
-        assert str(victim.relative_to(plugin / "skills")) in need
-        after = _snapshot(plugin / "skills", "*/SKILL.md")
-        changed = {k for k in after if after[k] != untouched_before[k]}
-        assert changed == need, (
-            f"add_compliance_gate rewrote {changed - need} that already had "
-            f"the section, and skipped {need - changed} that did not")
+    def test_add_gate_first_application_links_existing_contract_only(self, tmp_path):
+        plugin = _authoring_fixture(tmp_path)
+        skill = plugin / "skills/hold-fix"
+        md = skill / "SKILL.md"
+        body = "---\nname: hold-fix\ndescription: Inspect the supplied timing evidence.\n---\nInspect hold results.\n"
+        md.write_text(body)
+        before = _footprint(plugin / "skills")
+        result = _author(plugin, "add_compliance_gate.py", "--skill", "hold-fix")
+        assert result.returncode == 0, result.stdout + result.stderr
+        after = _footprint(plugin / "skills")
+        assert before.keys() == after.keys()
+        assert {k for k in before if before[k] != after[k]} == {"hold-fix/SKILL.md"}
+        assert md.read_text().startswith(body.rstrip())
+        assert authoring.referenced_contracts(skill) == [(skill / "compliance.yaml").resolve()]
+        # Actual report consumer: its own generated explanatory paragraph is
+        # neither timing results nor an auditor receipt, so cannot certify work.
+        report = tmp_path / "prose-only.md"
+        report.write_text(md.read_text())
+        result = subprocess.run([sys.executable, str(DRIVER), "--requirements",
+                                 str(skill / "compliance.yaml"), str(report)],
+                                capture_output=True, text=True)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "X_eda_log_check" in result.stdout
 
     def test_add_gate_is_idempotent(self, tmp_path):
-        """Running add_compliance_gate twice must not duplicate the section."""
-        plugin = _seed_plugin_copy(tmp_path, "add_compliance_gate.py")
-        script = plugin / "_shared" / "add_compliance_gate.py"
-        skills = plugin / "skills"
-        # Bring the copy to the fully-gated state first, so the second run is
-        # the one under measurement.
-        first = subprocess.run([sys.executable, str(script)],
-                               capture_output=True, text=True, cwd=str(plugin))
+        plugin = _authoring_fixture(tmp_path)
+        skill = plugin / "skills/hold-fix"
+        first = _author(plugin, "add_compliance_gate.py", "--skill", "hold-fix")
         assert first.returncode == 0, first.stderr
-        before = _snapshot(skills, "*/SKILL.md")
-        # The denominator, asserted and reported. `assert before` passed for
-        # years against a dict of ONE entry (#1045); one entry is truthy, and a
-        # comparison of one arbitrary file out of 63 is what let #1029 sit.
-        assert len(before) == _skill_count(skills), (
-            f"compared {len(before)} SKILL.md, expected one per skill "
-            f"({_skill_count(skills)}) — the comparison is not skill-wide")
-        second = subprocess.run([sys.executable, str(script)],
-                                capture_output=True, text=True, cwd=str(plugin))
+        before = _footprint(plugin / "skills")
+        second = _author(plugin, "add_compliance_gate.py", "--skill", "hold-fix")
         assert second.returncode == 0, second.stderr
-        after = _snapshot(skills, "*/SKILL.md")
-        assert before == after, "add_compliance_gate mutated files on 2nd run"
-        assert "Added Compliance gate to 0 SKILL.md files." in second.stdout
+        assert _footprint(plugin / "skills") == before
 
     def test_basename_key_is_blind_to_a_non_idempotent_write(self, tmp_path):
-        """The PAIRED GUARD for #1045: the control that proves the fix is a fix.
-
-        `test_add_gate_is_idempotent` above is green under BOTH keyings — the
-        tool is idempotent, so `before == after` holds whether the dict holds 63
-        entries or 1. A green test therefore says nothing about the key, and
-        nothing in this suite reddened when the key was reverted (measured: the
-        two idempotency tests passed under `p.name`). So the rekeying that
-        #1046 landed had no guard, and the next careless refactor restores
-        #1045 silently.
-
-        This test supplies the missing evidence by making the operation
-        genuinely NON-idempotent for exactly ONE skill -- deliberately NOT the
-        one the basename key would have retained -- and driving both keyings
-        over the same write:
-
-            old key (`p.name`)  -> before == after   BLIND, the defect
-            new key (path)      -> before != after   CAUGHT, the fix
-
-        Revert `_snapshot`'s key to `p.name` and this test dies on the second
-        assertion, which is the property `test_add_gate_is_idempotent` cannot
-        have: it is the only place where the two keyings disagree.
-        """
-        plugin = _seed_plugin_copy(tmp_path, "add_compliance_gate.py")
-        script = plugin / "_shared" / "add_compliance_gate.py"
+        # Preserve the real snapshot collision control independently of the
+        # authoring tool's internal skip expression or global sweep behavior.
+        plugin = _authoring_fixture(tmp_path)
         skills = plugin / "skills"
-        assert subprocess.run([sys.executable, str(script)], cwd=str(plugin),
-                              capture_output=True, text=True).returncode == 0
-
-        # The basename dict keeps whichever file the glob yields LAST, so the
-        # single entry it compares is the LAST skill in sorted order. Mutate a
-        # different one -- otherwise the old key would catch it by luck and the
-        # control would prove nothing.
         every = sorted(skills.glob("*/SKILL.md"))
-        assert len(every) > 1, "one skill cannot demonstrate a key collision"
-        old_key_would_compare = every[-1]
         victim = every[0]
-        assert victim != old_key_would_compare
-        assert victim.name == old_key_would_compare.name == "SKILL.md", (
-            "the collision premise no longer holds: these files no longer "
-            "share a basename, so this control has nothing to demonstrate")
-
-        # Make the OPERATION non-idempotent, for that one skill only: defeat
-        # its already-applied skip so it re-appends the section every run.
-        src = script.read_text()
-        guard = "if 'Compliance gate' in content:"
-        assert guard in src, (
-            "add_compliance_gate.py no longer carries the skip this control "
-            "subverts; re-derive the non-idempotent variant before trusting it")
-        script.write_text(src.replace(
-            guard,
-            f"if 'Compliance gate' in content "
-            f"and md.parent.name != {victim.parent.name!r}:"))
-
         before_by_path = _snapshot(skills, "*/SKILL.md")
         before_by_name = _snapshot(skills, "*/SKILL.md", key=_key_by_name)
         assert len(before_by_path) == _skill_count(skills)
-        assert len(before_by_name) == 1, (
-            "the basename key no longer collapses; the defect being guarded "
-            "against is not reproducible and this control is vacuous")
-
-        res = subprocess.run([sys.executable, str(script)], cwd=str(plugin),
-                             capture_output=True, text=True)
-        assert res.returncode == 0, res.stderr
-        assert f"UPDATED: plugins/vibe-ic/skills/{victim.parent.name}/SKILL.md" \
-            in res.stdout, "the seeded non-idempotent write did not happen"
-
+        assert len(before_by_name) == 1 and len(every) > 1
+        victim.write_text(victim.read_text() + "\nMeasured control write.\n")
         after_by_path = _snapshot(skills, "*/SKILL.md")
         after_by_name = _snapshot(skills, "*/SKILL.md", key=_key_by_name)
+        assert before_by_name == after_by_name
+        assert before_by_path != after_by_path
+        assert {k for k in before_by_path if before_by_path[k] != after_by_path[k]} == {str(victim.relative_to(skills))}
 
-        # THE CONTROL, both halves.
-        assert before_by_name == after_by_name, (
-            "expected the basename key to be blind here; if it now sees the "
-            "write, the victim was chosen wrong and the comparison below "
-            "proves nothing")
-        assert before_by_path != after_by_path, (
-            "the path key MISSED a non-idempotent write to "
-            f"skills/{victim.parent.name}/SKILL.md -- the same blindness "
-            "#1045 describes")
+    def test_dangling_reference_refuses_before_authoring(self, tmp_path):
+        plugin = _authoring_fixture(tmp_path)
+        skill = plugin / "skills/hold-fix"
+        md = skill / "SKILL.md"
+        md.write_text(md.read_text() + "\nAlso read [contract](../missing/compliance.yaml).\n")
+        before = _footprint(plugin / "skills")
+        result = _author(plugin, "add_compliance_gate.py", "--skill", "hold-fix")
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert _footprint(plugin / "skills") == before
 
-        changed = {k for k in after_by_path
-                   if after_by_path[k] != before_by_path[k]}
-        assert changed == {str(victim.relative_to(skills))}, (
-            f"expected exactly the seeded skill to move, got {sorted(changed)}")
+    @pytest.mark.parametrize("style", ["handwritten", "edited-generated"])
+    def test_generator_preserves_handwritten_tests(self, tmp_path, style):
+        plugin = _authoring_fixture(tmp_path)
+        target = plugin / "skills/hold-fix/tests/test_compliance.py"
+        if style == "handwritten":
+            shutil.copy2(PLUGIN / "programs/tests/test_skill_compliance_audit_receipt_evidence.py", target)
+        else:
+            original = PLUGIN / "skills/hold-fix/tests/test_compliance.py"
+            target.write_text(original.read_text() + '''
+
+def test_receipt_requirement_is_still_declared():
+    spec = load_requirements()
+    assert any(c.get("rule") == "audit_receipt_evidence"
+               for c in spec["cross_checks"]), spec["cross_checks"]
+''')
+        before = _footprint(plugin / "skills")
+        result = _author(plugin, "gen_compliance_tests.py", "--skill", "hold-fix")
+        assert result.returncode == 0, result.stderr
+        assert _footprint(plugin / "skills") == before
+        if style == "edited-generated":
+            # The extra regression must survive AND discriminate: boilerplate
+            # cases adapt to a removed receipt rule, this authored case refuses.
+            import yaml
+            contract = plugin / "skills/hold-fix/compliance.yaml"
+            for arm in ("intact", "receipt-rule-removed"):
+                if arm == "receipt-rule-removed":
+                    spec = yaml.safe_load(contract.read_text())
+                    spec["cross_checks"] = [c for c in spec["cross_checks"]
+                                             if c.get("rule") != "audit_receipt_evidence"]
+                    contract.write_text(yaml.safe_dump(spec))
+                argv = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                        "--import-mode=importlib", f"--basetemp={tmp_path / arm}",
+                        f"--junitxml={tmp_path / (arm + '.xml')}",
+                        str(target) + "::test_receipt_requirement_is_still_declared"]
+                measured = subprocess.run(argv, cwd=plugin, capture_output=True, text=True)
+                (tmp_path / f"{arm}.log").write_text(measured.stdout + measured.stderr)
+                assert measured.returncode == (0 if arm == "intact" else 1), measured.stdout + measured.stderr
+
+    @pytest.mark.parametrize("skill_name", ["flow-change-acceptance", "hold-fix"])
+    def test_shared_wrapper_preserves_legacy_cases_and_outcomes(self, tmp_path, skill_name):
+        import ast
+        import json
+        import xml.etree.ElementTree as ET
+        plugin = _authoring_fixture(tmp_path)
+        consumer = plugin / "programs/tests/test_pattern_satisfier_2057.py"
+        consumer.parent.mkdir(parents=True)
+        shutil.copy2(PLUGIN / "programs/tests" / consumer.name, consumer)
+
+        def check_consumer(arm, expected_rc):
+            label = f"consumer-{arm}"
+            junit = tmp_path / f"{label}.xml"
+            argv = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                    "--import-mode=importlib", f"--basetemp={tmp_path / label}",
+                    f"--junitxml={junit}", str(consumer) +
+                    "::test_the_generated_tests_still_assert_the_register_both_ways"]
+            result = subprocess.run(argv, cwd=plugin, capture_output=True, text=True, timeout=60)
+            (tmp_path / f"{label}.log").write_text(result.stdout + result.stderr)
+            (tmp_path / f"{label}-command.json").write_text(json.dumps({"argv": argv, "rc": result.returncode}))
+            assert result.returncode == expected_rc, result.stdout + result.stderr
+            cases = list(ET.parse(junit).iter("testcase"))
+            assert len(cases) == 1 and cases[0].find("skipped") is None
+            assert (cases[0].find("failure") is not None) == (expected_rc == 1), cases[0].attrib
+
+        skill = plugin / "skills" / skill_name
+        if not skill.exists():
+            shutil.copytree(PLUGIN / "skills" / skill_name, skill)
+        else:
+            shutil.copy2(PLUGIN / "skills" / skill_name / "tests/test_compliance.py", skill / "tests/test_compliance.py")
+        target = skill / "tests/test_compliance.py"
+        observations = []
+        original = target.read_bytes()
+        for arm in ("legacy", "shared"):
+            if arm == "shared":
+                # Existing modules remain byte-identical. Create a NEW wrapper
+                # only in this private fixture to compare the same pytest IDs.
+                before = _footprint(plugin / "skills")
+                result = _author(plugin, "gen_compliance_tests.py", "--skill", skill_name)
+                assert result.returncode == 0, result.stderr
+                assert _footprint(plugin / "skills") == before
+                target.unlink()
+                before = _footprint(plugin / "skills")
+                result = _author(plugin, "gen_compliance_tests.py", "--skill", skill_name)
+                assert result.returncode == 0, result.stderr
+                after = _footprint(plugin / "skills")
+                assert after.keys() - before.keys() == {f"{skill_name}/tests/test_compliance.py"}
+                assert all(after[k] == v for k, v in before.items())
+                assert len(target.read_bytes()) < len(original)
+                result = _author(plugin, "gen_compliance_tests.py", "--skill", skill_name)
+                assert result.returncode == 0, result.stderr
+                assert _footprint(plugin / "skills") == after
+            junit = tmp_path / f"{arm}.xml"
+            argv = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                    "--import-mode=importlib", f"--basetemp={tmp_path / arm}", f"--junitxml={junit}", str(target)]
+            result = subprocess.run(argv, cwd=plugin, capture_output=True, text=True)
+            (tmp_path / f"{arm}.log").write_text(result.stdout + result.stderr)
+            (tmp_path / f"{arm}-command.json").write_text(json.dumps({"argv": argv, "rc": result.returncode}))
+            cases = [(n.get("classname"), n.get("name"), [c.tag for c in n if c.tag in {"failure", "error", "skipped"}])
+                     for n in ET.parse(junit).iter("testcase")]
+            observations.append((result.returncode, cases))
+            check_consumer(arm, 0)
+        assert observations[0] == observations[1], observations
+        assert observations[0][0] == 0 and len(observations[0][1]) == 3, observations
+
+        shared = plugin / "_shared/generated_compliance_support.py"
+        original_shared = shared.read_text()
+        try:
+            for mutation in ("broken-shared-method", "suppressed-register-check",
+                             "skip-real-rejection", "xfail-real-rejection"):
+                tree = ast.parse(original_shared)
+                method = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                              and n.name == "test_good_output_passes_all_required")
+                if mutation == "broken-shared-method":
+                    method.body = [ast.Pass()]
+                else:
+                    assertion = next(n for n in method.body if isinstance(n, ast.Assert)
+                                     and isinstance(n.test, ast.Compare)
+                                     and isinstance(n.test.left, ast.Name)
+                                     and n.test.left.id == "req_fails")
+                    if mutation == "suppressed-register-check":
+                        replacement = ast.Pass()
+                    else:
+                        action = "skip" if mutation == "skip-real-rejection" else "xfail"
+                        suppression = ast.parse(f'__import__("pytest").{action}("control: suppress real rejection")').body
+                        replacement = ast.If(test=ast.UnaryOp(op=ast.Not(), operand=assertion.test),
+                                             body=suppression, orelse=[])
+                    method.body[method.body.index(assertion)] = replacement
+                shared.write_text(ast.unparse(ast.fix_missing_locations(tree)) + "\n")
+                check_consumer(mutation, 1)
+        finally:
+            shared.write_text(original_shared)
+
 
 
 # ---------------------------------------------------------------------------
@@ -482,13 +569,14 @@ class TestCoreSkillSchema:
                 failures.append(f"{md.parent.name}: no 'description:' in frontmatter")
         assert not failures, "\n".join(failures)
 
-    def test_every_skill_md_has_compliance_gate(self):
-        core = _skill_dirs()
-        missing = []
-        for md in core.glob("*/SKILL.md"):
-            if "Compliance gate" not in md.read_text():
-                missing.append(md.parent.name)
-        assert missing == [], f"skills without Compliance gate: {missing}"
+    def test_localized_instructions_keep_the_same_contract(self, tmp_path):
+        plugin = _authoring_fixture(tmp_path)
+        skill = plugin / "skills/hold-fix"
+        md = skill / "SKILL.md"
+        before = authoring.referenced_contracts(skill)
+        md.write_text(md.read_text().replace("Compliance gate", "合規檢查"))
+        assert authoring.referenced_contracts(skill) == before
+        authoring.validate_skill_contracts(skill)
 
     def test_core_and_d_skill_names_match(self):
         """Every vibe-ic skill with compliance.yaml must have a SKILL.md

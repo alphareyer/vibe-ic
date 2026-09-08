@@ -126,7 +126,11 @@ _RUNNER = {
     "read_only": True,
     "cap_drop": ["ALL"],
     "security_opt": ["no-new-privileges:true"],
-    "tmpfs": ["/tmp:rw,nosuid,nodev,noexec,size=536870912,mode=1777"],
+    "tmpfs": [
+        "/tmp:rw,nosuid,nodev,noexec,size=536870912,mode=1777",
+        "/nonexistent:rw,nosuid,nodev,noexec,size=1048576,mode=0700,uid=65534,gid=65534",
+        "/var/tmp:rw,nosuid,nodev,exec,size=536870912,mode=0700,uid=65534,gid=65534",
+    ],
     "pull": "never",
     "workdir": "/subject",
     "subject_mount": "read-only",
@@ -194,6 +198,14 @@ def test_manifest_and_runtime_use_one_exact_base_owned_image() -> None:
     for ref in (P.RUNNER_IMAGE, P.RUNNER_IMAGE_RUNTIME, runner.IMAGE,
                 _RUNNER["image"]):
         assert ref.endswith("@" + P.RUNNER_IMAGE_DIGEST), ref
+    # Cross-module drift proof only: the production BASE validator must keep
+    # its own literal policy, never import candidate-supplied expectations.
+    runtime_tmpfs = [f"{path}:{options}"
+                     for path, options in runner.CANDIDATE_TMPFS.items()]
+    assert runtime_tmpfs == _RUNNER["tmpfs"]
+    assert P.derived_runner()["tmpfs"] == _RUNNER["tmpfs"]
+    assert runner._FIXED_PROCESS_ENV["HOME"] == "/nonexistent"
+    assert runner._FIXED_PROCESS_ENV["TMPDIR"] == "/var/tmp"
 
 
 def test_the_shipped_register_still_parses_when_a_repository_is_configured():
@@ -377,6 +389,7 @@ def test_steady_receipt_is_canonical_and_binds_both_worktrees(tmp_path):
     candidate = _commit(repo, "steady candidate")
     receipt = _receipt(repo, base, candidate, tmp_path)
     assert receipt["payload"]["operation"] == "STEADY"
+    assert receipt["payload"]["runner"] == _RUNNER
     assert receipt["payload"]["base_state_id"] == "legacy-timeout-v1"
     assert [row["role"] for row in receipt["payload"]["worktrees"]] == [
         "candidate-gates", "candidate-tests"]
@@ -653,6 +666,23 @@ def test_strict_json_refuses_duplicate_nonfinite_and_non_utf8(bad):
         P.strict_loads(bad, what="adversarial")
 
 
+def _private_tmpfs_drifts():
+    for path in ("/tmp", "/nonexistent", "/var/tmp"):
+        yield [row for row in _RUNNER["tmpfs"] if not row.startswith(path + ":")]
+    for path, before, after in (
+        ("/tmp", "noexec", "exec"),
+        ("/nonexistent", "uid=65534", "uid=0"),
+        ("/nonexistent", "gid=65534", "gid=0"),
+        ("/nonexistent", "noexec", "exec"),
+        ("/nonexistent", "size=1048576", "size=2097152"),
+        ("/var/tmp", ",exec,", ",noexec,"),
+        ("/var/tmp", "mode=0700", "mode=1777"),
+        ("/var/tmp", "size=536870912", "size=1073741824"),
+    ):
+        yield [row.replace(before, after) if row.startswith(path + ":") else row
+               for row in _RUNNER["tmpfs"]]
+
+
 def test_runner_requires_digest_and_exact_hermetic_profile(tmp_path):
     repo, _base, manifest = _repo(tmp_path)
     for field, value in (("image", "ghcr.io/vibeic/vibeic-eda:latest"),
@@ -662,6 +692,11 @@ def test_runner_requires_digest_and_exact_hermetic_profile(tmp_path):
         bad = json.loads(json.dumps(manifest))
         bad["runner"][field] = value
         with pytest.raises(P.Refusal, match="runner"):
+            P.parse_manifest(bad, 40)
+    for tmpfs in _private_tmpfs_drifts():
+        bad = json.loads(json.dumps(manifest))
+        bad["runner"]["tmpfs"] = tmpfs
+        with pytest.raises(P.Refusal, match=r"runner\.tmpfs"):
             P.parse_manifest(bad, 40)
 
 
@@ -681,6 +716,17 @@ def test_receipt_bool_int_extra_key_and_digest_tamper_are_refused(tmp_path):
         path = tmp_path / f"bad-{mutate}.json"
         path.write_text(json.dumps(bad))
         with pytest.raises(P.Refusal):
+            P.strict_load_receipt(path)
+    for index, tmpfs in enumerate(_private_tmpfs_drifts()):
+        bad = json.loads(json.dumps(receipt))
+        bad["payload"]["runner"]["tmpfs"] = tmpfs
+        # A candidate cannot turn altered mount claims into BASE authority by
+        # recomputing an otherwise valid receipt digest.
+        bad["payload_sha256"] = hashlib.sha256(
+            P.canonical_bytes(bad["payload"])).hexdigest()
+        path = tmp_path / f"bad-tmpfs-{index}.json"
+        path.write_bytes(P.canonical_bytes(bad))
+        with pytest.raises(P.Refusal, match=r"runner\.tmpfs"):
             P.strict_load_receipt(path)
 
 

@@ -173,8 +173,13 @@ RUNNER_PROFILE_EXPECTED = {
     "read_only": True,
     "cap_drop": ["ALL"],
     "security_opt": ["no-new-privileges:true"],
+    # BASE owns these literals. Never import a candidate's runner profile or
+    # learn accepted mounts from candidate-supplied receipt claims.
     "tmpfs": [
-        "/tmp:rw,nosuid,nodev,noexec,size=536870912,mode=1777"],
+        "/tmp:rw,nosuid,nodev,noexec,size=536870912,mode=1777",
+        "/nonexistent:rw,nosuid,nodev,noexec,size=1048576,mode=0700,uid=65534,gid=65534",
+        "/var/tmp:rw,nosuid,nodev,exec,size=536870912,mode=0700,uid=65534,gid=65534",
+    ],
     "pull": "never",
     "workdir": "/subject",
     "subject_mount": "read-only",
@@ -1580,6 +1585,8 @@ def _validate_observed(value: Any, oid_len: int, what: str
 
 
 def _parse_receipt(value: Any, oid_len: int) -> dict[str, Any]:
+    if isinstance(value, dict) and value.get("kind") == "vibeic.controller-runtime-subject-receipt":
+        return _parse_controller_receipt(value, oid_len)
     root = _exact_keys(
         value, {"schema", "kind", "complete", "payload", "payload_sha256"},
         "receipt")
@@ -1838,7 +1845,14 @@ def strict_load_receipt(path: Path, oid_len: int = 40) -> dict[str, Any]:
         raw = path.read_bytes()
     except OSError as exc:
         raise Refusal(f"cannot read protected transition receipt: {exc}") from exc
-    return _parse_receipt(strict_loads(raw, what="receipt"), oid_len)
+    value = strict_loads(raw, what="receipt")
+    if isinstance(value, dict) and value.get("kind") == "vibeic.controller-runtime-subject-receipt":
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid() or info.st_uid == 65534
+                or info.st_mode & 0o077):
+            raise Refusal("controller subject receipt is not parent-private evidence")
+    return _parse_receipt(value, oid_len)
 
 
 def strict_load_bootstrap_receipt(path: Path, oid_len: int = 40
@@ -1891,6 +1905,12 @@ def validate_receipt_binding(receipt: Mapping[str, Any], *, base_commit: str,
     for key, value in expected.items():
         if payload.get(key) != value:
             raise Refusal(f"receipt {key} does not bind the merge verdict")
+    if receipt.get("kind") == "vibeic.controller-runtime-subject-receipt":
+        parsed = _parse_controller_receipt(receipt, len(base_commit))
+        return {"operation": "CONTROLLER_RUNTIME",
+                "runtime_sha256": parsed["payload"]["runtime_sha256"],
+                "runtime_commit": parsed["payload"]["runtime_commit"],
+                "receipt_sha256": hashlib.sha256(canonical_bytes(dict(receipt))).hexdigest()}
     return {
         "operation": str(payload["operation"]),
         "base_transition_id": str(payload["base_transition_id"]),
@@ -1921,7 +1941,9 @@ def _preflight_gate_record(name: str, proc: subprocess.CompletedProcess
 
 
 def build_push_preflight_receipt(*, object_repo: Path, base: str,
-                                 candidate: str, push_range: str
+                                 candidate: str, push_range: str,
+                                 authority_object_repo: Path | None = None,
+                                 authority_commit: str | None = None
                                  ) -> dict[str, Any]:
     """Run the cheap BASE-owned push gates before any expensive verifier arm.
 
@@ -1947,12 +1969,18 @@ def build_push_preflight_receipt(*, object_repo: Path, base: str,
         raise Refusal("push range is empty or does not include the candidate")
 
     programs_rel = "vibe-ic-marketplace/plugins/vibe-ic/programs"
+    gate_repo = (authority_object_repo or repo).resolve(strict=True)
+    if (authority_object_repo is None) != (authority_commit is None):
+        raise Refusal("runtime push-gate authority requires repository and commit together")
+    _gate_algorithm, gate_oid_len = _object_format(gate_repo)
+    gate_commit, gate_tree = _commit_and_tree(
+        gate_repo, authority_commit or base_commit, gate_oid_len, "push-gate authority")
     gate_records: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="landing-push-preflight.") as temp:
         authority = Path(temp)
         for name in PUSH_PREFLIGHT_BASE_FILES:
             raw = _git(
-                repo, ["show", f"{base_commit}:{programs_rel}/{name}"],
+                gate_repo, ["show", f"{gate_commit}:{programs_rel}/{name}"],
                 binary=True)
             assert isinstance(raw, bytes)
             path = authority / name
@@ -2003,6 +2031,9 @@ def build_push_preflight_receipt(*, object_repo: Path, base: str,
         "push_range": push_range,
         "gates": gate_records,
     }
+    if authority_commit is not None:
+        payload["authority_commit"] = gate_commit
+        payload["authority_tree"] = gate_tree
     return {
         "schema": SCHEMA,
         "kind": PUSH_PREFLIGHT_KIND,
@@ -2027,11 +2058,18 @@ def parse_push_preflight_receipt(value: Any, oid_len: int) -> dict[str, Any]:
         raise Refusal("push preflight verdict is unknown")
     if root["complete"] is not (root["verdict"] != "NORECORD"):
         raise Refusal("push preflight completeness disagrees with its verdict")
-    payload = _exact_keys(
+    payload = _keys_with_optional(
         root["payload"],
         {"base_commit", "base_tree", "candidate_commit", "candidate_tree",
          "push_range", "gates"},
+        {"authority_commit", "authority_tree"},
         "push preflight receipt.payload")
+    for key in ("authority_commit", "authority_tree"):
+        if key in payload:
+            if not isinstance(payload[key], str) or OID_RE.fullmatch(payload[key]) is None:
+                raise Refusal("push preflight runtime authority is malformed")
+    if ("authority_commit" in payload) != ("authority_tree" in payload):
+        raise Refusal("push preflight runtime authority is incomplete")
     for key in ("base_commit", "base_tree", "candidate_commit", "candidate_tree"):
         _oid(payload[key], oid_len, f"push preflight {key}")
     if (not isinstance(payload["push_range"], str)
@@ -2115,6 +2153,79 @@ def runtime_choice(receipt: Mapping[str, Any]) -> tuple[str, str]:
     else:
         raise Refusal("receipt has no executable protected runtime choice")
     return root, _state_id(state_id, "receipt runtime state id")
+
+
+def runtime_bundle_identity(identity: Mapping[str, Any]) -> str:
+    """Runtime content identity, independent of the product verdict's commits.
+
+    The BASE here is the fixed runtime anchor plus explicit overlays. Ordinary
+    product releases reuse that identity until the external controller changes
+    its active choice. A digest is not itself authority to activate anything.
+    """
+    return hashlib.sha256(canonical_bytes({
+        "schema": 1, "kind": "vibeic.reviewable-runtime-bundle",
+        "identity": identity})).hexdigest()
+
+
+def require_active_runtime(identity: Mapping[str, Any], *,
+                           active_runtime_sha256: str) -> str:
+    """BLOCKING boundary called only by the trusted installed controller.
+
+    `active_runtime_sha256` must come from controller-owned external storage,
+    never candidate arguments, its repository manifest or a generated receipt.
+    Exact active equality also refuses downgrade to an older approved runtime;
+    there is no candidate-writable allowlist, approval flag or approval writer.
+    """
+    _sha256_value(active_runtime_sha256, "controller active runtime")
+    digest = runtime_bundle_identity(identity)
+    if digest != active_runtime_sha256:
+        raise Refusal("runtime identity is not the controller's active approval")
+    return digest
+
+
+def _parse_controller_receipt(value: Any, oid_len: int) -> dict[str, Any]:
+    """Parent-produced subject evidence, bound to the external active runtime.
+
+    The JSON is a transport, never approval. The final judge imports this copy
+    from the approved snapshot and re-reads the controller-owned active state.
+    """
+    root = _exact_keys(value, {"schema", "kind", "complete", "payload", "payload_sha256"},
+                       "controller receipt")
+    if (type(root["schema"]) is not int or root["schema"] != 1
+            or root["kind"] != "vibeic.controller-runtime-subject-receipt"
+            or root["complete"] is not True):
+        raise Refusal("controller receipt is incomplete")
+    payload = _exact_keys(root["payload"], {
+        "operation", "base_commit", "base_tree", "candidate_commit", "candidate_tree",
+        "runtime_sha256", "runtime_commit", "runtime_tree", "runtime_content_sha256",
+        "generation"}, "controller receipt payload")
+    if payload["operation"] != "CONTROLLER_RUNTIME":
+        raise Refusal("controller receipt operation is invalid")
+    for key in ("base_commit", "base_tree", "candidate_commit", "candidate_tree"):
+        _oid(payload[key], oid_len, key)
+    if root["payload_sha256"] != hashlib.sha256(canonical_bytes(payload)).hexdigest():
+        raise Refusal("controller receipt content digest mismatch")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_receipt_controller_store", Path(__file__).with_name("protected_runtime_store.py"))
+    if spec is None or spec.loader is None:
+        raise Refusal("controller runtime authority is unavailable")
+    controller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(controller)
+    state = controller.active()
+    if (payload["runtime_sha256"] != state["runtime_sha256"]
+            or type(payload["generation"]) is not int
+            or payload["generation"] != state["generation"]):
+        raise Refusal("controller receipt names an inactive runtime")
+    record = strict_loads((controller.DEFAULT_STORE / "bundles" /
+        state["runtime_sha256"] / "bundle.json").read_bytes(), what="active runtime bundle")
+    identity = record["identity"]
+    require_active_runtime(identity, active_runtime_sha256=state["runtime_sha256"])
+    if any(payload[field] != identity[source] for field, source in (
+            ("runtime_commit", "runtime_commit"), ("runtime_tree", "runtime_tree"),
+            ("runtime_content_sha256", "tree_sha256"))):
+        raise Refusal("controller receipt runtime provenance mismatch")
+    return dict(root)
 
 
 def require_semantic_runtime(receipt: Mapping[str, Any]) -> tuple[str, str]:
@@ -2477,6 +2588,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     push_preflight.add_argument("--candidate", required=True)
     push_preflight.add_argument("--push-range", required=True)
     push_preflight.add_argument("--receipt", type=Path, required=True)
+    push_preflight.add_argument("--authority-object-repo", type=Path)
+    push_preflight.add_argument("--authority-commit")
     rebind = sub.add_parser("rebind-verdict")
     rebind.add_argument("--object-repo", type=Path, required=True)
     rebind.add_argument("--base", required=True)
@@ -2526,6 +2639,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 base=args.base,
                 candidate=args.candidate,
                 push_range=args.push_range,
+                authority_object_repo=args.authority_object_repo,
+                authority_commit=args.authority_commit,
             )
             _atomic_write(args.receipt, canonical_bytes(receipt))
             for gate in receipt["payload"]["gates"]:

@@ -129,6 +129,113 @@ def test_a_keyword_name_is_disclosure():
     ''') == [("METRICS_JSON_NOT_PRESENT", True)]
 
 
+def test_identical_returned_records_do_not_depend_on_list_construction():
+    """Measured release failure: bookkeeping append is not a separate report."""
+    append = '''
+def decide():
+    incomplete = []
+    incomplete.append("BASE_AGGREGATE_MISSING")
+    return {"admission": "INCOMPLETE", "incomplete": incomplete,
+            "inputs": {"base_junit": "/inputs/base.xml"}}
+'''
+    literal = append.replace(
+        'incomplete = []\n    incomplete.append("BASE_AGGREGATE_MISSING")',
+        'incomplete = ["BASE_AGGREGATE_MISSING"]')
+    returned = []
+    for source in (append, literal):
+        namespace = {}
+        exec(compile(source, "<record-construction-control>", "exec"), namespace)
+        returned.append(namespace["decide"]())
+        assert all(named for _, named in _verdicts(source))
+    assert returned[0] == returned[1] == {
+        "admission": "INCOMPLETE", "incomplete": ["BASE_AGGREGATE_MISSING"],
+        "inputs": {"base_junit": "/inputs/base.xml"}}
+    assert _verdicts(append) == [("BASE_AGGREGATE_MISSING", True)]
+
+
+def test_a_returned_local_closure_carries_the_collector_and_its_diagnostic():
+    """The release keeps codes and prose in two lists in one returned record."""
+    assert _verdicts('''
+        def decide(previous):
+            incomplete = list(previous)
+            reasons = []
+            incomplete.append("SESSION_MISSING")
+            reasons.append("no aggregate session in the supplied base report")
+            def finish():
+                return Record(reasons=reasons, incomplete=incomplete)
+            def stop():
+                return finish()
+            return stop()
+    ''') == [("SESSION_MISSING", True)]
+
+
+@pytest.mark.parametrize("body", [
+    # Metadata with no disclosed locus is still scope-less.
+    'return {"incomplete": incomplete}',
+    # A separate, unused report cannot donate its address.
+    'unused = {"path": "/inputs/base.xml"}\n    return incomplete',
+    # A never-called closure cannot donate its address either.
+    'def unused():\n        return {"path": "/inputs/base.xml", "codes": incomplete}\n    return incomplete',
+    # This output contains a different binding, not the appended collector.
+    'def finish(incomplete):\n        return {"path": "/inputs/base.xml", "codes": incomplete}\n    return finish([])',
+    # Rebinding invalidates the claimed producer/consumer relation.
+    'incomplete = []\n    return {"path": "/inputs/base.xml", "codes": incomplete}',
+    # Do not infer the behavior of an arbitrary append-capable object.
+    'return {"path": "/inputs/base.xml", "codes": incomplete}',
+    # An earlier unaddressed consumer is not excused by the later report.
+    'publish(incomplete)\n    return {"path": "/inputs/base.xml", "codes": incomplete}',
+    'publish(codes=incomplete)\n    return {"path": "/inputs/base.xml", "codes": incomplete}',
+    'alias = incomplete\n    publish(alias)\n    return {"path": "/inputs/base.xml", "codes": incomplete}',
+])
+def test_collector_context_requires_a_proven_shared_output(body):
+    initializer = 'Factory()' if body == (
+        'return {"path": "/inputs/base.xml", "codes": incomplete}') else '[]'
+    source = ('def decide():\n    incomplete = ' + initializer + '\n'
+              '    incomplete.append("SESSION_MISSING")\n    ' + body + '\n')
+    assert _verdicts(source) == [("SESSION_MISSING", False)]
+
+
+def test_a_disclosed_branch_does_not_excuse_a_scope_less_return():
+    assert _verdicts('''
+        def decide(flag):
+            incomplete = []
+            incomplete.append("SESSION_MISSING")
+            if flag:
+                return {"path": "/inputs/base.xml", "codes": incomplete}
+            return {"codes": incomplete}
+    ''') == [("SESSION_MISSING", False)]
+
+
+def test_a_companion_shadowed_in_a_closure_cannot_borrow_outer_disclosure():
+    assert _verdicts('''
+        def decide():
+            incomplete = []
+            reasons = ["no aggregate session in the base report"]
+            incomplete.append("SESSION_MISSING")
+            def finish(reasons):
+                return Record(reasons=reasons, incomplete=incomplete)
+            return finish([])
+    ''') == [("SESSION_MISSING", False)]
+
+
+def test_the_collector_name_cannot_supply_its_own_missing_locus():
+    assert _verdicts('''
+        def decide():
+            reports = []
+            reports.append("SESSION_MISSING")
+            return {"codes": reports}
+    ''') == [("SESSION_MISSING", False)]
+
+
+def test_a_shadowed_list_constructor_is_not_a_known_list():
+    assert _verdicts('''
+        def decide(list):
+            incomplete = list()
+            incomplete.append("SESSION_MISSING")
+            return {"path": "/inputs/base.xml", "codes": incomplete}
+    ''') == [("SESSION_MISSING", False)]
+
+
 # ── population: what is NOT a refusal at all ────────────────────────────────
 
 def test_an_environment_read_is_not_a_refusal():

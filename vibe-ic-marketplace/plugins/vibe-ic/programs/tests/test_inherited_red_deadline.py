@@ -199,11 +199,13 @@ def _verdict(*, carried, ledger, age):
         red_since_ledger=ledger, commit_age=age)
 
 
-def test_the_landing_refuses_an_inherited_red_past_its_deadline():
+def test_the_landing_records_expired_debt_without_refusing_admission():
     v = _verdict(carried=_carried(("FAIL", "repo hygiene: a blocking gate", "")),
                  ledger=[_row(since="since-old", max_days=3)], age=_age)
+    assert v.ok is True, v.reasons
     assert any("THE DEADLINE ON AN INHERITED RED HAS PASSED" in r
-               for r in v.reasons), v.reasons
+               for r in v.debt["deadline_diagnostics"]), v.debt
+    assert v.debt["hygiene"] == _carried(("FAIL", "repo hygiene: a blocking gate", ""))
 
 
 def test_the_landing_does_not_refuse_one_inside_its_deadline():

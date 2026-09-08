@@ -308,8 +308,11 @@ _MAX_DOMAIN_PROGRESS_SCOPES_FLOOR = 64
 #: tree is re-walked per argument.  8 192 leaves ~2.8x headroom on the measured
 #: rate while still bounding a runaway emitter, and the floor keeps a
 #: one-file selection from being capped below a legitimate scan.
-_COLLECT_SCAN_PATHS_PER_UNIT = 8192
-_COLLECT_SCAN_FLOOR = 1_000_000
+from _pytest_progress_plugin import (
+    COLLECT_SCAN_PATHS_PER_UNIT as _COLLECT_SCAN_PATHS_PER_UNIT,
+    COLLECT_SCAN_FLOOR as _COLLECT_SCAN_FLOOR,
+    collect_scan_ceiling,
+)
 
 _MAX_PROGRESS_STREAMS = 256
 #: Absolute ceiling over ALL streams. The per-stream ceiling stays
@@ -376,7 +379,7 @@ def _load_hermetic_progress_planner():
 
 
 class _HermeticAggregateProgress:
-    """Relay only BASE-planned nested domains and completed pytest items."""
+    """Relay validated collection work separately from planned completions."""
 
     def __init__(self, selection: Sequence[str], emitter=None, planner=None):
         self.selection = list(selection)
@@ -413,14 +416,15 @@ class _HermeticAggregateProgress:
                 0))
         self.emitted = 0
         self.collection_emitted = False
+        self.collect_scanned = 0
         self.problem = ""
 
-    def _emit(self, state: str, unit: Optional[str] = None) -> bool:
+    def _emit(self, state: str, unit: Optional[str] = None, **fields) -> bool:
         if self.problem:
             return False
         try:
             sys.stdout.flush()
-            self.emitter.emit(state, unit)
+            self.emitter.emit(state, unit, **fields)
             sys.stdout.flush()
             return True
         except BaseException as exc:
@@ -431,7 +435,19 @@ class _HermeticAggregateProgress:
         return self._emit("start")
 
     def observe(self, probe: "_SemanticProgressProbe") -> None:
-        if self.problem or probe.error or probe.declared_items is None:
+        if self.problem or probe.error:
+            return
+        # Sampling may consume several exact strides, including a final burst
+        # together with collection_finish. Relay each once before completing
+        # the phase; never fill unused scan allowance to manufacture completion.
+        scanned = getattr(probe, "collect_scanned", 0)
+        while not self.collection_emitted and self.collect_scanned < scanned:
+            next_scan = self.collect_scanned + COLLECT_SCAN_STRIDE
+            if not self._emit("collect_scan", "pytest:collection-complete",
+                              scanned=next_scan):
+                return
+            self.collect_scanned = next_scan
+        if probe.declared_items is None:
             return
         if not self.collection_emitted:
             if not self._emit("checkpoint", "pytest:collection-complete"):
@@ -1007,6 +1023,14 @@ class _ProgressStreamSet:
                     or probe.item_order != first.item_order):
                 return None
         return probes
+
+    @property
+    def collect_scanned(self) -> int:
+        # Workers scan the same selection. Its high-water mark progresses
+        # without crediting a second worker's replay of that traversal. The
+        # per-stream FSM still validates PID/nonce/sequence/stride and ceiling.
+        return max((probe.collect_scanned for probe in self.streams.values()),
+                   default=0) if not self.error else 0
 
     @property
     def declared_items(self) -> Optional[int]:
@@ -2268,9 +2292,7 @@ def _run_progress_supervised(
         progress_path, nonce,
         lambda: holder["proc"].pid if "proc" in holder else None,
         collect_only=collect_only,
-        collect_scan_ceiling=max(
-            _COLLECT_SCAN_FLOOR,
-            int(scan_units) * _COLLECT_SCAN_PATHS_PER_UNIT),
+        collect_scan_ceiling=collect_scan_ceiling(int(scan_units)),
         require_runtime_identity=(
             os.environ.get(_REQUIRE_RUNTIME_IDENTITY_ENV) == "1"))
     child_env = os.environ.copy()

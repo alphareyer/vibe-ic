@@ -4,7 +4,8 @@
 This helper deliberately has no total elapsed-time limit.  Liveness comes from
 an exact finite-work protocol: the candidate must write canonical progress
 records to stdout, prefixed by ``VIBEIC_PROGRESS ``.  Only completion of the
-next parent-owned work unit renews the recording lease.  A malformed channel
+next parent-owned work unit, or validated bounded scan work during its
+collection phase, renews the recording lease. A malformed channel
 or a lease with no semantic progress is NORECORD, never a test verdict.
 
 The candidate container never sees a writable host bind.  It writes artefacts
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import pwd
@@ -30,6 +32,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Iterable, Sequence
 
@@ -86,6 +89,19 @@ PROGRESS_PREFIX = b"VIBEIC_PROGRESS "
 TMPFS_OPTIONS = (
     "rw,nosuid,nodev,noexec,size=536870912,mode=1777"
 )
+# The digest-pinned image's UID65534 is nobody, whose passwd home is
+# /nonexistent. Supply that account's real private home instead of inventing
+# duplicate NSS identities or weakening the caller's strict _home_path guard.
+CANDIDATE_HOME = "/nonexistent"
+# Runtime-tool tests and ordinary programs may execute tools they generate.
+# Keep /tmp noexec; use a separate bounded, private tmpfs rather than putting
+# temporary work into the exported evidence volume or enabling all of /tmp.
+CANDIDATE_SCRATCH = "/var/tmp"
+CANDIDATE_TMPFS = {
+    "/tmp": TMPFS_OPTIONS,
+    CANDIDATE_HOME: "rw,nosuid,nodev,noexec,size=1048576,mode=0700,uid=65534,gid=65534",
+    CANDIDATE_SCRATCH: "rw,nosuid,nodev,exec,size=536870912,mode=0700,uid=65534,gid=65534",
+}
 # A same-profile unprivileged provisioner first mounts the fresh volume over
 # the pinned image's empty mode-1777 /var/tmp.  Docker copy-up transfers only
 # that reviewed directory metadata, after which the candidate can mount the
@@ -120,13 +136,13 @@ _FIXED_PROCESS_ENV = {
     "GIT_CONFIG_KEY_1": "safe.directory",
     "GIT_CONFIG_VALUE_1": CORPUS_PATH,
     "GIT_NO_REPLACE_OBJECTS": "1",
-    "HOME": "/tmp",
+    "HOME": CANDIDATE_HOME,
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
     "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
     "PYTHONDONTWRITEBYTECODE": "1",
-    "TMPDIR": "/tmp",
+    "TMPDIR": CANDIDATE_SCRATCH,
     "VIBEIC_REQUIRE_TRUSTED_PYTEST_ENTRY": "1",
 }
 _LAND_PROCESS_ENV = {
@@ -612,6 +628,19 @@ def _load_progress_plan(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     }, summary
 
 
+@lru_cache(maxsize=1)
+def _collection_progress_emitter():
+    """Resolve protocol rules from this runtime, never from the candidate."""
+    spec = importlib.util.spec_from_file_location(
+        "_vibeic_outer_progress_emit",
+        Path(__file__).resolve().with_name("hermetic_progress_emit.py"))
+    if spec is None or spec.loader is None:
+        raise Refusal("trusted collection progress rules are unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class Progress:
     def __init__(self, nonce: str, scope: str, units: Sequence[str]):
         self.nonce = nonce
@@ -619,6 +648,7 @@ class Progress:
         self.units = tuple(units)
         self.next_record = 0
         self.completed = 0
+        self.collect_scanned = 0
         self.raw_records: list[bytes] = []
 
     def _expected(self) -> dict[str, Any]:
@@ -655,15 +685,27 @@ class Progress:
         except (UnicodeError, ValueError, json.JSONDecodeError) as exc:
             raise Refusal(f"malformed semantic progress record: {exc}") from exc
         expected = self._expected()
+        scanning = isinstance(row, dict) and row.get("state") == "collect_scan"
+        if scanning:
+            emitter = _collection_progress_emitter()
+            scanned = self.collect_scanned + emitter.scan_contract.COLLECT_SCAN_STRIDE
+            if (self.next_record != 1
+                    or scanned > emitter.collection_scan_limit(self.units)):
+                raise Refusal("collection work is outside the parent-owned scan allowance")
+            expected = {**expected, "state": "collect_scan", "completed": 0,
+                        "scanned": scanned}
         if row != expected or type(row.get("schema")) is not int:
             raise Refusal("semantic progress differs from the parent-owned FSM")
         if payload != _canonical(expected):
             raise Refusal("semantic progress record is not canonical JSON")
-        meaningful = expected["state"] == "checkpoint"
-        if meaningful:
+        meaningful = expected["state"] == "checkpoint" or scanning
+        if scanning:
+            self.collect_scanned = scanned
+        elif meaningful:
             self.completed += 1
         self.raw_records.append(payload)
-        self.next_record += 1
+        if not scanning:
+            self.next_record += 1
         return meaningful
 
     def finish(self) -> dict[str, Any]:
@@ -671,6 +713,8 @@ class Progress:
             raise Refusal("candidate ended without the exact semantic terminal record")
         wire = b"\n".join(self.raw_records) + b"\n"
         return {
+            **({"collect_scanned": self.collect_scanned}
+               if self.collect_scanned else {}),
             "completed": self.completed,
             "protocol_sha256": _sha256(wire),
             "records": len(self.raw_records),
@@ -947,8 +991,8 @@ def _validate_container_profile(
                 "no-new-privileges:true", "no-new-privileges=true"
             }):
         raise Refusal("candidate no-new-privileges profile differs")
-    if host.get("Tmpfs") != {"/tmp": TMPFS_OPTIONS}:
-        raise Refusal("candidate /tmp tmpfs profile differs")
+    if host.get("Tmpfs") != CANDIDATE_TMPFS:
+        raise Refusal("candidate private tmpfs profile differs")
     if host.get("Binds") not in (None, []):
         raise Refusal("candidate has an unowned legacy bind mount")
     if host.get("Devices") not in (None, []):
@@ -999,12 +1043,12 @@ def _validate_container_profile(
                 "source": volume,
                 "type": "volume",
             })
-        elif destination == "/tmp":
+        elif destination in CANDIDATE_TMPFS:
             if item.get("Type") != "tmpfs" or item.get("RW") is not True:
-                raise Refusal("candidate /tmp mount differs")
+                raise Refusal(f"candidate private tmpfs mount differs at {destination}")
         else:
             raise Refusal(f"candidate has an unowned mount at {destination}")
-    if seen - {"/tmp"} != set(expected_destinations) | {EVIDENCE_PATH}:
+    if seen - set(CANDIDATE_TMPFS) != set(expected_destinations) | {EVIDENCE_PATH}:
         raise Refusal("candidate mount set is incomplete")
     if any("docker.sock" in str(item) for item in observed_mounts):
         raise Refusal("candidate inspection exposes docker.sock")
@@ -1020,7 +1064,7 @@ def _validate_container_profile(
         "process_environment": process_environment,
         "read_only_rootfs": True,
         "restart": "no",
-        "tmpfs": {"destination": "/tmp", "options": TMPFS_OPTIONS},
+        "tmpfs": dict(CANDIDATE_TMPFS),
         "user": USER,
         "workdir": WORKDIR,
     }
@@ -1533,6 +1577,69 @@ def _publish_directory(source: Path, destination: Path) -> None:
             shutil.rmtree(staged)
 
 
+def _retain_failure_diagnostics(
+    resources: Resources, *, output: Path, run_id: str, image: dict[str, Any],
+    cid: str, progress: Progress, reason: str, runtime_plan_path: Path,
+    stdout_path: Path, stderr_path: Path, artifacts_dir: Path,
+) -> None:
+    """Retain NORECORD evidence beside the operator's success-only output.
+
+    Host streams and the exact resolved plan survive even if stopped-state
+    proof or raw-volume export refuses. No arm/success receipt is produced.
+    """
+    destination = output.with_name(output.name + ".failure-diagnostics-" + run_id)
+    destination.mkdir(mode=0o700)
+    for source in (stdout_path, stderr_path, runtime_plan_path):
+        if source.is_file():
+            shutil.copyfile(source, destination / source.name)
+    (destination / "accepted-progress.jsonl").write_bytes(
+        b"\n".join(progress.raw_records) + b"\n")
+    details = {
+        "kind": "failure-diagnostics", "status": "NORECORD", "reason": reason,
+        "run_id": run_id, "completed": progress.completed,
+        "collect_scanned": progress.collect_scanned,
+        "next_record": progress.next_record, "total": len(progress.units),
+        "raw_volume": "NOT_EXPORTED",
+    }
+    marker = destination / "FAILURE_DIAGNOSTICS.json"
+    marker.write_bytes(_canonical(details) + b"\n")
+    print(f"[NORECORD] failure diagnostics retained: {destination}", file=sys.stderr)
+    try:
+        name = resources.container
+        resources.docker.call(["container", "kill", name])
+        if resources.attach is not None:
+            if resources.attach.poll() is None:
+                try:
+                    os.killpg(resources.attach.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    # The attach client may exit after poll(). Container
+                    # identity and stopped state still need proof below.
+                    pass
+            resources.attach.wait()
+            resources.attach = None
+        stopped = _inspect_container(resources.docker, name,
+                                     "failed candidate stopped inspection")
+        if stopped.get("Id") != cid or stopped.get("Image") != image["id"]:
+            raise Refusal("failed candidate identity changed")
+        state = _stopped_state(stopped)
+        _post_stop_export(
+            resources.docker, resources, run_id=run_id, image=image,
+            volume=resources.volume, destination=artifacts_dir)
+        after = _inspect_container(resources.docker, name,
+                                   "failed candidate post-export inspection")
+        if (after.get("Id") != cid or after.get("Image") != image["id"]
+                or _stopped_state(after) != state):
+            raise Refusal("failed candidate stopped-state changed during export")
+        _strip_volume_ready_marker(artifacts_dir)
+        _artefact_manifest(artifacts_dir)
+        _publish_directory(artifacts_dir, destination / "raw-sidecars")
+        details["raw_volume"] = "EXPORTED_AFTER_STOP"
+    except (OSError, ValueError, Refusal, subprocess.SubprocessError) as exc:
+        details["raw_volume_reason"] = str(exc)
+    finally:
+        marker.write_bytes(_canonical(details) + b"\n")
+
+
 def _write_receipt(path: Path, receipt: dict[str, Any]) -> None:
     if path.exists() or path.is_symlink():
         raise Refusal("receipt path already exists")
@@ -1661,9 +1768,7 @@ def validate_receipt(doc: Any) -> dict[str, Any]:
             or container["restart"] != "no" or container["user"] != USER
             or container["launcher"] != ["/usr/bin/env", "-i", "--"]
             or container["workdir"] != WORKDIR
-            or container["tmpfs"] != {
-                "destination": "/tmp", "options": TMPFS_OPTIONS
-            }):
+            or container["tmpfs"] != CANDIDATE_TMPFS):
         raise ValueError("receipt container profile differs")
     if (not isinstance(container["container_id"], str)
             or _CONTAINER_ID.fullmatch(container["container_id"]) is None):
@@ -1797,17 +1902,28 @@ def validate_receipt(doc: Any) -> dict[str, Any]:
         transport_destinations.append(destination)
     if transport_destinations != sorted(expected_transport_mounts):
         raise ValueError("receipt evidence transport mounts are not canonical")
-    progress = _exact_keys(receipt["progress"], {
+    progress_fields = {
         "completed", "protocol_sha256", "records", "scope", "total", "units"
-    }, "receipt progress")
+    }
+    if isinstance(receipt["progress"], dict) and "collect_scanned" in receipt["progress"]:
+        progress_fields.add("collect_scanned")
+    progress = _exact_keys(receipt["progress"], progress_fields, "receipt progress")
     units = progress["units"]
     if (not isinstance(units, list) or not units
             or len(units) != len(set(units))
             or not all(isinstance(unit, str) and unit for unit in units)):
         raise ValueError("receipt progress units differ")
     total = _exact_int(progress["total"], "progress total", 1)
+    scan_records = 0
+    if "collect_scanned" in progress:
+        emitter = _collection_progress_emitter()
+        scanned = _exact_int(progress["collect_scanned"], "collected scan work", 1)
+        if (scanned > emitter.collection_scan_limit(units)
+                or scanned % emitter.scan_contract.COLLECT_SCAN_STRIDE):
+            raise ValueError("receipt collection work exceeds its finite allowance")
+        scan_records = scanned // emitter.scan_contract.COLLECT_SCAN_STRIDE
     if (total != len(units) or progress["completed"] != total
-            or progress["records"] != total + 2):
+            or progress["records"] != total + 2 + scan_records):
         raise ValueError("receipt progress is not complete")
     _bounded_string(progress["scope"], "receipt progress scope")
     if receipt_process_env["VIBEIC_HERMETIC_PROGRESS_SCOPE"] != progress["scope"]:
@@ -2036,7 +2152,8 @@ def run(args: argparse.Namespace) -> int:
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges=true",
             "--restart", "no",
-            "--tmpfs", f"/tmp:{TMPFS_OPTIONS}",
+            *[part for path, options in CANDIDATE_TMPFS.items()
+              for part in ("--tmpfs", f"{path}:{options}")],
             "--workdir", WORKDIR,
             # The pinned desktop image has a UI startup entrypoint and an
             # inherited Cmd.  Fixed-image /usr/bin/env clears both policies,
@@ -2083,10 +2200,22 @@ def run(args: argparse.Namespace) -> int:
         if container_profile["container_id"] != cid:
             raise Refusal("created candidate ID differs from inspection")
         progress = Progress(nonce, plan["scope"], plan["units"])
-        attach_rc, progress_receipt, streams = _run_monitored(
-            docker, resources, container_name, progress,
-            plan["stall_grace_seconds"], stdout_path, stderr_path,
-        )
+        try:
+            attach_rc, progress_receipt, streams = _run_monitored(
+                docker, resources, container_name, progress,
+                plan["stall_grace_seconds"], stdout_path, stderr_path,
+            )
+        except (OSError, ValueError, Refusal, subprocess.SubprocessError) as exc:
+            try:
+                _retain_failure_diagnostics(
+                    resources, output=output, run_id=run_id, image=image,
+                    cid=cid, progress=progress, reason=str(exc),
+                    runtime_plan_path=runtime_plan_path, stdout_path=stdout_path,
+                    stderr_path=stderr_path, artifacts_dir=artifacts_dir)
+            except (OSError, ValueError, Refusal, subprocess.SubprocessError) as diagnostic_error:
+                print(f"[NORECORD] failure diagnostics retention refused: "
+                      f"{diagnostic_error}", file=sys.stderr)
+            raise
         stopped = _inspect_container(docker, container_name,
                                      "stopped candidate inspection")
         if stopped.get("Id") != cid or stopped.get("Image") != image["id"]:

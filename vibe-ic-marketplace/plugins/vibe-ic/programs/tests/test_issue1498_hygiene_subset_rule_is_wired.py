@@ -316,13 +316,11 @@ def test_an_introduced_hygiene_finding_refuses():
     assert "HYGIENE_FINDING_DELTA_INTRODUCED" in v.disclosures
 
 
-def test_the_same_tree_without_the_differential_lands_it():
-    """THE NEGATIVE CONTROL FOR THE WHOLE CHANGE. Identical inputs, differing
-    only in whether the differential was supplied — which is precisely the
-    difference between `origin/main` and this branch. Without it the introduced
-    finding above is INVISIBLE and the landing is allowed."""
+def test_missing_differential_refuses_as_incomplete():
+    """Omitted evidence cannot establish the absence of new findings."""
     v = _decide(hygiene=None)
-    assert v.ok is True, v.reasons
+    assert v.ok is False, v.reasons
+    assert v.admission == "INCOMPLETE"
     assert "HYGIENE_FINDING_DELTA_NOT_SUPPLIED" in v.disclosures
     assert any("ONE label" in n for n in v.notes), v.notes
 
@@ -375,7 +373,8 @@ def test_the_delta_only_ever_adds_refusals():
     without = _decide(land=V.parse_land_log(log), hygiene=None)
     with_delta = _decide(land=V.parse_land_log(log), hygiene=clean)
     assert without.ok is False and with_delta.ok is False
-    assert set(without.reasons) <= set(with_delta.reasons), (
+    assert {reason for reason in without.reasons
+            if not reason.startswith("INCOMPLETE EVIDENCE")} <= set(with_delta.reasons), (
         "the finding delta removed a refusal the per-label rule produced:\n"
         f"without: {without.reasons}\nwith:    {with_delta.reasons}")
 
@@ -632,11 +631,13 @@ def test_end_to_end_the_record_says_when_it_was_not_asked(tmp_path):
         capture_output=True, text=True)
     # Exit code and the subject's own words BEFORE the record it may never have
     # written -- see `_cli` above for the six-version silence this ordering cost.
-    assert cp.returncode == 0, cp.stdout + cp.stderr
+    assert cp.returncode == 2, cp.stdout + cp.stderr
     assert out.is_file(), (
         f"landing_merge_verdict wrote no JSON record (rc={cp.returncode}): "
         f"{cp.stdout}\n{cp.stderr}")
     rec = json.loads(out.read_text())
+    assert rec["admission"] == "INCOMPLETE"
+    assert rec["verdict"] == "REFUSE"
     assert rec["hygiene_finding_delta"] is None
     assert "HYGIENE_FINDING_DELTA_NOT_SUPPLIED" in rec["disclosures"]
     assert "DISCLOSE  HYGIENE_FINDING_DELTA_NOT_SUPPLIED" in cp.stdout

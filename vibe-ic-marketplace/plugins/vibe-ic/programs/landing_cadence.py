@@ -5,7 +5,7 @@ THE POLICY IS NOT NEW AND IS NOT RE-IMPLEMENTED HERE
 ====================================================
 It lives in ``gatekeeper_review.derive_cadence`` and this program IMPORTS it:
 
-    x.y.0  milestone  ->  FULL       the whole ``programs/tests`` tree
+    x.y.0  milestone  ->  FULL       the declared pytest file population
     x.y.Z  patch      ->  TARGETED   the diff-derived subset suffices
     no parseable bump ->  NONE       the change ships nothing
 
@@ -51,8 +51,18 @@ EVERY FAILURE RESOLVES TO ``FULL``
 Unreadable ref, absent manifest, unparseable JSON, unparseable semver — all of
 them print ``FULL``. "I could not read the version" must never reach the
 landing as "the cheap tier is fine". The asymmetry is the whole point of the
-policy, so it is also the direction of every default here: this program can
-only ever make a landing run MORE than it needed, never less.
+policy. This fallback chooses cadence, not membership: missing or malformed
+population configuration is NOT_DETERMINED (rc 2), never a full-coverage claim.
+
+FILE MEMBERSHIP COMES FROM THE SAME SELECTOR AS TARGETED CADENCE
+================================================================
+`ci_targeted_test_select.declared_test_population` reads pytest.ini's testpaths,
+python_files and norecursedirs as data. A recursive filename glob used to admit
+expected-reject fixture trees that pytest explicitly excludes; adding fixture
+data therefore added permanent release blockers. Both cadence paths now use
+one declared population. No fixture/test name is special-cased, and no subject
+collector is executed to derive it. Actual node collection remains the runner's
+job; this program certifies file selection, not completed test execution.
 
 ``--describe`` AND WHY THE COMMAND IS DERIVED, NOT ASSERTED
 ===========================================================
@@ -80,7 +90,7 @@ Usage
 
 Output is ``KEY=VALUE`` lines so the landing shell can read it without a JSON
 parser. Exit 0 whenever an answer was produced (including the safe ``FULL``);
-exit 2 only on a usage error.
+exit 2 on a usage error or an unmeasurable declared population.
 
 chip-AGNOSTIC.
 """
@@ -103,6 +113,20 @@ _gr = None
 
 
 _fsr = None
+_selector = None
+
+
+def _test_selector():
+    """Load the population API beside this trusted program, never the subject."""
+    global _selector
+    if _selector is None:
+        spec = importlib.util.spec_from_file_location(
+            "_lc_test_selector", _PROGRAMS_DIR / "ci_targeted_test_select.py")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["_lc_test_selector"] = mod
+        spec.loader.exec_module(mod)
+        _selector = mod
+    return _selector
 
 
 def _full_suite_run_check():
@@ -208,18 +232,8 @@ def milestone_check(repo: Path, base: str, head: str) -> str:
 
 
 def tree_test_files(plugin_root: Path) -> List[str]:
-    """Every test file the full suite would collect, plugin-root-relative.
-
-    ``pytest.ini`` pins ``testpaths = programs/tests`` (one tree, guarded by
-    single_testpath_guard.py), so that tree IS the full suite here.
-    """
-    tree = plugin_root / _TEST_TREE
-    if not tree.is_dir():
-        return []
-    return sorted(
-        str(p.relative_to(plugin_root))
-        for p in tree.rglob("test_*.py")
-    )
+    """Declared pytest file population; config errors refuse, never mean FULL."""
+    return _test_selector().declared_test_population(plugin_root)
 
 
 def read_selection(path: Path) -> List[str]:
@@ -302,16 +316,25 @@ def describe(plugin_root: Path, selection: Path) -> Tuple[str, str, str]:
     file-level paths make the classifier say subset for certain, and they
     happen to also be the literal truth.
     """
-    tree = set(tree_test_files(plugin_root))
     sel = set(read_selection(selection))
 
     def _subset(paths):
         return "python3 -m pytest -q " + " ".join(sorted(paths))
 
+    try:
+        tree = set(tree_test_files(plugin_root))
+    except (ValueError, OSError) as exc:
+        return ("unknown", "python3 -m pytest -q --no-selection.py", str(exc))
+
     if not tree:
         # No tree to compare against: cannot certify completeness, so do not.
         return ("subset", _subset(sel) if sel else "python3 -m pytest -q --no-selection.py",
                 "the test tree is empty or unreadable — not certifiable as full")
+    extra = sel - tree
+    if extra:
+        return ("subset", _subset(sel),
+                f"selection contains {len(extra)} file(s) outside the declared "
+                "pytest population: " + ", ".join(sorted(extra)))
     missing = tree - sel
     if missing:
         return ("subset", _subset(sel),
@@ -376,7 +399,11 @@ def main(argv: Optional[list] = None) -> int:
     if args.emit_full_selection:
         root = Path(args.plugin_root).resolve() if args.plugin_root \
             else _PLUGIN_ROOT_DEFAULT
-        files = tree_test_files(root)
+        try:
+            files = tree_test_files(root)
+        except (ValueError, OSError) as exc:
+            print(f"NOT_DETERMINED: {exc}", file=sys.stderr)
+            return 2
         if not files:
             print(f"ERROR: no test files under {root / _TEST_TREE}", file=sys.stderr)
             return 2
@@ -393,7 +420,7 @@ def main(argv: Optional[list] = None) -> int:
         print(f"LANDING_TEST_SCOPE={scope}")
         print(f"LANDING_PYTEST_CMD={cmd}")
         print(f"LANDING_TEST_SCOPE_WHY={why}")
-        return 0
+        return 2 if scope == "unknown" else 0
 
     if not (args.repo and args.base and args.head):
         print("ERROR: --repo, --base and --head are required", file=sys.stderr)

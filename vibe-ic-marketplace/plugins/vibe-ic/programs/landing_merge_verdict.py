@@ -5,6 +5,11 @@ function, because `gh pr merge` runs no gate at all.
 THIS GATE BLOCKS (rc=1). rc=2 means the question could not be put, which also
 refuses the landing — an unmeasurable landing is not a verified one.
 
+Admission is BLOCKING for regressions, lost required coverage and incomplete
+evidence. Unchanged inherited failures and their deadlines are ADVISORY debt;
+LAND OK certifies admission only, never that a red check passed. New/repaired
+detectors must measure both fixed subjects through one caller-owned instrument.
+
 THE DEFECT (vibe-ic#1019), measured
 ===================================
 Three facts, each checked directly on 2026-08-12:
@@ -58,8 +63,8 @@ THE SAME RULE APPLIES TO BOTH TIERS, and the second half is not optional: two of
 those three hygiene gates are red on the base, so an absolute "any gate FAIL
 refuses" would have been exactly the ban described above. The candidate's failing
 GATE LABELS are compared against the base's, just as its failing TEST IDS are.
-When no base gate log is supplied the comparison falls back to absolute — the
-strict direction — and says so.
+Missing or incomplete baseline gate evidence refuses admission as INCOMPLETE.
+An absolute check of candidate failures cannot prove that baseline coverage survived.
 
 AND THE LABEL IS TOO COARSE FOR ONE OF THE TIERS (vibe-ic#1498)
 ==============================================================
@@ -79,15 +84,8 @@ base". Its answer is read here, and it is STRICTLY ADDITIVE — it can only add
 refusal reasons to the label-level rule above, never remove one, so no landing
 that refuses today lands because of it.
 
-THE TWO ARMS' RECORDS ARE ASYMMETRIC ON PURPOSE, for #1443's reason:
-
-    no BASE record       -> disclosed, degrades to the per-label comparison. The
-                            branch does not control whether the base arm ran (a
-                            `--base-gate-cache` hit skips it entirely), so a
-                            missing baseline must not be a ban.
-    no CANDIDATE record  -> REFUSE. The base measured its findings and the tree
-                            under test did not, so the subset question cannot be
-                            answered about the one side the branch owns.
+Both hygiene records are required for admission. Missing either arm is
+INCOMPLETE, including legacy callers that omit the differential altogether.
 
 So a PR is judged on WHAT IT BREAKS:
 
@@ -392,6 +390,7 @@ class Delta:
     base_total: int = 0
     candidate_total: int = 0
     overlap: int = 0
+    incomplete: List[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -406,6 +405,7 @@ class Delta:
             "base_total": self.base_total,
             "candidate_total": self.candidate_total,
             "overlap": self.overlap,
+            "incomplete": self.incomplete,
         }
 
 
@@ -476,6 +476,14 @@ class Verdict:
     #: downstream reader can tell a strong verification from a degraded one
     #: without parsing prose. Prose lives in :attr:`notes`; these are the keys.
     disclosures: List[str] = field(default_factory=list)
+    debt: dict = field(default_factory=dict)
+    incomplete: List[str] = field(default_factory=list)
+
+    @property
+    def admission(self) -> str:
+        if self.unmeasurable or self.incomplete:
+            return "INCOMPLETE"
+        return "READY" if self.ok else "BLOCKED"
 
 
 def read_protected_transition_receipt(
@@ -641,6 +649,8 @@ def read_aggregate_junit(path: Path,
     root = ET.parse(str(path)).getroot()
     out: Dict[str, str] = {}
     for tc in _aggregate_testcases(root):
+        if not (tc.get("name") or "").strip():
+            raise ValueError("aggregate testcase has no check identity")
         k = _key(tc)
         o = _testcase_outcome(tc)
         if k in out and _is_red(out[k]):
@@ -833,6 +843,15 @@ def failed_set_delta(base: Dict[str, str], cand: Dict[str, str]) -> Delta:
     for k in sorted(set(base) | set(cand)):
         b = base.get(k, ABSENT)
         c = cand.get(k, ABSENT)
+        invalid = False
+        for arm, outcome in (("base", b), ("candidate", c)):
+            if not isinstance(outcome, str) or not (
+                    outcome in RED | SILENT | {PASSED}
+                    or re.fullmatch(r"process_rc:(?:0|[1-9][0-9]*)", outcome)):
+                d.incomplete.append(f"INVALID_TEST_OUTCOME:{arm}:{k}")
+                invalid = True
+        if invalid:
+            continue
         if _is_red(c):
             if _same_red(b, c):
                 d.preexisting.append(k)
@@ -856,11 +875,43 @@ def failed_set_delta(base: Dict[str, str], cand: Dict[str, str]) -> Delta:
                 # FAILED -> SKIPPED / ABSENT. Never an improvement: the failure
                 # did not go away, the question did.
                 d.silenced.append(k)
-            else:
+            elif _is_passed(c):
                 d.fixed.append(k)
         elif _is_passed(b) and c in SILENT:
             d.weakened.append(k)
     return d
+
+
+def _hygiene_shape_error(record: object) -> str:
+    """Validate a trusted helper's result; a status string alone proves nothing."""
+    if not isinstance(record, dict):
+        return "result is not an object"
+    if record.get("status") == HYG_REFUSED:
+        return ""
+    if record.get("status") not in (HYG_CLEAN, HYG_INTRODUCED):
+        return "unknown status"
+    for key in ("introduced", "carried", "cleared"):
+        rows = record.get(key)
+        if not isinstance(rows, list) or any(
+                not isinstance(row, (list, tuple)) or len(row) != 3
+                or not all(isinstance(value, str) for value in row)
+                or not row[0] or not row[1] for row in rows):
+            return f"invalid {key} finding identities"
+    for key in ("base_findings", "candidate_findings", "declared"):
+        if type(record.get(key)) is not int or record[key] < 0:
+            return f"invalid {key} count"
+    if record["declared"] == 0:
+        return "no gates were declared"
+    if (record["base_findings"] != len(record["carried"]) + len(record["cleared"])
+            or record["candidate_findings"] != len(record["carried"]) + len(record["introduced"])):
+        return "finding counts do not match identities"
+    if (record["status"] == HYG_INTRODUCED) != bool(record["introduced"]):
+        return "status contradicts introduced identities"
+    for key in ("no_verdict_either_side", "absent_corpora", "empty_corpora"):
+        if key in record and (not isinstance(record[key], list)
+                              or any(not isinstance(v, str) for v in record[key])):
+            return f"invalid {key} list"
+    return ""
 
 
 # --------------------------------------------------------------- land.sh log
@@ -899,10 +950,8 @@ def read_hygiene_delta(base_path: str, cand_path: str, base_host: str,
                        ) -> Optional[dict]:
     """The hygiene finding differential, or ``None`` when it was not asked for.
 
-    ``None`` is NOT a clean result and `decide` never reads it as one — it is
-    the disclosed degradation to the per-label comparison, taken when the BASE
-    arm produced no record (a `--base-gate-cache` hit skips that arm entirely,
-    and the branch under test does not control that).
+    ``None`` is NOT a clean result: `decide` records missing evidence and
+    refuses admission. It remains distinct from a helper that ran and refused.
 
     A base record WITHOUT a candidate record is the opposite case and is not
     ``None``: it is a REFUSAL, because the side that failed to measure is the
@@ -977,6 +1026,12 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
            require_composite_gate_record: bool = False,
            candidate_test_worktree_status: str = "clean",
            base_test_worktree_status: str = "clean") -> Verdict:
+    """Compare measurements from the controller's same approved runtime.
+
+    The controller owns execution and instrument selection; this function owns
+    comparison. Adding a second, unused detector execution API here would split
+    that responsibility without changing the real CLI/controller path.
+    """
     reasons: List[str] = []
     notes: List[str] = []
     disclosures: List[str] = []
@@ -984,6 +1039,43 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
     #: can be PRESENT and still unable to answer. Carried to the final Verdict
     #: instead of returning early, so the reasons found after it are not lost.
     unmeasurable = False
+    incomplete = list(delta.incomplete)
+    debt = {"tests": list(delta.preexisting), "gates": [], "hygiene": [],
+            "deadline_diagnostics": [], "deadline_evaluated": False}
+    if missing_process_files:
+        incomplete.extend("CANDIDATE_PROCESS_MISSING:" + f for f in missing_process_files)
+    if not aggregate_process_present:
+        incomplete.append("CANDIDATE_AGGREGATE_MISSING")
+    if base_missing_process_files:
+        incomplete.extend("BASE_PROCESS_MISSING:" + f for f in base_missing_process_files)
+    if base_selection_supplied and not base_aggregate_process_present:
+        incomplete.append("BASE_AGGREGATE_MISSING")
+    if truncated:
+        incomplete.append("CANDIDATE_RUN_TRUNCATED")
+    incomplete.extend("CANDIDATE_SELECTION_MISSING:" + f for f in dropped_files)
+    incomplete.extend("BASE_SELECTION_MISSING:" + f for f in base_dropped_files)
+    if not base_selection_supplied:
+        incomplete.append("BASE_SELECTION_NOT_SUPPLIED")
+    if delta.base_total == 0:
+        incomplete.append("BASE_TEST_RESULT_EMPTY")
+    if selection_size == 0:
+        incomplete.append("CANDIDATE_SELECTION_EMPTY")
+    if (base_land is None or not base_land.sentinel_seen
+            or not (base_land.passed or base_land.failed)):
+        incomplete.append("BASE_GATE_RECORD_MISSING_OR_INVALID")
+    elif not (base_land.stamped_sha or base_land.non_target_complete
+              or base_land.failure_terminal_seen):
+        incomplete.append("BASE_GATE_RECORD_NO_COMPLETE_TERMINAL")
+
+    def _finish() -> Verdict:
+        for item in incomplete:
+            reason = "INCOMPLETE EVIDENCE — " + item
+            if reason not in reasons:
+                reasons.append(reason)
+        return Verdict(not reasons, reasons, notes,
+                       unmeasurable=unmeasurable or bool(incomplete),
+                       disclosures=disclosures, debt=debt,
+                       incomplete=incomplete)
 
     # `reasons + [...]`, never a fresh list, and `disclosures` carried through.
     # An early return that drops what was already found makes the operator hunt:
@@ -992,19 +1084,19 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
     # cause. The same argument applies to the tier — a refusal that does not say
     # WHICH tier could not answer sends the reader to the wrong host.
     def _stop(reason: str) -> Verdict:
-        return Verdict(False, reasons + [reason], notes, unmeasurable=True,
-                       disclosures=disclosures)
+        incomplete.append(reason)
+        return _finish()
 
     # ---- WHICH TIER ANSWERED, AND WHAT IT THEREFORE DID NOT CHECK ----
     # FAIL CLOSED ON AN UNKNOWN TIER, before anything else is read. A third tier
     # arriving by typo must not inherit the strong tier's silence: if the gate
     # cannot say what was verified, nothing was verified.
     if verification_tier not in TIERS:
-        return Verdict(False, reasons + [
+        disclosures.append("VERIFICATION_TIER_UNKNOWN")
+        return _stop(
             f"UNKNOWN VERIFICATION TIER {verification_tier!r} — this program "
             f"knows {' and '.join(TIERS)} and cannot say what was checked, so "
-            f"nothing was."], notes, unmeasurable=True,
-            disclosures=["VERIFICATION_TIER_UNKNOWN"])
+            f"nothing was.")
 
     if verification_tier == TIER_DIRECT_PUSH:
         # NOT a third degradation of the merge path. On `git push origin main`
@@ -1213,9 +1305,9 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
     # red on the base itself. An absolute "any gate FAIL refuses" would therefore
     # have refused every landing — the ban this whole program exists to avoid.
     if base_land is None or not base_land.sentinel_seen:
-        notes.append("no base gate log was supplied, so every failing gate "
-                     "counts against this branch — the comparison degraded to "
-                     "'demand green', which is the strict direction")
+        notes.append("no valid base gate log was supplied; admission is "
+                     "INCOMPLETE. Visible candidate failures are still listed, "
+                     "but their absence cannot prove a no-new-red comparison")
         for label in land.blocking_failures:
             reasons.append(f"LANDING GATE FAILED — {label}")
     else:
@@ -1239,6 +1331,10 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
                     f"A FAILING GATE WAS SILENCED RATHER THAN FIXED — "
                     f"{was_red[key]} failed on the base and is no longer asked "
                     f"here")
+        base_passed = {gate_key(label): label for label in base_land.passed
+                       if not _TEST_TIER.match(label)}
+        for key in sorted(set(base_passed) - set(cand_passed) - set(now_red)):
+            reasons.append("A PASSING GATE WAS WEAKENED — " + base_passed[key])
         if any("range is empty" in l for l in base_land.skipped):
             # DISCLOSED, because it bounds what the base arm can excuse. Arm A2
             # measures the base over an EMPTY range on purpose, so the
@@ -1251,6 +1347,7 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
                          "range-scoped gates were not asked there — a failure "
                          "among them on this branch is necessarily new")
         for key in sorted(set(was_red) & set(now_red)):
+            debt["gates"].append(now_red[key])
             notes.append(f"gate fails on the base too, so it is not this "
                          f"branch's — {now_red[key]}")
         for key in sorted((set(was_red) - set(now_red)) & set(cand_passed)):
@@ -1268,8 +1365,21 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
     # produced, so a landing that refuses without this input still refuses with
     # it. That is the property that makes reading a helper's verdict safe: the
     # worst a wrong CLEAN can do is leave the tier exactly as coarse as it was.
+    shape_error = "" if hygiene is None else _hygiene_shape_error(hygiene)
+    if shape_error:
+        incomplete.append("HYGIENE_RESULT_INVALID:" + shape_error)
+        hygiene = {"status": HYG_REFUSED, "refusal": shape_error}
     hyg_status = (hygiene or {}).get("status")
+    if not shape_error and hyg_status in (HYG_CLEAN, HYG_INTRODUCED):
+        debt["hygiene"] = list(hygiene.get("carried") or [])
+        for key in ("no_verdict_either_side", "absent_corpora"):
+            incomplete.extend(f"HYGIENE_{key.upper()}:{value}"
+                              for value in hygiene.get(key, []))
+        for kind, label, corpus in debt["hygiene"]:
+            if kind == "NOT_CHECKED":
+                incomplete.append(f"HYGIENE_NOT_CHECKED:{label}:{corpus}")
     if hygiene is None:
+        incomplete.append("HYGIENE_FINDING_DELTA_NOT_SUPPLIED")
         disclosures.append("HYGIENE_FINDING_DELTA_NOT_SUPPLIED")
         notes.append(
             "no hygiene finding differential was supplied, so the ~80-gate "
@@ -1277,6 +1387,7 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
             "branch introduced under a label the base already fails would not "
             "have been visible here (vibe-ic#1498)")
     elif hyg_status == HYG_REFUSED:
+        incomplete.append("HYGIENE_FINDING_DELTA_REFUSED")
         # A REFUSAL BLOCKS, and it is UNMEASURABLE rather than merely refused:
         # the two records exist and cannot be differenced, which is not the same
         # event as a finding. `hygiene_finding_delta` returns this rather than
@@ -1330,31 +1441,12 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
         base_hyg_red = base_land is not None and any(
             _HYGIENE_TIER.match(l) for l in base_land.failed)
         if cand_hyg_red and not base_hyg_red:
+            incomplete.append("HYGIENE_FAILURE_UNEXPLAINED")
             unmeasurable = True
             reasons.append(
                 "THE HYGIENE SUITE FAILED HERE AND NOT ON THE BASE, YET THE "
                 "FINDING DIFFERENTIAL NAMES NOTHING — the two disagree, so the "
                 "finding list is incomplete and cannot account for the failure.")
-    # ---- AN INHERITED RED IS NOT THIS BRANCH'S, AND IT IS STILL SOMEBODY'S ----
-    #
-    # The two tiers above both end the same way: a failure present on BOTH arms
-    # is `notes` (`gate fails on the base too…`) or `carried (which do NOT
-    # block)`. That subtraction is correct — an absolute "any FAIL refuses"
-    # would refuse every landing, which is measured in the comment above the
-    # gate differential — and it has no floor. MEASURED: `flow-gate enforcement
-    # audit`, dispatched with a plain blocking `run`, was red on the base at
-    # e4880703b on 2026-08-12 and still red at 752a8baa nine days, 704 commits
-    # and 96 version-bearing landings later, and every one of those landings
-    # was correct to allow it.
-    #
-    # The deadline that would end that already exists — `max_days` in
-    # `tools/ci/gate_red_since.json`, read by `gate_red_since_check` — and
-    # nothing ever opens it, because a row is voluntary and pure cost so no row
-    # is ever written. This is the forcing function, and it has to be HERE:
-    # a refusal wired inside the hygiene suite would be a gate in the suite, red
-    # on both arms from its first landing, and subtracted by this very rule.
-    #
-    # STRICTLY ADDITIVE, like the tier above it: it only ever appends reasons.
     else:
         # A status this program does not know is not a pass. Reached only if the
         # helper grows a fourth answer without this branch being taught it.
@@ -1364,9 +1456,8 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
             f"THE HYGIENE FINDING DIFFERENTIAL RETURNED {hyg_status!r}, which "
             f"this program does not know how to read, so it read nothing.")
 
-    # The rule itself runs AFTER the whole chain above, never inside it: it must
-    # apply whatever status the differential returned, and it must not change
-    # which branch of that chain is taken.
+    # Debt remediation has its own clock. Its diagnostics stay visible without
+    # changing admission; the raw red and the standalone debt check stay red.
     if red_since_ledger is None or commit_age is None:
         # A RULE THAT DID NOT RUN MUST SAY SO. Without the ledger or without a
         # way to age a commit this cannot answer, and silence here would be
@@ -1382,10 +1473,13 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
         # protected runtime pins; a top-level `sys.path` insertion in an
         # authority file changes what every later import resolves to, and it
         # measurably broke two end-to-end cases when it was one.
-        for reason in _load_red_since().inherited_red_reasons(
-                list((hygiene or {}).get("carried") or []),
-                list(red_since_ledger), commit_age):
-            reasons.append(reason)
+        try:
+            debt["deadline_diagnostics"] = _load_red_since().inherited_red_reasons(
+                debt["hygiene"], list(red_since_ledger), commit_age)
+            debt["deadline_evaluated"] = True
+        except (OSError, TypeError, ValueError, AttributeError) as exc:
+            debt["deadline_diagnostics"] = ["DEBT DEADLINE UNMEASURED: " + str(exc)]
+        notes.extend(debt["deadline_diagnostics"])
 
     if any("assigned at merge" in l for l in land.passed):
         # A DEFERRAL IS AN ACTION ITEM, NOT A CLEAN SHEET. Measured 2026-08-12:
@@ -1532,8 +1626,7 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
     # and never into it: the fallback reports what it could not check, it does
     # not get to excuse anything it did check. A tier that could soften a reason
     # would be the "fallback that passes everything" this design refuses.
-    return Verdict(not reasons, reasons, notes, unmeasurable=unmeasurable,
-                   disclosures=disclosures)
+    return _finish()
 
 
 # --------------------------------------------------------------------- the CLI
@@ -1573,9 +1666,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--base-junit", required=True)
     ap.add_argument("--candidate-junit", required=True)
     # vibe-ic#1498 — the two arms' `repo_hygiene_gates.sh --summary-json`
-    # records. OPTIONAL, and their absence degrades to the per-label comparison
-    # with a disclosure; supplying the BASE one without the candidate's is a
-    # refusal, because then the unmeasured side is the tree under test.
+    # records. Arguments stay syntactically optional for format compatibility;
+    # their absence produces a structured INCOMPLETE refusal.
     ap.add_argument("--base-hygiene", default="",
                     help="`--summary-json` record from the BASE arm's hygiene "
                          "run (vibe-ic#1498)")
@@ -1674,7 +1766,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return None
         try:
             return read_aggregate_junit(path, selection)
-        except ET.ParseError as exc:
+        except (ET.ParseError, OSError, ValueError) as exc:
             print(f"[SKIP] landing_merge_verdict: the {label} report at {p} is "
                   f"not parseable ({exc})", file=sys.stderr)
             return None
@@ -1764,6 +1856,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             candidate_tree=a.verified_tree,
         ))
 
+    debt_ledger = None
+    debt_input_error = ""
+    if a.red_since_ledger:
+        try:
+            path = Path(a.red_since_ledger)
+            if not path.is_file():
+                raise ValueError("the named debt ledger is missing")
+            debt_ledger = _load_red_since().load_ledger(path)
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            debt_input_error = "DEBT LEDGER UNMEASURED: " + str(exc)
+
     v = decide(rebase_status=a.rebase_status, expected_tree=a.expected_tree,
                verified_tree=a.verified_tree,
                github_tree=a.github_tree or None, land=land, delta=delta,
@@ -1773,11 +1876,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                base_selection_supplied=bool(base_selection),
                replayed_tree=a.replayed_tree, base_land=base_land,
                hygiene=hygiene,
-               red_since_ledger=(
-                   _load_red_since().load_ledger(Path(a.red_since_ledger))
-                   if a.red_since_ledger else None),
+               red_since_ledger=debt_ledger,
                commit_age=(
-                   _load_red_since().git_age_days(Path(a.red_since_repo))
+                   _load_red_since().git_age_days(Path(a.red_since_repo), a.base_sha)
                    if a.red_since_repo else None),
                verification_tier=a.verification_tier,
                git_version=a.git_version, tier_reason=a.tier_reason,
@@ -1793,6 +1894,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                    a.candidate_test_worktree_status),
                base_test_worktree_status=a.base_test_worktree_status)
 
+    if debt_input_error:
+        v.debt["deadline_diagnostics"].append(debt_input_error)
+        v.notes.append(debt_input_error)
+
     if a.gate_edited:
         v.notes.append("this branch edits the gate that judges it: "
                        + ", ".join(a.gate_edited))
@@ -1802,6 +1907,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         v.reasons.append(
             "PROTECTED LANDING SOURCE TRANSITION IS UNMEASURED: "
             + protected_error)
+        v.incomplete.append("PROTECTED_LANDING_SOURCE_TRANSITION_UNMEASURED")
 
     head = ("[PASS] landing_merge_verdict: LAND OK" if v.ok
             else "[FAIL] landing_merge_verdict: REFUSE")
@@ -1828,6 +1934,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         Path(a.json_out).write_text(json.dumps({
             "verdict": "LAND_OK" if v.ok else "REFUSE",
             "unmeasurable": v.unmeasurable,
+            "admission": v.admission,
+            "debt": v.debt,
+            "incomplete": v.incomplete,
             "base_sha": a.base_sha,
             "base_tree": a.base_tree,
             "head_sha": a.head_sha,

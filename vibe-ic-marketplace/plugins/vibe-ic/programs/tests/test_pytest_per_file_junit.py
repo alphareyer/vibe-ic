@@ -354,7 +354,39 @@ def _stream_set_over(tmp_path, shares, *, item_order, declared=None,
     return streams
 
 
-def test_a_stream_that_appears_after_the_first_scan_is_still_admitted(tmp_path):
+def test_hermetic_collection_join_does_not_replay_worker_scans(tmp_path):
+    class Emitter:
+        rows = []
+        def emit(self, state, unit=None, **fields):
+            self.rows.append((state, unit, fields))
+    emitter = Emitter()
+    relay = D._HermeticAggregateProgress(["test_a.py"], emitter=emitter)
+    streams = _stream_set_over(tmp_path, [(), ()], item_order=[])
+    try:
+        a, b = streams.streams.values()
+        a.declared_items = b.declared_items = None
+        assert relay.start()
+        a.collect_scanned = 1000
+        relay.observe(streams)
+        b.collect_scanned = 1000
+        relay.observe(streams)
+        assert emitter.rows == [
+            ("start", None, {}),
+            ("collect_scan", "pytest:collection-complete", {"scanned": 1000})]
+        b.collect_scanned = 3000
+        relay.observe(streams)
+        assert [row[2]["scanned"] for row in emitter.rows[1:]] == [1000, 2000, 3000]
+        assert relay.collection_emitted is False
+        streams.error = "planted invalid stream"
+        a.collect_scanned = 4000
+        relay.observe(streams)
+        assert len(emitter.rows) == 4
+        assert relay.finish() is False
+    finally:
+        streams.close()
+
+
+def test_a_stream_that_appears_after_the_first_scan_is_still_admitted(tmp_path, monkeypatch):
     """THE READ SIDE'S OWN BLIND SPOT, and it made every merge verification
     refuse.
 
@@ -383,7 +415,18 @@ def test_a_stream_that_appears_after_the_first_scan_is_still_admitted(tmp_path):
     try:
         assert streams.sample() == 0
         assert streams.streams == {}, "nothing was written yet"
-        os.lseek(streams.dir_fd, 0, os.SEEK_END)
+        # Linux tmpfs rejects SEEK_END on directories. Install a nonzero cookie
+        # with SEEK_SET, and model the offset-sensitive listing explicitly:
+        # some libc/filesystem pairs rewind listdir(fd) on their own.
+        os.lseek(streams.dir_fd, (1 << 63) - 1, os.SEEK_SET)
+        listdir = os.listdir
+
+        def list_from_cursor(path):
+            if path == streams.dir_fd and os.lseek(path, 0, os.SEEK_CUR) != 0:
+                return []
+            return listdir(path)
+
+        monkeypatch.setattr(os, "listdir", list_from_cursor)
         name = f"m.{os.getpid()}.0.jsonl"
         (tmp_path / name).write_bytes(b"")
         streams.sample()
@@ -1520,6 +1563,7 @@ def test_stratified_probe_preserves_late_and_early_green_files(
         encoding="utf-8",
     )
     merged = tmp_path / "stratified-local-cluster.xml"
+    capacity = D._fallback_capacity(8, len(ordered))
 
     proc = _run_driver(
         corpus, merged, "--aggregate-check",
@@ -1527,8 +1571,12 @@ def test_stratified_probe_preserves_late_and_early_green_files(
 
     assert proc.returncode == D.RC_NORECORD, proc.stdout + proc.stderr
     assert "AGGREGATE_NORECORD" in proc.stdout
-    assert ("FALLBACK_STRATIFIED_PROBE  "
-            "indices=1,2,4,5,6,7,9,10") in proc.stdout
+    assert D._stratified_probe_indices(10, 8) == [1, 2, 4, 5, 6, 7, 9, 10]
+    # The subprocess honors the same CPU/memory/PID ceiling as this test.
+    # A request for eight workers is not an entitlement to eight workers.
+    probe_indices = D._stratified_probe_indices(10, capacity.jobs)
+    assert ("FALLBACK_STRATIFIED_PROBE  indices="
+            + ",".join(str(i) for i in probe_indices)) in proc.stdout
     assert "FALLBACK_SYSTEMIC_NORECORD" not in proc.stdout
     assert proc.stdout.count("FALLBACK_PROGRESS") == 10
     assert len([line for line in proc.stdout.splitlines()
@@ -1704,6 +1752,7 @@ def test_systemic_import_hang_recovery_is_bounded_parallel_not_serial(
         encoding="utf-8",
     )
     merged = tmp_path / "systemic-import-hang.xml"
+    capacity = D._fallback_capacity(D.DEFAULT_FALLBACK_JOBS, count)
 
     started = time.monotonic()
     proc = _run_driver(
@@ -1735,9 +1784,9 @@ def test_systemic_import_hang_recovery_is_bounded_parallel_not_serial(
         f"{waves} probe wave(s) + {rescues} rescue(s) for {count} files — a "
         f"bounded parallel recovery is TWO waves, a serial one is {count} "
         f"(observed {elapsed:.2f}s):\n{proc.stdout}")
-    probe_indices = D._stratified_probe_indices(
-        count, D.DEFAULT_FALLBACK_JOBS)
-    assert probe_indices == [1, 2, 3, 4, 6, 7, 8, 9]
+    assert D._stratified_probe_indices(
+        count, D.DEFAULT_FALLBACK_JOBS) == [1, 2, 3, 4, 6, 7, 8, 9]
+    probe_indices = D._stratified_probe_indices(count, capacity.jobs)
     assert ("FALLBACK_STRATIFIED_PROBE  indices="
             + ",".join(str(i) for i in probe_indices)) in proc.stdout
     assert len(list(markers.iterdir())) == count

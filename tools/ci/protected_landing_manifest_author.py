@@ -162,6 +162,17 @@ def _load_transition():
     return module
 
 
+def _preflight(**kwargs) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "_manifest_runtime_preflight",
+        Path(__file__).resolve().with_name("protected_runtime_snapshot.py"))
+    if spec is None or spec.loader is None:
+        raise Refusal("runtime staging preflight is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.preflight_manifest(**kwargs)
+
+
 def _git(repo: Path, args: Sequence[str]) -> str:
     proc = subprocess.run(["git", "-C", str(repo), *args],
                           stdin=subprocess.DEVNULL, capture_output=True,
@@ -397,6 +408,8 @@ def render(*, repo: Path, commit: str, transition_id: str, current_id: str,
     # and `build_receipt` refuses would be a landing nobody could make, so it is
     # refused HERE, where the author can still see why.
     transition.parse_manifest(json.loads(json.dumps(manifest)), oid_len)
+    if not no_move:
+        _preflight(object_repo=repo, base=resolved, manifest=manifest, overlays=moves)
     return manifest
 
 

@@ -1,30 +1,19 @@
 #!/usr/bin/env python3
-"""
-Bootstrap compliance.yaml for every compliance-tracked skill.
+"""Scaffold draft report-shape aids only for explicitly requested skills.
 
-Layout (vibe-ic marketplace):
-    vibe-ic/skills/<skill>/SKILL.md        - the skill definition
-    vibe-ic/skills/<skill>/compliance.yaml    - THIS tool writes these
-    vibe-ic/skills/<skill>/tests/test_compliance.py  - (gen_compliance_tests.py writes)
-
-For every vibe-ic skill we emit a starter compliance.yaml in the
-plugin tree. Each file is a starting point - human review
-(or /rtl-review compliance-spec pass) is expected to refine patterns.
+No arguments are a no-op. Existing authored contracts are never replaced.
+Drafts are named compliance.draft.yaml and do not enter compliance.yaml consumers.
+Only patterns found in the requested instructions are suggested; presentation
+conventions such as Summary and Next are not invented for unrelated guidance.
 """
 from __future__ import annotations
+import json
 import re
 import sys
 from pathlib import Path
 
 
-COMMON_REQS = [
-    ("R_next_step",
-     "At least one 'Next:' handoff line",
-     r"Next:\s*(?:run\s+)?/\w"),
-    ("R_status_or_summary",
-     "Has a Summary or STATUS block",
-     r"(##\s+Summary|\*\*STATUS\*\*:)"),
-]
+from skill_authoring import ContractError, requested_skills
 
 
 def detect_skill_patterns(skill_md: str):
@@ -49,22 +38,23 @@ def detect_skill_patterns(skill_md: str):
 
 
 def gen_yaml(skill_name, detected):
-    all_reqs = detected + COMMON_REQS
+    all_reqs = detected
     seen, uniq = set(), []
     for r in all_reqs:
         if r[0] in seen: continue
         seen.add(r[0]); uniq.append(r)
     lines = [
-        f"# Auto-generated compliance spec for skill '{skill_name}'",
+        f"# DRAFT report-shape aid for skill '{skill_name}'. Review before authoring a contract.",
+        "# This scaffold is not execution evidence or a task-completion gate.",
         f"# Refines vibe-ic/skills/{skill_name}/SKILL.md output requirements.",
         f"skill: {skill_name}",
         "",
-        "requirements:",
+        "requirements:" if uniq else "requirements: []",
     ]
     for rid, desc, pat in uniq:
         safe = pat.replace("'", "''")
         lines.append(f"  - id: {rid}")
-        lines.append(f"    description: \"{desc}\"")
+        lines.append(f"    description: {json.dumps(desc)}")
         lines.append(f"    pattern: '{safe}'")
         lines.append(f"    skill_section: 'Output/Handoff'")
     lines.append("")
@@ -73,32 +63,22 @@ def gen_yaml(skill_name, detected):
     return '\n'.join(lines)
 
 
-def main():
-    # Wave 82: the former second plugin merged into vibe-ic. Try the
-    # merged-plugin layout first, fall back to legacy split for older
-    # checkouts.
-    d_plugin = Path(__file__).resolve().parent.parent
-    marketplace = d_plugin.parent.parent
-    legacy_core = marketplace / 'plugins' / 'vibe-ic' / 'skills'
-    if legacy_core.is_dir():
-        core_skills = legacy_core
-    else:
-        core_skills = d_plugin / 'skills'
-    d_skills = d_plugin / 'skills'
-    made = 0
-    for skill_md in core_skills.glob('*/SKILL.md'):
-        name = skill_md.parent.name
-        target_dir = d_skills / name
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / 'compliance.yaml'
-        if target.exists():
-            print(f"SKIP (exists): skills/{name}/compliance.yaml")
-            continue
-        detected = detect_skill_patterns(skill_md.read_text(errors='replace'))
-        target.write_text(gen_yaml(name, detected))
-        made += 1
-        print(f"WROTE: skills/{name}/compliance.yaml")
-    print(f"\nCreated {made} compliance.yaml files.")
+def main(argv=None):
+    plugin = Path(__file__).resolve().parent.parent
+    try:
+        selected = requested_skills(plugin, argv)
+        for skill in selected:
+            authored = skill / "compliance.yaml"
+            draft = skill / "compliance.draft.yaml"
+            if authored.exists() or draft.exists():
+                print(f"UNCHANGED: {skill.name} already has an authored contract or draft")
+                continue
+            detected = detect_skill_patterns((skill / "SKILL.md").read_text())
+            draft.write_text(gen_yaml(skill.name, detected))
+            print(f"DRAFT: skills/{skill.name}/compliance.draft.yaml; review only, not execution evidence")
+    except (ContractError, OSError) as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

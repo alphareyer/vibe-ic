@@ -296,11 +296,12 @@ class GateResult:
     name: str
     rc: int            # 0 PASS / 1 FAIL / 2 ERROR / -1 SKIP(not-applicable)
     summary: str
+    advisory: bool = False
 
     @property
     def green(self) -> bool:
         # rc 0 = pass; rc -1 = not applicable (counts as green / non-blocking).
-        return self.rc in (0, -1)
+        return self.advisory or self.rc in (0, -1)
 
 
 @dataclass
@@ -310,6 +311,7 @@ class Verdict:
     cadence: str = ""
     version_bump: str = ""
     blocking: List[str] = field(default_factory=list)
+    scope: str = "full"
 
 
 # --------------------------------------------------------------------------
@@ -1950,48 +1952,37 @@ def repo_hygiene_gate(repo: Path,
 
 def gate_red_since_gate(repo: Path, record: Path,
                         base: Optional[str] = None) -> GateResult:
-    """Adjudicate this run's reds against the acknowledgement ledger (#1025).
+    """Debt age is ADVISORY; unreadable/incomplete evidence is BLOCKING.
 
-    A SEPARATE gate rather than a clause folded into `repo_hygiene_gates`,
-    because the two answer different questions and a reader has to be able to
-    tell them apart: the hygiene gate says WHICH gates are red, this one says
-    which of those reds is NEW and which acknowledgement has run out of time.
-    Folding them would report an expired deadline under the headline
-    "repo_hygiene_gates FAILED", pointing the reader at the gate rather than at
-    the row that came due.
-
-    It is also deliberately NOT wired into `_gate_dispatch.sh`. The dispatcher's
-    rc is pinned by vibe-ic#1025's own guard (`run` blocks on rc 2,
-    `run_tolerating_uncheckable` does not), and a ledger that could move that rc
-    would be a ledger that can buy a green.
+    This report never waives a hygiene failure. Standalone review still judges
+    its full hygiene run; the parent landing's canonical BASE/CAND comparator
+    owns no-new-red admission. Read both ledger and clock from BASE so a
+    candidate cannot renew or expire its own inherited debt.
     """
     name = "gate_red_since"
-    prog = Path(__file__).resolve().parent / "gate_red_since_check.py"
-    if not prog.is_file():                      # pragma: no cover - packaging
-        return GateResult(name, -1, "skipped — checker not present")
-    if not record.is_file():
-        # The hygiene gate errored before writing a record. It has already
-        # reported that; saying "no red is overdue" over a record that does not
-        # exist would be this program committing the defect it audits for.
-        return GateResult(name, -1,
-                          "skipped — 0 gate state(s) examined: the hygiene set "
-                          "produced no record to adjudicate")
-    # BOTH HALVES COME FROM THE BASE. The clock, so a candidate's own
-    # commits cannot expire a row it never touched — measured on a
-    # 15-commit branch, 7 rows read as expired against its head and 5
-    # against origin/main, and the branch touched neither of the two.
-    # AND the rows, so a candidate cannot renew its own overdue row by
-    # moving `since` forward in the very commit that needs the renewal.
-    # `landing_merge_verdict` already states the second half for its copy
-    # of this ledger; the first half had never been written down.
-    argv = ["--record", str(record), "--repo", str(repo)]
-    if base:
-        argv += ["--head-ref", base, "--ledger-ref", base]
-    rc, out, err = _run_program(prog, argv)
-    line = (out.strip().splitlines() or [""])[-1]
-    if rc == 2:
-        return GateResult(name, -1, f"skipped — {line}")
-    return GateResult(name, rc, line or (err.strip()[:200] or "no output"))
+    try:
+        checker = _load_module("gate_red_since_check")
+        doc = json.loads(record.read_text(encoding="utf-8"))
+        why = checker.record_is_vacuous(doc)
+        if why:
+            return GateResult(name, 2, f"INCOMPLETE — {why}")
+        ledger = (checker.load_ledger_from_ref(repo, base) if base else
+                  checker.load_ledger(repo / checker.LEDGER_REL))
+        findings, known, new = checker.adjudicate(
+            doc, ledger, checker.git_age_days(repo, base or "HEAD"),
+            checker.git_commit_date(repo))
+    except Exception as exc:
+        return GateResult(name, 2, f"INCOMPLETE — debt evidence unavailable: {exc}")
+    blocking = [f for f in findings if f.kind != "expired"]
+    summary = (f"{len(new)} unacknowledged red, {len(known)} acknowledged; "
+               + ("; ".join(f.line() for f in findings) or "no debt findings"))
+    if blocking:
+        return GateResult(name, 2 if any(
+            f.kind in checker.UNDETERMINED_KINDS for f in blocking) else 1,
+            summary)
+    if findings:
+        return GateResult(name, 1, "ADVISORY — " + summary, advisory=True)
+    return GateResult(name, 0, summary)
 
 
 def _declared_labels(repo: Path, script: Optional[Path] = None) -> Optional[list]:
@@ -2446,7 +2437,8 @@ def review(base: str, head: str, *,
            hygiene_report: Optional[Path] = None,
            hygiene_progress: Optional[Path] = None,
            hygiene_record_in: Optional[Path] = None,
-           hygiene_record_rc: Optional[int] = None) -> Verdict:
+           hygiene_record_rc: Optional[int] = None,
+           scope: str = "full") -> Verdict:
     """Run the deterministic gatekeeper and return a Verdict.
 
     `version_by_gatekeeper=True` is the AUTHORING-side review of a version-less
@@ -2463,6 +2455,16 @@ def review(base: str, head: str, *,
     is the same kind of seam for the #538 hygiene gate — see `repo_hygiene_gate`
     for why it is deliberately not reachable from the CLI.
     """
+    # A structural sub-review is explicitly incomplete for standalone admission.
+    # It accepts no substitute evidence. The approved parent plan must execute
+    # full:repo-hygiene and join its terminal record independently.
+    if scope not in {"full", "structural"}:
+        raise RuntimeError(f"unknown review scope: {scope}")
+    if scope == "structural" and any(x is not None for x in (
+            hygiene_record_in, hygiene_record_rc, hygiene_script,
+            hygiene_report, hygiene_progress)):
+        raise RuntimeError("structural review cannot accept or publish hygiene evidence")
+
     # 1. change-set.
     if override_files is not None:
         files = list(override_files)
@@ -2540,19 +2542,20 @@ def review(base: str, head: str, *,
     # one run cannot answer: is any of this red OLD, and has any of it outlived
     # the deadline its acknowledgement set? The record is handed over rather
     # than the set re-run.
-    with tempfile.TemporaryDirectory(prefix="gate_red_since_") as _td:
-        _record = (Path(hygiene_report).resolve() if hygiene_report is not None
-                   else Path(_td) / "hygiene.json")
-        _record.parent.mkdir(parents=True, exist_ok=True)
-        if hygiene_record_in is not None:
-            _record = Path(hygiene_record_in).resolve()
-            gates.append(hygiene_gate_from_record(
-                repo, _record, hygiene_record_rc, script=hygiene_script))
-        else:
-            gates.append(repo_hygiene_gate(repo, script=hygiene_script,
-                                           summary_out=_record,
-                                           progress_out=hygiene_progress))
-        gates.append(gate_red_since_gate(repo, _record, base=base))
+    if scope == "full":
+        with tempfile.TemporaryDirectory(prefix="gate_red_since_") as _td:
+            _record = (Path(hygiene_report).resolve() if hygiene_report is not None
+                       else Path(_td) / "hygiene.json")
+            _record.parent.mkdir(parents=True, exist_ok=True)
+            if hygiene_record_in is not None:
+                _record = Path(hygiene_record_in).resolve()
+                gates.append(hygiene_gate_from_record(
+                    repo, _record, hygiene_record_rc, script=hygiene_script))
+            else:
+                gates.append(repo_hygiene_gate(repo, script=hygiene_script,
+                                               summary_out=_record,
+                                               progress_out=hygiene_progress))
+            gates.append(gate_red_since_gate(repo, _record, base=base))
 
     # 5. verdict.
     blocking = [f"{g.name}: {g.summary}" for g in gates if not g.green]
@@ -2561,10 +2564,10 @@ def review(base: str, head: str, *,
     elif blocking:
         verdict = "REQUEST_CHANGES"
     else:
-        verdict = "MERGE_OK"
+        verdict = "SCOPED_REVIEW_OK" if scope == "structural" else "MERGE_OK"
 
     return Verdict(verdict=verdict, gates=gates, cadence=cadence,
-                   version_bump=version_bump, blocking=blocking)
+                   version_bump=version_bump, blocking=blocking, scope=scope)
 
 
 def _git_show_marketplace_version(repo: Path, ref: str) -> Optional[str]:
@@ -2587,7 +2590,12 @@ def _git_show_marketplace_version(repo: Path, ref: str) -> Optional[str]:
 def _verdict_to_dict(v: Verdict) -> dict:
     return {
         "verdict": v.verdict,
-        "gates": [{"name": g.name, "rc": g.rc, "summary": g.summary}
+        "scope": v.scope,
+        "standalone_admission": v.verdict == "MERGE_OK" and v.scope == "full",
+        "required_parent_units": (["full:repo-hygiene"]
+                                  if v.scope == "structural" else []),
+        "gates": [{"name": g.name, "rc": g.rc, "summary": g.summary,
+                   "advisory": g.advisory}
                   for g in v.gates],
         "cadence": v.cadence,
         "version_bump": v.version_bump,
@@ -2595,13 +2603,18 @@ def _verdict_to_dict(v: Verdict) -> dict:
     }
 
 
-_RC_BY_VERDICT = {"MERGE_OK": 0, "REQUEST_CHANGES": 1, "REJECT": 2}
+_RC_BY_VERDICT = {"MERGE_OK": 0, "SCOPED_REVIEW_OK": 0,
+                  "REQUEST_CHANGES": 1, "REJECT": 2}
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="Deterministic PR gatekeeper — aggregate the governance "
                     "programs against a PR diff and emit a verdict.")
+    ap.add_argument("--scope", choices=("full", "structural"), default="full",
+                    help="structural: non-hygiene sub-review only; success is "
+                         "SCOPED_REVIEW_OK, never standalone admission. The "
+                         "parent must own hygiene/debt aggregation.")
     ap.add_argument("--base", required=True, help="base git ref")
     ap.add_argument("--head", required=True, help="head git ref")
     ap.add_argument("--role", default=None, help="PR author agent role")
@@ -2765,7 +2778,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                    version_by_gatekeeper=args.version_by_gatekeeper,
                    pr_metadata=pr_metadata,
                    override_files=override_files,
-                   batch=args.batch,
+                   batch=args.batch, scope=args.scope,
                    hygiene_report=(Path(args.hygiene_report)
                                    if args.hygiene_report else None),
                    hygiene_progress=(Path(args.hygiene_progress)
@@ -2781,8 +2794,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                                               ensure_ascii=False) + "\n")
 
     print(f"VERDICT: {v.verdict}   (cadence={v.cadence}, bump={v.version_bump})")
+    if v.scope == "structural":
+        print("SCOPE: structural only; hygiene and debt aggregation belong to "
+              "the caller's required full:repo-hygiene unit. "
+              "No standalone admission or full stamp is authorized.")
     for g in v.gates:
         tag = {0: "PASS", 1: "FAIL", 2: "ERROR", -1: "SKIP"}.get(g.rc, "?")
+        if g.advisory:
+            tag = "REPORT"
         print(f"  [{tag}] {g.name}: {g.summary}")
     if v.blocking:
         print("BLOCKING:")

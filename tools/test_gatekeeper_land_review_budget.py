@@ -182,7 +182,7 @@ def test_no_status_other_than_zero_reaches_a_caller_as_a_pass(
 
 def test_the_lander_actually_calls_the_review():
     src = LANDER.read_text(encoding="utf-8")
-    assert 'run "full:gatekeeper-review"' in src, (
+    assert 'landing_unit_full_gatekeeper_review()' in src, (
         "the review is defined but never invoked — which is the exact state "
         "this wiring exists to end")
 
@@ -245,6 +245,7 @@ def _drive_through_run(tmp_path, stub_body: str, budget: str = "240"):
         f'GK_REVIEW_BUDGET_S="{budget}"\nLANE_DIR="{lanes}"\n'
         'LANE_BROKEN=0\nLANE_WAIT_RC=0\nLANDING_RECORD_ENABLED=0\nFAILED=0\n'
         'EMIT_OUT=""\nEMIT_RC=0\n'
+        'LANDING_NEXT=0\nLANDING_PLAN_UNITS=("full:gatekeeper-review")\n'
         + "".join(_extract(fn) for fn in _CHAIN)
         + _extract("run_gatekeeper_review")
         + 'run "full:gatekeeper-review" "gatekeeper review" '

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import importlib.util
 import json
 import os
@@ -169,7 +170,7 @@ elif args[:2] == ["container", "create"]:
     }
     boolean_flags = {"--pull=never", "--read-only"}
     values = {}
-    repeated = {"--env": [], "--mount": []}
+    repeated = {"--env": [], "--mount": [], "--tmpfs": []}
     i = 2
     while i < len(args) and args[i] != IMAGE:
         flag = args[i]
@@ -239,6 +240,20 @@ elif args[:2] == ["container", "create"]:
             "RW": False, "Source": "/", "Type": "bind",
         })
     user = values["--user"] if behavior != "wrong_user" else "0:0"
+    tmpfs = dict(raw.split(":", 1) for raw in repeated["--tmpfs"])
+    candidate = "-provision-" not in values["--name"] and "-export-" not in values["--name"]
+    if candidate:
+        if behavior == "missing_home":
+            tmpfs.pop("/nonexistent", None)
+        elif behavior == "missing_scratch":
+            tmpfs.pop("/var/tmp", None)
+        elif behavior == "exec_tmp":
+            tmpfs["/tmp"] = tmpfs["/tmp"].replace("noexec", "exec")
+        elif behavior == "home_unowned":
+            tmpfs["/nonexistent"] = tmpfs["/nonexistent"].replace("uid=65534", "uid=0")
+        elif behavior == "host_home_mount":
+            mounts.append({"Destination": "/nonexistent", "Type": "bind",
+                           "Source": "/home", "RW": True, "Propagation": "rprivate"})
     doc = {
         "Config": {
             "AttachStdin": False, "Cmd": command, "Entrypoint": [values["--entrypoint"]],
@@ -254,7 +269,7 @@ elif args[:2] == ["container", "create"]:
             "PublishAllPorts": False, "ReadonlyRootfs": True,
             "RestartPolicy": {"MaximumRetryCount": 0, "Name": "no"},
             "SecurityOpt": ["no-new-privileges:true"],
-            "Tmpfs": {"/tmp": values["--tmpfs"].split(":", 1)[1]},
+            "Tmpfs": tmpfs,
         },
         "Id": CID, "Image": IMAGE_ID, "Mounts": mounts,
         "Name": "/" + values["--name"],
@@ -327,13 +342,19 @@ elif args[:2] == ["container", "start"]:
     elif behavior == "nan":
         print(PREFIX + '{"completed":NaN}', flush=True)
         rc = 0
-    elif behavior == "stall":
+    elif behavior in {"stall", "stall_stop_unproven"}:
+        (root / "evidence" / "raw-progress.jsonl").write_text(
+            '{"event":"collection-started"}\n', encoding="utf-8")
+        print("raw failure diagnostic", file=sys.stderr, flush=True)
         while True:
             current = load_container(name)
             if current.get("Killed"):
                 raise SystemExit(137)
             time.sleep(0.02)
     else:
+        if behavior == "collect_scan":
+            emit({**common, "completed": 0, "seq": 1, "state": "collect_scan",
+                  "unit": "pytest:collection-complete", "scanned": 1000})
         for index, unit in enumerate(plan["units"], 1):
             emit({**common, "completed": index, "seq": index,
                   "state": "checkpoint", "unit": unit})
@@ -367,6 +388,8 @@ elif args[:2] == ["container", "kill"]:
         "ExitCode": 137, "Pid": 0, "Restarting": False,
         "Running": False, "Status": "exited",
     })
+    if os.environ.get("FAKE_DOCKER_BEHAVIOR") == "stall_stop_unproven":
+        doc["State"].update({"Running": True, "Pid": 999, "Status": "running"})
     save_container(doc)
     print(doc["Name"].lstrip("/"))
 elif args[:2] == ["container", "rm"]:
@@ -488,6 +511,13 @@ def test_fake_docker_exact_profile_lifecycle_and_canonical_receipt(case):
     assert "STARTUPDIR" not in process_env
     assert "PYTHONPATH" not in process_env
     assert "GATEKEEPER_HYGIENE_REPORT" not in process_env
+    assert process_env["HOME"] == "/nonexistent"
+    assert process_env["TMPDIR"] == "/var/tmp"
+    assert receipt["container"]["tmpfs"] == {
+        "/tmp": "rw,nosuid,nodev,noexec,size=536870912,mode=1777",
+        "/nonexistent": "rw,nosuid,nodev,noexec,size=1048576,mode=0700,uid=65534,gid=65534",
+        "/var/tmp": "rw,nosuid,nodev,exec,size=536870912,mode=0700,uid=65534,gid=65534",
+    }
     assert receipt["result"] == {
         "attach_exit_code": 0, "dead": False, "exit_code": 0,
         "oom_killed": False, "pid": 0, "pid_dead": True,
@@ -588,8 +618,14 @@ def test_malformed_progress_is_norecord_and_cleanup_is_owned(case, behavior):
     assert not case["output"].exists()
     assert not (case["state"] / "container.json").exists()
     assert not (case["state"] / "volume.json").exists()
-    assert not any("vibeic-candidate-export-" in value
-                   for row in calls(case) for value in row)
+    rows = calls(case)
+    # Failure-side export is permitted only after killing the owned candidate
+    # and inspecting its stopped state. Success output/receipt remain absent.
+    exported = [i for i, row in enumerate(rows)
+                if row[:2] == ["container", "create"]
+                and any("vibeic-candidate-export-" in value for value in row)]
+    killed = [i for i, row in enumerate(rows) if row[:2] == ["container", "kill"]]
+    assert all(killed and killed[0] < index for index in exported)
 
 
 def test_semantic_stall_has_no_total_runtime_verdict_and_cleans(case):
@@ -605,6 +641,134 @@ def test_semantic_stall_has_no_total_runtime_verdict_and_cleans(case):
     assert not (case["state"] / "volume.json").exists()
 
 
+@pytest.mark.parametrize("behavior, exported, attach_signal, refusal", [
+    pytest.param("stall", True, None, None, id="stall-True"),
+    pytest.param("stall_stop_unproven", False, None, "dead-PID exit",
+                 id="stall_stop_unproven-False"),
+    pytest.param("stall", True, "exited", None,
+                 id="exit-between-poll-and-signal"),
+    pytest.param("stall_stop_unproven", False, "exited", "dead-PID exit",
+                 id="exit-with-stop-unproven"),
+    pytest.param("stall", False, "denied", "Operation not permitted",
+                 id="signal-denied"),
+])
+def test_failed_run_retains_diagnostics_without_a_success_receipt(
+    case, monkeypatch, behavior, exported, attach_signal, refusal,
+):
+    if attach_signal is not None:
+        # Delay only the fake attach client's already-killed exit so the real
+        # poll sees it alive. The wrapper lets it exit before the signal call;
+        # production retention, stopped proof and export remain unmodified.
+        before = 'if current.get("Killed"):\n                raise SystemExit(137)'
+        after = ('if current.get("Killed"):\n                time.sleep(0.2)'
+                 '\n                raise SystemExit(137)')
+        fixture = case["docker"].read_text()
+        assert fixture.count(before) == 1
+        case["docker"].write_text(fixture.replace(before, after))
+        wrapper = case["output"].parent / "attach_signal_wrapper.py"
+        trace = wrapper.with_suffix(".json")
+        wrapper.write_text(f'''
+import errno
+import json
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, {str(HERE)!r})
+import hermetic_candidate_runner as R
+original = R._run_monitored
+def monitored(docker, resources, *args, **kwargs):
+    try:
+        return original(docker, resources, *args, **kwargs)
+    except R.Refusal:
+        attach = resources.attach
+        real_killpg = os.killpg
+        def at_signal(pid, sig):
+            if attach is not None and pid == attach.pid:
+                os.killpg = real_killpg
+                # Reaching this call proves the production poll returned None.
+                rc = attach.wait(timeout=5)
+                try:
+                    if {attach_signal!r} == "denied":
+                        raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+                    return real_killpg(pid, sig)
+                except OSError as exc:
+                    Path({str(trace)!r}).write_text(json.dumps(dict(
+                        poll_return_before_exit=None, attach_exit_before_killpg=rc,
+                        signal=sig, errno=exc.errno)))
+                    raise
+            return real_killpg(pid, sig)
+        os.killpg = at_signal
+        raise
+R._run_monitored = monitored
+raise SystemExit(R.main())
+''')
+        monkeypatch.setitem(globals(), "RUNNER_PATH", wrapper)
+    proc = invoke(case, behavior=behavior)
+    if attach_signal is not None:
+        schedule = json.loads(trace.read_text())
+        assert schedule["poll_return_before_exit"] is None
+        assert schedule["attach_exit_before_killpg"] == 137
+        assert schedule["signal"] == signal.SIGTERM
+        assert schedule["errno"] == (
+            errno.ESRCH if attach_signal == "exited" else errno.EPERM)
+    assert proc.returncode == 2, proc.stderr
+    paths = list(case["output"].parent.glob(case["output"].name + ".failure-diagnostics-*"))
+    assert len(paths) == 1, proc.stderr
+    diagnostic = paths[0]
+    doc = json.loads((diagnostic / "FAILURE_DIAGNOSTICS.json").read_text())
+    assert doc["status"] == "NORECORD"
+    assert doc["completed"] == 0
+    assert "semantic progress stalled" in doc["reason"]
+    assert (diagnostic / "stdout.bin").read_bytes().startswith(b"VIBEIC_PROGRESS ")
+    assert (diagnostic / "stderr.bin").read_text() == "raw failure diagnostic\n"
+    plan = json.loads((diagnostic / "progress-plan.json").read_text())
+    first = json.loads((diagnostic / "accepted-progress.jsonl").read_text())
+    assert plan["nonce"] == first["nonce"]
+    assert plan["units"] == ["load", "check"]
+    assert not case["receipt"].exists()
+    assert not case["output"].exists()
+    if exported:
+        assert doc["raw_volume"] == "EXPORTED_AFTER_STOP"
+        assert (diagnostic / "raw-sidecars/raw-progress.jsonl").read_text() == (
+            '{"event":"collection-started"}\n')
+        rows = calls(case)
+        killed = next(i for i, row in enumerate(rows)
+                      if row[:2] == ["container", "kill"])
+        created = next(i for i, row in enumerate(rows)
+                       if row[:2] == ["container", "create"]
+                       and any("vibeic-candidate-export-" in v for v in row))
+        inspections = [i for i, row in enumerate(rows)
+                       if row == ["container", "inspect", rows[killed][-1]]
+                       and i > killed]
+        assert inspections[0] < created < inspections[1]
+    else:
+        assert doc["raw_volume"] == "NOT_EXPORTED"
+        assert refusal in doc["raw_volume_reason"]
+        assert not (diagnostic / "raw-sidecars").exists()
+        assert not any("vibeic-candidate-export-" in value
+                       for row in calls(case) for value in row)
+    assert not (case["state"] / "container.json").exists()
+    assert not (case["state"] / "volume.json").exists()
+
+
+def test_receipt_counts_scan_work_separately_from_completion(case):
+    plan = json.loads(case["plan"].read_text())
+    plan["units"] = ["pytest:collection-complete", "pytest:test_one.py",
+                     "pytest:record-published"]
+    case["plan"].write_text(canonical(plan) + "\n")
+    proc = invoke(case, behavior="collect_scan")
+    assert proc.returncode == 0, proc.stderr
+    receipt = runner.strict_load_receipt(case["receipt"])
+    assert receipt["progress"]["completed"] == 3
+    assert receipt["progress"]["collect_scanned"] == 1000
+    assert receipt["progress"]["records"] == 6
+    for scanned, records in ((1000, 5), (0, 6), (1001, 6), (1001000, 1006)):
+        changed = json.loads(case["receipt"].read_text())
+        changed["progress"].update(collect_scanned=scanned, records=records)
+        with pytest.raises(ValueError, match="progress|scan|collection"):
+            runner.validate_receipt(changed)
+
+
 @pytest.mark.parametrize("behavior", ["wrong_user", "extra_mount"])
 def test_profile_drift_refuses_before_candidate_start(case, behavior):
     proc = invoke(case, behavior=behavior)
@@ -613,6 +777,35 @@ def test_profile_drift_refuses_before_candidate_start(case, behavior):
     assert not (case["state"] / "container.json").exists()
     assert not (case["state"] / "provisioner.json").exists()
     assert not (case["state"] / "volume.json").exists()
+
+
+@pytest.mark.parametrize("behavior", [
+    "missing_home", "missing_scratch", "exec_tmp", "home_unowned", "host_home_mount",
+])
+def test_private_account_and_scratch_drift_refuses_before_candidate_start(case, behavior):
+    proc = invoke(case, behavior=behavior)
+    assert proc.returncode == 2, proc.stderr
+    assert "private tmpfs" in proc.stderr
+    candidate_starts = [row for row in calls(case)
+        if row[:2] == ["container", "start"]
+        and not any("-provision-" in item or "-export-" in item for item in row)]
+    assert candidate_starts == []
+    assert not case["receipt"].exists()
+    assert not (case["state"] / "container.json").exists()
+    assert not (case["state"] / "volume.json").exists()
+
+
+@pytest.mark.parametrize("destination", ["/tmp", "/nonexistent", "/var/tmp"])
+def test_private_tmpfs_receipt_cannot_lose_isolation(case, destination):
+    proc = invoke(case)
+    assert proc.returncode == 0, proc.stderr
+    receipt = runner.strict_load_receipt(case["receipt"])
+    receipt["container"]["tmpfs"].pop(destination)
+    # Rebind the digest: this must be a profile refusal, not merely bad hashing.
+    body = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    receipt["receipt_sha256"] = runner._sha256(runner._canonical(body))
+    with pytest.raises(ValueError, match="container profile"):
+        runner.validate_receipt(receipt)
 
 
 def test_a_read_write_subject_bind_refuses_before_the_candidate_starts(case):

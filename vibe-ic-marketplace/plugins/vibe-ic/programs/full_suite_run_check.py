@@ -181,12 +181,11 @@ def population(root: Optional[Path] = None) -> Optional[List[str]]:
     population that could not be read are the same shape to a caller that
     subtracts, and only one of them means the suite is complete.
 
-    The derivation is `landing_unselectable_pytest_corpus`'s — `git ls-files`
-    filtered by pytest's own `python_files` patterns, with that program's
-    DECLARED exclusions (each carrying its reason) subtracted. Importing it is
-    the point: the corpus this gate judges coverage against and the corpus the
-    landing enumerates as unreachable must be the same corpus, or a landing
-    could run one and be certified against the other.
+    The primary lane uses ci_targeted_test_select's declared pytest population,
+    intersected with landing_unselectable_pytest_corpus's tracked paths. Its
+    remaining sibling tiers retain their default filenames and explicit
+    exclusions. Selection and its FULL descriptor therefore agree about the
+    primary lane without dropping the other tiers a full run must execute.
     """
     plugin = (root or _PLUGIN_DEFAULT).resolve()
     try:
@@ -196,8 +195,21 @@ def population(root: Optional[Path] = None) -> Optional[List[str]]:
     repo = lu.repo_root(start=plugin / "programs" / "x.py")
     if repo is None:
         return None
-    tracked = lu.tracked_test_files(repo)
-    if tracked is None:
+    tracked_all = lu.tracked_files(repo)
+    if tracked_all is None:
+        return None
+    try:
+        selector = _load_sibling("ci_targeted_test_select")
+        declared = set(selector.declared_test_population(plugin))
+        testpaths, _, _ = selector._pytest_settings(plugin)
+        # The primary landing lane owns programs/tests; additional declared
+        # scopes also use its filename/exclusion settings. Other sibling tiers
+        # keep their existing default-name inventory and explicit exclusions.
+        scopes = {selector._TESTS_REL}
+        for pattern in testpaths:
+            matches = [plugin] if pattern == "." else plugin.glob(pattern)
+            scopes.update(path.relative_to(plugin).as_posix() for path in matches)
+    except (OSError, ValueError):
         return None
     try:
         prefix = plugin.relative_to(repo).as_posix() + "/"
@@ -211,14 +223,21 @@ def population(root: Optional[Path] = None) -> Optional[List[str]]:
     stem = lu._PLUGIN_REL.rstrip("/") + "/"
     excluded = tuple(e.prefix[len(stem):] if e.prefix.startswith(stem)
                      else e.prefix for e in lu._EXCLUDED)
-    out = []
-    for rel in tracked:
+    out = set()
+    for rel in tracked_all:
         if not rel.startswith(prefix):
             continue                      # repo-root trees are not this plugin's
         local = rel[len(prefix):]
+        if local in declared:
+            out.add(local)
+            continue
+        if any(scope == "." or local == scope or local.startswith(scope + "/")
+               for scope in scopes):
+            continue
         if any(local.startswith(x) for x in excluded):
             continue
-        out.append(local)
+        if lu._TEST_BASENAME.match(Path(local).name):
+            out.add(local)
     return sorted(out)
 
 

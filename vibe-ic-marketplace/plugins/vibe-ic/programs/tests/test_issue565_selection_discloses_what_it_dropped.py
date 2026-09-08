@@ -47,6 +47,9 @@ def _git(repo, *a):
 def _tree(tmp_path):
     """A plugin tree where one source module is imported by a test whose NAME
     does not own it — the exact shape name-ownership cannot see."""
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\ntestpaths = programs/tests\npython_files = test_*.py\n",
+        encoding="utf-8")
     prog = tmp_path / "programs"
     tests = prog / "tests"
     tests.mkdir(parents=True)
@@ -93,6 +96,9 @@ def test_the_invisible_edge_is_the_one_named_after_the_chip(tmp_path):
 def test_a_change_with_no_invisible_edge_reports_nothing(tmp_path):
     """THE ACCEPT CASE: when name-ownership covers every importer there is no
     gap, and inventing a line for it trains the reader to skip it."""
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\ntestpaths = programs/tests\npython_files = test_*.py\n",
+        encoding="utf-8")
     prog = tmp_path / "programs"
     tests = prog / "tests"
     tests.mkdir(parents=True)

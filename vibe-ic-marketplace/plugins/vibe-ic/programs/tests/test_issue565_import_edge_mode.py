@@ -132,6 +132,7 @@ def test_the_index_fails_open_on_an_unreadable_test(tmp_path):
     nothing is the defect this mode exists to prevent."""
     fake = tmp_path / "programs" / "tests"
     fake.mkdir(parents=True)
+    (tmp_path / "pytest.ini").write_text("[pytest]\ntestpaths = programs/tests\n")
     (tmp_path / "programs" / "some_module.py").write_text("x = 1\n")
     (fake / "test_broken.py").write_text("def f(:\n", encoding="utf-8")
     (fake / "test_ok.py").write_text("import some_module\n", encoding="utf-8")
@@ -163,6 +164,7 @@ def test_the_subprocess_driver_edge_kind_contributes(tmp_path):
     """
     fake_tests = tmp_path / "programs" / "tests"
     fake_tests.mkdir(parents=True)
+    (tmp_path / "pytest.ini").write_text("[pytest]\ntestpaths = programs/tests\n")
     (tmp_path / "programs" / "driven_program.py").write_text(
         "raise SystemExit(0)\n", encoding="utf-8")
     # NEITHER an import NOR a spec_from_file_location — the whole point.
@@ -195,6 +197,7 @@ def test_the_driver_edge_does_not_fire_on_a_bare_mention(tmp_path):
     """
     fake_tests = tmp_path / "programs" / "tests"
     fake_tests.mkdir(parents=True)
+    (tmp_path / "pytest.ini").write_text("[pytest]\ntestpaths = programs/tests\n")
     (tmp_path / "programs" / "driven_program.py").write_text(
         "raise SystemExit(0)\n", encoding="utf-8")
     (fake_tests / "test_only_mentions_it.py").write_text(

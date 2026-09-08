@@ -102,7 +102,53 @@ def _build_clean_plugin(tmp_path: Path, version: str = "1.0.96") -> Path:
             "    sys.exit(main())\n")
         (progs / "tests" / f"test_{guard}.py").write_text(
             f"import {guard}\n\ndef test_ok():\n    assert {guard}.main([]) == 0\n")
+    # Full review consumes hygiene evidence and a BASE-owned debt ledger.
+    # This fixture's tiny hygiene producer checks its own widget; it does not
+    # run the repository's global corpus or replace the debt adjudicator.
+    import test_issue1498_hygiene_subset_rule_is_wired as H
+    record = H._record([H._gate("fixture widget", "PASS")])
+    script = repo / "fixture-hygiene.sh"
+    script.write_text("python3 - \"$@\" <<'PY'\n"
+        "import argparse,json,pathlib,runpy,sys\n"
+        "p=argparse.ArgumentParser();p.add_argument('--summary-json');a=p.parse_args()\n"
+        "widget=pathlib.Path('vibe-ic-marketplace/plugins/vibe-ic/programs/widget.py')\n"
+        "assert runpy.run_path(str(widget))['go']() == 1\n"
+        f"pathlib.Path(a.summary_json).write_text({json.dumps(record)!r})\n"
+        "PY\n")
+    ledger = repo / "tools/ci/gate_red_since.json"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(json.dumps({"acknowledged": []}) + "\n")
+    import subprocess
+    # Keep the audit scaffolding in BASE: the subject is a widget repair,
+    # not an addition of the fixture's synthetic gates or flow declaration.
+    (progs / "widget.py").write_text("def go():\n    return 0\n")
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture",
+                    "-c", "user.email=fixture@invalid", "commit", "-qm", "fixture BASE ledger"], check=True)
+    subprocess.run(["git", "-C", str(repo), "tag", "BASE"], check=True)
+    # The review is of one real candidate commit, not BASE reviewing itself.
+    # Repair real behavior while the debt ledger and scaffolding stay BASE-owned.
+    (progs / "widget.py").write_text("def go():\n    return 1\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Fixture",
+                    "-c", "user.email=fixture@invalid", "commit", "-qm",
+                    "repair fixture widget result"], check=True)
     return repo, plugin
+
+
+@pytest.fixture(autouse=True)
+def _route_fixture_hygiene(monkeypatch):
+    """Use the existing explicit script seam for this module's tiny subject."""
+    actual = gk.repo_hygiene_gate
+
+    def run(repo, **kwargs):
+        script = repo / "fixture-hygiene.sh"
+        if script.is_file() and kwargs.get("script") is None:
+            kwargs["script"] = script
+        return actual(repo, **kwargs)
+
+    monkeypatch.setattr(gk, "repo_hygiene_gate", run)
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +156,7 @@ def _build_clean_plugin(tmp_path: Path, version: str = "1.0.96") -> Path:
 # ---------------------------------------------------------------------------
 def test_clean_diff_merge_ok(tmp_path):
     repo, plugin = _build_clean_plugin(tmp_path, version="1.0.96")
+    _write_ppa_answers(repo, plugin)
     v = gk.review(
         "BASE", "HEAD",
         repo=repo, plugin_root=plugin,
@@ -227,6 +274,7 @@ def test_regression_version_request_changes(tmp_path):
 # ---------------------------------------------------------------------------
 def test_cadence_minor_milestone_selects_full(tmp_path):
     repo, plugin = _build_clean_plugin(tmp_path, version="1.1.0")
+    _write_ppa_answers(repo, plugin)
     # A FULL milestone with a full-suite pytest cmd => cadence gate PASS.
     v = gk.review(
         "BASE", "HEAD",
@@ -266,6 +314,7 @@ def test_cadence_full_milestone_rejects_subset_pytest(tmp_path):
 
 def test_cadence_patch_selects_targeted(tmp_path):
     repo, plugin = _build_clean_plugin(tmp_path, version="1.0.96")
+    _write_ppa_answers(repo, plugin)
     # A patch with a SUBSET pytest run is fine for TARGETED cadence.
     v = gk.review(
         "BASE", "HEAD",
@@ -403,6 +452,7 @@ def test_forbidden_git_op_request_changes(tmp_path):
 def test_force_with_lease_is_allowed(tmp_path):
     """--force-with-lease is the safe sibling and must NOT be flagged."""
     repo, plugin = _build_clean_plugin(tmp_path, version="1.0.96")
+    _write_ppa_answers(repo, plugin)
     v = gk.review(
         "BASE", "HEAD",
         repo=repo, plugin_root=plugin, role="core-agent",
@@ -417,7 +467,7 @@ def test_force_with_lease_is_allowed(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 8. JSON shape: the emitted dict has the required 5 sections.
+# 8. JSON shape: admission scope and advisory state remain explicit.
 # ---------------------------------------------------------------------------
 def test_json_five_section_shape(tmp_path):
     repo, plugin = _build_clean_plugin(tmp_path, version="1.0.96")
@@ -429,11 +479,12 @@ def test_json_five_section_shape(tmp_path):
         override_cur="1.0.96", override_prev="1.0.95",
     )
     d = gk._verdict_to_dict(v)
-    assert set(d.keys()) == {"verdict", "gates", "cadence",
+    assert set(d.keys()) == {"verdict", "gates", "cadence", "scope",
+                             "standalone_admission", "required_parent_units",
                              "version_bump", "blocking"}
     assert isinstance(d["gates"], list) and d["gates"]
     for g in d["gates"]:
-        assert set(g.keys()) == {"name", "rc", "summary"}
+        assert set(g.keys()) == {"name", "rc", "summary", "advisory"}
     assert d["verdict"] in ("MERGE_OK", "REQUEST_CHANGES", "REJECT")
 
 
@@ -453,16 +504,11 @@ def test_json_five_section_shape(tmp_path):
 def _write_ppa_answers(repo, plugin):
     import hashlib
     rel_src = "vibe-ic-marketplace/plugins/vibe-ic/programs/widget.py"
-    rel_art = "vibe-ic-marketplace/plugins/vibe-ic/programs/widget_report.json"
     rel_tst = ("vibe-ic-marketplace/plugins/vibe-ic/programs/tests/"
-               "test_widget.py::test_widget_is_measured")
-    tests_dir = plugin / "programs" / "tests"
-    tests_dir.mkdir(parents=True, exist_ok=True)
-    (tests_dir / "test_widget.py").write_text(
-        "def test_widget_is_measured():\n    assert True\n")
-    art = plugin / "programs" / "widget_report.json"
-    art.write_text('{"metric":"area_um2","value":1.0}\n')
-    digest = "sha256:" + hashlib.sha256(art.read_bytes()).hexdigest()
+               "test_widget.py::test_go")
+    # Preserve the existing behavior assertion and bind the actual source;
+    # do not replace it with assert True or invent a physical measurement.
+    digest = "sha256:" + hashlib.sha256((repo / rel_src).read_bytes()).hexdigest()
     gh = repo / ".github"
     gh.mkdir(parents=True, exist_ok=True)
     (gh / "ppa_pr_answers.json").write_text(json.dumps({
@@ -470,7 +516,7 @@ def _write_ppa_answers(repo, plugin):
         "answers": [
             {"question": 1, "evidence": [{"kind": "path", "ref": rel_src}]},
             {"question": 2, "evidence": [{"kind": "path", "ref": rel_src}]},
-            {"question": 3, "evidence": [{"kind": "artefact", "ref": rel_art,
+            {"question": 3, "evidence": [{"kind": "artefact", "ref": rel_src,
                                           "sha256": digest}]},
             {"question": 4, "evidence": [{"kind": "test", "ref": rel_tst}]},
             {"question": 5, "evidence": [{"kind": "test", "ref": rel_tst}]},
@@ -674,6 +720,7 @@ def test_docstring_documents_step_2_7_boundary():
 # ---------------------------------------------------------------------------
 def test_blindness_skipped_when_absent(tmp_path):
     repo, plugin = _build_clean_plugin(tmp_path, version="1.0.96")
+    _write_ppa_answers(repo, plugin)
     v = gk.review(
         "BASE", "HEAD",
         repo=repo, plugin_root=plugin, role="core-agent",
@@ -858,6 +905,7 @@ def test_corpus_pin_scan_discloses_an_absent_tests_tree(tmp_path):
 def test_both_advisories_are_in_the_verdict_and_neither_blocks(tmp_path):
     """The wiring, not just the drivers: a full review() must LIST them."""
     repo, plugin = _build_clean_plugin(tmp_path, version="1.0.96")
+    _write_ppa_answers(repo, plugin)
     v = gk.review(
         "BASE", "HEAD",
         repo=repo, plugin_root=plugin,

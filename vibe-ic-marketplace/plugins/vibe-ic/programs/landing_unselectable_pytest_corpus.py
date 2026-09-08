@@ -231,8 +231,8 @@ def plugin_rel(repo: Path) -> str:
         return _PLUGIN_REL
 
 
-def tracked_test_files(repo: Path) -> Optional[List[str]]:
-    """Every TRACKED file pytest would collect by name, repo-relative, sorted.
+def tracked_files(repo: Path) -> Optional[List[str]]:
+    """Every TRACKED path, repo-relative, sorted, without a filename policy.
 
     None on any git failure — the rc=2 path. `git ls-files` is used rather than
     a walk so that an untracked scratch file in somebody's worktree cannot
@@ -251,6 +251,14 @@ def tracked_test_files(repo: Path) -> Optional[List[str]]:
     if not files:
         # A repository with zero tracked files is not a repository we can
         # measure. Refuse rather than report an empty corpus.
+        return None
+    return sorted(files)
+
+
+def tracked_test_files(repo: Path) -> Optional[List[str]]:
+    """Tracked default-name pytest files; the existing sibling-tier inventory."""
+    files = tracked_files(repo)
+    if files is None:
         return None
     return sorted(p for p in files if _TEST_BASENAME.match(os.path.basename(p)))
 

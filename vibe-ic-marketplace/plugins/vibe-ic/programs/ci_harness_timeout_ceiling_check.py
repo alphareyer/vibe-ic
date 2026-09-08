@@ -285,14 +285,7 @@ _DRIVER_COMMAND_RE = {
 # EVERY DIGEST BELOW IS DERIVED, never hand-transcribed: each is the value this
 # file's own rule printed as `sha256=` when run against the reviewed tree, and
 # the orchestrator's independently observed map agrees with all six.
-_LANDING_LANE_SHA256 = {
-    "run_pytest":
-        "3b3b685c4841db38be00b3fb2cc33fa86252b585d6ffab9450e34ad9b2e26dbd",
-    "run_repo_tools_pytest":
-        "95de055aebcd611fd6809deb3f0b3fdf542b9f0d0642df702bbb63ebee6d4ccf",
-    "run_unselectable_pytest":
-        "aac62e70f0eb53fba2925c85188fd57384396503ff871665f8ca9748cf36ef0a",
-}
+_LANDING_LANE_SHA256 = {'run_pytest': '3b3b685c4841db38be00b3fb2cc33fa86252b585d6ffab9450e34ad9b2e26dbd', 'run_repo_tools_pytest': '95de055aebcd611fd6809deb3f0b3fdf542b9f0d0642df702bbb63ebee6d4ccf', 'run_unselectable_pytest': 'aac62e70f0eb53fba2925c85188fd57384396503ff871665f8ca9748cf36ef0a'}
 # Entry-to-last-lane control flow is reviewed as one indivisible contract.
 # Hashing only the three function definitions is insufficient: their exact
 # bodies can remain present while a top-level ``exit``, ``false && call``, or a
@@ -339,7 +332,7 @@ _LANDING_WINDOW_ANCHOR = "lane_emit_window"
 # top-level `lane_emit_window` call, so the entry-to-anchor prefix moves with
 # the whole file and the three lane bodies do not.
 _LANDING_EXECUTION_PREFIX_SHA256 = (
-    "2295ec9ce4db824071c84e87063080d31006b59d32e032536c05542350d51c20"
+    '9a1a0c55525ded872e60cf6025ebdcc9c982d8097583e59e998728f7467d421e'
 )
 # RE-PINNED when the landing gained its runtime PREFLIGHT. Both digests below
 # moved for one reason and it is stated here rather than left to `git log`: the
@@ -879,7 +872,7 @@ _LANDING_EXECUTION_PREFIX_SHA256 = (
 # can force a byte change must be satisfied BEFORE the PREPARE is rendered, not
 # between the two landings. See vibe-ic#2202.
 _LANDING_SCRIPT_SHA256 = (
-    "5f7fb3c1b2bb01ac8d708699bcb678bc4f6647c147074a5c36403f0e21d0f3b6"
+    'b206f18e77cb16447f942afbf8663c2609d8de9e3ffe20d4893d8ff1f847b962'
 )
 # The helper AST is not enough: a counterfeit CLI can define the expected
 # helper and never call it.  Bind the policy to the complete reviewed driver
@@ -1002,7 +995,7 @@ _LANDING_SCRIPT_SHA256 = (
 #   run_unselectable_pytest             aac62e70f0eb…   unmoved, untouched
 #   _SEMANTIC_DRIVER_SHA256   a50922ce5e5c… -> 1912a288b458…      MOVED
 _SEMANTIC_DRIVER_SHA256 = (
-    "1912a288b458a164d577d63a8ab921b3d28ef86d894f33dcefb1840930941cab"
+    '981d5c5d8e1ac7051b0682c036a734335fc5f96e3ce717b9fadd355fcc19157e'
 )
 #: `pip install pytest-timeout` names the plugin, not a bound; it carries no
 #: `--timeout=N` and so cannot match, but the negative is stated because a
@@ -1135,7 +1128,7 @@ def _logical_lines(text: str) -> Iterable[Tuple[int, str]]:
         yield start, " ".join(buf)
 
 
-def _semantic_driver_contract_errors(driver: Path) -> List[str]:
+def _semantic_driver_contract_errors(driver: Path, expected_digest=None) -> List[str]:
     """Validate the executed supervisor call structurally, not by comments."""
     try:
         raw = driver.read_bytes()
@@ -1145,11 +1138,12 @@ def _semantic_driver_contract_errors(driver: Path) -> List[str]:
         return [f"semantic pytest driver cannot be parsed: {exc}"]
     errors: List[str] = []
     observed_digest = hashlib.sha256(raw).hexdigest()
-    if observed_digest != _SEMANTIC_DRIVER_SHA256:
+    expected_digest = expected_digest or _SEMANTIC_DRIVER_SHA256
+    if observed_digest != expected_digest:
         errors.append(
             "semantic pytest driver is not the exact reviewed executable "
             f"(sha256={observed_digest}, expected="
-            f"{_SEMANTIC_DRIVER_SHA256})")
+            f"{expected_digest})")
     functions = [node for node in tree.body
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                  and node.name == "_run_progress_supervised"]
@@ -1225,7 +1219,7 @@ def _shell_control_depths(lines: Sequence[str], start: int,
     return depths
 
 
-def landing_semantic_progress_contract(repo_root: Path) -> Dict:
+def landing_semantic_progress_contract(repo_root: Path, *, pins=None) -> Dict:
     """Validate the local landing pytest lanes' no-fixed-timeout contract.
 
     This deliberately owns only ``gatekeeper-land.sh``.  The A/B verifier has
@@ -1233,6 +1227,12 @@ def landing_semantic_progress_contract(repo_root: Path) -> Dict:
     disabled workflows or a separate orchestrator as this harness's elapsed
     bound is how a dead lane used to constrain the live one.
     """
+    pins = pins or {
+        "_LANDING_SCRIPT_SHA256": _LANDING_SCRIPT_SHA256,
+        "_LANDING_EXECUTION_PREFIX_SHA256": _LANDING_EXECUTION_PREFIX_SHA256,
+        "_LANDING_LANE_SHA256": _LANDING_LANE_SHA256,
+        "_SEMANTIC_DRIVER_SHA256": _SEMANTIC_DRIVER_SHA256,
+    }
     root = Path(repo_root)
     land = root / "tools" / "gatekeeper-land.sh"
     driver = (root / "vibe-ic-marketplace" / "plugins" / "vibe-ic" /
@@ -1247,10 +1247,10 @@ def landing_semantic_progress_contract(repo_root: Path) -> Dict:
             f"landing script is unreadable: {exc}"], "lanes": []}
 
     script_digest = hashlib.sha256(land_raw).hexdigest()
-    if script_digest != _LANDING_SCRIPT_SHA256:
+    if script_digest != pins["_LANDING_SCRIPT_SHA256"]:
         errors.append(
             "gatekeeper-land.sh is not the complete reviewed executable "
-            f"(sha256={script_digest}, expected={_LANDING_SCRIPT_SHA256})")
+            f"(sha256={script_digest}, expected={pins['_LANDING_SCRIPT_SHA256']})")
 
     source_lines = land_text.splitlines()
     populations = ("run_pytest", "run_repo_tools_pytest",
@@ -1266,12 +1266,12 @@ def landing_semantic_progress_contract(repo_root: Path) -> Dict:
         prefix_bytes = ("\n".join(source_lines[:final_calls[0]]) +
                         "\n").encode("utf-8")
         prefix_digest = hashlib.sha256(prefix_bytes).hexdigest()
-        if prefix_digest != _LANDING_EXECUTION_PREFIX_SHA256:
+        if prefix_digest != pins["_LANDING_EXECUTION_PREFIX_SHA256"]:
             errors.append(
                 "gatekeeper-land.sh entry-to-final-pytest execution prefix "
                 "is not the exact reviewed control flow "
                 f"(sha256={prefix_digest}, expected="
-                f"{_LANDING_EXECUTION_PREFIX_SHA256})")
+                f"{pins['_LANDING_EXECUTION_PREFIX_SHA256']})")
     ranges: Dict[str, Tuple[int, int]] = {}
     depths: Dict[str, Dict[int, int]] = {}
     for population in populations:
@@ -1291,12 +1291,12 @@ def landing_semantic_progress_contract(repo_root: Path) -> Dict:
         function_bytes = ("\n".join(
             source_lines[start - 1:ends[0]]) + "\n").encode("utf-8")
         observed_digest = hashlib.sha256(function_bytes).hexdigest()
-        if observed_digest != _LANDING_LANE_SHA256[population]:
+        if observed_digest != pins["_LANDING_LANE_SHA256"][population]:
             errors.append(
                 f"gatekeeper-land.sh function {population} is not the exact "
                 "reviewed executable body "
                 f"(sha256={observed_digest}, expected="
-                f"{_LANDING_LANE_SHA256[population]})")
+                f"{pins['_LANDING_LANE_SHA256'][population]})")
         # A HERE-STRING IS NOT A HEREDOC, and the difference is the whole
         # reason this rule exists. The concern is a literal block of
         # command-SHAPED DATA sitting in the file where a reader — and the
@@ -1450,8 +1450,94 @@ def landing_semantic_progress_contract(repo_root: Path) -> Dict:
                     f"exactly one semantic aggregate lane (found {count})")
     if not required:
         return {"declared": False, "errors": [], "lanes": []}
-    errors.extend(_semantic_driver_contract_errors(driver))
+    errors.extend(_semantic_driver_contract_errors(
+        driver, pins["_SEMANTIC_DRIVER_SHA256"]))
     return {"declared": True, "errors": errors, "lanes": lanes}
+
+
+def landing_pin_literals(source: bytes) -> Dict:
+    """Read future pins as data; never import a candidate checker to trust it."""
+    names = {"_LANDING_SCRIPT_SHA256", "_LANDING_EXECUTION_PREFIX_SHA256",
+             "_LANDING_LANE_SHA256", "_SEMANTIC_DRIVER_SHA256"}
+    nodes = {}
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in names:
+                    if target.id in nodes:
+                        raise ValueError(f"duplicate pin assignment: {target.id}")
+                    nodes[target.id] = node.value
+    if set(nodes) != names:
+        raise ValueError("checker does not declare all six pin faces")
+    values = {name: ast.literal_eval(node) for name, node in nodes.items()}
+    lanes = values["_LANDING_LANE_SHA256"]
+    if not isinstance(lanes, dict) or set(lanes) != {
+            "run_pytest", "run_repo_tools_pytest", "run_unselectable_pytest"}:
+        raise ValueError("checker lane pin population is incomplete")
+    digests = [value for name, value in values.items()
+               if name != "_LANDING_LANE_SHA256"] + list(lanes.values())
+    if any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value)
+           is None for value in digests):
+        raise ValueError("checker pin is not a SHA-256 literal")
+    return values
+
+
+def observe_landing_pins(repo_root: Path) -> Dict:
+    """Derive every face, including unchanged faces, before authoring a move."""
+    raw = (repo_root / "tools/gatekeeper-land.sh").read_bytes()
+    lines = raw.decode("utf-8").splitlines()
+    final = [i for i, line in enumerate(lines, 1)
+             if line in {_LANDING_WINDOW_ANCHOR,
+                         f"if {_LANDING_WINDOW_ANCHOR}; then"}]
+    if len(final) != 1:
+        raise ValueError("cannot derive pins: final lane anchor is not unique")
+    bodies = {}
+    for name in ("run_pytest", "run_repo_tools_pytest", "run_unselectable_pytest"):
+        starts = [i for i, line in enumerate(lines) if line.startswith(f"{name}() {{")]
+        if len(starts) != 1:
+            raise ValueError(f"cannot derive pins: {name} is not unique")
+        start = starts[0]
+        ends = [i for i in range(start + 1, len(lines)) if lines[i] == "}"]
+        if not ends:
+            raise ValueError(f"cannot derive pins: {name} has no structural end")
+        bodies[name] = hashlib.sha256(
+            ("\n".join(lines[start:ends[0] + 1]) + "\n").encode()).hexdigest()
+    driver = repo_root / "vibe-ic-marketplace/plugins/vibe-ic/programs/pytest_per_file_junit.py"
+    return {
+        "_LANDING_SCRIPT_SHA256": hashlib.sha256(raw).hexdigest(),
+        "_LANDING_EXECUTION_PREFIX_SHA256": hashlib.sha256(
+            ("\n".join(lines[:final[0]]) + "\n").encode()).hexdigest(),
+        "_LANDING_LANE_SHA256": bodies,
+        "_SEMANTIC_DRIVER_SHA256": hashlib.sha256(driver.read_bytes()).hexdigest(),
+    }
+
+
+def render_landing_pins(repo_root: Path, source: bytes) -> bytes:
+    """Generate local review bytes, not approval; retain the semantic checks."""
+    old = landing_pin_literals(source)
+    new = observe_landing_pins(repo_root)
+    semantic = landing_semantic_progress_contract(repo_root, pins=new)
+    if not semantic["declared"] or semantic["errors"]:
+        raise ValueError("cannot repin invalid semantic runtime: " +
+                         "; ".join(semantic["errors"]))
+    # AST byte offsets identify assignments rather than matching prose digests.
+    lines = source.splitlines(keepends=True)
+    edits = []
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or target.id not in old:
+            continue
+        value = node.value
+        start = sum(map(len, lines[:value.lineno - 1])) + value.col_offset
+        end = sum(map(len, lines[:value.end_lineno - 1])) + value.end_col_offset
+        edits.append((start, end, repr(new[target.id]).encode()))
+    for start, end, replacement in sorted(edits, reverse=True):
+        source = source[:start] + replacement + source[end:]
+    if landing_pin_literals(source) != new:
+        raise ValueError("generated pins do not cover the observed six faces")
+    return source
 
 
 def harness_bounds(repo_root: Path) -> List[HarnessBound]:
@@ -2576,12 +2662,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "the ceiling divisor is chosen against")
     ap.add_argument("--json", dest="json_out", default=None,
                     help="write the machine record to this path")
+    ap.add_argument("--repin-out", type=Path,
+                    help="generate all six pins into a NEW checker file for review; "
+                         "this does not approve or publish a runtime")
     args = ap.parse_args(argv)
 
     repo_root = find_repo_root(Path(args.root)) if args.root else \
         find_repo_root()
     if args.root and repo_root is None:
         repo_root = Path(args.root) if Path(args.root).is_dir() else None
+
+    if args.repin_out is not None:
+        try:
+            if repo_root is None:
+                raise ValueError("runtime root is unavailable")
+            checker = repo_root / "vibe-ic-marketplace/plugins/vibe-ic/programs/ci_harness_timeout_ceiling_check.py"
+            raw = render_landing_pins(repo_root, checker.read_bytes())
+            with args.repin_out.open("xb") as output:
+                output.write(raw)
+        except (OSError, ValueError, SyntaxError) as exc:
+            print(f"[REFUSE] runtime pin authoring: {exc}", file=sys.stderr)
+            return 2
+        print("[GENERATED] six runtime pin faces; review required")
+        return 0
 
     bounds = harness_bounds(repo_root) if repo_root else []
     harness = min((b.seconds for b in bounds), default=None)

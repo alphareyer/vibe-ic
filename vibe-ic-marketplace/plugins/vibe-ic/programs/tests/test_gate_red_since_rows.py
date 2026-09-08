@@ -607,37 +607,34 @@ def test_a_candidates_own_commits_do_not_expire_a_row_it_never_touched(tmp_path)
         "test proves nothing about which ref was used")
 
 
-def test_the_landing_review_passes_a_base_ref_through(tmp_path, monkeypatch):
-    """The wiring, not just the helper: `gatekeeper_review` must hand the base
-    to the checker, or the fix exists and is never reached."""
+def _typed_review_probe(tmp_path, monkeypatch, base=None):
     import gatekeeper_review as R
     seen = {}
-
-    def fake(prog, argv):
-        seen["argv"] = argv
-        return 0, "[PASS] ok", ""
-
-    monkeypatch.setattr(R, "_run_program", fake)
+    monkeypatch.setattr(R, "_load_module", lambda name: G)
+    monkeypatch.setattr(G, "load_ledger_from_ref", lambda repo, ref:
+                        seen.setdefault("ledger_ref", ref) and [])
+    monkeypatch.setattr(G, "load_ledger", lambda path:
+                        seen.setdefault("ledger_path", path) and [])
+    monkeypatch.setattr(G, "git_age_days", lambda repo, ref:
+                        seen.setdefault("head_ref", ref) and (lambda since: 0))
     rec = tmp_path / "rec.json"
-    rec.write_text("{}", encoding="utf-8")
-    R.gate_red_since_gate(tmp_path, rec, base="origin/main")
-    assert "--head-ref" in seen["argv"], seen["argv"]
-    assert seen["argv"][seen["argv"].index("--head-ref") + 1] == "origin/main"
+    rec.write_text(json.dumps({"declared": 1, "gates": [
+        {"label": "probe", "state": "PASS"}]}), encoding="utf-8")
+    result = R.gate_red_since_gate(tmp_path, rec, base=base)
+    assert result.green, result.summary
+    return seen
+
+
+def test_the_landing_review_passes_a_base_ref_through(tmp_path, monkeypatch):
+    seen = _typed_review_probe(tmp_path, monkeypatch, "origin/main")
+    assert seen["head_ref"] == "origin/main"
 
 
 def test_without_a_base_the_checker_is_not_told_a_ref(tmp_path, monkeypatch):
-    """The mirror: callers that have no base (a developer running it by hand)
-    keep the old behaviour byte-for-byte rather than being handed an empty
-    --head-ref, which git would read as a ref named ''."""
-    import gatekeeper_review as R
-    seen = {}
-    monkeypatch.setattr(R, "_run_program",
-                        lambda prog, argv: (seen.setdefault("argv", argv), 0,
-                                            "[PASS] ok", "")[1:])
-    rec = tmp_path / "rec.json"
-    rec.write_text("{}", encoding="utf-8")
-    R.gate_red_since_gate(tmp_path, rec)
-    assert "--head-ref" not in seen["argv"], seen["argv"]
+    seen = _typed_review_probe(tmp_path, monkeypatch)
+    assert seen["head_ref"] == "HEAD"
+    assert "ledger_ref" not in seen
+    assert seen["ledger_path"] == tmp_path / G.LEDGER_REL
 
 
 # --------------------------------------------------------------------------
@@ -760,18 +757,8 @@ def test_a_ref_that_does_not_exist_is_an_error(tmp_path):
 
 
 def test_the_review_passes_both_halves_from_the_base(tmp_path, monkeypatch):
-    import gatekeeper_review as R
-    seen = {}
-    monkeypatch.setattr(R, "_run_program",
-                        lambda prog, argv: (seen.setdefault("argv", argv), 0,
-                                            "[PASS] ok", "")[1:])
-    rec = tmp_path / "rec.json"
-    rec.write_text("{}", encoding="utf-8")
-    R.gate_red_since_gate(tmp_path, rec, base="origin/main")
-    argv = seen["argv"]
-    for flag in ("--head-ref", "--ledger-ref"):
-        assert flag in argv, argv
-        assert argv[argv.index(flag) + 1] == "origin/main"
+    seen = _typed_review_probe(tmp_path, monkeypatch, "origin/main")
+    assert seen["head_ref"] == seen["ledger_ref"] == "origin/main"
 
 
 # --------------------------------------------------------------------------

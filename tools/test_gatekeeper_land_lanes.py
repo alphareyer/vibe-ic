@@ -56,6 +56,15 @@ _LAND = _ROOT / "tools" / "gatekeeper-land.sh"
 
 # The scheduler, by name. Extracted rather than duplicated: a copy of these
 # bodies in a test would keep passing after the original stopped matching it.
+def _plan():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_lane_execution_plan", _ROOT / "tools/ci/landing_execution_plan.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 _SCHEDULER = (
     # `gk_cleanup` CALLS this, twice, and bash resolves a function name when the
     # call runs -- so leaving it out did not make the harness smaller, it made
@@ -88,6 +97,21 @@ _SCHEDULER = (
     "lane_report_round",
     "lane_report_window",
     "lane_window_reset",
+    "landing_plan_dispatch",
+    "landing_unit_full_targeted_tests",
+    "landing_unit_full_repo_tools_tests",
+    "landing_unit_full_unselectable_tests",
+    "landing_unit_full_unselectable_census",
+    "landing_unit_full_census_freshness",
+    "landing_unit_full_repo_hygiene",
+    "landing_unit_full_plugin_audit",
+    "landing_emit_full_targeted_tests",
+    "landing_emit_full_repo_tools_tests",
+    "landing_emit_full_unselectable_tests",
+    "landing_emit_full_unselectable_census",
+    "landing_emit_full_census_freshness",
+    "landing_emit_full_repo_hygiene",
+    "landing_emit_full_plugin_audit",
     "lane_hygiene",
     "lane_run_window",
     "lane_emit_window",
@@ -141,13 +165,9 @@ def default_width(land_text: str) -> str:
 
 @pytest.fixture(scope="module")
 def scheduler(land_text: str) -> str:
-    # LANE_WINDOW_UNITS is data the scheduler reads, so it is taken from the
-    # script too rather than restated here.
-    units = re.search(
-        r"^LANE_WINDOW_UNITS=\(\n(?:.*?\n)*?\)$", land_text, re.MULTILINE)
-    assert units, "LANE_WINDOW_UNITS is gone from tools/gatekeeper-land.sh"
-    return "\n".join([units.group(0)]
+    return "\n".join([_plan().shell()]
                      + [_extract(name, land_text) for name in _SCHEDULER])
+
 
 
 _HARNESS = r"""
@@ -159,11 +179,13 @@ LANE_LAUNCHED=""
 HYGIENE_POOL=8
 LANE_WAIT_RC=0; LANE_BROKEN=0; EMIT_RC=0; EMIT_OUT=""
 FAILED=0
+LANDING_NEXT=0
 ROOT="$WORK"
 PROGRAMS="$WORK/programs"
 JOURNAL="$WORK/journal.tsv"; : > "$JOURNAL"
 
 landing_record() {
+  LANDING_NEXT=$((LANDING_NEXT + 1))
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$JOURNAL"
 }
 landing_skip() { landing_record "$1" SKIP 0 "$2"; }
@@ -223,6 +245,11 @@ stage() {                            # stage <lane> <seconds> <rc>
   [ "$3" -eq 0 ] || { echo "FAIL: stub $1"; FAILED=1; }
   return "$3"
 }
+# The capture handlers are retained in the extracted closure; these expensive
+# suite boundaries are represented by the stage process in this harness.
+run_pytest() { stage targeted "$T_SEC" "$T_RC"; }
+run_repo_tools_pytest() { stage corpus "$C_SEC" "$C_RC"; }
+run_unselectable_pytest() { stage corpus2 0.05 0; }
 lane_targeted() { fn_capture "full:targeted-tests" stage targeted "$T_SEC" "$T_RC"; }
 lane_corpus() {
   fn_capture "full:repo-tools-tests"   stage corpus "$C_SEC" "$C_RC"
@@ -877,32 +904,20 @@ def test_an_earlier_red_in_the_same_lane_does_not_make_the_census_a_norecord(
     assert "  PASS  63x8 census freshness" in proc.stdout, proc.stdout
 
 
-def test_the_script_emits_exactly_the_declared_units_in_declared_order(
-        land_text):
-    """THE CONTRACT NOTHING WAS CHECKING (added 2026-08-21).
-
-    `landing_completion_record.py:200` refuses any label that is not
-    `LANDING_PROGRESS_UNITS[len(gates)]` and `:261` refuses unless the emitted
-    labels equal the complete tuple — so a unit added to the script at the
-    wrong position, or added to the tuple and never emitted, refuses EVERY
-    landing with `[NORECORD] landing completion record is incomplete`. That is
-    the most expensive failure this file can prevent and it was checked only
-    indirectly, for the six units inside the concurrent window.
-
-    Discovered while adding `full:gatekeeper-review`: nothing compared the
-    script's own emission order against the tuple at all, so the risk was
-    carried by whoever last edited either.
-    """
-    record = _ROOT / "tools" / "ci" / "landing_completion_record.py"
-    block = re.search(r"LANDING_PROGRESS_UNITS = \(\n((?:.*?\n)*?)\)",
-                      record.read_text(encoding="utf-8"), re.MULTILINE).group(1)
-    declared = re.findall(r'"([^"]+)"', block)
-    emitted = _emission_order(land_text)
-    assert emitted == declared, (
-        "the lander's emission order and the declared tuple have diverged; "
-        f"first difference at index "
-        f"{next((i for i, (a, b) in enumerate(zip(emitted, declared)) if a != b), min(len(emitted), len(declared)))}"
-        f"\n  emitted:  {emitted}\n  declared: {declared}")
+def test_the_script_emits_exactly_the_declared_units_in_declared_order(tmp_path):
+    # Exercise the real handler/capture/emit chain and protected append, not a
+    # regex over comments or a second copy of the scheduler's declaration.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_lane_plan_probe", _ROOT / "tools/ci/test_landing_execution_plan.py")
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    REQUIRED = probe.REQUIRED
+    proc = probe.exercise_plan(tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    import json
+    rows = json.loads((tmp_path / "journal.json").read_text())["gates"]
+    assert tuple(row["label"] for row in rows) == REQUIRED == _plan().UNITS
 
 
 def test_landing_record_is_never_called_from_a_lane_body(land_text):
@@ -922,7 +937,7 @@ def test_landing_record_is_never_called_from_a_lane_body(land_text):
                 f"{name} records from a lane body: {forbidden}")
 
 
-def test_the_window_is_exactly_the_declared_contiguous_units(land_text):
+def test_the_window_is_exactly_the_declared_contiguous_units():
     """The concurrent window may not silently widen past its brackets.
 
     NAMED FOR THE PROPERTY, NOT FOR THE COUNT (vibe-ic#2142). It was
@@ -932,16 +947,9 @@ def test_the_window_is_exactly_the_declared_contiguous_units(land_text):
     assertion below compares MEMBERSHIP against `_WINDOW` and never a length, so
     the number was never the subject and should never have been in the name.
     """
-    units = re.search(r"^LANE_WINDOW_UNITS=\(\n((?:.*?\n)*?)\)$",
-                      land_text, re.MULTILINE)
-    declared = re.findall(r'"([^"]+)"', units.group(1))
-    assert tuple(declared) == _WINDOW, declared
-
-    record = _ROOT / "tools" / "ci" / "landing_completion_record.py"
-    text = record.read_text(encoding="utf-8")
-    block = re.search(r"LANDING_PROGRESS_UNITS = \(\n((?:.*?\n)*?)\)",
-                      text, re.MULTILINE).group(1)
-    order = re.findall(r'"([^"]+)"', block)
+    declared = _plan().WINDOW_UNITS
+    assert declared == _WINDOW, declared
+    order = list(_plan().UNITS)
     start = order.index(_WINDOW[0])
     assert tuple(order[start:start + len(_WINDOW)]) == _WINDOW
     # The brackets stay outside it, on both sides.
@@ -1340,7 +1348,7 @@ def test_the_hygiene_lane_is_TOLD_the_checkout_is_shared(land_text):
     than on the probe: a fix that never reaches the process that runs is not a
     fix.
     """
-    parts = land_text.split("lane_hygiene() {", 1)
+    parts = land_text.split("landing_unit_full_repo_hygiene() {", 1)
     assert len(parts) == 2, "lane_hygiene() is gone"
     body = parts[1].split("\n}", 1)[0]
     assert "VIBEIC_CHECKOUT_CONCURRENT_LANES" in body, (
@@ -1479,6 +1487,7 @@ def test_the_judge_refuses_the_log_a_killed_stage_leaves(scheduler, work,
     """
     sys.path.insert(0, str(_ROOT / _PLUGIN_REL / "programs" / "tests"))
     import _protected_transition_fixture as protected
+    import test_issue1498_hygiene_subset_rule_is_wired as hygiene
 
     proc = _run(scheduler, work, {"LANE_WIDTH": "4", "C_SEC": "60"},
                 body=_KILL_ONE_STAGE)
@@ -1501,6 +1510,8 @@ def test_the_judge_refuses_the_log_a_killed_stage_leaves(scheduler, work,
     receipt = protected.receipt_for(
         tmp_path / "protected.json", base_commit=base, base_tree=base_tree,
         candidate_commit=head, candidate_tree=head_tree)
+    hygiene_record = hygiene._write(tmp_path, "hygiene.json",
+        hygiene._record([hygiene._gate("neutral check", "PASS")]))
     verdict = subprocess.run(
         [sys.executable, str(_VERDICT),
          "--base-sha", base, "--base-tree", base_tree, "--head-sha", head,
@@ -1514,6 +1525,9 @@ def test_the_judge_refuses_the_log_a_killed_stage_leaves(scheduler, work,
          "--verification-tier", "direct-push",
          "--candidate-gate-rc", "1", "--require-composite-gate-record",
          "--protected-transition-receipt", str(receipt),
+         "--base-hygiene", str(hygiene_record),
+         "--candidate-hygiene", str(hygiene_record),
+         "--base-hygiene-host", "test-host", "--candidate-hygiene-host", "test-host",
          "--json", str(tmp_path / "verdict.json")],
         capture_output=True, text=True)
     record = json.loads((tmp_path / "verdict.json").read_text())

@@ -100,23 +100,37 @@ generation blocked, tapeout refused). For them the extra hand-fixture
 cost is justified as continuous verification that the engine + spec +
 realistic output still agree end-to-end.
 
-## HARD RULE — always run the FULL suite (both test trees)
+## Select the required scope; name FULL only when it was run
 
-The plugin has **two** test trees and a valid run includes **both**:
+The plugin has **two** test trees. A FULL claim includes **both**:
 
 - `programs/tests/` — unit tests for the deterministic programs.
-- `tests/` — integration / regression **gates**: `INDEX.md` freshness
-  (every non-helper program registered), every-skill-has-`compliance.yaml`
-  + `tests/test_compliance.py`, orchestrator input-branch regressions, and the
-  end-to-end skill audit.
+- `tests/` — integration / regression checks, including program inventory,
+  orchestrator input-branch regressions and the end-to-end skill audit.
 
-`pytest.ini` pins `testpaths = programs/tests tests`, so **bare `pytest` from the
-plugin root runs both**. NEVER validate a change with only `pytest programs/tests/`
-(or only `tests/`): it silently skips the other tree. This is not hypothetical — an
-orchestrator fix once reached `main` green because it was verified against
-`programs/tests/` alone, while the matching regression test in `tests/` was never run.
+`pytest.ini` declares the primary collection, including `testpaths`,
+`python_files` and `norecursedirs`. Use the canonical landing cadence and trusted
+selection for release verification; include affected integration tests even when
+the edited source is under `programs/`. A targeted run is not a FULL-suite PASS.
+Do not start another full census automatically after each local repair. Explicit
+full-audit or benchmark-completeness requests retain their stated acceptance.
 
-Corollary for new code: a new **program** must be added to `programs/INDEX.md`
-(`tools/gen_programs_index.py`); a new **skill** must ship `compliance.yaml` +
-`tests/test_compliance.py` (`_shared/bootstrap_compliance.py` +
-`_shared/gen_compliance_tests.py`). The `tests/` gates fail until you do.
+## Skill authoring does not automatically create a new gate
+
+A guidance skill needs valid instructions and valid references, not a mandatory
+`compliance.yaml`, copied test module or literal heading. Author a machine-readable
+contract only when the skill has a specific consumer requirement to verify.
+Existing authored requirements and receipt-evidence checks remain effective.
+
+The authoring helpers act only on explicitly selected skills (`--skill NAME`):
+`bootstrap_compliance.py` produces a reviewable draft, `add_compliance_gate.py`
+describes an authored contract's scope, and `gen_compliance_tests.py` uses a shared
+implementation with thin wrappers. No-argument invocations do not mutate every
+skill. Report-pattern success is not evidence that an EDA tool or flow ran.
+
+Prefer extending the existing behavioral case or shared implementation to adding
+another global blocking check. A new global check needs a concrete uncovered risk,
+applicable scope, expected cost and owner in review; this guidance is not itself
+another automated gate. Preserve real positive and negative cases when removing
+duplicate representation. Program inventory registration remains distinct from
+appointing a program as a release-wide gate.

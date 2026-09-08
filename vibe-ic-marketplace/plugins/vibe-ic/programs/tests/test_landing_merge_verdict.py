@@ -77,28 +77,14 @@ _PROTECTED = importlib.util.module_from_spec(_PROTECTED_SPEC)
 _PROTECTED_SPEC.loader.exec_module(_PROTECTED)
 _T = 55
 
-_RUNNER_PROFILE = {
-    "schema": 1,
-    "profile_id": "vibeic-landing-hermetic-v1",
-    "engine": "docker",
-    "image": _PROTECTED.RUNNER_IMAGE,
-    "platform": "linux/amd64",
-    "user": "65534:65534",
-    "network": "none",
-    "read_only": True,
-    "cap_drop": ["ALL"],
-    "security_opt": ["no-new-privileges:true"],
-    "tmpfs": ["/tmp:rw,nosuid,nodev,noexec,size=536870912,mode=1777"],
-    "pull": "never",
-    "workdir": "/subject",
-    "subject_mount": "read-only",
-    "runtime_mount": "read-only",
-    "corpus_mount": "read-only",
-    "input_mounts": "selection-and-progress-plan-read-only",
-    "runtime_overlays": "sorted-exact-files-read-only",
-    "process_environment": "env-i-exact-arm-profile",
-    "progress_protocol": "VIBEIC_PROGRESS/1",
-    "evidence_transport": "private-volume-post-stop-export-and-absence-proof",
+# Synthetic receipts and BASE manifests use the shipped trusted declaration.
+# Candidate receipt fields never supply the validator's expected policy.
+_RUNNER_PROFILE = _PROTECTED.derived_runner()
+# Completion imports the execution declaration by path. This additional
+# BASE-owned authority must travel in the miniature manifest and snapshot,
+# just as it does in the real approved runtime bundle.
+_FIXTURE_AUTHORITY_PATHS = _PROTECTED.REQUIRED_AUTHORITY_PATHS | {
+    "tools/ci/landing_execution_plan.py",
 }
 _PROTECTED_SELECT_CONTROL_TESTS = (
     "programs/tests/test_ci_harness_timeout_ceiling_check.py",
@@ -124,7 +110,9 @@ _GOOD_LOG = """=== gatekeeper landing gates — base=origin/main ===
 
 _RED_TEST_TIER_LOG = """=== gatekeeper landing gates — base=origin/main ===
   PASS  NDA — commit messages
+  PASS  version monotonic (assigned at merge — deferred)
   FAIL  targeted tests (21 file(s))
+  PASS  repo hygiene gates
 === FAILURES ABOVE — stamp removed; the pre-push hook will refuse ===
 """
 
@@ -203,8 +191,12 @@ def _decide(**over):
     """A LAND OK baseline; each test perturbs exactly one fact."""
     kw = dict(rebase_status="ok", expected_tree=TREE, verified_tree=TREE,
               github_tree=TREE, land=V.parse_land_log(_GOOD_LOG),
+              base_land=V.parse_land_log(_GOOD_LOG),
               delta=_delta(), verified_sha=SHA, truncated=False,
-              dropped_files=(), selection_size=21)
+              dropped_files=(), selection_size=21,
+              hygiene={"status": "CLEAN", "introduced": [], "carried": [],
+                       "cleared": [], "candidate_findings": 0,
+                       "base_findings": 0, "declared": 1})
     kw.update(over)
     return V.decide(**kw)
 
@@ -309,16 +301,16 @@ def test_the_forge_disagreeing_with_the_local_merge_is_refused():
 
 
 def test_any_non_test_gate_failure_is_refused_when_there_is_no_base_to_compare():
-    """With no base gate log the comparison degrades to absolute — the STRICT
-    direction — and says so."""
+    """Missing baseline is incomplete, even when a candidate failure is visible."""
     log = V.parse_land_log(
         "=== gatekeeper landing gates ===\n"
         "  PASS  targeted tests (3 file(s))\n"
         "  FAIL  tree contains the base it claims as parent\n")
-    v = _decide(land=log)
+    v = _decide(land=log, base_land=None)
     assert v.ok is False
     assert any("tree contains the base" in r for r in v.reasons)
-    assert any("degraded to 'demand green'" in n for n in v.notes)
+    assert v.admission == "INCOMPLETE"
+    assert "BASE_GATE_RECORD_MISSING_OR_INVALID" in v.incomplete
 
 
 # ==================================== THE GATE TIER GETS THE SAME DIFFERENTIAL
@@ -334,6 +326,10 @@ def _gate_log(*lines, stamp=None):
         f"  {w}  {label}\n" for w, label in lines)
     if stamp:
         body += f"=== ALL GATES PASS — stamped {stamp} ===\n"
+    elif any(word == "FAIL" for word, _ in lines):
+        body += V._FAILURES_TERMINAL + "\n"
+    else:
+        body += V._NON_TARGET_COMPLETE + "\n"
     return V.parse_land_log(body)
 
 
@@ -441,9 +437,10 @@ def test_a_complete_base_arm_is_not_flagged_as_partial():
 def test_a_caller_that_never_says_what_arm_a_was_asked_for_is_disclosed():
     """DEGRADE LOUDLY. A caller supplying no base selection leaves the check
     unable to fire, and a check that cannot fire must not read as a clean sheet.
-    Not blocking: an older caller has to stay landable."""
+    Missing required coverage blocks admission while preserving the disclosure."""
     v = _decide(base_selection_supplied=False)
-    assert v.ok is True, v.reasons
+    assert v.ok is False, v.reasons
+    assert v.admission == "INCOMPLETE"
     assert any("completeness was NOT checked" in n for n in v.notes), v.notes
 
 
@@ -485,7 +482,7 @@ def test_a_complete_non_target_gate_record_can_join_the_composite():
         "=== gatekeeper landing gates — base=origin/main ===\n"
         "  PASS  one cheap gate\n"
         "=== ALL NON-TARGET GATES COMPLETE — stamp withheld for composite verdict ===\n")
-    v = _decide(land=complete, candidate_gate_rc=0,
+    v = _decide(land=complete, base_land=complete, candidate_gate_rc=0,
                 require_composite_gate_record=True)
     assert v.ok is True, v.reasons
 
@@ -864,14 +861,24 @@ def test_a_selection_failure_is_not_the_test_tier():
 
 
 def _cli(tmp_path, land_text, base_cases, cand_cases, sel, extra=(),
-         base_sel=None, attest_candidate=True,
+         base_sel="derive", attest_candidate=True,
          candidate_aggregate=True, candidate_per_file=True,
          attest_base=True, base_aggregate=True, base_per_file=True,
          base_mutator=None, candidate_mutator=None):
     (tmp_path / "land.log").write_text(land_text)
+    base_gate_args = ()
+    if "--base-land-log" not in extra:
+        baseline_log = tmp_path / "fixture_base_land.log"
+        baseline_log.write_text(_GOOD_LOG)
+        base_gate_args = ("--base-land-log", str(baseline_log))
     (tmp_path / "sel.txt").write_text("\n".join(sel) + "\n")
     bj = _junit(tmp_path, base_cases, "base.xml")
     cj = _junit(tmp_path, cand_cases, "cand.xml")
+    if base_sel == "derive":
+        base_sel = sorted(V.junit_files(bj, sel))
+    import test_issue1498_hygiene_subset_rule_is_wired as H
+    hyg_path = H._write(tmp_path, "clean-hygiene.json",
+                        H._record([H._gate("neutral check", "PASS")]))
     if attest_candidate:
         _attest_junit(cj, cand_cases, sel, aggregate=candidate_aggregate,
                       per_file=candidate_per_file)
@@ -892,10 +899,12 @@ def _cli(tmp_path, land_text, base_cases, cand_cases, sel, extra=(),
            "--head-sha", SHA, "--verified-sha", SHA,
            "--rebase-status", "ok", "--expected-tree", TREE,
            "--verified-tree", TREE, "--github-tree", TREE,
-           "--land-log", str(tmp_path / "land.log"),
+           "--land-log", str(tmp_path / "land.log"), *base_gate_args,
            "--selection", str(tmp_path / "sel.txt"), *base_sel_arg,
            "--base-junit", str(bj), "--candidate-junit", str(cj),
            "--protected-transition-receipt", str(_protected_receipt(tmp_path)),
+           "--base-hygiene", str(hyg_path), "--candidate-hygiene", str(hyg_path),
+           "--base-hygiene-host", "test-host", "--candidate-hygiene-host", "test-host",
            "--json", str(tmp_path / "v.json"), *extra]
     r = _pr.run(cmd, capture_output=True, text=True)
     doc = json.loads((tmp_path / "v.json").read_text())
@@ -955,7 +964,8 @@ def test_base_aggregate_norecord_is_an_absolute_refusal(tmp_path):
     r, doc = _cli(
         tmp_path, _GOOD_LOG, _CASE_OK, _CASE_OK, _SEL,
         base_sel=_SEL, base_aggregate=False)
-    assert r.returncode == 1, r.stdout + r.stderr
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert doc["admission"] == "INCOMPLETE"
     assert doc["base_aggregate_process_present"] is False
     assert doc["dropped_base_selected_files"] == _SEL
     assert any("BASE AGGREGATE TEST SESSION" in reason
@@ -1056,7 +1066,8 @@ def test_a_candidate_per_file_norecord_is_named_from_structured_junit(tmp_path):
     # THE DECISION FIRST. On a tree where the structured path is not connected
     # this is the assertion that fires, and it names the defect rather than a
     # missing record key.
-    assert r_bad.returncode == 1, r_bad.stdout + r_bad.stderr
+    assert r_bad.returncode == 2, r_bad.stdout + r_bad.stderr
+    assert doc_bad["admission"] == "INCOMPLETE"
     assert doc_bad["verdict"] == "REFUSE"
     # NAMED, not merely refused. A refusal that cannot say what is missing
     # sends the next reader looking in the wrong place.
@@ -1092,7 +1103,8 @@ def test_a_per_file_norecord_is_not_excused_by_the_same_gate_label_on_the_base(
         _SEL2, base_sel=_SEL2,
         candidate_mutator=_drop_per_file_attestation(_SEL2[0]),
         extra=("--base-land-log", str(tmp_path / "base_land.log")))
-    assert r.returncode == 1, r.stdout + r.stderr
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert doc["admission"] == "INCOMPLETE"
     assert doc["missing_candidate_process_files"] == [_SEL2[0]]
     assert any(_SEL2[0] in reason for reason in doc["reasons"]), doc["reasons"]
     # The label itself IS excused as pre-existing — that is the point. The
@@ -1112,7 +1124,8 @@ def test_a_base_per_file_norecord_is_named_and_refused(tmp_path):
         tmp_path, _GOOD_LOG, _CASE_BASE_WHOLE, _CASE_BASE_WHOLE, _SEL2,
         base_sel=_SEL2,
         base_mutator=_drop_per_file_attestation(_SEL2[1]))
-    assert r.returncode == 1, r.stdout + r.stderr
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert doc["admission"] == "INCOMPLETE"
     assert doc["missing_base_process_files"] == [_SEL2[1]]
     assert doc["missing_candidate_process_files"] == []
     assert any(_SEL2[1] in reason and "ON THE BASE" in reason
@@ -1201,7 +1214,8 @@ def test_per_file_base_diagnostics_cannot_fill_aggregate_coverage(tmp_path):
         tmp_path, _GOOD_LOG, _CASE_BASE_WHOLE, _CASE_SILENCED_CAND,
         _SEL2, base_sel=_SEL2, base_mutator=drop_beta_from_aggregate)
 
-    assert r.returncode == 1, r.stdout + r.stderr
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert doc["admission"] == "INCOMPLETE"
     assert doc["dropped_base_selected_files"] == [_SEL2[1]]
     assert any("ON THE BASE" in reason for reason in doc["reasons"])
 
@@ -1253,10 +1267,10 @@ def test_a_caller_supplying_no_base_selection_is_told_the_check_did_not_fire(
         tmp_path):
     """`base_selection_size == 0` and an empty dropped list are the SAME two
     values a clean base arm produces, so the record must be readable without
-    guessing which one happened. It is a note, never a refusal: an older caller
-    stays landable."""
-    r, doc = _cli(tmp_path, _GOOD_LOG, _CASE_OK, _CASE_OK, _SEL)
-    assert r.returncode == 0, r.stdout + r.stderr
+    guessing which one happened. Missing coverage is now an incomplete refusal."""
+    r, doc = _cli(tmp_path, _GOOD_LOG, _CASE_OK, _CASE_OK, _SEL, base_sel=None)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert doc["admission"] == "INCOMPLETE"
     assert doc["base_selection_size"] == 0
     assert any("completeness was NOT checked" in n for n in doc["notes"]), \
         doc["notes"]
@@ -1993,7 +2007,7 @@ def _write_activated_manifest(repo):
     and passes.  The synthetic bytes now stand in for the PRIOR state, which is
     the one no longer on disk.
     """
-    paths = sorted(_PROTECTED.REQUIRED_AUTHORITY_PATHS | _PROTECTED.RUNTIME_PATHS)
+    paths = sorted(_FIXTURE_AUTHORITY_PATHS | _PROTECTED.RUNTIME_PATHS)
     role_rows = []
     current = []
     next_files = []
@@ -2002,7 +2016,7 @@ def _write_activated_manifest(repo):
         raw = path.read_bytes()
         mode = "100755" if path.stat().st_mode & 0o111 else "100644"
         roles = []
-        if rel in _PROTECTED.REQUIRED_AUTHORITY_PATHS:
+        if rel in _FIXTURE_AUTHORITY_PATHS:
             roles.append("authority")
         if rel in _PROTECTED.RUNTIME_PATHS:
             roles.append("runtime")
@@ -2121,7 +2135,7 @@ def sandbox(tmp_path_factory):
     # imported authority file must therefore be present before the manifest is
     # written instead of being silently omitted by this test repository.
     for rel in sorted(
-            _PROTECTED.REQUIRED_AUTHORITY_PATHS | _PROTECTED.RUNTIME_PATHS):
+            _FIXTURE_AUTHORITY_PATHS | _PROTECTED.RUNTIME_PATHS):
         destination = repo / rel
         if destination.exists():
             continue

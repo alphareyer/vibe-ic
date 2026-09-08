@@ -26,6 +26,25 @@ PROTOCOL = "VIBEIC_PROGRESS/1"
 NONCE_RE = re.compile(r"[0-9a-f]{64}\Z")
 MAX_UNITS = 100_000
 
+_SCAN_SPEC = importlib.util.spec_from_file_location(
+    "_vibeic_hermetic_scan_contract",
+    Path(__file__).resolve().parents[2] / "vibe-ic-marketplace/plugins/vibe-ic"
+    / "programs/_pytest_progress_plugin.py",
+)
+if _SCAN_SPEC is None or _SCAN_SPEC.loader is None:
+    raise ImportError("trusted pytest scan contract is unavailable")
+scan_contract = importlib.util.module_from_spec(_SCAN_SPEC)
+_SCAN_SPEC.loader.exec_module(scan_contract)
+
+
+def collection_scan_limit(units: Sequence[str]) -> int:
+    """Derive the existing scan cap from the parent plan's selected files."""
+    if (not units or units[0] != "pytest:collection-complete"
+            or units[-1] != "pytest:record-published"):
+        return 0
+    files = sum(unit.startswith("pytest:") for unit in units[1:-1])
+    return scan_contract.collect_scan_ceiling(files) if files else 0
+
 
 class Refusal(RuntimeError):
     pass
@@ -69,14 +88,24 @@ def _plan() -> dict[str, Any]:
             "prefix": prefix}
 
 
-def record(state: str, unit: str | None = None) -> bytes:
+def record(state: str, unit: str | None = None, *,
+           scanned: int | None = None) -> bytes:
     plan = _plan()
     units = plan["units"]
     common = {
         "nonce": plan["nonce"], "schema": SCHEMA,
         "scope": plan["scope"], "total": len(units),
     }
-    if state == "start":
+    if state != "collect_scan" and scanned is not None:
+        raise Refusal("only collection work can carry a scanned count")
+    if state == "collect_scan":
+        if (unit != "pytest:collection-complete" or type(scanned) is not int
+                or not 0 < scanned <= collection_scan_limit(units)
+                or scanned % scan_contract.COLLECT_SCAN_STRIDE):
+            raise Refusal("collection work is outside the parent-owned scan allowance")
+        row = {**common, "completed": 0, "seq": 1,
+               "state": state, "unit": unit, "scanned": scanned}
+    elif state == "start":
         if unit is not None:
             raise Refusal("start cannot carry a unit")
         row = {**common, "seq": 0, "state": "start"}
@@ -96,8 +125,9 @@ def record(state: str, unit: str | None = None) -> bytes:
     return plan["prefix"].encode("ascii") + strict.canonical_bytes(row)
 
 
-def emit(state: str, unit: str | None = None) -> None:
-    raw = record(state, unit)
+def emit(state: str, unit: str | None = None, *,
+         scanned: int | None = None) -> None:
+    raw = record(state, unit, scanned=scanned)
     view = memoryview(raw)
     while view:
         written = os.write(sys.stdout.fileno(), view)

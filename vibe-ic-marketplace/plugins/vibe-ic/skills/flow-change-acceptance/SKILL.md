@@ -1,6 +1,6 @@
 ---
 name: flow-change-acceptance
-description: "MANDATORY before landing any change to the FLOW itself — a gate, a check, a step, a phase runner, a verdict rule, or anything under programs/ that every design passes through. Flow-level changes are foundational: when they are right every cell benefits, and when they are wrong every cell lies at once and nobody notices. This skill is the acceptance standard for that class of change: bidirectional negative control (a test that cannot fail against the pre-fix code proves nothing), corpus sweep with zero false positives, prove-by-run that a gate declared BLOCKING actually stops the flow, no design/PDK/vendor literals, an explicit BLOCKING-vs-ADVISORY declaration, and degrade-loudly-never-silently. Every criterion here was written from a measured failure in this repo, cited inline. Triggers on: authoring or reviewing a gate/check/step, 'add a gate', 'this check should catch', 'why did the flow not catch', 'land a flow fix', 'flow-level change', '流程層改動', '加一個檢查', '這個 gate 為什麼沒擋住'."
+description: "Validate changes to shared flow behavior, runners and verdict rules before landing: exercise actual consumers, known-good and known-bad cases, and retain honest evidence scope. Apply to flow-level implementation or review, not unrelated documentation edits. A repair does not automatically require a new checker, global gate or compliance template."
 ---
 
 # flow-change-acceptance — the standard for changing the flow itself
@@ -18,6 +18,38 @@ That asymmetry is the whole reason this skill exists:
 
 Every criterion below is written from a **measured** failure in this repo. None of
 them is a style preference.
+
+## Choose the smallest sufficient verification change
+
+Verification protects a product contract; its growth is a cost, not a product
+outcome. A past incident does not automatically justify another permanent gate.
+
+Before adding machinery, identify the actual failed behavior and its consumer.
+Prefer fixing the producer or removing duplicate state, then extending the
+existing behavioral test for that contract. One maintained test implementation
+can cover many data cases; do not copy a checker or test module for each issue.
+
+Separate these scopes:
+
+* A local regression case proves a specific failure is repaired. Keep it with
+  the responsible component and use the existing selection mechanism.
+* A global release gate is justified only by a cross-cutting risk that cannot
+  be covered at its owning boundary. Review its applicability, existing overlap,
+  expected execution cost and maintenance owner before making it mandatory.
+* Report-format advice and documentation lint are not evidence that a design,
+  simulation, verifier or repair actually worked. Do not promote a preferred
+  heading or prose pattern into a product-admission requirement.
+
+When equivalent checks already exist, consolidate their implementation and
+retain the discriminating cases. Changing one declaration should not require
+hand-synchronizing its copies or adding a new checker to check their equality.
+Prove that genuine bad inputs still fail and legitimate changes no longer
+cause representation-only failures. Do not use blanket test deletion, assertion
+caps, weaker thresholds, hidden skips or rewritten baselines as substitutes.
+
+This is authoring/review guidance, NOT a request for another global policy
+checker. Existing checks are not automatically reclassified by this paragraph;
+change their actual producers/consumers with scoped behavioral evidence.
 
 ---
 
@@ -174,21 +206,13 @@ the form it needs. "The token exists somewhere in the corpus" is not that.
 - [ ] the artifact you tested is the one that carries your fix — verify the plugin
       cache actually contains the changed code before trusting any run
 
-## Candidates to promote from this prose into programs
+## Reuse existing verification
 
-Program-first applies to this skill too. These criteria are mechanically checkable
-and should become deterministic checks rather than relying on an author remembering:
-
-- every gate declares BLOCKING vs ADVISORY (missing declaration ⇒ fail)
-- ~~every new gate's test suite contains at least one assertion that fails against
-  the parent revision~~ — LANDED as `control_substance_check`, and sharpened: the
-  criterion is that an assertion OBSERVED A VALUE, not merely that it failed
-- no flow-level program under `programs/` matches a design/PDK/vendor literal list
-- every `if <remedy> is not None:` decision point has an `else` that records the
-  decline
-
-Until they exist as programs, they live here — and a reviewer is expected to check
-them by hand.
+Program-first means automate useful repeated work. It does not mean convert
+every sentence, lesson or code shape into a new permanent admission gate.
+Use the relevant existing programs below; invoke them for their actual subject,
+and report what they measured. Extend an existing contract implementation when
+possible instead of adding another layer that checks the checker.
 
 ---
 
@@ -204,8 +228,8 @@ Landed, so the criterion is checked rather than remembered:
 | "empty vs clean" | `phase1_expert_track_evidence_check` — NEVER_RAN vs RAN_EMPTY | #312 |
 | §1 | `control_substance_check` — reads the pre-fix control's OWN pytest report and counts how many failures observed a VALUE, as against only noticing that something was absent. Composed by `gatekeeper_review --control-junit`, which BLOCKS on a tautological control | #381 |
 
-Still prose, worth promoting:
-- corpus-sweep evidence should be an artefact, not a claim in a PR body (§2)
+Keep corpus-sweep evidence as an artifact with its measured scope (§2). This
+requirement does not itself call for a new global checker.
 
 PROMOTED, and the reason it needed promoting: "every new gate's tests must
 contain at least one assertion that FAILS on the parent revision" is not the
@@ -217,26 +241,21 @@ of the four failed on the ABSENCE of a field the fix adds. Both "failed on the
 parent revision". `control_substance_check` grades the difference, and
 `gatekeeper_review --control-junit` is where it blocks.
 
-## Compliance gate (mandatory)
+## Compliance gate scope
 
-This skill ships `compliance.yaml`, and its patterns are enforced by
-`tests/test_compliance.py` in this directory. Before landing a change that
-claims to follow this doctrine, run the deterministic gate:
+This skill ships `compliance.yaml` and `tests/test_compliance.py`. They test
+the report-pattern machinery, not the feature, the stopped flow, or the truth of
+the report's claims. Run these tests when changing this skill's compliance
+contract, generator or shared checker:
 
 ```bash
 python3 -m pytest -q \
     plugins/vibe-ic/skills/flow-change-acceptance/tests/test_compliance.py
 ```
 
-The gate is the point of the doctrine, not a formality: every criterion
-above exists because a change that skipped it shipped a false certificate.
-A criterion asserted in prose and not measured by the gate is exactly the
-kind of unenforced declaration §5 tells you to refuse.
-
-**This section was missing until 2026-07-26.** The skill was landed during
-the #306/#307/#312 campaign with its `compliance.yaml` and tests in place
-but no Compliance-gate section in `SKILL.md`, so
-`test_every_skill_md_has_compliance_gate` had been RED on `main` — unseen,
-because CI runs the cadence-correct targeted subset rather than the full
-suite. A doctrine file about unenforced declarations shipped with an
-unenforced declaration of its own.
+For a flow behavior change, the actual evidence is the observed behavior and
+the substantive positive/negative controls above. A regex-generated "good
+output" cannot certify them. Report lint may identify missing explanations;
+it must not replace execution evidence or require a new global gate merely
+because a skill exists. Existing explicitly declared artifact/receipt checks
+still require their real producer evidence; no scope is silently waived.

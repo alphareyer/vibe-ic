@@ -239,26 +239,91 @@ def test_every_recorded_cause_still_names_a_live_requirement():
         + " ".join(orphans))
 
 
-def test_the_generated_tests_still_assert_the_register_both_ways():
-    """`ast`, not grep: the docstrings of these files QUOTE `pytest.skip()`
-    while describing the defect, so a substring test would either fail on
-    prose or have to stop looking for the thing it exists to find. That is the
-    same exemption-by-substring shape cz2050's M4 arm caught in its own test."""
+def test_the_generated_tests_still_assert_the_register_both_ways(tmp_path, monkeypatch):
+    """Follow the collected entrypoints through legacy bodies or shared methods.
+
+    Replay real driver outcomes at the test/driver boundary: an unexpected
+    requirement failure and a stale declared limitation must BOTH be refused.
+    A generated header selects a legacy path; it never proves its body intact.
+    """
     import ast
-    generated = [p for p in sorted(_SKILLS.glob("*/tests/test_compliance.py"))
-                 if "Auto-generated" in p.read_text()[:200]]
-    assert len(generated) == 69, len(generated)
-    for p in generated:
+    import copy
+    import importlib.util
+    from types import SimpleNamespace
+
+    def invoke(entry, *args, reject=False):
+        try:
+            entry(*args)
+        except (pytest.skip.Exception, pytest.xfail.Exception) as exc:
+            pytest.fail(f"{entry.__module__}.{entry.__name__} suppressed execution: {exc}")
+        except AssertionError:
+            if not reject:
+                raise
+        else:
+            assert not reject, f"{entry.__module__}.{entry.__name__} accepted the broken control"
+
+    generated = []
+    for p in sorted(_SKILLS.glob("*/tests/test_compliance.py")):
         text = p.read_text()
-        assert "SYNTHETIC_FIXTURE_LIMITATIONS" in text, p
-        assert "pattern_to_satisfier" in text, p
-        called = set()
-        for node in ast.walk(ast.parse(text)):
-            if isinstance(node, ast.Call) and isinstance(node.func,
-                                                         ast.Attribute):
-                called.add(node.func.attr)
-        assert "skip" not in called, p
-        assert "xfail" not in called, p
+        delegates = any(isinstance(n, ast.ImportFrom) and
+                        n.module == "generated_compliance_support"
+                        for n in ast.walk(ast.parse(text)))
+        if "Auto-generated" in text[:200] or delegates:
+            generated.append(p)
+    assert generated, "no generated execution paths were exercised"
+    for p in generated:
+        skill = p.parents[1].name
+        spec = importlib.util.spec_from_file_location(f"_generated_execution_{skill}", p)
+        module = importlib.util.module_from_spec(spec)
+        invoke(spec.loader.exec_module, module)
+        scope = getattr(module, "_CASE", module)
+        original_driver = scope.run_driver
+        measured = []
+
+        def record_driver(directory, text):
+            result = original_driver(directory, text)
+            measured.append(result)
+            return result
+
+        directory = tmp_path / skill
+        directory.mkdir()
+        with monkeypatch.context() as patch:
+            patch.setattr(scope, "run_driver", record_driver)
+            invoke(module.test_compliance_yaml_loads)
+            invoke(module.test_empty_output_fails_audit, directory)
+            assert measured, f"{p}: empty-output entrypoint never reached its driver"
+            empty = measured[-1]
+            before = len(measured)
+            invoke(module.test_good_output_passes_all_required, directory)
+            assert len(measured) > before, f"{p}: good-output entrypoint never reached its driver"
+            good = measured[-1]
+            required_failures = [f["id"] for f in empty[1]["findings"]
+                                 if f["severity"] == "FAIL" and f["id"].startswith("R")]
+            assert empty[0].returncode == 1 and required_failures, (p, empty)
+
+            # Growth: replay the actual empty-report rejection against the
+            # good-output assertion. No invented regex or failure ID is used.
+            patch.setattr(scope, "run_driver", lambda *_: empty)
+            invoke(module.test_good_output_passes_all_required, directory, reject=True)
+
+            # Shrinkage: a real satisfier no longer fails this declared rule.
+            patch.setattr(scope, "run_driver", lambda *_: good)
+            limits = scope.test_good_output_passes_all_required.__globals__["LIMITS"]
+            register = dict(limits.SYNTHETIC_FIXTURE_LIMITATIONS)
+            register[skill] = sorted(set(register.get(skill, ())) | {required_failures[0]})
+            with monkeypatch.context() as declared:
+                declared.setattr(limits, "SYNTHETIC_FIXTURE_LIMITATIONS", register)
+                invoke(module.test_good_output_passes_all_required, directory, reject=True)
+
+            # Suppressing a real missing-receipt finding cannot certify the
+            # synthetic report. This follows the wrapper into its shared body.
+            missing = [f for f in good[1]["findings"] if f["severity"] == "FAIL"]
+            if missing:
+                suppressed = copy.deepcopy(good[1])
+                suppressed["findings"] = [f for f in suppressed["findings"] if f["severity"] != "FAIL"]
+                suppressed["verdict"] = "PASS"
+                patch.setattr(scope, "run_driver", lambda *_: (SimpleNamespace(returncode=0), suppressed))
+                invoke(module.test_good_output_passes_all_required, directory, reject=True)
 
 
 def test_the_driver_finds_the_shared_satisfier_where_the_template_looks():

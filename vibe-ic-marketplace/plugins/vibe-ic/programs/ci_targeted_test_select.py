@@ -237,8 +237,11 @@ an x.y.0 MILESTONE, whose full-suite job lives in a workflow that fires only on
 from __future__ import annotations
 
 import argparse
-import ast
+import configparser
 import fnmatch
+import os
+import shlex
+import ast
 import re
 import subprocess
 import sys
@@ -435,6 +438,104 @@ SMOKE_BASENAMES: tuple[str, ...] = (
 _SOURCE_DIRS: tuple[str, ...] = ("programs", "benchmark")
 _TESTS_REL = "programs/tests"
 
+
+class PopulationError(ValueError):
+    """The declared pytest file population is NOT_DETERMINED, never empty/full."""
+
+
+def _pytest_settings(plugin_root: Path) -> tuple[list[str], list[str], list[str]]:
+    """Read the plugin's required pytest.ini as data; never load its Python."""
+    config = configparser.ConfigParser(interpolation=None)
+    try:
+        if (plugin_root / "pytest.ini").is_symlink():
+            raise ValueError("symlinked pytest.ini is not an immutable declaration")
+        with (plugin_root / "pytest.ini").open(encoding="utf-8") as stream:
+            config.read_file(stream)
+        section = config["pytest"]
+        paths = shlex.split(section["testpaths"])
+        patterns = shlex.split(section.get("python_files", "test_*.py *_test.py"))
+        ignored = shlex.split(section.get(
+            "norecursedirs", "*.egg .* _darcs build CVS dist node_modules venv {arch}"))
+    except (OSError, UnicodeError, configparser.Error, KeyError, ValueError) as exc:
+        raise PopulationError(f"NOT_DETERMINED: pytest.ini is missing or invalid: {exc}") from exc
+    if not paths or not patterns:
+        raise PopulationError("NOT_DETERMINED: pytest.ini requires nonempty testpaths/python_files")
+    if any(Path(path).is_absolute() or ".." in Path(path).parts for path in paths):
+        raise PopulationError("NOT_DETERMINED: testpaths must remain inside the plugin")
+    return paths, patterns, ignored
+
+
+def _pytest_path_matches(pattern: str, path: Path) -> bool:
+    """pytest's fnmatch_ex semantics, without importing candidate collectors."""
+    name = path.name if os.sep not in pattern else str(path)
+    if os.sep in pattern and path.is_absolute() and not os.path.isabs(pattern):
+        pattern = "*" + os.sep + pattern
+    return fnmatch.fnmatch(name, pattern)
+
+
+def declared_test_population(plugin_root: Path) -> list[str]:
+    """Sorted declared pytest files, relative to the plugin.
+
+    testpaths, python_files and norecursedirs define file eligibility. This is
+    not node collection: conftest, plugins, tests and custom collection hooks
+    are never executed. The trusted selector owns this implementation and reads
+    a subject's config only as data. Missing/invalid config, unreadable paths or
+    symlinked scopes refuse rather than certify a partial population.
+    """
+    root = plugin_root.resolve()
+    paths, patterns, ignored = _pytest_settings(root)
+    out = set()
+
+    def error(exc):
+        raise PopulationError(f"NOT_DETERMINED: test scope is unreadable: {exc}") from exc
+
+    def eligible(path):
+        return path.suffix == ".py" and any(_pytest_path_matches(p, path) for p in patterns)
+
+    try:
+        for pattern in paths:
+            scopes = [root] if pattern == "." else sorted(root.glob(pattern))
+            if not scopes:
+                raise PopulationError(f"NOT_DETERMINED: testpath has no matches: {pattern}")
+            for scope in scopes:
+                if any(path.is_symlink() for path in (scope, *scope.parents)
+                       if path == root or root in path.parents):
+                    raise PopulationError(f"NOT_DETERMINED: symlinked testpath: {scope}")
+                if scope.is_file():
+                    # pytest's explicit initial files bypass python_files;
+                    # directory recursion still applies that pattern below.
+                    if scope.suffix == ".py":
+                        out.add(scope.relative_to(root).as_posix())
+                    continue
+                if not scope.is_dir():
+                    raise PopulationError(f"NOT_DETERMINED: invalid testpath: {scope}")
+                for directory, dirs, files in os.walk(scope, onerror=error):
+                    parent = Path(directory)
+                    kept = []
+                    for name in dirs:
+                        child = parent / name
+                        if any(_pytest_path_matches(p, child) for p in ignored):
+                            continue
+                        if child.is_symlink():
+                            raise PopulationError(f"NOT_DETERMINED: symlinked test scope: {child}")
+                        kept.append(name)
+                    dirs[:] = sorted(kept)
+                    for name in files:
+                        path = parent / name
+                        if eligible(path):
+                            if path.is_symlink():
+                                raise PopulationError(f"NOT_DETERMINED: symlinked test file: {path}")
+                            out.add(path.relative_to(root).as_posix())
+    except (OSError, ValueError) as exc:
+        if isinstance(exc, PopulationError):
+            raise
+        raise PopulationError(f"NOT_DETERMINED: test population cannot be read: {exc}") from exc
+    return sorted(out)
+
+
+def _test_population_paths(plugin_root: Path) -> list[Path]:
+    return [plugin_root / rel for rel in declared_test_population(plugin_root)]
+
 # Rule 6 (vibe-ic#1057) — REPO-ROOT directories that sit OUTSIDE the plugin and
 # whose files the plugin's tests drive by PATH rather than by import.
 #
@@ -576,14 +677,11 @@ def _owning_stem(test_x: str, source_stems: set[str]) -> str | None:
 def _build_test_index(plugin_root: Path, source_stems: set[str]) -> dict[str, set[str]]:
     """Map each source stem -> set of plugin-rel test paths it owns."""
     index: dict[str, set[str]] = {}
-    tests_dir = plugin_root / _TESTS_REL
-    if not tests_dir.is_dir():
-        return index
-    for tf in tests_dir.glob("test_*.py"):
-        test_x = tf.name[len("test_"):-len(".py")]
+    for tf in _test_population_paths(plugin_root):
+        test_x = tf.stem.removeprefix("test_").removesuffix("_test")
         owner = _owning_stem(test_x, source_stems)
         if owner is not None:
-            index.setdefault(owner, set()).add(f"{_TESTS_REL}/{tf.name}")
+            index.setdefault(owner, set()).add(tf.relative_to(plugin_root).as_posix())
     return index
 
 
@@ -611,12 +709,8 @@ def _build_import_edge_index(
     no edges rather than aborting the selection. A selector that dies on one bad
     file selects nothing, and selecting nothing is the defect.
     """
-    tests_dir = plugin_root / _TESTS_REL
-    if not tests_dir.is_dir():
-        return {}
-
     idx: dict[str, set[str]] = {}
-    for tp in sorted(tests_dir.rglob("test_*.py")):
+    for tp in _test_population_paths(plugin_root):
         try:
             text = tp.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -668,15 +762,12 @@ def _build_reference_index(
     emit a list.
     """
     index: dict[str, set[str]] = {}
-    tests_dir = plugin_root / _TESTS_REL
-    if not tests_dir.is_dir():
-        return index
-    for tf in tests_dir.glob("test_*.py"):
+    for tf in _test_population_paths(plugin_root):
         try:
             text = tf.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        rel = f"{_TESTS_REL}/{tf.name}"
+        rel = tf.relative_to(plugin_root).as_posix()
         for name in set(_IDENT.findall(text)) & source_stems:
             index.setdefault(name, set()).add(rel)
     return index
@@ -781,16 +872,13 @@ def _build_tool_reference_index(
     index: dict[str, set[str]] = {}
     if not tool_basenames:
         return index
-    tests_dir = plugin_root / _TESTS_REL
-    if not tests_dir.is_dir():
-        return index
     pats = {b: _tool_ref_pattern(b) for b in tool_basenames}
-    for tf in sorted(tests_dir.glob("test_*.py")):
+    for tf in _test_population_paths(plugin_root):
         try:
             text = tf.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        rel = f"{_TESTS_REL}/{tf.name}"
+        rel = tf.relative_to(plugin_root).as_posix()
         for base, pat in pats.items():
             if pat.search(text):
                 index.setdefault(base, set()).add(rel)
@@ -1096,6 +1184,76 @@ def _helper_module_names(plugin_root: Path, source_stems: set[str]) -> dict[str,
     return out
 
 
+def _python_command_sources(tree: ast.AST) -> set[str]:
+    """Literal Python ``-c`` bodies passed to a command runner, never executed.
+
+    Imports inside subprocess probes are dependencies too. Resolve literal
+    strings, names assigned literals, and literal ``str.replace`` calls; an
+    ordinary fixture string or a non-Python command contributes no code. This
+    is static dependency discovery, not evaluation of arbitrary expressions.
+    """
+    literals: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    literals.setdefault(target.id, set()).add(value.value)
+
+    def strings(expr: ast.AST) -> set[str]:
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+            return {expr.value}
+        if isinstance(expr, ast.Name):
+            return literals.get(expr.id, set())
+        if (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute)
+                and expr.func.attr == "replace" and len(expr.args) == 2
+                and not expr.keywords
+                and all(isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                        for arg in expr.args)):
+            old, new = (arg.value for arg in expr.args)
+            return {text.replace(old, new) for text in strings(expr.func.value)}
+        return set()
+
+    sources: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        runner = (node.func.attr if isinstance(node.func, ast.Attribute)
+                  else node.func.id if isinstance(node.func, ast.Name) else None)
+        if runner not in {"run", "Popen", "call", "check_call", "check_output",
+                          "run_host_supervised"}:
+            continue
+        argv = node.args[0] if node.args else next(
+            (kw.value for kw in node.keywords if kw.arg == "args"), None)
+        if not isinstance(argv, (ast.List, ast.Tuple)) or len(argv.elts) < 3:
+            continue
+        executable = argv.elts[0]
+        is_python = (
+            isinstance(executable, ast.Attribute) and executable.attr == "executable"
+            and isinstance(executable.value, ast.Name) and executable.value.id == "sys"
+        ) or any(re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(name).name)
+                 for name in strings(executable))
+        if not is_python:
+            continue
+        index = 1
+        while index < len(argv.elts) - 1:
+            option = argv.elts[index]
+            if not isinstance(option, ast.Constant) or not isinstance(option.value, str):
+                break
+            if option.value == "-c":
+                sources |= strings(argv.elts[index + 1])
+                break
+            if option.value in {"-m", "--"} or not option.value.startswith("-"):
+                break  # subsequent arguments belong to a script/module, not Python
+            index += 2 if option.value in {"-W", "-X"} else 1
+    return sources
+
+
 def _imported_module_names(text: str, own_package: str | None) -> set[str] | None:
     """Every module name imported by ``text``, ancestors included.
 
@@ -1103,6 +1261,9 @@ def _imported_module_names(text: str, own_package: str | None) -> set[str] | Non
     ``flow_matrix/cells.py``, ``None`` at the tests-dir top level) and resolves
     relative imports: inside ``flow_matrix``, ``from . import flowref`` and
     ``from .flowref import StepId`` both yield ``flow_matrix.flowref``.
+
+    Includes imports in statically known Python ``-c`` command bodies; inert
+    string literals remain data. Child interpreters have no enclosing package.
 
     Returns ``None`` when the file cannot be parsed — a selector must not go
     quiet because one file is unreadable or syntactically broken; the caller
@@ -1138,6 +1299,12 @@ def _imported_module_names(text: str, own_package: str | None) -> set[str] | Non
             for alias in node.names:
                 if alias.name != "*":
                     found.add(f"{mod}.{alias.name}")
+    if "-c" in text:
+        for source in _python_command_sources(tree):
+            imported = _imported_module_names(source, None)
+            if imported is None:
+                return None
+            found |= imported
     return found
 
 
@@ -1197,15 +1364,15 @@ def _helper_consumers(plugin_root: Path, changed_helpers: list[str],
     # `a`, so a file without any target's top-level name cannot import one.
     tops = {t.split(".")[0] for t in targets}
     selected: set[str] = set()
-    for tf in tests_dir.glob("test_*.py"):
+    for tf in _test_population_paths(plugin_root):
         try:
             txt = tf.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         if not any(top in txt for top in tops):
             continue
-        rel = f"{_TESTS_REL}/{tf.name}"
-        imported = _imported_module_names(txt, None)
+        rel = tf.relative_to(plugin_root).as_posix()
+        imported = _imported_module_names(txt, _own_package(rel))
         if imported is None or imported & targets:
             selected.add(rel)
     return selected
@@ -1422,6 +1589,8 @@ def select_tests(
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; expected one of {MODES}")
 
+    population = set(declared_test_population(plugin_root))
+
     source_stems = _source_stems(plugin_root)
     index = _build_test_index(plugin_root, source_stems)
     ref_index: dict[str, set[str]] = {}
@@ -1455,9 +1624,8 @@ def select_tests(
             continue
         rp = Path(rel)
         # (2) a changed test file -> include directly (if it still exists).
-        if rel.startswith(_TESTS_REL + "/") and rp.name.startswith("test_"):
-            if (plugin_root / rel).is_file():
-                selected.add(rel)
+        if rel in population:
+            selected.add(rel)
             continue
         # (4) a changed shared test-helper module -> the tests that import it.
         if _is_test_helper(rel):
@@ -1569,7 +1737,7 @@ def select_tests(
                         selected |= edge_index.get(stem, set())
 
     # Only emit tests that exist on disk (robust against a stale index entry).
-    return sorted(t for t in selected if (plugin_root / t).is_file())
+    return sorted(selected & population)
 
 
 def _repo_root_of(plugin_root: Path, plugin_prefix: str) -> Path:
@@ -1746,8 +1914,12 @@ def main(argv: list[str] | None = None) -> int:
               f"to be seen here, it is not in this repository at this base.",
               file=sys.stderr)
 
-    selected = select_tests(changed, plugin_root, plugin_prefix,
-                            mode=args.mode, ref_max_tests=args.ref_max_tests)
+    try:
+        selected = select_tests(changed, plugin_root, plugin_prefix,
+                                mode=args.mode, ref_max_tests=args.ref_max_tests)
+    except PopulationError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     for t in selected:
         print(t)
     print(f"[ci_targeted_test_select] selected {len(selected)} test file(s) "

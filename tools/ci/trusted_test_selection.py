@@ -707,24 +707,27 @@ def _load_selector(path: Path, expected: dict[str, Any]):
 
 def build(*, object_repo: Path, base: str, candidate: str,
           selector_commit: str, selector_path: Path,
-          base_snapshot: Path, candidate_snapshot: Path) -> dict[str, Any]:
+          base_snapshot: Path, candidate_snapshot: Path,
+          selector_object_repo: Path | None = None) -> dict[str, Any]:
     repo = object_repo.resolve(strict=True)
     algorithm, oid_len = transition._object_format(repo)  # type: ignore[attr-defined]
     base_commit, base_tree_oid = transition._commit_and_tree(  # type: ignore[attr-defined]
         repo, base, oid_len, "selection base")
     candidate_commit, candidate_tree_oid = transition._commit_and_tree(  # type: ignore[attr-defined]
         repo, candidate, oid_len, "selection candidate")
+    selector_repo = (selector_object_repo or repo).resolve(strict=True)
+    selector_algorithm, selector_oid_len = transition._object_format(selector_repo)
     selector_commit_id, selector_tree_oid = transition._commit_and_tree(  # type: ignore[attr-defined]
-        repo, selector_commit, oid_len, "selection authority")
+        selector_repo, selector_commit, selector_oid_len, "selection authority")
     base_tree = transition._tree(repo, base_commit, oid_len)  # type: ignore[attr-defined]
     candidate_tree = transition._tree(  # type: ignore[attr-defined]
         repo, candidate_commit, oid_len)
     selector_tree = transition._tree(  # type: ignore[attr-defined]
-        repo, selector_commit_id, oid_len)
+        selector_repo, selector_commit_id, selector_oid_len)
     if SELECTOR_REL not in selector_tree:
         raise Refusal("selected runtime has no trusted selector")
     selector_record = transition._observe_file(  # type: ignore[attr-defined]
-        repo, SELECTOR_REL, selector_tree[SELECTOR_REL], algorithm, oid_len)
+        selector_repo, SELECTOR_REL, selector_tree[SELECTOR_REL], selector_algorithm, selector_oid_len)
     selector = _load_selector(selector_path, selector_record)
 
     base_root = base_snapshot.resolve(strict=True)
@@ -762,6 +765,20 @@ def build(*, object_repo: Path, base: str, candidate: str,
         if path.startswith(f"{PLUGIN_REL}/programs/tests/test_")
         and path.endswith(".py")
     }
+    population = getattr(selector, "declared_test_population", None)
+    if callable(population):
+        try:
+            # Use the approved selector's parser on data in each attested tree.
+            # Retain BASE-only deletions, but never let this extra union route
+            # resurrect a fixture excluded by both declared populations.
+            declared = set(population(base_plugin)) | set(population(candidate_plugin))
+        except Exception as exc:
+            raise Refusal(f"trusted selector could not declare test population: {exc}") from exc
+        directly_changed_tests &= declared
+    elif selector_object_repo is not None:
+        # Independent runtime approval must include the growth lane's API.
+        # Legacy BASE selectors keep their existing contract until migration.
+        raise Refusal("approved runtime selector lacks declared_test_population API")
     selected = base_selected | candidate_selected | directly_changed_tests
     for control in CONTROL_TESTS:
         full = f"{PLUGIN_REL}/{control}"
@@ -906,6 +923,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--base", required=True)
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--selector-commit", required=True)
+    parser.add_argument("--selector-object-repo", type=Path,
+                        help="trusted runtime object database, distinct from product repo")
     parser.add_argument("--selector-path", type=Path, required=True)
     parser.add_argument("--base-snapshot", type=Path, required=True)
     parser.add_argument("--candidate-snapshot", type=Path, required=True)
@@ -920,6 +939,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         record = build(
             object_repo=args.object_repo, base=args.base,
             candidate=args.candidate, selector_commit=args.selector_commit,
+            selector_object_repo=args.selector_object_repo,
             selector_path=args.selector_path,
             base_snapshot=args.base_snapshot,
             candidate_snapshot=args.candidate_snapshot,

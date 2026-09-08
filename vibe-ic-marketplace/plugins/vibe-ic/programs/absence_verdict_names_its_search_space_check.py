@@ -239,6 +239,146 @@ def _has_locus_resolved(nodes: List[ast.AST], binds: Dict[str, List[ast.AST]],
     return bool(followed) and _has_locus_resolved(followed, binds, depth - 1)
 
 
+def _scope_nodes(scope: ast.AST):
+    """Walk one lexical scope; definitions are bindings, not executed bodies."""
+    yield scope
+    for child in ast.iter_child_nodes(scope):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef, ast.Lambda)):
+            yield child
+        else:
+            yield from _scope_nodes(child)
+
+
+def _bound_names(nodes) -> List[str]:
+    names = []
+    for node in nodes:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.append(node.id)
+        elif isinstance(node, ast.arg):
+            names.append(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.append(node.name)
+        elif isinstance(node, ast.alias):
+            names.append(node.asname or node.name.split('.')[0])
+    return names
+
+
+def _returned_collector_context(tree: ast.AST, call: ast.Call) -> List[ast.AST]:
+    """Locus in the SAME returned record as an appended absence code.
+
+    A local list append constructs metadata; the refusal is the record that
+    carries it. Follow only single-binding local lists and directly returned
+    local helpers. Resolve companion lists from their own append/extend values,
+    never from an unrelated function. Every returned record carrying the list
+    must disclose a locus. Unknown objects, rebinding, shadowing, escaping the
+    collector, and indirect/recursive helpers receive no additional context.
+    This is not an append exemption: a scope-less returned list still fails.
+    """
+    if not (isinstance(call.func, ast.Attribute)
+            and call.func.attr == 'append'
+            and isinstance(call.func.value, ast.Name)):
+        return []
+    name = call.func.value.id
+    owner = _enclosing_function(tree, call.lineno)
+    nodes = list(_scope_nodes(owner))
+    bound = _bound_names(nodes)
+    # _scope_nodes includes the owner definition itself; it is not a local
+    # rebinding of its own function name, but local definitions below it are.
+    if bound.count(name) != 1:
+        return []
+    shadows_list = 'list' in bound + _bound_names(_scope_nodes(tree))
+    lists = set()
+    binds: Dict[str, List[ast.AST]] = {}
+    for node in nodes:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if not isinstance(target, ast.Name) or node.value is None:
+                    continue
+                binds.setdefault(target.id, []).append(node.value)
+                if len(targets) == 1 and bound.count(target.id) == 1 and (
+                        isinstance(node.value, ast.List) or (
+                            not shadows_list and isinstance(node.value, ast.Call)
+                            and isinstance(node.value.func, ast.Name)
+                            and node.value.func.id == 'list')):
+                    lists.add(target.id)
+    if name not in lists:
+        return []
+    helpers = {n.name: n for n in nodes if n is not owner
+               and isinstance(n, ast.FunctionDef) and bound.count(n.name) == 1}
+    returns = []
+    visited = set()
+
+    def follow(scope, active):
+        if id(scope) in active:
+            return False
+        local = list(_scope_nodes(scope))
+        if scope is not owner and lists.intersection(_bound_names(local)):
+            return False
+        visited.add(id(scope))
+        for node in local:
+            if not isinstance(node, ast.Return) or node.value is None:
+                continue
+            value = node.value
+            if (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                    and value.func.id in helpers):
+                if not follow(helpers[value.func.id], active | {id(scope)}):
+                    return False
+            elif any(isinstance(n, ast.Name) and n.id == name
+                     for n in ast.walk(value)):
+                returns.append(value)
+        return True
+
+    if not follow(owner, set()) or not returns:
+        return []
+    # Only scopes reached through returned helpers can contribute list values.
+    reached = nodes + [n for helper in helpers.values() if id(helper) in visited
+                       for n in _scope_nodes(helper)]
+    for node in reached:
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in lists
+                and node.func.attr in {'append', 'extend'}):
+            binds.setdefault(node.func.value.id, []).extend(node.args)
+    for node in reached:
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            if node.value is not None and any(
+                    isinstance(n, ast.Name) and n.id == name
+                    for n in ast.walk(node.value)):
+                return []  # aliases need a separate dataflow analysis
+        if isinstance(node, ast.Call) and any(
+                isinstance(n, ast.Name) and n.id == name
+                for arg in list(node.args) + [kw.value for kw in node.keywords]
+                for n in ast.walk(arg)):
+            if not any(node in ast.walk(ret) for ret in returns):
+                return []  # another consumer may emit an unaddressed refusal
+    contexts = []
+    for value in returns:
+        # The collector is the code-bearing field, not its own disclosure.
+        # Calling that variable 'reports' must not make a bare list an address.
+        if isinstance(value, ast.Dict):
+            fields = list(zip(value.keys, value.values))
+        elif isinstance(value, ast.Call):
+            fields = [(None, arg) for arg in value.args]
+            fields += [(ast.Constant(value=kw.arg), kw.value)
+                       for kw in value.keywords if kw.arg]
+        else:
+            return []
+        companions = [expr for key, field in fields
+                      if not any(isinstance(n, ast.Name) and n.id == name
+                                 for n in ast.walk(field))
+                      for expr in (key, field) if expr is not None]
+        if not _has_locus_resolved(companions, binds):
+            return []
+        pending = companions
+        for _ in range(3):
+            contexts.extend(pending)
+            pending = [v for expr in pending for n in ast.walk(expr)
+                       if isinstance(n, ast.Name) for v in binds.get(n.id, [])]
+    return contexts
+
+
 def absence_verdicts(tree: ast.AST) -> List[Tuple[int, str, List[ast.AST]]]:
     """Every refusal CONSTRUCTION whose rule id is absence-class.
 
@@ -287,6 +427,7 @@ def absence_verdicts(tree: ast.AST) -> List[Tuple[int, str, List[ast.AST]]]:
                     companions += [ast.Constant(value=kw.arg)
                                    for kw in node.keywords if kw.arg]
                     break
+            companions += _returned_collector_context(tree, call)
             out.append((call.lineno, arg.value, companions))
             break
     return out

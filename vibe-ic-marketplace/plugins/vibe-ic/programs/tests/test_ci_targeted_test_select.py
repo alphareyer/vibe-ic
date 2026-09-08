@@ -299,6 +299,7 @@ def test_reference_matches_whole_identifiers_not_substrings(tmp_path):
     the index is built by the rule under test and any check would be circular).
     """
     (tmp_path / "programs" / "tests").mkdir(parents=True)
+    (tmp_path / "pytest.ini").write_text("[pytest]\ntestpaths = programs/tests\n")
     (tmp_path / "programs" / "alpha.py").write_text("x = 1\n")
     (tmp_path / "programs" / "alpha_beta.py").write_text("y = 2\n")
     (tmp_path / "programs" / "tests" / "test_only_long.py").write_text(
@@ -524,6 +525,7 @@ def test_helper_rule_does_not_widen_unrelated_selections():
 def _fake_plugin(tmp_path: Path) -> Path:
     root = tmp_path / "vibe-ic"
     (root / "programs" / "tests").mkdir(parents=True)
+    (root / "pytest.ini").write_text("[pytest]\ntestpaths = programs/tests\n")
     return root
 
 
@@ -557,7 +559,7 @@ def test_helper_mapping_is_derived_from_imports_not_a_filename_list(tmp_path):
 
 
 def test_helper_rule_ignores_the_name_in_string_literals(tmp_path):
-    """Precision: a MENTION is not an import.
+    """Inert fixture text is data; a Python command body carries imports.
 
     Real pattern in this tree — test_real_artefact_test_backing_check.py embeds
     `"from _hostpaths import require_repo\\n"` as fixture text. A grep-based
@@ -569,12 +571,41 @@ def test_helper_rule_ignores_the_name_in_string_literals(tmp_path):
     (t / "test_mentions.py").write_text(
         'SRC = "from helper_mod import thing\\n"\n', encoding="utf-8")
     (t / "test_imports.py").write_text("import helper_mod\n", encoding="utf-8")
+    body = "import helper_mod\nraise RuntimeError('discovery must not execute this')\n"
+    (t / "test_multiline_data.py").write_text(f"SRC = {body!r}\n")
+    (t / "test_docstring.py").write_text(f"{body!r}\n")
+    (t / "test_other_command.py").write_text(
+        f"import subprocess\nsubprocess.run(['echo', '-c', {body!r}])\n")
+    (t / "test_logged_command.py").write_text(
+        f"import sys\nprint([sys.executable, '-c', {body!r}])\n")
+    (t / "test_script_argument.py").write_text(
+        f"import subprocess\nsubprocess.run(['python3', 'other.py', '-c', {body!r}])\n")
+    commands = {
+        "test_inline.py": f"subprocess.run([sys.executable, '-c', {body!r}])\n",
+        "test_named.py": f"PROBE = {body!r}\n_pr.run([sys.executable, '-c', PROBE])\n",
+        "test_replaced.py": (
+            "PROBE: str = 'pass\\n'\n"
+            "subprocess.run(args=('python3', '-c', PROBE.replace('pass', 'import helper_mod')))\n"),
+        "nested/test_child.py": f"subprocess.run(['/usr/bin/python3.12', '-I', '-c', {body!r}])\n",
+        "data/test_excluded.py": f"subprocess.run([sys.executable, '-c', {body!r}])\n",
+    }
+    for name, command in commands.items():
+        path = t / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("import sys\nimport subprocess\n" + command)
+    (root / "pytest.ini").write_text(
+        "[pytest]\ntestpaths = programs/tests\nnorecursedirs = programs/tests/data\n")
 
     out = set(sel.select_tests(["programs/tests/helper_mod.py"],
                                root, plugin_prefix=""))
     assert f"{TESTS_REL}/test_imports.py" in out
     assert f"{TESTS_REL}/test_mentions.py" not in out, (
         "a string literal naming the helper was read as an import")
+    assert out == {
+        f"{TESTS_REL}/{name}" for name in (
+            "test_imports.py", "test_inline.py", "test_named.py",
+            "test_replaced.py", "nested/test_child.py")
+    }, f"executed Python dependencies or declared exclusions were lost: {sorted(out)}"
 
 
 def test_helper_rule_follows_helper_to_helper_edges(tmp_path):

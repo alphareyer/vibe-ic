@@ -217,7 +217,23 @@ if [ -n "$BASE_GATE_CACHE" ]; then
   BASE_GATE_CACHE=""
 fi
 
-SELF_REPO="$(git -C "$SELF" rev-parse --show-toplevel 2>/dev/null)"
+# Fixed host provision point. No environment or candidate CLI can choose this
+# store. The operator invokes controller/tools/ci/protected_runtime_store.py
+# verify; it dispatches the exact externally active bundle's verifier.
+CONTROLLER_STORE=/var/lib/vibeic/landing-runtime
+CONTROLLER_HELPER="$CONTROLLER_STORE/controller/tools/ci/protected_runtime_store.py"
+CONTROLLER_MODE=0
+if [ -e "$CONTROLLER_STORE" ] || [ -L "$CONTROLLER_STORE" ]; then
+  [ -d "$CONTROLLER_STORE" ] && [ ! -L "$CONTROLLER_STORE" ] \
+    || die "controller runtime store is malformed; no legacy fallback"
+  PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$CONTROLLER_HELPER" bootstrap \
+    --verifier "$SELF/gatekeeper-verify-merge.sh" \
+    || die "running verifier has no external runtime authority"
+  CONTROLLER_MODE=1
+  SELF_REPO="$(cd "$SELF/.." && pwd)"
+else
+  SELF_REPO="$(git -C "$SELF" rev-parse --show-toplevel 2>/dev/null)"
+fi
 [ -z "$REPO" ] && REPO="$SELF_REPO"
 [ -n "$REPO" ] || die "no repository (pass --repo)"
 REPO="$(cd "$REPO" && pwd)"
@@ -260,6 +276,8 @@ derive_push_range() {
 # create. This is the time dimension of "verified the wrong tree", and it is the
 # cheap half — no worktree, no tests, just two `rev-parse`s.
 if [ -n "$REASSERT" ]; then
+  [ "$CONTROLLER_MODE" = 0 ] \
+    || die "controller runtime reassert requires a fresh verify; legacy reassert cannot authorize a bundle verdict"
   [ -f "$REASSERT" ] || die "--reassert: no such file: $REASSERT"
   read -r WAS_BASE WAS_HEAD WAS_VERDICT < <(python3 - "$REASSERT" <<'PY'
 import json, sys
@@ -323,6 +341,8 @@ fi
 # the actual unpublished range, rebuilds the protected tuple receipt for the
 # new one-commit head, and emits a self-contained REBOUND_FROM verdict.
 if [ -n "$REBIND" ]; then
+  [ "$CONTROLLER_MODE" = 0 ] \
+    || die "controller runtime rebind requires a fresh verify; legacy packaging receipts cannot authorize a bundle verdict"
   [ -z "$PR" ] || die "--rebind accepts --ref, not a PR number"
   [ -n "$REF" ] || die "--rebind requires --ref <new-head>"
   [ -n "$JSON_OUT" ] || die "--rebind requires --json <rebound-verdict>"
@@ -429,6 +449,11 @@ PROTECTED_OPERATION=""
 RUNTIME_AUTHORITY_COMMIT=""
 RUNTIME_SNAPSHOT="$RUN/protected-runtime"
 RUNTIME_RECORD="$RUN/protected-runtime.json"
+RUNTIME_SHA256=""
+RUNTIME_OBJECT_REPO="$REPO"
+BASE_SELECTOR_SNAPSHOT="$WT_TRUSTED"
+SELECTOR_REPO_ARGS=()
+PUSH_RUNTIME_ARGS=()
 CAND_SUBJECT="$RUN/candidate-subject"
 BASE_SUBJECT="$RUN/base-subject"
 CAND_SUBJECT_RECORD="$RUN/candidate-subject.json"
@@ -502,6 +527,14 @@ run_owned_operational() {
 
 validate_protected_landing_transition() {
   local receipt="$1"
+  if [ "$CONTROLLER_MODE" = 1 ]; then
+    PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$CONTROLLER_HELPER" subject-receipt \
+      --object-repo "$REPO" --base "$BASE_SHA" --candidate "$VERIFIED_SHA" \
+      --candidate-gates "$WT_CAND" --candidate-tests "$WT_CAND_TESTS" \
+      --runtime "$RUNTIME_SNAPSHOT" --expected-runtime-sha256 "$RUNTIME_SHA256" \
+      --record "$receipt"
+    return $?
+  fi
   run_owned_operational "$TRUSTED_REPO" \
     python3 "$TRUSTED_REPO/tools/ci/protected_landing_transition.py" verify \
       --object-repo "$REPO" --base "$BASE_SHA" \
@@ -513,6 +546,12 @@ validate_protected_landing_transition() {
 
 materialize_protected_runtime() {
   local selected runtime_root runtime_state
+  if [ "$CONTROLLER_MODE" = 1 ]; then
+    PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$CONTROLLER_HELPER" attest \
+      --runtime "$RUNTIME_SNAPSHOT" --expected-runtime-sha256 "$RUNTIME_SHA256" \
+      || die "externally approved runtime changed before arm launch"
+    return 0
+  fi
   selected="$(PYTHONDONTWRITEBYTECODE=1 python3 -B \
     "$TRUSTED_REPO/tools/ci/protected_landing_transition.py" select-runtime \
       --receipt "$PROTECTED_PRE" \
@@ -550,8 +589,9 @@ build_trusted_test_selection() {
     python3 "$RUNTIME_SNAPSHOT/tools/ci/trusted_test_selection.py" \
       --object-repo "$REPO" --base "$BASE_SHA" --candidate "$VERIFIED_SHA" \
       --selector-commit "$RUNTIME_AUTHORITY_COMMIT" \
+      "${SELECTOR_REPO_ARGS[@]}" \
       --selector-path "$RUNTIME_SNAPSHOT/$PLUGIN_REL/programs/ci_targeted_test_select.py" \
-      --base-snapshot "$TRUSTED_REPO" \
+      --base-snapshot "$BASE_SELECTOR_SNAPSHOT" \
       --candidate-snapshot "$WT_CAND" \
       --manifest "$SELECTION_MANIFEST" \
       --base-selection "$RUN/selection_base.txt" \
@@ -740,6 +780,35 @@ PY
 }
 
 refresh_and_attest_trusted_tools() {
+  if [ "$CONTROLLER_MODE" = 1 ]; then
+    if [ -z "$RUNTIME_SHA256" ]; then
+      local selected
+      selected="$(PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$CONTROLLER_HELPER" \
+        select --output "$RUNTIME_SNAPSHOT")" \
+        || die "cannot select externally approved runtime"
+      IFS=$'\t' read -r RUNTIME_SHA256 RUNTIME_AUTHORITY_COMMIT RUNTIME_OBJECT_REPO <<< "$selected"
+      [ -n "$RUNTIME_SHA256" ] && [ -n "$RUNTIME_AUTHORITY_COMMIT" ] && [ -n "$RUNTIME_OBJECT_REPO" ] \
+        || die "controller selection omitted exact runtime provenance"
+      SELECTOR_REPO_ARGS=(--selector-object-repo "$RUNTIME_OBJECT_REPO")
+      PUSH_RUNTIME_ARGS=(--authority-object-repo "$RUNTIME_OBJECT_REPO"
+                         --authority-commit "$RUNTIME_AUTHORITY_COMMIT")
+    else
+      PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$CONTROLLER_HELPER" attest \
+        --runtime "$RUNTIME_SNAPSHOT" --expected-runtime-sha256 "$RUNTIME_SHA256" \
+        || die "runtime choice or bytes changed during verification"
+    fi
+    TRUSTED_REPO="$RUNTIME_SNAPSHOT"
+    BASE_SELECTOR_SNAPSHOT="$RUN/product-base-selection"
+    case "$BASE_SELECTOR_SNAPSHOT" in "$RUN"/*) ;; *) die "unsafe product snapshot path" ;; esac
+    rm -rf -- "$BASE_SELECTOR_SNAPSHOT"
+    mkdir -m 0700 -- "$BASE_SELECTOR_SNAPSHOT"
+    "${G[@]}" archive --format=tar "$BASE_SHA" | tar -xf - -C "$BASE_SELECTOR_SNAPSHOT" \
+      || die "cannot materialize product BASE for exact selection"
+    PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$TRUSTED_REPO/tools/ci/trusted_worktree_attest.py" \
+      --object-repo "$REPO" --snapshot "$BASE_SELECTOR_SNAPSHOT" --expected-sha "$BASE_SHA" \
+      || die "product BASE selection snapshot failed raw-byte attestation"
+    return 0
+  fi
   # Untrusted arms know RUN and share this uid.  Natural wrapper exit plus the
   # owned final census proves they have no surviving writer; only then discard
   # the old tool worktree, rematerialize BASE, and byte-attest every tracked
@@ -1120,6 +1189,7 @@ BASE_TREE="$("${G[@]}" rev-parse "$BASE_SHA^{tree}" 2>/dev/null)" \
 # candidate may contain the same path, but it cannot use its edited verifier as
 # landing authority.  Phase 1 is therefore judged by the already-trusted old
 # verifier; after phase 1 lands, phase 2's unchanged verifier matches BASE.
+if [ "$CONTROLLER_MODE" = 0 ]; then
 SELF_VERIFIER_BLOB="$(git -C "$SELF_REPO" hash-object --no-filters \
   "$SELF/gatekeeper-verify-merge.sh" 2>/dev/null)" \
   || die "cannot hash the running verifier bytes"
@@ -1128,6 +1198,7 @@ BASE_VERIFIER_BLOB="$("${G[@]}" rev-parse \
   || die "base does not carry the trusted merge verifier"
 [ "$SELF_VERIFIER_BLOB" = "$BASE_VERIFIER_BLOB" ] \
   || die "running verifier is not the exact base-owned verifier; invoke the copy from current main"
+fi
 if [ -n "$("${G[@]}" for-each-ref --format='%(refname)' refs/replace \
      2>/dev/null)" ]; then
   die "repository has active refs/replace; the verified object graph is not canonical"
@@ -1169,6 +1240,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B \
     "$TRUSTED_REPO/tools/ci/protected_landing_transition.py" push-preflight \
     --object-repo "$REPO" --base "$BASE_SHA" \
     --candidate "$HEAD_SHA" --push-range "$PUSH_RANGE" \
+    "${PUSH_RUNTIME_ARGS[@]}" \
     --receipt "$PUSH_PREFLIGHT_RECEIPT" \
   || PUSH_PREFLIGHT_RC=$?
 if [ "$PUSH_PREFLIGHT_RC" -ne 0 ]; then
@@ -1554,8 +1626,9 @@ if [ "$SHORT_CIRCUIT" = "0" ]; then
     python3 "$RUNTIME_SNAPSHOT/tools/ci/trusted_test_selection.py" \
       --object-repo "$REPO" --base "$BASE_SHA" --candidate "$VERIFIED_SHA" \
       --selector-commit "$RUNTIME_AUTHORITY_COMMIT" \
+      "${SELECTOR_REPO_ARGS[@]}" \
       --selector-path "$RUNTIME_SNAPSHOT/$PLUGIN_REL/programs/ci_targeted_test_select.py" \
-      --base-snapshot "$TRUSTED_REPO" \
+      --base-snapshot "$BASE_SELECTOR_SNAPSHOT" \
       --candidate-snapshot "$WT_CAND" \
       --manifest "$RUN/test-selection.after.json" \
       --base-selection "$RUN/selection_base.txt" \
@@ -1642,6 +1715,11 @@ else
 fi
 
 # --------------------------------------------------------------- 7. the verdict
+if [ "$CONTROLLER_MODE" = 1 ]; then
+  PYTHONDONTWRITEBYTECODE=1 python3 -I -B "$CONTROLLER_HELPER" attest \
+    --runtime "$RUNTIME_SNAPSHOT" --expected-runtime-sha256 "$RUNTIME_SHA256" \
+    || die "final judge runtime lost its external approval or byte identity"
+fi
 [ -f "$VERDICT_PROG" ] || die "no verdict program at $VERDICT_PROG"
 python3 "$VERDICT_PROG" \
   --base-sha "$BASE_SHA" --base-tree "$BASE_TREE" --head-sha "$HEAD_SHA" \

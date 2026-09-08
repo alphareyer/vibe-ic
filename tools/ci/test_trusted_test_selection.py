@@ -57,6 +57,7 @@ def _repo(tmp_path: Path) -> tuple[Path, str, str]:
     selector = (HERE.parent.parent / "vibe-ic-marketplace" / "plugins" /
                 "vibe-ic" / "programs" / "ci_targeted_test_select.py")
     _write(repo, S.SELECTOR_REL, selector.read_text(encoding="utf-8"))
+    _write(repo, f"{S.PLUGIN_REL}/pytest.ini", "[pytest]\ntestpaths = programs/tests\n")
     _write(repo, f"{S.PLUGIN_REL}/programs/foo.py", "VALUE = 1\n")
     _write(
         repo, f"{S.PLUGIN_REL}/programs/tests/test_foo.py",

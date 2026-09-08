@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import configparser
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
 _PLUGIN = _PROGRAMS.parent
@@ -39,6 +40,175 @@ def _load(name: str, path: Path):
 
 lc = _load("_t_landing_cadence", _PROGRAMS / "landing_cadence.py")
 gr = _load("_t_gatekeeper_review", _PROGRAMS / "gatekeeper_review.py")
+
+
+def _population_fixture(tmp_path, config=None):
+    root = tmp_path / "plugin"
+    root.mkdir()
+    (root / "pytest.ini").write_text(config or (
+        "[pytest]\ntestpaths = programs/tests\n"
+        "norecursedirs = programs/tests/data_cases\n"))
+    _population_file(root, "programs/tests/test_primary.py")
+    _population_file(root, "programs/tests/nested/test_required.py")
+    _population_file(root, "programs/tests/data_cases/case_a/test_reject.py", failing=True)
+    return root
+
+
+def _population_file(root, rel, failing=False):
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("def test_case():\n    assert " + ("False" if failing else "True") + "\n")
+    return path
+
+
+def test_declared_excluded_growth_does_not_add_a_release_blocker(tmp_path):
+    root = _population_fixture(tmp_path)
+    expected = ["programs/tests/nested/test_required.py", "programs/tests/test_primary.py"]
+    before = lc.tree_test_files(root)
+    _population_file(root, "programs/tests/data_cases/case_b/test_reject.py", failing=True)
+    after = lc.tree_test_files(root)
+    assert before == expected
+    assert after == expected
+
+
+def test_eligible_nested_growth_is_preserved(tmp_path):
+    root = _population_fixture(tmp_path)
+    before = set(lc.tree_test_files(root))
+    added = "programs/tests/deeper/nested/test_required_new.py"
+    _population_file(root, added, failing=True)
+    after = set(lc.tree_test_files(root))
+    assert after - before == {added}
+    assert before - after == set()
+
+
+def test_fixed_tree_excluded_data_never_enters_full_selection():
+    from _hostpaths import require_repo
+    ini = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "pytest.ini")
+    config = configparser.ConfigParser(interpolation=None)
+    config.read(ini)
+    excluded = set()
+    for pattern in config["pytest"]["norecursedirs"].split():
+        scope = ini.parent / pattern
+        if scope.is_dir():
+            excluded.update(p.relative_to(ini.parent).as_posix() for p in scope.rglob("test_*.py"))
+    assert excluded, "the declared excluded scope must contain a real witness"
+    assert sorted(set(lc.tree_test_files(ini.parent)) & excluded) == []
+
+
+@pytest.mark.parametrize("config", [None, "[pytest\nbroken", "[pytest]\n",
+                                      "[pytest]\ntestpaths = missing\n"])
+def test_unknown_population_cannot_emit_full_selection(tmp_path, capsys, config):
+    root = _population_fixture(tmp_path)
+    ini = root / "pytest.ini"
+    if config is None:
+        ini.unlink()
+    else:
+        ini.write_text(config)
+    rc = lc.main(["--plugin-root", str(root), "--emit-full-selection"])
+    output = capsys.readouterr()
+    assert rc == 2
+    assert output.out == ""
+    assert "NOT_DETERMINED" in output.err
+
+
+def test_declared_paths_and_python_patterns_define_the_population(tmp_path):
+    root = _population_fixture(tmp_path, "[pytest]\ntestpaths = checks\npython_files = check_*.py *_spec.py\n")
+    _population_file(root, "checks/check_alpha.py")
+    _population_file(root, "checks/nested/beta_spec.py")
+    _population_file(root, "checks/test_not_selected.py")
+    assert lc.tree_test_files(root) == ["checks/check_alpha.py", "checks/nested/beta_spec.py"]
+
+
+@pytest.mark.parametrize("ignored", ["programs/tests/data_cases", "data_cases", "*/data_*"])
+def test_population_agrees_with_isolated_pytest_collection(tmp_path, ignored):
+    root = _population_fixture(tmp_path, "[pytest]\ntestpaths = programs/tests\n"
+                               f"norecursedirs = {ignored}\n")
+    _population_file(root, "programs/tests/nested/additional_test.py")
+    result = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q",
+                             "-p", "no:cacheprovider"], cwd=root,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    actual = sorted({line.split("::")[0] for line in result.stdout.splitlines() if "::test_case" in line})
+    assert actual == ["programs/tests/nested/additional_test.py",
+                      "programs/tests/nested/test_required.py", "programs/tests/test_primary.py"]
+    assert lc.tree_test_files(root) == actual
+
+
+def test_nested_legitimate_failure_remains_executable(tmp_path):
+    root = _population_fixture(tmp_path)
+    bad = "programs/tests/deeper/test_product_failure.py"
+    _population_file(root, bad, failing=True)
+    selected = lc.tree_test_files(root)
+    assert bad in selected
+    result = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *selected],
+                            cwd=root, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "FAILED " + bad + "::test_case" in result.stdout
+    assert "1 failed, 2 passed" in result.stdout
+
+
+def test_targeted_selection_shares_declared_population(tmp_path):
+    root = _population_fixture(tmp_path)
+    selector = lc._test_selector()
+    (root / "programs" / "alpha.py").write_text("VALUE = 1\n")
+    good = "programs/tests/nested/test_alpha.py"
+    rejected = "programs/tests/data_cases/test_alpha.py"
+    _population_file(root, good)
+    _population_file(root, rejected, failing=True)
+    for mode in selector.MODES:
+        selected = selector.select_tests(["programs/alpha.py", rejected], root, mode=mode)
+        assert good in selected
+        assert rejected not in selected
+        assert set(selected) <= set(lc.tree_test_files(root))
+
+
+def test_discovery_never_imports_subject_collectors(tmp_path):
+    root = _population_fixture(tmp_path)
+    (root / "conftest.py").write_text("raise RuntimeError('candidate collector executed')\n")
+    assert lc.tree_test_files(root) == ["programs/tests/nested/test_required.py", "programs/tests/test_primary.py"]
+
+
+def test_explicit_testpath_file_follows_pytest_initial_file_semantics(tmp_path):
+    root = _population_fixture(tmp_path, "[pytest]\ntestpaths = checks/explicit.py\npython_files = test_*.py\n")
+    _population_file(root, "checks/explicit.py")
+    result = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q",
+                             "-p", "no:cacheprovider"], cwd=root,
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "checks/explicit.py::test_case" in result.stdout
+    assert lc.tree_test_files(root) == ["checks/explicit.py"]
+
+
+def test_missing_config_description_is_explicitly_unknown(tmp_path):
+    root = _population_fixture(tmp_path)
+    (root / "pytest.ini").unlink()
+    scope, command, why = lc.describe(root, _write_sel(tmp_path, ["programs/tests/test_primary.py"]))
+    assert scope == "unknown"
+    assert "NOT_DETERMINED" in why
+
+
+def test_excluded_selection_superset_does_not_claim_full(tmp_path):
+    root = _population_fixture(tmp_path)
+    selected = lc.tree_test_files(root) + ["programs/tests/data_cases/case_a/test_reject.py"]
+    scope, command, why = lc.describe(root, _write_sel(tmp_path, selected))
+    assert scope == "subset"
+    assert "outside the declared pytest population" in why
+
+
+def test_full_inventory_uses_declared_primary_scope_and_preserves_siblings(tmp_path):
+    root = _population_fixture(tmp_path)
+    _population_file(root, "_shared/test_sibling.py")
+    (root / "pytest.ini").write_text(
+        "[pytest]\ntestpaths = programs/tests\npython_files = test_*.py *_spec.py\n"
+        "norecursedirs = programs/tests/data_cases\n")
+    _population_file(root, "programs/tests/nested/required_spec.py")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "plugin"], check=True)
+    population = lc._full_suite_run_check().population(root)
+    assert population == ["_shared/test_sibling.py", "programs/tests/nested/required_spec.py",
+                          "programs/tests/nested/test_required.py", "programs/tests/test_primary.py"]
+    (root / "pytest.ini").unlink()
+    assert lc._full_suite_run_check().population(root) is None
 
 
 # --------------------------------------------------------------------------

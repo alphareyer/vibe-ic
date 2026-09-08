@@ -181,6 +181,32 @@ done
 FAILED=0
 LANDING_RECORD_ENABLED=0
 LANDING_RECORD_TOOL="$RUNTIME_ROOT/tools/ci/landing_completion_record.py"
+# Only the approved runtime supplies this declaration. No candidate event,
+# environment path or receipt can replace the required execution population.
+LANDING_PLAN_TOOL="$RUNTIME_ROOT/tools/ci/landing_execution_plan.py"
+LANDING_PLAN_SHELL="$(python3 "$LANDING_PLAN_TOOL" shell)" \
+  || { echo "[NORECORD] approved landing execution plan unavailable" >&2; exit 2; }
+eval "$LANDING_PLAN_SHELL"
+unset LANDING_PLAN_SHELL
+LANDING_NEXT=0
+landing_plan_dispatch() {           # phase [lane] [emit]
+  local phase="$1" lane="${2:-}" mode="${3:-unit}" unit fn before
+  for unit in "${LANDING_PLAN_UNITS[@]}"; do
+    [ "${LANDING_PLAN_PHASE[$unit]}" = "$phase" ] || continue
+    [ -z "$lane" ] || [ "${LANDING_PLAN_LANE[$unit]}" = "$lane" ] || continue
+    fn="landing_${mode/validate/unit}_${unit//[:-]/_}"
+    declare -F "$fn" >/dev/null \
+      || { echo "[NORECORD] missing plan handler: $fn" >&2; exit 2; }
+    [ "$mode" != validate ] || continue
+    before="$LANDING_NEXT"
+    "$fn" "$unit"
+    if [ "$phase" != window ] || [ "$mode" = emit ]; then
+      [ "$LANDING_NEXT" -eq "$((before + 1))" ] \
+        || { echo "[NORECORD] plan unit did not record exactly once: $unit" >&2; exit 2; }
+    fi
+  done
+}
+
 LANDING_PROGRESS_TOOL="$RUNTIME_ROOT/tools/ci/hermetic_progress_emit.py"
 LANDING_JOURNAL="${VIBEIC_LANDING_PROGRESS:-}"
 LANDING_COMPLETION="${VIBEIC_LANDING_COMPLETION:-}"
@@ -206,8 +232,13 @@ landing_output_sha() {
 }
 
 landing_record() {                  # landing_record <unit> <state> <rc> <output>
-  [ "$LANDING_RECORD_ENABLED" = "1" ] || return 0
   local unit="$1" state="$2" rc="$3" output="$4" digest
+  if [ "${LANDING_PLAN_UNITS[$LANDING_NEXT]:-}" != "$unit" ]; then
+    echo "[NORECORD] missing, duplicate, unexpected or out-of-order plan unit: $unit" >&2
+    exit 2
+  fi
+  LANDING_NEXT=$((LANDING_NEXT + 1))
+  [ "$LANDING_RECORD_ENABLED" = "1" ] || return 0
   digest="$(landing_output_sha "$output")" \
     || { echo "[NORECORD] cannot digest landing stage $unit" >&2; exit 2; }
   python3 "$LANDING_RECORD_TOOL" append --journal "$LANDING_JOURNAL" \
@@ -567,9 +598,26 @@ echo "--- cheap tier (also enforced by the pre-push hook) ---"
 
 # An empty range means nothing new is being landed; the NDA checkers correctly
 # refuse an empty scan, so the no-op is skipped rather than reported as a pass.
-if [ "$(git rev-list --count "$RANGE" 2>/dev/null || echo 0)" != "0" ]; then
-  run "cheap:nda-messages" "NDA — commit messages"   python3 "$PROGRAMS/commit_msg_nda_check.py" --repo "$ROOT" --rev-range "$RANGE"
-  run "cheap:nda-content" "NDA — added content/paths" python3 "$PROGRAMS/nda_diff_scan_check.py" --rev-range "$RANGE"
+GK_RANGE_N="$(git rev-list --count "$RANGE" 2>/dev/null || echo 0)"
+landing_unit_cheap_nda_messages() {
+  if [ "$GK_RANGE_N" = "0" ]; then
+    landing_skip "$1" "range is empty"
+    return 0
+  fi
+  run "$1" "NDA — commit messages"   python3 "$PROGRAMS/commit_msg_nda_check.py" --repo "$ROOT" --rev-range "$RANGE"
+}
+landing_unit_cheap_nda_content() {
+  if [ "$GK_RANGE_N" = "0" ]; then
+    landing_skip "$1" "range is empty"
+    return 0
+  fi
+  run "$1" "NDA — added content/paths" python3 "$PROGRAMS/nda_diff_scan_check.py" --rev-range "$RANGE"
+}
+landing_unit_cheap_version() {
+  if [ "$GK_RANGE_N" = "0" ]; then
+    landing_skip "$1" "range is empty"
+    return 0
+  fi
   # `GATEKEEPER_VERSION_BY_GATEKEEPER=1` — the VERSION-LESS authoring-PR path,
   # for `tools/gatekeeper-verify-merge.sh` (vibe-ic#1019). The version is
   # assigned AT MERGE by the gatekeeper, so a PR under verification legitimately
@@ -579,11 +627,23 @@ if [ "$(git rev-list --count "$RANGE" 2>/dev/null || echo 0)" != "0" ]; then
   # refused in both directions, so this defers the gate and does not disable it.
   # Unset (the push path) is unchanged: current == previous still FAILs.
   if [ "${GATEKEEPER_VERSION_BY_GATEKEEPER:-0}" = "1" ]; then
-    run "cheap:version" "version monotonic (assigned at merge — deferred)" python3 "$PROGRAMS/version_bump_monotonic_check.py" --plugin-json "$PJSON" --base "$BASE" --version-by-gatekeeper
+    run "$1" "version monotonic (assigned at merge — deferred)" python3 "$PROGRAMS/version_bump_monotonic_check.py" --plugin-json "$PJSON" --base "$BASE" --version-by-gatekeeper
   else
-    run "cheap:version" "version bumped monotonically" python3 "$PROGRAMS/version_bump_monotonic_check.py" --plugin-json "$PJSON" --base "$BASE"
+    run "$1" "version bumped monotonically" python3 "$PROGRAMS/version_bump_monotonic_check.py" --plugin-json "$PJSON" --base "$BASE"
   fi
-  run "cheap:agent-scope" "agent check-in scope"    python3 "$PROGRAMS/agent_checkin_scope_guard.py" --role core-agent --base "$BASE"
+}
+landing_unit_cheap_agent_scope() {
+  if [ "$GK_RANGE_N" = "0" ]; then
+    landing_skip "$1" "range is empty"
+    return 0
+  fi
+  run "$1" "agent check-in scope"    python3 "$PROGRAMS/agent_checkin_scope_guard.py" --role core-agent --base "$BASE"
+}
+landing_unit_cheap_benchmark_structure() {
+  if [ "$GK_RANGE_N" = "0" ]; then
+    landing_skip "$1" "range is empty"
+    return 0
+  fi
   # `--corpus-may-be-absent`: the published corpus lives in vibeic/benchmark-data,
   # so THIS repo legitimately has no `benchmark-data/`. Without the flag the gate
   # correctly reports UNDETERMINED and blocks every push — a gate that refuses
@@ -602,12 +662,24 @@ if [ "$(git rev-list --count "$RANGE" 2>/dev/null || echo 0)" != "0" ]; then
   BENCHMARK_STRUCTURE_SCOPE=()
   [ -n "${VIBE_IC_BENCHMARK_DATA:-}" ] \
     || BENCHMARK_STRUCTURE_SCOPE=(--changed-since "$BASE")
-  run "cheap:benchmark-structure" "benchmark evidence structure" python3 "$PROGRAMS/benchmark_evidence_structure_check.py" --tree benchmark-data --corpus-may-be-absent "${BENCHMARK_STRUCTURE_SCOPE[@]}"
+  run "$1" "benchmark evidence structure" python3 "$PROGRAMS/benchmark_evidence_structure_check.py" --tree benchmark-data --corpus-may-be-absent "${BENCHMARK_STRUCTURE_SCOPE[@]}"
+}
+landing_unit_cheap_benchmark_manifest() {
+  if [ "$GK_RANGE_N" = "0" ]; then
+    landing_skip "$1" "range is empty"
+    return 0
+  fi
   # vibe-ic#635 — a NEW published number must arrive with its composition.
   # Scoped `--changed-since` like the gate above: 20 of the 25 runs already
   # published carry no per-problem name set, and applying this retroactively
   # would fail every landing over work nobody is doing.
-  run "cheap:benchmark-manifest" "benchmark run manifest" python3 "$PROGRAMS/benchmark_run_manifest.py" check --tree benchmark-data --changed-since "$BASE"
+  run "$1" "benchmark run manifest" python3 "$PROGRAMS/benchmark_run_manifest.py" check --tree benchmark-data --changed-since "$BASE"
+}
+landing_unit_cheap_git_prohibition() {
+  if [ "$GK_RANGE_N" = "0" ]; then
+    landing_skip "$1" "range is empty"
+    return 0
+  fi
   # PER-RUN, not a fixed name. `tools/gatekeeper-verify-merge.sh` (vibe-ic#1019)
   # runs this script for the BASE and for the CANDIDATE at the same time — two
   # arms of one differential — and a shared `/tmp/gk_*.txt` would have had each
@@ -615,14 +687,26 @@ if [ "$(git rev-list --count "$RANGE" 2>/dev/null || echo 0)" != "0" ]; then
   # tree is the defect this whole file exists to stop.
   MSGFILE="$(mktemp -t gk_commit_text.XXXXXX)"
   git log --format='%B' "$RANGE" > "$MSGFILE" 2>/dev/null
-  run "cheap:git-prohibition" "git prohibition guard"   python3 "$PROGRAMS/git_prohibition_guard.py" "$MSGFILE"
+  run "$1" "git prohibition guard"   python3 "$PROGRAMS/git_prohibition_guard.py" "$MSGFILE"
   rm -f "$MSGFILE"
+}
+landing_unit_cheap_collateral_revert() {
+  if [ "$GK_RANGE_N" = "0" ]; then
+    landing_skip "$1" "range is empty"
+    return 0
+  fi
   # 2026-08-03 — the batch that landed five PRs from a 6.5-hour-stale base and
   # let three of its own commits erase the other two. `gatekeeper_stale_branch_check`
   # said STALE_OVERLAP on all five BEFORE the land; nothing looked at the
   # commits AFTER they existed, which is the artefact this script pushes.
-  run "cheap:collateral-revert" "no collateral revert within the push" \
+  run "$1" "no collateral revert within the push" \
       python3 "$PROGRAMS/landing_collateral_revert_check.py" --repo "$ROOT" --rev-range "$RANGE"
+}
+landing_unit_cheap_base_ancestry() {
+  if [ "$GK_RANGE_N" = "0" ]; then
+    landing_skip "$1" "range is empty"
+    return 0
+  fi
   # 2026-08-05 — THE OTHER HALF OF THE SAME QUESTION, and the half nothing here
   # was asking. The gate above reads the commits INSIDE this push; this reads
   # whether the tree being pushed actually contains the base it names as its
@@ -638,22 +722,13 @@ if [ "$(git rev-list --count "$RANGE" 2>/dev/null || echo 0)" != "0" ]; then
   # The checker was already blocking in `gatekeeper_review`; it had never been
   # wired HERE, which is the script that writes the stamp the pre-push hook
   # demands — so the landing path had no opinion on the landing method at all.
-  run "cheap:base-ancestry" "tree contains the base it claims as parent" \
+  run "$1" "tree contains the base it claims as parent" \
       python3 "$PROGRAMS/gatekeeper_stale_branch_check.py" --repo "$ROOT" \
           --base "$BASE" --head HEAD
-else
-  echo "  SKIP  range is empty — nothing new to land"
-  landing_skip "cheap:nda-messages" "range is empty"
-  landing_skip "cheap:nda-content" "range is empty"
-  landing_skip "cheap:version" "range is empty"
-  landing_skip "cheap:agent-scope" "range is empty"
-  landing_skip "cheap:benchmark-structure" "range is empty"
-  landing_skip "cheap:benchmark-manifest" "range is empty"
-  landing_skip "cheap:git-prohibition" "range is empty"
-  landing_skip "cheap:collateral-revert" "range is empty"
-  landing_skip "cheap:base-ancestry" "range is empty"
-fi
-run "cheap:version-sync" "marketplace <-> plugin version sync" python3 "$PROGRAMS/marketplace_version_sync_check.py"
+}
+landing_unit_cheap_version_sync() {
+  run "$1" "marketplace <-> plugin version sync" python3 "$PROGRAMS/marketplace_version_sync_check.py"
+}
 # vibe-ic#712 — NO LANDING MAY ADD A POLARITY-BLIND PROSE EXTRACTOR.
 #
 # Whole-tree, so it sits OUTSIDE the range block above with `version-sync`: the
@@ -670,8 +745,10 @@ run "cheap:version-sync" "marketplace <-> plugin version sync" python3 "$PROGRAM
 # It is NOT the plain no-argument mode: that one compares against a baseline
 # debt file and prints an errand naming a write flag. A landing gate must name
 # the offender and its owning lane, never a flag that banks it.
-run "cheap:prose-polarity" "prose polarity — no landing adds an unregistered offender" \
-  python3 "$PROGRAMS/prose_polarity_consulted_check.py" --ratchet
+landing_unit_cheap_prose_polarity() {
+  run "$1" "prose polarity — no landing adds an unregistered offender" \
+    python3 "$PROGRAMS/prose_polarity_consulted_check.py" --ratchet
+}
 
 # vibe-ic#2138 — A HAND-FED COUNT GUARDING A POPULATION THAT MOVES EVERY
 # LANDING MUST GO STALE, SO THE LANDING IS WHERE IT IS CAUGHT.
@@ -698,10 +775,12 @@ run "cheap:prose-polarity" "prose polarity — no landing adds an unregistered o
 # CHEAP: one `pytest --collect-only` over four files. MEASURED on 8HD-9 in the
 # pinned image (0.3.48), this lane's clone, three consecutive runs at load
 # 12.3-12.7: 4.47 s / 4.27 s / 4.41 s.
-run "cheap:nested-progress-pin" "nested-progress item pins match live collection" \
-  python3 "$PROGRAMS/nested_progress_pin_check.py" \
-      --schedule "$ROOT/tools/ci/trusted_test_selection.py" \
-      --plugin-root "$PLUGIN"
+landing_unit_cheap_nested_progress_pin() {
+  run "$1" "nested-progress item pins match live collection" \
+    python3 "$PROGRAMS/nested_progress_pin_check.py" \
+        --schedule "$ROOT/tools/ci/trusted_test_selection.py" \
+        --plugin-root "$PLUGIN"
+}
 # A landing is normally ONE commit. A batch is legitimate when several
 # independent changes land together — NO-MIX forces a benchmark-data fix and a
 # plugin change into separate commits, for instance — and the gate accepts that
@@ -716,17 +795,19 @@ run "cheap:nested-progress-pin" "nested-progress item pins match live collection
 # gates are ALREADY failing, and a gate that fails vacuously there would let a
 # candidate's REAL one-commit violation be waived as pre-existing. Range-scoped
 # gates must SKIP over an empty range, exactly as the block above already does.
-GK_RANGE_N="$(git rev-list --count "$RANGE" 2>/dev/null || echo 0)"
-if [ "$GK_RANGE_N" = "0" ]; then
-  echo "  SKIP  landing shape — range is empty, so there is no landing to shape"
-  landing_skip "cheap:landing-shape" "range is empty"
-elif [ "$GK_RANGE_N" -gt 1 ]; then
-  run "cheap:landing-shape" "landing is a valid batch (version on tip)" \
-      python3 "$PROGRAMS/landing_is_one_commit_check.py" --base "$BASE" --batch
-else
-  run "cheap:landing-shape" "landing is one commit" \
-      python3 "$PROGRAMS/landing_is_one_commit_check.py" --base "$BASE"
-fi
+landing_unit_cheap_landing_shape() {
+  GK_RANGE_N="$(git rev-list --count "$RANGE" 2>/dev/null || echo 0)"
+  if [ "$GK_RANGE_N" = "0" ]; then
+    echo "  SKIP  landing shape — range is empty, so there is no landing to shape"
+    landing_skip "$1" "range is empty"
+  elif [ "$GK_RANGE_N" -gt 1 ]; then
+    run "$1" "landing is a valid batch (version on tip)" \
+        python3 "$PROGRAMS/landing_is_one_commit_check.py" --base "$BASE" --batch
+  else
+    run "$1" "landing is one commit" \
+        python3 "$PROGRAMS/landing_is_one_commit_check.py" --base "$BASE"
+  fi
+}
 
 # The gate above asks whether the batch has a legal SHAPE. This asks what it
 # CONTAINS: does more than one member of this landing claim the same issue?
@@ -753,14 +834,16 @@ fi
 # channels). A bar that refuses all of them is red every day, and a bar that is
 # red every day is the one people learn to bypass. What this asserts is only
 # that nobody has looked yet.
-if [ "$GK_RANGE_N" = "0" ]; then
-  echo "  SKIP  competing claims — range is empty, so there is nothing claimed"
-  landing_skip "cheap:competing-claims-report" "range is empty"
-else
-  report "cheap:competing-claims-report" "issues claimed by more than one commit in this landing" \
-      python3 "$PROGRAMS/competing_pr_claim_groups.py" \
-          --repo-root "$ROOT" --rev-range "$RANGE"
-fi
+landing_unit_cheap_competing_claims_report() {
+  if [ "$GK_RANGE_N" = "0" ]; then
+    echo "  SKIP  competing claims — range is empty, so there is nothing claimed"
+    landing_skip "$1" "range is empty"
+  else
+    report "$1" "issues claimed by more than one commit in this landing" \
+        python3 "$PROGRAMS/competing_pr_claim_groups.py" \
+            --repo-root "$ROOT" --rev-range "$RANGE"
+  fi
+}
 
 # Everything above reasons about COMMITS. A tracked file still modified in the
 # worktree means the tree they verified is not the tree the author has.
@@ -781,10 +864,13 @@ fi
 # unrelated file was edited at 10:35, and the targeted tests ran at 10:41 and
 # stamped 9fd81bb45 — a tree that never existed. FP is per-run, so two gates in
 # one checkout do not read each other's.
-FP="$(mktemp -t gk_fingerprint.XXXXXX)"
-run "cheap:worktree-clean" "worktree carries no uncommitted change" \
-    python3 "$PROGRAMS/landing_worktree_is_clean_check.py" "$ROOT" \
-        --emit-fingerprint "$FP"
+landing_unit_cheap_worktree_clean() {
+  FP="$(mktemp -t gk_fingerprint.XXXXXX)"
+  run "$1" "worktree carries no uncommitted change" \
+      python3 "$PROGRAMS/landing_worktree_is_clean_check.py" "$ROOT" \
+          --emit-fingerprint "$FP"
+}
+
 
 # The gate above deliberately EXCLUDES untracked paths (`??`) — see its module
 # docstring. That exclusion is right for its question and leaves a gap for a
@@ -799,9 +885,11 @@ run "cheap:worktree-clean" "worktree carries no uncommitted change" \
 # BEHIND origin/main. A bar whose one instance is already closed is a bar that
 # only ever fires on somebody's scratch notes. `--worktree-blocking` promotes
 # it when that changes.
-report "cheap:scratch-report" "untracked scratch paths in this checkout" \
-    python3 "$PROGRAMS/gitignore_scratch_guard.py" --root "$ROOT" \
-        --include-worktree
+landing_unit_cheap_scratch_report() {
+  report "$1" "untracked scratch paths in this checkout" \
+      python3 "$PROGRAMS/gitignore_scratch_guard.py" --root "$ROOT" \
+          --include-worktree
+}
 
 # vibe-ic#2176 — THE HYGIENE TIER DOES NOT RUN ON THE LANDING PATH, SO THE
 # LANDING PATH MUST ASK ITS QUESTION ITSELF.
@@ -834,14 +922,18 @@ report "cheap:scratch-report" "untracked scratch paths in this checkout" \
 # for the two declared. The hygiene tier itself took 563 s on the same host in
 # the same hour, so the whole delta is under 9% of it and the per-gate cost is
 # linear and legible — add a gate, add ~23 s.
-if [ "$GK_RANGE_N" = "0" ]; then
-  echo "  SKIP  hygiene ratchet — range is empty, so this landing introduces nothing"
-  landing_skip "cheap:hygiene-ratchet" "range is empty"
-else
-  run "cheap:hygiene-ratchet" "this landing introduces no hygiene finding" \
-      python3 "$PROGRAMS/landing_hygiene_ratchet_check.py" \
-          --repo "$ROOT" --plugin-root "$PLUGIN" --base "$BASE"
-fi
+landing_unit_cheap_hygiene_ratchet() {
+  if [ "$GK_RANGE_N" = "0" ]; then
+    echo "  SKIP  hygiene ratchet — range is empty, so this landing introduces nothing"
+    landing_skip "$1" "range is empty"
+  else
+    run "$1" "this landing introduces no hygiene finding" \
+        python3 "$PROGRAMS/landing_hygiene_ratchet_check.py" \
+            --repo "$ROOT" --plugin-root "$PLUGIN" --base "$BASE"
+  fi
+}
+
+landing_plan_dispatch cheap
 
 if [ "$CHEAP_ONLY" = "1" ]; then
   echo "--- full tier SKIPPED (--cheap-only) — no stamp will be written ---"
@@ -938,32 +1030,27 @@ fi
 # so the in-process pytest guard (programs/suite_write_guard.py, loaded by the
 # plugin's rootdir conftest) cannot see them. That gap is exactly the stage
 # whose family this repo already caught rewriting 77 tracked files.
-WG_BASE="$(mktemp -t gk_writeguard.XXXXXX)"
-run "full:write-guard-baseline" "write-guard baseline" \
-    python3 "$PROGRAMS/suite_write_guard.py" --repo "$ROOT" --snapshot "$WG_BASE"
+landing_unit_full_write_guard_baseline() {
+  WG_BASE="$(mktemp -t gk_writeguard.XXXXXX)"
+  run "$1" "write-guard baseline" \
+      python3 "$PROGRAMS/suite_write_guard.py" --repo "$ROOT" --snapshot "$WG_BASE"
+}
+landing_plan_dispatch before_window
+
 
 # ── THE FULL TIER'S INDEPENDENT STAGES RUN AT THE SAME TIME ────────────────
 #
-# The concurrent window is exactly `LANDING_PROGRESS_UNITS[17..23]` — a
-# contiguous SEVEN-unit run inside a 28-entry FIXED sequence. Everything before
-# it (units 0-16 and the pytest runtime preflight) and everything after it
-# (units 24-27) stays serial, because both ends are producer/consumer brackets:
+# The plan declares a contiguous window between serial producer/consumer
+# brackets. Its labels and lane order come from landing_execution_plan.py:
 # `cheap:worktree-clean` emits $FP which `full:worktree-fingerprint-final`
 # re-checks, and `full:write-guard-baseline` writes $WG_BASE which
 # `full:write-guard-final` compares. Four lanes:
 #
-#   L1  full:targeted-tests                                     (unit 17)
+#   L1  full:targeted-tests
 #   L2  repo-tools -> unselectable -> unselectable-census
-#       -> census-freshness                                     (units 18-21)
-#   L3  full:repo-hygiene                                       (unit 22)
-#   L4  full:plugin-audit                                       (unit 23)
-#
-# EVERY INDEX ON THIS PAGE IS RE-DERIVED FROM THE TUPLE, NEVER INCREMENTED --
-# the rule vibe-ic#2138 wrote down one landing ago, after finding both of its
-# numbers already one behind. vibe-ic#2142 inserts `full:census-freshness` at
-# index 21 and shifts everything after it again. Nothing asserts these ordinals
-# (`test_the_window_is_exactly_the_declared_contiguous_units` locates the window
-# by `order.index`), which is exactly why they rot in silence unless re-derived.
+#       -> census-freshness
+#   L3  full:repo-hygiene
+#   L4  full:plugin-audit
 #
 # L2 IS ONE ORDERED LANE AND THAT IS NOT A CONVENIENCE. Its first two stages
 # each wrap their own WHOLE-REPO `suite_write_guard` snapshot/compare bracket;
@@ -1233,19 +1320,7 @@ lane_join() {                        # lane_join <name>   → LANE_WAIT_RC/LANE_
 # literal `NORECORD` is what `lane_resolve` turns into a labelled FAIL, so a
 # unit whose lane never reached it is IMPOSSIBLE to read as a pass and
 # impossible to read as absent.
-LANE_WINDOW_UNITS=(
-  "full:targeted-tests"
-  "full:repo-tools-tests"
-  "full:unselectable-tests"
-  "full:unselectable-census"
-  # vibe-ic#2142 — the seventh, and it is IN the window because it is the last
-  # stage of `lane_corpus`. A unit that runs inside a lane and is not listed
-  # here is never reset between the two rounds `lane_window_saw_a_write` can
-  # cause, so its round-1 `.rc` would be read as round 2's verdict.
-  "full:census-freshness"
-  "full:repo-hygiene"
-  "full:plugin-audit"
-)
+# LANE_WINDOW_UNITS is derived from the approved execution plan at startup.
 lane_window_reset() {
   local unit
   for unit in "${LANE_WINDOW_UNITS[@]}"; do
@@ -1594,7 +1669,12 @@ run_pytest() {
   rm -f "$sel"
   if [ -n "$merged_tmp" ]; then rm -f "$merged_tmp"; fi
 }
-lane_targeted() { fn_capture "full:targeted-tests" run_pytest; }
+landing_unit_full_targeted_tests() {
+  fn_capture "$1" run_pytest
+}
+lane_targeted() {
+  landing_plan_dispatch window targeted
+}
 
 # ── REPO-LEVEL tests (tools/) ──────────────────────────────────────────────
 # `run_pytest` above cannot reach them, and not by accident: the targeted
@@ -1886,51 +1966,60 @@ run_unselectable_pytest() {
 # spanning one instant cannot tell a writer from a gate that merely overlapped
 # it. The census then audits the very corpus the second stage just ran. One
 # lane, in order, preserves both properties for free.
+landing_unit_full_repo_tools_tests() {
+    fn_capture "$1"   run_repo_tools_pytest
+}
+landing_unit_full_unselectable_tests() {
+    fn_capture "$1" run_unselectable_pytest
+}
+landing_unit_full_unselectable_census() {
+    # The census that decides the stage above must itself be trustworthy: a
+    # subtrahend whose stage no longer exists, or an exclusion whose reason no
+    # longer describes anything, both shrink the corpus in the direction that
+    # still prints PASS. rc=1 on either.
+    run_capture "$1" \
+        python3 "$PROGRAMS/landing_unselectable_pytest_corpus.py" --repo "$ROOT" --audit
+}
+landing_unit_full_census_freshness() {
+    # vibe-ic#2142 — THE 63x8 CENSUS, RE-DERIVED ON THE CANDIDATE TREE.
+    #
+    # `flow_matrix/README.md` publishes a 621-cell census that EVERY landing can
+    # move: a cell changes state whenever a gate is wired, waived, or goes red. So
+    # the published table is a register that must be hand-fed, and a register like
+    # that goes stale — the only question is who finds out. On 2026-09-07 at
+    # d644d7fb1 the finder was MAIN: the block published `undeclared 405,
+    # contradicted 0` while the tree derived `404, 1`, and it had been red on main
+    # for at least two days.
+    #
+    # NOT IN `repo_hygiene_gates.sh`, and the reason is that dispatcher's own
+    # contract rather than a preference: every gate declared there must arrive with
+    # a can-pass AND a can-fail fixture (`tools/ci/gate_fixture_debt.json`), a
+    # fixture drives the gate against a SYNTHETIC subject tree, and this program
+    # refuses any subject that is not its own checkout by construction (#972 —
+    # ZERO_DENOMINATOR / CROSS_TREE). Neither direction can be authored there, and
+    # the only way in would be a new debt entry, i.e. an exemption.
+    #
+    # NOT IN THE CHEAP TIER either: `test_issue1382_census_derives_at_land.py::
+    # test_the_expensive_check_is_not_moved_into_the_push_hook` asserts it is not
+    # in `pre-push`, and #1382 chose that with measurements on both sides.
+    #
+    # HERE, AND LAST IN THIS LANE, BECAUSE IT COSTS NO WALL CLOCK HERE. The
+    # lane elapsed figures this script's own stopwatch published are targeted
+    # 1736 s, hygiene 1259 s, corpus 518 s, audit 26 s. This check MEASURED 699 s
+    # (11m39s) on 8HD-4, so `corpus` becomes ~1217 s and is still not the critical
+    # path. Anywhere serial it would be twelve minutes on every landing.
+    #
+    # THE FIGURE IS THIS PROGRAM'S, NOT ITS TEST FILE'S. The first draft of this
+    # comment said 559 s, which is what `programs/tests/
+    # test_flow_matrix_census_freshness.py` takes -- a different subject that runs
+    # the same derivation among six other things. 699 s is the one measurement of
+    # THIS program on the tree that ships (the two other runs, 555 s and 531 s,
+    # were over deliberately mutated trees and are not this number).
+    run_capture "$1" \
+        python3 "$ROOT/tools/gen_flow_matrix_census.py" "$ROOT" --check
+}
 lane_corpus() {
-  fn_capture "full:repo-tools-tests"   run_repo_tools_pytest
-  fn_capture "full:unselectable-tests" run_unselectable_pytest
-  # The census that decides the stage above must itself be trustworthy: a
-  # subtrahend whose stage no longer exists, or an exclusion whose reason no
-  # longer describes anything, both shrink the corpus in the direction that
-  # still prints PASS. rc=1 on either.
-  run_capture "full:unselectable-census" \
-      python3 "$PROGRAMS/landing_unselectable_pytest_corpus.py" --repo "$ROOT" --audit
-  # vibe-ic#2142 — THE 63x8 CENSUS, RE-DERIVED ON THE CANDIDATE TREE.
-  #
-  # `flow_matrix/README.md` publishes a 621-cell census that EVERY landing can
-  # move: a cell changes state whenever a gate is wired, waived, or goes red. So
-  # the published table is a register that must be hand-fed, and a register like
-  # that goes stale — the only question is who finds out. On 2026-09-07 at
-  # d644d7fb1 the finder was MAIN: the block published `undeclared 405,
-  # contradicted 0` while the tree derived `404, 1`, and it had been red on main
-  # for at least two days.
-  #
-  # NOT IN `repo_hygiene_gates.sh`, and the reason is that dispatcher's own
-  # contract rather than a preference: every gate declared there must arrive with
-  # a can-pass AND a can-fail fixture (`tools/ci/gate_fixture_debt.json`), a
-  # fixture drives the gate against a SYNTHETIC subject tree, and this program
-  # refuses any subject that is not its own checkout by construction (#972 —
-  # ZERO_DENOMINATOR / CROSS_TREE). Neither direction can be authored there, and
-  # the only way in would be a new debt entry, i.e. an exemption.
-  #
-  # NOT IN THE CHEAP TIER either: `test_issue1382_census_derives_at_land.py::
-  # test_the_expensive_check_is_not_moved_into_the_push_hook` asserts it is not
-  # in `pre-push`, and #1382 chose that with measurements on both sides.
-  #
-  # HERE, AND LAST IN THIS LANE, BECAUSE IT COSTS NO WALL CLOCK HERE. The
-  # lane elapsed figures this script's own stopwatch published are targeted
-  # 1736 s, hygiene 1259 s, corpus 518 s, audit 26 s. This check MEASURED 699 s
-  # (11m39s) on 8HD-4, so `corpus` becomes ~1217 s and is still not the critical
-  # path. Anywhere serial it would be twelve minutes on every landing.
-  #
-  # THE FIGURE IS THIS PROGRAM'S, NOT ITS TEST FILE'S. The first draft of this
-  # comment said 559 s, which is what `programs/tests/
-  # test_flow_matrix_census_freshness.py` takes -- a different subject that runs
-  # the same derivation among six other things. 699 s is the one measurement of
-  # THIS program on the tree that ships (the two other runs, 555 s and 531 s,
-  # were over deliberately mutated trees and are not this number).
-  run_capture "full:census-freshness" \
-      python3 "$ROOT/tools/gen_flow_matrix_census.py" "$ROOT" --check
+  landing_plan_dispatch window corpus
 }
 
 # THE HYGIENE TIER, AND THE RECORD THAT LETS IT BE DIFFERENCED (vibe-ic#1498).
@@ -1991,62 +2080,65 @@ fi
 GK_HYG_ENV=()
 [ -n "${GATEKEEPER_HYGIENE_PROGRESS:-}" ] \
   && GK_HYG_ENV=(env "GATE_DISPATCH_ATTESTATION_FILE=$GATEKEEPER_HYGIENE_PROGRESS")
-lane_hygiene() {
-  # `VIBEIC_CHECKOUT_CONCURRENT_LANES` DECLARES THE SHARED CHECKOUT. The lanes
-  # above run in THIS tree at the same time as this one, so a per-gate
-  # before/after snapshot taken inside the hygiene tier sees their writes and
-  # cannot tell them from its own. `gate_host_independence_check` reads this to
-  # decide whether it may attribute such a write to a gate; without it, it named
-  # whichever gate it was driving. Said out loud rather than inferred from
-  # `HYGIENE_POOL`: a number that means one thing and is read as another is how
-  # this went wrong the first time.
-  #
-  # THE SUBJECT IS THE FRESH WORKTREE WHEN THERE IS ONE (vibe-ic#2008), AND
-  # THIS CHECKOUT WHEN THERE IS NOT. `gk_hygiene_subject_prepare` decided
-  # which, from the main shell and immediately before the window, and said so
-  # in a REPORT line; this lane only reads the decision. `${GK_HYG_SUBJECT:-}`,
-  # not `$GK_HYG_SUBJECT`: `tools/test_gatekeeper_land_lanes.py` drives this
-  # REAL function under `set -u` with the variable never set, and an unset
-  # subject IS the fallback, not an error.
-  #
-  # ONE, NOT `$LANE_WIDTH`, FOR THE FRESH SUBJECT — the same declaration, told
-  # truthfully. The variable counts the stages WRITING INTO THE CHECKOUT THE
-  # HYGIENE SET MEASURES. The other lanes write into `$ROOT`; nothing but this
-  # lane can reach the subject worktree, so a write the probe sees there is
-  # nobody else's and attribution is sound — which is the standalone shape the
-  # hygiene shard runs in ("ABSENT MEANS ONE", `gate_host_independence_check.
-  # declared_concurrent_lanes`). The shared fallback keeps the full width.
-  #
-  # THE SUBJECT'S OWN COPY OF THE SCRIPT RUNS AGAINST THE SUBJECT, when this
-  # checkout IS the runtime. MEASURED on the parked first attempt (8hd-3
-  # `_ktier_run`, tree 89ae23da8): the runtime copy driven at a subject
-  # elsewhere failed `gates are host-independent` with 114 of 141 gates at
-  # CHECKOUT_ATTESTATION_WRONG_COMMAND, because `gate_host_independence_check.
-  # _expand` rebuilds every declared argv with `$PG` under the SUBJECT while
-  # the attestation the dispatcher wrote carried `$PG` under the RUNTIME — two
-  # different paths to byte-identical programs. In the direct-push shape
-  # `RUNTIME_ROOT` is `$ROOT`, the subject is a worktree of `$ROOT`'s HEAD, and
-  # `cheap:worktree-clean` has already refused a tree whose tracked files
-  # differ from HEAD, so the subject's copy IS the runtime's copy, byte for
-  # byte, at a path the probe's expansion agrees with. When a SEPARATE runtime
-  # was named (`GATEKEEPER_RUNTIME_ROOT`, the verified-arm shape) the trusted
-  # copy keeps running, exactly as before: that shape's whole point is that
-  # the subject does not get to supply the instrument.
-  local subject="$ROOT" lanes="$LANE_WIDTH"
-  local script="$RUNTIME_ROOT/tools/ci/repo_hygiene_gates.sh"
-  if [ -n "${GK_HYG_SUBJECT:-}" ]; then
-    subject="$GK_HYG_SUBJECT"
-    lanes=1
-    if [ "$RUNTIME_ROOT" -ef "$ROOT" ]; then
-      script="$GK_HYG_SUBJECT/tools/ci/repo_hygiene_gates.sh"
+landing_unit_full_repo_hygiene() {
+    # `VIBEIC_CHECKOUT_CONCURRENT_LANES` DECLARES THE SHARED CHECKOUT. The lanes
+    # above run in THIS tree at the same time as this one, so a per-gate
+    # before/after snapshot taken inside the hygiene tier sees their writes and
+    # cannot tell them from its own. `gate_host_independence_check` reads this to
+    # decide whether it may attribute such a write to a gate; without it, it named
+    # whichever gate it was driving. Said out loud rather than inferred from
+    # `HYGIENE_POOL`: a number that means one thing and is read as another is how
+    # this went wrong the first time.
+    #
+    # THE SUBJECT IS THE FRESH WORKTREE WHEN THERE IS ONE (vibe-ic#2008), AND
+    # THIS CHECKOUT WHEN THERE IS NOT. `gk_hygiene_subject_prepare` decided
+    # which, from the main shell and immediately before the window, and said so
+    # in a REPORT line; this lane only reads the decision. `${GK_HYG_SUBJECT:-}`,
+    # not `$GK_HYG_SUBJECT`: `tools/test_gatekeeper_land_lanes.py` drives this
+    # REAL function under `set -u` with the variable never set, and an unset
+    # subject IS the fallback, not an error.
+    #
+    # ONE, NOT `$LANE_WIDTH`, FOR THE FRESH SUBJECT — the same declaration, told
+    # truthfully. The variable counts the stages WRITING INTO THE CHECKOUT THE
+    # HYGIENE SET MEASURES. The other lanes write into `$ROOT`; nothing but this
+    # lane can reach the subject worktree, so a write the probe sees there is
+    # nobody else's and attribution is sound — which is the standalone shape the
+    # hygiene shard runs in ("ABSENT MEANS ONE", `gate_host_independence_check.
+    # declared_concurrent_lanes`). The shared fallback keeps the full width.
+    #
+    # THE SUBJECT'S OWN COPY OF THE SCRIPT RUNS AGAINST THE SUBJECT, when this
+    # checkout IS the runtime. MEASURED on the parked first attempt (8hd-3
+    # `_ktier_run`, tree 89ae23da8): the runtime copy driven at a subject
+    # elsewhere failed `gates are host-independent` with 114 of 141 gates at
+    # CHECKOUT_ATTESTATION_WRONG_COMMAND, because `gate_host_independence_check.
+    # _expand` rebuilds every declared argv with `$PG` under the SUBJECT while
+    # the attestation the dispatcher wrote carried `$PG` under the RUNTIME — two
+    # different paths to byte-identical programs. In the direct-push shape
+    # `RUNTIME_ROOT` is `$ROOT`, the subject is a worktree of `$ROOT`'s HEAD, and
+    # `cheap:worktree-clean` has already refused a tree whose tracked files
+    # differ from HEAD, so the subject's copy IS the runtime's copy, byte for
+    # byte, at a path the probe's expansion agrees with. When a SEPARATE runtime
+    # was named (`GATEKEEPER_RUNTIME_ROOT`, the verified-arm shape) the trusted
+    # copy keeps running, exactly as before: that shape's whole point is that
+    # the subject does not get to supply the instrument.
+    local subject="$ROOT" lanes="$LANE_WIDTH"
+    local script="$RUNTIME_ROOT/tools/ci/repo_hygiene_gates.sh"
+    if [ -n "${GK_HYG_SUBJECT:-}" ]; then
+      subject="$GK_HYG_SUBJECT"
+      lanes=1
+      if [ "$RUNTIME_ROOT" -ef "$ROOT" ]; then
+        script="$GK_HYG_SUBJECT/tools/ci/repo_hygiene_gates.sh"
+      fi
     fi
-  fi
-  run_capture "full:repo-hygiene" "${GK_HYG_ENV[@]}" \
-      env "VIBEIC_SUBJECT_ROOT=$subject" \
-      "VIBEIC_CHECKOUT_CONCURRENT_LANES=$lanes" \
-      "GATEKEEPER_HYGIENE_JOBS=$HYGIENE_POOL" \
-      bash "$script" \
-      "${GK_HYG[@]+"${GK_HYG[@]}"}"
+    run_capture "$1" "${GK_HYG_ENV[@]}" \
+        env "VIBEIC_SUBJECT_ROOT=$subject" \
+        "VIBEIC_CHECKOUT_CONCURRENT_LANES=$lanes" \
+        "GATEKEEPER_HYGIENE_JOBS=$HYGIENE_POOL" \
+        bash "$script" \
+        "${GK_HYG[@]+"${GK_HYG[@]}"}"
+}
+lane_hygiene() {
+  landing_plan_dispatch window hygiene
 }
 # `full:plugin-audit` IS KEPT, AND SO IS THE HYGIENE TIER'S OWN COPY.
 #
@@ -2075,8 +2167,11 @@ lane_hygiene() {
 #
 # Both are read-only readers, 20.2 s and 21 s, so they cost nothing beside a
 # 259 s hygiene lane.
+landing_unit_full_plugin_audit() {
+    run_capture "$1" python3 "$PROGRAMS/plugin_full_audit.py" "$PLUGIN"
+}
 lane_audit() {
-  run_capture "full:plugin-audit" python3 "$PROGRAMS/plugin_full_audit.py" "$PLUGIN"
+  landing_plan_dispatch window audit
 }
 
 # ── LAUNCH THE WINDOW, JOIN IT, THEN EMIT IN DECLARATION ORDER ─────────────
@@ -2158,6 +2253,7 @@ landing_measured_tree_disclosure() {
 }
 
 lane_run_window() {
+  landing_plan_dispatch window "" validate
   local skipped="${GATEKEEPER_SKIP_TARGETED_TESTS:-0}"
   local others=0
   lane_window_reset
@@ -2170,47 +2266,68 @@ lane_run_window() {
   [[ "$budget" =~ ^[0-9]+$ ]] || budget=8
   HYGIENE_POOL=$(( budget - others ))
   [ "$HYGIENE_POOL" -ge 1 ] || HYGIENE_POOL=1
-  [ "$skipped" = "1" ] || lane_launch targeted lane_targeted
-  lane_launch corpus  lane_corpus
-  lane_launch hygiene lane_hygiene
-  lane_launch audit   lane_audit
+  local lane
+  for lane in "${LANDING_PLAN_LANES[@]}"; do
+    [ "$lane" != targeted ] || [ "$skipped" != "1" ] || continue
+    lane_launch "$lane" "lane_$lane"
+  done
 }
-lane_emit_window() {
+landing_emit_full_targeted_tests() {
   local skipped="${GATEKEEPER_SKIP_TARGETED_TESTS:-0}"
   if [ "$skipped" = "1" ]; then
     echo "  SKIP  targeted tests — measured by the independent aggregate test arm"
-    landing_skip "full:targeted-tests" "measured by the aggregate test arm"
+    landing_skip "$1" "measured by the aggregate test arm"
   else
     lane_join targeted
     _landing_before="$FAILED"
-    fn_emit "full:targeted-tests" "targeted tests" --last
+    fn_emit "$1" "targeted tests" --last
     [ "$EMIT_RC" -eq 0 ] || FAILED=1
-    landing_manual_stage "full:targeted-tests" "$_landing_before"
+    landing_manual_stage "$1" "$_landing_before"
   fi
-
+}
+landing_emit_full_repo_tools_tests() {
   lane_join corpus
-  fn_emit "full:repo-tools-tests" "repo tools tests"
+  fn_emit "$1" "repo tools tests"
   if [ "$EMIT_RC" -eq 0 ]; then
-    landing_record "full:repo-tools-tests" PASS 0 "repo tools tests complete"
+    landing_record "$1" PASS 0 "repo tools tests complete"
   else
     FAILED=1
-    landing_record "full:repo-tools-tests" FAIL "$EMIT_RC" "repo tools tests failed"
+    landing_record "$1" FAIL "$EMIT_RC" "repo tools tests failed"
   fi
-  fn_emit "full:unselectable-tests" "unselectable tests"
+}
+landing_emit_full_unselectable_tests() {
+  fn_emit "$1" "unselectable tests"
   if [ "$EMIT_RC" -eq 0 ]; then
-    landing_record "full:unselectable-tests" PASS 0 "unselectable tests complete"
+    landing_record "$1" PASS 0 "unselectable tests complete"
   else
     FAILED=1
-    landing_record "full:unselectable-tests" FAIL "$EMIT_RC" "unselectable tests failed"
+    landing_record "$1" FAIL "$EMIT_RC" "unselectable tests failed"
   fi
-  run_emit "full:unselectable-census" "unselectable-test census is not stale"
+}
+landing_emit_full_unselectable_census() {
+  run_emit "$1" "unselectable-test census is not stale"
+}
+landing_emit_full_census_freshness() {
   census_freshness_emit --last
-
+}
+landing_emit_full_repo_hygiene() {
   lane_join hygiene
-  run_emit "full:repo-hygiene" "repo hygiene gates" --last
+  run_emit "$1" "repo hygiene gates" --last
 
+
+  if [ -n "${GK_HYG_RECORD:-}" ]; then
+    printf '  REPORT  hygiene debt (advisory display; parent comparator owns admission)\n'
+    python3 "$PROGRAMS/gate_red_since_check.py" --repo "$ROOT" \
+      --record "$GK_HYG_RECORD" --head-ref "$BASE" --ledger-ref "$BASE" \
+      || printf '  REPORT  debt checker reported findings or incomplete evidence\n'
+  fi
+}
+landing_emit_full_plugin_audit() {
   lane_join audit
-  run_emit "full:plugin-audit" "plugin full audit" --last
+  run_emit "$1" "plugin full audit" --last
+}
+lane_emit_window() {
+  landing_plan_dispatch window "" emit
 }
 
 # ── WRITE-GUARD ATTRIBUTION: FAIL-SAFE, WITH A FAILURE-PATH RETRY ──────────
@@ -2395,95 +2512,10 @@ if [ "${GATEKEEPER_FAIL_FAST_NORECORD:-0}" = "1" ] \
   exit 2
 fi
 
-# ── THE REVIEW, WIRED WHERE IT CANNOT BE STEPPED AROUND ────────────────────
-#
-# Owner ruling, 2026-08-21. `gatekeeper_review.py` — "the gate a maintainer runs
-# before every push", whose MERGE_OK reads as "this will land green" — was
-# executed by NOTHING. Measured at 6dfe15a32: no workflow names it, no git hook
-# names it, no script names it; every occurrence outside its own tests is a
-# comment or a line of SKILL.md prose. It was therefore the weakest runner class
-# there is, which is verbatim what one of the hygiene gates it runs fails other
-# programs for — "a skill mention runs it only if an agent remembers to".
-#
-# NOT the pre-push hook: `--no-verify` steps around it, and so does any push
-# that does not go through this machine. NOT a workflow: the direct-push
-# doctrine means no workflow runs before main moves. The lander is the one path
-# every landing actually takes.
-#
-# THERE IS A BUDGET AND A TIMEOUT BLOCKS. `timeout` returns 124, which is not 0
-# and not 1, so the case statement below maps it — with every other unexpected
-# status — to rc 2 UNDETERMINED. A review that could not decide must never
-# reach the stamp as a review that decided nothing was wrong. The ruling set
-# that budget at four minutes; what it is now, and why it moved, is below.
-#
-# IT RUNS THE HYGIENE SET. IT IS NOT HANDED A RECORD OF ONE.
-#
-# v1.11.67 fed it this run's record through `--hygiene-record-in`, argued as a
-# change of RUNNER rather than of SUBJECT, so that the review would fit a
-# four-minute budget. Two gates that exist for exactly this went red and were
-# right to: `gatekeeper_review.py` may not grow a command-line way to hand its
-# hygiene gate a substitute for running it. Every check that flag made is a
-# check of the record's SHAPE — it parses, an rc came with it, it names the
-# labels a 0.12 s `--list` reports — and a shape is not a provenance: a record
-# marking every declared label PASS is a few lines of JSON, and a caller who
-# can pass a path can pass that one. The flag is gone; the handover keeps its
-# tests and its callers inside the process, where `argv` cannot reach it.
-#
-# SO THE BUDGET MOVED INSTEAD, and this is the trade, stated rather than
-# buried. The ruling's four minutes was chosen for a review that was going to
-# READ a record. Running the set costs what the set costs, and the numbers are
-# MEASURED end to end rather than inferred from the lane above: the hygiene set
-# itself runs in 188-193 s on this host, and the review that runs it decides in
-# 247.5 s. Against a 240 s budget that is an overrun of 3% — small, and enough,
-# because a budget the review cannot meet is a deadline that can only ever
-# expire, and that is not a deadline; it is an unconditional refusal wearing
-# one.
-#
-# THE MARGIN IS STATED BECAUSE IT IS NARROW. An earlier version of this comment
-# argued from a 551 s run and read as though four minutes were hopeless. That
-# run was CONTENDED; quoting it as the cost overstated the case ~3x. The honest
-# claim is the small one: 247.5 s > 240 s on a quiet host, so the ruling's
-# budget expires without deciding even in the good case. 1800 s is the outer bound because it is `repo_hygiene_gate`'s own
-# `_HYGIENE_STALL_GRACE_S`: below it, this `timeout` kills runs that the
-# REVIEW'S OWN SUPERVISOR still considers alive, and the kill would be reported
-# here as the review's verdict.
-#
-# THAT IS NOT THE GRACE THAT GOVERNS THE SET, and the earlier wording here said
-# it was. Measured 2026-08-22: there are TWO watchdogs and they differ 6x.
-# `repo_hygiene_gate` passes `stall_grace` to a supervisor it wraps around the
-# subprocess; it does NOT pass `--stall-grace` to the runner, which therefore
-# uses `repo_hygiene_parallel.DEFAULT_STALL_GRACE_S` = 300 s for every shard.
-# A shard that goes 300 s without a completed gate record is killed as hung,
-# its attestation truncates, and the coverage protocol reports
-# PROGRESS_PROTOCOL_INCOMPLETE / rc 199 — which arrives here as
-# `ERROR parallel hygiene incomplete`, a refusal about the HOST rather than
-# about the tree. Reproduce with `--stall-grace 5` on any tree (~70 s).
-#
-# 1800 remains the right value for THIS timeout: it is an outer bound, it is
-# above every observed complete run, and a landing must never kill a review
-# that is still deciding. The correction is only to what the number means —
-# it bounds the review, not the hygiene set.
-#
-# The half of the ruling that is load-bearing is untouched: a review that did
-# not decide arrives as rc 2 and BLOCKS, never as rc 0. That is what the case
-# statement below does and what `tools/test_gatekeeper_land_review_budget.py`
-# drives, against the real function extracted from this file.
-#
-# `GATEKEEPER_REVIEW_BUDGET_S` is not a skip button and cannot become one:
-# every value of it that stops the review early maps to rc 2 and refuses the
-# landing. Lowering it buys a refusal, never a pass.
+# The parent plan owns hygiene. This unit runs every other review gate and
+# returns SCOPED_REVIEW_OK only for that sub-scope. It accepts no record path
+# and cannot authorize standalone admission. Timeouts remain incomplete.
 GK_REVIEW_BUDGET_S="${GATEKEEPER_REVIEW_BUDGET_S:-1800}"
-# Its own path, never `$GK_HYG_RECORD`: that one is the differential's baseline
-# and a second writer would silently replace what `hygiene_finding_delta` came
-# to read.
-#
-# `review()` would keep this record in a temporary directory of its own and
-# adjudicate `gate_red_since` from it in-process, so naming a path changes no
-# verdict. What it buys is the case where the record is worth the most: the
-# `gk_cleanup` trap runs on a normal exit and does NOT run on a SIGKILL, so a
-# landing killed part-way leaves this file behind for a human to read, while
-# the review's own tempdir would have gone with it.
-GK_REVIEW_RECORD="$LANE_DIR/gatekeeper-review-hygiene.json"
 run_gatekeeper_review() {
   local out rc
   # THE REVIEW'S CADENCE GATE ONLY WORKS IF SOMEBODY TELLS IT WHAT RAN.
@@ -2542,29 +2574,14 @@ run_gatekeeper_review() {
   if [ "${GK_RANGE_N:-0}" -gt 1 ]; then
     batch_arg=(--batch)
   fi
-  # `--repo` IS THE REVIEW'S OWN FRESH SUBJECT WHEN THERE IS ONE (vibe-ic#2008).
-  # The review RUNS the hygiene set — it is not handed a record of one, see
-  # above — and it runs after the window, in the checkout the pytest lanes
-  # have just left their cache residue in. Pointed at `$ROOT` it failed
-  # `attestation preflight` for the same reason the lane did, on every
-  # official run of the week; pointed at the LANE's subject (the parked first
-  # attempt) it failed on the residue the lane's own hygiene run had left
-  # there. `gk_review_subject_prepare` made this one immediately before this
-  # function was called and nothing has read it. The subject is HEAD's tree,
-  # and every other question the review asks is a question about commits,
-  # which a linked worktree answers identically. The coordinator the review
-  # runs (`repo_hygiene_parallel.py`) resolves its own root from its file, so
-  # its working-checkout arm, its fresh arm and the host-independence probe
-  # all agree on where `$PG` is — the shape that passed in the parked run.
-  # `${GK_REVIEW_SUBJECT:-$ROOT}`: the fallback is the checkout, exactly as
-  # before, and `tools/test_gatekeeper_land_review_budget.py` drives this REAL
-  # function with the subject never set.
+  # The fresh review subject keeps structural readers clear of lane residue.
+  # Hygiene runs only in the parent's required unit. No receipt is handed in.
   out="$(timeout -k 10 "$GK_REVIEW_BUDGET_S" \
          python3 "$PROGRAMS/gatekeeper_review.py" \
          --base "$BASE" --head HEAD --repo "${GK_REVIEW_SUBJECT:-$ROOT}" \
          "${cadence_arg[@]+"${cadence_arg[@]}"}" \
          "${batch_arg[@]+"${batch_arg[@]}"}" \
-         --gate-record "$GK_REVIEW_RECORD" 2>&1)"; rc=$?
+         --scope structural 2>&1)"; rc=$?
   case "$rc" in
     0|1) ;;
     124|137)
@@ -2574,20 +2591,22 @@ killed. A landing may not proceed on a review that did not finish."
       rc=2 ;;
     *)
       out="$out
-UNDETERMINED: the review exited $rc, which is neither MERGE_OK nor \
+UNDETERMINED: the review exited $rc, which is neither scoped success nor \
 REQUEST_CHANGES. Treated as undecided."
       rc=2 ;;
   esac
   printf '%s\n' "$out"
   return "$rc"
 }
-gk_review_subject_prepare
-run "full:gatekeeper-review" "gatekeeper review (deadline adjudicated)" \
-    run_gatekeeper_review
-# Released BEFORE the two closing gates, so that everything this tier made
-# outside the tree is gone before the tree is judged; `gk_cleanup` repeats the
-# release for a run that dies before this line (vibe-ic#2008).
-gk_review_subject_release
+landing_unit_full_gatekeeper_review() {
+  gk_review_subject_prepare
+  run "$1" "gatekeeper structural review (hygiene owned by parent)" \
+      run_gatekeeper_review
+  # Released BEFORE the two closing gates, so that everything this tier made
+  # outside the tree is gone before the tree is judged; `gk_cleanup` repeats the
+  # release for a run that dies before this line (vibe-ic#2008).
+  gk_review_subject_release
+}
 
 # #1029 — the standing assertion, executed: everything above ran against this
 # tree, so nothing above may have CHANGED it. Names every offending path rather
@@ -2595,24 +2614,32 @@ gk_review_subject_release
 # separate accidental discoveries. rc=2 (could not look) fails here too: `run`
 # treats any non-zero as FAIL, which is the point — "I could not measure" must
 # never reach the stamp as "I measured and it was clean".
-run "full:write-guard-final" "the full tier wrote nothing into the tree" \
-    python3 "$PROGRAMS/suite_write_guard.py" --repo "$ROOT" --compare "$WG_BASE"
+landing_unit_full_write_guard_final() {
+  run "$1" "the full tier wrote nothing into the tree" \
+      python3 "$PROGRAMS/suite_write_guard.py" --repo "$ROOT" --compare "$WG_BASE"
+}
 
 # LAST, and after every suite has read the tree. Everything above answers
 # "do the gates pass"; this answers "did they all read the same tree", which is
 # the question the stamp actually asserts.
-run "full:worktree-fingerprint-final" "worktree unchanged since the gates started" \
-        python3 "$PROGRAMS/landing_worktree_is_clean_check.py" "$ROOT" \
-        --expect-fingerprint "$FP"
+landing_unit_full_worktree_fingerprint_final() {
+  run "$1" "worktree unchanged since the gates started" \
+          python3 "$PROGRAMS/landing_worktree_is_clean_check.py" "$ROOT" \
+          --expect-fingerprint "$FP"
+}
 
-if [ "$LANDING_RECORD_ENABLED" = "1" ]; then
-  landing_record "full:completion-record" PASS 0 "completion record publication"
-  python3 "$LANDING_RECORD_TOOL" finish --journal "$LANDING_JOURNAL" \
-    --record "$LANDING_COMPLETION" --failed "$FAILED" \
-    || { echo "[NORECORD] landing completion record is incomplete" >&2; exit 2; }
-  python3 "$LANDING_PROGRESS_TOOL" terminal \
-    || { echo "[NORECORD] landing progress terminal is incomplete" >&2; exit 2; }
-fi
+landing_unit_full_completion_record() {
+  landing_record "$1" PASS 0 "completion record publication"
+  if [ "$LANDING_RECORD_ENABLED" = "1" ]; then
+    python3 "$LANDING_RECORD_TOOL" finish --journal "$LANDING_JOURNAL" \
+      --record "$LANDING_COMPLETION" --failed "$FAILED" \
+      || { echo "[NORECORD] landing completion record is incomplete" >&2; exit 2; }
+    python3 "$LANDING_PROGRESS_TOOL" terminal \
+      || { echo "[NORECORD] landing progress terminal is incomplete" >&2; exit 2; }
+  fi
+}
+
+landing_plan_dispatch after_window
 
 if [ "$FAILED" -eq 0 ] && [ "${GATEKEEPER_NO_STAMP:-0}" = "1" ]; then
   # Merge verification runs the authoritative aggregate test session in its

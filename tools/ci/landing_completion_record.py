@@ -32,75 +32,17 @@ ARMS = frozenset({"A2", "B2"})
 SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 MAX_GATES = 512
-LANDING_PROGRESS_UNITS = (
-    "cheap:nda-messages",
-    "cheap:nda-content",
-    "cheap:version",
-    "cheap:agent-scope",
-    "cheap:benchmark-structure",
-    "cheap:benchmark-manifest",
-    "cheap:git-prohibition",
-    "cheap:collateral-revert",
-    "cheap:base-ancestry",
-    "cheap:version-sync",
-    # vibe-ic#712, added with the `run` line the cheap tier now carries
-    # beside version-sync. THE POSITION IS THE CONTRACT, not a listing:
-    # `:200` refuses any label that is not `LANDING_PROGRESS_UNITS[len(
-    # gates)]`, so a unit emitted at index 10 and declared anywhere else
-    # refuses EVERY landing with `landing completion record is
-    # incomplete`. Emitted at 10 in `gatekeeper-land.sh`; declared at 10
-    # here; the two orders are compared by
-    # `test_the_script_emits_exactly_the_declared_units_in_declared_order`,
-    # which is what caught this entry being missing.
-    "cheap:prose-polarity",
-    # vibe-ic#2138, added with the `run` line the cheap tier now carries just
-    # after prose-polarity. Declared at index 11 because that is where
-    # `gatekeeper-land.sh` emits it; see the note above prose-polarity for why
-    # a unit declared anywhere else refuses EVERY landing rather than only its
-    # own.
-    "cheap:nested-progress-pin",
-    "cheap:landing-shape",
-    "cheap:competing-claims-report",
-    "cheap:worktree-clean",
-    "cheap:scratch-report",
-    "full:write-guard-baseline",
-    "full:targeted-tests",
-    "full:repo-tools-tests",
-    "full:unselectable-tests",
-    "full:unselectable-census",
-    # vibe-ic#2142 — emitted at the END of `lane_corpus`, declared here at the
-    # same position. THE POSITION IS THE CONTRACT (see the note above
-    # `cheap:prose-polarity`): `append` refuses any label that is not
-    # `LANDING_PROGRESS_UNITS[len(gates)]`, so a unit emitted here and declared
-    # elsewhere refuses EVERY landing.
-    #
-    # NO DOUBLE QUOTES IN THIS BLOCK, and that is not style. Two readers in
-    # `tools/test_gatekeeper_land_lanes.py` —
-    # `test_the_script_emits_exactly_the_declared_units_in_declared_order` and
-    # `test_the_window_is_exactly_the_declared_contiguous_units` — recover this
-    # with `re.findall` over double-quoted runs across the WHOLE block, comments
-    # included, so a quoted phrase in a comment here becomes a PHANTOM UNIT in
-    # the list they compare against the lander. Measured while adding this entry:
-    # the phantom landed at index 20, between two real units, and the diff named
-    # the wrong index.
-    #
-    # WHY THE LANDING CARRIES IT AT ALL. The 63x8 census freshness gate left
-    # `repo_hygiene_gates.sh` on 2026-08-16 on the premise that the suite would
-    # still catch a stale census, so the figure could not drift unnoticed. Both
-    # halves of that premise were measured false on 2026-09-07 at d644d7fb1: the
-    # figure HAD drifted (one cell of 621 left ENFORCED-undeclared for
-    # ENFORCED-CONTRADICTED, undeclared 405 published against 404 live), and
-    # `landing_merge_verdict` judges the suite DIFFERENTIALLY, so a red already
-    # on the base is absorbed by every landing after it. A published count that
-    # every landing can move must be judged by the landing, not by main.
-    "full:census-freshness",
-    "full:repo-hygiene",
-    "full:plugin-audit",
-    "full:gatekeeper-review",
-    "full:write-guard-final",
-    "full:worktree-fingerprint-final",
-    "full:completion-record",
+# The approved runtime supplies both the dispatcher and this reader. Never
+# derive required checks from a candidate journal or progress event stream.
+_PLAN_SPEC = importlib.util.spec_from_file_location(
+    "_vibeic_landing_execution_plan",
+    Path(__file__).resolve().with_name("landing_execution_plan.py"),
 )
+if _PLAN_SPEC is None or _PLAN_SPEC.loader is None:
+    raise ImportError("approved landing execution plan is unavailable")
+plan = importlib.util.module_from_spec(_PLAN_SPEC)
+_PLAN_SPEC.loader.exec_module(plan)
+LANDING_PROGRESS_UNITS = plan.UNITS
 
 
 class Refusal(RuntimeError):
