@@ -11,7 +11,7 @@ root, and the census over 6847 published run roots on one host found 659 roots
 over 219 distinct paths that had always satisfied the gate's own definition and
 had never been visible: a published report citing a copy of ITS OWN run root
 that is gone — e.g. `d9corpus/ic/ibex` citing
-`/home/reyerchu/AI_IC_design/_bench6_v100_r1/ibex/phase2/.../results.json`.
+`/home/<your-user>/AI_IC_design/_bench6_v100_r1/ibex/phase2/.../results.json`.
 
 The PRODUCER defect that created them is fixed in the same change, so no NEW run
 can produce one. What is left is a legacy corpus, and the ruling on #2158 was
@@ -49,9 +49,9 @@ predicate tests — so the run root's relocated position is read straight off th
 path, and its parent is the directory the whole family was produced under.
 
     project `ibex`, reference
-    /home/reyerchu/AI_IC_design/_bench6_v100_r1/ibex/phase2/.../results.json
+    /home/<your-user>/AI_IC_design/_bench6_v100_r1/ibex/phase2/.../results.json
         relocated run root  .../_bench6_v100_r1/ibex
-        family              /home/reyerchu/AI_IC_design/_bench6_v100_r1
+        family              /home/<your-user>/AI_IC_design/_bench6_v100_r1
 
 THE FIRST DERIVATION WAS TOO FINE AND THE DATA SAID SO. "The first ancestor that
 does not exist on this host" was implemented first and run over the real census:

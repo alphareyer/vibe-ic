@@ -54,9 +54,16 @@ def _mk_project(tmp_path: Path) -> str:
     return netlist_rel
 
 
-def _fake_docker_measuring(project, cmd, timeout=600, pdk_dir=None):
+def _fake_docker_measuring(project, cmd, timeout=600, pdk_dir=None, *,
+                           supervised=False, ceiling_s=None, ceiling_notice=None):
     """Stand in for the container: `fault cut` succeeds and leaves its output;
     `fault atpg` succeeds and leaves a real coverage.yml (a measured ratio)."""
+    # The real cut and ATPG calls are supervised. Their budgets are recorded
+    # ceilings with a notification callback, not container wall deadlines.
+    # Keep an explicit signature so an unknown caller keyword still fails.
+    assert supervised is True
+    assert isinstance(ceiling_s, (int, float)) and ceiling_s > 0
+    assert callable(ceiling_notice)
     joined = " ".join(cmd)
     if joined.startswith("fault cut"):
         (project / "phase2/stage2/dft/cut_netlist.v").write_text(

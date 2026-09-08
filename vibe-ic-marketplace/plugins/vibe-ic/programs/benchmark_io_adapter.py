@@ -37,6 +37,7 @@ quietly contaminated number.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import re
 import sys
@@ -163,6 +164,111 @@ def problems(fmt_name: str, dataset: Path) -> Iterator[Dict[str, Any]]:
         raise ValueError(f"unknown format kind {kind!r}")
 
 
+def _public_relative(name: str) -> Path:
+    """Public-input roles do not grant permission to escape the input root."""
+    path = Path(name)
+    if (not name or path.is_absolute() or ".." in path.parts
+            or "\\" in name or path.as_posix() != name or name == "."):
+        raise ValueError("PUBLIC_INPUT_PATH_INVALID: expected a safe relative path")
+    return path
+
+
+def _public_source_hash(record: dict) -> str:
+    identity = {key: record[key] for key in ("id", "prompt_sha256", "files")}
+    return hashlib.sha256(json.dumps(
+        identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _public_write_once(path: Path, data: bytes) -> None:
+    if path.is_symlink() or any(p.is_symlink() for p in path.parents):
+        raise ValueError("PUBLIC_INPUT_CHANGED: symbolic link in source snapshot")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("xb") as output:
+            output.write(data)
+    except FileExistsError:
+        if path.read_bytes() != data:
+            raise ValueError("PUBLIC_INPUT_CHANGED: immutable source bytes differ")
+
+
+def _stage_public_original(problem_id: str, prompt: str, context: dict,
+                           project: Path) -> dict:
+    """Freeze only declared public input bytes BEFORE any runner transform.
+
+    Hashes provide integrity and task binding, not OS-level author identity.
+    No file is promoted from a candidate, repair parent, or unclassified root.
+    """
+    root = project.resolve() / "input" / "public_original"
+    files = []
+    for name, text in sorted(context.items()):
+        relative = _public_relative(name)
+        if not isinstance(text, str):
+            raise ValueError("PUBLIC_INPUT_INVALID: context contents must be text")
+        data = text.encode("utf-8")
+        files.append({"relative_path": relative.as_posix(),
+                      "sha256": hashlib.sha256(data).hexdigest(),
+                      "bytes": len(data)})
+    record = {"schema": "vibeic.public_original_input.v1",
+              "role": "public_original_input", "id": str(problem_id),
+              "status": "PRESENT" if files else "NOT_PROVIDED",
+              "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+              "files": files}
+    record["source_sha256"] = _public_source_hash(record)
+    for item in files:
+        _public_write_once(root / "files" / item["relative_path"],
+                           context[item["relative_path"]].encode("utf-8"))
+    _public_write_once(root / "manifest.json",
+                       (json.dumps(record, sort_keys=True, indent=2) + "\n").encode())
+    return record
+
+
+def public_original_input(project: Path, problem_id: str, prompt_sha256: str,
+                          expected: dict | None = None) -> dict:
+    """BLOCKING on dropped/stale inputs; legacy missing is NOT_MEASURED.
+
+    Consumers may allow only paths derived from this verified public manifest.
+    A text-generation task explicitly staged without context is NOT_PROVIDED,
+    never a fabricated baseline copied from its current RTL.
+    """
+    root = Path(project).resolve() / "input" / "public_original"
+    missing = {"schema": "vibeic.public_original_input.v1",
+               "role": "public_original_input", "id": str(problem_id),
+               "prompt_sha256": prompt_sha256, "status": "NOT_MEASURED",
+               "reason": "PUBLIC_INPUT_MANIFEST_NOT_RECORDED", "files": []}
+    if not root.exists() and (expected is None or expected == missing):
+        return missing
+    try:
+        if (root.is_symlink() or (root / "manifest.json").is_symlink()
+                or any(p.is_symlink() for p in root.parents)):
+            raise ValueError("snapshot root is a symbolic link")
+        record = json.loads((root / "manifest.json").read_text())
+        if (not isinstance(record, dict)
+                or record.get("schema") != "vibeic.public_original_input.v1"
+                or record.get("role") != "public_original_input"
+                or record.get("id") != str(problem_id)
+                or record.get("prompt_sha256") != prompt_sha256
+                or record.get("source_sha256") != _public_source_hash(record)
+                or (expected is not None and record != expected)):
+            raise ValueError("source identity differs from the handoff")
+        files = record["files"]
+        if record.get("status") != ("PRESENT" if files else "NOT_PROVIDED"):
+            raise ValueError("source presence declaration differs")
+        names = [item["relative_path"] for item in files]
+        if names != sorted(set(names)):
+            raise ValueError("source file set is duplicated or unsorted")
+        for item in files:
+            path = root / "files" / _public_relative(item["relative_path"])
+            if path.is_symlink() or any(p.is_symlink() for p in path.parents):
+                raise ValueError("source path is a symbolic link")
+            data = path.read_bytes()
+            if (hashlib.sha256(data).hexdigest() != item["sha256"]
+                    or len(data) != item["bytes"]):
+                raise ValueError("source bytes differ from the staged manifest")
+        return record
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise ValueError(f"PUBLIC_INPUT_HANDOFF_INVALID: {exc}") from exc
+
+
 def stage(fmt_name: str, problem: Dict[str, Any], project: Path) -> Dict[str, Any]:
     """Write the problem's INPUT into a project the general flow can enter.
 
@@ -175,6 +281,7 @@ def stage(fmt_name: str, problem: Dict[str, Any], project: Path) -> Dict[str, An
     project = Path(project)
     (project / "input" / "docs").mkdir(parents=True, exist_ok=True)
     staged: List[str] = []
+    ctx = {}
 
     if fmt["kind"] == "jsonl":
         rec = problem["record"]
@@ -183,20 +290,27 @@ def stage(fmt_name: str, problem: Dict[str, Any], project: Path) -> Dict[str, An
         for key in fmt.get("oracle_fields") or []:
             if key in rec and key not in ("input",):
                 pass          # present in the record; simply never read
-        for path, text in ctx.items():
-            if Path(path).suffix in (".v", ".sv", ".vh", ".svh"):
-                f = project / "input" / "rtl" / Path(path).name
-                f.parent.mkdir(parents=True, exist_ok=True)
-                f.write_text(text)
-                staged.append(str(f.relative_to(project)))
     else:
         prompt = open_input(fmt_name, problem["prompt_path"], problem["root"])
 
+    original = _stage_public_original(problem["id"], prompt, ctx, project)
+    destinations = set()
+    for name, text in ctx.items():
+        relative = _public_relative(name)
+        # Preserve the dependency tree while retaining the canonical RTL root.
+        if relative.parts[0] == "rtl":
+            relative = Path(*relative.parts[1:])
+        f = project / "input" / "rtl" / relative
+        if f in destinations:
+            raise ValueError("PUBLIC_INPUT_PATH_COLLISION: ambiguous staged path")
+        destinations.add(f)
+        _public_write_once(f, text.encode("utf-8"))
+        staged.append(str(f.relative_to(project)))
     (project / "input" / "phase1_prompt.md").write_text(prompt)
     (project / "input" / "docs" / "design_description.md").write_text(prompt)
     staged += ["input/phase1_prompt.md", "input/docs/design_description.md"]
     return {"id": problem["id"], "project": str(project), "staged": staged,
-            "prompt_chars": len(prompt)}
+            "prompt_chars": len(prompt), "public_original_input": original}
 
 
 def collect(fmt_name: str, problem_id: str, project: Path, *,

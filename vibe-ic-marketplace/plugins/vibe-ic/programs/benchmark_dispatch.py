@@ -39,6 +39,7 @@ import fcntl
 import re
 import signal
 import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, TypeVar
@@ -1032,7 +1033,8 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
                          repair_provenance: dict | None = None,
                          repair_input_candidate: dict | None = None,
                          review_key: str | None = None,
-                         archive_key: str | None = None) -> dict:
+                         archive_key: str | None = None,
+                         expected_public_input: dict | None = None) -> dict:
     """Build the hash-bound, oracle-free handoff for one AI review."""
     project, run_p = Path(project).resolve(), Path(run_p).resolve()
     prompt = project / "input" / "phase1_prompt.md"
@@ -1054,6 +1056,11 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
                      review_key)
     challenge_file = str((challenge_dir / "challenge_tb.sv").resolve())
     prompt_sha = _sha256_text(prompt.read_text(errors="replace"))
+    import benchmark_io_adapter as bio                  # noqa: PLC0415
+    public_input = bio.public_original_input(
+        project, problem_id, prompt_sha, expected=expected_public_input)
+    public_paths = [str(project / "input" / "public_original" / "files" /
+                        row["relative_path"]) for row in public_input["files"]]
     program_review_obligations = _program_review_obligation_contract(
         prompt.read_text(errors="replace"), candidate)
     evidence_item_shape = {
@@ -1081,6 +1088,8 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
         "id": str(problem_id),
         "project": str(project),
         "candidate_origin": candidate_origin,
+        "public_original_input": public_input,
+        "public_original_input_paths": public_paths,
         "candidate_snapshot": candidate,
         "program_candidate_snapshot": program_candidate,
         "repair_parent_candidate_snapshot": repair_parent_candidate,
@@ -1123,6 +1132,8 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
                     "them verbatim), <angle-bracket> values are authored by "
                     "the reviewer under the stated rule"),
                 "schema": _AI_REVIEW_SCHEMA,
+                **({"source_sha256": public_input["source_sha256"]}
+                   if public_input.get("status") == "PRESENT" else {}),
                 "id": str(problem_id),
                 "prompt_sha256": prompt_sha,
                 "rtl_sha256": candidate["rtl_sha256"],
@@ -1210,6 +1221,7 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
             "blind_inputs_only": [
                 "prompt_path",
                 "rtl_paths",
+                "public_original_input_paths (verified public_original_input only)",
                 ("verification_challenges only when correcting a defective "
                  "inherited test; never scorer/golden/oracle bytes"),
             ],
@@ -1379,7 +1391,7 @@ def _validate_repair_record(path: Path, task: dict, repaired_hash: str,
                             challenge: dict) -> tuple[dict | None, list[str]]:
     """Bind an AI repair's author and rationale to parent/new/test hashes."""
     path = Path(path).resolve()
-    reasons: list[str] = []
+    reasons: list[str] = _public_input_reasons(task)
     try:
         raw = path.read_text(errors="replace")
         record = json.loads(raw)
@@ -1849,7 +1861,7 @@ def _validate_ai_review(task: dict) -> dict:
     valid semantic FAIL is a real ``REPAIR_REQUIRED`` decision, not a malformed
     review and not a permanent convergence failure.
     """
-    task_reasons: list[str] = []
+    task_reasons: list[str] = _public_input_reasons(task)
     if task.get("schema") != _REVIEW_TASK_SCHEMA:
         task_reasons.append(f"review task schema must be {_REVIEW_TASK_SCHEMA!r}")
     review_path = Path(str(task.get("review_path") or ""))
@@ -1881,6 +1893,29 @@ def _validate_ai_review(task: dict) -> dict:
         reasons.append("review prompt_sha256 is stale or wrong")
     if review.get("rtl_sha256") != task.get("rtl_sha256"):
         reasons.append("review rtl_sha256 is stale or wrong")
+    original = task.get("public_original_input") or {}
+    if original.get("status") == "PRESENT" and review.get(
+            "source_sha256") != original.get("source_sha256"):
+        reasons.append("review source_sha256 is stale or wrong")
+    if task.get("candidate_origin") == "AI_BACKUP":
+        provenance = task.get("backup_provenance") or {}
+        try:
+            record = provenance["author_record"]
+            if (record["id"] != task["id"]
+                    or record["prompt_sha256"] != task["prompt_sha256"]
+                    or provenance["public_original_input"] != original
+                    or provenance["gated_rtl_sha256"] != task["rtl_sha256"]):
+                raise ValueError("backup input/output lineage differs")
+            root = Path(provenance["input_root"])
+            if json.loads((root.parent / "author_record.json").read_text()) != record:
+                raise ValueError("archived author record differs")
+            import benchmark_io_adapter as bio          # noqa: PLC0415
+            for row in record["output_manifest"]:
+                data = (root / bio._public_relative(row["relative_path"])).read_bytes()
+                if hashlib.sha256(data).hexdigest() != row["sha256"]:
+                    raise ValueError("archived author input differs")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            reasons.append(f"AI_BACKUP_PROVENANCE_INVALID: {exc}")
 
     reviewer = review.get("reviewer") or {}
     if reviewer.get("kind") != "AI":
@@ -3459,10 +3494,131 @@ def _declared_route_ai_backup(routing: dict) -> dict:
     return {"status": "DECLARED", "skills": skills}
 
 
+def _public_input_reasons(task: dict) -> list[str]:
+    """Keep original-input identity fixed across review and repair lineage."""
+    import benchmark_io_adapter as bio                  # noqa: PLC0415
+    try:
+        actual = bio.public_original_input(
+            Path(str(task.get("project") or "")), str(task.get("id")),
+            str(task.get("prompt_sha256") or ""),
+            expected=task.get("public_original_input"))
+        if actual.get("status") != "NOT_MEASURED" \
+                and task.get("public_original_input") != actual:
+            return ["PUBLIC_INPUT_HANDOFF_INVALID: task dropped original input"]
+        if "public_original_input_paths" in task:
+            paths = [str(Path(task["project"]).resolve() / "input" /
+                         "public_original" / "files" / row["relative_path"])
+                     for row in actual["files"]]
+            if task["public_original_input_paths"] != paths:
+                return ["PUBLIC_INPUT_HANDOFF_INVALID: reviewer allowlist differs"]
+    except ValueError as exc:
+        return [str(exc)]
+    return []
+
+
+def _backup_output_manifest(project: Path) -> list[dict]:
+    """Exact author deliverable set, including public include dependencies."""
+    root = Path(project) / "phase2" / "stage1" / "rtl"
+    if root.is_symlink():
+        raise ValueError("AI_BACKUP_OUTPUT_INVALID: linked output root")
+    files = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("AI_BACKUP_OUTPUT_INVALID: linked output")
+        if path.is_file():
+            data = path.read_bytes()
+            files.append({"relative_path": str(path.relative_to(root)),
+                          "sha256": hashlib.sha256(data).hexdigest(),
+                          "bytes": len(data)})
+    return files
+
+
+def _validate_backup_completion(item: dict, run_p: Path) -> tuple[dict | None, list[str]]:
+    """BLOCKING: file presence is not an author's completed handoff.
+
+    Reuse the repair record's named AI author, blind declaration and rationale
+    protocol. These cooperative records bind attribution, not OS identities.
+    """
+    reasons = _public_input_reasons(item)
+    project = Path(str(item.get("project") or "")).resolve()
+    try:
+        if project != (Path(run_p).resolve() / "projects" /
+                       _safe_problem_id(str(item.get("id")))):
+            raise ValueError("backup project is not owned by this run/task")
+        task_hash = item["task_sha256"]
+        body = {k: v for k, v in item.items() if k != "task_sha256"}
+        if _sha256_text(json.dumps(body, sort_keys=True)) != task_hash:
+            raise ValueError("issued backup task identity changed")
+        issued = Path(run_p) / "ai_backup_tasks" / f"{task_hash}.json"
+        if json.loads(issued.read_text()) != item:
+            raise ValueError("backup does not match the coordinator-issued handoff")
+        prompt_text = (project / "input" / "phase1_prompt.md").read_text()
+        if _sha256_text(prompt_text) != item["prompt_sha256"]:
+            raise ValueError("prompt changed before backup worker entry")
+        path = project / "phase2" / "stage1" / "ai_backup_author.json"
+        if path.is_symlink() or any(p.is_symlink() for p in path.parents):
+            raise ValueError("author completion record path is linked")
+        raw_record = path.read_bytes()
+        record = json.loads(raw_record)
+        outputs = _backup_output_manifest(project)
+        rtl = _rtl_files(project)
+        if not rtl or any(not p.read_bytes().strip() for p in rtl):
+            raise ValueError("author RTL output is empty or incomplete")
+        expected = {"schema": "vibeic.benchmark.ai_backup_record.v1",
+                    "id": item["id"], "task_sha256": task_hash,
+                    "prompt_sha256": item["prompt_sha256"],
+                    "source_sha256": item["public_original_input"].get("source_sha256"),
+                    "output_manifest": outputs,
+                    "rtl_sha256": _sha256_text(_candidate_text(rtl))}
+        if not isinstance(record, dict):
+            raise ValueError("author completion record must be an object")
+        for key, value in expected.items():
+            if record.get(key) != value:
+                reasons.append(f"AI_BACKUP_COMPLETION_INVALID: {key} is stale or wrong")
+        author = record.get("author")
+        if (not isinstance(author, dict) or author.get("kind") != "AI"
+                or not str(author.get("model") or "").strip()
+                or str(author.get("model")).lower() in {"unknown", "unspecified", "n/a"}):
+            reasons.append("AI_BACKUP_COMPLETION_INVALID: named AI author required")
+        if (record.get("oracle_accessed") is not False
+                or len(str(record.get("rationale") or "").strip()) < 40):
+            reasons.append("AI_BACKUP_COMPLETION_INVALID: blind author rationale required")
+        unchanged = outputs == item.get("initial_output_manifest")
+        if record.get("disposition") != ("NO_CHANGE" if unchanged else "CHANGED"):
+            reasons.append("AI_BACKUP_COMPLETION_INVALID: disposition differs from output")
+        if unchanged and not _verified_prompt_evidence(
+                record.get("prompt_evidence"), prompt_text):
+            reasons.append("AI_BACKUP_COMPLETION_INVALID: no-change needs prompt-bound evidence")
+        if reasons:
+            return None, reasons
+        return {**record, "path": str(path),
+                "record_sha256": hashlib.sha256(raw_record).hexdigest()}, []
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return None, reasons + [f"AI_BACKUP_COMPLETION_PENDING: {exc}"]
+
+
+def _archive_backup_completion(item: dict, record: dict, run_p: Path) -> dict:
+    """Preserve the exact signed input before Program normalizes any bytes."""
+    root = (Path(run_p) / "ai_backup_completions" / item["task_sha256"] /
+            record["record_sha256"])
+    project = Path(item["project"])
+    import benchmark_io_adapter as bio                  # noqa: PLC0415
+    for row in record["output_manifest"]:
+        relative = bio._public_relative(row["relative_path"])
+        data = (project / "phase2" / "stage1" / "rtl" / relative).read_bytes()
+        if hashlib.sha256(data).hexdigest() != row["sha256"]:
+            raise ValueError("AI_BACKUP_COMPLETION_PENDING: output changed before regating")
+        bio._public_write_once(root / "files" / relative, data)
+    _write_immutable_json(root / "author_record.json", record)
+    return {"author_record": record, "input_root": str(root / "files"),
+            "public_original_input": item["public_original_input"]}
+
+
 def _make_ai_backup_task(problem_id: str, project: Path, skills: list[str],
                          source: str, detail: str, bench: str,
                          dataset: Path, run_p: Path,
-                         required_top: str | None = None) -> dict:
+                         required_top: str | None = None,
+                         expected_public_input: dict | None = None) -> dict:
     """Build one prompt-bound handoff into the runner-owned RTL directory.
 
     `required_top` carries the module name the benchmark's SCORER will
@@ -3479,7 +3635,8 @@ def _make_ai_backup_task(problem_id: str, project: Path, skills: list[str],
     run_p = Path(run_p).resolve()
     prompt = project / "input" / "phase1_prompt.md"
     prompt_text = prompt.read_text(errors="replace")
-    return {
+    import benchmark_io_adapter as bio                  # noqa: PLC0415
+    task = {
         "schema": "vibeic.benchmark.ai_backup_task.v1",
         "id": str(problem_id),
         "project": str(project),
@@ -3490,12 +3647,32 @@ def _make_ai_backup_task(problem_id: str, project: Path, skills: list[str],
         "declared_skills": list(skills),
         "handoff_source": source,
         "prompt_sha256": _sha256_text(prompt_text),
+        "handoff_instance": uuid.uuid4().hex,
+        "public_original_input": bio.public_original_input(
+            project, problem_id, _sha256_text(prompt_text),
+            expected=expected_public_input),
+        "initial_output_manifest": _backup_output_manifest(project),
         "write_rtl_to": str(project / "phase2" / "stage1" / "rtl"),
         "read_docs_from": str(project / "phase1" / "generated_docs"),
         "read_prompt_from": str(prompt),
         "runner_said": str(detail or "")[:600],
         "regate_entry_step": "2",
         "review_required_after_regating": True,
+        "completion_record_path": str(project / "phase2" / "stage1" /
+                                      "ai_backup_author.json"),
+        "completion_record_contract": {
+            "schema": "vibeic.benchmark.ai_backup_record.v1",
+            "required_bindings": ["id", "task_sha256", "prompt_sha256",
+                                  "source_sha256", "output_manifest", "rtl_sha256"],
+            "output_manifest": "sorted complete relative_path/sha256/bytes list under write_rtl_to",
+            "rtl_sha256": "SHA256 of newline-joined sorted .sv/.v contents, as _candidate_text",
+            "author": {"kind": "AI", "model": "<actual named author model>"},
+            "oracle_accessed": False,
+            "rationale": "<at least 40 characters explaining completed work>",
+            "disposition": "CHANGED or explicit NO_CHANGE relative to initial_output_manifest",
+            "prompt_evidence": "NO_CHANGE requires excerpt/supports as in AI repair/review evidence",
+            "completion": "write this record only after all output files are complete; presence alone is pending",
+        },
         # The scorer-facing top module name, when the benchmark fixes one.
         # Absent (None) for benchmarks that take the name from the description.
         "required_top_module": required_top,
@@ -3509,6 +3686,13 @@ def _make_ai_backup_task(problem_id: str, project: Path, skills: list[str],
         "resume_with": (f"benchmark_dispatch.py {bench} --resume "
                         f"--dataset {dataset} --run {run_p}"),
     }
+    task["public_original_input_paths"] = [
+        str(project / "input" / "public_original" / "files" / row["relative_path"])
+        for row in task["public_original_input"]["files"]]
+    task["task_sha256"] = _sha256_text(json.dumps(task, sort_keys=True))
+    _write_immutable_json(run_p / "ai_backup_tasks" /
+                          f"{task['task_sha256']}.json", task)
+    return task
 
 
 def _prepare_general_solve_run(bench: str, dataset: Path, run_p: Path,
@@ -3808,6 +3992,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 "accepted": False, "staged": staged_chars,
                 "completeness": completeness,
                 "routing_verdict": verdict, "phases": phases,
+                "public_original_input": staged["public_original_input"],
                 "phase1_frontdoor": phase1_frontdoor,
                 "candidate_origin": (
                     "PROGRAM" if got.get("ok") else
@@ -3824,7 +4009,8 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
             if got.get("ok"):
                 review_task = _make_ai_review_task(
                     pid, proj, got, verdict, rc, run_p, "PROGRAM",
-                    program_phases=phases)
+                    program_phases=phases,
+                    expected_public_input=staged["public_original_input"])
                 result["review_task"] = review_task["review_path"]
                 p1 = (phases.get("phase1_routing") or {})
                 p1["needs_ai_parse_consumed_by"] = (
@@ -3834,7 +4020,8 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
                 backup_task = _make_ai_backup_task(
                     pid, proj, backup_skills, str(backup_source),
                     backup_detail, bench, ds, run_p,
-                    required_top=_required_scorer_top(_entry(bench)))
+                    required_top=_required_scorer_top(_entry(bench)),
+                    expected_public_input=staged["public_original_input"])
             state = ("candidate->AI-review" if got.get("ok")
                      else ("WAIVE->AI" if backup_source == "rtl_gen_waive"
                            else ("route-declared->AI" if awaiting_backup
@@ -4208,7 +4395,8 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         if got.get("ok"):
             task = _make_ai_review_task(
                 pid, proj, got, result.get("routing_verdict") or {}, rc,
-                run_p, "PROGRAM", program_phases=result.get("phases"))
+                run_p, "PROGRAM", program_phases=result.get("phases"),
+                expected_public_input=result.get("public_original_input"))
             task_by_id[pid] = task
             result.update({
                 "review_task": task["review_path"],
@@ -4296,17 +4484,22 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             })
             continue
         rtl_dir = proj / "phase2" / "stage1" / "rtl"
-        authored = rtl_dir.is_dir() and (list(rtl_dir.glob("*.sv"))
-                                         + list(rtl_dir.glob("*.v")))
-        if not authored:
+        completion, completion_reasons = _validate_backup_completion(item, run_p)
+        if completion is None:
             backup_plans.append({
                 "kind": "no_rtl", "item": item, "id": pid,
-                "result": result,
+                "result": result, "reasons": completion_reasons,
             })
+            continue
+        try:
+            provenance = _archive_backup_completion(item, completion, run_p)
+        except (OSError, ValueError) as exc:
+            backup_plans.append({"kind": "no_rtl", "item": item, "id": pid,
+                                 "result": result, "reasons": [str(exc)]})
             continue
         backup_plans.append({
             "kind": "run", "item": item, "id": pid, "result": result,
-            "project": proj, "rtl_dir": rtl_dir,
+            "project": proj, "rtl_dir": rtl_dir, "provenance": provenance,
         })
 
     backup_run_plans = [p for p in backup_plans if p["kind"] == "run"]
@@ -4314,10 +4507,20 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                                            "resume:ai-backup")
     if gate_rc is not None:
         return gate_rc
+    def _run_completed_backup(job):
+        pid = job[0]
+        plan = next(p for p in backup_run_plans if p["id"] == pid)
+        completion, reasons = _validate_backup_completion(plan["item"], run_p)
+        if completion != plan["provenance"]["author_record"]:
+            return _ResumeRunnerOutcome(problem_id=pid, rc=None,
+                collected_json=None, error="; ".join(reasons) or
+                "AI_BACKUP_COMPLETION_PENDING: author input changed before worker entry")
+        return _run_and_collect(job)
+
     backup_outcomes = iter(_ordered_parallel_map(
         [(p["id"], p["project"], True, None, p["result"].get("exit"))
          for p in backup_run_plans],
-        _run_and_collect, jobs))
+        _run_completed_backup, jobs))
     for plan in backup_plans:
         kind = plan["kind"]
         pid = plan["id"]
@@ -4337,8 +4540,11 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         if kind == "no_rtl":
             remaining_backup.append(item)
             result.update({"accepted": False, "awaiting_ai_backup": True,
-                           "awaiting_ai_review": False, "awaiting_ai": True})
-            print(f"  {pid:44s} AI backup still has no authored RTL")
+                           "awaiting_ai_review": False, "awaiting_ai": True,
+                           "ai_backup_completion": {"status": "PENDING",
+                                                    "reasons": plan["reasons"]}})
+            print(f"  {pid:44s} AI backup completion PENDING: "
+                  + "; ".join(plan["reasons"]))
             continue
         outcome = next(backup_outcomes)
         if outcome.error is not None:
@@ -4368,7 +4574,13 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         if got.get("ok"):
             task = _make_ai_review_task(
                 pid, proj, got, result.get("routing_verdict") or {}, rc,
-                run_p, "AI_BACKUP", program_phases=result.get("phases"))
+                run_p, "AI_BACKUP", program_phases=result.get("phases"),
+                expected_public_input=item["public_original_input"])
+            task["backup_provenance"] = {
+                **plan["provenance"], "gated_rtl_sha256": task["rtl_sha256"]}
+            result["ai_backup_completion"] = {
+                "status": "CONSUMED", "task_sha256": item["task_sha256"],
+                "record_sha256": plan["provenance"]["author_record"]["record_sha256"]}
             task_by_id[pid] = task
             result["review_task"] = task["review_path"]
             result["candidate_origin"] = "AI_BACKUP"
@@ -4610,6 +4822,7 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
             new_task = _make_ai_review_task(
                 pid, proj, got, result.get("routing_verdict") or {}, rc,
                 run_p, "AI_REPAIR",
+                expected_public_input=task.get("public_original_input"),
                 program_phases=result.get("phases"),
                 verification_challenges=inherited,
                 program_candidate=(task.get("program_candidate_snapshot")
@@ -5640,6 +5853,7 @@ def _apply_program_regate(bench: str, run_p: Path, request_path: Path,
         new_task = _make_ai_review_task(
             pid, project, got, result.get("routing_verdict") or {}, int(process.rc), run_p, "AI_REPAIR",
             program_phases=phases, verification_challenges=inherited,
+            expected_public_input=task.get("public_original_input"),
             program_candidate=task["program_candidate_snapshot"],
             repair_parent_candidate=task["repair_parent_candidate_snapshot"],
             repair_provenance=provenance, repair_input_candidate=input_candidate,

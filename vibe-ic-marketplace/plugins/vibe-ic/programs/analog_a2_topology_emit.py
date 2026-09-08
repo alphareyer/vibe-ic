@@ -4252,7 +4252,7 @@ def expand_stages(lib: Dict[str, Any], spec_values: Dict[str, float]
 # differing in `l` alone.
 #
 # CORRECTION (vibe-ic#2187, re-measured against the SOURCE in the pinned image
-# 0.3.49, sha256:89a8fd7295208ee6d06e216ade9edc6161d26db52099e9f22ceb77a2d76e3f49).
+# 0.3.49; the historical pin is c071f6253:programs/_eda_pin.py).
 # These lines used to add "the way one below `lmin` does", asserting that the
 # gencell refuses at the minimum and clamps only at the maximum. IT DOES NOT.
 # `sg13g2::cap_check` (libs.tech/magic/ihp-sg13g2-cap.tcl:727-746) handles all

@@ -93,6 +93,8 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+from _atomic_artefact import write_text
+
 #: (L-doc file stem, field) pairs that carry DIGITAL behaviour. Each is a list
 #: in the emitted schema; a non-empty list is content, an empty one is not.
 #: `L9_INTEGRATION_SPEC.submodules` is excluded on measured grounds — see the
@@ -258,8 +260,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     }
     blob = json.dumps(out, indent=2, ensure_ascii=False)
     if args.json:
-        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
-        Path(args.json).write_text(blob + "\n")
+        write_text(args.json, blob + "\n")
     print(blob)
     if absent:
         return 0

@@ -145,7 +145,7 @@ _PATH_RE = re.compile(
 # MEASURED (lanes rbsub5 and rbsub6, 8HD-9, 2026-09-07, same plugin tip): both
 # runs recorded a scratch path in `reports/orchestrator/phase2_one_shot.json`
 # that no longer existed. rbsub6's began `/tmp/lane.rbsub6/…` and FAILED this
-# gate; rbsub5's began `/home/reyerchu/…` and PASSED it. The only variable
+# gate; rbsub5's began `/home/<your-user>/…` and PASSED it. The only variable
 # between the two verdicts was where TMPDIR happened to point — a property of
 # the operator's environment, not of the run's honesty.
 #

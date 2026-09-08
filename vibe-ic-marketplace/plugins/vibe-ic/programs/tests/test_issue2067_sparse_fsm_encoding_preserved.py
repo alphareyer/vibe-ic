@@ -35,6 +35,7 @@ red while this was measured.
 import json
 import subprocess
 import sys
+import pytest
 from pathlib import Path
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
@@ -43,6 +44,64 @@ if str(_PROGRAMS) not in sys.path:
 
 import sparse_fsm_detect as det              # noqa: E402
 import sparse_fsm_encoding_check as chk      # noqa: E402
+
+
+def _phase3_commands(tmp_path, monkeypatch, rtl):
+    """Exercise all four real frontend command builders without running EDA."""
+    import phase3_one_shot_runner as p3
+    project = tmp_path / "project"
+    rtl_dir = project / "phase2/stage1/rtl"
+    rtl_dir.mkdir(parents=True)
+    # The conditional is an input capability that triggers the final retry.
+    (rtl_dir / "fsm.sv").write_text(rtl + "\n`ifdef SIMULATION\n`endif\n")
+    lib = tmp_path / "test.lib"
+    lib.write_text("library (test) { cell (INV) { area : 1.0; } }\n")
+    pdk = p3.PdkConfig(name="test", liberty=str(lib), tech_lef="test.lef",
+                       cell_lef="test.lef", cell_gds=None, site="unit",
+                       drc_deck=None)
+    captured = []
+    def fake_exec(container, cmd, **kwargs):
+        captured.append(cmd)
+        return 1, "", "frontend unavailable in command-capture test"
+    monkeypatch.setattr(p3, "_docker_exec", fake_exec)
+    monkeypatch.setattr(p3, "_to_container_path", lambda path, container: path)
+    monkeypatch.setattr(p3._sf, "resolve_slang_load_prefix", lambda *a: "")
+    synth_dir = project / "phase2/stage2/synth"
+    synth_dir.mkdir(parents=True)
+    from lec_run import FSM_ENCFILE_NAME
+    encfile = synth_dir / FSM_ENCFILE_NAME
+    encfile.write_text(".fsm old stale_state\n.map 00 -1\n")
+    result = p3.step_synth(project, "sparse_fsm", pdk, "command-capture")
+    assert result.status == "FAIL"
+    return [c for c in captured if "synth -top " in c], encfile
+
+
+@pytest.mark.parametrize("frontend", ["verilog", "slang", "sv2v", "synthesis"])
+def test_phase3_preserves_sparse_states_and_records_maps_on_every_frontend(
+        tmp_path, monkeypatch, frontend):
+    commands, encfile = _phase3_commands(tmp_path, monkeypatch, SPARSE_RTL)
+    selectors = {
+        "verilog": "read_verilog -sv -DSIMULATION",
+        "slang": "--top sparse_fsm -DSIMULATION",
+        "sv2v": "sv2v -DSIMULATION",
+        "synthesis": "--top sparse_fsm -DSYNTHESIS",
+    }
+    selected = [c for c in commands if selectors[frontend] in c]
+    assert len(selected) == 1, commands
+    cmd = selected[0]
+    preserve = 'setattr -set fsm_encoding "none" w:state_q'
+    assert preserve in cmd, cmd
+    assert cmd.index("flatten;") < cmd.index(preserve) < cmd.index("synth -top")
+    assert f"-encfile {encfile};" in cmd, cmd
+
+
+def test_phase3_dense_fsm_retains_recoding_and_failed_run_drops_stale_map(
+        tmp_path, monkeypatch):
+    commands, encfile = _phase3_commands(tmp_path, monkeypatch, DENSE_RTL)
+    assert commands
+    assert all("fsm_encoding" not in c.replace(str(encfile), "") for c in commands)
+    assert all("-nofsm" not in c for c in commands)
+    assert not encfile.exists(), "failed new synth retained the old netlist's map"
 
 # A 3-state, 5-bit, minimum-Hamming-3 encoding — the shape OpenTitan's
 # sparse-fsm-encode.py emits. These ARE the opentitan_aes `aes_ctr_e` codes,

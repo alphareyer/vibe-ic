@@ -3946,7 +3946,7 @@ def _phase1_commit_staged_tree(
 # child component and the stage path for the one that did not —
 #
 #     --project /tmp/lane.rbsub6/vibeic-rtl-step-6k_pkx29/subservient \
-#     --digest  /home/reyerchu/_lane_rbsub6/d/subservient/phase2/stage1/lessons.md
+#     --digest  /home/<your-user>/_lane_rbsub6/d/subservient/phase2/stage1/lessons.md
 #
 # — from a single f-string. `--digest <stage>/phase2/...` matched
 # `stage_text + os.sep` and was remapped; `--project <stage> ` did not and was

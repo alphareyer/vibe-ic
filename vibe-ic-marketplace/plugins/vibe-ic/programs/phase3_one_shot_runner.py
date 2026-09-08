@@ -14222,6 +14222,23 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     out_dir_c = _to_container_path(str(out_dir), container)
     netlist_c = _to_container_path(str(netlist), container)
 
+    # Phase 3 re-synthesises the RTL, so Phase 2's state attributes and
+    # recoding table do not carry over. Apply the same input-derived sparse
+    # state protection after flattening on EVERY frontend, and record any
+    # ordinary FSM recoding beside the netlist consumed by post-layout LEC.
+    import sparse_fsm_detect as _sfd
+    from lec_run import FSM_ENCFILE_NAME
+    _sparse = _sfd.detect_paths(rtl_files)
+    _preserve = _sfd.yosys_setattr_cmd(
+        _sparse["register_names"], _sparse["flop_instances"])
+    _encfile = out_dir / FSM_ENCFILE_NAME
+    # An aborted new synthesis must not leave a previous run's translation.
+    _encfile.unlink(missing_ok=True)
+    _encfile_c = _to_container_path(str(_encfile), container)
+    _fsm_synth_clause = (
+        (_preserve + "; " if _preserve else "")
+        + f"synth -top {top} -flatten -encfile {_encfile_c}; ")
+
     # Define SIMULATION so behavioral fallback paths fire (e.g. otp_mem
     # uses $readmemh + reg array instead of vendor-specific altsyncram
     # primitive that only exists on Altera FPGAs). chip-AGNOSTIC.
@@ -14492,7 +14509,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         f"yosys -p '{macro_lib_reads + ('; ' if macro_lib_reads else '')}{reads}; "
         f"{pre_synth}"
         f"{_arith_pre_clause}"
-        f"synth -top {top} -flatten; "
+        f"{_fsm_synth_clause}"
         f"dfflibmap{_du_flags} -liberty {liberty_c}; "
         f"{dlatch_clause}"
         f"abc -liberty {liberty_c}{_abc_timing}; "
@@ -14576,7 +14593,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
             f"read_slang {slang_files} --top {top} {_simdef}-DYOSYS; "
             f"hierarchy -top {top}; proc; flatten; tribuf -logic; "
             f"{_arith_pre_clause}"
-            f"synth -top {top} -flatten; "
+            f"{_fsm_synth_clause}"
             f"dfflibmap{_du_flags} -liberty {liberty_c}; "
             f"{dlatch_clause}"
             f"abc -liberty {liberty_c}{_abc_timing}; "
@@ -14608,7 +14625,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 f"read_verilog {sv2v_out}; "
                 f"hierarchy -check -top {top}; proc; flatten; tribuf -logic; "
                 f"{_arith_pre_clause}"
-                f"synth -top {top} -flatten; "
+                f"{_fsm_synth_clause}"
                 f"dfflibmap{_du_flags} -liberty {liberty_c}; "
                 f"{dlatch_clause}"
                 f"abc -liberty {liberty_c}{_abc_timing}; "
@@ -14662,7 +14679,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 f"read_slang {_syn_files} --top {top} -DSYNTHESIS -DYOSYS; "
                 f"hierarchy -top {top}; proc; flatten; tribuf -logic; "
                 f"{_arith_pre_clause}"
-                f"synth -top {top} -flatten; "
+                f"{_fsm_synth_clause}"
                 f"dfflibmap{_du_flags} -liberty {liberty_c}; "
                 f"{dlatch_clause}"
                 f"abc -liberty {liberty_c}{_abc_timing}; "

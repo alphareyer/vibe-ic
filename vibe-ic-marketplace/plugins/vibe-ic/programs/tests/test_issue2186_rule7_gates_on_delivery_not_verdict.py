@@ -200,7 +200,7 @@ def test_the_hawaii_adc_analog_chain_publishes_two_design_facts():
     """The A4..A9 chain from the run in #2186, in the shapes it published.
 
     Reproduced from the read-only stage report at
-    `/home/reyerchu/_lane_rbadc3/proj/reports/analog/stage_analog_compliance.json`
+    `/home/<your-user>/_lane_rbadc3/proj/reports/analog/stage_analog_compliance.json`
     (8HD-8). Predicted before running: DESIGN_FACT=2 (A5, A6) and UNCLASSIFIED=4
     (A4 on its own disclosure tier, A7 and A9 on their cascade notes, A8 because
     its predecessor A7 is MISSING and delivered nothing). Measured: exactly that.

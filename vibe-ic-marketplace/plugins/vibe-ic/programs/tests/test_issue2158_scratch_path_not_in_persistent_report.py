@@ -12,7 +12,7 @@ MEASURED (lane rbsub6, 8HD-9, 2026-09-07, project `d/subservient`): the report
 carried BOTH forms in one `steps[3].detail`, produced by a single f-string —
 
     --project /tmp/lane.rbsub6/vibeic-rtl-step-6k_pkx29/subservient \
-    --digest  /home/reyerchu/_lane_rbsub6/d/subservient/phase2/stage1/lessons.md
+    --digest  /home/<your-user>/_lane_rbsub6/d/subservient/phase2/stage1/lessons.md
 
 The remap replaced `<stage>` only when the string continued `<stage>/` (or was
 exactly `<stage>`), so the argument that named the stage ROOT — with a SPACE
@@ -44,7 +44,7 @@ import design_one_shot_runner as dosr  # noqa: E402
 # The exact scratch shape the runner creates, and a live project root that is
 # NOT under it. Neither has to exist: the remap is a pure string operation.
 STAGE = Path("/tmp/lane.neutral/vibeic-rtl-step-6k_pkx29/subservient")
-LIVE = Path("/home/reyerchu/runroot/subservient")
+LIVE = Path.home() / "runroot" / "subservient"
 
 # The measured detail, reduced to the two arguments that disagreed.
 MEASURED_DETAIL = (

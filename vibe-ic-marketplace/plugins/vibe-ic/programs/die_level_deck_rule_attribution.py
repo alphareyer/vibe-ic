@@ -480,7 +480,7 @@ FILL_REPORT_REL = "reports/phase3/cmp_fill_emit.json"
 #: engine baked into the container image — AHEAD of the copy vendored beside
 #: this plugin. MEASURED, lane czsubdrc 2026-09-07 on 8HD-4, against the
 #: image this tree pins (`0.3.49`,
-#: sha256:89a8fd7295208ee6d06e216ade9edc6161d26db52099e9f22ceb77a2d76e3f49):
+#: historical pin c071f6253:programs/_eda_pin.py):
 #: that image carries `metal-fill/metal_fill.py` at the override path, the
 #: hyphen spelling `_subdir_spellings` tries, so the override RESOLVES and the
 #: image's engine runs. It is 390 lines to the vendored copy's 681 and it

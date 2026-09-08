@@ -1322,14 +1322,21 @@ FSM_ENCFILE_NAME = "fsm_encoding.enc"
 
 
 def fsm_encfile_beside_netlist(gate_netlist: str) -> Optional[str]:
-    """Path of the FSM encoding table synth wrote next to this gate netlist, or
-    None when there is none.  PURE apart from one existence probe.
+    """Path of a nonempty FSM encoding table beside this gate netlist, or None.
 
     None is the correct answer for every netlist produced before the synth step
     started writing the file, and for every non-yosys netlist: the caller then
     emits the pre-change recipe byte-for-byte.  An absent table means "no
     translation is known", which is exactly the pre-#2050 situation; what the
-    fix removes is the case where a translation EXISTS and was ignored."""
+    fix removes is the case where a translation EXISTS and was ignored.
+
+    Yosys also creates a zero-byte file when no FSM was recoded. Passing that
+    file suppresses splitnets in both recipes even though there is no state
+    encoding to protect. If scan insertion scalarized internal buses, their
+    vector RTL names then lose every per-bit correspondence. Preserve the
+    normal matching recipe for this empty-table case; nonempty tables retain
+    the whole-state matching required for recoded FSMs.
+    """
     if not gate_netlist:
         return None
     try:
@@ -1341,7 +1348,173 @@ def fsm_encfile_beside_netlist(gate_netlist: str) -> Optional[str]:
         cand = Path(gate_netlist).parent / FSM_ENCFILE_NAME
     except (OSError, ValueError):
         return None
-    return str(cand) if cand.is_file() else None
+    return str(cand) if cand.is_file() and cand.stat().st_size > 0 else None
+
+
+def fsm_signal_names(encfile: Optional[str]) -> Optional[List[str]]:
+    """Read the whole FSM names that must survive wire splitting (#2209).
+
+    Unknown syntax/names retain the old, unsplit recipe. None is distinct
+    from an observed empty encoding file, which declares no recoded FSMs.
+    Only literal selection-safe identifiers are accepted: guessing a glob
+    for an escaped name could split precisely the state we must preserve.
+    """
+    if not encfile:
+        return None
+    try:
+        lines = Path(encfile).read_text().splitlines()
+    except (OSError, UnicodeError, ValueError):
+        return None
+    names = set()
+    have_fsm = False
+    for line in lines:
+        words = line.split()
+        if not words or words[0].startswith("#"):
+            continue
+        if words[0] == ".fsm" and len(words) == 3:
+            name = words[2].removeprefix("\\")
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.$]*", name):
+                return None
+            names.add(name)
+            have_fsm = True
+        elif (words[0] == ".map" and len(words) == 3 and have_fsm
+              and all(re.fullmatch(r"[01xXzZ-]+", w) for w in words[1:])):
+            continue
+        else:
+            return None
+    return sorted(names)
+
+
+def _equiv_splitnets(encfile: Optional[str],
+                     names: Optional[List[str]]) -> str:
+    if not encfile:
+        return "splitnets -ports\n"
+    if names is None:
+        return ""
+    # Keep every recoded FSM whole at the top and under any flatten prefix.
+    # All other wires may regain their scalar-name correspondence. Selection
+    # changes names only; it neither assumes equality nor removes logic/points.
+    if any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.$]*", n) for n in names):
+        return ""
+    exclude = "".join(f" w:{n} %d w:*.{n} %d" for n in sorted(set(names)))
+    return f"splitnets -ports w:*{exclude}\nselect *\n"
+
+
+def scan_fsm_mapping(encfile: Optional[str], gate_netlist: str,
+                     top: str, scan_mode: Optional[Dict], *,
+                     pre_scan_netlist: Optional[str] = None,
+                     liberty_text: str = "",
+                     dff_cells: Optional[List[str]] = None) -> Optional[Dict]:
+    """Restore producer-recorded FSM words lost to scan scalarization.
+
+    Only the published scan prefix and complete, explicitly declared scalar
+    wire sets authorize an alias. No matching by width alone or assumed state
+    equality is used. Yosys still proves the encoder/decoder correspondence.
+    Unrecognized or incomplete inputs retain the conservative old recipe.
+    """
+    if not encfile or not scan_mode or fsm_signal_names(encfile) is None:
+        return None
+    prefix = scan_mode.get("internal_prefix")
+    if not isinstance(prefix, str) or not re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_.$]*", prefix):
+        return None
+    try:
+        netlist = Path(gate_netlist).read_text()
+        encoding = Path(encfile).read_text()
+    except (OSError, UnicodeError, ValueError):
+        return None
+    # This is the generated post-scan top-level scalar declaration form.
+    # Restrict the lookup to the compared module; another module's wires
+    # cannot authorize aliases in this one.
+    modules = re.findall(r"(?ms)^\s*module\s+(\\?[^\s(]+).*?^\s*endmodule\b",
+                         netlist)
+    if modules != [top]:
+        return None
+    declarations = re.findall(r"(?m)^\s*wire\s+\\([^\s;]+)\s*;\s*$",
+                              netlist)
+    pre_instances = gate_instances = lib_cells = {}
+    pre_text = ""
+    if pre_scan_netlist and liberty_text and dff_cells:
+        try:
+            pre_text = Path(pre_scan_netlist).read_text()
+        except (OSError, UnicodeError, ValueError):
+            return None
+        # Reuse the post-layout producer's structural/Liberty parsers. A
+        # renamed scan-chain tail can be found at its unchanged FF OUTPUT
+        # pin; D inputs are ineligible because scan insertion adds their mux.
+        from lec_post_layout_check import _parse_netlist_instances, _parse_liberty_pins
+        pre_instances = _parse_netlist_instances(pre_text)
+        gate_instances = _parse_netlist_instances(netlist)
+        lib_cells = _parse_liberty_pins(liberty_text)
+    records = []
+    current = None
+    for line in encoding.splitlines():
+        words = line.split()
+        if not words or words[0].startswith("#"):
+            continue
+        if words[0] == ".fsm":
+            if words[1].removeprefix("\\") != top:
+                return None
+            current = {"name": words[2].removeprefix("\\"), "maps": []}
+            records.append(current)
+        elif words[0] == ".map" and current is not None:
+            current["maps"].append(words[1:])
+        else:
+            return None
+    aliases = {}
+    normalized = []
+    for record in records:
+        maps = record["maps"]
+        if not maps or len({len(x[1]) for x in maps}) != 1:
+            return None
+        width = len(maps[0][1])
+        original = prefix + "." + record["name"]
+        # The alias must be NEW. Connecting an already driven word would
+        # constrain the DUT, rather than only restoring its missing name.
+        if re.search(r"(?m)^\s*(?:wire|reg)\s+(?:\[[^\]]+\]\s+)?\\"
+                     + re.escape(original) + r"\s*;", netlist):
+            return None
+        bits = [f"{original}[{i}]" for i in range(width)]
+        observed = [n for n in declarations if n.startswith(original + "[")]
+        if len(observed) != len(set(observed)) or set(observed) - set(bits):
+            return None
+        for i, bit in enumerate(bits):
+            if declarations.count(bit) == 1:
+                continue
+            candidates = []
+            source_bit = f"{record['name']}[{i}]"
+            for inst, (cell, pins) in pre_instances.items():
+                if cell not in (dff_cells or []):
+                    continue
+                for pin in lib_cells.get(cell, {}).get("outputs", {}):
+                    if pins.get(pin) != source_bit:
+                        continue
+                    after = gate_instances.get(prefix + "." + inst)
+                    if not after or after[0] != cell:
+                        continue
+                    target = after[1].get(pin)
+                    if target and declarations.count(target) == 1:
+                        candidates.append(target)
+            if len(candidates) != 1:
+                return None
+            bits[i] = candidates[0]
+        full = _LEC_WRAP_INST + "." + original
+        aliases[full] = [_LEC_WRAP_INST + "." + bit for bit in bits]
+        normalized.append(f".fsm {top} {full}\n")
+        normalized.extend(f".map {a} {b}\n" for a, b in maps)
+    if not aliases:
+        return None
+    body = "".join(normalized)
+    return {"aliases": aliases, "encoding_text": body,
+            "encoding_sha256": hashlib.sha256(body.encode()).hexdigest(),
+            "source_encoding_sha256": hashlib.sha256(encoding.encode()).hexdigest(),
+            "gate_netlist_sha256": hashlib.sha256(netlist.encode()).hexdigest(),
+            "pre_scan_netlist_sha256": (hashlib.sha256(pre_text.encode()).hexdigest()
+                                         if pre_text else None),
+            "liberty_sha256": (hashlib.sha256(liberty_text.encode()).hexdigest()
+                                if liberty_text else None)}
+
+
 _STAT_MODULE_RE = re.compile(r"(?m)^\s*===\s+(\S+)\s+===\s*$")
 # yosys prints the per-type histogram as "count", then 2+ spaces, then the
 # cell type, indented under the module header; the SUMMARY lines above it
@@ -2991,6 +3164,8 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
                        gate_wrapper_v: str = "",
                        gold_wrapper_v: str = "",
                        fsm_encfile: Optional[str] = None,
+                       fsm_preserve_signals: Optional[List[str]] = None,
+                       scan_fsm_restore: Optional[Dict] = None,
                        checkpoint_dir: Optional[str] = None,
                        resume_from: Optional[Dict] = None,
                        ladder_rungs: Optional[int] = None) -> str:
@@ -3174,16 +3349,30 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
     # synth leaves the netlist BYTE-IDENTICAL (same sha256 on opentitan_aes and
     # on the fsmtop reproducer) — it only records the translation.
     #
-    # `splitnets` is dropped on the encfile path because `-encfile` is keyed on
-    # the WHOLE signal name (`.fsm <module> <signal>`), which a bit-blasted
-    # design no longer has; equiv_make already emits one `$equiv` per BIT for a
-    # multi-bit signal, so no key point is lost by not splitting.
+    # The encfile is keyed on WHOLE signal names. Keep those words intact;
+    # other vectors may need splitting to match scalarized scan data wires.
+    # Missing/unsupported encoding metadata retains the old unsplit recipe.
     #
     # NO-LEAK: with `fsm_encfile=None` — every caller until the synth step
     # starts writing one — both strings below are the pre-change literals and
     # the script is BYTE-IDENTICAL, so no design's verdict can move.
-    _splitnets = "splitnets -ports\n" if not fsm_encfile else ""
+    # #2209: scan insertion can spell every data vector as escaped scalar
+    # wires. Suppressing ALL splitting then loses the data correspondences.
+    # Preserve the encoding table's FSM words, including hierarchical copies,
+    # while normalizing the remaining names on BOTH sides. Unknown encoding
+    # metadata keeps #2050's conservative unsplit behavior.
+    _splitnets = _equiv_splitnets(fsm_encfile, fsm_preserve_signals)
     _encopt = f" -encfile {fsm_encfile}" if fsm_encfile else ""
+    _restore_words = ""
+    if scan_fsm_restore:
+        _encopt = f" -encfile {scan_fsm_restore['encoding_path']}"
+        _restore_words = ("# scan FSM encoding sha256: "
+                          + scan_fsm_restore["encoding_sha256"] + "\n")
+        for name, bits in sorted(scan_fsm_restore["aliases"].items()):
+            _restore_words += f"add -wire \\{name} {len(bits)}\n"
+            # connect uses SigSpec's comma-list grammar, not Verilog braces.
+            vector = ",".join("\\" + bit for bit in reversed(bits))
+            _restore_words += f"connect -nomap -nounset -set \\{name} {vector}\n"
     return (
         # --- gold = RTL, kept as generic satgen-modelable Yosys cells ---
         f"{gold_read_cmd}\n"
@@ -3236,6 +3425,7 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
         f"flatten\n"
         f"async2sync\n"   # async-FF legalization (see the gold side) — both sides
         f"opt_clean\n"
+        f"{_restore_words}"
         f"{_splitnets}"
         f"design -stash gate\n"
         f"design -copy-from gold -as gold {top}\n"
@@ -4759,6 +4949,26 @@ def main(argv: Optional[List[str]] = None) -> int:
     def _telemetry_finish(status: str, **extra: Any) -> None:
         _finish_telemetry_sidecar(telemetry_path, status, **extra)
 
+    _scan_fsm_restore = scan_fsm_mapping(
+        fsm_encfile_beside_netlist(gate_abs), gate_abs, resolved_top, scan_mode)
+    if _scan_fsm_restore is None and scan_mode and isinstance(_meta, dict) and liberty:
+        _pre_rel = _meta.get("fault_input_netlist") or _meta.get("input_netlist")
+        if isinstance(_pre_rel, str):
+            _lib_rc, _lib_text, _lib_err = _docker_exec_raw(
+                container, "cat " + shlex.quote(liberty))
+            if _lib_rc == 0:
+                _scan_fsm_restore = scan_fsm_mapping(
+                    fsm_encfile_beside_netlist(gate_abs), gate_abs,
+                    resolved_top, scan_mode,
+                    pre_scan_netlist=str(project / _pre_rel),
+                    liberty_text=_lib_text,
+                    dff_cells=str(_meta.get("dff_cells", "")).split(","))
+    if _scan_fsm_restore:
+        _scan_enc_path = project / "reports" / "lec_scan_fsm_encoding.enc"
+        _scan_enc_path.write_text(_scan_fsm_restore["encoding_text"])
+        _scan_fsm_restore["encoding_path"] = str(_scan_enc_path)
+        scan_record["fsm_correspondence"] = _scan_fsm_restore
+
     def _make_script(frontend: str, slang_prefix: str, defines: str, *,
                      checkpoint_dir: Optional[str] = None,
                      resume_from: Optional[Dict] = None,
@@ -4778,6 +4988,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             # `_identity_for` -> script_sha256, so a run WITH a translation and
             # a run WITHOUT one can never share a PASS-cache entry.
             fsm_encfile=fsm_encfile_beside_netlist(gate_abs),
+            fsm_preserve_signals=fsm_signal_names(
+                fsm_encfile_beside_netlist(gate_abs)),
+            scan_fsm_restore=_scan_fsm_restore,
             checkpoint_dir=checkpoint_dir, resume_from=resume_from,
             ladder_rungs=ladder_rungs)
 

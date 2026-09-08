@@ -83,11 +83,22 @@ def test_the_runs_own_flag_still_outranks_the_environment(
 
 
 def test_with_neither_the_default_is_unchanged(monkeypatch, a6_project):
-    """Control: a run that names no container anywhere keeps the behaviour
-    it has today. Green on both arms — if this moved, the fix would be a
-    change of default dressed up as a bug fix."""
+    """With no flag or analog environment, use the runtime policy's default.
+
+    This checks the third precedence rung; the runtime-policy tests own the
+    digest-derived name. A test-owned sentinel cannot pass via a stale literal.
+    """
+    runtime_default = "fixture_runtime_default"
+    monkeypatch.setattr(R._pin, "default_container_name", lambda: runtime_default)
     got = _container_handed_over(monkeypatch, a6_project, flag=None, env=None)
-    assert got == "vibeic-eda"
+    assert got == runtime_default
+
+
+def test_shared_container_override_is_reached_after_analog_overrides(
+        monkeypatch, a6_project):
+    monkeypatch.setenv("VIBEIC_EDA_CONTAINER", "shared-run-container")
+    got = _container_handed_over(monkeypatch, a6_project, flag=None, env=None)
+    assert got == "shared-run-container"
 
 
 # ── every container-resolution site, DERIVED from the tree ─────────────────

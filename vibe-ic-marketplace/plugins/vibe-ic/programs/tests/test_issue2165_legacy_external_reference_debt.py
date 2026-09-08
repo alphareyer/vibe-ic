@@ -62,9 +62,9 @@ def _root_citing_reports_only(tmp_path: Path) -> Path:
 # ── family derivation ───────────────────────────────────────────────────────
 
 def test_the_family_is_the_parent_of_the_relocated_run_root():
-    assert D.family_of(
-        "/home/reyerchu/AI_IC_design/_bench6_v100_r1/ibex/phase2/x.json",
-        "ibex") == "/home/reyerchu/AI_IC_design/_bench6_v100_r1"
+    family = Path.home() / "AI_IC_design" / "_bench6_v100_r1"
+    assert D.family_of(str(family / "ibex" / "phase2" / "x.json"),
+                       "ibex") == str(family)
 
 
 def test_the_shallowest_occurrence_of_the_name_wins():

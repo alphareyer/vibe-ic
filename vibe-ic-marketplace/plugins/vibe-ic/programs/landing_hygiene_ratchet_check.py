@@ -106,6 +106,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from _atomic_artefact import write_text
+
 GATE = "landing_hygiene_ratchet_check"
 
 # ── THE REGISTRY ──────────────────────────────────────────────────────────
@@ -300,7 +302,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                       f"(base {sum(b.values())} -> candidate {sum(c.values())})")
 
         if args.json:
-            args.json.write_text(json.dumps(record, indent=2, sort_keys=True))
+            write_text(args.json, json.dumps(record, indent=2, sort_keys=True))
         return 1 if introduced_any else 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

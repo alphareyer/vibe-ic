@@ -500,24 +500,51 @@ def test_the_producer_grades_the_transient_of_every_run_it_makes():
     assert args[2:] == ["rail_meas_nodes_requested(tb_text)"], args
 
 
-def test_a_transient_excursion_is_a_refusal_and_not_an_emitted_netlist():
-    """The same tier as a non-convergence and as a DC-op excursion: a run that
-    took the block's own nodes outside its own rails has not verified the
-    netlist, and every measurement the same log reports was taken across that
-    excursion. Graded over the AST of `emit_for_block`, so the refusal cannot
-    be a docstring."""
-    src = inspect.getsource(A3.emit_for_block)
-    assert "TRAN_NODE_OUTSIDE_RAIL" in src, (
-        "`emit_for_block` never reads the transient verdict, so a deck whose "
-        "transient left the rails is still emitted")
-    tree = ast.parse(src.lstrip())
-    guarded = [n for n in ast.walk(tree)
-               if isinstance(n, ast.If)
-               and "TRAN_NODE_OUTSIDE_RAIL" in ast.unparse(n.test)]
-    assert len(guarded) == 1, ast.unparse(tree)[:400]
-    body = ast.unparse(guarded[0])
-    assert "write_gap" in body and "NETLIST_TRAN_OUTSIDE_RAILS" in body, body
-    assert "emitted=False" in body, body
+def _drive_rail_verdict(tmp_path, monkeypatch, status):
+    """Drive the public A3 entry, with only the simulator result supplied.
+
+    The public entry gained an environment-refusal wrapper; its implementation
+    moved without removing the rail refusal. Inspecting that wrapper's source
+    could no longer distinguish a working refusal from its absence.
+    """
+    entry = block("rail_probe", "ldo", specs=SPECS)
+    project = make_project(tmp_path, [entry])
+    stage_custom_pdk(project, PDK)
+    run_prog(A1, project)
+    run_prog(A2, project, "--pdk", PDK)
+    calls = []
+
+    def simulation(*args, **kwargs):
+        calls.append(args)
+        return {"simulation_verified": status == "CONVERGED",
+                "simulation_status": status,
+                "tran_rail_excursions": [["internal_node", 4.0]],
+                "measurements": {}, "ngspice_rc": 0}
+
+    monkeypatch.setattr(A3, "verify_with_ngspice", simulation)
+    result = A3.emit_for_block(project, entry, PDK, "unused-simulator", True)
+    assert len(calls) == 1, (result, "the rail verdict was never consumed")
+    return project, result
+
+
+def test_a_transient_excursion_is_a_refusal_and_not_an_emitted_netlist(
+        tmp_path, monkeypatch):
+    project, result = _drive_rail_verdict(
+        tmp_path, monkeypatch, "TRAN_NODE_OUTSIDE_RAIL")
+    assert result["action"] == "gap", result
+    assert result["status"] == "NETLIST_TRAN_OUTSIDE_RAILS", result
+    assert result["emitted"] is False, result
+    assert result["tran_rail_excursions"] == [["internal_node", 4.0]]
+    gap = json.loads((project / result["gap_path"]).read_text())
+    assert gap["status"] == "NETLIST_TRAN_OUTSIDE_RAILS", gap
+    assert not (project / "phase3/analog/rail_probe/rail_probe.sp").exists()
+
+
+def test_a_converged_simulation_still_emits_through_the_public_entry(
+        tmp_path, monkeypatch):
+    project, result = _drive_rail_verdict(tmp_path, monkeypatch, "CONVERGED")
+    assert result["emitted"] is True, result
+    assert (project / "phase3/analog/rail_probe/rail_probe.sp").is_file()
 
 
 def test_the_two_rail_invariants_stay_two_answers():

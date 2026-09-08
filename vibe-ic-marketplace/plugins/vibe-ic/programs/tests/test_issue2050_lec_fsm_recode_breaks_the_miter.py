@@ -59,7 +59,10 @@ import ast
 import json
 import re
 import sys
+import subprocess
 from pathlib import Path
+
+import pytest
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
 if str(_PROGRAMS) not in sys.path:
@@ -290,6 +293,67 @@ def test_the_resolver_never_guesses(tmp_path):
         str(tmp_path / "does_not_exist.v")) is None
 
 
+@pytest.mark.parametrize("invert_output", [False, True])
+def test_empty_encoding_table_preserves_scalarized_register_proofs(
+        tmp_path, invert_output):
+    """A synth with no FSM writes an empty encfile. A later transform can
+    scalarize a bus; its named points must still be proved, and a changed
+    output must remain unproven. Exercise the resolver, recipe and real SAT.
+    """
+    rtl = tmp_path / "delay.v"
+    rtl.write_text("""module delay(input clk, input d, output o);
+reg [31:0] stages;
+always @(posedge clk) stages <= {stages[30:0], d};
+assign o = stages[31];
+endmodule
+""")
+    enc = tmp_path / lec_run.FSM_ENCFILE_NAME
+    net = tmp_path / "netlist.v"
+    synth = tmp_path / "synth.ys"
+    synth.write_text(f"read_verilog {rtl}\nsynth -top delay -encfile {enc}\n"
+                     f"splitnets -ports\nwrite_verilog -noattr -noexpr {net}\n")
+    p = subprocess.run(["yosys", "-s", str(synth)], capture_output=True, text=True)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert enc.read_bytes() == b"", "fixture must exercise synth's empty table"
+    if invert_output:
+        text = net.read_text()
+        assert "assign o =" in text
+        net.write_text(text.replace("assign o =", "assign o = ~", 1))
+    script = lec_run.build_equiv_script(
+        [str(rtl)], str(net), "delay", None, gate_is_generic=True,
+        fsm_encfile=lec_run.fsm_encfile_beside_netlist(str(net)),
+        ladder_rungs=3)
+    ys = tmp_path / "equiv.ys"
+    ys.write_text(script + "equiv_status -assert\n")
+    p = subprocess.run(["yosys", "-s", str(ys)], capture_output=True, text=True)
+    raw = p.stdout + p.stderr
+    report = lec_run.build_report(lec_run.parse_equiv_output(raw),
+                                  "delay", str(net), None)
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "lec.json").write_text(json.dumps(report))
+    (tmp_path / "reports" / "lec.rpt").write_text(raw)
+    if invert_output:
+        assert p.returncode == 1, raw
+        assert report["unproven_points"] > 0, report
+        assert gate.audit(tmp_path).passed is False
+    else:
+        assert p.returncode == 0, raw
+        assert report["compared_points"] >= 32, report
+        assert report["unproven_points"] == 0, report
+        assert gate.audit(tmp_path).passed is True
+
+
+def test_empty_synth_map_preserves_scalar_register_alignment(tmp_path):
+    net = tmp_path / "netlist.v"
+    net.write_text("module t(); endmodule\n")
+    (tmp_path / lec_run.FSM_ENCFILE_NAME).write_text("")
+    enc = lec_run.fsm_encfile_beside_netlist(str(net))
+    assert enc is None, "no FSM was recoded, so bit matching must remain enabled"
+    script = lec_run.build_equiv_script(
+        ["rtl.v"], str(net), "t", None, fsm_encfile=enc)
+    assert script.count("splitnets -ports") == 2
+
+
 def _functions_owning(src: str, marker: str) -> set:
     """The INNERMOST function that owns each occurrence of `marker`, by NAME.
 
@@ -408,3 +472,147 @@ def test_the_recipe_funnel_is_actually_wired_to_the_resolver():
     assert len(value.args) == 1 and isinstance(value.args[0], ast.Name), \
         ast.dump(value)
     assert value.args[0].id == "gate_abs", value.args[0].id
+
+
+def test_encoding_names_preserve_all_hierarchical_state_words(tmp_path):
+    enc = tmp_path / "enc"
+    enc.write_text(".fsm top state_q\n.map 00 --1\n"
+                   ".fsm child pipe.state_q\n.map 01 -1-\n")
+    names = lec_run.fsm_signal_names(str(enc))
+    assert names == ["pipe.state_q", "state_q"]
+    script = _script(fsm_encfile=str(enc), fsm_preserve_signals=names)
+    assert script.count("w:state_q %d w:*.state_q %d") == 2
+    assert script.count("w:pipe.state_q %d w:*.pipe.state_q %d") == 2
+    assert script.count("select *\n") == 2
+
+
+@pytest.mark.parametrize("content", [
+    ".fsm t state[0]\n.map 00 --1\n", ".map 00 --1\n",
+    ".fsm t state\n.unrecognized command\n",
+])
+def test_unknown_encoding_selection_retains_width_guard(tmp_path, content):
+    enc = tmp_path / "enc"
+    enc.write_text(content)
+    names = lec_run.fsm_signal_names(str(enc))
+    assert names is None
+    assert "splitnets" not in _script(
+        fsm_encfile=str(enc), fsm_preserve_signals=names)
+
+
+def test_empty_encoding_is_observed_not_assumed(tmp_path):
+    enc = tmp_path / "enc"
+    assert lec_run.fsm_signal_names(str(enc)) is None
+    enc.write_text("# no FSM was extracted\n")
+    assert lec_run.fsm_signal_names(str(enc)) == []
+    assert _script(fsm_encfile=str(enc), fsm_preserve_signals=[]).count(
+        "splitnets -ports w:*\n") == 2
+
+
+@pytest.mark.parametrize("broken_reset", [False, True])
+def test_scalar_data_and_recoded_fsm_real_yosys(tmp_path, broken_reset):
+    """A real scalarized synthesis DUT, its full state map, and reset mutation.
+
+    Candidate must recover data anchors without pairing binary FSM bits with
+    one-hot bits. The reset mutant must remain unproven on the same recipe.
+    """
+    import shutil
+    import subprocess
+    yosys = shutil.which("yosys")
+    if not yosys:
+        pytest.skip("real Yosys is unavailable")
+    rtl = """module toy(input clk, input rst_n, input go, input [3:0] d,
+                       output [3:0] q);
+    reg [1:0] state;
+    (* keep *) reg [3:0] data_q;
+    always @(posedge clk) begin
+      if (!rst_n) begin state <= 0; data_q <= 0; end
+      else begin
+        case (state)
+          0: if (go) state <= 1;
+          1: state <= 2;
+          2: state <= 3;
+          3: state <= 0;
+        endcase
+        if (state == 1) data_q <= d;
+      end
+    end
+    assign q = data_q ^ {4{state == 2}};
+    endmodule
+    """
+    gold = tmp_path / "gold.v"
+    gate_rtl = tmp_path / "gate_rtl.v"
+    gate = tmp_path / "gate.v"
+    enc = tmp_path / "enc"
+    wrapper = ("module testtop(input clk, input rst_n, input go, input [3:0] d, "
+               "output [3:0] q); toy inner(clk, rst_n, go, d, q); endmodule\n")
+    gold.write_text(rtl + wrapper)
+    gate_rtl.write_text(rtl.replace("if (!rst_n)", "if (rst_n)")
+                        if broken_reset else rtl)
+
+    def run(script, name):
+        p = tmp_path / (name + ".ys")
+        p.write_text(script)
+        res = subprocess.run([yosys, "-Q", "-T", "-s", str(p)],
+                             capture_output=True, text=True, timeout=60)
+        (tmp_path / (name + ".log")).write_text(res.stdout + res.stderr)
+        assert res.returncode == 0, res.stdout[-1500:] + res.stderr
+        return res.stdout
+
+    run(f"read_verilog {gate_rtl}\nsynth -top toy -encfile {enc}\n"
+        f"splitnets\nwrite_verilog -noexpr {gate}\n", "synth")
+    gate.write_text(gate.read_text() + wrapper)
+    names = lec_run.fsm_signal_names(str(enc))
+    assert names == ["state"], enc.read_text()
+    kwargs = dict(gold_files=[str(gold)], gate_netlist=str(gate), top="testtop",
+                  liberty=None, gate_is_generic=True, fsm_encfile=str(enc),
+                  ladder_rungs=2)
+    before = run(lec_run.build_equiv_script(**kwargs), "baseline")
+    flat_enc = tmp_path / "flat.enc"
+    flat_enc.write_text(enc.read_text().replace(".fsm toy state", ".fsm toy inner.state"))
+    import hashlib
+    width = len(next(line.split()[2] for line in enc.read_text().splitlines()
+                     if line.startswith(".map ")))
+    restore = {"encoding_path": str(flat_enc),
+               "encoding_sha256": hashlib.sha256(flat_enc.read_bytes()).hexdigest(),
+               "aliases": {"inner.state": [f"inner.state[{i}]" for i in range(width)]}}
+    after = run(lec_run.build_equiv_script(
+        **kwargs, fsm_preserve_signals=names, scan_fsm_restore=restore), "candidate")
+    b = lec_run.parse_equiv_output(before)
+    c = lec_run.parse_equiv_output(after)
+    assert c["total"] > b["total"], (b, c)
+    assert "Presumably equivalent wires: inner.state[" not in after
+    assert "Presumably equivalent wires: inner.data_q[" in after
+    if broken_reset:
+        assert not c["equivalent"] and c["unproven"] > 0, c
+    else:
+        assert c["equivalent"] and c["unproven"] == 0, c
+
+
+def test_scan_mapping_follows_only_an_identified_flop_output(tmp_path):
+    enc = tmp_path / "enc"
+    enc.write_text(".fsm top state\n.map 0 -1\n.map 1 1-\n")
+    pre = tmp_path / "pre.v"
+    pre.write_text("module top();\n"
+                   " FF f0 (.CK(clk), .D(d), .Q(state[0]));\n"
+                   " FF f1 (.CK(clk), .D(d), .Q(state[1]));\nendmodule\n")
+    gate = tmp_path / "scan.v"
+    gate.write_text("module top();\n"
+                    " wire \\core.state[0] ;\n wire \\scan_tail ;\n"
+                    " FF \\core.f0 (.CK(clk), .D(muxed), .Q(\\core.state[0] ));\n"
+                    " FF \\core.f1 (.CK(clk), .D(muxed), .Q(\\scan_tail ));\n"
+                    "endmodule\n")
+    lib = ('cell(FF) { pin(D) { direction : input; } '
+           'pin(Q) { direction : output; function : "IQ"; } }')
+    args = dict(encfile=str(enc), gate_netlist=str(gate), top="top",
+                scan_mode={"internal_prefix": "core"}, pre_scan_netlist=str(pre),
+                liberty_text=lib, dff_cells=["FF"])
+    found = lec_run.scan_fsm_mapping(**args)
+    assert found is not None
+    assert found["aliases"] == {"_LECWRAP.core.state": [
+        "_LECWRAP.core.state[0]", "_LECWRAP.scan_tail"]}
+    assert ".fsm top _LECWRAP.core.state\n" in found["encoding_text"]
+    # Input muxes must never become a claimed state alias.
+    assert lec_run.scan_fsm_mapping(**dict(args, liberty_text=lib.replace(
+        "direction : output", "direction : input"))) is None
+    assert lec_run.scan_fsm_mapping(**dict(args, dff_cells=[])) is None
+    assert lec_run.scan_fsm_mapping(**dict(args, scan_mode={})) is None
