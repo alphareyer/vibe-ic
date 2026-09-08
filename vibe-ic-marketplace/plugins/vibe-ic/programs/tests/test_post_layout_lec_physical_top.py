@@ -202,8 +202,9 @@ END DESIGN
             tmp_path / "reports/phase3", L)
 
 
+@pytest.mark.parametrize("supply_encoding", ["regular", "special", "wildcard"])
 def test_signal_tie_path_restores_only_producer_and_def_proven_supply_pins(
-        tmp_path):
+        tmp_path, supply_encoding):
     gate = tmp_path / "phase3/stage3/pnr/core_pnr.v"
     gate.parent.mkdir(parents=True, exist_ok=True)
     gate.write_text("""module chip_top(inout VDD, inout VSS, input a, output y);
@@ -241,6 +242,22 @@ END DESIGN
                 "DVDD": "VDD", "DVSS": "VSS", "VDD": "VDD"}},
         },
     }))
+    if supply_encoding != "regular":
+        text = final_def.read_text().replace("NETS 3 ;", "NETS 1 ;")
+        text = text.replace("- VDD (", "END NETS\nSPECIALNETS 2 ;\n- VDD (")
+        text = text.replace("END NETS\nEND DESIGN", "END SPECIALNETS\nEND DESIGN")
+        text = text.replace("+ USE POWER", "+ USE POWER + ROUTED Metal3 100 ( 0 0 ) ( 100 0 )")
+        text = text.replace("+ USE GROUND", "+ USE GROUND + ROUTED Metal3 100 ( 0 0 ) ( 100 0 )")
+        if supply_encoding == "wildcard":
+            text = text.replace("DESIGN chip_top ;", "DESIGN chip_top ;\nCOMPONENTS 2 ;\n- u_vdd SUPPLY ;\n- u_vss SUPPLY ;\nEND COMPONENTS")
+            text = text.replace("( u_vdd DVDD ) ( u_vss DVDD )", "( * DVDD )")
+            text = text.replace("( u_vdd DVSS )", "( * DVSS )").replace("( u_vss DVSS )", "")
+            # Native DEF routing reuses coordinates with '*'. These are not
+            # wildcard pin memberships, even on two rails at one ordinate.
+            text = text.replace("( 0 0 ) ( 100 0 )",
+                                "( 0 0 ) ( * 100 ) ( 100 * ) ( * * )")
+        final_def.write_text(text)
+    valid_def = final_def.read_text()
     out, provenance, constants = R._lec_restore_aux_connections(
         tmp_path, "chip_top", gate, final_def,
         tmp_path / "reports/phase3", L)
@@ -258,6 +275,21 @@ END DESIGN
             tmp_path, "chip_top", gate, final_def,
             tmp_path / "reports/phase3", L)
 
+    if supply_encoding == "wildcard":
+        mutations = {
+            "wrong_rail": valid_def.replace("( * DVDD )", "").replace("( * DVSS )", "( * DVSS ) ( * DVDD )"),
+            "contradictory": valid_def.replace("( * DVSS )", "( * DVSS ) ( u_vdd DVDD )"),
+            "conflicting_wildcard": valid_def.replace("( * DVSS )", "( * DVSS ) ( * DVDD )"),
+            "absent_component": valid_def.replace("- u_vdd SUPPLY ;", "- absent SUPPLY ;"),
+            "missing_pin": valid_def.replace("( * DVDD )", "( * BAD )"),
+        }
+        for label, bad in mutations.items():
+            final_def.write_text(bad)
+            with pytest.raises(RuntimeError):
+                R._lec_restore_aux_connections(
+                    tmp_path, "chip_top", gate, final_def,
+                    tmp_path / "reports/phase3" / label, L)
+
 @pytest.mark.parametrize("functional", [True, False])
 def test_gold_supply_strip_is_confined_to_gold_half(functional):
     ys = L.build_yosys_equiv_script(
@@ -268,3 +300,33 @@ def test_gold_supply_strip_is_confined_to_gold_half(functional):
     assert "delete chip_top/w:VSS" in gold_half
     assert "delete chip_top/w:VDD" not in gate_half
     assert "delete chip_top/w:VSS" not in gate_half
+
+
+@pytest.mark.parametrize("functional", [True, False])
+def test_supply_constants_survive_prep_pruning_with_native_yosys(tmp_path, functional):
+    import shutil
+    import subprocess
+    yosys = shutil.which("yosys")
+    if not yosys:
+        pytest.skip("native Yosys required")
+    lib = tmp_path / "empty.lib"
+    lib.write_text("library(test) {}\n")
+    gold, gate = tmp_path / "gold.v", tmp_path / "gate.v"
+    gold.write_text("module chip(input a, input VDD, output y); assign y=a; endmodule\n")
+    gate.write_text("module chip(input a, output y); wire VDD; assign y=a; endmodule\n")
+    script = tmp_path / "proof.ys"
+    def run():
+        script.write_text(L.build_yosys_equiv_script(
+            str(gold), str(gate), str(lib), "chip", functional_lib=functional,
+            constant_gold_wires={"VDD": 1}, constant_gate_wires={"VDD": 1},
+            strip_gold_ports=["VDD"]) + "\nequiv_status -assert\n")
+        return subprocess.run([yosys, "-s", str(script)], capture_output=True, text=True)
+    result = run()
+    (tmp_path / "positive.log").write_text(result.stdout + result.stderr)
+    assert result.returncode == 0, result.stdout[-1500:] + result.stderr
+    assert "Equivalence successfully proven" in result.stdout
+    gate.write_text(gate.read_text().replace("assign y=a", "assign y=~a"))
+    mutant = run()
+    (tmp_path / "mutant.log").write_text(mutant.stdout + mutant.stderr)
+    assert mutant.returncode != 0
+    assert "unproven" in mutant.stdout.lower() + mutant.stderr.lower()

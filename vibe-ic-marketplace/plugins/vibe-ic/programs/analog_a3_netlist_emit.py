@@ -2008,11 +2008,11 @@ def verify_with_ngspice(container: str, block: str, sp_text: str,
         # status -- and neither may fall through to the log reader below,
         # which would parse an empty log and answer DID_NOT_CONVERGE about a
         # simulator that was never started.
-        if cp.returncode == _ce.IMAGE_MISMATCH_RC:
-            return container_refusal_result(
-                (cp.stderr or "").strip() or
-                _pin.container_matches_pin(container) or
-                f"container `{container}` is not the pinned image")
+        # 125 alone is also a Docker/tool exit; only the shared rc-plus-mark
+        # identity establishes that the image was refused.
+        refusal = _ce.image_refusal(cp)
+        if refusal:
+            return container_refusal_result(refusal)
         out = (cp.stdout or "") + (cp.stderr or "")
         # A RUN THAT WAS STOPPED IS NOT A RUN THAT ANSWERED. `_container_exec`
         # returns 124 when a deadline fires -- which cannot happen here, since
@@ -2032,6 +2032,11 @@ def verify_with_ngspice(container: str, block: str, sp_text: str,
                 "anyway (rc 124). Something outside the flow ended the "
                 "simulator: this is a run that was STOPPED, not a measurement "
                 "that came back empty")
+        elif cp.returncode == _ce.IMAGE_MISMATCH_RC:
+            not_a_verdict = (
+                "SIMULATION_INVOCATION_FAILED",
+                "the container command returned rc 125 without an image-refusal "
+                "marker; this supplies no verified simulation measurement")
         elif cp.returncode == _ce.TIMEOUT_UNAVAILABLE_RC:
             # 127 IS STILL NOT A VERDICT, and since the supervised conversion
             # (vibe-ic#2117) it no longer means what `describe_result` says it

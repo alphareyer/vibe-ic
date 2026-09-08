@@ -49127,12 +49127,17 @@ def _lec_physical_top_gold(project: Path, logical_top: str,
     return combined, provenance
 
 
-def _def_specialnet_iterm_map(def_text: str) -> Dict[Tuple[str, str], str]:
+def _def_specialnet_iterm_map(
+        def_text: str, *, expand_wildcards: bool = False,
+        ) -> Dict[Tuple[str, str], str]:
     """Return exact ``(instance, pin) -> special-net`` connectivity.
 
     Only terminal tuples in the final DEF ``SPECIALNETS`` section are
     authoritative here.  Route coordinate tuples are numeric and discarded;
     top-level ``PIN`` and wildcard ``*`` tuples are not instance terminals.
+    With ``expand_wildcards``, OpenROAD's ``( * pin )`` serialization is
+    expanded only over instances actually declared by this DEF's COMPONENTS.
+    This describes logical terminal membership, not geometric PG signoff.
     A terminal named on two rails is contradictory and refuses instead of
     allowing the later LEC normalization to choose one.
     """
@@ -49149,22 +49154,44 @@ def _def_specialnet_iterm_map(def_text: str) -> Dict[Tuple[str, str], str]:
         section, re.MULTILINE | re.DOTALL))
     if not entries:
         raise RuntimeError("final DEF SPECIALNETS section has no net entries")
+    components: Set[str] = set()
+    if expand_wildcards:
+        comp_section = re.search(
+            r"^\s*COMPONENTS\b[^;]*;(.*?)^\s*END\s+COMPONENTS\b",
+            def_text, re.MULTILINE | re.DOTALL)
+        if comp_section:
+            components = set(re.findall(
+                r"^\s*-\s+(\S+)\s+\S+", comp_section.group(1), re.MULTILINE))
     out: Dict[Tuple[str, str], str] = {}
     for entry in entries:
         net = entry.group("net")
+        # DEF connections form the leading tuple list, before net options.
+        # ROUTED/FIXED/COVER paths can also contain (* number) or (* *),
+        # which are coordinate reuse, never wildcard terminal membership.
+        terminals = re.match(r"(?:\s*\([^)]*\))*", entry.group("body")).group()
         for inst, pin in re.findall(r"\(\s+(\S+)\s+(\S+)\s*\)",
-                                    entry.group("body")):
-            if inst.upper() == "PIN" or inst == "*":
+                                    terminals):
+            if inst.upper() == "PIN":
                 continue
+            if inst == "*":
+                if not expand_wildcards:
+                    continue
+                if not components:
+                    raise RuntimeError(
+                        "final DEF wildcard SPECIALNET has no COMPONENTS evidence")
+                instances = sorted(components)
+            else:
+                instances = [inst]
             # Routed coordinates and mask tuples are numbers, not iterms.
             if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", inst):
                 continue
-            key = (inst, pin)
-            if key in out and out[key] != net:
-                raise RuntimeError(
-                    f"final DEF assigns {inst}/{pin} to both "
-                    f"{out[key]!r} and {net!r}")
-            out[key] = net
+            for instance in instances:
+                key = (instance, pin)
+                if key in out and out[key] != net:
+                    raise RuntimeError(
+                        f"final DEF assigns {instance}/{pin} to both "
+                        f"{out[key]!r} and {net!r}")
+                out[key] = net
     return out
 
 
@@ -49279,8 +49306,10 @@ def _lec_restore_aux_connections(project: Path, physical_top: str,
                 f"gate netlist: {stats}")
         # OpenROAD also omits POWER/GROUND pin connections from its signal
         # Verilog writer.  Restore only the supply-pad pins named by the same
-        # producer and independently observed on the exact regular DEF nets.
-        # (The conductor itself remains SPECIALNET geometry; this is a
+        # producer and independently observed in the final DEF's NETS or
+        # SPECIALNETS. OpenROAD may serialize shared PG pins as ( * pin ).
+        # Reject contradictory regular/special assignments; neither wins by
+        # precedence. (The conductor remains SPECIALNET geometry; this is a
         # proof-only serialization repair, never a DEF/GDS mutation.)
         pad_instances = rec.get("pad_instances")
         supply_connections: List[Tuple[str, str, str]] = []
@@ -49289,6 +49318,17 @@ def _lec_restore_aux_connections(project: Path, physical_top: str,
         # that actually declares a supply pad enters the restoration below.
         if not isinstance(pad_instances, dict):
             pad_instances = {}
+        supply_observed = dict(observed)
+        if any(isinstance(item, dict) and item.get("is_supply_pad")
+               for item in pad_instances.values()) and re.search(
+                   r"^\s*SPECIALNETS\b", def_text, re.MULTILINE):
+            special = _def_specialnet_iterm_map(def_text, expand_wildcards=True)
+            for endpoint, net in special.items():
+                if endpoint in supply_observed and supply_observed[endpoint] != net:
+                    raise RuntimeError(
+                        f"final DEF assigns {endpoint[0]}/{endpoint[1]} to both "
+                        f"{supply_observed[endpoint]!r} and {net!r}")
+                supply_observed[endpoint] = net
         for supply_inst, item in sorted(pad_instances.items()):
             if not isinstance(item, dict) or not item.get("is_supply_pad"):
                 continue
@@ -49302,7 +49342,7 @@ def _lec_restore_aux_connections(project: Path, physical_top: str,
                     raise RuntimeError(
                         f"producer supply connection is incomplete: "
                         f"{supply_inst}/{supply_pin}/{supply_net}")
-                actual = observed.get((supply_inst, supply_pin))
+                actual = supply_observed.get((supply_inst, supply_pin))
                 if actual != supply_net:
                     raise RuntimeError(
                         f"final DEF does not prove supply pad "

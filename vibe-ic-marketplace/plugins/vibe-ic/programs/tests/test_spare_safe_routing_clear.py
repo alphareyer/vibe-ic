@@ -436,3 +436,42 @@ def test_a_terminal_whose_shapes_cannot_be_read_is_not_acquitted(tmp_path):
     assert "n_probe" in out["SHIP_UNROUTED_NETS"], out
     assert out["SHIP_ABUTTED_NETS"].startswith("0"), out
     assert out["SHIP_UNROUTED_SHAPE_BLIND"] == "1", out
+
+
+@_needs_tcl
+@pytest.mark.parametrize("case,expected_status,expected_detail", [
+    ("abutted", 0, ""),
+    ("apart", 1, "PAD_CHECK_INCOMPLETE: 1"),
+    ("unreadable_terminal", 1, "PAD_CHECK_INCOMPLETE: 1"),
+    ("unreadable_database", 1, "PAD_CHECK_UNROUTED_CHECK_FAILED:"),
+])
+def test_pad_recovery_requires_proven_connectivity(
+        tmp_path, case, expected_status, expected_detail):
+    """Execute the pad producer's strict check using the existing ODB seam.
+
+    This is Tcl contract coverage, not native routing or physical acceptance.
+    A connected geometry must be accepted; a hole or unreadable database must
+    stop the repair before it can report completion.
+    """
+    import pad_signal_route_repair as pad
+
+    left = [("route_layer", 0, 0, 100, 100)]
+    right = [("route_layer", 200, 0, 300, 100)] if case == "apart" else left
+    setup = _geom_stub(left, right, b_readable=case != "unreadable_terminal")
+    if case == "unreadable_database":
+        setup += '\nproc ord::get_db_block {} {error "database unavailable"}\n'
+    script = tmp_path / "pad_integrity.tcl"
+    script.write_text(setup + "\nset status [catch {\n"
+                      + pad.strict_integrity_tcl("PAD_CHECK")
+                      + '} detail]\nputs "PAD_TEST_RESULT:$status:$detail"\n')
+    run = _pr.run([_TCLSH, str(script)], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    outcomes = [line for line in run.stdout.splitlines()
+                if line.startswith("PAD_TEST_RESULT:")]
+    assert len(outcomes) == 1, run.stdout
+    _, status, detail = outcomes[0].split(":", 2)
+    assert int(status) == expected_status, (run.stdout, run.stderr)
+    assert detail.startswith(expected_detail), detail
+    if expected_status == 0:
+        assert "PAD_CHECK_UNROUTED_NETS: 0" in run.stdout
+        assert "PAD_CHECK_ABUTTED_NETS: 1" in run.stdout

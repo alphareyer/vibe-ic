@@ -511,9 +511,9 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
     def _constant_block(values: Optional[Dict[str, int]]) -> str:
         lines: List[str] = []
         if values:
-            # `prep` leaves the whole design selected.  `connect -set VDD`
-            # against that selection is ambiguous when library modules also
-            # expose a VDD wire.  Scope the producer-owned rail constants to
+            # Apply these before prep: it can remove an unobservable internal
+            # supply wire from a signal-only routed netlist. Library modules
+            # may also expose the rail, so scope producer-owned constants to
             # the exact comparison top, then restore the full selection for
             # the subsequent flatten/optimization passes.
             lines.append(f"select -module {top}")
@@ -576,8 +576,8 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
                        renames: str = "") -> str:
             return (f"{_read_liberties(True)}"
                     f"{bb_block}{read_v}\n"
-                    f"prep -top {top}\n"
                     f"{_constant_block(constants)}"
+                    f"prep -top {top}\n"
                     f"{extra_strip}"
                     f"tribuf -formal\n"
                     f"flatten\n"
@@ -617,14 +617,12 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
     return f"""# Vibe-IC post-layout LEC — gold(reference) vs gate(routed) structural equiv.
 {_read_liberties(False).rstrip()}
 {bb_block}read_verilog -sv {gold_v}
-prep -top {top}
-{_constant_block(constant_gold_wires)}
+{_constant_block(constant_gold_wires)}prep -top {top}
 {gold_strip_block}{splitnets}design -stash gold
 
 {_read_liberties(False).rstrip()}
 {bb_block}read_verilog -sv {gate_v}
-prep -top {top}
-{_constant_block(constant_gate_wires)}
+{_constant_block(constant_gate_wires)}prep -top {top}
 {gate_strip_block}{_rename_block(gate_renames, top)}{splitnets}design -stash gate
 
 design -copy-from gold -as gold {top}
