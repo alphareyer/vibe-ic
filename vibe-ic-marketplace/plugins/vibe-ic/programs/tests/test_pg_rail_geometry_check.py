@@ -469,3 +469,38 @@ def test_the_declared_intent_matches_the_wiring():
                     _PROGRAMS)
     assert [c for c in rep["contradictions"]
             if c["gate"].startswith("pg_rail_geometry_check")] == []
+
+
+@pytest.mark.parametrize('use', ['SIGNAL', 'CLOCK', 'TIEOFF', 'ANALOG', 'SCAN', 'RESET'])
+def test_explicit_non_supply_specialnet_is_not_a_power_rail(tmp_path, use):
+    """SPECIALNETS contains ordinary routed-signal port aliases too.
+
+    The failed field DEF has POWER/GROUND stripes beside SIGNAL/CLOCK port
+    entries; USE, not membership of SPECIALNETS, owns the supply meaning.
+    """
+    body = _ROUTED_A + _ROUTED_G + f'    - port_alias ( PIN port_alias ) + USE {use} ;\n'
+    result = PG.check(_project(tmp_path, body))
+    assert result['verdict'] == 'PASS'
+    assert result['rails_total'] == 2
+    assert result['specialnets_total'] == 3
+    assert result['non_supply_specialnets'] == [{'name': 'port_alias', 'use': use}]
+
+
+@pytest.mark.parametrize('tail', [
+    '+ USE POWER', '+ USE GROUND', '', '+ USE UNKNOWN',
+    '+ USE POWER + USE SIGNAL', '+ PROPERTY note "+ USE SIGNAL"',
+    '# + USE SIGNAL\n',
+])
+def test_non_supply_classification_does_not_hide_unrouted_supply(tmp_path, tail):
+    body = _ROUTED_A + _ROUTED_G + f'    - undecided ( PIN x ) {tail} ;\n'
+    result = PG.check(_project(tmp_path, body))
+    assert result['verdict'] == 'FAIL'
+    assert [x['rail'] for x in result['findings']] == ['undecided']
+
+
+def test_use_clause_can_span_lines(tmp_path):
+    body = _ROUTED_A + '    - clock_alias ( PIN c )\n + USE\n CLOCK ;\n'
+    result = PG.check(_project(tmp_path, body))
+    assert result['verdict'] == 'PASS'
+    assert result['rails_total'] == 1
+    assert result['non_supply_specialnets'] == [{'name': 'clock_alias', 'use': 'CLOCK'}]

@@ -39,6 +39,10 @@ current reach this pin"*, and no gate in the flow asked.
 WHAT THIS GATE PROVES, EXACTLY
 ------------------------------
 It answers ONE question: **does this rail carry at least one geometry clause?**
+SPECIALNETS can also contain port aliases explicitly typed SIGNAL or CLOCK.
+Those are not supply rails. The DEF USE clause owns that distinction; absent,
+unknown or conflicting USE values remain checked conservatively. Every such
+classification is reported alongside the power-rail denominator.
 That is a floor, not a connectivity proof. A single 1-DBU island stub parked in
 a die corner, touching no pin and no stripe, satisfies it and PASSes. This gate
 therefore does NOT establish that current can reach any pin — it establishes
@@ -228,6 +232,19 @@ class Rail:
     def empty(self) -> bool:
         return self.geom_lines == 0
 
+    @property
+    def non_supply_use(self) -> str | None:
+        # raw is already stripped of comments and quoted-property bodies.
+        # Join the whole entry: a USE clause can span lines. A conflicting
+        # declaration must not let SIGNAL override POWER and hide a supply.
+        toks = _tokens(" ".join(self.raw))
+        uses = {toks[i + 2] for i in range(len(toks) - 2)
+                if toks[i:i + 2] == ["+", "USE"]}
+        non_supply = {"SIGNAL", "CLOCK", "TIEOFF", "ANALOG", "SCAN", "RESET"}
+        if len(uses) == 1 and uses <= non_supply:
+            return next(iter(uses))
+        return None
+
 
 def parse_specialnets(def_text: str) -> tuple[list, bool, bool]:
     """Return ``(rails, section_present, truncated)``.
@@ -405,6 +422,18 @@ def check(project: Path, extra_disclosed: set | None = None) -> dict:
         return {"gate": GATE, "verdict": "SKIP", "def": str(def_path),
                 "reason": "SPECIALNETS section is empty"}
 
+    population = {
+        "specialnets_total": len(rails),
+        "non_supply_specialnets": [
+            {"name": r.name, "use": r.non_supply_use}
+            for r in rails if r.non_supply_use is not None],
+    }
+    rails = [r for r in rails if r.non_supply_use is None]
+    if not rails:
+        return {"gate": GATE, "verdict": "SKIP", "def": str(def_path),
+                "reason": "SPECIALNETS declares only explicit non-supply nets",
+                "rails_total": 0, **population}
+
     disc = disclosures(project)
     for name in (extra_disclosed or set()):
         disc.setdefault(name, {"source": "cli", "approver": None, "reason": None})
@@ -437,6 +466,7 @@ def check(project: Path, extra_disclosed: set | None = None) -> dict:
                     f"via `{DISCLOSURE_FIELD}` (reason + approver required)."),
             })
         return {"gate": GATE, "verdict": "FAIL", "def": str(def_path),
+                **population,
                 "rails_total": len(rails), "rails_routed": len(routed),
                 "rails_empty_undisclosed": len(undisclosed),
                 "findings": findings, "rails": detail}
@@ -451,6 +481,7 @@ def check(project: Path, extra_disclosed: set | None = None) -> dict:
                   f"{len(empty)} empty rail(s) are DISCLOSED as delivered at "
                   f"integration: {who}")
     return {"gate": GATE, "verdict": "PASS", "def": str(def_path),
+            **population,
             "rails_total": len(rails), "rails_routed": len(routed),
             "rails_empty_disclosed": len(empty), "reason": reason,
             "rails": detail}

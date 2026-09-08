@@ -2619,7 +2619,14 @@ def parse_equiv_output(text: str, *,
             # kill it was. A run that was STOPPED gets the stopped wording; a
             # run that genuinely walked the induction ladder to exhaustion keeps
             # the capability-gap wording, because for that run it is TRUE.
-            if _execution_stopped:
+            if ladder_complete is False and not _execution_stopped:
+                verdict_explanation = (
+                    f"{proven}/{total} proven, {unproven} unproven — "
+                    "the proof ladder did not finish. A completed earlier "
+                    "rung is partial evidence, not an exhausted engine "
+                    "ladder or proof of a mismatch. No counterexample was "
+                    "recorded. Equivalence remains INCONCLUSIVE.")
+            elif _execution_stopped:
                 verdict_explanation = (
                     f"{proven if proven is not None else 0}/"
                     f"{total if total is not None else '?'} proven, "
@@ -3834,7 +3841,8 @@ class StepBudget:
 
 
 def annotate_step_budget(report: Dict, budget: "StepBudget", *,
-                         stopped: Optional[bool] = None) -> Dict:
+                         stopped: Optional[bool] = None,
+                         ladder_complete: Optional[bool] = None) -> Dict:
     """Record WHAT was attempted, WHICH resource ran out, and HOW MANY attempts
     were made onto the verdict the parser already produced.
 
@@ -3926,7 +3934,16 @@ def annotate_step_budget(report: Dict, budget: "StepBudget", *,
         _stopped = (bool(stopped) if stopped is not None
                     else any(a.get("killed_by_budget") for a in launched))
         _decided = not _stopped
-        if _decided:
+        if _decided and ladder_complete is False:
+            report["verdict_explanation"] = (
+                (report.get("verdict_explanation") or "").rstrip()
+                + " STEP BUDGET: a later proof rung was not admitted after "
+                  "the admission budget was spent. The completed rung and "
+                  "its checkpoint retain partial proof evidence; the ladder "
+                  "did not finish. No running attempt was killed. Resume "
+                  "from the verified checkpoint with a justified strategy; "
+                  "this is not evidence that the full engine ladder failed.")
+        elif _decided:
             _tail = (
                 f" STEP BUDGET: the {budget.total_s}s admission budget was "
                 f"spent ({len(launched)} attempt(s), "
@@ -5739,8 +5756,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         # `stopped` is MEASURED from this run's own log -- the producer writes
         # those two markers itself and nothing else can -- so the budget
         # sentence follows the evidence rather than the verdict word.
-        report = annotate_step_budget(report, budget,
-                                      stopped=stopped_this_run)
+        report = annotate_step_budget(
+            report, budget, stopped=stopped_this_run,
+            ladder_complete=ladder_record.get("complete"))
         report["gold_rtl_files"] = [Path(f).name for f in gold_files]
         report["gold_frontend"] = gold_frontend
         report["gold_defines"] = (
@@ -5785,7 +5803,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         _furthest = (resume_record["rungs_available"][-1]
                      if resume_record["rungs_available"] else None)
         _complete = bool(report.get("verdict") == "PASS"
-                         or (not report.get("budget_exhausted")
+                         or (ladder_record.get("complete") is not False
+                             and not report.get("budget_exhausted")
                              and not report.get("progress_stalled")
                              and not report.get("parse_error")))
         if _complete:
