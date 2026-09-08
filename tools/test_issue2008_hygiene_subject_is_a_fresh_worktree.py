@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import os
 import re
+import runpy
 import shutil
 import stat
 import subprocess
@@ -83,9 +84,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 _LAND = _ROOT / "tools" / "gatekeeper-land.sh"
 _PROGRAMS = _ROOT / "vibe-ic-marketplace" / "plugins" / "vibe-ic" / "programs"
 _PREFLIGHT = _PROGRAMS / "attestation_preflight_check.py"
+_PLAN = runpy.run_path(str(_ROOT / "tools" / "ci" / "landing_execution_plan.py"))
 
 #: The real pieces the drive needs, by name, in definition order.
 _REAL = ("lane_write", "lane_reported", "run_capture",
+         "landing_plan_dispatch", "landing_unit_full_repo_hygiene",
          "gk_subject_prepare", "gk_subject_release",
          "gk_hygiene_subject_prepare", "gk_hygiene_subject_release",
          "gk_review_subject_prepare", "gk_review_subject_release",
@@ -200,7 +203,8 @@ def _drive(root: Path, land_text: str, *, prepare: bool,
         "set -uo pipefail\n"
         f'ROOT="{repo}"\nRUNTIME_ROOT="{runtime or repo}"\n'
         f'LANE_DIR="{lanes}"\nLANE_WIDTH="{lane_width}"\nHYGIENE_POOL=1\n'
-        "GK_HYG=(); GK_HYG_ENV=()\nFAILED=0\n"
+        "GK_HYG=(); GK_HYG_ENV=()\nFAILED=0\nLANDING_NEXT=0\n"
+        + _PLAN["shell"]() + "\n"
         + body + "\n"
         + ("gk_hygiene_subject_prepare\n" if prepare else "")
         + 'echo "SUBJECT=${GK_HYG_SUBJECT:-}"\n'
@@ -437,12 +441,15 @@ def test_the_lane_subject_is_prepared_right_before_the_window_and_released_after
     i_prep = top.index("gk_hygiene_subject_prepare")
     i_win = top.index("lane_run_window")
     assert i_prep == i_win - 1, "the lane subject is not prepared right before the window"
-    base = land_text.index('run "full:write-guard-baseline"')
-    assert base < land_text.index("\ngk_hygiene_subject_prepare\n")
+    # The unit label now comes from the real plan, not an inline run literal.
+    assert ("full:write-guard-baseline", "before_window", "") in _PLAN["STEPS"]
+    baseline = _extract("landing_unit_full_write_guard_baseline", land_text)
+    assert 'run "$1"' in baseline and '"$PROGRAMS/suite_write_guard.py"' in baseline
+    assert top.index("landing_plan_dispatch before_window") < i_prep
     i_report = top.index("lane_report_window")
     i_rel = top.index("gk_hygiene_subject_release")
-    i_review_prep = top.index("gk_review_subject_prepare")
-    assert i_report < i_rel < i_review_prep, top[i_report:i_review_prep + 1]
+    i_review = top.index("landing_plan_dispatch after_window")
+    assert i_report < i_rel < i_review, top[i_report:i_review + 1]
 
 
 def test_the_serial_rerun_gets_a_fresh_lane_subject(land_text):
@@ -458,25 +465,23 @@ def test_the_serial_rerun_gets_a_fresh_lane_subject(land_text):
 
 
 def test_the_review_measures_its_OWN_subject_prepared_just_before_it(land_text):
-    """`full:gatekeeper-review` RUNS the hygiene set; pointed at `$ROOT` it
-    failed the same preflight, pointed at the lane's used subject it failed
-    too. Its `--repo` is the REVIEW subject, made immediately before the
-    review and released immediately after, before the closing gates. The
-    fallback expansion is the old argument."""
+    """The structural review retains its own fresh subject; hygiene is owned
+    by the parent now. Its subject is released before the closing gates."""
     body = _extract("run_gatekeeper_review", land_text)
     assert '--repo "${GK_REVIEW_SUBJECT:-$ROOT}"' in body, body
     assert '--repo "$ROOT"' not in body
     assert "GK_HYG_SUBJECT" not in body, "the review must not reuse the lane's subject"
-    top = _top_level(land_text)
-    i_prep = top.index("gk_review_subject_prepare")
-    i_run = [i for i, l in enumerate(top)
-             if l.startswith('run "full:gatekeeper-review"')]
-    assert len(i_run) == 1, top
+    handler = _extract("landing_unit_full_gatekeeper_review", land_text)
+    lines = [line.strip() for line in handler.replace("\\\n", " ").splitlines()
+             if line.strip() and not line.lstrip().startswith("#")]
+    i_prep = lines.index("gk_review_subject_prepare")
+    i_run = [i for i, line in enumerate(lines) if line.startswith('run "$1"')]
+    assert len(i_run) == 1 and "run_gatekeeper_review" in lines[i_run[0]], lines
     assert i_prep == i_run[0] - 1, "the review subject is not prepared right before the review"
-    i_rel = top.index("gk_review_subject_release")
-    i_final = [i for i, l in enumerate(top)
-               if l.startswith('run "full:write-guard-final"')][0]
-    assert i_run[0] < i_rel < i_final, top[i_run[0]:i_final + 1]
+    assert lines.index("gk_review_subject_release") == i_run[0] + 1, lines
+    after = [unit for unit, phase, _ in _PLAN["STEPS"] if phase == "after_window"]
+    assert after.index("full:gatekeeper-review") < after.index("full:write-guard-final")
+    assert "landing_plan_dispatch after_window" in _top_level(land_text)
 
 
 def test_gk_cleanup_releases_both_subjects_when_the_script_dies_first(land_text):
@@ -497,7 +502,9 @@ def test_the_readers_never_dereference_a_subject_unguarded(land_text):
     guarded: the lanes harness and the review-budget harness run those
     functions under `set -u` with the variables never set, and an unset
     subject is the FALLBACK, not a crash."""
-    for name, var in (("lane_hygiene", "GK_HYG_SUBJECT"),
+    assert "landing_plan_dispatch window hygiene" in _extract("lane_hygiene", land_text)
+    assert ("full:repo-hygiene", "window", "hygiene") in _PLAN["STEPS"]
+    for name, var in (("landing_unit_full_repo_hygiene", "GK_HYG_SUBJECT"),
                       ("run_gatekeeper_review", "GK_REVIEW_SUBJECT")):
         body = _extract(name, land_text)
         assert f"${{{var}:-" in body, f"{name}: no guarded read of {var}"

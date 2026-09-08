@@ -2053,12 +2053,16 @@ def test_outcome_relay_owns_one_native_scope_across_module_waves(
     for scope in ("collection-relay", "collection-complete"):
         feed("domain_progress", nodeid=nodeid, scope=scope, completed=1, total=1)
     owner_thread = threading.get_ident()
+    parent_progress = _domain_progress
 
     def emit(scope, completed, total):
         assert threading.get_ident() == owner_thread
         feed("domain_progress", nodeid=nodeid, scope=scope,
              completed=completed, total=total)
         assert probe.error == "", probe.error
+        # This probe observes the scheduler without swallowing the outer
+        # item's real checkpoints. Deliberate invalid events below stay local.
+        parent_progress(scope, completed, total)
 
     def child(path, _cwd, _width, progress_queue):
         progress_queue.put((path, 1))

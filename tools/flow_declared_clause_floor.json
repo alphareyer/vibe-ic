@@ -1025,7 +1025,7 @@
     {
       "step": "D1",
       "kind": "program_exit_zero",
-      "cmd": "phase1_expert_parse_track ."
+      "cmd": "phase1_expert_parse_track . --check-report"
     },
     {
       "step": "DT1",

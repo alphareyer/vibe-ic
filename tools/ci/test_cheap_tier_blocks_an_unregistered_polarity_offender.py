@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import re
+import runpy
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -72,7 +74,7 @@ def _run_gate(*args: str) -> subprocess.CompletedProcess:
 
 
 # ── the WIRING: red before it exists ──────────────────────────────────────
-def test_the_cheap_tier_runs_the_polarity_ratchet():
+def test_the_cheap_tier_runs_the_polarity_ratchet(tmp_path):
     """The landing tier must invoke the gate, in `--ratchet` mode.
 
     RED before the wiring: this is the assertion that fails on a tree where the
@@ -93,9 +95,72 @@ def test_the_cheap_tier_runs_the_polarity_ratchet():
         "compares against a baseline debt file and prints an errand naming a "
         "write flag; a landing gate must name the offender and its owner, never "
         "a flag that banks it.\n" + "\n".join(inv))
-    assert any(re.search(r'run\s+"cheap:', ln) for ln in inv), (
-        "the invocation is not in the CHEAP tier, which is the list the "
-        "pre-push hook and land_gate.sh run")
+    assert "\nlanding_plan_dispatch cheap\n" in text
+    plan = runpy.run_path(str(_REPO / "tools/ci/landing_execution_plan.py"))
+
+    def extract(name):
+        match = re.search(rf"^{name}\(\) \{{.*?^\}}$", text, re.M | re.S)
+        assert match, name
+        return match.group(0)
+
+    # Exercise the real plan -> dispatcher -> handler -> capture/emit/record.
+    # Unrelated cheap units are explicitly SKIP, not fabricated gate results.
+    # Only the gate's input root/register are synthetic; its predicate is real.
+    functions = "\n".join(extract(name) for name in (
+        "landing_plan_dispatch", "landing_record", "lane_write",
+        "lane_reported", "run_capture", "lane_resolve", "run_emit", "run",
+        "landing_unit_cheap_prose_polarity"))
+    unrelated = "\n".join(
+        'landing_unit_' + unit.replace(':', '_').replace('-', '_')
+        + '() { landing_record "$1" SKIP 0 "outside this control"; }'
+        for unit, phase, _ in plan["STEPS"]
+        if phase == "cheap" and unit != "cheap:prose-polarity")
+    root = tmp_path / "plugin"
+    (root / "programs").mkdir(parents=True)
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps({"_comment": "synthetic", "known": []}))
+
+    def drive(name, mutation=""):
+        lanes = tmp_path / name
+        lanes.mkdir()
+        script = f'''set -uo pipefail
+PROGRAMS={shlex.quote(str(_GATE.parent))}
+LANE_DIR={shlex.quote(str(lanes))}
+FAILED=0; LANDING_NEXT=0; LANDING_RECORD_ENABLED=0
+LANE_BROKEN=0; LANE_WAIT_RC=0
+{plan['shell']()}
+{functions}
+{unrelated}
+python3() {{
+  [ "$1" = {shlex.quote(str(_GATE))} ] || return 93
+  command python3 "$@" --root {shlex.quote(str(root))} --baseline {shlex.quote(str(baseline))}
+}}
+{mutation}
+landing_plan_dispatch cheap
+cat "$LANE_DIR/cheap:prose-polarity.out"
+echo "PREDICATE_RC=$(cat "$LANE_DIR/cheap:prose-polarity.rc")"
+echo "FAILED=$FAILED"
+exit "$FAILED"
+'''
+        result = subprocess.run(["bash", "-c", script], capture_output=True,
+                                text=True, timeout=_GATE_TIMEOUT_S)
+        print(f"CONTROL {name}: rc={result.returncode}\n{result.stdout}{result.stderr}")
+        return result
+
+    clean = drive("clean")
+    assert clean.returncode == 0 and "PREDICATE_RC=0" in clean.stdout, clean.stdout + clean.stderr
+    assert "[PASS]" in clean.stdout
+    (root / "programs" / "careless_landing.py").write_text(_SYNTHETIC_OFFENDER)
+    bad = drive("offender")
+    assert bad.returncode == 1 and "PREDICATE_RC=1" in bad.stdout, bad.stdout + bad.stderr
+    assert "careless_landing::read_target" in bad.stdout and "FAILED=1" in bad.stdout
+    for name, mutation in (
+        ("missing-handler", "unset -f landing_unit_cheap_prose_polarity"),
+        ("disconnected-handler", "landing_unit_cheap_prose_polarity() { :; }"),
+    ):
+        refused = drive(name, mutation)
+        assert refused.returncode == 2 and "[NORECORD]" in refused.stderr, (
+            refused.stdout + refused.stderr)
 
 
 # ── the BEHAVIOUR, both directions ────────────────────────────────────────

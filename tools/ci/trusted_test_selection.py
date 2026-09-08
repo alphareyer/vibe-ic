@@ -185,7 +185,13 @@ HERMETIC_TEST_PROGRESS = {
         # shift by exactly three, 28 -> 31 and 32 -> 35. The domain TOTALS are
         # unmoved: they still count `test_matrix_d[1-9]_*.py`, still 9 modules,
         # and the wave-boundary item still drives its own 8 synthetic paths.
-        "items": 36,
+        # ec9563ce8 added three relay controls at live ordinals 21-23.
+        # The frozen a99 collection has 39 items; all five older domain
+        # owners therefore move by three. The scheduler control completes
+        # 13 synthetic modules and forwards their validated progress; the
+        # real-child-refusal control completes one module with a red report.
+        # Neither producer is exempted from the item-level inventory.
+        "items": 39,
         # EVERY PRODUCER ITEM MUST APPEAR IN EXACTLY ONE OF TWO LISTS, and
         # this is the second. It is NOT a claim that these items are short:
         # it is the MEASURED set of producer items carrying no schedule at
@@ -223,18 +229,24 @@ HERMETIC_TEST_PROGRESS = {
         ),
         "domains": (
             (21, HERMETIC_MATRIX_FILE
+             + "::test_outcome_relay_owns_one_native_scope_across_module_waves",
+             "matrix-outcome-modules", 13),
+            (23, HERMETIC_MATRIX_FILE
+             + "::test_outcome_relay_does_not_erase_a_real_child_predicate_failure",
+             "matrix-outcome-modules", 1),
+            (24, HERMETIC_MATRIX_FILE
              + "::test_nested_outcome_run_outlives_old_fixed_bound_with_semantic_progress",
              "matrix-outcome-modules", 4),
-            (25, HERMETIC_MATRIX_FILE
+            (28, HERMETIC_MATRIX_FILE
              + "::test_the_outcome_loop_cannot_outlive_the_pytest_harness",
              "matrix-outcome-modules", 9),
-            (26, HERMETIC_MATRIX_FILE
+            (29, HERMETIC_MATRIX_FILE
              + "::test_the_outcome_pool_waits_at_each_wave_boundary",
              "matrix-outcome-modules", 8),
-            (31, HERMETIC_MATRIX_FILE
+            (34, HERMETIC_MATRIX_FILE
              + "::test_every_cell_has_a_live_outcome_and_the_outcome_run_is_not_starved",
              "matrix-outcome-modules", 9),
-            (35, HERMETIC_MATRIX_FILE
+            (38, HERMETIC_MATRIX_FILE
              + "::test_the_second_axis_downgrades_a_red_cell_that_the_state_axis_counts",
              "matrix-outcome-modules", 1),
         ),

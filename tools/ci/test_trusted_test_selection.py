@@ -244,8 +244,10 @@ def test_progress_plan_interleaves_only_parent_owned_matrix_module_units():
     # instead. The whole of this move is therefore the item term: `items`
     # 33 -> 36 for the three functions the load-bounded process budget added to
     # the coverage file.
-    assert sum(row[3] for row in spec["domains"]) == 31
-    assert len(expected) == 31 + spec["items"] == 67
+    # ec9563ce8's three relay items add three item completions and two
+    # scheduled populations: 13 synthetic modules and one real red child.
+    assert sum(row[3] for row in spec["domains"]) == 31 + 13 + 1
+    assert len(expected) == 45 + spec["items"] == 84
     assert len(expected) == len(set(expected))
 
 

@@ -2624,6 +2624,22 @@ def test_the_shipped_floor_is_readable_and_matches_the_shipped_flow(tmp_path):
     assert short["floor"] > 100, short
     assert short["missing"] == [], short["missing"]
 
+    # #2206 moved D1 from re-running the producer to reading its evidence.
+    # Protect that published obligation, not the obsolete mutating command:
+    # dropping --check-report must still name a missing clause, even though
+    # the step, blocking kind, program and project argument all stay the same.
+    command = "phase1_expert_parse_track . --check-report"
+    line = f'        - program_exit_zero: "{command}"'
+    source = lc.FLOW_YAML.read_text(encoding="utf-8")
+    assert source.count(line) == 1
+    reverted = tmp_path / "mutating-audit.yaml"
+    reverted.write_text(source.replace(
+        line, '        - program_exit_zero: "phase1_expert_parse_track ."', 1),
+        encoding="utf-8")
+    missing = lc.clause_floor_shortfall(reverted, lc.CLAUSE_FLOOR)["missing"]
+    assert missing == [{"step": "D1", "kind": "program_exit_zero",
+                        "cmd": command}], missing
+
 
 def _full_clause_downgrade(tmp_path, blocking_cmd, advisory_cmd):
     """Replace one complete live kind+command pair, leaving the real floor.
@@ -3665,4 +3681,3 @@ def test_the_prefix_and_step_requirements_survive_the_widening():
     # an empty --json path
     assert not lc._is_monotonic_json_promotion(
         base, _clause("4", "advisory_program_exit_zero", "some_gate . --json="))
-
