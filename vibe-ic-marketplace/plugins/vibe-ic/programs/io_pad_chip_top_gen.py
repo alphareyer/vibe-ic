@@ -160,10 +160,12 @@ GEOMETRIC_VERTICAL_QUARTERS = 1
 
 
 class Refusal(Exception):
-    def __init__(self, rule: str, message: str) -> None:
+    def __init__(self, rule: str, message: str,
+                 evidence: Optional[Dict[str, object]] = None) -> None:
         super().__init__(message)
         self.rule = rule
         self.message = message
+        self.evidence = evidence or {}
 
 
 class Unavailable(Exception):
@@ -200,6 +202,136 @@ def _read_top_ports(project: Path) -> List[Dict[str, object]]:
         raise Unavailable("NO_TOP_PORTS",
                           "the integration spec declares no top_ports")
     return [p for p in ports if isinstance(p, dict)]
+
+
+def _check_scan_interface(project: Path,
+                          ports: Sequence[Dict[str, object]]) -> Dict[str, object]:
+    """Do not emit a wrapper with floating controls on the selected scan core.
+
+    Reuse PnR's selector and the scan producer's functional-mode metadata.
+    Proof-only tie values do not authorize permanent physical tie-offs or pads.
+    """
+    from phase3_one_shot_runner import pnr_input_netlist
+    from lec_run import netlist_top_ports, scan_mode_from_meta
+
+    spec = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    core = str(json.loads(spec.read_text()).get("top_module") or "core")
+    netlist, note, is_scan = pnr_input_netlist(project, core)
+    if not is_scan:
+        return {"selected_scan_netlist": False, "selection": note}
+    meta_path = project / "reports/phase2/dft/scan_chain.json"
+    meta = json.loads(meta_path.read_text())
+    mode = scan_mode_from_meta(meta)
+    actual = {name: direction for direction, _, name in
+              netlist_top_ports(netlist.read_text(), core)}
+    declared = {str(p.get("name")): str(p.get("direction") or p.get("mode") or "")
+                for p in ports}
+    controls = sorted((mode or {}).get("tieoff", {}))
+    missing = [name for name in controls
+               if actual.get(name) != "input" or declared.get(name) != "input"]
+    evidence = {"selected_scan_netlist": True, "selection": note,
+                "netlist": str(netlist), "netlist_sha256": _sha256(netlist),
+                "scan_metadata": str(meta_path), "scan_metadata_sha256": _sha256(meta_path),
+                "integration_spec": str(spec), "integration_spec_sha256": _sha256(spec),
+                "functional_mode": mode, "unconnected_controls": missing,
+                "unconnected_scan_outputs": [name for name in
+                    [str((mode or {}).get("scan_out_port") or "")]
+                    if name and declared.get(name) != "output"],
+                "physical_tieoff_authorized": False}
+    if mode is None or missing or evidence["unconnected_scan_outputs"]:
+        raise Refusal(
+            "DFT_CONTROL_UNCONNECTED",
+            "selected post-DFT core has no approved chip-top connection for "
+            f"scan controls {missing} / outputs {evidence['unconnected_scan_outputs']}; "
+            "functional-mode proof tie-offs are not "
+            "physical interface authority. Declare test access in the approved "
+            "integration/pad plan before emitting a wrapper; no pads, pin mux "
+            "or permanent tie-off were invented.", {"scan_interface": evidence})
+    return evidence
+
+
+
+def _declared_test_access(project: Path, ports: Sequence[Dict[str, object]]):
+    """Extend the physical interface only through an explicit, source-bound plan.
+
+    config/dft_test_access.json is an integration choice, never a rewrite of L9.
+    The supported mapping is a dedicated pad per scalar scan port, preserving
+    the core's names and polarities. No implicit mux, constant or protocol is
+    synthesized. Absence keeps the existing DFT_CONTROL_UNCONNECTED refusal.
+    All pad masters and connections still come from the usual LEF/Liberty path.
+    """
+    path = project / "config/dft_test_access.json"
+    if not path.exists():
+        return [], {}, None
+    from phase3_one_shot_runner import pnr_input_netlist
+    from lec_run import netlist_top_ports, scan_mode_from_meta
+
+    def refuse(message):
+        raise Refusal("DFT_TEST_ACCESS_INVALID", message)
+
+    try:
+        plan = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        refuse(f"cannot read {path}: {exc}")
+    if not isinstance(plan, dict) or plan.get("schema") != "vibeic.dft-test-access.v1":
+        refuse("test access needs schema vibeic.dft-test-access.v1")
+    if plan.get("mapping") != "dedicated_pads" or not plan.get("authority"):
+        refuse("test access needs an explicit authority and dedicated_pads mapping")
+    spec = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+    core = str(json.loads(spec.read_text()).get("top_module") or "core")
+    netlist, note, is_scan = pnr_input_netlist(project, core)
+    meta_path = project / "reports/phase2/dft/scan_chain.json"
+    if not is_scan:
+        refuse("a test-access plan requires the selected published scan netlist")
+    if (plan.get("netlist_sha256") != _sha256(netlist)
+            or plan.get("scan_metadata_sha256") != _sha256(meta_path)):
+        refuse("test-access plan does not bind the current netlist and scan metadata")
+    try:
+        mode = scan_mode_from_meta(json.loads(meta_path.read_text()))
+    except (OSError, ValueError, TypeError) as exc:
+        refuse(f"scan functional-mode metadata is invalid: {exc}")
+    if not mode or any(v not in (0, 1) for v in mode["tieoff"].values()):
+        refuse("scan metadata needs binary functional control levels")
+    if plan.get("functional_mode") != mode["tieoff"]:
+        refuse("declared external functional-mode levels disagree with scan metadata")
+    actual = {n: (d, rng.strip()) for d, rng, n in
+              netlist_top_ports(netlist.read_text(), core)}
+    functional = {str(p.get("name")) for p in ports}
+    expected = dict.fromkeys(mode["tieoff"], "input")
+    sout = mode["scan_out_port"]
+    if not sout or sout in expected:
+        refuse("scan output is absent or conflicts with a control")
+    expected[sout] = "output"
+    if functional & expected.keys():
+        refuse("dedicated test access cannot replace an existing functional port")
+    if set(actual) != functional | expected.keys():
+        refuse("selected netlist ports disagree with the functional and scan interfaces")
+    for name, direction in expected.items():
+        if actual.get(name) != (direction, ""):
+            refuse(f"scan port {name!r} must be an actual scalar {direction}")
+    rows = plan.get("ports")
+    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
+        refuse("test access ports must be explicit per-port records")
+    names = [r.get("name") for r in rows]
+    if any(not isinstance(n, str) or not re.fullmatch(r"[A-Za-z_]\w*", n) for n in names):
+        refuse("test-access port names must be simple Verilog identifiers")
+    if len(names) != len(set(names)) or set(names) != set(expected):
+        refuse("test-access plan must map every scan port exactly once")
+    additions, sides = [], {s: [] for s in SIDES}
+    for row in rows:
+        name, side = row["name"], row.get("side")
+        if side not in SIDES or row.get("direction") != expected[name]:
+            refuse(f"invalid direction or side for scan port {name!r}")
+        additions.append({"name": name, "direction": expected[name], "width": 1})
+        sides[side].append(name)
+    record = {"declaration": str(path), "declaration_sha256": _sha256(path),
+              "authority": plan["authority"], "mapping": plan["mapping"],
+              "netlist_sha256": _sha256(netlist),
+              "scan_metadata_sha256": _sha256(meta_path),
+              "ports": rows, "functional_mode": mode["tieoff"],
+              "functional_mode_source": "external tester or board drives these levels",
+              "permanent_control_tieoffs": False, "selection": note}
+    return additions, sides, record
 
 
 def _bit_names(port: Dict[str, object]) -> List[str]:
@@ -897,7 +1029,14 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                       "choose one on its behalf")
 
     ports = _read_top_ports(project)
+    rec["functional_top_port_count"] = len(ports)
+    test_ports, test_sides, test_record = _declared_test_access(project, ports)
+    functional_ports = ports
+    ports = ports + test_ports
     rec["top_port_count"] = len(ports)
+    if test_record is not None:
+        rec["test_access"] = test_record
+    rec["scan_interface"] = _check_scan_interface(project, ports)
 
     side_ports, unresolved = LPP.expand_side_ports(placement, params)
     if unresolved:
@@ -906,7 +1045,7 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                       f"range does not resolve from a declared parameter: "
                       f"{sorted(unresolved)}")
 
-    grouped, group_records = _resolve_declared_pad_groups(placement, ports)
+    grouped, group_records = _resolve_declared_pad_groups(placement, functional_ports)
     if group_records:
         rec["pad_group_resolution"] = group_records
     unresolved_groups = [r for r in group_records if not r["resolved_nets"]]
@@ -919,6 +1058,9 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                 f"{r['side']}={r['statement']!r}" for r in unresolved_groups))
     for side, group_nets in grouped.items():
         side_ports.setdefault(side, []).extend(group_nets)
+
+    for side, test_nets in test_sides.items():
+        side_ports.setdefault(side, []).extend(test_nets)
 
     nets: List[str] = []
     direction_of: Dict[str, str] = {}
@@ -1375,7 +1517,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                       "rule": exc.rule, "findings": [exc.message]}
     except Refusal as exc:
         rc, rec = 1, {"program": PROGRAM, "verdict": "REFUSE",
-                      "rule": exc.rule, "findings": [exc.message]}
+                      "rule": exc.rule, "findings": [exc.message],
+                      **exc.evidence}
 
     print(f"=== {PROGRAM} ({project.name}) ===")
     print(f"  verdict: {rec.get('verdict')}")

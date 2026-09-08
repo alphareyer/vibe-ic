@@ -28,11 +28,12 @@ and its own issue reference:
 A THIRD, `benchmark_evidence_structure_check.py`, was on that list until the
 czcorpus lane (2026-09-08) measured what it cost: 28 tests that build a fixture
 corpus in tmp_path and pass `--tree <tmp_path>` were redirected onto the real
-corpus and judged the wrong subject. It now states the resolver's rule — a
-READABLE explicit root wins, an ABSENT one is a missing corpus the pointer still
-supplies — which keeps both shipped call sites (`--tree benchmark-data`, a
-relative path that is gone) working unchanged. The split is narrower; it is not
-settled, and this program still does not arbitrate it.
+corpus and judged the wrong subject. Its first repair gave only a READABLE root
+priority. A fixed-source #1254 reproduction still certified the pointer's tree
+when the explicit root was absent. Its subject contract is now stricter: an
+explicit root always wins or is refused; only an unnamed subject uses the
+environment default. This program records that contract and still does not
+arbitrate or widen its enforcement to the other consumers.
 
 Both sides are argued in comments; the resolver's own docstring records that
 letting the pointer win outright turned 15 of 21 tests red for every developer

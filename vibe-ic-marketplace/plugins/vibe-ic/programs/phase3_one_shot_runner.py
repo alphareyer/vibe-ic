@@ -4052,9 +4052,15 @@ def _build_unplaceable_master_cap_tcl(
         "      if {[info exists _wc_fx($_wc_y)]} { set _wc_own $_wc_fx($_wc_y) }\n"
         "      set _wc_cur $_wc_x0\n"
         "      foreach _wc_p [lsort -integer -index 0 $_wc_own] {\n"
-        "        set _wc_g [expr {[lindex $_wc_p 0] - $_wc_cur}]\n"
+        "        # Pad-ring objects may share yMin with a core row but lie OUTSIDE\n"
+        "        # its extent. Only the intersection obstructs placement; an\n"
+        "        # off-row pad must never create a fictitious gap past xMax.\n"
+        "        set _wc_lo [expr {max($_wc_x0, [lindex $_wc_p 0])}]\n"
+        "        set _wc_hi [expr {min($_wc_x1, [lindex $_wc_p 1])}]\n"
+        "        if {$_wc_hi <= $_wc_lo} { continue }\n"
+        "        set _wc_g [expr {$_wc_lo - $_wc_cur}]\n"
         "        if {$_wc_g > $_wc_run} { set _wc_run $_wc_g }\n"
-        "        if {[lindex $_wc_p 1] > $_wc_cur} { set _wc_cur [lindex $_wc_p 1] }\n"
+        "        if {$_wc_hi > $_wc_cur} { set _wc_cur $_wc_hi }\n"
         "      }\n"
         "      set _wc_g [expr {$_wc_x1 - $_wc_cur}]\n"
         "      if {$_wc_g > $_wc_run} { set _wc_run $_wc_g }\n"
@@ -4111,7 +4117,7 @@ def _build_unplaceable_master_cap_tcl(
         "    set _wc_pre {}\n"
         "    if {$_wc_run > 0} {\n"
         "      foreach _wc_i [$_wc_blk getInsts] {\n"
-        "        if {[[$_wc_i getMaster] getWidth] > $_wc_run} {\n"
+        "        if {[[$_wc_i getMaster] isCore] && [[$_wc_i getMaster] getWidth] > $_wc_run} {\n"
         "          lappend _wc_pre [$_wc_i getName]\n"
         "        }\n"
         "      }\n"
@@ -47809,10 +47815,10 @@ def _emit_spef(project: Path, top: str, pdk: PdkConfig, container: str,
     cell_lef_c = _to_container_path(str(pdk.cell_lef), container)
     liberty_c = _to_container_path(str(pdk.liberty), container)
     spef_c = _to_container_path(str(spef_out), container)
-    macro_lefs_tcl = "\n".join(
-        f"read_lef {_to_container_path(str(f), container)}"
-        for f in pdk.macro_lefs
-    )
+    # A routed chip DEF names IO masters as well as standard cells. Reuse
+    # the same DEF-driven library resolver as the other reopening consumers.
+    macro_lefs_tcl = _extra_lef_read_block(
+        _def_reopen_extra_lefs_c(def_file, pdk, container))
     mp = pdk.metal_prefix
     # ORGANIC-20260531 Step 22 fix (v0.2.5 — CORRECTED): `write_spef` is the OpenRCX
     # sign-off command; it needs `extract_parasitics -ext_model_file <captable>` to have
@@ -48091,9 +48097,10 @@ def _emit_spef_corners(project: Path, top: str, pdk: PdkConfig, container: str,
     cell_lef_c = _to_container_path(str(pdk.cell_lef), container)
     liberty_c = _to_container_path(str(pdk.liberty), container)
     def_c = _to_container_path(str(def_file), container)
-    macro_lefs_tcl = "\n".join(
-        f"read_lef {_to_container_path(str(f), container)}"
-        for f in pdk.macro_lefs)
+    # A routed chip DEF names IO masters as well as standard cells. Reuse
+    # the same DEF-driven library resolver as the other reopening consumers.
+    macro_lefs_tcl = _extra_lef_read_block(
+        _def_reopen_extra_lefs_c(def_file, pdk, container))
     mp = pdk.metal_prefix
     # Build ONE tcl that reads the DEF once then extracts+writes each corner.
     corner_spefs: Dict[str, Path] = {}

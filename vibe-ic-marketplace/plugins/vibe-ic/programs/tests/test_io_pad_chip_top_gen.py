@@ -577,3 +577,79 @@ def test_the_richer_size_record_decides_which_master_is_narrowest(tmp_path):
         (proj / "reports" / "phase3" / "io_pad_chip_top.json").read_text())
     ) == ["testlib_io__bi", "testlib_io__in"], (
         "precondition: the two SIZE records really do read differently")
+
+
+def _scan_project(tmp_path):
+    """Neutral published scan core, bound to an explicit integration choice."""
+    import hashlib
+    proj = _project(tmp_path)
+    synth = proj / "phase2/stage2/synth"
+    synth.mkdir(parents=True)
+    text = """module core(clk, rst, d, q, serial_in, serial_out, scan_enable);
+input clk;
+input rst;
+input [1:0] d;
+output q;
+input serial_in;
+output serial_out;
+input scan_enable;
+assign serial_out = serial_in;
+assign q = d[0];
+endmodule
+"""
+    net = synth / "post_dft_netlist.v"
+    net.write_text(text)
+    meta = proj / "reports/phase2/dft/scan_chain.json"
+    meta.parent.mkdir(parents=True)
+    meta.write_text(json.dumps({"published": True, "chain_length_matches_flop_count": True,
+        "dft_ports": ["serial_in", "serial_out", "scan_enable"],
+        "functional_mode_tieoff": {"serial_in": 0, "scan_enable": 0},
+        "scan_out_port": "serial_out"}))
+    plan = {"schema": "vibeic.dft-test-access.v1", "mapping": "dedicated_pads",
+        "authority": "synthetic integration declaration",
+        "netlist_sha256": hashlib.sha256(net.read_bytes()).hexdigest(),
+        "scan_metadata_sha256": hashlib.sha256(meta.read_bytes()).hexdigest(),
+        "functional_mode": {"serial_in": 0, "scan_enable": 0},
+        "ports": [{"name": n, "direction": d, "side": "W"} for n, d in
+            [("serial_in", "input"), ("serial_out", "output"), ("scan_enable", "input")]]}
+    cfg = proj / "config/dft_test_access.json"
+    cfg.parent.mkdir()
+    cfg.write_text(json.dumps(plan))
+    return proj, cfg, plan
+
+
+def test_declared_scan_access_reaches_the_wrapper_and_pad_map(tmp_path):
+    proj, _, _ = _scan_project(tmp_path)
+    pdk = _pdk(tmp_path / "pdk")
+    run = _run(GEN, proj, pdk)
+    assert run.returncode == 0, run.stdout + run.stderr
+    wrapper = (proj / "phase3/stage3/pnr/chip_top_io.v").read_text()
+    rec = _record(proj)
+    for name in ["serial_in", "serial_out", "scan_enable"]:
+        assert f".{name}({name})" in wrapper
+        assert f"u_pad_{name}" in wrapper
+    assert rec["scan_interface"]["unconnected_controls"] == []
+    assert rec["test_access"]["permanent_control_tieoffs"] is False
+
+
+@pytest.mark.parametrize("defect", ["missing", "stale", "duplicate", "wrong_direction", "wrong_mode"])
+def test_invalid_or_missing_scan_plan_still_refuses(tmp_path, defect):
+    proj, cfg, plan = _scan_project(tmp_path)
+    pdk = _pdk(tmp_path / "pdk")
+    if defect == "missing":
+        cfg.unlink()
+    else:
+        if defect == "stale":
+            plan["netlist_sha256"] = "0" * 64
+        elif defect == "duplicate":
+            plan["ports"].append(plan["ports"][0])
+        elif defect == "wrong_direction":
+            plan["ports"][0]["direction"] = "output"
+        else:
+            plan["functional_mode"]["scan_enable"] = 1
+        cfg.write_text(json.dumps(plan))
+    run = _run(GEN, proj, pdk)
+    assert run.returncode == 1, run.stdout + run.stderr
+    rec = _record(proj)
+    assert rec["rule"] == ("DFT_CONTROL_UNCONNECTED" if defect == "missing" else "DFT_TEST_ACCESS_INVALID")
+    assert not (proj / "phase3/stage3/pnr/chip_top_io.v").exists()

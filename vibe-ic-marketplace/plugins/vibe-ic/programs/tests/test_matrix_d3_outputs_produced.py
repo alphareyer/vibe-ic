@@ -2492,6 +2492,58 @@ def check_entry(step_id, entry: str, rec: Dict) -> EntryVerdict:
     return EntryVerdict(False, LIVE, f"unrecognised manifest status {status!r}")
 
 
+def measure_new_signoff_output(step_id, entry: str) -> EntryVerdict:
+    """Measure a NEW declaration through its normal inline producer, not audit.
+
+    The historical manifest remains historical. A newly declared output has
+    no capture there; the runner may nevertheless produce it NOW from tracked
+    inputs. Only the runner's explicit ownership table admits this path. A
+    missing input/NOT_CHECKED record is not production evidence, and a measured
+    FAIL report proves production, never design sign-off.
+    """
+    import phase3_one_shot_runner as runner
+
+    owners = [row for row in runner._DECLARED_SIGNOFF_GATES
+              if row[2] == entry and Path(row[1]).stem in F.gate_programs(step_id)]
+    if len(owners) != 1:
+        return EntryVerdict(False, LIVE, "never measured; no unique declared inline producer")
+    name, program, output, argv = owners[0]
+    attempts = []
+    for label, rr in sorted(run_roots().items()):
+        with tempfile.TemporaryDirectory(prefix="d3_signoff_live_") as td:
+            project = Path(td) / "project"
+            copied = _copy_tracked(rr.path, project)
+            target = project / output
+            if not copied or target.exists() or target.is_symlink():
+                attempts.append(f"{label}: no tracked inputs or output already captured; not fresh")
+                continue
+            result = runner._run_declared_signoff_gate(project, name, program, output, argv)
+            if result.status not in {"PASS", "FAIL"}:
+                attempts.append(f"{label}: {result.status}; {result.detail}")
+                continue
+            # Consume the actual declared path using the flow's own resolver.
+            # A process rc, stale symlink, empty file or absence JSON is not a
+            # substitute for a freshly written, measured report.
+            hits = _GLOB_FIRST(project, entry)
+            if output not in hits or target.is_symlink() or not target.is_file():
+                attempts.append(f"{label}: producer did not write the declared regular file")
+                continue
+            try:
+                report = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                attempts.append(f"{label}: unreadable measured report: {exc}")
+                continue
+            if not isinstance(report, dict) or report.get("verdict") != result.status:
+                attempts.append(f"{label}: report has no matching measured PASS/FAIL verdict")
+                continue
+            return EntryVerdict(True, LIVE,
+                f"FRESH_PRODUCER {program} via phase3 inline runner on tracked-only {label!r}: "
+                f"{target.stat().st_size} bytes, design verdict={result.status}; "
+                "historical capture remains NOT_MEASURED; this is a new producer/consumer execution")
+    return EntryVerdict(False, LIVE, "never measured by a valid producer execution: "
+                        + "; ".join(attempts or ["no admissible run roots"]))
+
+
 def audit_step(step_id) -> Tuple[List[str], List[str]]:
     """``(missing, details)`` over ALL declared entries — ALL-of-N."""
     rec = step_record(step_id)
@@ -2499,21 +2551,20 @@ def audit_step(step_id) -> Tuple[List[str], List[str]]:
     recorded = rec["entries"]
 
     drift = []
-    if set(live_entries) != set(recorded):
-        added = sorted(set(live_entries) - set(recorded))
-        gone = sorted(set(recorded) - set(live_entries))
+    gone = sorted(set(recorded) - set(live_entries))
+    if gone:
         drift.append(
             f"required_outputs drifted from the measured manifest: "
-            f"+{added} -{gone}"
+            f"removed {gone}"
         )
 
     missing: List[str] = list(drift)
     details: List[str] = []
     for entry in live_entries:
         if entry not in recorded:
-            missing.append(f"{entry!r}: never measured")
-            continue
-        v = check_entry(step_id, entry, recorded[entry])
+            v = measure_new_signoff_output(step_id, entry)
+        else:
+            v = check_entry(step_id, entry, recorded[entry])
         details.append(f"[{v.mode}] {entry!r} -> {v.detail}")
         if not v.produced:
             missing.append(f"{entry!r}: {v.detail}")

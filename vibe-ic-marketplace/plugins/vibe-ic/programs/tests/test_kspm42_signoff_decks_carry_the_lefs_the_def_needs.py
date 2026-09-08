@@ -191,3 +191,47 @@ def test_the_tech_and_cell_lef_are_never_offered_twice(tmp_path, monkeypatch):
     pdk.cell_lef, pdk.tech_lef = cell, tech
     d = _def(tmp_path, ["STD_CELL_A", "MACRO_USED"])
     assert p3._def_reopen_extra_lefs_c(d, pdk, None) == [macro]
+
+
+def test_spef_emitters_reopen_actual_pad_masters_before_def(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    project = tmp_path / "project"
+    pnr = project / "phase3/stage3/pnr"
+    pnr.mkdir(parents=True)
+    _def(pnr, ["STD_CELL_A", "IO_PAD_IN"]).rename(pnr / "top.def")
+    io = _lef(tmp_path, "io", ["IO_PAD_IN"])
+    pdk = SimpleNamespace(tech_lef="/tech.lef", cell_lef="/cells.lef",
+                          liberty="/cells.lib", macro_lefs=[], metal_prefix="M")
+    monkeypatch.setattr(p3, "_to_container_path", lambda path, c: str(path))
+    monkeypatch.setattr(p3, "_discover_padring_io_views", lambda pdk, c: ([io], []))
+    monkeypatch.setattr(p3, "_discover_openrcx_captables", lambda pdk, c: {"nom": "/nom.rules"})
+    monkeypatch.setattr(p3, "_docker_exec", lambda *a, **k: (1, "control: execution not requested", ""))
+    out = project / "extract"
+    out.mkdir()
+    p3._emit_spef(project, "top", pdk, "unused", out / "top.spef", [])
+    p3._emit_spef_corners(project, "top", pdk, "unused", out / "corners", [])
+    for path in [out / "extract_top.tcl", out / "corners/extract_corners_top.tcl"]:
+        commands = path.read_text().splitlines()
+        read_def = next(i for i, line in enumerate(commands) if line.startswith("read_def "))
+        assert f"read_lef {io}" in commands[:read_def], commands
+
+
+def test_spef_emitters_ignore_io_libraries_unused_by_the_def(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    project = tmp_path / "project"
+    pnr = project / "phase3/stage3/pnr"
+    pnr.mkdir(parents=True)
+    _def(pnr, ["STD_CELL_A"]).rename(pnr / "top.def")
+    io = _lef(tmp_path, "io", ["IO_PAD_IN"])
+    pdk = SimpleNamespace(tech_lef="/tech.lef", cell_lef="/cells.lef",
+                          liberty="/cells.lib", macro_lefs=[], metal_prefix="M")
+    monkeypatch.setattr(p3, "_to_container_path", lambda path, c: str(path))
+    monkeypatch.setattr(p3, "_discover_padring_io_views", lambda pdk, c: ([io], []))
+    monkeypatch.setattr(p3, "_discover_openrcx_captables", lambda pdk, c: {"nom": "/nom.rules"})
+    monkeypatch.setattr(p3, "_docker_exec", lambda *a, **k: (1, "control: execution not requested", ""))
+    out = project / "extract"
+    out.mkdir()
+    p3._emit_spef(project, "top", pdk, "unused", out / "top.spef", [])
+    p3._emit_spef_corners(project, "top", pdk, "unused", out / "corners", [])
+    for path in [out / "extract_top.tcl", out / "corners/extract_corners_top.tcl"]:
+        assert f"read_lef {io}" not in path.read_text()

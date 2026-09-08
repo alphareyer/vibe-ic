@@ -13,10 +13,10 @@ THE RULE THIS PINS, IN BOTH DIRECTIONS
 * The pointer still supplies the corpus when NO ``--tree`` is given.  (control:
   green in both arms — it exists so that a future "fix" cannot make the
   environment default inert and call that a win)
-* The pointer still supplies the corpus when the explicit ``--tree`` names a
-  path that IS NOT THERE — the shape both shipped call sites use, which pass the
-  literal relative ``--tree benchmark-data`` that no longer exists in this repo.
-  (control: green in both arms)
+* An explicit missing ``--tree`` is refused without scanning the pointer's
+  subject, including when absence of a default corpus would be allowed.
+  The original fallback control's node ID is retained for exact-ID comparison;
+  its old behavior was the remaining defect, not a valid default.
 * A caller that passes BOTH a readable root and a pointer at a DIFFERENT tree
   has named two subjects. That is said out loud, not silently resolved.
   (falsifying)
@@ -117,10 +117,14 @@ def test_with_no_tree_at_all_the_pointer_still_supplies_the_corpus(tmp_path):
 
 
 def test_an_explicit_tree_that_is_not_there_still_falls_back_to_the_pointer(tmp_path):
-    """The shape both shipped call sites use: a literal relative path that is gone."""
+    """Legacy node ID names the defect: explicit missing subjects must NOT fall back."""
     _, decoy = _two_trees(tmp_path)
-    r = _run(["--tree", str(tmp_path / "benchmark-data-that-is-gone")], pointer=decoy)
-    assert "v7.7.7_openpdkx" in r.stdout, (
-        "an absent named root is a MISSING corpus, which is exactly what the "
-        "pointer is for:\n%s%s" % (r.stdout, r.stderr))
-    assert "is not a directory" in r.stderr
+    missing = tmp_path / "benchmark-data-that-is-gone"
+    for optional in ([], ["--corpus-may-be-absent"]):
+        r = _run(["--tree", str(missing), *optional], pointer=decoy)
+        assert r.returncode == 2, r.stdout + r.stderr
+        assert "v7.7.7_openpdkx" not in r.stdout, (
+            "a refused explicit subject must not certify the decoy:\n%s%s"
+            % (r.stdout, r.stderr))
+        assert str(missing) in r.stderr and "is not a directory" in r.stderr
+        assert "UNDETERMINED" in r.stderr

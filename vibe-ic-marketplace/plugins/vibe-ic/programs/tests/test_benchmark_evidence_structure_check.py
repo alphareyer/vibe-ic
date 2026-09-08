@@ -236,7 +236,10 @@ def test_missing_path_is_error(tmp_path):
     assert r.returncode == 1  # nonconformant (PATH failure), not a crash
 
 
-def test_no_targets_is_usage_error():
+def test_no_targets_is_usage_error(monkeypatch):
+    # This named unit measures absence of BOTH target channels. The paired
+    # czcorpus environment-only control proves the legitimate default still runs.
+    monkeypatch.delenv("VIBE_IC_BENCHMARK_DATA", raising=False)
     assert _run([]).returncode == 2
 
 

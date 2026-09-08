@@ -616,3 +616,13 @@ def test_the_call_site_supplies_the_resolved_cts_masters():
     assert "_build_tapcell_and_placeability_tcl(\n        pdk, cts_masters=" in whole \
         or "cts_masters=(clk_buf, clk_buf_root)" in whole, \
         "the call site does not supply the resolved masters"
+
+
+@_needs_tcl
+@pytest.mark.parametrize("xmin,xmax", [(-900, -200), (1300, 1600), (-900, 0), (1000, 1600)])
+def test_off_row_fixed_objects_cannot_enlarge_the_free_run(tmp_path, xmin, xmax):
+    setup = _OBSTRUCTED + f"\nmkinst offrow FIXED {xmin} {xmax} 0 cell_wide\n"
+    out = _run_cap(setup, tmp_path)
+    assert "PLACEABLE_WIDTH_BOUND: 200 dbu" in out, out
+    assert "drv_wide" in _excluded(out), out
+    assert "drv_narrow" not in _excluded(out), out

@@ -353,9 +353,12 @@ def test_guard_changed_since_still_catches_new_ic_level_output(tmp_path):
     assert "IC_LEVEL_LAYOUT" in out and "phase3/" in out, out
 
 
-def test_guard_no_argument_at_all_still_refuses(tmp_path):
+def test_guard_no_argument_at_all_still_refuses(tmp_path, monkeypatch):
     """The original rc-2 refusal for "you gave me nothing" is unchanged, message
     included — this fix restores a refusal, it must not have replaced one."""
+    # Arrange the documented no-target condition, not an environment-only
+    # request. No runner-wide environment cleanup; other cases retain its value.
+    monkeypatch.delenv("VIBE_IC_BENCHMARK_DATA", raising=False)
     rc, out = _run(cwd=tmp_path)
     assert rc == 2, out
     assert "no evidence folders to check" in out, out
