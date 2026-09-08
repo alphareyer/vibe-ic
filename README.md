@@ -4,14 +4,16 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Awesome](https://awesome.re/badge.svg)](https://github.com/vibeic/awesome-open-ic)
-[![Plugin v1.19.101](https://img.shields.io/badge/plugin-v1.19.101-brightgreen.svg)](vibe-ic-marketplace/README.md)
+[![Plugin v1.20.0](https://img.shields.io/badge/plugin-v1.20.0-brightgreen.svg)](vibe-ic-marketplace/README.md)
 [![MCP-EDA v1.0.0](https://img.shields.io/badge/mcp--eda-v1.0.0-brightgreen.svg)](vibe-ic-marketplace/plugins/vibe-ic/mcp-eda/README.md)
 
-> **Status: v1.19 — mature, benchmark-hardened.** The `vibe-ic` plugin is the
+> **Status: v1.20 — mature, benchmark-hardened.** The `vibe-ic` plugin is the
 > product: one install bundles and auto-registers the MCP server, the IP
 > catalog, and the benchmark harness. Install once, design in natural language.
 > Every capability is gated by a deterministic checker and continuously
 > hardened against open IC-design benchmarks (see **Benchmark results** below).
+
+Maintainers assign releases with [`gatekeeper_assign_version.py`](vibe-ic-marketplace/plugins/vibe-ic/programs/gatekeeper_assign_version.py): the patch range is 0–99, so `x.y.99` rolls over to `x.(y+1).0`, never a three-digit patch.
 
 Vibe-IC is a Claude Code plugin + Model Context Protocol (MCP) server
 that bridges large language models to real open-source EDA tools so that
