@@ -12,10 +12,13 @@ The eda-tools MCP dodged it by prefixing every command with
 could not. The fix bakes the tool dirs into a global `ENV PATH` in the
 Dockerfile runtime stage so tools resolve WITHOUT a login shell.
 
-The STATIC test locks the Dockerfile invariant (no docker daemon needed). The
-LIVE test actually runs the user's exact failing commands against the running
-container, and SKIPS cleanly when docker / the container is unavailable so CI
-without a daemon stays green.
+The STATIC tests lock the Dockerfile invariant when its separate tool-image
+source is available. LIVE probes on the host retain the historical docker-exec
+transport. Inside the EDA test image, they execute native tools with PID 1's
+initial environment: the image's global environment before the normal startup
+entrypoint adds tool paths. This measures the same non-login PATH contract
+without attaching to another owner's container. JUnit names the transport;
+a native image-environment result is not a historical docker-exec measurement.
 """
 import os
 import shutil
@@ -37,6 +40,7 @@ if not DOCKERFILE.exists():
 
 TOOL_DIRS = ["/foss/tools/bin", "/foss/tools/sak"]
 CONTAINER = os.environ.get("EDA_CONTAINER", "vibeic-eda")
+_IN_CONTAINER = Path("/.dockerenv").is_file()
 
 
 def _env_path_line():
@@ -84,24 +88,57 @@ def _docker_ok():
     return r.returncode == 0 and CONTAINER in r.stdout
 
 
-@pytest.mark.skipif(not _docker_ok(), reason="docker/container not available")
+def _run_nonlogin(probe, record_property):
+    if not _IN_CONTAINER:
+        record_property("runtime_transport", "historical-docker-exec")
+        return subprocess.run(["docker", "exec", CONTAINER] + probe,
+                              capture_output=True, text=True)
+    # Without an init frame an entrypoint can patch PATH and exec the test as
+    # PID 1; that process's environ is no longer the original OCI environment.
+    # A container marker alone must not upgrade that environment to evidence.
+    init_name = Path("/proc/1/comm").read_text().strip()
+    assert init_name in {"docker-init", "tini"}, (
+        "native image-environment probe requires docker --init; "
+        f"PID 1 is {init_name!r}, not a preserved init frame"
+    )
+    record_property("runtime_transport", "native-image-initial-env")
+    # The init frame inherits OCI's environment before starting the entrypoint.
+    initial = dict(item.split("=", 1) for item in
+                   Path("/proc/1/environ").read_bytes().decode().split("\0")
+                   if "=" in item)
+    assert "PATH" in initial, "container initial environment has no PATH"
+    try:
+        return subprocess.run(probe, env=initial, capture_output=True, text=True)
+    except OSError as exc:
+        return subprocess.CompletedProcess(probe, 127, "", str(exc))
+
+
+@pytest.mark.skipif(not (_IN_CONTAINER or _docker_ok()), reason="docker/container not available")
 @pytest.mark.parametrize("probe", [
     ["yosys", "--version"],
     ["openroad", "-version"],
 ])
-def test_bare_docker_exec_resolves_tool(probe):
-    """The user's exact failing invocation must now exit 0 (bare, non-login)."""
-    r = subprocess.run(["docker", "exec", CONTAINER] + probe, capture_output=True, text=True)
+def test_bare_docker_exec_resolves_tool(probe, record_property):
+    """Resolve the original tool argv with the non-login image environment."""
+    r = _run_nonlogin(probe, record_property)
     assert r.returncode == 0, (
-        f"bare `docker exec {CONTAINER} {' '.join(probe)}` failed "
+        f"non-login {' '.join(probe)} failed "
         f"(rc={r.returncode}): {r.stderr.strip() or r.stdout.strip()}"
     )
 
 
-@pytest.mark.skipif(not _docker_ok(), reason="docker/container not available")
-def test_nonlogin_path_contains_tool_dir():
+@pytest.mark.skipif(not (_IN_CONTAINER or _docker_ok()), reason="docker/container not available")
+def test_nonlogin_path_contains_tool_dir(record_property, monkeypatch):
     """Non-login PATH (what `docker exec ... bash -c` sees) must carry /foss/tools/bin."""
-    r = subprocess.run(["docker", "exec", CONTAINER, "bash", "-c", "echo $PATH"],
-                       capture_output=True, text=True)
+    r = _run_nonlogin(["bash", "--noprofile", "--norc", "-c", "echo $PATH"],
+                      record_property)
     assert r.returncode == 0
     assert "/foss/tools/bin" in r.stdout, f"non-login PATH lacks /foss/tools/bin: {r.stdout!r}"
+    if _IN_CONTAINER:
+        original_read = Path.read_text
+        with monkeypatch.context() as scoped:
+            scoped.setattr(Path, "read_text", lambda path, *args, **kwargs:
+                           "python3\n" if str(path) == "/proc/1/comm" else
+                           original_read(path, *args, **kwargs))
+            with pytest.raises(AssertionError, match="requires docker --init"):
+                _run_nonlogin(["bash", "-c", "echo $PATH"], record_property)

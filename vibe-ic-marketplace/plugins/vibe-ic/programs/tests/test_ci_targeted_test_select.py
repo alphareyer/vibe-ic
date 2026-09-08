@@ -587,6 +587,16 @@ def test_helper_rule_ignores_the_name_in_string_literals(tmp_path):
             "PROBE: str = 'pass\\n'\n"
             "subprocess.run(args=('python3', '-c', PROBE.replace('pass', 'import helper_mod')))\n"),
         "nested/test_child.py": f"subprocess.run(['/usr/bin/python3.12', '-I', '-c', {body!r}])\n",
+        "test_named_argv.py": (
+            f"PROBE = {body!r}\n"
+            "def run_probe(payload):\n"
+            "    argv = [sys.executable, '-c', PROBE]\n"
+            "    if payload:\n"
+            "        argv.append(payload)\n"
+            "    return subprocess.run(argv)\n"),
+        "test_named_tuple.py": (
+            f"argv: tuple = ('python3', '-c', {body!r})\n"
+            "subprocess.run(args=argv)\n"),
         "data/test_excluded.py": f"subprocess.run([sys.executable, '-c', {body!r}])\n",
     }
     for name, command in commands.items():
@@ -604,7 +614,8 @@ def test_helper_rule_ignores_the_name_in_string_literals(tmp_path):
     assert out == {
         f"{TESTS_REL}/{name}" for name in (
             "test_imports.py", "test_inline.py", "test_named.py",
-            "test_replaced.py", "nested/test_child.py")
+            "test_replaced.py", "nested/test_child.py", "test_named_argv.py",
+            "test_named_tuple.py")
     }, f"executed Python dependencies or declared exclusions were lost: {sorted(out)}"
 
 

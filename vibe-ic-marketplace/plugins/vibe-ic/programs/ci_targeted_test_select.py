@@ -1188,11 +1188,13 @@ def _python_command_sources(tree: ast.AST) -> set[str]:
     """Literal Python ``-c`` bodies passed to a command runner, never executed.
 
     Imports inside subprocess probes are dependencies too. Resolve literal
-    strings, names assigned literals, and literal ``str.replace`` calls; an
-    ordinary fixture string or a non-Python command contributes no code. This
+    strings, names assigned literals, named argument lists/tuples, and literal
+    ``str.replace`` calls; an ordinary fixture string or a non-Python command
+    contributes no code. This
     is static dependency discovery, not evaluation of arbitrary expressions.
     """
     literals: dict[str, set[str]] = {}
+    argvs: dict[str, list[ast.List | ast.Tuple]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             targets, value = node.targets, node.value
@@ -1204,6 +1206,10 @@ def _python_command_sources(tree: ast.AST) -> set[str]:
             for target in targets:
                 if isinstance(target, ast.Name):
                     literals.setdefault(target.id, set()).add(value.value)
+        elif isinstance(value, (ast.List, ast.Tuple)):
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    argvs.setdefault(target.id, []).append(value)
 
     def strings(expr: ast.AST) -> set[str]:
         if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
@@ -1230,27 +1236,30 @@ def _python_command_sources(tree: ast.AST) -> set[str]:
             continue
         argv = node.args[0] if node.args else next(
             (kw.value for kw in node.keywords if kw.arg == "args"), None)
-        if not isinstance(argv, (ast.List, ast.Tuple)) or len(argv.elts) < 3:
-            continue
-        executable = argv.elts[0]
-        is_python = (
-            isinstance(executable, ast.Attribute) and executable.attr == "executable"
-            and isinstance(executable.value, ast.Name) and executable.value.id == "sys"
-        ) or any(re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(name).name)
-                 for name in strings(executable))
-        if not is_python:
-            continue
-        index = 1
-        while index < len(argv.elts) - 1:
-            option = argv.elts[index]
-            if not isinstance(option, ast.Constant) or not isinstance(option.value, str):
-                break
-            if option.value == "-c":
-                sources |= strings(argv.elts[index + 1])
-                break
-            if option.value in {"-m", "--"} or not option.value.startswith("-"):
-                break  # subsequent arguments belong to a script/module, not Python
-            index += 2 if option.value in {"-W", "-X"} else 1
+        candidates = (argvs.get(argv.id, []) if isinstance(argv, ast.Name)
+                      else [argv])
+        for argv in candidates:
+            if not isinstance(argv, (ast.List, ast.Tuple)) or len(argv.elts) < 3:
+                continue
+            executable = argv.elts[0]
+            is_python = (
+                isinstance(executable, ast.Attribute) and executable.attr == "executable"
+                and isinstance(executable.value, ast.Name) and executable.value.id == "sys"
+            ) or any(re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(name).name)
+                     for name in strings(executable))
+            if not is_python:
+                continue
+            index = 1
+            while index < len(argv.elts) - 1:
+                option = argv.elts[index]
+                if not isinstance(option, ast.Constant) or not isinstance(option.value, str):
+                    break
+                if option.value == "-c":
+                    sources |= strings(argv.elts[index + 1])
+                    break
+                if option.value in {"-m", "--"} or not option.value.startswith("-"):
+                    break  # subsequent arguments belong to a script/module, not Python
+                index += 2 if option.value in {"-W", "-X"} else 1
     return sources
 
 

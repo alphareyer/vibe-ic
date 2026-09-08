@@ -8,6 +8,7 @@ import builtins
 from collections import Counter
 import io
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,20 @@ def writer(request, tmp_path, monkeypatch):
         project.mkdir()
         # Missing L9 is an unanswered question. A report must still be written.
         return lambda output: census.main([str(project), "--json", str(output)]), 2
-    monkeypatch.setattr(ratchet, "_archive", lambda *args: None)
+    # The ratchet now reads its real commit range before archiving. A report
+    # fixture needs readable revisions too, otherwise it only tests NORECORD.
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    def commit(label):
+        subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(tmp_path),
+                        "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                        "commit", "-qm", label], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "tag", label], check=True)
+    subject = tmp_path / "subject.txt"
+    subject.write_text("before\n")
+    commit("base")
+    subject.write_text("after\n")
+    commit("candidate")
     monkeypatch.setattr(
         ratchet, "_findings",
         lambda entry, plugin, root, arm:
