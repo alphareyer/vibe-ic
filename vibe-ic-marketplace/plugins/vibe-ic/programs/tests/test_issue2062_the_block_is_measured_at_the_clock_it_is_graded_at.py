@@ -41,7 +41,8 @@ import pytest
 _PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROGRAMS))
 
-import analog_a2_topology_emit as a2  # noqa: E402
+import analog_a2_topology_emit as a2
+import analog_transient_record as _a2_record  # noqa: E402
 
 ENTRY = a2.LIBRARY["delta_sigma"]
 _UNITS = {"order": "", "vdd": "V", "osr": "", "enob": "bit", "vref": "V",
@@ -105,7 +106,16 @@ def test_the_span_ratio_is_exactly_the_clock_ratio():
     the transient goes as 1/clock, so moving the deck from the ceiling to the
     operating point multiplies it by fclk_max/fclk exactly."""
     for fmax in (1.0, 1.2823, 2.0, 10.0):
-        env = {"window_clocks": 256.0, "fclk": 1.0, "fclk_max": fmax}
+        # `record_clocks` is DERIVED by `analog_transient_record` from every
+        # constraint that bears on the record (vibe-ic#2200), so it is seeded
+        # here the way the emitter publishes it rather than typed. It is a
+        # count of clocks and carries no frequency, which is exactly why the
+        # ratio this test asserts is unchanged by it.
+        env = {"window_clocks": 256.0, "fclk": 1.0, "fclk_max": fmax,
+               "record_clocks": _a2_record.derive(
+                   ENTRY["testbench"], {"window_clocks": 256.0}, _spec(),
+                   ENTRY["testbench"]["env_exprs"]["tstop_ns"],
+               )[_a2_record.RECORD_CONSTANT]}
         at_fclk = a2._safe_eval(ENTRY["testbench"]["env_exprs"]["tstop_ns"],
                                 env)
         at_ceiling = a2._safe_eval(

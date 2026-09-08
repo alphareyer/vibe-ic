@@ -84,6 +84,7 @@ import _prose_polarity as _pp
 import _runner_measurement as _rmeas
 import _reference_flow_boundary as _rfb
 import _source_record_merge as _srm  # per-source merge: silence cannot erase
+from _ppa.power import pdn_ring_dimensions as _pdn_ring_dimensions
 import floorplan_contract as _fpc  # design-declared fixed floorplan + DRV limits
 from _rtl_include_hub import drop_include_hubs as _drop_include_hubs  # shared aggregator filter
 import _container_exec as _cex  # the ONE route predicate AND the ONE guarded
@@ -7079,28 +7080,10 @@ def _pad_connected_ring_tcl(pdk: "PdkConfig") -> Dict[str, str]:
             "note": "",
         }
 
-    layers = cfg.get("layers") or []
-    widths = cfg.get("widths") or []
-    spacings = cfg.get("spacings") or []
-    pad_layers = cfg.get("connect_to_pad_layers") or []
+    offset, clearance, widths_f, spacings_f, footprint = _pdn_ring_dimensions(cfg)
+    layers = cfg["layers"]
+    pad_layers = cfg["connect_to_pad_layers"]
     connects = cfg.get("connects") or []
-    try:
-        offset = float(cfg.get("core_offset_um"))
-        clearance = float(cfg.get("min_clearance_um"))
-        widths_f = [float(v) for v in widths]
-        spacings_f = [float(v) for v in spacings]
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"invalid pdn_ring numeric config: {exc}") from exc
-    names = list(layers) + list(pad_layers) + [n for pair in connects
-                                               for n in (pair or [])]
-    if (len(layers) != 2 or len(widths_f) != 2 or len(spacings_f) != 2
-            or not pad_layers or offset <= 0 or clearance < 0
-            or any(v <= 0 for v in widths_f + spacings_f)
-            or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", str(n))
-                   for n in names)
-            or any(not isinstance(pair, (list, tuple)) or len(pair) != 2
-                   for pair in connects)):
-        raise ValueError("invalid pdn_ring shape or layer identifier")
 
     layer_s = " ".join(str(v) for v in layers)
     width_s = " ".join(str(v) for v in widths_f)
@@ -7108,7 +7091,6 @@ def _pad_connected_ring_tcl(pdk: "PdkConfig") -> Dict[str, str]:
     pad_layer_s = " ".join(str(v) for v in pad_layers)
     # Each side contains two rails on its one routing layer.  Use the larger
     # orientation footprint so one conservative offset is valid on all sides.
-    footprint = max(2.0 * widths_f[i] + spacings_f[i] for i in range(2))
     setup = f"""  # Pad-connected ring: fit the PDK recipe to placed ODB geometry.
   set _vibeic_ring_extend {{}}
   set _vibeic_pad_ring_active 0
@@ -16688,7 +16670,8 @@ def _padring_required_die_um(project: Optional[Path]) -> Tuple[Optional[int], st
     return side_i, str(req.get("basis") or "")
 
 
-def _padring_core_inset_um(project: Optional[Path]
+def _padring_core_inset_um(project: Optional[Path],
+                           pdk: Optional["PdkConfig"] = None
                            ) -> Tuple[Optional[float], str]:
     """How far the placeable core must stay back from the die edge.
 
@@ -16706,7 +16689,12 @@ def _padring_core_inset_um(project: Optional[Path]
     a corner cell at its larger dimension because it occupies both sides) plus
     the PDK's declared PAD_EDGE_SPACING — and records it as
     `die_required_um.ring_depth_um` beside the die side that comes from the
-    same three terms. Nothing here recomputes it.
+    same three terms. Nothing here recomputes the pad depth. When the PDK
+    declares a pad-connected PDN ring, reserve its full configured offset,
+    two-rail footprint and pad clearance BEYOND that depth. Otherwise rows can
+    leave less room than the unchanged runtime PDN recipe requires and the
+    entire grid is refused before pdngen (rbsub7: 5.12 um vs 5.36 um).
+    Die and pad locations remain decided by their existing producers.
 
     FAIL-CLOSED. A ring whose record carries no depth, or names a master with
     no LEF SIZE, returns None with the reason; the caller REFUSES rather than
@@ -16734,11 +16722,19 @@ def _padring_core_inset_um(project: Optional[Path]
             f"guessed")
     depth = req.get("ring_depth_um")
     try:
-        return float(depth), ""
+        inset = float(depth)
     except (TypeError, ValueError):
         return None, ("the pad-ring producer record states no "
                       "`die_required_um.ring_depth_um`, so the core inset "
                       "cannot be derived from the ring that exists")
+    cfg = getattr(pdk, "pdn_ring", None) or {}
+    if cfg:
+        try:
+            offset, clearance, _, _, footprint = _pdn_ring_dimensions(cfg)
+        except ValueError as exc:
+            return None, str(exc)
+        inset += offset + footprint + clearance
+    return inset, ""
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -27684,7 +27680,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # ring's measured depth instead — see `_padring_core_inset_um` for the
     # 3104 Shorts the flat inset produced.
     core_pad = 10
-    _ring_inset, _ring_inset_why = _padring_core_inset_um(project)
+    _ring_inset, _ring_inset_why = _padring_core_inset_um(project, pdk)
     if _ring_inset_why:
         return StepResult(
             "pnr", "FAIL", time.time() - t0,
@@ -27695,7 +27691,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         core_pad = int(math.ceil(_ring_inset))
         print(f"[phase3] core inset := {core_pad} um — the pad ring's own "
               f"measured depth (deepest placed ring master + the library's "
-              f"declared PAD_EDGE_SPACING), not the historical 10 um: a core "
+              f"declared PAD_EDGE_SPACING) plus the configured PDN ring "
+              f"offset, footprint and clearance where present: a core "
               f"that overlaps the ring places cells under the pads' own "
               f"obstruction", file=sys.stderr)
 
@@ -41640,6 +41637,11 @@ _DECLARED_SIGNOFF_GATES = (
      "reports/phase3/sta/post_route_signoff_corner.json", ()),
     ("sta_record", "sta_corner_record_completeness_check.py",
      "reports/phase3/sta/sta_corner_record_completeness.json", ()),
+    # Step 23 declares this report, but the inline executor must produce and
+    # consume it too. Its real subprocess verdict reaches the same release
+    # fold as the other sign-off gates; missing inputs remain BLOCKED.
+    ("sta_architectural_residual", "sta_architectural_residual_check.py",
+     "reports/phase3/sta/architectural_residual.json", ()),
     ("em_signoff", "em_report_check.py",
      "reports/phase3/em_signoff.json", ("--mode", "em")),
     # STEP 37.5ic, WIRED IN 2026-09-04 ON THE FLOW OWNER'S INSTRUCTION.

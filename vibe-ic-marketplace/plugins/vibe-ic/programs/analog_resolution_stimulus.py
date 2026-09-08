@@ -167,6 +167,42 @@ def _num(value: float) -> str:
     return f"{value:.10g}"
 
 
+# ── the record the tone needs ──────────────────────────────────────────────
+def coherent_record_samples(osr: float) -> Dict[str, Any]:
+    """The SHORTEST record, in converter samples, over which this file will
+    emit a coherent in-band tone at oversampling ratio `osr`.
+
+    THE ONE DEFINITION of that floor. `plan` refuses below it, and whatever
+    SIZES the record has to be able to read it — a producer that derives a
+    record length from its own restatement of this arithmetic and a consumer
+    that refuses against this one is the shape vibe-ic#2200 reports: a record
+    of 512 samples where the tone needed 13824, and no way for the second
+    number to reach the first. So the number is exported rather than inlined
+    twice.
+
+    `samples` is the ACTUAL threshold, not a convenient lower bound: the tone
+    bin is always ODD, so a reader who lengthens a record to the even closed
+    form gets the same refusal back (measured at OSR 256: 13824 works, 12288
+    does not — vibe-ic#2188).
+
+    Raises `ValueError` when `osr` is not a usable ratio, because "no record
+    length satisfies this" is the honest answer to an undeclared signal band
+    and a silently-assumed 1 grades a modulator over the noise it shaped out
+    on purpose.
+    """
+    if isinstance(osr, bool) or not isinstance(osr, (int, float)):
+        raise ValueError(f"osr must be a number, got {osr!r}")
+    osr = float(osr)
+    if not math.isfinite(osr) or osr < 1.0:
+        raise ValueError(f"osr must be finite and at least 1, got {osr!r}")
+    min_bin = _MIN_SIGNAL_CYCLES + (1 - _MIN_SIGNAL_CYCLES % 2)
+    return {"samples": int(math.ceil(2.0 * osr * HARMONICS_IN_BAND * min_bin)),
+            "osr": osr,
+            "min_tone_bin": min_bin,
+            "min_signal_cycles": _MIN_SIGNAL_CYCLES,
+            "harmonics_in_band": HARMONICS_IN_BAND}
+
+
 # ── what the DESIGN declares ───────────────────────────────────────────────
 def resolution_axis(spec: Any) -> Optional[Dict[str, Any]]:
     """`{"axis", "enob_bits", "osr"}` when the block's bound spec declares an
@@ -442,13 +478,14 @@ def plan(deck_text: str, spec: Any, topology: Any) -> Dict[str, Any]:
     # refused: at OSR 256 it is 13824 samples against 12288, and 12288 comes
     # back UNMEASURED. Caught by bisecting the real refusal rather than by
     # reading this arithmetic (vibe-ic#2188).
-    min_bin = _MIN_SIGNAL_CYCLES + (1 - _MIN_SIGNAL_CYCLES % 2)
-    required = int(math.ceil(2.0 * osr * HARMONICS_IN_BAND * min_bin))
+    floor = coherent_record_samples(osr)
+    min_bin = floor["min_tone_bin"]
+    required = floor["samples"]
     record.update({"record_s": stop_s, "samples_available": samples,
                    "band_bins": band_bins, "samples_required": required,
-                   "min_signal_cycles": _MIN_SIGNAL_CYCLES,
+                   "min_signal_cycles": floor["min_signal_cycles"],
                    "min_tone_bin": min_bin,
-                   "harmonics_in_band": HARMONICS_IN_BAND})
+                   "harmonics_in_band": floor["harmonics_in_band"]})
     highest = int(band_bins // HARMONICS_IN_BAND)
     tone_bin = highest if highest % 2 else highest - 1
     if tone_bin < _MIN_SIGNAL_CYCLES:

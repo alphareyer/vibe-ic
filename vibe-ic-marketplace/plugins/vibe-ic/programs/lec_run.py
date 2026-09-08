@@ -3513,7 +3513,8 @@ def classify_exhausted_resource(*, budget_exhausted: bool, stopped: bool,
         return (EXHAUSTED_MEMORY,
                 f"the container cgroup's oom_kill counter rose by "
                 f"{oom_kill_delta} during this attempt{cap}")
-    if not budget_exhausted and not stopped:
+    # Admission exhaustion prevents another attempt; it did not stop this one.
+    if not stopped:
         return (None, "")
     if returncode == 124:
         # GNU `timeout`'s SIGTERM expiry is unambiguous: the clock ended it.
@@ -3535,9 +3536,7 @@ def classify_exhausted_resource(*, budget_exhausted: bool, stopped: bool,
         return (EXHAUSTED_NOT_MEASURED,
                 f"this attempt was stopped (rc={returncode}) and no probe "
                 "identified the resource")
-    return (EXHAUSTED_WALL_CLOCK,
-            "the step's attempt-admission budget was spent and no attempt was "
-            "killed")
+    return (None, "")
 
 
 # ---------------------------------------------------------------------------
@@ -3688,6 +3687,9 @@ def annotate_step_budget(report: Dict, budget: "StepBudget", *,
         memory_max_bytes=_cause.get("memory_max_bytes"))
     report["exhausted_resource"] = _resource
     report["exhausted_resource_evidence"] = _evidence or None
+    # A legacy killed_by_budget flag records a stop, not its cause: the old
+    # timeout return-code set also includes OOM/SIGKILL. Without kill_cause,
+    # keep the classifier's NOT_MEASURED rather than inventing clock evidence.
     # THE FIELD THAT SAYS WHICH OF THE TWO IT WAS. `step_budget_exhausted`
     # answers "is the ADMISSION budget spent" and stays exactly what it was --
     # true of a proof that legitimately ran long and then DECIDED as much as of

@@ -139,6 +139,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _analog_producer_common as _pc  # noqa: E402
 import pdk_analog_device_params as _pdp  # noqa: E402
 import pdk_analog_layout_minima as _minima  # noqa: E402
+import analog_transient_record as _record  # noqa: E402
 
 PRODUCER = "analog_a2_topology_emit"
 
@@ -2962,9 +2963,55 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
                 # at a reset the counter itself produced.
                 "tmeas_ns": "window_clocks * 1000 / fclk * 1.02",
                 "twin2_ns": "window_clocks * 2000 / fclk",
-                "tstop_ns": "window_clocks * 2000 / fclk",
+                # THE WHOLE RECORD, and it is NOT the same statement as the
+                # window above. `record_clocks` is DERIVED from every row of
+                # `record_constraints` below — the deck's own two windows AND
+                # the graded spec set — by `analog_transient_record`, which
+                # publishes it into `constants` and refuses when the rows do
+                # not close. This expression used to be a second copy of
+                # `twin2_ns`, so the record was sized by the metric the deck
+                # measures and no spec the block is GRADED on could ever
+                # lengthen it: 512 samples where an in-band tone needed 13824
+                # (vibe-ic#2200). The measurement window is untouched — every
+                # `meas` card above still runs from `tmeas_ns` to `twin2_ns`,
+                # so lengthening the record changes no number this deck
+                # already reports; it only stops truncating the record before
+                # the graded measurement can be taken over it.
+                "tstop_ns": "record_clocks * 1000 / fclk",
                 "tstep_ns": "1000 / fclk / 200",
             },
+            # EVERY CONSTRAINT THAT BEARS ON THE RECORD LENGTH, as data.
+            # `analog_transient_record.derive` takes the LONGEST and names
+            # which row bound it; a row whose own inputs the declaration does
+            # not bind is a REFUSAL, never a row that is quietly dropped so the
+            # remaining ones can produce a shorter answer.
+            "record_constraints": [
+                {"name": "conversion_windows",
+                 "clocks_expr": "window_clocks * 2",
+                 "why": ("the deck measures the bitstream density over the "
+                         "SECOND conversion window, because the counter's "
+                         "power-up state is not declared and its first reset "
+                         "can fall anywhere inside the first one. Two windows "
+                         "is what that measurement needs and it is the floor "
+                         "this deck has always run")},
+                {"name": "coherent_in_band_tone",
+                 # The graded spec set, spelled as the consumer spells it:
+                 # a block graded on an effective resolution is graded by an
+                 # FFT over this record, and that is a constraint ON the
+                 # record whether or not the deck's own metric needs it.
+                 "applies_when_spec_declares_any": ["enob", "sndr", "sndr_db",
+                                                    "snr", "snr_db"],
+                 "needs_spec_bound": ["osr"],
+                 "clocks_rule": "coherent_in_band_tone",
+                 "why": ("a block the declaration grades on an effective "
+                         "resolution is graded by an FFT of this record over "
+                         "its signal band, and a coherent in-band tone needs "
+                         "an ODD bin at least `min_signal_cycles` whole cycles "
+                         "long with its harmonics still inside the band. That "
+                         "fixes a minimum number of samples given the declared "
+                         "OSR. The arithmetic is imported from the producer "
+                         "that refuses below it, never restated here")},
+            ],
             "conditions": [
                 "supply = {supply} V (the bound core supply when the spec "
                 "carries one, else the PDK's nominal)",
@@ -3388,6 +3435,14 @@ def entry_admission(lib: Dict[str, Any], spec_values: Dict[str, float],
                     f"structure only for {list(allowed)}. Selecting the "
                     f"nearest admitted value would emit a document that "
                     f"reads as this design's and is another one's")})
+    # THE RECORD LENGTH IS A REQUIREMENT TOO. A block whose declaration
+    # triggers a record constraint the declaration does not then bind cannot
+    # have a record derived for it AT ALL — there is no length that puts a tone
+    # inside a band nobody declared — so it is refused here, by name, next to
+    # every other unmet requirement, rather than sized to the rows that are
+    # left and shipped short (vibe-ic#2200).
+    refusals.extend(_record.unbound_inputs(lib.get("testbench") or {},
+                                           spec_values))
     env = admission_env(lib, spec_values, measured)
     for spec in (lib.get(REQUIRES_DERIVED_KEY) or []):
         if not isinstance(spec, dict):
@@ -4768,6 +4823,33 @@ def build_ir(block: str, btype: str, entry: Dict[str, Any],
                   if stage_rec else []):
         if isinstance(_grec, dict) and _grec.get("window_clocks"):
             constants["window_clocks"] = float(_grec["window_clocks"])
+    # THE TRANSIENT RECORD, derived from EVERY declared constraint. Published
+    # as a constant for the same reason `window_clocks` is: the expression
+    # grammar has no `max` and no way to reach the graded spec set, so nothing
+    # downstream could derive it. Placed here, right after `window_clocks`,
+    # because the conversion-window row is written against it.
+    #
+    # An entry that declares no `record_constraints` derives nothing and takes
+    # the identical path it always did — which is every entry but the one whose
+    # record vibe-ic#2200 reports.
+    record_derivation: Optional[Dict[str, Any]] = None
+    _tb = lib.get("testbench")
+    if isinstance(_tb, dict) and _tb.get(_record.CONSTRAINTS_KEY):
+        _renv: Dict[str, float] = {
+            k: float(v) for k, v in constants.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)}
+        _renv.update({k: float(v) for k, v in knobs.items()
+                      if isinstance(v, (int, float))
+                      and not isinstance(v, bool)})
+        _renv.update({k: float(v) for k, v in spec_values.items()
+                      if isinstance(v, (int, float))
+                      and not isinstance(v, bool)})
+        record_derivation = _record.derive(
+            _tb, _renv, spec_values,
+            consumer_expr=(_tb.get("env_exprs") or {}).get("tstop_ns"))
+        constants[_record.RECORD_CONSTANT] = float(
+            record_derivation[_record.RECORD_CONSTANT])
+
     clamps = floor_geometry_to_pdk(lib, constants, devices, role_minima)
 
     # A DEVICE THE PDK CANNOT DRAW BECOMES N THAT IT CAN — see
@@ -4846,6 +4928,13 @@ def build_ir(block: str, btype: str, entry: Dict[str, Any],
         # generically instead of holding a second per-type table.
         "testbench": (dict(lib["testbench"]) if isinstance(
             lib.get("testbench"), dict) else None),
+        # None for an entry that declares no `record_constraints`. Present, it
+        # is the whole derivation of the transient span: every constraint that
+        # bears on it, the value each one asks for, and which one BOUND it —
+        # so a reader is never left to re-derive why a record is the length it
+        # is, and a record that grew because the graded spec set asked for it
+        # says so in the artefact.
+        "record_derivation": record_derivation,
         "selection_basis": ("block_type_and_spec" if spec_values
                             else "block_type_only"),
         "design_inputs_bound": sorted(spec_values.keys()),
@@ -5460,6 +5549,15 @@ def emit_for_block(project: Path, entry: Dict[str, Any],
                       fam, params, role_minima, _minima.minima_source(pdk),
                       measured, measured_prov,
                       role_maxima, _minima.maxima_source(pdk))
+    except _record.RecordNotDerivable as exc:
+        # Same shape as an admission refusal, and for the same reason: a deck
+        # whose record this declaration cannot size must not reach disk. The
+        # alternative — emitting the record the deck's own metric happens to
+        # need — is exactly what vibe-ic#2200 reports, and it PASSES the A2
+        # gate, because that gate measures vocabulary and a short record has
+        # the same vocabulary as a long one.
+        return _gap("TRANSIENT_RECORD_NOT_DERIVABLE", exc.refusals,
+                    informational)
     except CapacitorNotRealisable as exc:
         # Same shape as an admission refusal, and for the same reason: a
         # topology whose sizing this PDK cannot realise must not reach disk.

@@ -88,6 +88,49 @@ def test_the_python_half_still_resolves_with_no_shell_hint():
     assert out.returncode == 0 and "ok" in out.stdout
 
 
+def _docstring_ids(tree):
+    """The `ast.Constant` nodes that are PROSE, not call-site values.
+
+    A DOCSTRING IS NOT A CALL SITE, and reading one as a hard-code is how this
+    guard accused an honest landing. MEASURED (czmainred9, v1.19.60): `8000bb196`
+    documented WHY `_local_exec_mode` exists by quoting the measurement that
+    produced it —
+
+        `yosys`, `openroad` and `klayout` were all on PATH in that same process
+        (/foss/tools/bin/yosys, /foss/tools/bin/openroad,
+        /foss/tools/klayout/klayout)
+
+    — inside the function's docstring. That is a report of where the tools were
+    found on one host, it invokes nothing, and this scan named it as a site that
+    hard-codes the base tree. The string it flagged does not even reach a
+    process; a fix "for" it could only have been to delete the evidence.
+
+    A string in EXPRESSION POSITION executed for no effect is the same class
+    `gate_is_wired_check.executable_text` drops for the same reason, and that
+    docstring rule is the one respelled here: this scan needs the NODE (to keep
+    `node.lineno` for the message) where `executable_text` returns text, so it
+    cannot call it — but it must not disagree with it either. Comments never
+    reach `ast` at all, so only docstrings need saying.
+
+    THIS IS NOT A CARVE-OUT FOR THE OFFENDING LINE. Any string that a call site
+    passes still counts, including one built or bound in the same function;
+    `test_a_hard_code_in_a_call_site_is_still_caught` plants one and proves it.
+    """
+    out = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list) or not isinstance(
+                node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                       ast.ClassDef)):
+            continue
+        first = body[0] if body else None
+        if (isinstance(first, ast.Expr)
+                and isinstance(first.value, ast.Constant)
+                and isinstance(first.value.value, str)):
+            out.add(id(first.value))
+    return out
+
+
 def test_no_call_site_hard_codes_the_base_klayout():
     """WIRING, which is where a fix like this leaks.
 
@@ -104,9 +147,12 @@ def test_no_call_site_hard_codes_the_base_klayout():
     """
     src = pathlib.Path(P.__file__).read_text()
     tree = ast.parse(src)
+    docstrings = _docstring_ids(tree)
     offenders = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if id(node) in docstrings:
+                continue                 # PROSE. See `_docstring_ids`.
             v = node.value
             names_base = ("/foss/tools/klayout/" in v
                           or v.endswith("/foss/tools/klayout"))
@@ -115,3 +161,66 @@ def test_no_call_site_hard_codes_the_base_klayout():
     assert not offenders, (
         "these name the BASE klayout tree directly, so the fork never runs "
         "there: " + "; ".join(f"line {l}: {v}" for l, v in offenders))
+
+
+def test_a_hard_code_in_a_call_site_is_still_caught():
+    """MUTATION. The docstring exemption must not be an exemption for anything
+    that runs.
+
+    Both directions on one synthetic module: the SAME path string is invisible
+    in a docstring and an offender everywhere a call site can put it — bound to
+    a name, passed as an argument, built into an f-string, or sitting in a list.
+    Drop `_docstring_ids` and the first assertion fails; widen it to any string
+    constant and every one of the four below goes quiet.
+    """
+    mod = ast.parse(
+        '"""prose: measured at /foss/tools/klayout/klayout on one host."""\n'
+        'BOUND = "/foss/tools/klayout/klayout"\n'
+        'def go(run):\n'
+        '    """also prose about /foss/tools/klayout/klayout."""\n'
+        '    run("/foss/tools/klayout/strmcmp")\n'
+        '    run(f"{PRE}/foss/tools/klayout/x")\n'
+        '    return ["/foss/tools/klayout"]\n')
+    docstrings = _docstring_ids(mod)
+    hits = [n.value for n in ast.walk(mod)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and id(n) not in docstrings
+            and ("/foss/tools/klayout/" in n.value
+                 or n.value.endswith("/foss/tools/klayout"))]
+    assert sorted(hits) == [
+        "/foss/tools/klayout",
+        "/foss/tools/klayout/klayout",
+        "/foss/tools/klayout/strmcmp",
+        "/foss/tools/klayout/x",
+    ], hits
+
+
+def test_the_docstring_rule_agrees_with_the_trees_one_answer():
+    """`_docstring_ids` must not become a SECOND, divergent docstring rule.
+
+    vibe-ic#2169's finding was two implementations of one predicate drifting
+    apart. This asserts the two agree on the real file: every string this scan
+    skips is a string `gate_is_wired_check.executable_text` also removes.
+    """
+    sys.path.insert(0, str(pathlib.Path(P.__file__).parent))
+    import gate_is_wired_check as wiring        # noqa: E402
+
+    path = pathlib.Path(P.__file__)
+    src = path.read_text()
+    kept = wiring.executable_text(path, src)
+    tree = ast.parse(src)
+    lines = src.splitlines()
+    kept_lines = kept.splitlines()
+    docstrings = _docstring_ids(tree)
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Expr)
+                and isinstance(node.value, ast.Constant)
+                and isinstance(node.value.value, str)):
+            continue
+        if id(node.value) not in docstrings:
+            continue
+        lo, hi = node.lineno, (node.end_lineno or node.lineno)
+        assert all(not kept_lines[i].strip()
+                   for i in range(lo - 1, min(hi, len(lines)))), (
+            f"line {lo}-{hi} is a docstring to this scan and executable to "
+            f"gate_is_wired_check.executable_text — the two rules have drifted")

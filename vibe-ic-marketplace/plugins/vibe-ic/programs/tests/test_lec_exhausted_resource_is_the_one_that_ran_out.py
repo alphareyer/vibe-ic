@@ -136,13 +136,12 @@ def test_nothing_ran_out_stays_none():
         oom_kill_delta=0) == (None, "")
 
 
-def test_a_spent_admission_budget_with_no_kill_still_reports_time():
-    """NO-LEAK the other way: the case the old literal was RIGHT about keeps
-    its answer."""
+def test_a_spent_admission_budget_with_no_kill_names_no_exhausted_resource():
+    """#2212: a completed attempt is not a clock stop, even beyond admission."""
     res, why = lec_run.classify_exhausted_resource(
         budget_exhausted=True, stopped=False, returncode=0, oom_kill_delta=0)
-    assert res == lec_run.EXHAUSTED_WALL_CLOCK
-    assert "admission" in why
+    assert res is None
+    assert why == ""
 
 
 # --------------------------------------------------------------------------
@@ -186,9 +185,11 @@ def test_the_report_names_memory_when_the_attempt_was_oom_killed():
 def test_the_report_says_not_measured_when_no_probe_ran():
     """Every caller predating the probe lands here -- and lands on the honest
     answer, not on the old default."""
-    rep = lec_run.annotate_step_budget(
-        {}, _budget_with(None), stopped=True)
-    assert rep["exhausted_resource"] == lec_run.EXHAUSTED_NOT_MEASURED
+    for stopped in (None, True):
+        rep = lec_run.annotate_step_budget(
+            {}, _budget_with(None), stopped=stopped)
+        assert rep["exhausted_resource"] == lec_run.EXHAUSTED_NOT_MEASURED
+        assert "no probe identified" in rep["exhausted_resource_evidence"]
 
 
 # --------------------------------------------------------------------------

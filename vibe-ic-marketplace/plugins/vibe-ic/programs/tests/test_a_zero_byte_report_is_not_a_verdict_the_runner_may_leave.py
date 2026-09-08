@@ -30,6 +30,7 @@ if str(PROGRAMS) not in sys.path:
     sys.path.insert(0, str(PROGRAMS))
 
 import phase3_one_shot_runner as R  # noqa: E402
+from not_verified_tier import skip_not_verified  # noqa: E402
 
 SRC = (PROGRAMS / "phase3_one_shot_runner.py").read_text()
 
@@ -139,8 +140,15 @@ _LOOP_CLEANUP = ("    set _ant_now [_vic_ant_nets $_ant_rf $_nv]\n"
 def _tclsh():
     exe = shutil.which("tclsh") or shutil.which("tclsh8.6")
     if not exe:
-        pytest.skip("no tclsh on PATH — the emitted antenna block cannot be "
-                    "driven here (the pinned EDA image ships tclsh 8.6)")
+        # DECLARED, not merely skipped (vibe-ic#1128). Without the stamp this
+        # reads to the roll-up as a question that was ASKED and passed, and the
+        # failure mode the tier exists for is exactly a host that quietly has
+        # no tclsh: the antenna block is then never driven and nothing says so.
+        skip_not_verified(
+            "no tclsh on PATH — the emitted antenna block cannot be driven "
+            "here",
+            "run this inside the pinned EDA image, which ships tclsh 8.6, or "
+            "install tclsh8.6 on this host")
     return exe
 
 

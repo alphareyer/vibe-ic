@@ -50,10 +50,14 @@ EXIT CODES
 0 = scanned >=1 transcript, no violations
 1 = blindness violation(s) found (printed + optional --json)
 2 = nothing to audit (no transcript files found) / usage error
-3 = AUDIT_ERROR — an auditor-internal exception (e.g. an OSError while
-    classifying a path) aborted the scan. This is a TOOL failure, NOT a
-    blindness violation; the consumer must NEVER fold it into a FAIL
-    verdict (ORGANIC-20260607-blindness-audit-jsonl-crash, #480).
+3 = AUDIT_ERROR / NOT MEASURED — either an auditor-internal exception
+    (e.g. an OSError while classifying a path) aborted the scan, or the
+    scan completed but a tool-CALL envelope carried no readable actionable
+    payload, so the commands inside it were never inspected (#2205). Both
+    are TOOL failures, NOT blindness violations; the consumer must NEVER
+    fold them into a FAIL verdict (ORGANIC-20260607, #480) — and must never
+    treat them as a PASS either: an envelope the auditor could not read is
+    not certified clean, it is unmeasured.
 
 JSONL TRANSCRIPTS (Claude-Code export)
 --------------------------------------
@@ -67,6 +71,24 @@ non-existent path → OSError: File name too long → a genuinely-blind run
 mis-scored as a blindness FAIL (#480). Non-JSON lines fall back to the
 legacy plain-text line scan, so READ-line / fs-access-log transcripts still
 work unchanged.
+
+TOOL-CALL ENVELOPES (#2205)
+---------------------------
+The structured field scan above recognises a tool call by FIELD NAME
+(command / script / file_path / …). That is a token match standing in for a
+grammar: a Codex `custom_tool_call` carries its command in a STRING `input`,
+and a `function_call` in a JSON-serialised `arguments` blob — neither name is
+in the list, so the command existed and NOTHING was harvested; the transcript
+was counted, never read, and the audit printed PASS. Two rules close it:
+  * a tool-CALL frame is recognised STRUCTURALLY, by its own declared `type`
+    (anything ending in tool_use / tool_call / function_call), so the
+    recognised set follows what the transcripts actually contain; declared
+    input/arguments payloads are read using command/path fields, and serialized
+    function arguments must decode as JSON objects. Frame descriptions and
+    tool outputs are not executed commands;
+  * a call frame that yields NO readable actionable payload is refused BY
+    NAME (shape, tool, transcript:line) as NOT MEASURED, exit 3. Whatever the
+    audit cannot read, it does not certify.
 """
 from __future__ import annotations
 
@@ -229,7 +251,8 @@ _LIST_FIELDS = ("paths", "files", "file_paths")
 _CMD_FIELDS = ("command", "cmd", "pattern", "query", "script")
 
 
-def _harvest_tool_strings(obj) -> list[str]:
+def _harvest_tool_strings_cov(obj, calls: list[dict] | None = None
+                              ) -> tuple[list[str], list[dict]]:
     """Recursively pull tool-use input string VALUES (paths + commands) out of
     a parsed JSON transcript object. We walk the whole structure so it works
     regardless of the exact Claude-Code envelope nesting (message.content[]
@@ -238,6 +261,8 @@ def _harvest_tool_strings(obj) -> list[str]:
 
     def walk(node):
         if isinstance(node, dict):
+            if _is_call_frame(node) or _is_tool_result(node):
+                return
             # tool_use blocks carry the actionable fields under "input"; but be
             # liberal and also scan path/command fields wherever they appear.
             inp = node.get("input")
@@ -260,6 +285,27 @@ def _harvest_tool_strings(obj) -> list[str]:
                 walk(v)
 
     walk(obj)
+    # ENVELOPE COVERAGE (#2205): a tool-CALL frame is recognised STRUCTURALLY
+    # (by its own declared type), not by a hand-kept list of envelope shapes,
+    # and its declared payload is harvested — including a payload that is
+    # itself a string (Codex `custom_tool_call.input`) or a JSON-serialised
+    # argument blob (`function_call.arguments`). The field-name scan above
+    # stays as-is for everything OUTSIDE a call frame.
+    uninspected: list[dict] = []
+    for frame in _iter_call_frames(obj):
+        got = _harvest_frame_strings(frame)
+        record = {
+            "envelope_type": frame.get("type"),
+            "tool_name": frame.get("name") or frame.get("tool_name"),
+            "call_id": frame.get("call_id") or frame.get("id"),
+            "keys": sorted(k for k in frame if isinstance(k, str)),
+        }
+        if calls is not None:
+            calls.append({**record, "inspected": bool(got), "fragments": got})
+        if got:
+            out.extend(got)
+        else:
+            uninspected.append(record)
     # de-dup while preserving first-seen order: the same field can be reached
     # both as a sub-scope of its parent and again when recursion descends into
     # it as its own node, so a single read would otherwise be flagged twice.
@@ -269,7 +315,102 @@ def _harvest_tool_strings(obj) -> list[str]:
         if s not in seen:
             seen.add(s)
             uniq.append(s)
-    return uniq
+    return uniq, uninspected
+
+
+def _harvest_tool_strings(obj) -> list[str]:
+    """Back-compat wrapper: the harvested strings only (no coverage)."""
+    return _harvest_tool_strings_cov(obj)[0]
+
+
+# --- envelope coverage (#2205) ------------------------------------------
+# A tool-CALL frame declares its own kind in `type`. Any type ENDING in a
+# call word is a frame whose payload the agent actually executed; a
+# `..._output` / `..._result` twin is the tool's ANSWER, not an action, and
+# is deliberately not required to be inspected (it is not an access the
+# agent chose). Recognition is derived from the frame's declared type — no
+# list of vendor envelope names to keep in sync.
+_CALL_TYPE_RE = re.compile(r"(?:tool_use|tool_call|function_call)$", re.I)
+
+# Frame bookkeeping keys: identity/status, never an actionable payload.
+_FRAME_META_KEYS = frozenset({
+    "type", "name", "tool_name", "id", "call_id", "tool_use_id", "status",
+    "role", "index", "timestamp", "encrypted_content",
+})
+
+
+def _is_call_frame(node) -> bool:
+    t = node.get("type") if isinstance(node, dict) else None
+    return isinstance(t, str) and bool(_CALL_TYPE_RE.search(t))
+
+
+def _is_tool_result(node) -> bool:
+    t = node.get("type") if isinstance(node, dict) else None
+    return isinstance(t, str) and t.endswith(("tool_result", "tool_call_output",
+                                             "function_call_output"))
+
+
+def _iter_call_frames(obj) -> list[dict]:
+    found: list[dict] = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if _is_tool_result(node):
+                return
+            if _is_call_frame(node):
+                found.append(node)
+                return
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(obj)
+    return found
+
+
+def _harvest_frame_strings(node, depth: int = 0) -> list[str]:
+    """Read declared call payloads, never frame descriptions or opaque fields.
+
+    Function arguments must decode as a JSON object. Custom tool inputs may
+    be scripts. Structured inputs retain the legacy command/path vocabulary;
+    an unsupported shape has no inspection credit.
+    """
+    if depth > 12:
+        return []
+    if _is_call_frame(node):
+        kind = node["type"]
+        payload = node.get("input")
+        if kind.endswith("function_call"):
+            try:
+                payload = json.loads(node.get("arguments"))
+            except (ValueError, TypeError):
+                return []
+            if not isinstance(payload, dict):
+                return []
+        elif isinstance(payload, str) and kind.endswith("tool_call"):
+            return [payload] if payload.strip() else []
+        if not isinstance(payload, dict):
+            return []
+        return _harvest_frame_strings(payload, depth + 1)
+    if isinstance(node, dict):
+        out: list[str] = []
+        for k, v in node.items():
+            if k in _PATH_FIELDS + _CMD_FIELDS and isinstance(v, str):
+                if v.strip():
+                    out.append(v)
+            elif k in _LIST_FIELDS and isinstance(v, list):
+                out.extend(x for x in v if isinstance(x, str) and x.strip())
+            elif isinstance(v, (dict, list)):
+                out += _harvest_frame_strings(v, depth + 1)
+        return out
+    if isinstance(node, list):
+        out = []
+        for v in node:
+            out += _harvest_frame_strings(v, depth + 1)
+        return out
+    return []
 
 
 # v0.3.8 — ORGANIC #504 ROUND-2: shell-token semantics for two
@@ -400,14 +541,21 @@ def _scan_fragment(frag: str, ds: str, allowed: list[str], source: str,
 
 
 def audit_text(text: str, dataset: Path, allowed: list[str],
-               source: str) -> list[dict]:
+               source: str, uninspected: list[dict] | None = None,
+               coverage: list[dict] | None = None
+               ) -> list[dict]:
     """Pure scanner: return violation dicts for one transcript text.
 
     Each line is parsed with json.loads first; a Claude-Code JSONL line is
     scanned through its STRUCTURED tool-use input field values (so a legal
     prompt read does not concatenate with the rest of the JSON, #480). A line
     that is not a JSON object falls back to the legacy raw-line text scan
-    (READ-lines / fs-access logs / prose mentions)."""
+    (READ-lines / fs-access logs / prose mentions).
+
+    `uninspected`, when given, receives one record per tool-CALL frame from
+    which ZERO actionable strings could be harvested (#2205). Those are NOT
+    blindness violations — they are the auditor declaring, by name, which
+    envelope it could not read; the caller must refuse to certify."""
     findings: list[dict] = []
     ds = str(dataset).rstrip("/")
     for ln_no, line in enumerate(text.splitlines(), 1):
@@ -419,8 +567,31 @@ def audit_text(text: str, dataset: Path, allowed: list[str],
             except (ValueError, TypeError):
                 obj = None                     # non-JSON / truncated → fallback
         if obj is not None:
-            for frag in _harvest_tool_strings(obj):
-                findings += _scan_fragment(frag, ds, allowed, source, ln_no)
+            calls: list[dict] = []
+            frags, unread = _harvest_tool_strings_cov(obj, calls)
+            call_fragments = {f for c in calls for f in c["fragments"]}
+            for frag in frags:
+                if frag not in call_fragments:
+                    findings += _scan_fragment(frag, ds, allowed, source, ln_no)
+            for call in calls:
+                fragments = call.pop("fragments")
+                call.update({"transcript": source, "line": ln_no})
+                if coverage is not None:
+                    coverage.append(call)
+                for frag in dict.fromkeys(fragments):
+                    for finding in _scan_fragment(frag, ds, allowed, source, ln_no):
+                        finding.update({"tool_name": call["tool_name"],
+                                        "call_id": call["call_id"]})
+                        findings.append(finding)
+            # #2205 — an envelope we could not read is NOT clean. Record it by
+            # name (shape + tool + where); never a silent pass, and never a
+            # fabricated blindness violation either.
+            if uninspected is not None:
+                for u in unread:
+                    findings_free = dict(u)
+                    findings_free.update({"transcript": source, "line": ln_no,
+                                          "evidence": stripped[:300]})
+                    uninspected.append(findings_free)
         else:
             findings += _scan_fragment(line, ds, allowed, source, ln_no)
     return findings
@@ -439,6 +610,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--allowed-glob", action="append", default=[],
                     help="override allowed basename glob (repeatable)")
     ap.add_argument("--json", help="write findings JSON here")
+    ap.add_argument("--coverage-json",
+                    help="write the envelope-coverage census here (#2205): "
+                         "every tool-call frame the auditor could not read")
     a = ap.parse_args(argv)
 
     srcs = list(a.transcripts)
@@ -454,6 +628,8 @@ def main(argv: list[str] | None = None) -> int:
     dataset = Path(a.dataset).resolve()
     allowed = _allowed_globs(a.bench, a.allowed_glob)
     findings: list[dict] = []
+    uninspected: list[dict] = []
+    coverage: list[dict] = []
     for f in files:
         try:
             text = f.read_text(errors="replace")
@@ -466,7 +642,8 @@ def main(argv: list[str] | None = None) -> int:
         # AUDIT_ERROR with its own exit code; it must NEVER be reported as a
         # blindness violation (#480).
         try:
-            findings += audit_text(text, dataset, allowed, str(f))
+            findings += audit_text(text, dataset, allowed, str(f),
+                                   uninspected=uninspected, coverage=coverage)
         except Exception as exc:  # noqa: BLE001
             print(f"blindness_audit: AUDIT_ERROR — internal failure while "
                   f"scanning {f}: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -474,6 +651,30 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.json:
         Path(a.json).write_text(json.dumps(findings, indent=2) + "\n")
+    if a.coverage_json:
+        Path(a.coverage_json).write_text(json.dumps({
+            "transcripts": len(files),
+            "tool_calls": len(coverage),
+            "inspected_tool_calls": sum(c["inspected"] for c in coverage),
+            "uninspected_tool_calls": len(uninspected),
+            "calls": coverage,
+            "uninspected": uninspected,
+        }, indent=2) + "\n")
+
+    if uninspected:
+        shapes = sorted({str(u.get("envelope_type")) for u in uninspected})
+        print(f"blindness_audit: NOT MEASURED — {len(uninspected)} tool-call "
+              f"envelope(s) carried no readable actionable payload, so those "
+              f"commands were never inspected. Unread envelope shape(s): "
+              f"{shapes}. This is an auditor COVERAGE gap, NOT a blindness "
+              f"violation: the run is not blindness-verified and must not be "
+              f"scored as canonical until the auditor can read these frames.",
+              file=sys.stderr)
+        for u in uninspected[:20]:
+            print(f"  [uninspected-tool-call] {u['transcript']}:{u['line']} -> "
+                  f"type={u.get('envelope_type')!r} "
+                  f"tool={u.get('tool_name')!r} keys={u.get('keys')}",
+                  file=sys.stderr)
 
     if findings:
         print(f"blindness_audit: FAIL — {len(findings)} violation(s) across "
@@ -484,7 +685,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  [{fd['kind']}] {loc} -> {what}\n"
                   f"      {fd['class']}\n      | {fd['evidence']}")
         return EXIT_VIOLATION
-    print(f"blindness_audit: PASS — {len(files)} transcript(s) clean "
+    if uninspected:
+        # Nothing PROVEN wrong, but the audit did not read everything the
+        # agent ran — refusing to certify is the only honest verdict (#2205).
+        return EXIT_AUDIT_ERROR
+    print(f"blindness_audit: PASS — {len(files)} transcript(s) clean; "
+          f"{sum(c['inspected'] for c in coverage)} tool-call(s) inspected "
           f"[allowed prompt globs: {allowed}]")
     return EXIT_CLEAN
 

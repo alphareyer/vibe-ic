@@ -60,6 +60,8 @@ import ast
 import sys
 from pathlib import Path
 
+import pytest
+
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 
@@ -278,7 +280,10 @@ REGISTER = PROGRAMS / "gate_is_wired_baseline.json"
 
 def _run(baseline, *args):
     return subprocess.run(
-        [_sys.executable, str(GATE), "--baseline", str(baseline), *args],
+        # `--root` NAMED (vibe-ic#2199): these arms drive the register over the
+        # SHIPPED plugin, and the gate no longer guesses that from its own path.
+        [_sys.executable, str(GATE), "--root", str(PROGRAMS.parent),
+         "--baseline", str(baseline), *args],
         capture_output=True, text=True)
 
 
@@ -341,3 +346,121 @@ def test_a_migration_with_the_rule_id_already_current_records_nothing(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     assert "nothing to migrate" in r.stdout, r.stdout
     assert p.read_text(encoding="utf-8") == before, "the register was written"
+
+
+def test_omitting_the_stage_map_is_refused_and_not_answered_with_an_empty_dict():
+    """vibe-ic#2189, closed at the RULE rather than at one caller.
+
+    The defect was never that one caller forgot the map — it was that
+    forgetting it produced a well-formed, wrong, SILENT answer: `{}`, which is
+    indistinguishable from "this source invokes nothing". Both directions:
+
+      * omitted        -> TypeError naming the omission;
+      * declared       -> the old permissive behaviour, on purpose, for a
+                          population of names that are not gates.
+
+    The declared arm matters as much as the refusal: a guard that only refuses
+    would push the next caller into inventing a fake map, which is the same
+    wrong answer with a longer path to it.
+    """
+    caller = ("import demo_check\n"
+              "def go():\n"
+              "    return demo_check.main()\n")
+    with pytest.raises(TypeError) as exc:
+        G.py_invocations(caller, {"demo_check"})
+    assert "vibe-ic#2189" in str(exc.value)
+
+    declared = G.py_invocations(caller, {"demo_check"},
+                                _allow_no_stage_map=True)
+    assert declared, (
+        "the declared escape must still ANSWER — a `main()` caller credits "
+        "under the default map, and if this is empty the escape is useless "
+        "and the refusal above is the only behaviour left")
+
+
+def test_every_shipped_call_site_passes_the_stage_map():
+    """The refusal above is a rule; this is the sweep that says it holds NOW.
+
+    Derived from the tree, not from a list: every `py_invocations(...)` call in
+    every python file under the plugin must carry a third argument or the
+    explicit keyword. A hand-written list of call sites goes stale silently.
+    """
+    root = PROGRAMS.parent
+    offenders = []
+    for f in sorted(root.rglob("*.py")):
+        if f.name == "gate_is_wired_check.py":
+            continue                              # the definition itself
+        try:
+            tree = ast.parse(f.read_text(errors="replace"))
+        except SyntaxError:
+            continue
+        # A CALL INSIDE `with pytest.raises(...)` IS THE REFUSAL BEING TESTED.
+        # Derived from the syntax, not excused by file or line number, so the
+        # next such arm is covered and a real caller never is.
+        proving = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.With):
+                continue
+            for item in node.items:
+                c = item.context_expr
+                if (isinstance(c, ast.Call)
+                        and isinstance(c.func, ast.Attribute)
+                        and c.func.attr == "raises"):
+                    proving.update(
+                        range(node.lineno, (node.end_lineno or node.lineno) + 1))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = (fn.id if isinstance(fn, ast.Name)
+                    else fn.attr if isinstance(fn, ast.Attribute) else None)
+            if name != "py_invocations" or node.lineno in proving:
+                continue
+            kw = {k.arg for k in node.keywords}
+            if len(node.args) < 3 and not ({"stages", "_allow_no_stage_map"} & kw):
+                offenders.append(f"{f.relative_to(root)}:{node.lineno}")
+    assert not offenders, (
+        "these call sites would now raise, and before vibe-ic#2189's rule "
+        f"landed they silently got `{{}}`: {offenders}")
+
+
+def test_the_call_site_sweep_can_actually_see_an_offender():
+    """The sweep above is a ZERO, and a zero from an instrument nobody proved
+    can see is not a measurement (this repo's own
+    `gate_zero_denominator_refuses_check`, #564).
+
+    The same walk, run over source that carries one offender and one proving
+    arm, must return exactly the offender.
+    """
+    src = ("import pytest\n"
+           "def a():\n"
+           "    return G.py_invocations(text, names)\n"
+           "def b():\n"
+           "    with pytest.raises(TypeError):\n"
+           "        G.py_invocations(text, names)\n"
+           "def c():\n"
+           "    return G.py_invocations(text, names, stage_map)\n")
+    tree = ast.parse(src)
+    proving = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.With):
+            continue
+        for item in node.items:
+            c = item.context_expr
+            if (isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                    and c.func.attr == "raises"):
+                proving.update(
+                    range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = (fn.id if isinstance(fn, ast.Name)
+                else fn.attr if isinstance(fn, ast.Attribute) else None)
+        if name != "py_invocations" or node.lineno in proving:
+            continue
+        if len(node.args) < 3 and not (
+                {"stages", "_allow_no_stage_map"} & {k.arg for k in node.keywords}):
+            hits.append(node.lineno)
+    assert hits == [3], hits

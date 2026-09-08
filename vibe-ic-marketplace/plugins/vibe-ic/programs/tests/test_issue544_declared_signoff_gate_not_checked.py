@@ -178,6 +178,11 @@ def _project(tmp: Path, *, violated_corner: bool = False,
     sta.mkdir(parents=True)
     (sta / "post_route_timing.rpt").write_text(
         _STA_RPT_VIOLATED if violated_own_report else _STA_RPT)
+    # Supply the separate report read by the now-executed architectural gate.
+    # Keep the same nominal verdict as this fixture's owning STA report.
+    (sta / "sta_spef_based.rpt").write_text(
+        "STA_BASIS: POST_ROUTE_SPEF\n" +
+        (_STA_RPT_VIOLATED if violated_own_report else _STA_RPT))
     if violated_corner:
         (sta / "sta_spef_multicorner.rpt").write_text(_MULTICORNER_VIOLATED)
     rpt = tmp / "reports" / "phase3"

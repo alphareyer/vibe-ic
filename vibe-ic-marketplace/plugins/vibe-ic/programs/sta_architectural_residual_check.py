@@ -222,7 +222,10 @@ def analyse_report(text: str) -> Tuple[Optional[str], List[Dict[str, object]]]:
     corner = None
     corner_banner = None
     corner_denial = None
-    for chunk in re.split(r"(?=^Startpoint: )", text, flags=re.M):
+    # Section banners delimit the preceding path too. Otherwise the next
+    # corner's banner sits at the END of that path's chunk and relabels it
+    # before classify_path runs (the last SS setup path becomes FF hold).
+    for chunk in re.split(r"(?=^Startpoint: |^===\s)", text, flags=re.M):
         for cm in _CORNER_RE.finditer(chunk):
             banner = cm.group(1)
             pm = _PROCESS_RE.search(banner)

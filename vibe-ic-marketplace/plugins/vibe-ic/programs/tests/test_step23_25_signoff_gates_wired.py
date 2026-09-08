@@ -134,6 +134,11 @@ def _project(tmp: Path) -> Path:
     sta = tmp / "phase3" / "stage3" / "sta"
     sta.mkdir(parents=True)
     (sta / "post_route_timing.rpt").write_text(_STA_RPT)
+    # The architectural residual reader consumes a declared post-route SPEF
+    # report. A fixture claiming complete sign-off must supply that input;
+    # missing-input behavior is tested separately and remains BLOCKED.
+    (sta / "sta_spef_based.rpt").write_text(
+        "STA_BASIS: POST_ROUTE_SPEF\n" + _STA_RPT)
     rpt = tmp / "reports" / "phase3"
     rpt.mkdir(parents=True)
     (rpt / "em.rpt").write_text(_EM_RPT)
@@ -254,6 +259,7 @@ def test_runner_exposes_every_declared_signoff_gate():
         "sta_report_check.py",
         "post_route_signoff_corner_check.py",
         "sta_corner_record_completeness_check.py",
+        "sta_architectural_residual_check.py",
         "em_report_check.py",
         # Step 37.5ic. Both tape-out ladders existed and neither ran until this
         # entry: no runner invoked the gate, so a phase-3 verdict was reached

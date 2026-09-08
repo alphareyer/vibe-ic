@@ -1129,14 +1129,23 @@ run "programs load when loaded by path" "$ROOT" \
   --programs "$ROOT/vibe-ic-marketplace/plugins/vibe-ic/programs" --jobs 8
 # vibe-ic#381 — a checker only its own unit test ever runs has zero coverage of
 # real inputs: the fixture proves the logic, never the artefacts.
-run "checker execution wiring"          "$ROOT" python3 "$PG/checker_execution_wiring_audit.py"
+#
+# THE PROGRAM COMES FROM THE RUNTIME, THE TREE FROM THE SUBJECT (vibe-ic#2199).
+# Through a61a8e4b4778 this line passed no subject at all and the audit walked
+# its own `__file__` for one -- so on every arrangement where `$ROOT` and
+# `$RUNTIME_ROOT` are two different trees it measured the instrument and
+# published the answer as a verdict about the subject.
+run "checker execution wiring"          "$ROOT" python3 "$PG/checker_execution_wiring_audit.py" --repo-root "$ROOT"
 # vibe-ic#693 — and the question NOTHING was asking: is a gate CONSULTED AT ALL?
 # `gate_skip_routing_check` reports "98 unrouted skip path(s) in 53 gate(s);
 # published inventory holds 98 in 53" — balanced, over a 53-gate population that
 # contains none of the 35 gates no automatic verdict invokes. Its scope is its
 # coverage. A gate nothing runs produces no verdict, and the tree looks the same
 # either way.
-run "gates are wired to something"      "$ROOT" python3 "$PG/gate_is_wired_check.py"
+# `--root "$PLUGIN"`, not `"$ROOT"`: this gate's subject is the PLUGIN root
+# (it wants `programs/` directly under it) and it derives the repo root from
+# there itself. Same split as the line above -- vibe-ic#2199.
+run "gates are wired to something"      "$ROOT" python3 "$PG/gate_is_wired_check.py" --root "$PLUGIN"
 # AND THE ONE THAT COVERS EVERY PROGRAM, NOT A FILENAME-SHAPED SUBSET.
 #
 # The two gates above are the tree's wiring auditors and neither scans the whole
@@ -1198,7 +1207,10 @@ run "per-source record merges"          "$ROOT" python3 "$PG/per_source_record_m
 # question, not a presence one — the defect function CALLS the stripper, for a
 # SIBLING variable, and scans the raw one. Three detectors were built and
 # retracted on that basis; this one carries the known instance as a test.
-run "declaration scans strip comments"  "$ROOT" python3 "$PG/hdl_declaration_scan_strips_comments_check.py"
+# `--root "$PLUGIN"` for the same reason as the two gates above (vibe-ic#2199):
+# the subject is the plugin root, and without it this scanned the runtime's
+# tree and named its offenders as the subject's.
+run "declaration scans strip comments"  "$ROOT" python3 "$PG/hdl_declaration_scan_strips_comments_check.py" --root "$PLUGIN"
 # ORGANIC #686 — a macro OBS is the vendor's statement of where the integrator
 # may not put metal. It is not in the PDK deck, so sign-off DRC cannot see a
 # crossing; and the wire is on the right net, so a connectivity audit cannot

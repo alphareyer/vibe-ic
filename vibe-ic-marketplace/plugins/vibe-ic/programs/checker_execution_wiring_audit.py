@@ -1105,8 +1105,7 @@ def audit(plugin: Path, repo_root: Path, rule=None) -> dict:
             "no_runner_at_all": sorted(unrun),
             "skill_only": sorted(skill_only),
             "not_determined": sorted(undetermined),
-            "machine_runners": machine_runners,
-            "passed": True}
+            "machine_runners": machine_runners}
 
 
 def skill_only_register(path: Path) -> Dict[str, str]:
@@ -1388,11 +1387,21 @@ def _baseline_rule(p: Path) -> Optional[str]:
 
 
 def _resolve(repo_root: Path):
+    """The plugin under `repo_root`, or None. NEVER this program's own.
+
+    THE SECOND HALF OF vibe-ic#2199, in the same code path. This used to fall
+    back to `Path(__file__).resolve().parent.parent` when the named root
+    carried no plugin layout — so a caller that DID name a subject, and named
+    one this program could not read, was answered about the instrument's tree
+    instead of being told. That is the same substitution as the missing
+    `--repo-root` default, reached by a different door, and it is silent in
+    exactly the same way.
+
+    None means "the tree you named has no plugin layout", and `main` says so
+    and names the tree. An unreadable subject is not a subject.
+    """
     plugin = repo_root / "vibe-ic-marketplace" / "plugins" / "vibe-ic"
-    if (plugin / "programs").is_dir():
-        return plugin
-    here = Path(__file__).resolve().parent.parent
-    return here if (here / "programs").is_dir() else None
+    return plugin if (plugin / "programs").is_dir() else None
 
 
 #: The credit rule this build measures under, stamped into the register and
@@ -1531,7 +1540,13 @@ def _migrate(bl: Path, prev, now, plugin: Path, root: Path,
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    ap.add_argument("--repo-root", default=None)
+    ap.add_argument("--repo-root", default=None,
+                    help="THE TREE UNDER AUDIT. Required: there is no default, "
+                         "because the only default available is this "
+                         "program's own location, and a run that substitutes "
+                         "the instrument's tree for the subject's answers "
+                         "confidently about a tree nobody asked about "
+                         "(vibe-ic#2199)")
     ap.add_argument("--json", dest="json_out")
     ap.add_argument("--baseline", default=None)
     ap.add_argument("--write-baseline", action="store_true")
@@ -1557,13 +1572,61 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     here = Path(__file__).resolve()
-    root = (Path(a.repo_root).resolve() if a.repo_root
-            else next((b for b in here.parents
-                       if (b / "vibe-ic-marketplace").is_dir()), here.parents[3]))
+
+    def _record(rc: int, payload: Dict[str, object]) -> int:
+        """Write the machine record, with `passed` DERIVED from `rc`.
+
+        vibe-ic#2199. `audit()` used to return `"passed": True` as a LITERAL
+        and the record was dumped BEFORE the verdict was computed, so a run
+        that exited 1 published a JSON saying it had passed. Two readers of one
+        run got two answers, and the one that looked like a measurement was the
+        wrong one.
+
+        EVERY exit that can write this file goes through here, refusals
+        included: a refusal that leaves LAST run's record on disk is the same
+        disagreement one run later. There is no expression here that can be
+        true while the process exits non-zero, and
+        `test_issue2199_subject_root_is_named_and_passed_is_derived` refuses
+        any assignment to this key whose right-hand side is a constant.
+        """
+        if a.json_out:
+            payload["passed"] = rc == 0
+            Path(a.json_out).write_text(json.dumps(payload, indent=2) + "\n")
+        return rc
+
+    def _refuse(rc: int, why: str) -> int:
+        """Say why on stderr AND in the record, then exit `rc`."""
+        print(why, file=sys.stderr)
+        return _record(rc, {"program": "checker_execution_wiring_audit",
+                            "refused": why})
+
+    # NO DEFAULT SUBJECT. vibe-ic#2199.
+    #
+    # This used to walk `__file__`'s parents for a `vibe-ic-marketplace/` and
+    # audit whatever it found -- the RUNTIME's tree. `repo_hygiene_gates.sh`
+    # passed no `--repo-root`, so on every arrangement where the subject and
+    # the runtime are two different trees (the fresh-worktree hygiene shape of
+    # #2008, the A/B base arm, every `gate_mutation_fixtures.invoke` subject)
+    # this audit measured the instrument and published a verdict about the
+    # subject. MEASURED on 8HD-4 at a61a8e4b4778: with the subject carrying an
+    # unwired checker the runtime did not, the finding set did not name it.
+    #
+    # A REFUSAL IS THE CORRECT ANSWER, and a cleverer default is not. "I was
+    # not told what to measure" is true, actionable and cannot be mistaken for
+    # a clean tree; a substituted subject reads exactly like a real verdict.
+    if not a.repo_root:
+        return _refuse(2, (
+            "[CANNOT DETERMINE] checker_execution_wiring_audit: no "
+            "--repo-root. This audit has no default subject and will not "
+            "invent one: the only tree it could reach without being told is "
+            "its OWN, and a verdict about the instrument's tree is "
+            "indistinguishable from a verdict about yours. Name the tree "
+            "under audit (vibe-ic#2199)."))
+    root = Path(a.repo_root).resolve()
     plugin = _resolve(root)
     if plugin is None:
-        print("[SKIP] checker_execution_wiring_audit: plugin layout not found.")
-        return 2
+        return _refuse(2, f"[SKIP] checker_execution_wiring_audit: plugin "
+                          f"layout not found under {root}.")
 
     bl = Path(a.baseline) if a.baseline else here.parent / _BASELINE_NAME
     base = _load_baseline(bl)
@@ -1582,11 +1645,15 @@ def main(argv=None) -> int:
                 "before asking this audit to attribute anything. See "
                 "vibe-ic#1705.",
                 file=sys.stderr)
-            return 2
+            return _record(2, {
+                "program": "checker_execution_wiring_audit",
+                "refused": f"no readable baseline at {bl} (vibe-ic#1705)"})
 
     rep = audit(plugin, root)
-    if a.json_out:
-        Path(a.json_out).write_text(json.dumps(rep, indent=2) + "\n")
+
+    def _emit(rc: int) -> int:
+        """The verdict half of `_record`: this run's findings, plus its rc."""
+        return _record(rc, rep)
     # THE DISCLOSURE IS EVALUATED BEFORE THE FINDING, because it changes the
     # population the finding is computed over. `unwired_by_decision` entries
     # whose PROOF this audit re-derived and found still true are not debt: they
@@ -1614,14 +1681,14 @@ def main(argv=None) -> int:
                  - _excused_names)
 
     if a.migrate_from:
-        return _migrate(bl, base, now, plugin, root, a.migrate_from,
-                        _excused_names)
+        return _emit(_migrate(bl, base, now, plugin, root, a.migrate_from,
+                              _excused_names))
 
     if a.write_baseline:
         if a.scope_expanded is not None and len(a.scope_expanded.strip()) < 30:
             print("[FAIL] --scope-expanded needs a real reason (>=30 chars) "
                   "naming what the audit now looks at that it did not before.")
-            return 1
+            return _emit(1)
         prev = base
         if (prev is not None and len(now) > len(prev)
                 and a.scope_expanded is None):
@@ -1630,7 +1697,7 @@ def main(argv=None) -> int:
                   f"real runner is a regression, not a fact to record. If the "
                   f"audit now LOOKS at more than it did, say so with "
                   f"--scope-expanded '<why>'.")
-            return 1
+            return _emit(1)
         prev_triage = {}
         if bl.is_file():
             try:
@@ -1656,7 +1723,7 @@ def main(argv=None) -> int:
              "unwired_by_decision": _load_decisions(bl)},
             indent=2, ensure_ascii=False) + "\n")
         print(f"wrote {bl} ({len(now)} entr(ies))")
-        return 0
+        return _emit(0)
 
     print(f"checker_execution_wiring_audit: {rep['checkers']} checker-shaped "
           f"program(s) of {rep['all_programs']} in programs/")
@@ -1764,12 +1831,12 @@ def main(argv=None) -> int:
         for line in stale:
             print(line)
     if new or paid or stale or gestured or proof_failed:
-        return 1
+        return _emit(1)
     print(f"[PASS] no NEW test-only checker ({len(now)} recorded)"
           + (f"; {len(decisions)} deliberately unwired, disclosed"
              f" ({len(excused)} with a proof re-derived this run)"
              if decisions else ""))
-    return 0
+    return _emit(0)
 
 
 if __name__ == "__main__":

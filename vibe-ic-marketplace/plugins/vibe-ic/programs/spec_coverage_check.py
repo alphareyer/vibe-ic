@@ -1673,7 +1673,41 @@ _HANDSHAKE_RE = re.compile(
 # ---------------------------------------------------------------------------
 # Checklist extraction (DETERMINISTIC, structural)
 # ---------------------------------------------------------------------------
+def _requirement_text(text: str) -> str:
+    """Remove typed provenance subtrees before prose requirement extraction.
+
+    Keep requirement-bearing keys and values verbatim. Only JSON object fields
+    explicitly labelled provenance are metadata; the word in ordinary prose,
+    and hardware fields such as ``truncated``, retain their existing meaning.
+    L-doc directories concatenate JSON documents, so consume the whole stream
+    before using the typed view. Mixed prose is left unchanged.
+    """
+    def requirements(value):
+        if isinstance(value, dict):
+            return {key: requirements(item) for key, item in value.items()
+                    if key != "provenance" and not key.endswith("_provenance")}
+        if isinstance(value, list):
+            return [requirements(item) for item in value]
+        return value
+
+    decoder = json.JSONDecoder()
+    remaining = text.strip()
+    documents = []
+    try:
+        while remaining:
+            value, end = decoder.raw_decode(remaining)
+            if not isinstance(value, (dict, list)):
+                return text
+            documents.append(value)
+            remaining = remaining[end:].lstrip()
+    except (ValueError, TypeError):
+        return text
+    return "\n".join(json.dumps(requirements(value), ensure_ascii=False)
+                     for value in documents)
+
+
 def extract_checklist(spec_text: str) -> List[ChecklistItem]:
+    spec_text = _requirement_text(spec_text)
     items: List[ChecklistItem] = []
 
     # --- Ports (structural; reuse the canonical contract extractor) ---
@@ -2756,6 +2790,8 @@ def run(stations: dict, rtl_text: Optional[str], tb_text: Optional[str],
     # explicit interface absence across the station merge: generated L-doc
     # boilerplate such as "reset behavior verification" must not turn a source
     # declaration of "no reset pin" into an RTL/TB requirement.
+    stations = {key: _requirement_text(value) if value else value
+                for key, value in stations.items()}
     user_prompt = stations.get("user_prompt") or ""
     reset_explicitly_absent = bool(
         re.search(r"\b(?:reset|rst|por)\b", user_prompt, re.IGNORECASE)

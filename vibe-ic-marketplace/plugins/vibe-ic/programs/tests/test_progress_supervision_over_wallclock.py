@@ -702,9 +702,11 @@ def test_a_spent_admission_budget_does_not_contradict_a_verdict():
     assert "neither proven equivalent nor proven different" not in ex, (
         "a PASS report also says the designs were never compared:\n" + ex)
     assert "bounds attempts, not runtime" in ex
-    # the machine-readable fields stay true and unchanged
+    # Admission was spent, but this completed proof exhausted no resource.
     assert rep["step_budget_exhausted"] is True
-    assert rep["exhausted_resource"] == "wall_clock_seconds"
+    assert rep["step_budget_stopped_this_proof"] is False
+    assert rep["exhausted_resource"] is None
+    assert rep["exhausted_resource_evidence"] is None
 
 
 def test_a_spent_budget_with_no_verdict_still_says_nothing_was_decided():
@@ -763,11 +765,11 @@ def test_an_inconclusive_that_COMPLETED_is_decided_not_a_clock():
         "the decided narrative does not carry the counts the verdict rests on")
     assert "the ENGINE's" in ex
     assert rep["step_budget_stopped_this_proof"] is False
-    # The machine-readable admission-budget facts are UNCHANGED: the budget
-    # really was spent. What was missing is the field that says whether it
-    # stopped THIS proof.
+    # The admission budget really was spent; neither it nor the completed
+    # engine result is evidence that a resource stopped THIS proof (#2212).
     assert rep["step_budget_exhausted"] is True
-    assert rep["exhausted_resource"] == "wall_clock_seconds"
+    assert rep["exhausted_resource"] is None
+    assert rep["exhausted_resource_evidence"] is None
 
 
 def test_a_frontend_abort_is_not_told_that_a_ladder_ran():

@@ -285,6 +285,18 @@ def test_extract_ports_runs_the_same_one_implementation():
             assert set(p) == {"name", "dir", "width"}
 
 
+def _phantoms(mutant_span, text, fixed_span):
+    """Names the MUTANT span mints that the FIXED span does not.
+
+    Both answers are taken inside one call so nothing else can move between
+    them; `_MODULE_SPAN` is restored by the caller's `finally`.
+    """
+    PPX._MODULE_SPAN = fixed_span
+    fixed = _names(text)
+    PPX._MODULE_SPAN = mutant_span
+    return [n for n in _names(text) if n not in fixed]
+
+
 def test_mutation_restoring_the_bare_word_module_span_re_reddens_the_phantoms():
     """MUTATION. The exact pre-#2060 expression. Restore it and running English
     becomes a Verilog region again — the phantoms come straight back, which is
@@ -293,17 +305,40 @@ def test_mutation_restoring_the_bare_word_module_span_re_reddens_the_phantoms():
     saved = PPX._MODULE_SPAN
     try:
         PPX._MODULE_SPAN = pre_2060
-        mutated = _names(_CODE_BLOCK_INPUT)
-        assert "the" in mutated, mutated
-        assert "changes" in mutated, mutated
-        mutated_bst = _names(_MERMAID_THEN_VERILOG)
-        assert "temp_data" in mutated_bst, mutated_bst
+        phantoms = {
+            "_CODE_BLOCK_INPUT":
+                _phantoms(pre_2060, _CODE_BLOCK_INPUT, saved),
+            "_MERMAID_THEN_VERILOG":
+                _phantoms(pre_2060, _MERMAID_THEN_VERILOG, saved),
+        }
     finally:
         PPX._MODULE_SPAN = saved
-    # …and the restore really restored: the fixed answer is back.
-    assert "the" not in _names(_CODE_BLOCK_INPUT)
-    assert "changes" not in _names(_CODE_BLOCK_INPUT)
-    assert "temp_data" not in _names(_MERMAID_THEN_VERILOG)
+
+    # THE SET, NOT A HAND-LISTED WORD. This row used to name `the`, `changes`
+    # and `temp_data`, and it went red on pristine main at v1.19.60 because a
+    # LATER, INDEPENDENT improvement to the extractor stopped reading the bare
+    # article `the` as a port name — measured czmainred9. The mutation was
+    # still live and still minting phantoms; only one of the three names this
+    # row happened to pick had gone. A guard written as a word list decays
+    # every time the thing it guards gets better, and the red it then files
+    # says "the mutation is dead" when the mutation is not.
+    #
+    # What the row is FOR is the DIFFERENCE: running English inside the span
+    # yields port names that the fixed span does not yield. That is asserted
+    # as a set, per fixture, and it is non-empty in both — which is the whole
+    # claim, and it survives the extractor getting stricter again.
+    for label, got in phantoms.items():
+        assert got, (
+            f"{label}: the pre-#2060 span minted NO phantom this fixture's "
+            f"fixed span does not also mint, so this mutation proves nothing "
+            f"about the fix. The mutation is dead — repair it, do not delete "
+            f"the row.")
+    # …and the restore really restored: not one phantom survives the fixed
+    # span, which is the other direction and the reason the row is a check.
+    assert [n for n in phantoms["_CODE_BLOCK_INPUT"]
+            if n in _names(_CODE_BLOCK_INPUT)] == []
+    assert [n for n in phantoms["_MERMAID_THEN_VERILOG"]
+            if n in _names(_MERMAID_THEN_VERILOG)] == []
 
 
 def test_the_mutation_is_reached_and_the_fixed_span_still_reads_real_code():

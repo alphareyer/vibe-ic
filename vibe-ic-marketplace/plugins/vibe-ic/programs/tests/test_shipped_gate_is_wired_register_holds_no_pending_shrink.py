@@ -103,7 +103,10 @@ _MOVED_HELPER = "corpus_guard"
 
 
 def _run(*extra, baseline=None):
-    cmd = [sys.executable, str(_CHECK)]
+    # `--root` NAMED (vibe-ic#2199). Every arm through this helper asks about
+    # the SHIPPED tree -- that is the whole subject of this file -- and the gate
+    # no longer substitutes its own location for a subject nobody stated.
+    cmd = [sys.executable, str(_CHECK), "--root", str(_PROGRAMS.parent)]
     if baseline is not None:
         cmd += ["--baseline", str(baseline)]
     return _pr.run(cmd + list(extra), capture_output=True, text=True)

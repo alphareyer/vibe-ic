@@ -10864,17 +10864,49 @@ def _v455_expand_pin_token(tok: str) -> List[str]:
     return [tok]
 
 
-def _v455_dir_from_line(line: str) -> str:
+#: ORGANIC #2198 — the v455 direction vocabulary, split by the KIND of
+#: evidence each entry is.  The table was always ordered, but the order hid
+#: that its four rows answer two DIFFERENT questions:
+#:
+#:   EXPLICIT — the sentence STATES a direction ("inputs", "outputs").  That
+#:              is a READING of the design input.
+#:   ROLE     — the sentence names a port ROLE and the direction is INFERRED
+#:              from the noun ("clocks" → input, "supply" → inout).  That is
+#:              a GUESS about the design input, not a reading of it.
+#:
+#: Keeping them in one flat table made a guess and a reading indistinguishable
+#: at the point of decision, which is why a role noun could out-rank the only
+#: direction word a sentence contained and nothing could say so.  Same rows,
+#: same order, same answers — only the provenance is now recoverable.
+#: chip-AGNOSTIC: English port vocabulary only, no chip/vendor literal.
+_V455_EXPLICIT_DIR: tuple = (
+    (r"\binputs?\b", "input"),
+    (r"\boutputs?\b", "output"),
+)
+_V455_ROLE_DIR: tuple = (
+    (r"\bclocks?\b", "input"),
+    (r"\b(suppl|reference|vdd|power|ground)\w*", "inout"),
+)
+
+
+def _v455_dir_from_line_tiered(line: str) -> tuple:
+    """``(direction, tier)`` where tier is ``explicit`` / ``role`` / ``none``.
+
+    The direction returned is IDENTICAL to `_v455_dir_from_line`'s, which is
+    now a thin projection of this function — the tier is the only new fact.
+    """
     low = line.lower()
-    if re.search(r"\binputs?\b", low):
-        return "input"
-    if re.search(r"\boutputs?\b", low):
-        return "output"
-    if re.search(r"\bclocks?\b", low):
-        return "input"
-    if re.search(r"\b(suppl|reference|vdd|power|ground)\w*", low):
-        return "inout"
-    return "unspecified"
+    for _pat, _dir in _V455_EXPLICIT_DIR:
+        if re.search(_pat, low):
+            return _dir, "explicit"
+    for _pat, _dir in _V455_ROLE_DIR:
+        if re.search(_pat, low):
+            return _dir, "role"
+    return "unspecified", "none"
+
+
+def _v455_dir_from_line(line: str) -> str:
+    return _v455_dir_from_line_tiered(line)[0]
 
 
 #: Clause separators for the prose-bullet interface shape. A datasheet bullet
@@ -10889,20 +10921,74 @@ def _v455_dir_from_line(line: str) -> str:
 _RE_V455_CLAUSE_SPLIT = re.compile(r"[,;]|，|；")
 
 
+def _v455_clause_for_span(line: str, pos: int) -> str:
+    """The clause of `line` that contains the token starting at `pos`."""
+    start = 0
+    for sep in _RE_V455_CLAUSE_SPLIT.finditer(line):
+        if sep.start() > pos:
+            return line[start:sep.start()]
+        start = sep.end()
+    return line[start:]
+
+
 def _v455_dir_for_span(line: str, pos: int, line_dir: str) -> str:
     """Direction for the token at `pos`, resolved from ITS OWN clause.
 
     Falls back to the whole-line answer when the token's clause states no
     direction of its own, so a single-clause line behaves exactly as before.
     """
-    start = 0
-    for sep in _RE_V455_CLAUSE_SPLIT.finditer(line):
-        if sep.start() > pos:
-            clause_dir = _v455_dir_from_line(line[start:sep.start()])
-            return clause_dir if clause_dir != "unspecified" else line_dir
-        start = sep.end()
-    clause_dir = _v455_dir_from_line(line[start:])
-    return clause_dir if clause_dir != "unspecified" else line_dir
+    return _v455_dir_for_span_ex(line, pos, line_dir)[0]
+
+
+def _v455_dir_for_span_ex(line: str, pos: int, line_dir: str) -> tuple:
+    """``(direction, conflict)`` for the token at `pos`.
+
+    ORGANIC #2198 — the direction is UNCHANGED from `_v455_dir_for_span`;
+    `conflict` is the second half, and it is the whole point.
+
+    A clause whose direction comes from the ROLE table (`clocks?`,
+    `suppl|reference|…`) has INFERRED a direction from a noun.  When the LINE
+    that clause sits in states an EXPLICIT direction word that DISAGREES, the
+    extractor is not resolving an ambiguity — it is silently overruling the
+    only direction the design input actually stated, with a guess.  Before
+    #2198 that produced two different `mode` values for two halves of one
+    sentence, both carrying that same sentence as their `description`, with
+    nothing on either to say which was read and which was inferred.
+
+    This does NOT re-decide the direction.  Which reading is right is a
+    property of the design input, and the input is genuinely ambiguous — a
+    modulator clock is conventionally an input, and this bullet groups it with
+    the outputs.  §4.05 forbids settling that from any reference.  What a
+    program CAN decide from the sentence alone is that the sentence and the
+    noun disagree, and that is what it now records.
+
+    `conflict` is None whenever no such disagreement exists, so every
+    single-clause line, every clause that states its own direction word, and
+    every line with no direction word at all behave exactly as before.
+    chip-AGNOSTIC: punctuation + the English vocabulary already in the table.
+    """
+    clause = _v455_clause_for_span(line, pos)
+    clause_dir, clause_tier = _v455_dir_from_line_tiered(clause)
+    if clause_dir == "unspecified":
+        return line_dir, None
+    if clause_tier != "role":
+        return clause_dir, None
+    # the clause INFERRED its direction from a role noun — ask whether the
+    # line it belongs to STATES a direction, and whether the two agree.
+    line_stated, line_tier = _v455_dir_from_line_tiered(line)
+    if line_tier != "explicit" or line_stated == clause_dir:
+        return clause_dir, None
+    return clause_dir, {
+        "emitted": clause_dir,
+        "emitted_from": "clause_role_noun",
+        "alternative": line_stated,
+        "alternative_from": "line_direction_word",
+        "clause": clause.strip()[:160],
+        "line": line.strip()[:160],
+        "reason": ("the clause names a port ROLE and the direction was "
+                   "inferred from that noun; the sentence's own direction "
+                   "word says the opposite"),
+    }
 
 
 def _v455_interface_pins(extracted: Dict[str, str]) -> List[dict]:
@@ -11007,9 +11093,14 @@ def _v455_interface_pins(extracted: Dict[str, str]) -> List[dict]:
                     # A pipe-table row's direction lives in its own cell and is
                     # already row-scoped; only the PROSE bullet shape needs the
                     # per-clause resolution.
-                    tok_dir = (direction if _is_port_table_row
-                               else _v455_dir_for_span(line, _tm.start(),
-                                                       direction))
+                    # #2198 — a pipe-table row's direction is READ from its
+                    # own cell, so it can never be a role-noun inference and
+                    # carries no conflict.
+                    if _is_port_table_row:
+                        tok_dir, tok_conflict = direction, None
+                    else:
+                        tok_dir, tok_conflict = _v455_dir_for_span_ex(
+                            line, _tm.start(), direction)
                     expanded = _v455_expand_pin_token(tok)
                     # aliases attach only to a single (non-banked) canonical tok
                     tok_aliases = (alias_for.get(tok, [])
@@ -11047,7 +11138,7 @@ def _v455_interface_pins(extracted: Dict[str, str]) -> List[dict]:
                                 or _short_drop):
                             continue
                         seen.add(name)
-                        out.append({
+                        _entry = {
                             "name": name,
                             "mode": tok_dir,
                             "aliases": list(tok_aliases),
@@ -11058,7 +11149,19 @@ def _v455_interface_pins(extracted: Dict[str, str]) -> List[dict]:
                             "function": _infer_pin_function(name, ""),
                             "description": line.strip()[:160],
                             "_extraction": "backticked_interface_v455",
-                        })
+                        }
+                        # ORGANIC #2198 — a direction INFERRED from a role
+                        # noun against the sentence's own direction word is
+                        # marked, and BOTH readings are recorded, so a
+                        # consumer can see it was guessed rather than read.
+                        # Added only on conflict: an unmarked pin keeps the
+                        # exact key set it had before.  `low_confidence` is
+                        # the key this repo already uses for an extraction
+                        # the extractor is not sure of.
+                        if tok_conflict is not None:
+                            _entry["low_confidence"] = True
+                            _entry["direction_conflict"] = dict(tok_conflict)
+                        out.append(_entry)
     return out
 
 
@@ -50257,6 +50360,17 @@ def gen_l9_integration_spec(project: Path,
                 _v = p.get(_k)
                 if _v is not None:
                     entry_l9[_k] = _v
+            # ORGANIC #2198 — a pin whose DIRECTION was inferred from a role
+            # noun against its own sentence's direction word carries
+            # `low_confidence` + both readings at L1.  L9 is the layer every
+            # downstream consumer actually reads, and this projection is a
+            # WHITELIST — an un-forwarded marker is a marker that does not
+            # exist.  Forward it here and at the twin projection so the two
+            # producers of L9.top_ports cannot disagree about it.
+            for _k in ("low_confidence", "direction_conflict"):
+                _v = p.get(_k)
+                if _v is not None:
+                    entry_l9[_k] = _v
             top_module_pins.append(entry_l9)
     else:
         # v1.6.65 — closes issue-#6 v1.6.64 follow-up Bug E thin-input
@@ -61834,6 +61948,13 @@ def _promote_l1_pins_to_l9_ports(
         if es:
             entry["extraction_strategy"] = es
         for _k in ("width", "msb", "lsb", "width_symbolic", "optional"):
+            _v = p.get(_k)
+            if _v is not None:
+                entry[_k] = _v
+        # ORGANIC #2198 — twin of the projection above; see its note.  Both
+        # producers of L9.top_ports forward the direction-conflict marker, so
+        # which one ran cannot change whether the marker survives.
+        for _k in ("low_confidence", "direction_conflict"):
             _v = p.get(_k)
             if _v is not None:
                 entry[_k] = _v

@@ -60,6 +60,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -385,12 +386,96 @@ def _cli_snapshot(project: Path) -> str:
         return ""
 
 
+#: ── the Phase-1 expert hand-off is a TWO-PASS protocol (#2204) ──────────────
+#: `phase1_expert_parse_track` writes a pack, records
+#: `ai_subtrack.status = HANDOFF_EMITTED`, and ends by telling the operator to
+#: "invoke subagent vibe-ic:ic-expert-agent on … and re-run to consume its
+#: answer". A subagent then authors `l_doc_expectations.json` beside the pack.
+#: THE FRONT DOOR COULD NOT PERFORM THAT RE-RUN. `_phase1_decision` answered
+#: "have the L documents been extracted" — the right question for the
+#: EXTRACTOR and the wrong one for a two-pass hand-off — so from the first
+#: successful run onward `L_count >= 13` was permanently true, every
+#: subsequent orchestrator invocation SKIPPED Phase 1, and a delivered expert
+#: answer sat on disk unread forever. MEASURED on the real project: the answer
+#: file present, the track record still `HANDOFF_EMITTED`, `plan` recording
+#: ("phase1", "SKIPPED", 0).
+#:
+#: The distinction the front door needs is a STATE, not a judgement —
+#:     "phase 1 has run"  vs  "phase 1 has run AND its expert answer was read"
+#: — and both halves of it are already on disk, written by the track itself.
+_EXPERT_TRACK_REPORT_REL = "phase1/expert_parse_track.json"
+#: `phase1_expert_parse_track.evaluate`'s `out_dir`, and the `output_target`
+#: its hand-off descriptor names as the file the subagent must author.
+_EXPERT_PACK_DIRNAME = "expert_parse_track_pack"
+_EXPERT_ANSWER_NAME = "l_doc_expectations.json"
+#: The producer's hand-off state. Other statuses alone cannot establish that
+#: the CURRENT answer was read: even ERROR may precede opening the file.
+_EXPERT_AI_UNREAD = "HANDOFF_EMITTED"
+#: The mode `_phase1_decision` returns for that second pass. NOT "docs": the
+#: extraction is done, and re-running it would both cost a full extraction on
+#: every such run and move the L documents the delivered answer was authored
+#: against.
+_P1_MODE_EXPERT_SECOND_PASS = "expert_second_pass"
+
+
+def _expert_answer_pending(project: Path) -> Tuple[bool, str]:
+    """Retry an answer whose bytes have no matching producer read receipt.
+
+    The producer hashes the exact bytes it parses, including refused JSON.
+    An unchanged refused/consumed answer terminates; changed or genuinely
+    unread bytes re-enter. Legacy or malformed reports without a digest get
+    one read to establish identity. Neither mtime nor status is a receipt.
+    This decision grants no execution credit; the expert consumer owns that.
+    """
+    report = _pl.report_path(project, _EXPERT_TRACK_REPORT_REL)
+    answer = report.parent / _EXPERT_PACK_DIRNAME / _EXPERT_ANSWER_NAME
+    if not answer.is_file():
+        # No answer was delivered. There is nothing to consume, and a re-entry
+        # here would re-run the FIRST pass, which is idempotent and already
+        # recorded — the tax, again.
+        return (False, f"no expert answer at {answer}")
+    try:
+        blob = json.loads(report.read_text(errors="replace"))
+    except OSError:
+        return (True, f"{_EXPERT_ANSWER_NAME} exists and the expert track "
+                      f"wrote no report to say it was read")
+    except ValueError as exc:
+        return (True, f"{_EXPERT_ANSWER_NAME} exists and the expert-track "
+                      f"report does not parse ({exc}) — an unreadable record "
+                      f"cannot say the answer was read")
+    ai = blob.get("ai_subtrack") if isinstance(blob, dict) else None
+    status = ai.get("status") if isinstance(ai, dict) else None
+    if status == _EXPERT_AI_UNREAD:
+        return (True, f"{_EXPERT_ANSWER_NAME} exists and the last "
+                      f"expert-track record still says "
+                      f"ai_subtrack.status={status} — an answer arrived that "
+                      f"nobody has read")
+    read_digest = ai.get("answer_sha256") if isinstance(ai, dict) else None
+    if (status not in ("CONSUMED", "CONSUMED_EMPTY", "ANSWER_SCHEMA_MISMATCH", "ERROR")
+            or not isinstance(read_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", read_digest) is None):
+        return (True, "the expert record has no identified reading of this answer")
+    try:
+        current_digest = hashlib.sha256(answer.read_bytes()).hexdigest()
+    except OSError as exc:
+        return (True, f"cannot identify the current expert answer ({exc}); "
+                      "the producer must report the read failure")
+    if current_digest != read_digest:
+        return (True, "the expert answer changed since the producer last read it")
+    return (False, f"the unchanged expert answer was already read "
+                   f"(ai_subtrack.status={status!r})")
+
+
 def _phase1_decision(project: Path, force_skip: bool) -> Tuple[bool, str]:
     """Decide whether to run Phase 1 and in which mode.
 
     Returns (run, mode) where:
       run  -> True if phase1 must run before phase2
       mode -> "prompt" (Path A NL inputs), "docs" (Path B vendor docs),
+              "expert_second_pass" (#2204: the L documents already exist AND a
+              delivered IC-Expert answer is on disk that the expert track's own
+              record says nobody has read — the SECOND pass of the hand-off,
+              which re-runs the expert track ALONE and re-extracts nothing),
               or "" when run is False.
 
     Path-B fix (v-orch): when a project carries POPULATED vendor docs
@@ -411,8 +496,14 @@ def _phase1_decision(project: Path, force_skip: bool) -> Tuple[bool, str]:
                  if hasattr(_pl, "input_doc_dir") else None)
     gd = _pl.generated_docs_dir(project)
     L_count = len(list(gd.glob("L*.json"))) if gd.is_dir() else 0
-    # Already has the full L-doc set → nothing to do.
+    # Already has the full L-doc set → the EXTRACTION has nothing to do.
     if L_count >= 13:
+        # #2204 — but "the L documents exist" is not "Phase 1 is finished".
+        # Phase 1's second track is a two-pass hand-off, and its second pass is
+        # a state this project either is or is not in. Ask.
+        pending, _why = _expert_answer_pending(project)
+        if pending:
+            return (True, _P1_MODE_EXPERT_SECOND_PASS)
         return (False, "")
     def _has_extractable(d: Path) -> bool:
         # #583 — "populated" means at least one real, non-empty,
@@ -946,9 +1037,18 @@ def main() -> int:
     if run_phase1:
         runner = _phase_runner("phase1")
         p1_args = [str(project), "--ic-name", args.ic_name]
+        # #2204 — the second pass of the expert hand-off. The extraction is
+        # ALREADY DONE and its L documents are what the delivered answer was
+        # authored against, so this pass runs the second track and nothing
+        # else. The reason is PRINTED: a Phase-1 re-entry the operator did not
+        # ask for must say which fact on disk caused it.
+        if p1_mode == _P1_MODE_EXPERT_SECOND_PASS:
+            p1_args += ["--second-track-only"]
+            _pending, _why = _expert_answer_pending(project)
+            print(f"[phase1] EXPERT SECOND PASS — {_why}")
         # Path B (vendor docs, no L docs yet): force docs mode so the
         # doc-extraction track runs and produces L*.json for phase2.
-        if p1_mode == "docs":
+        elif p1_mode == "docs":
             p1_args += ["--mode", "docs"]
             # ORGANIC-20260803b — a design document may state its timing
             # target ONCE PER PROCESS, as a table keyed by PDK. Phase 1
@@ -960,7 +1060,10 @@ def main() -> int:
             # is not PDK-keyed.
             if args.pdk and str(args.pdk).strip().lower() != "auto":
                 p1_args += ["--pdk", str(args.pdk).strip()]
-        label = ("PHASE 1 (vendor docs → L1-L23)" if p1_mode == "docs"
+        label = ("PHASE 1 (expert second pass → consume the delivered "
+                 "IC-Expert answer)"
+                 if p1_mode == _P1_MODE_EXPERT_SECOND_PASS
+                 else "PHASE 1 (vendor docs → L1-L23)" if p1_mode == "docs"
                  else "PHASE 1 (NL → L1-L23)")
         rc = _run_phase(label, runner, p1_args, env=_phase_env)
         rep = _read_report(_pl.report_path(project, "phase1_one_shot.json"))

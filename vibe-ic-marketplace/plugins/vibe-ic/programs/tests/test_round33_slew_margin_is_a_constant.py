@@ -111,8 +111,8 @@ def test_it_still_catches_the_regression_it_is_kept_for():
         "and it must actually breach the bound, or the check is decorative")
 
 
-def test_the_testbench_and_the_circuit_read_different_clocks():
-    """The mismatch this round was sent to find, pinned where it really is."""
+def _testbench_times():
+    """The testbench's time parameters, from the entry or from the source."""
     tb = _entry()["testbench"]
     times = {k: v for k, v in (tb.get("values") or tb).items()
              if isinstance(v, str) and ("tper_ns" in k or "tstop_ns" in k
@@ -122,13 +122,62 @@ def test_the_testbench_and_the_circuit_read_different_clocks():
         times = {k: v for k, v in
                  re.findall(r'"(t(?:per|high|stop|meas)_ns)":\s*"([^"]+)"', src)}
     assert times, "no testbench time parameters found"
+    return times
+
+
+def test_the_testbench_and_the_circuit_now_read_THE_SAME_clock():
+    """THE MISMATCH IS CLOSED, and this is the arm that keeps it closed.
+
+    RENAMED FROM `test_the_testbench_and_the_circuit_read_different_clocks`,
+    which pinned the mismatch as a standing fact. It was RED on pristine main
+    from `b36bd2e9e` (#2062 rulings 1+2) to v1.19.60 — measured by czmainred9 —
+    because that landing FIXED what this test was pinning and did not come back
+    for the pin. Its ruling is quoted in the producer beside the change:
+
+        "A block is measured at the clock it is graded at; that is the whole of
+        the ruling."
+
+    Round 33 (this file) found the deck exercised at `fclk_max` while the bias
+    was derived at `fclk`, so the density the deck measured was never a
+    measurement of the block the bound admitted. #2062 moved the deck to
+    `fclk`. Both halves now read `fclk`, and the test that used to assert the
+    gap asserts the agreement — the SAME property, from the other side.
+
+    A test that keeps asserting a defect after the defect is fixed is not
+    strict, it is stale: it refuses every landing and names none of them.
+    """
+    times = _testbench_times()
     for k, v in times.items():
-        assert "fclk_max" in v, (k, v)
-    # ...while the circuit is sized from `fclk`
+        assert "fclk_max" not in v, (
+            f"{k} = {v!r} went back to the ceiling. #2062: the deck is exercised "
+            f"at the clock the grade names, and the bias is derived at `fclk`, "
+            f"so a testbench time at `fclk_max` reopens round 33's mismatch")
+        assert "fclk" in v, (k, v)
+    # ...and the circuit is sized from the same `fclk`
     assert "fclk_max" not in m._R_IB_L_UM_EXPR
     assert "fclk" in m._R_IB_L_UM_EXPR
-    # and the entry BINDS fclk_max, so the two are not even the same declared row
+    # The ceiling is still DECLARED — it is published as
+    # `settling_time_constants_at_fclk_max`, non-blocking — so `fclk_max`
+    # remains a bound row. Losing that would be the other way to make this
+    # test green, and it is not the same thing as closing the mismatch.
     assert "fclk_max" in _entry()["requires_bound"]
+    assert "fclk" in _entry()["requires_bound"]
+
+
+def test_a_testbench_time_at_the_ceiling_is_refused():
+    """MUTATION. Put ONE time back at `fclk_max` and the arm above must speak.
+
+    Driven on the real expressions rather than a paraphrase, so it cannot pass
+    against a producer that has stopped emitting them.
+    """
+    times = _testbench_times()
+    assert times, times
+    reopened = {k: v.replace("fclk", "fclk_max") for k, v in times.items()}
+    assert reopened != times
+    offenders = [k for k, v in reopened.items() if "fclk_max" in v]
+    assert sorted(offenders) == sorted(times), (
+        "the mutation did not reach every time parameter, so a green above "
+        f"would not be evidence: {offenders} vs {sorted(times)}")
 
 
 def test_the_shipped_library_still_holds_its_own_invariants():

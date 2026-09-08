@@ -1,0 +1,53 @@
+"""Execute the actual coordinator; unrelated tools are bounded recording stubs."""
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import design_one_shot_runner as runner
+
+
+@pytest.mark.parametrize('exit_step', ['2', '4', None])
+def test_main_scopes_step4_producers_and_real_consumer(tmp_path, monkeypatch, exit_step):
+    docs = tmp_path / 'phase1/generated_docs'
+    docs.mkdir(parents=True)
+    for n in range(1, 14):
+        (docs / f'L{n}.json').write_text('{}')
+    calls = []
+    for name in list(vars(runner)):
+        if not name.startswith('step_') or name == 'step_step4_functional_evidence':
+            continue
+        def stub(*args, _name=name, **kwargs):
+            calls.append(_name)
+            result = runner.StepResult(_name.removeprefix('step_'), 'SKIP', 0.0, 'unrelated tool stub')
+            return [result] if _name == 'step_dft_lec_chain' else result
+        monkeypatch.setattr(runner, name, stub)
+    monkeypatch.setattr(runner._spf, 'gate', lambda project, owner, site, refuse, fn, *a, **kw:
+                        fn(*a, **{k: v for k, v in kw.items() if not k.startswith('_preflight')}))
+    monkeypatch.setattr(runner._pl, 'emit_final_summary', lambda *a, **kw: False)
+    def publish(project, programs, owner, summary, name):
+        out = tmp_path / name
+        out.write_text(json.dumps(summary))
+        return {}, out
+    monkeypatch.setattr(runner._pl, 'publish_report_then_steps_view', publish)
+    argv = ['runner', str(tmp_path), '--skip-hardware', '--skip-phase3', '--skip-analog',
+            '--max-rtl-repair-retries', '0']
+    if exit_step:
+        argv += ['--exit-step', exit_step]
+    monkeypatch.setattr(sys, 'argv', argv)
+    rc = runner.main()
+    report = json.loads((tmp_path / 'phase2_one_shot.json').read_text())
+    rows = {row['name']: row for row in report['steps']}
+    if exit_step == '2':
+        for name in ['sim', 'reference_tb', 'step4_functional_evidence', 'verilator_coverage']:
+            assert rows[name]['status'] == 'SKIPPED-BY-EXIT', rows[name]
+        assert not any(name in calls for name in ['step_full_stack_tb_gen', 'step_reference_tb',
+                                                  'step_professional_tb_gen', 'step_verilator_coverage'])
+        assert rc == 0, report
+    else:
+        assert 'step_reference_tb' in calls
+        assert 'step_full_stack_tb_gen' in calls
+        assert rows['step4_functional_evidence']['status'] == 'FAIL', rows
+        assert rc == 1

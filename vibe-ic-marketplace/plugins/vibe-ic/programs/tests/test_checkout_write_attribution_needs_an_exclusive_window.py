@@ -36,8 +36,8 @@ a detector:
 
   green  the same shape, the concurrent window DECLARED -> 0 findings, the
          peer's bytes intact, and the skipped attribution NAMED
-  red    the same shape with the window not declared (a genuinely exclusive
-         run) -> the finding still fires and still repairs, which is #1029's
+  red    a declared gate writer with no peer writers (an exclusive run) ->
+         the finding still fires and still repairs, which is #1029's
          detector and it must not be retired
   red    a genuinely host-dependent gate is still caught WITH the window
          declared, so the fix did not buy silence
@@ -76,8 +76,9 @@ def _git(r: Path, *args: str) -> None:
                    capture_output=True)
 
 
-def _repo(tmp_path: Path, sync_dir: Path, *, sync_on_arm: str) -> Path:
-    """A checkout with one READ-ONLY gate that hands control to the peers.
+def _repo(tmp_path: Path, sync_dir: Path, *, sync_on_arm: str,
+          gate_writes: bool = False) -> Path:
+    """A checkout with a reader handshake or an explicit gate-owned writer.
 
     `sync_on_arm` is `"checkout"` or `"worktree"`: the gate signals and then
     waits only while running in that tree, which is what makes the peers' write
@@ -91,8 +92,11 @@ def _repo(tmp_path: Path, sync_dir: Path, *, sync_on_arm: str) -> Path:
     """
     r = tmp_path / "checkout"
     (r / "tools" / "ci").mkdir(parents=True)
+    label = ("a gate that declares and performs a write" if gate_writes else
+             "a read-only gate that writes nothing")
     (r / "tools" / "ci" / "repo_hygiene_gates.sh").write_text(
-        'run "a read-only gate that writes nothing" "$ROOT" python3 quiet.py\n'
+        f'run "{label}" "$ROOT" python3 quiet.py'
+        + (' --write' if gate_writes else '') + '\n'
         'run "a second read-only gate" "$ROOT" python3 second.py\n')
     (r / "quiet.py").write_text(
         "import pathlib, sys, time\n"
@@ -101,7 +105,7 @@ def _repo(tmp_path: Path, sync_dir: Path, *, sync_on_arm: str) -> Path:
         "here = pathlib.Path.cwd().resolve()\n"
         f"mine = (here == CHECKOUT) if {sync_on_arm!r} == 'checkout' "
         "else (here != CHECKOUT)\n"
-        "if mine:\n"
+        f"if mine and not {gate_writes!r}:\n"
         "    (SYNC / 'started').write_text('1')\n"
         f"    deadline = time.monotonic() + {_SYNC_S}\n"
         "    while time.monotonic() < deadline:\n"
@@ -109,6 +113,10 @@ def _repo(tmp_path: Path, sync_dir: Path, *, sync_on_arm: str) -> Path:
         f"for i in range({_PEERS})) == {_PEERS}:\n"
         "            break\n"
         "        time.sleep(0.02)\n"
+        f"if mine and {gate_writes!r}:\n"
+        f"    for i in range({_PEERS}):\n"
+        "        (CHECKOUT / ('payload%d.txt' % i)).write_text('gate mutation\\n')\n"
+        "    (SYNC / 'gate_wrote').write_text('1')\n"
         "print('[PASS] 1 item examined')\n")
     (r / "second.py").write_text("print('[PASS] 1 item examined')\n")
     for i in range(_PEERS):
@@ -226,18 +234,20 @@ def test_the_shipping_wiring_never_opens_the_bracket_at_all(tmp_path):
 # RED: the constructed violations. A check that cannot go red is not a check.
 # --------------------------------------------------------------------------
 def test_an_exclusive_run_still_files_and_still_repairs(tmp_path, monkeypatch):
-    """THE CONTROL. Same fixture, same peers, window NOT declared.
+    """THE CONTROL. One declared writer, with no concurrent peer writers.
 
     A run that really does own its checkout is `test_issue1029_the_killer_must
-    _clean_up`'s subject, and the detector there must survive this change. If
-    this test goes green, the fix bought silence rather than correctness.
+    _clean_up`'s subject. Omitting a concurrency environment variable does not
+    make three peer writers disappear, nor turn a declared reader's shared
+    claim into an exclusive one. This fixture makes the gate itself write.
     """
     sync = tmp_path / "sync"
     sync.mkdir()
-    r = _repo(tmp_path, sync, sync_on_arm="checkout")
+    r = _repo(tmp_path, sync, sync_on_arm="checkout", gate_writes=True)
     monkeypatch.delenv("VIBEIC_CHECKOUT_CONCURRENT_LANES", raising=False)
 
-    res = _run_with_peers(r, sync)
+    res = G.audit(r, timeout=_T)
+    assert (sync / "gate_wrote").read_text() == "1", "the writer never ran"
 
     corrupted = _kinds(res, "GATE_CORRUPTED_CHECKOUT")
     assert corrupted, (
@@ -246,6 +256,8 @@ def test_an_exclusive_run_still_files_and_still_repairs(tmp_path, monkeypatch):
     assert _peer_bytes_survived(r) == 0, (
         "and it must still be undone: a SIGKILLed gate's mutation is what the "
         "repair exists for")
+    assert all((r / f"payload{i}.txt").read_text() == _ORIGINAL
+               for i in range(_PEERS)), "the writer's mutation was not restored"
     assert not (res.unattributed or []), (
         "the window WAS exclusive, so nothing may be filed as unattributed — "
         "a clean measurement reported as `I could not look` is the mirror of "

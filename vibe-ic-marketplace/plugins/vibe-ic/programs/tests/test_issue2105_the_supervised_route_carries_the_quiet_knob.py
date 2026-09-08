@@ -44,6 +44,7 @@ if str(PROGRAMS) not in sys.path:
 
 import _eda_pin as PIN            # noqa: E402 — the ONE pin resolver
 import phase3_one_shot_runner as R  # noqa: E402
+from not_verified_tier import skip_not_verified  # noqa: E402
 
 #: The tool's own output. The denominator: "no banner" means nothing at all
 #: unless the tool actually ran and we can see that it did.
@@ -63,21 +64,28 @@ def pinned_container():
     than assuming anything about this host."""
     docker = _docker()
     if not docker:
-        pytest.skip("no `docker` client on PATH, so no container route exists "
-                    "to measure here (this is the in-image case)")
+        skip_not_verified(
+            "no `docker` client on PATH, so no container route exists to "
+            "measure here (this is the in-image case)",
+            "run this from the HOST beside the image rather than inside it")
     image = PIN.image_reference()
     if subprocess.run([docker, "image", "inspect", image],
                       capture_output=True).returncode != 0:
-        pytest.skip("the pinned image %s is not present on this host and this "
-                    "test will not pull one" % image)
+        skip_not_verified(
+            "the pinned image %s is not present on this host and this test "
+            "will not pull one" % image,
+            "docker pull %s" % image)
     name = "cz2105_probe_%s" % secrets.token_hex(6)
     started = subprocess.run(
         [docker, "run", "-d", "--rm", "--name", name,
          "--entrypoint", "/bin/sleep", image, "300"],
         capture_output=True, text=True)
     if started.returncode != 0:
-        pytest.skip("could not start a container from the pinned image: %s"
-                    % (started.stderr or "").strip()[:200])
+        skip_not_verified(
+            "could not start a container from the pinned image: %s"
+            % (started.stderr or "").strip()[:200],
+            "check the docker daemon is reachable and the pinned digest is "
+            "runnable on this host")
     cid = started.stdout.strip()
     try:
         yield name

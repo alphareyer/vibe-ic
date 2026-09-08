@@ -45,8 +45,11 @@ _ORPHANED = ("blocker_classification_check.py",
 @pytest.fixture(scope="module")
 def audit_report(tmp_path_factory):
     out = tmp_path_factory.mktemp("wiring") / "audit.json"
-    _pr.run([sys.executable, str(_AUDIT), "--json", str(out)],
-                   capture_output=True, text=True)
+    # `--repo-root` NAMED (vibe-ic#2199). The audit has no default subject:
+    # the shipped repository is the tree this fixture has always meant, and it
+    # now says so instead of relying on the auditor's own location.
+    _pr.run([sys.executable, str(_AUDIT), "--repo-root", str(_REPO),
+             "--json", str(out)], capture_output=True, text=True)
     return json.loads(out.read_text())
 
 

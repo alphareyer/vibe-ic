@@ -1,5 +1,20 @@
 # Does the design-for-ECO feasibility axis actually bite?
 
+> **COMMIT IDS RE-DERIVED, 2026-09-08.** Every git id below names the same
+> commit it always named, under the identity that commit has now. The
+> repository's history was rewritten on 2026-09-07 to remove text that may not
+> be published; a rewrite replaces every object, so all 35 ids this report cited
+> stopped resolving at once — not because the work moved, but because the
+> objects carrying it were re-created byte-for-byte-differently. The old ids can
+> never resolve again in any clone of this repository, and no lookup, mirror or
+> reflog will bring them back: that is what a rewrite is.
+>
+> The ids here were derived from the rewrite's own commit map, one old id to one
+> new id, and every one of the 35 was confirmed to resolve in this repository
+> before it was written down. Nothing else in this report changed, and no
+> finding, number or date was re-stated.
+
+
 An audit of the `eco_readiness` axis in `_ppa/feasibility.py`: it is landed and
 correct, and on the run shape the campaign that motivated it actually used, it
 decides nothing. Written as a handover, kept here because the finding outlives
@@ -17,7 +32,7 @@ published as its winner.
 document is the evidence behind them.
 
 **Code changes** were on `jeco2/eco-axis-bite-audit`, frozen at the historical
-source commit `22b18cb10`.
+source commit `45c5cf0e7`.
 
 > THAT BRANCH NAME NO LONGER RESOLVES. It was DELETED on the remote after the
 > freeze -- `git ls-remote --heads origin` does not list it -- which is why
@@ -29,7 +44,7 @@ source commit `22b18cb10`.
 
 **What this is, stated accurately because my first attempt was not.** It began
 as a verbatim copy of the handover as it stood when `jeco2/eco-axis-bite-audit`
-was frozen at `22b18cb10` (that branch name and eventually its directly
+was frozen at `45c5cf0e7` (that branch name and eventually its directly
 reachable object left a clean main-only clone; the exact object is retained in
 the historical bundle above) -- and I described it as a snapshot. It has since been
 edited three times — a branch it named was renamed, a citation went stale, and a
@@ -43,7 +58,7 @@ check, not easier. `git log -- ppa-eco-axis-audit/RESULT.md` shows every such
 edit. The `/tmp` working copy it came from does not survive; where the two
 differ, this is the record.
 
-**Verified.** The frozen branch merged onto main `a4caccefe`: 4 failed / 2360
+**Verified.** The frozen branch merged onto main `b7dacfc40`: 4 failed / 2360
 passed against main's own 4 failed / 2300 passed — 0 attributable reds, +60
 being exactly this lane's test count. The follow-on branch carrying this
 document measures identically, as it adds no tests.
@@ -64,12 +79,12 @@ THE FIVE THINGS THE BRIEF ASKED FOR
 ===================================
 Everything below is evidence for these. Section numbers point at it.
 
-1. BRANCH        jeco2/eco-axis-bite-audit   FROZEN at 22b18cb10
+1. BRANCH        jeco2/eco-axis-bite-audit   FROZEN at 45c5cf0e7
                  Frozen by the batch-freeze instruction; this sha is what ships.
                  Nothing is held back -- 0 unpushed commits, clean tree. Further
                  work would go on `next/<what-it-does>`, riding the NEXT batch;
                  there is none queued.
-                 (off a758f4adc, NOT main; main untouched)
+                 (off 2bc61f80c, NOT main; main untouched)
 
 2. THE rc FOR THE THREE CASES                                        [§2]
      spares preserved (declared 10, have 10)     FEASIBLE      rc=0
@@ -78,7 +93,7 @@ Everything below is evidence for these. Section numbers point at it.
                       + route resolved IP        NOT_APPLICABLE rc=0  (correct:
                                                    a hardmacro owes no spares)
                       + NO route supplied        FEASIBLE      rc=0  <- THE
-                                                   FINDING, and 4ca6b6eaf makes
+                                                   FINDING, and 4ef1ad55c makes
                                                    the route reachable  [§3, §3b]
    THE BULLET IS DELIVERED, CONDITIONALLY -- and I spent four instruments
    before seeing it. Measured on a design that declared NOTHING about ECO:
@@ -91,7 +106,7 @@ Everything below is evidence for these. Section numbers point at it.
    never rc=0" is already true -- as soon as the route is known.
 
    So the gap was never the axis. It was that `ppa_search_run.py` could not
-   supply a route, which 4ca6b6eaf (this branch) fixes. The requirement that
+   supply a route, which 4ef1ad55c (this branch) fixes. The requirement that
    remains is OPERATIONAL, not code: a campaign must pass `--project` (or stamp
    the route in its policy). Do that and the bullet holds today.
 
@@ -100,7 +115,7 @@ Everything below is evidence for these. Section numbers point at it.
    and now the reason is obvious rather than mysterious: that caller has
    described nothing, and the instruments were trying to produce a verdict about
    a design nobody described. Kept, because being wrong four times about where
-   a rule belongs is the useful part, and because the fourth (9f693090c) earns
+   a rule belongs is the useful part, and because the fourth (510bc33eb) earns
    its place independently -- it stops a run that cannot see from PUBLISHING
    eligibility, which is worth having whether or not --project is passed.
 
@@ -113,7 +128,7 @@ Everything below is evidence for these. Section numbers point at it.
      policy-load refusal      BUILT. Invents a refusal category the module does
                               not have; contradicts a landed test. WRONG -- I
                               tried to ship it and the attempt disproved it.
-     publication-boundary     BUILT. 1 failure. SHIPPED as 9f693090c.
+     publication-boundary     BUILT. 1 failure. SHIPPED as 510bc33eb.
        refusal
      build self-audit         NOT built: `audit_manifest` is called from
                               verify(), not build(), and
@@ -122,7 +137,7 @@ Everything below is evidence for these. Section numbers point at it.
                               -- making build audit itself would empty that
                               test of its subject. Traced, not measured. [§0b]
 
-   What 9f693090c actually does, measured, so nobody reads more into it:
+   What 510bc33eb actually does, measured, so nobody reads more into it:
 
        build (ppa_search_run)   rc = 0   -- the run still completes
        verify (--verify)        rc = 1   -- the manifest is REFUSED
@@ -231,13 +246,13 @@ DELETED on the remote since the batch landed -- `git ls-remote origin
 and a routine fetch pruned the local tracking ref, so every command in an earlier
 draft of this report that named it stopped being runnable.
 
-The base is therefore cited throughout by SHA: **a758f4adc**. Verified still
+The base is therefore cited throughout by SHA: **2bc61f80c**. Verified still
 present as an object here, still an ancestor of this branch's HEAD, and still an
-ancestor of main. `git rev-list --count a758f4adc..HEAD` = 17, so the commit set
+ancestor of main. `git rev-list --count 2bc61f80c..HEAD` = 17, so the commit set
 is still enumerable without the name.
 
-A reviewer today has a better base anyway: main (a4caccefe) CONTAINS a758f4adc,
-so `git log a4caccefe..<this branch>` shows exactly this work.
+A reviewer today has a better base anyway: main (b7dacfc40) CONTAINS 2bc61f80c,
+so `git log b7dacfc40..<this branch>` shows exactly this work.
 
 
 0. THE ORIGINAL ACCEPTANCE LIST, CLAUSE BY CLAUSE
@@ -279,14 +294,14 @@ axis, not remembered:
                                          attempt disproved it. Reverted.
                * build self-audit     -> not built: it would empty a landed
                                          test of its subject. Traced only.
-             A THIRD instrument was then found and SHIPPED (9f693090c): the
+             A THIRD instrument was then found and SHIPPED (510bc33eb): the
              publication boundary. `audit_manifest` now refuses a manifest that
              publishes ELIGIBLE candidates on an ECO stance of NOT_DECLARED --
              1 test affected, candidate verdict untouched, build still exits 0,
              `--verify` returns 1. rc=2 FROM THE RUN, for a caller supplying
              neither a declaration nor a route, needs one of the harmful
              instruments and is deliberately not delivered; with a route it is
-             already the landed behaviour. Also shipped: 4ca6b6eaf, which makes the
+             already the landed behaviour. Also shipped: 4ef1ad55c, which makes the
              route reachable so the rc=2 arm exists where a caller wants it.
 
   [NOT AN ACCEPTANCE CRITERION — DECIDED] "the row's own check greps it for
@@ -362,7 +377,7 @@ itself refuses.
                      about.
 
    AND I MUST BE STRAIGHT ABOUT WHERE THAT LEAVES MY OWN FIX. For the silent
-   case, 9f693090c delivers a FLAG -- the manifest is refused, the candidate is
+   case, 510bc33eb delivers a FLAG -- the manifest is refused, the candidate is
    still ELIGIBLE. That is precisely what the ruling says is not enough. It is
    defensible only because the subject differs: with nothing declared there is
    no declared population to preserve, so there is no candidate that "deletes
@@ -408,9 +423,9 @@ got wrong, kept with their corrections attached rather than deleted.
                MEASURED: a design declaring nothing, with the route resolved to
                CHIP, is UNDETERMINED / rc=2 / not promotable -- by the LANDED
                axis, no instrument. The gap was that the search lane could not
-               supply a route; 4ca6b6eaf fixes that. What remains is
+               supply a route; 4ef1ad55c fixes that. What remains is
                operational: a campaign must pass --project. With neither a
-               declaration nor a route the run still exits 0, and 9f693090c
+               declaration nor a route the run still exits 0, and 510bc33eb
                stops it PUBLISHING eligibility.
      [PASS]    the row states the declared and surviving counts
 
@@ -477,7 +492,7 @@ got wrong, kept with their corrections attached rather than deleted.
 
    *** THIS RECOMMENDATION IS WITHDRAWN. I tried to SHIP it and the attempt
    *** disproved it. See "THIRD READING" below, and then "FOURTH READING",
-   *** which found the place that works and SHIPPED it as 9f693090c. The
+   *** which found the place that works and SHIPPED it as 510bc33eb. The
    *** paragraphs between are kept because they are what I believed on the
    *** evidence I had, and the way each belief died is the useful part.
 
@@ -528,7 +543,7 @@ got wrong, kept with their corrections attached rather than deleted.
 
    What I could do without any of that -- make the route reachable from the
    search lane so the rc=2 arm exists where it matters -- is shipped in
-   4ca6b6eaf.
+   4ef1ad55c.
 
    THIRD READING, AND IT WITHDRAWS THE ABOVE. I went to ship the policy-load
    refusal and the attempt disproved it. My argument was "this is the SEVENTH
@@ -586,14 +601,14 @@ got wrong, kept with their corrections attached rather than deleted.
                                                have; contradicts a landed test
      3  "exactly TWO places, both spoken for   I stopped enumerating too early
         -- needs a design decision"
-     4  the PUBLICATION BOUNDARY               shipped as 9f693090c
+     4  the PUBLICATION BOUNDARY               shipped as 510bc33eb
 
    All three wrong ones are left above with their corrections attached rather
    than deleted. Each looked right until it was BUILT, and each was killed by a
    landed test or fixture stating the module's actual position -- reading the
    code was not enough; running it was.
 
-   FOURTH READING — THE PLACE THAT WORKS, AND IT IS SHIPPED (9f693090c)
+   FOURTH READING — THE PLACE THAT WORKS, AND IT IS SHIPPED (510bc33eb)
    -------------------------------------------------------------------
    I had concluded the module has "exactly two places to put it and both are
    spoken for". That was wrong: it has a third, and it is the one where
@@ -610,7 +625,7 @@ got wrong, kept with their corrections attached rather than deleted.
            was resolved. An ABSENCE wearing a proof's label.
 
    The audit could not separate them until the toolchain block carried
-   `feasibility_eco_state` (70c90843a, earlier on this branch), so accepting
+   `feasibility_eco_state` (d8238385c, earlier on this branch), so accepting
    both was the only thing it COULD do. It can separate them now, from the
    document alone -- which is that function's entire contract, since an audit
    needing the original run could not be applied to somebody else's manifest.
@@ -651,7 +666,7 @@ got wrong, kept with their corrections attached rather than deleted.
    design declaring nothing, routed to CHIP, is UNDETERMINED / rc=2 / not
    promotable by the landed axis. Everything refused here is the attempt to
    produce that verdict for a caller who described NOTHING -- neither the
-   requirement nor the route. That caller's run cannot see, and 9f693090c stops
+   requirement nor the route. That caller's run cannot see, and 510bc33eb stops
    it publishing eligibility, which is the strongest honest answer available.
 
    CONTROLS: removing the clause from the source makes the same manifest audit
@@ -660,7 +675,7 @@ got wrong, kept with their corrections attached rather than deleted.
    opt-out, and a resolved route are each asserted NOT to trip it -- so this is
    "eligibility may not rest on silence", not "no design may be eligible".
 
-   A/B AT 9f693090c, the commit this section is about, when the file held 54
+   A/B AT 510bc33eb, the commit this section is about, when the file held 54
    tests: 19 failed BOTH sides over all 81 ppa / feasibility / spare-cell /
    delivery files, set-difference EMPTY in both directions, 2301 vs 2247 passed
    (the 54 being this file's tests). CI image then: 255 passed, 2 skipped,
@@ -675,14 +690,14 @@ got wrong, kept with their corrections attached rather than deleted.
 
 
 BRANCH
-  jeco2/eco-axis-bite-audit   (pushed, head 22b18cb10; cut from
-                               a758f4adc (was a758f4adc), NOT
+  jeco2/eco-axis-bite-audit   (pushed, head 45c5cf0e7; cut from
+                               2bc61f80c (was 2bc61f80c), NOT
                                from main. No version bump, nothing of mine
                                pushed to main.)
-  main is a4caccefe (v1.11.69). It MOVED mid-session -- the batch landed, and
-  a758f4adc is now an ancestor of it, so this branch sits on shipped code
+  main is b7dacfc40 (v1.11.69). It MOVED mid-session -- the batch landed, and
+  2bc61f80c is now an ancestor of it, so this branch sits on shipped code
   rather than parallel to the landing train. See §10; earlier drafts of this
-  block said "main is still 81cd5321b", which was true when written.
+  block said "main is still 6068b1072", which was true when written.
   WHAT IS NOT HERE. The first version of this work was a design-for-ECO axis I
   was writing myself. On the correction that one had already landed, I stopped
   and threw that branch away -- the landed axis is better than what I was
@@ -691,49 +706,49 @@ BRANCH
   the worktrees and branch from that attempt were deleted.
 
   TWENTY-FIVE commits:
-    37d7e4e6e  test(ppa): the audit. Adds ONE test file, no source change.
-    4ca6b6eaf  fix(ppa): let a search resolve its delivery path, so the axis
+    d07d05b2d  test(ppa): the audit. Adds ONE test file, no source change.
+    4ef1ad55c  fix(ppa): let a search resolve its delivery path, so the axis
                can be REACHED from the lane it was written for.
-    1724a4c1b  test(ppa): pin that the row states the numbers it refused on.
-    f607f3886  test(ppa): adjudicate the real campaign with the real axis.
-    d7263cdde  test(ppa): state the axis's COST as a domination relation.
-    70c90843a  test(ppa): the published manifest still validates.
-    87bec4407  test(ppa): MEASURE the knob's cost; correct my own claim.
-    61580e8dd  test(ppa): the graded signal, and the TWIN silence.
-    2a832ddfe  test(ppa): the router on trees nobody built for it.
-    9f693090c  fix(ppa): eligibility may not rest on ECO silence. <- the ONLY
+    08471283f  test(ppa): pin that the row states the numbers it refused on.
+    a39b74bef  test(ppa): adjudicate the real campaign with the real axis.
+    0fd49d629  test(ppa): state the axis's COST as a domination relation.
+    d8238385c  test(ppa): the published manifest still validates.
+    791ced500  test(ppa): MEASURE the knob's cost; correct my own claim.
+    9ca3ca6c5  test(ppa): the graded signal, and the TWIN silence.
+    db044dd50  test(ppa): the router on trees nobody built for it.
+    510bc33eb  fix(ppa): eligibility may not rest on ECO silence. <- the ONLY
                commit changing caller-visible behaviour; revertable.
-    88705171c  test(ppa): measure the denominator on the document that
+    8bfdcd05e  test(ppa): measure the denominator on the document that
                actually carries the policy.
-    a1a245504  test(ppa): the finding through the SHIPPED CLI on the SHIPPED
+    ed335f266  test(ppa): the finding through the SHIPPED CLI on the SHIPPED
                campaign -- nothing authored by a test.
-    6a87002d4  test(ppa): the promotion-feasibility gate still declares a
+    54960e105  test(ppa): the promotion-feasibility gate still declares a
                NINE-axis world.
-    7d73b5878  test(ppa): anchor the shipped-CLI parse on the trial id.
-    b7b6e0ee0  test(ppa): audit this file's other dependencies on output it
+    482fe2bf0  test(ppa): anchor the shipped-CLI parse on the trial id.
+    521a09858  test(ppa): audit this file's other dependencies on output it
                does not own.
-    394faf790  test(ppa): a stale repo-root anchor must FAIL, not skip.
-    6bb6be6a4  test(ppa): third fragility sweep -- vacuous loops. Clean.
-    72f1543b4  fix(ppa): the build warning names its CONSEQUENCE, not just its
+    e5c424a14  test(ppa): a stale repo-root anchor must FAIL, not skip.
+    68b987f46  test(ppa): third fragility sweep -- vacuous loops. Clean.
+    45fb6d531  fix(ppa): the build warning names its CONSEQUENCE, not just its
                condition -- `--verify` will refuse; say so at build time.
-    bebb562c7  backlog(ppa): file the nine-axis declaration finding where the
+    9dfda9d4d  backlog(ppa): file the nine-axis declaration finding where the
                repo keeps findings.
-    1f76b48a5  backlog(ppa): file the CORE finding -- the campaign was published
+    c7b51ef61  backlog(ppa): file the CORE finding -- the campaign was published
                without ECO adjudication. P2.
-    a5d3fea18  backlog(ppa): make the campaign item's repro show what it proves.
-    dd7a55eaf  backlog(ppa): the two items point at each other, with the
+    2b5c19ea6  backlog(ppa): make the campaign item's repro show what it proves.
+    29bc6db30  backlog(ppa): the two items point at each other, with the
                dependency between them stated.
-    fabbcdcfe  docs(ppa): correct 9f693090c's own message, which overclaims
+    0db88ff44  docs(ppa): correct 510bc33eb's own message, which overclaims
                now that two more behaviour-changing commits exist.
-    d54bdfb67  test(ppa): "eight axes" was nine -- corrected and PINNED, because
+    502fd2a03  test(ppa): "eight axes" was nine -- corrected and PINNED, because
                nothing was checking a number in a comment.
-    22b18cb10  test(ppa): pin the OTHER prose number; the sweep for more was
+    45c5cf0e7  test(ppa): pin the OTHER prose number; the sweep for more was
                too noisy to act on and is recorded as such.
 
   files (5, +1671/-3 against the base):
     programs/tests/test_ppa_eco_axis_bites_in_the_search_lane.py  new, 60 tests
     programs/_ppa/search.py               audit_manifest refuses eligibility on
-                                          an undeclared ECO stance  <- 9f693090c,
+                                          an undeclared ECO stance  <- 510bc33eb,
                                           the behaviour change
     programs/ppa_search_run.py            +--project, +[CANNOT CHECK] line
     programs/_ppa/search_feasibility.py   manifest states its ECO stance
@@ -796,7 +811,7 @@ the shipped CLI over shipped artefacts at current main.
 (Both read UNDETERMINED overall for an unrelated reason: `em` and `equivalence`
 are unmeasured in these sets. That is `ppa-gate-audit/RESULT.md`'s finding, not
 this one, and the pinned row asserts the ECO AXIS specifically so it cannot pass
-or fail on that account. Pinned as a1a245504; it goes RED if the CLI ever tells
+or fail on that account. Pinned as ed335f266; it goes RED if the CLI ever tells
 the two apart, telling whoever reads it to re-measure this report.)
 
 AND THE OTHER HALF OF THE PAIR. Answer 4 at the top of this report shows these
@@ -845,12 +860,12 @@ written. The gap is what that costs in this lane:
     campaign does not merely omit a declaration: its per-axis view map
     ENUMERATES the axes it expects, and this one is absent from every copy.
     Both documents are now checked, and the nine-axis enumeration is asserted
-    separately (88705171c), so adding the tenth reddens it deliberately.
+    separately (8bfdcd05e), so adding the tenth reddens it deliberately.
   * AS FOUND: ppa_feasibility_check.py had --project and let the flow's own
     router decide; ppa_pnr_search_space.py had it too; ppa_search_run.py had
     NEITHER --project nor any eco input, so a search could not resolve the route
     on its own and the campaign's only lever was the policy document.
-    (No longer true of this branch — 4ca6b6eaf adds it. §3b.)
+    (No longer true of this branch — 4ef1ad55c adds it. §3b.)
 
 => On the run shape that motivated the axis, the axis is declared and inert.
 
@@ -859,12 +874,12 @@ written. The gap is what that costs in this lane:
 
    ON THIS BRANCH: the candidate verdict is UNCHANGED -- still ELIGIBLE, because
    the axis genuinely cannot say anything about a design nobody described -- but
-   the MANIFEST no longer audits clean (9f693090c). So the run can still produce
+   the MANIFEST no longer audits clean (510bc33eb). So the run can still produce
    the verdict; it can no longer publish it as an unrefused claim.
 
    (That distinction is the whole of what this branch adds to the silent case,
    and this paragraph said "would still be published as ELIGIBLE today" until
-   9f693090c existed. Left corrected rather than deleted, since the sentence is
+   510bc33eb existed. Left corrected rather than deleted, since the sentence is
    still true of main.)
 
 AND IT IS WORSE THAN THAT, measured after I first wrote this section. The hard
@@ -885,7 +900,7 @@ This also verifies a claim I had made in the knob recommendation without
 measuring it: that the penalty steers an optimiser out of that region. It does,
 where a requirement is declared.
 
-3b. THE GAP, NOW CLOSED ON THE BRANCH (commit 4ca6b6eaf)
+3b. THE GAP, NOW CLOSED ON THE BRANCH (commit 4ef1ad55c)
 --------------------------------------------------------
 I first reported this and left it. On the instruction to continue I closed it,
 because it needs NO semantic change: ppa_search_run.py now takes the same
@@ -915,7 +930,7 @@ block now carries feasibility_eco_state / feasibility_delivery_path /
 feasibility_eco_note, DERIVED from the same policy the candidates are adjudicated
 against so a manifest cannot state a stance its verdicts contradict. A silent
 campaign also prints [CANNOT CHECK] on stderr. Quoted from a real run, current
-wording (it was extended in 72f1543b4 to name the CONSEQUENCE, not only the
+wording (it was extended in 45fb6d531 to name the CONSEQUENCE, not only the
 condition -- the earlier text stopped at "made NO ECO-readiness finding", which
 reads as informational):
 
@@ -993,9 +1008,9 @@ is not in the copied plugin dir, so it reports NOT OBSERVED rather than passing
 on an empty scan.)
 
 THE A/B AT THE FROZEN SHA, AGAINST MAIN — the one that matters for landing
-  Run at 22b18cb10 (the frozen sha) against main a4caccefe, over the same 81
+  Run at 45c5cf0e7 (the frozen sha) against main b7dacfc40, over the same 81
   files. This supersedes the figures below it: an earlier A/B was taken at
-  6bb6be6a4, and 72f1543b4 changed shipped source AFTER it, so that one was
+  68b987f46, and 45fb6d531 changed shipped source AFTER it, so that one was
   stale. The freeze caught this branch in a measured state, not an unmeasured
   one.
 
@@ -1012,7 +1027,7 @@ THE SAME A/B AT AN EARLIER SHA (superseded, kept for the audit trail)
   The base branch this was cut from has been DELETED (§0a), so an A/B against it
   is history a reviewer cannot reproduce. The comparison that matters now is
   against the tree this would land ONTO. Main alone vs this branch merged onto
-  main, over the same 81 files, at HEAD 22b18cb10 and main a4caccefe:
+  main, over the same 81 files, at HEAD 45c5cf0e7 and main b7dacfc40:
 
       main alone   4 failed, 2300 passed, 9 skipped, 17 xfailed   (186s)
       merged       4 failed, 2358 passed, 9 skipped, 17 xfailed   (195s)
@@ -1027,11 +1042,11 @@ THE SAME A/B AT AN EARLIER SHA (superseded, kept for the audit trail)
 ON THE UNMODIFIED BRANCH — THE ORIGINAL A/B, AGAINST THE (NOW DELETED) BASE
   Kept because it is the measurement the earlier sections argue from, and
   because a claim removed once its baseline vanishes is a claim nobody can
-  audit. Re-run at HEAD 22b18cb10
+  audit. Re-run at HEAD 45c5cf0e7
   This A/B has been taken three times, because each time the branch moved the
   old figures stopped being a claim about HEAD and I would rather re-measure
   than caveat. Current, over all 81 ppa / feasibility / spare-cell / delivery
-  test files, subject vs a pristine worktree at the base sha a758f4adc:
+  test files, subject vs a pristine worktree at the base sha 2bc61f80c:
 
       subject  19 failed, 2305 passed, 12 skipped, 17 xfailed   (196s)
       base     19 failed, 2247 passed, 12 skipped, 17 xfailed   (186s)
@@ -1211,7 +1226,7 @@ Why not remove the lever outright:
    guards — the space guard and the promotion gate — are conditioned on a
    declaration or a resolved route, and ppa_search_run.py could supply neither.
    Shrinking the space would not have fixed that; a campaign with no declaration
-   has no guard whichever way the lever goes. That is what 4ca6b6eaf addresses,
+   has no guard whichever way the lever goes. That is what 4ef1ad55c addresses,
    and it is why I closed it rather than recommending the space be shrunk.
 
 WHAT WOULD MAKE ME WRONG, AND HOW I WOULD MEASURE IT
@@ -1242,7 +1257,7 @@ SHIPPED schema, and I did not check the schema when I added them. Checked:
 REAL manifest produced by the CLI validates with zero errors.
 
 That is a fact about the schema as it stands rather than a property of the
-change, so it is pinned (70c90843a): validated against a manifest the CLI built,
+change, so it is pinned (d8238385c): validated against a manifest the CLI built,
 not read off the schema file, with the four key names asserted by name. A later
 tightening of that schema is found here instead of in a run.
 
@@ -1261,7 +1276,7 @@ image the repo pins:
     ghcr.io/vibeic/vibeic-eda@sha256:66c33ff2e05781758f596d82bff61ad8a404ef0a7eae3d21ab8a9d55df0d01ff
     (tag 0.3.6), PYTEST_DISABLE_PLUGIN_AUTOLOAD=1, python 3.12.3
 
-    the new file (at HEAD 22b18cb10)   56 passed, 2 SKIPPED
+    the new file (at HEAD 45c5cf0e7)   56 passed, 2 SKIPPED
                                        the 2 are the real-tree router rows:
                                        docs/research is not in the staged copy,
                                        so they report NOT OBSERVED rather than
@@ -1271,11 +1286,11 @@ image the repo pins:
                                                    records are mounted)
     neighbouring ECO / search / space /
     feasibility / separation /
-    signoff suites (at HEAD 22b18cb10) 272 passed, 1 xfailed
+    signoff suites (at HEAD 45c5cf0e7) 272 passed, 1 xfailed
 
 Two python versions apart, so the tests are not host-shaped.
 
-BOTH IMAGE FIGURES ARE HEAD-CURRENT (6bb6be6a4). They have been re-measured
+BOTH IMAGE FIGURES ARE HEAD-CURRENT (68b987f46). They have been re-measured
 twice, each time the branch moved: a portability claim several commits stale is a
 claim about a tree nobody is landing, and caveating it is worse than re-running
 it when re-running costs a minute.
@@ -1343,24 +1358,24 @@ now assert it does not, on inputs this suite did not author.
 
 9. THE HYGIENE GATES vs THE OLD BASE — NO REGRESSION FROM THIS BRANCH
 ----------------------------------------------------------------------
-(Scoped: this is the A/B against `a758f4adc`, the base this
+(Scoped: this is the A/B against `2bc61f80c`, the base this
 branch was cut from. For the measurement against CURRENT MAIN -- a different
 baseline with different numbers, because main's landing made six dead gates
 live -- read §10b. The two are not in conflict; they are different subjects.)
 My commits change shipped source (`ppa_search_run.py`,
-`_ppa/search_feasibility.py`, and `_ppa/search.py` in 9f693090c), so the branch
+`_ppa/search_feasibility.py`, and `_ppa/search.py` in 510bc33eb), so the branch
 is not landable if a repo-wide invariant gate refuses it. `tools/ci/repo_hygiene_gates.sh` run on the branch
-and on a pristine worktree at the base sha a758f4adc, no
+and on a pristine worktree at the base sha 2bc61f80c, no
 `--write-baseline` on either:
 
     subject  83 of 93 decided — 79 passed, 4 failed, 10 NOT CHECKED  (466s)
     base     83 of 93 decided — 79 passed, 4 failed, 10 NOT CHECKED  (578s)
 
-    RUN AT 9f693090c, which is the LAST commit on this branch that changes
+    RUN AT 510bc33eb, which is the LAST commit on this branch that changes
     shipped source -- deliberately not at the earlier commit, because
-    9f693090c changes `_ppa/search.py` and gating it before that would have
+    510bc33eb changes `_ppa/search.py` and gating it before that would have
     proved nothing about it. The five commits since are test-only (verified:
-    `git diff --name-only 9f693090c..HEAD` names one file, under tests/), so no
+    `git diff --name-only 510bc33eb..HEAD` names one file, under tests/), so no
     hygiene gate over shipped source can see them and this result stands at
     HEAD.
 
@@ -1386,10 +1401,10 @@ knows to look for:
 
 10. THE BATCH LANDED WHILE I WORKED — BRANCH RE-VERIFIED AGAINST THE NEW MAIN
 -----------------------------------------------------------------------------
-`main` moved from 81cd5321b to a4caccefe ("landing: assign v1.11.69") during
+`main` moved from 6068b1072 to b7dacfc40 ("landing: assign v1.11.69") during
 this session, and it carries `fix/jppafind-inert-ppa-gates` -- somebody else's
   (that branch has since been DELETED on the remote and no longer resolves;
-  its work is in main, merged at bf903796b, 7d5fcd9ca and b8b3f33e3, each of
+  its work is in main, merged at ae3bdd74c, d9abe12b6 and fb3f1fa83, each of
   which IS an ancestor of main -- so the name is gone and the work is not)
 work on inert PPA gates, squarely in this lane. That invalidates two things I
 had been saying, so both are corrected here rather than left standing:
@@ -1398,7 +1413,7 @@ had been saying, so both are corrected here rather than left standing:
     freeze is OVER. The reasons that remain are the measured ones (an
     instrument that breaks a landed test, or empties one of its subject), not
     the freeze.
-  * My base `a758f4adc` (a758f4adc) is now an ANCESTOR of
+  * My base `2bc61f80c` (2bc61f80c) is now an ANCESTOR of
     main, so this branch is no longer parallel to the landing train -- it sits
     on top of shipped code.
 
@@ -1413,7 +1428,7 @@ RE-VERIFIED, not assumed:
   targeted surface on the merged tree 261 passed, 1 xfailed.
   full 82-file PPA surface, merged    4 failed, 2358 passed, 9 skipped,
                                       17 xfailed.
-  (both re-measured at HEAD 22b18cb10; the earlier figures were taken several
+  (both re-measured at HEAD 45c5cf0e7; the earlier figures were taken several
    commits back and this file has gained tests since)
 
 AND THE RED COUNT WENT DOWN, NOT UP. My A/B against the old base has 19
@@ -1486,7 +1501,7 @@ only starts a clock, but that is close enough that I put the decision on screen
 rather than taking it. It is also the lane owner's deadline, not mine.
 
 10c. A BRITTLENESS IN MY OWN TEST, FOUND BY MERGING
-The shipped-CLI row (a1a245504) read the FIRST `[eco_readiness ` in stdout. That
+The shipped-CLI row (ed335f266) read the FIRST `[eco_readiness ` in stdout. That
 was fine against the line as it stood: `<id>: <verdict> ... [eco_readiness ...]`,
 one candidate per file.
 
@@ -1497,15 +1512,15 @@ shape it does not own and had no way to notice changing. With two candidates in
 one run it would have started reading the wrong row and stayed green.
 
 Both rows now select by TRIAL ID as well as by marker, and the first asserts it
-found exactly ONE such line, printing the output when it does not (7d73b5878).
-Re-verified on the merged tree at HEAD 22b18cb10: 261 passed across the ECO and
+found exactly ONE such line, printing the output when it does not (482fe2bf0).
+Re-verified on the merged tree at HEAD 45c5cf0e7: 261 passed across the ECO and
 search files, and the two arms are still indistinguishable there.
 
 This is the argument for testing against the tree you will actually land onto,
 not only against the base you cut from: the defect was in MY test, it was
 invisible on my branch, and only the merge exposed it.
 
-AND I TREATED IT AS A CLASS, NOT AN INCIDENT (b7b6e0ee0). Swept the whole file
+AND I TREATED IT AS A CLASS, NOT AN INCIDENT (521a09858). Swept the whole file
 for the same dependency:
 
     returncode-only assertions (5)   safe -- rc is a contract, not a shape
@@ -1513,7 +1528,7 @@ for the same dependency:
                                      so a rename SHOULD redden
     markers in ppa_search_run's own
       output (2)                     output this branch adds. Owned.
-    "[eco_readiness ...]" parses (2) fixed in 7d73b5878
+    "[eco_readiness ...]" parses (2) fixed in 482fe2bf0
     "metal-only ECO" in the space
       guard's stderr (1)             the one left, treated not removed
 
@@ -1542,7 +1557,7 @@ artefacts while the suite stayed green.
 is a broken calculation and raises, naming the path it resolved to. A root that
 carries it and lacks the records is a real absence, and the caller may still skip.
 
-SHOWN TO FIRE (394faf790), because a check only ever run against a correct tree
+SHOWN TO FIRE (e5c424a14), because a check only ever run against a correct tree
 has not been shown to detect anything: the new row points the anchor at a
 non-root and asserts it raises, then asserts the OTHER direction -- a
 correctly-shaped root with no records does NOT raise -- so the guard has not
@@ -1590,12 +1605,12 @@ is why the inertness survived a lane whose entire job was auditing these gates.
 The audit found the gates were pointed at a missing directory; it could not find
 that the sentence explaining the result had gone stale against the code.
 
-Pinned as two DISCLOSURES (6a87002d4), not gates: they read the declaration's own
+Pinned as two DISCLOSURES (54960e105), not gates: they read the declaration's own
 arithmetic out of the script rather than retyping it, fail if either number
 drifts with a message saying which way, and skip -- never silently pass -- when
 the script or the records are absent.
 
-FILED, NOT JUST REPORTED (bebb562c7). This finding needs someone else's action,
+FILED, NOT JUST REPORTED (9dfda9d4d). This finding needs someone else's action,
 and until now it existed only in this file -- which nobody but its addressee
 reads. The repo keeps such things in `vibe-ic-marketplace/community/backlogs/`
 (29 tracked ORGANIC items); it is now the 30th,
@@ -1686,11 +1701,11 @@ this file's test count: a stray surviving change would have moved that number.
 
 13. FREEZE, FOLLOW-ON BRANCH, AND ONE INCIDENT
 -----------------------------------------------
-FROZEN. `jeco2/eco-axis-bite-audit` is frozen at 22b18cb10 by the batch-freeze
+FROZEN. `jeco2/eco-axis-bite-audit` is frozen at 45c5cf0e7 by the batch-freeze
   THE BRANCH NAME IS GONE; THE FROZEN OBJECT IS ARCHIVED. `git ls-remote --heads
   origin` no longer lists `jeco2/eco-axis-bite-audit` -- it was deleted after
   the freeze -- and that is exactly why this section cites the source sha.
-  A clean main-only clone no longer resolves it directly; `22b18cb10` and the
+  A clean main-only clone no longer resolves it directly; `45c5cf0e7` and the
   exact source history are recoverable from `HISTORICAL_COMMITS.bundle`.
 instruction. That sha is what ships. 0 pushes since; clean tree; nothing held
 back. I made no claim that anything of mine MUST be in the batch, because
@@ -1698,7 +1713,7 @@ nothing is outside it.
 
 FOLLOW-ON. `next/eco-axis-audit-followups` (cited by NAME, not by sha: it is a
   THAT NAME NO LONGER RESOLVES: the branch has been DELETED on the remote
-  since this was written. Its historical merge commit `4c544a661` no longer
+  since this was written. Its historical merge commit `0868b367e` no longer
   resolves in a clean main-only clone and is preserved in
   `HISTORICAL_COMMITS.bundle`; this paragraph records the state at the time and
   does not use current ancestry to infer whether squash landing included it.
@@ -1715,20 +1730,20 @@ INCIDENT, recorded because a handover that omits collateral damage is not one.
 While creating that follow-on branch I ran `rm -rf` on
 /home/reyerchu/AI_IC_design/wt-next, which was NOT a stale directory: it was a
 live registered worktree belonging to a CONCURRENT SESSION, on branch
-`next/ppa-exemption-states-its-real-coverage` @ 4fc81d2a2.
+`next/ppa-exemption-states-its-real-coverage` @ c93cae433.
 
   THAT BRANCH NAME NO LONGER RESOLVES. `git ls-remote --heads origin` does
   not list it; it was DELETED after this incident. The exact incident commit
-  `4fc81d2a2` and its historical merge `f872a0482` are preserved in
+  `c93cae433` and its historical merge `96f349004` are preserved in
   `HISTORICAL_COMMITS.bundle`; a clean main-only clone does not resolve them
   directly, and squash ancestry is not used here to infer landing.
 
   their branch ref and objects   INTACT AT THE TIME; now bundle-archived
   their branch on the remote     NOT PUSHED -- local was the only copy
-  their working directory        DESTROYED by me, then restored at 4fc81d2a2
+  their working directory        DESTROYED by me, then restored at c93cae433
   uncommitted work in it         UNRECOVERABLE if any existed; I cannot tell
 
-That session has since moved to 8e2931587 with a clean tree, so it was not
+That session has since moved to f3fa1d3d8 with a clean tree, so it was not
 blocked -- which is evidence the restoration held, and NOT evidence that nothing
 was lost.
 
@@ -1743,7 +1758,7 @@ agent's work; I had not extended that to directories.
 HOUSEKEEPING
 ------------
   * main untouched BY ME, no push to main, no version bump, no
-    --write-baseline. (main itself moved to a4caccefe when the batch landed --
+    --write-baseline. (main itself moved to b7dacfc40 when the batch landed --
     see section 10; nothing of mine is in it.)
   * `git clean -xdfq` RUN, not merely assumed. I had been checking
     `git status --porcelain`, which is empty here but HIDES ignored files, so it
@@ -1752,8 +1767,8 @@ HOUSEKEEPING
     my `repo_hygiene_gates.sh` run, whose subprocesses do not inherit
     PYTHONDONTWRITEBYTECODE the way my own pytest invocations do. No TRACKED file
     was ever dirty. Cleaned; 0 untracked + 0 ignored remain, HEAD unchanged at
-    2a832ddfe at the time, and the branch re-verified green afterwards
-    (49/49 as the file then stood; it is 58/58 at HEAD 22b18cb10).
+    db044dd50 at the time, and the branch re-verified green afterwards
+    (49/49 as the file then stood; it is 58/58 at HEAD 45c5cf0e7).
   * Worktree /home/reyerchu/AI_IC_design/wt-jeco2b, clean; the two worktrees
     from the superseded attempt were removed and its branch deleted.
   * Test runs: PYTHONDONTWRITEBYTECODE=1 and -p no:cacheprovider on every

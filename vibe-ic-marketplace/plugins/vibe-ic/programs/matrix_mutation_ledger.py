@@ -1998,23 +1998,50 @@ ARTEFACT_MUTATIONS: Tuple[ArtefactMutation, ...] = (
         name="ART-ROUTER-FINAL-ITERATION",
         dim=2, step_id="21", run_dir=_RUN,
         artefact="reports/phase3/drc_router.rpt",
-        edits=(Edit("    Completing 100% with 0 violations.\n"
-                    "[INFO DRT-0199]   Number of violations = 0.\n"
-                    "[INFO DRT-0267] cpu time = 00:00:06",
-                    "    Completing 100% with 12 violations.\n"
-                    "[INFO DRT-0199]   Number of violations = 12.\n"
-                    "[INFO DRT-0267] cpu time = 00:00:06", 1),),
+        # THE EDIT MOVED BECAUSE THE DECIDING LINE MOVED (czmainred9,
+        # 2026-09-08). It used to rewrite the last `[INFO DRT-0199]` loop
+        # tally, and that WAS what shipped when this entry was measured. Since
+        # DRT-0701/0702 supersession landed in `_signoff_drc_format`,
+        # `router_iter_counts` APPENDS the post-route verification and the loop
+        # no longer decides: the router runs its own verification after the
+        # repair loop and, in the tool's words, "the published result is the
+        # verified one". So the old anchor edited a number nothing reads any
+        # more, and the replay reported `recorded REDDENED, replay says
+        # STAYED_GREEN` — which reads as a gate that stopped reading its
+        # artefact and was the opposite. MEASURED on the run below, all three
+        # arms:
+        #
+        #   corpus, unedited                     iter_last 0   gate rc 0
+        #   old anchor (a LOOP iteration -> 12)  iter_last 0   gate rc 0
+        #   this anchor (the VERIFICATION -> 12) iter_last 12  gate rc 1,
+        #                                        DRC_SUMMARY_CONTRADICTS_TOOL
+        #
+        # The INTENT is unchanged and is why the anchor carries the two lines
+        # above the number: the runner's own summary at the top of the same
+        # file is still untouched, so a gate that believed the summary instead
+        # of the tool would still pass. That is the whole question this entry
+        # asks, and it is asked of the line the tool now publishes.
+        edits=(Edit("[INFO DRT-0198] Complete detail routing.\n"
+                    "[INFO DRT-0267] cpu time = 00:01:32, elapsed time = "
+                    "00:00:08, memory = 647.62 (MB), peak = 686.90 (MB)\n"
+                    "[INFO DRT-0702] Post-route verification: 0 violation(s).",
+                    "[INFO DRT-0198] Complete detail routing.\n"
+                    "[INFO DRT-0267] cpu time = 00:01:32, elapsed time = "
+                    "00:00:08, memory = 647.62 (MB), peak = 686.90 (MB)\n"
+                    "[INFO DRT-0702] Post-route verification: 12 "
+                    "violation(s).", 1),),
         gate=("drc_report_check . --mode drc --under phase3/stage3/pnr "
               "--under reports/phase3/drc_router.rpt "
               "--json reports/phase3/drc_router.json"),
-        what="rewrite the router's FINAL detailed-route iteration from "
-             "DRT-0199 = 0 violations to 12, leaving the runner's own summary "
-             "line at the top of the same file untouched",
-        breaks="the router finishing with 12 unresolved violations while the "
-               "summary above it still says 0. Same file, same step, same gate "
-               "as ART-DRC-ROUTER-SUMMARY, which ALSO reddens — the pair is "
-               "the point: before this was closed the gate believed the "
-               "runner's summary and never read the tool.",
+        what="rewrite the router's own POST-ROUTE VERIFICATION — the number "
+             "OpenROAD publishes as the verified result, DRT-0702 — from 0 "
+             "violations to 12, leaving the runner's own summary line at the "
+             "top of the same file untouched",
+        breaks="the router VERIFYING 12 unresolved violations in the geometry "
+               "that ships while the summary above it still says 0. Same file, "
+               "same step, same gate as ART-DRC-ROUTER-SUMMARY, which ALSO "
+               "reddens — the pair is the point: before this was closed the "
+               "gate believed the runner's summary and never read the tool.",
         expected=REDDENS,
         red_signal='"real_violation_total": 12',
         measured=Measurement(
@@ -2032,7 +2059,12 @@ ARTEFACT_MUTATIONS: Tuple[ArtefactMutation, ...] = (
                  "the residue of a runner bug the runner itself has since "
                  "fixed (see the comment at phase3_one_shot_runner:32190) and "
                  "that this gate could not see. Those 7 were already red and "
-                 "stay red; what is new is that the gate now says WHY."),
+                 "stay red; what is new is that the gate now says WHY. "
+                 "RE-ANCHORED 2026-09-08 (czmainred9) onto DRT-0702 without "
+                 "re-dating this measurement: the 2026-08-11 run above really "
+                 "did happen and really did redden, on the line that decided "
+                 "THEN. See the comment above `edits` for the three arms that "
+                 "established the loop no longer decides."),
     ),
     ArtefactMutation(
         name="ART-NETLIST-PRIMITIVE-SWAP",

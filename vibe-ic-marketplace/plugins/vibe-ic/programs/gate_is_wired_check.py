@@ -323,7 +323,8 @@ def _entry_stem(token: str) -> str:
 
 
 def py_invocations(text: str, names: Set[str],
-                   stages: Optional[Dict[str, Tuple[Set[str], bool]]] = None
+                   stages: Optional[Dict[str, Tuple[Set[str], bool]]] = None,
+                   *, _allow_no_stage_map: bool = False
                    ) -> Dict[str, str]:
     """{gate: how} for the gates THIS python source invokes.
 
@@ -383,6 +384,30 @@ def py_invocations(text: str, names: Set[str],
     # differently. Two implementations of one predicate diverge again the next
     # time either is touched; the rule below the call is this file's #2141
     # rule, moved, not rewritten.
+    # AN ABSENT STAGE MAP IS A CALLER BUG, AND IT USED TO BE SILENT
+    # (vibe-ic#2189). `credited` falls back to `(set(), True)` for a stem it
+    # has no entry for — "this gate has a `main` and no stages" — which is the
+    # right answer for a name that is not a gate at all and the WRONG answer
+    # for every real gate driven through a stage. Under `invocation.v2` such a
+    # caller then credits NOTHING and the result is an empty dict, which reads
+    # exactly like an honest "this file invokes no gate". MEASURED on v1.19.60
+    # (czmainred9): the single caller in the tree that omitted the map got `{}`
+    # for two files that demonstrably invoke the gate, and the test built on it
+    # was red on pristine main.
+    #
+    # So the omission is now LOUD. Every caller resolves stems through
+    # `_invocation_credit.Stages(programs_dir)`; a caller that genuinely wants
+    # the default — a population of names that are not gates — says so with
+    # `_allow_no_stage_map=True` and is then making a claim rather than
+    # forgetting one.
+    if stages is None and not _allow_no_stage_map:
+        raise TypeError(
+            "py_invocations needs the stage map: without it every gate "
+            "resolves to (set(), True) and a stage invocation credits "
+            "nothing, so the answer is a silent empty dict (vibe-ic#2189). "
+            "Pass `{stem: _invocation_credit.Stages(programs)(stem) ...}`, or "
+            "`_allow_no_stage_map=True` to state that these names are not "
+            "gates.")
     _st = stages or {}
     for g, how in _credit.credited(
             tree, names, lambda n: _st.get(n, (set(), True)),
@@ -730,7 +755,12 @@ def _baseline_rule(p: Path) -> Optional[str]:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--root", default=None,
-                    help="plugin root (default: this program's parent's parent)")
+                    help="THE PLUGIN ROOT UNDER TEST. Required: there is no "
+                         "default, because the only default available is this "
+                         "program's own location and a run that substitutes "
+                         "the instrument's tree for the subject's answers "
+                         "confidently about a tree nobody asked about "
+                         "(vibe-ic#2199)")
     ap.add_argument("--json", dest="json_out")
     ap.add_argument("--baseline", default=None)
     ap.add_argument("--write-baseline", action="store_true",
@@ -750,7 +780,30 @@ def main(argv=None) -> int:
                          "the path the gate names when it reports a shrink")
     a = ap.parse_args(argv)
 
-    plugin = Path(a.root).resolve() if a.root else Path(__file__).resolve().parents[1]
+    # NO DEFAULT SUBJECT. vibe-ic#2199.
+    #
+    # This used to fall back to `Path(__file__).resolve().parents[1]` -- the
+    # RUNTIME's plugin -- and `repo_hygiene_gates.sh` passed no `--root`.
+    # MEASURED on 8HD-4 at a61a8e4b4778, subject and runtime two trees, the
+    # subject carrying one gate nothing invokes:
+    #
+    #   no --root : wiring sources ... under <RUNTIME>; unwired 37 (baseline
+    #               37); [PASS] gate_is_wired: no gate newly unwired   rc=0
+    #   --root S  : wiring sources ... under <SUBJECT>; unwired 38 (baseline
+    #               37)                                                rc=1
+    #
+    # The PASS was about the instrument. Note that the `wiring sources:` line
+    # printed the RUNTIME's path while doing it: the evidence was on the screen
+    # and read as normal, which is exactly why a refusal beats a default here.
+    if not a.root:
+        print("[CANNOT DETERMINE] gate_is_wired: no --root. This gate has no "
+              "default subject and will not invent one: the only tree it "
+              "could reach without being told is its OWN, and a verdict about "
+              "the instrument's tree is indistinguishable from a verdict "
+              "about yours. Name the plugin root under test (vibe-ic#2199). "
+              "NOT a pass.", file=sys.stderr)
+        return 2
+    plugin = Path(a.root).resolve()
     root = repo_root(plugin)
     repo = root if root is not None else plugin
 

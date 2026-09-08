@@ -49,8 +49,10 @@ _CHECKER = "vendored_attribution_retained_check.py"
 @pytest.fixture(scope="module")
 def audit_report(tmp_path_factory):
     out = tmp_path_factory.mktemp("wiring1241") / "audit.json"
-    _pr.run([sys.executable, str(_AUDIT), "--json", str(out)],
-                   capture_output=True, text=True)
+    # `--repo-root` NAMED (vibe-ic#2199): the shipped repository, which is what
+    # this fixture has always measured.
+    _pr.run([sys.executable, str(_AUDIT), "--repo-root", str(_REPO),
+             "--json", str(out)], capture_output=True, text=True)
     return json.loads(out.read_text())
 
 

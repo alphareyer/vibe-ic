@@ -85,12 +85,19 @@ def _log(tools_line):
 
 def _decide(base_log, cand_log):
     """Everything except the two gate logs is held identical and clean."""
+    # This unit fixture varies gate-label counts, not hygiene findings. Supply
+    # the complete comparator input for its one clean synthetic hygiene gate;
+    # absence now correctly means INCOMPLETE, never a measured empty delta.
+    hygiene = {"status": "CLEAN", "introduced": [], "carried": [],
+               "cleared": [], "candidate_findings": 0,
+               "base_findings": 0, "declared": 1}
     return V.decide(
         rebase_status="ok", expected_tree=TREE, verified_tree=TREE,
         github_tree=TREE, land=V.parse_land_log(cand_log),
         base_land=V.parse_land_log(base_log),
         delta=V.Delta(base_total=10, candidate_total=10, overlap=10),
-        verified_sha=SHA, truncated=False, dropped_files=(), selection_size=21)
+        verified_sha=SHA, truncated=False, dropped_files=(), selection_size=21,
+        hygiene=hygiene)
 
 
 # ====================================================== 1. THE BAN, AND ITS CONTROL
@@ -242,22 +249,58 @@ _DECLARED_STRICT = {
 }
 
 _PRINTF_GATE = re.compile(
-    r"""printf\s+'\s{2}(?:PASS|FAIL|SKIP)\s{2}(?P<label>.*?)\\n'""")
+    r"""printf\s+'\s{2}(?:PASS|FAIL|SKIP)\s{2}(?P<label>.*?)\\n'"""
+    r"""(?P<args>[^\n]*)""")
 _ECHO_GATE = re.compile(
     r'echo\s+"\s{2}(?:PASS|FAIL|SKIP)\s{2}(?P<label>[^"]*)"')
 
+#: The generic `run()` helper's argument. A `%s` fed from THIS is the unit's own
+#: name, set as a literal at the call site — it is the same string on every tree.
+_CALL_SITE_LABEL_ARG = '"$label"'
+
+
+def _varies_with_the_tree(label: str, args: str) -> bool:
+    """Does this printed line differ between two runs on two trees?
+
+    THE FORMAT ALONE CANNOT ANSWER IT, and reading it as if it could is how
+    this guard accused an honest landing. MEASURED (czmainred9, v1.19.60):
+    `ca93e79dc` (#2142) added the census-freshness unit, whose two FAIL lines are
+
+        printf '  FAIL  %s — no verdict was recorded for this unit\\n' "$label"
+        printf '  FAIL  %s — the published census does not re-derive on this
+                          tree\\n' "$label"
+
+    with `label="63x8 census freshness"` three lines above — a constant. Both
+    print the identical sentence on every tree in the world, and this scan
+    called them tree-varying because the FORMAT holds a `%s`. The old filter
+    had the right idea and stopped one step short: it excluded a BARE `%s`
+    because "its label comes from the call site as a literal", which is a fact
+    about the ARGUMENT and not about the format, so a fixed suffix after the
+    same argument defeated it.
+
+    So the argument decides. `"$label"` is the call site's literal; anything
+    else — `"$(wc -l < "$sel")"`, `"${#files[@]}"`, `"$wrc"` — is a measurement
+    of this tree, and those are exactly the labels this file exists to refuse.
+    An `echo` line interpolates in place and carries no separate argument, so
+    it is judged on its own text as before.
+    """
+    if "%s" not in label and "$" not in label:
+        return False
+    if args is None:                              # the `echo` form
+        return True
+    rest = args.strip()
+    if not rest:
+        return "$" in label                       # nothing substituted at all
+    return set(rest.split()) != {_CALL_SITE_LABEL_ARG}
+
 
 def _tree_varying_gate_labels():
-    """Every gate label `gatekeeper-land.sh` prints that is not a constant.
-
-    `printf '  PASS  %s\\n' "$label"` is the generic `run()` helper — its label
-    comes from the call site as a literal, so it is not itself varying.
-    """
+    """Every gate label `gatekeeper-land.sh` prints that is not a constant."""
     src = _LAND_SH.read_text(encoding="utf-8")
-    found = [m.group("label") for m in _PRINTF_GATE.finditer(src)]
-    found += [m.group("label") for m in _ECHO_GATE.finditer(src)]
-    return sorted({l for l in found
-                   if l.strip() != "%s" and ("%s" in l or "$" in l)})
+    found = [(m.group("label"), m.group("args"))
+             for m in _PRINTF_GATE.finditer(src)]
+    found += [(m.group("label"), None) for m in _ECHO_GATE.finditer(src)]
+    return sorted({l for l, a in found if _varies_with_the_tree(l, a)})
 
 
 def test_the_scan_actually_finds_the_labels_it_is_meant_to_judge():
@@ -307,3 +350,53 @@ def test_the_strict_declaration_names_no_label_the_script_stopped_printing():
     src = _LAND_SH.read_text(encoding="utf-8")
     stale = [l for l in _DECLARED_STRICT if l not in src]
     assert not stale, "declared strict but no longer printed: %r" % (stale,)
+
+
+# ── the argument rule's own two directions (czmainred9) ───────────────────
+
+def test_the_scan_still_catches_a_label_fed_from_a_tree_measurement():
+    """MUTATION. The `"$label"` rule must not be a way to hide a real one.
+
+    Six lines, one synthetic script, every shape the real file uses. The three
+    fed from `"$label"` are the same sentence on every tree; the three fed from
+    a count, an array length and an rc are not, and every one of those three is
+    a label this file exists to refuse. Replace `_varies_with_the_tree` with
+    `"%s" in label` and the first three come back; replace it with `False` and
+    the last three go quiet.
+    """
+    script = (
+        '''    printf '  PASS  %s\\n' "$label"\n'''
+        '''    printf '  FAIL  %s — no verdict was recorded for this unit\\n' "$label"\n'''
+        '''    printf '  SKIP  %s — nothing to do here\\n' "$label"\n'''
+        '''    printf '  FAIL  targeted tests (%s file(s))\\n' "$(wc -l < "$sel")"\n'''
+        '''    printf '  PASS  repo tools tests (%s file(s))\\n' "${#files[@]}"\n'''
+        '''    printf '  FAIL  it wrote to the tree (write-guard rc=%s)\\n' "$wrc"\n''')
+    varying = sorted({m.group("label") for m in _PRINTF_GATE.finditer(script)
+                      if _varies_with_the_tree(m.group("label"),
+                                               m.group("args"))})
+    assert varying == [
+        "it wrote to the tree (write-guard rc=%s)",
+        "repo tools tests (%s file(s))",
+        "targeted tests (%s file(s))",
+    ], varying
+
+
+def test_a_census_style_suffix_is_not_made_varying_by_its_suffix():
+    """The exact pair #2142 added, and the exact pair that was accused.
+
+    Asserted on the REAL script rather than on a copy of the strings, so it
+    cannot pass by describing a file that has moved on.
+    """
+    src = _LAND_SH.read_text(encoding="utf-8")
+    suffixed = [(m.group("label"), m.group("args"))
+                for m in _PRINTF_GATE.finditer(src)
+                if m.group("label").startswith("%s — ")]
+    assert len(suffixed) >= 2, (
+        "the `%s — <suffix>` shape is gone from the script, so this test now "
+        "asks nothing — re-point it or delete it, do not leave it green: "
+        f"{suffixed}")
+    for label, args in suffixed:
+        assert args.strip() == _CALL_SITE_LABEL_ARG, (
+            "a `%s — <suffix>` line grew an argument that is NOT the call "
+            f"site's own label, so it really does vary: {label!r} <- {args!r}")
+        assert not _varies_with_the_tree(label, args), label

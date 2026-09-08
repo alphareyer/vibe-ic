@@ -202,7 +202,10 @@ def test_the_gate_it_found_still_exists_and_is_a_real_program():
 #: from one that is not running.
 @pytest.mark.parametrize("prog,args,needle", [
     ("gate_is_wired_check.py", ["--root", str(_PLUGIN)], "gates:"),
-    ("checker_execution_wiring_audit.py", [], "checker-shaped program(s)"),
+    # The SUBJECT is named on both rows now (vibe-ic#2199); the audit takes the
+    # repository root, its neighbour takes the plugin root.
+    ("checker_execution_wiring_audit.py",
+     ["--repo-root", str(_PLUGIN.parents[2])], "checker-shaped program(s)"),
 ])
 def test_the_wiring_gates_state_their_denominator_on_a_clean_run(prog, args, needle):
     #: 55s, not 170s. The harness runs this suite under `--timeout=180` and

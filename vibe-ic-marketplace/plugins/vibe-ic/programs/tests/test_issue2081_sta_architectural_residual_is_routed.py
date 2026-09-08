@@ -292,3 +292,47 @@ def test_analyse_report_consults_the_one_polarity_vocabulary(tmp_path):
     two copies of it, and they drifted)."""
     import _prose_polarity
     assert mod.is_denied is _prose_polarity.is_denied
+
+
+def test_next_section_cannot_relabel_the_previous_setup_path():
+    # A real combined sign-off report appends the HOLD banner after the last
+    # SETUP path, before the next Startpoint. Splitting only at Startpoint
+    # attaches that future banner to the preceding path.
+    hold = _HOLD.replace("process=SS", "process=FF")
+    _, paths = mod.analyse_report(_ARCH + hold)
+    assert len(paths) == 1
+    assert paths[0]["corner"] == "SS"
+    # Both directions: a following setup section must acquire its OWN label.
+    _, paths = mod.analyse_report(_ARCH + _ARCH.replace("process=SS", "process=TT"))
+    assert [p["corner"] for p in paths] == ["SS", "TT"]
+
+
+@pytest.mark.parametrize("body, expected", [(_ARCH, "FAIL"), (_MET, "PASS"), (None, "BLOCKED")],
+                         ids=["violated", "met", "missing"])
+def test_inline_signoff_executes_the_architectural_gate(tmp_path, monkeypatch, body, expected):
+    import phase3_one_shot_runner as runner
+    project = _project(tmp_path, body) if body is not None else tmp_path
+    actual = runner._run_declared_signoff_gate
+
+    def dispatch(project, name, program, out_rel, extra_argv=()):
+        # Isolate this gate's contribution to the real dispatch and verdict
+        # fold. Unrelated gates (including operator tools) are outside this
+        # report-reader test; the subject runs as its actual subprocess.
+        if program == "sta_architectural_residual_check.py":
+            return actual(project, name, program, out_rel, extra_argv)
+        return runner.StepResult(name, "PASS", 0.0, "unrelated gate control", [])
+
+    monkeypatch.setattr(runner, "_run_declared_signoff_gate", dispatch)
+    rows = runner.step_declared_signoff_gates(project)
+    own = [r for r in rows if r.name == "sta_architectural_residual"]
+    assert len(own) == 1, "the inline sign-off executor never called the declared gate"
+    assert own[0].status == expected
+    report = json.loads((project / "reports/phase3/sta/architectural_residual.json").read_text())
+    assert report["route_skill"] == "spec-to-rtl"
+    if expected == "FAIL":
+        assert "SS" in own[0].detail and "0.88" in own[0].detail
+        assert runner._aggregate_verdict(rows) == "FAIL"
+    elif expected == "BLOCKED":
+        assert runner._aggregate_verdict(rows) not in ("PASS", "PASS_WITH_WAIVERS")
+    else:
+        assert runner._aggregate_verdict(rows) == "PASS"

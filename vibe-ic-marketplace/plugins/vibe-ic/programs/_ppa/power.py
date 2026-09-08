@@ -88,7 +88,43 @@ __all__ = [
     "activity_provenance", "parse_power_report", "read_power_report",
     "metric_records", "total_record", "comparable", "compare_total_power",
     "V_A_LOWER", "V_B_LOWER", "V_EQUAL", "V_UNDETERMINED",
+    "pdn_ring_dimensions",
 ]
+
+
+def pdn_ring_dimensions(cfg: Dict[str, Any]
+                        ) -> Tuple[float, float, List[float], List[float], float]:
+    """Validate the shared recipe and measure its two-rail footprint.
+
+    Floorplanning must reserve the same widths, spacing, core offset and
+    pad clearance that the later PDN emitter will require.
+    """
+    layers = cfg.get("layers") or []
+    widths = cfg.get("widths") or []
+    spacings = cfg.get("spacings") or []
+    pad_layers = cfg.get("connect_to_pad_layers") or []
+    connects = cfg.get("connects") or []
+    try:
+        offset = float(cfg.get("core_offset_um"))
+        clearance = float(cfg.get("min_clearance_um"))
+        widths_f = [float(v) for v in widths]
+        spacings_f = [float(v) for v in spacings]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid pdn_ring numeric config: {exc}") from exc
+    names = list(layers) + list(pad_layers) + [n for pair in connects
+                                               for n in (pair or [])]
+    if (len(layers) != 2 or len(widths_f) != 2 or len(spacings_f) != 2
+            or not pad_layers or offset <= 0 or clearance < 0
+            or any(v <= 0 for v in widths_f + spacings_f)
+            or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", str(n))
+                   for n in names)
+            or any(not isinstance(pair, (list, tuple)) or len(pair) != 2
+                   for pair in connects)):
+        raise ValueError("invalid pdn_ring shape or layer identifier")
+
+    footprint = max(2.0 * widths_f[i] + spacings_f[i] for i in range(2))
+    return offset, clearance, widths_f, spacings_f, footprint
+
 
 SCHEMA_METRIC = "vibeic.ppa.metric.v1"
 PARSER = "_ppa/power.py"

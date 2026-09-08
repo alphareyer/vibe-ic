@@ -21889,7 +21889,11 @@ def main() -> int:
     rtl_repair_retry = 0
     last_rtl_hash = _rtl_dir_sha256(project)
     rtl_repair_remediation_attempted = False  # v1.6.181 (#72 P1-4)
+    if _after_exit("sim"):
+        plan.append(_exit_sentinel("reference_tb"))
     while True:
+        if _after_exit("sim"):
+            break
         sr = step_reference_tb(project, args.top_name, ic_class,
                                args.container)
         plan.append(sr)
@@ -21976,7 +21980,10 @@ def main() -> int:
     # stack paths have had their chance to create functional evidence, and
     # before synthesis/backend work can be mistaken for a certified Phase-2
     # result. The StepResult is blocking in the aggregate verdict.
-    plan.append(step_step4_functional_evidence(project, ic_class))
+    if _after_exit("sim"):
+        plan.append(_exit_sentinel("step4_functional_evidence"))
+    else:
+        plan.append(step_step4_functional_evidence(project, ic_class))
 
     # Step 4 — yosys offline synth (Docker fallback if host yosys absent)
     # PRE-FLIGHT (canonical step 9). Step 9 also declares step 7's
@@ -22162,8 +22169,11 @@ def main() -> int:
     plan.append(step_arith_declaration_emit(project))
     # MEASURE coverage before the manifests/audit read it. Nothing used to run
     # the measurement at all — see step_verilator_coverage's docstring.
-    plan.append(step_verilator_coverage(project, args.top_name,
-                                        args.container))
+    if _after_exit("sim"):
+        plan.append(_exit_sentinel("verilator_coverage"))
+    else:
+        plan.append(step_verilator_coverage(project, args.top_name,
+                                            args.container))
     plan.append(step_emit_phase2_manifests(project, plan, args.top_name,
                                            args.container))
     # v0.1.58 capture: regenerate final_summary.md BEFORE the audit so the

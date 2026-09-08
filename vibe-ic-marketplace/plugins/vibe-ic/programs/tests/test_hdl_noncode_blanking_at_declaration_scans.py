@@ -21,6 +21,7 @@ reason the gate names rather than because a helper is missing.
 """
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 import sys
@@ -205,7 +206,9 @@ def test_the_declaration_scan_gate_is_green_on_this_tree():
     proc = subprocess.run(
         [sys.executable,
          str(PROGRAMS / "hdl_declaration_scan_strips_comments_check.py"),
-         "--ratchet"],
+         # `--root` NAMED (vibe-ic#2199): the shipped plugin, which is the
+         # "this tree" the name of this test already claims.
+         "--root", str(PROGRAMS.parent), "--ratchet"],
         capture_output=True, text=True, timeout=900)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "[PASS]" in proc.stdout
@@ -348,3 +351,87 @@ def test_a_generator_that_exists_only_in_a_comment_is_not_reported():
                                       "tlul_pkg::tl_h2d_t")
     assert mod is None
     assert "pass-through" in why
+
+
+# ── the gate's own two blind spots, closed (czmainred9) ───────────────────
+#
+# Both were measured on pristine main at v1.19.60, where they were the ONLY two
+# offenders the ratchet named and neither was a defect in the accused code.
+
+def test_a_COMPILED_regexs_own_sub_is_recognised_as_a_strip():
+    """SPELLING, not behaviour: `X_RE.sub(repl, t)` strips as surely as
+    `re.sub(pat, repl, t)`, and this repository pre-compiles.
+
+    BOTH DIRECTIONS on one synthetic module. The compiled comment pattern
+    counts; a compiled pattern that is NOT a comment pattern does not, or the
+    fix would have made every `.sub` look like a strip and switched the gate
+    off.
+    """
+    G = _load_gate()
+    src = (
+        'import re\n'
+        '_C = re.compile(r"(?m)^[ \\t]*//.*$")\n'
+        '_NOTC = re.compile(r"\\\\s+")\n'
+        '_M = re.compile(r"\\\\bmodule\\\\s+(\\\\w+)")\n'
+        'def stripped(text):\n'
+        '    t = _C.sub("", text)\n'
+        '    return _M.findall(t)\n'
+        'def squeezed(text):\n'
+        '    t = _NOTC.sub(" ", text)\n'
+        '    return _M.findall(t)\n')
+    found = G.scan_source(src, "syn")
+    assert found == ["syn::squeezed::_M(t)"], found
+
+
+def test_a_keyword_in_ATTRIBUTE_position_is_not_a_declaration():
+    """`\\.output\\s*\\(` is a method call. `output` is a Verilog reserved word,
+    so it cannot be the name of a port a connection dots into either.
+
+    Both directions, because a rule that dropped the real productions would be
+    the third retracted widening this file's header records.
+    """
+    G = _load_gate()
+    assert not G.declares_hdl(r"\.output\s*\(\s*['\"]([^'\"]+)['\"]")
+    assert not G.declares_hdl(r"extent\.input\(")
+    # …and every real declaration production still declares
+    for real in (r"\bmodule\s+(\w*)", r"module[ \t]+", r"\binout\b",
+                 r"^\s*(input|output|inout)\b", r"module[\s_-]?list"):
+        assert G.declares_hdl(real), real
+
+
+def test_the_attribute_rule_removes_exactly_one_regex_tree_wide():
+    """The SET, not the count — a smaller population is what both wrong rules
+    in this gate's history produced too.
+
+    Re-measured here rather than quoted, so the claim in the gate's comment
+    cannot go stale without this failing.
+    """
+    G = _load_gate()
+    root = PROGRAMS.parent
+    kept, dropped = [], []
+    for f in sorted(root.rglob("*.py")):
+        try:
+            tree = ast.parse(f.read_text(errors="replace"))
+        except SyntaxError:
+            continue
+        for n in ast.walk(tree):
+            if not (isinstance(n, ast.Assign) and len(n.targets) == 1
+                    and isinstance(n.targets[0], ast.Name)):
+                continue
+            pat = G._pattern_of(n.value)
+            if pat is None:
+                continue
+            name = f"{f.relative_to(root)}::{n.targets[0].id}"
+            without = G._KW_PATH_TOKEN.sub(
+                lambda m: " " * len(m.group(0)), pat)
+            before = bool(G._KW.search(G._META.sub(" ", without)))
+            after = G.declares_hdl(pat)
+            if before and not after:
+                dropped.append(name)
+            elif after:
+                kept.append(name)
+    assert dropped == [
+        "programs/_seal_ring_margin.py::_RE_RULE_ID"], dropped
+    assert len(kept) >= 200, (
+        f"the population collapsed to {len(kept)}; the attribute rule is "
+        f"supposed to remove one entry, not a class")

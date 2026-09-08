@@ -18,7 +18,8 @@ WHAT THIS MODULE PINS is the direction that matters: teaching a scanner to see
 a bound must not teach it to stop looking. Every case below is driven in BOTH
 directions, and the decisive one is `test_removing_the_deadline_from_the_real_
 function_flags_it_again` — the REAL shipped function, with the deadline taken
-out, must redden. That is what separates "it learned to see the bound" from
+out together with any independent iteration cap, must redden. That separates
+"it learned to see the bound" from
 "it learned to ignore that function".
 
 chip-AGNOSTIC: pure AST shapes, no IC / PDK / vendor content.
@@ -319,34 +320,81 @@ def test_the_real_bounded_acquire_is_read_as_bounded():
 
 
 def test_removing_the_deadline_from_the_real_function_flags_it_again():
-    """TAKE THE DEADLINE OUT AND THE SCANNER MUST SPEAK AGAIN.
+    """Removing every independent bound must restore the polling offense.
 
-    This is what proves the scanner learned to SEE the bound rather than to
-    ignore this function. Two mutations, each removing a different half of the
-    bound, and each must redden:
-      1. the pre-loop reading is deleted (nothing was computed before the loop);
-      2. the whole expiry branch is deleted (the loop retries forever).
+    The claim now has an iteration cap as well as a deadline. Removing only
+    the clock bound must leave that cap effective. Once the cap is removed,
+    either a missing pre-loop reading or a missing expiry branch must redden.
     """
     src = _real_claim_enter()
-
-    m1 = "\n".join(ln for ln in src.splitlines()
-                   if "deadline = time.monotonic()" not in ln)
-    assert "deadline = time.monotonic()" not in m1
+    assert _offenses(src) == [], "a pre-existing offense cannot earn mutation credit"
+    guarded = 'for _ in _wd.loop_guard(f"checkout_claim:{word}", max_iter=max_polls):'
+    assert guarded in src, "the independent iteration bound is missing"
+    clockless = _drop_block(src, "deadline = ")
+    clockless = _drop_block(clockless, "started = time.monotonic()")
+    assert _offenses(clockless) == [], "the iteration cap must survive clock removal"
+    m1 = clockless.replace(guarded, "while True:")
+    assert m1 != clockless and "deadline = " not in m1
     assert "while" in _kinds(_offenses(m1)), \
-        f"the pre-loop reading is gone and the loop is unbounded:\n{m1}"
+        f"both the pre-loop reading and iteration cap are gone:\n{m1}"
 
-    m2 = _drop_block(_drop_block(src, "deadline = time.monotonic()"),
-                     "if time.monotonic() >= deadline:")
-    assert "deadline" not in m2, m2
+    expiryless = _drop_block(src, "if time.monotonic() >= deadline:")
+    assert _offenses(expiryless) == [], "the iteration cap must survive expiry removal"
+    m2 = expiryless.replace(guarded, "while True:")
+    assert m2 != expiryless and "if time.monotonic() >= deadline:" not in m2
     assert "time.sleep" in m2 and "while True" in m2, m2
     assert "while" in _kinds(_offenses(m2)), \
-        f"the expiry branch is gone and the loop retries forever:\n{m2}"
+        f"both the expiry branch and iteration cap are gone:\n{m2}"
 
 
 def test_the_shipped_programs_tree_is_watchdog_clean():
     offs = W.scan_programs(PROGRAMS)
     assert offs == [], "\n".join(f"{o.file}:{o.line} [{o.kind}] {o.detail}"
                                  for o in offs)
+
+
+def test_the_claim_iteration_cap_stops_a_frozen_clock(tmp_path, monkeypatch):
+    """Recovered lock-repair control, with a finite falsifier on the old loop.
+
+    Count actual failed acquisitions with a frozen producer clock. An old
+    unbounded loop fails on its seventh attempt instead of hanging or needing
+    a wall kill. The repaired loop must exhaust its own six-iteration guard.
+    """
+    from types import SimpleNamespace
+    import gate_host_independence_check as G
+
+    attempts = []
+    guards = []
+    real_guard = G._wd.loop_guard
+
+    def deny_lock(*args):
+        attempts.append(args)
+        assert len(attempts) <= 6, "the claim exceeded its finite polling budget"
+        raise BlockingIOError("held by another driver")
+
+    def record_guard(*args, **kwargs):
+        guard = real_guard(*args, **kwargs)
+        guards.append(guard)
+        return guard
+
+    monkeypatch.setattr(G, "time", SimpleNamespace(
+        monotonic=lambda: 1000.0, sleep=lambda seconds: None))
+    monkeypatch.setattr(G.fcntl, "flock", deny_lock)
+    monkeypatch.setattr(G._wd, "loop_guard", record_guard)
+    claim = G._CheckoutClaim(tmp_path, True, wait_s=1.0, lock_root=tmp_path)
+    with claim as result:
+        assert result.held is False
+        assert "another driver held a conflicting claim" in result.why
+    assert len(guards) == 1 and guards[0].reason == "max_iter"
+    assert len(attempts) == guards[0].iterations == guards[0].max_iter == 6
+
+
+def test_the_claim_still_grants_a_free_lock(tmp_path):
+    import gate_host_independence_check as G
+
+    with G._CheckoutClaim(tmp_path, True, wait_s=1.0, lock_root=tmp_path) as claim:
+        assert claim.held is True and claim.why == "held"
+    assert claim._fh is None
 
 
 # ══ the truncated-window rule ══════════════════════════════════════════════

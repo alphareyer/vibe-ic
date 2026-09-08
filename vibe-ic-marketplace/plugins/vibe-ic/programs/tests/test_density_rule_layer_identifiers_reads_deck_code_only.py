@@ -31,6 +31,7 @@ and with the entry removed the ratchet refuses again.
 
 chip/PDK-AGNOSTIC: every deck below is written by this file.
 """
+import re
 import sys
 from pathlib import Path
 
@@ -84,10 +85,49 @@ def _answer(**kw):
     return G.density_rule_layer_identifiers(_deck(**kw))
 
 
+def _denial_alternatives():
+    r"""Every alternative `_prose_polarity` spells, derived from its own source.
+
+    A regex ALTERNATIVE is the unit of that module's vocabulary — `\bexclud\w*\b`
+    is one entry that TOKENS covers with two words, and `\bnon-?\b` is one entry
+    covered by one — so the population this list must describe is the set of
+    alternatives, not the set of words.
+    """
+    raw = P._DENIAL_CORE + "|" + P._DENIAL_RETIRED
+    return [a for a in raw.split("|") if a]
+
+
 def test_the_vocabulary_is_the_modules_own():
+    """BOTH DIRECTIONS, as a set, against the population itself.
+
+    THE OLD SECOND HALF WAS `len(TOKENS) == 21` — `len()` over an unmutated
+    literal, which is true on every tree, forever, and could not have gone red
+    for any reason. `population_guard_asserts_equality_not_a_floor` names
+    exactly that shape, and it was the ONE offender on main at v1.19.60
+    (czmainred9): a denominator that cannot go red is not a denominator, and
+    the comment above TOKENS claimed the guard it did not have — "a token added
+    there and not here is a test failure" was simply not asserted anywhere.
+
+    So it is asserted now:
+
+      forward   every token here is a denial to `_prose_polarity`  (unchanged);
+      backward  every ALTERNATIVE `_prose_polarity` spells is exercised by at
+                least one token here — which is the direction that catches the
+                vocabulary growing and this sweep silently not growing with it.
+    """
     for t in TOKENS:
         assert P.NEGATION_RE.search(t), f"{t!r} is not a denial to _prose_polarity"
-    assert len(TOKENS) == 21
+
+    alternatives = _denial_alternatives()
+    assert len(alternatives) >= 15, (
+        "the alternatives could not be read out of _prose_polarity's source, "
+        f"so the backward direction below asks nothing: {alternatives}")
+    uncovered = [a for a in alternatives
+                 if not any(re.search(a, t, re.IGNORECASE) for t in TOKENS)]
+    assert uncovered == [], (
+        "`_prose_polarity` spells these denials and no token in TOKENS "
+        f"exercises them, so the sweep below has a silent gap: {uncovered}. "
+        "Add a word each one matches — do NOT delete the alternative.")
 
 
 def test_no_sentence_moves_the_published_answer():
@@ -188,3 +228,18 @@ def test_the_exemption_is_load_bearing_and_its_removal_refuses(monkeypatch):
     assert C.main(["--ratchet", "--root", str(root)]) == 1, (
         "with the entry removed the ratchet must refuse again — an exemption "
         "that changes nothing is not carrying the claim")
+
+
+def test_the_backward_direction_can_actually_fail():
+    """MUTATION on the guard above, since a guard nobody proved can go red is
+    the very shape it was rewritten to stop being.
+
+    Add one alternative to the vocabulary and leave TOKENS alone: the backward
+    direction must name it. This drives the same expression on a mutated
+    pattern rather than editing the shipped module.
+    """
+    mutated = [a for a in (P._DENIAL_CORE + "|" + P._DENIAL_RETIRED).split("|")
+               if a] + [r"\brescinded\b"]
+    uncovered = [a for a in mutated
+                 if not any(re.search(a, t, re.IGNORECASE) for t in TOKENS)]
+    assert uncovered == [r"\brescinded\b"], uncovered

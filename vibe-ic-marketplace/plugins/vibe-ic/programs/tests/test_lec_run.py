@@ -1619,7 +1619,8 @@ def test_budget_annotation_carries_attempts_elapsed_and_the_resource():
     # deadline indistinguishable from progress.
     clk = _FakeClock()
     b = lec_run.StepBudget(600, clock=clk)
-    b.record("verilog", "-DSIMULATION -DYOSYS", 600, 600.0, True, True)
+    b.record("verilog", "-DSIMULATION -DYOSYS", 600, 600.0, True, True,
+             kill_cause={"returncode": 124, "oom_kill_delta": 0})
     clk.advance(600)
     rep = {"verdict": "SKIPPED-CONDITION", "equivalent": False,
            "verdict_explanation": "Yosys equiv exceeded its time budget."}
@@ -1646,6 +1647,51 @@ def test_budget_annotation_names_no_resource_when_nothing_ran_out():
     assert out["step_budget_exhausted"] is False
     assert out["exhausted_resource"] is None
     assert out["verdict_explanation"] == "ok"   # untouched
+
+
+@pytest.mark.parametrize("verdict,equivalent", [
+    ("PASS", True), ("FAIL", False), ("INCONCLUSIVE", False),
+])
+def test_completed_proof_over_admission_budget_did_not_exhaust_clock(
+        verdict, equivalent):
+    clk = _FakeClock()
+    budget = lec_run.StepBudget(600, clock=clk)
+    budget.record("verilog", "", 600, 900, True, False)
+    clk.advance(900)
+    report = {"verdict": verdict, "equivalent": equivalent,
+              "verdict_explanation": "engine result"}
+    out = lec_run.annotate_step_budget(report, budget, stopped=False)
+    assert out["step_budget_exhausted"] is True
+    assert out["step_budget_stopped_this_proof"] is False
+    assert json.dumps(out["exhausted_resource"]) == "null"
+    assert (out["verdict"], out["equivalent"]) == (verdict, equivalent)
+
+
+def test_clock_stop_is_named_even_when_admission_budget_remains():
+    clk = _FakeClock()
+    budget = lec_run.StepBudget(600, clock=clk)
+    budget.record("verilog", "", 60, 60, True, True,
+                  kill_cause={"returncode": 124, "oom_kill_delta": 0})
+    clk.advance(60)
+    out = lec_run.annotate_step_budget(
+        {"verdict": "INCONCLUSIVE", "equivalent": False}, budget)
+    assert out["step_budget_exhausted"] is False
+    assert out["step_budget_stopped_this_proof"] is True
+    assert json.dumps(out["exhausted_resource"]) == '"wall_clock_seconds"'
+
+
+def test_progress_stop_over_admission_budget_is_not_a_clock_stop():
+    clk = _FakeClock()
+    budget = lec_run.StepBudget(600, clock=clk)
+    budget.record("verilog", "", 600, 900, True, False)
+    clk.advance(900)
+    out = lec_run.annotate_step_budget(
+        {"verdict": "INCONCLUSIVE", "equivalent": False},
+        budget, stopped=True)
+    assert out["step_budget_exhausted"] is True
+    assert out["step_budget_stopped_this_proof"] is True
+    assert out["exhausted_resource"] == lec_run.EXHAUSTED_NOT_MEASURED
+    assert "no probe identified" in out["exhausted_resource_evidence"]
 
 
 def test_a_skipped_retry_is_recorded_not_silently_dropped():

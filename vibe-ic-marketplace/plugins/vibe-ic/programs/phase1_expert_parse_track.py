@@ -260,6 +260,7 @@ Never an oracle, a golden artefact or a harness.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -2105,6 +2106,85 @@ def carriage_sentence(carriage: Dict[str, Any]) -> str:
             "question — which layer owns it — and not a content gap.")
 
 
+# ── rendering a SPLIT finding (#2190) ──────────────────────────────────────
+# A split parent's `layer`, `field_path` and `expected_tokens` are EMPTY BY
+# CONTRACT (`SPLIT_MARKER`, above): it addresses no single field and no single
+# layer, so answering DECLARED or True for it would report a reading of one
+# branch as a reading of the expectation. That contract is right and is not
+# what changed here.
+#
+# WHAT WAS MEASURED (2026-09-08, lane cz2190, on ab8d9ce834f0). The three
+# finding emitters read those parent fields as if a single expectation had
+# supplied them, so every finding raised on a split rendered::
+#
+#   "The AI sub-track asked None for: <requirement>. That layer does not carry
+#    it, and ['L4_REGMAP'] DOES — every one of the 0 expected token(s). ...
+#    or — if the layer contract really does put it in None — ..."
+#
+# Three separate falsehoods in one sentence, and the third is load-bearing:
+# `every one of the 0 expected token(s)` is a VACUOUS UNIVERSAL printed as the
+# positive evidence that the fact was extracted, and the sentence built on it
+# then instructs the reader not to repair an extractor. The claim underneath
+# is sound — `owning_layers` for a split is computed per failing branch — but
+# a reader auditing the finding cannot tell a real re-scope from a vacuous
+# one, which is the confusion #2127 existed to remove.
+#
+# A SPLIT IS ANSWERED BRANCH BY BRANCH, SO IT IS REPORTED BRANCH BY BRANCH.
+# The parent's `owning_layers` is a UNION over the failing branches, and a
+# union is not an owner: on the measured shape `['L19...', 'L4...']` was
+# printed as carrying "every one of" the tokens when L4 carried one half and
+# L19 the other and NEITHER carried both. Substituting a real token count into
+# the same union sentence would have replaced a vacuous claim with a false
+# one. Only the per-branch form is true, so that is the form these render.
+def _branch_address(b: Dict[str, Any]) -> str:
+    """`LAYER.field_path` — the address ONE branch actually asked."""
+    return f"{b['layer']}{'.' + b['field_path'] if b['field_path'] else ''}"
+
+
+def _branch_token_count(b: Dict[str, Any]) -> int:
+    """How many tokens THIS branch compared. Never the parent's zero."""
+    return len(b.get("expected_tokens") or [])
+
+
+def _split_branch_rows(c: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The machine-readable half of a split finding: one row per branch.
+
+    Carried BESIDE the parent's `layer`/`field_path` rather than instead of
+    them, and only on a split. A reviewer triaging a run's Phase-1 findings
+    had no way to see WHICH addresses a split expectation asked or HOW MANY
+    tokens were compared — the parent fields cannot say, by construction, and
+    the prose was saying it wrongly. This says it in the one place where each
+    answer has a single referent.
+    """
+    return [{
+        "id": b["id"],
+        "layer": b["layer"],
+        "field_path": b["field_path"],
+        "expected_token_count": _branch_token_count(b),
+        "met": b["met"],
+        "layer_present": b["layer_present"],
+        "owning_layers": b.get("owning_layers") or [],
+    } for b in (c.get("sub_results") or [])]
+
+
+def _split_addresses(c: Dict[str, Any]) -> str:
+    """Every branch address of a split, in order, for one prose clause."""
+    return ", ".join(_branch_address(b) for b in (c.get("sub_results") or []))
+
+
+def _failed_branches(c: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The branches that DISAGREED — the same set `_converge_split` took the
+    parent's `owning_layers` from, recomputed here so the finding text and the
+    parent field can never be about two different sets."""
+    return [b for b in (c.get("sub_results") or []) if not b["met"]]
+
+
+def _absent_branches(c: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The branches addressing a layer this Phase-1 root does not carry."""
+    return [b for b in (c.get("sub_results") or [])
+            if b["layer_present"] is False]
+
+
 def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
     """Decide ONE AI expectation against what the program track actually wrote.
 
@@ -2437,7 +2517,12 @@ def ai_subtrack(project: Path, prompt: str, out_dir: Path,
     answer = out_dir / "l_doc_expectations.json"
     if answer.is_file():
         try:
-            data = json.loads(answer.read_text(errors="replace"))
+            raw = answer.read_bytes()
+            # Identify exactly the bytes parsed below, including a refused
+            # answer. Pack-assembly/open failures carry no read receipt.
+            status.update(answer_path=str(answer),
+                          answer_sha256=hashlib.sha256(raw).hexdigest())
+            data = json.loads(raw.decode("utf-8", errors="replace"))
         except (OSError, ValueError) as exc:
             status.update(status=AI_ERROR,
                           reason=f"agent answer does not parse: {exc}")
@@ -2639,15 +2724,60 @@ def evaluate(project: Path) -> Dict[str, Any]:
         # decision table computed over a DIFFERENT Phase-1 root produces, and
         # a shape no extractor can ever repair.
         if c["layer_present"] is False and c["layer_in_taxonomy"] is False:
-            findings.append({
-                "severity": "REVIEW",
-                "about": "track",
-                "rule": f"{RULE_AI_LAYER_ABSENT}::{c['id']}",
-                "layer": c["layer"],
-                "field_path": c["field_path"],
-                "owning_layers": c["owning_layers"],
-                "layers_in_root": c.get("layers_in_root") or [],
-                "message": (
+            if c.get("split"):
+                # #2190. `_converge_split` joins the absent branches' layer
+                # names into the parent's `layer`, which the single form then
+                # printed as ONE quoted name: `'L91_NOT_DECLARED, L21_POWER_
+                # INTENT'` — a layer nothing declares because it is not a
+                # layer name at all. Worse, that sentence asserts the taxonomy
+                # declares no layer of "that name" about EVERY joined branch,
+                # and the parent's `layer_in_taxonomy` is `all(...)` over the
+                # absent branches: ONE undeclared branch is enough to refuse
+                # the row, so the others can be declared layers this root
+                # simply does not carry — a different fact, and #312's.
+                # Separated, and the token counts taken per branch.
+                absent = _absent_branches(c)
+                undeclared = [b for b in absent if not b["layer_in_taxonomy"]]
+                declared_absent = [b for b in absent if b["layer_in_taxonomy"]]
+                message = (
+                    f"The AI sub-track asked this as a "
+                    f"{len(c['sub_results'])}-branch SPLIT, and "
+                    f"{len(undeclared)} of its branch(es) address a layer "
+                    f"name the L-doc taxonomy does not declare — so no "
+                    f"Phase-1 root of any design carries it and no extractor "
+                    f"can produce it: "
+                    + "; ".join(f"[{b['id']}] {_branch_address(b)}, "
+                                f"{_branch_token_count(b)} expected token(s)"
+                                for b in undeclared)
+                    + (f". Refused WITH them, because a conjunction is "
+                       f"answered only when every term is: "
+                       + "; ".join(
+                           f"[{b['id']}] {_branch_address(b)}, "
+                           f"{_branch_token_count(b)} expected token(s), "
+                           f"whose layer the taxonomy DOES declare and this "
+                           f"root does not carry" for b in declared_absent)
+                       if declared_absent else "")
+                    + f". This root carries "
+                      f"{c.get('layers_in_root') or '(no layer document)'}. "
+                      f"The miss is a fact about the EXPECTATION, not about "
+                      f"the design"
+                    + ("; and each refused branch's half IS carried "
+                       "elsewhere — "
+                       + "; ".join(
+                           f"[{b['id']}] {b['owning_layers']} carries every "
+                           f"one of its {_branch_token_count(b)} expected "
+                           f"token(s)" for b in absent)
+                       + ", so the repair is to re-scope each of those "
+                         "branches there"
+                       if c["owning_layers"] else
+                       ". Either re-scope each branch named above to a layer "
+                       "the taxonomy declares, or state that the expectation "
+                       "was computed over a DIFFERENT artefact than the one "
+                       "being judged — an expectation naming a layer that "
+                       "does not exist answers a different question rather "
+                       "than disagreeing with this one") + ".")
+            else:
+                message = (
                     f"The AI sub-track addressed layer {c['layer']!r}, and "
                     f"the L-doc taxonomy declares no layer of that name — so "
                     f"no Phase-1 root of any design carries it and no "
@@ -2668,8 +2798,19 @@ def evaluate(project: Path) -> Dict[str, Any]:
                        "over a DIFFERENT artefact than the one being judged "
                        "— an expectation naming a layer that does not exist "
                        "answers a different question rather than "
-                       "disagreeing with this one") + "."),
+                       "disagreeing with this one") + ".")
+            findings.append({
+                "severity": "REVIEW",
+                "about": "track",
+                "rule": f"{RULE_AI_LAYER_ABSENT}::{c['id']}",
+                "layer": c["layer"],
+                "field_path": c["field_path"],
+                "owning_layers": c["owning_layers"],
+                "layers_in_root": c.get("layers_in_root") or [],
+                "message": message,
                 "expert_source": c.get("expert_source"),
+                **({"split_branches": _split_branch_rows(c)}
+                   if c.get("split") else {}),
             })
             continue
 
@@ -2755,20 +2896,37 @@ def evaluate(project: Path) -> Dict[str, Any]:
         # do not re-derive it.
 
         if c["owning_layers"]:
-            findings.append({
-                "severity": "REVIEW",
-                "about": "track",
-                "rule": f"{RULE_AI_MISSCOPED}::{c['id']}",
-                "layer": c["layer"],
-                "field_path": c["field_path"],
-                "owning_layers": c["owning_layers"],
-                # WHERE each owner carried each token (#2191). The half that
-                # makes the claim falsifiable: until this landing a reader was
-                # told a layer "DOES" carry the fact and had to re-run the
-                # comparator to see that the only match was the emitter's own
-                # class stamp or the name of a file it had read.
-                "owning_layers_evidence": c["owning_layers_evidence"],
-                "message": (
+            if c.get("split"):
+                # #2190. BRANCH BY BRANCH. The parent asked no single layer
+                # and compared no tokens of its own, and its `owning_layers`
+                # is a union across the disagreeing branches — so the single
+                # form's sentence would name `None` as the layer, `0` as the
+                # token count, and a union as the carrier of tokens no single
+                # member of it carries.
+                failed = _failed_branches(c)
+                message = (
+                    f"The AI sub-track asked this as a "
+                    f"{len(c['sub_results'])}-branch SPLIT, and "
+                    f"{len(failed)} of its branch(es) disagree, for: "
+                    f"{c['requirement']}. The layer each disagreeing branch "
+                    f"addressed does not carry that branch's half, and "
+                    f"another layer DOES — stated per branch, because a "
+                    f"split is decided per branch and no single layer need "
+                    f"carry the whole conjunction: "
+                    + "; ".join(
+                        f"[{b['id']}] asked {_branch_address(b)} for "
+                        f"{_branch_token_count(b)} expected token(s), and "
+                        f"{b['owning_layers']} carries every one of them"
+                        for b in failed)
+                    + ". So the fact was extracted and those branches named "
+                      "the wrong layer; this is NOT a missing extraction and "
+                      "must not be repaired in an extractor. Either re-scope "
+                      "each branch named above to the layer that owns its "
+                      "half, or — if the layer contract really does put a "
+                      "branch's half where that branch asked — record that "
+                      "as a layer-contract defect in its own right.")
+            else:
+                message = (
                     f"The AI sub-track asked {c['layer']}"
                     f"{'.' + c['field_path'] if c['field_path'] else ''} for: "
                     f"{c['requirement']}. That layer does not carry it, and "
@@ -2780,11 +2938,35 @@ def evaluate(project: Path) -> Dict[str, Any]:
                     f"expectation to the layer that owns the fact, or — if "
                     f"the layer contract really does put it in {c['layer']} "
                     f"— record that as a layer-contract defect in its own "
-                    f"right."),
+                    f"right.")
+            findings.append({
+                "severity": "REVIEW",
+                "about": "track",
+                "rule": f"{RULE_AI_MISSCOPED}::{c['id']}",
+                "layer": c["layer"],
+                "field_path": c["field_path"],
+                "owning_layers": c["owning_layers"],
+                "owning_layers_evidence": c["owning_layers_evidence"],
+                "message": message,
                 "expert_source": c.get("expert_source"),
+                **({"split_branches": _split_branch_rows(c)}
+                   if c.get("split") else {}),
             })
             continue
 
+        if c.get("split"):
+            # #2190. The parent names no layer, so the single form rendered
+            # "expected None to carry". Name the conjunction the expectation
+            # actually stated: every address, and that EVERY one of them has
+            # to agree — which is what makes the `observed` below a verdict on
+            # the whole row rather than on the branch it happens to quote.
+            addressed = (
+                f"a {len(c['sub_results'])}-branch SPLIT — every one of "
+                f"{_split_addresses(c)} must agree —")
+        else:
+            addressed = (
+                f"{c['layer']}"
+                f"{'.' + c['field_path'] if c['field_path'] else ''}")
         findings.append({
             "severity": "REVIEW",
             "about": "design",
@@ -2793,8 +2975,7 @@ def evaluate(project: Path) -> Dict[str, Any]:
             "field_path": c["field_path"],
             "message": (
                 f"The AI sub-track, reading the same design input "
-                f"independently, expected {c['layer']}"
-                f"{'.' + c['field_path'] if c['field_path'] else ''} to carry: "
+                f"independently, expected {addressed} to carry: "
                 f"{c['requirement']}. The program track produced: "
                 f"{c['observed']}."
                 + (f" Grounds: {'; '.join(str(e) for e in c['evidence'])}."
@@ -2808,6 +2989,8 @@ def evaluate(project: Path) -> Dict[str, Any]:
             # The machine-readable half of the same sentence, so a consumer
             # never has to parse prose to learn the carriage verdict.
             "carriage": c.get("carriage"),
+            **({"split_branches": _split_branch_rows(c)}
+               if c.get("split") else {}),
         })
 
     if ai.get("pack_assembly_status") == "NOT_ASSEMBLED":
@@ -3083,10 +3266,65 @@ def evaluate(project: Path) -> Dict[str, Any]:
     }
 
 
+def check_report(project: Path) -> int:
+    """D1 reads Phase 1's evidence without consuming or rewriting its subject.
+
+    Execution is mandatory; findings remain advisory. Missing, malformed or
+    stale evidence refuses credit. This path never calls evaluate or emits a
+    pack. The producer invocation and answer/root digests identify the reading
+    being checked, rather than crediting an audit-time second pass (#2206).
+    """
+    target = _pl.report_path(project, "phase1/expert_parse_track.json")
+    try:
+        rep = json.loads(target.read_text())
+        if not isinstance(rep, dict) or rep.get("program") != PROGRAM:
+            raise ValueError("missing expert-track producer record")
+        producer = rep.get("producer")
+        if not isinstance(producer, dict) or not producer.get("invocation_id"):
+            raise ValueError("producer invocation is not recorded; rerun Phase 1")
+        rc = producer.get("returncode")
+        if type(rc) is not int or rc not in (0, 1, AWAITING_EXIT_CODE):
+            raise ValueError("producer return code is missing or invalid")
+        root = rep.get("phase1_root")
+        current = phase1_root_identity(project)
+        if (not isinstance(root, dict) or current.get("status") != "OK"
+                or root.get("digest") != current.get("digest")):
+            raise ValueError("Phase-1 layer set changed since the producer reading")
+        ai = rep.get("ai_subtrack")
+        execution = rep.get("execution")
+        if not isinstance(ai, dict) or not isinstance(execution, dict):
+            raise ValueError("expert execution record is malformed")
+        if rc == 0:
+            if (rep.get("verdict") not in ("PASS", "FINDINGS")
+                    or execution.get("complete") is not True
+                    or ai.get("status") != AI_CONSUMED
+                    or type(execution.get("observed_ai_consumed")) is not int
+                    or execution["observed_ai_consumed"] < 1):
+                raise ValueError("zero return code contradicts expert execution")
+            answer = target.parent / "expert_parse_track_pack" / "l_doc_expectations.json"
+            if ai.get("answer_sha256") != hashlib.sha256(answer.read_bytes()).hexdigest():
+                raise ValueError("current expert answer has no matching producer reading")
+        elif rc == AWAITING_EXIT_CODE and (
+                rep.get("verdict") != "INCOMPLETE" or ai.get("status") != AI_HANDOFF_EMITTED):
+            raise ValueError("awaiting return code contradicts expert execution")
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"INCOMPLETE: {PROGRAM} report unavailable or stale: {exc}")
+        return 1
+    prefix = "INCOMPLETE: " if rc else ""
+    print(f"{prefix}{PROGRAM}: {rep.get('verdict')} — read-only report check; "
+          f"producer={producer.get('invoked_by')} "
+          f"invocation={producer['invocation_id']} rc={rc}; report: {target}")
+    return rc
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("project_dir", type=Path)
     ap.add_argument("--json", default=None)
+    ap.add_argument("--check-report", action="store_true",
+                    help="read the Phase-1 producer report without running the track")
+    ap.add_argument("--invoked-by", default="direct",
+                    help="name the invoking phase runner in the producer receipt")
     ap.add_argument("--input-readability", action="store_true",
                     help="print ONLY whether this project's design input can "
                          "be read, and what was skipped — the census a "
@@ -3099,6 +3337,8 @@ def main(argv=None) -> int:
         return 1
 
     project = args.project_dir.resolve()
+    if args.check_report:
+        return check_report(project)
     if args.input_readability:
         rep = input_text_report(project)
         disp = input_readability_disposition(rep)
@@ -3121,6 +3361,12 @@ def main(argv=None) -> int:
 
     rc = rep.pop("rc")
     rep = {"program": PROGRAM, "version": VERSION, **rep}
+    import uuid
+    from datetime import datetime, timezone
+    rep["producer"] = {"invocation_id": str(uuid.uuid4()),
+                       "invoked_by": args.invoked_by,
+                       "program": PROGRAM, "returncode": rc,
+                       "completed_at": datetime.now(timezone.utc).isoformat()}
     out = json.dumps(rep, indent=2, ensure_ascii=False)
 
     target = Path(args.json) if args.json else \

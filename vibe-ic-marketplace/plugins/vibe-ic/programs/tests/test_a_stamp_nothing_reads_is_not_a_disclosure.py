@@ -40,6 +40,8 @@ _PROGRAMS = Path(__file__).resolve().parents[1]
 if str(_PROGRAMS) not in sys.path:
     sys.path.insert(0, str(_PROGRAMS))
 
+import gate_is_wired_check as _wiring          # noqa: E402
+
 RUNNER = _PROGRAMS / "phase3_one_shot_runner.py"
 BACKEND = _PROGRAMS / "_ppa" / "backends" / "opensta.py"
 
@@ -60,9 +62,37 @@ NOT_READ_ON_PURPOSE = {
 }
 
 
+#: A stamp is a token the runner WRITES INTO A REPORT. Two things wear the same
+#: spelling and are not that, and both were measured on this tree (czmainred9,
+#: v1.19.60) as false accusations this file made against honest landings:
+#:
+#:   PROSE.       `c281a9ed4` put a worked example of an audit finding line into
+#:                a comment -- `#   sta_signoff  PASS  STA_SINGLE_CORNER_ONLY:
+#:                no multi-corner POST_ROUTE STA`. Nothing emits it. It is an
+#:                `eda_report_audit` FINDING RULE quoted for a reader, and the
+#:                raw-text scan read the comment as an emitter.
+#:   AN IDENTIFIER TAIL. `_STA_SINGLE_CORNER_RULE` is a module constant, and
+#:                `if ... == _STA_SINGLE_CORNER_RULE:` ends in the colon that
+#:                closes an `if`. The lookahead matched that colon and the
+#:                unanchored `STA_` matched mid-identifier, so a Python
+#:                statement was read as a stamp named `STA_SINGLE_CORNER_RULE`.
+#:
+#: Neither is reachable by a reader of a report, so demanding that the PPA
+#: backend parse them -- or that somebody declare them unread -- asks for a
+#: disclosure about text that is not disclosed. The population is narrowed to
+#: what the rule was always about; `test_the_runner_really_does_stamp_things`
+#: is the guard against narrowing it to nothing, and it reads 8 here.
+#:
+#: The prose half is decided by `gate_is_wired_check.executable_text`, the
+#: tree's ONE answer to "which bytes of this file can do anything" -- not a
+#: second copy of that rule, for the reason vibe-ic#2169 gives.
+_STAMP_RE = re.compile(r"(?<![A-Za-z0-9_])STA_[A-Z_]+(?=\s*:)")
+
+
 def _stamps_written_by_the_runner():
     """Every `STA_*` token the runner stamps into a report."""
-    return set(re.findall(r"STA_[A-Z_]+(?=\s*:)", RUNNER.read_text()))
+    return set(_STAMP_RE.findall(
+        _wiring.executable_text(RUNNER, RUNNER.read_text())))
 
 
 def _stamps_parsed_by_the_reader():
@@ -167,3 +197,63 @@ def test_the_single_corner_deck_stamps_the_parasitics_it_reads():
         "does not stamp it, while stamping the corner, the liberty and the "
         "corner count. The report it produces can then name no RC condition "
         "at all:\n" + block)
+
+
+# ── the population's own two directions (czmainred9) ──────────────────────
+#
+# The rule above was narrowed, and a narrowing is only honest if it can be
+# shown to have dropped the two things it names AND NOTHING ELSE. These drive
+# the extractor on source built for the purpose, so they answer without waiting
+# for the shipped runner to happen to carry an instance.
+
+_SYNTHETIC_RUNNER = '''\
+"""A docstring that mentions STA_DOCSTRING: and must not count."""
+# a comment that mentions STA_COMMENTED: and must not count
+_STA_ALIASED_RULE = "STA_REAL_EMITTED"
+
+
+def emit(f, basis):
+    if f.get("rule") == _STA_ALIASED_RULE:      # an `if`, not a stamp
+        f.write(f"STA_REAL_EMITTED: {basis}\\n")
+    f.write("# STA_COMMENT_LINE_IN_THE_REPORT: yes\\n")
+'''
+
+
+def test_the_extractor_reads_emitted_stamps_and_only_those(tmp_path):
+    """MUTATION, both directions, on source that carries every shape at once.
+
+    A stamp emitted into the report is FOUND -- including one emitted as a
+    comment line OF THE REPORT, which is a real disclosure and must survive.
+    A stamp appearing only in this file's own prose, or only as the tail of a
+    longer Python identifier, is NOT. Delete either clause of `_STAMP_RE`/
+    `executable_text` and one of these four goes the wrong way.
+    """
+    p = tmp_path / "synthetic_runner.py"
+    p.write_text(_SYNTHETIC_RUNNER)
+    found = set(_STAMP_RE.findall(
+        _wiring.executable_text(p, p.read_text())))
+
+    assert "STA_REAL_EMITTED" in found, found          # emitted -> counted
+    assert "STA_COMMENT_LINE_IN_THE_REPORT" in found, found   # emitted as a
+    #        report comment: still a disclosure the reader can see
+    assert "STA_DOCSTRING" not in found, found        # this file's prose
+    assert "STA_COMMENTED" not in found, found        # this file's prose
+    assert "STA_ALIASED_RULE" not in found, found     # an identifier tail
+
+
+def test_a_genuinely_unread_new_stamp_still_fails_the_rule():
+    """THE POWER OF THE NARROWED POPULATION.
+
+    Everything the fix removed was prose; the rule itself must be unchanged.
+    Adding a real emitter for a stamp the PPA backend does not parse must
+    still be refused, or the narrowing bought silence instead of accuracy.
+    """
+    planted = "STA_PLANTED_BY_THIS_TEST"
+    text = _wiring.executable_text(RUNNER, RUNNER.read_text())
+    text += '\n    f.write(f"%s: {x}\\n")\n' % planted
+
+    written = set(_STAMP_RE.findall(text))
+    assert planted in written, "the plant did not even reach the population"
+    parsed = {s for s in written if s in BACKEND.read_text()}
+    orphaned = sorted(written - parsed - set(NOT_READ_ON_PURPOSE))
+    assert orphaned == [planted], orphaned

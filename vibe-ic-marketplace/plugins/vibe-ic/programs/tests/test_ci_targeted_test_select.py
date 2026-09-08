@@ -781,3 +781,55 @@ def test_ownership_is_still_reachable_as_an_opt_in():
     M = importlib.import_module("ci_targeted_test_select")
     assert M.MODE_OWNERSHIP in M.MODES
     assert M.MODE_IMPORT_EDGE in M.MODES
+
+
+# ── rule 4, hop: SOURCE THIS FILE RUNS (czmainred9) ────────────────────────
+
+def test_a_probe_source_string_is_an_import_and_a_MENTION_still_is_not():
+    """BOTH DIRECTIONS, on the two instances the tree actually holds.
+
+    These two are the whole contract, and they pull opposite ways:
+
+      MENTION   `SRC = "from helper_mod import thing\\n"` — fixture text.
+                `test_helper_rule_ignores_the_name_in_string_literals` pins
+                that this must NOT select, against a real pattern in this tree.
+      PROGRAM   `_CLI_PROBE = r'''…'''` in
+                test_issue2142_census_refusal_names_what_moved — source handed
+                to `runpy` in a subprocess, which imports flow_matrix.
+
+    The separator is use as an executed Python command, not whether a fixture
+    happens to contain valid Python. Import-only commands are dependencies too.
+    """
+    mention = 'SRC = "from helper_mod import thing\\n"\n'
+    got = sel._imported_module_names(mention, None)
+    assert not any(g.startswith("helper_mod") for g in got), got
+
+    probe = ('P = """\n'
+             'import runpy\n'
+             'from flow_matrix import substitution as SUB\n'
+             'x = SUB\n'
+             '"""\n')
+    assert not sel._imported_module_names(probe, None)
+    executed_probe = probe + '\nsubprocess.run([sys.executable, "-c", P])\n'
+    got = sel._imported_module_names(executed_probe, None)
+    assert {"flow_matrix", "flow_matrix.substitution"} <= got, got
+
+    # An executed import-only command still loads that module's side effects.
+    executed_import = mention + '\nsubprocess.run([sys.executable, "-c", SRC])\n'
+    assert "helper_mod" in sel._imported_module_names(executed_import, None)
+
+
+def test_the_new_edge_adds_exactly_the_probe_holder_and_removes_nothing():
+    """THE SET, not the count.
+
+    Under-selection is the whole of vibe-ic#534 and over-selection only costs a
+    test run, so the shape of the change is what is asserted: the one test that
+    RUNS a matrix probe joins, every consumer that was already selected stays,
+    and nothing leaves.
+    """
+    out = set(sel.select_tests([_REGISTRY_REL], PLUGIN_ROOT, plugin_prefix=""))
+    probe_holder = f"{TESTS_REL}/test_issue2142_census_refusal_names_what_moved.py"
+    assert probe_holder in out, (
+        "the test whose CLI probe imports flow_matrix.substitution — which "
+        "imports waivers — is not selected by a change to waivers")
+    assert _matrix_consumers_by_independent_scan() <= out

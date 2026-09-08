@@ -769,7 +769,8 @@ def _run_expert_track(project: Path) -> int:
     # however long that legitimately takes. Nothing moving at all across the
     # grace is a MEASURED finding: the track is wedged, and that is a real
     # verdict about the track rather than a shrug about the clock.
-    argv = [sys.executable, str(prog), str(project)]
+    argv = [sys.executable, str(prog), str(project),
+            "--invoked-by", "phase1_one_shot_runner"]
     res = _wd.run_host_supervised(argv, stall_grace_s=_TRACK_STALL_GRACE_S)
     if res.outcome in ("stalled", "ceiling"):
         print(f"      ERROR: the expert track STALLED — its whole process tree "
@@ -1226,6 +1227,89 @@ def run_phase1_second_track(project: Path, rc_in: int) -> int:
     return max(int(rc_in or 0), rc_track)
 
 
+def run_second_pass_only(project: Path, ic_name: str) -> int:
+    """PASS 2 of the Phase-1 expert hand-off, and NOTHING else (#2204).
+
+    `phase1_expert_parse_track` ends its first pass by telling the operator to
+    invoke the `vibe-ic:ic-expert-agent` subagent and "re-run to consume its
+    answer". This is the entry that performs that re-run, and it is what
+    `vibe_ic_one_shot_runner._phase1_decision` dispatches when it finds an
+    answer on disk that the track's own record says nobody has read.
+
+    THE DOC-EXTRACTION TRACK IS NOT RE-RUN, and that is deliberate twice over:
+    it already ran, and its L documents are the very thing the delivered answer
+    was authored against — re-deriving them under the answer would move the
+    ground the second track is about to compare against.
+
+    IT DOES NOT ERASE WHAT PASS 1 RECORDED. `reports/phase1_one_shot.json` is
+    the file every caller reads for Phase 1's verdict; replacing a full D1
+    record with a one-row second-pass record would throw away the extraction's
+    own report in order to close a hand-off. The prior summary is carried
+    forward and only the fields THIS pass re-measured are rewritten.
+    """
+    print("[phase1] EXPERT SECOND PASS — consuming the delivered IC-Expert "
+          "answer; the doc-extraction track is NOT re-run")
+    reports = project / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    out = reports / "phase1_one_shot.json"
+    try:
+        summary = json.loads(out.read_text(errors="replace"))
+        if not isinstance(summary, dict):
+            raise ValueError("phase1_one_shot.json top level is not an object")
+        carried = True
+    except (OSError, ValueError) as exc:
+        # DEGRADE LOUDLY. A second pass over a project whose pass-1 summary is
+        # gone or unreadable still reports, and it says so rather than
+        # publishing a fresh-looking record that implies pass 1 was fine.
+        summary = {"phase": 1, "project": str(project), "ic_name": ic_name}
+        summary["pass1_summary"] = (
+            f"UNREADABLE — the pass-1 record could not be carried forward "
+            f"({exc}); this file now describes the second pass ONLY")
+        carried = False
+    # Freeze the extraction/route outcome independently of replaceable expert
+    # retries. Old second-pass FAIL summaries cannot tell which pass failed;
+    # retain that uncertainty instead of manufacturing a successful extraction.
+    pass1 = summary.get("pass1")
+    if not isinstance(pass1, dict):
+        prior_verdict = summary.get("verdict")
+        known = (carried and summary.get("mode") != "expert_second_pass"
+                 and prior_verdict in ("PASS", "PASS_WITH_WAIVERS", "FAIL"))
+        pass1 = {
+            "verdict": prior_verdict if known else "NOT_MEASURED",
+            "rc": 0 if known and prior_verdict != "FAIL" else 1,
+            "source": ("carried first-pass summary" if known else
+                       "first-pass outcome unavailable; extraction not rerun"),
+        }
+    pass1_rc = pass1.get("rc")
+    if (type(pass1_rc) is not int or pass1_rc < 0
+            or pass1.get("verdict") not in ("PASS", "PASS_WITH_WAIVERS", "FAIL")):
+        pass1_rc = 1
+    if pass1.get("verdict") == "FAIL":
+        pass1_rc = max(pass1_rc, 1)
+    summary["pass1"] = pass1
+    rc = run_phase1_second_track(project, 0)
+    summary["mode"] = "expert_second_pass"
+    summary["second_track"] = _expert_track_summary(project)
+    summary["second_pass"] = {
+        "ran": True,
+        "rc": rc,
+        "consumes": str(_pl.report_path(
+            project, "phase1/expert_parse_track.json").parent
+            / "expert_parse_track_pack" / "l_doc_expectations.json"),
+        "doc_extraction_rerun": False,
+        "pass1_summary_carried_forward": carried,
+    }
+    # Only this retry's failure can clear. The CLI and consumer-visible verdict
+    # both include the independently retained first-pass failure.
+    rc_out = max(pass1_rc, rc)
+    summary["verdict"] = "FAIL" if rc_out else pass1["verdict"]
+    out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+    print("\n=== phase1_one_shot_runner DONE (mode=expert_second_pass) ===")
+    print(f"verdict: {summary['verdict']}")
+    print(f"second track: {summary['second_track']}")
+    return rc_out
+
+
 def _czl9_sufficiency_gate(project: Path) -> Tuple[bool, str]:
     """#czl9docs — run the sufficiency gate on the PROMPT branch too.
 
@@ -1304,6 +1388,17 @@ def main() -> int:
                         "track is resolved to `docs` and announced — the "
                         "engine reverse-extractor is not a second front door "
                         "for raw design input.")
+    p.add_argument("--second-track-only", action="store_true",
+                   help="#2204: run ONLY the Phase-1 expert second track — "
+                        "the second pass of the hand-off that "
+                        "`phase1_expert_parse_track` asks for when it writes "
+                        "a pack and a subagent answers it. The "
+                        "doc-extraction track is NOT re-run: it already ran, "
+                        "and its L documents are what the delivered answer "
+                        "was authored against. Dispatched automatically by "
+                        "`vibe_ic_one_shot_runner` when a delivered answer is "
+                        "on disk and the track's own record says nobody has "
+                        "read it.")
     args, extras = p.parse_known_args()
     project = args.project.resolve()
     if not project.is_dir():
@@ -1317,6 +1412,13 @@ def main() -> int:
     _lock = _runner_lock.acquire_or_reenter(project, "phase1_one_shot_runner")
     if _lock is None:
         return 3
+
+    # #2204 — the expert second pass short-circuits EVERYTHING below. Step
+    # 0.5ic and D1 both already ran in the pass that emitted the hand-off;
+    # this entry exists to read one delivered answer and record what it made
+    # of it, so it runs the second track alone and re-runs nothing.
+    if args.second_track_only:
+        return run_second_pass_only(project, args.ic_name)
 
     # STEP 0.5ic — the route declaration. Dispatched before the mode branch
     # and on every path, because 0.5ic `blocks_on: []` and takes no input from
@@ -1359,6 +1461,9 @@ def main() -> int:
         # no rc value that is also a StepResult.
         refused = isinstance(_pf, StepResult)
         rc = 1 if refused else int(_pf)
+        rc_extract = rc
+        pass1_rc = max(rc_extract, rc_route)
+        pass1_verdict = "FAIL" if pass1_rc else "PASS"
         if refused:
             # The second track parses the L-docs D1 was supposed to write. D1
             # was never called, so there is nothing for it to examine — running
@@ -1367,7 +1472,8 @@ def main() -> int:
             second_track = ("not run — D1 was REFUSED, so no L-doc exists for "
                             "the expert track to parse")
         else:
-            rc = run_phase1_second_track(project, rc)
+            rc_track = run_phase1_second_track(project, 0)
+            rc = max(rc_extract, rc_track, rc_route)
             second_track = _expert_track_summary(project)
         # The dispatcher always emits reports/phase1_one_shot.json so
         # callers / tests see a unified entry point regardless of mode.
@@ -1381,12 +1487,14 @@ def main() -> int:
             "project": str(project),
             "ic_name": args.ic_name,
             "delegated_to": "phase1_doc_one_shot_runner",
-            "delegated_rc": rc,
+            "delegated_rc": rc_extract,
             "mode_requested": args.mode,
             "mode_detected": detected,
             "mode_redirect": mode_redirect,
             "duration_s": time.time() - t0,
             "verdict": verdict,
+            "pass1": {"verdict": pass1_verdict, "rc": pass1_rc,
+                      "source": "extraction and route before expert track"},
             "second_track": second_track,
         }
         # THE REPORT SHAPE IS THE SAME ON BOTH DOORS (#2052). A refusal was
@@ -1404,13 +1512,13 @@ def main() -> int:
         else:
             summary["steps"] = [
                 asdict(StepResult(
-                    D1_STEP_NAME, "PASS" if rc == 0 else "FAIL", _t_docs,
-                    f"delegated to phase1_doc_one_shot_runner (rc={rc}); "
+                    D1_STEP_NAME, "PASS" if rc_extract == 0 else "FAIL", _t_docs,
+                    f"delegated to phase1_doc_one_shot_runner (rc={rc_extract}); "
                     f"L documents under "
                     f"{_pl.generated_docs_dir(project).name}/")),
                 asdict(StepResult(
                     "phase1_expert_parse_track",
-                    "PASS" if rc == 0 else "FAIL", 0.0,
+                    "PASS" if rc_track == 0 else "FAIL", 0.0,
                     str(second_track)[:400])),
             ]
         # Per-step output view — see the prompt-mode call below. BOTH exits of
@@ -1454,6 +1562,10 @@ def main() -> int:
 
     reports = project / "reports"
     reports.mkdir(parents=True, exist_ok=True)
+    pass1_verdict = _aggregate_verdict(plan)
+    pass1_rc = max(1 if pass1_verdict == "FAIL" or _gap else 0, rc_route)
+    if pass1_rc:
+        pass1_verdict = "FAIL"
     summary = {
         "phase": 1,
         "mode": mode,
@@ -1463,7 +1575,9 @@ def main() -> int:
         "project": str(project),
         "ic_name": args.ic_name,
         "steps": [asdict(s) for s in plan],
-        "verdict": _aggregate_verdict(plan),
+        "verdict": "FAIL" if max(pass1_rc, rc_second) else pass1_verdict,
+        "pass1": {"verdict": pass1_verdict, "rc": pass1_rc,
+                  "source": "extraction, sufficiency and route without expert track"},
         "second_track": ("not run — D1 was REFUSED" if _refused else
                          _expert_track_summary(project)),
         "step_0_5ic": "ran" if rc_route == 0 else "FAILED to run",

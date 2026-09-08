@@ -61,8 +61,12 @@ chip-AGNOSTIC: pure AST structure. No design, PDK or vendor literal.
 
 USAGE
 -----
-    hdl_declaration_scan_strips_comments_check.py [--root .] [--json OUT]
+    hdl_declaration_scan_strips_comments_check.py --root <plugin> [--json OUT]
                                                   [--write-baseline]
+
+    --root is REQUIRED and has no default (vibe-ic#2199): a gate that
+    substitutes its own tree for the one it was asked about answers
+    confidently about the wrong subject.
 
     exit 0 = no NEW unstripped declaration scan
     exit 1 = a new one, or the baseline grew (BLOCKING)
@@ -114,6 +118,23 @@ _KW = re.compile(r"\b(?:module|input|output|inout)\b")
 #: a smaller population is what both wrong rules produced too.
 _KW_PATH_TOKEN = re.compile(
     r"\b(?:module|input|output|inout)\b(?=\[[^\]]*/[^\]]*\])")
+#: A keyword in ATTRIBUTE POSITION — `\.output\s*\(` — is a METHOD CALL, and
+#: no Verilog declaration production can wear one: `output` is a reserved word,
+#: so `.output(` cannot even be a port connection to a port of that name. The
+#: instance is `_seal_ring_margin::_RE_RULE_ID`, which reads the rule NAME out
+#: of a KLayout deck's own `extent.output('COV1.a', …)` and never parses HDL.
+#:
+#: MEASURED THE WAY `_KW_PATH_TOKEN` above was, by DIFFING THE SETS and not the
+#: counts, over every `*.py` in the plugin at v1.19.60 (czmainred9):
+#:
+#:     population 254 -> 253
+#:     DROPPED  {_seal_ring_margin::_RE_RULE_ID}
+#:     ADDED    {}
+#:
+#: Exactly one entry, and it is the intended one. A rule that dropped more than
+#: it named would be the same mistake the two retracted rules above made.
+_KW_ATTRIBUTE_TOKEN = re.compile(
+    r"\\\.\s*(?:module|input|output|inout)\b")
 #: A name that means "comments are gone".
 _STRIPPER = re.compile(r"strip.*comment|_strip_hdl|decomment|no_comment", re.I)
 #: A regex SOURCE that removes comments by naming a comment INTRODUCER. Stripping
@@ -151,14 +172,58 @@ _NOT_HDL_DECLARATION: Dict[str, str] = {
 }
 
 
-def _strips_comments_inline(call: ast.Call) -> bool:
-    """`re.sub(<a comment pattern>, ...)` — a strip written in place."""
+def compiled_patterns(tree: ast.Module) -> Dict[str, str]:
+    """`NAME -> pattern source` for EVERY module-level `re.compile(...)`.
+
+    Wider than `declaration_regexes`, and deliberately: a stripper's pattern is
+    a COMMENT pattern, never a declaration one, so the map that recognises a
+    strip cannot be the map that recognises a scan.
+    """
+    out: Dict[str, str] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 \
+                and isinstance(n.targets[0], ast.Name):
+            p = _pattern_of(n.value)
+            if p is not None:
+                out[n.targets[0].id] = p
+    return out
+
+
+def _strips_comments_inline(call: ast.Call,
+                            compiled: Optional[Dict[str, str]] = None) -> bool:
+    """`re.sub(<a comment pattern>, ...)` — a strip written in place.
+
+    TWO SPELLINGS, and recognising only the first made this gate accuse a call
+    site that had already done the work. MEASURED at v1.19.60 (czmainred9):
+
+        re.sub(r"//[^\n]*", " ", txt)          the module function: the
+                                               pattern is `args[0]`
+        _RPT_HDL_LINE_COMMENT_RE.sub("", txt)  a COMPILED regex's own method:
+                                               `args[0]` is the REPLACEMENT and
+                                               the pattern is not in the call
+
+    `lec_equivalence_check.parse_rpt` opens with the second — it drops the
+    Verilog line comments a tool echoes into its own log, and the reason is
+    written above the pattern: a design carrying
+    `// Found 999 unproven $equiv cells in module equiv:` would otherwise have
+    written this gate's verdict out of its own source file, which the spoof arm
+    of `test_lec_rpt_point_reading_precedence` catches. The strip is there, it
+    is the right one, and this gate could not see it because the repository
+    pre-compiles its regexes and the recogniser only knew `re.sub`.
+    """
     fn = call.func
     if not (isinstance(fn, ast.Attribute) and fn.attr == "sub" and call.args):
         return False
     src = "".join(n.value for n in ast.walk(call.args[0])
                   if isinstance(n, ast.Constant) and isinstance(n.value, str))
-    return bool(_COMMENT_PAT.search(src.replace("\\", "")))
+    if _COMMENT_PAT.search(src.replace("\\", "")):
+        return True
+    # The compiled form: the receiver names the pattern.
+    if compiled and isinstance(fn.value, ast.Name):
+        pat = compiled.get(fn.value.id)
+        if pat is not None and _COMMENT_PAT.search(pat.replace("\\", "")):
+            return True
+    return False
 
 
 def declares_hdl(pattern: str) -> bool:
@@ -169,6 +234,7 @@ def declares_hdl(pattern: str) -> bool:
     be told from whitespace.
     """
     p = _KW_PATH_TOKEN.sub(lambda m: " " * len(m.group(0)), pattern or "")
+    p = _KW_ATTRIBUTE_TOKEN.sub(lambda m: " " * len(m.group(0)), p)
     return bool(_KW.search(_META.sub(" ", p)))
 
 
@@ -192,7 +258,8 @@ def declaration_regexes(tree: ast.Module) -> Dict[str, str]:
     return out
 
 
-def stripped_locals(fn: ast.AST) -> Set[str]:
+def stripped_locals(fn: ast.AST,
+                    compiled: Optional[Dict[str, str]] = None) -> Set[str]:
     """Locals whose value passed through a stripper, transitively.
 
     Per-NAME, which is the point: a sibling variable being stripped does not
@@ -214,7 +281,8 @@ def stripped_locals(fn: ast.AST) -> Set[str]:
                     fname = ast.unparse(sub.func)
                 except Exception:
                     fname = ""
-                if _STRIPPER.search(fname) or _strips_comments_inline(sub):
+                if (_STRIPPER.search(fname)
+                        or _strips_comments_inline(sub, compiled)):
                     return True
             if isinstance(sub, ast.Name) and sub.id in ok:
                 return True
@@ -257,10 +325,11 @@ def scan_source(src: str, label: str) -> List[str]:
     regs = declaration_regexes(tree)
     if not regs:
         return []
+    compiled = compiled_patterns(tree)
     out: List[str] = []
     for fn in [x for x in ast.walk(tree)
                if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-        safe = stripped_locals(fn)
+        safe = stripped_locals(fn, compiled)
         for n in ast.walk(fn):
             if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                     and n.func.attr in _SCAN
@@ -408,7 +477,13 @@ def _ratchet_verdict(new, root) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--root", default=None)
+    ap.add_argument("--root", default=None,
+                    help="THE PLUGIN ROOT UNDER TEST. Required: there is no "
+                         "default, because the only default available is this "
+                         "program's own location and a run that substitutes "
+                         "the instrument's tree for the subject's answers "
+                         "confidently about a tree nobody asked about "
+                         "(vibe-ic#2199)")
     ap.add_argument("--json", dest="json_out")
     ap.add_argument("--ratchet", action="store_true",
                     help="verdict by MEMBERSHIP against the offender register: "
@@ -418,7 +493,24 @@ def main(argv=None) -> int:
     ap.add_argument("--write-baseline", action="store_true")
     a = ap.parse_args(argv)
 
-    root = Path(a.root).resolve() if a.root else Path(__file__).resolve().parents[1]
+    # NO DEFAULT SUBJECT. vibe-ic#2199.
+    #
+    # This used to fall back to `Path(__file__).resolve().parents[1]` -- the
+    # RUNTIME's plugin -- and `repo_hygiene_gates.sh` passed no `--root`.
+    # MEASURED on 8HD-4 at a61a8e4b4778 over two trees, the subject carrying
+    # one extra unstripped declaration scan: no --root reported 159 sites and
+    # 2 new offenders, `--root <subject>` reported 160 and 3. The extra
+    # offender was in the tree under test and in neither answer the runner
+    # published.
+    if not a.root:
+        print("[CANNOT DETERMINE] hdl_declaration_scan: no --root. This gate "
+              "has no default subject and will not invent one: the only tree "
+              "it could reach without being told is its OWN, and a verdict "
+              "about the instrument's tree is indistinguishable from a "
+              "verdict about yours. Name the plugin root under test "
+              "(vibe-ic#2199). NOT a pass.", file=sys.stderr)
+        return 2
+    root = Path(a.root).resolve()
     if not (root / "programs").is_dir():
         print(f"[CANNOT DETERMINE] hdl_declaration_scan: no programs/ under "
               f"{root}. NOT a pass.", file=sys.stderr)

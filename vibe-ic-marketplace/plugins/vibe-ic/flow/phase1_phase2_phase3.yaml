@@ -878,7 +878,9 @@ steps:
         #
         # PINNED BOTH WAYS by
         # `programs/tests/test_issue2144_expert_track_runs_after_the_l_docs.py`.
-        - program_exit_zero: "phase1_expert_parse_track ."
+        # D1 audits the Phase-1 producer record. Running the track here would
+        # consume a pending expert answer and rewrite the subject (#2206).
+        - program_exit_zero: "phase1_expert_parse_track . --check-report"
         # The CLAUSE that reads the two extraction-coverage entries moved here
         # from step 1 (#1219). Without it, moving the declaration alone would
         # only RELOCATE d4's "declared by no clause" finding from step 1 to D1.

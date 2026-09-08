@@ -113,8 +113,11 @@ def _declaration_scan_offenders():
     import re as _re
     import subprocess
     proc = subprocess.run(
+        # `--root` NAMED (vibe-ic#2199): `SCRIPT.parent` is programs/, so its
+        # parent is the shipped plugin -- the tree this arm has always meant.
         [sys.executable,
-         str(SCRIPT.parent / "hdl_declaration_scan_strips_comments_check.py")],
+         str(SCRIPT.parent / "hdl_declaration_scan_strips_comments_check.py"),
+         "--root", str(SCRIPT.parent.parent)],
         capture_output=True, text=True, timeout=900)
     assert proc.returncode in (0, 1), (
         "the gate did not reach a verdict (rc=%s); that is NOT a clean tree\n%s"

@@ -427,8 +427,11 @@ check("every in-repo source named in the coverage table exists",
 #     limitation is closable rather than merely disclosed.
 if SLOW:
     _g = PLUG / "programs" / "gate_is_wired_check.py"
-    _r = subprocess.run([sys.executable, str(_g)], capture_output=True,
-                        text=True, timeout=600)
+    # `--root` NAMED, never defaulted (vibe-ic#2199). The gate no longer
+    # substitutes its own location for a subject nobody gave it, and PLUG is
+    # the subject this check has always meant: the plugin under `ROOT`.
+    _r = subprocess.run([sys.executable, str(_g), "--root", str(PLUG)],
+                        capture_output=True, text=True, timeout=600)
     _live = set(re.findall(r"^   ([a-z0-9_]+)$", _r.stdout, re.M))
     _tg = {pathlib.Path(ROUTING["steps"][r["step"]]["bucket_A_program"]).stem
            for r in RECS if r["bucket"] == "A" and r.get("step") in ROUTING["steps"]}
