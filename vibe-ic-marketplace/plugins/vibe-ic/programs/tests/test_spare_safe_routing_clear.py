@@ -53,11 +53,13 @@ namespace eval odb {}
 proc odb::dbWire_destroy {w} { lappend ::destroyed $w }
 """
 
-def _run(tcl_body: str, tmp_path) -> str:
+def _run(tcl_body: str, tmp_path, *, expected_rc: int = 0) -> str:
     f = tmp_path / "t.tcl"
-    f.write_text(_STUB + tcl_body + '\nputs "DESTROYED: $::destroyed"\n')
+    f.write_text(_STUB + '\nset test_rc [catch {\n' + tcl_body
+                 + '\n} test_message]\nputs "DESTROYED: $::destroyed"\n'
+                 + 'if {$test_rc} {puts stderr $test_message; exit 1}\n')
     r = _pr.run([_TCLSH, str(f)], capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
+    assert r.returncode == expected_rc, r.stderr
     return r.stdout
 
 @_needs_tcl
@@ -261,7 +263,7 @@ def test_the_named_violation_reroute_site_protects_the_same_nets(tmp_path):
     body = (_FINDNET_STUB
             + "proc detailed_route {args} { error \"stop-here\" }\n"
             + p3._named_violation_reroute_tcl(str(rpt)))
-    out = _run(body, tmp_path)
+    out = _run(body, tmp_path, expected_rc=1)
     destroyed = out.split("DESTROYED:")[1]
     assert "w_n_pwr" not in destroyed, "a POWER net's wire was destroyed"
     assert "w_n_dnt" not in destroyed, "a dont_touch net's wire was destroyed"
@@ -282,7 +284,7 @@ def test_the_named_violation_reroute_emits_the_integrity_check(tmp_path):
     rpt = tmp_path / "drc.rpt"
     rpt.write_text("violation type: x\n  srcs: net:n_sig\n")
     body = (_FINDNET_STUB + p3._named_violation_reroute_tcl(str(rpt)))
-    out = _run(body, tmp_path)
+    out = _run(body, tmp_path, expected_rc=1)
     line = [l for l in out.splitlines()
             if l.startswith("NAMED_VIOL_REROUTE_UNROUTED_NETS:")]
     assert line, out

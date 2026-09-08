@@ -1642,7 +1642,18 @@ REAL_GATE_PASS_TIER_STEPS: Tuple[str, ...] = (
 #:
 #: MEASURED, per step, on the seeded tree through the step's OWN gate:
 #:
-#:   D1  INCOMPLETE  `phase1_expert_parse_track`. RE-MEASURED 2026-09-03:
+#:   D1  FAIL        RE-MEASURED 2026-09-08, 205cf509: #2206 changed the
+#:                   clause to `phase1_expert_parse_track . --check-report`.
+#:                   The seeded generic JSON is NOT a producer record, so the
+#:                   read-only audit refuses it (rc 1), rather than producing
+#:                   a new handoff while auditing. This is not a failure of a
+#:                   valid pending handoff. The existing controls in
+#:                   `test_issue2206_expert_audit_is_read_only` distinguish a
+#:                   real producer PASS, a valid pending INCOMPLETE, and five
+#:                   missing/stale producer-evidence FAIL cases without any
+#:                   audit-time rewriting. The synthetic fixture stays out of
+#:                   the PASS tier; neither pin loses a step.
+#:                   Historical 2026-09-03 reading:
 #:                   FAIL -> INCOMPLETE, and NOT a move toward a PASS tier.
 #:                   #1973 made the hand-off protocol's designed FIRST pass
 #:                   (HANDOFF_EMITTED — the pack is written and no subagent has
@@ -1697,7 +1708,7 @@ REAL_GATE_PASS_TIER_STEPS: Tuple[str, ...] = (
 #:   38  MISSING     audit-created refusal of `reports/phase3/
 #:                   foundry_handoff_audit.json` (#2005); its gate still PASSes
 REAL_GATE_LEFT_THE_PASS_TIER: Dict[str, str] = {
-    "D1": "INCOMPLETE",
+    "D1": "FAIL",
     "2": "INCOMPLETE",
     "4": "FAIL",
     "12": "INCOMPLETE",

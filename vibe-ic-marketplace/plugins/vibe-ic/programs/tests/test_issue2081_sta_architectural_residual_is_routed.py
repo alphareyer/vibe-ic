@@ -392,3 +392,26 @@ def test_compliance_audit_preserves_producer_output(
     else:
         assert len(after) == len(before), "audit created a producer-owned output"
     assert after == before, "audit changed project evidence"
+
+
+@pytest.mark.parametrize("broken", ["missing-reader", "missing-output"])
+def test_d4_inline_report_wiring_requires_actual_consumption(monkeypatch, broken):
+    """Neither a registered path nor a successful writer is a report read."""
+    import matrix_d4_probe as probe
+    import phase3_one_shot_runner as runner
+
+    if broken == "missing-reader":
+        monkeypatch.setattr(runner, "_gate_detail", lambda path, out, err: out or err)
+    else:
+        actual = runner._pr.run
+
+        def missing_output(cmd, **kwargs):
+            result = actual(cmd, **kwargs)
+            # Only this real subprocess's scratch output is removed, after
+            # it produced a report but before the normal wrapper can read it.
+            Path(cmd[cmd.index("--json") + 1]).unlink()
+            return result
+
+        monkeypatch.setattr(runner._pr, "run", missing_output)
+
+    assert probe.ground(23, "reports/phase3/sta/architectural_residual.json") is None

@@ -941,6 +941,48 @@ def describes_tree(files: Sequence[Mapping[str, Any]],
     return None
 
 
+def transition_state(*, object_repo: Path, commit: str = "HEAD") -> dict[str, Any]:
+    """ADVISORY observation of a committed tuple; never landing authority.
+
+    SPENT means the complete observed tuple equals next (including a settled
+    re-observation). ARMED means it equals current. Any other combination is
+    DRIFT. An abandoned ARMED PREPARE can be superseded by another PREPARE;
+    there is no lock to release. Finalize all future bytes, including required
+    pins, before preparing, then ACTIVATE in a separate landing. Re-observe
+    with --no-move only to record drift, never merely because nothing is pending.
+    """
+    repo = object_repo.resolve(strict=True)
+    algorithm, oid_len = _object_format(repo)
+    revision, tree_oid = _commit_and_tree(repo, commit, oid_len, "observed")
+    _record, raw = _observe_manifest(repo, revision, algorithm, oid_len)
+    manifest = parse_manifest(strict_loads(raw, what="observed manifest"), oid_len)
+    tree = _tree(repo, revision, oid_len)
+    current = {r["path"]: r for r in manifest["current"]["files"]}
+    nxt = {r["path"]: r for r in manifest["next"]["files"]}
+    comparisons = []
+    for path in sorted(current.keys() | nxt.keys()):
+        observed = None
+        if path in tree:
+            mode, oid = tree[path]
+            # A symlink is observable drift too; do not dereference it.
+            data = _git(repo, ["cat-file", "blob", oid], binary=True)
+            assert isinstance(data, bytes)
+            if _blob_oid(data, algorithm) != oid:
+                raise Refusal(f"raw blob object disagrees with its id: {path}")
+            observed = {"path": path, "mode": mode, "blob_oid": oid,
+                        "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+        comparisons.append({"path": path, "current": current.get(path),
+                            "next": nxt.get(path), "observed": observed,
+                            "matches_current": observed == current.get(path),
+                            "matches_next": observed == nxt.get(path)})
+    matches_next = all(row["matches_next"] for row in comparisons)
+    matches_current = all(row["matches_current"] for row in comparisons)
+    state = "SPENT" if matches_next else "ARMED" if matches_current else "DRIFT"
+    return {"state": state, "advisory": True, "commit": revision, "tree": tree_oid,
+            "transition_id": manifest["transition_id"], "kind": manifest["kind"],
+            "moved_paths": moved_paths(manifest), "comparisons": comparisons}
+
+
 def _rows_by_path(files: Sequence[Mapping[str, Any]], what: str
                   ) -> dict[str, Mapping[str, Any]]:
     out: dict[str, Mapping[str, Any]] = {}
@@ -1055,7 +1097,12 @@ def classify_move(base_files: Sequence[Mapping[str, Any]],
             "protected tuple matches neither authorised atomic state: the "
             "candidate moves protected paths the manifest authorises no move "
             "of: " + ", ".join(undeclared)
-            + ". Declare the move in the same landing:  python3 tools/ci/"
+            + ". Finalize the future bytes and required pins, then declare "
+            "a PREPARE with the manifest only and ACTIVATE in a separate landing. "
+            "An abandoned PREPARE may be superseded; no release is needed. "
+            "Inspect the committed tuple with protected_landing_transition.py "
+            "state --repo .; --no-move is only for observed drift. Author: "
+            "python3 tools/ci/"
             "protected_landing_manifest_author.py --commit <base> "
             "--transition-id <new-id> --current-id "
             + base_state_id + " --next-id <new-id>-next"
@@ -2570,6 +2617,9 @@ def _atomic_write(path: Path, data: bytes) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="command", required=True)
+    state = sub.add_parser("state", help="read-only ARMED/SPENT/DRIFT report; no authority")
+    state.add_argument("--repo", type=Path, default=Path("."))
+    state.add_argument("--commit", default="HEAD")
     verify = sub.add_parser("verify")
     verify.add_argument("--object-repo", type=Path, required=True)
     verify.add_argument("--base", required=True)
@@ -2621,6 +2671,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     validate_bootstrap.add_argument("--expected-phase-a-tree", required=True)
     args = ap.parse_args(argv)
     try:
+        if args.command == "state":
+            print(json.dumps(transition_state(object_repo=args.repo,
+                                              commit=args.commit), sort_keys=True))
+            return 0
         if args.command == "validate-verdict":
             raw = args.verdict.read_bytes()
             value = strict_loads(raw, what="verdict")

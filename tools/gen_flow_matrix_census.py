@@ -897,6 +897,81 @@ def census_rows() -> Tuple[List[Dict], Dict[str, int]]:
     return rows, totals
 
 
+# ============================================================================
+# A STALL IS NOT A VERDICT ABOUT THE TREE (vibe-ic#2203)
+# ============================================================================
+#: The two markers the NESTED driver prints when its own stall watchdog killed
+#: the child. `programs/pytest_per_file_junit.py` returns `RC_NORECORD` (2) for
+#: every reason it could not record a session, and
+#: `test_flow_matrix_coverage._run_one_module_outcome` refuses ALL of them with
+#: one AssertionError. Only the STALL among them is a fact about the host.
+_STALL_MARKERS = ("WATCHDOG_STALLED", "AGGREGATE_NORECORD  STALLED")
+
+#: The driver rc the same assertion prints. Required as well as a marker, so a
+#: module whose OWN test output happens to quote `WATCHDOG_STALLED` — several
+#: in this repo do, in docstrings about this very mechanism — cannot buy itself
+#: an UNDETERMINED. Both halves come from the driver, neither from a test body.
+_DRIVER_NORECORD_RC = "driver rc=2"
+
+
+class _NestedOutcomeStalled(_pr.Stalled):
+    """The inner driver was KILLED, so this run measured nothing.
+
+    `_pr.Stalled` is what `exit_undetermined_on_stall` catches, and its own
+    ``__init__`` renders the sentence for a stall THIS process supervised. Here
+    the stall was supervised one level down and its evidence is the child's log,
+    so the message is composed rather than derived — the base class is entered
+    for the TYPE, which is the contract `exit_undetermined_on_stall` reads.
+    """
+
+    def __init__(self, message: str, diagnostic: str = ""):
+        RuntimeError.__init__(self, message)
+        self.cmd = ("gen_flow_matrix_census.py", "--check")
+        self.looks = 0
+        self.poll_s = 0.0
+        self.elapsed_s = 0.0
+        self.signals = {}
+        self.stdout = ""
+        self.stderr = diagnostic
+
+
+def _nested_outcome_stall(exc: BaseException) -> Optional[str]:
+    """The host condition, named — or ``None`` when this is not a stall.
+
+    NARROW BY CONSTRUCTION, AND THAT IS THE POINT. A STALE census never
+    travels as an exception at all: it is the ordinary rc 1 RETURN of a run
+    that finished and compared two blocks. So nothing this function can say
+    yes to could have been a staleness finding, and the relabel the issue
+    forbids — every failure becoming UNDETERMINED — is not reachable from
+    here. What IS reachable is the other rc-2 reasons the same assertion
+    covers (a missing manifest, an empty manifest, a coverage problem), and
+    they are excluded by requiring the driver's own stall marker.
+    """
+    if not isinstance(exc, AssertionError):
+        return None
+    text = str(exc)
+    if _DRIVER_NORECORD_RC not in text:
+        return None
+    if not any(marker in text for marker in _STALL_MARKERS):
+        return None
+    module = ""
+    m = re.search(r"the outcome run for (\S+) produced no complete", text)
+    if m:
+        module = m.group(1)
+    window = ""
+    m = re.search(r"did not advance for > (\S+) —", text)
+    if m:
+        window = f" after {m.group(1)} with no validated pytest lifecycle progress"
+    return (
+        f"NOT_MEASURED: the nested outcome run"
+        + (f" for {module}" if module else "")
+        + f" was KILLED by its own stall watchdog{window}. The census was "
+        f"therefore never computed on this host, so this run has NOT found "
+        f"the published block stale — it has found nothing at all. Host "
+        f"condition, not a property of the commit."
+    )
+
+
 def census_rows_with_record() -> Tuple[List[Dict], Dict[str, int],
                                        Optional[str]]:
     """``([row], totals, norecord reason or None)`` from the live suite.
@@ -928,6 +1003,26 @@ def census_rows_with_record() -> Tuple[List[Dict], Dict[str, int],
     verdict is still NORECORD, it just no longer costs the repair.
     """
     CV, SUB, DIMENSIONS, NAMES, QUESTIONS = _load()
+    try:
+        return _census_rows_from(CV, SUB, DIMENSIONS, NAMES, QUESTIONS)
+    except AssertionError as exc:
+        # THE INNER DRIVER'S KILL, HANDED TO THE OUTER THREE-OUTCOME PATH
+        # (vibe-ic#2203). Without this the AssertionError leaves `main`
+        # uncaught, the interpreter exits 1, and `census_freshness_emit` reads
+        # rc 1 as its ONE meaning — "the published census does not re-derive on
+        # this tree", a sentence about the tree produced by a fact about the
+        # machine. Re-raised as the type `exit_undetermined_on_stall` catches,
+        # so the SAME event reaches the stamp as rc 2 / UNDETERMINED. Every
+        # other AssertionError is re-raised untouched and still exits 1.
+        reason = _nested_outcome_stall(exc)
+        if reason is None:
+            raise
+        raise _NestedOutcomeStalled(reason, str(exc)) from exc
+
+
+def _census_rows_from(CV, SUB, DIMENSIONS, NAMES, QUESTIONS) -> Tuple[
+        List[Dict], Dict[str, int], Optional[str]]:
+    """The body of :func:`census_rows_with_record`, after the imports."""
     # vibe-ic#898 — QUOTE THE TWO-AXIS CENSUS, NOT THE CONFIGURATION AXIS.
     #
     # This generator shipped calling state_census(), which is the exact thing

@@ -349,6 +349,109 @@ def _repo(tmp_path: Path) -> tuple[Path, str, dict]:
     return repo, base, manifest
 
 
+def _state_cli(repo: Path, commit: str = "HEAD"):
+    return subprocess.run(
+        [sys.executable, str(_HERE / "protected_landing_transition.py"),
+         "state", "--repo", str(repo), "--commit", commit],
+        capture_output=True, text=True, check=False)
+
+
+def test_state_reports_armed_then_spent_from_the_same_manifest(tmp_path):
+    repo, base, manifest = _repo(tmp_path)
+    before = (repo / P.MANIFEST_PATH).read_bytes()
+    armed = _state_cli(repo)
+    assert armed.returncode == 0, armed.stderr
+    report = json.loads(armed.stdout)
+    assert report["state"] == "ARMED"
+    assert report["commit"] == base
+    assert report["advisory"] is True
+    assert report["moved_paths"] == P.moved_paths(manifest)
+    assert all(row["matches_current"] for row in report["comparisons"])
+    for path in P.RUNTIME_PATHS:
+        (repo / path).write_bytes(b"next:" + path.encode())
+    activated = _commit(repo, "activate the recorded bytes")
+    spent = _state_cli(repo)
+    assert spent.returncode == 0, spent.stderr
+    report = json.loads(spent.stdout)
+    assert report["state"] == "SPENT"
+    assert report["commit"] == activated
+    assert all(row["matches_next"] for row in report["comparisons"])
+    assert (repo / P.MANIFEST_PATH).read_bytes() == before
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize("change", ["bytes", "mode", "missing", "symlink", "partial"])
+def test_state_reports_exact_drift_without_authorising_it(tmp_path, change):
+    repo, base, manifest = _repo(tmp_path)
+    path = sorted(P.RUNTIME_PATHS)[0]
+    target = repo / path
+    if change == "bytes":
+        target.write_bytes(b"unrecorded bytes")
+    elif change == "mode":
+        target.chmod(0o644 if target.stat().st_mode & 0o111 else 0o755)
+    elif change == "missing":
+        target.unlink()
+    elif change == "symlink":
+        target.unlink()
+        target.symlink_to("unread-target")
+    else:
+        target.write_bytes(b"next:" + path.encode())
+    head = _commit(repo, "one path drifted")
+    before = _git(repo, "status", "--porcelain")
+    got = _state_cli(repo)
+    assert got.returncode == 0, got.stderr
+    report = json.loads(got.stdout)
+    assert report["state"] == "DRIFT"
+    assert report["commit"] == head
+    row = next(row for row in report["comparisons"] if row["path"] == path)
+    assert row["matches_current"] is False
+    assert row["matches_next"] is (change == "partial")
+    assert row["current"] == next(r for r in manifest["current"]["files"]
+                                   if r["path"] == path)
+    assert _git(repo, "status", "--porcelain") == before
+    assert json.loads(_state_cli(repo, base).stdout)["state"] == "ARMED"
+
+
+def test_state_reads_committed_bytes_and_leaves_dirty_worktree_alone(tmp_path):
+    repo, base, manifest = _repo(tmp_path)
+    path = repo / sorted(P.RUNTIME_PATHS)[0]
+    path.write_bytes(b"operator work in progress")
+    before = _git(repo, "status", "--porcelain")
+    got = _state_cli(repo)
+    assert got.returncode == 0, got.stderr
+    assert json.loads(got.stdout)["state"] == "ARMED"
+    assert path.read_bytes() == b"operator work in progress"
+    assert _git(repo, "status", "--porcelain") == before
+
+
+def test_state_reports_settled_reobservation_without_creating_authority(tmp_path):
+    repo, base, manifest = _repo(tmp_path)
+    manifest["kind"] = P.REOBSERVATION_KIND
+    manifest["next"]["files"] = manifest["current"]["files"]
+    _write(repo, P.MANIFEST_PATH, P.canonical_bytes(manifest))
+    _commit(repo, "record the settled tuple")
+    got = _state_cli(repo)
+    assert got.returncode == 0, got.stderr
+    report = json.loads(got.stdout)
+    assert report["state"] == "SPENT"
+    assert report["moved_paths"] == []
+    changed = [dict(row) for row in manifest["current"]["files"]]
+    changed[0]["sha256"] = "f" * 64
+    with pytest.raises(P.Refusal, match="candidate moves protected paths"):
+        P.classify_move(manifest["current"]["files"], changed,
+                        P.parse_manifest(manifest, 40))
+
+
+def test_state_refuses_an_unreadable_register_instead_of_reporting_spent(tmp_path):
+    repo, base, manifest = _repo(tmp_path)
+    _write(repo, P.MANIFEST_PATH, b"{broken")
+    _commit(repo, "unreadable register")
+    got = _state_cli(repo)
+    assert got.returncode == 2
+    assert "[NORECORD]" in got.stderr
+    assert not got.stdout
+
+
 def _worktrees(repo: Path, commit: str, tmp_path: Path) -> tuple[Path, Path]:
     gates = tmp_path / "candidate-gates"
     tests = tmp_path / "candidate-tests"

@@ -27,7 +27,7 @@ are unrouted, and `detailed_route` is re-invoked. Bounded to
 `_NAMED_VIOL_REROUTE_MAX_PASSES`, and it stops the moment a pass does not
 strictly reduce the count.
 
-NO `global_route`. This repo has already MEASURED that stale detailed routes
+Without an authoritative reserve plan, no pad recovery is enabled. This repo has already MEASURED that stale detailed routes
 against fresh guides abort the whole re-route (DRT-0206 -- see
 `_spare_safe_routing_clear_tcl`'s v1.8.43 note). The guides every current
 route was laid against are left untouched.
@@ -36,7 +36,7 @@ NO `-verbose 0` on the re-route, deliberately: the published count is read
 from the LOG, so a routing call that changes geometry and prints no count
 would leave the verdict quoting the previous route's number.
 
-DECLARED: ADVISORY. The `pnr` verdict re-measures the count after this stage;
+DECLARED: integrity failures are BLOCKING. The `pnr` verdict re-measures DRC;
 this can never turn a failing count into a passing one, only change the
 geometry the count is taken on.
 
@@ -88,12 +88,14 @@ _STUBS = textwrap.dedent(r"""
     proc _handle_dispatch {kind name sub args} {
         switch -- $kind {
             block { switch -- $sub {
+                getNets { set ns {}; foreach n $::ALLNETS {lappend ns [_mkhandle net $n]}; return $ns }
                 findNet { set n [lindex [lindex $args 0] 0]
                           if {[lsearch -exact $::MISSING $n] >= 0} { return "NULL" }
                           return [_mkhandle net $n] } } }
             net { switch -- $sub {
                 getSigType { if {[lsearch -exact $::PGNETS $name] >= 0} { return POWER }
                              return SIGNAL }
+                getBTerms  { return {} }
                 getITerms  { return [list [_mkhandle iterm $name]] }
                 getWire    { if {[lsearch -exact $::NOWIRE $name] >= 0} { return "NULL" }
                              return "wire:$name" } } }
@@ -120,6 +122,7 @@ def _run(tmp_path, report, *, after, dnt=(), pg=(), missing=()):
     body = _p3r._named_violation_reroute_tcl(str(rpt))
     script = tmp_path / "drive.tcl"
     script.write_text(
+        f'set ::ALLNETS {{{" ".join(_NETS)}}}\n'
         f'set ::RPT "{rpt}"\n'
         f'set ::MISSING {{{" ".join(missing)}}}\n'
         f'set ::PGNETS {{{" ".join(pg)}}}\n'
@@ -184,11 +187,11 @@ def test_an_empty_report_is_a_clean_route(tmp_path):
     assert "NAMED_VIOL_REROUTE_CLEAN: pass 1" in out
 
 
-def test_the_stage_is_wired_into_the_flow_and_declared_nonfatal():
+def test_the_stage_is_wired_into_the_flow_and_is_not_omittable():
     assert ("postroute_named_violation_reroute"
             in _p3r._PNR_STAGE_ORDER)
     assert ("postroute_named_violation_reroute"
-            in _p3r._PNR_NONFATAL_STAGES)
+            not in _p3r._PNR_NONFATAL_STAGES)
     order = list(_p3r._PNR_STAGE_ORDER)
     assert (order.index("postroute_named_violation_reroute")
             > order.index("postroute_fill"))

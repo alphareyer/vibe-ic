@@ -394,7 +394,8 @@ def _inject_module_rails(head: str, portlist: Optional[str],
 def _patch_module(head: str, name: str, portlist: Optional[str], body: str,
                   model: PdkPowerModel, stats: EmitStats,
                   as_ports: bool, tie_wells_to_rails: bool = False,
-                  tie_targets: Optional[Tuple[str, str]] = None
+                  tie_targets: Optional[Tuple[str, str]] = None,
+                  declared_pins: Optional[Dict[str, List[str]]] = None,
                   ) -> Tuple[str, bool]:
     """Patch one module: thread rails through the header and inject PG pins on
     each std-cell instance. Returns (new_head + new_body, changed)."""
@@ -405,7 +406,6 @@ def _patch_module(head: str, name: str, portlist: Optional[str], body: str,
 
     conn_pairs, decl_rails = _rail_connection_map(
         model, tie_wells_to_rails, tie_targets)
-    pg_full = ", ".join(f".{pin}({tgt})" for pin, tgt in conn_pairs)
 
     # Collect every insertion as (position, text), then assemble the new body in
     # a SINGLE forward pass (O(N)). Per-instance full-body slicing would be
@@ -415,6 +415,17 @@ def _patch_module(head: str, name: str, portlist: Optional[str], body: str,
         if already:
             stats.instances_already_pg += 1
             continue
+        # A family-level rail model is not every master's pin interface.
+        # Physical cells can expose only the supply pair while logic cells
+        # also expose well pins. Use the supplied native LEF declaration for
+        # this exact master; retain the legacy model when no view was supplied.
+        pairs = conn_pairs
+        if declared_pins is not None and _cell in declared_pins:
+            pairs = [(pin, tgt) for pin, tgt in pairs
+                     if pin in declared_pins[_cell]]
+        if not pairs:
+            continue
+        pg_full = ", ".join(f".{pin}({tgt})" for pin, tgt in pairs)
         conn = body[open_idx + 1:close_idx]
         # Insert right after the '(' — keeps every original signal connection.
         insert = pg_full if conn.strip() == "" else pg_full + ", "
@@ -555,6 +566,15 @@ def emit_power_aware_netlist(text: str, pdk: str, top: Optional[str] = None,
             if rail not in stats.rails:
                 stats.rails.append(rail)
 
+    # Keep each macro's actual interface instead of applying a library union
+    # to every instance. Additional IO views use the same rule as std cells.
+    declared_pins: Dict[str, List[str]] = {}
+    for lef in ([cell_lef] if cell_lef else []) + list(additional_lefs or []):
+        for master, pins in _lef_macro_pin_lists(lef).items():
+            if master in declared_pins and set(declared_pins[master]) != set(pins):
+                raise ValueError(f"LVS_PG_MASTER_PIN_VIEW_CONFLICT: {master}")
+            declared_pins[master] = pins
+
     def _apply(source: str, current: PdkPowerModel,
                current_tie: bool,
                current_targets: Optional[Tuple[str, str]]) -> str:
@@ -572,7 +592,8 @@ def emit_power_aware_netlist(text: str, pdk: str, top: Optional[str] = None,
             if do_this:
                 patched, changed = _patch_module(
                     head, name, portlist, body, current, stats,
-                    rails_as_ports, current_tie, current_targets)
+                    rails_as_ports, current_tie, current_targets,
+                    declared_pins=declared_pins)
                 if changed:
                     stats.modules_patched += 1
                 pieces.append(patched + end)

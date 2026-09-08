@@ -107,6 +107,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from _atomic_artefact import write_text
+import atomic_artifact_write_check as _atomic_census
 
 GATE = "landing_hygiene_ratchet_check"
 
@@ -147,6 +148,125 @@ _RATCHETED_GATES: Tuple[Dict[str, object], ...] = (
 
 class Refusal(Exception):
     """Raised for anything this program cannot answer.  Always rc=2."""
+
+
+PROGRAMS_REL = "vibe-ic-marketplace/plugins/vibe-ic/programs"
+_FLOW_REL = str(Path(PROGRAMS_REL).parent / _atomic_census.FLOW_REL)
+
+
+def _git_subject(repo: Path, *args: str) -> str:
+    proc = subprocess.run(["git", "-C", str(repo), *args],
+                          capture_output=True, text=True)
+    if proc.returncode:
+        raise Refusal(f"git {args[0]} rc={proc.returncode}: {proc.stderr.strip()}")
+    return proc.stdout
+
+
+def _subject_blob(repo: Path, rev: str, path: str) -> Optional[str]:
+    entry = _git_subject(repo, "ls-tree", "-z", rev, "--", path)
+    if not entry:
+        return None
+    mode, kind, _oid = entry.split("\t", 1)[0].split()
+    if kind != "blob" or mode not in ("100644", "100755"):
+        raise Refusal(f"{rev}:{path} is not a regular tracked source file")
+    return _git_subject(repo, "show", f"{rev}:{path}")
+
+
+def _subject_declarations(text: Optional[str], scratch: Path) -> Dict[str, set]:
+    if text is None:
+        return {}  # A subject without a flow still has its CLI destinations.
+    import yaml
+    # The census's historical CLI fallback is not evidence that a malformed
+    # flow has no changed declarations. Keep that uncertainty a refusal here.
+    try:
+        yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise Refusal(f"cannot read subject flow declarations: {exc}") from exc
+    flow = scratch / _atomic_census.FLOW_REL
+    flow.parent.mkdir(parents=True, exist_ok=True)
+    flow.write_text(text)
+    return _atomic_census.declared_outputs_by_program(scratch)
+
+
+def _atomic_sites(text: str, path: Path, declared: set) -> Dict[Tuple[str, str], List[int]]:
+    """Use #1082 itself; source/form identity survives harmless line movement.
+
+    Occurrences are retained, so duplicating an existing write cannot cancel
+    against the old copy merely because its source text is identical.
+    """
+    path.write_text(text)
+    lines = text.splitlines()
+    sites: Dict[Tuple[str, str], List[int]] = {}
+    for hit in _atomic_census.scan_program(path, declared):
+        line = int(hit["line"])
+        key = (lines[line - 1].strip(), str(hit["form"]))
+        sites.setdefault(key, []).append(line)
+    return sites
+
+
+def atomic_added_offenders(repo: Path, base: str, head: str = "HEAD") -> dict:
+    """The existing cheap unit's affected #1082 delta, not a full-tree gate.
+
+    Adapted from the unshipped issue2154 delta (6494f3f6). Unlike that version,
+    the subject is each COMMIT's bytes and declaration-only changes select the
+    affected programs too. The candidate census instrument stays the same.
+    """
+    record = {"base": base, "head": head, "programs_examined": 0,
+              "affected_programs": [], "added": [], "not_measured": {}}
+    try:
+        base = _git_subject(repo, "rev-parse", "--verify", f"{base}^{{commit}}").strip()
+        head = _git_subject(repo, "rev-parse", "--verify", f"{head}^{{commit}}").strip()
+        record.update(base=base, head=head)
+        changed = _git_subject(repo, "diff", "--name-only", "-z", base, head,
+                               "--", PROGRAMS_REL, _FLOW_REL).split("\0")
+        names = {p for p in changed if p.endswith(".py")
+                 and Path(p).parent.as_posix() == PROGRAMS_REL}
+        # No Python/flow change means no atomic population needs measuring.
+        if not names and _FLOW_REL not in changed:
+            return record
+        with tempfile.TemporaryDirectory(prefix="atomic-delta.") as td:
+            scratch = Path(td)
+            before_decl = _subject_declarations(
+                _subject_blob(repo, base, _FLOW_REL), scratch / "base")
+            after_decl = _subject_declarations(
+                _subject_blob(repo, head, _FLOW_REL), scratch / "candidate")
+            for stem in before_decl.keys() | after_decl.keys():
+                if before_decl.get(stem, set()) != after_decl.get(stem, set()):
+                    # Match the census's top-level programs/*.py population.
+                    if Path(stem).name == stem:
+                        names.add(f"{PROGRAMS_REL}/{stem}.py")
+            record["affected_programs"] = sorted(names)
+            for name in sorted(names):
+                after_text = _subject_blob(repo, head, name)
+                if after_text is None:
+                    continue  # Deleted/absent in candidate: no introduced write.
+                before_text = _subject_blob(repo, base, name)
+                stem = Path(name).stem
+                before = _atomic_sites(before_text or "", scratch / "before.py",
+                                       before_decl.get(stem, set()))
+                after = _atomic_sites(after_text, scratch / "after.py",
+                                      after_decl.get(stem, set()))
+                record["programs_examined"] += 1
+                for key, lines in sorted(after.items()):
+                    for line in lines[len(before.get(key, [])):]:
+                        record["added"].append({"file": name, "line": line,
+                                                "source": key[0], "form": key[1]})
+    except (OSError, Refusal) as exc:
+        record["not_measured"]["range"] = str(exc)
+    return record
+
+
+def summarize_atomic(record: dict) -> str:
+    if record["not_measured"]:
+        return f"{GATE}: REFUSED — atomic writes: {record['not_measured']}; NOTHING WAS MEASURED"
+    if record["added"]:
+        return (f"{GATE}: FAIL — this landing INTRODUCES non-atomic report writes:\n"
+                + "\n".join(f"  {r['file']}:{r['line']}  {r['form']}"
+                            for r in record["added"]))
+    if not record["programs_examined"]:
+        return f"{GATE}: NOT_APPLICABLE — no affected atomic-write population"
+    return (f"{GATE}: PASS — atomic writes introduce nothing "
+            f"({record['programs_examined']} affected programs examined)")
 
 
 def _archive(repo: Path, rev: str, dest: Path) -> None:
@@ -256,9 +376,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               f"registry is a wiring error, not a clean tree.", file=sys.stderr)
         return 2
 
+    atomic = atomic_added_offenders(args.repo, args.base, args.head)
+    print(summarize_atomic(atomic))
+    if atomic["not_measured"]:
+        if args.json:
+            write_text(args.json, json.dumps({"atomic_writes": atomic}, indent=2))
+        return 2
+
     tmp = Path(tempfile.mkdtemp(prefix="hygratchet."))
     record: Dict[str, object] = {"base": args.base, "head": args.head,
-                                 "gates": {}}
+                                 "gates": {}, "atomic_writes": atomic}
     try:
         try:
             base_root = tmp / "base"
@@ -269,7 +396,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"{GATE}: REFUSED — {r}", file=sys.stderr)
             return 2
 
-        introduced_any = False
+        introduced_any = bool(atomic["added"])
         for entry in entries:
             label = str(entry["label"])
             try:

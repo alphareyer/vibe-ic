@@ -861,7 +861,7 @@ def _emission_order(land_text):
      ("1", "FAIL", "  FAIL  63x8 census freshness"),
      ("2", "REPORT", "  REPORT  63x8 census freshness")])
 def test_the_census_unit_has_three_outcomes_and_only_one_of_them_blocks(
-        scheduler, work, rc, state, line):
+        scheduler, work, rc, state, line, land_text):
     """PASS / FAIL / REPORT, driven through the real emitter (vibe-ic#2142).
 
     `run_emit` reads every non-zero as FAIL, and for this unit that is wrong in
@@ -872,13 +872,73 @@ def test_the_census_unit_has_three_outcomes_and_only_one_of_them_blocks(
 
     All three arms are driven here rather than asserted about, because a
     three-outcome branch nobody executes is two outcomes and a comment. The
-    BLOCKING one is checked by `FAILED`: only rc 1 may set it.
+    Product failure is checked by `FAILED`: only rc 1 may set it. The historical
+    node id is retained; an undecided REPORT must also prohibit a completed
+    stamp, without becoming a product failure (#2203).
     """
     proc = _run(scheduler, work, {"CF_RC": rc})
     assert line in proc.stdout, proc.stdout
     rows = {r[0]: (r[1], r[2]) for r in _journal(work)}
     assert rows["full:census-freshness"] == (state, rc), rows
     assert f"FAILED={1 if rc == '1' else 0}" in proc.stdout, proc.stdout
+
+    # Execute the actual emitter -> completion unit -> final stamp tail. Other
+    # gate bodies are not run; transport is the only stub in the final tail.
+    # A pre-existing stamp must be removed on both refusal paths.
+    assert _plan().STEPS[-1] == ("full:completion-record", "after_window", "")
+    tail = re.search(
+        r'^if \[ "\$FAILED" -eq 0 \] && \[ "\$\{GATEKEEPER_NO_STAMP:-0\}"',
+        land_text, re.MULTILINE)
+    assert tail, "the actual final stamp consumer is absent"
+    for record_enabled in ([0, 1] if rc == "2" else [0]):
+        end = work / f"completion-{record_enabled}"
+        end.mkdir()
+        for args in (("init", "-q"),
+                     ("-c", "user.name=probe", "-c", "user.email=probe@example.invalid",
+                      "commit", "--allow-empty", "-qm", "synthetic completion control")):
+            subprocess.run(["git", "-C", str(end), *args], check=True,
+                           capture_output=True)
+        stamp = end / ".git/gatekeeper-stamp"
+        stamp.write_text("an earlier certificate must not survive refusal\n")
+        script = r'''
+set -uo pipefail
+FAILED=0
+ROOT="$PWD"
+LANDING_CADENCE=TARGETED
+GATEKEEPER_NO_STAMP=0
+GATEKEEPER_VERIFY_ARM=""
+LANDING_RECORD_TOOL=must-not-be-reached-on-undetermined
+LANDING_JOURNAL="$PWD/completion-journal.tsv"
+LANDING_COMPLETION="$PWD/completion.json"
+LANDING_PROGRESS_TOOL=must-not-be-reached-on-undetermined
+lane_resolve() { EMIT_RC="$CF_RC"; EMIT_OUT="NOT_MEASURED: synthetic verdict input"; }
+landing_record() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$LANDING_JOURNAL"; }
+python3() { printf 'STATUS_TRANSPORT_NOT_RUN %s\n' "$*"; }
+trap 'echo "FINAL_FAILED=$FAILED"' EXIT
+'''
+        script += _extract("census_freshness_emit", land_text) + "\n"
+        script += _extract("landing_unit_full_completion_record", land_text) + "\n"
+        script += "census_freshness_emit\nlanding_unit_full_completion_record full:completion-record\n"
+        script += land_text[tail.start():]
+        script_path = end / "actual-completion.sh"
+        script_path.write_text(script)
+        done = _pr.run(["bash", str(script_path)], cwd=end,
+                       env={**os.environ, "CF_RC": rc,
+                            "LANDING_RECORD_ENABLED": str(record_enabled)},
+                       capture_output=True, text=True, check=False)
+        (end / "stdout.txt").write_text(done.stdout)
+        (end / "stderr.txt").write_text(done.stderr)
+        (end / "returncode.txt").write_text(str(done.returncode) + "\n")
+        observed = (end / "completion-journal.tsv").read_text()
+        assert done.returncode == int(rc), (done.returncode, done.stdout, done.stderr)
+        assert f"FINAL_FAILED={1 if rc == '1' else 0}" in done.stdout
+        assert stamp.exists() == (rc == "0"), (done.stdout, done.stderr)
+        assert ("ALL GATES PASS" in done.stdout) == (rc == "0"), done.stdout
+        assert ("full:completion-record\tPASS" in observed) == (rc != "2"), observed
+        if rc == "2":
+            assert "[UNDETERMINED]" in done.stderr
+            assert not (end / "completion.json").exists()
+            assert "STATUS_TRANSPORT_NOT_RUN" not in done.stdout
 
 
 def test_an_earlier_red_in_the_same_lane_does_not_make_the_census_a_norecord(

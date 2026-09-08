@@ -179,6 +179,7 @@ for _arg in "$@"; do
 done
 
 FAILED=0
+CENSUS_UNDETERMINED=0
 LANDING_RECORD_ENABLED=0
 LANDING_RECORD_TOOL="$RUNTIME_ROOT/tools/ci/landing_completion_record.py"
 # Only the approved runtime supplies this declaration. No candidate event,
@@ -505,10 +506,10 @@ census_freshness_emit() {            # census_freshness_emit [--last]
   # returns 2 for "I could not look" — NORECORD (a non-cell test in one of the
   # nine dimension modules is red, so the census is not a record), a tree that
   # carries no matrix suite (ZERO_DENOMINATOR), or a declared corpus provenance
-  # this host cannot arrange. Refusing a landing on any of those is the ban
-  # vibe-ic#1277 measured for the same generator: its failure modes are
-  # properties of the host and of OTHER people's reds, and a gate that refuses
-  # every landing is a gate operators learn to bypass.
+  # this host cannot arrange. These are not product findings (#1277), but a
+  # run that could not decide cannot certify ALL GATES PASS either (#2203).
+  # Keep REPORT separate from FAILED; the existing completion unit refuses
+  # certification of an undetermined run without inventing a tree defect.
   #
   # rc 2 is therefore REPORT — the state this record already has for "ran,
   # decided nothing, never mistaken for a pass" — with the returncode printed.
@@ -528,6 +529,8 @@ census_freshness_emit() {            # census_freshness_emit [--last]
   # RESOLUTION is consulted first and an unresolved unit is a FAIL, exactly as
   # `run_emit` treats it.
   local unit="full:census-freshness" label="63x8 census freshness" resolved=0
+  # The last emitted measurement owns this state, including a serial re-run.
+  CENSUS_UNDETERMINED=0
   lane_resolve "$unit" "${1:-}" || resolved=1
   if [ "$resolved" -ne 0 ]; then
     printf '  FAIL  %s — no verdict was recorded for this unit\n' "$label"
@@ -544,6 +547,7 @@ census_freshness_emit() {            # census_freshness_emit [--last]
     FAILED=1
     landing_record "$unit" FAIL "$EMIT_RC" "$EMIT_OUT"
   else
+    CENSUS_UNDETERMINED=1
     printf '  REPORT  %s (rc=%s — the census could not be measured here; NOT a pass)\n' \
       "$label" "$EMIT_RC"
     printf '%s\n' "$EMIT_OUT" | grep -aE 'NORECORD|ZERO_DENOMINATOR|CROSS_TREE|NOT_MEASURED' \
@@ -2629,6 +2633,14 @@ landing_unit_full_worktree_fingerprint_final() {
 }
 
 landing_unit_full_completion_record() {
+  # #2203: REPORT is not a product defect, but it cannot certify completion.
+  # Keep the diagnostic journal and FAILED unchanged. Refuse before publishing
+  # a completion receipt or reaching either standalone/composite success tail.
+  if [ "${CENSUS_UNDETERMINED:-0}" -ne 0 ] && [ "$FAILED" -eq 0 ]; then
+    rm -f "$(git rev-parse --absolute-git-dir)/gatekeeper-stamp"
+    echo "[UNDETERMINED] census freshness was not measured; no completion receipt or stamp" >&2
+    exit 2
+  fi
   landing_record "$1" PASS 0 "completion record publication"
   if [ "$LANDING_RECORD_ENABLED" = "1" ]; then
     python3 "$LANDING_RECORD_TOOL" finish --journal "$LANDING_JOURNAL" \

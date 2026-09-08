@@ -47,7 +47,7 @@ ANY gate program of that step actually name a path that resolves to this
 artefact — or does the gate's own invocation hand it over?
 
 **CLAIM side** = the flow yaml's own statement of what the step delivers
-(``required_outputs``). **ACTUAL side** = three channels, in this order:
+(``required_outputs``). **ACTUAL side** = the following channels, in order:
 
   ``CODE``   a path-shaped string constant in the EXECUTABLE AST of a gate
              program or of a local helper it imports directly. Docstrings are
@@ -68,6 +68,12 @@ artefact — or does the gate's own invocation hand it over?
              cannot see — ``gd.glob("*.json")`` filtered by a
              ``_REQUIRED_PREFIXES`` table (``phase1_all_l_docs_present_check``).
              It fires on exactly ONE of the 122 entries; it is not a back door.
+  ``INLINE`` a uniquely owned report of the normal inline sign-off executor,
+             whose program is one of THIS step's gates. Only after the static
+             channels miss, run that owner on fresh empty scratch and observe
+             the wrapper successfully reading its newly produced exact report.
+             The registry alone is not evidence. Like argv/``--json`` wiring,
+             this proves consumption, NOT semantic sign-off of report content.
 
 Dynamic forms are resolved explicitly rather than given up on:
   * f-strings are reconstructed, substituting module-level ``NAME = "literal"``
@@ -755,6 +761,50 @@ def prefix_selector_grounding(step_id, alternative: str) -> Optional[Grounding]:
     return None
 
 
+def inline_report_grounding(step_id, alternative: str) -> Optional[Grounding]:
+    """Observe the normal wrapper's exact report read, not its path catalogue.
+
+    This is a fallback for a gate whose audit invocation is deliberately
+    read-only while the inline executor owns its report. Empty scratch prevents
+    a stale report from impersonating a current producer output. A blocked
+    design on that scratch is expected: this measures wiring, not design PASS.
+    """
+    import phase3_one_shot_runner as runner
+    from unittest.mock import patch
+
+    owners = [row for row in runner._DECLARED_SIGNOFF_GATES
+              if _normalise(row[2]) == _normalise(alternative)]
+    if len(owners) != 1:
+        return None
+    name, program, out_rel, extra = owners[0]
+    if Path(program).stem not in F.gate_programs(step_id):
+        return None
+    if Path(out_rel).is_absolute() or ".." in Path(out_rel).parts:
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="d4_inline_") as scratch:
+        project = Path(scratch)
+        report = project / out_rel
+        read_report = False
+        read_text = Path.read_text
+
+        def observe_read(path, *args, **kwargs):
+            nonlocal read_report
+            text = read_text(path, *args, **kwargs)
+            if path == report:
+                read_report = True
+            return text
+
+        with patch.object(Path, "read_text", observe_read):
+            result = runner._run_declared_signoff_gate(
+                project, name, program, out_rel, extra)
+        if (not read_report or not report.is_file()
+                or str(report) not in result.output_files):
+            return None
+    return Grounding(alternative, alternative, out_rel, "INLINE",
+                     f"phase3_one_shot_runner: {name} ({program}), observed report read")
+
+
 # ---------- the public entry point --------------------------------------------
 def ground(step_id, entry: str) -> Optional[Grounding]:
     """The best evidence that *entry* is measured by *step_id*'s gate, or None.
@@ -801,6 +851,11 @@ def ground(step_id, entry: str) -> Optional[Grounding]:
                 channel=CH_PREFIX,
                 source=hit.source,
             )
+    for alternative in F.split_any_of(entry):
+        hit = inline_report_grounding(step_id, alternative)
+        if hit is not None:
+            return Grounding(entry, hit.alternative, hit.pattern,
+                             hit.channel, hit.source)
     return None
 
 

@@ -15322,10 +15322,9 @@ def _pnr_stage_end(label: str) -> str:
 _PNR_NONFATAL_STAGES = frozenset({
     "postroute_drv_repair",
     "postroute_drv_reconverge",
-    # A targeted repair that dies leaves the route it was handed: the stage
-    # only ever CLEARS nets it then re-routes, and every step inside it is
-    # NONFATAL-guarded, so a crash there is a lost repair, not a lost route.
-    "postroute_named_violation_reroute",
+    # Named-marker repair is load-bearing: after wire invalidation a failed
+    # transaction can leave an incomplete route. It must never be omitted on
+    # a fatal-signal resume.
     "postroute_setup_repair_estimate",
 })
 
@@ -21251,7 +21250,9 @@ def _router_drc_report_types(pnr_out: Path, published: Optional[int]
 _NAMED_VIOL_REROUTE_MAX_PASSES = 2
 
 
-def _named_violation_reroute_tcl(rpt_path: str) -> str:
+def _named_violation_reroute_tcl(
+        rpt_path: str, reserved_instance_names: Optional[Sequence[str]] = None
+) -> str:
     """Tcl that rips up ONLY the nets the router's own DRC report names, and
     re-routes them — bounded, disclosed, and re-measured every pass.
 
@@ -21272,27 +21273,33 @@ def _named_violation_reroute_tcl(rpt_path: str) -> str:
     are UNROUTED, and re-invokes `detailed_route`, which must then route them
     and will do so against the markers now present.
 
-    WHY NO `global_route`. The repo has already MEASURED that mixing stale
+    The bounded fixed-pad Short-marker transaction first rebuilds guides for
+    its explicitly admitted signal nets. Fixed pad attributes and all reserved
+    bindings remain immutable. Other markers retain the original policy below.
+
+    WHY NO broad `global_route`. The repo has already MEASURED that mixing stale
     detailed routes with fresh guides aborts the whole re-route (DRT-0206,
     `_spare_safe_routing_clear_tcl`'s v1.8.43 note). The guides in the block are
     the ones every current route was laid against, so they are left alone and
     only the cleared nets are re-derived — the same shape as the flow's
     existing incremental post-diode re-route.
 
-    SAFETY. POWER/GROUND nets and any net touching a `dont_touch` instance are
-    skipped, exactly as every other routing-clear site in this file does; the
-    Design-for-ECO spare bindings therefore cannot be re-derived here. Every
-    step is NONFATAL-guarded and every outcome is named. The count is
-    RE-MEASURED by the router after each pass — never carried over — so if this
-    repair does not help, the verdict says the same thing it said before.
+    SAFETY. The pad transaction refuses reserved and protected non-pad nets
+    and checks the complete instance/net-terminal identity. Other markers
+    retain the original PG/dont_touch skip policy. Native DRC is re-measured.
 
-    DECLARED: ADVISORY. It changes geometry, so the `pnr` verdict re-measures;
-    it can never make a failing count read as a passing one.
+    DECLARED: BLOCKING for unsafe pad admission, changed identity, incomplete
+    routing or an unreadable integrity check. A failed wire transaction is
+    not resumable by omitting this stage. Ordinary residual DRC is still
+    graded by the normal PnR consumer; a count is never rewritten as a pass.
 
     chip-AGNOSTIC: odb API + the tool's own report; no PDK, layer or design
     literal."""
+    from pad_signal_route_repair import normal_recovery_tcl, strict_integrity_tcl
     return (
-        _spare_safe_clear_net_proc_tcl()
+        normal_recovery_tcl(rpt_path, None if reserved_instance_names is None
+                            else list(reserved_instance_names))
+        + _spare_safe_clear_net_proc_tcl()
         + '# === named-violation targeted rip-up + re-route ===\n'
         'set _nvr_rpt "' + rpt_path + '"\n'
         'for {set _nvr_p 1} {$_nvr_p <= '
@@ -21399,15 +21406,8 @@ def _named_violation_reroute_tcl(rpt_path: str) -> str:
         # had none. A spare-tie net that comes back with no wire is exactly the
         # v1.5.65 hazard, and it was unobservable on this path.
         #
-        # DISCLOSURE, NOT YET A REFUSAL, and saying so is the point: the only
-        # consumer of this marker family, `_parse_ship_repair_log`, reads
-        # `SHIP_UNROUTED_NETS` out of the SHIP repair log, which is a different
-        # log from the PnR one this block writes to. Emitting `SHIP_…` here
-        # would put the token where nothing parses it; teaching the PnR
-        # promotion gate to REFUSE on a new one is a verdict change that needs
-        # a corpus sweep this does not have. The count is named and printed, so
-        # the failure is visible on the path that can cause it.
-        + _routing_integrity_check_tcl("NAMED_VIOL_REROUTE").rstrip() + '\n'
+        # Shared geometric measurement is now blocking on this normal entry.
+        + strict_integrity_tcl("NAMED_VIOL_REROUTE").rstrip() + '\n'
         + 'puts "NAMED_VIOL_REROUTE_DONE"\n')
 
 
@@ -25293,7 +25293,9 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
                         cts_distance_between_buffers: Optional[float] = None,
                         sizing_limits_block: str = "",
                         sizing_drv_report_block: str = "",
-                        fanout_root_repair_block: str = "") -> str:
+                        fanout_root_repair_block: str = "",
+                        reserved_instance_names: Optional[Sequence[str]] = None
+                        ) -> str:
     """ORGANIC #581 — the COMPLETE pnr.tcl template as a PURE builder
     (v0.1.49 doctrine: extract Tcl-block builders into pure helpers so
     regression tests pin them). The #557 SPEF-repair block shipped with
@@ -25492,7 +25494,8 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
     # The SAME report path the router is asked to write, read back by the
     # targeted repair. One constant, two consumers.
     _named_viol_reroute_block = _named_violation_reroute_tcl(
-        out_dir_c + "/" + ROUTER_DRC_REPORT_NAME)
+        out_dir_c + "/" + ROUTER_DRC_REPORT_NAME,
+        reserved_instance_names=reserved_instance_names)
     return f"""
 {_thread_block}read_lef {tech_lef_c}
 read_lef {cell_lef_c}
@@ -27192,6 +27195,44 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
                       "; ".join(notes) or "no producer ran", out_files)
 
 
+def _validate_padring_core_connections(netlist: Path, wrapper: Path,
+                                        core: str, chip_top: str) -> None:
+    """Bind the generated pad wrapper to the netlist selected for routing.
+
+    The integration document can precede scan insertion. Its port list alone
+    cannot prove that the wrapper connects the implemented core: omitted DFT
+    inputs elaborate as undriven internal nets. Refuse before floorplanning;
+    pad assignments and timing for additional ports require a design contract.
+    """
+    from module_port_audit import parse_modules
+
+    cores = [m for m in parse_modules(netlist.read_text(), str(netlist))
+             if m.name == core]
+    wrappers = [m for m in parse_modules(wrapper.read_text(), str(wrapper))
+                if m.name == chip_top]
+    if len(cores) != 1 or len(wrappers) != 1 or not cores[0].ports:
+        raise ValueError("PADRING_CORE_INTERFACE_UNRESOLVED: expected one "
+                         "selected core with ports and one generated chip top")
+    instances = [i for i in wrappers[0].instances if i.module_name == core]
+    if len(instances) != 1 or instances[0].is_implicit:
+        raise ValueError("PADRING_CORE_INTERFACE_UNRESOLVED: expected one "
+                         "explicitly connected core in the generated wrapper")
+    conns = instances[0].connections
+    names = [c.port_name for c in conns]
+    missing = sorted(set(cores[0].ports) - set(names))
+    empty = sorted(c.port_name for c in conns if not c.wire_expr.strip())
+    unknown = sorted(set(names) - set(cores[0].ports))
+    duplicate = sorted(n for n in set(names) if names.count(n) > 1)
+    if missing or empty or unknown or duplicate:
+        raise ValueError(
+            "PADRING_CORE_PORT_CONNECTION_MISMATCH: selected netlist "
+            f"{netlist} core {core}, wrapper {wrapper}; missing={missing}, "
+            f"empty={empty}, unknown={unknown}, duplicate={duplicate}. "
+            "The generated pad wrapper must explicitly connect every selected "
+            "core port before routing; missing pad/timing declarations need "
+            "an input contract, not an invented tie or clock.")
+
+
 def _prepare_padring_for_route(
         project: Path, pdk: PdkConfig, container: str,
         out_dir: Path, out_dir_c: str, generic_pnr_tcl: str,
@@ -27221,6 +27262,12 @@ def _prepare_padring_for_route(
         io_lefs, io_gds = io_view_discover(pdk, container)
         io_ready_tcl = _inject_padring_io_lefs(generic_pnr_tcl, io_lefs)
         if chip_top_rec is not None:
+            _pad_core = str(chip_top_rec.get("core_module") or "")
+            _pad_top = str(chip_top_rec.get("chip_top_module") or "chip_top")
+            _pad_wrapper = project / chip_top_rec["chip_top_verilog"]
+            _pad_netlist, _, _ = pnr_input_netlist(project, _pad_core)
+            _validate_padring_core_connections(
+                _pad_netlist, _pad_wrapper, _pad_core, _pad_top)
             io_ready_tcl = _inject_padring_chip_top(
                 io_ready_tcl,
                 _to_container_path(
@@ -28737,7 +28784,10 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             "cts_distance_between_buffers"),
         sizing_limits_block=sizing_limits_block,
         sizing_drv_report_block=sizing_drv_report_block,
-        fanout_root_repair_block=_pnr_fanout_root_repair)
+        fanout_root_repair_block=_pnr_fanout_root_repair,
+        reserved_instance_names=[
+            item["name"] for key in ("instances", "spare_pads")
+            for item in spare_plan.get(key, []) if item.get("name")])
 
     _chip_padring = _chip_path_requests_pad_ring(project)
 

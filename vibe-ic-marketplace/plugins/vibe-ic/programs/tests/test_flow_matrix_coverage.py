@@ -1639,6 +1639,40 @@ _OUTCOME_WORKER_CAP_ENV = "VIBEIC_MATRIX_OUTCOME_WORKERS"
 _NESTED_PROGRESS_RELAY_TOTAL = 10_000
 
 
+class _OutcomeProgressRelay:
+    """One finite outer domain, not one new domain per child filename.
+
+    Child identity and monotonicity remain per child. Only validated forward
+    score units may advance the owner's single sequence. Its existing finite
+    domain budget is shared by the invocation; exhaustion refuses rather than
+    rotating scope names, discarding progress, or minting timer heartbeats.
+    All calls run on the owner thread, including the final queue drain.
+    """
+
+    def __init__(self):
+        self.seen = {}
+        self.completed = 0
+
+    def start_wave(self, paths):
+        self.seen = {path: 0 for path in paths}
+
+    def publish(self, path, score):
+        assert path in self.seen, f"unknown nested semantic relay: {path}"
+        previous = self.seen[path]
+        assert previous < score <= _NESTED_PROGRESS_RELAY_TOTAL, (
+            f"invalid nested semantic relay for {path.name}: "
+            f"{previous} -> {score}")
+        target = self.completed + score - previous
+        assert target <= _NESTED_PROGRESS_RELAY_TOTAL, (
+            "matrix outcome invocation exhausted its finite semantic relay "
+            f"budget: {target} > {_NESTED_PROGRESS_RELAY_TOTAL}")
+        for completed in range(self.completed + 1, target + 1):
+            _domain_progress("matrix-outcome-relay", completed,
+                             _NESTED_PROGRESS_RELAY_TOTAL)
+        self.completed = target
+        self.seen[path] = score
+
+
 def _domain_progress(scope: str, completed: int, total: int) -> None:
     """Emit one finite semantic checkpoint when the landing plugin is loaded."""
     plugin = sys.modules.get("_pytest_progress_plugin")
@@ -1801,8 +1835,10 @@ def _run_outcome_reports(
 
     per_path: Dict[Path, Dict[str, List[Dict]]] = {}
     completed_paths = 0
+    progress_relay = _OutcomeProgressRelay()
     for start in range(0, len(paths), _width):
         wave = paths[start:start + _width]
+        progress_relay.start_wave(wave)
         relay_queue: queue.Queue = queue.Queue()
         with ThreadPoolExecutor(max_workers=len(wave)) as pool:
             # `_width` is diagnostic only. It changes no liveness rule.
@@ -1814,35 +1850,18 @@ def _run_outcome_reports(
             # Queue, then emit from this MAIN thread only. Worker-thread writes
             # would race the plugin's global sequence and could corrupt the
             # outer protocol. A finite total prevents an infinite heartbeat.
-            relay_seen: Dict[Path, int] = {path: 0 for path in wave}
             while not all(future.done() for future in futures):
                 try:
                     path, score = relay_queue.get(timeout=0.1)
                 except queue.Empty:
                     continue
-                previous = relay_seen[path]
-                assert previous < score <= _NESTED_PROGRESS_RELAY_TOTAL, (
-                    f"invalid nested semantic relay for {path.name}: "
-                    f"{previous} -> {score}")
-                for completed in range(previous + 1, score + 1):
-                    _domain_progress(
-                        f"matrix-outcome-child:{path.name}", completed,
-                        _NESTED_PROGRESS_RELAY_TOTAL)
-                relay_seen[path] = score
+                progress_relay.publish(path, score)
             while True:
                 try:
                     path, score = relay_queue.get_nowait()
                 except queue.Empty:
                     break
-                previous = relay_seen[path]
-                assert previous < score <= _NESTED_PROGRESS_RELAY_TOTAL, (
-                    f"invalid nested semantic relay for {path.name}: "
-                    f"{previous} -> {score}")
-                for completed in range(previous + 1, score + 1):
-                    _domain_progress(
-                        f"matrix-outcome-child:{path.name}", completed,
-                        _NESTED_PROGRESS_RELAY_TOTAL)
-                relay_seen[path] = score
+                progress_relay.publish(path, score)
             # Read results in declaration order after every process in this
             # wave ended, so the same first error wins on both arms.
             first: Optional[BaseException] = None
@@ -2008,6 +2027,98 @@ def _run_one_module_outcome(path: Path,
         return rows
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def test_outcome_relay_owns_one_native_scope_across_module_waves(
+        monkeypatch, tmp_path):
+    """Exercise the real scheduler/relay and native eight-scope predicate."""
+    import pytest_per_file_junit as driver
+
+    module = sys.modules[__name__]
+    paths = tuple(tmp_path / f"test_neutral_{i}.py" for i in range(13))
+    nodeid = "test_owner.py::test_owner"
+    sidecar = tmp_path / "native.jsonl"
+    sidecar.touch()
+    probe = driver._SemanticProgressProbe(sidecar, "relay-control", os.getpid)
+
+    def feed(event, **fields):
+        probe._accept({"schema": 1, "nonce": "relay-control",
+                       "pid": os.getpid(), "seq": probe.seq + 1,
+                       "monotonic_ns": probe.last_ns + 1,
+                       "event": event, **fields})
+
+    feed("session_start")
+    feed("item_collected", nodeid=nodeid)
+    feed("collection_finish", selected_items=1)
+    for scope in ("collection-relay", "collection-complete"):
+        feed("domain_progress", nodeid=nodeid, scope=scope, completed=1, total=1)
+    owner_thread = threading.get_ident()
+
+    def emit(scope, completed, total):
+        assert threading.get_ident() == owner_thread
+        feed("domain_progress", nodeid=nodeid, scope=scope,
+             completed=completed, total=total)
+        assert probe.error == "", probe.error
+
+    def child(path, _cwd, _width, progress_queue):
+        progress_queue.put((path, 1))
+        progress_queue.put((path, 2))
+        return {f"{path.name}::test_cell": [
+            {"when": "call", "outcome": "passed", "wasxfail": False,
+             "longrepr": ""}]}
+
+    monkeypatch.setattr(module, "_domain_progress", emit)
+    monkeypatch.setattr(module, "_run_one_module_outcome", child)
+    monkeypatch.setattr(module.os, "getloadavg", lambda: (0.0, 0.0, 0.0))
+    monkeypatch.setattr(module.os, "cpu_count", lambda: 32)
+    try:
+        reports = _run_outcome_reports(paths, cwd=tmp_path)
+        assert len(reports) == len(paths)
+        assert len(probe.domain_progress) == 4
+        assert probe.domain_progress[(nodeid, "matrix-outcome-relay")] == (
+            2 * len(paths), _NESTED_PROGRESS_RELAY_TOTAL)
+        # The native refusal stays real, not merely an arithmetic assertion.
+        for index in range(5):
+            feed("domain_progress", nodeid=nodeid, scope=f"runaway-{index}",
+                 completed=1, total=1)
+        assert "more than 8 distinct" in probe.error
+    finally:
+        probe.close()
+
+
+def test_outcome_relay_keeps_child_ownership_and_a_finite_invocation_budget(
+        monkeypatch, tmp_path):
+    observed = []
+    monkeypatch.setattr(sys.modules[__name__], "_domain_progress",
+                        lambda *event: observed.append(event))
+    first, second = tmp_path / "first.py", tmp_path / "second.py"
+    relay = _OutcomeProgressRelay()
+    relay.start_wave((first,))
+    relay.publish(first, 2)
+    with pytest.raises(AssertionError, match="invalid nested semantic relay"):
+        relay.publish(first, 2)
+    relay.start_wave((second,))
+    with pytest.raises(AssertionError, match="unknown nested semantic relay"):
+        relay.publish(first, 3)
+    relay.publish(second, _NESTED_PROGRESS_RELAY_TOTAL - 2)
+    assert len(observed) == _NESTED_PROGRESS_RELAY_TOTAL
+    assert observed[-1] == ("matrix-outcome-relay",
+                            _NESTED_PROGRESS_RELAY_TOTAL,
+                            _NESTED_PROGRESS_RELAY_TOTAL)
+    with pytest.raises(AssertionError, match="exhausted its finite semantic"):
+        relay.publish(second, _NESTED_PROGRESS_RELAY_TOTAL - 1)
+    assert len(observed) == _NESTED_PROGRESS_RELAY_TOTAL
+
+
+def test_outcome_relay_does_not_erase_a_real_child_predicate_failure(tmp_path):
+    path = tmp_path / "test_neutral_failure.py"
+    path.write_text("def test_cell():\n    assert False, 'real-child-refusal'\n")
+    reports = _run_outcome_reports((path,), cwd=tmp_path)
+    key = f"{path.name}::test_cell"
+    assert _reduce_outcome(reports[key]) == "failed"
+    assert "real-child-refusal" in str(reports[key])
+    with pytest.raises(AssertionError, match="outside the matrix cell join"):
+        _cell_outcomes_from_reports(reports, {path.name: 1}, {"1"})
 
 
 def test_nested_outcome_run_outlives_old_fixed_bound_with_semantic_progress(
