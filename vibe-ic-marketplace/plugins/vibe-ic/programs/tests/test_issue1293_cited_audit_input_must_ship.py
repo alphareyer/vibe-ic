@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A RESULT.md that cites an audit must publish its provenance-bound input.
+"""A RESULT.md claiming an audit result must publish its provenance-bound input.
 
 THE ORIGINAL DEFECT (vibe-ic#1293). ``benchmark_triage_absorption_audit`` is
 deterministic and its verdict depends entirely on the triage JSON passed as its
@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -74,8 +75,141 @@ def _text(md: Path) -> str:
         return ""
 
 
+def _claims_audit_result(text: str) -> bool:
+    """Recognize attributed current results; refuse ambiguous result language.
+
+    JSON binds program and verdict/returncode in one record. Prose supports
+    named-tool results, current/machine-check labels and tool/result table
+    cells. Historical, quoted, example and explicitly unexecuted statements
+    are references, not current claims. An unresolved result-looking sentence
+    raises rather than silently escaping the unchanged evidence requirement.
+    """
+    audit = rf"\b{re.escape(AUDIT)}(?:\.py)?\b"
+    result = (r"\b(?:PASS(?:ED)?|FAIL(?:ED)?|IO_ERROR|"
+              r"(?:rc|returncode|return code|exit code)\s*[:=]?\s*-?\d+)\b")
+    sep = r"[\s:=\-–—]+"
+    attribution = rf"(?:(?:returned|reported|result|verdict|status){sep})?"
+    label = r"(?:(?:current(?: audit)? (?:result|output)|machine checks?|machine-checked)\s*:\s*)?"
+    historical = re.compile(
+        r"^(?:(?:the )?(?:earlier|previous|historical|old)\b|"
+        r"documentation example\b|example\s*:|see\s)", re.I)
+    denied = re.compile(r"\b(?:do|does|did) not (?:claim|report|run|execute)\b", re.I)
+    absent = re.compile(r"\b(?:had (?:nothing to|no input)|(?:was|is|were) not "
+                        r"(?:executed|run)|not executed)\b", re.I)
+    ambiguous = []
+    claimed = False
+    paragraphs = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        # Markdown separates a quote/fence from its colon-ended introducer
+        # with a blank line. That delimiter does not make the quoted result
+        # ownerless or turn an explicitly old log into a current result.
+        if (paragraphs and paragraphs[-1].rstrip().endswith(":")
+                and re.match(r"\s*(?:>|`{3,}|~{3,})", paragraph)):
+            paragraphs[-1] += "\n" + paragraph
+        else:
+            paragraphs.append(paragraph)
+    for paragraph in paragraphs:
+        # A blockquote is someone else's statement unless explicitly presented
+        # as current output. That latter, unsupported form must not vanish.
+        quoted = [line for line in paragraph.splitlines() if line.lstrip().startswith(">")]
+        if any(re.search(audit, line) for line in quoted) and re.match(
+                r"\s*current\b", paragraph, re.I):
+            ambiguous.append(paragraph)
+        paragraph = "\n".join(line for line in paragraph.splitlines()
+                              if not line.lstrip().startswith(">"))
+        # Decode JSON before Markdown/prose normalization. Each object owns
+        # its fields; values from another object or tool never supply a result.
+        decoder = json.JSONDecoder()
+        spans = []
+        cursor = 0
+        while match := re.search(r"[\[{]", paragraph[cursor:]):
+            start = cursor + match.start()
+            try:
+                value, length = decoder.raw_decode(paragraph[start:])
+            except json.JSONDecodeError:
+                if re.search(r'"program"\s*:', paragraph[start:]) and AUDIT in paragraph[start:]:
+                    ambiguous.append(paragraph[start:])
+                cursor = start + 1
+                continue
+            end = start + length
+            spans.append((start, end))
+            cursor = end
+            # Context belongs to this sentence, not an earlier statement in
+            # the paragraph (possibly about another tool). Keep wrapped JSON
+            # with its introducing sentence, just as for wrapped prose below.
+            prefix = re.split(r";|(?<=[.!?])\s+", paragraph[:start])[-1]
+            prefix = " ".join(prefix.split())
+            if historical.match(prefix) or denied.search(prefix):
+                continue
+            records = value if isinstance(value, list) else [value]
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                program = record.get("program")
+                if not isinstance(program, str) or program not in {AUDIT, AUDIT + ".py"}:
+                    # Nested record containers are not a supported binding.
+                    if any(isinstance(v, (dict, list)) and AUDIT in json.dumps(v)
+                           for v in record.values()):
+                        ambiguous.append(paragraph[start:end])
+                    continue
+                verdict = record.get("verdict")
+                code = record.get("returncode")
+                if (isinstance(verdict, str) and verdict.upper() in {"PASS", "FAIL", "IO_ERROR"}
+                        or isinstance(code, int) and not isinstance(code, bool)):
+                    claimed = True
+                else:
+                    ambiguous.append(paragraph[start:end])
+        for start, end in reversed(spans):
+            paragraph = paragraph[:start] + " " + paragraph[end:]
+        plain = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", paragraph)
+        plain = " ".join(plain.replace("`", "").replace("*", "").split())
+        antecedent = False
+        unresolved_negative = None
+        for clause in re.split(r"[;,]|(?<=[.!?])\s+", plain):
+            clause = clause.strip()
+            mention = re.search(audit, clause)
+            other_tool = re.search(r"\b(?!" + re.escape(AUDIT) + r"\.py\b)[\w.-]+\.py\b", clause)
+            if antecedent and not other_tool and re.match(
+                    rf"^it\s+{attribution}{result}", clause, re.I):
+                claimed = True
+                unresolved_negative = None
+                continue
+            antecedent = False
+            if not mention:
+                continue
+            prefix, suffix = clause[:mention.start()].strip(), clause[mention.end():].strip()
+            if historical.match(prefix or clause) or denied.search(prefix) or absent.search(suffix):
+                continue
+            if re.match(r"^(?:did|does|was|is) not\b", suffix, re.I):
+                antecedent = not other_tool
+                unresolved_negative = clause
+                continue
+            cells = [cell.strip() for cell in clause.strip("|").split("|")]
+            table_claim = any(re.fullmatch(audit, cell) and re.match(rf"^{attribution}{result}", following, re.I)
+                              for cell, following in zip(cells, cells[1:]))
+            forward = re.match(rf"^(?:{sep})?{attribution}{result}", suffix, re.I)
+            reverse = re.match(rf"^{label}{result}{sep}{audit}(?:[.!?]|$)", clause, re.I)
+            if table_claim or reverse or (forward and re.fullmatch(label, prefix, re.I)):
+                claimed = True
+                unresolved_negative = None
+            elif re.search(result, clause, re.I) or re.search(r"\b(?:ran|executed|returned|reported)\b", suffix, re.I):
+                ambiguous.append(clause)
+        if unresolved_negative and not absent.search(plain):
+            ambiguous.append(unresolved_negative)
+    if ambiguous:
+        raise ValueError("AMBIGUOUS_AUDIT_CLAIM: " + repr(ambiguous))
+    return claimed
+
+
 def _citing_records() -> list[Path]:
-    return [md for md in _all_results() if AUDIT in _text(md)]
+    records = []
+    for md in _all_results():
+        try:
+            if _claims_audit_result(_text(md)):
+                records.append(md)
+        except ValueError as exc:
+            raise AssertionError(f"{md}: {exc}") from exc
+    return records
 
 
 def _rel(md: Path) -> str:
@@ -415,6 +549,73 @@ def test_NEGATIVE_control_a_new_citation_without_input_is_rejected(
     records = _citing_records()
     with pytest.raises(AssertionError, match="new_run/RESULT.md"):
         _assert_no_new(records, _unverifiable_inventory())
+
+
+@pytest.mark.parametrize("claim", [
+    "`{audit}.py` returned FAIL",
+    "| [{audit}.py](audit.py) | **PASS** |",
+    "{audit}.py verdict:\nIO_ERROR",
+    "{audit}.py rc=0",
+    "PASS: {audit}.py",
+])
+def test_result_claim_syntax_does_not_hide_missing_input(
+        tmp_path, monkeypatch, claim):
+    evaluation = tmp_path / "evaluation"
+    md = evaluation / "new_run" / "RESULT.md"
+    md.parent.mkdir(parents=True)
+    md.write_text(claim.format(audit=AUDIT), encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "EVAL", evaluation)
+    assert _citing_records() == [md]
+    with pytest.raises(AssertionError, match="new_run/RESULT.md"):
+        _assert_no_new(_citing_records(), frozenset())
+
+
+@pytest.mark.parametrize("reference", [
+    "Earlier cells lacked triage evidence, so `{audit}.py` had nothing to\nre-run.",
+    "See `{audit}.py` for the audit's input format.",
+    "`{audit}.py` had no input; `another_check.py` PASS.",
+    "The historical tool was `{audit}.py`.\n\nPASS: another_check.py",
+])
+def test_a_tool_reference_is_not_an_audit_result_claim(
+        tmp_path, monkeypatch, reference):
+    evaluation = tmp_path / "evaluation"
+    md = evaluation / "reference_only" / "RESULT.md"
+    md.parent.mkdir(parents=True)
+    text = reference.format(audit=AUDIT)
+    md.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "EVAL", evaluation)
+    assert _citing_records() == []
+    _assert_no_new(_citing_records(), frozenset())
+    # A historical note cannot hide a new explicit result elsewhere in the
+    # same RESULT. The exact evidence requirement must fire again.
+    md.write_text(text + f"\n\nCurrent result: `{AUDIT}.py` PASS.\n",
+                  encoding="utf-8")
+    assert _citing_records() == [md]
+    with pytest.raises(AssertionError, match="reference_only/RESULT.md"):
+        _assert_no_new(_citing_records(), frozenset())
+
+    # The same current-result control in JSON must also own only its sentence:
+    # neither a historical first sentence nor another tool's denial can hide it.
+    result = json.dumps({"program": AUDIT, "verdict": "PASS"})
+    for statement in (
+            text + " Current result: " + result,
+            "We did not run other_check.py. Current audit output:\n```json\n"
+            + result + "\n```"):
+        md.write_text(statement, encoding="utf-8")
+        assert _citing_records() == [md]
+        with pytest.raises(AssertionError, match="reference_only/RESULT.md"):
+            _assert_no_new(_citing_records(), frozenset())
+
+    # A blank line before a Markdown block cannot erase its introducer.
+    md.write_text("The old log said:\n\n```json\n" + result
+                  + "\n```\n\nNo audit was run in this cell.", encoding="utf-8")
+    assert _citing_records() == []
+    _assert_no_new(_citing_records(), frozenset())
+    md.write_text(f"Current audit output:\n\n> {AUDIT}.py PASS", encoding="utf-8")
+    # Current blockquote attribution retains its existing explicit ambiguity
+    # policy. It must refuse, never silently drop the current result claim.
+    with pytest.raises(AssertionError, match="AMBIGUOUS_AUDIT_CLAIM"):
+        _citing_records()
 
 
 def test_NEGATIVE_control_a_forged_old_date_cannot_grandfather_a_fresh_path(

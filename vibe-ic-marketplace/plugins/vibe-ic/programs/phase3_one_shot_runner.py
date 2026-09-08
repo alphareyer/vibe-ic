@@ -11975,6 +11975,72 @@ def _i1958_pick_cts_buffers(
     return buf, root, how
 
 
+def _cts_legal_buffer_selection_tcl(
+        buffers: Sequence[str], root: str) -> str:
+    """Intersect explicit CTS choices with the live resizer/geometry policy.
+
+    Explicit CTS lists can reintroduce masters already excluded by the tap-grid
+    width cap. Liberty's ``dont_use`` property is not the resizer's mutable
+    exclusion set (and non-primary corners can mark every cell dont_use).
+    Capture the resizer's own report, with sentinels proving capture worked.
+    The strict width bound is unchanged: a master exactly at it stays usable.
+    """
+    return r'''
+# CTS choices must obey the live policy after all pre-CTS optimization.
+set _cts_requested_bufs {@BUFFERS@}
+set _cts_requested_root {@ROOT@}
+utl::redirectStringBegin
+utl::report "CTS_POLICY_BEGIN"
+set _cts_policy_rc [catch {report_dont_use} _cts_policy_err]
+utl::report "CTS_POLICY_END"
+set _cts_policy [utl::redirectStringEnd]
+if {$_cts_policy_rc || ![string match *CTS_POLICY_BEGIN* $_cts_policy]
+    || ![string match *CTS_POLICY_END* $_cts_policy]} {
+  error "CTS_CELL_POLICY_UNAVAILABLE: $_cts_policy_err"
+}
+set _cts_excluded [regexp -all -inline {\S+} $_cts_policy]
+set _cts_legal_bufs {}
+set _cts_legal_root ""
+set _cts_widest -1
+set _cts_fallback_root ""
+foreach _cts_name [lsort -unique [concat $_cts_requested_bufs [list $_cts_requested_root]]] {
+  set _cts_master [[ord::get_db] findMaster $_cts_name]
+  set _cts_reason ""
+  if {$_cts_master eq "NULL" || $_cts_master eq ""} {
+    set _cts_reason "physical_master_absent"
+  } elseif {[lsearch -exact $_cts_excluded $_cts_name] >= 0} {
+    set _cts_reason "resizer_dont_use"
+  } elseif {[info exists _wc_run] && $_wc_run > 0
+            && [$_cts_master getWidth] > $_wc_run} {
+    set _cts_reason "exceeds_measured_width_bound"
+  }
+  if {$_cts_reason ne ""} {
+    puts "CTS_CELL_EXCLUDED: $_cts_name $_cts_reason"
+    continue
+  }
+  if {$_cts_name eq $_cts_requested_root} { set _cts_legal_root $_cts_name }
+  if {[lsearch -exact $_cts_requested_bufs $_cts_name] >= 0} {
+    lappend _cts_legal_bufs $_cts_name
+    if {[$_cts_master getWidth] > $_cts_widest} {
+      set _cts_widest [$_cts_master getWidth]
+      set _cts_fallback_root $_cts_name
+    }
+  }
+}
+# Preserve the producer's family order; no new family or electrical limit.
+set _cts_bufs {}
+foreach _cts_name $_cts_requested_bufs {
+  if {[lsearch -exact $_cts_legal_bufs $_cts_name] >= 0} { lappend _cts_bufs $_cts_name }
+}
+if {[llength $_cts_bufs] == 0} { error "CTS_LEGAL_BUFFER_POOL_EMPTY" }
+if {$_cts_legal_root eq ""} {
+  set _cts_legal_root $_cts_fallback_root
+  puts "CTS_ROOT_RESELECTED: $_cts_requested_root -> $_cts_legal_root"
+}
+puts "CTS_LEGAL_SELECTION: buffers=$_cts_bufs root=$_cts_legal_root"
+'''.replace("@BUFFERS@", " ".join(buffers)).replace("@ROOT@", root)
+
+
 # === vibe-ic#2172 — hand CTS the WHOLE buffer family, not one pinned master ===
 # `clock_tree_synthesis -buf_list` accepts a LIST. The flow passed exactly one
 # cell -- whatever `clk_buf` resolved to, either the registry's `clk_buf_cell`
@@ -25347,6 +25413,8 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
     # tool picks a drive strength per level; absent that, the single resolved
     # master, byte-identical to the pre-fix deck.
     _cts_buf_list = " ".join(cts_buf_list) if cts_buf_list else clk_buf
+    _cts_legal_selection = _cts_legal_buffer_selection_tcl(
+        list(cts_buf_list) if cts_buf_list else [clk_buf], clk_buf_root)
     _cts_cluster = ""
     if cts_cluster_size is not None or cts_cluster_diameter is not None:
         _cts_cluster = " -sink_clustering_enable"
@@ -25537,7 +25605,7 @@ if {{[catch {{detailed_placement}} _rt_dp_err]}} {{
   }} else {{ puts "REPAIR_LEGALIZE_OK disp=diamond" }}
 }}
 puts "{_PNR_STAGE_MARKER} cts"
-{_clk_path_snapshot}if {{[catch {{clock_tree_synthesis -buf_list {{{_cts_buf_list}}} -root_buf {clk_buf_root}{_cts_cluster}}} cts_err]}} {{
+{_clk_path_snapshot}{_cts_legal_selection}if {{[catch {{clock_tree_synthesis -buf_list $_cts_bufs -root_buf $_cts_legal_root{_cts_cluster}}} cts_err]}} {{
   puts "CTS_NONFATAL: $cts_err -- continuing without explicit CTS"
 }}
 {_clk_path_sizing}write_def {out_dir_c}/post_cts.def

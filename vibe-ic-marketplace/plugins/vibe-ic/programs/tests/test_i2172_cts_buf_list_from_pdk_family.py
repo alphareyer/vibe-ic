@@ -27,7 +27,10 @@ What these pin, all without OpenROAD and without a PDK on the host:
 """
 import importlib
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 R = importlib.import_module("phase3_one_shot_runner")
 
@@ -156,9 +159,83 @@ def _pnr_tcl(tmp_path, cts_buf_list):
 
 
 def _emitted_buf_list(tcl):
-    m = re.search(r"clock_tree_synthesis -buf_list \{([^}]*)\}", tcl)
-    assert m, "no clock_tree_synthesis -buf_list in the emitted deck"
-    return m.group(1).split()
+    # Exercise the emitted selection at the Tcl consumer boundary. Every
+    # declared master is legal in this control, so the whole family survives.
+    start = tcl.index("# CTS choices must obey")
+    end = tcl.index("if {[catch {clock_tree_synthesis", start)
+    selected = _run_selection(tcl[start:end])
+    assert selected.returncode == 0, selected.stderr
+    return re.search(r"ACTUAL_BUFFERS (.*)", selected.stdout)[1].split()
+
+
+def _run_selection(selection, *, excluded=(), widths=None, bound=100):
+    widths = widths or {}
+    prelude = r'''
+namespace eval utl {
+  proc redirectStringBegin {} { set ::captured "" }
+  proc report {s} { append ::captured "$s\n" }
+  proc redirectStringEnd {} { return $::captured }
+}
+proc report_dont_use {} { foreach n $::excluded { utl::report "  $n" } }
+namespace eval ord { proc get_db {} { return DB } }
+proc DB {op name} {
+  if {$op ne "findMaster"} { error "unexpected DB operation $op" }
+  if {$name eq "missing"} { return NULL }
+  interp alias {} $name {} MASTER $name
+  return $name
+}
+proc MASTER {name op} {
+  if {$op ne "getWidth"} { error "unexpected master operation $op" }
+  if {[dict exists $::widths $name]} { return [dict get $::widths $name] }
+  return 10
+}
+'''
+    setup = ("set ::excluded {" + " ".join(excluded) + "}\n"
+             + "set ::widths {" + " ".join(f"{k} {v}" for k, v in widths.items()) + "}\n"
+             + f"set _wc_run {bound}\n")
+    # tclsh reads stdin interactively and can mask errors; explicitly exit 1.
+    body = prelude + setup + "if {[catch {\n" + selection + r'''
+puts "ACTUAL_BUFFERS $_cts_bufs"
+puts "ACTUAL_ROOT $_cts_legal_root"
+} err]} { puts stderr $err; exit 1 }
+'''
+    return subprocess.run(["tclsh"], input=body, text=True, capture_output=True)
+
+
+@pytest.mark.parametrize("excluded,widths,expected", [
+    (("family_20",), {}, ["family_1", "family_16"]),
+    ((), {"family_20": 120, "family_16": 100}, ["family_1", "family_16"]),
+    ((), {"family_20": 100}, ["family_1", "family_16", "family_20"]),
+])
+def test_actual_cts_choices_obey_policy_and_strict_width_bound(excluded, widths, expected):
+    tcl = R._cts_legal_buffer_selection_tcl(
+        ["family_1", "family_16", "family_20"], "family_16")
+    result = _run_selection(tcl, excluded=excluded, widths=widths)
+    assert result.returncode == 0, result.stderr
+    assert re.search(r"ACTUAL_BUFFERS (.*)", result.stdout)[1].split() == expected
+    assert "ACTUAL_ROOT family_16" in result.stdout
+
+
+def test_excluded_root_uses_widest_admitted_member():
+    tcl = R._cts_legal_buffer_selection_tcl(["family_1", "family_4"], "family_20")
+    result = _run_selection(tcl, excluded=["family_20"], widths={"family_4": 40})
+    assert result.returncode == 0, result.stderr
+    assert "ACTUAL_ROOT family_4" in result.stdout
+
+
+def test_empty_legal_pool_refuses_before_cts():
+    tcl = R._cts_legal_buffer_selection_tcl(["family_1"], "family_1")
+    result = _run_selection(tcl, excluded=["family_1"])
+    assert result.returncode == 1
+    assert "CTS_LEGAL_BUFFER_POOL_EMPTY" in result.stderr
+
+
+def test_missing_physical_master_cannot_be_selected():
+    tcl = R._cts_legal_buffer_selection_tcl(["missing", "family_1"], "missing")
+    result = _run_selection(tcl)
+    assert result.returncode == 0, result.stderr
+    assert "ACTUAL_BUFFERS family_1" in result.stdout
+    assert "ACTUAL_ROOT family_1" in result.stdout
 
 
 def test_emitted_deck_carries_every_derived_master(tmp_path):

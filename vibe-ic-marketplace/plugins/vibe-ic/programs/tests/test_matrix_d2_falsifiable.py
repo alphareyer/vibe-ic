@@ -618,11 +618,22 @@ def _f_expert_answer_refused(p: Path) -> None:
     present and is not `{"expectations": [...]}` is a REFUSAL, never a wait:
     the agent did answer, and the answer could not be read. Absence is the
     wait; presence-in-a-shape-nobody-reads is the defect. So the fixture has to
-    write an answer, and has to write it wrong."""
+    write an answer, and has to write it wrong.
+
+    D1 now reads the producer receipt with --check-report; it must not run the
+    expert track during audit. Produce that receipt normally over a measured
+    layer root, so the reader refuses a real schema rejection, not a missing
+    report masquerading as the content defect described above."""
+    import phase1_expert_parse_track as track
+
+    _w(p, "input/docs/spec.md", "The block accepts a clock input named clk.\n")
+    _w(p, "phase1/generated_docs/L9_INTERFACE.json",
+       {"doc_id": "L9", "top_ports": ["clk"]})
     _w(p, "reports/audit/phase1/expert_parse_track_pack/"
           "l_doc_expectations.json",
        {"verdict": "gaps", "complete": False,
         "notes": ["an expert schema this consumer does not read"]})
+    assert track.main([str(p)]) == 1
 
 
 def _f_a0_skipped(p: Path) -> None:
@@ -798,6 +809,30 @@ def _f_hold_corner_contradicted(p: Path) -> None:
        "read_verilog top_pnr.v\n"
        "link_design top\n"
        "report_checks -path_delay min -digits 4\n")
+
+
+def _f_sta_architectural_residual(p: Path) -> None:
+    """Distributed setup delay exceeds its removable physical delay bound.
+
+    Eight equal logic arcs avoid the dominant-arc/drive-limited category.
+    Zero clock skew and one 0.50 ns buffer cannot repair -2.00 ns slack.
+    The neutral post-route report therefore carries a 1.50 ns architectural
+    residual. No tool output or historical design evidence is being certified.
+    """
+    arcs = "\n".join(
+        f"  1.00  {i + 1:.2f} ^ logic{i}/Y (cell__and2_1)"
+        for i in range(8))
+    _w(p, "phase3/stage3/sta/sta_mcorner_ocv.rpt",
+       "=== SETUP corner: process=SS liberty=lib_ss ===\n"
+       "STA_BASIS: POST_ROUTE_SPEF\n"
+       "Startpoint: launch\nEndpoint: capture\n"
+       "Path Group: clk\nPath Type: max\n\n"
+       "  Delay Time Description\n"
+       "  0.00  0.00 clock network delay (propagated)\n"
+       + arcs + "\n"
+       "  0.50  8.50 ^ removable/Y (cell__buf_1)\n"
+       "  0.00 10.00 clock network delay (propagated)\n"
+       "       -2.00 slack (VIOLATED)\n")
 
 
 #: The promotion marker, the repair transcript's claim, and the sign-off
@@ -2303,6 +2338,7 @@ FIXTURES: Dict[str, Callable[[Path], None]] = {
     "PNR_BAD": _f_pnr_bad,
     "PNR_TCL_HOLD_ONLY": _f_pnr_tcl_hold_only,
     "HOLD_CORNER_CONTRADICTED": _f_hold_corner_contradicted,
+    "STA_ARCHITECTURAL_RESIDUAL": _f_sta_architectural_residual,
     "DRV_PROMOTION_CONTRADICTED": _f_drv_promotion_contradicted,
     "ASSUMED_CLOCK_UNDISCLOSED": _f_assumed_clock_undisclosed,
     "CLOCK_TARGET_RECORDS_DISAGREE": _f_clock_target_records_disagree,
@@ -2400,7 +2436,9 @@ CLAUSE_FIXTURE: Dict[Tuple[str, str], str] = {
     # DISCLOSED_INCOMPLETE and left the FAIL arm unproven, so it is proven
     # here, against the condition that actually is a defect: an answer that
     # exists and cannot be read.
-    ("D1", "phase1_expert_parse_track ."): "EXPERT_ANSWER_REFUSED",
+    ("D1", "phase1_expert_parse_track . --check-report"): "EXPERT_ANSWER_REFUSED",
+    # A missing post-route report is unmeasured, not the residual FAIL arm.
+    ("23", "sta_architectural_residual_check ."): "STA_ARCHITECTURAL_RESIDUAL",
     # Step 1.6x (v1.11.15) — its single blocking clause answers
     # NOT_APPLICABLE on EMPTY and banks a PASS, so nothing proved its FAIL
     # reachable and the cell was red on main from the version it arrived in.
@@ -3422,6 +3460,63 @@ def _tier(project: Path, command: str) -> Tuple[str, str]:
     _prepare_report_dirs(project, command)
     passed, out = FCC._check_program_exit_zero(project, command)
     return _classify(passed, out), out
+
+
+def test_d2_sta_residual_fixture_reddens_only_beyond_the_physical_bound(
+        tmp_path, _gate_timeout):
+    import sta_architectural_residual_check as residual
+
+    command = "sta_architectural_residual_check ."
+    fixture = CLAUSE_FIXTURE[("23", command)]
+    project = _build_project(tmp_path, "residual", fixture)
+    tier, out = _tier(project, command)
+    assert tier == RED, out
+    record = residual.check(project)
+    assert record["verdict"] == "FAIL"
+    assert record["architectural_paths"][0]["residual_ns"] == pytest.approx(1.50)
+    sta = project / "phase3/stage3/sta/sta_mcorner_ocv.rpt"
+    sta.write_text(sta.read_text().replace("-2.00 slack", "-0.25 slack"))
+    tier, out = _tier(project, command)
+    assert tier == PASS, out
+    record = residual.check(project)
+    assert record["verdict"] == "PASS" and not record["architectural_paths"]
+    empty = _build_project(tmp_path, "empty-residual", "EMPTY")
+    tier, out = _tier(empty, command)
+    assert tier == INCOMPLETE_TIER, out
+
+
+def test_d2_expert_fixture_consumes_the_producers_content_refusal_read_only(
+        tmp_path, _gate_timeout):
+    import phase1_expert_parse_track as track
+
+    command = "phase1_expert_parse_track . --check-report"
+    project = _build_project(tmp_path, "expert-refusal",
+                             CLAUSE_FIXTURE[("D1", command)])
+    report = project / "reports/audit/phase1/expert_parse_track.json"
+    record = json.loads(report.read_text())
+    assert record["ai_subtrack"]["status"] == track.AI_SCHEMA_MISMATCH
+    assert record["producer"]["returncode"] == 1
+    assert record["phase1_root"]["status"] == "OK"
+
+    def snapshot():
+        return {str(path.relative_to(project)): path.read_bytes()
+                for path in project.rglob("*") if path.is_file()}
+
+    before = snapshot()
+    tier, out = _tier(project, command)
+    assert tier == RED and "read-only report check" in out, out
+    assert snapshot() == before
+    answer = report.parent / "expert_parse_track_pack/l_doc_expectations.json"
+    _w(project, str(answer.relative_to(project)), {"expectations": [{
+        "id": "clock-is-named", "layer": "L9_INTERFACE",
+        "field_path": "top_ports", "requirement": "name the input clock",
+        "expected_tokens": ["clk"], "evidence": ["the input names clk"],
+    }]})
+    assert track.main([str(project)]) == 0
+    before = snapshot()
+    tier, out = _tier(project, command)
+    assert tier == PASS and "read-only report check" in out, out
+    assert snapshot() == before
 
 
 def test_d2_the_two_newly_wired_blocking_clauses_redden_and_only_on_content(
