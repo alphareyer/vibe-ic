@@ -46,6 +46,36 @@ could still recover, and REFUSE when the violation exceeds that bound.
 perfectly, and the path is still `residual` ns over its budget.  What remains
 is delay on LOGIC arcs, which placement cannot remove and re-authoring can.
 
+WHOSE DIE THE SHORTFALL WAS MEASURED ON (vibe-ic#2160)
+======================================================
+A setup shortfall is a statement about a design AND about the die it was placed
+on.  MEASURED on subservient x gf180mcuD and recorded in
+`phase3_one_shot_runner._pdn_em_width_floor`'s own docstring: an EM strap width
+derived from the I_total CONSERVATION BOUND demanded Metal4 20.77 um where the
+per-segment MEASUREMENT needed 5.62 um (3.70x).  Seating those straps grew the
+die 227x227 -> 416x416 um, which dropped core utilisation to 17 % against an
+L9-DECLARED 50 %, which in turn "inflated CTS insertion delay to 6.47 ns, itself
+40 % of the register-to-output-port setup budget".  That runner's own words for
+it are "Two sign-off failures, one over-sized number" -- the setup shortfall
+(#2160) and the die-level density rules (#2148) are ONE cause, not two.
+
+The owner ruling of 2026-09-02 already fixed the sizing: when the run has
+measured the distribution, the measurement supersedes the bound.  But the
+measurement does not exist on a first pass -- `_pdn_em_width_floor` returns None
+and the bound is used -- so a first-pass run is placed on the inflated die, and
+NOTHING in its sign-off says so.  A reader of that run sees a setup shortfall and
+a density failure and concludes the design cannot meet its DECLARED period.  The
+honest statement is narrower: it did not meet the period ON A DIE SIZED FROM AN
+UNMEASURED BOUND.
+
+So when this gate reads a violating sign-off path AND the run's own
+`pdn_em_sizing.json` says its strap widths came from the bound rather than from a
+measurement, it NAMES that in the reason.  It does NOT change the verdict, the
+route or the exit code: which remedy the shortfall needs is still decided by the
+residual arithmetic alone.  This is disclosure, not a new refusal -- the shortfall
+is still a shortfall, nothing is relaxed, no period is re-declared, and a run
+whose die WAS sized from a measurement reads exactly as it did before.
+
 ONE-SIDED, DELIBERATELY
 =======================
 Firing proves the violation is architectural.  NOT firing proves NOTHING —
@@ -280,6 +310,62 @@ def _candidates(project: Path) -> List[Path]:
     return seen
 
 
+#: The sizing bases `phase3_one_shot_runner._pdn_em_width_floor` records. Only
+#: the bound is disclosed here: a measured basis is the preferred one and needs
+#: no caveat. Spelled out rather than pattern-matched so a renamed basis reads as
+#: "not the bound" and this disclosure goes quiet, which is the safe direction --
+#: it can then under-disclose, never mis-disclose.
+_EM_BOUND_BASIS = "i_total_conservation_bound"
+_EM_MEASURED_BASIS = "measured_max_segment"
+
+#: Where the runner writes the record. One path, read-only.
+_EM_SIZING_REL = "reports/phase3/pdn_em_sizing.json"
+
+
+def die_sizing_basis(project: Path) -> Optional[Dict[str, object]]:
+    """This run's EM strap-sizing basis, or None when it cannot be read.
+
+    None is returned for every uncertainty -- absent file, unreadable JSON, no
+    `sizing_basis` key (a record written before the field existed), or a basis
+    this version does not recognise. None means "no caveat is added", which
+    leaves the verdict exactly as it was; it never means "the die was measured".
+    """
+    path = project / _EM_SIZING_REL
+    try:
+        doc = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    basis = doc.get("sizing_basis")
+    if basis not in (_EM_BOUND_BASIS, _EM_MEASURED_BASIS):
+        return None
+    return {
+        "sizing_basis": basis,
+        "from_unmeasured_bound": basis == _EM_BOUND_BASIS,
+        "bound_over_measured_x": doc.get("bound_over_measured_x"),
+        "i_total_A": doc.get("i_total_A"),
+        "max_segment_current_A": doc.get("max_segment_current_A"),
+        "record": _EM_SIZING_REL,
+    }
+
+
+def _die_sizing_sentence(info: Dict[str, object]) -> str:
+    """The caveat, naming the record so a reader can check it."""
+    return (
+        " THE DIE THIS WAS MEASURED ON WAS SIZED FROM AN UNMEASURED EM BOUND: "
+        f"{info['record']} says sizing_basis={info['sizing_basis']!r}, the "
+        "I_total conservation fallback used when no per-segment measurement "
+        "exists. That bound is generous by construction, the straps it demands "
+        "inflate the die, and a lower core utilisation lengthens the clock tree "
+        "the insertion delay on this path comes from. So this shortfall is NOT "
+        "established as the design's floor at its DECLARED period — re-running "
+        "the project so the EM measurement supersedes the bound (owner ruling "
+        "2026-09-02) changes the die this path was placed on. Nothing here is "
+        "relaxed or re-declared: the shortfall stands, and its BASIS is now "
+        "stated with it.")
+
+
 def check(project: Path) -> Dict[str, object]:
     rep: Dict[str, object] = {
         "program": "sta_architectural_residual_check",
@@ -332,13 +418,21 @@ def check(project: Path) -> Dict[str, object]:
 
     arch = [p for p in rep["paths"] if p["category"] == "architectural"]
     rep["architectural_paths"] = arch
+    # DISCLOSURE, NOT A VERDICT. Attached to whichever verdict follows, and only
+    # when this run actually read a violating path -- a clean design has no
+    # shortfall to qualify, so it must read exactly as it did before.
+    sizing = die_sizing_basis(project) if rep["paths"] else None
+    rep["die_sizing_basis"] = sizing
+    caveat = (_die_sizing_sentence(sizing)
+              if sizing and sizing["from_unmeasured_bound"] else "")
     if not arch:
         n_viol = len(rep["paths"])
         rep["verdict"] = "PASS"
         rep["reason"] = (
             f"no post-route sign-off path is PROVEN architectural "
             f"({n_viol} violating path(s) read). This is one-sided: it does "
-            f"not certify that any remaining violation is physical.")
+            f"not certify that any remaining violation is physical."
+            + caveat)
         rep["reasons"] = [rep["reason"]]
         return rep
 
@@ -358,7 +452,8 @@ def check(project: Path) -> Dict[str, object]:
         f"ROUTED TO step {ROUTE_STEP} ({ROUTE_STEP_NAME}, skill "
         f"'{ROUTE_SKILL}'): this is a re-authoring request, not a closure "
         f"problem. The residual is NAMED, never waived — do not answer it by "
-        f"re-declaring the period, dropping the corner or moving the target.")
+        f"re-declaring the period, dropping the corner or moving the target."
+        + caveat)
     rep["reasons"] = [rep["reason"]] + [
         (f"corner '{corner_name(p)}' {p['startpoint']} -> {p['endpoint']}: "
          f"slack {p['slack_ns']} ns, PRUB "
