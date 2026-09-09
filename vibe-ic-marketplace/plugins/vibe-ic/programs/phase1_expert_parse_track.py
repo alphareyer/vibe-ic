@@ -482,6 +482,14 @@ RULE_AI_WITHDRAWN = "EXPERT_TRACK_AI_EXPECTATION_WITHDRAWN"
 # marker that says only that something was deleted.
 RULE_AI_WITHDRAWN_NO_REASON = "EXPERT_TRACK_AI_EXPECTATION_WITHDRAWN_WITHOUT_REASON"
 
+# A decision table sitting beside the pack that this artefact's own stamp says
+# cannot describe it (#2150 item 6). REPORTED, and the table is NOT applied.
+# The refusal is `about: "track"` because nothing about the design is in
+# question: a table computed on another Phase-1 root makes claims about a
+# DIFFERENT set of layer documents, and a wrong re-pointing reads exactly like
+# a right one, so applying it hopefully is how a table stops being evidence.
+RULE_DECISION_TABLE_NOT_APPLICABLE = "EXPERT_TRACK_DECISION_TABLE_NOT_APPLICABLE"
+
 #: #2164. The retrieval query was built from a design input this reader could
 #: not open. About the TRACK, never about the design: a pack assembled from
 #: nothing says nothing about the chip, and the number derived from it is not a
@@ -2792,7 +2800,56 @@ def evaluate(project: Path) -> Dict[str, Any]:
     ai = ai_subtrack(project, prompt, out_dir, ic_class=ic_class,
                      class_availability=availability)
 
+    # #2150 item 6 — A DECISION TABLE IS DATED BEFORE IT IS USED.
+    # A table says, per expectation, where a fact belongs: re-point it to this
+    # layer and this field, or withdraw it for this reason. It is authored by
+    # reading ONE Phase-1 root and then applied to ANOTHER, and nothing
+    # recorded which root it was computed on. MEASURED, applying #2132's 30-row
+    # table to the opentitan_aes artefact: two OWNER cells name a leaf that
+    # artefact does not declare, and three name fields introduced by work that
+    # landed AFTER the emitter that wrote those layers — fields that could not
+    # exist in it. None of that is a defect in the table; it is a table
+    # computed on a newer root judging an older artefact. So the table carries
+    # a stamp, and one whose stamp says it cannot describe this artefact is
+    # refused BY NAME rather than applied hopefully.
+    decision_table: Dict[str, Any] = {"present": False}
+    try:
+        import expert_decision_table as _dt
+        tpath = out_dir / "decision_table.json"
+        if tpath.is_file():
+            v = _dt.load(project, tpath)
+            decision_table = {
+                "present": True, "path": str(tpath), "state": v["state"],
+                "reason": v["reason"], "rows": v.get("rows", 0),
+                "artefact_stamp": v.get("artefact_stamp"),
+                "table_stamp": v.get("table_stamp"),
+                "applied": v["state"] in _dt.APPLICABLE,
+            }
+        else:
+            decision_table["reason"] = ("no decision table beside the pack — "
+                                        "nothing to date, and nothing applied")
+    except Exception as exc:  # noqa: BLE001 — a table that cannot be READ is
+        # reported, never raised: the deterministic half of this track is
+        # unaffected by it, so the run is not void, and an exception here would
+        # take the whole report down with a file nothing else depends on.
+        decision_table = {"present": False,
+                          "reason": f"{exc.__class__.__name__}: {exc}"}
+
     findings: List[Dict[str, Any]] = []
+    if decision_table.get("present") and not decision_table.get("applied"):
+        findings.append({
+            "severity": "REVIEW",
+            "about": "track",
+            "rule": RULE_DECISION_TABLE_NOT_APPLICABLE,
+            "message": (
+                f"A decision table is present and is NOT applied: "
+                f"{decision_table['state']} — {decision_table['reason']}. "
+                f"Refused rather than applied hopefully: every OWNER cell in a "
+                f"table computed on another Phase-1 root is a claim about "
+                f"fields that may not exist here, and a wrong re-pointing "
+                f"reads exactly like a right one. Table: "
+                f"{decision_table.get('path')}."),
+        })
     # #2164, FIRST, because everything after it is derived from the query this
     # names. Reported rather than raised: the deterministic half of the track
     # reads the L documents and is unaffected, so the run is not void — but the
@@ -3479,6 +3536,10 @@ def evaluate(project: Path) -> Dict[str, Any]:
             # it would make a refused withdrawal look like an honoured one.
             "withdrawn": len([c for c in converged if c["withdrawn_reason"]]),
         },
+        # #2150 item 6 — whether a decision table was present, and whether it
+        # was applied. An absent key would make "there was no table" and "the
+        # table was refused" the same reading.
+        "decision_table": decision_table,
         "findings": findings,
         # #312's own rule turned on this landing's scope decision. The
         # deterministic rule below has a real payload and REPORTS every

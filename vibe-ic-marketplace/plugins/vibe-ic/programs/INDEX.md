@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1302
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1302)
+- **Total programs (excluding helpers / shims):** 1303
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1303)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1293 |
+| `any` | 1294 |
 
 ## Alphabetical listing
 
@@ -379,6 +379,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `every_declared_step_reaches_the_evaluator_check` | any | — | A step the evaluator never receives cannot fail — and never appears. |
 | `every_required_metric_key_has_a_producer` | any | — | an axis proves from a metric somebody actually emits. |
 | `evidence_citation_resolves_check` | any | — | a cited evidence artifact must EXIST. |
+| `expert_decision_table` | any | — | a decision table is DATED, and a stale one is refused. |
 | `explicit_argument_outranks_the_environment_pointer` | any | — | whatever a gate scanned, it says so. |
 | `explicit_argument_outranks_the_environment_pointer_census` | any | — | An environment pointer that overrules a location the caller NAMED. |
 | `extraction_coverage_check` | any | Wave 23 | gate (LL-38) verifies input/docs/ extraction coverage in generated_docs/L*.json. |
@@ -1374,7 +1375,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1293 programs)
+### `any` (1294 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1725,6 +1726,7 @@ _(no programs in this group)_
 - `every_declared_step_reaches_the_evaluator_check` — A step the evaluator never receives cannot fail — and never appears.
 - `every_required_metric_key_has_a_producer` — an axis proves from a metric somebody actually emits.
 - `evidence_citation_resolves_check` — a cited evidence artifact must EXIST.
+- `expert_decision_table` — a decision table is DATED, and a stale one is refused.
 - `explicit_argument_outranks_the_environment_pointer` — whatever a gate scanned, it says so.
 - `explicit_argument_outranks_the_environment_pointer_census` — An environment pointer that overrules a location the caller NAMED.
 - `extraction_coverage_check` — gate (LL-38) verifies input/docs/ extraction coverage in generated_docs/L*.json.  _[Wave 23]_
