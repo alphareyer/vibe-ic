@@ -113,7 +113,7 @@ import tempfile
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import _path_layout as _pl
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _rtl_include_hub as _hub  # shared include-hub aggregator predicate
@@ -284,6 +284,164 @@ def _preflight_refusal(name: str):
     def _mk(detail: str, extras: Dict[str, Any]) -> StepResult:
         return StepResult(name, _spf.REFUSAL_STATUS, 0.0, detail, extras=extras)
     return _mk
+
+
+# ─── vibe-ic#2225 ──────────────────────────────────────────────────────────
+# THE REPAIR/RETRY LOOP RE-DISPATCHES ITS PRODUCER BUT NOT THE GATES THAT READ IT
+#
+# MEASURED, on this runner's own `reports/orchestrator/phase2_one_shot.json`
+# (ve1903 final7 Prob002_m2014_q4i, and re-measured against the live pre-flight
+# on a tree built for it):
+#
+#     rtl_gen        BLOCKED   REFUSED TO RUN: phase1/extraction_patterns.json
+#     rtl_validate   BLOCKED   REFUSED TO RUN: phase2/stage1/rtl/*.sv OR *.v
+#                              (owed by step 1, read by step 2)
+#     sim            BLOCKED   REFUSED TO RUN: ... (owed by step 1, read by 4)
+#     reference_tb   BLOCKED   rtl/ missing
+#     rtl_repair_retry_iter    RTL_REPAIR_RETRY 1/3
+#     rtl_gen        PASS      deterministic emit -> phase2/stage1/rtl/ EXISTS
+#
+# `rtl_validate` and `sim` refused because step 1 had produced nothing AT THAT
+# MOMENT. The retry loop then re-ran step 1 and it PASSED. Nothing re-measured
+# the two sites, so their `BLOCKED / REQUIRED_INPUT_ABSENT` rows stayed as the
+# run's answer for flow steps 2, 3 and 4 — rows that describe a tree which no
+# longer exists. Re-running the pre-flight on the post-retry tree returns READY
+# for both, and `flow_dashboard_data._runner_verdict_overrides` — which already
+# takes a site's FINAL record, precisely because "the RTL repair/retry loop
+# re-dispatches rtl_gen, whose records read BLOCKED then PASS" — publishes the
+# stale refusal as step 4's status.
+#
+# ONE CAUSE, not one per starved site: the loop re-dispatches its PRODUCER
+# outside `_spf.gate` and no site that was starved BY that producer is revisited.
+#
+# WHAT IS AND IS NOT DONE HERE
+#   * The stale row KEEPS ITS STATUS. Relabelling a refusal would be the same
+#     defect pointing the other way; it is annotated `superseded_by` and a NEW
+#     record is appended, which is what makes the site's FINAL record current.
+#   * `_aggregate_verdict` is NOT touched. A superseded BLOCKED still counts as
+#     FAIL exactly as it does today for `rtl_gen`; making it green would be a
+#     relaxation nobody asked for, and a run that had to repair a starved
+#     producer is not a clean run.
+#   * WHICH sites are revisited is a LOOKUP, not a new policy: the refusal row
+#     carries `absent_inputs[*].from` — the flow step the absence is charged to
+#     — and `step_preflight.RUNNER_PLANS` says which flow steps the re-dispatched
+#     site executes. A site is revisited iff its CURRENT last record is a
+#     refusal charged to a step in that span. So a site that is SKIPPED-BY-ENTRY,
+#     SKIPPED-BY-EXIT, PASS or SKIP is never resurrected, and a site that the
+#     re-dispatch repairs stops matching and is not revisited again.
+#   * Only the site's GATED head is replayed — the dispatch that produced the
+#     refusal and the one `_spf.gate` ledgers. The ungated followers of a span
+#     recorded no refusal; replaying them would re-run simulators over a path
+#     that already has an honest verdict.
+
+#: The finding on a superseded refusal that this runner could not re-measure.
+SUPERSEDED_UNMEASURED = "SUPERSEDED_UNMEASURED"
+
+
+def _refusal_producers(sr: StepResult) -> set:
+    """Flow steps a pre-flight refusal charges its absences to. Empty for any
+    row that is not a `REQUIRED_INPUT_ABSENT` refusal — including a BLOCKED row
+    a STEP emitted for its own reasons, which this must never claim to know
+    how to repair."""
+    ex = getattr(sr, "extras", None) or {}
+    if ex.get("finding") != _spf.REFUSAL_FINDING:
+        return set()
+    return {str(i.get("from")) for i in (ex.get("absent_inputs") or [])}
+
+
+def _last_record_per_site(plan: List[StepResult],
+                          sites: Sequence[str]) -> Dict[str, StepResult]:
+    """The LAST row each named site left in `plan`. `last`, not `first`, is the
+    whole point: an earlier refusal that a later dispatch already replaced is
+    not this run's answer for that site."""
+    wanted = set(sites)
+    out: Dict[str, StepResult] = {}
+    for sr in plan:
+        if sr.name in wanted:
+            out[sr.name] = sr
+    return out
+
+
+def _sites_starved_by(plan: List[StepResult], producer_span: Sequence[str],
+                      runner: str = "design_one_shot_runner") -> List[str]:
+    """Declared sites whose CURRENT last record is a refusal charged to a step
+    inside `producer_span`, in this runner's own dispatch order."""
+    rp = getattr(_spf, "RUNNER_PLANS", {}).get(runner)
+    if rp is None:
+        return []
+    names = [n for n, _s in rp.sites]
+    last = _last_record_per_site(plan, names)
+    span = {str(s) for s in producer_span}
+    return [n for n in names
+            if n in last
+            and getattr(last[n], "status", "") == _spf.REFUSAL_STATUS
+            and (_refusal_producers(last[n]) & span)]
+
+
+def _redispatch_starved_sites(
+        plan: List[StepResult], producer_site: str,
+        redispatch: Dict[str, Callable[[], List[StepResult]]],
+        runner: str = "design_one_shot_runner") -> List[StepResult]:
+    """Re-dispatch every site the just-re-run `producer_site` had starved.
+
+    Appends to `plan` and returns the NEW rows. Adds NO retry budget: it is
+    driven entirely by which sites still carry a refusal charged to this
+    producer, so a site the re-dispatch repairs drops out on its own and a site
+    it cannot repair records the CURRENT refusal rather than the stale one.
+    """
+    rp = getattr(_spf, "RUNNER_PLANS", {}).get(runner)
+    span = dict(rp.sites).get(producer_site, ()) if rp is not None else ()
+    if not span:
+        return []
+    # A producer that was itself refused, or deliberately not dispatched, has
+    # produced nothing — there is no new tree for a starved reader to be
+    # re-measured against, and claiming otherwise would manufacture a dispatch.
+    own = _last_record_per_site(plan, [producer_site]).get(producer_site)
+    if own is None or own.status in (_spf.REFUSAL_STATUS, "SKIPPED-BY-ENTRY",
+                                     "SKIPPED-BY-EXIT"):
+        return []
+    fresh: List[StepResult] = []
+    for site in _sites_starved_by(plan, span, runner):
+        if site == producer_site:
+            continue
+        stale = _last_record_per_site(plan, [site])[site]
+        thunk = redispatch.get(site)
+        if thunk is None:
+            # NOT a silent drop and NOT a green row: `_spf.REFUSAL_STATUS` is
+            # already "nothing is known", which is exactly true here, and it is
+            # already classified in `_aggregate_verdict`. The DETAIL is what
+            # changes — it names the supersession instead of describing a tree
+            # that is gone.
+            rows: List[StepResult] = [StepResult(
+                site, _spf.REFUSAL_STATUS, 0.0,
+                (f"SUPERSEDED AND UNMEASURED: this site refused for want of "
+                 f"input(s) owed by flow step(s) {', '.join(sorted(span))}, "
+                 f"which the RTL repair/retry loop has since re-dispatched at "
+                 f"site {producer_site!r} — so the earlier refusal describes a "
+                 f"tree that no longer exists. This runner registered no "
+                 f"re-dispatch for {site!r}, so the site was NOT re-measured "
+                 f"and nothing is known about it now."),
+                extras={"finding": SUPERSEDED_UNMEASURED,
+                        "producer_site": producer_site,
+                        "producer_steps": sorted(span),
+                        "superseded_detail": stale.detail})]
+        else:
+            got = thunk()
+            rows = list(got) if isinstance(got, (list, tuple)) else [got]
+        for r in rows:
+            if isinstance(getattr(r, "extras", None), dict):
+                r.extras["redispatched_after"] = producer_site
+        if isinstance(getattr(stale, "extras", None), dict):
+            # The status is UNCHANGED. This says the row was answered, not that
+            # it was wrong to have been recorded.
+            stale.extras["superseded_by"] = {
+                "producer_site": producer_site,
+                "producer_steps": sorted(span),
+                "statuses": [getattr(r, "status", "") for r in rows],
+            }
+        plan.extend(rows)
+        fresh.extend(rows)
+    return fresh
 
 
 # v1.6.181 (#72 P1-4) — hint-driven RTL repair remediation policy.
@@ -21530,6 +21688,26 @@ def main() -> int:
         return 3
 
     plan: List[StepResult] = []
+
+    # vibe-ic#2225 — HOW to repeat a pre-flighted dispatch, registered BY the
+    # dispatch itself so the two can never describe different calls. The RTL
+    # repair/retry loop re-dispatches its producer; a site that refused because
+    # that producer had produced nothing is replayed from here, against the tree
+    # the retry actually left behind.
+    _redispatch: Dict[str, Callable[[], List[StepResult]]] = {}
+
+    def _dispatch_site(site: str,
+                       thunk: Callable[[], List[StepResult]]
+                       ) -> List[StepResult]:
+        """Run `thunk` now, append its rows, and register it as `site`'s
+        re-dispatch. Registration is a side effect of dispatching, so a site
+        that produced a refusal row is by construction replayable."""
+        _redispatch[site] = thunk
+        rows = thunk()
+        rows = list(rows) if isinstance(rows, (list, tuple)) else [rows]
+        plan.extend(rows)
+        return rows
+
     if _entry_staged is not None:
         # Record it: an input-staging step that ran but appears nowhere would
         # make the RTL's provenance unexplainable in the run's own report.
@@ -21661,10 +21839,10 @@ def main() -> int:
     elif _after_exit("rtl_validate"):
         plan.append(_exit_sentinel("rtl_validate"))
     else:
-        plan.append(_spf.gate(
+        _dispatch_site("rtl_validate", lambda: [_spf.gate(
             project, "design_one_shot_runner", "rtl_validate",
             _preflight_refusal("rtl_validate"),
-            step_determinism_gates, project, args.top_name))
+            step_determinism_gates, project, args.top_name)])
 
     # vibe-ic#2103 — RUN `lesson_consumption_check` and put its verdict in the
     # ledger. Until this dispatch the gate was author-invoked only: the WAIVE
@@ -21721,10 +21899,10 @@ def main() -> int:
         # professional cocotb path below) sits past the declared exit.
         plan.append(_exit_sentinel("sim"))
     else:
-        plan.append(_spf.gate(
+        _dispatch_site("sim", lambda: [_spf.gate(
             project, "design_one_shot_runner", "sim",
             _preflight_refusal("sim"),
-            step_full_stack_tb_gen, project, args.top_name))
+            step_full_stack_tb_gen, project, args.top_name)])
         # ORGANIC #797 — wire the testbench_gen PRODUCER (it was never called by any
         # one-shot runner, so L10 `functional_vector` cases got NO Step-4 evidence).
         # Runs AFTER full_stack_tb_gen (RTL/L9 stable) and BEFORE reference_tb /
@@ -21959,6 +22137,12 @@ def main() -> int:
         # Repair body: re-run RTL gen (idempotent if already current).
         plan.append(step_rtl_gen(project, ic_class))
         new_rtl_hash = _rtl_dir_sha256(project)
+        # vibe-ic#2225 — the gates this producer had starved. AFTER the digest
+        # above: that digest is the loop's byte-identical-retry
+        # guard and must measure the PRODUCER. A re-dispatched
+        # gate that writes into `rtl/` would otherwise read as
+        # the emitter having made progress.
+        _redispatch_starved_sites(plan, "rtl_gen", _redispatch)
         if (new_rtl_hash is not None and last_rtl_hash is not None
                 and new_rtl_hash == last_rtl_hash):
             hint = _rtl_repair_inert_hint(project)
@@ -21978,6 +22162,12 @@ def main() -> int:
                 if remediated:
                     plan.append(step_rtl_gen(project, ic_class))
                     rehashed = _rtl_dir_sha256(project)
+                    # vibe-ic#2225 — the gates this producer had starved. AFTER the digest
+                    # above: that digest is the loop's byte-identical-retry
+                    # guard and must measure the PRODUCER. A re-dispatched
+                    # gate that writes into `rtl/` would otherwise read as
+                    # the emitter having made progress.
+                    _redispatch_starved_sites(plan, "rtl_gen", _redispatch)
                     if (rehashed is not None
                             and rehashed != new_rtl_hash):
                         last_rtl_hash = rehashed
@@ -22096,6 +22286,12 @@ def main() -> int:
                                    f"{args.max_rtl_repair_retries}"))
             plan.append(step_rtl_gen(project, ic_class))
             new_rtl_hash = _rtl_dir_sha256(project)
+            # vibe-ic#2225 — the gates this producer had starved. AFTER the digest
+            # above: that digest is the loop's byte-identical-retry
+            # guard and must measure the PRODUCER. A re-dispatched
+            # gate that writes into `rtl/` would otherwise read as
+            # the emitter having made progress.
+            _redispatch_starved_sites(plan, "rtl_gen", _redispatch)
             if (new_rtl_hash is not None and last_rtl_hash is not None
                     and new_rtl_hash == last_rtl_hash):
                 hint = _rtl_repair_inert_hint(project)
@@ -22115,6 +22311,12 @@ def main() -> int:
                     if remediated:
                         plan.append(step_rtl_gen(project, ic_class))
                         rehashed = _rtl_dir_sha256(project)
+                        # vibe-ic#2225 — the gates this producer had starved. AFTER the digest
+                        # above: that digest is the loop's byte-identical-retry
+                        # guard and must measure the PRODUCER. A re-dispatched
+                        # gate that writes into `rtl/` would otherwise read as
+                        # the emitter having made progress.
+                        _redispatch_starved_sites(plan, "rtl_gen", _redispatch)
                         if (rehashed is not None
                                 and rehashed != new_rtl_hash):
                             last_rtl_hash = rehashed
