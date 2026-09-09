@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for flow_compliance_check.py — the sole Phase 2+3 acceptance gate."""
 from __future__ import annotations
-import json, re, shutil, subprocess, sys, tempfile
+import hashlib, json, re, shutil, subprocess, sys, tempfile
 from pathlib import Path
 import pytest
 
@@ -314,13 +314,52 @@ def _satisfy_p0_ancestry(project: Path) -> Path:
             "expected_tokens": ["L1_DATASHEET"],
         }],
     }))
+    # THE FIFTH TIME THIS HELPER WENT STALE, AND THE FIRST ON THE RECORD'S
+    # SHAPE RATHER THAN ON A MISSING PATH (2026-09-09). v1.19.89 (e6699343b)
+    # changed D1's gate clause from `phase1_expert_parse_track .` — which RAN
+    # the track and therefore wrote this record itself — to
+    # `phase1_expert_parse_track . --check-report`, which READS it and refuses
+    # credit for a missing, malformed or stale one (#2206: an audit must not
+    # consume a pending expert answer and rewrite its own subject). The
+    # producer is wired: `phase1_one_shot_runner._run_expert_track` invokes the
+    # track with `--invoked-by phase1_one_shot_runner`, so a real Phase-1 run
+    # writes a `producer` receipt. This hand-staged tree has to stage one too —
+    # the body below is exactly what the gate declines to manufacture for
+    # itself, so staging it is completing the fixture, not weakening the gate.
+    #
+    # DERIVED FROM THE PRODUCER, NOT COPIED FROM IT. The old body said
+    # `"program": "phase1_expert_parse_track.py"`; the module's own `PROGRAM`
+    # is the stem WITHOUT `.py`, so `--check-report` rejected it at its first
+    # branch ("missing expert-track producer record") and D1 was FAIL. That is
+    # the shape of every previous staleness here — a literal typed beside the
+    # producer instead of read from it — so the identity, the AI status word,
+    # the answer digest and the Phase-1 root digest are all taken from the
+    # module and computed against this tree, and a rename or a re-shape moves
+    # them without anyone remembering to come here.
+    import phase1_expert_parse_track as _track
+    _answer = pack / "l_doc_expectations.json"
     (ra / "expert_parse_track.json").write_text(json.dumps({
-        "program": "phase1_expert_parse_track.py",
+        "program": _track.PROGRAM,
+        "version": _track.VERSION,
         "verdict": "PASS",
         "findings": [],
-        "ai_subtrack": {"status": "CONSUMED"},
+        "phase1_root": _track.phase1_root_identity(project),
+        "ai_subtrack": {
+            "status": _track.AI_CONSUMED,
+            # The digest of the answer staged above. `--check-report` compares
+            # it with the file on disk so a reading cannot be credited against
+            # an answer that has since changed.
+            "answer_sha256": hashlib.sha256(_answer.read_bytes()).hexdigest(),
+        },
+        "execution": {"complete": True, "observed_ai_consumed": 1},
         "ai_convergence": {"consumed": 1},
         "denominator": {"deterministic": 0, "ai": 1, "total": 1},
+        "producer": {
+            "invocation_id": "fixture-0000-0000-0000-000000000000",
+            "invoked_by": "test fixture",
+            "program": _track.PROGRAM,
+            "returncode": 0,
+        },
         "generated_by": "test fixture",
     }))
     # The 19th declared output (#1348). Same reason as the 18th above: the

@@ -941,6 +941,10 @@
           "alternative": "reports/phase3/sta/post_route_signoff_corner.json",
           "path": "reports/phase3/sta/post_route_signoff_corner.json",
           "size_bytes": 391
+        },
+        "reports/phase3/sta/architectural_residual.json": {
+          "status": "UNPROVEN",
+          "note": "2026-09-09 - declared by step 23 in c733c0e06 (vibe-ic#2081) and produced by phase3_one_shot_runner._DECLARED_SIGNOFF_GATES row 'sta_architectural_residual'. MEASURED, not assumed: the path occurs in ZERO of the 18 run roots this manifest lists - the gate program landed 2026-09-08 and every published cell predates it - so no PRODUCED_BY_RUN citation exists to make. Recorded UNPROVEN for exactly the reason step 31's reports/phase3/magic_illegal_overlap.json was (R9, 2026-08-20): declaring an artefact d3 cannot evidence moves the dimension-7 finding to d3 instead of closing it, and UNPROVEN is the true statement of that gap. Re-measure to PRODUCED_BY_RUN at the first published cell that runs step 23 with this gate wired."
         }
       }
     },
