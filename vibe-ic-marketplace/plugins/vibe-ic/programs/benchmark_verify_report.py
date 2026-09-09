@@ -186,17 +186,91 @@ def _is_analog_ic(project: Path) -> bool:
 
     A genuinely pure-digital IC has none of these artefacts and stays N/A —
     that is the positive case and it must keep reporting N/A untouched.
+
+    THE LIST IS READ, NOT COUNTED AS PRESENT (measured 2026-09-10). Presence
+    alone made a fabricated list load-bearing. On the sha256 and subservient
+    corpora — both of whose OWN `L5_ADI_SPEC.json` states
+    `no_analog: true, analog_blocks: [], analog_blocks_detected: false` —
+    `phase3/analog/analog_block_list.json` carries two blocks, `dac` and
+    `esd`, BOTH `low_confidence: true`, and both quoting a DENIAL as their
+    evidence: the `dac` paragraph reads "Plugin 不需產生 … analog trim DAC",
+    and the `esd` one is not a design sentence at all but the emitter's own
+    changelog note, whose source token sits under a heading that means "things
+    NOT constrained here". Two stubs flipped a pure-digital hash core to
+    mixed-signal, which turned Pillar 5 from N/A into a PENDING nothing can
+    satisfy — an A-track cannot converge on a block that does not exist — and
+    turned 13 Pillar-2 rows (A1..A9, M1..M4) from N/A into applicable/PENDING.
+    That is 14 cells held open by a file the design's own L-doc contradicts,
+    and it violates this function's own closing sentence below.
+
+    SO A LOW-CONFIDENCE-ONLY LIST DOES NOT ESTABLISH ANALOG WHEN THE OWNING
+    L-DOC DENIES IT. Precisely three conditions, all required, because each one
+    alone is a different and wrong rule:
+      * every block in the list is flagged `low_confidence` — one block that is
+        not is a real detection and still establishes analog on its own;
+      * `L5_ADI_SPEC.json` is READABLE and states `analog_blocks_detected` is
+        false (or `no_analog` true). An ABSENT or unparseable L5 is "I could
+        not look", never "it said no": the list then stands, so this can never
+        turn a missing document into a pure-digital verdict;
+      * the A-track artefact globs below still find nothing. A real corner
+        sweep, netlist or layout outranks every declaration on both sides.
+
+    The FALSE PASS this function was written to close stays closed: the glob
+    arm is untouched, and a genuine mixed-signal IC is unaffected — measured on
+    the u_hawaii_adc corpus, whose two blocks (`delta_sigma`, `ldo`) carry
+    `low_confidence: false` and keep Pillar 5 applicable.
+
+    chip-AGNOSTIC: keyed on the producer's own `low_confidence` flag and the
+    L-doc's own declaration fields; no chip name, block name or value literal.
     """
-    for rel in ("analog/analog_block_list.json",
-                "phase3/analog/analog_block_list.json"):
-        if (project / rel).is_file():
-            return True
     for pat in ("phase3/analog/*/corner_results.json",
                 "phase3/analog/*/spec.json",
                 "phase3/analog/*/topology.md",
                 "phase3/analog/*/*.sp",
                 "phase3/analog/*/*.gds"):
         if glob.glob(str(project / pat)):
+            return True
+    for rel in ("analog/analog_block_list.json",
+                "phase3/analog/analog_block_list.json"):
+        if not (project / rel).is_file():
+            continue
+        blocks = (_load_json(project / rel) or {}).get("blocks")
+        if not isinstance(blocks, list) or not blocks:
+            # NARROWED DELIBERATELY, and the narrowing is the point. A list
+            # that is unreadable or carries no `blocks` key says nothing about
+            # the design, and an earlier revision of this repair read that
+            # silence as "no analog". That collides with the guard this
+            # predicate already carries: `test_pre_layout_analog_artefact_is_
+            # detected` and `test_legacy_root_block_list_still_detected` write
+            # the file with a placeholder body precisely to assert that an
+            # A-track which stopped before layout still engages Pillar 5, and
+            # both went RED. Their assertion is load-bearing — it closed a
+            # silent FALSE PASS on the load-bearing analog pillar — so the
+            # repair yields to it. PRESENCE STILL ESTABLISHES ANALOG whenever
+            # the file does not itself name blocks this repair can weigh.
+            return True
+        if any(not b.get("low_confidence")
+               for b in blocks if isinstance(b, dict)):
+            return True          # at least one confident detection
+        if not _l5_denies_analog(project):
+            return True          # stubs stand while nothing contradicts them
+    return False
+
+
+def _l5_denies_analog(project: Path) -> bool:
+    """True only when the project's own L5 was READ and it says there is no
+    analog. Absent, unparseable or silent L5 returns False — the difference
+    between "it said no" and "I could not look" is the whole reason this is a
+    separate predicate, and collapsing them would let a missing document
+    N/A the load-bearing analog pillar."""
+    for rel in ("phase1/generated_docs/L5_ADI_SPEC.json",
+                "generated_docs/L5_ADI_SPEC.json"):
+        doc = _load_json(project / rel)
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("analog_blocks_detected") is False:
+            return True
+        if doc.get("no_analog") is True:
             return True
     return False
 
