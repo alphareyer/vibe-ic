@@ -87,8 +87,16 @@ IDENTITY_KINDS = ("problem", "implementation", "analysis", "toolchain",
 
 
 def _normalise_artefact(row: Mapping[str, Any]) -> Dict[str, Any]:
-    """The part of an artefact row that IS the identity: role and content."""
-    return {"role": str(row.get("role", "")), "sha256": str(row.get("sha256", ""))}
+    """The part of an artefact row that IS the identity: role and content.
+
+    `identity_sha256` wins wherever `provenance.artefact_ref` recorded one.
+    vibe-ic#2221: a GDS carries its own write time, so its raw bytes name the
+    clock as well as the layout, and comparing two runs on them reports
+    DIFFERENT on every design forever. Rows without one are byte-for-byte as
+    before -- this only ever narrows what a digest is allowed to mean.
+    """
+    digest = row.get("identity_sha256") or row.get("sha256", "")
+    return {"role": str(row.get("role", "")), "sha256": str(digest)}
 
 
 def _fact_value(fact: Mapping[str, Any]) -> Any:
@@ -141,14 +149,21 @@ def identity(kind: str,
 
     unreadable = [
         {"role": str(r.get("role", "")), "path": str(r.get("path", "")),
-         "reason": str(r.get("reason", "unstated"))}
-        for r in artefacts if r.get("status") != prov.MEASURED
+         "reason": str(r.get("reason")
+                       or r.get("identity_reason") or "unstated")}
+        for r in artefacts
+        if r.get("status") != prov.MEASURED
+        # vibe-ic#2221: a row that WAS read but cannot be compared honestly is
+        # not evidence for an identity either. UNDETERMINED is the whole point;
+        # a DIFFERENT computed from two clock readings is worse than no answer.
+        or r.get("identity_status") == prov.NOT_MEASURED
     ]
     fact_members, conflicts = _collapse_facts(facts)
 
     artefact_members = sorted(
         (_normalise_artefact(r) for r in artefacts
-         if r.get("status") == prov.MEASURED),
+         if r.get("status") == prov.MEASURED
+         and r.get("identity_status") != prov.NOT_MEASURED),
         key=lambda m: (m["role"], m["sha256"]))
 
     record: Dict[str, Any] = {

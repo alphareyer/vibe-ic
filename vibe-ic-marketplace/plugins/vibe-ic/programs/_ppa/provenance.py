@@ -61,6 +61,8 @@ about any IC, vendor, process or product.
 """
 from __future__ import annotations
 
+import sys
+
 import hashlib
 import os
 import re
@@ -116,6 +118,24 @@ def hash_bytes(data: bytes) -> str:
     describes our parse of the file rather than the file.
     """
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+# ── vibe-ic#2221: the clock-free digest a two-run comparison must use ────────
+if __package__ in (None, ""):  # pragma: no cover - direct-script import path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import gds_canonical_digest as _gdsdig  # type: ignore  # noqa: E402
+from _gds_geometry import GdsError as _GdsError  # type: ignore  # noqa: E402
+
+#: Named, so a reader of a row can tell WHICH canonicalisation produced it.
+_IDENTITY_FORM_GDS = "gds-dates-zeroed"
+
+
+def _gds_suffix(path: Path) -> bool:
+    """A GDSII stream by name, including the gzipped form the reader accepts."""
+    name = path.name.lower()
+    return name.endswith(".gds") or name.endswith(".gds.gz")
 
 
 def hash_file(path: Path) -> str:
@@ -195,6 +215,30 @@ def artefact_ref(root: Path, rel_path: str, role: str) -> Dict[str, Any]:
     row["status"] = MEASURED
     row["sha256"] = digest
     row["bytes"] = size
+
+    # vibe-ic#2221 — A GDS CARRIES ITS OWN WRITE TIME, so `sha256` above
+    # answers "which bytes shipped" (attestation, exact, unchanged) and cannot
+    # answer "is this the same layout as that one". v1.20.34 landed
+    # `gds_canonical_digest`; this is the seam that CONSUMES it, which is the
+    # half #2221 asked for and nothing was using yet.
+    #
+    # MEASURED 2026-09-10 on 8HD-6 in `ghcr.io/vibeic/vibeic-eda:0.3.41`, one
+    # corpus layout (`ic/spm/v1.10.18_sky130A/.../spm.gds`, 1,616,344 bytes)
+    # read ONCE into KLayout and streamed out TWICE two seconds apart:
+    # 98 differing bytes, and 98 of those 98 inside a BGNLIB/BGNSTR date
+    # payload -- 0 outside. So identity gets its own digest, and a `.gds` this
+    # repo cannot account for as a record stream is NOT_MEASURED for identity:
+    # never DIFFERENT-because-a-clock-ticked, and never a raw hash wearing a
+    # canonical name.
+    if _gds_suffix(target):
+        try:
+            row["identity_sha256"] = "sha256:" + _gdsdig.canonical_digest(target)
+            row["identity_form"] = _IDENTITY_FORM_GDS
+        except (_GdsError, OSError, ValueError) as exc:
+            row["identity_status"] = NOT_MEASURED
+            row["identity_reason"] = (
+                f"canonical GDS digest unavailable: {exc.__class__.__name__}: "
+                f"{exc}")
     return row
 
 
