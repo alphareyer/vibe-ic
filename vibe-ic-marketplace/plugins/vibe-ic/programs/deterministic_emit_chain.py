@@ -179,6 +179,39 @@ def _general(prompt: str, ifc: str, top: str) -> Tuple[Optional[str], Optional[s
 # FAILS the official test on both, so promoting it ahead of the registry would
 # cost two solves. Everything below the registry is a fallback for prompts the
 # registry declines, and none of them is measured to shadow a registry hit.
+def _bit_mapping(prompt: str, ifc: str, top: str) -> Tuple[Optional[str], Optional[str]]:
+    """A public input that states its per-bit mapping COMPLETELY (vibe-ic#2215).
+
+    `spec_numeric_pack_extract` retains the conditional bit mapping the prose
+    states -- target and source slices, transform, condition, extension source,
+    preservation prohibitions -- and `bit_mapping_synth.plan` decides whether
+    what was retained is complete, consistent and supported. READY means every
+    output bit is covered, every condition has both branches, and nothing
+    contradicts a stated prohibition; anything less is REFUSED by name and this
+    returns None, which is the chain's normal handover to the next emitter and
+    then to the AI backup.
+
+    LAST IN THE CHAIN, deliberately. A prompt an earlier recogniser claims is
+    already solved by a narrower, better-measured emitter, and this must not
+    shadow one. It only reaches designs nothing else recognised.
+
+    MEASURED before wiring, on 246 distinct real `phase1_prompt.md` files on the
+    build host: 246 REFUSED, 0 would-emit. So this cannot hijack a design in
+    that corpus -- and equally, it has no positive real-corpus example yet. Its
+    positive evidence is the issue's own fixture plus renamed and re-widthed
+    variants, each generating RTL that passes its own generated test.
+    """
+    try:
+        import bit_mapping_synth as _synth              # noqa: PLC0415
+        import spec_numeric_pack_extract as _extract    # noqa: PLC0415
+    except ImportError:
+        return None, None
+    made = _synth.plan(_extract.extract(prompt), module=top)
+    if made.get("status") != "READY":
+        return None, None
+    return "bit_mapping_synth", _synth.emit_rtl(made)
+
+
 EMITTERS: List[Tuple[str, Callable[..., Tuple[Optional[str], Optional[str]]]]] = [
     ("spec_artifact_registry", _registry),
     ("fsm_vector_rtl_emit", _supplemental),
@@ -190,6 +223,9 @@ EMITTERS: List[Tuple[str, Callable[..., Tuple[Optional[str], Optional[str]]]]] =
     # Then the interface-taking prose solvers, narrowest cue first.
     ("arith_ext_synth", _arith_ext),
     ("general_synth", _general),
+    # Last: fires only on a prompt whose per-bit mapping is stated COMPLETELY,
+    # and only where nothing narrower recognised the design.
+    ("bit_mapping_synth", _bit_mapping),
 ]
 
 

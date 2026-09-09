@@ -573,6 +573,341 @@ def _detect_byte_order(text: str) -> Optional[str]:
 # ===========================================================================
 # Public API
 # ===========================================================================
+# ===========================================================================
+# (3) CONDITIONAL BIT MAPPINGS
+# ===========================================================================
+#
+# WHY THIS SECTION EXISTS (#2215)
+# -------------------------------
+# The width family above answers "how many bits in, how many out". It does not
+# answer WHICH bit becomes WHICH, under WHAT condition, and whether a bit may
+# be transformed at all -- and that is the part an author has to implement.
+# MEASURED on the shared extractor at v1.20.7, two public inputs that state
+# DIFFERENT contracts:
+#
+#   "When active is one, result[11] is sample[11] XOR flip. When active is
+#    zero, result[11] equals sample[11]. Bits result[10:0] always equal
+#    sample[10:0]. If extend is one, bits result[19:12] repeat result[11];
+#    otherwise those upper bits are zero."
+#   "Preserve all twelve source bits. Do not invert any source bit. The upper
+#    eight result bits are zero."
+#
+# both returned ONE identical item -- `width_convert 12->20` -- and the
+# coverage reader emitted only that kind. No condition, no bit relation, no
+# extension source and no preservation prohibition survived into the
+# deterministic handoff, so the two contracts were indistinguishable
+# downstream while differing in every bit they describe.
+#
+# §4.05 NO-LEAK, UNCHANGED. Every field below is read off an EXPLICIT clause
+# and carries the clause as `evidence`. A prompt that states no mapping emits
+# nothing: an unspecified format block must not acquire a guessed one, which
+# is why there is no default transform, no default condition polarity and no
+# inference from a signal's NAME.
+
+# `name[hi:lo]` or `name[i]`. Bare `name` is deliberately NOT a reference: a
+# mapping this module reports must say which bits it is about.
+_BIT_REF = r"([A-Za-z_]\w*)\s*\[\s*(\d{1,4})\s*(?::\s*(\d{1,4})\s*)?\]"
+_BIT_REF_RE = re.compile(_BIT_REF)
+
+# The truth words a public input actually uses for a one-bit control. Kept
+# closed: a word this does not list is not silently read as a polarity.
+_TRUE_WORDS = ("one", "1", "high", "set", "asserted", "true")
+_FALSE_WORDS = ("zero", "0", "low", "clear", "cleared", "deasserted", "false")
+
+_CONDITION_RE = re.compile(
+    r"\b(?:when|if)\s+([A-Za-z_]\w*)\s+is\s+"
+    r"(" + "|".join(_TRUE_WORDS + _FALSE_WORDS) + r")\b", re.I)
+# A guard is PRESENT here whether or not the truth word is one this grammar
+# knows. The difference matters: a clause whose guard cannot be read must
+# yield NOTHING, because recording its mapping without the guard turns a
+# conditional contract into an unconditional one -- a different contract, and
+# the §4.05 leak this section exists to avoid.
+_GUARD_PRESENT_RE = re.compile(r"\b(?:when|if)\s+[A-Za-z_]\w*\s+is\b", re.I)
+# A bitwise operator with no operand after it: the statement is incomplete,
+# and reading it as the plain identity it syntactically resembles would
+# record a mapping the input never states.
+_DANGLING_OP_RE = re.compile(
+    r"^\s*(?:XOR|AND|OR|\^|&|\|)\s*$", re.I)
+
+# `<target> is|equals|becomes <source>` optionally transformed by a bitwise op
+# with a named operand. `XOR` is the only transform with an operand; the rest
+# of the vocabulary is closed for the same reason as the truth words.
+_MAP_RE = re.compile(
+    r"(?P<target>" + _BIT_REF + r")\s*"
+    # An adverb between the reference and the relation word is common and
+    # carries the UNCONDITIONAL claim ("always"), so it must not stop the
+    # match -- it was the reason `Bits result[10:0] always equal sample[10:0]`
+    # produced nothing while its two conditional siblings parsed.
+    r"(?P<adverb>always|unconditionally|in all cases)?\s*"
+    r"(?:is|are|equals?|equal to|becomes?)\s+"
+    r"(?P<invert>(?:the\s+)?(?:inverse|complement|inversion)\s+of\s+|~|!)?\s*"
+    r"(?P<source>" + _BIT_REF + r")"
+    r"(?:\s*(?P<op>XOR|AND|OR|\^|&|\|)\s*(?P<operand>[A-Za-z_]\w*))?",
+    re.I)
+
+# Sign/bit extension: the upper slice REPEATS a named bit.
+_REPLICATE_RE = re.compile(
+    r"(?:bits?\s+)?(?P<target>" + _BIT_REF + r")\s*"
+    r"(?:repeats?|replicates?|are copies of|is a copy of|"
+    r"are sign[- ]extended from|extends? the sign of)\s+"
+    r"(?P<source>" + _BIT_REF + r")", re.I)
+
+# Zero fill, in the two shapes the prose actually uses: an explicit slice, or
+# "those upper bits"/"the upper N result bits" naming a count.
+_ZERO_SLICE_RE = re.compile(
+    r"(?:bits?\s+)?(?P<target>" + _BIT_REF + r")\s*"
+    r"(?:is|are)\s+(?:all\s+)?(?:zero|zeros|zeroed|0)\b", re.I)
+_ZERO_UPPER_RE = re.compile(
+    r"\b(?:those|the)\s+upper\s+"
+    r"(?:(?P<count>\d{1,4}|" + "|".join(_CONCAT_NUM_WORD) + r")\s+)?"
+    r"(?:\w+\s+)?bits?\s+"
+    r"(?:is|are)\s+(?:all\s+)?(?:zero|zeros|zeroed|0)\b", re.I)
+
+# Preservation, and its prohibition. Both are explicit REQUIREMENTS -- the
+# prohibition especially: "do not invert" is not an absent statement, it is a
+# stated constraint, and dropping it is how a preserve-only contract became
+# indistinguishable from one that inverts a bit.
+_PRESERVE_RE = re.compile(
+    r"\bpreserve[sd]?\s+(?:all\s+)?(?:the\s+)?"
+    r"(?P<count>\d{1,4}|" + "|".join(_CONCAT_NUM_WORD) + r")?\s*"
+    r"(?:source|input|payload|data)?\s*bits?\b", re.I)
+_NO_INVERT_RE = re.compile(
+    r"\b(?:do not|don't|must not|never|shall not)\s+"
+    r"(?:invert|complement|negate|flip)\b[^.;\n]*", re.I)
+
+
+def _ref_from(groups: Tuple[str, str, Optional[str]]) -> Dict[str, object]:
+    signal, first, second = groups
+    hi = int(first)
+    lo = int(second) if second is not None else hi
+    if lo > hi:
+        hi, lo = lo, hi
+    return {"signal": signal, "hi": hi, "lo": lo, "width": hi - lo + 1}
+
+
+def _ref_at(text: str, start: int) -> Optional[Dict[str, object]]:
+    m = _BIT_REF_RE.match(text, start)
+    return _ref_from(m.groups()) if m else None
+
+
+def _condition_for(clause: str) -> Optional[Dict[str, object]]:
+    """The `when/if <ctrl> is <truth word>` guard of one clause, or None.
+
+    None means only "no guard I can read here". It does NOT mean the clause is
+    unconditional -- `_detect_bit_mappings` asks `_GUARD_PRESENT_RE` next, and
+    a clause that HAS a guard whose truth word is outside the closed
+    vocabulary yields no mapping at all. Splitting the two questions is what
+    keeps an unreadable guard from silently becoming an unconditional
+    contract.
+    """
+    m = _CONDITION_RE.search(clause)
+    if m is None:
+        return None
+    word = m.group(2).lower()
+    return {"signal": m.group(1),
+            "value": 1 if word in _TRUE_WORDS else 0,
+            "evidence": m.group(0).strip()}
+
+
+_OTHERWISE_RE = re.compile(r"^\s*(?:otherwise|else)\b", re.I)
+
+
+def _negate(condition: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:
+    """The complementary branch of a one-bit condition, or None.
+
+    None when there is nothing to complement, and the caller then emits NO
+    mapping for that clause. An `otherwise` arm recorded without its condition
+    would be an UNCONDITIONAL mapping -- a different contract from the one the
+    public input states, and the §4.05 leak this whole section exists to
+    avoid. Silence is the safe answer; a guessed guard is not.
+    """
+    if condition is None:
+        return None
+    return {"signal": condition["signal"],
+            "value": 0 if condition["value"] else 1,
+            "evidence": f"otherwise-arm of: {condition['evidence']}"}
+
+
+def _detect_bit_mappings(text: str) -> List[dict]:
+    """Every EXPLICIT per-bit / per-slice mapping, with its condition.
+
+    One item per stated clause, in source order, de-duplicated on the exact
+    (target, source, transform, condition) tuple so a contract repeated in
+    prose and in an embedded skeleton is reported once.
+
+    An `otherwise`/`else` clause inherits the COMPLEMENT of the condition its
+    neighbour stated. When there is no such neighbour the clause yields
+    nothing at all, because an else-arm with no guard is not the contract the
+    input describes.
+    """
+    items: List[dict] = []
+    seen: set = set()
+    previous_condition: Optional[Dict[str, object]] = None
+    previous_targets: List[Dict[str, object]] = []
+    for clause in _clauses(text):
+        stripped = clause.strip()
+        if not stripped:
+            continue
+        condition = _condition_for(stripped)
+        otherwise_arm = False
+        if condition is None and _OTHERWISE_RE.match(stripped):
+            condition = _negate(previous_condition)
+            if condition is None:
+                continue
+            otherwise_arm = True
+        elif condition is None and _GUARD_PRESENT_RE.search(stripped):
+            continue          # a guard this grammar cannot read -- see above
+        elif condition is not None:
+            previous_condition = condition
+        clause_targets: List[Dict[str, object]] = []
+        for m in _MAP_RE.finditer(stripped):
+            target = _ref_at(stripped, m.start("target"))
+            source = _ref_at(stripped, m.start("source"))
+            if target is None or source is None:
+                continue
+            if m.group("op"):
+                transform = {"^": "xor", "xor": "xor", "&": "and",
+                             "and": "and", "|": "or", "or": "or"}[
+                                 m.group("op").lower()]
+                operand = m.group("operand")
+            elif m.group("invert"):
+                transform, operand = "invert", None
+            elif _DANGLING_OP_RE.match(stripped[m.end():]):
+                continue      # `X is Y XOR` names no operand -- incomplete
+            else:
+                transform, operand = "identity", None
+            items.append(_mapping_item(
+                target, source, transform, operand, condition, stripped))
+            clause_targets.append(target)
+        for m in _REPLICATE_RE.finditer(stripped):
+            target = _ref_at(stripped, m.start("target"))
+            source = _ref_at(stripped, m.start("source"))
+            if target is None or source is None:
+                continue
+            items.append(_mapping_item(
+                target, source, "replicate", None, condition, stripped))
+            clause_targets.append(target)
+        for m in _ZERO_SLICE_RE.finditer(stripped):
+            target = _ref_at(stripped, m.start("target"))
+            if target is None:
+                continue
+            items.append(_mapping_item(
+                target, {"literal": 0}, "zero", None, condition, stripped))
+            clause_targets.append(target)
+        zero_upper = _ZERO_UPPER_RE.search(stripped)
+        if zero_upper is not None:
+            count = zero_upper.group("count")
+            target = {"signal": None, "hi": None, "lo": None,
+                      # `_coerce_count`, not int(): the prose writes "the upper
+                      # eight result bits" as often as "the upper 8".
+                      "width": _coerce_count(count) if count else None,
+                      "position": "upper"}
+            # "OTHERWISE THOSE UPPER BITS ARE ZERO" NAMES THE SLICE ITS OWN
+            # OTHER BRANCH NAMED. `those` is anaphoric, and the antecedent is
+            # decidable from the clause structure rather than guessed: an
+            # else-arm complements exactly one preceding branch, so when that
+            # branch stated exactly ONE explicit target slice, `those bits`
+            # are those bits. Resolved only under all three conditions -- an
+            # else-arm, no explicit count of its own, and exactly one
+            # antecedent -- because a reference with two candidate antecedents
+            # is ambiguous and an ambiguous mapping must stay unanchored.
+            if (otherwise_arm and target["width"] is None
+                    and len(previous_targets) == 1):
+                antecedent = previous_targets[0]
+                if antecedent.get("signal") is not None:
+                    target = dict(antecedent)
+            items.append(_mapping_item(
+                target, {"literal": 0}, "zero", None, condition, stripped))
+            clause_targets.append(target)
+        if not otherwise_arm:
+            previous_targets = [t for t in clause_targets
+                                if t.get("signal") is not None]
+    deduped: List[dict] = []
+    for item in items:
+        key = json.dumps(
+            [item["target"], item["source"], item["transform"],
+             item.get("operand"), item.get("condition")], sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _describe(ref: Dict[str, object]) -> str:
+    if "literal" in ref:
+        return str(ref["literal"])
+    if ref.get("signal") is None:
+        width = ref.get("width")
+        return f"the upper {width} result bits" if width else "the upper bits"
+    if ref["hi"] == ref["lo"]:
+        return f"{ref['signal']}[{ref['hi']}]"
+    return f"{ref['signal']}[{ref['hi']}:{ref['lo']}]"
+
+
+def _mapping_item(target, source, transform, operand, condition,
+                  evidence: str) -> dict:
+    requirement = f"{_describe(target)} = {_describe(source)}"
+    if transform == "xor":
+        requirement += f" XOR {operand}"
+    elif transform == "invert":
+        requirement = f"{_describe(target)} = ~{_describe(source)}"
+    elif transform == "replicate":
+        requirement = f"{_describe(target)} = replicate({_describe(source)})"
+    if condition is not None:
+        requirement += (f" when {condition['signal']} == "
+                        f"{condition['value']}")
+    item = {
+        "kind": "bit_mapping",
+        "requirement": requirement,
+        "evidence": evidence[:240],
+        "target": target,
+        "source": source,
+        "transform": transform,
+        "condition": condition,
+        "coverage_tokens": [t for t in (
+            target.get("signal"), source.get("signal") if isinstance(source, dict)
+            else None, operand,
+            condition["signal"] if condition else None) if t],
+    }
+    if operand:
+        item["operand"] = operand
+    return item
+
+
+def _detect_preservation(text: str) -> List[dict]:
+    """Explicit preserve / do-not-transform rules.
+
+    A prohibition is a REQUIREMENT, not an absence. "Do not invert any source
+    bit" is the clause that makes a preserve-only contract different from one
+    that conditionally inverts a bit, and it is exactly what was being dropped.
+    """
+    items: List[dict] = []
+    preserve = _PRESERVE_RE.search(text)
+    if preserve is not None:
+        raw = preserve.group("count")
+        count = _coerce_count(raw) if raw else None
+        items.append({
+            "kind": "bit_preserve",
+            "requirement": ("preserve all source bits"
+                            + (f" ({count} bits)" if count else "")),
+            "evidence": preserve.group(0).strip()[:240],
+            "preserved_width": count,
+            "prohibited_transforms": [],
+            "coverage_tokens": ["preserve"],
+        })
+    for m in _NO_INVERT_RE.finditer(text):
+        items.append({
+            "kind": "bit_preserve",
+            "requirement": "no source bit may be inverted",
+            "evidence": m.group(0).strip()[:240],
+            "preserved_width": None,
+            "prohibited_transforms": ["invert"],
+            "coverage_tokens": ["invert"],
+        })
+    return items
+
+
 def extract(prompt_text: str) -> List[dict]:
     """Extract structural numeric-semantics + packing/width checklist items from
     a CVDP-style prompt. Returns a list of dicts (one per explicit fact).
@@ -582,6 +917,7 @@ def extract(prompt_text: str) -> List[dict]:
 
     Item kinds (extends spec_coverage_check.ChecklistItem.kind):
       rounding_mode | saturation | width_convert | byte_order
+      bit_mapping | bit_preserve
     """
     if not prompt_text or not isinstance(prompt_text, str):
         return []
@@ -613,6 +949,10 @@ def extract(prompt_text: str) -> List[dict]:
             if flags:
                 item["status_flags"] = flags
             items.append(item)
+
+    # --- (1a-bis) Explicit per-bit / per-slice mappings and their conditions ---
+    items.extend(_detect_bit_mappings(text))
+    items.extend(_detect_preservation(text))
 
     # --- (1b) Saturation / clamp on overflow ---
     sat = _detect_saturation(text)
