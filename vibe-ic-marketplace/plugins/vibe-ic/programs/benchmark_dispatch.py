@@ -2018,6 +2018,23 @@ def _timescale_disagreement(rtl_paths: list[str], declared: str | None) -> str |
     return None
 
 
+def _ports_absent_from_dut(errors: str) -> list:
+    """Port names iverilog says are not ports of the instantiated unit.
+
+    The diagnostic is `port ``NAME'' is not a port of dut.` — the quoting is
+    iverilog's own (two backticks, two apostrophes), so match it literally
+    rather than guessing a shape. Returns names in first-seen order with
+    duplicates removed: one missing port is usually reported once per
+    instantiation site and a count is not the finding, the membership is.
+    """
+    seen = []
+    for m in re.finditer(r"port ``([^']+)'' is not a port of", errors or ""):
+        name = m.group(1)
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
 def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
     """Compile/run one immutable test against one immutable candidate."""
     reasons = _validate_candidate_snapshot(candidate, str(candidate.get("id")))
@@ -2084,10 +2101,40 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
                 cited = "both candidate RTL and the challenge file"
             else:
                 cited = "no classifiable file"
-            return {"status": "INVALID", "reasons": [
-                f"joint compile failed; errors cite {cited}",
-                errors[-1200:],
-            ]}
+            # AN OMITTED REQUIRED PORT AND AN INVENTED ONE PRODUCE THE SAME
+            # DIAGNOSTIC, IN THE SAME FILE (vibe-ic#2210). iverilog reports
+            # both at the challenge's named-port instantiation, so attribution
+            # by CITED FILE cannot separate "the candidate failed to expose a
+            # port it was required to expose" from "the test asked for a port
+            # nobody required". Those are opposite verdicts: the first is a
+            # real interface defect held without a candidate-side proof, the
+            # second is correctly INVALID.
+            #
+            # Deciding it needs the PROMPT-BOUND interface, and this function
+            # receives only a candidate and a challenge. So it does not decide.
+            # It NAMES the ports and says which question is unanswered — a gate
+            # that cannot decide has to say so rather than pick, or the next
+            # reader inherits a verdict with no evidence under it.
+            absent = _ports_absent_from_dut(errors)
+            extra = []
+            if absent:
+                extra = [
+                    "ports named by the compiler as absent from the "
+                    f"instantiated unit: {', '.join(absent)}",
+                    "ATTRIBUTION UNDETERMINED: this diagnostic is identical "
+                    "whether the candidate OMITTED a required port or the "
+                    "challenge INVENTED one. Deciding it requires the "
+                    "prompt-bound required interface, which this comparison "
+                    "does not carry. Supply it to attribute; do not read this "
+                    "INVALID as evidence that the candidate is conforming.",
+                ]
+            return {"status": "INVALID",
+                    "ports_absent_from_candidate": absent,
+                    "reasons": [
+                        f"joint compile failed; errors cite {cited}",
+                        *extra,
+                        errors[-1200:],
+                    ]}
         try:
             sim = subprocess.run(
                 [vvp, str(out)], cwd=td, capture_output=True, text=True,
