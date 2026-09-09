@@ -549,7 +549,9 @@ def assemble(prompt: str, iface: Optional[List[Dict[str, Any]]], target: Optiona
                            if derived else "optional field path"),
             "requirement": "what the input requires the layer to carry",
             "evidence": ["input-only evidence supporting the expectation"],
-            "expected_tokens": ["one or more tokens to compare"],
+            "expected_tokens": (
+                derived.get("expected_tokens_rule")
+                or ["one or more tokens to compare"]),
         }
         # THE SPLIT FORM (#2150 class 3). Advertised here because a grammar
         # the author is never shown is a grammar nobody writes: the two rows
@@ -562,7 +564,9 @@ def assemble(prompt: str, iface: Optional[List[Dict[str, Any]]], target: Optiona
             "sub_expectations": [{
                 "layer": "generated L-layer name",
                 "field_path": "a field path THAT layer declares, or omitted",
-                "expected_tokens": ["one or more tokens to compare"],
+                "expected_tokens": (
+                    derived.get("expected_tokens_rule")
+                    or ["one or more tokens to compare"]),
             }],
         }
         handoff["answer_contract"] = {

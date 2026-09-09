@@ -238,6 +238,52 @@ already means "no layer carries this fact" and is published as a gap in the
 DESIGN. `met` is untouched: it is still decided over the whole document, so no
 verdict moves and none can be blamed on this guard.
 
+AND THE QUESTION ITSELF CAN BE UNASKABLE (#2150 item 2)
+-------------------------------------------------------
+#2191 stopped the OWNERSHIP question being answered when it could not be
+asked. The same substitution was still happening one level further down, in
+the token comparison every verdict rests on.
+
+`phrase_present` reduces both sides with `_norm` — lower-case, every run of
+non-`[a-z0-9]` collapsed to one space. Two token shapes do not survive that
+reduction as the thing the author wrote, and both are SILENT:
+
+  * a token with NO `[a-z0-9]` character normalises to the empty string, and
+    the function returns False on `if not want` BEFORE reading the haystack.
+    False for every possible document, including one that states the token
+    verbatim. MEASURED on the surviving opentitan_aes root: a CJK token the
+    design input states at `phase1_prompt.md:9` was published as a gap in the
+    design. This plugin's own briefs are written in Traditional Chinese, so
+    the shape is chip-AGNOSTIC.
+  * an ELLIPSIS is deleted with every other separator, so `writes ... are
+    ignored` silently becomes a demand for the contiguous phrase `writes are
+    ignored`. MEASURED: the same input states "writes to these registers are
+    ignored" five times, the row was published as a design gap, and the #2150
+    decision table then WITHDREW it with the reason that neither the input
+    nor any layer states it "in this form". A true expectation deleted on the
+    strength of a comparator defect.
+
+ONE such token decides a whole row — `met` is `not missing`, and the
+owning-layer answer is the INTERSECTION over the tokens — so the row falls
+past every track branch into the design column. MEASURED on live main
+610cae2cc: 4 of the 20 surviving DISAGREE rows, and they are one of exactly
+FOUR root causes behind those twenty.
+
+So `unaskable_tokens` names them and `RULE_AI_TOKEN_UNASKABLE` refuses them,
+`about: "track"`. `met` is untouched, as with #2127's field_path guard and
+#2191's ownership refusal: base vs fix on that root, 43 findings before and
+43 after, 20 design / 23 track -> 16 design / 27 track, denominator 46
+unchanged, and no row becomes an agreement. The refusal is deliberately not a
+widening — teaching `_norm` to keep CJK was measured and moves nothing here,
+and an ellipsis cannot be honoured at all without making the comparator
+weaker the more an author writes.
+
+`authoring_schema` declares the same two rules under `expected_tokens_rule`,
+and the hand-off pack carries it: F5 as first landed gave the author a
+project-derived vocabulary for `field_path` — the field an expectation only
+DECORATES with — and "one or more tokens to compare" for the field every
+verdict rests on.
+
 On NOT writing the AI-patch sidecar
 -----------------------------------
 This track deliberately does NOT write
@@ -362,6 +408,54 @@ RULE_AI_OWNERSHIP_UNDECIDABLE = "EXPERT_TRACK_AI_OWNERSHIP_UNDECIDABLE"
 # stays a disagreement and only gains the taxonomy fact and an owning-layer
 # answer; a name the taxonomy does not declare is refused here by name.
 RULE_AI_LAYER_ABSENT = "EXPERT_TRACK_AI_EXPECTATION_LAYER_ABSENT"
+# An expected token the comparator CANNOT ASK FOR (#2150 item 2, re-measured
+# on live main 610cae2cc). `about: "track"`, its own rule id, and it does NOT
+# fall through to `RULE_AI_UNMET` — for exactly the reason #2191 gave one
+# level down: a question that could not be asked must never be answered with
+# a gap in the DESIGN.
+#
+# `present_in_units` decides every token through `phrase_present`, which
+# reduces BOTH sides with `_norm` — lower-case, every run of non-`[a-z0-9]`
+# collapsed to one space — and then demands a contiguous run of haystack
+# tokens. Two token shapes survive that reduction as something the author did
+# not write, and both are SILENT:
+#
+#   * NO_MATCHABLE_CHARACTER — a token with no `[a-z0-9]` character at all
+#     normalises to the empty string, and `phrase_present` returns False on
+#     `if not want` BEFORE it reads the haystack. So the answer is False for
+#     EVERY possible document, including one that states the token verbatim.
+#     MEASURED on the surviving opentitan_aes root: the expectation
+#     `l19-gcm-scope-disposition-underspecified` expects the token `五種`,
+#     which the design input states verbatim at `phase1_prompt.md:9`
+#     ("ECB / CBC / CFB-128 / OFB / CTR 五種 block cipher 操作模式"), and
+#     `phrase_present("五種", <that very line>)` is False. The row was
+#     published as a gap in the design. This plugin's own design briefs are
+#     written in Traditional Chinese, so the shape is chip-AGNOSTIC and not
+#     an opentitan_aes accident.
+#   * ELLIPSIS_ERASED — `_norm` deletes `...` / `…` along with every other
+#     separator, so `"writes ... are ignored"` silently becomes a demand for
+#     the CONTIGUOUS phrase `writes are ignored`. The author wrote a pattern;
+#     the comparator asked a different, stricter question and reported the
+#     answer as the author's. MEASURED: the same root's input states "writes
+#     to these registers are ignored" five times in `docs/aes_registers.md`,
+#     and `l9-idle-gated-writes-are-ignored` was published as a design gap —
+#     then WITHDRAWN by the #2150 decision table with the reason "neither the
+#     input nor any layer states ['writes ... are ignored'] in this form".
+#     A true expectation deleted on the strength of a comparator defect.
+#
+# ONE unaskable token is enough to decide a row: `met` is `not missing`, and
+# the ownership answer is the INTERSECTION over the tokens, so a token no
+# layer can carry empties `owning_layers` and the row falls past the misscope
+# branch into the design column. MEASURED on live main 610cae2cc: 4 of the 20
+# surviving DISAGREE rows are decided by one such token each.
+#
+# The refusal is the FLOOR, and it is deliberately not a widening. Whether
+# `_norm` should preserve CJK is a separate question with its own blast
+# radius; it was measured here and it moves NOTHING on this corpus — under a
+# CJK-preserving normaliser no emitted layer carries `五種` either, because
+# this root's L-docs are English-only. So the honest repair is to stop
+# answering, not to answer differently.
+RULE_AI_TOKEN_UNASKABLE = "EXPERT_TRACK_AI_EXPECTATION_TOKEN_UNASKABLE"
 # A SPLIT expectation whose grammar is self-contradictory or empty (#2150).
 # Reuses `RULE_AI_UNUSABLE` rather than inventing a token: an expectation the
 # comparator cannot decide is one situation, and it already has a name. What
@@ -1008,6 +1102,93 @@ def phrase_present(phrase: str, haystack: str) -> bool:
     return False
 
 
+#: The ELLIPSIS an author reaches for when the fact is stated with words in
+#: between. `_norm` deletes it with every other separator, so it is never a
+#: wildcard and never can be without making the comparator weaker the more an
+#: author writes — which is the property `_converge_split` refuses for a
+#: disjunction, for the same reason.
+_TOKEN_ELLIPSIS = re.compile(r"\.\.\.|\u2026")
+
+#: THE EXPECTED-TOKEN LANGUAGE, declared (#2150 F5, second half). F5 shipped a
+#: project-derived vocabulary for `field_path` — the field an expectation only
+#: DECORATES with — and left `expected_tokens`, the field every verdict rests
+#: on, documented as "one or more tokens to compare". An author given that is
+#: told nothing about what the comparator can represent, and the two shapes it
+#: cannot are exactly the two an author writes when the fact is awkward: a
+#: non-Latin token, and a pattern with an ellipsis in it.
+TOKEN_LANGUAGE = {
+    "matcher": ("each token is compared with `phrase_present`: both the token "
+                "and the document are lower-cased and every run of "
+                "non-[a-z0-9] characters is collapsed to one space, then the "
+                "token matches iff some CONTIGUOUS run of document tokens "
+                "concatenates to it"),
+    "rules": [
+        "a token MUST contain at least one [a-zA-Z0-9] character. A token "
+        "written wholly in CJK, Greek, Cyrillic or punctuation normalises to "
+        "the empty string and is refused BY EVERY document, including one "
+        "that states it verbatim",
+        "a token MUST NOT contain an ellipsis (`...` or `\u2026`). It is not "
+        "a wildcard: normalisation deletes it, and the expectation silently "
+        "becomes a demand for the contiguous phrase with the elided words "
+        "removed. State the phrase the document actually uses, or state the "
+        "surviving words as SEPARATE tokens",
+    ],
+    "separators_are_not_a_disagreement": (
+        "`1.8 V` matches `1.8V` and `TRIM_SEL` matches `trim sel`; a token "
+        "can never match inside a longer word (`REF` does not match `REFHI`)"),
+}
+
+#: The reason codes `unaskable_tokens` returns. Codes, not prose, because a
+#: consumer must be able to count them without parsing a sentence.
+TOKEN_NO_MATCHABLE_CHARACTER = "NO_MATCHABLE_CHARACTER"
+TOKEN_ELLIPSIS_ERASED = "ELLIPSIS_ERASED"
+
+
+def unaskable_tokens(tokens: Any) -> List[Dict[str, Any]]:
+    """Which of these expected tokens `present_in_units` cannot ASK for.
+
+    Returns one entry per unaskable token — `token`, `reason` (a code) and
+    `asked_instead` (what the comparator would actually have compared, so the
+    refusal is falsifiable from the report rather than only by re-running).
+    An empty list means every token is representable; it does NOT mean any of
+    them is present.
+
+    This is a property of the TOKEN and the matcher alone. It reads no
+    document, so it answers identically for every design — which is what
+    makes it safe to check before the Phase-1 root is opened, and what makes
+    it a fact about the expectation rather than about the chip.
+    """
+    out: List[Dict[str, Any]] = []
+    for t in (tokens or []):
+        text = str(t)
+        want = _norm(text).split()
+        if not want:
+            out.append({
+                "token": text,
+                "reason": TOKEN_NO_MATCHABLE_CHARACTER,
+                "asked_instead": "",
+                "why": ("no [a-z0-9] character survives normalisation, so "
+                        "`phrase_present` returns False on the empty phrase "
+                        "BEFORE it reads any document — the answer is False "
+                        "for every possible document, including one that "
+                        "states this token verbatim"),
+            })
+            continue
+        if _TOKEN_ELLIPSIS.search(text):
+            out.append({
+                "token": text,
+                "reason": TOKEN_ELLIPSIS_ERASED,
+                "asked_instead": " ".join(want),
+                "why": ("the ellipsis is deleted by normalisation, so the "
+                        "comparator did not ask for this pattern — it asked "
+                        f"whether the document states {' '.join(want)!r} "
+                        "contiguously, which is a stricter question than the "
+                        "one written and is answered as though it were the "
+                        "same one"),
+            })
+    return out
+
+
 def _layer_haystack(blob: Any) -> str:
     """Every key and every scalar of an L-doc, flattened to searchable text.
 
@@ -1361,6 +1542,14 @@ def authoring_schema(project: Path) -> Dict[str, Any]:
                       "a layer's list is either deeper than max_depth or not "
                       "declared — the counts say which"),
         },
+        # #2150 F5, second half. The vocabulary above is for `field_path`,
+        # which an expectation only DECORATES with — the reading falls back
+        # to the whole layer when it does not resolve. `expected_tokens` is
+        # the field every verdict rests on, and F5 as first landed declared
+        # nothing about it at all. The two shapes the matcher cannot
+        # represent are named here, at authoring time, by the same
+        # declaration `unaskable_tokens` refuses by at review time.
+        "expected_tokens_rule": TOKEN_LANGUAGE,
         "rule": ("an expectation's `field_path` MUST be one this schema lists "
                  "for the layer it addresses, or be omitted entirely. A path "
                  "no layer declares is refused BY NAME at review time and the "
@@ -1873,6 +2062,13 @@ def _converge_split(project: Path, base: Dict[str, Any], exp: Any,
     base["usable"] = True
     base["sub_results"] = branches
     base["sub_layers"] = [b["layer"] for b in branches]
+    # #2150 item 2. The parent states no tokens of its own, so its unaskable
+    # set is the union over the branches, each entry naming the branch it
+    # belongs to — a refusal that named only the parent would send the author
+    # to re-read every branch to find the one token that caused it.
+    base["tokens_unaskable"] = [
+        {**u, "branch": b["id"]}
+        for b in branches for u in (b.get("tokens_unaskable") or [])]
 
     # A branch addressing a layer this Phase-1 root does not contain (#2150,
     # first commit) makes the whole conjunction undecidable about the DESIGN:
@@ -2253,6 +2449,10 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
         # consulted when the root does not carry the document, so it stays
         # NOT_MEASURED whenever the question did not arise.
         "layer_in_taxonomy": "NOT_MEASURED",
+        # #2150 item 2. The expected tokens this comparator CANNOT ASK FOR.
+        # Computed from the tokens and the matcher alone, before any document
+        # is opened, so it is the same answer for every design.
+        "tokens_unaskable": [],
     }
     if not isinstance(exp, dict):
         base["observed"] = ("the answer contained an entry that is not an "
@@ -2311,6 +2511,12 @@ def converge_ai_expectation(project: Path, exp: Any) -> Dict[str, Any]:
         return base
 
     base["usable"] = True
+    # #2150 item 2 — asked BEFORE the Phase-1 root is opened, because it is a
+    # question about the expectation and the matcher, not about the design.
+    # Recorded, never acted on here: `met` is decided over the whole layer
+    # exactly as it was, so no verdict moves and no moved verdict can be
+    # attributed to this check — the separation #2127 and #2191 both kept.
+    base["tokens_unaskable"] = unaskable_tokens(base["expected_tokens"])
     path = resolve_layer_file(project, base["layer"])
     if path is None:
         # #2150 — the LAYER is absent from the Phase-1 root. Recorded as its
@@ -2860,6 +3066,49 @@ def evaluate(project: Path) -> Dict[str, Any]:
         # "the program track is missing this" on the strength of a question
         # nobody could answer. `about: "track"` — the repair is to the
         # expectation's tokens.
+        # ── a token the comparator could not ASK FOR (#2150 item 2) ───────
+        # Checked BEFORE the ownership refusal and before the misscope
+        # branch, and it does not fall through to `RULE_AI_UNMET`. One
+        # unaskable token empties `owning_layers` (the answer is the
+        # intersection over the tokens) and forces `met` False (`met` is `not
+        # missing`), so without this branch the row arrives in the design
+        # column carrying a verdict the comparator never actually reached.
+        # `about: "track"` — the repair is to the expectation's tokens, never
+        # to an extractor, and there is nothing here for a Phase-1 emitter to
+        # produce.
+        if c["tokens_unaskable"]:
+            findings.append({
+                "severity": "REVIEW",
+                "about": "track",
+                "rule": f"{RULE_AI_TOKEN_UNASKABLE}::{c['id']}",
+                "layer": c["layer"],
+                "field_path": c["field_path"],
+                "expected_tokens": c["expected_tokens"],
+                "tokens_unaskable": c["tokens_unaskable"],
+                "message": (
+                    f"The AI sub-track asked "
+                    f"{c['layer'] or 'a SPLIT expectation'}"
+                    f"{'.' + c['field_path'] if c['field_path'] else ''} for: "
+                    f"{c['requirement']}. "
+                    f"{len(c['tokens_unaskable'])} of its "
+                    f"{len(c['expected_tokens']) or 'expected'} token(s) is a "
+                    f"token this comparator CANNOT ASK FOR, so the row was "
+                    f"never decided about the design: "
+                    + "; ".join(
+                        (f"[{u['branch']}] " if u.get("branch") else "")
+                        + f"{u['token']!r} ({u['reason']}) — {u['why']}"
+                        for u in c["tokens_unaskable"])
+                    + ". This is NOT a missing extraction and must not be "
+                      "repaired in an extractor: no Phase-1 root of any "
+                      "design can satisfy it, because the question was never "
+                      "put to one. Repair the expectation's tokens to the "
+                      "language the matcher reads — see `expected_tokens` in "
+                      "the authoring schema — and the row becomes decidable "
+                      "in either direction."),
+                "expert_source": c.get("expert_source"),
+            })
+            continue
+
         if c["owning_layers_status"] == "NO_DISCRIMINATING_TOKEN":
             findings.append({
                 "severity": "REVIEW",
