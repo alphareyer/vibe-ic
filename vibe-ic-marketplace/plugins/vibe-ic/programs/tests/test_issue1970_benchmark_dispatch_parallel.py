@@ -234,6 +234,28 @@ def test_solve_jobs_overlap_and_commit_shared_artifacts_in_dataset_order(
     serial_report = json.loads((serial / "solve_report.json").read_text())
     parallel_report = json.loads((parallel / "solve_report.json").read_text())
     assert [row["id"] for row in parallel_report["results"]] == ["p1", "p2"]
+    # NON-VACUITY, BEFORE THE COMPARISON. Equality of two reports is evidence
+    # that jobs=1 and jobs=2 AGREE only if the runs actually ran. Measured on
+    # the tree before v1.20.33: `bio.stage`'s fake omitted
+    # `public_original_input`, EVERY worker died with
+    # `KeyError: 'public_original_input'`, the coordinator wrote an ERROR row
+    # for each — and this case compared two IDENTICALLY BROKEN runs, which are
+    # equal, so it PASSED while measuring no dispatch whatsoever. v1.20.33
+    # repaired the fixture and the case went green again; nothing yet stops it
+    # going quietly green the next time a worker-side contract moves.
+    #
+    # `worker_status` is written ONLY on the coordinator's except path
+    # (`benchmark_dispatch._cmd_solve_locked`), so its presence is the
+    # program's own statement that the worker did not finish. Reading it here
+    # asks the report the one question equality cannot: did anything run.
+    for label, report in (("serial", serial_report),
+                          ("parallel", parallel_report)):
+        errored = [row["id"] for row in report["results"]
+                   if row.get("worker_status") == "ERROR"]
+        assert not errored, (
+            f"the {label} workers did not run, so comparing the two reports "
+            f"proves nothing: {errored}\n"
+            + json.dumps(report["results"], indent=1)[:1200])
     assert parallel_report == serial_report
     for name in (bd._BACKUP_WORKLIST, bd._REVIEW_WORKLIST,
                  bd._ACCEPTANCE_REPORT):
