@@ -855,8 +855,35 @@ def _review_over(repo: Path, plugin: Path, script: Path):
     and CI allows 180s per test on runners slower than this box. What is being
     asserted is `review()`'s aggregation of gate results into a verdict, which
     the synthetic root exercises identically.
+
+    `BASE..HEAD`, NOT `HEAD..HEAD`. This read `review("HEAD", "HEAD", ...)`
+    back when `_build_clean_plugin` created files and no git history at all, so
+    the degenerate range reached no gate that could object to it. v1.19.88
+    (`4690c3181`) gave that fixture its own history — one commit tagged `BASE`
+    carrying the scaffolding, then one commit repairing the widget — and
+    `landing_is_one_commit_check` immediately and CORRECTLY answered
+
+        [FAIL] landing_is_one_commit: NOTHING to land: HEAD == HEAD.
+        This is not a pass; a landing that adds no commit landed nothing.
+
+    which is a true sentence about a range this file never meant to ask about.
+    The fixture's own `BASE` tag is the range every other consumer of it uses
+    and is STRICTLY MORE demanding than the old one: the gate that used to have
+    nothing to judge now judges a real single-commit landing and must pass it.
+    MEASURED: the red arm below (`p_bad`) stays REQUEST_CHANGES for the hygiene
+    reason it names, which `HEAD..HEAD` had begun to absorb.
     """
-    return GR.review("HEAD", "HEAD", repo=repo, plugin_root=plugin,
+    # AND IT ANSWERS THE MERGE CONDITION. `ppa_pr_scope_check`'s absent-document
+    # arm has been BLOCKING since 2026-08-31 (`ac3232ddeb`); over `HEAD..HEAD`
+    # there was no change-set for it to have an opinion about, so the fixture
+    # never needed one. Over a real range the five `always` questions apply, and
+    # `_write_ppa_answers` is the sibling fixture's own answer to exactly them —
+    # imported, not re-written, for the reason `_TGR` is imported at all. This
+    # is the same class of "MERGE_OK must be a pass, not an avoidance" the
+    # sibling states: without it the green arm below would go REQUEST_CHANGES on
+    # a gate this file is not about.
+    _TGR._write_ppa_answers(repo, plugin)
+    return GR.review("BASE", "HEAD", repo=repo, plugin_root=plugin,
                      override_files=["README.md"], override_cur=None,
                      override_prev=None, hygiene_script=script)
 

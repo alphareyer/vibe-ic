@@ -335,9 +335,28 @@ def _reviewable_repo(document):
     def git(*a):
         _sp.run(["git", *a], cwd=repo, check=True, capture_output=True)
 
-    git("init", "-q")
     git("config", "user.email", "t@example.invalid")
     git("config", "user.name", "t")
+    # RE-ROOT, because that fixture now owns a history of its own.
+    #
+    # `_build_clean_plugin` used to create files and no git at all, so `git
+    # init` + a README base commit + `git add -A` put the WHOLE synthetic plugin
+    # in the change-set — which is what the comment above `_REVIEWABLE_SRC`
+    # describes and what makes question 11 apply. v1.19.88 (`4690c3181`) gave it
+    # its own `git init`, a `BASE` tag and two commits, so everything the path
+    # arm reads was already committed before this fixture started and "the
+    # change" shrank to the answers document alone. MEASURED on 6883a9c93: the
+    # checker reported "5 applicable" (the five `always` questions) against the
+    # 6 declared here, and the WITHHELD arm — `document is None` — had nothing
+    # left to commit at all and died in `git commit` with CalledProcessError,
+    # a fixture failure the first assertion masked.
+    #
+    # `--orphan` + `rm --cached` keeps the fixture's files EXACTLY as it built
+    # them (no second copy of a tree that must track `plugin_full_audit`'s guard
+    # list) and restores the history this fixture declares: a base holding only
+    # a README, and one commit adding the plugin.
+    git("checkout", "-q", "--orphan", "review-base")
+    git("rm", "-r", "-q", "--cached", ".")
     (repo / "README.md").write_text("base\n")
     git("add", "README.md")
     git("commit", "-qm", "base")

@@ -58,6 +58,7 @@ from __future__ import annotations
 VIBEIC_SILENCE_BUDGET_S = 900
 
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -348,7 +349,8 @@ def test_the_real_program_runs_against_this_repo_and_honours_its_boundary():
 # MISSING. Asserting only on the script's message would therefore accept a
 # broken dispatch. Asserting on the program's own refusal text is what proves
 # the real program ran and answered.
-_LAND_SH = PROGRAMS.parents[3] / "tools" / "gatekeeper-land.sh"
+_REPO_ROOT = PROGRAMS.parents[3]
+_LAND_SH = _REPO_ROOT / "tools" / "gatekeeper-land.sh"
 
 
 def _module_level_siblings(module: Path, _seen=None) -> list:
@@ -391,6 +393,44 @@ def _module_level_siblings(module: Path, _seen=None) -> list:
     return list(seen.values())
 
 
+def _script_tool_dependencies(script: Path) -> list:
+    """Every file under `tools/` the SCRIPT itself needs, read off the script.
+
+    The python side of this fixture already DERIVES its seed (see
+    `_module_level_siblings`); the SHELL side did not, and that is this repair.
+    v1.19.88 (`4690c3181`) gave `gatekeeper-land.sh` a new hard prerequisite at
+    line 187 --
+
+        LANDING_PLAN_TOOL="$RUNTIME_ROOT/tools/ci/landing_execution_plan.py"
+        LANDING_PLAN_SHELL="$(python3 "$LANDING_PLAN_TOOL" shell)" \
+          || { echo "[NORECORD] approved landing execution plan unavailable"; exit 2; }
+
+    -- which runs BEFORE argument dispatch can have any observable effect. The
+    fixture copied the script and not the file the script now reads, so both
+    tests below got, MEASURED on 6883a9c93:
+
+        python3: can't open file '.../tools/ci/landing_execution_plan.py'
+        [NORECORD] approved landing execution plan unavailable
+
+    and rc 2 before `--- prepare` or `cheap tier` could ever print. Their own
+    messages then read "the dispatch is not wired" and "the script must proceed
+    to the gates" -- two true-looking sentences about the wrong thing, which is
+    precisely the failure `_module_level_siblings`' docstring was written from.
+
+    DERIVED, not listed, for the same reason it gives: the next prerequisite the
+    script grows is copied without anybody remembering to. `$ROOT`,
+    `$SCRIPT_ROOT` and `$RUNTIME_ROOT` all resolve to this scratch repo when the
+    script is invoked as `bash tools/gatekeeper-land.sh` from its root, so one
+    relative path serves every spelling. A referenced file absent from THIS
+    repository is skipped rather than stubbed: a stub answers differently from
+    the shipped program, which is the thing this fixture exists to avoid.
+    """
+    body = script.read_text(encoding="utf-8")
+    rels = sorted({m.group(1) for m in re.finditer(
+        r"\$(?:RUNTIME_ROOT|SCRIPT_ROOT|ROOT)/(tools/[A-Za-z0-9_/.-]+)", body)})
+    return [r for r in rels if (_REPO_ROOT / r).is_file()]
+
+
 @pytest.fixture()
 def landing_repo(tmp_path):
     """A scratch repo carrying the REAL script and the REAL program, dirty.
@@ -420,6 +460,11 @@ def landing_repo(tmp_path):
     (r / "tools").mkdir()
     (r / "vibe-ic-marketplace/plugins/vibe-ic/.claude-plugin").mkdir(parents=True)
     (r / "tools/gatekeeper-land.sh").write_bytes(_LAND_SH.read_bytes())
+    # AND WHAT THE SCRIPT ITSELF READS -- derived from the script, never listed.
+    for _rel in _script_tool_dependencies(_LAND_SH):
+        _dst = r / _rel
+        _dst.parent.mkdir(parents=True, exist_ok=True)
+        _dst.write_bytes((_REPO_ROOT / _rel).read_bytes())
     (prog / "gatekeeper_prepare_landing.py").write_bytes(MOD.read_bytes())
     for helper in _module_level_siblings(MOD):
         (prog / helper.name).write_bytes(helper.read_bytes())

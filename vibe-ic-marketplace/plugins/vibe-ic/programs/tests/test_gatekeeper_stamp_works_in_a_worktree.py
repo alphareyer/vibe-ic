@@ -85,11 +85,25 @@ def test_the_removal_path_uses_it_too():
     # matching it made this test pass while asserting nothing about the stamp.
     rms = [l for l in body.splitlines()
            if "rm -f" in l and "gatekeeper-stamp" in l]
-    # Failure removes a stale stamp, and composite merge verification also
-    # removes one on its successful NO_STAMP path.  Both paths must resolve the
-    # same per-worktree location the writer and hook use.
-    assert len(rms) == 2, rms
-    assert all(_EXPR in line for line in rms)
+    # BOUND THE PROPERTY, NOT THE POPULATION. This read `len(rms) == 2` and was
+    # a census of removal SITES, not of the defect: v1.19.88 added a third,
+    # CORRECT removal (the UNDETERMINED-census path, which withholds the
+    # completion receipt) and the test went red over a repair. A count that
+    # punishes adding a correct removal pushes the next author toward not
+    # adding one, which is the exact direction this file exists to prevent —
+    # the failure mode named above is the one that fails OPEN.
+    #
+    # What must hold is that EVERY site naming the stamp — the writer, the
+    # appender and every remover — resolves the same per-worktree path, and
+    # that at least one remover exists so the assertion can never be vacuous.
+    # A new site is then covered the day it is written; a wrongly-built one is
+    # red whether it is the second or the tenth.
+    #
+    # MEASURED on 6883a9c93: 3 removals, 2 write sites, 5 of 5 use _EXPR.
+    assert rms, "no path removes the stamp; a stale stamp would authorise a push"
+    uses = [l for l in body.splitlines() if "gatekeeper-stamp" in l]
+    wrong = [l for l in uses if _EXPR not in l]
+    assert not wrong, wrong
 
 
 def test_it_resolves_to_a_real_directory_here(tmp_path):

@@ -1951,15 +1951,47 @@ def repo_hygiene_gate(repo: Path,
 
 
 def gate_red_since_gate(repo: Path, record: Path,
-                        base: Optional[str] = None) -> GateResult:
+                        base: Optional[str] = None,
+                        producer: Optional[GateResult] = None) -> GateResult:
     """Debt age is ADVISORY; unreadable/incomplete evidence is BLOCKING.
 
     This report never waives a hygiene failure. Standalone review still judges
     its full hygiene run; the parent landing's canonical BASE/CAND comparator
     owns no-new-red admission. Read both ledger and clock from BASE so a
     candidate cannot renew or expire its own inherited debt.
+
+    `producer` IS THE GATE THAT WAS SUPPOSED TO WRITE `record`, and it is here
+    because THIS ADJUDICATOR MUST NOT BE MORE CERTAIN THAN ITS OWN PRODUCER.
+    `repo_hygiene_gate` already models "this tree wires no hygiene set" as an
+    honest SKIP that states its denominator -- rc -1, "0 gate(s) consulted:
+    tools/ci/repo_hygiene_gates.sh not present under <repo>" -- and in that case
+    it writes no record, because there was no run to record. Reading the absence
+    it deliberately left and calling it "INCOMPLETE -- debt evidence
+    unavailable" turned one gate's zero denominator into another gate's BLOCKING
+    verdict, quoting a temp path that never existed:
+
+        gate_red_since: INCOMPLETE -- debt evidence unavailable:
+            [Errno 2] No such file or directory: '/tmp/gate_red_since_xxxxxxxx/hygiene.json'
+
+    MEASURED on 6883a9c93, that sentence was the sole blocker turning MERGE_OK
+    into REQUEST_CHANGES in two reviews of trees that wire no hygiene set, and
+    it names nothing a reader could act on.
+
+    THE BLOCKING DIRECTION IS UNCHANGED, and that is the point of keying on the
+    producer rather than on the file. `producer=None` -- every caller that does
+    not know who was to write it -- still reads a missing record as INCOMPLETE
+    and BLOCKING (`test_missing_debt_evidence_is_incomplete_not_a_skip`). A
+    producer that RAN and left no readable record is INCOMPLETE and BLOCKING,
+    which is the case that rule was written for. Only "the producer itself
+    reported it did not run, and there is indeed no record" is inherited as the
+    same skip, with the producer's own words carried into the summary so the
+    cascade is legible instead of silent.
     """
     name = "gate_red_since"
+    if producer is not None and producer.rc == -1 and not record.is_file():
+        return GateResult(name, -1,
+                          f"skipped — 0 hygiene record(s) produced: "
+                          f"{producer.name} {producer.summary}")
     try:
         checker = _load_module("gate_red_since_check")
         doc = json.loads(record.read_text(encoding="utf-8"))
@@ -2549,13 +2581,18 @@ def review(base: str, head: str, *,
             _record.parent.mkdir(parents=True, exist_ok=True)
             if hygiene_record_in is not None:
                 _record = Path(hygiene_record_in).resolve()
-                gates.append(hygiene_gate_from_record(
-                    repo, _record, hygiene_record_rc, script=hygiene_script))
+                _hygiene = hygiene_gate_from_record(
+                    repo, _record, hygiene_record_rc, script=hygiene_script)
             else:
-                gates.append(repo_hygiene_gate(repo, script=hygiene_script,
-                                               summary_out=_record,
-                                               progress_out=hygiene_progress))
-            gates.append(gate_red_since_gate(repo, _record, base=base))
+                _hygiene = repo_hygiene_gate(repo, script=hygiene_script,
+                                             summary_out=_record,
+                                             progress_out=hygiene_progress)
+            gates.append(_hygiene)
+            # The producer is handed over, not just its output: a debt
+            # adjudicator that never learns whether the run happened cannot
+            # tell "no record" from "no run". See gate_red_since_gate.
+            gates.append(gate_red_since_gate(repo, _record, base=base,
+                                             producer=_hygiene))
 
     # 5. verdict.
     blocking = [f"{g.name}: {g.summary}" for g in gates if not g.green]
