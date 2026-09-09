@@ -1550,7 +1550,30 @@ def _check_drc(project_dir: Path) -> AuditResult:
         "spacing": re.compile(r"spac", re.I),
         "width": re.compile(r"width|min\s*width", re.I),
         "density": re.compile(r"density", re.I),
-        "antenna": re.compile(r"antenna", re.I),
+        # THE WORD IS NOT THE VOCABULARY (vibe-ic#2172's third recorded item).
+        # A KLayout gf180 sign-off RDB names its antenna rules `ANT.8`,
+        # `ANT.16_ii_ANT.4`, and describes them as "related gate oxide area".
+        # It never writes the word "antenna". MEASURED on the published corpus:
+        # `ic/spm/v1.9.96_gf180mcuD/reports/phase3/drc_signoff.rpt` carries 20
+        # antenna rule instances and the literal count is 0, so the report was
+        # classified `[spacing, width, via, enclosure]` -- antenna absent from a
+        # report that is 20/20 antenna.
+        #
+        # NOT simply reused from `_TOOL_SIGNATURES["antenna"]` below, and that
+        # is deliberate: the two tables answer different questions. That one
+        # asks "did an antenna TOOL write this", so it carries `openroad` and
+        # `net violations` -- tokens that would put every OpenROAD DRC report
+        # into the antenna category here. This one asks "does this report talk
+        # about antenna RULES", and its tokens are the ones the decks
+        # themselves write.
+        #
+        # `ANT[.-]\d` is anchored on both sides for a reason: `\b` plus a
+        # required separator AND digit is what keeps SLANT, GIANT, ANTI and a
+        # bare "ANT" out. OVER-MATCH CONTROL over the 31 DRC reports of the
+        # published corpus: 14 matched before and still match, 2 files / 1 ROOT
+        # gained (the spm report above, and it is the same report under two
+        # paths), 15 still do not match. Nothing was swept in.
+        "antenna": re.compile(r"antenna|\bANT[.-]\d|gate[- ]oxide", re.I),
         "via": re.compile(r"\bvia\b", re.I),
         "enclosure": re.compile(r"enclos", re.I),
     }
