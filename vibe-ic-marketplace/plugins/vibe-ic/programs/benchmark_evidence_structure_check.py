@@ -194,6 +194,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _corpus_denominator as _corpus_den  # noqa: E402
+import _corpus_location as _corpus_loc  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Contract constants (structure, not chips).
@@ -1229,6 +1230,54 @@ def main(argv: Optional[List[str]] = None) -> int:
     #
     # A pointer that IS set still refuses here, before discovery: that is a caller naming two
     # subjects, which is the czcorpus shape and stays out loud.
+    # THE CANONICAL NAME OF THE TREE THAT MOVED IS NOT A SUBJECT THE CALLER CHOSE.
+    #
+    # Two landed contracts met here and gave the SAME command line opposite
+    # answers, MEASURED on main 72bd2679b:
+    #
+    #   #1710 (v1.10.51) `--tree benchmark-data` + pointer set -> follow the
+    #       pointer and ANNOUNCE it. The corpus left this repo in v1.10.56 and
+    #       the pointer is the only way to say where it went.
+    #   czcorpus (v1.19.92) explicit `--tree` absent + pointer set -> refuse,
+    #       because an environment variable must never SUBSTITUTE for a subject
+    #       the caller named (28 tests judged the wrong tree).
+    #
+    # Both are right about different inputs, and the difference is WHO CHOSE THE
+    # NAME. `benchmark-data` as a REPOSITORY-RELATIVE path is not a subject a
+    # caller picked; it is this repository's own former name for the tree that
+    # moved out of it, spelled once as `_corpus_location.CANONICAL_CORPUS_NAME`
+    # and hardcoded into both shipped call sites. An absolute path, or any other
+    # relative name, IS a subject the caller picked, and czcorpus governs it
+    # unchanged.
+    #
+    # Not settling this left the gate unable to scan a corpus AT ALL on the
+    # landing path. MEASURED on 72bd2679b with a real 21-cell corpus:
+    #
+    #   pointer unset -> rc 0 NO_CORPUS      (nothing scanned, by permission)
+    #   pointer set   -> rc 2 UNDETERMINED   (refused before discovery)
+    #
+    # and `tools/gatekeeper-land.sh` drops `--changed-since` exactly when the
+    # pointer IS set, while `hermetic_candidate_runner` sets the pointer in both
+    # its land and test process envs. So configuring the corpus — the one
+    # supported way to make this gate check something — turned it into a landing
+    # blocker, and `test_a_pointed_at_corpus_that_is_malformed_still_fails` went
+    # green on rc 2 for a corpus the gate never opened.
+    _named = Path(args.tree) if args.tree else None
+    _named_is_the_moved_corpus = (
+        _named is not None
+        and not _named.is_absolute()
+        and _named.parts[:1] == (_corpus_loc.CANONICAL_CORPUS_NAME,)
+        and not _named.is_dir())
+    if _env_tree and _named_is_the_moved_corpus:
+        _rel = _named.relative_to(_corpus_loc.CANONICAL_CORPUS_NAME)
+        _target = Path(_env_tree).joinpath(*_rel.parts)
+        print(f"note: {CORPUS_ENV} overrides --tree {args.tree} -> {_target}. "
+              f"`{args.tree}` is this repository's own name for the corpus that "
+              f"moved to its own repository in v1.10.56, not a subject the "
+              f"caller chose; an explicit subject that is anything else is "
+              f"still never substituted.", file=sys.stderr)
+        args.tree = str(_target)
+
     _absence_is_permitted = args.corpus_may_be_absent and not _env_tree
     if (args.tree is not None and (not args.tree or not Path(args.tree).is_dir())
             and not _absence_is_permitted):
