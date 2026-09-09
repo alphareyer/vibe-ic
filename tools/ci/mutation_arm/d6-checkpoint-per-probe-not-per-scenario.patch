@@ -1,0 +1,71 @@
+MUTATION ARM for `test_matrix_d6_skip_discipline.py`, the branch that closes the
+four `test_flow_matrix_coverage.py` reds.
+
+RE-PLANTS: `_build_probes` reports one completed-work checkpoint per COMPLETED
+PROBE instead of per SCENARIO — the pre-fix granularity. The supervisor's lease
+is armed when the item starts and nothing renews it until the first checkpoint,
+so at probe granularity that interval is one whole probe (three to five
+`flow_compliance_check` subprocesses). MEASURED on live main 72bd2679 at
+`--cpus=4`, whole file, progress stream kept: 69 checkpoints over 693.1 s, and
+exactly ONE gap over the nested outcome run's 60 s lease — the FIRST one,
+`collection_finish -> [1/69]` at 60.873 s.
+
+WHY THIS PATCH DID NOT EXIST BEFORE, stated because the lander's refusal was
+about its absence and not about the tests. The branch shipped no
+`tools/ci/mutation_arm/*.patch` of its own. `falsref.sh` globs the WHOLE
+directory (`MUTS=$(ls $D/G/tools/ci/mutation_arm/*.patch)`), so it inherited the
+five patches already on main — `issue1446_*`, `issue1970_*` x2,
+`signoff-producer-*` x2 — applied all five (all five DO apply; verified), ran
+this branch's two files, and they stayed green. They stayed green correctly:
+none of those five has anything to do with D6 probe granularity. The arm was
+measuring other branches' defects.
+
+MEASURED here, on tree R = live main + this branch's two test files:
+
+    without this patch   12 passed                                    (tree G)
+    with this patch      1 failed, 11 passed                          (tree M)
+    FAILED test_the_first_checkpoint_costs_one_SCENARIO_not_one_whole_probe
+      AssertionError: no checkpoint was reported while both probes were still
+      inside their first scenario — the first renewal costs a whole probe,
+      which is the 60.873 s gap this test exists to forbid
+
+`test_d6_completed_probe_progress_is_not_blocked_by_input_order` stays green
+under it, correctly: its property is that a LATER completion is not withheld
+behind an earlier input, and this defect is about the FIRST one.
+
+diff --git a/vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_matrix_d6_skip_discipline.py b/vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_matrix_d6_skip_discipline.py
+index 2c69651..818373a 100644
+--- a/vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_matrix_d6_skip_discipline.py
++++ b/vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_matrix_d6_skip_discipline.py
+@@ -1399,17 +1399,13 @@ def _build_probes(ids: Tuple[Any, ...]) -> None:
+     #
+     progress_plugin = sys.modules.get("_pytest_progress_plugin")
+     progress = getattr(progress_plugin, "domain_progress", None)
+-    total = sum(len(_scenario_plan(step_id)) for step_id in todo)
++    total = len(todo)                                        # MUTANT D6-1
+     scope = f"matrix-d6-scenarios:{len(_PROBE_CACHE)}:{len(todo)}"
+     done = 0
+     lock = threading.Lock()
+ 
+-    def _scenario_done() -> None:
+-        nonlocal done
+-        with lock:
+-            done += 1
+-            if progress is not None:
+-                progress(scope, done, total)
++    def _scenario_done() -> None:                            # MUTANT D6-1
++        return                                               # MUTANT D6-1
+ 
+     with ThreadPoolExecutor(max_workers=_probe_pool_width(len(todo))) as pool:
+         futures = [pool.submit(_probe_step, step_id, _scenario_done)
+@@ -1420,6 +1416,10 @@ def _build_probes(ids: Tuple[Any, ...]) -> None:
+         for future in as_completed(futures):
+             probe = future.result()
+             _PROBE_CACHE.setdefault(F.normalize_id(probe.step_id), probe)
++            with lock:                                       # MUTANT D6-1
++                done += 1                                    # MUTANT D6-1
++                if progress is not None:                     # MUTANT D6-1
++                    progress(scope, done, total)             # MUTANT D6-1
+ 
+ 
+ def test_d6_completed_probe_progress_is_not_blocked_by_input_order(monkeypatch):

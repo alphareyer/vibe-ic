@@ -225,6 +225,10 @@ from flow_matrix.cells import cells_for
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+# The repo's ONE reading of the tightest affinity/cgroup CPU allowance.
+# Imported rather than re-derived: a second implementation of this is a
+# second opinion about the machine, and they would drift.
+from pytest_per_file_junit import _available_cpu_count  # noqa: E402
 
 DIM = 6
 
@@ -1240,33 +1244,55 @@ def _reads_an_rtl_directory(step_id) -> bool:
     return False
 
 
-def _probe_step(step_id) -> Probe:
-    probe = Probe(step_id=step_id, roles=roles_for(step_id))
-    probe.gate_only_empty = _gate_only_on_empty(step_id)
-    probe.scenarios["EMPTY"] = _run_scenario(step_id, "EMPTY", seeded=False)
-    probe.scenarios["SEEDED"] = _run_scenario(step_id, "SEEDED", seeded=True)
-    probe.scenarios["FLOW_COMPLETE"] = _run_scenario(
-        step_id, "FLOW_COMPLETE", seeded=True, flow_complete=True)
+def _scenario_plan(step_id) -> Tuple[Tuple[str, Dict[str, Any]], ...]:
+    """The scenarios ONE probe will run, decided WITHOUT running any of them.
+
+    Extracted from :func:`_probe_step` so the unit of completed work has a name
+    and a COUNT that is knowable before the first subprocess starts. Every
+    decision here (`roles_for`, `_reads_an_rtl_directory`, `declared_paths`) is
+    a cheap read of the flow yaml, so the plan costs nothing and cannot drift
+    from what runs -- `_probe_step` iterates THIS list rather than repeating it.
+    """
+    roles = roles_for(step_id)
+    plan: List[Tuple[str, Dict[str, Any]]] = [
+        ("EMPTY", dict(seeded=False)),
+        ("SEEDED", dict(seeded=True)),
+        ("FLOW_COMPLETE", dict(seeded=True, flow_complete=True)),
+    ]
     if _reads_an_rtl_directory(step_id):
         # A step that reads RTL CONTENT cannot be shown anything by the
         # path-seeder, which materialises `phase2/stage1/rtl` as a bare
         # directory. Give it RTL that declares a safety mechanism, so the
         # constructive proof leg L2 demands has an input to find.
-        probe.scenarios["SAFETY_RTL"] = _run_scenario(
-            step_id, "SAFETY_RTL", seeded=True, safety_rtl=True)
+        plan.append(("SAFETY_RTL", dict(seeded=True, safety_rtl=True)))
     if not declared_paths(step_id):
         # P0 and anything else that declares no path of its own: SEEDED is
         # byte-identical to EMPTY, so the conditionality leg would have no
         # second input to compare against. Give it a project with real RTL —
         # the flow's universal precondition — so the umbrella's skip has
         # something to be conditional ON.
-        probe.scenarios["RTL"] = _run_scenario(
-            step_id, "RTL", seeded=True, rtl=True)
+        plan.append(("RTL", dict(seeded=True, rtl=True)))
     for name, waiver in (("W_PROSE", _PROSE_ONLY_WAIVER),
                          ("W_FORMED", _GOOD_WAIVER)):
-        if probe.roles:
-            probe.scenarios[name] = _run_scenario(
-                step_id, name, seeded=True, waiver=waiver, role=probe.roles[0])
+        if roles:
+            plan.append((name, dict(seeded=True, waiver=waiver,
+                                    role=roles[0])))
+    return tuple(plan)
+
+
+def _probe_step(step_id, on_scenario=None) -> Probe:
+    """One step's probe. ``on_scenario`` is called after EACH scenario.
+
+    The callback is what makes the unit of reported completed work a SCENARIO
+    rather than a whole probe; see :func:`_build_probes` for why that
+    distinction is load-bearing rather than cosmetic.
+    """
+    probe = Probe(step_id=step_id, roles=roles_for(step_id))
+    probe.gate_only_empty = _gate_only_on_empty(step_id)
+    for name, kwargs in _scenario_plan(step_id):
+        probe.scenarios[name] = _run_scenario(step_id, name, **kwargs)
+        if on_scenario is not None:
+            on_scenario()
     return probe
 
 
@@ -1281,28 +1307,119 @@ _PROBE_CACHE: Dict[str, Probe] = {}
 _PROBE_BUDGET: Optional[Tuple[str, ...]] = None
 
 
+#: The most probes that may run at once, whatever the machine says. Unchanged
+#: from the flat `8` this function used before: the CPU allowance below only
+#: ever NARROWS it.
+_PROBE_POOL_HARD_CAP = 8
+
+
+def _probe_pool_width(todo: int) -> int:
+    """How many probes to run at once: the CPU allowance, never more than 8.
+
+    THE OTHER HALF OF THE SAME MEASUREMENT. A scenario is CPU-bound (it seeds a
+    project and runs `flow_compliance_check.py` as a subprocess), so eight of
+    them in flight on a four-CPU cgroup do not finish sooner than four -- they
+    all finish about twice as LATE, and the interval between two checkpoints is
+    exactly how long the in-flight batch takes.
+
+    MEASURED 2026-09-10, pinned image, `--cpus=4`, SIX concurrent containers
+    running this file (the shape of the A/B that exposed it), scenario-granular
+    checkpoints at the flat width 8:
+
+        arm     max inter-event gap     over the 60 s lease
+        L1               38.65 s                 0
+        L2               59.92 s                 0
+        L3               60.21 s                 1   <--
+        L4               57.45 s                 0
+        L5               38.07 s                 0
+        L6               56.54 s                 0
+
+    Four of six sat within four seconds of the lease and one crossed it. That
+    is not margin, and the flat `8` is why: it is a guess about the machine
+    made in a file that has a measured answer available. `_available_cpu_count`
+    is the repo's existing reading of the tightest affinity/cgroup allowance
+    and is what `pytest_per_file_junit._fallback_capacity` already narrows by.
+
+    NOTHING IS RAISED. The hard cap stays 8 and this can only lower it; a host
+    that reports nothing keeps the previous behaviour exactly.
+    """
+    width = min(_PROBE_POOL_HARD_CAP, todo)
+    allowance = _available_cpu_count()
+    if allowance is not None and allowance > 0:
+        width = min(width, allowance)
+    return max(1, width)
+
+
 def _build_probes(ids: Tuple[Any, ...]) -> None:
-    """Probe every id not already cached, in parallel, and cache the results."""
+    """Probe every id not already cached, in parallel, and cache the results.
+
+    THE UNIT OF REPORTED WORK IS A SCENARIO, NOT A PROBE, and that is the whole
+    of the fix for the four `test_flow_matrix_coverage.py` reds.
+
+    This one pytest item batches many independent, real flow probes. Exposing
+    FINITE completed-work checkpoints to the landing supervisor is not optional
+    here: `_pytest_progress_plugin.pytest_runtest_logstart` emits NOTHING, so
+    between two `test_finish` events these checkpoints are the ONLY signal the
+    supervisor can see, and this item runs for 12 minutes.
+
+    Reporting one checkpoint per COMPLETED PROBE satisfies that only after the
+    first probe finishes, and nothing renews before it. MEASURED 2026-09-10 at
+    live main 72bd2679 in the pinned image at `--cpus=4`, whole file, progress
+    stream kept: 69 checkpoints spanning 693.1 s, largest gap BETWEEN
+    checkpoints 33.504 s -- and exactly ONE gap over the nested outcome run's
+    60 s lease, the FIRST one, `collection_finish -> [1/69]` at **60.873 s**.
+    That interval is one whole probe (three to five `flow_compliance_check`
+    subprocesses) and it is structurally unrenewable at probe granularity, so
+    `test_flow_matrix_coverage.py` reported
+
+        the outcome run for test_matrix_d6_skip_discipline.py produced no
+        complete semantic pytest lifecycle record (driver rc=2)
+        ... PROGRESS_PROTOCOL_INCOMPLETE: terminal event missing (stage=running)
+
+    in 9 of 9 runs -- 1 alone and 8 at eight-way container concurrency, the
+    same four test ids every time. The lease is not raised and no heartbeat is
+    added: the checkpoint is moved to the unit that is actually finite, real
+    and completed, which is a SCENARIO. One D1 probe is 17.20 s of three
+    scenarios (0.81 / 4.91 / 11.48), so the first renewal now arrives about a
+    second in and the largest reachable gap is one scenario.
+
+    The total is `_scenario_plan`-derived and therefore known before the first
+    subprocess starts, which is what the supervisor requires (a fixed total and
+    exact `+1` transitions; `pytest_per_file_junit` caps a total at 10,000 and
+    this is ~4x69). Checkpoints are emitted from worker threads, so the
+    counter and the emit are under ONE lock: releasing between them would let
+    two threads report `2` before `1` and the supervisor would correctly refuse
+    the whole session for a non-monotonic scope.
+    """
     todo = [s for s in ids if F.normalize_id(s) not in _PROBE_CACHE]
     if not todo:
         return
-    # This one pytest item deliberately batches many independent, real flow
-    # probes.  Expose FINITE completed-work checkpoints to the landing
-    # supervisor; do not emit time/output/CPU heartbeats.  When the private
-    # plugin is not loaded (ordinary direct pytest), this remains a no-op.
+    # When the private plugin is not loaded (ordinary direct pytest), this
+    # remains a no-op.
+    #
     progress_plugin = sys.modules.get("_pytest_progress_plugin")
     progress = getattr(progress_plugin, "domain_progress", None)
-    scope = f"matrix-d6-probes:{len(_PROBE_CACHE)}:{len(todo)}"
-    with ThreadPoolExecutor(max_workers=min(8, len(todo))) as pool:
-        futures = [pool.submit(_probe_step, step_id) for step_id in todo]
+    total = sum(len(_scenario_plan(step_id)) for step_id in todo)
+    scope = f"matrix-d6-scenarios:{len(_PROBE_CACHE)}:{len(todo)}"
+    done = 0
+    lock = threading.Lock()
+
+    def _scenario_done() -> None:
+        nonlocal done
+        with lock:
+            done += 1
+            if progress is not None:
+                progress(scope, done, total)
+
+    with ThreadPoolExecutor(max_workers=_probe_pool_width(len(todo))) as pool:
+        futures = [pool.submit(_probe_step, step_id, _scenario_done)
+                   for step_id in todo]
         # Report actual completions, not input-order retirements.  `map()`
         # blocks on the first submitted probe even when seven later probes have
         # already finished, turning real completed work into supervisor silence.
-        for completed, future in enumerate(as_completed(futures), start=1):
+        for future in as_completed(futures):
             probe = future.result()
             _PROBE_CACHE.setdefault(F.normalize_id(probe.step_id), probe)
-            if progress is not None:
-                progress(scope, completed, len(todo))
 
 
 def test_d6_completed_probe_progress_is_not_blocked_by_input_order(monkeypatch):
@@ -1322,16 +1439,25 @@ def test_d6_completed_probe_progress_is_not_blocked_by_input_order(monkeypatch):
         def __init__(self, step_id):
             self.step_id = step_id
 
-    def fake_probe(step_id):
+    def fake_probe(step_id, on_scenario=None):
         if step_id == "slow":
             if not slow_release.wait(10):
                 raise AssertionError("the test did not release the slow probe")
         else:
             fast_finished.set()
+        if on_scenario is not None:
+            on_scenario()
         return _FinishedProbe(step_id)
 
+    # `slow`/`fast` are not flow steps, so the plan is faked too -- ONE scenario
+    # each, which keeps this guard's subject exactly what it always was (a
+    # completed unit must not be withheld behind a slower earlier input) while
+    # the total stays a live derivation of the plan rather than a literal.
+    fake_plan = {"slow": (("ONLY", {}),), "fast": (("ONLY", {}),)}
+    expected_total = sum(len(fake_plan[s]) for s in ("slow", "fast"))
+
     def record_progress(_scope, completed, total):
-        assert total == 2
+        assert total == expected_total, (total, expected_total)
         if completed == 1:
             first_checkpoint.set()
 
@@ -1341,6 +1467,7 @@ def test_d6_completed_probe_progress_is_not_blocked_by_input_order(monkeypatch):
 
     monkeypatch.setattr(module, "_PROBE_CACHE", {})
     monkeypatch.setattr(module, "_probe_step", fake_probe)
+    monkeypatch.setattr(module, "_scenario_plan", lambda sid: fake_plan[sid])
     # Ordinary direct pytest does not load the private progress plugin.  Put a
     # proxy at the exact lookup seam rather than making the unit test depend on
     # the outer driver that is itself under test elsewhere.
@@ -1365,6 +1492,112 @@ def test_d6_completed_probe_progress_is_not_blocked_by_input_order(monkeypatch):
         worker.join(timeout=10)
     assert not worker.is_alive(), "probe builder did not terminate"
     assert not errors, errors
+
+
+def test_the_probe_pool_narrows_to_the_cpu_allowance_and_never_widens():
+    """The width may only ever come DOWN from the flat cap it used to be.
+
+    Both directions, because a "cap" that a machine reading can raise is not a
+    cap: a four-CPU cgroup must get four probes in flight, a machine that
+    reports a hundred CPUs must still get eight, and a host that can report
+    nothing at all must keep exactly the previous behaviour.
+    """
+    module = sys.modules[__name__]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(module, "_available_cpu_count", lambda: 4)
+        assert _probe_pool_width(69) == 4
+        assert _probe_pool_width(2) == 2, "never more than there is work"
+        mp.setattr(module, "_available_cpu_count", lambda: 100)
+        assert _probe_pool_width(69) == _PROBE_POOL_HARD_CAP, (
+            "a big machine may not widen the pool past the hard cap")
+        mp.setattr(module, "_available_cpu_count", lambda: None)
+        assert _probe_pool_width(69) == _PROBE_POOL_HARD_CAP, (
+            "an unmeasurable host keeps the previous flat behaviour")
+        mp.setattr(module, "_available_cpu_count", lambda: 0)
+        assert _probe_pool_width(69) == _PROBE_POOL_HARD_CAP
+        mp.setattr(module, "_available_cpu_count", lambda: 1)
+        assert _probe_pool_width(69) == 1, "a one-CPU box runs one at a time"
+
+
+def test_the_first_checkpoint_costs_one_SCENARIO_not_one_whole_probe():
+    """THE 60.873 s GAP, as a property.
+
+    The supervisor's lease is armed when the item starts and nothing renews it
+    until the first checkpoint. At probe granularity that interval is one whole
+    probe; MEASURED on live main it was 60.873 s against a 60 s lease, and it
+    was the ONLY gap in the entire 693 s run that exceeded it.
+
+    So what is pinned is not a duration -- a duration would be a reading of this
+    box -- but the UNIT: while every probe is still running its FIRST scenario,
+    a checkpoint must already have been reported. Restoring the per-probe
+    checkpoint makes the first one unreachable until a probe completes, and this
+    test blocks and then fails on `first`.
+    """
+    started = threading.Barrier(2, timeout=30)
+    release = threading.Event()
+    first: List[Tuple[int, int]] = []
+    first_seen = threading.Event()
+
+    plan = {"a": 3, "b": 3}
+
+    class _Probed:
+        def __init__(self, step_id):
+            self.step_id = step_id
+
+    def fake_plan(step_id):
+        return tuple(("S%d" % i, {}) for i in range(plan[step_id]))
+
+    def fake_probe(step_id, on_scenario=None):
+        for index in range(plan[step_id]):
+            if index == 0:
+                # Every probe reaches the end of its FIRST scenario, and none
+                # of them is allowed to finish, so any checkpoint observed
+                # below can only be a scenario-granular one.
+                started.wait()
+            else:
+                if not release.wait(20):
+                    raise AssertionError("the test never released the probes")
+            if on_scenario is not None:
+                on_scenario()
+        return _Probed(step_id)
+
+    def record_progress(_scope, completed, total):
+        if not first_seen.is_set():
+            first.append((completed, total))
+            first_seen.set()
+
+    class _ProgressProxy:
+        domain_progress = staticmethod(record_progress)
+
+    module = sys.modules[__name__]
+    errors: List[BaseException] = []
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(module, "_PROBE_CACHE", {})
+        mp.setattr(module, "_probe_step", fake_probe)
+        mp.setattr(module, "_scenario_plan", fake_plan)
+        mp.setitem(sys.modules, "_pytest_progress_plugin", _ProgressProxy)
+
+        def build():
+            try:
+                _build_probes(("a", "b"))
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=build)
+        worker.start()
+        try:
+            observed = first_seen.wait(20)
+        finally:
+            release.set()
+            worker.join(timeout=20)
+
+    assert not worker.is_alive(), "probe builder did not terminate"
+    assert not errors, errors
+    assert observed, (
+        "no checkpoint was reported while both probes were still inside their "
+        "first scenario — the first renewal costs a whole probe, which is the "
+        "60.873 s gap this test exists to forbid")
+    assert first == [(1, 6)], first
 
 
 def _budget_from(items) -> Optional[Tuple[str, ...]]:

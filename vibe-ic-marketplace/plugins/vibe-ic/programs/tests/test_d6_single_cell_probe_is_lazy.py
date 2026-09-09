@@ -84,8 +84,16 @@ def _d6_modules():
 
 def pytest_collection_modifyitems(session, config, items):
     for mod in _d6_modules():
-        def _stub(step_id, _mod=mod):
+        def _stub(step_id, on_scenario=None, _mod=mod):
+            # A faithful double of `_probe_step`: it reports ONE completed unit
+            # per PLANNED SCENARIO, which is the granularity the real one owes
+            # the landing supervisor. A double that swallowed the callback
+            # would make this file green against a `_build_probes` that reports
+            # nothing at all.
             _SEEN.append(str(step_id))
+            for _scenario in _mod._scenario_plan(step_id):
+                if on_scenario is not None:
+                    on_scenario()
             return _mod.Probe(step_id=step_id)
 
         mod._probe_step = _stub
@@ -119,8 +127,11 @@ class _FakeItem:
 
 
 def _counting_probe_step(seen: List[str]):
-    def _stub(step_id):
+    def _stub(step_id, on_scenario=None):
         seen.append(str(step_id))
+        for _scenario in D6._scenario_plan(step_id):
+            if on_scenario is not None:
+                on_scenario()
         return D6.Probe(step_id=step_id)
 
     return _stub
