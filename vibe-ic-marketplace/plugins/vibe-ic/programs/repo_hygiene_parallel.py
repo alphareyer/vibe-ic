@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Sequence, Tuple
 
 import _crash_safe_scratch as _scratch
+import _gate_inflight_progress as _inflight
 import _owned_process_supervisor as _owned
 import _semantic_child_progress as _semantic_progress
 import gate_process_attestation as _gate_attestation
@@ -446,6 +447,104 @@ def _write_jsonl(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
     write_text(path, "".join(json.dumps(row, ensure_ascii=True,
                                          sort_keys=True) + "\n" for row in rows))
     path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+
+# --- THE REVIEW-SIDE HALF OF vibe-ic#2177 ----------------------------------
+# The in-flight channel repaired the lease THIS module holds over each shard.
+# It does not reach the lease `gatekeeper_review.repo_hygiene_gate` holds over
+# THIS PROCESS. That supervisor is `_watchdog.run_supervised(..., log_path=
+# progress, stall_grace_s=_HYGIENE_STALL_GRACE_S)` and its own refusal text
+# names its only two signals: "no output or completed-gate record advanced for
+# 1800s". The per-shard in-flight files are private to each worker, so nothing
+# it can see moves while one long gate is in flight.
+#
+# THE BOUND IS BELOW ITS SUBJECT AGAIN, ONE SUPERVISOR OUT, and the figure is
+# DERIVED rather than typed: `hygiene_shard_plan.plan` over this script's
+# declared labels with the shipped `hygiene_gate_profile.json` puts the two
+# heaviest gates in SINGLETON buckets at 2556 s (`gates are host-independent`)
+# and 646 s (`an argued direction is pinned`). After the second finishes no
+# arm-A shard can complete another gate for at least 2556 - 646 = 1910 s,
+# against a 1800 s lease. `test_issue2177_review_side_lease.py` re-derives
+# both numbers from the shipped artefacts rather than asserting them.
+#
+# MEASURED, not argued: an outer `run_supervised` over a child that wrote 20
+# ACCEPTED in-flight rows and nothing else was killed at exactly its lease.
+#
+# THE REPAIR IS THE ISSUE'S OWN AND RAISES NO BOUND: measured sub-unit
+# progress is converted into the one signal that supervisor can see, one line
+# on stdout, and ONLY for rows `InflightReader` has ACCEPTED -- so a shard
+# cannot hold the outer lease open with rows the reader refuses, and a channel
+# that goes bad stops renewing from that moment (the reader latches its error
+# and freezes its score). The line names the arm, the shard and the gate in
+# flight, which is also the live log a 40-minute tier never had.
+#
+# INERT WITHOUT SHARDS: with no in-flight paths the relay starts no thread and
+# prints nothing, so a caller that wired no channel keeps the previous output
+# byte-for-byte.
+_OUTER_RELAY_POLL_S = 5.0
+
+
+class OuterProgressRelay:
+    """Renew the REVIEW-side lease from measured sub-unit progress."""
+
+    def __init__(self, rows, *, stream=None, poll_s: float = _OUTER_RELAY_POLL_S):
+        self._readers = [
+            (arm, shard, _inflight.InflightReader(str(path), tuple(labels)))
+            for arm, shard, path, labels in rows]
+        self._scores: Dict[Tuple[str, int], int] = {}
+        self._said_error: set = set()
+        self._stream = stream
+        self._poll_s = float(poll_s)
+        self._stop = threading.Event()
+        self._thread = None
+        self.emitted = 0
+
+    def _say(self, line: str) -> None:
+        print(line, file=self._stream if self._stream is not None else sys.stdout,
+              flush=True)
+
+    def sample_once(self) -> int:
+        """One pass. Returns how many lines it emitted."""
+        emitted = 0
+        for arm, shard, reader in self._readers:
+            key = (arm, shard)
+            try:
+                score = reader.sample()
+            except Exception:
+                # A relay that raised would take the whole tier down over a
+                # channel that is only ever an ADDITION to the record.
+                continue
+            if score > self._scores.get(key, 0):
+                self._scores[key] = score
+                self._say(f"[PROGRESS] hygiene arm {arm} shard {shard}: "
+                          f"{reader.describe()}")
+                emitted += 1
+            if reader.error and key not in self._said_error:
+                self._said_error.add(key)
+                self._say(f"[PROGRESS] hygiene arm {arm} shard {shard}: "
+                          "in-flight channel stopped renewing: "
+                          f"{reader.error}")
+                emitted += 1
+        self.emitted += emitted
+        return emitted
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self._poll_s):
+            self.sample_once()
+        self.sample_once()
+
+    def __enter__(self):
+        if self._readers:
+            self._thread = threading.Thread(
+                target=self._loop, daemon=True, name="hygiene-outer-progress")
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(self._poll_s * 2.0, 1.0))
+        return False
 
 
 def _run(argv: List[str], cwd: Path, env: Dict[str, str], *,
@@ -1499,8 +1598,13 @@ def main(argv=None) -> int:
         # but at most `budget` of them hold a gate slot at any moment and the
         # rest queue. `jobs * 2` ran both arms of every bucket at once, which
         # is where the 16 concurrent shards of #2072 came from.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=budget) as pool:
-            results = list(pool.map(run_worker, workers))
+        relay_rows = [(arm, i, inflight, expected_executed_labels(bucket))
+                      for (arm, i, bucket, _r, _s, _a, inflight, _v, _e)
+                      in workers]
+        with OuterProgressRelay(relay_rows):
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=budget) as pool:
+                results = list(pool.map(run_worker, workers))
 
         # Resource wave 2.  The census owns its machine while each arm runs.
         # A/B concurrency here reproducibly pushes a 43s-alone subprocess past
@@ -1531,8 +1635,13 @@ def main(argv=None) -> int:
                 sensitive_workers.append(
                     (arm, sensitive_i, sensitive, arm_root, summary, attest,
                      inflight, argv_i, env))
-            for row in sensitive_workers:
-                results.append(run_worker(row))
+            sensitive_rows = [
+                (arm, i, inflight, expected_executed_labels(bucket))
+                for (arm, i, bucket, _r, _s, _a, inflight, _v, _e)
+                in sensitive_workers]
+            with OuterProgressRelay(sensitive_rows):
+                for row in sensitive_workers:
+                    results.append(run_worker(row))
 
         docs: List[Tuple[Path, Dict[str, Any]]] = []
         arm_a_doc_count = 0
