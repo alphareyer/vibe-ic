@@ -216,9 +216,40 @@ def evaluate(project: Path,
     }
 
 
+def _section_tally(v: Dict[str, Any]) -> str:
+    """One section's tally, with an ALL-NOT-APPLICABLE section named as such.
+
+    WHY THIS IS NOT COSMETIC (measured, spm @ v1.18.17, lane rbspm4). On the
+    HARDMACRO route every question in `2B_pad_ring` and `2C_seal_ring` is
+    `required_for=(DIE,)`, so `audit()` correctly reports
+    `unanswered=0, not_applicable=8` and `unanswered=0, not_applicable=3`:
+    the questions are DISPOSED OF, not outstanding. This line nevertheless
+    printed them as
+
+        2B_pad_ring=0/8 2C_seal_ring=0/3
+
+    — the `answered/questions` ratio — which reads as "0 of 8 done" and is
+    indistinguishable from eight unanswered questions. That reading was taken
+    at face value twice, by a reviewing agent and by the repo owner, and
+    produced a decision to "dispose of" questions the code had already
+    disposed of. A tally that cannot distinguish "not required here" from
+    "not answered yet" is the defect; the counts underneath were right all
+    along.
+
+    NO VERDICT CHANGES. `answered`, `not_applicable` and the verdict itself
+    are untouched — only how a fully-N/A section is rendered.
+    """
+    if v["questions"] and v["not_applicable"] == v["questions"]:
+        return f"n/a({v['questions']})"
+    if v["not_applicable"]:
+        return (f"{v['answered']}/{v['questions'] - v['not_applicable']}"
+                f"+n/a({v['not_applicable']})")
+    return f"{v['answered']}/{v['questions']}"
+
+
 def summary_line(res: Dict[str, Any]) -> str:
     a = res["audit"]
-    secs = " ".join(f"{k}={v['answered']}/{v['questions']}"
+    secs = " ".join(f"{k}={_section_tally(v)}"
                     for k, v in a["sections"].items())
     return (f"{res['verdict']}: {PROGRAM} — "
             f"answered={a['answered']}/{a['questions_total']} ({secs}), "
