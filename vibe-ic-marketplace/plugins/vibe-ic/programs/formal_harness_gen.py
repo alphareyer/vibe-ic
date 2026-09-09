@@ -34,8 +34,11 @@ come from the RTL, which is design INPUT.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
+import os
 import re
+import stat
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,21 +64,46 @@ AUTHORING_REQUEST = "formal_authoring_request.json"
 #   2. the root exists and holds an `L*.json` that could NOT be parsed or
 #      opened (`json.loads` / `read_text` raised, and the exception was
 #      swallowed by a bare `continue`);
-#   3. the root exists, every file in it was read, and the design genuinely
+#   3. the root exists but could not be LISTED — `Path.glob` answers a
+#      directory it may not read with an empty iterator and no exception, so
+#      every declaration inside it, individually openable by name, was counted
+#      as a layer the design never declared. Its sibling, an ancestor that
+#      cannot be traversed, was not silent but was not Step 5's answer either:
+#      `Path.is_dir()` propagates EACCES, so the exception escaped this
+#      function and the runner's blanket handler wrote one opaque
+#      `authoring_program_error` row naming no root and no layer;
+#   4. the root exists, every file in it was read, and the design genuinely
 #      declares nothing for that layer.
 #
-# Only (3) is "absent". (1) and (2) are "I could not read it", and reporting
-# them as (3) is what left vibe-ic#2183 unable to name its own mechanism: the
-# run's own `property_contract.json` said the design's L3/L6/L8 declarations
-# were absent while they were present and yielded four obligations, and the
-# artefact carried nothing that could say WHICH root had been read. Every
-# contract below now names that root, so the next reader of a phantom
-# denominator can see the directory it was measured against.
+# Only (4) is "absent". (1), (2) and (3) are "I could not read it", and
+# reporting them as (4) is what left vibe-ic#2183 unable to name its own
+# mechanism: the run's own `property_contract.json` said the design's L3/L6/L8
+# declarations were absent while they were present and yielded four
+# obligations, and the artefact carried nothing that could say WHICH root had
+# been read. Every contract below now names that root, so the next reader of a
+# phantom denominator can see the directory it was measured against.
+#
+# (3) is the state this file reproduced LAST, and it is the one that still
+# printed (4)'s sentence after (1) and (2) were separated out. MEASURED
+# (lane cy2183, 8HD-4, 2026-09-09) on `main` 610cae2cc2b9, against a project
+# whose L3/L6/L8 are present and whose declaration root is merely not
+# listable:
+#
+#     missing_declarations  ['L3', 'L6', 'L8']      obligations 0
+#     declaration_root_present True                 unreadable_declarations []
+#     row L3.declaration_missing  DECLARATION_MISSING
+#         "L3 declaration is absent; applicability and property are unknown"
+#
+# — which is #2183's reported artefact, verbatim, produced from a root whose
+# declarations are on disk and readable BY NAME. A directory this process may
+# not list is not a design that declared nothing.
 #
 # Never greener: each state is still an UNRESOLVED row on an INCOMPLETE
-# verdict, and an unreadable file adds a row where it used to add silence.
+# verdict, the denominator is unchanged, and an unreadable file or root adds a
+# row where it used to add silence.
 DECLARATION_MISSING = "DECLARATION_MISSING"
 DECLARATION_ROOT_ABSENT = "DECLARATION_ROOT_ABSENT"
+DECLARATION_ROOT_UNREADABLE = "DECLARATION_ROOT_UNREADABLE"
 DECLARATION_UNREADABLE = "DECLARATION_UNREADABLE"
 
 #: The layers `_read_l_docs` reads. L3/L6/L8 carry the authoring denominator;
@@ -109,21 +137,30 @@ def _norm_applicability(value: Any) -> Tuple[str, str]:
 
 def _read_l_docs(project: Optional[Path]) -> Tuple[
         Dict[str, List[Tuple[Path, dict]]], Optional[Path], bool,
-        List[Dict[str, str]]]:
+        List[Dict[str, str]], Optional[str]]:
     """Read the canonical Phase-1 L3/L6/L8/L22 declarations, and SAY WHAT HAPPENED.
 
-    Returns ``(docs, root, root_present, unreadable)``:
+    Returns ``(docs, root, root_present, unreadable, root_error)``:
 
-    * ``root`` — the directory that was actually globbed, or None when there is
+    * ``root`` — the directory that was actually listed, or None when there is
       no project to derive one from. It is returned so every caller can put the
       path it read into the artefact it writes (#2183).
-    * ``root_present`` — whether that directory exists. "There is no such
-      directory" and "the directory holds no L3" are different findings.
+    * ``root_present`` — whether that directory was POSITIVELY established to
+      be a directory. "There is no such directory" and "the directory holds no
+      L3" are different findings.
     * ``unreadable`` — one row per ``L*.json`` that exists but could not be
       opened or parsed, naming the file and the error. This used to be a bare
       ``continue``: an unparseable declaration was indistinguishable from an
       undeclared one, which is the same error as reporting a failed read as an
       empty result anywhere else in this flow.
+    * ``root_error`` — set when the root itself could not be READ: the listing
+      raised, or ``stat`` raised something other than "no such file". The
+      directory is enumerated with ``os.listdir`` rather than ``Path.glob``
+      for exactly this reason — ``glob`` answers a directory it may not read
+      with an empty iterator and no exception, and every caller below then
+      reports declarations that are present, and individually openable by
+      name, as declarations the design never made. The selection is otherwise
+      byte-identical to the ``L*.json`` glob it replaces.
 
     A file that parses to something that is not a JSON object is NOT an
     unreadable file — it was read, and it declares nothing this schema can use.
@@ -132,12 +169,27 @@ def _read_l_docs(project: Optional[Path]) -> Tuple[
         layer: [] for layer in DECLARATION_LAYERS}
     unreadable: List[Dict[str, str]] = []
     if project is None or _pl is None:
-        return out, None, False, unreadable
+        return out, None, False, unreadable, None
     root = _pl.generated_docs_dir(project)
-    if not root.is_dir():
-        return out, root, False, unreadable
+    try:
+        is_dir = stat.S_ISDIR(os.stat(root).st_mode)
+    except OSError as exc:
+        # ENOENT/ENOTDIR is the honest "it is not there". Anything else is a
+        # failed read, and a failed read is never an absent declaration.
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            return out, root, False, unreadable, None
+        return out, root, False, unreadable, f"{type(exc).__name__}: {exc}"
+    if not is_dir:
+        return out, root, False, unreadable, None
+    try:
+        names = sorted(os.listdir(root))
+    except OSError as exc:
+        return out, root, True, unreadable, f"{type(exc).__name__}: {exc}"
     for layer in out:
-        for path in sorted(root.glob(f"{layer}*.json")):
+        for name in names:
+            if not (name.startswith(layer) and name.endswith(".json")):
+                continue
+            path = root / name
             try:
                 data = json.loads(path.read_text(errors="replace"))
             except (OSError, ValueError) as exc:
@@ -147,7 +199,7 @@ def _read_l_docs(project: Optional[Path]) -> Tuple[
                 continue
             if isinstance(data, dict):
                 out[layer].append((path, data))
-    return out, root, True, unreadable
+    return out, root, True, unreadable, None
 
 
 def _global_formal_applicability(
@@ -266,11 +318,16 @@ def declaration_obligations(project: Optional[Path]) -> dict:
         return {"applicability": "APPLICABLE", "obligations": [],
                 "missing_declarations": [], "layer_not_applicable": [],
                 "declaration_root": None, "declaration_root_present": False,
+                "declaration_root_error": None,
                 "unreadable_declarations": []}
-    docs, root, root_present, unreadable = _read_l_docs(project)
+    docs, root, root_present, unreadable, root_error = _read_l_docs(project)
     read_state = {
         "declaration_root": str(root) if root is not None else None,
         "declaration_root_present": root_present,
+        # #2183 — the state that used to be indistinguishable from "the design
+        # declares nothing": the root is there and this process could not read
+        # it. Never None-and-silent; a reader can tell the two apart.
+        "declaration_root_error": root_error,
         "unreadable_declarations": unreadable,
     }
     explicit_na = _global_formal_applicability(docs)
@@ -368,6 +425,7 @@ def _write_property_contract(project: Optional[Path], contract: dict) -> None:
             "declaration_root": contract.get("declaration_root"),
             "declaration_root_present": contract.get(
                 "declaration_root_present"),
+            "declaration_root_error": contract.get("declaration_root_error"),
             "unreadable_declarations": contract.get(
                 "unreadable_declarations", []),
             "reason": (
@@ -1126,6 +1184,7 @@ def _declaration_read_state(decl: dict) -> dict:
     return {
         "declaration_root": decl.get("declaration_root"),
         "declaration_root_present": bool(decl.get("declaration_root_present")),
+        "declaration_root_error": decl.get("declaration_root_error"),
         "unreadable_declarations": list(decl.get("unreadable_declarations") or []),
     }
 
@@ -1142,8 +1201,25 @@ def _unresolved_declaration_rows(decl: dict) -> List[dict]:
     rows: List[dict] = []
     root = decl.get("declaration_root")
     root_present = bool(decl.get("declaration_root_present"))
+    root_error = decl.get("declaration_root_error")
     for layer in decl.get("missing_declarations") or []:
-        if root_present:
+        if root_error:
+            # The root is not absent and the layer is not undeclared: the
+            # listing itself failed, so NOTHING was read and nothing here is a
+            # statement about the design. Checked FIRST — an unreadable root
+            # can be `root_present` either way (a failed listdir vs a failed
+            # stat), and neither of the other two rows would be true.
+            rows.append({
+                "id": f"{layer}.declaration_root_unreadable", "layer": layer,
+                "source": root,
+                "description": (
+                    f"the Phase-1 declaration root {root!r} could not be "
+                    f"read: {root_error}; {layer} was never read, and this is "
+                    f"NOT a statement that the design declares no {layer}"),
+                "author": "formal-verify",
+                "status": DECLARATION_ROOT_UNREADABLE,
+            })
+        elif root_present:
             rows.append({
                 "id": f"{layer}.declaration_missing", "layer": layer,
                 "source": None,
