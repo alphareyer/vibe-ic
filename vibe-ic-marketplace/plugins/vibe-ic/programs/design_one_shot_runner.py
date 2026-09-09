@@ -19184,6 +19184,22 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
     # `fault chain` also needs the RESET name (its --reset default is the
     # literal `rst`); derived from the SAME blob so the two can never disagree.
     dft_rst, dft_rst_active_low = "", False
+    # vibe-ic#2183 (the secondary finding of the NOT-REPRODUCIBLE report) —
+    # `pdk` is sniffed ONLY inside the Step-11 branch below, and Step DT1
+    # further down reads it at FUNCTION scope. Step 11 is skipped whenever
+    # `full_chip` is false; DT1 is not, because its own preconditions are
+    # `clk` + `phase2/stage2/dft/cut_netlist.v`, both of which survive an
+    # earlier full run. MEASURED on b6a73c0aa3, driving the real step with
+    # `full_chip=False` and a cut netlist on disk:
+    #     UnboundLocalError: cannot access local variable 'pdk'
+    # raised out of `step_dft_lec_chain`, which no caller catches — the whole
+    # phase-2 run dies at steps 11-13.
+    #
+    # `None` means NOT SNIFFED and is deliberately NOT `""`: the empty string
+    # is the sniff's OWN answer for a generic / unmapped netlist, so
+    # initialising to it would publish "there are no library-mapped cells" on a
+    # run that never looked. DT1 measures it instead — see the sniff below.
+    pdk: Optional[str] = None
     try:
         # DERIVE FROM THE TOP'S OWN PORTS, NOT FROM EVERY FILE IN rtl/.
         # The old blob was the concatenation of every RTL file, so on any
@@ -19737,6 +19753,14 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
             if (project / "input" / "pdk" / "liberty").is_dir() else []
         if _tdf_lib:
             tdf_cmd += ["--liberty", str(_tdf_lib[0])]
+        # vibe-ic#2183 — SNIFF IT HERE when Step 11 did not run (see the
+        # `pdk = None` note at the top of this function). The same call, on the
+        # same netlist, so the two branches can never name different PDKs; and
+        # a measurement rather than a default, so `--pdk-dir` is present
+        # exactly when the netlist says the commercial PDK is in use.
+        if pdk is None:
+            _tdf_sniff_netlist, pdk = _dft_atpg_sniff_pdk(
+                project, "phase2/stage2/synth/netlist.v")
         if pdk and pdk == _cpdk.COMMERCIAL_PDK_ID:
             tdf_cmd += ["--pdk-dir", str((project / "input" / "pdk").resolve())]
         try:
