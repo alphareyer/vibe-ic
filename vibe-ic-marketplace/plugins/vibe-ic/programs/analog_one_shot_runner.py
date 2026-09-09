@@ -60,6 +60,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import _path_layout as _pl
+import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _analog_a_check_common as _acc
 import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch site
 # vibe-ic#2080 — the master block-list SCHEMA gate. `main()` already refuses an
@@ -2121,7 +2122,7 @@ def main() -> int:
     def _dispatched(sr: StepResult) -> None:
         plan.append(sr)
         print(f"  {sr.status:6} {sr.name:24} block={sr.block:16} "
-              f"{sr.detail[:60]}")
+              f"{_rsum.summary_detail(sr.detail, sr.status, width=60)}")
 
     for blk in blocks:
         _bname = blk.get("name") or blk.get("type") or "unknown"

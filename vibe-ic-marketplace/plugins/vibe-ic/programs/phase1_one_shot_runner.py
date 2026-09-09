@@ -65,6 +65,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import _path_layout as _pl
+import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _runner_lock  # ORGANIC #588 — single-driver lock (all 4 runners)
 import _watchdog as _wd  # progress supervision — never a runtime bound
 import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch site
@@ -1598,7 +1599,8 @@ def main() -> int:
     print(f"\n=== phase1_one_shot_runner DONE (mode={mode}) ===")
     print(f"verdict: {summary['verdict']}")
     for s in plan:
-        print(f"  {s.status:6} {s.name:24} {s.detail[:120]}")
+        print(f"  {s.status:6} {s.name:24} "
+              f"{_rsum.summary_detail(s.detail, s.status)}")
     if _gap:
         # Same clause, same wording and same rc as the docs branch. A design
         # must not get a different answer because of which front door it came

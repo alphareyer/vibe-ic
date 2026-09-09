@@ -80,6 +80,7 @@ from pathlib import Path, PurePosixPath
 from typing import (Any, Callable, Dict, FrozenSet, Iterable, List,
                     NamedTuple, Optional, Sequence, Set, Tuple)
 import _path_layout as _pl
+import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _prose_polarity as _pp
 import _runner_measurement as _rmeas
 import _reference_flow_boundary as _rfb
@@ -38442,7 +38443,8 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
              f"{upstream_pnr.status} — the final DEF / pin-label stages "
              f"were never completed, so any compare would mismatch by "
              f"construction (not a design/extraction defect). Fix the "
-             f"pnr failure first: {upstream_pnr.detail[:400]}"),
+             f"pnr failure first: "
+             f"{_rsum.summary_detail(upstream_pnr.detail, width=400)}"),
             extras={"finding": "LVS_UPSTREAM_PNR_INCOMPLETE",
                     "upstream_pnr_status": upstream_pnr.status})
     # v1.4.70/#182 — DEVICE-level LVS route. A PDK whose registry declares a
@@ -42371,7 +42373,8 @@ def _reconcile_sta_verdict(rows: List[StepResult]) -> List[StepResult]:
         f"on this design. A single-corner result is a disclosed PARTIAL "
         f"measurement, not a sign-off STA verdict, so this row states no "
         f"verdict and the run's one STA answer is the multi-corner refusal "
-        f"(vibe-ic#2134). Its own finding was: {verdict_row.detail[:240]}",
+        f"(vibe-ic#2134). Its own finding was: "
+        f"{_rsum.summary_detail(verdict_row.detail, width=240)}",
         list(verdict_row.output_files), dict(verdict_row.extras))
     return [deferred if r.name == _STA_VERDICT_GATE else r for r in rows]
 
@@ -56177,7 +56180,8 @@ def main() -> int:
     if signoff_rollup["declared"]:
         print(f"sign-off: {signoff_rollup['line']}")
     for s in plan:
-        print(f"  {s.status:6} {s.name:8} {s.detail[:120]}")
+        print(f"  {s.status:6} {s.name:8} "
+              f"{_rsum.summary_detail(s.detail, s.status)}")
     print(f"final summary: {'reports/final_summary.md' if fs_ok else 'NOT generated'}")
     return 0 if summary["verdict"] in ("PASS", "PASS_WITH_WAIVERS",
                                        "PASS_WITH_OPEN_SOURCE_CONSTRAINTS") else 1

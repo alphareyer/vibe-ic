@@ -115,6 +115,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import _path_layout as _pl
+import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _rtl_include_hub as _hub  # shared include-hub aggregator predicate
 import _commercial_pdk as _cpdk  # config-driven commercial-PDK id (NDA: no SKU in source)
 import _lesson_digest  # surface the captured-lesson digest to spec-to-rtl authors
@@ -22272,7 +22273,8 @@ def main() -> int:
     print(f"\n=== design_one_shot_runner DONE — {out}")
     print(f"verdict: {summary['verdict']}")
     for s in plan:
-        print(f"  {s.status:8} {s.name:20} {s.detail[:120]}")
+        print(f"  {s.status:8} {s.name:20} "
+              f"{_rsum.summary_detail(s.detail, s.status)}")
     print(f"final summary: {'reports/final_summary.md' if fs_ok else 'NOT generated'}")
     return 0 if summary["verdict"] in ("PASS", "PASS_WITH_WAIVERS") else 1
 
