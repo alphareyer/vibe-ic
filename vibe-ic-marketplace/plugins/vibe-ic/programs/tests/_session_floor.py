@@ -53,6 +53,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
 
@@ -129,3 +130,189 @@ def stall_window(nominal: float, *, starts: int = 1) -> float:
     if not isinstance(starts, int) or starts < 1:
         raise ValueError(f"starts must be a positive int, got {starts!r}")
     return max(float(nominal), FLOOR_MULTIPLE * starts * trivial_session_s())
+
+
+# ── A NESTED DRIVER'S FIRST RELAYED EVENT (vibe-ic#2219) ────────────────────
+#
+# `stall_window(..., starts=N)` models the silence before a lease's first
+# renewal as N pytest start-ups IN SERIES. That model is right for a subject
+# that IS a pytest, and wrong for a subject whose renewals arrive through the
+# per-file driver's semantic RELAY, because the relay is not N start-ups: it is
+# a driver interpreter, then a supervised pytest, then that pytest's first
+# validated lifecycle event, then one probe poll that turns it into a relay
+# score, then one reader poll that turns the score into an outer
+# `domain_progress`. Four of those five terms are not interpreter start-up and
+# none of them is measured by `trivial_session_s`.
+#
+# MEASURED 2026-09-09 on 8HD-9, live main 6883a9c93 (v1.20.7), in the pinned
+# image at `--cpus=1 --memory=8g --pids-limit=1024`, host load 12. The outer
+# progress stream of
+# `test_nested_validated_progress_is_relayed_to_the_outer_session` was kept
+# (the driver deletes it) and every inter-event gap of the outer lease read
+# off it:
+#
+#     1.1059  SPAWN -> session_start                (one interpreter start)
+#     0.4705  collect_scan -> item_collected
+#     0.0002  item_collected -> collection_finish
+#     2.9234  collection_finish -> matrix-outcome-relay 1     <-- THE GAP
+#     0.0000  ... 82 relay scores, all sub-millisecond ...
+#     1.3084  matrix-outcome-modules 2 -> relay 83  (the second wave's lane)
+#
+# The lease was `stall_window(2.5, starts=2)`. The silence that killed it is
+# 2.9234 s of ONE term — the nested lane's first relayed event — and it is
+# 2.6x the interpreter start measured in the same run. `starts=2` at
+# `FLOOR_MULTIPLE` needs `trivial_session_s` >= 0.731 s to cover it, so the
+# test's colour was decided by whether this box's pytest start-up happened to
+# land above or below that line. That is the machine, which is the whole
+# defect. The 1.3084 s gap is the SAME quantity again at the wave boundary,
+# with warm caches.
+#
+# So the term is MEASURED rather than modelled, in the same shape as
+# `trivial_session_s`: really spawn the driver the subject spawns, on a
+# one-test corpus, and time spawn to the first byte the relay carries.
+
+#: The relay reader in `test_flow_matrix_coverage._run_one_module_outcome`
+#: polls at this cadence, so the calibration polls at it too: the quantity is
+#: "when could the outer lease have SEEN it", not "when was it written".
+_RELAY_POLL_S = 0.1
+
+_DRIVER = _PROGRAMS / "pytest_per_file_junit.py"
+
+#: The subject's shape, reduced to the part that happens BEFORE it can relay.
+#: `stall_window` is here because the subject calls it -- that call is two
+#: pytest sessions (`max(... for _ in range(2))`) and it is the largest single
+#: term in the silence measured above. Nothing after the driver spawn matters
+#: to the reading, so the corpus the nested lane runs is one trivial test.
+_RELAY_CALIBRATION_TEST = """\
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import _session_floor as _floor
+
+
+def test_relay_floor():
+    # The subject's own preamble, inside the lease exactly as the subject
+    # holds it: a lease-holder that must compute a floor before it can relay.
+    _floor.stall_window(0.45)
+    scratch = Path(os.environ["VIBEIC_RELAY_FLOOR_SCRATCH"])
+    proc = subprocess.run(
+        [sys.executable, os.environ["VIBEIC_RELAY_FLOOR_DRIVER"],
+         "--selection", str(scratch / "selection.txt"),
+         "--junit", str(scratch / "relay-floor-junit.xml"),
+         "--aggregate-only",
+         "--aggregate-stall-after", os.environ["VIBEIC_RELAY_FLOOR_STALL"],
+         "--progress-relay", str(scratch / "semantic-progress.relay"),
+         "--cwd", str(scratch), "--",
+         sys.executable, "-m", "pytest", "-q", "--tb=no",
+         "-p", "no:cacheprovider",
+         "--basetemp", str(scratch / "pytest_tmp")],
+        cwd=str(scratch), stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True)
+    assert proc.returncode in (0, 1), proc.stdout[-2000:]
+"""
+
+
+def _one_trivial_relay_s(cwd: Path) -> float:
+    """Spawn-to-FIRST-RELAYED-EVENT seconds, in the subject's own shape.
+
+    Not a model of the span and not one term of it: really spawn a pytest
+    that computes a floor and then drives a nested
+    ``pytest_per_file_junit.py`` lane through ``--progress-relay``, and time
+    from that spawn to the first byte the relay carries -- which is the first
+    moment an enclosing lease could have been renewed.
+
+    This is EXPENSIVE (three interpreter generations plus the subject's own
+    two calibration sessions) and that is the price of the number being a
+    reading rather than a guess. It is taken once per process, cached, and
+    only by the tests that hold such a lease.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in _INHERITED}
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(_PROGRAMS), str(_PROGRAMS / "tests")]
+        + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # A SHORT name on purpose: this root carries a `--basetemp` beneath it and
+    # then pytest's own per-test directories, and a scratch root that is merely
+    # LONG is its own class of manufactured failure in this tree.
+    with tempfile.TemporaryDirectory(prefix="r-", dir=str(cwd)) as scratch_name:
+        scratch = Path(scratch_name)
+        (scratch / "test_relay_floor_inner.py").write_text(
+            "def test_relay_floor_inner():\n    assert True\n",
+            encoding="utf-8")
+        (scratch / "selection.txt").write_text(
+            str(scratch / "test_relay_floor_inner.py") + "\n",
+            encoding="utf-8")
+        outer = scratch / "test_relay_floor_outer.py"
+        outer.write_text(_RELAY_CALIBRATION_TEST, encoding="utf-8")
+        relay = scratch / "semantic-progress.relay"
+        relay.touch(mode=0o600)
+        env["VIBEIC_RELAY_FLOOR_SCRATCH"] = str(scratch)
+        env["VIBEIC_RELAY_FLOOR_DRIVER"] = str(_DRIVER)
+        # The lease the CALIBRATION's own nested driver holds. Nothing is
+        # derived from it; it exists so a hung calibration is reported as a
+        # stall instead of hanging the file, and it is deliberately far above
+        # anything this can take.
+        env["VIBEIC_RELAY_FLOOR_STALL"] = str(60.0 * FLOOR_MULTIPLE)
+        log = scratch / "calibration.log"
+        started = time.monotonic()
+        with log.open("w+", encoding="utf-8") as log_file:
+            proc = subprocess.Popen(
+                [sys.executable, "-m", "pytest", "-q", "--tb=short",
+                 "-p", "no:cacheprovider", str(outer)],
+                cwd=str(scratch), stdout=log_file,
+                stderr=subprocess.STDOUT, text=True, env=env)
+            first: Optional[float] = None
+            while proc.poll() is None:
+                if relay.stat().st_size > 0:
+                    first = time.monotonic() - started
+                    break
+                time.sleep(_RELAY_POLL_S)
+            # A lane short enough to relay and finish between two polls still
+            # relayed; without this read its reading would be lost, not zero.
+            if first is None and relay.stat().st_size > 0:
+                first = time.monotonic() - started
+            proc.wait()
+            log_file.flush()
+            log_file.seek(0)
+            diagnostic = log_file.read()
+    assert proc.returncode == 0, (
+        "the relay-floor calibration must be a green nested lane, or the "
+        "floor is a reading of a failure, not of a relay; "
+        f"rc={proc.returncode}\n{diagnostic[-3000:]}")
+    assert first is not None, (
+        "the relay-floor calibration produced NO relayed score, so there is "
+        "nothing to read a floor from; a zero here would be an unmeasured "
+        f"quantity reported as a measured one\n{diagnostic[-3000:]}")
+    return first
+
+
+@functools.lru_cache(maxsize=None)
+def trivial_relay_s() -> float:
+    """Seconds until a nested driver session's first event REACHES an outer
+    lease, HERE, spawn to relayed score.
+
+    The larger of two consecutive readings, exactly as ``trivial_session_s``:
+    one lucky start must not set the floor for the whole file.
+    """
+    with tempfile.TemporaryDirectory(prefix="vibeic-relay-") as d:
+        return max(_one_trivial_relay_s(Path(d)) for _ in range(2))
+
+
+def relay_window(nominal: float) -> float:
+    """``stall_window`` for a lease renewed by a NESTED DRIVER'S relay.
+
+    Same construction, same guarantee, different measured term: ``nominal``
+    wherever the nested lane's first relayed event arrives inside it, else
+    lifted to ``FLOOR_MULTIPLE`` measured relay floors. Nothing is relaxed —
+    the kill direction is untouched and a subject that never relays is still
+    stopped one window after its last event — and callers scale the ratios
+    they assert from the value returned.
+
+    This is what ``stall_window(..., starts=2)`` was standing in for. Prefer
+    it wherever the events that renew the lease arrive through
+    ``--progress-relay`` rather than from the subject pytest itself.
+    """
+    return max(float(nominal), FLOOR_MULTIPLE * trivial_relay_s())

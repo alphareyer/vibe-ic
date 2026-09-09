@@ -43,7 +43,7 @@ from pathlib import Path
 import pytest
 
 from _hostpaths import require_repo
-from _session_floor import stall_window, trivial_session_s
+from _session_floor import relay_window, stall_window, trivial_session_s
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROGRAMS))
@@ -794,13 +794,25 @@ def test_nested_validated_progress_is_relayed_to_the_outer_session(
             + "::test_nested_outcome_run_outlives_old_fixed_bound_with_semantic_progress")
     merged = tmp_path / "outer.xml"
     monkeypatch.setattr(D, "DEFAULT_POLL_S", 0.05)
+    # NOT `stall_window(2.5, starts=2)` (vibe-ic#2219). Every event that can
+    # renew THIS lease arrives through the subject's `--progress-relay`, and
+    # the silence before the first one is a nested driver lane, not two
+    # interpreter start-ups: MEASURED at `--cpus=1` in the pinned image, the
+    # gap `collection_finish -> matrix-outcome-relay 1` is 2.9234 s against a
+    # 2.5 s window, while the interpreter start in the same run is 1.1059 s.
+    # `relay_window` measures that lane instead of modelling it.
+    window = relay_window(2.5)
     started = time.monotonic()
     rc, out, incomplete = D.run_one(
         [sys.executable, "-m", "pytest", "-p", "no:terminal",
          "-p", "no:cacheprovider"],
-        node, merged, stall_window(2.5, starts=2), str(_PROGRAMS.parent))
+        node, merged, window, str(_PROGRAMS.parent))
     elapsed = time.monotonic() - started
-    assert elapsed > 4.5, elapsed
+    # `4.5` was 1.8 windows when the window was the literal 2.5. The RATIO is
+    # what this asserts -- that the nested run really outlived the lease it was
+    # held under -- so it travels with the derived window instead of standing
+    # still while the window moves.
+    assert elapsed > 1.8 * window, (elapsed, window)
     assert rc == 0 and not incomplete, out
     suites = D._load_suites(merged)
     assert suites is not None
