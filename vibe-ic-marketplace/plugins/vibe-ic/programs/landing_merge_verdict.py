@@ -306,6 +306,22 @@ _PER_FILE_NOTRUN = "targeted per-file session was not run"
 # the per-label differential: the finding delta is added to that rule, not
 # substituted for it.
 _HYGIENE_TIER = re.compile(r"^repo hygiene gates(?:\s|\(|$)")
+#: vibe-ic#2176 — THE DIRECT-PUSH PATH'S OWN HYGIENE DELTA. The 154-gate
+#: hygiene tier NEVER RUNS on `gatekeeper-land.sh`'s landing path: the
+#: `--cheap-only` exit happens before `--- full tier ---`, the only caller of
+#: `tools/ci/repo_hygiene_gates.sh`. So neither arm of a direct-push landing can
+#: produce the `--summary-json` records `hygiene_finding_delta` differences, and
+#: demanding them there is demanding evidence the tier cannot exist to give — a
+#: gate that refuses everything, which this program's own docstring names as the
+#: worse of the two failures. That path answers the SAME question with its own
+#: instrument, `landing_hygiene_ratchet_check.py`, run inside the landing gates
+#: and printed into the land log under this label. Accepting it is accepting an
+#: ANSWER, not an absence: it is honoured ONLY on the direct-push tier and ONLY
+#: as a PASS in the candidate's own log. A FAIL is already a blocking failure by
+#: the per-label rule above, a SKIP (empty range) still refuses as INCOMPLETE,
+#: and on every other tier the `--summary-json` differential remains required.
+_HYGIENE_RATCHET = re.compile(
+    r"^this landing introduces no hygiene finding(?:\s|\(|$)")
 _STAMPED = re.compile(r"===\s*ALL GATES PASS\s*[—-]\s*stamped\s+(\S+)")
 _NON_TARGET_COMPLETE = "=== ALL NON-TARGET GATES COMPLETE"
 _FAILURES_TERMINAL = "=== FAILURES ABOVE"
@@ -1378,7 +1394,24 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
         for kind, label, corpus in debt["hygiene"]:
             if kind == "NOT_CHECKED":
                 incomplete.append(f"HYGIENE_NOT_CHECKED:{label}:{corpus}")
-    if hygiene is None:
+    ratchet_passed = any(_HYGIENE_RATCHET.match(l) for l in land.passed)
+    if (hygiene is None and verification_tier == TIER_DIRECT_PUSH
+            and ratchet_passed):
+        # The question WAS asked on this tier, by the instrument this tier owns
+        # (vibe-ic#2176). Disclosed by name, because it is a DIFFERENT and
+        # narrower measurement than the ~80-gate finding differential: it
+        # compares the declared ratchet gates over this landing's range, not
+        # every hygiene finding.
+        disclosures.append("HYGIENE_DELTA_VIA_LANDING_RATCHET")
+        notes.append(
+            "no `--summary-json` hygiene finding differential was supplied, and "
+            "on the DIRECT-PUSH tier none can be: the 154-gate hygiene tier "
+            "does not run on the landing path. The question was answered there "
+            "instead by the landing ratchet gate, which PASSED on this "
+            "candidate — a narrower instrument than the finding differential, "
+            "covering the ratchet's declared gates over this landing's range "
+            "(vibe-ic#2176)")
+    elif hygiene is None:
         incomplete.append("HYGIENE_FINDING_DELTA_NOT_SUPPLIED")
         disclosures.append("HYGIENE_FINDING_DELTA_NOT_SUPPLIED")
         notes.append(

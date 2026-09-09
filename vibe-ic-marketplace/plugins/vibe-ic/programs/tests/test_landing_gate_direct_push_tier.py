@@ -65,6 +65,15 @@ OTHER_TREE = "e" * 40
 LAND_LOG = (
     "=== gatekeeper landing gates — base=deadbeef ===\n"
     "  PASS  repo tools tests (31 file(s))\n"
+    # vibe-ic#2176 — the DIRECT-PUSH path's own hygiene delta, and the reason it
+    # belongs in this fixture: the 154-gate hygiene tier does not run on the
+    # landing path, so a direct-push land log carries THIS gate and never a
+    # `repo_hygiene_gates.sh --summary-json` record. Without it the judge has no
+    # hygiene evidence of any kind and answers every case below INCOMPLETE,
+    # before the differential they exist to measure is reached. It is on BOTH
+    # arms, so it cannot buy a landing: a candidate whose ratchet is absent or
+    # FAILING is still refused, which is what the two cases at the end assert.
+    "  PASS  this landing introduces no hygiene finding\n"
     "  FAIL  targeted tests (2 file(s))\n"
     "=== FAILURES ABOVE — stamp removed; the pre-push hook will refuse ===\n"
 )
@@ -246,7 +255,12 @@ def test_errored_and_failed_are_the_same_pre_existing_red(tmp_path):
 def test_an_unreadable_base_report_degrades_to_demand_green(tmp_path):
     """Not to 'assume it was red'. The strict direction, and it is disclosed."""
     cp, rec = _run(tmp_path, base=None, cand="failed", base_junit_written=False)
-    assert cp.returncode == 1
+    # rc 2, not rc 1, and the difference is the point: an unreadable base arm is
+    # a landing this program COULD NOT MEASURE, not one it measured and refused.
+    # Both codes refuse; only this one says which. The candidate's own visible
+    # failure is still listed, which is the "demand green" half of the name.
+    assert cp.returncode == 2
+    assert "BASE_TEST_RESULT_EMPTY" in rec["incomplete"]
     assert rec["delta"]["base_total"] == 0
     assert any("NEW FAILURE(S)" in r for r in rec["reasons"])
 
@@ -256,7 +270,8 @@ def test_an_absent_base_gate_log_makes_every_failing_gate_the_branchs(tmp_path):
         tmp_path, base="failed", cand="failed", base_land_log=None,
         land_log=LAND_LOG.replace("  PASS  repo tools tests (31 file(s))\n",
                                   "  FAIL  repo tools tests (31 file(s))\n"))
-    assert cp.returncode == 1
+    assert cp.returncode == 2
+    assert "BASE_GATE_RECORD_MISSING_OR_INVALID" in rec["incomplete"]
     assert any("repo tools tests" in r for r in rec["reasons"])
 
 
@@ -314,7 +329,12 @@ def test_a_base_arm_that_did_not_finish_is_refused_not_subtracted(tmp_path):
          "--json", str(tmp_path / "verdict.json")],
         capture_output=True, text=True)
     rec = json.loads((tmp_path / "verdict.json").read_text())
-    assert cp.returncode == 1
+    # A base arm that ran only some of its files is UNMEASURED, not measured
+    # and refused — rc 2, and the file that did not answer is named rather than
+    # summarised. It refuses either way; this asserts the stronger of the two.
+    assert cp.returncode == 2
+    assert ("BASE_SELECTION_MISSING:programs/tests/test_other.py"
+            in rec["incomplete"])
     assert any("PRODUCED NO TEST CASE ON THE BASE" in r for r in rec["reasons"])
 
 
@@ -351,6 +371,11 @@ def test_the_cross_tree_refusals_stay_armed_under_the_new_tier(tmp_path):
     (tmp_path / "base.xml").write_text(_junit("failed"))
     (tmp_path / "cand.xml").write_text(_junit("failed"))
     (tmp_path / "land.log").write_text(LAND_LOG)
+    # THE BASE GATE LOG IS AN INPUT HERE, NOT THE SUBJECT. Without it the
+    # judge answers INCOMPLETE for the missing baseline and never reaches the
+    # cross-tree rule this case exists to arm — a true-looking refusal about
+    # the wrong thing. `test_an_absent_base_gate_log_...` owns that omission.
+    (tmp_path / "base_land.log").write_text(LAND_LOG)
     (tmp_path / "sel.txt").write_text(FILE + "\n")
     (tmp_path / "selb.txt").write_text(FILE + "\n")
     cp = subprocess.run(
@@ -360,6 +385,7 @@ def test_the_cross_tree_refusals_stay_armed_under_the_new_tier(tmp_path):
          "--verified-sha", HEAD_SHA, "--rebase-status", "ok",
          "--expected-tree", HEAD_TREE, "--verified-tree", OTHER_TREE,
          "--land-log", str(tmp_path / "land.log"),
+         "--base-land-log", str(tmp_path / "base_land.log"),
          "--selection", str(tmp_path / "sel.txt"),
          "--base-selection", str(tmp_path / "selb.txt"),
          "--base-junit", str(tmp_path / "base.xml"),
@@ -471,3 +497,44 @@ def test_the_manifest_lists_every_path_the_code_protects():
         assert declared and listed, (
             f"the {role!r} closure is empty on one side — this guard would pass "
             f"while protecting nothing")
+
+
+# ---------------------------------- the direct-push hygiene delta (vibe-ic#2176)
+#
+# The controls for the ONE substitution this tier makes. A tier that accepted a
+# missing hygiene differential would be the leniency this file exists to refuse,
+# so each of the three ways the substitution could be wrong is asked directly.
+
+
+def test_the_ratchet_is_accepted_only_as_a_PASS_and_only_on_this_tier(tmp_path):
+    """The 154-gate hygiene tier does not run on the landing path, so a
+    direct-push land log carries the landing ratchet instead of a
+    `repo_hygiene_gates.sh --summary-json` record. Accepting that gate is
+    accepting an ANSWER — and only an answer: absent, and the evidence is
+    missing; on another tier, the record is still required."""
+    absent = LAND_LOG.replace(
+        "  PASS  this landing introduces no hygiene finding\n", "")
+    _, gone = _run(tmp_path, base="failed", cand="failed",
+                   land_log=absent, base_land_log=absent)
+    assert gone["verdict"] == "REFUSE"
+    assert "HYGIENE_FINDING_DELTA_NOT_SUPPLIED" in gone["incomplete"]
+
+    # SAME candidate log, MERGE tier: the substitution is scoped to the path
+    # that cannot produce the record, not granted to the one that can.
+    _, merge = _run(tmp_path, base="failed", cand="failed", tier="merge-tree")
+    assert merge["verdict"] == "REFUSE"
+    assert "HYGIENE_FINDING_DELTA_NOT_SUPPLIED" in merge["incomplete"]
+
+    # And the PASS is honoured as a PASS, not as the gate's mere presence: a
+    # ratchet that FAILED here while passing on the base is this branch's.
+    red = LAND_LOG.replace(
+        "  PASS  this landing introduces no hygiene finding\n",
+        "  FAIL  this landing introduces no hygiene finding\n")
+    cp, rec = _run(tmp_path, base="failed", cand="failed", land_log=red)
+    # Refused twice over, which is the safe direction: as a gate this branch
+    # broke, and — because only a PASS is an answer — as hygiene evidence this
+    # landing does not have.
+    assert cp.returncode == 2
+    assert any("this landing introduces no hygiene finding" in r
+               and "PASSED ON THE BASE" in r for r in rec["reasons"])
+    assert "HYGIENE_FINDING_DELTA_NOT_SUPPLIED" in rec["incomplete"]
