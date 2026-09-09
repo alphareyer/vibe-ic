@@ -140,7 +140,7 @@
         "sar_adc",
         "pipeline_adc"
       ],
-      "rtl_gen": null,
+      "rtl_gen": "data_converter_rtl_gen.py",
       "fallback_skill": "spec-to-rtl",
       "verification_track": "generic_full_stack",
       "command_protocol_applicable": false,

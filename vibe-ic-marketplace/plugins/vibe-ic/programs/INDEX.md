@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1304
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1304)
+- **Total programs (excluding helpers / shims):** 1305
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1305)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1295 |
+| `any` | 1296 |
 
 ## Alphabetical listing
 
@@ -288,6 +288,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `cxl_protocol_synth` | any | v0.1.89 | Compute Express Link (CXL) cache-coherent interconnect synth helper. |
 | `d3_manifest_declaration_parity_check` | any | — | Every declared `required_outputs` path must be covered by the d3 manifest. |
 | `dali_protocol_synth` | any | v0.1.84 | DALI-class protocol synth helper. |
+| `data_converter_rtl_gen` | any | — | the deterministic digital datapath for the ``data_converter`` class, or a REFUSAL that names the field it lacked. |
 | `ddr4_protocol_synth` | any | — | DDR4 SDRAM protocol synth helper (JEDEC JESD79-4) — protocol class #58. |
 | `ddr5_protocol_synth` | any | — | DDR5 SDRAM protocol synth helper (JEDEC JESD79-5). |
 | `ddr_protocol_synth` | any | v0.1.84 | DDR (DDR3 SDRAM)-class protocol synth helper. |
@@ -1376,7 +1377,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1295 programs)
+### `any` (1296 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1637,6 +1638,7 @@ _(no programs in this group)_
 - `cxl_protocol_synth` — Compute Express Link (CXL) cache-coherent interconnect synth helper.  _[v0.1.89]_
 - `d3_manifest_declaration_parity_check` — Every declared `required_outputs` path must be covered by the d3 manifest.
 - `dali_protocol_synth` — DALI-class protocol synth helper.  _[v0.1.84]_
+- `data_converter_rtl_gen` — the deterministic digital datapath for the ``data_converter`` class, or a REFUSAL that names the field it lacked.
 - `ddr4_protocol_synth` — DDR4 SDRAM protocol synth helper (JEDEC JESD79-4) — protocol class #58.
 - `ddr5_protocol_synth` — DDR5 SDRAM protocol synth helper (JEDEC JESD79-5).
 - `ddr_protocol_synth` — DDR (DDR3 SDRAM)-class protocol synth helper.  _[v0.1.84]_

@@ -7120,6 +7120,52 @@ def step_rtl_gen(project: Path, ic_class: str,
             binding.close()
 
 
+def _analog_track_deferral(project, config, ic_class, t0):
+    """``StepResult`` when this DESIGN has no digital datapath to author, else None.
+
+    HOISTED OUT OF THE ``rtl_gen is null`` ARM (vibe-ic#2197). ORGANIC #141 and
+    lane czadcrtl's #2184 both placed this routing inside ``if not gen_name:``,
+    so it asked "does the CLASS have a generator?" before "does the DESIGN have
+    a datapath?" — and the moment `data_converter` gained a deterministic
+    generator, a converter with no digital datapath stopped routing to the
+    analog track and started FAILING on a generator that correctly refused it.
+
+    MEASURED, on this branch, before the hoist:
+
+        no subject -> FAIL   deferred_to=None      (was WAIVED/analog_track)
+
+    Whether a design has a datapath is a property OF THE DESIGN. It cannot
+    depend on whether somebody has written a generator for its class, and #2197
+    item 4 requires exactly that independence: removing the generator must
+    return the flow to the routed-to-analog behaviour, not to a silent pass.
+    Hoisted, that property holds by construction rather than by coincidence.
+    """
+    if not config.get("analog_applicable"):
+        return None
+    try:
+        import sys as _sys
+        if str(PROGRAMS_DIR) not in _sys.path:
+            _sys.path.insert(0, str(PROGRAMS_DIR))
+        import analog_interface_classify as _aic
+        _absent, _why, _ev = _aic.digital_datapath_absent(project)
+    except Exception as _e:
+        _absent, _why, _ev = (False, f"classifier unavailable: {_e}", {})
+    if not _absent:
+        return None
+    return StepResult(
+        "rtl_gen", "WAIVED",
+        time.time() - t0,
+        f"IC class {ic_class!r} is analog-applicable and has no "
+        f"digital datapath to author ({_why}) — digital RTL steps "
+        f"route to the analog A1..A8 track (/vibe-ic-analog): "
+        f"N/A, NOT spec-to-rtl.",
+        extras={"fallback_skill": None,
+                "deferred_to": "analog_track",
+                "digital_datapath_absent": True,
+                "interface_evidence": _ev,
+                "class_config": config})
+
+
 def _step_rtl_gen_bound(
         project: Path, ic_class: str, force_regen: Optional[bool],
         t0: float, project_binding: _Phase1ProjectBinding,
@@ -7254,6 +7300,12 @@ def _step_rtl_gen_bound(
                     **_sk_extras,
                     **_hint_extras})
 
+    # #2197 — ASK ABOUT THE DESIGN BEFORE ASKING ABOUT THE CLASS. See
+    # `_analog_track_deferral`: this used to sit inside the arm below, so it
+    # was reachable only for a class with no generator.
+    _deferral = _analog_track_deferral(project, config, ic_class, t0)
+    if _deferral is not None:
+        return _deferral
     gen_name = config.get("rtl_gen")
     if not gen_name:
         # ORGANIC #542 — staged vendor RTL check. If input/vendor_rtl/ is
@@ -7393,37 +7445,6 @@ def _step_rtl_gen_bound(
         # clk/rst/data interface (real on-chip decimation) is unchanged.
         # Structural + chip-AGNOSTIC — no IC-name / class-keyword carve-out;
         # gated by analog_applicable so a pure-digital class never reaches here.
-        if config.get("analog_applicable"):
-            try:
-                import sys as _sys
-                if str(PROGRAMS_DIR) not in _sys.path:
-                    _sys.path.insert(0, str(PROGRAMS_DIR))
-                import analog_interface_classify as _aic
-                _absent, _why, _ev = _aic.digital_datapath_absent(project)
-            except Exception as _e:
-                _absent, _why, _ev = (False, f"classifier unavailable: {_e}", {})
-            if _absent:
-                # THE REASON IS THE CLASSIFIER'S, NOT THIS SITE'S. This message
-                # used to assert "its top interface is ALL-ANALOG" and then
-                # print the classifier's reason inside brackets. Since lane
-                # czadcrtl (2026-09-08) the classifier has a SECOND disjunct —
-                # a clocked-but-logic-free interface whose Phase-1 extraction
-                # declares no digital content — and for that one the asserted
-                # half was simply false: the design has three clock INPUTs.
-                # A site that restates a verdict it did not compute will
-                # eventually restate it wrongly; this one now quotes.
-                return StepResult(
-                    "rtl_gen", "WAIVED",
-                    time.time() - t0,
-                    f"IC class {ic_class!r} is analog-applicable and has no "
-                    f"digital datapath to author ({_why}) — digital RTL steps "
-                    f"route to the analog A1..A8 track (/vibe-ic-analog): "
-                    f"N/A, NOT spec-to-rtl.",
-                    extras={"fallback_skill": None,
-                            "deferred_to": "analog_track",
-                            "digital_datapath_absent": True,
-                            "interface_evidence": _ev,
-                            "class_config": config})
         # ROUTING FIX — surface the captured-lesson digest to the spec-to-rtl /
         # catalog-glue author. Shape-C blind authors already get this digest
         # (benchmark_dispatch._render_lesson_digest); a runner-driven (Shape-B)

@@ -203,14 +203,25 @@ def test_step_rtl_gen_stops_declaring_an_unservable_handoff(tmp_path):
 
 def test_step_rtl_gen_still_declares_it_when_there_is_a_subject(tmp_path):
     """The control that matters most: a converter whose input DOES declare
-    digital content keeps the spec-to-rtl handoff, unchanged."""
+    digital content keeps a DIGITAL path — it is not routed to analog.
+
+    vibe-ic#2197 gave `data_converter` a deterministic generator, so the
+    digital path this test guards is now reached in one of two ways: the
+    generator emits (declared parameters present), or it refuses BY NAME and
+    the class's declared author is offered. Both are the digital path; neither
+    is `analog_track`. The assertion that was always load-bearing — "this
+    design is NOT deferred to analog" — is unchanged and is checked first.
+    This fixture declares no decimator parameters, so the refusal arm is the
+    one it exercises."""
     p = _mk_project(tmp_path, _CLOCKED_LOGIC_FREE,
                     docs=_with_field("L4_REGMAP", "registers",
                                      [{"name": "CTRL", "offset": 0}]))
     res = DOR.step_rtl_gen(p, "data_converter")
-    assert res.status == "WAIVED"
-    assert res.extras.get("fallback_skill") == "spec-to-rtl"
     assert res.extras.get("deferred_to") != "analog_track"
+    assert res.extras.get("fallback_skill") == "spec-to-rtl"
+    assert res.status in ("WAIVED", "FAIL"), res.detail
+    if res.status == "FAIL":
+        assert "does not state" in (res.detail or ""), res.detail
 
 
 # ── D. the halting step, and every consumer of the one resolver ────────────

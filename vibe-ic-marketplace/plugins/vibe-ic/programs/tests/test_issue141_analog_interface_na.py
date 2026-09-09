@@ -113,12 +113,35 @@ def test_step_rtl_gen_all_analog_routes_to_analog_track(tmp_path):
 
 
 def test_step_rtl_gen_digital_iface_keeps_spec_to_rtl(tmp_path):
+    """A converter WITH a digital interface keeps the DIGITAL path — #141's
+    contrast with the all-analog case above, which is what this file is for.
+
+    vibe-ic#2197 gave `data_converter` a deterministic generator, so the digital
+    path is now served two ways: the generator emits when the decimator
+    parameters are declared, or it refuses BY NAME and the declared author is
+    still offered. This fixture declares none, so it takes the refusal arm and
+    the step is FAIL rather than WAIVED.
+
+    That is not a new failure. MEASURED and stated in #2197: before the
+    generator existed this design WAIVED to an author, nobody took the handoff,
+    `phase2/stage1/rtl/` was never created and Phase 2 FAILED anyway — "the
+    runner declared a handoff and then charged the design with the fact that
+    nobody took it". Same outcome; the cause is now named at the step that
+    knows it, and the author is still offered.
+
+    The two assertions #141 actually rests on are unchanged and are checked
+    FIRST: this design is not routed to the analog track, and it keeps
+    spec-to-rtl."""
     p = _mk_project(tmp_path, _CONV_DIGITAL_IFACE)
     res = DOR.step_rtl_gen(p, "data_converter")
-    assert res.status == "WAIVED"
     # a converter WITH a digital interface still authors RTL via spec-to-rtl
     assert res.extras.get("fallback_skill") == "spec-to-rtl"
     assert res.extras.get("deferred_to") != "analog_track"
+    assert res.status in ("WAIVED", "FAIL"), res.detail
+    if res.status == "FAIL":
+        assert "does not state" in (res.detail or ""), (
+            "a refusal must name the declared field it lacked, not merely "
+            f"fail: {res.detail!r}")
 
 
 # ── C. flow_compliance_check._digital_backend_is_na ────────────────────────

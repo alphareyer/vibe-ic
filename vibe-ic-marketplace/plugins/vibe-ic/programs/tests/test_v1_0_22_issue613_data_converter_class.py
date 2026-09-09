@@ -122,9 +122,17 @@ def _write_pure_analog_project(tmp_path: Path) -> Path:
 
 def test_registry_data_converter_has_generation_path():
     c = _reg_class("data_converter")
-    # rtl_gen=null is fine (AI authors), but fallback_skill MUST be non-null
-    # — that is precisely what pure_analog lacks (double-null dead-end).
-    assert c["rtl_gen"] is None
+    # THE PROPERTY IS "NOT A DOUBLE-NULL DEAD END", which is what this test's
+    # own comment has always said: "rtl_gen=null is fine (AI authors), but
+    # fallback_skill MUST be non-null — that is precisely what pure_analog
+    # lacks". `rtl_gen is None` recorded the STATE OF THE DAY, not the
+    # property: vibe-ic#2197 gave the class a deterministic generator, which
+    # is a STRONGER generation path than the null it replaced, and the
+    # assertion below is the one that was always load-bearing.
+    assert c["rtl_gen"] or c["fallback_skill"], "double-null dead-end"
+    assert c["rtl_gen"] == "data_converter_rtl_gen.py", (
+        "#2197 — the class declares a deterministic generator; without the "
+        "registry row the program is unreachable however correct it is")
     assert c["fallback_skill"] == "spec-to-rtl", (
         "data_converter must route to spec-to-rtl, NOT inherit pure_analog's "
         "fallback_skill=null (which SKIPs RTL entirely)")
