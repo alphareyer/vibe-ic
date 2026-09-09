@@ -84,26 +84,94 @@ class PdkFamilyDeclarationError(RuntimeError):
 # The declared library defines NOTHING to derive from — 0 `.subckt`, 0
 # `.model`, 0 `.include`/`.lib` targets, 0 section definitions — so the honest
 # entry is NOT_AVAILABLE with the reason, never a borrowed token map.
+#
+# gf180's NATIVE TEMPLATE (the #2161 follow-on). #2161 left this entry
+# NOT_AVAILABLE because the file it declared as the family's model library is
+# the family's global switch/parameter deck, which defines no device and no
+# corner section. The device library is a SIBLING file in the SAME published
+# ngspice directory, and it is what this entry now declares. Nothing was moved,
+# re-pointed or copied into this repo — only the file that is named.
+# MEASURED inside the pinned image, with the real simulator:
+#   * the device library defines `.subckt nfet_03v3` / `pfet_03v3` (71 device
+#     subckts in its closure) and the top-level corner sections `typical`,
+#     `ff`, `ss`, `fs`, `sf`;
+#   * it defines NO section named `tt` — which is, in the simulator's own
+#     words, the `section definition tt not found` #2161 reported. The typical
+#     corner of THIS family is spelled `typical`, and the corner names below
+#     are the three the grid spans, read off the library rather than assumed;
+#   * the MOS subckts declare METRIC geometry defaults (`w=1e-5 l=2.8e-7`), so
+#     the corner templates' scaled-micron idiom is wrong for them — see
+#     `_GEOM_DEFAULT_RE` and `device_geometry_units`;
+#   * their bodies REFERENCE a statistical switch (`sw_stat_mismatch`) that the
+#     device library itself does not define; the family's global
+#     switch/parameter deck — the file #2161 found here — does. It is declared
+#     as this entry's `deck_prelude` and the deck `.include`s it BEFORE the
+#     `.lib` line, because without it ngspice stops at
+#     `Undefined parameter [sw_stat_mismatch]`, exit(1), with no analysis run.
+#     `undefined_free_params` below is the grounding for exactly that.
 _KNOWN_FAMILIES = {
     "sky130": {
         "device_map": dict(SKY130_DEVICES),
         "corner_sections": ["ss", "tt", "ff"],
         "model_lib": "/foss/pdks/sky130A/libs.tech/ngspice/sky130.lib.spice",
+        # EXPLICIT empty: this family's device subckts reference no parameter
+        # their own library does not define (measured: 0 free parameters), so
+        # the deck loads exactly one file and stays byte-identical. An omitted
+        # key would be indistinguishable from "nobody looked".
+        "deck_prelude": [],
+        # EXPLICIT empty: this family's process-corner section carries its
+        # passives too, so one `.lib` line is the whole deck (measured: its
+        # closure defines 191 device subckts under `tt`).
+        "companion_corner_groups": [],
+        "companion_sections": [],
     },
     "gf180": {
-        "device_map": NOT_AVAILABLE,
-        "device_map_not_available": (
-            "no native device template was authored for this family, and its "
-            "declared model library defines nothing to derive one from "
-            "(measured: 0 `.subckt`, 0 `.model`, 0 `.include`/`.lib` targets, "
-            "0 corner-section definitions — the declared file is the family's "
-            "global switch/parameter deck, not its device library). The other "
-            "open PDK's MOS tokens stood here until vibe-ic#2161; a deck built "
-            "from them cannot elaborate against this family's library."),
-        "corner_sections": ["ss", "tt", "ff"],
-        "model_lib": "/foss/pdks/gf180mcuD/libs.tech/ngspice/design.ngspice",
+        # The MOS pair is the 3.3 V core flavour, which is the one this
+        # family's registry entry already characterises
+        # (`analog_device_params.note` names exactly these two). The passives
+        # are the unsilicided p+ poly resistor and the generic MIM capacitor —
+        # the analogues of what the other open PDK's entry binds, chosen
+        # because they are the family's precision passives rather than a metal
+        # or diffusion parasitic. EVERY token here is DEFINED by the library
+        # this entry declares; `family_library_grounding` re-measures that and
+        # refuses by name if it stops being true.
+        "device_map": {"nmos": "nfet_03v3", "pmos": "pfet_03v3",
+                       "res": "ppolyf_u", "cap": "cap_mim_1f0ff"},
+        "corner_sections": ["ss", "typical", "ff"],
+        "model_lib": "/foss/pdks/gf180mcuD/libs.tech/ngspice/sm141064.ngspice",
+        "deck_prelude": [
+            "/foss/pdks/gf180mcuD/libs.tech/ngspice/design.ngspice"],
+        # This family splits its corners BY DEVICE CLASS inside ONE file: the
+        # process-corner section carries the MOS models only, and the resistor
+        # and MIM corners are their own `<group>_<corner>` sections. A deck
+        # that loads only the process corner elaborates its transistors and
+        # then stops at `unknown subckt` on the first passive — so each group
+        # is loaded at the SAME corner as the MOS section, and the grid moves
+        # all three together.
+        "companion_corner_groups": ["res", "mimcap"],
+        # Corner-INDEPENDENT companions: the generic MIM subckt lives in a
+        # section of its own, while the corner section above supplies the
+        # process parameters that subckt reads. Both are required and only one
+        # of them moves with the corner.
+        "companion_sections": ["cap_mim"],
     },
 }
+
+
+def family_companion_sections(entry: Dict[str, Any], corner: str) -> List[str]:
+    """Every section BESIDES `corner` that a deck at `corner` must also load
+    from this family's model library, in load order: the per-corner companion
+    groups (`<group>_<corner>`) then the corner-independent ones. `[]` for a
+    family whose process-corner section is self-sufficient."""
+    groups = [str(g) for g in (entry.get("companion_corner_groups") or [])]
+    fixed = [str(x) for x in (entry.get("companion_sections") or [])]
+    return [f"{g}_{corner}" for g in groups] + fixed
+
+
+def family_deck_prelude(entry: Dict[str, Any]) -> List[str]:
+    """The files a deck for this family must `.include` BEFORE its `.lib`
+    corner line. Empty for a family whose device library is self-contained."""
+    return [str(x) for x in (entry.get("deck_prelude") or [])]
 
 
 def family_device_map(entry: Dict[str, Any]) -> Optional[Dict[str, str]]:
@@ -256,9 +324,17 @@ _MODEL_RE = re.compile(r"(?im)^\s*\.model\s+(\S+)\s+(\w+)")
 # at EVERY pass-device size). Detected from the PDK's OWN text — structural,
 # no vendor/SKU literal, and a PDK with no metric default is left UNITLESS so
 # the sky130 path stays byte-identical.
+# The suffix is ATTACHED to the number (`0.35u`). It used to be read across
+# whitespace (`\s*([a-zA-Z]*)`), which made the NEXT parameter's name the
+# suffix: on `w=1e-5 l=2.8e-7` the match was ('w', '1e-5', 'l') — 'l' is not an
+# SI magnitude, so a plainly metric default was classified UNITLESS, and the
+# consumed `l=` was never examined either. MEASURED against the two open PDKs
+# inside the pinned image: the fix moves 7 gf180 MOS subckts (incl. both roles
+# this module elects) from `unitless` to `metric` and changes NOTHING for
+# sky130 — 191 subckts, 7 metric before and after, zero verdicts moved.
 _GEOM_DEFAULT_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9_])([wl])\s*=\s*([0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)"
-    r"\s*([a-zA-Z]*)")
+    r"([a-zA-Z]*)")
 # SPICE engineering suffixes that denote a sub-millimetre magnitude.
 _SI_SUB_MM = ("u", "n", "p", "f", "a", "meg")  # 'm' is ambiguous (milli/metre)
 # section DEFINITION form: `.lib <bare-identifier>` alone (NOT the include form
@@ -273,7 +349,7 @@ def _iter_section_bodies(text: str):
     Non-nesting (HSPICE/ngspice section DEFs do not nest); a stray inner
     `.lib <bare>` closes the current block defensively. Lines outside any block
     are ignored. Pure — chip-AGNOSTIC (directive syntax only)."""
-    lines = (text or "").splitlines()
+    lines = spice_code_only(text or "").splitlines()
     i, n = 0, len(lines)
     while i < n:
         m = _LIB_SECTION_RE.match(lines[i])
@@ -357,6 +433,20 @@ class DeckContext:
     # `w=`/`l=` idiom is valid for the resolved family, or whether the geometry
     # must be emitted in explicit metres (see render_deck). chip-AGNOSTIC.
     device_geometry_units: Dict[str, str] = field(default_factory=dict)
+    # Files the emitted deck must `.include` BEFORE its `.lib <corner>` line —
+    # the family's own global switch/parameter deck, when its device subckts
+    # reference parameters their model library does not itself define. Empty
+    # for a self-contained family (sky130), so its deck is byte-identical.
+    deck_prelude: List[str] = field(default_factory=list)
+    # {role: {"w": formal, "l": formal}} — the names each bound device subckt
+    # gives its OWN geometry. `{}` / a role mapping to {"w": "w", "l": "l"} is
+    # the historical `w=`/`l=` emission, so a family that names them that way
+    # is untouched.
+    device_geometry_params: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    # Sections the deck must load ALONGSIDE the process corner, keyed by that
+    # corner: {corner: [section, ...]} in load order. `{}` for a family whose
+    # process-corner section carries every device class it binds.
+    companion_sections: Dict[str, List[str]] = field(default_factory=dict)
     unresolved_roles: List[str] = field(default_factory=list)
     # vibe-ic#903 — HOW each device role's flavour was elected, and WHAT was
     # rejected. The device binding is an ELECTRICAL choice; before #903 it was
@@ -406,6 +496,10 @@ class DeckContext:
             "device_map": self.device_map,
             "device_terminals": self.device_terminals,
             "device_geometry_units": self.device_geometry_units,
+            "deck_prelude": self.deck_prelude,
+            "device_geometry_params": self.device_geometry_params,
+            "companion_sections": {k: list(v) for k, v
+                                   in self.companion_sections.items()},
             "unresolved_roles": self.unresolved_roles,
             "device_election": self.device_election,
             "deck_loads": [list(dl) for dl in self.deck_loads],
@@ -529,11 +623,14 @@ def parse_devices(text: str) -> Dict[str, Any]:
 
     Returns {"subckts": {name: n_terminals}, "models": {name: type}}. Pure —
     the caller supplies the text (local read or container read)."""
+    # CODE ONLY: `_subckt_terminals` stops at the first `key=`, so an inline
+    # comment before one would be counted as terminal nodes.
+    code = spice_code_only(text or "")
     subckts: Dict[str, int] = {}
-    for m in _SUBCKT_RE.finditer(text or ""):
+    for m in _SUBCKT_RE.finditer(code):
         subckts[m.group(1)] = len(_subckt_terminals(m.group(2)))
     models: Dict[str, str] = {}
-    for m in _MODEL_RE.finditer(text or ""):
+    for m in _MODEL_RE.finditer(code):
         models[m.group(1)] = m.group(2).lower()
     return {"subckts": subckts, "models": models,
             "geometry_units": parse_subckt_geometry_units(text)}
@@ -563,7 +660,9 @@ def parse_subckt_geometry_units(text: str) -> Dict[str, str]:
     an unparseable PDK degrades to today's behaviour rather than to a guess.
     Pure; chip-AGNOSTIC (SPICE syntax only)."""
     out: Dict[str, str] = {}
-    lines = (text or "").splitlines()
+    # CODE ONLY — an inline `; w=1e-9` note on a card would otherwise decide
+    # this family's whole geometry convention out of a sentence.
+    lines = spice_code_only(text or "").splitlines()
     for i, ln in enumerate(lines):
         m = _SUBCKT_RE.match(ln)
         if not m:
@@ -607,9 +706,10 @@ _LIB_INCLUDE_RE = re.compile(
 def _iter_includes(text: str):
     """Yield the referenced file paths of every `.include`/`.inc`/`.lib <path>
     <section>` directive in `text` (verbatim, unresolved)."""
-    for m in _INCLUDE_RE.finditer(text or ""):
+    code = spice_code_only(text or "")
+    for m in _INCLUDE_RE.finditer(code):
         yield m.group(1)
-    for m in _LIB_INCLUDE_RE.finditer(text or ""):
+    for m in _LIB_INCLUDE_RE.finditer(code):
         yield m.group(1)
 
 
@@ -669,6 +769,311 @@ def transitive_geometry_units(lib_path: str, text: str,
         units.update(transitive_geometry_units(tgt, itxt, reader, seen,
                                                _depth + 1))
     return units
+
+
+# ── CODE ONLY: no sentence reaches any regex in this module ─────────────────
+# A SPICE model library is machine-written syntax, but the FILE around it is not
+# — a foundry's `.ngspice` carries an Apache header, per-device commentary, and
+# `;` / `$` notes on the cards themselves. MEASURED on this module before this
+# helper existed, and it is why the helper exists: an English sentence placed in
+# an inline comment on a `.subckt` card, or inside a quoted default on it, is
+# read by the formal-list scan as a declaration and MOVES the published answer
+# in 3 of the 6 positions a sentence can occupy in that production. The move is
+# a LOSS — two candidates match the dimension suffix, so the reader publishes
+# nothing and the emitter silently falls back to `w=`/`l=` at a subckt that
+# declares neither. A comment can therefore un-declare a device's geometry.
+#
+# ONE LEFT-TO-RIGHT SCAN that tracks comment state and quote state TOGETHER,
+# because a two-pass shape is wrong in both directions at once: a `;` inside a
+# quoted expression is not a comment, and an APOSTROPHE INSIDE A COMMENT would
+# open a quote that a separate pass closes far below, blanking live code in
+# between. Quote state is additionally reset at every newline, because a SPICE
+# expression does not span lines (a continued card uses `+`), so an unbalanced
+# quote can never reach past the line it is on.
+#
+# OFFSETS AND LINE STRUCTURE ARE PRESERVED byte for byte — blanked characters
+# become spaces and newlines are kept — so every caller's line indexing, `+`
+# continuation walk and `.ends` search see exactly the geometry they saw before.
+#
+# THE INPUT THIS IS FOR IS A MODEL LIBRARY, AND THE LIMIT IS WORTH STATING
+# BECAUSE THE NEXT REUSER IS WHO IT IS FOR: a `.control` block is NOT model
+# library text, and ngspice reads `$` differently there — `echo "MEAS vout="
+# $&vo` is a VECTOR REFERENCE, which this scan would blank as a comment. No
+# caller in this module reads a `.control` block (the deck emitter that does
+# lives in `analog_real_corner_sweep` and does not call this), and both open
+# PDKs' transitive closures contain zero `$` comments, which is why the strip
+# measures a zero delta on them. A future caller that wants to strip a DECK
+# needs the `$&` case handled first; it is not handled here, and this sentence
+# is the reason that is a decision rather than an oversight.
+#
+# chip-AGNOSTIC: SPICE comment/quote syntax only, no vendor / PDK / SKU literal.
+_SPICE_EOL_COMMENT = ";"
+_SPICE_QUOTES = "'\""
+
+
+def spice_code_only(text: str, blank_quoted: bool = False) -> str:
+    """`text` with every SPICE comment blanked to spaces, same length, same
+    lines. With `blank_quoted`, the CONTENTS of quoted expressions are blanked
+    too — for a scan that reads the formal-parameter NAMES of a card, where a
+    quoted default's contents are never a name."""
+    out = []
+    in_comment = False
+    quote = ""
+    at_line_start = True
+    for i, ch in enumerate(text or ""):
+        if ch == "\n":
+            out.append(ch)
+            in_comment = False
+            quote = ""
+            at_line_start = True
+            continue
+        if in_comment:
+            out.append(" ")
+            continue
+        if quote:
+            out.append(" " if blank_quoted else ch)
+            if ch == quote:
+                out[-1] = ch          # the delimiter itself always survives
+                quote = ""
+            continue
+        if at_line_start and ch == "*":
+            in_comment = True         # a full-line comment
+            out.append(" ")
+            continue
+        if not ch.isspace():
+            at_line_start = False
+        if ch == _SPICE_EOL_COMMENT:
+            in_comment = True
+            out.append(" ")
+            continue
+        if ch == "$" and i > 0 and (text[i - 1].isspace() or text[i - 1] == ""):
+            # ngspice reads `$` as end-of-line comment only after whitespace,
+            # which is what keeps `$&vector` in a `.control` block intact.
+            in_comment = True
+            out.append(" ")
+            continue
+        if ch in _SPICE_QUOTES:
+            quote = ch
+            out.append(ch)
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
+# ── the PARAMETERS a device subckt needs but does not carry ─────────────────
+# A foundry's MOS `.subckt` commonly references a GLOBAL statistical / corner
+# switch that its own model library never defines — the family ships it in a
+# separate switch deck the user's netlist is expected to `.include`. Nothing in
+# the deck's shape says so: the `.lib <corner>` line loads, the devices are
+# defined, and ngspice stops at `Undefined parameter [<name>]`, exit(1), before
+# any analysis. That is the failure this pair measures, at RESOLVE time and in
+# the same words the simulator would use.
+#
+# Scope is deliberately the ELECTED device subckts' own bodies, not the whole
+# library: those are the definitions the emitted deck instantiates, they are a
+# dozen lines each, and a library-wide sweep would report parameters that every
+# corner section legitimately supplies to itself.
+# chip-AGNOSTIC — SPICE expression syntax only, no vendor / SKU literal.
+_PARAM_DEF_RE = re.compile(r"(?im)^\s*\.param\s+(.*)$")
+_ENDS_RE = re.compile(r"(?im)^\s*\.ends\b")
+#: `name=` on the LHS of an assignment (a `.param` definition or a subckt
+#: formal). The lookbehind keeps `x.y=` and `1e2=` out.
+_ASSIGN_LHS_RE = re.compile(r"(?<![A-Za-z0-9_.])([A-Za-z_]\w*)\s*=")
+_IDENT_RE = re.compile(r"(?<![A-Za-z0-9_.])([A-Za-z_]\w*)")
+#: Built-in SPICE / ngspice expression functions and reserved expression
+#: variables. A name used as `f(` is dropped structurally as well, so this list
+#: only has to carry the bare-name reserved words.
+_EXPR_RESERVED = frozenset((
+    "temper", "hertz", "time", "temp", "tnom", "pi", "e", "true", "false"))
+
+
+def subckt_body(text: str, name: str) -> Optional[str]:
+    """The `.subckt <name> ... .ends` block of `text`, header line included, or
+    None when `text` does not define it."""
+    # CODE ONLY, quoted expressions KEPT — `subckt_free_params` reads those
+    # deliberately; what must not reach it is a sentence in a comment, which
+    # would mint a parameter reference out of English.
+    lines = spice_code_only(text or "").splitlines()
+    for i, ln in enumerate(lines):
+        m = _SUBCKT_RE.match(ln)
+        if not m or m.group(1) != name:
+            continue
+        out = [ln]
+        for nxt in lines[i + 1:]:
+            out.append(nxt)
+            if _ENDS_RE.match(nxt):
+                break
+        return "\n".join(out)
+    return None
+
+
+def defined_params(text: str) -> set:
+    """Lower-cased names every `.param` in `text` DEFINES. CODE ONLY."""
+    out: set = set()
+    for m in _PARAM_DEF_RE.finditer(spice_code_only(text or "")):
+        out |= {n.lower() for n in _ASSIGN_LHS_RE.findall(m.group(1))}
+    return out
+
+
+def _split_subckt_header(body: str) -> Tuple[str, str]:
+    """(`.subckt` declaration incl. its `+` continuations, everything after)."""
+    lines = (body or "").splitlines()
+    head = [lines[0]] if lines else []
+    i = 1
+    while i < len(lines) and lines[i].lstrip().startswith("+"):
+        head.append(lines[i])
+        i += 1
+    return "\n".join(head), "\n".join(lines[i:])
+
+
+def _expr_refs(text: str) -> set:
+    """Lower-cased identifiers referenced in `text`'s quoted expressions and
+    bare `key=value` right-hand sides. A name immediately followed by `(` is a
+    function call, not a parameter."""
+    refs: set = set()
+    for expr in re.findall(r"'([^']*)'", text or ""):
+        for m in _IDENT_RE.finditer(expr):
+            if expr[m.end():m.end() + 1] == "(":      # a function call
+                continue
+            refs.add(m.group(1).lower())
+    for m in re.finditer(r"=\s*([A-Za-z_]\w*)\b(?!\s*\()", text or ""):
+        refs.add(m.group(1).lower())
+    return refs
+
+
+def subckt_free_params(body: str, supplied: Tuple[str, ...] = ()) -> List[str]:
+    """Lower-cased parameter names `body` REFERENCES but neither declares as a
+    formal nor defines with its own `.param` — i.e. the names its caller's deck
+    must already have in scope. Sorted; `[]` when the subckt is self-contained.
+
+    A reference inside a HEADER FORMAL'S DEFAULT is conditional: it is only
+    evaluated when the instantiation does not supply that formal. A foundry's
+    passive commonly defaults its geometry to bare `w` / `l` — global names no
+    deck defines — precisely because every real instantiation passes them. So
+    `supplied` names the formals the emitter will pass, and their defaults are
+    not read as requirements. Every other header default IS a requirement,
+    because nothing will override it."""
+    if not (body or "").strip():
+        return []
+    header, rest = _split_subckt_header(body)
+    head = _SUBCKT_RE.match(header.splitlines()[0])
+    if not head:
+        return []
+    decl = header.split("\n", 1)
+    decl_rest = head.group(2) + (" " + decl[1].replace("+", " ")
+                                 if len(decl) > 1 else "")
+    formals = [f.lower() for f in _ASSIGN_LHS_RE.findall(decl_rest)]
+    known = set(formals)
+    known |= {t.lower() for t in _subckt_terminals(head.group(2))}
+    known |= defined_params(body)
+    known |= _EXPR_RESERVED
+    refs = _expr_refs(rest)
+    # header defaults, minus the ones the deck overrides by supplying the formal
+    sup = {x.lower() for x in supplied}
+    for m in re.finditer(r"(?<![A-Za-z0-9_.])([A-Za-z_]\w*)\s*=\s*"
+                         r"(\'[^\']*\'|[^\s]+)", decl_rest):
+        if m.group(1).lower() in sup:
+            continue
+        refs |= _expr_refs(f"x={m.group(2)}")
+    return sorted(refs - known)
+
+
+def undefined_free_params(tokens: List[str], closure_text: str,
+                          prelude_text: str = "",
+                          supplied: Optional[Dict[str, Tuple[str, ...]]] = None,
+                          ) -> List[Tuple[str, str]]:
+    """[(token, param)] for every free parameter of every named device subckt
+    that NEITHER the library closure NOR the deck prelude defines — the exact
+    set ngspice would report as `Undefined parameter`. `[]` is measured-clean.
+    A token the closure does not define at all is skipped here: that is
+    `undefined_tokens`' finding, not this one."""
+    have = defined_params(closure_text) | defined_params(prelude_text)
+    out: List[Tuple[str, str]] = []
+    sup = supplied or {}
+    seen: set = set()
+    for tok in tokens:
+        if tok in seen:          # one device bound to two roles is one device
+            continue
+        seen.add(tok)
+        body = subckt_body(closure_text, tok)
+        if body is None:
+            continue
+        for prm in subckt_free_params(body, sup.get(tok, ())):
+            if prm not in have:
+                out.append((tok, prm))
+    return out
+
+
+# ── the NAMES a device subckt gives its own geometry ────────────────────────
+# The corner templates and A3's emitter write `w=` / `l=`. That is the name a
+# MOS subckt uses, but a foundry's PASSIVE subckt commonly names its geometry
+# after the device class instead (`r_width` / `r_length`, `c_width` /
+# `c_length`) and DEFAULTS those formals to bare `w` / `l`, which are global
+# parameters no deck defines. Emitting `w=` at such a subckt therefore both
+# passes a parameter it does not declare and leaves its real geometry at an
+# undefined default. Read the names off the subckt's own header instead.
+# chip-AGNOSTIC: the suffix is the SPICE-wide spelling of the dimension, not a
+# vendor / SKU literal, and a subckt that declares `w`/`l` maps to itself so
+# every family that already worked is untouched.
+_GEOM_ROLE_SUFFIX = {"w": "_width", "l": "_length"}
+
+
+def subckt_geometry_param_names(text: str, name: str) -> Dict[str, str]:
+    """{"w": <formal>, "l": <formal>} for `name`'s own geometry formals.
+
+    `{"w": "w", "l": "l"}` when the subckt declares them directly. A dimension
+    the header names in NEITHER form is omitted — never guessed."""
+    # CODE ONLY, and quoted defaults blanked with it: a formal NAME is never
+    # inside a quoted expression, and an inline comment on this card is prose.
+    # Without this the scan reads `; the c_width = 3` as a declared formal.
+    lines = spice_code_only(text or "", blank_quoted=True).splitlines()
+    rest = None
+    for i, ln in enumerate(lines):
+        m = _SUBCKT_RE.match(ln)
+        if m and m.group(1) == name:
+            rest = m.group(2)
+            for nxt in lines[i + 1:]:      # the declaration's `+` continuations
+                t = nxt.lstrip()
+                if not t.startswith("+"):
+                    break
+                rest += " " + t[1:]
+            break
+    if rest is None:
+        return {}
+    formals = [f.lower() for f in _ASSIGN_LHS_RE.findall(rest)]
+    out: Dict[str, str] = {}
+    for key, suffix in _GEOM_ROLE_SUFFIX.items():
+        if key in formals:
+            out[key] = key
+            continue
+        cand = [f for f in formals if f.endswith(suffix)]
+        if len(cand) == 1:
+            out[key] = cand[0]
+    return out
+
+
+def transitive_text(lib_path: str, text: str,
+                    reader: Optional[Callable[[str], Optional[str]]],
+                    _seen: Optional[set] = None, _depth: int = 0) -> str:
+    """The concatenated text of `text` and everything reachable from it through
+    the same `.include` / `.lib <path> <section>` graph the device walks use.
+    Bounded depth + visited set; an unreadable include is skipped."""
+    blob = [text or ""]
+    if reader is None or _depth >= 8:
+        return blob[0]
+    seen = _seen if _seen is not None else set()
+    base = posixpath.dirname(str(lib_path))
+    for inc in _iter_includes(text or ""):
+        tgt = inc if posixpath.isabs(inc) else posixpath.normpath(
+            posixpath.join(base, inc))
+        if tgt in seen:
+            continue
+        seen.add(tgt)
+        itxt = reader(tgt)
+        if itxt is None:
+            continue
+        blob.append(transitive_text(tgt, itxt, reader, seen, _depth + 1))
+    return "\n".join(blob)
 
 
 # ── device FLAVOUR election (vibe-ic#903) ───────────────────────────────────
@@ -1003,7 +1408,7 @@ def map_device_roles(subckts: Dict[str, int],
 def parse_sections(text: str) -> List[str]:
     """Ordered, de-duplicated `.lib <section>` DEFINITION names in a model lib."""
     out: List[str] = []
-    for m in _LIB_SECTION_RE.finditer(text or ""):
+    for m in _LIB_SECTION_RE.finditer(spice_code_only(text or "")):
         s = m.group(1).lower()
         if s not in out:
             out.append(s)
@@ -1106,6 +1511,13 @@ def family_library_grounding(selector: str,
       undefined_sections  the ones the library does not define.
       derived_device_map  {role: subckt} elected FROM the library.
       n_subckts           size of the library's transitive device closure.
+      geometry_units      {token: "metric"|"unitless"} for the tokens in play.
+      prelude             the files the entry declares as its deck prelude.
+      prelude_unreadable  the declared prelude files that could not be read
+                          HERE (only meaningful when `measured`).
+      undefined_params    [(token, param)] a bound device references and
+                          neither the library closure nor the prelude defines
+                          — the `Undefined parameter` ngspice would report.
     """
     fams = _KNOWN_FAMILIES if families is None else families
     entry = fams.get(selector) or {}
@@ -1115,11 +1527,12 @@ def family_library_grounding(selector: str,
     hit = _GROUNDING_CACHE.get(key)
     declared = family_device_map(entry) or {}
     declared_sections = [str(x) for x in (entry.get("corner_sections") or [])]
+    prelude = family_deck_prelude(entry)
     if hit is None:
         txt = rd(lib) if lib else None
         if txt is None:
             hit = {"measured": False, "n_subckts": 0, "subckts": {},
-                   "sections": []}
+                   "sections": [], "units": {}, "closure": ""}
         else:
             tsub = transitive_subckts(lib, txt, rd)
             own = parse_devices(txt)
@@ -1127,7 +1540,9 @@ def family_library_grounding(selector: str,
             for m in (own.get("models") or {}):
                 names.setdefault(m, 0)
             hit = {"measured": True, "n_subckts": len(tsub), "subckts": names,
-                   "sections": parse_sections(txt)}
+                   "sections": parse_sections(txt),
+                   "units": transitive_geometry_units(lib, txt, rd),
+                   "closure": transitive_text(lib, txt, rd)}
         _GROUNDING_CACHE[key] = hit
     defined = hit["subckts"]
     secs_lower = {str(x).lower() for x in hit["sections"]}
@@ -1140,6 +1555,14 @@ def family_library_grounding(selector: str,
         "undefined_tokens": [],
         "undefined_sections": [],
         "derived_device_map": {},
+        "geometry_units": {},
+        "geometry_param_names": {},
+        "terminals": {},
+        "companion_sections": {},
+        "undefined_companion_sections": [],
+        "prelude": list(prelude),
+        "prelude_unreadable": [],
+        "undefined_params": [],
     }
     if not hit["measured"]:
         return out
@@ -1147,11 +1570,47 @@ def family_library_grounding(selector: str,
                                if t not in defined]
     out["undefined_sections"] = [x for x in declared_sections
                                  if str(x).lower() not in secs_lower]
+    # A companion section is as load-bearing as the corner itself: without it
+    # the deck elaborates its transistors and stops at the first passive. The
+    # per-corner ones are checked AT EVERY declared corner, because a family
+    # can ship a group at some corners and not others and the grid would then
+    # be silently narrower than it claims.
+    companions: Dict[str, List[str]] = {}
+    for sec in declared_sections:
+        companions[str(sec)] = family_companion_sections(entry, str(sec))
+    out["companion_sections"] = companions
+    out["undefined_companion_sections"] = sorted(
+        {(str(c), str(x)) for c, xs in companions.items() for x in xs
+         if str(x).lower() not in secs_lower})
     if not declared:
         dmap, _unres, _notes, _elec = elect_device_roles(
             {k: v for k, v in defined.items() if v}, required, None)
         out["derived_device_map"] = {r: d for r, d in dmap.items()
                                      if r in required}
+    # The geometry-unit convention and the free-parameter closure are facts
+    # about the tokens THIS context will bind — the authored map when there is
+    # one, the derived map otherwise.
+    bound = dict(declared) or dict(out["derived_device_map"])
+    units = hit["units"]
+    out["geometry_units"] = {t: units.get(t, "unitless")
+                             for t in bound.values() if t in defined}
+    pre_text = []
+    for path in prelude:
+        ptxt = rd(path)
+        if ptxt is None:
+            out["prelude_unreadable"].append(path)
+        else:
+            pre_text.append(ptxt)
+    out["terminals"] = {t: defined.get(t, 0)
+                        for t in bound.values() if t in defined}
+    out["geometry_param_names"] = {
+        t: subckt_geometry_param_names(hit["closure"], t)
+        for t in bound.values() if t in defined}
+    out["undefined_params"] = undefined_free_params(
+        [t for t in bound.values() if t in defined],
+        hit["closure"], "\n".join(pre_text),
+        supplied={t: tuple(names.values())
+                  for t, names in out["geometry_param_names"].items()})
     return out
 
 
@@ -1216,6 +1675,37 @@ def known_family_context(selector: str,
                 f"does not define (vibe-ic#2161)"
                 for sec in _gr["undefined_sections"]]
             device_map = {}
+        # The #2161 follow-on: a device the library DOES define can still be
+        # un-elaborable, because its body references a global switch the
+        # library does not carry. The family declares the file that carries it
+        # (`deck_prelude`); an unreadable or insufficient prelude is refused
+        # here, in the simulator's own words, instead of at `Undefined
+        # parameter [...] exit(1)` with no analysis run.
+        if _gr["measured"] and _gr["undefined_companion_sections"] and not _work:
+            _work += [
+                f"NOT_AVAILABLE: family '{_template_family}' needs companion "
+                f"section '{sec}' at corner '{corner}', which its OWN model "
+                f"library {_gr['library']} does not define — a deck at that "
+                f"corner cannot elaborate the device class it carries"
+                for corner, sec in _gr["undefined_companion_sections"]]
+            device_map = {}
+        if _gr["measured"] and _gr["prelude_unreadable"] and not _work:
+            _work += [
+                f"NOT_AVAILABLE: family '{_template_family}' declares deck "
+                f"prelude '{path}', which could not be read where its own "
+                f"model library {_gr['library']} WAS readable — a deck cannot "
+                f"include it"
+                for path in _gr["prelude_unreadable"]]
+            device_map = {}
+        if _gr["measured"] and _gr["undefined_params"] and not _work:
+            _work += [
+                f"NOT_AVAILABLE: family '{_template_family}' binds device "
+                f"'{tok}', whose definition references parameter '{prm}' that "
+                f"neither its own model library {_gr['library']} nor this "
+                f"entry's deck prelude {_gr['prelude']} defines — ngspice "
+                f"stops at `Undefined parameter [{prm}]`"
+                for tok, prm in _gr["undefined_params"]]
+            device_map = {}
     else:
         device_map = dict(_gr["derived_device_map"])
         if device_map:
@@ -1242,12 +1732,42 @@ def known_family_context(selector: str,
         corner_sections=list(fam["corner_sections"]),
         typ_section=typ, process_corners=process,
         device_map=dict(device_map),
+        # GROUNDED, never asserted: the geometry-unit convention each bound
+        # device declares FOR ITSELF, read off the family's own library. `{}`
+        # when the library was not readable here — the historical no-op, so a
+        # host with no PDK installed emits exactly what it emitted before, and
+        # sky130 (whose devices declare no metric default) is a no-op either
+        # way.
+        device_geometry_units=({role: _gr["geometry_units"].get(tok,
+                                                               "unitless")
+                                for role, tok in device_map.items()}
+                               if _gr["measured"] else {}),
+        deck_prelude=(family_deck_prelude(fam) if device_map else []),
+        device_geometry_params=({role: _gr["geometry_param_names"].get(tok, {})
+                                 for role, tok in device_map.items()}
+                                if _gr["measured"] else {}),
+        companion_sections=({c: list(v) for c, v
+                             in _gr["companion_sections"].items()}
+                            if device_map else {}),
+        # EVERY (lib, section) an emitted deck must load at the NOMINAL corner.
+        # Populated only for a family that HAS companions, so a single-section
+        # family (sky130) keeps the empty list its consumers already branch on
+        # and emits the same one `.lib` line it always did.
+        deck_loads=([(fam["model_lib"], typ)]
+                    + [(fam["model_lib"], sec)
+                       for sec in family_companion_sections(fam, typ or "")]
+                    if (device_map and typ
+                        and family_companion_sections(fam, typ)) else []),
         unresolved_roles=[r for r in _REQUIRED_ROLES_DEFAULT
                           if r not in device_map],
         work_items=list(_work),
-        # the open-PDK device templates are 4-terminal (d g s b) — no extra
-        # substrate/well node injection (keeps the sky130 deck byte-identical).
-        device_terminals={role: 4 for role in device_map},
+        # DERIVED from the family's own library when it was readable; 4 (the
+        # `d g s b` the corner templates are authored for) when it was not, so
+        # a host with no PDK installed keeps the historical value. sky130's MOS
+        # subckts measure 4, so its deck is byte-identical either way.
+        device_terminals={role: (_gr["terminals"].get(tok, 4)
+                                 if _gr["measured"] else 4)
+                          for role, tok in device_map.items()},
         template_family=_template_family,
         # vibe-ic#903 — no DEVICE election happens on this path either: the
         # device map is the plugin's authored table. Stated positively rather

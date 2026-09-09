@@ -724,6 +724,8 @@ def resolve_pdk_context(project: Path, pdk: str, container: str,
     typ_section: Optional[str] = None
     device_terminals: Dict[str, int] = {}
     geometry_units: Dict[str, str] = {}
+    deck_prelude: List[str] = []
+    geometry_params: Dict[str, Dict[str, str]] = {}
     status = "OK"
     work_items: List[str] = []
     family = pdk
@@ -780,6 +782,9 @@ def resolve_pdk_context(project: Path, pdk: str, container: str,
         device_map = dict(ctx_json.get("device_map") or {})
         device_terminals = dict(ctx_json.get("device_terminals") or {})
         geometry_units = dict(ctx_json.get("device_geometry_units") or {})
+        geometry_params = {k: dict(v) for k, v in
+                           (ctx_json.get("device_geometry_params") or {}).items()}
+        deck_prelude = [str(x) for x in (ctx_json.get("deck_prelude") or [])]
         work_items = list(ctx_json.get("work_items") or [])
     except _ce.ContainerImageMismatch:
         # THE ONE EXCEPTION THIS BROAD HANDLER MAY NOT ABSORB (vibe-ic#2076,
@@ -840,6 +845,14 @@ def resolve_pdk_context(project: Path, pdk: str, container: str,
         "unresolved_roles": unresolved,
         "device_terminals": device_terminals,
         "geometry_units": geometry_units,
+        # {role: {"w": formal, "l": formal}} — the geometry parameter NAMES
+        # each bound device subckt declares for itself.
+        "geometry_params": geometry_params,
+        # The family's own global switch/parameter deck — files this netlist
+        # must `.include` BEFORE its `.lib` corner line, because its bound
+        # device subckts reference parameters their model library does not
+        # define. Empty for a self-contained family (the sky130 path).
+        "deck_prelude": deck_prelude,
         # vibe-ic#1962 — the DECLARED half only, taken off THIS function's own
         # already-resolved entry rather than re-resolved through a second
         # matcher. The measured sub-record is a different kind of fact and is
@@ -1105,6 +1118,11 @@ def render_netlist(ir: Dict[str, Any], pdkctx: Dict[str, Any],
     L.append("*")
     if not metric:
         L.append(".option scale=1u")
+    # The prelude precedes the `.lib` line: ngspice resolves parameters in read
+    # order, and without it a device whose body references a global switch stops
+    # the run at `Undefined parameter [...]` before any analysis.
+    for _pre in (pdkctx.get("deck_prelude") or []):
+        L.append(f".include {_portable_lib_path(str(_pre), deck_dir)}")
     section = pdkctx.get("typ_section") or ""
     # vibe-ic#907 — LOAD EVERY LIB THIS DECK BINDS A DEVICE FROM.
     #
@@ -1133,12 +1151,21 @@ def render_netlist(ir: Dict[str, Any], pdkctx: Dict[str, Any],
     for d in ir["devices"]:
         model = pdkctx["role_models"][d["role"]]
         parts = [f"x{d['name']}"] + list(d["nets"]) + [model]
+        # THE NAME THE SUBCKT ITSELF GIVES THE DIMENSION. `w=`/`l=` is the MOS
+        # spelling; a foundry passive commonly declares `r_width`/`r_length` or
+        # `c_width`/`c_length` and defaults them to bare `w`/`l`, which no deck
+        # defines — so emitting `w=` there passes an undeclared parameter AND
+        # leaves the real geometry at an undefined default. The resolver reads
+        # the names off the subckt's own header; a role it says nothing about
+        # keeps `w=`/`l=` exactly as before.
+        _gp = (pdkctx.get("geometry_params") or {}).get(d["role"]) or {}
         for p in ("w", "l"):
             v = (overrides.get(d["name"], {}).get(p, d.get(p)))
             if v is None:
                 continue
-            parts.append(f"{p}={_fmt(float(v))}u" if metric
-                         else f"{p}={_fmt(float(v))}")
+            _name = _gp.get(p, p)
+            parts.append(f"{_name}={_fmt(float(v))}u" if metric
+                         else f"{_name}={_fmt(float(v))}")
         m = overrides.get(d["name"], {}).get("m", d.get("m"))
         if m is not None:
             parts.append(f"m={_fmt(float(m))}")

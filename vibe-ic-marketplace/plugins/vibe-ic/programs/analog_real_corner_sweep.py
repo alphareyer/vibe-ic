@@ -264,7 +264,7 @@ def _scan_analysis_failures(txt):
 
 PDK_LIB = {
     "sky130":"/foss/pdks/sky130A/libs.tech/ngspice/sky130.lib.spice",
-    "gf180" :"/foss/pdks/gf180mcuD/libs.tech/ngspice/design.ngspice",
+    "gf180" :"/foss/pdks/gf180mcuD/libs.tech/ngspice/sm141064.ngspice",
 }
 
 
@@ -1649,9 +1649,56 @@ def stamp_temp_card(deck_text, temp_c):
     return "\n".join(lines), applied
 
 
+def known_family_deck_inputs(ctx, pdk):
+    """What the KNOWN-FAMILY fast path hands the deck emitter, as a dict.
+
+    THE FAMILY'S OWN TEMPLATE, not the historical sky130 defaults. `devices`
+    and `process_corners` used to be None here, which means "the corner
+    template's authored tokens and ss/tt/ff" — right only for the family those
+    templates were authored against. The other open PDK spells its nominal
+    corner `typical` and binds different device subckts, so those defaults
+    produced `section definition tt not found` (vibe-ic#2161) against a library
+    that ships the corner under another name.
+
+    EVERY VALUE TAKEN OFF `ctx` IS GUARDED BY THE FAMILY MATCH. ORGANIC #410:
+    `known_family_context` falls back to one family's template for a selector
+    it does not know, while `family` records the name that was ASKED FOR — so
+    reading that context at face value would simulate one PDK and call it
+    another. `known_family_key` returns None for such a selector, and then
+    NOTHING is taken from the context: no device map, no corner grid, no
+    prelude, and `PDK_LIB.get(pdk)` is None, so the caller stops at "pdk lib
+    not reachable" exactly as it did. This is a FUNCTION rather than an inline
+    block so that guard can be exercised directly instead of grepped for.
+
+    Pure: no I/O, no container, no PDK. `ctx` may be None."""
+    famkey = None
+    if ctx is not None:
+        try:
+            import analog_pdk_deck_context as _apdc_k
+            famkey = _apdc_k.known_family_key(pdk)
+        except Exception:
+            famkey = None
+    matched = ctx is not None and bool(famkey)
+    return {
+        "family_key": famkey if matched else None,
+        "pdk_lib": PDK_LIB.get(pdk) or (PDK_LIB.get(famkey) if famkey else None),
+        "devices": dict(ctx.device_map) if matched else None,
+        "device_terminals": dict(ctx.device_terminals) if matched else None,
+        "device_geometry_units": (dict(ctx.device_geometry_units)
+                                  if matched else None),
+        "deck_prelude": list(ctx.deck_prelude) if matched else [],
+        "corner_sections": list(ctx.corner_sections) if matched else None,
+        "companion_sections": dict(ctx.companion_sections) if matched else None,
+        "typ_section": (ctx.typ_section if ctx is not None else None) or "tt",
+        "process_corners": (list(ctx.process_corners)
+                            if matched and ctx.process_corners else None),
+    }
+
+
 def render_deck(btype, block, pdk, pdk_lib, corner, knob, val,
                 deck_overrides=None, temp_c=None, devices=None,
-                device_terminals=None, device_geometry_units=None):
+                device_terminals=None, device_geometry_units=None,
+                deck_prelude=None):
     """Render T[btype] for one sweep point, then apply the L5 deck overrides
     (GAP-ANALOG-2) and a REAL per-corner temperature card (GAP-ANALOG-3).
 
@@ -1723,6 +1770,18 @@ def render_deck(btype, block, pdk, pdk_lib, corner, knob, val,
                            if u == "metric" and devices.get(r)}
             if metric_devs:
                 deck = _emit_metric_geometry(deck, metric_devs)
+    # ── the family's own global switch/parameter deck ───────────────────────
+    # A foundry MOS `.subckt` may reference a global statistical switch its
+    # model library does not define; the family ships it in a separate deck the
+    # netlist is expected to `.include`. Emitted immediately BEFORE the `.lib`
+    # corner line, because ngspice resolves parameters in read order. Empty
+    # prelude -> the deck is returned unchanged (the sky130 path).
+    for _inc in reversed(list(deck_prelude or [])):
+        deck, _n = re.subn(r"(?m)^(\.lib\s)",
+                           f".include {_inc}\n\\1", deck, count=1)
+        if not _n:                       # no `.lib` card to anchor to — prepend
+            _head, _sep, _rest = deck.partition("\n")
+            deck = f"{_head}{_sep}.include {_inc}\n{_rest}"
     ov = deck_overrides or {}
     applied = {}
     if "vref" in ov:
@@ -2029,8 +2088,8 @@ def _run_pvt_corners(project, container, host_root, sl_dir, btype, block, pdk,
                      pdk_lib, knob, val, deck_overrides, subst_header, base_tt,
                      process_corners=None, devices=None, typ_section="tt",
                      device_terminals=None, device_geometry_units=None,
-                     origin=None, render=None, metric_key=None,
-                     resolution_records=None):
+                     deck_prelude=None, origin=None, render=None,
+                     metric_key=None, resolution_records=None):
     """Attempt a REAL ngspice sim at each PVT corner (real .lib section + real
     .temp) for the sized sweep point. Returns `(real_sims, not_completed)`.
 
@@ -2079,7 +2138,8 @@ def _run_pvt_corners(project, container, host_root, sl_dir, btype, block, pdk,
                                       val, deck_overrides=deck_overrides,
                                       temp_c=temp_c, devices=devices,
                                       device_terminals=device_terminals,
-                                      device_geometry_units=device_geometry_units)
+                                      device_geometry_units=device_geometry_units,
+                                      deck_prelude=deck_prelude)
             sp = sl_dir / f"pvt_{proc}_{tlbl}.sp"
             deck = stamp_resolution_stimulus(
                 project, block, container, host_root, deck, sp,
@@ -2377,7 +2437,8 @@ _LIB_CARD_RE = re.compile(
 
 
 def build_design_deck(project: Path, block: str, pdk_lib: str, corner: str,
-                      temp_c=None):
+                      temp_c=None, corner_sections=None,
+                      companion_sections=None):
     """Build ONE corner deck whose circuit under test is the DESIGN netlist.
 
     Returns `(deck_text, info)`, or `(None, info)` when the delivered pair
@@ -2458,10 +2519,29 @@ def build_design_deck(project: Path, block: str, pdk_lib: str, corner: str,
     # step RESOLVED; the other device-class cards are A3's electrical
     # decisions, kept verbatim. Partition by file name, the same identity the
     # model-set refusal below has always used.
-    own_cards = [(lib, sec) for lib, sec in found_lib
-                 if Path(lib).name == Path(pdk_lib).name]
+    # A family can also split its device classes BY SECTION inside ONE file
+    # (confirmed: gf180mcuD ships the MOS corner as `typical`/`ss`/`ff` and the
+    # resistor and MIM corners as `res_<corner>` / `mimcap_<corner>` sections of
+    # the same lib, plus one corner-INDEPENDENT section for the generic MIM
+    # subckt). Those cards are companions too: A4 still owns exactly ONE
+    # process-corner card, and a companion that tracks the corner is moved WITH
+    # it so the grid cannot leave a device class at the nominal corner while
+    # the transistors move. A family that declares no sections here partitions
+    # by file name exactly as before.
+    _corner_secs = {str(x).lower() for x in (corner_sections or [])}
+    _companion_map = {c: [str(x) for x in v]
+                      for c, v in (companion_sections or {}).items()}
+    _companion_secs = {str(x).lower()
+                       for v in _companion_map.values() for x in v}
+    _same_file = [(lib, sec) for lib, sec in found_lib
+                  if Path(lib).name == Path(pdk_lib).name]
+    own_cards = [(lib, sec) for lib, sec in _same_file
+                 if not (_corner_secs and str(sec).lower() in _companion_secs
+                         and str(sec).lower() not in _corner_secs)]
     companions = [(lib, sec) for lib, sec in found_lib
-                  if Path(lib).name != Path(pdk_lib).name]
+                  if Path(lib).name != Path(pdk_lib).name] + \
+                 [(lib, sec) for lib, sec in _same_file
+                  if (lib, sec) not in own_cards]
     if not own_cards:
         declared = ", ".join(repr(lib) for lib, _sec in found_lib)
         info["reason"] = (
@@ -2489,16 +2569,38 @@ def build_design_deck(project: Path, block: str, pdk_lib: str, corner: str,
 
     restamped = [0]
 
+    # {old companion section -> the same companion at the target corner}. The
+    # per-corner companion lists are the SAME length and order at every corner
+    # by construction, so the mapping is positional; a corner-independent
+    # companion maps to itself and is re-emitted unchanged.
+    _move = {}
+    _dst = _companion_map.get(corner) or []
+    for _src_corner, _src in _companion_map.items():
+        if len(_src) != len(_dst):
+            continue
+        for _a, _b in zip(_src, _dst):
+            _move[str(_a).lower()] = _b
+    moved = [0]
+
     def _restamp(m: "re.Match") -> str:
-        # Only the process-corner card this step owns is re-stamped; a
-        # companion device-class card (RES/CAP/…) keeps A3's binding verbatim.
-        if Path(m.group(1)).name == Path(pdk_lib).name:
-            restamped[0] += 1
-            return f".lib {pdk_lib} {corner}"
-        return m.group(0)
+        # Only the process-corner card this step owns is re-stamped to the
+        # corner; a same-file COMPANION card is moved to the same corner's
+        # section of its own device class; a companion card in ANOTHER file
+        # keeps A3's binding verbatim.
+        if Path(m.group(1)).name != Path(pdk_lib).name:
+            return m.group(0)
+        sec = str(m.group(2) or "")
+        if _corner_secs and sec.lower() in _companion_secs \
+                and sec.lower() not in _corner_secs:
+            tgt = _move.get(sec.lower(), sec)
+            moved[0] += 1
+            return f".lib {pdk_lib} {tgt}"
+        restamped[0] += 1
+        return f".lib {pdk_lib} {corner}"
 
     deck, _nseen = _LIB_CARD_RE.subn(_restamp, deck)
     info["lib_cards_restamped"] = restamped[0]
+    info["lib_cards_moved_with_corner"] = moved[0]
     info["lib_cards_kept"] = len(companions)
     deck, applied = stamp_temp_card(deck, temp_c)
     info.update(applied)
@@ -2946,12 +3048,16 @@ def _run_block(project, block, container, pdk, topology_override):
             print(f"[real_sim] block={block}: {ctx.status} "
                   f"(family={ctx.family}) — {ctx.work_items}", file=sys.stderr)
             return 2
-        pdk_lib = PDK_LIB.get(pdk)
-        devices = None
-        device_terminals = None
-        device_geometry_units = None
-        typ_section = (ctx.typ_section if ctx else None) or "tt"
-        grid_corners = None                        # → PVT_PROCESS (ss/tt/ff)
+        _inputs = known_family_deck_inputs(ctx, pdk)
+        pdk_lib = _inputs["pdk_lib"]
+        devices = _inputs["devices"]
+        device_terminals = _inputs["device_terminals"]
+        device_geometry_units = _inputs["device_geometry_units"]
+        deck_prelude = _inputs["deck_prelude"]
+        family_corner_sections = _inputs["corner_sections"]
+        family_companion_sections = _inputs["companion_sections"]
+        typ_section = _inputs["typ_section"]
+        grid_corners = _inputs["process_corners"]
     else:
         if ctx.status != "OK":
             _write_native_template_gap(bdir, block, btype, ctx)
@@ -2973,6 +3079,9 @@ def _run_block(project, block, container, pdk, topology_override):
         devices = ctx.device_map
         device_terminals = ctx.device_terminals
         device_geometry_units = ctx.device_geometry_units
+        deck_prelude = list(ctx.deck_prelude)
+        family_corner_sections = list(ctx.corner_sections)
+        family_companion_sections = dict(ctx.companion_sections)
         typ_section = ctx.typ_section
         grid_corners = ctx.process_corners
 
@@ -3029,8 +3138,10 @@ def _run_block(project, block, container, pdk, topology_override):
             pdk_lib = _declared_lib
     if design_deck:
         def _render(corner, knob, val, temp_c):
-            deck, info = build_design_deck(project, block, pdk_lib, corner,
-                                           temp_c=temp_c)
+            deck, info = build_design_deck(
+                project, block, pdk_lib, corner, temp_c=temp_c,
+                corner_sections=family_corner_sections,
+                companion_sections=family_companion_sections)
             if deck is None:
                 raise RuntimeError(info.get("reason", "design deck unbuildable"))
             design_deck_info.update(info)
@@ -3052,7 +3163,8 @@ def _run_block(project, block, container, pdk, topology_override):
                                deck_overrides=deck_overrides, temp_c=temp_c,
                                devices=devices,
                                device_terminals=device_terminals,
-                               device_geometry_units=device_geometry_units)
+                               device_geometry_units=device_geometry_units,
+                               deck_prelude=deck_prelude)
         sweep_points = SWEEPS.get(btype, [("__noop__", 0)])
         l5_overrides_not_applied = {}
 
@@ -3201,7 +3313,8 @@ def _run_block(project, block, container, pdk, topology_override):
         deck_overrides, subst_header, base_tt,
         process_corners=grid_corners, devices=devices, typ_section=typ_section,
         device_terminals=device_terminals,
-        device_geometry_units=device_geometry_units, origin=origin,
+        device_geometry_units=device_geometry_units,
+        deck_prelude=deck_prelude, origin=origin,
         render=_render, metric_key=target["key"],
         resolution_records=resolution_records)
     pvt_grid, corners_executed = build_pvt_grid(

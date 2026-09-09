@@ -357,6 +357,7 @@ WHICH_GATES = (
     ("test_dff_primitive_synth", "_HAVE_IVERILOG"),
     ("test_gate_directed_rtl_repair", "_HAS_IVERILOG"),
     ("test_general_synth", "_HAVE_IV"),
+    ("test_gf180_family_has_its_own_native_analog_device_template", "_HAVE_NGSPICE"),
     ("test_hamming_synth", "_HAS_IVERILOG"),
     ("test_issue186_p2_regmap_transaction_oracle", "_HAVE_IVERILOG"),
     ("test_issue1437_absent_iverilog_reaches_a_declared_verdict", "_HAS_IVERILOG"),
@@ -465,6 +466,8 @@ WHICH_GATES = (
 NOT_WHICH_GATES = (
     ("test_dff_primitive_synth", "_HAVE_DATASET", "corpus dir"),
     ("test_general_synth", "_HAVE_DS", "corpus dir"),
+    ("test_gf180_family_has_its_own_native_analog_device_template", "_HAVE_PDK",
+     "published PDK model-lib file"),
     ("test_l4_systemrdl_export", "_HAVE_RDL", "package import"),
     ("test_v1_0_78_issue729_ppa_area_threshold", "_HAVE_CONTAINER", "docker probe"),
     ("test_v1_0_80_issue739_ppa_unreachable_target_escape", "_HAVE_CONTAINER", "docker probe"),
