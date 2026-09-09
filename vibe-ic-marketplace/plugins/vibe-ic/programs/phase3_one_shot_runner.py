@@ -33465,7 +33465,39 @@ def _cvg_prune_checkpoints(pnr_out: Path, keep: Optional[Path] = None) -> int:
     They exist to make the winner restorable, and after the decision only the
     winner has a job. On a large design eight routed DEFs is real disk, and a
     step that leaves them behind trades one defect for a slower one. Returns how
-    many were removed; failures are ignored, never reported as removals."""
+    many were removed; failures are ignored, never reported as removals.
+
+    WHAT KEEP-ALL-THEN-PRUNE ACTUALLY COSTS, measured rather than asserted
+    (vibe-ic#2201, lane cz2201 on 8HD-4, image sha256:89a8fd729520, sha256 x
+    sky130A, an 8-pass series sampled every 10 s while the loop ran):
+
+        one checkpoint          7 699 105 B   (7.34 MiB; a routed DEF with the
+                                               fill cleared, 57% of the 13 503
+                                               484 B base `routed.def`)
+        peak, 8 held at once   61 608 934 B   (58.8 MiB)
+        `pnr/` at that moment 197 592 483 B   -> the checkpoints are 31.2% of
+                                               `pnr/`, 10.7% of the 549 MiB run
+                                               tree
+        after this function             0 B   (nothing was restored, so nothing
+                                               was kept)
+
+    MEASURED TWICE, on a second base route of the same design and the same
+    8-pass shape: peak 87 317 429 B against a `pnr/` of 275 978 298 B — 31.6%,
+    against the 31.2% above. The fraction is a property of the shape (8 held
+    checkpoints beside one routed design's worth of everything else), not of
+    the run.
+
+    So the retention policy is KEEP EVERY PASS, PRUNE AT THE DECISION — chosen,
+    not stumbled into. The alternative (best-so-far plus current, a 2-file
+    ceiling of 14.7 MiB here) buys 44 MiB back on this design and costs the
+    ability to restore a pass that the FINAL state's own DRV/hold later make
+    admissible — axes the loop cannot know until it has stopped. The bound is
+    already 8 (`_SHIP_POSTROUTE_CVG_MAX_PASSES`), so the peak is bounded at
+    8 x one fill-free routed DEF whatever the design: on the largest routed DEF
+    in this host's archive (39 162 685 B, caravel_user_project x sky130A) that
+    ceiling is ~180 MiB, still a minority of that run's own `pnr/`. If a design
+    ever appears where 8 x DEF is not proportionate, the 2-file ceiling is the
+    named fallback and this is the arithmetic to redo."""
     n = 0
     for f in sorted(pnr_out.glob(_CVG_CKPT_GLOB)):
         if keep is not None and f == keep:
