@@ -1365,6 +1365,40 @@ def _make_ai_review_task(problem_id: str, project: Path, got: dict,
                     "expected_behavior": ("<the checked behavior; at least "
                                           "24 characters>"),
                     "prompt_evidence": [dict(evidence_item_shape)],
+                    "interface_proof": {
+                        "_optional_when": (
+                            "the joint compile fails ONLY at the test's "
+                            "named-port instantiation because the candidate "
+                            "omits a port the public input explicitly "
+                            "requires. Without this the diagnostic is "
+                            "indistinguishable from a test that invented a "
+                            "port name, and both stay INVALID. Every field is "
+                            "validated: the excerpt must be verbatim public "
+                            "input that NAMES the port and states its "
+                            "DIRECTION, the hashes must be the reviewed ones, "
+                            "the candidate must declare the module and NOT "
+                            "the port, the test must connect it, and the "
+                            "compiler must itself report that port is not a "
+                            "port. A proof that fails any of these REJECTS "
+                            "the review; it never falls back to INVALID. The "
+                            "result stays an interface defect: it authorizes "
+                            "repair, never a runtime FAIL or a PASS"),
+                        "schema": _INTERFACE_PROOF_SCHEMA,
+                        "module": "<module the public input names>",
+                        "port": "<required port identifier>",
+                        "direction": "<input|output|inout>",
+                        "width": "<positive integer bit width>",
+                        "excerpt": ("<exact public-input excerpt naming the "
+                                    "port and its direction>"),
+                        "supports": ("<the interface requirement it "
+                                     "establishes; at least 12 characters>"),
+                        "prompt_sha256": prompt_sha,
+                        **({"public_source_sha256": public_input["source_sha256"]}
+                           if public_input.get("status") == "PRESENT" else {}),
+                        "candidate_rtl_sha256": candidate["rtl_sha256"],
+                        "challenge_sha256": ("<sha256 of the exact challenge "
+                                             "file text>"),
+                    },
                 },
                 "challenge_supersessions": [{
                     "_optional_when": (
@@ -1824,6 +1858,162 @@ def _gate_escalation_disposition_reasons(task: dict, review: dict,
                 f"{_ESCALATION_SANCTIONED}")
     return reasons
 
+_INTERFACE_PROOF_SCHEMA = "vibeic.benchmark.interface_proof.v1"
+_DIRECTIONS = ("input", "output", "inout")
+def _declared_ports(source: str, module: str) -> set[str] | None:
+    """Identifiers in `module <name> ( ... );`, or None if it is not declared.
+
+    A port is a port because it appears in the module HEADER -- true for both
+    the ANSI form (`module m(input wire a, ...)`) and the non-ANSI form
+    (`module m(a, b); input a;`), which is what makes one scan answer the
+    question for both. Comments and strings are stripped first, for the same
+    reason `_challenge_forbidden_hit` strips them: text that the compiler does
+    not read must not decide a verdict about code.
+
+    None is NOT the empty set. "This file does not declare that module" and
+    "that module declares no ports" are different answers, and the caller
+    refuses on the first rather than treating it as an omission it can blame
+    on the candidate.
+    """
+    import _hdl_code_text                                 # noqa: PLC0415
+    scanned = _hdl_code_text.strip_hdl_comments_and_strings(source or "")
+    match = re.search(rf"\bmodule\s+{re.escape(module)}\b", scanned)
+    if match is None:
+        return None
+    rest = scanned[match.end():]
+    stop = rest.find(";")
+    header = rest[:stop] if stop != -1 else rest
+    if "(" not in header:
+        return set()
+    body = header[header.index("(") + 1:]
+    if body.rstrip().endswith(")"):
+        body = body.rstrip()[:-1]
+    return set(re.findall(r"[A-Za-z_]\w*", body)) - {
+        *_DIRECTIONS, "wire", "reg", "logic", "signed", "unsigned", "parameter",
+        "localparam", "bit", "integer", "real", "genvar", "tri", "wand", "wor"}
+
+
+def _interface_proof_from_review(raw, task: dict, prompt_text: str,
+                                 challenge_source: str,
+                                 ) -> tuple[dict | None, list[str]]:
+    """Validate a typed, prompt-bound proof that a REQUIRED port was omitted.
+
+    THE PROBLEM THIS EXISTS FOR (#2210). A candidate that omits a required
+    public port and a test that invents a port name produce the SAME compiler
+    diagnostic, at the SAME location -- the test's named-port instantiation --
+    so `_joint_compile_attribution`, which reads WHICH FILE the errors cite,
+    cannot separate them and both become INVALID. MEASURED on the pinned image
+    (iverilog 14.0 s20260301-462-ga5d8d1781), synthetic fixtures, both
+    standalone compiles clean:
+
+        candidate omits required `io_line`   joint rc 2   INVALID
+        conforming candidate, test typo      joint rc 2   INVALID
+        conforming candidate, correct test   joint rc 0   PASS
+
+    Compiler source location is the wrong instrument for the question, and no
+    stronger one can be built from the compile alone: which interface was
+    REQUIRED is a fact about the public input, which the joint compile never
+    reads. So the semantic authority supplies the claim and the PROGRAM
+    validates every binding it rests on -- the same shape `_validate_ai_review`
+    already uses for override authority: authority is not an unexplained token.
+
+    EVERY BINDING IS CHECKED, AND ANY FAILURE LEAVES THE RESULT INVALID:
+
+      * the excerpt is a whitespace-normalized VERBATIM substring of the public
+        input, so a port name the input never contains cannot be proven -- this
+        is what keeps the invented-port control INVALID;
+      * the excerpt must NAME the port and state a DIRECTION word, so a passing
+        mention ("do not add io_line") is not an interface requirement and an
+        ambiguous one is refused rather than guessed;
+      * the prompt hash, and the public-source hash when a public manifest is
+        PRESENT, must still be the ones the task was written against;
+      * the candidate and challenge hashes must be the reviewed ones;
+      * the candidate must DECLARE the module and NOT declare the port -- if it
+        declares the port there is no omission to attribute, and if it declares
+        no such module this is a wrong-top binding, which stays invalid;
+      * the challenge must actually CONNECT that port by name.
+
+    The compiler evidence itself is checked later, at the compile, against the
+    real diagnostics -- a proof cannot assert what the compiler said.
+    """
+    reasons: list[str] = []
+    if raw is None:
+        return None, []
+    if not isinstance(raw, dict):
+        return None, ["verification_test.interface_proof must be an object"]
+    if raw.get("schema") != _INTERFACE_PROOF_SCHEMA:
+        reasons.append(f"interface_proof.schema must be "
+                       f"{_INTERFACE_PROOF_SCHEMA!r}")
+    module = str(raw.get("module") or "")
+    port = str(raw.get("port") or "")
+    direction = str(raw.get("direction") or "").lower()
+    if not re.fullmatch(r"[A-Za-z_]\w*", module):
+        reasons.append("interface_proof.module must be an identifier")
+    if not re.fullmatch(r"[A-Za-z_]\w*", port):
+        reasons.append("interface_proof.port must be an identifier")
+    if direction not in _DIRECTIONS:
+        reasons.append("interface_proof.direction must be one of "
+                       + ", ".join(_DIRECTIONS))
+    width = raw.get("width")
+    if not isinstance(width, int) or isinstance(width, bool) or width < 1:
+        reasons.append("interface_proof.width must be a positive integer")
+    if raw.get("prompt_sha256") != task.get("prompt_sha256"):
+        reasons.append("interface_proof.prompt_sha256 is not the reviewed prompt")
+    if raw.get("candidate_rtl_sha256") != task.get("rtl_sha256"):
+        reasons.append("interface_proof.candidate_rtl_sha256 is not the "
+                       "reviewed candidate")
+    if raw.get("challenge_sha256") != _sha256_text(challenge_source):
+        reasons.append("interface_proof.challenge_sha256 is not this challenge")
+    public = task.get("public_original_input")
+    if isinstance(public, dict) and public.get("status") == "PRESENT":
+        if raw.get("public_source_sha256") != public.get("source_sha256"):
+            reasons.append("interface_proof.public_source_sha256 is not the "
+                           "staged public source")
+    verified = _verified_prompt_evidence(
+        [{"excerpt": raw.get("excerpt"),
+          "supports": raw.get("supports") or ""}], prompt_text)
+    if not verified:
+        reasons.append("interface_proof.excerpt must be an exact prompt "
+                       "excerpt of at least 8 characters with a stated claim "
+                       "of at least 12")
+    else:
+        excerpt = verified[0]["excerpt"]
+        if port and not re.search(rf"\b{re.escape(port)}\b", excerpt):
+            reasons.append("interface_proof.excerpt does not name the port it "
+                           "claims the public input requires")
+        if direction in _DIRECTIONS and direction not in excerpt.lower():
+            reasons.append("interface_proof.excerpt states no direction for "
+                           "the port, so the requirement is ambiguous")
+    candidate_text = "\n".join(
+        Path(p).read_text(errors="replace")
+        for p in (task.get("rtl_paths") or []) if Path(p).is_file())
+    ports = _declared_ports(candidate_text, module) if module else None
+    if ports is None:
+        reasons.append(f"the candidate declares no module {module!r}, so this "
+                       "is a wrong-top binding, not a port omission")
+    elif port and port in ports:
+        reasons.append(f"the candidate already declares port {port!r}; there "
+                       "is no omission to attribute")
+    if port and not re.search(rf"\.\s*{re.escape(port)}\s*\(",
+                              challenge_source or ""):
+        reasons.append("the challenge does not connect the port this proof is "
+                       "about")
+    if reasons:
+        return None, reasons
+    return {
+        "schema": _INTERFACE_PROOF_SCHEMA,
+        "module": module,
+        "port": port,
+        "direction": direction,
+        "width": width,
+        "excerpt": verified[0]["excerpt"],
+        "supports": verified[0]["supports"],
+        "prompt_sha256": task.get("prompt_sha256"),
+        "public_source_sha256": raw.get("public_source_sha256"),
+        "candidate_rtl_sha256": task.get("rtl_sha256"),
+        "challenge_sha256": _sha256_text(challenge_source),
+    }, []
+
 
 def _challenge_from_review(task: dict, review: dict,
                            prompt_text: str, *,
@@ -1884,6 +2074,13 @@ def _challenge_from_review(task: dict, review: dict,
         raw.get("prompt_evidence") or [], prompt_text)
     if not verified_evidence:
         reasons.append("verification_test needs prompt-bound evidence")
+    # OPTIONAL, and absent is the default. A challenge without one behaves
+    # exactly as before; supplying an invalid one is a refusal, not a
+    # downgrade to the old behaviour, so a malformed proof can never buy a
+    # weaker result than no proof at all.
+    interface_proof, proof_reasons = _interface_proof_from_review(
+        raw.get("interface_proof"), task, prompt_text, source)
+    reasons.extend(proof_reasons)
     if reasons:
         return None, reasons
     challenge = {
@@ -1898,6 +2095,8 @@ def _challenge_from_review(task: dict, review: dict,
         "expected_behavior": expected_behavior,
         "rationale": rationale,
     }
+    if interface_proof is not None:
+        challenge["interface_proof"] = interface_proof
     return challenge, []
 
 
@@ -2035,6 +2234,65 @@ def _ports_absent_from_dut(errors: str) -> list:
     return seen
 
 
+def _interface_omission_reason(candidate: dict, challenge: dict,
+                               errors: str) -> str | None:
+    """The attributable interface defect this compile proves, or None.
+
+    v1.20.9 established WHICH ports the compiler says are absent and stated,
+    out loud, that attribution between "the candidate omitted a required port"
+    and "the test invented one" is UNDETERMINED without the prompt-bound
+    interface. This is the consumer that supplies it. It reads
+    `_ports_absent_from_dut` rather than re-deriving the same list: one
+    extractor, so the disclosure and the attribution can never disagree about
+    which ports the compiler named.
+
+    The freeze-time half (`_interface_proof_from_review`) established that the
+    public input REQUIRES this port. This half re-establishes everything that
+    is a fact about THIS RUN, and takes none of it on trust from the proof:
+
+      * the proof is bound to the candidate being compiled RIGHT NOW. A
+        challenge is INHERITED across repair rounds -- `_validate_ai_review`
+        re-runs every one of them against the new candidate -- so a proof
+        frozen against the parent must not be spent on its child. It is
+        re-earned or it is not used.
+      * this candidate really does declare the module and NOT the port. The
+        freeze-time check answered that about a different set of bytes.
+      * the compiler itself named this port as absent.
+
+    None whenever any of that is missing, and the caller then falls through to
+    v1.20.9's disclosure unchanged -- so the undecidable case keeps saying it
+    is undecidable, and only a validated proof turns it into a decision. An
+    interface result stays an interface result: this returns a
+    CANDIDATE_BROKEN reason, never a runtime FAIL and never a PASS.
+    """
+    proof = challenge.get("interface_proof")
+    if not isinstance(proof, dict) or proof.get("schema") != _INTERFACE_PROOF_SCHEMA:
+        return None
+    port = str(proof.get("port") or "")
+    module = str(proof.get("module") or "")
+    if not port or not module:
+        return None
+    if proof.get("candidate_rtl_sha256") != candidate.get("rtl_sha256"):
+        return None
+    if port not in _ports_absent_from_dut(errors):
+        return None
+    try:
+        source = "\n".join(
+            Path(p).read_text(errors="replace")
+            for p in (candidate.get("rtl_paths") or []) if Path(p).is_file())
+    except OSError:
+        return None
+    declared = _declared_ports(source, module)
+    if declared is None or port in declared:
+        return None
+    return (f"joint compile failed on a REQUIRED public interface the "
+            f"candidate omits: module {module!r} must declare "
+            f"{proof.get('direction')} port {port!r} of width "
+            f"{proof.get('width')}, evidenced by the public input excerpt "
+            f"{proof.get('excerpt')!r}; the compiler reports it is not a port "
+            f"of the instantiated candidate")
+
+
 def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
     """Compile/run one immutable test against one immutable candidate."""
     reasons = _validate_candidate_snapshot(candidate, str(candidate.get("id")))
@@ -2096,6 +2354,19 @@ def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
                     errors[-1200:],
                 ]}
             if cites_challenge and not cites_candidate:
+                # The one case where the CITED FILE is not the broken one: a
+                # required public port the candidate never declared is
+                # reported at the test's named-port instantiation, exactly
+                # where an invented port name is. The interface proof was
+                # validated against the public input at freeze time; what is
+                # still open is whether the COMPILER actually says this port
+                # is missing, which only the real diagnostics can answer.
+                proven = _interface_omission_reason(
+                    candidate, challenge, errors)
+                if proven is not None:
+                    return {"status": _CHALLENGE_CANDIDATE_BROKEN,
+                            "interface_proof": challenge["interface_proof"],
+                            "reasons": [proven, errors[-1200:]]}
                 cited = "only the challenge file"
             elif cites_candidate:
                 cited = "both candidate RTL and the challenge file"
