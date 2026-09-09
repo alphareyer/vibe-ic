@@ -75,6 +75,47 @@ def _required(step_id: str):
     return list(_steps()[step_id].get("required_outputs") or [])
 
 
+#: The module-level table in `phase3_one_shot_runner` whose rows ARE the
+#: inline sign-off dispatch: `(step name, program, output path, extra argv)`.
+_SIGNOFF_TABLE = "_DECLARED_SIGNOFF_GATES"
+
+
+def _declared_signoff_outputs() -> set:
+    """The output column of every row in the runner's sign-off gate table.
+
+    READ AS DATA, NOT AS A SHAPE, and that is the whole point of parsing it
+    rather than grepping for it. The two producer shapes this module already
+    accepts are both TEXT patterns — a literal beside a `/`, or a literal after
+    `--json` in the yaml. `_run_declared_signoff_gate` satisfies BOTH of them
+    (`out_json = project / out_rel`, then `"--json", str(out_json)`), but it
+    spells the path through a parameter, so neither pattern can see it and the
+    literal lives one call away, in this table.
+
+    Returns an empty set if the table cannot be found or parsed; the callers
+    below refuse on an empty set rather than passing over one.
+    """
+    import ast  # noqa: WPS433
+    try:
+        tree = ast.parse(_RUNNER_SRC)
+    except SyntaxError:                                    # pragma: no cover
+        return set()
+    out = set()
+    for node in tree.body:
+        targets = (node.targets if isinstance(node, ast.Assign)
+                   else [node.target] if isinstance(node, ast.AnnAssign)
+                   else [])
+        if not any(isinstance(x, ast.Name) and x.id == _SIGNOFF_TABLE
+                   for x in targets):
+            continue
+        value = getattr(node, "value", None)
+        for row in getattr(value, "elts", []):
+            elts = getattr(row, "elts", [])
+            if len(elts) >= 3 and isinstance(elts[2], ast.Constant) \
+                    and isinstance(elts[2].value, str):
+                out.add(elts[2].value)
+    return out
+
+
 # ===========================================================================
 # The artefacts the step's own verdict is read from are declared
 # ===========================================================================
@@ -202,6 +243,11 @@ def test_every_declared_output_of_these_steps_has_a_producer():
     measured separately — see the corpus counts in this module's docstring.
     """
     steps = _steps()
+    declared_signoff_outputs = _declared_signoff_outputs()
+    assert declared_signoff_outputs, (
+        f"{_SIGNOFF_TABLE} yielded no output paths — the third producer shape "
+        f"below would pass nothing and this test would silently narrow back to "
+        f"two shapes")
     for step_id in ("23", "25", "26"):
         gate_json_targets = set()
         for cmd in _gate_commands(steps[step_id]):
@@ -212,10 +258,12 @@ def test_every_declared_output_of_these_steps_has_a_producer():
             name = Path(entry).name
             built_by_runner = re.search(
                 rf'/\s*f?["\'][^"\'\n]*{re.escape(name)}["\']', _RUNNER_SRC)
-            assert built_by_runner or entry in gate_json_targets, (
-                f"step {step_id} declares {entry} but neither the runner "
-                f"builds that path nor does this step's gate produce it "
-                f"via --json")
+            assert (built_by_runner or entry in gate_json_targets
+                    or entry in declared_signoff_outputs), (
+                f"step {step_id} declares {entry} but no producer was found: "
+                f"the runner does not build that path from a literal, this "
+                f"step's gate does not produce it via --json, and it is not "
+                f"the output column of any {_SIGNOFF_TABLE} row")
 
 
 # ===========================================================================
@@ -442,3 +490,98 @@ def test_the_matrix_does_not_hold_the_step31_json_entry():
         f"{writers} WRITE {_STEP31_DRC_SIGNOFF_JSON}. A consumer that writes "
         f"this path is the general_precheck clobber returning under a new "
         f"name — the matrix must not hold an entry an audit produces itself.")
+
+
+# ===========================================================================
+# The third producer shape is only admissible while it really produces
+# ===========================================================================
+def test_the_signoff_table_dispatch_really_writes_its_output_column():
+    """Membership in `_DECLARED_SIGNOFF_GATES` means PRODUCED, or it means
+    nothing — and if it means nothing, accepting it above is a relaxation
+    rather than a widening.
+
+    So the implication is asserted, not assumed. `_run_declared_signoff_gate`
+    must (1) build the row's third column under the project directory and
+    (2) hand that path to the gate as `--json`. Those are precisely the two
+    producer mechanisms this module already accepts from a literal; the row
+    reaches them through a parameter, which is why the text patterns miss it.
+
+    If the dispatcher is ever refactored so a row's output path is no longer
+    built and passed, this fails HERE — and the acceptance above becomes
+    unsound at the same moment, which is the point of pinning it.
+    """
+    import ast
+    fn = None
+    for node in ast.walk(ast.parse(_RUNNER_SRC)):
+        if isinstance(node, ast.FunctionDef) \
+                and node.name == "_run_declared_signoff_gate":
+            fn = node
+            break
+    assert fn is not None, (
+        "the runner no longer defines _run_declared_signoff_gate, so nothing "
+        f"dispatches {_SIGNOFF_TABLE} and its rows produce nothing")
+    body = ast.unparse(fn)
+    assert re.search(r"out_json\s*=\s*project\s*/\s*out_rel", body), (
+        "_run_declared_signoff_gate no longer builds <project> / <out_rel>; "
+        f"a {_SIGNOFF_TABLE} row's output column is then not a produced path")
+    assert re.search(r"'--json'\s*,\s*str\(out_json\)", body) \
+        or re.search(r'"--json"\s*,\s*str\(out_json\)', body), (
+        "_run_declared_signoff_gate no longer passes the row's output path to "
+        "the gate as --json; the row declares a path nothing is told to write")
+
+
+def test_the_table_is_dispatched_over_every_row():
+    """A table nobody iterates produces nothing either."""
+    assert re.search(
+        r"for\s+\w+\s*,\s*\w+\s*,\s*\w+\s*,\s*\w+\s+in\s+" + _SIGNOFF_TABLE,
+        _RUNNER_SRC), (
+        f"nothing iterates {_SIGNOFF_TABLE}, so its rows are declarations "
+        f"with no dispatch behind them")
+
+
+def test_an_entry_with_no_producer_anywhere_still_fails():
+    """NEGATIVE CONTROL for the widening — the whole reason this test exists.
+
+    Adding a third accepted shape is only safe if the check can still REFUSE.
+    A path that satisfies none of the three shapes must not be accepted, so
+    the acceptance is exercised here directly against a name no producer
+    mentions. Without this, `test_every_declared_output_of_these_steps_has_a_
+    producer` could be widened until nothing could fail it and it would still
+    look green.
+    """
+    phantom = "reports/phase3/sta/no_such_artefact_cybk4_control.json"
+    name = Path(phantom).name
+    assert not re.search(
+        rf'/\s*f?["\'][^"\'\n]*{re.escape(name)}["\']', _RUNNER_SRC), (
+        "the control path is mentioned in the runner; pick another")
+    assert phantom not in _declared_signoff_outputs(), (
+        "the control path is a declared sign-off output; pick another")
+    gate_json_targets = set()
+    for cmd in _gate_commands(_steps()["23"]):
+        toks = cmd.split()
+        gate_json_targets.update(
+            toks[i + 1] for i, t in enumerate(toks) if t == "--json")
+    assert phantom not in gate_json_targets
+
+
+def test_the_third_shape_is_what_admits_the_architectural_residual_report():
+    """The entry this widening was measured on, pinned by NAME.
+
+    `sta_architectural_residual_check` is the one declared sign-off gate whose
+    step-23 yaml clause deliberately does NOT pass `--json`: the clause says so
+    in as many words — "The inline sign-off runner owns the required JSON
+    output. Auditing must re-check the timing inputs without creating or
+    replacing it." So the runner's table is its ONLY producer, and that is by
+    design, not by omission. Pinned here so that if someone later "fixes" this
+    by adding `--json` to the yaml — re-creating the report on the audit pass
+    the comment forbids — the reason this shape exists is still on the record.
+    """
+    entry = "reports/phase3/sta/architectural_residual.json"
+    assert entry in _required("23")
+    assert entry in _declared_signoff_outputs(), (
+        f"{entry} is no longer an output column of {_SIGNOFF_TABLE}")
+    name = Path(entry).name
+    assert not re.search(
+        rf'/\s*f?["\'][^"\'\n]*{re.escape(name)}["\']', _RUNNER_SRC), (
+        "the runner now builds this path from a literal too; if that is "
+        "intended, this pin should be retired rather than kept green by luck")
