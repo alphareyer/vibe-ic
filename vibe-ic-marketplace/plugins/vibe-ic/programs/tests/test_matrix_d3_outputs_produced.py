@@ -6475,6 +6475,89 @@ def test_d3_live_production_is_handed_only_what_the_commit_carries():
             )
 
 
+def test_d3_rc2_detail_carries_the_machine_token(monkeypatch, tmp_path):
+    """The token contract, driven through `produce_live` and needing NOTHING
+    this host may lack — no published corpus, no KLayout, no producer.
+
+    WHY THIS EXISTS. The rule the guard above enforces cannot be falsified by
+    the lander: `test_d3_produce_live_is_not_decided_by_the_working_tree` needs
+    a run root, `run_roots()` deliberately refuses to search for one (#527) and
+    the published cells left this repository, so in an arm with no
+    VIBE_IC_BENCHMARK_DATA that test SKIPS at "no live-produced entry has a run
+    root on this tree" — in every arm, mutated or not. MEASURED in falsref's own
+    image at live main b6a73c0aa3: tree G `1 skipped`, tree M (whole-tree-copy
+    defect re-planted) `1 skipped`; bind the corpus and the same two trees give
+    `1 passed` / `1 failed`. The rule is real and armed; the harness cannot see
+    it, so this pins the half that IS reachable anywhere: the contract that the
+    one function which knows the return code EMITS the token, and the one
+    predicate beside it READS it.
+
+    Nothing here parses prose. `subprocess.run` is stubbed at the module seam so
+    the producer never runs, which is exactly why the case is host-independent.
+    """
+    src = tmp_path / "root"
+    (src / "phase3").mkdir(parents=True)
+    (src / "phase3" / "input.txt").write_text("tracked input\n")
+    subprocess.run(["git", "init", "-q", "."], cwd=src, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "add", "-A"], cwd=src, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@e",
+                    "commit", "-qm", "probe"], cwd=src, check=True,
+                   capture_output=True)
+
+    program = "die_finishing_gen"
+    assert (F.PROGRAMS_DIR / f"{program}.py").is_file(), (
+        "the probe names a producer this tree does not ship")
+    rec = {"base_run": "cyd3-probe", "writes": "phase3/out.def",
+           "producer": program, "argv": ["."]}
+
+    mod = sys.modules[__name__]
+    monkeypatch.setattr(mod, "run_roots",
+                        lambda: {"cyd3-probe": RunRoot("cyd3-probe",
+                                                       _IN_REPO_KIND, src)})
+    monkeypatch.setattr(mod, "gate_command_writing", lambda *_a, **_k: None)
+
+    class _Proc:
+        def __init__(self, rc):
+            self.returncode = rc
+            self.stdout = "VACUOUS_PASS: no KLayout runner available\n"
+            self.stderr = ""
+
+    # THE PRODUCER IS LAUNCHED THROUGH `_pr.run`, NOT `subprocess.run`. Stubbing
+    # the latter looks right, changes nothing, and lets the real producer run —
+    # which on a host without KLayout returns 2 by itself and makes the negative
+    # arm below silently untestable. Only the PRODUCER call is faked; the git
+    # calls `_copy_tracked` makes go through untouched, or the probe would carry
+    # nothing tracked and `produce_live` would return before it ever launched.
+    real_run = mod._pr.run
+
+    def _fake(rc):
+        def _run(argv, *a, **k):
+            if list(argv)[:1] == [sys.executable]:
+                return _Proc(rc)
+            return real_run(argv, *a, **k)
+        return _run
+
+    # rc=2 — the disclosed capability gap. The detail must be MACHINE-readable.
+    monkeypatch.setattr(mod._pr, "run", _fake(2))
+    result = produce_live("26.5ic", "phase3/out.def", rec)
+    assert result.produced is False
+    assert result.unmeasured is True, (
+        "the disclosed rc=2 capability gap must remain a distinct third "
+        "outcome, rather than being collapsed into an ordinary failure")
+    assert "UNMEASURED here" in result.detail
+
+    # rc=1 — a real failed production. It must NOT wear the token, or the guard
+    # would skip on every red and the rule would be switched off, not scoped.
+    monkeypatch.setattr(mod._pr, "run", _fake(1))
+    result = produce_live("26.5ic", "phase3/out.def", rec)
+    assert result.produced is False
+    assert result.unmeasured is False, (
+        "a real producer failure must not be relabelled as an unavailable "
+        "capability merely because it returned a nonzero status")
+
+
 def test_d3_produce_live_is_not_decided_by_the_working_tree(monkeypatch):
     """The same rule asserted through ``produce_live`` itself, not its helper.
 
