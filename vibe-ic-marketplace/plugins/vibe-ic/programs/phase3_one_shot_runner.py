@@ -31055,16 +31055,49 @@ def _snap_dbu(v):
 def _snap_local_shapes():
     """Snap every cell's LOCAL geometry vertices to the grid."""
     n = 0
+    _top_ids = set(c.cell_index() for c in ly.top_cells())
     for ci in range(ly.cells()):
         cell = ly.cell(ci)
+        # pya.Region carries POLYGONS ONLY, so the Region/clear/insert trip
+        # below DESTROYS every text shape on the layer. Those texts are the
+        # DEF PIN labels -- the only thing naming a top port -- so after this
+        # pass the streamed GDS has none, LVS extracts a top with ZERO formal
+        # pins, and netgen reports the design's power and well pins as
+        # `VDD / VNW / VPW / VSS |(no matching pin)`. MEASURED on the pinned
+        # image against a 4-pin DEF: streamout emits VDD/VNW/VPW/VSS, this
+        # pass returns 0 of them.
+        #
+        # Only the TOP cell's OWN texts are carried across. A child cell's
+        # texts are the foundry library's internal pin names; the layer-merge
+        # pass flattens the hierarchy, so a preserved child label becomes a
+        # TOP-LEVEL label and an extraction with top_lvl_pins promotes every
+        # labelled top net to a formal pin -- measured on spm, that gave
+        # `.SUBCKT chip_top` 5,655 pins with collided names (`A|AB$17`)
+        # instead of the 38 the DEF declares. Child texts were already dropped
+        # here before this repair, so leaving them dropped is not a
+        # regression. No polygon, grid, layer map or device content changes.
+        _keep_texts = cell.cell_index() in _top_ids
         for li in ly.layer_indexes():
             sh = cell.shapes(li)
             if sh.is_empty():
                 continue
+            # Text VALUES, taken BEFORE clear(): a Shape handle read after
+            # sh.clear() aborts the interpreter.
+            _texts = ([s_.text for s_ in sh.each() if s_.is_text()]
+                      if _keep_texts else [])
             reg = pya.Region(sh)
             reg.snap(grid_dbu, grid_dbu)
             sh.clear()
             sh.insert(reg)
+            for _tt in _texts:
+                # Snap the label anchor the same way the polygon vertices
+                # were snapped; set ONLY the displacement so the original
+                # rotation/mirror is preserved exactly.
+                _tr = _tt.trans
+                _tr.disp = pya.Vector(_snap_dbu(_tr.disp.x),
+                                      _snap_dbu(_tr.disp.y))
+                _tt.trans = _tr
+                sh.insert(_tt)
             n += 1
     return n
 
@@ -31213,10 +31246,17 @@ for tc in ly.top_cells():
         sh = tc.shapes(li)
         if sh.is_empty():
             continue
+        # Same text-destroying round-trip as the grid snap. Merging is a
+        # polygon operation and has nothing to say about labels: union the
+        # polygons, then put the texts back unchanged. Values taken before
+        # clear() invalidates the Shape handles.
+        _texts = [s_.text for s_ in sh.each() if s_.is_text()]
         reg = pya.Region(sh)
         reg.merge()                 # union abutting/overlapping same-layer
         sh.clear()
         sh.insert(reg)
+        for _tt in _texts:
+            sh.insert(_tt)
         merged_layers += 1
 ly.write(gds_out)
 print("GDS_LAYER_MERGE_DONE layers=%d" % merged_layers)
