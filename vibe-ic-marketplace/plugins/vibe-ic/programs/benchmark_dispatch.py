@@ -669,6 +669,168 @@ def _review_obligation_id(item: dict) -> str:
 _ROUTED_ESCALATION_VERDICTS = frozenset({"FINDING", "ESCALATE"})
 
 
+#: Statuses that are a REQUIRED gate REPORTING A FAILURE. Deliberately only the
+#: unambiguous three: this list decides what HOLDS a deliverable, and widening
+#: it to statuses that merely mean "not run" (BLOCKED) or "not applicable"
+#: (SKIP / SKIPPED-BY-ENTRY / WAIVED / ADVISORY) would be the blanket
+#: all-history-green rule #2216 explicitly forbids. MEASURED on the published
+#: VerilogEval-Human corpus: 61 accepted rows carry 163 FAIL steps and NOT ONE
+#: of them is an in-scope site gate, so this predicate blocks none of them.
+_GATE_FAILED = frozenset({"FAIL", "REFUSED", "ERROR"})
+
+#: Statuses that mean the gate DID NOT REPORT — the run never got an answer out
+#: of it. Not a pass and not a failure: a hole. MEASURED: `rtl_validate` is
+#: BLOCKED on 44 of those 61 accepted rows and absent on the other 17, so this
+#: is the ordinary state of a required in-scope gate today, and the accepting
+#: message has been claiming those gates passed.
+_GATE_UNMEASURED = frozenset({"BLOCKED", "INCOMPLETE", "NOT_MEASURED", ""})
+
+
+def _required_gate_ledger(solve_result: Any) -> dict:
+    """Which REQUIRED IN-SCOPE Program gates this run declared, and what each
+    actually said — the ledger #2216 says does not exist.
+
+    THE GAP THIS CLOSES. The accept path asks four questions: is the artefact
+    owned by the runner, does the reviewed hash still match, is Phase-1
+    provenance intact, and did the RTL-OWNING gate (`rtl_gen`) reach an allowed
+    status. It then prints `ACCEPTED by PROGRAM gates`, which is a claim about
+    EVERY required gate. No question it asked can see a second, downstream,
+    in-scope gate that FAILED on the same RTL. Measured on the real collector
+    with the issue's own probe: `rtl_gen=PASS, rtl_validate=FAIL` collects
+    `ok=True` and reaches that message.
+
+    SCOPE IS READ, NEVER INVENTED, from two records the run already publishes:
+
+      * `step_preflight.RUNNER_PLANS["design_one_shot_runner"].sites` — the
+        runner's OWN ordered (site, flow-step-span) declaration, the same table
+        `--exit-step` prunes against, so "in scope" here means exactly what the
+        runner meant when it decided which sites to dispatch;
+      * the run's declared ``exit`` in solve_report.
+
+    A site whose span HEAD is at or before the declared exit is IN SCOPE. This
+    mirrors `design_one_shot_runner._exit_pruned_sites` exactly — a span is one
+    dispatch and cannot be stopped mid-span, so the head decides.
+
+    WHAT IS DELIBERATELY *NOT* CLAIMED. A gate the ledger cannot place on the
+    flow (`sdc_gen`, `final_audit`, `lec_equivalence`, …) is recorded under
+    ``unscoped`` and NEVER blocks. Guessing a step id for it would be inventing
+    the scope oracle this function exists to read, and blocking on a guess
+    would fail 61 published candidates whose out-of-exit FAILs are #2208's
+    producer/consumer defect, not a defect in the reviewed RTL.
+
+    ELIGIBILITY IS THREE-VALUED, and the third value is the point:
+      * ``INELIGIBLE`` — a required in-scope gate REPORTED a failure;
+      * ``ELIGIBLE``   — every required in-scope gate reported an allowed status;
+      * ``NOT_MEASURED`` — a required in-scope gate never reported at all.
+        Never collapsed into either neighbour. Reporting a hole as ELIGIBLE is
+        the defect; reporting it as INELIGIBLE would fail 61 published
+        candidates for a state nobody measured.
+
+    Pure: reads one dict, returns one dict. chip-AGNOSTIC.
+    """
+    ledger = {
+        "schema": "vibeic.benchmark.required_gate_ledger.v1",
+        "declared_exit": None, "in_scope": {}, "out_of_scope": {},
+        "unscoped": {}, "failed_required": [], "unmeasured_required": [],
+        "eligibility": _NOT_MEASURED,
+        "scope_source": ("step_preflight.RUNNER_PLANS[design_one_shot_runner]"
+                         " + solve_report.exit"),
+    }
+    if not isinstance(solve_result, dict):
+        ledger["why"] = "solve_report row is malformed, so no gate is placeable"
+        return ledger
+    ledger["declared_exit"] = solve_result.get("exit")
+    phases = solve_result.get("phases")
+    p3 = (phases or {}).get("phase3_verifying") if isinstance(phases, dict) else None
+    if not isinstance(p3, dict):
+        ledger["why"] = "solve_report carries no Program gate record"
+        return ledger
+    recorded: dict = {}
+    for key in ("ran", "not_attempted"):
+        block = p3.get(key)
+        if isinstance(block, dict):
+            for name, status in block.items():
+                recorded[str(name)] = str(status)
+    if not recorded:
+        ledger["why"] = "the Program gate record names no gate"
+        return ledger
+
+    try:
+        import step_preflight as _spf                     # noqa: PLC0415
+        plan = _spf.RUNNER_PLANS.get("design_one_shot_runner")
+        sites = [(str(n), [str(x) for x in span])
+                 for n, span in (plan.sites if plan else ())]
+    except Exception:                                     # noqa: BLE001
+        sites = []
+    if not sites:
+        ledger["unscoped"] = dict(sorted(recorded.items()))
+        ledger["why"] = ("the runner's own site plan is unreadable, so no gate "
+                         "can be placed on the flow")
+        return ledger
+
+    try:
+        cut = int(str(ledger["declared_exit"]))
+    except (TypeError, ValueError):
+        ledger["unscoped"] = dict(sorted(recorded.items()))
+        ledger["why"] = (f"declared exit {ledger['declared_exit']!r} is not an "
+                         f"orderable flow step id, so nothing can be scoped")
+        return ledger
+
+    placed = set()
+    for name, span in sites:
+        if name not in recorded:
+            # A site the run never recorded at all. In scope, and it did not
+            # report — that is a hole, and it is named as one.
+            if span and str(span[0]).isdigit() and int(span[0]) <= cut:
+                ledger["in_scope"][name] = "(absent)"
+                ledger["unmeasured_required"].append(name)
+            continue
+        placed.add(name)
+        status = recorded[name]
+        head = span[0] if span else ""
+        if not str(head).isdigit():
+            ledger["unscoped"][name] = status
+            continue
+        if int(head) <= cut:
+            ledger["in_scope"][name] = status
+            if status.upper() in _GATE_FAILED:
+                ledger["failed_required"].append(name)
+            elif status.upper() in _GATE_UNMEASURED:
+                ledger["unmeasured_required"].append(name)
+        else:
+            ledger["out_of_scope"][name] = status
+    for name, status in recorded.items():
+        if name not in placed and name not in ledger["unscoped"]:
+            ledger["unscoped"][name] = status
+
+    for key in ("in_scope", "out_of_scope", "unscoped"):
+        ledger[key] = dict(sorted(ledger[key].items()))
+    ledger["failed_required"] = sorted(set(ledger["failed_required"]))
+    ledger["unmeasured_required"] = sorted(set(ledger["unmeasured_required"]))
+    if ledger["failed_required"]:
+        ledger["eligibility"] = "INELIGIBLE"
+    elif ledger["unmeasured_required"]:
+        ledger["eligibility"] = _NOT_MEASURED
+    elif ledger["in_scope"]:
+        ledger["eligibility"] = "ELIGIBLE"
+    return ledger
+
+
+def _gate_status_note(ledger: dict) -> str:
+    """One line stating what the gates ACTUALLY said, for the accepting
+    message. Never the words "by PROGRAM gates" over an unmeasured ledger."""
+    elig = str(ledger.get("eligibility") or _NOT_MEASURED)
+    if elig == "ELIGIBLE":
+        return (f"PROGRAM gates ELIGIBLE "
+                f"({len(ledger.get('in_scope') or {})} in-scope PASS)")
+    if elig == "INELIGIBLE":
+        return ("PROGRAM gates INELIGIBLE: "
+                + ", ".join(ledger.get("failed_required") or []))
+    holes = ledger.get("unmeasured_required") or []
+    return ("PROGRAM gate eligibility NOT_MEASURED"
+            + (f" ({', '.join(holes)} did not report)" if holes else ""))
+
+
 def _program_gate_escalations(project: Optional[Path]) -> list:
     """Advisory gate findings this project raised that nothing acted on.
 
@@ -3228,6 +3390,15 @@ def _shape_c_task_binding_reasons(task: dict, run_p: Path,
         reasons.append("RTL-owning Program gate differs from solve_report")
     if recorded_rtl_gen not in {"PASS", "SKIPPED-BY-ENTRY"}:
         reasons.append("RTL-owning Program gate did not pass its allowed status")
+    # #2216 — the RTL-OWNING gate is one gate, not the ledger. Export is the
+    # second door onto the same claim as the resume accept path, so it asks the
+    # same question: did any REQUIRED IN-SCOPE gate report a failure on these
+    # bytes. Out-of-exit and unplaceable gates are recorded and never block.
+    ledger = _required_gate_ledger(solve_result)
+    for name in ledger.get("failed_required") or []:
+        reasons.append(
+            f"required in-scope PROGRAM gate {name} reported "
+            f"{(ledger.get('in_scope') or {}).get(name)}")
     return reasons
 
 
@@ -5612,6 +5783,41 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
                            "awaiting_ai_review": False,
                            "ai_repair_required": False})
             continue
+        # #2216 — REQUIRED IN-SCOPE PROGRAM GATE ELIGIBILITY, asked here and
+        # nowhere earlier. Every check above is about the ARTEFACT: is it
+        # runner-owned, does its hash still match, is its Phase-1 provenance
+        # intact, did its OWNING gate pass. None of them can see a second
+        # in-scope gate that FAILED on these same bytes, and the message below
+        # nevertheless claimed every Program gate had passed. Collection stays
+        # exactly as permissive as it was — a failed candidate must remain
+        # reviewable and repairable — but a required in-scope FAILURE now holds
+        # the DELIVERABLE instead of being overwritten by a semantic PASS.
+        gate_ledger = _required_gate_ledger(result)
+        result["required_gate_ledger"] = gate_ledger
+        if gate_ledger.get("failed_required"):
+            repairs.append({
+                "schema": "vibeic.benchmark.ai_repair_task.v2",
+                "id": pid, "project": task.get("project"),
+                "status": "PROGRAM_GATE_INELIGIBLE",
+                "reasons": [
+                    f"required in-scope PROGRAM gate {name} reported "
+                    f"{gate_ledger['in_scope'].get(name)} on this candidate"
+                    for name in gate_ledger["failed_required"]],
+                "required_gate_ledger": gate_ledger,
+                "review_path": task.get("review_path"),
+                "reviewed_rtl_sha256": task.get("rtl_sha256"),
+                "required_next": (
+                    "repair the RTL so the named in-scope gate passes, then "
+                    "run --resume for PROGRAM gates and submit a fresh AI "
+                    "review for the new hash; an independent semantic PASS "
+                    "does not discharge a required in-scope gate failure"),
+            })
+            result.update({"accepted": False, "awaiting_ai": True,
+                           "awaiting_ai_review": False,
+                           "ai_repair_required": True})
+            print(f"  {pid:44s} NOT ACCEPTED -- "
+                  f"{_gate_status_note(gate_ledger)}")
+            continue
         _atomic_write_json(Path(task["response_path"]), frozen_payload)
         accepted_ids.append(pid)
         result.update({"accepted": True, "awaiting_ai": False,
@@ -5622,7 +5828,13 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         route_note = ("AI OVERRIDE_PROGRAM" if
                       verdict.get("routing_verdict") == "OVERRIDE_PROGRAM"
                       else "AI AGREE")
-        print(f"  {pid:44s} ACCEPTED by PROGRAM gates + {route_note}")
+        # The message states what was MEASURED. "ACCEPTED by PROGRAM gates"
+        # asserted that every required gate passed even when a required
+        # in-scope gate never reported at all -- MEASURED: `rtl_validate` is
+        # BLOCKED on 44 of 61 published accepted rows and absent on the other
+        # 17. That hole is now said out loud as NOT_MEASURED, never as a pass.
+        print(f"  {pid:44s} ACCEPTED -- {_gate_status_note(gate_ledger)} "
+              f"+ {route_note}")
 
     ordered_tasks = [task_by_id[pid] for pid in result_by_id
                      if pid in task_by_id]
