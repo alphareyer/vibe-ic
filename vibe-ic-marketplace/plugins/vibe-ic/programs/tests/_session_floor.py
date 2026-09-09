@@ -46,6 +46,7 @@ speed — host speed is what the reading is.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import functools
 import os
 import subprocess
@@ -96,21 +97,50 @@ def _one_trivial_session_s(cwd: Path) -> float:
 
 
 @functools.lru_cache(maxsize=None)
-def trivial_session_s() -> float:
-    """Seconds an empty one-test pytest session costs HERE, spawn to exit.
-
-    The larger of two consecutive measurements, so one lucky start does not set
-    the floor for the whole file.  An upper bound on spawn-to-``session_start``:
-    the calibration session also collects, runs and tears down one item.
+def _session_floor_at(width: int) -> float:
+    """The cached reading. Split from the public name ON PURPOSE: caching the
+    public signature instead would give ``trivial_session_s()`` and
+    ``trivial_session_s(1)`` two DIFFERENT cache entries, i.e. two separate
+    readings of the same thing, and the contract test that compares the two
+    would then be comparing two measurements rather than one derivation.
     """
     with tempfile.TemporaryDirectory(prefix="vibeic-session-floor-") as d:
         cwd = Path(d)
         (cwd / "test_floor.py").write_text(
             "def test_floor():\n    assert True\n", encoding="utf-8")
-        return max(_one_trivial_session_s(cwd) for _ in range(2))
+        if width == 1:
+            return max(_one_trivial_session_s(cwd) for _ in range(2))
+        worst = 0.0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=width) as pool:
+            for _round in range(2):
+                worst = max(worst, max(pool.map(
+                    _one_trivial_session_s, [cwd] * width)))
+        return worst
 
 
-def stall_window(nominal: float, *, starts: int = 1) -> float:
+def trivial_session_s(width: int = 1) -> float:
+    """Seconds an empty one-test pytest session costs HERE, spawn to exit.
+
+    The larger of two consecutive measurements, so one lucky start does not set
+    the floor for the whole file.  An upper bound on spawn-to-``session_start``:
+    the calibration session also collects, runs and tears down one item.
+
+    ``width`` is how many such sessions start AT ONCE.  A serial reading is not
+    an upper bound for a subject that starts eight interpreters into one cgroup
+    at once, and this module's whole claim is that the floor is a reading of
+    THIS box under THIS load -- so the reading is taken at the width the caller
+    will actually run at, rather than modelled from a serial one.  ``width=1``
+    is byte-identical to the original reading.
+    """
+    if not isinstance(width, int) or width < 1:
+        raise ValueError(f"width must be a positive int, got {width!r}")
+    return _session_floor_at(width)
+
+
+trivial_session_s.cache_clear = _session_floor_at.cache_clear
+
+
+def stall_window(nominal: float, *, starts: int = 1, width: int = 1) -> float:
     """``nominal`` where the interpreter starts inside it; else lifted.
 
     The lift is to ``FLOOR_MULTIPLE`` measured floors PER INTERPRETER START,
@@ -126,10 +156,30 @@ def stall_window(nominal: float, *, starts: int = 1) -> float:
     on 8HD-9 (floor 0.73 s): the nested tests' outer lease at 2x the floor
     expired at 0.91 s with `terminal event missing (stage=running)` while the
     grandchild was still starting.
+
+    ``width`` is how many interpreter start-ups happen AT ONCE under this one
+    lease.  A test that drives the per-file driver with ``--fallback-jobs 8``
+    spawns eight supervised pytest sessions into one cgroup simultaneously, and
+    each of them holds its OWN lease of this size from its OWN spawn.  Deriving
+    that lease from a floor measured one session at a time is the same defect
+    this module was written for, one axis over: MEASURED in the pinned image
+    under `--cpus=4`, the width-1 floor was 0.51 s (window 1.03 s) while eight
+    concurrent starts took 1.9 s, so four of `test_pytest_per_file_junit.py`'s
+    tests reported `STALLED after 1.0268 s with no validated pytest lifecycle
+    progress` about subjects that had not started.  Those four were red on
+    610cae2cc and on 6883a9c93 alike -- the window read the box, not the tree.
+
+    ``starts`` and ``width`` are ORTHOGONAL and both are still models of a
+    SERIES of interpreter starts.  Where the silence before the first renewal
+    is not interpreter start-up at all, neither is the right instrument and
+    ``relay_window`` below is: that term is measured in its own shape.
     """
     if not isinstance(starts, int) or starts < 1:
         raise ValueError(f"starts must be a positive int, got {starts!r}")
-    return max(float(nominal), FLOOR_MULTIPLE * starts * trivial_session_s())
+    if not isinstance(width, int) or width < 1:
+        raise ValueError(f"width must be a positive int, got {width!r}")
+    return max(float(nominal),
+               FLOOR_MULTIPLE * starts * trivial_session_s(width))
 
 
 # ── A NESTED DRIVER'S FIRST RELAYED EVENT (vibe-ic#2219) ────────────────────
@@ -316,3 +366,82 @@ def relay_window(nominal: float) -> float:
     ``--progress-relay`` rather than from the subject pytest itself.
     """
     return max(float(nominal), FLOOR_MULTIPLE * trivial_relay_s())
+
+
+# ── A BARE-INTERPRETER CHILD (the semantic-progress lane) ───────────────────
+#
+# A third measured term, for a third shape of subject. `trivial_session_s`
+# times a pytest session and `trivial_relay_s` times a nested driver's first
+# relayed event; neither is the right instrument for a lease held over a bare
+# `python3 -c` child, which is what `test_semantic_child_progress.py` spawns.
+# The pytest floor is ~10x too large there and would inflate every grace in
+# that file for no reason.
+#
+# MEASURED 2026-09-09 in the pinned image at 12 concurrent containers: the
+# declared `grace=0.18` produced
+#
+#     WATCHDOG_STALLED: ... did not advance for > 0.18s
+#     ... incomplete domain-progress relay (0/4)
+#
+# -- ZERO of four checkpoints, i.e. the child was killed before reaching its
+# first one -- on `610cae2cc` exactly as on `6883a9c93`.
+
+
+def _one_trivial_child_s(cwd: Path) -> float:
+    """Spawn-to-exit seconds of a bare ``python3 -c`` that imports the module a
+    semantic child imports.  NOT a pytest session.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in _INHERITED}
+    env["PYTHONPATH"] = (
+        str(_PROGRAMS) if not env.get("PYTHONPATH")
+        else str(_PROGRAMS) + os.pathsep + env["PYTHONPATH"])
+    started = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, "-c", "import _semantic_child_progress"],
+        cwd=str(cwd), env=env, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True)
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 0, (
+        "the child-floor calibration must succeed, or the floor is a reading "
+        f"of a failure, not of start-up; rc={proc.returncode}\n"
+        f"{proc.stdout[-2000:]}")
+    return elapsed
+
+
+@functools.lru_cache(maxsize=None)
+def _child_floor_at(width: int) -> float:
+    """The cached reading; split from the public name for the reason above."""
+    with tempfile.TemporaryDirectory(prefix="vibeic-child-floor-") as d:
+        cwd = Path(d)
+        if width == 1:
+            return max(_one_trivial_child_s(cwd) for _ in range(2))
+        worst = 0.0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=width) as pool:
+            for _round in range(2):
+                worst = max(worst, max(pool.map(
+                    _one_trivial_child_s, [cwd] * width)))
+        return worst
+
+
+def trivial_child_s(width: int = 1) -> float:
+    """Seconds a bare interpreter + one plugin import costs HERE, spawn to exit.
+
+    Same construction and same reason as ``trivial_session_s``: the larger of
+    two consecutive readings, taken at the width the caller will run at, on
+    THIS box under THIS load.
+    """
+    if not isinstance(width, int) or width < 1:
+        raise ValueError(f"width must be a positive int, got {width!r}")
+    return _child_floor_at(width)
+
+
+trivial_child_s.cache_clear = _child_floor_at.cache_clear
+
+
+def child_window(nominal: float, *, width: int = 1) -> float:
+    """``stall_window`` for a lease over a BARE-INTERPRETER child.
+
+    Callers must scale their checkpoint cadence from the value returned,
+    exactly as with ``stall_window`` and ``relay_window``.
+    """
+    return max(float(nominal), FLOOR_MULTIPLE * trivial_child_s(width))

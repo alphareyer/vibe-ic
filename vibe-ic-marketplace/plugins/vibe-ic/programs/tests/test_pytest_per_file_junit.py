@@ -39,10 +39,12 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Sequence
 
 import pytest
 
 from _hostpaths import require_repo
+import _session_floor as _floor
 from _session_floor import relay_window, stall_window, trivial_session_s
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
@@ -576,12 +578,76 @@ def _pytest_cmd():
     return [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
 
 
+class _CorpusStub:
+    """Just enough of a corpus for `_driver_width`: a readable selection."""
+
+    def __init__(self, files: int):
+        self._selection = "".join(
+            f"test_{i:02d}.py\n" for i in range(1, files + 1))
+
+    def __truediv__(self, name):
+        return self
+
+    def read_text(self, **_kw):
+        return self._selection
+
+    def __str__(self):
+        return "corpus"
+
+
+def _driver_argv(corpus, *extra):
+    """The argv `_run_driver` would build, without launching anything."""
+    return [sys.executable, str(_PROG),
+            "--selection", str(corpus),
+            "--junit", "merged.xml",
+            "--stall-after",
+            str(stall_window(1, width=_driver_width(corpus, extra))), *extra]
+
+
+def _stall_after_of(argv):
+    return float(argv[argv.index("--stall-after") + 1])
+
+
+def _driver_width(corpus: Path, extra: Sequence[str]) -> int:
+    """How many pytest interpreters this invocation starts AT ONCE.
+
+    The per-file lane is serial: one session, then the next, so its lease is
+    held over ONE start-up. The aggregate lane's recovery arm is not — it
+    launches `_fallback_capacity(requested, remaining)` supervised sessions
+    into this one cgroup simultaneously, and EACH of them holds a lease of
+    `--stall-after` from ITS OWN spawn. Deriving that lease from a floor
+    measured one session at a time reads the machine rather than the subject:
+    MEASURED here, `stall_window(1)` = 1.03 s while eight concurrent starts
+    took 1.9 s, and the four tests below reported `STALLED after 1.0268 s with
+    no validated pytest lifecycle progress` about sessions that had not
+    started -- identically on `610cae2cc` and on `6883a9c93`, so the colour was
+    the box's, not the tree's.
+
+    The requested width is an UPPER bound on what the driver will really run
+    (`_fallback_capacity` caps it further by CPU, memory and PIDs), and the
+    window only ever widens, so reading the request here is fail-safe: it can
+    over-measure the floor, never under-measure it.
+    """
+    if "--aggregate-check" not in extra and "--aggregate-only" not in extra:
+        return 1
+    extra = list(extra)
+    if "--fallback-jobs" in extra:
+        requested = int(extra[extra.index("--fallback-jobs") + 1])
+    else:
+        requested = D.DEFAULT_FALLBACK_JOBS
+    selected = len([line for line
+                    in (corpus / "selection.txt").read_text(
+                        encoding="utf-8").splitlines() if line.strip()])
+    return max(1, min(requested, selected or 1, D.MAX_FALLBACK_PROCESSES))
+
+
 def _run_driver(corpus: Path, junit: Path, *extra, pytest_extra=()):
     return _supervised(
         [sys.executable, str(_PROG),
          "--selection", str(corpus / "selection.txt"),
          "--junit", str(junit),
-         "--stall-after", str(_STALL), *extra,
+         "--stall-after",
+         str(stall_window(1, width=_driver_width(corpus, extra))), *extra,
         "--"] + _pytest_cmd() + list(pytest_extra),
         cwd=str(corpus))
 
@@ -982,6 +1048,81 @@ def test_a_window_below_the_measured_session_floor_is_lifted_not_declared():
     lifted = stall_window(floor / 10)
     assert lifted == pytest.approx(2.0 * floor), (lifted, floor)
     assert stall_window(100 * floor) == 100 * floor
+
+
+def test_the_floor_is_READ_at_the_width_not_MODELLED_from_a_serial_one():
+    """A width-8 reading must really start eight interpreters AT ONCE.
+
+    A serial reading multiplied by a fudge factor would satisfy every other
+    assertion here and measure nothing, so what is asserted is the OBSERVED
+    concurrency of the calibration itself: eight calibration sessions alive
+    simultaneously, in a run whose call count is also pinned so a lazy
+    implementation cannot pass by measuring once and returning it eight times.
+    """
+    import threading
+    live = {"now": 0, "peak": 0, "calls": 0}
+    lock = threading.Lock()
+    barrier = threading.Barrier(8, timeout=30)
+
+    def _fake(_cwd):
+        with lock:
+            live["now"] += 1
+            live["calls"] += 1
+            live["peak"] = max(live["peak"], live["now"])
+        try:
+            barrier.wait()
+        finally:
+            with lock:
+                live["now"] -= 1
+        return 0.25
+
+    _floor.trivial_child_s.cache_clear()
+    _floor.trivial_session_s.cache_clear()
+    real = _floor._one_trivial_session_s
+    _floor._one_trivial_session_s = _fake
+    try:
+        measured = _floor.trivial_session_s(8)
+    finally:
+        _floor._one_trivial_session_s = real
+        _floor.trivial_session_s.cache_clear()
+
+    assert live["peak"] == 8, live
+    assert live["calls"] == 16, live          # two rounds of eight, not one
+    assert measured == pytest.approx(0.25), measured
+
+
+def test_the_recovery_arm_is_handed_a_window_derived_at_ITS_width():
+    """THE LOAD-BEARING GUARD, and the one a revert reddens.
+
+    `--stall-after` is the lease EACH recovery session holds from ITS OWN
+    spawn, and the aggregate arm's recovery launches them simultaneously. This
+    pins that the value the driver is handed comes from a floor read at that
+    simultaneous width: with a box whose width-8 start-up is 100x its width-1
+    one, an aggregate invocation must carry the width-8 window and a plain
+    per-file invocation must still carry the width-1 one. Restoring the
+    constant `str(_STALL)` makes the first of these equal to the second.
+    """
+    per_width = {1: 0.01, 2: 0.02, 8: 1.0}
+    _floor.trivial_session_s.cache_clear()
+    real = _floor.trivial_session_s
+    _floor.trivial_session_s = lambda width=1: per_width[width]
+    try:
+        corpus = _CorpusStub(9)
+        aggregate = _stall_after_of(_driver_argv(
+            corpus, "--aggregate-check", "--fallback-jobs", "8"))
+        plain = _stall_after_of(_driver_argv(corpus))
+        capped = _stall_after_of(_driver_argv(
+            _CorpusStub(2), "--aggregate-check"))
+    finally:
+        _floor.trivial_session_s = real
+        _floor.trivial_session_s.cache_clear()
+
+    assert aggregate == pytest.approx(2.0), aggregate
+    assert plain == pytest.approx(1.0), plain      # nominal 1 beats 2 * 0.01
+    # The width is the number of sessions that will REALLY start at once, so a
+    # two-file selection is width 2 even when eight jobs were the default.
+    assert capped == pytest.approx(1.0), capped
+    assert aggregate > plain, (aggregate, plain)
 
 
 def test_maxfail_prefix_is_norecord_not_a_complete_failure_set(tmp_path):

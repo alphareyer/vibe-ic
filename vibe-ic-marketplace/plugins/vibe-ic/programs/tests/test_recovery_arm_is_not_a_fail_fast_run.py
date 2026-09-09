@@ -65,12 +65,33 @@ if str(_PROGRAMS) not in sys.path:
 import pytest_per_file_junit as D                              # noqa: E402
 import _watchdog                                               # noqa: E402
 from _hostpaths import require_repo                            # noqa: E402
+from _session_floor import stall_window                        # noqa: E402
 
 _PROG = _PROGRAMS / "pytest_per_file_junit.py"
 
 #: Test-only no-progress window. NOT a cap on healthy runtime — the driver's
 #: contract is forward progress, and these fixtures make progress constantly.
-_STALL = 1
+#:
+#: DERIVED, NOT DECLARED (`_session_floor`, written for exactly this defect one
+#: file over). The driver's lease starts at SPAWN, so a window shorter than
+#: this box's own interpreter start-up is not a stall detector — it is a
+#: reading of the host. MEASURED 2026-09-09 in the pinned image at 12
+#: concurrent containers, the bare `1` here produced
+#:
+#:   NORECORD  test_more_reds_than_the_bound.py  STALLED after 1 s with no
+#:             validated pytest lifecycle progress
+#:   NORECORD  test_green_neighbour.py           STALLED after 1 s ...
+#:
+#: — BOTH files, i.e. both recovery sessions killed while still starting — and
+#: it did so on `610cae2cc` as readily as on `6883a9c93`, so the colour was
+#: never the tree's.
+#:
+#: TWO windows, because the two arms have different widths. The aggregate arm
+#: is ONE pytest session. The recovery arm launches one supervised session PER
+#: SELECTED FILE at once (`_fallback_capacity(DEFAULT_FALLBACK_JOBS, 2)` = 2
+#: here), each holding its own lease of `--stall-after` from its own spawn.
+_STALL = stall_window(1)
+_RECOVERY_STALL = stall_window(1, width=2)
 
 #: More reds than the bound the caller declares below. Three vs two is the
 #: smallest pair that distinguishes "recorded the prefix" from "recorded the
@@ -110,7 +131,7 @@ def _drive(corpus: Path, junit: Path, *extra, pytest_extra=()):
         [sys.executable, str(_PROG),
          "--selection", str(corpus / "selection.txt"),
          "--junit", str(junit),
-         "--stall-after", str(_STALL),
+         "--stall-after", str(_RECOVERY_STALL),
          "--aggregate-check", "--aggregate-stall-after", str(_STALL),
          *extra, "--",
          sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",

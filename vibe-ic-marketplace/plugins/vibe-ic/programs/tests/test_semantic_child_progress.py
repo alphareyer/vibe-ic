@@ -16,10 +16,41 @@ import _semantic_child_progress as S
 import l4_systemrdl_export as L4
 import repo_hygiene_parallel as P
 import _progress_run as _pr  # noqa: E402
+from _session_floor import child_window  # noqa: E402
 
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 SCOPE = "test:finite-corpus-work"
+
+#: The LIVE-direction semantic lease, DERIVED rather than declared.
+#:
+#: A semantic child here is a bare ``python3 -c`` and the lease starts at its
+#: SPAWN, so a grace below this box's own interpreter start-up cannot observe
+#: renewal at all. MEASURED 2026-09-09 in the pinned image at 12 concurrent
+#: containers, the declared ``0.18`` produced
+#:
+#:   WATCHDOG_STALLED: ... did not advance for > 0.18s
+#:   ... incomplete domain-progress relay (0/4)
+#:
+#: — ZERO of four checkpoints, i.e. the child was killed before reaching its
+#: first one — on ``610cae2cc`` exactly as on ``6883a9c93``.
+#:
+#: THE GAP IS THE DERIVED QUANTITY AND THE LEASE IS TWICE IT, because the
+#: lease is armed at SPAWN and the FIRST checkpoint arrives one gap later:
+#: nothing between those two moments can renew, so the lease has to cover
+#: start-up AND one gap, not start-up alone. MEASURED 2026-09-09 at 24
+#: concurrent containers, a first attempt that set the LEASE to two floors and
+#: the gap to half of it still lost 2 of 12 runs, at elapsed 0.394 s and
+#: 0.456 s against leases of 0.200 s and 0.251 s -- one lease plus the spawn,
+#: i.e. the child had not reached its first checkpoint. Deriving the GAP at
+#: two floors and the lease at two gaps makes the lease four floors and leaves
+#: a whole floor of margin over start-up-plus-one-gap.
+#:
+#: `child_window` returns the nominal wherever a child really starts inside
+#: it, so on a fast idle box these are 0.09 and 0.18 -- the numbers this file
+#: has always declared, unchanged.
+_LIVE_GAP = child_window(0.09)
+_LIVE_GRACE = 2 * _LIVE_GAP
 
 
 def _env() -> dict[str, str]:
@@ -30,7 +61,8 @@ def _env() -> dict[str, str]:
 
 
 def _semantic(tmp_path: Path, source: str, units, *, callback=None,
-              grace: float = 0.18):
+              grace: float = None):
+    grace = _LIVE_GRACE if grace is None else grace
     return P._run(
         [sys.executable, "-c", source], tmp_path, _env(),
         stall_grace_s=grace,
@@ -56,9 +88,9 @@ units = {units!r}
 def main():
     with child_progress({SCOPE!r}) as progress:
         for unit in units:
-            time.sleep(0.09)
+            time.sleep({_LIVE_GAP!r})
             progress.checkpoint(unit)
-        time.sleep(0.05)
+        time.sleep({_LIVE_GAP / 2!r})
     pathlib.Path({str(done)!r}).write_text('natural\\n')
     print('natural-output-is-preserved')
     return 0
@@ -69,8 +101,16 @@ raise SystemExit(main())
         tmp_path, source, units,
         callback=relay)
     elapsed = time.monotonic() - started
-    assert elapsed > 0.36 > 0.18, elapsed
+    # THE OUTCOME IS ASSERTED FIRST, ON PURPOSE. A killed child fails the
+    # elapsed ratio below as well, and if that fires first the failure text is
+    # three floats and the supervisor's own reason — the one sentence naming
+    # WHY — is never printed.
     assert (rc, problem) == (0, None), (rc, out, problem)
+    # THE RATIO, NOT THE SECONDS. The claim this test is named for is that the
+    # run outlives the stall window because CHECKPOINTS renew it, so what has
+    # to hold is `run > window > gap`, at whatever window this box needs.
+    assert elapsed > 4 * _LIVE_GAP > _LIVE_GRACE > _LIVE_GAP, (
+        elapsed, _LIVE_GAP, _LIVE_GRACE)
     assert "natural-output-is-preserved" in out
     assert [(s, c, t) for s, c, t, _done in observed] == [
         (SCOPE, 1, 4), (SCOPE, 2, 4),
