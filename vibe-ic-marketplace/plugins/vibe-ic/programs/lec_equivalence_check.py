@@ -534,11 +534,37 @@ def audit(project: Path) -> AuditResult:
                    "peak this proof needs -- measured, not guessed -- or close "
                    "the remainder with a method that does not unroll the whole "
                    "miter.")
-    elif _exhausted == "not_measured":
+    elif _exhausted in ("not_measured", "unnamed"):
+        # vibe-ic#2182. `budget_exhausted_resource` deliberately refuses to
+        # default an unrecorded resource to the clock -- see the comment on
+        # `_EXHAUSTED_RESOURCE_KEYS`: "Never defaulted: an exhaustion whose
+        # resource was not recorded is reported as unnamed, not as wall-clock."
+        # The LABEL honoured that and the REMEDY did not: `"unnamed"` fell
+        # through to the `else` branch and was answered with "re-run with a
+        # bigger budget", i.e. the clock, one sentence after refusing to name
+        # it. MEASURED on sha256 at v1.20.18: the producer recorded
+        # `step_budget_exhausted: true` with `exhausted_resource: null` AND
+        # `step_budget_stopped_this_proof: false` -- the budget never stopped
+        # the proof; the ladder ran to its end and did not converge
+        # (`induction_wall_kind: "induction_depth"`, `non_convergence: true`,
+        # 1314/1612 proven, 298 unproven, 13050 s). A bigger budget cannot
+        # help a run no budget stopped. An unnamed resource gets the same
+        # discipline as an unmeasured one: establish the cause, do not assume.
         _remedy = ("WHICH resource ran out was NOT MEASURED, so no remedy is "
                    "named here: do not assume the clock. Establish the cause "
                    "first (the container cgroup's oom_kill counter settles "
                    "it), then repair the resource that actually ran out.")
+        _wall = str(lc.get("induction_wall_kind") or "").strip()
+        _stopped = lc.get("step_budget_stopped_this_proof")
+        if _stopped is False:
+            _remedy += (" The producer records "
+                        "`step_budget_stopped_this_proof: false`, so no budget "
+                        "stopped this proof -- raising one cannot change the "
+                        "outcome.")
+        if _wall:
+            _remedy += (f" The producer DID record what the proof ran into: "
+                        f"`induction_wall_kind: {_wall}`. Repair that, not the "
+                        "ceiling.")
     else:
         _remedy = ("Re-run the step with a budget it can finish inside, or "
                    "close it with a sign-off LEC that reaches a verdict. The "
