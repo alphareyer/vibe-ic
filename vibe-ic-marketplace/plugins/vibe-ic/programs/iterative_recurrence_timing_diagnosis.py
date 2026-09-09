@@ -68,10 +68,23 @@ Signals
   * names_anonymized  : the register names are synthesis-anonymised (``_1234_``
     / ``$auto$...``) so the name test cannot see the bank identity -> fall back
     to the retiming signal or ask for a name-preserving netlist / the RTL.
-  * retiming_ineffective : a retiming experiment improved WNS by < EPS ns
-    (default 0.10) -> corroborates loop-bound; retiming_effective is the
+  * retiming_ineffective : a retiming experiment that is READABLE established
+    the pass could not help -> corroborates loop-bound. A dWNS is readable ONLY
+    against a floor measured at the same granularity, or not at all when the
+    pass returned a byte-identical netlist (#2220). retiming_effective is the
     opposite and OVERRIDES the name heuristic (a measured improvement is ground
-    truth: the path was not a pure single-register loop).
+    truth: the path was not a pure single-register loop) — which is exactly why
+    an unreadable dWNS must never reach it: MEASURED, a full-flow dWNS of
+    1.569724 ns was produced with the netlist held BYTE-IDENTICAL, and that
+    number alone used to answer "apply retiming".
+    States, reported as ``retiming_datapoint_state``:
+      INEFFECTIVE_BYTE_IDENTICAL     the pass returned the same netlist.
+      EFFECTIVE                      delta >= the MEASURED noise floor.
+      REGRESSED                      delta <= -floor; worse, above the noise.
+      NOT_MEASURED_BELOW_NOISE_FLOOR |delta| < floor — indistinguishable from
+                                     the flow's own spread; corroborates
+                                     NOTHING, in either direction.
+      NOT_MEASURED_NO_NOISE_FLOOR    a delta arrived with no declared floor.
 
 Verdicts (exit code in brackets)
 --------------------------------
@@ -102,7 +115,9 @@ Verdicts (exit code in brackets)
 CLI::
 
     python3 iterative_recurrence_timing_diagnosis.py --sta-report worst.rpt \\
-        [--retiming-wns-delta 0.0] [--spec-microarch-free] \\
+        [--retiming-wns-delta 0.0 \\
+         (--retiming-wns-noise-floor-ns 0.35 | --retiming-netlist-byte-identical)] \\
+        [--spec-microarch-free] \\
         [--spec-latency-unconstrained] [--target-period-ns 25.907] \\
         [--timing-driven-synth] [--relax-clock-proposed] [--json out.json]
 """
@@ -116,10 +131,51 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# WNS-improvement threshold below which a retiming experiment counts as
-# "ineffective" (loop-bound corroboration). 0.10 ns is well inside routing/
-# characterisation noise for any sign-off corner and is not PDK-specific.
-RETIMING_EPS_NS = 0.10
+# ── vibe-ic#2220 — THE FIXED THRESHOLD WAS WITHDRAWN, NOT RAISED ───────────
+#
+# There used to be a module constant here:
+#
+#     RETIMING_EPS_NS = 0.10   # "well inside routing/characterisation noise
+#                              #  for any sign-off corner"
+#
+# and `diagnose` decided `retiming_effective` / `retiming_ineffective` from it.
+# Its own comment is the refutation: a quantity documented as lying INSIDE the
+# noise cannot be the thing that separates two verdicts drawn from that noise.
+#
+# MEASURED (issue #2220, sky130A x sha256, 25.9 ns SDC, ss_100C_1v60 + extracted
+# max SPEF, propagated clock, derate 0.95/1.05, one sign-off script for every
+# row): with the netlist held BYTE-IDENTICAL (`post_dft_netlist.v` sha256
+# `fcaf73e3...`) and only `set_thread_count` changed 32 -> 10, global WNS moved
+# **1.569724 ns** — 15.7x the withdrawn constant. REPRODUCED here at the program
+# level (lane cy2183, 8HD-4, 2026-09-10, main 9c653d47f, image content id
+# da2314d4100c...): feeding that very number made the program answer
+# RETIMING_EFFECTIVE_APPLY and send the author to apply retiming, while +0.09 ns
+# — two hundredths less than the constant — answered LOOP_BOUND_RECURRENCE with
+# "loop-bound corroborated". The verdict, and the architectural remedy behind
+# it, turned on 0.02 ns of a quantity whose own noise is 1.57 ns.
+#
+# The repair is NOT a bigger constant: the right floor is flow- and
+# granularity-dependent, which is the whole point. A delta must arrive WITH the
+# thing that makes it readable —
+#
+#   * `--retiming-netlist-byte-identical` — the retiming pass returned the same
+#     netlist. Definitive, threshold-free: nothing changed, so nothing can have
+#     improved. This is the loop-bound signature the docstring already names.
+#   * `--retiming-wns-noise-floor-ns F` — a MEASURED control-vs-control dWNS
+#     from the SAME flow at the SAME granularity (re-run the identical netlist
+#     and record the spread). |delta| < F is then NOT_MEASURED, never
+#     "ineffective".
+#
+# A delta with neither is reported as NOT_MEASURED and decides nothing. That is
+# strictly less claim than before and never a greener verdict: no exit code
+# moves, and the name heuristic keeps deciding exactly what it decided.
+
+#: What a retiming datapoint was found to be. `None` = no datapoint supplied.
+RETIMING_INEFFECTIVE_BYTE_IDENTICAL = "INEFFECTIVE_BYTE_IDENTICAL"
+RETIMING_EFFECTIVE = "EFFECTIVE"
+RETIMING_REGRESSED = "REGRESSED"
+RETIMING_NOT_MEASURED_NO_FLOOR = "NOT_MEASURED_NO_NOISE_FLOOR"
+RETIMING_NOT_MEASURED_BELOW_FLOOR = "NOT_MEASURED_BELOW_NOISE_FLOOR"
 
 # A register whose base name is purely a synthesis tag (yosys ``_1234_`` /
 # ``$auto$...`` / ``$abc$...``) carries no RTL bank identity.
@@ -260,6 +316,37 @@ def _parse_worst_path(text: str) -> Optional[WorstPath]:
     return min(candidates, key=_key)
 
 
+def classify_retiming_datapoint(
+    retiming_wns_delta: Optional[float],
+    noise_floor_ns: Optional[float],
+    netlist_byte_identical: bool,
+) -> Optional[str]:
+    """What, if anything, a retiming experiment established (vibe-ic#2220).
+
+    Returns one of the ``RETIMING_*`` states, or ``None`` when no datapoint was
+    supplied at all. The ONE rule: a dWNS reading is readable only against a
+    floor that was MEASURED at the same granularity, or not at all when the
+    pass returned the same netlist.
+    """
+    if netlist_byte_identical:
+        # Threshold-free and definitive: the pass changed nothing, so no dWNS
+        # it is paired with can be an improvement. Any reading beside it is the
+        # measurement's own spread.
+        return RETIMING_INEFFECTIVE_BYTE_IDENTICAL
+    if retiming_wns_delta is None:
+        return None
+    if noise_floor_ns is None:
+        return RETIMING_NOT_MEASURED_NO_FLOOR
+    if abs(retiming_wns_delta) < noise_floor_ns:
+        return RETIMING_NOT_MEASURED_BELOW_FLOOR
+    if retiming_wns_delta > 0:
+        return RETIMING_EFFECTIVE
+    # <= -floor: an above-noise DEGRADATION. Not "effective", and emphatically
+    # not "ineffective" — the old code called this band ">= EPS -> effective"
+    # in its evidence line while taking neither branch in its verdict.
+    return RETIMING_REGRESSED
+
+
 def diagnose(
     worst: WorstPath,
     retiming_wns_delta: Optional[float],
@@ -267,6 +354,8 @@ def diagnose(
     spec_latency_unconstrained: bool,
     relax_clock_proposed: bool,
     timing_driven_synth: bool = False,
+    retiming_wns_noise_floor_ns: Optional[float] = None,
+    retiming_netlist_byte_identical: bool = False,
 ) -> Dict[str, Any]:
     evidence: List[str] = []
 
@@ -280,21 +369,57 @@ def diagnose(
             "self_loop_by_name": None,
             "names_anonymized": None,
             "retiming_ineffective": None,
+            "retiming_datapoint_state": None,
         }
 
     self_loop = (worst.start.bank == worst.end.bank)
     both_anon = worst.start.anonymized or worst.end.anonymized
 
+    state = classify_retiming_datapoint(
+        retiming_wns_delta, retiming_wns_noise_floor_ns,
+        retiming_netlist_byte_identical)
+    # `retiming_ineffective` is TRUE only where it was established, FALSE only
+    # where it was ruled out, and None wherever the datapoint could not say —
+    # NOT_MEASURED, never a defaulted zero (#2220).
     retiming_ineffective: Optional[bool] = None
     retiming_effective = False
-    if retiming_wns_delta is not None:
-        retiming_ineffective = abs(retiming_wns_delta) < RETIMING_EPS_NS
-        retiming_effective = retiming_wns_delta >= RETIMING_EPS_NS
+    delta_txt = ("no dWNS supplied" if retiming_wns_delta is None
+                 else f"dWNS {retiming_wns_delta:+.6f} ns")
+    if state == RETIMING_INEFFECTIVE_BYTE_IDENTICAL:
+        retiming_ineffective = True
         evidence.append(
-            f"retiming WNS delta {retiming_wns_delta:+.3f} ns "
-            f"({'< ' if retiming_ineffective else '>= '}"
-            f"{RETIMING_EPS_NS} ns -> "
-            f"{'ineffective (loop-bound corroborated)' if retiming_ineffective else 'effective'})")
+            f"retiming returned a BYTE-IDENTICAL netlist ({delta_txt}) -> "
+            f"ineffective (loop-bound corroborated); no threshold is involved, "
+            f"the pass changed nothing")
+    elif state == RETIMING_EFFECTIVE:
+        retiming_ineffective = False
+        retiming_effective = True
+        evidence.append(
+            f"retiming {delta_txt} >= measured noise floor "
+            f"{retiming_wns_noise_floor_ns:.6f} ns -> effective")
+    elif state == RETIMING_REGRESSED:
+        retiming_ineffective = False
+        evidence.append(
+            f"retiming {delta_txt} <= -{retiming_wns_noise_floor_ns:.6f} ns "
+            f"(measured noise floor) -> the pass made WNS WORSE by more than "
+            f"the noise; that is neither effective nor loop-bound "
+            f"corroboration, and it is not evidence about the recurrence")
+    elif state == RETIMING_NOT_MEASURED_BELOW_FLOOR:
+        evidence.append(
+            f"retiming {delta_txt} is inside the measured noise floor "
+            f"{retiming_wns_noise_floor_ns:.6f} ns -> NOT_MEASURED: this "
+            f"reading cannot tell an ineffective pass from the flow's own "
+            f"run-to-run spread, so it corroborates nothing")
+    elif state == RETIMING_NOT_MEASURED_NO_FLOOR:
+        evidence.append(
+            f"retiming {delta_txt} arrived with NO declared noise floor -> "
+            f"NOT_MEASURED: a dWNS is readable only against a floor measured "
+            f"at the SAME granularity. Supply "
+            f"--retiming-wns-noise-floor-ns <control-vs-control dWNS from this "
+            f"flow>, or --retiming-netlist-byte-identical if the pass returned "
+            f"the same netlist. MEASURED (#2220): with the netlist held "
+            f"byte-identical, a thread-count change alone moved full-flow WNS "
+            f"1.569724 ns")
 
     # Timing already met -> nothing to diagnose.
     if worst.slack_ns is not None and worst.slack_ns >= 0:
@@ -305,6 +430,7 @@ def diagnose(
             "self_loop_by_name": self_loop,
             "names_anonymized": both_anon,
             "retiming_ineffective": retiming_ineffective,
+            "retiming_datapoint_state": state,
         }
 
     # A measured retiming improvement is ground truth and OVERRIDES the name
@@ -318,6 +444,7 @@ def diagnose(
             "self_loop_by_name": self_loop,
             "names_anonymized": both_anon,
             "retiming_ineffective": retiming_ineffective,
+            "retiming_datapoint_state": state,
         }
 
     # Is the path dominated by ONE carry-propagate add? If so, splitting the
@@ -392,10 +519,18 @@ def diagnose(
             "self_loop_by_name": True,
             "names_anonymized": both_anon,
             "retiming_ineffective": retiming_ineffective,
+            "retiming_datapoint_state": state,
         }
 
     # Not a same-bank self loop by name.
-    if both_anon and retiming_wns_delta is None:
+    #
+    # #2220 — the gate asks whether there is a USABLE retiming datapoint, not
+    # whether a number arrived. A dWNS that the program has just reported as
+    # NOT_MEASURED is not a datapoint, and letting it suppress this branch is
+    # how a noise reading came to stand in for the bank identity nobody could
+    # see.
+    _usable_datapoint = (retiming_ineffective is not None) or retiming_effective
+    if both_anon and not _usable_datapoint:
         return {
             "verdict": "INCONCLUSIVE_NAMES_ANONYMIZED",
             "remedy": "SUPPLY_RETIMING_DELTA_OR_NAME_PRESERVING_NETLIST",
@@ -408,6 +543,7 @@ def diagnose(
             "self_loop_by_name": False,
             "names_anonymized": True,
             "retiming_ineffective": retiming_ineffective,
+            "retiming_datapoint_state": state,
         }
 
     return {
@@ -420,6 +556,7 @@ def diagnose(
         "self_loop_by_name": False,
         "names_anonymized": both_anon,
         "retiming_ineffective": retiming_ineffective,
+        "retiming_datapoint_state": state,
     }
 
 
@@ -443,7 +580,23 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="OpenSTA/OpenROAD report_checks text (worst setup path)")
     ap.add_argument("--retiming-wns-delta", type=float, default=None,
                     help="WNS improvement (ns) from a retiming experiment; "
-                         "omit if no retiming experiment was run")
+                         "omit if no retiming experiment was run. On its own "
+                         "this decides NOTHING (#2220): pair it with "
+                         "--retiming-wns-noise-floor-ns or "
+                         "--retiming-netlist-byte-identical")
+    ap.add_argument("--retiming-wns-noise-floor-ns", type=float, default=None,
+                    help="MEASURED control-vs-control dWNS for THIS flow at "
+                         "the SAME granularity as --retiming-wns-delta (re-run "
+                         "the identical netlist and record the spread). A "
+                         "|delta| below it is NOT_MEASURED, never "
+                         "'ineffective'. There is no default: the right floor "
+                         "is flow- and granularity-dependent, which is why the "
+                         "old fixed 0.10 ns constant was withdrawn (#2220 "
+                         "measured 1.569724 ns on a byte-identical netlist)")
+    ap.add_argument("--retiming-netlist-byte-identical", action="store_true",
+                    help="the retiming pass returned a BYTE-IDENTICAL netlist. "
+                         "Definitive loop-bound corroboration and threshold-"
+                         "free: nothing changed, so nothing improved")
     ap.add_argument("--spec-microarch-free", action="store_true",
                     help="the design spec authorises the microarch "
                          "(iterative/unrolled/pipelined/multi-cycle) as a free "
@@ -464,6 +617,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--json", help="write JSON report to this path")
     args = ap.parse_args(argv)
 
+    if (args.retiming_wns_noise_floor_ns is not None
+            and args.retiming_wns_noise_floor_ns <= 0):
+        print("error: --retiming-wns-noise-floor-ns must be > 0 — a floor of "
+              "zero would readmit the defect #2220 withdrew, by making every "
+              "reading sit above it", file=sys.stderr)
+        return 2
+
     path = Path(args.sta_report)
     if not path.is_file():
         print(f"error: STA report not found: {path}", file=sys.stderr)
@@ -480,7 +640,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             res = diagnose(WorstPath(_mk_endpoint("?"), _mk_endpoint("?"), None, None),
                            args.retiming_wns_delta, args.spec_microarch_free,
                            args.spec_latency_unconstrained, True,
-                           args.timing_driven_synth)
+                           args.timing_driven_synth,
+                           args.retiming_wns_noise_floor_ns,
+                           args.retiming_netlist_byte_identical)
         else:
             print(f"error: no Startpoint/Endpoint path parsed in {path}",
                   file=sys.stderr)
@@ -488,7 +650,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         res = diagnose(worst, args.retiming_wns_delta, args.spec_microarch_free,
                        args.spec_latency_unconstrained, args.relax_clock_proposed,
-                       args.timing_driven_synth)
+                       args.timing_driven_synth,
+                       args.retiming_wns_noise_floor_ns,
+                       args.retiming_netlist_byte_identical)
 
     report = {
         "gate": "iterative_recurrence_timing_diagnosis",
@@ -500,6 +664,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             "self_loop_by_name": res["self_loop_by_name"],
             "names_anonymized": res["names_anonymized"],
             "retiming_ineffective": res["retiming_ineffective"],
+            # #2220 — WHY it is True/False/None, in one word the reader can act
+            # on. None with a state of NOT_MEASURED_* is a datapoint that
+            # arrived and could not be read; it is not a zero.
+            "retiming_datapoint_state": res.get("retiming_datapoint_state"),
         },
         "evidence": res["evidence"],
     }

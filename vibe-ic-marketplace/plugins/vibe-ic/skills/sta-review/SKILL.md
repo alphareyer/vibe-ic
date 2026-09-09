@@ -234,7 +234,12 @@ _Captured by benchmark-enhancement-capture 2026-07-21 (Bucket A, prose → progr
 #    persists at the sign-off corner on an ITERATIVE / FSM datapath):
 python3 plugins/vibe-ic/programs/iterative_recurrence_timing_diagnosis.py \
     --sta-report <worst_setup_path.rpt> \
-    [--retiming-wns-delta <ns_from_a_retiming_experiment>] \
+    # a retiming dWNS decides nothing on its own (vibe-ic#2220): pair it with
+    # the thing that makes it readable, or the program answers NOT_MEASURED.
+    [--retiming-wns-delta <ns> \
+     (--retiming-wns-noise-floor-ns <control-vs-control dWNS, SAME flow and
+                                     SAME granularity>
+      | --retiming-netlist-byte-identical)] \
     [--spec-microarch-free] [--spec-latency-unconstrained] \
     [--target-period-ns <hard_period>] --json /tmp/iter_diag.json
 ```

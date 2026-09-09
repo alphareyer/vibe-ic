@@ -104,8 +104,13 @@ def test_worst_is_most_negative():
 
 # --------------------------- diagnose verdicts ---------------------------
 def test_loop_bound_recommends_multicycle_when_spec_free(tmp_path):
+    # #2220 — a bare `--retiming-wns-delta 0.0` no longer establishes
+    # ineffectiveness: on its own it is NOT_MEASURED. The datapoint this case
+    # has always MEANT is the byte-identical netlist, so it now says which,
+    # and every assertion below is unchanged.
     rc = mod.main(["--sta-report", str(_write(tmp_path, "s.rpt", SELF_LOOP_RPT)),
                    "--retiming-wns-delta", "0.0",
+                   "--retiming-netlist-byte-identical",
                    "--spec-microarch-free", "--spec-latency-unconstrained",
                    "--target-period-ns", "25.907",
                    "--json", str(tmp_path / "o.json")])
@@ -129,9 +134,13 @@ def test_loop_bound_honest_floor_when_spec_blocks(tmp_path):
 
 
 def test_measured_retiming_improvement_overrides_name(tmp_path):
-    # same-bank names, but retiming DID improve WNS -> not a pure self-loop
+    # same-bank names, but retiming DID improve WNS -> not a pure self-loop.
+    # #2220 — "measured" now has to be true of the READING as well as of the
+    # improvement: 2.5 ns overrides the name heuristic because it stands above
+    # a noise floor this flow measured, not because it beats a fixed constant.
     rc = mod.main(["--sta-report", str(_write(tmp_path, "s.rpt", SELF_LOOP_RPT)),
                    "--retiming-wns-delta", "2.5",
+                   "--retiming-wns-noise-floor-ns", "0.35",
                    "--json", str(tmp_path / "o.json")])
     assert rc == 0
     r = json.loads((tmp_path / "o.json").read_text())
