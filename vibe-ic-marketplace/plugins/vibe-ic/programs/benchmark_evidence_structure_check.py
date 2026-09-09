@@ -1213,7 +1213,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     # absolute path over the same tree found 8 failing and 93 entries (2026-08-11,
     # recorded above). Whatever this gate scanned, it says so.
     _env_tree = os.environ.get(CORPUS_ENV)
-    if args.tree is not None and (not args.tree or not Path(args.tree).is_dir()):
+    # ...but "an explicit subject may not be SUBSTITUTED" and "an explicit subject may not
+    # be ABSENT" are different claims, and collapsing them made --corpus-may-be-absent
+    # unreachable dead code for every caller that also names --tree. MEASURED 2026-09-09:
+    # `gatekeeper-land.sh:552` passes `--tree benchmark-data --corpus-may-be-absent` on every
+    # landing; benchmark-data moved to its own repository, so this branch returned 2 and THE
+    # LANDING GATE REFUSED EVERY CHANGE — for a tree the repo is not required to carry and a
+    # permission the caller had already given. Zero landings reached main that day.
+    #
+    # Permitting the absence does NOT reintroduce the czcorpus defect. That defect was the
+    # gate SCANNING A DIFFERENT SUBJECT than the one named. Here nothing is scanned at all
+    # and nothing is claimed: the caller named a subject, said in the same breath that it may
+    # live elsewhere, and set no pointer. The three-way distinction below already draws that
+    # line correctly, so hand it the decision instead of pre-empting it.
+    #
+    # A pointer that IS set still refuses here, before discovery: that is a caller naming two
+    # subjects, which is the czcorpus shape and stays out loud.
+    _absence_is_permitted = args.corpus_may_be_absent and not _env_tree
+    if (args.tree is not None and (not args.tree or not Path(args.tree).is_dir())
+            and not _absence_is_permitted):
         print(f"UNDETERMINED: explicit --tree {args.tree} is not a directory; "
               f"nothing was scanned. {CORPUS_ENV} cannot replace an explicit "
               "subject.", file=sys.stderr)
