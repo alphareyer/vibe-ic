@@ -486,7 +486,7 @@ import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import pytest
 
@@ -1694,16 +1694,46 @@ def _copy_tracked(src: Path, dst: Path) -> int:
     return n
 
 
-def produce_live(step_id, entry: str, rec: Dict) -> Tuple[bool, str]:
+class LiveProduction(NamedTuple):
+    """The THREE outcomes of driving a producer, said in the RETURN TYPE.
+
+    `produce_live` has named three outcomes in prose since it was written —
+    "an entry nothing could measure is UNMEASURED, and reporting it as 'not
+    produced' would be as wrong as reporting it as produced" — and returned
+    two. A caller reading the boolean therefore converts a DISCLOSED
+    capability gap into a finding about the tree, which is the exact sentence
+    that comment says would be wrong.
+
+    MEASURED on 8hd-3 at 72bd2679b, published corpus 0e5d7b85f bound:
+    `test_d3_produce_live_is_not_decided_by_the_working_tree` FAILED carrying
+    the producer's own `VACUOUS_PASS: no seal ring was inserted — no KLayout
+    runner available`, and PASSED, unchanged, with `VIBEIC_EDA_CONTAINER`
+    bound to a container carrying /foss/tools/klayout/klayout. Same commit,
+    same corpus, same tree: the red was a report about the HOST.
+
+    `unmeasured` is deliberately NOT "rc == 2" alone. rc 2 carries two
+    meanings in this flow — "the capability is absent" and "you called me
+    wrongly" — so it is paired with the token the flow's OWN verdict consumer
+    matches, `flow_compliance_check._stdout_signals_vacuous`. A producer that
+    exits 2 without disclosing vacuity stays a failure, and
+    `test_d3_an_undisclosed_rc2_is_still_a_failure` is what says so.
+    """
+
+    produced: bool
+    detail: str
+    unmeasured: bool = False
+
+
+def produce_live(step_id, entry: str, rec: Dict) -> LiveProduction:
     """Run the declared producer in a throwaway TRACKED-ONLY copy of
     *rec['base_run']*.
 
-    Returns ``(produced, detail)``. ``detail`` always names a measured value.
+    Returns :class:`LiveProduction`. ``detail`` always names a measured value.
     """
     label = rec["base_run"]
     rr = run_roots().get(label)
     if rr is None:
-        return False, f"base run root {label!r} does not resolve on this host"
+        return LiveProduction(False, f"base run root {label!r} does not resolve on this host")
 
     writes = rec["writes"]
     program = rec["producer"]
@@ -1722,24 +1752,24 @@ def produce_live(step_id, entry: str, rec: Dict) -> Tuple[bool, str]:
             # it writes a step output.
             declared_before_gate = rec.get("producer_is_declared_before_gate") is True
             if not declared_before_gate or program not in F.declared_programs(step_id):
-                return False, (
+                return LiveProduction(False, (
                     f"the gate clause that names {entry!r} is {from_gate!r} but the "
                     f"manifest recorded producer {[program, *argv]!r} — the flow's "
                     f"declared producer changed and the manifest is stale"
-                )
+                ))
 
     prog_file = F.PROGRAMS_DIR / f"{program}.py"
     if not prog_file.is_file():
-        return False, f"declared producer programs/{program}.py does not exist"
+        return LiveProduction(False, f"declared producer programs/{program}.py does not exist")
 
     with tempfile.TemporaryDirectory(prefix="d3_live_") as td:
         dst = Path(td) / "proj"
         copied = _copy_tracked(rr.path, dst)
         if not copied:
-            return False, (
+            return LiveProduction(False, (
                 f"the run root {label!r} carries no file tracked at HEAD, so "
                 f"there is nothing a fresh clone could hand the producer"
-            )
+            ))
         target = dst / writes
         # A LIVE production must be proved against a tree that does not
         # already hold the artefact.
@@ -1755,11 +1785,11 @@ def produce_live(step_id, entry: str, rec: Dict) -> Tuple[bool, str]:
         # Unlinking it would let a committed artefact be re-created and
         # counted as freshly produced.
         if target.exists():
-            return False, (
+            return LiveProduction(False, (
                 f"{writes} is tracked at HEAD in the run root {label!r}; this "
                 f"cell claims a LIVE production and cannot prove one against a "
                 f"tree that already carries the artefact"
-            )
+            ))
         # A LIVE production must also be proved against a tree the producer
         # can actually READ.
         #
@@ -1800,7 +1830,7 @@ def produce_live(step_id, entry: str, rec: Dict) -> Tuple[bool, str]:
         scopes = [argv[i + 1] for i, tok in enumerate(argv)
                   if tok == "--under" and i + 1 < len(argv)]
         if scopes and not any((dst / s).exists() for s in scopes):
-            return False, (
+            return LiveProduction(False, (
                 f"none of the producer's declared --under scope(s) {scopes} "
                 f"exists in a tracked-only copy of {label!r}, so "
                 f"`{program}` can discover nothing there: whatever it writes "
@@ -1808,7 +1838,7 @@ def produce_live(step_id, entry: str, rec: Dict) -> Tuple[bool, str]:
                 f"outputs (the program's own SCOPE_NOT_FOUND finding says so "
                 f"in those words). A non-empty absence record is not a "
                 f"produced artefact"
-            )
+            ))
         proc = _pr.run(
             [sys.executable, str(prog_file), *argv],
             cwd=dst, capture_output=True, text=True)
@@ -1818,25 +1848,30 @@ def produce_live(step_id, entry: str, rec: Dict) -> Tuple[bool, str]:
             # Say so in those words: an entry nothing could measure is
             # UNMEASURED, and reporting it as "not produced" would be as
             # wrong as reporting it as produced.
+            # PAIRED, never rc alone: rc 2 also means "you called me wrongly"
+            # in this flow, so the producer must ALSO have disclosed vacuity
+            # through the token the flow's own verdict consumer matches.
+            disclosed_vacuous = _fcc._stdout_signals_vacuous(
+                (proc.stdout or "") + "\n" + (proc.stderr or ""))
             unmeasured = (
                 " — rc=2 is this plugin's disclosed capability gap, so the "
                 "entry is UNMEASURED here rather than absent; install/start "
                 "the tool the producer names above and re-run"
-                if proc.returncode == 2 else ""
+                if proc.returncode == 2 and disclosed_vacuous else ""
             )
-            return False, (
+            return LiveProduction(False, (
                 f"ran `{program} {' '.join(argv)}` in a copy of {label!r} "
                 f"(rc={proc.returncode}) and {writes} was NOT written; "
                 f"last output: {tail}{unmeasured}"
-            )
+            ), bool(unmeasured))
         size = target.stat().st_size
         if size <= 0:
-            return False, (
+            return LiveProduction(False, (
                 f"ran `{program} {' '.join(argv)}` in a copy of {label!r} and "
                 f"{writes} landed at 0 bytes — a zero-byte artefact is not a "
                 f"produced artefact"
-            )
-        return True, f"{writes} produced live at {size} B in a copy of {label!r}"
+            ))
+        return LiveProduction(True, f"{writes} produced live at {size} B in a copy of {label!r}")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1868,6 +1903,11 @@ class EntryVerdict:
     produced: bool
     mode: str
     detail: str
+    #: The entry's producer DISCLOSED that the capability itself is absent
+    #: (see :class:`LiveProduction`). Not "absent" and not "produced": an
+    #: answer nobody could take. Defaulted so the other construction sites
+    #: keep their exact meaning.
+    unmeasured: bool = False
 
 
 @dataclass(frozen=True)
@@ -2411,10 +2451,17 @@ def check_entry(step_id, entry: str, rec: Dict) -> EntryVerdict:
                 _unevidenced_detail(
                     entry, rec, f"the recorded base run {rec['base_run']!r}",
                     rejected) + _ledger_state(step_id, entry))
-        ok, detail = produce_live(step_id, entry, rec)
-        if ok:
-            return EntryVerdict(True, LIVE, detail)
-        return _recorded_or(step_id, entry, LIVE, detail)
+        live = produce_live(step_id, entry, rec)
+        if live.produced:
+            return EntryVerdict(True, LIVE, live.detail)
+        recorded = _recorded_or(step_id, entry, LIVE, live.detail)
+        # A tracked publisher record is a real answer and OUTRANKS "could not
+        # look" — same precedence as `matrix_cell_state`, where NA and WAIVED
+        # outrank NOT_MEASURED. Only when the record has nothing to say does
+        # the producer's own disclosure decide.
+        if recorded.produced or not live.unmeasured:
+            return recorded
+        return EntryVerdict(False, LIVE, recorded.detail, unmeasured=True)
 
     if status == "PRODUCED_BY_RUN":
         alts = F.split_any_of(entry)
@@ -2545,8 +2592,15 @@ def measure_new_signoff_output(step_id, entry: str) -> EntryVerdict:
                         + "; ".join(attempts or ["no admissible run roots"]))
 
 
-def audit_step(step_id) -> Tuple[List[str], List[str]]:
-    """``(missing, details)`` over ALL declared entries — ALL-of-N."""
+def audit_step(step_id) -> Tuple[List[str], List[str], List[str]]:
+    """``(missing, details, unmeasured)`` over ALL declared entries — ALL-of-N.
+
+    ``unmeasured`` is a SUBSET of ``missing``, never a substitute for it: the
+    caller must still refuse on everything in ``missing`` that is not in it,
+    so an entry nobody could measure can never mask one that was measured and
+    found absent. ``test_d3_a_measured_absence_still_fails_beside_an_
+    unmeasured_entry`` drives exactly that pairing.
+    """
     rec = step_record(step_id)
     live_entries = list(F.required_outputs(step_id))
     recorded = rec["entries"]
@@ -2561,6 +2615,7 @@ def audit_step(step_id) -> Tuple[List[str], List[str]]:
 
     missing: List[str] = list(drift)
     details: List[str] = []
+    unmeasured: List[str] = []
     for entry in live_entries:
         if entry not in recorded:
             v = measure_new_signoff_output(step_id, entry)
@@ -2568,8 +2623,11 @@ def audit_step(step_id) -> Tuple[List[str], List[str]]:
             v = check_entry(step_id, entry, recorded[entry])
         details.append(f"[{v.mode}] {entry!r} -> {v.detail}")
         if not v.produced:
-            missing.append(f"{entry!r}: {v.detail}")
-    return missing, details
+            row = f"{entry!r}: {v.detail}"
+            missing.append(row)
+            if v.unmeasured:
+                unmeasured.append(row)
+    return missing, details, unmeasured
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -3005,19 +3063,172 @@ def test_d3_required_outputs_are_produced(cell):
     if not run_roots() and corpus_root() is None:
         pytest.skip(SKIP_REASON)
 
-    missing, details = audit_step(sid)
-    assert not missing, (
+    missing, details, unmeasured = audit_step(sid)
+    # THE MEASURED HALF IS ASSERTED FIRST, and that order is the whole guard:
+    # an entry whose producer disclosed a capability gap must never be able to
+    # hide one that was measured and found absent.
+    measured_missing = [m for m in missing if m not in unmeasured]
+    assert not measured_missing, (
         f"step {sid} ({F.step_name(sid)}) declares {len(F.required_outputs(sid))} "
-        f"required_outputs; {len(missing)} are NOT produced:\n  "
-        + "\n  ".join(missing)
+        f"required_outputs; {len(measured_missing)} are NOT produced:\n  "
+        + "\n  ".join(measured_missing)
         + f"\n[{len(run_roots())} admissible run roots searched: "
         + f"{sorted(run_roots())}]"
     )
+    # THE FOURTH STATE AGAIN, at entry granularity. The same owner ruling
+    # (2026-08-21) the NOT_MEASURED branch above obeys: a predicate that could
+    # not look declines to look, so both axes agree and the census counts the
+    # cell as the absence of a measurement rather than as either colour.
+    # NOTHING IS EXCUSED — the reason names the producer, its rc and its own
+    # disclosure, and it self-invalidates the moment the tool is reachable.
+    if unmeasured:
+        pytest.skip(
+            f"NOT_MEASURED: step {sid} — {len(unmeasured)} of "
+            f"{len(F.required_outputs(sid))} declared output(s) could not be "
+            f"measured on this host; the producer disclosed the gap itself:"
+            "\n  " + "\n  ".join(unmeasured))
 
 
 # ──────────────────────────────────────────────────────────────────────
 # Guards — these keep the 63 above from going quietly hollow
 # ──────────────────────────────────────────────────────────────────────
+
+# ──────────────────────────────────────────────────────────────────────
+# THE THIRD OUTCOME MUST NOT BECOME A DOOR (vibe-ic#2177 follow-up)
+# ──────────────────────────────────────────────────────────────────────
+# `produce_live` may now answer UNMEASURED, and an UNMEASURED entry does not
+# redden its cell. That is a door, and a door needs two locks: the producer
+# must have DISCLOSED the gap in the flow's own vacuity token, and an entry
+# nobody measured must never hide one that was measured and found absent.
+# Both are driven below against the real functions.
+def _live_entry_for_probe():
+    """The same subject the working-tree test drives, chosen the same way."""
+    candidates = [
+        (sid, entry, erec)
+        for cell in cells_for(DIM)
+        for sid in [cell.step_id]
+        for entry, erec in step_record(sid)["entries"].items()
+        if erec.get("status") == "PRODUCED_LIVE"
+        and erec.get("base_run") in run_roots()
+    ]
+    if not candidates:
+        pytest.skip("no live-produced entry has a run root on this tree")
+    return candidates[0]
+
+
+class _FakeProc:
+    def __init__(self, rc, out):
+        self.returncode, self.stdout, self.stderr = rc, out, ""
+
+
+def _produce_live_under(monkeypatch, rc, out):
+    """Drive the REAL `produce_live` with a producer whose rc/output we fix."""
+    sid, entry, erec = _live_entry_for_probe()
+    src = run_roots()[erec["base_run"]].path
+    with _probe_run_root("d3_rc2guard_") as (probe, commit):
+        assert _copy_tracked(src, probe), "probe would be inert"
+        subprocess.run(["git", "add", "-f", "--", "."], cwd=probe, check=True,
+                       capture_output=True)
+        commit()
+        monkeypatch.setattr(
+            sys.modules[__name__], "run_roots",
+            lambda: {erec["base_run"]: RunRoot(erec["base_run"], _IN_REPO_KIND,
+                                               probe)})
+        # NARROW ON PURPOSE. `_pr.run` also carries the git plumbing that
+        # decides what is tracked; replacing it wholesale made this probe
+        # report "git is not on PATH" and measure nothing. Only the PRODUCER
+        # invocation is intercepted; every other call stays real.
+        real_run = _pr.run
+
+        def _only_the_producer(argv, *a, **k):
+            if (isinstance(argv, (list, tuple)) and len(argv) > 1
+                    and str(argv[0]) == sys.executable
+                    and Path(str(argv[1])).parent == F.PROGRAMS_DIR):
+                return _FakeProc(rc, out)
+            return real_run(argv, *a, **k)
+
+        monkeypatch.setattr(_pr, "run", _only_the_producer)
+        return produce_live(sid, entry, erec)
+
+
+@pytest.mark.parametrize("rc,out,expect_unmeasured", [
+    # The producer this repository really ships prints exactly this line when
+    # the tool is absent; MEASURED on 8hd-3 at 72bd2679b.
+    (2, "VACUOUS_PASS: no seal ring was inserted — no KLayout runner "
+        "available (no strmrun/klayout on PATH)", True),
+    # rc 2 with NO disclosure. This flow spends rc 2 on two different
+    # meanings — "the capability is absent" and "you called me wrongly" — and
+    # only the first may excuse a cell.
+    (2, "Traceback (most recent call last):\nTypeError: bad argument", False),
+    # A disclosure without the refusal code is not one either.
+    (1, "VACUOUS_PASS: nothing to do", False),
+])
+def test_d3_only_a_disclosed_rc2_is_unmeasured(monkeypatch, rc, out,
+                                               expect_unmeasured):
+    """Both locks, driven through the real `produce_live`.
+
+    `getattr` on purpose: against the PRE-FIX module this arm must RUN and
+    answer wrongly, not abort on a missing attribute before it observed
+    anything.
+    """
+    live = _produce_live_under(monkeypatch, rc, out)
+    assert getattr(live, "produced", live[0]) is False, live
+    assert getattr(live, "unmeasured", False) is expect_unmeasured, (
+        f"rc={rc} with output {out!r} was classified "
+        f"unmeasured={getattr(live, 'unmeasured', False)}, expected "
+        f"{expect_unmeasured}. The pairing of the refusal code with the "
+        f"flow's own vacuity token is what stops rc 2's other meaning — "
+        f"'you called me wrongly' — from excusing a cell."
+    )
+
+
+def test_d3_a_measured_absence_still_fails_beside_an_unmeasured_entry(
+        monkeypatch):
+    """An entry nobody could measure must not hide one that was measured.
+
+    Drives the REAL `audit_step` with `check_entry` returning one of each, and
+    compares the two populations to the expected lists rather than asserting
+    that something is truthy.
+    """
+    sid = next(iter(F.normalize_id(s_) for s_ in F.step_ids()
+                    if F.required_outputs(s_)))
+    entries = list(F.required_outputs(sid))
+    if len(entries) < 2:
+        pytest.skip(f"step {sid} declares {len(entries)} entry; need two")
+    gap, real = entries[0], entries[1]
+    # Built through a tolerant constructor and read through a tolerant unpack
+    # so the PRE-FIX module RUNS this arm and answers wrongly. A control that
+    # dies on a TypeError or a ValueError before it reached the property has
+    # observed nothing.
+    def _verdict(detail, unmeasured=False):
+        try:
+            return EntryVerdict(False, LIVE, detail, unmeasured=unmeasured)
+        except TypeError:
+            return EntryVerdict(False, LIVE, detail)
+
+    verdicts = {gap: _verdict("the tool is absent", unmeasured=True),
+                real: _verdict("the artefact is absent")}
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "check_entry",
+                        lambda step_id, entry, rec: verdicts.get(
+                            entry, EntryVerdict(True, LIVE, "ok")))
+    monkeypatch.setattr(module, "measure_new_signoff_output",
+                        lambda step_id, entry: verdicts.get(
+                            entry, EntryVerdict(True, LIVE, "ok")))
+    monkeypatch.setattr(module, "step_record",
+                        lambda step_id: {"entries": {e: {} for e in entries}})
+    result = audit_step(sid)
+    missing = result[0]
+    unmeasured = result[2] if len(result) > 2 else []
+    assert unmeasured == [f"{gap!r}: the tool is absent"], unmeasured
+    assert missing == [f"{gap!r}: the tool is absent",
+                       f"{real!r}: the artefact is absent"], missing
+    measured_missing = [m for m in missing if m not in unmeasured]
+    assert measured_missing == [f"{real!r}: the artefact is absent"], (
+        "the measured absence was swallowed by the unmeasured one; an entry "
+        "nobody could look at would then be a way to carry a real one")
+
+
 def test_d3_the_source_arm_goes_red_when_a_real_producer_is_deleted():
     """MUT: delete the sole writer of a declared output; the cell must move.
 
@@ -6312,11 +6523,27 @@ def test_d3_produce_live_is_not_decided_by_the_working_tree(monkeypatch):
             sys.modules[__name__], "run_roots",
             lambda: {erec["base_run"]: RunRoot(erec["base_run"], _IN_REPO_KIND,
                                                probe)})
-        produced, detail = produce_live(sid, entry, erec)
+        live = produce_live(sid, entry, erec)
 
-    assert produced, (
+    # THE THIRD OUTCOME, DECLINING TO LOOK — the same owner ruling
+    # (2026-08-21) the cell body above already obeys: a predicate that could
+    # not look says NOT_MEASURED and counts as neither colour, rather than
+    # charging the flow with a defect on evidence this host does not hold.
+    # This site is the one that did not obey it. The subject is chosen by
+    # `candidates[0]`, so a property about COPYING TRACKED FILES was decided
+    # by whether a GDS tool happened to be installed.
+    #
+    # NOTHING IS EXCUSED. The skip names the producer, the rc and the
+    # producer's own disclosure; it self-invalidates the moment the tool is
+    # reachable; and an rc=2 that does NOT disclose vacuity still fails below.
+    if live.unmeasured:
+        pytest.skip(
+            f"NOT_MEASURED: step {sid} {entry!r} — {live.detail}")
+
+    assert live.produced, (
         f"step {sid} {entry!r} could not be produced live once an UNTRACKED "
-        f"leftover of {erec['writes']!r} sat in the working tree: {detail}. "
+        f"leftover of {erec['writes']!r} sat in the working tree: "
+        f"{live.detail}. "
         f"The producer must be handed the tree a fresh clone would give it."
     )
 
