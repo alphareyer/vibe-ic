@@ -178,8 +178,13 @@ def test_an_empty_population_is_undetermined_not_a_pass():
     universal claim over the empty set -- vacuously true, and indistinguishable
     to a caller from the same sentence over the real repository.
 
-    `gate_zero_denominator_refuses_check` refuses this shape, and CANNOT SEE
-    THIS FILE: its population is `*_check.py`. So the refusal is asserted here.
+    `gate_zero_denominator_refuses_check` refuses this shape. Its population
+    is no longer `*_check.py` as the sentence here used to say: measured on
+    this tree it is 716 programs, 662 by one of five checker suffixes and 56
+    by BEHAVIOUR (a `[PASS]`/`[FAIL]` banner plus a `__main__`), and this file
+    is IN it by behaviour. The refusal is still asserted here as well, because
+    that gate probes an empty PROJECT and this program's population is a
+    repository.
     """
     root = Path(tempfile.mkdtemp(prefix="zeropop_"))
     try:
@@ -191,6 +196,44 @@ def test_an_empty_population_is_undetermined_not_a_pass():
         assert r.returncode == 2, (
             f"an empty population returned rc={r.returncode}; it must be "
             f"UNDETERMINED, not a pass\n{r.stdout}")
+        assert "NOT a pass" in r.stdout, r.stdout
+        assert "[PASS]" not in r.stdout, r.stdout
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_stale_row_over_an_unread_tree_is_not_a_finding():
+    """The sibling above passes only while the shipped inventory is EMPTY.
+
+    Give this program one row that matches nothing and the refusal stops
+    firing: it sat under `if rc == 0`, and a stale row sets rc. MEASURED
+    before the fix, on an empty tree with one stale row: `modules parsed: 0`
+    and rc 1 -- a FINDING asserted over a tree that was never read. The row
+    "matches nothing" there because nothing was read, not because the site is
+    gone, and `_gate_dispatch` reads rc 1 as a finding rather than as "could
+    not measure".
+
+    NOT_MEASURED outranks every finding, because a finding over an unread tree
+    is not one.
+    """
+    root = Path(tempfile.mkdtemp(prefix="zeroref_"))
+    try:
+        (root / ".git").mkdir()
+        (root / "vibe-ic-marketplace" / "plugins" / "vibe-ic" / "programs"
+         / "tests").mkdir(parents=True)
+        inv = root / "stale_inv.json"
+        inv.write_text(json.dumps({"known": [
+            {"key": "vibe-ic-marketplace/plugins/vibe-ic/programs/gone.py"
+                    "::x", "reason": "matches nothing on this tree"}]}) + "\n",
+            encoding="utf-8")
+        r = _pr.run([sys.executable, str(PROG), "--root", str(root),
+                     "--inventory", str(inv)], capture_output=True, text=True)
+        assert "match nothing" in r.stdout, (
+            "precondition: the stale-row branch must be the one that fired\n"
+            f"{r.stdout}")
+        assert r.returncode == 2, (
+            f"nothing was parsed and this returned rc={r.returncode}; a stale "
+            f"inventory row is not a measurement of the tree\n{r.stdout}")
         assert "NOT a pass" in r.stdout, r.stdout
         assert "[PASS]" not in r.stdout, r.stdout
     finally:

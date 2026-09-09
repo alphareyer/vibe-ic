@@ -325,23 +325,33 @@ def main(argv=None) -> int:
         print(f"\n[CENSUS] {len(stale)} inventory row(s) match nothing:")
         for k in stale:
             print(f"   {k}")
-    if rc == 0:
-        # A COUNT OVER AN EMPTY POPULATION IS NOT A COUNT. `[CENSUS] 0 site(s)`
-        # is honest only if something was read; over a tree this program parsed
-        # NOTHING it is indistinguishable from a clean result. Measured: on an
-        # empty tree this returned 0 -- and still 0 under `--strict`, so the
-        # "--strict is where a caller asks for the refusal" argument did not cover
-        # it either. Exiting 0 is a census's contract for a REAL population, not a
-        # licence to report over none.
-        if denom.get("files_walked", 0) == 0:
-            print("[CANNOT DETERMINE] local_clone_does_not_borrow_objects_census: 0 python modules and 0 shell scripts were read -- "
-                  "nothing was read, so the count is not a measurement. NOT a pass.")
-            return 2
+    # A COUNT OVER AN EMPTY POPULATION IS NOT A COUNT. `[CENSUS] 0 site(s)`
+    # is honest only if something was read; over a tree this program parsed
+    # NOTHING it is indistinguishable from a clean result. Measured: on an
+    # empty tree this returned 0 -- and still 0 under `--strict`, so the
+    # "--strict is where a caller asks for the refusal" argument did not cover
+    # it either. Exiting 0 is a census's contract for a REAL population, not a
+    # licence to report over none.
+    #
+    # UNCONDITIONAL, and it was not. Under `if rc == 0` a single stale
+    # inventory row -- a datum read from the inventory FILE, never from the
+    # tree -- switched this refusal off. Measured on an empty tree with one
+    # stale row: 0 python modules and 0 shell scripts read, and exit 0. The
+    # denominator is a property of what was READ; nothing found in the
+    # inventory can establish it, so nothing found there may gate it.
+    if denom.get("files_walked", 0) == 0:
+        print("[CANNOT DETERMINE] local_clone_does_not_borrow_objects_census: 0 python modules and 0 shell scripts were read -- "
+              "nothing was read, so the count is not a measurement. NOT a pass.")
+        return 2
 
-        print(f"[CENSUS] {len(findings)} site(s) classified, "
-              f"{len(known)} recorded as known debt, "
-              f"{len(new)} unrecorded. This is a count, not a "
-              f"verdict — the gate is programs/local_clone_does_not_borrow_objects.py.")
+    # Likewise unconditional: this line is the census's whole product, and
+    # under `if rc == 0` it was printed only when there was nothing to report
+    # -- silent in exactly the case a reader opened it for, taking the sentence
+    # that names the refusing gate with it.
+    print(f"[CENSUS] {len(findings)} site(s) classified, "
+          f"{len(known)} recorded as known debt, "
+          f"{len(new)} unrecorded. This is a count, not a "
+          f"verdict — the gate is programs/local_clone_does_not_borrow_objects.py.")
     if rc and not a.strict:
         print("\n  CENSUS: reported, not refused. The gate for this rule is\n"
               "  programs/local_clone_does_not_borrow_objects.py — run that for a verdict.")
