@@ -1,0 +1,14 @@
+diff --git a/vibe-ic-marketplace/plugins/vibe-ic/programs/phase3_one_shot_runner.py b/vibe-ic-marketplace/plugins/vibe-ic/programs/phase3_one_shot_runner.py
+index 737465fac..93c38b0a8 100644
+--- a/vibe-ic-marketplace/plugins/vibe-ic/programs/phase3_one_shot_runner.py
++++ b/vibe-ic-marketplace/plugins/vibe-ic/programs/phase3_one_shot_runner.py
+@@ -14622,8 +14622,8 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
+         f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
+         f"yosys -p '{macro_lib_reads + ('; ' if macro_lib_reads else '')}{reads}; "
+         f"{pre_synth}"
+-        f"{_arith_pre_clause}"
+         f"{_fsm_synth_clause}"
++        f"{_arith_pre_clause}"
+         f"dfflibmap{_du_flags} -liberty {liberty_c}; "
+         f"{dlatch_clause}"
+         f"abc -liberty {liberty_c}{_abc_timing}; "

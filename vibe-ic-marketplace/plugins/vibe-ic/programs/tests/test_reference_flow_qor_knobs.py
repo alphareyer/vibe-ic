@@ -28,6 +28,7 @@ the generated yosys command string. No container is spawned.
 from __future__ import annotations
 
 import importlib
+import re
 from pathlib import Path
 
 import pytest
@@ -289,7 +290,18 @@ class TestStepSynthKnobEmission:
         assert result.status == "PASS", result.detail
         # SWAP_ARITH_OPERATORS → alumacc (before generic synth mapping)
         assert "alumacc;" in cmd
-        assert cmd.index("alumacc;") < cmd.index("synth -top top -flatten;")
+        # ANCHOR ON THE COMMAND, NOT ON THE FLAG LIST THAT FOLLOWS IT.
+        # This read `cmd.index("synth -top top -flatten;")` — the literal
+        # INCLUDING its terminating `;`. `_fsm_synth_clause` now emits
+        # `synth -top {top} -flatten -encfile {path};` (the FSM recoding table
+        # post-layout LEC consumes), so the literal cannot occur and this line
+        # raised `ValueError: substring not found` — a red about a flag nobody
+        # here is asserting anything about, on a case whose subject is ORDER.
+        # The `\b` keeps `-flatten` required and stops the next appended flag
+        # rotting it again.
+        _mapping = re.search(r"synth -top top -flatten\b", cmd)
+        assert _mapping, f"the generic synth mapping is not in the command:\n{cmd}"
+        assert cmd.index("alumacc;") < _mapping.start()
         # ADDER_MAP_FILE → techmap -map <staged file>, and the file is staged
         assert "techmap -map " in cmd and "_ref_adder_map.v" in cmd
         assert (_pl.synth_dir(project) / "_ref_adder_map.v").is_file()
