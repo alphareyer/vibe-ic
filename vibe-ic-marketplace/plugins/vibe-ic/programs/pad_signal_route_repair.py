@@ -10,9 +10,15 @@ Final native DRC, routing integrity and antenna checks remain mandatory.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
-from phase3_one_shot_runner import (
+# vibe-ic#2104 — a BARE SIBLING import, and this program is loaded by path by
+# `program_path_load_check`, where the program's own directory is not on
+# `sys.path`. Same remedy the gate states; the import itself is unchanged.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from phase3_one_shot_runner import (  # noqa: E402
     _routing_integrity_check_tcl,
     _spare_safe_clear_net_proc_tcl,
 )

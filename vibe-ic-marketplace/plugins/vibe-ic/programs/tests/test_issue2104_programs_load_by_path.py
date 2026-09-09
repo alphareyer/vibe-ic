@@ -468,3 +468,75 @@ def test_the_sweep_leaves_no_bytecode_in_the_tree_it_measures(tmp_path,
         f"{residue}. Pass `-B` on the child's argv — the parent's flag and "
         "`sys.dont_write_bytecode` do not cross a subprocess boundary.")
     assert r.returncode == 0, r.stdout[-2000:]
+
+
+# ---------------------------------------------------------------------------
+# 6. THE TWO SITES THIS REPAIR TOUCHES, LOADED BY PATH AND *USED*
+# ---------------------------------------------------------------------------
+#
+# `test_every_shipped_program_loads_by_path` above is the population claim, and
+# it is the one the BLOCKING gate answers. It is not, on its own, the whole
+# claim for a repaired site: it says the module IMPORTED, not that the name the
+# bare import bound is the REAL sibling. That distinction is the entire point of
+# section 5 — `lec_equivalence_check` imported cleanly by path on the base tree
+# and still ran with a stub classifier, because its own `except ImportError`
+# swallowed the failure. A repair that put the directory on `sys.path` but bound
+# the wrong object would be invisible to a sweep that only counts
+# ModuleNotFoundError.
+#
+# So each site repaired here gets the section-5 treatment: load by path in a
+# child whose `sys.path` does NOT contain `programs/`, then CALL through the
+# imported name and check the answer only the real sibling can give.
+#
+# MEASURED on main f91aaa3915, both methods agreeing:
+#     [FAIL] landing_hygiene_ratchet_check.py cannot resolve sibling
+#            `_atomic_artefact`
+#     [FAIL] pad_signal_route_repair.py cannot resolve sibling
+#            `phase3_one_shot_runner`
+#     [FAIL] program_path_load_check: 2 of 1407 program(s) ...
+# Both files are tracked, both are loaded by path, and one of them —
+# `landing_hygiene_ratchet_check` — is the program the LANDING itself runs.
+
+_RATCHET = _PROGRAMS / "landing_hygiene_ratchet_check.py"
+_PAD_REPAIR = _PROGRAMS / "pad_signal_route_repair.py"
+
+
+def test_landing_hygiene_ratchet_check_loads_by_path_with_the_real_siblings(
+        tmp_path):
+    """The landing's own hygiene unit. `_atomic_artefact` and
+    `atomic_artifact_write_check` are bare siblings; both are USED at module
+    scope (`_FLOW_REL`) and at the two `--json` write sites, so a stub or an
+    absent binding is not a latent defect here — it is the landing writing its
+    report through something that is not the atomic writer."""
+    target = tmp_path / "written.json"
+    r = _load_by_path(_RATCHET, (
+        "print('WRITE_TEXT_FROM', m.write_text.__module__)\n"
+        "print('CENSUS_FROM', m._atomic_census.__name__)\n"
+        f"m.write_text({str(target)!r}, 'PAYLOAD')\n"
+        "print('FLOW_REL', m._FLOW_REL)\n"))
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert "WRITE_TEXT_FROM _atomic_artefact" in r.stdout, r.stdout + r.stderr
+    assert "CENSUS_FROM atomic_artifact_write_check" in r.stdout, r.stdout
+    # the call went through the REAL writer, not a name that merely existed
+    assert target.read_text() == "PAYLOAD", sorted(
+        p.name for p in tmp_path.iterdir())
+    assert "FLOW_REL " in r.stdout, r.stdout
+
+
+def test_pad_signal_route_repair_loads_by_path_and_emits_through_its_sibling():
+    """`_routing_integrity_check_tcl` comes from `phase3_one_shot_runner`, and
+    `strict_integrity_tcl` REWRITES a handler line it expects that function to
+    have produced — it raises `Shared integrity failure handler changed` if the
+    text is not the real one. Calling it is therefore a check on the binding,
+    not only on the import."""
+    r = _load_by_path(_PAD_REPAIR, (
+        "t = m.strict_integrity_tcl('MARK')\n"
+        "print('HAS_FAILED', 'MARK_UNROUTED_CHECK_FAILED' in t)\n"
+        "print('HAS_INCOMPLETE', 'MARK_INCOMPLETE' in t)\n"
+        "print('HAS_NONFATAL', 'MARK_UNROUTED_CHECK_NONFATAL' in t)\n"))
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert "HAS_FAILED True" in r.stdout, r.stdout + r.stderr
+    assert "HAS_INCOMPLETE True" in r.stdout, r.stdout
+    # the non-fatal handler is what the shared helper emits and what this
+    # program replaces; if it survived, the replacement did not happen
+    assert "HAS_NONFATAL False" in r.stdout, r.stdout

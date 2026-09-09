@@ -106,8 +106,15 @@ from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from _atomic_artefact import write_text
-import atomic_artifact_write_check as _atomic_census
+# vibe-ic#2104 — the two imports below are BARE SIBLINGS. This program is loaded
+# by path (`spec_from_file_location`) by the landing and by
+# `program_path_load_check`, and under that loader the program's own directory
+# is NOT on `sys.path`, so both raised ModuleNotFoundError. The gate's own
+# remedy, verbatim: put the program's directory on `sys.path` before the bare
+# import; do not silence the import.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _atomic_artefact import write_text  # noqa: E402
+import atomic_artifact_write_check as _atomic_census  # noqa: E402
 
 GATE = "landing_hygiene_ratchet_check"
 
