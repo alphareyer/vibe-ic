@@ -656,8 +656,12 @@ so two in series is a miss that no amount of buffering recovers. It will not
 show up at the typical corner, and it will not show up until post-route STA on a
 design whose route converged, whose DRC was 0 and whose LVS matched.
 
-**Two rewrites recover it, both equivalence-preserving, neither touching the
-spec.**
+**Three rewrites recover it, all equivalence-preserving, none touching the
+spec.** The first two reduce the number of carry-propagate adds on the path;
+the third is about the one that is left, and a run that applied only the first
+two was measured through the front door still VIOLATING its sign-off corner,
+with a single full-width ripple carry as the dominant term of its worst path
+(vibe-ic#2228). Stopping after two is the failure mode this list now names.
 
 1. **CARRY-SAVE the multi-operand sum.** `a + b + c + d + e` is not four adds.
    Reduce with 3:2 compressors -- `s = a^b^c`, `c_out = maj(a,b,c) << 1`, whose
@@ -672,8 +676,39 @@ spec.**
    and the path reads a single operand instead of three. This is retiming: it
    adds registers, it does NOT add cycles.
 
-**The cycle count is the thing you must not quietly move.** Both rewrites above
-keep it exactly. Before considering any rewrite that does move it, read what the
+3. **THE ONE CARRY-PROPAGATE ADD THAT REMAINS MUST ITSELF BE FAST.** Rewrite 1
+   ends at ONE carry-propagate add, and that is where an author who applied it
+   faithfully still misses the corner: a full-width RIPPLE carry is a single
+   arc-by-arc chain as long as the word, and one of them can be a large
+   fraction of the declared period at the slow corner all by itself. Two
+   rewrites are not the remedy — three are. When the surviving add sits on a
+   register-to-register path at the declared period, author it as a
+   CARRY-SELECT or PARALLEL-PREFIX add, not as a bare `+` left to whatever the
+   synthesiser's default maps.
+
+   **How to tell you have a ripple, from the report you already have.** In the
+   worst-path listing a full-width ripple carry appears as a run of MAJORITY
+   gates about as long as the word width — the carry — with `xor`/`xnor` sums
+   between them — and their summed delay, not the buffering around them, is the
+   dominant term. Nothing else in a datapath produces that shape.
+
+   **And compute a shared sum ONCE.** A value several consumers each need is
+   often written once per consumer, so the same carry-propagate add appears on
+   several paths and the worst of them decides the corner. Hoist it to one
+   place and let the consumers read the result. This is the other half of the
+   same remedy: the fast add is worth little while a slow copy of it survives
+   somewhere else.
+
+   **A SYNTHESIS KNOB IS NOT THIS REMEDY.** Declaring a prefix-adder map is a
+   different act with a different outcome, and this repo has measured it:
+   `tools/vibeic-eda/FIX_STATUS.md` records a full A/B in which the declared map
+   did restructure the routed ripple, and the sign-off corner still did not
+   close — worst-corner slack moved a fraction of a nanosecond while total
+   negative slack and slew violations got WORSE. Author the structure; do not
+   expect a map to author it for you.
+
+**The cycle count is the thing you must not quietly move.** All three rewrites
+above keep it exactly. Before considering any rewrite that does move it, read what the
 input actually constrains -- and read the whole document, because the layer that
 NARRATES a cycle count is often the same layer that declines to constrain it.
 Where the input declares an observable latency, a rewrite that changes it is a

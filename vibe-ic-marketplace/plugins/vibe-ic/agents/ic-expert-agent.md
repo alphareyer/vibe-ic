@@ -3755,8 +3755,12 @@ slow corner, so two in series is a miss that no amount of buffering recovers. It
 will not show up at the typical corner, and it will not show up until post-route
 STA on a design whose route converged, whose DRC was 0 and whose LVS matched.
 
-**What to do** — two rewrites recover it, both equivalence-preserving, neither
-touching the spec:
+**What to do** — three rewrites recover it, all equivalence-preserving, none
+touching the spec. The first two reduce the NUMBER of carry-propagate adds on
+the path; the third is about the one that is left, and a front-door run that
+applied only the first two was measured still VIOLATING its sign-off corner,
+with a single full-width ripple carry as the dominant term of its worst path
+(vibe-ic#2228):
 
 1. **CARRY-SAVE the multi-operand sum.** `a + b + c + d + e` is not four adds.
    Reduce with 3:2 compressors (a full-adder row) — `s = a^b^c`,
@@ -3772,8 +3776,25 @@ touching the spec:
    and the path reads a single operand instead of three. This is retiming: it
    adds registers, it does NOT add cycles.
 
-**The cycle count is the thing you must not quietly move.** Both rewrites above
-keep it exactly. Before considering any rewrite that does move it, read what the
+3. **THE ONE CARRY-PROPAGATE ADD THAT REMAINS MUST ITSELF BE FAST.** Rewrite 1
+   ends at ONE carry-propagate add, and that is where an author who applied it
+   faithfully still misses the corner: a full-width RIPPLE carry is one
+   arc-by-arc chain as long as the word, and a single one of them can be a
+   large fraction of the declared period at the slow corner. When the surviving
+   add sits on a register-to-register path at the declared period, author it as
+   a CARRY-SELECT or PARALLEL-PREFIX add, not as a bare `+` left to the
+   synthesiser's default map. In the worst-path listing a full-width ripple
+   shows as a run of MAJORITY gates about as long as the word width — the carry
+   — with `xor`/`xnor` sums between them, and their summed delay dominates.
+   And compute a SHARED sum ONCE: a value several consumers each recompute puts
+   the same add on several paths, and the worst of them decides the corner.
+   A SYNTHESIS KNOB IS NOT THIS REMEDY — `tools/vibeic-eda/FIX_STATUS.md`
+   records an A/B where a declared prefix-adder map did restructure the routed
+   ripple and the sign-off corner still did not close, while total negative
+   slack and slew violations got worse.
+
+**The cycle count is the thing you must not quietly move.** All three rewrites
+above keep it exactly. Before considering any rewrite that does move it, read what the
 input actually constrains — and read the whole document, because the layer that
 NARRATES a cycle count is often the same layer that declines to constrain it.
 Where the input declares an observable latency, a rewrite that changes it is a
