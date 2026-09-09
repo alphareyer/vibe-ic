@@ -11984,6 +11984,37 @@ def _cts_legal_buffer_selection_tcl(
     exclusion set (and non-primary corners can mark every cell dont_use).
     Capture the resizer's own report, with sentinels proving capture worked.
     The strict width bound is unchanged: a master exactly at it stays usable.
+
+    THE REFUSAL NAMES ITS OWN SUBJECT. Two unrelated things can make this
+    block refuse, and until now both raised the same sentence:
+
+      * `report_dont_use` itself raised -- `$_cts_policy_err` carries the
+        tool's own words ("no network has been linked."), and the cell policy
+        really is unavailable;
+      * `report_dont_use` SUCCEEDED (rc=0) but `utl::redirectString*` handed
+        back a capture without the sentinels this block wrote itself. Nothing
+        was learned about the cell policy, because the channel that was
+        supposed to carry it did not round-trip. `catch` sets its var to the
+        command RESULT on success, so `$_cts_policy_err` is EMPTY here and the
+        refusal degenerated to `CTS_CELL_POLICY_UNAVAILABLE: ` -- a claim
+        about the POLICY, with no explanation, for a failure of the CHANNEL.
+
+    MEASURED on v1.20.15, driving both conditions through the same emitted
+    block under `tclsh`: rc!=0 gave
+    `CTS_CELL_POLICY_UNAVAILABLE: no network has been linked.` and a lost
+    capture gave `CTS_CELL_POLICY_UNAVAILABLE: ` -- nothing after the colon.
+    That second sentence is what the six deck-evaluator files emitted 32 times
+    at v1.19.95 (aa08f0556 clean -> 4b74ba713 17 red -> e435688b7 clean), and
+    it pointed every reader at the PDK and the pinned image. The image was
+    never the subject: OpenROAD 26Q3-2075-g18e98f9e44 ships `report_dont_use`,
+    and `utl::redirectString*` round-trips it with and without `-metrics`
+    (verified against the pinned digest `sha256:89a8fd72…`). The subject was
+    the stand-in in the test harness, which `_pnr_tcl_stub` now models.
+
+    The FIRING CONDITION is byte-for-byte what it was -- rc, or either
+    sentinel missing. Only the diagnosis is split, and the
+    `CTS_CELL_POLICY_UNAVAILABLE` token is kept on both branches so nothing
+    that greps for it loses the signal.
     """
     return r'''
 # CTS choices must obey the live policy after all pre-CTS optimization.
@@ -11994,9 +12025,19 @@ utl::report "CTS_POLICY_BEGIN"
 set _cts_policy_rc [catch {report_dont_use} _cts_policy_err]
 utl::report "CTS_POLICY_END"
 set _cts_policy [utl::redirectStringEnd]
-if {$_cts_policy_rc || ![string match *CTS_POLICY_BEGIN* $_cts_policy]
-    || ![string match *CTS_POLICY_END* $_cts_policy]} {
-  error "CTS_CELL_POLICY_UNAVAILABLE: $_cts_policy_err"
+# The refusal names WHICH of the two things failed. The firing condition is
+# unchanged -- rc, or either sentinel missing -- only the diagnosis is split.
+set _cts_saw_begin [string match *CTS_POLICY_BEGIN* $_cts_policy]
+set _cts_saw_end [string match *CTS_POLICY_END* $_cts_policy]
+if {$_cts_policy_rc} {
+  error "CTS_CELL_POLICY_UNAVAILABLE: report_dont_use failed: $_cts_policy_err"
+}
+if {!$_cts_saw_begin || !$_cts_saw_end} {
+  error "CTS_CELL_POLICY_UNAVAILABLE: capture channel did not round-trip --\
+ report_dont_use returned rc=0, so nothing is known about the cell policy;\
+ utl::redirectString gave back begin_sentinel=$_cts_saw_begin\
+ end_sentinel=$_cts_saw_end over [string length $_cts_policy] byte(s):\
+ '[string range $_cts_policy 0 200]'"
 }
 set _cts_excluded [regexp -all -inline {\S+} $_cts_policy]
 set _cts_legal_bufs {}
