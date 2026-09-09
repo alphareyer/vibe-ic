@@ -1075,6 +1075,26 @@ def _check_tool_authenticity(files: List[Path], mode: str,
         # it began passing it.
         text, _stamp_bytes = _meas.strip_stamp(text)
         size -= _stamp_bytes
+        # AN EMPTY REPORT IS NOT A HAND-TYPED STUB (vibe-ic, lane rbsha4).
+        # Both screens below are about a SMALL FILE WITH CONTENT: one asks
+        # whether there is too little of it to be real, the other whether the
+        # text names a tool. A zero-byte file has no typed content to be a stub
+        # and no text to carry a signature, so both accusations are category
+        # errors against it -- and the EMPTY case already has an owner that
+        # states the correct meaning: "the tool wrote its report and had no
+        # violation to write, read as ZERO violations". MEASURED 2026-09-07
+        # (sha256 x sky130A, v1.19.26, image 0.3.49): one 0-byte
+        # routed_router.drc.rpt drew all THREE findings at once -- an INFO
+        # saying it is a legitimate empty report and two ERRORs saying it is
+        # not real tool output. By the flow's own design a CLEAN detailed route
+        # writes exactly this file, so the screens accused every clean route.
+        #
+        # `continue` and NOT `any_authentic = True`, deliberately: dropping a
+        # false accusation must not become a free pass. Silence is not
+        # testimony, so an empty report still testifies to nothing and cannot
+        # satisfy the authenticity requirement on its own.
+        if size <= 0:
+            continue
         # Waive the byte-size floor when the report carries a strong,
         # multi-marker tool signature (a real-but-compact small-design
         # report). The tool-signature requirement below still gates.

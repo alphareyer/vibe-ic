@@ -184,6 +184,38 @@ def verify(container: str, require_image: Optional[str] = None) -> Dict[str, obj
         rec.setdefault("reason", "container inspect failed")
         return rec
 
+    # A CONTAINER THAT IS NOT RUNNING CANNOT EXECUTE THE TOOLCHAIN IT NAMES.
+    # `inspect_container` has always reported `running` (parts[3] of
+    # _INSPECT_FMT) and this decision never consulted it, so the pin was keyed
+    # on the container EXISTING and carrying the right image -- not on it being
+    # able to run anything. `--require-image`'s own CLI help has always read
+    # "image ref or id the container MUST be running": the intent was
+    # documented and unimplemented.
+    #
+    # MEASURED 2026-09-07 on 8HD-6 (lane rbsha4), from docker's own timestamps:
+    # a container was created at 08:52:39.748Z and EXITED at 08:52:39.942Z; a
+    # run launched at 08:52:44Z with --require-image was NOT refused, and one
+    # step later the run said so itself -- "[#902 sim-toolchain DIVERGED]
+    # container was declared (image ...) but verilator ran on the HOST ... the
+    # run VERIFIED one toolchain and USED another". The ABSENT-container branch
+    # above already refuses for exactly this reason ("every step verdict from
+    # here would be measured against a toolchain this run cannot attest to");
+    # a named-but-dead container reaches the same end by a quieter road, and
+    # #902 caught the consequence one step later and per-tool, not the pin.
+    #
+    # Placed BEFORE the require_image comparison on purpose: the image a dead
+    # container "runs" is not a toolchain any step will execute, so MISMATCH vs
+    # match is not the question worth answering about it.
+    if not rec.get("running"):
+        rec["verdict"] = "FAIL"
+        rec["reason"] = (
+            "container %r exists but is NOT RUNNING, so it can execute nothing "
+            "and every tool would silently fall back to the host: the run would "
+            "be measured against a toolchain it cannot attest to. Start it, e.g. "
+            "docker start %s (or recreate it), then re-run."
+            % (container, container))
+        return rec
+
     rec["verdict"] = "PASS"
     rec["reason"] = "resolved %s -> %s (%s)" % (
         container, rec["image_ref"], rec["image_id"][:19])
