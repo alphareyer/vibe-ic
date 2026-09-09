@@ -34,6 +34,7 @@ the other with it.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import re
@@ -103,10 +104,9 @@ def _close_ancestry(project: Path) -> Path:
         json.dumps({"coverage_pct": 100}))
     ra = project / "reports" / "audit" / "phase1"
     ra.mkdir(parents=True, exist_ok=True)
-    (ra / "expert_parse_track.json").write_text(json.dumps({
-        "program": "phase1_expert_parse_track.py", "verdict": "PASS",
-        "findings": [], "ai_subtrack": {"status": "SKIPPED-CONDITION"},
-        "generated_by": "test fixture"}))
+    # The producer record is written AFTER the answer pack below, because
+    # `check_report` binds the two: the digest it stores must be of the answer
+    # this tree actually carries. See `_stage_producer_report`.
     # AND THE ANSWER THE SECOND PASS CONSUMES. Staging the REPORT alone does
     # not close this chain, and MEASURED on live main 7903c1972305 (2026-09-03,
     # pinned image sha256:66c33ff2..., host load 5.5) that is why both arms of
@@ -157,6 +157,7 @@ def _close_ancestry(project: Path) -> Path:
                          "Phase 1 that completed BOTH passes of the expert "
                          "track, not one that emitted a hand-off and stopped"],
             "expert_source": "test fixture"}]}))
+    _stage_producer_report(project, ra, pack / "l_doc_expectations.json")
     # The 19th (#1348). `phase1_doc_one_shot_runner._seed_canonical_from_
     # backfilled_subset` returns WITHOUT writing when nothing was backfilled,
     # and on a tree with no `input/docs` nothing can be — so a hand-staged
@@ -170,6 +171,61 @@ def _close_ancestry(project: Path) -> Path:
                      "literal was backfilled into a typed L doc on this tree, "
                      "so the catalogue is empty; staged by test fixture.")}))
     return project
+
+
+def _stage_producer_report(project: Path, audit_dir: Path, answer: Path) -> None:
+    """The `phase1/expert_parse_track.json` a Phase 1 that REALLY RAN leaves.
+
+    #2206 turned D1's clause `phase1_expert_parse_track . --check-report` into a
+    pure READER: it no longer runs the track, it reads the producer's record and
+    refuses credit for an audit-time second pass. So the record has to identify
+    the reading — the producer invocation, its return code, WHICH Phase-1 root
+    was judged, and WHICH answer was consumed — and a hand-staged Phase 1 must
+    stage all four or D1 is FAIL, not closed.
+
+    MEASURED on live main 72bd2679bc before this: the old two-key stub named the
+    program as `phase1_expert_parse_track.py` while `PROGRAM` is
+    `phase1_expert_parse_track`, so the very first clause refused it —
+
+        [FAIL] Step D1: Phase 1 Doc Extraction
+          program failed: phase1_expert_parse_track . --check-report
+          INCOMPLETE: ... report unavailable or stale: missing expert-track
+          producer record
+
+    — and both of this file's CONTROLS (`..._over_a_closed_chain_stays_green`
+    and `..._ancestry_control_really_closes_the_chain`) went red for that, not
+    for anything either of them is about.
+
+    NOTHING IS PINNED HERE. The program name, the consumed-status word and the
+    root identity are all READ FROM THE PROGRAM and computed over this fixture's
+    own tree, so the next contract change reddens the ancestry control and names
+    itself, exactly as this helper's caller promises. A literal copy would go
+    green against a program that had been deleted.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "peptrack_issue1446", PROG.parent / "phase1_expert_parse_track.py")
+    track = importlib.util.module_from_spec(spec)
+    sys.modules["peptrack_issue1446"] = track
+    spec.loader.exec_module(track)
+
+    root = track.phase1_root_identity(project)
+    assert root.get("status") == "OK", (
+        "PRECONDITION: the staged L-docs must be a readable Phase-1 root, "
+        f"otherwise this fixture closes nothing: {root}")
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    (audit_dir / "expert_parse_track.json").write_text(json.dumps({
+        "program": track.PROGRAM,
+        "verdict": "PASS",
+        "findings": [],
+        "producer": {"invocation_id": "issue1446-closed-ancestry-fixture",
+                     "invoked_by": "test fixture",
+                     "returncode": 0},
+        "phase1_root": root,
+        "ai_subtrack": {
+            "status": track.AI_CONSUMED,
+            "answer_sha256": hashlib.sha256(answer.read_bytes()).hexdigest()},
+        "execution": {"complete": True, "observed_ai_consumed": 1},
+        "generated_by": "test fixture"}))
 
 
 def _stub_p0(monkeypatch, mod, *, passing: int):

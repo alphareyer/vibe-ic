@@ -1,0 +1,42 @@
+Re-plants vibe-ic#1446 in flow_compliance_check.py: a terminal that is IN the
+verdict scope but returned NO VERDICT AT ALL stops contributing to the gating
+subset, so a P0 that measured nothing over a chain that never ran publishes
+green again.
+
+This is the reversal of the fix commit 3d717059f ("fix(#1446): a P0 that
+measured nothing over a chain that never ran is not a pass"), whose entire code
+change was to build `_no_verdict_ids` and add it as the second disjunct of the
+gating condition. Dropping that disjunct is the smallest edit that reintroduces
+the defect; `_no_verdict_ids` is deliberately left defined so the patch touches
+one expression and nothing else. The surrounding code has since been
+restructured (#2092 folded the two projections into `_ordering_is_gating`,
+#2063 made the set membership derived rather than a literal `== "INCOMPLETE"`),
+so this is that same reversal expressed against the live-main shape rather than
+a raw `git revert`.
+
+Re-planted, tests/test_issue1446_incomplete_in_scope_is_not_green.py goes RED on
+exactly the two cases that are about this defect —
+`test_a_no_verdict_p0_over_a_broken_chain_is_not_green` and
+`test_the_violation_that_gates_is_named_as_gating` — while all four controls
+stay green.
+
+diff --git a/vibe-ic-marketplace/plugins/vibe-ic/programs/flow_compliance_check.py b/vibe-ic-marketplace/plugins/vibe-ic/programs/flow_compliance_check.py
+index b4a0e4c..d8bd8a7 100644
+--- a/vibe-ic-marketplace/plugins/vibe-ic/programs/flow_compliance_check.py
++++ b/vibe-ic-marketplace/plugins/vibe-ic/programs/flow_compliance_check.py
+@@ -16566,14 +16566,13 @@ def main(argv: Optional[List[str]] = None) -> int:
+         # vibe-ic#2092 — ONE predicate, TWO projections. The gating lines and
+         # the ids of the violations held informational were derived by two
+         # copies of this condition; a second copy is a second place for the
+         # printed disclosure and the recorded one to disagree about which
+         # violations they describe.
+         _ordering_is_gating = [
+-            (str(v['signoff_id']) in _scoped_ids
+-             or str(v['terminal_id']) in _no_verdict_ids)
++            (str(v['signoff_id']) in _scoped_ids)
+             for v in _ordering_violations]
+         ordering_gating_lines = [
+             line for line, g in zip(ordering_fail_lines, _ordering_is_gating)
+             if g]
+         ordering_informational_step_ids = [
+             str(v['terminal_id'])
