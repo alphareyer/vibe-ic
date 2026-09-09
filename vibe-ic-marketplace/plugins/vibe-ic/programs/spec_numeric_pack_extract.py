@@ -908,6 +908,95 @@ def _detect_preservation(text: str) -> List[dict]:
     return items
 
 
+# ---------------------------------------------------------------------------
+# IS THERE A BIT OBLIGATION HERE AT ALL?  (vibe-ic#2215, second half)
+# ---------------------------------------------------------------------------
+# `_detect_bit_mappings` above answers "what bit obligations can I READ?".
+# A completeness verdict has to answer a different question first: "does this
+# prose STATE one?" — because a stated obligation nobody can read is a MISSED
+# FACT, and one that was never stated is silence, and those two must not grade
+# the same.
+#
+# MEASURED ON main 4245ea72e, after the bit-mapping grammar landed:
+#
+#   'Convert a 12-bit width to a larger width of 20-bit. When shift is one,
+#    result[11:4] takes sample[7:0] rotated left by three.'
+#
+#       extract()  -> 0 bit items
+#       assess_spec -> COMPLETE, 0 gaps,
+#                      'every port placed ...; stated structures captured'
+#
+# A control-conditioned per-bit obligation, stated in plain words, read by
+# nothing, and graded COMPLETE. Widening the grammar does not fix that shape —
+# it moves it to the next prose form — because the COMPLETE claim never
+# measured whether anything was missed.
+#
+# THIS PREDICATE IS NOT THE GRAMMAR, AND THAT SEPARATION IS THE WHOLE GUARD.
+# If presence were decided by the patterns that EXTRACT, it would be true
+# exactly when extraction already succeeded, the gap could never fire, and the
+# guard would be a tautology wearing a guard's clothes. So it asks something
+# cheaper and broader: does a clause carry two bit references, or one beside a
+# real bit-operation word, or an explicit preserve / inversion ban?
+#
+# BROADER IS NOT LOOSER, MEASURED. A first cut accepted a bit reference beside
+# ANY relation word. That fires on an ordinary PORT DECLARATION — the line
+# `- out [2:0]: the index of the highest set bit.` carries a `[2:0]` and the
+# word `set` — and it turned `test_cvdp_complete_extract.
+# test_prompt_declared_interface_resolves` from COMPLETE to EXTRACTION_GAP. An
+# 8-to-3 priority encoder states no per-bit mapping, and a gap that fires on
+# every spec is exactly as useless as one that fires on none. `[hi:lo]` alone
+# is a WIDTH, and this predicate says so.
+_BITOP_RE = re.compile(
+    r"(?i)\b(xor|exclusive[\s-]?or|invert(?:ed|s)?|complement(?:ed|s)?|"
+    r"negate[ds]?|repeats?|replicates?|copies|copied|rotat\w*|shift\w*|"
+    r"sign[\s-]?extend\w*|zero[\s-]?extend\w*|preserv\w*|retain\w*|"
+    r"majority|concatenat\w*|reverse[ds]?)\b")
+
+#: `- in [7:0]: the request bits.` — a port/width DECLARATION line, never a
+#: per-bit obligation however many relation words its description carries.
+_PORTDECL_RE = re.compile(r"^\s*[-*+]?\s*[A-Za-z_]\w*\s*\[[^\]]+\]\s*:")
+
+#: An explicit ban or an explicit preserve-the-source-bits statement — a bit
+#: obligation that carries no `[hi:lo]` at all.
+_BITBAN_RE = re.compile(
+    r"(?i)\b(?:do\s+not|does\s+not|must\s+not|never|shall\s+not|without)\s+"
+    r"(?:be\s+)?(?:invert|complement|negat|reorder|swap)\w*")
+_BITKEEP_RE = re.compile(
+    r"(?i)\b(?:preserve|retain|keep)\s+(?:all\s+)?(?:the\s+)?"
+    r"(?:\w+\s+)?(?:source|input|payload|data)?\s*bits\b")
+
+
+def states_bit_mapping(text: str) -> bool:
+    """Does this prose STATE a per-bit obligation? (independent of extraction)
+
+    TRUE when some clause carries an explicit inversion/reorder ban, an explicit
+    preserve-the-source-bits statement, TWO bit references (a target and a
+    source), or ONE bit reference beside a real bit-operation word.
+
+    FALSE for a port/width declaration and for a bare mention of a "mapping":
+    the third fixture of vibe-ic#2215 ("detailed mapping is not yet supplied")
+    is genuinely spec-absent and must never become a phantom obligation.
+
+    Used by `spec_complete_extract` to tell a MISSED bit fact from silence. It
+    deliberately does not consult `_detect_bit_mappings`; see the note above.
+    """
+    if not text or not isinstance(text, str):
+        return False
+    for clause in _clauses(text):
+        if _PORTDECL_RE.match(clause):
+            continue
+        if _BITBAN_RE.search(clause):
+            return True
+        if _BITKEEP_RE.search(clause) and re.search(r"(?i)\bbits?\b", clause):
+            return True
+        refs = _BIT_REF_RE.findall(clause)
+        if len(refs) >= 2:
+            return True
+        if refs and _BITOP_RE.search(clause):
+            return True
+    return False
+
+
 def extract(prompt_text: str) -> List[dict]:
     """Extract structural numeric-semantics + packing/width checklist items from
     a CVDP-style prompt. Returns a list of dicts (one per explicit fact).

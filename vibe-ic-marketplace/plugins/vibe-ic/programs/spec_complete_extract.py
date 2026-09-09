@@ -141,6 +141,67 @@ def _place_interface(prompt: str, inputs: List[str], outputs: List[str],
     return dedup, gaps
 
 
+# ---------------------------------------------------------------------------
+# STRUCTURAL GAPS — a structure the prompt STATES that no extractor recovered
+# (vibe-ic#2215)
+# ---------------------------------------------------------------------------
+# `_verdict` returns COMPLETE with the words "stated structures captured". That
+# half of the sentence was ASSERTED, never MEASURED: `gaps` is built solely by
+# `_place_interface`, which classifies PORT WIDTHS. No structural extractor
+# could contribute a gap, so a structure the prompt states and no extractor
+# represents was not "missed" — it was INVISIBLE, and the verdict said the
+# opposite of the truth.
+#
+# MEASURED on main 4245ea72e, AFTER the #2215 bit-mapping grammar landed:
+#
+#   'Convert a 12-bit width to a larger width of 20-bit. When shift is one,
+#    result[11:4] takes sample[7:0] rotated left by three.'
+#
+#       spec_numeric_pack_extract.extract -> 0 bit items
+#       assess_spec  completeness = COMPLETE, gaps = 0
+#
+# A control-conditioned per-bit obligation, stated in plain words, read by
+# nothing, graded COMPLETE. This is why widening a grammar is not the fix on its
+# own: it moves the blind spot to the next prose form. The verdict has to
+# measure the claim it makes.
+#
+# THE REPAIR MEASURES THE CLAIM, IT DOES NOT SOFTEN IT. Nothing here relaxes
+# what the verdict asks. A stated-but-unrecovered structure becomes what it
+# always was — an EXTRACTION_GAP, the class this engine already defines as "a
+# fact IS in the prompt / context but our extractor MISSED it — ACTIONABLE".
+#
+# SCOPE, STATED RATHER THAN IMPLIED: this measures the NUMERIC bit-mapping
+# family, the one vibe-ic#2215 names. The register-map, FSM, enum-set and
+# worked-example extractors are still un-measured by the COMPLETE claim, for
+# exactly the reason above; each needs its own presence predicate and none is
+# supplied here.
+
+#: The kinds `spec_numeric_pack_extract` uses for a per-bit obligation.
+_BIT_KINDS = ("bit_mapping", "bit_preserve")
+
+
+def _structural_gaps(prompt: str) -> List[dict]:
+    """EXTRACTION_GAPs for structures the prompt STATES and no extractor read."""
+    gaps: List[dict] = []
+    try:
+        import spec_numeric_pack_extract as _np
+    except Exception:                                        # pragma: no cover
+        return gaps
+    if not getattr(_np, "states_bit_mapping", None):         # pragma: no cover
+        return gaps
+    if _np.states_bit_mapping(prompt):
+        got = [i for i in _np.extract(prompt) if i.get("kind") in _BIT_KINDS]
+        if not got:
+            gaps.append({
+                "kind": "INCOMPLETE_EXTRACTION_GAP",
+                "type": "bit_mapping_not_extracted",
+                "detail": "the prose states a per-bit mapping obligation and the "
+                          "numeric extractor recovered none of it",
+                "evidence": _impl._evidence_line(prompt, "["),
+            })
+    return gaps
+
+
 def _verdict(iface: List[dict], inputs: List[str], outputs: List[str],
              gaps: List[dict], have_oracle: bool) -> Tuple[str, str]:
     """Roll per-signal gaps into ONE completeness verdict (general; extracted from
@@ -607,6 +668,12 @@ def assess_spec(prompt: str, inputs: List[str], outputs: List[str], *,
     else:
         iface, gaps = _place_interface(
             prompt, inputs, outputs, params, param_defaults, table, ctx_widths, tb)
+
+    # A structure the prompt STATES and no extractor recovered is a MISSED FACT,
+    # not silence (vibe-ic#2215). Added on BOTH interface paths: a supplied
+    # skeleton means the ports need no resolving, it does not mean the prose
+    # carries no unread structure.
+    gaps = list(gaps) + _structural_gaps(prompt)
 
     have_oracle = bool(inputs or outputs or skeleton_iface or tb)
     completeness, reason = _verdict(iface, inputs, outputs, gaps, have_oracle)
