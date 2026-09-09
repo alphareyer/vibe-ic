@@ -564,6 +564,78 @@ def leg_peak_rss_kib(telemetry_path: Optional[Path],
     return max(peaks) if peaks else None
 
 
+#: Yosys's OWN closing line, one per process: `End of script. Logfile hash:
+#: …, time: …, MEM: 166.80 MB peak`. It is the tool's `ru_maxrss` for THAT
+#: process, so it is an exact peak rather than a poll, and it is present for a
+#: rung that lasted 0.15 s exactly as for one that lasted an hour.
+_YOSYS_PEAK_MEM_RE = re.compile(
+    r"End of script\..*?MEM:\s*([0-9]+(?:\.[0-9]+)?)\s*MB peak")
+
+
+def yosys_self_reported_peak_kib(raw: Optional[str]) -> Optional[int]:
+    """The peak Yosys itself reports for ONE leg, in KiB. None = NOT MEASURED.
+
+    WHY THIS EXISTS, AND WHAT IT REPLACES AS THE PRIMARY SOURCE (vibe-ic#2194).
+    `leg_peak_rss_kib` reads the supervisor's samples, and the supervisor polls
+    every `DEFAULT_POLL_S` (30 s). A poll is not a peak. MEASURED on a 1153-point
+    miter, per-rung arm, this file's own instrument against Yosys's:
+
+        rung                 supervisor        Yosys's own
+        equiv_simple_full    165100 KiB        154.53 MB
+        equiv_induct_seq4     64832 KiB        166.80 MB   <- 2.6x UNDERSTATED
+        equiv_induct_seq16    53016 KiB         45.55 MB
+        equiv_induct_seq64    53412 KiB         46.00 MB
+
+    The seq4 row is the defect: one sample landed while that process was small,
+    and a sample was then published in a field named `peak`. That is a number
+    that reads as measured and is not the quantity it names — and #2194's whole
+    acceptance is "the ladder's peak is the MAX of its rungs", which cannot be
+    read off an instrument that can miss a rung's maximum entirely. The same
+    poll also reports NOTHING for a rung shorter than its interval, which is why
+    c071f6253 could only record `legs 2-4 NOT_MEASURED — each ran in under 1 s`
+    and had to land `Refs #2194` rather than close it.
+
+    Yosys states the figure itself, in the evidence every run already keeps, and
+    nothing read it. `MB` here is `ru_maxrss / 1024` on Linux, so KiB is the
+    figure times 1024 — CROSS-CHECKED against the supervisor on the single-
+    process arm of the same design, where the poll did catch the maximum:
+    211.43 MB -> 216504 KiB against the supervisor's 222940 KiB for the whole
+    process TREE, agreeing to 3%.
+
+    The LAST match, not the first: a leg's output is that one process's log, but
+    a resumed leg's evidence can carry the earlier leg's tail, and the closing
+    line is the one that belongs to the process that just ended.
+    """
+    if not raw:
+        return None
+    finals = _YOSYS_PEAK_MEM_RE.findall(raw)
+    if not finals:
+        return None
+    try:
+        return int(round(float(finals[-1]) * 1024))
+    except (TypeError, ValueError):
+        return None
+
+
+def leg_peak_rss(sampled: Optional[int],
+                 self_reported: Optional[int]) -> Tuple[Optional[int], Optional[str]]:
+    """(peak_kib, source) for ONE leg from the sources that exist.
+
+    Both are LOWER BOUNDS on the true peak — the supervisor can poll past a
+    maximum, and Yosys's figure covers the Yosys process alone while the
+    supervisor covers the whole stamped tree — so the larger is the better
+    estimate and taking it can never overstate beyond what one of them measured.
+    Neither present is NOT_MEASURED: None, never 0.
+    """
+    present = [(v, n) for v, n in ((sampled, "supervisor samples"),
+                                   (self_reported, "yosys end-of-script"))
+               if isinstance(v, int)]
+    if not present:
+        return None, None
+    best = max(present)[0]
+    return best, "+".join(n for _, n in present)
+
+
 def proof_state_carry(legs: List[Dict]) -> Dict:
     """Did the PROVED SET survive each process boundary? (vibe-ic#2194)
 
@@ -5325,6 +5397,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             _entry_counts = (resume_status_counts(_leg_raw)
                              if resume_from is not None else None)
             _exit_counts = final_status_counts(_leg_raw)
+            _peak_sampled = leg_peak_rss_kib(telemetry_path, _attempt_no)
+            _peak_self = yosys_self_reported_peak_kib(_leg_raw)
+            _peak_kib, _peak_src = leg_peak_rss(_peak_sampled, _peak_self)
             _leg: Dict[str, Any] = {
                 "leg": len(ladder_legs) + 1,
                 "rung": _rung_name,
@@ -5343,7 +5418,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "unproven_at_entry": (_entry_counts or {}).get("unproven"),
                 "proved_at_exit": (_exit_counts or {}).get("proved"),
                 "unproven_at_exit": (_exit_counts or {}).get("unproven"),
-                "peak_rss_kib": leg_peak_rss_kib(telemetry_path, _attempt_no),
+                # TWO INSTRUMENTS, BOTH RECORDED, the better one published
+                # (vibe-ic#2194). The supervisor's poll is kept because it sees
+                # the whole process tree; Yosys's own closing figure is kept
+                # because it is an exact peak and exists for every leg however
+                # short. Neither is allowed to become a 0.
+                "peak_rss_kib_sampled": _peak_sampled,
+                "peak_rss_kib_self_reported": _peak_self,
+                "peak_rss_kib": _peak_kib,
+                "peak_rss_kib_source": _peak_src,
                 "stopped": run_was_stopped(_leg_raw),
                 "checkpoint_recorded": [],
             }
