@@ -42,6 +42,23 @@ def _select(changed, root=PLUGIN_ROOT, prefix=PLUGIN_PREFIX):
                                 mode=sel.MODE_IMPORT_EDGE))
 
 
+def _synthetic_plugin_root(tmp_path: Path) -> Path:
+    """A tmp plugin root the selector can actually READ its population from.
+
+    `declared_test_population` refuses (`PopulationError: NOT_DETERMINED`)
+    unless the root DECLARES its test files in `pytest.ini` — a selector that
+    guessed its population would silently misclassify a changed test file, and
+    guessing over nothing at all is how a selection comes to read as "your
+    change needs no further tests". A synthetic root is a plugin root, so it
+    carries the declaration every real one carries; without it these two cases
+    were not testing the boundary they name, they were dying before reaching it.
+    """
+    (tmp_path / TESTS_REL).mkdir(parents=True)
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\ntestpaths = %s\n" % TESTS_REL, encoding="utf-8")
+    return tmp_path / TESTS_REL
+
+
 def _tests_naming(basename: str, root: Path = PLUGIN_ROOT) -> set[str]:
     """The truth set, recomputed from the tree — never a hardcoded list."""
     pat = sel._tool_ref_pattern(basename)
@@ -126,8 +143,7 @@ def test_a_suffix_name_does_not_inherit_the_longer_script_s_tests(tmp_path):
     inheriting an existing one's tests — a selection that looks richer while
     pointing at code that did not change.
     """
-    tests = tmp_path / TESTS_REL
-    tests.mkdir(parents=True)
+    tests = _synthetic_plugin_root(tmp_path)
     (tests / "test_only_names_the_long_one.py").write_text(
         'CMD = "tools/pre-land.sh"\n', encoding="utf-8")
 
@@ -148,8 +164,7 @@ def test_the_rule_reads_a_directory_not_a_filename_list(tmp_path):
     release has ever seen still resolves. A hardcoded filename list would fail
     this the moment someone adds a script.
     """
-    tests = tmp_path / TESTS_REL
-    tests.mkdir(parents=True)
+    tests = _synthetic_plugin_root(tmp_path)
     (tests / "test_drives_a_brand_new_script.py").write_text(
         'run("tools/freshly_invented_tool.sh")\n', encoding="utf-8")
     out = _select(["tools/freshly_invented_tool.sh"], root=tmp_path, prefix="")

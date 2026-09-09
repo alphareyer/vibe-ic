@@ -48,6 +48,19 @@ def _repo(tmp_path: Path) -> tuple[Path, str]:
     return r, base
 
 
+def _declare_population(r: Path) -> None:
+    """`main()` asks the root for its DECLARED test population, and refuses
+    (rc 2, `NOT_DETERMINED`) when the root does not declare one — guessing it
+    is how a selection over nothing comes to read as a real answer, which is
+    the very defect this file was written for. A synthetic root is a plugin
+    root; it declares. Without this both cases below died inside the selector
+    and never reached the banner they assert on.
+    """
+    (r / "programs" / "tests").mkdir(parents=True, exist_ok=True)
+    (r / "pytest.ini").write_text("[pytest]\ntestpaths = programs/tests\n",
+                                  encoding="utf-8")
+
+
 def test_a_staged_but_uncommitted_change_is_seen(tmp_path):
     """THE LOAD-BEARING CASE — exactly the merge queue's situation."""
     r, base = _repo(tmp_path)
@@ -110,9 +123,10 @@ def test_the_empty_case_says_so_instead_of_looking_like_a_selection(tmp_path,
     OUTPUT of an empty diff reads as a real answer. The smoke floor must
     announce itself."""
     r, base = _repo(tmp_path)
-    (r / "programs").mkdir()
-    S.main(["--base", base, "--plugin-root", str(r)])
+    _declare_population(r)
+    rc = S.main(["--base", base, "--plugin-root", str(r)])
     err = capsys.readouterr().err
+    assert rc == 0, f"the selector refused instead of answering (rc={rc})\n{err}"
     assert "NO CHANGES" in err, err
     assert "from 0 changed path(s)" in err, err
 
@@ -120,10 +134,11 @@ def test_the_empty_case_says_so_instead_of_looking_like_a_selection(tmp_path,
 def test_a_real_change_does_not_print_the_no_changes_banner(tmp_path, capsys):
     """Paired: the banner must not cry wolf on every run."""
     r, base = _repo(tmp_path)
-    (r / "programs").mkdir()
+    _declare_population(r)
     (r / "programs" / "prog.py").write_text("x = 1\n")
     subprocess.run(["git", "-C", str(r), "add", "programs/prog.py"], check=True)
-    S.main(["--base", base, "--plugin-root", str(r)])
+    rc = S.main(["--base", base, "--plugin-root", str(r)])
     err = capsys.readouterr().err
+    assert rc == 0, f"the selector refused instead of answering (rc={rc})\n{err}"
     assert "NO CHANGES" not in err, err
     assert "from 1 changed path(s)" in err, err

@@ -270,23 +270,35 @@ def main(argv=None) -> int:
         print(f"\n[CENSUS] {len(stale)} inventory row(s) match nothing:")
         for k in stale:
             print(f"   {k}")
-    if rc == 0:
-        # A COUNT OVER AN EMPTY POPULATION IS NOT A COUNT. `[CENSUS] 0 site(s)`
-        # is honest only if something was read; over a tree this program parsed
-        # NOTHING it is indistinguishable from a clean result. Measured: on an
-        # empty tree this returned 0 -- and still 0 under `--strict`, so the
-        # "--strict is where a caller asks for the refusal" argument did not cover
-        # it either. Exiting 0 is a census's contract for a REAL population, not a
-        # licence to report over none.
-        if denom.get("modules_parsed", 0) == 0:
-            print("[CANNOT DETERMINE] explicit_argument_outranks_the_environment_pointer_census: 0 modules were parsed -- "
-                  "nothing was read, so the count is not a measurement. NOT a pass.")
-            return 2
+    # A COUNT OVER AN EMPTY POPULATION IS NOT A COUNT. `[CENSUS] 0 site(s)`
+    # is honest only if something was read; over a tree this program parsed
+    # NOTHING it is indistinguishable from a clean result. Measured: on an
+    # empty tree this returned 0 -- and still 0 under `--strict`, so the
+    # "--strict is where a caller asks for the refusal" argument did not cover
+    # it either. Exiting 0 is a census's contract for a REAL population, not a
+    # licence to report over none.
+    #
+    # UNCONDITIONAL, and it was not. Both this refusal and the count below sat
+    # under `if rc == 0`, so a single stale inventory row -- a datum read from
+    # the inventory FILE, not from the tree -- suppressed them. A row matching
+    # nothing therefore bought a census over ZERO parsed modules an exit 0,
+    # which is the vacuous pass this refusal exists to stop. The denominator
+    # is a property of what was READ; nothing found in the inventory can
+    # establish it, so nothing found there may gate it.
+    if denom.get("modules_parsed", 0) == 0:
+        print("[CANNOT DETERMINE] explicit_argument_outranks_the_environment_pointer_census: 0 modules were parsed -- "
+              "nothing was read, so the count is not a measurement. NOT a pass.")
+        return 2
 
-        print(f"[CENSUS] {len(findings)} site(s) classified, "
-              f"{len(known)} recorded as known debt, "
-              f"{len(new)} unrecorded. This is a count, not a "
-              f"verdict — the gate is programs/explicit_argument_outranks_the_environment_pointer.py.")
+    # Likewise unconditional: this line is the census's whole product, and
+    # under `if rc == 0` it was printed only when there was nothing to report.
+    # A census that states its count only when the count is zero says nothing
+    # in exactly the case a reader opened it for -- and the sentence naming
+    # the gate that DOES refuse went missing with it.
+    print(f"[CENSUS] {len(findings)} site(s) classified, "
+          f"{len(known)} recorded as known debt, "
+          f"{len(new)} unrecorded. This is a count, not a "
+          f"verdict — the gate is programs/explicit_argument_outranks_the_environment_pointer.py.")
     if rc and not a.strict:
         print("\n  CENSUS: reported, not refused. The gate for this rule is\n"
               "  programs/explicit_argument_outranks_the_environment_pointer.py — run that for a verdict.")

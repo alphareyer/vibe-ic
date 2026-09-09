@@ -191,3 +191,72 @@ def test_a_count_over_an_empty_population_is_undetermined():
         assert "0 modules were parsed" in r.stdout, r.stdout
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_a_stale_row_does_not_buy_an_empty_population_a_pass():
+    """The sibling above deliberately empties the inventory so the stale-row
+    branch cannot mask the vacuous one. THIS is the case it stepped around,
+    and it was a live hole: the refusal above, and the census count itself,
+    both sat under `if rc == 0`, so any stale row -- a datum read from the
+    inventory FILE, never from the tree -- switched them off. A census over
+    ZERO parsed modules then exited 0 while announcing nothing it had counted.
+
+    The denominator is a property of what was READ. Nothing found in the
+    inventory can establish it, so nothing found there may gate it.
+    """
+    root = Path(tempfile.mkdtemp(prefix="csr_"))
+    try:
+        (root / ".git").mkdir()
+        (root / "vibe-ic-marketplace" / "plugins" / "vibe-ic" / "programs"
+         / "tests").mkdir(parents=True)
+        inv = root / "stale_inv.json"
+        inv.write_text(json.dumps({"known": [
+            {"key": "vibe-ic-marketplace/plugins/vibe-ic/programs/gone.py"
+                    "::tree", "reason": "matches nothing on this tree"}]}) + "\n",
+            encoding="utf-8")
+        r = _pr.run([sys.executable, str(PROG), "--root", str(root),
+                     "--inventory", str(inv)], capture_output=True, text=True)
+        assert "match nothing" in r.stdout, (
+            "precondition: the stale-row branch must be the one that fired\n"
+            f"{r.stdout}")
+        assert r.returncode == 2, (
+            "0 modules were parsed and the census still exited "
+            f"{r.returncode} -- a stale inventory row is not a measurement\n"
+            f"{r.stdout}")
+        assert "0 modules were parsed" in r.stdout, r.stdout
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_the_census_states_its_count_even_when_it_has_something_to_report():
+    """The census's whole product is the count line, and under `if rc == 0` it
+    was printed ONLY when there was nothing to report -- silent in exactly the
+    case a reader opened it for, taking the sentence that names the refusing
+    gate with it. Driven over a REAL population with a stale row present, so
+    the reporting branch is the one under test."""
+    root = Path(tempfile.mkdtemp(prefix="csc_"))
+    try:
+        (root / ".git").mkdir()
+        programs = (root / "vibe-ic-marketplace" / "plugins" / "vibe-ic"
+                    / "programs")
+        (programs / "tests").mkdir(parents=True)
+        (programs / "clean.py").write_text(_REPAIRED, encoding="utf-8")
+        inv = root / "stale_inv.json"
+        inv.write_text(json.dumps({"known": [
+            {"key": "vibe-ic-marketplace/plugins/vibe-ic/programs/gone.py"
+                    "::tree", "reason": "matches nothing on this tree"}]}) + "\n",
+            encoding="utf-8")
+        r = _pr.run([sys.executable, str(PROG), "--root", str(root),
+                     "--inventory", str(inv)], capture_output=True, text=True)
+        assert "match nothing" in r.stdout, (
+            "precondition: something must be reported, or this is the branch "
+            f"the old code already printed\n{r.stdout}")
+        assert r.returncode == 0, f"rc={r.returncode}\n{r.stdout}"
+        assert "site(s) classified" in r.stdout, (
+            "the census reported a finding and never stated its count\n"
+            f"{r.stdout}")
+        assert "the gate is programs/%s.py" % _RULE in r.stdout, (
+            "the count line names the gate that does the refusing; it went "
+            f"missing with the count\n{r.stdout}")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
