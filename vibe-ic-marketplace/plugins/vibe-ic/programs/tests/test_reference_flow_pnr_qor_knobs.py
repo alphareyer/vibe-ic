@@ -38,6 +38,10 @@ import pytest
 
 mod = importlib.import_module("phase3_one_shot_runner")
 
+import sys  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _pnr_tcl_stub import STUB as _STUB  # noqa: E402
+
 tclsh = shutil.which("tclsh")
 needs_tclsh = pytest.mark.skipif(tclsh is None, reason="tclsh not installed")
 
@@ -367,10 +371,20 @@ class TestPnrTclEmission:
         # active and no explicit CTS_DISTANCE_BETWEEN_BUFFERS knob overrides
         # it (spm x ihp-sg13g2, 2026-08-07 — sink_clustering alone can still
         # leave the CTS root buffer over its own fanout limit).
-        assert ("clock_tree_synthesis -buf_list {clkbuf_4} -root_buf clkbuf_16"
+        # v1.19.95 (4b74ba713) moved the two master names OFF the
+        # `clock_tree_synthesis` line: the legality block that now precedes it
+        # intersects them with the live resizer policy and hands CTS
+        # `$_cts_bufs` / `$_cts_legal_root`. The knobs are asserted where they
+        # still are, and the masters are asserted where they went -- so this
+        # test still fails if EITHER the knobs or the two masters stop
+        # reaching CTS, which is the whole coverage the one literal gave.
+        assert ("clock_tree_synthesis -buf_list $_cts_bufs"
+                " -root_buf $_cts_legal_root"
                 " -sink_clustering_enable -sink_clustering_size 20"
                 " -sink_clustering_max_diameter 50"
                 " -distance_between_buffers 10}") in tcl
+        assert "set _cts_requested_bufs {clkbuf_4}" in tcl
+        assert "set _cts_requested_root {clkbuf_16}" in tcl
 
     def test_hold_repair_never_gets_repair_tns(self):
         tcl = mod._build_pnr_tcl_text(**_TCL_BASE, repair_tns_percent=100)
@@ -415,7 +429,7 @@ class TestPnrTclEmission:
             **{**_TCL_BASE, "util": 0.75}, repair_tns_percent=100,
             cts_cluster_size=20, cts_cluster_diameter=50.0)
         script = tmp_path / "pnr.tcl"
-        script.write_text('proc unknown {args} { return "" }\n' + tcl)
+        script.write_text(_STUB + tcl)
         r = subprocess.run([tclsh, str(script)], capture_output=True, text=True)
         assert r.returncode == 0, r.stderr
 

@@ -39,7 +39,8 @@ import _progress_run as _pr  # noqa: E402
 
 tclsh = shutil.which("tclsh")
 needs_tclsh = pytest.mark.skipif(tclsh is None, reason="tclsh not installed")
-_STUB = 'proc unknown {args} { return "" }\n'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _pnr_tcl_stub import STUB as _STUB  # noqa: E402
 
 
 # ── the thread-count helper ─────────────────────────────────────────────────

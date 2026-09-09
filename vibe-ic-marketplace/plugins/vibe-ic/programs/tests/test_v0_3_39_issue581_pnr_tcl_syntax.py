@@ -14,8 +14,14 @@ Fixes:
     ACTUAL tclsh parse/eval — string-content assertions alone proved
     insufficient (the broken block passed a content-only field audit).
 
-The tclsh harness defines `proc unknown {args} {}` so every OpenROAD
-command is a no-op while the Tcl PARSER still sees the real structure.
+The tclsh harness (`_pnr_tcl_stub.STUB`) makes every OpenROAD command a
+no-op while the Tcl PARSER still sees the real structure. The four
+primitives whose RETURN VALUE the deck reads -- `utl::redirectString*`,
+`utl::report`, `report_dont_use` and `[ord::get_db] findMaster` -- are
+modelled with real semantics, because a no-op is not a stand-in for a
+command a block branches on: with `unknown` alone the v1.19.95 CTS
+legality block's own "the capture did not work" guard fired and the deck
+aborted 316 lines into 1,717, so 82% of it stopped being parsed at all.
 """
 import shutil
 import sys
@@ -33,7 +39,10 @@ import _progress_run as _pr  # noqa: E402
 tclsh = shutil.which("tclsh")
 needs_tclsh = pytest.mark.skipif(tclsh is None, reason="tclsh not installed")
 
-_STUB = 'proc unknown {args} { return "" }\n'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _pnr_tcl_stub import STUB as _STUB  # noqa: E402
+from _pnr_tcl_stub import (  # noqa: E402
+    STUB_MASTERS_ABSENT as _STUB_MASTERS_ABSENT)
 
 
 def _run_tclsh(script_path: Path):
@@ -224,3 +233,49 @@ def test_spef_repair_block_no_multiline_catch_in_bracket_expr():
         # within `[catch { ... } var]` the braces must balance before `]`
         inner = line[idx + len("if {[") : bracket_close]
         assert inner.count("{") == inner.count("}"), line
+
+
+# ── the harness is a STAND-IN, not a bypass: prove it both ways ────────────
+
+@needs_tclsh
+def test_the_deck_takes_the_real_cts_legality_path_under_the_stub(tmp_path):
+    """A stub that merely stops the deck dying would be worthless: it has to
+    carry the block down its REAL branch. Under `STUB` the policy read must
+    succeed, every requested master must survive, and the block must announce
+    the selection it hands `clock_tree_synthesis` -- not a fallback, not an
+    abort.
+
+    Without this, a future edit could quieten the block instead of modelling
+    it and every deck test would stay green over a deck that never ran its
+    own CTS legality filter.
+    """
+    script = tmp_path / "pnr.tcl"
+    full = _full_pnr_tcl(tmp_path)
+    full = full.replace("\nexit\n", "\nputs PNR_TCL_END\n")
+    script.write_text(_STUB + full)
+    result = _run_tclsh(script)
+    assert result.returncode == 0, result.stderr
+    assert "CTS_LEGAL_SELECTION: buffers=sky130_fd_sc_hd__clkbuf_4 " \
+           "root=sky130_fd_sc_hd__clkbuf_16" in result.stdout, result.stdout
+    # the degraded outcomes must NOT be what made the deck survive
+    assert "CTS_CELL_EXCLUDED" not in result.stdout
+    assert "CTS_ROOT_RESELECTED" not in result.stdout
+
+
+@needs_tclsh
+def test_the_stub_still_lets_the_block_refuse_an_empty_legal_pool(tmp_path):
+    """NEGATIVE control on the harness itself. `STUB_MASTERS_ABSENT` is the
+    same interpreter with `findMaster` answering NULL; the block's refusal
+    (`CTS_LEGAL_BUFFER_POOL_EMPTY`, the contract
+    `test_i2172_cts_buf_list_from_pdk_family` pins) must still reach the
+    deck. A stand-in that could no longer express the refusal would be
+    hiding the guard rather than representing it.
+    """
+    script = tmp_path / "pnr.tcl"
+    full = _full_pnr_tcl(tmp_path)
+    full = full.replace("\nexit\n", "\nputs PNR_TCL_END\n")
+    script.write_text(_STUB_MASTERS_ABSENT + full)
+    result = _run_tclsh(script)
+    assert result.returncode != 0
+    assert "CTS_LEGAL_BUFFER_POOL_EMPTY" in (result.stderr + result.stdout)
+    assert "PNR_TCL_END" not in result.stdout

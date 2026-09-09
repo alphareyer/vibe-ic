@@ -256,7 +256,8 @@ class TestDesignSupplyNets:
 
 
 # ── tclsh: the emitted block PARSES + EVALUATES inside a full pnr.tcl ─────────
-_STUB = 'proc unknown {args} { return "" }\n'
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _pnr_tcl_stub import STUB as _STUB  # noqa: E402
 
 
 def _run_tclsh(script_path: Path):

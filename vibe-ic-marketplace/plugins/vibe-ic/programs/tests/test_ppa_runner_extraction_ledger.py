@@ -597,6 +597,24 @@ _LEDGER = frozenset({
     "_i2172_cts_buf_family",        # (liberty_text, leaf, root) -> every drive
                                     # strength of the leaf master's own
                                     # structural buffer family, for -buf_list.
+    # RECORDED after 4b74ba713 (v1.19.95), which added the name below and did
+    # not make this ledger decision. It is the THIRD rung of the one CTS
+    # buffer-selection decision already recorded twice above: #1958 names a
+    # master, #2172 widens that to the master's whole family, and this renders
+    # the intersection of that family with the resizer's LIVE exclusion set as
+    # the Tcl `clock_tree_synthesis` is handed. It matches on the token `cts`
+    # alone. It reads no STA artefact -- no slack, no WNS/TNS, no SDC, no
+    # report -- takes no metric record and emits no verdict; its whole return
+    # value is a Tcl string. `_ppa/timing.py` is a per-view EXTRACTOR over
+    # timing records, so a Tcl emitter would sit in it as a stranger, and
+    # §4-7 above already record three other Tcl emitters here for that same
+    # reason. Splitting the three halves of one buffer-selection decision
+    # across two modules is exactly the reviewing cost this ledger exists to
+    # prevent.
+    "_cts_legal_buffer_selection_tcl",  # (buffers, root) -> Tcl that keeps
+                                    # only the requested masters the live
+                                    # resizer policy and the measured width
+                                    # bound still admit.
     #
     # 9. PAD-RING DIE SIZE is read off another producer's record.
     "_padring_required_die_um",     # (project) -> the die side the pad ring

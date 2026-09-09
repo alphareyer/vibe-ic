@@ -48,6 +48,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _pnr_tcl_stub import STUB as _STUB  # noqa: E402
 
 mod = importlib.import_module("phase3_one_shot_runner")
 
@@ -975,7 +977,7 @@ def test_a_kill_sentinel_inside_the_signal_window_is_still_not_a_signal(
 
 def _tcl_evals(tmp_path, body, name):
     script = tmp_path / name
-    script.write_text('proc unknown {args} { return "" }\n'
+    script.write_text(_STUB
                       + body.replace("\nexit\n", "\nputs PNR_TCL_END\n"))
     # The parse is a `tclsh` syntax check over one file and measures well
     # under a second; 30 s is two orders of magnitude of headroom and stays
