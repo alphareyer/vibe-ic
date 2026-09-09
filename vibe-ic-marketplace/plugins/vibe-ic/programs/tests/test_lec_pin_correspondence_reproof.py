@@ -276,3 +276,81 @@ def test_a_gate_net_no_gold_pin_carries_is_refused():
     ren, recs = L.build_pin_correspondence_renames(acc, ["u.g1.A1", "u.g1.A2"])
     assert ren == []
     assert "no gold pin" in recs[0]["skipped"]
+
+
+# --------------------------------------------------------------------------
+# ZERO DENOMINATOR — a screen that could pair NOTHING is not a screen that
+# found nothing.  MEASURED (AES x cyaes2, 2026-09-10): on an RTL-vs-gate miter
+# the gold half is behavioural, so `_parse_netlist_instances` finds 12
+# instances there against 39732 on the gate side and NONE in common; all 29
+# parsed points came back rejected with the one reason "instance absent from
+# the gold netlist" and the screen reported `accepted: 0`.  From the counts
+# alone that is indistinguishable from "screened, no permutation artefact
+# found", and a lane spent a run establishing by hand which of the two it was.
+# --------------------------------------------------------------------------
+_GOLD_BEHAVIOURAL = r"""
+module top(a, b, c, clk, y);
+  input a, b, c, clk; output y;
+  reg q;
+  always @(posedge clk) q <= ~((a & b) | c);
+  assign y = q;
+endmodule
+"""
+
+
+def test_a_screen_that_could_pair_no_point_reports_a_zero_denominator():
+    """The RTL-vs-gate shape: `accepted: 0` over a denominator of 0.  On the
+    pre-fix tree the result carries `accepted`/`rejected` and nothing else, so
+    the caller reads a zero it cannot tell from a finding."""
+    r = L.classify_pin_permutation_points(_POINTS, _GOLD_BEHAVIOURAL,
+                                          _GATE_BUFFERED_SWAP, _LIB)
+    # the shape that produces it, observed rather than assumed
+    assert L._parse_netlist_instances(_GOLD_BEHAVIOURAL) == {}
+    assert sorted(L._parse_netlist_instances(_GATE_BUFFERED_SWAP)) == \
+        ["u.bx", "u.f1", "u.g1"]
+    assert r["accepted"] == []
+    # THE CONTROL, and it observes a VALUE: on the pre-fix tree these two
+    # points come back with the bare per-point reason, which is true of a
+    # point that failed a test and of a screen that could test nothing.
+    assert sorted({x["reason"] for x in r["rejected"]}) == [
+        "instance absent from the gold netlist — and NOT ONE of the 2 "
+        "point(s) this screen was given could be paired (gold declares 0 "
+        "instance(s), gate declares 3, sharing 0), so `accepted: 0` is a ZERO "
+        "DENOMINATOR and not the finding that the design carries no "
+        "permutation artefact"]
+    # and the machine-readable half of the same statement
+    assert r.get("not_applicable") == {
+        "points": 2,
+        "pairable_points": 0,
+        "gold_instances": 0,
+        "gate_instances": 3,
+        "shared_instances": 0,
+        "reason": (
+            "NOT ONE of the 2 point(s) this screen was given could be paired "
+            "(gold declares 0 instance(s), gate declares 3, sharing 0), so "
+            "`accepted: 0` is a ZERO DENOMINATOR and not the finding that the "
+            "design carries no permutation artefact"),
+    }
+
+
+def test_a_screen_that_could_pair_its_points_is_not_called_inapplicable():
+    """The DISCRIMINATION control: the same call on netlists that DO share the
+    instance must carry no such key, or the refusal above would be unconditional
+    and would say nothing.  Both the accepting and the rejecting applicable
+    cases are checked, so the key cannot be keyed on `accepted` being empty."""
+    ok = L.classify_pin_permutation_points(_POINTS, _GOLD,
+                                           _GATE_BUFFERED_SWAP, _LIB)
+    assert len(ok["accepted"]) == 2 and ok.get("not_applicable") is None
+    bug = L.classify_pin_permutation_points(_POINTS, _GOLD, _GATE_REAL_BUG,
+                                            _LIB)
+    assert bug["accepted"] == [] and bug["rejected"]
+    assert bug.get("not_applicable") is None
+
+
+def test_the_pairable_denominator_is_counted_per_point_not_per_netlist():
+    """One pairable point is a real, if tiny, denominator: the screen DID look
+    at something, so it must not be reported as having made no observation."""
+    r = L.classify_pin_permutation_points(_POINTS + ["u.zz.A1"], _GOLD,
+                                          _GATE_BUFFERED_SWAP, _LIB)
+    assert any(x["point"] == "u.zz.A1" for x in r["rejected"])
+    assert r.get("not_applicable") is None

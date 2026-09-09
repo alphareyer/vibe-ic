@@ -1203,7 +1203,23 @@ def classify_pin_permutation_points(names: List[str], gold_text: str,
     cell — a naming artefact of the flattened recipe) and `rejected` (with the
     failing test named). See the block comment above for the tests; every one
     must hold or the point is rejected, and an exception inside the evaluator
-    (a sequential cell's state variable, a malformed function) rejects too."""
+    (a sequential cell's state variable, a malformed function) rejects too.
+
+    ZERO DENOMINATOR (measured, AES x cyaes2 2026-09-10). Every test here
+    compares ONE instance's two structural sides, so a point can only be judged
+    when its instance is declared in BOTH netlists. On an RTL-vs-gate miter the
+    gold half is behavioural and declares almost no instances — measured 12 on
+    the gold side against 39732 on the gate side, sharing none — so all 29
+    parsed points were rejected with the single reason "instance absent from the
+    gold netlist" and the screen returned `accepted: 0`. That zero is NOT the
+    observation "this design has no permutation artefact": nothing was compared.
+    A caller cannot tell those apart from the counts alone, and one lane spent a
+    run establishing by hand that the screen had been inapplicable rather than
+    negative. So when the population is non-empty and NO point could be paired,
+    the result also carries `not_applicable` naming the two namespace sizes.
+    `accepted` and `rejected` are unchanged — a rejected point keeps its cut
+    point and stays unproven either way, so no verdict moves; what changes is
+    that the record now says the screen made no observation."""
     gold_i = _parse_netlist_instances(gold_text)
     gate_i = _parse_netlist_instances(gate_text)
     lib = _parse_liberty_pins(liberty_text)
@@ -1314,7 +1330,34 @@ def classify_pin_permutation_points(names: List[str], gold_text: str,
         rec["evidence"] = ("cell symmetry proven by truth table over "
                           f"{len(nets)} net(s); output nets unchanged")
         accepted.append(rec)
-    return {"accepted": accepted, "rejected": rejected}
+    out: Dict[str, List[Dict[str, object]]] = {"accepted": accepted,
+                                               "rejected": rejected}
+    # A screen that could pair NOTHING is not a screen that found nothing.
+    shaped = [n for n in names if n.rpartition(".")[0] and n.rpartition(".")[2]]
+    pairable = [n for n in shaped
+                if n.rpartition(".")[0] in gold_i
+                and n.rpartition(".")[0] in gate_i]
+    if shaped and not pairable:
+        why = (f"NOT ONE of the {len(shaped)} point(s) this screen was given "
+               f"could be paired (gold declares {len(gold_i)} instance(s), "
+               f"gate declares {len(gate_i)}, sharing "
+               f"{len(set(gold_i) & set(gate_i))}), so `accepted: 0` is a ZERO "
+               "DENOMINATOR and not the finding that the design carries no "
+               "permutation artefact")
+        out["not_applicable"] = {
+            "points": len(shaped),
+            "pairable_points": 0,
+            "gold_instances": len(gold_i),
+            "gate_instances": len(gate_i),
+            "shared_instances": len(set(gold_i) & set(gate_i)),
+            "reason": why,
+        }
+        # The per-point reason stays TRUE and gains the aggregate: a reader who
+        # only ever sees one rejection record must still be able to tell "this
+        # point failed a test" from "no point could be tested at all".
+        for rec in rejected:
+            rec["reason"] = f"{rec['reason']} — and {why}"
+    return out
 
 
 # ---------------------------------------------------------------------------

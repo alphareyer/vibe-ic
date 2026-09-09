@@ -49880,6 +49880,10 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                 "accepted": _s_cls.get("accepted") or [],
                 "rejected": _s_cls.get("rejected") or [],
                 "classifier_error": _s_cls.get("error"),
+                # SAID OUT LOUD (cyaes2 2026-09-10): on an RTL-vs-gate miter no
+                # point's instance exists on both sides, so `accepted: 0` is a
+                # zero denominator and not a finding about the design.
+                "not_applicable": _s_cls.get("not_applicable"),
                 "renames": _pre_renames,
                 "rename_records": _s_recs,
             })
@@ -49895,6 +49899,10 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
             f"{_screen.get('total_points')} points survived equiv_simple; "
             f"{len(_pre_renames)} gate-side pin rename(s) carried into the "
             "full ladder. A screen is not a verdict.")
+        if _screen.get("not_applicable"):
+            notes.append("post-layout LEC: the permutation screen made NO "
+                         "observation — "
+                         + str(_screen["not_applicable"]["reason"]))
 
     rc, log_text = _run_lec(functional_lib=functional_lib,
                             gate_renames=_pre_renames or None)
@@ -49956,6 +49964,7 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
             "accepted": _cls.get("accepted") or [],
             "rejected": _cls.get("rejected") or [],
             "classifier_error": _cls.get("error"),
+            "not_applicable": _cls.get("not_applicable"),
             "reproof_run": False,
             "method": None,
             "pin_correspondence": {"renames": _ren, "records": _ren_recs},
