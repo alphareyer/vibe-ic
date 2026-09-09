@@ -321,10 +321,56 @@ def test_a_json_from_another_wrapper_is_not_this_ones_evidence(tmp_path):
 # ---------------------------------------------------------------------------
 # The control the issue names: nothing new in a sign-off directory
 # ---------------------------------------------------------------------------
+# The five outputs step 23 declared when #2057 landed. This is a HISTORICAL
+# ANCHOR — "what the accounting held at the moment this change promised not to
+# disturb it" — never a picture of what the step is allowed to declare today.
+# The list below is therefore closed; step 23's own list is not.
+_STEP23_AT_2057 = (
+    "phase3/stage3/sta/post_route_timing.rpt",
+    "reports/phase3/sta_spef_based.rpt",
+    "reports/phase3/sta/post_route_summary.json",
+    "reports/phase3/sta/sta_corner_record_completeness.json",
+    "reports/phase3/sta/post_route_signoff_corner.json",
+)
+
+
 def test_no_step_required_output_changed_and_step_23_is_named():
     """`required_outputs` is the accounting this change refused to disturb.
-    Step 23's list is pinned by name here; the flow file itself is not touched
-    by this change, which `git diff` shows and this asserts independently."""
+
+    ASSERT THE CLAIM, NOT A PHOTOGRAPH OF A LIST THIS CHANGE DOES NOT OWN
+    (vibe-ic#2229). This used to read `assert outs["23"] == [<the five>]`.
+    Step 23's `required_outputs` is a GROWING list, owned by whichever change
+    adds a sign-off output, so set equality made every LEGITIMATE addition a
+    failure of THIS control:
+
+        c733c0e06b^  v1.19.86   1 passed
+        c733c0e06b   v1.19.87   1 failed   <- added
+                                 reports/phase3/sta/architectural_residual.json
+                                 because a Phase-3 sign-off STA violation had
+                                 nowhere to go (#2081)
+
+    and clean main then carried the red from 2026-09-08 to at least
+    `9c653d47f` (v1.20.18) — 30+ landings. A red on clean main is not one
+    test's problem: it is the reference every lane differences against, and the
+    message it printed —
+
+        Left contains one more item:
+          'reports/phase3/sta/architectural_residual.json'
+
+    — cannot tell a reader whether that addition is a regression or the point.
+
+    NOTHING IS RELAXED. What #2057 actually promised is two things, and both
+    are now asserted directly and by name:
+
+      (a) it REMOVED or RENAMED nothing step 23 already declared — a rename is
+          the shape that would silently strand a consumer, and set equality
+          caught it only as a side effect of catching everything;
+      (b) it contributed NO `*_receipt.json` for any of the four wrappers to
+          ANY step's accounting — the thing #2057 could actually have added.
+
+    A LATER change adding a sixth output violates neither, and is exactly what
+    this control has no business refusing.
+    """
     flow = yaml.safe_load(_FLOW.read_text())
     outs = {}
 
@@ -338,17 +384,22 @@ def test_no_step_required_output_changed_and_step_23_is_named():
             for v in o:
                 walk(v)
     walk(flow)
-    assert outs["23"] == [
-        "phase3/stage3/sta/post_route_timing.rpt",
-        "reports/phase3/sta_spef_based.rpt",
-        "reports/phase3/sta/post_route_summary.json",
-        "reports/phase3/sta/sta_corner_record_completeness.json",
-        "reports/phase3/sta/post_route_signoff_corner.json",
-    ], outs["23"]
+    step23 = outs["23"]
+    missing = [name for name in _STEP23_AT_2057 if name not in step23]
+    assert not missing, (
+        "#2057 promised not to disturb step 23's accounting, and these outputs "
+        f"it declared then are no longer declared: {missing}\n"
+        "A later change ADDING an output is not a violation and needs no edit "
+        "here. A REMOVAL or a RENAME is one — if it was intended, the consumer "
+        "of each name above has to be moved with it, and this anchor updated "
+        "in the same landing.\n"
+        f"step 23 declares now: {step23}")
     # and no step declares a `*_receipt.json` for any of the four wrappers
     every = [o for lst in outs.values() for o in lst]
     for auditor in _WRAPPERS:
-        assert f"{auditor}_receipt.json" not in [Path(o).name for o in every]
+        assert f"{auditor}_receipt.json" not in [Path(o).name for o in every], (
+            f"#2057 must add no accounting of its own: a step declares "
+            f"{auditor}_receipt.json as a required output")
 
 
 # ---------------------------------------------------------------------------
