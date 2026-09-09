@@ -2956,6 +2956,28 @@ _REHOMED = {
     "analog_adc_enob_corner_check .":
     "analog_adc_enob_corner_check . --json "
     "reports/analog/analog_adc_enob_corner_check.json",
+    # e6699343b [v1.19.89] "integrate recovered producer and verification
+    # repairs": D1's own clause gained `--check-report`. Same step, same kind,
+    # same program; what changed is WHICH ENTRY POINT of it D1 runs, and the
+    # flow yaml states the reason on the clause itself (vibe-ic#2206): "D1
+    # audits the Phase-1 producer record. Running the track here would consume a
+    # pending expert answer and rewrite the subject."
+    #
+    # A TIGHTENING, and that is why it is authorised rather than read as a
+    # retirement. `phase1_expert_parse_track.check_report()` (programs/
+    # phase1_expert_parse_track.py:3518) is documented as "Execution is
+    # mandatory; findings remain advisory. Missing, malformed or stale evidence
+    # refuses credit. This path never calls evaluate or emits a pack." It
+    # refuses on a missing producer record, on an unrecorded invocation id, on a
+    # returncode outside {0, 1, AWAITING}, and on a phase1_root digest that does
+    # not match the tree — so the clause is still declared, still runs, and
+    # still blocks, over evidence it no longer manufactures for itself.
+    #
+    # Reading the old spelling's absence as a RETIREMENT had the sign backwards
+    # in exactly the way `_REHOMED`'s own docstring describes: the gate did not
+    # go away, its command string changed.
+    "phase1_expert_parse_track .":
+    "phase1_expert_parse_track . --check-report",
 }
 
 #: Clauses deliberately removed from the GATE denominator by Issue #1980 and

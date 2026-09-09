@@ -1,0 +1,56 @@
+# MUTATION ARM for next/cygate2c — D1's expert-track clause is RETIRED for real.
+#
+# WHAT THIS BRANCH FIXES, AND WHY ITS MUTATION IS NOT AN UNDO. The branch adds ONE
+# `_REHOMED` row to `tools/test_liar_census.py`, authorising v1.19.89's re-spelling
+# of step D1's own clause from `phase1_expert_parse_track .` to
+# `phase1_expert_parse_track . --check-report`. It changes no product behaviour:
+# the flow is CORRECT and always was, and what was wrong was the census's RECORD of
+# it — `population_delta` keys a clause by (step, kind, cmd), so an EDIT to the
+# command is indistinguishable from a DELETE, and the distinction is made one named
+# row at a time. There is therefore no product defect to re-plant, and "undo the
+# fix" would only mean deleting the row again, which proves nothing about the tests.
+#
+# WHAT AN AUTHORISATION ROW ACTUALLY HAS TO BE FALSIFIED AGAINST is the opposite
+# risk: that granting it BLUNTED the control, so that a real retirement now walks
+# through. So the defect this re-plants is the one the row must never excuse —
+# the gate genuinely GONE from the flow. The test file's own docstring names this
+# first among the things that must make it red: "the gate is deleted from the flow
+# entirely -> `still_declared` empty".
+#
+# With the row present, the census must STILL refuse, on two independent counts:
+#   * `dead`        — a `_REHOMED` row whose successor no step declares today is
+#                     "excusing a removal on the strength of a command that is
+#                     itself gone";
+#   * `unaccounted` — the old spelling is then removed with no live successor.
+#
+# MEASURED on live main b6a73c0aa with the branch's row applied:
+#   without this patch   130 passed
+#   with    this patch     6 failed, 124 passed
+# and the two the branch is about are among the six:
+#   test_the_1_6x_clause_was_REHOMED_and_not_retired
+#   test_the_flow_has_NOT_shrunk_since_the_literal_was_last_moved
+# The other four are the shipped-floor and sweep controls, which a real clause
+# retirement is SUPPOSED to trip; they are noise from this patch's point of view,
+# not from the flow's.
+diff --git a/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml b/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml
+index e972d5d73..ebf572473 100644
+--- a/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml
++++ b/vibe-ic-marketplace/plugins/vibe-ic/flow/phase1_phase2_phase3.yaml
+@@ -875,17 +875,16 @@ steps:
+         # class is PERSISTED on first sight and every later call returns it
+         # (#435), so an early input-derived class is not wrong once — it is
+         # frozen for the run.
+         #
+         # PINNED BOTH WAYS by
+         # `programs/tests/test_issue2144_expert_track_runs_after_the_l_docs.py`.
+         # D1 audits the Phase-1 producer record. Running the track here would
+         # consume a pending expert answer and rewrite the subject (#2206).
+-        - program_exit_zero: "phase1_expert_parse_track . --check-report"
+         # The CLAUSE that reads the two extraction-coverage entries moved here
+         # from step 1 (#1219). Without it, moving the declaration alone would
+         # only RELOCATE d4's "declared by no clause" finding from step 1 to D1.
+         #
+         # `phase1_coverage_report_present_check.py` shipped and was wired
+         # NOWHERE — verified on a38902d1: the program exists and
+         # `grep -c phase1_coverage_report_present_check` over this file returned
+         # 0. That is the #725 shape this flow keeps finding.
