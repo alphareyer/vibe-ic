@@ -58,6 +58,8 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import subprocess as _sp
+import tempfile as _tf
 import os
 import re
 import sys
@@ -137,6 +139,168 @@ def states_missing_input(text: str) -> bool:
     return bool(text) and bool(_NO_INPUT_RE.search(text))
 
 
+#: THE SECOND POPULATION — THE ADVISORY CENSUSES (vibe-ic#2227).
+#:
+#: `project_population` selects a verdict emitter two ways, and BOTH are blind
+#: to this class. By name it takes five checker suffixes; `*_census.py` is not
+#: one. By behaviour it takes a source carrying a `[PASS]`/`[FAIL]` banner
+#: (`checker_population_is_structural_not_filename_shaped_census._VERDICT`); an
+#: advisory census prints `[CENSUS]` and `[CANNOT DETERMINE]` and so matches
+#: neither. MEASURED on live main 9c653d47f: 716 programs in the population
+#: (662 by suffix + 56 by behaviour), 10 `*_census.py` in the tree, 4 of them
+#: inside the population and SIX outside it.
+#:
+#: This class is the one that most needs the check. A census's declared
+#: contract is rc 0 WITH findings — its only red is the zero-population
+#: refusal. So for a census that refusal is not one guard among many, it is the
+#: entire difference between a measurement and a sentence.
+#:
+#: SELECTED FROM THE TREE BY THE SAME RELATION, NOT BY A NAME. A population
+#: chosen by a filename is the defect `checker_population_is_structural_not_
+#: filename_shaped_census` exists to name, so this reads the same structure it
+#: does — a source that carries a census banner AND has a `__main__` entry —
+#: with the census vocabulary instead of the verdict one. A file called
+#: `*_census.py` that prints neither banner is not selected, and a program that
+#: prints one under any other name is.
+_CENSUS_BANNER = ("[CENSUS]", "[CANNOT DETERMINE]", "[CANNOT CHECK]")
+
+
+def advisory_census_population(programs_dir: Path,
+                               already: set) -> List[Path]:
+    """Verdict-emitting censuses the primary population cannot see."""
+    out = []
+    for path in sorted(programs_dir.glob("*.py")):
+        if path.stem == Path(__file__).stem or path.name in already:
+            continue
+        try:
+            src = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not any(b in src for b in _CENSUS_BANNER):
+            continue
+        if "__main__" not in src:
+            continue
+        out.append(path)
+    return out
+
+
+#: HOW TO HAND A PROGRAM AN EMPTY SUBJECT, and why this is a list rather than
+#: one convention. `_drive_on_empty_project` passes a positional path and an
+#: empty PROJECT. A census's subject is a REPOSITORY and four of the six
+#: measured take it by option, so that driver cannot reach them at all —
+#: MEASURED on 9c653d47f, four of the six answered
+#: `error: unrecognized arguments: .` (rc 3), which is not a verdict about
+#: anything. Each convention below is CONFIRMED against the program's own
+#: `--help` before it is used, so this is not a guess about any one program:
+#: the program declares what it accepts and the driver reads that declaration.
+#: A program that declares none of them is NOT_MEASURED, by name — never a pass.
+_SUBJECT_CONVENTIONS = ("--root", "--programs")
+
+_NOT_MEASURED = "NOT_MEASURED"
+
+
+def _accepts(prog: Path, option: str, timeout: int) -> bool:
+    """Does the program's OWN `--help` declare this option?"""
+    try:
+        r = _sp.run([sys.executable, str(prog), "--help"],
+                    capture_output=True, text=True, timeout=timeout)
+    except (OSError, _sp.SubprocessError):
+        return False
+    return option in (r.stdout or "") + (r.stderr or "")
+
+
+def _drive_on_empty_subject(prog: Path, timeout: int) -> Dict:
+    """Run ONE census over an EMPTY subject, using a convention it declares.
+
+    Returns ``rc``, or ``rc=None`` with ``not_measured`` naming why. A census
+    that cannot be handed an empty subject is DISCLOSED, never scored as clean:
+    a population this gate did not reach must not read as one it approved.
+    """
+    with _tf.TemporaryDirectory(prefix="empty_subject_") as td:
+        empty = Path(td)
+        argv = None
+        for opt in _SUBJECT_CONVENTIONS:
+            if _accepts(prog, opt, timeout):
+                argv = [opt, str(empty)]
+                break
+        if argv is None:
+            # A positional subject, or a program that reads its cwd. Both are
+            # answered by running INSIDE the empty directory; the positional
+            # form additionally needs the path, and a program that takes
+            # neither declines with its own usage error, which is captured.
+            argv = []
+        try:
+            r = _sp.run([sys.executable, str(prog), *argv, str(empty)]
+                        if not argv else [sys.executable, str(prog), *argv],
+                        capture_output=True, text=True, timeout=timeout,
+                        cwd=str(empty))
+        except _sp.TimeoutExpired:
+            return {"gate": prog.stem, "rc": None,
+                    "not_measured": f"made no progress within {timeout}s"}
+        except (OSError, _sp.SubprocessError) as exc:
+            return {"gate": prog.stem, "rc": None,
+                    "not_measured": f"could not be driven: {exc}"}
+        out = ((r.stdout or "") + (r.stderr or "")).strip()
+        if "unrecognized arguments" in out or "the following arguments are required" in out:
+            return {"gate": prog.stem, "rc": None,
+                    "not_measured": "declares none of the subject conventions "
+                                    f"{_SUBJECT_CONVENTIONS} and refused the "
+                                    f"positional form, so no empty subject "
+                                    f"could be constructed for it"}
+        return {"gate": prog.stem, "rc": r.returncode,
+                "output_tail": (out.splitlines()[-1][:200] if out
+                                else "(no output at all)")}
+
+
+def audit_advisory_censuses(programs_dir: Path, already: set,
+                            timeout: int = 120,
+                            workers: int = 0) -> Tuple[List[Dict], Dict]:
+    """The #2227 arm: a census over an EMPTY population must not exit 0.
+
+    NO PROSE IS PARSED HERE, deliberately. The primary arm has to read the
+    output because a checker over an empty project may legitimately exit 0 and
+    only its wording distinguishes the two. A census has no such ambiguity: its
+    authors are unanimous that an empty population is never a pass, and five of
+    the six measured already refuse. So the property is the exit code alone,
+    which cannot be reworded.
+    """
+    progs = advisory_census_population(programs_dir, already)
+    if not progs:
+        return [], {"censuses_probed": 0, "censuses_refused": 0,
+                    "censuses_exited_0": 0, "censuses_not_measured": 0,
+                    "censuses_not_measured_names": []}
+    workers = workers or min(8, (os.cpu_count() or 2))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        results = list(ex.map(lambda p: _drive_on_empty_subject(p, timeout),
+                              progs))
+    findings, refused, exited0, unmeasured = [], 0, 0, []
+    for res in results:
+        if res["rc"] is None:
+            unmeasured.append(f"{res['gate']} ({res['not_measured']})")
+            continue
+        if res["rc"] == 0:
+            exited0 += 1
+            findings.append({
+                "gate": res["gate"], "kind": "CENSUS_OVER_AN_EMPTY_POPULATION_EXITS_ZERO",
+                "rc": 0, "output_tail": res.get("output_tail", ""),
+                "detail": "driven over an EMPTY subject this census exited 0. A "
+                          "census's only red is the zero-population refusal, so "
+                          "an exit 0 here is the whole difference between a "
+                          "measurement and a sentence. Refuse with rc 2 "
+                          "(the disclosed-skip convention) BEFORE the findings "
+                          "branches — a refusal placed under `if rc == 0` is "
+                          "switched off by any finding, including one read from "
+                          "an inventory FILE that says nothing about the tree.",
+            })
+        else:
+            refused += 1
+    return findings, {"censuses_probed": len(progs),
+                      "censuses_refused": refused,
+                      "censuses_exited_0": exited0,
+                      "censuses_not_measured": len(unmeasured),
+                      "censuses_not_measured_names": sorted(unmeasured)}
+
+
 def audit(programs_dir: Path, timeout: int = 120,
           workers: int = 0) -> Tuple[str, List[Dict], Dict]:
     # A PROBER MUST NOT BE IN ITS OWN POPULATION. `project_check_programs` is
@@ -196,12 +360,19 @@ def audit(programs_dir: Path, timeout: int = 120,
                           f"suppressing something it no longer describes",
             })
 
+    # vibe-ic#2227 — THE SECOND ARM, in the SAME audit, on purpose. Returning
+    # it separately would let a caller run one and publish the other's silence.
+    census_findings, census_stats = audit_advisory_censuses(
+        programs_dir, {p.name for p in progs}, timeout, workers)
+    findings.extend(census_findings)
+
     stats = {"gates_probed": len(progs),
              "stated_zero_population": len(zero_rc0) + len(zero_refused),
              "zero_and_exited_0": len(zero_rc0),
              "zero_and_refused": len(zero_refused),
              "exempted": len(_ZERO_IS_A_PASS),
-             "unrunnable": len(unrunnable)}
+             "unrunnable": len(unrunnable),
+             **census_stats}
     verdict = "FINDINGS" if findings else "PASS"
     return verdict, findings, stats
 
@@ -264,6 +435,16 @@ def main(argv=None) -> int:
           f"population, of which {stats['zero_and_refused']} refused and "
           f"{stats['zero_and_exited_0']} exited 0 "
           f"({stats['exempted']} exempted, {stats['unrunnable']} unrunnable)")
+    # vibe-ic#2227 — the second population is DISCLOSED on every run, passing or
+    # not. A class this gate did not reach must never read as one it approved,
+    # and a population that quietly shrank is the same silent zero this whole
+    # program is about.
+    print(f"{TOOL}: advisory-census arm — {stats['censuses_probed']} census(es) "
+          f"probed over an EMPTY subject, {stats['censuses_refused']} refused, "
+          f"{stats['censuses_exited_0']} exited 0, "
+          f"{stats['censuses_not_measured']} NOT_MEASURED")
+    for name in stats.get("censuses_not_measured_names", []):
+        print(f"    NOT_MEASURED: {name}", file=sys.stderr)
     return RC_FINDINGS if findings else RC_OK
 
 
