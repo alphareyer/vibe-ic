@@ -2055,6 +2055,53 @@ def _declared_ports(source: str, module: str) -> set[str] | None:
         "localparam", "bit", "integer", "real", "genvar", "tri", "wand", "wor"}
 
 
+def _interface_proof_internal_reasons(proof) -> list:
+    """The proof's own bindings that hold WITHOUT reading the public input.
+
+    ONE implementation, called from both halves. The freeze-time validator has
+    the prompt and can ask "is this excerpt really the public input"; the
+    compile-time half does not and cannot. But three of the freeze's four
+    excerpt rules never needed the prompt at all -- whether the excerpt NAMES
+    the port, whether it STATES the claimed direction, and whether it states a
+    width the proof claims to be wider than 1 are properties of the excerpt
+    text and the claim, and they are exactly what makes a claim self-consistent.
+
+    Re-asking them at the compile is the difference between reporting a
+    direction the public input supports and reporting whatever the proof said.
+    Factored rather than copied so a rule cannot be tightened in one half and
+    left loose in the other (vibe-ic#2210).
+    """
+    reasons = []
+    port = str(proof.get("port") or "")
+    direction = str(proof.get("direction") or "").lower()
+    width = proof.get("width")
+    excerpt = " ".join(str(proof.get("excerpt") or "").split())
+    if not re.fullmatch(r"[A-Za-z_]\w*", port):
+        reasons.append(f"interface_proof.port is not an identifier: {port!r}")
+    if direction not in _DIRECTIONS:
+        reasons.append("interface_proof.direction must be one of "
+                       + ", ".join(_DIRECTIONS))
+    if not isinstance(width, int) or isinstance(width, bool) or width < 1:
+        reasons.append("interface_proof.width must be a positive integer")
+    if len(excerpt) < 8:
+        reasons.append("interface_proof.excerpt is too short to be evidence")
+        return reasons
+    if port and not re.search(rf"\b{re.escape(port)}\b", excerpt):
+        reasons.append("interface_proof.excerpt does not name the port it "
+                       "claims the public input requires")
+    if direction in _DIRECTIONS and direction not in excerpt.lower():
+        reasons.append("interface_proof.excerpt states no direction for the "
+                       "port, so the requirement is ambiguous")
+    # A width the excerpt never states is a number the proof invented. Width 1
+    # is exempt because a bare `inout wire io_line` states it by saying nothing,
+    # which is how the public input in vibe-ic#2210 expresses it.
+    if (isinstance(width, int) and not isinstance(width, bool) and width > 1
+            and not re.search(rf"\b{width}\b", excerpt)):
+        reasons.append(f"interface_proof.width {width} is not stated by the "
+                       f"excerpt that supports the port")
+    return reasons
+
+
 def _interface_proof_from_review(raw, task: dict, prompt_text: str,
                                  challenge_source: str,
                                  ) -> tuple[dict | None, list[str]]:
@@ -2139,13 +2186,9 @@ def _interface_proof_from_review(raw, task: dict, prompt_text: str,
                        "excerpt of at least 8 characters with a stated claim "
                        "of at least 12")
     else:
-        excerpt = verified[0]["excerpt"]
-        if port and not re.search(rf"\b{re.escape(port)}\b", excerpt):
-            reasons.append("interface_proof.excerpt does not name the port it "
-                           "claims the public input requires")
-        if direction in _DIRECTIONS and direction not in excerpt.lower():
-            reasons.append("interface_proof.excerpt states no direction for "
-                           "the port, so the requirement is ambiguous")
+        # The prompt-free rules come from the SHARED helper, so the compile-time
+        # half cannot end up asking a weaker question than this one does.
+        reasons.extend(_interface_proof_internal_reasons(raw))
     candidate_text = "\n".join(
         Path(p).read_text(errors="replace")
         for p in (task.get("rtl_paths") or []) if Path(p).is_file())
@@ -2436,6 +2479,24 @@ def _interface_omission_reason(candidate: dict, challenge: dict,
         return None
     if proof.get("candidate_rtl_sha256") != candidate.get("rtl_sha256"):
         return None
+    # THE CHALLENGE IS RE-EARNED TOO. The candidate binding above stops a proof
+    # frozen against a parent from being spent on its child, but nothing stopped
+    # a proof frozen for one CHALLENGE from riding on another: this function is
+    # reached once per challenge, and a challenge is inherited across repair
+    # rounds. `_run_verification_challenge` binds the challenge to its own hash,
+    # so the comparison that was missing is the proof's claim against it.
+    if proof.get("challenge_sha256") != challenge.get("sha256"):
+        return None
+    # AND THE REASON MUST NOT STATE WHAT THIS RUN DID NOT ESTABLISH. The
+    # direction, width and excerpt below are interpolated into the attributed
+    # reason verbatim. Whether the excerpt is really the public input is a
+    # question only the freeze can ask, but whether the excerpt NAMES the port,
+    # STATES that direction, and states that width are properties of the proof
+    # itself -- so they are re-asked here, through the same helper the freeze
+    # uses. Without this, a proof reaching this boundary directly could have the
+    # attributed record assert an interface the excerpt does not support.
+    if _interface_proof_internal_reasons(proof):
+        return None
     if port not in _ports_absent_from_dut(errors):
         return None
     try:
@@ -2451,8 +2512,10 @@ def _interface_omission_reason(candidate: dict, challenge: dict,
             f"candidate omits: module {module!r} must declare "
             f"{proof.get('direction')} port {port!r} of width "
             f"{proof.get('width')}, evidenced by the public input excerpt "
-            f"{proof.get('excerpt')!r}; the compiler reports it is not a port "
-            f"of the instantiated candidate")
+            f"{proof.get('excerpt')!r} (excerpt provenance established when "
+            f"the proof was frozen against the reviewed prompt; every other "
+            f"binding re-earned on this run); the compiler reports it is not a "
+            f"port of the instantiated candidate")
 
 
 def _run_verification_challenge(candidate: dict, challenge: dict) -> dict:
