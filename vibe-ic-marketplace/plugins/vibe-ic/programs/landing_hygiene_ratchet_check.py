@@ -92,6 +92,34 @@ If either arm cannot be run, or its output cannot be parsed into the shape this
 program declares, the verdict is rc=2 REFUSED and the landing stops.  "Could
 not measure it" is never reported as "measured it and it was clean" — a landing
 gate that cannot measure must never report that it measured.
+
+WHAT THIS REGISTRY DOES NOT ASK, IT NOW SAYS (vibe-ic#2224)
+===========================================================
+The rule above governs the gates this registry DECLARES.  It said nothing at
+all about the gates it does not, and the landing printed one unqualified line —
+`PASS  this landing introduces no hygiene finding` — over a hand-listed subset.
+MEASURED on `9c653d47f1`: `tools/ci/repo_hygiene_gates.sh` declares **124**
+BLOCKING gates (`run`, i.e. `_dispatch 0 0`, whose non-zero rc fails the tier)
+plus 30 `run_tolerating_uncheckable`; **2** of the 124 were ratcheted.  So 122
+BLOCKING questions were not asked at any direct-push landing and nothing said
+so.  `program_path_load_check` (#2104) was one of them, which is #2224: the
+gate has exactly one caller, `repo_hygiene_gates.sh:1128`, whose only caller is
+`run_capture "full:repo-hygiene"` in `tools/gatekeeper-land.sh` — after the
+`--cheap-only` exit the direct-push path takes.
+
+Two things follow, and they are one cause: the gate is added to the registry
+BELOW, and the complement is disclosed on every run.
+
+BLOCKING vs ADVISORY, DECLARED RATHER THAN INFERRED
+===================================================
+* The per-gate ratchet is **BLOCKING** (rc 1) and every unanswerable question
+  is **BLOCKING** (rc 2).  Unchanged.
+* The coverage disclosure is **ADVISORY**: it prints, it is recorded in
+  `--json`, and it never changes the return code.  It is not blocking because
+  the only way to satisfy a blocking version today is to ratchet 121 more
+  gates in one landing; a bar that refuses every landing is the bar people
+  learn to bypass, which this program's own history is about.  What it buys is
+  that the PASS line can no longer be read as a statement about the tier.
 """
 from __future__ import annotations
 
@@ -165,7 +193,108 @@ _RATCHETED_GATES: Tuple[Dict[str, object], ...] = (
         "finding": re.compile(
             r"^\s+(?P<path>\S+?):\d+\s+\[(?P<rule>[A-Za-z0-9_]+)\]", re.M),
     },
+    # vibe-ic#2224 — BLOCKING since #2104, wired into the hygiene tier by
+    # #2175, and until this entry it was asked on NO landing: the tier is
+    # reached only after the `--cheap-only` exit that the direct-push path
+    # takes. MEASURED on 9c653d47f1 before adding it: `1407 program(s) loaded
+    # by path, 0 offenders` rc 0 — green, which is the condition this registry
+    # requires of a new entry, so it adds an asked question and not a new red.
+    #
+    # COST, MEASURED RATHER THAN FEARED — and it is NOT the ~23 s/gate the
+    # section above records for the first two. This sweep spawns ONE CHILD PER
+    # PROGRAM (1407 of them) per arm. MEASURED on 8HD-4, in the pinned image,
+    # over `HEAD~1..HEAD`, on a host at load ~175-180 (73 containers, another
+    # lane's fleet run):
+    #
+    #   this entry alone, both arms   real 4m13.9s   (user 8m40.0s)
+    #   the whole 3-gate registry     real 5m50.2s   (user 10m20.9s)
+    #
+    # so ~2m07 per arm against the 900 s `_findings` timeout — roughly 7x
+    # headroom at a load this repository's own fleet actually produces. That
+    # timeout is a REFUSAL (rc 2), not a pass, so exhausting it stops the
+    # landing rather than waving it through; the headroom is what says it will
+    # not. On an idle 32-core host the same sweep is 12.5 s (the program's own
+    # docstring), so the figures above are an upper bound, not a typical cost.
+    #
+    # IDENTITY. `(path, rule)` = (the program's BARE FILENAME, the sibling it
+    # cannot resolve). The checker reports `p.name`, never a path under the
+    # arm's temporary root, so the two arms' keys are comparable; a key built
+    # from the printed header — which does carry the arm's root — would differ
+    # on every run and report the whole population as introduced.
+    {
+        "label": "programs load when loaded by path",
+        "argv": ("python3", "{plugin}/programs/program_path_load_check.py",
+                 "--programs", "{plugin}/programs", "--jobs", "8"),
+        "finding": re.compile(
+            r"^\s+\[FAIL\]\s+(?P<path>\S+?)\s+cannot resolve sibling\s+"
+            r"`(?P<rule>[^`]+)`", re.M),
+    },
 )
+
+
+#: vibe-ic#2224 — the hygiene tier's own declaration syntax. `run` is the
+#: BLOCKING wrapper (`tools/ci/_gate_dispatch.sh:1437` -> `_dispatch 0 0`); a
+#: non-zero rc from it fails the tier. `run_tolerating_uncheckable` is the
+#: non-blocking one and is deliberately NOT counted here: this disclosure is
+#: about questions that BLOCK when they are asked and are not asked at all.
+_HYGIENE_TIER_REL = "tools/ci/repo_hygiene_gates.sh"
+_BLOCKING_DECLARATION = re.compile(r'^run\s+"([^"]+)"', re.M)
+
+
+def unratcheted_blocking_labels(
+        subject_root: Path,
+        ratcheted: Sequence[str]) -> Tuple[List[str], int, Optional[str]]:
+    """`(labels, declared_total, not_measured)` — what this path never asks.
+
+    THE SUBJECT IS THE CANDIDATE'S TREE, not the runtime's, so a landing that
+    ADDS a blocking hygiene gate discloses it as unratcheted in the same run
+    that adds it.
+
+    AN UNREADABLE TIER IS `NOT_MEASURED`, NEVER AN EMPTY GAP. If the script is
+    absent, or its declaration syntax changed so that nothing parses, this
+    returns a reason and an empty list — and the caller prints the reason. A
+    coverage figure this program could not compute must never reach a reader as
+    "nothing is missing"; that is the exact shape of the defect #2224 is about.
+    """
+    script = subject_root / _HYGIENE_TIER_REL
+    try:
+        text = script.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return [], 0, f"cannot read {_HYGIENE_TIER_REL}: {exc}"
+    declared = set(_BLOCKING_DECLARATION.findall(text))
+    if not declared:
+        return [], 0, (
+            f"{_HYGIENE_TIER_REL} parsed to zero `run` declarations — the "
+            f"tier's declaration syntax changed and this coverage cannot be "
+            f"computed from it")
+    return sorted(declared - set(ratcheted)), len(declared), None
+
+
+def summarize_coverage(gaps: List[str], declared_total: int,
+                       not_measured: Optional[str], asked: int) -> str:
+    """ONE line, and it is ADVISORY — see this module's docstring.
+
+    NAMED, NOT JUST COUNTED, and printed BEFORE the per-gate verdicts.
+    `tools/gatekeeper-land.sh:run_emit` renders a FAILING gate as its FAIL
+    lines plus `tail -5`, so a block of names printed after the verdicts would
+    displace the verdict out of that tail. Printed before them it cannot, and
+    a passing landing pays nothing for it either: `run_emit` prints no stdout
+    at all on PASS, and the whole capture still reaches `landing_record`, which
+    is where a reader who wants the names goes. `--json .coverage` carries the
+    same list in machine form.
+    """
+    if not_measured:
+        return (f"{GATE}: NOT_MEASURED — coverage of the hygiene tier is "
+                f"unknown: {not_measured}")
+    if not gaps:
+        return (f"{GATE}: COVERAGE — all {declared_total} BLOCKING hygiene "
+                f"gate(s) are ratcheted on this path.")
+    return "\n".join(
+        [f"{GATE}: NOT_MEASURED — {len(gaps)} of {declared_total} BLOCKING "
+         f"hygiene gate(s) are not ratcheted on this path, so this landing "
+         f"was NOT asked about them; the {asked} ratcheted gate(s) below are "
+         f"the whole of what it WAS asked."]
+        + [f"  [NOT_MEASURED] {label}" for label in gaps])
 
 
 class Refusal(Exception):
@@ -417,6 +546,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except Refusal as r:
             print(f"{GATE}: REFUSED — {r}", file=sys.stderr)
             return 2
+
+        # vibe-ic#2224 — SAY WHAT WAS NOT ASKED, BEFORE ANSWERING WHAT WAS.
+        # ADVISORY: it never touches the return code (see the docstring).
+        gaps, declared_total, cov_not_measured = unratcheted_blocking_labels(
+            cand_root, [str(e["label"]) for e in _RATCHETED_GATES])
+        record["coverage"] = {
+            "hygiene_tier": _HYGIENE_TIER_REL,
+            "blocking_gates_declared": declared_total,
+            "ratcheted": sorted(str(e["label"]) for e in _RATCHETED_GATES),
+            "not_ratcheted": gaps,
+            "not_measured": cov_not_measured,
+            "advisory": True,
+        }
+        print(summarize_coverage(gaps, declared_total, cov_not_measured,
+                                 len(_RATCHETED_GATES)))
 
         introduced_any = bool(atomic["added"])
         for entry in entries:
