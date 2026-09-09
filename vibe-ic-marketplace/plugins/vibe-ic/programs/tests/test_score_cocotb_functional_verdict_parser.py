@@ -36,6 +36,7 @@ from _hostpaths import require_corpus
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
+import _container_guard as _cg  # noqa: E402
 
 SCRIPT = (Path(__file__).resolve().parents[2]
           / "benchmark" / "score_cocotb_mcp.py")
@@ -226,16 +227,19 @@ def test_float_coercion_short_circuits_when_tests_gt_zero():
 # ---------------------------------------------------------------------------
 
 def _need_iic_eda():
+    """Skip unless the container PROVABLY runs the pinned image (#2230).
+
+    `--type=container` was already a correction in this direction — a bare
+    `docker inspect vibeic-eda` also resolves the IMAGE of that name, so on any
+    host with the image pulled this guard passed and the test failed inside
+    `docker exec` instead of skipping. RUNNING is the same mistake one step on:
+    the name is shared, and a stale container wearing it answers True.
+    """
     if not shutil.which("docker"):
         pytest.skip("docker not installed")
-    # --type=container: a bare `docker inspect vibeic-eda` also resolves the
-    # IMAGE of that name, so on any host with the image pulled this guard
-    # passed and the test failed inside `docker exec` instead of skipping.
-    r = subprocess.run(["docker", "inspect", "--type=container",
-                        "-f", "{{.State.Running}}", "vibeic-eda"],
-                       capture_output=True, text=True)
-    if r.returncode != 0 or r.stdout.strip() != "true":
-        pytest.skip("vibeic-eda container not available or not running")
+    if not _cg.container_usable("vibeic-eda"):
+        pytest.skip("vibeic-eda is not the pinned runtime here — absent, "
+                    "stopped, or running other bytes")
 
 
 def _find_encoder_project():

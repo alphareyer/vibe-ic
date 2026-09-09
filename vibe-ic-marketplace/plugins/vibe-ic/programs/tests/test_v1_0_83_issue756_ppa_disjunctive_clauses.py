@@ -67,16 +67,24 @@ def _load(modname, filename):
 ppa = _load("ppa_area_threshold_check", "ppa_area_threshold_check.py")
 
 
+import sys as _cg_sys
+from pathlib import Path as _cg_path
+_cg_sys.path.insert(0, str(_cg_path(__file__).resolve().parent))
+import _container_guard as _cg  # noqa: E402
+
+
 def _container_up(container="vibeic-eda") -> bool:
-    if shutil.which("docker") is None:
-        return False
-    try:
-        cp = _pr.run(
-            ["docker", "inspect", "-f", "{{.State.Running}}", container],
-            capture_output=True, text=True)
-        return cp.returncode == 0 and cp.stdout.strip() == "true"
-    except Exception:
-        return False
+    """Is the PINNED runtime reachable under that name? (#2230)
+
+    Was `docker inspect -f {{.State.Running}}` — presence, not identity. On a
+    shared host the bare name `vibeic-eda` answers True for whatever container
+    got there first, so a stale image turned this file's live-path tests into
+    reds that are about the host and reproduce nowhere else. `container_usable`
+    asks `_eda_pin.container_matches_pin`, the repo's one definition of
+    "provably the pinned bytes"; a wrong-image container is now the same
+    not-here as an absent one, and skips exactly as it always did.
+    """
+    return _cg.container_usable(container)
 
 
 _HAVE_CONTAINER = _container_up()

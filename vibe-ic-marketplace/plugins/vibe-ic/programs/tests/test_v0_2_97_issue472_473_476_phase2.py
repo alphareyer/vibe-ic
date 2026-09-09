@@ -38,11 +38,24 @@ import pytest
 
 _TESTS_DIR = Path(__file__).resolve().parent
 _PROGRAMS = _TESTS_DIR.parent
-for _p in (str(_PROGRAMS),):
+for _p in (str(_PROGRAMS), str(_TESTS_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 import design_one_shot_runner as p2  # noqa: E402
+
+import _container_guard as _cg  # noqa: E402
+
+#: #2230 — THE CONTAINER THIS FILE NAMES. `test_476_oracle_run_loads_firmware_
+#: via_staged_hex` hands `container="vibeic-eda"` to the runner, and this file
+#: guarded only on `shutil.which("iverilog")` — i.e. not on the container at
+#: all. On a host where a stale image holds that shared name the runner's attach
+#: check refuses (correctly, #2076) and the test reds about the HOST. Asking
+#: whether the pinned runtime is actually reachable turns that into the skip an
+#: absent container already got. The container name stays exactly as the test
+#: had it; only the precondition is now measured.
+_ORACLE_CONTAINER = "vibeic-eda"
+_HAVE_PINNED_CONTAINER = _cg.container_usable(_ORACLE_CONTAINER)
 import _path_layout as _pl  # noqa: E402
 
 
@@ -444,6 +457,10 @@ def test_476_stage_readmem_missing_source_is_skipped(tmp_path):
 @pytest.mark.skipif(
     shutil.which("iverilog") is None or shutil.which("vvp") is None,
     reason="iverilog/vvp not available for end-to-end oracle run")
+@pytest.mark.skipif(
+    not _HAVE_PINNED_CONTAINER,
+    reason=f"{_ORACLE_CONTAINER} is not the pinned runtime here (#2230) — "
+           "absent, or a container of that name running other bytes")
 def test_476_oracle_run_loads_firmware_via_staged_hex(tmp_path):
     """## 驗收 (476): TB with a relative $readmemh + hex in TB dir → the
     staged run cwd contains the hex (or cwd strategy resolves it) and the
@@ -493,7 +510,7 @@ def test_476_oracle_run_loads_firmware_via_staged_hex(tmp_path):
 
     res = p2._run_oracle_tb(project, "synthtop", tb,
                             track_reason="test", t0=p2.time.time(),
-                            container="vibeic-eda")
+                            container=_ORACLE_CONTAINER)
     assert res is not None, "oracle run returned None (no simulator?)"
 
     run_dir = sim_fs / "oracle_run"

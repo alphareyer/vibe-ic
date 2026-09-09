@@ -76,22 +76,24 @@ def test_771_noleak_multiclause_and_still_splits():
     assert sorted(cl) == [(15.0, "wires"), (25.0, "cells")], cl
 
 
-def _container_up(container: str = "vibeic-eda") -> bool:
-    """Is a RUNNING container of that name exec-able?
+import sys as _cg_sys
+from pathlib import Path as _cg_path
+_cg_sys.path.insert(0, str(_cg_path(__file__).resolve().parent))
+import _container_guard as _cg  # noqa: E402
 
-    `--type=container` matters: a bare `docker inspect vibeic-eda` also resolves
-    the IMAGE of that name (which is exactly our image), so it reports success
-    on any host that merely has the image pulled.
+
+def _container_up(container: str = "vibeic-eda") -> bool:
+    """Is the PINNED runtime reachable under that name? (#2230)
+
+    Was `docker inspect --type=container -f {{.State.Running}}`. The
+    `--type=container` half was already a correction in this direction — a bare
+    inspect also resolves the IMAGE of that name — but RUNNING is still
+    presence, not identity: on a shared host the bare name answers True for
+    whatever container got there first, including one running an image this
+    repo does not pin. `container_usable` asks `_eda_pin.container_matches_pin`,
+    so a wrong-image container is the same not-here as an absent one.
     """
-    if shutil.which("docker") is None:
-        return False
-    try:
-        cp = _pr.run(
-            ["docker", "inspect", "--type=container", "-f", "{{.State.Running}}", container],
-            capture_output=True, text=True)
-        return cp.returncode == 0 and cp.stdout.strip() == "true"
-    except Exception:  # noqa: BLE001
-        return False
+    return _cg.container_usable(container)
 
 
 # ── #478 END-STATE: the real program binds the single metric ('wires'), via a

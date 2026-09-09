@@ -26,6 +26,11 @@ sf = importlib.import_module("synth_frontend")
 p2 = importlib.import_module("design_one_shot_runner")
 p3 = importlib.import_module("phase3_one_shot_runner")
 
+import sys as _cg_sys
+from pathlib import Path as _cg_path
+_cg_sys.path.insert(0, str(_cg_path(__file__).resolve().parent))
+import _container_guard as _cg  # noqa: E402
+
 _CONTAINER = "vibeic-eda"
 
 # A genuine modern-SystemVerilog repro that BOTH default frontends
@@ -60,29 +65,28 @@ endmodule
 
 
 def _need_iic_eda():
-    """Skip unless a RUNNING container named _CONTAINER can actually be exec'd.
+    """Skip unless _CONTAINER PROVABLY runs the pinned image (#2230).
 
-    `docker inspect <name>` resolves IMAGES as well as containers, and
-    `vibeic-eda` is precisely our image name — so on any machine that has the
-    image pulled the old guard returned rc=0, declared the container
-    "available", and let the test proceed to fail inside `docker exec` with
-    "could not create container workdir". An environment-gated test must SKIP
-    when its environment is absent, never FAIL.
+    Two earlier corrections walked toward this and stopped short. `docker
+    inspect <name>` resolves IMAGES as well as containers, so the first guard
+    declared the container available on any host that had merely pulled the
+    image; `--type=container` fixed that, and `.State.Running` rejected a
+    stopped one. What survived both is that RUNNING is still presence: on a
+    multi-lane host `vibeic-eda` is a shared name, and whatever container
+    reached it first answers True — including one running an image this repo
+    does not pin, which then fails inside `docker exec` instead of skipping.
+    That is the same sentence the two earlier comments wrote, one layer up.
 
-    `--type=container` restricts the lookup to containers, and `.State.Running`
-    rejects a stopped one (which also inspects fine but cannot be exec'd).
+    An environment-gated test must SKIP when its environment is absent, and a
+    container running other bytes is exactly that: the pinned environment is
+    not here.
     """
     if not shutil.which("docker"):
         skip_not_verified("docker not installed", RUN_REMEDY)
-    r = subprocess.run(["docker", "inspect", "--type=container",
-                        "-f", "{{.State.Running}}", _CONTAINER],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        skip_not_verified(f"{_CONTAINER} container not available",
-                          RUN_REMEDY)
-    if r.stdout.strip() != "true":
-        skip_not_verified(f"{_CONTAINER} container is not running",
-                          RUN_REMEDY)
+    if not _cg.container_usable(_CONTAINER):
+        skip_not_verified(
+            f"{_CONTAINER} is not the pinned runtime here — absent, stopped, "
+            f"or a container of that name running other bytes", RUN_REMEDY)
 
 
 # ---------------------------------------------------------------------------
