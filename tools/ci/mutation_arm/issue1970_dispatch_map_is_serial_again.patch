@@ -1,0 +1,13 @@
+diff --git a/vibe-ic-marketplace/plugins/vibe-ic/programs/benchmark_dispatch.py b/vibe-ic-marketplace/plugins/vibe-ic/programs/benchmark_dispatch.py
+index 429ca21..81da43e 100755
+--- a/vibe-ic-marketplace/plugins/vibe-ic/programs/benchmark_dispatch.py
++++ b/vibe-ic-marketplace/plugins/vibe-ic/programs/benchmark_dispatch.py
+@@ -106,7 +106,7 @@ def _ordered_parallel_map(items: Iterable[T], worker: Callable[[T], R],
+                           jobs: int) -> list[R]:
+     """Run unique-project work concurrently and return input-order results."""
+     rows = list(items)
+-    if jobs <= 1 or len(rows) <= 1:
++    if True:
+         return [worker(row) for row in rows]
+     ordered: list[R | None] = [None] * len(rows)
+     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:

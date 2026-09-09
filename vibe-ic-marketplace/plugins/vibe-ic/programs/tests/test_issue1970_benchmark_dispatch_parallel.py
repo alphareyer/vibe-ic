@@ -83,7 +83,16 @@ def _install_solve_fakes(monkeypatch, intervals: dict[str, tuple[float, float]],
         prompt.parent.mkdir(parents=True, exist_ok=True)
         text = f"Design {problem['id']} with an input and an output.\n"
         prompt.write_text(text)
-        return {"prompt_chars": len(text)}
+        # `public_original_input` is a TOTAL part of the real `stage()`
+        # contract -- `benchmark_io_adapter.stage` has exactly one return and
+        # always carries it -- and `_cmd_solve_locked` reads it by subscript.
+        # Built with the SAME helper the real one uses rather than a literal,
+        # so this fake cannot drift from the contract a second time. An empty
+        # context is the honest fixture shape: status NOT_PROVIDED.
+        original = bio._stage_public_original(
+            problem["id"], text, {}, project)
+        return {"prompt_chars": len(text),
+                "public_original_input": original}
 
     monkeypatch.setattr(bio, "stage", stage)
     monkeypatch.setattr(
@@ -132,11 +141,49 @@ def _write_resume_fixture(run: Path) -> None:
             "awaiting_ai": True, "awaiting_ai_review": False,
             "awaiting_ai_backup": True, "ai_repair_required": False,
         })
-        backups.append({
+        # d854185 ("converge LEC, stamp reports and public input handoffs",
+        # v1.19.90) made the AI-backup handoff BLOCKING: `_validate_backup_
+        # completion` refuses to dispatch a worker until the coordinator-issued
+        # task, the staged public original input and a named-author completion
+        # record all agree. A three-key row cannot reach the dispatch this test
+        # measures. Every field below is produced by the PRODUCTION helper that
+        # defines it, never by a literal, so this fixture cannot drift from the
+        # contract the way the three-key one did.
+        original = bio._stage_public_original(pid, prompt.read_text(), {},
+                                              project)
+        item = {
             "id": pid,
             "project": str(project),
             "prompt_sha256": bd._sha256_text(prompt.read_text()),
-        })
+            "public_original_input": original,
+            # An empty prior manifest makes the disposition CHANGED, which is
+            # the arm that does not additionally require prompt-bound
+            # no-change evidence.
+            "initial_output_manifest": [],
+        }
+        item["task_sha256"] = bd._sha256_text(
+            json.dumps(item, sort_keys=True))
+        issued = run / "ai_backup_tasks"
+        issued.mkdir(parents=True, exist_ok=True)
+        (issued / f"{item['task_sha256']}.json").write_text(json.dumps(item))
+        (project / "phase2" / "stage1" / "ai_backup_author.json").write_text(
+            json.dumps({
+                "schema": "vibeic.benchmark.ai_backup_record.v1",
+                "id": pid,
+                "task_sha256": item["task_sha256"],
+                "prompt_sha256": item["prompt_sha256"],
+                "source_sha256": original.get("source_sha256"),
+                "output_manifest": bd._backup_output_manifest(project),
+                "rtl_sha256": bd._sha256_text(
+                    bd._candidate_text(bd._rtl_files(project))),
+                "author": {"kind": "AI", "model": "fixture-backup-author"},
+                "oracle_accessed": False,
+                "rationale": ("Fixture author record: the RTL was authored "
+                              "from the staged prompt alone, with no oracle "
+                              "or harness read."),
+                "disposition": "CHANGED",
+            }))
+        backups.append(item)
     (run / "solve_report.json").write_text(json.dumps({
         "bench": "rtllm", "format": "rtllm", "total": 2,
         "solved": 0, "accepted": 0,

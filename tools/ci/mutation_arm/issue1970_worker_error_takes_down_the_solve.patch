@@ -1,0 +1,12 @@
+diff --git a/vibe-ic-marketplace/plugins/vibe-ic/programs/benchmark_dispatch.py b/vibe-ic-marketplace/plugins/vibe-ic/programs/benchmark_dispatch.py
+index 429ca21..129e346 100755
+--- a/vibe-ic-marketplace/plugins/vibe-ic/programs/benchmark_dispatch.py
++++ b/vibe-ic-marketplace/plugins/vibe-ic/programs/benchmark_dispatch.py
+@@ -4348,6 +4348,7 @@ def _cmd_solve_locked(bench: str, dataset: str, run: str, limit: int = 0,
+                                   if backup_task else None),
+                 log_line=log_line)
+         except Exception as exc:                          # noqa: BLE001
++            raise
+             error = f"{type(exc).__name__}: {exc}"
+             result = {
+                 "id": pid,
