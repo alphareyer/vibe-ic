@@ -86,6 +86,91 @@ def _module_map(texts: Iterable[str]) -> tuple[Dict[str, str], List[str]]:
     return modules, sorted(duplicates)
 
 
+def compile_source_manifest(
+        files: Dict[str, str], *,
+        declared_top: str | None = None) -> tuple[Dict[str, Any], List[str]]:
+    """Compile an EXACT ordered source manifest and report what happened.
+
+    vibe-ic#2211. This is the one implementation of "do these bytes, together,
+    actually compile", and it has two callers: `check_final_bundle` (export) and
+    `benchmark_io_adapter.collect` (candidate admission). Keeping it in ONE
+    place is deliberate — the request that created the second caller asked for
+    integration with the existing module/export checks, never for a second
+    divergent duplicate-module policy.
+
+    THE COMPILER IS THE AUTHORITY, and that is not a stylistic preference. The
+    textual duplicate-ownership rule in `_module_map` cannot tell a real
+    redeclaration from a legal one; measured in the pinned image on this exact
+    module:
+
+        `ifdef`-guarded alternatives (one file) : duplicates=['widget'] compile PASS
+        the same name declared in two files     : duplicates=['widget'] compile BLOCKED
+        two distinct modules in two files       : duplicates=[]         compile PASS
+
+    Only the compile separates the first two, so an admission gate built on the
+    textual count alone would refuse a legal conditional bundle.
+
+    Returns `(evidence, reasons)`. `reasons` carries only the facts about the
+    manifest ITSELF that the caller may want to raise (an unsafe path, no
+    Verilog in the set); the compile verdict stays in `evidence` so a caller can
+    act on PASS / BLOCKED / NOT_MEASURED separately.
+
+    NOT_MEASURED IS NOT A PASS AND NOT A FAILURE. An absent `iverilog`, or a
+    compile that outruns the timeout, means this was never measured, and it says
+    so rather than reporting a zero it never counted.
+    """
+    reasons: List[str] = []
+    compiler = shutil.which("iverilog")
+    if not compiler:
+        return ({
+            "status": "NOT_MEASURED",
+            "reason": "iverilog is unavailable; final RTL bytes were not compiled",
+        }, reasons)
+    with tempfile.TemporaryDirectory(prefix="vibeic_final_bundle_") as raw_root:
+        root = Path(raw_root)
+        compile_paths = []
+        include_dirs = {root}
+        for output_path, text in files.items():
+            relative = Path(output_path)
+            if relative.is_absolute() or ".." in relative.parts:
+                reasons.append(f"unsafe final RTL path {output_path!r}")
+                continue
+            destination = root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(text)
+            include_dirs.add(destination.parent)
+            if destination.suffix.lower() in {".v", ".sv"}:
+                compile_paths.append(destination)
+        if not compile_paths:
+            reasons.append("final bundle contains no Verilog source")
+            return ({"status": "BLOCKED", "reason": "no compile input"}, reasons)
+        command = [compiler, "-g2012", "-tnull"]
+        if declared_top:
+            command.extend(["-s", declared_top])
+        for include_dir in sorted(include_dirs, key=str):
+            command.extend(["-I", str(include_dir)])
+        command.extend(str(path) for path in compile_paths)
+        try:
+            proc = subprocess.run(
+                command, cwd=root, capture_output=True, text=True,
+                timeout=30, check=False)
+        except subprocess.TimeoutExpired:
+            return ({
+                "status": "NOT_MEASURED",
+                "reason": "final RTL compile exceeded 30 seconds",
+                "tool": compiler,
+            }, reasons)
+        diagnostics = (getattr(proc, "stderr", "")
+                       or getattr(proc, "stdout", "") or "").strip()
+        diagnostics = diagnostics.replace(str(root), "<final_bundle>")
+        return ({
+            "status": "PASS" if proc.returncode == 0 else "BLOCKED",
+            "reason": "" if proc.returncode == 0 else diagnostics[:2000],
+            "tool": compiler,
+            "returncode": proc.returncode,
+        }, reasons)
+
+
 def check_final_bundle(reviewed_paths: Iterable[Path],
                        exported_files: Dict[str, str], *,
                        declared_top: str | None = None) -> Dict[str, Any]:
@@ -141,66 +226,13 @@ def check_final_bundle(reviewed_paths: Iterable[Path],
                 f"prompt-derived declared top {declared_top!r} occurs "
                 f"{top_count} times in final RTL")
 
-    compiler = shutil.which("iverilog")
-    compile_evidence: Dict[str, Any]
-    if not compiler:
-        compile_evidence = {
-            "status": "NOT_MEASURED",
-            "reason": "iverilog is unavailable; final RTL bytes were not compiled",
-        }
-    else:
-        with tempfile.TemporaryDirectory(
-                prefix="vibeic_final_bundle_") as raw_root:
-            root = Path(raw_root)
-            compile_paths = []
-            include_dirs = {root}
-            for output_path, text in exported_files.items():
-                relative = Path(output_path)
-                if relative.is_absolute() or ".." in relative.parts:
-                    reasons.append(f"unsafe final RTL path {output_path!r}")
-                    continue
-                destination = root / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_text(text)
-                include_dirs.add(destination.parent)
-                if destination.suffix.lower() in {".v", ".sv"}:
-                    compile_paths.append(destination)
-            if not compile_paths:
-                reasons.append("final bundle contains no Verilog source")
-                compile_evidence = {
-                    "status": "BLOCKED", "reason": "no compile input"}
-            else:
-                command = [compiler, "-g2012", "-tnull"]
-                if declared_top:
-                    command.extend(["-s", declared_top])
-                for include_dir in sorted(include_dirs, key=str):
-                    command.extend(["-I", str(include_dir)])
-                command.extend(str(path) for path in compile_paths)
-                try:
-                    proc = subprocess.run(
-                        command, cwd=root, capture_output=True, text=True,
-                        timeout=30, check=False)
-                except subprocess.TimeoutExpired:
-                    compile_evidence = {
-                        "status": "NOT_MEASURED",
-                        "reason": "final RTL compile exceeded 30 seconds",
-                        "tool": compiler,
-                    }
-                else:
-                    diagnostics = (proc.stderr or proc.stdout or "").strip()
-                    diagnostics = diagnostics.replace(
-                        str(root), "<final_bundle>")
-                    compile_evidence = {
-                        "status": ("PASS" if proc.returncode == 0
-                                   else "BLOCKED"),
-                        "reason": ("" if proc.returncode == 0
-                                   else diagnostics[:2000]),
-                        "tool": compiler,
-                        "returncode": proc.returncode,
-                    }
-                    if proc.returncode != 0:
-                        reasons.append("exact final RTL compile failed: "
-                                       + diagnostics[:2000])
+    compile_evidence, compile_reasons = compile_source_manifest(
+        exported_files, declared_top=declared_top)
+    reasons.extend(compile_reasons)
+    if compile_evidence.get("status") == "BLOCKED" and compile_evidence.get(
+            "returncode") is not None:
+        reasons.append("exact final RTL compile failed: "
+                       + str(compile_evidence.get("reason") or ""))
 
     if reasons:
         status = "BLOCKED"

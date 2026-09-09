@@ -355,6 +355,19 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
     score. A defect the program can detect deterministically must be detected
     where the flow can still act on it -- here, which routes it to AI backup for
     re-authoring, the correct remedy.
+
+    NOR IS ONE FILE THE DELIVERABLE (vibe-ic#2211). Everything above judges the
+    generating STEP or a property of the concatenated text; nothing asked whether
+    the complete set COMPILES. Measured on this tree at plugin 1.20.18: emit a
+    normalized copy of the RTL back into the deliverable directory and
+    `harness_exact_selfverify` returns rc 0 with all three of its gates PASS on
+    the file it was handed, while `iverilog` on the resulting set exits 2 --
+    "'test_unit' has already been declared in this scope". The per-file harness
+    is not at fault; it verified exactly what it was given. The gap was that
+    `ok=True` from HERE is what freezes the whole set (`_archive_candidate`) and
+    sends it onward. So the exact ordered deliverable manifest is compiled here,
+    bound to its own hashes, and a set that cannot compile is refused with the
+    compiler's own words.
     """
     project = Path(project)
     rtl_dir = project / "phase2" / "stage1" / "rtl"
@@ -377,7 +390,12 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
                           f"disk is scaffolding, not an answer: "
                           f"{verdict['detail'][:180]}"}
 
-    text = "\n".join(f.read_text(errors="replace") for f in rtl)
+    # Read ONCE. Every fact below — the concatenation handed back as
+    # `completion`, the per-file hashes, and the bytes that are compiled — comes
+    # from this one read, so the bundle that was validated is provably the
+    # bundle that is frozen (vibe-ic#2211).
+    sources = [(f.name, f.read_text(errors="replace")) for f in rtl]
+    text = "\n".join(body for _name, body in sources)
     if required_top and required_top not in _declared_module_names(text):
         return {"id": problem_id, "ok": False, "rtl_gen": verdict["status"],
                 "declared_modules": _declared_module_names(text),
@@ -385,9 +403,100 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
                            f"artefact declares no such module "
                            f"(declares: {', '.join(_declared_module_names(text)) or 'none'})"
                            " — the grading testbench could not elaborate against it")}
+    # THE COMPLETE DELIVERABLE, NOT A FILE OF IT (vibe-ic#2211).
+    #
+    # Everything above this line is satisfiable by a bundle that cannot exist.
+    # `rtl_gen` reports on the STEP; `required_top` is satisfied by a name
+    # declared twice exactly as well as by one declared once; and the per-file
+    # harness (`harness_exact_selfverify`) verifies the one file it is handed and
+    # is entitled to say so. Measured on this tree, plugin 1.20.18: emit a
+    # normalized copy of the RTL back into the deliverable directory and the
+    # per-file harness returns rc 0 with all three of its gates PASS, while
+    # `iverilog` on the resulting set exits 2 with "'test_unit' has already been
+    # declared in this scope". `ok=True` here is what freezes that set
+    # (`_archive_candidate`) and sends it to review, so the defect survived to
+    # export — which is exactly the argument this function's own docstring
+    # already makes about the required-top check.
+    #
+    # The compiler is the authority and the textual module count is NOT. The
+    # sibling rule in `rtl_final_bundle_integrity._module_map` reports duplicate
+    # ownership for `ifdef`-guarded alternatives, which are legal and compile
+    # clean; only the compile separates those from a real redeclaration. So this
+    # calls the SHARED `compile_source_manifest` — one implementation, also used
+    # by the export-time `check_final_bundle` — and never a second textual
+    # duplicate-module policy.
+    #
+    # A BLOCKED bundle is refused HERE, where the flow can still act on it: the
+    # caller routes an `ok=False` candidate to AI backup for re-authoring, which
+    # is the remedy. NOT_MEASURED (no `iverilog`, or a compile that outran its
+    # timeout) is NEITHER — the candidate is admitted and the record says the
+    # bundle compile was never measured, because a missing tool is not evidence
+    # of a clean bundle and must not be reported as one.
+    manifest = [{"path": name,
+                 "sha256": hashlib.sha256(body.encode()).hexdigest()}
+                for name, body in sources]
+    # ORDER IS LOAD-BEARING. The cross-file view is pure; the compile is a
+    # subprocess. Asking the cheap question first means the compiler is invoked
+    # ONLY for a manifest that already looks wrong, so a well-formed candidate
+    # costs nothing and this function stays inspect-only on the path every
+    # candidate takes. Measured why that matters: running it unconditionally put
+    # an `iverilog` call inside the solve path, and
+    # `test_public_input_backup_provenance` -- which patches `bd.subprocess.run`,
+    # i.e. the subprocess MODULE, and counts worker invocations -- saw 2 where it
+    # requires 1. The gate had started answering for the runner.
+    cross_file = _cross_file_duplicate_modules(sources)
+    if cross_file:
+        bundle_compile, manifest_reasons = (
+            bundle_integrity.compile_source_manifest(dict(sources)))
+    else:
+        bundle_compile, manifest_reasons = {
+            "status": "NOT_ATTEMPTED",
+            "reason": ("no module in this manifest is declared by more than one "
+                       "file, so there is no cross-file redeclaration for a "
+                       "compile to confirm or refute here"),
+        }, []
+    bundle = {
+        "source_manifest": manifest,
+        "bundle_sha256": hashlib.sha256(text.encode()).hexdigest(),
+        "bundle_compile": bundle_compile,
+        "bundle_manifest_findings": manifest_reasons,
+        "cross_file_duplicate_modules": cross_file,
+    }
+    if cross_file and bundle_compile.get("status") == "BLOCKED":
+        return {"id": problem_id, "ok": False, "rtl_gen": verdict["status"],
+                "files": [name for name, _body in sources], **bundle,
+                "reason": (
+                    "the complete deliverable source manifest "
+                    f"({', '.join(name for name, _b in sources)}) declares "
+                    f"{', '.join(cross_file)} in more than one file and does "
+                    f"not compile as a set, so this candidate cannot be "
+                    f"scored: {str(bundle_compile.get('reason') or '')[:400]}")}
     return {"id": problem_id, "ok": True, "completion": text,
             "rtl_gen": verdict["status"], "supplied_rtl": supplied_rtl,
-            "files": [f.name for f in rtl]}
+            "files": [name for name, _body in sources], **bundle}
+
+
+def _cross_file_duplicate_modules(
+        sources: List[tuple]) -> List[str]:
+    """Module names declared by MORE THAN ONE file of the manifest.
+
+    vibe-ic#2211, and the boundary is the whole point. A name declared twice
+    across two files is a property of the SET: no single file is wrong, which is
+    why a per-file harness can pass every one of them and the bundle still fails
+    to compile. A name declared twice INSIDE one file is a property of that file,
+    and this deliberately does not report it -- `ifdef`-guarded alternatives are
+    exactly that shape and are legal.
+
+    This never decides anything on its own. The caller refuses only when the
+    compiler ALSO says the set does not compile, so a legal cross-file
+    arrangement that happens to reuse a name in a way iverilog accepts is not
+    rejected by counting.
+    """
+    owners: Dict[str, set] = {}
+    for name, body in sources:
+        for module, _block in bundle_integrity.module_blocks(body):
+            owners.setdefault(module, set()).add(name)
+    return sorted(module for module, files in owners.items() if len(files) > 1)
 
 
 def _declared_module_names(text: str) -> List[str]:
