@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1303
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1303)
+- **Total programs (excluding helpers / shims):** 1304
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1304)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1294 |
+| `any` | 1295 |
 
 ## Alphabetical listing
 
@@ -496,6 +496,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `gatekeeper_stale_branch_check` | any | — | the STALE-BRANCH / phantom-revert guard. |
 | `gddr6_protocol_synth` | any | — | GDDR6 SGRAM (JEDEC JESD250) protocol synth helper (graphics DDR memory). |
 | `gds_antenna_deck_check` | any | — | independent GDS-geometry process-antenna sign-off. |
+| `gds_canonical_digest` | any | — | compare two stream-outs of one layout honestly. |
 | `gds_ip_attribution` | any | — | Embed IP attribution metadata into the foundry handoff GDS as user-data records. |
 | `gds_port_label_check` | any | — | every port the DEF declares must be NAMED in the sign-off GDS. |
 | `gds_size_check` | any | — | Deterministic GDS file existence and size checker. |
@@ -1375,7 +1376,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1294 programs)
+### `any` (1295 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1843,6 +1844,7 @@ _(no programs in this group)_
 - `gatekeeper_stale_branch_check` — the STALE-BRANCH / phantom-revert guard.
 - `gddr6_protocol_synth` — GDDR6 SGRAM (JEDEC JESD250) protocol synth helper (graphics DDR memory).
 - `gds_antenna_deck_check` — independent GDS-geometry process-antenna sign-off.
+- `gds_canonical_digest` — compare two stream-outs of one layout honestly.
 - `gds_ip_attribution` — Embed IP attribution metadata into the foundry handoff GDS as user-data records.
 - `gds_port_label_check` — every port the DEF declares must be NAMED in the sign-off GDS.
 - `gds_size_check` — Deterministic GDS file existence and size checker.

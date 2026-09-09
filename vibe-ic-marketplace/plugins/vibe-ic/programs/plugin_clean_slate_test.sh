@@ -83,17 +83,36 @@ for d in "${deliverables[@]}"; do
   fi
 done
 
-# Gate 2 — md5 differs from baseline (proves fresh build)
-echo "=== Gate 2: md5 distinctness vs baseline ==="
+# Gate 2 — the build is not the baseline (proves fresh build)
+#
+# THE GDS HALF USES A CANONICAL DIGEST, NOT md5, AND THAT IS THE WHOLE POINT
+# OF vibe-ic#2221. A GDSII stream stamps its own write time into every BGNLIB
+# and BGNSTR record, so `md5` on a `.gds` answers "did a clock tick" and never
+# "is this the same layout". MEASURED in the pinned image: one KLayout layout
+# written twice 2.2 s apart differs in exactly six bytes, six of six inside a
+# date field. So a contaminated build that merely RE-STREAMS the baseline
+# layout used to satisfy this gate every time, on any design, forever -- the
+# check could not fail in the direction it exists to catch.
+#
+# `gds_canonical_digest.py` zeroes those date fields and hashes the rest, so
+# identical geometry now produces an identical digest and the contamination
+# verdict is real. It exits 2 and prints NOT_MEASURED rather than a digest
+# when a file will not parse, and that is treated as a FAIL here: an
+# unreadable artefact is not a distinct one.
+echo "=== Gate 2: distinctness vs baseline ==="
 project_gds=$(find "$PROJ/gds" -name "*.gds" -size +1k 2>/dev/null | head -1)
 project_sof=$(find "$PROJ/fpga" -name "*.sof" -size +1k 2>/dev/null | head -1)
 if [[ -n "$BASELINE_GDS" && -f "$BASELINE_GDS" && -n "$project_gds" ]]; then
-  m_proj=$(md5sum "$project_gds" | awk '{print $1}')
-  m_base=$(md5sum "$BASELINE_GDS" | awk '{print $1}')
-  if [[ "$m_proj" == "$m_base" ]]; then
-    fail "GDS md5 IDENTICAL to baseline ($m_proj) — likely contamination"
+  canon="$(dirname "${BASH_SOURCE[0]}")/gds_canonical_digest.py"
+  c_proj=$(python3 "$canon" "$project_gds" 2>&1 | awk 'NR==1{print $1}') || true
+  c_base=$(python3 "$canon" "$BASELINE_GDS" 2>&1 | awk 'NR==1{print $1}') || true
+  if [[ "$c_proj" == "NOT_MEASURED" || "$c_base" == "NOT_MEASURED" \
+        || -z "$c_proj" || -z "$c_base" ]]; then
+    fail "GDS canonical digest NOT_MEASURED (project=$c_proj baseline=$c_base)"
+  elif [[ "$c_proj" == "$c_base" ]]; then
+    fail "GDS canonical digest IDENTICAL to baseline ($c_proj) — same layout, contamination"
   else
-    ok "GDS md5 distinct ($m_proj vs baseline $m_base)"
+    ok "GDS canonical digest distinct ($c_proj vs baseline $c_base)"
   fi
 elif [[ -n "$BASELINE_GDS" ]]; then
   fail "baseline GDS specified but project GDS missing or unreadable"

@@ -142,6 +142,16 @@ assertions are NOT re-judged in prose. Run the program; read its JSON.
    - GDS stream-out (Calibre + KLayout), md5 checksum recorded, fab-specific
      deliverables bundled — *enforced by* `programs/signoff_audit.py` +
      `programs/foundry_handoff_package_check.py`.
+   - The md5 above ATTESTS one artefact — what this file was — and that is the
+     right instrument for it. It is the WRONG instrument for comparing two
+     runs. A GDSII stream stamps its own write time into every BGNLIB and
+     BGNSTR record, so two stream-outs of one layout are never byte-equal:
+     measured in the pinned image, one layout written twice 2.2 s apart differs
+     in exactly six bytes, six of six inside a date field. To ask "did the
+     layout change between these two runs", use
+     `programs/gds_canonical_digest.py`, which zeroes those fields and hashes
+     the rest. Comparing two GDS by md5/sha256 reports "not reproducible" every
+     time, on any design, forever (vibe-ic#2221).
 
 ## Workflow
 
