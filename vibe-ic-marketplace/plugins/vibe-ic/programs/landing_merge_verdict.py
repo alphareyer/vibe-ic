@@ -923,10 +923,20 @@ def _hygiene_shape_error(record: object) -> str:
         return "finding counts do not match identities"
     if (record["status"] == HYG_INTRODUCED) != bool(record["introduced"]):
         return "status contradicts introduced identities"
-    for key in ("no_verdict_either_side", "absent_corpora", "empty_corpora"):
+    for key in ("no_verdict_either_side", "absent_corpora", "empty_corpora",
+                "no_verdict_either_side_bounded"):
         if key in record and (not isinstance(record[key], list)
                               or any(not isinstance(v, str) for v in record[key])):
             return f"invalid {key} list"
+    # The bounded subset EXCUSES a refusal reason, so it is the one list here a
+    # wrong record could use to buy something. It must be a subset of the list
+    # it claims to qualify: without this, a record naming any label at all would
+    # silence a reason that label never produced.
+    if "no_verdict_either_side_bounded" in record:
+        if not set(record["no_verdict_either_side_bounded"]).issubset(
+                set(record.get("no_verdict_either_side") or [])):
+            return ("no_verdict_either_side_bounded names label(s) that are not "
+                    "no_verdict_either_side")
     return ""
 
 
@@ -1388,9 +1398,34 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
     hyg_status = (hygiene or {}).get("status")
     if not shape_error and hyg_status in (HYG_CLEAN, HYG_INTRODUCED):
         debt["hygiene"] = list(hygiene.get("carried") or [])
-        for key in ("no_verdict_either_side", "absent_corpora"):
-            incomplete.extend(f"HYGIENE_{key.upper()}:{value}"
-                              for value in hygiene.get(key, []))
+        # A BOUGHT SILENCE IS DEBT, AN UNBOUGHT ONE IS MISSING EVIDENCE.
+        #
+        # Both arrive in `no_verdict_either_side`, and treating them alike made
+        # a landing impossible for a reason no branch could act on. MEASURED, in
+        # `test_end_to_end_post_bootstrap_equal_corpus_uses_ordinary_delta`: the
+        # four routed-cell gates are NOT_CHECKED on BOTH arms under a live
+        # `uncheckable_until`, and this refused the landing with four
+        # INCOMPLETE EVIDENCE reasons -- while the sibling bootstrap test, whose
+        # base declares those gates NOT AT ALL, admits the very same four as
+        # `bounded_not_checked` and lands. Less evidence, better verdict.
+        #
+        # NOTHING IS RELAXED. The exemption test is `hygiene_finding_delta`'s own
+        # `_bounded_not_checked` -- dated, reasoned and UNEXPIRED -- which the
+        # bootstrap path already treats as sufficient; an expired or unreasoned
+        # silence is not in the subset and still refuses here. The excused
+        # labels do not disappear: they land in `debt`, where this file's own
+        # doctrine puts an unchanged inherited state, and are disclosed below.
+        #
+        # A record from a helper that does not state the subset yields an empty
+        # one, so every label stays blocking exactly as it is today. The
+        # fallback is the strict direction on purpose.
+        bought = set(hygiene.get("no_verdict_either_side_bounded") or [])
+        no_verdict = list(hygiene.get("no_verdict_either_side") or [])
+        debt["hygiene_no_verdict_bought"] = [v for v in no_verdict if v in bought]
+        incomplete.extend(f"HYGIENE_NO_VERDICT_EITHER_SIDE:{value}"
+                          for value in no_verdict if value not in bought)
+        incomplete.extend(f"HYGIENE_ABSENT_CORPORA:{value}"
+                          for value in hygiene.get("absent_corpora", []))
         for kind, label, corpus in debt["hygiene"]:
             if kind == "NOT_CHECKED":
                 incomplete.append(f"HYGIENE_NOT_CHECKED:{label}:{corpus}")
@@ -1451,9 +1486,19 @@ def decide(*, rebase_status: str, expected_tree: str, verified_tree: str,
             f"carried (which do NOT block), "
             f"{len(hygiene.get('cleared') or [])} cleared, over "
             f"{hygiene.get('declared')} declared gate(s)")
+        bought_note = set(hygiene.get("no_verdict_either_side_bounded") or [])
         for lbl in (hygiene.get("no_verdict_either_side") or [])[:8]:
-            notes.append(f"hygiene gate reached no verdict on EITHER arm, so it "
-                         f"excuses nothing — {lbl}")
+            if lbl in bought_note:
+                # Said in full rather than omitted: this one does not block, and
+                # a reader must be able to see WHY without diffing two lists.
+                notes.append(
+                    f"hygiene gate reached no verdict on EITHER arm under a "
+                    f"live, dated uncheckable exemption — inherited debt, "
+                    f"identical on both arms, so it neither blocks this "
+                    f"landing nor excuses any finding — {lbl}")
+            else:
+                notes.append(f"hygiene gate reached no verdict on EITHER arm, "
+                             f"so it excuses nothing — {lbl}")
         for name in (hygiene.get("empty_corpora") or [])[:8]:
             notes.append(f"hygiene loop corpus expanded over 0 item(s) on some "
                          f"arm — {name}")

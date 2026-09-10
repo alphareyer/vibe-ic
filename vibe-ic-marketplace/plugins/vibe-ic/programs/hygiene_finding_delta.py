@@ -1072,6 +1072,53 @@ def delta(base: dict, cand: dict,
         if b_state.get((lbl, corpus)) in UNKNOWN_STATES
         and c_state.get((lbl, corpus)) in UNKNOWN_STATES)
 
+    # WHICH OF THOSE SILENCES WERE BOUGHT, AND WHICH ARE JUST SILENT.
+    #
+    # `unknown_both` is one list holding two different things. A gate that is
+    # NOT_CHECKED on both arms under a dated, reasoned, UNEXPIRED
+    # `uncheckable_until` is a disclosure this repository sells on purpose and
+    # already knows how to read -- `_bounded_not_checked` is the test, and the
+    # EMPTY-base bootstrap path below applies it to decide which unknowns may
+    # stand in for a measured base. A gate that is silent with nothing bought
+    # is the case the refusal was written for.
+    #
+    # MEASURED, and the reason this split exists: the bootstrap path admits
+    # those four `tiny/openpdkx` gates as `bounded_not_checked` and lands, while
+    # the ORDINARY differential -- which sees the SAME four gates in the SAME
+    # NOT_CHECKED state, and additionally sees them declared on BOTH arms
+    # instead of only one -- refuses them as incomplete evidence. Strictly more
+    # evidence produced a strictly worse verdict, and no branch could ever clear
+    # it, because a symmetric bought silence is not something a branch does.
+    #
+    # So the subset is STATED, not subtracted: `no_verdict_either_side` keeps
+    # every label it has always held, and this names the ones whose silence was
+    # bought. A consumer that does not know this key is unaffected, and one that
+    # does can excuse exactly these and nothing else. Only NOT_CHECKED can be
+    # bought -- LISTED / OTHER_SHARD / OUT_OF_SCOPE are silences of a different
+    # kind and no exemption speaks to them.
+    b_rows: Dict[Tuple[str, str], List[dict]] = {}
+    c_rows: Dict[Tuple[str, str], List[dict]] = {}
+    for rows, gates in ((b_rows, bg), (c_rows, cg)):
+        for g in gates:
+            rows.setdefault(ident(g), []).append(g)
+    # One day for both arms: `delta` refuses above when the arms disagree about
+    # it, precisely so an exemption cannot expire between them.
+    today = str(cand.get("today") or "")
+
+    def _all_bought(rows: List[dict]) -> bool:
+        # EVERY row under the identity must be bought. `check_injective` makes a
+        # second row exceptional, but if one ever appears, "some row is exempt"
+        # is the flattering reading and this takes the other one.
+        return bool(rows) and all(
+            str(r.get("state", "")) == "NOT_CHECKED"
+            and _bounded_not_checked(r, today) for r in rows)
+
+    unknown_both_bounded = sorted(
+        lbl for (lbl, corpus) in common
+        if lbl in set(unknown_both)
+        and _all_bought(b_rows.get((lbl, corpus), []))
+        and _all_bought(c_rows.get((lbl, corpus), [])))
+
     introduced = sorted((c_find - b_find).elements())
     result = {
         "status": INTRODUCED if introduced else CLEAN,
@@ -1079,6 +1126,10 @@ def delta(base: dict, cand: dict,
         "carried": [list(k) for k in sorted((c_find & b_find).elements())],
         "cleared": [list(k) for k in sorted((b_find - c_find).elements())],
         "no_verdict_either_side": unknown_both,
+        # The subset of the line above whose silence is a live, dated, reasoned
+        # exemption. Always stated, empty when empty, for the same reason as
+        # every other denominator here: an unstated population reads as a pass.
+        "no_verdict_either_side_bounded": unknown_both_bounded,
         # A loop that expanded over nothing declares no gate, so it is invisible
         # in `gates` by construction — the case a reader most needs told.
         "empty_corpora": sorted(set(_empty_corpora(base)) | set(_empty_corpora(cand))),
