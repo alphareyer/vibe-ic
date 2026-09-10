@@ -173,3 +173,45 @@ def test_the_shipped_tree_passes_its_own_rule():
     r = _pr.run([sys.executable, str(PROG), "--root", str(root)],
                        capture_output=True, text=True)
     assert r.returncode == 0, f"rc={r.returncode}\n{r.stdout}\n{r.stderr}"
+
+
+def test_no_shipped_exemption_row_matches_nothing():
+    """An exemption that matches nothing can no longer be falsified by the tree.
+
+    `test_the_shipped_tree_passes_its_own_rule` above reads the checker's EXIT
+    CODE, which is 1 for either of the two failure modes. This binds the second
+    mode alone and NAMES the rows, because the two are repaired in opposite
+    directions: a new count-only pin is repaired in the test that carries it, a
+    row matching nothing is repaired by DELETING the row.
+
+    A row earns its place only while the pin it exempts is still there. Once
+    that pin is repaired the row stops exempting anything, and an exemption that
+    can never fire is indistinguishable from one that was always wrong -- it
+    reads as a live debt, and it silently pre-approves the defect coming back
+    under the same path.
+    """
+    root = Path(__file__).resolve().parents[5]
+    if not (root / ".git").exists():
+        pytest.skip("not a checkout")
+
+    sys.path.insert(0, str(PROG.parent))
+    import population_pin_without_its_member_set as _ppm
+
+    findings, denom = _ppm.scan(root)
+    # An empty walk is NOT OBSERVED, not a pass: with no modules parsed every
+    # row is trivially stale and with no rows read nothing is trivially clean.
+    assert denom["test_modules"] > 0, (
+        f"the walk parsed no test modules under {root} -- this test observed "
+        f"nothing and is not evidence that the inventory is clean")
+
+    inv = PROG.parent / _ppm._INVENTORY_NAME
+    rows = json.loads(inv.read_text(encoding="utf-8"))["known"]
+    assert rows, f"{inv.name} carries no rows -- nothing was compared"
+
+    seen = {f["file"] for f in findings}
+    stale = sorted({r["key"] for r in rows} - seen)
+    assert stale == [], (
+        f"{len(stale)} of {len(rows)} row(s) in {inv.name} match no count-only "
+        f"pin in the tree ({denom['count_only_modules']} found under "
+        f"{denom['test_modules']} modules). The pin each one exempts has been "
+        f"repaired; delete the row.\n  " + "\n  ".join(stale))
