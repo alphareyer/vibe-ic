@@ -71,18 +71,32 @@ import sys as _cg_sys
 from pathlib import Path as _cg_path
 _cg_sys.path.insert(0, str(_cg_path(__file__).resolve().parent))
 import _container_guard as _cg  # noqa: E402
+_cg_sys.path.insert(0, str(_cg_path(__file__).resolve().parents[1]))
+import _eda_pin as _pin  # noqa: E402 — the ONE place the pin/name is stated
 
 
-def _container_up(container="vibeic-eda") -> bool:
-    """Is the PINNED runtime reachable under that name? (#2230)
+def _container_up(container: str | None = None) -> bool:
+    """Is the PINNED runtime reachable under the name the PROGRAM will use?
 
-    Was `docker inspect -f {{.State.Running}}` — presence, not identity. On a
-    shared host the bare name `vibeic-eda` answers True for whatever container
-    got there first, so a stale image turned this file's live-path tests into
-    reds that are about the host and reproduce nowhere else. `container_usable`
-    asks `_eda_pin.container_matches_pin`, the repo's one definition of
-    "provably the pinned bytes"; a wrong-image container is now the same
-    not-here as an absent one, and skips exactly as it always did.
+    #2230 replaced `docker inspect -f {{.State.Running}}` — presence, not
+    identity — with `container_usable`, so a container running the wrong bytes
+    stopped being a red and became the skip an absent one always got. That
+    removed the red and left the OTHER half of the same cause in place: the
+    name being asked about was still the bare literal `vibeic-eda`.
+
+    MEASURED 2026-09-10 on 8HD-9, clean main `97990612f4`, with the pinned
+    runtime genuinely present under the name the runtime derives: the live-path
+    test SKIPPED anyway, because a five-day-old container of a different image
+    held the bare name. `vibeic-eda` is guessable and shared; nothing in this
+    repo ever creates it (`grep -rn '--name vibeic-eda'` is empty), so it can
+    only ever be somebody else's. Guarding on it asks which container won a
+    race for a name — a fact about the host, not about the code.
+
+    `container=None` asks `_eda_pin.default_container_name`, the per-pin name
+    `ppa_area_threshold_check.main` itself defaults `--container` to. That is
+    the container this file's live path will actually exec into, it carries the
+    pin digest so it cannot be squatted by an older image, and it is the name
+    `_container_guard.container_usable` documents as the one to ask about.
     """
     return _cg.container_usable(container)
 
@@ -282,10 +296,16 @@ def test_unmeasurable_clause_or_is_not_applicable():
 # ════════════════════════════════════════════════════════════════════════════
 # 7. (container-guarded) end-to-end main — a real synth measurement path. Pure
 #    logic above is the gate's verdict; this just proves the wiring runs and
-#    surfaces `clauses` + `combinator` in the report. Skipped without vibeic-eda.
+#    surfaces `clauses` + `combinator` in the report. Skipped when the PINNED
+#    runtime is not reachable under the name the program itself defaults to.
 # ════════════════════════════════════════════════════════════════════════════
-@pytest.mark.skipif(not _HAVE_CONTAINER,
-                    reason="vibeic-eda container not running")
+@pytest.mark.skipif(
+    not _HAVE_CONTAINER,
+    reason=(f"the pinned runtime is not reachable as "
+            f"{_pin.default_container_name()} — absent, stopped, or running "
+            f"bytes other than the pin. 'not running' was the OLD wording and "
+            f"it misdirected the reader: a container was running, under a "
+            f"different name, on a different image."))
 def test_end_to_end_main_reports_clauses(tmp_path):
     orig = tmp_path / "orig.v"
     opt = tmp_path / "opt.v"
@@ -302,7 +322,12 @@ def test_end_to_end_main_reports_clauses(tmp_path):
     out = tmp_path / "rep.json"
     rc = ppa.main([
         "--original", str(orig), "--optimized", str(opt), "--top", "m",
-        "--prompt", str(prompt), "--container", "vibeic-eda",
+        # NO `--container`: the program's own default is
+        # `_eda_pin.default_container_name()`, and letting it stand is what
+        # makes this an end-to-end test OF THE PROGRAM rather than of a literal
+        # restated here. Pinning the bare name here was what put the live path
+        # out of reach on every host where that name is already taken.
+        "--prompt", str(prompt),
         "--json", str(out)])
     assert rc in (0, 1)   # PASS / NOT-APPLICABLE / BLOCK — never a setup error
     import json
@@ -324,3 +349,82 @@ def test_756_endstate_via_program_main(tmp_path):
                    "--optimized", str(tmp_path / "opt.sv"),
                    "--top", "m", "--prompt", str(tmp_path / "p.txt")])
     assert rc in (0, 1)   # real end-state (NOT_APPLICABLE/PASS=0 or BLOCK=1)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 8. THE CONTAINER THIS FILE TALKS ABOUT IS THE ONE THE PROGRAM USES.
+#
+#    These two run with NO docker at all, on purpose. The live-path test above
+#    cannot pin this: without a docker client it skips, so it is green whether
+#    the name is right or wrong, and a guard that is green either way pins
+#    nothing. The seam below (`_container_running`) is the exact call
+#    `run_ppa_area_threshold` makes before it decides the run is applicable, so
+#    recording its argument records the container the program would exec into.
+#
+#    WHY THE BARE NAME IS NOT A NAME (#2230, second half). `vibeic-eda` is
+#    guessable and shared, and nothing in this repo ever creates it —
+#    `grep -rn -- '--name vibeic-eda'` over the tree is empty — so on a
+#    multi-lane host it can only ever be somebody else's container. Writing it
+#    down here made this file's live path unreachable on exactly the hosts the
+#    repo runs on, which is a fact about a race for a name, not about the code.
+# ════════════════════════════════════════════════════════════════════════════
+def test_main_targets_the_per_pin_container_not_the_bare_shared_name(
+        tmp_path, monkeypatch):
+    """`main()` with no `--container` must ask about the PER-PIN name."""
+    asked: list = []
+
+    def _record(container):
+        asked.append(container)
+        return False            # not up -> NOT_APPLICABLE, no docker touched
+
+    # BOTH seams, so the answer is the same on a host with docker and inside
+    # the pinned image, which has no docker client at all. Left unstubbed,
+    # `_docker_available()` short-circuits to NOT_APPLICABLE before the
+    # container is ever named, and this guard would pass by never running —
+    # measured 2026-09-10: it did exactly that in the container.
+    monkeypatch.setattr(ppa, "_docker_available", lambda: True)
+    monkeypatch.setattr(ppa, "_container_running", _record)
+    (tmp_path / "orig.v").write_text(
+        "module m(input a, input b, output y); assign y = a & b; endmodule\n")
+    (tmp_path / "opt.v").write_text(
+        "module m(input a, input b, output y); assign y = b & a; endmodule\n")
+    (tmp_path / "p.txt").write_text(
+        "minimum reduction must be 12% for wires or 8% for cells\n")
+    rc = ppa.main(["--original", str(tmp_path / "orig.v"),
+                   "--optimized", str(tmp_path / "opt.v"),
+                   "--top", "m", "--prompt", str(tmp_path / "p.txt")])
+    assert rc == 0                                  # NOT_APPLICABLE, not error
+    assert asked, ("the program never named a container — the run ended "
+                   "before the container was chosen, so this guard measured "
+                   "nothing")
+    assert asked[0] == _pin.default_container_name(), (
+        f"main() targeted {asked[0]!r}; the pinned runtime is "
+        f"{_pin.default_container_name()!r}")
+    assert asked[0] != "vibeic-eda", (
+        "main() targeted the bare shared name, which nothing in this repo "
+        "creates and any lane can hold")
+
+
+def test_the_skip_guard_asks_about_the_container_the_program_will_use(
+        monkeypatch):
+    """The guard and the program must be talking about the SAME container.
+
+    A guard that clears on container A while the code execs into container B
+    is not a guard; it is two independent facts about a host printed next to
+    each other.
+    """
+    asked: list = []
+
+    def _record(container=None, env=None):
+        asked.append(container)
+        return False
+
+    monkeypatch.setattr(_cg, "container_usable", _record)
+    _container_up()
+    assert len(asked) == 1
+    # `None` means "ask _eda_pin for the derived name", which is the same
+    # answer by construction; anything else must BE that name.
+    resolved = asked[0] if asked[0] is not None else _pin.default_container_name()
+    assert resolved == _pin.default_container_name(), (
+        f"the guard asked about {asked[0]!r}, the program uses "
+        f"{_pin.default_container_name()!r}")
