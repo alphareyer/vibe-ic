@@ -158,6 +158,62 @@ def _derived_user_site() -> str:
     return derived
 
 
+def _stdlib_shadows(lane: Path) -> list[tuple[str, Path]]:
+    """Top-level names in `lane` that would OUTRANK the stdlib once it is
+    front-inserted, as (module name, file) pairs, sorted by name.
+
+    WHY THIS IS A REFUSAL AND NOT A WARNING. The lane goes in at position 0 --
+    that is this entry's whole contract and the measurement in the module
+    docstring rules out appending. Position 0 is ahead of the stdlib, so a lane
+    holding `argparse.py` does not merely add a runner: it REPLACES a stdlib
+    module for every import that follows, including the runner's own.
+
+    MEASURED on 8HD-9 at live main a003990aef, this entry inside its own tests:
+
+        [NORECORD] trusted pytest entry: ArgumentParser.__init__() got an
+                   unexpected keyword argument 'allow_abbrev'
+
+    `argparse 1.4.0` (a PyPI backport of the 2.7-era module, predating
+    `allow_abbrev` in 3.5) sits in that host's user site. `import pytest` two
+    lines below the front-insert pulls in `_pytest.config.argparsing`, which
+    constructs `ArgumentParser(allow_abbrev=...)` against the SHADOW. The tier
+    was already honest -- `[NORECORD]`, never a pass -- but the REASON named a
+    keyword in a file the reader would then go and read for nothing. The entry
+    had not measured which module was shadowed, so it could not say.
+
+    Only the TOP LEVEL is examined, because that is what a path entry offers
+    the import system first; a name nested inside a package cannot shadow.
+
+    BLAST RADIUS, measured on this host across all three site directories
+    (user site, /usr/local/lib/python3.10/dist-packages,
+    /usr/lib/python3/dist-packages): 303 stdlib names, ONE shadow -- the
+    `argparse.py` above. The check is narrow in practice, not a blunderbuss.
+
+    `sys.stdlib_module_names` is 3.10+. On an older interpreter the set is
+    empty and this returns nothing -- an entry that cannot ask the question
+    must not answer it, so the lane is admitted exactly as it was before and
+    the refusal below simply never fires.
+    """
+    names = getattr(sys, "stdlib_module_names", frozenset())
+    if not names:
+        return []
+    found: list[tuple[str, Path]] = []
+    try:
+        entries = sorted(lane.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
+        if entry.name.endswith(".py"):
+            candidate = entry.name[:-3]
+        elif entry.is_dir() and (entry / "__init__.py").is_file():
+            candidate = entry.name
+        else:
+            continue
+        if candidate in names:
+            found.append((candidate, entry))
+    return sorted(found)
+
+
 def _host_lane(subject: Path, programs: Path) -> list[Path]:
     """Resolve, refuse and return the opted-in host site directories.
 
@@ -224,6 +280,27 @@ def _host_lane(subject: Path, programs: Path) -> list[Path]:
         raise Refusal(
             f"{HOST_SITE_ENV} requires {AUTOLOAD_ENV}=1 on the child: the lane "
             "restores these directories' entry-point plugins")
+    # THE THIRD REFUSAL. The two per-segment refusals above ask WHERE the lane
+    # is; this one asks WHAT IT CONTAINS -- the question the entry could not
+    # answer when it died naming `allow_abbrev`. See `_stdlib_shadows`.
+    #
+    # LAST, DELIBERATELY. The autoload pin above is a CALLER contract error and
+    # a shadow is a HOST condition; a caller that forgot the token should be
+    # told about the token, not about this machine's user site. Ordering it
+    # first also cost a passing test its subject: with the shadow refusal
+    # ahead, `test_the_lane_refuses_without_the_autoload_pin` could no longer
+    # observe the autoload refusal on a shadowed host at all.
+    shadowed = [(lane, hits) for lane in lanes
+                if (hits := _stdlib_shadows(lane))]
+    if shadowed:
+        named = "; ".join(
+            f"{lane}: " + ", ".join(f"{name} <- {path.name}"
+                                    for name, path in hits)
+            for lane, hits in shadowed)
+        raise Refusal(
+            f"{HOST_SITE_ENV} names a lane that SHADOWS the standard library "
+            f"and is inserted ahead of it, so the runner would import the "
+            f"shadow rather than the stdlib module: {named}")
     return lanes
 
 

@@ -238,6 +238,104 @@ def _site_processing_dirs() -> list[Path]:
     return out
 
 
+def _shadowing_lane_segments(value: str) -> list[str]:
+    """The segments of a lane VALUE whose top level shadows a stdlib module.
+
+    Measured with the entry's own `_stdlib_shadows`, so the test and the
+    subject cannot disagree about what a shadow is.
+    """
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("_tpe_subject", ENTRY)
+    module = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    probe = getattr(module, "_stdlib_shadows", None)
+    if probe is None:          # pre-repair subject: it cannot answer, so the
+        return []              # guard stands down and the arm goes red below
+    named = []
+    for segment in value.split(os.pathsep):
+        segment = segment.strip()
+        if not segment:
+            continue
+        lane = Path(segment)
+        if lane.is_dir() and probe(lane.resolve()):
+            hits = probe(lane.resolve())
+            named.append(f"{lane}: " + ", ".join(n for n, _ in hits))
+    return named
+
+
+def _unshadowed_closure_lane(tmp_path: Path) -> str:
+    """The runner's closure with every stdlib shadow REMOVED, as a lane value.
+
+    WHY THIS EXISTS. The two direction-1 controls below assert that a clean
+    lane is still ADMITTED -- without them the repair could be "refuse
+    everything" and nobody would notice. On this host `_closure_lane()`
+    contains the `argparse 1.4.0` shadow, so routing them through
+    `_require_unshadowed_lane` made both SKIP: a control that does not run is
+    not a control. MEASURED before this helper: `11 passed, 8 skipped`, with
+    both direction-1 ids among the skips.
+
+    Each shadowed segment is replaced by a symlink mirror of itself with the
+    shadowing names left out, so the runner still resolves and the lane is
+    clean on ANY host, shadowed or not.
+    """
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("_tpe_subject_u", ENTRY)
+    module = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    probe = getattr(module, "_stdlib_shadows", None)
+    if probe is None:
+        return _closure_lane()
+    out: list[str] = []
+    for index, segment in enumerate(_closure_lane().split(os.pathsep)):
+        lane = Path(segment.strip())
+        if not lane.is_dir():
+            continue
+        hits = probe(lane.resolve())
+        if not hits:
+            out.append(str(lane))
+            continue
+        drop = {path.name for _, path in hits}
+        mirror = tmp_path / f"unshadowed{index}"
+        mirror.mkdir(parents=True, exist_ok=True)
+        for item in lane.iterdir():
+            if item.name in drop:
+                continue
+            link = mirror / item.name
+            if not link.exists():
+                link.symlink_to(item)
+        out.append(str(mirror))
+    return os.pathsep.join(out)
+
+
+def _require_unshadowed_lane(value: str) -> str:
+    """SKIP, not fail, when THIS HOST's real site directory shadows the stdlib.
+
+    These four tests hand the entry a REAL host lane in order to observe what
+    the entry does with it -- front-insertion, ordering, the identity record.
+    On a host whose site directory shadows a stdlib module the entry now
+    REFUSES that lane by name (its third refusal), so the session under test
+    never starts and the property is not observable here.
+
+    Reporting that as a FAILURE says the tree is broken when what was measured
+    is a condition of this machine's user site. MEASURED on 8HD-9: 303 stdlib
+    names, one shadow, `argparse 1.4.0` in the user site, and these same four
+    ids red on CLEAN main for it. The honest word is the one this module
+    already uses for an environment it cannot supply: skip, with the shadow
+    NAMED so the reader is sent to the right file.
+
+    This does not weaken the assertions below -- they are unchanged and still
+    run wherever the lane is clean. The host repair is `pip uninstall argparse`
+    and it belongs to whoever owns the box, not to a lane.
+    """
+    import pytest  # this module imports pytest at use site, not at module level
+    shadowed = _shadowing_lane_segments(value)
+    if shadowed:
+        pytest.skip("this host's lane shadows the standard library, so the "
+                    "entry refuses it and front-insertion is NOT MEASURED "
+                    "here: " + "; ".join(shadowed))
+    return value
+
+
 def _closure_lane() -> str:
     """A lane value naming the runner's WHOLE import closure, runner dir first.
 
@@ -340,7 +438,7 @@ def test_without_the_lane_a_siteless_isolated_entry_refuses(tmp_path):
 def test_the_named_lane_records_where_the_same_entry_refused(tmp_path):
     """THE REVERT GUARD. Remove the lane from `run()` and this goes red."""
     proc = _entry(_siteless_python(tmp_path), _subject(tmp_path),
-                  **{_HOST_LANE_ENV: _closure_lane()})
+                  **{_HOST_LANE_ENV: _require_unshadowed_lane(_closure_lane())})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "1 passed" in proc.stdout
 
@@ -371,7 +469,7 @@ def test_the_lane_is_inserted_at_the_front_not_appended(tmp_path):
         "    assert pytest.__file__.startswith(LANE + '/'), pytest.__file__\n",
         encoding="utf-8")
     proc = _entry(_siteless_python(tmp_path), subject,
-                  **{_HOST_LANE_ENV: _closure_lane()})
+                  **{_HOST_LANE_ENV: _require_unshadowed_lane(_closure_lane())})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "2 passed" in proc.stdout, proc.stdout
 
@@ -445,7 +543,7 @@ def test_the_identity_record_still_shows_which_lane_answered(tmp_path):
         " rows\n",
         encoding="utf-8")
     proc = _entry(_siteless_python(tmp_path), subject,
-                  **{_HOST_LANE_ENV: _closure_lane()})
+                  **{_HOST_LANE_ENV: _require_unshadowed_lane(_closure_lane())})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "2 passed" in proc.stdout, proc.stdout
 
@@ -539,7 +637,7 @@ def test_every_named_directory_answers_in_the_order_it_was_named(tmp_path):
     assertions above pin it to.
     """
     subject = _subject(tmp_path)
-    value = _closure_lane()
+    value = _require_unshadowed_lane(_closure_lane())
     named = value.split(os.pathsep)
     (subject / "test_ok.py").write_text(
         "import sys\n"
@@ -583,3 +681,125 @@ def test_an_unset_lane_leaves_the_pinned_image_path_unchanged(tmp_path):
         encoding="utf-8")
     proc = _entry(Path(sys.executable), subject)
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+# ===========================================================================
+# vibe-ic#2231 — A LANE MAY NOT SHADOW THE STANDARD LIBRARY
+#
+# The lane goes in at position 0. Position 0 is ahead of the stdlib, so a lane
+# holding `argparse.py` does not add a runner, it REPLACES a stdlib module for
+# every import that follows -- including the runner's own. MEASURED on 8HD-9 at
+# live main a003990aef, this module against clean main:
+#
+#   [NORECORD] trusted pytest entry: ArgumentParser.__init__() got an
+#              unexpected keyword argument 'allow_abbrev'
+#
+#   4 failed, 8 passed, 2 skipped
+#
+# `argparse 1.4.0` (a PyPI backport predating `allow_abbrev`) sits in that
+# host's user site; `import pytest` two lines after the front-insert reaches
+# `_pytest.config.argparsing`, which builds `ArgumentParser(allow_abbrev=...)`
+# against the shadow. The tier was already honest -- `[NORECORD]`, rc 2, never
+# a pass -- but the REASON named a keyword in a file the reader would then go
+# and read for nothing. The entry had never measured WHICH module was shadowed,
+# so it could not say. 4 test ids, ONE root cause.
+#
+# These pin the repair: the entry MEASURES the lane's top level against
+# `sys.stdlib_module_names` and refuses BY NAME. Nothing is relaxed -- the
+# refusal is new and strictly narrower than admitting a poisoned lane.
+# ===========================================================================
+def _shadow_lane(tmp_path: Path, module: str = "argparse") -> Path:
+    """A lane whose top level shadows one stdlib module, and nothing else."""
+    lane = tmp_path / "shadowlane"
+    lane.mkdir(parents=True, exist_ok=True)
+    (lane / f"{module}.py").write_text(
+        "raise AssertionError('the stdlib shadow was imported')\n",
+        encoding="utf-8")
+    return lane
+
+
+def test_a_lane_that_shadows_the_stdlib_is_refused_BY_NAME(tmp_path):
+    """The refusal names the shadowed MODULE and the file, not a downstream
+    keyword. This is the #2231 repair: on clean main the same lane produced
+    `unexpected keyword argument 'allow_abbrev'`, which sends the reader to
+    `_pytest/config/argparsing.py` -- the wrong file entirely."""
+    subject = _subject(tmp_path)
+    value = os.pathsep.join([str(_shadow_lane(tmp_path)), _closure_lane()])
+    proc = _entry(_siteless_python(tmp_path), subject,
+                  **{_HOST_LANE_ENV: value})
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    combined = proc.stdout + proc.stderr
+    assert "NORECORD" in combined, combined
+    assert "SHADOWS the standard library" in combined, combined
+    assert "argparse" in combined, combined
+    assert "argparse.py" in combined, combined
+    assert str(_shadow_lane(tmp_path)) in combined, combined
+    # and it does NOT report the downstream symptom instead
+    assert "allow_abbrev" not in combined, combined
+
+
+def test_the_shadow_refusal_names_EVERY_shadowed_module_not_just_the_first(tmp_path):
+    """A lane with two shadows names both. A refusal that stopped at the first
+    would send a reader to fix one file and hit the next one."""
+    lane = _shadow_lane(tmp_path)
+    (lane / "types.py").write_text("raise AssertionError('shadow')\n",
+                                   encoding="utf-8")
+    subject = _subject(tmp_path)
+    proc = _entry(_siteless_python(tmp_path), subject,
+                  **{_HOST_LANE_ENV: os.pathsep.join(
+                      [str(lane), _closure_lane()])})
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    combined = proc.stdout + proc.stderr
+    assert "argparse" in combined and "types" in combined, combined
+
+
+def test_a_name_NESTED_in_a_package_is_not_a_shadow(tmp_path):
+    """Only the TOP LEVEL of a lane is what the import system offers first.
+    Refusing on a nested `argparse.py` would refuse most real site directories
+    for a file that can never win."""
+    lane = tmp_path / "nestedlane" / "pkg"
+    lane.mkdir(parents=True)
+    (lane / "__init__.py").write_text("", encoding="utf-8")
+    (lane / "argparse.py").write_text("x = 1\n", encoding="utf-8")
+    subject = _subject(tmp_path)
+    value = os.pathsep.join([str(lane.parent),
+                             _unshadowed_closure_lane(tmp_path)])
+    proc = _entry(_siteless_python(tmp_path), subject,
+                  **{_HOST_LANE_ENV: value})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "1 passed" in proc.stdout
+
+
+def test_a_clean_lane_is_still_admitted(tmp_path):
+    """DIRECTION-1: the new refusal must not refuse a lane that shadows
+    nothing. Without this the repair could be 'refuse everything'."""
+    lane = tmp_path / "cleanlane"
+    lane.mkdir()
+    (lane / "not_a_stdlib_name_xyz.py").write_text("x = 1\n", encoding="utf-8")
+    subject = _subject(tmp_path)
+    value = os.pathsep.join([str(lane),
+                             _unshadowed_closure_lane(tmp_path)])
+    proc = _entry(_siteless_python(tmp_path), subject,
+                  **{_HOST_LANE_ENV: value})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "1 passed" in proc.stdout
+
+
+def test_the_caller_contract_error_still_reports_BEFORE_the_host_condition(tmp_path):
+    """ORDERING, pinned. The autoload pin is the CALLER's own error; a shadow is
+    a condition of the machine. A caller that forgot the token must be told
+    about the token. Ordering the shadow first also cost
+    `test_the_lane_refuses_without_the_autoload_pin` its subject on a shadowed
+    host, which is how this ordering was found."""
+    subject = _subject(tmp_path)
+    env = {key: value for key, value in os.environ.items()
+           if key not in {"PYTHONPATH", "PYTHONHOME", _AUTOLOAD_ENV}
+           and not key.startswith(_PROGRESS_ENV_PREFIX)}
+    env[_HOST_LANE_ENV] = str(_shadow_lane(tmp_path))
+    proc = subprocess.run(
+        [str(_siteless_python(tmp_path)), "-I", str(ENTRY), "-q", "-p",
+         "no:cacheprovider", "test_ok.py"],
+        cwd=subject, env=env, capture_output=True, text=True)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert _AUTOLOAD_ENV in proc.stderr, proc.stderr
+    assert "SHADOWS" not in proc.stderr, proc.stderr
