@@ -95,7 +95,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 _HERE = Path(__file__).resolve().parent
 _PLUGIN = _HERE.parent
@@ -804,6 +804,52 @@ def audit(repo_root: Path, timeout: int = 120,
 _HISTORICAL_SUFFIX = "*_check.py"
 
 
+def _tracked_names(programs_dir: Path) -> Optional[Set[str]]:
+    """Basenames of the programs git TRACKS in `programs_dir`, or None.
+
+    THE POPULATION IS WHAT SHIPS, NOT WHAT IS ON SOMEBODY'S DISK (vibe-ic#511
+    follow-on). `programs_dir.glob(...)` answers "what is in this directory",
+    and on a working checkout that includes files nobody is landing: a lane's
+    scratch gate, a half-written program, an artefact another job left behind.
+    A gate whose verdict moves with the contents of the developer's working
+    copy is measuring the CHECKOUT, not the code.
+
+    MEASURED on a clean clone of main 0b2d38210: planting ONE untracked
+    `zz_lane_scratch_check.py` (a `[PASS]`-printing stub, 8 lines) into
+    `programs/` takes this check from rc 0 to rc 1 and turns exactly two ids of
+    `test_issue511_empty_project_pass_disclosure.py` red —
+    `test_standing_check_drives_every_gate_and_passes` (its `silent_gates`
+    exact-set equality gains a member on neither dated list) and
+    `test_standing_check_publishes_its_inventory_on_a_passing_run` (its
+    `returncode == 0`). Removing the file restores 37 passed. Nothing in the
+    committed tree changed in either direction.
+
+    NOTHING IS NARROWED THAT COULD EVER LAND. A file that is not tracked cannot
+    be in a landing, so every gate that ships is still in the population and the
+    exact-set equality above it is untouched. This removes a way for the answer
+    to change without the tree changing; it does not remove a question.
+
+    AN UNANSWERABLE GIT IS NOT AN EMPTY POPULATION. If `programs_dir` is not in
+    a work tree, or git is absent, or the listing comes back empty, this returns
+    None and the caller keeps the on-disk population it has always used — a
+    disclosed degrade. Reading an empty `git ls-files` as "there are no
+    programs" would be the zero-denominator false clean this whole module
+    exists to refuse; `_corpus_location` records the same doctrine for the
+    corpus ("an empty `git ls-files` is 'I could not look'").
+    """
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(programs_dir), "ls-files", "-z", "--", "*.py"],
+            capture_output=True, timeout=60)
+    except Exception:                                        # pragma: no cover
+        return None
+    if r.returncode != 0:
+        return None
+    names = {Path(p.decode("utf-8", "replace")).name
+             for p in r.stdout.split(b"\0") if p}
+    return names or None
+
+
 def project_population(programs_dir: Path) -> Tuple[List[Path], Dict]:
     """Every program the REPOSITORY recognises as a verdict emitter.
 
@@ -921,6 +967,20 @@ def project_population(programs_dir: Path) -> Tuple[List[Path], Dict]:
             no_entry.append(n)
     names -= set(no_entry)
     definition["no_entry_point"] = no_entry
+
+    # WHAT SHIPS, NOT WHAT IS ON DISK (see `_tracked_names`). Applied LAST so
+    # `by_suffix` / `by_behaviour` still report what each source saw, and the
+    # drop is published rather than silently folded into `total`.
+    tracked = _tracked_names(programs_dir)
+    if tracked is None:
+        definition["population_binding"] = "ON_DISK_UNVERIFIED"
+        definition["untracked_excluded"] = []
+    else:
+        definition["population_binding"] = "GIT_TRACKED"
+        dropped = sorted(names - tracked)
+        names &= tracked
+        definition["untracked_excluded"] = dropped
+
     definition["total"] = len(names)
     return sorted(programs_dir / n for n in names), definition
 
