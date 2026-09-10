@@ -120,6 +120,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 
@@ -369,17 +370,135 @@ def ngspice_env():
     return env
 
 
+#: The literal the defect used for every run on a host.
+_FIXED_NAME_THE_DEFECT_USED = ".vibeic_issue193_test"
+#: What every run's own directory starts with, before its per-run component.
+DECK_DIR_PREFIX = ".vibeic_issue193_"
+
+
+def own_deck_dir(host_root: Path) -> Path:
+    """Create and return a deck directory THIS run owns, under *host_root*.
+
+    A NAMED FUNCTION AND NOT FIXTURE-INLINE, so the property can be measured
+    where there is no ngspice. `ngspice_env` skips when no running container
+    exposes a writable verbatim bind-mount, which is exactly the environment
+    the falsifier and the land gate run in. A guard reached only through that
+    fixture therefore SKIPS with the defect restored, and a skip is not a red:
+    MEASURED on this branch as pushed, in the pinned image —
+
+        10 passed, 7 skipped
+
+    with both guards among the seven. The re-planted defect could not make them
+    fail because they never ran.
+
+    Callers get the same directory the fixture gets, so re-planting the defect
+    HERE trips the guards below; a guard that called `mkdtemp` itself would
+    stay green with the defect restored, which is the difference between
+    pinning a mechanism and pinning the property.
+    """
+    return Path(tempfile.mkdtemp(prefix=DECK_DIR_PREFIX, dir=str(host_root)))
+
+
 @pytest.fixture
 def workdir(ngspice_env):
+    """A deck directory THIS run owns, and no other.
+
+    THE DEFECT THIS CLOSES (measured 2026-09-10 on 8hd-3). This fixture used a
+    FIXED name, `<host_root>/.vibeic_issue193_test`, and `rmtree`d it on entry.
+    `host_root` is the first verbatim writable mount of the first container
+    `docker ps` happens to list — a container this test DOES NOT OWN. So two
+    runs of this file on one host chose the SAME directory, and each one's
+    entry deleted the other's decks mid-simulation.
+
+    Measured, two concurrent runs of this file alone on a private clone of
+    97990612f4b3, nothing else changed:
+
+        run A   15 passed
+        run B    2 failed  (test_ngspice_co_located_both_candidates_load,
+                            test_ngspice_split_and_non_self_contained_neither_candidate_loads)
+
+    The colour recorded which processes overlapped, not what the code does —
+    and on a busy host the chosen `host_root` was `/tmp` of `mr29-eda`, another
+    lane's container. The sweep that reported this file as 5 red ids runs beside
+    other lanes by construction.
+
+    `mkdtemp` gives each run its own directory under the same mount, so the
+    ngspice execution and every assertion are unchanged and only the collision
+    is gone. Nothing pre-existing is deleted: a fixture that removes a path it
+    did not create can destroy another lane's data, which is the same defect
+    seen from the other side."""
     _c, host_root, _n = ngspice_env
-    work = host_root / ".vibeic_issue193_test"
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
+    work = own_deck_dir(Path(host_root))
     try:
         yield work
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+
+
+def test_the_deck_directory_is_this_runs_own_not_a_shared_name(tmp_path):
+    """THE GUARD FOR THE CHOOSER, and it must run where there is no ngspice.
+
+    It drives the REAL `own_deck_dir` — an earlier draft called `mkdtemp`
+    itself and would have stayed GREEN with the defect restored, which is the
+    difference between pinning a mechanism and pinning the property. It takes
+    `tmp_path` rather than `workdir` for the reason this branch was refused:
+    `workdir` needs `ngspice_env`, which SKIPS with no live ngspice container,
+    so both guards skipped in the falsifier's arms (measured: 10 passed, 7
+    skipped) and the re-planted defect could not turn them red.
+
+    The defect: a FIXED name under `host_root`, `rmtree`d on entry. `host_root`
+    is the first verbatim writable mount of whatever container `docker ps`
+    lists — one this test does not own — so every concurrent run chose the same
+    directory and deleted the others' decks. Measured on a private clone of
+    97990612f4b3, two concurrent runs of this file alone:
+
+        run A   15 passed
+        run B    2 failed  (test_ngspice_co_located_both_candidates_load,
+                            test_ngspice_split_and_non_self_contained_neither_candidate_loads)
+
+    and the chosen root was `/tmp` of `mr29-eda`, another lane's container.
+    """
+    first = own_deck_dir(tmp_path)
+    second = own_deck_dir(tmp_path)      # a second, concurrent run
+
+    assert first != second, (
+        "two runs under one host_root chose the SAME directory — the "
+        "collision is possible, and each one's teardown deletes the other's "
+        f"decks: {first}")
+    for got in (first, second):
+        assert got.name != _FIXED_NAME_THE_DEFECT_USED, (
+            f"the deck directory is the shared literal "
+            f"{_FIXED_NAME_THE_DEFECT_USED!r}")
+        assert got.name.startswith(DECK_DIR_PREFIX), got.name
+        assert len(got.name) > len(DECK_DIR_PREFIX), (
+            f"{got.name!r} carries no per-run component, so two runs collide")
+        assert got.parent == tmp_path, (
+            f"{got} is not under the container-visible mount {tmp_path}")
+        assert got.is_dir() and not any(got.iterdir()), (
+            "the chooser handed back a directory that already had contents — "
+            "it did not create it, and a teardown would delete someone "
+            "else's data")
+
+
+def test_the_chooser_does_not_delete_a_directory_it_did_not_create(tmp_path):
+    """A run already holding the defect's literal must survive, decks intact.
+
+    The bystander is named EXACTLY what the defect used, because that is the
+    only name a re-planted defect would `rmtree`; a differently-named sibling
+    would survive the defect too and the guard would prove nothing.
+    """
+    victim = tmp_path / _FIXED_NAME_THE_DEFECT_USED
+    victim.mkdir()
+    (victim / "keepme").write_text("decks owned by a concurrent run\n")
+
+    work = own_deck_dir(tmp_path)
+
+    assert (victim / "keepme").is_file(), (
+        "the chooser removed a path it did not create — on a shared host that "
+        "is another lane's decks, deleted mid-simulation")
+    assert work != victim, f"the chooser handed back the bystander itself: {work}"
 
 
 def test_ngspice_split_staging_only_head_pick_loads(ngspice_env, workdir):

@@ -1,0 +1,61 @@
+MUTATION ARM for `test_issue193_custom_pdk_primary_selection_ngspice.py`.
+
+RE-PLANTS: the deck directory is a FIXED name under `host_root`,
+`.vibeic_issue193_test`, `rmtree`d on entry. That is the shipped defect
+verbatim — it is what live main carries today.
+
+WHY IT IS A DEFECT AND NOT A STYLE CHOICE. `host_root` is the first verbatim
+writable mount of the first container `docker ps` happens to list — a container
+this test does not own. So every concurrent run on the host chooses the SAME
+directory, and each one's setup deletes the other's decks mid-simulation. The
+file's colour then records which processes overlapped rather than what the code
+does, which is why the sweep — which runs beside other lanes by construction —
+reported 5 red ids that pass in isolation.
+
+MEASURED on a private clone of live main 97990612f4b3, two concurrent runs of
+this file alone, nothing else changed:
+
+    run A   15 passed
+    run B    2 failed  (test_ngspice_co_located_both_candidates_load,
+                        test_ngspice_split_and_non_self_contained_neither_candidate_loads)
+
+and the chosen root was `/tmp` of `mr29-eda`, ANOTHER LANE'S container. With
+the repair, four concurrent runs at loadavg 28.4 are 17 passed each, 0 failed.
+
+WHY THIS PATCH TARGETS `own_deck_dir` AND NOT THE FIXTURE BODY. The first
+version of this arm re-planted the defect inside the `workdir` fixture, and the
+lander refused the branch: MUTATION ARM DID NOT GO RED. The reason is measured,
+not guessed — both guards reached the chooser only through `workdir`, which
+depends on `ngspice_env`, and that fixture SKIPS when no running container
+exposes a writable verbatim bind-mount. In the pinned image, on the branch as
+first pushed:
+
+    10 passed, 7 skipped
+
+with both guards among the seven. A skipped test cannot go red, so the defect
+was invisible to the arm. The chooser is now a named function the guards drive
+directly against `tmp_path`, so this patch reaches them wherever they run.
+
+EXPECTED under this mutation, with no ngspice container present:
+`test_the_deck_directory_is_this_runs_own_not_a_shared_name` fails on the fixed
+literal AND on `first != second`, and
+`test_the_chooser_does_not_delete_a_directory_it_did_not_create` fails because
+the bystander's `keepme` is gone. The ngspice cases themselves are unaffected
+and stay skipped or green exactly as before — which is the whole point: the
+defect is invisible to them in isolation, and that is why the guards were owed.
+
+--- a/vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_issue193_custom_pdk_primary_selection_ngspice.py
++++ b/vibe-ic-marketplace/plugins/vibe-ic/programs/tests/test_issue193_custom_pdk_primary_selection_ngspice.py
+@@ -396,7 +396,11 @@ def own_deck_dir(host_root: Path) -> Path:
+     stay green with the defect restored, which is the difference between
+     pinning a mechanism and pinning the property.
+     """
+-    return Path(tempfile.mkdtemp(prefix=DECK_DIR_PREFIX, dir=str(host_root)))
++    work = Path(host_root) / _FIXED_NAME_THE_DEFECT_USED
++    if work.exists():
++        shutil.rmtree(work)
++    work.mkdir(parents=True)
++    return work
+ 
+ 
+ @pytest.fixture
