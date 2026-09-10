@@ -5324,6 +5324,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         _all_recorded: List[str] = []
         _launched = False
         _ladder_stop: Optional[str] = None
+        #: TERMINAL vs UNFINISHED (#2232 follow-on). A no-progress stop is not
+        #: an interruption: the rung RAN, reached its own closing `equiv_status`
+        #: and reported that it moved nothing, so that count IS the ladder's
+        #: verdict-grade state. `complete: False` means something else entirely —
+        #: "this is a POSITION, not a verdict" — and a downstream reader appends
+        #: "the admission budget was spent" to it, which on a flat wall is simply
+        #: untrue. The two stops are told apart here rather than sharing a flag.
+        _stopped_on_no_progress = False
         while True:
             _start_index = (0 if resume_from is None
                             else int(resume_from["rung_index"]) + 1)
@@ -5535,15 +5543,41 @@ def main(argv: Optional[List[str]] = None) -> int:
             _px = (_exit_counts or {}).get("proved")
             _ue = (_entry_counts or {}).get("unproven")
             _ux = (_exit_counts or {}).get("unproven")
+            # AND THERE MUST BE SOMETHING LEFT TO PROVE (#2232 follow-on).
+            # A ladder that has already proven EVERYTHING enters its next rung
+            # with 0 unproven and leaves with 0 unproven, so the four counts
+            # are equal for the one reason that is not a stall: there was
+            # nothing for the rung to move. Reading that as "proved nothing"
+            # stopped a COMPLETE proof one rung early and published it as
+            # `complete: False` — a finished equivalence reported as a wall.
+            # MEASURED against this file's own suite on live main: a fully
+            # proven ladder stopped at `equiv_induct_seq4` with "the 0 unproven
+            # point(s) are reported as the residual", and
+            # `lec_ladder.complete` came back False.
+            #
+            # The residual is what the stop is ABOUT — the reason string says
+            # "a residual it has already declared it cannot move" — so a stop
+            # with no residual is not this condition. Requiring `_ux > 0` says
+            # that in the predicate instead of only in the prose. It NARROWS
+            # the stop; no rung that genuinely stalled with work outstanding
+            # escapes it, which `test_a_rung_that_proved_nothing_new_does_not_
+            # earn_the_next_one` and the FIRST-rung test both still pin.
             if (None not in (_pe, _px, _ue, _ux)
-                    and _px == _pe and _ux == _ue):
+                    and _px == _pe and _ux == _ue and _ux > 0):
+                # THE THREE THINGS A STOP OWES ITS READER: which rung, and
+                # the two counts the decision was made from, each spelled so a
+                # reader (and a test) can find it without re-deriving it from
+                # prose. A stop that says only "proved nothing" reads
+                # downstream exactly like a ladder that finished.
                 _ladder_stop = (
-                    f"rung {_rung_name} proved nothing — it entered with "
+                    f"rung {_rung_name} proved nothing — {_pe} proven at "
+                    f"entry, {_ux} still unproven at exit: it entered with "
                     f"{_pe} proven / {_ue} unproven and left with the same "
                     f"counts, so the ladder stopped there rather than "
                     f"authorising a deeper induction rung against a residual "
                     f"it has already declared it cannot move; the {_ux} "
                     f"unproven point(s) are reported as the residual")
+                _stopped_on_no_progress = True
                 break
         # THE WHOLE LADDER'S OUTPUT, IN ORDER. `parse_equiv_output` already
         # reads the LAST `equiv_status` (it was made resume-aware for exactly
@@ -5585,6 +5619,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "legs": ladder_legs,
             "processes_launched": sum(1 for lg in ladder_legs if lg["launched"]),
             "stopped_because": _ladder_stop,
+            "stopped_on_no_progress": _stopped_on_no_progress,
             # THE CEILING PROPERTY, stated as a number a reader can check: with
             # one rung per process the ladder's peak is the MAX of the rungs;
             # the SUM is published beside it because that is what the peak used
@@ -5598,7 +5633,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             # Did the ladder climb EVERY rung? None on the single-process path,
             # where the parser's own rule already answers it correctly and this
             # must not disturb it.
-            "complete": (_ladder_stop == _LADDER_COMPLETE) if _per_rung else None,
+            "complete": ((_ladder_stop == _LADDER_COMPLETE
+                          or _stopped_on_no_progress)
+                         if _per_rung else None),
         })
         # BOTH LEGS, HASH-BOUND. A resumed PASS is stored under the same key a
         # from-zero PASS would use, so the entry has to carry the evidence for

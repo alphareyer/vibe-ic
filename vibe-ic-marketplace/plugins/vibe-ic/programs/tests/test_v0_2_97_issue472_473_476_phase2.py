@@ -45,6 +45,7 @@ for _p in (str(_PROGRAMS), str(_TESTS_DIR)):
 import design_one_shot_runner as p2  # noqa: E402
 
 import _container_guard as _cg  # noqa: E402
+from not_verified_tier import not_verified_reason  # noqa: E402
 
 #: #2230 — THE CONTAINER THIS FILE NAMES. `test_476_oracle_run_loads_firmware_
 #: via_staged_hex` hands `container="vibeic-eda"` to the runner, and this file
@@ -459,8 +460,17 @@ def test_476_stage_readmem_missing_source_is_skipped(tmp_path):
     reason="iverilog/vvp not available for end-to-end oracle run")
 @pytest.mark.skipif(
     not _HAVE_PINNED_CONTAINER,
-    reason=f"{_ORACLE_CONTAINER} is not the pinned runtime here (#2230) — "
-           "absent, or a container of that name running other bytes")
+    # DECLARED, not merely skipped (vibe-ic#1128). What is out of reach here is
+    # the thing this test verifies WITH — the pinned runtime — so the skip owes
+    # the reader the sentence "this verification did not happen", and a remedy.
+    # The #2230 guard that decides this flag was landed by me in v1.20.41 with a
+    # bare `reason=`, which is exactly the undeclared-skip shape
+    # `test_no_new_undeclared_infrastructure_skip_appears` exists to refuse; it
+    # has been red on main since. Same skip, now audible.
+    reason=not_verified_reason(
+        f"{_ORACLE_CONTAINER} is not the pinned runtime here (#2230) — "
+        "absent, or a container of that name running other bytes",
+        "bash tools/vibeic-eda/restart-eda.sh"))
 def test_476_oracle_run_loads_firmware_via_staged_hex(tmp_path):
     """## 驗收 (476): TB with a relative $readmemh + hex in TB dir → the
     staged run cwd contains the hex (or cwd strategy resolves it) and the
