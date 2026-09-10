@@ -30,8 +30,28 @@ import sys as _cg_sys
 from pathlib import Path as _cg_path
 _cg_sys.path.insert(0, str(_cg_path(__file__).resolve().parent))
 import _container_guard as _cg  # noqa: E402
+_cg_sys.path.insert(0, str(_cg_path(__file__).resolve().parents[1]))
+import _eda_pin as _pin  # noqa: E402 — the ONE place the pin/name is stated
 
-_CONTAINER = "vibeic-eda"
+# THE NAME THE RUNTIME ITSELF DERIVES, not the bare shared literal.
+#
+# #2230 replaced this file's `docker inspect .State.Running` probe with
+# `container_usable`, which turned "a container of that name runs other bytes"
+# from a red into a skip. That fixed the PROBE and left the NAME: `vibeic-eda`
+# is guessable and shared, nothing in this repo ever creates it, and whichever
+# lane reached it first is what the question was being asked about.
+#
+# MEASURED 2026-09-10 on 8HD-8: the bare name is held by a four-day-old
+# container of image 06537f7e8d3c while the pin is 89a8fd729520, so the guard
+# correctly refused it — and the two TestPhase2IverilogTbFallbackEndToEnd ids
+# SKIPPED even though the pinned runtime was genuinely present under its
+# derived name. A skip is not a pass; the live path was simply unreachable.
+#
+# `default_container_name()` carries the pin digest, so it cannot be squatted,
+# and it is the container `_iverilog_compile_with_sv_fallback` — which takes
+# this very value as its `container` argument — will actually exec into.
+_CONTAINER = _pin.default_container_name()
+
 
 # A genuine modern-SystemVerilog repro that BOTH default frontends
 # (`read_verilog -sv`, `iverilog -g2012`) reject — a package-scoped
@@ -328,9 +348,25 @@ endmodule
             f"TB fallback did not use sv2v: rc={rc} err={err[-600:]}"
         assert rc == 0
         assert vvp.is_file()
-        # And the compiled image actually runs.
-        r_rc, r_out, _ = p2._run(["vvp", str(vvp)], cwd=run_dir, timeout=60)
-        assert "TB_DONE" in r_out
+        # And the compiled image actually runs — IN THE RUNTIME THAT BUILT IT.
+        #
+        # This used to run `vvp` on the HOST while the sv2v fallback above had
+        # just compiled the image INSIDE the container, and a vvp image is not
+        # portable across Icarus versions. MEASURED 2026-09-10 on 8HD-8:
+        #
+        #   host      Icarus 11.0 (stable)
+        #   container Icarus 14.0 (devel)
+        #   vvp       "VVP input file 14.0 can not be run with run time
+        #              version 11.0 (stable)"
+        #
+        # The assertion was therefore about whether one machine's Icarus
+        # happened to match the pinned image's, which is a fact about the host
+        # and not about the fallback this test exists to pin. Nothing is
+        # widened: the test still demands TB_DONE, it just asks the toolchain
+        # that produced the artefact to run it.
+        r_rc, r_out, r_err = p2._run_iverilog_stage(
+            ["vvp", str(vvp)], run_dir, _CONTAINER, timeout=60)
+        assert "TB_DONE" in r_out, f"rc={r_rc} {r_out[-400:]} {r_err[-400:]}"
 
     def test_real_defect_still_fails_no_false_recovery(self, tmp_path):
         # Honesty gate end-to-end: a genuine RTL defect (a .v DUT with a
@@ -429,3 +465,62 @@ def test_synth_dsynthesis_signatures_superset_of_verilator():
     # signature (so the shared retry doctrine is not duplicated/divergent).
     for s in _sfmod.VERILATOR_SIMONLY_CONSTRUCT_SIGNATURES:
         assert s in _sfmod.SYNTH_FRONTEND_SIMONLY_CONSTRUCT_SIGNATURES
+
+
+# ---------------------------------------------------------------------------
+# CONTROLS for the two repairs above, hermetic so they run where the live path
+# cannot. The falsifier runs pytest INSIDE the pinned image, which carries no
+# docker client, so every container-gated test there skips; a claim that only
+# the live path can falsify is a claim nothing in CI ever checks.
+# ---------------------------------------------------------------------------
+def test_the_container_name_is_derived_from_the_pin_not_a_bare_literal():
+    """`_CONTAINER` must be COMPUTED, never a string constant.
+
+    The bare literal `vibeic-eda` is guessable and shared; nothing in this repo
+    ever creates it, so it can only ever be somebody else's container. Asking
+    about it asks which lane won a race for a name. This control sits behind
+    that mechanism rather than restating it: it reads this module's own AST and
+    refuses a constant, so re-planting the literal fails HERE and not only on a
+    host that happens to hold the pinned runtime.
+    """
+    import ast
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    found = [n for n in tree.body
+             if isinstance(n, ast.Assign)
+             and any(getattr(t, "id", None) == "_CONTAINER" for t in n.targets)]
+    assert len(found) == 1, f"expected one _CONTAINER assignment, got {len(found)}"
+    value = found[0].value
+    assert not isinstance(value, ast.Constant), (
+        "_CONTAINER is a bare string constant. The container this file execs "
+        "into must be the pin-derived name `_eda_pin.default_container_name()`, "
+        "which carries the digest and cannot be squatted.")
+    assert isinstance(value, ast.Call), f"_CONTAINER is not derived: {ast.dump(value)}"
+
+
+def test_the_compiled_image_is_run_by_the_runtime_that_built_it():
+    """The vvp image must not be executed on the host after a container build.
+
+    A vvp image is not portable across Icarus versions. MEASURED 2026-09-10 on
+    8HD-8: host Icarus 11.0, pinned container 14.0, and the host `vvp` refused
+    the container-built image with "VVP input file 14.0 can not be run with run
+    time version 11.0". That assertion was about whether one machine's Icarus
+    matched the pinned image's — a fact about the host, not about the fallback
+    this file exists to pin.
+    """
+    import ast
+    src = Path(__file__).read_text(encoding="utf-8")
+    body = ast.parse(src)
+    fn = None
+    for node in ast.walk(body):
+        if isinstance(node, ast.FunctionDef) and \
+                node.name == "test_sv2v_prepass_lets_iverilog_compile":
+            fn = node
+    assert fn is not None, "the end-to-end test was renamed; update this control"
+    attrs = {getattr(n.func, "attr", None) for n in ast.walk(fn)
+             if isinstance(n, ast.Call)}
+    assert "_run_iverilog_stage" in attrs, (
+        "the compiled image is not run through the runner's own stage "
+        "dispatcher. `design_one_shot_runner` already runs vvp where the .vvp "
+        "was built — 'host-only vvp cannot run a container-compiled image' is "
+        "its own comment — and a test that calls `_run` directly bypasses that "
+        "decision and measures which Icarus the host happens to carry.")
