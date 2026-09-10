@@ -2414,6 +2414,24 @@ def _check_ir_drop(project_dir: Path) -> AuditResult:
     # budget. Values-present-only reports (legacy) gate as before.
     budget_ok = True
     worst_uv = budget_uv = None
+    # A COVERAGE-INCOMPLETE run is NOT_MEASURED, never a budget pass. The
+    # producer writes, in this same file, which power nets `analyze_power_grid`
+    # REFUSED (`nets_analysis_failed`) and what that does to the number
+    # (`verdict_basis`). A refused net emits no `IR drop` line, so the worst
+    # case is the worst of the nets that SUCCEEDED -- the failure makes the
+    # number SMALLER and the budget likelier to pass. Reading only
+    # `worst_ir_uv`/`budget_uv` therefore converts a partial analysis into a
+    # clean pass. MEASURED on u_hawaii_adc (ihp-sg13g2, reports/phase3):
+    # ir_drop.json `verdict: "FAIL"`, `nets_analysis_failed: ["IOVDD"]`,
+    # `verdict_basis: "... the worst-case IR reported is the worst of the nets
+    # that SUCCEEDED and is not a statement about the design"` -- and beside it
+    # ir_drop_signoff.json `passed: true, ir_within_budget: true`.
+    # `ir_within_budget` becomes None (NOT_MEASURED) rather than False: the
+    # gate must not claim the design is OVER budget either, because the
+    # population it would be claiming that over is the incomplete one.
+    ir_coverage_complete = True
+    nets_failed: list = []
+    producer_verdict = None
     for rel in ("reports/phase3/ir_drop.json", "reports/ir_drop.json"):
         jp = project_dir / rel
         if not jp.is_file():
@@ -2422,6 +2440,26 @@ def _check_ir_drop(project_dir: Path) -> AuditResult:
             jd = json.loads(jp.read_text(errors="replace"))
         except (OSError, ValueError):
             continue
+        if isinstance(jd, dict):
+            raw_failed = jd.get("nets_analysis_failed")
+            if isinstance(raw_failed, list) and raw_failed:
+                nets_failed = [str(n) for n in raw_failed]
+            producer_verdict = jd.get("verdict")
+            if nets_failed or producer_verdict == "FAIL":
+                ir_coverage_complete = False
+                because = (
+                    f"the grid analysis REFUSED {len(nets_failed)} power net(s) "
+                    f"({', '.join(nets_failed)})" if nets_failed
+                    else "the producer recorded verdict FAIL")
+                result.findings.append(Finding(
+                    rule="IR_COVERAGE_INCOMPLETE", severity="ERROR",
+                    message=(
+                        f"{because}, so the reported worst-case IR is the worst "
+                        f"of the nets that SUCCEEDED and is NOT a statement "
+                        f"about the design. Recorded NOT_MEASURED: a refused "
+                        f"net makes the number smaller and the budget likelier "
+                        f"to pass."),
+                    file=rel))
         if isinstance(jd, dict) and isinstance(
                 jd.get("worst_ir_uv"), (int, float)) and isinstance(
                 jd.get("budget_uv"), (int, float)):
@@ -2435,13 +2473,18 @@ def _check_ir_drop(project_dir: Path) -> AuditResult:
                     file=rel))
         break
 
-    result.passed = own_design and has_drop and authentic and budget_ok
+    result.passed = (own_design and has_drop and authentic and budget_ok
+                     and ir_coverage_complete)
     result.subject_files = [str(f) for f in files]
     result.summary = {"files_found": len(files), "has_drop_value": has_drop,
                       "design_binding": design_binding,
                       "tool_authentic": authentic,
                       "worst_ir_uv": worst_uv, "budget_uv": budget_uv,
-                      "ir_within_budget": budget_ok}
+                      "ir_within_budget": (budget_ok if ir_coverage_complete
+                                           else None),
+                      "ir_coverage_complete": ir_coverage_complete,
+                      "ir_nets_analysis_failed": nets_failed,
+                      "ir_producer_verdict": producer_verdict}
     return result
 
 
