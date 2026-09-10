@@ -994,8 +994,23 @@ _LANDING_SCRIPT_SHA256 = (
 #   run_repo_tools_pytest               95de055aebcd…   unmoved, untouched
 #   run_unselectable_pytest             aac62e70f0eb…   unmoved, untouched
 #   _SEMANTIC_DRIVER_SHA256   a50922ce5e5c… -> 1912a288b458…      MOVED
+#
+# RE-PINNED AGAIN for vibe-ic#2219, under the same rule stated above. The driver
+# change is confined to `_run_progress_supervised`'s OUTPUT STRING: on a session
+# the supervisor stopped (`result.outcome != "natural"`) it now prints
+# PROGRESS_PROTOCOL_NOT_MEASURED instead of PROGRESS_PROTOCOL_INCOMPLETE, and
+# still prints the observed stream after the reason. Measured against what this
+# pin protects, NOTHING this file checks moved: `protocol_complete` is still
+# False on that path and the `incomplete = (result.outcome != "natural" or ...)`
+# line is byte-identical, so the run's VERDICT is unchanged. Proved, not
+# asserted: with only the digest re-pinned, `_semantic_driver_contract_errors`
+# returned EXACTLY ONE error — the digest — so the structural half was already
+# clean; and the driver's five test modules plus this file's own module went
+# 12 failed/225 passed -> 0 failed/237 passed on the same tree.
+#
+#   _SEMANTIC_DRIVER_SHA256   981d5c5d8e1a… -> f92c0ae944f9…      MOVED
 _SEMANTIC_DRIVER_SHA256 = (
-    '981d5c5d8e1ac7051b0682c036a734335fc5f96e3ce717b9fadd355fcc19157e'
+    'f92c0ae944f9b5306e92a736bff84703f78b9a20c85c2f0606288cfe36acee32'
 )
 #: `pip install pytest-timeout` names the plugin, not a bound; it carries no
 #: `--timeout=N` and so cannot match, but the negative is stated because a

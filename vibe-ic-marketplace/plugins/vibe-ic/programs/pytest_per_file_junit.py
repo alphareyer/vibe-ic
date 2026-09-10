@@ -2388,7 +2388,36 @@ def _run_progress_supervised(
                 f"survivors={sorted(cleanup_survivors)}; "
                 f"census_ok={cleanup_census_ok}\n")
     if not protocol_complete:
-        out += f"\nPROGRESS_PROTOCOL_INCOMPLETE: {protocol_error}\n"
+        # WE STOPPED IT, SO ITS PROTOCOL IS NOT_MEASURED -- NOT INCOMPLETE
+        # (vibe-ic#2219). `probe.complete()` reports the stream as it stands.
+        # On a session the supervisor KILLED, the stream stands one event short
+        # BECAUSE WE ENDED IT, and `terminal event missing (stage=running)` then
+        # reads as a finding about the SUBJECT's conformance. It is not one: the
+        # subject was never given the chance to reach its terminal event. The
+        # run that opened #2219 printed both lines together --
+        #
+        #     WATCHDOG_STALLED: ... did not advance for > 2.5s -- killed as hung
+        #     PROGRESS_PROTOCOL_INCOMPLETE: m.66.1.jsonl: terminal event missing
+        #                                   (stage=running)
+        #
+        # -- and the second one is the supervisor grading the subject on an exam
+        # the supervisor cancelled. A reader, or anything counting protocol
+        # failures, books a defect against a subject that was behaving perfectly.
+        #
+        # NOTHING IS RELAXED. `protocol_complete` stays False, and `incomplete`
+        # below already contains `result.outcome != "natural"`, so the VERDICT
+        # for this run is bit-for-bit what it was. What changes is only what the
+        # run SAYS: an unmeasured thing stops being reported as a measured
+        # failure. The observed state is still printed, after the reason, so no
+        # information is lost -- it is re-attributed, not withheld.
+        if result.outcome != "natural":
+            out += (f"\nPROGRESS_PROTOCOL_NOT_MEASURED: the supervisor stopped "
+                    f"this session ({result.outcome}), so its progress protocol "
+                    f"was never given the chance to finish; this is NOT a "
+                    f"finding about the subject. Stream as it stood when we "
+                    f"ended it: {protocol_error}\n")
+        else:
+            out += f"\nPROGRESS_PROTOCOL_INCOMPLETE: {protocol_error}\n"
     incomplete = (result.outcome != "natural" or bool(leaked)
                   or not post_exit_cleanup_ok or not protocol_complete)
     if outcome_sink is not None:
