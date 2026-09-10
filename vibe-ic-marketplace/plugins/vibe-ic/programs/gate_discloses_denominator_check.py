@@ -867,8 +867,28 @@ def project_population(programs_dir: Path) -> Tuple[List[Path], Dict]:
     definition["suffix_source"] = (
         "FALLBACK" if definition["degraded"]
         else "checker_execution_wiring_audit.py")
+    # THE NAMES THIS WALK SAW, PER PATTERN, PUBLISHED — so a caller asking
+    # "does the derived population cover the old `*_check.py` glob?" can ask
+    # THIS answer instead of globbing the directory a second time.
+    #
+    # WHY, MEASURED. `programs_dir` is a live tree, and on a shared worktree a
+    # peer lane lands files into it while this runs. A caller that globs
+    # separately is comparing two different directory states: run with one
+    # `*_check.py` created between the two reads, `old - derived` came back
+    #
+    #     ['zzz_concurrent_lane_check.py']   -> the assertion FAILS
+    #
+    # and with no concurrent write it came back `[]`. The file was in the
+    # derived population all along; it simply was not in the older listing.
+    # That is a fact about the directory changing, not about this selection,
+    # and it is exactly the shape #511 exists to refuse: a verdict that reads
+    # like a finding and measures the machine.
+    by_pattern: Dict[str, List[str]] = {}
     for pat in suffixes:
-        names |= {f.name for f in programs_dir.glob(pat)}
+        hit = sorted(f.name for f in programs_dir.glob(pat))
+        by_pattern[pat] = hit
+        names |= set(hit)
+    definition["suffix_names"] = by_pattern
     definition["by_suffix"] = len(names)
 
     if _cps is not None and not definition["degraded"]:

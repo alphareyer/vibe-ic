@@ -243,12 +243,52 @@ def test_the_definition_is_on_stderr_of_a_passing_run(tmp_path):
 
 
 def test_the_shipped_population_is_a_strict_superset_of_the_old_glob():
-    derived = {p.name for p in GD.project_check_programs(PROGRAMS)}
-    old = {p.name for p in PROGRAMS.glob("*_check.py")}
+    """ONE directory read, not two compared against each other.
+
+    This used to glob `*_check.py` itself, next to `project_check_programs`'s
+    own walk of the same live tree, and assert one covered the other. On a
+    shared worktree that is a race, and it is the race that reddened this file
+    in the whole-suite sweep at 9c653d47f1 while the file passed ALONE at that
+    same tree (17 passed) and alone at the tip (17 passed). Demonstrated
+    directly: create one `*_check.py` between the two reads and `old - derived`
+    is `['zzz_concurrent_lane_check.py']`; create nothing and it is `[]`.
+
+    The population is now taken from the walk that BUILT it — `project_
+    population` publishes the names it saw per suffix — so the assertion is
+    about the selection and not about whether the directory moved. It can still
+    fail: a `*_check.py` the entry-point filter drops is still `old - derived`.
+    """
+    paths, definition = GD.project_population(PROGRAMS)
+    derived = {p.name for p in paths}
+    old = set(definition["suffix_names"]["*_check.py"])
     assert old - derived == set(), sorted(old - derived)[:10]
     assert len(derived) > len(old)
     # The instance that motivated this is IN, by name and by behaviour.
     assert "analog_netlist_path_lint.py" in derived
+
+
+def test_the_published_suffix_names_are_the_walk_that_built_the_population():
+    """The new answer is the SAME walk, and it is not a second authority.
+
+    Both directions. Every published name for a suffix must be a real file, and
+    the union over every suffix must cover the derived population apart from
+    the two documented removals — the behaviour-only additions, which are not
+    suffix hits, and the entry-point drops, which the same definition names.
+    """
+    paths, definition = GD.project_population(PROGRAMS)
+    by_pattern = definition["suffix_names"]
+    assert set(by_pattern) == set(definition["suffixes"])
+    for pat, names in by_pattern.items():
+        assert names == sorted(set(names)), pat
+        for n in names:
+            assert (PROGRAMS / n).is_file(), (pat, n)
+    union = {n for names in by_pattern.values() for n in names}
+    assert union, "an empty suffix walk would make the check above vacuous"
+    dropped = set(definition["no_entry_point"])
+    derived = {p.name for p in paths}
+    # Nothing the suffix walk saw may vanish from the population unaccounted
+    # for; the only permitted absence is the drop the definition itself names.
+    assert (union - derived) <= dropped, sorted((union - derived) - dropped)[:10]
 
 
 # ── 6. the second exemption list is dated, reasoned and ratcheted ──────────
