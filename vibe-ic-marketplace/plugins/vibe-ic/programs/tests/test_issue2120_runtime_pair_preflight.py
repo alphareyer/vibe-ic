@@ -610,25 +610,114 @@ def test_CONTROL_resume_with_nothing_to_run_is_not_blocked_by_the_pair(
 
 
 def test_every_conditional_fan_out_in_resume_is_guarded():
-    """MEMBERSHIP, not a count. A fourth fan-out added later must be guarded
-    too, and the way to notice is to compare the SET of `_ordered_parallel_map`
-    call sites in the resume coordinator against the SET that is preceded by
-    the guard — never to assert 'there are three'."""
+    """MEMBERSHIP, not a count — and DOMINANCE, not adjacency.
+
+    A fourth fan-out added later must be guarded too, and the way to notice is
+    to compare the SET of `_ordered_parallel_map` call sites in the resume
+    coordinator against the SET that a guard actually protects — never to
+    assert "there are three".
+
+    WHAT "PROTECTED" MEANS, and why it is not a line distance. This assertion
+    used to read `any(0 < line - g < 12 for g in guards)`: a guard counted only
+    if it sat within eleven PHYSICAL LINES above the fan-out. MEASURED on live
+    main ff3e383fb: the three fan-outs are at 5185 / 5336 / 5587 and their
+    three guards at 5182 / 5322 / 5583 — a correct 1:1 pairing, each guard
+    dominating its own fan-out — yet the middle pair is 14 lines apart because
+    a nine-line nested `def _run_completed_backup` sits between them, and the
+    test went red on a tree whose guards are all present and all effective.
+    Eleven was a fact about the file's layout, not about the code: any comment,
+    helper or intervening statement moves it, and widening the number just
+    picks the next literal that happens to hold today.
+
+    So the property is asked STRUCTURALLY instead. For each fan-out, walk the
+    chain of statement blocks that reaches it and require an EARLIER statement
+    on that chain to bind a `_runtime_pair_before_fan_out` verdict to a name
+    AND a later-but-still-earlier statement to act on it with
+    `if <name> is not None: return <name>`. That is what the guard is for, it
+    holds at any distance, and it is STRICTER than the line test was: a guard
+    whose verdict is computed and then dropped on the floor used to satisfy the
+    old assertion purely by sitting close enough.
+    """
     import ast                                             # noqa: PLC0415
     src = (_PROGRAMS / "benchmark_dispatch.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     resume = next(n for n in ast.walk(tree)
                   if isinstance(n, ast.FunctionDef)
                   and n.name == "_cmd_resume_locked")
-    def _called(fn):
-        return {n.lineno for n in ast.walk(resume)
+
+    def _called(node, fn):
+        return {n.lineno for n in ast.walk(node)
                 if isinstance(n, ast.Call)
                 and getattr(n.func, "id", None) == fn}
-    fan_outs = _called("_ordered_parallel_map")
-    guards = _called("_runtime_pair_before_fan_out")
+
+    fan_outs = _called(resume, "_ordered_parallel_map")
+    guards = _called(resume, "_runtime_pair_before_fan_out")
     assert fan_outs, "the resume coordinator fans out somewhere"
     assert len(guards) == len(fan_outs), (
         f"fan-outs at {sorted(fan_outs)} but guards at {sorted(guards)}")
-    for line in fan_outs:
-        assert any(0 < line - g < 12 for g in guards), (
-            f"the fan-out at line {line} is not preceded by a pair guard")
+
+    def _spans(stmt, line):
+        return stmt.lineno <= line <= (getattr(stmt, "end_lineno", None)
+                                       or stmt.lineno)
+
+    def _chain(block, line, acc):
+        """[(block, index)] from outermost to innermost reaching `line`."""
+        for i, st in enumerate(block):
+            if not _spans(st, line):
+                continue
+            acc.append((block, i))
+            for field in ("body", "orelse", "finalbody", "handlers"):
+                sub = getattr(st, field, None)
+                if not isinstance(sub, list):
+                    continue
+                for entry in sub:
+                    inner = (entry.body if isinstance(entry, ast.ExceptHandler)
+                             else None)
+                    if inner is not None and any(_spans(s, line) for s in inner):
+                        return _chain(inner, line, acc)
+                if sub and isinstance(sub[0], ast.stmt) and any(
+                        _spans(s, line) for s in sub):
+                    return _chain(sub, line, acc)
+            return acc
+        return acc
+
+    def _is_refusal_return(stmt, name):
+        test = getattr(stmt, "test", None)
+        return (isinstance(stmt, ast.If)
+                and isinstance(test, ast.Compare)
+                and len(test.ops) == 1
+                and isinstance(test.ops[0], ast.IsNot)
+                and isinstance(test.left, ast.Name)
+                and test.left.id == name
+                and isinstance(test.comparators[0], ast.Constant)
+                and test.comparators[0].value is None
+                and any(isinstance(b, ast.Return) for b in stmt.body))
+
+    def _acted_on_guard_before(block, stop):
+        """True when the LAST guard bound before `stop` is also acted on.
+
+        KEYED ON THE BINDING, NOT ON THE NAME. All three call sites bind their
+        verdict to the same identifier `gate_rc`, so asking merely "is some
+        `gate_rc` early-returned somewhere above" lets the FIRST fan-out's
+        guard vouch for a later one that has none — MEASURED: with the
+        ai-backup `if gate_rc is not None: return gate_rc` deleted, that
+        spelling still passed. Re-binding therefore RESETS the evidence: the
+        verdict in hand at the fan-out is the one that must have been obeyed.
+        """
+        held, obeyed = None, False
+        for st in block[:stop]:
+            if isinstance(st, ast.Assign) and _called(
+                    st, "_runtime_pair_before_fan_out"):
+                names = [t.id for t in st.targets if isinstance(t, ast.Name)]
+                if names:
+                    held, obeyed = names[0], False
+            elif held is not None and _is_refusal_return(st, held):
+                obeyed = True
+        return held is not None and obeyed
+
+    for line in sorted(fan_outs):
+        chain = _chain(resume.body, line, [])
+        assert chain, f"the fan-out at line {line} is not inside the coordinator"
+        assert any(_acted_on_guard_before(block, i) for block, i in chain), (
+            f"the fan-out at line {line} is not dominated by a pair guard "
+            f"whose verdict is returned on refusal")

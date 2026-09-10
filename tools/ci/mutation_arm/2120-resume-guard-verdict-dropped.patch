@@ -1,0 +1,35 @@
+MUTATION ARM for `test_issue2120_runtime_pair_preflight.py`.
+
+RE-PLANTS: the guard is still CALLED but its verdict is dropped on the floor —
+the `_runtime_pair_before_fan_out(...)` call stays, its
+`if gate_rc is not None: return gate_rc` is deleted. The call site looks guarded
+and refuses nothing.
+
+THIS IS THE ONE THE OLD ASSERTION COULD NOT SEE. The pre-fix test asked only
+whether a guard sat within eleven physical lines above the fan-out, never
+whether anything acted on it, so this mutant satisfied it. It also defeated the
+FIRST draft of the repair: all three call sites bind their verdict to the same
+identifier, so a check keyed on the NAME let the retry fan-out's guard vouch for
+the ai-backup one. Keying on the BINDING — a re-bind resets the evidence — is
+what kills it.
+
+MEASURED at live main ff3e383fbe887bc25a15b8894d376e8884c5c1fe, host 8hd-3,
+2026-09-10: tree G = 22 passed; tree M = 1 failed, 21 passed, killed at the
+DOMINANCE assertion, which names the site:
+
+    AssertionError: the fan-out at line 5334 is not dominated by a pair guard
+    whose verdict is returned on refusal
+
+diff --git a/vibe-ic-marketplace/plugins/vibe-ic/programs/benchmark_dispatch.py b/vibe-ic-marketplace/plugins/vibe-ic/programs/benchmark_dispatch.py
+index 8870a85..4f8ce3d 100755
+--- a/vibe-ic-marketplace/plugins/vibe-ic/programs/benchmark_dispatch.py
++++ b/vibe-ic-marketplace/plugins/vibe-ic/programs/benchmark_dispatch.py
+@@ -5321,8 +5321,6 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
+     backup_run_plans = [p for p in backup_plans if p["kind"] == "run"]
+     gate_rc = _runtime_pair_before_fan_out(backup_run_plans, run_p,
+                                            "resume:ai-backup")
+-    if gate_rc is not None:
+-        return gate_rc
+     def _run_completed_backup(job):
+         pid = job[0]
+         plan = next(p for p in backup_run_plans if p["id"] == pid)
