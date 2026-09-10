@@ -1844,8 +1844,49 @@ def _check_drc(project_dir: Path) -> AuditResult:
     # that disagree cannot both be zero — but a verdict that depends on that
     # coincidence would be silently undone by any later change to how the total
     # is formed, and this is the whole decision being added.
+    # A ZERO NOBODY CORROBORATED IS NOT A MEASURED ZERO (sha256 sign-off DRC).
+    #
+    # MEASURED on the sha256 sign-off tree (lane rbsha5, 2026-09-08, v1.19.29,
+    # sky130A). `reports/phase3/drc_signoff.json` shipped:
+    #
+    #     passed true · real_violation_total 0 · has_count FALSE
+    #     tool_corroborated_files 0 · tool_uncorroborated_files 1
+    #     empty_report_files 0 · determined_files 1
+    #
+    # The 22 385-byte KLayout RDB it read carries the deck's full rule list and
+    # ZERO `<item>` and ZERO `<values>` elements. The gate credited that as a
+    # determined zero, while its own finding said `DRC_VIOLATION_COUNT: No
+    # violation count pattern found in DRC report`. A sign-off DRC verdict of
+    # "clean" was therefore formed from a report that stated no count and that
+    # nothing corroborated -- a zero produced by not looking.
+    #
+    # THE EMPTY RULING IS UNTOUCHED, and the guard is written so it cannot
+    # reach it. The 2026-08-30 decision is that a PRESENT and EMPTY report is a
+    # legitimate zero (OpenROAD writes a zero-byte file exactly when the route
+    # is clean), and that case has `empty_report_files > 0`; this condition
+    # requires `not empty`, so an empty report still reads as clean and the
+    # measured spm case that ruling was made on does not move.
+    #
+    # NOR IS THIS A RELAXATION IN THE OTHER DIRECTION: it can only ever turn a
+    # PASS into a refusal, never a FAIL into a pass. `real_total > 0` already
+    # fails, and this clause is reached only when the total is zero.
+    _uncorroborated_zero = (real_total == 0 and not has_count
+                            and determined_files > 0
+                            and tool_corroborated == 0 and not empty)
+    if _uncorroborated_zero:
+        result.findings.append(Finding(
+            rule="DRC_ZERO_NOT_MEASURED", severity="ERROR",
+            message=(
+                f"{determined_files} discovered DRC report(s) yielded a total "
+                f"of 0, but NO report stated a violation count and NONE was "
+                f"corroborated by the tool's own total, and none of them is "
+                f"empty. This is NOT_MEASURED, not clean: a sign-off gate may "
+                f"not certify a design on a zero it did not establish. "
+                f"An EMPTY report is a legitimate zero and is not this."),
+            file=best_file))
     result.passed = (own_design and determined_files > 0 and real_total == 0 and authentic
-                     and not unreadable and not contradictions)
+                     and not unreadable and not contradictions
+                     and not _uncorroborated_zero)
     result.subject_files = [str(f) for f in files]
     result.summary = {"files_found": len(files), "categories_found": cats_found,
                       "design_binding": design_binding,
