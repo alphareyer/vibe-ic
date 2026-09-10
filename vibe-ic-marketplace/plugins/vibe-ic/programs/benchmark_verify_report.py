@@ -28,7 +28,7 @@ silent PASS):
   analog/analog_block_list.json      (presence => analog applicable)
   reports/spare_cell_coverage.json   {"status":"PASS"|.., density/distribution/tie-off readiness}
   reports/spare_preservation.json    {"all_keep_attr_intact":bool, "removed":N}
-  cross_check/**/step_<id>.md        per-step OURS-vs-REF verdict (first line w/ verdict token)
+  cross_check/**/step_<id>.json      machine-verifiable per-step OURS-vs-REF receipt
   SOURCE_MANIFEST.md                 GENERATED vs REUSED-IP tally
 
 The Design-for-ECO gate (pillar 6) is owned methodologically by the
@@ -42,7 +42,7 @@ Usage:
       [--flow <phase1_phase2_phase3.yaml>] [--out <report.md>]
 """
 from __future__ import annotations
-import argparse, json, re, sys, glob, os
+import argparse, hashlib, json, re, sys, glob, os
 from pathlib import Path
 
 VERDICT_TOKENS = ["MATCH", "EQUIVALENT", "IN-RANGE", "BOTH-CLEAN", "PASS",
@@ -52,7 +52,11 @@ VERDICT_TOKENS = ["MATCH", "EQUIVALENT", "IN-RANGE", "BOTH-CLEAN", "PASS",
 # beats REF, or the step is a justified N/A (e.g. analog on a digital IC, or a
 # capability neither the open-source flow nor the reference can produce).
 PASS_TOKENS = {"MATCH", "EQUIVALENT", "IN-RANGE", "BOTH-CLEAN", "PASS",
-               "DIFFERENT-BUT-OK", "BETTER-THAN-REF", "N/A"}
+               "DIFFERENT-BUT-OK", "BETTER-THAN-REF"}
+
+# A prose file can disclose a comparison, but it cannot attest that either side
+# was actually read. Pillar 2 therefore consumes only this receipt schema.
+CROSS_CHECK_RECEIPT_SCHEMA = "vibeic.cross_check_receipt.v1"
 
 # ── Per-step output-comparison METHOD table (chip-agnostic) ──────────────────
 # Method describes HOW to cross-check OUR step output vs the open-source ref.
@@ -146,16 +150,92 @@ def _load_steps(flow_yaml: Path):
         return [(i, "", "") for i in dict.fromkeys(ids)]
 
 
-def _read_step_verdict(project: Path, sid: str):
-    """First verdict token found in any cross_check/**/step_<id>.md."""
-    for f in glob.glob(str(project / "cross_check" / "**" / f"step_{sid}.md"),
-                       recursive=True) + \
-             glob.glob(str(project / "cross_check" / "**" / f"step_{sid.zfill(2)}.md"),
-                       recursive=True):
-        txt = Path(f).read_text(errors="ignore")[:4000]
-        for tok in VERDICT_TOKENS:
-            if re.search(rf"\b{re.escape(tok)}\b", txt):
-                return tok, f
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _receipt_file(root: Path, declared: object) -> Path | None:
+    """Resolve one receipt path below root; absolute/escaping paths are invalid."""
+    if not isinstance(declared, str) or not declared:
+        return None
+    raw = Path(declared)
+    if raw.is_absolute():
+        return None
+    candidate = (root / raw).resolve()
+    try:
+        candidate.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
+
+
+def _valid_receipt(receipt: object, project: Path, reference: Path, sid: str,
+                   program_root: Path) -> str | None:
+    """Return a verified verdict, otherwise None (fail closed)."""
+    if not isinstance(receipt, dict):
+        return None
+    if receipt.get("schema") != CROSS_CHECK_RECEIPT_SCHEMA:
+        return None
+    if str(receipt.get("step_id")) != sid:
+        return None
+    verdict = str(receipt.get("verdict", "")).upper()
+    if verdict not in PASS_TOKENS | {"FAIL", "GAP", "TODO", "NO-TOOL"}:
+        return None
+    for key, root in (("subject", project), ("reference", reference)):
+        item = receipt.get(key)
+        if not isinstance(item, dict):
+            return None
+        artifact = _receipt_file(root, item.get("path"))
+        if artifact is None or item.get("sha256") != _sha256_file(artifact):
+            return None
+    producer = receipt.get("producer")
+    if not isinstance(producer, dict) or producer.get("exit_code") != 0:
+        return None
+    program = _receipt_file(program_root, producer.get("program"))
+    log = _receipt_file(project, producer.get("log"))
+    if program is None or log is None or producer.get("log_sha256") != _sha256_file(log):
+        return None
+    return verdict
+
+
+def _read_step_verdict(project: Path, reference: Path | None, sid: str,
+                       program_root: Path):
+    """Read exactly one bound JSON receipt; prose is not executable evidence."""
+    if reference is None or not reference.is_dir():
+        return None, None
+    # A project cannot be its own reference, nor may one root contain the
+    # other: either shape lets a caller label a self-comparison "vs ref".
+    try:
+        project.resolve().relative_to(reference.resolve())
+        return None, None
+    except ValueError:
+        pass
+    try:
+        reference.resolve().relative_to(project.resolve())
+        return None, None
+    except ValueError:
+        pass
+    files = sorted(set(
+        glob.glob(str(project / "cross_check" / "**" / f"step_{sid}.json"), recursive=True)
+        + glob.glob(str(project / "cross_check" / "**" / f"step_{sid.zfill(2)}.json"), recursive=True)
+    ))
+    verdicts = []
+    for name in files:
+        try:
+            verdict = _valid_receipt(json.loads(Path(name).read_text()), project, reference,
+                                     sid, program_root)
+        except (OSError, ValueError, json.JSONDecodeError):
+            verdict = None
+        if verdict is not None:
+            verdicts.append((verdict, name))
+    # One step has one comparison. Multiple apparently-good, disagreeing
+    # receipts are ambiguity, not a reason to select the first green one.
+    if len(verdicts) == 1:
+        return verdicts[0]
     return None, None
 
 
@@ -432,6 +512,7 @@ def main():
     if not project.is_dir():
         print(f"error: project not a dir: {project}"); sys.exit(2)
     here = Path(__file__).resolve().parent
+    reference = Path(a.ref).resolve() if a.ref else None
     flow = Path(a.flow) if a.flow else (here.parent / "flow" / "phase1_phase2_phase3.yaml")
     out = Path(a.out) if a.out else (project / "BENCHMARK_VERIFICATION_REPORT.md")
     analog_ic = _is_analog_ic(project)
@@ -464,7 +545,7 @@ def main():
             applicable = False
             verdict = "N/A (analog-only — no digital RTL)"
         else:
-            v, _ = _read_step_verdict(project, sid)
+            v, _ = _read_step_verdict(project, reference, sid, here)
             verdict = v or "PENDING"
         if applicable:
             n_applicable += 1

@@ -6,6 +6,7 @@ the pillar evidence files + cross_check verdicts, runs the report, and asserts t
 """
 from __future__ import annotations
 import importlib.util
+import hashlib
 import json
 import subprocess
 import sys
@@ -31,6 +32,14 @@ def _all_step_ids(mod):
     # so those steps got no verdict file and showed as PENDING/unresolved.
     flow = GEN.parent.parent / "flow" / "phase1_phase2_phase3.yaml"
     return [sid for sid, _, _ in mod._load_steps(flow)]
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _reference_for(project: Path) -> Path:
+    return project.parent / f"{project.name}-reference"
 
 
 def _make_project(tmp: Path, *, func_pct=100.0, line_pct=95.0, fpga="PASS",
@@ -63,15 +72,58 @@ def _make_project(tmp: Path, *, func_pct=100.0, line_pct=95.0, fpga="PASS",
         (tmp / "analog" / "analog_block_list.json").write_text(json.dumps({"blocks": []}))
     # SOURCE_MANIFEST
     (tmp / "SOURCE_MANIFEST.md").write_text("GENERATED x\n")
-    # Pillar 2: a verdict file for every step id
+    # Pillar 2: each verdict is bound to actual subject/ref artifacts and a
+    # producer log. Markdown alone is deliberately not accepted.
+    ref = _reference_for(tmp)
+    (ref / "artifacts").mkdir(parents=True, exist_ok=True)
+    (ref / "artifacts" / "reference.bin").write_text("reference\n")
+    (tmp / "artifacts").mkdir(parents=True, exist_ok=True)
+    (tmp / "artifacts" / "subject.bin").write_text("subject\n")
+    (tmp / "reports" / "cross-check.log").write_text("comparison completed\n")
+    for sid in _all_step_ids(mod):
+        (tmp / "cross_check" / "p" / f"step_{sid}.json").write_text(json.dumps({
+            "schema": mod.CROSS_CHECK_RECEIPT_SCHEMA, "step_id": sid,
+            "verdict": step_verdict,
+            "subject": {"path": "artifacts/subject.bin",
+                        "sha256": _sha256(tmp / "artifacts" / "subject.bin")},
+            "reference": {"path": "artifacts/reference.bin",
+                          "sha256": _sha256(ref / "artifacts" / "reference.bin")},
+            "producer": {"program": "benchmark_verify_report.py", "exit_code": 0,
+                         "log": "reports/cross-check.log",
+                         "log_sha256": _sha256(tmp / "reports" / "cross-check.log")},
+        }))
+    return tmp
+
+
+def _make_markdown_only_project(tmp: Path) -> Path:
+    """A complete-looking legacy project whose only Pillar-2 proof is prose."""
+    mod = _load_mod()
+    (tmp / "reports").mkdir(parents=True, exist_ok=True)
+    (tmp / "cross_check" / "p").mkdir(parents=True, exist_ok=True)
+    (tmp / "reports" / "functional_coverage.json").write_text(json.dumps({
+        "requirements": [{"id": "R", "source": "L2", "desc": "x", "status": "PASS"}],
+    }))
+    (tmp / "reports" / "code_coverage.json").write_text(json.dumps({
+        "line_pct": 95.0, "branch_pct": 90, "toggle_pct": 90,
+    }))
+    (tmp / "reports" / "hw_test.json").write_text(json.dumps({"verdict": "PASS", "patterns": 1}))
+    (tmp / "reports" / "spare_cell_coverage.json").write_text(json.dumps({"status": "PASS"}))
+    (tmp / "reports" / "spare_preservation.json").write_text(json.dumps({
+        "all_keep_attr_intact": True, "removed": 0, "verdict": "PASS",
+    }))
+    (tmp / "phase3" / "stage4" / "gds").mkdir(parents=True, exist_ok=True)
+    (tmp / "phase3" / "stage4" / "gds" / "x.gds").write_text("dummy")
+    (tmp / "SOURCE_MANIFEST.md").write_text("GENERATED x\n")
+    _reference_for(tmp).mkdir(exist_ok=True)
     for sid in _all_step_ids(mod):
         (tmp / "cross_check" / "p" / f"step_{sid}.md").write_text(
-            f"# step {sid}\n\n**Verdict: {step_verdict}**\n")
+            "**Verdict: MATCH**\n**Verdict: FAIL**\n")
     return tmp
 
 
 def _run(project: Path):
-    r = subprocess.run([sys.executable, str(GEN), str(project)],
+    r = subprocess.run([sys.executable, str(GEN), str(project),
+                        "--ref", str(_reference_for(project))],
                        capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
 
@@ -118,11 +170,34 @@ def test_unresolved_step_token_fails(tmp_path):
 def test_verdict_token_sets():
     mod = _load_mod()
     # honest tokens that should count as a passing comparison
-    for t in ("MATCH", "EQUIVALENT", "IN-RANGE", "BOTH-CLEAN", "BETTER-THAN-REF", "N/A"):
+    for t in ("MATCH", "EQUIVALENT", "IN-RANGE", "BOTH-CLEAN", "BETTER-THAN-REF"):
         assert t in mod.PASS_TOKENS
     # tokens that must NOT pass
-    for t in ("FAIL", "GAP", "TODO", "NO-TOOL"):
+    for t in ("FAIL", "GAP", "TODO", "NO-TOOL", "N/A"):
         assert t not in mod.PASS_TOKENS
+
+
+def test_markdown_match_cannot_satisfy_pillar_two(tmp_path):
+    p = _make_markdown_only_project(tmp_path)
+    rc, out = _run(p)
+    assert rc == 1 and "OVERALL=NOT-COMPLETE" in out
+
+
+def test_receipt_must_bind_supplied_reference_and_producer_log(tmp_path):
+    p = _make_project(tmp_path)
+    one = next((p / "cross_check").rglob("*.json"))
+    receipt = json.loads(one.read_text())
+    receipt["reference"]["sha256"] = "0" * 64
+    one.write_text(json.dumps(receipt))
+    rc, out = _run(p)
+    assert rc == 1 and "OVERALL=NOT-COMPLETE" in out
+
+
+def test_self_reference_cannot_satisfy_pillar_two(tmp_path):
+    p = _make_project(tmp_path)
+    r = subprocess.run([sys.executable, str(GEN), str(p), "--ref", str(p)],
+                       capture_output=True, text=True)
+    assert r.returncode == 1 and "OVERALL=NOT-COMPLETE" in r.stdout + r.stderr
 
 
 def test_better_than_ref_counts_as_pass(tmp_path):
