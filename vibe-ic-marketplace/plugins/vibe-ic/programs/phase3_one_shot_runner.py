@@ -26957,11 +26957,65 @@ def pnr_input_netlist(project: Path, top: str) -> Tuple[Path, str, bool]:
 
 
 def _chip_path_requests_pad_ring(project: Path) -> bool:
-    """The exact design-dependent condition declared by canonical step 15.5ic."""
+    """The exact design-dependent condition declared by canonical step 15.5ic.
+
+    A HARDMACRO DELIVERY NEVER REQUESTS ONE. A pad ring is die furniture: it
+    belongs to the die that is fabricated, and a hardmacro is placed inside
+    somebody else's die, which is the party that owns pads, bond terminals and
+    test access. The seal-ring band already reasons exactly this way (#2112 —
+    "a macro somebody else places, not a die that will be fabricated"); this
+    predicate did not, and the asymmetry was the whole defect: the pad ring was
+    requested on the mere PRESENCE of operator slot geometry.
+
+    Measured on spm x gf180mcuD: `input/submission_template/slots/` holds the
+    operator's CATALOGUE of four slot sizes while its sibling
+    `tapeout_declaration.json` declares `deliverable: HARDMACRO`, every `pad_*`
+    answer NOT_DETERMINED, and states in its own rationale that the design
+    "takes no operator slot whose geometry could supply one". A catalogue is not
+    a choice. Reading it as one gave a 111x111 um core a 3162x3162 um die -- 28x
+    the core in each dimension -- and every physical failure followed from that
+    geometry, none of it from the design: PDN straps 1.97x/11.7x/5.23x narrower
+    than the measured-segment EM floor, unprotected antenna on the preserved
+    spare pool's tie-lo nets, and two max_fanout DRV rows.
+
+    A slot that is genuinely TAKEN still requests a ring, and so does a
+    self-tape-out: the declaration is consulted, never overridden.
+    """
     slot_dir = project / "input" / "submission_template" / "slots"
-    return ((project / "input" / "submission_template"
+    if not ((project / "input" / "submission_template"
              / "SELF_TAPEOUT.txt").is_file()
-            or (slot_dir.is_dir() and any(slot_dir.glob("*.yaml"))))
+            or (slot_dir.is_dir() and any(slot_dir.glob("*.yaml")))):
+        return False
+    declared, _why = _declaration_deliverable_answer(project)
+    return declared != "HARDMACRO"
+
+
+def _declaration_deliverable_answer(project: Path) -> Tuple[Optional[str], str]:
+    """The delivery's OWN declared `deliverable`, or (None, why not).
+
+    Read straight from `input/submission_template/tapeout_declaration.json` --
+    the party who has to accept the result. Deliberately NOT
+    `_declared_deliverable`, which DERIVES a route and, for this design, reads
+    the L3 pad-placement table's four named sides as evidence of a die; that
+    derivation is what a declaration is entitled to overrule, and
+    `_effective_deliverable` already prefers the declaration for exactly this
+    reason. NOT_DETERMINED and an unreadable or absent file are not answers and
+    leave behaviour unchanged.
+    """
+    path = (project / "input" / "submission_template"
+            / "tapeout_declaration.json")
+    if not path.is_file():
+        return None, f"{path.name} is not on disk, so nothing was declared"
+    try:
+        doc = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError) as exc:
+        return None, f"{path.name} could not be read: {exc}"
+    answer = ((doc or {}).get("answers") or {}).get("deliverable")
+    if not isinstance(answer, str) or answer.strip().upper() in (
+            "", "NOT_DETERMINED", "NOT_APPLICABLE"):
+        return None, (f"{path.name} declares deliverable="
+                      f"{answer!r}, which is not an answer")
+    return answer.strip().upper(), f"declared in {path.name}"
 
 
 def _padring_pdk_root_and_tree(pdk: PdkConfig,
