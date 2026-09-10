@@ -16465,7 +16465,8 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
             + " | ".join(f"{r['reason']}: {r['message']}"
                          for r in _refusals[:4]),
             [str(rtl_dir / f".{synth_top}__param_resolution.json")],
-            extras={"param_refusals": _refusals})
+            extras={"param_refusals": _refusals,
+                    "synth_top": synth_top})
     # vibe-ic#2089 — SAME PLACE, DIFFERENT QUESTION. The refusal above is
     # about a value the wrapper CARRIES; this one is about a value that was
     # neither stated by the input nor derived by the resolver, although the
@@ -16490,7 +16491,8 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
             f"emission, before yosys: "
             + " | ".join(f"{r['reason']}: {r['message']}" for r in _cpl[:4]),
             [str(rtl_dir / f".{synth_top}__param_couplings.json")],
-            extras={"coupling_refusals": _cpl})
+            extras={"coupling_refusals": _cpl,
+                    "synth_top": synth_top})
     # ORGANIC #639 — REUSED-IP / catalog-glue staging has no
     # instantiation-closure pruning or duplicate-module dedup. A flat
     # vendor RTL dump (no per-IP rtl_files manifest) stages every *.sv/*.v
@@ -16594,7 +16596,8 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
                      f"duplicate-module defect{_facet} of the staged synth "
                      f"set — yosys-slang would crash with a raw 'duplicate "
                      f"definition' abort. {_msg}{_prune_note}"),
-                    extras={"catalog_glue_closure": _cg_report})
+                    extras={"catalog_glue_closure": _cg_report,
+                            "synth_top": synth_top})
         else:
             # ORGANIC #778 — NON-duplicate (PASS) verdict: the runner still feeds
             # the full flat glob to synth. If the closure flags an over-broad
@@ -17122,8 +17125,10 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
                  f"likely produced stub modules pruned by `synth "
                  f"-flatten`. Detail: {tail}"),
                 [str(out_v), str(log)],
-                extras={"synth_frontend": synth_frontend})
-        _pass_extras = {"synth_frontend": synth_frontend}
+                extras={"synth_frontend": synth_frontend,
+                        "synth_top": synth_top})
+        _pass_extras = {"synth_frontend": synth_frontend,
+                        "synth_top": synth_top}
         if _prune_advisory:  # ORGANIC #778 — surface the over-broad-tail advisory
             _pass_extras["catalog_glue_prune_advisory"] = _prune_advisory
         return StepResult("yosys_synth", "PASS",
@@ -17209,11 +17214,13 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
                                f"{', '.join(_v662_dep['staged'])})")
     return StepResult("yosys_synth", "FAIL",
                       time.time() - t0,
-                      f"rc={rc} log_tail={_diag_txt[-1500:]}"
+                      f"rc={rc} synth_top={synth_top} "
+                      f"log_tail={_diag_txt[-1500:]}"
                       f"{closure_note}{macro_note}",
                       [str(log)],
                       extras={"synth_frontend": synth_frontend,
                               "synth_frontend_reason": fe_reason,
+                              "synth_top": synth_top,
                               "macro_deps": _v662_dep or None})
 
 

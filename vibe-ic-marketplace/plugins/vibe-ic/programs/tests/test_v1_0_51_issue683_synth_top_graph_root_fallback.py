@@ -42,6 +42,35 @@ PROG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROG))
 import design_one_shot_runner as R  # noqa: E402
 import _path_layout as _pl  # noqa: E402
+import _eda_pin as _pin  # noqa: E402
+
+#: THE CONTAINER IS DERIVED FROM THE PIN, NEVER SPELLED.
+#
+# The five end-to-end ids below used to pass the SHARED, host-global
+# container name as a literal. A shared name is not an identity: whichever
+# process got there first is holding it. `step_yosys_synth` runs the host
+# yosys first and, when that yosys is too old for the script it emits, falls
+# through to `_phase2_sv_synth_fallback`, which is CONTAINER-ONLY — so the
+# verdict of a synth-TOP-RESOLUTION test was decided by whatever image
+# somebody else's container of that name happened to be running.
+#
+# MEASURED 2026-09-10 on 8HD-9, the same file at the same tree 97990612f4:
+#   pinned image (no docker on PATH -> local route)  8 passed
+#   bare host   (docker present; a container holding
+#                the shared name, up 4 days, running
+#                sha256:06537f7e..., while the pin
+#                requires sha256:89a8fd72...)        5 failed, 3 passed
+# every one of the five raising `_container_exec.ContainerImageMismatch`.
+# The three that passed are the resolver-unit ids, which never reach a tool.
+#
+# `_eda_pin.default_container_name()` derives the name FROM THE REQUIRED
+# DIGEST, so it cannot be squatted by a container running other bytes.
+# `test_the_run_path_resolves_the_pinned_image.py::test_no_shipped_file_
+# names_the_shared_container_literal` already forbids the literal in every
+# shipped program (42 sites before, 1 after — the definition itself), but
+# its population helper `_shipped_py()` skips `tests/` by construction, so
+# the test tree kept the defect the programs were cleaned of.
+_CONTAINER = _pin.default_container_name()
 
 _HAVE_YOSYS = shutil.which("yosys") is not None
 _yosys = pytest.mark.skipif(not _HAVE_YOSYS,
@@ -115,7 +144,14 @@ def test_synth_adopts_graph_root_no_chip_top_fail(tmp_path):
         {"core.sv": _ROOT_WRAPPING.format(root="core", child="sub"),
          "sub.sv": _LEAF.format(n="sub")},
         {"top_module": "the_top", "synth_top": None})
-    res = R.step_yosys_synth(proj, "chip_top", container="vibeic-eda")
+    res = R.step_yosys_synth(proj, "chip_top", container=_CONTAINER)
+    # THE #683 CLAIM, ON EVERY MACHINE. `synth_top` used to reach the
+    # StepResult only on the PASS path, so a run whose BACKEND failed for a
+    # reason of its own reported no decision at all and this id could assert
+    # nothing. The step now records it on every exit path it has resolved
+    # one, so the resolution — which is the whole of #683 — is pinned here
+    # whatever the synth backend then did with it.
+    assert res.extras.get("synth_top") == "core", res.extras
     assert res.status == "PASS", res.detail
     assert _synth_top_in(res.detail) == "core", res.detail
     # NO 'chip_top is not a valid top-level module' FAIL.
@@ -137,7 +173,14 @@ def test_noleak_real_chip_top_not_overridden(tmp_path):
         {"chip_top.sv": _ROOT_WRAPPING.format(root="chip_top", child="sub"),
          "sub.sv": _LEAF.format(n="sub")},
         {"top_module": "chip_top", "synth_top": None})
-    res = R.step_yosys_synth(proj, "chip_top", container="vibeic-eda")
+    res = R.step_yosys_synth(proj, "chip_top", container=_CONTAINER)
+    # THE #683 CLAIM, ON EVERY MACHINE. `synth_top` used to reach the
+    # StepResult only on the PASS path, so a run whose BACKEND failed for a
+    # reason of its own reported no decision at all and this id could assert
+    # nothing. The step now records it on every exit path it has resolved
+    # one, so the resolution — which is the whole of #683 — is pinned here
+    # whatever the synth backend then did with it.
+    assert res.extras.get("synth_top") == "chip_top", res.extras
     assert res.status == "PASS", res.detail
     assert _synth_top_in(res.detail) == "chip_top", res.detail
 
@@ -151,7 +194,14 @@ def test_noleak_real_l9_synth_top_preserved(tmp_path):
         {"mytop.sv": _ROOT_WRAPPING.format(root="mytop", child="sub"),
          "sub.sv": _LEAF.format(n="sub")},
         {"top_module": "the_top", "synth_top": "mytop"})
-    res = R.step_yosys_synth(proj, "chip_top", container="vibeic-eda")
+    res = R.step_yosys_synth(proj, "chip_top", container=_CONTAINER)
+    # THE #683 CLAIM, ON EVERY MACHINE. `synth_top` used to reach the
+    # StepResult only on the PASS path, so a run whose BACKEND failed for a
+    # reason of its own reported no decision at all and this id could assert
+    # nothing. The step now records it on every exit path it has resolved
+    # one, so the resolution — which is the whole of #683 — is pinned here
+    # whatever the synth backend then did with it.
+    assert res.extras.get("synth_top") == "mytop", res.extras
     assert res.status == "PASS", res.detail
     assert _synth_top_in(res.detail) == "mytop", res.detail
 
@@ -168,7 +218,14 @@ def test_noleak_real_waiver_synth_top_preserved(tmp_path):
          "sub2.sv": _LEAF.format(n="sub2")},
         {"top_module": "the_top", "synth_top": None},
         waivers={"phase2_synth_top": "waivedtop"})
-    res = R.step_yosys_synth(proj, "chip_top", container="vibeic-eda")
+    res = R.step_yosys_synth(proj, "chip_top", container=_CONTAINER)
+    # THE #683 CLAIM, ON EVERY MACHINE. `synth_top` used to reach the
+    # StepResult only on the PASS path, so a run whose BACKEND failed for a
+    # reason of its own reported no decision at all and this id could assert
+    # nothing. The step now records it on every exit path it has resolved
+    # one, so the resolution — which is the whole of #683 — is pinned here
+    # whatever the synth backend then did with it.
+    assert res.extras.get("synth_top") == "waivedtop", res.extras
     assert res.status == "PASS", res.detail
     assert _synth_top_in(res.detail) == "waivedtop", res.detail
 
@@ -196,9 +253,17 @@ def test_noleak_ambiguous_multi_root_honestly_fails(tmp_path):
         {"rootA.sv": _LEAF.format(n="rootA"),
          "rootB.sv": _LEAF.format(n="rootB")},
         {"top_module": "the_top", "synth_top": None})
-    res = R.step_yosys_synth(proj, "chip_top", container="vibeic-eda")
+    res = R.step_yosys_synth(proj, "chip_top", container=_CONTAINER)
     # honest FAIL — neither rootA nor rootB was silently chosen.
     assert res.status == "FAIL", res.detail
+    # NON-VACUITY. Until the step recorded its decision on the FAIL path,
+    # `_synth_top_in(detail)` was None here and both `!=` below were true of
+    # NOTHING — the id could not have caught a silently-adopted wrong root.
+    # Assert a value is present before asserting what it is not.
+    _chosen = res.extras.get("synth_top")
+    assert _chosen, res.extras
+    assert _chosen not in ("rootA", "rootB"), res.extras
+    assert _synth_top_in(res.detail) == _chosen, res.detail
     assert _synth_top_in(res.detail) != "rootA"
     assert _synth_top_in(res.detail) != "rootB"
 
