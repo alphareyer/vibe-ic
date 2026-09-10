@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import hashlib
 import struct
 import sys
 from dataclasses import dataclass, asdict, field
@@ -314,6 +315,57 @@ def iter_records(data: bytes):
         if rec_type == RT_ENDLIB:
             return
         pos += rec_len
+
+
+#: The two records whose payload is a WALL CLOCK, not the layout (vibe-ic#2221).
+#: `BGNLIB` and `BGNSTR` each carry 12 int16 -- modification date then last
+#: access date -- which the writer stamps from the clock. MEASURED across six
+#: published corpus GDS: every one carries a real timestamp to the second, and
+#: the Magic-written analog ones carry mod and access ~11 minutes apart, i.e.
+#: two distinct clock reads inside one file.
+_DATE_RECORDS = (RT_BGNLIB, RT_BGNSTR)
+
+#: 12 int16 dates = 24 bytes. A record whose payload is SHORTER than that is
+#: malformed for its type; it is hashed verbatim rather than padded, so a
+#: malformed file can never collide with a well-formed one.
+_DATE_BYTES = 24
+
+
+def canonical_digest(data: bytes) -> Optional[str]:
+    """sha256 of a GDS stream with its WRITE TIMES zeroed. PURE.
+
+    WHY THIS EXISTS (vibe-ic#2221). Two stream-outs of one layout can never be
+    byte-equal, because the format stamps the writing clock into `BGNLIB` and
+    `BGNSTR`. That is the format working as specified -- nothing about the
+    geometry is implied -- but it makes `sha256` the wrong instrument for the
+    question "did these two runs produce the same layout", which is the
+    question every physical A/B in this repo asks. MEASURED: a lane comparing
+    two arms by `md5` reported "the stream-out is not reproducible run to run"
+    and would do so on any design, forever.
+
+    This zeroes ONLY those two payloads. Record lengths, record types, every
+    other payload and the order of everything are hashed verbatim, so the digest
+    still separates two layouts that differ anywhere at all -- including in a
+    structure NAME, which sits in `STRNAME` and not here.
+
+    NOT A VALIDITY CHECK, and it does not pretend to be one: `iter_records`
+    stops silently at the first impossible record, so a caller must establish
+    validity with `parse_gds` first, exactly as that walker's own contract says.
+    Returns `None` for a stream that carries no `ENDLIB`, because a digest of a
+    truncated file would be a confident answer about an incomplete artefact.
+    """
+    h = hashlib.sha256()
+    saw_endlib = False
+    for _off, rec_type, payload in iter_records(data):
+        h.update(struct.pack('>HH', len(payload) + 4, rec_type))
+        if rec_type in _DATE_RECORDS and len(payload) >= _DATE_BYTES:
+            h.update(b'\x00' * _DATE_BYTES)
+            h.update(payload[_DATE_BYTES:])
+        else:
+            h.update(payload)
+        if rec_type == RT_ENDLIB:
+            saw_endlib = True
+    return h.hexdigest() if saw_endlib else None
 
 
 @dataclass

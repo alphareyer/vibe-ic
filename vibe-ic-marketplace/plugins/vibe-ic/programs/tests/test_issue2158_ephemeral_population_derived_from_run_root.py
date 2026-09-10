@@ -31,6 +31,11 @@ from pathlib import Path
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from project_outputs_in_tree_check import (  # noqa: E402
+    _VOLATILE_PREFIXES,
+)
+
 PROG = Path(__file__).resolve().parent.parent / \
     "project_outputs_in_tree_check.py"
 _MERGE_BASE = "91902638a2ba302914bed49a478dc3b35bf9a555"
@@ -43,15 +48,44 @@ def _run(project_dir: Path, prog: Path = PROG) -> subprocess.CompletedProcess:
                           capture_output=True, text=True)
 
 
+def _account_home_root() -> Path:
+    """A home-shaped anchor that is NEVER under a volatile prefix.
+
+    The fixtures below exist to exercise the DERIVED class — "outside the run
+    root and not on disk" — on a path the pre-fix hard list of four volatile
+    directories could NOT name. That is the only property that makes them
+    discriminating, and anchoring them at `Path.home()` does not guarantee it:
+    on the landing path this repo runs `HOME=/tmp`, and there the very same
+    fixture is ALSO `/tmp/...`, so it collapses into the hard-list class the
+    file is supposed to be measuring the absence of. Measured on the live tip
+    `97990612f`, file unchanged since the sweep: HOME=/home/... , /headless and
+    /nonexistent all give 18 passed, HOME=/tmp gives 3 failed / 15 passed, and
+    the three are exactly the assertions that name the derived class — the
+    negative control among them announcing, correctly, that the fixture had
+    stopped discriminating.
+
+    So the anchor is DERIVED FROM THE PROPERTY rather than inherited from the
+    operator: the account home when that already satisfies it, and a synthetic
+    home root when it does not. Both are absolute, outside the run root, and
+    never created. `_VOLATILE_PREFIXES` is imported from the gate rather than
+    re-typed, so a prefix added there cannot leave this fixture behind."""
+    home = Path.home()
+    if not str(home).rstrip("/").startswith(
+            tuple(p.rstrip("/") for p in _VOLATILE_PREFIXES)):
+        return home
+    return Path("/home/_vibeic2158_absent_account")
+
+
 def _home_ephemeral(project: Path) -> str:
     """A path shaped exactly like the measured rbsub5 case: a STAGED COPY of
     the run root, under the account home, and gone.
 
-    `<HOME>/_lane_gone_2158/<stage>/<project-name>` — the run root's own
+    `<home>/_lane_gone_2158/<stage>/<project-name>` — the run root's own
     directory name is the last component, which is what makes it a relocated
     copy of THIS project rather than an unrelated absolute path. Never created:
-    its absence is the point."""
-    return str(Path.home() / "_lane_gone_2158" /
+    its absence is the point. The home root comes from `_account_home_root`,
+    which guarantees the one property that makes this fixture discriminating."""
+    return str(_account_home_root() / "_lane_gone_2158" /
                f"vibeic-rtl-step-{project.name}" / project.name)
 
 
@@ -282,3 +316,40 @@ def test_the_deciding_line_still_fits_the_published_cap_with_derived_hits(
     assert "(0 live, 0 dangling, 1024 outside-root)" in head, head
     assert F._p0_first_line(r.stdout) == head, (
         f"published reason truncated at {len(head)} chars: {head}")
+
+
+# ── the fixture must measure the CODE, not the operator's HOME ──────────────
+
+def test_the_fixture_stays_outside_the_hard_list_when_home_is_volatile(
+        monkeypatch, tmp_path):
+    """THE REGRESSION THIS FILE'S OWN REDS WERE. Every assertion above that
+    names the derived class is only discriminating while the fixture is a path
+    the pre-fix hard list could NOT name. Anchored at `Path.home()` that held
+    on a developer box and silently stopped holding on the landing path, where
+    `HOME=/tmp`: the fixture became `/tmp/_lane_gone_2158/...`, the gate
+    classified it as dangling-volatile instead of outside-root, and three ids
+    went red against code that had not changed in 55 versions.
+
+    Driven, not inherited: HOME is pinned to each volatile prefix in turn and
+    the built fixture must still fall outside all of them."""
+    for prefix in _VOLATILE_PREFIXES:
+        monkeypatch.setenv("HOME", prefix.rstrip("/"))
+        built = _home_ephemeral(tmp_path)
+        assert Path(built).is_absolute(), built
+        assert not Path(built).exists(), built
+        landed_in = [p for p in _VOLATILE_PREFIXES if built.startswith(p)]
+        assert landed_in == [], (
+            f"HOME={prefix.rstrip('/')} put the fixture back inside the "
+            f"pre-fix hard list {landed_in}: {built}. The fixture would then "
+            f"be classified by the old rule, and every derived-class assertion "
+            f"in this file would be measuring the operator's HOME.")
+
+
+def test_the_home_anchor_is_used_when_it_is_already_non_volatile(monkeypatch,
+                                                                 tmp_path):
+    """The other direction: where the account home ALREADY satisfies the
+    property, it is the anchor — the fix must not throw the real-world shape
+    away and hard-code a synthetic root everywhere."""
+    monkeypatch.setenv("HOME", "/home/someone")
+    assert _account_home_root() == Path("/home/someone")
+    assert _home_ephemeral(tmp_path).startswith("/home/someone/_lane_gone_2158")

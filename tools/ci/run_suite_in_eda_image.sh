@@ -439,10 +439,44 @@ if [ ! -f "$HOME_IN/.bashrc" ]; then
   mv "$HOME_IN/.bashrc.tmp" "$HOME_IN/.bashrc"
 fi
 
+# A LINKED WORKTREE'S `.git` IS A POINTER OUT OF THE MOUNT.
+#
+# `-v "$REPO_ROOT:$REPO_ROOT"` carries the tree and nothing else. In a linked
+# worktree `$REPO_ROOT/.git` is a FILE reading `gitdir: <main>/.git/worktrees/
+# <name>`, and that address is not mounted, so every git invocation inside the
+# container fails. MEASURED 2026-09-10 on 8HD-8, this script run from the
+# worktree $S/cy538 at v1.20.13:
+#
+#   WRITE_GUARD_NOT_CHECKED: git rev-parse --show-toplevel exited 128:
+#   fatal: not a git repository: /home/reyerchu/vibe-ic/.git/worktrees/cy538
+#   35 passed
+#
+# The suite reported 35 passed with `suite_write_guard` NOT RUNNING. It is
+# disclosed rather than silent — that part works — but the fleet runs this
+# harness from a throwaway worktree as a matter of course, so the guard was off
+# for essentially every run, and "35 passed" is exactly as reassuring as it
+# looks. Mounting the COMMON git dir restores it; it covers both `<main>/.git`
+# and the `worktrees/<name>` directory beneath it, and it is mounted RW because
+# `git status` refreshes the index.
+#
+# Empty for an ordinary checkout, where the common dir is already inside
+# REPO_ROOT and this adds no mount at all.
+# >>> GIT_COMMON_MOUNT BLOCK (executed verbatim by
+# test_worktree_run_still_measures_the_write_guard.py — keep these sentinels)
+GIT_COMMON_MOUNT=()
+_GIT_COMMON="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute \
+                 --git-common-dir 2>/dev/null || true)"
+case "$_GIT_COMMON" in
+  "" | "$REPO_ROOT"/*) : ;;
+  *) GIT_COMMON_MOUNT=(-v "$_GIT_COMMON:$_GIT_COMMON") ;;
+esac
+# <<< GIT_COMMON_MOUNT BLOCK
+
 DOCKER_ARGS=(
   --rm --platform linux/amd64
   --user "$UID_NOW:$GID_NOW"
   -v "$REPO_ROOT:$REPO_ROOT"
+  "${GIT_COMMON_MOUNT[@]}"
   -v /tmp:/tmp
   -v "$PASSWD:/etc/passwd:ro"
   -w "$PLUGIN_DIR"
