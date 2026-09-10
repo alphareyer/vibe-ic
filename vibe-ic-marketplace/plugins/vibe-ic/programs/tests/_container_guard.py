@@ -43,6 +43,7 @@ chip-AGNOSTIC: container identity only. No design, PDK, vendor or tool literal.
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -69,8 +70,44 @@ def container_usable(container: str | None = None, env=None) -> bool:
         return False
     name = container or _pin.default_container_name(env)
     try:
-        return _pin.container_matches_pin(name, env) == ""
+        if _pin.container_matches_pin(name, env) != "":
+            return False
+        return _running(name)
     except Exception:                                   # noqa: BLE001
         # An auditor that cannot read the machine has not proved the pin is
         # here; it says "not usable", never "usable".
         return False
+
+
+_RUNNING_TIMEOUT_S = 15
+
+
+def _running(name: str) -> bool:
+    """Is `name` a container that is RUNNING right now?
+
+    THE CONVERSE OF THIS MODULE'S OWN THESIS. The header above says running is
+    not usable; usable is not running either, and only the first half was
+    implemented. `container_matches_pin` reads the IMAGE a container was
+    created from, and docker answers that for a STOPPED container just as
+    readily as for a live one — so a container holding the pinned bytes and not
+    running returned True, while `container_usable` promises in its first line
+    that it is True only when the container "PROVABLY runs the pinned image".
+
+    MEASURED 2026-09-10 on 8HD-8: with the pinned container stopped and its
+    bytes still on the machine, the guard admitted the two live-path tests in
+    test_lec_include_hub_aggregator; `docker exec` then produced empty output
+    and both FAILED on an empty string — a red about a stopped container, which
+    is precisely the absent-runtime state this module exists to turn into a
+    skip.
+
+    Absent, wrong bytes, and stopped are one state to a caller: the pinned
+    runtime is not reachable here. They are one answer here too. Anything this
+    cannot read is False, for the same reason every other answer here is.
+    """
+    try:
+        r = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", name],
+            capture_output=True, text=True, timeout=_RUNNING_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0 and r.stdout.strip().lower() == "true"

@@ -238,71 +238,103 @@ def test_phase2_selector_delegates_to_the_same_predicate(tmp_path):
 # 6. INTEGRATION — the fixture must actually ELABORATE and compare >0 points.
 #    Skips when no path-visible vibeic-eda container is available.
 # ---------------------------------------------------------------------------
-def _yosys_available() -> bool:
-    try:
-        r = _pr.run(
-            ["docker", "exec", "vibeic-eda", "bash", "-lc", "which yosys"],
+import sys as _cg_sys                                        # noqa: E402
+from pathlib import Path as _cg_path                        # noqa: E402
+_cg_sys.path.insert(0, str(_cg_path(__file__).resolve().parent))
+import _container_guard as _cg                              # noqa: E402
+_cg_sys.path.insert(0, str(_cg_path(__file__).resolve().parents[1]))
+import _container_exec as _cx                               # noqa: E402
+import _eda_pin as _pin                                     # noqa: E402
+
+
+def _pinned_runtime_here() -> bool:
+    """Is the PINNED runtime reachable under the name the runtime derives?
+
+    What this replaced asked `docker exec vibeic-eda which yosys` — PRESENCE of
+    a tool inside whatever container holds a SHARED, guessable name. Two
+    separate faults, one cause: the name is not the pin's, and the probe is not
+    an identity check.
+
+    MEASURED 2026-09-10 on 8HD-8: `vibeic-eda` is held by a four-day-old
+    container of image 06537f7e8d3c, while the pin is 89a8fd729520. `which
+    yosys` succeeds in it, so the guard admitted both live tests and they
+    elaborated under UNPINNED bytes and passed — a green that says nothing
+    about the pinned toolchain. On the sweep host the same shared name was won
+    by a container in which the exec failed, and the identical code reported
+    two FAILURES. The verdict tracked which container won a race for a name.
+
+    `container_usable(None)` asks `_eda_pin.default_container_name` — per-pin
+    and digest-derived, so it cannot be squatted — and proves the bytes rather
+    than probing for a file. Nothing in this repo ever creates the bare literal.
+    """
+    return _cg.container_usable(None)
+
+
+def _yosys_in_pinned_runtime(design_dir: Path, files: str) -> str:
+    """Run the yosys elaboration inside the PINNED container and return stdout.
+
+    The fixture is COPIED IN with `docker cp` rather than reached through a
+    bind. The two tests used to build their fixture under `Path.home()` and
+    name those host paths inside the container, which silently required the
+    container to mount the host home. That is a fact about how somebody started
+    a container, not about the code under test; where it did not hold the tool
+    reported a missing file and the assertion failed about the host. Copying
+    makes the subject the elaboration itself.
+    """
+    name = _pin.default_container_name()
+    dest = f"/tmp/{design_dir.name}"
+    remote_files = " ".join(
+        f"{dest}/{Path(f).name}" for f in files.split())
+    cmd = (f"export PATH=/foss/tools/yosys/bin:$PATH && "
+           f"yosys -p 'read_slang --single-unit {remote_files} --top top; "
+           f"hierarchy -check -top top' 2>&1")
+    _pr.run(_cx.docker_exec_argv(name, "rm", "-rf", dest),
             capture_output=True, text=True)
-        return r.returncode == 0
-    except (subprocess.SubprocessError, OSError):
-        return False
+    cp = _pr.run(["docker", "cp", str(design_dir), f"{name}:{dest}"],
+                 capture_output=True, text=True)
+    assert cp.returncode == 0, f"docker cp failed: {cp.stderr}"
+    try:
+        r = _pr.run(_cx.docker_exec_argv(name, "bash", "-lc", cmd),
+                    capture_output=True, text=True)
+        return r.stdout or ""
+    finally:
+        _pr.run(_cx.docker_exec_argv(name, "rm", "-rf", dest),
+                capture_output=True, text=True)
 
 
-@pytest.mark.skipif(not _yosys_available(),
-                    reason="no path-visible vibeic-eda container")
-def test_single_unit_does_not_break_a_macro_redefining_design():
+@pytest.mark.skipif(not _pinned_runtime_here(),
+                    reason="the pinned vibeic-eda runtime is not reachable "
+                           "under its derived name here")
+def test_single_unit_does_not_break_a_macro_redefining_design(tmp_path):
     """CONTROL for the `--single-unit` half. Collapsing per-file compilation
     units means two files that each `` `define `` the SAME macro now share one
     preprocessor scope. Measured in-container: slang emits a `-Wredef-macro`
     WARNING, NOT an error — the build still succeeds and the top elaborates.
     So single-unit does not regress a design that read cleanly before."""
-    import tempfile
-    import shutil
-    work = Path(tempfile.mkdtemp(prefix=".lec_su_it_", dir=str(Path.home())))
-    try:
-        d = work / "rtl"
-        d.mkdir(parents=True)
-        (d / "a.v").write_text(
-            "`define W 8\nmodule a(output [`W-1:0] o); assign o=0; endmodule\n")
-        (d / "b.v").write_text(
-            "`define W 4\nmodule b(output [`W-1:0] o); assign o=0; endmodule\n")
-        (d / "top.v").write_text(
-            "module top(output [7:0] x, output [3:0] y);\n"
-            "  a ia(.o(x)); b ib(.o(y));\nendmodule\n")
-        files = " ".join(lec_run._resolve_gold_files(d))
-        cmd = (f"export PATH=/foss/tools/yosys/bin:$PATH && "
-               f"yosys -p 'read_slang --single-unit {files} --top top; "
-               f"hierarchy -check -top top' 2>&1")
-        r = _pr.run(
-            ["docker", "exec", "vibeic-eda", "bash", "-lc", cmd],
-            capture_output=True, text=True)
-        out = r.stdout or ""
-        assert "Build succeeded" in out, out[-1500:]
-        assert "Top module:  \\top" in out, out[-1500:]
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+    d = tmp_path / "lec_su_it_rtl"
+    d.mkdir(parents=True)
+    (d / "a.v").write_text(
+        "`define W 8\nmodule a(output [`W-1:0] o); assign o=0; endmodule\n")
+    (d / "b.v").write_text(
+        "`define W 4\nmodule b(output [`W-1:0] o); assign o=0; endmodule\n")
+    (d / "top.v").write_text(
+        "module top(output [7:0] x, output [3:0] y);\n"
+        "  a ia(.o(x)); b ib(.o(y));\nendmodule\n")
+    files = " ".join(lec_run._resolve_gold_files(d))
+    out = _yosys_in_pinned_runtime(d, files)
+    assert "Build succeeded" in out, out[-1500:]
+    assert "Top module:  \\top" in out, out[-1500:]
 
 
-@pytest.mark.skipif(not _yosys_available(),
-                    reason="no path-visible vibeic-eda container")
+@pytest.mark.skipif(not _pinned_runtime_here(),
+                    reason="the pinned vibeic-eda runtime is not reachable "
+                           "under its derived name here")
 def test_hub_design_elaborates_after_the_fix(tmp_path):
     """END-TO-END: the selected file list must elaborate a top module, where
     the unfiltered glob aborted with duplicate definitions."""
-    import tempfile
-    import shutil
-    work = Path(tempfile.mkdtemp(prefix=".lec_hub_it_", dir=str(Path.home())))
-    try:
-        d = _hub_design(work)
-        files = " ".join(lec_run._resolve_gold_files(d))
-        cmd = (f"export PATH=/foss/tools/yosys/bin:$PATH && "
-               f"yosys -p 'read_slang --single-unit {files} --top top; "
-               f"hierarchy -check -top top' 2>&1")
-        r = _pr.run(
-            ["docker", "exec", "vibeic-eda", "bash", "-lc", cmd],
-            capture_output=True, text=True)
-        out = r.stdout or ""
-        assert "duplicate definition" not in out, out[-1500:]
-        assert "unknown macro" not in out, out[-1500:]
-        assert "Top module:  \\top" in out, out[-1500:]
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+    d = _hub_design(tmp_path / "lec_hub_it")
+    files = " ".join(lec_run._resolve_gold_files(d))
+    out = _yosys_in_pinned_runtime(d, files)
+    assert "duplicate definition" not in out, out[-1500:]
+    assert "unknown macro" not in out, out[-1500:]
+    assert "Top module:  \\top" in out, out[-1500:]
