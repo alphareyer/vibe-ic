@@ -753,6 +753,43 @@ def test_the_shadow_refusal_names_EVERY_shadowed_module_not_just_the_first(tmp_p
     assert "argparse" in combined and "types" in combined, combined
 
 
+def test_a_shadow_the_runner_never_touches_is_refused_too(tmp_path):
+    """THE SILENT CASE — and it is why the refusal is a REFUSAL and not just a
+    better message.
+
+    The two shadow cases above both use names the runner really imports:
+    `argparse` (via `_pytest.config.argparsing`) and `types`. Those fail
+    LOUDLY, which is the mild shape — something goes wrong and a reader goes
+    looking. This one does not.
+
+    `wave` is a stdlib module pytest's start-up never touches. A lane holding
+    `wave.py` sits at position 0 ahead of the standard library for the whole
+    session and changes what `import wave` means, and NOTHING in the run says
+    so: on an entry without the name-set check this session reports an ORDINARY
+    PASS. A trusted entry whose contract is "the import environment is known"
+    must not be able to reach that state.
+
+    So this pins that the check is on the NAME SET, not on what happens to
+    break. `_shadow_lane` plants a body that raises if imported, which here is
+    belt-and-braces: the point is that the refusal arrives WITHOUT the import.
+    """
+    subject = _subject(tmp_path)
+    lane = _shadow_lane(tmp_path, "wave")
+    proc = _entry(_siteless_python(tmp_path), subject,
+                  **{_HOST_LANE_ENV: os.pathsep.join(
+                      [str(lane), _unshadowed_closure_lane(tmp_path)])})
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 2, (
+        "a lane shadowing a stdlib name the runner never imports ran a session "
+        f"and reported it as ordinary:\n{combined}")
+    assert "NORECORD" in combined, combined
+    assert "SHADOWS the standard library" in combined, combined
+    assert "wave" in combined, combined
+    assert "wave.py" in combined, combined
+    # the shadow was never imported — the refusal beat it to the interpreter
+    assert "the stdlib shadow was imported" not in combined, combined
+
+
 def test_a_name_NESTED_in_a_package_is_not_a_shadow(tmp_path):
     """Only the TOP LEVEL of a lane is what the import system offers first.
     Refusing on a nested `argparse.py` would refuse most real site directories

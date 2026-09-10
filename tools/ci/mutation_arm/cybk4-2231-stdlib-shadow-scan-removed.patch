@@ -1,0 +1,14 @@
+diff --git a/vibe-ic-marketplace/plugins/vibe-ic/programs/trusted_pytest_entry.py b/vibe-ic-marketplace/plugins/vibe-ic/programs/trusted_pytest_entry.py
+index 9d920ed3e..8e9d9ab1a 100644
+--- a/vibe-ic-marketplace/plugins/vibe-ic/programs/trusted_pytest_entry.py
++++ b/vibe-ic-marketplace/plugins/vibe-ic/programs/trusted_pytest_entry.py
+@@ -290,8 +290,7 @@ def _host_lane(subject: Path, programs: Path) -> list[Path]:
+     # first also cost a passing test its subject: with the shadow refusal
+     # ahead, `test_the_lane_refuses_without_the_autoload_pin` could no longer
+     # observe the autoload refusal on a shadowed host at all.
+-    shadowed = [(lane, hits) for lane in lanes
+-                if (hits := _stdlib_shadows(lane))]
++    shadowed = []
+     if shadowed:
+         named = "; ".join(
+             f"{lane}: " + ", ".join(f"{name} <- {path.name}"
