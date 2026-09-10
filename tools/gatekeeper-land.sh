@@ -490,8 +490,31 @@ run_emit() {                         # run_emit <unit> <label>
     #
     # The tail is kept because the summary line usually lives there and is
     # worth having; it is no longer the ONLY thing kept.
+    # A VERDICT PREFIXED WITH ITS OWN PROGRAM NAME IS STILL A VERDICT (2026-09-10).
+    # The `^[[:space:]]*` anchor meant a line like
+    #     landing_hygiene_ratchet_check: FAIL — this landing INTRODUCES non-atomic report writes
+    # matched NOTHING, so this branch printed nothing and only the `tail` below survived. That
+    # program emits 127 lines, so the window held its last two ADVISORY coverage gaps while the
+    # FAIL sat 122 lines above it — and the reader saw a refusal that named no finding.
+    #
+    # Measured cost, one night: nine landings refused with an unreadable reason. All nine named
+    # a REAL introduced finding once the truncation was undone; zero false positives. One held a
+    # PR for three and a half hours over a single line, and four were a personal username
+    # entering this PUBLIC repository inside an added test file — on runs where the
+    # `NDA — added content/paths` gate itself reported PASS.
+    #
+    # The second-order cost was worse than the first. A reader inferred from this DISPLAY that
+    # the GATE was refusing on sub-checks it could not measure, and weakened the gate to match —
+    # a fail-open hole in the one instrument that had just caught four NDA-shaped leaks. Measured
+    # afterwards, the checker prints 121 unmeasurable sub-checks and still exits 0; its coverage
+    # block is advisory by construction. The gate was never wrong. The display was.
+    #
+    # This is the SECOND repair of this class at this line — the 2026-07-30 note above records a
+    # failing gate hidden by `tail` alone, fixed by printing failing lines first. That fix
+    # assumed a failing line looks like `FAIL …`. This one drops the assumption, and errs toward
+    # showing MORE: an extra rendered line costs a glance; a missing one cost an hour and a gate.
     printf '%s\n' "$out" \
-      | grep -aE '^[[:space:]]*(FAIL|ERROR)|\[FAIL\]|\[ERROR\]|FAILED' \
+      | grep -aE '(^|[[:space:]]|:[[:space:]])(FAIL|ERROR|REFUSE|REFUSED)\b|\[FAIL\]|\[ERROR\]|FAILED' \
       | head -12 | sed 's/^/          /'
     printf '%s\n' "$out" | tail -5 | sed 's/^/          /'
     FAILED=1
