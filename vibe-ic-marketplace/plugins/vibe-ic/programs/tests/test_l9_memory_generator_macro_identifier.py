@@ -74,6 +74,7 @@ sys.path.insert(0, str(PLUGIN / "programs"))
 import phase1_doc_one_shot_runner as P  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _plugin_tree as _pt
 from _published_corpus import corpus_root, skip_reason  # noqa: E402
 
 U = P._v1_6_441_is_useful_memory_entry
@@ -122,7 +123,12 @@ def _real_docs_dir():
     if root is not None and (root / _DOCS_REL).is_dir():
         return root / _DOCS_REL
     rel = Path("benchmark-data") / _DOCS_REL
-    for cand in [PLUGIN, *PLUGIN.parents]:
+    # BOUNDED at the repository this plugin belongs to. The walk used to run to
+    # the filesystem root, and on a host whose $HOME holds a clone of
+    # vibeic/benchmark-data it bound this module's subject to that clone — 19 of
+    # these 58 tests changed verdict with the checkout's LOCATION alone. See
+    # `_plugin_tree.repo_root_of` for the measurement.
+    for cand in _pt.corpus_search_roots(PLUGIN):
         d = cand / rel
         if d.is_dir():
             return d

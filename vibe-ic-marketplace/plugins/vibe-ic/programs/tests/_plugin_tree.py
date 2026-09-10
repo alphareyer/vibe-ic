@@ -106,6 +106,58 @@ def require_or_skip(*parts: str) -> Path:
     return p
 
 
+def repo_root_of(plugin_dir: Path) -> Optional[Path]:
+    """:func:`repo_root` for a GIVEN plugin root — the BOUNDED search ceiling.
+
+    WHY THIS IS A SEPARATE, PARAMETERISED FUNCTION
+    ==============================================
+    Three test modules resolved a corpus subject by walking
+    ``[<plugin root>, *<plugin root>.parents]`` — every ancestor **up to the
+    filesystem root** — for a ``benchmark-data/`` directory. Each says so in its
+    own docstring ("up to the filesystem root", "resolve by STRUCTURE, not a
+    hard-coded parent count"). The structure part was right; the ceiling was
+    missing, and without a ceiling the walk leaves the repository.
+
+    MEASURED on ``f91aaa391``, one file
+    (``test_l9_memory_generator_macro_identifier.py``), same commit, same host,
+    same interpreter, ONLY the checkout's LOCATION different — the operator's
+    ``$HOME`` happens to hold a clone of ``vibeic/benchmark-data``::
+
+        tree under /home/reyerchu/...   58 passed,  0 skipped
+        tree under /tmp/...             39 passed, 19 skipped   (git archive, same sha)
+        inside the pinned image         39 passed, 19 skipped   (only the tree mounted)
+
+    Both readings are wrong. The skip is capability-shaped and is not about a
+    capability; the pass is a green taken against an **undeclared corpus of
+    unknown version** that no run record names. A subject reachable from outside
+    the repository is not this repository's subject.
+
+    The ceiling is the repository the plugin belongs to. This function is the
+    single place that rule is written, and it takes the plugin root as an
+    ARGUMENT so a test can steer it — a bound whose failure path cannot be
+    exercised is a bound nothing checks.
+    """
+    try:
+        if (plugin_dir.parent.name == "plugins"
+                and plugin_dir.parent.parent.name == "vibe-ic-marketplace"):
+            return plugin_dir.parent.parent.parent
+    except Exception:
+        return None
+    return None
+
+
+def corpus_search_roots(plugin_dir: Path) -> tuple:
+    """The ONLY directories an in-repo corpus subject may be resolved under.
+
+    The plugin itself, and the repository it belongs to. Never an ancestor of
+    that repository, and never the filesystem root. Callers keep their own
+    ``benchmark-data/...`` relative path and their own absent-subject skip; all
+    that changes is where they are allowed to look.
+    """
+    ceiling = repo_root_of(plugin_dir)
+    return (plugin_dir,) if ceiling is None else (plugin_dir, ceiling)
+
+
 def repo_root() -> Optional[Path]:
     """Return the monorepo root (the ``vibe-ic-marketplace`` parent) when
     running on the SOURCE tree, else ``None`` on the flattened cache.
@@ -114,14 +166,7 @@ def repo_root() -> Optional[Path]:
     On the cache tree there is no such ancestor chain, so this returns
     ``None`` and callers should ``pytest.skip(...NOT_SHIPPED_REASON...)``.
     """
-    pr = plugin_root()
-    # Expect ...<repo>/vibe-ic-marketplace/plugins/vibe-ic
-    try:
-        if pr.parent.name == "plugins" and pr.parent.parent.name == "vibe-ic-marketplace":
-            return pr.parent.parent.parent
-    except Exception:
-        return None
-    return None
+    return repo_root_of(plugin_root())
 
 
 def _reroute_moved(parts) -> Optional[Path]:

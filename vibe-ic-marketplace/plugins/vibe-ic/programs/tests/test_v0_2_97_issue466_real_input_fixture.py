@@ -48,6 +48,7 @@ import pytest
 _THIS = Path(__file__).resolve()
 _PLUGIN_ROOT = _THIS.parent.parent.parent          # …/plugins/vibe-ic
 sys.path.insert(0, str(_PLUGIN_ROOT / "programs"))
+import _plugin_tree as _pt  # noqa: E402
 import phase1_doc_one_shot_runner as P1  # noqa: E402
 
 
@@ -63,14 +64,16 @@ _CONVERTER_ACRONYM_RE = re.compile(
 
 def _candidate_benchmark_dirs() -> list:
     """Every ``benchmark_clean`` dir on the ancestor chain from the
-    plugin root up to the filesystem root. The marketplace nesting means
+    plugin root, BOUNDED at the repository the plugin belongs to
+    (`_plugin_tree.corpus_search_roots`): a walk to the filesystem root binds
+    the subject to any unrelated clone above the checkout. The marketplace nesting means
     a (possibly empty) ``benchmark_clean`` can exist at the plugin root
     AND the real one lives at the actual repo root (~3 parents up). We
     resolve by STRUCTURE, not a hard-coded parent count, and search all
     of them so whichever holds the real input docs is found."""
     seen = set()
     out = []
-    for cand in [_PLUGIN_ROOT, *_PLUGIN_ROOT.parents]:
+    for cand in _pt.corpus_search_roots(_PLUGIN_ROOT):
         bench = cand / "benchmark-data" / "ic"
         if bench.is_dir() and bench not in seen:
             seen.add(bench)

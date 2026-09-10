@@ -90,6 +90,7 @@ import pytest
 _THIS = Path(__file__).resolve()
 _PLUGIN_ROOT = _THIS.parent.parent.parent          # …/plugins/vibe-ic
 sys.path.insert(0, str(_PLUGIN_ROOT / "programs"))
+import _plugin_tree as _pt  # noqa: E402
 import ic_class_profile as ICP  # noqa: E402
 
 
@@ -378,7 +379,8 @@ _DISCOVERY_SHAPES = {
 
 def _repo_roots() -> list:
     """Every ``benchmark_clean`` / ``benchmark_phase1`` dir on the
-    ancestor chain from the plugin root up to the filesystem root.
+    ancestor chain from the plugin root, BOUNDED at the repository the
+    plugin belongs to (`_plugin_tree.corpus_search_roots`).
     Resolved by STRUCTURE, not a hard-coded parent count, so the
     marketplace nesting (a possibly-empty copy at the plugin root and the
     real one ~3 parents up) is handled robustly. Returns [] off-monorepo
@@ -386,7 +388,7 @@ def _repo_roots() -> list:
     above carries the anti-drift load."""
     seen = set()
     out = []
-    for cand in [_PLUGIN_ROOT, *_PLUGIN_ROOT.parents]:
+    for cand in _pt.corpus_search_roots(_PLUGIN_ROOT):
         for name in ("benchmark-data/ic", "benchmark-data/evaluation/phase1_parity"):
             d = cand / name
             if d.is_dir() and d not in seen:
