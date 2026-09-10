@@ -72,7 +72,16 @@ from typing import Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
 
-_VERSION_RE = re.compile(r"\[v\d+\.\d+\.\d+\]")
+# THE REPO WRITES `(v1.2.3)`, NOT `[v1.2.3]` — measured over the last 300 commits of main:
+# the bracket form matches 0 and the parenthesis form matches 129. `land_seq.sh` appends
+# " (vX.Y.Z)" to every landing message, so the batch arm was asking for a format this
+# repository abandoned: a legitimate two-commit batch whose tip says "... (v1.20.64)" was
+# refused with "batch of 2 carries 0 version-tagged commit(s) []", and re-wording the same
+# tip to "[v1.20.64]" made it pass. A rule no lane can satisfy is not a standard, it is a
+# wall. The same blindness reaches history mode: `--limit 600` reported "every landing is a
+# single squashed commit" while a manifest-only commit on an unversioned one sat inside
+# that window.
+_VERSION_RE = re.compile(r"[\[(]v\d+\.\d+\.\d+[\])]")
 
 # The manifests a version bump touches, and NOTHING else. A landing that only
 # rewrites these is not a change; it is the tail of a change that was left
