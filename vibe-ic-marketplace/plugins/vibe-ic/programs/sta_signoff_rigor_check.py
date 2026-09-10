@@ -82,8 +82,8 @@ import argparse
 import json
 import re
 import sys
-from pathlib import Path
-from typing import Dict, List, Optional
+from pathlib import Path, PurePosixPath
+from typing import Dict, List, Optional, Set
 
 # The OCV-derate marker line emitted by _emit_spef_sta (native-Tcl file append).
 _OCV_MARKER_RE = re.compile(
@@ -227,7 +227,61 @@ def _check_types_violations(report_text: str) -> List[str]:
     return found
 
 
-def _find_report(target: Path) -> Optional[Path]:
+#: Actions in ``postroute_timing_repair_decision.json`` naming a post-route
+#: repair arm the flow RAN and then DECLINED TO ADOPT. ``phase3_one_shot_runner``
+#: says it in as many words — "The post-route repair outputs stay on disk under
+#: their own names for debug; they are NOT adopted as the shipped artefacts" —
+#: so that arm's ``sta_mcorner_ocv_postrepair.rpt`` sits beside the governing
+#: ``sta_mcorner_ocv.rpt``, matches the SAME globs below, and NOTHING on disk
+#: distinguishes the two except this record.
+_NOT_ADOPTED_ACTIONS = frozenset({
+    "timing_repair_reverted_regression",
+    "timing_repair_blind_to_violation",
+})
+
+_DECISION_BASENAME = "postroute_timing_repair_decision.json"
+
+
+def _non_adopted_reports(target: Path) -> Set[Path]:
+    """Resolved STA reports belonging to a repair arm the flow did not adopt.
+
+    Read from the flow's OWN record rather than inferred from a filename: the
+    decision carries ``repair_after.report``, the path ``_measure_postrepair_
+    mcorner_ocv`` actually wrote, so a rename in the runner cannot silently empty
+    this set the way a hard-coded ``*_postrepair*`` pattern would.
+
+    An unreadable or absent record excludes NOTHING. That is the safe direction
+    here: this set only ever removes candidates, so failing to read it degrades
+    to today's behaviour rather than to a refusal on a run that never repaired.
+    """
+    out: Set[Path] = set()
+    if not target.is_dir():
+        return out
+    for dec in target.rglob(_DECISION_BASENAME):
+        try:
+            rec = json.loads(dec.read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict) or rec.get("action") not in _NOT_ADOPTED_ACTIONS:
+            continue
+        after = rec.get("repair_after")
+        rel = after.get("report") if isinstance(after, dict) else None
+        if not isinstance(rel, str) or not rel.strip():
+            continue
+        rel_p = PurePosixPath(rel.strip())
+        # The record is written project-relative, and the gate may be pointed at
+        # the project root or at any directory above it, so resolve against the
+        # decision file's own ancestors instead of hard-coding the depth.
+        for anc in [dec.parent, *dec.parents]:
+            cand = anc / rel_p
+            if cand.is_file():
+                out.add(cand.resolve())
+                break
+    return out
+
+
+def _find_report(target: Path,
+                 excluded: Optional[Set[Path]] = None) -> Optional[Path]:
     """Resolve the sign-off STA report. Accepts a file or a directory.
 
     Preference order (most-rigorous sign-off basis first):
@@ -237,14 +291,26 @@ def _find_report(target: Path) -> Optional[Path]:
          sign-off, not the single (nom) corner.
       2. the single-corner SPEF-based report (``post_route_timing.rpt`` /
          ``sta_spef_based*.rpt``).
-      3. any remaining post_route/sta report."""
+      3. any remaining post_route/sta report.
+
+    A report from a repair arm the flow did NOT adopt is excluded outright, the
+    same doctrine ``lvs_tapeout_signoff_check`` applies to an in-tree snapshot.
+    Ordering cannot be relied on to do this: ``sta_mcorner_ocv.rpt`` only beats
+    ``sta_mcorner_ocv_postrepair.rpt`` because ``.`` sorts under ``_``, and
+    ``rglob`` sorts whole PATHS, so a discarded arm one directory over wins on
+    the directory component alone. When the discarded arm is the only candidate
+    this returns ``None`` rather than letting it be read as sign-off.
+    """
     if target.is_file():
         return target
     if target.is_dir():
+        if excluded is None:
+            excluded = _non_adopted_reports(target)
         for pat in ("sta_mcorner_ocv*.rpt", "*mcorner_ocv*.rpt",
                     "post_route_timing.rpt", "sta_spef_based*.rpt",
                     "*spef*sta*.rpt", "sta.rpt", "*sta*.rpt"):
-            hits = sorted(target.rglob(pat))
+            hits = [p for p in sorted(target.rglob(pat))
+                    if p.resolve() not in excluded]
             if hits:
                 return hits[0]
     return None
@@ -337,8 +403,19 @@ def evaluate(report_text: str) -> Dict[str, object]:
 
 
 def check(target: Path) -> Dict[str, object]:
-    rpt = _find_report(target)
+    excluded = _non_adopted_reports(target)
+    rpt = _find_report(target, excluded)
     if rpt is None:
+        if excluded:
+            return {
+                "verdict": "IO_ERROR",
+                "error": (
+                    f"no ADOPTED sign-off STA report at {target}: every candidate "
+                    "belongs to a post-route repair arm the flow declined to adopt "
+                    "(" + ", ".join(sorted(p.name for p in excluded)) + "). A rigor "
+                    "verdict computed on a discarded arm is not a sign-off verdict, "
+                    "so this is NOT_MEASURED rather than a result."),
+                "non_adopted_reports": sorted(str(p) for p in excluded)}
         return {"verdict": "IO_ERROR",
                 "error": f"no sign-off STA report found at {target}"}
     try:
@@ -347,6 +424,8 @@ def check(target: Path) -> Dict[str, object]:
         return {"verdict": "IO_ERROR", "error": f"cannot read {rpt}: {e}"}
     res = evaluate(text)
     res["report"] = str(rpt)
+    if excluded:
+        res["non_adopted_reports_skipped"] = sorted(str(p) for p in excluded)
     return res
 
 
