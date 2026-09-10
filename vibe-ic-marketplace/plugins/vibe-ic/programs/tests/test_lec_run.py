@@ -1,8 +1,14 @@
 """Unit tests for lec_run.py — the Step 13 LEC PRODUCER.
 
-SYNTHETIC-only: every test drives the pure parser `parse_equiv_output` and
-the report shaper `build_report` with captured Yosys text. NO test requires
-Docker / a container.
+SYNTHETIC by default: almost every test drives the pure parser
+`parse_equiv_output` and the report shaper `build_report` with captured Yosys
+text, and needs no container. THREE cases do drive a real `docker exec` (the
+slang / async-reset / corrupted-SV live paths). They are guarded by
+`_container_guard.container_usable` and exec the PIN-DERIVED name, never the
+bare shared `vibeic-eda` — see `_live_container` below (#2230). The line that
+used to sit here said "NO test requires Docker / a container", which stopped
+being true when those three were added and is exactly the sentence that let a
+host-dependent red look impossible in this file.
 
 The two fixture blobs are REAL Yosys 0.66 output captured from spm:
   - CLEAN PASS  : generic $_-primitive netlist   -> 71/71 proven
@@ -28,6 +34,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
 import _docker_watchdog as _dw  # noqa: E402
 import _watchdog as _WD  # noqa: E402
+import _eda_pin as _pin  # noqa: E402 — the ONE place the pin/name is stated
+import _container_guard as _cg  # noqa: E402 — usable, not "wearing the name"
+
+
+def _live_container() -> str:
+    """The container the LIVE-path cases below actually exec into.
+
+    NOT the bare literal `vibeic-eda`. That name is guessable and SHARED on a
+    multi-lane host, nothing in this repo ever creates it, and `docker exec`
+    against it reaches whatever container won a race for the name — including
+    an image this repo does not pin. `_container_guard`'s own measurement, on
+    the very tree this file was last swept red at (`9c653d47f`), is 7 test
+    files and 10 ids red from that one cause, none of them about the tree.
+
+    `_eda_pin.default_container_name()` carries the pin digest, so it cannot be
+    squatted by an older image."""
+    return _pin.default_container_name()
 
 
 # ---------------------------------------------------------------------------
@@ -239,12 +262,12 @@ def test_marked_yosys_uses_container_tree_progress_and_attempt_budget(
             "marked long LEC must not use the host-only progress monitor"))
 
     got = lec_run._docker(
-        "vibeic-eda", "yosys -s /work/equiv.ys", timeout=73,
+        _live_container(), "yosys -s /work/equiv.ys", timeout=73,
         marker="/work/equiv.ys")
 
     assert got.returncode == 0
     assert got.stdout == "Yosys 0.68\n"
-    assert seen["container"] == "vibeic-eda"
+    assert seen["container"] == _live_container()
     assert seen["marker"] == "/work/equiv.ys"
     assert seen.get("hard_ceiling_s", _WD.DEFAULT_HARD_CEILING_S) >= \
         _WD.DEFAULT_HARD_CEILING_S, (
@@ -264,7 +287,7 @@ def test_run_yosys_equiv_binds_exact_script_as_progress_marker(monkeypatch):
 
     monkeypatch.setattr(lec_run, "_docker", fake_docker)
     launched, out = lec_run.run_yosys_equiv(
-        "vibeic-eda", "/work/hash-bound-equiv.ys", timeout=61)
+        _live_container(), "/work/hash-bound-equiv.ys", timeout=61)
 
     assert launched is True
     assert out == PASS_OUTPUT.rstrip("\n")
@@ -281,7 +304,7 @@ def test_progress_stall_is_disclosed_no_verdict_and_blocks_retry(monkeypatch):
             "Yosys 0.68\nFound 8 unproven $equiv cells (8 groups) in equiv:\n"))
 
     launched, out = lec_run.run_yosys_equiv(
-        "vibeic-eda", "/work/stalled.ys", timeout=7200)
+        _live_container(), "/work/stalled.ys", timeout=7200)
 
     assert launched is True
     assert lec_run._STALL_MARKER in out
@@ -973,12 +996,18 @@ def _mounted_workdir(tmp_path):
             p = root / ".probe"
             p.write_text("ok")
             r = _pr.run(
-                ["docker", "exec", "vibeic-eda", "bash", "-lc", f"cat {p}"],
+                ["docker", "exec", _live_container(), "bash", "-lc", f"cat {p}"],
                 capture_output=True, text=True)
             p.unlink(missing_ok=True)
             return r.returncode == 0 and "ok" in (r.stdout or "")
         except (subprocess.SubprocessError, OSError):
             return False
+    if not _cg.container_usable():
+        # A container running the wrong bytes is the SAME state as an absent
+        # one: the pinned runtime is not here. Absent already skipped; this
+        # makes "someone else's container holds the name" skip too, instead of
+        # committing these cases to a red about the host.
+        return None, (lambda: None)
     if _sees(tmp_path):
         return tmp_path, (lambda: None)
     import tempfile
@@ -993,7 +1022,7 @@ def _mounted_workdir(tmp_path):
 def _yosys(script_path):
     cmd = (f"export PATH=/foss/tools/yosys/bin:$PATH && "
            f"yosys -s {script_path} 2>&1")
-    return _pr.run(["docker", "exec", "vibeic-eda", "bash", "-lc", cmd],
+    return _pr.run(["docker", "exec", _live_container(), "bash", "-lc", cmd],
                           capture_output=True, text=True).stdout or ""
 
 
@@ -1065,7 +1094,7 @@ def test_urandom_simblock_plus_async_reaches_verdict_via_synthesis_define(tmp_pa
         pytest.skip("vibeic-eda container not available / path not bind-mounted")
     try:
         chk = _pr.run(
-            ["docker", "exec", "vibeic-eda", "bash", "-lc",
+            ["docker", "exec", _live_container(), "bash", "-lc",
              f"test -f {_SKY130_HD_LIB} && echo ok"],
             capture_output=True, text=True)
         if "ok" not in (chk.stdout or ""):
@@ -1122,7 +1151,7 @@ def test_async_reset_reaches_verdict_on_slang_path_in_container(tmp_path):
         (work / "dff_ar.v").write_text(_ASYNC_RTL)
         # is the sky130_hd lib present in the container?
         chk = _pr.run(
-            ["docker", "exec", "vibeic-eda", "bash", "-lc",
+            ["docker", "exec", _live_container(), "bash", "-lc",
              f"test -f {_SKY130_HD_LIB} && echo ok"],
             capture_output=True, text=True)
         if "ok" not in (chk.stdout or ""):
@@ -1283,7 +1312,7 @@ def test_widened_trigger_still_reports_a_corrupted_sv_design_as_not_equivalent(
         pytest.skip("vibeic-eda container not available / path not bind-mounted")
     try:
         chk = _pr.run(
-            ["docker", "exec", "vibeic-eda", "bash", "-lc",
+            ["docker", "exec", _live_container(), "bash", "-lc",
              f"test -f {_SKY130_HD_LIB} && echo ok"],
             capture_output=True, text=True)
         if "ok" not in (chk.stdout or ""):
@@ -2168,7 +2197,7 @@ def test_lec_telemetry_sidecar_is_live_then_finalized(monkeypatch, tmp_path):
 
     monkeypatch.setattr(_dw._wd, "run_supervised", supervised)
     rc, _out, _err = _dw.run_docker_supervised(
-        "vibeic-eda", "yosys -s /p/lec.ys", "/p/lec.ys",
+        _live_container(), "yosys -s /p/lec.ys", "/p/lec.ys",
         docker_exec_raw=raw, log_path=log, telemetry_path=sidecar,
         telemetry_stage_probe=lec_run.lec_stage_from_output,
         telemetry_context={"invocation_id": "inv", "attempt": 1},
@@ -2211,7 +2240,7 @@ def test_lec_telemetry_elapsed_and_attempt_ids_accumulate_across_retries(
     monkeypatch.setattr(_dw._wd, "run_supervised", supervised)
     for attempt in (1, 2):
         _dw.run_docker_supervised(
-            "vibeic-eda", "yosys -s /p/lec.ys", "/p/lec.ys",
+            _live_container(), "yosys -s /p/lec.ys", "/p/lec.ys",
             docker_exec_raw=raw, log_path=log, telemetry_path=sidecar,
             telemetry_stage_probe=lec_run.lec_stage_from_output,
             telemetry_context={"invocation_id": "inv", "attempt": attempt},
@@ -2282,3 +2311,41 @@ def test_lec_cache_second_identical_invocation_launches_no_yosys(monkeypatch,
     assert att["revalidated_identity"] == first["proof_identity"]
     assert att["source_report_sha256"].startswith("sha256:")
     assert att["source_proof_timestamp"] == first["source_proof_timestamp"]
+
+
+# ---------------------------------------------------------------------------
+# #2230 — the live path may never exec an UNQUALIFIED shared container name
+# ---------------------------------------------------------------------------
+def test_no_live_docker_exec_targets_the_bare_shared_container_name():
+    """The cause behind this file's main-red row, pinned so it cannot return.
+
+    `docker exec vibeic-eda ...` reaches whatever container holds that name on
+    a multi-lane host. `_container_guard`'s measurement at `9c653d47f` — the
+    tree this file was last swept red at — is 7 files / 10 ids red from that
+    one cause, invisible on any other machine. So every REAL exec here must
+    name the pin-derived container.
+
+    Read as an AST, not as text: a `grep` counts the argument-passing cases
+    below (which hand the name to a MOCKED runner and are not execs at all)
+    and would either pass vacuously or force churn on tests that are correct."""
+    import ast as _ast
+    bare = "vibeic" + "-eda"          # not a literal, so this scan can see itself
+    tree = _ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    offenders = [
+        n.lineno for n in _ast.walk(tree)
+        if isinstance(n, _ast.Constant) and n.value == bare]
+    assert offenders == [], (
+        f"the bare shared container name appears as a string literal at "
+        f"line(s) {offenders} — pass `_live_container()` instead, so the name "
+        f"carries the pin digest and cannot be squatted by another lane's "
+        f"container (#2230)")
+
+
+def test_the_live_container_name_is_pin_derived_and_not_the_bare_name():
+    """The other direction: the helper must return the PIN's name, so the
+    guard above cannot be satisfied by any constant-free expression."""
+    name = _live_container()
+    assert name == _pin.default_container_name()
+    assert name != "vibeic" + "-eda", (
+        "the pin-derived name collapsed to the bare shared name; it no longer "
+        "carries the digest and is squattable again")
