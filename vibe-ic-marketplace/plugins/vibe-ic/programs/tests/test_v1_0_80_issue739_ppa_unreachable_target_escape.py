@@ -71,18 +71,37 @@ import sys as _cg_sys
 from pathlib import Path as _cg_path
 _cg_sys.path.insert(0, str(_cg_path(__file__).resolve().parent))
 import _container_guard as _cg  # noqa: E402
+_cg_sys.path.insert(0, str(_cg_path(__file__).resolve().parents[1]))
+import _eda_pin as _pin  # noqa: E402 — the ONE place the pin/name is stated
 
 
-def _container_up(container="vibeic-eda") -> bool:
-    """Is the PINNED runtime reachable under that name? (#2230)
+def _container_up(container=None) -> bool:
+    """Is the PINNED runtime reachable under the name the PROGRAM will use?
 
-    Was `docker inspect -f {{.State.Running}}` — presence, not identity. On a
-    shared host the bare name `vibeic-eda` answers True for whatever container
-    got there first, so a stale image turned this file's live-path tests into
-    reds that are about the host and reproduce nowhere else. `container_usable`
-    asks `_eda_pin.container_matches_pin`, the repo's one definition of
-    "provably the pinned bytes"; a wrong-image container is now the same
-    not-here as an absent one, and skips exactly as it always did.
+    #2230 (v1.20.41) replaced `docker inspect -f {{.State.Running}}` — presence,
+    not identity — with `container_usable`, so a container running the wrong
+    bytes stopped being a red and became the skip an absent one always got.
+    That removed the RED and left the OTHER half of the same cause in place:
+    the name being asked about was still the bare literal `vibeic-eda`.
+
+    MEASURED 2026-09-10 on 8hd-3, clean main `0b2d38210` (v1.20.78), with the
+    pinned runtime genuinely present under the name the runtime derives
+    (`vibeic-eda-89a8fd729520`): all four live-path tests SKIPPED anyway,
+    because the bare name was held by a container of a different image. So the
+    live path did not merely stop being red — it became UNREACHABLE.
+
+    `vibeic-eda` is guessable and shared. No CODE in this repo creates it; the
+    only occurrences of `--name vibeic-eda` are the install instructions in
+    `README.md`, `docs/INSTALL.md` and `tools/vibeic-eda/README.md`, i.e. a name
+    the OPERATOR is told to use. On a multi-lane host it therefore answers for
+    whichever lane got there first, and guarding on it measures which container
+    won a race for a name — a fact about the host, not about the code.
+
+    `container=None` asks `_eda_pin.default_container_name`, the per-pin name
+    `ppa_area_threshold_check.main` itself defaults `--container` to. That is
+    the container this file's live path actually execs into, it carries the pin
+    digest so it cannot be squatted by an older image, and it is the name
+    `_container_guard.container_usable` documents as the one to ask about.
     """
     return _cg.container_usable(container)
 
@@ -345,7 +364,8 @@ def test_decide_generic_meets_target_passes_post_remediation():
 
 # ── orchestration: a near-minimal equivalent pair downgrades (no false block) ─
 @pytest.mark.skipif(not _HAVE_CONTAINER,
-                    reason="vibeic-eda container not running — live yosys path")
+                    reason=f"pinned runtime not usable as "
+                           f"{_pin.default_container_name()!r} — live yosys path")
 def test_live_near_minimal_equivalent_is_not_applicable(tmp_path):
     """LIVE END-STATE: two functionally-equivalent near-minimal RTLs (a 3-input
     XOR spelled two ways) — synthesis shares the redundancy so NEITHER the
@@ -372,7 +392,7 @@ def test_live_near_minimal_equivalent_is_not_applicable(tmp_path):
         "  assign y = a ^ (b ^ c);\nendmodule\n")
     rc, report = ppa.run_ppa_area_threshold(
         original=orig, optimized=equiv, top="m", prompt_text=None,
-        threshold_override=20.0, metric_override="both", container="vibeic-eda",
+        threshold_override=20.0, metric_override="both", container=_pin.default_container_name(),
         reference=ref)
     if report["verdict"] == "NOT_APPLICABLE" and "unmeasurable" in report.get(
             "reason", "").lower():
@@ -390,7 +410,8 @@ def test_live_near_minimal_equivalent_is_not_applicable(tmp_path):
 
 
 @pytest.mark.skipif(not _HAVE_CONTAINER,
-                    reason="vibeic-eda container not running — live yosys path")
+                    reason=f"pinned runtime not usable as "
+                           f"{_pin.default_container_name()!r} — live yosys path")
 def test_live_no_reference_noop_copy_blocks_via_floor(tmp_path):
     """LIVE §4.05 NO-LEAK (ORGANIC #768): a do-nothing copy (the optimized file
     is byte-identical to the original → 0% generic) WITHOUT a reference trips the
@@ -406,7 +427,7 @@ def test_live_no_reference_noop_copy_blocks_via_floor(tmp_path):
         "  assign y = (a ^ b) ^ c;\nendmodule\n")
     rc, report = ppa.run_ppa_area_threshold(
         original=orig, optimized=copy, top="m", prompt_text=None,
-        threshold_override=20.0, metric_override="both", container="vibeic-eda")
+        threshold_override=20.0, metric_override="both", container=_pin.default_container_name())
     if report["verdict"] == "NOT_APPLICABLE" and "unmeasurable" in report.get(
             "reason", "").lower():
         pytest.skip("synth could not measure both stats in this container")
@@ -416,7 +437,8 @@ def test_live_no_reference_noop_copy_blocks_via_floor(tmp_path):
 
 
 @pytest.mark.skipif(not _HAVE_CONTAINER,
-                    reason="vibeic-eda container not running — live yosys path")
+                    reason=f"pinned runtime not usable as "
+                           f"{_pin.default_container_name()!r} — live yosys path")
 def test_live_generic_meets_target_passes(tmp_path):
     """LIVE END-STATE (ORGANIC #769): an 8x8 multiplier reduced to a 7x7 one;
     its GENERIC reduction outpaces its MAPPED reduction. At a threshold pinned
@@ -435,7 +457,7 @@ def test_live_generic_meets_target_passes(tmp_path):
     # first measure to find a threshold strictly between mapped and generic.
     rc0, rep0 = ppa.run_ppa_area_threshold(
         original=big, optimized=small, top="m", prompt_text=None,
-        threshold_override=1.0, metric_override="cells", container="vibeic-eda")
+        threshold_override=1.0, metric_override="cells", container=_pin.default_container_name())
     mapped = rep0.get("cells_reduction_pct")
     generic = rep0.get("cells_reduction_pct_generic")
     if mapped is None or generic is None or not (generic > mapped + 1.0):
@@ -443,7 +465,7 @@ def test_live_generic_meets_target_passes(tmp_path):
     thr = (mapped + generic) / 2.0   # strictly between → mapped misses, generic MEETS
     rc, report = ppa.run_ppa_area_threshold(
         original=big, optimized=small, top="m", prompt_text=None,
-        threshold_override=thr, metric_override="cells", container="vibeic-eda")
+        threshold_override=thr, metric_override="cells", container=_pin.default_container_name())
     assert rc == 0, (report.get("verdict"), report.get("reason"))
     assert report["verdict"] == "PASS", report.get("reason")
     assert "generic meets" in report["reason"].lower()
@@ -455,7 +477,8 @@ def test_live_generic_meets_target_passes(tmp_path):
 #   python3 programs/ppa_area_threshold_check.py --original <orig>.sv \
 #       --optimized <equiv_near_minimal>.sv --top m --threshold-pct 20 --metric both
 @pytest.mark.skipif(not _HAVE_CONTAINER,
-                    reason="vibeic-eda container not running — live yosys path")
+                    reason=f"pinned runtime not usable as "
+                           f"{_pin.default_container_name()!r} — live yosys path")
 def test_acceptance_near_minimal_endstate_via_program_main(tmp_path):
     """END-STATE via the real program's main() on a tmp_path-shaped defect
     artifact: two functionally-equivalent near-minimal RTLs (a 3-input XOR spelled
@@ -477,6 +500,74 @@ def test_acceptance_near_minimal_endstate_via_program_main(tmp_path):
                    "--reference", str(tmp_path / "ref.sv"),
                    "--top", "m", "--threshold-pct", "20", "--metric", "both"])
     assert rc == 0, rc   # equivalent near-minimal: advisory NOT_APPLICABLE, not BLOCK
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# THE NAME ITSELF, asserted WITHOUT DOCKER.
+# The four live-path tests above cannot pin this: with no usable container they
+# skip, so they are green whether the name is right or wrong — which is exactly
+# how the bare-name half of #2230 survived its own fix. These two guards need no
+# docker client, so they run in the pinned image and on a bare host alike.
+# ════════════════════════════════════════════════════════════════════════════
+def test_main_targets_the_per_pin_container_not_the_bare_shared_name(
+        tmp_path, monkeypatch):
+    """`main()` with no `--container` must ask about the PER-PIN name."""
+    asked: list = []
+
+    def _record(container):
+        asked.append(container)
+        return False            # not up -> NOT_APPLICABLE, no docker touched
+
+    # BOTH seams. Left unstubbed, `_docker_available()` short-circuits to
+    # NOT_APPLICABLE before a container is ever named, and this guard would pass
+    # by never running — the empty-denominator green.
+    monkeypatch.setattr(ppa, "_docker_available", lambda: True)
+    monkeypatch.setattr(ppa, "_container_running", _record)
+    (tmp_path / "orig.sv").write_text(
+        "module m(input a, input b, input c, output y);\n"
+        "  assign y = (a ^ b) ^ c;\nendmodule\n")
+    (tmp_path / "equiv.sv").write_text(
+        "module m(input a, input b, input c, output y);\n"
+        "  wire t = a ^ b;\n  assign y = t ^ c;\nendmodule\n")
+    rc = ppa.main(["--original", str(tmp_path / "orig.sv"),
+                   "--optimized", str(tmp_path / "equiv.sv"),
+                   "--top", "m", "--threshold-pct", "20", "--metric", "both"])
+    assert rc == 0, rc                              # NOT_APPLICABLE, not error
+    assert asked, ("the program never named a container — the run ended before "
+                   "the container was chosen, so this guard measured nothing")
+    assert asked[0] == _pin.default_container_name(), (
+        f"main() targeted {asked[0]!r}; the pinned runtime is "
+        f"{_pin.default_container_name()!r}")
+    assert asked[0] != "vibeic-eda", (
+        "main() targeted the bare shared name. No code in this repo creates it "
+        "— only the install docs name it — so on a multi-lane host it is "
+        "whichever lane got there first.")
+
+
+def test_the_skip_guard_asks_about_the_container_the_program_will_use(
+        monkeypatch):
+    """The guard and the program must be talking about the SAME container.
+
+    A guard that clears on container A while the code execs into container B is
+    not a guard; it is two independent facts about a host printed next to each
+    other. That is the shape that made all four live tests unreachable.
+    """
+    asked: list = []
+
+    def _record(container=None, env=None):
+        asked.append(container)
+        return False
+
+    monkeypatch.setattr(_cg, "container_usable", _record)
+    _container_up()
+    assert len(asked) == 1, asked
+    # `None` means "ask _eda_pin for the derived name", the same answer by
+    # construction; anything else must BE that name, and must not be the bare
+    # shared one.
+    assert asked[0] is None or asked[0] == _pin.default_container_name(), asked
+    assert asked[0] != "vibeic-eda", (
+        "the skip guard asks about the bare shared name while the program execs "
+        "into " + repr(_pin.default_container_name()))
 
 
 if __name__ == "__main__":
