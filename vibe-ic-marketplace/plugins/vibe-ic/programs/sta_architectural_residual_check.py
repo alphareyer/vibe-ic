@@ -139,6 +139,10 @@ from _sta_basis import declared_basis  # noqa: E402
 # about a file nobody writes and passes forever.
 from sta_corner_record_completeness_check import (  # noqa: E402
     _MCORNER_OCV_CANDIDATES, _MULTICORNER_CANDIDATES, _NOMINAL_SPEF_CANDIDATES)
+try:
+    import _path_layout as _pl  # noqa: E402
+except Exception:  # pragma: no cover - _path_layout is always present in-tree
+    _pl = None
 
 #: The step this gate routes its finding TO — the one step that can remove a
 #: combinational depth. Read from `flow/phase1_phase2_phase3.yaml` step 1.
@@ -322,6 +326,134 @@ _EM_MEASURED_BASIS = "measured_max_segment"
 _EM_SIZING_REL = "reports/phase3/pdn_em_sizing.json"
 
 
+#: THE FOURTH FIELD OF THE RE-AUTHORING REQUEST (vibe-ic#2081).
+#:
+#: The owner's ruling of 2026-09-09 names what a Phase-3 sign-off violation owes
+#: a Phase-2 author: "a Phase-3 corner + slack + failing-path endpoints + THE
+#: LATENCY CONTRACT THE SPEC ALLOWS". MEASURED on this gate before this change,
+#: on #2081's own numbers (SS setup -2.53 ns, 39 arcs, PRUB 1.62): the request
+#: carried the first three and nothing at all about the fourth —
+#: `cycles_per_block` absent, `latency` absent, and the only "66" in the record
+#: was the digits inside the endpoint name `_17661_`.
+#:
+#: WHY THE ABSENT FIELD IS THE DANGEROUS ONE. The request says "a combinational
+#: depth the ARCHITECTURE implies", and the cheapest way for an author to cut
+#: depth is to add a pipeline stage. On #2081's design that breaks the observable
+#: 66-cycle READY contract — a design that closes timing and fails its spec.
+#: Every remedy the owner measured on this very design was chosen to keep the
+#: count: "Neither rewrite moves the cycle count."
+#:
+#: WHAT IT DOES AND DOES NOT SAY. It reports the cycle-count DECLARATIONS it can
+#: read, with the file each came from. It does NOT rule on whether the spec
+#: permits moving the count: on this design the L-docs contradict themselves
+#: about exactly that (#2168), and a gate that picked a side would be asserting a
+#: state nobody measured. So the sentence hands the author the declaration and
+#: says the permission is not established here.
+#:
+#: The key set is SPELLED OUT, never pattern-matched, for the same reason
+#: `_EM_BOUND_BASIS` is: a spelling this version does not know reads as "nothing
+#: declared" and the disclosure goes quiet. It can under-disclose, never
+#: mis-disclose.
+_LATENCY_KEYS = (
+    "latency_cycles_per_block",   # crypto_arch_extractor's own emitted field
+    "total_cycles_per_block",     # agents/qbank/crypto-engine_L8R.yaml
+    "throughput_cycles_per_block",  # agents/qbank/crypto-engine_L5.yaml
+    "latency_cycles",
+)
+
+
+def _latency_rows(doc: object, source: str) -> List[Dict[str, object]]:
+    """Every declared cycle count in ONE L-document, with where it was found."""
+    rows: List[Dict[str, object]] = []
+    if not isinstance(doc, dict):
+        return rows
+    scopes = [doc]
+    fields = doc.get("fields")
+    if isinstance(fields, dict):
+        scopes.append(fields)
+    for scope in scopes:
+        for key in _LATENCY_KEYS:
+            if key not in scope:
+                continue
+            value = scope[key]
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                # A count that is not a number is not a count. Reading prose
+                # here is how a gate starts asserting about a field it cannot
+                # parse; it stays unread instead.
+                continue
+            row: Dict[str, object] = {"key": key, "cycles": value,
+                                      "source": source}
+            ev = scope.get(f"{key}_evidence")
+            if isinstance(ev, dict):
+                # crypto_arch_extractor records source/line/matched_token beside
+                # the value; carry it so the author can check the declaration.
+                row["evidence"] = ev
+            rows.append(row)
+    return rows
+
+
+def latency_contract(project: Path) -> Optional[Dict[str, object]]:
+    """The design's DECLARED cycles-per-block, or None when none can be read.
+
+    None is returned for every uncertainty — no `_path_layout`, no
+    `phase1/generated_docs`, a root this process cannot list, an unreadable or
+    non-object document, and a document declaring no key this version knows.
+    None means "no sentence is added", which leaves the request exactly as it
+    was; it never means "the spec places no constraint".
+    """
+    if _pl is None:
+        return None
+    root = _pl.generated_docs_dir(project)
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        # Absent, or present and unlistable. Both are "could not read", and a
+        # failed read is never a declaration — least of all the declaration
+        # that a count is free to move.
+        return None
+    rows: List[Dict[str, object]] = []
+    for name in names:
+        if not (name.startswith("L") and name.endswith(".json")):
+            continue
+        try:
+            doc = json.loads((root / name).read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue
+        rows.extend(_latency_rows(doc, name))
+    if not rows:
+        return None
+    counts = sorted({row["cycles"] for row in rows})
+    return {
+        "declarations": rows,
+        "declared_cycles": counts,
+        "agrees": len(counts) == 1,
+        "root": str(root),
+    }
+
+
+def _latency_sentence(info: Dict[str, object]) -> str:
+    """The fourth field, stated without ruling on what it permits."""
+    rows = info["declarations"]
+    where = ", ".join(
+        f"{r['source']}:{r['key']}={r['cycles']}" for r in rows)
+    if info["agrees"]:
+        head = (f" THE DESIGN DECLARES {info['declared_cycles'][0]} CYCLE(S) "
+                f"PER BLOCK ({where}).")
+    else:
+        head = (f" THE DESIGN'S OWN DOCUMENTS DECLARE MORE THAN ONE CYCLE "
+                f"COUNT — {where} — so the latency contract is NOT_MEASURED "
+                f"here and must be settled before any re-authoring that "
+                f"depends on it.")
+    return head + (
+        " A re-authoring that changes this count changes the design's "
+        "observable contract, and the cheapest way to cut combinational depth "
+        "— adding a pipeline stage — does exactly that. This gate does NOT "
+        "establish whether the spec permits it: that is a Phase-1 question "
+        "about the L-documents named above, and it is NOT_MEASURED here. "
+        "Establish it there before moving the count; a rewrite that keeps the "
+        "count needs no such permission.")
+
+
 def die_sizing_basis(project: Path) -> Optional[Dict[str, object]]:
     """This run's EM strap-sizing basis, or None when it cannot be read.
 
@@ -380,6 +512,7 @@ def check(project: Path) -> Dict[str, object]:
         "architectural_paths": [],
         "reason": "",
         "reasons": [],
+        "latency_contract": None,
     }
     present = _candidates(project)
     if not present:
@@ -423,6 +556,11 @@ def check(project: Path) -> Dict[str, object]:
     # shortfall to qualify, so it must read exactly as it did before.
     sizing = die_sizing_basis(project) if rep["paths"] else None
     rep["die_sizing_basis"] = sizing
+    # #2081's fourth field. Read on the same condition as the sizing basis — a
+    # clean design has no re-authoring request to qualify — and attached BELOW
+    # to the FAIL branch only, because that is the branch that IS the request.
+    latency = latency_contract(project) if rep["paths"] else None
+    rep["latency_contract"] = latency
     caveat = (_die_sizing_sentence(sizing)
               if sizing and sizing["from_unmeasured_bound"] else "")
     if not arch:
@@ -453,7 +591,7 @@ def check(project: Path) -> Dict[str, object]:
         f"'{ROUTE_SKILL}'): this is a re-authoring request, not a closure "
         f"problem. The residual is NAMED, never waived — do not answer it by "
         f"re-declaring the period, dropping the corner or moving the target."
-        + caveat)
+        + caveat + (_latency_sentence(latency) if latency else ""))
     rep["reasons"] = [rep["reason"]] + [
         (f"corner '{corner_name(p)}' {p['startpoint']} -> {p['endpoint']}: "
          f"slack {p['slack_ns']} ns, PRUB "
