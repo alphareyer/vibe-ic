@@ -39,6 +39,7 @@ from typing import List, Optional
 
 __all__ = [
     "staged_pdk_roots",
+    "emitted_hardmacro_roots",
     "module_names_in_text",
     "staged_hardmacro_models",
     "emit_blackbox_stub",
@@ -78,6 +79,34 @@ def module_names_in_text(txt: str) -> set:
     return set(_MODULE_DECL_RE.findall(txt))
 
 
+#: Directories THIS FLOW writes hard-macro views into, relative to a project.
+#: Kept as data so a new emitter is one line, and so the reason each entry is
+#: here stays readable: every one of these is written by a step of this same
+#: flow, which is why a view found here is never "someone else's file".
+_EMITTED_HARDMACRO_DIRS = (
+    "phase3/analog/hardmacro",    # analog_a8_hardmacro_emit (A8), per block
+    "analog/hardmacro",           # legacy A8 location (final_report_generate)
+    "phase3/stage4/hardmacro",    # digital_hardmacro_gen
+)
+
+
+def emitted_hardmacro_roots(project: Path) -> List[Path]:
+    """Roots holding hard-macro views THIS FLOW emitted, for ``project``.
+
+    Separate from `staged_pdk_roots` on purpose: those are roots the DESIGNER
+    staged and Phase 1 recorded, these are the flow's OWN output. Both are
+    places a hard-macro view legitimately lives, and a consumer that must
+    resolve the macro needs to see both. Only existing directories are
+    returned, so this is a no-op for a design that emitted none.
+    """
+    roots: List[Path] = []
+    for rel in _EMITTED_HARDMACRO_DIRS:
+        d = project / rel
+        if d.is_dir():
+            roots.append(d)
+    return roots
+
+
 def staged_hardmacro_models(project: Path, rtl_files) -> List[dict]:
     """Discover instantiated-but-unstaged hard-macro models.
 
@@ -87,7 +116,13 @@ def staged_hardmacro_models(project: Path, rtl_files) -> List[dict]:
     'lib' (Liberty Path|None)}``. A macro referenced but with no staged model
     is still returned (v/lib None) so a caller can name the honest gap.
     """
-    roots = staged_pdk_roots(project)
+    # A macro view is resolvable from either the DESIGNER-staged PDK-local
+    # tree or from THIS FLOW'S OWN emitted hard-macro output. Searching only
+    # the former made discovery return ZERO for every design whose macro came
+    # from the analog A8 / digital hard-macro step, so no blackbox stub ever
+    # reached synth, sim or LEC and all three failed `Unknown module type`
+    # on a design the flow had itself produced a view for.
+    roots = staged_pdk_roots(project) + emitted_hardmacro_roots(project)
     if not roots:
         return []
     rtl_text_parts: List[str] = []
