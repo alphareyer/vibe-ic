@@ -6526,7 +6526,15 @@ def step_reused_ip_consume(project: Path,
         l9_top_module = None
     try:
         _staged_mods = set(_v661_rtl_module_names(project))
-        if top_name not in _staged_mods:
+        if top_name in _staged_mods:
+            # The requested top IS staged (the normal catalog-glue outcome:
+            # the authored chip_top sits in rtl/ alongside the reused IP).
+            # It resolves to itself — this is the same name `step_yosys_synth`
+            # passes as `--top`. Leaving it None here made the transitive-cone
+            # reduction below skip in exactly the case where the top is known
+            # and correct, so the orphan tail stayed staged and broke synth.
+            synth_top_resolved = top_name
+        else:
             _root = _v661_resolve_dut_module(project, top_name, l9_top_module)
             if _root and _root in _staged_mods:
                 synth_top_resolved = _root
