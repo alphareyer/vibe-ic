@@ -5501,6 +5501,50 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "stopped there; the verdict below is what that leg's own "
                     "log earned and nothing was re-attempted")
                 break
+            # A RUNG THAT PROVED NOTHING DOES NOT AUTHORISE A DEEPER ONE
+            # (vibe-ic#2232). MEASURED on ic/sha256: the rung that does the
+            # work took 700.6 s and the ladder then spent 7.5 h and counting on
+            # rungs that moved nothing, each authorised by `budget_sec 86400`.
+            # Its own log said so twice before the third rung started:
+            #     Proved 0 previously unproven $equiv cells.
+            #       Of those cells 1611 are proven and 2 are unproven.
+            # Deepening `-seq` is only worth a rung when the previous rung
+            # actually proved something. A stalled rung completes NORMALLY, so
+            # it writes its checkpoint and every stop condition above it is
+            # satisfied — which is why the ladder climbed on.
+            #
+            # LAST OF THE STOP CONDITIONS, DELIBERATELY. A rung that exceeds the
+            # ceiling dies with NO checkpoint, and in the silent-OOM shape its
+            # counts are still readable and equal — so an earlier placement
+            # RELABELLED a real exhaustion as a benign no-progress stop and
+            # took `test_a_rung_that_exceeds_the_ceiling_still_fails_honestly
+            # [True-no checkpoint]` down with it. Exhaustion keeps its own
+            # reason; this only speaks when the rung genuinely FINISHED.
+            #
+            # THE COUNTS WERE ALREADY BEING MEASURED HERE; they were simply
+            # never compared. Both ends must have been READ: a count of None is
+            # NOT_MEASURED, and reading an absence as "nothing moved" would
+            # invent a stop out of an unread state, which is the same error as
+            # inventing a pass out of one. So the guard fires only on four
+            # measured numbers.
+            #
+            # This decides WHERE THE LADDER STOPS, never what the verdict is:
+            # the residual is still parsed from the legs' own logs below, and a
+            # stopped ladder reports `complete: False`.
+            _pe = (_entry_counts or {}).get("proved")
+            _px = (_exit_counts or {}).get("proved")
+            _ue = (_entry_counts or {}).get("unproven")
+            _ux = (_exit_counts or {}).get("unproven")
+            if (None not in (_pe, _px, _ue, _ux)
+                    and _px == _pe and _ux == _ue):
+                _ladder_stop = (
+                    f"rung {_rung_name} proved nothing — it entered with "
+                    f"{_pe} proven / {_ue} unproven and left with the same "
+                    f"counts, so the ladder stopped there rather than "
+                    f"authorising a deeper induction rung against a residual "
+                    f"it has already declared it cannot move; the {_ux} "
+                    f"unproven point(s) are reported as the residual")
+                break
         # THE WHOLE LADDER'S OUTPUT, IN ORDER. `parse_equiv_output` already
         # reads the LAST `equiv_status` (it was made resume-aware for exactly
         # this reason), so a concatenation of the legs is read at the state the
