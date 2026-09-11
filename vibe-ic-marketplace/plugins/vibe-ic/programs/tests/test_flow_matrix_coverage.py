@@ -673,14 +673,56 @@ def test_live_collection_relays_finite_semantic_progress_past_old_bound(
 def test_live_collection_chatty_import_without_events_fails_closed(
         monkeypatch, tmp_path):
     """Collection stdout cannot impersonate a nonce-bound FSM transition."""
+    window = stall_window(0.25)
     monkeypatch.setattr(
-        sys.modules[__name__], "_COLLECTION_PROGRESS_STALL_S",
-        stall_window(0.25))
+        sys.modules[__name__], "_COLLECTION_PROGRESS_STALL_S", window)
     monkeypatch.setenv("PYTEST_ADDOPTS", "-s")
+    # THE SUBJECT IS DERIVED FROM THE WINDOW, NOT DECLARED — the same
+    # correction `test_live_collection_relays_finite_semantic_progress_past_
+    # old_bound` above already applies to its per-file sleep, and for the same
+    # reason: `stall_window` is CALIBRATED to this host's measured pytest
+    # start-up, and a subject written as a literal beside it does not scale
+    # with it.
+    #
+    # The lease is renewed through session_start and the collect scan, so the
+    # silent run this test needs the watchdog to cut begins at the chatterer
+    # and the firing condition is exactly `chatter_s > window`. With a literal
+    # `3`, that is `stall_window(0.25) < 3`, i.e. `trivial_session_s < 1.5` —
+    # a fact about the machine, decided by nothing in this repository.
+    #
+    # MEASURED as a CONTROLLED experiment on live main 72bd2679b (8HD-6,
+    # 2026-09-10), the floor pinned rather than waited for:
+    #
+    #     trivial_session_s = 0.10  ->  window 0.25s  vs 3s chatter  ->  passed
+    #     trivial_session_s = 1.70  ->  window 3.40s  vs 3s chatter  ->
+    #         Failed: DID NOT RAISE AssertionError
+    #
+    # which is the verbatim red seen on this host at load ~100, and the same
+    # shape the sibling test below reproduces at `trivial_session_s = 3.20`.
+    # Nothing about the watchdog changed between the two runs.
+    #
+    # So the margin is engineered and the window is untouched: 3x, of which
+    # the watchdog needs 1x, leaving 2x for its own poll cadence
+    # (`min(0.1, window / 4)`) and scheduler jitter. `max` keeps a fast host
+    # byte-identical to before this landing.
+    #
+    # THE UPPER END IS BOUNDED AND WAS CHECKED. `chatter_s` is `6 *
+    # trivial_session_s`, and the enclosing driver's own lease is
+    # `_OUTCOME_PROGRESS_STALL_S = 60`, so this item's silence only reaches
+    # that lease on a host whose pytest start-up exceeds 10 s — 3x the worst
+    # floor this repair was measured against (3.2 s) and 10x the one measured
+    # on 8HD-6. A host there cannot run this suite at all, so a cap is not
+    # added: a cap would be one more literal beside a calibrated quantity,
+    # which is the defect being removed.
+    chatter_s = max(3.0, 3.0 * window)
+    assert chatter_s > 2.0 * window, (
+        f"the chatterer must outlast the {window:.2f}s window by a margin the "
+        f"watchdog's own poll cadence fits inside, or this test measures the "
+        f"host's pytest start-up rather than fail-closed behaviour")
     path = tmp_path / "test_chatty_collect.py"
     path.write_text(
         "import time\n"
-        "deadline=time.monotonic()+3\n"
+        f"deadline=time.monotonic()+{chatter_s!r}\n"
         "while time.monotonic() < deadline:\n"
         "    print('COLLECT_CHATTER', flush=True)\n"
         "    time.sleep(.02)\n"
@@ -2247,13 +2289,33 @@ def test_nested_outcome_run_is_killed_when_no_item_can_renew_the_window(
 def test_nested_outcome_chatty_import_without_pytest_events_fails_closed(
         monkeypatch, tmp_path):
     """Captured chatter cannot impersonate a completed pytest transition."""
+    window = stall_window(0.45)
     monkeypatch.setattr(
-        sys.modules[__name__], "_OUTCOME_PROGRESS_STALL_S", stall_window(0.45))
+        sys.modules[__name__], "_OUTCOME_PROGRESS_STALL_S", window)
     monkeypatch.setenv("PYTEST_ADDOPTS", "-s")
+    # DERIVED FROM THE WINDOW, for the reason set out in full on
+    # `test_live_collection_chatty_import_without_events_fails_closed`. The
+    # comment below already said this assertion is "self-demonstrating — red
+    # when the machine is busy, green when it is idle, about code that did not
+    # change between the two runs"; removing the stopwatch assert took away
+    # the symptom and left the cause, which is a literal `6` beside a
+    # calibrated window.
+    #
+    # MEASURED as a CONTROLLED experiment on live main 72bd2679b (8HD-6,
+    # 2026-09-10), the floor pinned:
+    #
+    #     trivial_session_s = 0.10  ->  window 0.45s  vs 6s chatter  ->  passed
+    #     trivial_session_s = 3.20  ->  window 6.40s  vs 6s chatter  ->
+    #         Failed: DID NOT RAISE AssertionError
+    chatter_s = max(6.0, 3.0 * window)
+    assert chatter_s > 2.0 * window, (
+        f"the chatterer must outlast the {window:.2f}s window by a margin the "
+        f"watchdog's own poll cadence fits inside, or this test measures the "
+        f"host's pytest start-up rather than fail-closed behaviour")
     path = tmp_path / "test_chatty_import.py"
     path.write_text(
         "import time\n"
-        "deadline = time.monotonic() + 6\n"
+        f"deadline = time.monotonic() + {chatter_s!r}\n"
         "while time.monotonic() < deadline:\n"
         "    print('CHATTY_SENTINEL', flush=True)\n"
         "    time.sleep(0.02)\n\n"
