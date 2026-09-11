@@ -124,7 +124,7 @@ LEC_CHECKPOINT_SCHEMA_VERSION = "vibeic.lec.checkpoint.v1"
 #: legs it reached its verdict from. It is REPORT-ONLY: nothing here is hashed
 #: into a key, and nothing here can make a cache entry hit or miss.
 LEC_PROOF_EXECUTION_SCHEMA_VERSION = "vibeic.lec.proof-execution.v1"
-LEC_LADDER_SCHEMA_VERSION = "vibeic.lec.ladder.v1"
+LEC_LADDER_SCHEMA_VERSION = "vibeic.lec.ladder.v2-short-checkpoint"
 #: `_ladder_stop` when the loop climbed every rung. Named, not spelled
 #: twice: it is also what tells the parser the closing `equiv_status` is
 #: the LADDER's and not some intermediate leg's.
@@ -137,7 +137,8 @@ DEFAULT_CHECKPOINT_REL = "reports/lec_checkpoints"
 # `lec_stage_from_output`'s OWN vocabulary, so there is one spelling of a
 # ladder position in this file and not two.
 LEC_LADDER: Tuple[Tuple[str, str], ...] = (
-    ("equiv_simple_full", "equiv_simple -short\nequiv_simple\n"),
+    ("equiv_simple_short", "equiv_simple -short\n"),
+    ("equiv_simple_full", "equiv_simple\n"),
     ("equiv_induct_seq4", "equiv_induct -seq 4\n"),
     ("equiv_induct_seq16", "equiv_induct -seq 16\n"),
     ("equiv_induct_seq64", "equiv_induct -seq 64\n"),
@@ -3582,7 +3583,7 @@ def equiv_proof_tail(seq_depths: Optional[List[int]] = None, *,
         if rungs is not None:
             raise ValueError("equiv_proof_tail: a screen has no rung ladder "
                              "to bound")
-        ladder = LEC_LADDER[0][1]
+        ladder = LEC_LADDER[0][1] + LEC_LADDER[1][1]
     elif seq_depths is None:
         ladder = _emit_ladder(checkpoint_dir, start_index=start_index,
                               rungs=rungs)
@@ -3601,10 +3602,12 @@ def equiv_proof_tail(seq_depths: Optional[List[int]] = None, *,
             # writing a checkpoint no resume could ever select.
             raise ValueError("equiv_proof_tail: checkpoint_dir is supported "
                              "only for the shipped ladder (seq_depths=None)")
-        ladder = LEC_LADDER[0][1] + "".join(
+        ladder = (LEC_LADDER[0][1] + LEC_LADDER[1][1] + "".join(
             f"equiv_induct -seq {d}\n" for d in depths)
+        )
         if not depths:
-            ladder = LEC_LADDER[0][1] + "equiv_induct\n"
+            ladder = (LEC_LADDER[0][1] + LEC_LADDER[1][1]
+                      + "equiv_induct\n")
     return (
         # READ-ONLY report pass. It prints the miter's cell histogram, which is
         # the OBSERVABLE `miter_is_stateless` reads to decide whether temporal
@@ -5562,7 +5565,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             # the stop; no rung that genuinely stalled with work outstanding
             # escapes it, which `test_a_rung_that_proved_nothing_new_does_not_
             # earn_the_next_one` and the FIRST-rung test both still pin.
-            if (None not in (_pe, _px, _ue, _ux)
+            # Splitting the two simple commands adds a process boundary, not
+            # a new reason to stop.  Historically their combined rung could
+            # make zero progress before an induction rung made progress, so a
+            # plateau here must still be allowed to reach induction.
+            if (_rung_name not in {"equiv_simple_short", "equiv_simple_full"}
+                    and None not in (_pe, _px, _ue, _ux)
                     and _px == _pe and _ux == _ue and _ux > 0):
                 # THE THREE THINGS A STOP OWES ITS READER: which rung, and
                 # the two counts the decision was made from, each spelled so a

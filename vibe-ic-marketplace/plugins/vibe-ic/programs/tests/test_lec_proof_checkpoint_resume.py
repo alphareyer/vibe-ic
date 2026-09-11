@@ -90,7 +90,7 @@ def test_every_rung_writes_a_part_and_attests_it_after_the_write():
 
 
 def test_resume_script_reads_the_checkpoint_and_emits_only_later_rungs():
-    resume = {"rung": "equiv_induct_seq4", "rung_index": 1,
+    resume = {"rung": "equiv_induct_seq4", "rung_index": 2,
               "il_path": "/ck/equiv_induct_seq4.il"}
     script = lec_run.build_equiv_script(**_ARGS, checkpoint_dir="/ck",
                                         resume_from=resume)
@@ -107,7 +107,7 @@ def test_resume_script_keeps_the_read_only_observables_the_parser_needs():
     """`stat` feeds `miter_is_stateless`; the closing `equiv_status` feeds the
     verdict. Losing either would make a resumed run parse differently from a
     from-zero run for a reason that has nothing to do with the design."""
-    resume = {"rung": "equiv_simple_full", "rung_index": 0,
+    resume = {"rung": "equiv_simple_full", "rung_index": 1,
               "il_path": "/ck/equiv_simple_full.il"}
     script = lec_run.build_equiv_script(**_ARGS, checkpoint_dir="/ck",
                                         resume_from=resume)

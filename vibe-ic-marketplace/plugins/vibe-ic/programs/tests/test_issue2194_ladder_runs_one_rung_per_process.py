@@ -50,7 +50,7 @@ _ARGS = dict(gold_files=["/p/rtl/a.v"], gate_netlist="/p/synth/netlist.v",
 # The rung ladder as this suite expects to find it. Spelled out on purpose: if
 # a rung is ever added or reordered, these tests must be updated DELIBERATELY
 # rather than silently agreeing with whatever the code now emits.
-_RUNGS = ("equiv_simple_full", "equiv_induct_seq4",
+_RUNGS = ("equiv_simple_short", "equiv_simple_full", "equiv_induct_seq4",
           "equiv_induct_seq16", "equiv_induct_seq64")
 
 
@@ -100,15 +100,16 @@ def test_the_uncheckpointed_recipe_never_gains_a_rung_directive():
 def test_a_from_zero_script_can_be_bounded_to_the_first_rung_only():
     script = lec_run.build_equiv_script(**_ARGS, checkpoint_dir="/ck",
                                         ladder_rungs=1)
-    assert "equiv_simple -short" in script and "equiv_simple\n" in script
-    for later in ("equiv_induct -seq 4", "equiv_induct -seq 16",
+    assert "equiv_simple -short" in script
+    assert "equiv_simple\n" not in script
+    for later in ("equiv_simple\n", "equiv_induct -seq 4", "equiv_induct -seq 16",
                   "equiv_induct -seq 64"):
         assert later not in script
-    assert f"{lec_run.LEC_CHECKPOINT_SENTINEL} ck:equiv_simple_full" in script
+    assert f"{lec_run.LEC_CHECKPOINT_SENTINEL} ck:equiv_simple_short" in script
 
 
 def test_a_resumed_script_can_be_bounded_to_the_next_rung_only():
-    resume = {"rung": "equiv_induct_seq4", "rung_index": 1,
+    resume = {"rung": "equiv_induct_seq4", "rung_index": 2,
               "il_path": "/ck/equiv_induct_seq4.il"}
     script = lec_run.build_equiv_script(**_ARGS, checkpoint_dir="/ck",
                                         resume_from=resume, ladder_rungs=1)
@@ -389,7 +390,7 @@ def test_a_rung_that_exceeds_the_ceiling_still_fails_honestly(
     _rc, report = _drive(monkeypatch, fake)
     ladder = report["lec_ladder"]
     climbed = [lg["rung"] for lg in ladder["legs"]]
-    assert climbed == ["equiv_simple_full", "equiv_induct_seq4",
+    assert climbed == ["equiv_simple_short", "equiv_simple_full", "equiv_induct_seq4",
                        "equiv_induct_seq16"], climbed
     assert "equiv_induct_seq16" in (ladder["stopped_because"] or "")
     assert expect_in_reason in (ladder["stopped_because"] or ""), \
@@ -398,7 +399,7 @@ def test_a_rung_that_exceeds_the_ceiling_still_fails_honestly(
     # It was attempted ONCE. A driver that retried the failing rung would spin
     # on it forever and call the spinning progress.
     assert climbed.count("equiv_induct_seq16") == 1
-    assert len(fake.scripts) == 3
+    assert len(fake.scripts) == 4
     assert report.get("equivalent") is not True
     assert report["verdict"] != "PASS", (
         "a rung that ran out of memory was reported as a proof")
