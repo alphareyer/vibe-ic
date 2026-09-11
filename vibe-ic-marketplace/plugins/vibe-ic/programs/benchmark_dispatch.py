@@ -707,9 +707,10 @@ def _required_gate_ledger(solve_result: Any) -> dict:
         runner meant when it decided which sites to dispatch;
       * the run's declared ``exit`` in solve_report.
 
-    A site whose span HEAD is at or before the declared exit is IN SCOPE. This
-    mirrors `design_one_shot_runner._exit_pruned_sites` exactly — a span is one
-    dispatch and cannot be stopped mid-span, so the head decides.
+    The shared `step_preflight.exit_pruned_sites` defines the exit boundary.
+    Named exits use dispatch order; numeric exits use span HEADs because a
+    span is one dispatch and cannot be stopped mid-span. A numeric exit cannot
+    establish the scope of a non-numeric span.
 
     WHAT IS DELIBERATELY *NOT* CLAIMED. A gate the ledger cannot place on the
     flow (`sdc_gen`, `final_audit`, `lec_equivalence`, …) is recorded under
@@ -768,30 +769,32 @@ def _required_gate_ledger(solve_result: Any) -> dict:
                          "can be placed on the flow")
         return ledger
 
-    try:
-        cut = int(str(ledger["declared_exit"]))
-    except (TypeError, ValueError):
+    pruned = _spf.exit_pruned_sites(sites, ledger["declared_exit"])
+    if pruned is None:
         ledger["unscoped"] = dict(sorted(recorded.items()))
         ledger["why"] = (f"declared exit {ledger['declared_exit']!r} is not an "
-                         f"orderable flow step id, so nothing can be scoped")
+                         f"orderable flow step id or named site, so nothing can be scoped")
         return ledger
 
+    pruned = set(pruned)
+    named_exit = ledger["declared_exit"] in {name for name, _ in sites}
     placed = set()
     for name, span in sites:
+        scope_known = named_exit or bool(span and str(span[0]).isdigit())
+        in_scope = scope_known and name not in pruned
         if name not in recorded:
             # A site the run never recorded at all. In scope, and it did not
             # report — that is a hole, and it is named as one.
-            if span and str(span[0]).isdigit() and int(span[0]) <= cut:
+            if in_scope:
                 ledger["in_scope"][name] = "(absent)"
                 ledger["unmeasured_required"].append(name)
             continue
         placed.add(name)
         status = recorded[name]
-        head = span[0] if span else ""
-        if not str(head).isdigit():
+        if not scope_known:
             ledger["unscoped"][name] = status
             continue
-        if int(head) <= cut:
+        if in_scope:
             ledger["in_scope"][name] = status
             if status.upper() in _GATE_FAILED:
                 ledger["failed_required"].append(name)

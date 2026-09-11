@@ -92,7 +92,7 @@ def pruner():
     src = RUNNER.read_text(encoding="utf-8")
     m = re.search(r"def _exit_pruned_sites.*?(?=\ndef main\b)", src, re.S)
     assert m, "could not locate _exit_pruned_sites in the shipped runner"
-    ns: dict = {}
+    ns: dict = {"_spf": spf}
     exec(m.group(0), ns)  # noqa: S102 — executing our own shipped source
     return ns["_exit_pruned_sites"]
 

@@ -293,6 +293,35 @@ RUNNER_PLANS: Dict[str, RunnerPlan] = {
 }
 
 
+def exit_pruned_sites(sites: Sequence[Tuple[str, Sequence[str]]],
+                      exit_step: Any) -> Optional[List[str]]:
+    """Share the runner's exit boundary with consumers of its gate evidence.
+
+    Named exits prune later sites in dispatch order. Numeric exits prune sites
+    whose span head is past the exit: a multi-step span executes atomically.
+    Unorderable spans are never numerically pruned; this does not establish
+    their evidence scope. An unknown exit returns None, never an empty plan.
+    """
+    names = [n for n, _ in sites]
+    if exit_step in names:
+        return list(names[names.index(exit_step) + 1:])
+    try:
+        cut = int(str(exit_step))
+    except (TypeError, ValueError):
+        return None
+    pruned = []
+    for name, span in sites:
+        if not span:
+            continue
+        try:
+            head = int(str(span[0]))
+        except (TypeError, ValueError):
+            continue
+        if head > cut:
+            pruned.append(name)
+    return pruned
+
+
 def due_steps(runner: str, site: str) -> Tuple[frozenset, Optional[str]]:
     """Flow steps whose producer has ALREADY had its chance, at this site.
 

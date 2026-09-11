@@ -21537,24 +21537,7 @@ def _exit_pruned_sites(sites, exit_step):
     the caller must REFUSE rather than guess — silently running the whole
     flow would defeat the flag, and silently pruning it would be worse.
     """
-    names = [n for n, _ in sites]
-    if exit_step in names:
-        return list(names[names.index(exit_step) + 1:])
-    try:
-        cut = int(str(exit_step))
-    except (TypeError, ValueError):
-        return None
-    pruned = []
-    for name, span in sites:
-        if not span:
-            continue
-        try:
-            head = int(str(span[0]))
-        except (TypeError, ValueError):
-            continue
-        if head > cut:
-            pruned.append(name)
-    return pruned
+    return _spf.exit_pruned_sites(sites, exit_step)
 
 
 def main() -> int:
