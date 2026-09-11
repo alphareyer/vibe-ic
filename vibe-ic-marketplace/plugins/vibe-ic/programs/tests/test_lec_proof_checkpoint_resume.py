@@ -221,7 +221,7 @@ def test_select_takes_the_furthest_rung(tmp_path):
         evidence_log=_evidence(tmp_path, *_rungs))
     picked = lec_run.select_resume_checkpoint(ck, _KEY, _BASE)
     assert picked["rung"] == "equiv_induct_seq16"
-    assert picked["rung_index"] == 2
+    assert picked["rung_index"] == 3
 
 
 @pytest.mark.parametrize("how", ["foreign_key_asked", "foreign_key_declared",
@@ -429,7 +429,7 @@ def test_e2e_a_second_invocation_resumes_at_the_next_rung(monkeypatch,
     lec_run.main(argv)
     first = json.loads((proj / "reports/lec.json").read_text())
     assert first["lec_resume"]["rungs_recorded_this_run"] == \
-        ["equiv_simple_full"]
+        ["equiv_simple_short", "equiv_simple_full"]
     assert first["lec_resume"]["state"] == "RESUMABLE"
     assert "read_rtlil" not in scripts[0], "the FIRST run resumed from nothing"
 
@@ -445,7 +445,7 @@ def test_e2e_a_second_invocation_resumes_at_the_next_rung(monkeypatch,
     resumed = second["lec_resume"]["resumed_from"]
     assert second["lec_resume"]["resumed"] is True
     assert resumed["rung"] == "equiv_simple_full"
-    assert resumed["rung_index"] == 0
+    assert resumed["rung_index"] == 1
     assert resumed["checkpoint_sha256"].startswith("sha256:")
     # THE IDENTITY IS THE RECIPE; THE PATH TAKEN THROUGH IT IS RECORDED BESIDE
     # IT. A PASS is a PASS however it was reached, so a resumed run's identity
@@ -483,16 +483,46 @@ def test_e2e_a_second_invocation_resumes_at_the_next_rung(monkeypatch,
     # the legs are the canonical ladder's rungs IN ORDER, and none of them is
     # missing.
     assert first["lec_ladder"]["per_rung_processes"] is True
-    # `first` is the invocation the stub STOPPED after rung 0, so it made
-    # exactly ONE leg — the same rung its `rungs_recorded_this_run` names above.
+    # The short proof completed and was checkpointed before the stub stopped
+    # the full proof.  Both legs are retained; neither lets the other be
+    # skipped on resume.
     assert [lg["rung"] for lg in first["lec_ladder"]["legs"]] == \
-        ["equiv_simple_full"], first["lec_ladder"]["legs"]
+        ["equiv_simple_short", "equiv_simple_full"], first["lec_ladder"]["legs"]
     assert first["proof_execution"]["ladder_leg_script_sha256s"] == \
         [lg["script_sha256"] for lg in first["lec_ladder"]["legs"]]
     assert first["proof_execution"]["equivalence_script_sha256_executed"] == \
         first["lec_ladder"]["legs"][0]["script_sha256"]
     assert [leg["leg"] for leg in first["proof_execution"]["evidence_legs"]] \
         == ["this_invocation"]
+
+
+def test_e2e_a_short_checkpoint_resumes_into_full_not_induction(monkeypatch,
+                                                                 tmp_path):
+    """A completed short proof is useful state, never permission to skip full.
+
+    This is the negative control for the split boundary: before the split there
+    is no short checkpoint, and after it the next process must consume it and
+    run exactly the formerly coupled full proof.
+    """
+    proj = _project(tmp_path)
+    argv = [str(proj), "--top", "dut", "--container", "fake",
+            "--liberty", "/missing"]
+    scripts = []
+    _install_fake_yosys(monkeypatch, scripts,
+                        stop_after_rung="equiv_simple_short", tail=_STOPPED_TAIL)
+    lec_run.main(argv)
+    first = json.loads((proj / "reports/lec.json").read_text())
+    assert first["lec_resume"]["rungs_recorded_this_run"] == ["equiv_simple_short"]
+    assert first["verdict"] != "PASS"
+
+    scripts.clear()
+    _install_fake_yosys(monkeypatch, scripts,
+                        stop_after_rung="equiv_simple_full", tail=_STOPPED_TAIL)
+    lec_run.main(argv)
+    assert scripts and scripts[0].startswith("read_rtlil ")
+    assert "equiv_simple -short" not in scripts[0]
+    assert "equiv_simple\n" in scripts[0]
+    assert "equiv_induct" not in scripts[0]
 
 
 def test_e2e_a_stopped_run_says_which_rung_it_can_be_resumed_from(monkeypatch,
@@ -509,13 +539,14 @@ def test_e2e_a_stopped_run_says_which_rung_it_can_be_resumed_from(monkeypatch,
     assert rep["verdict"] == "INCONCLUSIVE", rep["verdict"]
     assert rec["state"] == "RESUMABLE"
     assert rec["resumable_from_rung"] == "equiv_induct_seq4"
-    assert rec["state_label"] == "INCONCLUSIVE-resumable-from-rung-1"
+    assert rec["state_label"] == "INCONCLUSIVE-resumable-from-rung-2"
     assert "resumes THERE" in rec["statement"]
     assert "sign-off LEC" not in rec["statement"], (
         "a resumable proof was told to buy a commercial tool")
     tele = rep["telemetry"]["record"]
     assert tele["checkpoint_state"] == "RESUMABLE"
-    assert tele["rungs_recorded"] == ["equiv_simple_full", "equiv_induct_seq4"]
+    assert tele["rungs_recorded"] == ["equiv_simple_short", "equiv_simple_full",
+                                       "equiv_induct_seq4"]
 
 
 def test_e2e_checkpointing_is_off_when_the_container_cannot_write(monkeypatch,
@@ -1242,7 +1273,8 @@ def test_e2e_the_prune_waits_until_this_ladder_has_landed_a_rung(monkeypatch,
         lambda *a, **k: "# ladder B\n" + _real(*a, **k))
     lec_run.main(argv)
     third = json.loads((proj / "reports/lec.json").read_text())["lec_resume"]
-    assert third["rungs_recorded_this_run"] == ["equiv_simple_full"], third
+    assert third["rungs_recorded_this_run"] == ["equiv_simple_short",
+                                                  "equiv_simple_full"], third
     assert lec_run.select_resume_checkpoint(
         ck, third["checkpoint_key"], base_a) is None, (
             "ladder A still revalidates after ladder B landed a rung")
