@@ -96,14 +96,33 @@ def test_a_required_in_scope_failure_makes_the_candidate_ineligible():
     assert "rtl_validate" in BD._gate_status_note(ledger)
 
 
-def test_the_export_door_refuses_the_same_candidate(tmp_path):
+@pytest.mark.parametrize("exit_step", ["2", "rtl_validate"])
+def test_the_export_door_refuses_the_same_candidate(tmp_path, exit_step):
     """One claim, TWO doors -- `--resume` prints it and the export re-asserts
     it. A fix on one door leaves the other saying the old thing."""
     reasons = BD._shape_c_task_binding_reasons(
         {"id": "x"}, tmp_path,
-        _solve(ran={"rtl_gen": "PASS", "rtl_validate": "FAIL"}))
+        _solve(exit_step=exit_step,
+               ran={"rtl_gen": "PASS", "rtl_validate": "FAIL"}))
     assert any("required in-scope PROGRAM gate rtl_validate" in r
                for r in reasons), reasons
+
+
+@pytest.mark.parametrize("status", ["PASS", "FAIL", "BLOCKED", None])
+def test_named_exit_and_numeric_exit_have_the_same_gate_scope(status):
+    """Both exit forms select the same real runner site, including its span.
+
+    Changing only the CLI spelling must not hide failures or measured holes.
+    An out-of-scope failure remains disclosed without blocking either form.
+    """
+    ran = {"rtl_gen": "PASS", "sim": "FAIL"}
+    if status is not None:
+        ran["rtl_validate"] = status
+    numeric = BD._required_gate_ledger(_solve(exit_step="2", ran=ran))
+    named = BD._required_gate_ledger(_solve(exit_step="rtl_validate", ran=ran))
+    numeric.pop("declared_exit")
+    named.pop("declared_exit")
+    assert named == numeric
 
 
 # ── 驗收: out-of-exit failures stay VISIBLE and block NOTHING (#2208) ──────
