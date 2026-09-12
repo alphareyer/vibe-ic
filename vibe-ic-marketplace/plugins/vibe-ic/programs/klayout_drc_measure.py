@@ -15,6 +15,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from _atomic_artefact import write_text
+
 
 def _sha(path: Path) -> str | None:
     if not path.is_file():
@@ -75,10 +77,10 @@ def measure(args: argparse.Namespace) -> int:
     try:
         cp = subprocess.run(command, capture_output=True, text=True, check=False)
         rc = cp.returncode
-        transcript.write_text(cp.stdout + cp.stderr, encoding="utf-8")
+        write_text(transcript, cp.stdout + cp.stderr, encoding="utf-8")
     except OSError as exc:
         rc = 127
-        transcript.write_text(f"MEASUREMENT_LAUNCH_ERROR: {exc}\n", encoding="utf-8")
+        write_text(transcript, f"MEASUREMENT_LAUNCH_ERROR: {exc}\n", encoding="utf-8")
 
     outputs = {}
     for path, rel in ((report, report_rel), (transcript, transcript_rel)):
