@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1307
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1307)
+- **Total programs (excluding helpers / shims):** 1308
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1308)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1298 |
+| `any` | 1299 |
 
 ## Alphabetical listing
 
@@ -589,6 +589,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `json_schema_check` | any | — | Deterministic JSON schema key checker. |
 | `jtag_protocol_synth` | any | — | IEEE 1149.1 JTAG TAP controller deterministic L1-L23 synth. |
 | `klayout_deck_mode_check` | any | v0.112 | BACKLOG-v10 P0.1 enforcement loop. |
+| `klayout_drc_measure` | any | — | Produce one digest-bound KLayout DRC invocation receipt with ``docker run``. |
 | `klayout_pdk_lvs` | any | — | net-correct KLayout transistor-level layout extraction for LVS. |
 | `kmap_grid_synth` | any | — | DETERMINISTIC Karnaugh-map → RTL synthesizer (v1.1.38 clean-room §4.2 absorption). |
 | `kmap_sop_synth` | any | — | deterministic Karnaugh-map (K-map) -> RTL SOLVER. |
@@ -1379,7 +1380,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1298 programs)
+### `any` (1299 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1940,6 +1941,7 @@ _(no programs in this group)_
 - `json_schema_check` — Deterministic JSON schema key checker.
 - `jtag_protocol_synth` — IEEE 1149.1 JTAG TAP controller deterministic L1-L23 synth.
 - `klayout_deck_mode_check` — BACKLOG-v10 P0.1 enforcement loop.  _[v0.112]_
+- `klayout_drc_measure` — Produce one digest-bound KLayout DRC invocation receipt with ``docker run``.
 - `klayout_pdk_lvs` — net-correct KLayout transistor-level layout extraction for LVS.
 - `kmap_grid_synth` — DETERMINISTIC Karnaugh-map → RTL synthesizer (v1.1.38 clean-room §4.2 absorption).
 - `kmap_sop_synth` — deterministic Karnaugh-map (K-map) -> RTL SOLVER.
