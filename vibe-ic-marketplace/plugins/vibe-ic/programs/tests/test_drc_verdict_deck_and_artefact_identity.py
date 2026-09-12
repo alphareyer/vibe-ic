@@ -51,7 +51,8 @@ def test_signoff_and_restream_use_the_same_deck_invocation(monkeypatch,
     """
     seen = []
 
-    def _fake_exec(container, cmd, marker=None, outputs=None):
+    def _fake_exec(container, cmd, marker=None, outputs=None,
+                   inputs=None, transcript_path=None):
         seen.append(cmd)
         for o in (outputs or []):
             Path(o).parent.mkdir(parents=True, exist_ok=True)
@@ -86,7 +87,8 @@ def test_unreadable_restream_is_none_not_zero(monkeypatch, tmp_path):
     """
     monkeypatch.setattr(
         p3, "_docker_exec",
-        lambda container, cmd, marker=None, outputs=None: (0, "", ""))
+        lambda container, cmd, marker=None, outputs=None, inputs=None,
+               transcript_path=None: (0, "", ""))
     monkeypatch.setattr(p3, "_to_container_path", lambda s, c: s)
     gds = tmp_path / "top.gds"
     gds.write_bytes(b"")
@@ -98,7 +100,8 @@ def test_unreadable_restream_is_none_not_zero(monkeypatch, tmp_path):
 
 def test_stalled_restream_is_none_not_zero(monkeypatch, tmp_path):
     """A stall/ceiling kill must not be scored from a partial report."""
-    def _stalled(container, cmd, marker=None, outputs=None):
+    def _stalled(container, cmd, marker=None, outputs=None, inputs=None,
+                  transcript_path=None):
         for o in (outputs or []):
             Path(o).parent.mkdir(parents=True, exist_ok=True)
             Path(o).write_text("<report-database>")  # truncated

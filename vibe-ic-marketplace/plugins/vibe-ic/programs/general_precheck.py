@@ -955,6 +955,80 @@ def _step_flow_marker_layers(ev: StepEvidence,
 # --------------------------------------------------------------------------- #
 # DELEGATED steps — call the in-tree checker, report its rc. Never its rules.
 # --------------------------------------------------------------------------- #
+def _bound_drc_scope(project: Path, layout: Optional[Path]):
+    """Use a canonical pair only when its measured run checked this layout.
+
+    Legacy ledgers without input bindings retain discovery. Once a producer
+    records a binding, missing/stale artifacts cannot silently revert to an
+    unrelated historical PASS. Publication aliases must be byte-identical.
+    """
+    ledger = project / "provenance.jsonl"
+    if not ledger.is_file():
+        return [], ""
+    records = []
+    for line in ledger.read_text(errors="replace").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            records.append(entry)
+    report_rel = "reports/phase3/drc_signoff.rpt"
+    log_rel = "reports/phase3/drc_signoff.log"
+    sources = (report_rel, "phase3/reports/drc.rpt")
+    def ledger_key(rel):
+        # The producer hashes resolved paths, including ordinary Step-31
+        # publication aliases. Reports and transcripts may resolve to
+        # different directories and stems; resolve each declared path itself.
+        try:
+            return (project / rel).resolve().relative_to(project.resolve()).as_posix()
+        except (ValueError, OSError):
+            return None
+    for entry in reversed(records):
+        outputs = entry.get("outputs")
+        inputs = entry.get("inputs")
+        if not isinstance(outputs, dict) or not isinstance(inputs, dict):
+            continue
+        source = next((p for p in sources if ledger_key(p) in outputs), None)
+        if source is None or not inputs:
+            continue
+        failure = "the measured DRC input/output binding is stale or incomplete"
+        if (entry.get("record") != "invocation" or
+                entry.get("measured") is not True or
+                type(entry.get("exit_code")) is not int or
+                entry["exit_code"] != 0 or entry.get("tool") != "klayout"):
+            return [], failure
+        def digest(path):
+            sha = _sha256(path) if path.is_file() else None
+            return "sha256:" + sha if sha else None
+        if layout is None or not layout.is_file():
+            return [], failure
+        # Hash equality allows the normal stage3 -> stage4 publication alias,
+        # but the originally measured input must also remain unchanged.
+        current = digest(layout)
+        matched_input = False
+        for name, sha in inputs.items():
+            if not isinstance(name, str):
+                continue
+            path = project / name
+            try:
+                path.resolve().relative_to(project.resolve())
+            except (ValueError, OSError):
+                continue
+            if path.suffix.lower() == ".gds" and sha == current and digest(path) == sha:
+                matched_input = True
+        source_log = str(Path(source).with_suffix(".log"))
+        if not matched_input:
+            return [], failure
+        for origin, alias in ((source, report_rel), (source_log, log_rel)):
+            expected = outputs.get(ledger_key(origin))
+            if (not expected or digest(project / origin) != expected or
+                    digest(project / alias) != expected):
+                return [], failure
+        return [report_rel, log_rel], ""
+    return [], ""
+
+
 def _step_delegate(ev: StepEvidence, step: Step, project: Path,
                    runner: Runner, programs_dir: Path,
                    timeout: Optional[float],
@@ -963,7 +1037,8 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
                    seal_facility: Optional[bool] = None,
                    seal_facility_path: Optional[str] = None,
                    seal_facility_tried: Optional[List[str]] = None,
-                   volume_why: str = "") -> None:
+                   volume_why: str = "",
+                   layout: Optional[Path] = None) -> None:
     d = step.delegate
     assert d is not None
     if step.step_id == "General.SealRing":
@@ -1042,6 +1117,13 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
     extra: List[str] = []
     if d.program in _PDK_AWARE_DELEGATES and pdk:
         extra = ["--pdk", pdk]
+    if d.program == "drc_report_check":
+        scope, refusal = _bound_drc_scope(project, layout)
+        if refusal:
+            ev.evidence = refusal
+            return
+        for path in scope:
+            extra.extend(["--under", path, "--require-report", path])
     cmd = [sys.executable, str(prog), positional, *d.argv_tail, *extra,
            "--json", str(out)]
     rc, stdout, stderr = runner(cmd, timeout)
@@ -1208,7 +1290,7 @@ def evaluate(project: Path,
                            pdk=pdk, seal_facility=seal_facility,
                            seal_facility_path=seal_path,
                            seal_facility_tried=seal_tried,
-                           volume_why=volume_why)
+                           volume_why=volume_why, layout=chosen)
 
     with_evidence = sum(1 for s in steps if s.verdict != NOT_DETERMINED)
     failed = [s.step_id for s in steps if s.verdict == FAIL]

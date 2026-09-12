@@ -888,7 +888,7 @@ def _hash_declared_outputs(sink: str, declared) -> dict:
 def _log_invocation(cmd: str, rc: int, duration_ms: int,
                     marker: Optional[str] = None,
                     container: Optional[str] = None,
-                    outputs=None) -> None:
+                    outputs=None, input_hashes=None) -> None:
     """Append ONE measured invocation record. Never raises: a ledger that can
     break the run it documents would be traded away the first time it did.
 
@@ -933,6 +933,8 @@ def _log_invocation(cmd: str, rc: int, duration_ms: int,
     }
     if marker:
         entry["marker"] = marker
+    if input_hashes:
+        entry["inputs"] = input_hashes
     # Declared by the CALL SITE, hashed here. Absent when the caller declared
     # nothing or nothing it declared was produced — empty is honest.
     _outs = _hash_declared_outputs(sink, outputs)
@@ -1279,7 +1281,9 @@ def _docker_exec(container: str, cmd: str, timeout: int = 1800, *,
                  hard_ceiling_s: Optional[float] = None,
                  poll_s: Optional[float] = None,
                  abort_probe: Optional[Callable[[], Optional[str]]] = None,
-                 outputs: Optional[List[str]] = None) -> Tuple[int, str, str]:
+                 outputs: Optional[List[str]] = None,
+                 inputs: Optional[List[Path]] = None,
+                 transcript_path: Optional[Path] = None) -> Tuple[int, str, str]:
     """Run shell cmd inside a Docker container.
 
     DISPATCH (v1.3.47):
@@ -1316,6 +1320,10 @@ def _docker_exec(container: str, cmd: str, timeout: int = 1800, *,
                else hard_ceiling_s)
     poll = _WATCHDOG_POLL_S if poll_s is None else poll_s
 
+    # Capture inputs BEFORE execution: hashing them afterwards could bind a
+    # report to a replacement layout the tool never read.
+    input_hashes = (_hash_declared_outputs(_PROV_SINK, inputs)
+                    if _PROV_SINK is not None and inputs else {})
     _t0 = time.monotonic()
     # THE SHARED SUPERVISED DISPATCH, AND NO CLOCK (vibe-ic#2051, v1.18.28).
     #
@@ -1359,9 +1367,17 @@ def _docker_exec(container: str, cmd: str, timeout: int = 1800, *,
         term_grace_s=_WATCHDOG_TERM_GRACE_S,
         # the caller's OWN domain read, carried through rather than dropped
         abort_probe=abort_probe)
+    if input_hashes and _hash_declared_outputs(_PROV_SINK, inputs) != input_hashes:
+        res_err += (f"\nInput artifacts changed during execution (native rc={res_rc}); "
+                    "the output cannot be bound to the published input.\n")
+        res_rc = 1
+    if transcript_path is not None:
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        transcript_path.write_text(res_out + res_err)
     _log_invocation(cmd, res_rc if res_rc is not None else -1,
                     int((time.monotonic() - _t0) * 1000), marker=marker,
-                    container=container, outputs=outputs)
+                    container=container, outputs=outputs,
+                    input_hashes=input_hashes)
     return res_rc, res_out, _annotate_local_exec(res_rc, res_err)
 
 
@@ -37049,7 +37065,10 @@ def _klayout_deck_exec(gds: Path, rpt: Path, top: str, pdk: PdkConfig,
         f"-rd in_gds={gds_c} -rd report_file={rpt_c} "
         f"-rd top_cell={top}"
     )
-    return _docker_exec(container, cmd, marker=gds_c, outputs=[rpt])
+    transcript = rpt.with_suffix(".log")
+    return _docker_exec(container, cmd, marker=gds_c,
+                        inputs=[gds], outputs=[rpt, transcript],
+                        transcript_path=transcript)
 
 
 def _klayout_deck_violations_on(
@@ -38292,6 +38311,9 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
         if rpt.is_file():
             _canon.write_bytes(rpt.read_bytes())
             extras["drc_signoff_report"] = str(_canon)
+            _native_log = rpt.with_suffix(".log")
+            if _native_log.is_file():
+                _canon.with_suffix(".log").write_bytes(_native_log.read_bytes())
     except Exception:  # nosec — canonical mirror is best-effort provenance
         pass
     return StepResult("drc", status, time.time() - t0,
