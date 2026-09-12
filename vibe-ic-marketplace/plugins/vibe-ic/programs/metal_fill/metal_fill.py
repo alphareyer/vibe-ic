@@ -286,7 +286,20 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
         out.append(floor_fwd)
         return out
 
-    def _run_ladder(rungs, tag):
+    owned_cells = []
+
+    def _new_fill_cell(name):
+        # A name prefix is not ownership: incoming streams may already carry
+        # fill from earlier runs or reserved cells with similar names.
+        candidate, suffix = name, 0
+        while ly.cell(candidate) is not None:
+            suffix += 1
+            candidate = f"{name}_{suffix}"
+        cell = ly.create_cell(candidate)
+        owned_cells.append(cell.cell_index())
+        return cell
+
+    def _run_ladder(rungs, tag, phase=(0, 0)):
         """Lay `rungs` (dbu square sides, large -> small) into whatever room is
         left. Returns the pitches used. DRC-safety is by CONSTRUCTION and does
         not depend on the fill engine's own margin handling: `blocked` is
@@ -302,7 +315,7 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
             min_pitch = _snap_up(cur_fwd + sp)
             # a SEPARATE cell per size: mutating one cell would retroactively resize the
             # fills already placed from it.
-            fcell = ly.create_cell(f"FILL_{spec['name']}_{tag}{si}")
+            fcell = _new_fill_cell(f"FILL_{spec['name']}_{tag}{si}")
             fcell.shapes(fill_lidx).insert(pya.Box(0, 0, cur_fwd, cur_fwd))
             fcbox = pya.Box(0, 0, cur_fwd, cur_fwd)
             for _pass in range(max_passes):
@@ -344,20 +357,18 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
                 n_before = sum(1 for _ in top.begin_shapes_rec(fill_lidx))
                 fillable.fill(top, fcell.cell_index(), fcbox,
                               pya.Vector(p, 0), pya.Vector(0, p),
-                              pya.Point(0, 0), None, pya.Vector(sp, sp))
+                              pya.Point(_snap_near(p * phase[0] // 2),
+                                        _snap_near(p * phase[1] // 2)),
+                              None, pya.Vector(sp, sp))
                 if sum(1 for _ in top.begin_shapes_rec(fill_lidx)) == n_before:
                     break                               # size saturated -> go smaller
         return used
 
-    def _drop_own_fill(tag):
-        """Delete the fill THIS program placed under `tag` — and only that.
-
-        Every square this program emits lives in a `FILL_<layer>_<tag><n>` cell
-        it created itself, so deleting those cells removes exactly this
-        program's own geometry and nothing that was already on the layer."""
-        for _c in list(ly.each_cell()):
-            if _c.name.startswith(f"FILL_{spec['name']}_{tag}"):
-                ly.delete_cell_rec(_c.cell_index())
+    def _drop_own_fill():
+        """Delete only cells allocated by this invocation on this layer."""
+        for index in owned_cells:
+            ly.delete_cell(index)
+        owned_cells.clear()
 
     # === WHAT ROOM DOES THIS LAYER ACTUALLY HAVE? (vibe-ic#2135) ==============
     # Measured BEFORE any fill decision, on the same basis the density rule
@@ -373,9 +384,11 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
     ceiling_any = drawn_frac0 + free_frac
     floor = spec.get("_floor")
 
+    initial_fill = _fill_now()
     pitches = _run_ladder(ladder, "")
+    initial_density = _measure().area() / float(bbox.area())
     families = [{"top_width_um": round(top_fwd * dbu, 4),
-                 "density": round(_measure().area() / float(bbox.area()), 4)}]
+                 "density": round(initial_density, 4)}]
 
     # === THE LATTICE IS DERIVED FROM THE DECK AND THE ROOM, NOT FROM AN AIM ===
     # The config's `width` targets a fixed open-area packing. When that is not
@@ -388,8 +401,9 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
     # delete anything).
     _need_um = lattice_width_for_floor(space, drawn_frac0, free_frac, floor)
     if (floor is not None and separate and _need_um
-            and families[-1]["density"] < float(floor)):
-        best_d, best_top, best_pitches = families[-1]["density"], top_fwd, pitches
+            and initial_density < float(floor)):
+        best_d, best_top, best_pitches = initial_density, top_fwd, pitches
+        best_added = _fill_now() - initial_fill
         # `_need_um` is what an OPEN field would need; a fragmented free region
         # needs more, and how much more is not predictable from the deck — so
         # the candidates are a geometric widening of the configured square, and
@@ -401,22 +415,47 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
         if _need_um > float(width):
             cands.append(_need_um)
         cands = sorted({round(c, 4) for c in cands})[:6]
-        last_top = top_fwd
         for cw_um in cands:
-            _drop_own_fill("")
+            _drop_own_fill()
             _tf = max(_snap_near(int(round(cw_um / dbu))), grid_dbu)
             _pi = _run_ladder(_ladder_for(_tf), "")
             _d = _measure().area() / float(bbox.area())
             families.append({"top_width_um": round(_tf * dbu, 4),
                              "density": round(_d, 4)})
-            last_top = _tf
             if _d > best_d:
                 best_d, best_top, best_pitches = _d, _tf, _pi
-        if best_top != last_top:
-            # the winner was not the family left in the layout -> lay it again
-            _drop_own_fill("")
-            best_pitches = _run_ladder(_ladder_for(best_top), "")
+                best_added = _fill_now() - initial_fill
+        # Restore the actual winning geometry, not a recipe identified only
+        # by width. The first winner can include inherited fill that no width
+        # can reconstruct; rounded report densities must not rank candidates.
+        _drop_own_fill()
+        if not best_added.is_empty():
+            winner = _new_fill_cell(f"FILL_{spec['name']}_winner")
+            winner.shapes(fill_lidx).insert(best_added)
+            top.insert(pya.CellInstArray(winner.cell_index(), pya.Trans()))
         top_fwd, pitches = best_top, best_pitches
+
+    # A zero-insertion pass only proves that ONE lattice phase is saturated,
+    # not that a square of this size cannot fit. All families above anchor at
+    # (0, 0), so widening the squares cannot discover legal residual channels
+    # between those anchors. Try the other half-pitch phases only for a layer
+    # still below its declared floor. Geometry is additive: every pass re-reads
+    # the actual fill and subtracts the same spacing/keep-out regions. Offsets
+    # are manufacturing-grid snapped, never arbitrary continuous translations.
+    phase_trials = []
+    if (floor is not None and ceiling_any > float(floor)
+            and min(_measure().area() / float(bbox.area()),
+                    _worst_window_density(_measure(), bbox, wd)) < float(floor)):
+        for index, phase in enumerate(((1, 0), (0, 1), (1, 1))):
+            pitches.extend(_run_ladder(_ladder_for(top_fwd),
+                                       f"phase{index}_", phase))
+            measured = _measure()
+            achieved = min(measured.area() / float(bbox.area()),
+                           _worst_window_density(measured, bbox, wd))
+            phase_trials.append({"half_pitch_offset": list(phase),
+                                 "density": round(achieved, 4)})
+            if achieved >= float(floor):
+                break
 
     metal_after = _measure()
     d_after = metal_after.area() / float(bbox.area())
@@ -454,6 +493,7 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
         "lattice_width_needed_um": (round(_need_um, 4)
                                     if _need_um not in (None, 0.0) else _need_um),
         "families_tried": families,
+        "residual_phase_trials": phase_trials,
         "below_floor": (None if floor is None
                         else bool(min(d_after, worst_after) < float(floor) - 1e-9)),
         "floor_unreachable_by_any_fill": (None if floor is None
@@ -465,6 +505,7 @@ def run(gds, cfg, out_gds, cell_name=None):
     pya = _load_pya()
     ly = pya.Layout()
     ly.read(gds)
+    input_cell_ids = {cell.cell_index() for cell in ly.each_cell()}
     top = ly.cell(cell_name) if cell_name else ly.top_cell()
     if top is None:
         return {"verdict": "ERROR", "error": f"top cell not found: {cell_name}"}
@@ -587,7 +628,7 @@ def run(gds, cfg, out_gds, cell_name=None):
     pruned = []
     for _c in list(ly.each_cell()):
         _n = _c.name
-        if not _n.startswith("FILL_"):
+        if _c.cell_index() in input_cell_ids or not _n.startswith("FILL_"):
             continue
         if _c.parent_cells() == 0:
             pruned.append(_n)

@@ -257,3 +257,100 @@ def test_refusal_lines_name_the_layer_and_stay_silent_when_there_is_none():
     # is absent, never an invented "nothing was refused"
     assert E.refusal_lines({}) == []
     assert E.refusal_lines({"refusals": "not a list"}) == []
+
+
+def test_off_origin_channel_is_not_a_saturated_lattice(tmp_path):
+    """A legal 1.55um channel misses every original 0-origin square; a
+    grid-snapped translated lattice can fill it without changing any rule."""
+    pya = _pya_or_skip()
+    ly = pya.Layout()
+    ly.dbu = 0.001
+    top = ly.create_cell("TOP")
+    boundary = ly.layer(99, 0)
+    keepout = ly.layer(98, 0)
+    top.shapes(boundary).insert(pya.Box(0, 0, 10000, 10000))
+    top.shapes(keepout).insert(pya.Box(0, 0, 1150, 10000))
+    top.shapes(keepout).insert(pya.Box(2700, 0, 10000, 10000))
+    source, output = tmp_path / "channel.gds", tmp_path / "filled.gds"
+    ly.write(str(source))
+    cfg = _cfg(2.0)
+    cfg["boundary_layer"] = [99, 0]
+    cfg["keepout_layers"] = [[98, 0, 0.0]]
+    cfg["layers"][0]["target"] = 0.35
+    report = metal_fill.run(str(source), cfg, str(output), "TOP")
+    # VALUE control: the original emitter produces zero fill here, not an
+    # absent field, missing dependency or changed status spelling.
+    assert report["layers"][0]["density_after"] > 0.02
+    measured = pya.Layout()
+    measured.read(str(output))
+    cell = measured.top_cell()
+    dummy = pya.Region(cell.begin_shapes_rec(measured.layer(LAYER, FILL_DT)))
+    forbidden = pya.Region(cell.begin_shapes_rec(measured.layer(98, 0)))
+    assert (dummy & forbidden).is_empty()
+    assert dummy.space_check(980).is_empty()
+    assert dummy.area() / 100000000.0 > 0.02
+    for polygon in dummy.each():
+        for point in polygon.each_point_hull():
+            assert point.x % 5 == 0 and point.y % 5 == 0
+
+
+def test_inherited_fill_is_not_owned_by_the_next_invocation(tmp_path):
+    import hashlib
+
+    pya = _pya_or_skip()
+    source, output = tmp_path / "existing.gds", tmp_path / "refilled.gds"
+    _striped_die(pya, source, 16.0)
+    ly = pya.Layout()
+    ly.read(str(source))
+    top = ly.top_cell()
+    layer = ly.layer(LAYER, FILL_DT)
+    inherited = ly.create_cell("FILL_m_0")
+    inherited.shapes(layer).insert(pya.Box(4000, 4000, 9000, 9000))
+    top.insert(pya.CellInstArray(inherited.cell_index(), pya.Trans()))
+    before = pya.Region(top.begin_shapes_rec(layer)).merged()
+    original_shapes = str(pya.Region(inherited.shapes(layer)))
+    ly.write(str(source))
+    original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    report = metal_fill.run(str(source), _cfg(50.0), str(output), "TOP")
+    result = pya.Layout()
+    result.read(str(output))
+    after = pya.Region(result.top_cell().begin_shapes_rec(
+        result.layer(LAYER, FILL_DT))).merged()
+    # Geometric value assertions run on parent too; a matching prefix is not
+    # permission to remove or recreate any shape in the input stream.
+    assert (before - after).is_empty()
+    assert str(pya.Region(result.cell("FILL_m_0").shapes(
+        result.layer(LAYER, FILL_DT)))) == original_shapes
+    assert report["layers"][0]["density_after"] >= report["layers"][0]["density_before"]
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == original_hash
+
+
+def test_checked_in_stream_retains_its_original_metal(tmp_path):
+    import json
+    from _hostpaths import require_repo
+
+    pya = _pya_or_skip()
+    programs = require_repo("vibe-ic-marketplace", "plugins", "vibe-ic", "programs")
+    source = programs / "tests" / "fixtures" / "density_fill" / "filled.gds"
+    cfg = json.loads((programs / "metal_fill" / "fill_config.example.json").read_text())
+    # The example explicitly uses placeholder layer IDs. Bind it to this
+    # stream's checked-in map instead of assuming two different fixtures
+    # describe the same layer.
+    mapped = [line.split() for line in source.with_name("fill.map").read_text().splitlines()
+              if line.strip() and not line.lstrip().startswith("#")]
+    routing = next(row for row in mapped if "NET" in row[1].split(","))
+    fill = next(row for row in mapped if row[1] == "FILL")
+    cfg["layers"][0]["layer"] = [int(routing[2]), int(routing[3])]
+    cfg["layers"][0]["fill_datatype"] = int(fill[3])
+    original = pya.Layout()
+    original.read(str(source))
+    output = tmp_path / "corpus.gds"
+    metal_fill.run(str(source), cfg, str(output))
+    emitted = pya.Layout()
+    emitted.read(str(output))
+    for spec in cfg["layers"]:
+        number, datatype = spec["layer"]
+        before = pya.Region(original.top_cell().begin_shapes_rec(original.layer(number, datatype)))
+        after = pya.Region(emitted.top_cell().begin_shapes_rec(emitted.layer(number, datatype)))
+        assert not before.is_empty(), "checked-in stream must exercise real geometry"
+        assert (before - after).is_empty()
