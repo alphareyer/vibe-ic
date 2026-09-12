@@ -4534,13 +4534,13 @@ def test_d2_a_real_crash_is_disclosed_by_the_consumer_not_guessed(
         f"the {FCC._OUTPUT_SNIPPET_CHARS}-char evidence window it exists to "
         f"overflow — this cell would prove nothing")
     src, overflows = _D2_CRASH_SHAPES[shape]
-    helper = FCC.PROGRAMS_DIR / f"_d2_crash_probe_{shape}.py"
+    # The probe is test input, not a shipped program.  Keeping it in this
+    # test's private directory lets the real consumer execute an absolute
+    # ``.py`` path while the source tree remains hermetic/read-only.
+    helper = tmp_path / f"_d2_crash_probe_{shape}.py"
     helper.write_text(src, encoding="utf-8")
-    try:
-        passed, out = FCC._check_program_exit_zero(
-            project, f"{helper.stem} {project}")
-    finally:
-        helper.unlink(missing_ok=True)
+    passed, out = FCC._check_program_exit_zero(
+        project, f"{shlex.quote(str(helper))} {shlex.quote(str(project))}")
 
     assert passed is False, f"{shape}: a crash must never be a PASS"
     assert out.startswith(FCC._CRASH_HINT_PREFIX), (
