@@ -21,11 +21,12 @@ for _anc in Path(__file__).resolve().parents:
 import _progress_run as _pr  # noqa: E402
 
 GEN = None
-for _c in (Path(__file__).resolve().parents[2] / "tools" / "gen_flow_gate_header.py",
-           Path(__file__).resolve().parents[4] / "tools" / "gen_flow_gate_header.py"):
+for _ancestor in Path(__file__).resolve().parents:
+    _c = _ancestor / "tools" / "gen_flow_gate_header.py"
     if _c.is_file():
         GEN = _c
         break
+assert GEN is not None, "the checked-out header generator was not found"
 
 PAGE = """<html><head>
 <meta name="description" content="Vibe-IC 流程 63 步驟 x 8 判斷維度的即時狀態：504 格，每一格都是對當前原始碼重新計算的謂詞。">
