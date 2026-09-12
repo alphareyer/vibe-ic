@@ -13,7 +13,7 @@ and bound the subject to that clone.
 MEASURED on ``f91aaa391``, ``test_l9_memory_generator_macro_identifier.py``,
 same commit, same host, same interpreter, ONLY the checkout's LOCATION moved::
 
-    tree under /home/reyerchu/...   58 passed,  0 skipped
+    tree under <account-home>/...  58 passed,  0 skipped
     tree under /tmp/...             39 passed, 19 skipped   (git archive, same sha)
     inside the pinned image         39 passed, 19 skipped   (only the tree mounted)
 

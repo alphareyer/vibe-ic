@@ -58,7 +58,7 @@ def _account_home_root() -> Path:
     on the landing path this repo runs `HOME=/tmp`, and there the very same
     fixture is ALSO `/tmp/...`, so it collapses into the hard-list class the
     file is supposed to be measuring the absence of. Measured on the live tip
-    `97990612f`, file unchanged since the sweep: HOME=/home/... , /headless and
+    `97990612f`, file unchanged since the sweep: HOME=<account-home>, /headless and
     /nonexistent all give 18 passed, HOME=/tmp gives 3 failed / 15 passed, and
     the three are exactly the assertions that name the derived class — the
     negative control among them announcing, correctly, that the fixture had
@@ -73,7 +73,7 @@ def _account_home_root() -> Path:
     if not str(home).rstrip("/").startswith(
             tuple(p.rstrip("/") for p in _VOLATILE_PREFIXES)):
         return home
-    return Path("/home/_vibeic2158_absent_account")
+    return Path("/accounts/_vibeic2158_absent_account")
 
 
 def _home_ephemeral(project: Path) -> str:
@@ -350,6 +350,6 @@ def test_the_home_anchor_is_used_when_it_is_already_non_volatile(monkeypatch,
     """The other direction: where the account home ALREADY satisfies the
     property, it is the anchor — the fix must not throw the real-world shape
     away and hard-code a synthetic root everywhere."""
-    monkeypatch.setenv("HOME", "/home/someone")
-    assert _account_home_root() == Path("/home/someone")
-    assert _home_ephemeral(tmp_path).startswith("/home/someone/_lane_gone_2158")
+    monkeypatch.setenv("HOME", "/accounts/someone")
+    assert _account_home_root() == Path("/accounts/someone")
+    assert _home_ephemeral(tmp_path).startswith("/accounts/someone/_lane_gone_2158")

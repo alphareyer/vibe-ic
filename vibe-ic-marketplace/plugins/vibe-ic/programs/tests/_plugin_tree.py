@@ -123,7 +123,7 @@ def repo_root_of(plugin_dir: Path) -> Optional[Path]:
     same interpreter, ONLY the checkout's LOCATION different — the operator's
     ``$HOME`` happens to hold a clone of ``vibeic/benchmark-data``::
 
-        tree under /home/reyerchu/...   58 passed,  0 skipped
+        tree under <account-home>/...  58 passed,  0 skipped
         tree under /tmp/...             39 passed, 19 skipped   (git archive, same sha)
         inside the pinned image         39 passed, 19 skipped   (only the tree mounted)
 

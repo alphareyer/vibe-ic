@@ -34,6 +34,7 @@ order, each of which must still MOVE the digest.
 """
 import struct
 import sys
+import os
 from pathlib import Path
 
 import pytest
@@ -145,8 +146,10 @@ def test_a_file_that_is_not_a_gds_at_all_is_refused():
 # ---------------------------------------------------------------------------
 # The real corpus, so the fixture above is not the only thing measured
 # ---------------------------------------------------------------------------
-_CORPUS = Path("/home/reyerchu/benchmark-data/ic/spm/v1.9.96_gf180mcuD"
-               "/phase3/stage4/gds/chip_top.gds")
+_BENCHMARK_DATA = os.environ.get("VIBEIC_BENCHMARK_DATA")
+_CORPUS = (Path(_BENCHMARK_DATA) / "ic/spm/v1.9.96_gf180mcuD"
+           / "phase3/stage4/gds/chip_top.gds"
+           if _BENCHMARK_DATA else Path("/__vibeic_benchmark_data_unset__"))
 
 
 @pytest.mark.skipif(not _CORPUS.is_file(),

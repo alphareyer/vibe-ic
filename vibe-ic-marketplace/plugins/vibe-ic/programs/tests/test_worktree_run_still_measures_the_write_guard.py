@@ -5,7 +5,7 @@ MEASURED 2026-09-10 on 8HD-8, v1.20.13, this script invoked from the linked
 worktree `/mnt/ssd2/vibe-ic/scratch/cy538`::
 
     WRITE_GUARD_NOT_CHECKED: git rev-parse --show-toplevel exited 128:
-    fatal: not a git repository: /home/reyerchu/vibe-ic/.git/worktrees/cy538
+    fatal: not a git repository: /workspace/vibe-ic/.git/worktrees/cy538
     35 passed
 
 `-v "$REPO_ROOT:$REPO_ROOT"` carries the TREE. In a linked worktree
