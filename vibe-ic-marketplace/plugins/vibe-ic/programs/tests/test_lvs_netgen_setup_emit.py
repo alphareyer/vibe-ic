@@ -15,14 +15,14 @@ mod = importlib.import_module("lvs_netgen_setup_emit")
 
 
 def _globalised(tcl: str) -> set:
-    """Exact set of net names on `global <name>` lines.
+    """Exact set of net names on `::netgen::global <name>` lines.
 
-    Token-exact on purpose: a substring probe like `"global VPW" in tcl` is
-    also satisfied by the `global VPWR` line, so a naive containment test can
+    Token-exact on purpose: a substring probe like `"::netgen::global VPW" in tcl` is
+    also satisfied by the `::netgen::global VPWR` line, so a naive containment test can
     report a net as globalised when it is not.
     """
     return {ln.split()[1] for ln in tcl.splitlines()
-            if ln.strip().startswith("global ") and len(ln.split()) >= 2}
+            if ln.strip().startswith("::netgen::global ") and len(ln.split()) >= 2}
 
 
 class TestPdkNormalize:
@@ -58,20 +58,20 @@ class TestPdkNormalize:
 class TestRule1GlobalPowerNets:
     def test_sky130_has_vccd1_vssd1(self):
         tcl = mod.build_supplementary_setup_tcl("sky130A")
-        assert "global vccd1" in tcl
-        assert "global vssd1" in tcl
+        assert "::netgen::global vccd1" in tcl
+        assert "::netgen::global vssd1" in tcl
 
     def test_sky130_has_VPWR_VGND_VPB_VNB(self):
         # Std-cell Liberty convention pin names — these are the ones that
         # Magic ext2spice surfaces per-cell flat unless globalised.
         tcl = mod.build_supplementary_setup_tcl("sky130A")
         for name in ("VPWR", "VGND", "VPB", "VNB"):
-            assert f"global {name}" in tcl, f"missing global {name}"
+            assert f"::netgen::global {name}" in tcl, f"missing global {name}"
 
     def test_sky130_has_analog_and_io_domains(self):
         tcl = mod.build_supplementary_setup_tcl("sky130A")
         for name in ("vdda1", "vssa1", "vddio", "vssio"):
-            assert f"global {name}" in tcl
+            assert f"::netgen::global {name}" in tcl
 
     def test_gf180_single_domain(self):
         # The REAL gf180mcu std-cell PG/well pin set, measured from the shipped
@@ -123,14 +123,20 @@ class TestRule1GlobalPowerNets:
     def test_extra_power_nets_appended(self):
         opts = mod.LvsSetupOptions(extra_power_nets=["VBN_REF", "VBP_REF"])
         tcl = mod.build_supplementary_setup_tcl("sky130A", opts)
-        assert "global VBN_REF" in tcl
-        assert "global VBP_REF" in tcl
+        assert "::netgen::global VBN_REF" in tcl
+        assert "::netgen::global VBP_REF" in tcl
 
     def test_extra_power_nets_deduped_with_defaults(self):
         # Asking for VPWR (already in defaults) must not double-emit.
         opts = mod.LvsSetupOptions(extra_power_nets=["VPWR"])
         tcl = mod.build_supplementary_setup_tcl("sky130A", opts)
-        assert tcl.count("global VPWR") == 1
+        assert tcl.count("::netgen::global VPWR") == 1
+
+    def test_never_emits_legacy_unqualified_global_command(self):
+        tcl = mod.build_supplementary_setup_tcl("sky130A")
+        assert not any(
+            line.strip().startswith("global ") for line in tcl.splitlines()
+        )
 
 
 class TestRule2StdcellEquate:
@@ -227,11 +233,11 @@ class TestUnknownPdk:
         assert "LVS_SETUP_SKIPPED" in tcl
         assert "intel18A" in tcl
         # MUST NOT silently emit a half-config that looks like sky130
-        assert "global vccd1" not in tcl
+        assert "::netgen::global vccd1" not in tcl
 
     def test_unknown_does_not_emit_global_directives(self):
         tcl = mod.build_supplementary_setup_tcl("foundry-x-72nm")
-        assert "global " not in tcl  # no `global VPWR` etc.
+        assert "::netgen::global " not in tcl  # no power directives
         # But the header comment is still emitted so the file is
         # syntactically valid Tcl that does nothing.
         assert "#---" in tcl

@@ -280,7 +280,10 @@ def build_supplementary_setup_tcl(
         "# Yosys structural netlist that shares one wire across cells."
     )
     for net in power_nets:
-        out.append(f"global {net}")
+        # Netgen 1.5.323 reports that the legacy unqualified spelling must use
+        # its fully-qualified public command.  A generated setup is sourced by
+        # Netgen, so bind this operation to that command explicitly.
+        out.append(f"::netgen::global {net}")
     if opts.audit_comments:
         out.append(
             f"puts stdout \"LVS_SETUP_APPLIED: {len(power_nets)} "
