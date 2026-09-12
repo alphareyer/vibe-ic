@@ -76,6 +76,21 @@ class _pinned:
         return False
 
 
+
+def _old_model(nominal: float, starts: int) -> float:
+    """What ``stall_window(nominal, starts=N)`` COMPUTED before #2219's second
+    half refused it.
+
+    Reproduced from the module's own constants rather than called, because the
+    call now raises -- which is the repair, not a loss of coverage. The
+    property these tests assert is untouched and is stated here as plainly as
+    before: this number reads ``trivial_session_s`` and therefore cannot move
+    when the relay lane does.
+    """
+    return max(float(nominal),
+               _floor.FLOOR_MULTIPLE * starts * _floor.trivial_session_s())
+
+
 def test_the_window_moves_with_the_NESTED_LANE_and_the_old_model_cannot():
     """THE LOAD-BEARING GUARD, and the one a revert reddens.
 
@@ -87,10 +102,10 @@ def test_the_window_moves_with_the_NESTED_LANE_and_the_old_model_cannot():
     equality so it cannot be argued with.
     """
     with _pinned(session=0.40, relay=0.50):
-        old_fast = _floor.stall_window(2.5, starts=2)
+        old_fast = _old_model(2.5, starts=2)
         new_fast = _floor.relay_window(2.5)
     with _pinned(session=0.40, relay=5.00):
-        old_slow = _floor.stall_window(2.5, starts=2)
+        old_slow = _old_model(2.5, starts=2)
         new_slow = _floor.relay_window(2.5)
 
     assert old_fast == old_slow, (old_fast, old_slow)
@@ -100,7 +115,7 @@ def test_the_window_moves_with_the_NESTED_LANE_and_the_old_model_cannot():
     # The measured case: a lane of 2.2041 s is NOT covered by the old model on
     # a box whose pytest start-up is 0.60 s, and IS covered by the new one.
     with _pinned(session=0.60, relay=2.2041):
-        assert _floor.stall_window(2.5, starts=2) < 2.9234
+        assert _old_model(2.5, starts=2) < 2.9234
         assert _floor.relay_window(2.5) > 2.9234
 
 

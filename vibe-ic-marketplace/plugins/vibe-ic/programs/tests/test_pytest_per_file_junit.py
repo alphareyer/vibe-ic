@@ -45,7 +45,8 @@ import pytest
 
 from _hostpaths import require_repo
 import _session_floor as _floor
-from _session_floor import relay_window, stall_window, trivial_session_s
+from _session_floor import (OUTER_LEASE_ENV, relay_window, stall_window,
+                            trivial_session_s)
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROGRAMS))
@@ -893,11 +894,27 @@ def test_nested_collect_progress_is_relayed_to_the_outer_session(
             + "::test_live_collection_relays_finite_semantic_progress_past_old_bound")
     merged = tmp_path / "outer-collect.xml"
     monkeypatch.setattr(D, "DEFAULT_POLL_S", 0.05)
-    # TWO interpreter starts in series before the first relayed event: the
-    # inner node spawns the driver, which spawns the pytest whose events reach
-    # this lease. `starts=2` says so; the inner test mirrors it as its
-    # `outer_bound`.
-    window = stall_window(0.8, starts=2)
+    # THE SAME LANE AS THE TEST ABOVE (vibe-ic#2219). The events that renew
+    # this lease arrive through the subject's `--progress-relay`: the inner
+    # node spawns the driver, which spawns the pytest whose events reach here.
+    # This said `stall_window(0.8, starts=2)` until 2026-09-10 — the model
+    # #2219 measured wrong, left behind when its first half moved only the
+    # sibling above. MEASURED on 8HD-6 in the pinned image at `--cpus=1` with
+    # `trivial_session_s` held at #2219's own 0.60 s reading: this test died
+    # `WATCHDOG_STALLED ... since_last_progress_s=2.419` /
+    # `terminal event missing (stage=running)` / rc 199, the issue's signature,
+    # while the sibling above passed in the same container. Its window was
+    # `max(0.8, 4 x 0.60) = 2.4` — TIGHTER than the 2.5 the sibling floored at,
+    # so this call site was the more exposed of the two, not the safer one.
+    window = relay_window(0.8)
+    # PUBLISH THE LEASE THE CHILD IS HELD UNDER, so the inner node mirrors this
+    # exact number instead of taking its own reading. `relay_window` calibrates
+    # by really spawning a driver and a pytest; done inside the child, that
+    # calibration sits IN SERIES with the silence this lease is watching --
+    # MEASURED on 8HD-6, pinned image, `--cpus=1`, session pinned to 0.60: the
+    # lease grew to 5.431 s and the silence grew to 5.479 s, so the recomputed
+    # mirror was still RED, for a reason the repair itself had introduced.
+    monkeypatch.setenv(OUTER_LEASE_ENV, repr(window))
     started = time.monotonic()
     rc, out, incomplete = D.run_one(
         [sys.executable, "-m", "pytest", "-p", "no:terminal",

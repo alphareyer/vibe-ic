@@ -129,6 +129,7 @@ VIBEIC_SILENCE_BUDGET_S = 1800
 
 import ast
 import json
+import math
 import os
 import queue
 import re
@@ -145,7 +146,7 @@ from typing import Dict, List, NamedTuple, Optional, Set, Tuple
 
 import pytest
 
-from _session_floor import stall_window
+from _session_floor import OUTER_LEASE_ENV, relay_window, stall_window
 from flow_matrix import flowref as F
 from flow_matrix import substitution as SUB
 from flow_matrix import waivers as W
@@ -417,6 +418,13 @@ def dimension_modules() -> Dict[int, object]:
 # Live collection through pytest's own machinery
 # ══════════════════════════════════════════════════════════════════════
 _COLLECTION_PROGRESS_STALL_S = 60
+
+#: How far the generated collection work must overshoot the enclosing lease.
+#: This is what the literal `files = 21` encoded while the outer bound was
+#: always exactly 2x `old_fixed_bound`: 21 files of `old/6` is `3.5 x old`,
+#: i.e. 1.75 outer bounds.  Named so the count can be derived from it when the
+#: outer bound stops being a fixed multiple (vibe-ic#2219).
+_OUTER_CROSSING_MARGIN = 1.75
 _COLLECTION_PROGRESS_POLL_S = 0.1
 _collection_invocation = 0
 
@@ -600,11 +608,25 @@ def test_live_collection_relays_finite_semantic_progress_past_old_bound(
     # where it cannot; every ratio asserted below scales with the result, so
     # nothing about renewal is relaxed. See `_session_floor`.
     old_fixed_bound = stall_window(0.3)
-    # The enclosing driver test's lease. Two interpreter starts sit between
-    # that lease's spawn and the first event it can see (this node's driver,
-    # then the driver's pytest), so it is derived with `starts=2` there and
-    # mirrored here.
-    outer_bound = stall_window(0.8, starts=2)
+    # THE ENCLOSING DRIVER TEST'S LEASE, RECEIVED RATHER THAN RE-DERIVED
+    # (vibe-ic#2219, second half).  This said `stall_window(0.8, starts=2)`,
+    # the model #2219 measured wrong; the enclosing test now derives its lease
+    # with `relay_window(0.8)`, which MEASURES the nested relay lane.
+    #
+    # WHY THE VALUE IS PASSED IN AND NOT RECOMPUTED HERE.  `relay_window` takes
+    # its reading by really spawning a driver and a pytest, and this node runs
+    # INSIDE the very silence that lease is watching.  Recomputing it here puts
+    # the calibration in series with the gap it is meant to cover.  MEASURED
+    # 2026-09-10 on 8HD-6, pinned image, `--cpus=1`, `trivial_session_s` held
+    # at 0.60: with the bound recomputed here the outer lease grew to 5.431 s
+    # and the silence grew to 5.479 s — still RED, and now red for a reason the
+    # fix itself introduced.  The enclosing test exports its OWN lease instead,
+    # so the mirror is EXACT and costs the nested lane nothing.
+    #
+    # The fallback is the same expression the enclosing test uses, so a
+    # standalone run of this node still bounds itself the way its driver would.
+    _declared = os.environ.get(OUTER_LEASE_ENV)
+    outer_bound = float(_declared) if _declared else relay_window(0.8)
     seen = []
     # RECORD AND FORWARD, never replace. This test's subject is that a live
     # collection RELAYS finite semantic progress; a spy that swallows the call
@@ -644,7 +666,16 @@ def test_live_collection_relays_finite_semantic_progress_past_old_bound(
     #: notch less acute, and it gets the same treatment — the window is
     #: untouched and the margin is engineered instead.
     file_seconds = _COLLECTION_PROGRESS_STALL_S / 6
-    files = 21
+    # DERIVED, because the bound above no longer stands in a fixed ratio to
+    # `old_fixed_bound` (vibe-ic#2219).  The literal `21` encoded exactly the
+    # margin below: work was `3.5 x old_fixed_bound` against an outer bound
+    # that was always `2 x old_fixed_bound`, i.e. 1.75x.  `relay_window` reads
+    # a different quantity, so that ratio is no longer fixed and a literal
+    # count silently stops crossing the bound on a box whose relay lane is slow
+    # relative to its interpreter start — the precondition below would then
+    # fail and report it, but the count is what should move, not the guard.
+    files = max(21, math.ceil(
+        _OUTER_CROSSING_MARGIN * outer_bound / file_seconds))
     assert file_seconds * 6 <= old_fixed_bound, (
         f"each collected file must finish well inside the {old_fixed_bound}s "
         f"window or this test measures scheduler jitter, not renewal")

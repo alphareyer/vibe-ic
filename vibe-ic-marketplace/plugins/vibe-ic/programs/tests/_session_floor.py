@@ -149,13 +149,34 @@ def stall_window(nominal: float, *, starts: int = 1, width: int = 1) -> float:
     cadence from the value returned, which keeps every ratio they assert intact.
 
     ``starts`` is how many interpreter start-ups happen IN SERIES between this
-    lease's spawn and the first validated event that can renew it.  A subject
-    pytest is one.  A subject that is itself a test which drives the per-file
-    driver is two: the driver's interpreter, then the pytest it spawns, and
-    only that grandchild's events reach the outer relay -- MEASURED at load 27
-    on 8HD-9 (floor 0.73 s): the nested tests' outer lease at 2x the floor
-    expired at 0.91 s with `terminal event missing (stage=running)` while the
-    grandchild was still starting.
+    lease's spawn and the first validated event that can renew it, and it may
+    now only be ONE.
+
+    WHY ``starts > 1`` IS REFUSED (vibe-ic#2219, second half).  ``starts=2``
+    meant exactly one thing in this tree: the subject is a test that drives the
+    per-file driver, so the events that renew the lease arrive through
+    ``--progress-relay``.  #2219 MEASURED that lane and it is not two
+    interpreter start-ups -- it is 2.6x one of them, and four of its five terms
+    (driver spawn, supervised pytest, first validated lifecycle event, probe
+    poll, reader poll) are not interpreter start-up at all.  A model that reads
+    ``trivial_session_s`` therefore hands a relayed lease a window whose size is
+    decided by how fast THIS box starts an interpreter, which is the defect
+    #2219 exists for: RED at ``--cpus=1`` and GREEN at ``--cpus=4`` on the same
+    commit.
+
+    ``relay_window`` measures that lane instead of modelling it.  Refusing
+    ``starts > 1`` here is what stops the wrong model being reachable at all:
+    #2219's first half moved ONE call site and left the primitive in place, and
+    the two call sites it did not move kept the defect.  MEASURED 2026-09-10 on
+    8HD-6 in the pinned image at ``--cpus=1``, with ``trivial_session_s`` held
+    at the 0.60 s reading #2219 itself recorded,
+    ``test_nested_collect_progress_is_relayed_to_the_outer_session`` died with
+    the issue's own signature -- ``WATCHDOG_STALLED ...
+    since_last_progress_s=2.419``, ``terminal event missing (stage=running)``,
+    ``rc 199`` -- while the repaired sibling beside it passed.
+
+    Nothing is relaxed by this refusal: it removes a derivation that was
+    measured to be too SMALL, and the replacement is never smaller.
 
     ``width`` is how many interpreter start-ups happen AT ONCE under this one
     lease.  A test that drives the per-file driver with ``--fallback-jobs 8``
@@ -169,13 +190,23 @@ def stall_window(nominal: float, *, starts: int = 1, width: int = 1) -> float:
     progress` about subjects that had not started.  Those four were red on
     610cae2cc and on 6883a9c93 alike -- the window read the box, not the tree.
 
-    ``starts`` and ``width`` are ORTHOGONAL and both are still models of a
-    SERIES of interpreter starts.  Where the silence before the first renewal
-    is not interpreter start-up at all, neither is the right instrument and
-    ``relay_window`` below is: that term is measured in its own shape.
+    ``width`` REMAINS, and it is a different axis from the one refused above.
+    It still models a real SERIES-of-one-start-per-worker silence, measured in
+    its own shape by ``trivial_session_s(width)``.  What ``starts > 1`` modelled
+    was never interpreter start-up at all, which is why one is kept and the
+    other refused rather than both being swept away together.  Where the silence
+    before the first renewal is a relayed lane, ``relay_window`` below is the
+    instrument: that term is measured, not modelled.
     """
     if not isinstance(starts, int) or starts < 1:
         raise ValueError(f"starts must be a positive int, got {starts!r}")
+    if starts > 1:
+        raise ValueError(
+            f"stall_window(starts={starts}) models a relayed lease as "
+            f"{starts} interpreter start-ups, and vibe-ic#2219 measured that "
+            "model wrong (the lane is 2.6x an interpreter start and four of "
+            "its five terms are not start-up). Use relay_window(nominal) for "
+            "any lease whose renewals arrive through --progress-relay.")
     if not isinstance(width, int) or width < 1:
         raise ValueError(f"width must be a positive int, got {width!r}")
     return max(float(nominal),
@@ -349,6 +380,17 @@ def trivial_relay_s() -> float:
     """
     with tempfile.TemporaryDirectory(prefix="vibeic-relay-") as d:
         return max(_one_trivial_relay_s(Path(d)) for _ in range(2))
+
+
+#: WHERE AN ENCLOSING DRIVER TEST PUBLISHES ITS OWN DERIVED LEASE, so a nested
+#: node can MIRROR it exactly (vibe-ic#2219).  A nested node that recomputes
+#: `relay_window` runs the calibration IN SERIES with the silence that lease is
+#: watching -- MEASURED on 8HD-6 in the pinned image at `--cpus=1`: the lease
+#: grew to 5.431 s and the silence it had to cover grew to 5.479 s, so the
+#: recomputation defeated the very repair it was part of.  Spelled once, here,
+#: because a producer and a consumer that spell an env key separately are one
+#: rename away from silently never meeting.
+OUTER_LEASE_ENV = "VIBEIC_OUTER_LEASE_S"
 
 
 def relay_window(nominal: float) -> float:
