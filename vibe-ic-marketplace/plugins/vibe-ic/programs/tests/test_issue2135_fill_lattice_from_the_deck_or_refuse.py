@@ -259,7 +259,8 @@ def test_refusal_lines_name_the_layer_and_stay_silent_when_there_is_none():
     assert E.refusal_lines({"refusals": "not a list"}) == []
 
 
-def test_off_origin_channel_is_not_a_saturated_lattice(tmp_path):
+@pytest.mark.parametrize("channel_start_um", [1.15, 0.55])
+def test_off_origin_channel_is_not_a_saturated_lattice(tmp_path, channel_start_um):
     """A legal 1.55um channel misses every original 0-origin square; a
     grid-snapped translated lattice can fill it without changing any rule."""
     pya = _pya_or_skip()
@@ -269,8 +270,10 @@ def test_off_origin_channel_is_not_a_saturated_lattice(tmp_path):
     boundary = ly.layer(99, 0)
     keepout = ly.layer(98, 0)
     top.shapes(boundary).insert(pya.Box(0, 0, 10000, 10000))
-    top.shapes(keepout).insert(pya.Box(0, 0, 1150, 10000))
-    top.shapes(keepout).insert(pya.Box(2700, 0, 10000, 10000))
+    channel_left = int(round(channel_start_um / ly.dbu))
+    channel_right = int(round((channel_start_um + 1.55) / ly.dbu))
+    top.shapes(keepout).insert(pya.Box(0, 0, channel_left, 10000))
+    top.shapes(keepout).insert(pya.Box(channel_right, 0, 10000, 10000))
     source, output = tmp_path / "channel.gds", tmp_path / "filled.gds"
     ly.write(str(source))
     cfg = _cfg(2.0)

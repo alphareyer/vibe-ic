@@ -299,7 +299,7 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
         owned_cells.append(cell.cell_index())
         return cell
 
-    def _run_ladder(rungs, tag, phase=(0, 0)):
+    def _run_ladder(rungs, tag, phase=(0, 0), phase_divisions=2):
         """Lay `rungs` (dbu square sides, large -> small) into whatever room is
         left. Returns the pitches used. DRC-safety is by CONSTRUCTION and does
         not depend on the fill engine's own margin handling: `blocked` is
@@ -357,8 +357,8 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
                 n_before = sum(1 for _ in top.begin_shapes_rec(fill_lidx))
                 fillable.fill(top, fcell.cell_index(), fcbox,
                               pya.Vector(p, 0), pya.Vector(0, p),
-                              pya.Point(_snap_near(p * phase[0] // 2),
-                                        _snap_near(p * phase[1] // 2)),
+                              pya.Point(_snap_near(p * phase[0] // phase_divisions),
+                                        _snap_near(p * phase[1] // phase_divisions)),
                               None, pya.Vector(sp, sp))
                 if sum(1 for _ in top.begin_shapes_rec(fill_lidx)) == n_before:
                     break                               # size saturated -> go smaller
@@ -457,6 +457,29 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
             if achieved >= float(floor):
                 break
 
+    # Half-pitch samples can still miss channels that fit the smallest legal
+    # ladder square. Refine that SAME square's origin grid once, not its size
+    # or spacing. Cell-centre phases precede edge phases, and every trial uses
+    # the residual left by earlier trials. This is bounded to the twelve new
+    # quarter-grid phases; origins already tried at half pitch are excluded.
+    quarter_trials = []
+    if (floor is not None and ceiling_any > float(floor)
+            and min(_measure().area() / float(bbox.area()),
+                    _worst_window_density(_measure(), bbox, wd)) < float(floor)):
+        quarter_phases = [(x, y) for x in (1, 3) for y in (1, 3)]
+        quarter_phases += [(x, y) for x in range(4) for y in range(4)
+                           if (x % 2) != (y % 2)]
+        for index, phase in enumerate(quarter_phases):
+            pitches.extend(_run_ladder([floor_fwd], f"quarter{index}_",
+                                       phase, phase_divisions=4))
+            measured = _measure()
+            achieved = min(measured.area() / float(bbox.area()),
+                           _worst_window_density(measured, bbox, wd))
+            quarter_trials.append({"quarter_pitch_offset": list(phase),
+                                   "density": round(achieved, 4)})
+            if achieved >= float(floor):
+                break
+
     metal_after = _measure()
     d_after = metal_after.area() / float(bbox.area())
     worst_after = _worst_window_density(metal_after, bbox, wd)
@@ -494,6 +517,7 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
                                     if _need_um not in (None, 0.0) else _need_um),
         "families_tried": families,
         "residual_phase_trials": phase_trials,
+        "residual_quarter_phase_trials": quarter_trials,
         "below_floor": (None if floor is None
                         else bool(min(d_after, worst_after) < float(floor) - 1e-9)),
         "floor_unreachable_by_any_fill": (None if floor is None
