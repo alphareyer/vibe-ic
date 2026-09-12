@@ -85,10 +85,12 @@ because it was asserted in a docstring and pinned by no test.
 The guard fires on a disjunction of three conditions and raised ONE sentence
 for all of them:
 
-    if {$_cts_policy_rc || ![string match *CTS_POLICY_BEGIN* $_cts_policy]
-        || ![string match *CTS_POLICY_END* $_cts_policy]} {
-      error "CTS_CELL_POLICY_UNAVAILABLE: $_cts_policy_err"
-    }
+```tcl
+if {$_cts_policy_rc || ![string match *CTS_POLICY_BEGIN* $_cts_policy]
+    || ![string match *CTS_POLICY_END* $_cts_policy]} {
+  error "CTS_CELL_POLICY_UNAVAILABLE: $_cts_policy_err"
+}
+```
 
 `catch` sets its variable to the command's RESULT on success. So driving the
 two conditions through the same emitted block under `tclsh`, on live main:
