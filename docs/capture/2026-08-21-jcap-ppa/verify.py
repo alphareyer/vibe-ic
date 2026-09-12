@@ -972,31 +972,58 @@ _quoted_checks |= {int(m) for m in re.findall(r"verifier's (\d+) checks", MD)}
 _bR = _sp2.run(["git", "show",
                 f"{_base}:vibe-ic-marketplace/plugins/vibe-ic/benchmark/CAPTURE_ROUTING.json"],
                capture_output=True, text=True, cwd=str(ROOT))
-if _bR.returncode == 0:
-    def _steps(txt):
-        d = json.loads(txt)
-        return next(v for v in d.values() if isinstance(v, dict)
-                    and any(isinstance(x, dict) and "bucket_A_program" in x for x in v.values()))
-    _base_steps = set(_steps(_bR.stdout))
-    _new_steps = set(ROUTING["steps"]) - _base_steps
+def _steps(txt):
+    d = json.loads(txt)
+    return next(v for v in d.values() if isinstance(v, dict)
+                and any(isinstance(x, dict) and "bucket_A_program" in x for x in v.values()))
+
+
+_routing_error = ""
+_base_steps = None
+_receipt_steps = None
+try:
+    _base_routing = (_bR.stdout if _bR.returncode == 0 else
+                     _truth.archived_checkpoint_text(
+                         ROOT, pathlib.PurePosixPath(
+                             "vibe-ic-marketplace/plugins/vibe-ic/benchmark/CAPTURE_ROUTING.json"),
+                         _base, archive=HERE / "CAPTURE_ROUTING_IDENTITY.json"))
+    _base_steps = set(_steps(_base_routing))
+    _tip_routing = _sp2.run([
+        "git", "show",
+        f"{_receipt_tip}:vibe-ic-marketplace/plugins/vibe-ic/benchmark/CAPTURE_ROUTING.json"],
+        capture_output=True, text=True, cwd=str(ROOT))
+    _receipt_routing = (_tip_routing.stdout if _tip_routing.returncode == 0 else
+                        _truth.archived_checkpoint_text(
+                            ROOT, pathlib.PurePosixPath(
+                                "vibe-ic-marketplace/plugins/vibe-ic/benchmark/CAPTURE_ROUTING.json"),
+                            _receipt_tip, archive=HERE / "CAPTURE_ROUTING_RECEIPT_IDENTITY.json"))
+    _receipt_steps = set(_steps(_receipt_routing))
+except (OSError, ValueError, KeyError, TypeError, StopIteration) as _exc:
+    _routing_error = f"historical routing evidence unavailable or invalid: {_exc}"
+
+_q = re.search(r"gains \*\*(\d+)\*\* steps\. Without them \*\*(\d+) of the\s+(\d+)\s+records\*\*",
+               MD, re.S)
+_projection = None
+if _base_steps is not None and _receipt_steps is not None:
+    # The report names this immutable repair lane's delta, not subsequent
+    # main additions. Live routing existence/wiring checks remain live above.
+    _new_steps = _receipt_steps - _base_steps
     _at_new = sum(1 for r in RECS if r.get("step") in _new_steps)
-    _q = re.search(r"gains \*\*(\d+)\*\* steps\. Without them \*\*(\d+) of the\s+(\d+)\s+records\*\*",
-                   MD, re.S)
+    _projection = (len(_new_steps), _at_new, len(RECS))
     control("routing-figures", bool(_base_steps) and bool(_q))
-    # the same projection carries one more figure a record quotes: how many
-    # distinct programs the batch routes at. It was 16 and is 18, stale for the
-    # same reason and caught by the same derivation.
-    _ntp = len({ROUTING["steps"][r["step"]]["bucket_A_program"]
-                for r in RECS if r["bucket"] == "A" and r.get("step") in ROUTING["steps"]})
-    _qtp = re.search(r"^ {4,}distinct target programs\s+(\d+)", MD, re.M)
-    check("the quoted distinct-target-program count is the routed one",
-          bool(_qtp) and int(_qtp.group(1)) == _ntp,
-          f"live {_ntp}, quoted {_qtp.group(1) if _qtp else '-'}")
-    check("the quoted routing figures are derived from the two routing files",
-          bool(_q) and (int(_q.group(1)), int(_q.group(2)), int(_q.group(3)))
-                       == (len(_new_steps), _at_new, len(RECS)),
-          f"live ({len(_new_steps)}, {_at_new}, {len(RECS)}); quoted "
-          + (f"({_q.group(1)}, {_q.group(2)}, {_q.group(3)})" if _q else "not found"))
+# Both existing checks always run. Missing historical evidence is a named
+# refusal, not permission to drop two checks and change the denominator.
+_ntp = len({ROUTING["steps"][r["step"]]["bucket_A_program"]
+            for r in RECS if r["bucket"] == "A" and r.get("step") in ROUTING["steps"]})
+_qtp = re.search(r"^ {4,}distinct target programs\s+(\d+)", MD, re.M)
+check("the quoted distinct-target-program count is the routed one",
+      bool(_qtp) and int(_qtp.group(1)) == _ntp,
+      f"live {_ntp}, quoted {_qtp.group(1) if _qtp else '-'}")
+check("the quoted routing figures are derived from the two routing files",
+      _projection is not None and bool(_q)
+      and (int(_q.group(1)), int(_q.group(2)), int(_q.group(3))) == _projection,
+      _routing_error or (f"live {_projection}; quoted "
+                        + (f"({_q.group(1)}, {_q.group(2)}, {_q.group(3)})" if _q else "not found")))
 
 # Counted from actual invocations, not call sites: several checks run inside
 # loops, so the source has 42 `check(` lines and the run emits more. This one

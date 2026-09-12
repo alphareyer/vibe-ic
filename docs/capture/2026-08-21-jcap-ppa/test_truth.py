@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ast
 import base64
 import json
 import pathlib
@@ -28,6 +29,71 @@ EXCLUDED = "324435d94a65f7ef1c8d2b8e4b66407cf778220d"
 RESULT_PATH = pathlib.PurePosixPath("docs/capture/2026-08-21-jcap-ppa/RESULT.md")
 EXCLUDED_RESULT_SHA256 = \
     "e36e633bb62c23ae2a2f4eca980dd3e941d8391490d3159bece48070fb78fdec"
+
+
+@pytest.mark.parametrize("case", ["authentic", "missing", "wrong_path", "tampered", "wrong_claim",
+                                "current_extra", "wrong_tip", "missing_tip_object"])
+def test_routing_checks_execute_and_refuse_missing_or_mismatched_history(tmp_path, case):
+    """Execute the verifier's actual routing block, with local Git unavailable.
+
+    The normal complete verifier is also exercised by the native acceptance
+    packet. Here the isolated block makes absence and corruption deterministic.
+    """
+    import re
+    import types
+    archive = tmp_path / "CAPTURE_ROUTING_IDENTITY.json"
+    proof = json.loads((HERE / archive.name).read_text())
+    if case == "wrong_path":
+        proof["path"] = "another/CAPTURE_ROUTING.json"
+    if case == "tampered":
+        for item in proof["objects"].values():
+            if item["type"] == "blob":
+                item["base64"] = base64.b64encode(b"{}").decode()
+    if case != "missing":
+        archive.write_text(json.dumps(proof))
+    tip_archive = tmp_path / "CAPTURE_ROUTING_RECEIPT_IDENTITY.json"
+    tip_proof = json.loads((HERE / tip_archive.name).read_text())
+    if case == "missing_tip_object":
+        tip_proof["objects"].pop("58d5efd79cf60d75bfa156b83cecd1c63e78728f")
+    tip_archive.write_text(json.dumps(tip_proof))
+    md = RESULT
+    if case == "wrong_claim":
+        md = re.sub(r"gains \*\*\d+\*\* steps", "gains **999** steps", md, count=1)
+        assert md != RESULT
+    tree = ast.parse((HERE / "verify.py").read_text())
+    start = next(i for i, node in enumerate(tree.body)
+                 if isinstance(node, ast.Assign)
+                 and any(isinstance(t, ast.Name) and t.id == "_bR" for t in node.targets))
+    count = next(i for i in range(start, len(tree.body))
+                 if isinstance(tree.body[i], ast.Assign)
+                 and any(isinstance(t, ast.Name) and t.id == "_cost"
+                         for t in tree.body[i].targets))
+    observed = []
+    controls = []
+    env = {"_sp2": types.SimpleNamespace(run=lambda *a, **kw: subprocess.CompletedProcess(a, 1, "", "missing")),
+           "_base": "6dd97611eafa2af2d1aacc13dae88bd40c3c0e8b",
+           "_receipt_tip": ("0" * 40 if case == "wrong_tip" else
+                            "58d5efd79cf60d75bfa156b83cecd1c63e78728f"),
+           "ROOT": ROOT, "HERE": tmp_path, "_truth": _truth,
+           "pathlib": pathlib, "json": json, "re": re, "MD": md,
+           "ROUTING": json.loads((ROOT / "vibe-ic-marketplace/plugins/vibe-ic/benchmark/CAPTURE_ROUTING.json").read_text()),
+           "RECS": json.loads((HERE / "recoveries.json").read_text()),
+           "check": lambda name, ok, detail="": observed.append((name, bool(ok), detail)),
+           "control": lambda name, ok: controls.append((name, bool(ok)))}
+    if case == "current_extra":
+        env["ROUTING"]["steps"]["test.later_route"] = {
+            "bucket_A_program": "programs/test_later_route.py"}
+    exec(compile(ast.Module(body=tree.body[start:count], type_ignores=[]), str(HERE / "verify.py"), "exec"), env)
+    expected = ["the quoted distinct-target-program count is the routed one",
+                "the quoted routing figures are derived from the two routing files"]
+    assert [row[0] for row in observed] == expected, observed
+    assert all(ok for _, ok in controls), controls
+    if case in {"authentic", "current_extra"}:
+        assert env["_routing_error"] == ""
+        assert env["_projection"] == (0, 0, 49)
+        assert all(row[1] for row in observed), observed
+    else:
+        assert observed[1][1] is False, observed
 
 
 def _portable_history_repo(tmp_path):
