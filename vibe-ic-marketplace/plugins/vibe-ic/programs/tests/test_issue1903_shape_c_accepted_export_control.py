@@ -13,6 +13,7 @@ from pathlib import Path
 
 import benchmark_dispatch as dispatch
 import emit_attestation
+import flow_phase_attribution as fpa
 
 
 def _sha(text: str) -> str:
@@ -116,18 +117,26 @@ def _fixture(root: Path) -> tuple[Path, Path, str]:
                             "rationale": "The output continuously mirrors the input exactly as the prompt requires."},
     }) + "\n")
     (run / "needs_ai_review.jsonl").write_text(json.dumps(task) + "\n")
+    report = project / "reports" / "orchestrator" / "phase2_one_shot.json"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    step_report = {"verdict": "PASS", "steps": [
+        {"name": "rtl_gen", "status": "PASS"},
+        {"name": "rtl_validate", "status": "PASS"},
+        {"name": "step4_functional_evidence", "status": "PASS"},
+    ]}
+    report.write_text(json.dumps(step_report) + "\n")
     (run / "solve_report.json").write_text(json.dumps({
         "results": [{
             "id": task["id"],
             "rc": 0,
+            "exit": "2",
             "ok": True,
             "candidate_ready": True,
             "accepted": True,
             "candidate_origin": "PROGRAM",
             "review_task": task["review_path"],
-            "phases": {"phase3_verifying": {"ran": {
-                "rtl_gen": "PASS",
-                "step4_functional_evidence": "PASS"}}},
+            "phases": {"phase3_verifying": fpa.phase3_verifying(
+                step_report, None)},
         }],
     }) + "\n")
     return run, dataset, rtl_text

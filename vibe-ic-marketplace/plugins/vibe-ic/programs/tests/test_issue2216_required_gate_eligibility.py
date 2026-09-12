@@ -44,6 +44,7 @@ Run: python3 -m pytest programs/tests/test_issue2216_required_gate_eligibility.p
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -55,6 +56,8 @@ if str(_PROGRAMS) not in sys.path:
 
 import benchmark_dispatch as BD                 # noqa: E402
 import step_preflight as SPF                    # noqa: E402
+import flow_phase_attribution as FPA            # noqa: E402
+from test_issue1903_shape_c_accepted_export_control import _fixture
 
 
 def _solve(exit_step="2", ran=None, not_attempted=None, **extra):
@@ -228,3 +231,81 @@ def test_the_published_corpus_shape_is_not_refused_by_this_rule():
     assert ledger["eligibility"] == BD._NOT_MEASURED
     assert ledger["out_of_scope"]["yosys_synth"] == "FAIL"
     assert "lec_equivalence" in ledger["unscoped"]
+
+
+def _freshness_fixture(tmp_path, status="PASS"):
+    run, dataset, rtl_text = _fixture(tmp_path)
+    task = BD._read_jsonl(run / BD._REVIEW_WORKLIST)[0]
+    project = Path(task["project"])
+    report = project / "reports/orchestrator/phase2_one_shot.json"
+    doc = json.loads(report.read_text())
+    doc["steps"][1]["status"] = status
+    report.write_text(json.dumps(doc))
+    solve = json.loads((run / "solve_report.json").read_text())
+    result = solve["results"][0]
+    result["phases"]["phase3_verifying"] = FPA.phase3_verifying(doc, None)
+    solve["acceptance_policy"] = {
+        "required": True, "review_task_schema": BD._REVIEW_TASK_SCHEMA,
+        "review_schema": BD._AI_REVIEW_SCHEMA,
+    }
+    (run / "solve_report.json").write_text(json.dumps(solve))
+    # Resume must see the same working bytes as the frozen review candidate.
+    rtl = project / "phase2/stage1/rtl/TopModule.sv"
+    rtl.parent.mkdir(parents=True, exist_ok=True)
+    rtl.write_text(rtl_text)
+    return run, dataset, task, report, result
+
+
+@pytest.mark.parametrize("before,after", [
+    ("PASS", "FAIL"), ("FAIL", "PASS"), ("PASS", "BLOCKED"),
+])
+def test_changed_live_gate_evidence_blocks_export(tmp_path, before, after):
+    run, _, task, report, result = _freshness_fixture(tmp_path, before)
+    doc = json.loads(report.read_text())
+    doc["steps"][1]["status"] = after
+    report.write_text(json.dumps(doc))
+    reasons = BD._shape_c_task_binding_reasons(task, run, result)
+    assert any("evidence is stale" in r for r in reasons), reasons
+    with pytest.raises(SystemExit, match="evidence is stale"):
+        BD._export_accepted_shape_c_samples("verilogeval-v2", run)
+    assert not (run / "samples" / f"{task['id']}_sample01.sv").exists()
+
+
+@pytest.mark.parametrize("damage", ["absent", "json", "steps"])
+def test_unreadable_live_gate_evidence_blocks_export(tmp_path, damage):
+    run, _, task, report, result = _freshness_fixture(tmp_path)
+    if damage == "absent":
+        report.unlink()
+    else:
+        report.write_text("{" if damage == "json" else '{"steps": [null]}')
+    reasons = BD._shape_c_task_binding_reasons(task, run, result)
+    assert any("current Program gate evidence" in r for r in reasons), reasons
+
+
+@pytest.mark.parametrize("status", ["PASS", "BLOCKED"])
+def test_unchanged_live_gate_evidence_preserves_export_policy(tmp_path, status):
+    run, _, task, _, result = _freshness_fixture(tmp_path, status)
+    result["phases"]["phase3_verifying"]["ai_semantic_review"] = {"status": "PASS"}
+    assert BD._shape_c_task_binding_reasons(task, run, result) == []
+    assert BD._required_gate_ledger(result)["eligibility"] == (
+        "ELIGIBLE" if status == "PASS" else BD._NOT_MEASURED)
+
+
+@pytest.mark.parametrize("status,changed", [
+    ("PASS", False), ("BLOCKED", False), ("PASS", True),
+])
+def test_resume_checks_live_gate_evidence_before_publication(tmp_path, status, changed):
+    run, dataset, task, report, _ = _freshness_fixture(tmp_path, status)
+    if changed:
+        doc = json.loads(report.read_text())
+        doc["steps"][1]["status"] = "FAIL"
+        report.write_text(json.dumps(doc))
+    BD.cmd_resume("verilogeval-v2", str(dataset), str(run))
+    acceptance = json.loads((run / BD._ACCEPTANCE_REPORT).read_text())
+    assert acceptance["accepted_ids"] == ([] if changed else [task["id"]])
+    if changed:
+        repairs = BD._read_jsonl(run / BD._REPAIR_WORKLIST)
+        assert any(r.get("status") == "PROGRAM_GATE_EVIDENCE_STALE"
+                   for r in repairs), repairs
+        assert not Path(task["response_path"]).exists()
+        assert (Path(task["project"]) / "phase2/stage1/rtl/TopModule.sv").is_file()

@@ -819,6 +819,30 @@ def _required_gate_ledger(solve_result: Any) -> dict:
     return ledger
 
 
+def _gate_evidence_freshness_reasons(project: Path, result: dict) -> list[str]:
+    """BLOCKING: acceptance/export must not reuse a stale gate snapshot.
+
+    Derive both ledgers with the existing policy, including NOT_MEASURED for
+    BLOCKED. Compare gate evidence, not the whole attribution: AI review adds
+    fields to the latter without changing the Program's measured gates.
+    """
+    import flow_phase_attribution as fpa                 # noqa: PLC0415
+    try:
+        rep, why = fpa.step_report(project)
+        if rep is None:
+            return [f"current Program gate evidence is unavailable: {why}"]
+        current = {
+            "exit": result.get("exit"),
+            "phases": {"phase3_verifying": fpa.phase3_verifying(rep, why)},
+        }
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        return [f"current Program gate evidence is unreadable: {exc}"]
+    if _required_gate_ledger(current) != _required_gate_ledger(result):
+        return ["Program gate evidence changed since the solve snapshot; "
+                "the reviewed evidence is stale"]
+    return []
+
+
 def _gate_status_note(ledger: dict) -> str:
     """One line stating what the gates ACTUALLY said, for the accepting
     message. Never the words "by PROGRAM gates" over an unmeasured ledger."""
@@ -3461,6 +3485,8 @@ def _shape_c_task_binding_reasons(task: dict, run_p: Path,
     # same question: did any REQUIRED IN-SCOPE gate report a failure on these
     # bytes. Out-of-exit and unplaceable gates are recorded and never block.
     ledger = _required_gate_ledger(solve_result)
+    reasons.extend(_gate_evidence_freshness_reasons(
+        expected_project, solve_result))
     for name in ledger.get("failed_required") or []:
         reasons.append(
             f"required in-scope PROGRAM gate {name} reported "
@@ -5858,6 +5884,25 @@ def _cmd_resume_locked(bench: str, dataset: str, run: str,
         # exactly as permissive as it was — a failed candidate must remain
         # reviewable and repairable — but a required in-scope FAILURE now holds
         # the DELIVERABLE instead of being overwritten by a semantic PASS.
+        freshness_reasons = _gate_evidence_freshness_reasons(
+            Path(str(task.get("project") or "")), result)
+        if freshness_reasons:
+            repairs.append({
+                "schema": "vibeic.benchmark.ai_repair_task.v2",
+                "id": pid, "project": task.get("project"),
+                "status": "PROGRAM_GATE_EVIDENCE_STALE",
+                "reasons": freshness_reasons,
+                "required_next": (
+                    "refresh the solve attribution and review handoff from "
+                    "the current Program step report, then obtain a fresh "
+                    "review before acceptance; repeating --resume alone "
+                    "cannot refresh reviewed gate evidence"),
+            })
+            result.update({"accepted": False, "awaiting_ai": True,
+                           "awaiting_ai_review": True,
+                           "ai_repair_required": False})
+            print(f"  {pid:44s} NOT ACCEPTED -- {freshness_reasons[0]}")
+            continue
         gate_ledger = _required_gate_ledger(result)
         result["required_gate_ledger"] = gate_ledger
         if gate_ledger.get("failed_required"):
