@@ -450,7 +450,12 @@ def test_fetch_declares_cell_stream_units_not_lef_units(tmp_path, monkeypatch,
                    PYTHONDONTWRITEBYTECODE="1")
         result = subprocess.run(command, capture_output=True, text=True,
                                 env=env, timeout=timeout)
-        return result.returncode, result.stdout, result.stderr
+        # Match the real image entrypoint: stdout is not a naked JSON value.
+        # Even an echoed marker inside the command is not a result line.
+        output = ("[INFO] Starting pinned runtime\n[INFO] command: "
+                  + repr(command) + "\n" + result.stdout
+                  + "[INFO] Command finished\n")
+        return result.returncode, output, result.stderr
 
     monkeypatch.setattr(STF, "_run", transport)
     facts = STF.technology_facts(row["name"], "")

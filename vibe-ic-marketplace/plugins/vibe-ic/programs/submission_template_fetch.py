@@ -655,7 +655,7 @@ def technology_facts(pdk: str, image: str,
         "if not paths: raise RuntimeError('no PDK cell GDS matches the registry')\n"
         "path = paths[0]\n"
         "layout = read_layout(Path(path))\n"
-        "print(json.dumps({'cell_gds': path, 'value': layout.dbu_um}))\n")
+        "print('VIBEIC_STREAM_DBU=' + json.dumps({'cell_gds': path, 'value': layout.dbu_um}))\n")
     rc, out, err = _run([
         "docker", "run", "--rm", *_dmem.docker_memory_flags(),
         "-v", f"{_HERE}:/vibeic_programs:ro",
@@ -663,7 +663,14 @@ def technology_facts(pdk: str, image: str,
         digest, "--skip", "python3", "-c", probe, f"{root}/{gds_glob}"],
         timeout=600)
     try:
-        stream = json.loads(out) if rc == 0 else {}
+        # The image entrypoint prints banners and the command itself. Only a
+        # complete, uniquely marked result line belongs to this probe.
+        records = [line.removeprefix("VIBEIC_STREAM_DBU=")
+                   for line in (out or "").splitlines()
+                   if line.startswith("VIBEIC_STREAM_DBU=")]
+        if rc != 0 or len(records) != 1:
+            raise ValueError("expected one successful stream DBU probe record")
+        stream = json.loads(records[0])
         value = stream.get("value")
         if (not isinstance(value, (int, float)) or isinstance(value, bool)
                 or not math.isfinite(value) or value <= 0
