@@ -11,6 +11,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+import pytest
 
 HERE = Path(__file__).resolve().parent
 GEN = HERE.parent / "benchmark_verify_report.py"
@@ -126,6 +127,39 @@ def _run(project: Path):
                         "--ref", str(_reference_for(project))],
                        capture_output=True, text=True)
     return r.returncode, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize('log_mode,expected', [('clean', 0), ('missing', 1),
+                                             ('failed', 1), ('partial', 1), ('garbage', 1)])
+def test_normal_done_consumer_requires_the_plugin_change_gate(tmp_path, log_mode, expected):
+    project = _make_project(tmp_path / 'project')
+    argv = [sys.executable, str(GEN), str(project), '--ref', str(_reference_for(project)),
+            '--changed-files', 'programs/neutral_repair.py']
+    # Synthetic gate-contract input, NOT a claim that a real full suite ran.
+    if log_mode != 'missing':
+        log = tmp_path / 'pytest.log'
+        log.write_text({
+            'clean': 'programs/tests/test_unit.py::test_ok PASSED\ntests/test_integration.py::test_ok PASSED\n2 passed in 0.1s\n',
+            'failed': 'programs/tests/test_unit.py::test_ok PASSED\ntests/test_integration.py::test_bad FAILED\n1 failed, 1 passed in 0.1s\n',
+            'partial': 'programs/tests/test_unit.py::test_ok PASSED\n1 passed in 0.1s\n',
+            'garbage': 'The tests probably worked.\n',
+        }[log_mode])
+        argv += ['--pytest-log', str(log)]
+    run = subprocess.run(argv, capture_output=True, text=True)
+    assert run.returncode == expected, run.stdout + run.stderr
+    report = (project / 'BENCHMARK_VERIFICATION_REPORT.md').read_text()
+    assert 'Benchmark-pillar verdict: PASS' in report
+    assert ('OVERALL=PRODUCTION-READY' in run.stdout) is (expected == 0)
+    assert 'Plugin-change test prerequisite' in report
+    assert ('"passed": true' in report) is (expected == 0)
+
+
+def test_plugin_prerequisite_rejects_a_contradictory_native_rc(tmp_path, monkeypatch):
+    mod = _load_mod()
+    monkeypatch.setattr(mod.subprocess, 'run', lambda *a, **k: subprocess.CompletedProcess(
+        a, 1, json.dumps({'program': 'plugin_change_pytest_gate', 'verdict': 'PASS', 'passed': True}), ''))
+    result = mod._plugin_test_prerequisite(GEN.parent.parent, changed_files=['programs/repair.py'])
+    assert result['native_rc'] == 1 and result['passed'] is False
 
 
 def test_all_pass_is_production_ready(tmp_path):

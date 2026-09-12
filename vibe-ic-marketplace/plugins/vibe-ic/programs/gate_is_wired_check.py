@@ -665,7 +665,7 @@ def wiring_sources(plugin: Path, repo: Path) -> Tuple[int, int]:
     return (_count(plugin, _EXECUTABLE_GLOBS), _count(repo, _REPO_GLOBS))
 
 
-def wiring(plugin: Path, repo: Path) -> Dict[str, Dict[str, List[str]]]:
+def wiring(plugin: Path, repo: Path, *, only: Optional[Set[str]] = None) -> Dict[str, Dict[str, List[str]]]:
     """{gate: {"executable": [...], "skill": [...]}} — where each is INVOKED.
 
     `executable` holds `<path>::<how>` for every INVOCATION found, and an
@@ -675,6 +675,8 @@ def wiring(plugin: Path, repo: Path) -> Dict[str, Dict[str, List[str]]]:
     and files whose whole format is declaration are not read at all.
     """
     g = gates(plugin)
+    if only is not None:
+        g = {name for name in g if name in only}
     #: Each gate's own verdict path, read from its own source once. This is
     #: what separates "run as a gate" from "imported as a library" — see
     #: `verdict_path` and `_credits` (vibe-ic#2141).

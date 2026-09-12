@@ -42,7 +42,7 @@ Usage:
       [--flow <phase1_phase2_phase3.yaml>] [--out <report.md>]
 """
 from __future__ import annotations
-import argparse, hashlib, json, re, sys, glob, os
+import argparse, hashlib, json, re, sys, glob, os, subprocess
 from pathlib import Path
 
 VERDICT_TOKENS = ["MATCH", "EQUIVALENT", "IN-RANGE", "BOTH-CLEAN", "PASS",
@@ -500,6 +500,31 @@ def _full_stack_functional_coverage(project: Path):
     return None, None, None
 
 
+def _plugin_test_prerequisite(plugin: Path, pytest_log: str = "",
+                              changed_files: list[str] | None = None) -> dict:
+    """Consume the existing gate, including its native rc, before claiming DONE.
+
+    This does not run pytest or accept a caller-written verdict. The gate owns
+    applicability and log validation; malformed/contradictory output cannot pass.
+    """
+    argv = [sys.executable, str(plugin / "programs" / "plugin_change_pytest_gate.py"), str(plugin)]
+    if pytest_log:
+        argv += ["--pytest-log", pytest_log]
+    if changed_files is not None:
+        argv += ["--changed-files", *changed_files]
+    try:
+        run = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        report = json.loads(run.stdout)
+        if not isinstance(report, dict):
+            raise ValueError("gate output is not an object")
+        passed = (run.returncode == 0 and report.get("program") == "plugin_change_pytest_gate"
+                  and report.get("verdict") == "PASS" and report.get("passed") is True)
+        return {"passed": passed, "native_rc": run.returncode, "report": report,
+                "stderr": run.stderr}
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return {"passed": False, "native_rc": None, "error": str(exc)}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("project")
@@ -507,6 +532,9 @@ def main():
     ap.add_argument("--flow", default="")
     ap.add_argument("--out", default="")
     ap.add_argument("--code-cov-floor", type=float, default=90.0)
+    ap.add_argument("--pytest-log", default="", help="Full-suite log for the existing plugin-change DONE prerequisite")
+    ap.add_argument("--changed-files", nargs="*", default=None,
+                    help="Explicit plugin change list forwarded to the prerequisite; omitted means native git detection")
     a = ap.parse_args()
     project = Path(a.project).resolve()
     if not project.is_dir():
@@ -809,7 +837,9 @@ def main():
     g_analog = (not analog_ic) or (analog_state == "CONVERGED")
     # Design-for-ECO gate: N/A passes; otherwise requires coverage PASS + preservation intact.
     g_dfe = (not dfe_applicable) or (dfe_state == "PASS")
-    overall = all([g_func, g_steps, g_code, g_fpga, g_analog, g_dfe])
+    pillar_overall = all([g_func, g_steps, g_code, g_fpga, g_analog, g_dfe])
+    plugin_test = _plugin_test_prerequisite(here.parent, a.pytest_log, a.changed_files)
+    overall = pillar_overall and plugin_test["passed"]
 
     # ── Emit report ──
     L = []
@@ -835,7 +865,7 @@ def main():
     #
     # So the scope travels WITH the sentence. Anyone quoting this line quotes
     # what it covers, and the flow verdict stays the flow's to state.
-    L.append(f"**Benchmark-pillar verdict: {'PASS' if overall else 'FAIL'}** "
+    L.append(f"**Benchmark-pillar verdict: {'PASS' if pillar_overall else 'FAIL'}** "
              f"— scope: the 6 benchmark pillars below, NOT flow convergence. "
              f"For whether the flow itself closed, read "
              f"`reports/audit/phase23_completion_audit.json` and "
@@ -890,6 +920,10 @@ def main():
     L.append("")
     L.append(f"_Design-for-ECO status: **{dfe_state}** — {dfe_detail}_")
     L.append("")
+    L.append("## Plugin-change test prerequisite (existing DONE hard rule)")
+    L.append("This prerequisite is separate from the six design pillars; it does not run pytest.")
+    L.append("```json\n" + json.dumps(plugin_test, indent=2) + "\n```")
+    L.append("")
     # Pillar 2 detail table
     L.append("## Pillar 2 — 56-step Output Comparison (OURS vs open-source reference)")
     L.append("")
@@ -913,6 +947,7 @@ def main():
           f"fpga={'N/A' if fpga_na else fpga_verdict} "
           f"analog={'N/A' if not analog_ic else analog_state} "
           f"design_for_eco={dfe_state} "
+          f"plugin_tests={'PASS' if plugin_test['passed'] else 'FAIL/ERROR'} "
           f"analog_only={analog_only}")
     sys.exit(0 if overall else 1)
 

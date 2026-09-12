@@ -15,6 +15,7 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 
 
 NUMBER_WORDS = {
@@ -32,6 +33,25 @@ HISTORY_START = re.compile(
     rf"claims=({NUMBER_TOKEN}) holding=({NUMBER_TOKEN}) -->"
 )
 HISTORY_END = "<!-- already-program-history-end -->"
+
+
+def live_unwired_routing_targets(plugin: pathlib.Path, repo: pathlib.Path,
+                                 targets: dict[str, str], known: set[str]) -> tuple[list[str], dict]:
+    """Recheck the baseline's suspects using the actual invocation reader.
+
+    A baseline remains immutable evidence of what was unwired, not proof that
+    a later real caller is still absent. Missing target programs remain refused.
+    This verifies routing only, not implementation of the captured rule sketches.
+    """
+    programs = str(plugin / 'programs')
+    if programs not in sys.path:
+        sys.path.insert(0, programs)
+    import gate_is_wired_check
+    suspects = set(targets.values()) & known
+    live = gate_is_wired_check.wiring(plugin, repo, only=suspects)
+    refused = sorted(name for name, target in targets.items()
+                     if target in suspects and not live.get(target, {}).get('executable'))
+    return refused, live
 
 
 def coverage_source_path(repo: pathlib.Path, source: str) -> pathlib.Path | None:

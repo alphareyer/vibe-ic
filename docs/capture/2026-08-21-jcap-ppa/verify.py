@@ -347,13 +347,10 @@ check("every program named as enforcing a class exists",
 #     verdict consults." I ran that by hand at 21 records and again at 26 —
 #     which is the check-that-was-run-once problem this whole file exists for.
 #
-#     WHAT THIS FAST FORM COVERS, AND WHAT IT DOES NOT. It reads the wiring
-#     gate's committed baseline: the 59 programs known to be consulted by no
-#     automatic verdict. That catches a record routed at a program already
-#     known unwired, at zero cost. It does NOT catch a program that became
-#     unwired after the baseline was written — for that, run the gate itself
-#     (`gate_is_wired_check.py`, about forty seconds). The difference is stated
-#     rather than left for a reader to assume the strong form.
+#     The committed baseline selects suspects, not their current verdict.
+#     Recheck those targets with the wiring gate's invocation reader so a real
+#     caller can repair routing without rewriting the historical baseline.
+#     Programs outside that baseline remain outside this bounded check's scope.
 _bl = PLUG / "programs" / "gate_is_wired_baseline.json"
 if _bl.is_file():
     _known = set(json.loads(_bl.read_text()).get("unwired", []))
@@ -361,9 +358,10 @@ if _bl.is_file():
     _tgt = {r["rule_name"]: pathlib.Path(
                 ROUTING["steps"][r["step"]]["bucket_A_program"]).stem
             for r in RECS if r["bucket"] == "A" and r.get("step") in ROUTING["steps"]}
-    _unw = sorted({n for n, prog in _tgt.items() if prog in _known})
+    _unw, _live_wiring = _truth.live_unwired_routing_targets(PLUG, ROOT, _tgt, _known)
     check("no Bucket-A rule is routed at a known-unwired program",
-          not _unw, f"{len(set(_tgt.values()))} distinct targets, unwired {_unw}")
+          not _unw, f"{len(set(_tgt.values()))} distinct targets, unwired {_unw}; "
+          f"live invocation evidence {_live_wiring}")
 else:
     check("no Bucket-A rule is routed at a known-unwired program", False,
           "wiring baseline absent — cannot answer, and this is not a pass")
