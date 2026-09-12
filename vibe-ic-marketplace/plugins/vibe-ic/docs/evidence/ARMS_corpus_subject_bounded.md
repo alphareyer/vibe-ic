@@ -1,6 +1,6 @@
 # Two-arm evidence — corpus subject bounded at the repository
 
-`falsref.sh` is NOT on 8hd-3 (`/home/reyerchu/fleet_scripts/` holds nine scripts and none is
+`falsref.sh` is NOT on 8hd-3 (`<account-home>/fleet_scripts/` holds nine scripts and none is
 it; 192.168.1.112/.120 refuse ssh with publickey, .122 times out). The arms below were
 therefore built by hand to the definition the auto-lander states, with `git archive` so no arm
 can carry the other's mtimes or `__pycache__`, and verified BY BLOB.
@@ -40,7 +40,7 @@ replaced, not kept.)
 
 ## The property, measured both ways
 
-Same arm, two LOCATIONS. `/home/reyerchu` holds a clone of `vibeic/benchmark-data`;
+Same arm, two LOCATIONS. `<account-home>` holds a clone of `vibeic/benchmark-data`;
 `/tmp` does not. The three affected modules only:
 
     arm  location                     result

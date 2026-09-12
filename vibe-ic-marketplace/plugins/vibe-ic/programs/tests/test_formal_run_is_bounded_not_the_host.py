@@ -340,8 +340,10 @@ def test_a_stalled_solver_is_stopped_with_its_whole_process_group(
     # not enforced too.
     for _ in range(50):
         try:
-            os.kill(gpid, 0)
-        except ProcessLookupError:
+            state = Path(f"/proc/{gpid}/stat").read_text().rsplit(")", 1)[-1].split()[0]
+        except OSError:
+            break
+        if state in ("Z", "X", "x"):
             break
         time.sleep(0.2)
     else:                                          # pragma: no cover - failure

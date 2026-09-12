@@ -55,10 +55,18 @@ def _drive(tmp_path: Path, *, new_session: bool):
 
 
 def _alive(pid: int) -> bool:
+    """A zombie has been killed; it is not a surviving process tree member.
+
+    `os.kill(pid, 0)` succeeds for a zombie, so it cannot distinguish the
+    failure this test cares about (a running orphan) from a child correctly
+    killed by the group signal but awaiting PID 1 reaping it.
+    """
     for _ in range(25):
         try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[-1].split()[0]
+        except OSError:
+            return False
+        if state in ("Z", "X", "x"):
             return False
         time.sleep(0.2)
     return True
