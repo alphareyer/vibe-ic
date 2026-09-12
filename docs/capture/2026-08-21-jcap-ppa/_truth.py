@@ -8,6 +8,10 @@ the landing receipt, measured from the frozen base through the excluded source.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
+import hashlib
+import json
+import os
 import pathlib
 import re
 import subprocess
@@ -210,26 +214,81 @@ def validate_current_claim_counts(
     return derived, surfaces, history, errors
 
 
+def archived_checkpoint_text(repo: pathlib.Path, result_path: pathlib.PurePosixPath, sha: str) -> str:
+    """Read an exact Git commit/tree/blob path proof without modifying .git.
+
+    Squash-landed commits need not survive in a clean clone. The archive carries
+    their original object bytes, not reconstructed reports or substitute refs.
+    The requested immutable commit SHA authenticates the entire path to the blob;
+    trusting only a sidecar claim-to-blob mapping would not establish that link.
+    """
+    archive = repo / result_path.parent / 'HISTORICAL_CHECKPOINTS.json'
+    proof = json.loads(archive.read_text())
+    if (not isinstance(proof, dict)
+            or proof.get('format') != 'git-object-path-proof-v1'
+            or proof.get('path') != result_path.as_posix()
+            or sha not in proof.get('checkpoints', [])):
+        raise ValueError('archive does not declare this exact checkpoint/path')
+
+    def obj(oid: str, kind: str) -> bytes:
+        item = proof['objects'][oid]
+        if item['type'] != kind:
+            raise ValueError(f'object {oid} has wrong type')
+        data = base64.b64decode(item['base64'], validate=True)
+        actual = hashlib.sha1(f'{kind} {len(data)}\0'.encode() + data).hexdigest()
+        if actual != oid:
+            raise ValueError(f'object {oid} has invalid Git identity')
+        return data
+
+    commit = obj(sha, 'commit')
+    tree_line = commit.split(b'\n', 1)[0]
+    if not re.fullmatch(rb'tree [0-9a-f]{40}', tree_line):
+        raise ValueError('commit has no canonical root tree')
+    oid = tree_line[5:].decode()
+    parts = result_path.parts
+    if not parts or any(part in {'', '.', '..'} for part in parts) or result_path.is_absolute():
+        raise ValueError('archive path is not relative and canonical')
+    for index, part in enumerate(parts):
+        tree, cursor, entries = obj(oid, 'tree'), 0, {}
+        while cursor < len(tree):
+            end = tree.index(b'\0', cursor)
+            mode, name = tree[cursor:end].split(b' ', 1)
+            raw_oid = tree[end + 1:end + 21]
+            if len(raw_oid) != 20 or name in entries:
+                raise ValueError('tree has truncated or duplicate entry')
+            entries[name] = (mode, raw_oid.hex())
+            cursor = end + 21
+        mode, oid = entries[part.encode()]
+        if index < len(parts) - 1 and mode not in {b'40000', b'040000'}:
+            raise ValueError('non-directory in authenticated path')
+        if index == len(parts) - 1 and mode not in {b'100644', b'100755'}:
+            raise ValueError('checkpoint result is not a regular file')
+    return obj(oid, 'blob').decode('utf-8')
+
+
 def validate_history_checkpoints(
     repo: pathlib.Path, result_path: pathlib.PurePosixPath, checkpoints: list[HistoryCheckpoint]
 ) -> list[str]:
     errors: list[str] = []
     for checkpoint in checkpoints:
+        local_only = {**os.environ, 'GIT_NO_LAZY_FETCH': '1'}
         obj = subprocess.run(
             ["git", "cat-file", "-e", f"{checkpoint.sha}^{{commit}}"],
-            cwd=repo, capture_output=True, text=True,
+            cwd=repo, capture_output=True, text=True, env=local_only,
         )
-        if obj.returncode != 0:
-            errors.append(f"historical checkpoint {checkpoint.sha} does not resolve")
-            continue
         shown = subprocess.run(
             ["git", "show", f"{checkpoint.sha}:{result_path.as_posix()}"],
-            cwd=repo, capture_output=True, text=True,
+            cwd=repo, capture_output=True, text=True, env=local_only,
         )
-        if shown.returncode != 0:
-            errors.append(f"historical checkpoint {checkpoint.sha} lacks {result_path}")
-            continue
-        pair, _, pair_errors = derive_claim_pair(shown.stdout)
+        if obj.returncode == 0 and shown.returncode == 0:
+            historical = shown.stdout
+        else:
+            try:
+                historical = archived_checkpoint_text(repo, result_path, checkpoint.sha)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                errors.append(f"historical checkpoint {checkpoint.sha} does not resolve to authenticated {result_path}: {exc}")
+                continue
+        pair, _, pair_errors = derive_claim_pair(historical)
         if pair_errors:
             errors.append(f"historical checkpoint {checkpoint.sha} cannot derive its pair: {pair_errors}")
         elif pair != checkpoint.pair:

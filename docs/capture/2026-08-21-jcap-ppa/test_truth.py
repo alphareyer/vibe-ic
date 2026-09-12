@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import base64
+import json
 import pathlib
 import subprocess
 import sys
@@ -26,6 +28,67 @@ EXCLUDED = "324435d94a65f7ef1c8d2b8e4b66407cf778220d"
 RESULT_PATH = pathlib.PurePosixPath("docs/capture/2026-08-21-jcap-ppa/RESULT.md")
 EXCLUDED_RESULT_SHA256 = \
     "e36e633bb62c23ae2a2f4eca980dd3e941d8391490d3159bece48070fb78fdec"
+
+
+def _portable_history_repo(tmp_path):
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    archive = tmp_path / RESULT_PATH.parent / 'HISTORICAL_CHECKPOINTS.json'
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes((HERE / 'HISTORICAL_CHECKPOINTS.json').read_bytes())
+    return archive
+
+
+def test_history_checkpoints_are_authenticated_in_an_empty_clean_clone(tmp_path):
+    _portable_history_repo(tmp_path)
+    checkpoints = _truth.strip_labeled_history(RESULT)[1]
+    before = subprocess.check_output(['git', '-C', str(tmp_path), 'count-objects', '-v'])
+    for checkpoint in checkpoints:
+        assert subprocess.run(['git', '-C', str(tmp_path), 'cat-file', '-e', checkpoint.sha],
+                              capture_output=True).returncode != 0
+    assert _truth.validate_history_checkpoints(tmp_path, RESULT_PATH, checkpoints) == []
+    assert subprocess.check_output(['git', '-C', str(tmp_path), 'count-objects', '-v']) == before
+
+
+@pytest.mark.parametrize('kind', ['commit', 'tree', 'blob'])
+def test_history_archive_rejects_modified_authenticated_object(tmp_path, kind):
+    archive = _portable_history_repo(tmp_path)
+    proof = json.loads(archive.read_text())
+    # Corrupt every object of this type so the requested proof path necessarily
+    # encounters one; retain all claimed object/commit identities.
+    for item in proof['objects'].values():
+        if item['type'] == kind:
+            item['base64'] = base64.b64encode(base64.b64decode(item['base64']) + b'X').decode()
+    archive.write_text(json.dumps(proof))
+    errors = _truth.validate_history_checkpoints(tmp_path, RESULT_PATH, _truth.strip_labeled_history(RESULT)[1])
+    assert errors and all('invalid Git identity' in error for error in errors)
+
+
+@pytest.mark.parametrize('mutation', ['missing_archive', 'wrong_path', 'unregistered_sha', 'missing_object'])
+def test_history_archive_cannot_waive_missing_or_mismatched_evidence(tmp_path, mutation):
+    archive = _portable_history_repo(tmp_path)
+    checkpoints = _truth.strip_labeled_history(RESULT)[1]
+    proof = json.loads(archive.read_text())
+    if mutation == 'missing_archive':
+        archive.unlink()
+    else:
+        if mutation == 'wrong_path':
+            proof['path'] = 'another/RESULT.md'
+        elif mutation == 'unregistered_sha':
+            proof['checkpoints'] = []
+        else:
+            proof['objects'] = {}
+        archive.write_text(json.dumps(proof))
+    errors = _truth.validate_history_checkpoints(tmp_path, RESULT_PATH, checkpoints)
+    assert len(errors) == len(checkpoints)
+    assert all('does not resolve to authenticated' in error for error in errors)
+
+
+def test_authentic_history_still_rejects_a_false_claim_pair(tmp_path):
+    _portable_history_repo(tmp_path)
+    actual = _truth.strip_labeled_history(RESULT)[1][0]
+    changed = _truth.HistoryCheckpoint(actual.sha, _truth.ClaimPair(actual.pair.claims + 1, actual.pair.holding))
+    errors = _truth.validate_history_checkpoints(tmp_path, RESULT_PATH, [changed])
+    assert len(errors) == 1 and 'but its tables derive' in errors[0]
 
 
 def _excluded_source_result() -> str:
