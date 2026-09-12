@@ -146,18 +146,47 @@ def test_requirement_rejects_a_report_missing_exactly_that_evidence(rid):
     )
 
 
-def test_skill_documents_its_own_promotion_path():
-    """The skill must name which criteria should become programs.
+def _program_mapping_errors(body: str, programs: Path) -> list[str]:
+    """Check the documented reuse targets, not a prescribed prose slogan."""
+    rows = []
+    for line in body.splitlines():
+        cells = [cell.strip() for cell in line.split("|")]
+        if len(cells) == 5 and cells[2].startswith("`"):
+            rows.append(cells)
+    if not rows:
+        return ["no criterion-to-program mappings"]
+    errors = []
+    for cells in rows:
+        match = re.match(r"`([a-z][a-z0-9_]*)`", cells[2])
+        if not match or not (programs / (match.group(1) + ".py")).is_file():
+            errors.append(f"unresolvable program: {cells[2]}")
+        if not cells[1] or not cells[3]:
+            errors.append("mapping lacks its criterion or evidence reference")
+    return errors
 
-    A doctrine that does not plan its own replacement by deterministic checks stays
-    prose forever, which contradicts program-first.
+
+def test_skill_documents_its_own_promotion_path():
+    """Program-first reuse must identify real programs, without mandatory slogans.
+
+    This is documentation integrity, not evidence that those programs passed a
+    design. A legitimate heading change must not become a product-admission red.
     """
     assert SKILL_MD.is_file(), f"SKILL.md missing at {SKILL_MD}"
     body = SKILL_MD.read_text(encoding="utf-8")
-    assert re.search(r"(?i)promote.{0,40}program|from this prose into programs", body), (
-        "SKILL.md does not identify which criteria should be promoted from prose "
-        "into deterministic programs"
-    )
+    programs = SKILL_DIR.parents[1] / "programs"
+    assert not _program_mapping_errors(body, programs)
+    # Both negative controls exercise values present in the real document.
+    without_table = "\n".join(line for line in body.splitlines()
+                               if not line.startswith("|"))
+    assert without_table != body
+    assert _program_mapping_errors(without_table, programs)
+    mapped = re.search(r"^\|[^|]+\| `([a-z][a-z0-9_]*)`", body, re.M)
+    assert mapped is not None
+    missing = "nonexistent_program_mapping_control"
+    assert not (programs / (missing + ".py")).exists()
+    invalid = body.replace(f"`{mapped.group(1)}`", f"`{missing}`")
+    assert invalid != body
+    assert _program_mapping_errors(invalid, programs)
 
 
 def test_every_criterion_cites_measured_evidence():
