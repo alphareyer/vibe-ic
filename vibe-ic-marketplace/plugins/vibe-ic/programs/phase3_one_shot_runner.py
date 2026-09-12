@@ -35586,6 +35586,11 @@ def publish_database_unit_declaration(project: Path, pdk: "PdkConfig",
     `input/submission_template/tapeout_declaration.json` ONLY on PASS and ONLY
     when nobody has already answered it. An OPERATOR's answer outranks a
     technology reading: the operator is the party that has to accept the die.
+    A previous technology transcription is different: it is not an operator
+    answer, so a fresh stream measurement replaces that older fact only when
+    the declaration's answer and its cited fact agree.  This preserves an
+    explicit operator value and also refuses to paper over a self-conflicting
+    declaration.
     """
     _tlef = _read_technology_text(pdk.tech_lef, container)
     rec = database_unit_verdict(
@@ -35610,20 +35615,37 @@ def publish_database_unit_declaration(project: Path, pdk: "PdkConfig",
                 doc, err = _td.load(decl_path)
                 if err is None and isinstance(doc, dict):
                     already = _td.answer(doc, "database_unit_um")
-                    if _td.is_answered(already):
+                    old_facts = doc.get(_td.TECHNOLOGY_KEY)
+                    old_fact = (old_facts.get("database_unit_um")
+                                if isinstance(old_facts, dict) else None)
+                    old_is_consistent_technology_fact = (
+                        isinstance(old_fact, dict)
+                        and old_fact.get("value") == already)
+                    if (_td.is_answered(already)
+                            and not old_is_consistent_technology_fact):
                         rec["published"] = False
                         rec["reason"] += (
                             f" — not published: the declaration already "
                             f"answers database_unit_um={already!r}, and that "
                             f"answer outranks this reading.")
                     else:
-                        doc, _ignored = _td.merge_answers(
-                            doc, {"database_unit_um": rec["database_unit_um"]})
+                        fact = {
+                            "value": rec["database_unit_um"],
+                            "pdk": pdk.name,
+                            "source": f"{pdk.cell_gds}:UNITS",
+                            "statement": (
+                                "GDSII UNITS database unit "
+                                f"{rec['database_unit_um']:g} um"),
+                        }
+                        doc = _td.merge_technology(
+                            doc, {"database_unit_um": fact})
                         decl_path.write_text(
                             json.dumps(doc, indent=2,
                                        ensure_ascii=False) + "\n")
                         rec["published"] = True
                         rec["published_to"] = str(decl_path)
+                        if old_is_consistent_technology_fact:
+                            rec["superseded_technology_fact"] = old_fact
                 else:
                     rec["reason"] += (
                         f" — not published: {decl_path} is unreadable"
