@@ -44,19 +44,12 @@ for _p in (str(_PROGRAMS), str(_TESTS_DIR)):
 
 import design_one_shot_runner as p2  # noqa: E402
 
-import _container_guard as _cg  # noqa: E402
 from not_verified_tier import not_verified_reason  # noqa: E402
 
-#: #2230 — THE CONTAINER THIS FILE NAMES. `test_476_oracle_run_loads_firmware_
-#: via_staged_hex` hands `container="vibeic-eda"` to the runner, and this file
-#: guarded only on `shutil.which("iverilog")` — i.e. not on the container at
-#: all. On a host where a stale image holds that shared name the runner's attach
-#: check refuses (correctly, #2076) and the test reds about the HOST. Asking
-#: whether the pinned runtime is actually reachable turns that into the skip an
-#: absent container already got. The container name stays exactly as the test
-#: had it; only the precondition is now measured.
-_ORACLE_CONTAINER = "vibeic-eda"
-_HAVE_PINNED_CONTAINER = _cg.container_usable(_ORACLE_CONTAINER)
+# This module runs inside the image selected by the test launcher. Compile
+# and simulate in that same runtime: a second named container cannot see the
+# private tmp_path and need not exist. An empty container selects the runner's
+# supported local-tool path, using the binaries checked below.
 import _path_layout as _pl  # noqa: E402
 
 
@@ -457,20 +450,9 @@ def test_476_stage_readmem_missing_source_is_skipped(tmp_path):
 
 @pytest.mark.skipif(
     shutil.which("iverilog") is None or shutil.which("vvp") is None,
-    reason="iverilog/vvp not available for end-to-end oracle run")
-@pytest.mark.skipif(
-    not _HAVE_PINNED_CONTAINER,
-    # DECLARED, not merely skipped (vibe-ic#1128). What is out of reach here is
-    # the thing this test verifies WITH — the pinned runtime — so the skip owes
-    # the reader the sentence "this verification did not happen", and a remedy.
-    # The #2230 guard that decides this flag was landed by me in v1.20.41 with a
-    # bare `reason=`, which is exactly the undeclared-skip shape
-    # `test_no_new_undeclared_infrastructure_skip_appears` exists to refuse; it
-    # has been red on main since. Same skip, now audible.
     reason=not_verified_reason(
-        f"{_ORACLE_CONTAINER} is not the pinned runtime here (#2230) — "
-        "absent, or a container of that name running other bytes",
-        "bash tools/vibeic-eda/restart-eda.sh"))
+        "iverilog/vvp are unavailable in the test runtime",
+        "Run this test inside the pinned vibeic-eda image with --skip"))
 def test_476_oracle_run_loads_firmware_via_staged_hex(tmp_path):
     """## 驗收 (476): TB with a relative $readmemh + hex in TB dir → the
     staged run cwd contains the hex (or cwd strategy resolves it) and the
@@ -520,7 +502,7 @@ def test_476_oracle_run_loads_firmware_via_staged_hex(tmp_path):
 
     res = p2._run_oracle_tb(project, "synthtop", tb,
                             track_reason="test", t0=p2.time.time(),
-                            container=_ORACLE_CONTAINER)
+                            container="")
     assert res is not None, "oracle run returned None (no simulator?)"
 
     run_dir = sim_fs / "oracle_run"
