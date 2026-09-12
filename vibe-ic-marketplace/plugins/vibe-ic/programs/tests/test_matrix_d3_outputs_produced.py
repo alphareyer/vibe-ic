@@ -1784,7 +1784,7 @@ def produce_live(step_id, entry: str, rec: Dict) -> LiveProduction:
         # live production at all; it should be recorded PRODUCED_BY_RUN.
         # Unlinking it would let a committed artefact be re-created and
         # counted as freshly produced.
-        if target.exists():
+        if target.exists() or target.is_symlink():
             return LiveProduction(False, (
                 f"{writes} is tracked at HEAD in the run root {label!r}; this "
                 f"cell claims a LIVE production and cannot prove one against a "
@@ -1839,6 +1839,20 @@ def produce_live(step_id, entry: str, rec: Dict) -> LiveProduction:
                 f"in those words). A non-empty absence record is not a "
                 f"produced artefact"
             ))
+        # A read-only gate clause does not name its JSON output: the normal
+        # inline runner owns that write. Use the same strict producer proof
+        # as newly declared outputs, never the generic nonempty-file test
+        # (a NOT_CHECKED/rc2 checker can also write a nonempty JSON).
+        if from_gate is None:
+            owners = _inline_signoff_owners(step_id, entry)
+            if owners:
+                if len(owners) != 1:
+                    return LiveProduction(False, "no unique declared inline producer")
+                owner = owners[0]
+                expected = [".", *owner[3], "--json", owner[2]]
+                if Path(owner[1]).stem != program or writes != owner[2] or argv != expected:
+                    return LiveProduction(False, "manifest disagrees with declared inline producer")
+                return _produce_inline_signoff(dst, entry, owner, label)
         proc = _pr.run(
             [sys.executable, str(prog_file), *argv],
             cwd=dst, capture_output=True, text=True)
@@ -2540,6 +2554,183 @@ def check_entry(step_id, entry: str, rec: Dict) -> EntryVerdict:
     return EntryVerdict(False, LIVE, f"unrecognised manifest status {status!r}")
 
 
+def _inline_signoff_owners(step_id, entry: str) -> List[tuple]:
+    import phase3_one_shot_runner as runner
+
+    return [row for row in runner._DECLARED_SIGNOFF_GATES
+            if row[2] == entry and Path(row[1]).stem in F.gate_programs(step_id)]
+
+
+def _produce_inline_signoff(project: Path, entry: str, owner: tuple,
+                            label: str) -> LiveProduction:
+    """One shared native invocation and measured-report proof, never closure."""
+    import phase3_one_shot_runner as runner
+
+    name, program, output, argv = owner
+    target = project / output
+    if target.exists() or target.is_symlink():
+        return LiveProduction(False, "output already captured; not fresh")
+    result = runner._run_declared_signoff_gate(project, name, program, output, argv)
+    if result.status not in {"PASS", "FAIL"}:
+        # The normal runner records a non-verdict's native rc in this clause.
+        # Preserve the existing TWO-lock capability disclosure classification;
+        # it remains not-produced, never a measured PASS or a design FAIL.
+        unmeasured = (result.status == "BLOCKED"
+                      and "(rc=2):" in result.detail
+                      and _fcc._stdout_signals_vacuous(
+                          result.detail.split("(rc=2):", 1)[1].lstrip()))
+        return LiveProduction(False, f"{result.status}; {result.detail}", unmeasured)
+    hits = _GLOB_FIRST(project, entry)
+    if output not in hits or target.is_symlink() or not target.is_file():
+        return LiveProduction(False, "producer did not write the declared regular file")
+    try:
+        report = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return LiveProduction(False, f"unreadable measured report: {exc}")
+    if not isinstance(report, dict) or report.get("verdict") != result.status:
+        return LiveProduction(False, "report has no matching measured PASS/FAIL verdict")
+    return LiveProduction(True,
+        f"FRESH_PRODUCER {program} via phase3 inline runner on tracked-only {label!r}: "
+        f"{target.stat().st_size} bytes, design verdict={result.status}; "
+        "historical capture remains NOT_MEASURED; this is a new producer/consumer execution")
+
+
+@pytest.mark.parametrize("status,body,expected", [
+    ("PASS", '{"verdict":"PASS"}', True),
+    ("FAIL", '{"verdict":"FAIL"}', True),
+    ("BLOCKED", '{"verdict":"NOT_CHECKED"}', False),
+    ("PASS", '{"verdict":"FAIL"}', False),
+    ("FAIL", '{"verdict":"PASS"}', False),
+    ("PASS", '{"verdict":"NOT_CHECKED"}', False),
+    ("PASS", '[]', False),
+    ("PASS", 'not-json', False),
+    ("PASS", '', False),
+    ("PASS", None, False),
+])
+def test_d3_inline_production_requires_a_matching_measured_verdict(
+        tmp_path, monkeypatch, status, body, expected):
+    import phase3_one_shot_runner as runner
+
+    entry = "reports/phase3/sta/architectural_residual.json"
+    owner, = _inline_signoff_owners("23", entry)
+
+    def emit(project, name, program, output, argv):
+        target = project / output
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if body is not None:
+            target.write_text(body)
+        return runner.StepResult(name, status, 0.0, "controlled native outcome", [])
+
+    monkeypatch.setattr(runner, "_run_declared_signoff_gate", emit)
+    result = _produce_inline_signoff(tmp_path, entry, owner, "probe")
+    assert result.produced is expected, result.detail
+    if expected:
+        assert f"design verdict={status}" in result.detail
+        assert "historical capture remains NOT_MEASURED" in result.detail
+
+
+@pytest.mark.parametrize("rc,disclosure,expected", [
+    (2, "VACUOUS_PASS: no KLayout runner available", True),
+    (2, "no post-route report available", False),
+    (3, "VACUOUS_PASS: no KLayout runner available", False),
+])
+def test_d3_inline_capability_gap_keeps_both_locks(
+        tmp_path, monkeypatch, rc, disclosure, expected):
+    import phase3_one_shot_runner as runner
+
+    entry = "reports/phase3/sta/architectural_residual.json"
+    owner, = _inline_signoff_owners("23", entry)
+    # Invoke the REAL inline runner; only the child result is controlled.
+    monkeypatch.setattr(runner._pr, "run", lambda *a, **kw: _FakeProc(rc, disclosure))
+    result = _produce_inline_signoff(tmp_path, entry, owner, "probe")
+    assert result.produced is False
+    assert result.unmeasured is expected
+
+
+def test_d3_inline_native_missing_inputs_are_not_production(tmp_path):
+    entry = "reports/phase3/sta/architectural_residual.json"
+    owner, = _inline_signoff_owners("23", entry)
+    result = _produce_inline_signoff(tmp_path, entry, owner, "empty-input-control")
+    assert not result.produced, result.detail
+    report = json.loads((tmp_path / entry).read_text())
+    assert report["verdict"] == "NOT_CHECKED"
+
+
+@pytest.mark.parametrize("kind", ["preexisting", "dangling", "emitted_symlink", "missing_program"])
+def test_d3_inline_production_rejects_nonfresh_or_nonregular_outputs(
+        tmp_path, monkeypatch, kind):
+    import phase3_one_shot_runner as runner
+
+    entry = "reports/phase3/sta/architectural_residual.json"
+    owner, = _inline_signoff_owners("23", entry)
+    target = tmp_path / entry
+    target.parent.mkdir(parents=True, exist_ok=True)
+    calls = []
+    if kind == "preexisting":
+        target.write_text('{"verdict":"PASS"}')
+    elif kind == "dangling":
+        target.symlink_to(tmp_path / "absent")
+    elif kind == "missing_program":
+        monkeypatch.setattr(runner, "PROGRAMS_DIR", tmp_path / "missing-programs")
+
+    if kind != "missing_program":
+        def emit(*args):
+            calls.append(args)
+            backing = tmp_path / "backing.json"
+            backing.write_text('{"verdict":"PASS"}')
+            target.symlink_to(backing)
+            return runner.StepResult(owner[0], "PASS", 0.0, "probe", [])
+        monkeypatch.setattr(runner, "_run_declared_signoff_gate", emit)
+    result = _produce_inline_signoff(tmp_path, entry, owner, "probe")
+    assert not result.produced, result.detail
+    if kind in {"preexisting", "dangling"}:
+        assert not calls
+
+
+@pytest.mark.parametrize("entry", [
+    "phase3/final/metrics.json",
+    "reports/phase3/signoff_metrics_aggregate.json",
+])
+def test_d3_metrics_live_producer_with_read_only_gate_remains_generic(entry, monkeypatch):
+    rec = step_record("37.4")["entries"][entry]
+    assert rec["producer"] == "signoff_metrics_aggregate"
+    assert rec["argv"] == ["."]
+    assert gate_command_writing("37.4", entry) is None
+    assert not _inline_signoff_owners("37.4", entry)
+    if rec["base_run"] not in run_roots():
+        pytest.skip("original published corpus required for native metrics producer")
+
+    def wrong_route(*args):
+        pytest.fail("generic metrics producer was sent to the inline signoff helper")
+
+    monkeypatch.setattr(sys.modules[__name__], "_produce_inline_signoff", wrong_route)
+    measured = produce_live("37.4", entry, rec)
+    assert measured.produced, measured.detail
+    assert "produced live" in measured.detail
+
+
+def test_d3_registered_inline_record_uses_strict_native_path(tmp_path, monkeypatch):
+    module = sys.modules[__name__]
+    entry = "reports/phase3/sta/architectural_residual.json"
+    rec = step_record("23")["entries"][entry]
+    assert rec["status"] == "PRODUCED_LIVE"
+    label = rec["base_run"]
+    monkeypatch.setattr(module, "run_roots", lambda: {
+        label: RunRoot(label, _IN_REPO_KIND, tmp_path)})
+
+    def copy_empty(src, dst):
+        dst.mkdir(parents=True)
+        (dst / "tracked.txt").write_text("no post-route reports")
+        return 1
+
+    monkeypatch.setattr(module, "_copy_tracked", copy_empty)
+    # Real rc2 checker writes a nonempty NOT_CHECKED JSON. The old generic
+    # nonempty-file arm would incorrectly say produced here.
+    result = produce_live("23", entry, rec)
+    assert not result.produced, result.detail
+    assert "NOT_CHECKED" in result.detail or "BLOCKED" in result.detail
+
+
 def measure_new_signoff_output(step_id, entry: str) -> EntryVerdict:
     """Measure a NEW declaration through its normal inline producer, not audit.
 
@@ -2549,10 +2740,7 @@ def measure_new_signoff_output(step_id, entry: str) -> EntryVerdict:
     missing input/NOT_CHECKED record is not production evidence, and a measured
     FAIL report proves production, never design sign-off.
     """
-    import phase3_one_shot_runner as runner
-
-    owners = [row for row in runner._DECLARED_SIGNOFF_GATES
-              if row[2] == entry and Path(row[1]).stem in F.gate_programs(step_id)]
+    owners = _inline_signoff_owners(step_id, entry)
     if len(owners) != 1:
         return EntryVerdict(False, LIVE, "never measured; no unique declared inline producer")
     name, program, output, argv = owners[0]
@@ -2565,29 +2753,10 @@ def measure_new_signoff_output(step_id, entry: str) -> EntryVerdict:
             if not copied or target.exists() or target.is_symlink():
                 attempts.append(f"{label}: no tracked inputs or output already captured; not fresh")
                 continue
-            result = runner._run_declared_signoff_gate(project, name, program, output, argv)
-            if result.status not in {"PASS", "FAIL"}:
-                attempts.append(f"{label}: {result.status}; {result.detail}")
-                continue
-            # Consume the actual declared path using the flow's own resolver.
-            # A process rc, stale symlink, empty file or absence JSON is not a
-            # substitute for a freshly written, measured report.
-            hits = _GLOB_FIRST(project, entry)
-            if output not in hits or target.is_symlink() or not target.is_file():
-                attempts.append(f"{label}: producer did not write the declared regular file")
-                continue
-            try:
-                report = json.loads(target.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                attempts.append(f"{label}: unreadable measured report: {exc}")
-                continue
-            if not isinstance(report, dict) or report.get("verdict") != result.status:
-                attempts.append(f"{label}: report has no matching measured PASS/FAIL verdict")
-                continue
-            return EntryVerdict(True, LIVE,
-                f"FRESH_PRODUCER {program} via phase3 inline runner on tracked-only {label!r}: "
-                f"{target.stat().st_size} bytes, design verdict={result.status}; "
-                "historical capture remains NOT_MEASURED; this is a new producer/consumer execution")
+            measured = _produce_inline_signoff(project, entry, owners[0], label)
+            if measured.produced:
+                return EntryVerdict(True, LIVE, measured.detail)
+            attempts.append(f"{label}: {measured.detail}")
     return EntryVerdict(False, LIVE, "never measured by a valid producer execution: "
                         + "; ".join(attempts or ["no admissible run roots"]))
 
