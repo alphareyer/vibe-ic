@@ -1,5 +1,6 @@
 """The DRC receipt producer must bind real bytes and use a fresh docker run."""
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,31 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import klayout_drc_measure as M  # noqa: E402
+
+_PROGRAMS = Path(__file__).resolve().parents[1]
+
+
+def test_loads_by_path_without_programs_on_sys_path():
+    """Hygiene loads each program by path in a fresh child interpreter."""
+    program = _PROGRAMS / "klayout_drc_measure.py"
+    code = """
+import importlib.util
+import sys
+from pathlib import Path
+p = Path(sys.argv[1]).resolve()
+sys.path[:] = [entry for entry in sys.path
+               if Path(entry or '.').resolve() != p.parent]
+spec = importlib.util.spec_from_file_location('isolated_klayout_drc_measure', p)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(program)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _args(project: Path):

@@ -1127,6 +1127,13 @@ run_tolerating_uncheckable "phase1 parity source-tier record" "$ROOT" python3 "$
 run "programs load when loaded by path" "$ROOT" \
   python3 "$PG/program_path_load_check.py" \
   --programs "$ROOT/vibe-ic-marketplace/plugins/vibe-ic/programs" --jobs 8
+# An interactive EDA console can turn a malformed command into an unbounded
+# disk writer.  Execute the checker over the SUBJECT programs tree, not merely
+# through its own fixture: the following two wiring audits must be able to see
+# this call as a real consumer.
+run "console tool termination" "$ROOT" \
+  python3 "$PG/console_tool_termination_check.py" \
+  "$ROOT/vibe-ic-marketplace/plugins/vibe-ic/programs"
 # vibe-ic#381 — a checker only its own unit test ever runs has zero coverage of
 # real inputs: the fixture proves the logic, never the artefacts.
 #

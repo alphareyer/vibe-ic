@@ -15,6 +15,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+# This module is also loaded by path by repository hygiene.  Unlike execution
+# as ``__main__``, that loader does not add ``programs/`` to ``sys.path``.
+_PROGRAMS_DIR = str(Path(__file__).resolve().parent)
+if _PROGRAMS_DIR not in sys.path:
+    sys.path.insert(0, _PROGRAMS_DIR)
+
 from _atomic_artefact import write_text
 
 
