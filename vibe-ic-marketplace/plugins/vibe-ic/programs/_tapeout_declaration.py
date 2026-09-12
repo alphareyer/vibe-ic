@@ -153,7 +153,7 @@ SECTION_SEAL_RING = "2C_seal_ring"
 # Nineteen of the twenty questions ask the DESIGN about itself. One does
 # not. `database_unit_um` asks what the TECHNOLOGY FILE declares, and a design
 # has no standing to answer that: the number is a property of the PDK the run
-# targets, published by that PDK's own tech LEF.
+# targets, published by that PDK's own cell GDS stream.
 #
 # MEASURED, and this is why it is a defect and not a nicety. Two designs in the
 # corpus each name TWO open PDK families in L1, and the pinned image's tech
@@ -164,8 +164,9 @@ SECTION_SEAL_RING = "2C_seal_ring"
 # NOT_DETERMINED and cited both measurements — which is the right answer to a
 # question that should never have been put to them.
 #
-# So the value is TRANSCRIBED, per run, from the tech LEF of the run's own
-# `--pdk`, and carried here with the path:line it was read at. A design answer
+# The LEF measurements above describe a DIFFERENT database; they are not the
+# authority for GDSII UNITS. The stream value is transcribed per run from the
+# cell GDS of the run's own `--pdk`, with its path and UNITS record. A design answer
 # that DISAGREES with the run's technology is refused BY NAME, with both values
 # in the message; one that AGREES is accepted with a note, because a design
 # that happens to be right is still not the authority.
@@ -293,12 +294,11 @@ _2A: Tuple[Question, ...] = (
              "everywhere at once, and nothing downstream says so. "
              "NOT ASKED OF THE DESIGN (#2070): it is a fact of the "
              "TECHNOLOGY the run targets, not a claim the design is entitled "
-             "to make. Step 0.5ic transcribes `DATABASE MICRONS` from the "
-             "tech LEF of the run's own `--pdk` inside the pinned image and "
-             "records the path:line it read. Measured: the two families one "
-             "design named declare DIFFERENT units (2000 vs 1000 dbu/um), so "
-             "a single scalar in a design's answers file is wrong for one of "
-             "the two runs that file drives. A design scalar that DISAGREES "
+             "to make. Step 0.5ic transcribes GDSII UNITS from the PDK's own "
+             "cell stream inside the pinned image and records its source. "
+             "LEF DATABASE MICRONS is retained separately: the LEF/DEF and "
+             "stream databases need not share a resolution. "
+             "A design scalar that DISAGREES "
              "with the run's technology is refused by name "
              f"({RULE_TECHNOLOGY_FACT_FROM_DESIGN}); one that agrees is "
              "accepted with a note."),

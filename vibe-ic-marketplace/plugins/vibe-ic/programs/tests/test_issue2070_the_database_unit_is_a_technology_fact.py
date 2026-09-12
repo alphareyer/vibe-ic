@@ -50,7 +50,8 @@ import _tapeout_declaration as TD                             # noqa: E402
 import submission_template_fetch as STF                       # noqa: E402
 import phase1_one_shot_runner as P1                           # noqa: E402
 
-#: Shaped exactly like `submission_template_fetch.technology_facts` output.
+#: Synthetic authority records for precedence tests, not measurements of the
+#: named PDKs. Actual stream-vs-LEF transcription is exercised below.
 GF180 = {"database_unit_um": {
     "value": 0.0005, "pdk": "gf180mcuD",
     "source": "/foss/pdks/<pdk>/libs.ref/<scl>/techlef/<scl>__nom.tlef:40",
@@ -399,6 +400,82 @@ def _run(proj: Path, ans_rel: str = "input/step_0_5ic_answers.json") -> int:
 
 def _declared(proj: Path):
     return json.loads((proj / TD.DECLARATION_REL).read_text())
+
+
+@pytest.mark.parametrize("stream_um,compressed", [
+    (0.001, False), (0.002, False), (None, False), (0.001, True)])
+def test_fetch_declares_cell_stream_units_not_lef_units(tmp_path, monkeypatch,
+                                                       stream_um, compressed):
+    """Run the producer's actual GDS probe and both declaration consumers.
+
+    Only the container transport is substituted. The binary GDS reader and
+    producer-generated probe run unchanged; absent GDS must not reuse LEF DBU.
+    """
+    import os
+    from types import SimpleNamespace
+    import _eda_image
+    from _hostpaths import require_repo
+    from test_general_precheck import write_gds
+    import general_precheck as GP
+
+    registry = json.loads(require_repo(
+        "vibe-ic-marketplace", "plugins", "vibe-ic", "programs",
+        "pdk_registry.json").read_text())
+    row = next(r for r in registry["pdks"]
+               if r.get("cell_gds_glob") and r.get("tech_lef_glob"))
+    row = dict(row, container_path=str(tmp_path / "technology"),
+               tech_lef_glob="tech.lef", cell_gds_glob="cells.gds")
+    technology = Path(row["container_path"])
+    technology.mkdir()
+    (technology / "tech.lef").write_text("DATABASE MICRONS 2000 ;\n")
+    if stream_um is not None:
+        write_gds(technology / "cells.gds", {"unit_cell": {}},
+                  dbu_meters=stream_um * 1e-6)
+        if compressed:
+            import gzip
+            (technology / "cells.gds.gz").write_bytes(
+                gzip.compress((technology / "cells.gds").read_bytes()))
+            row["cell_gds_glob"] = "cells.gds.gz"
+    monkeypatch.setattr(STF, "_registry_entry", lambda _: row)
+    monkeypatch.setattr(_eda_image, "judged_image", lambda **_: SimpleNamespace(
+        ref="registry.invalid/eda@sha256:test", digest="sha256:test", version="test"))
+
+    def transport(argv, timeout=600):
+        assert argv[0:2] == ["docker", "run"]
+        pos = argv.index("--skip")
+        command = argv[pos + 1:]
+        if command[0] == "python3":
+            command[0] = sys.executable
+        env = dict(os.environ, PYTHONPATH=str(_PROGRAMS),
+                   PYTHONDONTWRITEBYTECODE="1")
+        result = subprocess.run(command, capture_output=True, text=True,
+                                env=env, timeout=timeout)
+        return result.returncode, result.stdout, result.stderr
+
+    monkeypatch.setattr(STF, "_run", transport)
+    facts = STF.technology_facts(row["name"], "")
+    fact = facts["database_unit_um"]
+    if stream_um is None:
+        assert fact["value"] is None, "an unread GDS must not publish the LEF's unit"
+        assert fact["unavailable"]
+    else:
+        assert fact["value"] == pytest.approx(stream_um), (
+            "the stream declaration is still publishing LEF/DEF resolution")
+        assert fact["lef_database_unit_um"] == 0.0005
+        assert fact["source"].endswith(row["cell_gds_glob"] + ":UNITS")
+    project = _project(tmp_path, {"deliverable": "HARDMACRO"}, facts)
+    assert _run(project) == 0
+    declared = TD.answer(_declared(project), "database_unit_um")
+    if stream_um is None:
+        assert declared == TD.NOT_DETERMINED
+    else:
+        assert declared == pytest.approx(stream_um)
+        evidence = GP.StepEvidence("General.DatabaseUnit", "DBU", 2,
+                                   GP.DECLARED, GP.NOT_DETERMINED, "mismatch")
+        GP._step_database_unit(evidence, {"dbu_um": stream_um}, declared)
+        assert evidence.verdict == GP.PASS
+        GP._step_database_unit(evidence, {"dbu_um": 0.0005}, declared)
+        assert evidence.verdict == GP.FAIL, "a genuinely wrong stream must still fail"
 
 
 def test_the_transcription_is_published_with_its_provenance(tmp_path):

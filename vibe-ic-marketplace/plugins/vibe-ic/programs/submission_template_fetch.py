@@ -71,6 +71,7 @@ import argparse
 import ast
 import hashlib
 import json
+import math
 import re
 import subprocess
 import sys
@@ -495,11 +496,10 @@ def family_named_by_design(pdk: str, families: List[str]) -> Optional[str]:
 # See `_tapeout_declaration.ANSWERED_BY_TECHNOLOGY` for why. Here is only HOW:
 # the registry already names, per PDK, the container root and the glob of the
 # tech LEF the rest of the flow builds against, so this resolves that same file
-# inside the same digest-pinned image and transcribes the `DATABASE MICRONS`
-# record it declares. Nothing is computed and nothing is converted from a
-# second source: `DATABASE MICRONS N` means N database units per micron, so the
-# unit in microns is 1/N, and the raw statement plus its path:line travel with
-# the number so a reader can re-derive it without this program.
+# inside the same digest-pinned image. LEF DATABASE MICRONS describes the
+# LEF/DEF database; GDSII UNITS in the PDK's cell stream supplies the stream
+# database unit that General.DatabaseUnit actually compares. Both readings
+# retain their own provenance; they need not have the same resolution.
 _DBU_RE = re.compile(r"DATABASE\s+MICRONS\s+([0-9.]+)")
 
 
@@ -528,7 +528,9 @@ def _registry_entry(pdk: str) -> Optional[Dict[str, Any]]:
 
 def technology_facts(pdk: str, image: str,
                      allow_pull: bool = False) -> Dict[str, Any]:
-    """`{"database_unit_um": {...}}` transcribed from this PDK's tech LEF.
+    """`{"database_unit_um": {...}}` from the PDK's cell GDS UNITS.
+
+    The tech LEF reading is retained separately, never used as a stream default.
 
     Every branch that cannot read the file records WHY and answers nothing.
     "We could not read it" is never allowed to arrive as a number, and a PDK
@@ -630,10 +632,52 @@ def technology_facts(pdk: str, image: str,
                                f"{per_um!r} database units per micron, which "
                                f"is not a unit anything can be measured in")
         return {"database_unit_um": fact}
-    fact["value"] = 1.0 / per_um
+    # LEF/DEF coordinates and GDS stream coordinates are distinct databases.
+    # Keep the LEF reading, but never publish it as the stream's answer.
+    fact["lef_database_unit_um"] = 1.0 / per_um
     fact["database_microns"] = per_um
-    fact["statement"] = statement
-    fact["source"] = f"{path}:{line_no}"
+    fact["tech_lef_statement"] = statement
+    fact["tech_lef_source"] = f"{path}:{line_no}"
+    gds_glob = str(row.get("cell_gds_glob") or "")
+    if not gds_glob:
+        fact["unavailable"] = "the registry declares no cell_gds_glob; the stream database unit was not read"
+        return {"database_unit_um": fact}
+    # Read the TECHNOLOGY's stream, never the design being checked. Reuse the
+    # same GDS parser as general_precheck; run this checkout's parser in the
+    # same digest-pinned image whose LEF was read above.
+    # Sorted-first is the existing _registry_glob_one / PdkConfig.cell_gds
+    # selection, not a claim that every stream shipped by a PDK has this DBU.
+    probe = (
+        "import glob,json,sys\n"
+        "from pathlib import Path\n"
+        "from _gds_geometry import read_layout\n"
+        "paths = sorted(glob.glob(sys.argv[1]))\n"
+        "if not paths: raise RuntimeError('no PDK cell GDS matches the registry')\n"
+        "path = paths[0]\n"
+        "layout = read_layout(Path(path))\n"
+        "print(json.dumps({'cell_gds': path, 'value': layout.dbu_um}))\n")
+    rc, out, err = _run([
+        "docker", "run", "--rm", *_dmem.docker_memory_flags(),
+        "-v", f"{_HERE}:/vibeic_programs:ro",
+        "-e", "PYTHONPATH=/vibeic_programs", "-e", "PYTHONDONTWRITEBYTECODE=1",
+        digest, "--skip", "python3", "-c", probe, f"{root}/{gds_glob}"],
+        timeout=600)
+    try:
+        stream = json.loads(out) if rc == 0 else {}
+        value = stream.get("value")
+        if (not isinstance(value, (int, float)) or isinstance(value, bool)
+                or not math.isfinite(value) or value <= 0
+                or not stream.get("cell_gds")):
+            raise ValueError("no positive finite GDS UNITS reading")
+    except (ValueError, TypeError, AttributeError) as exc:
+        fact["unavailable"] = (
+            f"the PDK cell GDS UNITS could not be read (rc={rc}): {exc}; "
+            f"{(err or out or '').strip()[-400:]}. The LEF reading is not a stream unit")
+        return {"database_unit_um": fact}
+    fact["value"] = value
+    fact["cell_gds"] = stream["cell_gds"]
+    fact["statement"] = f"GDSII UNITS database unit {value:g} um"
+    fact["source"] = f"{stream['cell_gds']}:UNITS"
     return {"database_unit_um": fact}
 
 
