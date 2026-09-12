@@ -29,6 +29,7 @@ reach; the third test below is what proves it, and it is the one a careless
 widening breaks.
 """
 import json
+import hashlib
 import sys
 from pathlib import Path
 
@@ -65,6 +66,37 @@ def _project(tmp_path: Path, name: str, body: str) -> Path:
 
 def _drc(project: Path):
     return A._check_drc(project)
+
+
+def _sha(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _measured_klayout_receipt(project: Path) -> tuple[Path, Path, Path]:
+    """Create the minimum *bound* invocation shape, not a textual count.
+
+    The unit fixture models the record emitted by the KLayout runner.  The
+    consumer must require all three links (GDS input, RDB, transcript) to be
+    current; each negative test below breaks one link.
+    """
+    report = project / "reports/phase3/drc_signoff.rpt"
+    transcript = report.with_suffix(".log")
+    gds = project / "phase3/stage4/gds/chip.gds"
+    gds.parent.mkdir(parents=True, exist_ok=True)
+    gds.write_bytes(b"GDS fixture bytes, not an empty layout")
+    transcript.write_text("KLayout completed deck execution\n", encoding="utf-8")
+    record = {
+        "record": "invocation", "measured": True, "tool": "klayout",
+        "exit_code": 0,
+        "inputs": {gds.relative_to(project).as_posix(): _sha(gds)},
+        "outputs": {
+            report.relative_to(project).as_posix(): _sha(report),
+            transcript.relative_to(project).as_posix(): _sha(transcript),
+        },
+    }
+    (project / "provenance.jsonl").write_text(json.dumps(record) + "\n",
+                                               encoding="utf-8")
+    return report, transcript, gds
 
 
 def test_a_zero_nobody_corroborated_is_refused(tmp_path):
@@ -116,3 +148,33 @@ def test_a_report_that_STATES_a_count_is_untouched(tmp_path):
     r = _drc(proj)
     assert r.summary["has_count"] is True, r.summary
     assert not any(f.rule == "DRC_ZERO_NOT_MEASURED" for f in r.findings)
+
+
+def test_digest_bound_measured_klayout_receipt_corroborates_an_rdb_zero(tmp_path):
+    """A real invocation binding is independent evidence, not a made-up count."""
+    proj = _project(tmp_path, "drc_signoff.rpt", _RDB_NO_ITEMS)
+    _measured_klayout_receipt(proj)
+    r = _drc(proj)
+    assert r.summary["has_count"] is False
+    assert r.summary["receipt_corroborated_files"] == 1
+    assert not any(f.rule == "DRC_ZERO_NOT_MEASURED" for f in r.findings)
+
+
+@pytest.mark.parametrize("break_link", ["report", "transcript", "gds", "exit"])
+def test_a_stale_or_nonmeasured_receipt_cannot_corroborate(tmp_path, break_link):
+    proj = _project(tmp_path, "drc_signoff.rpt", _RDB_NO_ITEMS)
+    report, transcript, gds = _measured_klayout_receipt(proj)
+    if break_link == "report":
+        report.write_text(_RDB_NO_ITEMS + "\n", encoding="utf-8")
+    elif break_link == "transcript":
+        transcript.unlink()
+    elif break_link == "gds":
+        gds.write_bytes(b"different GDS bytes")
+    else:
+        ledger = project_ledger = proj / "provenance.jsonl"
+        row = json.loads(ledger.read_text(encoding="utf-8"))
+        row["exit_code"] = 1
+        project_ledger.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    r = _drc(proj)
+    assert r.summary["receipt_corroborated_files"] == 0
+    assert any(f.rule == "DRC_ZERO_NOT_MEASURED" for f in r.findings)

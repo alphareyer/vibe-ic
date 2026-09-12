@@ -1538,6 +1538,87 @@ def _drc_tool_final_violation_count(text: str) -> Optional[int]:
     return _sdf.router_iter_last_count(text)
 
 
+def _measured_klayout_receipt_files(project_dir: Path,
+                                    files: Sequence[Path]) -> set[Path]:
+    """Return RDB reports bound to one successful measured KLayout invocation.
+
+    A KLayout RDB can express a zero by carrying an empty ``<items>`` element,
+    but it need not print a textual final-count line.  That shape is not a
+    certificate by itself.  The only alternate corroboration accepted here is
+    the runner's append-only invocation record: it must bind an existing GDS
+    input and both the exact report and its command transcript by digest.
+
+    This is intentionally narrower than trusting a prose receipt.  A stale
+    report, a missing transcript, a changed GDS, a non-zero tool exit, or a
+    back-filled (non-measured) declaration returns no corroboration.
+    """
+    ledger = project_dir / "provenance.jsonl"
+    if not ledger.is_file():
+        return set()
+
+    def digest(path: Path) -> Optional[str]:
+        if not path.is_file():
+            return None
+        h = hashlib.sha256()
+        try:
+            with path.open("rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+        except OSError:
+            return None
+        return "sha256:" + h.hexdigest()
+
+    records = []
+    for line in ledger.read_text(errors="replace").splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            records.append(row)
+
+    bound: set[Path] = set()
+    for report in files:
+        try:
+            rel = report.resolve().relative_to(project_dir.resolve()).as_posix()
+        except (OSError, ValueError):
+            continue
+        report_sha = digest(report)
+        transcript = report.with_suffix(".log")
+        log_sha = digest(transcript)
+        if not report_sha or not log_sha:
+            continue
+        for row in reversed(records):
+            outputs, inputs = row.get("outputs"), row.get("inputs")
+            if (row.get("record") != "invocation" or
+                    row.get("measured") is not True or
+                    row.get("tool") != "klayout" or
+                    row.get("exit_code") != 0 or
+                    not isinstance(outputs, dict) or not isinstance(inputs, dict)):
+                continue
+            if outputs.get(rel) != report_sha:
+                continue
+            log_rel = str(Path(rel).with_suffix(".log"))
+            if outputs.get(log_rel) != log_sha:
+                continue
+            has_bound_gds = False
+            for input_rel, input_sha in inputs.items():
+                if not isinstance(input_rel, str) or not input_rel.lower().endswith(".gds"):
+                    continue
+                candidate = project_dir / input_rel
+                try:
+                    candidate.resolve().relative_to(project_dir.resolve())
+                except (OSError, ValueError):
+                    continue
+                if input_sha == digest(candidate):
+                    has_bound_gds = True
+                    break
+            if has_bound_gds:
+                bound.add(report)
+                break
+    return bound
+
+
 def _check_drc(project_dir: Path) -> AuditResult:
     result = AuditResult(program="eda_report_audit:drc", passed=False)
     # `.lyrdb` IS THE KLAYOUT REPORT DATABASE, and this audit already knows how
@@ -1623,7 +1704,9 @@ def _check_drc(project_dir: Path) -> AuditResult:
     tool_total = 0
     summary_total = 0
     tool_corroborated = 0
+    receipt_corroborated = 0
     contradictions: List[dict] = []
+    measured_receipts = _measured_klayout_receipt_files(project_dir, files)
 
     for fp in files:
         try:
@@ -1686,6 +1769,8 @@ def _check_drc(project_dir: Path) -> AuditResult:
             unreadable.append(str(fp))
         if n is not None:
             determined_files += 1
+            if fp in measured_receipts:
+                receipt_corroborated += 1
             _user_n, _std_n = n
             stdcell_excluded += _std_n
             summary_total += _user_n
@@ -1872,14 +1957,16 @@ def _check_drc(project_dir: Path) -> AuditResult:
     # fails, and this clause is reached only when the total is zero.
     _uncorroborated_zero = (real_total == 0 and not has_count
                             and determined_files > 0
-                            and tool_corroborated == 0 and not empty)
+                            and tool_corroborated == 0
+                            and receipt_corroborated == 0 and not empty)
     if _uncorroborated_zero:
         result.findings.append(Finding(
             rule="DRC_ZERO_NOT_MEASURED", severity="ERROR",
             message=(
                 f"{determined_files} discovered DRC report(s) yielded a total "
                 f"of 0, but NO report stated a violation count and NONE was "
-                f"corroborated by the tool's own total, and none of them is "
+                f"corroborated by the tool's own total or by a digest-bound "
+                f"measured KLayout invocation, and none of them is "
                 f"empty. This is NOT_MEASURED, not clean: a sign-off gate may "
                 f"not certify a design on a zero it did not establish. "
                 f"An EMPTY report is a legitimate zero and is not this."),
@@ -1903,6 +1990,7 @@ def _check_drc(project_dir: Path) -> AuditResult:
                       # transcript is not corroborated and is not pretended to
                       # be — see `tool_uncorroborated_files`.
                       "tool_corroborated_files": tool_corroborated,
+                      "receipt_corroborated_files": receipt_corroborated,
                       "tool_uncorroborated_files": (determined_files
                                                     - tool_corroborated),
                       "tool_contradictions": contradictions,
