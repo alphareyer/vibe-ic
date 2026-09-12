@@ -186,6 +186,38 @@ RE_DRT_0702 = re.compile(
     r"(\d+)\s+violation")
 
 
+def selected_route_log(text: str) -> str:
+    """Exclude only complete, byte-verified rolled-back trial intervals.
+
+    The raw log remains the audit history. No count is synthesized: selection
+    exposes the original native messages for the route actually restored.
+    An orphan/mismatched/incomplete marker cannot suppress router evidence.
+    """
+    lines = text.splitlines(keepends=True)
+    out: List[str] = []
+    pending: List[str] = []
+    trial = None
+    for line in lines:
+        begin = re.fullmatch(r"NAMED_VIOL_TRIAL_BEGIN: pass=(\d+)\s*", line)
+        end = re.fullmatch(
+            r"NAMED_VIOL_TRIAL_(ROLLBACK_VERIFIED|ACCEPTED): pass=(\d+)\s*", line)
+        if begin:
+            out.extend(pending)
+            pending = [line]
+            trial = begin.group(1)
+        elif trial is not None:
+            pending.append(line)
+            if end:
+                if end.group(1) != "ROLLBACK_VERIFIED" or end.group(2) != trial:
+                    out.extend(pending)
+                pending = []
+                trial = None
+        else:
+            out.append(line)
+    out.extend(pending)
+    return "".join(out)
+
+
 def router_loop_iter_counts(text: str) -> List[int]:
     """Every per-iteration router DRC count the ROUTING LOOP itself printed, in
     log order ([] when none) — WITHOUT the post-route verification's count.
@@ -205,6 +237,7 @@ def router_loop_iter_counts(text: str) -> List[int]:
     chip-AGNOSTIC: OpenROAD/TritonRoute log grammar only."""
     if not text:
         return []
+    text = selected_route_log(text)
     raw = RE_DRT_0199.findall(text) or RE_DRT_COMPLETING.findall(text)
     out: List[int] = []
     for c in raw:
@@ -283,6 +316,7 @@ def router_post_route_final_count(text: str) -> Optional[int]:
     """
     if not text:
         return None
+    text = selected_route_log(text)
     matches = [*RE_DRT_0701.finditer(text), *RE_DRT_0702.finditer(text)]
     if not matches:
         return None
@@ -327,6 +361,7 @@ def _last_0701_not_superseded(text: str, rx: "re.Pattern[str]"):
     """
     if not text:
         return None
+    text = selected_route_log(text)
     last = None
     for m in rx.finditer(text):
         last = m

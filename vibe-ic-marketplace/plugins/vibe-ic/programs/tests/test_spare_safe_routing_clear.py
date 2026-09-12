@@ -242,6 +242,61 @@ proc BLK2 {m args} {
   if {$m eq "findNet"} { return [lindex $args 0] }
 }
 proc ord::get_db_block {} { return BLK2 }
+# These named-site tests execute the whole transaction before inspecting the
+# spare-safe clear. Model the same native wire ownership/copy operations as the
+# real tool, rather than stopping at an unknown write_def or wire method.
+set ::wire_sequence 0
+array set ::wire_of {}
+array set ::wire_owner {}
+array set ::wire_payload {}
+array set ::wire_id {}
+proc _new_wire_handle {handle net} {
+  set ::wire_owner($handle) $net
+  set ::wire_payload($handle) "route:$net"
+  set ::wire_id($handle) [incr ::wire_sequence]
+  proc ::$handle {method args} [format {
+    return [_wire_method {%s} $method {*}$args]
+  } $handle]
+  return $handle
+}
+proc _wire_method {handle method args} {
+  set net $::wire_owner($handle)
+  switch -- $method {
+    getId { return $::wire_id($handle) }
+    detach { set ::wire_of($net) NULL }
+    append { set ::wire_payload($handle) $::wire_payload([lindex $args 0]) }
+    attach { set ::wire_of([lindex $args 0]) $handle }
+    default { error "unknown wire method $method" }
+  }
+}
+foreach n {n_sig n_spare n_pwr n_dnt n_unrouted} {
+  set ::wire_of($n) NULL
+  if {$n ne "n_unrouted"} { set ::wire_of($n) [_new_wire_handle w_$n $n] }
+  rename $n ${n}_original
+  proc $n {method args} [format {
+    set n %s
+    if {$method eq "getWire"} { return $::wire_of($n) }
+    return [${n}_original $method {*}$args]
+  } $n]
+}
+proc odb::dbWire_create {net} {
+  set handle [_new_wire_handle trial_w_${net}_$::wire_sequence $net]
+  set ::wire_of($net) $handle
+  return $handle
+}
+proc odb::dbWire_destroy {handle} {
+  lappend ::destroyed $handle
+  set net $::wire_owner($handle)
+  if {$::wire_of($net) eq $handle} { set ::wire_of($net) NULL }
+}
+proc write_def {path} {
+  set f [open $path w]
+  foreach net {n_sig n_spare n_pwr n_dnt n_unrouted} {
+    set wire $::wire_of($net)
+    puts $f [list $net [expr {$wire eq "NULL" ? "UNROUTED" : $::wire_payload($wire)}]]
+  }
+  close $f
+}
 """
 
 

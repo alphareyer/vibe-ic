@@ -78,6 +78,26 @@ _STUBS = textwrap.dedent(r"""
     set ::DR_CALLS 0
     set ::DESTROYED {}
     set ::HN 0
+    array set ::WIRES {}
+    array set ::PAYLOAD {}
+    array set ::OWNER {}
+    proc _wire {name} {
+        set h "wire:${name}:[incr ::HN]"
+        set ::PAYLOAD($h) "original:$name"
+        set ::OWNER($h) $name
+        proc ::$h {sub args} [format {return [_wire_dispatch {%s} $sub $args]} $h]
+        return $h
+    }
+    proc _wire_dispatch {h sub args} {
+        set name $::OWNER($h)
+        switch -- $sub {
+            getId { return [lindex [split $h :] end] }
+            detach { set ::WIRES($name) NULL }
+            append { set ::PAYLOAD($h) $::PAYLOAD([lindex $args 0]) }
+            attach { set name [[lindex $args 0] getName]; set ::WIRES($name) $h }
+            default { error "unknown wire method $sub" }
+        }
+    }
     proc _mkhandle {kind name} {
         set h "h[incr ::HN]"
         proc ::$h {sub args} [format {
@@ -88,17 +108,19 @@ _STUBS = textwrap.dedent(r"""
     proc _handle_dispatch {kind name sub args} {
         switch -- $kind {
             block { switch -- $sub {
-                getNets { set ns {}; foreach n $::ALLNETS {lappend ns [_mkhandle net $n]}; return $ns }
+                getNets { set ns {}; foreach n $::ALLNETS { lappend ns [_mkhandle net $n] }; return $ns }
                 findNet { set n [lindex [lindex $args 0] 0]
                           if {[lsearch -exact $::MISSING $n] >= 0} { return "NULL" }
                           return [_mkhandle net $n] } } }
             net { switch -- $sub {
+                getName { return $name }
                 getSigType { if {[lsearch -exact $::PGNETS $name] >= 0} { return POWER }
                              return SIGNAL }
                 getBTerms  { return {} }
                 getITerms  { return [list [_mkhandle iterm $name]] }
                 getWire    { if {[lsearch -exact $::NOWIRE $name] >= 0} { return "NULL" }
-                             return "wire:$name" } } }
+                             if {![info exists ::WIRES($name)]} {set ::WIRES($name) [_wire $name]}
+                             return $::WIRES($name) } } }
             iterm { switch -- $sub { getInst { return [_mkhandle inst $name] } } }
             inst  { switch -- $sub { isDoNotTouch {
                         return [expr {[lsearch -exact $::DNT $name] >= 0}] } } }
@@ -106,16 +128,42 @@ _STUBS = textwrap.dedent(r"""
         error "stub: unhandled $kind.$sub"
     }
     namespace eval ord { proc get_db_block {} { return [_mkhandle block ""] } }
-    namespace eval odb { proc dbWire_destroy {w} { lappend ::DESTROYED $w } }
+    namespace eval odb {
+        proc dbWire_create {net} {
+            set n [$net getName]; set w [_wire $n]; set ::WIRES($n) $w; return $w
+        }
+        proc dbWire_destroy {w} {
+            lappend ::DESTROYED $w
+            set n $::OWNER($w)
+            if {$::WIRES($n) eq $w} { set ::WIRES($n) NULL }
+        }
+    }
+    proc write_def {path} {
+        set f [open $path w]
+        puts $f "placement=$::PLACEMENT"
+        foreach name $::ALLNETS {
+            set w [[_mkhandle net $name] getWire]
+            puts $f [list $name [expr {$w eq "NULL" ? "UNROUTED" : $::PAYLOAD($w)}]]
+        }
+        close $f
+    }
     proc detailed_route args {
         incr ::DR_CALLS
+        if {$::DAMAGE_NONWIRE} { set ::PLACEMENT changed }
         set nxt [lindex $::AFTER_REPORTS [expr {$::DR_CALLS - 1}]]
-        if {$nxt ne "KEEP"} { set f [open $::RPT w]; puts -nonewline $f $nxt; close $f }
+        if {$nxt eq "MISSING"} { return }
+        if {$nxt eq "KEEP"} { set nxt $::ORIGINAL_REPORT }
+        foreach n $::ALLNETS {
+            set w [odb::dbWire_create [_mkhandle net $n]]
+            set ::PAYLOAD($w) "rerouted:$n"
+        }
+        if {$nxt eq "ERROR"} { error NATIVE_ROUTE_CONTROL_ERROR }
+        set f [open $::RPT w]; puts -nonewline $f $nxt; close $f
     }
 """)
 
 
-def _run(tmp_path, report, *, after, dnt=(), pg=(), missing=()):
+def _run(tmp_path, report, *, after, dnt=(), pg=(), missing=(), damage_nonwire=False):
     rpt = tmp_path / "routed_router.drc.rpt"
     if report is not None:
         rpt.write_text(report)
@@ -123,6 +171,8 @@ def _run(tmp_path, report, *, after, dnt=(), pg=(), missing=()):
     script = tmp_path / "drive.tcl"
     script.write_text(
         f'set ::ALLNETS {{{" ".join(_NETS)}}}\n'
+        f'set ::PLACEMENT original\nset ::DAMAGE_NONWIRE {int(damage_nonwire)}\n'
+        f'set ::ORIGINAL_REPORT {{{report or ""}}}\n'
         f'set ::RPT "{rpt}"\n'
         f'set ::MISSING {{{" ".join(missing)}}}\n'
         f'set ::PGNETS {{{" ".join(pg)}}}\n'
@@ -158,6 +208,71 @@ def test_a_pass_that_does_not_improve_stops_the_repair(tmp_path):
     assert calls == 1
     assert "NAMED_VIOL_REROUTE_PASS1_AFTER: 3 (was 3)" in out
     assert "NAMED_VIOL_REROUTE_NO_IMPROVEMENT: 3 -> 3" in out
+
+
+def test_worse_route_restores_original_bytes_and_report(tmp_path):
+    worse = _REPORT + _REPORT
+    out, calls = _run(tmp_path, _REPORT, after=[worse])
+    assert calls == 1
+    assert "NAMED_VIOL_TRIAL_ROLLBACK_VERIFIED: pass=1" in out
+    checkpoint, = tmp_path.glob("*.trial.*")
+    assert (checkpoint / "before.def").read_bytes() == (checkpoint / "restored.def").read_bytes()
+    assert (checkpoint / "before.def").read_bytes() != (checkpoint / "rejected.def").read_bytes()
+    assert (tmp_path / "routed_router.drc.rpt").read_text() == _REPORT
+    assert (checkpoint / "rejected.drc.rpt").read_text() == worse
+
+
+@pytest.mark.parametrize("report", ["MISSING", "unreadable producer output", "ERROR"])
+def test_missing_or_unreadable_fresh_report_cannot_be_clean(tmp_path, report):
+    out, calls = _run(tmp_path, _REPORT, after=[report])
+    assert calls == 1
+    assert "NAMED_VIOL_TRIAL_ROLLBACK_VERIFIED: pass=1" in out
+    assert "NAMED_VIOL_TRIAL_ACCEPTED" not in out
+    assert (tmp_path / "routed_router.drc.rpt").read_text() == _REPORT
+
+
+def test_nonwire_damage_refuses_partial_restore(tmp_path):
+    with pytest.raises(AssertionError, match="WIRE_RESTORE_DEF_MISMATCH"):
+        _run(tmp_path, _REPORT, after=[_REPORT + _REPORT], damage_nonwire=True)
+    # The report is still the rejected trial's; no restored evidence is falsely
+    # paired with a database whose non-wire state failed the equality guard.
+    assert (tmp_path / "routed_router.drc.rpt").read_text() == _REPORT + _REPORT
+
+
+@pytest.mark.parametrize("after", ["", _REPORT])
+def test_nonworse_route_is_accepted_without_rollback(tmp_path, after):
+    out, calls = _run(tmp_path, _REPORT, after=[after])
+    assert calls == 1
+    assert "NAMED_VIOL_TRIAL_ACCEPTED: pass=1" in out
+    assert "NAMED_VIOL_TRIAL_ROLLBACK_VERIFIED" not in out
+    checkpoint, = tmp_path.glob("*.trial.*")
+    assert not (checkpoint / "restored.def").exists()
+    assert (tmp_path / "routed_router.drc.rpt").read_text() == after
+
+
+@pytest.mark.parametrize("end, expected", [
+    ("NAMED_VIOL_TRIAL_ROLLBACK_VERIFIED: pass=1", 7),
+    ("NAMED_VIOL_TRIAL_ACCEPTED: pass=1", 14),
+    ("NAMED_VIOL_TRIAL_ROLLBACK_VERIFIED: pass=2", 14),
+    ("", 14),
+])
+def test_native_log_reader_selects_only_a_complete_verified_restore(end, expected):
+    original = "[INFO DRT-0702] Post-route verification: 7 violation(s).\n"
+    trial = ("NAMED_VIOL_TRIAL_BEGIN: pass=1\n"
+             "[INFO DRT-0194] Start detail routing\n"
+             "[INFO DRT-0702] Post-route verification: 14 violation(s).\n")
+    assert _p3r._sdf.router_post_route_final_count(original + trial + end + "\n") == expected
+
+
+def test_later_native_route_supersedes_restored_measurement():
+    text = ("[INFO DRT-0702] Post-route verification: 7 violation(s).\n"
+            "NAMED_VIOL_TRIAL_BEGIN: pass=1\n"
+            "[INFO DRT-0702] Post-route verification: 14 violation(s).\n"
+            "NAMED_VIOL_TRIAL_ROLLBACK_VERIFIED: pass=1\n"
+            "[INFO DRT-0194] Start detail routing\n")
+    assert _p3r._sdf.router_post_route_final_count(text) is None
+    text += "[INFO DRT-0702] Post-route verification: 9 violation(s).\n"
+    assert _p3r._sdf.router_post_route_final_count(text) == 9
 
 
 def test_protected_nets_are_never_ripped_up(tmp_path):

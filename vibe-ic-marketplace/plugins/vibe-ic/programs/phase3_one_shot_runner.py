@@ -83,6 +83,7 @@ import _path_layout as _pl
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _prose_polarity as _pp
 import _runner_measurement as _rmeas
+from _route_wire_transaction import wire_transaction_tcl
 import _reference_flow_boundary as _rfb
 import _source_record_merge as _srm  # per-source merge: silence cannot erase
 from _ppa.power import pdn_ring_dimensions as _pdn_ring_dimensions
@@ -21357,7 +21358,7 @@ def _named_violation_reroute_tcl(
     return (
         normal_recovery_tcl(rpt_path, None if reserved_instance_names is None
                             else list(reserved_instance_names))
-        + _spare_safe_clear_net_proc_tcl()
+        + wire_transaction_tcl() + _spare_safe_clear_net_proc_tcl()
         + '# === named-violation targeted rip-up + re-route ===\n'
         'set _nvr_rpt "' + rpt_path + '"\n'
         'for {set _nvr_p 1} {$_nvr_p <= '
@@ -21392,6 +21393,9 @@ def _named_violation_reroute_tcl(
         '    break\n'
         '  }\n'
         '  set _nvr_cleared 0; set _nvr_skipped 0\n'
+        '  set _nvr_dir "${_nvr_rpt}.trial.[pid].${_nvr_p}"\n'
+        '  set _nvr_saved [_vic_wire_begin $_nvr_dir $_nvr_rpt]\n'
+        '  puts "NAMED_VIOL_TRIAL_BEGIN: pass=$_nvr_p"\n'
         '  if {[catch {\n'
         # THE SAME DECISION AS EVERY OTHER CLEAR SITE, and it is taken in the
         # ONE place that owns it. This loop used to re-type the POWER/GROUND
@@ -21411,10 +21415,16 @@ def _named_violation_reroute_tcl(
         '        default  { incr _nvr_skipped }\n'
         '      }\n'
         '    }\n'
-        '  } _nvr_e]} { puts "NAMED_VIOL_REROUTE_CLEAR_NONFATAL: $_nvr_e"; break }\n'
+        '  } _nvr_e]} {\n'
+        '    _vic_wire_finish $_nvr_dir $_nvr_rpt $_nvr_saved 0\n'
+        '    puts "NAMED_VIOL_TRIAL_ROLLBACK_VERIFIED: pass=$_nvr_p"\n'
+        '    puts "NAMED_VIOL_REROUTE_CLEAR_NONFATAL: $_nvr_e"; break\n'
+        '  }\n'
         '  puts "NAMED_VIOL_REROUTE_CLEARED: $_nvr_cleared '
         '(skipped=$_nvr_skipped)"\n'
         '  if {$_nvr_cleared == 0} {\n'
+        '    _vic_wire_finish $_nvr_dir $_nvr_rpt $_nvr_saved 0\n'
+        '    puts "NAMED_VIOL_TRIAL_ROLLBACK_VERIFIED: pass=$_nvr_p"\n'
         '    puts "NAMED_VIOL_REROUTE_NOTHING_CLEARED: every named net was '
         'PG or dont_touch-protected"\n'
         '    break\n'
@@ -21432,23 +21442,40 @@ def _named_violation_reroute_tcl(
         # three-line window above each use to prove no site can reference an
         # undefined variable. It caught this site when the note above sat
         # between them.
+        '  file delete -- $_nvr_rpt\n'
         '  if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n'
         '  if {[catch {detailed_route {*}$_vic_drc_opt} _nvr_e]} {\n'
+        '    _vic_wire_finish $_nvr_dir $_nvr_rpt $_nvr_saved 0\n'
+        '    puts "NAMED_VIOL_TRIAL_ROLLBACK_VERIFIED: pass=$_nvr_p"\n'
         '    puts "NAMED_VIOL_REROUTE_DR_NONFATAL: $_nvr_e"\n'
         '    break\n'
         '  }\n'
         '  set _nvr_after -1\n'
         '  if {[catch {\n'
         '    set _nvr_after 0\n'
+        '    set _nvr_nonempty 0\n'
         '    set _nvr_fh [open $_nvr_rpt r]\n'
         '    while {[gets $_nvr_fh _nvr_ln] >= 0} {\n'
+        '      if {[string trim $_nvr_ln] ne ""} { set _nvr_nonempty 1 }\n'
         '      if {[string first "violation type:" $_nvr_ln] >= 0} '
         '{ incr _nvr_after }\n'
         '    }\n'
         '    close $_nvr_fh\n'
-        '  } _nvr_e]} { puts "NAMED_VIOL_REROUTE_RECOUNT_NONFATAL: $_nvr_e"; break }\n'
+        '    if {$_nvr_after == 0 && $_nvr_nonempty} { error UNREADABLE_FRESH_DRC_REPORT }\n'
+        '  } _nvr_e]} {\n'
+        '    _vic_wire_finish $_nvr_dir $_nvr_rpt $_nvr_saved 0\n'
+        '    puts "NAMED_VIOL_TRIAL_ROLLBACK_VERIFIED: pass=$_nvr_p"\n'
+        '    puts "NAMED_VIOL_REROUTE_RECOUNT_NONFATAL: $_nvr_e"; break\n'
+        '  }\n'
         '  puts "NAMED_VIOL_REROUTE_PASS${_nvr_p}_AFTER: $_nvr_after '
         '(was $_nvr_n)"\n'
+        '  if {$_nvr_after > $_nvr_n} {\n'
+        '    _vic_wire_finish $_nvr_dir $_nvr_rpt $_nvr_saved 0\n'
+        '    puts "NAMED_VIOL_TRIAL_ROLLBACK_VERIFIED: pass=$_nvr_p"\n'
+        '    break\n'
+        '  }\n'
+        '  _vic_wire_finish $_nvr_dir $_nvr_rpt $_nvr_saved 1\n'
+        '  puts "NAMED_VIOL_TRIAL_ACCEPTED: pass=$_nvr_p"\n'
         '  if {$_nvr_after >= $_nvr_n} {\n'
         '    puts "NAMED_VIOL_REROUTE_NO_IMPROVEMENT: $_nvr_n -> $_nvr_after '
         '-- stopping; the residual is not one a re-route of these nets moves"\n'
