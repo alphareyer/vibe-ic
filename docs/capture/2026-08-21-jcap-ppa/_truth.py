@@ -30,6 +30,30 @@ HISTORY_START = re.compile(
 HISTORY_END = "<!-- already-program-history-end -->"
 
 
+def coverage_source_path(repo: pathlib.Path, source: str) -> pathlib.Path | None:
+    """Resolve a historical campaign citation after its repository relocation.
+
+    Only the original relative path and the known docs/campaigns relocation
+    are candidates. No basename search or external checkout can supply proof.
+    """
+    if not (repo / "vibe-ic-marketplace" / "plugins" / "vibe-ic").is_dir():
+        return None
+    relative = pathlib.PurePosixPath(source)
+    if relative.is_absolute() or ".." in relative.parts:
+        return None
+    if not relative.parts or not relative.parts[0].startswith("ppa-"):
+        return None
+    root = repo.resolve()
+    for candidate in (repo / relative, repo / "docs" / "campaigns" / relative):
+        try:
+            candidate.resolve().relative_to(root)
+        except (ValueError, OSError):
+            continue
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 @dataclass(frozen=True)
 class ClaimPair:
     claims: int

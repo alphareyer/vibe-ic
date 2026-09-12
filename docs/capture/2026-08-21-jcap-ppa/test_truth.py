@@ -157,6 +157,44 @@ def test_current_pair_is_derived_and_every_surface_agrees():
     assert surfaces and all(surface == pair for surface in surfaces.values())
 
 
+def test_historical_coverage_citations_resolve_the_real_relocated_sources():
+    import re
+    sources = set(re.findall(r"`(ppa-[a-z0-9]+/[A-Za-z0-9_./-]+\.md)`", RESULT))
+    assert len(sources) == 4
+    for source in sources:
+        resolved = _truth.coverage_source_path(ROOT, source)
+        assert resolved is not None, source
+        assert resolved == ROOT / "docs" / "campaigns" / source
+
+
+@pytest.mark.parametrize("case", ["legacy", "relocated", "missing", "wrong_root",
+                                  "basename_elsewhere", "external_symlink"])
+def test_coverage_source_relocation_never_substitutes_unrelated_evidence(tmp_path, case):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    if case != "wrong_root":
+        (repo / "vibe-ic-marketplace/plugins/vibe-ic").mkdir(parents=True)
+    relative = "ppa-neutral/RESULT.md"
+    target = repo / "docs/campaigns" / relative
+    if case == "legacy":
+        target = repo / relative
+    if case == "basename_elsewhere":
+        target = repo / "other/RESULT.md"
+    if case != "missing":
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if case == "external_symlink":
+            outside = tmp_path / "outside.md"
+            outside.write_text("not repository evidence")
+            target.symlink_to(outside)
+        else:
+            target.write_text("source evidence")
+    result = _truth.coverage_source_path(repo, relative)
+    if case in ("legacy", "relocated"):
+        assert result == target
+    else:
+        assert result is None
+
+
 @pytest.mark.parametrize(("name", "mutate", "expected"), MUTATIONS, ids=[x[0] for x in MUTATIONS])
 def test_each_count_surface_mutation_is_rejected(name, mutate, expected):
     mutated = mutate(RESULT)

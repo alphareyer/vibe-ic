@@ -413,11 +413,11 @@ check("every sweep-table figure exists in the record it summarises",
 # the class, and the check reported 1 source where there are 4. Caught only
 # because 1 looked wrong; a plausible count would have shipped.
 _srcs = set(re.findall(r"`(ppa-[a-z0-9]+/[A-Za-z0-9_./-]+\.md)`", MD))
-control("coverage-sources", not (ROOT / "ppa-e2e" / "NO_SUCH.md").is_file()
+control("coverage-sources", _truth.coverage_source_path(ROOT, "ppa-e2e/NO_SUCH.md") is None
         and (ROOT / "vibe-ic-marketplace").is_dir())   # the second half is the one that
         # bites: a bogus filename is absent under a WRONG root too, so the original
         # control passed happily while every path was being built from the wrong place.
-_absent = sorted(s for s in _srcs if not (ROOT / s).is_file())
+_absent = sorted(s for s in _srcs if _truth.coverage_source_path(ROOT, s) is None)
 check("every in-repo source named in the coverage table exists",
       not _absent, f"{len(_srcs)} named, absent {_absent}")
 
