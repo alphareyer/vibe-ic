@@ -109,11 +109,12 @@ same way:
     NOT_DETERMINED  no verdict was obtained: no layout, an unreadable layout,
                     a question left unanswered, or a delegated checker that
                     could not run. "NOT DETERMINED" beats a guess.
-    NOT_APPLICABLE  the TECHNOLOGY has no such facility, derived from the PDK
-                    volume and never from a declaration. Does not block a PASS.
+    NOT_APPLICABLE  the technology has no such facility, or the validated IP
+                    deliverable is outside the declaration schema's required
+                    scope and has no explicit ring requirement. Does not block
+                    a PASS; it is not evidence that a ring was measured.
 
-No `SKIPPED` or `BLOCKED`, and NOT_APPLICABLE is admitted for exactly one
-reason. The three-verdict rule above was written because `SKIPPED` / `N/A` /
+No `SKIPPED` or `BLOCKED`. The three-verdict rule above was written because `SKIPPED` / `N/A` /
 `BLOCKED` all read as "nothing to worry about here" in an aggregate, and
 nothing-to-worry-about is exactly what a design nobody checked is not entitled
 to. That reasoning is intact and is what the derivation requirement enforces:
@@ -127,6 +128,16 @@ to. That reasoning is intact and is what the derivation requirement enforces:
                               nothing there. The report names the volume and
                               the path that was absent, so a reader can check
                               the derivation instead of taking the word.
+
+The declaration schema also owns deliverable applicability: section 2C is a
+DIE obligation, not an unconditional HARDMACRO obligation. Only a validated
+declaration selecting the IP route may use this scope. Retained catalogue
+slots are informational only when `submission_template_check` confirms the
+existing non-obligation and validates their records and hashes. An affirmative
+operator binding retains the SHUTTLE route even for HARDMACRO.
+An explicit `seal_ring_required: true` always reaches the
+physical checker, including when no PDK generator was found. A malformed or
+unanswered deliverable never earns contract-based NOT_APPLICABLE.
 
 MEASURED over the six PDK volumes the pinned image carries (image label
 0.3.46, `_pdk_layer_authority`): two ship the generator, three do not, and one
@@ -188,6 +199,8 @@ if str(_HERE) not in sys.path:
 import _gds_geometry as _geom                                   # noqa: E402
 import _pdk_layer_authority as _pdkauth                         # noqa: E402
 import _tapeout_declaration as _decl                            # noqa: E402
+import _submission_template as _template                       # noqa: E402
+import submission_template_check as _template_check            # noqa: E402
 import plugin_manifest_discovery as _pmd                        # noqa: E402
 from _atomic_artefact import write_text as atomic_write_text    # noqa: E402
 
@@ -1038,7 +1051,9 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
                    seal_facility_path: Optional[str] = None,
                    seal_facility_tried: Optional[List[str]] = None,
                    volume_why: str = "",
-                   layout: Optional[Path] = None) -> None:
+                   layout: Optional[Path] = None,
+                   seal_deliverable: Any = _decl.NOT_DETERMINED,
+                   seal_route: str = _decl.NOT_DETERMINED) -> None:
     d = step.delegate
     assert d is not None
     if step.step_id == "General.SealRing":
@@ -1056,11 +1071,25 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
         # statement rather than a shrug — and the report names the volume and
         # the absent path so the derivation can be checked.
         ev.measured = {"seal_ring_required_declared": seal_required,
+                       "deliverable": seal_deliverable,
+                       "route": seal_route,
                        "technology_seal_ring_facility": seal_facility,
                        "seal_ring_facility_path": seal_facility_path,
                        "seal_ring_facility_tried": list(seal_facility_tried
                                                         or [])}
-        if seal_facility is False:
+        seal_question = _decl.question("seal_ring_required")
+        if (seal_route == _decl.ROUTE_IP and seal_required is not True
+                and seal_question is not None
+                and not _decl.applicable(seal_question, seal_deliverable)):
+            ev.verdict = NOT_APPLICABLE
+            ev.evidence = (
+                "the validated declaration selects the IP route with no "
+                "operator slot obligation; the declaration schema does not require "
+                "seal_ring_required for this deliverable. No explicit ring "
+                "requirement was supplied. This is contract applicability, "
+                "not a measurement of a seal ring")
+            return
+        if seal_facility is False and seal_required is not True:
             ev.verdict = NOT_APPLICABLE
             _absent = ", ".join(seal_facility_tried or []) or "the PDK volume"
             ev.evidence = (
@@ -1198,6 +1227,18 @@ def evaluate(project: Path,
     ans = doc.get("answers") or {}
     audit = _decl.audit(doc)
     deliverable = _decl.answer(doc, "deliverable")
+    slots_dir = project / _template.SLOTS_DIR_REL
+    has_slots = bool(list(slots_dir.glob("*.yaml"))
+                     + list(slots_dir.glob("*.yml")))
+    catalogue_ip, _catalogue_why = (
+        _template_check.catalogue_selects_ip(project) if has_slots
+        else (False, ""))
+    seal_route = _decl.route_of(doc, has_slots and not catalogue_ip)
+    if (seal_route == _decl.ROUTE_IP
+            and _template_check.slot_rules_are_owed(project, None)[0]):
+        # Missing slot files do not cancel an affirmative or unreadable
+        # operator binding in the design's own input.
+        seal_route = _decl.NOT_DETERMINED
 
     rep = PrecheckReport(
         project=str(project), verdict=NOT_DETERMINED, reason="",
@@ -1290,7 +1331,8 @@ def evaluate(project: Path,
                            pdk=pdk, seal_facility=seal_facility,
                            seal_facility_path=seal_path,
                            seal_facility_tried=seal_tried,
-                           volume_why=volume_why, layout=chosen)
+                           volume_why=volume_why, layout=chosen,
+                           seal_deliverable=deliverable, seal_route=seal_route)
 
     with_evidence = sum(1 for s in steps if s.verdict != NOT_DETERMINED)
     failed = [s.step_id for s in steps if s.verdict == FAIL]

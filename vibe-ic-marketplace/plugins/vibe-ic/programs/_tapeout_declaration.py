@@ -748,6 +748,7 @@ RULE_ENUM_INVALID = "DECLARATION_ENUM_INVALID"
 RULE_RECT_INVALID = "DECLARATION_RECT_INVALID"
 RULE_POINT_INVALID = "DECLARATION_POINT_INVALID"
 RULE_NUMBER_INVALID = "DECLARATION_NUMBER_INVALID"
+RULE_BOOL_INVALID = "DECLARATION_BOOL_INVALID"
 RULE_AREA_BUDGET_INVALID = "SYNTHESIS_AREA_BUDGET_INVALID"
 
 
@@ -847,6 +848,10 @@ def validate(doc: Any) -> List[Dict[str, Any]]:
                     RULE_NUMBER_INVALID,
                     f"{q.key!r} must be a positive number, got {v!r}",
                     key=q.key))
+        elif q.kind == "bool" and not isinstance(v, bool):
+            out.append(_refusal(
+                RULE_BOOL_INVALID,
+                f"{q.key!r} must be a boolean, got {v!r}", key=q.key))
 
     # THE TECHNOLOGY'S OWN SIDE (#2070). Two things are refused here, and
     # nothing else about this key is:

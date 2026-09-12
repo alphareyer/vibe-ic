@@ -444,10 +444,18 @@ def delivery_route(project: Path) -> Tuple[str, str]:
     is NOT_DETERMINED and stays a non-pass.
     """
     if any(p.is_file() for p in project.glob(TEMPLATE_SLOTS_GLOB)):
+        import submission_template_check as _template_check
+        catalogue_ip, why = _template_check.catalogue_selects_ip(project)
+        if catalogue_ip:
+            return ROUTE_IP, why
         return ROUTE_CHIP, TEMPLATE_SLOTS_GLOB
     if (project / _decl.SELF_TAPEOUT_REL).is_file():
         return ROUTE_CHIP, _decl.SELF_TAPEOUT_REL
     if (project / _st.NO_TEMPLATE_REL).is_file():
+        if (project / _st.DESIGN_ANSWERS_REL).exists():
+            import submission_template_check as _template_check
+            if _template_check.slot_rules_are_owed(project, None)[0]:
+                return ROUTE_UNDECLARED, "operator binding does not establish an IP route"
         return ROUTE_IP, _st.NO_TEMPLATE_REL
     return ROUTE_UNDECLARED, ""
 

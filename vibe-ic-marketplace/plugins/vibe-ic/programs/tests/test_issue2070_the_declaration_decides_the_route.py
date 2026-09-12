@@ -130,6 +130,58 @@ def _rules(proj: Path):
     return check, {r["rule"] for r in check["refusals"]}
 
 
+@pytest.mark.parametrize("case", ["catalogue", "purchased", "path_binding",
+                                  "die", "malformed", "contradiction",
+                                  "changed_source", "missing_record",
+                                  "invalid_own_boolean", "stale_ring_answer"])
+def test_catalogue_route_and_seal_consumer_share_the_record_authority(
+        tmp_path, monkeypatch, case):
+    import general_precheck as GP
+    import tapeout_precheck as TP
+    from test_the_technology_answers_the_precheck_not_the_declaration import (
+        _technology, _die, MAPPED)
+    from test_general_precheck import _NEVER_RAN, _step
+    proj = _ingested_project(tmp_path, "DIE" if case == "die" else "HARDMACRO")
+    own = {"answers": {"deliverable": "DIE" if case == "die" else "HARDMACRO"},
+           "operator_template": {"path": None, "slot": None,
+                                 "absent_reason": "This IP is not submitted to an operator."}}
+    if case == "purchased":
+        own["operator_template"]["slot"] = "1x1"
+    if case == "path_binding":
+        own["operator_template"]["path"] = "input/submission_template_source"
+    if case == "contradiction":
+        own["answers"]["deliverable"] = "DIE"
+    if case == "invalid_own_boolean":
+        own["answers"]["seal_ring_required"] = "false"
+    if case == "stale_ring_answer":
+        own["answers"]["seal_ring_required"] = True
+    (proj / ST.DESIGN_ANSWERS_REL).write_text(json.dumps(own))
+    if case == "malformed":
+        declaration = json.loads((proj / TD.DECLARATION_REL).read_text())
+        declaration["schema"] = "wrong"
+        (proj / TD.DECLARATION_REL).write_text(json.dumps(declaration))
+    if case == "changed_source":
+        (proj / ST.STAGED_TEMPLATE_REL / "1x1.json").write_text("{}")
+    if case == "missing_record":
+        (proj / ST.REPORT_REL).unlink()
+    catalogue = proj / ST.SLOTS_DIR_REL / "1x1.yaml"
+    before = catalogue.read_bytes()
+    pdkroot = tmp_path / "pdks"
+    _technology(pdkroot, "hastech", pairs=[MAPPED], sealring=True)
+    monkeypatch.setenv("PDK_ROOT", str(pdkroot))
+    gds = _die(proj / "phase3/stage4/gds/chip_top.gds")
+    report = GP.evaluate(proj, runner=_NEVER_RAN, pdk="hastech", layout=gds)
+    seal = _step(report, "General.SealRing")
+    route, _ = TP.delivery_route(proj)
+    if case == "catalogue":
+        assert seal.verdict == GP.NOT_APPLICABLE, seal.evidence
+        assert route == TP.ROUTE_IP
+    else:
+        assert seal.verdict == GP.NOT_DETERMINED, seal.evidence
+        assert route != TP.ROUTE_IP
+    assert catalogue.read_bytes() == before
+
+
 def test_the_hardmacro_arm_does_not_refuse_and_says_why(tmp_path):
     proj = _ingested_project(tmp_path, TD.DELIVERABLE_HARDMACRO)
     check, rules = _rules(proj)

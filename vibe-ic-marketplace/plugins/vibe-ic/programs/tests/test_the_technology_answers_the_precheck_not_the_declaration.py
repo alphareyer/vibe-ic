@@ -106,6 +106,74 @@ def pdkroot(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # FP-10 — the seal-ring tier
 # --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("required", [TD.NOT_DETERMINED, False])
+def test_hardmacro_schema_applicability_uses_the_same_layout(
+        tmp_path, pdkroot, required):
+    _technology(pdkroot, "hastech", pairs=[MAPPED], sealring=True)
+    proj = _project(tmp_path, _die, {"deliverable": "HARDMACRO",
+                                     "seal_ring_required": required})
+    ev = _step(GP.evaluate(proj, runner=_NEVER_RAN, pdk="hastech"),
+               "General.SealRing")
+    assert ev.verdict == GP.NOT_APPLICABLE, ev.evidence
+    assert ev.measured["route"] == TD.ROUTE_IP
+
+
+@pytest.mark.parametrize("deliverable", ["DIE", TD.NOT_DETERMINED, "wrong"])
+def test_unanswered_or_invalid_die_contract_cannot_claim_macro_applicability(
+        tmp_path, pdkroot, deliverable):
+    _technology(pdkroot, "hastech", pairs=[MAPPED], sealring=True)
+    proj = _project(tmp_path, _die, {"deliverable": deliverable})
+    ev = _step(GP.evaluate(proj, runner=_NEVER_RAN, pdk="hastech"),
+               "General.SealRing")
+    assert ev.verdict == GP.NOT_DETERMINED, ev.evidence
+
+
+@pytest.mark.parametrize("invalid", ["not-a-bool", "false", 0, 1, [], {}])
+def test_malformed_macro_declaration_cannot_claim_applicability(
+        tmp_path, pdkroot, invalid):
+    _technology(pdkroot, "hastech", pairs=[MAPPED], sealring=True)
+    proj = _project(tmp_path, _die, {"deliverable": "HARDMACRO"})
+    path = proj / TD.DECLARATION_REL
+    doc = json.loads(path.read_text())
+    doc["answers"]["seal_ring_required"] = invalid
+    path.write_text(json.dumps(doc))
+    rep = GP.evaluate(proj, runner=_NEVER_RAN, pdk="hastech")
+    assert rep.declaration_refusals
+    assert _step(rep, "General.SealRing").verdict == GP.NOT_DETERMINED
+
+
+@pytest.mark.parametrize("deliverable", ["DIE", "HARDMACRO"])
+@pytest.mark.parametrize("facility", [False, True])
+def test_explicit_ring_requirement_still_calls_the_physical_checker(
+        tmp_path, pdkroot, deliverable, facility):
+    _technology(pdkroot, "ringtech", pairs=[MAPPED], sealring=facility)
+    proj = _project(tmp_path, _die, {"deliverable": deliverable,
+                                     "seal_ring_required": True})
+    called = []
+    def runner(cmd, timeout):
+        called.append(cmd)
+        return (1, "", "missing physical ring")
+    ev = _step(GP.evaluate(proj, runner=runner, pdk="ringtech"),
+               "General.SealRing")
+    assert any(any(str(arg).endswith("die_finishing_check.py") for arg in cmd)
+               for cmd in called)
+    assert ev.verdict == GP.FAIL, ev.evidence
+
+
+@pytest.mark.parametrize("suffix", ["yaml", "yml"])
+def test_operator_slots_prevent_macro_declaration_from_bypassing_route(
+        tmp_path, pdkroot, suffix):
+    _technology(pdkroot, "hastech", pairs=[MAPPED], sealring=True)
+    proj = _project(tmp_path, _die, {"deliverable": "HARDMACRO"})
+    slots = proj / GP._template.SLOTS_DIR_REL
+    slots.mkdir()
+    (slots / f"operator.{suffix}").write_text("slot: operator\n")
+    ev = _step(GP.evaluate(proj, runner=_NEVER_RAN, pdk="hastech"),
+               "General.SealRing")
+    assert ev.verdict == GP.NOT_DETERMINED, ev.evidence
+    assert ev.measured["route"] == TD.ROUTE_SHUTTLE
+
+
 def test_a_technology_with_no_seal_ring_facility_reaches_not_applicable(
         tmp_path, pdkroot):
     _technology(pdkroot, "notech", pairs=[MAPPED], sealring=False)

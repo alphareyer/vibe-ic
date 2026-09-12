@@ -322,13 +322,42 @@ def slot_rules_are_owed(project: Path,
     if declared_slot is not None:
         return True, None
     doc, err = TD.load(project / TD.DECLARATION_REL)
-    if err is not None or not isinstance(doc, dict):
+    if err is not None or not isinstance(doc, dict) or TD.validate(doc):
         # DEGRADE TOWARDS OWING IT. "I could not read the declaration" is not
         # "the design declared HARDMACRO".
         return True, None
     deliverable = TD.answer(doc, "deliverable")
     if deliverable != TD.DELIVERABLE_HARDMACRO:
         return True, None
+    # A catalogue is not a purchase, but an affirmative operator binding is.
+    # Read the same input as step 0.5ic, not guessed declaration field names.
+    own = project / ST.DESIGN_ANSWERS_REL
+    if own.exists():
+        try:
+            answer_doc = json.loads(own.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return True, None
+        if not isinstance(answer_doc, dict):
+            return True, None
+        own_answers = answer_doc.get("answers")
+        operator = answer_doc.get("operator_template")
+        if not isinstance(own_answers, dict) or not isinstance(operator, dict):
+            return True, None
+        own_declaration, _ignored = TD.merge_answers(TD.blank_declaration(), own_answers)
+        if TD.validate(own_declaration):
+            return True, None
+        if own_answers.get("deliverable") != deliverable:
+            return True, None
+        if (own_answers.get("seal_ring_required") is True
+                and TD.answer(doc, "seal_ring_required") is not True):
+            # A stale merged declaration must not erase a newly stated ring.
+            return True, None
+        for key in ("path", "slot"):
+            value = operator.get(key)
+            if value is not None:
+                # Unknown, malformed, and affirmative bindings all retain
+                # the obligation; none may become an IP exemption.
+                return True, None
     return False, (
         f"the design's own declaration at {TD.DECLARATION_REL} answers "
         f"deliverable={TD.DELIVERABLE_HARDMACRO} and names no slot, so it is "
@@ -338,6 +367,29 @@ def slot_rules_are_owed(project: Path,
         f"design that is submitting a die to it. This one terminates at the "
         f"hardmacro kit (step 37.5ip). Every rule about the RECORD itself was "
         f"still evaluated; only the slot contract was not owed.")
+
+
+def catalogue_selects_ip(project: Path) -> Tuple[bool, str]:
+    """Whether retained catalogue slots represent a verified non-obligation.
+
+    Reuse this gate's complete record/hash validation. A HARDMACRO word alone
+    cannot bypass an unreadable record, a changed source, or a purchased slot.
+    No files are removed and no new router marker is manufactured.
+    """
+    path = project / ST.REPORT_REL
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return False, f"operator catalogue record could not be read: {exc}"
+    if not isinstance(doc, dict) or not isinstance(doc.get("ingest"), dict):
+        return False, "operator catalogue record is malformed"
+    owed, why = slot_rules_are_owed(project, doc["ingest"].get("declared_slot"))
+    if owed:
+        return False, "operator slot obligation was not excluded by a valid contract"
+    result = evaluate(project, doc, None)
+    if result["verdict"] != ST.VERDICT_NOT_APPLICABLE:
+        return False, "operator catalogue record failed its existing integrity check"
+    return True, why or "operator catalogue is informational"
 
 
 def _geometry_key(slot: dict) -> tuple:
