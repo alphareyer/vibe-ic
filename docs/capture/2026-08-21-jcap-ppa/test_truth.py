@@ -91,6 +91,54 @@ def test_authentic_history_still_rejects_a_false_claim_pair(tmp_path):
     assert len(errors) == 1 and 'but its tables derive' in errors[0]
 
 
+def test_capture_plugin_identity_matches_original_backlogs_without_git_objects(tmp_path):
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True)
+    before = subprocess.check_output(['git', '-C', str(tmp_path), 'count-objects', '-v'])
+    sha = '6dd97611eafa2af2d1aacc13dae88bd40c3c0e8b'
+    assert subprocess.run(['git', '-C', str(tmp_path), 'cat-file', '-e', sha],
+                          capture_output=True).returncode != 0
+    version = _truth.capture_plugin_version(tmp_path, HERE, sha)
+    assert version == '1.11.71'
+    inputs = sorted((HERE / 'candidates').rglob('*.yaml'))
+    assert len(inputs) == 3
+    for item in inputs:
+        assert f'plugin_version: "{version}"' in item.read_text()
+    assert subprocess.check_output(['git', '-C', str(tmp_path), 'count-objects', '-v']) == before
+
+
+@pytest.mark.parametrize('mutation', ['missing', 'wrong_path', 'tampered_blob'])
+def test_capture_plugin_identity_refuses_unproven_version(tmp_path, mutation):
+    proof = json.loads((HERE / 'CAPTURE_PLUGIN_IDENTITY.json').read_text())
+    if mutation == 'wrong_path':
+        proof['path'] = 'unrelated/plugin.json'
+    elif mutation == 'tampered_blob':
+        for obj in proof['objects'].values():
+            if obj['type'] == 'blob':
+                obj['base64'] = base64.b64encode(b'{"version":"1.11.71"}').decode()
+    if mutation != 'missing':
+        (tmp_path / 'CAPTURE_PLUGIN_IDENTITY.json').write_text(json.dumps(proof))
+    with pytest.raises((OSError, ValueError)):
+        _truth.capture_plugin_version(tmp_path, tmp_path, '6dd97611eafa2af2d1aacc13dae88bd40c3c0e8b')
+
+
+@pytest.mark.parametrize('coverage,rc,extra,declared,expected', [
+    ('MEASURED', 1, False, '1.11.71', True),
+    ('NOT_MEASURED', 1, False, '1.11.71', False),
+    (None, 1, False, '1.11.71', False),
+    ('MEASURED', 2, False, '1.11.71', False),
+    ('MEASURED', 1, True, '1.11.71', False),
+    ('MEASURED', 1, False, '0.0.0', False),
+])
+def test_historical_version_reconciliation_keeps_content_refusals(coverage, rc, extra, declared, expected):
+    report = {'findings': [{'category': 'PLUGIN_VERSION_MISMATCH'}]}
+    if coverage is not None:
+        report['nda_codename_rule'] = coverage
+    if extra:
+        report['findings'].append({'category': 'MISSING_FIELD'})
+    assert _truth.historical_backlog_version_only(report, rc, declared, '1.11.71') is expected
+    assert not _truth.historical_backlog_version_only(report, rc, declared, None)
+
+
 def _excluded_source_result() -> str:
     """Rebuild the exact excluded result without needing a dangling Git object.
 

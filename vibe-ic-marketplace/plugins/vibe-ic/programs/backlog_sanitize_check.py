@@ -681,6 +681,11 @@ def main(argv: List[str] = None) -> int:
     report = {
         "program": "backlog_sanitize_check",
         "version": "1.2.0",
+        # A hard finding can coexist with an unavailable rule. Consumers that
+        # reconcile historical version drift still need the coverage boundary.
+        "nda_codename_rule": (
+            "NOT_MEASURED" if NDA_TOKENS_MISSING else "MEASURED"
+        ) if args.audit in ("content", "both") else "NOT_APPLICABLE",
         "summary": {"pass": is_pass, "findings_count": len(findings), **summary},
         "findings": [asdict(f) for f in findings],
     }

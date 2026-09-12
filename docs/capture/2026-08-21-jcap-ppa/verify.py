@@ -235,41 +235,40 @@ with tempfile.TemporaryDirectory() as _d:
 control("sanitiser", SAN.is_file() and _r.returncode != 0)
 bad_yaml = []
 historical_version_only = []
-_base_plugin = subprocess.run(
-    ["git", "show", CAPTURE_BASE + ":vibe-ic-marketplace/plugins/vibe-ic/"
-     ".claude-plugin/plugin.json"], cwd=str(HERE), capture_output=True,
-    text=True, timeout=120)
+not_measured_yaml = []
 try:
-    _capture_version = json.loads(_base_plugin.stdout)["version"]
-except (json.JSONDecodeError, KeyError, TypeError):
+    _capture_version = _truth.capture_plugin_version(ROOT, HERE, CAPTURE_BASE)
+except (OSError, ValueError, KeyError, TypeError):
     _capture_version = None
 for y in yamls:
     r = subprocess.run([sys.executable, str(SAN), "--file", str(y)],
                        capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
         try:
-            _findings = json.loads(r.stdout).get("findings") or []
+            _report = json.loads(r.stdout)
+            if not isinstance(_report, dict):
+                _report = {}
         except json.JSONDecodeError:
-            _findings = []
+            _report = {}
         _declared = re.search(
             r'^plugin_version:\s*["\']?([^"\'\s]+)', y.read_text(), re.M)
         # These are historical capture records.  A later release bump must not
         # rewrite the version they truthfully record or make yesterday's valid
         # backlog become invalid today.  Accept only the single expected drift
         # category, and only when the record matches the frozen capture base.
-        if (_findings
-                and {f.get("category") for f in _findings}
-                == {"PLUGIN_VERSION_MISMATCH"}
-                and _capture_version is not None
-                and _declared is not None
-                and _declared.group(1) == _capture_version):
+        if _truth.historical_backlog_version_only(
+                _report, r.returncode, _declared.group(1) if _declared else None,
+                _capture_version):
             historical_version_only.append(y.name)
         else:
             bad_yaml.append(y.name)
+            if _report.get("nda_codename_rule") == "NOT_MEASURED":
+                not_measured_yaml.append(y.name)
 check("every emitted backlog passes its own sanitiser",
       not bad_yaml,
       f"{len(yamls)} checked, refused: {bad_yaml}; "
-      f"historical-version-only: {historical_version_only}")
+      f"historical-version-only: {historical_version_only}; "
+      f"NDA-rule-NOT_MEASURED: {not_measured_yaml}")
 
 # 14. the emitted artefacts are IN SYNC with the records that produced them.
 #     candidates/ is generated. Edit recoveries.json without re-emitting and

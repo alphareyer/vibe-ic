@@ -38,6 +38,28 @@ def test_empty_dir(tmp_path):
     assert r.returncode == 0
 
 
+@pytest.mark.parametrize('missing_rule,malformed', [(True, False), (True, True), (False, False)])
+def test_version_mismatch_does_not_hide_content_rule_coverage(tmp_path, monkeypatch, capsys,
+                                                            missing_rule, malformed):
+    sys.path.insert(0, str(PROG.parent))
+    import backlog_sanitize_check as mod
+    # Synthetic capability control only; the native consumer keeps its actual
+    # private configuration and must still refuse when the rule is unavailable.
+    monkeypatch.setattr(mod, 'NDA_TOKENS_MISSING', 'unavailable control' if missing_rule else '')
+    bf = tmp_path / 'backlog.yaml'
+    bf.write_text('type: enhancement\ncomponent: program:flow_compliance_check\n'
+                  'title: Reproducible dependency checks\n'
+                  + ('' if malformed else 'pattern: Check dependency identity before use\n')
+                  + 'plugin_version: "0.0.0"\n')
+    assert mod.main(['--file', str(bf)]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report['nda_codename_rule'] == ('NOT_MEASURED' if missing_rule else 'MEASURED')
+    categories = {finding['category'] for finding in report['findings']}
+    assert 'PLUGIN_VERSION_MISMATCH' in categories
+    assert ('MISSING_FIELD' in categories) is malformed
+    assert report['summary']['pass'] is False
+
+
 # --- `pattern` is a REQUIRED field of the record, downstream of emit -------
 
 def test_required_fields_is_exactly_this_set():

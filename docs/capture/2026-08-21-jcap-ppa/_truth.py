@@ -214,7 +214,8 @@ def validate_current_claim_counts(
     return derived, surfaces, history, errors
 
 
-def archived_checkpoint_text(repo: pathlib.Path, result_path: pathlib.PurePosixPath, sha: str) -> str:
+def archived_checkpoint_text(repo: pathlib.Path, result_path: pathlib.PurePosixPath, sha: str,
+                             *, archive: pathlib.Path | None = None) -> str:
     """Read an exact Git commit/tree/blob path proof without modifying .git.
 
     Squash-landed commits need not survive in a clean clone. The archive carries
@@ -222,7 +223,8 @@ def archived_checkpoint_text(repo: pathlib.Path, result_path: pathlib.PurePosixP
     The requested immutable commit SHA authenticates the entire path to the blob;
     trusting only a sidecar claim-to-blob mapping would not establish that link.
     """
-    archive = repo / result_path.parent / 'HISTORICAL_CHECKPOINTS.json'
+    if archive is None:
+        archive = repo / result_path.parent / 'HISTORICAL_CHECKPOINTS.json'
     proof = json.loads(archive.read_text())
     if (not isinstance(proof, dict)
             or proof.get('format') != 'git-object-path-proof-v1'
@@ -264,6 +266,31 @@ def archived_checkpoint_text(repo: pathlib.Path, result_path: pathlib.PurePosixP
         if index == len(parts) - 1 and mode not in {b'100644', b'100755'}:
             raise ValueError('checkpoint result is not a regular file')
     return obj(oid, 'blob').decode('utf-8')
+
+
+def capture_plugin_version(repo: pathlib.Path, capture: pathlib.Path, sha: str) -> str:
+    text = archived_checkpoint_text(
+        repo, pathlib.PurePosixPath('vibe-ic-marketplace/plugins/vibe-ic/.claude-plugin/plugin.json'),
+        sha, archive=capture / 'CAPTURE_PLUGIN_IDENTITY.json')
+    version = json.loads(text)['version']
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError('authenticated capture manifest has no version')
+    return version
+
+
+def historical_backlog_version_only(report: dict, rc: int, declared: str | None,
+                                    capture_version: str | None) -> bool:
+    """Version drift is not a content defect, but unavailable rules remain so.
+
+    A mismatch has rc 1 even when an unavailable NDA rule would otherwise yield
+    rc 2. Require explicit coverage; missing metadata is not proof of coverage.
+    """
+    findings = report.get('findings')
+    return bool(rc == 1 and capture_version and declared == capture_version
+                and report.get('nda_codename_rule') == 'MEASURED'
+                and isinstance(findings, list) and findings
+                and all(isinstance(f, dict) and f.get('category') == 'PLUGIN_VERSION_MISMATCH'
+                        for f in findings))
 
 
 def validate_history_checkpoints(
