@@ -11,6 +11,7 @@ import pytest
 
 import benchmark_dispatch as dispatch
 import shape_b_sample_export as guarded_export
+import flow_phase_attribution as fpa
 from _hostpaths import require_repo
 from test_issue1903_shape_c_accepted_export_control import _fixture
 
@@ -147,9 +148,16 @@ def test_supplied_rtl_gate_is_read_from_not_attempted_on_export(tmp_path):
     task["program_verification"]["rtl_gen"] = "SKIPPED-BY-ENTRY"
     (run / "needs_ai_review.jsonl").write_text(json.dumps(task) + "\n")
     solve = json.loads((run / "solve_report.json").read_text())
-    verifying = solve["results"][0]["phases"]["phase3_verifying"]
-    verifying["ran"].pop("rtl_gen")
-    verifying["not_attempted"] = {"rtl_gen": "SKIPPED-BY-ENTRY"}
+    # Model a real supplied-RTL re-entry: its Program report records the skip
+    # first, and the solve snapshot is derived from that same evidence.
+    report = Path(task["project"]) / "reports/orchestrator/phase2_one_shot.json"
+    doc = json.loads(report.read_text())
+    for step in doc["steps"]:
+        if step["name"] == "rtl_gen":
+            step["status"] = "SKIPPED-BY-ENTRY"
+    report.write_text(json.dumps(doc) + "\n")
+    solve["results"][0]["phases"]["phase3_verifying"] = \
+        fpa.phase3_verifying(doc, None)
     (run / "solve_report.json").write_text(json.dumps(solve) + "\n")
 
     dispatch._export_accepted_shape_c_samples("verilogeval-v2", run)

@@ -15,6 +15,7 @@ sys.path.insert(0, str(PROGRAMS))
 
 import benchmark_dispatch as bd                         # noqa: E402
 import benchmark_io_adapter as bio                      # noqa: E402
+import flow_phase_attribution as fpa                    # noqa: E402
 
 import sys as _rt_sys
 from pathlib import Path as _rt_path
@@ -1153,6 +1154,13 @@ def _solve_report(run: Path, task: dict) -> None:
         "awaiting_ai": True, "awaiting_ai_review": True,
         "awaiting_ai_backup": False,
     }
+    # Both solve and the resume worker-refresh path record attribution from
+    # the actual Program report before creating the review handoff. Omitting
+    # it models a missing snapshot, not the canonical accepted candidate.
+    result["phases"] = fpa.attribute(
+        Path(task["project"]), routing=ROUTING, entry=result["entry"],
+        evidence=result["evidence"], exit_step=result["exit"],
+        artefact_collected=True)
     (run / "solve_report.json").write_text(json.dumps({
         "bench": "rtllm", "format": "rtllm", "total": 1,
         "solved": 1, "accepted": 0,
