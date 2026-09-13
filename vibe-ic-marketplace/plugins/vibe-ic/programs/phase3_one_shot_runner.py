@@ -21967,6 +21967,53 @@ proc ma_bbox {rects} {
   return [list [expr {int($x1)}] [expr {int($y1)}] [expr {int($x2)}] [expr {int($y2)}]]
 }
 
+proc ma_term_rects_of_net {net} {
+  # -> dict layerName -> terminal metal boxes in placed coordinates.
+  # `dbITerm getGeometries` is instance-transformed; BPin boxes are already
+  # absolute.  These are deliberately obtained from THIS net only: a wire
+  # cluster that touches its own terminal may include master metal which the
+  # routing DB cannot measure, while a cluster elsewhere on the same layer is
+  # still a valid min-area candidate.
+  set out [dict create]
+  foreach it [$net getITerms] {
+    if {[catch {set gs [$it getGeometries]}]} { continue }
+    foreach g $gs {
+      if {[catch {
+        lassign $g ly rc
+        dict lappend out [$ly getName] [list [$rc xMin] [$rc yMin] \
+          [$rc xMax] [$rc yMax]]
+      }]} { continue }
+    }
+  }
+  foreach bt [$net getBTerms] {
+    if {[catch {set bps [$bt getBPins]}]} { continue }
+    foreach bp $bps {
+      if {[catch {set bxs [$bp getBoxes]}]} { continue }
+      foreach b $bxs {
+        if {[catch {
+          set ly [$b getTechLayer]
+          dict lappend out [$ly getName] [list [$b xMin] [$b yMin] \
+            [$b xMax] [$b yMax]]
+        }]} { continue }
+      }
+    }
+  }
+  return $out
+}
+
+proc ma_cluster_touches_term {cluster termrs} {
+  # A terminal overlap is the narrow, geometry-proven exception to normal
+  # routing-area measurement.  Do not turn a layer-wide pin declaration into
+  # a chip-wide exemption: standard-cell libraries commonly expose pins on
+  # every routing layer.
+  foreach c $cluster {
+    foreach tr $termrs {
+      if {[ma_touch $c $tr]} { return 1 }
+    }
+  }
+  return 0
+}
+
 
 # ── R8 (v1.9.3) — VIA-ENCLOSURE PATCH ───────────────────────────────────────
 # The docstring of `_min_area_patch_tcl` has always claimed it returns "the
@@ -22173,45 +22220,12 @@ proc via_enclosure_patch {{marker "VIA_ENCL_PATCH"}} {
 proc min_area_patch {{marker "MIN_AREA_PATCH"}} {
   set blk  [ord::get_db_block]
   set tech [ord::get_db_tech]
-  # === layers this check MUST NOT judge ===
-  # The net's WIRE is the only geometry this routine can see. On any layer that
-  # standard-cell PINS (or master obstructions) also use, the wire's metal is
-  # electrically merged with cell metal the routine cannot see, so every area it
-  # computes there is an UNDER-count. Measured on spm x sky130A: judging those
-  # layers produced 1247 'deficient' clusters against 9 real sign-off
-  # violations — every extra one a pin landing. So: derive the pin/obstruction
-  # layer set from the MASTERS actually instantiated in this block (PDK-derived,
-  # no literal) and refuse to judge them. Those layers are also the ones
-  # TritonRoute's own patcher already handles (measured: 32 met1 `RECT` patches
-  # in the base route's DEF), so the gap being closed here — via-only landings
-  # on the layers ABOVE pin metal — is exactly the part it misses.
-  set pinlayers [dict create]
-  set _seen [dict create]
-  foreach inst [$blk getInsts] {
-    set mst [$inst getMaster]
-    if {[dict exists $_seen [$mst getName]]} { continue }
-    dict set _seen [$mst getName] 1
-    foreach mt [$mst getMTerms] {
-      foreach mp [$mt getMPins] {
-        foreach g [$mp getGeometry] {
-          set tl [$g getTechLayer]
-          if {$tl ne "NULL"} { dict set pinlayers [$tl getName] 1 }
-        }
-      }
-    }
-    foreach ob [$mst getObstructions] {
-      set tl [$ob getTechLayer]
-      if {$tl ne "NULL"} { dict set pinlayers [$tl getName] 1 }
-    }
-  }
-  puts "${marker}_PIN_LAYERS_NOT_JUDGED: [lsort [dict keys $pinlayers]]"
   # layer name -> {minarea minwidth spacing}
   set L [dict create]
   foreach lay [$tech getLayers] {
     if {[$lay getRoutingLevel] <= 0} { continue }
     set a 0; catch {set a [$lay getArea]}
     if {$a <= 0} { continue }
-    if {[dict exists $pinlayers [$lay getName]]} { continue }
     set mw 0; catch {set mw [$lay getMinWidth]}
     set sp 0; catch {set sp [$lay getSpacing]}
     if {$sp <= 0} { set sp $mw }
@@ -22220,7 +22234,7 @@ proc min_area_patch {{marker "MIN_AREA_PATCH"}} {
   }
   # 1st pass: gather every net's per-layer rects (also used as the blockage set)
   set netrects [dict create]
-  set netpins [dict create]
+  set netterms [dict create]
   set all [dict create]
   foreach net [$blk getNets] {
     set st [$net getSigType]
@@ -22228,9 +22242,13 @@ proc min_area_patch {{marker "MIN_AREA_PATCH"}} {
     set pp {}
     set d [ma_rects_of_net $net pp]
     if {[dict size $d] == 0} { continue }
+    set terms [ma_term_rects_of_net $net]
     dict set netrects [$net getName] $d
-    dict set netpins  [$net getName] $pp
+    dict set netterms [$net getName] $terms
     dict for {ln rs} $d { foreach r $rs { dict lappend all $ln $r } }
+    # Terminal metal is a real foreign-net blockage for a patch extension.
+    # The candidate's own terminal overlap is dealt with below before patching.
+    dict for {ln trs} $terms { foreach tr $trs { dict lappend all $ln $tr } }
   }
   set patched 0; set skipped 0; set deficient 0; set pinmerged 0
   dict for {nname d} $netrects {
@@ -22239,17 +22257,16 @@ proc min_area_patch {{marker "MIN_AREA_PATCH"}} {
       if {![dict exists $L $ln]} { continue }
       lassign [dict get $L $ln] minarea minw spac maxw
       foreach cl [ma_clusters $rs] {
+        set termrs {}
+        if {[dict exists $netterms $nname $ln]} {
+          set termrs [dict get $netterms $nname $ln]
+        }
+        if {[ma_cluster_touches_term $cl $termrs]} {
+          incr pinmerged
+          continue
+        }
         set ar [ma_union_area $cl]
         if {$ar >= $minarea} { continue }
-        lassign [ma_bbox $cl] _cx1 _cy1 _cx2 _cy2
-        set _pinned 0
-        foreach _pt [dict get $netpins $nname] {
-          lassign $_pt _px _py
-          if {$_px >= $_cx1 && $_px <= $_cx2 && $_py >= $_cy1 && $_py <= $_cy2} {
-            set _pinned 1; break
-          }
-        }
-        if {$_pinned} { incr pinmerged; continue }
         incr deficient
         lassign [ma_bbox $cl] bx1 by1 bx2 by2
         set h [expr {$by2 - $by1}]
