@@ -10865,6 +10865,49 @@ def _registry_glob_one(container: str, root: str, pattern: Optional[str],
     return None
 
 
+def _registry_container_root(container: str, reg: Dict[str, Any]
+                             ) -> Optional[str]:
+    """Resolve a registry PDK root, including content-addressed installs.
+
+    A Ciel-installed PDK is deliberately not exposed as
+    ``/foss/pdks/<name>``.  Its version directory is an image-build input, so
+    baking that directory's hash into a registry entry makes the next image
+    silently look like a missing PDK.  ``container_path_glob`` is the explicit
+    registry declaration for that shape.  It must resolve to *exactly one*
+    directory in the named container; zero and ambiguity both refuse.  The
+    returned concrete root is then used by every subsequent asset probe, so
+    liberty/LEF/DRC cannot accidentally come from a different PDK.
+    """
+    root_glob = str(reg.get("container_path_glob") or "").strip()
+    if not root_glob:
+        root = str(reg.get("container_path") or "").strip()
+        return root or None
+    if (not root_glob.startswith("/foss/pdks/")
+            or not re.fullmatch(r"/[A-Za-z0-9_./*?\-]+", root_glob)):
+        return None
+    rc, out, _err = _docker_exec_raw(
+        # `*`/`?` must reach the shell as glob syntax.  The strict alphabet
+        # above excludes whitespace, quotes, command substitution and every
+        # shell control character, so this does not turn registry data into a
+        # command-injection surface.
+        container, f"ls -1d {root_glob} 2>/dev/null | sort",
+        timeout=60)
+    if rc != 0:
+        return None
+    roots: List[str] = []
+    prefix = "/foss/pdks/"
+    for raw in out.splitlines():
+        candidate = raw.strip()
+        if not candidate.startswith(prefix):
+            continue
+        rc2, _o2, _e2 = _docker_exec_raw(
+            container, f"test -d {shlex.quote(candidate)}", timeout=60)
+        if rc2 == 0:
+            roots.append(candidate)
+    roots = sorted(set(roots))
+    return roots[0] if len(roots) == 1 else None
+
+
 def _pdk_config_from_registry(project: Path, reg: Dict[str, Any]
                               ) -> Optional[PdkConfig]:
     """Build a PdkConfig from a pdk_registry.json entry — GENERIC, no
@@ -10886,7 +10929,7 @@ def _pdk_config_from_registry(project: Path, reg: Dict[str, Any]
     Returns None when the mandatory assets (liberty + both LEFs) cannot be
     resolved, so the caller can refuse rather than substitute. PDK-AGNOSTIC."""
     container = os.environ.get("EDA_CONTAINER") or _pin.default_container_name()
-    root = reg.get("container_path") or ""
+    root = _registry_container_root(container, reg) or ""
     if not root:
         return None
     # ONE ROUTE (see `_registry_glob_one`): `_docker_exec_raw` already runs

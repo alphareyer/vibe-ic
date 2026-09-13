@@ -104,6 +104,18 @@ def _resolve(monkeypatch, glob):
     return R._registry_glob_one("c", ROOT, glob)
 
 
+def test_content_addressed_root_refuses_ambiguity(monkeypatch):
+    """A Ciel root is resolved from the named image, never guessed by hash."""
+    one = "/foss/pdks/ciel/gf180mcu/versions/a/gf180mcuD"
+    two = "/foss/pdks/ciel/gf180mcu/versions/b/gf180mcuD"
+
+    monkeypatch.setattr(R, "_docker_exec_raw", _FakeContainer([one]))
+    assert R._registry_container_root("c", GF) == one
+
+    monkeypatch.setattr(R, "_docker_exec_raw", _FakeContainer([one, two]))
+    assert R._registry_container_root("c", GF) is None
+
+
 # --------------------------------------------------------------- assets ----
 
 def test_liberty_glob_resolves_in_the_real_container(monkeypatch):
