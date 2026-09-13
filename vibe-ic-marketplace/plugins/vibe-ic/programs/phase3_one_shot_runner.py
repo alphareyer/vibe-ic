@@ -27008,8 +27008,9 @@ def _write_pnr_fatal_signal_attestation(project: Path,
 #
 # The selection is now: `post_dft_netlist.v` when a MEASURED scan chain backs
 # it, else `<top>_synth.v` exactly as before. Every condition is a measurement:
-#   * the scan producer must have PUBLISHED (`scan_chain.json.published`) and
-#     measured that the chain covers every flop;
+#   * the scan producer must have PUBLISHED (`scan_chain.json.published`),
+#     measured that the chain covers every flop, AND recorded the L20 contract
+#     that authorized the added DFT interface;
 #   * `post_dft_netlist.v` must exist AND still carry the DFT ports the chain
 #     metadata declares — a `post_dft_netlist.v` left over from the old
 #     cut-view path has none, and must never reach the router.
@@ -27031,10 +27032,12 @@ def pnr_input_netlist(project: Path, top: str) -> Tuple[Path, str, bool]:
     except (OSError, ValueError):
         meta = None
     if not (isinstance(meta, dict) and meta.get("published")
-            and meta.get("chain_length_matches_flop_count")):
+            and meta.get("chain_length_matches_flop_count")
+            and meta.get("authorized_by_l20_contract")):
         return pre_dft, (
-            f"{pre_dft.name} (pre-DFT) — no measured scan chain for this run; "
-            f"the implemented design carries NO scan chain"), False
+            f"{pre_dft.name} (pre-DFT) — no measured, L20-authorized scan "
+            f"chain for this run; the implemented design carries NO scan "
+            f"chain"), False
     if not post_dft.is_file():
         return pre_dft, (
             f"{pre_dft.name} (pre-DFT) — a scan chain WAS inserted but step 12 "

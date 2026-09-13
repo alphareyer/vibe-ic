@@ -163,6 +163,7 @@ import lec_gate_netlist_select as _lec_gns  # ATPG-cut predicate (diagnosis only
 import _yosys_stat as _ystat  # shared yosys `stat` parser (step 9 stats.json)
 import quartus_map_audit as _qma  # step 6 .map.rpt silent-failure scanner
 import _hardmacro_stage as _hms  # staged SRAM/IP macro discovery + blackbox
+import l20_dft_scan_topology_actionable_check as _l20_dft  # design-owned DFT contract
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
@@ -18489,6 +18490,38 @@ def _dft_disclose_skip(path: Path, reason: str, extra: Optional[dict] = None):
     path.write_text(json.dumps(payload, indent=2))
 
 
+def dft_scan_insertion_contract(project: Path) -> Tuple[bool, str]:
+    """Whether this design authorizes automatic scan insertion.
+
+    Scan insertion changes the physical interface: it adds test ports and, for
+    a non-fixed top, boundary cells.  A measured chain alone is not authority
+    to make that product decision.  The existing L20 consumer is the single
+    design-owned source for it: only an actionable, declared topology may
+    reach the scan producer.  A missing, malformed, or undeclared contract
+    declines loudly rather than creating an interface which no pad plan owns.
+
+    ``inspect`` is read-only.  Its ``PASS`` verdict is specifically the state
+    where L20 contains an actionable topology; ``SKIP`` means no requirement,
+    and ``FAIL`` means a requirement exists but has not reached the consuming
+    layer.  Neither latter state is permission to invent a chain.
+    """
+    try:
+        result = _l20_dft.inspect(project)
+    except Exception as exc:  # fail closed; never invent test IO on uncertainty
+        return False, (
+            "L20 DFT contract could not be inspected; scan insertion declined: "
+            f"{type(exc).__name__}")
+    verdict = str(result.get("verdict") or "").upper()
+    evidence = result.get("evidence") or {}
+    actionable = int(evidence.get("typed_scan_chain_count") or 0) > 0
+    if verdict in ("PASS", "PASS_WITH_ADVISORY") and actionable:
+        return True, "L20 declares an actionable DFT scan topology"
+    return False, (
+        "L20 does not authorize automatic scan insertion "
+        f"(verdict={verdict or 'UNKNOWN'}; "
+        f"reason={result.get('reason') or 'no actionable scan topology'})")
+
+
 # The post-DFT-optimization skip-sentinel must OWN its canonical output so
 # flow_compliance's STRICT early-MISSING promotion (#675 strict) can promote
 # step 12 to SKIPPED-CONDITION WITHOUT the marker being able to mask a DIFFERENT
@@ -19238,6 +19271,7 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
 
     # ================= Step 11 — DFT insertion (Fault ATPG) =================
     t0 = time.time()
+    dft_authorized, dft_contract_reason = dft_scan_insertion_contract(project)
     if not full_chip:
         _dft_disclose_skip(dft_dir / "dft_atpg_not_run.json",
                            "lightweight/--skip-phase3 flow: heavy Fault ATPG "
@@ -19246,6 +19280,16 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
         results.append(StepResult("dft_insertion", "SKIP", time.time() - t0,
                        "DFT ATPG gated off on --skip-phase3 (disclosed-skip "
                        "sentinel written); LEC still runs"))
+    elif not dft_authorized:
+        _dft_disclose_skip(
+            dft_dir / "dft_atpg_not_run.json",
+            f"DFT/ATPG and scan insertion not authorized by the design's L20 "
+            f"consumer contract: {dft_contract_reason}",
+            {"gate_reason": "l20_dft_contract"})
+        results.append(StepResult(
+            "dft_insertion", "SKIP", time.time() - t0,
+            f"DFT insertion and ATPG disclosed-skipped: {dft_contract_reason}; "
+            "LEC still runs on the pre-DFT netlist"))
     elif not clk:
         _dft_disclose_skip(dft_dir / "dft_atpg_not_run.json",
                            "no primary clock port derivable from RTL; Fault ATPG "
@@ -19359,6 +19403,12 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
             _scan_rc, _scan_tail = -1, f"execution error: {exc}"
         _scan_meta = _read_scan_chain_meta(project)
         if _scan_rc == 0 and (_scan_meta or {}).get("published"):
+            # Bind this producer receipt to the consumer contract that
+            # authorized it.  PnR requires this bit as well, so stale scan
+            # artifacts from an earlier run cannot silently alter a later
+            # design whose L20 has no DFT topology.
+            _scan_meta["authorized_by_l20_contract"] = True
+            _scan_json.write_text(json.dumps(_scan_meta, indent=2) + "\n")
             results.append(StepResult(
                 "dft_scan_insertion", "PASS", time.time() - _scan_t0,
                 f"fault chain: {_scan_meta.get('internal_chain_length')} "

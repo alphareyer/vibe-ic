@@ -33,6 +33,7 @@ import phase3_one_shot_runner as p3            # noqa: E402
 GOOD_META = {
     "published": True,
     "chain_length_matches_flop_count": True,
+    "authorized_by_l20_contract": True,
     "internal_chain_length": 64,
     "boundary_chain_length": 34,
     "area_instances_delta": 200,
@@ -124,6 +125,21 @@ class TestNeverRoutesAnythingUnproven:
                   post_dft=SCAN_HEADER)
         nl, _, is_scan = p3.pnr_input_netlist(p, "spm")
         assert nl.name == "spm_synth.v" and is_scan is False
+
+    def test_measured_chain_without_design_contract_is_refused(self, tmp_path):
+        """A stale receipt must not add DFT ports after L20 stops authorizing it.
+
+        The old selector trusted only the tool receipt, so a previous automatic
+        chain could survive a rerun whose design inputs declared no scan
+        topology.  The receipt now has to prove both measurement and the
+        design-owned authorization.
+        """
+        meta = {k: v for k, v in GOOD_META.items()
+                if k != "authorized_by_l20_contract"}
+        p = _tree(tmp_path, meta=meta, post_dft=SCAN_HEADER)
+        nl, note, is_scan = p3.pnr_input_netlist(p, "spm")
+        assert nl.name == "spm_synth.v" and is_scan is False
+        assert "L20-authorized" in note
 
     def test_chain_that_misses_flops(self, tmp_path):
         """A chain that leaves flops off it is untestable silicon.  It must not
