@@ -131,6 +131,8 @@ LEC_LADDER_SCHEMA_VERSION = "vibeic.lec.ladder.v2-short-checkpoint"
 _LADDER_COMPLETE = "the ladder is complete"
 DEFAULT_CACHE_REL = "reports/lec_pass_cache"
 DEFAULT_CHECKPOINT_REL = "reports/lec_checkpoints"
+CONTROLLED_LIMIT_RECEIPT_PREFIX = "lec_controlled_limit"
+CONTROLLED_LIMIT_RECEIPT_SCHEMA_VERSION = "vibeic.lec.controlled-limit.v1"
 
 # THE PROOF LADDER, in the order `build_equiv_script` emits it: (rung name,
 # the yosys command(s) that constitute the rung). The rung NAMES are
@@ -4678,6 +4680,25 @@ def entry(argv: Optional[List[str]] = None) -> int:
         return _report_env_refusal(exc, [])
 
 
+def _positive_completed_rung_cap(value: str) -> int:
+    """Argparse type for the opt-in completed-rung policy.
+
+    This is intentionally a count of *completed checkpointed rungs*, not a
+    wall-clock deadline.  A live proof is allowed to finish its current rung;
+    only the next rung is refused at a durable, independently re-hashable
+    checkpoint boundary.
+    """
+    try:
+        cap = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "max completed rungs must be a positive integer") from exc
+    if cap < 1:
+        raise argparse.ArgumentTypeError(
+            "max completed rungs must be at least 1")
+    return cap
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
         description="Step 13 LEC PRODUCER — real Yosys RTL≡gate equivalence "
@@ -4696,6 +4717,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="One TOTAL LEC step wall-clock budget in seconds, "
                          "shared by all frontend/define retries "
                          f"(default {DEFAULT_YOSYS_TIMEOUT_S})")
+    ap.add_argument("--max-completed-rungs", type=_positive_completed_rung_cap,
+                    default=None,
+                    help="OPT-IN: stop only BETWEEN complete, log-attested "
+                         "checkpoint rungs after this many new rungs in this "
+                         "invocation, then emit an INCONCLUSIVE receipt. "
+                         "This is a deterministic work counter, not a "
+                         "wall-clock kill; default is unbounded.")
     ap.add_argument("--json", default=DEFAULT_JSON_REL,
                     help="Output JSON path, relative to project")
     ap.add_argument("--scan-meta", default=None,
@@ -4998,6 +5026,36 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not checkpoint_enabled:
         print(f"[lec_run] WARN: proof checkpointing OFF — "
               f"{checkpoint_disabled_reason}", file=sys.stderr)
+    if args.max_completed_rungs is not None and not checkpoint_enabled:
+        # The counter has no honest boundary without a re-hashable completed
+        # checkpoint.  Refuse before launching Yosys rather than degrade into
+        # the old one-process/unbounded path while still claiming the cap.
+        _receipt = rpt_out.parent / (
+            f"{CONTROLLED_LIMIT_RECEIPT_PREFIX}.{invocation_id}.json")
+        _doc = {
+            "schema_version": CONTROLLED_LIMIT_RECEIPT_SCHEMA_VERSION,
+            "invocation_id": invocation_id,
+            "verdict": "INCONCLUSIVE",
+            "equivalent": False,
+            "policy": {"enabled": True,
+                       "max_completed_rungs": args.max_completed_rungs},
+            "reason": "REFUSED_NO_CHECKPOINT_BOUNDARY",
+            "checkpoint_reason": checkpoint_disabled_reason,
+            "statement": (
+                "No LEC rung was launched: an opt-in completed-rung policy "
+                "requires a writable, verifiable checkpoint boundary."),
+        }
+        _atomic_write_json(_receipt, _doc)
+        _atomic_write_json(json_out, {
+            "verdict": "INCONCLUSIVE",
+            "equivalent": False,
+            "verdict_explanation": _doc["statement"],
+            "bounded_rung_policy": _doc["policy"],
+            "controlled_limit_receipt": str(_receipt.relative_to(project)),
+        })
+        print("[lec_run] REFUSED: --max-completed-rungs requires a "
+              "writable checkpoint boundary", file=sys.stderr)
+        return 2
     resume_record: Dict[str, Any] = {
         "enabled": checkpoint_enabled,
         "reason": checkpoint_disabled_reason,
@@ -5029,6 +5087,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         "sum_of_rung_peaks_kib": None,
         "proof_state_carry": None,
     }
+    # This is deliberately separate from StepBudget.  StepBudget records a
+    # caller's elapsed-time admission budget but, by current doctrine, does
+    # not kill a progressing proof.  The optional cap below is a deterministic
+    # count of COMPLETE rungs and can therefore stop only where the checkpoint
+    # protocol has already made the state durable and independently verifiable.
+    bounded_rung_policy: Dict[str, Any] = {
+        "schema_version": "vibeic.lec.completed-rung-cap.v1",
+        "enabled": args.max_completed_rungs is not None,
+        "max_completed_rungs": args.max_completed_rungs,
+        "completed_rungs_this_invocation": 0,
+        "limit_reached": False,
+        "stopped_before_rung": None,
+        "reason": (None if args.max_completed_rungs is not None
+                   else "not requested"),
+    }
+    controlled_rung_limit_hit = False
 
     proof_execution: Dict[str, Any] = {
         "schema_version": LEC_PROOF_EXECUTION_SCHEMA_VERSION,
@@ -5163,7 +5237,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     def _run(frontend: str, slang_prefix: str = "",
              defines: str = "-DSIMULATION -DYOSYS"):
-        nonlocal cache_hit_report, final_proof_identity
+        nonlocal cache_hit_report, final_proof_identity, controlled_rung_limit_hit
         # THE FROM-ZERO SCRIPT FIRST, always — it is what the checkpoint key
         # and the manifest's `base_script_sha256` are computed from, so a
         # resumed run and a from-zero run agree on WHICH ladder wrote a file.
@@ -5342,6 +5416,28 @@ def main(argv: Optional[List[str]] = None) -> int:
             if _at_top and ladder_legs:
                 _ladder_stop = _LADDER_COMPLETE
                 break
+            # A bounded policy is checked only BEFORE a NEW rung.  The
+            # read-back-only final leg remains allowed: it consumes no rung and
+            # is the sole producer of a terminal PASS/FAIL.  Conversely, a
+            # completed rung followed by a cap is explicitly not a PASS just
+            # because its local `equiv_status` happened to sound optimistic.
+            if (not _at_top and args.max_completed_rungs is not None
+                    and bounded_rung_policy[
+                        "completed_rungs_this_invocation"]
+                    >= args.max_completed_rungs):
+                controlled_rung_limit_hit = True
+                bounded_rung_policy.update({
+                    "limit_reached": True,
+                    "stopped_before_rung": LEC_LADDER[_start_index][0],
+                    "reason": (
+                        "completed-rung cap reached at a log-attested "
+                        "checkpoint boundary; no later rung was launched"),
+                })
+                _ladder_stop = (
+                    "controlled completed-rung cap reached before rung "
+                    f"{LEC_LADDER[_start_index][0]}; the prior checkpoint is "
+                    "durable, but no terminal equivalence verdict was run")
+                break
             # `_at_top` with NO legs yet: a PREVIOUS invocation already
             # checkpointed every rung. One leg still has to run — it reads the
             # position back and STATES it — or this invocation launches nothing
@@ -5470,6 +5566,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                               f"checkpoints in {ckpt_dir.name}: {_pruned}",
                               file=sys.stderr)
             ladder_legs.append(_leg)
+            # Count ONLY the rung that actually completed and whose log
+            # attested checkpoint was promoted.  A stopped leg, a partial
+            # `.part`, a top read-back, or a synthetic report never consumes a
+            # unit of this deterministic policy.
+            if (_per_rung and not _at_top and _rung_name in _recorded):
+                bounded_rung_policy["completed_rungs_this_invocation"] += 1
             if _at_top:
                 _ladder_stop = _LADDER_COMPLETE
                 break
@@ -5904,6 +6006,21 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     parsed = parse_equiv_output(
         raw, ladder_complete=ladder_record.get("complete"))
+    if controlled_rung_limit_hit:
+        # The cap is an operator-requested admission boundary, not equivalence
+        # evidence.  Even if a local rung's `equiv_status` printed a happy
+        # phrase, later required rungs were deliberately not launched, so the
+        # only honest terminal result is INCONCLUSIVE.  Keep measured point
+        # counts and parser diagnostics intact; override only the conclusion.
+        parsed = dict(parsed)
+        parsed["verdict"] = "INCONCLUSIVE"
+        parsed["equivalent"] = False
+        parsed["verdict_explanation"] = (
+            "Controlled completed-rung limit reached after "
+            f"{bounded_rung_policy['completed_rungs_this_invocation']} "
+            "log-attested checkpointed rung(s); no later rung was launched. "
+            "The proof is resumable where the receipt names it, but the "
+            "designs are neither proven equivalent nor proven different.")
     if cache_hit_report is not None:
         report = copy.deepcopy(cache_hit_report)
         report.pop("_cache_source_rpt", None)
@@ -5956,6 +6073,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # scan netlist compared WITHOUT the constraints is visible as such rather
     # than looking like an ordinary comparison.
     report["scan_functional_mode"] = scan_record
+    report["bounded_rung_policy"] = bounded_rung_policy
     # WHERE THIS PROOF CAN BE PICKED UP FROM. Without this a reader of a
     # stalled or budget-stopped lec.json cannot tell that the work the run DID
     # do is on disk and where — which is why every restart used to re-prove
@@ -6036,6 +6154,44 @@ def main(argv: Optional[List[str]] = None) -> int:
         }
     else:
         report["proof_execution"] = proof_execution
+    # A per-invocation receipt prevents a later normal run from silently
+    # overwriting the finding that this particular invocation stopped by its
+    # requested resource counter.  It is written atomically, and the main
+    # report names its exact path.  No receipt is emitted on the default path.
+    if controlled_rung_limit_hit:
+        controlled_receipt = rpt_out.parent / (
+            f"{CONTROLLED_LIMIT_RECEIPT_PREFIX}.{invocation_id}.json")
+        controlled_doc = {
+            "schema_version": CONTROLLED_LIMIT_RECEIPT_SCHEMA_VERSION,
+            "invocation_id": invocation_id,
+            "verdict": "INCONCLUSIVE",
+            "equivalent": False,
+            "policy": bounded_rung_policy,
+            "stopped_because": ladder_record.get("stopped_because"),
+            "checkpoint": {
+                "state": resume_record.get("state"),
+                "resumable_from_rung": resume_record.get("resumable_from_rung"),
+                "rungs_available": resume_record.get("rungs_available"),
+                "checkpoint_key": resume_record.get("checkpoint_key"),
+            },
+            "measured_counts": {
+                "compared_points": report.get("compared_points"),
+                "unproven_points": report.get("unproven_points"),
+                "non_equivalent_points": report.get("non_equivalent_points"),
+            },
+            "statement": (
+                "A deterministic completed-rung policy stopped this "
+                "invocation between complete checkpoints. This receipt is not "
+                "a PASS or FAIL and cannot seed the PASS cache."),
+        }
+        _atomic_write_json(controlled_receipt, controlled_doc)
+        try:
+            report["controlled_limit_receipt"] = str(
+                controlled_receipt.relative_to(project))
+        except ValueError:
+            report["controlled_limit_receipt"] = str(controlled_receipt)
+    else:
+        report["controlled_limit_receipt"] = None
     if final_proof_identity is not None:
         report["proof_identity"] = final_proof_identity
     if cache_hit_report is None:

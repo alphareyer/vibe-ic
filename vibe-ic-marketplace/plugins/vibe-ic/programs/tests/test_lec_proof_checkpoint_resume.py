@@ -549,6 +549,81 @@ def test_e2e_a_stopped_run_says_which_rung_it_can_be_resumed_from(monkeypatch,
                                        "equiv_induct_seq4"]
 
 
+def test_completed_rung_cap_stops_at_a_checkpoint_and_writes_inconclusive_receipt(
+        monkeypatch, tmp_path):
+    """The opt-in cap is a work counter, not a clock that kills a live proof.
+
+    The fake returns a superficially happy `equiv_status` after every leg.  A
+    cap after the first complete rung must nevertheless say INCONCLUSIVE,
+    launch no second rung, record the durable checkpoint, and never seed PASS
+    cache.  That is the positive control against treating a partial ladder as
+    PASS just because one leg printed a success phrase.
+    """
+    proj = _project(tmp_path)
+    scripts = []
+    _install_fake_yosys(monkeypatch, scripts, stop_after_rung=None,
+                        tail=_PASS_TAIL)
+    argv = [str(proj), "--top", "dut", "--container", "fake",
+            "--liberty", "/missing", "--max-completed-rungs", "1"]
+    assert lec_run.main(argv) == 0
+    rep = json.loads((proj / "reports/lec.json").read_text())
+    assert len(scripts) == 1, "the cap launched a rung after its boundary"
+    assert rep["verdict"] == "INCONCLUSIVE", rep
+    assert rep["equivalent"] is False
+    policy = rep["bounded_rung_policy"]
+    assert policy["enabled"] is True
+    assert policy["completed_rungs_this_invocation"] == 1
+    assert policy["limit_reached"] is True
+    assert policy["stopped_before_rung"] == "equiv_simple_full"
+    assert rep["lec_resume"]["state"] == "RESUMABLE"
+    assert rep["lec_resume"]["resumable_from_rung"] == "equiv_simple_short"
+    assert rep["cache"]["hit"] is False
+    cache = proj / "reports/lec_pass_cache"
+    assert not cache.exists() or not list(cache.rglob("*.json")), (
+        "a controlled INCONCLUSIVE limit wrote a PASS-cache entry")
+    receipt = proj / rep["controlled_limit_receipt"]
+    got = json.loads(receipt.read_text())
+    assert got["verdict"] == "INCONCLUSIVE"
+    assert got["policy"]["completed_rungs_this_invocation"] == 1
+    assert got["checkpoint"]["resumable_from_rung"] == "equiv_simple_short"
+
+    # Removing the OPT-IN cap preserves the old behaviour and resumes rather
+    # than repeating the first complete rung.
+    scripts.clear()
+    assert lec_run.main(argv[:-2]) == 0
+    resumed = json.loads((proj / "reports/lec.json").read_text())
+    assert scripts and scripts[0].startswith("read_rtlil ")
+    assert resumed["bounded_rung_policy"]["enabled"] is False
+    assert resumed["controlled_limit_receipt"] is None
+    assert resumed["verdict"] == "PASS", resumed
+
+
+def test_completed_rung_cap_refuses_without_checkpoint_boundary(monkeypatch,
+                                                                tmp_path):
+    """Negative control: never silently turn the cap into an unbounded run."""
+    proj = _project(tmp_path)
+    scripts = []
+    _install_fake_yosys(monkeypatch, scripts, stop_after_rung=None,
+                        tail=_PASS_TAIL, writable=False)
+    rc = lec_run.main([str(proj), "--top", "dut", "--container", "fake",
+                       "--liberty", "/missing", "--max-completed-rungs", "1"])
+    assert rc == 2
+    assert scripts == [], "a capped invocation ran without a checkpoint boundary"
+    rep = json.loads((proj / "reports/lec.json").read_text())
+    assert rep["verdict"] == "INCONCLUSIVE"
+    assert "No LEC rung was launched" in rep["verdict_explanation"]
+    receipt = proj / rep["controlled_limit_receipt"]
+    got = json.loads(receipt.read_text())
+    assert got["reason"] == "REFUSED_NO_CHECKPOINT_BOUNDARY"
+    assert got["verdict"] == "INCONCLUSIVE"
+
+
+def test_completed_rung_cap_rejects_zero():
+    with pytest.raises(SystemExit):
+        lec_run.main(["/does/not/matter", "--top", "dut",
+                      "--max-completed-rungs", "0"])
+
+
 def test_e2e_checkpointing_is_off_when_the_container_cannot_write(monkeypatch,
                                                                   tmp_path):
     """`write_rtlil` to an unwritable path is a HARD yosys ERROR that aborts
