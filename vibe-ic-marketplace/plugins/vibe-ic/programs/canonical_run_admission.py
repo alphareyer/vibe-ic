@@ -19,10 +19,20 @@ import fcntl
 import hashlib
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
+
+# This module is both imported by the phase runners and independently loaded by
+# the hygiene program inventory.  The latter can execute it from an arbitrary
+# working directory (and with ``-I``), where Python does not promise that this
+# file's directory remains on ``sys.path``.  Keep the explicit sibling lookup
+# before either sibling import; a missing sibling must still fail normally.
+_PROGRAMS_DIR = str(Path(__file__).resolve().parent)
+if _PROGRAMS_DIR not in sys.path:
+    sys.path.insert(0, _PROGRAMS_DIR)
 
 import emit_attestation
 import _eda_pin

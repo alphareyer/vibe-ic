@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,6 +15,28 @@ if str(PROGRAMS) not in sys.path:
 
 import canonical_run_admission as cra  # noqa: E402
 import design_input_digest as did  # noqa: E402
+
+
+def test_standalone_isolated_path_load_resolves_required_siblings(tmp_path):
+    """The inventory may load this file outside ``programs/`` and under ``-I``.
+
+    That path must retain the ordinary, fail-loud sibling imports; this is not
+    an import fallback or a test-only ``PYTHONPATH`` workaround.
+    """
+    target = PROGRAMS / "canonical_run_admission.py"
+    loader = (
+        "import importlib.util, sys; "
+        "p = sys.argv[1]; "
+        "s = importlib.util.spec_from_file_location('isolated_canonical_admission', p); "
+        "m = importlib.util.module_from_spec(s); "
+        "sys.modules[s.name] = m; "
+        "s.loader.exec_module(m); "
+        "assert m.emit_attestation.__file__ and m._eda_pin.__file__"
+    )
+    got = subprocess.run(
+        [sys.executable, "-I", "-c", loader, str(target)],
+        cwd=tmp_path, text=True, capture_output=True)
+    assert got.returncode == 0, got.stderr
 
 
 def _project(root: Path) -> Path:

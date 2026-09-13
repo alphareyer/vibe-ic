@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1308
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1308)
+- **Total programs (excluding helpers / shims):** 1309
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1309)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1299 |
+| `any` | 1300 |
 
 ## Alphabetical listing
 
@@ -187,6 +187,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `canfd_protocol_synth` | any | v0.1.84 | CAN-FD-class protocol synth helper. |
 | `canonical_path_symlink_forbid_check` | any | — | generalised symlink ban for canonical deliverable trees. |
 | `canonical_primitive_synth` | any | — | ONE deterministic SOLVER that emits prompt-derived RTL for SIXTEEN canonical design shapes, keyed on STATED STRUCTURE. |
+| `canonical_run_admission` | any | — | Persistent admission for expensive canonical Phase-2/Phase-3 runs. |
 | `canopen_protocol_synth` | any | — | CANopen (CiA 301) protocol synth helper (protocol #70). |
 | `caravel_integration_runner` | any | v0.1.51 | Caravel chipignite integration runner (B2 from spm pilot). |
 | `caravel_wrapper_emit` | any | v0.1.51 | Caravel user_project_wrapper emitter (B3 from spm pilot). |
@@ -1380,7 +1381,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1299 programs)
+### `any` (1300 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1542,6 +1543,7 @@ _(no programs in this group)_
 - `canfd_protocol_synth` — CAN-FD-class protocol synth helper.  _[v0.1.84]_
 - `canonical_path_symlink_forbid_check` — generalised symlink ban for canonical deliverable trees.
 - `canonical_primitive_synth` — ONE deterministic SOLVER that emits prompt-derived RTL for SIXTEEN canonical design shapes, keyed on STATED STRUCTURE.
+- `canonical_run_admission` — Persistent admission for expensive canonical Phase-2/Phase-3 runs.
 - `canopen_protocol_synth` — CANopen (CiA 301) protocol synth helper (protocol #70).
 - `caravel_integration_runner` — Caravel chipignite integration runner (B2 from spm pilot).  _[v0.1.51]_
 - `caravel_wrapper_emit` — Caravel user_project_wrapper emitter (B3 from spm pilot).  _[v0.1.51]_
