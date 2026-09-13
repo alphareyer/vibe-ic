@@ -602,6 +602,7 @@ endmodule
     meta = proj / "reports/phase2/dft/scan_chain.json"
     meta.parent.mkdir(parents=True)
     meta.write_text(json.dumps({"published": True, "chain_length_matches_flop_count": True,
+        "authorized_by_l20_contract": True,
         "dft_ports": ["serial_in", "serial_out", "scan_enable"],
         "functional_mode_tieoff": {"serial_in": 0, "scan_enable": 0},
         "scan_out_port": "serial_out"}))
