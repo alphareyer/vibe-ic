@@ -348,6 +348,13 @@ WAIVER_KEY = "cross_layer_reference_unresolved"
 WAIVER_MIN_LEN = 40
 MANIFEST_NAME = "cross_layer_references.json"
 BASELINE_NAME = "cross_layer_reference_baseline.json"
+# A denominator is normally monotonic: a smaller population can hide a
+# finding.  This is the *one* explicitly recorded corpus withdrawal that is
+# allowed to start a new comparable population without rewriting the debt
+# register.  It is deliberately a program-owned, sealed contract rather than
+# a sentence in the corpus or an exemption flag on the command line.
+POPULATION_TRANSITION_NAME = "cross_layer_reference_population_transition.json"
+POPULATION_TRANSITION_SCHEMA = "cross_layer_reference_population_transition/v1"
 
 # Finding codes. Ordered from "the reference is broken in the layer set"
 # to "the reference is fine and the consumer cannot see it".
@@ -1169,6 +1176,129 @@ def seal_status(path: Path) -> Tuple[str, str]:
     return "OK", f"{path} matches its own seal"
 
 
+def population_transition_seal(doc: Dict[str, Any]) -> str:
+    """Digest the binding facts of an intentional corpus transition.
+
+    The baseline seal binds the *old* measured denominator.  A transition has
+    to bind that seal, the exact git tree that supplied the *new* population,
+    and the exact resulting denominator.  Prose is deliberately outside this
+    digest, just as comments are outside :func:`register_seal`: editing an
+    explanation must not train a maintainer to re-seal the measurement.
+    """
+    payload = json.dumps(
+        {"schema": doc.get("schema"),
+         "baseline_seal": doc.get("baseline_seal"),
+         "corpus_tree": doc.get("corpus_tree"),
+         "cells_swept": doc.get("cells_swept"),
+         "examined": doc.get("examined")},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return f"{_SEAL_ALGO}:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def population_transition_path() -> Path:
+    """The program-owned transition contract (split out for test injection)."""
+    return _HERE / POPULATION_TRANSITION_NAME
+
+
+def _git_population_tree(corpus: Path) -> Tuple[Optional[str], Optional[str]]:
+    """Return the clean checkout tree containing ``corpus``.
+
+    A contract over ``HEAD^{tree}`` cannot attest bytes read from a dirty work
+    tree.  Refusing that mixed identity is important: otherwise an untracked
+    or modified producer document could be called the recorded transition.
+    """
+    try:
+        root = subprocess.run(
+            ["git", "-C", str(corpus), "rev-parse", "--show-toplevel"],
+            check=False, capture_output=True, text=True, timeout=10)
+        if root.returncode != 0 or not root.stdout.strip():
+            return None, "the corpus is not inside a readable git checkout"
+        dirty = subprocess.run(
+            ["git", "-C", str(corpus), "status", "--porcelain",
+             "--untracked-files=all", "--", "."],
+            check=False, capture_output=True, text=True, timeout=10)
+        if dirty.returncode != 0:
+            return None, "git could not determine whether the corpus is clean"
+        if dirty.stdout.strip():
+            return None, "the corpus checkout is dirty, so its bytes do not bind its tree"
+        tree = subprocess.run(
+            ["git", "-C", str(corpus), "rev-parse", "HEAD^{tree}"],
+            check=False, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"git could not identify the corpus tree ({exc})"
+    if tree.returncode != 0 or not tree.stdout.strip():
+        return None, "git could not resolve the corpus HEAD tree"
+    return tree.stdout.strip(), None
+
+
+def population_transition_status(
+        corpus: Path, report: Dict[str, Any], baseline: Path
+        ) -> Tuple[str, str]:
+    """Adjudicate a sealed, exact population transition.
+
+    This does *not* author a new baseline.  It only says that the baseline's
+    recorded population was intentionally replaced by this exact clean git
+    tree.  Any later shrink, source/collection loss, dirty corpus, missing
+    evidence, malformed evidence, or hand edit stays a failure at the caller.
+    """
+    path = population_transition_path()
+    if not path.is_file():
+        return "MISSING", f"no population transition contract at {path}"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:                    # noqa: BLE001
+        return "UNREADABLE", f"{path} could not be read as JSON ({exc})"
+    if not isinstance(doc, dict):
+        return "MALFORMED", f"{path} is not a JSON object"
+    if doc.get("schema") != POPULATION_TRANSITION_SCHEMA:
+        return "MALFORMED", f"{path} has no supported transition schema"
+    rationale = doc.get("rationale")
+    if not isinstance(rationale, str) or len(rationale.strip()) < 40:
+        return "MALFORMED", f"{path} has no substantive transition rationale"
+    if not isinstance(doc.get("cells_swept"), int) or doc["cells_swept"] < 1:
+        return "MALFORMED", f"{path} has no positive cells_swept measurement"
+    if not isinstance(doc.get("examined"), dict) or any(
+            not isinstance(k, str) or not isinstance(v, int) or v < 0
+            for k, v in doc["examined"].items()):
+        return "MALFORMED", f"{path} has no valid examined measurement"
+    seal = doc.get(SEAL_KEY)
+    if not isinstance(seal, str) or not seal:
+        return "MALFORMED", f"{path} has no transition seal"
+    want = population_transition_seal(doc)
+    if seal != want:
+        return "MISMATCH", (
+            f"{path} records {SEAL_KEY}={seal}, but its binding facts digest "
+            f"to {want}")
+    bstatus, _ = seal_status(baseline)
+    if bstatus != "OK":
+        return "BASELINE_UNSEALED", (
+            "the debt register has no valid seal, so a transition cannot bind "
+            "the population it claims to replace")
+    baseline_doc = json.loads(baseline.read_text(encoding="utf-8"))
+    if doc.get("baseline_seal") != baseline_doc.get(SEAL_KEY):
+        return "BASELINE_MISMATCH", (
+            "the contract does not bind the current debt-register seal")
+    tree, error = _git_population_tree(corpus)
+    if error:
+        return "CORPUS_UNATTESTED", error
+    if doc.get("corpus_tree") != tree:
+        return "TREE_MISMATCH", (
+            f"the contract binds corpus tree {doc.get('corpus_tree')!r}, "
+            f"but this sweep read {tree!r}")
+    actual_examined = report.get("examined")
+    if doc["examined"] != actual_examined:
+        return "POPULATION_MISMATCH", (
+            f"the contract records examined={doc['examined']!r}, but this "
+            f"sweep measured {actual_examined!r}")
+    if doc["cells_swept"] != len(report.get("cells") or []):
+        return "CELL_COUNT_MISMATCH", (
+            f"the contract records {doc['cells_swept']} cell(s), but this "
+            f"sweep measured {len(report.get('cells') or [])}")
+    return "OK", (
+        f"sealed transition binds baseline {doc['baseline_seal']} to clean "
+        f"corpus tree {tree} ({doc['cells_swept']} cell(s))")
+
+
 def compare_denominator(examined: Dict[str, int],
                         recorded: Optional[Dict[str, int]],
                         offered: Optional[Dict[str, int]] = None,
@@ -1532,6 +1662,24 @@ def main(argv: Optional[List[str]] = None) -> int:
                                      report["offered"], report["unreached"])
         under_reach = compare_reach(report["offered"], report["examined"],
                                     report["unreached"])
+        # A smaller denominator is normally a hard failure.  There is no
+        # command-line waiver for it: an intentional corpus withdrawal must
+        # be recorded before this run as a sealed contract that binds both the
+        # old register and this exact clean corpus tree.  This preserves the
+        # per-corpus reach check above and the finding ratchet below; it only
+        # prevents a documented population migration from being mislabelled as
+        # an emitter/manifest regression forever.
+        transition_status, transition_detail = "NOT_NEEDED", ""
+        # ``compare_denominator`` has two kinds of shrink: its ordinary rows
+        # are themselves lost reach (field/layer/collection disappeared), and
+        # only the explicitly labelled SMALLER POPULATION row is eligible for
+        # a population transition.  Never let a contract intercept the former.
+        if (shrunk and not under_reach and
+                all(line.startswith("SMALLER POPULATION") for line in shrunk)):
+            transition_status, transition_detail = population_transition_status(
+                corpus, report, bpath)
+            if transition_status == "OK":
+                shrunk = []
         n_cells = len(report["cells"])
         n_find = sum(len(c["findings"]) for c in report["cells"])
         n_exam = sum(report["examined"].values())
@@ -1594,6 +1742,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"[FAIL] cross-layer reference sweep LOST REACH: {line}",
                       file=sys.stderr)
             return 1
+        if transition_status not in ("NOT_NEEDED", "OK"):
+            print(f"[FAIL] cross-layer population transition: "
+                  f"{transition_status}: {transition_detail}",
+                  file=sys.stderr)
+            return 1
+        if transition_status == "OK":
+            print(f"  (population transition) {transition_detail}")
         if shrunk:
             for line in shrunk:
                 # The prefix is part of the verdict, so it may not name a

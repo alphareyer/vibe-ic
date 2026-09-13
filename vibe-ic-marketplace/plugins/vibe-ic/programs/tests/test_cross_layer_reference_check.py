@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -382,6 +383,62 @@ def _corpus(tmp_path, n_broken: int) -> Path:
     return corpus
 
 
+def _commit_corpus(corpus: Path) -> None:
+    """Make the synthesized corpus a clean published tree for transition tests."""
+    for cmd in (
+            ["git", "init", "-q", str(corpus)],
+            ["git", "-C", str(corpus), "config", "user.email",
+             "test@example.invalid"],
+            ["git", "-C", str(corpus), "config", "user.name", "test"],
+            ["git", "-C", str(corpus), "add", "."],
+            ["git", "-C", str(corpus), "commit", "-qm", "fixture"]):
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+
+def _four_record_cell(corpus: Path, *, param=True) -> None:
+    """One neutral cell with the real transition's 8 -> 4 denominator shape."""
+    _build(corpus / "cell")
+    l9_path = (corpus / "cell" / "phase1" / "generated_docs" /
+               "L9_INTEGRATION_SPEC.json")
+    l9 = json.loads(l9_path.read_text())
+    l9["top_module_pins"] = l9["ports"]
+    if not param:
+        param_path = (corpus / "cell" / "phase1" / "generated_docs" /
+                      "L8_RTL_CONSTANTS.json")
+        param_path.write_text(json.dumps({"parameters": []}), encoding="utf-8")
+    l9_path.write_text(json.dumps(l9), encoding="utf-8")
+
+
+def _transition_contract(tmp_path: Path, corpus: Path, report, baseline: Path) -> Path:
+    tree, error = mod._git_population_tree(corpus)
+    assert error is None
+    bdoc = json.loads(baseline.read_text())
+    doc = {
+        "schema": mod.POPULATION_TRANSITION_SCHEMA,
+        "baseline_seal": bdoc[mod.SEAL_KEY],
+        "corpus_tree": tree,
+        "cells_swept": len(report["cells"]),
+        "examined": report["examined"],
+        "rationale": ("The previous published population was withdrawn for "
+                      "evidence integrity; this clean fixture tree is the "
+                      "explicit replacement population, not an exemption."),
+    }
+    doc[mod.SEAL_KEY] = mod.population_transition_seal(doc)
+    path = tmp_path / "transition.json"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+def _eight_record_baseline(path: Path) -> None:
+    doc = {
+        "recorded": {"port_width_symbolic_to_parameter":
+                     {mod.CONSUMER_BLIND: 2}},
+        "examined": {"port_width_symbolic_to_parameter": 8},
+    }
+    doc[mod.SEAL_KEY] = mod.register_seal(doc)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+
+
 def test_corpus_regression_fails_on_a_new_break(tmp_path):
     corpus = _corpus(tmp_path, 1)
     base = tmp_path / "baseline.json"
@@ -505,6 +562,101 @@ def test_a_repair_at_constant_reach_is_still_a_pass(tmp_path):
     assert after["examined"] == before, "precondition: reach is unchanged"
     assert after["counts"] != before, "precondition: the findings dropped"
     assert rc == 0
+
+
+def test_sealed_population_transition_accepts_exact_intentional_8_to_4(
+        tmp_path, monkeypatch, capsys):
+    """The actual corpus shape: 8 recorded producer records, 4 retained.
+
+    The retained cell still carries the real finding, so this is not a
+    baseline rewrite or a fake repair.  The manifest reaches all four current
+    records and the finding count has not grown; only then can the explicitly
+    sealed population transition make the two verdicts comparable.
+    """
+    corpus = tmp_path / "corpus"
+    _four_record_cell(corpus)
+    _commit_corpus(corpus)
+    baseline = tmp_path / "baseline.json"
+    _eight_record_baseline(baseline)
+    report = mod.check_corpus(corpus, mod.load_manifest(None))
+    assert report["examined"] == {"port_width_symbolic_to_parameter": 4}
+    assert report["offered"] == report["examined"]
+    assert report["counts"] == {"port_width_symbolic_to_parameter":
+                                {mod.CONSUMER_BLIND: 1}}
+    contract = _transition_contract(tmp_path, corpus, report, baseline)
+    monkeypatch.setattr(mod, "population_transition_path", lambda: contract)
+    assert mod.main(["--corpus", str(corpus), "--baseline", str(baseline)]) == 0
+    assert "population transition" in capsys.readouterr().out
+
+
+def test_population_transition_missing_or_forged_still_fails(tmp_path,
+                                                              monkeypatch):
+    corpus = tmp_path / "corpus"
+    _four_record_cell(corpus)
+    _commit_corpus(corpus)
+    baseline = tmp_path / "baseline.json"
+    _eight_record_baseline(baseline)
+    report = mod.check_corpus(corpus, mod.load_manifest(None))
+    contract = _transition_contract(tmp_path, corpus, report, baseline)
+    monkeypatch.setattr(mod, "population_transition_path", lambda: contract)
+    # A forged binding fact, left with the original seal, must not bless the
+    # exact same 8 -> 4 observation.
+    doc = json.loads(contract.read_text())
+    doc["cells_swept"] = 2
+    contract.write_text(json.dumps(doc), encoding="utf-8")
+    assert mod.main(["--corpus", str(corpus), "--baseline", str(baseline)]) == 1
+
+
+def test_population_transition_rejects_a_later_arbitrary_shrink(
+        tmp_path, monkeypatch):
+    corpus = tmp_path / "corpus"
+    _four_record_cell(corpus)
+    _commit_corpus(corpus)
+    baseline = tmp_path / "baseline.json"
+    _eight_record_baseline(baseline)
+    report = mod.check_corpus(corpus, mod.load_manifest(None))
+    contract = _transition_contract(tmp_path, corpus, report, baseline)
+    monkeypatch.setattr(mod, "population_transition_path", lambda: contract)
+    assert mod.main(["--corpus", str(corpus), "--baseline", str(baseline)]) == 0
+
+    # A later publication drops one declared carrier.  It remains internally
+    # reachable, so only the exact population/tree binding can distinguish it
+    # from the recorded withdrawal; the old contract must reject it.
+    l9_path = (corpus / "cell" / "phase1" / "generated_docs" /
+               "L9_INTEGRATION_SPEC.json")
+    l9 = json.loads(l9_path.read_text())
+    del l9["top_module_pins"]
+    l9_path.write_text(json.dumps(l9), encoding="utf-8")
+    for cmd in (["git", "-C", str(corpus), "add", "."],
+                ["git", "-C", str(corpus), "commit", "-qm", "shrink"]):
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    assert mod.main(["--corpus", str(corpus), "--baseline", str(baseline)]) == 1
+
+
+def test_population_transition_does_not_hide_new_finding_or_lost_reach(
+        tmp_path, monkeypatch):
+    # Same four-record population, but its only finding changes to a code the
+    # old register never recorded.  An exact, sealed transition cannot turn a
+    # new defect into an improvement.
+    corpus = tmp_path / "corpus"
+    _four_record_cell(corpus, param=False)
+    _commit_corpus(corpus)
+    baseline = tmp_path / "baseline.json"
+    _eight_record_baseline(baseline)
+    report = mod.check_corpus(corpus, mod.load_manifest(None))
+    assert report["examined"] == {"port_width_symbolic_to_parameter": 4}
+    assert report["counts"] == {"port_width_symbolic_to_parameter":
+                                {mod.DANGLING: 1}}
+    contract = _transition_contract(tmp_path, corpus, report, baseline)
+    monkeypatch.setattr(mod, "population_transition_path", lambda: contract)
+    assert mod.main(["--corpus", str(corpus), "--baseline", str(baseline)]) == 1
+
+    # The same valid contract also cannot conceal a manifest that stopped
+    # selecting an offered collection.
+    manifest = _mutated_manifest(
+        tmp_path, lambda r: r["producer"]["collections"].remove("ports"))
+    assert mod.main(["--corpus", str(corpus), "--baseline", str(baseline),
+                     "--manifest", str(manifest)]) == 1
 
 
 def test_a_sweep_that_finds_no_cell_is_not_checked_not_a_pass(tmp_path):

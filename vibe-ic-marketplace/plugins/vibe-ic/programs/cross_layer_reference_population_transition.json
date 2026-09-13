@@ -1,0 +1,12 @@
+{
+  "_comment": "One sealed corpus-population transition. It is not a baseline rewrite and it grants no finding or reach exemption: the checker still requires the manifest to reach every producer record and rejects new findings. The external corpus deliberately withdrew its former published population because its evidence was not fit to publish; the retained specimen is bound by its exact clean git tree.",
+  "schema": "cross_layer_reference_population_transition/v1",
+  "baseline_seal": "sha256:0be298e0060f264f875385cde3afd821cb54adcbb15bb52124d3f529d5be90af",
+  "corpus_tree": "a1143e3da43514d81940d5e691174a3a0a750878",
+  "cells_swept": 1,
+  "examined": {
+    "port_width_symbolic_to_parameter": 4
+  },
+  "rationale": "The previously published corpus was deliberately withdrawn for evidence integrity. The retained specimen is the explicit replacement population, not a repaired finding or a reason to omit reach and regression checks.",
+  "seal": "sha256:876910a28e257f48fdec8ae7eafd426dd6123f09854f18f17a636216e8202754"
+}
