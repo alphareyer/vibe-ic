@@ -26,6 +26,14 @@ from __future__ import annotations
 import os as _os                                                    # noqa: E402
 import sys as _sys                                                  # noqa: E402
 
+# This coordinator is sometimes invoked directly as ``python3 -I``.  Isolated
+# mode discards PYTHONDONTWRITEBYTECODE, and this file imports its siblings
+# before it can start the shell gate that exports that variable.  Keep the
+# protection local to that isolated coordinator: it is the process that owns
+# the fresh tree, not a global environment policy for every Python process.
+if _sys.flags.isolated:
+    _sys.dont_write_bytecode = True
+
 if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 # ---------------------------------------------------------------------------
