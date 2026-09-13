@@ -19187,8 +19187,41 @@ def _derive_dft_reset_name(blob: str) -> Tuple[str, bool]:
 # that the producer's fault sample is sized by the producer alone.
 
 
+def _lec_run_argv(project: Path, lec_run: Path, gate_netlist: str,
+                  top_name: str, container: str, *,
+                  lec_max_completed_rungs: Optional[int] = None) -> List[str]:
+    """Build the one Step-13 producer argv without inventing a policy.
+
+    ``None`` deliberately means that no completed-rung policy was requested:
+    the producer retains its unbounded default.  A positive value is validated
+    at both public runner entry points before it reaches here; keep the helper
+    narrow so a future caller cannot accidentally turn an omitted opt-in into
+    a different LEC invocation.
+    """
+    cmd = [sys.executable, str(lec_run), str(project),
+           "--gold-rtl-dir", "phase2/stage1/rtl",
+           "--gate-netlist", gate_netlist, "--top", top_name,
+           "--container", container, "--json", "reports/lec.json"]
+    if lec_max_completed_rungs is not None:
+        cmd += ["--max-completed-rungs", str(lec_max_completed_rungs)]
+    return cmd
+
+
+def _positive_completed_rung_cap(value: str) -> int:
+    """Argparse type for the explicit bounded-LEC opt-in."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def step_dft_lec_chain(project: Path, top_name: str, container: str,
-                       ic_class: str, full_chip: bool = True
+                       ic_class: str, full_chip: bool = True,
+                       lec_max_completed_rungs: Optional[int] = None
                        ) -> List[StepResult]:
     """Flow steps 11-13 (stage-2 DFT → post-DFT → LEC).
 
@@ -19998,10 +20031,9 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
         _lec_gns.gate_netlist_for_lec(project, top_name))
     lec_run = PROGRAMS_DIR / "lec_run.py"
     if lec_run.is_file():
-        cmd = [sys.executable, str(lec_run), str(project),
-               "--gold-rtl-dir", "phase2/stage1/rtl",
-               "--gate-netlist", gate_netlist, "--top", top_name,
-               "--container", container, "--json", "reports/lec.json"]
+        cmd = _lec_run_argv(
+            project, lec_run, gate_netlist, top_name, container,
+            lec_max_completed_rungs=lec_max_completed_rungs)
         # FUNCTIONAL-MODE CONSTRAINTS — only when this run really has a scan
         # chain. The gate netlist then carries `sin`/`shift`/`test`/`tck`/`sout`,
         # which the RTL gold does not have, and yosys `equiv_make` hard-errors
@@ -21625,6 +21657,11 @@ def main() -> int:
                         "longer pays for a DFT/LEC chain nothing downstream "
                         "reads.")
     p.add_argument("--max-rtl-repair-retries", type=int, default=3)
+    p.add_argument("--lec-max-completed-rungs",
+                   type=_positive_completed_rung_cap, default=None,
+                   help="OPT-IN: forward this positive completed-checkpoint "
+                        "rung cap only to Step 13 lec_run.py. Omitted keeps "
+                        "LEC unbounded; this is never a wall-clock timeout.")
     p.add_argument("--top-name", default="chip_top")
     p.add_argument("--container", default=_pin.default_container_name())
     p.add_argument("--skip-phase3", action="store_true",
@@ -21767,7 +21804,8 @@ def main() -> int:
          "skip_hardware": args.skip_hardware, "skip_phase3": args.skip_phase3,
          "skip_analog": args.skip_analog, "entry_step": args.entry_step,
          "exit_step": args.exit_step, "force_rtl_regen": args.force_rtl_regen,
-         "dry_run": args.dry_run})
+         "dry_run": args.dry_run,
+         "lec_max_completed_rungs": args.lec_max_completed_rungs})
     if not _canonical.admitted:
         print(f"REFUSED: canonical Phase-2 admission: {_canonical.reason} "
               f"({_canonical.detail})", file=sys.stderr)
@@ -22468,6 +22506,7 @@ def main() -> int:
                 detail, extras)],
             step_dft_lec_chain, project, args.top_name, args.container,
             ic_class, full_chip=not args.skip_phase3,
+            lec_max_completed_rungs=args.lec_max_completed_rungs,
             _preflight_not_applicable=(_analog_reason if _analog_absent
                                        else None))
         plan.extend(_dft_chain)

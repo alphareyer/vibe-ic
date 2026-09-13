@@ -572,6 +572,47 @@ def _run_phase(label: str, runner: Path, args: List[str],
     return cp.returncode
 
 
+def _positive_completed_rung_cap(value: str) -> int:
+    """Validate the canonical front-door's explicit bounded-LEC opt-in."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _phase2_runner_argv(project: Path, *, top_name: str, container: str,
+                       max_rtl_repair_retries: int,
+                       lec_max_completed_rungs: Optional[int],
+                       skip_hardware: bool, skip_phase3: bool,
+                       skip_analog: bool, entry_step: Optional[str],
+                       exit_step: Optional[str]) -> List[str]:
+    """Build the canonical Phase-2 argv with explicit opt-ins only.
+
+    The bounded LEC value is absent by default, preserving Step 13's
+    unbounded producer behaviour.  This seam is deliberately pure so the
+    front-door forwarding contract can be tested without launching a flow.
+    """
+    result = [str(project), "--top-name", top_name, "--container", container,
+              "--max-rtl-repair-retries", str(max_rtl_repair_retries)]
+    if lec_max_completed_rungs is not None:
+        result += ["--lec-max-completed-rungs", str(lec_max_completed_rungs)]
+    if skip_hardware:
+        result.append("--skip-hardware")
+    if skip_phase3:
+        result.append("--skip-phase3")
+    if skip_analog:
+        result.append("--skip-analog")
+    if entry_step:
+        result += ["--entry-step", str(entry_step)]
+    if exit_step:
+        result += ["--exit-step", str(exit_step)]
+    return result
+
+
 def _read_report(p: Path) -> Dict[str, Any]:
     if not p.is_file():
         return {}
@@ -773,6 +814,11 @@ def main() -> int:
                         "Omitted: the image identity is still RECORDED to "
                         "reports/container_image.json, just not enforced.")
     p.add_argument("--max-rtl-repair-retries", type=int, default=3)
+    p.add_argument("--lec-max-completed-rungs",
+                   type=_positive_completed_rung_cap, default=None,
+                   help="OPT-IN: forward this positive completed-checkpoint "
+                        "rung cap only to Phase-2 Step 13 LEC. Omitted keeps "
+                        "LEC unbounded; this is not a wall-clock timeout.")
     p.add_argument("--skip-hardware", action="store_true")
     p.add_argument("--entry-step", default=None,
                    help="START the flow at this canonical step id. The step "
@@ -1125,23 +1171,13 @@ def main() -> int:
     # ---------------- Phase 2 ----------------
     if not halted_at:
         runner = _phase_runner("phase2")
-        p2_args = [str(project),
-                   "--top-name", flow_top,
-                   "--container", args.container,
-                   "--max-rtl-repair-retries", str(args.max_rtl_repair_retries)]
-        if args.skip_hardware:
-            p2_args.append("--skip-hardware")
         # Forward --skip-phase3 so phase2's DFT/LEC chain (steps 11-13) gates the
         # heavy Fault ATPG OFF on a lightweight/RTL-only run (no silicon target),
         # while still running the fast LEC. On a full-chip flow (no --skip-phase3)
         # the full DFT insertion + ATPG runs.
-        if args.skip_phase3:
-            p2_args.append("--skip-phase3")
         # v0.1.54 capture: forward --skip-analog so phase2 final_audit doesn't
         # FAIL a digital-only project on missing phase1/analog/analog_block_list.json.
         # (1) User explicitly asked to skip the analog track.
-        if args.skip_analog:
-            p2_args.append("--skip-analog")
         # (2) #459: the orchestrator's OWN analog decision is authoritative. If
         # we are NOT running the A-track because _need_analog()==False (even
         # without a user --skip-analog), phase2's final_audit must agree — so
@@ -1149,22 +1185,31 @@ def main() -> int:
         # (run_analog==True) the flag is NEVER injected, so the A-track and its
         # final_audit condition stay active (corpus-sweep guard). The membership
         # guard makes (1)+(2) idempotent (no duplicate append).
-        elif not run_analog:
-            p2_args.append("--skip-analog")
-        if _entry_runner == "design_one_shot_runner":
-            p2_args += ["--entry-step", str(args.entry_step)]
+        # `--skip-analog` is emitted once below from this resolved decision.
         # Forward --exit-step the same way --entry-step travels: the phase2
         # runner owns the site table, so the mapping (and the refusal for an
         # unmappable value) happens there, not here.
-        if args.exit_step:
-            p2_args += ["--exit-step", str(args.exit_step)]
+        p2_args = _phase2_runner_argv(
+            project, top_name=flow_top, container=args.container,
+            max_rtl_repair_retries=args.max_rtl_repair_retries,
+            lec_max_completed_rungs=args.lec_max_completed_rungs,
+            skip_hardware=args.skip_hardware, skip_phase3=args.skip_phase3,
+            skip_analog=False,
+            entry_step=(str(args.entry_step)
+                        if _entry_runner == "design_one_shot_runner" else None),
+            exit_step=(str(args.exit_step) if args.exit_step else None))
+        if args.skip_analog:
+            p2_args.append("--skip-analog")
+        elif not run_analog:
+            p2_args.append("--skip-analog")
         p2_admission = _canonical_admission.admit_span(
             project, "phase2", PROGRAMS_DIR, args.container,
             {"top_name": flow_top, "max_rtl_repair_retries": args.max_rtl_repair_retries,
              "skip_hardware": args.skip_hardware, "skip_phase3": args.skip_phase3,
              "skip_analog": "--skip-analog" in p2_args,
              "entry_step": args.entry_step, "exit_step": args.exit_step,
-             "force_rtl_regen": False, "dry_run": False})
+             "force_rtl_regen": False, "dry_run": False,
+             "lec_max_completed_rungs": args.lec_max_completed_rungs})
         if not p2_admission.admitted:
             print(f"REFUSED: canonical Phase-2 admission: {p2_admission.reason} "
                   f"({p2_admission.detail})", file=sys.stderr)
