@@ -65,6 +65,17 @@ def test_accepts_only_connected_strictly_improved_candidate(tmp_path):
 
 
 @needs_tclsh
+def test_accepts_drv_candidate_when_clean_router_drc_is_preserved(tmp_path):
+    """DRV repair can change cells while a DRC-clean route correctly stays 0."""
+    run, out = _run(tmp_path, before=0, after=0)
+    assert run.returncode == 0, run.stderr
+    assert "SDR_TRANSACTION_ACCEPTED: router_drc clean-preserved (0 -> 0)" in run.stdout
+    assert "FINAL:CANDIDATE ABORT:0" in run.stdout
+    receipt = (out / "sdr_transaction" / "receipt.tsv").read_text()
+    assert "ACCEPTED\trouter_drc_preserved_clean\t0\t0" in receipt
+
+
+@needs_tclsh
 def test_rolls_back_when_router_drc_does_not_strictly_improve(tmp_path):
     run, out = _run(tmp_path, before=4, after=4)
     assert run.returncode == 0, run.stderr

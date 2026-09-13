@@ -24727,7 +24727,15 @@ def _postroute_sdr_transaction_begin_tcl(out_dir_c: str) -> str:
 
 
 def _postroute_sdr_transaction_finish_tcl() -> str:
-    """Commit or restore the bounded SDR candidate; never continue on refusal."""
+    """Commit a safe SDR candidate or restore a regressing one.
+
+    Router DRC is a *safety invariant* for this DRV-focused repair, not its
+    objective.  A clean route therefore remains clean (0 -> 0) while
+    ``repair_design`` removes slew/capacitance/fanout violations.  Treating
+    that as a failed transaction used to invoke ``read_def`` in the already
+    populated OpenROAD database, which is rejected as ODB-0251 and discarded a
+    valid DRV repair.  A non-clean non-improvement is still rolled back.
+    """
     return (
         "  if {$_sdr_tx_ready && $_sdr_tx_mutated} {\n"
         "    if {$_sdr_tx_error || !$_sdr_tx_route_ok} {\n"
@@ -24736,6 +24744,10 @@ def _postroute_sdr_transaction_finish_tcl() -> str:
         "      _sdr_tx_rollback connectivity_error $_sdr_tx_before -1\n"
         "    } elseif {[catch {set _sdr_tx_after [_sdr_tx_count_router_drc $_sdr_tx_report]} _sdr_tx_count_e]} {\n"
         "      _sdr_tx_rollback unreadable_candidate_router_drc $_sdr_tx_before -1\n"
+        "    } elseif {$_sdr_tx_after == 0 && $_sdr_tx_before == 0} {\n"
+        "      file copy -force $_sdr_tx_report $_sdr_tx_dir/accepted_router.drc.rpt\n"
+        "      _sdr_tx_receipt ACCEPTED router_drc_preserved_clean $_sdr_tx_before $_sdr_tx_after\n"
+        "      puts \"SDR_TRANSACTION_ACCEPTED: router_drc clean-preserved ($_sdr_tx_before -> $_sdr_tx_after)\"\n"
         "    } elseif {$_sdr_tx_after >= $_sdr_tx_before} {\n"
         "      _sdr_tx_rollback router_drc_not_strictly_improved $_sdr_tx_before $_sdr_tx_after\n"
         "    } else {\n"
