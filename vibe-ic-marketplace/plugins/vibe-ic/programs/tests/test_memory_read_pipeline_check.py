@@ -133,6 +133,24 @@ def test_non_memory_module_not_flagged(tmp_path):
     assert rc == 0
 
 
+def test_indexed_input_write_is_not_a_memory_read(tmp_path):
+    """A GPIO write from an indexed input bus is not a registered read.
+
+    The RHS has ``name[index]`` syntax, but that name is an input port rather
+    than locally-held memory.  Treating it as a memory read creates a false
+    latency warning and can incorrectly block strict structural acceptance.
+    """
+    src = """
+    module gpio(input clk, input [7:0] wdata, output reg gpio_out);
+        always @(posedge clk) gpio_out <= wdata[0];
+    endmodule
+    """
+    rc, out = _run(tmp_path, src)
+    assert rc == 0
+    assert out["verdict"] == "PASS"
+    assert out["total_findings"] == 0
+
+
 def test_registered_keyword_doc_passes(tmp_path):
     """Doc matches 'registered read'."""
     src = """

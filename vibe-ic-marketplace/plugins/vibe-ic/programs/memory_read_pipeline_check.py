@@ -117,6 +117,10 @@ OUTPUT_REG_RE = re.compile(
 OUTPUT_WIRE_RE = re.compile(
     r"output\s+(?:wire\s+)?(?:\[[^\]]*\]\s+)?([A-Za-z_][A-Za-z0-9_]*)\b",
 )
+INPUT_PORT_RE = re.compile(
+    r"\binput\s+(?:wire\s+|reg\s+|logic\s+)?(?:\[[^\]]*\]\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)\b",
+)
 
 # Registered read form: `<DATA> <= mem[addr];` or `<DATA> <= mem[...];`
 REGISTERED_READ_RE = re.compile(
@@ -183,6 +187,7 @@ def check_file(path: Path) -> list[Finding]:
         combined = header + ";" + body
         output_regs = {m.group(1) for m in OUTPUT_REG_RE.finditer(combined)}
         output_wires = {m.group(1) for m in OUTPUT_WIRE_RE.finditer(combined)}
+        input_ports = {m.group(1) for m in INPUT_PORT_RE.finditer(combined)}
         # output_wires includes output reg in some regex greediness; strip.
         output_wires -= output_regs
 
@@ -190,7 +195,11 @@ def check_file(path: Path) -> list[Finding]:
         reg_reads = []
         for rm in REGISTERED_READ_RE.finditer(body):
             out_name, arr_name = rm.group(1), rm.group(2)
-            if out_name in output_regs:
+            # An indexed input such as ``o_gpio <= i_wdata[0]`` is a
+            # registered write from a bus into a peripheral, not a memory
+            # read.  Only locally held arrays can carry the read-latency
+            # contract this checker enforces.
+            if out_name in output_regs and arr_name not in input_ports:
                 reg_reads.append((out_name, arr_name, rm.start()))
 
         if not reg_reads:
