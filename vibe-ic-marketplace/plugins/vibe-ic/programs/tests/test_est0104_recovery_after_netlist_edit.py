@@ -184,7 +184,15 @@ _LOOP_STUBS = """
 # --- stubs standing in for the OpenROAD/OpenDB commands the loop drives ---
 set CALLS {}
 set _prs_max /dev/null
+set ::DB BASE
 proc _log {c} { global CALLS; lappend CALLS $c }
+proc write_def {path} {
+  set fh [open $path w]; puts -nonewline $fh $::DB; close $fh
+}
+proc read_def {path} {
+  set fh [open $path r]; set ::DB [read $fh]; close $fh
+}
+proc check_connectivity {} { return }
 namespace eval ord { proc get_db_block {} { return BLK } }
 namespace eval rsz { proc find_max_wire_length {} { return 0 } }
 namespace eval odb { proc dbWire_destroy {w} {} }
@@ -226,7 +234,12 @@ proc repair_design {args} {
 }
 proc estimate_parasitics {args} { _log "estimate_parasitics" }
 proc global_route {args} { _log "global_route" }
-proc detailed_route {args} { _log "detailed_route $args" }
+proc detailed_route {args} {
+  _log "detailed_route $args"
+  # A fresh empty native report is a clean candidate route.
+  global ROUTE_DRC
+  set fh [open $ROUTE_DRC w]; close $fh
+}
 proc repair_timing {args} { _log "repair_timing" }
 proc detailed_placement {args} { _log "detailed_placement" }
 proc check_placement {args} { return 0 }
@@ -251,6 +264,12 @@ def _drive_loop(tmpdir, rd_script, spef_exists=True):
     script = " ".join("{%s}" % a for a in rd_script)
     head = _LOOP_STUBS + "\nset RPT %s/sdr_drv.rpt\nset RPT_N 0\nset RD_N 0\nset RD_SCRIPT {%s}\n" % (
         out, script)
+    # The transaction refuses to mutate without a real router baseline.  This
+    # unit fixture supplies one native-format finding, and detailed_route above
+    # replaces it with the clean candidate report.
+    route_drc = os.path.join(out, p3.ROUTER_DRC_REPORT_NAME)
+    open(route_drc, "w").write("violation type: spacing\\n")
+    head += "set ROUTE_DRC {%s}\n" % route_drc
     return _run_tcl(head + tcl)
 
 

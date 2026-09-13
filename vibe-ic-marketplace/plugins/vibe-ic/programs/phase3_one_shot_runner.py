@@ -24655,6 +24655,100 @@ def _est0104_recovery_tcl(spef_c: str, err_var: str, retry_cmd: str,
     )
 
 
+def _postroute_sdr_transaction_begin_tcl(out_dir_c: str) -> str:
+    """Start the generic post-route DRV transaction.
+
+    ``repair_design`` changes instances and nets, so the wire-only transaction
+    used by targeted DRC repair is deliberately insufficient here.  The
+    immutable DEF checkpoint is the recovery authority: a candidate may change
+    the live database only until routing, connectivity, and a fresh router DRC
+    report prove it is strictly better.  A missing/unreadable router report is
+    a refusal, never an invented zero.
+    """
+    report = f"{out_dir_c}/{ROUTER_DRC_REPORT_NAME}"
+    return (
+        "  # === transactional post-route SDR candidate ===\n"
+        "  set _sdr_tx_ready 0\n"
+        "  set _sdr_tx_mutated 0\n"
+        "  set _sdr_tx_error 0\n"
+        "  set _sdr_tx_route_ok 0\n"
+        "  set ::_vic_postroute_transaction_failed 0\n"
+        f"  set _sdr_tx_dir {{{out_dir_c}/sdr_transaction}}\n"
+        f"  set _sdr_tx_report {{{report}}}\n"
+        "  proc _sdr_tx_count_router_drc {_path} {\n"
+        "    if {![file exists $_path]} { error MISSING_ROUTER_DRC_REPORT }\n"
+        "    set _fh [open $_path r]\n"
+        "    set _n 0; set _nonempty 0\n"
+        "    while {[gets $_fh _line] >= 0} {\n"
+        "      if {[string trim $_line] ne \"\"} { set _nonempty 1 }\n"
+        "      if {[string first \"violation type:\" $_line] >= 0} { incr _n }\n"
+        "    }\n"
+        "    close $_fh\n"
+        "    # Empty is the tool's clean report; nonempty without its native\n"
+        "    # record grammar is not a count we may compare.\n"
+        "    if {$_n == 0 && $_nonempty} { error UNREADABLE_ROUTER_DRC_REPORT }\n"
+        "    return $_n\n"
+        "  }\n"
+        "  proc _sdr_tx_receipt {_status _reason _before _after} {\n"
+        "    global _sdr_tx_dir\n"
+        "    if {![file exists $_sdr_tx_dir]} { file mkdir $_sdr_tx_dir }\n"
+        "    set _fh [open \"$_sdr_tx_dir/receipt.tsv\" w]\n"
+        "    puts $_fh \"status\\treason\\tbefore_router_drc\\tafter_router_drc\"\n"
+        "    puts $_fh \"$_status\\t$_reason\\t$_before\\t$_after\"\n"
+        "    close $_fh\n"
+        "  }\n"
+        "  proc _sdr_tx_rollback {_reason _before _after} {\n"
+        "    global _sdr_tx_dir _sdr_tx_report\n"
+        "    if {[file exists $_sdr_tx_report]} {\n"
+        "      file copy -force $_sdr_tx_report $_sdr_tx_dir/rejected_router.drc.rpt\n"
+        "    }\n"
+        "    write_def $_sdr_tx_dir/rejected.def\n"
+        "    read_def $_sdr_tx_dir/pre_repair.def\n"
+        "    write_def $_sdr_tx_dir/restored.def\n"
+        "    _sdr_tx_receipt ROLLED_BACK $_reason $_before $_after\n"
+        "    set ::_vic_postroute_transaction_failed 1\n"
+        "    puts \"SDR_ROLLBACK: reason=$_reason before=$_before after=$_after\"\n"
+        "  }\n"
+        "  if {[catch {\n"
+        "    if {[file exists $_sdr_tx_dir]} { file delete -force $_sdr_tx_dir }\n"
+        "    file mkdir $_sdr_tx_dir\n"
+        "    set _sdr_tx_before [_sdr_tx_count_router_drc $_sdr_tx_report]\n"
+        "    file copy -force $_sdr_tx_report $_sdr_tx_dir/pre_repair_router.drc.rpt\n"
+        "    write_def $_sdr_tx_dir/pre_repair.def\n"
+        "  } _sdr_tx_begin_e]} {\n"
+        "    _sdr_tx_receipt REFUSED $_sdr_tx_begin_e -1 -1\n"
+        "    set ::_vic_postroute_transaction_failed 1\n"
+        "    puts \"SDR_TRANSACTION_REFUSED: $_sdr_tx_begin_e\"\n"
+        "  } else {\n"
+        "    set _sdr_tx_ready 1\n"
+        "    puts \"SDR_TRANSACTION_BEGIN: router_drc=$_sdr_tx_before\"\n"
+        "  }\n"
+    )
+
+
+def _postroute_sdr_transaction_finish_tcl() -> str:
+    """Commit or restore the bounded SDR candidate; never continue on refusal."""
+    return (
+        "  if {$_sdr_tx_ready && $_sdr_tx_mutated} {\n"
+        "    if {$_sdr_tx_error || !$_sdr_tx_route_ok} {\n"
+        "      _sdr_tx_rollback nonfatal_or_route_error $_sdr_tx_before -1\n"
+        "    } elseif {[catch {check_connectivity} _sdr_tx_conn_e]} {\n"
+        "      _sdr_tx_rollback connectivity_error $_sdr_tx_before -1\n"
+        "    } elseif {[catch {set _sdr_tx_after [_sdr_tx_count_router_drc $_sdr_tx_report]} _sdr_tx_count_e]} {\n"
+        "      _sdr_tx_rollback unreadable_candidate_router_drc $_sdr_tx_before -1\n"
+        "    } elseif {$_sdr_tx_after >= $_sdr_tx_before} {\n"
+        "      _sdr_tx_rollback router_drc_not_strictly_improved $_sdr_tx_before $_sdr_tx_after\n"
+        "    } else {\n"
+        "      file copy -force $_sdr_tx_report $_sdr_tx_dir/accepted_router.drc.rpt\n"
+        "      _sdr_tx_receipt ACCEPTED strict_router_drc_improvement $_sdr_tx_before $_sdr_tx_after\n"
+        "      puts \"SDR_TRANSACTION_ACCEPTED: router_drc=$_sdr_tx_before -> $_sdr_tx_after\"\n"
+        "    }\n"
+        "  } elseif {$_sdr_tx_ready} {\n"
+        "    _sdr_tx_receipt NO_CANDIDATE no_repair_needed $_sdr_tx_before $_sdr_tx_before\n"
+        "  }\n"
+    )
+
+
 def _v1_8_100_signoff_drv_repair_tcl(
         out_dir_c: str, fanout_root_buffer_cell: Optional[str] = None) -> str:
     """Bounded repair-until-clean loop on the sign-off-deck SPEF.
@@ -24668,7 +24762,8 @@ def _v1_8_100_signoff_drv_repair_tcl(
     lo = _V1_8_100_DRV_MIN_WIRE_LEN_UM
     return (
         "  # --- v1.8.100 sign-off-domain DRV repair ---\n"
-        "  set _sdr_ok 1\n"
+        + _postroute_sdr_transaction_begin_tcl(out_dir_c)
+        + "  set _sdr_ok $_sdr_tx_ready\n"
         "  set _sdr_mwl 0\n"
         "  if {[catch {\n"
         "    set _sdr_blk [ord::get_db_block]\n"
@@ -24682,7 +24777,7 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # into segments shorter than the span the measurement showed failing.
         # It is only a SEED — the loop halves it whenever a pass does not clear.
         "    set _sdr_mwl [expr {int(min($_sdr_w,$_sdr_h)/8.0)}]\n"
-        "  } _sdr_e]} { puts \"SDR_DIE_NONFATAL: $_sdr_e\"; set _sdr_ok 0 }\n"
+        "  } _sdr_e]} { puts \"SDR_DIE_NONFATAL: $_sdr_e\"; set _sdr_tx_error 1; set _sdr_ok 0 }\n"
         f"  if {{$_sdr_mwl < {lo}}} {{ set _sdr_mwl {lo} }}\n"
         # The GEOMETRIC seed is kept: the electrical floor below can raise the
         # repeater spacing far past it (measured here: 162 -> 3671 um), and a
@@ -24732,12 +24827,12 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "    catch {define_process_corner -ext_model_index 0 X}\n"
         "    if {[catch {extract_parasitics -ext_model_file $_prs_max "
         "-corner_cnt 1 -max_res 50 -coupling_threshold 0.1} _sdr_ex]} {\n"
-        "      puts \"SDR_EXTRACT_NONFATAL: $_sdr_ex\"; break\n"
+        "      puts \"SDR_EXTRACT_NONFATAL: $_sdr_ex\"; set _sdr_tx_error 1; break\n"
         "    }\n"
         f"    if {{[catch {{write_spef {out_dir_c}/sdr_pass.spef}} _sdr_sw]}} "
-        "{ puts \"SDR_SPEFW_NONFATAL: $_sdr_sw\"; break }\n"
+        "{ puts \"SDR_SPEFW_NONFATAL: $_sdr_sw\"; set _sdr_tx_error 1; break }\n"
         f"    if {{[catch {{read_spef {out_dir_c}/sdr_pass.spef}} _sdr_sr]}} "
-        "{ puts \"SDR_SPEFR_NONFATAL: $_sdr_sr\"; break }\n"
+        "{ puts \"SDR_SPEFR_NONFATAL: $_sdr_sr\"; set _sdr_tx_error 1; break }\n"
         # Count the sign-off DRV the same way the Step-23 gate does: the
         # tool's own violator report, not a proxy.
         f"    catch {{report_check_types -max_slew -max_capacitance -max_fanout "
@@ -24782,8 +24877,13 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "    puts \"SDR_DRV_PASS${_sdr_p}_BEFORE: $_sdr_n (max_wire_length=$_sdr_mwl)\"\n"
         "    if {$_sdr_n == 0} { puts \"SDR_CONVERGED: pass $_sdr_p\"; break }\n"
         "    set _sdr_stop 0\n"
-        f"    if {{[catch {{repair_design -max_wire_length $_sdr_mwl "
+        "    set _sdr_tx_mutated 1\n"
+        + f"    if {{[catch {{repair_design -max_wire_length $_sdr_mwl "
         f"-slew_margin {m} -cap_margin {m}}} _sdr_rd]}} {{\n"
+        "      # A caught repair error is not a successful candidate.  Even a\n"
+        "      # bounded recovery below may collect diagnosis, but this turn\n"
+        "      # cannot be committed over the immutable pre-repair route.\n"
+        "      set _sdr_tx_error 1\n"
         + _est0104_recovery_tcl(
             f"{out_dir_c}/sdr_pass.spef",
             "_sdr_rd",
@@ -24856,7 +24956,7 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # same `repair_timing -setup` the flow already runs post-global-
         # route; it belongs after any buffer insertion, not only that one.
         + "    if {[catch {repair_timing -setup} _sdr_rt]} "
-        "{ puts \"SDR_REPAIR_TIMING_NONFATAL: $_sdr_rt\" }\n"
+        "{ puts \"SDR_REPAIR_TIMING_NONFATAL: $_sdr_rt\"; set _sdr_tx_error 1 }\n"
         # LEGALIZE AND VERIFY. A bare catch-guarded detailed_placement
         # says nothing about whether the placement is legal AFTERWARDS:
         # it can return cleanly and still leave overlaps the default
@@ -24866,10 +24966,10 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # either way so the Python side can refuse an illegal die
         # instead of streaming it out (see PNR_PLACEMENT_VIOLATIONS).
         "    if {[catch {detailed_placement} _sdr_dp]} "
-        "{ puts \"SDR_DPL_NONFATAL: $_sdr_dp\" }\n"
+        "{ puts \"SDR_DPL_NONFATAL: $_sdr_dp\"; set _sdr_tx_error 1 }\n"
         "    set _sdr_pv -1\n"
         "    if {[catch {set _sdr_pv [check_placement -no_abort]} _sdr_pe]} "
-        "{ puts \"SDR_DPL_CHECK_NONFATAL: $_sdr_pe\"; set _sdr_pv -1 }\n"
+        "{ puts \"SDR_DPL_CHECK_NONFATAL: $_sdr_pe\"; set _sdr_tx_error 1; set _sdr_pv -1 }\n"
         "    if {[string is integer -strict $_sdr_pv] && $_sdr_pv > 0} {\n"
         "      if {[catch {detailed_placement -use_diamond_legalizer} _sdr_dp2]} "
         "{ puts \"SDR_DPL_DIAMOND_NONFATAL: $_sdr_dp2\" }\n"
@@ -24897,7 +24997,7 @@ def _v1_8_100_signoff_drv_repair_tcl(
         + _spare_safe_routing_clear_tcl("SDR")
         +
         "    if {[catch {global_route} _sdr_gr]} "
-        "{ puts \"SDR_GR_NONFATAL: $_sdr_gr\"; break }\n"
+        "{ puts \"SDR_GR_NONFATAL: $_sdr_gr\"; set _sdr_tx_error 1; break }\n"
         # ASK THE ROUTER FOR ITS DRC REPORT. This reroute can be the LAST one
         # to touch the geometry that ships, so its report is the one that
         # describes the published violations. Same path as the base route's:
@@ -24905,7 +25005,8 @@ def _v1_8_100_signoff_drv_repair_tcl(
         + _route_drc_report_tcl(out_dir_c + "/" + ROUTER_DRC_REPORT_NAME)
         +
         "    if {[catch {detailed_route {*}$_vic_drc_opt} _sdr_dr]} "
-        "{ puts \"SDR_DR_NONFATAL: $_sdr_dr\"; break }\n"
+        "{ puts \"SDR_DR_NONFATAL: $_sdr_dr\"; set _sdr_tx_error 1; set _sdr_tx_route_ok 0; break }\n"
+        "    set _sdr_tx_route_ok 1\n"
         # v1.8.100 r2 — the seed is HELD, not halved. MEASURED (iter1): halving
         # the repeater spacing each pass drove the count 314 -> 747 -> 647 -> 70
         # — over-splitting creates short nets whose OWN pins then violate, the
@@ -24916,7 +25017,8 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "    if {$_sdr_stop} { puts \"SDR_STOPPED_AFTER_PARTIAL_REPAIR: pass $_sdr_p completed (legalized + rerouted)\"; break }\n"
         "  }\n"
         "  }\n"
-        "  puts \"SDR_DONE\"\n"
+        + _postroute_sdr_transaction_finish_tcl()
+        + "  puts \"SDR_DONE\"\n"
     )
 
 
@@ -25866,8 +25968,11 @@ if {{[catch {{write_def {out_dir_c}/routed_preantenna.def}} _cp_err]}} {{
 # cannot.
 puts "{_PNR_STAGE_MARKER} postroute_spef_extract"
 {spef_repair_block}# === v0.2.14 — antenna repair (diode insertion) after detailed_route ===
+if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 puts "{_PNR_STAGE_MARKER} postroute_antenna_repair"
-{antenna_repair_block}{drv_reconverge_block}puts "{_PNR_STAGE_MARKER} postroute_antenna_reconverge"
+{antenna_repair_block}{drv_reconverge_block}
+if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
+puts "{_PNR_STAGE_MARKER} postroute_antenna_reconverge"
 {post_reconverge_antenna_block}# === v0.1.48 — decap + filler insertion ===
 # spm pilot Tier 2 EM/decap finding: prior runs (v0.1.25 → v0.1.47) emitted
 # ZERO decap or filler cells. Empty std-cell-row gaps left an MPW-rejecting
@@ -25878,6 +25983,12 @@ puts "{_PNR_STAGE_MARKER} postroute_antenna_repair"
 puts "{_PNR_STAGE_MARKER} postroute_fill"
 {filler_block}{pg_reconnect_block}{_pnr_stage_begin("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} postroute_named_violation_reroute"
 {_named_viol_reroute_block}{_pnr_stage_end("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} write_routed"
+}} else {{
+  puts "POSTROUTE_RECONVERGE_DOWNSTREAM_REFUSED: SDR transaction rolled back; skipping antenna/PG/named reroute"
+}}
+}} else {{
+  puts "POSTROUTE_DOWNSTREAM_REFUSED: SDR transaction rolled back; skipping antenna/PG/named reroute"
+}}
 # v1.8.43 — min-area patch: LAST thing before the route is written, so it
 # sees the final geometry (post antenna-repair, post filler) and every
 # downstream consumer (write_def / write_verilog / RCX / magic GDS / DRC /
@@ -25902,7 +26013,12 @@ if {{[catch {{set _plv [check_placement -no_abort]}} _plv_e]}} {{
 }} else {{
   puts "PNR_PLACEMENT_VIOLATIONS: $_plv"
 }}
+if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 {min_area_patch_block}write_def {out_dir_c}/routed.def
+}} else {{
+  puts "POSTROUTE_MIN_AREA_PATCH_SKIPPED: SDR transaction rolled back"
+  write_def {out_dir_c}/routed.def
+}}
 write_def {out_dir_c}/{top}.def
 write_verilog {out_dir_c}/{top}_pnr.v
 report_checks > {out_dir_c}/sta.rpt
