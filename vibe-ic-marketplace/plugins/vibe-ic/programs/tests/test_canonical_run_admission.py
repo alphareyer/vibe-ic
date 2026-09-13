@@ -23,6 +23,12 @@ def _project(root: Path) -> Path:
     (root / "phase1" / "input_doc" / "brief.md").write_text("brief\n")
     (root / "phase1" / "generated_docs").mkdir(parents=True)
     (root / "phase1" / "generated_docs" / "L1.json").write_text('{"layer": 1}\n')
+    (root / "phase2" / "stage1" / "rtl").mkdir(parents=True)
+    (root / "phase2" / "stage1" / "rtl" / "core.v").write_text(
+        "module core(input a, output y); assign y = a; endmodule\n")
+    (root / "phase2" / "stage2" / "constraints").mkdir(parents=True)
+    (root / "phase2" / "stage2" / "constraints" / "core.sdc").write_text(
+        "create_clock -period 10 [get_ports a]\n")
     return root
 
 
@@ -43,6 +49,17 @@ def test_same_identity_is_refused_after_persistent_reload(tmp_path):
     second = _admit(project)
     assert not second.admitted
     assert second.reason == "DUPLICATE_NO_NEW_EVIDENCE"
+
+
+def test_canonical_authored_rtl_change_reopens_phase2_admission(tmp_path):
+    project = _project(tmp_path / "proj")
+    assert _admit(project).admitted
+    assert not _admit(project).admitted
+    rtl = project / "phase2" / "stage1" / "rtl" / "core.v"
+    rtl.write_text("module core(input a, output y); assign y = ~a; endmodule\n")
+    reopened = _admit(project)
+    assert reopened.admitted
+    assert reopened.reason == "ADMITTED"
 
 
 def test_substantive_identity_changes_reopen_but_runtime_ledger_does_not(tmp_path):

@@ -126,7 +126,14 @@ def build_identity(project: Path, span: str, *, container_image: str,
         "subject_id": _subject_id(project),
         "span": span,
         "source_input_sha256": _tree_digest(project, (
+            # Phase-2 is allowed to start from canonical authored RTL or an
+            # authored SDC already staged for its consumers.  They are design
+            # inputs, not reports: an RTL/constraint repair must therefore
+            # reopen admission, while regenerated reports and this ledger may
+            # never do so.
             "input", "phase1/input_doc", "SOURCE_MANIFEST.md",
+            "phase2/stage1/rtl", "phase2/stage2/constraints",
+            "input/constraints",
         )),
         "phase1_receipt_sha256": phase1_receipt,
         "phase3_input_sha256": (_phase3_input_digest(project)
