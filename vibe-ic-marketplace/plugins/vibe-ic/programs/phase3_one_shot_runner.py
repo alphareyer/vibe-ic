@@ -24742,6 +24742,7 @@ def _postroute_sdr_transaction_finish_tcl() -> str:
         "    if {$_sdr_tx_error || !$_sdr_tx_route_ok} {\n"
         "      _sdr_tx_rollback nonfatal_or_route_error $_sdr_tx_before -1\n"
         "    } elseif {[catch {check_connectivity} _sdr_tx_conn_e]} {\n"
+        "      puts \"SDR_TRANSACTION_CONNECTIVITY_ERROR: $_sdr_tx_conn_e\"\n"
         "      _sdr_tx_rollback connectivity_error $_sdr_tx_before -1\n"
         "    } elseif {[catch {set _sdr_tx_after [_sdr_tx_count_router_drc $_sdr_tx_report]} _sdr_tx_count_e]} {\n"
         "      puts \"SDR_TRANSACTION_ROUTER_DRC_UNREADABLE: $_sdr_tx_count_e\"\n"
