@@ -89,6 +89,13 @@ def _load_gate_reports(reports_dir: Path) -> List[Dict]:
         if not isinstance(data, dict):
             continue
         program = data.get("program", f.stem)
+        # This checker writes its own WARN when it finds an unaddressed WARN.
+        # Re-reading that derived report turns one resolved source finding into
+        # a permanent recursive finding on the next invocation.  Only source
+        # gate reports belong in this input population; this policy result is
+        # the verdict about that population, not another member of it.
+        if program == "warn_acceptance_policy_check":
+            continue
         for finding in data.get("findings", []):
             if not isinstance(finding, dict):
                 continue
