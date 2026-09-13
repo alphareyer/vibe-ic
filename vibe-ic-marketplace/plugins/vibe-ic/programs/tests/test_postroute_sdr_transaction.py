@@ -99,9 +99,12 @@ def test_nonfatal_error_refuses_candidate_even_when_count_improves(tmp_path):
 
 
 @needs_tclsh
-def test_connectivity_failure_refuses_candidate_even_when_count_improves(tmp_path):
-    run, out = _run(tmp_path, before=4, after=1, connectivity_ok=False)
+def test_does_not_call_unavailable_openroad_connectivity_command(tmp_path):
+    """Pinned OpenROAD has no ``check_connectivity`` command; LVS owns that proof."""
+    run, out = _run(tmp_path, before=0, after=0, connectivity_ok=False)
     assert run.returncode == 0, run.stderr
-    assert "SDR_ROLLBACK: reason=connectivity_error" in run.stdout
-    assert "FINAL:BASE ABORT:1" in run.stdout
-    assert (out / "sdr_transaction" / "rejected_router.drc.rpt").is_file()
+    assert "SDR_TRANSACTION_ACCEPTED: router_drc clean-preserved (0 -> 0)" in run.stdout
+    assert "FINAL:CANDIDATE ABORT:0" in run.stdout
+    assert "check_connectivity" not in run.stdout
+    assert "ACCEPTED\trouter_drc_preserved_clean\t0\t0" in (
+        out / "sdr_transaction" / "receipt.tsv").read_text()

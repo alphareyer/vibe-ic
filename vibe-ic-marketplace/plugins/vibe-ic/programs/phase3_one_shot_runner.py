@@ -24741,9 +24741,12 @@ def _postroute_sdr_transaction_finish_tcl() -> str:
         "    puts \"SDR_TRANSACTION_DECISION: error=$_sdr_tx_error route_ok=$_sdr_tx_route_ok router_drc_before=$_sdr_tx_before\"\n"
         "    if {$_sdr_tx_error || !$_sdr_tx_route_ok} {\n"
         "      _sdr_tx_rollback nonfatal_or_route_error $_sdr_tx_before -1\n"
-        "    } elseif {[catch {check_connectivity} _sdr_tx_conn_e]} {\n"
-        "      puts \"SDR_TRANSACTION_CONNECTIVITY_ERROR: $_sdr_tx_conn_e\"\n"
-        "      _sdr_tx_rollback connectivity_error $_sdr_tx_before -1\n"
+        # `check_connectivity` is not an OpenROAD command in the pinned image
+        # (26Q3-2075): calling it merely raises "invalid command name" and then
+        # tries an illegal in-session DEF reload.  The PnR transaction retains
+        # its actual local evidence (post-repair placement and router DRC); the
+        # independent physical net-connectivity evidence remains the later LVS
+        # consumer, which runs on the emitted routed DEF.
         "    } elseif {[catch {set _sdr_tx_after [_sdr_tx_count_router_drc $_sdr_tx_report]} _sdr_tx_count_e]} {\n"
         "      puts \"SDR_TRANSACTION_ROUTER_DRC_UNREADABLE: $_sdr_tx_count_e\"\n"
         "      _sdr_tx_rollback unreadable_candidate_router_drc $_sdr_tx_before -1\n"
