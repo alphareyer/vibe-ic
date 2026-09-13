@@ -4395,7 +4395,7 @@ _NL_MODULE_HDR_RE = re.compile(
     r"^\s*module\s+(?P<name>\\?[\w$]+)\s*\((?P<ports>[^)]*)\)\s*;",
     re.M)
 _NL_PORT_DECL_RE = re.compile(
-    r"^\s*(?P<dir>input|output|inout)\s+(?:wire\s+|reg\s+)?"
+    r"^\s*(?P<dir>input|output|inout)\s+(?:(?:wire|reg|logic)\s+)?"
     r"(?P<range>\[[^\]]*\]\s*)?(?P<name>\\?[\w$]+)\s*;",
     re.M)
 

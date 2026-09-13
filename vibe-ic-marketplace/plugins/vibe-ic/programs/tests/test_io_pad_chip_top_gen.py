@@ -591,7 +591,7 @@ input rst;
 input [1:0] d;
 output q;
 input serial_in;
-output serial_out;
+output logic serial_out;
 input scan_enable;
 assign serial_out = serial_in;
 assign q = d[0];

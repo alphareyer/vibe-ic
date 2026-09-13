@@ -27047,7 +27047,7 @@ def pnr_input_netlist(project: Path, top: str) -> Tuple[Path, str, bool]:
     except OSError:
         text = ""
     declared = [p for p in (meta.get("dft_ports") or [])
-                if not re.search(rf"^\s*(input|output)\s+(?:wire\s+)?\\?{re.escape(str(p))}\s*;",
+                if not re.search(rf"^\s*(input|output)\s+(?:(?:wire|reg|logic)\s+)?\\?{re.escape(str(p))}\s*;",
                                  text, re.M)]
     if declared:
         return pre_dft, (
