@@ -2,6 +2,8 @@
 """analog_acceptance_tb_gen.py — PRODUCER of executable acceptance checks for
 the analog `verification_intent` rows Phase 1 declares.
 
+CHIP_AGNOSTIC: strict-logic
+
 ORGANIC #2064. WHAT WAS MISSING, MEASURED (u_hawaii_adc, image 0.3.46):
 Phase 1 harvests the design's own `## Verification intent` section into four
 L10 rows of `kind: verification_intent`, and NOTHING in the flow can author an
@@ -70,7 +72,6 @@ FOUR VERDICTS, KEPT APART
 flow's own measurement. A row whose prose names the fabricated / golden
 reference is REFUSED with §4.05 named and its artefact is never opened.
 
-CHIP_AGNOSTIC: strict-logic
 Block names, spec names, bounds, corner axes and evidence all come from the
 design's own Phase-1 artefacts: no chip, vendor, node, SKU, PDK or part literal
 appears in the LOGIC of this file. The module docstring above names the design
