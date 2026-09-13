@@ -27161,6 +27161,42 @@ def _discover_padring_io_views(pdk: PdkConfig,
     return lefs, gds
 
 
+def _stage_padring_io_lefs_for_lvs(project: Path, pdk: PdkConfig,
+                                   container: str) -> List[Path]:
+    """Make the IO LEFs that PnR consumed available to host-side LVS emission.
+
+    Pad-ring PnR resolves its IO library inside the EDA container, whereas
+    ``lvs_power_aware_netlist_emit`` intentionally parses LEFs on the host.
+    Passing container-only paths made IO pads look like black boxes without
+    power pins and created proxy rails in the power-aware netlist.
+
+    Copy the exact resolver-selected texts into the run's extracted-input
+    directory. They are PDK views, not hand-authored design artefacts; their
+    digest gives a deterministic, collision-safe path. A PDK without an IO
+    library keeps the historical empty result.
+    """
+    ext_dir = _pl.extracted_dir(project)
+    try:
+        io_lefs, _io_gds = _discover_padring_io_views(pdk, container)
+    except Exception:
+        return []
+    staged: List[Path] = []
+    for lef in sorted(set(str(x) for x in io_lefs)):
+        text = _read_pdk_text(lef, container)
+        if not text:
+            continue
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        out = ext_dir / f"padring_io_{digest}.extract.lef"
+        try:
+            ext_dir.mkdir(parents=True, exist_ok=True)
+            if not out.is_file() or out.read_text(errors="replace") != text:
+                out.write_text(text)
+        except OSError:
+            continue
+        staged.append(out)
+    return staged
+
+
 def _inject_padring_io_lefs(full_pnr_tcl: str,
                             io_lefs: Sequence[str]) -> str:
     """Load IO masters before ``read_verilog``/``link_design`` exactly once."""
@@ -39747,11 +39783,12 @@ def _emit_local_netgen_setup(project: Path, pdk: PdkConfig,
                      f"{pdk.name}_setup.tcl")
     # Family-token regexes (TCL ERE). Anchored at a `_` separator or the
     # start of the name, and at the end (with an optional numeric drive
-    # suffix), so `..._fill_8`, `..._decap_4`, `..._tapvpwrvgnd_1` and
+    # suffix with or without its separator), so `..._fill_8`, `..._fill10`,
+    # `..._decap_4`, `..._tapvpwrvgnd_1` and
     # `..._fakediode_2` match on ANY library prefix while a functional cell
     # that merely contains the substring does not.
     _phys_res = (
-        r"(^|_)fill(er|cap|tie)?(_[[:digit:]]+)?$",
+        r"(^|_)fill(er|cap|tie)?(_?[[:digit:]]+)?$",
         r"(^|_)decap(_[[:digit:]]+)?$",
         r"(^|_)tap[[:alpha:]]*(_[[:digit:]]+)?$",
         r"(^|_)fakediode(_[[:digit:]]+)?$",
@@ -39925,7 +39962,15 @@ def _try_power_aware_lvs(project: Path, top: str, pdk: PdkConfig,
             # model is then derived from its own std-cell LEF instead of the
             # emitter skipping and leaving the netlist power-blind.
             emit_kwargs: Dict[str, Any] = {}
-            additional_lefs = sorted(ext_dir.glob("*.extract.lef"))
+            # The PnR chip-top has IO pad masters that are neither standard
+            # cells nor project-local hard macros. Stage the exact LEFs chosen
+            # by the same resolver PnR used, then let the emitter add their PG
+            # ports and black-box declarations. Existing extraction LEFs stay
+            # included; the path set is deterministic and de-duplicated.
+            additional_lefs = sorted({
+                *ext_dir.glob("*.extract.lef"),
+                *_stage_padring_io_lefs_for_lvs(project, pdk, container),
+            }, key=lambda p: str(p))
             if additional_lefs:
                 emit_kwargs["additional_lefs"] = additional_lefs
             st = _lvs_pa.emit_to_file(

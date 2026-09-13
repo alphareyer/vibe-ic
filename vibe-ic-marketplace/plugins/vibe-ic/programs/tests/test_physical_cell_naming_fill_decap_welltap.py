@@ -91,7 +91,7 @@ def test_gf180_plain_fill_is_ignored():
 
 
 def test_sized_variants_still_ignored():
-    for name in ("fill_1", "fillcap_16", "filltie_4", "decap_8"):
+    for name in ("fill_1", "fill10", "fillcap_16", "filltie_4", "decap_8"):
         assert _ignored(GF180 + name), name
 
 
