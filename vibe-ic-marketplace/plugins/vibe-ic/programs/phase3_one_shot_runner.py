@@ -24744,6 +24744,7 @@ def _postroute_sdr_transaction_finish_tcl() -> str:
         "    } elseif {[catch {check_connectivity} _sdr_tx_conn_e]} {\n"
         "      _sdr_tx_rollback connectivity_error $_sdr_tx_before -1\n"
         "    } elseif {[catch {set _sdr_tx_after [_sdr_tx_count_router_drc $_sdr_tx_report]} _sdr_tx_count_e]} {\n"
+        "      puts \"SDR_TRANSACTION_ROUTER_DRC_UNREADABLE: $_sdr_tx_count_e\"\n"
         "      _sdr_tx_rollback unreadable_candidate_router_drc $_sdr_tx_before -1\n"
         "    } else {\n"
         "      puts \"SDR_TRANSACTION_ROUTER_DRC: before=$_sdr_tx_before after=$_sdr_tx_after\"\n"
