@@ -999,10 +999,29 @@ _gate_inflight_poller_start() {
   [ "${GATE_DISPATCH_JOBS:-1}" -le 1 ] || return 0
   local label="$1" capture="$2" parent=$$
   (
+    # This shell waits on one `sleep` child at a time.  Killing only this
+    # shell reparented its current sleep, which made the outer ownership
+    # supervisor correctly refuse every otherwise-complete hygiene shard.
+    # Record and reap that exact child; no pattern process matching is safe on
+    # a fleet where every lane runs this same script.
+    GATE_DISPATCH_INFLIGHT_SLEEP_PID=0
+    _gate_inflight_poller_cleanup() {
+      trap - TERM INT
+      if [ "${GATE_DISPATCH_INFLIGHT_SLEEP_PID:-0}" -gt 0 ]; then
+        kill "$GATE_DISPATCH_INFLIGHT_SLEEP_PID" 2>/dev/null || true
+        wait "$GATE_DISPATCH_INFLIGHT_SLEEP_PID" 2>/dev/null || true
+      fi
+      GATE_DISPATCH_INFLIGHT_SLEEP_PID=0
+      exit 0
+    }
+    trap _gate_inflight_poller_cleanup TERM INT
     # `$BASHPID`, not `$$`: inside this subshell `$$` is still the parent's
     # pid, and excluding the parent would exclude the gate itself.
     while :; do
-      sleep "$GATE_DISPATCH_INFLIGHT_POLL_S"
+      sleep "$GATE_DISPATCH_INFLIGHT_POLL_S" &
+      GATE_DISPATCH_INFLIGHT_SLEEP_PID=$!
+      wait "$GATE_DISPATCH_INFLIGHT_SLEEP_PID" 2>/dev/null || true
+      GATE_DISPATCH_INFLIGHT_SLEEP_PID=0
       python3 "$GATE_DISPATCH_INFLIGHT_HELPER" \
         --path "$GATE_DISPATCH_INFLIGHT_FILE" --label "$label" \
         --of "$GATE_DISPATCH_INFLIGHT_TOTAL" --capture "$capture" \

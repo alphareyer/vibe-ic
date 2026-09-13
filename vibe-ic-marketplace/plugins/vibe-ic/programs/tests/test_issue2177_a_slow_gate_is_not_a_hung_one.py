@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -619,6 +620,49 @@ def test_the_dispatcher_kills_only_its_own_recorded_poller_pid():
     stop_body = body[start:body.index("\n}", start)]
     assert 'kill "$GATE_DISPATCH_INFLIGHT_POLLER"' in stop_body, stop_body
     assert "pkill" not in stop_body and "pgrep" not in stop_body, stop_body
+
+
+def test_stopping_poller_reaps_its_current_sleep_child(tmp_path):
+    """The recorded poller PID is not its entire process tree.
+
+    Before the repair, TERM made the poller shell exit while its current sleep
+    was reparented. The outer ownership supervisor then found and cleaned that
+    child after every otherwise-natural shard. Drive the shipped shell function
+    and inspect the exact child PID through /proc; no name matching is used.
+    """
+    dispatch = (PROGRAMS.parent.parent.parent.parent
+                / "tools" / "ci" / "_gate_dispatch.sh")
+    channel = tmp_path / "inflight.jsonl"
+    helper = PROGRAMS / "_gate_inflight_progress.py"
+    probe = tmp_path / "poller_result.txt"
+    script = tmp_path / "drive_poller.sh"
+    script.write_text(f'''#!/usr/bin/env bash
+set -euo pipefail
+source {str(dispatch)!r}
+GATE_DISPATCH_INFLIGHT_FILE={str(channel)!r}
+GATE_DISPATCH_INFLIGHT_HELPER={str(helper)!r}
+GATE_DISPATCH_INFLIGHT_TOTAL=1
+GATE_DISPATCH_INFLIGHT_POLL_S=20
+_gate_inflight_poller_start probe /dev/null
+poller="$GATE_DISPATCH_INFLIGHT_POLLER"
+children=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  children="$(cat "/proc/$poller/task/$poller/children" 2>/dev/null || true)"
+  [ -n "$children" ] && break
+  sleep 0.01
+done
+[ -n "$children" ]
+_gate_inflight_poller_stop
+for child in $children; do
+  [ ! -e "/proc/$child" ] || exit 23
+done
+printf '%s\\n' "$children" > {str(probe)!r}
+''', encoding="utf-8")
+    script.chmod(0o755)
+    result = subprocess.run(["bash", str(script)], capture_output=True,
+                            text=True, timeout=5)
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert probe.read_text(encoding="utf-8").strip(), "no sleep child observed"
 
 
 def test_no_bound_was_raised_by_this_fix():
