@@ -152,6 +152,7 @@ import agent_report_presence_check as _agent_report_presence
 import eda_log_check as _eda_log
 import spec_declaration_emit as _decl  # the spec's FREE-CHOICE declaration contract
 import _runner_lock  # ORGANIC #588 — single-driver lock (all 4 runners)
+import canonical_run_admission as _canonical_admission
 import rtl_provenance as _rtl_prov  # authored-RTL guard for phase2/stage1/rtl/
 import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch site
 # v0.2.33 (ORGANIC-20260526-sv-synth-frontend) — shared SV-frontend
@@ -21758,6 +21759,19 @@ def main() -> int:
     _lock = _runner_lock.acquire_or_reenter(project, "design_one_shot_runner")
     if _lock is None:
         return 3
+
+    _canonical = _canonical_admission.admit_span(
+        project, "phase2", PROGRAMS_DIR, args.container,
+        {"top_name": args.top_name,
+         "max_rtl_repair_retries": args.max_rtl_repair_retries,
+         "skip_hardware": args.skip_hardware, "skip_phase3": args.skip_phase3,
+         "skip_analog": args.skip_analog, "entry_step": args.entry_step,
+         "exit_step": args.exit_step, "force_rtl_regen": args.force_rtl_regen,
+         "dry_run": args.dry_run})
+    if not _canonical.admitted:
+        print(f"REFUSED: canonical Phase-2 admission: {_canonical.reason} "
+              f"({_canonical.detail})", file=sys.stderr)
+        return 2
 
     plan: List[StepResult] = []
 

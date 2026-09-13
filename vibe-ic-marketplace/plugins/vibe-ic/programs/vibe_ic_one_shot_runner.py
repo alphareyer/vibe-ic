@@ -71,6 +71,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import _path_layout as _pl
 import _runner_lock
+import canonical_run_admission as _canonical_admission
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 
@@ -1157,13 +1158,28 @@ def main() -> int:
         # unmappable value) happens there, not here.
         if args.exit_step:
             p2_args += ["--exit-step", str(args.exit_step)]
-        rc = _run_phase("PHASE 2 (= 2a + 2b)", runner, p2_args, env=_phase_env)
-        rep = _read_report(_pl.report_path(project, "phase2_one_shot.json"))
-        verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
-        plan.append(("phase2", verdict, rc))
-        reports["phase2"] = rep
-        if verdict == "FAIL":
+        p2_admission = _canonical_admission.admit_span(
+            project, "phase2", PROGRAMS_DIR, args.container,
+            {"top_name": flow_top, "max_rtl_repair_retries": args.max_rtl_repair_retries,
+             "skip_hardware": args.skip_hardware, "skip_phase3": args.skip_phase3,
+             "skip_analog": "--skip-analog" in p2_args,
+             "entry_step": args.entry_step, "exit_step": args.exit_step,
+             "force_rtl_regen": False, "dry_run": False})
+        if not p2_admission.admitted:
+            print(f"REFUSED: canonical Phase-2 admission: {p2_admission.reason} "
+                  f"({p2_admission.detail})", file=sys.stderr)
+            plan.append(("phase2", "REFUSED-CANONICAL-ADMISSION", 2))
             halted_at = "phase2"
+        else:
+            p2_env = _canonical_admission.child_env(
+                p2_admission.identity_sha256, _phase_env)
+            rc = _run_phase("PHASE 2 (= 2a + 2b)", runner, p2_args, env=p2_env)
+            rep = _read_report(_pl.report_path(project, "phase2_one_shot.json"))
+            verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
+            plan.append(("phase2", verdict, rc))
+            reports["phase2"] = rep
+            if verdict == "FAIL":
+                halted_at = "phase2"
     else:
         plan.append(("phase2", "SKIPPED", 0))
 
@@ -1282,14 +1298,29 @@ def main() -> int:
             p3_args.append("--allow-oss-pdk-fallback")
         if getattr(args, "allow_pdk_target_mismatch", False):
             p3_args.append("--allow-pdk-target-mismatch")
-        rc = _run_phase("PHASE 3 (synth → PnR → GDS → DRC → LVS)",
-                         runner, p3_args, env=_phase_env)
-        rep = _read_report(_pl.report_path(project, "phase3_one_shot.json"))
-        verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
-        plan.append(("phase3", verdict, rc))
-        reports["phase3"] = rep
-        if verdict == "FAIL":
+        p3_admission = _canonical_admission.admit_span(
+            project, "phase3", PROGRAMS_DIR, args.container,
+            {"top_name": phase3_top, "ic_name": args.ic_name,
+             "die_um": args.die_um, "util": args.util, "pdk": args.pdk,
+             "allow_oss_pdk_fallback": bool(args.allow_oss_pdk_fallback),
+             "allow_pdk_target_mismatch": bool(args.allow_pdk_target_mismatch),
+             "spare_density": 0.02})
+        if not p3_admission.admitted:
+            print(f"REFUSED: canonical Phase-3 admission: {p3_admission.reason} "
+                  f"({p3_admission.detail})", file=sys.stderr)
+            plan.append(("phase3", "REFUSED-CANONICAL-ADMISSION", 2))
             halted_at = "phase3"
+        else:
+            p3_env = _canonical_admission.child_env(
+                p3_admission.identity_sha256, _phase_env)
+            rc = _run_phase("PHASE 3 (synth → PnR → GDS → DRC → LVS)",
+                            runner, p3_args, env=p3_env)
+            rep = _read_report(_pl.report_path(project, "phase3_one_shot.json"))
+            verdict = rep.get("verdict") or ("PASS" if rc == 0 else "FAIL")
+            plan.append(("phase3", verdict, rc))
+            reports["phase3"] = rep
+            if verdict == "FAIL":
+                halted_at = "phase3"
     else:
         plan.append(("phase3", "SKIPPED", 0))
 

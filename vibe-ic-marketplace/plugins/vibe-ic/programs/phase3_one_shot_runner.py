@@ -94,6 +94,7 @@ import _container_exec as _cex  # the ONE route predicate AND the ONE guarded
 import _watchdog as _wd  # v1.3.47 — plugin-wide progress-stall supervision
 import _docker_watchdog as _dwd  # shared in-container CPU probe (tree-aware)
 import _runner_lock  # ORGANIC #588 — single-driver lock (all 4 runners)
+import canonical_run_admission as _canonical_admission
 import lvs_verdict_tokens as _lvt  # #524 — shared netgen terminal-verdict tokens
 import extraction_input_capability_check as _eicap  # extraction-input precondition (BLOCKED)
 import lvs_netgen_setup_emit as _lvs_setup  # GAP-E2E-9 — power-net globalisation
@@ -55548,6 +55549,18 @@ def main() -> int:
     _lock = _runner_lock.acquire_or_reenter(project, "phase3_one_shot_runner")
     if _lock is None:
         return 3
+
+    _canonical = _canonical_admission.admit_span(
+        project, "phase3", PROGRAMS_DIR, args.container,
+        {"top_name": args.top_name, "ic_name": args.ic_name,
+         "die_um": args.die_um, "util": args.util, "pdk": args.pdk,
+         "allow_oss_pdk_fallback": bool(args.allow_oss_pdk_fallback),
+         "allow_pdk_target_mismatch": bool(args.allow_pdk_target_mismatch),
+         "spare_density": args.spare_density})
+    if not _canonical.admitted:
+        print(f"REFUSED: canonical Phase-3 admission: {_canonical.reason} "
+              f"({_canonical.detail})", file=sys.stderr)
+        return 2
 
     # Fix #4 — normalize/validate --util (a FRACTION 0..1). Percent
     # values (>1) are divided by 100 with a warning; non-positive

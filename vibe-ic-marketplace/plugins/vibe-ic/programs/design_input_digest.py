@@ -103,7 +103,7 @@ SCHEMA_VERSION = 1
 #: bookkeeping and `__pycache__` is a byproduct of reading the tree with
 #: Python; both move without the design moving. Published in the artefact so
 #: the exclusion is never silent.
-EXCLUDED_DIR_NAMES: Tuple[str, ...] = (".git", "__pycache__")
+EXCLUDED_DIR_NAMES: Tuple[str, ...] = (".git", "__pycache__", ".vibeic-state")
 
 #: Bounds, so a pathological tree cannot hang a gate. Measured headroom on the
 #: tracked corpus: the largest project is 873 files / 66.8 MB and the whole
