@@ -17288,7 +17288,44 @@ def _has_board_harness_top(project: Path) -> bool:
 #: capture" — and refuses to emit accounting for it. NOTHING made the same
 #: statement about the LOG, which is the artefact every later reader has.
 _SYNTH_LOG_REL = "phase2/stage2/synth/yosys.log"
-_SYNTH_LOG_EXPECT = "Number of cells|Number of wires"
+
+#: AND THE MARKER IS THE PARSER'S, NOT A SECOND SPELLING OF IT.
+#:
+#: This was the literal `"Number of cells|Number of wires"` — yosys's LABELLED
+#: `stat` form and nothing else. The shipped image's yosys writes the BARE form:
+#:
+#:     === spm ===
+#:             +----------Local Count, excluding submodules.
+#:           714 wires
+#:           449 cells
+#:
+#: MEASURED on a completed gf180mcuD run of `spm` (2026-09-15, lane icspm2):
+#: `grep -n "Number of" phase2/stage2/synth/yosys.log` returns NOTHING over a
+#: 691-line log holding TWO complete stat tables (lines 530 and 670), and
+#: `eda_log_check` therefore recorded
+#:
+#:     EXPECTED_NOT_FOUND — None of the expected patterns were found in log
+#:     expect_matched: []   reject_matched: []   verdict: FAIL
+#:
+#: over a synthesis that ran perfectly (449 cells, 65 `$_DFF_P_`, `Found and
+#: reported 0 problems`). `step_internal_fail_bubble_up_check` then read that
+#: FAIL receipt as an unacknowledged step failure and refused the whole run.
+#: Two gates red, on a correct synthesis, because one assertion was written
+#: from memory.
+#:
+#: `_yosys_stat` — THIS RUNNER'S OWN stat parser, called from `step_yosys_synth`
+#: a few hundred lines above — has known all three forms since v1.7.36 and says
+#: so in its FORMAT COVERAGE section. So the assertion is now taken FROM that
+#: parser: if `_yosys_stat` can read a stat block out of the log, this gate
+#: passes, and if it cannot, this gate fails. The two cannot drift again.
+#:
+#: `(?m)` is prefixed because `eda_log_check.audit_log` compiles each pattern
+#: with `re.IGNORECASE` ALONE — without it the `^`/`$` anchors would only match
+#: the start and end of the whole file. The join is on `|` because that gate
+#: SPLITS `--expect-pattern` on `|` and requires at least one to match; no
+#: entry of `CELL_COUNT_LINE_PATTERNS` contains one.
+_SYNTH_LOG_EXPECT = "|".join(
+    "(?m)" + _pat for _pat in _ystat.CELL_COUNT_LINE_PATTERNS)
 
 #: Statuses that mean SYNTHESIS WAS NOT ATTEMPTED. A log absent after one of
 #: these is not a finding — there was no run to leave one. Any other status

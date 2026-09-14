@@ -95,11 +95,31 @@ AREA_UNIT_UNESTABLISHED = ("cell-library area unit (as declared by the "
 
 # `=== <module> ===` section header that opens each per-module stat block.
 _MODULE_RE = re.compile(r"^\s*===\s+(\S+)\s+===\s*$", re.M)
-# `Number of cells:  NNNN`
-_LABELLED_CELLS_RE = re.compile(r"^\s*Number of cells:\s*([0-9][0-9,]*)\s*$", re.M)
-# `   NNNN cells` and the liberty `   NNNN 5.84E+03 cells` variant.
-_BARE_CELLS_RE = re.compile(
-    r"^\s*([0-9][0-9,]*)\s+(?:[0-9][0-9.eE+-]*\s+)?cells\s*$", re.M)
+#: THE CELL-COUNT LINE, IN EVERY FORM YOSYS EMITS IT — AS SOURCE STRINGS.
+#:
+#: Published so that a consumer which needs to ASSERT the stat table reached a
+#: log (rather than parse it) asks the same question this parser answers. They
+#: drifted apart once and it cost a run: `design_one_shot_runner.
+#: _SYNTH_LOG_EXPECT` was the single literal `"Number of cells|Number of wires"`,
+#: i.e. the LABELLED form only, while the shipped image's yosys writes the BARE
+#: form — so `eda_log_check` reported `EXPECTED_NOT_FOUND` over a log carrying a
+#: complete, correct `stat` table (`449 cells`, `714 wires`), and a second gate
+#: then reported that receipt as an unacknowledged step failure. One module
+#: knowing all three forms is not enough if the assertion is written from
+#: memory somewhere else; this constant is the one place the forms live.
+#:
+#: No alternation metacharacter appears in any entry, deliberately:
+#: `eda_log_check` SPLITS its `--expect-pattern` on `|` before compiling, so a
+#: pattern carrying one would be torn in half.
+CELL_COUNT_LINE_PATTERNS = (
+    # `Number of cells:  NNNN`            (classic labelled form)
+    r"^\s*Number of cells:\s*([0-9][0-9,]*)\s*$",
+    # `   NNNN cells` and the liberty `   NNNN 5.84E+03 cells` variant.
+    r"^\s*([0-9][0-9,]*)\s+(?:[0-9][0-9.eE+-]*\s+)?cells\s*$",
+)
+
+_LABELLED_CELLS_RE = re.compile(CELL_COUNT_LINE_PATTERNS[0], re.M)
+_BARE_CELLS_RE = re.compile(CELL_COUNT_LINE_PATTERNS[1], re.M)
 # `   Chip area for module '\top': 5841.196200`
 _CHIP_AREA_RE = re.compile(
     r"^\s*Chip area for module\s+'\\?([^']+)':\s*([0-9][0-9.eE+-]*)\s*$", re.M)
