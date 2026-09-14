@@ -236,9 +236,15 @@ proc estimate_parasitics {args} { _log "estimate_parasitics" }
 proc global_route {args} { _log "global_route" }
 proc detailed_route {args} {
   _log "detailed_route $args"
-  # A fresh empty native report is a clean candidate route.
-  global ROUTE_DRC
-  set fh [open $ROUTE_DRC w]; close $fh
+  # A fresh empty native report is a clean candidate route; CANDIDATE_ROUTER_DRC
+  # "unreadable" instead leaves bytes that are not the tool's record grammar, so
+  # NOTHING about the candidate geometry is measured.
+  global ROUTE_DRC CANDIDATE_ROUTER_DRC
+  set fh [open $ROUTE_DRC w]
+  if {[info exists CANDIDATE_ROUTER_DRC] && $CANDIDATE_ROUTER_DRC eq "unreadable"} {
+    puts -nonewline $fh "not the router grammar"
+  }
+  close $fh
 }
 proc repair_timing {args} { _log "repair_timing" }
 proc detailed_placement {args} { _log "detailed_placement" }
@@ -246,7 +252,8 @@ proc check_placement {args} { return 0 }
 """
 
 
-def _drive_loop(tmpdir, rd_script, spef_exists=True):
+def _drive_loop(tmpdir, rd_script, spef_exists=True,
+                candidate_router_drc="clean"):
     """Execute the emitted sign-off DRV repair loop under tclsh.
 
     `rd_script` is what successive `repair_design` calls do: "ok", or an error
@@ -270,6 +277,8 @@ def _drive_loop(tmpdir, rd_script, spef_exists=True):
     route_drc = os.path.join(out, p3.ROUTER_DRC_REPORT_NAME)
     open(route_drc, "w").write("violation type: spacing\\n")
     head += "set ROUTE_DRC {%s}\n" % route_drc
+    # What the router is able to SAY about the candidate the pass leaves behind.
+    head += "set CANDIDATE_ROUTER_DRC {%s}\n" % candidate_router_drc
     return _run_tcl(head + tcl)
 
 
@@ -340,8 +349,47 @@ def test_the_give_up_still_terminates_the_loop(tmp_path):
     # its own suite now asserts the other way. "SDR_DONE" here would mean a
     # half-repaired database was certified finished; its absence is part of
     # the claim, exactly as the give-up itself is.
+    # ...and what the stop IS. #2240 (137adc428) made the give-up REJECT the
+    # candidate as unrestorable, because OpenROAD cannot reload the pre-repair
+    # DEF into an owned live database (ODB-0251 -- and, MEASURED on the pinned
+    # image, `read_db` of a `write_db` checkpoint refuses ORD-0047 too, so
+    # there is no in-session restore by ANY route). That claim is INTACT and is
+    # asserted, in the arm where it applies, by
+    # `test_the_give_up_refuses_when_the_candidate_cannot_be_measured` below.
+    #
+    # THIS arm is the other one. The give-up fired, and the router was then
+    # ASKED about the geometry it left behind: 1 -> 0, with `check_placement`
+    # measuring 0 violations. A nonfatal is a DISCLOSURE about how the pass
+    # went; it is not a fact about the geometry, and a candidate the tool
+    # itself measured clean on BOTH axes is not thrown away for a note. The
+    # advisory is recorded under its OWN status, so this can never be read as
+    # an un-advised acceptance.
+    assert "SDR_TRANSACTION_CANDIDATE_ROUTER_DRC: before=1 after=0" in out, out
+    assert "SDR_TRANSACTION_ACCEPTED_WITH_ADVISORY" in out, out
+    assert "SDR_TRANSACTION_REJECTED_UNRESTORABLE" not in out, out
+
+
+def test_the_give_up_refuses_when_the_candidate_cannot_be_measured(tmp_path):
+    """#2240's claim, pinned where it applies: UNMEASURED still stops the session.
+
+    The same give-up as the test above -- the recovery's retry also fails, one
+    pass, not six -- but here the router's report on the candidate cannot be
+    read, so NOTHING is known about the geometry the partial repair left. That
+    is the case the session must still refuse, and `SDR_DONE` must not be
+    reached: reaching it would certify a half-repaired database as finished.
+    """
+    out = _drive_loop(tmp_path, ["EST-0104 parasitics are stale",
+                                 "EST-0104 still stale", "ok", "ok", "ok", "ok"],
+                      candidate_router_drc="unreadable")
+    assert "SDR_EST0104_RETRY_NONFATAL" in out, out
+    assert "SDR_REPAIR_NONFATAL" in out, out
+    assert "SDR_STOPPED_AFTER_PARTIAL_REPAIR" in out, out
+    passes = [ln for ln in out.splitlines() if ln.startswith("SDR_DRV_PASS")]
+    assert len(passes) == 1, passes
+    assert "SDR_TRANSACTION_CANDIDATE_ROUTER_DRC_UNREADABLE" in out, out
     assert ("SDR_TRANSACTION_REJECTED_UNRESTORABLE: reason=nonfatal_or_route_error"
             in out), out
+    assert "ACCEPTED" not in out, out
     assert "SDR_DONE" not in out, out
 
 
