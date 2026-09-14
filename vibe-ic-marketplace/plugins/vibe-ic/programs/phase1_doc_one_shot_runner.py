@@ -8663,7 +8663,10 @@ def _write_l_doc(project: Path, name: str, content: dict,
     # two-owner disagreement is NOT resolved here — it is stamped on the
     # document as `clock_contract_conflicts[]` and blocks the run in
     # `_post_emit_enforce_clock_contract`. Fail-closed beats guessing.
-    _cc.enforce(content)
+    # `project` is passed so the contract can ask _l8_clock_scope which
+    # records THIS run's PDK puts in scope (vibe-ic#2244), exactly as the
+    # sibling consumers do.
+    _cc.enforce(content, project)
     # v0.1.60 capture (R11): wire phase1_post_process.scrub_l_doc into the
     # write chokepoint so every L doc emission gets the HALLUC_PATTERNS scan
     # (ic_name lifted from "SUCH ARM TECHNOLOGY" license clause, opcode_hex
@@ -60141,7 +60144,7 @@ def _post_emit_enforce_clock_contract(project: Path) -> List[str]:
         if not isinstance(doc, dict):
             continue
         before = json.dumps(doc, sort_keys=True, ensure_ascii=False)
-        _cc.enforce(doc)
+        _cc.enforce(doc, project)
         after = json.dumps(doc, sort_keys=True, ensure_ascii=False)
         if after != before:
             try:
