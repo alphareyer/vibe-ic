@@ -424,3 +424,85 @@ def test_the_adopt_tail_asks_the_router_for_its_own_report(tmp_path,
     assert f"-output_drc {out}/{R.ROUTER_DRC_REPORT_NAME}" in tail
     # and it is asked BEFORE anything in the tail can reroute
     assert tail.index("_vic_drc_opt") < tail.index("repair_antennas")
+
+
+# -------------------------------- session state the DEF does not carry
+
+
+_SPARE_PLAN = {"instances": [
+    {"name": "spare_inv_0", "cell": "sky130_fd_sc_hd__inv_2", "llx": 0, "lly": 0},
+    {"name": "spare_nand_1", "cell": "sky130_fd_sc_hd__nand2_1", "llx": 8, "lly": 0},
+    {"name": "spare_noclass_2", "cell": None, "llx": 16, "lly": 0},
+]}
+
+
+def test_a_restored_session_reasserts_the_spare_protection():
+    """MEASURED on the first real run of the child (sha256 x sky130A): the
+    shipping session cleared routing with `spare_preserved=236` and the CHILD
+    with `spare_preserved=0`.
+
+    The spare INSTANCES come back with the checkpoint DEF; the `dont_touch`
+    ATTRIBUTE does not, because it is session state, and the block that sets it
+    lives inside the region a checkpoint-seeded deck elides.  A restored
+    session was therefore free to resize, rebuffer and rip up the very pool
+    design-for-ECO exists to preserve.
+    """
+    tcl = R._spare_reassert_dont_touch_tcl(_SPARE_PLAN)
+    assert "set_dont_touch spare_inv_0" in tcl
+    assert "set_dont_touch spare_nand_1" in tcl
+    # an entry with no PDK cell was never physically inserted, so there is
+    # nothing in the DEF to protect and nothing is claimed about it
+    assert "spare_noclass_2" not in tcl
+    assert "SPARE_DONTTOUCH_REASSERTED: $_spare_reasserted of 2" in tcl
+    # a name the checkpoint does not carry is DISCLOSED, never fatal: the DEF
+    # is the authority on what exists, not the plan
+    assert "SPARE_DONTTOUCH_REASSERT_NONFATAL" in tcl
+
+
+def test_a_design_with_no_physical_spares_emits_nothing():
+    """A design that plans no spares must produce a byte-identical deck."""
+    for plan in (None, {}, {"instances": []},
+                 {"instances": [{"name": "x", "cell": None}]}):
+        assert R._spare_reassert_dont_touch_tcl(plan) == ""
+
+
+def test_every_checkpoint_seeded_deck_carries_the_reassertion(tmp_path):
+    """Child deck, adopt tail and fatal-signal resume are all restored
+    sessions, and all three mutate.  None of them may run without it."""
+    deck = _full_pnr_tcl(tmp_path)
+    reassert = R._spare_reassert_dont_touch_tcl(_SPARE_PLAN)
+    for stage in (SITE1, SITE2):
+        child = R._build_pnr_sdr_child_tcl_text(
+            deck, checkpoint_def_c="/c.def", stage=stage,
+            after_restore_tcl=reassert)
+        assert "set_dont_touch spare_inv_0" in child
+        # and it is in force BEFORE anything that could touch a spare
+        assert child.index("set_dont_touch spare_inv_0") < child.index(
+            "repair_design")
+    tail = R._build_pnr_resume_tcl_text(
+        deck, checkpoint_def_c="/c.def", omit_stages=[SITE1],
+        after_restore_tcl=reassert)
+    assert "set_dont_touch spare_inv_0" in tail
+    assert tail.index("read_def /c.def") < tail.index("set_dont_touch spare_inv_0")
+
+
+def test_the_reassertion_is_absent_when_no_plan_is_supplied(tmp_path):
+    """The default keeps a caller that passes nothing byte-identical."""
+    deck = _full_pnr_tcl(tmp_path)
+    a = R._build_pnr_sdr_child_tcl_text(deck, checkpoint_def_c="/c.def",
+                                        stage=SITE1)
+    b = R._build_pnr_sdr_child_tcl_text(deck, checkpoint_def_c="/c.def",
+                                        stage=SITE1, after_restore_tcl="")
+    assert a == b
+    assert "SPARE_DONTTOUCH_REASSERTED" not in a
+
+
+def test_the_child_deck_writer_puts_the_plan_in_both_decks(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "pnr.tcl").write_text(_full_pnr_tcl(tmp_path))
+    assert R._write_sdr_child_decks(out / "pnr.tcl", out, container="",
+                                    spare_plan=_SPARE_PLAN) == {}
+    for stage in (SITE1, SITE2):
+        assert "set_dont_touch spare_inv_0" in (
+            out / R._sdr_child_tcl_name(stage)).read_text()
