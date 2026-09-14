@@ -415,9 +415,22 @@ def inspect(project: Path, tol_pct: float = DEFAULT_TOL_PCT
 
     docs = _load_l8_docs(project)
     if not docs:
-        findings.append(Finding("ERROR", "L8_CLOCK_INPUT_NOT_MEASURED",
-            "No L8 document exists, so no clock/tick contract was measured; "
-            "this is NOT_MEASURED, not a vacuous pass."))
+        # 9320b0269 was RIGHT that this is not a vacuous pass, and WRONG about
+        # the tier. It typed the empty denominator `ERROR` (rc=1), which the
+        # flow reads as a live finding — so a design with no L8 document lost
+        # step D1 outright. The severity contradicted the finding's own
+        # sentence: "this is NOT_MEASURED".
+        #
+        # NOT_MEASURED has a tier of its own here: `skip_kind`
+        # `zero-denominator`, which `_flow_reason_taxonomy` books
+        # ZERO_DENOMINATOR -> `INCOMPLETE` -> `DISCLOSED_INCOMPLETE`. That is
+        # reported, printed, typed and carried in `advisory_gate_records` and
+        # is NEVER promoted to a pass (`ZERO_DENOMINATOR` is not in
+        # `SKIP_ELIGIBLE`). The hole stays shut; only the blast radius goes.
+        summary["skip_kind"] = "zero-denominator"
+        summary["skipped_reason"] = (
+            "zero-denominator: no L8 document exists, so no clock/tick "
+            "contract was measured. NOT_MEASURED, not a vacuous pass.")
         return findings, summary
     summary["l8_files"] = [str(p.relative_to(project)) for p, _ in docs]
 
@@ -428,9 +441,15 @@ def inspect(project: Path, tol_pct: float = DEFAULT_TOL_PCT
     summary["tick_constants"] = len(ticks)
 
     if not records and not ticks:
-        findings.append(Finding("ERROR", "L8_CLOCK_INPUT_NOT_MEASURED",
-            "L8 declares neither a clock record nor a tick-denominated "
-            "constant; no consumer-owned clock contract was measured."))
+        # Same tier decision as the no-document case above: an L8 that
+        # declares neither a clock record nor a tick constant offers this
+        # gate nothing to dereference. Zero subjects is NOT_MEASURED, not a
+        # FAIL and not a pass.
+        summary["skip_kind"] = "zero-denominator"
+        summary["skipped_reason"] = (
+            "zero-denominator: L8 declares neither a clock record nor a "
+            "tick-denominated constant, so no consumer-owned clock contract "
+            "was measured. NOT_MEASURED, not a vacuous pass.")
         return findings, summary
 
     # PDK-SCOPED CLOCK RECORDS — the four-outcome contract, stated once in
@@ -690,7 +709,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     findings, summary = inspect(project, tol_pct=args.tol_pct)
     errors = [f for f in findings if f.severity == "ERROR"]
     warns = [f for f in findings if f.severity == "WARN"]
-    passed = not errors
+    # A zero denominator is NOT a pass. `not errors` is True for it (there is
+    # nothing to find an error in), and publishing `passed: true` in the JSON
+    # is precisely the vacuous pass 9320b0269 set out to close — so the
+    # NOT_MEASURED tier is subtracted from `passed` here, at the one place the
+    # word is computed.
+    passed = bool(not errors
+                  and summary.get("skip_kind") != "zero-denominator")
 
     if args.json:
         out = Path(args.json)
@@ -699,6 +724,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             "program": "l8_clock_period_actionability_check",
             "blocks": not args.advise,
             "passed": passed,
+            "verdict": ("INCOMPLETE"
+                        if summary.get("skip_kind") == "zero-denominator"
+                        else ("PASS" if passed else "FAIL")),
+            "reason_class": ("ZERO_DENOMINATOR"
+                             if summary.get("skip_kind") == "zero-denominator"
+                             else None),
             "summary": summary,
             "findings": [f.as_dict() for f in findings],
         }, indent=2), encoding="utf-8")
@@ -706,6 +737,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"=== l8_clock_period_actionability_check ({project.name}) ===")
     if summary.get("skipped_reason"):
         print(f"skipped: {summary['skipped_reason']}")
+        if summary.get("skip_kind") == "zero-denominator":
+            # rc 2 WITHOUT the `VACUOUS_PASS:` sentinel. The sentinel is what
+            # promotes an rc 2 towards a skip that reads as a pass; the bare
+            # rc 2 plus the `zero-denominator` token in this line is what
+            # `_flow_reason_taxonomy._ZERO_RE` books as ZERO_DENOMINATOR, and
+            # ZERO_DENOMINATOR is in `INCOMPLETE`, never in `SKIP_ELIGIBLE`.
+            return _vx.RC_VACUOUS
         if summary.get("skip_kind") != "input-missing":
             return 0          # a waiver is not an empty examination
         # disclose on BOTH channels the consumer reads: the
