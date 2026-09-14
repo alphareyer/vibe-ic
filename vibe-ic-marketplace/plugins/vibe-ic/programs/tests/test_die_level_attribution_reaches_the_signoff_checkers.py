@@ -51,8 +51,24 @@ from pathlib import Path
 
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
-import _die_level_attribution_consult as C  # noqa: E402
 import die_level_deck_rule_attribution as D  # noqa: E402
+
+# DEFERRED, and that is the point. `_die_level_attribution_consult` does not
+# exist on the pre-fix tree, and a module-level import of it would make THIS
+# WHOLE FILE a collection error there -- 0 cases run, 0 questions answered,
+# and the end-to-end cases below (which drive the SHIPPED programs by
+# subprocess and need no new symbol) would never get to report what the
+# pre-fix tree actually does. Each case that needs the new module asks for it
+# itself.
+def _C():
+    import _die_level_attribution_consult as C  # noqa: PLC0415
+    return C
+
+
+class _TIER:
+    """`_TIER.value` without importing C at module scope; equal to the tier the
+    producer already declares, which exists on both trees."""
+    value = D.TIER_PASS_WITH_ATTRIBUTION
 
 import pytest  # noqa: E402
 
@@ -148,7 +164,7 @@ def test_rdb_rule_counts_reads_the_reports_own_rule_names():
 # ── the consultation: credited, and every way it is not ───────────────────
 
 def test_a_complete_hardmacro_attribution_is_credited(tmp_path):
-    got = C.consult(make_project(tmp_path), 2, ["XX.9", "YY.9"])
+    got = _C().consult(make_project(tmp_path), 2, ["XX.9", "YY.9"])
     assert got["credit"] is True
     assert got["tier"] == D.TIER_PASS_WITH_ATTRIBUTION
     assert set(got["provenance"].values()) == {"producer_recorded_deck_code"}
@@ -156,7 +172,7 @@ def test_a_complete_hardmacro_attribution_is_credited(tmp_path):
 
 def test_a_DIE_delivery_is_never_attributed(tmp_path):
     """A die owns its own die-level rules and there is nobody above it."""
-    got = C.consult(make_project(tmp_path, deliverable="DIE"), 2,
+    got = _C().consult(make_project(tmp_path, deliverable="DIE"), 2,
                     ["XX.9", "YY.9"])
     assert got["applicable"] is False and got["credit"] is False
     assert "HARDMACRO" in got["reason"]
@@ -165,7 +181,7 @@ def test_a_DIE_delivery_is_never_attributed(tmp_path):
 def test_an_undeclared_delivery_is_never_attributed(tmp_path):
     p = make_project(tmp_path)
     (p / "input/submission_template/tapeout_declaration.json").unlink()
-    got = C.consult(p, 2, ["XX.9", "YY.9"])
+    got = _C().consult(p, 2, ["XX.9", "YY.9"])
     assert got["credit"] is False and "undeclared" in got["reason"]
 
 
@@ -177,7 +193,7 @@ def test_a_rule_whose_deck_code_reads_no_die_area_is_refused(tmp_path):
     rec["die_level_density_rule_evidence"]["XX.9"] = {
         "deck_source": DECK, "code": "  metal1.space(0.2).output('XX.9')\n",
         "die_area_identifiers_matched": []}
-    got = C.consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
+    got = _C().consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
     assert got["credit"] is False
     assert "NO whole-die area identifier" in got["reason"]
 
@@ -187,7 +203,7 @@ def test_evidence_claiming_an_identifier_its_code_lacks_is_refused(tmp_path):
     rec["die_level_density_rule_evidence"]["XX.9"] = {
         "deck_source": DECK, "code": "  metal1.space(0.2).output('XX.9')\n",
         "die_area_identifiers_matched": ["whole_die_area"]}
-    got = C.consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
+    got = _C().consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
     assert got["credit"] is False
     assert "does not actually contain" in got["reason"]
 
@@ -199,14 +215,14 @@ def test_evidence_claiming_an_identifier_the_deck_never_declared_is_refused(
     rec["die_level_density_rule_evidence"]["XX.9"] = {
         "deck_source": DECK, "code": "  d = m1.area / invented_area\n",
         "die_area_identifiers_matched": ["invented_area"]}
-    got = C.consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
+    got = _C().consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
     assert got["credit"] is False and "invented_area" in got["reason"]
 
 
 def test_a_rule_with_no_recorded_evidence_at_all_is_refused(tmp_path):
     rec = _record()
     rec.pop("die_level_density_rule_evidence")
-    got = C.consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
+    got = _C().consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
     assert got["credit"] is False and "no recorded deck code" in got["reason"]
 
 
@@ -214,30 +230,30 @@ def test_the_attributed_rules_must_be_the_callers_own(tmp_path):
     """THE BINDING TO REALITY. A forged record can claim any deck block; it
     cannot make the caller's DRC report emit a violation under a rule the
     design did not violate."""
-    got = C.consult(make_project(tmp_path), 2, ["XX.9", "ZZ.1"])
+    got = _C().consult(make_project(tmp_path), 2, ["XX.9", "ZZ.1"])
     assert got["credit"] is False
     assert "not the rule(s) the caller's own report carries" in got["reason"]
 
 
 def test_the_count_must_be_the_callers_own(tmp_path):
-    got = C.consult(make_project(tmp_path), 5, ["XX.9", "YY.9"])
+    got = _C().consult(make_project(tmp_path), 5, ["XX.9", "YY.9"])
     assert got["credit"] is False and "not about the report" in got["reason"]
 
 
 def test_a_caller_that_states_no_count_is_not_credited(tmp_path):
-    got = C.consult(make_project(tmp_path))
+    got = _C().consult(make_project(tmp_path))
     assert got["credit"] is False and "did not state" in got["reason"]
 
 
 def test_a_missing_handoff_record_is_refused(tmp_path):
-    got = C.consult(make_project(tmp_path, handoff_rules=None), 2,
+    got = _C().consult(make_project(tmp_path, handoff_rules=None), 2,
                     ["XX.9", "YY.9"])
     assert got["credit"] is False and got["handoff_ok"] is False
     assert "waiver wearing another word" in got["reason"]
 
 
 def test_a_partial_handoff_record_is_refused(tmp_path):
-    got = C.consult(make_project(tmp_path, handoff_rules=("XX.9",)), 2,
+    got = _C().consult(make_project(tmp_path, handoff_rules=("XX.9",)), 2,
                     ["XX.9", "YY.9"])
     assert got["credit"] is False
     assert "part of the problem to nobody" in got["reason"]
@@ -245,27 +261,27 @@ def test_a_partial_handoff_record_is_refused(tmp_path):
 
 def test_one_unattributed_violation_keeps_the_fail(tmp_path):
     rec = _record(total=3, unattributed_total=1)
-    got = C.consult(make_project(tmp_path, rec), 3, ["XX.9", "YY.9"])
+    got = _C().consult(make_project(tmp_path, rec), 3, ["XX.9", "YY.9"])
     assert got["credit"] is False
     assert "NOT attributed to the integrator" in got["reason"]
 
 
 def test_arithmetic_that_does_not_close_is_refused(tmp_path):
     rec = _record(total=9)
-    got = C.consult(make_project(tmp_path, rec), 9, ["XX.9", "YY.9"])
+    got = _C().consult(make_project(tmp_path, rec), 9, ["XX.9", "YY.9"])
     assert got["credit"] is False and "does not add up" in got["reason"]
 
 
 def test_a_record_that_attributed_nothing_is_not_applicable(tmp_path):
     rec = _record(verdict="NOTHING_TO_ATTRIBUTE")
-    got = C.consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
+    got = _C().consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
     assert got["applicable"] is False and got["credit"] is False
 
 
 def test_no_attribution_record_at_all_is_not_applicable(tmp_path):
     p = make_project(tmp_path)
     (p / "reports/phase3/die_level_rule_attribution.json").unlink()
-    got = C.consult(p, 2, ["XX.9", "YY.9"])
+    got = _C().consult(p, 2, ["XX.9", "YY.9"])
     assert got["applicable"] is False and "could not be read" in got["reason"]
 
 
@@ -278,7 +294,7 @@ def test_a_deck_ON_THIS_HOST_outranks_the_recorded_code(tmp_path):
     rec = _record()
     rec["die_level_density_rules_in_deck"] = {"XX.9": str(deck),
                                               "YY.9": str(deck)}
-    got = C.consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
+    got = _C().consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
     assert got["credit"] is True
     assert set(got["provenance"].values()) == {"deck_on_disk"}
 
@@ -289,7 +305,7 @@ def test_a_deck_on_this_host_that_does_not_name_the_rule_is_refused(tmp_path):
     rec = _record()
     rec["die_level_density_rules_in_deck"] = {"XX.9": str(deck),
                                               "YY.9": str(deck)}
-    got = C.consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
+    got = _C().consult(make_project(tmp_path, rec), 2, ["XX.9", "YY.9"])
     assert got["credit"] is False
     assert "does NOT contain the rule name" in got["reason"]
 
@@ -303,7 +319,8 @@ def _signoff_project(tmp_path: Path, rules=("XX.9", "YY.9"),
     rpt.write_text(
         "# Tool: KLayout\n"
         "<report-database>\n"
-        " <generator>fixture_pdk.drc</generator>\n"
+        " <generator>drc: script='/fixture_pdk/tech/drc/fixture.drc'"
+        "</generator>\n"
         " <description>DRC</description>\n"
         f" <cells><cell><name>fixture_core</name></cell></cells>\n"
         " <items>\n" + "".join(
@@ -336,7 +353,7 @@ def test_drc_report_check_signoff_reaches_PASS_WITH_ATTRIBUTION(tmp_path):
     cp, rec = _run("drc_report_check.py", p, "--mode", "drc", "--signoff",
                    "--under", "reports/phase3/drc_signoff.rpt")
     assert cp.returncode == 0, cp.stderr[-2000:]
-    assert rec["summary"]["terminal_verdict"] == C.TIER
+    assert rec["summary"]["terminal_verdict"] == _TIER.value
     rules = {f["rule"] for f in rec["findings"]}
     assert "DRC_SIGNOFF_DIE_LEVEL_ATTRIBUTED" in rules
     assert "DRC_REAL_VIOLATIONS_FOUND" in rules, (
@@ -352,7 +369,7 @@ def test_drc_report_check_still_fails_a_DIE_delivery(tmp_path):
     cp, rec = _run("drc_report_check.py", p, "--mode", "drc", "--signoff",
                    "--under", "reports/phase3/drc_signoff.rpt")
     assert cp.returncode == 1
-    assert rec["summary"].get("terminal_verdict") != C.TIER
+    assert rec["summary"].get("terminal_verdict") != _TIER.value
 
 
 def test_drc_report_check_still_fails_an_unhanded_over_attribution(tmp_path):
@@ -478,3 +495,45 @@ def test_tapeout_library_internal_branch_is_untouched(tmp_path):
     r = audit._check_tapeout(p)
     assert r.summary["evidence"]["drc"] == "library_internal_waived"
     assert r.summary["drc_die_level_attributed"] is False
+
+
+def test_the_attribution_cannot_suppress_an_unrelated_signoff_refusal(tmp_path):
+    """THE CONTROL THIS FILE'S OWN R ARM FORCED INTO EXISTENCE.
+
+    An early draft cleared `signoff_refused` when the attribution was
+    credited. Run against the base tree, the fixture report happened to carry
+    no `<generator>` deck; the base tree refused it for THAT reason and the
+    fixed tree returned 0 — a real, unrelated refusal suppressed by a change
+    that has nothing to do with it.
+
+    The two questions are different. `--signoff`'s producer clauses ask
+    WHETHER THIS IS A CERTIFICATE (is it a rule deck applied to a layout, does
+    it name its rule set, was a layout streamed at all); the attribution asks
+    WHOSE the violations are. A perfectly attributed macro whose report does
+    not say which rules ran has certified nothing, and must still FAIL.
+    """
+    p = _signoff_project(tmp_path)
+    rpt = p / "reports/phase3/drc_signoff.rpt"
+    rpt.write_text(rpt.read_text().replace(
+        " <generator>drc: script='/fixture_pdk/tech/drc/fixture.drc'"
+        "</generator>\n", ""))
+    cp, rec = _run("drc_report_check.py", p, "--mode", "drc", "--signoff",
+                   "--under", "reports/phase3/drc_signoff.rpt")
+    assert cp.returncode == 1, (
+        "a credited attribution must not answer the producer question")
+    rules = {f["rule"] for f in rec["findings"]}
+    assert "DRC_SIGNOFF_PRODUCER_DECK_UNNAMED" in rules
+    assert "DRC_SIGNOFF_DIE_LEVEL_ATTRIBUTED" in rules, (
+        "and the attribution is still DISCLOSED — it was measured, it just "
+        "does not decide this")
+
+
+def test_the_attribution_cannot_suppress_a_missing_layout(tmp_path):
+    """Same contract, the other producer clause: no streamed layout means no
+    certificate, however cleanly the violations are attributed."""
+    p = _signoff_project(tmp_path)
+    for g in (p / "phase3/stage4/gds").glob("*.gds"):
+        g.unlink()
+    cp, _ = _run("drc_report_check.py", p, "--mode", "drc", "--signoff",
+                 "--under", "reports/phase3/drc_signoff.rpt")
+    assert cp.returncode == 1

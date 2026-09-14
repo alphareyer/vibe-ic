@@ -633,7 +633,18 @@ def run(caller_argv, _audit=None) -> int:
             if sadd2["credit"]:
                 payload["passed"] = True
                 payload["summary"]["terminal_verdict"] = _dlac.TIER
-                signoff_refused = False
+                # `signoff_refused` IS DELIBERATELY NOT CLEARED. It carries the
+                # sign-off scope's OTHER refusals — an unrecognised producer,
+                # a router-DRC report masquerading as a sign-off deck, a deck
+                # that does not name its rule set, no streamed layout at all.
+                # Those are about WHETHER THIS IS A CERTIFICATE; the
+                # attribution is about WHOSE the violations are, and it must
+                # not answer a question it was not asked. An early draft did
+                # clear it, and this file's own R arm caught it: the fixture
+                # report carried no `<generator>` deck, the base tree refused
+                # it for that reason, and the fixed tree returned 0 — a real
+                # refusal suppressed by a change that has nothing to do with
+                # it. The refusal below still runs first.
                 # AND THE EXIT CODE, or the persisted audit and the rc would
                 # disagree — the very state the `--json` re-emit above exists
                 # to prevent. `rc` is the base audit's, and the base audit was
