@@ -145,6 +145,7 @@ import analog_netlist_connectivity_check as _conncheck  # noqa: E402
 # The A1 spec-row reading rule, owned by A2 — see `spec_values`.
 import analog_a2_topology_emit as _a2  # noqa: E402
 import analog_poweron_sequence as _poweron  # noqa: E402  (lane icadc)
+import analog_deck_vector_retention as _retain  # noqa: E402  (lane icadc)
 import pdk_analog_device_params as _pdp  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1437,6 +1438,26 @@ def render_testbench(ir: Dict[str, Any], pdkctx: Dict[str, Any],
     else:
         notes.append("poweron_sequence=not applied: the topology IR declares "
                      "no `vdd` rail to bring up")
+
+    # THE VECTOR RETENTION (lane icadc, 2026-09-15). MEASURED on ONE deck in
+    # two arms differing by exactly the `.save` line: without it ngspice
+    # retains every internal node's full time vector and grows at 3784 kB per
+    # microsecond of simulated time against 542 kB with it — ~52 GB against
+    # ~7.5 GB over the conversion record this producer's own deck runs. The
+    # 7.5 GB arm was checked against an independent two-day run of the same
+    # circuit (measured 7.22 GiB at 11.8 ms). A validation sim that needs 52 GB
+    # is how a shared host freezes.
+    #
+    # It retains EXACTLY the vectors this deck's own meas/wrdata/print cards
+    # read — derived from the text above, including the rail cards
+    # `transient_rail_measurement` just wrote — so the measurement is unchanged
+    # and a block that gains a measurement gains its retention in the same
+    # breath. Applied AFTER the rail cards on purpose: retaining a node the
+    # deck measures is the requirement, and those cards are part of the deck.
+    text, _vr = _retain.apply(text)
+    notes.append(_vr.get("provenance")
+                 or f"vector_retention=not applied: {_vr.get('refused')}")
+    e["vector_retention"] = _vr
     return text, e, notes
 
 
