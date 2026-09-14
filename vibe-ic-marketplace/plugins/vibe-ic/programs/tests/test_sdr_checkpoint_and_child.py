@@ -399,3 +399,28 @@ def test_a_site_whose_child_deck_was_never_written_says_so(tmp_path):
     by_stage = {r["stage"]: r for r in recs}
     assert by_stage[SITE1]["child_deck_not_written"]
     assert "child_deck_not_written" not in by_stage[SITE2]
+
+
+def test_the_adopt_tail_asks_the_router_for_its_own_report(tmp_path,
+                                                           monkeypatch):
+    """The tail reroutes (antenna, the second site, named-violation), and the
+    shipped geometry must not be described by a report written before any of
+    them.  `_vic_drc_opt` is set inside the region the resume transform elides,
+    so the tail has to re-ask."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "pnr.tcl").write_text(_full_pnr_tcl(tmp_path))
+    txn = out / R._SDR_TXN_DIRS[SITE1]
+    txn.mkdir(parents=True)
+    (txn / R._SDR_CANDIDATE_DEF_NAME).write_text("CANDIDATE\n")
+    monkeypatch.setattr(R, "_docker_exec",
+                        lambda container, cmd, **kw: (0, "", ""))
+    log = (f"{R._SDR_ADOPT_MARKER} stage={SITE1} "
+           f"def={txn / R._SDR_CANDIDATE_DEF_NAME}\n")
+    R._pnr_adopt_sdr_candidates(
+        container="", out_dir=out, out_dir_c=str(out),
+        pnr_tcl=out / "pnr.tcl", log_text=log, hard_ceiling_s=60)
+    tail = (out / "pnr_sdr_adopt_1.tcl").read_text()
+    assert f"-output_drc {out}/{R.ROUTER_DRC_REPORT_NAME}" in tail
+    # and it is asked BEFORE anything in the tail can reroute
+    assert tail.index("_vic_drc_opt") < tail.index("repair_antennas")

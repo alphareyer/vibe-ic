@@ -27544,6 +27544,16 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
             rec["reason"] = f"adopt tail could not be derived: {exc}"
             rec["rc"] = 1
             break
+        # ASK THE ROUTER FOR ITS REPORT IN THE TAIL TOO. `_vic_drc_opt` is set
+        # by the base route's probe, which lives inside the region the resume
+        # transform elides — so without this the tail's own reroutes (antenna
+        # repair, the second SDR site, the named-violation reroute) would run
+        # with no `-output_drc` and the shipped geometry would be described by
+        # a report written before any of them. The helper is idempotent and
+        # self-disclosing, so re-emitting it is a no-op wherever the option is
+        # already set or unsupported.
+        tail_text = _route_drc_report_tcl(
+            f"{out_dir_c}/{ROUTER_DRC_REPORT_NAME}") + tail_text
         tail_name = f"pnr_sdr_adopt_{len(omitted)}.tcl"
         tail_log = f"pnr_sdr_adopt_{len(omitted)}.log"
         (out_dir / tail_name).write_text(tail_text)
