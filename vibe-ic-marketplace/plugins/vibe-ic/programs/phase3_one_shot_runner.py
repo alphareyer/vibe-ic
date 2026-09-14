@@ -57721,6 +57721,51 @@ def main() -> int:
         print(f"[WARN] pre-summary step record non-fatal: {_pre_exc}",
               file=sys.stderr)
 
+    # THE RUN WRITES THE DOCUMENTS THE FLOW SAYS THE RUN WRITES (#icsub2).
+    # Placed HERE — after every phase-3 step, before the final summary and
+    # before the completion-audit refresh below — because this is the first
+    # point at which every artefact those producers read exists.
+    #
+    # MEASURED on `subservient` x gf180mcuD: the completion audit reported
+    # "PRODUCER GAP: no pre-audit producer supplied these paths; wire them
+    # into the owning runner before claiming this step complete" on ELEVEN
+    # steps, and for a well-defined subset the flow had ALREADY NAMED the
+    # producer — the step lists the program under `programs:`, its own gate
+    # clause invokes that same program with `--json <path>`, and `<path>` is
+    # one of the step's `required_outputs`. Nothing in the run ran it, the
+    # AUDITOR's evaluation of the gate did, and the audit then correctly
+    # refused its own output as evidence. Three steps (26, 28, 31) stop being
+    # MISSING once the run produces them.
+    #
+    # THIS IS THE RUNNER, NOT THE AUDITOR, and that is the whole distinction:
+    # a run executing the producers its own flow declares is what a flow does;
+    # an auditor executing them and then grading its own output is
+    # self-certification. `flow_compliance_check` does not import this.
+    #
+    # It never overwrites the run's own work and never manufactures work for a
+    # step this delivery does not have — see `flow_declared_producer_run.owed`.
+    # Its own rc is RECORDED, not gating: the step gates re-run these programs
+    # and keep their verdicts.
+    try:
+        import subprocess as _sp_dp
+        _dp = _sp_dp.run(
+            [sys.executable, str(PROGRAMS_DIR / "flow_declared_producer_run.py"),
+             str(project)],
+            timeout=_pl.audit_timeout_s(project) + 120,
+            check=False, capture_output=True, text=True)
+        for _ln in (_dp.stdout or "").strip().splitlines():
+            print(f"[phase3] {_ln}")
+        if _dp.returncode != 0:
+            print(f"[INFO] flow_declared_producer_run rc={_dp.returncode}: a "
+                  f"declared producer could not be EXECUTED (not a verdict "
+                  f"about the design); {(_dp.stderr or '').strip()[-300:]}",
+                  file=sys.stderr)
+    except Exception as _dp_exc:  # nosec — must not abort finalize
+        print(f"[WARN] flow_declared_producer_run did NOT run ({_dp_exc}); the "
+              f"documents the flow declares this run's steps to produce may "
+              f"still be authored by the audit and refused as its own "
+              f"evidence", file=sys.stderr)
+
     fs_ok = _pl.emit_final_summary(project, PROGRAMS_DIR)
 
     # sha256×sky130A / #SS-SETUP — pin the completion audit to the FINAL artifact
