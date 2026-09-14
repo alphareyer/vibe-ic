@@ -1051,20 +1051,52 @@ def test_splitting_the_reconverge_block_did_not_drop_the_second_antenna_pass(
     Two passes means the antenna block is emitted TWICE and the two copies are
     byte-identical, which is exactly what the claim says. Both halves are
     measured on the real emission and both are cut out by their sentinels, so
-    neither depends on counting a token that also occurs elsewhere."""
+    neither depends on counting a token that also occurs elsewhere.
+
+    #2253 — THE FIRST PASS NOW HAS ITS OWN BEGIN/END SENTINEL PAIR, because an
+    SDR child deck seeded from the SECOND site's checkpoint has to omit the
+    antenna work that checkpoint already contains. So slot A is cut out by that
+    pair instead of by "everything up to the next stage's BEGIN", which is
+    strictly more precise: the old slice silently swallowed whatever sat
+    between the antenna block and the reconverge BEGIN, and the first thing
+    ever to sit there was the first pass's own END marker. MEASURED on the real
+    emission when that changed: the two passes are still 13,070 bytes each and
+    still byte-identical, and `repair_antennas` is still in BOTH — nothing was
+    dropped, the slice was reading a byte the pass does not own. Adding the
+    sentinel pair does NOT make this stage omittable on a fatal-signal resume:
+    that path gates on `_PNR_NONFATAL_STAGES`, which does not contain it, and
+    `test_the_second_antenna_pass_is_breadcrumbed_and_load_bearing` measures it.
+
+    `repair_antennas` is now asserted INSIDE slot B as well. The docstring above
+    names the hole the substring comparison alone left — an emptied slot B going
+    unnoticed because the token still appeared via slot A — and asking slot B
+    directly closes it without depending on the comparison at all."""
     _res, calls, _p = _drive(tmp_path, monkeypatch, first_rc=139,
                              stage="postroute_drv_repair")
     body = calls[0]["body"]
     a_open = f'puts "{_MARKER} postroute_antenna_repair"\n'
     b_open = f'puts "{_MARKER} postroute_antenna_reconverge"\n'
+    a_begin = mod._pnr_stage_begin("postroute_antenna_repair")
+    a_end = mod._pnr_stage_end("postroute_antenna_repair")
     rc_begin = mod._pnr_stage_begin("postroute_drv_reconverge")
     rc_end = mod._pnr_stage_end("postroute_drv_reconverge")
-    for needle in (a_open, b_open, rc_begin, rc_end):
+    for needle in (a_open, b_open, a_begin, a_end, rc_begin, rc_end):
         assert needle in body, f"the emission carries no {needle!r}"
-    slot_a = body[body.index(a_open) + len(a_open):body.index(rc_begin)]
+    # the first pass is bracketed, and its breadcrumb is INSIDE the bracket, so
+    # omitting the stage removes the breadcrumb with it instead of leaving a
+    # stage announcement for work that did not run
+    assert body.index(a_begin) < body.index(a_open) < body.index(a_end)
+    assert body.index(a_end) < body.index(rc_begin)
+    slot_a = body[body.index(a_open) + len(a_open):body.index(a_end)]
     assert slot_a.strip(), "the FIRST antenna pass is empty"
+    assert "repair_antennas" in slot_a, "the FIRST antenna pass repairs nothing"
     _b0 = body.index(b_open) + len(b_open)
-    assert body[_b0:_b0 + len(slot_a)] == slot_a, (
+    slot_b = body[_b0:_b0 + len(slot_a)]
+    assert "repair_antennas" in slot_b, (
+        "the SECOND (post-reconverge) antenna pass does not call "
+        "`repair_antennas` — it is the load-bearing one, and asking it "
+        "directly is what an emptied slot B cannot survive")
+    assert slot_b == slot_a, (
         "the SECOND (post-reconverge) antenna pass is not the byte-identical "
         "re-emission of the first — the split was claimed to change nothing "
         "about the emitted Tcl, and `repair_antennas` still appearing via the "

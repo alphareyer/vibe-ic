@@ -254,13 +254,26 @@ proc check_placement {args} { return 0 }
 
 def _drive_loop(tmpdir, rd_script, spef_exists=True,
                 candidate_router_drc="clean"):
-    """Execute the emitted sign-off DRV repair loop under tclsh.
+    """Execute the emitted sign-off DRV repair TRANSACTION under tclsh.
 
     `rd_script` is what successive `repair_design` calls do: "ok", or an error
     string. The OpenROAD commands are stubbed, so what is measured is which
     branch runs, in which order, and what the caller is told — the method this
-    module's own docstring declares and its other tests already use."""
+    module's own docstring declares and its other tests already use.
+
+    #2253 — the pass is now a CHECKPOINT-AND-CHILD transaction, so ONE block
+    emits two roles and they run in two processes. This harness runs BOTH, in
+    the shipped order: first the CHILD (`$::_vic_sdr_role` = child), which is
+    the half that carries this module's subject — the repair loop and its
+    EST-0104 recovery — and which ends by publishing a candidate + receipt;
+    then the PARENT, with `exec` stubbed out because the child has already
+    run, which ingests that receipt and decides. The returned text is both
+    transcripts, so every assertion below still reads one stream.
+    """
     out = str(tmpdir)
+    os.makedirs(
+        os.path.join(out, p3._SDR_TXN_DIRS["postroute_drv_repair"]),
+        exist_ok=True)
     if spef_exists:
         open(os.path.join(out, "sdr_pass.spef"), "w").write("")
     tcl = p3._v1_8_100_signoff_drv_repair_tcl(out)
@@ -276,10 +289,29 @@ def _drive_loop(tmpdir, rd_script, spef_exists=True,
     # replaces it with the clean candidate report.
     route_drc = os.path.join(out, p3.ROUTER_DRC_REPORT_NAME)
     open(route_drc, "w").write("violation type: spacing\\n")
-    head += "set ROUTE_DRC {%s}\n" % route_drc
+    # The CHILD's reroute writes its OWN report, which is what the parent then
+    # counts. The shipping session's own report above is never overwritten.
+    txn = os.path.join(out, p3._SDR_TXN_DIRS["postroute_drv_repair"])
+    head += "set ROUTE_DRC {%s}\n" % os.path.join(
+        txn, p3._SDR_CANDIDATE_DRC_NAME)
     # What the router is able to SAY about the candidate the pass leaves behind.
     head += "set CANDIDATE_ROUTER_DRC {%s}\n" % candidate_router_drc
-    return _run_tcl(head + tcl)
+    # THE SHIPPED ORDER, because it is load-bearing: the parent's `begin`
+    # CREATES the transaction directory (deleting any stale one) and writes the
+    # checkpoint, and only then does the child run and publish into it. Running
+    # the child first would have its receipt deleted out from under it.
+    child_tcl = os.path.join(out, "child.tcl")
+    with open(child_tcl, "w") as fh:
+        fh.write('set ::_vic_sdr_role "child"\n' + head + tcl)
+    parent_head = (head
+                   + "set CHILD_TCL {%s}\n" % child_tcl
+                   + "rename exec __real_exec\n"
+                   + "proc exec {args} {\n"
+                   + "  global CHILD_TCL\n"
+                   + "  __real_exec [info nameofexecutable] $CHILD_TCL "
+                     ">&@ stdout\n"
+                   + "}\n")
+    return _run_tcl(parent_head + tcl)
 
 
 def test_signoff_drv_repair_loop_recovers_instead_of_breaking_out(tmp_path):
@@ -366,7 +398,11 @@ def test_the_give_up_still_terminates_the_loop(tmp_path):
     # an un-advised acceptance.
     assert "SDR_TRANSACTION_CANDIDATE_ROUTER_DRC: before=1 after=0" in out, out
     assert "SDR_TRANSACTION_ACCEPTED_WITH_ADVISORY" in out, out
-    assert "SDR_TRANSACTION_REJECTED_UNRESTORABLE" not in out, out
+    assert "SDR_TRANSACTION_REJECTED_CANDIDATE_DISCARDED" not in out, out
+    # #2253 — an acceptance HANDS OFF rather than shipping from a session that
+    # cannot read the candidate back (ODB-0251). So this arm ends by naming
+    # the candidate and stopping, not by reaching SDR_DONE.
+    assert p3._SDR_ADOPT_MARKER in out, out
 
 
 def test_the_give_up_refuses_when_the_candidate_cannot_be_measured(tmp_path):
@@ -387,10 +423,18 @@ def test_the_give_up_refuses_when_the_candidate_cannot_be_measured(tmp_path):
     passes = [ln for ln in out.splitlines() if ln.startswith("SDR_DRV_PASS")]
     assert len(passes) == 1, passes
     assert "SDR_TRANSACTION_CANDIDATE_ROUTER_DRC_UNREADABLE" in out, out
-    assert ("SDR_TRANSACTION_REJECTED_UNRESTORABLE: reason=nonfatal_or_route_error"
-            in out), out
+    assert ("SDR_TRANSACTION_REJECTED_CANDIDATE_DISCARDED: "
+            "reason=nonfatal_or_route_error" in out), out
     assert "ACCEPTED" not in out, out
-    assert "SDR_DONE" not in out, out
+    # #2253 — the candidate is still refused for exactly the same reason, and
+    # the half-repaired database is still never certified. What has changed is
+    # that the half-repaired database was the CHILD's, so refusing it costs the
+    # shipping session nothing: it reaches SDR_DONE holding the clean route it
+    # checkpointed, and the sign-off runs. Certifying a half-repaired database
+    # is what the old `error` was protecting against, and there is no longer
+    # one to protect.
+    assert "SDR_DONE" in out, out
+    assert p3._SDR_ADOPT_MARKER not in out, out
 
 
 # --------------------------------------------------------------------------
