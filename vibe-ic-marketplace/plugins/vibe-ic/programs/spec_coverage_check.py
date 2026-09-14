@@ -3131,6 +3131,75 @@ def _print_human(report: dict) -> None:
               "checklist item.")
 
 
+#: Keys an emitted L-doc JSON carries that are the EMITTER'S OWN SCAFFOLDING,
+#: not the design's content: the instruction-to-self about where to look, the
+#: extraction bookkeeping, and the generator stamp. Their text is ABOUT the
+#: extraction, never a statement BY the design, so it must never reach a
+#: requirement extractor.
+#:
+#: MEASURED (subservient x gf180mcuD, plugin 1.21.6, L-docs emitted by
+#: `phase1_post_process.emit_l_doc_skeleton`): the design INPUT states no DFT,
+#: no JTAG and no BIST at all -- `spec_test_debug_extract.extract()` over all 9
+#: staged input documents returns `[]`. Run over the EMITTED
+#: `L20_DFT_SCAN_TOPOLOGY.json`, the same extractor minted THREE requirements,
+#: and its own `evidence` field named where each came from:
+#:   * jtag_tap and bist  <- `extraction_hints`:
+#:         "Look for scan / DFT / BIST / JTAG sections."
+#:   * scan_chain         <- the skeleton's boilerplate `fields.notes`:
+#:         "Spec does not specify DFT/scan topology; this is deferred to
+#:          integration."
+#: -- i.e. the sentence that PROVES the feature is absent is the sentence that
+#: minted the requirement for it, while that same document's structured answers
+#: read `dft_present: false`, `jtag_tap: null`, `bist_mbist: []`,
+#: `scan_chains: []`. The gate then told the author, in its own doctrine line,
+#: that "a hidden scorer derived from the same spec WILL test it" -- directing a
+#: design with no test infrastructure to grow a TAP controller and a BIST
+#: engine, and BLOCKING under `--strict`.
+#: chip-AGNOSTIC: these are L-doc schema keys, no chip / vendor / SKU literal.
+_LDOC_SCAFFOLD_KEYS = (
+    "extraction_hints",
+    "extraction_status",
+    "emitted_by",
+    "_generator",
+)
+
+#: The status an L-doc skeleton declares when NOTHING has been extracted into it
+#: yet. Such a document is, by its own declaration, entirely scaffolding: empty
+#: field values plus the emitter's boilerplate. It contributes no design text.
+#: This is self-limiting -- the moment a real extraction fills the doc, the
+#: status changes and the document is read in full again.
+_LDOC_UNEXTRACTED_STATUS = "NOT_YET_EXTRACTED"
+
+
+def _strip_scaffold(node):
+    """Recursively drop `_LDOC_SCAFFOLD_KEYS` from a parsed L-doc."""
+    if isinstance(node, dict):
+        return {k: _strip_scaffold(v) for k, v in node.items()
+                if k not in _LDOC_SCAFFOLD_KEYS}
+    if isinstance(node, list):
+        return [_strip_scaffold(v) for v in node]
+    return node
+
+
+def _ldoc_design_text(raw: str) -> str:
+    """The DESIGN content of an emitted L-doc, with the emitter's scaffolding
+    removed. Anything that is not a recognisable L-doc JSON is returned
+    UNCHANGED -- this never silently swallows a station file it does not
+    understand."""
+    try:
+        doc = json.loads(raw)
+    except Exception:
+        return raw
+    if not isinstance(doc, dict):
+        return raw
+    if not (doc.get("doc_id") or doc.get("doc_name")):
+        return raw                       # not an L-doc: leave it alone
+    status = doc.get("extraction_status")
+    if isinstance(status, str) and status.strip() == _LDOC_UNEXTRACTED_STATUS:
+        return ""                        # the doc declares it holds nothing
+    return json.dumps(_strip_scaffold(doc), ensure_ascii=False)
+
+
 def _read(path: str, what: str) -> str:
     """Read a station file, or concatenate the L-doc files in a directory."""
     p = Path(path)
@@ -3138,13 +3207,14 @@ def _read(path: str, what: str) -> str:
         parts = []
         for f in sorted(p.glob("L*")):
             if f.is_file():
-                parts.append(f.read_text(errors="replace"))
+                parts.append(_ldoc_design_text(f.read_text(errors="replace")))
         if not parts:                    # no L-files: read everything readable
             for f in sorted(p.glob("*")):
                 if f.is_file():
-                    parts.append(f.read_text(errors="replace"))
+                    parts.append(
+                        _ldoc_design_text(f.read_text(errors="replace")))
         return "\n".join(parts)
-    return p.read_text(errors="replace")
+    return _ldoc_design_text(p.read_text(errors="replace"))
 
 
 def main(argv: List[str]) -> int:
