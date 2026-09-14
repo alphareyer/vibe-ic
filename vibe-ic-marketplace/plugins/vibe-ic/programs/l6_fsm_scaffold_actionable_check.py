@@ -288,12 +288,12 @@ import json
 import re
 import sys
 from pathlib import Path
-import _flow_reason_taxonomy as _reason_taxonomy  # noqa: E402  (lane icadc)
 from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _gate_denominator as _gd  # noqa: E402
+import _flow_reason_taxonomy as _reason_taxonomy  # noqa: E402
 import _path_layout as _pl  # noqa: E402
 import _rtl_fsm_extract as _rtlfsm  # noqa: E402
 
