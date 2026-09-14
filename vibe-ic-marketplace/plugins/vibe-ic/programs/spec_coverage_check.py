@@ -3137,7 +3137,7 @@ def _print_human(report: dict) -> None:
 #: extraction, never a statement BY the design, so it must never reach a
 #: requirement extractor.
 #:
-#: MEASURED (subservient x gf180mcuD, plugin 1.21.6, L-docs emitted by
+#: MEASURED (a benchmark SoC on an open 180 nm PDK, plugin 1.21.6, L-docs emitted by
 #: `phase1_post_process.emit_l_doc_skeleton`): the design INPUT states no DFT,
 #: no JTAG and no BIST at all -- `spec_test_debug_extract.extract()` over all 9
 #: staged input documents returns `[]`. Run over the EMITTED

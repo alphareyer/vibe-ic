@@ -31,6 +31,13 @@ import phase3_one_shot_runner as R
 
 
 def _rec(tmp_path, **over):
+    # The delivery decides whether a ring pins the die (98109186b: a record an
+    # earlier run left on disk must not re-pin a floorplan to a ring THIS
+    # delivery does not build). This fixture is a self-tape-out, which builds
+    # its ring, so the record below is the ring's own measurement.
+    st = tmp_path / "input" / "submission_template"
+    st.mkdir(parents=True, exist_ok=True)
+    (st / "SELF_TAPEOUT.txt").write_text("self tape-out\n", encoding="utf-8")
     body = {"ring_depth_um": 381.0,
             "ring_depth_terms_um": {"lib__in": 350.0, "lib__cor": 355.0},
             "ring_depth_masters_without_a_lef_size": [],
