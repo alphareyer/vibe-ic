@@ -777,6 +777,36 @@ _TB_DISCOVERY_ORDER = (
     ("phase2/stage1/sim_full_stack", "tb_*_oracle.v"),
     ("phase2/stage1/sim_full_stack", "tb_*_full.v"),
     ("phase2/stage1/sim/tb", "*.v"),
+    # THE PER-MODULE UNIT TESTBENCH, and it is LAST on purpose: the order
+    # above is most-authoritative-first, and the unit TB is not what the flow
+    # simulates for its functional verdict. It is here because the selection
+    # below prefers whichever candidate DRIVES A FUNCTIONAL INPUT, and on a
+    # design whose generated end-to-end harnesses are inert this is the only
+    # stimulus the flow itself demands the existence of.
+    #
+    # MEASURED on `subservient` x gf180mcuD. `verilator_coverage_measure
+    # check` reported, in its own words:
+    #   "NO FUNCTIONAL STIMULUS IN THE COVERAGE BUILD -- this run measured no
+    #    coverage of the design ... of the signal(s) it binds to the design and
+    #    declares drivable it assigns only ['i_clk','i_rst'] -- the clock and
+    #    reset. It never drives ['i_sram_data'] ... the recorded percentages
+    #    (line 45.19%, toggle 34.76%, branch 43.75%) describe that testbench,
+    #    NOT the RTL"
+    # Every candidate the three entries above found was inert: the
+    # `sim_full_stack` harness declares itself connectivity-only, and the
+    # `sim/tb/*.v` unit cases are the generator's SUBSTANCE FLOOR shape, each
+    # carrying `VIBEIC_TB_ORACLE: NONE`. Meanwhile
+    # `rtl_unit_test_coverage_check` -- a gate in this same flow -- was
+    # DEMANDING a `sim_unit/tb_<module>.v` for that very module and routing
+    # the job to the `rtl-unit-testbench-gen` skill. So the flow asked for the
+    # one testbench that can move the design and then looked everywhere except
+    # where it had asked for it. The two lists are now the same list.
+    #
+    # `rtl_unit_test_coverage_check`'s own `--sim-dir` default is
+    # `<project>/sim_unit`; the phase-2 spelling is carried too so a project
+    # that files it under the stage tree is not silently skipped.
+    ("sim_unit", "tb_*.v"),
+    ("phase2/stage1/sim_unit", "tb_*.v"),
 )
 
 
