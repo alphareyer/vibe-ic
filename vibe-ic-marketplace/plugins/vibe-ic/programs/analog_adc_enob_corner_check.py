@@ -130,6 +130,13 @@ _UNMEASURABLE_NO_ROWS = "transient_dump_present_but_carries_no_rows"
 #: the number it yields is near 0 dB for a converter that is working perfectly.
 #: Reporting that as an effective resolution would be a FALSE FAIL, so the
 #: honest answer is that the band could not be established. (vibe-ic#2188)
+#: The window is longer than the largest grid this gate will build at the
+#: converter's own rate. Refused BY NAME rather than measured on a coarser
+#: grid, because a coarser grid is the aliasing `_resample_pow2` documents.
+_UNMEASURABLE_GRID_TOO_LARGE = (
+    "record_longer_than_the_grid_this_gate_can_build_at_the_sample_clock: "
+    "measuring it would mean sampling below the converter's own clock, which "
+    "folds the noise it shaped out of band back into the band")
 _UNMEASURABLE_NO_CLOCK = ("oversampled_but_sample_clock_not_in_the_deck: OSR "
                           "is declared and the deck names no single pulse "
                           "source, so the signal band cannot be established")
@@ -205,6 +212,83 @@ def _fft(re_in: List[float]) -> List[complex]:
                 w *= wl
         length <<= 1
     return data
+
+
+#: The largest grid this gate will build. A radix-2 FFT over it is O(n log n)
+#: in pure Python, and past this the gate stops being usable inside a run.
+_GRID_CAP = 1 << 18
+
+
+def _resample_at(times: List[float], vals: List[float],
+                 t0: float, t1: float, fs: float) -> Optional[List[float]]:
+    """`vals` zero-order-held onto a grid of EXACTLY `fs`, over [t0, t1).
+
+    THE GRID MUST BE COMMENSURATE WITH THE CONVERTER'S CLOCK (lane icadc,
+    2026-09-15, MEASURED). A bitstream is piecewise constant on a 1/fs
+    lattice. Resampling it onto a grid whose step is not that lattice beats the
+    two rates together, and the beat lands in the signal band as noise the
+    circuit never made. ONE waveform, three grids, everything else held:
+
+        last 8 cycles, grid = fs exactly (12288 pts)   SNDR  96.129 dB
+        last 8 cycles, grid = 16384 pts (1333 kHz)     SNDR  21.706 dB
+        whole record from t=0, grid = fs               SNDR  15.430 dB
+                                                       (startup is in the window)
+
+    **74 dB** between the first two, on identical samples. The grid, not the
+    circuit, was the measurement.
+    """
+    if t1 <= t0 or fs <= 0 or len(times) < 4:
+        return None
+    n = int(round((t1 - t0) * fs))
+    if n < 64 or n > _GRID_CAP:
+        return None
+    dt = 1.0 / fs
+    # A GRID POINT THAT LANDS ON A SAMPLE BOUNDARY MUST TAKE THAT SAMPLE.
+    # MEASURED: with a strict `<=` the window start came out 4.9e-19 s below
+    # the sample it was meant to start on — the last bits of `t1 - cycles /
+    # f_sig` — and the hold then took the PREVIOUS sample for 3924 of 3968
+    # points while the other 44 took the right one. That is not a delay (a
+    # uniform delay costs nothing); it is one-sample JITTER, and it cost
+    # **58 dB**: the same 16-bit record measures 110.758 dB sliced exactly and
+    # 52.392 dB through the jittered hold. The tolerance is a hundred-
+    # thousandth of a grid step — far above the accumulated error of `t0 + k *
+    # dt` over the largest grid this gate builds, and far below anything a
+    # circuit does.
+    tol = dt * 1e-5
+    out: List[float] = []
+    i = 0
+    for k in range(n):
+        t = t0 + k * dt
+        while i + 1 < len(times) and times[i + 1] <= t + tol:
+            i += 1
+        out.append(vals[i])
+    return out
+
+
+def _in_band_power(x: List[float], top: int) -> List[float]:
+    """|X(k)|^2 for k = 1..top by direct DFT.
+
+    NOT an FFT, and deliberately: the commensurate grid above is `cycles * fs /
+    f_sig` points, which is not a power of two, and a radix-2 FFT is what
+    forced the old code onto a grid the converter does not run at. An
+    oversampled converter is graded over `fs / (2 * OSR)`, which is a few dozen
+    bins -- `top * n` multiply-adds, not `n log n` -- so the narrow band that
+    makes the DFT affordable is the same property that makes the measurement
+    meaningful.
+    """
+    n = len(x)
+    mean = sum(x) / n
+    xs = [v - mean for v in x]
+    out: List[float] = []
+    for k in range(1, top + 1):
+        re = im = 0.0
+        w = -2.0 * math.pi * k / n
+        for i, v in enumerate(xs):
+            a = w * i
+            re += v * math.cos(a)
+            im += v * math.sin(a)
+        out.append(re * re + im * im)
+    return out
 
 
 def _resample_pow2(times: List[float], vals: List[float],
@@ -319,8 +403,61 @@ def sndr_db_from_transient(deck_text: str, dump_text: str,
     # makes the rectangular window exact.
     t1 = times[-1]
     t0 = t1 - cycles / f_sig
+    # THE GRID RATE IS THE CONVERTER'S OWN CLOCK (lane icadc). Read here, not
+    # inside the `osr > 1` branch below, because the rate the record is
+    # resampled at decides the answer for EVERY converter — the band edge only
+    # decides which part of that answer is graded.
+    f_clk = sample_clock_hz(deck_text)
+
+    # THE OVERSAMPLED PATH. An OSR the design declares is exactly the case the
+    # grid rate decides (see `_resample_at`), and it is also the case whose
+    # band is narrow enough to measure by direct DFT. The Nyquist path below is
+    # left byte-for-byte as it was: there the full span IS the band, a
+    # power-of-two FFT is the only affordable transform, and the grid rate was
+    # never the thing that was wrong.
+    if osr and osr > 1.0 and f_clk:
+        band_hz = f_clk / (2.0 * osr)
+        grid = _resample_at(times, vals, t0, t1, f_clk)
+        if grid is None:
+            need = int(round((t1 - t0) * f_clk))
+            if need > _GRID_CAP:
+                return None, {"reason": _UNMEASURABLE_GRID_TOO_LARGE,
+                              "sample_clock_hz": f_clk, "window_s": t1 - t0,
+                              "grid_points_required": need,
+                              "grid_cap": _GRID_CAP}
+            return None, {"reason": _UNMEASURABLE_NO_ROWS, "rows": len(times)}
+        n = len(grid)
+        bin_sig = cycles
+        # bin k of this grid sits at k * f_sig / cycles Hz, because the window
+        # is exactly `cycles / f_sig` seconds long however many points it holds.
+        top = min(n // 2 - 1, int(band_hz * cycles / f_sig))
+        if not (1 <= bin_sig < n // 2) or top < bin_sig + 1:
+            return None, {"reason": _UNMEASURABLE_OUT_OF_BAND,
+                          "osr": osr, "signal_hz": f_sig, "band_hz": band_hz,
+                          "signal_bin": bin_sig, "band_edge_bin": top}
+        power = _in_band_power(grid, top)
+        sig_bins = {b for b in (bin_sig - 1, bin_sig, bin_sig + 1)
+                    if 1 <= b <= top}
+        p_sig = sum(power[b - 1] for b in sig_bins)
+        p_noise = sum(power) - p_sig
+        if p_sig <= 0 or p_noise <= 0:
+            return None, {"reason": _UNMEASURABLE_NO_ROWS, "rows": len(times)}
+        return 10.0 * math.log10(p_sig / p_noise), {
+            "method": "dft_signal_bin_vs_in_band_rest_at_sample_clock",
+            "signal_hz": f_sig, "signal_bin": bin_sig, "band_hz": band_hz,
+            "osr": osr, "band_edge_bin": top, "cycles": cycles,
+            "fft_points": n, "rows_read": len(times),
+            "sample_clock_hz": f_clk, "grid_hz": f_clk,
+            "grid_rule": "sample_clock_commensurate",
+        }
+
     grid = _resample_pow2(times, vals, t0, t1)
     if grid is None:
+        if f_clk and (t1 - t0) * f_clk > _GRID_CAP:
+            return None, {"reason": _UNMEASURABLE_GRID_TOO_LARGE,
+                          "sample_clock_hz": f_clk, "window_s": t1 - t0,
+                          "grid_points_required": int((t1 - t0) * f_clk),
+                          "grid_cap": _GRID_CAP}
         return None, {"reason": _UNMEASURABLE_NO_ROWS, "rows": len(times)}
     n = len(grid)
     mean = sum(grid) / n
@@ -339,7 +476,6 @@ def sndr_db_from_transient(deck_text: str, dump_text: str,
     band_hz: Optional[float] = None
     top = half - 1
     if osr and osr > 1.0:
-        f_clk = sample_clock_hz(deck_text)
         if not f_clk:
             return None, {"reason": _UNMEASURABLE_NO_CLOCK, "osr": osr}
         band_hz = f_clk / (2.0 * osr)
@@ -367,6 +503,9 @@ def sndr_db_from_transient(deck_text: str, dump_text: str,
         "signal_hz": f_sig, "signal_bin": bin_sig, "band_hz": band_hz,
         "osr": osr, "band_edge_bin": top,
         "cycles": cycles, "fft_points": n, "rows_read": len(times),
+        "sample_clock_hz": f_clk,
+        "grid_hz": n / (t1 - t0) if t1 > t0 else None,
+        "grid_rule": "row_count",
     }
 
 

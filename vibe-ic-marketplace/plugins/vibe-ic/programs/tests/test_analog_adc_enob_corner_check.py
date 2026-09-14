@@ -233,7 +233,15 @@ def test_in_band_and_whole_span_disagree_on_a_modulator():
     in_band, meta_in = gate.sndr_db_from_transient(deck, dump, osr=64)
     whole, meta_all = gate.sndr_db_from_transient(deck, dump, osr=1.0)
     assert in_band is not None and whole is not None
-    assert meta_in["method"] == "fft_signal_bin_vs_in_band_rest"
+    # The in-band method NAME changed when the oversampled path moved onto a
+    # grid commensurate with the converter's own clock (lane icadc): it is a
+    # direct in-band DFT now, because the commensurate grid is not a power of
+    # two. Assert the PROPERTY, and assert MORE of it than the name did — the
+    # grid the oversampled measurement was taken on IS the sample clock, which
+    # is the thing that was wrong and the thing a future change must not undo.
+    assert meta_in["method"] == "dft_signal_bin_vs_in_band_rest_at_sample_clock"
+    assert meta_in["grid_rule"] == "sample_clock_commensurate"
+    assert meta_in["grid_hz"] == meta_in["sample_clock_hz"]
     assert meta_all["method"] == "fft_signal_bin_vs_rest"
     # The DIRECTION is the claim: the band is where the resolution is.
     assert in_band > whole + 30.0, (in_band, whole)
@@ -298,7 +306,15 @@ def test_a_corner_is_graded_from_the_a4_transient(tmp_path: Path):
     assert rpt["verdict"] == "PASS", json.dumps(rpt, indent=1)
     corner = rpt["blocks"][0]["measured_corners"][0]
     assert corner["source"] == "fft_of_a4_transient"
-    assert corner["measurement"]["method"] == "fft_signal_bin_vs_in_band_rest"
+    assert (corner["measurement"]["method"]
+            == "dft_signal_bin_vs_in_band_rest_at_sample_clock")
+    # STRICTLY MORE THAN THE NAME: the grid this corner was graded on is the
+    # converter's own clock. Grading it on any other grid is what made a
+    # working 16-bit record read as 6.6 bits (lane icadc).
+    assert (corner["measurement"]["grid_rule"]
+            == "sample_clock_commensurate")
+    assert (corner["measurement"]["grid_hz"]
+            == corner["measurement"]["sample_clock_hz"])
 
 
 def test_producer_refusal_outranks_the_deck_shape(tmp_path: Path):
