@@ -312,3 +312,79 @@ def test_an_op_only_producer_deck_keeps_the_deck_it_had():
     assert _card(text, "v_vdd") == "v_vdd vdd 0 1.2"
     assert env["poweron_sequence"]["refused"] == "no_transient"
     assert any("not applied: no_transient" in n for n in notes), notes
+
+
+# ══ THE DECK'S ENGLISH IS NOT THE DECK ════════════════════════════════════
+#
+# vibe-ic#712's ratchet named `plan` and `apply` as prose extractors with no
+# polarity vocabulary. Three of the module's four patterns are anchored `^...$`
+# over one SPICE card and no sentence can satisfy them — but `_MEAS_WINDOW` is
+# `\b(from|to)=(\S+?)(n?)\b`, unanchored, and it used to run over the WHOLE
+# file. MEASURED on the deck below, `apply` rewrote a COMMENT that said the
+# window "is NOT shifted" — a sentence DENYING the value, overwritten anyway,
+# which is exactly the #706/#711 shape.
+#
+# `deck_code_only` is the repair, and these cases are what make the module's
+# `_NOT_PROSE` entry a measurement rather than a claim.
+
+_DENYING_DECK = (
+    "* delta_sigma tb\n"
+    "* note: the reference run measured from=1000n to=2000n and is NOT"
+    " shifted\n"
+    "v_vdd vdd 0 1.8\n"
+    "v_clk clk 0 pulse(0 1.8 0n 1n 1n 500n 1000n)\n"
+    "tran 1n 10000n\n"
+    ".meas tran vavg AVG v(out) from=1000n to=2000n  $ window from=9n\n"
+)
+
+
+def test_a_comment_that_denies_the_shift_is_not_rewritten():
+    out, rec = po.apply(_DENYING_DECK, "vdd")
+    assert rec["applied"] is True, rec
+    lines = out.splitlines()
+    # PRECONDITION: the run really did shift the REAL window, so this is a
+    # case about WHICH text moved and not about a run that did nothing.
+    assert any(ln.startswith(".meas") and "from=2000n to=3000n" in ln
+               for ln in lines), out
+    # The two `*` comments come back byte-identical, denial and all.
+    for original in _DENYING_DECK.splitlines():
+        if original.startswith("*"):
+            assert original in lines, (
+                "a `*` comment was rewritten — a sentence was read as a "
+                "declaration:\n" + out)
+    # And an in-line `$` comment on a live card is a comment too.
+    assert "$ window from=9n" in out, out
+
+
+def test_a_comment_endpoint_is_not_counted_as_a_window_that_moved():
+    """`meas_window_endpoints_shifted` is published in the provenance record,
+    so counting a comment's `from=` reported a window that never moved."""
+    rec = po.plan(_DENYING_DECK, "vdd")
+    assert rec["meas_window_endpoints_shifted"] == 2, rec
+
+
+def test_the_strip_is_load_bearing_and_not_decoration(monkeypatch):
+    """THE NEGATIVE CONTROL. With `deck_code_only` replaced by the identity —
+    the strip deleted — the SAME deck's denying comment moves again. So the
+    zero above is a statement about the code, and a fixture that could not
+    have moved would prove nothing."""
+    monkeypatch.setattr(po, "deck_code_only", lambda text: text)
+    out, rec = po.apply(_DENYING_DECK, "vdd")
+    assert rec["applied"] is True, rec
+    assert "measured from=2000n to=3000n and is NOT shifted" in out, (
+        "the identity strip must reproduce the defect, or this control is "
+        "not measuring the strip:\n" + out)
+
+
+def test_the_filler_keeps_a_card_from_joining_the_line_above():
+    """`\\s` matches NEWLINES. MEASURED with a space filler: `_DC_SOURCE`'s
+    `^(\\s*)` swallowed the blanked comment lines, the match began at offset 0
+    and the rebuild DELETED every comment above the supply card. The filler is
+    `#` for this reason, and the property is asked of the output."""
+    code = po.deck_code_only(_DENYING_DECK)
+    assert len(code) == len(_DENYING_DECK), "offsets must be preserved"
+    m = po._DC_SOURCE.search(code)
+    assert m is not None
+    assert code[m.start():m.end()].lstrip().startswith("v_vdd"), (
+        "the supply card's match must not reach back over the comments: "
+        + repr(code[m.start():m.end()]))

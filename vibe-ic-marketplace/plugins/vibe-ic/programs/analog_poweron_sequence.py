@@ -107,6 +107,71 @@ _SI = {"f": 1e-15, "p": 1e-12, "n": 1e-9, "u": 1e-6, "m": 1e-3,
        "": 1.0, "k": 1e3, "meg": 1e6, "g": 1e9}
 
 
+def deck_code_only(deck_text: str) -> str:
+    r"""`deck_text` with every SPICE COMMENT blanked, offsets preserved.
+
+    THE ONLY UNANCHORED PATTERN IN THIS MODULE IS `_MEAS_WINDOW`, and until
+    this helper landed it ran over the whole file. MEASURED, on a deck whose
+    own comment said so::
+
+        * note: the reference run measured from=1000n to=2000n and is NOT
+          shifted
+
+    `apply` rewrote that line to `from=2000n to=3000n` — a sentence that
+    DENIES the value, overwritten with a value anyway. That is exactly the
+    vibe-ic#706/#711 shape, and it is why this module is NOT simply exempt
+    from the polarity question: it had to stop reading sentences first.
+
+    The other three patterns (`_DC_SOURCE`, `_PULSE`, `_TRAN`) are anchored
+    `^...$` over a SPICE card and no sentence can satisfy them, but they are
+    put through this helper too, so the claim is a property of the MODULE and
+    not of one reader's audit of four regexes.
+
+    Comment forms handled, the three SPICE decks use: a line whose first
+    non-blank character is `*`, and an in-line `$` or `;` to end of line.
+    Blanking (rather than deleting) keeps every offset, so a span found here
+    addresses the same characters in the original text.
+
+    THE FILLER IS `#`, NOT A SPACE, and that is load-bearing rather than
+    taste. MEASURED with a space filler: `_DC_SOURCE` is `(?im)^(\s*)(v\w+)`
+    and `\s` matches NEWLINES, so a comment blanked to whitespace was
+    swallowed into group 1 — the match then began at offset 0 and the splice
+    that rebuilds the deck DELETED every comment above the supply card. `#` is
+    outside `\s` and outside `\w`, appears in no production this module
+    matches, and a run of it can start no card, so it holds the offsets open
+    without joining anything.
+    """
+    out = []
+    for line in deck_text.splitlines(keepends=True):
+        body = line.rstrip("\n")
+        nl = line[len(body):]
+        if body.lstrip().startswith("*"):
+            out.append("#" * len(body) + nl)
+            continue
+        cut = min((i for i in (body.find("$"), body.find(";")) if i >= 0),
+                  default=-1)
+        if cut >= 0:
+            body = body[:cut] + "#" * (len(body) - cut)
+        out.append(body + nl)
+    return "".join(out)
+
+
+def _sub_in_code(pattern, repl, deck_text: str) -> str:
+    """`pattern.sub(repl, ...)` restricted to the deck's CODE.
+
+    The match is FOUND in the blanked copy and SPLICED into the original, so
+    a comment can never be rewritten and nothing else about the deck moves.
+    """
+    code = deck_code_only(deck_text)
+    out, last = [], 0
+    for m in pattern.finditer(code):
+        out.append(deck_text[last:m.start()])
+        out.append(repl(m))
+        last = m.end()
+    out.append(deck_text[last:])
+    return "".join(out)
+
+
 def si_seconds(tok: str) -> Optional[float]:
     """A SPICE time token as seconds, or None. `1000n`, `13.824m`, `5e-9`."""
     m = re.fullmatch(r"\s*([-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)"
@@ -133,10 +198,11 @@ def _ns(value_s: float) -> str:
 
 def deck_facts(deck_text: str, rail_node: str) -> Dict[str, Any]:
     """What the deck ITSELF declares. No defaults and no table."""
-    supplies = [m for m in _DC_SOURCE.finditer(deck_text)
+    code = deck_code_only(deck_text)
+    supplies = [m for m in _DC_SOURCE.finditer(code)
                 if m.group(4) == rail_node or m.group(6) == rail_node]
-    pulses = list(_PULSE.finditer(deck_text))
-    tran = _TRAN.search(deck_text)
+    pulses = list(_PULSE.finditer(code))
+    tran = _TRAN.search(code)
     period = None
     if pulses:
         args = [a for a in re.split(r"[\s,]+", pulses[0].group(8).strip()) if a]
@@ -152,7 +218,10 @@ def deck_facts(deck_text: str, rail_node: str) -> Dict[str, Any]:
         "clock_period_s": period,
         "tran_match": tran,
         "tran_tstop_s": si_seconds(tran.group(4)) if tran else None,
-        "meas_windows": len(_MEAS_WINDOW.findall(deck_text)),
+        # CODE ONLY: a `from=`/`to=` inside a comment is a sentence about
+        # the deck, not a window this module shifts, and counting it made
+        # `meas_window_endpoints_shifted` report windows that never moved.
+        "meas_windows": len(_MEAS_WINDOW.findall(deck_code_only(deck_text))),
     }
 
 
@@ -177,7 +246,7 @@ def plan(deck_text: str, rail_node: str) -> Dict[str, Any]:
         # looking for a source that is right there.
         already = re.search(
             rf"(?im)^\s*v\w+\s+(?:{re.escape(rail_node)}\s+\S+|\S+\s+"
-            rf"{re.escape(rail_node)})\s+\S", deck_text)
+            rf"{re.escape(rail_node)})\s+\S", deck_code_only(deck_text))
         rec["refused"] = ("supply_source_not_dc" if already
                           else "supply_source_absent")
         return rec
@@ -221,8 +290,7 @@ def apply(deck_text: str, rail_node: str) -> Tuple[str, Dict[str, Any]]:
 
     # (1) the rail. It ends at the SAME value, so nothing the deck divides by
     # the supply changes — `let dens = vavg / {supply}` reads the same rail.
-    sm = _DC_SOURCE.search(out)
-    sm = next((m for m in _DC_SOURCE.finditer(out)
+    sm = next((m for m in _DC_SOURCE.finditer(deck_code_only(out))
                if m.group(2) == rec["supply_source"]), None)
     assert sm is not None                                    # plan found it
     out = (out[:sm.start()]
@@ -232,7 +300,7 @@ def apply(deck_text: str, rail_node: str) -> Tuple[str, Dict[str, Any]]:
            + out[sm.end():])
 
     # (2) the clock's first edge, held back by exactly one period.
-    cm = next((m for m in _PULSE.finditer(out)
+    cm = next((m for m in _PULSE.finditer(deck_code_only(out))
                if m.group(2) == rec["clock_source"]), None)
     assert cm is not None
     args = [a for a in re.split(r"[\s,]+", cm.group(8).strip()) if a]
@@ -256,7 +324,7 @@ def apply(deck_text: str, rail_node: str) -> Tuple[str, Dict[str, Any]]:
     # window still covers the same samples of the same clock phase. Shifting
     # the stop time without the windows would measure a different part of the
     # record and call it the same measurement.
-    tm = _TRAN.search(out)
+    tm = _TRAN.search(deck_code_only(out))
     assert tm is not None
     out = (out[:tm.start()]
            + f"{tm.group(1)}{tm.group(2)}{tm.group(3)}{_ns(tstop_after)}"
@@ -269,7 +337,7 @@ def apply(deck_text: str, rail_node: str) -> Tuple[str, Dict[str, Any]]:
             return m.group(0)
         return f"{m.group(1)}={_ns(t + period)}"
 
-    out = _MEAS_WINDOW.sub(_shift, out)
+    out = _sub_in_code(_MEAS_WINDOW, _shift, out)
 
     # THE DECK SAYS IT ITSELF. A deck that differs from the one a reader
     # expects and does not say why is read as a deck somebody edited; the
@@ -286,7 +354,8 @@ def apply(deck_text: str, rail_node: str) -> Tuple[str, Dict[str, Any]]:
         f"period so the record holds the same samples "
         f"(see `{PROGRAM}`)")
     sm2 = next((m for m in re.finditer(
-        rf"(?m)^\s*{re.escape(rec['supply_source'])}\s", out)), None)
+        rf"(?m)^\s*{re.escape(rec['supply_source'])}\s",
+        deck_code_only(out))), None)
     if sm2 is not None:
         out = (out[:sm2.start()]
                + f"* condition: {rec['provenance']}\n"

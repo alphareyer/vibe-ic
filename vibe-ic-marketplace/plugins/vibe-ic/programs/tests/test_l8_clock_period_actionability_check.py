@@ -125,12 +125,90 @@ def test_ticks_with_declared_clock_passes(tmp_path):
     assert report["findings"] == []
 
 
-def test_no_l8_is_not_measured_and_blocks(tmp_path):
+# ══ THE NOT_MEASURED TIER ═════════════════════════════════════════════════
+#
+# 9320b0269 ("Fix scoped L8 clock consumer contracts") closed a real hole: an
+# absent L8 used to announce `VACUOUS_PASS:` and read as a skip that costs
+# nothing. It closed it with severity `ERROR` -> rc 1, and that contradicted
+# the finding's OWN sentence, "this is NOT_MEASURED, not a vacuous pass".
+#
+# rc 1 is a live finding. This gate is wired `advisory_program_exit_zero` at
+# step D1 but declares no `ENFORCEMENT:` in its docstring, so
+# `flow_compliance_check._gate_is_two_source_advisory` reads it BLOCKING and
+# the refusal took D1 down — MEASURED as three reds on main 2f230524b
+# (`test_issue1446_incomplete_in_scope_is_not_green`, both arms).
+#
+# NOT_MEASURED has its own tier and it is neither of the two: `skip_kind`
+# `zero-denominator` -> `_flow_reason_taxonomy.ZERO_DENOMINATOR` -> the
+# `INCOMPLETE` set -> `DISCLOSED_INCOMPLETE`. Reported, printed, typed,
+# carried — and NEVER promoted, because ZERO_DENOMINATOR is deliberately
+# absent from `SKIP_ELIGIBLE`. These cases pin BOTH halves: the tier is not a
+# FAIL, and it is not a pass.
+
+def test_no_l8_is_not_measured_and_is_neither_pass_nor_fail(tmp_path):
     (tmp_path / "phase1" / "generated_docs").mkdir(parents=True)
     proc, report = _run(tmp_path)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert report["passed"] is False, report
+    assert report["verdict"] == "INCOMPLETE", report
+    assert report["reason_class"] == "ZERO_DENOMINATOR", report
+    assert report["summary"]["skip_kind"] == "zero-denominator", report
+    # The sentinel that promotes an rc 2 toward a skip reading as a pass must
+    # NOT be printed. This is the half 9320b0269 was right about.
+    assert "VACUOUS_PASS" not in (proc.stdout + proc.stderr), proc.stdout
+
+
+def test_l8_without_clock_or_tick_is_not_measured_either(tmp_path):
+    """The second empty-denominator door: the document exists and declares
+    nothing this gate dereferences. Same tier, for the same reason."""
+    _write_l8(tmp_path, {"note": "no clock_domains, no timing_constants"})
+    proc, report = _run(tmp_path)
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert report["passed"] is False, report
+    assert report["reason_class"] == "ZERO_DENOMINATOR", report
+    assert "VACUOUS_PASS" not in (proc.stdout + proc.stderr), proc.stdout
+
+
+def test_the_flow_books_the_empty_denominator_as_incomplete_not_a_pass(
+        tmp_path):
+    """THE CONTROL THAT DECIDES IT, asked of the consumer rather than of the
+    gate's own rc: `flow_compliance_check` must type this gate's rc 2 as
+    INCOMPLETE. If the `zero-denominator` token stops reaching
+    `_flow_reason_taxonomy`, the reason falls through to a SKIP_ELIGIBLE class
+    and the rc 2 is promoted to VACUOUS_PASS — the exact vacuous pass this
+    gate exists to refuse — and this case goes red naming it."""
+    import importlib.util
+    fcc_path = PROG.parent / "flow_compliance_check.py"
+    spec = importlib.util.spec_from_file_location("fcc_l8_tier", fcc_path)
+    fcc = importlib.util.module_from_spec(spec)
+    sys.modules["fcc_l8_tier"] = fcc
+    spec.loader.exec_module(fcc)
+
+    (tmp_path / "phase1" / "generated_docs").mkdir(parents=True)
+    res = fcc._check_program_exit_zero(
+        tmp_path, "l8_clock_period_actionability_check .")
+
+    assert res.exit_code == 2, res
+    assert res.verdict == "INCOMPLETE", res
+    assert res.reason_class == "ZERO_DENOMINATOR", res
+    assert res.verdict not in {"PASS", "VACUOUS_PASS", "NOT_APPLICABLE"}, res
+
+
+def test_a_populated_l8_that_contradicts_itself_still_fails(tmp_path):
+    """THE OTHER DIRECTION — the negative control for the tier above. A
+    denominator that is NOT empty and whose contents disagree is a live
+    finding and must keep rc 1. A fix that reached this case would have
+    turned every real L8 contradiction into a disclosure."""
+    _write_l8(tmp_path, {"clock_domains": [
+        _clock("clk_a", 100.0, primary=True),
+        _clock("clk_a", 50.0, primary=True),
+    ]})
+    proc, report = _run(tmp_path)
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "L8_CLOCK_INPUT_NOT_MEASURED" in _rules(report)
-    assert report["passed"] is False
+    assert report["passed"] is False, report
+    assert report["verdict"] == "FAIL", report
+    assert report["reason_class"] is None, report
+    assert report["summary"].get("skip_kind") != "zero-denominator", report
 
 
 def _write_target(project: Path, value: str) -> None:

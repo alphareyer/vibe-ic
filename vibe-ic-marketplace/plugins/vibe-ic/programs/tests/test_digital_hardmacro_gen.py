@@ -448,3 +448,78 @@ def test_the_emitted_liberty_agrees_with_the_lef_about_which_rail(tmp_path):
     lib = gate.parse_liberty(mod.emit_liberty("macro_a", pins))
     assert lib["pg_type"] == {"vpwr": "primary_power",
                               "vgnd": "primary_ground"}
+
+
+# ══ THE LEF'S ENGLISH IS NOT THE LEF ══════════════════════════════════════
+#
+# `merge_duplicate_pin_declarations` is exempted from vibe-ic#712's polarity
+# ratchet as a FORMAL GRAMMAR with no negation form. An anchoring argument has
+# been wrong in this repo before, so the exemption is carried by a measurement
+# and this is it: the only English in a LEF is a `#` comment, and no comment
+# may move this function's answer.
+
+_TWO_DECLARATIONS = (
+    "MACRO spm\n"
+    "  SIZE 100 BY 100 ;\n"
+    "  PIN clk\n"
+    "    DIRECTION INPUT ;\n"
+    "    PORT\n"
+    "      LAYER Metal3 ; RECT 1 1 2 2 ;\n"
+    "    END\n"
+    "  END clk\n"
+    "  PIN clk\n"
+    "    PORT\n"
+    "      LAYER Metal2 ; RECT 3 3 4 4 ;\n"
+    "    END\n"
+    "  END clk\n"
+    "END spm\n"
+)
+
+
+def _denial_tokens():
+    import re as _re
+    import _prose_polarity as PP
+    toks = set()
+    for attr in dir(PP):
+        v = getattr(PP, attr)
+        if hasattr(v, "pattern"):
+            toks.update(_re.findall(r"[A-Za-z一-鿿]{2,}", v.pattern))
+    return sorted(toks)
+
+
+def test_no_denying_comment_moves_the_merge():
+    from digital_hardmacro_gen import merge_duplicate_pin_declarations as M
+    _ref_text, ref = M(_TWO_DECLARATIONS)
+    tokens = _denial_tokens()
+    assert len(tokens) >= 10, (
+        "the denial vocabulary came back nearly empty, so this sweep would "
+        "prove nothing: %r" % tokens)
+    trials = moved = 0
+    for tok in tokens:
+        for payload in ("# PIN clk is %s declared here" % tok,
+                        "  # %s: PIN clk" % tok,
+                        "# %s MACRO spm" % tok,
+                        "# END clk is %s the end" % tok):
+            for pos in (1, 3, 8, 14):
+                lines = _TWO_DECLARATIONS.splitlines(keepends=True)
+                lines.insert(min(pos, len(lines)), payload + "\n")
+                out, rep = M("".join(lines))
+                trials += 1
+                if rep["merged"] != ref["merged"] or payload not in out:
+                    moved += 1
+    assert trials >= 200, trials
+    assert moved == 0, (
+        "%d of %d denying comments moved the merge — the `_NOT_PROSE` "
+        "exemption for this function is false and it must consult "
+        "`_prose_polarity` instead" % (moved, trials))
+
+
+def test_the_same_payload_as_CODE_does_move_the_answer():
+    """THE CONTROL. Without it the zero above could be a fixture that cannot
+    move, which would prove nothing about the grammar."""
+    from digital_hardmacro_gen import merge_duplicate_pin_declarations as M
+    _t, ref = M(_TWO_DECLARATIONS)
+    lines = _TWO_DECLARATIONS.splitlines(keepends=True)
+    lines.insert(8, "  PIN rst\n    DIRECTION INPUT ;\n  END rst\n")
+    _out, rep = M("".join(lines))
+    assert rep["pin_declarations"] == ref["pin_declarations"] + 1, (ref, rep)

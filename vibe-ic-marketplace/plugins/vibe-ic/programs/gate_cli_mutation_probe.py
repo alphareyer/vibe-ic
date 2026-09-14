@@ -124,7 +124,11 @@ def neuter(source: str) -> Optional[Tuple[str, str]]:
 
 
 def naming_tests(program: str, tests_dir: Optional[Path] = None) -> List[Path]:
-    """Test files that name the program — the ones a regression would have to pass."""
+    """Test files that name the program — the ones a regression would have to pass.
+
+    RANKED, drivers first, and `probe` now RUNS them in that order and stops at
+    the first refusal. See `drives_program` for why the rank is load-bearing
+    rather than cosmetic."""
     rx = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(program) + r"(?![A-Za-z0-9_])")
     drives = re.compile(
         r"(subprocess\.\w+\([^)]{0,200}%s|%s\.py|import %s|%s\.(main|run|audit)\()"
@@ -143,6 +147,27 @@ def naming_tests(program: str, tests_dir: Optional[Path] = None) -> List[Path]:
         # one that merely names it in prose can neither catch nor clear it.
         scored.append((0 if drives.search(text) else 1, t.stat().st_size, t))
     return [t for _rank, _size, t in sorted(scored)]
+
+
+def naming_tests_ranked(program: str, tests_dir: Optional[Path] = None
+                        ) -> List[Tuple[int, Path]]:
+    """`naming_tests`, with each file's rank kept: 0 drives, 1 merely names."""
+    rx = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(program) + r"(?![A-Za-z0-9_])")
+    drives = re.compile(
+        r"(subprocess\.\w+\([^)]{0,200}%s|%s\.py|import %s|%s\.(main|run|audit)\()"
+        % ((re.escape(program),) * 4), re.S)
+    scored = []
+    for t in sorted((tests_dir or TESTS).glob("test_*.py")):
+        if _NOT_DRIVERS.match(t.name):
+            continue
+        try:
+            text = t.read_text(errors="replace")
+        except OSError:
+            continue
+        if not rx.search(text):
+            continue
+        scored.append((0 if drives.search(text) else 1, t.stat().st_size, t))
+    return [(rank, t) for rank, _size, t in sorted(scored)]
 
 
 #: Written beside the program while it is neutered.  A run that is killed
@@ -244,23 +269,61 @@ def probe(program: str, limit: Optional[int] = None, timeout: int = 240,
     # in the MEASUREMENT, not a verdict", which is honest and still leaves five
     # gates unprobed for a reason that is this program's, not theirs.
     tests_dir = root / "tests" if (root / "tests").is_dir() else root
-    sel = (naming_tests(program, tests_dir)[:limit] if limit
-           else naming_tests(program, tests_dir))
+    ranked = naming_tests_ranked(program, tests_dir)
+    if limit:
+        ranked = ranked[:limit]
+    sel = [t for _rank, t in ranked]
     if not sel:
         return {"program": program, "state": "NO_TEST", "entry": entry}
     env = dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
     backup = src.with_suffix(src.suffix + _BACKUP_SUFFIX)
+    # ONE FILE AT A TIME, IN RANK ORDER, STOPPING AT THE FIRST REFUSAL.
+    #
+    # It used to be one pytest over the whole selection under ONE wall-clock
+    # ceiling, and that made the guard's verdict depend on the machine.
+    # MEASURED for `analog_adc_enob_corner_check` on an idle-ish host (load
+    # 5.3): the probe took 109.6 s of its 240 s, and 109 of those seconds were
+    # ONE file — `test_shipped_gate_is_wired_register_holds_no_pending_shrink`,
+    # which this module's own ranking classifies rank 1, "merely names it in
+    # prose", and which it says "can neither catch nor clear it". A gate that
+    # is protected therefore reported `TIMEOUT` -> "was NOT PROBED" under a
+    # loaded shard, which the guard reports as a FAILURE — a red about the
+    # MEASUREMENT, on a gate the same probe calls CAUGHT when run alone.
+    #
+    # WHY ORDERING AND NOT AN EXCLUSION. Dropping the rank-1 files would be
+    # faster still and could change a verdict, and this module already carries
+    # the lesson of that: excluding `test_matrix_d2_falsifiable` for speed took
+    # `pvt_matrix_check` from CAUGHT to SILENT ("an exclusion written for speed
+    # that changes a verdict is not a speed optimisation; it is a wrong answer
+    # arriving sooner"). Ordering removes NO file from the selection. The
+    # SILENT population is unchanged — a SILENT verdict still means every file
+    # ran and none refused — and the only outcomes that move are the ones that
+    # used to be TIMEOUT.
+    #
+    # The budget is now PER FILE, which is also what makes the number mean
+    # something: a single file that genuinely hangs is a stall, while a
+    # selection that is merely long is not.
+    state = "SILENT"
+    ran: List[str] = []
     try:
         backup.write_text(original)
         src.write_text(mutated)
-        r = subprocess.run(
-            [sys.executable, "-m", "pytest", *[str(p) for p in sel], "-q",
-             "--no-header", "-p", "no:cacheprovider"],
-            cwd=root.parent, capture_output=True, text=True, env=env,
-            timeout=timeout)
-        state = "CAUGHT" if r.returncode != 0 else "SILENT"
-    except subprocess.TimeoutExpired:
-        state = "TIMEOUT"
+        for t in sel:
+            ran.append(t.name)
+            try:
+                r = subprocess.run(
+                    [sys.executable, "-m", "pytest", str(t), "-q",
+                     "--no-header", "-p", "no:cacheprovider"],
+                    cwd=root.parent, capture_output=True, text=True, env=env,
+                    timeout=timeout)
+            except subprocess.TimeoutExpired:
+                # A stall is only the answer when nothing has refused yet. A
+                # refusal already found is a verdict and outranks it.
+                state = "TIMEOUT"
+                break
+            if r.returncode != 0:
+                state = "CAUGHT"
+                break
     finally:
         # Restoring is not best-effort.  A probe that leaves a neutered gate
         # behind has done more damage than the gap it was measuring.
@@ -270,7 +333,10 @@ def probe(program: str, limit: Optional[int] = None, timeout: int = 240,
             % src)
         backup.unlink(missing_ok=True)
     return {"program": program, "state": state, "entry": entry,
-            "tests": [p.name for p in sel]}
+            # `tests` stays the SELECTION, which is what the guard's failure
+            # message reports and what a reader needs to judge a SILENT.
+            # `tests_run` is the prefix that actually executed.
+            "tests": [p.name for p in sel], "tests_run": ran}
 
 
 def main(argv=None) -> int:

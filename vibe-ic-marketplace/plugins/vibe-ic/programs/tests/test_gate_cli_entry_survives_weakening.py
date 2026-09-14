@@ -443,3 +443,118 @@ def test_naming_tests_accepts_an_explicit_directory(tmp_path):
     found = P.naming_tests("my_gate", tmp_path)
     assert [p.name for p in found] == ["test_thing.py"]
     assert P.naming_tests("other_gate", tmp_path) == []
+
+
+# ══ THE PROBE'S VERDICT MUST NOT DEPEND ON THE MACHINE ════════════════════
+#
+# The probe used to run its WHOLE selection as one pytest under one wall-clock
+# ceiling (240 s). MEASURED for `analog_adc_enob_corner_check` on an idle-ish
+# host (load 5.3): 109.6 s, of which 109 were ONE file —
+# `test_shipped_gate_is_wired_register_holds_no_pending_shrink`, which this
+# module's own ranking calls rank 1, "merely names it in prose", and which it
+# says "can neither catch nor clear it". On a loaded shard that selection
+# exceeds the ceiling, the probe returns TIMEOUT, and the guard above reports
+# "was NOT PROBED" — a FAILING test about the MEASUREMENT, on a gate the same
+# probe calls CAUGHT when run alone.
+#
+# `probe` now runs the selection ONE FILE AT A TIME in rank order and stops at
+# the first refusal. Nothing is removed from the selection, so a SILENT still
+# means every file ran and none refused; only the TIMEOUTs move.
+
+
+def _synthetic_root(tmp_path, catcher_rank):
+    """A two-file tree for one gate: a slow rank-1 namer and a rank-0 driver.
+
+    `catcher_rank` says which of the two actually refuses when the gate is
+    neutered, so both orders can be measured.
+    """
+    root = tmp_path / "programs"
+    tests = root / "tests"
+    tests.mkdir(parents=True)
+    # The shipped tree puts `programs/` on `sys.path` for its own tests; this
+    # synthetic one has to do the same, or every case here "catches" on an
+    # ImportError instead of on the neutering it is supposed to measure.
+    (tests / "conftest.py").write_text(
+        "import sys\nfrom pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).resolve().parent.parent))\n")
+    (root / "my_gate.py").write_text(
+        "import sys\n\n\n"
+        "def main(argv=None):\n"
+        "    return 1\n\n\n"
+        "if __name__ == '__main__':\n"
+        "    sys.exit(main())\n")
+    catches = ("    import my_gate as M\n    assert M.main([]) != 0\n")
+    passes = "    assert True\n"
+    # rank 0: it DRIVES the gate (`import my_gate`).
+    (tests / "test_driver.py").write_text(
+        "def test_x():\n" + (catches if catcher_rank == 0 else
+                             "    import my_gate  # noqa: F401\n" + passes))
+    # rank 1: it only NAMES the gate, in prose, and it is slow.
+    (tests / "test_register_namer.py").write_text(
+        '"""A register that lists my_gate and drives nothing."""\n'
+        "import time\n\n\n"
+        "def test_x():\n    time.sleep(3)\n"
+        + (catches if catcher_rank == 1 else passes))
+    return root
+
+
+def test_the_probe_runs_the_driver_first_and_stops_there(tmp_path):
+    """The regression. The slow rank-1 namer must not be paid for when a
+    rank-0 driver already refuses."""
+    import gate_cli_mutation_probe as P
+    root = _synthetic_root(tmp_path, catcher_rank=0)
+    r = P.probe("my_gate", programs_root=root)
+    assert r["state"] == "CAUGHT", r
+    assert r["tests_run"] == ["test_driver.py"], (
+        "the driver refused, so nothing after it should have run: %r" % r)
+    assert "test_register_namer.py" in r["tests"], (
+        "the namer must stay IN THE SELECTION — this is an ordering, not an "
+        "exclusion: %r" % r)
+
+
+def test_a_catcher_that_sorts_LAST_is_still_found(tmp_path):
+    """THE CONTROL THAT PROTECTS THE SILENT POPULATION. Stopping early may
+    only skip files after a REFUSAL. When the only file that refuses is the
+    rank-1 namer, the probe must run all the way to it and still say CAUGHT —
+    otherwise this change would have converted real CAUGHTs into SILENTs,
+    which is the `test_matrix_d2_falsifiable` mistake this module records."""
+    import gate_cli_mutation_probe as P
+    root = _synthetic_root(tmp_path, catcher_rank=1)
+    r = P.probe("my_gate", programs_root=root)
+    assert r["state"] == "CAUGHT", r
+    assert r["tests_run"] == ["test_driver.py", "test_register_namer.py"], r
+
+
+def test_a_gate_nothing_catches_is_SILENT_and_every_file_really_ran(tmp_path):
+    """A SILENT is only worth reading if it means the whole selection was
+    asked. Asserted by equality, not by trusting the loop."""
+    import gate_cli_mutation_probe as P
+    root = _synthetic_root(tmp_path, catcher_rank=None)
+    r = P.probe("my_gate", programs_root=root)
+    assert r["state"] == "SILENT", r
+    assert r["tests_run"] == r["tests"], r
+    assert len(r["tests"]) == 2, r
+
+
+def test_a_stall_is_not_reported_over_a_refusal_already_found(tmp_path):
+    """A file that hangs AFTER something has already refused must not turn a
+    verdict into a measurement failure."""
+    import gate_cli_mutation_probe as P
+    root = _synthetic_root(tmp_path, catcher_rank=0)
+    (root / "tests" / "test_register_namer.py").write_text(
+        '"""names my_gate."""\nimport time\n\n\ndef test_x():\n'
+        "    time.sleep(600)\n")
+    r = P.probe("my_gate", programs_root=root, timeout=5)
+    assert r["state"] == "CAUGHT", r
+
+
+def test_a_stall_with_nothing_found_is_still_reported_as_TIMEOUT(tmp_path):
+    """The other direction: a probe that genuinely could not finish has NOT
+    cleared the gate, and must keep saying so."""
+    import gate_cli_mutation_probe as P
+    root = _synthetic_root(tmp_path, catcher_rank=None)
+    (root / "tests" / "test_driver.py").write_text(
+        "import my_gate  # noqa: F401\nimport time\n\n\ndef test_x():\n"
+        "    time.sleep(600)\n")
+    r = P.probe("my_gate", programs_root=root, timeout=5)
+    assert r["state"] == "TIMEOUT", r
