@@ -332,7 +332,17 @@ def test_the_give_up_still_terminates_the_loop(tmp_path):
     assert "SDR_STOPPED_AFTER_PARTIAL_REPAIR" in out, out
     passes = [ln for ln in out.splitlines() if ln.startswith("SDR_DRV_PASS")]
     assert len(passes) == 1, passes
-    assert "SDR_DONE" in out, out
+    # ...and what the stop IS, since #2240 (137adc428): the one pass left a
+    # PARTIAL repair in the live ODB, and OpenROAD cannot reload the
+    # pre-repair DEF into an owned live database (ODB-0251), so the candidate
+    # is REJECTED as unrestorable and the session stops there. The old path
+    # "rolled back" and then reached SDR_DONE -- a pretence #2240 removed and
+    # its own suite now asserts the other way. "SDR_DONE" here would mean a
+    # half-repaired database was certified finished; its absence is part of
+    # the claim, exactly as the give-up itself is.
+    assert ("SDR_TRANSACTION_REJECTED_UNRESTORABLE: reason=nonfatal_or_route_error"
+            in out), out
+    assert "SDR_DONE" not in out, out
 
 
 # --------------------------------------------------------------------------
