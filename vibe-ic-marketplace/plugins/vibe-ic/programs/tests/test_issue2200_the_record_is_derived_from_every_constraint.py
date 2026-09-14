@@ -22,6 +22,7 @@ number somebody wrote down twice.
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -159,8 +160,17 @@ def test_a_record_that_is_GENUINELY_short_is_still_refused_by_name():
     deck = _render(ir)
     osr = int(_SPEC["osr"])
     need = st.coherent_record_samples(_SPEC["osr"])["samples"]
-    short = deck.replace(f"tran 5n {need * 1000}n",
-                         f"tran 5n {(need - 2 * osr) * 1000}n")
+    # The transient stop is read from the deck the producer emitted, not
+    # typed: since the power-on sequence (ea2a9c4f1) the stop carries the
+    # clock hold in front of the record (`need * 1000 + hold` ns), and a
+    # literal that assumed the record starts at t=0 no longer matched --
+    # so this guard silently stopped mutating anything. Shorten whatever
+    # stop is there by two OSR bands of samples.
+    m = re.search(r"^tran 5n (\d+)n$", deck, re.M)
+    assert m is not None, "the emitted deck carries no `tran 5n <stop>n` line"
+    stop_ns = int(m.group(1))
+    assert stop_ns >= need * 1000, (stop_ns, need)
+    short = deck.replace(m.group(0), f"tran 5n {stop_ns - 2 * osr * 1000}n")
     assert short != deck
     plan = st.plan(short, {"specs": [{"name": "enob", "min": 14.0},
                                      {"name": "osr", "target": 256.0}]}, ir)
