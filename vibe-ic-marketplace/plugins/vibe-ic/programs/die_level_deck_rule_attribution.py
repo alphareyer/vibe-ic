@@ -357,6 +357,49 @@ def die_level_density_rules(deck_sources: str, die_area_names: Iterable[str]
     return out
 
 
+def density_rule_evidence(deck_sources: str, rules: Iterable[str],
+                          die_area_names: Iterable[str]
+                          ) -> Dict[str, Dict[str, Any]]:
+    """The DECK'S OWN WORDS for each attributed rule, carried in the record.
+
+    WHY THE TEXT AND NOT JUST THE PATH. `die_level_density_rules_in_deck`
+    names the file a rule was read from, and that is enough for a reader
+    standing where the deck is. It is NOT enough for the readers that matter
+    most: MEASURED 2026-09-15, `/foss/pdks/...` exists only inside the flow's
+    container image, and the completion audit — which re-invokes step 31's
+    `drc_report_check --signoff` and step 36's `tapeout_signoff_check` — runs
+    on the HOST, where that path does not resolve. A consumer there could
+    only take this record's word, and a verdict a caller can hand in is a
+    verdict a caller can forge.
+
+    So the attribution carries the evidence it was derived from: for each
+    rule, the deck file, and the COMMENT-STRIPPED CODE of the rule's own
+    block together with which of the deck's whole-die area identifiers that
+    code references. A reader with no PDK can then re-run THIS MODULE'S OWN
+    predicate (`die_level_density_rules`: a `# Rule` block whose CODE reads
+    the deck's die-area identifier is measuring over the die) against the
+    recorded text, instead of believing a conclusion.
+
+    `deck_code_only` is what is stored, and that is load-bearing: a comment or
+    a violation message that happens to spell the die-area identifier must not
+    make a rule die-level, here or downstream.
+    """
+    wanted = {str(n) for n in die_area_names if str(n).strip()}
+    want_rules = {str(r) for r in rules}
+    out: Dict[str, Dict[str, Any]] = {}
+    if not wanted or not want_rules:
+        return out
+    for rid, where, body in _rule_blocks(deck_sources):
+        if rid not in want_rules or rid in out:
+            continue
+        code = deck_code_only(body)
+        matched = sorted(n for n in wanted
+                         if re.search(r"\b" + re.escape(n) + r"\b", code))
+        out[rid] = {"deck_source": where, "code": code,
+                    "die_area_identifiers_matched": matched}
+    return out
+
+
 def layer_named_by_rule(deck_sources: str, rule_id: str,
                         candidates: Iterable[str]) -> Optional[str]:
     """The fill-report layer name this rule's own block references, or None.
@@ -400,6 +443,25 @@ def _poly_bbox(text: str) -> Optional[Tuple[float, float, float, float]]:
     if not xs:
         return None
     return (min(xs), min(ys), max(xs), max(ys))
+
+
+def rdb_rule_counts(rdb_text: str) -> Dict[str, int]:
+    """{rule id: violations} straight from a KLayout report database.
+
+    The same `<item>`/`<category>` reading `rdb_rule_scope` performs, exposed
+    so a CONSUMER can state, in its own right, which rules the report it read
+    carries violations under — without importing this module's private regexes
+    or maintaining a second spelling of what an item is.
+    """
+    out: Dict[str, int] = {}
+    for body in _ITEM_RE.findall(rdb_text or ""):
+        cm = _CAT_RE.search(body)
+        if not cm:
+            continue
+        rid = cm.group(1).strip()
+        if rid:
+            out[rid] = out.get(rid, 0) + 1
+    return out
 
 
 def rdb_rule_scope(rdb_text: str, die_bbox_um: Optional[List[float]],
@@ -803,7 +865,9 @@ def attribute(per_rule: Dict[str, int], family: Dict[str, str],
               rule_scope: Optional[Dict[str, Tuple[int, int]]] = None,
               deck_sources: Optional[str] = None,
               facts: Optional[Dict[str, Dict[str, Any]]] = None,
-              die_bbox_um: Optional[List[float]] = None) -> Dict[str, Any]:
+              die_bbox_um: Optional[List[float]] = None,
+              die_area_names: Optional[Iterable[str]] = None
+              ) -> Dict[str, Any]:
     """The split, every reason it could not be made, and — under HARDMACRO
     ONLY — which die-level DENSITY rules the integrator carries.
 
@@ -853,6 +917,10 @@ def attribute(per_rule: Dict[str, int], family: Dict[str, str],
         attributed[rid] = n
 
     att_total = sum(attributed.values())
+    # The deck's own words for the die-level density rules it declares,
+    # carried so a reader with no PDK on its host can re-run the predicate.
+    density_evidence = density_rule_evidence(
+        deck_sources or "", sorted(density_family), die_area_names or ())
     rec: Dict[str, Any] = {
         "program": "die_level_deck_rule_attribution",
         "deliverable": deliverable or NOT_MEASURED,
@@ -865,6 +933,12 @@ def attribute(per_rule: Dict[str, int], family: Dict[str, str],
         "other_violations": total - fam_total,
         "fraction": round(fam_total / total, 4) if total else 0.0,
         "die_level_density_rules_in_deck": dict(sorted(density_family.items())),
+        # The deck's own words for every die-level density rule it declares,
+        # so a reader with no PDK on its host can re-run this module's own
+        # predicate instead of believing this record's conclusion. See
+        # `density_rule_evidence`.
+        "die_level_density_rule_evidence": density_evidence,
+        "die_area_identifiers": sorted(die_area_names or ()),
         "attributed_density_rules": dict(sorted(attributed.items(),
                                                 key=lambda kv: -kv[1])),
         "attributed_density_violations": att_total,
@@ -1046,6 +1120,7 @@ def run(project: Path, per_rule: Dict[str, int],
 
     # --- the die-level DENSITY family (vibe-ic#2148) ----------------------
     density_family: Dict[str, str] = {}
+    die_names: Set[str] = set()
     if deck_sources:
         die_names, dwhy = die_area_identifiers(deck_sources)
         if die_names:
@@ -1099,7 +1174,7 @@ def run(project: Path, per_rule: Dict[str, int],
 
     return attribute(per_rule, family, deliverable, ring_state, markers,
                      not_measured, density_family, rule_scope, deck_sources,
-                     facts, die_bbox)
+                     facts, die_bbox, die_area_names=die_names)
 
 
 def main(argv=None) -> int:

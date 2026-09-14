@@ -1239,6 +1239,14 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
     # — a routing-DRC-clean design whose only DRC items are foundry-cell
     # internal rules. Demotes the final verdict to PASS_WITH_WAIVERS.
     drc_library_internal_waived = False
+    # 2026-09-15: set when the DRC slot is credited because every violation is
+    # a DIE-LEVEL rule a HARDMACRO delivery hands to its integrator. A SECOND
+    # flag and not a reuse of the one above: the record is read by
+    # `benchmark_evidence_publish` and by release documents, and a die-level
+    # attribution recorded under the name `library_internal` would publish a
+    # false account of WHY the tapeout verdict carries a waiver tier. Same
+    # demotion contract, different fact.
+    drc_die_level_attributed = False
     # 2026-07-27: set when the LVS slot is credited by a POWER_PIN_ONLY
     # netgen waiver rather than a genuine match — same demotion contract.
     lvs_power_pin_waived = False
@@ -1498,6 +1506,34 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
             return None
         return classify_summary
 
+    def _die_level_attributed(proj, rdb, vcount):
+        """Is every one of `vcount` violations in `rdb` a die-level rule this
+        HARDMACRO hands to its integrator? `_die_level_attribution_consult`'s
+        verdict, asked with THIS checker's own count and rule names.
+
+        Memoised per report because the branch chain below asks twice and the
+        answer must not be able to differ between the two asks.
+        """
+        key = (str(rdb), vcount)
+        got = _die_level_attributed._cache.get(key)
+        if got is None:
+            try:
+                import _die_level_attribution_consult as _dlac  # noqa: PLC0415
+                import die_level_deck_rule_attribution as _dla  # noqa: PLC0415
+                rules = sorted(_dla.rdb_rule_counts(
+                    Path(rdb).read_text(errors="replace")))
+                got = _dlac.consult(Path(proj), vcount, rules or None)
+            except Exception as exc:                          # noqa: BLE001
+                # NAMED, never swallowed into a silent False: a consultation
+                # that could not run and one that found nothing to attribute
+                # are different facts, and only the second is about the design.
+                got = {"applicable": False, "credit": False,
+                       "reason": f"the die-level attribution could not be "
+                                 f"consulted: {type(exc).__name__}: {exc}"}
+            _die_level_attributed._cache[key] = got
+        return got
+    _die_level_attributed._cache = {}
+
     if drc_files:
         chosen = drc_files[0]
         vcount = _drc_violation_count(chosen)
@@ -1536,10 +1572,57 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
                          f"library-internal waiver; tapeout verdict demoted "
                          f"to PASS_WITH_WAIVERS (no cascaded waiver needed)."),
                 file=str(chosen)))
+        elif (vcount is not None and vcount > 0
+              and _die_level_attributed(project_dir, chosen, vcount)["credit"]):
+            # THE DELIVERY IS A MACRO AND THESE RULES ARE THE DIE'S.
+            # Third branch, and it follows the library-internal one directly
+            # above: a violation the design cannot close because its
+            # measurement window is not the design's is credited as a WAIVER
+            # tier, not as a clean DRC, and the tapeout verdict is demoted to
+            # PASS_WITH_WAIVERS exactly as that branch does.
+            #
+            # MEASURED 2026-09-15 on `subservient` x gf180mcuD: 2 violations,
+            # both M2.4/M3.4 metal-density MINIMUMS whose block divides by the
+            # deck's whole-die area. The design is a HARDMACRO; the run had
+            # already attributed them, written the integrator's closure
+            # requirement into the delivery, and reached PASS_WITH_ATTRIBUTION
+            # at phase 3's own `drc` step — while this checker reported
+            # "2 at design level — met2+/via+" and failed the tapeout
+            # checklist. The rule-layer classifier that produced that phrase
+            # asks which METAL a rule is on; it has no way to ask whose DIE it
+            # measures.
+            #
+            # `_die_level_attributed` grants this only when the declared
+            # deliverable is HARDMACRO, every attributed rule is re-derivable
+            # from the deck evidence, the handoff record beside the abstract
+            # names every one of them, the arithmetic closes against THE COUNT
+            # AND THE RULE NAMES THIS CHECKER READ, and the unattributed
+            # remainder is ZERO. One violation that is the design's and this
+            # branch is not taken.
+            _att = _die_level_attributed(project_dir, chosen, vcount)
+            evidence["drc"] = "die_level_attributed"
+            evidence_count += 1
+            drc_die_level_attributed = True
+            result.findings.append(Finding(
+                rule="TAPEOUT_DRC_DIE_LEVEL_ATTRIBUTED", severity="WARNING",
+                message=(f"signoff DRC report '{chosen.name}' carries "
+                         f"{vcount} violation(s) and every one of them is a "
+                         f"DIE-LEVEL rule this HARDMACRO delivery hands to its "
+                         f"integrator — {_att['reason']}. DRC slot credited as "
+                         f"an attribution; tapeout verdict demoted to "
+                         f"PASS_WITH_WAIVERS. This is not a waiver: the rules "
+                         f"are named, measured and handed over."),
+                file=str(chosen)))
         elif vcount is not None and vcount > 0:
             evidence["drc"] = False
+            _att_why = _die_level_attributed(project_dir, chosen, vcount)
             _dl_note = ("" if design_level is None
                         else f" ({design_level} at design level — met2+/via+)")
+            if _att_why.get("applicable"):
+                # SAY WHY IT WAS NOT TAKEN. A HARDMACRO whose attribution this
+                # checker declined must not look like one nobody asked about.
+                _dl_note += f" [die-level attribution declined: " \
+                            f"{_att_why.get('reason')}]"
             result.findings.append(Finding(
                 rule="TAPEOUT_DRC_VIOLATIONS", severity="ERROR",
                 message=(f"signoff DRC report '{chosen.name}' carries "
@@ -1718,6 +1801,12 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
     if result.passed and drc_library_internal_waived and verdict_tier == "PASS":
         verdict_tier = "PASS_WITH_WAIVERS"
 
+    # A die-level attribution is not an absolute PASS either: the violations
+    # are real, they are simply not this delivery's to close, and they travel
+    # with it. Same demotion, stated in its own words.
+    if result.passed and drc_die_level_attributed and verdict_tier == "PASS":
+        verdict_tier = "PASS_WITH_WAIVERS"
+
     # Same contract for the LVS pillar: a POWER_PIN_ONLY netgen waiver is not
     # a genuine tape-out match, so it may reach the threshold but it may
     # NEVER read as a bare PASS (CLAUDE.md rule 11 / #651).
@@ -1805,6 +1894,7 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
         "threshold": threshold,
         "env_unavailable_steps": env_unavailable_steps,
         "drc_library_internal_waived": drc_library_internal_waived,
+        "drc_die_level_attributed": drc_die_level_attributed,
         "lvs_power_pin_only_waived": lvs_power_pin_waived,
         "lvs_report": str(lvs_report) if lvs_report else "",
         "lvs_verdict": lvs_verdict or "",

@@ -147,6 +147,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 import _signoff_drc_format as _sdf  # noqa: E402
+import _die_level_attribution_consult as _dlac  # noqa: E402
+import die_level_deck_rule_attribution as _dla  # noqa: E402
 from _report_check_argv import json_target, split_and_pin  # noqa: E402
 from eda_report_audit import main as _audit_main  # noqa: E402
 
@@ -406,6 +408,53 @@ def signoff_verdict(payload: object, project_dir: str) -> tuple:
     return findings, add
 
 
+def _attribution_scope(payload: dict, project_dir: str,
+                       required_reports) -> Optional[dict]:
+    """The die-level attribution verdict for this audit, or None when the
+    audit found nothing to attribute.
+
+    Returns `{"credit", "summary", "finding"}`. `None` only when the audit
+    itself reports no real violations — then there is nothing to re-judge and
+    this clause must not add a finding saying so.
+    """
+    summary = payload.get("summary") if isinstance(payload, dict) else None
+    if not isinstance(summary, dict):
+        return None
+    total = summary.get("real_violation_total")
+    if isinstance(total, bool) or not isinstance(total, int) or total <= 0:
+        return None
+    # THE RULE NAMES THIS CHECKER MEASURED, from the reports IT scoped to and
+    # from nothing else. Reading the run's attribution record for them would
+    # be letting the record grade itself.
+    measured: dict = {}
+    scoped = [str(s) for s in (summary.get("scoped_under") or [])]
+    scoped += [str(s) for s in (required_reports or [])]
+    root = Path(project_dir)
+    for rel in dict.fromkeys(scoped):
+        for cand in (root / rel, Path(rel)):
+            try:
+                text = cand.read_text(errors="replace")
+            except OSError:
+                continue
+            for rid, n in _dla.rdb_rule_counts(text).items():
+                measured[rid] = measured.get(rid, 0) + n
+            break
+    got = _dlac.consult(root, total, sorted(measured) or None)
+    out = {"credit": bool(got.get("credit")),
+           "summary": {"die_level_attribution": got,
+                       "die_level_attribution_measured_rules": measured},
+           "finding": {
+               "rule": ("DRC_SIGNOFF_DIE_LEVEL_ATTRIBUTED" if got.get("credit")
+                        else "DRC_SIGNOFF_DIE_LEVEL_NOT_ATTRIBUTED"),
+               # DISCLOSURE, never an ERROR: when it is credited the run is
+               # not clean and must not read as clean; when it is refused the
+               # base audit's own ERROR is already the refusal and a second
+               # one would double-count it.
+               "severity": "WARNING", "file": "",
+               "message": _dlac.disclosure(got)}}
+    return out
+
+
 def _write_json(target: str, text: str) -> bool:
     try:
         path = Path(target)
@@ -547,6 +596,56 @@ def run(caller_argv, _audit=None) -> int:
               f"witness={sadd.get('layout_evidence_witness')!r}",
               file=sys.stderr)
 
+    # ── the DIE-LEVEL ATTRIBUTION scope ────────────────────────────────────
+    # RE-JUDGING A WOULD-BE FAIL, AND THE ONLY PLACE THIS FILE DOES.
+    # Everything above re-judges a would-be PASS only, on the stated rule that
+    # "a FAIL is already a FAIL, and re-deciding it here would relabel someone
+    # else's finding". This clause does not relabel anyone's finding: the base
+    # audit's DRC_REAL_VIOLATIONS_FOUND stays in the document, at ERROR, word
+    # for word. What it adds is the question the base audit has no way to ask,
+    # because `eda_report_audit` is a report reader and this is a property of
+    # the DELIVERY.
+    #
+    # MEASURED 2026-09-15 on `subservient` x gf180mcuD, a HARDMACRO that had
+    # passed 9 of 9 declared phase-3 sign-off gates:
+    #     phase 3's own `drc` STEP        PASS_WITH_ATTRIBUTION, remainder 0
+    #     this checker, step 31           FAIL, "2 real DRC violation(s)"
+    #     tapeout_signoff_check, step 36  FAIL, "2 at design level"
+    # Three checkers, ONE quantity, two of them never told what the delivery
+    # is. The two violations are M2.4/M3.4 metal-density MINIMUMS whose
+    # measurement window, in the deck's own block, is the WHOLE DIE — which a
+    # 413 um macro placed inside somebody else's die cannot move.
+    #
+    # NOTHING IS TAKEN ON THE RUN'S WORD: `_dlac.consult` re-establishes the
+    # declared deliverable, re-runs the producer's own die-level predicate over
+    # the deck evidence, requires the handoff record to name every attributed
+    # rule, requires the arithmetic to close against THE COUNT AND THE RULE
+    # NAMES THIS CHECKER MEASURED FOR ITSELF, and requires the unattributed
+    # remainder to be zero. Five refusals this path did not have. A DIE
+    # delivery is `applicable: False` and nothing changes for it.
+    attribution_credited = False
+    if signoff and isinstance(payload, dict):
+        sadd2 = _attribution_scope(payload, project_dir, required_reports)
+        if sadd2:
+            if isinstance(payload.get("summary"), dict):
+                payload["summary"].update(sadd2["summary"])
+            payload.setdefault("findings", []).append(sadd2["finding"])
+            if sadd2["credit"]:
+                payload["passed"] = True
+                payload["summary"]["terminal_verdict"] = _dlac.TIER
+                signoff_refused = False
+                # AND THE EXIT CODE, or the persisted audit and the rc would
+                # disagree — the very state the `--json` re-emit above exists
+                # to prevent. `rc` is the base audit's, and the base audit was
+                # answering "are there violations", which is still YES; this
+                # answers "are any of them THIS DELIVERY'S", which is NO.
+                attribution_credited = True
+            payload_text = json.dumps(payload, indent=2,
+                                      ensure_ascii=False) + "\n"
+            print(f"drc_report_check: [{sadd2['finding']['severity']}] "
+                  f"{sadd2['finding']['rule']}: {sadd2['finding']['message']}",
+                  file=sys.stderr)
+
     sys.stdout.write(payload_text)          # stdout stays pure audit JSON
 
     # `eda_report_audit` writes `--json` itself, so the artefact on disk holds
@@ -581,6 +680,15 @@ def run(caller_argv, _audit=None) -> int:
               "DRC_SIGNOFF_* finding(s) above. NOTHING was certified for "
               "step 31.", file=sys.stderr)
         return RC_FAIL
+
+    if attribution_credited:
+        print("drc_report_check: PASS_WITH_ATTRIBUTION — every violation this "
+              "sign-off deck reported is a die-level rule handed to the "
+              "INTEGRATOR, re-derived here from the declaration, the deck "
+              "evidence, the handoff record and this checker's own count. "
+              "The design's unattributed remainder is 0. See "
+              "DRC_SIGNOFF_DIE_LEVEL_ATTRIBUTED above.", file=sys.stderr)
+        return RC_PASS
 
     if rc == RC_PASS:
         ok, files_found, determined, real_total = denominator_of(payload)
