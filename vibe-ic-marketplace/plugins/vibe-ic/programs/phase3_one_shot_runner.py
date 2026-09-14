@@ -16843,6 +16843,15 @@ def _padring_required_die_um(project: Optional[Path]) -> Tuple[Optional[int], st
     """
     if project is None:
         return None, "no project"
+    # A RING NOTHING BUILDS DOES NOT PIN THE DIE. The producer is no longer
+    # dispatched for such a delivery (`_padring_producer_dispatch`), but a
+    # record written by an EARLIER run -- before the delivery was declared, or
+    # under an older plugin -- is still on disk, and reading it would re-pin
+    # the floorplan to a ring this run does not place. The decision is the
+    # delivery's, not the artefact's.
+    if not _chip_path_requests_pad_ring(Path(project)):
+        return None, ("this delivery builds no pad ring, so no ring geometry "
+                      "pins its die")
     rec = Path(project) / "reports" / "phase3" / "io_pad_chip_top.json"
     if not rec.is_file():
         return None, "no pad-ring producer record"
@@ -16894,6 +16903,11 @@ def _padring_core_inset_um(project: Optional[Path],
     which is the ordinary state of a design off the chip path.
     """
     if project is None:
+        return None, ""
+    # Same rule as `_padring_required_die_um`: a ring this delivery does not
+    # build cannot set the core back from the die edge either, however old the
+    # record on disk is.
+    if not _chip_path_requests_pad_ring(Path(project)):
         return None, ""
     rec = Path(project) / "reports" / "phase3" / "io_pad_chip_top.json"
     if not rec.is_file():
@@ -27237,6 +27251,61 @@ def _chip_path_requests_pad_ring(project: Path) -> bool:
     return declared != "HARDMACRO"
 
 
+def _padring_producer_dispatch(project: Path,
+                               container: Optional[str] = None,
+                               pdk: Optional["PdkConfig"] = None
+                               ) -> StepResult:
+    """Step 15.5ic's pad-ring producer, dispatched ONLY when a ring is built.
+
+    THE PRODUCER AND THE RING ARE ONE DECISION. `_chip_path_requests_pad_ring`
+    is the canonical condition for step 15.5ic, and a6a45babe taught it that a
+    HARDMACRO delivery never requests a ring. Every OTHER consumer of that
+    predicate already obeys it -- the route deck (`_install_route_deck`), the
+    PnR cache validity, and the final pad-ring evidence step. The producer
+    dispatch inside `step_pnr` did not, and because `_padring_required_die_um`
+    reads the record the producer writes, a delivery that builds no ring still
+    had its die pinned to one.
+
+    MEASURED on subservient x gf180mcuD (plugin 1.21.6, main ed3965cc6). The
+    design declares `deliverable: HARDMACRO` in
+    `input/submission_template/tapeout_declaration.json`; the sibling `slots/`
+    directory holds the operator's CATALOGUE of four slot sizes, which is not a
+    choice; `_chip_path_requests_pad_ring` therefore returned **False**. The
+    producer ran anyway, wrote `die_required_um.die_side_um = 1962`, and:
+
+      * the auto-sizer's `221x221` die was DISCARDED for `1962x1962` um,
+      * the core was inset by `393 um` -- the ring's own measured depth,
+      * measured core utilization fell to **3.979 %** against L9's declared
+        FP_CORE_UTIL 30-40 %,
+      * and `pad_side_constraint` FAILED on i_clk/i_rst "measured against the
+        run's declared die rectangle ... 1962x1962 um".
+
+    And no pad was ever placed: the routed DEF is `DESIGN subservient` and
+    contains **zero** `gf180mcu_fd_io__` instances. The die was grown 78x in
+    area, and 393 um of margin reserved on every side, for a ring that nothing
+    in the flow builds.
+
+    Every reader of the record already handles its absence, which is the
+    ordinary state of a design not on the chip path:
+    `_padring_required_die_um` returns `(None, "no pad-ring producer record")`,
+    `_padring_core_inset_um` likewise, and `_producer_supply_ports_for_drv`
+    returns `()` -- which leaves the signal-only DRV limits applying to every
+    port, i.e. STRICTER, never weaker. The delivery also stays declared:
+    `_effective_deliverable` prefers the tape-out declaration over this record.
+
+    chip-AGNOSTIC: the delivery route only, no chip / vendor / SKU literal.
+    """
+    if _chip_path_requests_pad_ring(project):
+        return step_io_pad_chip_top_gen(project, container, pdk)
+    declared, why = _declaration_deliverable_answer(project)
+    return StepResult(
+        "io_pad_chip_top_gen", "SKIP", 0.0,
+        f"no pad ring is built for this delivery (deliverable="
+        f"{declared or 'UNDECLARED'}; {why}), so step 15.5ic's IO pad "
+        f"chip-top producer is not dispatched. Dispatching it would write a "
+        f"die_required_um that pins the floorplan to a ring nothing places.")
+
+
 def _declaration_deliverable_answer(project: Path) -> Tuple[Optional[str], str]:
     """The delivery's OWN declared `deliverable`, or (None, why not).
 
@@ -27967,7 +28036,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # ports from signal-only DRV limits, while its die_required_um is an input
     # to the floorplan.  The producer is idempotent and writes only its own
     # wrapper/record; a design with no declared pad placement SKIPs.
-    _padring_producer = step_io_pad_chip_top_gen(project, container, pdk)
+    _padring_producer = _padring_producer_dispatch(project, container, pdk)
     if _padring_producer.status not in ("PASS", "SKIP"):
         print(f"[phase3] io_pad_chip_top_gen: {_padring_producer.status} — "
               f"{_padring_producer.detail}", file=sys.stderr)
