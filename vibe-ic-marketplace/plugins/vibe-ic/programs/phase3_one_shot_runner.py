@@ -24751,6 +24751,54 @@ _SDR_CHILD_OMIT = {
 }
 
 
+def _spare_reassert_dont_touch_tcl(plan: Optional[Dict[str, Any]]) -> str:
+    """Re-apply the spare cells' `set_dont_touch` in a session that was
+    restored from a checkpoint DEF.
+
+    MEASURED on the first real run of the #2253 child (sha256 x sky130A): the
+    shipping session's routing clear reported `SDR_ROUTING_CLEARED: 6569
+    (spare_preserved=236)` and the CHILD's reported `14041 (spare_preserved=0)`.
+    The reason is structural, and it is not the child's: `set_dont_touch` on
+    each spare is emitted by `_build_spare_protection_tcl` INSIDE the
+    floorplan..detailed_route region, because it has to run right before the
+    placement legalization -- and that whole region is what a checkpoint-seeded
+    deck elides, since the checkpoint already contains its result. The spare
+    INSTANCES come back with the DEF; the dont_touch ATTRIBUTE does not, because
+    it is session state and not DEF geometry.
+
+    So a restored session was free to resize, rebuffer and rip up the spare
+    pool that design-for-ECO exists to preserve. This re-asserts the attribute
+    (and only the attribute -- the instances are already in the DEF, so nothing
+    is placed and nothing is inserted), which is exactly the invariant the
+    elided block established.
+
+    Empty string when the design plans no physical spares, so a design without
+    them emits a byte-identical deck. NONFATAL per instance: a name the DEF
+    does not carry is DISCLOSED and skipped, never fatal -- the checkpoint is
+    the authority on what exists, not the plan.
+
+    Chip-AGNOSTIC: instance names from the run's own spare plan."""
+    names = [i.get("name") for i in ((plan or {}).get("instances") or [])
+             if i.get("cell") and i.get("name")]
+    if not names:
+        return ""
+    lines = [
+        "# === Design-for-ECO: RE-ASSERT spare protection after a",
+        "# checkpoint restore. The instances came back with the DEF; the",
+        "# dont_touch attribute is session state and did not. See",
+        "# _spare_reassert_dont_touch_tcl.",
+        "set _spare_reasserted 0",
+    ]
+    for name in names:
+        lines.append(
+            f"if {{[catch {{set_dont_touch {name}}} _rdt_{name}]}} {{ "
+            f"puts \"SPARE_DONTTOUCH_REASSERT_NONFATAL {name}: $_rdt_{name}\" "
+            f"}} else {{ incr _spare_reasserted }}")
+    lines.append(
+        f'puts "SPARE_DONTTOUCH_REASSERTED: $_spare_reasserted of {len(names)}"')
+    return "\n".join(lines) + "\n"
+
+
 def _sdr_txn_dir_c(out_dir_c: str, stage: str) -> str:
     return f"{out_dir_c}/{_SDR_TXN_DIRS[stage]}"
 
@@ -26679,7 +26727,8 @@ class PnrResumeUnavailable(Exception):
 
 
 def _build_pnr_resume_tcl_text(pnr_tcl_text: str, *, checkpoint_def_c: str,
-                               omit_stages: Sequence[str] = ()) -> str:
+                               omit_stages: Sequence[str] = (),
+                               after_restore_tcl: str = "") -> str:
     """Derive a RESUME Tcl from the pnr.tcl that was actually run.
 
     THE SOURCE OF THE TAIL IS pnr.tcl ITSELF. Re-emitting the post-route tail
@@ -26707,11 +26756,13 @@ def _build_pnr_resume_tcl_text(pnr_tcl_text: str, *, checkpoint_def_c: str,
     literal is read or written."""
     return "\n".join(_pnr_deck_from_checkpoint(
         pnr_tcl_text, checkpoint_def_c=checkpoint_def_c,
-        omit_stages=omit_stages)) + "\n"
+        omit_stages=omit_stages,
+        after_restore_tcl=after_restore_tcl)) + "\n"
 
 
 def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
-                              omit_stages: Sequence[str] = ()) -> List[str]:
+                              omit_stages: Sequence[str] = (),
+                              after_restore_tcl: str = "") -> List[str]:
     """The line surgery shared by the fatal-signal RESUME deck and the #2253
     SDR CHILD deck: re-seat the design load on a checkpoint DEF, delete the
     region that BUILDS that checkpoint, and drop each named stage.
@@ -26719,6 +26770,15 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
     Both callers need exactly this and nothing else differs between them
     except where the deck STOPS, so it lives in one place — a second copy of
     sentinel surgery is a second thing to keep in step with the template.
+
+    ``after_restore_tcl`` is emitted IMMEDIATELY after the design is restored,
+    and exists for SESSION STATE THE DEF DOES NOT CARRY. A DEF restores
+    instances, nets and geometry; it does not restore an attribute the elided
+    region set on them — and the elided region is exactly where such attributes
+    get set, because they have to be in force before the work the checkpoint
+    contains. See `_spare_reassert_dont_touch_tcl` for the measured case.
+    Default "" keeps a caller that passes nothing byte-identical.
+
     Returns the lines; the callers join and terminate them."""
     lines = pnr_tcl_text.splitlines()
 
@@ -26741,7 +26801,7 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
         "# RESUMED SESSION — the design is restored from the route checkpoint",
         "# instead of rebuilt from the netlist (see _build_pnr_resume_tcl_text).",
         f"read_def {checkpoint_def_c}",
-    ]
+    ] + ([after_restore_tcl.rstrip("\n")] if after_restore_tcl.strip() else [])
 
     def _drop(begin: str, end: str, replacement: Sequence[str],
               what: str) -> None:
@@ -26764,7 +26824,8 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
 
 
 def _build_pnr_sdr_child_tcl_text(pnr_tcl_text: str, *, checkpoint_def_c: str,
-                                  stage: str) -> str:
+                                  stage: str,
+                                  after_restore_tcl: str = "") -> str:
     """#2253 — derive the CHILD deck for one SDR site from pnr.tcl itself.
 
     The child is the ONLY session that is ever mutated by the optional
@@ -26799,7 +26860,8 @@ def _build_pnr_sdr_child_tcl_text(pnr_tcl_text: str, *, checkpoint_def_c: str,
             f"for {sorted(_SDR_CHILD_OMIT)}")
     lines = _pnr_deck_from_checkpoint(
         pnr_tcl_text, checkpoint_def_c=checkpoint_def_c,
-        omit_stages=_SDR_CHILD_OMIT[stage])
+        omit_stages=_SDR_CHILD_OMIT[stage],
+        after_restore_tcl=after_restore_tcl)
     # REFUSE a deck that does not carry this site at all, rather than shipping
     # a child that would run to the END of pnr.tcl writing shipped artifacts.
     begin_marker = _pnr_stage_begin(stage)
@@ -27409,8 +27471,9 @@ def _disclose_sdr_transactions(project: Path, out_dir: Path,
     return records
 
 
-def _write_sdr_child_decks(pnr_tcl: Path, out_dir: Path,
-                           container: str) -> Dict[str, str]:
+def _write_sdr_child_decks(pnr_tcl: Path, out_dir: Path, container: str,
+                           spare_plan: Optional[Dict[str, Any]] = None
+                           ) -> Dict[str, str]:
     """#2253 — derive and write the CHILD deck for every SDR site in pnr.tcl.
 
     Written next to the deck they come from, at the fixed names the emitted
@@ -27430,13 +27493,18 @@ def _write_sdr_child_decks(pnr_tcl: Path, out_dir: Path,
         deck = pnr_tcl.read_text(errors="replace")
     except OSError as exc:
         return {s: f"pnr.tcl unreadable: {exc}" for s in _SDR_CHILD_OMIT}
+    # The child mutates. Whatever the shipping session protected before the
+    # checkpoint has to be protected in the child too, or the candidate it
+    # proposes was built without a guard the parent was running under.
+    after_restore = _spare_reassert_dont_touch_tcl(spare_plan)
     for stage in _SDR_CHILD_OMIT:
         txn = out_dir / _SDR_TXN_DIRS[stage]
         ckpt_c = _to_container_path(str(txn / "pre_repair.def"), container)
         child = out_dir / _sdr_child_tcl_name(stage)
         try:
             child.write_text(_build_pnr_sdr_child_tcl_text(
-                deck, checkpoint_def_c=ckpt_c, stage=stage))
+                deck, checkpoint_def_c=ckpt_c, stage=stage,
+                after_restore_tcl=after_restore))
         except (PnrResumeUnavailable, OSError) as exc:
             failures[stage] = str(exc)
             # DEGRADE LOUDLY. A missing child deck turns into a refused
@@ -27476,7 +27544,9 @@ def _sdr_adopt_request(log_text: str) -> Optional[Dict[str, str]]:
 def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
                               out_dir_c: str, pnr_tcl: Path,
                               log_text: str,
-                              hard_ceiling_s: int) -> Dict[str, Any]:
+                              hard_ceiling_s: int,
+                              spare_plan: Optional[Dict[str, Any]] = None
+                              ) -> Dict[str, Any]:
     """#2253 — finish PnR from an ACCEPTED SDR candidate the shipping session
     could not read back.
 
@@ -27538,7 +27608,8 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
         omitted.append(stage)
         try:
             tail_text = _build_pnr_resume_tcl_text(
-                deck, checkpoint_def_c=cand_c, omit_stages=list(omitted))
+                deck, checkpoint_def_c=cand_c, omit_stages=list(omitted),
+                after_restore_tcl=_spare_reassert_dont_touch_tcl(spare_plan))
         except (PnrResumeUnavailable, OSError) as exc:
             rec["status"] = "FAILED"
             rec["reason"] = f"adopt tail could not be derived: {exc}"
@@ -27614,7 +27685,9 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
 def _pnr_resume_after_fatal_signal(*, project: Path, top: str, container: str,
                                    out_dir: Path, out_dir_c: str,
                                    pnr_tcl: Path, diag: Dict[str, Any],
-                                   hard_ceiling_s: int) -> Dict[str, Any]:
+                                   hard_ceiling_s: int,
+                                   spare_plan: Optional[Dict[str, Any]] = None
+                                   ) -> Dict[str, Any]:
     """ONE bounded attempt to finish PnR from the last stage checkpoint after
     the tool was killed by a signal.
 
@@ -27688,7 +27761,8 @@ def _pnr_resume_after_fatal_signal(*, project: Path, top: str, container: str,
         resume_text = _build_pnr_resume_tcl_text(
             pnr_tcl.read_text(errors="replace"),
             checkpoint_def_c=_to_container_path(str(ckpt), container),
-            omit_stages=[stage])
+            omit_stages=[stage],
+            after_restore_tcl=_spare_reassert_dont_touch_tcl(spare_plan))
     except (PnrResumeUnavailable, OSError) as e:
         rec["status"] = "NOT_ATTEMPTED"
         rec["reason"] = f"resume Tcl could not be derived: {e}"
@@ -29921,7 +29995,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             # must not leave a child deck describing the previous one.
             _sdr_child_deck_failures.clear()
             _sdr_child_deck_failures.update(
-                _write_sdr_child_decks(pnr_tcl, out_dir, container))
+                _write_sdr_child_decks(pnr_tcl, out_dir, container,
+                                       spare_plan=spare_plan))
             return None
         pad_result, consumer_tcl = _prepare_padring_for_route(
             project, pdk, container, out_dir, out_dir_c,
@@ -29938,7 +30013,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         pnr_tcl.write_text(consumer_tcl)
         _sdr_child_deck_failures.clear()
         _sdr_child_deck_failures.update(
-            _write_sdr_child_decks(pnr_tcl, out_dir, container))
+            _write_sdr_child_decks(pnr_tcl, out_dir, container,
+                                       spare_plan=spare_plan))
         return None
 
     _pad_install_failure = _install_route_deck()
@@ -30037,7 +30113,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         _sdr_adopt = _pnr_adopt_sdr_candidates(
             container=container, out_dir=out_dir, out_dir_c=out_dir_c,
             pnr_tcl=pnr_tcl, log_text=(out or "") + (err or ""),
-            hard_ceiling_s=_pnr_ceiling)
+            hard_ceiling_s=_pnr_ceiling, spare_plan=spare_plan)
         if _sdr_adopt.get("status") != "NOT_REQUESTED":
             _sdr_adopt_records.append(_sdr_adopt)
             rc = _sdr_adopt.get("rc", rc)
@@ -30532,7 +30608,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         _resume_record = _pnr_resume_after_fatal_signal(
             project=project, top=top, container=container, out_dir=out_dir,
             out_dir_c=out_dir_c, pnr_tcl=pnr_tcl, diag=_sig_diag,
-            hard_ceiling_s=_pnr_ceiling)
+            hard_ceiling_s=_pnr_ceiling, spare_plan=spare_plan)
         _sig_diag["resume"] = _resume_record
         if _resume_record.get("status") == "RESUMED":
             # The route was salvaged from the checkpoint and the tail
