@@ -41850,6 +41850,166 @@ def _signoff_drc_tool(path: Path) -> Optional[Tuple[str, str]]:
     return p.kind, cmd
 
 
+#: Where the canonical sign-off DRC report and its transcript are READ, by
+#: every consumer including `eda_report_audit`'s corroboration contract.
+_CANONICAL_SIGNOFF_DRC_REL = "reports/phase3/drc_signoff.rpt"
+
+
+def _rebind_measured_drc_invocation_to_canonical_path(
+        project: Path) -> Optional[str]:
+    """Bind the MEASURED sign-off DRC invocation to the path its report is
+    READ at, when the canonical copy is byte-for-byte that measurement.
+
+    THE DEFECT, MEASURED 2026-09-15 on a signed-off gf180mcuD run. The
+    corroboration contract in `eda_report_audit._measured_klayout_receipt_files`
+    accepts a zero only from a ledger row that is an `invocation`, `measured`,
+    exit 0, whose `outputs` carry BOTH the report and its `.log` at the digests
+    on disk, and one of whose `inputs` is a GDS still matching on disk. The run
+    satisfied every one of those facts and was refused anyway::
+
+        provenance.jsonl, newest klayout invocation (exit 0, measured true)
+          out phase3/reports/drc.rpt      ledger c5a1b3be…  disk c5a1b3be…  MATCH
+          out phase3/reports/drc.log      ledger fb0cf634…  disk fb0cf634…  MATCH
+          in  phase3/stage3/pnr/spm.gds   ledger 06fc4aac…  disk 06fc4aac…  MATCH
+
+        what the gate reads
+          reports/phase3/drc_signoff.rpt  disk c5a1b3be…  <- the SAME BYTES
+          reports/phase3/drc_signoff.log  disk fb0cf634…  <- the SAME BYTES
+
+        verdict: DRC_ZERO_NOT_MEASURED
+
+    The measurement happened, its outputs are on disk unchanged, and the only
+    thing wrong is that the canonicalised copy is read under a name the
+    invocation never recorded — the directories are transposed and the basename
+    differs. `klayout_drc_measure` is not at fault: it digests both outputs
+    after the run and binds the input GDS, correctly, at the path it was told
+    to write. Nothing afterwards tells the ledger the bytes are also at the
+    canonical path.
+
+    The cost of the gap is not bookkeeping. `drc_signoff.json` reports
+    `passed: false` and a sign-off DRC that is NOT_MEASURED, so a run whose
+    layout the PDK's own deck found clean cannot say so — and the workaround
+    reached for instead was to HAND-WRITE the missing row into a published
+    cell (benchmark-data `71071a1dd400`, "evidence(spm): record measured
+    signoff DRC invocation"). Evidence a run cannot produce for itself gets
+    written by hand, which is the failure this repo exists to prevent.
+
+    WHY THIS CANNOT MANUFACTURE A MEASUREMENT, which is the only thing that
+    makes it a legitimate fix rather than the hand-written row in code:
+
+      * the source invocation is found BY DIGEST, never by name. A row
+        qualifies only if its own `outputs` already contain the exact bytes now
+        sitting at the canonical report AND at the canonical transcript. A row
+        that produced different bytes cannot be re-bound to these.
+      * `measured`, `tool`, `exit_code` and `inputs` are COPIED from that row.
+        This function asserts nothing of its own; it says "those bytes are also
+        here", which is a fact it verifies rather than a claim it makes.
+      * the input binding must STILL HOLD on disk. A GDS that changed since the
+        deck ran breaks the re-bind, exactly as it breaks the original row.
+      * when no such invocation exists, NOTHING is written and the gate stays
+        refused. Degrading loudly is the point: an uncorroborated zero must
+        keep reading as uncorroborated.
+
+    The ledger stays append-only — the new row supersedes by being newer, and
+    the earlier rows remain as the history of where the bytes were first
+    written. Returns the canonical rel path when a row was appended, else None.
+
+    chip-AGNOSTIC: canonical PV paths and ledger schema only. No PDK, design,
+    vendor or IC literal.
+    """
+    import hashlib as _hl
+    import datetime as _dt
+
+    def _sha(fp: Path) -> Optional[str]:
+        if not fp.is_file():
+            return None
+        h = _hl.sha256()
+        try:
+            with fp.open("rb") as f:
+                for ch in iter(lambda: f.read(1 << 20), b""):
+                    h.update(ch)
+        except OSError:
+            return None
+        return "sha256:" + h.hexdigest()
+
+    canon_rpt = project / _CANONICAL_SIGNOFF_DRC_REL
+    canon_log = canon_rpt.with_suffix(".log")
+    rpt_sha, log_sha = _sha(canon_rpt), _sha(canon_log)
+    if not rpt_sha or not log_sha:
+        return None
+    rpt_rel = _CANONICAL_SIGNOFF_DRC_REL
+    log_rel = str(Path(rpt_rel).with_suffix(".log"))
+
+    prov = project / "provenance.jsonl"
+    if not prov.is_file():
+        return None
+    ledger: List[dict] = []
+    for line in prov.read_text(errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            doc = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(doc, dict):
+            ledger.append(doc)
+
+    for row in reversed(ledger):
+        outs = row.get("outputs") or {}
+        if (row.get("record") == "invocation"
+                and row.get("measured") is True
+                and isinstance(outs, dict)
+                and outs.get(rpt_rel) == rpt_sha
+                and outs.get(log_rel) == log_sha):
+            return None            # already bound; nothing owed
+
+    for row in reversed(ledger):
+        if (row.get("record") != "invocation"
+                or row.get("measured") is not True
+                or row.get("exit_code") != 0):
+            continue
+        outs = row.get("outputs")
+        ins = row.get("inputs")
+        if not isinstance(outs, dict) or not isinstance(ins, dict):
+            continue
+        src_rpt = sorted(k for k, v in outs.items() if v == rpt_sha)
+        src_log = sorted(k for k, v in outs.items() if v == log_sha)
+        if not src_rpt or not src_log:
+            continue
+        bound_gds = False
+        for in_rel, in_sha in ins.items():
+            if not isinstance(in_rel, str) or not in_rel.lower().endswith(".gds"):
+                continue
+            if _sha(project / in_rel) == in_sha:
+                bound_gds = True
+                break
+        if not bound_gds:
+            continue
+        record = {
+            "record": "invocation",
+            "measured": True,
+            "tool": row.get("tool"),
+            "exit_code": row.get("exit_code"),
+            "inputs": dict(ins),
+            "outputs": {rpt_rel: rpt_sha, log_rel: log_sha},
+            "command": row.get("command"),
+            "deck": row.get("deck"),
+            "top_cell": row.get("top_cell"),
+            "rebound_from": src_rpt + src_log,
+            "rebound_reason": (
+                "the canonical sign-off DRC report and transcript are "
+                "byte-identical to this measured invocation's own outputs; "
+                "this row binds the SAME measurement to the path every "
+                "consumer reads. Matched by digest, never by name."),
+            "timestamp": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        }
+        with prov.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+        return rpt_rel
+    return None
+
+
 def _v1_6_620_append_pv_signoff_provenance(project: Path, top: str) -> List[str]:
     """ORGANIC #620 — declare the Step-31 Physical-Verification sign-off
     outputs (sign-off DRC report, LVS report, streamout GDS) in
@@ -46035,6 +46195,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # on missing bookkeeping. Only real on-disk outputs are declared
         # (anti-fabrication); idempotent.
         _pv_declared = _v1_6_620_append_pv_signoff_provenance(project, top)
+        _rebind_measured_drc_invocation_to_canonical_path(project)
         if _pv_declared and str(prov_path) not in written:
             written.append(str(prov_path))
         if _pv_declared:
@@ -46791,6 +46952,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         # stamps outputs that actually EXIST on disk (each with its REAL
         # sha256), so a report that was never produced (or a stale/absent
         # one) is NOT fabricated and Step-31 provenance still FAILs correctly.
+        _rebind_measured_drc_invocation_to_canonical_path(project)
         _drc_prov_declared = _v1_6_620_append_pv_signoff_provenance(
             project, top)
         if _drc_prov_declared:

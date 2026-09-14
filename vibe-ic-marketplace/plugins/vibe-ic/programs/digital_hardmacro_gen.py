@@ -127,7 +127,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import _container_exec  # noqa: E402  container-side deadlines
 import _path_layout as _pl
@@ -1094,6 +1094,200 @@ def magic_env_for(magicrc: str, pdk_root: str) -> Dict[str, str]:
     return {"PDK_ROOT": pdk_root}
 
 
+#: LEF attributes that may appear at most ONCE per PIN. If two declarations of
+#: the same pin disagree on one of these, the two are not the same pin as far
+#: as this program can tell, and merging them would invent an answer.
+_SINGLE_VALUED_PIN_ATTRS: Tuple[str, ...] = (
+    "DIRECTION", "USE", "SHAPE", "MUSTJOIN", "TAPERRULE",
+    "NETEXPR", "SUPPLYSENSITIVITY", "GROUNDSENSITIVITY",
+)
+
+_PIN_OPEN_RE = re.compile(r"^([ \t]*)PIN[ \t]+(\S+)[ \t]*$")
+_MACRO_OPEN_RE = re.compile(r"^[ \t]*MACRO[ \t]+(\S+)[ \t]*$")
+
+
+class DuplicatePinConflict(Exception):
+    """Two declarations of one pin disagree on a single-valued attribute."""
+
+
+def _pin_attr_keyword(line: str) -> Optional[str]:
+    head = line.strip().split(None, 1)
+    return head[0] if head and head[0] in _SINGLE_VALUED_PIN_ATTRS else None
+
+
+def merge_duplicate_pin_declarations(lef_text: str) -> Tuple[str, Dict[str, Any]]:
+    """Declare every pin ONCE per MACRO, carrying the union of its geometry.
+
+    WHY THIS EXISTS — MEASURED 2026-09-15 on a signed-off gf180mcuD hardmacro,
+    the artefact the whole HARDMACRO route exists to produce::
+
+        phase3/stage4/hardmacro/spm.lef
+          PIN lines      : 59
+          distinct names : 38      (36 logical + VDD + VSS -- the correct count)
+          MACRO blocks   : 1       (so these are duplicates INSIDE one macro)
+          declared twice : 21
+
+    and the two declarations of a pin are not copies -- the second carries
+    GEOMETRY ONLY, with no DIRECTION and no USE::
+
+        PIN clk                        PIN clk
+          DIRECTION INPUT ;              PORT
+          USE SIGNAL ;                     LAYER Metal3 ; RECT 2375.480 ...
+          ANTENNAGATEAREA 4.738000 ;     END
+          PORT                           PORT
+            LAYER Metal3 ; RECT ...        LAYER Metal2 ; RECT 1366.820 ...
+          END                            END
+        END clk                        END clk
+
+    WHERE THE SECOND ONE COMES FROM. `build_lef_tcl` reads BOTH the GDS and the
+    DEF into one cell, on purpose, and both are load-bearing. Measured, by
+    running magic three ways on the same signed-off inputs:
+
+        input             PIN blocks  distinct  duplicated  no DIRECTION  OBS rects
+        DEF only              36         36          0            0           49
+        GDS only              38         38          0           38           94
+        GDS + DEF (shipped)   58         38         20           38           94
+
+    The DEF supplies the ELECTRICAL attributes and nothing else can -- GDS-only
+    gives 38 pins of which ALL 38 have no DIRECTION. The GDS supplies the
+    OBSTRUCTIONS and nothing else can -- DEF-only loses 45 of the 94 OBS rects,
+    which would let a parent route straight over blocked area. Neither input can
+    be dropped, so the duplication is repaired here rather than avoided by
+    shipping a worse abstract. (`gds labels no` was also measured: no effect.)
+
+    LEF gives a pin one declaration per macro and puts all of its shapes in
+    PORT blocks inside it. A second `PIN clk` leaves a reader a pin with no
+    direction and no use; a reader that takes the last one wins loses the
+    direction entirely, and a reader that counts them reports a macro with 56
+    signal pins where the netlist view declares 36 -- which is exactly what
+    `release_docs_check` reported as PIN_COUNT_DISAGREES_WITH_NETLIST.
+
+    WHAT IS AND IS NOT MERGED. The union is of GEOMETRY: every PORT block from
+    every declaration, in order. Attribute lines are carried over
+    first-occurrence-unique, so the attributed declaration supplies DIRECTION,
+    USE and the ANTENNA* figures and the bare one adds nothing. If two
+    declarations state DIFFERENT values for a single-valued attribute the merge
+    REFUSES with :class:`DuplicatePinConflict` -- it does not pick one. Nothing
+    outside a duplicated PIN is touched: MACRO order, SIZE, ORIGIN, FOREIGN,
+    OBS and every non-duplicated pin are passed through byte-for-byte.
+
+    Returns `(text, report)`; `report["merged"]` is empty when there was
+    nothing to merge, and then `text is lef_text`.
+
+    chip-AGNOSTIC: LEF syntax only. No PDK, design, vendor or IC literal.
+    """
+    lines = lef_text.splitlines(keepends=True)
+    # (macro, pin) -> {"indent", "attrs": [...], "ports": [...], "count": n}
+    merged_order: List[Tuple[Optional[str], str]] = []
+    collected: Dict[Tuple[Optional[str], str], Dict[str, Any]] = {}
+    # output is rebuilt so a duplicate's LATER declaration disappears entirely
+    out: List[Any] = []            # str line, or ("PIN", key) placeholder
+    macro: Optional[str] = None
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m_macro = _MACRO_OPEN_RE.match(line.rstrip("\n"))
+        if m_macro:
+            macro = m_macro.group(1)
+            out.append(line)
+            i += 1
+            continue
+        if macro is not None and re.match(rf"^[ \t]*END[ \t]+{re.escape(macro)}[ \t]*$",
+                                          line.rstrip("\n")):
+            macro = None
+            out.append(line)
+            i += 1
+            continue
+        m_pin = _PIN_OPEN_RE.match(line.rstrip("\n"))
+        if not m_pin:
+            out.append(line)
+            i += 1
+            continue
+        indent, name = m_pin.group(1), m_pin.group(2)
+        end_re = re.compile(rf"^[ \t]*END[ \t]+{re.escape(name)}[ \t]*$")
+        body: List[str] = []
+        j = i + 1
+        while j < len(lines) and not end_re.match(lines[j].rstrip("\n")):
+            body.append(lines[j])
+            j += 1
+        if j >= len(lines):
+            # Unterminated PIN: not something to guess about. Pass through.
+            out.append(line)
+            i += 1
+            continue
+        key = (macro, name)
+        rec = collected.get(key)
+        if rec is None:
+            rec = {"indent": indent, "attrs": [], "ports": [], "count": 0}
+            collected[key] = rec
+            merged_order.append(key)
+            out.append(("PIN", key))
+        rec["count"] += 1
+        # split the body into PORT...END groups and everything else
+        k = 0
+        while k < len(body):
+            b = body[k]
+            if b.strip().split(None, 1)[:1] == ["PORT"]:
+                grp = [b]
+                k += 1
+                while k < len(body):
+                    grp.append(body[k])
+                    if body[k].strip() == "END":
+                        k += 1
+                        break
+                    k += 1
+                rec["ports"].append(grp)
+            else:
+                if b.strip():
+                    rec["attrs"].append(b)
+                k += 1
+        i = j + 1
+
+    duplicates = {f"{mn or ''}.{pn}" if mn else pn: r["count"]
+                  for (mn, pn), r in collected.items() if r["count"] > 1}
+    if not duplicates:
+        return lef_text, {"merged": {}, "pin_declarations": len(collected),
+                          "conflicts": []}
+
+    # refuse on a real disagreement rather than choose
+    conflicts: List[str] = []
+    for (mn, pn), rec in collected.items():
+        by_kw: Dict[str, set] = {}
+        for a in rec["attrs"]:
+            kw = _pin_attr_keyword(a)
+            if kw:
+                by_kw.setdefault(kw, set()).add(a.strip())
+        for kw, vals in by_kw.items():
+            if len(vals) > 1:
+                conflicts.append(
+                    f"{mn or '<no macro>'}/{pn}: {kw} declared "
+                    f"{len(vals)} different ways: {sorted(vals)}")
+    if conflicts:
+        raise DuplicatePinConflict("; ".join(conflicts))
+
+    rendered: List[str] = []
+    for item in out:
+        if isinstance(item, str):
+            rendered.append(item)
+            continue
+        _, key = item
+        rec = collected[key]
+        ind = rec["indent"]
+        rendered.append(f"{ind}PIN {key[1]}\n")
+        seen: set = set()
+        for a in rec["attrs"]:
+            if a.strip() in seen:
+                continue
+            seen.add(a.strip())
+            rendered.append(a)
+        for grp in rec["ports"]:
+            rendered.extend(grp)
+        rendered.append(f"{ind}END {key[1]}\n")
+    return "".join(rendered), {"merged": duplicates,
+                               "pin_declarations": len(collected),
+                               "conflicts": []}
+
+
 def _accept_lef(produced: Path, out_lef: Path, rc: int,
                 tool_output: str) -> Tuple[bool, str]:
     """The verdict on what magic wrote. ONE copy, whichever site wrote it.
@@ -1109,14 +1303,37 @@ def _accept_lef(produced: Path, out_lef: Path, rc: int,
         tail = (tool_output or "").strip().splitlines()[-3:]
         return False, (f"magic exited {rc} and wrote no LEF; "
                        f"last output: {' | '.join(tail) or '(none)'}")
-    if not _LEF_HAS_PIN_RE.search(produced.read_text(errors="replace")):
+    text = produced.read_text(errors="replace")
+    if not _LEF_HAS_PIN_RE.search(text):
         return False, (
             "magic wrote a LEF with NO `PIN` block — an outline and "
             "obstructions with nothing to connect to. The macro's ports "
             "did not reach Magic, so the abstract is not deliverable and "
             "has not been staged.")
+    # A PIN-LESS abstract was the failure this predicate was written for, and
+    # the NEXT one past it is a pin declared TWICE — which the "at least one
+    # PIN" test cannot see. `build_lef_tcl` reads the GDS and the DEF into one
+    # cell because each supplies something the other cannot (see
+    # `merge_duplicate_pin_declarations` for the three-way measurement), and
+    # magic then writes both port sets. Normalise before staging, and refuse
+    # rather than stage a macro that is still malformed.
+    try:
+        text, merge_report = merge_duplicate_pin_declarations(text)
+    except DuplicatePinConflict as exc:
+        return False, (
+            "magic wrote a LEF whose duplicate PIN declarations DISAGREE, so "
+            "they cannot be one pin and this program will not choose between "
+            f"them: {exc}")
+    if merge_report["merged"]:
+        names = ", ".join(sorted(merge_report["merged"])[:6])
+        more = "" if len(merge_report["merged"]) <= 6 else " …"
+        print(f"[{PROGRAM}] LEF normalised: {len(merge_report['merged'])} pin(s) "
+              f"were declared more than once and their PORT geometry has been "
+              f"merged into one declaration each ({names}{more}). Reading the "
+              f"GDS and the DEF into one cell emits both port sets; LEF gives a "
+              f"pin one declaration per macro.")
     out_lef.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(produced, out_lef)
+    out_lef.write_text(text)
     return True, ""
 
 
