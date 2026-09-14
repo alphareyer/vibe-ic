@@ -839,25 +839,192 @@ def nldm_grid_point(table: dict, slew: float, load_axis: float) -> dict:
             "value": values[i][j]}
 
 
+#: Liberty boolean grammar, enough of it to decide a `when` under a known
+#: input assignment. `!`/`'` NOT, `&`/`*`/juxtaposition AND, `|`/`+` OR, `^`
+#: XOR, parentheses, and the literals `1`/`0`. Anything else is REFUSED
+#: (`None`), never guessed: a `when` this module cannot read must not be
+#: allowed to select an arc.
+_WHEN_TOKEN_RE = re.compile(r"\s*(\(|\)|!|\'|&|\*|\||\+|\^|[A-Za-z_]\w*(?:\[\d+\])?|[01])")
+
+
+def evaluate_when(expr: str, state: Dict[str, int]) -> Optional[bool]:
+    """Is this liberty `when` condition TRUE under ``state``?
+
+    ``None`` when the expression cannot be read, or names a pin ``state`` does
+    not fix — an undecidable condition selects nothing, which is the safe
+    direction: the caller falls back to the behaviour it had before.
+    """
+    if not isinstance(expr, str) or not expr.strip():
+        return None
+    toks: List[str] = []
+    i = 0
+    while i < len(expr):
+        m = _WHEN_TOKEN_RE.match(expr, i)
+        if not m:
+            if expr[i].isspace():
+                i += 1
+                continue
+            return None
+        toks.append(m.group(1))
+        i = m.end()
+    pos = 0
+
+    def _peek():
+        return toks[pos] if pos < len(toks) else None
+
+    def _primary():
+        nonlocal pos
+        tok = _peek()
+        if tok is None:
+            raise ValueError("truncated")
+        if tok == "!":
+            pos += 1
+            return not _primary()
+        if tok == "(":
+            pos += 1
+            v = _or()
+            if _peek() != ")":
+                raise ValueError("unbalanced")
+            pos += 1
+        elif tok in ("0", "1"):
+            pos += 1
+            v = tok == "1"
+        elif re.match(r"^[A-Za-z_]", tok):
+            pos += 1
+            if tok not in state:
+                raise KeyError(tok)
+            v = bool(state[tok])
+        else:
+            raise ValueError(tok)
+        while _peek() == "\'":          # postfix negation
+            pos += 1
+            v = not v
+        return v
+
+    def _and():
+        v = _primary()
+        while True:
+            tok = _peek()
+            if tok in ("&", "*"):
+                pos_inc()
+                v = _primary() and v
+            elif tok is not None and (tok == "(" or tok in ("0", "1")
+                                      or re.match(r"^[A-Za-z_!]", tok)):
+                v = _primary() and v      # juxtaposition is AND
+            else:
+                return v
+
+    def pos_inc():
+        nonlocal pos
+        pos += 1
+
+    def _xor():
+        v = _and()
+        while _peek() == "^":
+            pos_inc()
+            v = v != _and()
+        return v
+
+    def _or():
+        v = _xor()
+        while _peek() in ("|", "+"):
+            pos_inc()
+            v = _xor() or v
+        return v
+
+    try:
+        v = _or()
+    except (ValueError, KeyError, IndexError):
+        return None
+    if pos != len(toks):
+        return None
+    return bool(v)
+
+
+def deck_side_input_state(stage: dict, cell_block: str) -> Dict[str, int]:
+    """The logic level the REFERENCE DECK ties every non-toggling input to.
+
+    Read from `_installed_pin_node`, the one function that decides it, so the
+    deck and this reader cannot disagree about what was simulated. Only liberty
+    INPUT pins are in the result: supplies are not part of a `when`.
+    """
+    ins, _outs = liberty_pins(cell_block)
+    state: Dict[str, int] = {}
+    for pin in ins:
+        if pin == stage.get("toggle_pin"):
+            continue
+        node = _installed_pin_node(pin, stage, "__IN__", "__OUT__")
+        if node == "vdd":
+            state[pin] = 1
+        elif node == "0":
+            state[pin] = 0
+    return state
+
+
 def stage_nldm_table(liberty_text: str, stage: dict
                      ) -> Optional[Tuple[str, dict]]:
-    """(table_name, table) for the arc this stage's toggling pin drives, by the
-    SAME selection `derive_liberty_path_tolerance` uses (pure). None when the
-    liberty does not carry the cell, the arc, or the table."""
+    """(table_name, table) for the arc this stage's toggling pin drives.
+
+    THE ARC IS (related_pin, when), NOT related_pin ALONE (2026-09-15, icspm2)
+    =========================================================================
+    This used to take the FIRST `timing()` group whose `related_pin` matched
+    and ignore its `when`. MEASURED on a gf180mcuD run of `spm`, the reference
+    deck for `gf180mcu_fd_sc_mcu7t5v0__xor3_1`:
+
+        the PDK's own .spice:  .SUBCKT …__xor3_1 A1 A2 A3 Z VDD VNW VPW VSS
+        the deck emitted   :  x0f 0 0 si0f so0f vdd vdd 0 0 …__xor3_1
+                              i.e. A1 = 0, A2 = 0, A3 toggling
+
+    and the liberty declares SIX groups for `related_pin: A3`, in two
+    oppositely-unate families. At the very grid point the gate used
+    (index_1[5] = 1.769 ns, index_2[1] = 0.001853 pF):
+
+        when '!A1&A2'   negative_unate  cell_fall = 0.1888   <-- what was read
+        when 'A1&!A2'   negative_unate  cell_fall = 0.1888
+        when  None      negative_unate  cell_fall = 0.1888
+        when '!A1&!A2'  positive_unate  cell_fall = 1.159    <-- what was SIMULATED
+        when 'A1&A2'    positive_unate  cell_fall = 1.159
+        when  None      positive_unate  cell_fall = 1.159
+
+    ngspice measured 0.820247 ns. Against 0.1888 that is ratio 4.345, +334 %,
+    and it was the whole of the published `pdk_characterisation.gap_pct` of
+    67.9 % — the other three cells of the same path were -8.2 %, -19.5 % and
+    -19.0 %. That gap is then carried onto the liberty cone
+    (`design_reference_ns = 5.6286 x 1.6791 = 9.4507 ns`) and produced the
+    headline `SPICE_STA_CRITICAL_MISMATCH … -65.2 %`. Against the arc the deck
+    actually stimulated (1.159) the same measurement is ratio 0.708, -29.2 % —
+    the same direction and the same order of magnitude as its three siblings.
+
+    A two-input NAND/NOR has one family, so the defect is invisible on them;
+    it appears the first time a path uses a cell whose arcs are `when`-split.
+
+    THE SELECTION. The deck's side-input state is known exactly — it is what
+    `_installed_pin_node` tied — so the arc is the group whose `when` is TRUE
+    under that state. When no group carries a `when` this module can decide,
+    the first-match behaviour is kept unchanged, which is every cell the old
+    code was right about.
+    """
     cell_block = extract_cell_block(liberty_text, stage["cell"])
     if not cell_block:
         return None
     related = stage["toggle_pin"]
+    table_name = ("cell_fall" if stage.get("transition") == "fall"
+                  else "cell_rise")
+    state = deck_side_input_state(stage, cell_block)
+    candidates: List[Tuple[str, dict]] = []
     for block in _timing_blocks(cell_block):
         rel = re.search(r'related_pin\s*:\s*"?([^";]+)', block)
         if not (rel and related in rel.group(1).split()):
             continue
-        table_name = ("cell_fall" if stage.get("transition") == "fall"
-                      else "cell_rise")
         table = parse_nldm_table(block, table_name)
-        if table:
-            return table_name, table
-    return None
+        if not table:
+            continue
+        when = re.search(r'when\s*:\s*"([^"]*)"', block)
+        if when is not None and state:
+            if evaluate_when(when.group(1), state) is True:
+                return table_name, table      # the arc the deck stimulated
+        candidates.append((table_name, table))
+    return candidates[0] if candidates else None
 
 
 def measure_pdk_characterisation(
