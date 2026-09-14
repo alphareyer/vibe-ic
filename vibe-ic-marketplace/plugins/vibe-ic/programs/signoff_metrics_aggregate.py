@@ -425,7 +425,39 @@ def _tns(project: Path, want: str) -> Cell:
 _DECLARED_RE = re.compile(r"^SIGNOFF_CHECK_TYPES_REPORTED\s+(.+)$", re.M)
 
 
+#: `SIGNOFF_DRV_CENSUS <check> violators=<N|UNAVAILABLE>` — OpenSTA's OWN
+#: per-check violator counter, written by `phase3_one_shot_runner` from
+#: `sta::${check}_violation_count`. Its BEGIN banner states the contract:
+#: "the tool's own violator count for every check type requested above, zero
+#: included -- an absent table is silence, a count is a measurement".
+_DRV_CENSUS_RE = re.compile(
+    r"^SIGNOFF_DRV_CENSUS\s+(\S+)\s+violators=(\S+)\s*$", re.M)
+
+
 def _drv(project: Path, check: str) -> Cell:
+    """The violator count for ONE design-rule check.
+
+    IT IS PER-CHECK, AND IT USED NOT TO BE (2026-09-15, icspm2). This returned
+    `text.count("VIOLATED")` — the number of violated rows in the WHOLE report
+    — for every check it was asked about, so `design__max_slew_violation__count`
+    and `design__max_cap_violation__count` were the SAME number under two names.
+    On a clean design both are 0 and it is invisible; on a design with one
+    max-cap violation both keys would read 1, and a reader would conclude the
+    slews were violated too.
+
+    The per-check number is already in the report. `phase3_one_shot_runner`
+    (the `SIGNOFF_DRV_CENSUS` emitter) added it precisely because "an absent
+    table is not a measurement", and its comment says what it was for: "that is
+    the correct reading of silence, and it is why this run could not certify a
+    DRV axis it had actually checked". The census was built and never read.
+
+    The CENSUS is the authority when present, because it distinguishes a
+    measured zero from an absent table — which is the whole reason it exists.
+    `UNAVAILABLE` (OpenSTA had no such counter) stays NOT_MEASURED. A report
+    with no census at all falls back to the whole-report VIOLATED count, which
+    is what every already-published run carries, with the basis SAYING that the
+    figure is not per-check.
+    """
     rel = "reports/phase3/sta_spef_based.rpt"
     text = _text(project, rel)
     if text is None:
@@ -439,10 +471,31 @@ def _drv(project: Path, check: str) -> Cell:
             f"{rel}: does not declare {check} in SIGNOFF_CHECK_TYPES_REPORTED, "
             f"so the check was never requested and an empty report is silence, "
             f"not a zero", rel)
+    census = {name: value for name, value in _DRV_CENSUS_RE.findall(text)}
+    if census:
+        raw = census.get(check)
+        if raw is None:
+            return unmeasured(
+                f"{rel}: declares {check} in SIGNOFF_CHECK_TYPES_REPORTED but "
+                f"its SIGNOFF_DRV_CENSUS names no count for it, so the tool "
+                f"reported on it and this run did not capture the number", rel)
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            return unmeasured(
+                f"{rel}: SIGNOFF_DRV_CENSUS records {check} violators={raw} — "
+                f"OpenSTA had no counter for this check, which is not a zero",
+                rel)
+        return Cell(n, rel,
+                    basis=f"SIGNOFF_DRV_CENSUS {check} violators={n} — "
+                          f"OpenSTA's own per-check violator counter")
     rows = text.count("VIOLATED")
     return Cell(rows, rel,
                 basis=f"{check} declared in SIGNOFF_CHECK_TYPES_REPORTED; "
-                      f"{rows} row(s) marked VIOLATED in this report")
+                      f"{rows} row(s) marked VIOLATED in this report. NOTE: "
+                      f"this report carries no SIGNOFF_DRV_CENSUS, so the "
+                      f"figure is the whole report's violated-row count and is "
+                      f"NOT specific to {check}")
 
 
 # ── geometry ────────────────────────────────────────────────────────────────
@@ -554,6 +607,165 @@ def _xor(project: Path) -> Cell:
 #: come from `tapeout_docs_gen.MANUFACTURABILITY` / `.ELECTRICAL` plus
 #: `die_geometry`; a key added there and missing here is caught by
 #: `test_signoff_metrics_aggregate.py::test_every_key_the_readers_read_has_a_rule`.
+# ── the five axes the flow MEASURED and never published (icspm2, 2026-09-15) ──
+#
+# `every_required_metric_key_has_a_producer` reported six axes as "NOT PROVEN BY
+# ANY RUN IN THIS CORPUS" on a run that had measured every one of them. It is an
+# EMPIRICAL gate: it looks for a MEASURED record under a canonical name, and the
+# records were on disk under no name it reads. The rules below publish them, each
+# from the report the checker itself wrote, with its provenance — this module
+# still measures nothing and re-decides nothing.
+
+
+def _ir_worst_drop_v(project: Path) -> Cell:
+    """Worst static IR drop in VOLTS, from the PSM sign-off record.
+
+    `supply_measured` is consulted, not just the number: `ir_drop.json`
+    documents that a PSM supply voltage of ZERO means PSM found no source on
+    the net, and a drop derived from it is not a statement about the design.
+    """
+    rel = "reports/phase3/ir_drop.json"
+    doc = _json(project, rel)
+    if not isinstance(doc, dict):
+        return unmeasured(f"{rel}: absent or unreadable, so this run recorded "
+                          f"no IR-drop analysis")
+    if doc.get("unmeasured_reason"):
+        return unmeasured(f"{rel}: the producer declares it unmeasured — "
+                          f"{doc['unmeasured_reason']}", rel)
+    if doc.get("supply_measured") is False:
+        return unmeasured(f"{rel}: supply_measured is false, so the drop is "
+                          f"not a statement about this design", rel)
+    uv = doc.get("worst_ir_uv")
+    if not isinstance(uv, (int, float)):
+        return unmeasured(f"{rel}: carries no numeric worst_ir_uv", rel)
+    return Cell(float(uv) / 1e6, rel,
+                basis=f"worst_ir_uv {uv} uV from the PSM static sign-off, "
+                      f"expressed in volts")
+
+
+def _em(project: Path, what: str) -> Cell:
+    """EM from the Jmax screen's own record.
+
+    `offender_count` is the number of segments over Jmax; `worst_utilization`
+    is the worst current density AS A FRACTION of Jmax, which is what a
+    "worst ratio" is. A SKIPPED screen is NOT a zero.
+    """
+    rel = "reports/phase3/em_current_authority.json"
+    doc = _json(project, rel)
+    if not isinstance(doc, dict):
+        return unmeasured(f"{rel}: absent or unreadable, so this run recorded "
+                          f"no electromigration screen")
+    screen = doc.get("jmax_screen")
+    if not isinstance(screen, dict):
+        return unmeasured(f"{rel}: carries no jmax_screen record", rel)
+    if screen.get("skip_reason"):
+        return unmeasured(f"{rel}: the Jmax screen was skipped — "
+                          f"{screen['skip_reason']}", rel)
+    summary = screen.get("summary") or {}
+    screened = summary.get("segments_screened")
+    if not isinstance(screened, int) or screened <= 0:
+        return unmeasured(f"{rel}: the Jmax screen examined no segment, so "
+                          f"neither a violation count nor a ratio was "
+                          f"established", rel)
+    if what == "violations":
+        n = screen.get("offender_count")
+        if not isinstance(n, int):
+            return unmeasured(f"{rel}: jmax_screen carries no offender_count",
+                              rel)
+        return Cell(n, rel,
+                    basis=f"jmax_screen.offender_count over "
+                          f"{screened} screened segment(s)")
+    ratio = summary.get("worst_utilization")
+    if not isinstance(ratio, (int, float)):
+        return unmeasured(f"{rel}: jmax_screen carries no worst_utilization",
+                          rel)
+    return Cell(float(ratio), rel,
+                basis=f"jmax_screen worst_utilization over {screened} "
+                      f"screened segment(s) — current density as a fraction "
+                      f"of the layer's Jmax")
+
+
+def _equivalence(project: Path) -> Cell:
+    """The post-layout LEC verdict, as the checker recorded it."""
+    rel = "reports/phase3/lec_post_layout.json"
+    doc = _json(project, rel)
+    if not isinstance(doc, dict):
+        return unmeasured(f"{rel}: absent or unreadable, so this run recorded "
+                          f"no post-layout logical-equivalence proof")
+    if doc.get("skipped"):
+        return unmeasured(f"{rel}: the LEC step records itself as skipped, so "
+                          f"no equivalence was proved", rel)
+    verdict = doc.get("verdict")
+    if not isinstance(verdict, str) or not verdict.strip():
+        return unmeasured(f"{rel}: carries no verdict string", rel)
+    return Cell(verdict, rel,
+                basis=f"the post-layout LEC's own verdict "
+                      f"(equivalent={doc.get('equivalent')!r}, "
+                      f"{doc.get('proven_points')} of "
+                      f"{doc.get('total_points')} point(s) proven)")
+
+
+def _spares(project: Path) -> Cell:
+    """Spare cells that SURVIVED to the shipped artefacts, not just inserted.
+
+    The design-for-ECO question is what a metal-only ECO can still reach, and
+    an inserted spare that a later optimisation removed reaches nothing.
+    """
+    rel = "reports/spare_preservation.json"
+    doc = _json(project, rel)
+    if not isinstance(doc, dict):
+        return unmeasured(f"{rel}: absent or unreadable, so this run recorded "
+                          f"no spare-cell preservation check")
+    n = doc.get("survived")
+    if not isinstance(n, int):
+        return unmeasured(f"{rel}: carries no integer `survived` count", rel)
+    return Cell(n, rel,
+                basis=f"{n} of {doc.get('inserted')} inserted spare cell(s) "
+                      f"survived into the shipped artefacts "
+                      f"({doc.get('verdict')})")
+
+
+def _antenna_total(project: Path) -> Cell:
+    """The antenna violation TOTAL — and ONLY when it is derivable.
+
+    `_metric_vocabulary` refuses to answer this key from either per-population
+    count, and its reason is right: "antenna violations are counted per NET and
+    per PIN and the two are not the same population; neither alone is the
+    total", and a net may violate at several pins, so the two do not sum
+    either. `eda_report_audit:antenna` publishes a `summary.violations` that
+    IS such a sum in its fallback path.
+
+    There is exactly one state in which the total is not in doubt: BOTH
+    populations are zero. Zero nets and zero pins can only be zero violations,
+    whatever the overlap. So a clean antenna result answers the canonical key
+    and a dirty one stays NOT_MEASURED, naming the two counts it holds. That is
+    the direction that cannot invent evidence: a design with violations is
+    never certified by this key.
+    """
+    rel = "reports/phase3/antenna.json"
+    doc = _json(project, rel)
+    if not isinstance(doc, dict):
+        return unmeasured(f"{rel}: absent or unreadable, so this run recorded "
+                          f"no antenna check")
+    nets, pins = doc.get("net_violations"), doc.get("pin_violations")
+    if not isinstance(nets, int) or not isinstance(pins, int):
+        return unmeasured(f"{rel}: carries no integer net_violations / "
+                          f"pin_violations pair", rel)
+    if doc.get("routing_incomplete"):
+        return unmeasured(f"{rel}: the route was incomplete, so an antenna "
+                          f"count over it is not sign-off evidence", rel)
+    if nets == 0 and pins == 0:
+        return Cell(0, rel,
+                    basis="net_violations 0 and pin_violations 0 — the one "
+                          "state in which the TOTAL is not in doubt, since "
+                          "the two populations overlap and do not sum")
+    return unmeasured(
+        f"{rel}: {nets} net violation(s) and {pins} pin violation(s). A net "
+        f"may violate at several pins, so these two populations overlap and "
+        f"their sum is not the total; this run therefore establishes no single "
+        f"antenna violation count", rel)
+
+
 RULES: list[tuple[str, str, Callable[[Path], Cell]]] = [
     ("route__drc_errors", "Routing DRC",
      lambda p: _drc_for_tool(p, "openroad")),
@@ -587,8 +799,50 @@ RULES: list[tuple[str, str, Callable[[Path], Cell]]] = [
      lambda p: _drv(p, "max_slew")),
     ("design__max_cap_violation__count", "Max-cap violations",
      lambda p: _drv(p, "max_capacitance")),
+    # The third leg of the `drv` proof group. `every_required_metric_key_has_a_
+    # producer` proves that axis only when max_tran + max_cap + max_fanout all
+    # have a measured record; two of the three were produced and this one never
+    # was, so the axis read "NOT PROVEN BY ANY RUN IN THIS CORPUS" on a run that
+    # had measured it (`SIGNOFF_DRV_CENSUS max_fanout violators=0`).
+    ("design__max_fanout_violation__count", "Max-fanout violations",
+     lambda p: _drv(p, "max_fanout")),
     ("design__die__bbox", "Die bounding box (um)", _die_bbox),
+    ("power__ir__worst_drop_v", "Worst static IR drop (V)", _ir_worst_drop_v),
+    ("reliability__em__violation__count", "EM segments over Jmax",
+     lambda p: _em(p, "violations")),
+    ("reliability__em__worst_ratio", "EM worst current density / Jmax",
+     lambda p: _em(p, "worst_ratio")),
+    ("equivalence__verdict", "Post-layout logical equivalence", _equivalence),
+    ("design_for_eco__spares__count", "Spare cells surviving to the artefacts",
+     _spares),
+    ("antenna__violation__count", "Antenna violations (total)", _antenna_total),
 ]
+
+#: Keys this aggregator publishes for the AXIS gate, not for the release
+#: documents (2026-09-15, icspm2).
+#:
+#: `test_every_key_the_release_readers_read_has_a_rule` pins RULES against the
+#: key set `tapeout_docs_gen` reads, as an EQUALITY. Its stated intent is
+#: one-directional — "a key added there and not here would silently be
+#: NOT_MEASURED forever" — and that direction is untouched and still exact.
+#: What the equality ALSO said, incidentally, is that this aggregator may never
+#: publish a measurement the release documents do not print, and that is the
+#: half these six keys break: `every_required_metric_key_has_a_producer` is a
+#: SECOND consumer, and it reported six axes as "NOT PROVEN BY ANY RUN IN THIS
+#: CORPUS" over runs that had measured every one of them.
+#:
+#: So the closure property is kept rather than relaxed: RULES is still exactly
+#: `readers | AXIS_ONLY_KEYS`, and a key may still not appear in RULES without
+#: being accounted for HERE, in writing, with the consumer that wants it named.
+AXIS_ONLY_KEYS: frozenset = frozenset({
+    "design__max_fanout_violation__count",   # axis `drv`  (third leg of the group)
+    "power__ir__worst_drop_v",               # axis `ir`
+    "reliability__em__violation__count",     # axis `em`
+    "reliability__em__worst_ratio",          # axis `em`
+    "equivalence__verdict",                  # axis `equivalence`
+    "design_for_eco__spares__count",         # axis `eco_readiness`
+    "antenna__violation__count",             # axis `antenna`
+})
 
 
 def aggregate(project: Path) -> tuple[dict, dict]:
