@@ -14,7 +14,17 @@ import json
 import os
 import re
 import subprocess
+import sys
 
+# Sibling import, resolvable HOWEVER this file is loaded. A caller that loads
+# the program by path (`spec_from_file_location`, which is how
+# test_issue2104_programs_load_by_path measures every shipped program) does
+# not put this directory on sys.path, and a bare `import _docker_memory`
+# then raises ModuleNotFoundError -- which is exactly what #2239's first
+# version of this import did. Same shim every other user of the helper
+# carries.
+if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _docker_memory as _dmem  # noqa: E402 -- the ONE place a `docker run` gets its ceiling
 import time
 import uuid
