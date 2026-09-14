@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1310
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1310)
+- **Total programs (excluding helpers / shims):** 1312
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1312)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1301 |
+| `any` | 1303 |
 
 ## Alphabetical listing
 
@@ -76,6 +76,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `analog_corner_lib_realism_lint` | any | — | R15 stale-corner-lib doc-lint (A4). |
 | `analog_corner_margin_check` | any | — | A4 strict PVT-margin gate. NOT WIRED. |
 | `analog_corner_sweep_check` | any | — | deterministic gate for PVT corner coverage |
+| `analog_deck_vector_retention` | any | — | retain the vectors a deck MEASURES, and only those. |
 | `analog_digital_interface_check` | any | — | deterministic gate for digital-analog interface validation |
 | `analog_flow_compliance_check` | any | — | analog track compliance gate (A1-A9) |
 | `analog_hardmacro_check` | any | — | deterministic gate for analog hardmacro deliverables |
@@ -106,6 +107,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `analog_pdk_availability` | any | — | native PDK availability resolver / ladder (headline analog-track honesty fix). |
 | `analog_pdk_deck_context` | any | — | family-agnostic ngspice deck-emission context. |
 | `analog_per_block_pv_completeness_check` | any | Wave 93 | strict per-block deliverable completeness gate for the analog A1-A9 track. |
+| `analog_poweron_sequence` | any | — | bring a CLOCKED analog block up through a power-on sequence instead of demanding a DC operating point at full rail. |
 | `analog_pre_vs_post_layout_check` | any | — | deterministic gate for pre/post-layout comparison |
 | `analog_real_corner_sweep` | any | — | v1.6.207 (ORGANIC-20260512). |
 | `analog_resolution_stimulus` | any | — | the A4 corner deck's RESOLUTION stimulus. |
@@ -1382,7 +1384,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1301 programs)
+### `any` (1303 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1434,6 +1436,7 @@ _(no programs in this group)_
 - `analog_corner_lib_realism_lint` — R15 stale-corner-lib doc-lint (A4).
 - `analog_corner_margin_check` — A4 strict PVT-margin gate. NOT WIRED.
 - `analog_corner_sweep_check` — deterministic gate for PVT corner coverage
+- `analog_deck_vector_retention` — retain the vectors a deck MEASURES, and only those.
 - `analog_digital_interface_check` — deterministic gate for digital-analog interface validation
 - `analog_flow_compliance_check` — analog track compliance gate (A1-A9)
 - `analog_hardmacro_check` — deterministic gate for analog hardmacro deliverables
@@ -1464,6 +1467,7 @@ _(no programs in this group)_
 - `analog_pdk_availability` — native PDK availability resolver / ladder (headline analog-track honesty fix).
 - `analog_pdk_deck_context` — family-agnostic ngspice deck-emission context.
 - `analog_per_block_pv_completeness_check` — strict per-block deliverable completeness gate for the analog A1-A9 track.  _[Wave 93]_
+- `analog_poweron_sequence` — bring a CLOCKED analog block up through a power-on sequence instead of demanding a DC operating point at full rail.
 - `analog_pre_vs_post_layout_check` — deterministic gate for pre/post-layout comparison
 - `analog_real_corner_sweep` — v1.6.207 (ORGANIC-20260512).
 - `analog_resolution_stimulus` — the A4 corner deck's RESOLUTION stimulus.
