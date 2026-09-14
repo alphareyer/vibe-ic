@@ -85,7 +85,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import _l8_clock_scope as _scope
+# Sibling import, resolvable HOWEVER this file is loaded: a by-path load
+# (`spec_from_file_location`, how test_issue2104_programs_load_by_path measures
+# every shipped program) does not put this directory on sys.path, and a bare
+# import then raises ModuleNotFoundError. Same shim every other consumer of the
+# contract carries (lander-added at landing; the G arm caught it).
+import os as _os
+import sys as _sys
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import _l8_clock_scope as _scope  # noqa: E402
 
 #: L8 containers that carry clock records.  ``clocks`` is the canonical list;
 #: ``clock_domains`` is what most extraction strategies populate.  A name at
