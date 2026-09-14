@@ -1115,6 +1115,163 @@ def _pin_attr_keyword(line: str) -> Optional[str]:
     return head[0] if head and head[0] in _SINGLE_VALUED_PIN_ATTRS else None
 
 
+class PinAttributeConflict(Exception):
+    """The LEF and the DEF disagree about a pin's DIRECTION or USE."""
+
+
+#: `DIRECTION <token> ;` / `USE <token> ;` as Magic writes them, indent-free.
+_PIN_DIRECTION_RE = re.compile(r"^[ \t]*DIRECTION[ \t]+(\w+)[ \t]*;", re.I)
+_PIN_USE_RE = re.compile(r"^[ \t]*USE[ \t]+(\w+)[ \t]*;", re.I)
+
+
+def fill_pin_attributes_from_def(
+        lef_text: str, interface: List[Pin]) -> Tuple[str, Dict[str, Any]]:
+    """Give every MACRO pin the DIRECTION and USE **the DEF states** for it.
+
+    WHY THIS EXISTS -- MEASURED 2026-09-15 on the signed-off gf180mcuD
+    hardmacro this flow shipped (`phase3/stage4/hardmacro/subservient.lef`,
+    the 37.5ip deliverable), AFTER `merge_duplicate_pin_declarations` has
+    done its half::
+
+        PIN declarations : 51   distinct names : 33   duplicated : 18
+        carrying DIRECTION                     : 18
+        distinct names with NO attributed declaration ANYWHERE : 15
+
+    and the DEF the very same invocation handed Magic states a DIRECTION for
+    all 31 of its signal pins::
+
+        PINS 31 ;  every entry carries `+ DIRECTION <INPUT|OUTPUT> + USE SIGNAL`
+
+    The merge could not repair these. It unions the GEOMETRY of declarations
+    that are DUPLICATED, and carries attributes first-occurrence-unique -- so
+    a pin Magic declared ONCE, bare, has no attributed sibling to take
+    DIRECTION from and leaves the merge exactly as bare as it went in. 18 of
+    subservient's 33 names were duplicated (attributed + bare) and were
+    repaired; the other 15 were only ever bare. Independently measured on
+    `spm`: 17 of 38 bare after the merge. So this is the SECOND half of one
+    producer defect, and the half the merge is structurally unable to see.
+
+    WHY IT MATTERS. `DIRECTION` has no LEF default. A placer reading a pin
+    with none cannot tell a macro input from a macro output, and
+    `release_docs_check --arm ip` reports PIN_COUNT_DISAGREES_WITH_NETLIST
+    because the abstract does not describe the same interface the netlist
+    view does. The primary deliverable of the whole HARDMACRO route is the
+    artefact that is malformed.
+
+    NOTHING IS GUESSED. The answer comes from `read_interface(def_text)` --
+    the DEF's own `PINS` section, the same reader the `.v` and `.lib` views
+    are built from, which is why those two views are already correct at 31
+    pins. A pin the DEF does not name gets NOTHING added and is returned in
+    `report["unresolved"]` for the caller to refuse over; a pin whose LEF
+    DIRECTION or USE **disagrees** with the DEF raises
+    :class:`PinAttributeConflict` rather than being overwritten -- this
+    function never relabels an attribute a tool did state.
+
+    Insertion is immediately after the `PIN <name>` line, which is where
+    Magic itself writes these two attributes, so a repaired pin is
+    indistinguishable in shape from one Magic attributed. Nothing else is
+    touched: MACRO order, SIZE, ORIGIN, FOREIGN, OBS, PORT geometry and every
+    already-complete pin are passed through byte-for-byte.
+
+    A supply pin that carries `USE POWER` / `USE GROUND` and no DIRECTION is
+    NOT reported bare: `USE` is where a LEF says which rail a supply is, that
+    is a complete supply declaration, and the DEF's `PINS` section does not
+    carry the PDN rails at all. Only SIGNAL pins are owed a DIRECTION.
+
+    Returns `(text, report)` with `report["filled"]` a
+    `{pin: {"direction": ..., "use": ...}}` of what was ADDED (never of what
+    was already there), `report["unresolved"]` the pins the DEF cannot answer
+    for, and `report["signal_pins_without_direction"]` the ones still bare
+    after the fill -- the caller's refusal condition. When there is nothing to
+    fill, `text is lef_text`.
+
+    chip-AGNOSTIC: LEF/DEF syntax only. No PDK, design, vendor or IC literal.
+    """
+    by_name: Dict[str, Pin] = {p.name: p for p in (interface or [])}
+    lines = lef_text.splitlines(keepends=True)
+    out: List[str] = []
+    filled: Dict[str, Dict[str, str]] = {}
+    unresolved: List[str] = []
+    still_bare: List[str] = []
+    conflicts: List[str] = []
+    macro: Optional[str] = None
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m_macro = _MACRO_OPEN_RE.match(line.rstrip("\n"))
+        if m_macro:
+            macro = m_macro.group(1)
+            out.append(line)
+            i += 1
+            continue
+        if macro is not None and re.match(
+                r"^[ \t]*END[ \t]+" + re.escape(macro) + r"[ \t]*$",
+                line.rstrip("\n")):
+            macro = None
+            out.append(line)
+            i += 1
+            continue
+        m_pin = _PIN_OPEN_RE.match(line.rstrip("\n"))
+        if not m_pin or macro is None:
+            out.append(line)
+            i += 1
+            continue
+        indent, name = m_pin.group(1), m_pin.group(2)
+        end_re = re.compile(r"^[ \t]*END[ \t]+" + re.escape(name) + r"[ \t]*$")
+        body: List[str] = []
+        j = i + 1
+        while j < len(lines) and not end_re.match(lines[j].rstrip("\n")):
+            body.append(lines[j])
+            j += 1
+        if j >= len(lines):
+            # Unterminated PIN: not something to guess about. Pass through.
+            out.append(line)
+            i += 1
+            continue
+        have_dir = next((m.group(1).upper() for m in
+                         (_PIN_DIRECTION_RE.match(b) for b in body) if m), "")
+        have_use = next((m.group(1).upper() for m in
+                         (_PIN_USE_RE.match(b) for b in body) if m), "")
+        pin = by_name.get(name)
+        want_dir = (pin.direction or "").upper() if pin else ""
+        want_use = (pin.use or "").upper() if pin else ""
+        is_supply = have_use in _PG_USES or want_use in _PG_USES
+        add: List[str] = []
+        if have_dir and want_dir and have_dir != want_dir:
+            conflicts.append(
+                macro + "/" + name + ": LEF says DIRECTION " + have_dir
+                + ", the DEF says " + want_dir)
+        if have_use and want_use and have_use != want_use:
+            conflicts.append(
+                macro + "/" + name + ": LEF says USE " + have_use
+                + ", the DEF says " + want_use)
+        if not have_dir and want_dir:
+            add.append(indent + "  DIRECTION " + want_dir + " ;\n")
+        if not have_use and want_use:
+            add.append(indent + "  USE " + want_use + " ;\n")
+        if add:
+            filled[name] = {a.split()[0].lower(): a.split()[1] for a in add}
+        if not have_dir and not want_dir:
+            # The DEF has no answer for this pin. Say so; add nothing.
+            if pin is None:
+                unresolved.append(name)
+            if not is_supply:
+                still_bare.append(name)
+        out.append(line)
+        out.extend(add)
+        out.extend(body)
+        out.append(lines[j])
+        i = j + 1
+    if conflicts:
+        raise PinAttributeConflict("; ".join(sorted(conflicts)))
+    report = {"filled": filled, "unresolved": sorted(set(unresolved)),
+              "signal_pins_without_direction": sorted(set(still_bare)),
+              "def_pins": len(by_name)}
+    if not filled:
+        return lef_text, report
+    return "".join(out), report
+
+
 def merge_duplicate_pin_declarations(lef_text: str) -> Tuple[str, Dict[str, Any]]:
     """Declare every pin ONCE per MACRO, carrying the union of its geometry.
 
@@ -1289,7 +1446,8 @@ def merge_duplicate_pin_declarations(lef_text: str) -> Tuple[str, Dict[str, Any]
 
 
 def _accept_lef(produced: Path, out_lef: Path, rc: int,
-                tool_output: str) -> Tuple[bool, str]:
+                tool_output: str,
+                def_text: str = "") -> Tuple[bool, str]:
     """The verdict on what magic wrote. ONE copy, whichever site wrote it.
 
     A PIN-LESS ABSTRACT IS WORSE THAN NO ABSTRACT — it is an outline and a
@@ -1332,6 +1490,47 @@ def _accept_lef(produced: Path, out_lef: Path, rc: int,
               f"merged into one declaration each ({names}{more}). Reading the "
               f"GDS and the DEF into one cell emits both port sets; LEF gives a "
               f"pin one declaration per macro.")
+    # THE MERGE IS ONLY HALF THE REPAIR. It unions declarations that are
+    # DUPLICATED; a pin magic declared ONCE and bare has no attributed sibling
+    # to take DIRECTION from and comes out of it as bare as it went in --
+    # MEASURED, 15 of subservient's 33 names and 17 of spm's 38. `DIRECTION`
+    # has no LEF default, so such a pin does not say whether it is a macro
+    # input or a macro output. The DEF this same invocation handed magic does
+    # say, for every one of its pins, and it is already the source the `.v`
+    # and `.lib` views are built from.
+    # NO `if def_text:` GUARD ON THE REFUSAL. Without a DEF there is nothing
+    # to FILL from, but the QUESTION still has an answer the LEF itself can
+    # give: a pin carrying neither DIRECTION nor a supply `USE` is a signal
+    # pin that does not say which way it points, whoever wrote it. Gating the
+    # refusal on the repair's input would mean the one path that cannot
+    # repair is also the one path that cannot complain.
+    try:
+        text, fill_report = fill_pin_attributes_from_def(
+            text, read_interface(def_text) if def_text else [])
+    except PinAttributeConflict as exc:
+        return False, (
+            "magic wrote a LEF whose pin attributes CONTRADICT the DEF it "
+            "was given, so one of the two is wrong and this program will "
+            f"not choose between them: {exc}")
+    if fill_report["filled"]:
+        names = ", ".join(sorted(fill_report["filled"])[:6])
+        more = "" if len(fill_report["filled"]) <= 6 else " …"
+        print(f"[{PROGRAM}] LEF completed: {len(fill_report['filled'])} "
+              f"pin(s) carried no DIRECTION/USE and have been given the "
+              f"ones the DEF's own PINS section states ({names}{more}). "
+              f"Nothing was inferred: a pin the DEF does not name is "
+              f"refused below, not filled.")
+    bare = fill_report["signal_pins_without_direction"]
+    if bare:
+        return False, (
+            f"magic wrote a LEF in which {len(bare)} SIGNAL pin(s) carry "
+            f"no DIRECTION and no supply USE, and the DEF the "
+            f"producer read does not name them either, so the "
+            f"abstract does not say whether they are macro inputs or "
+            f"macro outputs and no integrator can connect them: "
+            f"{sorted(bare)[:8]}"
+            + (" …" if len(bare) > 8 else "")
+            + ". A malformed primary deliverable is not staged.")
     out_lef.parent.mkdir(parents=True, exist_ok=True)
     out_lef.write_text(text)
     return True, ""
@@ -1385,7 +1584,8 @@ def _write_lef_here(top: str, gds: Path, def_file: Path, out_lef: Path,
             return False, (f"magic did not complete: watchdog reported "
                            f"{cp.outcome} after {cp.elapsed_s:.0f}s")
         return _accept_lef(work / f"{top}.lef", out_lef, cp.rc,
-                           cp.err or cp.out)
+                           cp.err or cp.out,
+                           def_file.read_text(errors="replace"))
 
 
 def _write_lef_in_container(site: "MagicSite", top: str, gds: Path,
@@ -1447,7 +1647,8 @@ def _write_lef_in_container(site: "MagicSite", top: str, gds: Path,
                 tail = (err or out or "").strip().splitlines()[-3:]
                 return False, (f"magic exited {rc} and wrote no LEF; "
                                f"last output: {' | '.join(tail) or '(none)'}")
-            return _accept_lef(produced, out_lef, rc, err or out)
+            return _accept_lef(produced, out_lef, rc, err or out,
+                               def_file.read_text(errors="replace"))
         finally:
             site.close()
 

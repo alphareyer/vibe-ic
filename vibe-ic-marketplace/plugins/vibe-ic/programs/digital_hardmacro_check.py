@@ -450,7 +450,8 @@ def parse_lef(lef_text: str, stem: str = "") -> Dict[str, object]:
 
     Returns `{"macro": <name|None>, "size": (w,h)|None, "frame": (llx,lly,src),
     "signal": set, "pg": set, "raw": {base: [spelled…]},
-    "direction": {base: input|output|inout|feedthru|mixed|""}}`.
+    "direction": {base: input|output|inout|feedthru|mixed|""},
+    "direction_spelled": {spelled: input|output|inout|feedthru|""}}`.
     """
     macro_m = _LEF_MACRO_RE.search(lef_text)
     macro = macro_m.group(1) if macro_m else None
@@ -478,6 +479,7 @@ def parse_lef(lef_text: str, stem: str = "") -> Dict[str, object]:
     pg_kind: Dict[str, str] = {}
     raw: Dict[str, List[str]] = {}
     direction_values: Dict[str, Set[str]] = {}
+    direction_spelled: Dict[str, str] = {}
     geom_by_pin: Dict[str, List[tuple]] = {}
     for m in _LEF_PIN_BLOCK_RE.finditer(scope):
         spelled = m.group("name")
@@ -488,6 +490,23 @@ def parse_lef(lef_text: str, stem: str = "") -> Dict[str, object]:
         if direction_m:
             direction_values.setdefault(b, set()).add(
                 direction_m.group(1).lower())
+        # PER SPELLING, not only per base. LEF states DIRECTION on the PIN
+        # statement, and a bus BIT is its own PIN statement. Rolled up to the
+        # base name, one attributed bit makes a whole bus look attributed:
+        # MEASURED on the shipped subservient kit, 14 signal PIN statements
+        # carried no DIRECTION and the base-name rollup could see only the 2
+        # that happened to be scalars. Whoever asks the question must be able
+        # to ask it at the granularity the defect occurs at.
+        # ANY declaration of this spelling attributing it is enough. LAST
+        # WINS WOULD BE WRONG: magic emits the attributed declaration and the
+        # bare GDS-derived one for the same pin, bare LAST, so a last-wins
+        # read reported ALL 31 of subservient's signal statements as
+        # direction-less when 17 of them were attributed. The producer merges
+        # the pair before staging; this gate must not depend on that having
+        # happened.
+        direction_spelled.setdefault(spelled, "")
+        if direction_m:
+            direction_spelled[spelled] = direction_m.group(1).lower()
         use_m = _LEF_USE_RE.search(body)
         if use_m and use_m.group(1).lower() in _PG_USES:
             pg.add(b)
@@ -520,6 +539,7 @@ def parse_lef(lef_text: str, stem: str = "") -> Dict[str, object]:
                 _LEF_FOREIGN_STRIP_RE.sub(" ", scope or lef_text))[:2],
             "signal": signal, "pg": pg, "pg_kind": pg_kind, "raw": raw,
             "direction": directions,
+            "direction_spelled": direction_spelled,
             "geometry": geom_by_pin,
             "macro_count": len(blocks),
             "has_obs": bool(_LEF_OBS_RE.search(scope)),
@@ -968,6 +988,73 @@ def check_package(name: str, views: Dict[str, Path], project: Path,
                          f"exposes and STA times what the Liberty declares; "
                          f"a pin only one of them knows is either unconnected "
                          f"or untimed.")))
+
+    # ── 6a. EVERY SIGNAL PIN SAYS WHICH WAY IT POINTS ──────────────
+    # `parse_lef` has read `DIRECTION` per base name since this gate was
+    # written and NOTHING CONSUMED IT. A parsed-and-discarded field is not a
+    # check, and the cost of that was MEASURED on the signed-off gf180mcuD
+    # kit this flow shipped as its 37.5ip deliverable:
+    #
+    #     subservient.lef: 33 distinct pins, 18 carrying DIRECTION,
+    #                      14 SIGNAL pins carrying neither DIRECTION nor USE
+    #     spm.lef        : 38 distinct pins, 17 carrying neither
+    #
+    # and every clause of this gate was green over both, so step 37.5ip's
+    # producer reported PASS [PRODUCED] on a macro an integrator cannot
+    # connect. (The producer is not NAMED here, and that is deliberate: a
+    # sibling test asserts this gate's source does not mention it at all, so
+    # the gate can never grow a call to the thing it audits.)
+    # `DIRECTION` has NO LEF DEFAULT: a placer
+    # reading a pin without one cannot tell a macro input from a macro
+    # output, and `release_docs_check --arm ip` sees the abstract and the
+    # netlist view describing different interfaces
+    # (PIN_COUNT_DISAGREES_WITH_NETLIST).
+    #
+    # SUPPLY PINS ARE NOT ASKED. `USE POWER` / `USE GROUND` is where a LEF
+    # states which rail a supply is, `pg` above is exactly the set that
+    # carries one, and the DEF's PINS section does not carry the PDN rails
+    # at all. Only the SIGNAL set is owed a direction.
+    #
+    # `mixed` is its own answer and its own defect: `parse_lef` returns it
+    # when the BITS of one bus disagree about direction, which is a bus no
+    # consumer can read as a bus.
+    spelled_dir = lef.get("direction_spelled", {}) or {}
+    no_direction = sorted(
+        s for s, d in spelled_dir.items()
+        if not d and base_name(s, bus_chars) in sig_lef)
+    mixed_direction = sorted(b for b in sig_lef
+                             if lef["direction"].get(b) == "mixed")
+    detail["interface"]["lef_direction"] = {
+        b: lef["direction"].get(b, "") for b in sorted(sig_lef)}
+    detail["interface"]["lef_signal_pin_statements"] = len(
+        [s for s in spelled_dir if base_name(s, bus_chars) in sig_lef])
+    detail["interface"]["lef_signal_pins_without_direction"] = no_direction
+    detail["interface"]["lef_signal_pins_mixed_direction"] = mixed_direction
+    if no_direction:
+        ok = False
+        F.append(Finding(
+            rule="LEF_SIGNAL_PIN_NO_DIRECTION", severity="ERROR", macro=name,
+            file=cite(lef_p),
+            message=(f"macro '{name}': {len(no_direction)} signal pin(s) "
+                     f"statement(s) declare no `DIRECTION` — "
+                     f"{no_direction[:8]}"
+                     + (" …" if len(no_direction) > 8 else "")
+                     + f". DIRECTION has no LEF default, so the abstract does "
+                     f"not say whether these are macro inputs or macro "
+                     f"outputs and nothing that places this kit can connect "
+                     f"them. The DEF this macro was abstracted from states a "
+                     f"direction for every one of its pins; an abstract that "
+                     f"drops it describes a different interface from the "
+                     f"netlist view beside it.")))
+    if mixed_direction:
+        ok = False
+        F.append(Finding(
+            rule="LEF_BUS_DIRECTION_MIXED", severity="ERROR", macro=name,
+            file=cite(lef_p),
+            message=(f"macro '{name}': bus pin(s) {mixed_direction} declare "
+                     f"DIFFERENT directions on different bits. A bus whose "
+                     f"bits disagree about which way they point is not one "
+                     f"port to any consumer that reads it as one.")))
 
     # ── 6b. WHICH RAIL each supply pin is ─────────────────────────────
     # THE NAME SETS AGREEING IS NOT THE SUPPLIES AGREEING. `PG_PIN_DISAGREE`
