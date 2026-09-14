@@ -87,7 +87,20 @@ def _load_json(p: Path) -> Optional[dict]:
         return None
 
 
-def _clock_mhz_from_l8_domains(l8: dict) -> Optional[float]:
+def _scope_values(rec: dict) -> set[str]:
+    values: set[str] = set()
+    for key in ("pdk_scoped_target", "pdk_target", "technology_scope"):
+        value = rec.get(key)
+        if isinstance(value, str) and value.strip():
+            values.add(value.strip().lower())
+        elif isinstance(value, dict):
+            values.update(v.strip().lower() for v in value.values()
+                          if isinstance(v, str) and v.strip())
+    return values
+
+
+def _clock_mhz_from_l8_domains(l8: dict,
+                               target_scope: Optional[str] = None) -> Optional[float]:
     """ORGANIC #579 — resolve the clock frequency from the layer-8
     ``clock_domains[]`` records the staged-SDC ingest (#554) emits
     (top-level ``clock_mhz`` stays null on that path). Prefers the
@@ -115,6 +128,11 @@ def _clock_mhz_from_l8_domains(l8: dict) -> Optional[float]:
                 return f
         return None
 
+    scoped = [r for r in domains if isinstance(r, dict) and _scope_values(r)]
+    if scoped:
+        if not target_scope:
+            return None
+        domains = [r for r in scoped if target_scope.lower() in _scope_values(r)]
     primary = [r for r in domains if isinstance(r, dict)
                and (r.get("domain_kind") == "primary"
                     or r.get("role") == "master")]
@@ -124,6 +142,16 @@ def _clock_mhz_from_l8_domains(l8: dict) -> Optional[float]:
         f = _mhz(rec)
         if f is not None:
             return f
+    return None
+
+
+def _project_target_scope(project: Path) -> Optional[str]:
+    for path in sorted(_pl.generated_docs_dir(project).glob("L19*.json")):
+        doc = _load_json(path) or {}
+        fields = doc.get("fields")
+        value = fields.get("pdk_target") if isinstance(fields, dict) else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return None
 
 
@@ -800,8 +828,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     # falling back to the 50 MHz default — otherwise the generator emits a
     # wrong-period SDC while the sibling checker reads the real period and
     # the structural gate can never pass on the staged-SDC path.
-    explicit_clock = l8.get("clock_mhz")
-    if explicit_clock is not None:
+    domains = l8.get("clock_domains")
+    scoped_clock = isinstance(domains, list) and any(
+        isinstance(r, dict) and _scope_values(r) for r in domains)
+    target_scope = _project_target_scope(project)
+    if scoped_clock:
+        if not target_scope:
+            print("FAIL: L8_CLOCK_SCOPE_NOT_MEASURED: scoped clock records "
+                  "require L19.fields.pdk_target", file=sys.stderr)
+            return 1
+        domains_mhz = _clock_mhz_from_l8_domains(l8, target_scope)
+        if domains_mhz is None:
+            print("FAIL: L8_CLOCK_SCOPE_MISMATCH: no scoped L8 clock matches "
+                  f"L19 target '{target_scope}'", file=sys.stderr)
+            return 1
+        clock_mhz = domains_mhz
+    elif (explicit_clock := l8.get("clock_mhz")) is not None:
         try:
             clock_mhz = float(explicit_clock)
         except Exception:

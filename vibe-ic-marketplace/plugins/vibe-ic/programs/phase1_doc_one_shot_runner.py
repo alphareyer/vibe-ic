@@ -60306,6 +60306,33 @@ def _post_emit_sdc_constraints(project: Path) -> None:
         _stamp.dump(out, l8)
 
 
+def _post_emit_reference_clock_config(project: Path) -> None:
+    """Promote only an explicitly library-scoped pre-synthesis clock pair."""
+    root = project / "input" / "reference_flow"
+    if not root.is_dir():
+        return
+    pair = re.compile(r"(?ms)^\s*set\s+(\w+)_clk_input\s+(\w+)\s*$.*?^\s*set\s+\1_clk_period\s+([0-9]+(?:\.[0-9]+)?)\s*$")
+    scope = re.compile(r"(?i)using\s+the\s+([A-Za-z0-9_.+-]+)\s+library")
+    for path in sorted(root.rglob("*.tcl")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        match, target = pair.search(text), scope.search(text)
+        if not match or not target or float(match.group(3)) <= 0:
+            continue
+        pin, period_ps = match.group(2), float(match.group(3))
+        record = {"name": pin, "source_pin": pin, "domain_kind": "primary", "role": "master", "period_ns": period_ps / 1000.0, "freq_mhz": 1_000_000.0 / period_ps, "pdk_scoped_target": target.group(1), "evidence": {"path": project_relative_source(path, project)[0], "kind": "reference_flow_clock"}}
+        for doc_name in ("L8_RTL_CONSTANTS", "L8_TIMING_WAVEFORM"):
+            doc = _try_load_l_doc(project, doc_name)
+            if not isinstance(doc, dict):
+                continue
+            domains = doc.setdefault("clock_domains", [])
+            if isinstance(domains, list) and not any(isinstance(d, dict) and d.get("source_pin") == pin and d.get("pdk_scoped_target") == target.group(1) for d in domains):
+                domains.append(record.copy())
+                _stamp.dump(_pl.generated_docs_dir(project) / f"{doc_name}.json", doc)
+
+
 def _post_emit_l22_coverage_goals(project: Path) -> int:
     """SALVAGE #315 — lift measurable coverage targets stated in the design's
     OWN inputs into ``L22.fields.coverage_goals[]``, the layer that CONSUMES
@@ -65619,6 +65646,12 @@ def main() -> int:
     except Exception as _sdc_err:
         print(f"      SDC constraints ingest FAILED (fail-open): "
               f"{_sdc_err}", file=sys.stderr)
+
+    try:
+        _post_emit_reference_clock_config(project)
+    except Exception as _refclk_err:
+        print(f"      reference-flow clock ingest FAILED: {_refclk_err}",
+              file=sys.stderr)
 
     # G-FIXED-DIE-1 — ingest a design-PROVIDED MANDATED fixed-floorplan
     # contract (OpenLane config.json DIE_AREA/FP_SIZING/FP_DEF_TEMPLATE and/or

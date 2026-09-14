@@ -20,6 +20,8 @@ from pathlib import Path
 
 PROG = Path(__file__).resolve().parent.parent / \
     "l8_clock_period_actionability_check.py"
+sys.path.insert(0, str(PROG.parent))
+import sdc_gen  # noqa: E402
 
 
 def _run(project: Path, *extra: str):
@@ -123,18 +125,52 @@ def test_ticks_with_declared_clock_passes(tmp_path):
     assert report["findings"] == []
 
 
-def test_no_l8_skips(tmp_path):
+def test_no_l8_is_not_measured_and_blocks(tmp_path):
     (tmp_path / "phase1" / "generated_docs").mkdir(parents=True)
     proc, report = _run(tmp_path)
-    # vibe-ic#1051 follow-up: an input-missing skip is the DISCLOSED tier, not a
-    # plain pass. rc 2 is `_vacuous_exit.RC_VACUOUS`, which `flow_compliance_check`
-    # records as VACUOUS_PASS; the `VACUOUS_PASS:` sentinel is the second,
-    # rc-independent channel the same consumer reads. Asserting BOTH is the point —
-    # either one alone can regress silently while the other keeps the test green.
-    assert proc.returncode == 2, proc.stdout + proc.stderr
-    assert "VACUOUS_PASS:" in (proc.stdout + proc.stderr), proc.stdout + proc.stderr
-    assert report["summary"]["skip_kind"] == "input-missing"
-    assert report["summary"]["skipped_reason"]
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "L8_CLOCK_INPUT_NOT_MEASURED" in _rules(report)
+    assert report["passed"] is False
+
+
+def _write_target(project: Path, value: str) -> None:
+    gd = project / "phase1" / "generated_docs"
+    gd.mkdir(parents=True, exist_ok=True)
+    (gd / "L19_CONSTRAINTS_PDK.json").write_text(json.dumps({
+        "fields": {"pdk_target": value},
+    }))
+
+
+def test_scoped_clock_selects_only_matching_l19_target(tmp_path):
+    _write_target(tmp_path, "process_family_a")
+    _write_l8(tmp_path, {"clock_domains": [
+        _clock("clk_a", 100.0, pdk_scoped_target="process_family_a"),
+        _clock("clk_a", 50.0, pdk_scoped_target="process_family_b"),
+    ]})
+    proc, report = _run(tmp_path)
+    assert proc.returncode == 0, proc.stdout
+    assert report["summary"]["target_scope"] == "process_family_a"
+    assert report["findings"] == []
+
+
+def test_scoped_clock_rejects_nonmatching_l19_target(tmp_path):
+    _write_target(tmp_path, "process_family_b")
+    _write_l8(tmp_path, {"clock_domains": [
+        _clock("clk_a", 100.0, pdk_scoped_target="process_family_a"),
+    ]})
+    proc, report = _run(tmp_path)
+    assert proc.returncode == 1, proc.stdout
+    assert "L8_CLOCK_SCOPE_MISMATCH" in _rules(report)
+
+
+def test_backend_consumer_selects_scope_before_unscoped_scalar():
+    l8 = {"clock_mhz": 50.0, "clock_domains": [
+        _clock("clk_a", 100.0, pdk_scoped_target="process_family_a"),
+        _clock("clk_a", 25.0, pdk_scoped_target="process_family_b"),
+    ]}
+    assert sdc_gen._clock_mhz_from_l8_domains(l8, "process_family_a") == 100.0
+    assert sdc_gen._clock_mhz_from_l8_domains(l8, "process_family_b") == 25.0
+    assert sdc_gen._clock_mhz_from_l8_domains(l8, "process_family_c") is None
 
 
 # ───────────────────────── NEGATIVE CONTROLS ─────────────────────────────

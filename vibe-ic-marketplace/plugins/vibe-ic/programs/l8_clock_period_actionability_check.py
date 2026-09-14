@@ -210,6 +210,11 @@ _TICK_UNITS = ("tick", "ticks", "cycle", "cycles", "clk", "clocks",
 _CONSTANT_CLOCK_REF_KEYS = ("clock", "clk", "clock_domain", "domain",
                             "clock_name", "clk_domain", "reference_clock")
 
+# The source-side name already used by the typed L8 emitter is retained as an
+# alias.  ``technology_scope`` is the structured form: a clock measured for
+# one library/PDK must never be silently reused by another backend target.
+_SCOPE_KEYS = ("pdk_scoped_target", "pdk_target", "technology_scope")
+
 
 @dataclass
 class Finding:
@@ -325,6 +330,33 @@ def _collect_clock_records(docs: list[tuple[Path, dict]]) -> list[ClockRecord]:
     return out
 
 
+def _scope_values(rec: dict) -> set[str]:
+    """Return declared target identities, without inventing one from prose."""
+    values: set[str] = set()
+    for key in _SCOPE_KEYS:
+        value = rec.get(key)
+        if isinstance(value, str) and value.strip():
+            values.add(value.strip().lower())
+        elif isinstance(value, dict):
+            for item in value.values():
+                if isinstance(item, str) and item.strip():
+                    values.add(item.strip().lower())
+    return values
+
+
+def _project_target_scope(project: Path) -> Optional[str]:
+    """Read the backend target from the L19 field its consumers own."""
+    for path in sorted((project / "phase1" / "generated_docs").glob("L19*.json")):
+        doc = _read_json(path) or {}
+        fields = doc.get("fields")
+        if not isinstance(fields, dict):
+            continue
+        value = fields.get("pdk_target")
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return None
+
+
 def _waiver_rationale(project: Path, waiver_id: str) -> str:
     cands = [project / "waivers.json"] + sorted(project.glob("**/waivers.json"))
     for cand in cands:
@@ -380,8 +412,9 @@ def inspect(project: Path, tol_pct: float = DEFAULT_TOL_PCT
 
     docs = _load_l8_docs(project)
     if not docs:
-        summary["skip_kind"] = "input-missing"
-        summary["skipped_reason"] = "no L8 document in project"
+        findings.append(Finding("ERROR", "L8_CLOCK_INPUT_NOT_MEASURED",
+            "No L8 document exists, so no clock/tick contract was measured; "
+            "this is NOT_MEASURED, not a vacuous pass."))
         return findings, summary
     summary["l8_files"] = [str(p.relative_to(project)) for p, _ in docs]
 
@@ -392,11 +425,40 @@ def inspect(project: Path, tol_pct: float = DEFAULT_TOL_PCT
     summary["tick_constants"] = len(ticks)
 
     if not records and not ticks:
-        summary["skip_kind"] = "input-missing"
-        summary["skipped_reason"] = (
-            "L8 declares no clock records and no tick-denominated constants "
-            "— nothing the SDC/turnaround consumers dereference")
+        findings.append(Finding("ERROR", "L8_CLOCK_INPUT_NOT_MEASURED",
+            "L8 declares neither a clock record nor a tick-denominated "
+            "constant; no consumer-owned clock contract was measured."))
         return findings, summary
+
+    target_scope = _project_target_scope(project)
+    scoped = []
+    for path, doc in docs:
+        for key in _CLOCK_ARRAY_KEYS:
+            for i, rec in enumerate(doc.get(key) or []):
+                if isinstance(rec, dict) and _scope_values(rec):
+                    source = f"{path.name}:{key}[{i}]"
+                    scoped.extend(r for r in records if r.source_key == source)
+    if scoped:
+        summary["target_scope"] = target_scope
+        if not target_scope:
+            findings.append(Finding("ERROR", "L8_CLOCK_SCOPE_NOT_MEASURED",
+                "L8 carries target-scoped clock records but L19 has no "
+                "pdk_target for the consumer to select."))
+            return findings, summary
+        selected = []
+        for path, doc in docs:
+            for key in _CLOCK_ARRAY_KEYS:
+                for i, rec in enumerate(doc.get(key) or []):
+                    if isinstance(rec, dict) and target_scope in _scope_values(rec):
+                        source = f"{path.name}:{key}[{i}]"
+                        selected.extend(r for r in records if r.source_key == source)
+        if not selected:
+            findings.append(Finding("ERROR", "L8_CLOCK_SCOPE_MISMATCH",
+                f"L19 target '{target_scope}' matches none of the L8 "
+                "target-scoped clock records; refusing cross-target timing."))
+            return findings, summary
+        records = selected
+        summary["clock_records"] = len(records)
 
     waiver = _waiver_rationale(project, WAIVER_ID)
     summary["waiver"] = waiver
