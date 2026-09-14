@@ -87,16 +87,19 @@ def _load_json(p: Path) -> Optional[dict]:
         return None
 
 
+# The PDK-scoped-clock contract lives in ONE module, consumed identically by
+# this generator and by `l8_clock_period_actionability_check`. Both used to
+# carry their own copy of the matcher and both copies asked the wrong question
+# in the same two ways — see `_l8_clock_scope.__doc__` for the measurement.
+import _l8_clock_scope as _scope  # noqa: E402
+
+#: Re-exported so the report path is stated ONCE, by its producer.
+_RUN_PDK_REPORT_REL = _scope.RUN_PDK_REPORT_REL
+
+
 def _scope_values(rec: dict) -> set[str]:
-    values: set[str] = set()
-    for key in ("pdk_scoped_target", "pdk_target", "technology_scope"):
-        value = rec.get(key)
-        if isinstance(value, str) and value.strip():
-            values.add(value.strip().lower())
-        elif isinstance(value, dict):
-            values.update(v.strip().lower() for v in value.values()
-                          if isinstance(v, str) and v.strip())
-    return values
+    """The target identities a record declares. Delegated, never re-derived."""
+    return _scope.scope_values(rec)
 
 
 def _clock_mhz_from_l8_domains(l8: dict,
@@ -128,11 +131,11 @@ def _clock_mhz_from_l8_domains(l8: dict,
                 return f
         return None
 
-    scoped = [r for r in domains if isinstance(r, dict) and _scope_values(r)]
-    if scoped:
-        if not target_scope:
-            return None
-        domains = [r for r in scoped if target_scope.lower() in _scope_values(r)]
+    resolution = _scope.select(
+        [r for r in domains if isinstance(r, dict)], target_scope)
+    if not resolution.selected:
+        return None
+    domains = resolution.records
     primary = [r for r in domains if isinstance(r, dict)
                and (r.get("domain_kind") == "primary"
                     or r.get("role") == "master")]
@@ -146,13 +149,15 @@ def _clock_mhz_from_l8_domains(l8: dict,
 
 
 def _project_target_scope(project: Path) -> Optional[str]:
-    for path in sorted(_pl.generated_docs_dir(project).glob("L19*.json")):
-        doc = _load_json(path) or {}
-        fields = doc.get("fields")
-        value = fields.get("pdk_target") if isinstance(fields, dict) else None
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
+    """The PDK THIS RUN targets — flow step 0.5ic's own record first, the
+    design's L19 declaration only as a fallback.
+
+    `L19.fields.pdk_target` is the DESIGN's primary declared family, not the
+    run's target; reading it as the run's refused every design that declares
+    two processes and is run on its second. Delegated to `_l8_clock_scope` so
+    the sibling consumer cannot answer differently.
+    """
+    return _scope.run_pdk_target(project, _pl.generated_docs_dir(project))[0]
 
 
 # v1.6.94 (issue #25 Bug 5) — AID-class half-duplex single-wire protocols
@@ -617,8 +622,25 @@ def _is_clock(name: str) -> bool:
     return ("clk" in n) or ("clock" in n)
 
 
-def _l8_declared_clocks(l8: dict) -> List[Tuple[str, Optional[float]]]:
+def _l8_declared_clocks(l8: dict, target_scope: Optional[str] = None
+                        ) -> List[Tuple[str, Optional[float]]]:
     """Clocks L8 DECLARES, as ``[(canonical_name, period_ns|None), ...]``.
+
+    ``target_scope`` — SECOND SITE OF THE SAME DEFECT, measured 2026-09-15 by
+    ``test_unscoped_design_owned_record_is_used_when_no_scope_matches``. This
+    helper collapses records BY NAME, first-wins. On a design whose L8 states
+    the same clock port once per target process, every record is named ``clk``,
+    so the FIRST record won and its period was written into the per-port
+    constraint — even when the scope contract had already selected a different
+    record for the run's own process. The measured symptom was an SDC whose
+    header said ``clock=clk@125.0MHz`` and whose body said ``period=24.00ns``:
+    two different records, one file. Passing the run's target makes this helper
+    collapse only the records the contract actually selected.
+
+    Omitted, the behaviour is exactly what it was: no filtering at all. Same
+    for a target that resolves to NOT_MEASURED or MISMATCH — this helper never
+    turns a clock LIST into silence; the verdict for those outcomes is the
+    caller's to issue, and it does.
 
     C4/2026-07-31 — measured defect. ``_is_clock`` is a NAME-SHAPE GUESS
     (``"clk" in n or "clock" in n``). On a design whose clock ports are
@@ -644,7 +666,13 @@ def _l8_declared_clocks(l8: dict) -> List[Tuple[str, Optional[float]]]:
     if not isinstance(l8, dict):
         return out
     for key in ("clock_domains", "clocks"):
-        for rec in (l8.get(key) or []):
+        recs = [r for r in (l8.get(key) or []) if isinstance(r, dict)]
+        if target_scope:
+            _res = _scope.select(recs, target_scope)
+            if _res.status in (_scope.SELECTED_SCOPED,
+                               _scope.SELECTED_UNSCOPED):
+                recs = _res.records
+        for rec in recs:
             if not isinstance(rec, dict):
                 continue
             name = (rec.get("name") or rec.get("source_pin") or "").strip()
@@ -828,19 +856,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     # falling back to the 50 MHz default — otherwise the generator emits a
     # wrong-period SDC while the sibling checker reads the real period and
     # the structural gate can never pass on the staged-SDC path.
+    # PDK-SCOPED CLOCK RECORDS — the four-outcome contract, stated once in
+    # `_l8_clock_scope` and applied identically by the sibling checker.
     domains = l8.get("clock_domains")
-    scoped_clock = isinstance(domains, list) and any(
-        isinstance(r, dict) and _scope_values(r) for r in domains)
-    target_scope = _project_target_scope(project)
-    if scoped_clock:
-        if not target_scope:
-            print("FAIL: L8_CLOCK_SCOPE_NOT_MEASURED: scoped clock records "
-                  "require L19.fields.pdk_target", file=sys.stderr)
-            return 1
+    records = [r for r in domains if isinstance(r, dict)] \
+        if isinstance(domains, list) else []
+    target_scope, target_source = _scope.run_pdk_target(
+        project, _pl.generated_docs_dir(project))
+    resolution = _scope.select(records, target_scope, target_source)
+    if resolution.status == _scope.NOT_MEASURED:
+        print(f"FAIL: {_scope.NOT_MEASURED}: {resolution.detail}",
+              file=sys.stderr)
+        return 1
+    if resolution.status == _scope.MISMATCH:
+        print(f"FAIL: {_scope.MISMATCH}: {resolution.detail}", file=sys.stderr)
+        return 1
+    if resolution.status in (_scope.SELECTED_SCOPED, _scope.SELECTED_UNSCOPED):
+        # DISCLOSED, never silent: outcome 2 used a clock the design stated
+        # without naming a process, and a reader must be able to see that.
+        print(f"[sdc_gen] clock scope: {resolution.status} "
+              f"(target={target_scope!r} from {target_source}) — "
+              f"{resolution.detail}")
         domains_mhz = _clock_mhz_from_l8_domains(l8, target_scope)
         if domains_mhz is None:
-            print("FAIL: L8_CLOCK_SCOPE_MISMATCH: no scoped L8 clock matches "
-                  f"L19 target '{target_scope}'", file=sys.stderr)
+            print(f"FAIL: {_scope.MISMATCH}: {resolution.detail}",
+                  file=sys.stderr)
             return 1
         clock_mhz = domains_mhz
     elif (explicit_clock := l8.get("clock_mhz")) is not None:
@@ -912,9 +952,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     # invisible here while a sibling gate saw it.
     _l8_wave = _load_json(
         _pl.generated_docs_dir(project) / "L8_TIMING_WAVEFORM.json") or {}
-    _l8_clocks = _l8_declared_clocks(l8)
+    _l8_scope_target = _scope.run_pdk_target(
+        project, _pl.generated_docs_dir(project))[0]
+    _l8_clocks = _l8_declared_clocks(l8, _l8_scope_target)
     _seen_l8 = {n.lower() for n, _ in _l8_clocks}
-    for _n, _p in _l8_declared_clocks(_l8_wave):
+    for _n, _p in _l8_declared_clocks(_l8_wave, _l8_scope_target):
         if _n.lower() not in _seen_l8:
             _seen_l8.add(_n.lower())
             _l8_clocks.append((_n, _p))

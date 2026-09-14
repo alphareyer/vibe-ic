@@ -330,6 +330,9 @@ def _collect_clock_records(docs: list[tuple[Path, dict]]) -> list[ClockRecord]:
     return out
 
 
+import _l8_clock_scope as _scope  # noqa: E402
+
+
 def _scope_values(rec: dict) -> set[str]:
     """Return declared target identities, without inventing one from prose."""
     values: set[str] = set()
@@ -430,34 +433,38 @@ def inspect(project: Path, tol_pct: float = DEFAULT_TOL_PCT
             "constant; no consumer-owned clock contract was measured."))
         return findings, summary
 
-    target_scope = _project_target_scope(project)
-    scoped = []
+    # PDK-SCOPED CLOCK RECORDS — the four-outcome contract, stated once in
+    # `_l8_clock_scope` and applied identically by `sdc_gen`. This checker and
+    # that generator MUST select the same record: when they disagreed, one
+    # emitted an SDC the other then failed, on inputs that were fully
+    # consistent. See `_l8_clock_scope.__doc__` for the measurement.
+    rec_by_source: dict[str, dict] = {}
     for path, doc in docs:
         for key in _CLOCK_ARRAY_KEYS:
             for i, rec in enumerate(doc.get(key) or []):
-                if isinstance(rec, dict) and _scope_values(rec):
-                    source = f"{path.name}:{key}[{i}]"
-                    scoped.extend(r for r in records if r.source_key == source)
-    if scoped:
+                if isinstance(rec, dict):
+                    rec_by_source[f"{path.name}:{key}[{i}]"] = rec
+
+    target_scope, target_source = _scope.run_pdk_target(
+        project, project / "phase1" / "generated_docs")
+    resolution = _scope.select(
+        records, target_scope, target_source,
+        scope_of=lambda r: _scope.scope_values(
+            rec_by_source.get(getattr(r, "source_key", ""), {})))
+    if resolution.status != _scope.NO_SCOPED_RECORDS:
         summary["target_scope"] = target_scope
-        if not target_scope:
-            findings.append(Finding("ERROR", "L8_CLOCK_SCOPE_NOT_MEASURED",
-                "L8 carries target-scoped clock records but L19 has no "
-                "pdk_target for the consumer to select."))
+        summary["target_scope_source"] = target_source
+        summary["clock_scope_status"] = resolution.status
+        summary["clock_scope_detail"] = resolution.detail
+        if resolution.status == _scope.NOT_MEASURED:
+            findings.append(Finding("ERROR", _scope.NOT_MEASURED,
+                resolution.detail))
             return findings, summary
-        selected = []
-        for path, doc in docs:
-            for key in _CLOCK_ARRAY_KEYS:
-                for i, rec in enumerate(doc.get(key) or []):
-                    if isinstance(rec, dict) and target_scope in _scope_values(rec):
-                        source = f"{path.name}:{key}[{i}]"
-                        selected.extend(r for r in records if r.source_key == source)
-        if not selected:
-            findings.append(Finding("ERROR", "L8_CLOCK_SCOPE_MISMATCH",
-                f"L19 target '{target_scope}' matches none of the L8 "
-                "target-scoped clock records; refusing cross-target timing."))
+        if resolution.status == _scope.MISMATCH:
+            findings.append(Finding("ERROR", _scope.MISMATCH,
+                resolution.detail))
             return findings, summary
-        records = selected
+        records = resolution.records
         summary["clock_records"] = len(records)
 
     waiver = _waiver_rationale(project, WAIVER_ID)
