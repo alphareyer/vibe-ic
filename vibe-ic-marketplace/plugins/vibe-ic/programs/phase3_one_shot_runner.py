@@ -24506,7 +24506,8 @@ def _post_route_spef_repair_tcl(out_dir_c: str, tech_lef_c: str,
         + ((_pnr_stage_begin("postroute_drv_repair") + "\n"
             + f"  puts \"{_PNR_STAGE_MARKER} postroute_drv_repair\"\n"
             + _v1_8_100_signoff_drv_repair_tcl(
-                out_dir_c, fanout_root_buffer_cell)
+                out_dir_c, fanout_root_buffer_cell,
+                stage="postroute_drv_repair")
             + _pnr_stage_end("postroute_drv_repair") + "\n")
            if fork_repair_capable else
            "  puts \"SDR_SKIP_STOCK_OPENROAD: post-route SPEF DRV repair needs "
@@ -24669,18 +24670,118 @@ def _est0104_recovery_tcl(spef_c: str, err_var: str, retry_cmd: str,
     )
 
 
-def _postroute_sdr_transaction_begin_tcl(out_dir_c: str) -> str:
+#: vibe-ic#2253 — THE SDR PASS IS A CHECKPOINT-AND-CHILD TRANSACTION.
+#:
+#: MEASURED, four runs on four trees (sha256 x sky130A, lane icsha F041/F044):
+#: the detailed route CLOSES clean every time (`DRT-0199 Number of violations =
+#: 0`), and then the OPTIONAL end-of-flow sign-off DRV-repair (SDR) pass mutates
+#: the design INSIDE THE SAME OpenROAD session, re-routes, and the transaction
+#: measures the candidate. Every rejection was SUBSTANTIVELY CORRECT (the
+#: candidate took router DRC 0 -> 1 or 0 -> 2). And every rejection `error`ed out
+#: of the script, so `routed.def` was never written, `pnr` exited 1, and drc /
+#: lvs / sta_signoff / em / hardmacro were all BLOCKED behind one absent file.
+#: A run that held, on disk, a route IT HAD ITSELF VERIFIED AT ZERO shipped
+#: nothing.
+#:
+#: WHY THE OLD SHAPE HAD TO STOP THE SESSION, AND WHY THAT WAS NOT THE DEFECT.
+#: MEASURED (icsha F030, in the pinned image): there is NO in-session restore in
+#: this OpenROAD by ANY route — `read_def` into a populated database refuses with
+#: ODB-0251, and `read_db` of the session's own `write_db` checkpoint refuses
+#: with ORD-0047. So once the shipping session has been mutated, stopping IS the
+#: honest thing to do. The defect is one level up: an OPTIONAL, REFUSABLE pass
+#: was being run inside the session that must ship the clean route.
+#:
+#: THE SHAPE. The shipping session writes the clean route to disk BEFORE the
+#: optional pass (`pre_repair.def` + the router DRC report it was measured
+#: with). The pass itself runs in a CHILD `openroad` process seeded from that
+#: checkpoint — a FRESH database, where `read_def` is legal — which applies the
+#: repair, re-routes, measures router DRC and `check_placement`, and writes its
+#: own candidate checkpoint plus a receipt. The parent reads the receipt and
+#: applies the UNCHANGED #2240/#2247 decision:
+#:   REJECTED -> the parent's live database was never touched, so the clean
+#:               route stands and the flow CONTINUES to `write_def routed.def`
+#:               and the whole sign-off tail. The rejection is a DISCLOSURE in
+#:               the receipt, not the end of the run.
+#:   ACCEPTED -> the candidate checkpoint becomes the current one. The parent
+#:               cannot adopt it in-session (ODB-0251), so it hands off: it
+#:               prints `PNR_SDR_ADOPT_CANDIDATE` and exits, and the Python side
+#:               re-enters the post-route tail from the candidate via the
+#:               SHIPPED resume transform with this stage omitted.
+#: #2240's honesty is kept exactly: nothing half-applied is ever shipped,
+#: because nothing is applied in the shipping session at all.
+#:
+#: WHAT IT COSTS, stated rather than left to be discovered. While the child
+#: runs, TWO OpenROAD processes hold a database: the parent, idle, holding the
+#: route it is going to ship, and the child, working. Peak memory over the SDR
+#: window is therefore roughly doubled, and the child pays one extra `read_def`
+#: of the routed checkpoint. Neither is free and neither is hidden. The
+#: alternative is what was measured four times: a correct refusal that throws
+#: away a verified route and every gate behind it.
+#:
+#: WHY THE *PARENT* IS THE ONE THAT KEEPS THE ROUTE IN MEMORY, and not the
+#: other way round. MEASURED elsewhere in this flow: a session that re-read the
+#: flow's OWN route checkpoint produced DRT-1010, three silent NONFATALs and
+#: 97,961 DRC violations while still reporting success. Re-reading a routed DEF
+#: is the risky half of this transaction, so it is the DISPOSABLE session that
+#: does it. The shipping session never re-reads anything: on a refusal it still
+#: holds the database it routed and verified.
+_SDR_ROLE_VAR = "::_vic_sdr_role"
+_SDR_ADOPT_MARKER = "PNR_SDR_ADOPT_CANDIDATE:"
+_SDR_CHILD_RECEIPT_NAME = "child_receipt.tsv"
+_SDR_CANDIDATE_DEF_NAME = "candidate.def"
+_SDR_CANDIDATE_DRC_NAME = "candidate_router.drc.rpt"
+#: The two SDR sites, and the transaction directory each owns. They used to
+#: share one directory, and `begin` starts by `file delete -force`-ing it — so
+#: the second site destroyed the first one's receipt and checkpoint before the
+#: run was over. The Python side now reads BOTH receipts, so both have to
+#: survive. The first site keeps its historical name.
+_SDR_TXN_DIRS = {
+    "postroute_drv_repair": "sdr_transaction",
+    "postroute_drv_reconverge": "sdr_transaction_reconverge",
+}
+#: Which stages a CHILD deck for a given site must omit: everything between the
+#: route checkpoint and this site's own checkpoint, because that work is ALREADY
+#: IN the checkpoint the child reads. Re-running it would make the candidate
+#: differ from the checkpoint by work the SDR pass did not do, and the decision
+#: would then be attributing somebody else's geometry to this pass.
+_SDR_CHILD_OMIT = {
+    "postroute_drv_repair": (),
+    "postroute_drv_reconverge": ("postroute_drv_repair",
+                                 "postroute_antenna_repair"),
+}
+
+
+def _sdr_txn_dir_c(out_dir_c: str, stage: str) -> str:
+    return f"{out_dir_c}/{_SDR_TXN_DIRS[stage]}"
+
+
+def _sdr_child_tcl_name(stage: str) -> str:
+    return f"sdr_child_{stage}.tcl"
+
+
+def _sdr_child_log_name(stage: str) -> str:
+    return f"sdr_child_{stage}.log"
+
+
+def _postroute_sdr_transaction_begin_tcl(
+        out_dir_c: str, stage: str = "postroute_drv_repair") -> str:
     """Start the generic post-route DRV transaction.
 
     ``repair_design`` changes instances and nets, so the wire-only transaction
     used by targeted DRC repair is deliberately insufficient here.  The
     immutable DEF checkpoint preserves the candidate evidence.  OpenROAD cannot
-    reload that DEF into an already-owned live ODB, so a rejected mutable
-    candidate must stop the session rather than pretend it restored the live
-    database.  A missing/unreadable router report is a refusal, never an
-    invented zero.
+    reload that DEF into an already-owned live ODB (ODB-0251; and ORD-0047 for
+    ``read_db`` of its own ``write_db`` — both MEASURED in the pinned image), so
+    the candidate is never applied to THIS session at all: it is built in a
+    child session seeded from this checkpoint (see the ``#2253`` note above),
+    and what lands here is its receipt.  A missing/unreadable router report is a
+    refusal, never an invented zero.
+
+    ``stage`` names the SDR site, and with it the transaction directory, so the
+    two sites cannot overwrite each other's evidence.
     """
     report = f"{out_dir_c}/{ROUTER_DRC_REPORT_NAME}"
+    txn_c = _sdr_txn_dir_c(out_dir_c, stage)
     return (
         "  # === transactional post-route SDR candidate ===\n"
         "  set _sdr_tx_ready 0\n"
@@ -24688,8 +24789,17 @@ def _postroute_sdr_transaction_begin_tcl(out_dir_c: str) -> str:
         "  set _sdr_tx_error 0\n"
         "  set _sdr_tx_route_ok 0\n"
         "  set ::_vic_postroute_transaction_failed 0\n"
-        f"  set _sdr_tx_dir {{{out_dir_c}/sdr_transaction}}\n"
+        "  set ::_sdr_tx_adopt 0\n"
+        f"  set _sdr_tx_dir {{{txn_c}}}\n"
         f"  set _sdr_tx_report {{{report}}}\n"
+        # The AFTER count is the CHILD's measurement of ITS candidate, written
+        # into the transaction directory. It is deliberately NOT this session's
+        # `routed_router.drc.rpt`: that file describes the route THIS session
+        # still holds and still ships, and the old in-session pass overwrote it
+        # with the candidate's numbers on its way to being refused.
+        f"  set _sdr_tx_cand_report {{{txn_c}/{_SDR_CANDIDATE_DRC_NAME}}}\n"
+        f"  set _sdr_tx_cand_def {{{txn_c}/{_SDR_CANDIDATE_DEF_NAME}}}\n"
+        f"  set _sdr_tx_child_receipt {{{txn_c}/{_SDR_CHILD_RECEIPT_NAME}}}\n"
         "  proc _sdr_tx_count_router_drc {_path} {\n"
         "    if {![file exists $_path]} { error MISSING_ROUTER_DRC_REPORT }\n"
         "    set _fh [open $_path r]\n"
@@ -24706,24 +24816,34 @@ def _postroute_sdr_transaction_begin_tcl(out_dir_c: str) -> str:
         "  }\n"
         "  proc _sdr_tx_receipt {_status _reason _before _after} {\n"
         "    global _sdr_tx_dir\n"
+        # ONE place decides that an acceptance happened, so the handoff below
+        # cannot disagree with the receipt a reader is holding.
+        "    if {[string match {ACCEPTED*} $_status]} { set ::_sdr_tx_adopt 1 }\n"
         "    if {![file exists $_sdr_tx_dir]} { file mkdir $_sdr_tx_dir }\n"
         "    set _fh [open \"$_sdr_tx_dir/receipt.tsv\" w]\n"
         "    puts $_fh \"status\\treason\\tbefore_router_drc\\tafter_router_drc\"\n"
         "    puts $_fh \"$_status\\t$_reason\\t$_before\\t$_after\"\n"
         "    close $_fh\n"
         "  }\n"
-        "  proc _sdr_tx_reject_unrestorable {_reason _before _after} {\n"
-        "    global _sdr_tx_dir _sdr_tx_report\n"
-        "    if {[file exists $_sdr_tx_report]} {\n"
-        "      file copy -force $_sdr_tx_report $_sdr_tx_dir/rejected_router.drc.rpt\n"
+        "  proc _sdr_tx_reject_candidate {_reason _before _after} {\n"
+        "    global _sdr_tx_dir _sdr_tx_cand_report _sdr_tx_cand_def\n"
+        "    if {[file exists $_sdr_tx_cand_report]} {\n"
+        "      file copy -force $_sdr_tx_cand_report "
+        "$_sdr_tx_dir/rejected_router.drc.rpt\n"
         "    }\n"
-        "    write_def $_sdr_tx_dir/rejected.def\n"
-        "    # A second bare read_def after route triggers ODB-0251; db rebuild\n"
-        "    # alternatives destroy the live STA graph. Preserve evidence and stop.\n"
-        "    _sdr_tx_receipt REJECTED_UNRESTORABLE $_reason $_before $_after\n"
-        "    set ::_vic_postroute_transaction_failed 1\n"
-        "    puts \"SDR_TRANSACTION_REJECTED_UNRESTORABLE: reason=$_reason before=$_before after=$_after\"\n"
-        "    error \"SDR_TRANSACTION_REJECTED_UNRESTORABLE: $_reason\"\n"
+        "    if {[file exists $_sdr_tx_cand_def]} {\n"
+        "      file copy -force $_sdr_tx_cand_def $_sdr_tx_dir/rejected.def\n"
+        "    }\n"
+        "    _sdr_tx_receipt REJECTED_CANDIDATE_DISCARDED $_reason $_before $_after\n"
+        # THE CHANGE #2253 EXISTS FOR. The candidate was built in a CHILD
+        # process, so this session was never mutated: there is nothing to
+        # restore, nothing half-applied, and nothing to stop for. The clean
+        # route this session still holds -- byte-for-byte the checkpoint
+        # `pre_repair.def` written before the pass -- is the one that ships,
+        # and the whole sign-off tail runs on it. The refusal is a DISCLOSURE.
+        "    puts \"SDR_TRANSACTION_REJECTED_CANDIDATE_DISCARDED: "
+        "reason=$_reason before=$_before after=$_after; the checkpointed route "
+        "is UNCHANGED in this session and the sign-off continues from it\"\n"
         "  }\n"
         "  if {[catch {\n"
         "    if {[file exists $_sdr_tx_dir]} { file delete -force $_sdr_tx_dir }\n"
@@ -24742,8 +24862,9 @@ def _postroute_sdr_transaction_begin_tcl(out_dir_c: str) -> str:
     )
 
 
-def _postroute_sdr_transaction_finish_tcl() -> str:
-    """Commit a safe SDR candidate or stop before an unsafe pseudo-rollback.
+def _postroute_sdr_transaction_finish_tcl(
+        stage: str = "postroute_drv_repair") -> str:
+    """Adopt a safe SDR candidate, or discard it and ship the checkpoint.
 
     Router DRC is a *safety invariant* for this DRV-focused repair, not its
     objective.  A clean route therefore remains clean (0 -> 0) while
@@ -24752,13 +24873,25 @@ def _postroute_sdr_transaction_finish_tcl() -> str:
     populated OpenROAD database, which is rejected as ODB-0251 and discarded a
     valid DRV repair.  A non-clean non-improvement is explicitly rejected;
     no in-session DEF reload is attempted.
+
+    THE DECISION IS UNCHANGED by #2253 — the same four outcomes, the same
+    predicates, the same receipt rows.  What changed is where the candidate
+    came from (a child session) and what a refusal COSTS (nothing: this
+    session still holds the checkpointed clean route, so it discards the
+    candidate and carries straight on to the sign-off tail).  An ACCEPTED
+    candidate cannot be pulled into this session -- that is the ODB-0251 wall
+    -- so acceptance HANDS OFF: it prints ``PNR_SDR_ADOPT_CANDIDATE`` and
+    exits, and the Python side re-enters the tail from the candidate with this
+    stage omitted.  Acceptance is therefore never a candidate nobody measured,
+    and refusal is never the end of a run.
     """
+    txn_name = _SDR_TXN_DIRS[stage]
     return (
         "  if {$_sdr_tx_ready && $_sdr_tx_mutated} {\n"
         "    puts \"SDR_TRANSACTION_DECISION: error=$_sdr_tx_error route_ok=$_sdr_tx_route_ok router_drc_before=$_sdr_tx_before\"\n"
         "    if {$_sdr_tx_error || !$_sdr_tx_route_ok} {\n"
         "      puts \"SDR_TRANSACTION_REJECT_CAUSE: nonfatal_during_repair=$_sdr_tx_error candidate_route_failed=[expr {!$_sdr_tx_route_ok}]\"\n"
-        "      if {[catch {set _sdr_tx_after [_sdr_tx_count_router_drc $_sdr_tx_report]} _sdr_tx_cand_e]} {\n"
+        "      if {[catch {set _sdr_tx_after [_sdr_tx_count_router_drc $_sdr_tx_cand_report]} _sdr_tx_cand_e]} {\n"
         "        puts \"SDR_TRANSACTION_CANDIDATE_ROUTER_DRC_UNREADABLE: $_sdr_tx_cand_e\"\n"
         "        set _sdr_tx_after -1\n"
         "      } else {\n"
@@ -24767,7 +24900,7 @@ def _postroute_sdr_transaction_finish_tcl() -> str:
         "      if {$_sdr_tx_route_ok && $_sdr_tx_after >= 0 && "
         "($_sdr_tx_after == 0 || $_sdr_tx_after < $_sdr_tx_before) && "
         "[info exists _sdr_pv] && $_sdr_pv == 0} {\n"
-        "        file copy -force $_sdr_tx_report $_sdr_tx_dir/accepted_router.drc.rpt\n"
+        "        file copy -force $_sdr_tx_cand_report $_sdr_tx_dir/accepted_router.drc.rpt\n"
         "        _sdr_tx_receipt ACCEPTED_WITH_ADVISORY nonfatal_disclosed_router_drc_and_placement_measured_clean "
         "$_sdr_tx_before $_sdr_tx_after\n"
         "        puts \"SDR_TRANSACTION_ACCEPTED_WITH_ADVISORY: a nonfatal was DISCLOSED "
@@ -24781,7 +24914,7 @@ def _postroute_sdr_transaction_finish_tcl() -> str:
         "        } else {\n"
         "          puts \"SDR_TRANSACTION_CANDIDATE_PLACEMENT_VIOLATIONS: $_sdr_pv\"\n"
         "        }\n"
-        "        _sdr_tx_reject_unrestorable nonfatal_or_route_error $_sdr_tx_before $_sdr_tx_after\n"
+        "        _sdr_tx_reject_candidate nonfatal_or_route_error $_sdr_tx_before $_sdr_tx_after\n"
         "      }\n"
         # `check_connectivity` is not an OpenROAD command in the pinned image
         # (26Q3-2075): calling it merely raises "invalid command name" and then
@@ -24789,19 +24922,19 @@ def _postroute_sdr_transaction_finish_tcl() -> str:
         # its actual local evidence (post-repair placement and router DRC); the
         # independent physical net-connectivity evidence remains the later LVS
         # consumer, which runs on the emitted routed DEF.
-        "    } elseif {[catch {set _sdr_tx_after [_sdr_tx_count_router_drc $_sdr_tx_report]} _sdr_tx_count_e]} {\n"
+        "    } elseif {[catch {set _sdr_tx_after [_sdr_tx_count_router_drc $_sdr_tx_cand_report]} _sdr_tx_count_e]} {\n"
         "      puts \"SDR_TRANSACTION_ROUTER_DRC_UNREADABLE: $_sdr_tx_count_e\"\n"
-        "      _sdr_tx_reject_unrestorable unreadable_candidate_router_drc $_sdr_tx_before -1\n"
+        "      _sdr_tx_reject_candidate unreadable_candidate_router_drc $_sdr_tx_before -1\n"
         "    } else {\n"
         "      puts \"SDR_TRANSACTION_ROUTER_DRC: before=$_sdr_tx_before after=$_sdr_tx_after\"\n"
         "      if {$_sdr_tx_after == 0 && $_sdr_tx_before == 0} {\n"
-        "        file copy -force $_sdr_tx_report $_sdr_tx_dir/accepted_router.drc.rpt\n"
+        "        file copy -force $_sdr_tx_cand_report $_sdr_tx_dir/accepted_router.drc.rpt\n"
         "        _sdr_tx_receipt ACCEPTED router_drc_preserved_clean $_sdr_tx_before $_sdr_tx_after\n"
         "        puts \"SDR_TRANSACTION_ACCEPTED: router_drc clean-preserved ($_sdr_tx_before -> $_sdr_tx_after)\"\n"
         "      } elseif {$_sdr_tx_after >= $_sdr_tx_before} {\n"
-        "        _sdr_tx_reject_unrestorable router_drc_not_strictly_improved $_sdr_tx_before $_sdr_tx_after\n"
+        "        _sdr_tx_reject_candidate router_drc_not_strictly_improved $_sdr_tx_before $_sdr_tx_after\n"
         "      } else {\n"
-        "        file copy -force $_sdr_tx_report $_sdr_tx_dir/accepted_router.drc.rpt\n"
+        "        file copy -force $_sdr_tx_cand_report $_sdr_tx_dir/accepted_router.drc.rpt\n"
         "        _sdr_tx_receipt ACCEPTED strict_router_drc_improvement $_sdr_tx_before $_sdr_tx_after\n"
         "        puts \"SDR_TRANSACTION_ACCEPTED: router_drc=$_sdr_tx_before -> $_sdr_tx_after\"\n"
         "      }\n"
@@ -24809,24 +24942,148 @@ def _postroute_sdr_transaction_finish_tcl() -> str:
         "  } elseif {$_sdr_tx_ready} {\n"
         "    _sdr_tx_receipt NO_CANDIDATE no_repair_needed $_sdr_tx_before $_sdr_tx_before\n"
         "  }\n"
+        # THE ADOPT HANDOFF. An accepted candidate lives in a file this session
+        # is not allowed to read (ODB-0251 into a populated database, ORD-0047
+        # for read_db -- both MEASURED). So the session that must not ship a
+        # stale database simply stops shipping: it names the candidate and
+        # exits 0, and the Python side re-enters the post-route tail from that
+        # candidate with this stage omitted. A REJECTED candidate never reaches
+        # here, so a refusal costs the run nothing.
+        "  if {[info exists ::_sdr_tx_adopt] && $::_sdr_tx_adopt} {\n"
+        f"    puts \"{_SDR_ADOPT_MARKER} stage={stage} "
+        "def=$_sdr_tx_cand_def report=$_sdr_tx_cand_report "
+        f"txn={txn_name}\"\n"
+        "    puts \"SDR_TRANSACTION_ADOPT_HANDOFF: the candidate was ACCEPTED "
+        "and cannot be read back into this session (ODB-0251), so NOTHING is "
+        "shipped from this database; the post-route tail is re-entered from "
+        f"the candidate checkpoint with {stage} omitted\"\n"
+        "    flush stdout\n"
+        "    exit 0\n"
+        "  }\n"
+    )
+
+
+def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
+                                        stage: str) -> str:
+    """#2253 — the PARENT half: run the candidate somewhere else, then read
+    back what that somewhere else measured.
+
+    `openroad` is the same binary this session is running under, and the child
+    deck is a line-exact transform of THIS pnr.tcl seeded at the checkpoint the
+    line above just wrote, so the child cannot be repairing a different design
+    than the one this session holds.
+
+    EVERY WAY THE CHILD CAN FAIL TO ANSWER IS A REFUSAL, never an invented
+    pass: a child that dies, a child that writes no receipt, a receipt that is
+    short or unparseable — all land on the flags the tool's own numbers would
+    have had to clear (`error=1`, `route_ok=0`, placement UNMEASURED) and go
+    through the UNCHANGED decision. That a refusal costs the run nothing is
+    the whole point: the shipping session was never mutated, so refusing
+    discards a file and carries on to the sign-off.
+
+    Chip-AGNOSTIC: process invocation and TSV parsing only."""
+    child_tcl_c = f"{out_dir_c}/{_sdr_child_tcl_name(stage)}"
+    return (
+        "  if {$_sdr_tx_ready} {\n"
+        # RUN THE CANDIDATE SOMEWHERE ELSE. `openroad` is the same binary this
+        # session is running under; the child deck is a line-exact transform of
+        # THIS pnr.tcl seeded at the checkpoint just written, so it loads the
+        # identical LEF/Liberty/SDC/do-not-use context. A child that dies, or
+        # writes no receipt, is a REFUSAL — never an invented pass.
+        f"    puts \"SDR_CHILD_SESSION_BEGIN: {child_tcl_c}\"\n"
+        "    set _sdr_child_rc 0\n"
+        f"    if {{[catch {{exec openroad -no_init -exit {child_tcl_c} "
+        f">&@ stdout}} _sdr_child_e]}} {{\n"
+        "      set _sdr_child_rc 1\n"
+        "      puts \"SDR_CHILD_SESSION_NONFATAL: $_sdr_child_e\"\n"
+        "    }\n"
+        f"    puts \"SDR_CHILD_SESSION_DONE: rc=$_sdr_child_rc\"\n"
+        "    set _sdr_child_ok 0\n"
+        "    if {[catch {\n"
+        "      set _sdr_fh [open $_sdr_tx_child_receipt r]\n"
+        "      gets $_sdr_fh _sdr_hdr\n"
+        "      gets $_sdr_fh _sdr_row\n"
+        "      close $_sdr_fh\n"
+        "      set _sdr_f [split $_sdr_row \"\\t\"]\n"
+        "      if {[llength $_sdr_f] != 4} { error SHORT_CHILD_RECEIPT }\n"
+        "      set _sdr_tx_mutated [lindex $_sdr_f 0]\n"
+        "      set _sdr_tx_error [lindex $_sdr_f 1]\n"
+        "      set _sdr_tx_route_ok [lindex $_sdr_f 2]\n"
+        "      set _sdr_pv_in [lindex $_sdr_f 3]\n"
+        "      set _sdr_child_ok 1\n"
+        "    } _sdr_rcpt_e]} { puts \"SDR_CHILD_RECEIPT_UNREADABLE: "
+        "$_sdr_rcpt_e\" }\n"
+        # A child that could not say what it did is a candidate nobody
+        # measured. It is refused through the SAME decision the tool's own
+        # numbers go through, with the flags that make it refusable.
+        "    if {!$_sdr_child_ok} {\n"
+        "      set _sdr_tx_mutated 1\n"
+        "      set _sdr_tx_error 1\n"
+        "      set _sdr_tx_route_ok 0\n"
+        "      catch {unset _sdr_pv}\n"
+        "    } elseif {$_sdr_pv_in eq \"NA\"} {\n"
+        "      catch {unset _sdr_pv}\n"
+        "    } else {\n"
+        "      set _sdr_pv $_sdr_pv_in\n"
+        "    }\n"
+        "  }\n"
     )
 
 
 def _v1_8_100_signoff_drv_repair_tcl(
-        out_dir_c: str, fanout_root_buffer_cell: Optional[str] = None) -> str:
+        out_dir_c: str, fanout_root_buffer_cell: Optional[str] = None,
+        *, stage: str = "postroute_drv_repair") -> str:
     """Bounded repair-until-clean loop on the sign-off-deck SPEF.
 
     Every step NONFATAL-guarded; any failure leaves the routing as it was and
     the surrounding measure-only extraction still runs, so a PDK/tool that
     cannot do this degrades to exactly the previous behaviour.
+
+    #2253 — the block emits BOTH ROLES of one checkpoint-and-child
+    transaction, selected at run time by ``$::_vic_sdr_role``:
+
+      * CHILD (``set ::_vic_sdr_role child`` at the top of the child deck, which
+        `_build_pnr_sdr_child_tcl_text` derives from THIS SAME pnr.tcl) — run
+        the repair loop, re-route, measure router DRC and ``check_placement``,
+        write ``candidate.def`` + ``candidate_router.drc.rpt`` + the child
+        receipt, and exit.  This session is disposable: it is the only one that
+        is ever mutated.
+      * PARENT (the default, i.e. the SHIPPING session) — checkpoint the clean
+        route, ``exec`` the child, ingest its receipt, and run the unchanged
+        decision.  It never calls ``repair_design``, never re-routes, and
+        therefore never has anything to roll back.
+
+    Emitting both from ONE builder is deliberate: the child deck is a line-exact
+    transform of pnr.tcl, so a second builder would put a second copy of the
+    repair recipe in the tree and the two would drift — the failure this repo
+    has already paid for once with the routing-clear filter.
     """
     n = _V1_8_100_DRV_REPAIR_PASSES
     m = _V1_8_100_DRV_REPAIR_MARGIN_PCT
     lo = _V1_8_100_DRV_MIN_WIRE_LEN_UM
+    txn_c = _sdr_txn_dir_c(out_dir_c, stage)
+    child_tcl_c = f"{out_dir_c}/{_sdr_child_tcl_name(stage)}"
+    child_log_c = f"{out_dir_c}/{_sdr_child_log_name(stage)}"
+    # The CHILD's own router DRC report. Deliberately NOT the shipping
+    # session's `routed_router.drc.rpt`: that file describes the route the
+    # parent still holds and still ships. The old in-session pass overwrote it
+    # with the candidate's numbers on the way to refusing the candidate, which
+    # left the shipped route described by a report of a design that was thrown
+    # away.
+    child_drc_c = f"{txn_c}/{_SDR_CANDIDATE_DRC_NAME}"
     return (
-        "  # --- v1.8.100 sign-off-domain DRV repair ---\n"
-        + _postroute_sdr_transaction_begin_tcl(out_dir_c)
-        + "  set _sdr_ok $_sdr_tx_ready\n"
+        "  # --- v1.8.100 sign-off-domain DRV repair "
+        "(#2253 checkpoint-and-child) ---\n"
+        f"  if {{[info exists {_SDR_ROLE_VAR}] "
+        f"&& ${_SDR_ROLE_VAR} eq \"child\"}} {{\n"
+        "  # ===== CHILD ROLE: the disposable session that builds the "
+        "candidate =====\n"
+        f"  set _sdr_tx_dir {{{txn_c}}}\n"
+        "  set _sdr_tx_error 0\n"
+        "  set _sdr_tx_route_ok 0\n"
+        "  set _sdr_tx_mutated 0\n"
+        "  set _sdr_tx_ready 1\n"
+        "  set _sdr_ok 1\n"
         "  set _sdr_mwl 0\n"
         "  if {[catch {\n"
         "    set _sdr_blk [ord::get_db_block]\n"
@@ -25065,7 +25322,7 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # to touch the geometry that ships, so its report is the one that
         # describes the published violations. Same path as the base route's:
         # last writer wins, which is the shipped route by construction.
-        + _route_drc_report_tcl(out_dir_c + "/" + ROUTER_DRC_REPORT_NAME)
+        + _route_drc_report_tcl(child_drc_c)
         +
         "    if {[catch {detailed_route {*}$_vic_drc_opt} _sdr_dr]} "
         "{ puts \"SDR_DR_NONFATAL: $_sdr_dr\"; set _sdr_tx_error 1; set _sdr_tx_route_ok 0; break }\n"
@@ -25080,7 +25337,39 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "    if {$_sdr_stop} { puts \"SDR_STOPPED_AFTER_PARTIAL_REPAIR: pass $_sdr_p completed (legalized + rerouted)\"; break }\n"
         "  }\n"
         "  }\n"
-        + _postroute_sdr_transaction_finish_tcl()
+        # ---- CHILD EPILOGUE: publish the candidate and its MEASUREMENTS ----
+        # What the parent decides on is exactly this receipt. `-1` for the
+        # placement count means the pass never reached `check_placement`;
+        # `NA` means the variable was never set at all, which the parent turns
+        # back into "unmeasured" so the disclosure branch can refuse it. An
+        # invented zero is never written here.
+        "  if {[catch {file mkdir $_sdr_tx_dir} _sdr_mk]} "
+        "{ puts \"SDR_CHILD_MKDIR_NONFATAL: $_sdr_mk\" }\n"
+        "  set _sdr_pv_out NA\n"
+        "  if {[info exists _sdr_pv]} { set _sdr_pv_out $_sdr_pv }\n"
+        f"  if {{[catch {{write_def {txn_c}/{_SDR_CANDIDATE_DEF_NAME}}} "
+        "_sdr_cdef]} { puts \"SDR_CHILD_DEF_NONFATAL: $_sdr_cdef\"; "
+        "set _sdr_tx_route_ok 0 }\n"
+        "  if {[catch {\n"
+        f"    set _sdr_fh [open {txn_c}/{_SDR_CHILD_RECEIPT_NAME} w]\n"
+        "    puts $_sdr_fh \"mutated\\terror\\troute_ok\\tplacement_violations\"\n"
+        "    puts $_sdr_fh \"$_sdr_tx_mutated\\t$_sdr_tx_error\\t"
+        "$_sdr_tx_route_ok\\t$_sdr_pv_out\"\n"
+        "    close $_sdr_fh\n"
+        "  } _sdr_wr]} { puts \"SDR_CHILD_RECEIPT_WRITE_NONFATAL: $_sdr_wr\" }\n"
+        "  puts \"SDR_CHILD_RECEIPT: mutated=$_sdr_tx_mutated "
+        "error=$_sdr_tx_error route_ok=$_sdr_tx_route_ok "
+        "placement_violations=$_sdr_pv_out\"\n"
+        "  puts \"SDR_CHILD_DONE\"\n"
+        "  flush stdout\n"
+        "  exit 0\n"
+        "  } else {\n"
+        "  # ===== PARENT ROLE: the SHIPPING session, which is never mutated "
+        "=====\n"
+        + _postroute_sdr_transaction_begin_tcl(out_dir_c, stage)
+        + _postroute_sdr_parent_child_call_tcl(out_dir_c, stage)
+        + _postroute_sdr_transaction_finish_tcl(stage)
+        + "  }\n"
         + "  puts \"SDR_DONE\"\n"
     )
 
@@ -26032,8 +26321,10 @@ if {{[catch {{write_def {out_dir_c}/routed_preantenna.def}} _cp_err]}} {{
 puts "{_PNR_STAGE_MARKER} postroute_spef_extract"
 {spef_repair_block}# === v0.2.14 — antenna repair (diode insertion) after detailed_route ===
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
+{_pnr_stage_begin("postroute_antenna_repair")}
 puts "{_PNR_STAGE_MARKER} postroute_antenna_repair"
-{antenna_repair_block}{drv_reconverge_block}
+{antenna_repair_block}{_pnr_stage_end("postroute_antenna_repair")}
+{drv_reconverge_block}
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 puts "{_PNR_STAGE_MARKER} postroute_antenna_reconverge"
 {post_reconverge_antenna_block}# === v0.1.48 — decap + filler insertion ===
@@ -26414,6 +26705,21 @@ def _build_pnr_resume_tcl_text(pnr_tcl_text: str, *, checkpoint_def_c: str,
 
     Chip-AGNOSTIC: sentinel-delimited line surgery; no design, PDK or vendor
     literal is read or written."""
+    return "\n".join(_pnr_deck_from_checkpoint(
+        pnr_tcl_text, checkpoint_def_c=checkpoint_def_c,
+        omit_stages=omit_stages)) + "\n"
+
+
+def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
+                              omit_stages: Sequence[str] = ()) -> List[str]:
+    """The line surgery shared by the fatal-signal RESUME deck and the #2253
+    SDR CHILD deck: re-seat the design load on a checkpoint DEF, delete the
+    region that BUILDS that checkpoint, and drop each named stage.
+
+    Both callers need exactly this and nothing else differs between them
+    except where the deck STOPS, so it lives in one place — a second copy of
+    sentinel surgery is a second thing to keep in step with the template.
+    Returns the lines; the callers join and terminate them."""
     lines = pnr_tcl_text.splitlines()
 
     def _index_of(pred, what: str) -> int:
@@ -26454,7 +26760,62 @@ def _build_pnr_resume_tcl_text(pnr_tcl_text: str, *, checkpoint_def_c: str,
         _drop(_pnr_stage_begin(stage), _pnr_stage_end(stage),
               [f'puts "PNR_STAGE_OMITTED: {stage}"'],
               f"stage {stage!r}")
-    return "\n".join(lines) + "\n"
+    return lines
+
+
+def _build_pnr_sdr_child_tcl_text(pnr_tcl_text: str, *, checkpoint_def_c: str,
+                                  stage: str) -> str:
+    """#2253 — derive the CHILD deck for one SDR site from pnr.tcl itself.
+
+    The child is the ONLY session that is ever mutated by the optional
+    end-of-flow DRV repair.  It is pnr.tcl with four edits and no fifth:
+
+      1. the design is restored from the checkpoint the shipping session just
+         wrote, instead of rebuilt from the netlist (shared with the resume);
+      2. floorplan..detailed_route is elided — it is already in the checkpoint
+         (shared with the resume);
+      3. every stage between the route and THIS site's checkpoint is dropped,
+         because that work is in the checkpoint too.  Re-running it would make
+         the candidate differ from the checkpoint by geometry this SDR pass did
+         not produce, and the decision would be crediting the pass with it;
+      4. ``$::_vic_sdr_role`` is set to ``child`` at the top, which makes the
+         SAME emitted SDR block take its child branch — so the repair recipe
+         exists once, in pnr.tcl, and cannot drift from the deck that runs it.
+
+    WHERE THE CHILD STOPS is a RUNTIME fact, not a text cut: the child branch
+    of the emitted block ends in ``exit 0``, so the session ends the moment it
+    has written its candidate and its receipt, and nothing after that is ever
+    reached — Tcl evaluates a script command by command, so the rest is not
+    even parsed.  Cutting the TEXT instead would sever the enclosing
+    ``if {$_prs_rules ne ""} {`` that the SDR block sits inside and hand the
+    child an unbalanced deck: exactly the defect class the tclsh parse test
+    exists for, and one the child could not report because it dies before its
+    receipt.
+
+    Chip-AGNOSTIC: sentinel-delimited line surgery only."""
+    if stage not in _SDR_CHILD_OMIT:
+        raise PnrResumeUnavailable(
+            f"{stage!r} is not an SDR site; a child deck can only be derived "
+            f"for {sorted(_SDR_CHILD_OMIT)}")
+    lines = _pnr_deck_from_checkpoint(
+        pnr_tcl_text, checkpoint_def_c=checkpoint_def_c,
+        omit_stages=_SDR_CHILD_OMIT[stage])
+    # REFUSE a deck that does not carry this site at all, rather than shipping
+    # a child that would run to the END of pnr.tcl writing shipped artifacts.
+    begin_marker = _pnr_stage_begin(stage)
+    if not any(ln.strip() == begin_marker for ln in lines):
+        raise PnrResumeUnavailable(
+            f"pnr.tcl carries no {begin_marker!r}, so there is no {stage!r} "
+            f"pass for a child to run; it will not guess one")
+    head = [
+        f"# SDR CHILD SESSION for {stage} — see _build_pnr_sdr_child_tcl_text.",
+        "# This session is DISPOSABLE. It is the only one the optional",
+        "# post-route DRV repair is allowed to mutate; the shipping session",
+        "# keeps the checkpointed route this deck reads, and this deck exits",
+        "# inside its own SDR stage without writing any shipped artifact.",
+        f'set {_SDR_ROLE_VAR} "child"',
+    ]
+    return "\n".join(head + lines) + "\n"
 
 
 _PNR_RESUME_TCL = "pnr_resume.tcl"
@@ -26966,6 +27327,278 @@ def _cached_stage_decision(project: Path, out_dir: Path, artefact: Path, *,
         reason += note
         prod_reason += note
     return CachedStageDecision(True, reason, prod_reason, dropped)
+
+
+def _read_sdr_receipts(out_dir: Path) -> List[Dict[str, Any]]:
+    """Both SDR sites' transaction receipts, as records.
+
+    A receipt exists for every outcome the transaction has -- ACCEPTED,
+    ACCEPTED_WITH_ADVISORY, REJECTED_CANDIDATE_DISCARDED, NO_CANDIDATE,
+    REFUSED -- so a site with no receipt genuinely did not run, which is a
+    different fact from a site that ran and refused. Both are reported as they
+    are; neither is inferred from the other.
+
+    Chip-AGNOSTIC: TSV parsing only."""
+    out: List[Dict[str, Any]] = []
+    for stage, dirname in _SDR_TXN_DIRS.items():
+        rcpt = out_dir / dirname / "receipt.tsv"
+        rec: Dict[str, Any] = {"stage": stage, "receipt": str(rcpt)}
+        if not rcpt.is_file():
+            rec["status"] = "NOT_RUN"
+            rec["detail"] = (
+                "no transaction receipt exists for this SDR site, so the pass "
+                "never started here — which is not the same as a pass that ran "
+                "and was refused")
+            out.append(rec)
+            continue
+        try:
+            rows = rcpt.read_text(errors="replace").splitlines()
+            head = rows[0].split("\t") if rows else []
+            vals = rows[1].split("\t") if len(rows) > 1 else []
+            rec.update({k: v for k, v in zip(head, vals)})
+            rec["status"] = rec.pop("status", "UNPARSEABLE_RECEIPT")
+        except (OSError, IndexError) as exc:
+            rec["status"] = "UNREADABLE_RECEIPT"
+            rec["detail"] = f"{type(exc).__name__}: {exc}"
+        out.append(rec)
+    return out
+
+
+def _disclose_sdr_transactions(project: Path, out_dir: Path,
+                               adoptions: Sequence[Dict[str, Any]],
+                               child_deck_failures: Dict[str, str]
+                               ) -> List[Dict[str, Any]]:
+    """Publish what each SDR site decided, where a reader will look.
+
+    Before #2253 a refused candidate ANNOUNCED itself by taking the run down,
+    so nobody had to go looking for it. Now a refusal is survivable — which is
+    the point — and a survivable event that is only in `openroad.log` is one
+    nobody reads. So the receipts are lifted into the run's own report tree,
+    beside the step that produced them.
+
+    DISCLOSURE-ONLY: never raises, never changes a verdict."""
+    records = _read_sdr_receipts(out_dir)
+    for rec in records:
+        why = child_deck_failures.get(str(rec.get("stage")))
+        if why:
+            rec["child_deck_not_written"] = why
+    payload = {
+        "schema_version": 1,
+        "note": ("Each post-route sign-off DRV-repair (SDR) pass is a "
+                 "checkpoint-and-child transaction: the candidate is built in "
+                 "a child OpenROAD session seeded from the checkpoint this "
+                 "run wrote before the pass, and the shipping session is never "
+                 "mutated. REJECTED_CANDIDATE_DISCARDED means the candidate "
+                 "was measured and refused and the checkpointed route shipped "
+                 "unchanged; it is a disclosure, not a failure."),
+        "transactions": records,
+        "adoptions": list(adoptions),
+    }
+    try:
+        dest = project / "reports" / "phase3" / "sdr_transactions.json"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(payload, indent=2) + "\n")
+    except (OSError, TypeError) as exc:
+        print(f"[pnr] SDR_TRANSACTION_DISCLOSURE_NOT_WRITTEN "
+              f"reason={type(exc).__name__}: {exc}", file=sys.stderr)
+    for rec in records:
+        print(f"[pnr] SDR_TRANSACTION {rec.get('stage')}: "
+              f"{rec.get('status')} reason={rec.get('reason', '-')} "
+              f"router_drc {rec.get('before_router_drc', '-')} -> "
+              f"{rec.get('after_router_drc', '-')}", file=sys.stderr)
+    return records
+
+
+def _write_sdr_child_decks(pnr_tcl: Path, out_dir: Path,
+                           container: str) -> Dict[str, str]:
+    """#2253 — derive and write the CHILD deck for every SDR site in pnr.tcl.
+
+    Written next to the deck they come from, at the fixed names the emitted
+    parent branch `exec`s, and BEFORE the route runs, because the parent has to
+    be able to name its child in the Tcl it is already executing.
+
+    A site whose deck cannot be derived is DISCLOSED and left without a child:
+    the emitted parent then finds no child deck, its `exec` fails, the receipt
+    is unreadable, and the candidate is REFUSED — which is the correct outcome
+    for a pass nobody could run, and it costs the run nothing because the
+    shipping session was never mutated. Returns {stage: reason} for the sites
+    that could NOT be written, so the caller can record them.
+
+    Chip-AGNOSTIC: deck surgery and file writes only."""
+    failures: Dict[str, str] = {}
+    try:
+        deck = pnr_tcl.read_text(errors="replace")
+    except OSError as exc:
+        return {s: f"pnr.tcl unreadable: {exc}" for s in _SDR_CHILD_OMIT}
+    for stage in _SDR_CHILD_OMIT:
+        txn = out_dir / _SDR_TXN_DIRS[stage]
+        ckpt_c = _to_container_path(str(txn / "pre_repair.def"), container)
+        child = out_dir / _sdr_child_tcl_name(stage)
+        try:
+            child.write_text(_build_pnr_sdr_child_tcl_text(
+                deck, checkpoint_def_c=ckpt_c, stage=stage))
+        except (PnrResumeUnavailable, OSError) as exc:
+            failures[stage] = str(exc)
+            # DEGRADE LOUDLY. A missing child deck turns into a refused
+            # candidate, and a reader is entitled to know which it was.
+            print(f"[pnr] SDR_CHILD_DECK_NOT_WRITTEN stage={stage} "
+                  f"reason={exc}", file=sys.stderr)
+            try:
+                child.unlink()
+            except OSError:
+                pass
+    return failures
+
+
+def _sdr_adopt_request(log_text: str) -> Optional[Dict[str, str]]:
+    """The LAST `PNR_SDR_ADOPT_CANDIDATE` line in an OpenROAD transcript, as
+    {stage, def, report, txn}, or None when the session shipped normally.
+
+    Parsed from the emitted marker rather than inferred from a receipt file:
+    the marker is printed by the SAME branch that exits, so its presence and
+    the session's refusal to ship are one fact, not two that can disagree.
+    Chip-AGNOSTIC: marker parsing only."""
+    found: Optional[Dict[str, str]] = None
+    for line in (log_text or "").splitlines():
+        i = line.find(_SDR_ADOPT_MARKER)
+        if i < 0:
+            continue
+        rec: Dict[str, str] = {}
+        for tok in line[i + len(_SDR_ADOPT_MARKER):].split():
+            if "=" in tok:
+                k, _, v = tok.partition("=")
+                rec[k] = v
+        if rec.get("stage") and rec.get("def"):
+            found = rec
+    return found
+
+
+def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
+                              out_dir_c: str, pnr_tcl: Path,
+                              log_text: str,
+                              hard_ceiling_s: int) -> Dict[str, Any]:
+    """#2253 — finish PnR from an ACCEPTED SDR candidate the shipping session
+    could not read back.
+
+    The parent session stops the moment it accepts a candidate: it cannot pull
+    the candidate into its own database (ODB-0251) and it must not ship its own
+    stale one, so it names the candidate and exits 0 having written nothing.
+    This is the other half of that transaction — re-enter the post-route tail
+    from the candidate checkpoint, with the accepted stage omitted, using the
+    SAME shipped resume transform the fatal-signal path uses.
+
+    BOUNDED by construction: there are two SDR sites and each may hand off at
+    most once, because the deck that runs after an adoption has that stage
+    omitted and therefore cannot reach its handoff again.  The loop bound is
+    the number of sites, and every iteration is recorded.
+
+    A tail that cannot be built or that fails is NOT papered over: the
+    adoption is recorded as FAILED, `routed.def` stays absent, and `step_pnr`
+    refuses exactly as it would for any route that did not finish.  The run is
+    never left claiming a sign-off it did not write.
+
+    Chip-AGNOSTIC: marker parsing, deck surgery, file existence."""
+    rec: Dict[str, Any] = {"status": "NOT_REQUESTED", "adoptions": [],
+                           "combined_log": "", "rc": 0}
+    req = _sdr_adopt_request(log_text)
+    if req is None:
+        return rec
+    try:
+        deck = pnr_tcl.read_text(errors="replace")
+    except OSError as exc:
+        rec["status"] = "FAILED"
+        rec["reason"] = f"pnr.tcl unreadable: {exc}"
+        return rec
+    omitted: List[str] = []
+    combined = ""
+    rc = 0
+    for _ in range(len(_SDR_CHILD_OMIT)):
+        stage = req["stage"]
+        if stage not in _SDR_TXN_DIRS:
+            rec["status"] = "FAILED"
+            rec["reason"] = (
+                f"the session named {stage!r} as the accepted SDR site, which "
+                f"is not one of {sorted(_SDR_TXN_DIRS)}")
+            rec["rc"] = 1
+            break
+        # Derived from the stage, not parsed back out of a container path:
+        # the transaction directory layout is this module's own constant, and
+        # a reverse path map would be a second thing that can disagree with it.
+        txn = out_dir / _SDR_TXN_DIRS[stage]
+        cand = txn / _SDR_CANDIDATE_DEF_NAME
+        cand_c = _to_container_path(str(cand), container)
+        if not cand.is_file():
+            rec["status"] = "FAILED"
+            rec["reason"] = (
+                f"the session ACCEPTED a candidate for {stage} and stopped, "
+                f"but {cand} does not exist, so there is nothing to finish "
+                f"the sign-off from")
+            rec["rc"] = 1
+            break
+        omitted.append(stage)
+        try:
+            tail_text = _build_pnr_resume_tcl_text(
+                deck, checkpoint_def_c=cand_c, omit_stages=list(omitted))
+        except (PnrResumeUnavailable, OSError) as exc:
+            rec["status"] = "FAILED"
+            rec["reason"] = f"adopt tail could not be derived: {exc}"
+            rec["rc"] = 1
+            break
+        tail_name = f"pnr_sdr_adopt_{len(omitted)}.tcl"
+        tail_log = f"pnr_sdr_adopt_{len(omitted)}.log"
+        (out_dir / tail_name).write_text(tail_text)
+        # The ACCEPTED candidate's own router DRC report describes the geometry
+        # that is now going to ship, so it becomes the run's route report. The
+        # old in-session pass wrote the candidate's numbers over the shipped
+        # route's report even when the candidate was then thrown away; here the
+        # report moves only WITH the geometry it describes.
+        try:
+            _cand_rpt = txn / _SDR_CANDIDATE_DRC_NAME
+            if _cand_rpt.is_file():
+                (out_dir / ROUTER_DRC_REPORT_NAME).write_text(
+                    _cand_rpt.read_text(errors="replace"))
+        except OSError as exc:
+            print(f"[pnr] SDR_ADOPT_REPORT_NOT_PROMOTED reason={exc}",
+                  file=sys.stderr)
+        print(f"[pnr] SDR ADOPT: finishing the post-route tail from "
+              f"{cand.name} with {', '.join(omitted)} omitted",
+              file=sys.stderr)
+        cmd = (f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
+               f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
+               f"openroad -no_init -exit {out_dir_c}/{tail_name} 2>&1 | "
+               f"tee {out_dir_c}/{tail_log}")
+        t_rc, t_out, t_err = _docker_exec(
+            container, cmd, marker=f"{out_dir_c}/{tail_name}",
+            log_path=out_dir / tail_log, hard_ceiling_s=hard_ceiling_s)
+        this_log = (t_out or "") + (t_err or "")
+        combined += (f"\n=== PNR SDR ADOPT (from {cand}, "
+                     f"{', '.join(omitted)} omitted) ===\n" + this_log)
+        rc = t_rc
+        rec["adoptions"].append({"stage": stage, "candidate": str(cand),
+                                 "tcl": tail_name, "log": tail_log,
+                                 "rc": t_rc})
+        nxt = _sdr_adopt_request(this_log)
+        if t_rc != 0 or nxt is None or nxt.get("stage") in omitted:
+            rec["status"] = "ADOPTED" if t_rc == 0 else "FAILED"
+            break
+        req = nxt
+    else:
+        rec["status"] = "ADOPTED" if rc == 0 else "FAILED"
+    rec["omitted_stages"] = omitted
+    rec["combined_log"] = combined
+    # A refusal keeps ITS rc. The loop's own rc only speaks for a tail that
+    # actually ran; a `routed.def` that was never written must not come back
+    # as rc 0 and be read downstream as a route that finished.
+    if rec["status"] != "FAILED" or rec.get("rc", 0) == 0:
+        rec["rc"] = rc if rec["status"] != "FAILED" else (rc or 1)
+    # Fold the adopt transcript into openroad.log so every gate that reads that
+    # one file sees the session that actually shipped the design.
+    try:
+        with (out_dir / "openroad.log").open("a") as fh:
+            fh.write(combined)
+    except OSError:
+        pass
+    return rec
 
 
 def _pnr_resume_after_fatal_signal(*, project: Path, top: str, container: str,
@@ -29020,7 +29653,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                                'postroute_drv_reconverge"\n'
                              + 'puts "SDR2_BEGIN"\n'
                              + _v1_8_100_signoff_drv_repair_tcl(
-                                 out_dir_c, _fanout_root_buffer_cell)
+                                 out_dir_c, _fanout_root_buffer_cell,
+                                 stage="postroute_drv_reconverge")
                              + 'puts "SDR2_END"\n'
                              + _pnr_stage_end("postroute_drv_reconverge")
                              + "\n")
@@ -29264,10 +29898,20 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
 
     _chip_padring = _chip_path_requests_pad_ring(project)
 
+    _sdr_child_deck_failures: Dict[str, str] = {}
+
     def _install_route_deck() -> Optional[StepResult]:
         """Write the current geometry's route deck, refreshing its ring first."""
         if not _chip_padring:
             pnr_tcl.write_text(_generic_pnr_tcl)
+            # #2253 — and the CHILD deck for each SDR site, derived from the
+            # deck just written. It has to exist before the route starts: the
+            # parent branch `exec`s it by name from inside the session that is
+            # already running, and a rewritten geometry (resize / loosen rung)
+            # must not leave a child deck describing the previous one.
+            _sdr_child_deck_failures.clear()
+            _sdr_child_deck_failures.update(
+                _write_sdr_child_decks(pnr_tcl, out_dir, container))
             return None
         pad_result, consumer_tcl = _prepare_padring_for_route(
             project, pdk, container, out_dir, out_dir_c,
@@ -29282,6 +29926,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                 pad_result.output_files,
                 extras={"finding": "PADRING_PREROUTE_BLOCKED"})
         pnr_tcl.write_text(consumer_tcl)
+        _sdr_child_deck_failures.clear()
+        _sdr_child_deck_failures.update(
+            _write_sdr_child_decks(pnr_tcl, out_dir, container))
         return None
 
     _pad_install_failure = _install_route_deck()
@@ -29297,6 +29944,10 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # the floorplan line in pnr.tcl with a larger die and retry.
     # Limit to 3 retries; cap die at 2000×2000µm.
     resize_history: List[Dict[str, Any]] = []
+    #: #2253 — one entry per SDR candidate adoption this step performed.
+    _sdr_adopt_records: List[Dict[str, Any]] = []
+    #: ...and what each SDR site decided, read back from its own receipt.
+    _sdr_txn_records: List[Dict[str, Any]] = []
     # #307 — declines are NOT resizes: a refused proposal changed no
     # dimension, so recording it in resize_history would corrupt the
     # answer to "how many times was the die resized?" (existing tests
@@ -29367,6 +30018,26 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         # so the FIRST approach of a re-invoked `step_pnr` sweeps whatever the
         # previous invocation left behind. See `_drop_empty_antenna_reports`.
         _drop_empty_antenna_reports(out_dir)
+        # #2253 — THE OTHER HALF OF THE SDR TRANSACTION. A session that
+        # ACCEPTED a candidate stopped without shipping anything (it cannot
+        # read the candidate back: ODB-0251). Finish the post-route tail from
+        # that candidate before anything downstream looks for `routed.def`.
+        # A REJECTED candidate never gets here: that session shipped its own
+        # checkpointed clean route and returned normally.
+        _sdr_adopt = _pnr_adopt_sdr_candidates(
+            container=container, out_dir=out_dir, out_dir_c=out_dir_c,
+            pnr_tcl=pnr_tcl, log_text=(out or "") + (err or ""),
+            hard_ceiling_s=_pnr_ceiling)
+        if _sdr_adopt.get("status") != "NOT_REQUESTED":
+            _sdr_adopt_records.append(_sdr_adopt)
+            rc = _sdr_adopt.get("rc", rc)
+            out = (out or "") + _sdr_adopt.get("combined_log", "")
+            print(f"[pnr] SDR_ADOPT {_sdr_adopt.get('status')} "
+                  f"stages={_sdr_adopt.get('omitted_stages')} rc={rc}"
+                  + (f" reason={_sdr_adopt.get('reason')}"
+                     if _sdr_adopt.get("reason") else ""), file=sys.stderr)
+        _sdr_txn_records = _disclose_sdr_transactions(
+            project, out_dir, _sdr_adopt_records, _sdr_child_deck_failures)
         if rc in (_RC_STALLED, 124):
             # Genuinely hung route (stall) or the 24h+ pathological ceiling —
             # isolate the half-written final DEF so a downstream step never
@@ -29982,6 +30653,9 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         if _lp.is_file():
             _drt_final = _sdf.router_post_route_final_count(
                 _lp.read_text(errors="ignore"))
+    _drt_extras["sdr_transactions"] = _sdr_txn_records
+    if _sdr_adopt_records:
+        _drt_extras["sdr_adoptions"] = _sdr_adopt_records
     _drt_extras["drt_in_loop_metric"] = _drt_metrics.get(_KEY_DRT)
     _drt_extras["drt_final_verified"] = _drt_final
     _drt_published, _note, _refuse = _route_verdict(_drt_rec, _drt_final)
