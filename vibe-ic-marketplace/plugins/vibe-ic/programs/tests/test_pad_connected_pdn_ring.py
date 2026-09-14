@@ -158,6 +158,15 @@ def test_registry_ring_is_bound_to_the_real_pdk_entry():
     }
 
 
+def _self_tapeout(project: Path) -> None:
+    """The delivery decides whether a ring pins the die (98109186b): a record
+    an earlier run left on disk must not re-pin a floorplan to a ring THIS
+    delivery does not build. These projects are self-tape-outs, which build
+    their ring, so the record they write is the ring's own measurement."""
+    st = project / "input" / "submission_template"
+    st.mkdir(parents=True, exist_ok=True)
+    (st / "SELF_TAPEOUT.txt").write_text("self tape-out\n", encoding="utf-8")
+
 @pytest.mark.parametrize("with_ring", [False, True])
 def test_pnr_reserves_pdn_space_before_floorplan(monkeypatch, tmp_path, with_ring):
     """Run the real step up to floorplan sizing, observing the inset it uses.
@@ -176,6 +185,7 @@ def test_pnr_reserves_pdn_space_before_floorplan(monkeypatch, tmp_path, with_rin
     rec.parent.mkdir(parents=True)
     rec.write_text(json.dumps({"verdict": "WROTE", "die_required_um": {
         "ring_depth_um": 381.0, "die_side_um": 1962.0}}))
+    _self_tapeout(tmp_path)
     monkeypatch.setattr(R, "pnr_input_netlist", lambda *a: (netlist, "test DUT", False))
     monkeypatch.setattr(R, "_v1_6_599_check_wrapper_pin_order_cfg", lambda *a: None)
     monkeypatch.setattr(R, "_stage_via_legalized_tech_lef", lambda *a: {"status": "NOT_NEEDED"})
@@ -209,6 +219,7 @@ def test_pdn_space_tracks_both_orientations_without_chip_names(tmp_path):
     rec.parent.mkdir(parents=True)
     rec.write_text(json.dumps({"verdict": "WROTE", "die_required_um": {
         "ring_depth_um": 80.0}}))
+    _self_tapeout(tmp_path)
     # Deliberately unrelated layer names, widths and pad dimensions.
     pdk = _pdk(tmp_path)
     inset, why = R._padring_core_inset_um(tmp_path, pdk)
@@ -224,6 +235,7 @@ def test_invalid_ring_cannot_supply_a_floorplan_inset(tmp_path):
     rec.parent.mkdir(parents=True)
     rec.write_text(json.dumps({"verdict": "WROTE", "die_required_um": {
         "ring_depth_um": 80.0}}))
+    _self_tapeout(tmp_path)
     pdk = _pdk(tmp_path, ring={**RING, "widths": [0.8]})
     inset, why = R._padring_core_inset_um(tmp_path, pdk)
     assert inset is None and "invalid pdn_ring" in why
