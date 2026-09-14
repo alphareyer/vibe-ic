@@ -817,6 +817,29 @@ def emit_sby(rtl_files: List[str], harness_file: str, top: str,
     else:
         _safety_read = f"read_verilog -formal -sv {safety_defs} {reads}"
         _bmc_read = f"read_verilog -formal -sv {bmc_defs} {reads}"
+    # `multiclock on` — WITHOUT IT AN EDGE-POLARITY MUTATION IS INVISIBLE
+    # (2026-09-15, icspm2). The flow asks the `formal-verify` expert to
+    # discharge `L8.clock_and_reset_waveform.clocks.0.edge`, i.e. the DECLARED
+    # CLOCK EDGE. MEASURED on a real `spm` harness in the pinned image (SBY
+    # v0.67-31-g2c2f04e), one solo harness per property x a single-edit RTL
+    # mutant that flips `@(posedge clk)` to `@(negedge clk)`:
+    #
+    #     default (no multiclock)   base PASS   negedge mutant ERROR
+    #         engine_0: Error: Does not work for combinational networks.
+    #     multiclock on             base PASS   negedge mutant FAIL   x4 properties
+    #
+    # An ERROR is not a discrimination: the engine never evaluated the model, so
+    # the flow could not tell a design that honours its declared edge from one
+    # that does not — on the very obligation it had asked an expert to prove.
+    # With the option the base still proves and every property refutes the
+    # mutant. The predecessor lane recorded this as an unverified candidate
+    # ("edge POLARITY is outside what a clocked model checker can see"); it is
+    # verified here and the opposite is true.
+    #
+    # COST, measured on the same design: safety arm (mode prove, abc pdr,
+    # UNBOUNDED) PASS at size 8 and 32; bmc arm (abc bmc3, depth 12, the default
+    # above) PASS at size 8 and 32. Nothing that proved stops proving.
+    #
     # Headers are STAGED but never READ: `[files]` puts them in sby's `src/` so
     # a `` `include `` resolves; `read_verilog` must not be handed a macro body.
     srcs = list(rtl_files) + [harness_file] + list(include_files or [])
@@ -831,6 +854,7 @@ safety: depth {safety_depth}
 bmc:    mode bmc
 bmc:    depth {bmc_depth}
 aigsmt none
+multiclock on
 
 [engines]
 safety: {engine_prove}

@@ -173,3 +173,42 @@ def test_allow_incomplete_still_writes_a_draft_for_a_chip(tmp_path):
     rc, text = _run(p, out, "--allow-incomplete")
     assert rc == 0, text
     assert out.is_dir() and list(out.glob("*.html"))
+
+
+# ---------------------------------------------------------------------------
+# The SAME question, one program further along the same gate clause
+# ---------------------------------------------------------------------------
+def test_an_ip_delivery_owes_no_IC_release_documentation(tmp_path):
+    """MEASURED after the fix above moved the clause one program along:
+
+        release_docs_check . --arm ic   rc 1
+          [ERROR] RELEASE_DOCUMENTATION_ABSENT (spm): the run signs off layout
+          `spm` under phase3/stage4/gds and phase3/stage4/documentation/ic/spm
+          carries no release documentation
+        release_docs_check . --arm ip   rc 0   (six documents, PASS)
+
+    A hardmacro kit SHIPS a GDS — it is one of its four views — so a
+    stem-per-GDS rule makes every IP delivery owe a DIE document set it has no
+    die for, while the IP arm has already documented the same artefacts."""
+    import _ic_release_artefacts as art
+    p = _project(tmp_path, "IP", CLEAN)
+    (p / "phase3/stage4/gds").mkdir(parents=True)
+    (p / "phase3/stage4/gds/spm.gds").write_bytes(b"\x00\x06\x00\x02\x00\x07")
+    assert art.releases(p) == [], "an IP delivery owes no IC release"
+
+
+def test_a_self_tapeout_chip_still_owes_its_release_documentation(tmp_path):
+    import _ic_release_artefacts as art
+    p = _project(tmp_path, "CHIP", CLEAN)
+    (p / "phase3/stage4/gds").mkdir(parents=True)
+    (p / "phase3/stage4/gds/spm.gds").write_bytes(b"\x00\x06\x00\x02\x00\x07")
+    assert art.releases(p) == ["spm"]
+
+
+def test_an_undeclared_route_still_owes_its_release_documentation(tmp_path):
+    """Silence is not the IP path — a chip whose 0.5ic failed still owes them."""
+    import _ic_release_artefacts as art
+    p = _project(tmp_path, "NONE", CLEAN)
+    (p / "phase3/stage4/gds").mkdir(parents=True)
+    (p / "phase3/stage4/gds/spm.gds").write_bytes(b"\x00\x06\x00\x02\x00\x07")
+    assert art.releases(p) == ["spm"]

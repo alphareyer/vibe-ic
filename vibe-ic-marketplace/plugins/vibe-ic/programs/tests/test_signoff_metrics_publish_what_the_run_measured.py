@@ -243,9 +243,11 @@ def test_the_runner_emits_the_drc_attribution_reports_before_aggregating(
         "reports/phase3/drc_router.rpt": "[INFO DRT-0199] Number of violations = 0\n",
         "reports/phase3/drc_signoff.rpt": "total DRC errors: 0\n"})
     rows = fn(p)
-    assert {row["json"] for row in rows} == {
+    drc = [row for row in rows if row.get("program", "drc_report_check")
+           == "drc_report_check"]
+    assert {row["json"] for row in drc} == {
         "reports/phase3/drc_router.json", "reports/phase3/drc_signoff.json"}
-    for row in rows:
+    for row in drc:
         assert row["status"] == "PRODUCED", row
         assert (p / row["json"]).is_file(), row
 
@@ -270,8 +272,12 @@ def test_the_argv_is_the_one_the_flow_declares():
     if jobs is None:
         pytest.skip("pre-fix tree has no _DRC_ATTRIBUTION_JOBS")
     yaml = (PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml").read_text()
-    for rel_json, _rel_rpt, argv in jobs:
-        want = "drc_report_check . " + " ".join(argv) + f" --json {rel_json}"
+    for job in jobs:
+        prog, rel_json, _rel_rpt, argv = (
+            job if len(job) == 4 else ("drc_report_check", *job))
+        want = f"{prog} . " + " ".join(argv)
+        if prog == "drc_report_check":
+            want += f" --json {rel_json}"
         assert want in yaml, (
             f"the runner's invocation is not the flow's:\n  runner: {want}")
 
@@ -293,3 +299,52 @@ def test_the_verdict_of_the_spawned_gate_is_recorded_not_discarded(tmp_path):
         assert "rc" in row
         assert row["blocking_here"] is False
         assert row["why_advisory_here"]
+
+
+def test_the_spare_record_is_produced_before_the_summary_reads_it(tmp_path):
+    """`design_for_eco__spares__count` brought its OWN ordering dependency, and
+    it is the same defect one report over. MEASURED on a run of `spm`:
+
+        phase3/final/metrics.json          06:05:10   <- the summary
+        reports/spare_preservation.json    06:07:45   <- TWO AND A HALF MINUTES LATER
+        signoff_metrics_aggregate . --check -> rc 1
+          "1 key(s) no longer state what this run's reports state:
+           design_for_eco__spares__count"
+
+    The only thing that runs `spare_cell_preservation_check` is the flow's own
+    gate clause inside the completion audit. Its trigger here is the POST-FILL
+    DEF it reads, not one of its own outputs."""
+    import phase3_one_shot_runner as r
+    jobs = getattr(r, "_DRC_ATTRIBUTION_JOBS", None)
+    if jobs is None or len(jobs[0]) != 4:
+        pytest.skip("pre-fix tree has no multi-program producer table")
+    progs = {j[0] for j in jobs}
+    assert "spare_cell_preservation_check" in progs, sorted(progs)
+    row = next(j for j in jobs if j[0] == "spare_cell_preservation_check")
+    assert row[1] == "reports/spare_preservation.json"
+    assert row[2] == "phase3/stage3/pnr/filled.def", (
+        "the trigger must be the DEF it reads, not an output of its own")
+
+
+def test_the_sby_asks_for_multiclock_so_an_edge_mutation_is_visible():
+    """MEASURED on a real `spm` harness in the pinned image, one solo harness
+    per property x a mutant flipping `@(posedge clk)` to `@(negedge clk)`:
+
+        default (no multiclock)   base PASS   negedge mutant ERROR
+            engine_0: Error: Does not work for combinational networks.
+        multiclock on             base PASS   negedge mutant FAIL  x4 properties
+
+    An ERROR is not a discrimination. The flow asks the formal-verify expert to
+    discharge `L8.clock_and_reset_waveform.clocks.0.edge` — the DECLARED CLOCK
+    EDGE — and without this option nothing it authors can refute a design that
+    does not honour it."""
+    import formal_property_run as fpr
+    sby = fpr.sby_text(
+        harness_file="h.sv", rtl_files=["d.v"], top="fv_top") \
+        if hasattr(fpr, "sby_text") else None
+    if sby is None:
+        import inspect
+        src = inspect.getsource(fpr)
+        assert "multiclock on" in src, "the emitted .sby never asks for it"
+    else:
+        assert "multiclock on" in sby, sby

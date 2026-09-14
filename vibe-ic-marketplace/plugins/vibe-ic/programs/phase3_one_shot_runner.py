@@ -45548,11 +45548,23 @@ def _canonical_step_condition(project: Path, step_id: str
 #: it summarises it, and `test_signoff_metrics_sources_exist_before_the_summary`
 #: asserts the two spellings still agree with the flow.
 _DRC_ATTRIBUTION_JOBS = (
-    ("reports/phase3/drc_router.json", "reports/phase3/drc_router.rpt",
+    ("drc_report_check", "reports/phase3/drc_router.json",
+     "reports/phase3/drc_router.rpt",
      ("--mode", "drc", "--under", "phase3/stage3/pnr",
       "--under", "reports/phase3/drc_router.rpt")),
-    ("reports/phase3/drc_signoff.json", "reports/phase3/drc_signoff.rpt",
+    ("drc_report_check", "reports/phase3/drc_signoff.json",
+     "reports/phase3/drc_signoff.rpt",
      ("--mode", "drc", "--signoff", "--under", "reports/phase3/drc_signoff.rpt")),
+    # The spare-cell survival record, for `design_for_eco__spares__count`. Same
+    # ordering defect, found the same way: MEASURED on a run of `spm`,
+    # `phase3/final/metrics.json` 06:05:10 and `reports/spare_preservation.json`
+    # 06:07:45 — the summary two and a half minutes ahead of its source, because
+    # the only thing that runs the checker is the flow's own gate clause inside
+    # the completion audit. The trigger here is the POST-FILL DEF the checker
+    # reads, not one of its own outputs.
+    ("spare_cell_preservation_check", "reports/spare_preservation.json",
+     "phase3/stage3/pnr/filled.def",
+     ("--json", "reports/phase2/gates/spare_preservation_postfill.json")),
 )
 
 
@@ -45593,27 +45605,27 @@ def _emit_drc_attribution_reports(project: Path) -> List[Dict[str, Any]]:
     whatever it finds there.
     """
     out: List[Dict[str, Any]] = []
-    prog = PROGRAMS_DIR / "drc_report_check.py"
-    if not prog.is_file():                                   # pragma: no cover
-        return out
-    for rel_json, rel_rpt, argv in _DRC_ATTRIBUTION_JOBS:
-        row: Dict[str, Any] = {"json": rel_json, "rpt": rel_rpt,
+    for prog_name, rel_json, rel_rpt, argv in _DRC_ATTRIBUTION_JOBS:
+        prog = PROGRAMS_DIR / f"{prog_name}.py"
+        row: Dict[str, Any] = {"program": prog_name,
+                               "json": rel_json, "rpt": rel_rpt,
                                "blocking_here": False,
                                "why_advisory_here":
                                    "the flow's own step evaluates this gate's "
                                    "exit code; this call site only needs the "
                                    "attribution record to exist before the "
                                    "sign-off summary reads it"}
-        if not (project / rel_rpt).is_file():
+        if not prog.is_file() or not (project / rel_rpt).is_file():
             row["status"] = "NOT_APPLICABLE"
-            row["reason"] = f"{rel_rpt} is absent — this run produced no such " \
-                            f"DRC report, so there is nothing to attribute"
+            row["reason"] = (f"{rel_rpt} is absent — this run produced no "
+                             f"such artefact, so there is nothing to record")
             out.append(row)
             continue
         try:
-            cp = _pr.run([sys.executable, str(prog), ".", *argv,
-                          "--json", rel_json],
-                         cwd=str(project), check=False,
+            cmd = [sys.executable, str(prog), ".", *argv]
+            if prog_name == "drc_report_check":
+                cmd += ["--json", rel_json]
+            cp = _pr.run(cmd, cwd=str(project), check=False,
                          capture_output=True, text=True)
             row["rc"] = cp.returncode
             row["status"] = "PRODUCED" if (project / rel_json).is_file() \
