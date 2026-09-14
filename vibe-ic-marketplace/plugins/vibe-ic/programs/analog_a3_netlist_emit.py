@@ -144,6 +144,7 @@ import pdk_family_identity as _ident  # noqa: E402 — the ONE family matcher
 import analog_netlist_connectivity_check as _conncheck  # noqa: E402
 # The A1 spec-row reading rule, owned by A2 — see `spec_values`.
 import analog_a2_topology_emit as _a2  # noqa: E402
+import analog_poweron_sequence as _poweron  # noqa: E402  (lane icadc)
 import pdk_analog_device_params as _pdp  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1407,7 +1408,36 @@ def render_testbench(ir: Dict[str, Any], pdkctx: Dict[str, Any],
     L.append(".endc")
     L.append(".end")
     L.append("")
-    return "\n".join(L), e, notes
+    text = "\n".join(L)
+
+    # THE POWER-ON SEQUENCE (lane icadc, 2026-09-15). MEASURED: the deck this
+    # producer renders for a CLOCKED block puts the supply at full rail and
+    # starts the clock at t=0, so ngspice has to SOLVE a DC operating point
+    # for a bias the clocked loop itself establishes. At the nominal corner it
+    # does; at SS/-40 C on `delta_sigma` it exhausted all five homotopies in
+    # 20.7 s ("trouble with node \"xdut.nbias\"", `tran simulation(s)
+    # aborted`) and the corner yielded NOTHING. The same deck with the rail
+    # ramped from 0 and the first clock edge held one period converges
+    # ("Dynamic gmin stepping completed") and runs. This is NOT `uic` — see
+    # `analog_poweron_sequence`, whose docstring keeps the `delta_sigma`
+    # entry's own measured reason for forbidding `uic` and explains why a rail
+    # that starts at 0 V is a SOLVED operating point rather than an unsolved
+    # initial condition.
+    #
+    # The transform REFUSES BY NAME on a deck it must not touch — an `op`-only
+    # deck (`no_transient`) and an unclocked block (`no_clock_source`) both
+    # keep the deck they had, byte for byte — so this cannot reach a block
+    # that has no clocked loop to bring up.
+    _rail = (ir.get("rails") or {}).get("vdd")
+    if isinstance(_rail, str) and _rail:
+        text, _po = _poweron.apply(text, _rail)
+        notes.append(_po.get("provenance")
+                     or f"poweron_sequence=not applied: {_po.get('refused')}")
+        e["poweron_sequence"] = _po
+    else:
+        notes.append("poweron_sequence=not applied: the topology IR declares "
+                     "no `vdd` rail to bring up")
+    return text, e, notes
 
 
 # ── self-verification ─────────────────────────────────────────────────────
