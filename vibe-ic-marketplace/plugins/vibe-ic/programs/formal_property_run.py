@@ -1455,14 +1455,28 @@ def _write_authoring_incomplete(formal_dir: Path, reason: str) -> None:
     })
 
 
-def _assertion_count(path: Optional[Path]) -> int:
-    """Count actual asserted properties in the authored harness."""
-    if path is None or not path.is_file():
-        return 0
-    text = re.sub(r"/\*.*?\*/", " ", path.read_text(errors="replace"),
-                  flags=re.DOTALL)
-    text = re.sub(r"//[^\n]*", "", text)
-    return len(re.findall(r"\bassert\s*(?:property\s*)?\(", text))
+def _assertion_count(path: Optional[Path],
+                     extra: Optional[List[Path]] = None) -> int:
+    """Count actual asserted properties in the authored harness.
+
+    `extra` carries the files the harness INCLUDES. An assert lives where it
+    is written, and an expert-authored property lives in
+    `formal_expert_properties.svh`, not in the generated harness that
+    `` `include ``s it -- so counting the harness alone reports 0 of them and
+    the caller then publishes `contract claims N covered obligation(s) but
+    harness contains 0 assert statement(s)` about a proof that really did
+    discharge N outputs. MEASURED on `subservient` x gf180mcuD: harness 1 +
+    fragment 3 = 4 asserts, and sby proved outputs 0..3.
+    """
+    texts = []
+    for f in [path] + list(extra or []):
+        if f is None or not f.is_file():
+            continue
+        body = re.sub(r"/\*.*?\*/", " ", f.read_text(errors="replace"),
+                      flags=re.DOTALL)
+        texts.append(re.sub(r"//[^\n]*", "", body))
+    return sum(len(re.findall(r"\bassert\s*(?:property\s*)?\(", x))
+               for x in texts)
 
 
 def _attach_property_contract(results: dict, formal_dir: Path,
@@ -1473,7 +1487,19 @@ def _attach_property_contract(results: dict, formal_dir: Path,
     its actual assertions. The in-flow generator writes `property_contract.json`
     with all remaining L3/L6/L8 obligations, which takes precedence.
     """
-    actual = _assertion_count(harness)
+    # THE HARNESS MAY NOT HAVE BEEN HANDED IN. `run()` reuses an existing
+    # `.sby` when no harness is passed, and `harness` is then None -- so this
+    # counted 0 asserts for a run that proved four, and the mismatch row below
+    # fired on a complete proof. The harness a reused task file READS is in
+    # its own `[files]` block; resolve it there rather than reporting a
+    # denominator against a file nobody named.
+    _harness = harness
+    if _harness is None or not _harness.is_file():
+        for cand in sorted(formal_dir.glob("formal_*.sv")):
+            _harness = cand
+            break
+    actual = _assertion_count(
+        _harness, [formal_dir / EXPERT_PROPERTIES_SVH])
     manifest_path = formal_dir / "property_contract.json"
     contract: dict = {}
     if manifest_path.is_file():
@@ -1581,6 +1607,47 @@ def _attach_property_contract(results: dict, formal_dir: Path,
         results["formal_completion"] = results.get("verdict")
 
 
+#: ONE spelling of the expert-property fragment's name, taken from the
+#: program that emits the `` `include `` for it rather than retyped here.
+try:
+    from formal_harness_gen import EXPERT_PROPERTIES_SVH  # noqa: E402
+except Exception:  # noqa: BLE001 — a sibling that cannot be imported is named
+    EXPERT_PROPERTIES_SVH = "formal_expert_properties.svh"
+
+
+def _ensure_expert_fragment_staged(sby_path: Path, formal_dir: Path) -> bool:
+    """Add the expert-property fragment to a REUSED .sby's `[files]` block.
+
+    Returns True when the file was changed. A no-op when the fragment is not
+    on disk (nothing to stage) or is already listed (nothing to add), so a
+    project without expert properties reads and writes byte-identical .sby
+    files to the ones it had before this existed.
+
+    The append is to `[files]` ONLY. It is a fragment, and `read_verilog` must
+    never be handed a macro body -- the same rule the header staging follows.
+    """
+    frag = formal_dir / EXPERT_PROPERTIES_SVH
+    if not frag.is_file():
+        return False
+    try:
+        text = sby_path.read_text(errors="replace")
+    except OSError:
+        return False
+    if "[files]" not in text:
+        return False
+    head, _, files_block = text.partition("[files]")
+    if any(line.strip() == EXPERT_PROPERTIES_SVH
+           for line in files_block.splitlines()):
+        return False
+    try:
+        sby_path.write_text(
+            head + "[files]" + files_block.rstrip("\n")
+            + f"\n{EXPERT_PROPERTIES_SVH}\n")
+    except OSError:
+        return False
+    return True
+
+
 def _stage_include_headers(rtl: List[Path], formal_dir: Path,
                            already: Optional[List[str]] = None) -> List[str]:
     """Copy the headers `rtl` includes into `formal_dir`; return their names.
@@ -1595,6 +1662,17 @@ def _stage_include_headers(rtl: List[Path], formal_dir: Path,
     """
     staged = set(already or [])
     names: List[str] = []
+    # THE EXPERT-AUTHORED PROPERTY FRAGMENT, staged like any other include.
+    # `formal_harness_gen` emits `` `include "formal_expert_properties.svh" ``
+    # inside the harness when this file is present; sby copies every `[files]`
+    # entry into its own `src/`, so without this line the include would resolve
+    # in `formal/` and NOT in the directory yosys actually reads from. Staged
+    # but never READ, exactly like the header case below: it is a fragment, and
+    # handing a macro body to `read_verilog` is what that rule exists to stop.
+    _expert = formal_dir / EXPERT_PROPERTIES_SVH
+    if _expert.is_file() and _expert.name not in staged:
+        names.append(_expert.name)
+        staged.add(_expert.name)
     for h in resolve_include_headers(list(rtl)):
         if h.name in staged:
             continue
@@ -1710,6 +1788,18 @@ def run(project: Path, harness: Optional[Path] = None,
         existing = sorted(formal_dir.glob("*.sby"))
         if existing and harness is None:
             sby_path = existing[0]
+
+    # A REUSED .sby IS A STALE ONE, and staleness here is not cosmetic.
+    # `formal_harness_gen` emits `` `include "formal_expert_properties.svh" ``
+    # into the harness the moment that fragment exists; a .sby written BEFORE
+    # it existed does not list it, sby stages every `[files]` entry into its
+    # own `src/` and nothing else, and yosys then dies with
+    #     ERROR: Can't open include file `formal_expert_properties.svh'!
+    # turning a proof that passes into ERROR / INCONCLUSIVE. MEASURED exactly
+    # that way on the first run of this path. The repair is the smallest one
+    # that can be right: a task file that names a source must stage it.
+    if sby_path is not None and sby_path.is_file():
+        _ensure_expert_fragment_staged(sby_path, formal_dir)
 
     if sby_path is None:
         # need to author a .sby from a harness
