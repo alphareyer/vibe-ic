@@ -1,5 +1,5 @@
 {
-  "_comment": "Declaration regexes scanned over text no stripper touched (vibe-ic#731). MAY ONLY SHRINK. A comment sentence matching `module\\s+(\\w+)` mints a module that does not exist \u2014 24 of them, measured, in #729.  2026-09-06 (czmainred): six entries DELETED AS SOURCE, reviewed like code \u2014 their scans became comment-stripped, so the entries no longer named an offender. The gate had been printing an errand pointing at --write-baseline; a debt register shrinks by a reviewed deletion, never by a flag. 2026-09-07 (czmainred3): three more DELETED AS SOURCE after rebasing onto v1.18.24 (83af0e54b, #731), which comment-stripped their scans; the entries no longer named an offender. Same rule, applied to somebody else's fix.",
+  "_comment": "Declaration regexes scanned over text no stripper touched (vibe-ic#731). MAY ONLY SHRINK. A comment sentence matching `module\\s+(\\w+)` mints a module that does not exist — 24 of them, measured, in #729.  2026-09-06 (czmainred): six entries DELETED AS SOURCE, reviewed like code — their scans became comment-stripped, so the entries no longer named an offender. The gate had been printing an errand pointing at --write-baseline; a debt register shrinks by a reviewed deletion, never by a flag. 2026-09-07 (czmainred3): three more DELETED AS SOURCE after rebasing onto v1.18.24 (83af0e54b, #731), which comment-stripped their scans; the entries no longer named an offender. Same rule, applied to somebody else's fix.  2026-09-15 (icspm2): the three `synth_wrapper_check` entries DELETED AS SOURCE. Its declaration scans now read `_hdl_code_text.strip_hdl_comments_and_strings(...)`; `design_has_inout` in particular was the live instance the register was written for — on a completed gf180mcuD run of `spm` it read `// No inout pad in L9` out of a testbench comment and refused the design for an inout port nothing declares. The entries no longer name an offender.",
   "known": [
     "_dft_netlist_ports::restore_inout_ports::hdr(chained_text)",
     "_dft_netlist_ports::strip_inout_ports::hdr_re(text)",
@@ -138,9 +138,6 @@
     "staged_rtl_reused_ip_manifest_emit::_derive_ip_list::_RE_MODULE_DECL(txt)",
     "synth_area_stats_emit::parse_blocks::_RE_AREA(line)",
     "synth_netlist_check::audit_netlist::MODULE_RE(text)",
-    "synth_wrapper_check::audit::INOUT_RE(text)",
-    "synth_wrapper_check::audit::MODULE_DECL_RE(text)",
-    "synth_wrapper_check::design_has_inout::INOUT_RE(text)",
     "table_lut_synth::_solve_table::_SEQ_HEADER_RE(h)",
     "testbench_gen::resolve_dut::_MODULE_DECL_RE(txt)",
     "timer_freeze_after_state_check::_module_imports_state::decl_re(mod_text)",
