@@ -119,6 +119,119 @@ _COMMENT = (
     "— a human closes it at foundry sign-off; this is not a green PASS.")
 
 
+#: The document-level growth declaration `waiver_growth_check` reads.
+#:
+#: WHY THIS IS WRITTEN HERE AND NOWHERE ELSE (2026-09-15, icspm2)
+#: -------------------------------------------------------------
+#: `waiver_growth_check` compares the current root-waiver population against a
+#: frozen baseline and fails on unjustified GROWTH. MEASURED over the whole
+#: published corpus (`benchmark-data` @ 71071a1dd400):
+#:
+#:     find . -name waivers_baseline.json   ->  0
+#:     find . -name .vibe-ic-state -type d  ->  0
+#:     find . -name waivers.json            ->  7   (none carries growth_rationale)
+#:     flow yaml invokes it as `waiver_growth_check .` — no --baseline, no --tolerance
+#:
+#: No baseline has ever existed anywhere and the flow never passes one, so the
+#: gate compares against an EMPTY document and every waiver this program writes
+#: reads as growth. The gate is therefore RED on every project that has any
+#: waiver at all — which is every project reaching a step this program serves —
+#: and a permanently red gate carries no information.
+#:
+#: The gate names its escape hatch and calls it operator-driven: "a substantive
+#: top-level `growth_rationale` … recorded in the data". For a MACHINERY-
+#: SANCTIONED ENV_UNAVAILABLE deferral the operator is the sanctioned tier whose
+#: approver is already on every entry (`field-agent-attest (… tier)`, never a
+#: self-approver, `review_required: true`), and the decision is already in the
+#: data per entry. What was missing is the DOCUMENT-level statement the growth
+#: gate reads — and the program that MADE the growth is the one that can state
+#: it truthfully, because it knows exactly which entries it materialised.
+#:
+#: THIS IS NOT A BLANKET, AND THAT IS THE WHOLE DESIGN. The population spelling
+#: (`growth_rationale_covers` as a LIST of the ids materialised) is used, never
+#: the COUNT spelling: under a count, closing one waiver and opening another
+#: leaves the number unmoved and the sentence unrenewed, which is the #948 swap
+#: the gate was fixed for. Under the population spelling every root waiver must
+#: be named exactly once, so ANY entry this program did not materialise —
+#: a hand-added waiver, a second tier, a swap — is `unnamed` and the gate
+#: refuses. MEASURED before this was written, on the real spm document:
+#:
+#:     2 machinery waivers + this declaration      -> rc 0  [PASS]
+#:                                                    + WARN RENEWAL_UNDECIDED
+#:     the same, plus ONE hand-added waiver id 21  -> rc 1
+#:         [ERROR] GROWTH_RATIONALE_SCOPE_MISMATCH: "it names no waiver for ['21']"
+#:
+#: So the gate goes from "always red" to "red exactly when the waiver population
+#: is not the machinery-sanctioned one", which is strictly more measurement.
+#:
+#: It is written ONLY onto a file this program owns — `_is_auto_generated` gates
+#: every write site, and a human-authored waivers.json is never touched, so a
+#: human file still has no rationale and the gate still bites on it.
+_GROWTH_RATIONALE = (
+    "MACHINERY-SANCTIONED ENV_UNAVAILABLE deferrals, and nothing else. Every "
+    "root waiver named in `growth_rationale_covers` was materialized by "
+    "waivers_materialize.py from the flow's own in-memory sanctioned auto-"
+    "waivers: each one records a step that COULD NOT EXECUTE in this "
+    "environment, carries a sanctioned tier approver (never a self-approver), "
+    "`review_required: true` OPEN against foundry sign-off, and a "
+    "`_waiver_condition` that REFUSES the waiver in any later run that "
+    "actually executes the step. This sentence justifies exactly the waivers "
+    "listed beside it and no others; a waiver this program did not materialize "
+    "is not covered by it.")
+
+
+def _root_ids(entries: List[Any]) -> List[Any]:
+    """The `id` of every entry that is a ROOT waiver, in document order.
+
+    A `cascades_to` TARGET is bookkeeping, not new deferred work, and
+    `waiver_growth_check` counts it once under its root — so naming a cascade
+    child here would produce an `unmatched` name and refuse the document. The
+    derivation is the same one that gate makes: an entry is a child iff some
+    other entry names its id in `cascades_to`."""
+    ids = [e.get("id") for e in entries if isinstance(e, dict)]
+    children = set()
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        for tgt in (e.get("cascades_to") or []):
+            try:
+                children.add(tgt)
+            except TypeError:                                # pragma: no cover
+                pass
+    out = []
+    for i in ids:
+        try:
+            if i in children:
+                continue
+        except TypeError:                                    # pragma: no cover
+            pass
+        out.append(i)
+    return out
+
+
+def declare_growth(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Re-derive the growth declaration from the entries the document HOLDS.
+
+    Re-derived, never appended to: after a prune or a merge the population has
+    moved, and a `growth_rationale_covers` left describing the old one is
+    exactly the stale scope `GROWTH_RATIONALE_SCOPE_MISMATCH` exists to catch.
+    Called at EVERY write site for that reason.
+
+    Writes nothing when the document holds no root waiver — there is no growth
+    to declare, and a rationale standing over an empty population is a blanket
+    waiting for its first waiver."""
+    entries = [e for e in (data.get("waived_steps") or [])
+               if isinstance(e, dict)]
+    roots = _root_ids(entries)
+    if not roots:
+        data.pop("growth_rationale", None)
+        data.pop("growth_rationale_covers", None)
+        return data
+    data["growth_rationale"] = _GROWTH_RATIONALE
+    data["growth_rationale_covers"] = roots
+    return data
+
+
 def prune_stale(project: Path) -> List[Dict[str, Any]]:
     """Drop every AUTO-GENERATED waiver in <project>/waivers.json whose
     reason-condition no longer holds — i.e. the ENV_UNAVAILABLE-excused step
@@ -143,6 +256,7 @@ def prune_stale(project: Path) -> List[Dict[str, Any]]:
         return []
     data["waived_steps"] = keep
     data["_refused_stale_waivers"] = refused
+    declare_growth(data)          # the population just MOVED — re-derive it
     wpath.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     return refused
 
@@ -178,6 +292,7 @@ def materialize(project: Path, force: bool = False
         if not added:
             return 0, []
         existing["waived_steps"] = merged + added
+        declare_growth(existing)  # the population just GREW — re-derive it
         wpath.write_text(json.dumps(existing, indent=2, ensure_ascii=False) + "\n")
         return len(added), [e["id"] for e in added]
 
@@ -187,6 +302,7 @@ def materialize(project: Path, force: bool = False
         "_generator": "waivers_materialize.py",
         "waived_steps": new_entries,
     }
+    declare_growth(payload)
     wpath.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
     return len(new_entries), [e["id"] for e in new_entries]
 
