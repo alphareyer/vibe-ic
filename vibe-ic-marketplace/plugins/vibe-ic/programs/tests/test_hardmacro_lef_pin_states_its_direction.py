@@ -357,3 +357,48 @@ def test_the_gate_is_green_on_the_repaired_lef():
                   if not v and C.base_name(s, d["bus_chars"]) in d["signal"])
     assert bare == []
     assert "VSS" not in d["signal"], "the supply is not asked for a direction"
+
+
+# ── the gate END TO END, executable on BOTH trees ─────────────────────────
+
+def test_the_whole_gate_refuses_a_kit_whose_lef_drops_a_direction(tmp_path):
+    """THE CONTROL THAT NEEDS NO NEW SYMBOL. It drives the shipped gate over a
+    complete four-view kit whose only defect is a LEF bus BIT with no
+    DIRECTION, and asks for the gate's verdict.
+
+    Pre-fix the gate reported **PASS** over it: `parse_lef` had read DIRECTION
+    since the gate was written and nothing consumed it, and the base-name
+    rollup saw `dout[0]`'s direction and called the whole bus attributed. That
+    is how a malformed primary deliverable reached `phase3/stage4/hardmacro/`
+    with `PASS [PRODUCED]` beside it.
+
+    Every other axis of the kit is deliberately left agreeing, so a red here
+    is this clause and nothing else.
+    """
+    from test_digital_hardmacro_check import LEF_OK, make_kit, rules
+    holed = LEF_OK.replace(
+        "  PIN dout[1]\n    DIRECTION OUTPUT ;\n    USE SIGNAL ;\n",
+        "  PIN dout[1]\n", 1)
+    assert holed != LEF_OK and holed.count("DIRECTION") == LEF_OK.count(
+        "DIRECTION") - 1
+    got = rules(make_kit(tmp_path, lef=holed))
+    assert "LEF_SIGNAL_PIN_NO_DIRECTION" in got, (
+        "the gate passed a kit whose LEF does not say which way dout[1] "
+        f"points; it reported {sorted(got)}")
+
+
+def test_the_whole_gate_still_passes_the_agreeing_kit(tmp_path):
+    """The guard that the new clause did not redden a correct kit."""
+    from test_digital_hardmacro_check import make_kit, rules
+    got = rules(make_kit(tmp_path))
+    assert "LEF_SIGNAL_PIN_NO_DIRECTION" not in got
+    assert "LEF_BUS_DIRECTION_MIXED" not in got
+
+
+def test_the_whole_gate_refuses_a_bus_whose_bits_point_both_ways(tmp_path):
+    from test_digital_hardmacro_check import LEF_OK, make_kit, rules
+    mixed = LEF_OK.replace(
+        "  PIN dout[1]\n    DIRECTION OUTPUT ;",
+        "  PIN dout[1]\n    DIRECTION INPUT ;", 1)
+    got = rules(make_kit(tmp_path, lef=mixed))
+    assert "LEF_BUS_DIRECTION_MIXED" in got
