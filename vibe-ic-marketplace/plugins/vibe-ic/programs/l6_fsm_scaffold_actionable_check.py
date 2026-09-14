@@ -293,6 +293,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _gate_denominator as _gd  # noqa: E402
+import _flow_reason_taxonomy as _reason_taxonomy  # noqa: E402
 import _path_layout as _pl  # noqa: E402
 import _rtl_fsm_extract as _rtlfsm  # noqa: E402
 
@@ -1300,9 +1301,43 @@ def evaluate(project: Path) -> Dict[str, Any]:
         # that only survives on the FAIL path is an advisory nobody reads on
         # the path it was written for.
         out["warnings"] = warnings
+        # THIS IS THE ONE SKIP PATH THAT IS A DESIGN DECLARATION, AND IT MUST
+        # SAY SO IN BOTH REGISTERS (lane icadc, 2026-09-15, MEASURED).
+        #
+        # The other three SKIPs this gate can reach — `no L6_CONTROL_LOGIC.json`,
+        # `L6 is not parseable JSON`, `L6 top level is not an object` — are an
+        # absent or broken artefact, which is a fault and must keep defaulting
+        # to EXECUTION_ERROR. This one is the design's own control-logic layer
+        # stating there is no FSM: the same declaration that routes this
+        # design's other digital steps to N/A.
+        #
+        # WHY BOTH THE FIELD AND THE SENTENCE. `flow/phase1_phase2_phase3.yaml`
+        # wires this gate BARE — `command: "l6_fsm_scaffold_actionable_check ."`
+        # — deliberately (a `--json` here would write a report
+        # `step_internal_fail_bubble_up_check` then reads, manufacturing its own
+        # red; the yaml records that measurement). With no `--json`,
+        # `flow_compliance_check._command_json_report` has no report to read, so
+        # the typed field below is invisible on THAT path and the classifier
+        # falls back to `_flow_reason_taxonomy.infer_nonverdict_reason`, which
+        # reads this sentence. It recognises "declared no" and "do not declare"
+        # and did NOT recognise "declares no" — one verb inflection — so this
+        # gate's honest N/A was classified EXECUTION_ERROR, which is not
+        # skip-eligible, so step D1 landed INCOMPLETE and the whole run was
+        # blocked by it. MEASURED on a real front-door run: D1 INCOMPLETE was
+        # the ONLY blocker outside the analog track, out of 35 gate rows and 58
+        # SKIPPED-CONDITION steps.
+        #
+        # THE RECOGNISER WAS NOT WIDENED, ON PURPOSE. "declares no" appears in
+        # 469 files in this tree, and several of them are real faults —
+        # `flow_dependency_graph_check` says "declares no steps" about a flow
+        # definition that is broken. Teaching the shared default to accept that
+        # inflection would launder those into skips. One gate's own sentence is
+        # changed instead, and a test pins the CLASSIFICATION rather than the
+        # wording so a future rewording cannot regress it silently.
+        out["reason_class"] = _reason_taxonomy.DESIGN_DECLARED_NA
         out["reason"] = (
-            "L6 positively declares no FSM in the input and declares no "
-            "reject_rules[] — nothing this gate can hold it to")
+            "the design's own L6 declared no FSM in the input and declared no "
+            "reject_rules[] — there is nothing this gate can hold it to")
         return out
 
     # ---------------- #504 — Part A's consumer model ----------------
