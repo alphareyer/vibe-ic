@@ -272,3 +272,121 @@ def test_the_measured_xor3_ratio_lands_in_family_with_its_siblings():
     assert -40.0 < gap_pct < 0.0, (
         f"gap {gap_pct:.2f}% against liberty {liberty_ns}; the siblings are "
         f"-8.19 / -19.51 / -18.97 %")
+
+
+# ---------------------------------------------------------------------------
+# THE OPERATING POINT: a report that states it beats one that does not
+# ---------------------------------------------------------------------------
+# MEASURED on a gf180mcuD run of `spm`. `phase3/stage3/sta/` holds BOTH OpenSTA
+# shapes over the same four combinational stages, so they TIED on the stitch
+# score and `sorted()` handed the tie to the SUMMARY one, which states neither
+# column. `sta_load_pf` and `input_slew_ns` were then None on every stage and
+# the fallbacks fired: the load to the SPEF's WIRE capacitance, the slew to
+# `index_1[len//2]` — the middle of the table. All four stages recorded
+# `input_slew_ns: 1.769`, which IS that middle index; four drivers cannot share
+# it. Measured with ngspice on the dominant stage:
+#
+#   in-slew 0.41, load 0.40   (BOTH as STA states)   3.3184 ns   +0.9 % vs STA
+#   slew 1.769 (default), load 0.165233 (wire only)  1.5308 ns  -53.5 % vs STA
+#
+# and after the tie-break the producer reports `pct_error -3.88 %` / CORRELATED
+# where it had reported -34.43 % / CRITICAL_MISMATCH.
+SUMMARY_RPT = """\
+Startpoint: _395_ (rising edge-triggered flip-flop clocked by clk)
+Endpoint: _410_ (rising edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: max
+
+  Delay    Time   Description
+---------------------------------------------------------
+   0.00    0.00   clock clk (rise edge)
+   1.55    2.66 ^ _395_/Q (lib__dffq_1)
+   3.29    5.95 ^ place2/Z (lib__buf_2)
+   0.84    6.79 v _248_/ZN (lib__nand2_1)
+           8.56   data arrival time
+"""
+
+DETAILED_RPT = """\
+Startpoint: _395_ (rising edge-triggered flip-flop clocked by clk)
+Endpoint: _410_ (rising edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: max
+
+    Cap    Slew   Delay    Time   Description
+-----------------------------------------------------------------------
+   0.01    0.41    1.56    2.68 ^ _395_/Q (lib__dffq_1)
+   0.40    5.44    3.55    6.23 ^ place2/Z (lib__buf_2)
+   0.02    1.58    0.88    7.11 v _248_/ZN (lib__nand2_1)
+                           8.96   data arrival time
+"""
+SUBCKTS = {"lib__dffq_1", "lib__buf_2", "lib__nand2_1"}
+
+
+def _sta_dir(tmp_path, **files):
+    import _path_layout as _pl
+    proj = tmp_path / "proj"
+    d = _pl.sta_dir(proj)
+    d.mkdir(parents=True)
+    for name, text in files.items():
+        (d / name).write_text(text)
+    return proj
+
+
+def test_the_summary_report_states_no_operating_point():
+    """The reproduction, through the gate's OWN parser."""
+    p = scc.parse_sta_path(SUMMARY_RPT)
+    rows = [r for r in p["rows"] if r["cell"] in SUBCKTS]
+    assert rows
+    assert all(r.get("cap_pf") is None and r.get("slew_ns") is None
+               for r in rows), rows
+
+
+def test_the_detailed_report_states_it():
+    p = scc.parse_sta_path(DETAILED_RPT)
+    row = next(r for r in p["rows"] if r["pin"] == "place2/Z")
+    assert row["cap_pf"] == 0.40
+    assert row["slew_ns"] == 5.44
+
+
+def test_a_tie_goes_to_the_report_that_states_its_operating_point(tmp_path):
+    """Both expose the same stages; `sorted()` used to hand the tie to the
+    alphabetically-first name, which is the summary one."""
+    proj = _sta_dir(tmp_path,
+                    **{"post_route_timing.rpt": SUMMARY_RPT,
+                       "sta_mcorner_ocv.rpt": DETAILED_RPT})
+    picked = scc._pick_sta_report(proj, SUBCKTS)
+    assert picked is not None and picked.name == "sta_mcorner_ocv.rpt", picked
+
+
+def test_the_stitch_score_still_dominates(tmp_path):
+    """A report that states an operating point for a path this gate cannot
+    stitch is worth nothing; a richer path always wins."""
+    thin = DETAILED_RPT.replace(
+        "   0.40    5.44    3.55    6.23 ^ place2/Z (lib__buf_2)\n", "").replace(
+        "   0.02    1.58    0.88    7.11 v _248_/ZN (lib__nand2_1)\n", "")
+    proj = _sta_dir(tmp_path,
+                    **{"post_route_timing.rpt": SUMMARY_RPT,
+                       "sta_mcorner_ocv.rpt": thin})
+    picked = scc._pick_sta_report(proj, SUBCKTS)
+    assert picked.name == "post_route_timing.rpt", picked
+
+
+def test_a_lone_summary_report_is_still_picked(tmp_path):
+    """The tie-break must not make a summary-only tree unmeasurable."""
+    proj = _sta_dir(tmp_path, **{"post_route_timing.rpt": SUMMARY_RPT})
+    assert scc._pick_sta_report(proj, SUBCKTS).name == "post_route_timing.rpt"
+
+
+def test_a_report_with_no_stitchable_stage_is_never_picked(tmp_path):
+    proj = _sta_dir(tmp_path, **{"only.rpt": SUMMARY_RPT})
+    assert scc._pick_sta_report(proj, {"some__other_cell"}) is None
+
+
+def test_the_operating_point_count_is_a_count_not_a_flag():
+    """A report that states the point on MORE of the path wins, so a
+    half-annotated report cannot beat a fully annotated one."""
+    fn = getattr(scc, "sta_path_states_its_operating_point", None)
+    if fn is None:
+        pytest.skip("pre-fix tree has no sta_path_states_its_operating_point")
+    assert fn(SUMMARY_RPT) == 0
+    assert fn(DETAILED_RPT) >= 3

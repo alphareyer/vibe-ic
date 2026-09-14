@@ -2391,10 +2391,64 @@ def parse_sta_corner_basis(text: str) -> dict:
     return out
 
 
+def sta_path_states_its_operating_point(text: str) -> int:
+    """How many of a report's path rows STATE the operating point they were
+    timed at — the `Cap` and `Slew` columns (pure).
+
+    OpenSTA prints two shapes. The SUMMARY form is `Delay Time Description`
+    and states NEITHER; the detailed form is `Cap Slew Delay Time Description`
+    and states both. `parse_sta_path` reads either, and every consumer of a
+    stage in this module is already written for the detailed one —
+    `"sta_load_pf": r.get("cap_pf")`, `"input_slew_ns": prior_slew`.
+    """
+    p = parse_sta_path(text)
+    if not p:
+        return 0
+    return sum(1 for r in p["rows"]
+               if r.get("cap_pf") is not None and r.get("slew_ns") is not None)
+
+
 def _pick_sta_report(project: Path, subckt_names: set) -> Optional[Path]:
     """Pick the STA report whose critical path exposes the most stitchable
-    combinational stages (SPEF-based post-route report preferred; a bare
-    flop→port estimate path scores 0)."""
+    combinational stages, and — AMONG REPORTS THAT TIE — the one that STATES
+    the operating point it timed at.
+
+    THE TIE-BREAK IS THE WHOLE OF A 34 % ERROR (2026-09-15, icspm2). MEASURED
+    on a gf180mcuD run of `spm`: `phase3/stage3/sta/` holds both shapes, both
+    expose the same four combinational stages, so they tied on the old score
+    and `sorted()` handed the tie to `post_route_timing.rpt` — the SUMMARY
+    form, which states NEITHER column. Through this module's own parser:
+
+        parse_sta_path(post_route_timing.rpt)
+          {'pin': 'place2/Z', 'incr': 3.29, 'slew': None, 'cap': None}   x every row
+
+    So `sta_load_pf` and `input_slew_ns` were None on every stage and the
+    downstream fallbacks fired: the load fell back to the SPEF's WIRE
+    capacitance, and the slew to `index_1[len//2]` — the MIDDLE OF THE TABLE.
+    All four stages then recorded `input_slew_ns: 1.769`, which is that middle
+    index; four drivers cannot share it.
+
+    `sta_mcorner_ocv.rpt`, in the SAME directory, states both:
+
+            Cap    Slew   Delay    Time   Description
+           0.40    5.44    3.55    6.23 ^ place2/Z (…__buf_2)
+
+    and STA's `Cap` is `total_output_net_capacitance` — wire PLUS every
+    receiver pin on the net — where the SPEF wire cap alone was 0.165233 pF.
+
+    WHAT THAT COST, measured with ngspice in the pinned image on the one cell:
+
+        in-slew 0.41, load 0.40  (BOTH as STA states)   3.3184 ns   +0.9 % vs STA
+        slew 1.769 (default), load 0.165233 (wire only) 1.5308 ns  -53.5 % vs STA
+
+    The published `SPICE_STA_CRITICAL_MISMATCH … -34.4 %` was therefore a
+    measurement of two different output loads, not a model-vs-silicon gap.
+
+    The stitch score still DOMINATES: a richer path always wins, because a
+    report that states an operating point for a path this gate cannot stitch is
+    worth nothing. The new term only decides ties, and it is a count rather
+    than a flag so a report that states the point on MORE of the path wins.
+    """
     cands: List[Path] = []
     sta_dir = _pl.sta_dir(project)
     if sta_dir.is_dir():
@@ -2402,14 +2456,15 @@ def _pick_sta_report(project: Path, subckt_names: set) -> Optional[Path]:
     pnr_rpt = project / "phase3" / "stage3" / "pnr" / "sta.rpt"
     if pnr_rpt.is_file():
         cands.append(pnr_rpt)
-    best, best_score = None, 0
+    best, best_score = None, (0, 0)
     for c in cands:
         try:
-            score = sta_path_stitch_score(c.read_text(errors="replace"),
-                                          subckt_names)
+            text = c.read_text(errors="replace")
         except OSError:
             continue
-        if score > best_score:
+        score = (sta_path_stitch_score(text, subckt_names),
+                 sta_path_states_its_operating_point(text))
+        if score[0] > 0 and score > best_score:
             best, best_score = c, score
     return best
 
