@@ -211,13 +211,25 @@ def test_chip_top_producer_precedes_sdc_and_die_resolution():
     source = pathlib.Path(RUNNER.__file__).read_text()
     step = source[source.index("def step_pnr("):]
     step = step[:step.index("\ndef step_", 1)]
-    producer = step.index(
-        "_padring_producer = step_io_pad_chip_top_gen(project, container, pdk)")
+    # 98109186b routed the dispatch through `_padring_producer_dispatch`, which
+    # consults `_chip_path_requests_pad_ring` (a HARDMACRO delivery builds no
+    # ring, so its producer is not run). The ORDER property is unchanged: the
+    # dispatch -- and therefore the producer, for a delivery that requests a
+    # ring -- precedes both SDC construction and die resolution.
+    dispatch_line = "_padring_producer = _padring_producer_dispatch(project, container, pdk)"
+    producer = step.index(dispatch_line)
     sdc = step.index("# SDC: silicon top != FPGA wrapper")
     die = step.index("die_um, _l9_die_note = _effective_die_um")
     assert producer < sdc < die
-    assert step.count(
-        "_padring_producer = step_io_pad_chip_top_gen(project, container, pdk)") == 1
+    assert step.count(dispatch_line) == 1
+    # and the dispatch is the ONLY road to the producer from step_pnr: the
+    # producer itself is called exactly once, inside the dispatch, never
+    # directly from step_pnr (a second, ungated call would re-pin a hardmacro
+    # to a ring it does not build).
+    assert step.count("step_io_pad_chip_top_gen(") == 0
+    dispatch = source[source.index("def _padring_producer_dispatch("):]
+    dispatch = dispatch[:dispatch.index("\ndef ", 1)]
+    assert dispatch.count("step_io_pad_chip_top_gen(project, container, pdk)") == 1
 
 
 def _real_pdk(monkeypatch=None, **over):
