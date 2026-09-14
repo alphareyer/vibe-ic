@@ -437,9 +437,23 @@ def _pdk_text(path, container: Optional[str] = None) -> str:
         pass
     if not container:
         return ""
+    # NO RUNTIME BOUND, and that is the rule rather than an oversight
+    # (`test_a_timeout_is_not_a_finding_about_the_subject`). THE KILL IS THE
+    # DEFECT: a wall clock that fires on a read which was one byte from
+    # finishing has destroyed the answer, and the record it then writes —
+    # "" here, which this module reads as "the liberty declares no operating
+    # condition" — is a FINDING ABOUT THE PDK that the clock invented. A fast
+    # host and a loaded host would disagree about the same library.
+    #
+    # There is also nothing here for a progress watchdog to supervise. This is
+    # a `cat` of one file, not a job: it either streams or the container is
+    # gone, and `docker exec` returns non-zero for the second. The module's own
+    # `_docker_exec_raw` stays bounded because it is the supervisor's in-
+    # container PROBE — an unbounded probe would wedge the watchdog that exists
+    # to catch a wedge — and it may be referenced only as that injection.
     try:
         cp = subprocess.run(_ce.docker_exec_argv(container, "cat", str(path)),
-                            capture_output=True, text=True, timeout=120)
+                            capture_output=True, text=True)
         return cp.stdout if cp.returncode == 0 else ""
     except Exception:                                        # noqa: BLE001
         return ""

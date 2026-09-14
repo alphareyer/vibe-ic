@@ -706,23 +706,58 @@ def _equivalence(project: Path) -> Cell:
 
 
 def _spares(project: Path) -> Cell:
-    """Spare cells that SURVIVED to the shipped artefacts, not just inserted.
+    """The graded spare-cell pool, from the artefact a STEP DECLARES.
 
-    The design-for-ECO question is what a metal-only ECO can still reach, and
-    an inserted spare that a later optimisation removed reaches nothing.
+    WHY NOT `reports/spare_preservation.json`, WHICH IS THE BETTER FACT
+    (2026-09-15, icspm2). The design-for-ECO question a reader really wants is
+    what SURVIVED into the shipped netlist/DEF/GDS — an inserted spare a later
+    pass removed reaches nothing — and `spare_preservation.json` carries
+    exactly that. Reading it here is refused, and the flow says so in its own
+    words at step 34:
+
+        "`reports/spare_preservation.json` IS NOT DECLARED HERE … this step's
+         only producer of that file is the `optional_program_exit_zero` clause
+         below, which runs only when `phase3/stage3/pnr/spare_cells.json` is
+         present, while `required_outputs` is UNCONDITIONAL … Declaring it
+         asserts a production the same gate denies four lines down, and reds
+         every spare-less design over an artefact nobody owes."
+
+    and at step 37.5ic, about a consumer that was wired and then REMOVED for
+    this very reason:
+
+        "WHAT WOULD MAKE IT WIREABLE: a step that produces
+         `reports/spare_preservation.json` UNCONDITIONALLY and declares it. As
+         long as step 34's producer is conditional, no honest declaration
+         exists and no gate may read the path."
+
+    I re-created that consumer and d7 caught it — `W2:produced_consumed_
+    undeclared` on step 37.4 — which is the register working. So this reads
+    `reports/spare_cell_coverage.json` instead: step 18 DECLARES it in
+    `required_outputs`, and `spare_cell_coverage_check` is its sole declaring
+    producer (docs/decisions/2026-08-22-spare-cell-coverage-declaring-producer).
+
+    AND THE BASIS SAYS WHAT THE WEAKER FACT IS. This is the pool at insertion,
+    graded for density / distribution / tie-off — NOT a survival count. The key
+    must not be read as evidence that the pool reached the shipped artefacts;
+    `spare_cell_preservation_check` is what answers that, and it cannot be
+    consumed here until its producer is unconditional and declared.
     """
-    rel = "reports/spare_preservation.json"
+    rel = "reports/spare_cell_coverage.json"
     doc = _json(project, rel)
     if not isinstance(doc, dict):
-        return unmeasured(f"{rel}: absent or unreadable, so this run recorded "
-                          f"no spare-cell preservation check")
-    n = doc.get("survived")
+        return unmeasured(f"{rel}: absent or unreadable, so this run graded no "
+                          f"spare-cell pool")
+    n = doc.get("count")
     if not isinstance(n, int):
-        return unmeasured(f"{rel}: carries no integer `survived` count", rel)
+        return unmeasured(f"{rel}: carries no integer `count`", rel)
     return Cell(n, rel,
-                basis=f"{n} of {doc.get('inserted')} inserted spare cell(s) "
-                      f"survived into the shipped artefacts "
-                      f"({doc.get('verdict')})")
+                basis=f"{n} spare cell(s) in the graded pool "
+                      f"(verdict {doc.get('verdict')}, actual_density "
+                      f"{doc.get('actual_density')} against target "
+                      f"{doc.get('target_density')}). POOL AT INSERTION, not a "
+                      f"survival count: the post-fill survival record is "
+                      f"written under a conditional clause that no step "
+                      f"declares, and no gate may read an undeclared path")
 
 
 def _antenna_total(project: Path) -> Cell:

@@ -179,12 +179,47 @@ def test_a_skipped_lec_proves_nothing(tmp_path):
     assert not sma._equivalence(p).measured
 
 
-def test_spares_counts_what_survived_not_what_was_inserted(tmp_path):
-    p = _proj(tmp_path, **{"reports/spare_preservation.json": {
-        "inserted": 6, "survived": 4, "verdict": "FAIL"}})
+def test_spares_reads_the_artefact_a_STEP_DECLARES(tmp_path):
+    """The better fact is `spare_preservation.json`'s `survived` count, and the
+    flow REFUSES it to any gate: step 34 says "no step's required_outputs names
+    it … Declaring it asserts a production the same gate denies four lines
+    down", and step 37.5ic says "no gate may read the path" until a step
+    produces it UNCONDITIONALLY and declares it. I wired that consumer anyway
+    and d7 caught it (`W2:produced_consumed_undeclared` on step 37.4) — the
+    register working. Step 18 DOES declare `reports/spare_cell_coverage.json`,
+    so that is what may honestly be read."""
+    p = _proj(tmp_path, **{"reports/spare_cell_coverage.json": {
+        "count": 6, "verdict": "PASS", "actual_density": 0.0229,
+        "target_density": 0.02}})
     cell = sma._spares(p)
-    assert cell.value == 4, "an inserted spare a later pass removed reaches nothing"
-    assert "4 of 6" in cell.basis
+    assert cell.value == 6
+
+
+def test_the_spares_basis_says_it_is_NOT_a_survival_count(tmp_path):
+    """A weaker fact under a name that could be read as the stronger one has to
+    say so where the reader is: in the basis, beside the number."""
+    p = _proj(tmp_path, **{"reports/spare_cell_coverage.json": {
+        "count": 6, "verdict": "PASS", "actual_density": 0.0229,
+        "target_density": 0.02}})
+    basis = sma._spares(p).basis
+    assert "POOL AT INSERTION" in basis
+    assert "not a survival count" in basis.lower()
+
+
+def test_no_gate_here_reads_the_undeclared_preservation_record():
+    """The regression this file exists to stop coming back. `_spares` must not
+    name `reports/spare_preservation.json` at all — reading it is what put a
+    produced-consumed-undeclared artefact on step 37.4."""
+    import inspect
+    src = inspect.getsource(sma._spares)
+    code = src.split('"""')[0] + src.split('"""')[-1]   # drop the docstring
+    assert "spare_preservation.json" not in code, code
+
+
+def test_an_ungraded_spare_pool_is_not_a_zero(tmp_path):
+    p = _proj(tmp_path, **{"reports/spare_cell_coverage.json": {
+        "verdict": "PASS"}})
+    assert not sma._spares(p).measured
 
 
 def test_a_clean_antenna_result_answers_the_total(tmp_path):
@@ -311,19 +346,23 @@ def test_the_spare_record_is_produced_before_the_summary_reads_it(tmp_path):
           "1 key(s) no longer state what this run's reports state:
            design_for_eco__spares__count"
 
-    The only thing that runs `spare_cell_preservation_check` is the flow's own
-    gate clause inside the completion audit. Its trigger here is the POST-FILL
-    DEF it reads, not one of its own outputs."""
+    The only thing that runs the checker is the flow's own gate clause inside
+    the completion audit. Its trigger is the artefact it READS, never one of
+    its own outputs — a producer triggered by its own product can never run the
+    first time."""
     import phase3_one_shot_runner as r
     jobs = getattr(r, "_DRC_ATTRIBUTION_JOBS", None)
     if jobs is None or len(jobs[0]) != 4:
         pytest.skip("pre-fix tree has no multi-program producer table")
     progs = {j[0] for j in jobs}
-    assert "spare_cell_preservation_check" in progs, sorted(progs)
-    row = next(j for j in jobs if j[0] == "spare_cell_preservation_check")
-    assert row[1] == "reports/spare_preservation.json"
-    assert row[2] == "phase3/stage3/pnr/filled.def", (
-        "the trigger must be the DEF it reads, not an output of its own")
+    assert "spare_cell_coverage_check" in progs, sorted(progs)
+    row = next(j for j in jobs if j[0] == "spare_cell_coverage_check")
+    assert row[1] == "reports/spare_cell_coverage.json", (
+        "the declared artefact, not the conditional preservation record")
+    assert row[2] == "phase3/stage3/pnr/spare_cells.json", (
+        "the trigger must be the artefact it READS, not an output of its own")
+    assert not any(j[1] == "reports/spare_preservation.json" for j in jobs), (
+        "no producer here may target the path no step declares")
 
 
 def test_the_sby_asks_for_multiclock_so_an_edge_mutation_is_visible():

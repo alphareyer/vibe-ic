@@ -45555,16 +45555,26 @@ _DRC_ATTRIBUTION_JOBS = (
     ("drc_report_check", "reports/phase3/drc_signoff.json",
      "reports/phase3/drc_signoff.rpt",
      ("--mode", "drc", "--signoff", "--under", "reports/phase3/drc_signoff.rpt")),
-    # The spare-cell survival record, for `design_for_eco__spares__count`. Same
+    # The graded spare-cell pool, for `design_for_eco__spares__count`. Same
     # ordering defect, found the same way: MEASURED on a run of `spm`,
-    # `phase3/final/metrics.json` 06:05:10 and `reports/spare_preservation.json`
-    # 06:07:45 — the summary two and a half minutes ahead of its source, because
+    # `phase3/final/metrics.json` 07:03:00 and `reports/spare_cell_coverage.json`
+    # 07:05:33 — the summary two and a half minutes ahead of its source, because
     # the only thing that runs the checker is the flow's own gate clause inside
-    # the completion audit. The trigger here is the POST-FILL DEF the checker
-    # reads, not one of its own outputs.
-    ("spare_cell_preservation_check", "reports/spare_preservation.json",
-     "phase3/stage3/pnr/filled.def",
-     ("--json", "reports/phase2/gates/spare_preservation_postfill.json")),
+    # the completion audit. The trigger is `spare_cells.json`, the artefact the
+    # checker READS; a producer triggered by its own product can never run the
+    # first time.
+    #
+    # `spare_cell_coverage_check` and NOT `spare_cell_preservation_check`,
+    # although the latter answers the better question (what SURVIVED, not what
+    # was inserted). The flow refuses the latter's path to any gate — step 34:
+    # "no step's required_outputs names it … Declaring it asserts a production
+    # the same gate denies four lines down"; step 37.5ic: "no gate may read the
+    # path" until a step produces it UNCONDITIONALLY and declares it. Step 18
+    # DOES declare `reports/spare_cell_coverage.json`, so that is the artefact a
+    # consumer may honestly read. See `signoff_metrics_aggregate._spares`.
+    ("spare_cell_coverage_check", "reports/spare_cell_coverage.json",
+     "phase3/stage3/pnr/spare_cells.json",
+     ("--json", "reports/phase2/gates/spare_cell_coverage.json")),
 )
 
 
@@ -45624,7 +45634,7 @@ def _emit_drc_attribution_reports(project: Path) -> List[Dict[str, Any]]:
         try:
             cmd = [sys.executable, str(prog), ".", *argv]
             if prog_name == "drc_report_check":
-                cmd += ["--json", rel_json]
+                cmd += ["--json", rel_json]   # its report IS the declared path
             cp = _pr.run(cmd, cwd=str(project), check=False,
                          capture_output=True, text=True)
             row["rc"] = cp.returncode
