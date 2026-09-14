@@ -45,6 +45,30 @@ record's numbers are NOT discarded: they are preserved on the owner under
 ``alternate_frequency_mentions[]``, where a reviewer can still see them and
 no consumer will mistake them for the contract.
 
+THE SECOND STATED RULE: the run's PDK decides which records are even
+IN SCOPE — and it is not this module's rule, it is the landed one.
+------------------------------------------------------------------------
+``_post_emit_reference_clock_config`` lifts the clock a vendor reference flow
+used for ITS library and stamps that library identity on the record
+(``pdk_scoped_target``).  Such a record says "when built for target X this
+design was clocked at P"; the design's own constraint file, carrying no
+scope, says "this design is clocked at Q" for whatever target is being built.
+Two answers to two different questions are not a contradiction, and refusing
+the document because both are present makes a run impossible the moment its
+input ships a reference flow for another library — MEASURED on a real run
+(2026-09-15): phase 1 halted at 18.8 s on a project that is fully and
+consistently specified.
+
+The contract that decides this is ``_l8_clock_scope`` (vibe-ic#2244), which
+``sdc_gen`` and ``l8_clock_period_actionability_check`` already delegate to.
+This module is the THIRD consumer and delegates to the SAME function rather
+than restating the rule, so all three answer identically: a scoped record
+naming the run's PDK wins; the design's unscoped record governs when none
+does; only-foreign-scoped REFUSES as cross-target timing reuse.  Only the
+records that contract SELECTS take part in the one-name-one-period test.
+Nothing is dropped — every record stays in the document, and the consumers
+select from it by the run's own target.
+
 WHERE IT REFUSES
 ----------------
 When two records that both OWN the name pin different periods, there is no
@@ -58,7 +82,19 @@ chip-class or design-name literal participates in any decision.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+# Sibling import, resolvable HOWEVER this file is loaded: a by-path load
+# (`spec_from_file_location`, how test_issue2104_programs_load_by_path measures
+# every shipped program) does not put this directory on sys.path, and a bare
+# import then raises ModuleNotFoundError. Same shim every other consumer of the
+# contract carries (lander-added at landing; the G arm caught it).
+import os as _os
+import sys as _sys
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+import _l8_clock_scope as _scope  # noqa: E402
 
 #: L8 containers that carry clock records.  ``clocks`` is the canonical list;
 #: ``clock_domains`` is what most extraction strategies populate.  A name at
@@ -231,6 +267,9 @@ def _describe(entry: Dict[str, Any], container: str) -> Dict[str, Any]:
         "period_ns": entry_period_ns(entry),
         "owns_name": entry_owns_name(entry),
     }
+    declared = sorted(_scope.scope_values(entry))
+    if declared:
+        out["scope"] = declared
     for k in ("role", "domain_kind", "extraction_strategy", "source",
               "derived_from"):
         v = entry.get(k)
@@ -242,7 +281,29 @@ def _describe(entry: Dict[str, Any], container: str) -> Dict[str, Any]:
     return out
 
 
-def enforce(doc: Any) -> List[Dict[str, Any]]:
+def _scope_partition(members: List[Tuple[str, Dict[str, Any]]],
+                     project: Optional[Path]
+                     ) -> Tuple[Optional[List[Tuple[str, Dict[str, Any]]]],
+                                Optional[str]]:
+    """Which of `members` this RUN's target puts in scope, per vibe-ic#2244.
+
+    Returns ``(members_in_scope, refusal_detail)``.  Exactly one is not None.
+    A refusal detail is the landed contract's own sentence, so the three
+    consumers cannot drift apart in what they say.
+    """
+    target, source = (_scope.run_pdk_target(project)
+                      if project is not None else (None, None))
+    res = _scope.select([e for _, e in members], target, source)
+    if res.status == _scope.NO_SCOPED_RECORDS:
+        return members, None
+    if not res.selected:
+        return None, res.detail
+    keep = {id(r) for r in res.records}
+    return [(c, e) for c, e in members if id(e) in keep], None
+
+
+def enforce(doc: Any, project: Optional[Path] = None
+            ) -> List[Dict[str, Any]]:
     """Make ``doc``'s clock contract self-consistent, or refuse.
 
     Mutates ``doc`` in place:
@@ -283,6 +344,28 @@ def enforce(doc: Any) -> List[Dict[str, Any]]:
 
     for name in sorted(groups):
         members = groups[name]
+        periods = [p for p in (entry_period_ns(e) for _, e in members)
+                   if p is not None]
+        if len(distinct_periods(periods)) <= 1:
+            # Already one period: no scope question can arise, and asking one
+            # could only invent a refusal where there is no disagreement.
+            continue
+
+        # Only now — with a real disagreement on the table — ask the landed
+        # contract which records this run's target even puts in scope.
+        in_scope, refusal = _scope_partition(members, project)
+        if refusal is not None:
+            conflicts.append({
+                "clock": name,
+                "scopes_seen": sorted({v for _, e in members
+                                       for v in _scope.scope_values(e)}),
+                "periods_ns": distinct_periods(periods),
+                "resolution": "refused",
+                "reason": refusal,
+                "records": [_describe(e, c) for c, e in members],
+            })
+            continue
+        members = in_scope or []
         periods = [p for p in (entry_period_ns(e) for _, e in members)
                    if p is not None]
         if len(distinct_periods(periods)) <= 1:
