@@ -139,7 +139,16 @@ _NOT_PROSE: Dict[str, str] = {
         "sentence either: the only value written is the pin NAME captured by "
         "the anchored group, and single-valued attributes that DISAGREE "
         "between two declarations raise `DuplicatePinConflict` rather than "
-        "being picked. Owner: lane mainred.",
+        "being picked. MEASURED, NOT ASSERTED, because an anchoring argument "
+        "has been wrong here before: every denial token `_prose_polarity`'s "
+        "own patterns spell (18), each carrying a DECLARATION-SHAPED payload "
+        "(`# PIN clk is <token> declared here` and three sibling shapes), "
+        "placed in each of 4 positions a comment can occupy in this "
+        "production, moved 0 of 288 published answers -- the merge report and "
+        "the comment text both unchanged, 288 UNCHANGED, 0 moved. THE ZERO "
+        "CARRIES ITS CONTROL: the same payload spliced in as CODE (a real "
+        "`PIN rst` block) moves the answer, 1 pin declaration to 2, so the "
+        "fixture could have moved. Owner: lane mainred.",
     "analog_poweron_sequence::plan":
         "SPICE CARD GRAMMAR, read to decide whether a deck runs a transient, "
         "drives a clock and has exactly one DC source on the named rail -- "
