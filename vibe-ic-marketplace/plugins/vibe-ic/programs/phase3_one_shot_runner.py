@@ -24414,8 +24414,9 @@ def _v1_8_100_routing_layer_range(pdk, project, container
 def _post_route_spef_repair_tcl(out_dir_c: str, tech_lef_c: str,
                                 cell_lef_c: str = "",
                                 fork_repair_capable: bool = False,
-                                fanout_root_buffer_cell: Optional[str] = None
-                                ) -> str:
+                                fanout_root_buffer_cell: Optional[str] = None,
+                                reserved_instance_names:
+                                    Optional[Sequence[str]] = None) -> str:
     """ORGANIC #557 / #581 — emit the OpenROAD Tcl for the
     post-detailed-route SPEF extraction (MEASURE-ONLY).
 
@@ -24565,7 +24566,8 @@ def _post_route_spef_repair_tcl(out_dir_c: str, tech_lef_c: str,
             + f"  puts \"{_PNR_STAGE_MARKER} postroute_drv_repair\"\n"
             + _v1_8_100_signoff_drv_repair_tcl(
                 out_dir_c, fanout_root_buffer_cell,
-                stage="postroute_drv_repair")
+                stage="postroute_drv_repair",
+                reserved_instance_names=reserved_instance_names)
             + _pnr_stage_end("postroute_drv_repair") + "\n")
            if fork_repair_capable else
            "  puts \"SDR_SKIP_STOCK_OPENROAD: post-route SPEF DRV repair needs "
@@ -25092,6 +25094,36 @@ def _sdr_child_log_name(stage: str) -> str:
     return f"sdr_child_{stage}.log"
 
 
+def _sdr_router_drc_count_proc_tcl() -> str:
+    """The ONE rule for turning the router's own DRC report into a number.
+
+    Both roles of the transaction need it now — the PARENT to judge the
+    candidate, and the CHILD to decide whether its candidate still has a
+    residual worth another reroute pass — and a second copy of "what counts as
+    a violation, and what counts as unreadable" is precisely the kind of drift
+    this file keeps paying for. Redefining a proc is idempotent in Tcl, so both
+    emitters may prepend it.
+
+    Empty is the tool's CLEAN report. Non-empty without its native record
+    grammar is NOT a count anyone may compare, and raises — an unreadable
+    report has exactly one honest meaning and it is never zero.
+
+    chip-AGNOSTIC: the tool's own report grammar, no design or PDK literal."""
+    return (
+        "  proc _sdr_tx_count_router_drc {_path} {\n"
+        "    if {![file exists $_path]} { error MISSING_ROUTER_DRC_REPORT }\n"
+        "    set _fh [open $_path r]\n"
+        "    set _n 0; set _nonempty 0\n"
+        "    while {[gets $_fh _line] >= 0} {\n"
+        "      if {[string trim $_line] ne \"\"} { set _nonempty 1 }\n"
+        "      if {[string first \"violation type:\" $_line] >= 0} { incr _n }\n"
+        "    }\n"
+        "    close $_fh\n"
+        "    if {$_n == 0 && $_nonempty} { error UNREADABLE_ROUTER_DRC_REPORT }\n"
+        "    return $_n\n"
+        "  }\n")
+
+
 def _postroute_sdr_transaction_begin_tcl(
         out_dir_c: str, stage: str = "postroute_drv_repair") -> str:
     """Start the generic post-route DRV transaction.
@@ -25129,20 +25161,8 @@ def _postroute_sdr_transaction_begin_tcl(
         f"  set _sdr_tx_cand_report {{{txn_c}/{_SDR_CANDIDATE_DRC_NAME}}}\n"
         f"  set _sdr_tx_cand_def {{{txn_c}/{_SDR_CANDIDATE_DEF_NAME}}}\n"
         f"  set _sdr_tx_child_receipt {{{txn_c}/{_SDR_CHILD_RECEIPT_NAME}}}\n"
-        "  proc _sdr_tx_count_router_drc {_path} {\n"
-        "    if {![file exists $_path]} { error MISSING_ROUTER_DRC_REPORT }\n"
-        "    set _fh [open $_path r]\n"
-        "    set _n 0; set _nonempty 0\n"
-        "    while {[gets $_fh _line] >= 0} {\n"
-        "      if {[string trim $_line] ne \"\"} { set _nonempty 1 }\n"
-        "      if {[string first \"violation type:\" $_line] >= 0} { incr _n }\n"
-        "    }\n"
-        "    close $_fh\n"
-        "    # Empty is the tool's clean report; nonempty without its native\n"
-        "    # record grammar is not a count we may compare.\n"
-        "    if {$_n == 0 && $_nonempty} { error UNREADABLE_ROUTER_DRC_REPORT }\n"
-        "    return $_n\n"
-        "  }\n"
+        + _sdr_router_drc_count_proc_tcl()
+        +
         "  proc _sdr_tx_receipt {_status _reason _before _after} {\n"
         "    global _sdr_tx_dir\n"
         # ONE place decides that an acceptance happened, so the handoff below
@@ -25371,7 +25391,8 @@ def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
 
 def _v1_8_100_signoff_drv_repair_tcl(
         out_dir_c: str, fanout_root_buffer_cell: Optional[str] = None,
-        *, stage: str = "postroute_drv_repair") -> str:
+        *, stage: str = "postroute_drv_repair",
+        reserved_instance_names: Optional[Sequence[str]] = None) -> str:
     """Bounded repair-until-clean loop on the sign-off-deck SPEF.
 
     Every step NONFATAL-guarded; any failure leaves the routing as it was and
@@ -25675,6 +25696,39 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # above asked for no further pass.
         "    if {$_sdr_stop} { puts \"SDR_STOPPED_AFTER_PARTIAL_REPAIR: pass $_sdr_p completed (legalized + rerouted)\"; break }\n"
         "  }\n"
+        "  }\n"
+        # ---- THE CHILD CLEARS ITS OWN RESIDUAL BEFORE IT IS JUDGED ----
+        # MEASURED (sha256 run5): the child's repair took DRV 14,489 -> 250 and
+        # its route closed, and the transaction then refused the candidate at
+        # router DRC 0 -> 2 -- correctly, as measured. But a candidate two
+        # violations away from clean has simply not had the flow's OWN
+        # post-route remedy aimed at it yet: the parent runs the named-violation
+        # reroute after ITS route, and the child never did.
+        #
+        # So the child runs THE SAME LOOP, on its own report, before writing
+        # its receipt. It is already bounded, already re-measures after every
+        # pass, and already stops on clean or on no-improvement, so nothing
+        # here is a new policy -- it is the existing remedy, applied to the
+        # candidate it was always meant to apply to.
+        #
+        # THIS IS CANDIDATE QUALITY, NOT ACCEPTANCE RELAXATION. #2240/#2247 are
+        # untouched: a candidate that clears to 0 is ACCEPTED because it is
+        # measured clean, one that cannot clear is still REJECTED, and one that
+        # never routed is still unmeasurable. What changes is only how good the
+        # candidate is when the unchanged rule is applied to it.
+        + _sdr_router_drc_count_proc_tcl()
+        + "  if {$_sdr_tx_mutated && $_sdr_tx_route_ok} {\n"
+        f"  set _sdr_cand_before -1\n"
+        f"  catch {{set _sdr_cand_before [_sdr_tx_count_router_drc {child_drc_c}]}}\n"
+        "  puts \"SDR_CHILD_RESIDUAL_BEFORE_REROUTE: $_sdr_cand_before\"\n"
+        "  if {$_sdr_cand_before > 0} {\n"
+        + _named_violation_reroute_tcl(
+            child_drc_c, reserved_instance_names=reserved_instance_names)
+        + "  }\n"
+        f"  set _sdr_cand_after_nvr -1\n"
+        f"  catch {{set _sdr_cand_after_nvr [_sdr_tx_count_router_drc {child_drc_c}]}}\n"
+        "  puts \"SDR_CHILD_RESIDUAL_AFTER_REROUTE: $_sdr_cand_after_nvr "
+        "(was $_sdr_cand_before)\"\n"
         "  }\n"
         # ---- CHILD EPILOGUE: publish the candidate and its MEASUREMENTS ----
         # What the parent decides on is exactly this receipt. `-1` for the
@@ -30007,10 +30061,16 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # use the PDK's declared ROOT master when one exists.  Falling back to the
     # ordinary CTS buffer preserves PDKs that expose only a single legal cell.
     _fanout_root_buffer_cell = clk_buf_root or clk_buf
+    _reserved_names = [item["name"]
+                       for key in ("instances", "spare_pads")
+                       for item in spare_plan.get(key, []) if item.get("name")]
     spef_repair_block = _post_route_spef_repair_tcl(
         out_dir_c, tech_lef_c, cell_lef_c,
         fork_repair_capable=_fork_repair_capable,
-        fanout_root_buffer_cell=_fanout_root_buffer_cell)
+        fanout_root_buffer_cell=_fanout_root_buffer_cell,
+        # the child's own residual reroute must protect the SAME bindings the
+        # parent's does -- the spares and spare pads are reserved in both.
+        reserved_instance_names=_reserved_names)
 
     # === R8 (v1.9.3) — DRV RE-CONVERGENCE AFTER ANTENNA REPAIR ===
     # MEASURED (R7 iter3): the sign-off DRV loop reported `SDR_CONVERGED: pass 6`
@@ -30041,7 +30101,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                              + 'puts "SDR2_BEGIN"\n'
                              + _v1_8_100_signoff_drv_repair_tcl(
                                  out_dir_c, _fanout_root_buffer_cell,
-                                 stage="postroute_drv_reconverge")
+                                 stage="postroute_drv_reconverge",
+                                 reserved_instance_names=_reserved_names)
                              + 'puts "SDR2_END"\n'
                              + _pnr_stage_end("postroute_drv_reconverge")
                              + "\n")
