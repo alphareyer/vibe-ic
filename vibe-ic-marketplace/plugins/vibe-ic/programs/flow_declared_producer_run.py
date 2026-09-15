@@ -81,21 +81,7 @@ REPORT_REL = "reports/audit/flow_declared_producer_run.json"
 #: The gate keys whose value is a shell-shaped command string.
 _COMMAND_KEYS = ("program_exit_zero", "advisory_program_exit_zero",
                  "optional_program_exit_zero")
-# THE FLAG A PRODUCER WRITES ITS DECLARED DOCUMENT WITH is not always
-# `--json` (vibe-ic#2277). `perc_corpus_sweep` writes
-# `reports/phase3/perc_sweep.json` -- a step-31 `required_output`, and the
-# document `sweep_reach_check` consumes -- through `--report`, because its
-# `--json` is a BOOLEAN that switches stdout to a row array. Matching only
-# `--json` therefore skipped it: the clause met conditions one and three and
-# failed the middle one on the flag's SPELLING, so nothing in the run wrote the
-# document and step 31 read MISSING on it while every other declared output was
-# present.
-#
-# The condition this expresses is "the clause names a path", and the third
-# condition -- that the path is one of the step's own `required_outputs` --
-# is what keeps that honest. A clause that names some other path is still not a
-# declared producer.
-_JSON_RE = re.compile(r"--(?:json|report)[=\s]+(\S+)")
+_JSON_RE = re.compile(r"--json[=\s]+(\S+)")
 
 
 def _iter_steps(node: Any):
@@ -132,9 +118,7 @@ def declared_producer_clauses(flow_yaml: Path = FLOW_YAML
 
     THREE CONDITIONS, ALL FROM THE FLOW, none inferred:
       * the clause's program is listed under that step's `programs:`;
-      * the clause names a declared-output path with `--json` or
-        `--report` (see `_JSON_RE` for why the flag's spelling is not the
-        condition);
+      * the clause names a `--json <path>`;
       * that path is one of the step's `required_outputs`.
 
     A clause meeting all three is the flow saying, in three places, that the
@@ -168,6 +152,62 @@ def declared_producer_clauses(flow_yaml: Path = FLOW_YAML
                           # that the RUN performed this step at all. See
                           # `owed`.
                           "siblings": sorted(outs - {m.group(1)})})
+
+    # ── THE SECOND DECLARATION CHANNEL, which is NOT a gate (vibe-ic#2277) ──
+    #
+    # A step may declare a producer WITHOUT putting it in the gate, and for
+    # some producers it MUST: #1980 ruled that step 31's PERC and via findings
+    # are ADVISORY EVIDENCE, read through `program_outputs`, with the refusal
+    # predicate owned by a separate program -- so naming those producers in the
+    # `gate:` promotes them into gate coverage and the enforcement register,
+    # which `test_issue1980_advisory_evidence_tiers` refuses by name.
+    #
+    # That left a real gap rather than a settled question:
+    # `reports/phase3/perc_sweep.json` is a step-31 `required_output` declared
+    # with its producer under `program_outputs`, and NOTHING ran it. The run
+    # produced 8 of 9 declared outputs and the ninth was owed by nobody.
+    #
+    # `producer_command` closes it on the channel that does not touch a gate.
+    # The THREE conditions are the same three, read from the same yaml:
+    #   * the entry's `program` is listed under that step's `programs:`;
+    #   * the entry states the command that writes the document;
+    #   * the entry's `path` is one of the step's `required_outputs`.
+    # The audit still executes no gate -- `_collect_program_output_records`
+    # reads these entries "WITHOUT EXECUTING A GATE" and is untouched. Only
+    # THIS program, which the phase-3 runner invokes, executes them, and only
+    # when the document is absent.
+    #
+    # An entry with no `producer_command` is NOT adopted: silence is not a
+    # dispatch instruction, and guessing a producer's argv is how a declared
+    # output gets written by something nobody asked for.
+    for step in _iter_steps(doc):
+        outs = set(step.get("required_outputs") or [])
+        producers = {str(p).strip() for p in (step.get("programs") or [])
+                     if isinstance(p, str) and str(p).strip()}
+        if not outs or not producers:
+            continue
+        for spec in step.get("program_outputs") or []:
+            if not isinstance(spec, dict):
+                continue
+            program = str(spec.get("program") or "").strip()
+            target = str(spec.get("path") or "").strip()
+            cmd = spec.get("producer_command")
+            if (not program or program not in producers
+                    or target not in outs
+                    or not isinstance(cmd, str) or not cmd.strip()):
+                continue
+            cmd = cmd.strip()
+            if cmd.split()[0] != program:
+                # The command must be the program the entry names. A row that
+                # declares one producer and runs another is a mis-declaration,
+                # not a dispatch.
+                continue
+            if any(f["step"] == str(step.get("id")) and f["target"] == target
+                   for f in found):
+                continue
+            found.append({"step": str(step.get("id")), "program": program,
+                          "command": cmd, "target": target,
+                          "siblings": sorted(outs - {target})})
     return found
 
 

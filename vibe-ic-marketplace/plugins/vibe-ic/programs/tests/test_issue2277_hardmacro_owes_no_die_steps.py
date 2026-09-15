@@ -172,27 +172,73 @@ def test_the_perc_sweep_document_now_has_a_declared_producer():
     assert rows[0]["step"] == "31"
 
 
-def test_the_producer_runs_BEFORE_its_reader_in_the_same_gate():
-    """A reach verdict rendered before the sweep wrote its report is the
-    vacuity `sweep_reach_check` exists to refuse."""
+def test_the_producer_is_declared_OFF_the_gate():
+    """#1980 is the contract and it is not negotiable here: step 31's PERC and
+    via findings are ADVISORY EVIDENCE that stays OUT of gate coverage, so the
+    producer may be named under `programs:` and `program_outputs:` and must NOT
+    appear in the `gate:`. A gate clause naming it is what
+    `test_issue1980_advisory_evidence_tiers` refuses by name, and it is what the
+    first attempt at this wiring did."""
+    step31 = _steps()["31"]
+    assert "perc_corpus_sweep" in step31["programs"]
+    assert "perc_corpus_sweep" not in str(step31["gate"])
+    entry = [e for e in step31["program_outputs"]
+             if e.get("program") == "perc_corpus_sweep"]
+    assert len(entry) == 1
+    assert entry[0]["path"] == "reports/phase3/perc_sweep.json"
+    assert entry[0]["producer_command"].split()[0] == "perc_corpus_sweep"
+
+
+def test_the_producer_is_not_promoted_into_the_enforcement_register():
+    """The paired half. A producer that is not gate-named must not claim an
+    enforcement tier either — silence here is the truth, not an omission."""
+    import flow_gate_enforcement_audit as ENF
+    assert ENF.declared_intent(PROGRAMS, "perc_corpus_sweep") is None
+
+
+def test_the_reader_still_owns_the_refusal():
+    """#1980 gave the refusal predicate to `sweep_reach_check`, and it still has
+    it: the producer writes the document, that gate judges it."""
     gate = json.dumps(_steps()["31"]["gate"])
-    assert gate.index("perc_corpus_sweep") < gate.index("sweep_reach_check")
+    assert "sweep_reach_check --report reports/phase3/perc_sweep.json" in gate
 
 
-def test_the_writer_flag_is_not_the_condition():
-    """`perc_corpus_sweep`'s own `--json` is a BOOLEAN; it writes its document
-    with `--report`, and matching only `--json` is what skipped it."""
-    src = (PROGRAMS / "perc_corpus_sweep.py").read_text()
-    assert 'ap.add_argument("--json", action="store_true"' in src
-    assert P._JSON_RE.search("x . --report reports/phase3/perc_sweep.json")
+def test_the_new_channel_adopted_exactly_one_entry():
+    """The blast radius, asserted rather than assumed: `producer_command` is read
+    from `program_outputs` only, and exactly one entry in the whole flow has one."""
+    doc = yaml.safe_load(_FLOW.read_text(encoding="utf-8"))
+    carrying = [(str(st["id"]), e["program"])
+                for st in doc["steps"]
+                for e in (st.get("program_outputs") or [])
+                if isinstance(e, dict) and e.get("producer_command")]
+    assert carrying == [("31", "perc_corpus_sweep")]
 
 
-def test_widening_the_flag_adopted_exactly_one_clause():
-    """The blast radius, asserted rather than assumed: no other step in the
-    flow names a declared output with `--report`."""
-    by_report = [c for c in _clauses() if "--report" in c["command"]]
-    assert [(c["step"], c["program"]) for c in by_report] == [
-        ("31", "perc_corpus_sweep")]
+def test_an_entry_without_a_producer_command_is_NOT_adopted():
+    """Silence is not a dispatch instruction. Guessing a producer's argv is how a
+    declared output gets written by something nobody asked for."""
+    doc = yaml.safe_load(_FLOW.read_text(encoding="utf-8"))
+    silent = [(str(st["id"]), e["program"], e.get("path"))
+              for st in doc["steps"]
+              for e in (st.get("program_outputs") or [])
+              if isinstance(e, dict) and not e.get("producer_command")]
+    assert silent, "the control needs at least one silent entry to be real"
+    adopted = {(c["step"], c["program"], c["target"]) for c in _clauses()}
+    for row in silent:
+        assert row not in adopted, row
+
+
+def test_the_declared_command_must_BE_the_program_the_entry_names(tmp_path):
+    """A row that declares one producer and runs another is a mis-declaration,
+    not a dispatch. Driven through the real reader on a synthetic flow."""
+    flow = tmp_path / "f.yaml"
+    flow.write_text(yaml.safe_dump({"steps": [{
+        "id": "T", "programs": ["perc_corpus_sweep"],
+        "required_outputs": ["reports/x.json"],
+        "program_outputs": [{"program": "perc_corpus_sweep",
+                             "path": "reports/x.json",
+                             "producer_command": "rm -rf reports/x.json"}]}]}))
+    assert P.declared_producer_clauses(flow) == []
 
 
 def test_a_clause_naming_an_undeclared_path_is_still_not_a_producer():
@@ -246,43 +292,3 @@ def test_a_tree_with_no_router_and_no_declaration_stays_NOT_DETERMINED(tmp_path)
     bare = tmp_path / "bare"
     (bare / "input" / "submission_template").mkdir(parents=True)
     assert DP.resolve(bare)["path"] == DP.PATH_NOT_DETERMINED
-
-
-# --------------------------------------------------------------------------- #
-# the enforcement register the new gate clause reaches
-# --------------------------------------------------------------------------- #
-# MEASURED on the branch: naming `perc_corpus_sweep` in a gate clause makes it a
-# gate-NAMED program, and `flow_gate_enforcement_audit` refuses a gate-named
-# program that is reachable only through the final audit and says nothing about
-# it -- `undeclared::perc_corpus_sweep`, the #1035 class, three red ratchets.
-# The repair is the DECLARATION, not a register entry: the three axes below are
-# the #1035 shape, and none of them is a grep for a string in a source file.
-import flow_gate_enforcement_audit as ENF                  # noqa: E402
-
-
-def test_the_new_gate_program_DECLARES_where_it_is_enforced():
-    """Axis 1 — the declaration exists AND the audit can SEE it (it must be an
-    opened line inside the reader's own window, which a grep would not prove)."""
-    assert ENF.declared_intent(PROGRAMS, "perc_corpus_sweep") == "advisory"
-
-
-def test_the_declaration_bought_no_demotion():
-    """Axis 2 — `advisory` on the audit's axis is the exact token a later change
-    could quote as licence to defang the refusal. It cannot: the refusal
-    predicate is a DIFFERENT program, and it is still the one wired to judge the
-    document this producer writes."""
-    gate = json.dumps(_steps()["31"]["gate"])
-    assert "sweep_reach_check --report reports/phase3/perc_sweep.json" in gate
-    assert gate.index("perc_corpus_sweep") < gate.index("sweep_reach_check")
-
-
-def test_the_audit_exits_zero_and_names_this_program_as_declared(tmp_path):
-    """Axis 3 — end to end, driven rather than read."""
-    import subprocess
-    out = tmp_path / "enf.json"
-    r = subprocess.run(
-        [sys.executable, str(PROGRAMS / "flow_gate_enforcement_audit.py"),
-         "--json", str(out)], capture_output=True, text=True)
-    assert r.returncode == 0, r.stdout[-800:]
-    gates = {g["gate"]: g for g in json.loads(out.read_text())["gates"]}
-    assert gates["perc_corpus_sweep"]["declared"] == "advisory"

@@ -122,12 +122,12 @@ a different population from the accessor this module tells you to use, so the
 two could not be reconciled by a reader and only one of them was derived.
 
     program_exit_zero          127<!--figure:gate_clauses_program_exit_zero-->  MANDATORY
-    advisory_program_exit_zero 78<!--figure:gate_clauses_advisory_program_exit_zero-->  NON-BLOCKING
+    advisory_program_exit_zero 77<!--figure:gate_clauses_advisory_program_exit_zero-->  NON-BLOCKING
     files_exist                32<!--figure:gate_clauses_files_exist-->
     optional_program_exit_zero 30<!--figure:gate_clauses_optional_program_exit_zero-->  conditional
     json_field_true             1<!--figure:gate_clauses_json_field_true-->
     ------------------------------
-    total                     268<!--figure:gate_clauses_total-->, of which
+    total                     267<!--figure:gate_clauses_total-->, of which
                               190<!--figure:blocking_clauses--> block
 
 Three different exit-zero kinds with three different force levels:
@@ -143,8 +143,8 @@ Use :func:`gate_clauses` (typed) rather than re-walking the dict.
 4. Program resolution
 --------------------------------------------------------------------
 A gate command's FIRST whitespace token is the program basename. Of the
-219<!--figure:gate_program_tokens_distinct--> distinct tokens across the
-235<!--figure:gate_commands_total--> gate commands, all but
+218<!--figure:gate_program_tokens_distinct--> distinct tokens across the
+234<!--figure:gate_commands_total--> gate commands, all but
 0<!--figure:gate_programs_unresolved--> resolve to ``programs/<token>.py``, and
 zero commands shell out via ``python3 <file>``. This figure is the live count
 of gates naming a program that does not exist. It went 0 -> 3 when the
