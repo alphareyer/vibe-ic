@@ -483,7 +483,8 @@ def _sidecar(project: Path, block: str) -> Optional[dict]:
 #: the IR it rendered. Matching it against the IR ON DISK is the only way a
 #: reader can tell a current deck from one the producer has since moved past.
 _IR_STAMP_RE = re.compile(
-    r"_provenance:\s*topology_ir=(\S+)\s+sha256=([0-9a-f]{64})")
+    r"_provenance:\s*topology_ir=(\S+)\s+sha256=([0-9a-f]{64})"
+    r"(?:\s+content_sha256=([0-9a-f]{64}|none))?")
 
 
 def _stale_vs_ir_fail(project: Path, block: str, path: Path,
@@ -508,24 +509,57 @@ def _stale_vs_ir_fail(project: Path, block: str, path: Path,
     m = _IR_STAMP_RE.search(text)
     if not m:
         return None
-    rel, stamped = m.group(1), m.group(2)
+    rel, stamped, stamped_content = m.group(1), m.group(2), m.group(3)
     ir = project / rel
     if not ir.is_file():
         return None
     try:
-        actual = hashlib.sha256(ir.read_bytes()).hexdigest()
+        raw = ir.read_bytes()
     except OSError:
         return None
+    actual = hashlib.sha256(raw).hexdigest()
     if actual == stamped:
         return None
+    # R-0915-62 — THE WHOLE-FILE DIGEST MOVED. That is not yet staleness.
+    # `topology.json` carries a `_provenance` block with a `produced_at` wall
+    # clock, so re-emitting IDENTICAL content moves this digest. Compare the
+    # CONTENT digests instead when the netlist carries one: a topology that
+    # differs only in its provenance did not supersede anything, and the
+    # netlist's own unchanged bytes are the corroboration.
+    #
+    # MEASURED on a real verdict run (lane icadc, 2026-09-16): the `ldo`
+    # topology was re-emitted, its whole-file digest moved
+    # 796eb6b2 -> 711cc1c6, the netlist stayed byte-identical at
+    # c6fe9b5468bdb153 — still equal to the `netlist_sha256` its own
+    # `corner_results.json` records — and this rule FAILED A3, voiding A4, A5
+    # and A6 and blocking A7 and A9. Six of seven blockers were one false
+    # stale.
+    #
+    # A netlist with no `content_sha256` is a legacy artefact and keeps the
+    # old behaviour exactly: this rule still fires on a moved whole-file
+    # digest, because for those there is nothing better to ask.
+    if stamped_content and stamped_content != "none":
+        actual_content = _pc.json_content_digest(
+            raw.decode("utf-8", errors="replace"))
+        if actual_content is not None and actual_content == stamped_content:
+            return None
     return {
         "block": block, "rule": "A3_NETLIST_STALE_VS_IR",
+        # R-0915-62 — a stale-digest refusal is the flow failing to re-emit,
+        # not a fact about the design. Classified so the audit's blocker list
+        # does not read it as DESIGN_FACT.
+        "reason_class": "EXECUTION_ERROR",
         "rel_path": str(path.relative_to(project)),
         "detail": (f"this netlist records topology_ir sha256={stamped[:12]}… "
                    f"but {rel} is now sha256={actual[:12]}…, so the deck was "
                    f"rendered from a SUPERSEDED topology. Every measurement "
                    f"taken on it describes the older circuit. Re-run "
-                   f"`analog_a3_netlist_emit` for this block."),
+                   f"`analog_a3_netlist_emit` for this block."
+                   + ("" if stamped_content and stamped_content != "none" else
+                      " (This netlist carries no `content_sha256`, so the "
+                      "comparison is the whole-file digest and a "
+                      "provenance-only re-emission cannot be distinguished "
+                      "from a real change; re-emitting stamps one.)")),
     }
 
 

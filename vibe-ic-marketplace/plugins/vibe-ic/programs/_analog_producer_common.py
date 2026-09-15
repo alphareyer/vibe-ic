@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import sys
 import time
@@ -203,6 +204,36 @@ def content_digest(text: str) -> str:
     body = [ln for ln in text.splitlines()
             if not ln.lstrip().startswith(PROVENANCE_COMMENT_PREFIX)]
     return hashlib.sha256(("\n".join(body) + "\n").encode("utf-8")).hexdigest()
+
+
+def json_content_digest(raw: str) -> Optional[str]:
+    """sha256 over a JSON artefact's CONTENT, with its `_provenance` removed.
+
+    The JSON sibling of :func:`content_digest`, and it exists for the same
+    reason (R-0915-62). `topology.json` carries a `_provenance` block with a
+    `produced_at` wall clock, and `analog_a3_netlist_gen_check` compared the
+    WHOLE-FILE sha256 of it against the digest the netlist stamped. So a
+    topology re-emitted with identical content a second later moved the digest
+    and the netlist was declared `A3_NETLIST_STALE_VS_IR` — on a deck whose own
+    content had not changed, which the netlist's unchanged `netlist_sha256`
+    proves. Measured on a real verdict run (lane icadc, 2026-09-16): the `ldo`
+    topology re-emitted at 07:23 local, its digest moved 796eb6b2 -> 711cc1c6,
+    the netlist stayed byte-identical at c6fe9b5468bdb153 — and A3 FAILED.
+
+    Sorted keys and fixed separators, so the digest is a property of the
+    content and not of the writer's formatting. Returns None on anything that
+    is not JSON, because a caller that cannot parse it must fall back rather
+    than invent a digest.
+    """
+    try:
+        obj = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(obj, dict):
+        obj = {k: v for k, v in obj.items() if k != "_provenance"}
+    return hashlib.sha256(
+        json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                   ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 def file_digest(path: Path) -> Optional[str]:

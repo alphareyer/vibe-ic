@@ -247,6 +247,15 @@ def _run_ref_in(text: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _ir_content_digest(path: Path) -> Optional[str]:
+    """The topology's CONTENT digest — its `_provenance` stripped (R-0915-62)."""
+    try:
+        return _pc.json_content_digest(path.read_text(encoding="utf-8",
+                                                      errors="replace"))
+    except OSError:
+        return None
+
+
 def _reuse_unchanged(path: Path, new_text: str) -> Optional[str]:
     """The text already on disk when its CONTENT matches `new_text`, else None.
 
@@ -2524,8 +2533,18 @@ def _emit_for_block(project: Path, entry: Dict[str, Any], pdk: str,
         # this file, which is where a time belongs. Measured (lane icadc,
         # 2026-09-16): `_provenance: produced_at=2026-09-14T18:59:58Z` at line
         # 5 of the shipped `delta_sigma.sp`.
+        # R-0915-62 — the whole-file digest is kept (every existing consumer
+        # reads it) and a CONTENT digest is stamped beside it, so the staleness
+        # check can ask whether the TOPOLOGY changed rather than whether its
+        # provenance was re-stamped. `topology.json` carries a `produced_at`
+        # wall clock; without this, a topology re-emitted with identical
+        # content moves the whole-file digest and the netlist is declared
+        # stale. Measured on a real verdict run: the `ldo` topology re-emitted,
+        # its digest moved 796eb6b2 -> 711cc1c6, the netlist stayed
+        # byte-identical, and A3 FAILED.
         f"_provenance: topology_ir={_CANONICAL_ANALOG}/{name}/topology.json "
-        f"sha256={_sha256(ir_path)}",
+        f"sha256={_sha256(ir_path)} "
+        f"content_sha256={_ir_content_digest(ir_path) or 'none'}",
         f"_provenance: spec={_CANONICAL_ANALOG}/{name}/spec.json "
         f"sha256={_sha256(spec_path)}",
         f"_provenance: spec_values_bound={sorted(sv.keys())}",
