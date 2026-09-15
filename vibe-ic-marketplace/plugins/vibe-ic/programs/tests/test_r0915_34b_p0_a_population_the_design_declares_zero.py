@@ -72,6 +72,20 @@ DECLARING = {
         ("L3_CMD_PROTOCOL.json", "opcodes", [{"hex": "0x01"}]),
     "bram_pdob_combinational_check":
         ("L9_INTEGRATION_SPEC.json", "memory_candidates", [{"name": "buf"}]),
+    "break_framing_vs_l3_check":
+        ("L3_CMD_PROTOCOL.json", "opcodes", [{"hex": "0x7e"}]),
+    "crc_oracle_vector_check":
+        ("L3_CMD_PROTOCOL.json", "crc_parameters", {"poly": "0x31"}),
+    "break_handler_safety_check":
+        ("L6_CONTROL_LOGIC.json", "fsm_machines", [{"name": "mac"}]),
+    "tx_abort_during_transmission_check":
+        ("L9_INTEGRATION_SPEC.json", "submodules", [{"name": "tx_cmd"}]),
+    "cross_module_1cycle_handshake_check":
+        ("L9_INTEGRATION_SPEC.json", "submodules", [{"name": "rx_phy"}]),
+    "frame_end_detection_check":
+        ("L9_INTEGRATION_SPEC.json", "submodules", [{"name": "rx_phy"}]),
+    "arbiter_starvation_check":
+        ("L9_INTEGRATION_SPEC.json", "memories", [{"name": "otp"}]),
 }
 GATES = tuple(DECLARING)
 
@@ -88,6 +102,13 @@ STATED_BY = {
         ("security_requirements_present", True),
     "l10_test_cases_cover_l3_constraints_check": ("no_opcodes_in_input", False),
     "bram_pdob_combinational_check": ("no_memories_in_input", False),
+    "break_framing_vs_l3_check": ("no_opcodes_in_input", False),
+    "crc_oracle_vector_check": ("no_crc_parameters_in_input", False),
+    "break_handler_safety_check": ("no_fsm_in_input", False),
+    "tx_abort_during_transmission_check": ("no_submodules_in_input", False),
+    "cross_module_1cycle_handshake_check": ("no_submodules_in_input", False),
+    "frame_end_detection_check": ("no_submodules_in_input", False),
+    "arbiter_starvation_check": ("no_submodules_in_input", False),
 }
 
 
@@ -104,8 +125,8 @@ def _write(proj, name, payload):
 def _declares_none(tmp_path):
     """A project whose L4/L20/L23 each positively declare a zero population.
 
-    L20 and L23 are written NESTED under `fields`; L3, L4 and L9 FLAT, which
-    is how these layers actually ship on spm.
+    L20 and L23 are written NESTED under `fields`; L3, L4, L6 and L9 FLAT,
+    which is how these layers actually ship on spm.
     """
     proj = tmp_path
     _write(proj, "L4_REGMAP.json", {
@@ -121,10 +142,17 @@ def _declares_none(tmp_path):
             "attack_surface": [], "key_handling": {},
             "side_channel_mitigation": []}})
     _write(proj, "L3_CMD_PROTOCOL.json", {
-        "doc_class": "cmd_protocol", "opcodes": [],
-        "no_opcodes_in_input": True, "crc_parameters": None})
+        "doc_class": "cmd_protocol", "opcodes": [], "payload_semantics": None,
+        "crc_parameters": None, "no_opcodes_in_input": True,
+        "no_payload_semantics_in_input": True,
+        "no_crc_parameters_in_input": True})
+    _write(proj, "L6_CONTROL_LOGIC.json", {
+        "doc_class": "control_logic", "fsm_machines": [], "fsm_states": [],
+        "fsm_machine_count": 0, "no_fsm_in_input": True,
+        "no_fsm_states_in_input": True})
     _write(proj, "L9_INTEGRATION_SPEC.json", {
         "doc_class": "integration_spec", "top_module": "top",
+        "submodules": [], "no_submodules_in_input": True,
         "memories": [], "memory_candidates": [], "memory_map": [],
         "no_memories_in_input": True, "no_memory_candidates_in_input": True,
         "no_memory_map_in_input": True})
@@ -263,3 +291,50 @@ def test_a_nested_layer_is_read_not_seen_as_an_empty_document(tmp_path):
     assert nested["fields"]["scan_chains"], "fixture wrote to the wrong level"
     assert F._p0_zero_population_evidence(proj, gate) is None
     assert F._p0_contract_na_reason(gate, proj, rtl) is None
+
+
+# ── the refusals, pinned ──────────────────────────────────────────────────
+
+#: P0 sub-gates that ALSO reported an empty population on spm and are
+#: DELIBERATELY NOT REGISTERED, because no document declares that population
+#: zero. Pinned so a later batch cannot quietly grant them the N/A.
+NOT_REGISTERED = {
+    # Skips with "no toggle-divider patterns found" -- an RTL scan. Its
+    # denominator, by its own docstring, is L8's per-signal frequency
+    # annotations, and L8 on spm declares a clock (clock_mhz 41.67,
+    # clock_domains one primary entry) and non-empty timing_constants. A
+    # design that declares a clock has not declared that it has no divider.
+    "clock_divider_period_check":
+        "no layer declares the absence of a divided clock",
+    # Both layers are UN-EXTRACTED SKELETONS on spm: extraction_status
+    # "NOT_YET_EXTRACTED", applicability "APPLICABLE", every field null and
+    # no `*_present` statement anywhere. A document that says it IS
+    # applicable and has not been extracted has declared nothing.
+    "l24_signoff_evidence_backed_check":
+        "L24 is applicable and NOT_YET_EXTRACTED",
+    "l25_reliability_envelope_actionable_check":
+        "L25 is applicable and NOT_YET_EXTRACTED",
+    # Ruled at R-0915-19: its subject is an OVERRIDE DOC, and a document
+    # nobody wrote is an input this run lacks, not a declared absence.
+    "l3_opcode_response_template_check":
+        "its subject is an override doc, not a design population",
+}
+
+
+@pytest.mark.parametrize("gate", sorted(NOT_REGISTERED))
+def test_a_population_no_document_declares_keeps_its_gate_live(tmp_path, gate):
+    """An empty scan is not a declaration. These four report an empty
+    population on the same design where the six registered gates are N/A, and
+    they must still run -- the difference is a document, not a count."""
+    proj, rtl = _declares_none(tmp_path)
+    assert gate not in F._P0_GATE_ZERO_POPULATION, (gate, NOT_REGISTERED[gate])
+    assert F._p0_zero_population_evidence(proj, gate) is None, gate
+    assert F._p0_contract_na_reason(gate, proj, rtl) is None, gate
+
+
+def test_the_roster_is_exactly_what_this_file_accounts_for():
+    """No gate may join `_P0_GATE_ZERO_POPULATION` without a both-direction
+    case here. If this fails, add the gate to DECLARING + STATED_BY rather
+    than to this list."""
+    assert set(F._P0_GATE_ZERO_POPULATION) == set(DECLARING)
+    assert set(STATED_BY) == set(DECLARING)
