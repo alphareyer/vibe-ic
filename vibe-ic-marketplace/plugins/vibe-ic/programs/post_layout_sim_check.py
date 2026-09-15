@@ -55,6 +55,7 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
     findings: List[Finding] = []
     sim_dir = _pl.sim_postlayout_dir(project_dir)
     stats = {"sim_dir_exists": False, "sdf_found": False,
+             "sim_executed": False,
              "log_found": False, "sdf_referenced": False,
              "flag_only": False, "approximation_flag": False}
 
@@ -96,10 +97,45 @@ def audit(project_dir: Path) -> Tuple[List[Finding], dict]:
     log_path = sim_dir / "results.log"
     flag_path = sim_dir / "pass.flag"
     stats["log_found"] = log_path.exists() or flag_path.exists()
+    # A simulation EXECUTED when it left a log. A pass.flag on its own is an
+    # assertion that one did, which #437(d) already refuses to treat as
+    # simulation evidence, so it does not set this either.
+    stats["sim_executed"] = log_path.exists()
 
     if not stats["log_found"]:
-        findings.append(Finding("ERROR", "NO_RESULTS",
-                                "Neither results.log nor pass.flag found in sim_postlayout/"))
+        # NAME THE CAUSE, NOT ONLY THE SYMPTOM (R-0915-42). "no results.log"
+        # is what a reader can already see; it does not say whether the sim was
+        # never attempted, could not compile, or ran and found no self-checking
+        # testbench. The runner records exactly that in a sibling attempt note
+        # when its back-annotated sim does not deliver, so carry it here rather
+        # than leaving the declared document to state a symptom and stop.
+        #
+        # MEASURED (sha256 run11): sim_postlayout/ held sdf.log, sha256.sdf and
+        # sdf_sim_skipped.json {"verdict":"ERROR","reason":"... sdf_gate_sim
+        # reported verdict=ERROR reason=no self-checking testbench ..."} while
+        # this document did not exist at all. The cause was on disk and the
+        # declared output was silent.
+        detail = ""
+        note = sim_dir / "sdf_sim_skipped.json"
+        if note.is_file():
+            try:
+                rec = json.loads(note.read_text(errors="replace"))
+            except (ValueError, OSError) as exc:
+                detail = f"{note.name} is present but unreadable: {exc}"
+            else:
+                detail = (f"{note.name}: verdict="
+                          f"{rec.get('verdict', 'UNSTATED')} reason="
+                          f"{rec.get('reason', 'UNSTATED')}")
+                if rec.get("capability_flag"):
+                    stats["capability_flag"] = rec["capability_flag"]
+        else:
+            detail = ("no attempt record beside it either: nothing in this "
+                      "project states that a post-layout simulation was ever "
+                      "attempted")
+        findings.append(Finding(
+            "ERROR", "NO_RESULTS",
+            "Neither results.log nor pass.flag found in sim_postlayout/",
+            detail))
         return findings, stats
 
     if log_path.exists():
@@ -159,6 +195,7 @@ def build_report(findings: List[Finding], stats: dict,
             "sim_dir_exists": stats["sim_dir_exists"],
             "sdf_found": stats["sdf_found"],
             "sdf_referenced": stats["sdf_referenced"],
+            "sim_executed": stats.get("sim_executed", False),
             "flag_only": stats.get("flag_only", False),
             "approximation_flag": stats.get("approximation_flag", False),
             "findings_count": len(findings),
