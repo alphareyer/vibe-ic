@@ -57,6 +57,8 @@ REGISTERED = ("klayout_deck_mode_check", "gate_evidence_completeness_check")
 
 
 def _audit(proj, ledger):
+    """Write the completion audit's own record. Rows may carry `cmd`, which
+    is how a gate DECLARES the artefact its PASS rests on."""
     p = proj / "reports" / "audit" / "phase23_completion_audit.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({"gate_execution_ledger": ledger}))
@@ -98,22 +100,48 @@ def test_a_pass_gate_whose_evidence_is_on_disk_is_backed(tmp_path):
     assert "0 without evidence" in out
 
 
-def test_a_pass_gate_with_no_evidence_anywhere_still_FAILS_naming_it(tmp_path):
-    """THE CONTROL R-0915-46 ASKS FOR. The fix must not make the gate
-    toothless: an audit JSON that exists with a gate whose evidence is
-    missing still FAILs, and says which gate."""
-    _audit(tmp_path, [{"gate": "yosys_hilomap_required_check",
-                       "verdict": "PASS"},
-                      {"gate": "a_gate_nobody_evidenced", "verdict": "PASS"}])
+def test_a_gate_that_DECLARED_an_artefact_and_did_not_produce_it_FAILS(
+        tmp_path):
+    """THE CONTROL R-0915-46 ASKS FOR, and the teeth of the whole check. A
+    gate whose own command names `--json <path>` must have produced that
+    file."""
+    _audit(tmp_path, [
+        {"gate": "yosys_hilomap_required_check", "verdict": "PASS",
+         "cmd": "yosys_hilomap_required_check . "
+                "--json reports/phase2/gates/yosys_hilomap.json"},
+        {"gate": "a_gate_that_promised_a_file", "verdict": "PASS",
+         "cmd": "a_gate_that_promised_a_file . "
+                "--json reports/phase2/gates/never_written.json"}])
     _gate_report(tmp_path, "phase2/gates/yosys_hilomap.json")
     rc, out = _run(tmp_path)
     assert rc == 1, out
-    assert "a_gate_nobody_evidenced" in out
+    assert "a_gate_that_promised_a_file" in out
+    assert "never_written.json" in out, "name the artefact it owed"
+
+
+def test_a_gate_that_DECLARES_no_artefact_is_evidenced_by_its_ledger_row(
+        tmp_path):
+    """MEASURED on the SPM verdict candidate: **146 PASS gates, 16 without
+    evidence** once the audit's full-scope record was read -- and a `find`
+    over the whole run tree turns up NOTHING for any of the 16, because they
+    are invoked WITHOUT `--json`. They print a verdict and the audit records
+    it; they are working exactly as designed. Demanding a file would be a
+    FALSE FAIL over 16 correct gates, which is worse than the circular
+    INCOMPLETE this ruling set out to remove."""
+    _audit(tmp_path, [{"gate": "constants_validation", "verdict": "PASS",
+                       "cmd": "constants_validation ."}])
+    rc, out = _run(tmp_path)
+    assert rc == 0, out
+    assert "declaring no artefact" in out
 
 
 def test_a_run_with_no_gate_reports_at_all_still_refuses(tmp_path):
-    """THE OTHER CONTROL. Nothing on disk is not a pass."""
+    """THE OTHER CONTROL. A claim with no ledger command and nothing on disk
+    is not a pass."""
     _audit(tmp_path, [{"gate": "some_check", "verdict": "PASS"}])
+    (tmp_path / "reports" / "audit"
+     / "phase23_completion_audit.json").write_text(json.dumps(
+         {"steps": [{"name": "some_check", "status": "PASS"}]}))
     rc, out = _run(tmp_path)
     assert rc == 1, out
     assert "some_check" in out
