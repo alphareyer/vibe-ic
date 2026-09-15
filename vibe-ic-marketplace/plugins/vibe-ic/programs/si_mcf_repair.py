@@ -231,3 +231,69 @@ def repair_tcl(*, folded_spef_c: str, victims: List[str],
         "} else {\n"
         "  puts \"SI_MCF_REPAIR_DONE\"\n"
         "}\n")
+
+
+def _corner_numbers(si_mcf: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The three numbers the trajectory is measured in, from a report."""
+    c = (si_mcf or {}).get("corners") or {}
+    return {
+        "nominal_setup_ns": ((si_mcf or {}).get("nominal")
+                             or {}).get("worst_setup_slack_ns"),
+        "mcf_setup_ns": (c.get("setup") or {}).get("worst_slack_after_ns"),
+        "mcf_hold_ns": (c.get("hold") or {}).get("worst_slack_after_ns"),
+    }
+
+
+def run_once(project: Path, *, container: str = "",
+             runner: Any = None) -> Dict[str, Any]:
+    """Plan, and record the trajectory. ONE pass, and NEVER in place.
+
+    `runner` is the callable that executes a candidate and returns the AFTER
+    numbers -- the runner supplies it, because the container seam, the
+    re-extraction and the re-STA all belong to the phase-3 runner and not here.
+    When it is None this producer PLANS and RECORDS and changes nothing, which
+    is the state a tree without the execution leg is in and must be able to
+    say out loud.
+
+    THE PARENT IS NEVER MUTATED. Whatever `runner` does, it does to a CANDIDATE
+    -- the same shape the SDR children established (R-0915-18): the shipping
+    session keeps the route it has, and a candidate is adopted only if
+    `accepts()` says so. A rejected candidate leaves the design byte-identical,
+    which is a test."""
+    import _path_layout as _pl                                # noqa: PLC0415
+    out_p = _pl.report_path(project, "si_mcf_repair.json")
+    si_mcf = _load(_pl.report_path(project, "si_mcf_sta.json"))
+    p = plan(project)
+    before = _corner_numbers(si_mcf)
+    record: Dict[str, Any] = {
+        "program": PROGRAM, "version": VERSION,
+        "scope": ("ONE SI-aware repair pass on the MCF-bounded loads, judged "
+                  "like an SDR child and never applied in place. The envelope "
+                  "is a conservative crosstalk-DELAY bound; closing it is not "
+                  "a silicon claim."),
+        "plan": p, "before": before, "after": None,
+        "decision": None, "reason": None, "residual": None,
+    }
+    if not p.get("run"):
+        record["decision"] = "NOT_RUN"
+        record["reason"] = p.get("reason")
+    elif runner is None:
+        # NOT a silent no-op: a tree whose execution leg is absent says so, and
+        # a reader can tell it from "the pass ran and changed nothing".
+        record["decision"] = "NOT_EXECUTED"
+        record["reason"] = (
+            "no execution seam was supplied, so this pass PLANNED and measured "
+            "the BEFORE state and applied nothing; the design is unchanged")
+    else:
+        after = runner(project, container=container, victims=p["victims"])
+        record["after"] = after
+        ok, why = accepts({**before, **{"router_drc":
+                                        (after or {}).get("router_drc_before")}},
+                          after or {})
+        record["decision"] = "ADOPTED" if ok else "REJECTED_CANDIDATE_DISCARDED"
+        record["reason"] = why
+        if ok:
+            record["residual"] = residual(after or {})
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    out_p.write_text(json.dumps(record, indent=2) + "\n")
+    return record

@@ -136,3 +136,68 @@ def test_a_still_open_envelope_is_reported_by_name_not_iterated():
 def test_a_closed_envelope_has_no_residual():
     assert R.residual({"mcf_setup_ns": 0.05}) is None
     assert R.residual({"mcf_setup_ns": 0.0}) is None
+
+
+# ------------------------------------------------------- the recorded trajectory
+
+def _proj(tmp_path, si_mcf, si_x=None):
+    import json as _j
+    p = tmp_path / "proj"
+    (p / "reports" / "phase3").mkdir(parents=True)
+    (p / "reports" / "phase3" / "si_mcf_sta.json").write_text(_j.dumps(si_mcf))
+    if si_x is not None:
+        (p / "reports" / "phase3" / "si_crosstalk.json").write_text(_j.dumps(si_x))
+    return p
+
+
+_OPEN = {"verdict": "FAIL",
+         "nominal": {"worst_setup_slack_ns": 0.03},
+         "corners": {"setup": {"worst_slack_after_ns": -0.266,
+                               "worst_victim": {"net": "n_worst"}},
+                     "hold": {"worst_slack_after_ns": 4.764}}}
+_CLOSED = {"verdict": "PASS",
+           "nominal": {"worst_setup_slack_ns": 0.03},
+           "corners": {"setup": {"worst_slack_after_ns": 0.5},
+                       "hold": {"worst_slack_after_ns": 4.7}}}
+
+
+def test_a_closed_envelope_records_NOT_RUN_and_touches_nothing(tmp_path):
+    rec = R.run_once(_proj(tmp_path, _CLOSED))
+    assert rec["decision"] == "NOT_RUN"
+    assert "does not report FAIL" in rec["reason"]
+    assert rec["after"] is None
+
+
+def test_an_absent_execution_seam_says_so_rather_than_reading_as_a_no_op(tmp_path):
+    """"the pass ran and changed nothing" and "there was no way to run it" are
+    different answers and the record must not merge them."""
+    rec = R.run_once(_proj(tmp_path, _OPEN, {"coupling_dominated_nets": []}))
+    assert rec["decision"] == "NOT_EXECUTED"
+    assert "applied nothing" in rec["reason"]
+    assert rec["before"]["mcf_setup_ns"] == -0.266
+
+
+def test_the_trajectory_carries_all_three_numbers_before(tmp_path):
+    rec = R.run_once(_proj(tmp_path, _OPEN))
+    assert rec["before"] == {"nominal_setup_ns": 0.03,
+                             "mcf_setup_ns": -0.266,
+                             "mcf_hold_ns": 4.764}
+
+
+def test_a_rejected_candidate_is_recorded_as_discarded(tmp_path):
+    def _runner(project, container="", victims=()):
+        return {"router_drc_before": 0, "router_drc": 4,
+                "nominal_setup_ns": 0.03, "mcf_setup_ns": 0.1}
+    rec = R.run_once(_proj(tmp_path, _OPEN), runner=_runner)
+    assert rec["decision"] == "REJECTED_CANDIDATE_DISCARDED"
+    assert "makes the ROUTE worse" in rec["reason"]
+    assert rec["residual"] is None
+
+
+def test_an_adopted_candidate_records_its_residual(tmp_path):
+    def _runner(project, container="", victims=()):
+        return {"router_drc_before": 0, "router_drc": 0,
+                "nominal_setup_ns": 0.03, "mcf_setup_ns": -0.05}
+    rec = R.run_once(_proj(tmp_path, _OPEN), runner=_runner)
+    assert rec["decision"] == "ADOPTED"
+    assert "STILL OPEN" in rec["residual"]
