@@ -103,6 +103,7 @@ import _reused_ip_predicate as _reused_ip
 import _waiver_entries as _we
 import _evidence_independence as _ev_ind  # #524
 import _sim_results_bridge as _srb
+import _sta_supersession                          # R-0915-28 (amended)
 import _gate_invocation
 import _flow_reason_taxonomy as _reason_taxonomy
 import _watchdog
@@ -3130,7 +3131,8 @@ def _record_gate_execution(cmd: str, rc: Optional[int], verdict: str,
                            reason_class: Optional[str] = None) -> Dict[str, Any]:
     """One row per gate INVOCATION. `rc=None` means the program could not be
     launched at all — itself a distinct fact from any exit code."""
-    if verdict not in ("PASS", "FAIL", "PASS_WITH_WAIVERS"):
+    if verdict not in ("PASS", "FAIL", "PASS_WITH_WAIVERS",
+                       _SUPERSEDED_VERDICT):
         reason_class = _reason_taxonomy.infer_nonverdict_reason(
             verdict=verdict, explicit=reason_class)
     else:
@@ -3317,6 +3319,17 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
         reason_class = _reason_taxonomy.EXECUTION_ERROR
     else:
         verdict, rc = ("PASS", 0) if ok else ("FAIL", 1)
+        if verdict == "FAIL":
+            _sup = _sta_supersession.supersession(project, report)
+            if _sup is not None:
+                # MEASURED-AND-ANSWERED, not waived. Every number the gate found
+                # is still in its own report and in this row; what changes is
+                # that a forecast the physical passes demonstrably recovered no
+                # longer blocks the run. Remove the passing sign-off artefact
+                # and this step blocks again -- which is a test.
+                verdict, ok, rc = _SUPERSEDED_VERDICT, True, 0
+                out = (f"{_SUPERSEDED_HINT_PREFIX}{cmd_str}\n"
+                       + _sta_supersession.disclosure(_sup))
         # THE SAME EXEMPTION THE rc-2 BRANCH ALREADY MAKES (vibe-ic#2277).
         #
         # MEASURED, live main 79506306d (lane icspm4, run1), flow step 14.
@@ -3658,6 +3671,18 @@ _SELF_SKIP_VERDICTS = frozenset({"SKIP", "SKIPPED", "SKIPPED-CONDITION"})
 _WAIVER_HINT_PREFIX = "__WAIVER_HINT__: "
 _WAIVER_EXIT_CODE = 3
 _WAIVER_STDOUT_SENTINEL = "PASS_WITH_WAIVERS"
+
+#: R-0915-28 (as amended). A step-10 FAIL whose report declares basis
+#: PRE_LAYOUT and whose corner the post-route multi-corner sign-off CLOSED is
+#: booked here, at a disclosed non-blocking tier. The GATE is untouched: it
+#: still fails, its finding stands, and `test_sta_basis_scope_residuals::
+#: test_widening_step10_does_not_buy_a_green` -- the contract that a label a
+#: report writes about itself may never buy a green -- is byte-identical.
+#: The question is asked here instead because here it can be keyed on EVIDENCE:
+#: supersession needs a SEPARATE, PASSING sign-off artefact that the failing
+#: report cannot author. See `_sta_supersession`.
+_SUPERSEDED_VERDICT = "SUPERSEDED_BY_SIGNOFF"
+_SUPERSEDED_HINT_PREFIX = "__SUPERSEDED_BY_SIGNOFF_HINT__: "
 
 # #2068 — the one state a waiver cannot cover: the gate's measurement did not
 # FINISH. A gate that exhausted a declared budget and reached NO verdict has
