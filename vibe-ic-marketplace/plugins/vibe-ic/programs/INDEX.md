@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1312
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1312)
+- **Total programs (excluding helpers / shims):** 1313
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1313)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1303 |
+| `any` | 1304 |
 
 ## Alphabetical listing
 
@@ -421,6 +421,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `flow_dashboard_cli` | any | — | LIVE terminal dashboard for the Vibe-IC flow. |
 | `flow_dashboard_data` | any | — | DATA PROVIDER for the live Vibe-IC flow dashboard. |
 | `flow_dashboard_web` | any | — | a localhost WEB dashboard for the Vibe-IC flow. |
+| `flow_declared_producer_run` | any | — | run the producers the FLOW already declares, so the RUN writes the documents it is supposed to write. |
 | `flow_dependency_graph_check` | any | — | recompute the flow-gate's dependency dimension. |
 | `flow_gate_enforcement_audit` | any | — | which flow gates can actually STOP a run, and which only get to complain afterwards (#306). |
 | `flow_gate_grid` | any | — | recompute the flow-gate grid, and say which cells cannot be. |
@@ -1384,7 +1385,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1303 programs)
+### `any` (1304 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1777,6 +1778,7 @@ _(no programs in this group)_
 - `flow_dashboard_cli` — LIVE terminal dashboard for the Vibe-IC flow.
 - `flow_dashboard_data` — DATA PROVIDER for the live Vibe-IC flow dashboard.
 - `flow_dashboard_web` — a localhost WEB dashboard for the Vibe-IC flow.
+- `flow_declared_producer_run` — run the producers the FLOW already declares, so the RUN writes the documents it is supposed to write.
 - `flow_dependency_graph_check` — recompute the flow-gate's dependency dimension.
 - `flow_gate_enforcement_audit` — which flow gates can actually STOP a run, and which only get to complain afterwards (#306).
 - `flow_gate_grid` — recompute the flow-gate grid, and say which cells cannot be.
