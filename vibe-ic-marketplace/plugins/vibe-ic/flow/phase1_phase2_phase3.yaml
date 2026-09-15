@@ -4645,6 +4645,30 @@ steps:
       files_exist:
         - "input/submission_template/slots/*.yaml"
         - "input/submission_template/SELF_TAPEOUT.txt"
+      # THE DELIVERY THE DESIGN DECLARED, ahead of the router's leftovers
+      # (vibe-ic#2277). MEASURED: since 0.5ic's fetch was wired, a PDK with a
+      # LIVE shuttle in the registry has the operator's whole CATALOGUE
+      # ingested as `slots/*.yaml` whether or not the design bought a slot,
+      # and no `NO_TEMPLATE.txt` is written. So a delivery that declares
+      # `deliverable=HARDMACRO` and binds no slot matched the `any_of` above,
+      # this row was judged APPLICABLE, every output was owed, the producers
+      # correctly wrote nothing, and the row read MISSING — a pad ring, a
+      # seal ring and an operator precheck demanded of a macro somebody else
+      # PLACES inside their die (RULINGS R12, 2026-09-07).
+      #
+      # Evaluated BEFORE `files_exist`, and conservative in the same direction
+      # as `l_doc_declares`: a missing or unparseable declaration, a
+      # `deliverable` that is not listed here, NOT_DETERMINED, DIE, or ANY
+      # affirmative `operator_template.path`/`.slot` binding in the design's
+      # own `input/step_0_5ic_answers.json` all RUN the step. See
+      # `flow_compliance_check._delivery_declares_absence`, which asks
+      # `submission_template_check.slot_rules_are_owed` — the same reader the
+      # run itself uses, so the run and the audit cannot disagree about one
+      # design's route.
+      delivery_declares:
+        declaration: "input/submission_template/tapeout_declaration.json"
+        field: "answers.deliverable"
+        absent_when: ["HARDMACRO"]
     # D6 (vibe-ic#1744). `design_dependent`, not `setup_required`: this
     # condition tests WHICH PATH the design is on, and step 0.5ic's
     # required_outputs is the OR of exactly the three router artefacts, so on
@@ -6232,6 +6256,30 @@ steps:
       files_exist:
         - "input/submission_template/slots/*.yaml"
         - "input/submission_template/SELF_TAPEOUT.txt"
+      # THE DELIVERY THE DESIGN DECLARED, ahead of the router's leftovers
+      # (vibe-ic#2277). MEASURED: since 0.5ic's fetch was wired, a PDK with a
+      # LIVE shuttle in the registry has the operator's whole CATALOGUE
+      # ingested as `slots/*.yaml` whether or not the design bought a slot,
+      # and no `NO_TEMPLATE.txt` is written. So a delivery that declares
+      # `deliverable=HARDMACRO` and binds no slot matched the `any_of` above,
+      # this row was judged APPLICABLE, every output was owed, the producers
+      # correctly wrote nothing, and the row read MISSING — a pad ring, a
+      # seal ring and an operator precheck demanded of a macro somebody else
+      # PLACES inside their die (RULINGS R12, 2026-09-07).
+      #
+      # Evaluated BEFORE `files_exist`, and conservative in the same direction
+      # as `l_doc_declares`: a missing or unparseable declaration, a
+      # `deliverable` that is not listed here, NOT_DETERMINED, DIE, or ANY
+      # affirmative `operator_template.path`/`.slot` binding in the design's
+      # own `input/step_0_5ic_answers.json` all RUN the step. See
+      # `flow_compliance_check._delivery_declares_absence`, which asks
+      # `submission_template_check.slot_rules_are_owed` — the same reader the
+      # run itself uses, so the run and the audit cannot disagree about one
+      # design's route.
+      delivery_declares:
+        declaration: "input/submission_template/tapeout_declaration.json"
+        field: "answers.deliverable"
+        absent_when: ["HARDMACRO"]
     # D6 (vibe-ic#1744). `design_dependent`, not `setup_required`: this
     # condition tests WHICH PATH the design is on, and step 0.5ic's
     # required_outputs is the OR of exactly the three router artefacts, so on
@@ -7089,6 +7137,29 @@ steps:
         # wiring auditors read that sentence as an invocation and certified a
         # reachability instrument as wired. The two programs' relationship was
         # written down in prose and never built. This clause builds it.
+        # THE WRITER, AHEAD OF ITS READER (vibe-ic#2277). Step 31 declares
+        # `reports/phase3/perc_sweep.json` as a `required_output` and names
+        # `perc_corpus_sweep` under `programs:`, but no clause invoked it --
+        # the reach clause below only READS the document. So the run produced
+        # 8 of 9 declared outputs, the reader's `condition_files_exist` took
+        # its absent branch, and step 31 read MISSING on the one artefact
+        # nothing was asked to write: a reachability instrument that certified
+        # itself by not running, which is exactly what the reader was added to
+        # refuse.
+        #
+        # `flow_declared_producer_run` -- invoked by the phase-3 runner, never
+        # by the auditor -- executes this clause when, and only when, the
+        # document is absent, so the RUN is the writer and the audit's own
+        # `audit_created` tier is not reached. A document the run already
+        # produced is left byte-for-byte alone.
+        #
+        # `.` is the project itself: the sweep's corpus is this run's own
+        # routed DEFs. MEASURED on a real run: rc 0, one target, reach
+        # coverage 1/1, `is_vacuous` false. Advisory for the same reason its
+        # reader is -- the exit code is a ratchet position, not yet a verdict.
+        - advisory_program_exit_zero:
+            command: "perc_corpus_sweep . --report reports/phase3/perc_sweep.json"
+            advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse (rc 2 + the reach sentinel when the sweep entered the PERC chain on nothing) and is wired advisory as a ratchet position, not as a verdict. Measured rc 0 with reach 1/1 on a real run (2026-09-15); the only thing holding it advisory is that no other run has been measured."
         - advisory_program_exit_zero:
             command: "sweep_reach_check --report reports/phase3/perc_sweep.json"
             advisory_reason: "NOT-YET-CLEAN: this gate CAN refuse and is wired advisory as a ratchet position, not as a verdict. Notch measured rc 0 on a real spm run (2026-08-31): it is already clean on real input, so blocking would cost nothing today; the only thing holding it advisory is that no other run has been measured."
@@ -8291,6 +8362,30 @@ steps:
       files_exist:
         - "input/submission_template/slots/*.yaml"
         - "input/submission_template/SELF_TAPEOUT.txt"
+      # THE DELIVERY THE DESIGN DECLARED, ahead of the router's leftovers
+      # (vibe-ic#2277). MEASURED: since 0.5ic's fetch was wired, a PDK with a
+      # LIVE shuttle in the registry has the operator's whole CATALOGUE
+      # ingested as `slots/*.yaml` whether or not the design bought a slot,
+      # and no `NO_TEMPLATE.txt` is written. So a delivery that declares
+      # `deliverable=HARDMACRO` and binds no slot matched the `any_of` above,
+      # this row was judged APPLICABLE, every output was owed, the producers
+      # correctly wrote nothing, and the row read MISSING — a pad ring, a
+      # seal ring and an operator precheck demanded of a macro somebody else
+      # PLACES inside their die (RULINGS R12, 2026-09-07).
+      #
+      # Evaluated BEFORE `files_exist`, and conservative in the same direction
+      # as `l_doc_declares`: a missing or unparseable declaration, a
+      # `deliverable` that is not listed here, NOT_DETERMINED, DIE, or ANY
+      # affirmative `operator_template.path`/`.slot` binding in the design's
+      # own `input/step_0_5ic_answers.json` all RUN the step. See
+      # `flow_compliance_check._delivery_declares_absence`, which asks
+      # `submission_template_check.slot_rules_are_owed` — the same reader the
+      # run itself uses, so the run and the audit cannot disagree about one
+      # design's route.
+      delivery_declares:
+        declaration: "input/submission_template/tapeout_declaration.json"
+        field: "answers.deliverable"
+        absent_when: ["HARDMACRO"]
     # D6 (vibe-ic#1744). `design_dependent`, not `setup_required`: this
     # condition tests WHICH PATH the design is on, and step 0.5ic's
     # required_outputs is the OR of exactly the three router artefacts, so on

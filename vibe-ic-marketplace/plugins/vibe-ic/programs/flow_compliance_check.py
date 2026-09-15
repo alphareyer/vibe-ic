@@ -11247,6 +11247,77 @@ def _l_doc_declares_absence(project: Path, spec: Any
     return cited, detail
 
 
+#: The `delivery_declares` predicate's answer, when it has one: the cited
+#: declaration and the detail a reader needs to check it.
+def _delivery_declares_absence(project: Path, spec: Any
+                               ) -> Optional[Tuple[str, str]]:
+    """Whether the DELIVERY the design declared has no die (vibe-ic#2277).
+
+    THE MEASURED DEFECT. Steps 15.5ic (Pad Ring), 26.5ic (Die Finishing) and
+    37.5ic (Tape-out Precheck) condition on router FILES --
+    `input/submission_template/slots/*.yaml` OR `SELF_TAPEOUT.txt` -- and the
+    only N/A a hardmacro is offered is `NO_TEMPLATE.txt`. Since the 0.5ic fetch
+    was wired, a PDK that has a LIVE shuttle in the registry has the operator's
+    whole CATALOGUE ingested as `slots/*.yaml` whether or not the design bought
+    a slot, and no `NO_TEMPLATE.txt` is left behind. So a delivery that
+    declares `deliverable=HARDMACRO` and binds no slot had all three rows
+    judged APPLICABLE and every one of their outputs owed -- a pad ring, a seal
+    ring and an operator precheck demanded of a macro that will be PLACED
+    inside somebody else's die. Its producers correctly wrote nothing
+    (`tapeout_precheck` step_applies=false, `tapeout_docs_gen` NOT_APPLICABLE,
+    `die_finishing_gen._hardmacro_skip`), so the rows read MISSING and
+    stage3/stage4 compliance failed on them. RULINGS R12 (2026-09-07): a
+    hardmacro exposes pins, gets no pad ring and no die ring.
+
+    THE CONDITION MUST READ THE DECLARATION, NOT THE ROUTER'S LEFTOVERS, and it
+    reads it through the one function the flow already has for the question --
+    `submission_template_check.slot_rules_are_owed` -- so the run and the audit
+    cannot hold two opinions about one design's route.
+
+    CONSERVATIVE IN THE SAME DIRECTION AS `_l_doc_declares_absence`. Absence of
+    a declaration is not a declaration of absence: a missing or unparseable
+    declaration, a `deliverable` that is not the declared-absent word,
+    NOT_DETERMINED, DIE, a SELF_TAPEOUT route, or ANY affirmative
+    `operator_template.path`/`.slot` binding all return ``None`` and the step
+    RUNS and is held to its outputs. Only a design that positively declared a
+    die-less delivery AND bought no slot stands these steps down.
+    """
+    if not isinstance(spec, dict):
+        return None
+    rel = str(spec.get("declaration") or "").strip()
+    field = str(spec.get("field") or "").strip()
+    absent_when = [str(v).strip().upper()
+                   for v in (spec.get("absent_when") or []) if str(v).strip()]
+    if not rel or not field or not absent_when or Path(rel).is_absolute():
+        return None
+    try:
+        source = (project / rel).resolve()
+        if not source.is_relative_to(project.resolve()) or not source.is_file():
+            return None
+        doc = json.loads(source.read_text(errors="replace"))
+    except (OSError, ValueError, TypeError):
+        return None
+    value: Any = doc
+    for part in field.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return None
+        value = value[part]
+    if not isinstance(value, str) or value.strip().upper() not in absent_when:
+        return None
+    # The DIE word alone is not enough: a hardmacro that bought an operator
+    # slot is going through that operator and owes the slot's rules. This is
+    # the same predicate `slot_pad_budget_check` now calls, and it degrades
+    # towards OWING the steps on anything it cannot read.
+    try:
+        import submission_template_check as _stc  # noqa: PLC0415
+        owed, _why = _stc.slot_rules_are_owed(project, None)
+    except Exception:  # noqa: BLE001 — cannot read the route: run the step
+        return None
+    if owed:
+        return None
+    return rel, f"{field}={value!r} and no operator slot is bound"
+
+
 def _check_condition(project: Path, condition: Dict[str, Any]) -> bool:
     """Evaluate a step condition (e.g. files_exist). Returns True if step should run."""
     if not condition:
@@ -11256,6 +11327,11 @@ def _check_condition(project: Path, condition: Dict[str, Any]) -> bool:
     # capability absent; see `_l_doc_declares_absence` for why every other
     # answer runs the step.
     if _l_doc_declares_absence(project, condition.get("l_doc_declares")):
+        return False
+    # The DELIVERY the design declared, read the same way: a delivery with no
+    # die owes no pad ring, no die finishing and no operator precheck. See
+    # `_delivery_declares_absence` for why every other answer runs the step.
+    if _delivery_declares_absence(project, condition.get("delivery_declares")):
         return False
     # v0.113 (BACKLOG-v10 P1.1): auto-trigger A1-A8 from L9 analog_modules.
     # If condition lists `analog/analog_block_list.json` and that file is
@@ -12825,6 +12901,9 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # file somebody forgot to author — the two need different actions.
             _decl = _l_doc_declares_absence(
                 project, (condition or {}).get("l_doc_declares"))
+            if _decl is None:
+                _decl = _delivery_declares_absence(
+                    project, (condition or {}).get("delivery_declares"))
             if _decl is not None:
                 _cited, _detail = _decl
                 result.reasons.append(

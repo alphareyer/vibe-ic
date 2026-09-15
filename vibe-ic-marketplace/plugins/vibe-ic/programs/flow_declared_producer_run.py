@@ -81,7 +81,21 @@ REPORT_REL = "reports/audit/flow_declared_producer_run.json"
 #: The gate keys whose value is a shell-shaped command string.
 _COMMAND_KEYS = ("program_exit_zero", "advisory_program_exit_zero",
                  "optional_program_exit_zero")
-_JSON_RE = re.compile(r"--json[=\s]+(\S+)")
+# THE FLAG A PRODUCER WRITES ITS DECLARED DOCUMENT WITH is not always
+# `--json` (vibe-ic#2277). `perc_corpus_sweep` writes
+# `reports/phase3/perc_sweep.json` -- a step-31 `required_output`, and the
+# document `sweep_reach_check` consumes -- through `--report`, because its
+# `--json` is a BOOLEAN that switches stdout to a row array. Matching only
+# `--json` therefore skipped it: the clause met conditions one and three and
+# failed the middle one on the flag's SPELLING, so nothing in the run wrote the
+# document and step 31 read MISSING on it while every other declared output was
+# present.
+#
+# The condition this expresses is "the clause names a path", and the third
+# condition -- that the path is one of the step's own `required_outputs` --
+# is what keeps that honest. A clause that names some other path is still not a
+# declared producer.
+_JSON_RE = re.compile(r"--(?:json|report)[=\s]+(\S+)")
 
 
 def _iter_steps(node: Any):
@@ -118,7 +132,9 @@ def declared_producer_clauses(flow_yaml: Path = FLOW_YAML
 
     THREE CONDITIONS, ALL FROM THE FLOW, none inferred:
       * the clause's program is listed under that step's `programs:`;
-      * the clause names a `--json <path>`;
+      * the clause names a declared-output path with `--json` or
+        `--report` (see `_JSON_RE` for why the flag's spelling is not the
+        condition);
       * that path is one of the step's `required_outputs`.
 
     A clause meeting all three is the flow saying, in three places, that the
