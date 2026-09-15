@@ -1106,7 +1106,17 @@ def resolve_power_requirement(project: Path, *,
                         "max_uw": l7_rep.get("threshold"),
                         "max_w": ((l7_rep.get("threshold") or 0) * _MICRO
                                   if l7_rep.get("determined") else None),
-                        "note": l7_rep.get("note")})
+                        "note": l7_rep.get("note"),
+                        # vibe-ic#2277 — the CONSUMER needs to tell the two
+                        # NOT_DETERMINED shapes apart: "the design states no
+                        # total-power sign-off row at all" and "it states one,
+                        # bound to another technology". Only this branch knows
+                        # which, so it says so here rather than leaving the
+                        # consumer to re-parse the prose.
+                        "signoff_row_found": bool(
+                            l7_rep.get("signoff_row_found")),
+                        "attributions_seen": l7_rep.get("attributions_seen"),
+                        "run_technology": l7_rep.get("run_technology")})
     if l7_req is not None:
         return {"requirement": l7_req, "sources": sources, "refusal": None,
                 "superseded": []}

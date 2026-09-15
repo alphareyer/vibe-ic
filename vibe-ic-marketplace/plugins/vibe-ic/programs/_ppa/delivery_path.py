@@ -156,7 +156,18 @@ def _terminal_conditions() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
 #: other than the presence of a router file, and a set difference over
 #: `files_exist` would then be answering a question the flow is no longer
 #: asking. Refused loudly rather than ignored.
-_ROUTE_CONDITION_KEYS = {"any_of", "files_exist"}
+_ROUTE_CONDITION_KEYS = {"any_of", "files_exist", "delivery_declares"}
+#: `delivery_declares` (vibe-ic#2277) is in that set because it answers THIS
+#: MODULE'S OWN QUESTION from a better source, not a different question from an
+#: unrelated one. The router artefacts are 0.5ic's record of the route; the
+#: design's `tapeout_declaration.json` is the design's own statement of it, and
+#: when a live shuttle exists on the target PDK the router leaves the
+#: operator's whole CATALOGUE on disk whether or not the design bought a slot —
+#: so the files alone read a hardmacro delivery as a die. The clause is
+#: evaluated by `flow_compliance_check._check_condition`, which is the same
+#: predicate `resolve` below already runs, and it is conservative: anything it
+#: cannot read positively leaves the `files_exist` reading in force. A key this
+#: module has NOT been taught is still refused loudly.
 
 
 def _route_conditions() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -288,6 +299,29 @@ def resolve(project: Optional[Any]) -> Dict[str, Any]:
                            f"{STEP_IP} and not {STEP_CHIP}, so this design "
                            "terminates at the hardmacro/IP delivery and is "
                            "not tape-out-bound"),
+                "evidence": evidence}
+    # THE DESIGN'S OWN STATEMENT, when the routers no longer distinguish the
+    # routes (vibe-ic#2277). A tree that carries the operator's CATALOGUE but
+    # bought no slot meets neither terminal once 37.5ic reads the declaration:
+    # the chip terminal stands down BY DECLARATION, and the IP terminal's
+    # `NO_TEMPLATE.txt` was never written because a live shuttle existed on the
+    # target PDK. Falling through to NOT_DETERMINED would then report "this
+    # tree carries no router artefact" about a tree that carries four of them —
+    # a false statement, and the module's whole contract is that it never makes
+    # one. The declaration that stood the chip terminal down is evidence FOR
+    # the IP route, and it is the design's own.
+    _declared_na = FCC._delivery_declares_absence(
+        root, (conditions[PATH_CHIP] or {}).get("delivery_declares"))
+    if _declared_na is not None:
+        _cited, _detail = _declared_na
+        evidence["declaration"] = {"file": _cited, "detail": _detail}
+        return {"path": PATH_IP,
+                "reason": (f"the design's own declaration at {_cited} records "
+                           f"{_detail}, so {STEP_CHIP} does not apply to it "
+                           f"and this design terminates at the hardmacro/IP "
+                           f"delivery. The operator slot files on this tree "
+                           f"are the PDK's live catalogue, which is "
+                           f"information and not a purchase"),
                 "evidence": evidence}
     return {"path": PATH_NOT_DETERMINED,
             "reason": ("neither terminal's condition is met: this tree carries "

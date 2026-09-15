@@ -372,6 +372,83 @@ def evaluate(project: Path, budget_override: Optional[float],
         rep["verdict"] = "INCOMPLETE"
         lacks: List[str] = []
         code = judged.get("code")
+        # ══════════════════════════════════════════════════════════════════
+        # THE DESIGN STATED NO POWER BUDGET FOR THIS TECHNOLOGY (R-0915-22).
+        # ══════════════════════════════════════════════════════════════════
+        # MEASURED, live main 79506306d: an open-source-PDK hardmacro run whose
+        # own L7 attributes its ONLY total-power baseline to a DIFFERENT
+        # library than the one the run built against. The resolver already
+        # derives that from the INPUT and refuses BY NAME
+        # (`baseline_not_attributed_to_this_technology`, `signoff_row_found`
+        # true), and refusing to borrow the number is correct and stays.
+        #
+        # What was wrong is the TIER. That refusal was pressed into the same
+        # BLOCKED_BY_UPSTREAM class as "nothing declared a budget at all",
+        # which says an input this gate needs was never PRODUCED and implies
+        # somebody still owes it. Nobody does: the design's input states no
+        # power budget applicable to this run's technology, and it never
+        # promised one. The sibling area gate has answered NOT_APPLICABLE for
+        # this very fact (a die the design declines to state) since #2147; this
+        # is that same answer for the same kind of fact.
+        #
+        # OWNER RULING R-0915-22 (2026-09-15): a power baseline the design
+        # attributes to ANOTHER technology is not a budget for this run, and
+        # when NO input document states one applicable to the run's technology
+        # the gate answers NOT_APPLICABLE / DESIGN_DECLARED_NA, disclosing the
+        # unattributed row BY NAME.
+        #
+        # DERIVED FROM THE INPUT, NEVER A FLAG. Every conjunct below is a fact
+        # the resolver read out of the design's own documents:
+        #   * no caller supplied `--budget-uw` (a caller that states a
+        #     requirement has taken the authority and is entitled to);
+        #   * no `vibeic.ppa.contract.v1` power requirement was readable OR
+        #     unreadable (an unreadable contract is outstanding work);
+        #   * every published L19 copy has `power_budget_uw` unset;
+        #   * the design's L7 DOES state a total-power sign-off row, and the
+        #     resolver refused it because its baseline is attributed to another
+        #     technology.
+        # A design whose L7/L19/contract states a budget for THIS technology
+        # keeps the gate live and reaches PASS or FAIL — the negative control.
+        if code == "NO_REQUIREMENT" and budget_override is None:
+            _srcs = res.get("sources") or []
+            _l7 = [s for s in _srcs
+                   if s.get("authority") == _pw.AUTHORITY_L7_SIGNOFF]
+            _contract = [s for s in _srcs
+                         if s.get("authority") != _pw.AUTHORITY_L7_SIGNOFF
+                         and s.get("authority") != _pw.AUTHORITY_L19]
+            _l19 = [s for s in _srcs
+                    if s.get("authority") == _pw.AUTHORITY_L19]
+            if (not _contract and _l19
+                    and all(s.get("max_w") is None for s in _l19)
+                    and len(_l7) == 1
+                    and _l7[0].get("signoff_row_found") is True
+                    and _l7[0].get("determined") is False
+                    and _l7[0].get("reason")
+                    == "baseline_not_attributed_to_this_technology"):
+                rep["verdict"] = "NOT_APPLICABLE"
+                rep["reason_class"] = _reason_taxonomy.DESIGN_DECLARED_NA
+                rep["skip_kind"] = "class-not-applicable"
+                rep["missing_authority"] = None
+                rep["disposition"] = {
+                    "status": "NOT_APPLICABLE",
+                    "source": _l7[0].get("file"),
+                    "unattributed_signoff_row": _l7[0].get("note"),
+                    "attributions_seen": _l7[0].get("attributions_seen"),
+                    "run_technology": _l7[0].get("run_technology"),
+                    # The TIER the resolver put the row in, kept verbatim so a
+                    # reader sees the row was NOT_DETERMINED for this run
+                    # rather than absent.
+                    "signoff_row_tier": _l7[0].get("tier"),
+                    "signoff_row_reason": _l7[0].get("reason"),
+                }
+                rep["reason"] = (
+                    "no input document states a total-power budget applicable "
+                    "to the technology this run built against, so there is no "
+                    "ceiling for the measured total to be under or over. The "
+                    "design DOES state a total-power sign-off row and it is "
+                    "disclosed here by name, unborrowed: "
+                    + str(_l7[0].get("note") or _l7[0].get("reason")))
+                return "NOT_APPLICABLE", rep
         if code == "NO_REQUIREMENT":
             lacks.append(res["refusal"] or
                          "a declared total-power limit (ppa contract "
@@ -517,6 +594,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                   f"{c['activity_basis']} number without knowing that is what "
                   f"it bounds.")
         return RC_OK
+
+    if verdict == "NOT_APPLICABLE":
+        # R-0915-22 (vibe-ic#2277). NOT the refusal paragraph below: this run
+        # is not missing an authority it was owed, and printing "INCOMPLETE:
+        # total power was NOT compared against anything" over a design that
+        # declared no budget for this technology is the same false statement
+        # the gate refuses to make about the number itself. rc stays 2 — the
+        # comparison did not happen and this gate never claims it did — and
+        # the CLASS in the report is what tells the flow this is a
+        # design-declared N/A rather than outstanding work. The unattributed
+        # row is disclosed BY NAME, never borrowed.
+        print(f"[N/A] {TOOL}: {scope}.")
+        print(_basis_line(rep))
+        print(f"VACUOUS_PASS: {rep['reason']}")
+        return RC_NOT_COMPARED
 
     # The sentinel must START A LINE and survive the consumer's tail cut —
     # `flow_compliance_check.output_snippet` keeps only the LAST 300 characters

@@ -1645,16 +1645,27 @@ def test_probe_no_cell_rests_on_channel_c_alone():
 #:
 #:   ("20", "hold_area_budget_check")               gated=F registry=F runner=F
 #:   ("31", "lvs_triage_classify")                  gated=F registry=F runner=F
-#:   ("31", "perc_corpus_sweep")                    gated=F registry=F runner=F
 #:   ("31", "pnr_via_stack_completeness_check")     gated=F registry=F runner=F
+#:   ("31", "perc_corpus_sweep")                    gated=F registry=F runner=F
 #:
-#: The contrast that proves the measurement discriminates: the SAME landing
-#: did the same swap to step 35's `dfm_screen_check`, and that one measures
-#: runner=TRUE — a runner still dispatches it — so it is NOT here. The swap
-#: itself does not orphan a program; losing the last thing that ran it does.
+#: ("31", "perc_corpus_sweep") STAYS PINNED, AND THE REASON IS WORTH A LINE
+#: (vibe-ic#2277). Step 31 declares `reports/phase3/perc_sweep.json` as a
+#: `required_output`, and a run now DOES write it: the step's
+#: `program_outputs:` entry carries a `producer_command`, and
+#: `flow_declared_producer_run` -- which the phase-3 runner invokes -- executes
+#: it when the document is absent. So the program is dispatched.
 #:
-#: Being here is the DISCLOSURE, not permission. Wiring these four means
-#: giving them a dispatch site, which is a flow change and not a pin repair.
+#: It is still an orphan BY THIS PROBE'S DEFINITION, which is the three
+#: channels named above: a gate token, the umbrella registry, or dispatch by
+#: one of the one-shot runners. The `program_outputs` route is a FOURTH, and it
+#: had to be that route rather than a gate clause: #1980 ruled step 31's PERC
+#: and via findings ADVISORY EVIDENCE that stays OUT of gate coverage, and
+#: `test_issue1980_advisory_evidence_tiers` refuses a gate clause naming this
+#: producer by name. Widening the predicate here to absorb the fourth channel
+#: is exactly the substitution this file's docstring refuses -- changing a
+#: predicate so a finding stops landing -- so the entry stays and the fact is
+#: recorded instead.
+
 ORPHAN_DECLARED_PROGRAMS: Tuple[Tuple[str, str], ...] = (
     ("2", "crosslayer_rewrite_equivalence"),
     ("2", "crosslayer_search_space"),
