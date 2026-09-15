@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1314
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1314)
+- **Total programs (excluding helpers / shims):** 1315
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1315)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1305 |
+| `any` | 1306 |
 
 ## Alphabetical listing
 
@@ -634,6 +634,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `l22_verification_plan_measurable_check` | any | — | SEMANTIC gate for L22_VERIFICATION_PLAN (batch layergate-7). |
 | `l23_security_requirements_typed_check` | any | — | SEMANTIC gate for L23_SECURITY_REQUIREMENTS (batch layergate-7). |
 | `l24_signoff_evidence_backed_check` | any | — | batch-8 / layergate-8 (L24_SIGNOFF) |
+| `l24_signoff_requirements_extract` | any | — | R-0915-38. |
 | `l25_reliability_envelope_actionable_check` | any | — | batch-8 / layergate-8 (L25_RELIABILITY_MISSION_PROFILE) |
 | `l26_mechanical_applicability_derived_check` | any | — | batch-8 / layergate-8 (L26_MECHANICAL_TRANSDUCTION) |
 | `l2_named_constant_resolvable_check` | any | — | VERDICT SEMANTICS: **BLOCKS** (exit 1 on FAIL). |
@@ -1386,7 +1387,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1305 programs)
+### `any` (1306 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1992,6 +1993,7 @@ _(no programs in this group)_
 - `l22_verification_plan_measurable_check` — SEMANTIC gate for L22_VERIFICATION_PLAN (batch layergate-7).
 - `l23_security_requirements_typed_check` — SEMANTIC gate for L23_SECURITY_REQUIREMENTS (batch layergate-7).
 - `l24_signoff_evidence_backed_check` — batch-8 / layergate-8 (L24_SIGNOFF)
+- `l24_signoff_requirements_extract` — R-0915-38.
 - `l25_reliability_envelope_actionable_check` — batch-8 / layergate-8 (L25_RELIABILITY_MISSION_PROFILE)
 - `l26_mechanical_applicability_derived_check` — batch-8 / layergate-8 (L26_MECHANICAL_TRANSDUCTION)
 - `l2_named_constant_resolvable_check` — VERDICT SEMANTICS: **BLOCKS** (exit 1 on FAIL).

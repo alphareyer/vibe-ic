@@ -109,8 +109,16 @@ def test_an_input_document_that_carries_the_subject_keeps_it_applicable(
     proj = _project(tmp_path, a_md="It multiplies.\n", b_md=carrier)
     doc = _emit(proj, code)
     assert doc["applicability"] == "APPLICABLE", (code, carrier)
-    assert doc["extraction_status"] == "NOT_YET_EXTRACTED"
     assert "applicability_evidence" not in doc
+    # R-0915-38 then EXTRACTS the layers that have an extractor, so the status
+    # a present subject earns depends on whether one exists -- APPLICABLE is
+    # what this case is about, and it holds either way.
+    assert doc["extraction_status"] in (
+        "NOT_YET_EXTRACTED", "EXTRACTED"), doc["extraction_status"]
+    import phase1_post_process as _P
+    expected = "EXTRACTED" if code in _P._LAYER_EXTRACTORS \
+        else "NOT_YET_EXTRACTED"
+    assert doc["extraction_status"] == expected, (code, carrier)
 
 
 def test_the_two_layers_are_decided_independently(tmp_path):
@@ -172,6 +180,7 @@ def test_an_unregistered_layer_is_untouched(tmp_path):
     proj = _project(tmp_path, spec_md="It multiplies.\n")
     for code in ("L20", "L21", "L22", "L23"):
         assert code not in P._INPUT_SUBJECT_TERMS
+        assert code not in P._LAYER_EXTRACTORS
         doc = _emit(proj, code)
         assert doc["applicability"] == "APPLICABLE", code
         assert doc["extraction_status"] == "NOT_YET_EXTRACTED", code
