@@ -100,14 +100,17 @@ def _extract_headings(text: str) -> List[str]:
     return [m.group(2).strip().lower() for m in _RE_HEADING.finditer(text)]
 
 
-def _check_sections(text: str) -> Tuple[List[SectionCheck], List[str]]:
+def _check_sections(
+        text: str,
+        required: Optional[Tuple[Tuple[str, Tuple[str, ...]], ...]] = None
+) -> Tuple[List[SectionCheck], List[str]]:
     """For each required section, find a heading whose text contains
     one of the synonyms. Returns (per-section results, overall missing).
     """
     headings = _extract_headings(text)
     results: List[SectionCheck] = []
     missing: List[str] = []
-    for canonical, synonyms in _REQUIRED_SECTIONS:
+    for canonical, synonyms in (required or _REQUIRED_SECTIONS):
         sc = SectionCheck(canonical_name=canonical)
         for h in headings:
             for syn in synonyms:
@@ -123,16 +126,82 @@ def _check_sections(text: str) -> Tuple[List[SectionCheck], List[str]]:
     return results, missing
 
 
+def _candidate_rel_paths() -> Tuple[str, ...]:
+    """THE register of what a report card is, owned by the sibling gate.
+
+    R-0915-51. This gate demanded `AGENT_REPORT.md`, and NOTHING in the
+    shipped flow writes one: the card moved to `reports/final_summary.md` in
+    v1.6.32 (`final_report_generate`, wired into all five runners) and this
+    gate was never re-pointed. On the SPM verdict run that single row was the
+    ONLY cause of the overall FAIL — it failed step 36 through
+    `step_internal_fail_bubble_up_check` and voided steps 37, 37.4, 37.5ip
+    and 38.
+
+    The order is the sibling's: the generated card first, the hand-authored
+    one as back-compat. Imported rather than re-typed so the two gates cannot
+    disagree about what a report card is.
+    """
+    try:
+        from agent_report_sha256_attestation_check import (
+            _REPORT_CANDIDATE_REL_PATHS)
+        return tuple(_REPORT_CANDIDATE_REL_PATHS)
+    except ImportError:
+        return ("reports/final_summary.md", "AGENT_REPORT.md")
+
+
+def _sections_for(rel: str) -> Tuple[Tuple[str, Tuple[str, ...]], ...]:
+    """The sections THAT card declares.
+
+    A generated card is held to what its generator GUARANTEES, imported from
+    `final_report_generate.MANDATORY_SECTIONS` so a renamed heading moves both
+    sides at once. A hand-authored `AGENT_REPORT.md` keeps the five this gate
+    has always demanded.
+
+    NOBODY HAND-WRITES A VERDICT CARD. Accepting the generated card is what
+    keeps it that way: the alternative is an agent typing a verdict into a
+    file to satisfy a gate, which is the fabrication surface the
+    anti-fabrication rules exist to close.
+    """
+    if Path(rel).name.lower() != "final_summary.md":
+        return _REQUIRED_SECTIONS
+    try:
+        from final_report_generate import MANDATORY_SECTIONS
+    except ImportError:
+        return _REQUIRED_SECTIONS
+    return tuple((name, tuple(syn)) for name, _heading, syn
+                 in MANDATORY_SECTIONS)
+
+
+def resolve_report(project: Path) -> Optional[Tuple[Path, str]]:
+    """(path, project-relative spelling) of the card this run produced."""
+    for rel in _candidate_rel_paths():
+        p = project / rel
+        if p.is_file():
+            return p, rel
+    return None
+
+
 def audit(project: Path) -> Tuple[str, List[SectionCheck], List[str]]:
-    report_path = project / "AGENT_REPORT.md"
-    if not report_path.is_file():
-        return "FAIL", [], ["AGENT_REPORT.md does not exist at project root"]
+    resolved = resolve_report(project)
+    if resolved is None:
+        # STILL FAILS when there is no card at all — that is the whole point
+        # of a presence check, and re-pointing it must not cost it.
+        # Phrased so each candidate is named with "does not exist": two
+        # shipped tests key on that wording, and the contract they pin --
+        # "this run produced no report card at all" -- is unchanged by
+        # re-pointing WHICH cards count. Widening the population must not
+        # silently rewrite the message its consumers read.
+        return "FAIL", [], [
+            "no report card exists: "
+            + " and ".join(f"{rel} does not exist"
+                           for rel in _candidate_rel_paths())]
+    report_path, rel = resolved
     text = report_path.read_text(encoding="utf-8", errors="replace")
     if not text.strip():
-        return "FAIL", [], ["AGENT_REPORT.md is empty"]
-    sections, missing = _check_sections(text)
+        return "FAIL", [], [f"{rel} is empty"]
+    sections, missing = _check_sections(text, _sections_for(rel))
     if missing:
-        diagnostics = [f"missing section: {s}" for s in missing]
+        diagnostics = [f"{rel}: missing section: {s}" for s in missing]
         return "FAIL", sections, diagnostics
     return "PASS", sections, []
 
@@ -150,12 +219,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     verdict, sections, diagnostics = audit(project)
+    resolved = resolve_report(project)
+    rel = resolved[1] if resolved else None
     report = {
         "gate": "agent_report_presence_check",
         "verdict": verdict,
         "project": str(project),
-        "report_path": "AGENT_REPORT.md",
-        "required_sections": [c for c, _ in _REQUIRED_SECTIONS],
+        # The card this run ACTUALLY produced, not a constant. `null` when
+        # there is none, which is the FAIL above.
+        "report_path": rel,
+        "report_candidates": list(_candidate_rel_paths()),
+        "required_sections": [c for c, _ in _sections_for(rel or "")],
         "section_results": [asdict(s) for s in sections],
         "diagnostics": diagnostics,
     }
@@ -166,10 +240,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         atomic_write_text(out_path, json.dumps(report, indent=2) + "\n")
 
     if verdict == "PASS":
-        print(f"PASS: AGENT_REPORT.md present with all "
-              f"{len(_REQUIRED_SECTIONS)} required sections")
+        # Name the card that was actually read and the count THAT card is
+        # held to; the old line said "AGENT_REPORT.md ... 5 sections" whatever
+        # it had resolved, which is how the mis-pointing stayed invisible.
+        print(f"PASS: {rel} present with all "
+              f"{len(report['required_sections'])} section(s) it declares")
         return 0
-    print(f"FAIL: AGENT_REPORT.md problems:", file=sys.stderr)
+    print(f"FAIL: report card problems:", file=sys.stderr)
     for d in diagnostics:
         print(f"  {d}", file=sys.stderr)
     return 1
