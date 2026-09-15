@@ -10843,10 +10843,77 @@ def _load_waivers(project: Path, max_step: int = 40) -> Dict[int, Dict[str, str]
         raise SystemExit(1)
 
 
+#: The `l_doc_declares` predicate's answer, when it has one: the cited
+#: document and the sentence a reader can check. `None` means the design did
+#: NOT declare the absence, which is the only answer that lets a step run.
+def _l_doc_declares_absence(project: Path, spec: Any
+                            ) -> Optional[Tuple[str, str]]:
+    """Has the DESIGN's own L-doc declared this capability absent?
+
+    MEASURED 2026-09-15 (lane icspm3) on `spm` x gf180mcuD. Step 11 (DFT
+    insertion) declares six `required_outputs`; the runner READ the design's
+    L20 and disclosed a skip --
+
+        SKIP step11_dft_insertion: DFT insertion and ATPG disclosed-skipped:
+        L20 does not authorize automatic scan insertion (reason=no DFT
+        requirement derivable from the design's own inputs and L20 asserts
+        none)
+
+    -- and wrote `phase2/stage2/dft/dft_atpg_not_run.json` saying so. The step
+    still read MISSING, because its six outputs were owed UNCONDITIONALLY, and
+    three ordering violations followed (FS1, 13 and 14 "marked done while
+    dependency [11] = MISSING"), which failed `stage2/3/4_compliance`. The run
+    honoured the declaration and the flow did not.
+
+    THE CONSERVATIVE DIRECTION IS THE WHOLE DESIGN OF THIS. Absence of a
+    declaration is NOT a declaration of absence: a missing document, one that
+    will not parse, a field that is not there, or a field whose value is not
+    the declared-absent one all return `None`, and the step RUNS and is held to
+    its outputs. A phase 1 that fell over therefore cannot excuse a step.
+
+    EVERY listed field must declare absence. One field asserting the
+    capability -- a scan chain, a TAP, a BIST block -- makes the condition MET
+    and the outputs owed, so an extraction that half-filled the document
+    cannot stand the step down.
+    """
+    if not isinstance(spec, dict):
+        return None
+    doc_id = str(spec.get("l_doc") or "").strip()
+    absent = spec.get("all_absent")
+    if not doc_id or not isinstance(absent, dict) or not absent:
+        return None
+    try:
+        path, doc = _ldoc.load_l_doc(project, doc_id)
+    except Exception:  # noqa: BLE001 — an unreadable document declares nothing
+        return None
+    if path is None or not isinstance(doc, dict):
+        return None
+    fields = _ldoc.l_doc_fields(doc)
+    if not isinstance(fields, dict):
+        return None
+    for key, declared_absent in absent.items():
+        if key not in fields:
+            return None
+        if fields[key] != declared_absent:
+            return None
+    try:
+        cited = str(path.relative_to(project))
+    except (ValueError, OSError):
+        cited = str(path)
+    detail = ", ".join(f"{k}={fields[k]!r}" for k in sorted(absent))
+    return cited, detail
+
+
 def _check_condition(project: Path, condition: Dict[str, Any]) -> bool:
     """Evaluate a step condition (e.g. files_exist). Returns True if step should run."""
     if not condition:
         return True
+    # THE DESIGN'S OWN DECLARATION, read from the L-doc the flow names. The
+    # step does not run when every field the clause lists declares the
+    # capability absent; see `_l_doc_declares_absence` for why every other
+    # answer runs the step.
+    if _l_doc_declares_absence(project, condition.get("l_doc_declares")):
+        return False
     # v0.113 (BACKLOG-v10 P1.1): auto-trigger A1-A8 from L9 analog_modules.
     # If condition lists `analog/analog_block_list.json` and that file is
     # absent, look at L9_INTEGRATION_SPEC.json for an `analog_modules`
@@ -12409,7 +12476,22 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             )
         else:
             result.status = "SKIPPED-CONDITION"
-            result.reasons.append(f"condition not met: {condition}")
+            # A DESIGN-DECLARED skip CITES THE DECLARATION. Without this the
+            # reason reads `condition not met: {...}` and a reviewer cannot
+            # tell a design that declared the capability absent from a trigger
+            # file somebody forgot to author — the two need different actions.
+            _decl = _l_doc_declares_absence(
+                project, (condition or {}).get("l_doc_declares"))
+            if _decl is not None:
+                _cited, _detail = _decl
+                result.reasons.append(
+                    f"design-declared NOT_APPLICABLE: {_cited} records "
+                    f"{_detail}, so this step's outputs are not owed by this "
+                    f"design. The declaration is the design's own; a missing, "
+                    f"unparseable or partly-filled document would have run the "
+                    f"step instead.")
+            else:
+                result.reasons.append(f"condition not met: {condition}")
         return result
 
     # v1.6.269 (#126) — ENV_UNAVAILABLE-tier waivers are "fallback"

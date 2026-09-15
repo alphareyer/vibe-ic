@@ -3269,6 +3269,46 @@ steps:
     # nowhere under skills/, so an agent told to invoke one cannot, and
     # hand-authors instead. The deterministic half below is what this step
     # actually has; declaring the gap is honest, an empty stub is not.
+    # WHETHER THIS STEP APPLIES IS THE DESIGN'S OWN DECLARATION, not an
+    # assumption of the flow. MEASURED 2026-09-15 (lane icspm3) on spm x
+    # gf180mcuD at main 972c21233: the six outputs below were owed
+    # UNCONDITIONALLY, the run produced none of them, and the step read
+    # MISSING -- on a run where the runner had READ L20 and disclosed the skip
+    # in its own log,
+    #   SKIP step11_dft_insertion: DFT insertion and ATPG disclosed-skipped:
+    #   L20 does not authorize automatic scan insertion (reason=no DFT
+    #   requirement derivable from the design's own inputs and L20 asserts
+    #   none); LEC still runs on the pre-DFT netlist
+    # and had written `phase2/stage2/dft/dft_atpg_not_run.json`
+    # (`gate_reason: l20_dft_contract`) recording it. Three ordering
+    # violations followed -- FS1, 13 and 14 "marked done while dependency [11]
+    # DFT insertion = MISSING" -- and they were the whole of what kept
+    # stage2/3/4_compliance red. The RUN honoured the declaration; the FLOW
+    # did not, so the flow is what is repaired here.
+    #
+    # ALL FOUR FIELDS, not just the flag. `dft_present: false` alone could be a
+    # skeleton's default; a scan chain, a TAP or a BIST block asserted anywhere
+    # in L20 makes the condition MET and all six outputs owed. Independently
+    # confirmed on spm's INPUT (§4.05, the design's own documents only): a
+    # case-insensitive grep for scan / dft / atpg / bsdl / jtag / test mode /
+    # testability over all 10 staged input files returns ZERO hits, and L20's
+    # own `notes` says "Spec does not specify DFT/scan topology".
+    #
+    # A MISSING, UNPARSEABLE OR PARTLY-FILLED L20 RUNS THE STEP. Absence of a
+    # declaration is not a declaration of absence, so a phase 1 that fell over
+    # can never excuse DFT -- see `_l_doc_declares_absence`.
+    condition:
+      l_doc_declares:
+        l_doc: L20
+        all_absent:
+          dft_present: false
+          scan_chains: []
+          bist_mbist: []
+          jtag_tap: null
+    condition_kind: design_dependent
+    condition_owner:
+      step: D1
+      declaration: "L20.fields.dft_present / scan_chains / bist_mbist / jtag_tap"
     mcp_tools: [eda_dft]
     programs:
       # Fault (cloudv-io/fault) for open-source stuck-at ATPG.
