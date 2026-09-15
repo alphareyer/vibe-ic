@@ -83,9 +83,28 @@ import _path_layout as _pl
 import _vacuous_exit as _vx
 
 
+#: The completion audit's own record. R-0915-46: this file is the run's
+#: register of which gates claimed what, and it was NOT in the candidate list
+#: below -- so on a real run tree `find_report` returned None and this check
+#: booked INCOMPLETE for the absence of an artefact produced by the very audit
+#: it is a component of. Circular: on a first run it could never be satisfied.
+#: MEASURED on spm x gf180mcuD: `find_report(spm23)` -> None, while
+#: `reports/audit/phase23_completion_audit.json` sat on disk with a
+#: `gate_execution_ledger` of 246 entries.
+COMPLETION_AUDIT_RECORD = "audit/phase23_completion_audit.json"
+
+
 def find_report(project: Path) -> Optional[Path]:
-    """Locate the flow compliance JSON or FINAL_REPORT.md."""
+    """Locate the completion audit record, the flow compliance JSON, or
+    FINAL_REPORT.md.
+
+    The audit record comes FIRST: it is this run's own register of gate
+    verdicts, it is the population the completion audit is building, and it is
+    the one artefact that exists on every completed run.
+    """
     candidates = [
+        _pl.report_path(project, COMPLETION_AUDIT_RECORD),
+        project / "reports" / "audit" / "phase23_completion_audit.json",
         _pl.report_path(project, "flow_compliance.json"),
         project / "FINAL_REPORT.md",
         _pl.report_path(project, "FINAL_REPORT.md"),
@@ -101,9 +120,27 @@ def find_report(project: Path) -> Optional[Path]:
 
 
 def extract_pass_gates_from_json(path: Path) -> List[str]:
-    """Extract gate names that claim PASS from flow compliance JSON."""
+    """Extract the names that claim PASS from a flow/audit JSON.
+
+    Two shapes, because two producers write one:
+      * `steps[]` with `status` — the flow-compliance shape, unchanged;
+      * `gate_execution_ledger[]` with `gate` and `verdict` — the completion
+        audit's shape. Preferred when present, because this check is about
+        GATES and the ledger names gates, where `steps` names steps.
+    """
     data = json.loads(path.read_text())
     gates = []
+    ledger = data.get("gate_execution_ledger")
+    if isinstance(ledger, list) and ledger:
+        for row in ledger:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("verdict", "")).strip().upper() != "PASS":
+                continue
+            name = row.get("gate")
+            if isinstance(name, str) and name.strip():
+                gates.append(name.strip())
+        return gates
     for step in data.get("steps", []):
         if step.get("status") == "PASS":
             name = step.get("name", f"step_{step.get('id', '?')}")
@@ -125,9 +162,36 @@ def extract_pass_gates_from_md(path: Path) -> List[str]:
 
 
 def collect_evidence_files(project: Path) -> Set[str]:
-    """Collect all evidence file stems in standard locations."""
+    """Collect all evidence file stems in standard locations.
+
+    R-0915-46, second half. The locator globbed `reports/gates/*.json`, but
+    THIS FLOW WRITES `reports/phase2/gates/*.json` and
+    `reports/phase3/gates/*.json` -- so every per-gate report a run produces
+    was invisible to it. MEASURED on spm x gf180mcuD the moment the circular
+    report-lookup above was fixed: 17 PASS gates, "3 with evidence, 14
+    without", naming `yosys_hilomap_required_check` among them while
+    `reports/phase2/gates/yosys_hilomap.json` sat on disk. Fixing the lookup
+    alone would have converted a circular INCOMPLETE into a FALSE FAIL, which
+    is worse -- so the phase-scoped directories are globbed too.
+
+    The matcher is untouched: a gate with no file anywhere still fails.
+    """
     evidence = set()
     for pattern in [
+        # phase-scoped, which is where this flow actually writes
+        "reports/*/gates/*.json",
+        "reports/*/gates/*.log",
+        "reports/*/gates/*.txt",
+        "reports/*/*.json",
+        "reports/*/*.rpt",
+        # A gate whose product is a TRANSCRIPT rather than a JSON row: the
+        # audit's own `reports/audit/flow_compliance_check.log` is the
+        # evidence for the `flow_compliance_check` gate, which writes no
+        # per-gate JSON because its record IS the audit. Without this the
+        # check reports the audit as the one unevidenced PASS in its own
+        # audit -- the same circularity one level down.
+        "reports/*/*.log",
+        "reports/*/*/*.json",
         "reports/gates/*.json",
         "reports/gates/*.log",
         "reports/gates/*.txt",

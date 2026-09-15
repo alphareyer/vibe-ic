@@ -30,11 +30,32 @@ EXTERNAL = "EXTERNAL"
 BLOCKED_BY_UPSTREAM = "BLOCKED_BY_UPSTREAM"
 EXECUTION_ERROR = "EXECUTION_ERROR"
 ZERO_DENOMINATOR = "ZERO_DENOMINATOR"
+#: R-0915-46/47 — the gate ran, found its subject absent, and the thing that
+#: PRODUCES that subject has not run yet in this flow. The gate is not broken
+#: and the design has not declared anything; the question was simply asked too
+#: early, and the answer comes from the completed tree.
+#:
+#: MEASURED twice on spm x gf180mcuD:
+#:   klayout_deck_mode_check       in-flight "[skipped] no KLayout DRC
+#:     artefacts found" -> on the completed tree, "[PASS] 14 DRC artefact(s);
+#:     real rule deck attested by 3 of them". The P0 umbrella asks before
+#:     phase-3 DRC has produced them.
+#:   gate_evidence_completeness_check  "examined nothing (reason: no
+#:     FINAL_REPORT.md or flow-compliance JSON in this run)" -- it books that
+#:     for the absence of the completion audit's OWN record, which the audit
+#:     it is a component of writes only after it passes. Circular: on a first
+#:     run it can never be satisfied.
+#:
+#: It is SKIP-ELIGIBLE, and narrowly so: `flow_compliance_check` grants it only
+#: when the tree shows the producer has NOT run. Once the producer HAS run, an
+#: absent subject keeps whatever non-green verdict the gate gave it.
+ASKED_BEFORE_PRODUCER = "ASKED_BEFORE_PRODUCER"
 
 REASON_CLASSES = (
     DESIGN_DECLARED_NA,
     CAPABILITY_ABSENT,
     EXTERNAL,
+    ASKED_BEFORE_PRODUCER,
     BLOCKED_BY_UPSTREAM,
     EXECUTION_ERROR,
     ZERO_DENOMINATOR,
@@ -46,6 +67,7 @@ SKIP_ELIGIBLE = frozenset({
     DESIGN_DECLARED_NA,
     CAPABILITY_ABSENT,
     EXTERNAL,
+    ASKED_BEFORE_PRODUCER,
 })
 INCOMPLETE = frozenset({
     BLOCKED_BY_UPSTREAM,

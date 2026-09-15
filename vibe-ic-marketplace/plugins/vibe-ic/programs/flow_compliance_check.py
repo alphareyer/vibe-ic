@@ -7727,6 +7727,80 @@ _P0_GATE_ZERO_POPULATION: Dict[str, Any] = {
 }
 
 
+# ── R-0915-46 / R-0915-47: a gate asked before its producer ran ────────────
+#
+# Some gates are invoked by an audit that runs BEFORE the thing they measure
+# exists. The gate is not broken, and the design has not declared anything —
+# the question was asked too early, and the answer comes from the completed
+# tree. Recording that as EXECUTION_ERROR says the PROGRAM failed, which is
+# false, and it makes P0 INCOMPLETE for an ordering fact.
+#
+# This is the same family as the deadlock R-0915-38 shipped and fixed: a gate
+# demanding an artefact produced after it.
+#
+# THE GRANT IS NARROW. It applies only to a registered gate, only when the
+# gate itself reported that it examined nothing, and only when the tree shows
+# the producer has NOT run. Once the producer HAS run, an absent subject keeps
+# whatever non-green verdict the gate gave it — that is the negative control,
+# and it is what stops this from becoming a blanket excuse.
+
+
+def _phase3_drc_ran(project: Path) -> bool:
+    """Has phase-3 DRC produced its artefacts yet?"""
+    d = project / "reports" / "phase3"
+    if not d.is_dir():
+        return False
+    return any(d.glob("drc*.json")) or any(d.glob("drc*.rpt"))
+
+
+def _completion_audit_written(project: Path) -> bool:
+    """Has the completion audit written its own record yet?"""
+    return (project / "reports" / "audit"
+            / "phase23_completion_audit.json").is_file()
+
+
+#: gate -> (what produces its subject, the predicate that says it has run).
+#: MEASURED on spm x gf180mcuD, both in-flight INCOMPLETE and both PASSing on
+#: the completed tree's re-audit:
+#:   klayout_deck_mode_check          "[skipped] no KLayout DRC artefacts
+#:     found" in flight; "[PASS] 14 DRC artefact(s); real rule deck attested
+#:     by 3 of them" afterwards.
+#:   gate_evidence_completeness_check "examined nothing (reason: no
+#:     FINAL_REPORT.md or flow-compliance JSON in this run)" — it books that
+#:     for the absence of the completion audit's OWN record, which the audit
+#:     it is a component of writes only after it passes.
+_GATE_SUBJECT_PRODUCED_BY: Dict[str, Tuple[str, Any]] = {
+    "klayout_deck_mode_check": (
+        "phase-3 DRC (reports/phase3/drc*.json)", _phase3_drc_ran),
+    "gate_evidence_completeness_check": (
+        "the completion audit itself "
+        "(reports/audit/phase23_completion_audit.json)",
+        _completion_audit_written),
+}
+
+
+def _asked_before_producer(gate_name: str,
+                           project: Path) -> Optional[Dict[str, Any]]:
+    """Evidence that this gate was asked before its producer ran, or None."""
+    spec = _GATE_SUBJECT_PRODUCED_BY.get(gate_name)
+    if spec is None:
+        return None
+    producer, has_run = spec
+    try:
+        if has_run(project):
+            return None
+    except OSError:
+        return None
+    return {
+        "kind": "asked-before-its-producer-ran",
+        "gate": gate_name,
+        "producer": producer,
+        "producer_has_run": False,
+        "resolution": ("re-asked on the completed tree; the final verdict "
+                       "derives from that audit, not from this answer"),
+    }
+
+
 def _p0_zero_population_evidence(project: Path,
                                  gate_name: str) -> Optional[Dict[str, Any]]:
     """The design's own declaration that a gate's population is zero, or None.
@@ -9453,6 +9527,12 @@ def _run_structural_rtl_gates(project: Path,
             # missing. `infer_nonverdict_reason` reads `evidence.reason_class`
             # before the skip_kind and before any prose, which is what
             # "branch-owned evidence outranks prose" means.
+            # R-0915-46/47 — before any recogniser reads the prose: was this
+            # gate asked before the thing it measures existed?
+            _early = _asked_before_producer(gate_name, project)
+            if _early is not None:
+                _evidence["reason_class"] = _reason_taxonomy.ASKED_BEFORE_PRODUCER
+                _evidence["asked_before_producer"] = _early
             _declared_cls = _p0_declared_reason_class(
                 gate_name, project, gate_scratch_dir)
             if _declared_cls:
