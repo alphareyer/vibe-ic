@@ -56,13 +56,21 @@ SUBJECTS = {
     "analog_corner_sweep_check": "analog_track",
     "analog_netlist_pdk_check": "analog_track",
     "analog_pre_vs_post_layout_check": "analog_track",
-    "l3_opcode_response_template_check": "l3_opcodes",
     "l11_sequence_covers_l6_reject_rules_check": "l6_reject_rules",
     "assertion_covers_l3_constraints_check": "l3_constraints",
     "otp_image_layer_consistency_check": "l11_otp",
     "deliverable_verdict_consistency_check": "deliverable_record",
 }
 ALL_GATES = tuple(SUBJECTS) + ("analog_hw_tb_de10lite_budget_check",)
+
+#: DELIBERATELY NOT REGISTERED, and the reason is the ruling.
+#: `l3_opcode_response_template_check`'s subject is an OVERRIDE DOC ("no opcode
+#: override doc found"), not the L3 opcode list: a missing override doc is an
+#: input this run does not have, not a design declaring it has no opcodes. The
+#: landed contract (test_umbrella_keeps_the_gates_own_skip_reason) keeps that
+#: record on the gate's OWN WORDS at INCOMPLETE, and registering it here
+#: answered N/A for a document nobody wrote.
+NOT_REGISTERED = ("l3_opcode_response_template_check",)
 
 
 def _docs(tmp_path):
@@ -136,12 +144,32 @@ def test_a_design_with_no_class_verdict_keeps_its_analog_gates_live(tmp_path):
         assert F._p0_contract_na_reason(gate, proj, rtl) is None, gate
 
 
-def test_a_design_that_declares_opcodes_keeps_its_opcode_gate_live(tmp_path):
+@pytest.mark.parametrize("gate", NOT_REGISTERED)
+def test_a_missing_override_doc_is_not_a_declaration(tmp_path, gate):
+    """R-0915-19 as RULED: N/A only when the declaring document EXISTS and
+    positively says the subject is absent. An override doc nobody wrote has
+    declared nothing, so this gate keeps its own words and its tier."""
     proj, rtl = _silent_design(tmp_path)
-    (_docs(proj) / "L3_CMD_PROTOCOL.json").write_text(json.dumps(
-        {"opcodes": [{"name": "READ", "code": "0x03"}], "constraints": None}))
-    assert F._p0_contract_na_reason(
-        "l3_opcode_response_template_check", proj, rtl) is None
+    assert F._P0_GATE_REQUIRED_CONTEXT.get(gate) is None, gate
+    assert F._p0_contract_na_reason(gate, proj, rtl) is None, gate
+
+
+@pytest.mark.parametrize("doc,key,gate", [
+    ("L3_CMD_PROTOCOL.json", "l3_constraints",
+     "assertion_covers_l3_constraints_check"),
+    ("L6_CONTROL_LOGIC.json", "l6_reject_rules",
+     "l11_sequence_covers_l6_reject_rules_check"),
+    ("L11_OTP_CONTENT.json", "l11_otp",
+     "otp_image_layer_consistency_check"),
+])
+def test_a_declaring_document_that_is_NOT_THERE_keeps_the_gate_live(
+        tmp_path, doc, key, gate):
+    """THE CORRECTION. A document that does not exist has declared nothing;
+    only `state == valid` plus an empty subject is the design speaking."""
+    proj, rtl = _silent_design(tmp_path)
+    (_docs(proj) / doc).unlink()
+    assert F._p0_contract_context(proj, rtl)[key], key
+    assert F._p0_contract_na_reason(gate, proj, rtl) is None, (doc, gate)
 
 
 def test_a_design_that_declares_reject_rules_keeps_its_gate_live(tmp_path):

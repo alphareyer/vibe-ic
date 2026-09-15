@@ -217,6 +217,30 @@ _SUBJECT_ABSENT_RE = re.compile(
     r"\binert\s*(?:/|or)\s*n/?a\b|\bno consumer exists\b)", re.I)
 
 
+
+#: The `skip_kind` values that ARE a declared absence, as opposed to a gate
+#: reporting what its own scan did not find.
+DECLARED_ABSENCE_SKIP_KINDS = frozenset({
+    "class-not-applicable",
+    "declaration-not-present",
+    "declared-by-gate",
+})
+
+
+def _declared_basis(evidence: Mapping[str, Any]) -> bool:
+    """Does this record carry a fact that says the DESIGN has no such thing?
+
+    `input-missing` is not one: it is the P0 umbrella's ASSUMPTION about any
+    rc 2, and a gate that scanned the RTL and found no CRC module has reported
+    what it did not find, not what the design declared.
+    """
+    if not isinstance(evidence, Mapping):
+        return False
+    if evidence.get("declared_absence_basis"):
+        return True
+    return (str(evidence.get("skip_kind") or "").lower()
+            in DECLARED_ABSENCE_SKIP_KINDS)
+
 def infer_nonverdict_reason(*, verdict: str = "", message: str = "",
                             evidence: Optional[Mapping[str, Any]] = None,
                             explicit: Any = None) -> str:
@@ -263,12 +287,29 @@ def infer_nonverdict_reason(*, verdict: str = "", message: str = "",
         return EXTERNAL
     if _DECLARED_NA_RE.search(text):
         return DESIGN_DECLARED_NA
-    # R-0915-15, LAST: every narrower reading above has declined, so a sentence
-    # naming a design element the gate looked for and did not find inside
-    # something it READ is the design speaking, not a fault. See
-    # `_SUBJECT_ABSENT_RE` for why this is a second pattern and not a wider
-    # `_DECLARED_NA_RE`.
-    if _SUBJECT_ABSENT_RE.search(text):
+    # R-0915-15, LAST, AND ONLY ON A DECLARED BASIS.
+    #
+    # THE CORRECTION (2026-09-15, lane icspm3). As first landed this branch
+    # granted DESIGN_DECLARED_NA from the SENTENCE ALONE, and that broke the
+    # #1978 contract two shipped tests pin: a BANNER-ONLY rc-2 — a gate that
+    # merely scanned the RTL and found nothing, `skip_kind: input-missing`,
+    # e.g. break_handler_safety_check's "No break signals detected — not a
+    # break-based protocol" — is INCOMPLETE / EXECUTION_ERROR, never an
+    # UNEARNED N/A. I had made the prose its own basis, which is the very
+    # laundering the docstring above refuses; the sentence was a better clue
+    # than the old default, and a clue is not a declaration.
+    #
+    # A DESIGN_DECLARED_NA must carry the fact that says the design has no
+    # such thing, and the tree has exactly two channels for it, both of which
+    # are read BEFORE this point and neither of which needs the prose:
+    #   * the gate STATES its class (`evidence.reason_class`, or
+    #     `report_reason_class` off its own `--json`) — #2275 / #2276;
+    #   * the P0 roster answers from the design's declarations and the gate is
+    #     never invoked (`skip_kind: declaration-not-present`) — R-0915-19.
+    # A caller that HAS a basis and wants the sentence read passes it here;
+    # everything else keeps the fail-closed default, which is what the two
+    # pinned tests assert.
+    if _SUBJECT_ABSENT_RE.search(text) and _declared_basis(ev):
         return DESIGN_DECLARED_NA
     return EXECUTION_ERROR
 

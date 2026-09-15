@@ -468,20 +468,8 @@ _P0_EXPECTED = {
     "analog_netlist_pdk_check": ("BLOCKED", "BLOCKED_BY_UPSTREAM"),
     "analog_pre_vs_post_layout_check":
         ("BLOCKED", "BLOCKED_BY_UPSTREAM"),
-    # R-0915-19 (lane icspm3, 2026-09-15) — MOVED, and one tier EARLIER.
-    # `otp_image_layer_consistency_check` is now registered in
-    # `_P0_GATE_REQUIRED_CONTEXT` against the design's declared OTP CONTENT
-    # (L11 `otp_bytes` / `content_hex` / `otp_layout` / `depth` /
-    # `width_bits`), so on a project that declares none the umbrella answers
-    # from the ROSTER before the gate is invoked at all. `_p0_contract_json`'s
-    # own docstring is the rule this follows: "Only an absent/valid
-    # declaration can support derived N/A. A file that is present but
-    # malformed must stay live" — and this fixture's project carries no L11 at
-    # all. The record is therefore a declaration SKIP, not a post-hoc rc-2
-    # reading of the gate's sentence, so its evidence carries
-    # `skip_kind: declaration-not-present` instead of an `exit_code`.
     "otp_image_layer_consistency_check":
-        ("SKIP", "DESIGN_DECLARED_NA"),
+        ("BLOCKED", "BLOCKED_BY_UPSTREAM"),
     "spice_correlation_check": ("BLOCKED", "BLOCKED_BY_UPSTREAM"),
     "tristate_active_drive_check": ("SKIP", "DESIGN_DECLARED_NA"),
 }
@@ -522,16 +510,8 @@ def test_p0_umbrella_records_the_nonverdict_cause(gate, tmp_path, monkeypatch):
     expected_verdict, expected_class = _P0_EXPECTED[gate]
     assert rec["verdict"] == expected_verdict, rec
     assert rec["reason_class"] == expected_class, rec
-    # A gate the ROSTER answered was never invoked, so there is no exit code
-    # to read; the cause is recorded one tier earlier and more precisely. Both
-    # shapes are asserted, neither is accepted loosely: a record with neither
-    # an exit code nor a declaration kind still fails here.
-    if rec["evidence"].get("skip_kind") == "declaration-not-present":
-        assert "exit_code" not in rec["evidence"], rec
-        assert rec["reason_class"] == "DESIGN_DECLARED_NA", rec
-    else:
-        assert rec["evidence"]["exit_code"] == _vx.RC_VACUOUS, rec
-        assert rec["evidence"]["skip_kind"] == "input-missing", rec
+    assert rec["evidence"]["exit_code"] == _vx.RC_VACUOUS, rec
+    assert rec["evidence"]["skip_kind"] == "input-missing", rec
     assert _flow._p0_passed_count(records) == 0
 
 

@@ -7573,6 +7573,25 @@ def _p0_nonempty(value: Any) -> Any:
     return value
 
 
+
+def _p0_declared_absent(state: str, value: Any) -> Any:
+    """The subject, or a SENTINEL that keeps the gate live.
+
+    R-0915-19 as ruled: a gate is N/A only when the DECLARING DOCUMENT EXISTS
+    and positively says the subject is absent. A document that is not there, or
+    that will not parse, has declared nothing — so this returns a truthy
+    sentinel and the gate keeps whatever tier it had. Only `state == "valid"`
+    plus an empty subject is the design speaking.
+
+    MEASURED: as first written this keyed on the subject alone, and a project
+    with no L3/L6/L11 at all had its gates answered N/A from a document that
+    did not exist — the same unearned N/A the #1978 contract refuses one level
+    down.
+    """
+    if state != "valid":
+        return f"declaring document not readable (state={state!r})"
+    return _p0_nonempty(value)
+
 def _p0_analog_track_declared(project: Path) -> Any:
     """Does the DESIGN declare an analog track? The cite, or None.
 
@@ -7729,9 +7748,15 @@ def _p0_contract_context(project: Path,
         # write it IS a cascade); what was missing is that nobody asked the
         # design whether the subject exists at all. This roster asks, BEFORE
         # the sentence is ever read.
+        # R-0915-19 AS RULED (corrected 2026-09-15): N/A only when the
+        # DECLARING DOCUMENT EXISTS and positively says the subject is absent.
+        # A document that is not there has declared nothing, so the key stays
+        # TRUTHY and the gate keeps whatever tier it had — `_p0_declared_absent`
+        # is that rule in one place.
         "analog_track": _p0_analog_track_declared(project),
-        "l3_constraints": _p0_nonempty(l3.get("constraints")),
-        "l6_reject_rules": _p0_nonempty(l6.get("reject_rules")),
+        "l3_constraints": _p0_declared_absent(l3_state, l3.get("constraints")),
+        "l6_reject_rules": _p0_declared_absent(l6_state,
+                                               l6.get("reject_rules")),
         # THE OTP CONTENT, not the document wrapper. MEASURED: spm's L11 is a
         # real document — schema_version, doc_class, ic_name — that declares
         # NO otp content (`otp_bytes: []`, `content_hex: null`,
@@ -7742,9 +7767,11 @@ def _p0_contract_context(project: Path,
         # level down. `otp_image_layer_consistency_check` needs an L11 ADDRESS
         # MAP (its own rc 2 says "no L11_OTP_CONTENT.json, or it declares no
         # address map"), so that is the subject asked for here.
-        "l11_otp": next((_p0_nonempty(l11.get(k)) for k in (
-            "otp_bytes", "content_hex", "otp_layout", "depth", "width_bits")
-            if _p0_nonempty(l11.get(k)) is not None), None),
+        "l11_otp": _p0_declared_absent(l11_state, next(
+            (_p0_nonempty(l11.get(k)) for k in (
+                "otp_bytes", "content_hex", "otp_layout", "depth",
+                "width_bits")
+             if _p0_nonempty(l11.get(k)) is not None), None)),
         "l6_state": l6_state,
         "l11_state": l11_state,
         "deliverable_record": (str(project / "RESULT.md")
@@ -7828,8 +7855,13 @@ _P0_GATE_REQUIRED_CONTEXT: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "analog_netlist_pdk_check": ("analog_track",),
     "analog_pre_vs_post_layout_check": ("analog_track",),
     "analog_hw_tb_de10lite_budget_check": ("analog_track", "qsf"),
-    # no opcodes declared in L3 -> the opcode response-template gate:
-    "l3_opcode_response_template_check": ("l3_opcodes",),
+    # NOT `l3_opcode_response_template_check`. Its subject is an OVERRIDE
+    # DOC ("no opcode override doc found"), not the L3 opcode list, and a
+    # missing override doc is an input this run does not have rather than a
+    # design declaring it has no opcodes. The landed contract
+    # (test_umbrella_keeps_the_gates_own_skip_reason) says that record keeps
+    # the gate's OWN WORDS and stays INCOMPLETE, and it is right: registering
+    # it here answered N/A for a document nobody wrote.
     # no L6.reject_rules declared -> the sequence-covers-reject-rules gate:
     "l11_sequence_covers_l6_reject_rules_check": ("l6_reject_rules",),
     # no L3 constraints declared -> the assertion-covers-constraints gate:
@@ -9241,6 +9273,22 @@ def _run_structural_rtl_gates(project: Path,
                          "invocation_contract":
                          _STRUCTURAL_GATE_INVOCATION_CONTRACTS.get(gate_name)},
                         reason_class=_reason_taxonomy.DESIGN_DECLARED_NA)))
+                continue
+            # THE DEFERRAL IS ASKED FIRST. A gate the analog deferral OWNS
+            # is deferred, not declared-N/A: `--skip-analog` is a statement
+            # about THIS RUN ("reviewed at analog / foundry sign-off"), and
+            # the roster's answer would replace it with a statement about the
+            # DESIGN. MEASURED: test_deferred_gate_skip_by_ownership
+            # ::test_owned_gates_are_still_deferred_on_a_legitimate_deferral
+            # went red when the roster answered first.
+            if gate_name in analog_skip_gates:
+                _msg = ("analog track deferred via --skip-analog "
+                        "(review_required at analog / foundry sign-off)")
+                _pending.append(
+                    ("imm", _p0_gate_record(
+                        gate_name, "SKIP", _msg,
+                        {"skip_kind": "analog-track-deferred"},
+                        reason_class=_reason_taxonomy.EXTERNAL)))
                 continue
             _contract_na = _p0_contract_na_reason(
                 gate_name, project, rtl_dir)
