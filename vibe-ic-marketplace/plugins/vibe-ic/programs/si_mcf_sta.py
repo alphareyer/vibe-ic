@@ -953,7 +953,8 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
         sdc: Optional[str] = None, liberty: Optional[str] = None,
         top: Optional[str] = None, macro_libs: Optional[List[str]] = None,
         vdd_v: float = 1.8, overlap_guard_ns: float = 0.0,
-        out_json: Optional[PathLike] = None, timeout: int = 1800) -> dict:
+        out_json: Optional[PathLike] = None, timeout: int = 1800,
+        work_dir: Optional[PathLike] = None) -> dict:
     """End-to-end: OpenSTA windows -> MCF fold (setup + hold) -> re-STA -> report.
 
     Auto-discovers spm-style canonical paths when the explicit args are omitted.
@@ -1016,7 +1017,23 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
         report["out_json"] = str(out_json_p)
         return report
 
-    work = ex / "si_mcf"
+    # WHERE THE BOUNDED SPEFs AND THE WINDOW JSON LAND. Fixed at
+    # `<extracted>/si_mcf` for the shipping run, and OVERRIDABLE because a
+    # CANDIDATE measured with this function must not write into the shipping
+    # run's working set.
+    #
+    # MEASURED, subservient r21: the SI repair child's candidate re-STA was
+    # called with only `out_json` redirected, so its
+    # `candidate.mcf_setup.spef` / `candidate.mcf_hold.spef`,
+    # `si_mcf_windows.json` and the three `si_mcf_sta_*.rpt` were written HERE,
+    # over the shipping run's own. `si_mcf_sta_check` then re-derived the
+    # expected fold from the SHIPPING SPEF and compared it against the
+    # CANDIDATE's bounded SPEF, and reported
+    #   ERROR FOLD_NOT_APPLIED: setup: 132 net(s) fail the independent MCF
+    #   recount ... the bounded SPEF does not carry the re-derived bound
+    # which cascaded to `tapeout_signoff_check` and step 36. Two failed gates
+    # that were an artefact of measuring a candidate, not of the design.
+    work = Path(work_dir) if work_dir else (ex / "si_mcf")
     work.mkdir(parents=True, exist_ok=True)
 
     # v1.4.7 — resolve a RELATIVE input path against the project dir before the

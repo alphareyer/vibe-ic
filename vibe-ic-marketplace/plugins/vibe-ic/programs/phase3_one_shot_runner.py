@@ -47223,7 +47223,15 @@ def _si_mcf_repair_seam(project: Path, top: str, pdk: "PdkConfig",
                 cand_rep = _si_sta.run(
                     project_, container=container, spef=str(cand_spef),
                     netlist=str(cand_v), sdc=str(sdc), top=top,
-                    out_json=str(txn / "si_mcf_sta_candidate.json"))
+                    out_json=str(txn / "si_mcf_sta_candidate.json"),
+                    # THE CANDIDATE MEASURES ITSELF IN ITS OWN TRANSACTION
+                    # DIRECTORY. Redirecting only `out_json` left the bounded
+                    # SPEFs, the window JSON and the three corner reports
+                    # landing in the SHIPPING run's `<extracted>/si_mcf`, over
+                    # the ones `si_mcf_sta_check` validates (MEASURED r21:
+                    # FOLD_NOT_APPLIED on 132 nets, cascading to
+                    # `tapeout_signoff_check` and step 36).
+                    work_dir=str(txn / "si_mcf_candidate"))
                 after["candidate_si_mcf_sta"] = str(
                     txn / "si_mcf_sta_candidate.json")
                 after["candidate_verdict"] = cand_rep.get("verdict")
@@ -55144,6 +55152,32 @@ def _emit_si_timing_json(project: Path, top: str, pdk: PdkConfig, container: str
             f"(rc={rc}; sta may be unavailable) — keeping floating-victim "
             "screen. Install OpenSTA in the container to enable the "
             "window-gated advisory watch-list.")
+        return False
+    # NON-EMPTY IS NOT THE SAME AS READABLE. A size-only guard passed a 1 MB
+    # file that ended mid-token, and the consumer then died on `json.load`
+    # 1 MB in while the flow reported only "screen errored" — a sentence that
+    # names no artefact and no cause. MEASURED on subservient r21:
+    #   Expecting value: line 6151 column 122 (char 1097728)
+    # on a file of exactly 1097728 bytes — 268 x 4096, a whole number of
+    # unflushed blocks — because the emitting Tcl aborted on a `---` and never
+    # reached its `close`. The fallback to the conservative floating-victim
+    # envelope is legitimate; taking it WITHOUT NAMING THE BROKEN ARTEFACT is
+    # not, because that envelope is what fails this design's step 27 by
+    # 0.266 ns while the nominal corner holds +2.5 ns.
+    try:
+        json.loads(out_json.read_text(errors="replace"))
+    except Exception as exc:                                   # noqa: BLE001
+        _emit_done = "SI_TIMING_JSON_EMIT_DONE" in ((out or "") + (err or ""))
+        notes.append(
+            f"SI timing-aware: the timing JSON at {out_json.name} is present "
+            f"({out_json.stat().st_size} bytes) but DOES NOT PARSE "
+            f"({type(exc).__name__}: {exc}); the emitting OpenSTA run "
+            f"{'printed' if _emit_done else 'did NOT print'} its completion "
+            f"marker, so the file is "
+            f"{'malformed' if _emit_done else 'TRUNCATED — the emit aborted'}. "
+            f"Keeping the floating-victim screen, which is a CONSERVATIVE "
+            f"ENVELOPE and not the timing-aware reading this run was supposed "
+            f"to get.")
         return False
     return True
 

@@ -933,7 +933,29 @@ proc _si_capture {{cmd args}} {{
   catch {{eval $cmd $args}}
   return [sta::redirect_string_end]
 }}
-proc _si_jnum {{x}} {{ if {{$x eq ""}} {{ return "null" }} else {{ return $x }} }}
+# A JSON NUMBER, OR `null`. `ne ""` is not a numeric test, and OpenSTA prints
+# `---` where it has no value. MEASURED on subservient x gf180mcuD (lane
+# icsub2, r21): `report_required` returned `---` for one pin, the capturing
+# regex `([-0-9.eE+]+)` MATCHED it because `-` is in its own character class,
+# and the two consequences were both fatal and both silent:
+#   * `expr {{$_si_rrmx - $_si_armx}}` raised
+#       Error: si_timing_subservient.tcl, 63 cannot use non-numeric string
+#              "---" as left operand of "-"
+#     which is UNCAUGHT, so the emit loop aborted, `close` never ran, and the
+#     JSON was left truncated at 1097728 bytes — exactly 268 x 4096, a whole
+#     number of unflushed blocks, ending mid-token on `"slew_rise_max":`;
+#   * and had the script survived, this proc would have written the bare token
+#     `---` into the JSON as if it were a number.
+# The consumer then failed with `Expecting value: line 6151 column 122 (char
+# 1097728)` — one past the end — and the flow fell back to the conservative
+# floating-victim ENVELOPE, which is the bound that fails subservient's step 27
+# by 0.266 ns while the nominal corner has +2.5 ns of margin.
+# `string is double -strict` is the test that was meant all along; the absence
+# of a value is `null`, which every consumer of this file already handles.
+proc _si_jnum {{x}} {{
+  if {{$x eq "" || ![string is double -strict $x]}} {{ return "null" }}
+  return $x
+}}
 
 set _si_out [open {out_json} w]
 puts $_si_out "{{"
@@ -970,11 +992,23 @@ proc _si_emit {{obj out first_var n_var}} {{
   set _si_rrmx ""; set _si_rfmx ""
   regexp {{r ([-0-9.eE+]+):([-0-9.eE+]+)}} $_si_req -> _si_dummy _si_rrmx
   regexp {{f ([-0-9.eE+]+):([-0-9.eE+]+)}} $_si_req -> _si_dummy _si_rfmx
+  # NUMERIC, and then CAUGHT. The guard is `string is double -strict` because
+  # `---` passes `ne ""`; the `catch` is belt-and-braces because a placeholder
+  # this proc has not seen must never be able to abort the emit and truncate
+  # the file — a missing slack degrades this pin to advisory, which the reader
+  # already handles, and a truncated JSON silently downgrades the whole SI
+  # screen, which nobody sees until a gate fails for the wrong reason.
   set _si_slk ""
-  if {{$_si_rrmx ne "" && $_si_armx ne ""}} {{ set _si_slk [expr {{$_si_rrmx - $_si_armx}}] }}
-  if {{$_si_rfmx ne "" && $_si_afmx ne ""}} {{
-    set _si_slkf [expr {{$_si_rfmx - $_si_afmx}}]
-    if {{$_si_slk eq "" || $_si_slkf < $_si_slk}} {{ set _si_slk $_si_slkf }}
+  if {{[string is double -strict $_si_rrmx] && [string is double -strict $_si_armx]}} {{
+    if {{[catch {{expr {{$_si_rrmx - $_si_armx}}}} _si_v] == 0}} {{ set _si_slk $_si_v }}
+  }}
+  if {{[string is double -strict $_si_rfmx] && [string is double -strict $_si_afmx]}} {{
+    if {{[catch {{expr {{$_si_rfmx - $_si_afmx}}}} _si_slkf]}} {{
+      set _si_slkf ""
+    }}
+    if {{$_si_slkf ne "" && ($_si_slk eq "" || $_si_slkf < $_si_slk)}} {{
+      set _si_slk $_si_slkf
+    }}
   }}
   if {{!$_si_first}} {{ puts $out "," }}
   set _si_first 0
