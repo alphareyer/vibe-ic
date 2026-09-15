@@ -84,6 +84,131 @@ ZH_UNCOVERED = """\
 """
 
 
+# The shape MEASURED 2026-09-15 (lane icsub2) on `subservient` x gf180mcuD: a
+# spec that states reset-during-operation with the ENGLISH verb `assert` beside
+# the Chinese time word, and no Chinese operation noun anywhere near it. Every
+# zh pattern above requires 計算/運算/操作/…, so this was UNCOVERABLE — the item
+# was reported on a spec that answers it, twice, in two different documents.
+ZH_ASSERT_WINDOW = """\
+# 介面規格
+
+| 訊號 | 行為 |
+|---|---|
+| `i_rst` | **同步 reset, active-high**;assert 期間 SERV 內部狀態歸零、SRAM 內容保留 |
+
+- 上電 → `i_rst = 1`(synchronous active-high reset assert)
+- 連續多筆傳輸之間不需插入 idle cycle。
+- 乘積定義為 p = (x * y) mod 2^N。
+- 非法輸入:opcode 0xF 為保留編碼,行為未定義。
+"""
+
+# The SAME document with the state effect removed: reset is named, `assert` is
+# named, a time window is named — and nothing says what happens to the state.
+# If the new pattern were loose enough to match here it would be worthless.
+ZH_ASSERT_WINDOW_UNCOVERED = """\
+# 介面規格
+
+| 訊號 | 行為 |
+|---|---|
+| `i_rst` | **同步 reset, active-high** |
+
+- 上電 → `i_rst = 1`(synchronous active-high reset assert)
+- reset 後請等待 10 個 cycle 再送出第一筆資料。
+- 資料 assert 期間必須維持穩定。
+- 連續多筆傳輸之間不需插入 idle cycle。
+- 乘積定義為 p = (x * y) mod 2^N。
+- 非法輸入:opcode 0xF 為保留編碼,行為未定義。
+"""
+
+
+# ── defect 5: `assert <time-word>` as the statement of the window ───────────
+def test_reset_during_operation_is_recognised_from_the_assert_window(tmp_path):
+    """MEASURED on a real design INPUT: `assert 期間 … 狀態歸零` states exactly
+    what happens to in-flight state when reset arrives. It could not match
+    because every zh pattern demanded a Chinese operation noun."""
+    _, f = run(tmp_path, ZH_ASSERT_WINDOW)
+    assert 'reset-during-operation' not in corner_ids(f)
+
+
+def test_the_after_spelling_of_the_same_statement_is_recognised(tmp_path):
+    """The sibling document says `assert 後一個 cycle SERV 內部歸零` — the same
+    fact with 後 for 期間."""
+    doc = ZH_ASSERT_WINDOW.replace("assert 期間 SERV 內部狀態歸零",
+                                   "assert 後一個 cycle SERV 內部歸零")
+    _, f = run(tmp_path, doc)
+    assert 'reset-during-operation' not in corner_ids(f)
+
+
+def test_the_assert_window_pattern_still_fires_without_a_state_effect(tmp_path):
+    """ADVERSARIAL, and the clause that carries this pattern's honesty: reset
+    is named, `assert` is named, `期間` and `後` both appear — about DATA and
+    about a WAIT — and nothing states what happens to the state. Still
+    reported."""
+    res, f = run(tmp_path, ZH_ASSERT_WINDOW_UNCOVERED, '.md', '--strict')
+    assert 'reset-during-operation' in corner_ids(f)
+    assert res.returncode == 1
+
+
+def test_the_plain_during_reset_spelling_is_recognised(tmp_path):
+    """The same item with no `assert` to anchor it: `reset 期間，管線中的交易
+    一律中止`. Kept as a SECOND pattern rather than by loosening the first, so
+    each can be broken on its own."""
+    doc = ZH_ASSERT_WINDOW.replace(
+        "assert 期間 SERV 內部狀態歸零、SRAM 內容保留",
+        "reset 期間,管線中的交易一律中止")
+    _, f = run(tmp_path, doc)
+    assert 'reset-during-operation' not in corner_ids(f)
+
+
+def test_the_plain_spelling_still_needs_a_state_effect(tmp_path):
+    """ADVERSARIAL, and the clause that makes the second pattern honest: a
+    reset and a time word with nothing said about the state. `reset 後請等待
+    10 個 cycle` is a WAIT, not an effect."""
+    doc = ZH_ASSERT_WINDOW.replace(
+        "assert 期間 SERV 內部狀態歸零、SRAM 內容保留",
+        "reset 後請等待 10 個 cycle")
+    res, f = run(tmp_path, doc, '.md', '--strict')
+    assert 'reset-during-operation' in corner_ids(f)
+    assert res.returncode == 1
+
+
+def test_the_assert_window_spelling_still_needs_a_state_effect(tmp_path):
+    """ADVERSARIAL for the FIRST pattern, with all three of its other halves
+    present: reset, `assert`, and a time word — and nothing about the state."""
+    doc = ZH_ASSERT_WINDOW.replace(
+        "assert 期間 SERV 內部狀態歸零、SRAM 內容保留",
+        "assert 期間 SERV 內部匯流排仍由 firmware 驅動")
+    res, f = run(tmp_path, doc, '.md', '--strict')
+    assert 'reset-during-operation' in corner_ids(f)
+    assert res.returncode == 1
+
+
+def test_the_plain_spelling_does_not_anchor_on_a_bare_time_word(tmp_path):
+    """`中` and `時` are ordinary Chinese words; the second pattern must not
+    use them, or `reset 訊號於 IO ring 中不需額外處理` would satisfy the item."""
+    doc = ZH_ASSERT_WINDOW.replace(
+        "assert 期間 SERV 內部狀態歸零、SRAM 內容保留",
+        "reset 訊號於 IO ring 中不需額外處理,交易一律中止")
+    res, f = run(tmp_path, doc, '.md', '--strict')
+    assert 'reset-during-operation' in corner_ids(f)
+    assert res.returncode == 1
+
+
+def test_an_assert_window_about_something_else_is_not_a_reset_statement(
+        tmp_path):
+    """`資料 assert 期間必須維持穩定` is a statement about DATA. Four halves are
+    required — reset, assert, a window, and a state effect — and this has the
+    middle two only."""
+    doc = ZH_ASSERT_WINDOW_UNCOVERED.replace(
+        "- 資料 assert 期間必須維持穩定。",
+        "- 資料 assert 期間必須維持穩定,超時則捨棄。")
+    res, f = run(tmp_path, doc, '.md', '--strict')
+    assert 'reset-during-operation' in corner_ids(f), (
+        "a state effect belonging to another signal's assert window must not "
+        "satisfy the reset item")
+    assert res.returncode == 1
+
+
 # ── defect 1: Traditional-Chinese corner-case statements ────────────────────
 def test_zh_reset_during_operation_is_recognised(tmp_path):
     _, f = run(tmp_path, ZH_COVERED)
