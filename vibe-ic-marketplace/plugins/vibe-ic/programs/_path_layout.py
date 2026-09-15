@@ -636,6 +636,7 @@ _REPORT_CATEGORY: dict = {
     "si_mcf_sta.json": "phase3",
     "si_mcf_sta.rpt": "phase3",
     "si_mcf_sta_check.json": "phase3",
+    "si_mcf_repair.json": "phase3",
     "spice_correlation.json": "phase3",
     "density.json": "phase3",
     "density.rpt": "phase3",
