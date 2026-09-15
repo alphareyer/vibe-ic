@@ -7625,6 +7625,23 @@ _P0_GATE_ZERO_POPULATION: Dict[str, Any] = {
     "l23_security_requirements_typed_check": (
         "L23_", ("attack_surface", "key_handling", "side_channel_mitigation"),
         {"security_requirements_present": False, "secure_boot": False}),
+    # ── batch 2 ────────────────────────────────────────────────────────────
+    # The L10 gate BUILDS ITS DENOMINATOR FROM `L3.opcodes[]` -- its own
+    # `_build_constraints` walks the opcode list and reads each opcode's
+    # `argument_constraints[]` -- so the population it judges is literally
+    # this field, and L3 says both that the list is empty and that the input
+    # declared none. MEASURED on spm: opcodes [], no_opcodes_in_input true.
+    "l10_test_cases_cover_l3_constraints_check": (
+        "L3_", ("opcodes",), {"no_opcodes_in_input": True}),
+    # The BRAM gate's subject is inferred memory. L9 carries THREE memory
+    # populations and a positive `no_*_in_input` flag for each; all six must
+    # agree before the gate steps aside. MEASURED on spm: memories [],
+    # memory_candidates [], memory_map [], all three flags true -- and the
+    # staged RTL is one module, `spm.v`, with no memory in it.
+    "bram_pdob_combinational_check": (
+        "L9_", ("memories", "memory_candidates", "memory_map"),
+        {"no_memories_in_input": True, "no_memory_candidates_in_input": True,
+         "no_memory_map_in_input": True}),
 }
 
 
@@ -7770,6 +7787,8 @@ def _p0_contract_context(project: Path,
     # that is absent or will not parse keeps its gate live.
     l20_path = _p0_contract_doc(project, "L20_")
     l23_path = _p0_contract_doc(project, "L23_")
+    l9_path = _p0_contract_doc(project, "L9_")
+    _, l9_state = _p0_contract_json(l9_path)
     _, l20_state = _p0_contract_json(l20_path)
     _, l23_state = _p0_contract_json(l23_path)
     l9_path = _p0_contract_doc(project, "L9_")
@@ -7912,6 +7931,12 @@ def _p0_contract_context(project: Path,
             project, "l20_dft_scan_topology_actionable_check", l20_state),
         "l23_security": _p0_zero_population_subject(
             project, "l23_security_requirements_typed_check", l23_state),
+        # R-0915-34(b) batch 2.
+        "l3_opcodes": _p0_zero_population_subject(
+            project, "l10_test_cases_cover_l3_constraints_check", l3_state),
+        "l9_memories": _p0_zero_population_subject(
+            project, "bram_pdob_combinational_check", l9_state),
+        "l9_state": l9_state,
         "l20_state": l20_state,
         "l23_state": l23_state,
         "deliverable_record": (str(project / "RESULT.md")
@@ -8021,6 +8046,9 @@ _P0_GATE_REQUIRED_CONTEXT: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "l20_dft_scan_topology_actionable_check": ("l20_dft",),
     # no security asset declared in L23 -> the typed-requirements gate.
     "l23_security_requirements_typed_check": ("l23_security",),
+    # batch 2
+    "l10_test_cases_cover_l3_constraints_check": ("l3_opcodes",),
+    "bram_pdob_combinational_check": ("l9_memories",),
     # AND ONE THAT IS NOT A DECLARATION AT ALL — a FLOW-ORDER defect, named as
     # that. `deliverable_verdict_consistency_check` reads `RESULT.md`, which
     # the runner authors at the END of the run, so a P0 sub-gate asking for it
@@ -8046,6 +8074,8 @@ _P0_CONTEXT_DOCUMENT_STATE: Mapping[str, str] = MappingProxyType({
     "l4_registers": "l4_state",
     "l20_dft": "l20_state",
     "l23_security": "l23_state",
+    "l3_opcodes": "l3_state",
+    "l9_memories": "l9_state",
     "crc_signal": "l3_state",
     "crc_vectors": "l3_state",
     "l3_opcodes": "l3_state",
