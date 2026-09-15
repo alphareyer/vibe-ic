@@ -84,6 +84,8 @@ Exit codes:
 from __future__ import annotations
 
 import sys
+import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -209,7 +211,25 @@ def _check_one(project: Path, layer_path: Path) -> Tuple[str, List[str]]:
 
     claims: List[Tuple[str, str, Any, Dict[str, Any]]] = []
     _collect_claims(doc, claims)
+
+    # ── R-0915-38: the layer now carries what the INPUT REQUIRES ───────────
+    # Phase 1 extracts L24's sign-off requirements from the design's own
+    # documents (`l24_signoff_requirements_extract`), so this gate has a
+    # second, earlier question to answer than the false-certificate one: for
+    # every requirement the input STATES, did this run actually measure it?
+    #
+    # That question is about the RUN's reports, not about L24's own fields —
+    # the requirement rows deliberately carry no `*_status` key, so they are
+    # not claims and cannot be certificates. A requirement the run's reports
+    # satisfy is BACKED; one they do not is named, and that is a real finding:
+    # the design said DRC must be clean and the run has no clean DRC report.
+    req_failures, req_msgs = _requirements_backed(project, doc, rel)
+    if req_failures:
+        return "FAIL", req_failures
+
     if not claims:
+        if req_msgs:
+            return "PASS", req_msgs
         return "SKIP", [
             f"{rel}: layer asserts no sign-off verdict "
             f"(extraction_status={doc.get('extraction_status')!r}) — nothing "
@@ -250,7 +270,168 @@ def _check_one(project: Path, layer_path: Path) -> Tuple[str, List[str]]:
 
     if failures:
         return "FAIL", failures
-    return "PASS", msgs
+    return "PASS", req_msgs + msgs
+
+
+#: A verdict that is NOT a measurement of the design. `vacuous_pass` and
+#: `inconclusive` are in here deliberately: a gate that examined nothing and
+#: returned green has not measured DRC, and crediting it would back a required
+#: check with an empty denominator — the exact shape this repo already refuses
+#: elsewhere (`gate_zero_denominator_refuses_check`).
+_ABSENT_VERDICTS = frozenset({
+    "", "none", "null", "tbd", "pending", "not_yet_extracted", "unknown",
+    "not_measured", "not_checked", "n/a", "na", "skip", "skipped",
+    "vacuous", "vacuous_pass", "inconclusive", "advisory_screen_only",
+    "not_applicable", "not_run", "deferred",
+})
+_FAILING_VERDICTS = frozenset({
+    "fail", "failed", "failing", "error", "violation", "violations",
+    "not_clean", "dirty", "not_met", "unmet", "false",
+})
+
+
+def _report_verdict_of(payload: Any) -> Optional[str]:
+    """One report's verdict, however that report spells it.
+
+    MEASURED across a real run tree: `drc_signoff.json` carries `passed: true`
+    with no verdict string at all, `lvs_verdict.json` carries `status` AND
+    `result` = "PASS", and `em.json` carries `verdict: "MEASURED"`. A reader
+    that knew only one spelling would call two of the three unmeasured.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for key in ("verdict", "status", "result"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    passed = payload.get("passed")
+    if isinstance(passed, bool):
+        return "pass" if passed else "fail"
+    return None
+
+
+def _reports_for_check(project: Path, check: str
+                       ) -> List[Tuple[str, Optional[str]]]:
+    """(project-relative path, verdict) for every report naming this check."""
+    try:
+        from l24_signoff_requirements_extract import report_tokens_for
+    except ImportError:
+        return []
+    tokens = report_tokens_for(check)
+    if not tokens:
+        return []
+    patterns = [re.compile(r"(?<![a-z0-9])" + re.escape(tok) + r"(?![a-z0-9])")
+                for tok in tokens]
+    reports = project / "reports"
+    if not reports.is_dir():
+        return []
+    out: List[Tuple[str, Optional[str]]] = []
+    for path in sorted(reports.rglob("*.json")):
+        # `reports/audit/` is the audit's own bookkeeping, not a measurement
+        # of the design; a requirement backed by the audit that is judging it
+        # would be circular.
+        try:
+            relative = path.relative_to(project)
+        except ValueError:
+            continue
+        if relative.parts[:2] == ("reports", "audit"):
+            continue
+        try:
+            payload = json.loads(path.read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue
+        haystack = path.stem.lower()
+        if isinstance(payload, dict):
+            for key in ("program", "gate", "subject", "check"):
+                value = payload.get(key)
+                if isinstance(value, str):
+                    haystack += " " + value.lower()
+        if not any(p.search(haystack) for p in patterns):
+            continue
+        out.append((relative.as_posix(), _report_verdict_of(payload)))
+    return out
+
+
+def _phase3_has_run(project: Path) -> bool:
+    """Has this run reached the phase that MEASURES sign-off?
+
+    MEASURED, and this function exists because its absence deadlocked a run:
+    the phase-2 strict-structural audit invokes this gate, so a requirements
+    arm that failed on "no DRC report" failed at a point in the flow where DRC
+    CANNOT have run. The run then halted in phase 2 and phase 3 never
+    executed, so the evidence the gate demanded could never appear — the gate
+    made its own premise unsatisfiable.
+
+    A requirement is UNMET only if the run completed the phase that would have
+    measured it. Before that it is simply not yet measurable, and saying so is
+    not the same as saying it was missed.
+    """
+    if (project / "reports" / "orchestrator" / "phase3_one_shot.json").is_file():
+        return True
+    d = project / "reports" / "phase3"
+    return d.is_dir() and any(d.rglob("*.json"))
+
+
+def _requirements_backed(project: Path, doc: Any, rel: str
+                         ) -> Tuple[List[str], List[str]]:
+    """Judge each STATED sign-off requirement against the run's own reports."""
+    fields = doc.get("fields") if isinstance(doc.get("fields"), dict) else doc
+    rows = fields.get("signoff_requirements") if isinstance(fields, dict)         else None
+    if not isinstance(rows, list) or not rows:
+        return [], []
+    failures: List[str] = []
+    msgs: List[str] = []
+    phase3 = _phase3_has_run(project)
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("stated"):
+            continue
+        check = str(row.get("check") or "?")
+        requirement = row.get("requirement")
+        cite = row.get("citation") or {}
+        where = (f"{cite.get('document')}:{cite.get('line')}"
+                 if cite.get("document") else "the input")
+        found = _reports_for_check(project, check)
+        measured = [(p, v) for p, v in found
+                    if v is not None and v not in _ABSENT_VERDICTS]
+        if not measured:
+            looked = ", ".join(p for p, _ in found[:4]) or "no report"
+            if not phase3:
+                # NOT YET MEASURABLE, not missed. The requirement is recorded
+                # and named so it is visible, but this run has not reached the
+                # phase that measures it and the gate does not block on it.
+                msgs.append(
+                    f"{rel}: {check} "
+                    f"{requirement or '(prose)'} required at {where} — "
+                    f"recorded; this run has not reached phase 3, so it is "
+                    f"not yet measurable")
+                continue
+            failures.append(
+                f"{rel}: the input REQUIRES {check} "
+                f"{requirement or '(requirement stated in prose)'} at {where}, "
+                f"and this run has no report measuring it "
+                f"(searched reports/ excluding reports/audit for "
+                f"{'/'.join(_signoff_tokens(check))}; found: {looked})")
+            continue
+        failed = [(p, v) for p, v in measured if v in _FAILING_VERDICTS]
+        if failed:
+            failures.append(
+                f"{rel}: the input REQUIRES {check} "
+                f"{requirement or '(requirement stated in prose)'} at {where}, "
+                f"and this run measured it as "
+                + ", ".join(f"{v!r} in {p}" for p, v in failed[:3]))
+            continue
+        msgs.append(
+            f"{rel}: {check} {requirement or '(prose)'} required at {where} — "
+            f"backed by " + ", ".join(f"{p} ({v})" for p, v in measured[:3]))
+    return failures, msgs
+
+
+def _signoff_tokens(check: str) -> Tuple[str, ...]:
+    try:
+        from l24_signoff_requirements_extract import report_tokens_for
+    except ImportError:
+        return ()
+    return report_tokens_for(check) or ()
 
 
 def main(argv: List[str]) -> int:
@@ -283,10 +464,19 @@ def main(argv: List[str]) -> int:
             n_skip += 1
 
     if all_fail:
-        print(f"[FAIL] l24_signoff_evidence_backed_check: "
-              f"{len(all_fail)} unevidenced sign-off assertion(s). A Phase-1 "
-              f"sign-off verdict must be DERIVED from a report path + the "
-              f"value read from it, never asserted.")
+        # The two failure families read very differently to an operator, so
+        # the headline says which one this is rather than calling an unmet
+        # REQUIREMENT an unevidenced ASSERTION.
+        unmet = [m for m in all_fail if "the input REQUIRES" in m]
+        if unmet and len(unmet) == len(all_fail):
+            print(f"[FAIL] l24_signoff_evidence_backed_check: "
+                  f"{len(unmet)} sign-off requirement(s) the design's own "
+                  f"input STATES are not measured by this run.")
+        else:
+            print(f"[FAIL] l24_signoff_evidence_backed_check: "
+                  f"{len(all_fail)} unevidenced sign-off assertion(s). A "
+                  f"Phase-1 sign-off verdict must be DERIVED from a report "
+                  f"path + the value read from it, never asserted.")
         for m in all_fail[:12]:
             print(f"  - {m}")
         if len(all_fail) > 12:
@@ -294,9 +484,36 @@ def main(argv: List[str]) -> int:
         return 1
 
     if all_pass:
-        print(f"[PASS] l24_signoff_evidence_backed_check: "
-              f"{len(all_pass)} sign-off verdict(s) each trace to a resolvable "
-              f"evidence path with a verified read-back value")
+        # Same distinction on the green side: R-0915-38 makes most PASSes a
+        # statement about REQUIREMENTS met by the run's reports, not about
+        # phase-1 verdicts tracing to evidence. Saying the latter when the
+        # layer asserted no verdict at all would be a false description of
+        # what was checked.
+        requirement_rows = [m for m in all_pass if " required at " in m]
+        pending = [m for m in requirement_rows
+                   if "not yet measurable" in m]
+        backed = [m for m in requirement_rows if m not in pending]
+        if requirement_rows and len(requirement_rows) == len(all_pass):
+            if not backed:
+                print(f"[PASS] l24_signoff_evidence_backed_check: "
+                      f"{len(pending)} sign-off requirement(s) extracted from "
+                      f"the design's own input and recorded; this run has not "
+                      f"reached phase 3, so none is measurable yet")
+            elif pending:
+                print(f"[PASS] l24_signoff_evidence_backed_check: "
+                      f"{len(backed)} of {len(requirement_rows)} sign-off "
+                      f"requirement(s) stated by the design's own input are "
+                      f"measured by a report in this run; "
+                      f"{len(pending)} not yet measurable")
+            else:
+                print(f"[PASS] l24_signoff_evidence_backed_check: "
+                      f"{len(backed)} sign-off requirement(s) stated by the "
+                      f"design's own input are each measured by a report in "
+                      f"this run")
+        else:
+            print(f"[PASS] l24_signoff_evidence_backed_check: "
+                  f"{len(all_pass)} sign-off verdict(s) each trace to a "
+                  f"resolvable evidence path with a verified read-back value")
         for m in all_pass[:6]:
             print(f"  - {m}")
         return 0

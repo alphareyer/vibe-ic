@@ -544,6 +544,17 @@ def input_documents(project_dir: Path) -> List[Path]:
                   if p.is_file() and p.suffix.lower() in _INPUT_DOC_SUFFIXES)
 
 
+def _l24_extract(project_dir: Path) -> Optional[Dict[str, Any]]:
+    """L24's requirement rows, via its own extractor module."""
+    from l24_signoff_requirements_extract import extract_signoff_requirements
+    return extract_signoff_requirements(project_dir)
+
+
+#: layer -> the extractor that fills it from the input. R-0915-38 registers
+#: L24; a layer with no entry keeps the skeleton it has today.
+_LAYER_EXTRACTORS: Dict[str, Any] = {"L24": _l24_extract}
+
+
 def _term_in(term: str, lowered_text: str) -> bool:
     """Word-bounded occurrence of one subject term in already-lowered text."""
     return re.search(r"(?<![a-z0-9])" + re.escape(term.lower())
@@ -653,6 +664,21 @@ def emit_l_doc_skeleton(l_doc_code: str,
     # registered for it. Absent a decision this is the unchanged APPLICABLE
     # skeleton every other layer still gets.
     absent = _input_carries_subject(l_doc_code, project_dir)
+    # R-0915-38 — where the input DOES carry the subject and an extractor
+    # exists for the layer, phase 1 EXTRACTS it instead of stamping a
+    # skeleton. Today that is L24; the registry is the extension point.
+    extracted = None
+    if not absent and project_dir is not None:
+        extractor = _LAYER_EXTRACTORS.get(str(l_doc_code or "").upper())
+        if extractor is not None:
+            try:
+                extracted = extractor(Path(project_dir))
+            except Exception:
+                # Fail-open: a crashing extractor must never take the L-doc
+                # emit down. The layer keeps the skeleton it has today.
+                extracted = None
+    if extracted:
+        fields_template.update(extracted)
     out = {
         "doc_id": spec.code,
         "doc_name": spec.full_name,
@@ -662,12 +688,27 @@ def emit_l_doc_skeleton(l_doc_code: str,
         "evidence": [],
         "extraction_hints": hints,
         "extraction_status": ("DECLARED_ABSENT_FROM_INPUT" if absent
+                              else "EXTRACTED" if extracted
                               else "NOT_YET_EXTRACTED"),
         "emitted_by": _pmd.emitted_by(
             "phase1_post_process.emit_l_doc_skeleton"),
     }
     if absent:
         out["applicability_evidence"] = absent
+        # `l24_signoff_evidence_backed_check` FAILS an N/A layer that gives no
+        # `rationale` — "a silent-empty layer is indistinguishable from a
+        # failed extraction". It is right to, and R-0915-36's stub had none:
+        # the roster answered the gate N/A before it ever ran, so the hole was
+        # invisible. The rationale is the evidence stated in one sentence.
+        out["rationale"] = (
+            f"No input document carries this layer's subject: "
+            f"{absent['documents_scanned_count']} document(s) scanned for "
+            f"{len(absent['terms_searched'])} term(s) "
+            f"({', '.join(absent['terms_searched'][:6])}...), 0 matched. "
+            f"See applicability_evidence for the full scan.")
+    if extracted:
+        out["extraction_evidence_scan"] = extracted.get(
+            "signoff_requirements_scan")
     return out
 
 
