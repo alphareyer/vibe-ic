@@ -406,6 +406,28 @@ def test_the_shared_producer_and_gate_population_is_declared_here():
         ("36", "reports/audit/tapeout_checklist.json"),
         ("38", "reports/phase3/foundry_handoff_audit.json"),
         ("M1", "reports/analog/mixed_signal/merge.json"),
+        # ARRIVED with the 13 producer declarations (lane icspm3, measured
+        # 2026-09-15 on spm x gf180mcuD at main b47917a47). Each of these was
+        # already a `--json` target of its own step's gate AND a declared
+        # `required_output`; what changed is that the step now NAMES the
+        # program under `programs:`, so `flow_declared_producer_run` executes
+        # it during the run and the document stops being the auditor's own
+        # output. They belong in this population for exactly the reason the
+        # thirteen above do: the stamp is the same whichever process wrote it,
+        # so content cannot decide and the two TIMING facts have the last word.
+        ("10", "reports/phase3/sta/pre_pnr_summary.json"),
+        ("15", "reports/phase2/gates/stage2_compliance.json"),
+        ("21", "reports/phase3/drc_router.json"),
+        ("23", "reports/phase3/sta/post_route_summary.json"),
+        ("24", "reports/phase3/ir_drop_signoff.json"),
+        ("25", "reports/phase3/em_signoff.json"),
+        ("25", "reports/phase3/em_current_authority.json"),
+        ("26.5ic", "reports/phase3/die_finishing.json"),
+        ("31", "reports/phase3/drc_signoff.json"),
+        ("31", "reports/phase3/lvs.json"),
+        ("37", "reports/phase3/gates/stage3_compliance.json"),
+        ("37.5ip", "reports/phase3/digital_hardmacro.json"),
+        ("37.5ic", "reports/phase3/tapeout_precheck.json"),
     }
     assert measured == pinned, (
         f"the BOTH-producer-and-gate population moved — arrived: "
