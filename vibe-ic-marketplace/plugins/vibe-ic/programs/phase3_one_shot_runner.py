@@ -24797,6 +24797,12 @@ def _est0104_recovery_tcl(spef_c: str, err_var: str, retry_cmd: str,
 _SDR_ROLE_VAR = "::_vic_sdr_role"
 _SDR_ADOPT_MARKER = "PNR_SDR_ADOPT_CANDIDATE:"
 _SDR_CHILD_RECEIPT_NAME = "child_receipt.tsv"
+#: The RESTORE POINT. A DEF is a disclosure artefact; it does not carry the
+#: global router's guides, it does not carry `dont_touch`, and its wire text
+#: does not always re-parse into router-legal geometry (DRT-1010). The ODB
+#: carries all three, and a FRESH process reads it in under a second -- both
+#: MEASURED on the real checkpoint, R-0915-16.
+_SDR_CHECKPOINT_ODB_NAME = "pre_repair.odb"
 _SDR_CANDIDATE_DEF_NAME = "candidate.def"
 _SDR_CANDIDATE_DRC_NAME = "candidate_router.drc.rpt"
 #: The two SDR sites, and the transaction directory each owns. They used to
@@ -25283,6 +25289,7 @@ def _postroute_sdr_transaction_begin_tcl(
         f"  set _sdr_tx_cand_report {{{txn_c}/{_SDR_CANDIDATE_DRC_NAME}}}\n"
         f"  set _sdr_tx_cand_def {{{txn_c}/{_SDR_CANDIDATE_DEF_NAME}}}\n"
         f"  set _sdr_tx_child_receipt {{{txn_c}/{_SDR_CHILD_RECEIPT_NAME}}}\n"
+        f"  set _sdr_tx_ckpt_odb {{{txn_c}/{_SDR_CHECKPOINT_ODB_NAME}}}\n"
         + _sdr_router_drc_count_proc_tcl()
         +
         "  proc _sdr_tx_receipt {_status _reason _before _after} {\n"
@@ -25322,6 +25329,15 @@ def _postroute_sdr_transaction_begin_tcl(
         "    set _sdr_tx_before [_sdr_tx_count_router_drc $_sdr_tx_report]\n"
         "    file copy -force $_sdr_tx_report $_sdr_tx_dir/pre_repair_router.drc.rpt\n"
         "    write_def $_sdr_tx_dir/pre_repair.def\n"
+        # THE RESTORE POINT IS THE ODB; the DEF stays as the human-readable
+        # disclosure artefact beside it. MEASURED (probes A-F, R-0915-16): a
+        # FRESH process `read_db`s this in under a second and gets the design,
+        # the libs, the tech, the routing, the GUIDES and the `dont_touch`
+        # attribute back -- none of which a DEF carries. `read_db` into a
+        # populated database is what refuses (ORD-0047); a child is not one.
+        "    if {[catch {write_db $_sdr_tx_ckpt_odb} _sdr_tx_odb_e]} {\n"
+        "      puts \"SDR_CHECKPOINT_ODB_NONFATAL: $_sdr_tx_odb_e\"\n"
+        "    } else { puts \"SDR_CHECKPOINT_ODB_WRITTEN: $_sdr_tx_ckpt_odb\" }\n"
         "  } _sdr_tx_begin_e]} {\n"
         "    _sdr_tx_receipt REFUSED $_sdr_tx_begin_e -1 -1\n"
         "    set ::_vic_postroute_transaction_failed 1\n"
@@ -25489,6 +25505,25 @@ def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
         "    }\n"
         f"    puts \"SDR_CHILD_SESSION_DONE: rc=$_sdr_child_rc "
         f"log={child_log_c}\"\n"
+        # REFUSE A DEF-ONLY RESTORE BY NAME. The child deck reads the ODB;
+        # if `begin`'s `write_db` did not produce one, the child would `read_db`
+        # a file that is not there and die with a message about a path, not
+        # about the reason. Say the reason here, before spending a session on
+        # it: a DEF restore loses the guides, the dont_touch and the wire
+        # fidelity this transaction depends on, so it is refused rather than
+        # silently degraded to the shape R-0915-13 was.
+        "    if {![file exists $_sdr_tx_ckpt_odb]} {\n"
+        "      puts \"SDR_CHECKPOINT_ODB_ABSENT: $_sdr_tx_ckpt_odb was not "
+        "written, so there is no restore point that carries the route guides, "
+        "the dont_touch attributes or router-legal wire geometry. The DEF "
+        "beside it is a disclosure artefact, not a restore point. This "
+        "candidate is REFUSED rather than built from a checkpoint that would "
+        "lose them.\"\n"
+        "      set _sdr_tx_mutated 1\n"
+        "      set _sdr_tx_error 1\n"
+        "      set _sdr_tx_route_ok 0\n"
+        "      catch {unset _sdr_pv}\n"
+        "    } else {\n"
         "    set _sdr_child_ok 0\n"
         "    if {[catch {\n"
         "      set _sdr_fh [open $_sdr_tx_child_receipt r]\n"
@@ -25516,6 +25551,7 @@ def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
         "      catch {unset _sdr_pv}\n"
         "    } else {\n"
         "      set _sdr_pv $_sdr_pv_in\n"
+        "    }\n"
         "    }\n"
         "  }\n"
     )
@@ -27205,7 +27241,8 @@ class PnrResumeUnavailable(Exception):
 
 def _build_pnr_resume_tcl_text(pnr_tcl_text: str, *, checkpoint_def_c: str,
                                omit_stages: Sequence[str] = (),
-                               after_restore_tcl: str = "") -> str:
+                               after_restore_tcl: str = "",
+                               restore_odb_c: str = "") -> str:
     """Derive a RESUME Tcl from the pnr.tcl that was actually run.
 
     THE SOURCE OF THE TAIL IS pnr.tcl ITSELF. Re-emitting the post-route tail
@@ -27234,12 +27271,14 @@ def _build_pnr_resume_tcl_text(pnr_tcl_text: str, *, checkpoint_def_c: str,
     return "\n".join(_pnr_deck_from_checkpoint(
         pnr_tcl_text, checkpoint_def_c=checkpoint_def_c,
         omit_stages=omit_stages,
-        after_restore_tcl=after_restore_tcl)) + "\n"
+        after_restore_tcl=after_restore_tcl,
+        restore_odb_c=restore_odb_c)) + "\n"
 
 
 def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
                               omit_stages: Sequence[str] = (),
-                              after_restore_tcl: str = "") -> List[str]:
+                              after_restore_tcl: str = "",
+                              restore_odb_c: str = "") -> List[str]:
     """The line surgery shared by the fatal-signal RESUME deck and the #2253
     SDR CHILD deck: re-seat the design load on a checkpoint DEF, delete the
     region that BUILDS that checkpoint, and drop each named stage.
@@ -27268,17 +27307,39 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
             f"emitter that predates resume support, so a resume cannot be "
             f"derived from it")
 
+    if restore_odb_c:
+        # AN ODB RESTORE REPLACES THE WHOLE LOAD, NOT JUST THE NETLIST. The ODB
+        # carries the libs and the tech as well as the design (MEASURED:
+        # `B_LIBS 2  TECH YES`), so the `read_lef` lines must go with the
+        # `read_verilog`/`link_design` pair -- re-reading a LEF into a database
+        # that already has it is a second definition of the same library.
+        # `read_liberty` / `define_corners` / `read_sdc` STAY: timing libraries
+        # are not in the ODB, and probe F measured the whole repair recipe
+        # working once they are read back.
+        lines = [ln for ln in lines if not ln.startswith("read_lef ")]
     i_rv = _index_of(lambda ln: ln.startswith("read_verilog "), "read_verilog")
     if not lines[i_rv + 1:i_rv + 2] or \
             not lines[i_rv + 1].startswith("link_design "):
         raise PnrResumeUnavailable(
             "pnr.tcl does not follow read_verilog with link_design; the "
             "design-load site could not be identified")
-    lines[i_rv:i_rv + 2] = [
-        "# RESUMED SESSION — the design is restored from the route checkpoint",
-        "# instead of rebuilt from the netlist (see _build_pnr_resume_tcl_text).",
-        f"read_def {checkpoint_def_c}",
-    ] + ([after_restore_tcl.rstrip("\n")] if after_restore_tcl.strip() else [])
+    if restore_odb_c:
+        _load = [
+            "# RESUMED SESSION — restored from the ODB checkpoint, which carries",
+            "# the design, the libs, the tech, the routing, the global router's",
+            "# GUIDES and the dont_touch attribute. A DEF carries none of the",
+            "# last three (R-0915-16, MEASURED). The DEF beside it is the",
+            "# human-readable disclosure artefact, not the restore point.",
+            f"read_db {restore_odb_c}",
+        ]
+    else:
+        _load = [
+            "# RESUMED SESSION — the design is restored from the route checkpoint",
+            "# instead of rebuilt from the netlist (see _build_pnr_resume_tcl_text).",
+            f"read_def {checkpoint_def_c}",
+        ]
+    lines[i_rv:i_rv + 2] = _load + (
+        [after_restore_tcl.rstrip("\n")] if after_restore_tcl.strip() else [])
 
     def _drop(begin: str, end: str, replacement: Sequence[str],
               what: str) -> None:
@@ -27302,7 +27363,8 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
 
 def _build_pnr_sdr_child_tcl_text(pnr_tcl_text: str, *, checkpoint_def_c: str,
                                   stage: str,
-                                  after_restore_tcl: str = "") -> str:
+                                  after_restore_tcl: str = "",
+                                  restore_odb_c: str = "") -> str:
     """#2253 — derive the CHILD deck for one SDR site from pnr.tcl itself.
 
     The child is the ONLY session that is ever mutated by the optional
@@ -27338,7 +27400,8 @@ def _build_pnr_sdr_child_tcl_text(pnr_tcl_text: str, *, checkpoint_def_c: str,
     lines = _pnr_deck_from_checkpoint(
         pnr_tcl_text, checkpoint_def_c=checkpoint_def_c,
         omit_stages=_SDR_CHILD_OMIT[stage],
-        after_restore_tcl=after_restore_tcl)
+        after_restore_tcl=after_restore_tcl,
+        restore_odb_c=restore_odb_c)
     # REFUSE a deck that does not carry this site at all, rather than shipping
     # a child that would run to the END of pnr.tcl writing shipped artifacts.
     begin_marker = _pnr_stage_begin(stage)
@@ -27989,7 +28052,9 @@ def _write_sdr_child_decks(pnr_tcl: Path, out_dir: Path, container: str,
         try:
             child.write_text(_build_pnr_sdr_child_tcl_text(
                 deck, checkpoint_def_c=ckpt_c, stage=stage,
-                after_restore_tcl=after_restore))
+                after_restore_tcl=after_restore,
+                restore_odb_c=_to_container_path(
+                    str(txn / _SDR_CHECKPOINT_ODB_NAME), container)))
         except (PnrResumeUnavailable, OSError) as exc:
             failures[stage] = str(exc)
             # DEGRADE LOUDLY. A missing child deck turns into a refused

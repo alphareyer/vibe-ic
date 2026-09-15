@@ -931,3 +931,71 @@ def test_the_childs_transcript_never_lands_in_the_parents_log():
     assert "tee" not in line
     # and the reader is still told where the transcript went
     assert f"log={'/o/' + R._sdr_child_log_name(SITE1)}" in parent
+
+
+# ------------------------- R-0915-16: the restore point is the ODB
+
+
+def test_the_child_restores_from_the_odb_not_the_def(tmp_path):
+    """MEASURED (R-0915-16, probes A–F on the real 14 MB checkpoint): a FRESH
+    process `read_db`s it in under a second and gets back the design, the libs,
+    the tech, the routing, the global router's GUIDES (14,041 nets) and the
+    `dont_touch` attribute — and then runs `read_liberty`, `read_sdc`, STA,
+    `estimate_parasitics` and `repair_design` on it.  A DEF carries none of the
+    last three, which is what R-0915-13 was made of.
+    """
+    deck = _full_pnr_tcl(tmp_path)
+    child = R._build_pnr_sdr_child_tcl_text(
+        deck, checkpoint_def_c="/c/pre_repair.def", stage=SITE1,
+        restore_odb_c="/c/pre_repair.odb")
+    body = [ln for ln in child.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+    assert "read_db /c/pre_repair.odb" in body
+    assert not [ln for ln in body if ln.startswith("read_def ")]
+    # the ODB carries libs + tech, so re-reading the LEFs would be a second
+    # definition of the same library
+    assert not [ln for ln in body if ln.startswith("read_lef ")]
+    # timing libraries are NOT in the ODB and must still be read
+    assert [ln for ln in body if ln.startswith("read_liberty ")]
+    assert [ln for ln in body if ln.startswith("read_sdc ")]
+
+
+def test_a_def_only_restore_is_refused_by_name_not_degraded(tmp_path):
+    """The one thing that must never happen quietly: falling back to the DEF.
+    That restore loses the guides, the dont_touch and the wire fidelity the
+    transaction depends on — it IS the shape R-0915-13 was — so the parent
+    refuses it, and says which file is missing and what it would have cost."""
+    parent = R._postroute_sdr_parent_child_call_tcl("/o", SITE1)
+    assert "SDR_CHECKPOINT_ODB_ABSENT" in parent
+    assert "route guides" in parent and "dont_touch" in parent
+    # refused through the SAME flags the tool's own numbers go through
+    i = parent.index("SDR_CHECKPOINT_ODB_ABSENT")
+    tail = parent[i:i + 900]
+    assert "set _sdr_tx_error 1" in tail
+    assert "set _sdr_tx_route_ok 0" in tail
+
+
+def test_the_checkpoint_writes_the_odb_and_keeps_the_def(tmp_path):
+    """The DEF stays: it is the human-readable disclosure artefact beside the
+    restore point, and every existing consumer of `pre_repair.def` keeps it."""
+    begin = R._postroute_sdr_transaction_begin_tcl("/o", SITE1)
+    assert "write_def $_sdr_tx_dir/pre_repair.def" in begin
+    assert "write_db $_sdr_tx_ckpt_odb" in begin
+    assert f"/o/{R._SDR_TXN_DIRS[SITE1]}/{R._SDR_CHECKPOINT_ODB_NAME}" in begin
+    # a checkpoint that cannot be written is DISCLOSED, never silent
+    assert "SDR_CHECKPOINT_ODB_NONFATAL" in begin
+
+
+def test_a_deck_with_no_odb_still_restores_from_the_def(tmp_path):
+    """The fatal-signal resume has only a stage DEF checkpoint on disk, so the
+    DEF path must remain exactly as it was for it — passing no ODB is not a
+    silent downgrade there, it is the only checkpoint that exists."""
+    deck = _full_pnr_tcl(tmp_path)
+    tail = R._build_pnr_resume_tcl_text(
+        deck, checkpoint_def_c="/c/routed_preantenna.def", omit_stages=[SITE1])
+    body = [ln for ln in tail.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+    assert "read_def /c/routed_preantenna.def" in body
+    assert not [ln for ln in body if ln.startswith("read_db ")]
+    # and it keeps its LEFs, because nothing restored them
+    assert [ln for ln in body if ln.startswith("read_lef ")]
