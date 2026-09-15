@@ -33,6 +33,10 @@ def one_record_per_reason_class():
         (T.DESIGN_DECLARED_NA, "SKIP", "the design declares no command protocol"),
         (T.CAPABILITY_ABSENT, "SKIP", "the required simulator is absent"),
         (T.EXTERNAL, "SKIP", "board-level work is external to this run"),
+        # R-0915-46/47: the gate ran, found its subject absent, and the thing
+        # that produces that subject has not run yet in this flow.
+        (T.ASKED_BEFORE_PRODUCER, "SKIP",
+         "no KLayout DRC artefacts found; phase-3 DRC has not run"),
         (T.BLOCKED_BY_UPSTREAM, "BLOCKED", "the producing step has not run"),
         (T.EXECUTION_ERROR, "INCOMPLETE", "the caller supplied the wrong path"),
         (T.ZERO_DENOMINATOR, "INCOMPLETE", "0 of 13 documents were examined"),
