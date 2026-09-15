@@ -142,6 +142,81 @@ _DECLARED_NA_RE = re.compile(
     r"\bno fpga target\b|\basic target\b)", re.I)
 
 
+# R-0915-15 (lane icspm3, 2026-09-15) — A GATE THAT RAN AND FOUND ITS SUBJECT
+# ABSENT FROM THE DESIGN IS NOT AN EXECUTION ERROR.
+#
+# MEASURED on `spm` x gf180mcuD (a serial-parallel multiplier) at main
+# f64df0596. P0's umbrella carried SIXTEEN sub-gates that executed, read the
+# design, found their subject is not in it, said so, and were booked
+# EXECUTION_ERROR:
+#
+#   crc_oracle_vector_check         [skipped] no CRC module found in RTL
+#   arbiter_starvation_check        [skipped] no arbitration patterns found
+#   bram_pdob_combinational_check   [skipped] no inferred BRAM / megafunction …
+#   break_framing_vs_l3_check       L3 does not indicate break-delimited framing
+#   break_handler_safety_check      No break signals detected — not a break-based protocol
+#   tx_abort_during_transmission…   No TX modules detected
+#   l4_regmap_phase2_emitter…       L4 declares no registers[] … nothing to build
+#   l20_dft_scan_topology…          … and L20 asserts none
+#   l23_security_requirements…      design declares no security-relevant asset and L23 asserts none
+#   l24_signoff_evidence_backed…    1/1 L24_SIGNOFF layer(s) assert no sign-off verdict (inert / N/A)
+#   l25_reliability_envelope…       1/1 L25 layer(s) inert or N/A — no consumer exists
+#
+# EXECUTION_ERROR is not skip-eligible, so P0 went INCOMPLETE, which made
+# stage1 non-green, which made `stage_on_pass_review` decline, which made steps
+# 2, 7, 15 and 37 INCOMPLETE, which failed stage2/3/4_compliance. A multiplier
+# was held INCOMPLETE for having no CRC, no arbiter, no BRAM, no register map,
+# no DFT and no security assets.
+#
+# WHY THIS IS A SECOND PATTERN AND NOT A WIDER `_DECLARED_NA_RE`. The docstring
+# below forbids laundering "a zero denominator or failed producer … into a
+# design N/A merely because its sentence also contains the word `no`", and that
+# refusal is right. So this pattern is checked LAST — after ZERO, BLOCKED,
+# CAPABILITY, EXTERNAL and the existing declared-N/A recogniser — and it is
+# written from the measured sentences rather than from the idea of them. Every
+# branch below names a DESIGN ELEMENT the gate looked for inside something it
+# READ; none of them matches a sentence about the gate's own source being
+# absent or unreadable.
+#
+# THE SEPARATION IS THE POINT, AND IT IS TESTED IN BOTH DIRECTIONS over
+# populations DERIVED from the tree (the 40 shipped `skipped_reason` literals
+# plus the 16 measured P0 messages), never invented ones. These must NOT move:
+#   `no RTL files found` · `no top-level modules found` · `no modules parseable`
+#   `<l7>.txt is empty or unparseable` · `could not detect clock frequency`
+#   `no L7 document in project` · `no KLayout DRC artefacts found`
+#   `no module found in netlist` · `no FPGA top module found`
+# A gate whose own input is absent or unreadable has not established that the
+# design lacks anything, and the conservative direction keeps it INCOMPLETE.
+_SUBJECT_ABSENT_RE = re.compile(
+    # "no CRC module found in RTL", "no $readmemh / $readmemb in RTL" — the
+    # gate READ the RTL; what is absent is the subject inside it. `in RTL`
+    # (not `RTL files`) is what separates this from a missing source.
+    r"(?:\bno\b[^\n]{0,60}\bin rtl\b|"
+    # "no arbitration patterns found", "no toggle-divider patterns found"
+    r"\bno\b[^\n]{0,40}\bpatterns found\b|"
+    # "no rx_* modules found" — a NAMED subject, never the bare
+    # "no top-level modules found" / "no modules parseable" of a broken input.
+    r"\bno\b[^\n]{0,30}[*_][^\n]{0,20}\bmodules found\b|"
+    # "No break signals detected", "No TX modules detected", "no cross-module
+    # 1-cycle pulse races detected", "no inferred BRAM … detected"
+    r"\bno\b[^\n]{0,80}\bdetected\b|"
+    # "L3 does not indicate break-delimited framing"
+    r"\bdoes not indicate\b|"
+    # "not a break-based protocol"
+    r"\bnot a\b[^\n]{0,30}\b(?:protocol|design|project)\b|"
+    # "L4 declares no registers[]", "design declares no security-relevant asset"
+    r"\bdeclares no\b|"
+    # "L20 asserts none", "L24_SIGNOFF layer(s) assert no sign-off verdict"
+    r"\basserts? (?:none|no)\b|"
+    # "no staged HDL input declares an address-valued typedef enum"
+    r"\bno\b[^\n]{0,40}\bdeclares\b|"
+    # "no testable constraints in L3", "no DFT requirement derivable from the
+    # design's own inputs"
+    r"\bno testable\b|\bderivable from the design\b|"
+    # "inert / N/A", "inert or N/A", "no consumer exists"
+    r"\binert\s*(?:/|or)\s*n/?a\b|\bno consumer exists\b)", re.I)
+
+
 def infer_nonverdict_reason(*, verdict: str = "", message: str = "",
                             evidence: Optional[Mapping[str, Any]] = None,
                             explicit: Any = None) -> str:
@@ -187,6 +262,13 @@ def infer_nonverdict_reason(*, verdict: str = "", message: str = "",
     if _EXTERNAL_RE.search(text):
         return EXTERNAL
     if _DECLARED_NA_RE.search(text):
+        return DESIGN_DECLARED_NA
+    # R-0915-15, LAST: every narrower reading above has declined, so a sentence
+    # naming a design element the gate looked for and did not find inside
+    # something it READ is the design speaking, not a fault. See
+    # `_SUBJECT_ABSENT_RE` for why this is a second pattern and not a wider
+    # `_DECLARED_NA_RE`.
+    if _SUBJECT_ABSENT_RE.search(text):
         return DESIGN_DECLARED_NA
     return EXECUTION_ERROR
 
