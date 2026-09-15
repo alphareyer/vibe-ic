@@ -268,11 +268,36 @@ def l10_unit_tb_track(project: Path) -> Optional[Dict[str, Any]]:
             "reason": "independent L10 execution record contains a failed case",
         }
     if any(state != _l10x.PASS for state in states):
+        # R-0915-39: REFUSE BY NAME, NEVER "one or more".
+        #
+        # The old sentence was a block with no subject: a reader could not tell
+        # WHICH declared case did not execute, or why, and the JUnit beside it
+        # says `tests=10 failures=0 errors=0 skipped=0` -- every log reads PASS.
+        # MEASURED on subservient x gf180mcuD (lane icsub2, r16): all TEN
+        # declared cases have rows and all ten RAN, and NINE of them carry
+        # `NOT_EXECUTED — simulator ran the substance-floor scaffold, but the
+        # declared L10 case oracle was not executed`. The producer's own
+        # per-case log says it in one line:
+        #     [TB rv32i_40] SUBSTANCE_OK — DUT subservient driven,
+        #     5 output(s) resolved (case oracle not yet written)
+        # The record already knows this per case. Collapsing it to "one or
+        # more" threw away the only thing that makes the refusal actionable.
+        not_passed = [
+            {"case": cid, "state": st, "reason": why}
+            for cid, (st, why) in
+            ((cid, _l10x.case_state(cid, record)) for cid in ids)
+            if st != _l10x.PASS]
+        shown = ", ".join(f"{r['case']} [{r['state']}]" for r in not_passed[:6])
+        more = (f" (+{len(not_passed) - 6} more)"
+                if len(not_passed) > 6 else "")
         return {
             "gate": "professional_tb", "verdict": "NOT_CHECKED",
             "reason_class": _reason_taxonomy.BLOCKED_BY_UPSTREAM,
             "professional_track": "l10_unit_tb_execution",
-            "reason": "one or more declared L10 cases were not executed",
+            "reason": (f"{len(not_passed)} of {len(ids)} declared L10 case(s) "
+                       f"did not execute their declared oracle: {shown}{more}"),
+            "cases_not_executed": not_passed,
+            "declared_case_count": len(ids),
         }
 
     return {
