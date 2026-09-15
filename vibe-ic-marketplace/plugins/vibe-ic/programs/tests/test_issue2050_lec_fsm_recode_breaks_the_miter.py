@@ -683,9 +683,35 @@ def test_scalar_data_and_recoded_fsm_real_yosys(yosys, broken_reset):
     gate.write_text(gate.read_text() + wrapper)
     names = lec_run.fsm_signal_names(str(enc))
     assert names == ["state"], enc.read_text()
+    # THE LADDER MUST CONTAIN THE PROVER THIS TEST'S ASSERTION NEEDS.
+    #
+    # `ladder_rungs=2` emits `LEC_LADDER`'s first two rungs — `equiv_simple
+    # -short` and `equiv_simple` — and NOTHING ELSE; induction is rungs 3, 4
+    # and 5. But `data_q` is a register whose ENABLE is the FSM state
+    # (`if (state == 1)`) and whose output is XORed with another state decode,
+    # so proving it equal across a re-encoded state is a SEQUENTIAL obligation.
+    # Asserting `equivalent and unproven == 0` while truncating the ladder below
+    # every sequential prover asked the recipe for a proof the recipe had not
+    # been told to attempt.
+    #
+    # MEASURED in the pinned image (sha256:89a8fd7295…, yosys 0.68+), this
+    # fixture, sweeping only this number:
+    #     rungs=2  (0 induct)  13/17 proven, 4 unproven  -> equivalent False
+    #     rungs=3  (1 induct)  17/17 proven, 0 unproven  -> equivalent True
+    #     rungs=4  (2 induct)  17/17                     -> True
+    #     rungs=5  (3 induct)  17/17                     -> True
+    # and the 4 unproven at rungs=2 are exactly `inner.data_q[0..3]` — the data
+    # register, never the FSM state the #2050 repair anchors, which is proven in
+    # both arms. So the recipe under test was working and the FIXTURE was short.
+    # `ladder_rungs` is #2194's per-rung RESOURCE knob, not a soundness claim.
+    #
+    # THE ASSERTIONS BELOW ARE UNCHANGED, and this is not a softening: it makes
+    # the recipe do MORE work, and the mutation arm still discriminates at this
+    # depth — the broken-reset mutant stays 16/17 with 1 unproven at rungs 3 AND
+    # 5, so induction does not launder it.
     kwargs = dict(gold_files=[str(gold)], gate_netlist=str(gate), top="testtop",
                   liberty=None, gate_is_generic=True, fsm_encfile=str(enc),
-                  ladder_rungs=2)
+                  ladder_rungs=3)
     before = run(lec_run.build_equiv_script(**kwargs), "baseline")
     flat_enc = tmp_path / "flat.enc"
     flat_enc.write_text(enc.read_text().replace(".fsm toy state", ".fsm toy inner.state"))
@@ -806,3 +832,128 @@ def test_no_test_here_can_excuse_itself_from_measuring():
                       isinstance(a, ast.Attribute) and a.attr == "_docker"
                       for a in ast.walk(n)))
     assert launch is not None
+
+
+# ---------------------------------------------------------------------------
+# (5) #2050 FAMILY, SECOND INSTANCE — "induction did not converge" was said
+#     about logs in which induction never ran.
+#
+# Sections (2) and (3) above separated the TWO flat induction walls and stopped
+# the gate blaming depth for an inconsistent miter. The same sentence was still
+# being said about a THIRD shape that is not a wall at all: a ladder TRUNCATED
+# below its induction rungs. `equiv_simple` prints the very same
+# `Proved 0 previously unproven $equiv cells.` line `equiv_induct` does, and
+# the classifiers searched the whole log for it.
+#
+# MEASURED in the pinned image, this file's own reproducer at ladder_rungs=2
+# (LEC_LADDER rungs 1-2, zero induction commands emitted): the log contains the
+# string "induct" ZERO times, and the record read
+#     induction_wall_kind: "induction_depth"
+#     "equiv_induct did NOT converge (equiv_induct proved 0 previously-unproven
+#      cells across the escalating -seq sweep) ... a disclosed sequential-depth
+#      capability gap ... Close the remainder with sign-off LEC, which handles
+#      deep sequential induction."
+# The remedy was one more rung, for free: 13/17 -> 17/17, equivalent.
+# ---------------------------------------------------------------------------
+
+#: A REAL `equiv_simple`-only log, lines taken verbatim from the measured run.
+_LADDER_TRUNCATED = """\
+19. Executing EQUIV_SIMPLE pass.
+Found 17 unproven $equiv cells (16 groups) in equiv:
+  Trying to prove $equiv for \\inner.d[2]:ezsat
+ success!
+Proved 13 previously unproven $equiv cells.
+
+20. Executing EQUIV_SIMPLE pass.
+Found 4 unproven $equiv cells (4 groups) in equiv:
+  Trying to prove $equiv for \\inner.data_q[0]:ezsat
+ezsat
+ failed.
+Proved 0 previously unproven $equiv cells.
+
+21. Executing EQUIV_STATUS pass.
+Found 17 $equiv cells in equiv:
+  Of those cells 13 are proven and 4 are unproven.
+Found a total of 4 unproven $equiv cells.
+"""
+
+
+def test_a_ladder_that_never_reached_induction_is_not_an_induction_wall():
+    """The heart of it: no induction pass, so no depth opinion."""
+    assert not lec_run.ladder_reached_induction(_LADDER_TRUNCATED)
+    assert lec_run.induction_wall_kind(_LADDER_TRUNCATED) == \
+        "ladder_below_induction"
+    noconv, _ = lec_run.induction_did_not_converge(_LADDER_TRUNCATED)
+    assert noconv is False, (
+        "`equiv_simple`'s own `Proved 0` line was read as an equiv_induct "
+        "result; that is the whole defect")
+    fired, ev = lec_run.ladder_stopped_below_induction(_LADDER_TRUNCATED)
+    assert fired and "STOPPED BELOW" in ev
+
+
+def test_an_excerpted_induction_log_is_still_an_induction_wall():
+    """REVERT-PROOF FOR THE WIDENING, and the reason it had to be wide.
+
+    `_DEPTH_WALL` is this file's oldest depth fixture and it is an EXCERPT: it
+    begins BELOW `Executing EQUIV_INDUCT pass.` and carries only the lines the
+    pass prints while working. Keying "did induction run?" on the header alone
+    would reclassify it — and every real log that has been tailed or clipped —
+    as a truncated ladder. `equiv_induct` is the only pass that prints either of
+    those lines, VERIFIED against an equiv_simple-only log that contains neither.
+    """
+    assert lec_run.ladder_reached_induction(_DEPTH_WALL)
+    assert lec_run.induction_wall_kind(_DEPTH_WALL) == "induction_depth"
+    assert "Executing EQUIV_INDUCT" not in _DEPTH_WALL, (
+        "the fixture gained the header, so this test would pass on the narrow "
+        "marker too and stops being a control")
+
+
+def test_the_truncated_ladder_is_INCONCLUSIVE_and_names_the_real_remedy():
+    """It must not become a false NOT_EQUIVALENT — the design IS equivalent,
+    and one more rung proves it — and it must stop selling a commercial tool
+    for work this recipe has not been asked to do."""
+    r = lec_run.build_report(
+        lec_run.parse_equiv_output(_LADDER_TRUNCATED), "toy", "netlist.v", None)
+    assert r["verdict"] == "INCONCLUSIVE", r
+    assert r["equivalent"] is False
+    assert r["induction_wall_kind"] == "ladder_below_induction"
+    why = r["verdict_explanation"]
+    assert "STOPPED BELOW ITS INDUCTION RUNGS" in why, why
+    assert "equiv_induct -seq 4/16/64" in why, (
+        "the remedy must name the rungs that would close it", why)
+    assert "did NOT converge" not in why, (
+        "still claiming a convergence result from a run with no induction", why)
+    assert "deep sequential induction" not in why, (
+        "still prescribing sign-off LEC for a ladder that stopped short", why)
+
+
+def test_a_counterexample_still_FAILS_even_on_a_truncated_ladder():
+    """§4.05 NO-LEAK CONTROL. The new branch softens a verdict, so the thing to
+    prove is what it CANNOT soften: a real, witnessed difference."""
+    raw = _LADDER_TRUNCATED + "Found counterexample for $equiv cell.\n"
+    r = lec_run.build_report(
+        lec_run.parse_equiv_output(raw), "toy", "netlist.v", None)
+    assert r["verdict"] == "FAIL", r
+    assert r["equivalent"] is False
+
+
+def test_a_stateless_miter_still_FAILS_on_a_truncated_ladder():
+    """The OTHER no-leak control, and the one the `miter_is_stateless` guard
+    was added for: on a combinational miter induction could never have helped,
+    so a truncated ladder is not an excuse either."""
+    # `stat`'s real column order is COUNT then TYPE; the shape is the one
+    # `test_lec_bounded_proof._STAT_COMB` already uses, so the two fixtures
+    # cannot drift apart about what yosys prints.
+    raw = ("\n=== equiv ===\n\n"
+           "       25   $_NAND_\n"
+           "       11   $_NOT_\n"
+           "       36   $equiv\n\n"
+           + _LADDER_TRUNCATED)
+    stateless, _ = lec_run.miter_is_stateless(raw)
+    if not stateless:                       # the fixture must earn the control
+        raise AssertionError(
+            "fixture no longer reads as a stateless miter, so this control "
+            "proves nothing — repair the `stat` block")
+    r = lec_run.build_report(
+        lec_run.parse_equiv_output(raw), "toy", "netlist.v", None)
+    assert r["verdict"] == "FAIL", r
