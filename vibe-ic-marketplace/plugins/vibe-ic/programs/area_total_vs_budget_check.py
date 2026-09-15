@@ -344,6 +344,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import _tapeout_declaration as _td
+import _flow_reason_taxonomy as _reason_taxonomy  # vibe-ic#2277
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082/#1470
 
 TOOL = "area_total_vs_budget_check"
@@ -693,6 +694,45 @@ def evaluate(project: Path, ceiling_override: Optional[str],
             }
             return cell_verdict
         rep["verdict"] = "NOT_APPLICABLE"
+        # STATE THE CLASS, DO NOT LEAVE IT TO BE INFERRED (vibe-ic#2277).
+        #
+        # MEASURED on an open-source-PDK hardmacro run, live main 79506306d (lane icspm4, run1):
+        # this branch exits 0 and writes verdict NOT_APPLICABLE, and the flow
+        # still booked step 9 INCOMPLETE. `flow_compliance_check`'s rc-0 branch
+        # sees the non-verdict, asks `_flow_reason_taxonomy` for the class with
+        # `explicit=None` -- because `report_reason_class` reads only
+        # `reason_class` / `not_measured_class` / `skip_reason_class`, and this
+        # report had none of them -- and with `message=""` too, because
+        # `_report_reason_text` reads `reason`/`explanation`/`message`/
+        # `skipped_reason` and this branch's rationale sits under
+        # `disposition.rationale`. With nothing typed and nothing to infer from
+        # it fail-closes to EXECUTION_ERROR, which is not skip-eligible, so a
+        # gate that answered its question correctly was recorded as one that
+        # crashed. The power sibling already states its class
+        # (`power_total_vs_budget_check.py`); this is the same one line.
+        #
+        # ONLY ON THIS BRANCH. Not on the L19-conflict INCOMPLETE above, not on
+        # the UNSET/ceiling/unit INCOMPLETE below, and not on a real
+        # comparison: each of those is a different answer and must keep its own
+        # tier.
+        rep["reason_class"] = _reason_taxonomy.DESIGN_DECLARED_NA
+        rep["program"] = "area_total_vs_budget_check"
+        # The evidence shape `_report_proves_executed_design_na` validates, so
+        # the reader can re-read the declaration's own bytes instead of taking
+        # the label on trust. This branch is reachable only when the design
+        # declared NOT_APPLICABLE *and* no ceiling source stated a die, so the
+        # ceiling population really is zero by declaration.
+        rep["applicability_evidence"] = {
+            "kind": "design-declared-zero-population",
+            "declaration_path": _td.DECLARATION_REL,
+            "population_paths": [
+                f"{_td.SYNTHESIS_AREA_BUDGET_KEY}.max_die_dimensions_um"],
+            "declared_population": 0,
+            "assertions": [
+                {"path": f"{_td.SYNTHESIS_AREA_BUDGET_KEY}.status",
+                 "equals": _td.AREA_BUDGET_NOT_APPLICABLE},
+            ],
+        }
         rep["disposition"] = {
             "status": "NOT_APPLICABLE",
             "source": declaration["source"],

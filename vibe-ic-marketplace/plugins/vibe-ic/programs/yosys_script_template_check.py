@@ -458,6 +458,29 @@ def main(argv: list[str] | None = None) -> int:
         if str(verdict).startswith("VACUOUS"):
             _vx.announce_vacuous("yosys_script_template_check",
                                  fields["reason_class"], stream=sys.stderr)
+        # vibe-ic#2277 — SAY HOW MUCH WAS ACTUALLY VERIFIED, as the sibling
+        # gate on this same step already does.
+        #
+        # `announce_vacuous` above discloses that NO `.ys` script was audited.
+        # It does not distinguish the tier where the inline `yosys -p` command
+        # WAS extracted and checked from the tier where nothing could be read
+        # at all -- that difference lives only in this gate's own
+        # `reason_class`, which is gate-private vocabulary the flow's six-class
+        # taxonomy does not contain. The reader therefore classified a verified
+        # inline command as EXECUTION_ERROR and booked step 14 INCOMPLETE.
+        #
+        # `yosys_hilomap_required_check` prints this same line on the same two
+        # tiers for the same reader. Printing it here is not a new claim: the
+        # claim is already in `reason_class`, and this is the one token the
+        # roll-up can see. Emitted ONLY on the tiers whose reason_class says a
+        # command was read, never on `_unconfirmed`, and never when the
+        # handoff-netlist arm rewrote `verdict` to FAIL.
+        if rc == 0 and not str(verdict).startswith("FAIL") and fields[
+                "reason_class"] in ("inline_yosys_p_mode_conformant",
+                                    "inline_yosys_p_mode_confirmed"):
+            print(f"SUBSTANTIVE_PASS: no `.ys` script existed, and the "
+                  f"equivalent was verified by another route "
+                  f"({fields['reason_class']})", file=sys.stderr)
         return rc
 
     overall = 0

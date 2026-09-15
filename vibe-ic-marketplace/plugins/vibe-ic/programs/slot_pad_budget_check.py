@@ -130,12 +130,16 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _atomic_artefact import write_json  # noqa: E402  vibe-ic#1082
 import _gate_usage_exit as _usage  # noqa: E402  vibe-ic#712
 import _flow_reason_taxonomy as _reason_taxonomy  # noqa: E402
+import _submission_template as _ST  # noqa: E402  vibe-ic#2277
+import _tapeout_declaration as _TD  # noqa: E402  vibe-ic#2277
+import submission_template_check as _stc  # noqa: E402  vibe-ic#2277
 
 # --------------------------------------------------------------------------- #
 # pad roles -- derived from the operator's OWN instance names, never assumed
@@ -858,6 +862,70 @@ def main(argv: Optional[List[str]] = None) -> int:
                                    f"--param {kv} is not an integer")
                 return _usage.RC_USAGE
 
+    # THE DESIGN DECLARED IT IS NOT GOING THROUGH AN OPERATOR (vibe-ic#2277).
+    #
+    # MEASURED on spm x gf180mcuD, live main 79506306d (2026-09-15): since the
+    # 0.5ic fetch was wired, a PDK with a LIVE shuttle in the registry has the
+    # operator's whole CATALOGUE ingested into
+    # `input/submission_template/slots/*.yaml` whether or not the design bought
+    # a slot. So `slots` is non-empty for a design that declared
+    # `deliverable=HARDMACRO` and named no slot, the `not slots and
+    # _declared_no_slot` path below is unreachable, and this gate budgets the
+    # design's pins against four slots it never purchased.
+    #
+    # A CATALOGUE IS NOT A PURCHASE, and the route is the DESIGN'S to declare.
+    # It declares it in two files the flow already owns: the merged
+    # `tapeout_declaration.json` answers `deliverable`, and the design's own
+    # `input/step_0_5ic_answers.json` names (or does not name) an
+    # `operator_template.path` / `.slot`. That predicate is already written
+    # ONCE, in `submission_template_check.slot_rules_are_owed`, and it is
+    # CALLED here rather than re-implemented: two readers of one route that can
+    # drift is how a design got two answers about itself in the first place.
+    # It degrades TOWARDS owing the budget -- an unreadable declaration, a
+    # NOT_DETERMINED deliverable, a DIE, or ANY affirmative operator binding
+    # all keep this gate live, which is the negative control.
+    #
+    # COMPUTED BEFORE the port parse and CHECKED FIRST below, because a
+    # hardmacro that buys no slot owes no pad budget whatever its top module is
+    # called. Answering "top module 'chip_top' not found" -- the
+    # EXECUTION_ERROR this run actually booked -- is a question that was never
+    # owed being reported as one that could not be asked.
+    _route_na: Optional[Dict[str, Any]] = None
+    try:
+        _owed, _why_not = _stc.slot_rules_are_owed(Path(a.project), None)
+    except (OSError, ValueError, TypeError):  # degrade towards owing it
+        _owed, _why_not = True, None
+    if not _owed and _why_not:
+        _route_na = {
+            "check": "slot_pad_budget",
+            "program": "slot_pad_budget_check",
+            "verdict": "NOT_APPLICABLE",
+            "rc": 2,
+            "reason_class": _reason_taxonomy.DESIGN_DECLARED_NA,
+            "skip_kind": "class-not-applicable",
+            "reason": (
+                "the design declares deliverable=HARDMACRO and binds no "
+                "operator slot, so no purchased pad budget exists for its "
+                "interface to fit; the slot files on disk are the PDK's live "
+                "catalogue, which is information, not a purchase. " + _why_not),
+            # The shape `flow_compliance_check._report_proves_executed_design_na`
+            # validates: a project-relative declaration, the population fields
+            # that must be empty, the zero, and a typed assertion re-read from
+            # the same bytes. A reason token alone is not evidence.
+            "applicability_evidence": {
+                "kind": "design-declared-zero-population",
+                "declaration_path": _ST.DESIGN_ANSWERS_REL,
+                "population_paths": ["operator_template.path",
+                                     "operator_template.slot"],
+                "declared_population": 0,
+                "assertions": [
+                    {"path": "answers.deliverable",
+                     "equals": _TD.DELIVERABLE_HARDMACRO},
+                ],
+            },
+            "note": "a design-declared route, not an unanswered question",
+        }
+
     slots = _load_slots(a.project)
     # An explicit --rtl always wins; discovery is the fallback the flow uses.
     rtl_files = list(a.rtl) or _discover_rtl(a.project)
@@ -890,7 +958,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                                        "submission_template", _name)):
             _declared_no_slot = _why
             break
-    if not slots and _declared_no_slot:
+    if _route_na is not None:
+        rep = _route_na
+        rc = 2
+    elif not slots and _declared_no_slot:
         rep = {"check": "slot_pad_budget", "verdict": "NOT_APPLICABLE", "rc": 2,
                "reason_class": _reason_taxonomy.DESIGN_DECLARED_NA,
                "skip_kind": "class-not-applicable",
