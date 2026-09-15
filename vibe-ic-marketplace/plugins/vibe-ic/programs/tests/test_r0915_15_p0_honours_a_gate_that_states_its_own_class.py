@@ -56,6 +56,35 @@ def test_a_declaring_gate_is_given_somewhere_to_say_it(tmp_path, gate):
     assert target.parent.is_dir(), "the scratch dir must exist before the run"
 
 
+#: What each declaring gate says about THE FIXTURE BELOW — a project with a
+#: reports/ dir, an ic_class declaring no analog, an auto-synthesized waiver,
+#: and nothing else.
+#:
+#: R-0915-52 (lane icsub4): this used to be one blanket
+#: `== DESIGN_DECLARED_NA`, which held only because both gates registered at
+#: the time read that fixture as "the design declares nothing". It is not a
+#: property of the registry — `l24_signoff_evidence_backed_check` reads the
+#: same fixture as ASKED_BEFORE_PRODUCER, and correctly so: the fixture has no
+#: `L24_SIGNOFF.json` because phase 1 never ran, which is a different fact
+#: from a design that declares no sign-off. The expectation is therefore
+#: stated per gate and the registry coverage is asserted, so a newly
+#: registered gate must SAY what it declares here rather than inherit a class
+#: it does not mean.
+_CLASS_ON_THE_EMPTY_FIXTURE = {
+    "waiver_staleness_check": R.DESIGN_DECLARED_NA,
+    "analog_flow_compliance_check": R.DESIGN_DECLARED_NA,
+    "l24_signoff_evidence_backed_check": R.ASKED_BEFORE_PRODUCER,
+}
+
+
+def test_every_declaring_gate_states_what_it_says_here():
+    """No gate may join the registry without an expectation in this file."""
+    assert set(_CLASS_ON_THE_EMPTY_FIXTURE) == set(DECLARING), (
+        sorted(set(DECLARING) ^ set(_CLASS_ON_THE_EMPTY_FIXTURE)))
+    for cls in _CLASS_ON_THE_EMPTY_FIXTURE.values():
+        assert cls in R.REASON_CLASS_SET, cls
+
+
 @pytest.mark.parametrize("gate", DECLARING)
 def test_a_declaring_gate_actually_writes_a_class(tmp_path, gate):
     """Not asserted from the registry — RUN each one and read what it wrote."""
@@ -72,7 +101,7 @@ def test_a_declaring_gate_actually_writes_a_class(tmp_path, gate):
     subprocess.run(argv, cwd=str(proj), capture_output=True,  # nosec B603
                    text=True, check=False)
     assert F._p0_declared_reason_class(gate, proj, scratch) == \
-        R.DESIGN_DECLARED_NA, gate
+        _CLASS_ON_THE_EMPTY_FIXTURE[gate], gate
 
 
 # ── the conservative direction ────────────────────────────────────────────
