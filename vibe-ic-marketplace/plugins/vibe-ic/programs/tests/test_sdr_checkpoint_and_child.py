@@ -530,3 +530,142 @@ def test_the_disclosure_does_not_republish_the_log_it_already_folded(tmp_path):
     assert payload["adoptions"][0]["adoptions"][0]["log"] == "pnr_sdr_adopt_1.log"
     assert payload["adoptions"][0]["status"] == "ADOPTED"
     assert published.stat().st_size < 4096
+
+
+# ---------------- R-0915-13: what a DEF restore gets WRONG, both halves
+
+
+def test_a_rerouting_deck_drops_the_round_tripped_spare_wiring(tmp_path):
+    """(A) MEASURED (sha256 run3/run4, the child's own transcript):
+        SDR_ROUTING_CLEARED: 13805 (spare_preserved=236)
+        [ERROR DRT-1010] Unsupported non-orthogonal wire ... on net
+            spare_tielo_spare_dff_14
+        SDR_DR_NONFATAL: DRT-1010  ->  route_ok=0  ->  REJECTED after=-1
+    The wire is orthogonal IN THE DEF (`NEW met1 ( 109250 520710 ) ( * 521050 0 )`)
+    and comes back from `read_def` diagonal. The shared clear returns PROTECTED
+    for any net touching a dont_touch instance, so the router never gets to lay
+    it again -- and refuses the whole design instead.
+    """
+    tcl = R._after_restore_tcl("", _SPARE_PLAN, reroutes_immediately=True)
+    assert "SPARE_WIRING_RELAID" in tcl
+    # the instances KEEP their protection -- that is what design-for-ECO needs
+    assert "set_dont_touch spare_inv_0" in tcl
+    # and the drop goes through the ONE filtered helper, never a second destroy
+    assert "_vibeic_spare_safe_clear_net $_spare_n 1" in tcl
+    assert tcl.count("odb::dbWire_destroy") == 1
+
+
+def test_a_shipping_deck_keeps_that_wiring_and_gets_its_guides_instead(tmp_path):
+    """(B) MEASURED (subservient, lane icsub2): the ADOPT TAIL restores the
+    candidate DEF, every `detailed_route` after it fails DRT-0047 swallowed as
+    PG_REROUTE_NONFATAL, and the post-route repair resizes NOTHING.  A DEF
+    carries wires, not the global router's guides, and the deck's own
+    `global_route` calls are all inside the elided region.
+
+    This deck must NOT drop wiring: it does not necessarily detailed-route, so
+    a dropped tie-off net would SHIP with no conductor.
+    """
+    tcl = R._after_restore_tcl("", _SPARE_PLAN, reroutes_immediately=False)
+    assert "RESTORED_ROUTE_GUIDES_REESTABLISHED" in tcl
+    assert "global_route" in tcl
+    assert "SPARE_WIRING_RELAID" not in tcl
+    assert "odb::dbWire_destroy" not in tcl
+    assert "set_dont_touch spare_inv_0" in tcl
+
+
+def test_the_two_deck_kinds_are_exclusive_and_neither_is_empty():
+    """Getting `reroutes_immediately` backwards is what each half of R-0915-13
+    was, so the two shapes are pinned against each other."""
+    child = R._after_restore_tcl("", _SPARE_PLAN, reroutes_immediately=True)
+    ship = R._after_restore_tcl("", _SPARE_PLAN, reroutes_immediately=False)
+    assert child != ship
+    assert ("SPARE_WIRING_RELAID" in child) and ("SPARE_WIRING_RELAID" not in ship)
+    assert ("global_route" in ship) and ("global_route" not in child)
+
+
+@needs_tclsh
+def test_the_relay_never_reaches_supply_wiring(tmp_path):
+    """The PG skip is NOT the exception `_drop_protected` lifts.
+
+    DRIVEN, not read: the proc is executed with the dont_touch skip dropped,
+    once on a SIGNAL net and once on a POWER net. The signal wire goes; the
+    supply wire must not, because a caller that could destroy PG wiring would
+    take the straps out of the die it is about to ship. That is the one refusal
+    in this filter with no opt-out, and the only honest way to show it is to
+    ask for the exception and be refused.
+    """
+    import subprocess
+    stub = (
+        'namespace eval odb { proc dbWire_destroy {w} { lappend ::D $w } }\n'
+        'set ::D {}\n'
+        'proc SIG {m args} {\n'
+        '  switch -- $m { getSigType {return SIGNAL} getITerms {return {IT}}\n'
+        '                 getWire {return WSIG} }\n'
+        '}\n'
+        'proc PWR {m args} {\n'
+        '  switch -- $m { getSigType {return POWER} getITerms {return {IT}}\n'
+        '                 getWire {return WPWR} }\n'
+        '}\n'
+        'proc IT {m args} { if {$m eq "getInst"} { return INST } }\n'
+        'proc INST {m args} { if {$m eq "isDoNotTouch"} { return 1 } }\n')
+    drive = ('puts "SIG_FORCED=[_vibeic_spare_safe_clear_net SIG 1]"\n'
+             'puts "PWR_FORCED=[_vibeic_spare_safe_clear_net PWR 1]"\n'
+             'puts "SIG_DEFAULT=[_vibeic_spare_safe_clear_net SIG]"\n'
+             'puts "DESTROYED=$::D"\n')
+    s = tmp_path / "pg.tcl"
+    s.write_text(stub + R._spare_safe_clear_net_proc_tcl() + drive)
+    r = subprocess.run([tclsh, str(s)], text=True, capture_output=True)
+    assert r.returncode == 0, r.stderr
+    # the exception reaches a protected SIGNAL net ...
+    assert "SIG_FORCED=CLEARED" in r.stdout, r.stdout
+    # ... and never a supply net, however it is asked
+    assert "PWR_FORCED=PG" in r.stdout, r.stdout
+    # ... and the default caller is unchanged: still PROTECTED
+    assert "SIG_DEFAULT=PROTECTED" in r.stdout, r.stdout
+    assert "DESTROYED=WSIG" in r.stdout, r.stdout
+
+
+def test_a_design_with_no_spares_still_gets_its_guides(tmp_path):
+    """The relay is empty without spares; the guides do not depend on them."""
+    ship = R._after_restore_tcl("", None, reroutes_immediately=False)
+    child = R._after_restore_tcl("", None, reroutes_immediately=True)
+    assert "RESTORED_ROUTE_GUIDES_REESTABLISHED" in ship
+    assert "SPARE_WIRING_RELAID" not in child
+    assert "odb::dbWire_destroy" not in child
+
+
+@needs_tclsh
+def test_the_relay_executes_and_reports_what_it_dropped(tmp_path):
+    """DRIVEN, not read: the fragment runs under the odb stubs and reports the
+    count, and a net it could not touch is DISCLOSED rather than silent."""
+    import subprocess
+    tcl = R._after_restore_tcl("", _SPARE_PLAN, reroutes_immediately=True)
+    stub = (
+        'namespace eval ord { proc get_db_block {} { return BLK } }\n'
+        'namespace eval odb { proc dbWire_destroy {w} { lappend ::DESTROYED $w } }\n'
+        'set ::DESTROYED {}\n'
+        'proc BLK {m args} {\n'
+        '  if {$m eq "findInst"} {\n'
+        '    if {[lindex $args 0] eq "spare_nand_1"} { return NULL }\n'
+        '    return INST\n'
+        '  }\n'
+        '}\n'
+        'proc INST {m args} { if {$m eq "getITerms"} { return {IT} } }\n'
+        'proc IT {m args} { if {$m eq "getNet"} { return NET } }\n'
+        'proc NET {m args} {\n'
+        '  switch -- $m {\n'
+        '    getSigType { return SIGNAL }\n'
+        '    getITerms  { return {IT} }\n'
+        '    getWire    { return W }\n'
+        '    getName    { return spare_tielo_x }\n'
+        '  }\n'
+        '}\n'
+        'proc set_dont_touch {args} {}\n')
+    s = tmp_path / "relay.tcl"
+    s.write_text(stub + tcl + '\nputs "DESTROYED=[llength $::DESTROYED]"\n')
+    r = subprocess.run([tclsh, str(s)], text=True, capture_output=True)
+    assert r.returncode == 0, r.stderr
+    # one spare resolves to an instance, one is absent from the DEF (NULL),
+    # one has no PDK cell and was never in the plan's emitted list
+    assert "SPARE_WIRING_RELAID: 1 net(s)" in r.stdout, r.stdout
+    assert "DESTROYED=1" in r.stdout

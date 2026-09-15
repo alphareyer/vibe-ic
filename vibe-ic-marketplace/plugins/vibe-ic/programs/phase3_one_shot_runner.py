@@ -21719,11 +21719,20 @@ def _spare_safe_clear_net_proc_tcl() -> str:
     chip-AGNOSTIC: odb API only; no PDK, layer, vendor or design literal.
     """
     return (
-        "proc _vibeic_spare_safe_clear_net {_n} {\n"
+        "proc _vibeic_spare_safe_clear_net {_n {_drop_protected 0}} {\n"
         "  set _st [$_n getSigType]\n"
         "  if {$_st eq \"POWER\" || $_st eq \"GROUND\"} { return PG }\n"
-        "  foreach _it [$_n getITerms] {\n"
-        "    if {[[$_it getInst] isDoNotTouch]} { return PROTECTED }\n"
+        # `_drop_protected` is the ONE exception to the dont_touch skip, and it
+        # is passed IN rather than re-implemented: a restored session whose
+        # next act is a full clear + global_route + detailed_route must be able
+        # to drop a DEF-round-tripped wire the router refuses (DRT-1010,
+        # MEASURED on the spare tie-off nets), and a second copy of this filter
+        # is exactly what this proc exists to prevent. The PG skip is NOT
+        # optional and stays above, so no caller can reach supply wiring.
+        "  if {!$_drop_protected} {\n"
+        "    foreach _it [$_n getITerms] {\n"
+        "      if {[[$_it getInst] isDoNotTouch]} { return PROTECTED }\n"
+        "    }\n"
         "  }\n"
         "  set _w [$_n getWire]\n"
         "  if {$_w eq \"NULL\"} { return UNROUTED }\n"
@@ -24923,18 +24932,152 @@ def _pg_global_connect_reassert_tcl(deck: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _after_restore_tcl(deck: str, spare_plan: Optional[Dict[str, Any]]) -> str:
+def _after_restore_tcl(deck: str, spare_plan: Optional[Dict[str, Any]],
+                       *, reroutes_immediately: bool) -> str:
     """Everything a checkpoint-restored session must re-establish, in one place.
 
-    Both invariants the elided floorplan..detailed_route region set up are
+    The invariants the elided floorplan..detailed_route region sets up are
     SESSION STATE that a DEF cannot carry: the spare pool's `dont_touch`
-    (#2255) and the PDN's global connection rules (R-0915-12). They are
-    assembled here so a third one cannot be added to one seam and forgotten at
-    the other two — `_write_sdr_child_decks`, `_pnr_adopt_sdr_candidates` and
+    (#2255), the PDN's global connection rules (R-0915-12), the global router's
+    GUIDES, and — the one case where the DEF's own GEOMETRY comes back
+    router-illegal — the spare tie-off WIRING. They are assembled here so a
+    fifth one cannot be added to one seam and forgotten at the other two:
+    `_write_sdr_child_decks`, `_pnr_adopt_sdr_candidates` and
     `_pnr_resume_after_fatal_signal` all restore, and all three call this.
+
+    ``reroutes_immediately`` is the ONE thing that differs between them, and it
+    is a fact about the deck, not a preference: an SDR CHILD always follows the
+    restore with a routing clear, a `global_route` and a `detailed_route` in the
+    same pass; the ADOPT TAIL and the FATAL-SIGNAL RESUME do not necessarily
+    detailed-route at all. So:
+
+      * a deck that reroutes immediately may DROP the DEF-round-tripped spare
+        wiring the shared clear would otherwise protect straight into the
+        router (DRT-1010, MEASURED) — its own pass lays it again — and needs no
+        guide re-establishment, because its own loop makes guides before every
+        detailed route;
+      * a deck that does NOT reroute immediately must keep that wiring (dropping
+        it would ship a tie-off net with no conductor) and MUST have guides,
+        because the detailed routes it does run — antenna repair, the second
+        SDR site, the named-violation reroute — have none after a DEF restore.
+
+    Getting that backwards is what each half of R-0915-13 was.
     """
-    return (_spare_reassert_dont_touch_tcl(spare_plan)
-            + _pg_global_connect_reassert_tcl(deck))
+    common = (_spare_reassert_dont_touch_tcl(spare_plan)
+              + _pg_global_connect_reassert_tcl(deck))
+    if reroutes_immediately:
+        return common + _spare_relay_restored_wiring_tcl(spare_plan)
+    return common + _restored_session_route_guides_tcl()
+
+
+def _spare_relay_restored_wiring_tcl(plan: Optional[Dict[str, Any]]) -> str:
+    """Destroy the routing on the spare cells' OWN signal nets in a restored
+    session, so the pass that follows re-lays it.
+
+    MEASURED (sha256 x sky130A, run3 and run4, the child's own transcript):
+        SDR_ROUTING_CLEARED: 13805 (spare_preserved=236)
+        [ERROR DRT-1010] Unsupported non-orthogonal wire
+            begin=(104.19, 520.71) end=(109.25, 521.05), layer met1
+            on net spare_tielo_spare_dff_14
+        SDR_DR_NONFATAL: DRT-1010   ->  route_ok=0  ->  candidate REJECTED after=-1
+    `detailed_route` refused the WHOLE design, so the candidate could not be
+    measured, so it was refused (correctly -- nothing known about a geometry is
+    never accepted), so the UN-REPAIRED route shipped. Same signature on AES and
+    on subservient.
+
+    THE WIRE IS NOT THE ROUTER'S. In the checkpoint DEF that segment is
+    orthogonal -- `NEW met1 ( 109250 520710 ) ( * 521050 0 )`, a vertical
+    340 dbu piece -- and it comes back from `read_def` as a DIAGONAL, with the
+    x of a neighbouring met2 segment. A DEF round-trip does not guarantee
+    router-legal wire geometry; the ODB the parent held did.
+
+    WHY IT ONLY BITES NOW, and it is this repo's own doing: the shared routing
+    clear (`_vibeic_spare_safe_clear_net`) returns PROTECTED for any net whose
+    iterms touch a `isDoNotTouch` instance, so it never destroys that wire and
+    the router never gets to lay it again. Before the spare `dont_touch` was
+    re-asserted in a restored session those 236 nets were cleared and re-routed
+    -- orthogonally -- and the candidate measured (run2: `spare_preserved=0`,
+    child route OK, candidate ACCEPTED). Re-asserting the protection is right;
+    letting it also protect DEF-round-tripped WIRING is what broke the router.
+
+    So the INSTANCES keep their `dont_touch` -- the resizer still may not
+    resize, rebuffer or delete a spare, which is what design-for-ECO actually
+    requires -- and their WIRING is dropped once, here, for the router to lay
+    again.
+
+    EMITTED ONLY INTO THE SDR CHILD DECKS. A child always follows this with
+    `_spare_safe_routing_clear_tcl` + `global_route` + `detailed_route`, so
+    every net dropped here is re-laid in the same pass. The ADOPT TAIL and the
+    FATAL-SIGNAL RESUME restore a checkpoint too, but they do NOT necessarily
+    detailed-route afterwards, and dropping wiring there would ship a spare
+    tie-off net with no conductor. They therefore do not get this fragment, and
+    that asymmetry is deliberate rather than an oversight.
+
+    Empty string when the design plans no physical spares. NONFATAL per net and
+    it PRINTS its count, so "0 relaid" is readable instead of inferred.
+
+    Chip-AGNOSTIC: instance names from the run's own spare plan; POWER/GROUND
+    skipped by the net's own SigType."""
+    names = [i.get("name") for i in ((plan or {}).get("instances") or [])
+             if i.get("cell") and i.get("name")]
+    if not names:
+        return ""
+    return (
+        _spare_safe_clear_net_proc_tcl()
+        + "# === Design-for-ECO: the spares keep their dont_touch; their\n"
+        "# DEF-round-tripped ROUTING does not. See\n"
+        "# _spare_relay_restored_wiring_tcl (DRT-1010, MEASURED).\n"
+        "set _spare_relaid 0\n"
+        "set _spare_relay_blk [ord::get_db_block]\n"
+        "foreach _spare_nm {" + " ".join(names) + "} {\n"
+        "  set _spare_i [$_spare_relay_blk findInst $_spare_nm]\n"
+        "  if {$_spare_i eq \"NULL\"} { continue }\n"
+        "  foreach _spare_it [$_spare_i getITerms] {\n"
+        "    set _spare_n [$_spare_it getNet]\n"
+        "    if {$_spare_n eq \"NULL\"} { continue }\n"
+        # THROUGH the shared filter, with the dont_touch skip explicitly
+        # dropped -- never a second `odb::dbWire_destroy` in this file.
+        "    if {[catch {set _spare_r "
+        "[_vibeic_spare_safe_clear_net $_spare_n 1]} _spare_we]} {\n"
+        "      puts \"SPARE_WIRING_RELAY_NONFATAL [$_spare_n getName]: $_spare_we\"\n"
+        "    } elseif {$_spare_r eq \"CLEARED\"} { incr _spare_relaid }\n"
+        "  }\n"
+        "}\n"
+        f"puts \"SPARE_WIRING_RELAID: $_spare_relaid net(s) dropped for the "
+        f"router to lay again (of {len(names)} spare(s)); the instances keep "
+        "their dont_touch\"\n")
+
+
+def _restored_session_route_guides_tcl() -> str:
+    """Re-establish global-route GUIDES in a session restored from a DEF.
+
+    MEASURED (subservient, lane icsub2): the ADOPT TAIL restores the accepted
+    candidate DEF and every `detailed_route` after it fails with
+    `[ERROR DRT-0047]`, swallowed as `PG_REROUTE_NONFATAL`; the post-route
+    repair then resizes NOTHING (`Iteration 0: 0 resized, 0 buffers`) and the
+    sign-off gain collapses from 3.27 ns to 2.33 ns. A DEF carries WIRES; it
+    does not carry the global router's guides, and `detailed_route` needs them.
+    The eleven `global_route` calls in the tail deck are all inside the
+    floorplan..detailed_route region that a checkpoint-seeded deck elides, so
+    not one of them runs.
+
+    So a restored deck runs `global_route` ONCE, before anything can ask for a
+    detailed route. NONFATAL and self-disclosing: a design where it cannot run
+    says so rather than failing silently into the same swallowed DRT-0047.
+
+    NOT emitted into the SDR CHILD decks: the child's own repair loop already
+    runs `global_route` immediately before each `detailed_route`, so a second
+    one here would cost minutes per pass and change nothing.
+
+    Chip-AGNOSTIC: one standard OpenROAD command."""
+    return (
+        "# === a DEF restores WIRES, not the global router's GUIDES; without\n"
+        "# them every detailed_route below fails DRT-0047 and the repair that\n"
+        "# follows resizes nothing. See _restored_session_route_guides_tcl.\n"
+        "if {[catch {global_route} _rg_e]} {\n"
+        "  puts \"RESTORED_ROUTE_GUIDES_NONFATAL: $_rg_e -- detailed routing "
+        "after this restore has no guides and may refuse\"\n"
+        "} else { puts \"RESTORED_ROUTE_GUIDES_REESTABLISHED\" }\n")
 
 
 def _sdr_txn_dir_c(out_dir_c: str, stage: str) -> str:
@@ -25169,6 +25312,7 @@ def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
 
     Chip-AGNOSTIC: process invocation and TSV parsing only."""
     child_tcl_c = f"{out_dir_c}/{_sdr_child_tcl_name(stage)}"
+    child_log_c = f"{out_dir_c}/{_sdr_child_log_name(stage)}"
     return (
         "  if {$_sdr_tx_ready} {\n"
         # RUN THE CANDIDATE SOMEWHERE ELSE. `openroad` is the same binary this
@@ -25178,12 +25322,21 @@ def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
         # writes no receipt, is a REFUSAL — never an invented pass.
         f"    puts \"SDR_CHILD_SESSION_BEGIN: {child_tcl_c}\"\n"
         "    set _sdr_child_rc 0\n"
+        # THE CHILD GETS ITS OWN LOG, and is still echoed to the parent's.
+        # Interleaving the child's transcript into the parent's was enough to
+        # SEE it but not enough to READ it: diagnosing the DRT-1010 that made
+        # every candidate unmeasurable meant bisecting line ranges between
+        # SDR_CHILD_SESSION_BEGIN and _DONE in a 4,000-line file that the next
+        # invocation's `tee` then truncated. `tee` keeps the echo (so every
+        # gate reading `openroad.log` still sees the child) AND leaves a file
+        # named for the site, which no later invocation rewrites.
         f"    if {{[catch {{exec openroad -no_init -exit {child_tcl_c} "
-        f">&@ stdout}} _sdr_child_e]}} {{\n"
+        f"|& tee {child_log_c} >@ stdout}} _sdr_child_e]}} {{\n"
         "      set _sdr_child_rc 1\n"
         "      puts \"SDR_CHILD_SESSION_NONFATAL: $_sdr_child_e\"\n"
         "    }\n"
-        f"    puts \"SDR_CHILD_SESSION_DONE: rc=$_sdr_child_rc\"\n"
+        f"    puts \"SDR_CHILD_SESSION_DONE: rc=$_sdr_child_rc "
+        f"log={child_log_c}\"\n"
         "    set _sdr_child_ok 0\n"
         "    if {[catch {\n"
         "      set _sdr_fh [open $_sdr_tx_child_receipt r]\n"
@@ -27641,7 +27794,8 @@ def _write_sdr_child_decks(pnr_tcl: Path, out_dir: Path, container: str,
     # The child mutates. Whatever the shipping session protected before the
     # checkpoint has to be protected in the child too, or the candidate it
     # proposes was built without a guard the parent was running under.
-    after_restore = _after_restore_tcl(deck, spare_plan)
+    after_restore = _after_restore_tcl(
+        deck, spare_plan, reroutes_immediately=True)
     for stage in _SDR_CHILD_OMIT:
         txn = out_dir / _SDR_TXN_DIRS[stage]
         ckpt_c = _to_container_path(str(txn / "pre_repair.def"), container)
@@ -27754,7 +27908,9 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
         try:
             tail_text = _build_pnr_resume_tcl_text(
                 deck, checkpoint_def_c=cand_c, omit_stages=list(omitted),
-                after_restore_tcl=_after_restore_tcl(deck, spare_plan))
+                after_restore_tcl=_after_restore_tcl(
+                    deck, spare_plan,
+                    reroutes_immediately=False))
         except (PnrResumeUnavailable, OSError) as exc:
             rec["status"] = "FAILED"
             rec["reason"] = f"adopt tail could not be derived: {exc}"
@@ -27908,7 +28064,8 @@ def _pnr_resume_after_fatal_signal(*, project: Path, top: str, container: str,
             _deck,
             checkpoint_def_c=_to_container_path(str(ckpt), container),
             omit_stages=[stage],
-            after_restore_tcl=_after_restore_tcl(_deck, spare_plan))
+            after_restore_tcl=_after_restore_tcl(
+                _deck, spare_plan, reroutes_immediately=False))
     except (PnrResumeUnavailable, OSError) as e:
         rec["status"] = "NOT_ATTEMPTED"
         rec["reason"] = f"resume Tcl could not be derived: {e}"
