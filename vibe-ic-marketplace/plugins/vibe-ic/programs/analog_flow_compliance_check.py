@@ -459,6 +459,44 @@ def run_audit(project: Path) -> AuditResult:
     blocks = _load_block_list(project)
 
     if not blocks:
+        # R-0915-15 (lane icspm3) — WHICH SILENCE THIS IS, on the path that
+        # could not say. `analog_class_is_na` is
+        # `_ic_class_says_non_analog AND _all_blocks_low_confidence`, and the
+        # second conjunct exists "so the skip is defence-in-depth, never a
+        # blanket bypass: ... a confident analog block fails (2)". With ZERO
+        # blocks declared there is no block for (2) to guard, so asking it
+        # here only ever answers False and a positively NON-analog IC took the
+        # conservative branch below. MEASURED on spm x gf180mcuD (a serial
+        # multiplier): `reports/ic_class.json` records `has_analog: false`,
+        # `_ic_class_says_non_analog` returns True, `_all_blocks_low_confidence`
+        # returns False for want of blocks, and the gate reported a coverage
+        # hole the umbrella booked ZERO_DENOMINATOR -> P0 INCOMPLETE.
+        #
+        # FAIL-CLOSED IS UNCHANGED, and that is the whole care here: a project
+        # with NO class verdict, or one classified analog or mixed-signal,
+        # still gets the conservative sentence below — `_ic_class_says_non_analog`
+        # returns False unless the classifier POSITIVELY says non-analog.
+        try:
+            import _analog_a_check_common as _aac0
+            _declared_digital = _aac0._ic_class_says_non_analog(project)
+        except Exception:  # noqa: BLE001 — an unreadable class verdict is none
+            _declared_digital = False
+        if _declared_digital:
+            res = _vacuous(
+                result, "SKIP_NO_ANALOG_DECLARED_DIGITAL",
+                ("the design's own classification records has_analog=false / "
+                 "analog_applicable=false and it declares NO analog block, so "
+                 "no A1-A9 obligation exists for this IC. NOT a sign-off: no "
+                 "A-step artefact was examined — there is none to examine. "
+                 "A project with no class verdict, or one classified analog "
+                 "or mixed-signal, keeps the unclassified reading below."),
+                "no_analog_blocks_declared_digital")
+            # The class is STATED by the program that knows it, which is what
+            # `_flow_reason_taxonomy` means by branch-owned evidence
+            # outranking prose: `report_reason_class` reads
+            # `summary.reason_class` before any recogniser runs.
+            res.summary["reason_class"] = "DESIGN_DECLARED_NA"
+            return res
         return _vacuous(
             result, "SKIP_NO_ANALOG",
             ("no analog_block_list.json under phase3/analog/ or "

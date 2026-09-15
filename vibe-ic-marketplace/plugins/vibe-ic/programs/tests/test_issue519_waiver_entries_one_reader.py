@@ -348,17 +348,45 @@ def test_present_approved_at_produces_no_warning(tmp_path):
 
 def test_staleness_names_the_population_it_could_not_age(tmp_path):
     """The skip is correct — an autogen waiver legitimately has no human
-    signature — but it must SAY so rather than reporting nothing."""
+    signature — but it must SAY so rather than reporting nothing.
+
+    R-0915-15 (lane icspm3, lander update): a MACHINE attestation is
+    un-ageable BY DESIGN, so it is counted apart from the coverage hole
+    (`entries_machine_attested`, reason class DESIGN_DECLARED_NA) instead of
+    being booked as an entry this gate could not audit — the umbrella read
+    `entries_unageable > 0 and entries_examined == 0` as ZERO_DENOMINATOR and
+    failed P0 for a signature the flow itself refuses to forge. The
+    population is still NAMED, in the count and in the sentence."""
     _write(tmp_path, {"waivers": [
         {**_ATTESTED, "step": "lvs"}, {**_ATTESTED, "step": "drc"},
     ]})
     findings, summary = wsl.inspect(tmp_path)
     assert findings == []
     assert summary["entries_total"] == 2
-    assert summary["entries_unageable"] == 2
+    assert summary["entries_machine_attested"] == 2
+    assert summary["entries_unageable"] == 0
     assert summary["entries_examined"] == 0
+    assert summary["reason_class"] == "DESIGN_DECLARED_NA"
+    assert "machine-generated attestation" in summary["skipped_reason"]
+    assert "all 2 open waiver entries" in summary["skipped_reason"]
+
+
+def test_a_human_entry_without_a_signature_is_still_the_coverage_hole(
+        tmp_path):
+    """Negative control for the above: an entry with NO machine marker is a
+    human's, and its missing `approved_at` is still un-ageable and still the
+    hole this gate reports — the R-0915-15 partition must not absorb it."""
+    human = {k: v for k, v in _ATTESTED.items()
+             if k not in ("auto_synthesized", "_autogen")}
+    _write(tmp_path, {"waivers": [{**human, "step": "lvs"}]})
+    findings, summary = wsl.inspect(tmp_path)
+    assert summary["entries_total"] == 1
+    assert summary["entries_unageable"] == 1
+    assert summary["entries_machine_attested"] == 0
+    assert summary["entries_examined"] == 0
+    assert summary.get("reason_class") != "DESIGN_DECLARED_NA"
     assert "could be aged" in summary["skipped_reason"]
-    assert "2 of 2" in summary["skipped_reason"]
+    assert "1 of 1" in summary["skipped_reason"]
 
 
 def test_staleness_reads_entries_under_both_keys(tmp_path):
