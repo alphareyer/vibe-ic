@@ -107,6 +107,47 @@ def _env_yosys_timeout_default() -> int:
     return 7200
 
 
+#: R-0915-48 — an OPT-IN hard bound on the equiv proof, and it is deliberately
+#: NOT `DEFAULT_YOSYS_TIMEOUT_S`.
+#:
+#: This file has removed a bound on this leg TWICE, each time with a
+#: measurement, and both are recorded above:
+#:   * 2026-09-06 — pinning `wrap_with_container_timeout` to the budget
+#:     SIGKILLed a proof at budget-5s that was emitting output at a full core
+#:     (5360 s of 7195 s, 1374 points proved, 0 failed, still advancing), and
+#:     "a bigger number would be the same defect with a later date";
+#:   * earlier — a host-side SILENCE window "killed two healthy RTLLM LEC jobs
+#:     ... while each Yosys process was still advancing at one full core".
+#: So neither a wall clock nor a quiet-window may become the DEFAULT here.
+#:
+#: What is also true, MEASURED on sha256 run12: a proof stuck on ONE hard point
+#: holds 99.9% CPU for ever, `_watchdog` counts CPU as progress (its signals are
+#: an OR), and the run therefore never ends. Both facts are real, and the only
+#: form that serves both is a bound the operator ASKS FOR.
+#:
+#: Set VIBEIC_LEC_YOSYS_TIMEOUT_S to a positive number of seconds and this leg
+#: carries a container-side backstop at it; leave it unset (or 0) and the leg
+#: behaves exactly as it does today, unbounded, and SAYS so. An expiry lands on
+#: the container-timeout path that already exists: `_TIMEOUT_MARKER`, parsed as
+#: INCONCLUSIVE / SKIPPED-CONDITION with the proof state reached, never a FAIL
+#: and never a PASS.
+def _env_lec_hard_bound_s() -> Optional[int]:
+    """Seconds for the opt-in equiv backstop, or None when not asked for.
+
+    PURE. Only an EXPLICIT positive value arms it: an unset variable is not a
+    request for a bound, and `DEFAULT_YOSYS_TIMEOUT_S`'s 7200 is the attempt-
+    admission budget, which `_docker`'s own docstring says is "not a fresh
+    retry budget" and not a runtime deadline."""
+    raw = os.environ.get("VIBEIC_LEC_YOSYS_TIMEOUT_S", "")
+    if not str(raw).strip():
+        return None
+    try:
+        v = int(raw)
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
 DEFAULT_YOSYS_TIMEOUT_S = _env_yosys_timeout_default()
 DEFAULT_JSON_REL = "reports/lec.json"
 DEFAULT_RPT_REL = "reports/lec.rpt"
@@ -2856,6 +2897,16 @@ def _docker_exec_raw(container: str, cmd: str, timeout: int = 120):
         return 127, "", f"COMMAND_NOT_FOUND: {exc}"
 
 
+def _dw_mod():
+    """The container watchdog module, or None. One import shape for every
+    caller in this file."""
+    try:
+        import _docker_watchdog as _dw
+        return _dw
+    except Exception:  # nosec — never let hardening break the call
+        return None
+
+
 def _docker(container: str, cmd: str, timeout: int = 120,
             marker: Optional[str] = None, *,
             log_path: Optional[Path] = None,
@@ -4109,6 +4160,21 @@ def run_yosys_equiv(container: str, ys_path_in_container: str,
                + shlex.quote(str(Path(live_log_path).resolve())))
     if workdir:
         cmd = f"cd {shlex.quote(workdir)} && " + cmd
+    # R-0915-48 — the opt-in backstop, armed ONLY when asked for. See
+    # `_env_lec_hard_bound_s` for why this is not the default and must not
+    # become one.
+    _hard_bound_s = _env_lec_hard_bound_s()
+    if _hard_bound_s is not None and _dw_mod() is not None:
+        cmd = _dw_mod().wrap_with_container_timeout(cmd, _hard_bound_s)
+        _note_bound = (f"[lec_run] equiv proof carries an OPT-IN container "
+                       f"backstop at {_hard_bound_s}s "
+                       f"(VIBEIC_LEC_YOSYS_TIMEOUT_S)")
+    else:
+        _note_bound = ("[lec_run] equiv proof is UNBOUNDED: "
+                       "VIBEIC_LEC_YOSYS_TIMEOUT_S is unset, so this leg runs "
+                       "to completion however long it takes, which is the "
+                       "2026-09-06 behaviour and not an oversight")
+    print(_note_bound, file=sys.stderr)
     # BEFORE-sample. Taken even when the attempt goes on to succeed: a probe
     # that only runs on failure cannot produce a delta, and a delta is the only
     # form of this counter that says anything about THIS attempt.
