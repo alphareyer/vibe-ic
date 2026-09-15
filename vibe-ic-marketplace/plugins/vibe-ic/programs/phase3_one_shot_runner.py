@@ -46960,6 +46960,7 @@ def _si_mcf_repair_child_tcl(top: str, *, tech_lef_c: str, cell_lef_c: str,
                              sdc_c: str, max_captable_c: str,
                              metal_prefix: str, thread_count: int,
                              repair_body: str,
+                             shield_body: str = "",
                              extra_lefs_c: Optional[Sequence[str]] = None,
                              extra_liberties_c: Optional[Sequence[str]] = None,
                              filler_masters: Optional[List[str]] = None,
@@ -47029,18 +47030,52 @@ def _si_mcf_repair_child_tcl(top: str, *, tech_lef_c: str, cell_lef_c: str,
         + _propagated_clock_tcl(
             reason=("the restored DEF is post-CTS and the MCF-bounded "
                     "parasitics are annotated below"))
+        + _spare_safe_clear_net_proc_tcl()
         + _design_signature_tcl("_si_sig0")
-        # ── the planned pass itself, composed by si_mcf_repair.repair_tcl ──
+        # ── SPACING FIRST (R-0915-56b). The coupling remedy for a victim is to
+        # move the aggressor away from it, and for a CLOCK victim it is the
+        # only remedy that does not change the clock itself. Emitted before any
+        # sizing, and empty when the caller asked for none.
+        + shield_body
+        # ── then the planned sizing pass, if any, composed by repair_tcl ──
         + repair_body
         + "if {[catch {detailed_placement} e]} { "
         "puts \"SI_MCF_DP_NONFATAL: $e\" }\n"
         "if {[catch {check_placement} e]} { puts \"SI_MCF_CP_WARN: $e\" }\n"
         "catch {puts \"SI_MCF_WNS_AFTER_REPAIR: [sta::worst_slack -max]\"}\n"
         + _design_signature_tcl("_si_sig1")
-        + "if {$_si_sig1 eq $_si_sig0} {\n"
-        f"  puts \"{_SI_MCF_CHILD_NOOP}: 1 (the pass changed no instance; the "
-        "base route is kept rather than re-routed for nothing)\"\n"
+        # ── WHICH NETS GET RE-ROUTED, and this is r21's whole lesson ──
+        # A spacing rule changes only the nets it is assigned to, so only
+        # those are cleared and re-routed. MEASURED on r21: the sizing
+        # pass cleared 2323 nets, and the fresh route it produced gave
+        # back six times what the repair had won — in-session
+        # `SI_MCF_WNS_AFTER_REPAIR: 0.00857`, mcf_setup -1.5703 after. A
+        # victim-scoped reroute cannot spend that.
+        + "set _si_reroute {}\n"
+        "if {[info exists ::_si_shielded] && [llength $::_si_shielded] > 0} {\n"
+        "  set _si_blk2 [ord::get_db_block]\n"
+        "  foreach _si_rn $::_si_shielded {\n"
+        "    set _si_rnet [$_si_blk2 findNet $_si_rn]\n"
+        "    if {$_si_rnet eq \"NULL\" || $_si_rnet eq \"\"} { continue }\n"
+        "    lappend _si_reroute \"$_si_rn=[_vibeic_spare_safe_clear_net $_si_rnet]\"\n"
+        "  }\n"
+        "  puts \"SI_MCF_SHIELD_RECLEARED: [llength $_si_reroute] victim "
+        "net(s) -- $_si_reroute\"\n"
+        "}\n"
+        + "if {$_si_sig1 eq $_si_sig0 && [llength $_si_reroute] == 0} {\n"
+
+        f"  puts \"{_SI_MCF_CHILD_NOOP}: 1 (the pass changed no instance and "
+        "assigned no spacing rule; the base route is kept rather than "
+        "re-routed for nothing)\"\n"
+        "} elseif {[llength $_si_reroute] > 0 && $_si_sig1 eq $_si_sig0} {\n"
+        "  puts \"SI_MCF_SHIELD_SCOPED_REROUTE: only the victim net(s) are "
+        "re-routed; the rest of the shipped route is untouched\"\n"
+        "  if {[catch {global_route} e]} { puts \"SI_MCF_GR_NONFATAL: $e\" }\n"
+        "  if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
+        f"  if {{[catch {{detailed_route -droute_end_iter {reroute_iters} "
+        "{*}$_vic_drc_opt} e]} { puts \"SI_MCF_DR_NONFATAL: $e\" }\n"
         "} else {\n"
+
         # global_route NO-OPS on already-routed nets, so the committed signal
         # routing has to go before the guides can be regenerated (R-0915-16).
         # Power/ground, special nets and the spare pool are left intact.
@@ -47135,10 +47170,16 @@ def _si_mcf_repair_seam(project: Path, top: str, pdk: "PdkConfig",
         txn_c = _to_container_path(str(txn), container)
         drc_before = _router_drc_count_from_report(
             pnr_out / ROUTER_DRC_REPORT_NAME)
-        repair_body = _si_rep.repair_tcl(
-            folded_spef_c=_to_container_path(str(folded[0]), container),
-            victims=list(victims or []),
-            sdc_c=_to_container_path(str(sdc), container))
+        # SPACING FIRST, SIZING SECOND — R-0915-56(b), and on this design
+        # sizing is not attempted at all. r21 ran the sizing pass to a verdict
+        # and it moved mcf_setup from -0.2660 to -1.5703 ns while spending
+        # 0.834 ns of real nominal margin; the loss was not the repair but the
+        # 2323-net reroute the repair forced. The spacing remedy changes only
+        # the victims, re-routes only the victims, and leaves every instance
+        # alone — which is also the only remedy available for the CLOCK victim
+        # among them, since resizing a clock leaf's driver changes the clock.
+        shield_body = _si_rep.shield_tcl(victims=list(victims or []))
+        repair_body = ""
         extra_liberties_c: List[str] = []
         for liberty in _sta_extra_liberties(project_, pdk, ss_lib):
             liberty_c = _to_container_path(str(liberty), container)
@@ -47158,7 +47199,7 @@ def _si_mcf_repair_seam(project: Path, top: str, pdk: "PdkConfig",
             sdc_c=_to_container_path(str(sdc), container),
             max_captable_c=cap, metal_prefix=pdk.metal_prefix,
             thread_count=_openroad_thread_count(),
-            repair_body=repair_body,
+            repair_body=repair_body, shield_body=shield_body,
             extra_lefs_c=_def_reopen_extra_lefs_c(routed, pdk, container),
             extra_liberties_c=extra_liberties_c,
             filler_masters=_filler_masters_for_pdk(pdk),

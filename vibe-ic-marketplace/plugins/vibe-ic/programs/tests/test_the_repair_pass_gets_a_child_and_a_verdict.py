@@ -253,12 +253,24 @@ def test_the_pass_may_not_remove_a_buffer():
 
 def test_a_repair_that_changed_nothing_does_not_spend_a_reroute():
     """v1.8.43's rule, kept: a second route of the SAME netlist is a different
-    route with its own quality lottery, and this pass may not spend one."""
+    route with its own quality lottery, and this pass may not spend one.
+
+    Asserted on the ARM rather than on the text between two markers: the no-op
+    arm must contain no routing verb at all. That survives a deck growing a
+    third branch, which the text-distance form did not — and it is the stronger
+    statement, because it forbids the thing rather than an arrangement of it."""
     deck = _deck()
     noop = deck.index(R._SI_MCF_CHILD_NOOP)
-    clear = deck.index("global_route")
-    assert noop < clear, "the no-op guard must precede the reroute branch"
-    assert "} else {" in deck[noop:clear]
+    # the no-op arm runs from its own `puts` to the next branch keyword
+    rest = deck[noop:]
+    end = min((rest.index(k) for k in ("} elseif {", "} else {") if k in rest),
+              default=len(rest))
+    arm = rest[:end]
+    for verb in ("global_route", "detailed_route",
+                 "_vibeic_spare_safe_clear_net"):
+        assert verb not in arm, f"the no-op arm spends a {verb}"
+    assert deck.index("global_route") > noop, (
+        "the no-op guard must precede every reroute branch")
 
 
 def test_the_child_names_its_own_completion():
@@ -702,3 +714,102 @@ def test_a_closed_envelope_on_the_same_shape_plans_nothing(tmp_path):
     plan = S.plan(proj)
     assert plan["run"] is False
     assert plan["victims"] == []
+
+
+# ── R-0915-56(b): spacing for coupling victims, and only the victims ──────
+
+def _shield_deck(**kw):
+    """The deck the seam now emits: a spacing rule and NO sizing."""
+    args = dict(tech_lef_c="/pdk/tech.lef", cell_lef_c="/pdk/cells.lef",
+                liberty_c="/pdk/ss.lib", pnr_dir_c="/w/pnr",
+                txn_dir_c="/w/pnr/txn", sdc_c="/w/constraint.sdc",
+                max_captable_c="/pdk/cap.captable", metal_prefix="Metal",
+                thread_count=8, repair_body="",
+                shield_body=S.shield_tcl(
+                    victims=["net690", "clknet_leaf_21_i_clk"]),
+                filler_masters=["FILL1"])
+    args.update(kw)
+    return R._si_mcf_repair_child_tcl("subservient", **args)
+
+
+def test_the_spacing_rule_comes_from_the_techs_own_minimum():
+    """No PDK dimension is written here: the rule is a MULTIPLE of whatever
+    each routing layer says its own minimum spacing is."""
+    body = S.shield_tcl(victims=["a"])
+    assert "getSpacing" in body and "getDbUnitsPerMicron" in body
+    assert f"-name {S.SHIELD_NDR_NAME}" in body
+    # and it is applied to ROUTING layers only — a cut layer has no track pitch
+    assert '[$_si_lyr getType] ne "ROUTING"' in body
+
+
+def test_a_clock_victim_is_classified_by_the_tool_not_by_its_name():
+    """`clknet_leaf_21_i_clk` must be recognised as a clock because the DESIGN
+    says `getSigType` is CLOCK — a name-matched rule is a chip-specific rule
+    wearing a general coat."""
+    body = S.shield_tcl(victims=["clknet_leaf_21_i_clk"])
+    assert "getSigType" in body
+    # THE REAL INVARIANT: nothing here INSPECTS THE NAME. A substring hunt for
+    # "clk" would also catch this deck's own counter variable, which proves
+    # nothing; what must be absent is any string-matching verb applied to the
+    # victim, because that is how a chip-specific rule gets in.
+    for verb in ("string match", "string first", "string tolower",
+                 "string range", "regexp", "regsub"):
+        assert verb not in body, verb
+
+
+def test_no_victim_means_no_spacing_rule_at_all():
+    assert S.shield_tcl(victims=[]) == ""
+
+
+def test_the_spacing_pass_touches_no_instance():
+    """The whole point of spacing-first: r21's sizing pass spent 0.834 ns of
+    nominal margin, and this one may not size anything."""
+    deck = _shield_deck()
+    assert "repair_timing" not in deck
+    assert "create_ndr" in deck and "assign_ndr" in deck
+
+
+def test_only_the_victims_are_re_routed():
+    """r21 cleared 2323 nets and the fresh route gave back six times what the
+    repair won. A spacing rule changes only the nets it is assigned to."""
+    deck = _shield_deck()
+    assert "SI_MCF_SHIELD_RECLEARED" in deck
+    assert "SI_MCF_SHIELD_SCOPED_REROUTE" in deck
+    assert "$::_si_shielded" in deck
+    # the whole-design clear is reachable only on the arm where an INSTANCE
+    # changed; a shield-only pass never gets there
+    scoped = deck.index("SI_MCF_SHIELD_SCOPED_REROUTE")
+    full = deck.index("SI_MCF_ROUTING_CLEARED") if "SI_MCF_ROUTING_CLEARED" \
+        in deck else len(deck)
+    assert scoped < full
+
+
+@needs_tclsh
+def test_the_shield_deck_parses_on_both_branches(tmp_path):
+    r = _walk(tmp_path, _shield_deck())
+    assert "TCL_OK" in r.stdout, r.stdout[-600:]
+
+
+def test_a_declared_floor_is_the_only_thing_that_buys_a_regression():
+    before = {"router_drc": 0, "nominal_setup_ns": 2.4975,
+              "mcf_setup_ns": -0.266}
+    cand = {"router_drc": 0, "nominal_setup_ns": 1.6632,
+            "mcf_setup_ns": -0.1}
+    ok, why = S.accepts(before, cand)
+    assert not ok and "may not trade on its own" in why
+    ok, why = S.accepts(before, cand, nominal_floor_ns=2.0)
+    assert not ok and "BELOW the declared floor" in why
+    ok, why = S.accepts(before, cand, nominal_floor_ns=1.0)
+    assert ok, why
+
+
+def test_the_floor_never_excuses_a_worse_envelope():
+    """THE NEGATIVE CONTROL: a floor buys nominal margin, not the envelope the
+    pass exists to close."""
+    before = {"router_drc": 0, "nominal_setup_ns": 2.4975,
+              "mcf_setup_ns": -0.266}
+    worse = {"router_drc": 0, "nominal_setup_ns": 1.6632,
+             "mcf_setup_ns": -1.5703}
+    ok, why = S.accepts(before, worse, nominal_floor_ns=0.0)
+    assert not ok
+    assert "did not improve the envelope" in why
