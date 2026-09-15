@@ -103,6 +103,13 @@ def _run(tmp_path: Path, *, before: int, after: int,
         "proc read_def {path} {\n"
         "  set f [open $path r]; set ::db [read $f]; close $f\n"
         "}\n"
+        # The shipping session's `begin` checkpoints an ODB beside the DEF --
+        # that ODB is the RESTORE POINT (R-0915-16), and the child refuses by
+        # name when it is missing. The harness models the shipping session, so
+        # it models that write too.
+        "proc write_db {path} {\n"
+        "  set f [open $path w]; puts -nonewline $f $::db; close $f\n"
+        "}\n"
         f"proc check_connectivity {{}} {{ {connectivity} }}\n"
         # THE CHILD, simulated.  The parent runs it with `exec`; nothing it
         # does touches `::db`, which is the whole point of the re-plumb.

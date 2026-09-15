@@ -189,6 +189,12 @@ proc _log {c} { global CALLS; lappend CALLS $c }
 proc write_def {path} {
   set fh [open $path w]; puts -nonewline $fh $::DB; close $fh
 }
+# The shipping session checkpoints an ODB beside the DEF -- that ODB is the
+# RESTORE POINT (R-0915-16) and the parent refuses by name without it, so the
+# harness models the write the shipping session actually performs.
+proc write_db {path} {
+  set fh [open $path w]; puts -nonewline $fh $::DB; close $fh
+}
 proc read_def {path} {
   set fh [open $path r]; set ::DB [read $fh]; close $fh
 }
