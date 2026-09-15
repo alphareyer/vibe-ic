@@ -669,3 +669,89 @@ def test_the_relay_executes_and_reports_what_it_dropped(tmp_path):
     # one has no PDK cell and was never in the plan's emitted list
     assert "SPARE_WIRING_RELAID: 1 net(s)" in r.stdout, r.stdout
     assert "DESTROYED=1" in r.stdout
+
+
+# ------- the child clears its own residual before the transaction judges it
+
+
+def _child_half(stage=SITE1, reserved=None):
+    t = R._v1_8_100_signoff_drv_repair_tcl(
+        "/o", "BUF", stage=stage, reserved_instance_names=reserved)
+    return t.partition("# ===== PARENT ROLE")[0]
+
+
+def test_the_child_runs_the_flows_own_reroute_on_its_own_residual():
+    """MEASURED (sha256 run5): the child's repair took DRV 14,489 -> 250, its
+    route closed (`route_ok=1`), and the transaction refused the candidate at
+    router DRC 0 -> 2 -- correctly, as measured.  But the flow's OWN post-route
+    remedy had never been aimed at that candidate: the parent runs the
+    named-violation reroute after ITS route, and the child never did.
+
+    So the child runs THE SAME loop, on ITS OWN report.  Not a second loop --
+    the same emitter, so its bound, its re-measurement and its
+    no-improvement stop cannot drift from the parent's.
+    """
+    child = _child_half()
+    assert "SDR_CHILD_RESIDUAL_BEFORE_REROUTE" in child
+    assert "SDR_CHILD_RESIDUAL_AFTER_REROUTE" in child
+    # it is the FLOW'S loop, identified by that loop's own markers
+    assert "NAMED_VIOL_REROUTE_PASS" in child
+    assert "NAMED_VIOL_REROUTE_CLEAN" in child
+    assert "NAMED_VIOL_REROUTE_NO_IMPROVEMENT" in child
+    # aimed at the CHILD's report, never the shipped route's
+    assert R._SDR_CANDIDATE_DRC_NAME in child
+    assert f"/o/{R.ROUTER_DRC_REPORT_NAME}" not in child
+
+
+def test_the_residual_reroute_is_gated_on_having_routed_at_all():
+    """A child that never routed has no residual to clear and nothing to
+    re-measure -- it must stay UNMEASURABLE, not be handed a reroute that
+    would invent a report."""
+    child = _child_half()
+    i_gate = child.index("if {$_sdr_tx_mutated && $_sdr_tx_route_ok} {")
+    i_loop = child.index("SDR_CHILD_RESIDUAL_BEFORE_REROUTE")
+    assert i_gate < i_loop
+    # and the reroute itself only runs when the residual is actually non-zero
+    assert "if {$_sdr_cand_before > 0} {" in child
+
+
+def test_the_decision_rule_is_untouched_by_the_residual_work():
+    """#2240/#2247 stay exactly as they were: the PARENT still counts the
+    candidate's report itself and still applies the same four outcomes. The
+    child improving its candidate changes how GOOD the candidate is, never
+    what the rule accepts."""
+    parent = R._v1_8_100_signoff_drv_repair_tcl(
+        "/o", "BUF", stage=SITE1).partition("# ===== PARENT ROLE")[2]
+    for unchanged in ("router_drc_not_strictly_improved",
+                      "unreadable_candidate_router_drc",
+                      "nonfatal_or_route_error",
+                      "router_drc_preserved_clean"):
+        assert unchanged in parent
+    # the parent does not reroute; improving the candidate is the child's job
+    assert "NAMED_VIOL_REROUTE" not in parent
+
+
+def test_the_counting_rule_has_one_definition_for_both_roles():
+    """Parent and child both turn the router's report into a number. Two copies
+    of "what counts as a violation, and what counts as unreadable" is the drift
+    this file keeps paying for."""
+    t = R._v1_8_100_signoff_drv_repair_tcl("/o", "BUF", stage=SITE1)
+    # emitted in both halves (Tcl proc redefinition is idempotent) ...
+    child, _, parent = t.partition("# ===== PARENT ROLE")
+    assert "proc _sdr_tx_count_router_drc" in child
+    assert "proc _sdr_tx_count_router_drc" in parent
+    # ... from ONE emitter, so the bodies cannot differ
+    proc = R._sdr_router_drc_count_proc_tcl()
+    assert proc in R._postroute_sdr_transaction_begin_tcl("/o", SITE1)
+    assert t.count("UNREADABLE_ROUTER_DRC_REPORT") == t.count(
+        "proc _sdr_tx_count_router_drc")
+
+
+def test_the_childs_reroute_protects_the_same_reserved_bindings(tmp_path):
+    """The parent's post-route reroute is given the spares and spare pads as
+    reserved; the child's must be given the same, or it can rip up a binding
+    the parent holds immutable."""
+    named = _child_half(reserved=["spare_inv_0", "spare_pad_3"])
+    plain = _child_half(reserved=None)
+    assert "spare_inv_0" in named and "spare_pad_3" in named
+    assert "spare_inv_0" not in plain
