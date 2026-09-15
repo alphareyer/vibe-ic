@@ -210,18 +210,27 @@ def test_a_real_known_good_artefact_is_accepted_by_r2(tmp_path):
     `L1.ic_name` its own strategy names.
 
     The assertion is on R2's OWN verdict rather than on the run's exit code,
-    and that distinction is the point of a stage carrying two rules: this cell
-    cites no hexadecimal constant, so R1 cannot be answered on it and the RUN
-    is honestly NOT CHECKED. `test_a_tree_both_rules_can_answer_exits_zero`
-    below is where rc 0 is pinned."""
+    and that distinction is the point of a stage carrying two rules.
+
+    R-0915-34(b) (lane icspm3, 2026-09-15): this cell cites no hexadecimal
+    constant, and that is a fact about the DESIGN — its documents exist, parse,
+    and quote none — not a blindness of the reviewer. R1 is therefore
+    NOT_APPLICABLE and no longer silences R2, so the run reaches rc 0. It is
+    still NOT an ACCEPT for R1: asserted below on R1's own verdict, and
+    disclosed on the output with its documents and count."""
     r = run(tree(tmp_path, ACCEPT), "--stage-verdict", "PASS",
             "--json", str(tmp_path / "r.json"))
     rec = json.loads((tmp_path / "r.json").read_text())
     assert rec["rejections"] == []
     r2 = [o for o in rec["observations"] if o["rule"].startswith("R2_")]
     assert [o["grounded_in"] for o in r2] == ["l1_ic_name"]
-    assert r.returncode == 2, r.stdout + r.stderr
+    assert r.returncode == 0, r.stdout + r.stderr
     assert "R1_CITED_CONSTANT_NOT_IN_ITS_SOURCE" in r.stdout
+    na = [f for f in rec["not_applicable"]
+          if f["rule"] == "R1_CITED_CONSTANT_NOT_IN_ITS_SOURCE"]
+    assert na and na[0]["verdict"] == "NOT_APPLICABLE", rec
+    assert na[0]["verdict"] != "ACCEPT"
+    assert rec["not_checked"] == [], rec["not_checked"]
 
 
 def test_a_tree_every_rule_can_answer_exits_zero(tmp_path):

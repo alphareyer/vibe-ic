@@ -286,13 +286,21 @@ def test_a_real_known_good_artefact_is_accepted(tmp_path):
     assert record_of(rec)["artefact"]["grounded"], (
         "the accept case makes no grounded citation; it would pass against a "
         "rule that checks nothing")
-    # The RUN exits 2, and that is a fact about a SIBLING and not a softening
-    # of the line above: `protocol_parity/a2b` cites no hexadecimal constant,
-    # so R1_CITED_CONSTANT_NOT_IN_ITS_SOURCE cannot be answered on it and says
-    # so by name. Named here so the number is read rather than assumed.
-    assert r.returncode == 2, r.stdout
-    assert [f["rule"] for f in rec["not_checked"]] == [
+    # R-0915-34(b) — THE RUN NOW EXITS 0, AND THIS CASE'S NAME BECOMES TRUE.
+    # `protocol_parity/a2b` cites no hexadecimal constant, so
+    # R1_CITED_CONSTANT_NOT_IN_ITS_SOURCE has no subject on it. That is a fact
+    # about the DESIGN — its documents exist, parse, and quote none — not a
+    # blindness of the reviewer, so it is NOT_APPLICABLE and no longer
+    # silences the sibling rules that read this cell and accepted it. It is
+    # still NOT an ACCEPT: asserted on R1's own verdict, and disclosed on the
+    # output with its documents and count.
+    assert r.returncode == 0, r.stdout
+    assert rec["not_checked"] == [], rec["not_checked"]
+    assert [f["rule"] for f in rec["not_applicable"]] == [
         "R1_CITED_CONSTANT_NOT_IN_ITS_SOURCE"]
+    assert rec["not_applicable"][0]["verdict"] == "NOT_APPLICABLE"
+    assert rec["not_applicable"][0]["applicability_evidence"]["count"] == 0
+    assert "not applicable to this design" in r.stdout, r.stdout
 
 
 def test_a_real_cell_every_rule_of_the_stage_accepts_exits_zero(tmp_path):
