@@ -200,8 +200,27 @@ def test_a_name_in_a_gate_must_be_a_program_the_gate_runs():
         blob = json.dumps(gate)
         dispatched = _gate_dispatched_programs(gate)
         for name in declared:
+            # A DOTTED REFERENCE NAMES A SYMBOL INSIDE THE MODULE, NOT A
+            # PROGRAM THE GATE SHOULD RUN. The trailing `(?![A-Za-z0-9_])`
+            # already lets `foo.bar` match `foo`, and a `.` is exactly the
+            # character that turns a citation of the PROGRAM into a citation
+            # of something in its SOURCE.
+            #
+            # MEASURED 2026-09-15 (lane icspm3): step D1's `advisory_reason`
+            # explains its own tier by naming the reader's internals --
+            # "`flow_compliance_check._advisory_execution_record` maps a
+            # refusal verdict to enforcement=BLOCKING" -- and D1's gate
+            # neither runs nor should run that program. The sentence became an
+            # offender the moment #2278 put `flow_compliance_check` into some
+            # step's `programs:` and therefore into `declared`; nothing about
+            # D1 changed. Its two mentions are BOTH dotted; steps 2 and 14
+            # carry bare ones and DO dispatch it.
+            #
+            # THE GUARD IS NOT WEAKENED, and that is what the two cases below
+            # assert: a BARE name dropped into a gate dict without wiring —
+            # the abuse this exists to catch — still offends.
             if re.search(r"(?<![A-Za-z0-9_])" + re.escape(name)
-                         + r"(?![A-Za-z0-9_])", blob) and name not in dispatched:
+                         + r"(?![A-Za-z0-9_.])", blob) and name not in dispatched:
                 offenders.append(f"step {sid}: {name}")
     assert offenders == [], (
         "these gates NAME a program they do not dispatch — a gate that cites "
@@ -343,3 +362,45 @@ def test_htol_missing_fields_fail(tmp_path):
 
 def test_htol_absent_is_vacuous(tmp_path):
     assert HTOL.audit(tmp_path)["rc"] == 2
+
+def test_a_BARE_undispatched_name_in_a_gate_is_still_an_offender():
+    """THE GUARD, kept. The 2026-09-15 narrowing excludes a DOTTED reference
+    to a symbol inside a module; a bare program name dropped into a gate dict
+    without wiring — the abuse this dimension exists to catch — must still be
+    reported.
+    """
+    import re
+    name = "rtl_hygiene_lint"
+    for blob, offends in (
+            ('{"all_of": [{"files_exist": ["x"]}], '
+             '"note": "checked by rtl_hygiene_lint"}', True),
+            ('{"note": "see rtl_hygiene_lint.main for the rule"}', False),
+            ('{"note": "see rtl_hygiene_lint._RULES for the list"}', False),
+            ('{"note": "rtl_hygiene_lint, and nothing else"}', True),
+    ):
+        hit = bool(re.search(r"(?<![A-Za-z0-9_])" + re.escape(name)
+                             + r"(?![A-Za-z0-9_.])", blob))
+        assert hit is offends, (blob, hit, offends)
+
+
+def test_the_narrowing_is_needed_by_a_real_sentence_in_the_shipped_flow():
+    """DERIVED, not asserted: the case above is abstract, so this one shows
+    the shipped flow really does carry a dotted reference in a gate whose step
+    does not dispatch that program."""
+    import re
+    dotted = []
+    for sid, st in _STEPS.items():
+        gate = st.get("gate")
+        if not gate:
+            continue
+        blob = json.dumps(gate)
+        dispatched = _gate_dispatched_programs(gate)
+        for m in re.finditer(r"(?<![A-Za-z0-9_])([a-z0-9_]+)\.[a-z_]", blob):
+            nm = m.group(1)
+            if nm in dispatched:
+                continue
+            if (PLUGIN / "programs" / f"{nm}.py").is_file():
+                dotted.append((sid, nm))
+    assert dotted, ("no gate in the shipped flow carries a dotted reference to "
+                    "a program it does not dispatch; the narrowing above would "
+                    "then be guarding nothing")
