@@ -33,7 +33,6 @@ phase-3 project dir); it is skipped BY NAME when unset, never silently.
 """
 import hashlib
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -633,29 +632,73 @@ def test_only_the_si_child_carries_the_exclusion():
     assert "-skip_buffer_removal" in _deck()
 
 
-# ── the real-container control ─────────────────────────────────────────────
+# ── the whole-project control, on the run's own MEASURED numbers ──────────
+# The reports below are a real run's, transcribed: subservient x gf180mcuD in
+# lane icsub2 reported these same three numbers and these same two victims in
+# r13, r14, r15, r16, r17, r18, r19 and r20 — eight trees. They are BUILT here
+# rather than read from a project directory so this control runs on every host
+# that measures this repo, which is the only place a control is worth anything.
 
-_REAL = os.environ.get("VIBEIC_SI_MCF_PROJECT", "").strip()
+_MEASURED_SI_MCF = {
+    "verdict": "FAIL",
+    "nominal": {"worst_setup_slack_ns": 2.4975},
+    "corners": {
+        "setup": {"worst_slack_after_ns": -0.266,
+                  "worst_victim": {"net": "net690"}},
+        "hold": {"worst_slack_after_ns": 1.6242,
+                 "worst_victim": {"net": "clknet_leaf_21_i_clk"}}},
+}
+#: MEASURED: this design's si_crosstalk names NO coupling-dominated net at all,
+#: so both victims reach the plan through the MCF corners' own worst_victim
+#: fields. A control that handed the planner a populated crosstalk list would be
+#: testing a path this design never takes.
+_MEASURED_SI_CROSSTALK = {"coupling_dominated_nets": []}
 
 
-@pytest.mark.skipif(
-    not _REAL,
-    reason="VIBEIC_SI_MCF_PROJECT is unset: the real-report control needs a "
-           "finished phase-3 project dir whose si_mcf_sta reported FAIL")
-def test_the_plan_and_the_deck_come_from_a_real_runs_own_reports():
-    """The control on r16's REAL reports: the victims, the folded SPEF and the
-    restored route are the ones that run produced — none is invented here."""
-    proj = Path(_REAL)
-    rep = json.loads((proj / "reports/phase3/si_mcf_sta.json").read_text())
-    assert rep.get("verdict") == "FAIL", "this control needs an OPEN envelope"
+def test_the_plan_and_the_deck_come_from_the_runs_own_reports(tmp_path):
+    """The victims and the folded SPEF are the ones the reports name — none is
+    invented by the planner, and the deck carries exactly them."""
+    proj = tmp_path / "proj"
+    (proj / "reports" / "phase3").mkdir(parents=True)
+    (proj / "reports/phase3/si_mcf_sta.json").write_text(
+        json.dumps(_MEASURED_SI_MCF))
+    (proj / "reports/phase3/si_crosstalk.json").write_text(
+        json.dumps(_MEASURED_SI_CROSSTALK))
+    folded = proj / "phase3/stage3/extracted/si_mcf/subservient.mcf_setup.spef"
+    folded.parent.mkdir(parents=True)
+    folded.write_text("*SPEF \"IEEE 1481-1998\"\n")
+    sdc = proj / "phase3/stage3/pnr/constraint.sdc"
+    sdc.parent.mkdir(parents=True)
+    sdc.write_text("create_clock -period 10 [get_ports clk]\n")
+
     plan = S.plan(proj)
-    assert plan["run"] is True and plan["victims"], plan
-    folded = sorted((proj / "phase3/stage3/extracted").glob(
-        "si_mcf/*.mcf_setup.spef"))
-    assert folded, "the run wrote no MCF-bounded setup SPEF"
-    body = S.repair_tcl(folded_spef_c=str(folded[0]), victims=plan["victims"],
-                        sdc_c=str(proj / "phase3/stage3/pnr/constraint.sdc"))
+    assert plan["run"] is True, plan
+    assert plan["victims"] == ["net690", "clknet_leaf_21_i_clk"], plan["victims"]
+    body = S.repair_tcl(folded_spef_c=str(folded), victims=plan["victims"],
+                        sdc_c=str(sdc))
     for net in plan["victims"]:
         assert net in body
-    assert str(folded[0]) in body
+    assert str(folded) in body
     assert body.count("repair_timing") == 1
+    assert "-skip_buffer_removal" in body
+    # and the BEFORE trajectory a run records is these three numbers, not two
+    # of them and a default
+    rec = S.run_once(proj)
+    assert rec["before"] == {"nominal_setup_ns": 2.4975,
+                             "mcf_setup_ns": -0.266,
+                             "mcf_hold_ns": 1.6242}
+    assert rec["decision"] == "NOT_EXECUTED"
+
+
+def test_a_closed_envelope_on_the_same_shape_plans_nothing(tmp_path):
+    """THE NEGATIVE CONTROL on the identical project shape: only the FAIL
+    verdict opens this door, not the presence of the reports."""
+    proj = tmp_path / "proj"
+    (proj / "reports" / "phase3").mkdir(parents=True)
+    closed = dict(_MEASURED_SI_MCF, verdict="PASS")
+    (proj / "reports/phase3/si_mcf_sta.json").write_text(json.dumps(closed))
+    (proj / "reports/phase3/si_crosstalk.json").write_text(
+        json.dumps(_MEASURED_SI_CROSSTALK))
+    plan = S.plan(proj)
+    assert plan["run"] is False
+    assert plan["victims"] == []

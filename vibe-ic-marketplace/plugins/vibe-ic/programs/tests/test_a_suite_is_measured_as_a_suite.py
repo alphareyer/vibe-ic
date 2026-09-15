@@ -157,9 +157,24 @@ def _project(tmp_path, *, unit_tb=True, cases=("blinky", "rv32i"),
     return p
 
 
+def _suite(project):
+    """The suite the measurer will use, asked in a way BASE SOURCES can answer.
+
+    On sources that have no suite selector at all, the suite IS the single
+    testbench the one-TB rule picks — which is precisely the defect — so every
+    assertion below fails on a NUMBER rather than on an AttributeError. A
+    control that dies on a missing attribute proves the attribute is missing
+    and nothing about the behaviour."""
+    fn = getattr(V, "discover_measure_testbenches", None)
+    if fn is not None:
+        return fn(project)
+    rtl, tb = V.discover_measure_inputs(project)
+    return rtl, ([tb] if tb else [])
+
+
 def test_discovery_returns_every_driving_testbench(tmp_path):
     p = _project(tmp_path)
-    _rtl, tbs = V.discover_measure_testbenches(p)
+    _rtl, tbs = _suite(p)
     names = [Path(t).name for t in tbs]
     assert "blinky.v" in names and "rv32i.v" in names
     assert "tb_dut.v" in names, "the unit testbench is part of the suite too"
@@ -177,7 +192,7 @@ def test_the_one_testbench_selector_is_unchanged(tmp_path):
 
 def test_an_inert_first_member_does_not_shrink_the_suite(tmp_path):
     p = _project(tmp_path, cases=("aaa_inert", "zzz_real"), inert=("aaa_inert",))
-    _rtl, tbs = V.discover_measure_testbenches(p)
+    _rtl, tbs = _suite(p)
     names = [Path(t).name for t in tbs]
     assert "aaa_inert.v" not in names
     assert "zzz_real.v" in names
@@ -185,7 +200,7 @@ def test_an_inert_first_member_does_not_shrink_the_suite(tmp_path):
 
 def test_a_project_with_no_driving_stimulus_still_yields_a_candidate(tmp_path):
     p = _project(tmp_path, unit_tb=False, cases=("only",), inert=("only",))
-    _rtl, tbs = V.discover_measure_testbenches(p)
+    _rtl, tbs = _suite(p)
     assert [Path(t).name for t in tbs] == ["only.v"]
 
 
@@ -352,22 +367,47 @@ def test_a_suite_is_driven_when_any_member_drives(tmp_path, capsys):
     assert "not instrumented" not in (text.out + text.err)
 
 
-# ── the real-report control ───────────────────────────────────────────────
+# ── the whole-project control ─────────────────────────────────────────────
+# A REAL project's shape, BUILT HERE. The measured case that produced this fix
+# had testbenches in TWO discovery roots at once — nine authored L10 oracles in
+# `phase2/stage1/sim/tb` and the unit testbench in `sim_unit` — and the defect
+# was precisely that the first root won outright. A control that only ever sees
+# one root cannot fail that way, so this one spans the roots.
 
-import os  # noqa: E402
+def test_a_whole_project_suite_is_discovered_across_every_root(tmp_path):
+    """The suite is the union of the discovery ROOTS, de-duplicated, and the
+    one-testbench selector's pick is a MEMBER of it — never a set the suite
+    does not contain."""
+    p = _project(tmp_path, unit_tb=True,
+                 cases=("blinky_hex", "hello_hex", "rv32i_40", "zifencei"))
+    # a third root, the connectivity harness the discovery order puts FIRST
+    (p / "phase2/stage1/sim_full_stack").mkdir(parents=True)
+    (p / "phase2/stage1/sim_full_stack/tb_dut_full.v").write_text(
+        "module tb_dut_full;\n  reg i_clk; reg i_rst; reg [7:0] i_data;\n"
+        "  dut u_dut(.i_clk(i_clk), .i_rst(i_rst), .i_data(i_data));\n"
+        "  initial begin\n    i_clk = 0; i_rst = 1;\n  end\nendmodule\n")
 
-_REAL = os.environ.get("VIBEIC_COVERAGE_SUITE_PROJECT", "").strip()
-
-
-@pytest.mark.skipif(
-    not _REAL,
-    reason="VIBEIC_COVERAGE_SUITE_PROJECT is unset: the real-report control "
-           "needs a finished project whose phase2/stage1/sim/tb carries an "
-           "authored testbench suite")
-def test_a_real_suite_is_discovered_whole():
-    proj = Path(_REAL)
-    _rtl, tbs = V.discover_measure_testbenches(proj)
-    one = V.discover_measure_inputs(proj)[1]
+    _rtl, tbs = _suite(p)
+    names = sorted(Path(t).name for t in tbs)
+    assert names == ["blinky_hex.v", "hello_hex.v", "rv32i_40.v",
+                     "tb_dut.v", "zifencei.v"], names
     assert len(tbs) > 1, "this control needs a SUITE, not one testbench"
+    assert len(tbs) == len(set(tbs)), "a testbench was counted twice"
+    # the inert connectivity harness is in the tree and is NOT in the suite
+    assert "tb_dut_full.v" not in names
+    # and the one-testbench selector's pick is one of these, not a sixth thing
+    one = V.discover_measure_inputs(p)[1]
     assert one in tbs
-    assert len(tbs) == len(set(tbs))
+    assert Path(one).name == "blinky_hex.v"
+
+
+def test_the_suite_spans_roots_that_the_first_match_rule_would_have_cut(tmp_path):
+    """THE DEFECT, in project shape: `phase2/stage1/sim/tb` comes before
+    `sim_unit` in the discovery order, so the one-testbench rule stops at the
+    first root that has a driving member and never reaches the second. The
+    suite must contain BOTH."""
+    p = _project(tmp_path, unit_tb=True, cases=("aaa_case",))
+    _rtl, tbs = _suite(p)
+    roots = {Path(t).parent.name for t in tbs}
+    assert roots == {"tb", "sim_unit"}, roots
+    assert V.discover_measure_inputs(p)[1].endswith("aaa_case.v")
