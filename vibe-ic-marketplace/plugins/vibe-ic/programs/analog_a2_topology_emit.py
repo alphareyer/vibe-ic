@@ -355,11 +355,104 @@ def _incremental_cifb_coefficients(order, spec_values, consts):
             f"cannot derive is ABSENT, never defaulted -- defaulting is how "
             f"one design's coefficients end up under another design's name.")
     swing = vdd * float(consts["integrator_swing_fraction_of_vdd"])
-    a = (swing * math.factorial(order) / (vref * n ** order)) ** (1.0 / order)
+    # THE OPEN-LOOP RAMP BOUND, KEPT AND REPORTED, NO LONGER THE ANSWER.
+    # `a_openloop` is what this function used to return. It bounds the ramp an
+    # integrator would make with NO FEEDBACK — `a**L * N**L * vref / L!` after
+    # N clocks at full scale — and in a closed single-bit loop the DAC removes
+    # charge every cycle, so that ramp never happens. MEASURED against the
+    # ideal-element harness of the very topology this entry emits (lane icadc,
+    # 2026-09-16; same nets, phases, DAC, reset and clock, ideal switches and
+    # amplifiers), the open-loop expression overestimates the real excursion by
+    # more than three orders of magnitude:
+    #
+    #     a         formula predicts      MEASURED closed-loop swing
+    #     0.00552   0.9996 V              0.0797 V        12.5x over
+    #     0.25      2048 V                0.3577 V        5700x over
+    #
+    # So it shrinks the coefficient by orders of magnitude to protect a swing
+    # that was never at risk, and the shrunken coefficient collapses the
+    # transfer. THIS FUNCTION'S OWN DOCSTRING ALREADY SAID SO — "an overflow
+    # bound is NECESSARY and is not SUFFICIENT, and a design that satisfies it
+    # is not thereby a converter" — and the generator shipped its output as the
+    # final coefficient anyway. That is the defect: the missing half was never
+    # supplied, so every emitted converter carried a coefficient chosen to
+    # satisfy the half that was.
+    a_openloop = (swing * math.factorial(order)
+                  / (vref * n ** order)) ** (1.0 / order)
+    # THE CLOSED-LOOP BOUND, WHICH IS THE ONE THAT BINDS.
+    # In a single-bit CIFB the first integrator's excursion is a small multiple
+    # of one DAC step, `a * vref`, because one decision is what the loop uses to
+    # correct it. MEASURED on the same harness, sweeping `ci/cs` with everything
+    # else identical (density at vin 0.700 / 0.600, ideal 0.6000 / 0.5000):
+    #
+    #     ci/cs    a         slope     vo1 swing
+    #       2      0.5000    1.0291    1.2446 V   <- OVERFLOWS a 1.2 V rail
+    #       4      0.2500    1.0105    0.3577 V   <- correct, 30 % of the rail
+    #       8      0.1250    0.9381    0.2066 V
+    #      16      0.0625    0.9472    0.1411 V
+    #      32      0.0313    0.8652    0.1400 V
+    #      64      0.0156    0.6922    0.1326 V
+    #     128      0.0078    0.5647    0.0940 V
+    #     183.5    0.0055    0.3846    0.0797 V   <- what a_openloop returns
+    #
+    # The transfer degrades monotonically as `a` shrinks and the overflow
+    # appears between 0.25 and 0.5. `a = swing / (4 * vref)` lands on 0.25 for
+    # this declaration: the largest coefficient the measurement shows converting
+    # without overflow. The 4 is the measured excursion multiple with margin —
+    # at a = 0.5 the excursion is 2.49 * a * vref and overflows, at a = 0.25 it
+    # is 1.43 * a * vref — and it is a property of a single-bit CIFB loop, not
+    # of any chip: `swing`, `vref` and `order` are all bound spec rows.
+    #
+    # The earlier round that shipped a1 = a2 = 1/2 (Boser & Wooley) recorded
+    # exactly the overflow this table re-measures: "a single DAC decision moves
+    # the loop filter's output by half the reference ... three same-sign
+    # decisions after a reset exhaust the swing". Independently confirmed here:
+    # ci/cs = 2 swings 1.2446 V on a 1.2 V rail.
+    a_closed = swing / (CLOSED_LOOP_EXCURSION_OVER_A_VREF * vref)
+    # AND A CEILING, because a rail-derived bound alone would let a high-supply
+    # declaration ask for a coefficient above 1, which a single-bit loop does
+    # not carry. The ceiling is the largest value the sweep above shows
+    # CONVERTING (a = 0.25, slope 1.0105); the next point measured, 0.5,
+    # overflows. So it is a measured stability ceiling, not a round number.
+    a = min(a_closed, LARGEST_MEASURED_CONVERTING_COEFFICIENT)
+    if a <= 0.0:
+        raise LibraryEntryError(
+            "the closed-loop coefficient bound resolved to a non-positive "
+            "value, which means the declared swing or reference is degenerate; "
+            "a coefficient this program cannot derive is ABSENT, never "
+            "defaulted")
+    # Reported so a reader can see BOTH bounds and which one bound. The
+    # open-loop number is kept because a future entry with an order or an OSR
+    # outside what was measured needs to see how far apart they are.
+    _COEFFICIENT_BOUNDS_SEEN.append(
+        {"order": order, "osr": n, "vref": vref, "swing": swing,
+         "a_openloop_ramp_bound": a_openloop, "a_closed_loop_bound": a_closed,
+         "a_returned": a})
     return [a] * order
 
 
 #: {name: callable(order, spec_values, consts) -> [per-stage coefficient]}
+#: The first integrator's closed-loop excursion in a single-bit CIFB loop, as a
+#: multiple of ONE DAC STEP (`a * vref`). MEASURED on an ideal-element harness of
+#: the topology this library emits, sweeping `ci/cs` with everything else held:
+#: 1.43x at a = 0.25 (0.3577 V) and 2.49x at a = 0.5 (1.2446 V, which overflows a
+#: 1.2 V rail). 4 is that multiple with margin, and it is what makes
+#: `swing / (4 * vref)` return the largest coefficient the measurement shows
+#: converting without overflow. Not a chip number: it is a property of a
+#: single-bit second-order CIFB loop.
+CLOSED_LOOP_EXCURSION_OVER_A_VREF = 4.0
+
+#: The largest coefficient the same sweep shows CONVERTING: a = 0.25, slope
+#: 1.0105 at 30 % of the rail. The next point measured, a = 0.5, swings
+#: 1.2446 V on a 1.2 V rail and overflows. A ceiling, so a high-supply
+#: declaration cannot ask a single-bit loop for a coefficient it does not carry.
+LARGEST_MEASURED_CONVERTING_COEFFICIENT = 0.25
+
+#: Every coefficient derivation this process performed, with BOTH bounds, so a
+#: reader can see which one bound and how far apart they were.
+_COEFFICIENT_BOUNDS_SEEN = []
+
+
 COEFFICIENT_DERIVATIONS = {
     "incremental_cifb": _incremental_cifb_coefficients,
 }

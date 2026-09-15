@@ -667,7 +667,22 @@ def sc_integrator_report(sp_text):
 DS_SPEC = [{"name": "order", "target": 2.0, "unit": ""},
            {"name": "vdd", "target": 1.2, "unit": "V"},
            {"name": "osr", "target": 64.0, "unit": ""},
-           {"name": "enob", "target": 12.0, "unit": "bit"},
+           # R-0915-61: 12 bit no longer forces the INTEGRATING capacitor over
+           # the PDK's drawable ceiling, because the coefficient bound moved
+           # from the open-loop ramp (ci/cs = 181) to the closed-loop
+           # excursion (ci/cs = 4) and ci shrank 45x with it — at 12 bit the
+           # deck now emits `xci1 ... l=3.40442`, one device, and the only
+           # arrays left are c_vcm and c_qdly. The unit-ARRAY mutation sites
+           # below need an array to mutate, and an ABSENT array makes each
+           # mutant byte-identical to the intact deck: a fixture that proves
+           # nothing rather than a gate that passes.
+           # MEASURED while choosing this: the sampling capacitor goes as
+           # 2**(2*enob), so 14 bit is 16x and puts ci at ~54 um (an array of
+           # two units) while cs stays at ~13 um, under the 30 um ceiling and
+           # still ONE device — which is what the sibling
+           # `test_every_sampling_capacitor_reaches_the_summing_node_through_a_switch`
+           # needs. 15 bit splits cs as well and breaks that one.
+           {"name": "enob", "target": 14.0, "unit": "bit"},
            {"name": "vref", "target": 1.0, "unit": "V"},
            {"name": "fclk", "target": 4.0, "unit": "MHz",
             "min": 0.1, "max": 4.0}]
