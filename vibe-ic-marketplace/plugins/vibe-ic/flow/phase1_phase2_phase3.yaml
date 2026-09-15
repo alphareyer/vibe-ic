@@ -1588,6 +1588,23 @@ steps:
       - rtl_hygiene_lint
       - rom_init_lint
       - rtl_bug_report_schema_check   # v0.54: every reports/phase2/rtl_bugs.json
+      # PRODUCER DECLARED (lane icspm3, 2026-09-15) — AND THIS ONE BIT.
+      # Named in the first pass of this work and deliberately LEFT, because
+      # `flow_compliance_check`'s own `--json` document carries none of
+      # `_GATE_DOCUMENT_IDENTITY_KEYS` and the classifier therefore has to
+      # fall back to its two TIMING facts. That is exactly why it had to be
+      # declared: with no producer, whether the document exists before the
+      # audit begins is a RACE. MEASURED on the SPM verdict run at main
+      # 79506306d (host load average 67.5, run 1670 s against ~770 s
+      # nominal): `reports/phase1/gates/stage_phase1_compliance.json` came
+      # back `audit_created` where the immediately preceding run on the same
+      # content had it `step_attributed`, step 2 went MISSING instead of
+      # INCOMPLETE, and `stage1_compliance` FAILED for the first time in the
+      # lane — a fifth failed gate produced by nothing but timing.
+      # Declaring the producer makes `flow_declared_producer_run` write the
+      # document during the RUN, every time, so the race has no side to land
+      # on. Same shape as the thirteen of #2261.
+      - flow_compliance_check
                                        # entry must carry spec_evidence
                                        # (doc + locator + verbatim quote).
                                        # Skipped if reports/phase2/rtl_bugs.json
@@ -4325,6 +4342,23 @@ steps:
       - yosys_hilomap_required_check
       - yosys_script_template_check
       - yosys_tiecell_recipe_order_check
+      # PRODUCER DECLARED (lane icspm3, 2026-09-15) — AND THIS ONE BIT.
+      # Named in the first pass of this work and deliberately LEFT, because
+      # `flow_compliance_check`'s own `--json` document carries none of
+      # `_GATE_DOCUMENT_IDENTITY_KEYS` and the classifier therefore has to
+      # fall back to its two TIMING facts. That is exactly why it had to be
+      # declared: with no producer, whether the document exists before the
+      # audit begins is a RACE. MEASURED on the SPM verdict run at main
+      # 79506306d (host load average 67.5, run 1670 s against ~770 s
+      # nominal): `reports/phase1/gates/stage_phase1_compliance.json` came
+      # back `audit_created` where the immediately preceding run on the same
+      # content had it `step_attributed`, step 2 went MISSING instead of
+      # INCOMPLETE, and `stage1_compliance` FAILED for the first time in the
+      # lane — a fifth failed gate produced by nothing but timing.
+      # Declaring the producer makes `flow_declared_producer_run` write the
+      # document during the RUN, every time, so the race has no side to land
+      # on. Same shape as the thirteen of #2261.
+      - flow_compliance_check
     required_outputs:
       - "phase2/stage2/synth/netlist.v"
       - "reports/analog/stage_analog_compliance.json"
