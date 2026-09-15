@@ -2362,11 +2362,19 @@ def rule_cited_constant_not_in_source(project: Path,
 
     checked: List[Dict[str, Any]] = []
     ungrounded: List[Dict[str, Any]] = []
+    unreadable: List[str] = []
     disclosed = 0
     for jf in l_docs:
         try:
             d = json.loads(jf.read_text(encoding="utf-8", errors="replace"))
         except (OSError, ValueError):
+            # R-0915-34(b) — COUNTED, not silently skipped. A document that
+            # will not parse has declared nothing, and with the count kept at
+            # zero by a skip, "this design cites no constant" and "I could not
+            # read the documents" were the same answer. They are opposite
+            # claims and the zero-population branch below refuses to be
+            # reached while any of them holds.
+            unreadable.append(jf.name)
             continue
         for cite in cited_input_literals(d):
             if _SCRUB_MARKER in cite["literal"]:
@@ -2467,6 +2475,7 @@ def rule_cited_constant_not_in_source(project: Path,
                 "constants_checked": len(checked),
                 "constants_ungrounded": len(ungrounded),
                 "scrub_disclosed_literals": disclosed,
+                "unreadable_l_docs": unreadable,
                 "ungrounded": ungrounded}
     intent = {"file": ", ".join(t["file"] for t in texts[:4])
                       + (", …" if len(texts) > 4 else ""),
@@ -2482,13 +2491,52 @@ def rule_cited_constant_not_in_source(project: Path,
     # NOT CHECKED, and the reason says so. MEASURED: this is 53 of the 58
     # readable cells in the published corpus, and calling them ACCEPT would be
     # a reviewer reporting a pass over a question it never put.
+    if not checked and unreadable:
+        # FAIL-CLOSED, and it is the whole difference from #2272's prose
+        # reading: a document that could not be READ has declared nothing, so
+        # a zero here is "I could not look", not "it is not there".
+        return {"verdict": "NOT_CHECKED", "intent": intent,
+                "artefact": artefact, "intent_dirs": intent_dirs,
+                "why": (f"{len(unreadable)} of {len(l_docs)} L-doc(s) could "
+                        f"not be parsed ({', '.join(unreadable[:6])}"
+                        f"{', …' if len(unreadable) > 6 else ''}), so the "
+                        f"population of cited hexadecimal constants is NOT "
+                        f"established; 0 examined here is 'I could not look', "
+                        f"not 'the design cites none'")}
     if not checked:
-        return {"verdict": "NOT_CHECKED", "intent": intent, "artefact": artefact,
-                "intent_dirs": intent_dirs,
-                "why": (f"{len(l_docs)} L-doc(s) cite no hexadecimal constant "
-                        f"as a quotation from the design input; this rule "
-                        f"examined 0 constants, which refutes nothing and "
-                        f"certifies nothing")}
+        # R-0915-34(b) — A DESIGN-DECLARED ZERO POPULATION.
+        #
+        # THE DOCUMENTS EXIST AND THEY PARSE, and between them they cite no
+        # hexadecimal constant out of the design input. This rule asks whether
+        # a QUOTATION is faithful; a design that quotes no constant has no
+        # such claim to be unfaithful about, and that is a fact about the
+        # DESIGN, not a blindness of the reviewer.
+        #
+        # It is NOT an ACCEPT, and the comment this replaces was right to
+        # refuse one — "calling them ACCEPT would be a reviewer reporting a
+        # pass over a question it never put", MEASURED at 53 of the 58
+        # readable cells in the published corpus. NOT_APPLICABLE says the
+        # third thing: the question does not arise here. The evidence is
+        # recorded in the shape R-0915-34(b) names, so a reader can check the
+        # claim against the documents themselves.
+        return {"verdict": "NOT_APPLICABLE", "intent": intent,
+                "artefact": artefact, "intent_dirs": intent_dirs,
+                "applicability_evidence": {
+                    "kind": "design-declared-zero-population",
+                    "population": "hexadecimal constants cited as a quotation "
+                                  "from the design input",
+                    "count": 0,
+                    "documents_read": len(l_docs),
+                    "documents": [p.name for p in l_docs],
+                    "document_dirs": [str(d.relative_to(project))
+                                      for d in gdirs],
+                    "unreadable_documents": unreadable},
+                "why": (f"{len(l_docs)} L-doc(s) were read and parsed, and "
+                        f"between them cite 0 hexadecimal constant(s) as a "
+                        f"quotation from the design input. The design declares "
+                        f"none, so there is no quotation for this rule to "
+                        f"check — NOT_APPLICABLE, not an acceptance: nothing "
+                        f"here certifies that the extraction is faithful")}
 
     if not ungrounded:
         return {"verdict": "ACCEPT", "intent": intent, "artefact": artefact,
@@ -4092,6 +4140,14 @@ def review(project: Path, stage_id: str, decl: Dict[str, Any],
         "rejection_requires": list(requires),
         "rules": [], "rejections": [], "observations": [],
         "unproven_rejections": [], "not_checked": [],
+        # R-0915-34(b) — THE THIRD ANSWER, kept apart from both the others. A
+        # rule whose SUBJECT the design declares it does not have has neither
+        # accepted nor failed to look: the question does not arise. Folding it
+        # into `not_checked` made a reviewer that read every document report
+        # that it could not read them; folding it into `observations` would
+        # make it an acceptance of a question never put, which the branch it
+        # replaces was right to refuse.
+        "not_applicable": [],
         "emit_dir": str(emit_dir), "emit_outside_run": emit_escapes,
     }
     for rule_id, fn in _RULES.get(stage_id, []):
@@ -4128,6 +4184,8 @@ def review(project: Path, stage_id: str, decl: Dict[str, Any],
                 rec["rejections"].append(out)
         elif out["verdict"] in ("DISARMED", "ACCEPT"):
             rec["observations"].append(out)
+        elif out["verdict"] == "NOT_APPLICABLE":
+            rec["not_applicable"].append(out)
         else:
             rec["not_checked"].append(out)
     return rec
@@ -4738,6 +4796,22 @@ def main(argv: Optional[List[str]] = None) -> int:
               "answer of the rule(s) that were, and it does not certify what "
               "these could not read.")
 
+    # R-0915-34(b) — THE RULES WHOSE SUBJECT THIS DESIGN DOES NOT HAVE.
+    # Printed whatever the verdict, and before it, because the claim is
+    # checkable: the evidence names the documents, the population and the
+    # count, so a reader can open them and disagree.
+    if rec["not_applicable"]:
+        print(f"{_NAME}: [N/A] {len(rec['not_applicable'])} rule(s) whose "
+              f"subject this design declares it does not have:")
+        for f in rec["not_applicable"]:
+            ev = f.get("applicability_evidence") or {}
+            print(f"    {f['rule']}: {f.get('why')}")
+            print(f"      EVIDENCE kind={ev.get('kind')} "
+                  f"population={ev.get('population')!r} "
+                  f"count={ev.get('count')} over "
+                  f"{ev.get('documents_read')} document(s) under "
+                  f"{', '.join(ev.get('document_dirs') or []) or 'no dir'}")
+
     if rec["rejections"]:
         print(f"{_NAME}: REJECT — {len(rec['rejections'])} proven "
               f"contradiction(s) between the intent and the stage-{a.stage} "
@@ -4755,9 +4829,22 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     n_ok = sum(1 for f in rec["observations"] if f["verdict"] == "ACCEPT")
     n_dis = sum(1 for f in rec["observations"] if f["verdict"] == "DISARMED")
+    n_na = len(rec["not_applicable"])
+    # A REVIEW WHERE NO RULE HAD A SUBJECT CERTIFIES NOTHING, and must not be
+    # read as an acceptance. This is the zero-denominator rule applied to the
+    # reviewer itself: N/A says the question does not arise, and a stage where
+    # NO question arose was not reviewed. Only reachable once a rule can
+    # answer NOT_APPLICABLE at all.
+    if not n_ok and not n_dis:
+        print(f"{_NAME}: rc=2 NOT CHECKED — every rule on stage {a.stage} "
+              f"answered NOT_APPLICABLE ({n_na}); the artefact was read and "
+              f"no rule found a subject in it, so nothing here certifies "
+              f"that the extraction is faithful.")
+        return 2
     print(f"{_NAME}: ACCEPT — stage {a.stage} passed and its artefact does not "
           f"contradict the intent ({n_ok} rule(s) accepted, {n_dis} disarmed "
-          f"by the intent's own disclosure).")
+          f"by the intent's own disclosure"
+          + (f", {n_na} not applicable to this design" if n_na else "") + ").")
     return 0
 
 

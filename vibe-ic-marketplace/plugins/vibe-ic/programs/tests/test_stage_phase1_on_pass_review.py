@@ -859,9 +859,32 @@ def test_an_artefact_citing_no_constant_is_not_checked_rather_than_accepted(tmp_
     d = json.loads(p.read_text(encoding="utf-8"))
     d["extraction_evidence"] = {}
     p.write_text(json.dumps(d, indent=2), encoding="utf-8")
-    r = run(t, "--stage-verdict", "PASS")
-    assert r.returncode == 2, r.stdout
-    assert "examined 0 constants" in r.stdout
+    # R-0915-34(b) (lane icspm3, 2026-09-15) — THE INTENT IS KEPT AND THE
+    # THIRD ANSWER IS NAMED. "Calling them ACCEPT would be a reviewer
+    # reporting a pass over a question it never put" is still the rule, and
+    # R1's OWN verdict is asserted below to be NOT_APPLICABLE — never ACCEPT.
+    # What changed is that a rule whose subject the DESIGN declares it does
+    # not have no longer silences the rules that DID have one: the documents
+    # exist, they parse, and they cite zero constants, which is a fact about
+    # the design. The N/A is disclosed on the same output, with the documents
+    # and the count, so nothing is hidden.
+    r = run(t, "--stage-verdict", "PASS", "--json", str(tmp_path / "n.json"))
+    import json as _json
+    rec = _json.loads((tmp_path / "n.json").read_text())
+    r1 = [f for f in rec["not_applicable"]
+          if f["rule"] == "R1_CITED_CONSTANT_NOT_IN_ITS_SOURCE"]
+    assert r1, rec
+    assert r1[0]["verdict"] == "NOT_APPLICABLE", r1[0]
+    assert r1[0]["verdict"] != "ACCEPT"
+    ev = r1[0]["applicability_evidence"]
+    assert ev["kind"] == "design-declared-zero-population" and ev["count"] == 0
+    assert ev["unreadable_documents"] == []
+    # disclosed on the output, not swallowed
+    assert "cite 0 hexadecimal constant" in r.stdout, r.stdout
+    assert "not an acceptance" in r.stdout, r.stdout
+    # and the run's verdict is the answer of the rules that COULD answer
+    assert r.returncode == 0, r.stdout
+    assert "1 not applicable to this design" in r.stdout, r.stdout
 
 
 def test_an_unreadable_input_is_not_checked_rather_than_a_rejection(tmp_path):
