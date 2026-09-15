@@ -506,3 +506,27 @@ def test_the_child_deck_writer_puts_the_plan_in_both_decks(tmp_path):
     for stage in (SITE1, SITE2):
         assert "set_dont_touch spare_inv_0" in (
             out / R._sdr_child_tcl_name(stage)).read_text()
+
+
+def test_the_disclosure_does_not_republish_the_log_it_already_folded(tmp_path):
+    """MEASURED on the first real adopt run: `sdr_transactions.json` came out
+    294 KB, because the adopt record carries the full tail transcript and the
+    disclosure published it verbatim — a second copy of a log the same function
+    had already appended to `openroad.log`.  The PATH to that log stays, so
+    nothing becomes unreachable; only the duplicate goes."""
+    import json
+    project = tmp_path / "proj"
+    out = project / "pnr"
+    out.mkdir(parents=True)
+    adoption = {"status": "ADOPTED", "rc": 0,
+                "omitted_stages": [SITE1],
+                "adoptions": [{"stage": SITE1, "log": "pnr_sdr_adopt_1.log"}],
+                "combined_log": "X" * 300_000}
+    R._disclose_sdr_transactions(project, out, [adoption], {})
+    published = (project / "reports" / "phase3" / "sdr_transactions.json")
+    payload = json.loads(published.read_text())
+    assert "combined_log" not in payload["adoptions"][0]
+    # what a reader needs to FIND the transcript is still there
+    assert payload["adoptions"][0]["adoptions"][0]["log"] == "pnr_sdr_adopt_1.log"
+    assert payload["adoptions"][0]["status"] == "ADOPTED"
+    assert published.stat().st_size < 4096

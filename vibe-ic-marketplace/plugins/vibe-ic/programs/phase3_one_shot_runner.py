@@ -27592,7 +27592,14 @@ def _disclose_sdr_transactions(project: Path, out_dir: Path,
                  "was measured and refused and the checkpointed route shipped "
                  "unchanged; it is a disclosure, not a failure."),
         "transactions": records,
-        "adoptions": list(adoptions),
+        # WITHOUT `combined_log`. The adopt transcript is already folded into
+        # `openroad.log` by the function that produced it, and publishing a
+        # second copy here made this file 294 KB on its first real run — a
+        # disclosure nobody opens twice, carrying the bulk of a log they
+        # already have. The record KEEPS the path to that log, so nothing
+        # becomes unreachable.
+        "adoptions": [{k: v for k, v in a.items() if k != "combined_log"}
+                      for a in adoptions],
     }
     try:
         dest = project / "reports" / "phase3" / "sdr_transactions.json"
