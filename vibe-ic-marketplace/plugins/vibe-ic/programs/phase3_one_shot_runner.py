@@ -46480,7 +46480,7 @@ def _canonical_step_condition(project: Path, step_id: str
 #: repeated here because the RUNNER must be able to produce the evidence before
 #: it summarises it, and `test_signoff_metrics_sources_exist_before_the_summary`
 #: asserts the two spellings still agree with the flow.
-_DRC_ATTRIBUTION_JOBS = (
+_DRC_ATTRIBUTION_JOBS_BASE = (
     ("drc_report_check", "reports/phase3/drc_router.json",
      "reports/phase3/drc_router.rpt",
      ("--mode", "drc", "--under", "phase3/stage3/pnr",
@@ -46598,6 +46598,29 @@ def _spare_coverage_job() -> Optional[Tuple[str, str, str, Tuple[str, ...]]]:
             argv)
 
 
+#: THE PRODUCER TABLE, AS ONE OBJECT AGAIN (R-0915-30).
+#:
+#: #2260 moved the spare-coverage row out of the literal table and derived it
+#: from step 18's declaration at CALL time, to satisfy
+#: `test_spare_coverage_single_declaring_producer`: this runner must not RESTATE
+#: a path the flow already declares. The derivation is right and stays. What was
+#: wrong was that the published table then no longer CONTAINED the producer, so
+#: `test_the_spare_record_is_produced_before_the_summary_reads_it` -- which
+#: reads this tuple to check that the spare record has a producer at all, and
+#: that the producer is triggered by the artefact it READS rather than by one of
+#: its own outputs -- saw `{'drc_report_check'}` and went red on main from
+#: #2260 (446e41f2e) onward. The ordering contract it guards was still honoured
+#: at runtime; it had simply become unreadable.
+#:
+#: So the table is assembled HERE, once, at import: the two literal DRC rows
+#: plus the spare row DERIVED from the declaration. Nothing is restated -- the
+#: derived row's paths still come from the flow, and `_spare_coverage_job`
+#: returns None on any unreadable declaration, in which case the table is the
+#: two DRC rows and the caller discloses the absence instead of guessing a path.
+_DRC_ATTRIBUTION_JOBS = _DRC_ATTRIBUTION_JOBS_BASE + tuple(
+    j for j in (_spare_coverage_job(),) if j is not None)
+
+
 def _emit_drc_attribution_reports(project: Path) -> List[Dict[str, Any]]:
     """Produce the DRC attribution reports BEFORE the sign-off summary reads them.
 
@@ -46635,7 +46658,15 @@ def _emit_drc_attribution_reports(project: Path) -> List[Dict[str, Any]]:
     whatever it finds there.
     """
     out: List[Dict[str, Any]] = []
-    jobs = list(_DRC_ATTRIBUTION_JOBS)
+    # THE RUNTIME DERIVATION IS THE AUTHORITY, and the import-time table is what
+    # is PUBLISHED. They can only disagree when the flow definition this process
+    # can reach has changed since import -- and then the runtime answer is the
+    # true one, because it describes the tree this run is actually reading. So
+    # the row is taken from the table when the declaration still resolves, and
+    # DROPPED (with the disclosure below) when it no longer does. Re-deriving is
+    # cheap; guessing is not allowed.
+    jobs = [j for j in _DRC_ATTRIBUTION_JOBS
+            if j[0] != _SPARE_COVERAGE_PROGRAM]
     spare = _spare_coverage_job()
     if spare is not None:
         jobs.append(spare)
