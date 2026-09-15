@@ -1,4 +1,4 @@
-"""R-0915-34(b), P0 batch 1: four sub-gates whose population an L-doc declares.
+"""R-0915-34(b): P0 sub-gates whose population an L-doc declares zero.
 
 MEASURED 2026-09-15 (lane icspm3) on `spm` x gf180mcuD, a serial-parallel
 multiplier with no register map, no DFT and no security asset. Four P0
@@ -68,15 +68,26 @@ DECLARING = {
         ("L20_DFT_SCAN_TOPOLOGY.json", "scan_chains", [{"name": "chain0"}]),
     "l23_security_requirements_typed_check":
         ("L23_SECURITY_REQUIREMENTS.json", "attack_surface", ["debug port"]),
+    "l10_test_cases_cover_l3_constraints_check":
+        ("L3_CMD_PROTOCOL.json", "opcodes", [{"hex": "0x01"}]),
+    "bram_pdob_combinational_check":
+        ("L9_INTEGRATION_SPEC.json", "memory_candidates", [{"name": "buf"}]),
 }
 GATES = tuple(DECLARING)
 
-#: gate -> the assertion field that makes its document a STATEMENT
+#: gate -> (the assertion field that makes its document a STATEMENT, the value
+#: of that field which DENIES the absence). The polarity differs by layer --
+#: L4/L20/L23 assert `<subject>_present: false`, while L3 and L9 assert
+#: `no_<subject>_in_input: true` -- so the denial is carried per gate rather
+#: than assumed, and every negative control below flips the right way.
 STATED_BY = {
-    "l4_regmap_declared_register_coverage_check": "register_map_present",
-    "l4_regmap_phase2_emitter_contract_check": "register_map_present",
-    "l20_dft_scan_topology_actionable_check": "dft_present",
-    "l23_security_requirements_typed_check": "security_requirements_present",
+    "l4_regmap_declared_register_coverage_check": ("register_map_present", True),
+    "l4_regmap_phase2_emitter_contract_check": ("register_map_present", True),
+    "l20_dft_scan_topology_actionable_check": ("dft_present", True),
+    "l23_security_requirements_typed_check":
+        ("security_requirements_present", True),
+    "l10_test_cases_cover_l3_constraints_check": ("no_opcodes_in_input", False),
+    "bram_pdob_combinational_check": ("no_memories_in_input", False),
 }
 
 
@@ -93,8 +104,8 @@ def _write(proj, name, payload):
 def _declares_none(tmp_path):
     """A project whose L4/L20/L23 each positively declare a zero population.
 
-    L20 and L23 are written NESTED under `fields` and L4 FLAT, which is how
-    these layers actually ship on spm.
+    L20 and L23 are written NESTED under `fields`; L3, L4 and L9 FLAT, which
+    is how these layers actually ship on spm.
     """
     proj = tmp_path
     _write(proj, "L4_REGMAP.json", {
@@ -109,6 +120,14 @@ def _declares_none(tmp_path):
             "security_requirements_present": False, "secure_boot": False,
             "attack_surface": [], "key_handling": {},
             "side_channel_mitigation": []}})
+    _write(proj, "L3_CMD_PROTOCOL.json", {
+        "doc_class": "cmd_protocol", "opcodes": [],
+        "no_opcodes_in_input": True, "crc_parameters": None})
+    _write(proj, "L9_INTEGRATION_SPEC.json", {
+        "doc_class": "integration_spec", "top_module": "top",
+        "memories": [], "memory_candidates": [], "memory_map": [],
+        "no_memories_in_input": True, "no_memory_candidates_in_input": True,
+        "no_memory_map_in_input": True})
     rtl = proj / "phase2" / "stage1" / "rtl"
     rtl.mkdir(parents=True, exist_ok=True)
     (rtl / "top.v").write_text("module top(); endmodule\n")
@@ -145,7 +164,7 @@ def test_that_NA_carries_the_declaration_it_rests_on(tmp_path, gate):
     assert (proj / rel).is_file(), ev["declaration_path"]
     assert rel.name == DECLARING[gate][0]
     assert ev["population_paths"], gate
-    assert any(a["path"] == STATED_BY[gate] for a in ev["assertions"]), gate
+    assert any(a["path"] == STATED_BY[gate][0] for a in ev["assertions"]), gate
 
 
 @pytest.mark.parametrize("gate", GATES)
@@ -165,7 +184,7 @@ def test_that_disposition_is_skip_eligible():
 
 
 @pytest.mark.parametrize("gate", GATES)
-def test_every_batch1_gate_is_on_the_roster(gate):
+def test_every_registered_gate_is_on_both_rosters(gate):
     assert F._P0_GATE_REQUIRED_CONTEXT.get(gate), gate
     assert F._P0_GATE_ZERO_POPULATION.get(gate), gate
 
@@ -208,7 +227,7 @@ def test_a_document_that_lists_nothing_but_says_nothing_keeps_it_live(
     name = DECLARING[gate][0]
     doc = json.loads((_docs(proj) / name).read_text())
     target = doc["fields"] if isinstance(doc.get("fields"), dict) else doc
-    target.pop(STATED_BY[gate])
+    target.pop(STATED_BY[gate][0])
     _write(proj, name, doc)
     assert F._p0_zero_population_evidence(proj, gate) is None, gate
     assert F._p0_contract_na_reason(gate, proj, rtl) is None, gate
@@ -217,16 +236,18 @@ def test_a_document_that_lists_nothing_but_says_nothing_keeps_it_live(
 @pytest.mark.parametrize("gate", GATES)
 def test_a_document_that_says_the_subject_IS_present_keeps_it_live(
         tmp_path, gate):
-    """A design asserting `*_present: true` while listing nothing has an
-    unmet obligation, not an absent subject -- its gate must run."""
+    """A design that SAYS it has the subject while listing nothing has an
+    unmet obligation, not an absent subject -- its gate must run. The saying
+    is `*_present: true` on L4/L20/L23 and `no_*_in_input: false` on L3/L9."""
     proj, rtl = _declares_none(tmp_path)
-    _patch(proj, gate, **{STATED_BY[gate]: True})
+    field, denial = STATED_BY[gate]
+    _patch(proj, gate, **{field: denial})
     assert F._p0_zero_population_evidence(proj, gate) is None, gate
     assert F._p0_contract_na_reason(gate, proj, rtl) is None, gate
 
 
 def test_a_nested_layer_is_read_not_seen_as_an_empty_document(tmp_path):
-    """The reader is load-bearing. A reader that knows only L4's flat shape
+    """The reader is load-bearing. A reader that knows only the flat shape
     sees NO `scan_chains` key in L20 at all -- an absent key is empty, so it
     would hand a SCAN-CHAINED design the N/A. Declare the chain in the shape
     L20 actually ships and the gate must stay live."""
