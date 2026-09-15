@@ -85,6 +85,25 @@ class Finding:
     file: str = ""
 
 
+
+def _machine_attested(entry: dict) -> bool:
+    """Is this entry a MACHINE attestation rather than a human approval?
+
+    `waivers_materialize.py` writes every auto-synthesized deferral with an
+    `auto_synthesized: True` marker (and the older `_autogen` spelling, which
+    that module's own reader accepts) so a reviewer can see it was not
+    self-approved. Such an entry legitimately carries no `approved_at` — this
+    gate's own skip message says so — and is tracked by its `ticket`.
+
+    STRUCTURAL, NOT PROSE: the marker is a field the producer writes, never a
+    word in a sentence. An entry with NO marker is a human's, and a missing
+    signature on it is still the coverage hole this gate reports.
+    """
+    if not isinstance(entry, dict):
+        return False
+    return (entry.get("auto_synthesized") is True
+            or entry.get("_autogen") is True)
+
 def _parse_iso(s: str) -> datetime | None:
     if not isinstance(s, str) or not s.strip():
         return None
@@ -156,6 +175,9 @@ def inspect(project: Path, warn_days: int = 90,
         "err_days": err_days,
         "entries_examined": 0,
         "entries_unageable": 0,
+        # R-0915-15 — un-ageable BY DESIGN, and counted apart from the
+        # coverage hole for that reason. See `_machine_attested`.
+        "entries_machine_attested": 0,
         "entries_closed": 0,
         "entries_total": 0,
         "stale_warn": [],
@@ -185,6 +207,21 @@ def inspect(project: Path, warn_days: int = 90,
             summary["entries_closed"] += 1
             continue
         approved = _parse_iso(e.get("approved_at", ""))
+        if approved is None and _machine_attested(e):
+            # R-0915-15 (lane icspm3) — THE SENTENCE BELOW ALREADY SAID THIS
+            # AND THE COUNT DID NOT. The skip message states that "an entry
+            # deferred under a machine-generated attestation (`waivers`
+            # dialect) legitimately carries none and is tracked by its
+            # `ticket` instead" — and then counted exactly such an entry as
+            # part of the coverage hole, which the umbrella books
+            # ZERO_DENOMINATOR -> P0 INCOMPLETE. MEASURED on spm x gf180mcuD:
+            # BOTH of that project's open waivers are `waivers_materialize`'s
+            # own ENV_UNAVAILABLE deferrals, so the flow was failing a gate
+            # for the absence of a signature the flow itself refuses to
+            # forge. An entry that is un-ageable BY DESIGN is not an entry
+            # this gate could not audit.
+            summary["entries_machine_attested"] += 1
+            continue
         if approved is None:
             # #519 — NOT silence. This gate deferred to `waivers_schema_check`
             # ("already flags it") for entries lacking `approved_at`; that gate
@@ -234,7 +271,30 @@ def inspect(project: Path, warn_days: int = 90,
                 ),
                 file=summary["waivers_path"],
             ))
-    if summary["entries_examined"] == 0:
+    if (summary["entries_examined"] == 0
+            and summary["entries_unageable"] == 0
+            and summary["entries_machine_attested"]):
+        # EVERY open entry is a machine attestation, so there is no human
+        # signature anywhere for this gate to age. That is a DECLARED state of
+        # the waiver file, not a hole in this gate's coverage, and the class is
+        # stated HERE rather than left to a prose recogniser downstream:
+        # `report_reason_class` reads `summary.reason_class` first, which is
+        # what "branch-owned evidence outranks prose" means in
+        # `_flow_reason_taxonomy.infer_nonverdict_reason`.
+        summary["reason_class"] = "DESIGN_DECLARED_NA"
+        summary["skipped_reason"] = (
+            f"all {summary['entries_machine_attested']} open waiver entr"
+            f"{'y is' if summary['entries_machine_attested'] == 1 else 'ies are'}"
+            f" a machine-generated attestation (`auto_synthesized`), which "
+            f"legitimately carries no `approved_at` and is tracked by its "
+            f"`ticket` — there is no human signature to age. `approved_at` is "
+            f"the human approver's dated signature and is never stamped "
+            f"automatically, because a machine-written approval date would be "
+            f"a self-approval. NOT a sign-off: each entry stays "
+            f"review_required against foundry sign-off, and any HUMAN-approved "
+            f"entry added later is aged normally."
+        )
+    elif summary["entries_examined"] == 0:
         # #519 — say WHICH silence this is. "no entries with parseable
         # approved_at" read identically whether the file held 0 waivers or 19
         # un-ageable ones; only the second is a coverage hole worth knowing
