@@ -20250,14 +20250,25 @@ def step_verilator_coverage(project: Path, top_name: str = "",
     import shutil as _shutil
     import verilator_coverage_measure as _vcm
 
-    rtl, tb = _vcm.discover_measure_inputs(project)
+    # THE SUITE, NOT ITS FIRST MEMBER. This asked for ONE testbench, and on a
+    # design whose verification is a suite of per-case oracles it got the
+    # alphabetically first one and published that case's coverage as the
+    # design's. MEASURED on subservient x gf180mcuD (lane icsub2, r17 against
+    # r18, same RTL and the same denominators): `sim_unit/tb_subservient.v`
+    # gave line 80.74%, and once ten authored L10 oracles existed in
+    # `phase2/stage1/sim/tb` the selector stopped at `blinky_hex.v` and gave
+    # 68.89%, below a 70% floor. Nothing about the design had changed; the
+    # verification had got BETTER. The ten members span 63.70%-97.78% and their
+    # union is 98.52%.
+    rtl, tbs = _vcm.discover_measure_testbenches(project)
     if not rtl:
         return StepResult("verilator_coverage", "SKIP", time.time() - t0,
                           "no RTL sources to instrument", [])
-    if not tb:
+    if not tbs:
         return StepResult("verilator_coverage", "SKIP", time.time() - t0,
                           "no testbench to instrument — coverage cannot be "
                           "measured without a stimulus that actually ran", [])
+    tb = tbs[0]
     have = bool(container and _tool_in_container(container, "verilator")) \
         or bool(_shutil.which("verilator"))
     if not have:
@@ -20271,10 +20282,6 @@ def step_verilator_coverage(project: Path, top_name: str = "",
     # artefact surface and a Verilator obj_dir is neither a report nor stable.
     build_dir = _pl.sim_dir(project) / "cov_build"
     try:
-        dat = _vcm.verilate_tb_and_run(
-            [str(x) for x in rtl], str(tb), str(build_dir), str(build_dir),
-            exec_fn=_verilator_stage_exec(container),
-            build_jobs=_eda_thread_count())
         # #2180 — VERILATOR ANSWERS IN THE NAMESPACE IT RAN IN. The exec above
         # dispatches the build into `container`, so every source path in the
         # coverage.dat it produced is a CONTAINER path, while `coverage_dat`,
@@ -20294,7 +20301,22 @@ def step_verilator_coverage(project: Path, top_name: str = "",
         _cov_mounts = (None if (not container or _local_exec_mode())
                        else [(Path(_s), _d)
                              for _s, _d in _container_mounts(container)])
-        cov = _vcm.parse_coverage_dat(dat, mounts=_cov_mounts)
+        # One implementation, shared with `verilator_coverage_measure`'s CLI:
+        # a second copy of a measurement is a second answer waiting to
+        # disagree, and this file HELD that second copy — which is why the
+        # union landed in the program and was invisible in every real run.
+        _suite = _vcm.measure_suite(
+            [str(x) for x in rtl], [str(x) for x in tbs], str(build_dir),
+            exec_fn=_verilator_stage_exec(container),
+            build_jobs=_eda_thread_count(), mounts=_cov_mounts)
+        if not _suite["dats"]:
+            return StepResult("verilator_coverage", "SKIP", time.time() - t0,
+                              "no testbench produced coverage points — "
+                              "refusing to report a measurement nothing "
+                              "measured", [])
+        dat = _suite["dats"][0]
+        tb = (_suite["measured"] or [str(tb)])[0]
+        cov = _suite["cov"]
         scoped = _vcm.scope_totals(cov, [str(x) for x in rtl])
     except SystemExit as exc:
         return StepResult("verilator_coverage", "SKIP", time.time() - t0,
@@ -20310,6 +20332,7 @@ def step_verilator_coverage(project: Path, top_name: str = "",
         "measurement_mode": "measure-tb",
         "coverage_dat": dat,
         "testbench": str(tb),
+        **_vcm.suite_payload_fields(_suite),
         "rtl_sources": [str(x) for x in rtl],
         "totals": scoped["totals"],
         "scope_files": scoped["scope_files"],

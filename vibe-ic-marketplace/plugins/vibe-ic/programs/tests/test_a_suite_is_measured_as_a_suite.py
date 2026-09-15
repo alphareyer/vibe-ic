@@ -230,7 +230,7 @@ class _Args:
 def _fake_builds(monkeypatch, tmp_path, coverage_by_tb, fail=()):
     made = []
 
-    def _run(rtl, tb, build_dir, run_dir, build_jobs=0):
+    def _run(rtl, tb, build_dir, run_dir, exec_fn=None, build_jobs=0):
         made.append((tb, build_dir))
         if Path(tb).name in fail:
             raise SystemExit(f"verilator coverage build failed for {tb}")
@@ -316,7 +316,7 @@ def test_an_unkeyable_format_falls_back_to_one_member_and_says_so(
     member's honest number — but it may not do it silently."""
     p = _project(tmp_path, unit_tb=False, cases=("blinky", "rv32i"))
 
-    def _run(rtl, tb, build_dir, run_dir, build_jobs=0):
+    def _run(rtl, tb, build_dir, run_dir, exec_fn=None, build_jobs=0):
         name = Path(tb).stem
         d = tmp_path / f"nokey_{name}.dat"
         d.write_text("C '\x01f\x02/x/rtl/dut.v\x01l\x0210"
@@ -411,3 +411,69 @@ def test_the_suite_spans_roots_that_the_first_match_rule_would_have_cut(tmp_path
     roots = {Path(t).parent.name for t in tbs}
     assert roots == {"tb", "sim_unit"}, roots
     assert V.discover_measure_inputs(p)[1].endswith("aaa_case.v")
+
+
+# ── THE PRODUCER THE FLOW ACTUALLY RUNS ───────────────────────────────────
+# The fix above first landed in `verilator_coverage_measure`'s CLI, and every
+# real run was unaffected: `design_one_shot_runner.step_verilator_coverage`
+# held a SECOND copy of the same logic and called the one-testbench selector.
+# MEASURED on subservient r21, on a main carrying the landed union code —
+# `measurement_scope: None`, `testbenches: 0`, totals still `blinky_hex`'s
+# 68.89 / 83.33 / 66.67. A test that only drives the CLI cannot see that, so
+# this one drives the step.
+
+def test_the_flows_own_producer_measures_the_suite(tmp_path, monkeypatch):
+    import design_one_shot_runner as D
+
+    p = _project(tmp_path, unit_tb=True, cases=("blinky_hex", "rv32i_40"))
+    built = []
+
+    def _run(rtl, tb, build_dir, run_dir, exec_fn=None, build_jobs=0):
+        built.append(Path(tb).name)
+        name = Path(tb).stem
+        pts = ([("line", 10, "p10", 1), ("line", 11, "p11", 0)]
+               if name != "rv32i_40" else
+               [("line", 10, "p10", 0), ("line", 11, "p11", 3)])
+        return _dat(tmp_path, f"cov_{name}", f"{name}.u", pts)
+
+    monkeypatch.setattr(V, "verilate_tb_and_run", _run)
+    monkeypatch.setattr(D, "_verilator_stage_exec", lambda c: None)
+    monkeypatch.setattr(D, "_tool_in_container", lambda c, t: True)
+    monkeypatch.setattr(D, "_eda_thread_count", lambda: 2)
+    monkeypatch.setattr(D, "_local_exec_mode", lambda: True)
+
+    res = D.step_verilator_coverage(p, "dut", container="c")
+    out = json.loads((p / "reports/phase2/coverage/coverage_verilator.json")
+                     .read_text())
+    assert res.status != "SKIP", res.detail
+    # `.get` on purpose: a producer that never learned about suites writes no
+    # such key, and this must fail on the VALUE — `None != 'union-of-suite'` —
+    # not on a KeyError, which would say the key is missing and nothing about
+    # what was measured.
+    assert out.get("measurement_scope") == "union-of-suite", (
+        f"measurement_scope={out.get('measurement_scope')!r}, "
+        f"testbench={out.get('testbench')!r}")
+    assert len(out.get("testbenches") or []) == 3, out.get("testbenches")
+    assert len(built) == 3, built
+    # the union: each member covers one of the two points, together both
+    assert out["totals"]["line"]["pct"] == 100.0, out["totals"]
+    # and every member keeps its own honest number beside the union
+    per = {Path(k).stem: v["totals"]["line"]["pct"]
+           for k, v in out["per_testbench"].items() if v.get("measured")}
+    assert per == {"blinky_hex": 50.0, "rv32i_40": 50.0, "tb_dut": 50.0}, per
+
+
+def test_the_flows_producer_still_skips_when_there_is_no_stimulus(
+        tmp_path, monkeypatch):
+    """THE NEGATIVE CONTROL: the disclosed SKIP that writes nothing is exactly
+    what this change may not turn into a fabricated number."""
+    import design_one_shot_runner as D
+
+    p = tmp_path / "empty"
+    (p / "phase2/stage1/rtl").mkdir(parents=True)
+    (p / "phase2/stage1/rtl/dut.v").write_text("module dut(); endmodule\n")
+    monkeypatch.setattr(D, "_tool_in_container", lambda c, t: True)
+    res = D.step_verilator_coverage(p, "dut", container="c")
+    assert res.status == "SKIP"
+    assert "no testbench to instrument" in res.detail
+    assert not (p / "reports/phase2/coverage/coverage_verilator.json").exists()
