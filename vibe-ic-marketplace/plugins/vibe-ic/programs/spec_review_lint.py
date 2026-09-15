@@ -405,8 +405,123 @@ def _has_encoded_input_layer(text: str) -> bool:
     return False
 
 
+# ── R-0915-29 — applicability of two more checklist items ────────────────────
+# The same argument as FIX 3 above, with different nouns, and the same rule for
+# writing it: the spec must NAME the subject and SHOW something concrete about
+# it. Naming alone is not enough, because a chapter that says the design HAS no
+# such thing names it too.
+#
+# "full / empty / overflow / underflow" presupposes a STORAGE ELEMENT WITH A
+# FILL LEVEL -- something that can hold N things and therefore be full or empty,
+# or accumulate past its width and therefore overflow. A design with no queue,
+# no ring buffer and no accumulator has no fill level to define behaviour at.
+# MEASURED on `subservient` (lane icsub2): a grep for the whole fill-level
+# vocabulary over its 9 input documents returns three hits, and not one is a
+# container -- an "IO buffer" (a GPIO drive-strength cell), "❌ Buffer insertion
+# 策略" (the PnR tool's timing buffers, in an explicit NOT-SPECIFIED list), and
+# a hold-fix "buffer-based 修復" (the same). So the bare word `buffer` is
+# deliberately NOT a fill-level noun here: in this corpus it is a CELL far more
+# often than a container.
+#
+# TWO SUBJECTS, NOT ONE. A thing can be full or empty (a container with a fill
+# level) or it can overflow (an ARITHMETIC RESULT with a finite width). An
+# 8-bit adder whose sum is 8 bits wide has no queue anywhere and can still
+# overflow, so the arithmetic half is named here explicitly -- an earlier draft
+# of this predicate had only the container half and skipped exactly that spec,
+# which the adversarial case in
+# `test_spec_review_lint_language_and_applicability` had already written down.
+_FILL_LEVEL_NOUN = re.compile(
+    # containers
+    r'\bfifo\b|\bqueue\b|\bring[\s_-]*buffer\b|\bcircular[\s_-]*buffer\b'
+    r'|\bbuffer\s+(?:depth|size|entries)\b|\bshift[\s_-]*register\b'
+    r'|佇列|環形緩衝|緩衝區'
+    # accumulations and arithmetic results, which have a width rather than a depth
+    r'|\baccumulator\b|\bcounter\b|\badder\b|\bsubtract(?:or|er)\b'
+    r'|\bmultiplier\b|\bproduct\b|\bsum\b|\bdifference\b|\bincrement'
+    r'|累加器|計數器|加法器|減法器|乘法器|乘積|總和|累加', re.I)
+#: Something CONCRETE about that container: how many it holds, or how wide it
+#: accumulates. A depth is what makes "full" a state rather than a word.
+_FILL_LEVEL_EVIDENCE = re.compile(
+    r'\b\d+[\s-]*(?:deep|entries|entry|stage|stages|slot|slots|bit|bits)\b'
+    r'|\b(?:depth|entries|width)\b\s*[:=]?\s*\d+'
+    r'|\bmod(?:ulo|ulus)?\b\s*\.?\s*2\s*(?:\^|\*\*)'
+    r'|\d+\s*(?:深|級|項|筆|位元)|深度\s*[:=]?\s*\d+', re.I)
+
+# "back-to-back transactions" presupposes a TRANSACTION STREAM THE DESIGN
+# RECEIVES: a requester on the other side that may issue one transfer in the
+# cycle after the last. A design that only DRIVES a bus to its own memory has no
+# such requester -- the rate is set by what it executes, not by what arrives.
+# `subservient` declares exactly that, in its own L4, which is headed
+# `status: not-applicable`: "它「執行 firmware」而非「接受外部 command」", with an
+# explicit 沒有 list (no chip-level SPI/I2C/UART command interface, no
+# opcode-encoded command parsing, no software-visible chip register).
+_SERVED_INTERFACE_NOUN = re.compile(
+    r'\bslave\b|\btarget\s+(?:port|interface|side)\b|\bresponder\b'
+    r'|\bsubordinate\b|\bperipheral\s+(?:port|interface)\b'
+    r'|\baccepts?\s+(?:external\s+)?(?:command|request|transaction|transfer)'
+    r'|\bincoming\s+(?:command|request|transaction|transfer)'
+    r'|從端|受控端|接受(?:外部)?(?:命令|指令|請求|交易)', re.I)
+
+
+def _has_fill_level_container(text: str) -> bool:
+    """True when the spec DECLARES something with a fill level -- a container
+    noun with a concrete depth/width beside it. See the comment above."""
+    ev = [m.start() for m in _FILL_LEVEL_EVIDENCE.finditer(text)]
+    if not ev:
+        return False
+    for m in _FILL_LEVEL_NOUN.finditer(text):
+        lo = m.start() - _ENCODING_EVIDENCE_WINDOW
+        hi = m.end() + _ENCODING_EVIDENCE_WINDOW
+        if any(lo <= q <= hi for q in ev):
+            return True
+    return False
+
+
+#: A HANDSHAKE IS A SERVED INTERFACE TOO, and it is how most of this corpus
+#: spells one: a producer raises `valid` and the design answers with `ready` or
+#: `ack`. BOTH halves are required -- a lone `valid` is just as likely to be an
+#: output this design DRIVES (`subservient`'s `o_sram_cyc` is exactly that), and
+#: a design that only drives one has no requester to pace it.
+#: BOTH halves must look like SIGNAL NAMES, not prose. `-` is a word boundary,
+#: so a bare `\bready\b` matches inside "production-ready GDS" -- MEASURED: that
+#: phrase is the ONLY `ready` in `subservient`'s nine documents, and paired with
+#: the `有效` of "匯流排 cycle 有效" it made a tape-out status line look like a
+#: handshake. The lookarounds refuse a hyphenated compound, and the Chinese
+#: prose words are left out entirely: 有效 means "effective" as often as it
+#: means "valid".
+_HANDSHAKE_REQ = re.compile(
+    r'(?<![\w-])(?:valid|req|request|strobe|stb)(?![\w-])', re.I)
+_HANDSHAKE_ACK = re.compile(
+    r'(?<![\w-])(?:ready|ack|acknowledge|grant|stall)(?![\w-])', re.I)
+
+
+def _has_served_transaction_interface(text: str) -> bool:
+    """True when the spec DECLARES an interface the design SERVES.
+
+    Three spellings, any one of which is evidence: an explicit served ROLE; the
+    encoded command layer the illegal-inputs predicate already looks for (a
+    design that decodes commands is by construction receiving them); or a
+    request/acknowledge HANDSHAKE, which needs both halves present."""
+    if _SERVED_INTERFACE_NOUN.search(text) or _has_encoded_input_layer(text):
+        return True
+    return bool(_HANDSHAKE_REQ.search(text) and _HANDSHAKE_ACK.search(text))
+
+
 # checklist id -> (applicability predicate, why-it-was-skipped wording)
 _CORNER_CASE_APPLICABILITY = {
+    "full-empty-overflow-underflow": (
+        _has_fill_level_container,
+        "the spec declares no storage element with a fill level (no FIFO, "
+        "queue, ring buffer, accumulator or counter with a stated depth or "
+        "width), so there is nothing that can be full, empty, or accumulate "
+        "past its own capacity"),
+    "back-to-back": (
+        _has_served_transaction_interface,
+        "the spec declares no interface the design SERVES (no slave/target "
+        "port, and no encoded command layer it receives), so there is no "
+        "requester that could issue one transaction in the cycle after the "
+        "last; a bus the design DRIVES to its own memory is paced by what it "
+        "executes, not by what arrives"),
     "illegal-inputs": (
         _has_encoded_input_layer,
         "the spec declares no command / opcode / encoding layer (no encoded "

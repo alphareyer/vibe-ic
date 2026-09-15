@@ -8,16 +8,31 @@ database holds no diagonal, and neither does any DEF on either side of the
 restore. The defect is in the router's wire reader, so until it is fixed the
 flow must not hand a restored session a wire the reader mis-pairs.
 
-Both directions are pinned here:
+R-0915-33 — THE RELAY IS RETIRED; THE CENSUS STAYS.
 
-  * a deck that re-routes in the same pass CENSUSES and RELAYS;
-  * a deck that may not route at all CENSUSES and REFUSES BY NAME — run7's
-    `pnr_sdr_adopt_2` restored a checkpoint and ran ZERO `detailed_route`, so a
-    dropped conductor there would never be laid again.
+Five cases in this file used to pin the relay's behaviour. They are replaced,
+not deleted, by the cases that pin its retirement, and the IDs that went are
+named in the commit. What retired it, MEASURED on `subservient` x gf180mcuD
+(lane icsub2, r14, on the tree that shipped the relay):
 
-and the negative controls: a net with no extension op is never touched, a
-census of 0 says so, PG is refused by the shared helper, and the census asks the
-decoder for nothing that could segfault.
+  * DRT-1010 IS COSMETIC. `DRT-0702 Post-route verification: 0 violation(s)` in
+    every session that ran one (5 of 5); the gates' own `routed_router.drc.rpt`
+    is 0 BYTES; and NO GATE READS DRT-1010 — the only file that mentions it is
+    the raw transcript copied to `reports/phase3/drc_router.rpt`, on which
+    `drc_report_check` PASSES. sha256 run7 is the same shape.
+  * RELAYING DOES NOT CURE IT. r14's failing net `o_sram_addr[7]` was IN the
+    first child's 31-net census, WAS relaid, and came back still tripping
+    DRT-1010.
+  * AND IT COSTS REAL TIMING. Same RTL, same SDC, same input, `SHIP_WNS_BEFORE`
+    -3.0296530586256614 (no relay) -> -3.636286041864957 (relay live), the
+    convergence plateauing with pass2 worse than pass1, and `sta_corner` SS
+    +0.03 (closed) -> -0.50 (VIOLATED).
+
+So every restore deck censuses and names the nets, and NO deck drops a wire.
+
+The negative controls are unchanged: a net with no extension op is never
+touched, a census of 0 says so, PG is refused by the shared helper, and the
+census asks the decoder for nothing that could segfault.
 """
 import shutil
 import sys
@@ -96,44 +111,68 @@ def test_an_unexpected_opcode_abstains_rather_than_relaying_the_wrong_nets():
 
 # ---------------------------------------------------------------- the relay
 
-def test_a_deck_that_reroutes_relays_the_censused_nets():
-    tcl = _reroutes()
-    assert "EXT_WIRE_RELAID:" in tcl
-    assert "EXT_WIRE_RELAY_DEFERRED" not in tcl
+def test_no_deck_drops_a_wire_any_more():
+    """REPLACES `test_a_deck_that_reroutes_relays_the_censused_nets` and
+    `test_a_deck_that_no_reroute_censuses_but_refuses_to_drop_by_name`.
+
+    Those two pinned the asymmetry between a deck that re-routes and one that
+    may not. R-0915-33 retires both halves: neither drops anything, so the two
+    emit the SAME text and there is no asymmetry left to pin."""
+    for build in (_reroutes, _no_reroute):
+        text = build()
+        assert "EXT_WIRE_RELAID" not in text, build.__name__
+        assert "EXT_WIRE_RELAY_DEFERRED" not in text, build.__name__
+        assert "EXT_WIRE_RELAY_RETIRED" in text, build.__name__
+    assert R._ext_wire_relay_tcl() == R._ext_wire_relay_deferred_tcl()
 
 
-def test_a_deck_that_may_not_route_censuses_but_refuses_to_drop_by_name():
-    tcl = _no_reroute()
-    assert "EXT_WIRE_RELAY_DEFERRED" in tcl
-    assert "EXT_WIRE_RELAID:" not in tcl
-    assert "does not re-route in the same pass" in tcl
+def test_the_retired_marker_carries_the_census_count_and_the_reason():
+    """REPLACES nothing; the disclosure is the whole of what is left. Silence
+    would read as 'there were none', which is the failure mode the census was
+    built to avoid in the first place."""
+    text = R._ext_wire_relay_tcl()
+    assert "[llength $_ext_nets]" in text
+    assert "NONE was dropped" in text
+    assert "cosmetic" in text and "DRT-0702" in text
+    assert "router-reader fix" in text
 
 
-def test_the_relay_iterates_the_census_list_and_never_the_whole_block():
-    """The negative control for "a net without an extension op is untouched":
-    the relay loop must walk the CENSUS, not the database."""
-    rel = R._ext_wire_relay_tcl()
-    assert "foreach _ext_nm $_ext_nets {" in rel
-    assert "getNets" not in rel
+def test_the_emitters_can_no_longer_destroy_a_wire():
+    """REPLACES `test_the_relay_iterates_the_census_list_and_never_the_whole_
+    block`, `test_the_relay_goes_through_the_one_permitted_clear_helper` and
+    `test_the_relay_leaves_the_instances_alone`.
+
+    Those three constrained HOW the relay dropped wiring: only the censused
+    nets, only through the one permitted helper, never touching an instance.
+    The stronger statement now available is that this path cannot drop a wire
+    at all -- it names no destroy, calls no clear helper, and iterates
+    nothing."""
+    for build in (_reroutes, _no_reroute):
+        emitted = build()
+        # the CENSUS still walks nets; the relay text must not.
+        relay = R._ext_wire_relay_tcl()
+        # STRONGER THAN A TOKEN BLACKLIST: every statement this emitter
+        # produces is a `puts`. It cannot destroy, clear, iterate or touch
+        # anything, because printing is the only thing it does. (A blacklist
+        # would also have caught the word "destroyed" in its own comment, which
+        # is prose, not a call.)
+        stmts = [ln for ln in relay.splitlines()
+                 if ln.strip() and not ln.lstrip().startswith("#")]
+        assert stmts, relay
+        assert all(ln.lstrip().startswith("puts ") for ln in stmts), stmts
+        assert "dbWire_destroy" not in relay
+        assert "_vibeic_spare_safe_clear_net" not in relay
+        assert emitted.count("EXT_WIRE_RELAY_RETIRED") == 1, build.__name__
 
 
-def test_the_relay_goes_through_the_one_permitted_clear_helper():
-    """There is exactly ONE `odb::dbWire_destroy` site in the program, and it
-    refuses POWER and GROUND by the net's own SigType. A second one here would
-    route around that refusal."""
-    rel = R._ext_wire_relay_tcl()
-    assert "_vibeic_spare_safe_clear_net $_ext_rn 1" in rel
-    body = rel.split("proc _vibeic_spare_safe_clear_net")[-1]
-    after_proc = body.split("}\n", 1)[-1]
-    assert "odb::dbWire_destroy" not in after_proc.split("set _ext_relaid")[-1]
-
-
-def test_the_relay_leaves_the_instances_alone():
-    rel = R._ext_wire_relay_tcl()
-    for forbidden in ("unset_dont_touch", "set_dont_touch", "delete_inst",
-                      "swap_master", "place_inst"):
-        assert forbidden not in rel, forbidden
-    assert "the instances are untouched" in rel
+def test_the_spare_relay_is_NOT_retired_with_it():
+    """THE NEGATIVE CONTROL FOR THE SCOPE OF THIS RULING. #2255's spare-wiring
+    relay answers a different measured defect and is untouched: a deck that
+    re-routes still drops the spare tie-off wiring for the router to lay
+    again."""
+    text = _reroutes()
+    assert "SPARE_WIRING_RELAID" in text
+    assert "_vibeic_spare_safe_clear_net" in text
 
 
 def test_the_shared_helper_still_refuses_pg():

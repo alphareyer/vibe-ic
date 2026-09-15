@@ -206,12 +206,14 @@ Implement TopModule.
  - output q
 rst_n is an active-low asynchronous reset; q is sampled on the rising edge of clk
 and reset by rst_n. The block just registers the input. The command word is
-0x0 = LOAD, 0x1 = SHIFT, 0x2 = CLEAR.
+0x0 = LOAD, 0x1 = SHIFT, 0x2 = CLEAR. It holds an 8-bit accumulator.
 """
     res, f = run(tmp_path, spec)
-    # An opcode layer with enumerated code points is present, so all four
-    # checklist items apply here; none of the four is addressed -> four
-    # uncovered findings, and none of them is a self-skip.
+    # All four subjects are DECLARED here: an opcode layer with enumerated code
+    # points (illegal-inputs, and with it the command stream back-to-back asks
+    # about) and an 8-bit accumulator (full/empty/overflow — R-0915-29 requires
+    # the subject to exist before the item is asked). None of the four is
+    # ADDRESSED -> four uncovered findings, and none of them is a self-skip.
     cc = [x for x in f if x['code'] == 'corner-case-uncovered']
     assert len(cc) == 4, f
     assert [x for x in f if x['code'] == 'corner-case-not-applicable'] == [], f

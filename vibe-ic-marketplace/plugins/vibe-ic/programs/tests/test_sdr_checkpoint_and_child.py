@@ -647,21 +647,32 @@ def test_a_design_with_no_spares_still_gets_its_guides(tmp_path):
     depend on them, because it is attached to the router commands and not to
     the spare plan.
 
-    PREMISE UPDATED by R-0915-25, and tightened rather than relaxed. This used
-    to assert that a spare-less child destroys no wire at all. That is no
-    longer the design: a design with no spares can still carry EXTENSION nets
-    -- on sha256 77 of the 101 are top-level IO, nothing to do with the spare
-    pool -- and the child must be able to re-lay those. So what is pinned now
-    is the property that actually matters and was only ever implied before:
-    EXACTLY ONE destroy site, reached only from the extension census, and NO
-    spare loop when there are no spares."""
+    PREMISE RESTORED by R-0915-33, to the one this case had before R-0915-25.
+    R-0915-25 relaxed it -- a spare-less child could still carry EXTENSION nets
+    and had to be able to re-lay those, so the assertion became "exactly one
+    destroy site, reached only from the extension census". R-0915-33 RETIRES
+    that relay (MEASURED on subservient r14: the error it worked around is
+    cosmetic -- DRT-0702 0 violations, no gate reads DRT-1010 -- relaying did
+    not cure it, and it cost SHIP_WNS_BEFORE -3.03 -> -3.64 and sta_corner SS
+    +0.03 -> -0.50). So the original, STRONGER statement is true again: a
+    spare-less child destroys no wire at all."""
     ship = R._after_restore_tcl("", None, reroutes_immediately=False)
     child = R._after_restore_tcl("", None, reroutes_immediately=True)
     assert "SPARE_WIRING_RELAID" not in child
-    # never a second destroy site, with or without a spare plan
+    # The one `odb::dbWire_destroy` left in the text is inside the shared
+    # helper's PROC DEFINITION, and with no spares and no extension relay
+    # NOTHING CALLS IT. That is the statement worth pinning: the capability is
+    # defined once, in one audited place, and this deck reaches it zero times.
     assert child.count("odb::dbWire_destroy") == 1
-    # and it is the EXTENSION census that reaches it, not a spare loop
-    assert "EXT_WIRE_RELAID" in child
+    assert "proc _vibeic_spare_safe_clear_net" in child
+    calls = [ln for ln in child.splitlines()
+             if "_vibeic_spare_safe_clear_net" in ln
+             and not ln.lstrip().startswith("proc ")]
+    assert calls == [], calls
+    # the extension census still runs and still names what it found
+    assert "EXT_WIRE_CENSUS:" in child
+    assert "EXT_WIRE_RELAID" not in child
+    assert "EXT_WIRE_RELAY_RETIRED" in child
     assert "_vibeic_spare_safe_clear_net $_spare_n 1" not in child
     # a deck that may not re-route still destroys nothing at all
     assert "odb::dbWire_destroy" not in ship
