@@ -7599,6 +7599,106 @@ def _p0_nonempty(value: Any) -> Any:
 
 
 
+#: R-0915-34(b): gate -> (L-doc tag, the POPULATION fields that gate judges,
+#: {field: value} the document must positively state).
+#:
+#: The populations are what the gate counts; the assertions are the document
+#: SAYING SO, which is what turns "we found nothing" into "the design declares
+#: none" — the distinction the corrected R-0915-19 turns on. An L-doc that
+#: lists no registers but does not say `register_map_present: false` has been
+#: silent, and its gate stays live.
+_P0_GATE_ZERO_POPULATION: Dict[str, Any] = {
+    # MEASURED on spm x gf180mcuD (a serial-parallel multiplier): L4 registers
+    # [] / internal_registers [] / register_map_present false; L20 scan_chains
+    # [] / bist_mbist [] / jtag_tap null / dft_present false; L23
+    # attack_surface [] / key_handling {} / side_channel_mitigation [] /
+    # security_requirements_present false / secure_boot false.
+    "l4_regmap_declared_register_coverage_check": (
+        "L4_", ("registers", "internal_registers"),
+        {"register_map_present": False}),
+    "l4_regmap_phase2_emitter_contract_check": (
+        "L4_", ("registers", "internal_registers"),
+        {"register_map_present": False}),
+    "l20_dft_scan_topology_actionable_check": (
+        "L20_", ("scan_chains", "bist_mbist", "jtag_tap", "test_compression"),
+        {"dft_present": False}),
+    "l23_security_requirements_typed_check": (
+        "L23_", ("attack_surface", "key_handling", "side_channel_mitigation"),
+        {"security_requirements_present": False, "secure_boot": False}),
+}
+
+
+def _p0_zero_population_evidence(project: Path,
+                                 gate_name: str) -> Optional[Dict[str, Any]]:
+    """The design's own declaration that a gate's population is zero, or None.
+
+    RE-DERIVED FROM THE BYTES every time it is asked, so the evidence cannot be
+    asserted, cached or carried over from a document that has since changed.
+    Returns None — meaning the gate stays live — unless ALL of:
+
+      * the declaring L-doc exists and parses;
+      * every population field it names is empty (a `null`, `[]`, `{}` or an
+        absent key is empty; anything else counts, a scalar as one);
+      * every assertion field is present and equal to the stated value.
+
+    Fields are read through `l_doc_consumer_contract.l_doc_fields`, the reader
+    every other consumer of these documents already uses, because these layers
+    ship in TWO SHAPES and a reader that knows only one sees an empty document
+    and would answer N/A for a design that declared its subject — MEASURED on
+    spm: L4 writes `registers` at the top level while L20 and L23 nest theirs
+    under `fields`. The reader is NAMED in the evidence so a reviewer can
+    re-run the same count against the same bytes.
+    """
+    spec = _P0_GATE_ZERO_POPULATION.get(gate_name)
+    if spec is None:
+        return None
+    tag, populations, assertions = spec
+    path = _p0_contract_doc(project, tag)
+    doc, state = _p0_contract_json(path)
+    if state != "valid" or path is None:
+        return None
+    fields = _ldoc.l_doc_fields(doc)
+    total = 0
+    for name in populations:
+        value = fields.get(name)
+        if value is None:
+            continue
+        total += len(value) if isinstance(value, (list, dict, str, tuple,
+                                                  set)) else 1
+    if total != 0:
+        return None
+    for name, expected in assertions.items():
+        if name not in fields or fields[name] != expected:
+            return None
+    try:
+        rel = str(Path(path).resolve().relative_to(Path(project).resolve()))
+    except ValueError:
+        return None
+    return {
+        "kind": "design-declared-zero-population",
+        "declaration_path": rel,
+        "declaration_reader": "l_doc_consumer_contract.l_doc_fields",
+        "population_paths": list(populations),
+        "declared_population": 0,
+        "assertions": [{"path": k, "equals": v}
+                       for k, v in sorted(assertions.items())],
+    }
+
+
+def _p0_zero_population_subject(project: Path, gate_name: str,
+                                state: str) -> Any:
+    """The subject that keeps a batch-1 gate live, or None when declared zero.
+
+    Same fail-closed shape as `_p0_declared_absent`: a document that is not
+    there or will not parse has declared nothing and returns a truthy reason.
+    """
+    if state != "valid":
+        return f"declaring document not readable (state={state!r})"
+    if _p0_zero_population_evidence(project, gate_name) is not None:
+        return None
+    return f"{gate_name}: the design declares no zero population for it"
+
+
 def _p0_declared_absent(state: str, value: Any) -> Any:
     """The subject, or a SENTINEL that keeps the gate live.
 
@@ -7665,6 +7765,13 @@ def _p0_contract_context(project: Path,
     l11_path = _p0_contract_doc(project, "L11_")
     l6, l6_state = _p0_contract_json(l6_path)
     l11, l11_state = _p0_contract_json(l11_path)
+    # R-0915-34(b) batch 1 — the layers whose own POPULATION answers a P0
+    # sub-gate. Loaded the same way as every other layer here, so a document
+    # that is absent or will not parse keeps its gate live.
+    l20_path = _p0_contract_doc(project, "L20_")
+    l23_path = _p0_contract_doc(project, "L23_")
+    _, l20_state = _p0_contract_json(l20_path)
+    _, l23_state = _p0_contract_json(l23_path)
     l9_path = _p0_contract_doc(project, "L9_")
     l12_path = _p0_contract_doc(project, "L12_")
     l3, l3_state = _p0_contract_json(l3_path)
@@ -7799,6 +7906,14 @@ def _p0_contract_context(project: Path,
              if _p0_nonempty(l11.get(k)) is not None), None)),
         "l6_state": l6_state,
         "l11_state": l11_state,
+        "l4_registers": _p0_zero_population_subject(
+            project, "l4_regmap_phase2_emitter_contract_check", l4_state),
+        "l20_dft": _p0_zero_population_subject(
+            project, "l20_dft_scan_topology_actionable_check", l20_state),
+        "l23_security": _p0_zero_population_subject(
+            project, "l23_security_requirements_typed_check", l23_state),
+        "l20_state": l20_state,
+        "l23_state": l23_state,
         "deliverable_record": (str(project / "RESULT.md")
                                if (project / "RESULT.md").is_file() else None),
         # R-0915-15 (lane icspm3) — the MCP-EDA execution manifest, present
@@ -7893,6 +8008,19 @@ _P0_GATE_REQUIRED_CONTEXT: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "assertion_covers_l3_constraints_check": ("l3_constraints",),
     # no OTP content declared in L11 -> the OTP image/layer consistency gate:
     "otp_image_layer_consistency_check": ("l11_otp",),
+    # ── R-0915-34(b) batch 1: four gates whose subject an L-doc declares ────
+    # no registers declared in L4 -> the two register-map gates. The emitter
+    # gate's own docstring already states the disposition
+    # ("`no_registers_in_input` / `register_map_present: false` -> SKIP(2)");
+    # what it could not do is make the umbrella book that skip as anything but
+    # a program error.
+    "l4_regmap_declared_register_coverage_check": ("l4_registers",),
+    "l4_regmap_phase2_emitter_contract_check": ("l4_registers",),
+    # no DFT declared in L20 -> the scan-topology actionability gate. Same
+    # declaration step 11 and DT1-DT3 already read in the flow yaml.
+    "l20_dft_scan_topology_actionable_check": ("l20_dft",),
+    # no security asset declared in L23 -> the typed-requirements gate.
+    "l23_security_requirements_typed_check": ("l23_security",),
     # AND ONE THAT IS NOT A DECLARATION AT ALL — a FLOW-ORDER defect, named as
     # that. `deliverable_verdict_consistency_check` reads `RESULT.md`, which
     # the runner authors at the END of the run, so a P0 sub-gate asking for it
@@ -7915,6 +8043,9 @@ _P0_CONTEXT_DOCUMENT_STATE: Mapping[str, str] = MappingProxyType({
     "l3_constraints": "l3_state",
     "l6_reject_rules": "l6_state",
     "l11_otp": "l11_state",
+    "l4_registers": "l4_state",
+    "l20_dft": "l20_state",
+    "l23_security": "l23_state",
     "crc_signal": "l3_state",
     "crc_vectors": "l3_state",
     "l3_opcodes": "l3_state",
@@ -9323,6 +9454,16 @@ def _run_structural_rtl_gates(project: Path,
                         gate_name, "SKIP", _contract_na,
                         {"skip_kind": "declaration-not-present",
                          "applicability_source": "generated L-doc roster",
+                         # R-0915-34(b): where the roster entry's basis is a
+                         # POPULATION the design declares zero, the record
+                         # carries that declaration re-derived from the bytes
+                         # -- document path, reader, fields counted, count,
+                         # and the assertions that make it a statement rather
+                         # than an empty scan. `None` for the entries whose
+                         # basis is a different kind of declaration; those keep
+                         # the prose reason they already had.
+                         "applicability_evidence":
+                         _p0_zero_population_evidence(project, gate_name),
                          # A gate outside the closed contract table is invoked
                          # under the default project-positional convention;
                          # a declaration-derived N/A names the contract it
