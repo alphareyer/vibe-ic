@@ -1,0 +1,389 @@
+"""The sign-off summary publishes what the run measured, after it exists (icspm2).
+
+TWO MEASURED FAILURES, ONE PROGRAM
+==================================
+
+1. THE SUMMARY WAS WRITTEN BEFORE ITS EVIDENCE. On a FIRST run of `spm` x
+   gf180mcuD in a fresh project directory:
+
+       phase3/final/metrics.json          05:12:48   <- the summary
+       reports/phase3/drc_router.rpt      05:12:47   <- runner-written, in time
+       reports/phase3/drc_signoff.rpt     05:11:47   <- runner-written, in time
+       reports/phase3/drc_router.json     05:15:37   <- THREE MINUTES LATER
+       reports/phase3/drc_signoff.json    05:15:39   <- THREE MINUTES LATER
+
+   The two `.json` are written by `drc_report_check`, and the only thing that
+   runs it is the FLOW's own gate clause inside the completion audit. So the
+   summary recorded `route__drc_errors` / `klayout__drc_error__count` as
+   NOT_MEASURED ("producers found: none"), the audit created the reports, and
+   its own `--check` then reported the record stale. It passed on the
+   predecessor lane only because that lane re-used ONE project directory, so a
+   previous attempt's reports were already on disk.
+
+2. FIVE AXES THE RUN MEASURED AND NEVER PUBLISHED.
+   `every_required_metric_key_has_a_producer` reported
+
+       axis 'drv' / 'antenna' / 'ir' / 'em' / 'equivalence' / 'eco_readiness'
+       IS NOT PROVEN BY ANY RUN IN THIS CORPUS
+
+   on a run that had measured every one of them — `SIGNOFF_DRV_CENSUS
+   max_fanout violators=0`, `antenna.json net_violations 0 / pin_violations 0`,
+   `ir_drop.json worst_ir_uv 1630.0`, `em_current_authority.json jmax_screen
+   offender_count 0 / worst_utilization 0.449207`, `lec_post_layout.json
+   verdict PROVEN_EQUIVALENT`, `spare_preservation.json survived 6`. Every
+   record was on disk under a name the canonical vocabulary did not carry.
+
+   And `_drv` returned `text.count("VIOLATED")` — the whole report's violated
+   row count — for EVERY check, so max-slew and max-cap were the same number
+   under two names.
+"""
+import json
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+PROGRAMS = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROGRAMS))
+
+import signoff_metrics_aggregate as sma   # noqa: E402
+import _metric_vocabulary as mv           # noqa: E402
+
+STA_RPT = """\
+SIGNOFF_CHECK_TYPES_REPORTED recovery removal max_slew min_pulse_width max_capacitance max_fanout
+SIGNOFF_DRV_CENSUS_BEGIN the tool's own violator count for every check type requested above
+SIGNOFF_DRV_CENSUS max_slew violators=3
+SIGNOFF_DRV_CENSUS max_fanout violators=0
+SIGNOFF_DRV_CENSUS max_capacitance violators=1
+some row VIOLATED
+another row VIOLATED
+a third row VIOLATED
+a fourth row VIOLATED
+"""
+
+
+def _proj(tmp_path, **files):
+    p = tmp_path / "proj"
+    for rel, payload in files.items():
+        f = p / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(payload if isinstance(payload, str)
+                     else json.dumps(payload))
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+# ---------------------------------------------------------------------------
+# 2a. the DRV census — per check, not one total under three names
+# ---------------------------------------------------------------------------
+def test_each_drv_check_gets_its_own_count(tmp_path):
+    p = _proj(tmp_path, **{"reports/phase3/sta_spef_based.rpt": STA_RPT})
+    assert sma._drv(p, "max_slew").value == 3
+    assert sma._drv(p, "max_capacitance").value == 1
+    assert sma._drv(p, "max_fanout").value == 0
+
+
+def test_the_three_counts_are_not_the_same_number(tmp_path):
+    """The defect, stated directly: before the fix all three were 4 — the
+    report's whole VIOLATED row count."""
+    p = _proj(tmp_path, **{"reports/phase3/sta_spef_based.rpt": STA_RPT})
+    vals = {c: sma._drv(p, c).value
+            for c in ("max_slew", "max_capacitance", "max_fanout")}
+    assert len(set(vals.values())) == 3, vals
+
+
+def test_an_unavailable_counter_is_not_a_zero(tmp_path):
+    rpt = STA_RPT.replace("max_fanout violators=0",
+                          "max_fanout violators=UNAVAILABLE")
+    p = _proj(tmp_path, **{"reports/phase3/sta_spef_based.rpt": rpt})
+    cell = sma._drv(p, "max_fanout")
+    assert not cell.measured
+    assert "UNAVAILABLE" in cell.reason
+
+
+def test_a_check_the_census_omits_is_not_a_zero(tmp_path):
+    rpt = STA_RPT.replace("SIGNOFF_DRV_CENSUS max_fanout violators=0\n", "")
+    p = _proj(tmp_path, **{"reports/phase3/sta_spef_based.rpt": rpt})
+    assert not sma._drv(p, "max_fanout").measured
+
+
+def test_a_report_with_no_census_falls_back_and_says_so(tmp_path):
+    """Every already-published run has no census; it must still answer, and the
+    basis must disclose that the figure is not per-check."""
+    rpt = "\n".join(l for l in STA_RPT.splitlines()
+                    if "SIGNOFF_DRV_CENSUS" not in l) + "\n"
+    p = _proj(tmp_path, **{"reports/phase3/sta_spef_based.rpt": rpt})
+    cell = sma._drv(p, "max_slew")
+    assert cell.value == 4
+    assert "NOT specific to max_slew" in cell.basis
+
+
+def test_a_check_the_run_never_requested_is_still_refused(tmp_path):
+    rpt = STA_RPT.replace(" max_fanout\n", "\n", 1)
+    p = _proj(tmp_path, **{"reports/phase3/sta_spef_based.rpt": rpt})
+    assert not sma._drv(p, "max_fanout").measured
+
+
+# ---------------------------------------------------------------------------
+# 2b. the five axes — each measured, each refusing honestly
+# ---------------------------------------------------------------------------
+def test_ir_worst_drop_is_volts_from_microvolts(tmp_path):
+    p = _proj(tmp_path, **{"reports/phase3/ir_drop.json": {
+        "worst_ir_uv": 1630.0, "supply_measured": True,
+        "unmeasured_reason": None}})
+    assert sma._ir_worst_drop_v(p).value == pytest.approx(0.00163)
+
+
+@pytest.mark.parametrize("doc", [
+    {"worst_ir_uv": 1630.0, "supply_measured": False},
+    {"worst_ir_uv": 1630.0, "unmeasured_reason": "PSM found no source"},
+    {"supply_measured": True},
+])
+def test_an_ir_number_the_tool_did_not_establish_is_refused(tmp_path, doc):
+    p = _proj(tmp_path, **{"reports/phase3/ir_drop.json": doc})
+    assert not sma._ir_worst_drop_v(p).measured
+
+
+def test_em_violations_and_ratio_come_from_the_jmax_screen(tmp_path):
+    p = _proj(tmp_path, **{"reports/phase3/em_current_authority.json": {
+        "jmax_screen": {"skip_reason": None, "offender_count": 0,
+                        "summary": {"segments_screened": 6949,
+                                    "worst_utilization": 0.449207}}}})
+    assert sma._em(p, "violations").value == 0
+    assert sma._em(p, "worst_ratio").value == pytest.approx(0.449207)
+
+
+def test_a_skipped_or_empty_em_screen_is_not_a_zero(tmp_path):
+    for screen in ({"skip_reason": "no Jmax reference", "offender_count": 0,
+                    "summary": {"segments_screened": 0}},
+                   {"skip_reason": None, "offender_count": 0,
+                    "summary": {"segments_screened": 0}}):
+        p = _proj(tmp_path / str(id(screen)),
+                  **{"reports/phase3/em_current_authority.json":
+                     {"jmax_screen": screen}})
+        assert not sma._em(p, "violations").measured
+        assert not sma._em(p, "worst_ratio").measured
+
+
+def test_the_equivalence_verdict_is_the_checkers_own(tmp_path):
+    p = _proj(tmp_path, **{"reports/phase3/lec_post_layout.json": {
+        "verdict": "PROVEN_EQUIVALENT", "equivalent": True,
+        "proven_points": 12, "total_points": 12, "skipped": False}})
+    assert sma._equivalence(p).value == "PROVEN_EQUIVALENT"
+
+
+def test_a_skipped_lec_proves_nothing(tmp_path):
+    p = _proj(tmp_path, **{"reports/phase3/lec_post_layout.json": {
+        "verdict": "SKIPPED", "skipped": True}})
+    assert not sma._equivalence(p).measured
+
+
+def test_spares_reads_the_artefact_a_STEP_DECLARES(tmp_path):
+    """The better fact is `spare_preservation.json`'s `survived` count, and the
+    flow REFUSES it to any gate: step 34 says "no step's required_outputs names
+    it … Declaring it asserts a production the same gate denies four lines
+    down", and step 37.5ic says "no gate may read the path" until a step
+    produces it UNCONDITIONALLY and declares it. I wired that consumer anyway
+    and d7 caught it (`W2:produced_consumed_undeclared` on step 37.4) — the
+    register working. Step 18 DOES declare `reports/spare_cell_coverage.json`,
+    so that is what may honestly be read."""
+    p = _proj(tmp_path, **{"reports/spare_cell_coverage.json": {
+        "count": 6, "verdict": "PASS", "actual_density": 0.0229,
+        "target_density": 0.02}})
+    cell = sma._spares(p)
+    assert cell.value == 6
+
+
+def test_the_spares_basis_says_it_is_NOT_a_survival_count(tmp_path):
+    """A weaker fact under a name that could be read as the stronger one has to
+    say so where the reader is: in the basis, beside the number."""
+    p = _proj(tmp_path, **{"reports/spare_cell_coverage.json": {
+        "count": 6, "verdict": "PASS", "actual_density": 0.0229,
+        "target_density": 0.02}})
+    basis = sma._spares(p).basis
+    assert "POOL AT INSERTION" in basis
+    assert "not a survival count" in basis.lower()
+
+
+def test_no_gate_here_reads_the_undeclared_preservation_record():
+    """The regression this file exists to stop coming back. `_spares` must not
+    name `reports/spare_preservation.json` at all — reading it is what put a
+    produced-consumed-undeclared artefact on step 37.4."""
+    import inspect
+    src = inspect.getsource(sma._spares)
+    code = src.split('"""')[0] + src.split('"""')[-1]   # drop the docstring
+    assert "spare_preservation.json" not in code, code
+
+
+def test_an_ungraded_spare_pool_is_not_a_zero(tmp_path):
+    p = _proj(tmp_path, **{"reports/spare_cell_coverage.json": {
+        "verdict": "PASS"}})
+    assert not sma._spares(p).measured
+
+
+def test_a_clean_antenna_result_answers_the_total(tmp_path):
+    p = _proj(tmp_path, **{"reports/phase3/antenna.json": {
+        "net_violations": 0, "pin_violations": 0, "routing_incomplete": False}})
+    assert sma._antenna_total(p).value == 0
+
+
+@pytest.mark.parametrize("nets,pins", [(1, 0), (0, 2), (3, 5)])
+def test_a_dirty_antenna_result_refuses_to_invent_a_total(tmp_path, nets, pins):
+    """The two populations OVERLAP — a net may violate at several pins — so
+    their sum is not the total, and a dirty design is never certified here."""
+    p = _proj(tmp_path / f"{nets}_{pins}", **{"reports/phase3/antenna.json": {
+        "net_violations": nets, "pin_violations": pins,
+        "routing_incomplete": False}})
+    cell = sma._antenna_total(p)
+    assert not cell.measured
+    assert "do not sum" in cell.reason or "not the total" in cell.reason
+
+
+def test_an_incomplete_route_is_not_antenna_signoff_evidence(tmp_path):
+    p = _proj(tmp_path, **{"reports/phase3/antenna.json": {
+        "net_violations": 0, "pin_violations": 0, "routing_incomplete": True}})
+    assert not sma._antenna_total(p).measured
+
+
+def test_every_new_key_is_a_RULE_and_a_vocabulary_entry(tmp_path):
+    """A producer with no vocabulary entry is invisible to the axis gate, and a
+    vocabulary entry with no producer is a promise nothing keeps."""
+    emitted = {k for k, _label, _fn in sma.RULES}
+    for canonical, spelling in (
+            ("timing.drv.max_fanout_violations",
+             "design__max_fanout_violation__count"),
+            ("power.ir.worst_drop_v", "power__ir__worst_drop_v"),
+            ("reliability.em.violations", "reliability__em__violation__count"),
+            ("reliability.em.worst_ratio", "reliability__em__worst_ratio"),
+            ("equivalence.verdict", "equivalence__verdict"),
+            ("design_for_eco.spares.count", "design_for_eco__spares__count"),
+            ("physical.antenna.violations", "antenna__violation__count")):
+        assert spelling in emitted, f"{spelling} is in no RULE"
+        entries = mv.SYNONYMS.get(canonical, ())
+        assert any(s == spelling and rel == mv.SAME_FACT
+                   for s, rel, _why in entries), (canonical, entries)
+
+
+# ---------------------------------------------------------------------------
+# 1. the ordering — the evidence exists before the summary reads it
+# ---------------------------------------------------------------------------
+def test_the_runner_emits_the_drc_attribution_reports_before_aggregating(
+        tmp_path):
+    import phase3_one_shot_runner as r
+    fn = getattr(r, "_emit_drc_attribution_reports", None)
+    if fn is None:
+        pytest.skip("pre-fix tree has no _emit_drc_attribution_reports")
+    p = _proj(tmp_path, **{
+        "reports/phase3/drc_router.rpt": "[INFO DRT-0199] Number of violations = 0\n",
+        "reports/phase3/drc_signoff.rpt": "total DRC errors: 0\n"})
+    rows = fn(p)
+    drc = [row for row in rows if row.get("program", "drc_report_check")
+           == "drc_report_check"]
+    assert {row["json"] for row in drc} == {
+        "reports/phase3/drc_router.json", "reports/phase3/drc_signoff.json"}
+    for row in drc:
+        assert row["status"] == "PRODUCED", row
+        assert (p / row["json"]).is_file(), row
+
+
+def test_an_absent_rpt_produces_nothing_and_says_why(tmp_path):
+    import phase3_one_shot_runner as r
+    fn = getattr(r, "_emit_drc_attribution_reports", None)
+    if fn is None:
+        pytest.skip("pre-fix tree has no _emit_drc_attribution_reports")
+    p = _proj(tmp_path, **{"reports/keep": "x"})
+    rows = fn(p)
+    assert all(row["status"] == "NOT_APPLICABLE" for row in rows), rows
+    assert all(not (p / row["json"]).is_file() for row in rows)
+    assert all(row.get("reason") for row in rows)
+
+
+def test_the_argv_is_the_one_the_flow_declares():
+    """Two spellings of one invocation is two places to get wrong. If the flow
+    clause moves, this test is where it is noticed."""
+    import phase3_one_shot_runner as r
+    jobs = getattr(r, "_DRC_ATTRIBUTION_JOBS", None)
+    if jobs is None:
+        pytest.skip("pre-fix tree has no _DRC_ATTRIBUTION_JOBS")
+    yaml = (PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml").read_text()
+    for job in jobs:
+        prog, rel_json, _rel_rpt, argv = (
+            job if len(job) == 4 else ("drc_report_check", *job))
+        want = f"{prog} . " + " ".join(argv)
+        if prog == "drc_report_check":
+            want += f" --json {rel_json}"
+        assert want in yaml, (
+            f"the runner's invocation is not the flow's:\n  runner: {want}")
+
+
+def test_the_verdict_of_the_spawned_gate_is_recorded_not_discarded(tmp_path):
+    """`drc_report_check` is a GATE; this call site wants only the attribution
+    record. The status is bound and written down, so the decision is on the
+    record rather than inferred from silence."""
+    import phase3_one_shot_runner as r
+    fn = getattr(r, "_emit_drc_attribution_reports", None)
+    if fn is None:
+        pytest.skip("pre-fix tree has no _emit_drc_attribution_reports")
+    p = _proj(tmp_path, **{
+        "reports/phase3/drc_signoff.rpt": "total DRC errors: 0\n"})
+    rows = fn(p)
+    produced = [row for row in rows if row["status"] == "PRODUCED"]
+    assert produced, rows
+    for row in produced:
+        assert "rc" in row
+        assert row["blocking_here"] is False
+        assert row["why_advisory_here"]
+
+
+def test_the_spare_record_is_produced_before_the_summary_reads_it(tmp_path):
+    """`design_for_eco__spares__count` brought its OWN ordering dependency, and
+    it is the same defect one report over. MEASURED on a run of `spm`:
+
+        phase3/final/metrics.json          06:05:10   <- the summary
+        reports/spare_preservation.json    06:07:45   <- TWO AND A HALF MINUTES LATER
+        signoff_metrics_aggregate . --check -> rc 1
+          "1 key(s) no longer state what this run's reports state:
+           design_for_eco__spares__count"
+
+    The only thing that runs the checker is the flow's own gate clause inside
+    the completion audit. Its trigger is the artefact it READS, never one of
+    its own outputs — a producer triggered by its own product can never run the
+    first time."""
+    import phase3_one_shot_runner as r
+    jobs = getattr(r, "_DRC_ATTRIBUTION_JOBS", None)
+    if jobs is None or len(jobs[0]) != 4:
+        pytest.skip("pre-fix tree has no multi-program producer table")
+    progs = {j[0] for j in jobs}
+    assert "spare_cell_coverage_check" in progs, sorted(progs)
+    row = next(j for j in jobs if j[0] == "spare_cell_coverage_check")
+    assert row[1] == "reports/spare_cell_coverage.json", (
+        "the declared artefact, not the conditional preservation record")
+    assert row[2] == "phase3/stage3/pnr/spare_cells.json", (
+        "the trigger must be the artefact it READS, not an output of its own")
+    assert not any(j[1] == "reports/spare_preservation.json" for j in jobs), (
+        "no producer here may target the path no step declares")
+
+
+def test_the_sby_asks_for_multiclock_so_an_edge_mutation_is_visible():
+    """MEASURED on a real `spm` harness in the pinned image, one solo harness
+    per property x a mutant flipping `@(posedge clk)` to `@(negedge clk)`:
+
+        default (no multiclock)   base PASS   negedge mutant ERROR
+            engine_0: Error: Does not work for combinational networks.
+        multiclock on             base PASS   negedge mutant FAIL  x4 properties
+
+    An ERROR is not a discrimination. The flow asks the formal-verify expert to
+    discharge `L8.clock_and_reset_waveform.clocks.0.edge` — the DECLARED CLOCK
+    EDGE — and without this option nothing it authors can refute a design that
+    does not honour it."""
+    import formal_property_run as fpr
+    sby = fpr.sby_text(
+        harness_file="h.sv", rtl_files=["d.v"], top="fv_top") \
+        if hasattr(fpr, "sby_text") else None
+    if sby is None:
+        import inspect
+        src = inspect.getsource(fpr)
+        assert "multiclock on" in src, "the emitted .sby never asks for it"
+    else:
+        assert "multiclock on" in sby, sby

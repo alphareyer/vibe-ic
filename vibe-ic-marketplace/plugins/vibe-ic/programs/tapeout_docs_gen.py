@@ -488,6 +488,63 @@ def main():
     ports = json.loads(a.ports_json.read_text()) if a.ports_json and a.ports_json.is_file() else []
     pre = json.loads(a.precheck_json.read_text()) if a.precheck_json and a.precheck_json.is_file() else []
 
+    # ── DOES THIS STEP APPLY TO THIS DESIGN AT ALL? ────────────────────────
+    #
+    # ONE GATE CLAUSE, TWO PROGRAMS, AND ONLY ONE OF THEM WAS ASKING
+    # (2026-09-15, icspm2). Step 37.5ic's clause runs `tapeout_precheck` and
+    # this program inside one `all_of`. MEASURED on a gf180mcuD run of `spm`,
+    # a HARDMACRO delivery:
+    #
+    #     tapeout_precheck . --json …   -> PASS, step_applies false,
+    #         "step 37.5ic does not apply to this design: step 0.5ic routed it
+    #          to the IP/hardmacro terminal … which delivers LEF/Liberty/GDS/
+    #          Verilog and no die. There is no submission, so there is no
+    #          tape-out precheck to pass"
+    #     phase3_one_shot_runner.step_tapeout_docs_gen -> SKIP, from
+    #         `_canonical_step_condition(project, "37.5ic")`
+    #     tapeout_docs_gen …            -> rc 1, NOT RELEASABLE, refusing the
+    #         design on five DIE metrics an IP delivery has no die to measure
+    #
+    # Two of the three sites knew; this one asked nothing. The flow's own
+    # structural condition cannot separate them — step 0.5ic writes
+    # `input/submission_template/slots/*.yaml` on EVERY route — so the question
+    # has to be asked where the answer lives, which is the design's own
+    # declaration.
+    #
+    # THE SAME READER AND THE SAME CHANNEL as the sibling program, deliberately:
+    # `tapeout_precheck.delivery_route` (which consults
+    # `submission_template_check.catalogue_selects_ip`, never a filename), and
+    # the rc-0 NOT_APPLICABLE channel whose comment in that program says why it
+    # is not `_vacuous_exit.RC_VACUOUS`: "rc 2 … `_DECLARED_SIGNOFF_GATES`
+    # reads as an ERROR outright".
+    #
+    # ONLY THE IP ROUTE. `delivery_route` answers ROUTE_UNDECLARED — not
+    # ROUTE_IP — when nobody declared one, and its own docstring says why:
+    # "0.5ic failing is the one circumstance in which a CHIP most needs this
+    # step, and reading its silence as 'must be an IP' would let the failure
+    # delete the check that would have reported it." A CHIP with unmeasured DRC
+    # is still rc 1 NOT RELEASABLE, unchanged.
+    #
+    # AND NO DOCUMENT IS WRITTEN. The anti-fabrication rule this program is
+    # built on is untouched: a run that is not documented here is not
+    # documented at all.
+    if a.project is not None:
+        try:
+            import tapeout_precheck as _tp                   # noqa: PLC0415
+            route, route_evidence = _tp.delivery_route(a.project)
+        except Exception as exc:                             # noqa: BLE001
+            route, route_evidence = "", f"route not read: {exc}"
+        if route and route == getattr(_tp, "ROUTE_IP", object()):
+            print(f"NOT_APPLICABLE — no documents written. Step 37.5ic does "
+                  f"not apply to this design: step 0.5ic routed it to the "
+                  f"IP/hardmacro terminal ({route_evidence}), which delivers "
+                  f"LEF/Liberty/GDS/Verilog and no die. These are DIE release "
+                  f"documents; there is no die to describe, and this is NOT a "
+                  f"statement that a layout was examined. The IP terminal's "
+                  f"own documents are step 37.5ip's "
+                  f"(`ip_release_docs_gen`).")
+            raise SystemExit(0)
+
     blockers = release_blockers(m)
     if blockers and not a.allow_incomplete:
         print("NOT RELEASABLE — no documents written. "

@@ -690,6 +690,35 @@ def releases(project: Path) -> List[str]:
     project.json that names nothing is a hole in the DOCUMENT, not a licence to
     lose the release.
     """
+    #: AND A GDS IS NOT A DIE WHEN THE DESIGN DECLARED IT IS NOT (icspm2,
+    #: 2026-09-15). An IP/hardmacro delivery ships a GDS too — it is one of the
+    #: four views of the kit (LEF + Liberty + GDS + Verilog) that step 37.5ip
+    #: delivers — so a stem-per-GDS rule makes EVERY hardmacro owe a DIE
+    #: document set it has no die for. MEASURED on a gf180mcuD run of `spm`:
+    #:
+    #:     release_docs_check . --arm ic   rc 1
+    #:       [ERROR] RELEASE_DOCUMENTATION_ABSENT (spm): the run signs off
+    #:       layout `spm` under phase3/stage4/gds and
+    #:       phase3/stage4/documentation/ic/spm carries no release documentation
+    #:
+    #:     release_docs_check . --arm ip   rc 0   (six documents, PASS)
+    #:
+    #: The IP arm had already documented the same artefacts. So the route is
+    #: asked — through `tapeout_precheck.delivery_route`, the same reader
+    #: `tapeout_precheck` and `tapeout_docs_gen` use, never a filename — and on
+    #: the IP terminal this returns NO ic release. The caller then reaches its
+    #: OWN documented vacuous tier (`no_release_to_examine`), which is where
+    #: "this arm has no release in this run" already lives.
+    #:
+    #: ONLY THE IP ROUTE. `delivery_route` answers UNDECLARED, never IP, when
+    #: nobody declared one, so a chip whose step 0.5ic failed still owes its
+    #: documents — which is the state in which it most needs to.
+    try:
+        import tapeout_precheck as _tp                        # noqa: PLC0415
+        if _tp.delivery_route(project)[0] == _tp.ROUTE_IP:
+            return []
+    except Exception:                                         # noqa: BLE001
+        pass                    # unreadable route: owe the documents, as before
     gds_dir = _pl.gds_dir(project)
     if not gds_dir.is_dir():
         return []

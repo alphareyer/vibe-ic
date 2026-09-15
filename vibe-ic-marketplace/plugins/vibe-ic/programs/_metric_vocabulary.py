@@ -118,6 +118,16 @@ SYNONYMS: Dict[str, Tuple[Tuple[str, str, str], ...]] = {
          "unmatched PINS only; the same argument as devices and nets."),
     ),
     "physical.antenna.violations": (
+        # Added 2026-09-15 (icspm2). The two NARROWER entries below are right
+        # and stay; what was missing is a spelling that IS the total. The
+        # producer emits `antenna__violation__count` ONLY when both populations
+        # are zero — the one state in which the total is not in doubt, since a
+        # net may violate at several pins and the two do not sum. A design WITH
+        # violations still resolves nothing here, which is the direction that
+        # cannot certify a dirty result.
+        ("antenna__violation__count", SAME_FACT,
+         "the antenna violation TOTAL, emitted only for a result whose net and "
+         "pin populations are both zero; never a sum of the two below."),
         ("antenna__violating__nets", NARROWER,
          "antenna violations are counted per NET and per PIN and the two are "
          "not the same population; neither alone is the total."),
@@ -135,7 +145,54 @@ SYNONYMS: Dict[str, Tuple[Tuple[str, str, str], ...]] = {
          "max SLEW and max TRANSITION are the same design-rule check under two "
          "industry names; both mean the signal edge is too slow."),
     ),
+    # The third leg of the `drv` proof group, added 2026-09-15 (icspm2). The
+    # other two resolved and this one had NO emitted spelling at all, so the
+    # group could never close and `every_required_metric_key_has_a_producer`
+    # reported `axis 'drv' IS NOT PROVEN BY ANY RUN IN THIS CORPUS` on runs
+    # whose own STA report carried `SIGNOFF_DRV_CENSUS max_fanout violators=0`.
+    # A two-thirds-resolvable group is indistinguishable, in the verdict, from
+    # one nobody measured.
+    "timing.drv.max_fanout_violations": (
+        ("design__max_fanout_violation__count", SAME_FACT,
+         "the max-fanout violation count — one name for the count of nets "
+         "driving more loads than the library's or the SDC's stated maximum. "
+         "Emitted by `signoff_metrics_aggregate` from OpenSTA's own per-check "
+         "counter (`SIGNOFF_DRV_CENSUS max_fanout violators=N`), which is a "
+         "measured zero and not an absent table."),
+    ),
+    # Three more axes the flow MEASURED and never published under a canonical
+    # name (2026-09-15, icspm2). Same shape as the drv leg above: the record
+    # was on disk, in the checker's own report, under a spelling this table
+    # did not carry.
+    "power.ir.worst_drop_v": (
+        ("power__ir__worst_drop_v", SAME_FACT,
+         "the worst static IR drop, in volts. The producer converts the PSM "
+         "record's microvolts and refuses when `supply_measured` is false, so "
+         "it is a drop the tool established and never one derived from a zero "
+         "supply it could not find."),
+    ),
+    "reliability.em.violations": (
+        ("reliability__em__violation__count", SAME_FACT,
+         "the count of routed segments whose current density exceeds the "
+         "layer's Jmax — the EM violation population, from the Jmax screen's "
+         "own `offender_count` over the segments it actually screened."),
+    ),
+    "reliability.em.worst_ratio": (
+        ("reliability__em__worst_ratio", SAME_FACT,
+         "worst current density AS A FRACTION of the layer's Jmax, which is "
+         "what an EM 'worst ratio' is; the screen's `worst_utilization`."),
+    ),
+    "design_for_eco.spares.count": (
+        ("design_for_eco__spares__count", SAME_FACT,
+         "the number of spare cells that SURVIVED into the shipped artefacts. "
+         "The design-for-ECO question is what a metal-only ECO can still "
+         "reach, and an inserted spare a later pass removed reaches nothing, "
+         "so `survived` is the count and `inserted` is not."),
+    ),
     "equivalence.verdict": (
+        ("equivalence__verdict", SAME_FACT,
+         "the post-layout LEC's own verdict string — the logical-equivalence "
+         "proof itself, as the checker recorded it (added 2026-09-15, icspm2)."),
         ("design__xor_difference__count", RELATED,
          "a layout-vs-layout XOR difference count is not a logical-equivalence "
          "verdict; a zero XOR says two layouts match, not that the netlist "

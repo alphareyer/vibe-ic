@@ -152,10 +152,30 @@ def test_an_empty_tree_answers_every_key_and_still_exits_zero(tmp_path):
 def test_every_key_the_release_readers_read_has_a_rule():
     """The readers' table is the population; a key added there and not here
     would silently be NOT_MEASURED forever, which is the exact failure this
-    whole program was written to end."""
+    whole program was written to end.
+
+    2026-09-15 (icspm2): this aggregator acquired a SECOND consumer —
+    `every_required_metric_key_has_a_producer`, which proves a sign-off AXIS
+    from a canonical metric name and was reporting six axes as "NOT PROVEN BY
+    ANY RUN IN THIS CORPUS" over runs that had measured every one of them. The
+    keys added for it are not printed in any release document, so the equality
+    below would forbid them. It is kept as an EQUALITY rather than relaxed to
+    a subset: `AGG.AXIS_ONLY_KEYS` names each one and the axis that wants it,
+    so a key still cannot enter RULES without being accounted for in writing.
+    The original direction (readers ⊆ rules) is asserted separately below and
+    is exactly as strong as it was."""
     wanted = {key for _, key, _ in TDG.MANUFACTURABILITY + TDG.ELECTRICAL}
     wanted.add("design__die__bbox")          # `TDG.die_geometry` reads this one
-    assert wanted == {key for key, _, _ in AGG.RULES}
+    rules = {key for key, _, _ in AGG.RULES}
+    assert wanted <= rules, sorted(wanted - rules)
+    assert wanted | set(AGG.AXIS_ONLY_KEYS) == rules, {
+        "in RULES and accounted for nowhere": sorted(
+            rules - wanted - set(AGG.AXIS_ONLY_KEYS)),
+        "declared axis-only but not in RULES": sorted(
+            set(AGG.AXIS_ONLY_KEYS) - rules),
+    }
+    assert not (wanted & set(AGG.AXIS_ONLY_KEYS)), (
+        "a key the release documents DO read is not axis-only")
 
 
 def test_every_measured_key_carries_its_source_and_that_files_sha(project):

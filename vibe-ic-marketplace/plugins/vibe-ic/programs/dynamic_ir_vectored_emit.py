@@ -419,10 +419,50 @@ def build_result(worst_dyn_mv: float, vdd_v: Optional[float],
     return res
 
 
+def _pdk_text(path, container: Optional[str] = None) -> str:
+    """The text of a PDK asset that may live ONLY inside the EDA container.
+
+    Host read first (a staged/host-local copy wins), then `docker exec cat`
+    through the ONE guarded argv builder this module already uses for its
+    OpenROAD run. Returns "" when neither can see it — the caller then emits
+    nothing and behaviour is byte-identical to before. chip/PDK-AGNOSTIC.
+
+    Same shape, and for the same measured reason, as
+    `phase3_one_shot_runner._read_pdk_text`."""
+    if not path:
+        return ""
+    try:
+        return Path(path).read_text(errors="replace")
+    except (OSError, TypeError):
+        pass
+    if not container:
+        return ""
+    # NO RUNTIME BOUND, and that is the rule rather than an oversight
+    # (`test_a_timeout_is_not_a_finding_about_the_subject`). THE KILL IS THE
+    # DEFECT: a wall clock that fires on a read which was one byte from
+    # finishing has destroyed the answer, and the record it then writes —
+    # "" here, which this module reads as "the liberty declares no operating
+    # condition" — is a FINDING ABOUT THE PDK that the clock invented. A fast
+    # host and a loaded host would disagree about the same library.
+    #
+    # There is also nothing here for a progress watchdog to supervise. This is
+    # a `cat` of one file, not a job: it either streams or the container is
+    # gone, and `docker exec` returns non-zero for the second. The module's own
+    # `_docker_exec_raw` stays bounded because it is the supervisor's in-
+    # container PROBE — an unbounded probe would wedge the watchdog that exists
+    # to catch a wedge — and it may be referenced only as that injection.
+    try:
+        cp = subprocess.run(_ce.docker_exec_argv(container, "cat", str(path)),
+                            capture_output=True, text=True)
+        return cp.stdout if cp.returncode == 0 else ""
+    except Exception:                                        # noqa: BLE001
+        return ""
+
+
 _OPCOND_RE = re.compile(r"^\s*operating_conditions\s*\(\s*([A-Za-z0-9_.\-]+)\s*\)")
 
 
-def liberty_operating_condition(liberty) -> str:
+def liberty_operating_condition(liberty, container: Optional[str] = None) -> str:
     """NAME of an operating condition the liberty defines, or "".
 
     Same root cause as the static path (vibe-ic#362): PSM cannot determine
@@ -438,15 +478,37 @@ def liberty_operating_condition(liberty) -> str:
     importing `phase3_one_shot_runner` for one regex would pull a 25k-line
     module — and its import-time side effects — into a program that exists to
     be run on its own. The shared thing here is the LIBERTY GRAMMAR, which is
-    IEEE 1497 and does not drift; a shared helper module for it would be the
-    right move only once a third caller appears.
+    IEEE 1497 and does not drift.
 
-    Reads the file directly: this program already receives host-visible paths
-    (it is invoked with `--liberty` by the caller), unlike the runner which
-    must also handle container-only paths."""
-    try:
-        txt = Path(liberty).read_text(errors="replace")
-    except (OSError, TypeError):
+    AND THE OTHER SHARED THING, WHICH IS WHERE THE FILE IS (2026-09-15, icspm2)
+    --------------------------------------------------------------------------
+    The sentence above used to continue *"Reads the file directly: this program
+    already receives host-visible paths … unlike the runner which must also
+    handle container-only paths."* **That is false for every PDK this flow
+    runs.** MEASURED on a completed gf180mcuD run of `spm`:
+
+        liberty passed in : /foss/pdks/ciel/gf180mcu/versions/b344c97…/
+                            gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00.lib
+        host  test -e     : NO   (`/foss` does not exist on the host at all)
+        this function     : ''   (OSError, swallowed)
+        the SAME bytes read where they ARE visible
+                          : 'gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00'
+        in-container line 44: `operating_conditions(gf180mcu_…__tt_025C_5v00) {`
+
+    So the emitted deck carried NO `set_operating_conditions`, PSM aborted
+    `[ERROR PSM-0079] Cannot determine the supply voltage for VDD` over a grid
+    it had just reported CONNECTED (`[INFO PSM-0040] All shapes on net VDD are
+    connected`), `dynamic_ir.json` recorded `status: ERROR_NO_PSM_IR`, and
+    `dynamic_ir_drop_check` refused the run. The #362 fix was present and inert.
+    The static path never showed it because the RUNNER's copy of this helper
+    takes a `container` and reads through it (`_read_pdk_text`, whose own
+    docstring documents this exact failure class for LEF discovery).
+
+    Host read FIRST, so a staged or host-local copy still wins; the container
+    only when the host cannot see the file. `container=None` reproduces the old
+    host-only behaviour exactly, which is what the pure unit tests use."""
+    txt = _pdk_text(liberty, container)
+    if not txt:
         return ""
     for line in txt.splitlines():
         m = _OPCOND_RE.match(line)
@@ -490,7 +552,8 @@ def _build_transient_tcl(def_file: Path, tech_lef: Path, cell_lef: Path,
                          sdc: Optional[Path], power_net: str,
                          period_ns: float, steps: int,
                          decap_cap: Optional[str], via_res: Dict[str, float],
-                         metal_prefix: str) -> str:
+                         metal_prefix: str,
+                         container: Optional[str] = None) -> str:
     """The exact OpenROAD PSM TRANSIENT TCL (host paths; container mounts them).
 
     Mirrors the static grid setup that already produces a real IR number on the
@@ -501,7 +564,7 @@ def _build_transient_tcl(def_file: Path, tech_lef: Path, cell_lef: Path,
     via_tcl = "".join(f"catch {{set_layer_rc -via {c} -resistance {r}}}\n"
                       for c, r in sorted(via_res.items()))
     decap_arg = f" -decap_cap {decap_cap}" if decap_cap else ""
-    _oc = liberty_operating_condition(liberty)
+    _oc = liberty_operating_condition(liberty, container)
     return (
         f"read_lef {tech_lef}\n"
         f"read_lef {cell_lef}\n"
@@ -616,7 +679,7 @@ def emit(def_file: Path, tech_lef: Path, cell_lef: Path, liberty: Path,
     via_res = _discover_via_res(tech_lef)
     tcl = _build_transient_tcl(def_file, tech_lef, cell_lef, liberty, macro_lefs,
                                sdc, net, period_ns, steps, decap_cap, via_res,
-                               metal_prefix)
+                               metal_prefix, container)
     tcl_path = out_json.parent / "dynamic_ir_transient.tcl"
     tcl_path.write_text(tcl)
     cmd = (f"export PATH={_TOOLS}/openroad/bin:{_TOOLS}/bin:$PATH && "

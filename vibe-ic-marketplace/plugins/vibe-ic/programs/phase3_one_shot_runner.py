@@ -45541,6 +45541,112 @@ def _canonical_step_condition(project: Path, step_id: str
     return applies, f"canonical step {step_id} condition {'met' if applies else 'not met'}"
 
 
+#: The two DRC ATTRIBUTION reports `signoff_metrics_aggregate` reads, and the
+#: argv the flow itself declares for each. `flow/phase1_phase2_phase3.yaml`
+#: spells them verbatim at the step-22 and step-31 gate clauses; they are
+#: repeated here because the RUNNER must be able to produce the evidence before
+#: it summarises it, and `test_signoff_metrics_sources_exist_before_the_summary`
+#: asserts the two spellings still agree with the flow.
+_DRC_ATTRIBUTION_JOBS = (
+    ("drc_report_check", "reports/phase3/drc_router.json",
+     "reports/phase3/drc_router.rpt",
+     ("--mode", "drc", "--under", "phase3/stage3/pnr",
+      "--under", "reports/phase3/drc_router.rpt")),
+    ("drc_report_check", "reports/phase3/drc_signoff.json",
+     "reports/phase3/drc_signoff.rpt",
+     ("--mode", "drc", "--signoff", "--under", "reports/phase3/drc_signoff.rpt")),
+    # The graded spare-cell pool, for `design_for_eco__spares__count`. Same
+    # ordering defect, found the same way: MEASURED on a run of `spm`,
+    # `phase3/final/metrics.json` 07:03:00 and `reports/spare_cell_coverage.json`
+    # 07:05:33 — the summary two and a half minutes ahead of its source, because
+    # the only thing that runs the checker is the flow's own gate clause inside
+    # the completion audit. The trigger is `spare_cells.json`, the artefact the
+    # checker READS; a producer triggered by its own product can never run the
+    # first time.
+    #
+    # `spare_cell_coverage_check` and NOT `spare_cell_preservation_check`,
+    # although the latter answers the better question (what SURVIVED, not what
+    # was inserted). The flow refuses the latter's path to any gate — step 34:
+    # "no step's required_outputs names it … Declaring it asserts a production
+    # the same gate denies four lines down"; step 37.5ic: "no gate may read the
+    # path" until a step produces it UNCONDITIONALLY and declares it. Step 18
+    # DOES declare `reports/spare_cell_coverage.json`, so that is the artefact a
+    # consumer may honestly read. See `signoff_metrics_aggregate._spares`.
+    ("spare_cell_coverage_check", "reports/spare_cell_coverage.json",
+     "phase3/stage3/pnr/spare_cells.json",
+     ("--json", "reports/phase2/gates/spare_cell_coverage.json")),
+)
+
+
+def _emit_drc_attribution_reports(project: Path) -> List[Dict[str, Any]]:
+    """Produce the DRC attribution reports BEFORE the sign-off summary reads them.
+
+    MEASURED (2026-09-15, icspm2) on a first run of `spm` x gf180mcuD in a fresh
+    project directory::
+
+        phase3/final/metrics.json          05:12:48   <- the summary
+        reports/phase3/drc_router.rpt      05:12:47   <- runner-written, in time
+        reports/phase3/drc_signoff.rpt     05:11:47   <- runner-written, in time
+        reports/phase3/drc_router.json     05:15:37   <- THREE MINUTES LATER
+        reports/phase3/drc_signoff.json    05:15:39   <- THREE MINUTES LATER
+
+    The two `.json` files are written by `drc_report_check`, and the only thing
+    that runs it is the FLOW's own gate clause, inside the completion audit. So
+    the summary recorded `route__drc_errors` and `klayout__drc_error__count` as
+    NOT_MEASURED with the reason "producers found: none", the audit then created
+    the two reports, and the audit's own `signoff_metrics_aggregate --check`
+    found the record stale: "2 key(s) no longer state what this run's reports
+    state. Re-run the producer."
+
+    It passed on the predecessor lane only because that lane RE-USED one project
+    directory, so a previous attempt's two reports were already on disk. A gate
+    that is green only on the second run in the same directory is exactly how a
+    producer-ordering defect hides.
+
+    THE VERDICT IS NOT READ, AND THAT IS SAID HERE RATHER THAN INFERRED FROM
+    SILENCE. `drc_report_check` is a GATE and the flow evaluates its exit code
+    at the step that owns it; this call site wants only the ATTRIBUTION RECORD
+    to exist, so a non-zero status (a design with real DRC errors) must not fail
+    THIS step and hide the finding behind the wrong name. Each rc is bound and
+    recorded in the step's extras so the decision is on the record.
+
+    Nothing is fabricated: each job runs only when the `.rpt` it reads is
+    already on disk, and `drc_report_check` writes its own honest verdict for
+    whatever it finds there.
+    """
+    out: List[Dict[str, Any]] = []
+    for prog_name, rel_json, rel_rpt, argv in _DRC_ATTRIBUTION_JOBS:
+        prog = PROGRAMS_DIR / f"{prog_name}.py"
+        row: Dict[str, Any] = {"program": prog_name,
+                               "json": rel_json, "rpt": rel_rpt,
+                               "blocking_here": False,
+                               "why_advisory_here":
+                                   "the flow's own step evaluates this gate's "
+                                   "exit code; this call site only needs the "
+                                   "attribution record to exist before the "
+                                   "sign-off summary reads it"}
+        if not prog.is_file() or not (project / rel_rpt).is_file():
+            row["status"] = "NOT_APPLICABLE"
+            row["reason"] = (f"{rel_rpt} is absent — this run produced no "
+                             f"such artefact, so there is nothing to record")
+            out.append(row)
+            continue
+        try:
+            cmd = [sys.executable, str(prog), ".", *argv]
+            if prog_name == "drc_report_check":
+                cmd += ["--json", rel_json]   # its report IS the declared path
+            cp = _pr.run(cmd, cwd=str(project), check=False,
+                         capture_output=True, text=True)
+            row["rc"] = cp.returncode
+            row["status"] = "PRODUCED" if (project / rel_json).is_file() \
+                else "NOT_PRODUCED"
+        except Exception as exc:                             # noqa: BLE001
+            row["status"] = "NOT_MEASURED"
+            row["reason"] = f"{type(exc).__name__}: {exc}"
+        out.append(row)
+    return out
+
+
 def step_signoff_metrics_aggregate(project: Path) -> StepResult:
     """Canonical step 37.4 — the sign-off metrics record, produced then checked.
 
@@ -45584,6 +45690,8 @@ def step_signoff_metrics_aggregate(project: Path) -> StepResult:
         return StepResult("signoff_metrics_aggregate", "BLOCKED",
                           time.time() - t0, f"producer not present: {prog}")
 
+    drc_attr = _emit_drc_attribution_reports(project)
+
     cp, stopped = _run_producer(
         "signoff_metrics_aggregate", [sys.executable, str(prog), str(project)],
         t0)
@@ -45616,11 +45724,13 @@ def step_signoff_metrics_aggregate(project: Path) -> StepResult:
             f"the written record does not state what this run's own reports "
             f"state (rc={checked.returncode}): {check_detail}", outputs,
             {"flow_step": "37.4", "producer_rc": cp.returncode,
-             "check_rc": checked.returncode})
+             "check_rc": checked.returncode,
+             "drc_attribution_reports": drc_attr})
     return StepResult("signoff_metrics_aggregate", "PASS", time.time() - t0,
                       check_detail, outputs,
                       {"flow_step": "37.4", "producer_rc": cp.returncode,
-                       "check_rc": checked.returncode})
+                       "check_rc": checked.returncode,
+                       "drc_attribution_reports": drc_attr})
 
 
 def step_tapeout_docs_gen(project: Path) -> StepResult:
