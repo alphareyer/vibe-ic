@@ -151,20 +151,56 @@ def _deck(**kw):
     return R._si_mcf_repair_child_tcl("subservient", **args)
 
 
-@needs_tclsh
-def test_the_child_deck_is_complete_tcl(tmp_path):
-    """An unbalanced deck is the one defect a child cannot report: it dies
-    before its receipt."""
-    script = tmp_path / "chk.tcl"
-    script.write_text(
-        'set fh [open [lindex $argv 0] r]; set t [read $fh]; close $fh\n'
-        'if {[info complete $t]} { puts COMPLETE } else { puts INCOMPLETE }\n')
+#: Walk the deck with every OpenROAD command stubbed, and make each stub return
+#: a DIFFERENT value so the design-signature comparison FAILS and the else arm —
+#: the reroute branch — is evaluated too.
+#:
+#: WHY IT IS NOT `info complete`. That only balances braces. The first version
+#: of this deck emitted
+#:     if {[catch {detailed_route -droute_end_iter 32 {*}$_vic_drc_opt}} e]}} {
+#: — brace-BALANCED and syntactically wrong — from a PLAIN string whose braces
+#: had been doubled as if it were an f-string. `info complete` passed it. So did
+#: a stub walk with EQUAL signatures, because Tcl does not check the syntax
+#: inside a braced body it never enters. The real child on r19 reached
+#:     Error: extra characters after close-brace
+#: only AFTER it had already run the repair, i.e. at the point where the work
+#: was done and the candidate was about to be written.
+_TCL_WALK = (
+    "set ::n 0\n"
+    "proc unknown {args} { incr ::n ; return \"stub$::n\" }\n"
+    "if {[catch {source [lindex $argv 0]} e]} { puts \"TCL_ERROR: $e\"; exit 1 }\n"
+    "puts TCL_OK\n")
+
+
+def _walk(tmp_path, deck_text):
+    script = tmp_path / "walk.tcl"
+    script.write_text(_TCL_WALK)
     deck = tmp_path / "child.tcl"
-    deck.write_text(_deck())
-    r = subprocess.run([tclsh, str(script), str(deck)],
-                       capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
-    assert "COMPLETE" in r.stdout
+    deck.write_text(deck_text)
+    return subprocess.run([tclsh, str(script), str(deck)],
+                          capture_output=True, text=True)
+
+
+@needs_tclsh
+def test_the_child_deck_parses_on_both_branches(tmp_path):
+    """A malformed deck is the one defect a child cannot report: it dies after
+    the work and before the receipt."""
+    r = _walk(tmp_path, _deck())
+    assert "TCL_OK" in r.stdout, r.stdout[-600:] + r.stderr[-600:]
+    assert "TCL_ERROR" not in r.stdout
+
+
+@needs_tclsh
+def test_the_walk_catches_a_balanced_but_wrong_brace(tmp_path):
+    """THE CONTROL FOR THE TEST ITSELF. Re-introduce r19's exact defect and the
+    walk must refuse — otherwise this file is checking nothing."""
+    broken = _deck().replace(
+        "{*}$_vic_drc_opt} e]} { puts",
+        "{*}$_vic_drc_opt}} e]}} { puts")
+    assert broken != _deck(), "the defect could not be re-introduced"
+    r = _walk(tmp_path, broken)
+    assert "TCL_ERROR" in r.stdout, r.stdout[-400:]
+    assert "close-brace" in r.stdout
 
 
 def test_the_child_restores_the_shipped_route_and_writes_only_a_candidate():
@@ -196,6 +232,24 @@ def test_the_pass_is_si_aware_and_runs_exactly_once():
     assert deck.count("repair_timing") == 1
     assert "-max_passes 1" in deck
     assert "-repair_tns 0" in deck
+
+
+def test_the_pass_may_not_remove_a_buffer():
+    """MEASURED, r19: removing a buffer MERGES the two nets it sat between, and
+    `dbNet::mergeNet` asks the global router to merge their routing. This
+    session restores a finished route from a DEF and never runs `global_route`,
+    so the router holds no state for those nets:
+
+        rsz::UnbufferCandidate::apply -> Resizer::removeBuffer
+          -> odb::dbNet::mergeNet -> grt::GlobalRouter::mergeNetsRouting
+          -> grt::GlobalRouter::connectRouting        SIGSEGV, 2.9 s in
+
+    Reproduced deterministically by re-running the emitted deck (rc=139), and
+    the same deck completes the repair with this flag. Sizing is what this pass
+    is for; the moves that ADD a net are safe because the deck re-routes when
+    the signature moves — only the move that MERGES two already-routed nets
+    needs router state this session does not have."""
+    assert "-skip_buffer_removal" in _deck()
 
 
 def test_a_repair_that_changed_nothing_does_not_spend_a_reroute():

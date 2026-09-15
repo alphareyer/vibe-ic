@@ -252,7 +252,26 @@ def repair_tcl(*, folded_spef_c: str, victims: List[str],
         "set _si_drc_before 0\n"
         "catch {set _si_drc_before [_sdr_tx_count_router_drc "
         "$::_vic_router_drc_rpt]}\n"
-        "if {[catch {repair_timing -setup -repair_tns 0 -max_passes 1} _si_e]} "
+        # `-skip_buffer_removal` IS LOAD-BEARING AND WAS MEASURED, NOT GUESSED.
+        # Removing a buffer MERGES the two nets it sat between, and
+        # `dbNet::mergeNet` asks the GLOBAL ROUTER to merge their routing. This
+        # pass restores a finished route from a DEF and never runs
+        # `global_route`, so the router holds no state for those nets and
+        # `grt::GlobalRouter::connectRouting` dereferences it. MEASURED on
+        # subservient x gf180mcuD, lane icsub2 r19 — SIGSEGV 2.9 s in, stack:
+        #   rsz::UnbufferCandidate::apply -> Resizer::removeBuffer
+        #     -> odb::dbNet::mergeNet -> grt::GlobalRouter::mergeNetsRouting
+        #     -> grt::GlobalRouter::connectRouting
+        # and reproduced deterministically by re-running the emitted deck
+        # (rc=139), which then completes with this flag. It is the same fact
+        # R-0915-16 established from the other side: a DEF carries no guides.
+        # SIZING is what this pass is for; restructuring the netlist is not,
+        # and the moves that ADD a net (buffering, cloning) are safe because
+        # the deck re-routes when the design signature moves — only the move
+        # that MERGES two already-routed nets needs router state this session
+        # does not have.
+        "if {[catch {repair_timing -setup -repair_tns 0 -max_passes 1 "
+        "-skip_buffer_removal} _si_e]} "
         "{\n"
         "  puts \"SI_MCF_REPAIR_NONFATAL: $_si_e\"\n"
         "} else {\n"
