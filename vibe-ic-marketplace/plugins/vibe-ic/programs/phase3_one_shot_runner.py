@@ -48889,6 +48889,23 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             ]
         spice_skip.write_text(json.dumps(_payload, indent=2) + "\n")
         written.append(str(spice_skip))
+        # R-0915-43 — THE DECLARED HALF OF STEP 30 IS NEVER SILENT EITHER.
+        #
+        # `spice_correlation_not_run.json` is this runner's own disclosure and
+        # carries `skips_required_output` for the #675 promoter, but it is NOT
+        # one of step 30's declared outputs. MEASURED on sha256 run11: the
+        # driver reached a real conclusion — "Liberty grid tolerance could not
+        # be derived", an implemented-capability failure, not a capability gap
+        # — and `phase3/stage3/spice/correlation.json` did not exist. A reader
+        # of the declared record saw nothing at all.
+        #
+        # The SAME payload goes to the declared path: one refusal, two names,
+        # so the disclosure and the declared record cannot disagree about why
+        # the correlation did not happen.
+        _spice_declared = spice_out / "correlation.json"
+        if not _spice_declared.is_file():
+            _spice_declared.write_text(json.dumps(_payload, indent=2) + "\n")
+            written.append(str(_spice_declared))
 
     # --- Step 32b: post-route timing repair TCL (ORGANIC #561) ----------------
     # Emit the standalone multi-corner-aware OpenROAD post-route timing-repair script

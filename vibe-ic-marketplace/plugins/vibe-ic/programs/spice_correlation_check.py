@@ -2929,6 +2929,24 @@ def run_installed_pdk_path_correlation(
     report_path = _pl.reports_dir(project) / "phase3" / "spice_correlation.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
+    # R-0915-43 — ALSO AT THE OTHER NAME STEP 30 DECLARES.
+    #
+    # Step 30 declares `phase3/stage3/spice/correlation.json OR
+    # reports/phase3/spice_correlation.json`, and the line above satisfies the
+    # OR. What it does not do is make the FIRST name exist — and that is the
+    # name this module's own loader `_check_spice_correlation_json` reads
+    # first, and the one beside the deck and the log a reader opens when they
+    # want to know what the correlation concluded. A run that correlated and
+    # left `correlation.spice` + `correlation.log` in that directory with no
+    # `correlation.json` beside them is reporting its work in one place and
+    # its numbers in another.
+    #
+    # The SAME dict, never a second summary of it: two documents describing one
+    # correlation are two things that can disagree, and the loader reaches this
+    # one first, so a divergent copy here would silently outrank the other.
+    declared = _pl.spice_dir(project) / "correlation.json"
+    declared.parent.mkdir(parents=True, exist_ok=True)
+    declared.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
     return {"status": "RAN", "report": report,
             "report_path": str(report_path), "deck": str(deck_path),
             "log": str(log_path)}
