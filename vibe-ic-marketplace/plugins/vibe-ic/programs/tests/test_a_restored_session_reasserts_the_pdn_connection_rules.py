@@ -120,15 +120,19 @@ def test_the_rules_are_read_from_the_deck_not_rebuilt():
 
 # ── both invariants, and every seam ───────────────────────────────────────
 
-def test_the_after_restore_block_carries_BOTH_invariants():
+@pytest.mark.parametrize("reroutes_immediately", [True, False])
+def test_the_after_restore_block_carries_BOTH_invariants(reroutes_immediately):
     plan = {"instances": [{"name": "spare_0", "cell": "FILLER"}]}
-    got = R._after_restore_tcl(DECK_WITH_PDN, plan)
+    got = R._after_restore_tcl(DECK_WITH_PDN, plan,
+                               reroutes_immediately=reroutes_immediately)
     assert "set_dont_touch spare_0" in got, "the #2255 invariant"
     assert "add_global_connection" in got, "the R-0915-12 invariant"
 
 
-def test_a_design_with_no_spares_still_gets_the_pdn_rules():
-    got = R._after_restore_tcl(DECK_WITH_PDN, None)
+@pytest.mark.parametrize("reroutes_immediately", [True, False])
+def test_a_design_with_no_spares_still_gets_the_pdn_rules(reroutes_immediately):
+    got = R._after_restore_tcl(DECK_WITH_PDN, None,
+                               reroutes_immediately=reroutes_immediately)
     assert "set_dont_touch" not in got
     assert "add_global_connection" in got
 
@@ -167,7 +171,8 @@ def test_the_derived_child_deck_carries_the_rules(tmp_path):
         "re-derive this case before trusting it")
     child = R._build_pnr_sdr_child_tcl_text(
         deck, checkpoint_def_c="/w/ck.def", stage=SITE1,
-        after_restore_tcl=R._after_restore_tcl(deck, None))
+        after_restore_tcl=R._after_restore_tcl(deck, None,
+                                               reroutes_immediately=True))
     assert "add_global_connection" in child, (
         "the child session creates instances and has no rule saying which pin "
         "patterns belong to the supplies")
@@ -181,7 +186,8 @@ def test_the_derived_adopt_tail_carries_the_rules(tmp_path):
     deck = _full_pnr_tcl(tmp_path)
     tail = R._build_pnr_resume_tcl_text(
         deck, checkpoint_def_c="/w/cand.def", omit_stages=[SITE1],
-        after_restore_tcl=R._after_restore_tcl(deck, None))
+        after_restore_tcl=R._after_restore_tcl(deck, None,
+                                              reroutes_immediately=False))
     assert "add_global_connection" in tail
     assert "PDN_GLOBAL_CONNECT_REASSERTED" in tail
 
