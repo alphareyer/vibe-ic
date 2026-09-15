@@ -9,6 +9,7 @@ and no OTP content. NINE P0 sub-gates were booked `BLOCKED_BY_UPSTREAM`::
     analog_pre_vs_post_layout_check    examined nothing (reason: no_analog_dir)
     analog_hw_tb_de10lite_budget_check NO_DATA: no .qsf file found
     l3_opcode_response_template_check  no opcode override doc found
+                                       (REVISED by R-0915-37 -- see below)
     l11_sequence_covers_l6_reject…     no L6.reject_rules to check
     assertion_covers_l3_constraints…   no L3 constraints to enforce
     otp_image_layer_consistency_check  examined nothing (reason: no_l11)
@@ -63,14 +64,18 @@ SUBJECTS = {
 }
 ALL_GATES = tuple(SUBJECTS) + ("analog_hw_tb_de10lite_budget_check",)
 
-#: DELIBERATELY NOT REGISTERED, and the reason is the ruling.
-#: `l3_opcode_response_template_check`'s subject is an OVERRIDE DOC ("no opcode
-#: override doc found"), not the L3 opcode list: a missing override doc is an
-#: input this run does not have, not a design declaring it has no opcodes. The
-#: landed contract (test_umbrella_keeps_the_gates_own_skip_reason) keeps that
-#: record on the gate's OWN WORDS at INCOMPLETE, and registering it here
-#: answered N/A for a document nobody wrote.
-NOT_REGISTERED = ("l3_opcode_response_template_check",)
+#: REVISED BY R-0915-37 (2026-09-15 23:17). This roster previously held
+#: `l3_opcode_response_template_check` as deliberately-unregistered, on the
+#: reading that its subject is an OVERRIDE DOC and a document nobody wrote
+#: declares nothing. The orchestrator revised that: the gate's subject is
+#: opcode RESPONSE TEMPLATES, and the override doc only matters once opcodes
+#: EXIST -- so the gate is now keyed on L3's declared opcode POPULATION.
+#:
+#: THE PROTECTION THAT TEST GAVE IS NOT DROPPED, it is re-pointed: the case
+#: below now asserts the direction that actually protects the run -- a design
+#: that DECLARES an opcode and has no override doc keeps the gate live and
+#: blocking, which is the shape the old test existed to defend.
+STILL_BLOCKING_WITH_A_SUBJECT = ("l3_opcode_response_template_check",)
 
 
 def _docs(tmp_path):
@@ -144,13 +149,39 @@ def test_a_design_with_no_class_verdict_keeps_its_analog_gates_live(tmp_path):
         assert F._p0_contract_na_reason(gate, proj, rtl) is None, gate
 
 
-@pytest.mark.parametrize("gate", NOT_REGISTERED)
-def test_a_missing_override_doc_is_not_a_declaration(tmp_path, gate):
-    """R-0915-19 as RULED: N/A only when the declaring document EXISTS and
-    positively says the subject is absent. An override doc nobody wrote has
-    declared nothing, so this gate keeps its own words and its tier."""
+@pytest.mark.parametrize("gate", STILL_BLOCKING_WITH_A_SUBJECT)
+def test_a_declared_opcode_with_no_override_doc_keeps_the_gate_live(
+        tmp_path, gate):
+    """R-0915-37. A template can only be owed for an opcode that EXISTS, so
+    the population is L3's opcode list. Declare one opcode and write no
+    override doc: the gate must stay live and blocking, exactly as it did
+    when it was unregistered."""
     proj, rtl = _silent_design(tmp_path)
-    assert F._P0_GATE_REQUIRED_CONTEXT.get(gate) is None, gate
+    (_docs(proj) / "L3_CMD_PROTOCOL.json").write_text(json.dumps(
+        {"opcodes": [{"hex": "0x74", "name": "READ"}],
+         "no_opcodes_in_input": False, "constraints": None}))
+    assert F._p0_zero_population_evidence(proj, gate) is None, gate
+    assert F._p0_contract_na_reason(gate, proj, rtl) is None, gate
+
+
+@pytest.mark.parametrize("gate", STILL_BLOCKING_WITH_A_SUBJECT)
+def test_a_design_with_no_opcodes_at_all_answers_that_gate_NA(tmp_path, gate):
+    """The other half of R-0915-37, and the reason it is a revision: with a
+    PRESENT L3 declaring zero opcodes there is no response template to owe."""
+    proj, rtl = _silent_design(tmp_path)
+    (_docs(proj) / "L3_CMD_PROTOCOL.json").write_text(json.dumps(
+        {"opcodes": [], "no_opcodes_in_input": True, "constraints": None}))
+    assert F._p0_zero_population_evidence(proj, gate) is not None, gate
+    assert F._p0_contract_na_reason(gate, proj, rtl) is not None, gate
+
+
+@pytest.mark.parametrize("gate", STILL_BLOCKING_WITH_A_SUBJECT)
+def test_an_L3_that_is_not_there_still_keeps_that_gate_live(tmp_path, gate):
+    """R-0915-19's correction is untouched: a document nobody wrote declares
+    nothing."""
+    proj, rtl = _silent_design(tmp_path)
+    (_docs(proj) / "L3_CMD_PROTOCOL.json").unlink()
+    assert F._p0_zero_population_evidence(proj, gate) is None, gate
     assert F._p0_contract_na_reason(gate, proj, rtl) is None, gate
 
 
