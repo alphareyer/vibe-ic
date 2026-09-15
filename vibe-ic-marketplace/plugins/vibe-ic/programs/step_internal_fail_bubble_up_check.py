@@ -381,6 +381,76 @@ def _waiver_text_corpus(project: Path) -> str:
     return _normalise(" | ".join(parts))
 
 
+
+#: This gate's own name, as it appears in an audit record of it.
+_SELF_NAME = "step_internal_fail_bubble_up_check"
+
+
+def _is_self_record(node: Any) -> bool:
+    """True when this dict is an audit's record OF THIS GATE."""
+    if not isinstance(node, dict):
+        return False
+    for key in ("program", "gate", "check", "name", "rule", "cmd", "command"):
+        v = node.get(key)
+        if isinstance(v, str) and v.strip().split()[:1] == [_SELF_NAME]:
+            return True
+        if isinstance(v, str) and v.strip() == _SELF_NAME:
+            return True
+    return False
+
+
+def _prune_self(node: Any) -> Any:
+    """`node` with every record OF THIS GATE removed, recursively."""
+    if isinstance(node, dict):
+        if _is_self_record(node):
+            return None
+        return {k: _prune_self(v) for k, v in node.items()}
+    if isinstance(node, list):
+        out = [_prune_self(v) for v in node]
+        return [v for v in out if v is not None]
+    return node
+
+
+def _without_this_gates_own_records(txt: str) -> str:
+    """Drop THIS GATE's own records from an acknowledgement corpus.
+
+    THE TWO-CYCLE OSCILLATOR THIS CLOSES (F43; icspm3 measured 3,2,3 / 2,3,2
+    across arms, alternating run by run). The corpus is built from
+    `reports/audit/**/*.json`, which includes the completion audit -- and the
+    completion audit records THIS GATE's own failure, detail and all. That
+    detail NAMES the very leaf reports the gate said were unacknowledged. So:
+
+        run N    the gate reports "report X declares FAIL and nothing
+                 acknowledges it"; the audit records that complaint, which puts
+                 X on a line containing the word FAIL
+        run N+1  the corpus now contains that line, X matches, X reads as
+                 ACKNOWLEDGED, the gate passes, and the audit records no
+                 complaint
+        run N+2  the complaint is gone from the corpus, X is unacknowledged
+                 again
+
+    A COMPLAINT THAT X WAS NOT ACKNOWLEDGED IS NOT AN ACKNOWLEDGEMENT OF X.
+    That is the whole of the fix, and it is why the exclusion is scoped to this
+    gate's OWN records and to nothing else: a top-level audit recording some
+    OTHER gate's FAIL is exactly the bubble-up this check exists to credit, and
+    an AGENT_REPORT acknowledgement is not an audit record at all.
+
+    Structural, not textual, where the JSON parses: the whole record is pruned,
+    so a leaf name buried in a nested `detail` or `findings` array goes with it.
+    A file that does not parse falls back to dropping the LINES that name this
+    gate -- weaker, but it can only ever remove self-reference, never a genuine
+    bubble-up, because a line that does not name this gate is untouched."""
+    try:
+        data = json.loads(txt)
+    except (ValueError, TypeError):
+        return "\n".join(ln for ln in txt.splitlines()
+                          if _SELF_NAME not in ln)
+    pruned = _prune_self(data)
+    try:
+        return json.dumps(pruned, ensure_ascii=False, indent=1)
+    except (TypeError, ValueError):                      # pragma: no cover
+        return txt
+
 def _bubbled_corpus(project: Path) -> str:
     """Concatenate searchable text from orchestrator + completion-audit
     JSONs. A FAIL report is "bubbled up" if a top-level audit also
@@ -415,6 +485,7 @@ def _bubbled_corpus(project: Path) -> str:
             txt = _read_input_text(p, encoding="utf-8")
         except OSError:
             continue
+        txt = _without_this_gates_own_records(txt)
         # Only include lines that look like they reference a FAIL.
         for line in txt.splitlines():
             ll = line.lower()
