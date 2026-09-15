@@ -178,11 +178,46 @@ def test_the_probe_is_idempotent_so_several_call_sites_may_emit_it():
 
 def test_the_drv_repair_reroute_asks_the_router_too():
     """SUBJECT: the reroute that can be LAST to touch the shipped geometry
-    carries the probe and expands the option."""
+    carries the probe and expands the option.
+
+    The probe's literal moved when `_route_guide_discipline_tcl` began renaming
+    `detailed_route` and putting a wrapper in its place: `info body` on the
+    wrapper describes the WRAPPER, which carries no `-output_drc`, so the probe
+    now follows the real command to its new name. The CLAIM is unchanged and is
+    what is asserted here -- the block probes a router body and expands the
+    option it found -- plus the new half: that it probes the REAL command, since
+    probing the wrapper would silently drop the router's DRC report.
+    """
     tcl = R._v1_8_100_signoff_drv_repair_tcl("/OUT")
-    assert "info body detailed_route" in tcl
+    assert "info body $_vic_dr_cmd" in tcl
+    assert "_vibeic_real_detailed_route" in tcl, \
+        "the probe must follow the renamed real command, not describe the wrapper"
     assert "detailed_route {*}$_vic_drc_opt" in tcl
     assert f"/OUT/{R.ROUTER_DRC_REPORT_NAME}" in tcl
+
+
+@pytest.mark.skipif(_TCLSH is None, reason="tclsh not installed")
+def test_the_probe_reads_the_real_body_through_the_wrapper():
+    """DRIVEN, and it is the control for the assertion above: with the
+    discipline armed, the probe must still find `-output_drc`. Probing the
+    wrapper instead would report the option unsupported and the run would ship
+    a route with no per-violation detail -- a silent loss that reads exactly
+    like a clean route."""
+    script = (
+        # a 'real' router command whose body advertises the option
+        "proc detailed_route {args} { # -output_drc supported\n }\n"
+        "proc global_route {args} { }\n"
+        + R._route_guide_discipline_tcl()
+        + R._route_drc_report_tcl("/OUT/r.rpt")
+        + 'puts "OPT=|$_vic_drc_opt|"\n')
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "p.tcl"
+        f.write_text(script)
+        out = subprocess.run([_TCLSH, str(f)], capture_output=True, text=True,
+                             timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert "ROUTE_GUIDE_DISCIPLINE_ARMED" in out.stdout, out.stdout
+    assert "OPT=|-output_drc /OUT/r.rpt|" in out.stdout, out.stdout
 
 
 def test_the_base_route_asks_the_router_too():
