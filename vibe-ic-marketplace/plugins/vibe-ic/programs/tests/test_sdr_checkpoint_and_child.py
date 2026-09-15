@@ -566,11 +566,15 @@ def test_a_shipping_deck_keeps_that_wiring_and_gets_its_guides_instead(tmp_path)
     a dropped tie-off net would SHIP with no conductor.
     """
     tcl = R._after_restore_tcl("", _SPARE_PLAN, reroutes_immediately=False)
-    assert "RESTORED_ROUTE_GUIDES_REESTABLISHED" in tcl
-    assert "global_route" in tcl
     assert "SPARE_WIRING_RELAID" not in tcl
     assert "odb::dbWire_destroy" not in tcl
     assert "set_dont_touch spare_inv_0" in tcl
+    # The GUIDES half moved: a one-shot at restore bought exactly one routing
+    # call, because `detailed_route` consumes them (subservient r8, DRT-0047
+    # 819 lines after the re-establish). It is attached to the COMMANDS in the
+    # pnr.tcl header now, so this deck gets it by construction -- asserted at
+    # the deck in `test_the_discipline_is_in_the_header_so_restored_decks_inherit_it`.
+    assert "global_route" not in tcl
 
 
 def test_the_two_deck_kinds_are_exclusive_and_neither_is_empty():
@@ -579,8 +583,11 @@ def test_the_two_deck_kinds_are_exclusive_and_neither_is_empty():
     child = R._after_restore_tcl("", _SPARE_PLAN, reroutes_immediately=True)
     ship = R._after_restore_tcl("", _SPARE_PLAN, reroutes_immediately=False)
     assert child != ship
+    # the ONE thing that still differs here is the wiring relay: only a deck
+    # that reroutes immediately may drop wiring, because only it lays it again
     assert ("SPARE_WIRING_RELAID" in child) and ("SPARE_WIRING_RELAID" not in ship)
-    assert ("global_route" in ship) and ("global_route" not in child)
+    # guides are neither deck's business any more -- they are the commands'
+    assert ("global_route" not in ship) and ("global_route" not in child)
 
 
 @needs_tclsh
@@ -626,12 +633,17 @@ def test_the_relay_never_reaches_supply_wiring(tmp_path):
 
 
 def test_a_design_with_no_spares_still_gets_its_guides(tmp_path):
-    """The relay is empty without spares; the guides do not depend on them."""
+    """The relay is empty without spares; the guide discipline does not depend
+    on them, because it is attached to the router commands and not to the
+    spare plan."""
     ship = R._after_restore_tcl("", None, reroutes_immediately=False)
     child = R._after_restore_tcl("", None, reroutes_immediately=True)
-    assert "RESTORED_ROUTE_GUIDES_REESTABLISHED" in ship
     assert "SPARE_WIRING_RELAID" not in child
     assert "odb::dbWire_destroy" not in child
+    assert ship == "" or "SPARE" not in ship
+    # and the guides are there for it regardless, in the deck
+    deck = _full_pnr_tcl(tmp_path)
+    assert "ROUTE_GUIDE_DISCIPLINE" in deck
 
 
 @needs_tclsh
@@ -755,3 +767,80 @@ def test_the_childs_reroute_protects_the_same_reserved_bindings(tmp_path):
     plain = _child_half(reserved=None)
     assert "spare_inv_0" in named and "spare_pad_3" in named
     assert "spare_inv_0" not in plain
+
+
+# ------------- guides: detailed_route eats them, so each one gets its own
+
+
+@needs_tclsh
+def test_every_detailed_route_gets_guides_and_a_held_one_is_not_redone(tmp_path):
+    """MEASURED (subservient r8): the adopt tail re-established guides at
+    restore (`…:670`) and the PG reroute's `detailed_route` still died
+    `[ERROR DRT-0047]` 819 lines later (`…:1489`), because `detailed_route`
+    CONSUMES them. A one-shot at restore buys exactly ONE routing call.
+
+    Both halves are driven here: a route with no guides gets them, and a route
+    that still holds them is NOT re-global-routed — the second half is what
+    keeps this from costing a global_route per detailed_route forever.
+    """
+    import subprocess
+    script = (
+        "proc detailed_route {args} { lappend ::DR $args }\n"
+        "proc global_route {args} { incr ::GR }\n"
+        "set ::GR 0\nset ::DR {}\n"
+        + R._route_guide_discipline_tcl()
+        + "detailed_route a\n"      # no guides yet -> must re-establish
+        + "detailed_route b\n"      # previous one consumed them -> again
+        + "global_route\n"          # explicit guides ...
+        + "detailed_route c\n"      # ... so this one must NOT re-establish
+        + 'puts "GR=$::GR DR=[llength $::DR]"\n')
+    s = tmp_path / "guides.tcl"
+    s.write_text(script)
+    r = subprocess.run([tclsh, str(s)], text=True, capture_output=True)
+    assert r.returncode == 0, r.stderr
+    assert "ROUTE_GUIDE_DISCIPLINE_ARMED" in r.stdout
+    # three routes happened, and the real command was reached every time
+    assert "DR=3" in r.stdout, r.stdout
+    # two auto re-establishes + the one explicit global_route = 3
+    assert "GR=3" in r.stdout, r.stdout
+    assert r.stdout.count("ROUTE_GUIDES_REESTABLISHED") == 2, r.stdout
+    assert r.stdout.count("ROUTE_GUIDES_HELD") == 1, r.stdout
+
+
+@needs_tclsh
+def test_an_interpreter_with_no_router_to_wrap_says_so(tmp_path):
+    """DEGRADE LOUDLY. A silent skip reads downstream exactly like a deck whose
+    routing calls all had guides."""
+    import subprocess
+    s = tmp_path / "noroute.tcl"
+    s.write_text(R._route_guide_discipline_tcl())
+    r = subprocess.run([tclsh, str(s)], text=True, capture_output=True)
+    assert r.returncode == 0, r.stderr
+    assert "ROUTE_GUIDE_DISCIPLINE_UNAVAILABLE" in r.stdout
+    assert "ROUTE_GUIDE_DISCIPLINE_ARMED" not in r.stdout
+
+
+def test_the_discipline_is_in_the_header_so_restored_decks_inherit_it(tmp_path):
+    """It is attached to the COMMANDS, above the resume-elide region, so a
+    checkpoint-seeded deck gets it by construction instead of by a second
+    emitter remembering. The list-of-call-sites approach has been wrong twice."""
+    deck = _full_pnr_tcl(tmp_path)
+    i_disc = deck.index("ROUTE_GUIDE_DISCIPLINE")
+    i_elide = deck.index(R._PNR_RESUME_ELIDE_BEGIN)
+    assert i_disc < i_elide, "the discipline must survive the elision"
+    for stage in (SITE1, SITE2):
+        child = R._build_pnr_sdr_child_tcl_text(
+            deck, checkpoint_def_c="/c.def", stage=stage)
+        assert "ROUTE_GUIDE_DISCIPLINE" in child
+    tail = R._build_pnr_resume_tcl_text(
+        deck, checkpoint_def_c="/c.def", omit_stages=[SITE1])
+    assert "ROUTE_GUIDE_DISCIPLINE" in tail
+
+
+def test_the_one_shot_restore_time_global_route_is_gone():
+    """It bought exactly one routing call. Keeping it as well would
+    global_route once for nothing before the first detailed_route did it
+    again."""
+    ship = R._after_restore_tcl("", _SPARE_PLAN, reroutes_immediately=False)
+    assert "RESTORED_ROUTE_GUIDES_REESTABLISHED" not in ship
+    assert "global_route" not in ship

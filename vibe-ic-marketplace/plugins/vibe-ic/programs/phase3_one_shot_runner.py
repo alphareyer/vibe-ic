@@ -21663,7 +21663,16 @@ def _route_drc_report_tcl(rpt_path: str) -> str:
         "if {![info exists _vic_drc_opt]} {\n"
         "  set _vic_drc_opt [list]\n"
         "  set _vic_dr_body \"\"\n"
-        "  if {[catch {info body detailed_route} _vic_dr_body]} "
+        # ASK THE REAL COMMAND. `_route_guide_discipline_tcl` renames
+        # `detailed_route` and puts a wrapper in its place; `info body` would
+        # then describe the WRAPPER, which carries no `-output_drc`, and this
+        # probe would conclude the option is unsupported and silently drop the
+        # router's DRC report. The real command keeps its body under its new
+        # name, so the probe follows it there when it exists.
+        "  set _vic_dr_cmd detailed_route\n"
+        "  if {[llength [info commands _vibeic_real_detailed_route]] > 0} "
+        "{ set _vic_dr_cmd _vibeic_real_detailed_route }\n"
+        "  if {[catch {info body $_vic_dr_cmd} _vic_dr_body]} "
         "{ set _vic_dr_body \"\" }\n"
         "  if {[string match {*-output_drc*} $_vic_dr_body]} {\n"
         "    set _vic_drc_opt [list -output_drc " + rpt_path + "]\n"
@@ -24969,7 +24978,14 @@ def _after_restore_tcl(deck: str, spare_plan: Optional[Dict[str, Any]],
               + _pg_global_connect_reassert_tcl(deck))
     if reroutes_immediately:
         return common + _spare_relay_restored_wiring_tcl(spare_plan)
-    return common + _restored_session_route_guides_tcl()
+    # NO one-shot `global_route` here any more. It bought exactly ONE routing
+    # call: `detailed_route` consumes the guides, and the tail's later routes
+    # -- PG reroute, named-violation reroute, antenna reconverge -- were back
+    # where they started (DRT-0047, MEASURED on subservient r8). The discipline
+    # is attached to the COMMANDS in the pnr.tcl header instead, which a
+    # checkpoint-seeded deck inherits by construction, so every routing call is
+    # covered rather than a list of call sites that has already been wrong.
+    return common
 
 
 def _spare_relay_restored_wiring_tcl(plan: Optional[Dict[str, Any]]) -> str:
@@ -25048,6 +25064,80 @@ def _spare_relay_restored_wiring_tcl(plan: Optional[Dict[str, Any]]) -> str:
         f"puts \"SPARE_WIRING_RELAID: $_spare_relaid net(s) dropped for the "
         f"router to lay again (of {len(names)} spare(s)); the instances keep "
         "their dont_touch\"\n")
+
+
+def _route_guide_discipline_tcl() -> str:
+    """Give every `detailed_route` its own guides, because the last one ate them.
+
+    MEASURED (subservient, lane icsub2, r8): the adopt tail re-established
+    guides at restore -- `RESTORED_ROUTE_GUIDES_REESTABLISHED` at
+    `pnr_sdr_adopt_1.log:670` -- and 819 lines later, at :1489, the PG reroute's
+    `detailed_route` died `[ERROR DRT-0047]`, swallowed as PG_REROUTE_NONFATAL.
+    In between the tail ran postroute_spef_extract, antenna_repair,
+    drv_reconverge, antenna_reconverge and fill. **`detailed_route` CONSUMES the
+    guides**, so re-establishing them ONCE at restore buys exactly one routing
+    call and every later one is back where it started. Repair gain 2.32 ns
+    against r4's 3.27; SS -0.706; sta_corner FAIL.
+
+    AND IT IS NOT ONLY A RESTORED-SESSION PROBLEM. The same lane sees DRT-0047
+    twice in the SHIPPING session at `PNR_STAGE postroute_fill` -- same cause, a
+    `detailed_route` after an earlier one consumed the guides. That one predates
+    every checkpoint change here.
+
+    So the discipline is attached to the COMMANDS, once, instead of to a list of
+    call sites that has already been wrong twice. `global_route` records that
+    guides now exist; `detailed_route` re-establishes them first if they do not,
+    then records that it consumed them. Every routing call in the deck is
+    covered -- the base route, the SDR loop, the PG reroute, the
+    named-violation reroute, antenna reconverge -- with nothing to keep in step.
+
+    A SESSION THAT STILL HOLDS GUIDES IS NOT RE-GLOBAL-ROUTED: the flag is the
+    whole point, and `ROUTE_GUIDES_HELD` says so out loud, so the cost of this
+    is readable rather than assumed.
+
+    Emitted in the pnr.tcl HEADER, above the resume-elide region, so a
+    checkpoint-seeded deck inherits it by construction instead of by a second
+    emitter remembering to add it.
+
+    Idempotent (guarded on the renamed command already existing) and NONFATAL:
+    a re-establish that fails is DISCLOSED and the routing call still happens,
+    which is the behaviour before this existed.
+
+    chip-AGNOSTIC: two standard OpenROAD commands and a Tcl rename."""
+    return (
+        "# === route-guide discipline: detailed_route CONSUMES the global\n"
+        "# router's guides, so the NEXT one must be given its own. See\n"
+        "# _route_guide_discipline_tcl (DRT-0047, MEASURED).\n"
+        "if {[llength [info commands _vibeic_real_detailed_route]] == 0} {\n"
+        # DEGRADE LOUDLY. An interpreter that exposes no such command has
+        # nothing to wrap, and a silent skip here reads downstream exactly like
+        # a deck whose routing calls all had guides.
+        "if {[llength [info commands detailed_route]] == 0 "
+        "|| [llength [info commands global_route]] == 0} {\n"
+        "  puts \"ROUTE_GUIDE_DISCIPLINE_UNAVAILABLE: this interpreter "
+        "exposes no detailed_route/global_route command to wrap; routing calls "
+        "keep whatever guides they find\"\n"
+        "} elseif {[catch {\n"
+        "  rename global_route _vibeic_real_global_route\n"
+        "  proc global_route {args} {\n"
+        "    set ::_vibeic_route_guides 1\n"
+        "    return [uplevel 1 _vibeic_real_global_route $args]\n"
+        "  }\n"
+        "  rename detailed_route _vibeic_real_detailed_route\n"
+        "  proc detailed_route {args} {\n"
+        "    if {![info exists ::_vibeic_route_guides] "
+        "|| !$::_vibeic_route_guides} {\n"
+        "      if {[catch {_vibeic_real_global_route} _rgd_e]} {\n"
+        "        puts \"ROUTE_GUIDES_REESTABLISH_NONFATAL: $_rgd_e\"\n"
+        "      } else { puts \"ROUTE_GUIDES_REESTABLISHED\" }\n"
+        "    } else { puts \"ROUTE_GUIDES_HELD\" }\n"
+        "    set ::_vibeic_route_guides 0\n"
+        "    return [uplevel 1 _vibeic_real_detailed_route $args]\n"
+        "  }\n"
+        "} _rgd_setup]} {\n"
+        "  puts \"ROUTE_GUIDE_DISCIPLINE_UNAVAILABLE: $_rgd_setup\"\n"
+        "} else { puts \"ROUTE_GUIDE_DISCIPLINE_ARMED\" }\n"
+        "}\n")
 
 
 def _restored_session_route_guides_tcl() -> str:
@@ -26490,7 +26580,7 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
         out_dir_c + "/" + ROUTER_DRC_REPORT_NAME,
         reserved_instance_names=reserved_instance_names)
     return f"""
-{_thread_block}read_lef {tech_lef_c}
+{_thread_block}{_route_guide_discipline_tcl()}read_lef {tech_lef_c}
 read_lef {cell_lef_c}
 {macro_lefs_tcl}
 {_corner_lib_stanza}
