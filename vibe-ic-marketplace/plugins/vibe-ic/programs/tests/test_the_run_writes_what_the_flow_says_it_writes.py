@@ -133,9 +133,21 @@ def test_the_shipped_flow_declares_the_measured_set():
                  ("31", "erc_density_check"),
                  ("36", "tapeout_signoff_check")):
         assert pair in got, f"{pair} is no longer a declared producer clause"
-    # and it never picks up a step whose gate --json target it does not declare
-    assert ("21", "drc_report_check") not in got
-    assert ("10", "sta_report_check") not in got
+    # WAS `("21", "drc_report_check")` and `("10", "sta_report_check")`, and
+    # both were THE DEFECT rather than the rule. Steps 10 and 21 declare the
+    # gate `--json` target as a `required_output` and named no producer, so
+    # the audit refused its own document on both (lane icspm3, spm x
+    # gf180mcuD, main b47917a47). Naming the producer is the fix; the two
+    # pairs are asserted PRESENT by
+    # `test_the_run_writes_the_13_spm_declared_outputs.py`.
+    #
+    # The rule this line was written for is kept, on a case that still shows
+    # it: `rtl_bug_report_schema_check` IS listed under step 2's `programs:`
+    # and its gate clause writes `--json reports/phase2/gates/
+    # rtl_bug_schema.json`, which step 2 does NOT declare as a
+    # `required_output` — so the document is not owed as run evidence and the
+    # clause is not picked up. 64 clauses in the shipped flow have that shape.
+    assert ("2", "rtl_bug_report_schema_check") not in got
 
 
 # ── what is OWED, and what is left alone ──────────────────────────────────
