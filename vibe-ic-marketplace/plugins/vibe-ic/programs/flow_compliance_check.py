@@ -5255,12 +5255,115 @@ _P0_THIN_INPUT_DEFERRABLE_SUBGATES: Dict[str, str] = {
         "BFM (USB / PCIe / SystemVerilog VIP)"),
 }
 
-# Steps the chip must have passed for the OS-constraints promotion
-# to fire. These are the "chip is shipped on FPGA" signals.
-_OS_CONSTRAINTS_PREREQ_STEPS: tuple[Any, ...] = (
-    6,   # FPGA early prototype + verification report audit
-    36,  # FPGA final sign-off (recompile + on-board test)
+# ── R-0915-55 part 2: the prereq steps are DERIVED FROM THE FLOW ──────────
+#
+# These are the "chip is shipped on FPGA" signals the OS-constraints promotion
+# requires. They used to be hand-typed ids:
+#
+#     6,   # FPGA early prototype + verification report audit
+#     36,  # FPGA final sign-off (recompile + on-board test)
+#
+# and the second one was WRONG. In this flow step 36 is "Tapeout checklist
+# (final sign-off confirmation)" and FPGA final sign-off is step **39**: the
+# step was renumbered and this table was not moved with it. The error was
+# MASKED because step 36 happens to PASS, so the condition was silently
+# measuring a different step from the one its own comment named.
+#
+# So the roles are named and the ids are resolved from the flow YAML at
+# import. A renumbering now moves this table with it.
+_OS_CONSTRAINTS_PREREQ_ROLES: Tuple[str, ...] = (
+    "FPGA early prototype",
+    "FPGA final sign-off (recompile + on-board test)",
 )
+
+
+def _derive_os_constraints_prereq_steps(
+        flow_path: Optional[Path] = None
+) -> Tuple[Tuple[Any, ...], Tuple[str, ...]]:
+    """(resolved step ids, roles that could NOT be resolved).
+
+    FAILS CLOSED, and that is the whole reason this returns two values. The
+    promotion's guard is `all(... for sid in prereqs)`, and `all(())` is True
+    — so a derivation that quietly resolved nothing would fire the promotion
+    UNCONDITIONALLY, turning a mis-typed role into a blanket green. The caller
+    must therefore refuse to promote while any role is unresolved.
+    """
+    try:
+        path = Path(flow_path) if flow_path is not None else _find_flow_def()
+        doc = yaml.safe_load(Path(path).read_text(errors="replace"))
+    except Exception:                                        # noqa: BLE001
+        return (), tuple(_OS_CONSTRAINTS_PREREQ_ROLES)
+    steps = (doc or {}).get("steps") or []
+    ids: List[Any] = []
+    unresolved: List[str] = []
+    for role in _OS_CONSTRAINTS_PREREQ_ROLES:
+        needle = role.strip().lower()
+        hits = [s.get("id") for s in steps
+                if isinstance(s, dict)
+                and needle in str(s.get("name", "")).strip().lower()]
+        if len(hits) == 1:
+            ids.append(hits[0])
+        else:
+            # Zero matches, or an ambiguous rename that produced two: either
+            # way this role no longer names exactly one step, and guessing
+            # which would be the same mistake as hard-coding the id.
+            unresolved.append(role)
+    return tuple(ids), tuple(unresolved)
+
+
+_OS_CONSTRAINTS_PREREQ_STEPS, _OS_CONSTRAINTS_PREREQ_UNRESOLVED = (
+    _derive_os_constraints_prereq_steps())
+
+
+def _render_os_deferral(d: Dict[str, Any]) -> Optional[str]:
+    """One deferral line, or None to fall through to the P0 renderer.
+
+    The two row kinds say different things and the difference is not
+    cosmetic: a commercial-tool deferral needs a TOOL the container lacks, and
+    a capability-gap waiver needs someone to close a TICKET. Rendering the
+    second with the first's format is how this crashed with
+    `KeyError: 'commercial_tool_required'` on the first real run after the
+    rows were added — the verdict had already promoted and the printer took
+    the whole audit down.
+    """
+    if d.get("kind") == "capability-gap-waiver":
+        return (f"    • Step {d['step_id']} ({d['step_name']}): "
+                f"WAIVED under {d.get('verdict_tier') or 'a declared'} "
+                f"capability gap — ticket {d.get('ticket')}, "
+                f"approver {d.get('approver')}")
+    if d.get("step_id") == "P0" and "p0_thin_input_subgates" in d:
+        return None
+    return (f"    • Step {d['step_id']} ({d['step_name']}): "
+            f"{d.get('status')} — needs "
+            f"{d.get('commercial_tool_required', '?')}")
+
+
+def _os_constraints_prereq_satisfied(result: Any,
+                                     waivers: Dict[Any, Any]) -> bool:
+    """Has this prerequisite step NOT FAILED?  (R-0915-55 part 1.)
+
+    The guard used to demand PASS. On SPM that refused the promotion because
+    step 6 is WAIVED under the flow's OWN declared capability gap — the
+    ENV_UNAVAILABLE fpga-board-prototype tier, carrying
+    `ticket=fpga-board-prototype-capgap-v1.0.18`, `review_required=True` and
+    `approver="field-agent-attest (fpga-board cap-gap tier)"`. The promotion
+    exists to forgive exactly that class of gap, and its own precondition was
+    being defeated by it.
+
+    A waiver counts ONLY when the flow recorded the things that make it
+    reviewable: a ticket, an approver, and review_required. FAIL, MISSING,
+    INCOMPLETE — or a waiver without those — still block, because then nobody
+    has undertaken to close it. The promoted verdict is
+    PASS_WITH_OPEN_SOURCE_CONSTRAINTS carrying these rows, never bare PASS.
+    """
+    status = getattr(result, "status", None)
+    if status == "PASS":
+        return True
+    if status != "WAIVED":
+        return False
+    w = waivers.get(getattr(result, "id", None)) or {}
+    return bool(w.get("ticket")) and bool(w.get("approver")) \
+        and bool(w.get("review_required"))
 
 
 # ── #497 step 4 — the four prose scrapers are GONE ───────────────────────────
@@ -17725,11 +17828,51 @@ def main(argv: Optional[List[str]] = None) -> int:
                 continue
             non_blocked_failing.append(r)
 
-        prereq_pass = all(
-            any(r.id == sid and r.status == "PASS"
-                for r in results)
-            for sid in _OS_CONSTRAINTS_PREREQ_STEPS
-        )
+        # R-0915-55 part 1 — the prerequisite must NOT HAVE FAILED, which is
+        # not the same as having passed. A prereq WAIVED under the flow's own
+        # declared capability gap (ticket + approver + review_required) is an
+        # undertaking to close it, not a failure; anything else still blocks.
+        #
+        # FAIL-CLOSED on a derivation that lost a role: `all(())` is True, so
+        # an unresolved role would otherwise promote every run unconditionally.
+        os_prereq_waived: List[Dict[str, Any]] = []
+        prereq_pass = not _OS_CONSTRAINTS_PREREQ_UNRESOLVED
+        if prereq_pass:
+            scoped = (args.stage is not None
+                      or getattr(args, "stage_id", None)
+                      or (getattr(args, "phase", "all") not in (None, "all")))
+            for sid in _OS_CONSTRAINTS_PREREQ_STEPS:
+                match = next((r for r in results if r.id == sid), None)
+                if match is None:
+                    # A SCOPED invocation (--stage / --phase) does not carry
+                    # the other stages' steps at all, and an FPGA prerequisite
+                    # that lives in stage1/stage4 is out of a stage-2 slice's
+                    # scope, not failed by it. Demanding it there refused
+                    # every stage slice on a step it was never shown.
+                    # In a FULL audit every step is present, so a missing
+                    # prereq there is a real absence and still blocks.
+                    if scoped:
+                        continue
+                    prereq_pass = False
+                    break
+                if not _os_constraints_prereq_satisfied(match, waivers):
+                    prereq_pass = False
+                    break
+                if match.status == "WAIVED":
+                    w = waivers.get(sid) or {}
+                    os_prereq_waived.append({
+                        # The printer and every consumer branch on this: these
+                        # rows carry a TICKET, not a commercial tool.
+                        "kind": "capability-gap-waiver",
+                        "step_id": sid,
+                        "step_name": match.name,
+                        "status": "WAIVED",
+                        "verdict_tier": w.get("verdict_tier"),
+                        "ticket": w.get("ticket"),
+                        "approver": w.get("approver"),
+                        "evidence": w.get("evidence"),
+                        "review_required": True,
+                    })
         # v1.6.212 (#93) — include informational_only_failing items in
         # the deferral source. The informational filter (#31 Bug 2)
         # excludes them from `failing` for verdict computation, but
@@ -17779,6 +17922,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                     "commercial_tool_required": tool,
                     "review_required": True,
                 })
+            # R-0915-55 — the promoted verdict CARRIES the waivers that let it
+            # promote. A prereq accepted because it is WAIVED under a declared
+            # capability gap is a row on the tape-out reviewer's must-close
+            # list exactly like the commercial-tool deferrals above; promoting
+            # on a waiver and then not naming it would be the silent green
+            # this tier exists to refuse.
+            os_constraints_deferrals.extend(os_prereq_waived)
             overall = "PASS_WITH_OPEN_SOURCE_CONSTRAINTS"
 
     print(f"\nOverall: {overall}  (strict={not args.lenient})")
@@ -17800,6 +17950,10 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"container. NOT a green pass; tapeout vendor must close "
               f"each entry before production.")
         for d in os_constraints_deferrals:
+            rendered = _render_os_deferral(d)
+            if rendered is not None:
+                print(rendered)
+                continue
             if d["step_id"] == "P0" and "p0_thin_input_subgates" in d:
                 # v1.6.211 (#92) — P0 deferral surfaces per-sub-gate
                 # breakdown.
@@ -17812,7 +17966,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 print(f"    • Step {d['step_id']} ({d['step_name']}): "
                       f"{d['status']} — needs "
-                      f"{d['commercial_tool_required']}")
+                      f"{d.get('commercial_tool_required', '?')}")
     # DFT_FCC / 11-d7 — never let a sign-off-bar self-skip pass unmentioned at
     # the verdict line, whether or not the promotion tier fired.
     if oss_blocked_skipped and overall != "PASS_WITH_OPEN_SOURCE_CONSTRAINTS":

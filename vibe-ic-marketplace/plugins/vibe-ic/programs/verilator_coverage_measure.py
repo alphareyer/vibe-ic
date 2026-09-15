@@ -1049,6 +1049,92 @@ def _cov_sources_for_tb(project: Path, tb: Path,
     return extra
 
 
+def measure_suite(rtl: Sequence[str], tbs: Sequence[str], build_dir: str, *,
+                  run_dir: Optional[str] = None, exec_fn=None,
+                  build_jobs: int = 0,
+                  mounts: Optional[Sequence[Tuple[Path, str]]] = None,
+                  scope: Optional[Sequence[str]] = None) -> Dict[str, Any]:
+    """Build and run EVERY testbench in `tbs`, then UNION their points.
+
+    THE ONE IMPLEMENTATION. This exists because there were two: the CLI's
+    `measure-tb` and a hand-rolled copy inside `design_one_shot_runner`'s
+    `step_verilator_coverage`, which is the one the flow actually runs. They
+    had the same shape and the same payload keys, so a fix to the first was
+    invisible in every real run — MEASURED on subservient r21, where the landed
+    suite-union code produced `measurement_scope: None` and `testbenches: 0`
+    because nothing in the flow's path had ever called it. A second
+    implementation of a measurement is a second answer waiting to disagree.
+
+    `exec_fn` is threaded through to `verilate_tb_and_run` so the caller
+    decides WHERE the build runs; everything else — one build directory per
+    testbench, the per-testbench totals, the union, and the named refusal when
+    the records cannot be keyed — is decided once, here.
+
+    Returns the pieces a payload is composed from; composing it stays with the
+    caller, because the two callers write to different places for different
+    readers."""
+    dats: List[str] = []
+    per_tb: Dict[str, Any] = {}
+    for i, one_tb in enumerate(tbs):
+        # ONE BUILD DIRECTORY PER TESTBENCH. Sharing one lets a later Verilator
+        # build overwrite an earlier coverage.dat, and the union would then be
+        # over fewer runs than it names — silently.
+        sub = (build_dir if len(tbs) == 1
+               else str(Path(build_dir) / f"tb{i:02d}_{Path(one_tb).stem}"))
+        sub_run = ((run_dir or build_dir) if len(tbs) == 1 else sub)
+        try:
+            dat_i = verilate_tb_and_run(list(rtl), str(one_tb), sub, sub_run,
+                                        exec_fn=exec_fn, build_jobs=build_jobs)
+        except SystemExit as exc:
+            # DISCLOSED, never silently dropped: a member that would not build
+            # is a member whose contribution is missing from the union, and the
+            # reader has to be told which one.
+            per_tb[str(one_tb)] = {"measured": False, "reason": str(exc)[:400]}
+            continue
+        dats.append(dat_i)
+        one_cov = parse_coverage_dat(dat_i, mounts=mounts)
+        one_scoped = scope_totals(one_cov, list(scope or rtl))
+        per_tb[str(one_tb)] = {"measured": True, "coverage_dat": dat_i,
+                               "totals": one_scoped["totals"] if one_scoped
+                               else None}
+    union_refused = ""
+    cov: Optional[Dict[str, Any]] = None
+    if len(dats) > 1:
+        cov = union_coverage_dats(dats, mounts=mounts)
+        if not cov.get("unionisable"):
+            # FAIL SAFE AND SAY SO: reporting a concatenated denominator would
+            # be worse than reporting one member's honest number.
+            union_refused = (f"the {len(dats)} runs could not be unioned "
+                             f"({cov.get('reason')}); reporting the FIRST "
+                             f"measured testbench alone")
+            cov = parse_coverage_dat(dats[0], mounts=mounts)
+            dats = dats[:1]
+    elif dats:
+        cov = parse_coverage_dat(dats[0], mounts=mounts)
+    return {"dats": dats, "cov": cov, "per_testbench": per_tb,
+            "union_refused": union_refused,
+            "measured": [str(t) for t in tbs
+                         if per_tb.get(str(t), {}).get("measured")],
+            "scope_used": list(scope or rtl)}
+
+
+def suite_payload_fields(result: Dict[str, Any]) -> Dict[str, Any]:
+    """The payload keys BOTH producers must carry, composed once.
+
+    `testbench` keeps naming ONE testbench because every existing reader audits
+    it for functional stimulus; `testbenches` is the honest population and
+    `measurement_scope` says which of the two the totals belong to."""
+    measured = result.get("measured") or []
+    dats = result.get("dats") or []
+    return {
+        "testbenches": measured,
+        "measurement_scope": ("union-of-suite" if len(dats) > 1
+                              else "single-testbench"),
+        "per_testbench": result.get("per_testbench") or {},
+        "union_refused": result.get("union_refused") or "",
+    }
+
+
 def cmd_measure_tb(args: argparse.Namespace) -> int:
     """Instrument + run the project's own testbench and write the measurement."""
     rtl = list(args.rtl or [])
@@ -1081,51 +1167,22 @@ def cmd_measure_tb(args: argparse.Namespace) -> int:
     mounts = _mounts_for(getattr(args, "container", ""))
     scope = args.scope_file or rtl
 
-    dats: List[str] = []
-    per_tb: Dict[str, Any] = {}
-    for i, one_tb in enumerate(tbs):
-        # Each testbench gets its OWN build directory. Sharing one would let a
-        # later Verilator build overwrite the coverage.dat of an earlier run
-        # and the union would silently be over fewer runs than it names.
-        sub = (build_dir if len(tbs) == 1
-               else str(Path(build_dir) / f"tb{i:02d}_{Path(one_tb).stem}"))
-        sub_run = (run_dir if len(tbs) == 1 else sub)
-        try:
-            dat_i = verilate_tb_and_run(rtl, one_tb, sub, sub_run,
-                                        build_jobs=args.build_jobs)
-        except SystemExit as exc:
-            # DISCLOSED, never silently dropped: a member that could not be
-            # built is a member whose contribution is missing from the union,
-            # and the reader has to be told which one.
-            per_tb[one_tb] = {"measured": False, "reason": str(exc)[:400]}
+    # ONE implementation, shared with the flow's own producer.
+    res = measure_suite(rtl, tbs, build_dir, run_dir=run_dir,
+                        build_jobs=args.build_jobs, mounts=mounts, scope=scope)
+    dats, per_tb = res["dats"], res["per_testbench"]
+    for one_tb, rec in per_tb.items():
+        if not rec.get("measured"):
             print(f"[measure-tb] {Path(one_tb).name}: NOT MEASURED — "
-                  f"{str(exc)[:200]}", file=sys.stderr)
-            continue
-        dats.append(dat_i)
-        one_cov = parse_coverage_dat(dat_i, mounts=mounts)
-        one_scoped = scope_totals(one_cov, scope)
-        per_tb[one_tb] = {"measured": True,
-                          "totals": one_scoped["totals"] if one_scoped else None,
-                          "coverage_dat": dat_i}
+                  f"{str(rec.get('reason'))[:200]}", file=sys.stderr)
     if not dats:
         print("[measure-tb] no testbench produced coverage points — refusing "
               "to report a measurement nothing measured", file=sys.stderr)
         return 1
-
-    union_note = ""
-    if len(dats) > 1:
-        cov = union_coverage_dats(dats, mounts=mounts)
-        if not cov.get("unionisable"):
-            # FAIL SAFE AND SAY SO. Reporting a concatenated denominator would
-            # be worse than reporting one member's honest number.
-            union_note = (f"the {len(dats)} runs could not be unioned "
-                          f"({cov.get('reason')}); reporting the FIRST "
-                          f"measured testbench alone")
-            print(f"[measure-tb] {union_note}", file=sys.stderr)
-            cov = parse_coverage_dat(dats[0], mounts=mounts)
-            dats = dats[:1]
-    else:
-        cov = parse_coverage_dat(dats[0], mounts=mounts)
+    union_note = res["union_refused"]
+    if union_note:
+        print(f"[measure-tb] {union_note}", file=sys.stderr)
+    cov = res["cov"]
     dat = dats[0]
     scoped = scope_totals(cov, scope)
     if scoped is None:
@@ -1133,23 +1190,13 @@ def cmd_measure_tb(args: argparse.Namespace) -> int:
               f"for any of {[Path(x).name for x in scope]} — refusing to "
               f"report the unscoped total in their place", file=sys.stderr)
         return 1
-    measured = [t for t in tbs if per_tb.get(t, {}).get("measured")]
+    measured = res["measured"]
     out = {
         "tool": "verilator",
         "measurement_mode": "measure-tb",
         "coverage_dat": dat,
-        # `testbench` keeps naming ONE testbench because every existing reader
-        # audits it for functional stimulus; `testbenches` is the honest
-        # population and `measurement_scope` says which of the two the totals
-        # are. A reader that only knows the old field is not misled about the
-        # stimulus, only about the breadth, and `measurement_scope` is there
-        # for the one that wants to know.
         "testbench": measured[0] if measured else tbs[0],
-        "testbenches": measured,
-        "measurement_scope": ("union-of-suite" if len(dats) > 1
-                              else "single-testbench"),
-        "per_testbench": per_tb,
-        "union_refused": union_note,
+        **suite_payload_fields(res),
         "rtl_sources": [str(x) for x in rtl],
         "totals": scoped["totals"],
         "scope_files": scoped["scope_files"],
