@@ -7882,6 +7882,55 @@ def _p0_contract_argv(gate_name: str,
     raise AssertionError(f"unknown structural gate invocation contract: {kind}")
 
 
+#: Gates that STATE their own `reason_class` in the `--json` report they write.
+#:
+#: R-0915-15 (lane icspm3, 2026-09-15) — WHY THIS REGISTRY EXISTS AT ALL.
+#: `_flow_reason_taxonomy.infer_nonverdict_reason` says branch-owned evidence
+#: outranks prose, and `report_reason_class` reads `summary.reason_class`
+#: before any recogniser runs. The P0 umbrella could not honour either, because
+#: it invoked these gates with NO `--json` at all: there was no report, so a
+#: gate that KNEW its own class had nowhere to say so and the umbrella fell
+#: back to reading its sentence. MEASURED on spm x gf180mcuD: both gates below
+#: emitted a class and the record still read
+#:   waiver_staleness_check — reason_class=EXECUTION_ERROR
+#: from the prose.
+#:
+#: OPT-IN, and it stays opt-in: a gate is added here only once it actually
+#: writes the field, because `--json` is not a flag every gate in the umbrella
+#: accepts. `_p0_declared_report` returns None for everything else, and the
+#: prose reading those gates already had is untouched.
+_P0_GATE_DECLARES_REASON_CLASS: frozenset = frozenset({
+    "waiver_staleness_check",
+    "analog_flow_compliance_check",
+})
+
+
+def _p0_declared_report_path(gate_name: str, project: Path,
+                             scratch_dir: Optional[Path]) -> Optional[Path]:
+    """Where a declaring gate's `--json` report is written, or None."""
+    if gate_name not in _P0_GATE_DECLARES_REASON_CLASS:
+        return None
+    scratch = scratch_dir or (project / ".p0-gate-scratch")
+    return scratch / f"{gate_name}.declared.json"
+
+
+def _p0_declared_reason_class(gate_name: str, project: Path,
+                              scratch_dir: Optional[Path]) -> Optional[str]:
+    """The class the gate STATED in its own report, or None.
+
+    Conservative in the only direction that matters: an absent, unreadable or
+    silent report returns None and the caller keeps the reading it had.
+    """
+    path = _p0_declared_report_path(gate_name, project, scratch_dir)
+    if path is None or not path.is_file():
+        return None
+    try:
+        report = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return None
+    return _reason_taxonomy.report_reason_class(report)
+
+
 def _structural_gate_argv(gate_name: str,
                           project: Path,
                           rtl_dir: Optional[Path] = None,
@@ -7917,6 +7966,11 @@ def _structural_gate_argv(gate_name: str,
     # v1.6.32: forward --strict-timing to the provenance gate only.
     if strict_timing and gate_name == "provenance_output_hash_completeness_check":
         argv.append("--strict-timing")
+    # R-0915-15 — give a DECLARING gate somewhere to state its own class.
+    _declared = _p0_declared_report_path(gate_name, project, scratch_dir)
+    if _declared is not None:
+        _declared.parent.mkdir(parents=True, exist_ok=True)
+        argv += ["--json", str(_declared)]
     return argv
 
 
@@ -8844,6 +8898,17 @@ def _run_structural_rtl_gates(project: Path,
             _skip_line = _p0_skip_reason_from_output(
                 gate_name, r.stdout, r.stderr)
             _evidence = {"exit_code": 2, "skip_kind": "input-missing"}
+            # R-0915-15 — the GATE's own word, when it wrote one. `skip_kind:
+            # input-missing` is this arm's ASSUMPTION about an rc=2, and for a
+            # gate that states its class it is simply wrong: nothing was
+            # missing. `infer_nonverdict_reason` reads `evidence.reason_class`
+            # before the skip_kind and before any prose, which is what
+            # "branch-owned evidence outranks prose" means.
+            _declared_cls = _p0_declared_reason_class(
+                gate_name, project, gate_scratch_dir)
+            if _declared_cls:
+                _evidence["reason_class"] = _declared_cls
+                _evidence["skip_kind"] = "declared-by-gate"
             _reason_class = _reason_taxonomy.infer_nonverdict_reason(
                 verdict="SKIP", message=_skip_line, evidence=_evidence)
             return _p0_gate_record(
