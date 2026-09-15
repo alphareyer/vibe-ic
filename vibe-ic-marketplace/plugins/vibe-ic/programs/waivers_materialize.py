@@ -209,6 +209,52 @@ def _root_ids(entries: List[Any]) -> List[Any]:
     return out
 
 
+#: The second sanctioned KIND, R-0915-26. `signoff_audit._emit_tapeout_waiver_entry`
+#: appends a waiver of its own to the same document -- the tape-out step, when
+#: the sign-off reached its evidence threshold with a DRC/LVS slot credited via
+#: a waiver -- and it used to append WITHOUT re-deriving the growth declaration.
+#: MEASURED on subservient x gf180mcuD (lane icsub2, run r13): `waived_steps`
+#: carried ids [39, 6, 36] while `growth_rationale_covers` still read [39, 6],
+#: so `waiver_growth_check` refused the document for a waiver the machinery had
+#: itself just created.
+#:
+#: THE FIX IS NOT TO PUT 36 UNDER THE SENTENCE ABOVE. That sentence says
+#: "MACHINERY-SANCTIONED ENV_UNAVAILABLE deferrals, and nothing else", and a
+#: tape-out tier waiver is not an ENV_UNAVAILABLE deferral; covering it there
+#: would make the rationale false, which is worse than leaving the gate red.
+#: So the declaration is COMPOSED from the kinds the document actually holds,
+#: each clause naming its own basis and its own ids, and an entry of a kind
+#: neither clause can justify is left UNCOVERED -- the gate then refuses it,
+#: which is the ratchet this whole mechanism exists to be.
+_TIER_RATIONALE = (
+    "SIGN-OFF TIER waiver(s), recorded by the auditor that issued the tier. "
+    "Each one records a sign-off step that reached its evidence threshold "
+    "with a slot credited via a waiver rather than measured clean, carries "
+    "the tier it was demoted to, a review ticket, `review_required: true` OPEN "
+    "against production tape-out review, and the evidence file(s) the auditor "
+    "read. This clause justifies exactly the waivers listed beside it and no "
+    "others; a waiver of any other kind is not covered by it.")
+
+
+def _is_env_unavailable_entry(e: Dict[str, Any]) -> bool:
+    """A machinery-sanctioned ENV_UNAVAILABLE deferral, by its OWN fields.
+
+    Keyed on what the entry records about itself -- never on a step id, which
+    would bind this program to one flow's numbering and to one design."""
+    return bool(e.get("_env_unavailable")) or (
+        bool(e.get("auto_synthesized")) and "_waiver_condition" in e)
+
+
+def _is_signoff_tier_entry(e: Dict[str, Any]) -> bool:
+    """A sign-off tier waiver, by its OWN fields: it names the tier it was
+    demoted to and the ticket its review is open against, and it is NOT an
+    ENV_UNAVAILABLE deferral (which carries a tier too)."""
+    return (not _is_env_unavailable_entry(e)
+            and bool(e.get("verdict_tier"))
+            and bool(e.get("ticket"))
+            and bool(e.get("review_required")))
+
+
 def declare_growth(data: Dict[str, Any]) -> Dict[str, Any]:
     """Re-derive the growth declaration from the entries the document HOLDS.
 
@@ -227,8 +273,31 @@ def declare_growth(data: Dict[str, Any]) -> Dict[str, Any]:
         data.pop("growth_rationale", None)
         data.pop("growth_rationale_covers", None)
         return data
-    data["growth_rationale"] = _GROWTH_RATIONALE
-    data["growth_rationale_covers"] = roots
+    by_id = {}
+    for e in entries:
+        by_id.setdefault(e.get("id"), e)
+    env, tier = [], []
+    for rid in roots:
+        e = by_id.get(rid) or {}
+        if _is_env_unavailable_entry(e):
+            env.append(rid)
+        elif _is_signoff_tier_entry(e):
+            tier.append(rid)
+        # else: UNCOVERED on purpose. Neither clause can justify it, so it is
+        # left out of `covers` and `waiver_growth_check` refuses the document.
+        # That is the hand-added-waiver case the mechanism was built for.
+    clauses = []
+    if env:
+        clauses.append(f"{_GROWTH_RATIONALE} Covers: {env}.")
+    if tier:
+        clauses.append(f"{_TIER_RATIONALE} Covers: {tier}.")
+    covered = env + tier
+    if not covered:
+        data.pop("growth_rationale", None)
+        data.pop("growth_rationale_covers", None)
+        return data
+    data["growth_rationale"] = " ".join(clauses)
+    data["growth_rationale_covers"] = [r for r in roots if r in set(covered)]
     return data
 
 

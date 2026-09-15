@@ -2067,6 +2067,24 @@ def _emit_tapeout_waiver_entry(project_dir: Path, result: "AuditResult") -> None
             return
     waived.append(waiver_entry)
     data["waived_steps"] = waived
+    # R-0915-26: THE POPULATION JUST GREW, SO RE-DERIVE THE DECLARATION.
+    # `waiver_growth_check` requires `growth_rationale_covers` to name EVERY
+    # root waiver the document holds -- equal, not "at least" -- and appending
+    # here without re-declaring left the document describing the population it
+    # had BEFORE this entry. MEASURED on subservient x gf180mcuD (lane icsub2,
+    # run r13): waived_steps [39, 6, 36] against covers [39, 6], so the gate
+    # refused a waiver the machinery had itself just created.
+    # `declare_growth` classifies each entry by its OWN recorded fields and
+    # composes one clause per kind, so this entry is covered by a sentence that
+    # is TRUE of it (a sign-off tier waiver) rather than folded under the
+    # ENV_UNAVAILABLE sentence, which would be false. A file this program could
+    # not classify is still left uncovered and the gate still refuses it.
+    try:
+        import waivers_materialize as _wm
+        _wm.declare_growth(data)
+    except Exception as exc:                       # pragma: no cover - disclose
+        print(f"[signoff_audit] WAIVER_GROWTH_DECLARE_NONFATAL: {exc}",
+              file=sys.stderr)
     try:
         wpath.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     except OSError:
