@@ -6796,6 +6796,19 @@ _STRUCTURAL_GATE_INVOCATION_CONTRACTS: Mapping[str, str] = MappingProxyType({
     # umbrella recorded as EXECUTION_ERROR → P0 INCOMPLETE. MEASURED on the
     # sha256 x sky130A v1.15.44 acceptance audit.
     "l9_response_delay_schema_check": "l9-positional",
+    # R-0915-15 (lane icspm3, 2026-09-15) — THE SAME DEFECT, ONE GATE OVER.
+    # `phase1_k5_quality_check` documents its own invocation as
+    # `python3 phase1_k5_quality_check.py <generated_docs/>` and takes that
+    # DIRECTORY as its positional, not the project root. Under the legacy
+    # project-positional convention it loaded no document at all and answered
+    #   K5 census: docs loaded NONE; 0/13 checks examined anything;
+    #   0 unit(s) examined in total.
+    # which the umbrella recorded as ZERO_DENOMINATOR -> P0 INCOMPLETE, on a
+    # run whose Phase 1 PASSED and wrote 29 L-docs. MEASURED on spm x
+    # gf180mcuD: handed `phase1/generated_docs` the same gate reads them --
+    # K5-P stops saying "L1_DATASHEET.json absent" and starts reporting
+    # "L1.class_path is null/empty", which is a finding about the DESIGN.
+    "phase1_k5_quality_check": "generated-docs-positional",
     "mask_application_check": "declared-masks",
     "module_port_audit": "module-ports",
     "oe_pattern_check": "rtl-files-output",
@@ -7634,6 +7647,7 @@ _P0_CONTRACT_REQUIRED_CONTEXT: Mapping[str, tuple[str, ...]] = MappingProxyType(
     # when the design actually declares a register section in L9.
     "l9": ("l9_path", "l9_registers"),
     "l9-positional": ("l9_path",),
+    "generated-docs-positional": (),
     "declared-masks": ("masks",),
     "rtl-files-output": ("rtl_files",),
     "payload-bitmap": ("l3_path", "payload_bitmap"),
@@ -7772,6 +7786,13 @@ def _p0_contract_argv(gate_name: str,
             ctx.get("l9_path") or project / "missing_l9.json")]
     if kind == "l9-positional":
         return base + [str(ctx.get("l9_path") or project / "missing_l9.json")]
+    if kind == "generated-docs-positional":
+        # The directory Phase 1 writes its L-docs into. Passed even when it is
+        # absent: the gate's own census then says so as a census ("docs loaded
+        # NONE") and the umbrella books ZERO_DENOMINATOR, which is the honest
+        # answer for a project that has not run Phase 1 -- and is exactly what
+        # the WRONG argument was making it say on projects that HAD.
+        return base + [str(project / "phase1" / "generated_docs")]
     if kind == "declared-masks":
         argv = base + [str(rtl_dir)]
         for item in ctx.get("masks") or []:
