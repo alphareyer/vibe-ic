@@ -950,12 +950,27 @@ def test_the_childs_transcript_never_lands_in_the_parents_log():
     exec_line = [l for l in parent.splitlines() if "exec openroad" in l]
     assert len(exec_line) == 1, exec_line
     line = exec_line[0]
-    assert f"/o/{R._sdr_child_log_name(SITE1)}" in line
-    # redirected AWAY from the parent's stdout, not tee'd through it
+    # PREMISE UPDATED by R-0915-26 and TIGHTENED. There are now TWO child
+    # sessions per site -- the ODB leg and, only if that one is rejected, the
+    # DEF leg -- so the single `exec` is a shared runner taking the log as an
+    # argument, and the literal path lives at the CALL sites instead of on the
+    # exec line. The property this test exists for is unchanged and is now
+    # pinned harder: one exec site, redirected to a per-call file, and the two
+    # legs must not share a log or one would overwrite the other's transcript.
+    assert ">& $log" in line
+    # redirected AWAY from the parent's stdout, not tee'd through it. Checked
+    # positively as well as negatively: an earlier version of this guard looked
+    # for the ABSENCE of ">&@ stdout" while the live form was ">@ stdout".
     assert ">@ stdout" not in line and ">&@ stdout" not in line
     assert "tee" not in line
-    # and the reader is still told where the transcript went
-    assert f"log={'/o/' + R._sdr_child_log_name(SITE1)}" in parent
+    odb_log = f"/o/{R._sdr_child_log_name(SITE1)}"
+    def_log = f"/o/{R._sdr_child_def_leg_log_name(SITE1)}"
+    assert odb_log != def_log
+    for want in (odb_log, def_log):
+        assert f"_sdr_exec_child /o/" in parent
+        assert want in parent, want
+    # and the reader is still told where each transcript went
+    assert "log=$log" in parent
 
 
 # ------------------------- R-0915-16: the restore point is the ODB
