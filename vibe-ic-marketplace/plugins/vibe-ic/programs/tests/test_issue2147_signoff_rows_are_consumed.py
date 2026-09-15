@@ -208,11 +208,36 @@ def test_the_measured_run_refuses_by_name_and_never_passes_on_a_null(tmp_path):
     assert rep["cell_area_signoff"]["signoff_row_found"] is True
 
     pv, prep = power_gate.evaluate(proj, None)
-    assert pv == "INCOMPLETE"
+    # OWNER RULING R-0915-22 (2026-09-15) CHANGED THIS ONE LINE, and only this
+    # one. It used to read `assert pv == "INCOMPLETE"`.
+    #
+    # What the ruling did NOT change, and what every other assertion here still
+    # pins: an unattributed baseline is NOT a budget for this run, the number
+    # is never borrowed, and the row is disclosed BY NAME. Those are the
+    # findings #2147 landed and they are untouched.
+    #
+    # What it changed is the TIER of that refusal. INCOMPLETE says an input
+    # this gate needs was never produced and somebody still owes it. Nobody
+    # does: this design's input states no power budget applicable to the
+    # technology the run built against, and never promised one. The area gate
+    # has answered NOT_APPLICABLE for exactly this kind of fact -- a ceiling
+    # the design declines to state -- since #2147, three lines above. The two
+    # gates now agree, and the refusal still never becomes a PASS or a FAIL.
+    assert pv == "NOT_APPLICABLE"
+    assert prep["reason_class"] == "DESIGN_DECLARED_NA"
+    # UNCHANGED: no budget was adopted ...
     assert prep["power_budget_uw"] is None
-    assert "NOT_DETERMINED" in prep["missing_authority"]
-    assert "baseline_not_attributed_to_this_technology" in \
-        prep["missing_authority"]
+    assert prep["requirement"] is None
+    # ... the row was NOT_DETERMINED for this run, for the named reason ...
+    assert prep["disposition"]["signoff_row_tier"] == "not_determined"
+    assert prep["disposition"]["signoff_row_reason"] == \
+        "baseline_not_attributed_to_this_technology"
+    # ... and the disclosure names the attribution the document DOES carry,
+    # so the unusable row is reported rather than quietly dropped.
+    assert any(LIB_A in str(a)
+               for a in prep["disposition"]["attributions_seen"])
+    assert "baseline_not_attributed_to_this_technology" in prep["reason"] \
+        or "no baseline is attributed to" in prep["reason"]
 
 
 def test_a_cross_technology_row_is_never_borrowed(tmp_path):
