@@ -3317,7 +3317,36 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
         reason_class = _reason_taxonomy.EXECUTION_ERROR
     else:
         verdict, rc = ("PASS", 0) if ok else ("FAIL", 1)
-        if verdict == "PASS" and _json_report_declares_nonverdict(report):
+        # THE SAME EXEMPTION THE rc-2 BRANCH ALREADY MAKES (vibe-ic#2277).
+        #
+        # MEASURED, live main 79506306d (lane icspm4, run1), flow step 14.
+        # `yosys_hilomap_required_check` and `yosys_script_template_check` exit
+        # 0 on a run whose synthesis used an inline `yosys -p` command instead
+        # of a `.ys` script. They keep the verdict word VACUOUS_PASS on purpose
+        # -- no `.ys` file existed to audit -- and record in their own
+        # gate-private `reason_class` (`inline_yosys_p_mode_conformant`) that
+        # the inline command WAS extracted and verified. The hilomap gate also
+        # prints `SUBSTANTIVE_PASS:` for exactly this reader.
+        #
+        # That token was then thrown away here: this branch saw a JSON
+        # non-verdict, asked the taxonomy to classify a word that is not one of
+        # its six classes, got None, fell through to prose inference, matched
+        # no recogniser, fail-closed to EXECUTION_ERROR and REWROTE `out` as
+        # `INCOMPLETE: ...` -- which the optional-clause reader below then turns
+        # into `__INCOMPLETE_HINT__` and the step into INCOMPLETE. A gate that
+        # said "I verified the equivalent by another route" was recorded as one
+        # that examined nothing and then crashed.
+        #
+        # The rc-2 branch above has handled this since it was written, and its
+        # comment is the specification: "That is a substantive PASS, not a
+        # non-verdict reason to classify." This is the SAME rule on the other
+        # exit code. Nothing else is exempted: a gate that does not print the
+        # token is classified exactly as before, and a FAILING gate never
+        # reaches this test because `verdict` is PASS only when `ok`.
+        if verdict == "PASS" and _stdout_signals_token(
+                out, _SUBSTANTIVE_STDOUT_TOKEN):
+            pass
+        elif verdict == "PASS" and _json_report_declares_nonverdict(report):
             reason_class = _reason_taxonomy.infer_nonverdict_reason(
                 verdict="VACUOUS_PASS", message=report_message,
                 explicit=report_cls)
