@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -113,6 +114,53 @@ def _resolve_image_id(ref: str) -> Optional[str]:
     except (OSError, subprocess.SubprocessError):
         return None
     return (proc.stdout or "").strip() or None if proc.returncode == 0 else None
+
+
+#: `sha256:<64 hex>` — the exact identity shape, the SAME spelling `_eda_pin`
+#: uses. Kept as a literal fallback only for the case where `_eda_pin` cannot be
+#: imported; `_registry_digest_of` prefers the pin module so there is one
+#: authority on what a digest is.
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _registry_digest_of(ref: Optional[str]) -> Optional[str]:
+    """The REGISTRY digest `ref` names — from `<repo>@sha256:…` or from a bare
+    `sha256:…` — else None.
+
+    A bare `sha256:<hex>` is genuinely ambiguous: it is the spelling of a local
+    config Id (`docker inspect --format '{{.Image}}'`) AND the spelling of a
+    manifest digest (`_eda_pin.IMAGE_DIGEST`). This returns it under the second
+    reading; `verify` tries the first reading separately, so both are honoured
+    and neither is guessed at.
+    """
+    if not ref:
+        return None
+    ref = str(ref).strip()
+    try:
+        import _eda_pin as _pin
+        named = _pin.reference_digest(ref)
+        if named:
+            return named
+        return ref if _pin.DIGEST_RE.match(ref) else None
+    except Exception:                                       # noqa: BLE001
+        head, sep, tail = ref.partition("@")
+        if sep and head and _DIGEST_RE.match(tail):
+            return tail
+        return ref if _DIGEST_RE.match(ref) else None
+
+
+def _repo_digests_of(image: str) -> "tuple[tuple[str, ...], str]":
+    """`(repo_digests, why_not)` of the image `image` names, LOCAL metadata only.
+
+    Delegates to `_eda_pin.local_repo_digests`, which already owns the docker
+    call and the `{{json .RepoDigests}}` parsing (including the tab-field quirk
+    the repo's fake docker produces). Never touches the network.
+    """
+    try:
+        import _eda_pin as _pin
+        return _pin.local_repo_digests(image)
+    except Exception as exc:                                # noqa: BLE001
+        return (), f"repo digests unreadable: {type(exc).__name__}: {exc}"
 
 
 def verify(container: str, require_image: Optional[str] = None) -> Dict[str, object]:
@@ -228,15 +276,60 @@ def verify(container: str, require_image: Optional[str] = None) -> Dict[str, obj
                    or (want_id is not None and want_id == got_id))
         rec["require_image"] = require_image
         rec["require_image_id"] = want_id
+
+        # ── A REGISTRY DIGEST IS NOT A CONFIG DIGEST, AND BOTH NAME THE IMAGE ──
+        # Everything above compares `require_image` against the CONFIG digest
+        # (`docker inspect --format '{{.Image}}'`) or against the literal string
+        # the container was started with. The plugin's own pin is neither: it is
+        # a MANIFEST digest (`_eda_pin.IMAGE_DIGEST`), which docker records on
+        # the image as a RepoDigest and which `docker image inspect` cannot
+        # resolve on its own — so `_resolve_image_id` returns None and the
+        # comparison fell through to MISMATCH.
+        #
+        # MEASURED 2026-09-16 on 8HD-6 (lane icsha3), one container, one process:
+        #   _eda_pin.pinned_image_present()
+        #     -> ('192.168.1.112:5000/vibeic-eda@sha256:89a8fd72…', '')   # held
+        #   verify('icsha3-eda', _eda_pin.IMAGE_DIGEST)
+        #     -> MISMATCH "…(unresolved)… the run would silently execute a
+        #        DIFFERENT toolchain than the one pinned"
+        # The container ran EXACTLY those bytes. Two modules, one fact, opposite
+        # answers — and the refusal a lane sees is indistinguishable from a real
+        # stale-container substitution, which is the alarm this program exists to
+        # raise. (The 2026-09-15 08:05->08:30 fleet correction is this same
+        # confusion read the other way round.)
+        #
+        # This is NOT a relaxation. A RepoDigest belongs to the image the
+        # container is actually running: matching one proves the container holds
+        # the demanded bytes, which is a STRICTER statement than the tag equality
+        # already accepted above. A genuinely stale container carries different
+        # RepoDigests and still MISMATCHes — `test_stale_container_*` pins that.
+        want_digest = _registry_digest_of(require_image)
+        if not matched and want_digest is not None:
+            held, why = _repo_digests_of(got_id)
+            rec["image_repo_digests"] = list(held)
+            if why:
+                rec["repo_digest_probe"] = why
+            if any(_registry_digest_of(d) == want_digest for d in held):
+                matched = True
+                rec["matched_by"] = "repo_digest"
+
         rec["image_match"] = matched
         if not matched:
             rec["verdict"] = "MISMATCH"
+            held_note = ""
+            if want_digest is not None:
+                held = rec.get("image_repo_digests") or []
+                held_note = (
+                    "; that image's repo digests are %s" % (
+                        ", ".join(str(h) for h in held) if held
+                        else "none (%s)" % (rec.get("repo_digest_probe")
+                                            or "the image records none")))
             rec["reason"] = (
                 "container %r runs image %s (%s) but --require-image %s (%s) was "
                 "demanded — the run would silently execute a DIFFERENT toolchain "
-                "than the one pinned" % (
+                "than the one pinned%s" % (
                     container, rec["image_ref"], got_id[:19],
-                    require_image, (want_id or "unresolved")[:19])
+                    require_image, (want_id or "unresolved")[:19], held_note)
             )
     return rec
 
