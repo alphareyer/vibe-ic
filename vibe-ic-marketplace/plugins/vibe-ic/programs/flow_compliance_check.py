@@ -9018,8 +9018,15 @@ def _run_structural_rtl_gates(project: Path,
                         gate_name, "SKIP", _contract_na,
                         {"skip_kind": "declaration-not-present",
                          "applicability_source": "generated L-doc roster",
+                         # A gate outside the closed contract table is invoked
+                         # under the default project-positional convention;
+                         # a declaration-derived N/A names the contract it
+                         # would have run under either way (lander, R-0915-15:
+                         # test_issue1968_replaces_not_invocable_with_declared_na
+                         # reads this field on every such record).
                          "invocation_contract":
-                         _STRUCTURAL_GATE_INVOCATION_CONTRACTS.get(gate_name)},
+                         _STRUCTURAL_GATE_INVOCATION_CONTRACTS.get(
+                             gate_name, "project-positional")},
                         reason_class=_reason_taxonomy.DESIGN_DECLARED_NA)))
                 continue
             if gate_name in analog_skip_gates:
