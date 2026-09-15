@@ -60,7 +60,7 @@ import re
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import plugin_manifest_discovery as _pmd  # noqa: E402  (#800 ONE version reader)
 
 # Importable as both a script and a module
@@ -496,6 +496,114 @@ def restamp_l_doc_skeletons(project_dir: Optional[Path]) -> list[str]:
 # ---------------------------------------------------------------------------
 # L14-L23 skeleton emission
 # ---------------------------------------------------------------------------
+# ── R-0915-36: applicability is DECIDED FROM THE INPUT, not assumed ────────
+#
+# A skeleton stamped `applicability: APPLICABLE` + `extraction_status:
+# NOT_YET_EXTRACTED` has declared NOTHING: it says the layer's subject matters
+# and that nobody looked. Every consumer downstream then has to treat it as an
+# open obligation, which is correct but permanent — the layer never becomes a
+# statement no matter what the design is.
+#
+# So for the layers registered here the emitter ASKS THE INPUT. If no input
+# document carries the layer's subject, the layer is emitted as a DECLARED
+# ABSENCE: `applicability: NOT_APPLICABLE`, carrying the documents it scanned
+# and the terms it searched, so the claim can be re-run. If ANY input document
+# carries the subject, nothing changes — the layer stays APPLICABLE and its
+# skeleton stays the honest open obligation it is today. That direction is the
+# fail-closed one and it is the one that matters: a design whose input DOES
+# discuss sign-off must not have its sign-off layer answered N/A.
+#
+# The terms are not invented here. Each is a word the layer's OWN
+# `_extraction_hints_for()` text already uses to describe its subject, and
+# `test_r0915_36_the_terms_come_from_the_layers_own_hints` holds them to it, so
+# the table cannot drift away from what the layer says it is looking for.
+_INPUT_SUBJECT_TERMS: Dict[str, Tuple[str, ...]] = {
+    # 'Look for signoff / tapeout / sign-off checklist sections.'
+    # 'Capture DRC / LVS / STA / antenna / IR-drop status per gate.'
+    "L24": ("signoff", "sign-off", "tapeout", "checklist", "DRC", "LVS",
+            "STA", "antenna", "IR-drop"),
+    # 'Look for reliability / qualification / mission-profile sections.'
+    # 'Capture qual standard (JESD47, AEC-Q100/Q200) if stated.'
+    # 'Capture temperature range, EM budget, NBTI/HCI aging margins.'
+    "L25": ("reliability", "qualification", "mission-profile", "JESD47",
+            "AEC-Q100", "Q200", "NBTI", "HCI", "aging", "EM budget"),
+}
+
+#: Suffixes the input-document scan will read. Text only — a staged binary is
+#: not a document that "carries the subject" in any readable sense.
+_INPUT_DOC_SUFFIXES = (".md", ".markdown", ".txt", ".rst", ".adoc",
+                       ".asciidoc")
+
+
+def input_documents(project_dir: Path) -> List[Path]:
+    """Every readable input document of the design, in stable order."""
+    docs = project_dir / "input" / "docs"
+    if not docs.is_dir():
+        return []
+    return sorted(p for p in docs.rglob("*")
+                  if p.is_file() and p.suffix.lower() in _INPUT_DOC_SUFFIXES)
+
+
+def _term_in(term: str, lowered_text: str) -> bool:
+    """Word-bounded occurrence of one subject term in already-lowered text."""
+    return re.search(r"(?<![a-z0-9])" + re.escape(term.lower())
+                     + r"(?![a-z0-9])", lowered_text) is not None
+
+
+def _input_carries_subject(l_doc_code: str,
+                           project_dir: Optional[Path]
+                           ) -> Optional[Dict[str, Any]]:
+    """Evidence that NO input document carries this layer's subject, or None.
+
+    Returns None — leaving the layer APPLICABLE — whenever the question cannot
+    be answered honestly: the layer is not registered, there is no project, or
+    the design staged no readable input document at all. An empty corpus is
+    not a design saying "I have no sign-off requirements"; it is a scan with
+    no denominator, and the repo already refuses those.
+    """
+    terms = _INPUT_SUBJECT_TERMS.get(str(l_doc_code or "").upper())
+    if not terms or project_dir is None:
+        return None
+    docs = input_documents(Path(project_dir))
+    if not docs:
+        return None
+    root = Path(project_dir)
+    scanned: List[str] = []
+    matched: List[Dict[str, str]] = []
+    for doc in docs:
+        try:
+            text = doc.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            # Unreadable is not absent. Refuse the whole decision.
+            return None
+        try:
+            scanned.append(doc.relative_to(root).as_posix())
+        except ValueError:
+            scanned.append(doc.name)
+        low = text.lower()
+        for term in terms:
+            # WORD-BOUNDED, and this is load-bearing: a plain substring test
+            # makes "STA" fire inside "state", "status" and "installation",
+            # so almost every design would look as though it discussed
+            # sign-off and no layer would ever reach a declared absence. The
+            # boundary class is [a-z0-9] rather than \b so a hyphenated term
+            # ("sign-off", "IR-drop", "AEC-Q100") still matches.
+            if _term_in(term, low):
+                matched.append({"document": scanned[-1], "term": term})
+                break
+    if matched:
+        return None
+    return {
+        "kind": "input-declares-no-subject",
+        "layer": str(l_doc_code).upper(),
+        "documents_scanned": scanned,
+        "documents_scanned_count": len(scanned),
+        "terms_searched": list(terms),
+        "documents_matching": 0,
+        "decided_by": "phase1_post_process._input_carries_subject",
+    }
+
+
 def emit_l_doc_skeleton(l_doc_code: str,
                         ic_class: Optional[str] = None,
                         project_dir: Optional[Path] = None) -> Dict[str, Any]:
@@ -541,18 +649,26 @@ def emit_l_doc_skeleton(l_doc_code: str,
         if staged is not None:
             fields_template["sdc_constraints_path"] = staged
     hints = _extraction_hints_for(l_doc_code)
-    return {
+    # R-0915-36 — decide applicability from the input where the layer is
+    # registered for it. Absent a decision this is the unchanged APPLICABLE
+    # skeleton every other layer still gets.
+    absent = _input_carries_subject(l_doc_code, project_dir)
+    out = {
         "doc_id": spec.code,
         "doc_name": spec.full_name,
-        "applicability": "APPLICABLE",
+        "applicability": "NOT_APPLICABLE" if absent else "APPLICABLE",
         "ic_class": resolved,
         "fields": fields_template,
         "evidence": [],
         "extraction_hints": hints,
-        "extraction_status": "NOT_YET_EXTRACTED",
+        "extraction_status": ("DECLARED_ABSENT_FROM_INPUT" if absent
+                              else "NOT_YET_EXTRACTED"),
         "emitted_by": _pmd.emitted_by(
             "phase1_post_process.emit_l_doc_skeleton"),
     }
+    if absent:
+        out["applicability_evidence"] = absent
+    return out
 
 
 def _staged_sdc_rel(project_dir: Path) -> Optional[str]:

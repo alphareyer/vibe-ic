@@ -108,6 +108,7 @@ import _gate_invocation
 import _flow_reason_taxonomy as _reason_taxonomy
 import _watchdog
 import l_doc_consumer_contract as _ldoc
+import clock_contract as _clock_contract
 # vibe-ic#634 — the ONE classification of verdict words, shared with
 # `flow_step_execution_coverage_check` so a tier added here cannot be
 # unknown to the guard that adjudicates dependency ordering.
@@ -7684,6 +7685,45 @@ _P0_GATE_ZERO_POPULATION: Dict[str, Any] = {
     "arbiter_starvation_check": (
         "L9_", ("submodules", "memories"),
         {"no_submodules_in_input": True, "no_memories_in_input": True}),
+    # ── batch 4 ────────────────────────────────────────────────────────────
+    # R-0915-35. The divider gate's SUBJECT is a DERIVED (divided) clock
+    # domain, and L8 is where the design enumerates its clock domains. The
+    # population is therefore a SUBSET of `clock_domains`, picked by the
+    # repo's own definition of a derived clock — `clock_contract
+    # .entry_is_derived`, which already reads domain_kind / role /
+    # derived_from and is what every other clock consumer here uses. The
+    # gate's own "[skipped] no toggle-divider patterns found" RTL scan is NOT
+    # the basis; L8 is. `enumerated` requires L8 to have actually listed its
+    # domains: a layer that lists none has enumerated nothing.
+    # MEASURED on spm: one entry, domain_kind "primary", no derived_from —
+    # entries_read 1, derived count 0.
+    "clock_divider_period_check": (
+        "L8_", ("clock_domains",), {},
+        {"filter": ("clock_contract.entry_is_derived",
+                    _clock_contract.entry_is_derived),
+         "enumerated": ("clock_domains",)}),
+    # R-0915-37, revising R-0915-19's removal. The subject is opcode RESPONSE
+    # TEMPLATES, and a template can only be owed for an opcode that EXISTS.
+    # The override doc matters only once the design declares one, so the
+    # population is L3's opcode list, not the doc. Zero opcodes -> N/A; one
+    # opcode and no override doc -> the BLOCKED_BY_UPSTREAM it reports today.
+    "l3_opcode_response_template_check": (
+        "L3_", ("opcodes",), {"no_opcodes_in_input": True}),
+    # R-0915-36. These two answer from the layer's own APPLICABILITY, which
+    # `phase1_post_process.emit_l_doc_skeleton` now DECIDES FROM THE INPUT: a
+    # layer reaches NOT_APPLICABLE only when no input document carries its
+    # subject, and carries the documents scanned and terms searched as its
+    # evidence. A layer left APPLICABLE — including the un-extracted skeleton
+    # — keeps its gate live, which is today's behaviour and the fail-closed
+    # direction.
+    "l24_signoff_evidence_backed_check": (
+        "L24_", ("drc_status", "lvs_status", "sta_status", "ir_drop_status",
+                 "antenna_status", "tapeout_gates"),
+        {"applicability": "NOT_APPLICABLE"}),
+    "l25_reliability_envelope_actionable_check": (
+        "L25_", ("mission_profile", "qual_standard", "temp_range",
+                 "em_budget", "aging_margin"),
+        {"applicability": "NOT_APPLICABLE"}),
 }
 
 
@@ -7711,16 +7751,40 @@ def _p0_zero_population_evidence(project: Path,
     spec = _P0_GATE_ZERO_POPULATION.get(gate_name)
     if spec is None:
         return None
-    tag, populations, assertions = spec
+    tag, populations, assertions, *_rest = spec
+    # R-0915-35 — an optional SUBSET spec, for a gate whose subject is a kind
+    # of entry inside a population rather than the population itself.
+    #   filter     (name, predicate) — counts only entries the predicate picks
+    #   enumerated (field, ...)      — these fields must be NON-empty, because
+    #                                  the declaration here is the layer having
+    #                                  ENUMERATED the population and none of
+    #                                  its entries being of the kind asked
+    #                                  about. A layer listing nothing has
+    #                                  enumerated nothing and is not a
+    #                                  declaration, the same empty-denominator
+    #                                  refusal the rest of this rule makes.
+    subset = _rest[0] if _rest else {}
+    filt = subset.get("filter")
+    enumerated = subset.get("enumerated", ())
     path = _p0_contract_doc(project, tag)
     doc, state = _p0_contract_json(path)
     if state != "valid" or path is None:
         return None
     fields = _ldoc.l_doc_fields(doc)
+    for name in enumerated:
+        if not _p0_nonempty(fields.get(name)):
+            return None
     total = 0
+    entries_read = 0
     for name in populations:
         value = fields.get(name)
         if value is None:
+            continue
+        if filt is not None:
+            if not isinstance(value, (list, tuple)):
+                return None
+            entries_read += len(value)
+            total += sum(1 for entry in value if filt[1](entry))
             continue
         total += len(value) if isinstance(value, (list, dict, str, tuple,
                                                   set)) else 1
@@ -7733,7 +7797,7 @@ def _p0_zero_population_evidence(project: Path,
         rel = str(Path(path).resolve().relative_to(Path(project).resolve()))
     except ValueError:
         return None
-    return {
+    evidence = {
         "kind": "design-declared-zero-population",
         "declaration_path": rel,
         "declaration_reader": "l_doc_consumer_contract.l_doc_fields",
@@ -7742,6 +7806,10 @@ def _p0_zero_population_evidence(project: Path,
         "assertions": [{"path": k, "equals": v}
                        for k, v in sorted(assertions.items())],
     }
+    if filt is not None:
+        evidence["population_filter"] = filt[0]
+        evidence["entries_read"] = entries_read
+    return evidence
 
 
 def _p0_zero_population_subject(project: Path, gate_name: str,
@@ -7831,6 +7899,13 @@ def _p0_contract_context(project: Path,
     l23_path = _p0_contract_doc(project, "L23_")
     l9_path = _p0_contract_doc(project, "L9_")
     _, l9_state = _p0_contract_json(l9_path)
+    # L8 ships as two documents on some designs (L8_RTL_CONSTANTS and
+    # L8_TIMING_WAVEFORM); `_p0_contract_doc` globs the prefix and takes the
+    # first in sorted order, which is the constants layer that carries
+    # `clock_domains`.
+    _, l8_state = _p0_contract_json(_p0_contract_doc(project, "L8_"))
+    _, l24_state = _p0_contract_json(_p0_contract_doc(project, "L24_"))
+    _, l25_state = _p0_contract_json(_p0_contract_doc(project, "L25_"))
     _, l20_state = _p0_contract_json(l20_path)
     _, l23_state = _p0_contract_json(l23_path)
     l9_path = _p0_contract_doc(project, "L9_")
@@ -7992,6 +8067,18 @@ def _p0_contract_context(project: Path,
             project, "cross_module_1cycle_handshake_check", l9_state),
         "l9_arbitrable": _p0_zero_population_subject(
             project, "arbiter_starvation_check", l9_state),
+        # R-0915-34(b) batch 4.
+        "l8_derived_clocks": _p0_zero_population_subject(
+            project, "clock_divider_period_check", l8_state),
+        "l3_opcodes_for_templates": _p0_zero_population_subject(
+            project, "l3_opcode_response_template_check", l3_state),
+        "l24_signoff_subject": _p0_zero_population_subject(
+            project, "l24_signoff_evidence_backed_check", l24_state),
+        "l25_reliability_subject": _p0_zero_population_subject(
+            project, "l25_reliability_envelope_actionable_check", l25_state),
+        "l8_state": l8_state,
+        "l24_state": l24_state,
+        "l25_state": l25_state,
         "l20_state": l20_state,
         "l23_state": l23_state,
         "deliverable_record": (str(project / "RESULT.md")
@@ -8112,6 +8199,11 @@ _P0_GATE_REQUIRED_CONTEXT: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "cross_module_1cycle_handshake_check": ("l9_submodules",),
     "frame_end_detection_check": ("l9_submodules",),
     "arbiter_starvation_check": ("l9_arbitrable",),
+    # batch 4
+    "clock_divider_period_check": ("l8_derived_clocks",),
+    "l3_opcode_response_template_check": ("l3_opcodes_for_templates",),
+    "l24_signoff_evidence_backed_check": ("l24_signoff_subject",),
+    "l25_reliability_envelope_actionable_check": ("l25_reliability_subject",),
     # AND ONE THAT IS NOT A DECLARATION AT ALL — a FLOW-ORDER defect, named as
     # that. `deliverable_verdict_consistency_check` reads `RESULT.md`, which
     # the runner authors at the END of the run, so a P0 sub-gate asking for it
@@ -8144,6 +8236,10 @@ _P0_CONTEXT_DOCUMENT_STATE: Mapping[str, str] = MappingProxyType({
     "l6_fsm": "l6_state",
     "l9_submodules": "l9_state",
     "l9_arbitrable": "l9_state",
+    "l8_derived_clocks": "l8_state",
+    "l3_opcodes_for_templates": "l3_state",
+    "l24_signoff_subject": "l24_state",
+    "l25_reliability_subject": "l25_state",
     "crc_signal": "l3_state",
     "crc_vectors": "l3_state",
     "l3_opcodes": "l3_state",

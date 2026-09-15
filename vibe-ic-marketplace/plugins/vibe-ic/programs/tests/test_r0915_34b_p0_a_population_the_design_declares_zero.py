@@ -86,8 +86,27 @@ DECLARING = {
         ("L9_INTEGRATION_SPEC.json", "submodules", [{"name": "rx_phy"}]),
     "arbiter_starvation_check":
         ("L9_INTEGRATION_SPEC.json", "memories", [{"name": "otp"}]),
+    "l3_opcode_response_template_check":
+        ("L3_CMD_PROTOCOL.json", "opcodes", [{"hex": "0x01"}]),
+    "l24_signoff_evidence_backed_check":
+        ("L24_SIGNOFF.json", "drc_status", "CLEAN"),
+    "l25_reliability_envelope_actionable_check":
+        ("L25_RELIABILITY_MISSION_PROFILE.json", "mission_profile",
+         {"temp_range_c": [-40, 125]}),
+    # clock_divider_period_check is registered too, but its population is a
+    # SUBSET of a field rather than the field, so its cases are written out
+    # below rather than driven from this table.
+    "clock_divider_period_check":
+        ("L8_RTL_CONSTANTS.json", "clock_domains",
+         [{"name": "clk", "domain_kind": "primary"},
+          {"name": "clk_div4", "domain_kind": "derived", "derived_from": "clk"}]),
 }
 GATES = tuple(DECLARING)
+#: Every gate whose declaration is a FIELD STATING the absence. The divider
+#: gate is excluded: L8 states nothing about dividers, and what makes its zero
+#: a declaration is that L8 ENUMERATED its clock domains -- so its two
+#: negative controls are written out rather than driven from STATED_BY.
+GENERIC_GATES = tuple(g for g in DECLARING if g != "clock_divider_period_check")
 
 #: gate -> (the assertion field that makes its document a STATEMENT, the value
 #: of that field which DENIES the absence). The polarity differs by layer --
@@ -109,6 +128,15 @@ STATED_BY = {
     "cross_module_1cycle_handshake_check": ("no_submodules_in_input", False),
     "frame_end_detection_check": ("no_submodules_in_input", False),
     "arbiter_starvation_check": ("no_submodules_in_input", False),
+    "l3_opcode_response_template_check": ("no_opcodes_in_input", False),
+    # R-0915-36: these two read the layer's APPLICABILITY, and the denial of
+    # an absence is the layer saying it IS applicable -- which is exactly the
+    # un-extracted skeleton that must keep its gate live.
+    "l24_signoff_evidence_backed_check": ("applicability", "APPLICABLE"),
+    "l25_reliability_envelope_actionable_check": ("applicability", "APPLICABLE"),
+    # L8 states nothing; what makes it a declaration is that it ENUMERATED its
+    # clock domains. Its "lists nothing" control is written out below.
+    "clock_divider_period_check": ("clock_mhz", None),
 }
 
 
@@ -150,6 +178,21 @@ def _declares_none(tmp_path):
         "doc_class": "control_logic", "fsm_machines": [], "fsm_states": [],
         "fsm_machine_count": 0, "no_fsm_in_input": True,
         "no_fsm_states_in_input": True})
+    _write(proj, "L8_RTL_CONSTANTS.json", {
+        "doc_class": "rtl_constants", "clock_mhz": 50.0,
+        "clock_domains": [{"name": "clk", "domain_kind": "primary",
+                           "role": "primary", "freq_mhz": 50.0}]})
+    _write(proj, "L24_SIGNOFF.json", {
+        "doc_id": "L24", "applicability": "NOT_APPLICABLE",
+        "extraction_status": "DECLARED_ABSENT_FROM_INPUT", "fields": {
+            "drc_status": None, "lvs_status": None, "sta_status": None,
+            "ir_drop_status": None, "antenna_status": None,
+            "tapeout_gates": []}})
+    _write(proj, "L25_RELIABILITY_MISSION_PROFILE.json", {
+        "doc_id": "L25", "applicability": "NOT_APPLICABLE",
+        "extraction_status": "DECLARED_ABSENT_FROM_INPUT", "fields": {
+            "mission_profile": None, "qual_standard": None,
+            "temp_range": None, "em_budget": None, "aging_margin": None}})
     _write(proj, "L9_INTEGRATION_SPEC.json", {
         "doc_class": "integration_spec", "top_module": "top",
         "submodules": [], "no_submodules_in_input": True,
@@ -166,8 +209,10 @@ def _patch(proj, gate, **changes):
     """Rewrite one gate's document, preserving the shape it ships in."""
     name = DECLARING[gate][0]
     doc = json.loads((_docs(proj) / name).read_text())
-    target = doc["fields"] if isinstance(doc.get("fields"), dict) else doc
-    target.update(changes)
+    nested = doc["fields"] if isinstance(doc.get("fields"), dict) else None
+    for key, value in changes.items():
+        level = doc if (nested is None or key in doc) else nested
+        level[key] = value
     _write(proj, name, doc)
 
 
@@ -192,7 +237,9 @@ def test_that_NA_carries_the_declaration_it_rests_on(tmp_path, gate):
     assert (proj / rel).is_file(), ev["declaration_path"]
     assert rel.name == DECLARING[gate][0]
     assert ev["population_paths"], gate
-    assert any(a["path"] == STATED_BY[gate][0] for a in ev["assertions"]), gate
+    if gate in GENERIC_GATES:
+        assert any(a["path"] == STATED_BY[gate][0]
+                   for a in ev["assertions"]), gate
 
 
 @pytest.mark.parametrize("gate", GATES)
@@ -245,7 +292,7 @@ def test_a_document_that_will_not_parse_keeps_the_gate_live(tmp_path, gate):
     assert F._p0_contract_na_reason(gate, proj, rtl) is None, gate
 
 
-@pytest.mark.parametrize("gate", GATES)
+@pytest.mark.parametrize("gate", GENERIC_GATES)
 def test_a_document_that_lists_nothing_but_says_nothing_keeps_it_live(
         tmp_path, gate):
     """THE POINT OF R-0915-19 AS CORRECTED: an empty scan is not a
@@ -254,14 +301,22 @@ def test_a_document_that_lists_nothing_but_says_nothing_keeps_it_live(
     proj, rtl = _declares_none(tmp_path)
     name = DECLARING[gate][0]
     doc = json.loads((_docs(proj) / name).read_text())
-    target = doc["fields"] if isinstance(doc.get("fields"), dict) else doc
-    target.pop(STATED_BY[gate][0])
+    field = STATED_BY[gate][0]
+    # `applicability` is stamped at the TOP level while the populations live
+    # under `fields`; `l_doc_fields` merges the two, so the control has to
+    # remove the key from whichever level actually holds it.
+    for level in (doc, doc.get("fields")):
+        if isinstance(level, dict) and field in level:
+            level.pop(field)
+            break
+    else:
+        raise AssertionError(f"fixture has no {field!r} to remove for {gate}")
     _write(proj, name, doc)
     assert F._p0_zero_population_evidence(proj, gate) is None, gate
     assert F._p0_contract_na_reason(gate, proj, rtl) is None, gate
 
 
-@pytest.mark.parametrize("gate", GATES)
+@pytest.mark.parametrize("gate", GENERIC_GATES)
 def test_a_document_that_says_the_subject_IS_present_keeps_it_live(
         tmp_path, gate):
     """A design that SAYS it has the subject while listing nothing has an
@@ -295,41 +350,80 @@ def test_a_nested_layer_is_read_not_seen_as_an_empty_document(tmp_path):
 
 # ── the refusals, pinned ──────────────────────────────────────────────────
 
-#: P0 sub-gates that ALSO reported an empty population on spm and are
-#: DELIBERATELY NOT REGISTERED, because no document declares that population
-#: zero. Pinned so a later batch cannot quietly grant them the N/A.
-NOT_REGISTERED = {
-    # Skips with "no toggle-divider patterns found" -- an RTL scan. Its
-    # denominator, by its own docstring, is L8's per-signal frequency
-    # annotations, and L8 on spm declares a clock (clock_mhz 41.67,
-    # clock_domains one primary entry) and non-empty timing_constants. A
-    # design that declares a clock has not declared that it has no divider.
-    "clock_divider_period_check":
-        "no layer declares the absence of a divided clock",
-    # Both layers are UN-EXTRACTED SKELETONS on spm: extraction_status
-    # "NOT_YET_EXTRACTED", applicability "APPLICABLE", every field null and
-    # no `*_present` statement anywhere. A document that says it IS
-    # applicable and has not been extracted has declared nothing.
-    "l24_signoff_evidence_backed_check":
-        "L24 is applicable and NOT_YET_EXTRACTED",
-    "l25_reliability_envelope_actionable_check":
-        "L25 is applicable and NOT_YET_EXTRACTED",
-    # Ruled at R-0915-19: its subject is an OVERRIDE DOC, and a document
-    # nobody wrote is an input this run lacks, not a declared absence.
-    "l3_opcode_response_template_check":
-        "its subject is an override doc, not a design population",
-}
+# Batches 1-4 leave NO P0 sub-gate with an empty population unruled, so the
+# `NOT_REGISTERED` roster that pinned my earlier refusals is gone -- every gate
+# it held is now registered under R-0915-35/36/37. What replaces it is the
+# refusal that still bites, below: a layer the design has NOT declared absent
+# keeps its gate live even when every one of its fields is empty. That is the
+# L24 case on spm, and it is the direction the whole rule exists to protect.
 
 
-@pytest.mark.parametrize("gate", sorted(NOT_REGISTERED))
-def test_a_population_no_document_declares_keeps_its_gate_live(tmp_path, gate):
-    """An empty scan is not a declaration. These four report an empty
-    population on the same design where the six registered gates are N/A, and
-    they must still run -- the difference is a document, not a count."""
+def test_an_applicable_but_unextracted_layer_keeps_its_gate_live(tmp_path):
+    """MEASURED on spm: the input carries L24's subject -- 8 occurrences of
+    "sign-off", 5 of DRC, 4 of LVS, 3 of STA across five input documents -- so
+    L24 is emitted APPLICABLE and its skeleton is a real extraction gap, not a
+    declared absence. Every field is still empty, and the gate must still
+    run."""
     proj, rtl = _declares_none(tmp_path)
-    assert gate not in F._P0_GATE_ZERO_POPULATION, (gate, NOT_REGISTERED[gate])
-    assert F._p0_zero_population_evidence(proj, gate) is None, gate
-    assert F._p0_contract_na_reason(gate, proj, rtl) is None, gate
+    gate = "l24_signoff_evidence_backed_check"
+    _patch(proj, gate, applicability="APPLICABLE")
+    doc = json.loads((_docs(proj) / "L24_SIGNOFF.json").read_text())
+    assert doc["applicability"] == "APPLICABLE"
+    assert all(v in (None, [], {}) for v in doc["fields"].values()), doc
+    assert F._p0_zero_population_evidence(proj, gate) is None
+    assert F._p0_contract_na_reason(gate, proj, rtl) is None
+
+
+# ── R-0915-35: a population that is a SUBSET of a field ───────────────────
+
+def test_a_design_that_enumerates_only_a_primary_clock_has_no_divider(
+        tmp_path):
+    proj, rtl = _declares_none(tmp_path)
+    gate = "clock_divider_period_check"
+    ev = F._p0_zero_population_evidence(proj, gate)
+    assert ev is not None
+    assert ev["population_filter"] == "clock_contract.entry_is_derived"
+    assert ev["entries_read"] == 1, "L8 enumerated one domain"
+    assert ev["declared_population"] == 0
+    assert F._p0_contract_na_reason(gate, proj, rtl) is not None
+
+
+@pytest.mark.parametrize("derived", [
+    {"name": "clk_div4", "domain_kind": "derived", "derived_from": "clk"},
+    {"name": "clk_gen", "role": "generated_clock"},
+    {"name": "clk_half", "derived_from": "clk"},
+])
+def test_an_L8_that_declares_a_derived_clock_keeps_the_gate_live(
+        tmp_path, derived):
+    """Every shape `clock_contract.entry_is_derived` recognises must keep it
+    live -- the predicate is the repo's, not this test's."""
+    import clock_contract as _cc
+    assert _cc.entry_is_derived(derived), derived
+    proj, rtl = _declares_none(tmp_path)
+    gate = "clock_divider_period_check"
+    _patch(proj, gate, clock_domains=[
+        {"name": "clk", "domain_kind": "primary"}, derived])
+    assert F._p0_zero_population_evidence(proj, gate) is None, derived
+    assert F._p0_contract_na_reason(gate, proj, rtl) is None, derived
+
+
+def test_an_L8_that_enumerates_no_clock_at_all_keeps_the_gate_live(tmp_path):
+    """An empty enumeration is an empty denominator, not a declaration."""
+    proj, rtl = _declares_none(tmp_path)
+    gate = "clock_divider_period_check"
+    _patch(proj, gate, clock_domains=[])
+    assert F._p0_zero_population_evidence(proj, gate) is None
+    assert F._p0_contract_na_reason(gate, proj, rtl) is None
+
+
+def test_a_clock_domains_field_that_is_not_a_list_keeps_the_gate_live(
+        tmp_path):
+    """FAIL-CLOSED on a shape the filter cannot count."""
+    proj, rtl = _declares_none(tmp_path)
+    gate = "clock_divider_period_check"
+    _patch(proj, gate, clock_domains={"clk": {"domain_kind": "primary"}})
+    assert F._p0_zero_population_evidence(proj, gate) is None
+    assert F._p0_contract_na_reason(gate, proj, rtl) is None
 
 
 def test_the_roster_is_exactly_what_this_file_accounts_for():
