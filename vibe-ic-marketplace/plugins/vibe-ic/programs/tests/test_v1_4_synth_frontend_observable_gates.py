@@ -380,7 +380,19 @@ def test_callers_supply_the_design_property():
     p3 = inspect.getsource(P3.step_synth)
     assert "synth_frontend_should_retry_under_synthesis" in p3
     assert "rtl_text_blob=_sf.read_text_blob(rtl_files)" in p3
-    assert "produced_output=netlist.is_file()" in p3
+    # 2026-09-15: this line used to pin `produced_output=netlist.is_file()`.
+    # The property it is guarding — the caller SUPPLIES the observable rather
+    # than letting it default — is unchanged and still asserted. What changed
+    # is which observable is correct. `netlist.is_file()` answers "does a file
+    # of that name exist", and phase 3 synthesises into the directory phase 2
+    # already wrote `<top>_synth.v` to, so it was true before the build began:
+    # on opentitan_aes a 4-hour-old netlist made `produced_output` True and
+    # suppressed the -DSYNTHESIS retry the runner ships for that very design.
+    # The caller now passes a per-build stamp comparison instead.
+    assert "produced_output=_netlist_is_from_this_build()" in p3
+    assert "produced_output=netlist.is_file()" not in p3, (
+        "the presence test is back: an earlier build's netlist will again be "
+        "read as this build's output and suppress the retry")
 
     esc = inspect.getsource(D._verilator_sim_escape)
     assert "rtl_text_blob=_sf.read_text_blob(rtl_files)" in esc

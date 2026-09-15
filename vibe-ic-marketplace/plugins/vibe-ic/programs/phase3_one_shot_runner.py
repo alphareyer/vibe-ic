@@ -14170,6 +14170,31 @@ def _ensure_structural_reader_readable(netlist: Path,
 _SYNTH_INPUTS_SIDECAR = "synth_inputs.json"
 
 
+def _synth_artifact_stamp(path: Path) -> Optional[Tuple[int, int, str]]:
+    """Identity of a build artefact: ``(size, mtime_ns, sha256)`` or ``None``.
+
+    ``None`` means "no artefact here" — the file is absent, or unreadable,
+    which for this purpose is the same answer.
+
+    WHY A STAMP AND NOT ``is_file()``. Phase 3 synthesises into the directory
+    phase 2 already wrote a netlist to, so "a file with that name exists" is
+    true on essentially every real run and says nothing about the build that
+    just ran. Every consumer of that predicate wanted the other question:
+    did THIS build produce the artefact? Comparing a stamp taken before the
+    build with one taken after answers it. The digest is included so a rebuild
+    that lands byte-identical content at a new mtime is honestly reported as
+    "not a new result" rather than as one.
+
+    chip-AGNOSTIC: filesystem metadata and a content digest, no design literal.
+    """
+    try:
+        st = path.stat()
+        return (st.st_size, st.st_mtime_ns,
+                hashlib.sha256(path.read_bytes()).hexdigest())
+    except OSError:
+        return None
+
+
 def _synth_rtl_sources(rtl_dir: Path) -> List[Path]:
     """THE one RTL selector, shared by the fingerprint writer and both
     staleness checks — the same glob _stale_rtl_vs_netlist has always used.
@@ -14697,6 +14722,30 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # exceed 30 min on a large design while progressing). Route it through the
     # progress-stall watchdog: marker = the output netlist path (present in the
     # `write_verilog {netlist_c}` arg of the yosys `-p` script), so a still-
+    # THIS BUILD'S OUTPUT, NOT ANY FILE OF THAT NAME. Every check below asks
+    # "did the build produce a netlist?" and used to answer it with a bare
+    # presence test. A netlist left behind by an EARLIER, different build
+    # satisfies that, and phase 3 synthesises into the same directory phase 2
+    # already wrote to — so on a real run the file is essentially always there.
+    # MEASURED (opentitan_aes x sky130A, 2026-09-15): a 5,276,402-byte
+    # `chip_top_synth.v` from the 05:01 phase-2 run made the 07:51 phase-3
+    # synth's `produced_output` True, which suppressed the -DSYNTHESIS retry
+    # written for THIS design's sim-only vendor primitives and turned a
+    # recoverable build into `FAIL ... synth_frontend: "none"`. Stamp the file's
+    # identity before the first build so "produced" can mean PRODUCED.
+    _netlist_before = _synth_artifact_stamp(netlist)
+
+    def _netlist_is_from_this_build() -> bool:
+        """True only if `netlist` exists AND differs from the pre-build stamp.
+
+        Fail-safe in the direction that matters: if the stamp cannot be taken
+        or compared, an existing file counts as NOT this build's, so the retry
+        is allowed (it re-reads source and keeps its own rc/artifact check) and
+        a frontend is never CERTIFIED on someone else's artefact.
+        """
+        now = _synth_artifact_stamp(netlist)
+        return now is not None and now != _netlist_before
+
     # progressing synth is never killed; only a hang dies.
     rc, out, err = _docker_exec(container, yosys_cmd, marker=netlist_c)
     log = out_dir / "synth.log"
@@ -14749,7 +14798,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # rewrites the SV to Verilog-2005 before the default frontend. The
     # synth backend is identical; only the parser changes.
     need_sv_fallback, fe_reason = _decide_synth_frontend(
-        rtl_files, rc, netlist.is_file(), out + err)
+        rtl_files, rc, _netlist_is_from_this_build(), out + err)
     if need_sv_fallback:
         # All RTL read together in one slang compilation unit; packages
         # first so import resolution and the ANSI port-list types bind.
@@ -14781,7 +14830,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         log.write_text(log.read_text() +
                        f"\n\n=== SLANG FALLBACK FRONTEND ({fe_reason}) ===\n" +
                        out + "\n" + err)
-        if rc == 0 and netlist.is_file():
+        if rc == 0 and _netlist_is_from_this_build():
             synth_frontend = "yosys_slang"
         else:
             # slang unavailable / failed → sv2v pre-pass (emit V-2005).
@@ -14814,7 +14863,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 log.read_text() +
                 "\n\n=== SV2V PRE-PASS FALLBACK FRONTEND ===\n" +
                 out2 + "\n" + err2)
-            if rc2 == 0 and netlist.is_file():
+            if rc2 == 0 and _netlist_is_from_this_build():
                 rc, out, err = rc2, out2, err2
                 synth_frontend = "sv2v_verilog2005"
             # else: keep the (failed) slang rc/out/err for the FAIL path.
@@ -14829,7 +14878,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
     # signature (shared with the phase-2 #668 helper — single source of truth); a
     # closure that ALSO fails under -DSYNTHESIS keeps the honest FAIL below.
     # chip-AGNOSTIC. Guards: 8 OpenTitan primitives on the AES end-to-end run.
-    if rc != 0 or not netlist.is_file():
+    if rc != 0 or not _netlist_is_from_this_build():
         # v1.4.x OBSERVABLE-OVER-WORDING: the retry is decided by the OBSERVABLE
         # (no netlist produced — the `if` above) plus the DESIGN PROPERTY (does
         # the closure branch on the define set at all), NOT by how slang/yosys/
@@ -14838,7 +14887,7 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
         _retry_syn, _retry_reason = _sf.synth_frontend_should_retry_under_synthesis(
             out + "\n" + err,
             rtl_text_blob=_sf.read_text_blob(rtl_files),
-            produced_output=netlist.is_file())
+            produced_output=_netlist_is_from_this_build())
         if _retry_syn:
             _syn_files = " ".join(
                 _to_container_path(str(f), container) for f in rtl_files)
@@ -14871,10 +14920,10 @@ def step_synth(project: Path, top: str, pdk: PdkConfig,
                 log.read_text() +
                 f"\n\n=== -DSYNTHESIS RETRY (phase2 #668 port — {_retry_reason}) ===\n" +
                 _outs + "\n" + _errs)
-            if _rcs == 0 and netlist.is_file():
+            if _rcs == 0 and _netlist_is_from_this_build():
                 rc, out, err = _rcs, _outs, _errs
                 synth_frontend = "yosys_slang_dsynthesis"
-    if rc != 0 or not netlist.is_file():
+    if rc != 0 or not _netlist_is_from_this_build():
         # ORGANIC #551 — surface the ROOT-CAUSE error line ahead of the tail
         # (a `cd: No such file or directory` from a missing container mount
         # was buried; a plain tail/head could miss it).
