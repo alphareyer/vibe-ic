@@ -7642,6 +7642,48 @@ _P0_GATE_ZERO_POPULATION: Dict[str, Any] = {
         "L9_", ("memories", "memory_candidates", "memory_map"),
         {"no_memories_in_input": True, "no_memory_candidates_in_input": True,
          "no_memory_map_in_input": True}),
+    # ── batch 3: the RTL-scanning gates that DO have a declaring layer ──────
+    # Each of these reported an empty RTL scan, which on its own is NOT a
+    # declaration (#2272). What makes them N/A is that a layer names the
+    # FEATURE the scan looks for and says the design has none of it.
+    #
+    # L3 is the command protocol. `break_framing_vs_l3_check`'s own docstring
+    # scopes it: it verifies break-to-break framing "when L3 CMD_PROTOCOL
+    # specifies break-delimited frames" -- a protocol with no opcodes and no
+    # payload semantics specifies no frames to delimit.
+    "break_framing_vs_l3_check": (
+        "L3_", ("opcodes", "payload_semantics"),
+        {"no_opcodes_in_input": True, "no_payload_semantics_in_input": True}),
+    # The CRC gate compares a CRC module's poly/init "against the L3 / L8 spec
+    # declaration". L3 is where that declaration lives, and it is the field
+    # this entry counts.
+    "crc_oracle_vector_check": (
+        "L3_", ("crc_parameters",), {"no_crc_parameters_in_input": True}),
+    # L6 is the control logic. The break-handler gate's subject is an FSM
+    # break/reset handler firing in the wrong state; a design whose control
+    # layer declares no state machine at all has no such handler.
+    "break_handler_safety_check": (
+        "L6_", ("fsm_machines", "fsm_states"),
+        {"no_fsm_in_input": True, "no_fsm_states_in_input": True}),
+    # L9 is the integration spec, and `submodules` is where it declares the
+    # design's MODULE INVENTORY. These four gates all have a module as their
+    # subject -- a TX module, a cross-MODULE pulse, an rx_phy module, an
+    # arbiter between requesting modules -- so a declared single-module design
+    # has none of them. MEASURED on spm: L9 submodules [],
+    # no_submodules_in_input true, top_module "spm"; and the staged RTL is one
+    # file with one module, which is the same design the layer describes.
+    "tx_abort_during_transmission_check": (
+        "L9_", ("submodules",), {"no_submodules_in_input": True}),
+    "cross_module_1cycle_handshake_check": (
+        "L9_", ("submodules",), {"no_submodules_in_input": True}),
+    "frame_end_detection_check": (
+        "L9_", ("submodules",), {"no_submodules_in_input": True}),
+    # The arbiter gate's worked example is an OTP arbiter between two
+    # requesters, so it needs BOTH populations empty: no peer modules to
+    # arbitrate between and no shared memory port to arbitrate for.
+    "arbiter_starvation_check": (
+        "L9_", ("submodules", "memories"),
+        {"no_submodules_in_input": True, "no_memories_in_input": True}),
 }
 
 
@@ -7937,6 +7979,19 @@ def _p0_contract_context(project: Path,
         "l9_memories": _p0_zero_population_subject(
             project, "bram_pdob_combinational_check", l9_state),
         "l9_state": l9_state,
+        # R-0915-34(b) batch 3. One ctx key per (layer, population) pair, so
+        # two gates that rest on the same declaration share one key and a gate
+        # that needs two populations gets its own.
+        "l3_frames": _p0_zero_population_subject(
+            project, "break_framing_vs_l3_check", l3_state),
+        "l3_crc_declaration": _p0_zero_population_subject(
+            project, "crc_oracle_vector_check", l3_state),
+        "l6_fsm": _p0_zero_population_subject(
+            project, "break_handler_safety_check", l6_state),
+        "l9_submodules": _p0_zero_population_subject(
+            project, "cross_module_1cycle_handshake_check", l9_state),
+        "l9_arbitrable": _p0_zero_population_subject(
+            project, "arbiter_starvation_check", l9_state),
         "l20_state": l20_state,
         "l23_state": l23_state,
         "deliverable_record": (str(project / "RESULT.md")
@@ -8049,6 +8104,14 @@ _P0_GATE_REQUIRED_CONTEXT: Mapping[str, tuple[str, ...]] = MappingProxyType({
     # batch 2
     "l10_test_cases_cover_l3_constraints_check": ("l3_opcodes",),
     "bram_pdob_combinational_check": ("l9_memories",),
+    # batch 3
+    "break_framing_vs_l3_check": ("l3_frames",),
+    "crc_oracle_vector_check": ("l3_crc_declaration",),
+    "break_handler_safety_check": ("l6_fsm",),
+    "tx_abort_during_transmission_check": ("l9_submodules",),
+    "cross_module_1cycle_handshake_check": ("l9_submodules",),
+    "frame_end_detection_check": ("l9_submodules",),
+    "arbiter_starvation_check": ("l9_arbitrable",),
     # AND ONE THAT IS NOT A DECLARATION AT ALL — a FLOW-ORDER defect, named as
     # that. `deliverable_verdict_consistency_check` reads `RESULT.md`, which
     # the runner authors at the END of the run, so a P0 sub-gate asking for it
@@ -8076,6 +8139,11 @@ _P0_CONTEXT_DOCUMENT_STATE: Mapping[str, str] = MappingProxyType({
     "l23_security": "l23_state",
     "l3_opcodes": "l3_state",
     "l9_memories": "l9_state",
+    "l3_frames": "l3_state",
+    "l3_crc_declaration": "l3_state",
+    "l6_fsm": "l6_state",
+    "l9_submodules": "l9_state",
+    "l9_arbitrable": "l9_state",
     "crc_signal": "l3_state",
     "crc_vectors": "l3_state",
     "l3_opcodes": "l3_state",
