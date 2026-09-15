@@ -72,6 +72,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `analog_block_list_emit_check` | any | — | master block-list schema gate. |
 | `analog_block_type_classify` | any | — | deterministic name→type taxonomy lookup. |
 | `analog_content_detected_must_emit_l5_check` | any | Wave 47 | Prevents silent ``L5_ADI_SPEC.json analog_blocks: []`` SKIP when |
+| `analog_converter_density_grade` | any | — | R-0915-45: EVALUATE the density pass condition the analog harness already DECLARES, on the run's own bitstream. |
 | `analog_corner_admission` | any | — | Fail-closed aggregate-RAM admission for independently launched PVT corners. |
 | `analog_corner_lib_realism_lint` | any | — | R15 stale-corner-lib doc-lint (A4). |
 | `analog_corner_margin_check` | any | — | A4 strict PVT-margin gate. NOT WIRED. |
@@ -1435,6 +1436,7 @@ _(no programs in this group)_
 - `analog_block_list_emit_check` — master block-list schema gate.
 - `analog_block_type_classify` — deterministic name→type taxonomy lookup.
 - `analog_content_detected_must_emit_l5_check` — Prevents silent ``L5_ADI_SPEC.json analog_blocks: []`` SKIP when  _[Wave 47]_
+- `analog_converter_density_grade` — R-0915-45: EVALUATE the density pass condition the analog harness already DECLARES, on the run's own bitstream.
 - `analog_corner_admission` — Fail-closed aggregate-RAM admission for independently launched PVT corners.
 - `analog_corner_lib_realism_lint` — R15 stale-corner-lib doc-lint (A4).
 - `analog_corner_margin_check` — A4 strict PVT-margin gate. NOT WIRED.
