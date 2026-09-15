@@ -424,6 +424,38 @@ def _local_instantiated_masters(project: Path,
     return {m for m in masters if re.search(r"\b" + re.escape(m) + r"\b", blob)}
 
 
+def staged_macro_liberties(project: Path) -> Tuple[List[str], List[str]]:
+    """`([examined_rel, ...], [unreadable_rel, ...])` — the DECLARING POPULATION.
+
+    R-0915-40. The arc collector below only ever recorded the liberties that
+    HAVE a non_seq arc, so when the answer was "none" the report named no
+    population at all and the audit had nothing to distinguish "no macro was
+    staged" from "the gate examined nothing". The population is the set of
+    design-staged macro Liberty files, and it is listed whether or not any of
+    them declares an arc.
+
+    `unreadable` is kept SEPARATE and is never folded into "zero population": a
+    Liberty that is present and cannot be parsed is an EXECUTION ERROR, not a
+    design declaring it has no macros. The arc collector skips it silently,
+    which is correct for its own job and wrong as an applicability answer."""
+    examined: List[str] = []
+    unreadable: List[str] = []
+    seen: Set[Path] = set()
+    for pat in _MACRO_LIB_GLOBS:
+        for lib in sorted(project.glob(pat)):
+            if not lib.is_file() or lib in seen:
+                continue
+            seen.add(lib)
+            rel = str(lib.relative_to(project))
+            try:
+                lib.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                unreadable.append(rel)
+                continue
+            examined.append(rel)
+    return examined, unreadable
+
+
 def collect_staged_non_seq_arcs(
         project: Path) -> Tuple[List[Dict[str, object]], List[str]]:
     """`([arc, ...], [liberty_rel_path, ...])` for every design-staged macro
@@ -666,11 +698,50 @@ def evaluate(project: Path) -> Tuple[str, int, Dict[str, object]]:
 
     arcs, libs = collect_staged_non_seq_arcs(project)
     report["macro_liberties"] = libs
-    if not arcs:
-        report["verdict"] = "SKIP"
+    examined, unreadable = staged_macro_liberties(project)
+    report["examined_macro_liberties"] = examined
+    report["unreadable_macro_liberties"] = unreadable
+    if unreadable and not arcs:
+        # R-0915-40: PRESENT BUT UNPARSEABLE IS NOT AN ABSENT POPULATION. The
+        # design staged a macro Liberty and this gate could not read it, so it
+        # does not know whether a non_seq arc is declared. Saying N/A here would
+        # be the empty-scan-as-a-pass shape one layer up.
+        report["verdict"] = "INCOMPLETE"
+        report["reason_class"] = "EXECUTION_ERROR"
         report["reason"] = (
-            "no design-staged macro Liberty declares a non_seq_* timing arc "
-            "(the PDK std-cell library is deliberately out of scope)")
+            f"{len(unreadable)} design-staged macro Liberty file(s) are "
+            f"present and could not be read, so whether any declares a "
+            f"non_seq_* timing arc is UNKNOWN: {', '.join(unreadable[:5])}")
+        return "INCOMPLETE", 2, report
+    if not arcs:
+        # R-0915-40: STATE THE CLASS, DO NOT LEAVE IT TO PROSE. Since #2282 a
+        # reason sentence is not a basis, so a gate that ran, examined a real
+        # population and found it empty must SAY SO in its own typed fields or
+        # P0 books it EXECUTION_ERROR -- which reads as "the program broke",
+        # not as "the design has no such thing".
+        report["verdict"] = "SKIP"
+        report["program"] = GATE_NAME
+        report["reason_class"] = "DESIGN_DECLARED_NA"
+        report["reason"] = (
+            f"no design-staged macro Liberty declares a non_seq_* timing arc "
+            f"(the PDK std-cell library is deliberately out of scope); "
+            f"{len(examined)} staged macro Liberty file(s) examined")
+        report["applicability_evidence"] = {
+            "kind": "design-declared-zero-population",
+            # The population is FILES, not a JSON field, so the paths named
+            # here are the globs this gate searched and the files it actually
+            # read. `declaration_path` is deliberately ABSENT: this design
+            # publishes no JSON declaration enumerating its macros, and naming
+            # one that does not enumerate them would make the evidence false.
+            # The audit's `_report_proves_executed_design_na` therefore
+            # declines to promote this to NOT_APPLICABLE and books it
+            # VACUOUS_PASS instead -- which is the honest tier, and still not
+            # EXECUTION_ERROR.
+            "population_paths": list(_MACRO_LIB_GLOBS),
+            "declared_population": 0,
+            "examined_files": examined,
+            "assertions": [],
+        }
         return "SKIP", 2, report
 
     cells = sorted({str(a["cell"]) for a in arcs})
