@@ -53,9 +53,45 @@ import phase1_post_process as P  # noqa: E402
 
 GATE = PROGRAMS / "l24_signoff_evidence_backed_check.py"
 
+def _sta_records_from_the_flow():
+    """The flow's own answer, derived HERE — not asked of the module under test.
+
+    Two reasons, and the second is the load-bearing one:
+
+      * a test that asked the program for the population and then checked the
+        program against it would agree with itself by construction; and
+      * on a tree WITHOUT the fix the program has no such function at all, and
+        resolving the population through it turns the whole file into one
+        collection error. A `falsref` R arm then shows an ImportError where it
+        should show the defect. Derived here, both arms build the SAME project
+        and the unfixed one is SEEN to fail on it.
+    """
+    import re as _re
+
+    import yaml as _yaml
+    flow = PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml"
+    data = _yaml.safe_load(flow.read_text(encoding="utf-8"))
+    out = []
+    for step in data.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        if not _re.search(r"sign[-\s]?off", str(step.get("name") or ""),
+                          _re.I):
+            continue
+        for entry in step.get("required_outputs") or []:
+            for alt in _re.split(r"\s+OR\s+", str(entry)):
+                alt = alt.strip()
+                if (alt.startswith("reports/") and alt.endswith(".json")
+                        and not alt.startswith("reports/audit/")
+                        and _re.search(r"(?<![a-z0-9])sta(?![a-z0-9])",
+                                       alt.lower())):
+                    out.append(alt)
+    return tuple(dict.fromkeys(out))
+
+
 #: The flow's own answer, read once. Every project the tests build writes to
 #: THESE paths, so a test can never agree with the gate by re-typing a path.
-STA_RECORDS = X.signoff_record_paths_for("STA")
+STA_RECORDS = _sta_records_from_the_flow()
 
 
 def _project(tmp_path, **docs):
@@ -115,6 +151,11 @@ def test_the_flow_declares_a_signoff_record_for_STA():
         "token scan")
     assert all(p.startswith("reports/") and p.endswith(".json")
                for p in STA_RECORDS), STA_RECORDS
+
+
+def test_the_program_derives_exactly_what_the_flow_declares():
+    """The gate's own derivation, checked against this file's independent one."""
+    assert X.signoff_record_paths_for("STA") == STA_RECORDS
 
 
 def test_the_pre_layout_estimate_is_not_in_the_declared_record():
