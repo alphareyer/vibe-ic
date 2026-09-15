@@ -1645,8 +1645,19 @@ def test_probe_no_cell_rests_on_channel_c_alone():
 #:
 #:   ("20", "hold_area_budget_check")               gated=F registry=F runner=F
 #:   ("31", "lvs_triage_classify")                  gated=F registry=F runner=F
-#:   ("31", "perc_corpus_sweep")                    gated=F registry=F runner=F
 #:   ("31", "pnr_via_stack_completeness_check")     gated=F registry=F runner=F
+#:
+#: ("31", "perc_corpus_sweep") WAS HERE AND IS NOW WIRED (vibe-ic#2277), which
+#: is the "newly wired — good news; remove it from the pin in the same change"
+#: half of the assertion below firing for the first time. Step 31 declared
+#: `reports/phase3/perc_sweep.json` as a `required_output` and named this
+#: program under `programs:`, and nothing invoked it: the run produced 8 of 9
+#: declared outputs and the ninth was owed by nobody, so the reader
+#: (`sweep_reach_check`) took its absent branch and no reach verdict was ever
+#: rendered. It now has a gate clause ahead of that reader, so `gated` is TRUE
+#: and it is an orphan no longer. Removed here rather than left as a stale
+#: entry, because a pin that lists a wired program understates the gap exactly
+#: as much as one that omits an orphan overstates it.
 #:
 #: The contrast that proves the measurement discriminates: the SAME landing
 #: did the same swap to step 35's `dfm_screen_check`, and that one measures
@@ -1664,7 +1675,6 @@ ORPHAN_DECLARED_PROGRAMS: Tuple[Tuple[str, str], ...] = (
     ("15", "phase3_backend_step"),
     ("20", "hold_area_budget_check"),
     ("31", "lvs_triage_classify"),
-    ("31", "perc_corpus_sweep"),
     ("31", "pnr_via_stack_completeness_check"),
     ("39", "bringup_plan_gen"),
     ("39", "signaltap_recompile_sequence_check"),
