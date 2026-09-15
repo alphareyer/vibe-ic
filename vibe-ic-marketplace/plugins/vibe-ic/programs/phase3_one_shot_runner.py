@@ -48780,6 +48780,42 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         skip_note.write_text(json.dumps(_payload, indent=2) + "\n")
         written.append(str(skip_note))
 
+    # R-0915-42 — STEP 29'S DECLARED VERDICT DOCUMENT, WRITTEN BY THE RUN.
+    #
+    # The flow says in three places that this run produces it: step 29 lists
+    # `post_layout_sim_check` under `programs:`, its gate clause invokes that
+    # same program with `--json reports/phase2/gates/post_layout_sim.json`, and
+    # that path is one of the step's own `required_outputs`. Nothing in the run
+    # ran it. MEASURED on sha256 run11: `sim_postlayout/` held sdf.log,
+    # sha256.sdf and an sdf_sim_skipped.json naming a REAL cause ("no
+    # self-checking testbench"), and the declared document did not exist —
+    # the step had a result and published silence.
+    #
+    # `flow_declared_producer_run` cannot close this one: its "did the run
+    # perform this step" test asks whether any OTHER declared output is on
+    # disk, and step 29's others are `results.log` / `pass.flag` — precisely
+    # the artefacts a sim that ran and FAILED never writes. A failed step reads
+    # to it as a step that never ran, correctly by its own rule. So the run
+    # writes it here, where the attempt actually happened.
+    #
+    # NEVER SILENCE, and never an invented pass: the producer reaches its own
+    # verdict from the tree, and a run with no results carries a NAMED refusal
+    # (the attempt note's own verdict and reason) rather than nothing. A
+    # producer that cannot be executed is disclosed and costs the run nothing
+    # else. chip-AGNOSTIC: no design name, no per-design branch.
+    _pls_json = project / "reports/phase2/gates/post_layout_sim.json"
+    if not _pls_json.is_file():
+        try:
+            import post_layout_sim_check as _plsc
+            _plsc.main([str(project), "--json", str(_pls_json)])
+        except Exception as _pls_exc:
+            notes.append(
+                "step 29 declared output could not be produced: "
+                f"post_layout_sim_check raised: {_pls_exc}")
+        else:
+            if _pls_json.is_file():
+                written.append(str(_pls_json))
+
     # --- Step 30: transistor-level critical-path correlation ---------------
     # The active PDK configuration supplies Liberty. The producer discovers
     # its sibling cell SPICE + device model section at runtime, extracts the
@@ -48853,6 +48889,23 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             ]
         spice_skip.write_text(json.dumps(_payload, indent=2) + "\n")
         written.append(str(spice_skip))
+        # R-0915-43 — THE DECLARED HALF OF STEP 30 IS NEVER SILENT EITHER.
+        #
+        # `spice_correlation_not_run.json` is this runner's own disclosure and
+        # carries `skips_required_output` for the #675 promoter, but it is NOT
+        # one of step 30's declared outputs. MEASURED on sha256 run11: the
+        # driver reached a real conclusion — "Liberty grid tolerance could not
+        # be derived", an implemented-capability failure, not a capability gap
+        # — and `phase3/stage3/spice/correlation.json` did not exist. A reader
+        # of the declared record saw nothing at all.
+        #
+        # The SAME payload goes to the declared path: one refusal, two names,
+        # so the disclosure and the declared record cannot disagree about why
+        # the correlation did not happen.
+        _spice_declared = spice_out / "correlation.json"
+        if not _spice_declared.is_file():
+            _spice_declared.write_text(json.dumps(_payload, indent=2) + "\n")
+            written.append(str(_spice_declared))
 
     # --- Step 32b: post-route timing repair TCL (ORGANIC #561) ----------------
     # Emit the standalone multi-corner-aware OpenROAD post-route timing-repair script
