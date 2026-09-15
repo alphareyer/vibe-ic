@@ -68,10 +68,28 @@ No chip / SKU / foundry literal anywhere in this file.
 """
 from __future__ import annotations
 
-import re
-from typing import Any, Dict, List, Optional, Tuple
+# --- sibling-import path (vibe-ic#2104) ------------------------------------
+# `programs/` is a flat directory whose modules import each other by BARE name.
+# Python puts a file's own directory on `sys.path` only when that file is run
+# as `__main__`; under `importlib.util.spec_from_file_location` — how the
+# gates, the wiring audit and much of the suite load a program — it does not,
+# so the bare sibling import below raises ModuleNotFoundError. This shim MUST
+# stay ABOVE that import: I wrote it below the first time and
+# `test_every_shipped_program_loads_by_path` caught it by name
+# ("1 program(s) cannot resolve a sibling when loaded by path"). Idempotent,
+# and the same shape every sibling that already carries it uses.
+import os as _os                                                     # noqa: E402
+import sys as _sys                                                   # noqa: E402
 
-import analog_adc_enob_corner_check as _enob
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# ---------------------------------------------------------------------------
+
+import re                                                            # noqa: E402
+from typing import Any, Dict, List, Optional, Tuple                  # noqa: E402
+
+import analog_adc_enob_corner_check as _enob                         # noqa: E402
+import analog_pdk_deck_context as _dc                                # noqa: E402
 
 PRODUCER = "analog_converter_density_grade"
 
@@ -100,8 +118,19 @@ def _sources(deck_text: str) -> Dict[str, float]:
     value, and a bare number itself — which is what a DC level means for each
     of the three shapes this flow emits.
     """
+    # THE POLARITY QUESTION HAS NO REFERENT HERE, because no sentence reaches
+    # the regex. `spice_code_only` blanks every `*` comment line and every `;`
+    # / `$` inline comment before the first match, which is where English
+    # lives in a SPICE deck — and this deck is FULL of it: the power-on
+    # sequence, the vector-retention note and the resolution-stimulus note are
+    # all `*` lines that name `v_in`, `vrefp` and their values in prose.
+    # Without the strip, `_sources` would be reading a value out of a sentence
+    # and writing it as a declaration, which is exactly what
+    # `prose_polarity_consulted_check --ratchet` refuses — it named this
+    # function (`analog_converter_density_grade::_sources`) the first time I
+    # pushed it without the strip.
     out: Dict[str, float] = {}
-    for _name, node, rest in _SRC.findall(deck_text or ""):
+    for _name, node, rest in _SRC.findall(_dc.spice_code_only(deck_text or "")):
         rest = rest.strip()
         m = _SIN.search(rest)
         if m:
