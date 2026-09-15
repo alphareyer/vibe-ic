@@ -70,6 +70,8 @@ from typing import Any, Dict, List, Optional, Tuple
 if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
+
 PROGRAM = "flow_declared_producer_run"
 VERSION = "1.0.0"
 PROGRAMS_DIR = Path(__file__).resolve().parent
@@ -311,7 +313,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     rec = run(project, args.timeout)
     target = Path(args.json) if args.json else project / REPORT_REL
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(rec, indent=2) + "\n")
+    # vibe-ic#1082: the final name must appear only once the write completed --
+    # this report IS a declared destination (REPORT_REL), and `required_outputs`
+    # credits a step for the name existing, not for the file being whole.
+    # `write_text` rather than `write_json` ON PURPOSE: `rec` carries `tail`,
+    # the last 300 chars of a producer's own stderr/stdout (see `run` below),
+    # and this plugin's producers quote zh-Hant spec lines. `write_json` passes
+    # ensure_ascii=False, so converting through it would silently change the
+    # bytes of every report that has non-ASCII in a tail. _atomic_artefact's own
+    # rule is that a conversion does not alter what gets written.
+    atomic_write_text(target, json.dumps(rec, indent=2) + "\n")
     print(f"[{rec['verdict']}] {PROGRAM} — {rec['declared_clauses']} declared "
           f"producer clause(s); {rec['already_produced_by_the_run']} already "
           f"produced by the run, {rec['owed']} owed, {rec['executed']} "
