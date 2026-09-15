@@ -25482,6 +25482,26 @@ def _sdr_child_log_name(stage: str) -> str:
     return f"sdr_child_{stage}.log"
 
 
+#: R-0915-26 — the SECOND candidate. When the ODB-leg child is REJECTED the
+#: transaction tries the same recipe again from the checkpoint DEF that sits
+#: beside the ODB, and judges it with the SAME judge. Its own deck and log, so
+#: neither leg's transcript is written over the other's.
+def _sdr_child_def_leg_tcl_name(stage: str) -> str:
+    return f"sdr_child_def_leg_{stage}.tcl"
+
+
+def _sdr_child_def_leg_log_name(stage: str) -> str:
+    return f"sdr_child_def_leg_{stage}.log"
+
+
+#: The ODB leg's artefacts are moved aside under this prefix before the DEF leg
+#: runs, because both children write the same fixed names into the same
+#: transaction directory. Without this the second leg would silently erase the
+#: evidence for the first leg's rejection, which is the one thing a reader
+#: needs in order to check that trying again was justified.
+_SDR_ODB_LEG_PREFIX = "odb_leg_"
+
+
 def _sdr_router_drc_count_proc_tcl() -> str:
     """The ONE rule for turning the router's own DRC report into a number.
 
@@ -25699,6 +25719,14 @@ def _postroute_sdr_transaction_finish_tcl(
         # here, so a refusal costs the run nothing.
         "  if {[info exists ::_sdr_tx_adopt] && $::_sdr_tx_adopt} {\n"
         f"    puts \"{_SDR_ADOPT_MARKER} stage={stage} "
+        # R-0915-26: WHICH LEG produced the candidate being adopted.
+        # Disclosure, not control flow -- the adopt tail restores from
+        # `candidate.odb` either way, because BOTH children write it
+        # (each is its own process with a populated db), and the tail
+        # routes again so it needs the guides and dont_touch a DEF
+        # cannot carry (R-0915-18). A reader still needs to know which
+        # carrier the accepted repair came from.
+        "leg=$_sdr_tx_leg "
         "def=$_sdr_tx_cand_def report=$_sdr_tx_cand_report "
         f"txn={txn_name}\"\n"
         "    puts \"SDR_TRANSACTION_ADOPT_HANDOFF: the candidate was ACCEPTED "
@@ -25714,14 +25742,41 @@ def _postroute_sdr_transaction_finish_tcl(
 def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
                                         stage: str) -> str:
     """#2253 — the PARENT half: run the candidate somewhere else, then read
-    back what that somewhere else measured.
+    back what that somewhere else measured. R-0915-26 — and if that candidate
+    is REJECTED, run the SAME recipe from the checkpoint DEF and judge that
+    one too, before giving up on the repair.
 
-    `openroad` is the same binary this session is running under, and the child
+    `openroad` is the same binary this session is running under, and each child
     deck is a line-exact transform of THIS pnr.tcl seeded at the checkpoint the
-    line above just wrote, so the child cannot be repairing a different design
+    line above just wrote, so neither child can be repairing a different design
     than the one this session holds.
 
-    EVERY WAY THE CHILD CAN FAIL TO ANSWER IS A REFUSAL, never an invented
+    THE SECOND CANDIDATE, and why it is not symmetric. MEASURED on sha256:
+    the ODB leg's first transaction was REJECTED (DRT-0206 checkConnectivity on
+    a spare tie-off net) where the DEF leg accepted the same site from the same
+    checkpoint. The two restores are not equivalent and neither dominates, so
+    a rejection on one is not evidence that the repair is impossible — only
+    that THAT carrier could not deliver it. The ODB leg is tried FIRST and
+    always: it carries the guides, the `dont_touch` and the wire geometry a DEF
+    round-trip does not (R-0915-13, R-0915-18). The DEF leg is a fallback and
+    never the other way round.
+
+    A MISSING CHECKPOINT ODB IS STILL A NAMED REFUSAL, not a reason to fall
+    back. `begin` failing to `write_db` means the ODB leg never ran at all, and
+    quietly building the only candidate from a DEF is precisely the silent
+    degrade R-0915-13 was. The fallback fires on a JUDGED REJECTION and on
+    nothing else.
+
+    BOTH LEGS ARE DISCLOSED. Both children write the same fixed names into the
+    same transaction directory, so the first leg's receipt, candidate DEF and
+    router-DRC report are copied aside under `odb_leg_` before the second runs.
+    Otherwise the retry would erase the evidence for its own justification.
+    The transcript reads
+    `SDR_CANDIDATE_ODB_REJECTED` -> `SDR_CANDIDATE_DEF_TRIED` ->
+    `SDR_CANDIDATE_DEF_RECEIPT` -> `SDR_CANDIDATE_LEG`, and the unchanged
+    decision then judges whichever leg is standing.
+
+    EVERY WAY A CHILD CAN FAIL TO ANSWER IS A REFUSAL, never an invented
     pass: a child that dies, a child that writes no receipt, a receipt that is
     short or unparseable — all land on the flags the tool's own numbers would
     have had to clear (`error=1`, `route_ok=0`, placement UNMEASURED) and go
@@ -25732,47 +25787,58 @@ def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
     Chip-AGNOSTIC: process invocation and TSV parsing only."""
     child_tcl_c = f"{out_dir_c}/{_sdr_child_tcl_name(stage)}"
     child_log_c = f"{out_dir_c}/{_sdr_child_log_name(stage)}"
+    def_tcl_c = f"{out_dir_c}/{_sdr_child_def_leg_tcl_name(stage)}"
+    def_log_c = f"{out_dir_c}/{_sdr_child_def_leg_log_name(stage)}"
+    keep = " ".join((_SDR_CHILD_RECEIPT_NAME, _SDR_CANDIDATE_DEF_NAME,
+                     _SDR_CANDIDATE_DRC_NAME))
     return (
         "  if {$_sdr_tx_ready} {\n"
-        # RUN THE CANDIDATE SOMEWHERE ELSE. `openroad` is the same binary this
-        # session is running under; the child deck is a line-exact transform of
-        # THIS pnr.tcl seeded at the checkpoint just written, so it loads the
-        # identical LEF/Liberty/SDC/do-not-use context. A child that dies, or
-        # writes no receipt, is a REFUSAL — never an invented pass.
-        f"    puts \"SDR_CHILD_SESSION_BEGIN: {child_tcl_c}\"\n"
-        "    set _sdr_child_rc 0\n"
-        # THE CHILD'S TRANSCRIPT GOES TO THE CHILD'S OWN LOG, AND NOWHERE ELSE.
+        "    set _sdr_tx_leg odb\n"
+        # ONE runner and ONE receipt reader, used by both legs, so the two
+        # cannot drift into judging the same thing differently.
         #
+        # THE CHILD'S TRANSCRIPT GOES TO THE CHILD'S OWN LOG, AND NOWHERE ELSE.
         # MEASURED (sha256 run5) — echoing it into the parent's `openroad.log`
         # made the PARENT'S ROUTE UNREADABLE:
         #     pnr FAIL ROUTE_DRC_NOT_MEASURED: route__drc_errors:
         #         METRIC=0 but LOG=5133
-        # The parent routed clean (`DRT-0702 Post-route verification: 0
-        # violation(s)`, metric 0). 5133 is the CHILD's last in-loop DRT-0199,
-        # from its own repair passes, interleaved into the parent's log — and
-        # the log scraper takes the LAST DRT-0199. The gate then refused to
-        # choose between the tool's metric and its log, which is exactly right
-        # and is why this was caught instead of shipping a wrong number.
-        #
-        # A log is not a noticeboard: `openroad.log` is the record of what THIS
-        # session routed, and every consumer of it is written for that. The
-        # child gets its own per-site file, `SDR_CHILD_SESSION_DONE` names it,
-        # and the receipts carry the decision — so nothing is hidden and
-        # nothing is attributed to the wrong session.
-        f"    if {{[catch {{exec openroad -no_init -exit {child_tcl_c} "
-        f">& {child_log_c}}} _sdr_child_e]}} {{\n"
-        "      set _sdr_child_rc 1\n"
-        "      puts \"SDR_CHILD_SESSION_NONFATAL: $_sdr_child_e\"\n"
+        # The parent routed clean (metric 0). 5133 was the CHILD's last in-loop
+        # DRT-0199 interleaved into the parent's log, and the scraper takes the
+        # LAST one. Each leg therefore gets its own per-site file.
+        "    if {[llength [info commands _sdr_exec_child]] == 0} {\n"
+        "      proc _sdr_exec_child {tcl log} {\n"
+        "        set rc 0\n"
+        "        if {[catch {exec openroad -no_init -exit $tcl >& $log} e]} {\n"
+        "          set rc 1\n"
+        "          puts \"SDR_CHILD_SESSION_NONFATAL: $e\"\n"
+        "        }\n"
+        "        puts \"SDR_CHILD_SESSION_DONE: rc=$rc log=$log\"\n"
+        "        return $rc\n"
+        "      }\n"
+        # A child that could not say what it did is a candidate nobody
+        # measured, so the unreadable case returns the SAME flags a failing
+        # tool would have produced and goes through the SAME decision.
+        "      proc _sdr_read_child_receipt {path} {\n"
+        "        if {[catch {\n"
+        "          set fh [open $path r]\n"
+        "          gets $fh hdr\n"
+        "          gets $fh row\n"
+        "          close $fh\n"
+        "          set f [split $row \"\\t\"]\n"
+        "          if {[llength $f] != 4} { error SHORT_CHILD_RECEIPT }\n"
+        "        } e]} {\n"
+        "          puts \"SDR_CHILD_RECEIPT_UNREADABLE: $e\"\n"
+        "          return [list 0 1 1 0 NA]\n"
+        "        }\n"
+        "        return [list 1 [lindex $f 0] [lindex $f 1] [lindex $f 2] "
+        "[lindex $f 3]]\n"
+        "      }\n"
         "    }\n"
-        f"    puts \"SDR_CHILD_SESSION_DONE: rc=$_sdr_child_rc "
-        f"log={child_log_c}\"\n"
         # REFUSE A DEF-ONLY RESTORE BY NAME. The child deck reads the ODB;
-        # if `begin`'s `write_db` did not produce one, the child would `read_db`
-        # a file that is not there and die with a message about a path, not
-        # about the reason. Say the reason here, before spending a session on
-        # it: a DEF restore loses the guides, the dont_touch and the wire
-        # fidelity this transaction depends on, so it is refused rather than
-        # silently degraded to the shape R-0915-13 was.
+        # if `begin`'s `write_db` did not produce one, the ODB leg never ran,
+        # and building the ONLY candidate from the DEF beside it is the silent
+        # degrade R-0915-13 was. The R-0915-26 fallback fires on a JUDGED
+        # rejection, not on a checkpoint that was never written.
         "    if {![file exists $_sdr_tx_ckpt_odb]} {\n"
         "      puts \"SDR_CHECKPOINT_ODB_ABSENT: $_sdr_tx_ckpt_odb was not "
         "written, so there is no restore point that carries the route guides, "
@@ -25785,38 +25851,58 @@ def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
         "      set _sdr_tx_route_ok 0\n"
         "      catch {unset _sdr_pv}\n"
         "    } else {\n"
-        "    set _sdr_child_ok 0\n"
-        "    if {[catch {\n"
-        "      set _sdr_fh [open $_sdr_tx_child_receipt r]\n"
-        "      gets $_sdr_fh _sdr_hdr\n"
-        "      gets $_sdr_fh _sdr_row\n"
-        "      close $_sdr_fh\n"
-        "      set _sdr_f [split $_sdr_row \"\\t\"]\n"
-        "      if {[llength $_sdr_f] != 4} { error SHORT_CHILD_RECEIPT }\n"
-        "      set _sdr_tx_mutated [lindex $_sdr_f 0]\n"
-        "      set _sdr_tx_error [lindex $_sdr_f 1]\n"
-        "      set _sdr_tx_route_ok [lindex $_sdr_f 2]\n"
-        "      set _sdr_pv_in [lindex $_sdr_f 3]\n"
-        "      set _sdr_child_ok 1\n"
-        "    } _sdr_rcpt_e]} { puts \"SDR_CHILD_RECEIPT_UNREADABLE: "
-        "$_sdr_rcpt_e\" }\n"
-        # A child that could not say what it did is a candidate nobody
-        # measured. It is refused through the SAME decision the tool's own
-        # numbers go through, with the flags that make it refusable.
-        "    if {!$_sdr_child_ok} {\n"
-        "      set _sdr_tx_mutated 1\n"
-        "      set _sdr_tx_error 1\n"
-        "      set _sdr_tx_route_ok 0\n"
-        "      catch {unset _sdr_pv}\n"
-        "    } elseif {$_sdr_pv_in eq \"NA\"} {\n"
-        "      catch {unset _sdr_pv}\n"
-        "    } else {\n"
-        "      set _sdr_pv $_sdr_pv_in\n"
-        "    }\n"
+        f"      puts \"SDR_CHILD_SESSION_BEGIN: {child_tcl_c}\"\n"
+        f"      _sdr_exec_child {child_tcl_c} {child_log_c}\n"
+        "      set _sdr_r [_sdr_read_child_receipt $_sdr_tx_child_receipt]\n"
+        "      set _sdr_child_ok [lindex $_sdr_r 0]\n"
+        "      set _sdr_tx_mutated [lindex $_sdr_r 1]\n"
+        "      set _sdr_tx_error [lindex $_sdr_r 2]\n"
+        "      set _sdr_tx_route_ok [lindex $_sdr_r 3]\n"
+        "      set _sdr_pv_in [lindex $_sdr_r 4]\n"
+        # ---- R-0915-26: the second candidate ----
+        "      if {$_sdr_tx_error || !$_sdr_tx_route_ok} {\n"
+        "        puts \"SDR_CANDIDATE_ODB_REJECTED: error=$_sdr_tx_error "
+        "route_ok=$_sdr_tx_route_ok receipt_readable=$_sdr_child_ok\"\n"
+        f"        foreach _sdr_keep {{{keep}}} {{\n"
+        "          catch {file copy -force $_sdr_tx_dir/$_sdr_keep "
+        f"$_sdr_tx_dir/{_SDR_ODB_LEG_PREFIX}$_sdr_keep}}\n"
+        "        }\n"
+        "        puts \"SDR_CANDIDATE_ODB_EVIDENCE_KEPT: "
+        f"$_sdr_tx_dir/{_SDR_ODB_LEG_PREFIX}*\"\n"
+        f"        if {{[file exists {def_tcl_c}]}} {{\n"
+        f"          puts \"SDR_CANDIDATE_DEF_TRIED: {def_tcl_c}\"\n"
+        "          set _sdr_tx_leg def\n"
+        f"          _sdr_exec_child {def_tcl_c} {def_log_c}\n"
+        "          set _sdr_r [_sdr_read_child_receipt "
+        "$_sdr_tx_child_receipt]\n"
+        "          set _sdr_child_ok [lindex $_sdr_r 0]\n"
+        "          set _sdr_tx_mutated [lindex $_sdr_r 1]\n"
+        "          set _sdr_tx_error [lindex $_sdr_r 2]\n"
+        "          set _sdr_tx_route_ok [lindex $_sdr_r 3]\n"
+        "          set _sdr_pv_in [lindex $_sdr_r 4]\n"
+        "          puts \"SDR_CANDIDATE_DEF_RECEIPT: "
+        "mutated=$_sdr_tx_mutated error=$_sdr_tx_error "
+        "route_ok=$_sdr_tx_route_ok placement_violations=$_sdr_pv_in\"\n"
+        "        } else {\n"
+        f"          puts \"SDR_CANDIDATE_DEF_UNAVAILABLE: {def_tcl_c} was not "
+        "written, so there is no second candidate to try and the transaction "
+        "is decided on the ODB leg alone\"\n"
+        "        }\n"
+        "      }\n"
+        "      puts \"SDR_CANDIDATE_LEG: $_sdr_tx_leg\"\n"
+        "      if {!$_sdr_child_ok} {\n"
+        "        set _sdr_tx_mutated 1\n"
+        "        set _sdr_tx_error 1\n"
+        "        set _sdr_tx_route_ok 0\n"
+        "        catch {unset _sdr_pv}\n"
+        "      } elseif {$_sdr_pv_in eq \"NA\"} {\n"
+        "        catch {unset _sdr_pv}\n"
+        "      } else {\n"
+        "        set _sdr_pv $_sdr_pv_in\n"
+        "      }\n"
         "    }\n"
         "  }\n"
     )
-
 
 def _v1_8_100_signoff_drv_repair_tcl(
         out_dir_c: str, fanout_root_buffer_cell: Optional[str] = None,
@@ -28330,6 +28416,19 @@ def _write_sdr_child_decks(pnr_tcl: Path, out_dir: Path, container: str,
                 after_restore_tcl=after_restore,
                 restore_odb_c=_to_container_path(
                     str(txn / _SDR_CHECKPOINT_ODB_NAME), container)))
+            # R-0915-26 — the SECOND candidate's deck, written now for the same
+            # reason the first one is: the parent has to be able to NAME it in
+            # the Tcl it is already executing. It is the identical transform
+            # with `restore_odb_c` left empty, so it restores from the
+            # checkpoint DEF instead of the ODB and is otherwise the same
+            # recipe judged by the same judge. If it cannot be written the
+            # parent finds no deck, says so by name, and the transaction is
+            # decided on the ODB leg alone -- which is exactly today's
+            # behaviour, so a failure here can only cost the retry.
+            (out_dir / _sdr_child_def_leg_tcl_name(stage)).write_text(
+                _build_pnr_sdr_child_tcl_text(
+                    deck, checkpoint_def_c=ckpt_c, stage=stage,
+                    after_restore_tcl=after_restore))
         except (PnrResumeUnavailable, OSError) as exc:
             failures[stage] = str(exc)
             # DEGRADE LOUDLY. A missing child deck turns into a refused
