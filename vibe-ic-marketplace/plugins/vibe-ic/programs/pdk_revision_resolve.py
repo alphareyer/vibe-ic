@@ -661,8 +661,54 @@ def candidate_trees_from_run(run: Path, fs: Fs, cap: int = 400
 # Record.
 # ---------------------------------------------------------------------------
 
+#: The dataset's OWN declaration of the process it was measured against —
+#: the "REVISION.md treatment". Read ONLY as a last resort, when no PDK tree
+#: the run actually loaded resolved: a file the dataset ships is a statement by
+#: the design's author, which is weaker evidence than the tree the tools read,
+#: and it must never outrank it.
+_INPUT_REVISION_RELS: Tuple[str, ...] = (
+    "input/pdk/REVISION.md",
+    "input/pdk/REVISION",
+)
+INPUT_REVISION = "INPUT_REVISION"
+
+
+def read_input_revision(run: Path) -> Optional[Dict[str, Any]]:
+    """The run's own staged PDK revision declaration, or None.
+
+    R-0915-58. A dataset may ship `input/pdk/REVISION.md` naming the process
+    revision it was authored against (the treatment icadc gave the ADC). Until
+    now a run whose tools loaded no self-declaring tree refused by name even
+    when its own input said which revision it meant.
+
+    HOST-SIDE ON PURPOSE: this file is part of the RUN, not of the container's
+    PDK install, so it is read from the run directory with no container
+    involved.
+    """
+    for rel in _INPUT_REVISION_RELS:
+        path = Path(run) / rel
+        try:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        revisions = _parse_sources(text) or _parse_commit(text)
+        if not revisions:
+            continue
+        return {
+            "source": INPUT_REVISION,
+            "read_from": rel,
+            "sha256": _sha256_text(text),
+            "revisions": dict(sorted(revisions.items())),
+        }
+    return None
+
+
 def build_record(trees: Sequence[Dict[str, Any]], read_in: str,
-                 derived_from: str, note: str = "") -> Dict[str, Any]:
+                 derived_from: str, note: str = "",
+                 input_revision: Optional[Dict[str, Any]] = None
+                 ) -> Dict[str, Any]:
     resolved = [t for t in trees if t.get("resolved")]
     rec: Dict[str, Any] = {
         "_comment": ("The PDK revision this run signed off against, read from "
@@ -683,7 +729,24 @@ def build_record(trees: Sequence[Dict[str, Any]], read_in: str,
                                                 for t in resolved)))
     else:
         rec["revision"] = None
-    if not rec["resolved"]:
+    if not rec["resolved"] and input_revision:
+        # LAST RESORT, and labelled as such in the record: no tree the run
+        # loaded declared a revision, but the dataset itself states one.
+        # Weaker evidence than the tree the tools read, so it never competes
+        # with a resolved tree — it only replaces a refusal.
+        revs = input_revision["revisions"]
+        comp = (TREE_COMPONENT if TREE_COMPONENT in revs
+                else sorted(revs)[0])
+        rec["resolved"] = True
+        rec["revision"] = f"{comp}:{revs[comp]}"
+        rec["revision_source"] = INPUT_REVISION
+        rec["input_revision"] = input_revision
+        rec["note"] = ((rec.get("note", "") + "; ") if rec.get("note") else "") + (
+            f"no PDK tree this run loaded declares a revision; taken from the "
+            f"run's own {input_revision['read_from']}, which is the DESIGN's "
+            f"statement of the process it was authored against, not the "
+            f"tree the tools read")
+    elif not rec["resolved"]:
         unresolved = [t for t in trees if not t.get("resolved")]
         rec["reason"] = ("; ".join(
             f"{t.get('tree')}: {t.get('reason')}" for t in unresolved)
@@ -726,7 +789,18 @@ def record_gaps(rec: Any) -> List[str]:
                         f"({', '.join(repr(b) for b in bad)}) — a placeholder "
                         f"in this field is the gap wearing a hat")
     if not rec.get("trees"):
-        gaps.append("trees: the record names no PDK tree it read")
+        # R-0915-58 — a record resolved from the run's OWN staged declaration
+        # names no tree because there was none to name, and it says so: it
+        # carries the file it read and that file's digest. Demanding a tree
+        # here would leave the record permanently INCOMPLETE and keep the
+        # refusal token on a run that DID state its revision. Anything else
+        # with no trees is still a gap.
+        src = rec.get("revision_source")
+        decl = rec.get("input_revision")
+        named = (src == INPUT_REVISION and isinstance(decl, dict)
+                 and bool(decl.get("read_from")) and bool(decl.get("sha256")))
+        if not named:
+            gaps.append("trees: the record names no PDK tree it read")
     return gaps
 
 
@@ -795,8 +869,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         derived_from = "run tool logs" if not args.tree else \
             "run tool logs + --tree"
 
+    input_rev = (read_input_revision(Path(args.from_run))
+                 if args.from_run else None)
     if not trees:
-        rec = build_record([], read_in, derived_from, note)
+        rec = build_record([], read_in, derived_from, note, input_rev)
+        if rec.get("resolved"):
+            # The run's own input declared the revision; it is recorded, so
+            # this is no longer a refusal and must not be overwritten with
+            # one. Falls through to the normal emit below.
+            _emit(args.json, rec)
+            print(f"pdk_revision_resolve: {rec['revision']} "
+                  f"(from {rec['input_revision']['read_from']})")
+            return 0
         rec["reason"] = (
             "NOT DETERMINED — no PDK tree was given or derivable. "
             + (note + ". " if note else "")
@@ -812,7 +896,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     resolved = [resolve_tree(fs, t) for t in trees]
-    rec = build_record(resolved, read_in, derived_from, note)
+    # The fallback applies here too: trees were found but none of them
+    # declared a revision. It is still a last resort — `build_record` ignores
+    # it whenever any tree resolved.
+    rec = build_record(resolved, read_in, derived_from, note, input_rev)
     _emit(args.json, rec)
 
     for t in resolved:
