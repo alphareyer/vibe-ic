@@ -207,3 +207,33 @@ def test_SKIPPED_CONDITION_is_an_EXCUSED_status_so_the_cascade_clears():
     import flow_step_execution_coverage_check as C  # noqa: PLC0415
     assert "SKIPPED-CONDITION" in C._NOT_APPLICABLE
     assert "MISSING" not in C._NOT_APPLICABLE
+
+
+def test_step_11_names_no_condition_owner_and_why(tmp_path):
+    """MEASURED, not omitted. With `condition_owner: {step: D1, declaration:
+    "L20.fields..."}` the audit refused the row --
+
+        blocked-by-upstream(step D1): condition-owner configuration is
+        INVALID: Step D1 does not define non-empty declaration '...'
+
+    -- and demoted it back to MISSING. The owner mechanism resolves a
+    declaration through `condition_declarations`, a `files_exist` record, and
+    it exists for the one ambiguity a FILE predicate cannot resolve: neither
+    marker existing can mean either "the other route was selected" or "the
+    owner failed and selected nothing". This predicate carries its own
+    discriminator — the three states are asserted by the cases above — so an
+    owner here would name a record that does not exist.
+    """
+    step = _step11()
+    assert "condition_owner" not in step, (
+        "step 11's condition is resolved by the design's own L-doc; an owner "
+        "would have to name a condition_declarations record and none applies")
+    # and the three states this replaces an owner with are all exercised:
+    F = _F()
+    spec = step["condition"]["l_doc_declares"]
+    declared_absent = _project(tmp_path / "a", ABSENT)
+    declared_present = _project(tmp_path / "b", {**ABSENT, "dft_present": True})
+    not_declared = _project(tmp_path / "c", ABSENT, write=False)
+    assert F._l_doc_declares_absence(declared_absent, spec) is not None
+    assert F._l_doc_declares_absence(declared_present, spec) is None
+    assert F._l_doc_declares_absence(not_declared, spec) is None

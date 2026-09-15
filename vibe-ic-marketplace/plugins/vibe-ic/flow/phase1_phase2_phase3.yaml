@@ -3306,9 +3306,22 @@ steps:
           bist_mbist: []
           jtag_tap: null
     condition_kind: design_dependent
-    condition_owner:
-      step: D1
-      declaration: "L20.fields.dft_present / scan_chains / bist_mbist / jtag_tap"
+    # NO `condition_owner`, and that is the measured answer rather than an
+    # omission. MEASURED: with `condition_owner: {step: D1, declaration:
+    # "L20.fields..."}` the audit correctly refused it --
+    #   blocked-by-upstream(step D1): condition-owner configuration is
+    #   INVALID: Step D1 does not define non-empty declaration '...'
+    # -- and demoted the row back to MISSING. `_attribute_condition_owner_blocks`
+    # resolves an owner through `condition_declarations`, which is a
+    # `files_exist` record; it exists for the ONE ambiguity a FILE predicate
+    # cannot resolve, namely that neither marker existing can mean either "the
+    # other route was selected" or "the route owner failed and selected
+    # nothing" (the 0.5ic delivery_route case). This predicate does not have
+    # that ambiguity: it reads a POSITIVE declaration in the design's own
+    # L-doc, and every way the declaration can be absent -- no document, an
+    # unparseable one, a field that is not there -- RUNS the step. The
+    # discriminator the owner mechanism exists to supply is supplied inline, so
+    # naming an owner here would only assert a record that does not exist.
     mcp_tools: [eda_dft]
     programs:
       # Fault (cloudv-io/fault) for open-source stuck-at ATPG.
