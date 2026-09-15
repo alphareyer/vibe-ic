@@ -3709,6 +3709,40 @@ steps:
     # exactly that gap (empty file / pre-DFT netlist substituted / scan chain
     # vanished), and only that — it does not duplicate Step 13's functional
     # equivalence question.
+    # WHETHER THIS STEP APPLIES IS THE DESIGN'S OWN DECLARATION, exactly as
+    # for step 11, and for the same reason. MEASURED 2026-09-16 (lane icspm5)
+    # on the SPM run32 shape at main bac74aff0: with step 11 correctly
+    # SKIPPED-CONDITION by the L20 declaration, this step had no scan netlist
+    # to optimise and the runner disclosed that in
+    # `phase2/stage2/synth/post_dft_not_run.json` -- but the marker it wrote
+    # carried `capability_flag: cap:post_dft_scan_optimization`, a claim that
+    # the OPEN-SOURCE CONTAINER lacks a capability. `check_step`'s #675 strict
+    # sibling promotion then set `self_skip_disclosed`, step id 12 was a member
+    # of `_OPEN_SOURCE_CONTAINER_BLOCKED_STEPS`, and the run's whole headline
+    # became PASS_WITH_OPEN_SOURCE_CONSTRAINTS deferring
+    #   12: "Post-DFT optimisation (Design Compiler + DFT)"
+    # -- a commercial-tool excuse for a design that had simply declared no DFT.
+    # No tool was missing: with no scan chain there is nothing to re-optimise.
+    #
+    # The declaration is the same one step 11 reads, so the clause is the same
+    # clause, byte for byte. A design that DOES declare DFT anywhere in L20 --
+    # a scan chain, a TAP, a BIST block -- makes the condition MET and
+    # `post_dft_netlist.v` owed, and a scan netlist that never appeared is then
+    # a real MISSING. Every way the declaration can be ABSENT rather than
+    # negative (no L20, unparseable, a field not there) RUNS the step, because
+    # absence of a declaration is not a declaration of absence.
+    #
+    # The condition is evaluated in `check_step` BEFORE the #675 sibling
+    # promotion, so the declared-N/A answer wins and cites L20 by path.
+    condition:
+      l_doc_declares:
+        l_doc: L20
+        all_absent:
+          dft_present: false
+          scan_chains: []
+          bist_mbist: []
+          jtag_tap: null
+    condition_kind: design_dependent
     programs:
       - dft_post_optimization_scan_survival_check
     skills: [synth-doctor]

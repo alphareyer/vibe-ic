@@ -2783,11 +2783,20 @@ _DECLARED_CAPABILITY_GAP_FLAGS: Mapping[str, Tuple[str, ...]] = MappingProxyType
         "phase2/stage2/dft/atpg_coverage.rpt",
         "reports/phase2/dft/coverage.json",
     ),
-    # No scan netlist exists to re-optimise (downstream of the above).
-    # `design_one_shot_runner._POST_DFT_SKIP_OWN`.
-    "cap:post_dft_scan_optimization": (
-        "phase2/stage2/synth/post_dft_netlist.v",
-    ),
+    # REMOVED 2026-09-16 (lane icspm5, R-0915-57): "cap:post_dft_scan_
+    # optimization", bound to "phase2/stage2/synth/post_dft_netlist.v".
+    #
+    # It claimed the open-source container could not re-optimise a scan
+    # netlist. `design_one_shot_runner`'s step 12 does exactly that with
+    #     yosys -p 'read_verilog <scan_netlist>; opt_clean -purge;
+    #               write_verilog -noattr <post_dft_netlist>'
+    # whenever a scan netlist exists, so the claim was never true and the
+    # entry let two quite different things buy the same deferral: a design
+    # that DECLARED no DFT (nothing to optimise -- now a design-declared N/A,
+    # step 12 carries step 11's `l_doc_declares` L20 condition in the flow
+    # yaml), and a run that simply failed to produce the netlist (now MISSING).
+    # No producer emits the flag any more; the entry is deleted rather than
+    # emptied so the registry and its producers stay in step.
     # Transition/at-speed ATPG needs a timing-graded fault model the OSS
     # ATPG chain does not provide. `design_one_shot_runner._TDF_CAP` and
     # `phase3_one_shot_runner._ATPG_COVERAGE_REL` (DT1/DT2/DT3).
@@ -5030,9 +5039,56 @@ _FSM_STOPWORDS = frozenset(w.upper() for w in (
 # list. It is NOT a green pass — it is a machine-attested deferral
 # that the tapeout vendor must close before production.
 _OPEN_SOURCE_CONTAINER_BLOCKED_STEPS: Dict[Any, str] = {
-    11: "DFT insertion (Tessent Scan / DFTMAX)",
-    12: "Post-DFT optimisation (Design Compiler + DFT)",
-    13: "RTL≡post-DFT equivalence (Formality / Conformal)",
+    # ── STEPS 11 / 12 / 13 REMOVED 2026-09-16 (lane icspm5, R-0915-57) ──
+    #
+    # They used to read:
+    #   11: "DFT insertion (Tessent Scan / DFTMAX)"
+    #   12: "Post-DFT optimisation (Design Compiler + DFT)"
+    #   13: "RTL≡post-DFT equivalence (Formality / Conformal)"
+    #
+    # Three commercial tool families named as the reason the flow could not
+    # close the DFT steps. MEASURED at main bac74aff0, against this same tree:
+    # for every one of the three the premise -- "the OSS container CANNOT do
+    # this" -- is untrue, and the tier's own docstring above says a step with
+    # an available open-source path is DELIBERATELY EXCLUDED.
+    #
+    #   * Step 11 already declares four OPEN-SOURCE programs in the shipped
+    #     flow yaml -- `fault_atpg_run`, `dft_atpg_coverage_check`,
+    #     `bsdl_emit`, `dft_signoff_check` -- around Fault (cloudv-io/fault),
+    #     whose own integration note in the yaml reads "Integrated 2026-04-22
+    #     to eliminate the 'no commercial ATPG' waiver". The waiver it was
+    #     integrated to eliminate then outlived it here. The pinned image also
+    #     carries OpenROAD's `dft` module (scan_replace / insert_dft /
+    #     set_dft_config) for the insertion half.
+    #   * Step 12's own declared program is `dft_post_optimization_scan_
+    #     survival_check`, and the runner's implementation is yosys -- no
+    #     Design Compiler is reachable from this flow at all, so naming one as
+    #     the blocker described a tool the step never had a path to.
+    #   * Step 13 is `lec_equivalence_check` / `lec_run`, which is yosys
+    #     `equiv_*`; it RUNS, and on the reference SPM run it PASSES.
+    #
+    # WHAT ACTUALLY HAPPENED ON SPM run32 (the row the owner asked about):
+    # the design's L20 declared NO DFT at all, so there was no scan chain to
+    # optimise and NO tool was missing -- but the runner minted
+    # `capability_flag: cap:post_dft_scan_optimization` for that
+    # design-declared absence, `check_step`'s #675 promotion set
+    # `self_skip_disclosed`, membership here did the rest, and a whole IC's
+    # headline became PASS_WITH_OPEN_SOURCE_CONSTRAINTS. Cause was conflated
+    # with capability. The declared-absence route is repaired at its two real
+    # sites -- step 12 now carries step 11's `l_doc_declares` L20 condition in
+    # the flow yaml, and `design_one_shot_runner` no longer mints a capability
+    # flag for the L20-declared branch -- and these three keys go, so that a
+    # DFT step which genuinely did not close can no longer buy a commercial-
+    # tool deferral. With them gone it reads MISSING / FAIL, which is the
+    # correct verdict when the open-source path was available and not taken.
+    #
+    # THE TIER ITSELF IS KEPT, and is not dead code: fourteen keys still reach
+    # it -- 24, 25, 26, 28 (IR / EM / antenna / PERC sign-off precision),
+    # "M1".."M4" (mixed-signal AMS) and "A3"/"A4"/"A5"/"A7"/"A8"/"A9" (the
+    # PDK-substitution analog deferrals). Those rest on PDK and AMS
+    # availability rather than on a forked-tool gap, are a different question
+    # from this one, and removing them would let MORE failures be promoted, so
+    # they are deliberately untouched here.
     # v1.6.211 (#92) — added per field-agent verification that
     # iic-osic-tools open-source paths do not produce gate-required
     # signoff artefacts. OpenRCX / OpenSTA-IR / antenna_checker /
@@ -5151,6 +5207,39 @@ _OPEN_SOURCE_CONTAINER_BLOCKED_STEPS: Dict[Any, str] = {
            "process (AMS environment + foundry PDK; the open path runs the "
            "substituted open-source PDK)"),
 }
+
+#: Steps whose PASS_WITH_OPEN_SOURCE_CONSTRAINTS entry was WITHDRAWN on
+#: 2026-09-16 (lane icspm5, R-0915-57) because the open-source path exists:
+#: 11 DFT insertion (Fault ATPG + OpenROAD `dft`), 12 post-DFT optimisation
+#: (yosys, run by `design_one_shot_runner` itself), 13 RTL≡post-DFT
+#: equivalence (yosys `equiv_*` via `lec_run`).
+#:
+#: Removing the three keys removed TWO behaviours at once, and only one of
+#: them should have gone. Membership of `_OPEN_SOURCE_CONTAINER_BLOCKED_STEPS`
+#: made a disclosed self-skip (a) VISIBLE -- it joined `ok` like `missing`, so
+#: the gap travelled THROUGH the verdict -- and (b) PROMOTABLE to the deferral
+#: tier. Dropping (b) is the whole point of R-0915-57. Dropping (a) as well
+#: would have been a RELAXATION: measured on this tree, a design that DECLARES
+#: DFT and then produced no scan netlist would have gone SKIPPED-CONDITION
+#: with `self_skip_disclosed` set, landed in neither `failing`, `missing` nor
+#: `oss_blocked_skipped`, and read GREEN -- exactly the invisibility the tier
+#: was built in v1.6.210 to end.
+#:
+#: So these steps keep the visibility and lose the exit: a disclosed self-skip
+#: on 11 / 12 / 13 enters `oss_blocked_skipped` and there is no promotion for
+#: it, because they are no longer in the map the promotion reads. The result
+#: is FAIL, which is the correct verdict when the open-source path was
+#: available and was not taken.
+#:
+#: NOT a general widening, and that is deliberate. MEASURED: the flags with a
+#: non-empty binding in `_DECLARED_CAPABILITY_GAP_FLAGS` own steps 11, 12,
+#: DT1-DT3, 29 and 30, and DT1-DT3 / 29 / 30 are ALREADY outside the map
+#: today -- their disclosed self-skips are already invisible, on main, before
+#: this change. That is a real hole and a pre-existing one; closing it would
+#: redden ICs outside this lane's ruling, so it is REPORTED rather than
+#: smuggled in here.
+_DFT_SIGNOFF_WITHDRAWN_STEPS: Tuple[Any, ...] = (11, 12, 13)
+
 
 # v1.6.211 (#92) — structural-RTL sub-gates inside the P0 umbrella
 # that are deferrable under the open-source-container promotion path.
@@ -5313,6 +5402,25 @@ def _derive_os_constraints_prereq_steps(
 
 _OS_CONSTRAINTS_PREREQ_STEPS, _OS_CONSTRAINTS_PREREQ_UNRESOLVED = (
     _derive_os_constraints_prereq_steps())
+
+
+#: What a self-skipped sign-off step needs, for the reader.
+#:
+#: For a step still in `_OPEN_SOURCE_CONTAINER_BLOCKED_STEPS` that is the
+#: commercial tool family the entry names. For one of the WITHDRAWN steps
+#: (`_DFT_SIGNOFF_WITHDRAWN_STEPS`) the honest answer is the opposite, and
+#: saying "needs ?" would have been a worse answer than the one it replaced:
+#: nothing is needed that this container does not already carry, so what the
+#: reviewer must look at is why the available open-source path was not taken.
+def _self_skip_requirement(sid: Any) -> str:
+    tool = _OPEN_SOURCE_CONTAINER_BLOCKED_STEPS.get(sid)
+    if tool:
+        return tool
+    if sid in _DFT_SIGNOFF_WITHDRAWN_STEPS:
+        return ("no commercial tool \u2014 the open-source path for this step is "
+                "in the container (Fault ATPG / OpenROAD dft / yosys / yosys "
+                "equiv) and was not taken; review the run, not the toolchain")
+    return "?"
 
 
 def _render_os_deferral(d: Dict[str, Any]) -> Optional[str]:
@@ -17210,11 +17318,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     #   * membership of `_OPEN_SOURCE_CONTAINER_BLOCKED_STEPS` — the step is
     #     already enumerated here as a sign-off bar the open-source container
     #     cannot clear.
+    #   * …OR membership of `_DFT_SIGNOFF_WITHDRAWN_STEPS` — see below. The
+    #     map decides whether a disclosed gap is PROMOTABLE to the deferral
+    #     tier; it must not also decide whether the gap is VISIBLE, or
+    #     withdrawing a step's commercial excuse would silently make its gaps
+    #     cost-free. Both memberships enter this bucket; only map members can
+    #     leave it again through the promotion below.
     oss_blocked_skipped = [
         r for r in scoped
         if r.status == "SKIPPED-CONDITION"
         and r.self_skip_disclosed
-        and r.id in _OPEN_SOURCE_CONTAINER_BLOCKED_STEPS
+        and (r.id in _OPEN_SOURCE_CONTAINER_BLOCKED_STEPS
+             or r.id in _DFT_SIGNOFF_WITHDRAWN_STEPS)
     ]
 
     # v1.6.99 (issue #31 Bug 2) — informational-only step exclusion.
@@ -17975,7 +18090,7 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"open-source-container sign-off bar) — review required:")
         for r in oss_blocked_skipped:
             print(f"    • Step {r.id} ({r.name}) — needs "
-                  f"{_OPEN_SOURCE_CONTAINER_BLOCKED_STEPS.get(r.id, '?')}")
+                  f"{_self_skip_requirement(r.id)}")
     if structural_fail_lines:
         print(f"Phase 2 strict-structural mode: "
               f"{len(structural_fail_lines)} structural gates FAILed")
@@ -18524,8 +18639,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             # can see the gap without re-deriving it from the per-step table.
             "open_source_blocked_self_skipped_steps": [
                 {"step_id": r.id, "step_name": r.name,
-                 "commercial_tool_required":
-                     _OPEN_SOURCE_CONTAINER_BLOCKED_STEPS.get(r.id, "?"),
+                 "commercial_tool_required": _self_skip_requirement(r.id),
                  "review_required": True}
                 for r in oss_blocked_skipped
             ],
