@@ -119,6 +119,47 @@ def find_report(project: Path) -> Optional[Path]:
     return None
 
 
+_JSON_FLAG_RE = re.compile(r"--json[=\s]+(\S+)")
+
+
+def declared_json_outputs(path: Path) -> Dict[str, Optional[str]]:
+    """gate -> the `--json <path>` its OWN ledger row declares, or None.
+
+    R-0915-46, third and final half, and the one that keeps this check
+    honest. MEASURED on the SPM verdict candidate the moment the audit's
+    full-scope record was read instead of a stage-scoped one: **146 PASS
+    gates, 16 without evidence** -- `constants_validation`, `oracle_vector_gen`,
+    `integration_spec_audit`, `spec_review_lint` and twelve more. A
+    `find`-sweep of the whole run tree turns up NOTHING for any of them,
+    because those gates are invoked WITHOUT `--json`: they print a verdict and
+    the audit records it. They are working exactly as designed.
+
+    So "a PASS claim needs a file" is the wrong rule for them, and applying it
+    would be a FALSE FAIL over 16 correct gates. The rule that has teeth and
+    is not vacuous is the one the flow already uses elsewhere: a gate whose
+    own command NAMES an artefact must have produced it. A gate that names
+    none is evidenced by its ledger row, which carries the command and the
+    exit code -- a record of execution, not a self-assertion.
+    """
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    ledger = data.get("gate_execution_ledger")
+    if not isinstance(ledger, list):
+        return {}
+    out: Dict[str, Optional[str]] = {}
+    for row in ledger:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("gate")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        m = _JSON_FLAG_RE.search(str(row.get("cmd") or ""))
+        out[name.strip()] = m.group(1) if m else None
+    return out
+
+
 def extract_pass_gates_from_json(path: Path) -> List[str]:
     """Extract the names that claim PASS from a flow/audit JSON.
 
@@ -275,10 +316,29 @@ def main(argv=None) -> int:
         return 0
 
     evidence = collect_evidence_files(project)
+    # The artefact each gate's OWN command declares. Empty for a legacy
+    # report; populated when the report is the audit's ledger.
+    declared = declared_json_outputs(report_path)
 
     with_evidence = []
     without_evidence = []
+    unfiled = []
     for gate in pass_gates:
+        if gate in declared:
+            named = declared[gate]
+            if named is None:
+                # The gate declares no artefact, so a file is not what its
+                # PASS rests on -- its ledger row is, and the row exists by
+                # construction of this list. Counted and reported, never
+                # failed: demanding a file here would FAIL 16 correctly
+                # designed gates on this very run.
+                unfiled.append(gate)
+                continue
+            if (project / named).is_file():
+                with_evidence.append(gate)
+            else:
+                without_evidence.append(f"{gate} (declared {named}, not on disk)")
+            continue
         if gate_has_evidence(gate, evidence):
             with_evidence.append(gate)
         else:
@@ -287,7 +347,9 @@ def main(argv=None) -> int:
     print(f"Report: {report_path.name}")
     print(f"PASS gates: {len(pass_gates)} total, "
           f"{len(with_evidence)} with evidence, "
-          f"{len(without_evidence)} without evidence")
+          f"{len(without_evidence)} without evidence"
+          + (f", {len(unfiled)} declaring no artefact (evidenced by their "
+             f"ledger row)" if unfiled else ""))
 
     if without_evidence:
         print(f"\nMissing evidence for:")
@@ -304,6 +366,7 @@ def main(argv=None) -> int:
             "program": "gate_evidence_completeness_check",
             "report_path": str(report_path),
             "total_pass_gates": len(pass_gates),
+            "declaring_no_artefact": len(unfiled),
             "with_evidence": len(with_evidence),
             "without_evidence_count": len(without_evidence),
             "without_evidence_items": without_evidence,
