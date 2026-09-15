@@ -47176,8 +47176,16 @@ def _si_mcf_repair_seam(project: Path, top: str, pdk: "PdkConfig",
             container, f"openroad -no_init -exit {tcl_c}", marker=tcl_c)
         log = (out or "") + "\n" + (err or "")
         (txn / "si_mcf_repair_child.log").write_text(log)
+        # R-0915-50 (2) — the child's OWN account of how it ended, carried out
+        # of the seam so the producer can tell a tool that DIED from a
+        # candidate that was weighed and declined. `rc` alone cannot: 139 and
+        # 1 are both "non-zero" and only one of them is a crash.
+        _sig = _si_rep.signal_of(rc)
         after: Dict[str, Any] = {
             "router_drc_before": drc_before,
+            "child_signal": (_sig[0] if _sig else None),
+            "child_signal_name": (_sig[1] if _sig else None),
+            "child_crash_frames": (_si_rep.crash_frames(log) if _sig else []),
             "router_drc": None,
             "nominal_setup_ns": None,
             "mcf_setup_ns": None,

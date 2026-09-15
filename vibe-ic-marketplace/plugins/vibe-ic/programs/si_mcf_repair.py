@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -297,6 +298,45 @@ def _corner_numbers(si_mcf: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 corner_numbers = _corner_numbers
 
 
+#: rc >= 128 from a shell is 128 + the signal that killed the child. The three
+#: that matter here are named because "rc 139" is not a sentence a reader can
+#: act on — R-0915-50 (2): a child that dies by SIGNAL is an EXECUTION_ERROR
+#: with its signal and its top frame, never only "wrote no candidate".
+_SIGNAL_NAMES = {4: "SIGILL", 6: "SIGABRT", 7: "SIGBUS", 8: "SIGFPE",
+                 9: "SIGKILL", 11: "SIGSEGV", 13: "SIGPIPE", 15: "SIGTERM"}
+
+
+def signal_of(rc: Any) -> Optional[Tuple[int, str]]:
+    """`(signal, name)` when `rc` is a death by signal, else None.
+
+    Both spellings are accepted: a shell reports 128+N, and
+    `subprocess.returncode` reports -N. 0 and ordinary non-zero exits are NOT
+    signals — a tool that exits 1 has reported a failure, which is a different
+    thing from a tool that was killed."""
+    if isinstance(rc, bool) or not isinstance(rc, int):
+        return None
+    sig = -rc if rc < 0 else (rc - 128 if rc > 128 else 0)
+    if sig <= 0 or sig > 64:
+        return None
+    return sig, _SIGNAL_NAMES.get(sig, f"signal {sig}")
+
+
+#: A stack frame OpenROAD prints as `  2# grt::GlobalRouter::connectRouting(...)
+#: in openroad`. Frames that carry only an address (`0# 0x00000000035... in
+#: openroad`) name nothing and are skipped — the top NAMED frame is the one a
+#: reader can act on.
+_FRAME_RE = re.compile(r"^\s*\d+#\s+(?!0x)(\S.*?)\s+in\s+\S+\s*$", re.M)
+
+
+def crash_frames(log_text: str, limit: int = 6) -> List[str]:
+    """The first NAMED frames of a tool stack trace, in order.
+
+    Empty when the log carries none, which is itself worth recording: a child
+    that died without a trace is a different report from one that left six
+    frames naming the exact move that killed it."""
+    return [m.group(1).strip() for m in _FRAME_RE.finditer(log_text or "")][:limit]
+
+
 def run_once(project: Path, *, container: str = "",
              runner: Any = None, no_seam_reason: str = "") -> Dict[str, Any]:
     """Plan, and record the trajectory. ONE pass, and NEVER in place.
@@ -326,6 +366,7 @@ def run_once(project: Path, *, container: str = "",
                   "a silicon claim."),
         "plan": p, "before": before, "after": None,
         "decision": None, "reason": None, "residual": None,
+        "reason_class": None, "crash": None,
     }
     if not p.get("run"):
         record["decision"] = "NOT_RUN"
@@ -345,13 +386,41 @@ def run_once(project: Path, *, container: str = "",
     else:
         after = runner(project, container=container, victims=p["victims"])
         record["after"] = after
-        ok, why = accepts({**before, **{"router_drc":
-                                        (after or {}).get("router_drc_before")}},
-                          after or {})
-        record["decision"] = "ADOPTED" if ok else "REJECTED_CANDIDATE_DISCARDED"
-        record["reason"] = why
-        if ok:
-            record["residual"] = residual(after or {})
+        sig = signal_of((after or {}).get("child_rc"))
+        if sig is not None:
+            # R-0915-50 (2) — A CHILD KILLED BY A SIGNAL IS NOT A JUDGEMENT.
+            # "the candidate was refused" says the pass looked at an outcome
+            # and declined it; a SIGSEGV means the tool died and there was no
+            # outcome to look at. Both leave the design unchanged and only one
+            # of them is a defect someone has to fix, so they may not share a
+            # decision. MEASURED on subservient r19: rc 139 after 2.857 s, with
+            # the move that killed it named in the child's own trace.
+            signum, signame = sig
+            frames = (after or {}).get("child_crash_frames") or []
+            record["decision"] = "EXECUTION_ERROR"
+            record["reason_class"] = "EXECUTION_ERROR"
+            record["reason"] = (
+                f"the repair child was killed by {signame} (rc "
+                f"{(after or {}).get('child_rc')}, signal {signum}) after "
+                f"{(after or {}).get('elapsed_s')} s and produced no candidate"
+                + (f"; top frame: {frames[0]}" if frames else
+                   "; the child left no stack trace to name a frame from")
+                + ". The design is unchanged and the shipping session kept its "
+                  "route, but this is a TOOL FAILURE to be fixed, not a "
+                  "candidate that was weighed and declined.")
+            record["crash"] = {"rc": (after or {}).get("child_rc"),
+                               "signal": signum, "signal_name": signame,
+                               "frames": frames}
+        else:
+            ok, why = accepts({**before,
+                               **{"router_drc":
+                                  (after or {}).get("router_drc_before")}},
+                              after or {})
+            record["decision"] = ("ADOPTED" if ok
+                                  else "REJECTED_CANDIDATE_DISCARDED")
+            record["reason"] = why
+            if ok:
+                record["residual"] = residual(after or {})
     out_p.parent.mkdir(parents=True, exist_ok=True)
     out_p.write_text(json.dumps(record, indent=2) + "\n")
     return record

@@ -520,6 +520,119 @@ def test_a_refusal_leaves_the_shipping_route_byte_identical(tmp_path, monkeypatc
     assert not (p / "phase3/stage3/pnr/routed.def.pre_si_mcf").exists()
 
 
+# ── R-0915-50 (2): a child killed by a signal is an EXECUTION_ERROR ───────
+
+_R19_TRACE = """[INFO] starting
+Stack trace:
+ 0# 0x000000000352A995 in openroad
+ 1# 0x0000000000045330 in /lib/x86_64-linux-gnu/libc.so.6
+ 2# grt::GlobalRouter::connectRouting(odb::dbNet*, odb::dbNet*) in openroad
+ 3# grt::GlobalRouter::mergeNetsRouting(odb::dbNet*, odb::dbNet*) in openroad
+ 4# odb::dbNet::mergeNet(odb::dbNet*) in openroad
+ 5# rsz::Resizer::removeBuffer(sta::Instance*) in openroad
+ 6# rsz::UnbufferCandidate::apply() in openroad
+"""
+
+
+def test_a_shell_signal_and_a_subprocess_signal_are_both_read():
+    assert S.signal_of(139) == (11, "SIGSEGV")
+    assert S.signal_of(-11) == (11, "SIGSEGV")
+    assert S.signal_of(134) == (6, "SIGABRT")
+
+
+def test_an_ordinary_failure_is_not_a_signal():
+    """A tool that exits 1 has REPORTED a failure; a tool that is killed had no
+    chance to. Collapsing the two would relabel every refusal as a crash."""
+    for rc in (0, 1, 2, 127, None, True, "139"):
+        assert S.signal_of(rc) is None, rc
+
+
+def test_the_top_frame_is_the_first_one_that_names_something():
+    frames = S.crash_frames(_R19_TRACE)
+    assert frames[0] == "grt::GlobalRouter::connectRouting(odb::dbNet*, odb::dbNet*)"
+    assert "rsz::Resizer::removeBuffer(sta::Instance*)" in frames
+    # address-only frames name nothing a reader can act on
+    assert not any(f.startswith("0x") for f in frames)
+
+
+def test_a_log_with_no_trace_names_no_frame():
+    assert S.crash_frames("it just died\n") == []
+
+
+def test_a_killed_child_is_an_execution_error_not_a_refusal(tmp_path):
+    """r19's EXACT record. "the candidate was refused" says the pass looked at
+    an outcome and declined it; SIGSEGV means there was no outcome to look at,
+    and only one of the two is a defect someone has to fix."""
+    # The frames are SPELLED OUT rather than read back through the new helper,
+    # so this case is EXECUTABLE against base sources and fails on the decision
+    # it is about — an AttributeError would prove nothing about the behaviour.
+    frames = ["grt::GlobalRouter::connectRouting(odb::dbNet*, odb::dbNet*)",
+              "grt::GlobalRouter::mergeNetsRouting(odb::dbNet*, odb::dbNet*)",
+              "odb::dbNet::mergeNet(odb::dbNet*)",
+              "rsz::Resizer::removeBuffer(sta::Instance*)",
+              "rsz::UnbufferCandidate::apply()"]
+
+    def _crashed(project, container="", victims=()):
+        return {"router_drc_before": 0, "router_drc": None,
+                "nominal_setup_ns": None, "mcf_setup_ns": None,
+                "mcf_hold_ns": None, "child_rc": 139, "child_signal": 11,
+                "child_signal_name": "SIGSEGV", "elapsed_s": 2.857,
+                "child_crash_frames": frames}
+    rec = S.run_once(_proj(tmp_path), runner=_crashed)
+    assert rec["decision"] == "EXECUTION_ERROR", rec["decision"]
+    assert rec["reason_class"] == "EXECUTION_ERROR"
+    assert "SIGSEGV" in rec["reason"] and "139" in rec["reason"]
+    assert "2.857" in rec["reason"]
+    assert "connectRouting" in rec["reason"]
+    assert "TOOL FAILURE" in rec["reason"]
+    assert rec["crash"]["signal"] == 11
+    assert rec["crash"]["frames"][0].startswith("grt::GlobalRouter")
+    assert rec["residual"] is None
+
+
+def test_an_ordinary_unmeasured_candidate_is_still_a_refusal(tmp_path):
+    """THE NEGATIVE CONTROL for the decision split: a child that exited 1 and
+    measured nothing is REFUSED, not relabelled a crash."""
+    def _quiet(project, container="", victims=()):
+        return {"router_drc_before": 0, "router_drc": None,
+                "nominal_setup_ns": None, "mcf_setup_ns": None,
+                "child_rc": 1, "child_crash_frames": []}
+    rec = S.run_once(_proj(tmp_path), runner=_quiet)
+    assert rec["decision"] == "REJECTED_CANDIDATE_DISCARDED"
+    assert "NOT MEASURED" in rec["reason"]
+    # `.get` on purpose: this is a NEGATIVE control and must be green in BOTH
+    # arms — the refusal path is exactly what this change may not disturb.
+    assert rec.get("reason_class") is None
+    assert rec.get("crash") is None
+
+
+def test_a_crash_promotes_nothing(tmp_path):
+    def _crashed(project, container="", victims=()):
+        return {"router_drc_before": 0, "child_rc": 139, "elapsed_s": 0.5,
+                "child_crash_frames": []}
+    rec = S.run_once(_proj(tmp_path), runner=_crashed)
+    assert rec["decision"] == "EXECUTION_ERROR"
+    assert "no stack trace" in rec["reason"]
+
+
+# ── R-0915-50 (1): the NEGATIVE control — the ordinary repair is unchanged ─
+
+def test_the_ordinary_postroute_repair_still_allows_buffer_removal():
+    """The SI child excludes the unbuffer move because IT has no global-route
+    state. The flow's own post-route repair session has, and this fix may not
+    quietly narrow it — a fix that disables a move everywhere is a different
+    change from the one that was measured."""
+    ship = R._ship_signoff_spef_repair_tcl(
+        "dut", "/pdk/t.lef", "/pdk/c.lef", "/pdk/ss.lib", "/w/pnr",
+        "/pdk/cap", "Metal", 4)
+    assert "repair_timing" in ship
+    assert "-skip_buffer_removal" not in ship
+
+
+def test_only_the_si_child_carries_the_exclusion():
+    assert "-skip_buffer_removal" in _deck()
+
+
 # ── the real-container control ─────────────────────────────────────────────
 
 _REAL = os.environ.get("VIBEIC_SI_MCF_PROJECT", "").strip()
