@@ -24899,7 +24899,8 @@ def _spare_reassert_dont_touch_tcl(plan: Optional[Dict[str, Any]]) -> str:
 _ADD_GLOBAL_CONNECTION_RE = re.compile(r"^\s*add_global_connection\b.*$", re.M)
 
 
-def _pg_global_connect_reassert_tcl(deck: str) -> str:
+def _pg_global_connect_reassert_tcl(
+        deck: str, spare_plan: Optional[Dict[str, Any]] = None) -> str:
     """Re-apply the PDN's global CONNECTION RULES in a session restored from a
     checkpoint DEF.
 
@@ -24962,8 +24963,59 @@ def _pg_global_connect_reassert_tcl(deck: str) -> str:
             f"if {{[catch {{{rule}}} _pgc_{idx}]}} {{ "
             f"puts \"PDN_GLOBAL_CONNECT_REASSERT_NONFATAL: $_pgc_{idx}\" "
             f"}} else {{ incr _pg_rules_reasserted }}")
+    # R-0915-24: `global_connect` SKIPS a do-not-touch instance, and the very
+    # first thing `_after_restore_tcl` does is re-assert `dont_touch` on every
+    # spare -- so THIS apply, the one I added for R-0915-12, was running inside
+    # that window and leaving the spare pool's PG pins owned by no net. The
+    # tool says so itself, once per spare, every session: MEASURED on r13
+    # (subservient x gf180mcuD) 148 x `ODB-0383 <spare> is marked do not touch
+    # and will be skipped in global connections` -- 37 spares in each of 4
+    # sessions -- and in the candidate ODB the child handed back, 148 of 148
+    # spare POWER/GROUND iterms (37 x VDD/VNW/VPW/VSS) with NO net and 0
+    # connected. icsha2 measured the same on sha256 (236 -> 0).
+    #
+    # SCOPED TO THE SPARES AND TO THIS ONE CALL. The window opens immediately
+    # before `global_connect` and closes immediately after, whether it threw or
+    # not; nothing between them can resize, reroute or rip up, because nothing
+    # between them runs. A do-not-touch instance that is NOT in this run's own
+    # spare plan is never touched -- unlike the postroute_fill block, which
+    # lifts every dont_touch in the design; there it is correct (it is the PG
+    # reconnect for the whole design), here the narrower scope is what keeps
+    # this change from reaching anything the ruling did not name.
+    spare_names = [i.get("name") for i in ((spare_plan or {}).get("instances")
+                                           or []) if i.get("cell")
+                   and i.get("name")]
+    if spare_names:
+        lines.append("set _pg_spare_lifted {}")
+        lines.append("if {[catch {")
+        lines.append("  foreach _pg_sn {" + " ".join(spare_names) + "} {")
+        lines.append("    set _pg_si [[ord::get_db_block] findInst $_pg_sn]")
+        lines.append("    if {$_pg_si ne \"NULL\" && [$_pg_si isDoNotTouch]} {")
+        lines.append("      lappend _pg_spare_lifted $_pg_si")
+        lines.append("      $_pg_si setDoNotTouch false")
+        lines.append("    }")
+        lines.append("  }")
+        lines.append("} _pgsl_err]} { puts "
+                     "\"SPARE_DONTTOUCH_LIFT_FOR_GLOBAL_CONNECT_NONFATAL: "
+                     "$_pgsl_err\" }")
+        lines.append('puts "SPARE_DONTTOUCH_LIFTED_FOR_GLOBAL_CONNECT: '
+                     '[llength $_pg_spare_lifted] of ' +
+                     str(len(spare_names)) + '"')
     lines.append("if {[catch {global_connect} _pgc_apply]} { "
                  "puts \"PDN_GLOBAL_CONNECT_APPLY_NONFATAL: $_pgc_apply\" }")
+    if spare_names:
+        # RE-ASSERT UNCONDITIONALLY, and before anything else can run. The apply
+        # above is inside its own `catch`, so control reaches here whether it
+        # succeeded or threw; a spare left unprotected by a failed global
+        # connect is exactly the outcome #2255 exists to prevent.
+        lines.append("if {[catch {")
+        lines.append("  foreach _pg_si $_pg_spare_lifted { "
+                     "$_pg_si setDoNotTouch true }")
+        lines.append("} _pgsr_err]} { puts "
+                     "\"SPARE_DONTTOUCH_REASSERT_AFTER_GLOBAL_CONNECT_NONFATAL: "
+                     "$_pgsr_err\" } else { puts "
+                     "\"SPARE_DONTTOUCH_REASSERTED_AFTER_GLOBAL_CONNECT: "
+                     "[llength $_pg_spare_lifted]\" }")
     lines.append(
         f'puts "PDN_GLOBAL_CONNECT_REASSERTED: $_pg_rules_reasserted of '
         f'{len(rules)}"')
@@ -25002,7 +25054,7 @@ def _after_restore_tcl(deck: str, spare_plan: Optional[Dict[str, Any]],
     Getting that backwards is what each half of R-0915-13 was.
     """
     common = (_spare_reassert_dont_touch_tcl(spare_plan)
-              + _pg_global_connect_reassert_tcl(deck))
+              + _pg_global_connect_reassert_tcl(deck, spare_plan))
     if reroutes_immediately:
         return common + _spare_relay_restored_wiring_tcl(spare_plan)
     # NO one-shot `global_route` here any more. It bought exactly ONE routing
