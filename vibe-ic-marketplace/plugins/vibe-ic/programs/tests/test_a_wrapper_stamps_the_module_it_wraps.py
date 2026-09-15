@@ -174,24 +174,95 @@ def test_the_shipped_step_credits_its_own_producers_document(sid, stamp,
     assert F._is_gate_verdict_document(_doc(tmp_path, stamp), gp, pp) is False
 
 
-@pytest.mark.parametrize("sid,stamp", [
-    ("10", "eda_report_audit:sta"),
-    ("21", "eda_report_audit:drc"),
-    ("23", "eda_report_audit:sta"),
-    ("24", "eda_report_audit:ir_drop"),
-    ("25", "eda_report_audit:em"),
-    ("31", "eda_report_audit:drc"),
-    ("37.5ip", "digital_hardmacro_check"),
-])
-def test_the_shipped_step_still_refuses_a_gate_only_document(sid, stamp,
-                                                            tmp_path):
-    """THE GUARD. These steps declare the target and list no producer that
-    writes it; nothing in the run authors them and the refusal must stand."""
-    step = _flow_steps().get(sid)
-    if step is None:
-        pytest.skip(f"step {sid} is not in the shipped flow any more")
-    gp, pp = _sets(step)
-    assert F._is_gate_verdict_document(_doc(tmp_path, stamp), gp, pp) is True
+def _gate_only_cases():
+    """(step, stamp) for every shipped step whose gate program is NOT reachable
+    from that step's own `programs:`.
+
+    DERIVED, NOT RETYPED, and that is the repair rather than a convenience.
+    The population used to be the literal list `10, 21, 23, 24, 25, 31,
+    37.5ip` — which is exactly the set lane icspm3 then WIRED UP (each of those
+    steps declared its gate's `--json` target as a `required_output` and named
+    no producer, so nothing in the run wrote the document and the audit refused
+    its own output). A literal list makes a case that was measured once outlive
+    the fact it measured; a derived one keeps asking the shipped flow.
+    """
+    out = []
+    for sid, step in sorted(_flow_steps().items()):
+        gp, pp = _sets(step)
+        for g in sorted(gp):
+            aliases = _aliases_of(g)
+            if aliases & _producer_aliases(pp):
+                continue
+            for a in sorted(aliases):
+                out.append((sid, a))
+    return out
+
+
+def _aliases_of(program):
+    """The stamps `program` can write, read from its own source — the same
+    rule `_is_gate_verdict_document._aliases` applies."""
+    import re
+    got = {program}
+    src = PROGRAMS / f"{program}.py"
+    try:
+        text = src.read_text(errors="replace")
+    except OSError:
+        return got
+    m = re.search(r"^from\s+(\w+)\s+import\s+main\b", text, re.M)
+    if not m:
+        return got
+    md = re.search(r"^MODE\s*=\s*[\"\'](\w+)[\"\']", text, re.M)
+    got.add(f"{m.group(1)}:{md.group(1)}" if md else m.group(1))
+    if not md:
+        got.add(m.group(1))
+    return got
+
+
+def _producer_aliases(pp):
+    out = set()
+    for name in pp:
+        out |= _aliases_of(name)
+    return out
+
+
+def test_a_gate_only_document_is_still_refused_across_the_shipped_flow(
+        tmp_path):
+    """THE GUARD, over the flow as it ships. A document stamped by a program
+    this step lists ONLY as its gate — never under `programs:` — is the
+    auditor's, and the refusal must stand.
+
+    The denominator is asserted non-empty: a derived population that found
+    nothing would report a vacuous green, which is what this case exists to
+    refuse about the audit in the first place.
+    """
+    cases = _gate_only_cases()
+    assert len(cases) >= 20, (
+        f"only {len(cases)} gate-only (step, stamp) pair(s) derived from the "
+        f"shipped flow; the population is too small to be measuring anything")
+    for sid, stamp in cases:
+        gp, pp = _sets(_flow_steps()[sid])
+        assert F._is_gate_verdict_document(_doc(tmp_path, stamp), gp, pp) \
+            is True, (sid, stamp)
+
+
+def test_the_steps_lane_icspm3_wired_are_no_longer_gate_only(tmp_path):
+    """The other direction of the same repair, named so the change is visible.
+    These seven steps WERE the literal list above; each now lists the producer
+    of its own declared output, so its document is no longer classified as the
+    auditor's by name alone and the two timing facts decide."""
+    for sid, stamp in (("10", "eda_report_audit:sta"),
+                       ("21", "eda_report_audit:drc"),
+                       ("23", "eda_report_audit:sta"),
+                       ("24", "eda_report_audit:ir_drop"),
+                       ("25", "eda_report_audit:em"),
+                       ("31", "eda_report_audit:drc"),
+                       ("37.5ip", "digital_hardmacro_check")):
+        step = _flow_steps().get(sid)
+        if step is None:
+            pytest.skip(f"step {sid} is not in the shipped flow any more")
+        gp, pp = _sets(step)
+        assert F._is_gate_verdict_document(_doc(tmp_path, stamp), gp, pp) \
+            is False, (sid, stamp)
 
 
 def test_every_wrapper_in_the_tree_resolves_to_the_module_it_wraps():

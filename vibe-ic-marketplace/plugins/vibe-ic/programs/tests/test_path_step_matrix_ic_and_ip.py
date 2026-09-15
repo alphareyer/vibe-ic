@@ -1138,6 +1138,27 @@ WIRED_PRODUCERS = {
     # channels in both directions, and un-wiring either one reddens here.
     ("37.5ic", "ic_release_docs_gen"),
     ("37.5ip", "ip_release_docs_gen"),
+    # 2026-09-15 (lane icspm3) — THE THREE PATH-STEP CHECKERS JOIN THE LEDGER,
+    # and they arrive WIRED. Each is its own step's gate clause writing a
+    # `--json` document the step also declares as a `required_output`; until
+    # the step NAMED it under `programs:` nothing in the run ran it, the
+    # AUDIT's evaluation of the gate wrote the document, and the audit then
+    # refused its own output ("SELF-CERTIFIED EVIDENCE EXCLUDED
+    # (audit_created) ... PRODUCER GAP"). Measured on spm x gf180mcuD at main
+    # b47917a47; `flow_declared_producer_run` (the runner's, never the
+    # auditor's) now executes them. Channels MEASURED by
+    # `_producer_channels` above, not asserted:
+    #   ('26.5ic', 'die_finishing_check') -> ['is a gate clause of its own step']
+    #   ('37.5ic', 'tapeout_precheck')    -> ['invoked by _ic_release_artefacts,
+    #        phase3_one_shot_runner, tapeout_docs_gen', 'is a gate clause of its own step']
+    #   ('37.5ip', 'digital_hardmacro_check') -> ['invoked by _ic_release_artefacts,
+    #        digital_hardmacro_gen, ic_release_docs_gen, ip_release_docs_gen,
+    #        release_docs_check', 'is a gate clause of its own step']
+    # Registering them makes the pin STRICTER: three more channels guarded in
+    # both directions, and un-wiring any one of them reddens here.
+    ("26.5ic", "die_finishing_check"),
+    ("37.5ic", "tapeout_precheck"),
+    ("37.5ip", "digital_hardmacro_check"),
 }
 #: EMPTY, and it stays a name rather than being deleted: the assertion below
 #: reads `WIRED_PRODUCERS | UNWIRED_PRODUCERS` as the whole declared

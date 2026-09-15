@@ -101,7 +101,17 @@ def test_the_two_programs_the_step_names_exist_and_are_split():
     (KLayout.Density then Checker.KLayoutDensity), and the CHECKER is the one
     that fails the flow."""
     st = _step(_STEP)
-    assert st["programs"] == ["die_finishing_gen"]
+    # THE CLAIM IS THE SPLIT, AND `== ["die_finishing_gen"]` WAS A PROXY FOR IT.
+    # The step now also lists `die_finishing_check` under `programs:` — not
+    # because the two stopped being separate, but because the flow declares
+    # `reports/phase3/die_finishing.json` a `required_output` and that list is
+    # the third declaration `flow_declared_producer_run` reads, so without the
+    # name nothing in the RUN wrote the document and the audit refused its own
+    # output (lane icspm3, spm x gf180mcuD). What this case is about is
+    # asserted directly below: two DIFFERENT programs, on disk, with the
+    # CHECKER in the gate command.
+    assert "die_finishing_gen" in st["programs"]
+    assert "die_finishing_gen" != "die_finishing_check"
     gate = st["gate"]
     cmd = gate["program_exit_zero"] if "program_exit_zero" in gate else None
     assert cmd and cmd.startswith("die_finishing_check "), gate
