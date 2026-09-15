@@ -178,14 +178,30 @@ def test_a_hyphenated_word_is_not_a_handshake():
         "input valid, output ready; a transfer happens when both are high")
 
 
+#: The env var a lane points at its own staged corpus with. NAMED, never a
+#: personal path: shipped source must be portable (rule R1,
+#: `shipped_path_portability_check`), and a `/home/<user>/` literal in a test is
+#: exactly as unshippable as one in a program. The case below SKIPS with this
+#: name when it is unset, so a reader is told what to set rather than told
+#: nothing.
+CORPUS_ENV = "VIBEIC_SPEC_CORPUS_DIR"
+
+
 def test_the_real_corpus_is_the_case_this_was_written_for(tmp_path):
     """END TO END on the nine INPUT documents this lane may not edit: strict
     goes from a refusal on two fabricated requirements to a pass with three
-    named disclosures, and not one assertion was weakened to get there."""
-    docs = Path("/home/reyerchu/_lane_icsub2/a6_proj/input/docs")
-    if not docs.is_dir():                     # pragma: no cover - lane-local
-        import pytest
-        pytest.skip("the lane's staged input corpus is not on this host")
+    named disclosures, and not one assertion was weakened to get there.
+
+    Point `VIBEIC_SPEC_CORPUS_DIR` at a staged `input/docs` to run it; the
+    lane that authored this ran it against `subservient`'s nine documents."""
+    import os
+    import pytest
+    root = os.environ.get(CORPUS_ENV)
+    if not root:
+        pytest.skip(f"set {CORPUS_ENV} to a staged input/docs to run this case")
+    docs = Path(root)
+    if not docs.is_dir():
+        pytest.skip(f"{CORPUS_ENV}={root!r} is not a directory")
     import subprocess
     cp = subprocess.run(
         [sys.executable, str(PROG / "spec_review_lint.py"), "--strict"]
