@@ -57,9 +57,13 @@ literal, and no design name is required by any assertion below.
 """
 import ast
 import json
+import os
 import re
-import sys
+import shlex
+import shutil
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -70,6 +74,131 @@ if str(_PROGRAMS) not in sys.path:
 
 import lec_run                       # noqa: E402
 import lec_equivalence_check as gate  # noqa: E402
+
+
+#: WHERE A REAL YOSYS IS, AND WHY THIS IS NOT A SKIP.
+#:
+#: Four tests in this file drive a REAL yosys, because a recipe asserted only as
+#: a STRING cannot show that the SAT actually proves the points -- which is the
+#: whole argument of #2050 and must not be downgraded to a text comparison.
+#:
+#: MEASURED on main 800cecb34 (8HD-8, a bare PATH; the tools live in the pinned
+#: image): `test_empty_encoding_table_preserves_scalarized_register_proofs`
+#: called `subprocess.run(["yosys", ...])` with nothing resolved and died
+#: `FileNotFoundError: [Errno 2] ... 'yosys'` -- a missing INSTALL reported as a
+#: claim about the CODE.
+#:
+#: AND THE ANSWER IS NOT A SKIP. A skip on the measuring host turns a test that
+#: CANNOT RUN into a green line, which is the same lie in the other direction;
+#: the sibling `test_scalar_data_and_recoded_fsm_real_yosys` did exactly that,
+#: and it is why a real #2050 failure sat unseen on main behind a `2 skipped`.
+#: So the test RESOLVES yosys the way `lec_run` itself does and measures
+#: WHEREVER THE PROGRAM CAN RUN:
+#:
+#:   1. this filesystem, if `yosys` is on PATH -- which is the case INSIDE the
+#:      image, where the plugin's own suite and an in-image flow run live;
+#:   2. otherwise the pinned EDA container the flow dispatches into, named by
+#:      `lec_run.DEFAULT_CONTAINER` (`_eda_pin.default_container_name()`, so
+#:      `VIBEIC_EDA_CONTAINER` is honoured exactly as everywhere else).
+#:
+#: HOST FIRST is not a preference: it is what makes one test correct in both
+#: environments, and it is the order `digital_hardmacro_gen.MagicSite`,
+#: `_klayout_launch.find_runner` and `analog_pdk_deck_context.container_reader`
+#: already follow.
+#:
+#: NO SECOND RESOLVER AND NO SECOND EXEC. Every container touch below is
+#: `lec_run`'s own: `_container_available`, `_yosys_version`,
+#: `_container_file_exists`, and `_docker`, whose first argument IS the
+#: host/container switch (`container in ("", "host")` runs here, anything else
+#: is a `docker exec`). So the test launches yosys through the same call the
+#: program launches it through.
+#:
+#: AND IF NEITHER ROUTE REACHES IT, THE TEST FAILS -- naming NOT_MEASURED and
+#: both routes it tried. A test that cannot measure says so as a failure.
+class _YosysSite:
+    """The one environment yosys, the scripts and the produced files share."""
+
+    def __init__(self, where, workdir, tried):
+        self.where = where          # "host", a container name, or "" for none
+        self.dir = workdir
+        self.tried = tried
+
+    def require(self):
+        assert self.where, (
+            "NOT_MEASURED: no reachable yosys, so this test has no opinion and "
+            "will not pretend to one. Routes tried, in order:\n  "
+            + "\n  ".join(self.tried)
+            + "\nRun the suite inside the pinned EDA image, or start that "
+              "container on this host (its name comes from "
+              "`_eda_pin.default_container_name()`; `VIBEIC_EDA_CONTAINER` "
+              "overrides it).")
+
+    def run(self, script_text, name):
+        """Run `script_text` as a yosys script and return its output."""
+        self.require()
+        path = self.dir / (name + ".ys")
+        path.write_text(script_text)
+        cp = lec_run._docker(
+            self.where, "yosys -Q -T -s %s" % shlex.quote(str(path)),
+            timeout=900)
+        out = lec_run._strip_login_banner(
+            (cp.stdout or "") + (cp.stderr or ""))
+        (self.dir / (name + ".log")).write_text(out)
+        return cp.returncode, out
+
+
+def _resolve_yosys_site(tmp_path):
+    """`lec_run`'s own probes, in `lec_run`'s own order. Never raises."""
+    tried = []
+    if shutil.which("yosys"):
+        return _YosysSite("host", tmp_path, tried)
+    tried.append("this filesystem: `shutil.which('yosys')` found nothing on "
+                 "PATH")
+
+    container = lec_run.DEFAULT_CONTAINER
+    if not lec_run._container_available(container):
+        tried.append(f"container {container!r} (lec_run.DEFAULT_CONTAINER): "
+                     f"`lec_run._container_available` could not run in it")
+        return _YosysSite("", None, tried)
+    version = lec_run._yosys_version(container)
+    if not version:
+        tried.append(f"container {container!r}: reachable, but "
+                     f"`lec_run._yosys_version` got no version back")
+        return _YosysSite("", None, tried)
+
+    # The tool is reachable; the FILES have to be too. A container sees the
+    # host paths it was started with, and a pytest `tmp_path` under /tmp is
+    # usually not one of them -- so ASK, with lec_run's own probe, rather than
+    # assume a mount table. The candidates are this run's tmp_path (correct in
+    # the image, where both sides are one filesystem) and the account home,
+    # which is what the plugin's own container convention mounts.
+    for cand in (tmp_path, Path.home() / ".cache" / "vibeic-lec-fixtures"):
+        try:
+            cand.mkdir(parents=True, exist_ok=True)
+            probe = cand / f".visible-{os.getpid()}"
+            probe.write_text("probe")
+        except OSError as exc:
+            tried.append(f"{cand}: not writable here ({exc})")
+            continue
+        seen = lec_run._container_file_exists(container, str(probe))
+        probe.unlink(missing_ok=True)
+        if seen:
+            work = Path(tempfile.mkdtemp(dir=str(cand), prefix="issue2050-"))
+            return _YosysSite(container, work, tried)
+        tried.append(f"container {container!r} has yosys {version!r} but "
+                     f"cannot see {cand} -- no shared path for the fixtures")
+    return _YosysSite("", None, tried)
+
+
+@pytest.fixture
+def yosys(tmp_path):
+    """The resolved site, with any directory this fixture created removed."""
+    site = _resolve_yosys_site(tmp_path)
+    try:
+        yield site
+    finally:
+        if site.dir is not None and site.dir != tmp_path:
+            shutil.rmtree(site.dir, ignore_errors=True)
 
 
 _GOLD = ["/g/a.sv", "/g/b.sv"]
@@ -295,11 +424,13 @@ def test_the_resolver_never_guesses(tmp_path):
 
 @pytest.mark.parametrize("invert_output", [False, True])
 def test_empty_encoding_table_preserves_scalarized_register_proofs(
-        tmp_path, invert_output):
+        yosys, invert_output):
     """A synth with no FSM writes an empty encfile. A later transform can
     scalarize a bus; its named points must still be proved, and a changed
     output must remain unproven. Exercise the resolver, recipe and real SAT.
     """
+    yosys.require()
+    tmp_path = yosys.dir
     rtl = tmp_path / "delay.v"
     rtl.write_text("""module delay(input clk, input d, output o);
 reg [31:0] stages;
@@ -309,11 +440,10 @@ endmodule
 """)
     enc = tmp_path / lec_run.FSM_ENCFILE_NAME
     net = tmp_path / "netlist.v"
-    synth = tmp_path / "synth.ys"
-    synth.write_text(f"read_verilog {rtl}\nsynth -top delay -encfile {enc}\n"
-                     f"splitnets -ports\nwrite_verilog -noattr -noexpr {net}\n")
-    p = subprocess.run(["yosys", "-s", str(synth)], capture_output=True, text=True)
-    assert p.returncode == 0, p.stdout + p.stderr
+    rc, out = yosys.run(
+        f"read_verilog {rtl}\nsynth -top delay -encfile {enc}\n"
+        f"splitnets -ports\nwrite_verilog -noattr -noexpr {net}\n", "synth")
+    assert rc == 0, out
     assert enc.read_bytes() == b"", "fixture must exercise synth's empty table"
     if invert_output:
         text = net.read_text()
@@ -323,21 +453,18 @@ endmodule
         [str(rtl)], str(net), "delay", None, gate_is_generic=True,
         fsm_encfile=lec_run.fsm_encfile_beside_netlist(str(net)),
         ladder_rungs=3)
-    ys = tmp_path / "equiv.ys"
-    ys.write_text(script + "equiv_status -assert\n")
-    p = subprocess.run(["yosys", "-s", str(ys)], capture_output=True, text=True)
-    raw = p.stdout + p.stderr
+    rc, raw = yosys.run(script + "equiv_status -assert\n", "equiv")
     report = lec_run.build_report(lec_run.parse_equiv_output(raw),
                                   "delay", str(net), None)
     (tmp_path / "reports").mkdir()
     (tmp_path / "reports" / "lec.json").write_text(json.dumps(report))
     (tmp_path / "reports" / "lec.rpt").write_text(raw)
     if invert_output:
-        assert p.returncode == 1, raw
+        assert rc == 1, raw
         assert report["unproven_points"] > 0, report
         assert gate.audit(tmp_path).passed is False
     else:
-        assert p.returncode == 0, raw
+        assert rc == 0, raw
         assert report["compared_points"] >= 32, report
         assert report["unproven_points"] == 0, report
         assert gate.audit(tmp_path).passed is True
@@ -509,17 +636,14 @@ def test_empty_encoding_is_observed_not_assumed(tmp_path):
 
 
 @pytest.mark.parametrize("broken_reset", [False, True])
-def test_scalar_data_and_recoded_fsm_real_yosys(tmp_path, broken_reset):
+def test_scalar_data_and_recoded_fsm_real_yosys(yosys, broken_reset):
     """A real scalarized synthesis DUT, its full state map, and reset mutation.
 
     Candidate must recover data anchors without pairing binary FSM bits with
     one-hot bits. The reset mutant must remain unproven on the same recipe.
     """
-    import shutil
-    import subprocess
-    yosys = shutil.which("yosys")
-    if not yosys:
-        pytest.skip("real Yosys is unavailable")
+    yosys.require()
+    tmp_path = yosys.dir
     rtl = """module toy(input clk, input rst_n, input go, input [3:0] d,
                        output [3:0] q);
     reg [1:0] state;
@@ -550,13 +674,9 @@ def test_scalar_data_and_recoded_fsm_real_yosys(tmp_path, broken_reset):
                         if broken_reset else rtl)
 
     def run(script, name):
-        p = tmp_path / (name + ".ys")
-        p.write_text(script)
-        res = subprocess.run([yosys, "-Q", "-T", "-s", str(p)],
-                             capture_output=True, text=True, timeout=60)
-        (tmp_path / (name + ".log")).write_text(res.stdout + res.stderr)
-        assert res.returncode == 0, res.stdout[-1500:] + res.stderr
-        return res.stdout
+        rc, out = yosys.run(script, name)
+        assert rc == 0, out[-1500:]
+        return out
 
     run(f"read_verilog {gate_rtl}\nsynth -top toy -encfile {enc}\n"
         f"splitnets\nwrite_verilog -noexpr {gate}\n", "synth")
@@ -616,3 +736,73 @@ def test_scan_mapping_follows_only_an_identified_flop_output(tmp_path):
         "direction : output", "direction : input"))) is None
     assert lec_run.scan_fsm_mapping(**dict(args, dff_cells=[])) is None
     assert lec_run.scan_fsm_mapping(**dict(args, scan_mode={})) is None
+
+
+def test_no_test_here_can_excuse_itself_from_measuring():
+    """THE LINE, asserted over this file's OWN source as CODE.
+
+    Three properties, and each one is a way this file has already gone wrong:
+
+      (1) NO BARE TOOL LAUNCH. A test that shells out to a tool it never
+          resolved reports a missing INSTALL as a failing ASSERTION -- a claim
+          about the code that the run never made. That is how
+          `test_empty_encoding_table_preserves_scalarized_register_proofs` was
+          red on main 800cecb34.
+      (2) NO `pytest.skip`, ANYWHERE, IN ANY SPELLING. Not a disciplined one,
+          not a tool guard, not "just while the tool is missing". A skip on the
+          measuring host turns a test that CANNOT RUN into a green line, and a
+          green line is what a reader counts. This file's own history is the
+          argument: `test_scalar_data_and_recoded_fsm_real_yosys` skipped on
+          every bare-PATH host, and a REAL #2050 failure sat behind that
+          `2 skipped` for as long as nobody ran the suite in the image.
+      (3) NO SECOND RESOLVER. `lec_run.DEFAULT_CONTAINER` and `lec_run._docker`
+          are how the PROGRAM finds and launches yosys; a test that grew its own
+          copy would be free to disagree with the program about where the tool
+          is, which is the class `digital_hardmacro_gen.MagicSite` was written
+          to close.
+
+    The only correct answer when the tool cannot be reached is the one
+    `_YosysSite.require` gives: FAIL, naming NOT_MEASURED and every route tried.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    bare = sorted({n.lineno for n in ast.walk(tree)
+                   if isinstance(n, ast.Call)
+                   and isinstance(n.func, ast.Attribute)
+                   and n.func.attr in ("run", "Popen", "check_output", "call")
+                   for a in ast.walk(n)
+                   if isinstance(a, ast.Constant) and a.value == "yosys"})
+    assert not bare, (
+        f"line(s) {bare} launch a literal `yosys` without resolving it; on a "
+        f"host with a bare PATH that is a FileNotFoundError wearing an "
+        f"assertion's clothes. Go through the `yosys` fixture")
+
+    skips = sorted({n.lineno for n in ast.walk(tree)
+                    if isinstance(n, ast.Call)
+                    and ((isinstance(n.func, ast.Attribute)
+                          and n.func.attr in ("skip", "importorskip", "xfail"))
+                         or (isinstance(n.func, ast.Name)
+                             and n.func.id in ("skip", "xfail")))})
+    assert not skips, (
+        f"line(s) {skips} skip. Nothing in this file may: a skip on the "
+        f"measuring host is a test that did not run, counted as one that "
+        f"passed. If the tool is unreachable, FAIL and say so")
+    assert not [n for n in ast.walk(tree)
+                if isinstance(n, ast.Attribute) and n.attr == "skipif"], (
+        "a `skipif` marker appeared; same rule, same reason")
+
+    # (3) the resolver is lec_run's, by name, at the one site that resolves.
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_resolve_yosys_site")
+    borrowed = {a.attr for a in ast.walk(fn) if isinstance(a, ast.Attribute)}
+    for owed in ("DEFAULT_CONTAINER", "_container_available",
+                 "_yosys_version", "_container_file_exists"):
+        assert owed in borrowed, (
+            f"`_resolve_yosys_site` no longer consults `lec_run.{owed}` — the "
+            f"test would be resolving yosys somewhere the program does not")
+    launch = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                  and n.name == "run" and any(
+                      isinstance(a, ast.Attribute) and a.attr == "_docker"
+                      for a in ast.walk(n)))
+    assert launch is not None
