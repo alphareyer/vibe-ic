@@ -1653,6 +1653,34 @@ steps:
                                             # commits over this project's RTL
                                             # paths. Observability, not a
                                             # verdict. Reports, never blocks.
+    program_outputs:
+      # THE PRODUCER NAMED WITHOUT THE ARTEFACT PROMISED (lane icspm3,
+      # 2026-09-15). Dimension 7 refused step 2's list:
+      #   [W1:gate_output_read_elsewhere]
+      #   'reports/phase2/gates/slot_pad_budget.json'
+      #   (written by slot_pad_budget_check; read by
+      #    program:design_one_shot_runner)
+      #   — gate-designated output that something other than its own writer
+      #     reads
+      # `design_one_shot_runner.py:12007` reads that path and the yaml clause
+      # below writes it; BOTH sides date from 2026-08-21 (da02c143f and
+      # b0ff3babf), so the relation is old and what was missing is the
+      # DECLARATION of who produces it.
+      #
+      # `program_outputs:` IS THE CHANNEL, and `required_outputs:` IS NOT.
+      # d7's own case states both halves: an anchor must be DECLARED so W2's
+      # "declared by nobody" is answered, and must NOT be promised in
+      # `required_outputs`, which is unconditional ALL-of-N — a design that
+      # buys no operator slot legitimately never writes this file, and an
+      # entry there would report every such run MISSING. That is the same
+      # trap step 1's yaml records for `phase2/stage1/lessons.md`.
+      #
+      # `verdict_field` is READ, not assumed: the gate's own report carries a
+      # top-level `verdict` (measured on this lane's runs:
+      # {check, note, rc, reason, reason_class, verdict}).
+      - program: slot_pad_budget_check
+        path: "reports/phase2/gates/slot_pad_budget.json"
+        verdict_field: verdict
     required_outputs:
       - "reports/phase2/lint/rtl_hygiene.json"
       - "reports/phase2/lint/rom_init_lint.json"
