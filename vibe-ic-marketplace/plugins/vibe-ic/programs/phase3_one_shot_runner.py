@@ -2748,6 +2748,7 @@ def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, obj
     out: Dict[str, object] = {
         "max_transition_ns": None, "max_capacitance_pf": None, "max_fanout": None,
         "slew_source": None, "cap_source": None, "fanout_source": None, "note": "",
+        "cap_note": "", "observed_max_pin_capacitance_pf": None,
     }
     if not liberty_path:
         out["note"] = ("no PDK liberty resolved; NO DRV limit emitted "
@@ -2801,18 +2802,34 @@ def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, obj
         except ValueError:
             pass
     else:
-        # No library-level default_max_capacitance (the sky130 open PDK ships
-        # none): derive a PDK-DEFENSIBLE ceiling from the MAX characterised
-        # output-pin max_capacitance (the library's own strongest-driver rated
-        # load). Real value, disclosed as a ceiling — not a fabricated literal.
+        # R-0915-32 — no library-level default_max_capacitance, and the MAX
+        # characterised output-pin max_capacitance is NOT a substitute for one.
+        #
+        # MEASURED (opentitan_aes x sky130A, 2026-09-15). That ceiling resolved
+        # to 5.0 pF — the STRONGEST driver's rated load — and imposing it
+        # design-wide is strictly WORSE than emitting nothing: OpenSTA takes the
+        # TIGHTEST of SDC / liberty-pin / liberty-default, but `repair_design`'s
+        # target became a blanket 5.0 pF that no weak cell could ever reach. A
+        # `sky130_fd_sc_hd__o2111ai_1`, the weakest drive in the library, sat on
+        # a **399-sink** net contributing **21.46 ns** to one stage of the worst
+        # SS path, and repair_design reported a no-op because nothing had been
+        # violated. Each driver's OWN liberty `max_capacitance` is both tighter
+        # and per-cell correct, and repair_design already reads it.
+        #
+        # The value is still READ and RECORDED for disclosure — suppressing a
+        # limit must be a disclosure, never a silent deletion — it is simply
+        # not imposed as a design-wide constraint.
         caps = [float(v) for v in _LIB_PIN_MAX_CAP_RE.findall(text)]
-        # drop the default_* echoes we already handled (their values may appear
-        # via the broad pin regex on the grep'd text); harmless either way.
         if caps:
-            out["max_capacitance_pf"] = max(caps)
-            out["cap_source"] = (f"{src}:max characterised output-pin "
-                                 "max_capacitance (PDK-derived ceiling; no "
-                                 "library default_max_capacitance declared)")
+            out["observed_max_pin_capacitance_pf"] = max(caps)
+        out["cap_source"] = None
+        out["cap_note"] = (
+            f"no library default_max_capacitance in {src}; NO design-wide "
+            "set_max_capacitance emitted — each driver's own liberty "
+            "max_capacitance governs, which is tighter than the library's "
+            "strongest-driver ceiling"
+            + (f" (observed ceiling {max(caps)} pF, recorded not imposed)"
+               if caps else ""))
     if (out["max_transition_ns"] is None and out["max_capacitance_pf"] is None
             and out["max_fanout"] is None):
         out["note"] = ("PDK liberty declares neither default_max_transition, "
@@ -2826,6 +2843,8 @@ def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, obj
         if out["cap_source"]:
             parts.append(f"max_capacitance={out['max_capacitance_pf']} pF "
                          f"(from {out['cap_source']})")
+        if out.get("cap_note"):
+            parts.append(str(out["cap_note"]))
         if out["fanout_source"]:
             parts.append(f"max_fanout={out['max_fanout']} "
                          f"(from {out['fanout_source']})")
