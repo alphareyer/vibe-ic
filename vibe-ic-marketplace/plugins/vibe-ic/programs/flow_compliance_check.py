@@ -7554,6 +7554,56 @@ def _p0_declared_path(project: Path, value: Any) -> Optional[Path]:
     return path if path.is_absolute() else project / path
 
 
+
+def _p0_nonempty(value: Any) -> Any:
+    """The value when the design actually declared something, else None.
+
+    `null`, `{}`, `[]` and `""` are all the design declaring nothing; a dict
+    whose every value is None is the emitter's empty skeleton and is the same
+    statement. Anything else is returned unchanged so the caller can cite it.
+    """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        if not value or all(v is None for v in value.values()):
+            return None
+        return value
+    if isinstance(value, (list, tuple, set, str)):
+        return value or None
+    return value
+
+
+def _p0_analog_track_declared(project: Path) -> Any:
+    """Does the DESIGN declare an analog track? The cite, or None.
+
+    Two positive readings, either of which is the design saying yes: a block
+    list that declares at least one block, or a class verdict that is NOT
+    positively non-analog. `_ic_class_says_non_analog` is fail-closed — it
+    returns False unless the classifier POSITIVELY says non-analog — so a
+    project with no class verdict at all keeps its analog gates live, which is
+    the direction this must err in.
+    """
+    for rel in ("phase3/analog/analog_block_list.json",
+                "phase1/analog/analog_block_list.json"):
+        path = project / rel
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8",
+                                             errors="replace"))
+        except (OSError, ValueError):
+            return rel  # unreadable: not a declaration of absence
+        blocks = data.get("blocks") if isinstance(data, dict) else data
+        if blocks:
+            return rel
+    try:
+        import _analog_a_check_common as _aac
+        if _aac._ic_class_says_non_analog(project):
+            return None
+    except Exception:  # noqa: BLE001 — an unreadable verdict declares nothing
+        return "analog class verdict unreadable"
+    return "no positive non-analog class verdict"
+
 def _p0_contract_context(project: Path,
                          rtl_dir: Path) -> Dict[str, Any]:
     """Design-declared inputs available to exceptional gate contracts.
@@ -7564,6 +7614,13 @@ def _p0_contract_context(project: Path,
     """
     l3_path = _p0_contract_doc(project, "L3_")
     l4_path = _p0_contract_doc(project, "L4_")
+    # R-0915-19 (lane icspm3) — the declarations the nine BLOCKED gates' subjects
+    # live in. Loaded the same way every other layer here is, so an unreadable
+    # document is `state == "malformed"` and the gate still runs.
+    l6_path = _p0_contract_doc(project, "L6_")
+    l11_path = _p0_contract_doc(project, "L11_")
+    l6, l6_state = _p0_contract_json(l6_path)
+    l11, l11_state = _p0_contract_json(l11_path)
     l9_path = _p0_contract_doc(project, "L9_")
     l12_path = _p0_contract_doc(project, "L12_")
     l3, l3_state = _p0_contract_json(l3_path)
@@ -7655,6 +7712,43 @@ def _p0_contract_context(project: Path,
         "backlog_dir": backlog_dir,
         "tester_config": tester_config,
         "scope_samples": scope_samples,
+        # ── R-0915-19: the SUBJECT of a gate, as the DESIGN declares it ──────
+        # Each key is truthy exactly when the design's own input says the
+        # subject exists. A key that is falsy is the design saying "I have no
+        # such thing"; a key that cannot be read at all leaves its `*_state`
+        # "malformed" and the gate still runs, which is the fail-closed
+        # direction `_p0_contract_na_reason` already implements.
+        #
+        # MEASURED on spm x gf180mcuD: a serial-parallel multiplier with no
+        # analog track, no opcodes, no reject rules and no OTP had NINE P0
+        # sub-gates booked BLOCKED_BY_UPSTREAM — "examined nothing (reason:
+        # no_analog_dir)", "no L6.reject_rules to check", "no L3 constraints to
+        # enforce", "examined nothing (reason: no_l11)" — a class that is NOT
+        # skip-eligible, so P0 stayed INCOMPLETE. `_BLOCKED_RE` is right to
+        # claim those sentences (a producer that OWED the document and did not
+        # write it IS a cascade); what was missing is that nobody asked the
+        # design whether the subject exists at all. This roster asks, BEFORE
+        # the sentence is ever read.
+        "analog_track": _p0_analog_track_declared(project),
+        "l3_constraints": _p0_nonempty(l3.get("constraints")),
+        "l6_reject_rules": _p0_nonempty(l6.get("reject_rules")),
+        # THE OTP CONTENT, not the document wrapper. MEASURED: spm's L11 is a
+        # real document — schema_version, doc_class, ic_name — that declares
+        # NO otp content (`otp_bytes: []`, `content_hex: null`,
+        # `otp_layout: null`, and the emitter's own positive
+        # `no_otp_layout_in_input: true`). Keying on the whole document made
+        # the roster answer "the subject exists" for a design that says the
+        # opposite, which is the mistake this whole ruling is about — one
+        # level down. `otp_image_layer_consistency_check` needs an L11 ADDRESS
+        # MAP (its own rc 2 says "no L11_OTP_CONTENT.json, or it declares no
+        # address map"), so that is the subject asked for here.
+        "l11_otp": next((_p0_nonempty(l11.get(k)) for k in (
+            "otp_bytes", "content_hex", "otp_layout", "depth", "width_bits")
+            if _p0_nonempty(l11.get(k)) is not None), None),
+        "l6_state": l6_state,
+        "l11_state": l11_state,
+        "deliverable_record": (str(project / "RESULT.md")
+                               if (project / "RESULT.md").is_file() else None),
         # R-0915-15 (lane icspm3) — the MCP-EDA execution manifest, present
         # only on a run that DROVE the MCP server. `mcp-eda`'s
         # `writeManifest()` is the sole writer; nothing in this flow produces
@@ -7713,6 +7807,44 @@ _P0_GATE_REQUIRED_CONTEXT: Mapping[str, tuple[str, ...]] = MappingProxyType({
     # channel is this roster, so the question is asked here in the same terms.
     # A run that DID drive the MCP server keeps the gate live and blocking.
     "fpga_program_chain_attest_check": ("mcp_manifest",),
+    # ── R-0915-19 (lane icspm3, 2026-09-15) ─────────────────────────────────
+    # Nine P0 sub-gates were booked BLOCKED_BY_UPSTREAM on a serial-parallel
+    # multiplier because their SUBJECT is not in this design. `_BLOCKED_RE`
+    # keeps its job and its place — a producer that owed the document and did
+    # not write it IS a cascade and stays BLOCKED — and no regex is reordered.
+    # What changes is that the design is ASKED FIRST, through the roster that
+    # already exists for exactly this question, and each entry names the
+    # declaration that answers it.
+    #
+    # NEGATIVE CONTROL FOR EVERY ONE: a design that DECLARES the subject with
+    # the artefact missing keeps its gate live and stays BLOCKED_BY_UPSTREAM.
+    # The keys are truthy iff the design declared the subject, and a document
+    # that cannot be READ is not a declaration of absence.
+    #
+    # no analog track (no block list with blocks, and a positively non-analog
+    # class verdict) -> the three analog A-step gates, and the DE10-Lite
+    # analog hardware budget:
+    "analog_corner_sweep_check": ("analog_track",),
+    "analog_netlist_pdk_check": ("analog_track",),
+    "analog_pre_vs_post_layout_check": ("analog_track",),
+    "analog_hw_tb_de10lite_budget_check": ("analog_track", "qsf"),
+    # no opcodes declared in L3 -> the opcode response-template gate:
+    "l3_opcode_response_template_check": ("l3_opcodes",),
+    # no L6.reject_rules declared -> the sequence-covers-reject-rules gate:
+    "l11_sequence_covers_l6_reject_rules_check": ("l6_reject_rules",),
+    # no L3 constraints declared -> the assertion-covers-constraints gate:
+    "assertion_covers_l3_constraints_check": ("l3_constraints",),
+    # no OTP content declared in L11 -> the OTP image/layer consistency gate:
+    "otp_image_layer_consistency_check": ("l11_otp",),
+    # AND ONE THAT IS NOT A DECLARATION AT ALL — a FLOW-ORDER defect, named as
+    # that. `deliverable_verdict_consistency_check` reads `RESULT.md`, which
+    # the runner authors at the END of the run, so a P0 sub-gate asking for it
+    # mid-run asks before the producer has run. Its own message already says
+    # whose question the presence is: "no deliverable at <project>/RESULT.md —
+    # presence is run_output_completeness_check's question, not this one's".
+    # So it is N/A WHILE THE RUN IS IN FLIGHT and live the moment the
+    # deliverable exists — which is what requiring the artefact expresses.
+    "deliverable_verdict_consistency_check": ("deliverable_record",),
 })
 
 # Semantic declarations owned by a malformed document are not "absent".  The
@@ -7720,6 +7852,12 @@ _P0_GATE_REQUIRED_CONTEXT: Mapping[str, tuple[str, ...]] = MappingProxyType({
 # inert argv placeholders) so the gate can return a substantive parse/schema
 # verdict instead of the umbrella manufacturing N/A.
 _P0_CONTEXT_DOCUMENT_STATE: Mapping[str, str] = MappingProxyType({
+    # R-0915-19 — a MALFORMED document is not a declaration of absence, so the
+    # gate still runs and returns its own parse verdict. Same rule the L3/L4/L9
+    # /L12 entries below already state.
+    "l3_constraints": "l3_state",
+    "l6_reject_rules": "l6_state",
+    "l11_otp": "l11_state",
     "crc_signal": "l3_state",
     "crc_vectors": "l3_state",
     "l3_opcodes": "l3_state",
