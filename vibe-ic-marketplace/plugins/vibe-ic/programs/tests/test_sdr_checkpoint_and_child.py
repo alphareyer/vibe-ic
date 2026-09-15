@@ -808,6 +808,65 @@ def test_every_detailed_route_gets_guides_and_a_held_one_is_not_redone(tmp_path)
 
 
 @needs_tclsh
+def test_a_global_route_that_regenerated_nothing_is_not_announced_as_success(
+        tmp_path):
+    """MEASURED (subservient r10): `ROUTE_GUIDES_REESTABLISHED` at
+    `pnr_sdr_adopt_1.log:1463` and `[ERROR DRT-0047]` 28 lines later at :1491 --
+    `global_route` returned with no Tcl error and `detailed_route` still found
+    no guides.
+
+    This repo already records why: "OpenROAD's `global_route` NO-OPS on
+    already-routed nets (regenerates 0 guides)". In a DEF-restored session
+    every signal net IS already routed, so the call succeeds and produces
+    nothing. Announcing REESTABLISHED there claims work that did not happen,
+    and a reader who greps for it reads a fixed run.
+
+    So the wrapper ASKS THE DATABASE. Both arms are driven: a design that has
+    guides reports REESTABLISHED, a design that has none reports UNAVAILABLE
+    and says why.
+    """
+    import subprocess
+    common = (
+        "proc detailed_route {args} { }\n"
+        "proc global_route {args} { }\n"
+        "namespace eval ord { proc get_db_block {} { return BLK } }\n")
+    def _run(guides):
+        blk = ('proc BLK {m args} { if {$m eq "getNets"} { return {N} } }\n'
+               'proc N {m args} { if {$m eq "getGuides"} { return %s } }\n'
+               % ("{g1 g2}" if guides else "{}"))
+        s_ = tmp_path / f"g{guides}.tcl"
+        s_.write_text(common + blk + R._route_guide_discipline_tcl()
+                      + "detailed_route x\n")
+        return subprocess.run([tclsh, str(s_)], text=True, capture_output=True)
+    r_yes = _run(True)
+    assert r_yes.returncode == 0, r_yes.stderr
+    assert "ROUTE_GUIDES_REESTABLISHED" in r_yes.stdout
+    assert "ROUTE_GUIDES_UNAVAILABLE" not in r_yes.stdout
+    r_no = _run(False)
+    assert r_no.returncode == 0, r_no.stderr
+    assert "ROUTE_GUIDES_UNAVAILABLE" in r_no.stdout, r_no.stdout
+    assert "ROUTE_GUIDES_REESTABLISHED" not in r_no.stdout
+    # and it names the cause rather than just the symptom
+    assert "already carries" in r_no.stdout and "DRT-0047" in r_no.stdout
+
+
+@needs_tclsh
+def test_a_build_that_cannot_answer_is_unknown_never_present(tmp_path):
+    """-1 is not 0. A build that does not expose guides must not be reported as
+    guide-less (which would print a cause that may be false), nor as fixed."""
+    import subprocess
+    s_ = tmp_path / "unknown.tcl"
+    s_.write_text(
+        "proc detailed_route {args} { }\nproc global_route {args} { }\n"
+        + R._route_guide_discipline_tcl()
+        + "detailed_route x\n")
+    r = subprocess.run([tclsh, str(s_)], text=True, capture_output=True)
+    assert r.returncode == 0, r.stderr
+    # no ord::get_db_block at all -> -1 -> neither claim is made
+    assert "ROUTE_GUIDES_UNAVAILABLE" not in r.stdout
+
+
+@needs_tclsh
 def test_an_interpreter_with_no_router_to_wrap_says_so(tmp_path):
     """DEGRADE LOUDLY. A silent skip reads downstream exactly like a deck whose
     routing calls all had guides."""
