@@ -25108,6 +25108,22 @@ def _route_guide_discipline_tcl() -> str:
         "# === route-guide discipline: detailed_route CONSUMES the global\n"
         "# router's guides, so the NEXT one must be given its own. See\n"
         "# _route_guide_discipline_tcl (DRT-0047, MEASURED).\n"
+        # Guides live in the ODB. "Are there any?" is the only question that
+        # distinguishes a real re-establish from a no-op, and it is answered by
+        # asking the database, not by trusting a return code. Bounded: it stops
+        # at the FIRST net that has guides, so the good case is O(1) and only a
+        # genuinely guide-less design pays for the walk. -1 = the build does not
+        # expose them, which is reported as unknown and never as present.
+        "proc _vibeic_guides_present {} {\n"
+        "  if {[catch {set _gp_blk [ord::get_db_block]}]} { return -1 }\n"
+        "  if {$_gp_blk eq \"NULL\"} { return -1 }\n"
+        "  if {[catch {set _gp_nets [$_gp_blk getNets]}]} { return -1 }\n"
+        "  foreach _gp_n $_gp_nets {\n"
+        "    if {[catch {set _gp_g [$_gp_n getGuides]}]} { return -1 }\n"
+        "    if {[llength $_gp_g] > 0} { return 1 }\n"
+        "  }\n"
+        "  return 0\n"
+        "}\n"
         "if {[llength [info commands _vibeic_real_detailed_route]] == 0} {\n"
         # DEGRADE LOUDLY. An interpreter that exposes no such command has
         # nothing to wrap, and a silent skip here reads downstream exactly like
@@ -25129,6 +25145,22 @@ def _route_guide_discipline_tcl() -> str:
         "|| !$::_vibeic_route_guides} {\n"
         "      if {[catch {_vibeic_real_global_route} _rgd_e]} {\n"
         "        puts \"ROUTE_GUIDES_REESTABLISH_NONFATAL: $_rgd_e\"\n"
+        # MEASURE IT, DO NOT ANNOUNCE IT. `global_route` NO-OPS on already-routed
+        # nets and regenerates ZERO guides -- this repo's own GRT-guide-regen
+        # note records exactly that -- and it returns with no Tcl error while
+        # doing so. In a DEF-restored session every signal net IS already
+        # routed, so the call succeeds, produces nothing, and the next
+        # `detailed_route` still aborts DRT-0047. Printing REESTABLISHED there
+        # claims work that did not happen, and a reader who greps for it reads
+        # a fixed run.
+        "      } elseif {[_vibeic_guides_present] == 0} {\n"
+        "        puts \"ROUTE_GUIDES_UNAVAILABLE: global_route returned cleanly "
+        "and regenerated NO guides -- every signal net already carries "
+        "committed detailed routing, which global_route no-ops on. The "
+        "detailed route that follows will refuse (DRT-0047). A DEF checkpoint "
+        "does not carry guides, and rebuilding them needs the signal routing "
+        "cleared first -- which is the routing this session exists to "
+        "preserve.\"\n"
         "      } else { puts \"ROUTE_GUIDES_REESTABLISHED\" }\n"
         "    } else { puts \"ROUTE_GUIDES_HELD\" }\n"
         "    set ::_vibeic_route_guides 0\n"
