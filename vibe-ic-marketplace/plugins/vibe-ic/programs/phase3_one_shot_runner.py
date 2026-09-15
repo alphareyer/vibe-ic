@@ -25054,9 +25054,26 @@ def _after_restore_tcl(deck: str, spare_plan: Optional[Dict[str, Any]],
     Getting that backwards is what each half of R-0915-13 was.
     """
     common = (_spare_reassert_dont_touch_tcl(spare_plan)
-              + _pg_global_connect_reassert_tcl(deck, spare_plan))
+              # R-0915-24 (icsub2, LANDED): the spare pool's dont_touch is
+              # LIFTED across `global_connect` and re-asserted immediately
+              # after, so the spares actually get their power back. That is
+              # why this takes the spare plan.
+              + _pg_global_connect_reassert_tcl(deck, spare_plan)
+              # R-0915-25: the census runs on EVERY restore, AFTER the PG work
+              # above and BEFORE the spare relay, so its count is the whole
+              # population (sha256: 101 of 14041 -- 24 spares + 77 top-level
+              # IO) and not what is left after another fragment has already
+              # dropped some of it.
+              + _ext_wire_census_tcl())
     if reroutes_immediately:
-        return common + _spare_relay_restored_wiring_tcl(spare_plan)
+        # ONE copy of the one permitted `odb::dbWire_destroy` site, for BOTH
+        # relays below. Each fragment emitting its own would be a second
+        # destroy site in the same deck, which is what
+        # `test_all_routing_clear_sites_use_the_filtered_helper` exists to
+        # refuse.
+        return (common + _spare_safe_clear_net_proc_tcl()
+                + _ext_wire_relay_tcl()
+                + _spare_relay_restored_wiring_tcl(spare_plan))
     # NO one-shot `global_route` here any more. It bought exactly ONE routing
     # call: `detailed_route` consumes the guides, and the tail's later routes
     # -- PG reroute, named-violation reroute, antenna reconverge -- were back
@@ -25064,7 +25081,166 @@ def _after_restore_tcl(deck: str, spare_plan: Optional[Dict[str, Any]],
     # is attached to the COMMANDS in the pnr.tcl header instead, which a
     # checkpoint-seeded deck inherits by construction, so every routing call is
     # covered rather than a list of call sites that has already been wrong.
-    return common
+    #
+    # The extension-net census still runs (above); what this deck may NOT do is
+    # DROP those wires, for the same reason it keeps the spare wiring -- run7's
+    # pnr_sdr_adopt_2 restored a checkpoint and ran ZERO detailed_route, so a
+    # dropped conductor would simply never be laid again.
+    return common + _ext_wire_relay_deferred_tcl()
+
+
+def _ext_wire_census_tcl() -> str:
+    """Census the nets whose stored `dbWire` carries a POINT_EXT (extension) op.
+
+    WHY THIS EXISTS (R-0915-21, MEASURED on sha256 x sky130A, run9's own
+    checkpoint, decoded with `odb::dbWireDecoder`):
+
+        spare_tielo_spare_dff_4   [9] PATH met1
+                                 [10] POINT     (304290, 488070)
+                                 [11] POINT_EXT (304290, 488410) ext=0
+                                 [12] PATH met1
+                                 [13] POINT     (298770, 488070)
+                                 [14] POINT     (304290, 488070)
+        [ERROR DRT-1010] Unsupported non-orthogonal wire
+            begin=(298.77, 488.07) end=(304.29, 488.41), layer met1
+
+    begin is POINT[13] and end is POINT_EXT[11] -- the begin of ONE path paired
+    with the extension point of a DIFFERENT path. Each path is itself
+    orthogonal; x is constant across the extension. THERE IS NO DIAGONAL IN THE
+    DATABASE, and none in any DEF either: `write_def` renders the op faithfully
+    as `NEW met1 ( 304290 488070 ) ( * 488410 0 )`, and a whole-design scan of
+    the checkpoint, of an ODB round-trip and of the child's candidate found 0
+    diagonal segments in 111479 / 114303 segments (two independent parsers,
+    each positive-controlled on a DEF holding one known diagonal).
+
+    So DRT-1010 here is a defect in the ROUTER'S WIRE READER, not in the
+    geometry it is reading. Until that is fixed upstream the flow must not hand
+    a restored session a wire the reader mis-pairs: this censuses them, and
+    `_ext_wire_relay_tcl` drops exactly those nets for the router to lay again.
+
+    Necessary but NOT sufficient, and the census says so rather than pretending:
+    on sha256 101 of 14041 nets carry an extension op -- all 24
+    `spare_tielo_spare_dff_*` and 77 top-level IO nets -- and only 2 of them
+    tripped DRT-1010. The census is therefore deliberately WIDER than the
+    observed failures; a net that is merely re-laid loses nothing.
+
+    OPCODE SAFETY, learned twice. The Tcl layer exposes no symbolic enum for
+    `dbWireDecoder::OpCode`, so 5 (POINT_EXT) and 12 (END_DECODE) are pinned
+    EMPIRICALLY against the DEF text (findings F073). Two consequences are
+    encoded below rather than trusted:
+
+      * the loop calls ONLY `dbWireDecoder_next`. The other accessors are NOT
+        opcode-safe -- `getTechVia` on a non-via op returns a dangling pointer
+        and SEGFAULTS, which `catch` cannot trap. The census needs no
+        coordinates, so it asks for none.
+      * if any opcode falls outside 0..12 the alphabet this census depends on
+        does not hold in that build, and it ABSTAINS -- census 0, nothing
+        relayed, and it says so by name. A wrong relay is worse than none.
+
+    Every loop is bounded (F060: a SWIG decode loop that waits for a string
+    sentinel never returns).
+
+    Emitted on EVERY restore -- child, adopt tail and fatal-signal resume --
+    because all three hand a restored wire to a later router. Chip-AGNOSTIC:
+    it asks the database, and names no cell, net or design."""
+    return (
+        "# === R-0915-25: nets whose stored wire carries a POINT_EXT op.\n"
+        "# drt's wire reader pairs one path's begin with a DIFFERENT path's\n"
+        "# extension point and calls the join a non-orthogonal wire (DRT-1010).\n"
+        "# The geometry is legal; the reader is not. See _ext_wire_census_tcl.\n"
+        "# Opcodes 5=POINT_EXT 12=END_DECODE, pinned empirically (no symbolic\n"
+        "# enum in Tcl). ONLY dbWireDecoder_next is called: the other accessors\n"
+        "# are not opcode-safe and SEGFAULT, which catch cannot trap.\n"
+        "set _ext_nets {}\n"
+        "set _ext_abstain 0\n"
+        "set _ext_blk [ord::get_db_block]\n"
+        "foreach _ext_n [$_ext_blk getNets] {\n"
+        "  set _ext_w [$_ext_n getWire]\n"
+        "  if {$_ext_w eq \"NULL\"} { continue }\n"
+        "  set _ext_has 0\n"
+        "  if {[catch {\n"
+        "    set _ext_d [odb::new_dbWireDecoder]\n"
+        "    odb::dbWireDecoder_begin $_ext_d $_ext_w\n"
+        "    set _ext_last -99\n"
+        "    set _ext_same 0\n"
+        "    for {set _ext_i 0} {$_ext_i < 100000} {incr _ext_i} {\n"
+        "      set _ext_op [odb::dbWireDecoder_next $_ext_d]\n"
+        "      if {$_ext_op < 0 || $_ext_op > 12} { set _ext_abstain 1; break }\n"
+        "      if {$_ext_op == 5} { set _ext_has 1 }\n"
+        "      if {$_ext_op == $_ext_last} { incr _ext_same } else "
+        "{ set _ext_same 0; set _ext_last $_ext_op }\n"
+        "      if {$_ext_same >= 2} { break }\n"
+        "    }\n"
+        "    odb::delete_dbWireDecoder $_ext_d\n"
+        "  } _ext_e]} { puts \"EXT_WIRE_CENSUS_NONFATAL [$_ext_n getName]: $_ext_e\"; continue }\n"
+        "  if {$_ext_abstain} { break }\n"
+        "  if {$_ext_has} { lappend _ext_nets [$_ext_n getName] }\n"
+        "}\n"
+        "if {$_ext_abstain} {\n"
+        "  puts \"EXT_WIRE_CENSUS_ABSTAINED: the decoder returned an opcode "
+        "outside 0..12, so the opcode alphabet this census depends on does not "
+        "hold in this build; NOTHING was relayed\"\n"
+        "  set _ext_nets {}\n"
+        "}\n"
+        "puts \"EXT_WIRE_CENSUS: [llength $_ext_nets] net(s) carry a POINT_EXT op\"\n"
+        "foreach _ext_nm [lsort $_ext_nets] { puts \"EXT_WIRE_CENSUS_NET: $_ext_nm\" }\n"
+        "if {[llength $_ext_nets] == 0} {\n"
+        "  puts \"EXT_WIRE_CENSUS_EMPTY: no net carries an extension op; "
+        "nothing to relay\"\n"
+        "}\n")
+
+
+def _ext_wire_relay_tcl() -> str:
+    """Drop the wiring on exactly the censused extension nets, for the router.
+
+    Emitted ONLY into a deck that re-routes in the same pass. See
+    `_ext_wire_relay_deferred_tcl` for the other half and why it is not
+    symmetric.
+
+    It relays THROUGH `_vibeic_spare_safe_clear_net`, never with its own
+    `odb::dbWire_destroy` -- that helper is the one permitted site, it refuses
+    POWER and GROUND nets by their own SigType, and `_drop_protected 1` is the
+    same named exception the spare relay already uses. The INSTANCES are
+    untouched: nothing here resizes, moves or un-protects a cell.
+
+    It iterates the CENSUS LIST, not the block, so a net without an extension op
+    is never touched. An empty census emits a loop over an empty list and says
+    `EXT_WIRE_RELAID: 0`."""
+    return (
+        "# The censused nets only -- a net with no extension op is not touched.\n"
+        "set _ext_relaid 0\n"
+        "foreach _ext_nm $_ext_nets {\n"
+        "  set _ext_rn [$_ext_blk findNet $_ext_nm]\n"
+        "  if {$_ext_rn eq \"NULL\"} { continue }\n"
+        "  if {[catch {set _ext_r "
+        "[_vibeic_spare_safe_clear_net $_ext_rn 1]} _ext_we]} {\n"
+        "    puts \"EXT_WIRE_RELAY_NONFATAL $_ext_nm: $_ext_we\"\n"
+        "  } elseif {$_ext_r eq \"CLEARED\"} { incr _ext_relaid }\n"
+        "}\n"
+        "puts \"EXT_WIRE_RELAID: $_ext_relaid net(s) dropped for the router to "
+        "lay again (of [llength $_ext_nets] carrying an extension op); the "
+        "instances are untouched\"\n")
+
+
+def _ext_wire_relay_deferred_tcl() -> str:
+    """Census, but do NOT drop, in a deck that may not route afterwards.
+
+    MEASURED, and it is why this is not symmetric with `_ext_wire_relay_tcl`:
+    run7's `pnr_sdr_adopt_2` ran ZERO `detailed_route` (DRT-0167 0, DRT-0702 0)
+    while still restoring a checkpoint. Dropping a conductor there would ship a
+    net -- including a top-level IO net -- with no wire at all, which is far
+    worse than the reader defect being worked around.
+
+    So these decks get the census, by name and count, and an explicit refusal
+    naming the reason. Silence here would read as "there were none"."""
+    return (
+        "if {[llength $_ext_nets]} {\n"
+        "  puts \"EXT_WIRE_RELAY_DEFERRED: [llength $_ext_nets] net(s) carry an "
+        "extension op and were NOT dropped, because this deck does not re-route "
+        "in the same pass (MEASURED: run7 pnr_sdr_adopt_2 ran 0 detailed_route) "
+        "and dropping a wire nothing re-lays would ship a net with no "
+        "conductor\"\n"
+        "}\n")
 
 
 def _spare_relay_restored_wiring_tcl(plan: Optional[Dict[str, Any]]) -> str:
@@ -25082,11 +25258,23 @@ def _spare_relay_restored_wiring_tcl(plan: Optional[Dict[str, Any]]) -> str:
     never accepted), so the UN-REPAIRED route shipped. Same signature on AES and
     on subservient.
 
-    THE WIRE IS NOT THE ROUTER'S. In the checkpoint DEF that segment is
-    orthogonal -- `NEW met1 ( 109250 520710 ) ( * 521050 0 )`, a vertical
-    340 dbu piece -- and it comes back from `read_def` as a DIAGONAL, with the
-    x of a neighbouring met2 segment. A DEF round-trip does not guarantee
-    router-legal wire geometry; the ODB the parent held did.
+    THE WIRE IS NOT A DIAGONAL, AND THE ROUND TRIP DID NOT MAKE IT ONE. That
+    was this docstring's earlier claim and it is WITHDRAWN (R-0915-21). The
+    segment is orthogonal in the checkpoint DEF -- `NEW met1 ( 109250 520710 )
+    ( * 521050 0 )`, a vertical 340 dbu piece carrying an EXTENSION -- it is
+    orthogonal in the ODB the parent held, and it is orthogonal in every DEF on
+    either side of the restore: a whole-design scan of the checkpoint, of an ODB
+    round-trip and of the child's candidate found 0 diagonal segments in
+    111479 / 114303 segments, two independent parsers, each positive-controlled.
+    Suppressing this relay on an ODB restore reproduces DRT-1010 at the SAME
+    coordinates (MEASURED, probe/arm), so the round trip is not the mechanism.
+
+    What the router is actually reporting is its own reader pairing one path's
+    begin with a DIFFERENT path's POINT_EXT op -- see `_ext_wire_census_tcl`,
+    which now censuses and relays exactly those nets on every restore. This
+    fragment stays because the spare pool needs its wiring re-laid for a second,
+    independent reason: `dont_touch` makes the shared clear return PROTECTED, so
+    without it these 236 nets are the only ones the child never re-routes.
 
     WHY IT ONLY BITES NOW, and it is this repo's own doing: the shared routing
     clear (`_vibeic_spare_safe_clear_net`) returns PROTECTED for any net whose
@@ -25120,8 +25308,7 @@ def _spare_relay_restored_wiring_tcl(plan: Optional[Dict[str, Any]]) -> str:
     if not names:
         return ""
     return (
-        _spare_safe_clear_net_proc_tcl()
-        + "# === Design-for-ECO: the spares keep their dont_touch; their\n"
+        "# === Design-for-ECO: the spares keep their dont_touch; their\n"
         "# DEF-round-tripped ROUTING does not. See\n"
         "# _spare_relay_restored_wiring_tcl (DRT-1010, MEASURED).\n"
         "set _spare_relaid 0\n"

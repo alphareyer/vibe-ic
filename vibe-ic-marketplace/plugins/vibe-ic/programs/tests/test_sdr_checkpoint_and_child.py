@@ -643,13 +643,28 @@ def test_the_relay_never_reaches_supply_wiring(tmp_path):
 
 
 def test_a_design_with_no_spares_still_gets_its_guides(tmp_path):
-    """The relay is empty without spares; the guide discipline does not depend
-    on them, because it is attached to the router commands and not to the
-    spare plan."""
+    """The SPARE relay is empty without spares; the guide discipline does not
+    depend on them, because it is attached to the router commands and not to
+    the spare plan.
+
+    PREMISE UPDATED by R-0915-25, and tightened rather than relaxed. This used
+    to assert that a spare-less child destroys no wire at all. That is no
+    longer the design: a design with no spares can still carry EXTENSION nets
+    -- on sha256 77 of the 101 are top-level IO, nothing to do with the spare
+    pool -- and the child must be able to re-lay those. So what is pinned now
+    is the property that actually matters and was only ever implied before:
+    EXACTLY ONE destroy site, reached only from the extension census, and NO
+    spare loop when there are no spares."""
     ship = R._after_restore_tcl("", None, reroutes_immediately=False)
     child = R._after_restore_tcl("", None, reroutes_immediately=True)
     assert "SPARE_WIRING_RELAID" not in child
-    assert "odb::dbWire_destroy" not in child
+    # never a second destroy site, with or without a spare plan
+    assert child.count("odb::dbWire_destroy") == 1
+    # and it is the EXTENSION census that reaches it, not a spare loop
+    assert "EXT_WIRE_RELAID" in child
+    assert "_vibeic_spare_safe_clear_net $_spare_n 1" not in child
+    # a deck that may not re-route still destroys nothing at all
+    assert "odb::dbWire_destroy" not in ship
     assert ship == "" or "SPARE" not in ship
     # and the guides are there for it regardless, in the deck
     deck = _full_pnr_tcl(tmp_path)

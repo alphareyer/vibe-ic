@@ -323,9 +323,29 @@ def test_block_appears_before_routing_and_full_tcl_parses(tmp_path):
     full = _full_pnr_tcl(tmp_path, hm_block)
     # Positioned BEFORE detailed routing (that is what makes the constant-tie
     # never reach the router).
+    #
+    # The anchor is the deck's OWN routing-stage sentinel, not the first
+    # occurrence of the bare string "detailed_route". That proxy became
+    # unsatisfiable, and it is worth writing down why so nobody re-tightens it
+    # into the same wall: the route-guide discipline (R-0915-13(B)) has to be
+    # installed above the PNR_RESUME_ELIDE region so a checkpoint-seeded child
+    # deck inherits it -- `test_the_discipline_is_in_the_header_so_restored_
+    # decks_inherit_it` pins exactly that -- and it cannot avoid the string,
+    # because it RENAMES the command and even the renamed handle
+    # `_vibeic_real_detailed_route` contains it. MEASURED on the deck this test
+    # builds: discipline at 7, PNR_RESUME_ELIDE_BEGIN at 6693, supply-pin block
+    # at 8349 (INSIDE the elided region), so "supply block before the first
+    # literal" and "discipline above the elision" cannot both hold.
+    #
+    # `PNR_STAGE: detailed_route` is the deck declaring the routing stage
+    # itself, so this still fails if the supply-pin block is ever emitted after
+    # routing -- which is the property the docstring above claims. It is
+    # checked for presence first, because an anchor that is merely absent would
+    # make the ordering assertion vacuous rather than true.
     assert "hard-macro supply-pin auto global-connect" in full
+    assert 'puts "PNR_STAGE: detailed_route"' in full
     assert full.index("hard-macro supply-pin auto global-connect") < \
-        full.index("detailed_route")
+        full.index('puts "PNR_STAGE: detailed_route"')
     script = tmp_path / "pnr.tcl"
     full = full.replace("\nexit\n", "\nputs PNR_TCL_END\n")
     script.write_text(_STUB + full)
