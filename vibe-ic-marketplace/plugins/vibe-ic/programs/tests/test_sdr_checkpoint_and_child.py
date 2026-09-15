@@ -297,6 +297,9 @@ def test_adopt_tail_is_the_shipped_resume_transform_with_the_stage_omitted(
     txn = out / R._SDR_TXN_DIRS[SITE1]
     txn.mkdir(parents=True)
     (txn / R._SDR_CANDIDATE_DEF_NAME).write_text("CANDIDATE DEF\n")
+    # R-0915-18: the RESTORE POINT is the candidate ODB; the DEF beside it is
+    # the disclosure artefact. Both exist on the happy path.
+    (txn / R._SDR_CANDIDATE_ODB_NAME).write_bytes(b"CANDIDATE ODB\n")
     (txn / R._SDR_CANDIDATE_DRC_NAME).write_text("candidate report\n")
 
     calls = []
@@ -317,7 +320,11 @@ def test_adopt_tail_is_the_shipped_resume_transform_with_the_stage_omitted(
     assert rec["omitted_stages"] == [SITE1]
     assert len(calls) == 1
     tail = (out / "pnr_sdr_adopt_1.tcl").read_text()
-    assert f"read_def {txn / R._SDR_CANDIDATE_DEF_NAME}" in tail
+    # R-0915-18: restored from the ODB, not the DEF — the tail routes again
+    # and only the ODB carries the guides and dont_touch across the process
+    # boundary. The DEF must NOT be the restore point any more.
+    assert f"read_db {txn / R._SDR_CANDIDATE_ODB_NAME}" in tail
+    assert f"read_def {txn / R._SDR_CANDIDATE_DEF_NAME}" not in tail
     assert f"PNR_STAGE_OMITTED: {SITE1}" in tail
     # the tail DOES ship: it is the post-route tail, not another candidate run
     assert "routed.def" in tail
@@ -338,6 +345,8 @@ def test_adopt_is_bounded_by_the_number_of_sdr_sites(tmp_path, monkeypatch):
         txn = out / R._SDR_TXN_DIRS[stage]
         txn.mkdir(parents=True)
         (txn / R._SDR_CANDIDATE_DEF_NAME).write_text(f"CANDIDATE {stage}\n")
+        (txn / R._SDR_CANDIDATE_ODB_NAME).write_bytes(
+            f"CANDIDATE ODB {stage}\n".encode())
 
     seq = [SITE2, SITE1]
 
@@ -413,6 +422,7 @@ def test_the_adopt_tail_asks_the_router_for_its_own_report(tmp_path,
     txn = out / R._SDR_TXN_DIRS[SITE1]
     txn.mkdir(parents=True)
     (txn / R._SDR_CANDIDATE_DEF_NAME).write_text("CANDIDATE\n")
+    (txn / R._SDR_CANDIDATE_ODB_NAME).write_bytes(b"CANDIDATE ODB\n")
     monkeypatch.setattr(R, "_docker_exec",
                         lambda container, cmd, **kw: (0, "", ""))
     log = (f"{R._SDR_ADOPT_MARKER} stage={SITE1} "

@@ -24804,6 +24804,27 @@ _SDR_CHILD_RECEIPT_NAME = "child_receipt.tsv"
 #: MEASURED on the real checkpoint, R-0915-16.
 _SDR_CHECKPOINT_ODB_NAME = "pre_repair.odb"
 _SDR_CANDIDATE_DEF_NAME = "candidate.def"
+#: THE RETURN LEG'S RESTORE POINT, R-0915-18. The leg INTO the child became the
+#: ODB in R-0915-16; the leg back OUT of it stayed a DEF, and MEASURED on
+#: subservient x gf180mcuD (lane icsub2, run r12 on 205c52b1a) that is where
+#: every remaining DRT-0047 lived: the child restored with `read_db` reported
+#: `DRT-0157 Number of guides: 20986` over 2378 nets, `ROUTE_GUIDES_HELD` and
+#: DRT-0047 = 0, while the adopt session restored from `candidate.def` reported
+#: `ROUTE_GUIDES_UNAVAILABLE` and DRT-0047 = 3 (and the parent tail 3 more).
+#: The candidate is a ROUTED design being handed back for a sign-off tail that
+#: routes again, so it needs the same three things a DEF cannot carry.
+#:
+#: TWO INDEPENDENT FAILURES, ONE SEAM. The guides above are the subservient
+#: measurement. On sha256 (lane icsha2) the adopt session's guides are fine --
+#: the re-establish fires and DRT-0047 is 0 -- and the DEF return leg fails the
+#: OTHER way: a DEF's wire text does not always re-parse into router-legal
+#: geometry, so the reproduced diagonal `spare_tielo_*` wires come back and the
+#: PG reroute hits DRT-1010 in `pnr_sdr_adopt_2`. The relay of #2263 cannot
+#: help there, because the adopt tail SHIPS and must not drop wiring. An ODB is
+#: the tool's own representation and is never re-parsed, so one carrier answers
+#: both. Both must therefore be measured on this leg: DRT-0047 = 0 AND
+#: DRT-1010 = 0 in every adopt session.
+_SDR_CANDIDATE_ODB_NAME = "candidate.odb"
 _SDR_CANDIDATE_DRC_NAME = "candidate_router.drc.rpt"
 #: The two SDR sites, and the transaction directory each owns. They used to
 #: share one directory, and `begin` starts by `file delete -force`-ing it — so
@@ -25288,6 +25309,7 @@ def _postroute_sdr_transaction_begin_tcl(
         # with the candidate's numbers on its way to being refused.
         f"  set _sdr_tx_cand_report {{{txn_c}/{_SDR_CANDIDATE_DRC_NAME}}}\n"
         f"  set _sdr_tx_cand_def {{{txn_c}/{_SDR_CANDIDATE_DEF_NAME}}}\n"
+        f"  set _sdr_tx_cand_odb {{{txn_c}/{_SDR_CANDIDATE_ODB_NAME}}}\n"
         f"  set _sdr_tx_child_receipt {{{txn_c}/{_SDR_CHILD_RECEIPT_NAME}}}\n"
         f"  set _sdr_tx_ckpt_odb {{{txn_c}/{_SDR_CHECKPOINT_ODB_NAME}}}\n"
         + _sdr_router_drc_count_proc_tcl()
@@ -25911,6 +25933,20 @@ def _v1_8_100_signoff_drv_repair_tcl(
         f"  if {{[catch {{write_def {txn_c}/{_SDR_CANDIDATE_DEF_NAME}}} "
         "_sdr_cdef]} { puts \"SDR_CHILD_DEF_NONFATAL: $_sdr_cdef\"; "
         "set _sdr_tx_route_ok 0 }\n"
+        # R-0915-18: THE CANDIDATE'S RESTORE POINT IS THE ODB. The DEF above
+        # stays and is still written first -- it is the human-readable
+        # disclosure artefact the rejection path copies to `rejected.def` and
+        # the one a reader diffs. What the parent RESTORES from is this db,
+        # because the adopt session routes again and a DEF hands it neither the
+        # global router's guides nor `dont_touch` (MEASURED, see
+        # _SDR_CANDIDATE_ODB_NAME). A failure here is DISCLOSED and does NOT
+        # clear route_ok: the candidate was still routed and measured, and the
+        # ONE place that decides what happens to a candidate with no restore
+        # point is the parent's refusal, which names the absent file.
+        f"  if {{[catch {{write_db {txn_c}/{_SDR_CANDIDATE_ODB_NAME}}} "
+        f"_sdr_codb]}} {{ puts \"SDR_CHILD_CANDIDATE_ODB_NONFATAL: "
+        f"$_sdr_codb\" }} else {{ puts \"SDR_CHILD_CANDIDATE_ODB_WRITTEN: "
+        f"{txn_c}/{_SDR_CANDIDATE_ODB_NAME}\" }}\n"
         "  if {[catch {\n"
         f"    set _sdr_fh [open {txn_c}/{_SDR_CHILD_RECEIPT_NAME} w]\n"
         "    puts $_sdr_fh \"mutated\\terror\\troute_ok\\tplacement_violations\"\n"
@@ -28155,10 +28191,38 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
                 f"the sign-off from")
             rec["rc"] = 1
             break
+        # R-0915-18: THE RESTORE POINT IS THE CANDIDATE ODB, AND A DEF-ONLY
+        # CANDIDATE IS REFUSED BY NAME. This session is a FRESH process that
+        # ROUTES AGAIN (antenna repair, the second SDR site, the named-
+        # violation reroute all live in the tail), so it needs the global
+        # router's guides and `dont_touch` back, and a DEF carries neither.
+        # Degrading silently to the DEF is what produced the measurement in
+        # `_SDR_CANDIDATE_ODB_NAME`: the tail ran, `global_route` no-opped on
+        # the already-routed nets, and every `detailed_route` after it refused
+        # with DRT-0047 — swallowed as PG_REROUTE_NONFATAL, so the run
+        # continued and SHIPPED a tail whose reroutes had all been skipped.
+        # A named refusal costs the adopt and keeps the session's own clean
+        # route; a silent degrade costs the sign-off and says nothing.
+        cand_odb = txn / _SDR_CANDIDATE_ODB_NAME
+        if not cand_odb.is_file():
+            rec["status"] = "FAILED"
+            rec["reason"] = (
+                f"the session ACCEPTED a candidate for {stage} and stopped, "
+                f"and {cand} exists, but its restore point "
+                f"{cand_odb} does not. The adopt tail routes again and an "
+                f"ODB is what carries the global router's guides and "
+                f"dont_touch across a process boundary (R-0915-18); "
+                f"restoring from the DEF instead would run the tail with no "
+                f"guides and every detailed_route in it would refuse "
+                f"(DRT-0047). REFUSED by name rather than degraded")
+            rec["rc"] = 1
+            break
+        cand_odb_c = _to_container_path(str(cand_odb), container)
         omitted.append(stage)
         try:
             tail_text = _build_pnr_resume_tcl_text(
                 deck, checkpoint_def_c=cand_c, omit_stages=list(omitted),
+                restore_odb_c=cand_odb_c,
                 after_restore_tcl=_after_restore_tcl(
                     deck, spare_plan,
                     reroutes_immediately=False))
