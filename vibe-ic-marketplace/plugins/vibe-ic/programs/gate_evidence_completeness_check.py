@@ -76,6 +76,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 import argparse
 import json
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -119,7 +120,49 @@ def find_report(project: Path) -> Optional[Path]:
     return None
 
 
-_JSON_FLAG_RE = re.compile(r"--json[=\s]+(\S+)")
+def _declared_json_argument(cmd: str) -> Optional[str]:
+    """The `--json <path>` a ledger row's command DECLARES, as a COMMAND.
+
+    READ AS ARGV, NOT AS TEXT, and that is the whole of this function. The
+    predecessor was `re.compile(r"--json[=\\s]+(\\S+)").search(cmd)` — an
+    UNANCHORED grep over a string, which is two defects at once:
+
+      * it is wrong. `--json` is a FLAG, so it is a whole token or it is
+        nothing, and a substring search cannot tell the flag from the same
+        eight characters inside a quoted argument. `runner --report "use
+        --json out.json"` declares no artefact and the grep reports `out.json`;
+        a declaration that was never made then has to be ON DISK or this gate
+        fails a PASS gate that did nothing wrong.
+      * it read a command with the instrument for reading a sentence, which is
+        what `prose_polarity_consulted_check --ratchet` flags: any `re.search`
+        whose matched group is written into a record is a polarity-blind prose
+        extractor until shown otherwise. It was right to flag it. The answer is
+        not to consult a denial vocabulary that argv cannot spell, nor to file
+        an exemption saying the question does not arise — it is to stop reading
+        argv as prose.
+
+    `cmd` IS an argv string, not a description of one: `flow_compliance_check.
+    _resolve_program_cmd` does `shlex.split(cmd_str)` and RUNS the result, and
+    the same `cmd_str` is what `_record_gate_execution` files in the row. So
+    splitting it the way its executor splits it is reading the field in its own
+    grammar. An unbalanced quote makes `shlex` refuse; such a string was never
+    a runnable command either, so it falls back to whitespace tokens — still
+    tokens, never a substring.
+
+    Both spellings the flow uses are honoured: `--json <path>` and
+    `--json=<path>`. `--jsonl x` is a different flag and is NOT one of them.
+    """
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:          # unbalanced quote — never a runnable command
+        toks = cmd.split()
+    for i, tok in enumerate(toks):
+        if tok == "--json":
+            nxt = toks[i + 1] if i + 1 < len(toks) else None
+            return nxt if nxt and not nxt.startswith("-") else None
+        if tok.startswith("--json="):
+            return tok[len("--json="):] or None
+    return None
 
 
 def declared_json_outputs(path: Path) -> Dict[str, Optional[str]]:
@@ -155,8 +198,8 @@ def declared_json_outputs(path: Path) -> Dict[str, Optional[str]]:
         name = row.get("gate")
         if not isinstance(name, str) or not name.strip():
             continue
-        m = _JSON_FLAG_RE.search(str(row.get("cmd") or ""))
-        out[name.strip()] = m.group(1) if m else None
+        out[name.strip()] = _declared_json_argument(
+            str(row.get("cmd") or ""))
     return out
 
 

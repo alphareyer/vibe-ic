@@ -21442,6 +21442,44 @@ def step_final_audit(project: Path, phase: int = 3,
                       extras={"structural_measurement": meas})
 
 
+def stamp_verdict_mode(report_path: Path, blocking: bool) -> Optional[str]:
+    """Write the repo's own BLOCKS/ADVISES key into a gate's own JSON.
+
+    R-0915-51 part 2. A step can wire a gate ADVISORY — `"blocking": False` in
+    its ledger row — but that fact lived ONLY in the ledger, while
+    `step_internal_fail_bubble_up_check` reads `"verdict_mode": "ADVISES"` out
+    of the GATE's report (its own docstring: "verdict_mode: ADVISES IS AN
+    ANSWER, NOT A SILENCE"). So the two halves of one decision were written in
+    two places and only one of them was readable by the consumer that needed
+    it: the bubble-up gate saw an unacknowledged FAIL and flagged it.
+
+    MEASURED on the SPM verdict run: that flag failed step 36 and voided steps
+    37, 37.4, 37.5ip and 38 — the ONLY cause of the run's overall FAIL.
+
+    THIS IS CONSISTENCY, NOT A LEVER. It writes ADVISES only where the step
+    already declared the gate advisory, and writes NOTHING for a blocking
+    gate — no gate changes tier, and a blocking gate's report can never
+    acquire the key by this path.
+    """
+    if blocking:
+        return None
+    try:
+        payload = json.loads(Path(report_path).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    payload["verdict_mode"] = "ADVISES"
+    payload["verdict_mode_source"] = (
+        "the step that invoked this gate wired it advisory "
+        "(ledger row blocking=false)")
+    try:
+        _aa.write_json(Path(report_path), payload)
+    except OSError:
+        return None
+    return "ADVISES"
+
+
 def step_agent_report_presence(project: Path) -> StepResult:
     """RUN `agent_report_presence_check` over the finished run and put its
     verdict in the ledger. vibe-ic#2080 (one of the ten made visible by
@@ -21539,6 +21577,11 @@ def step_agent_report_presence(project: Path) -> StepResult:
         rep = {}
     row["diagnostics"] = rep.get("diagnostics") or []
     row["required_sections"] = rep.get("required_sections")
+    row["report_path"] = rep.get("report_path")
+    # R-0915-51 part 2 — say in the GATE's own report what this row already
+    # says: that this step wired it advisory. Without it the bubble-up gate
+    # cannot see the answer and flags an unacknowledged FAIL.
+    row["verdict_mode"] = stamp_verdict_mode(out, row["blocking"])
     if rc == 2:
         row["verdict"] = "NOT_MEASURED"
         row["reason"] = (buf_err.getvalue().strip().splitlines() or ["rc 2"])[0]

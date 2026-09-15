@@ -135,6 +135,54 @@ VERDICT_SYM = {
     NO_VERDICT: "?",
 }
 
+# ── R-0915-51: what this generator GUARANTEES a report card contains ───────
+#
+# `reports/final_summary.md` IS the flow's report card — `final_report_generate`
+# is wired into all five runners and nothing in the shipped flow writes
+# `AGENT_REPORT.md`. `agent_report_presence_check` was pointed at the latter
+# and never re-pointed when the card moved in v1.6.32, so on every real run it
+# reported "AGENT_REPORT.md does not exist at project root", and on SPM that
+# single row was the ONLY cause of the run's FAIL: it failed step 36 through
+# `step_internal_fail_bubble_up_check` and voided steps 37, 37.4, 37.5ip and 38.
+#
+# The consumer must not hand-type the section list — a copy in the consumer is
+# a second source of truth that drifts the first time a heading is renamed. So
+# the guarantee lives HERE, beside the emitter, the emission sites BUILD their
+# headings from it, and `test_the_generator_emits_every_section_it_guarantees`
+# holds a generated card to it. Each entry is
+# (canonical name, heading text as emitted, synonyms the checker accepts).
+#
+# The sections listed are the card's SPINE, emitted unconditionally on every
+# route. The conditional ones — the per-output blocks, the analog block, the
+# chip-specific addendum — are deliberately NOT guaranteed: a design without
+# an analog track must not be told its report card is incomplete.
+MANDATORY_SECTIONS: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
+    ("Verdict", "Verdict", ("verdict",)),
+    ("Waivers", "Waivers (must be human-reviewed before tapeout)",
+     ("waivers",)),
+    # NOT the bare "attestation": that also matches the "Self-attestation"
+    # heading below, so a card carrying only Self-attestation was credited
+    # with BOTH sections. Caught by the per-section drop control in
+    # test_r0915_51_*, which removes each guaranteed heading in turn.
+    ("SHA-256 Attestation", "SHA-256 Attestation",
+     ("sha-256 attestation", "sha256 attestation")),
+    ("Self-attestation", "Self-attestation",
+     ("self-attestation", "self attestation")),
+)
+
+
+def section_heading(canonical: str) -> str:
+    """The `## ` heading line this generator emits for one guaranteed section.
+
+    Emission sites call THIS rather than spelling the text, so the guarantee
+    above and the bytes on disk cannot drift apart.
+    """
+    for name, heading, _syn in MANDATORY_SECTIONS:
+        if name == canonical:
+            return f"## {heading}"
+    raise KeyError(f"{canonical!r} is not a guaranteed section")
+
+
 # Canonical roll-up print order. Any bucket the audit produces that is
 # NOT listed here is still printed (appended, sorted) — the roll-up must
 # never silently drop a bucket, or its rows stop summing to its own Total.
@@ -330,7 +378,7 @@ def _render_attestation_section(project: Path) -> List[str]:
     `_prewrite_attestation` / #461 symptom (1)) and re-used verbatim in
     the full report."""
     md: List[str] = []
-    md.append("## SHA-256 Attestation")
+    md.append(section_heading("SHA-256 Attestation"))
     md.append("")
     md.append("Independent reviewers can verify any artefact by re-")
     md.append("computing `sha256sum <path>` and comparing against the")
@@ -1999,7 +2047,7 @@ def _render(project: Path, run_audit: bool = True,
     md.append(f"- **IC**: `{ic_name}`")
     md.append(f"- **Project root**: `{project}`")
     md.append(f"")
-    md.append(f"## Verdict")
+    md.append(section_heading("Verdict"))
     md.append(f"")
     md.append(f"**`Overall: {overall}`**")
     md.append(f"")
@@ -2460,7 +2508,7 @@ def _render(project: Path, run_audit: bool = True,
         md.append("")
 
     # Waivers — full text (no truncation)
-    md.append("## Waivers (must be human-reviewed before tapeout)")
+    md.append(section_heading("Waivers"))
     md.append("")
     if waivers:
         for w in waivers[:20]:
@@ -2583,7 +2631,7 @@ def _render(project: Path, run_audit: bool = True,
     md.extend(_render_attestation_section(project))
 
     # Self-attestation
-    md.append("## Self-attestation")
+    md.append(section_heading("Self-attestation"))
     md.append("")
     md.append("```bash")
     md.append(f"python3 {COMPLIANCE_TOOL} \\")

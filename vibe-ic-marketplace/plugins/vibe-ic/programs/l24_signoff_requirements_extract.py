@@ -54,10 +54,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 __all__ = ["SIGNOFF_CHECKS", "extract_signoff_requirements",
-           "report_tokens_for"]
+           "report_tokens_for", "signoff_record_paths_for", "find_flow_def"]
 
 #: check -> (the word-bounded spellings that NAME it in an input document,
 #:           the tokens that name its REPORT in a run tree).
@@ -80,6 +80,20 @@ SIGNOFF_CHECKS: Tuple[Tuple[str, Tuple[str, ...], Tuple[str, ...]], ...] = (
                           "tapeout pre-check", "tapeout checklist",
                           "tape-out checklist"),
      ("tapeout_precheck", "tapeout_checklist")),
+    # R-0915-52. SI is its OWN check, judged BY NAME and only when the input
+    # states one. Before this row the flow's SI reports had no requirement of
+    # their own to answer, so `si_mcf_sta.json` — whose stem ends in the token
+    # `sta` — was read as a reading of the STA requirement instead. An SI
+    # envelope is not a timing sign-off, and a design that never asks for one
+    # must not be failed by it.
+    #
+    # The spellings are deliberately the NAMES and not the bare initialism:
+    # a word-bounded, case-insensitive `SI` matches the English word "si" in
+    # nothing, but it does match a stray `si` token in a table, a filename or
+    # a unit, and a check that fires on that is inventing a requirement.
+    ("SI", ("signal integrity", "signal-integrity", "crosstalk",
+            "cross-talk"),
+     ("si", "si_crosstalk", "si_mcf_sta", "crosstalk")),
 )
 
 
@@ -89,6 +103,161 @@ def report_tokens_for(check: str) -> Tuple[str, ...]:
         if name == check:
             return tokens
     return ()
+
+
+# ── R-0915-52: the flow's DECLARED sign-off record for a check ─────────────
+#
+# WHY THIS EXISTS. `l24_signoff_evidence_backed_check` judged a stated
+# requirement by scanning every `reports/**/*.json` whose stem or
+# `program`/`gate`/`subject`/`check` field carried one of the tokens above,
+# and took EACH one's verdict. MEASURED on the r19 subservient run
+# (gf180mcuD, 2026-09-15): the input states "STA ... setup + hold >= 0", the
+# run's post-route sign-off STA PASSED, and the gate still reported
+#
+#   the input REQUIRES STA ... and this run measured it as 'fail' in
+#   reports/phase3/si_mcf_sta.json, 'fail' in reports/phase3/sta/pre_pnr_summary.json
+#
+# Neither of those is a sign-off reading of STA. `pre_pnr_summary.json` is
+# step 10's PRE-LAYOUT ESTIMATE, which R-0915-28 already rules is superseded
+# by a passing post-route sign-off; `si_mcf_sta.json` is step 27's SIGNAL
+# INTEGRITY envelope, which answers a different question and now has its own
+# check row above. The token was standing in for the record.
+#
+# WHAT REPLACES IT, AND WHY IT IS DERIVED. A requirement is judged by the
+# record the FLOW declares as that check's sign-off: the step whose own name
+# says it is the sign-off step, and the `reports/**/*.json` it declares in
+# `required_outputs`. Both halves come from
+# `flow/phase1_phase2_phase3.yaml` — the flow is the single source of truth
+# for which step publishes what, and a hand list here would drift away from it
+# the first time a step's outputs changed.
+#
+# MEASURED on the flow at 800cecb34: six steps name themselves sign-off
+# (23, 28, 36, 37.4, 39, M4), and after intersecting their declared reports
+# with each check's tokens exactly ONE check resolves to a declared record —
+# STA, to step 23's four `reports/phase3/sta/*.json`. Every other check
+# (DRC, LVS, antenna, IR_drop, EM, tapeout_precheck, SI) derives none and
+# keeps the token scan it has today. The change is therefore scoped to the
+# defect by construction, not by a special case.
+FLOW_DEF_FILENAME = "phase1_phase2_phase3.yaml"
+
+#: A step whose NAME declares it the sign-off step for its own subject.
+_SIGNOFF_STEP_NAME_RE = re.compile(r"sign[-\s]?off", re.I)
+#: `required_outputs` states alternates as "<a> OR <b>".
+_OUTPUT_ALT_RE = re.compile(r"\s+OR\s+")
+#: Cache keyed on (resolved path, mtime, size) so a test that rewrites a
+#: fixture flow sees the rewrite.
+_RECORD_CACHE: Dict[Any, Dict[str, Tuple[str, ...]]] = {}
+
+
+def find_flow_def() -> Path:
+    """Locate `flow/phase1_phase2_phase3.yaml` for the installed plugin.
+
+    Mirrors the unified-layout half of `flow_compliance_check._find_flow_def`,
+    restated for the same reason `waivers_schema_check.find_flow_def` restates
+    it: that module `sys.exit(2)`s at import time when PyYAML is missing, and
+    this one must keep answering when it is.
+    """
+    here = Path(__file__).resolve()
+    for ancestor in (here.parent.parent,
+                     here.parent.parent.parent,
+                     here.parent.parent.parent.parent):
+        cand = ancestor / "flow" / FLOW_DEF_FILENAME
+        if cand.is_file():
+            return cand
+    return here.parent.parent / "flow" / FLOW_DEF_FILENAME
+
+
+def _path_names_token(rel: str, tokens: Sequence[str]) -> bool:
+    """Does this project-relative report path NAME one of these tokens?
+
+    Word-bounded against the whole path with `/`, `_`, `-` and `.` acting as
+    boundaries, so `reports/phase3/sta/post_route_summary.json` names `sta`
+    (the directory does) while `reports/phase3/status_board.json` does not.
+    """
+    low = rel.lower()
+    for tok in tokens:
+        if re.search(r"(?<![a-z0-9])" + re.escape(tok.lower())
+                     + r"(?![a-z0-9])", low):
+            return True
+    return False
+
+
+def _declared_records(flow_def: Path) -> Dict[str, Tuple[str, ...]]:
+    """check -> the project-relative sign-off records the FLOW declares.
+
+    Fail-SOFT and empty: no PyYAML, an unreadable or unparseable flow, or a
+    flow with no sign-off step all give `{}`, and the caller keeps the token
+    scan it already had. A derivation that raised would take down a gate that
+    merely wanted to ask a question.
+    """
+    try:
+        import yaml  # noqa: PLC0415 — optional, and absent is not fatal here
+    except ImportError:
+        return {}
+    try:
+        stat = flow_def.stat()
+        key = (str(flow_def), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return {}
+    cached = _RECORD_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        data = yaml.safe_load(flow_def.read_text(encoding="utf-8",
+                                                 errors="replace"))
+    except (OSError, ValueError, yaml.YAMLError):
+        return {}
+    steps = data.get("steps") if isinstance(data, dict) else None
+    if not isinstance(steps, list):
+        return {}
+
+    declared: List[str] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        if not _SIGNOFF_STEP_NAME_RE.search(str(step.get("name") or "")):
+            continue
+        for entry in step.get("required_outputs") or []:
+            for alt in _OUTPUT_ALT_RE.split(str(entry)):
+                alt = alt.strip()
+                # A sign-off READING is a machine-readable verdict, so only
+                # the JSON half of a declared pair counts; an `.rpt` is the
+                # tool's transcript and carries no verdict field to read.
+                if not alt.startswith("reports/") or not alt.endswith(".json"):
+                    continue
+                # The same exclusion `_reports_for_check` already applies:
+                # `reports/audit/` is the completion audit's OWN bookkeeping,
+                # and a requirement backed by the audit that is judging it
+                # would be circular. Excluding it here means the checks whose
+                # only sign-off-named publisher writes there (tapeout_precheck,
+                # via step 36's reports/audit/tapeout_checklist.json) derive no
+                # declared record and keep the scan they have today — which is
+                # the behaviour-preserving direction.
+                if alt.startswith("reports/audit/"):
+                    continue
+                declared.append(alt)
+
+    out: Dict[str, Tuple[str, ...]] = {}
+    for check, _spellings, tokens in SIGNOFF_CHECKS:
+        hits = tuple(dict.fromkeys(
+            p for p in declared if _path_names_token(p, tokens)))
+        if hits:
+            out[check] = hits
+    _RECORD_CACHE[key] = out
+    return out
+
+
+def signoff_record_paths_for(check: str,
+                             flow_def: Optional[Path] = None
+                             ) -> Tuple[str, ...]:
+    """The project-relative reports the FLOW declares as `check`'s sign-off.
+
+    Empty when the flow declares none — which is the honest answer for every
+    check whose sign-off is not published by a step that names itself sign-off
+    — and the caller then judges the check the way it did before.
+    """
+    path = Path(flow_def) if flow_def is not None else find_flow_def()
+    return _declared_records(path).get(check, ())
 
 #: The requirement a line STATES, as the input's own word. Ordered: the first
 #: match wins, so the specific numeric forms are tried before the bare words.

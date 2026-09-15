@@ -8525,6 +8525,15 @@ def _p0_contract_argv(gate_name: str,
 _P0_GATE_DECLARES_REASON_CLASS: frozenset = frozenset({
     "waiver_staleness_check",
     "analog_flow_compliance_check",
+    # R-0915-52 (lane icsub4). The completion audit's `classify_sub_gate`
+    # says a FAIL record "carries a FAIL verdict and no field that separates
+    # a measurement from a failure to read its input". This gate now writes
+    # that field: `reason_class` is null on a verdict it MEASURED (PASS or
+    # FAIL alike) and names the class on each of the three shapes where it
+    # measured nothing — the project it could not open (EXECUTION_ERROR), the
+    # layer phase 1 never emitted (ASKED_BEFORE_PRODUCER), and the inert /
+    # N/A layer (DESIGN_DECLARED_NA).
+    "l24_signoff_evidence_backed_check",
 })
 
 

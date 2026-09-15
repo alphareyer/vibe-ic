@@ -57,9 +57,13 @@ literal, and no design name is required by any assertion below.
 """
 import ast
 import json
+import os
 import re
-import sys
+import shlex
+import shutil
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -70,6 +74,131 @@ if str(_PROGRAMS) not in sys.path:
 
 import lec_run                       # noqa: E402
 import lec_equivalence_check as gate  # noqa: E402
+
+
+#: WHERE A REAL YOSYS IS, AND WHY THIS IS NOT A SKIP.
+#:
+#: Four tests in this file drive a REAL yosys, because a recipe asserted only as
+#: a STRING cannot show that the SAT actually proves the points -- which is the
+#: whole argument of #2050 and must not be downgraded to a text comparison.
+#:
+#: MEASURED on main 800cecb34 (8HD-8, a bare PATH; the tools live in the pinned
+#: image): `test_empty_encoding_table_preserves_scalarized_register_proofs`
+#: called `subprocess.run(["yosys", ...])` with nothing resolved and died
+#: `FileNotFoundError: [Errno 2] ... 'yosys'` -- a missing INSTALL reported as a
+#: claim about the CODE.
+#:
+#: AND THE ANSWER IS NOT A SKIP. A skip on the measuring host turns a test that
+#: CANNOT RUN into a green line, which is the same lie in the other direction;
+#: the sibling `test_scalar_data_and_recoded_fsm_real_yosys` did exactly that,
+#: and it is why a real #2050 failure sat unseen on main behind a `2 skipped`.
+#: So the test RESOLVES yosys the way `lec_run` itself does and measures
+#: WHEREVER THE PROGRAM CAN RUN:
+#:
+#:   1. this filesystem, if `yosys` is on PATH -- which is the case INSIDE the
+#:      image, where the plugin's own suite and an in-image flow run live;
+#:   2. otherwise the pinned EDA container the flow dispatches into, named by
+#:      `lec_run.DEFAULT_CONTAINER` (`_eda_pin.default_container_name()`, so
+#:      `VIBEIC_EDA_CONTAINER` is honoured exactly as everywhere else).
+#:
+#: HOST FIRST is not a preference: it is what makes one test correct in both
+#: environments, and it is the order `digital_hardmacro_gen.MagicSite`,
+#: `_klayout_launch.find_runner` and `analog_pdk_deck_context.container_reader`
+#: already follow.
+#:
+#: NO SECOND RESOLVER AND NO SECOND EXEC. Every container touch below is
+#: `lec_run`'s own: `_container_available`, `_yosys_version`,
+#: `_container_file_exists`, and `_docker`, whose first argument IS the
+#: host/container switch (`container in ("", "host")` runs here, anything else
+#: is a `docker exec`). So the test launches yosys through the same call the
+#: program launches it through.
+#:
+#: AND IF NEITHER ROUTE REACHES IT, THE TEST FAILS -- naming NOT_MEASURED and
+#: both routes it tried. A test that cannot measure says so as a failure.
+class _YosysSite:
+    """The one environment yosys, the scripts and the produced files share."""
+
+    def __init__(self, where, workdir, tried):
+        self.where = where          # "host", a container name, or "" for none
+        self.dir = workdir
+        self.tried = tried
+
+    def require(self):
+        assert self.where, (
+            "NOT_MEASURED: no reachable yosys, so this test has no opinion and "
+            "will not pretend to one. Routes tried, in order:\n  "
+            + "\n  ".join(self.tried)
+            + "\nRun the suite inside the pinned EDA image, or start that "
+              "container on this host (its name comes from "
+              "`_eda_pin.default_container_name()`; `VIBEIC_EDA_CONTAINER` "
+              "overrides it).")
+
+    def run(self, script_text, name):
+        """Run `script_text` as a yosys script and return its output."""
+        self.require()
+        path = self.dir / (name + ".ys")
+        path.write_text(script_text)
+        cp = lec_run._docker(
+            self.where, "yosys -Q -T -s %s" % shlex.quote(str(path)),
+            timeout=900)
+        out = lec_run._strip_login_banner(
+            (cp.stdout or "") + (cp.stderr or ""))
+        (self.dir / (name + ".log")).write_text(out)
+        return cp.returncode, out
+
+
+def _resolve_yosys_site(tmp_path):
+    """`lec_run`'s own probes, in `lec_run`'s own order. Never raises."""
+    tried = []
+    if shutil.which("yosys"):
+        return _YosysSite("host", tmp_path, tried)
+    tried.append("this filesystem: `shutil.which('yosys')` found nothing on "
+                 "PATH")
+
+    container = lec_run.DEFAULT_CONTAINER
+    if not lec_run._container_available(container):
+        tried.append(f"container {container!r} (lec_run.DEFAULT_CONTAINER): "
+                     f"`lec_run._container_available` could not run in it")
+        return _YosysSite("", None, tried)
+    version = lec_run._yosys_version(container)
+    if not version:
+        tried.append(f"container {container!r}: reachable, but "
+                     f"`lec_run._yosys_version` got no version back")
+        return _YosysSite("", None, tried)
+
+    # The tool is reachable; the FILES have to be too. A container sees the
+    # host paths it was started with, and a pytest `tmp_path` under /tmp is
+    # usually not one of them -- so ASK, with lec_run's own probe, rather than
+    # assume a mount table. The candidates are this run's tmp_path (correct in
+    # the image, where both sides are one filesystem) and the account home,
+    # which is what the plugin's own container convention mounts.
+    for cand in (tmp_path, Path.home() / ".cache" / "vibeic-lec-fixtures"):
+        try:
+            cand.mkdir(parents=True, exist_ok=True)
+            probe = cand / f".visible-{os.getpid()}"
+            probe.write_text("probe")
+        except OSError as exc:
+            tried.append(f"{cand}: not writable here ({exc})")
+            continue
+        seen = lec_run._container_file_exists(container, str(probe))
+        probe.unlink(missing_ok=True)
+        if seen:
+            work = Path(tempfile.mkdtemp(dir=str(cand), prefix="issue2050-"))
+            return _YosysSite(container, work, tried)
+        tried.append(f"container {container!r} has yosys {version!r} but "
+                     f"cannot see {cand} -- no shared path for the fixtures")
+    return _YosysSite("", None, tried)
+
+
+@pytest.fixture
+def yosys(tmp_path):
+    """The resolved site, with any directory this fixture created removed."""
+    site = _resolve_yosys_site(tmp_path)
+    try:
+        yield site
+    finally:
+        if site.dir is not None and site.dir != tmp_path:
+            shutil.rmtree(site.dir, ignore_errors=True)
 
 
 _GOLD = ["/g/a.sv", "/g/b.sv"]
@@ -295,11 +424,13 @@ def test_the_resolver_never_guesses(tmp_path):
 
 @pytest.mark.parametrize("invert_output", [False, True])
 def test_empty_encoding_table_preserves_scalarized_register_proofs(
-        tmp_path, invert_output):
+        yosys, invert_output):
     """A synth with no FSM writes an empty encfile. A later transform can
     scalarize a bus; its named points must still be proved, and a changed
     output must remain unproven. Exercise the resolver, recipe and real SAT.
     """
+    yosys.require()
+    tmp_path = yosys.dir
     rtl = tmp_path / "delay.v"
     rtl.write_text("""module delay(input clk, input d, output o);
 reg [31:0] stages;
@@ -309,11 +440,10 @@ endmodule
 """)
     enc = tmp_path / lec_run.FSM_ENCFILE_NAME
     net = tmp_path / "netlist.v"
-    synth = tmp_path / "synth.ys"
-    synth.write_text(f"read_verilog {rtl}\nsynth -top delay -encfile {enc}\n"
-                     f"splitnets -ports\nwrite_verilog -noattr -noexpr {net}\n")
-    p = subprocess.run(["yosys", "-s", str(synth)], capture_output=True, text=True)
-    assert p.returncode == 0, p.stdout + p.stderr
+    rc, out = yosys.run(
+        f"read_verilog {rtl}\nsynth -top delay -encfile {enc}\n"
+        f"splitnets -ports\nwrite_verilog -noattr -noexpr {net}\n", "synth")
+    assert rc == 0, out
     assert enc.read_bytes() == b"", "fixture must exercise synth's empty table"
     if invert_output:
         text = net.read_text()
@@ -323,21 +453,18 @@ endmodule
         [str(rtl)], str(net), "delay", None, gate_is_generic=True,
         fsm_encfile=lec_run.fsm_encfile_beside_netlist(str(net)),
         ladder_rungs=3)
-    ys = tmp_path / "equiv.ys"
-    ys.write_text(script + "equiv_status -assert\n")
-    p = subprocess.run(["yosys", "-s", str(ys)], capture_output=True, text=True)
-    raw = p.stdout + p.stderr
+    rc, raw = yosys.run(script + "equiv_status -assert\n", "equiv")
     report = lec_run.build_report(lec_run.parse_equiv_output(raw),
                                   "delay", str(net), None)
     (tmp_path / "reports").mkdir()
     (tmp_path / "reports" / "lec.json").write_text(json.dumps(report))
     (tmp_path / "reports" / "lec.rpt").write_text(raw)
     if invert_output:
-        assert p.returncode == 1, raw
+        assert rc == 1, raw
         assert report["unproven_points"] > 0, report
         assert gate.audit(tmp_path).passed is False
     else:
-        assert p.returncode == 0, raw
+        assert rc == 0, raw
         assert report["compared_points"] >= 32, report
         assert report["unproven_points"] == 0, report
         assert gate.audit(tmp_path).passed is True
@@ -509,17 +636,14 @@ def test_empty_encoding_is_observed_not_assumed(tmp_path):
 
 
 @pytest.mark.parametrize("broken_reset", [False, True])
-def test_scalar_data_and_recoded_fsm_real_yosys(tmp_path, broken_reset):
+def test_scalar_data_and_recoded_fsm_real_yosys(yosys, broken_reset):
     """A real scalarized synthesis DUT, its full state map, and reset mutation.
 
     Candidate must recover data anchors without pairing binary FSM bits with
     one-hot bits. The reset mutant must remain unproven on the same recipe.
     """
-    import shutil
-    import subprocess
-    yosys = shutil.which("yosys")
-    if not yosys:
-        pytest.skip("real Yosys is unavailable")
+    yosys.require()
+    tmp_path = yosys.dir
     rtl = """module toy(input clk, input rst_n, input go, input [3:0] d,
                        output [3:0] q);
     reg [1:0] state;
@@ -550,22 +674,44 @@ def test_scalar_data_and_recoded_fsm_real_yosys(tmp_path, broken_reset):
                         if broken_reset else rtl)
 
     def run(script, name):
-        p = tmp_path / (name + ".ys")
-        p.write_text(script)
-        res = subprocess.run([yosys, "-Q", "-T", "-s", str(p)],
-                             capture_output=True, text=True, timeout=60)
-        (tmp_path / (name + ".log")).write_text(res.stdout + res.stderr)
-        assert res.returncode == 0, res.stdout[-1500:] + res.stderr
-        return res.stdout
+        rc, out = yosys.run(script, name)
+        assert rc == 0, out[-1500:]
+        return out
 
     run(f"read_verilog {gate_rtl}\nsynth -top toy -encfile {enc}\n"
         f"splitnets\nwrite_verilog -noexpr {gate}\n", "synth")
     gate.write_text(gate.read_text() + wrapper)
     names = lec_run.fsm_signal_names(str(enc))
     assert names == ["state"], enc.read_text()
+    # THE LADDER MUST CONTAIN THE PROVER THIS TEST'S ASSERTION NEEDS.
+    #
+    # `ladder_rungs=2` emits `LEC_LADDER`'s first two rungs — `equiv_simple
+    # -short` and `equiv_simple` — and NOTHING ELSE; induction is rungs 3, 4
+    # and 5. But `data_q` is a register whose ENABLE is the FSM state
+    # (`if (state == 1)`) and whose output is XORed with another state decode,
+    # so proving it equal across a re-encoded state is a SEQUENTIAL obligation.
+    # Asserting `equivalent and unproven == 0` while truncating the ladder below
+    # every sequential prover asked the recipe for a proof the recipe had not
+    # been told to attempt.
+    #
+    # MEASURED in the pinned image (sha256:89a8fd7295…, yosys 0.68+), this
+    # fixture, sweeping only this number:
+    #     rungs=2  (0 induct)  13/17 proven, 4 unproven  -> equivalent False
+    #     rungs=3  (1 induct)  17/17 proven, 0 unproven  -> equivalent True
+    #     rungs=4  (2 induct)  17/17                     -> True
+    #     rungs=5  (3 induct)  17/17                     -> True
+    # and the 4 unproven at rungs=2 are exactly `inner.data_q[0..3]` — the data
+    # register, never the FSM state the #2050 repair anchors, which is proven in
+    # both arms. So the recipe under test was working and the FIXTURE was short.
+    # `ladder_rungs` is #2194's per-rung RESOURCE knob, not a soundness claim.
+    #
+    # THE ASSERTIONS BELOW ARE UNCHANGED, and this is not a softening: it makes
+    # the recipe do MORE work, and the mutation arm still discriminates at this
+    # depth — the broken-reset mutant stays 16/17 with 1 unproven at rungs 3 AND
+    # 5, so induction does not launder it.
     kwargs = dict(gold_files=[str(gold)], gate_netlist=str(gate), top="testtop",
                   liberty=None, gate_is_generic=True, fsm_encfile=str(enc),
-                  ladder_rungs=2)
+                  ladder_rungs=3)
     before = run(lec_run.build_equiv_script(**kwargs), "baseline")
     flat_enc = tmp_path / "flat.enc"
     flat_enc.write_text(enc.read_text().replace(".fsm toy state", ".fsm toy inner.state"))
@@ -616,3 +762,198 @@ def test_scan_mapping_follows_only_an_identified_flop_output(tmp_path):
         "direction : output", "direction : input"))) is None
     assert lec_run.scan_fsm_mapping(**dict(args, dff_cells=[])) is None
     assert lec_run.scan_fsm_mapping(**dict(args, scan_mode={})) is None
+
+
+def test_no_test_here_can_excuse_itself_from_measuring():
+    """THE LINE, asserted over this file's OWN source as CODE.
+
+    Three properties, and each one is a way this file has already gone wrong:
+
+      (1) NO BARE TOOL LAUNCH. A test that shells out to a tool it never
+          resolved reports a missing INSTALL as a failing ASSERTION -- a claim
+          about the code that the run never made. That is how
+          `test_empty_encoding_table_preserves_scalarized_register_proofs` was
+          red on main 800cecb34.
+      (2) NO `pytest.skip`, ANYWHERE, IN ANY SPELLING. Not a disciplined one,
+          not a tool guard, not "just while the tool is missing". A skip on the
+          measuring host turns a test that CANNOT RUN into a green line, and a
+          green line is what a reader counts. This file's own history is the
+          argument: `test_scalar_data_and_recoded_fsm_real_yosys` skipped on
+          every bare-PATH host, and a REAL #2050 failure sat behind that
+          `2 skipped` for as long as nobody ran the suite in the image.
+      (3) NO SECOND RESOLVER. `lec_run.DEFAULT_CONTAINER` and `lec_run._docker`
+          are how the PROGRAM finds and launches yosys; a test that grew its own
+          copy would be free to disagree with the program about where the tool
+          is, which is the class `digital_hardmacro_gen.MagicSite` was written
+          to close.
+
+    The only correct answer when the tool cannot be reached is the one
+    `_YosysSite.require` gives: FAIL, naming NOT_MEASURED and every route tried.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    bare = sorted({n.lineno for n in ast.walk(tree)
+                   if isinstance(n, ast.Call)
+                   and isinstance(n.func, ast.Attribute)
+                   and n.func.attr in ("run", "Popen", "check_output", "call")
+                   for a in ast.walk(n)
+                   if isinstance(a, ast.Constant) and a.value == "yosys"})
+    assert not bare, (
+        f"line(s) {bare} launch a literal `yosys` without resolving it; on a "
+        f"host with a bare PATH that is a FileNotFoundError wearing an "
+        f"assertion's clothes. Go through the `yosys` fixture")
+
+    skips = sorted({n.lineno for n in ast.walk(tree)
+                    if isinstance(n, ast.Call)
+                    and ((isinstance(n.func, ast.Attribute)
+                          and n.func.attr in ("skip", "importorskip", "xfail"))
+                         or (isinstance(n.func, ast.Name)
+                             and n.func.id in ("skip", "xfail")))})
+    assert not skips, (
+        f"line(s) {skips} skip. Nothing in this file may: a skip on the "
+        f"measuring host is a test that did not run, counted as one that "
+        f"passed. If the tool is unreachable, FAIL and say so")
+    assert not [n for n in ast.walk(tree)
+                if isinstance(n, ast.Attribute) and n.attr == "skipif"], (
+        "a `skipif` marker appeared; same rule, same reason")
+
+    # (3) the resolver is lec_run's, by name, at the one site that resolves.
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_resolve_yosys_site")
+    borrowed = {a.attr for a in ast.walk(fn) if isinstance(a, ast.Attribute)}
+    for owed in ("DEFAULT_CONTAINER", "_container_available",
+                 "_yosys_version", "_container_file_exists"):
+        assert owed in borrowed, (
+            f"`_resolve_yosys_site` no longer consults `lec_run.{owed}` — the "
+            f"test would be resolving yosys somewhere the program does not")
+    launch = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                  and n.name == "run" and any(
+                      isinstance(a, ast.Attribute) and a.attr == "_docker"
+                      for a in ast.walk(n)))
+    assert launch is not None
+
+
+# ---------------------------------------------------------------------------
+# (5) #2050 FAMILY, SECOND INSTANCE — "induction did not converge" was said
+#     about logs in which induction never ran.
+#
+# Sections (2) and (3) above separated the TWO flat induction walls and stopped
+# the gate blaming depth for an inconsistent miter. The same sentence was still
+# being said about a THIRD shape that is not a wall at all: a ladder TRUNCATED
+# below its induction rungs. `equiv_simple` prints the very same
+# `Proved 0 previously unproven $equiv cells.` line `equiv_induct` does, and
+# the classifiers searched the whole log for it.
+#
+# MEASURED in the pinned image, this file's own reproducer at ladder_rungs=2
+# (LEC_LADDER rungs 1-2, zero induction commands emitted): the log contains the
+# string "induct" ZERO times, and the record read
+#     induction_wall_kind: "induction_depth"
+#     "equiv_induct did NOT converge (equiv_induct proved 0 previously-unproven
+#      cells across the escalating -seq sweep) ... a disclosed sequential-depth
+#      capability gap ... Close the remainder with sign-off LEC, which handles
+#      deep sequential induction."
+# The remedy was one more rung, for free: 13/17 -> 17/17, equivalent.
+# ---------------------------------------------------------------------------
+
+#: A REAL `equiv_simple`-only log, lines taken verbatim from the measured run.
+_LADDER_TRUNCATED = """\
+19. Executing EQUIV_SIMPLE pass.
+Found 17 unproven $equiv cells (16 groups) in equiv:
+  Trying to prove $equiv for \\inner.d[2]:ezsat
+ success!
+Proved 13 previously unproven $equiv cells.
+
+20. Executing EQUIV_SIMPLE pass.
+Found 4 unproven $equiv cells (4 groups) in equiv:
+  Trying to prove $equiv for \\inner.data_q[0]:ezsat
+ezsat
+ failed.
+Proved 0 previously unproven $equiv cells.
+
+21. Executing EQUIV_STATUS pass.
+Found 17 $equiv cells in equiv:
+  Of those cells 13 are proven and 4 are unproven.
+Found a total of 4 unproven $equiv cells.
+"""
+
+
+def test_a_ladder_that_never_reached_induction_is_not_an_induction_wall():
+    """The heart of it: no induction pass, so no depth opinion."""
+    assert not lec_run.ladder_reached_induction(_LADDER_TRUNCATED)
+    assert lec_run.induction_wall_kind(_LADDER_TRUNCATED) == \
+        "ladder_below_induction"
+    noconv, _ = lec_run.induction_did_not_converge(_LADDER_TRUNCATED)
+    assert noconv is False, (
+        "`equiv_simple`'s own `Proved 0` line was read as an equiv_induct "
+        "result; that is the whole defect")
+    fired, ev = lec_run.ladder_stopped_below_induction(_LADDER_TRUNCATED)
+    assert fired and "STOPPED BELOW" in ev
+
+
+def test_an_excerpted_induction_log_is_still_an_induction_wall():
+    """REVERT-PROOF FOR THE WIDENING, and the reason it had to be wide.
+
+    `_DEPTH_WALL` is this file's oldest depth fixture and it is an EXCERPT: it
+    begins BELOW `Executing EQUIV_INDUCT pass.` and carries only the lines the
+    pass prints while working. Keying "did induction run?" on the header alone
+    would reclassify it — and every real log that has been tailed or clipped —
+    as a truncated ladder. `equiv_induct` is the only pass that prints either of
+    those lines, VERIFIED against an equiv_simple-only log that contains neither.
+    """
+    assert lec_run.ladder_reached_induction(_DEPTH_WALL)
+    assert lec_run.induction_wall_kind(_DEPTH_WALL) == "induction_depth"
+    assert "Executing EQUIV_INDUCT" not in _DEPTH_WALL, (
+        "the fixture gained the header, so this test would pass on the narrow "
+        "marker too and stops being a control")
+
+
+def test_the_truncated_ladder_is_INCONCLUSIVE_and_names_the_real_remedy():
+    """It must not become a false NOT_EQUIVALENT — the design IS equivalent,
+    and one more rung proves it — and it must stop selling a commercial tool
+    for work this recipe has not been asked to do."""
+    r = lec_run.build_report(
+        lec_run.parse_equiv_output(_LADDER_TRUNCATED), "toy", "netlist.v", None)
+    assert r["verdict"] == "INCONCLUSIVE", r
+    assert r["equivalent"] is False
+    assert r["induction_wall_kind"] == "ladder_below_induction"
+    why = r["verdict_explanation"]
+    assert "STOPPED BELOW ITS INDUCTION RUNGS" in why, why
+    assert "equiv_induct -seq 4/16/64" in why, (
+        "the remedy must name the rungs that would close it", why)
+    assert "did NOT converge" not in why, (
+        "still claiming a convergence result from a run with no induction", why)
+    assert "deep sequential induction" not in why, (
+        "still prescribing sign-off LEC for a ladder that stopped short", why)
+
+
+def test_a_counterexample_still_FAILS_even_on_a_truncated_ladder():
+    """§4.05 NO-LEAK CONTROL. The new branch softens a verdict, so the thing to
+    prove is what it CANNOT soften: a real, witnessed difference."""
+    raw = _LADDER_TRUNCATED + "Found counterexample for $equiv cell.\n"
+    r = lec_run.build_report(
+        lec_run.parse_equiv_output(raw), "toy", "netlist.v", None)
+    assert r["verdict"] == "FAIL", r
+    assert r["equivalent"] is False
+
+
+def test_a_stateless_miter_still_FAILS_on_a_truncated_ladder():
+    """The OTHER no-leak control, and the one the `miter_is_stateless` guard
+    was added for: on a combinational miter induction could never have helped,
+    so a truncated ladder is not an excuse either."""
+    # `stat`'s real column order is COUNT then TYPE; the shape is the one
+    # `test_lec_bounded_proof._STAT_COMB` already uses, so the two fixtures
+    # cannot drift apart about what yosys prints.
+    raw = ("\n=== equiv ===\n\n"
+           "       25   $_NAND_\n"
+           "       11   $_NOT_\n"
+           "       36   $equiv\n\n"
+           + _LADDER_TRUNCATED)
+    stateless, _ = lec_run.miter_is_stateless(raw)
+    if not stateless:                       # the fixture must earn the control
+        raise AssertionError(
+            "fixture no longer reads as a stateless miter, so this control "
+            "proves nothing — repair the `stat` block")
+    r = lec_run.build_report(
+        lec_run.parse_equiv_output(raw), "toy", "netlist.v", None)
+    assert r["verdict"] == "FAIL", r

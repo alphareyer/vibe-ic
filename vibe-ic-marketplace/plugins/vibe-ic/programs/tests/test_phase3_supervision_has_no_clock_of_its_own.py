@@ -26,14 +26,40 @@ import pytest
 
 PROGRAMS = Path(__file__).resolve().parents[1]
 
+#: sentinel — "there was no `sys.modules` entry", which `None` cannot say.
+_ABSENT = object()
+
 
 def _load(name):
+    """A PRIVATE, freshly-executed copy of `name` — and `sys.modules` is left
+    exactly as it was found.
+
+    `exec_module` needs the module registered under its own name while it runs
+    (that is what makes a self-referential or dataclass-bearing module import
+    cleanly), so the entry IS installed — and then put back.  Leaving the fresh
+    copy installed is not a private copy at all: it REBINDS the name for every
+    later importer in the same process while every EARLIER importer keeps the
+    original object.  MEASURED on main 800cecb34: this file leaked its 4th copy
+    into `sys.modules`, and `test_progress_supervision_over_wallclock.py` — which
+    binds `import _docker_watchdog as _dw` at collection time, i.e. BEFORE these
+    tests run — then monkeypatched the ORIGINAL while `lec_run._docker`'s own
+    call-time `import _docker_watchdog` resolved to the LEAKED one.  The stub was
+    never called, `seen` stayed empty and the test died `KeyError: 'marker'`.
+    Order-dependent, green alone, red in the suite.
+    """
     if str(PROGRAMS) not in sys.path:
         sys.path.insert(0, str(PROGRAMS))
     spec = importlib.util.spec_from_file_location(name, PROGRAMS / f"{name}.py")
     m = importlib.util.module_from_spec(spec)
+    _previously = sys.modules.get(name, _ABSENT)
     sys.modules[name] = m
-    spec.loader.exec_module(m)
+    try:
+        spec.loader.exec_module(m)
+    finally:
+        if _previously is _ABSENT:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = _previously
     return m
 
 

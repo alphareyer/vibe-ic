@@ -1712,6 +1712,57 @@ def miter_is_stateless(text: str):
         f"Induction non-convergence cannot explain this result.")
 
 
+#: EVIDENCE THAT INDUCTION RAN — the pass by name, OR either line only it
+#: prints. The name alone is not enough: `_DEPTH_WALL`, this file's oldest
+#: hand-written depth fixture, is an EXCERPT of a real induction run that starts
+#: below the `Executing EQUIV_INDUCT pass.` header, and a real log that has been
+#: tailed or clipped looks the same. `equiv_induct.cc` is the only pass that
+#: prints "Proving induction step" or "Proving existence of base case";
+#: VERIFIED, not assumed — an `equiv_simple`-only log of this file's own
+#: reproducer (LEC_LADDER rungs 1-2, no induction emitted) contains ZERO
+#: occurrences of "induct" or "base case", while the same recipe at rung 3
+#: contains all three phrases.
+_INDUCTION_RAN_RE = re.compile(
+    r"equiv_induct"
+    r"|Proving\s+induction\s+step"
+    r"|Proving\s+existence\s+of\s+base\s+case",
+    re.IGNORECASE)
+
+
+def ladder_reached_induction(text: str) -> bool:
+    """Did an `equiv_induct` pass ACTUALLY RUN in this log?
+
+    #2050 FAMILY, SECOND INSTANCE. `equiv_simple` prints the SAME
+    `Proved 0 previously unproven $equiv cells.` line `equiv_induct` does, so a
+    whole-text search for that phrase cannot tell "induction hit a wall" from
+    "induction never ran". `induction_ladder_exhausted` below already knows
+    this — its docstring says its scan is scoped past the marker "so
+    equiv_simple's OWN proved-count can never trigger it" — but the two
+    functions that answer the same question about the same log,
+    `induction_did_not_converge` and `induction_wall_kind`, were not scoped, and
+    reported a flat INDUCTION wall on a run containing no induction.
+
+    MEASURED on main 800cecb34, pinned image sha256:89a8fd7295…, yosys 0.68+:
+    `build_equiv_script(..., ladder_rungs=2)` emits `equiv_simple -short` and
+    `equiv_simple` and NOTHING ELSE — `LEC_LADDER`'s induction rungs are 3, 4
+    and 5 — and the resulting log contains the string "induct" ZERO times. The
+    record nevertheless read "equiv_induct did NOT converge (equiv_induct proved
+    0 previously-unproven cells across the escalating -seq sweep)" with
+    `induction_wall_kind: "induction_depth"`, and advised closing the remainder
+    with a commercial sign-off LEC "which handles deep sequential induction".
+    Running ONE more rung proved every remaining point (13/17 -> 17/17).
+
+    This is the #581 defect with a different cause: there the WALL CLOCK stopped
+    the proof before induction ran and the record blamed the engine's depth;
+    here the RECIPE stops before induction runs and the record blames the
+    engine's depth. `ladder_rungs` is #2194's per-rung RESOURCE knob — it exists
+    so one yosys process holds one rung's peak memory — so this shape is the
+    NORMAL state of every intermediate rung of a per-rung driver run, not a
+    corner case.
+    """
+    return bool(_INDUCTION_RAN_RE.search(text or ""))
+
+
 def induction_did_not_converge(text: str):
     """(bool, evidence) — True when equiv_induct made NO progress (a flat wall)
     rather than finding a difference. PRECISION-first: the caller MUST also
@@ -1721,7 +1772,11 @@ def induction_did_not_converge(text: str):
     if _INDUCT_DIVERGE_RE.search(text):
         return True, ("equiv_induct SAT base case could not be established "
                       "(`Circuit inherently diverges!`)")
-    if _PROVED_ZERO_RE.search(text):
+    # SCOPED PAST THE MARKER. `equiv_simple` prints this same line, so an
+    # unscoped search answers "induction hit a flat wall" about a log in which
+    # induction never ran. See `ladder_reached_induction`.
+    if (ladder_reached_induction(text)
+            and _PROVED_ZERO_RE.search(text)):
         return True, ("equiv_induct proved 0 previously-unproven cells across "
                       "the escalating -seq sweep (a flat induction wall)")
     return False, ""
@@ -1754,6 +1809,10 @@ def induction_did_not_converge(text: str):
 # is in the miter handed to the engine.
 _WALL_MITER_INCONSISTENT = "miter_inconsistent"
 _WALL_INDUCTION_DEPTH = "induction_depth"
+#: The ladder STOPPED BELOW its induction rungs, so there is no induction
+#: result to have a depth opinion about. Remediable HERE — run the rungs — and
+#: therefore a different finding from either wall above.
+_WALL_LADDER_BELOW_INDUCTION = "ladder_below_induction"
 
 
 def induction_wall_kind(text: str) -> str:
@@ -1767,9 +1826,13 @@ def induction_wall_kind(text: str) -> str:
     base-case signature separates them."""
     if _INDUCT_DIVERGE_RE.search(text or ""):
         return _WALL_MITER_INCONSISTENT
-    if _PROVED_ZERO_RE.search(text or ""):
-        return _WALL_INDUCTION_DEPTH
-    return ""
+    if not _PROVED_ZERO_RE.search(text or ""):
+        return ""
+    # A DEPTH VERDICT REQUIRES AN INDUCTION PASS TO HAVE HAPPENED. Without one
+    # the same `Proved 0` line is equiv_simple's, and the honest answer names
+    # the truncated ladder rather than the engine.
+    return (_WALL_INDUCTION_DEPTH if ladder_reached_induction(text or "")
+            else _WALL_LADDER_BELOW_INDUCTION)
 
 
 # #778 / round-2 subservient×sky130A — the escalating `-seq 4/16/64` induction
@@ -1813,6 +1876,39 @@ def induction_ladder_exhausted(text: str):
             "convergence — a bounded sequential-depth induction gap, not a flat "
             "wall and not a counterexample")
     return False, ""
+
+def ladder_stopped_below_induction(text: str):
+    """(bool, evidence) — points are open and the ladder never REACHED
+    induction, so nothing has yet been asked of the prover that could close
+    them.
+
+    This must re-class to INCONCLUSIVE for exactly the reason #581's
+    wall-clock branch does: the remainder was NEVER ATTEMPTED, so nothing about
+    it was learned, and a FAIL here would be a fabricated non-equivalence.
+    MEASURED: the design that produced this shape is EQUIVALENT — one further
+    rung proves all 17 of 17 points.
+
+    But it is a DIFFERENT finding from a capability gap and it carries a
+    different remedy, which is the whole reason it is separated: the fix is to
+    RUN THE INDUCTION RUNGS, here, for free. Advising a commercial sign-off LEC
+    "which handles deep sequential induction" for a ladder that stopped two
+    rungs short sends the reader to buy a tool for work this one has not been
+    asked to do yet.
+
+    PRECISION-first, identically to its siblings: the caller confirms NO
+    counterexample and a state-bearing miter first, so a real mismatch (which
+    prints a counterexample) and a stateless miter (where induction could not
+    have helped anyway) both keep their blocking FAIL.
+    """
+    if ladder_reached_induction(text):
+        return False, ""
+    if not _PROVED_ZERO_RE.search(text or ""):
+        return False, ""
+    return True, (
+        "the proof ladder STOPPED BELOW its induction rungs — no equiv_induct "
+        "pass appears in this log at all, so the `Proved 0 previously unproven` "
+        "line is equiv_simple's own and says nothing about sequential depth")
+
 
 # Frontend-ABORT signatures — a read_verilog / read_slang failure that prevented
 # ANY equivalence miter from being built (0 compared points). DISTINCT from a
@@ -2575,6 +2671,16 @@ def parse_equiv_output(text: str, *,
         # mismatch (which prints a counterexample → stays the blocking FAIL).
         if not _noconv and not _has_ctrex and not _stateless:
             _noconv, _noconv_ev = induction_ladder_exhausted(text)
+        # AND THE LADDER THAT NEVER GOT THERE. Same guards, same reason, and
+        # last in the chain so it can only ever describe a log the two above
+        # have already declined: no flat wall (there was no induction to be
+        # flat), no positive induct progress (likewise), no counterexample, and
+        # a miter that holds state.
+        _below_induction = False
+        if not _noconv and not _has_ctrex and not _stateless:
+            _below_induction, _below_ev = ladder_stopped_below_induction(text)
+            if _below_induction:
+                _noconv, _noconv_ev = True, _below_ev
         # A WALL-CLOCK KILL THAT MADE PARTIAL PROGRESS.
         #
         # The three budget guards above all have a precondition this shape
@@ -2742,6 +2848,23 @@ def parse_equiv_output(text: str, *,
                     "rung is partial evidence, not an exhausted engine "
                     "ladder or proof of a mismatch. No counterexample was "
                     "recorded. Equivalence remains INCONCLUSIVE.")
+            elif _below_induction and not _execution_stopped:
+                verdict_explanation = (
+                    f"{proven if proven is not None else 0}/"
+                    f"{total if total is not None else '?'} proven, "
+                    f"{unproven if unproven is not None else '?'} unproven — "
+                    f"and the proof ladder STOPPED BELOW ITS INDUCTION RUNGS "
+                    f"({_noconv_ev}), with NO counterexample recorded "
+                    "(non_equivalent_points=0). This is NOT a statement about "
+                    "the engine's sequential depth and NOT a capability gap: "
+                    "equiv_induct was never asked, so nothing about the "
+                    "remainder was learned. → INCONCLUSIVE (the recipe stopped "
+                    "short), never a false NOT_EQUIVALENT. THE REMEDY IS HERE, "
+                    "NOT IN A COMMERCIAL TOOL: run the induction rungs "
+                    "(`equiv_induct -seq 4/16/64`, LEC_LADDER rungs 3-5; raise "
+                    "`ladder_rungs`, or let the per-rung driver continue to the "
+                    "next rung). Visible non-PASS (equivalent:false) — never a "
+                    "vacuous PASS a regression could hide behind.")
             elif _execution_stopped:
                 verdict_explanation = (
                     f"{proven if proven is not None else 0}/"

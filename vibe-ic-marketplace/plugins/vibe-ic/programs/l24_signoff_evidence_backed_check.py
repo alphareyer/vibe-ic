@@ -87,7 +87,7 @@ import sys
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from l_doc_evidence_util import (  # noqa: E402
@@ -191,7 +191,9 @@ def _collect_claims(node: Any,
             _collect_claims(item, out, f"{path}[{i}]")
 
 
-def _check_one(project: Path, layer_path: Path) -> Tuple[str, List[str]]:
+def _check_one(project: Path, layer_path: Path,
+               rows_out: Optional[List[Dict[str, Any]]] = None
+               ) -> Tuple[str, List[str]]:
     """Returns (verdict, messages) with verdict in {PASS, FAIL, SKIP}."""
     rel = layer_path.relative_to(project) if layer_path.is_relative_to(project) \
         else layer_path
@@ -223,7 +225,7 @@ def _check_one(project: Path, layer_path: Path) -> Tuple[str, List[str]]:
     # not claims and cannot be certificates. A requirement the run's reports
     # satisfy is BACKED; one they do not is named, and that is a real finding:
     # the design said DRC must be clean and the run has no clean DRC report.
-    req_failures, req_msgs = _requirements_backed(project, doc, rel)
+    req_failures, req_msgs = _requirements_backed(project, doc, rel, rows_out)
     if req_failures:
         return "FAIL", req_failures
 
@@ -310,6 +312,49 @@ def _report_verdict_of(payload: Any) -> Optional[str]:
     return None
 
 
+#: How a requirement's population was chosen. Carried into the gate's own
+#: `--json` record so a reader can tell a flow-DECLARED sign-off reading from
+#: the name scan that is still all some checks have.
+_BASIS_DECLARED = "flow-declared-signoff-record"
+_BASIS_SCAN = "report-name-scan"
+
+
+def _declared_signoff_population(project: Path, check: str
+                                 ) -> Optional[Tuple[Tuple[str, ...],
+                                                     List[Tuple[str, Optional[str]]]]]:
+    """(declared paths, [(path, verdict)]) when the FLOW declares a record.
+
+    R-0915-52. A stated sign-off requirement is judged by the record the flow
+    declares for that check — the step that publishes the sign-off verdict —
+    and by nothing else. A pre-layout ESTIMATE published by an earlier step is
+    not a sign-off reading of the same check, and neither is a different
+    check's envelope that happens to carry the token in its filename.
+
+    Returns None when the flow declares no sign-off record for this check, and
+    the caller falls back to the name scan below. A declared record that is
+    ABSENT from the run is reported as absent, NOT backfilled from the scan:
+    the whole point is that the estimate does not stand in for the sign-off.
+    """
+    try:
+        from l24_signoff_requirements_extract import signoff_record_paths_for
+    except ImportError:
+        return None
+    declared = signoff_record_paths_for(check)
+    if not declared:
+        return None
+    out: List[Tuple[str, Optional[str]]] = []
+    for rel in declared:
+        path = project / rel
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue
+        out.append((rel, _report_verdict_of(payload)))
+    return declared, out
+
+
 def _reports_for_check(project: Path, check: str
                        ) -> List[Tuple[str, Optional[str]]]:
     """(project-relative path, verdict) for every report naming this check."""
@@ -372,11 +417,21 @@ def _phase3_has_run(project: Path) -> bool:
     return d.is_dir() and any(d.rglob("*.json"))
 
 
-def _requirements_backed(project: Path, doc: Any, rel: str
+def _requirements_backed(project: Path, doc: Any, rel: str,
+                         rows_out: Optional[List[Dict[str, Any]]] = None
                          ) -> Tuple[List[str], List[str]]:
-    """Judge each STATED sign-off requirement against the run's own reports."""
+    """Judge each STATED sign-off requirement against the run's own reports.
+
+    `rows_out`, when given, collects one typed record per stated requirement —
+    the check, the BASIS its population was chosen on, every record read with
+    the verdict read from it, and the outcome. That is what this gate's
+    `--json` publishes, so a consumer can separate a MEASUREMENT from a
+    failure to read an input without parsing the prose.
+    """
     fields = doc.get("fields") if isinstance(doc.get("fields"), dict) else doc
     rows = fields.get("signoff_requirements") if isinstance(fields, dict)         else None
+    if rows_out is None:
+        rows_out = []
     if not isinstance(rows, list) or not rows:
         return [], []
     failures: List[str] = []
@@ -390,36 +445,62 @@ def _requirements_backed(project: Path, doc: Any, rel: str
         cite = row.get("citation") or {}
         where = (f"{cite.get('document')}:{cite.get('line')}"
                  if cite.get("document") else "the input")
-        found = _reports_for_check(project, check)
+        # R-0915-52: the flow's DECLARED sign-off record decides the
+        # population where the flow declares one; the name scan answers for
+        # every check it does not.
+        declared_pair = _declared_signoff_population(project, check)
+        if declared_pair is not None:
+            declared_paths, found = declared_pair
+            basis = _BASIS_DECLARED
+            where_looked = (f"the flow's declared sign-off record for {check}"
+                            f": {', '.join(declared_paths)}")
+        else:
+            declared_paths = ()
+            found = _reports_for_check(project, check)
+            basis = _BASIS_SCAN
+            where_looked = (f"searched reports/ excluding reports/audit for "
+                            f"{'/'.join(_signoff_tokens(check))}")
         measured = [(p, v) for p, v in found
                     if v is not None and v not in _ABSENT_VERDICTS]
+        record: Dict[str, Any] = {
+            "check": check,
+            "requirement": requirement,
+            "citation": where,
+            "basis": basis,
+            "declared_records": list(declared_paths),
+            "records_read": [{"path": p, "verdict": v} for p, v in found],
+        }
+        rows_out.append(record)
         if not measured:
             looked = ", ".join(p for p, _ in found[:4]) or "no report"
             if not phase3:
                 # NOT YET MEASURABLE, not missed. The requirement is recorded
                 # and named so it is visible, but this run has not reached the
                 # phase that measures it and the gate does not block on it.
+                record["outcome"] = "NOT_YET_MEASURABLE"
                 msgs.append(
                     f"{rel}: {check} "
                     f"{requirement or '(prose)'} required at {where} — "
                     f"recorded; this run has not reached phase 3, so it is "
                     f"not yet measurable")
                 continue
+            record["outcome"] = "UNMET_NO_READING"
             failures.append(
                 f"{rel}: the input REQUIRES {check} "
                 f"{requirement or '(requirement stated in prose)'} at {where}, "
                 f"and this run has no report measuring it "
-                f"(searched reports/ excluding reports/audit for "
-                f"{'/'.join(_signoff_tokens(check))}; found: {looked})")
+                f"({where_looked}; found: {looked})")
             continue
         failed = [(p, v) for p, v in measured if v in _FAILING_VERDICTS]
         if failed:
+            record["outcome"] = "UNMET_MEASURED_FAILING"
             failures.append(
                 f"{rel}: the input REQUIRES {check} "
                 f"{requirement or '(requirement stated in prose)'} at {where}, "
                 f"and this run measured it as "
                 + ", ".join(f"{v!r} in {p}" for p, v in failed[:3]))
             continue
+        record["outcome"] = "BACKED"
         msgs.append(
             f"{rel}: {check} {requirement or '(prose)'} required at {where} — "
             f"backed by " + ", ".join(f"{p} ({v})" for p, v in measured[:3]))
@@ -434,34 +515,93 @@ def _signoff_tokens(check: str) -> Tuple[str, ...]:
     return report_tokens_for(check) or ()
 
 
+# ── R-0915-52: the gate STATES its own reason class ───────────────────────
+#
+# The completion audit's `classify_sub_gate` says of a FAIL record: "the
+# record carries a FAIL verdict and no field that separates a measurement
+# from a failure to read its input". That is true of this gate today, and it
+# is the reason a real finding and an unreadable project look identical to a
+# reader of the record.
+#
+# The field that separates them is `reason_class`, from the repo's own closed
+# vocabulary in `_flow_reason_taxonomy`. It is written ONLY when this gate
+# produced no measurement of the design, and is `null` on every verdict that
+# IS one — including a FAIL, because a requirement measured and found unmet is
+# a measurement, not a reason to excuse the step. A class on a measured verdict
+# would be the false-disclosure shape in the other direction.
+_GATE_NAME = "l24_signoff_evidence_backed_check"
+
+
+def _emit_json(dest: Optional[str], payload: Dict[str, Any]) -> None:
+    """Write the gate's own record, or do nothing when no `--json` is given."""
+    if not dest:
+        return
+    out = Path(dest)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from _atomic_artefact import write_text as _atomic_write  # noqa: PLC0415
+    except ImportError:
+        out.write_text(json.dumps(payload, indent=2, ensure_ascii=False)
+                       + "\n", encoding="utf-8")
+        return
+    _atomic_write(out, json.dumps(payload, indent=2, ensure_ascii=False)
+                  + "\n")
+
+
 def main(argv: List[str]) -> int:
-    if len(argv) < 2:
-        print("usage: l24_signoff_evidence_backed_check <project_dir>",
-              file=sys.stderr)
+    args = [a for a in argv[1:] if not a.startswith("--")]
+    json_dest: Optional[str] = None
+    rest = argv[1:]
+    for i, a in enumerate(rest):
+        if a == "--json" and i + 1 < len(rest):
+            json_dest = rest[i + 1]
+        elif a.startswith("--json="):
+            json_dest = a.partition("=")[2]
+    # `--json <path>` consumes its value, which is not a positional.
+    if json_dest is not None and json_dest in args:
+        args.remove(json_dest)
+    if not args:
+        print("usage: l24_signoff_evidence_backed_check <project_dir> "
+              "[--json <out>]", file=sys.stderr)
         return 2
-    project = Path(argv[1]).resolve()
+    project = Path(args[0]).resolve()
+    record: Dict[str, Any] = {"gate": _GATE_NAME, "project": str(project),
+                              "requirements": []}
     if not project.is_dir():
+        # The gate could not READ its input. This is the case the audit says
+        # a FAIL record cannot be told apart from — so it is named.
+        record.update(verdict="SKIP", reason_class="EXECUTION_ERROR",
+                      reason=f"{project} is not a directory")
+        _emit_json(json_dest, record)
         print(f"[SKIP] l24_signoff_evidence_backed_check: "
               f"{project} is not a directory")
         return 2
 
     layers = find_layer_files(project, _STEM)
     if not layers:
+        # Phase 1's post-process is the sole writer of this layer, and it has
+        # not run. ASKED_BEFORE_PRODUCER is exactly that shape.
+        record.update(verdict="SKIP", reason_class="ASKED_BEFORE_PRODUCER",
+                      reason=f"no {_STEM}.json under {project}; phase-1 "
+                             f"post-process has not emitted the layer")
+        _emit_json(json_dest, record)
         print(f"[SKIP] l24_signoff_evidence_backed_check: no {_STEM}.json "
               f"under {project}")
         return 2
 
     all_fail: List[str] = []
     all_pass: List[str] = []
+    rows: List[Dict[str, Any]] = []
     n_skip = 0
     for layer in layers:
-        verdict, msgs = _check_one(project, layer)
+        verdict, msgs = _check_one(project, layer, rows)
         if verdict == "FAIL":
             all_fail.extend(msgs)
         elif verdict == "PASS":
             all_pass.extend(msgs)
         else:
             n_skip += 1
+    record["requirements"] = rows
 
     if all_fail:
         # The two failure families read very differently to an operator, so
@@ -481,6 +621,13 @@ def main(argv: List[str]) -> int:
             print(f"  - {m}")
         if len(all_fail) > 12:
             print(f"  ... {len(all_fail) - 12} more")
+        # A FAIL here is a MEASUREMENT: the gate read the layer and the run's
+        # own reports and found a stated requirement unmet, or a verdict
+        # asserted with no evidence. `reason_class` stays null, which is what
+        # makes it distinguishable from the two SKIPs above.
+        record.update(verdict="FAIL", reason_class=None,
+                      findings=list(all_fail))
+        _emit_json(json_dest, record)
         return 1
 
     if all_pass:
@@ -516,8 +663,28 @@ def main(argv: List[str]) -> int:
                   f"resolvable evidence path with a verified read-back value")
         for m in all_pass[:6]:
             print(f"  - {m}")
+        # A PASS whose every requirement row is NOT_YET_MEASURABLE measured
+        # nothing about the design — the question was asked before the phase
+        # that answers it. That is the one green here that carries a class.
+        stated = [r for r in rows if r.get("outcome")]
+        pending_only = bool(stated) and all(
+            r["outcome"] == "NOT_YET_MEASURABLE" for r in stated)
+        record.update(
+            verdict="PASS",
+            reason_class="ASKED_BEFORE_PRODUCER" if pending_only else None,
+            reason=("every stated sign-off requirement is recorded but this "
+                    "run has not reached the phase that measures it")
+                   if pending_only else None,
+            findings=[])
+        _emit_json(json_dest, record)
         return 0
 
+    record.update(
+        verdict="SKIP", reason_class="DESIGN_DECLARED_NA",
+        reason=(f"{n_skip}/{len(layers)} {_STEM} layer(s) assert no sign-off "
+                f"verdict and the input states no sign-off requirement — "
+                f"nothing to certify"))
+    _emit_json(json_dest, record)
     print(f"[SKIP] l24_signoff_evidence_backed_check: "
           f"{n_skip}/{len(layers)} {_STEM} layer(s) assert no sign-off verdict "
           f"(inert / N/A) — nothing to certify")
