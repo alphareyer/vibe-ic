@@ -52,8 +52,18 @@ def test_no_explicit_corner_reservation_is_refused():
 
 def test_selected_container_memory_is_the_no_env_reservation_fallback():
     raw, amount = aca.declared_reservation({}, container_memory=str(32 * G))
-    assert raw == str(32 * G)
+    # THE PROPERTY, NOT THE SPELLING (lane icadc). This used to assert
+    # `raw == str(32 * G)` — the raw byte count — and that MECHANISM was the
+    # defect: the same string is fed to `parse_bytes` by both `launch` and
+    # `docker_run_argv`, which require a K/M/G/T unit and reject a bare byte
+    # count, so the container-derived path could never reach Docker. Asserting
+    # that the string ROUND-TRIPS to the declared amount is strictly more than
+    # the old assertion: it says what the string means AND that every consumer
+    # of it can read it.
     assert amount == 32 * G
+    assert aca.parse_bytes(raw) == amount
+    aca.docker_run_argv(image="i", reservation=raw, project=Path("/tmp"),
+                        workdir=Path("/tmp"), simulation_args=["x"])
 
 def test_a4_reads_selected_container_memory_when_env_is_unset(monkeypatch):
     sweep = load_sweep()
@@ -61,7 +71,11 @@ def test_a4_reads_selected_container_memory_when_env_is_unset(monkeypatch):
     monkeypatch.delenv("VIBEIC_DOCKER_MEMORY", raising=False)
     monkeypatch.setattr(sweep.subprocess, "run", lambda *args, **kwargs:
                         subprocess.CompletedProcess(args[0], 0, str(32 * G) + "\n", ""))
-    assert sweep._corner_reservation("selected-a4") == (str(32 * G), 32 * G)
+    raw, amount = sweep._corner_reservation("selected-a4")
+    # Same property as above: A4 reads the SELECTED CONTAINER'S declaration,
+    # and what it reads is usable by the launcher that consumes it.
+    assert amount == 32 * G
+    assert sweep._aca.parse_bytes(raw) == amount
 
 def test_a4_refuses_zero_container_memory_before_launch(monkeypatch):
     sweep = load_sweep()

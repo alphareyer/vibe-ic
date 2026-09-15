@@ -66,7 +66,46 @@ def declared_reservation(env=None, *, container_memory=None) -> tuple[str, int]:
     fallback = str(container_memory or "").strip()
     if not _BYTES.fullmatch(fallback):
         raise AdmissionRefused("no non-zero declared corner memory reservation")
-    return fallback, int(fallback)
+    # RETURNED IN THE CANONICAL UNIT FORM, not as the raw byte count
+    # (vibe-ic, lane icadc 2026-09-15, MEASURED). The string this function
+    # returns is consumed TWICE by `parse_bytes` — once in `launch` and once in
+    # `docker_run_argv`, which validates what it is about to hand to
+    # `docker --memory`. `parse_bytes` requires `_SIZE`, a K/M/G/T suffix, and
+    # rejects a bare byte count ON PURPOSE: in a value a human typed into
+    # `VIBEIC_ANALOG_CORNER_MEMORY`, `8` is ambiguous and must not be guessed.
+    # So returning `HostConfig.Memory` verbatim made the container-derived
+    # path — the fallback EVERY invocation takes when no env var is set —
+    # unable to reach Docker at all:
+    #
+    #     _run_block -> _run_ngspice -> _aca.launch -> parse_bytes
+    #     AdmissionRefused: memory reservation must be a non-zero whole
+    #                       K/M/G/T value
+    #
+    # Both halves were already tested, SEPARATELY, and neither test fed one's
+    # output to the other. Converting HERE — at the single place the string is
+    # produced — fixes both consumers and leaves the ambiguity guard on
+    # human-supplied strings exactly as strict as it was.
+    return _canonical_size(int(fallback)), int(fallback)
+
+
+def _canonical_size(amount: int) -> str:
+    """`amount` bytes as the largest K/M/G/T unit that divides it EXACTLY.
+
+    Exactly, never rounded: the returned string is what `docker --memory` is
+    given, so a rounded one would run a container at a size the ledger did not
+    reserve. A value no unit divides cannot be expressed in the form every
+    consumer here requires, and is refused by name rather than approximated —
+    Docker's own ceilings are whole MiB, so this refusal is not reachable from
+    a container declaration and exists for the caller that hand-builds one.
+    """
+    for unit, scale in (("t", 1024 ** 4), ("g", GiB), ("m", 1024 ** 2),
+                        ("k", 1024)):
+        if amount % scale == 0:
+            return f"{amount // scale}{unit}"
+    raise AdmissionRefused(
+        f"a reservation of {amount} bytes is not a whole K/M/G/T value and "
+        f"cannot be expressed as the `docker --memory` limit every consumer "
+        f"of this reservation requires")
 
 
 def host_state_dir(env=None) -> Path:
