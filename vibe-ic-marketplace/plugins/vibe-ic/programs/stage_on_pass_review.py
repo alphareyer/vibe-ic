@@ -762,10 +762,19 @@ def stage_passed(compliance: Optional[Path], stage_id: str,
                 "source": str(compliance)}
     bad = sorted({str(r.get("status") or "?") for r in mine
                   if _norm_status(r.get("status")) not in _STAGE_GREEN})
+    # R-0915-34(a) — WHICH ROWS, not only which WORDS. A cascade has to name
+    # what it waits on or the reader cannot act on it, and the caller states
+    # this program's class from exactly these rows.
+    rows = sorted(
+        ({"id": str(r.get("id")), "status": str(r.get("status") or "?")}
+         for r in mine
+         if _norm_status(r.get("status")) not in _STAGE_GREEN),
+        key=lambda r: r["id"])
     return {"passed": not bad,
             "why": (f"{len(mine)} row(s) for {stage_id}"
                     + (f"; non-green: {', '.join(bad)}" if bad else
                        "; all green")),
+            "non_green_rows": rows,
             "source": str(compliance)}
 
 
@@ -4583,11 +4592,35 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"unestablished verdict.")
         return 2
     if not fired["passed"]:
+        # R-0915-34(a) — THIS IS A CASCADE, AND IT SAYS SO IN ITS OWN WORDS.
+        #
+        # Declining because the stage under review is not green is not a fault
+        # in this program: it looked, it read the register, and it is WAITING
+        # on rows somebody else owns. Booked as EXECUTION_ERROR it read as a
+        # program defect, and because this review is the gate of steps 2, 7,
+        # 14, 15, 37 and 39, every one of them inherited INCOMPLETE from a
+        # sentence about someone else's step. MEASURED on spm x gf180mcuD.
+        #
+        # The class is STATED here, in the field `report_reason_class` reads
+        # before any prose recogniser (#2275/#2276), together with the ROWS it
+        # waits on so the reader can act on it. `_p0_declared_absent`'s rule
+        # applies in spirit: the register EXISTS and says these rows are not
+        # green. The neighbouring `passed is None` branch — no register, an
+        # unreadable one, or no row for this stage at all — states NOTHING and
+        # keeps the fail-closed EXECUTION_ERROR, because a review that truly
+        # could not run has established nothing.
+        blocked = fired.get("non_green_rows") or []
         emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_CHECKED",
-              "why": fired["why"], "fires_on": decl.get("fires_on")})
+              "why": fired["why"], "fires_on": decl.get("fires_on"),
+              "reason_class": "BLOCKED_BY_UPSTREAM",
+              "blocked_by": blocked})
+        named = ", ".join(f"{r['id']}={r['status']}" for r in blocked[:8])
         print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage} did not pass "
               f"({fired['why']}). This review reviews a PASS; a stage that "
-              f"failed is the repair tier's, not this one's.")
+              f"failed is the repair tier's, not this one's. BLOCKED_BY_"
+              f"UPSTREAM, waiting on: "
+              f"{named or 'no row this register names'}"
+              + (f", and {len(blocked) - 8} more" if len(blocked) > 8 else ""))
         return 2
 
     if a.stage in _DECLARED_NOT_ENABLED and a.stage not in _RULES:
