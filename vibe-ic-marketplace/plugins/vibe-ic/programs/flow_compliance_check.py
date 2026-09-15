@@ -7626,6 +7626,17 @@ def _p0_contract_context(project: Path,
         "backlog_dir": backlog_dir,
         "tester_config": tester_config,
         "scope_samples": scope_samples,
+        # R-0915-15 (lane icspm3) — the MCP-EDA execution manifest, present
+        # only on a run that DROVE the MCP server. `mcp-eda`'s
+        # `writeManifest()` is the sole writer; nothing in this flow produces
+        # it, which is what step 31's own clause already says of the same file:
+        #   "Scoped to a run that drove the MCP-EDA server: the manifest is
+        #    written by the MCP tools themselves and by nothing in this flow,
+        #    so a program-only run has no execution record to read and this
+        #    gate would be reporting on an absence rather than judging one."
+        "mcp_manifest": (str(project / "latest_results.jsonl")
+                         if (project / "latest_results.jsonl").is_file()
+                         else None),
     }
 
 
@@ -7663,6 +7674,16 @@ _P0_CONTRACT_REQUIRED_CONTEXT: Mapping[str, tuple[str, ...]] = MappingProxyType(
 # a generic RTL-dir checker must not inherit a protocol-only prerequisite.
 _P0_GATE_REQUIRED_CONTEXT: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "pre_awake_silence_check": ("l3_opcodes",),
+    # R-0915-15 (lane icspm3, MEASURED on spm x gf180mcuD). This gate audits
+    # the mcp-eda execution manifest and answered
+    #   error: manifest not found: <project>/latest_results.jsonl
+    # on a program-only run, which P0 booked EXECUTION_ERROR -- a fault the
+    # design did not commit and this flow cannot fix, because nothing in the
+    # flow writes that file. Step 31 already declares the SAME artefact N/A
+    # for the SAME reason through `condition_files_exist`; P0's equivalent
+    # channel is this roster, so the question is asked here in the same terms.
+    # A run that DID drive the MCP server keeps the gate live and blocking.
+    "fpga_program_chain_attest_check": ("mcp_manifest",),
 })
 
 # Semantic declarations owned by a malformed document are not "absent".  The
@@ -7696,11 +7717,20 @@ def _p0_contract_na_reason(gate_name: str,
     non-protocol design; unknown/default contracts run fail-closed.
     """
     kind = _STRUCTURAL_GATE_INVOCATION_CONTRACTS.get(gate_name)
-    if kind is None:
+    gate_required = _P0_GATE_REQUIRED_CONTEXT.get(gate_name, ())
+    # A GATE-KEYED REQUIREMENT DOES NOT NEED AN ARGV CONTRACT. The early return
+    # used to be `if kind is None: return None`, which made this roster
+    # unreachable for every gate invoked under the default project-positional
+    # convention -- i.e. for most of the umbrella. `_P0_GATE_REQUIRED_CONTEXT`
+    # is keyed by GATE precisely because the question it asks is about the
+    # gate's subject, not about its CLI shape, so a gate with a requirement is
+    # asked it either way. A gate with NEITHER a contract nor a requirement is
+    # unchanged: it still runs, fail-closed.
+    if kind is None and not gate_required:
         return None
     ctx = _p0_contract_context(project, rtl_dir)
     required = (*_P0_CONTRACT_REQUIRED_CONTEXT.get(kind, ()),
-                *_P0_GATE_REQUIRED_CONTEXT.get(gate_name, ()))
+                *gate_required)
     missing = []
     for name in required:
         if ctx.get(name):
@@ -7716,7 +7746,12 @@ def _p0_contract_na_reason(gate_name: str,
         f"invocation_contract={kind!r}, but the required declaration(s) "
         f"{', '.join(missing)} are absent. The gate was not given fabricated "
         f"placeholder arguments; a project that declares them keeps the gate "
-        f"live.")
+        f"live."
+        if kind is not None else
+        f"N/A from the design declaration roster: {gate_name} requires "
+        f"{', '.join(missing)}, and this run produced none. The gate was not "
+        f"given a fabricated placeholder; a run that produces it keeps the "
+        f"gate live and blocking.")
 
 
 def _p0_contract_argv(gate_name: str,
@@ -8983,8 +9018,15 @@ def _run_structural_rtl_gates(project: Path,
                         gate_name, "SKIP", _contract_na,
                         {"skip_kind": "declaration-not-present",
                          "applicability_source": "generated L-doc roster",
+                         # A gate outside the closed contract table is invoked
+                         # under the default project-positional convention;
+                         # a declaration-derived N/A names the contract it
+                         # would have run under either way (lander, R-0915-15:
+                         # test_issue1968_replaces_not_invocable_with_declared_na
+                         # reads this field on every such record).
                          "invocation_contract":
-                         _STRUCTURAL_GATE_INVOCATION_CONTRACTS.get(gate_name)},
+                         _STRUCTURAL_GATE_INVOCATION_CONTRACTS.get(
+                             gate_name, "project-positional")},
                         reason_class=_reason_taxonomy.DESIGN_DECLARED_NA)))
                 continue
             if gate_name in analog_skip_gates:
