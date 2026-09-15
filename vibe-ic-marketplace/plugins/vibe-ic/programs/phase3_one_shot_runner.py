@@ -25210,56 +25210,69 @@ def _ext_wire_census_tcl() -> str:
 
 
 def _ext_wire_relay_tcl() -> str:
-    """Drop the wiring on exactly the censused extension nets, for the router.
+    """RETIRED: census only. Drops nothing, on any deck.
 
-    Emitted ONLY into a deck that re-routes in the same pass. See
-    `_ext_wire_relay_deferred_tcl` for the other half and why it is not
-    symmetric.
+    THE RELAY IS WITHDRAWN AND THE CENSUS STAYS. What it was for was DRT-1010 --
+    `Unsupported non-orthogonal wire` on a net whose stored wire carries a
+    POINT_EXT op. Two measurements retired it, both on `subservient` x
+    gf180mcuD, lane icsub2, r14 on the tree that shipped the relay:
 
-    It relays THROUGH `_vibeic_spare_safe_clear_net`, never with its own
-    `odb::dbWire_destroy` -- that helper is the one permitted site, it refuses
-    POWER and GROUND nets by their own SigType, and `_drop_protected 1` is the
-    same named exception the spare relay already uses. The INSTANCES are
-    untouched: nothing here resizes, moves or un-protects a cell.
+    1. THE ERROR IS COSMETIC. `DRT-0702 Post-route verification: 0 violation(s)`
+       in EVERY session that ran one (5 of 5), the gates' own
+       `routed_router.drc.rpt` is 0 BYTES, and NO GATE READS DRT-1010: the only
+       file in the project that mentions it is the raw OpenROAD transcript
+       copied to `reports/phase3/drc_router.rpt`, on which `drc_report_check`
+       PASSES. sha256's run7 is the same shape (58 nonfatal DRT-1010, DRT-0702
+       0 violations). It is a defect in how `drt` READS a wire's op stream --
+       it pairs a POINT_EXT with the point BEFORE the previous one -- and the
+       fix belongs in the router's reader, which is filed to the fork.
 
-    It iterates the CENSUS LIST, not the block, so a net without an extension op
-    is never touched. An empty census emits a loop over an empty list and says
-    `EXT_WIRE_RELAID: 0`."""
+    2. RELAYING DOES NOT CURE IT AND COSTS REAL TIMING. The failing net in r14,
+       `o_sram_addr[7]`, was IN the first child's 31-net census, WAS relaid, and
+       came back still tripping DRT-1010: the router simply lays another wire
+       whose op stream the same reader mis-pairs. Meanwhile the relay drops and
+       re-lays 31 LONG DIE-EDGE IO nets, and the route that then enters sign-off
+       repair is a worse one. Same RTL (c6378fa7), same SDC, same input, one
+       lane, `SHIP_WNS_BEFORE`:
+
+           r9/r10/r11  -3.0296530586256614      (no ext relay)
+           r12/r13     -3.227233682746434
+           r14         -3.636286041864957       (ext relay live)
+
+       and the convergence loop plateaued with pass2 worse than pass1
+       (-0.9366 -> -0.4953 -> -0.6665) where r13 converged in four improving
+       passes to +0.0324. `sta_corner` SS went +0.03 (closed) -> -0.50
+       (VIOLATED). The relay cost 0.409 ns of starting slack and a closed
+       sign-off, to work around an error nothing reads.
+
+    So this emits the census COUNT and a named retirement, and destroys no
+    wire. The disclosure is the point: a reader must still be able to see how
+    many nets carry an extension op, and that nothing was done about them ON
+    PURPOSE, pending the reader fix. Silence would read as "there were none".
+
+    `_ext_wire_relay_deferred_tcl` delegates here: the asymmetry between a deck
+    that re-routes and one that does not is retired with the relay, because
+    neither drops anything now."""
     return (
-        "# The censused nets only -- a net with no extension op is not touched.\n"
-        "set _ext_relaid 0\n"
-        "foreach _ext_nm $_ext_nets {\n"
-        "  set _ext_rn [$_ext_blk findNet $_ext_nm]\n"
-        "  if {$_ext_rn eq \"NULL\"} { continue }\n"
-        "  if {[catch {set _ext_r "
-        "[_vibeic_spare_safe_clear_net $_ext_rn 1]} _ext_we]} {\n"
-        "    puts \"EXT_WIRE_RELAY_NONFATAL $_ext_nm: $_ext_we\"\n"
-        "  } elseif {$_ext_r eq \"CLEARED\"} { incr _ext_relaid }\n"
-        "}\n"
-        "puts \"EXT_WIRE_RELAID: $_ext_relaid net(s) dropped for the router to "
-        "lay again (of [llength $_ext_nets] carrying an extension op); the "
-        "instances are untouched\"\n")
+        "# R-0915-33: the relay is RETIRED. Census only; no wire is destroyed.\n"
+        "puts \"EXT_WIRE_RELAY_RETIRED: [llength $_ext_nets] net(s) carry an "
+        "extension op and NONE was dropped. DRT-1010 is a cosmetic "
+        "router-reader error -- DRT-0702 reports 0 violation(s), no gate reads "
+        "it -- and relaying these nets did not cure it while costing real "
+        "timing (MEASURED r14: SHIP_WNS_BEFORE -3.03 -> -3.64, sta_corner SS "
+        "+0.03 -> -0.50). Pending the router-reader fix\"\n")
 
 
 def _ext_wire_relay_deferred_tcl() -> str:
-    """Census, but do NOT drop, in a deck that may not route afterwards.
+    """RETIRED with its sibling; delegates, so there is ONE text.
 
-    MEASURED, and it is why this is not symmetric with `_ext_wire_relay_tcl`:
-    run7's `pnr_sdr_adopt_2` ran ZERO `detailed_route` (DRT-0167 0, DRT-0702 0)
-    while still restoring a checkpoint. Dropping a conductor there would ship a
-    net -- including a top-level IO net -- with no wire at all, which is far
-    worse than the reader defect being worked around.
-
-    So these decks get the census, by name and count, and an explicit refusal
-    naming the reason. Silence here would read as "there were none"."""
-    return (
-        "if {[llength $_ext_nets]} {\n"
-        "  puts \"EXT_WIRE_RELAY_DEFERRED: [llength $_ext_nets] net(s) carry an "
-        "extension op and were NOT dropped, because this deck does not re-route "
-        "in the same pass (MEASURED: run7 pnr_sdr_adopt_2 ran 0 detailed_route) "
-        "and dropping a wire nothing re-lays would ship a net with no "
-        "conductor\"\n"
-        "}\n")
+    This half existed because a deck that may not route afterwards must not
+    drop a conductor -- MEASURED, run7's `pnr_sdr_adopt_2` ran ZERO
+    `detailed_route` while still restoring a checkpoint, so a drop there would
+    have shipped a top-level IO net with no wire at all. That reasoning is
+    still true and is now moot: under R-0915-33 NO deck drops anything, so the
+    two halves say the same thing and say it once."""
+    return _ext_wire_relay_tcl()
 
 
 def _spare_relay_restored_wiring_tcl(plan: Optional[Dict[str, Any]]) -> str:
