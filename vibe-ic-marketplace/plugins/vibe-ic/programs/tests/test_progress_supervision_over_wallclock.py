@@ -187,6 +187,22 @@ def test_lec_docker_does_not_hand_the_step_budget_to_the_hard_ceiling(
     lec_run._docker(_NO_SUCH_CONTAINER, "yosys -s /work/equiv.ys", timeout=73,
                     marker="/work/equiv.ys")
 
+    # (0) THE STUB WAS ACTUALLY REACHED. Every assertion below reads `seen`,
+    #     and three of them read it with a DEFAULT — so a `_docker` that never
+    #     routed through the supervised dispatch at all would satisfy them
+    #     vacuously and this test would report green on a mechanism it never
+    #     exercised. It is checked FIRST, and by name, because the way it broke
+    #     (a sibling test file leaking a second `_docker_watchdog` into
+    #     `sys.modules`, so the monkeypatch landed on a module object
+    #     `lec_run._docker` no longer imports) surfaced 80 lines later as a bare
+    #     `KeyError`, which names neither the cause nor the vacuity.
+    assert seen, (
+        "`lec_run._docker` did not route a MARKED command through "
+        "`_docker_watchdog.run_docker_supervised` — the stub was never called, "
+        "so nothing below this line measures anything. Either the marked path "
+        "is gone, or the patched module object is not the one `_docker` "
+        "imports at call time")
+
     # (1) WHATEVER THE CEILING IS, IT IS A NUMBER — recorded, never a kill.
     ceiling = seen.get("hard_ceiling_s", _wd.DEFAULT_HARD_CEILING_S)
     assert isinstance(ceiling, (int, float)) and ceiling > 0, (
