@@ -120,10 +120,42 @@ MUST_NOT_BE_DESIGN_NA = (
 
 # ── direction 1: an honest absence is N/A-by-declaration ──────────────────
 
+#: A record that carries a DECLARED BASIS. The 2026-09-15 correction: the
+#: sentence is a clue, never its own basis — see `_declared_basis`.
+WITH_BASIS = {"skip_kind": "declaration-not-present"}
+
+
 @pytest.mark.parametrize("message", MUST_BE_DESIGN_NA)
 def test_a_subject_the_design_does_not_have_is_design_declared_na(message):
-    got = R.infer_nonverdict_reason(message=message)
+    got = R.infer_nonverdict_reason(message=message, evidence=WITH_BASIS)
     assert got == R.DESIGN_DECLARED_NA, (got, message)
+
+
+@pytest.mark.parametrize("message", MUST_BE_DESIGN_NA[:6])
+def test_the_same_sentence_WITHOUT_a_basis_stays_incomplete(message):
+    """THE #1978 CONTRACT, and the correction to this file's first landing.
+    A banner-only rc-2 — a gate that merely scanned and found nothing,
+    `skip_kind: input-missing` — is INCOMPLETE / EXECUTION_ERROR, never an
+    unearned N/A. The sentence was a better clue than the old default; a clue
+    is not a declaration."""
+    got = R.infer_nonverdict_reason(
+        verdict="SKIP", message=message,
+        evidence={"exit_code": 2, "skip_kind": "input-missing"})
+    assert got == R.EXECUTION_ERROR, (got, message)
+    assert got not in R.SKIP_ELIGIBLE
+
+
+@pytest.mark.parametrize("kind", sorted(R.DECLARED_ABSENCE_SKIP_KINDS))
+def test_every_declared_absence_kind_is_a_basis(kind):
+    assert R._declared_basis({"skip_kind": kind}) is True
+
+
+def test_input_missing_is_not_a_basis():
+    assert R._declared_basis({"skip_kind": "input-missing"}) is False
+    assert R._declared_basis({}) is False
+    assert R._declared_basis(None) is False
+    assert R._declared_basis({"declared_absence_basis":
+                              "L20 declares dft_present false"}) is True
 
 
 def test_and_that_class_is_skip_eligible_so_P0_can_reach_PASS():
@@ -139,7 +171,7 @@ def test_and_that_class_is_skip_eligible_so_P0_can_reach_PASS():
 
 @pytest.mark.parametrize("message", MUST_NOT_BE_DESIGN_NA)
 def test_a_gate_that_could_not_read_its_own_source_is_not_design_na(message):
-    got = R.infer_nonverdict_reason(message=message)
+    got = R.infer_nonverdict_reason(message=message, evidence=WITH_BASIS)
     assert got != R.DESIGN_DECLARED_NA, (got, message)
     assert got not in R.SKIP_ELIGIBLE, (got, message)
 
@@ -150,13 +182,15 @@ def test_a_crash_or_a_timeout_is_still_an_execution_error(verdict):
     """And the message cannot talk it out of that: the verdict branch is read
     before any prose."""
     got = R.infer_nonverdict_reason(
-        verdict=verdict, message="no CRC module found in RTL")
+        verdict=verdict, message="no CRC module found in RTL",
+        evidence=WITH_BASIS)
     assert got == R.EXECUTION_ERROR, (verdict, got)
 
 
 def test_a_traceback_is_an_execution_error():
     got = R.infer_nonverdict_reason(
-        message="Traceback (most recent call last): KeyError: 'modules'")
+        message="Traceback (most recent call last): KeyError: 'modules'",
+        evidence=WITH_BASIS)
     assert got == R.EXECUTION_ERROR, got
 
 
@@ -167,7 +201,7 @@ def test_a_zero_denominator_stays_a_zero_denominator():
     for m in ("K5 census: docs loaded NONE; 0/13 checks examined anything",
               "examined 0 A1-A9 step obligation(s) evaluated",
               "0 of 0 examined"):
-        got = R.infer_nonverdict_reason(message=m)
+        got = R.infer_nonverdict_reason(message=m, evidence=WITH_BASIS)
         assert got == R.ZERO_DENOMINATOR, (got, m)
         assert got not in R.SKIP_ELIGIBLE
 
