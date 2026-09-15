@@ -43,6 +43,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import analog_corner_admission as aca            # noqa: E402
+# vibe-ic#1128 — "docker is not on this host" means A VERIFICATION DID NOT
+# HAPPEN, not that one passed. Declared through `not_verified_tier` so the
+# run's roll-up cannot count this site under `passed`, and so the reader is
+# told which command would make it answerable.
+from not_verified_tier import skip_not_verified  # noqa: E402
+
+DOCKER_REMEDY = "install docker, or run this suite on a host that has the daemon"
 
 
 def _template_used():
@@ -83,15 +90,21 @@ def test_the_label_key_is_quoted_the_way_a_go_template_quotes_it():
     assert '.Config.Labels "vibeic.corner.token"' in fmt, repr(fmt)
 
 
-@pytest.mark.skipif(shutil.which("docker") is None,
-                    reason="NOT_VERIFIED: docker is not on this host, so the "
-                           "template cannot be handed to the parser that "
-                           "rejected it")
 def test_docker_itself_parses_the_template():
     """THE ARM THAT WOULD HAVE CAUGHT IT: hand the template to Docker instead
     of asserting what it looks like. Run against the daemon's own `docker`
     binary with no container — a parse error is reported before any lookup, so
-    this needs no running container and no image."""
+    this needs no running container and no image.
+
+    Where there is no `docker` binary this does not quietly pass: it reports
+    NOT_VERIFIED by name through `not_verified_tier`, because the whole point
+    of this test is that the string is checked by the parser that rejected it
+    rather than by another assertion about its characters.
+    """
+    if shutil.which("docker") is None:
+        skip_not_verified(
+            "docker is not on this host, so the template cannot be handed to "
+            "the Go template parser that rejected it", DOCKER_REMEDY)
     fmt = _template_used()
     cp = subprocess.run(["docker", "inspect", "-f", fmt, "__vibeic_absent__"],
                         capture_output=True, text=True, timeout=30)
