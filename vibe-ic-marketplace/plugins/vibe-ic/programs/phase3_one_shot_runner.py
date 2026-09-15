@@ -48307,6 +48307,24 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
         except Exception as _mcf_exc:
             notes.append(f"si_mcf_sta non-fatal: {_mcf_exc}")
 
+    # R-0915-41 — WHEN THE ENVELOPE IS OPEN, PLAN AND RECORD THE ONE PASS THAT
+    # WOULD CLOSE IT. `si_mcf_sta` reports a conservative crosstalk-delay bound
+    # and nothing closed it; on subservient that bound is this design's last
+    # real wall (step 27 FAIL -> 28/31/32 VOIDED -> 29/30 cascade), measured
+    # identically across four trees. The producer is NONFATAL and NEVER applies
+    # anything in place: with no execution seam supplied it PLANS, records the
+    # BEFORE trajectory and says `NOT_EXECUTED` -- which a reader must be able
+    # to tell apart from "the pass ran and changed nothing".
+    try:
+        import si_mcf_repair as _si_rep                       # noqa: PLC0415
+        _si_rec = _si_rep.run_once(project, container=container)
+        _si_out = _pl.report_path(project, "si_mcf_repair.json")
+        if _si_out.is_file():
+            written.append(str(_si_out))
+        notes.append(f"si_mcf_repair: {_si_rec.get('decision')}")
+    except Exception as _si_exc:                              # noqa: BLE001
+        notes.append(f"si_mcf_repair non-fatal: {_si_exc}")
+
     # Step 29 self-report when no results.log was produced.
     #
     # v1.7.37 — this used to write ONE canned marker for EVERY no-results.log
