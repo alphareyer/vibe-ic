@@ -285,7 +285,44 @@ _CORNER_CASES: List[Tuple[str, str, List[str]]] = [
       r"(?:reset|重置|復位|歸零)[^\n]{0,24}"
       r"(?:計算|運算|操作|傳輸|轉換|執行)[^\n]{0,4}(?:進行中|中途|途中|期間|中)",
       r"(?:計算|運算|操作|傳輸|轉換|執行)[^\n]{0,4}(?:進行中|中途|途中|期間)"
-      r"[^\n]{0,24}(?:reset|重置|復位|assert|拉起)"]),
+      r"[^\n]{0,24}(?:reset|重置|復位|assert|拉起)",
+      # THE ASSERTION ITSELF AS THE TIME WINDOW, which is how a spec states
+      # this item when it has no separate word for "operation". MEASURED on
+      # `subservient` x gf180mcuD, whose L2 says, of `i_rst`:
+      #     同步 reset, active-high;assert 期間 SERV 內部 SERV-MINI 狀態歸零、
+      #     SRAM 內容保留
+      #   ("during the assert, the internal state is zeroed and the SRAM
+      #    contents are preserved")
+      # and whose L3 says `assert 後一個 cycle SERV 內部歸零`. Both state
+      # exactly what happens to in-flight state when reset arrives — which is
+      # the item — and neither could match, because every zh-Hant pattern
+      # above requires a CHINESE operation noun (計算/運算/…) while these
+      # specs write the ENGLISH verb `assert` beside the Chinese time word.
+      # The item was UNCOVERABLE for a spec of that shape, which is a checker
+      # defect and not a design gap.
+      #
+      # FOUR HALVES ARE REQUIRED and that is what keeps it honest: a reset
+      # token, an ASSERT token, a time window, and a STATE EFFECT. Measured
+      # against the negative controls in this file's test: a spec that merely
+      # names a reset pin, one that merely says reset is active-high, one
+      # whose "assert 期間" is about DATA rather than reset, and one that says
+      # "reset 後請等待 10 個 cycle" (a wait, no state effect) all still fail.
+      r"(?:reset|重置|復位)[^\n]{0,40}?(?:assert|拉起|拉高|置位)[^\n]{0,8}?"
+      r"(?:期間|後|中|時)[^\n]{0,40}?"
+      r"(?:歸零|清零|清除|捨棄|中止|停止|保留|不受影響)",
+      # AND THE SAME STATEMENT WITHOUT AN `assert` TO ANCHOR IT.
+      # `reset 期間，管線中的交易一律中止` states the item as plainly as the
+      # assert-window spelling does, and the pattern above cannot see it. The
+      # two are kept SEPARATE rather than merged into one loose regex so each
+      # can be argued, and broken, on its own: this one has no assert token to
+      # bound the distance, so it pays for that with a much tighter window
+      # (the time word must follow the reset token almost immediately) and a
+      # narrower time vocabulary — 期間/後 only, never the bare 中 or 時, which
+      # are far too common in Chinese to anchor anything. A state EFFECT is
+      # still required, which is what keeps `reset 後請等待 10 個 cycle` (a
+      # wait, not an effect on state) correctly reported.
+      r"(?:reset|重置|復位)[^\n]{0,4}?(?:期間|後)[^\n]{0,40}?"
+      r"(?:歸零|清零|清除|捨棄|中止|停止|不受影響)"]),
     ("back-to-back", "back-to-back transactions",
      [r"back[\s-]*to[\s-]*back", r"consecutive\s+(?:transaction|transfer|request|cycle)",
       r"(?:no|zero)\s+(?:idle|gap)\s+(?:cycle|between)", r"successive\s+\w+",

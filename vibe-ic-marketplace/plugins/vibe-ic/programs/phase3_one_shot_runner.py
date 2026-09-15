@@ -24848,6 +24848,95 @@ def _spare_reassert_dont_touch_tcl(plan: Optional[Dict[str, Any]]) -> str:
     return "\n".join(lines) + "\n"
 
 
+#: An `add_global_connection` line, taken from the deck VERBATIM.
+_ADD_GLOBAL_CONNECTION_RE = re.compile(r"^\s*add_global_connection\b.*$", re.M)
+
+
+def _pg_global_connect_reassert_tcl(deck: str) -> str:
+    """Re-apply the PDN's global CONNECTION RULES in a session restored from a
+    checkpoint DEF.
+
+    THE SAME CLASS OF LOSS `_spare_reassert_dont_touch_tcl` FOUND, on the other
+    invariant the elided region establishes. A checkpoint-seeded deck elides the
+    floorplan..detailed_route region because the checkpoint already contains its
+    RESULT; but `add_global_connection` / `global_connect` are SESSION STATE,
+    not DEF geometry, so they do not come back with it. A restored session
+    therefore has no rule saying which pin patterns belong to VDD and VSS — and
+    every instance it goes on to create (CTS buffers, DRV repair buffers) gets
+    power/ground terminals owned by no net.
+
+    MEASURED 2026-09-15 (lane icsub2) on `subservient` x gf180mcuD, same RTL
+    (sha c6378fa74a…), same PDK, same container, same host, only main moved::
+
+        main 2f230524b   pnr PASS, GDS 8,142,856 B, 9 of 9 sign-off gates,
+                         ZERO occurrences of PG_TERMINALS_ON_NO_NET
+        main 7c3bab59c   pnr FAIL
+                         PG_TERMINALS_ON_NO_NET: 30150 of 41498 power/ground
+                         instance terminals (72.7%) are attached to no net
+                         after routing (e.g. masters
+                         gf180mcu_fd_sc_mcu7t5v0__clkbuf_16 …)
+                         -> no GDS -> drc SKIP, lvs SKIP,
+                            sta_signoff/sta_corner/sta_record FAIL
+
+    and in the run's own artefacts, which is where the mechanism is visible::
+
+        phase3/stage3/pnr/pnr.tcl                    6 add_global_connection
+                                                     + global_connect  (:432-438)
+        phase3/stage3/pnr/sdr_child_postroute_drv_repair.tcl      0  +  0
+        phase3/stage3/pnr/sdr_child_postroute_drv_reconverge.tcl  0  +  0
+
+    The gate that caught it says the remedy itself: "Re-apply the global-connect
+    rules after the last instance-creating step and re-route."
+
+    THE RULES ARE TAKEN FROM THE DECK, NOT REBUILT. `_build_pdn_tcl` derives
+    them from the PDK's own LEFs, the macro LEFs and the IO library; rebuilding
+    them here would be a SECOND derivation that could disagree with the one the
+    parent session actually ran. Re-running the parent's own lines cannot.
+
+    NONFATAL AND DISCLOSED: each line is caught individually, the count is
+    printed, and a deck carrying no such line yields an empty string — so a
+    design with no PDN emits a byte-identical child deck.
+
+    chip-AGNOSTIC: every net and pattern comes from the deck this run wrote.
+    """
+    rules = [m.group(0).strip() for m in _ADD_GLOBAL_CONNECTION_RE.finditer(deck)]
+    if not rules:
+        return ""
+    lines = [
+        "# === PDN: RE-ASSERT the global connection rules after a checkpoint",
+        "# restore. The instances and the stripe geometry came back with the",
+        "# DEF; these rules are session state and did not, so anything this",
+        "# session creates would otherwise have PG terminals owned by no net.",
+        "# See _pg_global_connect_reassert_tcl.",
+        "set _pg_rules_reasserted 0",
+    ]
+    for idx, rule in enumerate(rules):
+        lines.append(
+            f"if {{[catch {{{rule}}} _pgc_{idx}]}} {{ "
+            f"puts \"PDN_GLOBAL_CONNECT_REASSERT_NONFATAL: $_pgc_{idx}\" "
+            f"}} else {{ incr _pg_rules_reasserted }}")
+    lines.append("if {[catch {global_connect} _pgc_apply]} { "
+                 "puts \"PDN_GLOBAL_CONNECT_APPLY_NONFATAL: $_pgc_apply\" }")
+    lines.append(
+        f'puts "PDN_GLOBAL_CONNECT_REASSERTED: $_pg_rules_reasserted of '
+        f'{len(rules)}"')
+    return "\n".join(lines) + "\n"
+
+
+def _after_restore_tcl(deck: str, spare_plan: Optional[Dict[str, Any]]) -> str:
+    """Everything a checkpoint-restored session must re-establish, in one place.
+
+    Both invariants the elided floorplan..detailed_route region set up are
+    SESSION STATE that a DEF cannot carry: the spare pool's `dont_touch`
+    (#2255) and the PDN's global connection rules (R-0915-12). They are
+    assembled here so a third one cannot be added to one seam and forgotten at
+    the other two — `_write_sdr_child_decks`, `_pnr_adopt_sdr_candidates` and
+    `_pnr_resume_after_fatal_signal` all restore, and all three call this.
+    """
+    return (_spare_reassert_dont_touch_tcl(spare_plan)
+            + _pg_global_connect_reassert_tcl(deck))
+
+
 def _sdr_txn_dir_c(out_dir_c: str, stage: str) -> str:
     return f"{out_dir_c}/{_SDR_TXN_DIRS[stage]}"
 
@@ -27545,7 +27634,7 @@ def _write_sdr_child_decks(pnr_tcl: Path, out_dir: Path, container: str,
     # The child mutates. Whatever the shipping session protected before the
     # checkpoint has to be protected in the child too, or the candidate it
     # proposes was built without a guard the parent was running under.
-    after_restore = _spare_reassert_dont_touch_tcl(spare_plan)
+    after_restore = _after_restore_tcl(deck, spare_plan)
     for stage in _SDR_CHILD_OMIT:
         txn = out_dir / _SDR_TXN_DIRS[stage]
         ckpt_c = _to_container_path(str(txn / "pre_repair.def"), container)
@@ -27658,7 +27747,7 @@ def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
         try:
             tail_text = _build_pnr_resume_tcl_text(
                 deck, checkpoint_def_c=cand_c, omit_stages=list(omitted),
-                after_restore_tcl=_spare_reassert_dont_touch_tcl(spare_plan))
+                after_restore_tcl=_after_restore_tcl(deck, spare_plan))
         except (PnrResumeUnavailable, OSError) as exc:
             rec["status"] = "FAILED"
             rec["reason"] = f"adopt tail could not be derived: {exc}"
@@ -27807,11 +27896,12 @@ def _pnr_resume_after_fatal_signal(*, project: Path, top: str, container: str,
             f"({', '.join(sorted(_PNR_NONFATAL_STAGES))}) are omittable")
         return rec
     try:
+        _deck = pnr_tcl.read_text(errors="replace")
         resume_text = _build_pnr_resume_tcl_text(
-            pnr_tcl.read_text(errors="replace"),
+            _deck,
             checkpoint_def_c=_to_container_path(str(ckpt), container),
             omit_stages=[stage],
-            after_restore_tcl=_spare_reassert_dont_touch_tcl(spare_plan))
+            after_restore_tcl=_after_restore_tcl(_deck, spare_plan))
     except (PnrResumeUnavailable, OSError) as e:
         rec["status"] = "NOT_ATTEMPTED"
         rec["reason"] = f"resume Tcl could not be derived: {e}"
@@ -57720,6 +57810,51 @@ def main() -> int:
     except Exception as _pre_exc:      # best-effort; never crash finalize
         print(f"[WARN] pre-summary step record non-fatal: {_pre_exc}",
               file=sys.stderr)
+
+    # THE RUN WRITES THE DOCUMENTS THE FLOW SAYS THE RUN WRITES (#icsub2).
+    # Placed HERE — after every phase-3 step, before the final summary and
+    # before the completion-audit refresh below — because this is the first
+    # point at which every artefact those producers read exists.
+    #
+    # MEASURED on `subservient` x gf180mcuD: the completion audit reported
+    # "PRODUCER GAP: no pre-audit producer supplied these paths; wire them
+    # into the owning runner before claiming this step complete" on ELEVEN
+    # steps, and for a well-defined subset the flow had ALREADY NAMED the
+    # producer — the step lists the program under `programs:`, its own gate
+    # clause invokes that same program with `--json <path>`, and `<path>` is
+    # one of the step's `required_outputs`. Nothing in the run ran it, the
+    # AUDITOR's evaluation of the gate did, and the audit then correctly
+    # refused its own output as evidence. Three steps (26, 28, 31) stop being
+    # MISSING once the run produces them.
+    #
+    # THIS IS THE RUNNER, NOT THE AUDITOR, and that is the whole distinction:
+    # a run executing the producers its own flow declares is what a flow does;
+    # an auditor executing them and then grading its own output is
+    # self-certification. `flow_compliance_check` does not import this.
+    #
+    # It never overwrites the run's own work and never manufactures work for a
+    # step this delivery does not have — see `flow_declared_producer_run.owed`.
+    # Its own rc is RECORDED, not gating: the step gates re-run these programs
+    # and keep their verdicts.
+    try:
+        import subprocess as _sp_dp
+        _dp = _sp_dp.run(
+            [sys.executable, str(PROGRAMS_DIR / "flow_declared_producer_run.py"),
+             str(project)],
+            timeout=_pl.audit_timeout_s(project) + 120,
+            check=False, capture_output=True, text=True)
+        for _ln in (_dp.stdout or "").strip().splitlines():
+            print(f"[phase3] {_ln}")
+        if _dp.returncode != 0:
+            print(f"[INFO] flow_declared_producer_run rc={_dp.returncode}: a "
+                  f"declared producer could not be EXECUTED (not a verdict "
+                  f"about the design); {(_dp.stderr or '').strip()[-300:]}",
+                  file=sys.stderr)
+    except Exception as _dp_exc:  # nosec — must not abort finalize
+        print(f"[WARN] flow_declared_producer_run did NOT run ({_dp_exc}); the "
+              f"documents the flow declares this run's steps to produce may "
+              f"still be authored by the audit and refused as its own "
+              f"evidence", file=sys.stderr)
 
     fs_ok = _pl.emit_final_summary(project, PROGRAMS_DIR)
 

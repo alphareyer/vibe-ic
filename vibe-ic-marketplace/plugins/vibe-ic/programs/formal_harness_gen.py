@@ -852,9 +852,77 @@ def derive_reset_props(iface: ModuleIface, reset_name: str, active_low: bool
 
 
 # ── harness emission ────────────────────────────────────────────────────────
+#: The ONE file in `formal/` this generator never writes. See the comment in
+#: `emit_harness` for why it has to exist and why it has to be a fragment.
+EXPERT_PROPERTIES_SVH = "formal_expert_properties.svh"
+
+
+def _expert_closed_obligations(formal_dir: Path, unresolved: List[dict],
+                               harness_text: str) -> List[dict]:
+    """The obligations the `formal-verify` receipt has genuinely discharged.
+
+    An entry is returned only when ALL of these hold, and each one is a way a
+    receipt can be wrong rather than a formality:
+
+      * the receipt exists and says `invocation_status: INVOKED` -- a file
+        that records no invocation is not one;
+      * it carries a disposition FOR THIS OBLIGATION ID, `status: AUTHORED`,
+        naming a property. Closure by omission is what the immutable request
+        IDs exist to prevent;
+      * the named property is DECLARED in the harness text this run emitted,
+        or in the expert fragment that harness includes. A receipt naming a
+        property nobody wrote closes nothing.
+
+    Returns rows in `covered_obligations` shape, authored by `formal-verify`.
+    """
+    receipt_path = formal_dir / "formal_expert_review.json"
+    try:
+        receipt = json.loads(receipt_path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(receipt, dict):
+        return []
+    if str(receipt.get("invocation_status", "")).upper() != "INVOKED":
+        return []
+    dispositions = {
+        str(row.get("id")): row
+        for row in (receipt.get("dispositions") or [])
+        if isinstance(row, dict) and str(row.get("id", "")).strip()
+    }
+    if not dispositions:
+        return []
+    text = harness_text
+    frag = formal_dir / EXPERT_PROPERTIES_SVH
+    if frag.is_file():
+        try:
+            text += "\n" + frag.read_text(errors="replace")
+        except OSError:
+            pass
+    closed: List[dict] = []
+    for row in unresolved:
+        oid = str(row.get("id", "")).strip()
+        d = dispositions.get(oid)
+        if not d or str(d.get("status", "")).upper() != "AUTHORED":
+            continue
+        prop = str(d.get("property", "")).strip()
+        if not prop:
+            continue
+        if not re.search(r"\bproperty\s+" + re.escape(prop) + r"\b", text):
+            continue
+        out = dict(row)
+        out.update({"property": prop, "status": "AUTHORED",
+                    "author": "formal-verify",
+                    "receipt": receipt_path.name})
+        if d.get("reason"):
+            out["disposition_reason"] = str(d["reason"])
+        closed.append(out)
+    return closed
+
+
 def emit_harness(iface: ModuleIface, clock: str, reset_name: str,
                  active_low: bool, props: List[ResetProp],
-                 assertion_form: str = "concurrent") -> str:
+                 assertion_form: str = "concurrent",
+                 expert_properties: str = "") -> str:
     """Emit `formal_<top>.sv`: instantiate the DUT with all ports, drive every
     non-clock input as free `(* anyseq *)`, and assert each output's reset-safety
     invariant under the guard appropriate to its FF's reset style. Pure."""
@@ -976,6 +1044,38 @@ def emit_harness(iface: ModuleIface, clock: str, reset_name: str,
     if prop_lines:
         body_parts.append("")
     body_parts += assert_lines
+    # THE EXPERT ROLE'S PROPERTIES, IF THIS RUN HAS ANY.
+    #
+    # WHY: measured 2026-09-15 on `subservient` x gf180mcuD. This program
+    # emits `formal_authoring_request.json` asking the `formal-verify` role to
+    # author properties for obligations it cannot discharge itself --
+    #   "invoke formal-verify on these exact IDs and record each authored
+    #    property in property_contract.json before rerunning Step 5"
+    # -- and `formal_property_run` reads a receipt at
+    # `formal_expert_review.json` naming each authored property. So the flow
+    # REQUESTS expert properties and RECORDS them.
+    #
+    # It had nowhere for them to LIVE. The only file carrying properties is
+    # this harness, and the write below is an unconditional
+    # `out_path.write_text(harness)` -- so a property the expert authored was
+    # destroyed by the next run of the producer that asked for it, and the
+    # receipt then named a property no file contained. A request with no
+    # channel to answer on is a request that can only ever be reported
+    # unanswered, which is exactly what step 5 reported:
+    #   EXPERT_FALLBACK_NOT_INVOKED (#1974)
+    #
+    # The channel is a file this program never writes and always includes. It
+    # is a `.svh` FRAGMENT, included INSIDE the harness module, so the
+    # expert's properties see the same nets the generated ones do -- the DUT's
+    # ports, `f_past_valid`, and the reset-activity registers above -- without
+    # a second instantiation of the DUT or a hierarchical reference.
+    if expert_properties:
+        body_parts.append("")
+        body_parts.append(
+            f"    // Expert-authored properties, included and never rewritten")
+        body_parts.append(
+            f"    // by this generator. See {EXPERT_PROPERTIES_SVH}.")
+        body_parts.append(f'    `include "{expert_properties}"')
     body = "\n".join(bp for bp in body_parts if bp is not None)
 
     return (
@@ -1349,11 +1449,18 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
     active_low = analysis["active_low"]
     props = analysis["props"]
 
-    harness = emit_harness(iface, clock, reset_name, active_low, props,
-                           assertion_form=assertion_form)
     out_path = out or (
         (_pl.formal_dir(project) / f"formal_{dut_top}.sv")
         if (project and _pl) else Path(f"formal_{dut_top}.sv"))
+    # PRESENT, not assumed: the include is emitted only when the fragment is
+    # actually on disk, so a design with no expert properties gets a
+    # byte-identical harness to the one it got before this existed, and a
+    # harness can never `` `include `` a file sby would fail to stage.
+    _expert = out_path.parent / EXPERT_PROPERTIES_SVH
+    harness = emit_harness(iface, clock, reset_name, active_low, props,
+                           assertion_form=assertion_form,
+                           expert_properties=(EXPERT_PROPERTIES_SVH
+                                              if _expert.is_file() else ""))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(harness)
     generated = [{
@@ -1365,6 +1472,30 @@ def generate(project: Optional[Path] = None, top: Optional[str] = None,
         "author": "formal_harness_gen",
     } for idx, p in enumerate(props, 1)]
     unresolved = declared
+    # THE EXPERT'S ANSWER, READ BACK AND RE-VERIFIED.
+    #
+    # This program writes `formal_authoring_request.json` telling the
+    # `formal-verify` role to author properties for the obligations it cannot
+    # discharge, and `formal_property_run` reads a receipt at
+    # `formal_expert_review.json` naming each authored property. But the list
+    # `formal_property_run` measures completion against is THIS program's
+    # `property_contract.json`, and nothing moved an obligation out of it --
+    # so an expert could author the properties, prove them, and file a
+    # correct receipt, and the contract would still read 3 UNAUTHORED and the
+    # run still report `EXPERT_FALLBACK_NOT_INVOKED`. MEASURED on
+    # `subservient` x gf180mcuD, with all four assertions proved unbounded.
+    #
+    # A RECEIPT CANNOT CLOSE AN OBLIGATION BY ASSERTION. The disposition must
+    # name a property, and THAT PROPERTY MUST BE IN THE HARNESS THIS RUN JUST
+    # EMITTED -- which, for an expert property, means it is in the fragment
+    # that harness includes. A name nobody wrote closes nothing, and that
+    # clause is what keeps this a read-back rather than a rubber stamp.
+    _closed = _expert_closed_obligations(out_path.parent, unresolved, harness)
+    if _closed:
+        _closed_ids = {c["id"] for c in _closed}
+        unresolved = [o for o in unresolved
+                      if str(o.get("id")) not in _closed_ids]
+        generated = list(generated) + _closed
     contract = {
         "program": "formal_harness_gen", "version": "2.0.0",
         "verdict": "INCOMPLETE" if unresolved else "AUTHORED",

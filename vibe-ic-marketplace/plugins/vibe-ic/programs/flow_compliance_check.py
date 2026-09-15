@@ -11809,19 +11809,85 @@ def _is_gate_verdict_document(path: Path,
             base = base[:-3]
         return {stamp, head, base}
 
-    _gates = set(gate_programs or ())
-    _producers = set(producer_programs or ())
+    # A WRAPPER DOES NOT STAMP ITS OWN NAME, AND THE FLOW LISTS THE WRAPPER.
+    # MEASURED 2026-09-15 across the shipped flow:
+    #
+    #   step 26  programs: [antenna_report_check, ...]
+    #            reports/phase3/antenna_signoff.json  program: eda_report_audit:antenna
+    #   step 36  programs: [tapeout_signoff_check]
+    #            reports/audit/tapeout_checklist.json program: signoff_audit:tapeout
+    #
+    # In both, the document was written by the program the flow lists as THIS
+    # STEP'S PRODUCER, and in both the stamp matched no name in either set --
+    # so the comparison fell through to the final `return True` and a
+    # RUN-WRITTEN document was classified as the auditor's, refused as
+    # self-certified evidence, and the step went MISSING. Six wrappers in this
+    # tree have that shape (`antenna_report_check`, `drc_report_check`,
+    # `sta_report_check`, `em_report_check`, `ir_drop_report_check`,
+    # `lvs_report_check`), plus `tapeout_signoff_check`.
+    #
+    # THE ALIAS IS DERIVED FROM THE PROGRAM'S OWN SOURCE, never tabulated
+    # here: a wrapper is `from <module> import main` plus, for the
+    # `eda_report_audit` family, a pinned `MODE = "<x>"` -- which is exactly
+    # the `"<module>:<x>"` its shared emitter stamps. A table would go stale
+    # the first time a wrapper is added; this reads the tree the flow ships.
+    #
+    # IT NARROWS NOTHING ELSE. A step whose PRODUCER list does not contain the
+    # wrapper is untouched: steps 10, 21, 23, 24, 25 and 31 declare a gate
+    # `--json` target with `programs: []` or with producers that write other
+    # paths, their stamps still match only the GATE set, and they stay refused
+    # -- correctly, because nothing in the run writes them.
+    def _aliases(program: str) -> set:
+        got = {program}
+        src = PROGRAMS_DIR / f"{program}.py"
+        try:
+            text = src.read_text(errors="replace")
+        except OSError:
+            return got
+        m = re.search(r"^from\s+(\w+)\s+import\s+main\b", text, re.M)
+        if not m:
+            return got
+        wrapped = m.group(1)
+        md = re.search(r"^MODE\s*=\s*[\"'](\w+)[\"']", text, re.M)
+        # WITH the mode when the wrapper pins one -- `eda_report_audit:antenna`
+        # is a different document from `eda_report_audit:drc`, and collapsing
+        # them to the bare module would let one step's gate document be
+        # credited to another step's producer. Without a pinned mode the bare
+        # module is the only honest alias, and the caller's timing facts still
+        # have the last word.
+        got.add(f"{wrapped}:{md.group(1)}" if md else wrapped)
+        if not md:
+            got.add(wrapped)
+        return got
+
+    def _resolve(names: set) -> set:
+        out = set()
+        for n in names:
+            out |= _aliases(n)
+        return out
+
+    _gates = _resolve(set(gate_programs or ()))
+    _producers = _resolve(set(producer_programs or ()))
     _producers_only = _producers - _gates
     _gates_only = _gates - _producers
     _shared = _producers & _gates
-    if any(_names(st) & _producers_only for st in stamps):
+    def _hits(stamp: str, pool: set) -> bool:
+        names = _names(stamp)
+        if names & pool:
+            return True
+        # `eda_report_audit:antenna` also answers to `eda_report_audit` for a
+        # wrapper that pins no mode; the reverse is never true.
+        head = stamp.split()[0]
+        return ":" in head and head.split(":", 1)[0] in pool
+
+    if any(_hits(st, _producers_only) for st in stamps):
         # A producer's record IS the document, or survives inside it: the run
         # produced it. A gate that later writes its own verdict beside it does
         # not turn the run's evidence into the auditor's.
         return False
-    if any(_names(st) & _gates_only for st in stamps):
+    if any(_hits(st, _gates_only) for st in stamps):
         return True
-    if any(_names(st) & _shared for st in stamps) and _shared:
+    if any(_hits(st, _shared) for st in stamps) and _shared:
         # THE STAMP IS THE SAME EITHER WAY, SO CONTENT DOES NOT ANSWER HERE.
         # A program the flow lists BOTH under this step's `programs:` and as
         # its own gate writes a byte-identical document whether the RUN
@@ -12188,7 +12254,50 @@ def _emit_step_metrics(project: Path, step: Dict[str, Any],
         metrics = {k: v for k, v in metrics.items()
                    if not any(e.startswith(_prefix) and e.endswith(f"__{k}")
                               for e in already)}
-    _sm.emit_best_effort(project, step.get("id"), metrics)
+    # ONE NON-CONFORMING NAME MUST NOT COST THE WHOLE STEP'S METRICS.
+    # `emit` validates every key and raises on the FIRST defect, before it
+    # writes anything -- so this harvester, which forwards a REPORT'S OWN key
+    # names into a schema with a stricter name rule, loses the entire batch to
+    # one of them. MEASURED on `subservient` x gf180mcuD, step 25:
+    #   [step_metrics] EMIT FAILED (step=25, domain=flow): ValueError:
+    #     step_metrics.emit: '25__flow__max_segment_current_A': component
+    #     'max_segment_current_A' must be lowercase alphanumeric/underscore
+    # `em_signoff.json` spells its peak current with the SI unit capitalised,
+    # and every other step-25 metric went down with it -- the step's metric
+    # file was never written at all.
+    #
+    # THE NAME IS NOT REWRITTEN. This harvester does not own these names (the
+    # program that computed the number does), and quietly lower-casing one
+    # would publish a key nobody declared, under the authority of a module
+    # that explicitly refuses to derive numbers. The non-conforming key is
+    # DROPPED and NAMED on stderr, and every conforming sibling is emitted --
+    # "a caller cannot fix what it is never told about", which
+    # `emit_best_effort`'s own docstring states, applied per KEY instead of
+    # per batch.
+    _keep, _refused = {}, []
+    _pfx = f"{_sm.normalize_step(step.get('id'))}__"
+    for _k, _v in metrics.items():
+        _full = (_k if str(_k).startswith(_pfx)
+                 else _sm.key_for(step.get("id"), "flow", str(_k)))
+        _why = _sm.key_defect(_full) or _sm.value_defect(_v)
+        if _why:
+            _refused.append(_why)
+        else:
+            _keep[_k] = _v
+    if _refused:
+        # NO `+` AND NO `len()` HERE, and neither is a style preference. A
+        # sibling test walks this function's AST and refuses Add/Sub/Mult and
+        # any aggregator, because a wrapper that can do arithmetic or reduce a
+        # list can publish a number no gate stands behind. String
+        # concatenation and counting my OWN refusals are neither of those, but
+        # the guard cannot tell them apart and the guard is the one that must
+        # not be weakened — so the message NAMES the refused keys instead of
+        # counting them, which is the more useful sentence anyway.
+        _named = "; ".join(_refused)
+        print(f"[step_metrics] key(s) from step {step.get('id')}'s own "
+              f"report(s) are not schema-conformant and were NOT emitted; "
+              f"every conforming sibling was: {_named}", file=sys.stderr)
+    _sm.emit_best_effort(project, step.get("id"), _keep)
 
 
 def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
