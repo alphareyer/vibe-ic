@@ -213,3 +213,150 @@ def test_looks_like_image_ref_discriminates():
     assert cip.looks_like_image_ref("ghcr.io/vibeic/vibeic-eda")
     assert not cip.looks_like_image_ref("vibeic-eda")
     assert not cip.looks_like_image_ref("vibeic_eda_0230b")
+
+
+# ------------------------------------------------- defect 3: registry digest --
+# A REGISTRY (manifest) digest and a CONFIG digest are both `sha256:<64 hex>`
+# and they are DIFFERENT numbers for the same image. The plugin's own pin,
+# `_eda_pin.IMAGE_DIGEST`, is the registry one; `docker inspect --format
+# '{{.Image}}'` reports the config one, and `docker image inspect <manifest
+# digest>` does not resolve. So passing the plugin's OWN pin to the plugin's
+# OWN --require-image was refused as "(unresolved)" — with a message claiming
+# the run "would silently execute a DIFFERENT toolchain than the one pinned"
+# about a container running exactly the pinned bytes.
+#
+# MEASURED 2026-09-16 on 8HD-6 (lane icsha3), one container, one process:
+#   _eda_pin.pinned_image_present() -> ('…@sha256:89a8fd72…', '')     # held
+#   cip.verify('icsha3-eda', _eda_pin.IMAGE_DIGEST) -> MISMATCH
+# The alarm is indistinguishable from a real stale-container substitution,
+# which is the one thing this program exists to detect.
+PIN_MANIFEST = "sha256:" + "89a8fd72" * 8
+OTHER_MANIFEST = "sha256:" + "beeab663" * 8
+
+
+def _held(*digests):
+    """Stub `_repo_digests_of`: the RepoDigests docker records on the image."""
+    return lambda image: (tuple(digests), "")
+
+
+def test_container_running_the_pinned_bytes_matches_a_bare_manifest_digest(monkeypatch):
+    """THE DEFECT. The container runs the pinned image; its RepoDigests carry
+    the pinned manifest digest; `--require-image <that digest>` must PASS."""
+    monkeypatch.setattr(cip, "inspect_container",
+                        lambda n: _ok("vibeic-eda:0.3.49", PINNED_ID))
+    monkeypatch.setattr(cip, "_resolve_image_id", lambda r: None)
+    monkeypatch.setattr(cip, "_repo_digests_of",
+                        _held("ghcr.io/vibeic/vibeic-eda@" + PIN_MANIFEST,
+                              "192.168.1.112:5000/vibeic-eda@" + PIN_MANIFEST))
+
+    rec = cip.verify("vibeic-eda", require_image=PIN_MANIFEST)
+    assert rec["verdict"] == "PASS", rec
+    assert rec["image_match"] is True
+    # the record must say HOW it matched, or a reader cannot tell this apart
+    # from a plain tag comparison
+    assert rec["matched_by"] == "repo_digest", rec
+
+
+def test_repo_at_digest_reference_form_matches_the_same_way(monkeypatch):
+    """`<repo>@sha256:…` is the other spelling of the same demand, and the
+    container may have been started from a TAG, so neither string equality nor
+    the config-id comparison can see it."""
+    monkeypatch.setattr(cip, "inspect_container",
+                        lambda n: _ok("vibeic-eda:0.3.49", PINNED_ID))
+    monkeypatch.setattr(cip, "_resolve_image_id", lambda r: None)
+    monkeypatch.setattr(cip, "_repo_digests_of",
+                        _held("ghcr.io/vibeic/vibeic-eda@" + PIN_MANIFEST))
+
+    rec = cip.verify("vibeic-eda",
+                     require_image="192.168.1.112:5000/vibeic-eda@" + PIN_MANIFEST)
+    assert rec["verdict"] == "PASS", rec
+    assert rec["matched_by"] == "repo_digest", rec
+
+
+def test_the_plugins_own_pin_constant_is_accepted_by_its_own_require_image(monkeypatch):
+    """Reads `_eda_pin.IMAGE_DIGEST` itself, so the two cannot drift apart
+    again: whatever the pin becomes, --require-image must accept it for a
+    container running an image that carries it."""
+    import _eda_pin
+    monkeypatch.setattr(cip, "inspect_container",
+                        lambda n: _ok("vibeic-eda:pinned", PINNED_ID))
+    monkeypatch.setattr(cip, "_resolve_image_id", lambda r: None)
+    monkeypatch.setattr(cip, "_repo_digests_of",
+                        _held("ghcr.io/vibeic/vibeic-eda@" + _eda_pin.IMAGE_DIGEST))
+
+    rec = cip.verify("vibeic-eda", require_image=_eda_pin.IMAGE_DIGEST)
+    assert rec["verdict"] == "PASS", rec
+
+
+# ---- the other direction: the repo-digest path must still REFUSE -----------
+def test_stale_container_is_still_MISMATCH_through_the_repo_digest_path(monkeypatch):
+    """The control that makes the fix a fix and not a hole: the container runs a
+    DIFFERENT image, whose RepoDigests carry a different manifest digest. It
+    must still MISMATCH, and the message must name what it DID find."""
+    monkeypatch.setattr(cip, "inspect_container",
+                        lambda n: _ok("vibeic-eda:0.3.54", STALE_ID))
+    monkeypatch.setattr(cip, "_resolve_image_id", lambda r: None)
+    monkeypatch.setattr(cip, "_repo_digests_of",
+                        _held("ghcr.io/vibeic/vibeic-eda@" + OTHER_MANIFEST))
+
+    rec = cip.verify("vibeic-eda", require_image=PIN_MANIFEST)
+    assert rec["verdict"] == "MISMATCH", rec
+    assert rec["image_match"] is False
+    assert "matched_by" not in rec
+    # actionable: the operator must be able to see WHICH bytes are there
+    assert OTHER_MANIFEST in rec["reason"], rec["reason"]
+
+
+def test_image_with_no_repo_digests_is_MISMATCH_not_a_fabricated_pass(monkeypatch):
+    """A locally-built image records no RepoDigests. "I could not find the
+    digest" is not "the digest is there"."""
+    monkeypatch.setattr(cip, "inspect_container",
+                        lambda n: _ok("vibeic-eda:local", STALE_ID))
+    monkeypatch.setattr(cip, "_resolve_image_id", lambda r: None)
+    monkeypatch.setattr(cip, "_repo_digests_of", lambda image: ((), ""))
+
+    rec = cip.verify("vibeic-eda", require_image=PIN_MANIFEST)
+    assert rec["verdict"] == "MISMATCH", rec
+    assert rec["image_repo_digests"] == []
+
+
+def test_unreadable_repo_digests_is_MISMATCH_and_says_why(monkeypatch):
+    """docker unavailable / image gone: refuse, and record the reason rather
+    than letting an unanswerable probe read as a clean refusal."""
+    monkeypatch.setattr(cip, "inspect_container",
+                        lambda n: _ok("vibeic-eda:0.3.49", PINNED_ID))
+    monkeypatch.setattr(cip, "_resolve_image_id", lambda r: None)
+    monkeypatch.setattr(cip, "_repo_digests_of",
+                        lambda image: ((), "docker binary not on PATH"))
+
+    rec = cip.verify("vibeic-eda", require_image=PIN_MANIFEST)
+    assert rec["verdict"] == "MISMATCH", rec
+    assert rec["repo_digest_probe"] == "docker binary not on PATH"
+    assert "docker binary not on PATH" in rec["reason"]
+
+
+def test_registry_digest_of_reads_both_spellings_and_refuses_neither_shape():
+    """The digest vocabulary is `_eda_pin`'s; this pins the two shapes the
+    comparison relies on and the shapes it must NOT accept."""
+    assert cip._registry_digest_of(PIN_MANIFEST) == PIN_MANIFEST
+    assert cip._registry_digest_of("repo/x@" + PIN_MANIFEST) == PIN_MANIFEST
+    assert cip._registry_digest_of("vibeic-eda:0.3.49") is None
+    assert cip._registry_digest_of("") is None
+    assert cip._registry_digest_of(None) is None
+    # a repository-less `@sha256:…` is malformed, not a reference (#2085)
+    assert cip._registry_digest_of("@" + PIN_MANIFEST) is None
+
+
+def test_a_tag_require_image_never_takes_the_repo_digest_path(monkeypatch):
+    """`--require-image vibeic-eda:0.3.49` names no digest, so the new path
+    must not fire at all — a tag mismatch stays a tag mismatch."""
+    probed = []
+    monkeypatch.setattr(cip, "inspect_container",
+                        lambda n: _ok("vibeic-eda:0.3.54", STALE_ID))
+    monkeypatch.setattr(cip, "_resolve_image_id", lambda r: None)
+    monkeypatch.setattr(cip, "_repo_digests_of",
+                        lambda image: (probed.append(image), ((), ""))[1])
+
+    rec = cip.verify("vibeic-eda", require_image="vibeic-eda:0.3.49")
+    assert rec["verdict"] == "MISMATCH", rec
+    assert probed == [], "a tag demand must not probe repo digests"
