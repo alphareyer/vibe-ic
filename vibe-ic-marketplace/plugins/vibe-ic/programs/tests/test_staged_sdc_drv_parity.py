@@ -166,14 +166,22 @@ def test_unreadable_liberty_supplies_nothing(tmp_path):
 
 
 def test_pin_cap_only_liberty_supplies_cap_but_not_slew(tmp_path):
-    """A liberty with no default_max_transition yields NO slew constraint, but
-    its characterised output-pin max_capacitance is a real, PDK-derived ceiling."""
+    """A liberty with no default_max_transition yields NO slew constraint — and
+    with no default_max_capacitance either, NO design-wide cap constraint.
+
+    R-0915-32, 2026-09-15: the characterised output-pin max_capacitance is a
+    real liberty value and is still read and disclosed, but imposing the
+    STRONGEST driver's rated load design-wide overrides every weak cell's own
+    tighter per-pin limit. Measured on a real design, that is what let a
+    minimum-drive gate on a 399-sink net violate nothing. The SDC now carries
+    no `set_max_capacitance`, and each driver's own liberty value governs.
+    """
     lib = _lib(tmp_path, _LIB_PIN_CAP_ONLY)
     out, info = R._ensure_staged_sdc_drv(_DESIGN_SDC_NO_DRV, lib)
     assert "set_max_transition" not in out
-    assert "set_max_capacitance 0.11" in out
+    assert "set_max_capacitance" not in out
     assert info["added_max_transition"] is None
-    assert info["added_max_capacitance"] == 0.11
+    assert info["added_max_capacitance"] is None
 
 
 # ── 4. fanout cap: design declaration wins, liberty default is the fallback ──

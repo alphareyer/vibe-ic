@@ -53,17 +53,32 @@ _LIB_TT = (
 
 
 def test_liberty_drv_limits_parses_slew_and_cap_ceiling(tmp_path):
-    """max_transition comes from the library default; with no library-level
-    default_max_capacitance the ceiling is the MAX characterised pin cap (5.0),
-    disclosed as a PDK-derived ceiling — both are REAL liberty values."""
+    """max_transition comes from the library default; the MAX characterised pin
+    cap (5.0) is still READ and disclosed — but it is NOT imposed as a
+    design-wide `set_max_capacitance`.
+
+    R-0915-32, 2026-09-15: this test's PROPERTY — every value is a real liberty
+    value, never fabricated — is unchanged and still asserted below. What
+    changed is whether a real value should be IMPOSED. Measured on
+    opentitan_aes x sky130A, that 5.0 pF ceiling is the STRONGEST driver's
+    rated load, and forcing it design-wide gave `repair_design` a target no
+    weak cell could reach: a minimum-drive `o2111ai_1` on a **399-sink** net
+    contributed 21.46 ns to one stage of the worst SS path and the repair
+    reported a no-op. Each driver's own liberty max_capacitance is tighter and
+    per-cell correct. The ceiling is now recorded, not imposed.
+    """
     lib = tmp_path / "sky130_fd_sc_hd__tt_025C_1v80.lib"
     lib.write_text(_LIB_TT)
     res = R._liberty_drv_limits(str(lib))
     assert res["max_transition_ns"] == 1.5
-    assert res["max_capacitance_pf"] == 5.0
     assert "default_max_transition" in res["slew_source"]
-    assert "ceiling" in res["cap_source"]
     assert "DRV limits derived from the PDK liberty" in res["note"]
+    # the ceiling is READ (no fabrication, no loss of information) ...
+    assert res["observed_max_pin_capacitance_pf"] == 5.0
+    assert "ceiling" in res["cap_note"]
+    # ... and NOT imposed
+    assert res["max_capacitance_pf"] is None
+    assert res["cap_source"] is None
 
 
 def test_liberty_drv_limits_prefers_library_default_cap(tmp_path):

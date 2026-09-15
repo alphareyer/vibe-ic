@@ -2717,25 +2717,6 @@ _LIB_DEFAULT_MAX_FANOUT_RE = re.compile(
     r"default_max_fanout\s*:\s*([0-9.]+)", re.IGNORECASE)
 
 
-#: R-0915-32 — the flow's own conservative DRV fallbacks, used ONLY when
-#: neither the design's SDC nor the liberty declares one. MEASURED on
-#: opentitan_aes x sky130A (2026-09-15): with NO max_fanout emitted at all, a
-#: `sky130_fd_sc_hd__o2111ai_1` — the weakest drive in the library — was left
-#: driving a **399-sink** net and contributed **21.46 ns** to a single stage of
-#: the worst SS path (a second min-drive gate on an 80-sink net added 10.10 ns;
-#: together 48% of a 65.63 ns path whose MEDIAN stage was 0.570 ns).
-#: `repair_design` never touched either, because nothing it could violate had
-#: been set. A limit the flow declines to state is not neutrality — it is a
-#: repair step with nothing to repair against.
-#: 16 is the conventional synthesis fanout cap and is deliberately conservative;
-#: it is a FALLBACK, never an override, and its provenance is recorded so a
-#: reader can always tell a flow default from a design or library fact.
-FLOW_DEFAULT_MAX_FANOUT = 16
-FLOW_DEFAULT_MAX_FANOUT_NOTE = (
-    "flow conservative default (neither the design SDC nor the active liberty "
-    "declares a fanout limit; without one repair_design has no fanout target)")
-
-
 def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, object]:
     """Derive design-rule (DRV) limits from a Liberty file, chip/PDK-AGNOSTIC.
 
@@ -2767,7 +2748,7 @@ def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, obj
     out: Dict[str, object] = {
         "max_transition_ns": None, "max_capacitance_pf": None, "max_fanout": None,
         "slew_source": None, "cap_source": None, "fanout_source": None, "note": "",
-        "cap_note": "", "fanout_note": "", "observed_max_pin_capacitance_pf": None,
+        "cap_note": "", "observed_max_pin_capacitance_pf": None,
     }
     if not liberty_path:
         out["note"] = ("no PDK liberty resolved; NO DRV limit emitted "
@@ -2821,18 +2802,23 @@ def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, obj
         except ValueError:
             pass
     else:
-        # R-0915-32 — NO library-level default_max_capacitance, and the MAX
-        # characterised output-pin max_capacitance is NOT a substitute.
-        # MEASURED on opentitan_aes x sky130A: that ceiling resolved to 5.0 pF,
-        # the STRONGEST driver's rated load, and forcing it design-wide is
-        # strictly WORSE than emitting nothing — `set_max_capacitance 5.0`
-        # overrides the per-driver liberty `max_capacitance` of every weak cell
-        # with a limit ~an order of magnitude looser than its own, so a
-        # minimum-drive gate on a 399-sink net violated nothing and
-        # repair_design left it alone.
-        # Emitting NO global cap lets each driver's OWN liberty
-        # max_capacitance govern, which is both tighter and per-cell correct.
-        # The value is still recorded for disclosure; it is simply not imposed.
+        # R-0915-32 — no library-level default_max_capacitance, and the MAX
+        # characterised output-pin max_capacitance is NOT a substitute for one.
+        #
+        # MEASURED (opentitan_aes x sky130A, 2026-09-15). That ceiling resolved
+        # to 5.0 pF — the STRONGEST driver's rated load — and imposing it
+        # design-wide is strictly WORSE than emitting nothing: OpenSTA takes the
+        # TIGHTEST of SDC / liberty-pin / liberty-default, but `repair_design`'s
+        # target became a blanket 5.0 pF that no weak cell could ever reach. A
+        # `sky130_fd_sc_hd__o2111ai_1`, the weakest drive in the library, sat on
+        # a **399-sink** net contributing **21.46 ns** to one stage of the worst
+        # SS path, and repair_design reported a no-op because nothing had been
+        # violated. Each driver's OWN liberty `max_capacitance` is both tighter
+        # and per-cell correct, and repair_design already reads it.
+        #
+        # The value is still READ and RECORDED for disclosure — suppressing a
+        # limit must be a disclosure, never a silent deletion — it is simply
+        # not imposed as a design-wide constraint.
         caps = [float(v) for v in _LIB_PIN_MAX_CAP_RE.findall(text)]
         if caps:
             out["observed_max_pin_capacitance_pf"] = max(caps)
@@ -2844,13 +2830,6 @@ def _liberty_drv_limits(liberty_path: str, container: str = "") -> Dict[str, obj
             "strongest-driver ceiling"
             + (f" (observed ceiling {max(caps)} pF, recorded not imposed)"
                if caps else ""))
-    if out["max_fanout"] is None:
-        # R-0915-32 — a liberty with no default_max_fanout must not leave
-        # repair_design with no fanout target at all. The SDC still wins: the
-        # caller drops this whenever the design declares its own.
-        out["max_fanout"] = FLOW_DEFAULT_MAX_FANOUT
-        out["fanout_source"] = f"flow default ({FLOW_DEFAULT_MAX_FANOUT})"
-        out["fanout_note"] = FLOW_DEFAULT_MAX_FANOUT_NOTE
     if (out["max_transition_ns"] is None and out["max_capacitance_pf"] is None
             and out["max_fanout"] is None):
         out["note"] = ("PDK liberty declares neither default_max_transition, "
@@ -3352,21 +3331,10 @@ def _ensure_staged_sdc_drv(sdc_text: str, active_liberty: str,
         # this only fires when have_fanout is False and nothing was declared.
         fanout = drv.get("max_fanout")
         if fanout is not None:
-            # R-0915-32 — the last reach now has TWO possible provenances and
-            # they must not be described alike: a real library default is a
-            # characterised fact, the flow's fallback is the flow's own choice.
-            # Calling the latter "the ACTIVE liberty's own" would be a false
-            # attribution, which is the thing this disclosure exists to prevent.
-            if drv.get("fanout_note"):
-                _LAST_FANOUT_SOURCE["note"] = (
-                    "no design/RTL/PDK-family cap declared and the ACTIVE "
-                    "liberty declares no default_max_fanout; "
-                    + str(drv["fanout_note"]))
-            else:
-                _LAST_FANOUT_SOURCE["note"] = (
-                    "no design/RTL/PDK-family cap declared; using the ACTIVE "
-                    f"liberty's own {drv.get('fanout_source', 'default_max_fanout')}"
-                    " (a real characterised limit, not fabricated)")
+            _LAST_FANOUT_SOURCE["note"] = (
+                "no design/RTL/PDK-family cap declared; using the ACTIVE "
+                f"liberty's own {drv.get('fanout_source', 'default_max_fanout')}"
+                " (a real characterised limit, not fabricated)")
 
     if slew is None and cap is None and fanout is None:
         info["note"] = (

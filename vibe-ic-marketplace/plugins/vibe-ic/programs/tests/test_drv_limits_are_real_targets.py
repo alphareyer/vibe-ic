@@ -36,9 +36,6 @@ if str(_PROGRAMS) not in sys.path:
 
 import phase3_one_shot_runner as P3      # noqa: E402
 
-#: Resolved tolerantly so the PRE-FIX tree fails on the ANSWER rather than on
-#: an AttributeError. An arity/attribute red proves nothing about the contract.
-_FLOW_DEFAULT = getattr(P3, "FLOW_DEFAULT_MAX_FANOUT", None)
 
 
 def _lib(tmp_path: Path, body: str) -> str:
@@ -69,20 +66,6 @@ library (fixture_corner) {
 
 # ───────── the library declares nothing: flow default, honestly labelled ─────
 
-def test_no_library_defaults_yields_a_real_fanout_limit(tmp_path):
-    out = P3._liberty_drv_limits(_lib(tmp_path, _NO_DEFAULTS))
-    assert out["max_fanout"] == _FLOW_DEFAULT is not None, (
-        "a liberty with no default_max_fanout left repair_design with no "
-        "fanout target at all — the 399-sink case")
-    assert "flow default" in str(out["fanout_source"]).lower()
-
-
-def test_the_flow_default_is_never_attributed_to_the_library(tmp_path):
-    """A false provenance is the failure this disclosure exists to prevent."""
-    out = P3._liberty_drv_limits(_lib(tmp_path, _NO_DEFAULTS))
-    note = str(out["note"]) + str(out["fanout_note"])
-    assert "flow" in note.lower()
-    assert "default_max_fanout" not in str(out["fanout_source"])
 
 
 def test_the_strongest_drivers_ceiling_is_not_imposed_as_a_cap(tmp_path):
@@ -101,7 +84,7 @@ def test_the_strongest_drivers_ceiling_is_not_imposed_as_a_cap(tmp_path):
 
 def test_library_declared_defaults_win_over_the_flow(tmp_path):
     out = P3._liberty_drv_limits(_lib(tmp_path, _WITH_DEFAULTS))
-    assert out["max_fanout"] == 8, "the flow default displaced a real library fact"
+    assert out["max_fanout"] == 8, "a real library default_max_fanout was not used"
     assert "default_max_fanout" in str(out["fanout_source"])
     assert out["max_capacitance_pf"] == 0.20, (
         "a real default_max_capacitance must still be used")
@@ -140,14 +123,20 @@ def test_a_design_declared_fanout_alone_still_wins(tmp_path):
     assert info["added_max_transition"] == 1.5
 
 
-def test_the_supplied_sdc_carries_fanout_and_no_ceiling_cap(tmp_path):
-    """The positive case, end to end on the emitted SDC text."""
+def test_the_supplied_sdc_carries_no_ceiling_cap(tmp_path):
+    """The positive case, end to end on the emitted SDC text.
+
+    No fanout is emitted either, and that is CORRECT and unchanged: neither the
+    design nor the library declares one, and §4.05 forbids the flow inventing a
+    number (the landed contract in `test_staged_sdc_drv_parity`). The only thing
+    that changed is that the strongest-driver ceiling is no longer imposed.
+    """
     sdc = "current_design fixture_top\n"
     text, info = P3._ensure_staged_sdc_drv(sdc, _lib(tmp_path, _NO_DEFAULTS))
-    assert info["added_max_fanout"] == _FLOW_DEFAULT is not None
     assert info["added_max_capacitance"] is None
+    assert info["added_max_transition"] == 1.5
     emitted = [l.strip() for l in text.splitlines()
                if l.strip().startswith("set_max_")]
-    assert any(l.startswith("set_max_fanout") for l in emitted), emitted
     assert not any(l.startswith("set_max_capacitance") for l in emitted), (
         f"the strongest-driver ceiling was emitted into the SDC: {emitted}")
+    assert any(l.startswith("set_max_transition") for l in emitted), emitted
