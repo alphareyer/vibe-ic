@@ -179,6 +179,14 @@ def test_an_uncovered_item_still_fails_the_strict_gate_over_a_big_corpus(tmp_pat
 
 
 # ── direction 4: a single-file spec is a corpus of one ─────────────────────
+#: R-0915-29: the corner-case items only ask about a subject the spec declares,
+#: so an UNCOVERED fixture has to DECLARE all four subjects and then address
+#: none of them -- otherwise it is measuring applicability, not coverage.
+CHAPTER = CHAPTER + """
+The block decodes a command word (0x0 = LOAD, 0x1 = SHIFT) arriving on its slave
+port and holds an 8-bit accumulator.
+"""
+
 SINGLE_UNCOVERED = CHAPTER.format(n=1, title='the whole spec')
 SINGLE_COVERED = SINGLE_UNCOVERED + """
 A reset asserted during operation clears the accumulator. Back-to-back

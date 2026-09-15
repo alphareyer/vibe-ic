@@ -2871,6 +2871,22 @@ def _check_sta(project_dir: Path) -> AuditResult:
     any_verdict_determined = False
     real_violation_found = False
     violation_evidence = ""
+    # R-0915-28: the BASIS the evidence report declares for itself, and the
+    # numbers that report carries, captured where the evidence is chosen so the
+    # tier below is decided on the same file the finding names.
+    violation_basis: Optional[str] = None
+    violation_slacks: Dict[str, Optional[float]] = {}
+
+    def _note_violation(_fp: Any, _text: str,
+                        _sl: Optional[Dict[str, Optional[float]]] = None) -> None:
+        nonlocal violation_evidence, violation_basis, violation_slacks
+        if violation_evidence:
+            return
+        violation_evidence = str(_fp)
+        violation_basis = _report_declared_basis(_text)
+        violation_slacks = dict(
+            _sl if _sl is not None else _sta_slack.extract_slacks(_text))
+
     # PROVENANCE OF THE REPORT ITSELF (see `_self_discloses_post_layout_
     # derivation`). Reports whose own disclosure contradicts the basis the
     # scope declares, keyed by real path so a canonical file and its
@@ -2966,8 +2982,7 @@ def _check_sta(project_dir: Path) -> AuditResult:
             if violated_re.search(text) or any(v < 0 for v in _vals):
                 real_violation_found = True
                 any_verdict_determined = True
-                if not violation_evidence:
-                    violation_evidence = str(fp)
+                _note_violation(fp, text, _slacks)
                 result.findings.append(Finding(
                     rule="STA_STAMP_CONTRADICTED_BY_ITS_OWN_REPORT",
                     severity="ERROR",
@@ -2984,8 +2999,7 @@ def _check_sta(project_dir: Path) -> AuditResult:
             any_verdict_determined = True
             if violated_re.search(text):
                 real_violation_found = True
-                if not violation_evidence:
-                    violation_evidence = str(fp)
+                _note_violation(fp, text)
         # Reuse the already-hardened multi-dialect slack extractor (worst-
         # slack summary lines, WNS/TNS tokens, SETUP/HOLD section split)
         # rather than re-deriving numeric parsing here.
@@ -2995,8 +3009,7 @@ def _check_sta(project_dir: Path) -> AuditResult:
             any_verdict_determined = True
             if any(v < 0 for v in vals):
                 real_violation_found = True
-                if not violation_evidence:
-                    violation_evidence = str(fp)
+                _note_violation(fp, text, slacks)
 
     #: True when EVERY report examined honestly reported nothing to measure and
     #: none reported a hard miss: the step ran and had nothing to judge.
@@ -3054,12 +3067,59 @@ def _check_sta(project_dir: Path) -> AuditResult:
                      "a MET/VIOLATED path-table entry) — a sign-off gate "
                      "must not pass on report-shape presence alone"),
             file=best_file))
+    elif real_violation_found and violation_basis == "PRE_LAYOUT":
+        # R-0915-28. THE FINDING IS KEPT; THE SIGN-OFF VERDICT IS NOT.
+        #
+        # A report that declares `STA_BASIS: PRE_LAYOUT_ESTIMATE` states in its
+        # own body that it timed the pre-PnR netlist with NO parasitics and
+        # that it "excludes placement, CTS, resizing and all interconnect RC".
+        # Raising the SIGN-OFF rule against it asks an artefact to prove a
+        # closure it declares it cannot represent -- the same shape as
+        # `spec_review_lint`'s illegal-inputs item before it learned to
+        # self-skip. MEASURED on subservient x gf180mcuD (lane icsub2, r13),
+        # one design, one SDC, two bases:
+        #     pre-layout  SS 125C 4v50   setup -6.10 ns   TNS -371.15
+        #     post-route  SS 125C 4v50   setup +0.97 ns   (sign-off +0.03)
+        # Placement, CTS and the repair passes are what close it, so a
+        # pre-layout negative slack is a FORECAST, not a failure to sign off.
+        #
+        # NOTHING IS SILENCED. The corner's own numbers, the file they came
+        # from and what they do and do not mean are all in the message, at a
+        # tier that discloses instead of judging. The sign-off rule still fires
+        # on a POST_ROUTE basis, and -- deliberately -- on a report that
+        # declares NO basis at all: an undeclared report has not earned the
+        # softer tier, so this fails CLOSED.
+        _ss = violation_slacks.get("setup_wns_ns")
+        _hs = violation_slacks.get("hold_wns_ns")
+        _tn = violation_slacks.get("tns_ns")
+        _nums = ", ".join(
+            f"{_k} {_v:+.4g} ns" for _k, _v in
+            (("worst setup slack", _ss), ("worst hold slack", _hs),
+             ("TNS", _tn)) if _v is not None) or "no numeric slack extracted"
+        result.findings.append(Finding(
+            rule="STA_PRE_LAYOUT_VIOLATION_DISCLOSED", severity="INFO",
+            message=(f"a real timing violation was found in a report whose "
+                     f"own declared basis is PRE_LAYOUT ({_nums}). This is "
+                     f"DISCLOSED, not a sign-off verdict: the report states it "
+                     f"timed the pre-PnR netlist with no parasitics and "
+                     f"excludes placement, CTS, resizing and interconnect RC, "
+                     f"so this design closes this corner only after PnR and "
+                     f"the number above is a forecast of what the physical "
+                     f"passes must recover, not a failure to sign off. The "
+                     f"sign-off rule is raised against a POST_ROUTE basis, and "
+                     f"against any report that declares no basis at all"),
+            file=violation_evidence))
     elif real_violation_found:
         result.findings.append(Finding(
             rule="STA_REAL_VIOLATION_FOUND", severity="ERROR",
             message="a real timing violation (negative slack, or a "
                     "VIOLATED path-table entry) was found in a discovered "
-                    "STA report",
+                    "STA report"
+                    + ("" if violation_basis else
+                       " that declares NO STA basis of its own — an "
+                       "undeclared report is judged as a sign-off report, "
+                       "because a softer tier has to be EARNED by a "
+                       "declaration and cannot be inferred from silence"),
             file=violation_evidence))
 
     if unreadable:
@@ -3218,11 +3278,20 @@ def _check_sta(project_dir: Path) -> AuditResult:
     # `not basis_offenders` is part of the verdict, not a note beside it: a
     # gate that emits an ERROR finding and still returns rc 0 is the "reported
     # another question" failure one layer up.
+    # R-0915-28: the VERDICT follows the same basis split as the finding above.
+    # A violation whose evidence report declares itself PRE_LAYOUT is disclosed
+    # and does not deny the step its verdict; every other one -- POST_ROUTE, or
+    # a report that declares no basis at all -- still does. `real_violation_
+    # found` is UNCHANGED and still published in the summary beside this: the
+    # violation is a fact about the artefact and stays on the record whatever
+    # tier it is judged at.
+    signoff_violation_found = (real_violation_found
+                               and violation_basis != "PRE_LAYOUT")
     result.passed = (own_design and (has_wns_tns or nothing_to_judge)
                       and (has_setup_hold or nothing_to_judge)
                       and authentic and corners_ok
                       and (any_verdict_determined or nothing_to_judge)
-                      and not real_violation_found
+                      and not signoff_violation_found
                       and not not_measured_hard
                       and not basis_offenders and not unreadable)
     result.subject_files = [str(f) for f in files]
@@ -3283,7 +3352,11 @@ def _check_sta(project_dir: Path) -> AuditResult:
                       "reports_contradicting_declared_basis":
                           len(basis_offenders),
                       "any_verdict_determined": any_verdict_determined,
-                      "real_violation_found": real_violation_found}
+                      "real_violation_found": real_violation_found,
+                      # Both halves, so a reader can tell "no violation" from
+                      # "a violation disclosed at a non-sign-off basis".
+                      "signoff_violation_found": signoff_violation_found,
+                      "violation_declared_basis": violation_basis}
     return result
 
 
