@@ -3555,6 +3555,25 @@ steps:
     name: "Transition-delay-fault (at-speed LOC) ATPG"
     stage: stage2
     condition:
+      # SAME DECLARATION, SAME CLASS AS STEP 11 (lane icspm3, 2026-09-15).
+      # At-speed ATPG IS DFT: a design whose own L20 declares no scan chain,
+      # no BIST, no TAP and dft_present=false cannot owe a transition /
+      # path-delay / SDD coverage report, and MEASURED on spm x gf180mcuD this
+      # step read MISSING on every run. The `condition_not_applicable` clause
+      # on this step was already reaching for that answer and could not get
+      # it: it keys on L20's DOCUMENT-level `applicability`, which is
+      # "APPLICABLE" for a design whose L20 exists and says there is no DFT --
+      # the document applies, and what it declares is the absence.
+      # `l_doc_declares` reads the declaration itself. Every way the
+      # declaration can be ABSENT (no document, unparseable, a field that is
+      # not there) still RUNS the step; see `_l_doc_declares_absence`.
+      l_doc_declares:
+        l_doc: L20
+        all_absent:
+          dft_present: false
+          scan_chains: []
+          bist_mbist: []
+          jtag_tap: null
       # ANY of these three, not just the cut netlist. Gating DT1 solely on its
       # INPUT meant that whenever the scan cut was missing the step vanished by
       # condition — no artefact, no gate, no row — which is indistinguishable
@@ -5173,6 +5192,25 @@ steps:
       l_doc: L20
       applicability: [NOT_APPLICABLE, N/A, NA]
     condition:
+      # SAME DECLARATION, SAME CLASS AS STEP 11 (lane icspm3, 2026-09-15).
+      # At-speed ATPG IS DFT: a design whose own L20 declares no scan chain,
+      # no BIST, no TAP and dft_present=false cannot owe a transition /
+      # path-delay / SDD coverage report, and MEASURED on spm x gf180mcuD this
+      # step read MISSING on every run. The `condition_not_applicable` clause
+      # on this step was already reaching for that answer and could not get
+      # it: it keys on L20's DOCUMENT-level `applicability`, which is
+      # "APPLICABLE" for a design whose L20 exists and says there is no DFT --
+      # the document applies, and what it declares is the absence.
+      # `l_doc_declares` reads the declaration itself. Every way the
+      # declaration can be ABSENT (no document, unparseable, a field that is
+      # not there) still RUNS the step; see `_l_doc_declares_absence`.
+      l_doc_declares:
+        l_doc: L20
+        all_absent:
+          dft_present: false
+          scan_chains: []
+          bist_mbist: []
+          jtag_tap: null
       # TWO triggers, and they are exactly this step's own `blocks_on: [DT1, 22]`
       # written as artefacts: DT1's at-speed grade, and step 22's post-route
       # timing model. Self-skips (NOT_APPLICABLE) on a design with no DFT track,
@@ -5317,6 +5355,25 @@ steps:
       l_doc: L20
       applicability: [NOT_APPLICABLE, N/A, NA]
     condition:
+      # SAME DECLARATION, SAME CLASS AS STEP 11 (lane icspm3, 2026-09-15).
+      # At-speed ATPG IS DFT: a design whose own L20 declares no scan chain,
+      # no BIST, no TAP and dft_present=false cannot owe a transition /
+      # path-delay / SDD coverage report, and MEASURED on spm x gf180mcuD this
+      # step read MISSING on every run. The `condition_not_applicable` clause
+      # on this step was already reaching for that answer and could not get
+      # it: it keys on L20's DOCUMENT-level `applicability`, which is
+      # "APPLICABLE" for a design whose L20 exists and says there is no DFT --
+      # the document applies, and what it declares is the absence.
+      # `l_doc_declares` reads the declaration itself. Every way the
+      # declaration can be ABSENT (no document, unparseable, a field that is
+      # not there) still RUNS the step; see `_l_doc_declares_absence`.
+      l_doc_declares:
+        l_doc: L20
+        all_absent:
+          dft_present: false
+          scan_chains: []
+          bist_mbist: []
+          jtag_tap: null
       # Fuses DT1 transition faults + DT2 per-path slack. It self-skips only
       # for the explicit design declaration above; a missing upstream grade is
       # a named dependency block.

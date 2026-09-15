@@ -237,3 +237,87 @@ def test_step_11_names_no_condition_owner_and_why(tmp_path):
     assert F._l_doc_declares_absence(declared_absent, spec) is not None
     assert F._l_doc_declares_absence(declared_present, spec) is None
     assert F._l_doc_declares_absence(not_declared, spec) is None
+
+
+# ── the at-speed ATPG steps are the same class and take the same clause ───
+
+#: Step 11 plus the three at-speed ATPG steps. All four are DFT, all four are
+#: owed by a design that declares DFT and by no other, and MEASURED on spm x
+#: gf180mcuD at main 066027775 all four read MISSING on every run.
+DFT_STEPS = ("11", "DT1", "DT2", "DT3")
+
+
+def _step(sid):
+    yaml = pytest.importorskip("yaml")
+    doc = yaml.safe_load(FLOW_YAML.read_text(errors="replace"))
+
+    def walk(n):
+        if isinstance(n, dict):
+            if "id" in n and ("required_outputs" in n or "gate" in n):
+                yield n
+            for v in n.values():
+                yield from walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                yield from walk(v)
+    for s in walk(doc):
+        if str(s.get("id")) == sid:
+            return s
+    raise AssertionError(f"step {sid} is not in the shipped flow")
+
+
+@pytest.mark.parametrize("sid", DFT_STEPS)
+def test_every_dft_step_reads_the_same_declaration(sid):
+    cond = (_step(sid).get("condition") or {}).get("l_doc_declares")
+    assert isinstance(cond, dict), f"step {sid} carries no l_doc_declares"
+    assert cond.get("l_doc") == "L20"
+    assert cond.get("all_absent") == ABSENT, (sid, cond.get("all_absent"))
+
+
+@pytest.mark.parametrize("sid", DFT_STEPS)
+def test_every_dft_step_stands_down_only_on_the_declaration(tmp_path, sid):
+    """Both directions, per step. Declared-absent stands the step down and
+    cites the document; ONE field asserting DFT runs it; a document that is
+    not there runs it."""
+    F = _F()
+    spec = _step(sid)["condition"]["l_doc_declares"]
+    absent = _project(tmp_path / f"{sid}-absent", ABSENT)
+    got = F._l_doc_declares_absence(absent, spec)
+    assert got is not None and got[0].endswith("L20_DFT_SCAN_TOPOLOGY.json")
+
+    for field, asserting in (("dft_present", True),
+                             ("scan_chains", [{"name": "c0"}]),
+                             ("bist_mbist", [{"kind": "mbist"}]),
+                             ("jtag_tap", {"ir_width": 4})):
+        proj = _project(tmp_path / f"{sid}-{field}", {**ABSENT, field: asserting})
+        assert F._l_doc_declares_absence(proj, spec) is None, (sid, field)
+
+    nodoc = _project(tmp_path / f"{sid}-nodoc", ABSENT, write=False)
+    assert F._l_doc_declares_absence(nodoc, spec) is None
+
+
+@pytest.mark.parametrize("sid", ("DT1", "DT2", "DT3"))
+def test_the_at_speed_steps_keep_their_dependency_triggers(sid):
+    """The clause is ADDED beside the existing `files_exist` trigger, never
+    instead of it: on a design that declares DFT the step is selected exactly
+    as it was before."""
+    cond = _step(sid)["condition"]
+    assert cond.get("files_exist"), sid
+    assert "l_doc_declares" in cond, sid
+
+
+@pytest.mark.parametrize("sid", ("DT1", "DT2", "DT3"))
+def test_a_dft_declaring_design_still_reaches_the_files_exist_trigger(
+        tmp_path, sid):
+    F = _F()
+    cond = _step(sid)["condition"]
+    proj = _project(tmp_path / sid, {**ABSENT, "dft_present": True})
+    # The L-doc predicate declines, so the answer is the one the step had
+    # before this clause existed: its own files_exist trigger, unsatisfied on
+    # an empty tree.
+    assert F._l_doc_declares_absence(proj, cond["l_doc_declares"]) is None
+    assert F._check_condition(proj, cond) is False
+    for pat in cond["files_exist"]:
+        (proj / pat).parent.mkdir(parents=True, exist_ok=True)
+        (proj / pat).write_text("x")
+    assert F._check_condition(proj, cond) is True

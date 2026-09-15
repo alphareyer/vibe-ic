@@ -438,6 +438,7 @@ import _design_module_set as _dms  # noqa: E402
 # here rather than growing this module's own copy, which is the
 # divergence `_prose_polarity`'s own header exists to end.
 import _prose_polarity  # noqa: E402
+import _flow_verdict_tiers as _T  # noqa: E402
 # THE GDSII READER IS NOT WRITTEN TWICE. `gds_topcell_name_check.parse_structures`
 # already walks the record stream and returns (defined, referenced, valid_header);
 # R4 reads a die with it rather than shipping a second parser that could drift
@@ -689,6 +690,45 @@ def stages_declaring_review(flow_def: Path) -> List[Dict[str, Any]]:
 # ─────────────────────────────────────────────────────────────────────────────
 # fires-on-success
 # ─────────────────────────────────────────────────────────────────────────────
+def _norm_status(word: Any) -> str:
+    """One spelling of a verdict word: upper-case, dashes not underscores.
+
+    The tree writes both spellings for the same tier — the audit emits
+    `VACUOUS_PASS` and `PARTIALLY-VACUOUS` in one report — so a set membership
+    test has to normalise or it answers about the punctuation.
+    """
+    return str(word or "?").strip().upper().replace("_", "-")
+
+
+#: The verdict words that do NOT stop this stage from being reviewable.
+#:
+#: DERIVED FROM THE FLOW'S OWN REGISTER, not retyped, and that is the repair.
+#: This set used to be a literal tuple, and it carried `WAIVED-DEFERRED` while
+#: OMITTING its sibling `WAIVED` — which is the word the completion audit
+#: actually writes. MEASURED 2026-09-15 (lane icspm3) on spm x gf180mcuD: steps
+#: 6 and 39 carry the machinery-sanctioned ENV_UNAVAILABLE fpga-board cap-gap
+#: deferral, the audit records both as `WAIVED`, and this program answered
+#:
+#:     rc=2 NOT CHECKED — stage stage1 did not pass (7 row(s) for stage1;
+#:     non-green: INCOMPLETE, WAIVED)
+#:
+#: so steps 7, 15 and 37 — whose gate this program is — each went INCOMPLETE,
+#: which kept stage1/2/3 from being green, which kept this program declining.
+#: `_flow_verdict_tiers.EXCUSED` registers BOTH spellings; one of them was
+#: registered here and one was not.
+#:
+#: The two VACUOUS tiers are NOT excused rows and are added on their own
+#: argument, unchanged from the tuple this replaces: a clause that RAN and
+#: disclosed a design-declared N/A has not failed, and it is the done tier the
+#: audit itself counts it as. Reviewing such a stage is this program's job, not
+#: the repair tier's.
+_STAGE_GREEN = frozenset(
+    _norm_status(w) for w in (
+        {_T.FULL_PASS}
+        | set(_T.EXCUSED)
+        | {"VACUOUS-PASS", "PARTIALLY-VACUOUS"}))
+
+
 def stage_passed(compliance: Optional[Path], stage_id: str,
                  explicit: Optional[str]) -> Dict[str, Any]:
     """Did this stage PASS? Returns {"passed": bool|None, "why": str}.
@@ -721,17 +761,7 @@ def stage_passed(compliance: Optional[Path], stage_id: str,
                 "why": f"{compliance} carries no row for stage {stage_id!r}",
                 "source": str(compliance)}
     bad = sorted({str(r.get("status") or "?") for r in mine
-                  if str(r.get("status") or "").upper()
-                  not in ("PASS", "SKIPPED", "SKIPPED-CONDITION",
-                          "VACUOUS-PASS", "VACUOUS_PASS",
-                          # v1.15.45 (sha256 capture): a stage whose only
-                          # non-PASS row is PARTIALLY-VACUOUS — every clause
-                          # ran, and the ones that examined nothing disclosed
-                          # a design-declared N/A — has not failed; it is the
-                          # done tier the audit itself counts it as. Reviewing
-                          # it is this program's job, not the repair tier's.
-                          "PARTIALLY-VACUOUS", "PARTIALLY_VACUOUS",
-                          "WAIVED-DEFERRED")})
+                  if _norm_status(r.get("status")) not in _STAGE_GREEN})
     return {"passed": not bad,
             "why": (f"{len(mine)} row(s) for {stage_id}"
                     + (f"; non-green: {', '.join(bad)}" if bad else
