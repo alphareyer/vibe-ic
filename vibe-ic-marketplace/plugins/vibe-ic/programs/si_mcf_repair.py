@@ -124,13 +124,40 @@ def accepts(before: Dict[str, Any], after: Dict[str, Any]) -> Tuple[bool, str]:
     children are judged by, plus the one this producer adds.
 
     Refusals are BY NAME and in a fixed order, so a reader always learns the
-    FIRST thing that was wrong rather than a summary."""
+    FIRST thing that was wrong rather than a summary.
+
+    "IT WAS NOT MEASURED" IS A REFUSAL IN ITS OWN RIGHT (R-0915-41 part 3),
+    and it sits directly behind the route test -- a route that is measurably
+    WORSE is named first even when the rest of the candidate is unmeasured,
+    because that is the most specific true thing about it. Every test here
+    compares two numbers and SKIPS when either is absent, so a candidate
+    whose AFTER numbers never arrived -- a child that died, a re-STA that wrote
+    nothing -- used to fall through every comparison and be ACCEPTED on the
+    strength of three skipped tests. That is the exact shape of a green nobody
+    can support, and it is the failure mode an execution seam makes reachable:
+    with `runner=None` there is no `after` dict at all, so the hole only opens
+    once something real can fail. An unmeasured candidate is REFUSED."""
     b_drc = before.get("router_drc")
     a_drc = after.get("router_drc")
     if isinstance(b_drc, int) and isinstance(a_drc, int) and a_drc > b_drc:
         return False, (f"router_drc {b_drc} -> {a_drc}: the candidate makes the "
                        f"ROUTE worse, and an envelope closed by breaking the "
                        f"route has closed nothing")
+    if isinstance(b_drc, bool) or not isinstance(b_drc, (int, float)):
+        return False, (f"the SHIPPING route's router DRC count was not measured "
+                       f"({b_drc!r}), so \"the candidate does not make the route "
+                       f"worse\" is not something this judgement can establish; "
+                       f"a comparison against an unmeasured baseline is not a "
+                       f"comparison")
+    for _k, _what in (("router_drc", "the candidate's router DRC count"),
+                      ("nominal_setup_ns", "the candidate's NOMINAL setup slack"),
+                      ("mcf_setup_ns", "the candidate's MCF-folded setup slack")):
+        _v = after.get(_k)
+        if isinstance(_v, bool) or not isinstance(_v, (int, float)):
+            return False, (f"{_k} was NOT MEASURED on the candidate ({_what} is "
+                           f"{_v!r}): a candidate whose outcome was not measured "
+                           f"is refused, never adopted on the strength of a "
+                           f"comparison that could not be made")
     b_nom = before.get("nominal_setup_ns")
     a_nom = after.get("nominal_setup_ns")
     if (isinstance(b_nom, (int, float)) and isinstance(a_nom, (int, float))
@@ -244,8 +271,15 @@ def _corner_numbers(si_mcf: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+#: The three numbers the trajectory is measured in, as a PUBLIC name: the
+#: execution seam lives in the phase-3 runner and must read a candidate's
+#: report with the same function this producer reads the shipping one with —
+#: two spellings of "the three numbers" is two things to keep in step.
+corner_numbers = _corner_numbers
+
+
 def run_once(project: Path, *, container: str = "",
-             runner: Any = None) -> Dict[str, Any]:
+             runner: Any = None, no_seam_reason: str = "") -> Dict[str, Any]:
     """Plan, and record the trajectory. ONE pass, and NEVER in place.
 
     `runner` is the callable that executes a candidate and returns the AFTER
@@ -281,9 +315,14 @@ def run_once(project: Path, *, container: str = "",
         # NOT a silent no-op: a tree whose execution leg is absent says so, and
         # a reader can tell it from "the pass ran and changed nothing".
         record["decision"] = "NOT_EXECUTED"
-        record["reason"] = (
+        # `no_seam_reason` exists so a runner that HAS the seam but could not
+        # arm it here -- no routed DEF to restore, no folded SPEF, no sign-off
+        # corner Liberty -- says WHICH of those was missing. "no seam was
+        # supplied" and "the seam had nothing to restore from" are different
+        # answers, and a reader of this file may not have the runner's log.
+        record["reason"] = (no_seam_reason.strip() or (
             "no execution seam was supplied, so this pass PLANNED and measured "
-            "the BEFORE state and applied nothing; the design is unchanged")
+            "the BEFORE state and applied nothing; the design is unchanged"))
     else:
         after = runner(project, container=container, victims=p["victims"])
         record["after"] = after
@@ -297,3 +336,41 @@ def run_once(project: Path, *, container: str = "",
     out_p.parent.mkdir(parents=True, exist_ok=True)
     out_p.write_text(json.dumps(record, indent=2) + "\n")
     return record
+
+
+def record_promotion(project: Path, *, promoted: List[Dict[str, Any]],
+                     rederived: List[Dict[str, Any]],
+                     refused: str = "") -> Dict[str, Any]:
+    """Write back WHAT AN ADOPTION ACTUALLY MOVED, into the same record.
+
+    An adoption that promotes a candidate route also makes every sign-off
+    artefact already derived from the OLD route stale -- the LVS that matched
+    the old netlist, the stream-out of the old geometry. This producer does not
+    promote anything itself (`run_once` never mutates), but the runner that
+    does has to leave the evidence HERE, next to the decision, because the
+    decision is what a reader arrives at this file for.
+
+    `promoted` names every path that moved (with the sidelined original, so the
+    pre-adoption design is still on disk and the move is reversible by hand).
+    `rederived` names every producer re-run over the adopted route and what it
+    returned. `refused` is set when the adoption was decided but NOT carried
+    out, and says why -- an ADOPTED decision with nothing promoted must never
+    read as a promotion that happened."""
+    import _path_layout as _pl                                # noqa: PLC0415
+    out_p = _pl.report_path(project, "si_mcf_repair.json")
+    try:
+        rec = json.loads(out_p.read_text())
+    except Exception:                                         # noqa: BLE001
+        return {}
+    rec["promotion"] = {
+        "promoted": list(promoted),
+        "rederived": list(rederived),
+        "refused": refused,
+        "note": ("every path listed under `promoted` was replaced by the "
+                 "candidate and its pre-adoption content kept beside it under "
+                 "the `sidelined` name; every producer under `rederived` was "
+                 "re-run so no sign-off artefact still describes the route "
+                 "this adoption replaced."),
+    }
+    out_p.write_text(json.dumps(rec, indent=2) + "\n")
+    return rec

@@ -46916,6 +46916,383 @@ def step_ic_release_docs_gen(project: Path) -> StepResult:
                       {"producer_rc": cp.returncode, "flow_step": "37.5ic"})
 
 
+# ── R-0915-41 part 3 — THE EXECUTION SEAM FOR THE ONE SI-AWARE REPAIR PASS ──
+# `si_mcf_repair` PLANS the pass and JUDGES a candidate; it deliberately owns
+# no container, no re-extraction and no re-STA, so with no seam supplied it can
+# only record NOT_EXECUTED. This is the seam: it builds the candidate in a
+# CHILD OpenROAD session seeded from the shipped route, re-extracts the
+# candidate's own parasitics, re-runs nominal STA + the MCF fold ON THE
+# CANDIDATE, and hands the three AFTER numbers plus the router DRC counts back
+# to `accepts()`. The shipping session is never the session that is repaired --
+# the same shape the SDR children established (R-0915-18).
+_SI_MCF_TXN_DIRNAME = "si_mcf_repair_txn"
+_SI_MCF_CANDIDATE_DEF = "candidate.def"
+_SI_MCF_CANDIDATE_ODB = "candidate.odb"
+_SI_MCF_CANDIDATE_DRC = "candidate_router.drc.rpt"
+_SI_MCF_CANDIDATE_SPEF = "candidate.spef"
+_SI_MCF_CHILD_DONE = "SI_MCF_REPAIR_CHILD_DONE"
+_SI_MCF_CHILD_NOOP = "SI_MCF_REPAIR_NOOP"
+
+
+def _router_drc_count_from_report(path: Path) -> Optional[int]:
+    """The router's own DRC record count, by the SAME rule the SDR transaction
+    counts by (`_sdr_tx_count_router_drc`): an EMPTY report is the tool's clean
+    0, and a non-empty report without the record grammar is NOT a count anyone
+    may compare — it returns None, never 0.
+
+    None and 0 must not be the same value here: `accepts()` refuses an
+    unmeasured candidate and compares a measured one, and collapsing the two
+    would let an unreadable report read as a perfect route.
+
+    chip-AGNOSTIC: the tool's own report grammar only."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return None
+    n = len(_ROUTER_DRC_TYPE_RE.findall(text))
+    if n == 0 and text.strip():
+        return None
+    return n
+
+
+def _si_mcf_repair_child_tcl(top: str, *, tech_lef_c: str, cell_lef_c: str,
+                             liberty_c: str, pnr_dir_c: str, txn_dir_c: str,
+                             sdc_c: str, max_captable_c: str,
+                             metal_prefix: str, thread_count: int,
+                             repair_body: str,
+                             extra_lefs_c: Optional[Sequence[str]] = None,
+                             extra_liberties_c: Optional[Sequence[str]] = None,
+                             filler_masters: Optional[List[str]] = None,
+                             slot_pinned_core: bool = False,
+                             design_declared_die: bool = False,
+                             sparse_active_row_fill: bool = False,
+                             reroute_iters: int = _SHIP_REROUTE_MAX_DROUTE_ITERS
+                             ) -> str:
+    """The CHILD deck for ONE SI-aware repair pass, written to a candidate.
+
+    It is `_ship_signoff_spef_repair_tcl`'s shape with three deliberate
+    differences, and no fourth:
+
+      1. the parasitics the resizer sees are the MCF-BOUNDED ones the envelope
+         is computed against — `repair_body` reads that folded SPEF — instead
+         of a freshly extracted max-RC SPEF. That is the whole point of the
+         pass: a nominal repair has already run by this step and did not close
+         the envelope;
+      2. ONE `repair_timing` call, not a bounded convergence loop. An envelope
+         that a repair can also WIDEN must not be iterated;
+      3. nothing is written over a shipped path. Every artefact lands in
+         ``txn_dir_c`` and the shipping session's route is untouched until a
+         decision adopts it.
+
+    The no-op guard is kept verbatim in spirit from v1.8.43: if the repair
+    changed no instance, the base route is NOT destroyed and re-routed for
+    nothing — a second route of the same netlist is a different route with its
+    own quality lottery, and this pass may not spend one.
+
+    chip/PDK-AGNOSTIC: standard OpenROAD APIs; every PDK value is passed in."""
+    mp = metal_prefix
+    refill_block = _build_sparse_die_aware_filler_tcl(
+        filler_masters or [], slot_pinned_core=slot_pinned_core,
+        design_declared_die=design_declared_die,
+        sparse_active_row_fill=sparse_active_row_fill)
+    drc_rpt_c = f"{txn_dir_c}/{_SI_MCF_CANDIDATE_DRC}"
+    return (
+        f"set_thread_count {thread_count}\n"
+        f"read_lef {tech_lef_c}\n"
+        f"read_lef {cell_lef_c}\n"
+        + _extra_lef_read_block(extra_lefs_c) +
+        f"read_liberty {liberty_c}\n"
+        + _extra_liberty_read_block(extra_liberties_c, liberty_c) +
+        f"read_def {pnr_dir_c}/routed.def\n"
+        f"read_sdc {sdc_c}\n"
+        # This session RESIZES, so it needs the same cell-pool exclusion the
+        # PnR session has (#543): without it the repair is free to insert the
+        # exact master the do-not-use block exists to keep out, and the reroute
+        # then dies inside its own catch.
+        + _dont_use_family_fallback_tcl()
+        + f"if {{[catch {{set_wire_rc -signal -layer {mp}1}} e]}} {{ "
+        f"if {{[catch {{set_wire_rc -layer {mp}1}} e2]}} {{ "
+        f"puts \"SI_MCF_SWR_SIG_NONFATAL: $e2\" }} }}\n"
+        f"if {{[catch {{set_wire_rc -clock -layer {mp}5}} e]}} {{ "
+        f"puts \"SI_MCF_SWR_CLK_NONFATAL: $e\" }}\n"
+        # DPL-0038 — clear the fill tiling BEFORE any parasitics are annotated:
+        # a core fully tiled with fillers has no legal site for an inserted
+        # buffer, and removing instances after the annotation invalidates the
+        # parasitics network (EST-0104). Fillers are restored after the reroute.
+        "if {[catch {remove_fillers} e]} { puts \"SI_MCF_RMFILL_NONFATAL: $e\" }\n"
+        "set_timing_derate -early 0.95\n"
+        "set_timing_derate -late 1.05\n"
+        # The candidate's route gets its OWN DRC report, at its own path, so the
+        # count `accepts()` compares against is never the shipping route's file.
+        + _route_drc_report_tcl(drc_rpt_c)
+        + f"set ::_vic_router_drc_rpt {drc_rpt_c}\n"
+        + _propagated_clock_tcl(
+            reason=("the restored DEF is post-CTS and the MCF-bounded "
+                    "parasitics are annotated below"))
+        + _design_signature_tcl("_si_sig0")
+        # ── the planned pass itself, composed by si_mcf_repair.repair_tcl ──
+        + repair_body
+        + "if {[catch {detailed_placement} e]} { "
+        "puts \"SI_MCF_DP_NONFATAL: $e\" }\n"
+        "if {[catch {check_placement} e]} { puts \"SI_MCF_CP_WARN: $e\" }\n"
+        "catch {puts \"SI_MCF_WNS_AFTER_REPAIR: [sta::worst_slack -max]\"}\n"
+        + _design_signature_tcl("_si_sig1")
+        + "if {$_si_sig1 eq $_si_sig0} {\n"
+        f"  puts \"{_SI_MCF_CHILD_NOOP}: 1 (the pass changed no instance; the "
+        "base route is kept rather than re-routed for nothing)\"\n"
+        "} else {\n"
+        # global_route NO-OPS on already-routed nets, so the committed signal
+        # routing has to go before the guides can be regenerated (R-0915-16).
+        # Power/ground, special nets and the spare pool are left intact.
+        + _spare_safe_routing_clear_tcl("SI_MCF")
+        + "  if {[catch {global_route} e]} { puts \"SI_MCF_GR_NONFATAL: $e\" }\n"
+        "  if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
+        f"  if {{[catch {{detailed_route -droute_end_iter {reroute_iters} "
+        "{*}$_vic_drc_opt}} e]}} { puts \"SI_MCF_DR_NONFATAL: $e\" }\n"
+        f"{refill_block}"
+        + _min_area_patch_tcl("SI_MCF_MIN_AREA")
+        + "}\n"
+        # ── the candidate, and ONLY the candidate ──
+        # Written on BOTH arms: a no-op candidate is still a candidate and must
+        # be judgeable by the same rules, so that "the pass ran and changed
+        # nothing" is a measured outcome rather than an absent one.
+        f"if {{[catch {{write_def {txn_dir_c}/{_SI_MCF_CANDIDATE_DEF}}} e]}} {{ "
+        f"puts \"SI_MCF_WD_NONFATAL: $e\" }}\n"
+        # The DATABASE is the restore point, not the DEF (R-0915-18): a DEF
+        # carries neither the global router's guides nor `dont_touch`.
+        f"if {{[catch {{write_db {txn_dir_c}/{_SI_MCF_CANDIDATE_ODB}}} e]}} {{ "
+        f"puts \"SI_MCF_WDB_NONFATAL: $e\" }}\n"
+        f"if {{[catch {{write_verilog {txn_dir_c}/{top}_pnr.v}} e]}} {{ "
+        f"puts \"SI_MCF_WV_NONFATAL: $e\" }}\n"
+        # The candidate's OWN parasitics: the MCF fold that judges it must be
+        # folded from the candidate's extraction, never from the SPEF of the
+        # route it replaced.
+        "catch {define_process_corner -ext_model_index 0 X}\n"
+        f"if {{[catch {{extract_parasitics -ext_model_file {max_captable_c} "
+        f"-corner_cnt 1 -max_res 50 -coupling_threshold 0.1}} e]}} {{ "
+        f"puts \"SI_MCF_EXT_NONFATAL: $e\" }}\n"
+        f"if {{[catch {{write_spef {txn_dir_c}/{_SI_MCF_CANDIDATE_SPEF}}} e]}} {{ "
+        f"puts \"SI_MCF_WSPEF_NONFATAL: $e\" }}\n"
+        f"puts \"{_SI_MCF_CHILD_DONE}\"\n"
+    )
+
+
+class SiMcfRepairSeamUnavailable(Exception):
+    """The seam could not be ARMED — named, and never confused with a refusal.
+
+    "the candidate was rejected" and "no candidate could be built" are
+    different answers and the record keeps them apart."""
+
+
+def _si_mcf_repair_seam(project: Path, top: str, pdk: "PdkConfig",
+                        container: str):
+    """Return the `runner=` callable `si_mcf_repair.run_once` executes, or raise
+    `SiMcfRepairSeamUnavailable` naming the FIRST missing precondition.
+
+    Arming is separated from running so a tree that cannot build a candidate
+    records NOT_EXECUTED with the real reason, instead of a REJECTED decision
+    for a candidate that never existed."""
+    import si_mcf_repair as _si_rep                            # noqa: PLC0415
+    pnr_out = _pl.pnr_dir(project)
+    routed = pnr_out / "routed.def"
+    if not routed.is_file():
+        raise SiMcfRepairSeamUnavailable(
+            "no phase3/stage3/pnr/routed.def exists, so there is no shipped "
+            "route for a candidate to be derived from")
+    sdc = pnr_out / "constraint.sdc"
+    if not sdc.is_file():
+        raise SiMcfRepairSeamUnavailable(
+            "no phase3/stage3/pnr/constraint.sdc exists, so the child session "
+            "has no constraints to repair against")
+    folded = sorted(_pl.extracted_dir(project).glob("si_mcf/*.mcf_setup.spef"))
+    if not folded:
+        raise SiMcfRepairSeamUnavailable(
+            "si_mcf_sta wrote no MCF-bounded setup SPEF under "
+            "phase3/stage3/extracted/si_mcf/, and a pass that reads the "
+            "ordinary SPEF is a nominal repair, not an SI-aware one")
+    try:
+        corner_libs = _resolve_signoff_corner_libs(project, pdk, container)
+    except Exception:                                          # noqa: BLE001
+        corner_libs = {}
+    ss_lib = corner_libs.get("SS") or corner_libs.get("TT")
+    cap = _max_captable_c(pdk, container)
+    if not ss_lib or not cap:
+        raise SiMcfRepairSeamUnavailable(
+            "the sign-off corner Liberty and/or the PDK max-captable could "
+            "not be resolved, so a candidate could not be built or extracted")
+
+    def _run(project_: Path, *, container: str = "",
+             victims: Optional[List[str]] = None) -> Dict[str, Any]:
+        t0 = time.time()
+        txn = pnr_out / _SI_MCF_TXN_DIRNAME
+        txn.mkdir(parents=True, exist_ok=True)
+        txn_c = _to_container_path(str(txn), container)
+        drc_before = _router_drc_count_from_report(
+            pnr_out / ROUTER_DRC_REPORT_NAME)
+        repair_body = _si_rep.repair_tcl(
+            folded_spef_c=_to_container_path(str(folded[0]), container),
+            victims=list(victims or []),
+            sdc_c=_to_container_path(str(sdc), container))
+        extra_liberties_c: List[str] = []
+        for liberty in _sta_extra_liberties(project_, pdk, ss_lib):
+            liberty_c = _to_container_path(str(liberty), container)
+            if liberty_c != ss_lib and liberty_c not in extra_liberties_c:
+                extra_liberties_c.append(liberty_c)
+        _slot = _slot_geometry(project_)
+        _declared_die = bool(_l9_declared_die_area(project_)
+                             or _l19_declared_die_area(project_))
+        _ring_inset, _ = _padring_core_inset_um(project_)
+        tcl = _si_mcf_repair_child_tcl(
+            top,
+            tech_lef_c=_to_container_path(str(pdk.tech_lef), container),
+            cell_lef_c=_to_container_path(str(pdk.cell_lef), container),
+            liberty_c=ss_lib,
+            pnr_dir_c=_to_container_path(str(pnr_out), container),
+            txn_dir_c=txn_c,
+            sdc_c=_to_container_path(str(sdc), container),
+            max_captable_c=cap, metal_prefix=pdk.metal_prefix,
+            thread_count=_openroad_thread_count(),
+            repair_body=repair_body,
+            extra_lefs_c=_def_reopen_extra_lefs_c(routed, pdk, container),
+            extra_liberties_c=extra_liberties_c,
+            filler_masters=_filler_masters_for_pdk(pdk),
+            slot_pinned_core=_slot is not None,
+            design_declared_die=_declared_die,
+            sparse_active_row_fill=bool(_ring_inset is not None
+                                        and _slot is None and not _declared_die))
+        tcl_path = txn / "si_mcf_repair_child.tcl"
+        tcl_path.write_text(tcl)
+        tcl_c = _to_container_path(str(tcl_path), container)
+        # Long, open-ended repair+reroute — supervised by the progress-stall
+        # WATCHDOG (marker=tcl_c), never by a clock that terminates a solve
+        # that is still solving.
+        rc, out, err = _docker_exec(
+            container, f"openroad -no_init -exit {tcl_c}", marker=tcl_c)
+        log = (out or "") + "\n" + (err or "")
+        (txn / "si_mcf_repair_child.log").write_text(log)
+        after: Dict[str, Any] = {
+            "router_drc_before": drc_before,
+            "router_drc": None,
+            "nominal_setup_ns": None,
+            "mcf_setup_ns": None,
+            "mcf_hold_ns": None,
+            "child_rc": rc,
+            "child_completed": _SI_MCF_CHILD_DONE in log,
+            "repair_changed_no_instance": _SI_MCF_CHILD_NOOP in log,
+            "candidate_dir": str(txn),
+            "elapsed_s": round(time.time() - t0, 3),
+        }
+        cand_def = txn / _SI_MCF_CANDIDATE_DEF
+        cand_spef = txn / _SI_MCF_CANDIDATE_SPEF
+        cand_v = txn / f"{top}_pnr.v"
+        after["candidate_def"] = str(cand_def) if cand_def.is_file() else None
+        after["candidate_odb"] = (str(txn / _SI_MCF_CANDIDATE_ODB)
+                                  if (txn / _SI_MCF_CANDIDATE_ODB).is_file()
+                                  else None)
+        after["candidate_netlist"] = str(cand_v) if cand_v.is_file() else None
+        after["candidate_spef"] = str(cand_spef) if cand_spef.is_file() else None
+        if after["repair_changed_no_instance"]:
+            # A no-op candidate keeps the shipping route, so its DRC count IS
+            # the shipping route's count. Said out loud rather than left to a
+            # missing file: the route was not re-run, not unmeasured.
+            after["router_drc"] = drc_before
+        else:
+            after["router_drc"] = _router_drc_count_from_report(
+                txn / _SI_MCF_CANDIDATE_DRC)
+        # ── re-run nominal STA + the MCF fold ON THE CANDIDATE ──
+        # One call: si_mcf_sta.run() measures the nominal grounded corner AND
+        # both folded corners from the SAME candidate netlist + SPEF, so the
+        # three AFTER numbers cannot come from three different designs.
+        if cand_spef is not None and cand_spef.is_file() and cand_v.is_file():
+            try:
+                import si_mcf_sta as _si_sta                   # noqa: PLC0415
+                cand_rep = _si_sta.run(
+                    project_, container=container, spef=str(cand_spef),
+                    netlist=str(cand_v), sdc=str(sdc), top=top,
+                    out_json=str(txn / "si_mcf_sta_candidate.json"))
+                after["candidate_si_mcf_sta"] = str(
+                    txn / "si_mcf_sta_candidate.json")
+                after["candidate_verdict"] = cand_rep.get("verdict")
+                after.update(_si_rep.corner_numbers(cand_rep))
+            except Exception as exc:                           # noqa: BLE001
+                # Left as None on purpose: `accepts()` refuses an unmeasured
+                # candidate by name, and a re-STA that raised has measured
+                # nothing.
+                after["candidate_sta_error"] = f"{type(exc).__name__}: {exc}"
+        else:
+            after["candidate_sta_error"] = (
+                "the child wrote no candidate SPEF and/or netlist, so the "
+                "candidate could not be re-measured")
+        return after
+
+    return _run
+
+
+def _si_mcf_repair_promote(project: Path, top: str, pdk: "PdkConfig",
+                           container: str, after: Dict[str, Any],
+                           notes: List[str]) -> None:
+    """Carry out an ADOPTED decision — and re-derive everything it made stale.
+
+    THIS IS THE HALF THAT COSTS SOMETHING. Promoting a candidate route makes
+    every sign-off artefact already derived from the OLD route describe a
+    design that is no longer shipped: the LVS that matched the old netlist, the
+    stream-out of the old geometry, the router DRC of the old route. An
+    adoption that moved the DEF and left those behind would publish a green
+    nobody can support, so the three route-derived producers are re-run over
+    the adopted route and each result is recorded by name.
+
+    The pre-adoption artefacts are SIDELINED, not deleted: `<name>.pre_si_mcf`
+    sits beside each promoted path, so the route this adoption replaced is
+    still on disk and the move is reversible by hand."""
+    import si_mcf_repair as _si_rep                            # noqa: PLC0415
+    pnr_out = _pl.pnr_dir(project)
+    moves = [
+        (after.get("candidate_def"), pnr_out / "routed.def"),
+        (after.get("candidate_netlist"), pnr_out / f"{top}_pnr.v"),
+        (after.get("candidate_spef"),
+         _pl.extracted_dir(project) / f"{top}.spef"),
+        (after.get("candidate_odb"), pnr_out / "routed_si_mcf.odb"),
+    ]
+    missing = [str(dst) for src, dst in moves if not src]
+    if missing:
+        _si_rep.record_promotion(
+            project, promoted=[], rederived=[],
+            refused=("the candidate was accepted but the child did not write "
+                     "every artefact the promotion needs (" +
+                     ", ".join(missing) + "), so NOTHING was promoted and the "
+                     "shipping session keeps its route"))
+        notes.append("si_mcf_repair: ADOPTED but NOT promoted (incomplete "
+                     "candidate); shipping route kept")
+        return
+    promoted: List[Dict[str, Any]] = []
+    for src, dst in moves:
+        sidelined = ""
+        if dst.is_file():
+            side = dst.with_suffix(dst.suffix + ".pre_si_mcf")
+            shutil.copy2(dst, side)
+            sidelined = str(side)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        promoted.append({"from": str(src), "to": str(dst),
+                         "sidelined": sidelined})
+    rederived: List[Dict[str, Any]] = []
+    for name, fn in (("gds", step_gds), ("drc", step_drc), ("lvs", step_lvs)):
+        try:
+            res = fn(project, top, pdk, container)
+            rederived.append({"step": name,
+                              "status": getattr(res, "status", None),
+                              "detail": getattr(res, "detail", None)})
+        except Exception as exc:                               # noqa: BLE001
+            # Disclosed, never swallowed: a re-derivation that did not happen
+            # leaves a sign-off artefact describing the replaced route, and the
+            # reader of this record has to be told which one.
+            rederived.append({"step": name, "status": "ERROR",
+                              "detail": f"{type(exc).__name__}: {exc}"})
+    _si_rep.record_promotion(project, promoted=promoted, rederived=rederived)
+    notes.append("si_mcf_repair: ADOPTED and promoted; re-derived " +
+                 ", ".join(r["step"] for r in rederived))
+
+
 def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                                 container: str) -> StepResult:
     """v1.6.36 — stage runner outputs at the canonical paths the flow YAML expects.
@@ -48317,11 +48694,32 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # to tell apart from "the pass ran and changed nothing".
     try:
         import si_mcf_repair as _si_rep                       # noqa: PLC0415
-        _si_rec = _si_rep.run_once(project, container=container)
+        # R-0915-41 part 3 — ARM the execution seam. Arming is separate from
+        # running so a tree that cannot build a candidate records NOT_EXECUTED
+        # with the reason it could not, rather than a REJECTED decision about a
+        # candidate that never existed.
+        _si_seam = None
+        _si_no_seam = ""
+        try:
+            _si_seam = _si_mcf_repair_seam(project, top, pdk, container)
+        except SiMcfRepairSeamUnavailable as _si_arm_exc:
+            _si_no_seam = (
+                f"the execution seam could not be armed: {_si_arm_exc}; this "
+                f"pass PLANNED and measured the BEFORE state and applied "
+                f"nothing, and the design is unchanged")
+        _si_rec = _si_rep.run_once(project, container=container,
+                                   runner=_si_seam,
+                                   no_seam_reason=_si_no_seam)
         _si_out = _pl.report_path(project, "si_mcf_repair.json")
         if _si_out.is_file():
             written.append(str(_si_out))
         notes.append(f"si_mcf_repair: {_si_rec.get('decision')}")
+        # The producer NEVER mutates (its own contract), so an adoption is
+        # carried out HERE, keyed on the decision it recorded — and a refusal
+        # leaves the shipping session byte-identical, which is a test.
+        if _si_rec.get("decision") == "ADOPTED":
+            _si_mcf_repair_promote(project, top, pdk, container,
+                                   _si_rec.get("after") or {}, notes)
     except Exception as _si_exc:                              # noqa: BLE001
         notes.append(f"si_mcf_repair non-fatal: {_si_exc}")
 
