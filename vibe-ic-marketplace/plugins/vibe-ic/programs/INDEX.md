@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1313
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1313)
+- **Total programs (excluding helpers / shims):** 1314
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1314)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1304 |
+| `any` | 1305 |
 
 ## Alphabetical listing
 
@@ -1107,6 +1107,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `ship_postroute_convergence_exhaustion_check` | any | — | chip-AGNOSTIC audit of the post-reroute real-SPEF convergence loop's OWN markers, answering one question a setup-VIOLATED run cannot othe... |
 | `shipped_path_portability_check` | any | — | shipped-source path-portability guard. |
 | `si_crosstalk_check` | any | — | Verify signal integrity / crosstalk analysis was performed. |
+| `si_mcf_repair` | any | — | close the MCF crosstalk-delay envelope, once. |
 | `si_mcf_sta` | any | — | SI-aware STA via Miller Coupling Factor (MCF) bounding. |
 | `si_mcf_sta_check` | any | — | GATE for the MCF-bounded SI-aware STA (si_mcf_sta.py). |
 | `si_signoff_timing_aware` | any | — | OPEN-SOURCE timing-window-aware SI ADVISORY screen. |
@@ -1385,7 +1386,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1304 programs)
+### `any` (1305 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2461,6 +2462,7 @@ _(no programs in this group)_
 - `ship_postroute_convergence_exhaustion_check` — chip-AGNOSTIC audit of the post-reroute real-SPEF convergence loop's OWN markers, answering one question a setup-VIOLATED run cannot othe...
 - `shipped_path_portability_check` — shipped-source path-portability guard.
 - `si_crosstalk_check` — Verify signal integrity / crosstalk analysis was performed.
+- `si_mcf_repair` — close the MCF crosstalk-delay envelope, once.
 - `si_mcf_sta` — SI-aware STA via Miller Coupling Factor (MCF) bounding.
 - `si_mcf_sta_check` — GATE for the MCF-bounded SI-aware STA (si_mcf_sta.py).
 - `si_signoff_timing_aware` — OPEN-SOURCE timing-window-aware SI ADVISORY screen.
