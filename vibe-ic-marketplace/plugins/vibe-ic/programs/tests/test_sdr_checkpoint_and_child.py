@@ -844,3 +844,31 @@ def test_the_one_shot_restore_time_global_route_is_gone():
     ship = R._after_restore_tcl("", _SPARE_PLAN, reroutes_immediately=False)
     assert "RESTORED_ROUTE_GUIDES_REESTABLISHED" not in ship
     assert "global_route" not in ship
+
+
+def test_the_childs_transcript_never_lands_in_the_parents_log():
+    """MEASURED (sha256 run5): echoing the child's transcript into the parent's
+    `openroad.log` made the PARENT'S ROUTE UNREADABLE --
+
+        pnr FAIL ROUTE_DRC_NOT_MEASURED: route__drc_errors: METRIC=0 but LOG=5133
+
+    The parent routed clean (`DRT-0702 … 0 violation(s)`, metric 0); 5133 was
+    the CHILD's last in-loop DRT-0199 from its own repair passes, and the log
+    scraper takes the LAST one. The gate refused to choose between the tool's
+    metric and its log, which is exactly right -- preferring either side is how
+    a measurement quietly becomes a guess -- and is why this was caught rather
+    than published.
+
+    `openroad.log` is the record of what THIS session routed. The child gets
+    its own per-site file, and `SDR_CHILD_SESSION_DONE` names it.
+    """
+    parent = R._postroute_sdr_parent_child_call_tcl("/o", SITE1)
+    exec_line = [l for l in parent.splitlines() if "exec openroad" in l]
+    assert len(exec_line) == 1, exec_line
+    line = exec_line[0]
+    assert f"/o/{R._sdr_child_log_name(SITE1)}" in line
+    # redirected AWAY from the parent's stdout, not tee'd through it
+    assert ">@ stdout" not in line and ">&@ stdout" not in line
+    assert "tee" not in line
+    # and the reader is still told where the transcript went
+    assert f"log={'/o/' + R._sdr_child_log_name(SITE1)}" in parent

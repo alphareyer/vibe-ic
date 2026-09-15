@@ -25432,16 +25432,26 @@ def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
         # writes no receipt, is a REFUSAL — never an invented pass.
         f"    puts \"SDR_CHILD_SESSION_BEGIN: {child_tcl_c}\"\n"
         "    set _sdr_child_rc 0\n"
-        # THE CHILD GETS ITS OWN LOG, and is still echoed to the parent's.
-        # Interleaving the child's transcript into the parent's was enough to
-        # SEE it but not enough to READ it: diagnosing the DRT-1010 that made
-        # every candidate unmeasurable meant bisecting line ranges between
-        # SDR_CHILD_SESSION_BEGIN and _DONE in a 4,000-line file that the next
-        # invocation's `tee` then truncated. `tee` keeps the echo (so every
-        # gate reading `openroad.log` still sees the child) AND leaves a file
-        # named for the site, which no later invocation rewrites.
+        # THE CHILD'S TRANSCRIPT GOES TO THE CHILD'S OWN LOG, AND NOWHERE ELSE.
+        #
+        # MEASURED (sha256 run5) — echoing it into the parent's `openroad.log`
+        # made the PARENT'S ROUTE UNREADABLE:
+        #     pnr FAIL ROUTE_DRC_NOT_MEASURED: route__drc_errors:
+        #         METRIC=0 but LOG=5133
+        # The parent routed clean (`DRT-0702 Post-route verification: 0
+        # violation(s)`, metric 0). 5133 is the CHILD's last in-loop DRT-0199,
+        # from its own repair passes, interleaved into the parent's log — and
+        # the log scraper takes the LAST DRT-0199. The gate then refused to
+        # choose between the tool's metric and its log, which is exactly right
+        # and is why this was caught instead of shipping a wrong number.
+        #
+        # A log is not a noticeboard: `openroad.log` is the record of what THIS
+        # session routed, and every consumer of it is written for that. The
+        # child gets its own per-site file, `SDR_CHILD_SESSION_DONE` names it,
+        # and the receipts carry the decision — so nothing is hidden and
+        # nothing is attributed to the wrong session.
         f"    if {{[catch {{exec openroad -no_init -exit {child_tcl_c} "
-        f"|& tee {child_log_c} >@ stdout}} _sdr_child_e]}} {{\n"
+        f">& {child_log_c}}} _sdr_child_e]}} {{\n"
         "      set _sdr_child_rc 1\n"
         "      puts \"SDR_CHILD_SESSION_NONFATAL: $_sdr_child_e\"\n"
         "    }\n"
