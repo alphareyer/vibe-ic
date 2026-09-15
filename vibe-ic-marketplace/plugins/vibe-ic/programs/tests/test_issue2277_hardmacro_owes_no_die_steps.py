@@ -200,3 +200,49 @@ def test_a_clause_naming_an_undeclared_path_is_still_not_a_producer():
     for c in _clauses():
         step = _steps()[c["step"]]
         assert c["target"] in set(step.get("required_outputs") or [])
+
+
+# --------------------------------------------------------------------------- #
+# the consumer the new condition key reaches: _ppa.delivery_path
+# --------------------------------------------------------------------------- #
+# MEASURED after the condition landed on the branch: `_ppa/delivery_path.py`
+# refuses LOUDLY (by design) any key on a terminal's condition it has not been
+# taught -- `_ROUTE_CONDITION_KEYS` -- and every route it resolved came back
+# UNREADABLE, reddening 13 tests across two modules. That guard is right and
+# stays; `delivery_declares` is now IN the set because it answers this module's
+# OWN question from a better source, and the same predicate `resolve` already
+# runs evaluates it.
+import _ppa.delivery_path as DP                           # noqa: E402
+
+
+def test_the_route_reader_was_TAUGHT_the_key_not_widened(tmp_path):
+    """The loud refusal survives: a key nothing has been taught still makes
+    the route UNREADABLE rather than being ignored."""
+    assert "delivery_declares" in DP._ROUTE_CONDITION_KEYS
+    conds, why = DP._route_conditions()
+    assert conds is not None, why
+
+
+def test_a_declared_hardmacro_resolves_to_the_IP_ROUTE(tmp_path):
+    """Neither terminal's `files_exist` is met on this tree -- the chip
+    terminal stands down BY DECLARATION and `NO_TEMPLATE.txt` was never
+    written because a live shuttle existed on the target PDK. Reporting
+    NOT_DETERMINED here would say "this tree carries no router artefact"
+    about a tree that carries one, which is the one thing this module
+    promises never to do."""
+    r = DP.resolve(_project(tmp_path))
+    assert r["path"] == DP.PATH_IP
+    assert r["evidence"]["declaration"]["file"] == (
+        "input/submission_template/tapeout_declaration.json")
+
+
+def test_a_DIE_on_the_same_tree_still_resolves_to_the_CHIP_ROUTE(tmp_path):
+    r = DP.resolve(_project(tmp_path, deliverable="DIE"))
+    assert r["path"] == DP.PATH_CHIP
+
+
+def test_a_tree_with_no_router_and_no_declaration_stays_NOT_DETERMINED(tmp_path):
+    """The honest unknown is preserved: nothing to read is not an IP finding."""
+    bare = tmp_path / "bare"
+    (bare / "input" / "submission_template").mkdir(parents=True)
+    assert DP.resolve(bare)["path"] == DP.PATH_NOT_DETERMINED
