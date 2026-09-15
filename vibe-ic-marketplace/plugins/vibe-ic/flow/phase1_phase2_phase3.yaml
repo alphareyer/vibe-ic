@@ -3140,6 +3140,25 @@ steps:
       trigger: "Setup violation; constraint or phase2/stage2/synth opt re-do"
     skills: [sta-review]
     mcp_tools: [eda_sta]
+    programs:
+      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
+      # This step's own gate clause below invokes the program with
+      # `--json <path>` and `<path>` is one of this step's `required_outputs`
+      # -- the flow already says in TWO places that the run writes that
+      # document. It did not say it in the third, `programs:`, which is the
+      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
+      # the AUDIT's evaluation of the gate wrote it, and the audit then
+      # correctly refused its own output:
+      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
+      #   no pre-audit producer supplied these paths; wire them into the
+      #   owning runner before claiming this step complete.
+      # Naming the producer here is that wiring: it makes the three
+      # declarations agree, and `flow_declared_producer_run` (invoked by the
+      # phase-3 runner, never by the auditor) then executes the clause when
+      # -- and only when -- the document is absent or the audit's own
+      # authorship note claims it. A document the run already produced is
+      # left byte-for-byte alone.
+      - sta_report_check
     required_outputs:
       - "phase3/stage3/sta/pre_pnr_timing.rpt"
       - "reports/phase3/sta/pre_pnr_summary.json"
@@ -4335,6 +4354,24 @@ steps:
       # individual gate logic stays in the dedicated checks below.
       - phase3_backend_step
       - floorplan_pdn_check
+      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
+      # This step's own gate clause below invokes the program with
+      # `--json <path>` and `<path>` is one of this step's `required_outputs`
+      # -- the flow already says in TWO places that the run writes that
+      # document. It did not say it in the third, `programs:`, which is the
+      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
+      # the AUDIT's evaluation of the gate wrote it, and the audit then
+      # correctly refused its own output:
+      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
+      #   no pre-audit producer supplied these paths; wire them into the
+      #   owning runner before claiming this step complete.
+      # Naming the producer here is that wiring: it makes the three
+      # declarations agree, and `flow_declared_producer_run` (invoked by the
+      # phase-3 runner, never by the auditor) then executes the clause when
+      # -- and only when -- the document is absent or the audit's own
+      # authorship note claims it. A document the run already produced is
+      # left byte-for-byte alone.
+      - stage2_compliance
     required_outputs:
       - "phase3/stage3/pnr/floorplan.def"
       - "phase3/stage3/pnr/pdn.tcl OR phase3/stage3/pnr/pdn.done"
@@ -4874,6 +4911,25 @@ steps:
       - from: 20
         path: "phase3/stage3/pnr/post_hold.def"
     mcp_tools: [eda_pnr]
+    programs:
+      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
+      # This step's own gate clause below invokes the program with
+      # `--json <path>` and `<path>` is one of this step's `required_outputs`
+      # -- the flow already says in TWO places that the run writes that
+      # document. It did not say it in the third, `programs:`, which is the
+      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
+      # the AUDIT's evaluation of the gate wrote it, and the audit then
+      # correctly refused its own output:
+      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
+      #   no pre-audit producer supplied these paths; wire them into the
+      #   owning runner before claiming this step complete.
+      # Naming the producer here is that wiring: it makes the three
+      # declarations agree, and `flow_declared_producer_run` (invoked by the
+      # phase-3 runner, never by the auditor) then executes the clause when
+      # -- and only when -- the document is absent or the audit's own
+      # authorship note claims it. A document the run already produced is
+      # left byte-for-byte alone.
+      - drc_report_check
     required_outputs:
       - "phase3/stage3/pnr/routed.def"
       # OpenROAD's own provenance records this as the route invocation's
@@ -5256,6 +5312,25 @@ steps:
       trigger: "Setup/Hold violation; post-route timing repair required"
     skills: [sta-review]
     mcp_tools: [eda_sta]
+    programs:
+      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
+      # This step's own gate clause below invokes the program with
+      # `--json <path>` and `<path>` is one of this step's `required_outputs`
+      # -- the flow already says in TWO places that the run writes that
+      # document. It did not say it in the third, `programs:`, which is the
+      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
+      # the AUDIT's evaluation of the gate wrote it, and the audit then
+      # correctly refused its own output:
+      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
+      #   no pre-audit producer supplied these paths; wire them into the
+      #   owning runner before claiming this step complete.
+      # Naming the producer here is that wiring: it makes the three
+      # declarations agree, and `flow_declared_producer_run` (invoked by the
+      # phase-3 runner, never by the auditor) then executes the clause when
+      # -- and only when -- the document is absent or the audit's own
+      # authorship note claims it. A document the run already produced is
+      # left byte-for-byte alone.
+      - sta_report_check
     required_outputs:
       - "phase3/stage3/sta/post_route_timing.rpt"
       # Emitted by Step 23's SPEF-backed STA pass and mirrored here.  Step
@@ -5674,6 +5749,25 @@ steps:
       fallback_to: 15
       trigger: "IR drop > 5%; PDN strengthen"
     skills: [ir-drop-triage]
+    programs:
+      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
+      # This step's own gate clause below invokes the program with
+      # `--json <path>` and `<path>` is one of this step's `required_outputs`
+      # -- the flow already says in TWO places that the run writes that
+      # document. It did not say it in the third, `programs:`, which is the
+      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
+      # the AUDIT's evaluation of the gate wrote it, and the audit then
+      # correctly refused its own output:
+      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
+      #   no pre-audit producer supplied these paths; wire them into the
+      #   owning runner before claiming this step complete.
+      # Naming the producer here is that wiring: it makes the three
+      # declarations agree, and `flow_declared_producer_run` (invoked by the
+      # phase-3 runner, never by the auditor) then executes the clause when
+      # -- and only when -- the document is absent or the audit's own
+      # authorship note claims it. A document the run already produced is
+      # left byte-for-byte alone.
+      - ir_drop_report_check
     required_outputs:
       - "reports/phase3/ir_drop.rpt"
       - "reports/phase3/ir_drop.json"
@@ -5747,6 +5841,26 @@ steps:
     # under its shipped name: "Triage static and dynamic IR-drop and
     # electromigration (EM) reports from power signoff tools".
     skills: [ir-drop-triage]
+    programs:
+      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
+      # This step's own gate clause below invokes the program with
+      # `--json <path>` and `<path>` is one of this step's `required_outputs`
+      # -- the flow already says in TWO places that the run writes that
+      # document. It did not say it in the third, `programs:`, which is the
+      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
+      # the AUDIT's evaluation of the gate wrote it, and the audit then
+      # correctly refused its own output:
+      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
+      #   no pre-audit producer supplied these paths; wire them into the
+      #   owning runner before claiming this step complete.
+      # Naming the producer here is that wiring: it makes the three
+      # declarations agree, and `flow_declared_producer_run` (invoked by the
+      # phase-3 runner, never by the auditor) then executes the clause when
+      # -- and only when -- the document is absent or the audit's own
+      # authorship note claims it. A document the run already produced is
+      # left byte-for-byte alone.
+      - em_report_check
+      - em_peak_current_authority_check
     required_outputs:
       - "reports/phase3/em.rpt"
       # The MEASUREMENT (`verdict: MEASURED`, max_segment_current_A,
@@ -5996,6 +6110,24 @@ steps:
     #              must not fail the seal ring for its own absence.
     programs:
       - die_finishing_gen
+      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
+      # This step's own gate clause below invokes the program with
+      # `--json <path>` and `<path>` is one of this step's `required_outputs`
+      # -- the flow already says in TWO places that the run writes that
+      # document. It did not say it in the third, `programs:`, which is the
+      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
+      # the AUDIT's evaluation of the gate wrote it, and the audit then
+      # correctly refused its own output:
+      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
+      #   no pre-audit producer supplied these paths; wire them into the
+      #   owning runner before claiming this step complete.
+      # Naming the producer here is that wiring: it makes the three
+      # declarations agree, and `flow_declared_producer_run` (invoked by the
+      # phase-3 runner, never by the auditor) then executes the clause when
+      # -- and only when -- the document is absent or the audit's own
+      # authorship note claims it. A document the run already produced is
+      # left byte-for-byte alone.
+      - die_finishing_check
     required_outputs:
       - "phase3/stage3/pnr/die_finished.def OR phase3/stage3/pnr/die_finishing.SKIPPED.txt"
       - "reports/phase3/die_finishing.json"
@@ -6343,6 +6475,25 @@ steps:
       - pnr_via_stack_completeness_check
       - perc_corpus_sweep
       - lvs_triage_classify
+      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
+      # This step's own gate clause below invokes the program with
+      # `--json <path>` and `<path>` is one of this step's `required_outputs`
+      # -- the flow already says in TWO places that the run writes that
+      # document. It did not say it in the third, `programs:`, which is the
+      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
+      # the AUDIT's evaluation of the gate wrote it, and the audit then
+      # correctly refused its own output:
+      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
+      #   no pre-audit producer supplied these paths; wire them into the
+      #   owning runner before claiming this step complete.
+      # Naming the producer here is that wiring: it makes the three
+      # declarations agree, and `flow_declared_producer_run` (invoked by the
+      # phase-3 runner, never by the auditor) then executes the clause when
+      # -- and only when -- the document is absent or the audit's own
+      # authorship note claims it. A document the run already produced is
+      # left byte-for-byte alone.
+      - drc_report_check
+      - lvs_report_check
     program_outputs:
       - program: pnr_via_stack_completeness_check
         path: "reports/phase3/pnr_via_stack_completeness.json"
@@ -7574,6 +7725,25 @@ steps:
       - from: 34
         path: "phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done"
     mcp_tools: [eda_gds]
+    programs:
+      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
+      # This step's own gate clause below invokes the program with
+      # `--json <path>` and `<path>` is one of this step's `required_outputs`
+      # -- the flow already says in TWO places that the run writes that
+      # document. It did not say it in the third, `programs:`, which is the
+      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
+      # the AUDIT's evaluation of the gate wrote it, and the audit then
+      # correctly refused its own output:
+      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
+      #   no pre-audit producer supplied these paths; wire them into the
+      #   owning runner before claiming this step complete.
+      # Naming the producer here is that wiring: it makes the three
+      # declarations agree, and `flow_declared_producer_run` (invoked by the
+      # phase-3 runner, never by the auditor) then executes the clause when
+      # -- and only when -- the document is absent or the audit's own
+      # authorship note claims it. A document the run already produced is
+      # left byte-for-byte alone.
+      - stage3_compliance
     required_outputs:
       - "phase3/stage4/gds/*.gds"
       - "reports/phase3/gates/stage3_compliance.json"
@@ -7830,6 +8000,24 @@ steps:
       # is dispatched from `phase3_one_shot_runner.step_ip_release_docs_gen`,
       # and the gate below judges documents the audit did not touch.
       - ip_release_docs_gen
+      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
+      # This step's own gate clause below invokes the program with
+      # `--json <path>` and `<path>` is one of this step's `required_outputs`
+      # -- the flow already says in TWO places that the run writes that
+      # document. It did not say it in the third, `programs:`, which is the
+      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
+      # the AUDIT's evaluation of the gate wrote it, and the audit then
+      # correctly refused its own output:
+      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
+      #   no pre-audit producer supplied these paths; wire them into the
+      #   owning runner before claiming this step complete.
+      # Naming the producer here is that wiring: it makes the three
+      # declarations agree, and `flow_declared_producer_run` (invoked by the
+      # phase-3 runner, never by the auditor) then executes the clause when
+      # -- and only when -- the document is absent or the audit's own
+      # authorship note claims it. A document the run already produced is
+      # left byte-for-byte alone.
+      - digital_hardmacro_check
     required_outputs:
       - "phase3/stage4/hardmacro/*.lef"
       - "phase3/stage4/hardmacro/*.lib"
@@ -7984,6 +8172,24 @@ steps:
       # `phase3_one_shot_runner.step_ic_release_docs_gen`, and the gate clause
       # below judges documents the audit did not touch.
       - ic_release_docs_gen
+      # PRODUCER DECLARED (lane icspm3, measured 2026-09-15 on spm x gf180mcuD).
+      # This step's own gate clause below invokes the program with
+      # `--json <path>` and `<path>` is one of this step's `required_outputs`
+      # -- the flow already says in TWO places that the run writes that
+      # document. It did not say it in the third, `programs:`, which is the
+      # one `flow_declared_producer_run` reads, so nothing in the run ran it,
+      # the AUDIT's evaluation of the gate wrote it, and the audit then
+      # correctly refused its own output:
+      #   SELF-CERTIFIED EVIDENCE EXCLUDED (audit_created) ... PRODUCER GAP:
+      #   no pre-audit producer supplied these paths; wire them into the
+      #   owning runner before claiming this step complete.
+      # Naming the producer here is that wiring: it makes the three
+      # declarations agree, and `flow_declared_producer_run` (invoked by the
+      # phase-3 runner, never by the auditor) then executes the clause when
+      # -- and only when -- the document is absent or the audit's own
+      # authorship note claims it. A document the run already produced is
+      # left byte-for-byte alone.
+      - tapeout_precheck
     required_outputs:
       # THE MERGED RECORD — which arms ran, what each concluded, every finding
       # labelled with the authority that produced it, and every disagreement
