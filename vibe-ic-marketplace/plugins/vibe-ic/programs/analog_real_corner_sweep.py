@@ -68,6 +68,8 @@ import _atomic_artefact as _aa  # noqa: E402  (vibe-ic#1082)
 import _designs_root as _dr  # noqa: E402  (host mount root, measured)
 import analog_resolution_stimulus as _ars  # noqa: E402  (vibe-ic#2188)
 import analog_corner_admission as _aca  # noqa: E402  (#2236 placement admission)
+import analog_converter_density_grade as _dens  # noqa: E402  (R-0915-45)
+import analog_adc_enob_corner_check as _enob_cc  # noqa: E402  (R-0915-45)
 
 try:
     from . import _container_exec                            # type: ignore
@@ -2106,6 +2108,174 @@ def stamp_resolution_stimulus(project, block, container, host_root, deck,
     return out
 
 
+def _read_json(path):
+    """A json artefact, or None. Never raises: a missing or malformed spec must
+    leave the sweep's own result intact and simply grade nothing."""
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return None
+
+
+def _osr_of(spec_json) -> "Optional[float]":
+    """The declared oversampling ratio, from the block's own spec.
+
+    It decides the band SNDR is integrated over, and that is the whole
+    difference for an oversampled converter (vibe-ic#2188): summed over the
+    full Nyquist span instead, a working modulator measures worse than
+    nothing — measured on this IC's own base transient, -11.80 dB.
+    """
+    try:
+        rows = (spec_json or {}).get("specs") or []
+    except AttributeError:
+        return None
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("name") or "").strip().lower() == "osr":
+            for key in ("target", "min"):
+                if row.get(key) is not None:
+                    try:
+                        return float(row[key])
+                    except (TypeError, ValueError):
+                        return None
+    return None
+
+
+def _enob_min_from_spec(spec_json) -> "Optional[float]":
+    """The design's declared minimum effective resolution, or None.
+
+    Read from the block's own `spec.json` — `enob` (or an `sndr`/`sndr_db`
+    converted the standard way). No table of chip values here.
+    """
+    try:
+        rows = (spec_json or {}).get("specs") or []
+    except AttributeError:
+        return None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip().lower()
+        lo = row.get("min")
+        if lo is None:
+            continue
+        if name == "enob":
+            try:
+                return float(lo)
+            except (TypeError, ValueError):
+                return None
+        if name in ("sndr", "sndr_db"):
+            try:
+                return (float(lo) - 1.76) / 6.02
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def grade_converter_resolution(pvt_grid, sl_dir, spec_json):
+    """R-0915-45 — put the resolution rows BESIDE the settle metric.
+
+    For every corner that really ran, read the deck it ran and the waveform it
+    produced and publish, per corner:
+
+      * `density_whole_record` + `density_status` — the pass condition
+        `analog_a2_topology_emit` DECLARES, evaluated over a whole number of
+        tone periods instead of over a window the tone transform invalidated
+        (see `analog_converter_density_grade`); and
+      * `sndr_db` / `enob` + `enob_status` — measured by
+        `analog_adc_enob_corner_check` off this corner's own transient, graded
+        against the block's own `enob` minimum.
+
+    Returns `(rows, summary)` where `rows` are extra `spec_results` entries.
+    The settle metric the caller already publishes is untouched: it stays, and
+    it stops being the ONLY pass condition on a block that declares a
+    resolution.
+    """
+    enob_min = _enob_min_from_spec(spec_json)
+    graded = 0
+    worst_enob = None
+    worst_enob_corner = None
+    density_fail = 0
+    density_graded = 0
+    for corner in pvt_grid or []:
+        log = corner.get("ngspice_log")
+        if not log or not corner.get("simulator_run"):
+            continue
+        stem = Path(log).name[:-len(".ngspice.log")] \
+            if str(log).endswith(".ngspice.log") else None
+        if not stem:
+            continue
+        deck_p = sl_dir / f"{stem}.sp"
+        dump_p = sl_dir / f"{stem}.resolution.wrdata"
+        try:
+            deck = deck_p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        try:
+            dump = dump_p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            corner["resolution"] = {"status": "NOT_MEASURED",
+                                    "reason": "no_waveform_dump"}
+            continue
+        d = _dens.grade(deck, dump)
+        corner["density_whole_record"] = d.get("density_measured")
+        corner["density_expected"] = d.get("density_expected")
+        corner["density_status"] = d.get("status")
+        if d.get("status") in ("PASS", "FAIL"):
+            density_graded += 1
+            if d["status"] == "FAIL":
+                density_fail += 1
+        corner["density_grade"] = d
+        sndr, detail = _enob_cc.sndr_db_from_transient(
+            deck, dump, column=1, osr=_osr_of(spec_json) or 1.0)
+        if sndr is None:
+            corner["enob_status"] = "NOT_MEASURED"
+            corner["enob_detail"] = detail
+            continue
+        enob = (sndr - 1.76) / 6.02
+        corner["sndr_db"] = sndr
+        corner["enob"] = enob
+        corner["enob_method"] = detail
+        graded += 1
+        if enob_min is None:
+            corner["enob_status"] = "PASS_INFORMATIONAL"
+        else:
+            corner["enob_status"] = "PASS" if enob >= enob_min else "FAIL"
+        if worst_enob is None or enob < worst_enob:
+            worst_enob, worst_enob_corner = enob, corner.get("name")
+
+    rows = []
+    if density_graded:
+        rows.append({
+            "name": "density",
+            "status": "FAIL" if density_fail else "PASS",
+            "raw_sim_verdict": "FAIL" if density_fail else "PASS",
+            "value": None, "target": None,
+            "target_source": "design_deck_declared_condition",
+            "tolerance_pct": None,
+            "detail": (f"{density_fail} of {density_graded} graded corner(s) miss "
+                       "the bitstream density the design's own deck declares "
+                       "for its input level, measured over whole tone periods"),
+        })
+    if graded and enob_min is not None:
+        rows.append({
+            "name": "enob",
+            "status": "PASS" if (worst_enob is not None and worst_enob >= enob_min)
+                      else "FAIL",
+            "raw_sim_verdict": "PASS" if (worst_enob is not None
+                                          and worst_enob >= enob_min) else "FAIL",
+            "value": worst_enob, "target": enob_min,
+            "target_source": "L5", "tolerance_pct": None,
+            "detail": (f"worst of {graded} measured corner(s): "
+                       f"{worst_enob_corner}"),
+        })
+    summary = {"producer": "grade_converter_resolution",
+               "corners_graded_for_enob": graded,
+               "corners_graded_for_density": density_graded,
+               "density_failures": density_fail,
+               "enob_min": enob_min,
+               "worst_enob": worst_enob, "worst_enob_corner": worst_enob_corner}
+    return rows, summary
+
+
 def resolution_stimulus_summary(records):
     """The ONE record `corner_results.json` publishes for the block.
 
@@ -3466,6 +3636,12 @@ def _run_block(project, block, container, pdk, topology_override):
         1 for c in pvt_grid if c.get("_provenance") == "NOT_COMPLETED")
     corners_unaccounted = sum(
         1 for c in pvt_grid if c.get("_provenance") == "DERIVED")
+    # R-0915-45 — evaluate the resolution conditions on this run's own
+    # waveforms. Enriches every corner in `pvt_grid` in place and returns the
+    # extra `spec_results` rows; a block that declares no resolution gets no
+    # rows and nothing changes for it.
+    _resolution_rows, _resolution_summary = grade_converter_resolution(
+        pvt_grid, sl_dir, _read_json(bdir / "spec.json"))
     real_corner = {
         "block": block,
         "block_type": btype,
@@ -3584,6 +3760,11 @@ def _run_block(project, block, container, pdk, topology_override):
         "resolution_stimulus": resolution_stimulus_summary(
             resolution_records),
         "corners": pvt_grid,
+        # R-0915-45 — the resolution rows sit BESIDE the settle metric, and on
+        # a block that declares a resolution the settle metric stops being the
+        # only pass condition. `_resolution_rows` was computed just above,
+        # which also enriched every corner in `pvt_grid` in place.
+        "resolution_grade": _resolution_summary,
         "best_corner": {
             "name": f"{typ_section}_27c", "value": best.get(target["key"]),
             "raw_meas": best,
@@ -3600,7 +3781,7 @@ def _run_block(project, block, container, pdk, topology_override):
              "value": best.get(target["key"]),
              "target": target["target"], "target_source": spec["target_source"],
              "tolerance_pct": target.get("tol")}
-        ],
+        ] + _resolution_rows,
         "note": (
             (f"Real ngspice PVT sweep: {corners_executed}/{len(pvt_grid)} "
              "corners really simulated (real ss/tt/ff .lib section + real "

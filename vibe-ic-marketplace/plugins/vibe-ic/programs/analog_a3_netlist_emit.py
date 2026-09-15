@@ -238,6 +238,32 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+_RUN_REF_RE = re.compile(r"^\*\s*_provenance:\s*run_ref=(\S+)\s*$", re.M)
+
+
+def _run_ref_in(text: str) -> Optional[str]:
+    """The `run_ref` nonce already stamped in an artefact's header, if any."""
+    m = _RUN_REF_RE.search(text or "")
+    return m.group(1) if m else None
+
+
+def _reuse_unchanged(path: Path, new_text: str) -> Optional[str]:
+    """The text already on disk when its CONTENT matches `new_text`, else None.
+
+    R-0915-44. `content_digest` strips every `* _provenance:` line, so this
+    compares the circuit and not the stamps. Returning the EXISTING text (not
+    the new one) is the point: the caller then leaves the file alone, and the
+    whole-file sha256 that A4 recorded as `netlist_sha256` stays valid.
+    """
+    try:
+        existing = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if _pc.content_digest(existing) != _pc.content_digest(new_text):
+        return None
+    return existing
+
+
 _ALLOWED_NODES = (_ast.Expression, _ast.BinOp, _ast.UnaryOp, _ast.Name,
                   _ast.Load, _ast.Constant, _ast.Add, _ast.Sub, _ast.Mult,
                   _ast.Div, _ast.Pow, _ast.USub, _ast.UAdd)
@@ -2487,7 +2513,17 @@ def _emit_for_block(project: Path, entry: Dict[str, Any], pdk: str,
     stamp = _now()
     prov_lines = [
         f"_provenance: producer={PRODUCER} schema={PROVENANCE_SCHEMA}",
-        f"_provenance: produced_at={stamp}",
+        # R-0915-44 — NO WALL CLOCK IN THE DIGESTED ARTEFACT. `produced_at`
+        # used to be emitted here, into the `.sp` whose WHOLE-FILE sha256 A4
+        # records as `netlist_sha256` and later recomputes. Two emissions of
+        # byte-identical content a minute apart therefore produced two
+        # different digests, and `analog_a4_corner_sweep_check` fired
+        # `A4_SWEEP_STALE_VS_NETLIST` on a netlist that had not changed —
+        # throwing away a completed 13-hour PVT sweep because of a timestamp.
+        # The stamp is not lost: it is in `netlist_provenance.json` beside
+        # this file, which is where a time belongs. Measured (lane icadc,
+        # 2026-09-16): `_provenance: produced_at=2026-09-14T18:59:58Z` at line
+        # 5 of the shipped `delta_sigma.sp`.
         f"_provenance: topology_ir={_CANONICAL_ANALOG}/{name}/topology.json "
         f"sha256={_sha256(ir_path)}",
         f"_provenance: spec={_CANONICAL_ANALOG}/{name}/spec.json "
@@ -2696,10 +2732,40 @@ def _emit_for_block(project: Path, entry: Dict[str, Any], pdk: str,
         f"* _provenance: ai_handoff", 1)
 
     bdir.mkdir(parents=True, exist_ok=True)
-    sp_path.write_text(sp_text, encoding="utf-8")
+    # R-0915-44, the load-bearing half: RE-EMITTING BYTE-IDENTICAL CONTENT IS
+    # A NO-OP, so the whole-file digest a downstream gate pinned survives.
+    #
+    # Dropping `produced_at` above is not enough on its own. `run_ref` is a
+    # NONCE (`_pc.new_run_ref`) — deliberately so, because it is checked by
+    # AGREEMENT between this artefact and the record beside it, not by
+    # re-derivation — and it lands in the header too. So a second emission of
+    # identical content still rewrote the file with a different nonce and a
+    # different whole-file sha256.
+    #
+    # `content_digest` already ignores every `* _provenance:` line, so it
+    # answers exactly the question that matters: is the CIRCUIT the same? When
+    # it is, the file on disk is kept verbatim — including its existing
+    # `run_ref` — and the sidecar is written against THAT run_ref, so the
+    # agreement check still holds and nothing downstream goes stale.
+    #
+    # A real netlist change still rewrites and still fires the staleness gate:
+    # `content_digest` moves the moment a device, a value or a node moves.
+    reused = _reuse_unchanged(sp_path, sp_text)
+    if reused is not None:
+        sp_text = reused
+        rref = _run_ref_in(sp_text) or rref
+        content_sha = _pc.content_digest(sp_text)
+        ref = _pc.provenance_ref(rref, sp_rel, content_sha)
+    else:
+        sp_path.write_text(sp_text, encoding="utf-8")
     tb_content_sha = None
     if tb_text:
-        (bdir / f"tb_{name}.sp").write_text(tb_text, encoding="utf-8")
+        tb_path = bdir / f"tb_{name}.sp"
+        tb_reused = _reuse_unchanged(tb_path, tb_text)
+        if tb_reused is not None:
+            tb_text = tb_reused
+        else:
+            tb_path.write_text(tb_text, encoding="utf-8")
         tb_content_sha = _pc.content_digest(tb_text)
     sidecar = {
         "block": name,
