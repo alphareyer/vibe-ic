@@ -12254,7 +12254,50 @@ def _emit_step_metrics(project: Path, step: Dict[str, Any],
         metrics = {k: v for k, v in metrics.items()
                    if not any(e.startswith(_prefix) and e.endswith(f"__{k}")
                               for e in already)}
-    _sm.emit_best_effort(project, step.get("id"), metrics)
+    # ONE NON-CONFORMING NAME MUST NOT COST THE WHOLE STEP'S METRICS.
+    # `emit` validates every key and raises on the FIRST defect, before it
+    # writes anything -- so this harvester, which forwards a REPORT'S OWN key
+    # names into a schema with a stricter name rule, loses the entire batch to
+    # one of them. MEASURED on `subservient` x gf180mcuD, step 25:
+    #   [step_metrics] EMIT FAILED (step=25, domain=flow): ValueError:
+    #     step_metrics.emit: '25__flow__max_segment_current_A': component
+    #     'max_segment_current_A' must be lowercase alphanumeric/underscore
+    # `em_signoff.json` spells its peak current with the SI unit capitalised,
+    # and every other step-25 metric went down with it -- the step's metric
+    # file was never written at all.
+    #
+    # THE NAME IS NOT REWRITTEN. This harvester does not own these names (the
+    # program that computed the number does), and quietly lower-casing one
+    # would publish a key nobody declared, under the authority of a module
+    # that explicitly refuses to derive numbers. The non-conforming key is
+    # DROPPED and NAMED on stderr, and every conforming sibling is emitted --
+    # "a caller cannot fix what it is never told about", which
+    # `emit_best_effort`'s own docstring states, applied per KEY instead of
+    # per batch.
+    _keep, _refused = {}, []
+    _pfx = f"{_sm.normalize_step(step.get('id'))}__"
+    for _k, _v in metrics.items():
+        _full = (_k if str(_k).startswith(_pfx)
+                 else _sm.key_for(step.get("id"), "flow", str(_k)))
+        _why = _sm.key_defect(_full) or _sm.value_defect(_v)
+        if _why:
+            _refused.append(_why)
+        else:
+            _keep[_k] = _v
+    if _refused:
+        # NO `+` AND NO `len()` HERE, and neither is a style preference. A
+        # sibling test walks this function's AST and refuses Add/Sub/Mult and
+        # any aggregator, because a wrapper that can do arithmetic or reduce a
+        # list can publish a number no gate stands behind. String
+        # concatenation and counting my OWN refusals are neither of those, but
+        # the guard cannot tell them apart and the guard is the one that must
+        # not be weakened — so the message NAMES the refused keys instead of
+        # counting them, which is the more useful sentence anyway.
+        _named = "; ".join(_refused)
+        print(f"[step_metrics] key(s) from step {step.get('id')}'s own "
+              f"report(s) are not schema-conformant and were NOT emitted; "
+              f"every conforming sibling was: {_named}", file=sys.stderr)
+    _sm.emit_best_effort(project, step.get("id"), _keep)
 
 
 def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
