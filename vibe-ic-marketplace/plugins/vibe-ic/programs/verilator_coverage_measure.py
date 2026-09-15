@@ -600,6 +600,119 @@ def parse_coverage_dat(
     }
 
 
+#: The one record field that is a property of the TESTBENCH rather than of the
+#: design: Verilator writes the instrumented point's INSTANCE PATH here, so the
+#: same design point recorded by two different testbenches is two different
+#: records. MEASURED (subservient x gf180mcuD, lane icsub2 r18) — the two lines
+#: below are byte-identical apart from it:
+#:   ...\x01f\x02<rtl>/subservient.v\x01l\x02100\x01t\x02toggle...\x01o\x02c_reg[0]:0->1\x01h\x02blinky_hex.u_dut  17
+#:   ...\x01f\x02<rtl>/subservient.v\x01l\x02100\x01t\x02toggle...\x01o\x02c_reg[0]:0->1\x01h\x02rv32i_40.u_dut     46
+#: which is why `verilator_coverage --write` over ten testbenches returns a
+#: denominator ten times too large: it concatenates where it looks like it
+#: merges (measured: line total 1350 against a design with 135 line points).
+_COV_HIER_FIELD_RE = re.compile(r"\x01h\x02[^\x01]*")
+
+
+def coverage_point_key(blob: str) -> Optional[str]:
+    """The identity of a coverage POINT, independent of which testbench saw it.
+
+    `None` when this record carries no hierarchy field — then the caller cannot
+    know whether two records from two runs are the same point, and MUST NOT
+    union them. Returning None rather than the raw blob is the whole safety
+    property: a silent fallback would double every denominator.
+    """
+    if "\x01h\x02" not in blob:
+        return None
+    return _COV_HIER_FIELD_RE.sub("", blob)
+
+
+def union_coverage_dats(
+        paths: Sequence[str],
+        *,
+        mounts: Optional[Sequence[Tuple[Path, str]]] = None,
+) -> Dict[str, Any]:
+    """One measurement over SEVERAL instrumented runs of the same design.
+
+    THE COVERAGE OF A SUITE IS THE UNION OF ITS CASES. A design verified by ten
+    testbenches, each exercising one scenario, has ten partial measurements and
+    exactly one true one; publishing any single member's number describes that
+    member, not the design. MEASURED on subservient: the ten authored L10
+    oracles individually span line 63.70%-97.78% and their union is 98.52%,
+    while the run published 68.89% — the alphabetically first one — and failed
+    a 70% floor with it.
+
+    A point is COVERED when ANY run hit it, and counted ONCE.
+
+    Refuses rather than guesses: when a record carries no hierarchy field the
+    union is not derivable, and this returns `unionisable: False` with the file
+    that could not be keyed, so the caller falls back to a single measurement
+    and SAYS it did. Same payload shape as `parse_coverage_dat`, so every
+    existing reader works unchanged.
+    """
+    hits: Dict[str, int] = {}
+    fmt: Optional[str] = None
+    for path in paths:
+        with open(path, "r", errors="replace") as fh:
+            for raw in fh:
+                m = COVERAGE_LINE_RE.match(raw)
+                if not m:
+                    continue
+                blob, n = m.group(1), int(m.group(2))
+                if fmt is None:
+                    if _classify_v5(blob) is not None:
+                        fmt = "v5"
+                    elif _classify_v4(blob) is not None:
+                        fmt = "v4"
+                key = coverage_point_key(blob)
+                if key is None:
+                    return {"unionisable": False, "blocked_by": str(path),
+                            "reason": ("a coverage record in this file carries "
+                                       "no hierarchy field, so two runs' "
+                                       "records cannot be matched to the same "
+                                       "point and a union would multiply the "
+                                       "denominator by the number of runs")}
+                hits[key] = hits.get(key, 0) + n
+
+    cats = {"line": [0, 0], "toggle": [0, 0], "branch": [0, 0], "other": [0, 0]}
+    per_file: Dict[str, Dict[str, List[int]]] = {}
+    for key, n in hits.items():
+        head = (_classify_v5(key) if fmt == "v5" else _classify_v4(key)) or "other"
+        if head not in cats:
+            head = "other"
+        src = _file_v5(key) if fmt == "v5" else _file_v4(key)
+        cats[head][1] += 1
+        if n > 0:
+            cats[head][0] += 1
+        if src:
+            pf = per_file.setdefault(
+                src, {"line": [0, 0], "toggle": [0, 0], "branch": [0, 0]})
+            if head in pf:
+                pf[head][1] += 1
+                if n > 0:
+                    pf[head][0] += 1
+
+    host_of, disclosure = host_path_namespace(list(per_file), mounts)
+
+    def pct(pair: List[int]) -> float:
+        return round(100.0 * pair[0] / pair[1], 2) if pair[1] > 0 else 0.0
+
+    return {
+        "unionisable": True,
+        "runs_unioned": len(list(paths)),
+        "distinct_points": len(hits),
+        "totals": {c: {"covered": cats[c][0], "total": cats[c][1],
+                       "pct": pct(cats[c])}
+                   for c in ("line", "toggle", "branch")},
+        "per_file": {
+            host_of.get(src, src):
+                {k: {"covered": v[0], "total": v[1], "pct": pct(v)}
+                 for k, v in pf.items()}
+            for src, pf in per_file.items()},
+        "format_detected": fmt or "unknown",
+        "path_namespace": disclosure,
+    }
+
+
 # ----- artefact provenance -----------------------------------------
 
 TOOL_SIGNATURES = [
@@ -849,6 +962,49 @@ def discover_measure_inputs(project: Path) -> Tuple[List[str], Optional[str]]:
     return rtl, tb
 
 
+def discover_measure_testbenches(project: Path) -> Tuple[List[str], List[str]]:
+    """(RTL sources, EVERY testbench that drives the design) — the suite, not
+    a member of it.
+
+    `discover_measure_inputs` returns the FIRST driving candidate and is kept
+    exactly as it was, because callers that measure one testbench are still
+    right to ask for one. This is the selector for the question "what does this
+    design's verification cover", whose answer is a set.
+
+    WHY IT MATTERS, MEASURED (subservient x gf180mcuD, lane icsub2, r17 vs r18
+    on the same RTL and the same denominators). `_TB_DISCOVERY_ORDER` places
+    `phase2/stage1/sim/tb/*.v` ahead of `sim_unit/tb_*.v`. While those files
+    were the generator's substance-floor scaffolds they were inert, the audit
+    said so, and selection fell through to the unit testbench: line 80.74%. The
+    moment a real per-case oracle suite was authored into that directory, the
+    alphabetically first member drove the design, selection stopped there, and
+    the run published `blinky_hex`'s line 68.89% as the design's coverage —
+    below a 70% floor the suite clears at 98.52%. Nothing about the design had
+    changed; the verification had got BETTER.
+
+    Order is the discovery order, de-duplicated. Falls back to the single
+    first candidate when NONE is decidably driven, which is what the one-TB
+    selector does, so a project with no functional stimulus is unaffected."""
+    rtl_dir = project / "phase2" / "stage1" / "rtl"
+    rtl, _first = discover_measure_inputs(project)
+    candidates: List[str] = []
+    for rel, pat in _TB_DISCOVERY_ORDER:
+        if (project / rel).is_dir():
+            for path in sorted((project / rel).glob(pat)):
+                if str(path) not in candidates:
+                    candidates.append(str(path))
+    driving = [c for c in candidates
+               if (lambda a: a["decidable"] and a["driven"])(
+                   functional_stimulus_audit(Path(c)))]
+    chosen = driving or ([candidates[0]] if candidates else [])
+    for tb in chosen:
+        for extra in _cov_sources_for_tb(project, Path(tb), rtl):
+            if extra not in rtl:
+                rtl.append(extra)
+    del rtl_dir
+    return rtl, chosen
+
+
 def _cov_sources_for_tb(project: Path, tb: Path,
                         rtl: List[str]) -> List[str]:
     """Resolve testbench-only helper modules from the design input.
@@ -896,16 +1052,22 @@ def _cov_sources_for_tb(project: Path, tb: Path,
 def cmd_measure_tb(args: argparse.Namespace) -> int:
     """Instrument + run the project's own testbench and write the measurement."""
     rtl = list(args.rtl or [])
-    tb = args.tb
-    if args.project:
-        d_rtl, d_tb = discover_measure_inputs(Path(args.project))
+    # THE SUITE, NOT A MEMBER OF IT. An explicit `--tb` still measures exactly
+    # that one testbench — a caller who names one is right to get one. Only
+    # DISCOVERY was ever the problem: it returned the first driving candidate
+    # and the totals were published as the design's.
+    tbs: List[str] = [args.tb] if args.tb else []
+    if args.project and not tbs:
+        d_rtl, d_tbs = discover_measure_testbenches(Path(args.project))
         rtl = rtl or d_rtl
-        tb = tb or d_tb
+        tbs = d_tbs
+    elif args.project and not rtl:
+        rtl = discover_measure_inputs(Path(args.project))[0]
     if not rtl:
         print("[measure-tb] no RTL sources found to instrument",
               file=sys.stderr)
         return 1
-    if not tb:
+    if not tbs:
         print("[measure-tb] no testbench found to instrument — coverage "
               "cannot be measured without a stimulus that actually ran",
               file=sys.stderr)
@@ -916,22 +1078,78 @@ def cmd_measure_tb(args: argparse.Namespace) -> int:
         else (Path(args.out).parent / "cov_build")
     build_dir = args.build_dir or str(default_build)
     run_dir = args.run_dir or build_dir
-    dat = verilate_tb_and_run(rtl, tb, build_dir, run_dir,
-                              build_jobs=args.build_jobs)
-    cov = parse_coverage_dat(dat,
-                             mounts=_mounts_for(getattr(args, "container", "")))
+    mounts = _mounts_for(getattr(args, "container", ""))
     scope = args.scope_file or rtl
+
+    dats: List[str] = []
+    per_tb: Dict[str, Any] = {}
+    for i, one_tb in enumerate(tbs):
+        # Each testbench gets its OWN build directory. Sharing one would let a
+        # later Verilator build overwrite the coverage.dat of an earlier run
+        # and the union would silently be over fewer runs than it names.
+        sub = (build_dir if len(tbs) == 1
+               else str(Path(build_dir) / f"tb{i:02d}_{Path(one_tb).stem}"))
+        sub_run = (run_dir if len(tbs) == 1 else sub)
+        try:
+            dat_i = verilate_tb_and_run(rtl, one_tb, sub, sub_run,
+                                        build_jobs=args.build_jobs)
+        except SystemExit as exc:
+            # DISCLOSED, never silently dropped: a member that could not be
+            # built is a member whose contribution is missing from the union,
+            # and the reader has to be told which one.
+            per_tb[one_tb] = {"measured": False, "reason": str(exc)[:400]}
+            print(f"[measure-tb] {Path(one_tb).name}: NOT MEASURED — "
+                  f"{str(exc)[:200]}", file=sys.stderr)
+            continue
+        dats.append(dat_i)
+        one_cov = parse_coverage_dat(dat_i, mounts=mounts)
+        one_scoped = scope_totals(one_cov, scope)
+        per_tb[one_tb] = {"measured": True,
+                          "totals": one_scoped["totals"] if one_scoped else None,
+                          "coverage_dat": dat_i}
+    if not dats:
+        print("[measure-tb] no testbench produced coverage points — refusing "
+              "to report a measurement nothing measured", file=sys.stderr)
+        return 1
+
+    union_note = ""
+    if len(dats) > 1:
+        cov = union_coverage_dats(dats, mounts=mounts)
+        if not cov.get("unionisable"):
+            # FAIL SAFE AND SAY SO. Reporting a concatenated denominator would
+            # be worse than reporting one member's honest number.
+            union_note = (f"the {len(dats)} runs could not be unioned "
+                          f"({cov.get('reason')}); reporting the FIRST "
+                          f"measured testbench alone")
+            print(f"[measure-tb] {union_note}", file=sys.stderr)
+            cov = parse_coverage_dat(dats[0], mounts=mounts)
+            dats = dats[:1]
+    else:
+        cov = parse_coverage_dat(dats[0], mounts=mounts)
+    dat = dats[0]
     scoped = scope_totals(cov, scope)
     if scoped is None:
         print(f"[measure-tb] the instrumented run recorded no coverage points "
               f"for any of {[Path(x).name for x in scope]} — refusing to "
               f"report the unscoped total in their place", file=sys.stderr)
         return 1
+    measured = [t for t in tbs if per_tb.get(t, {}).get("measured")]
     out = {
         "tool": "verilator",
         "measurement_mode": "measure-tb",
         "coverage_dat": dat,
-        "testbench": tb,
+        # `testbench` keeps naming ONE testbench because every existing reader
+        # audits it for functional stimulus; `testbenches` is the honest
+        # population and `measurement_scope` says which of the two the totals
+        # are. A reader that only knows the old field is not misled about the
+        # stimulus, only about the breadth, and `measurement_scope` is there
+        # for the one that wants to know.
+        "testbench": measured[0] if measured else tbs[0],
+        "testbenches": measured,
+        "measurement_scope": ("union-of-suite" if len(dats) > 1
+                              else "single-testbench"),
+        "per_testbench": per_tb,
+        "union_refused": union_note,
         "rtl_sources": [str(x) for x in rtl],
         "totals": scoped["totals"],
         "scope_files": scoped["scope_files"],
@@ -942,9 +1160,19 @@ def cmd_measure_tb(args: argparse.Namespace) -> int:
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(out, indent=2))
     t = scoped["totals"]
+    _how = (f"UNION of {len(dats)} testbench(es)" if len(dats) > 1
+            else f"from {dat}")
     print(f"[measure-tb] line={t['line']['pct']}% "
           f"toggle={t['toggle']['pct']}% branch={t['branch']['pct']}% "
-          f"(scope {scoped['scope_files']}, from {dat}) -> {args.out}")
+          f"(scope {scoped['scope_files']}, {_how}) -> {args.out}")
+    if len(dats) > 1:
+        for one_tb in measured:
+            one = (per_tb.get(one_tb) or {}).get("totals") or {}
+            if one:
+                print(f"[measure-tb]   {Path(one_tb).name}: "
+                      f"line={one['line']['pct']}% "
+                      f"toggle={one['toggle']['pct']}% "
+                      f"branch={one['branch']['pct']}%")
     below = [f"{c} {t[c]['pct']}% < {th}%"
              for c, th in (("line", args.min_line),
                            ("toggle", args.min_toggle),
@@ -1271,9 +1499,22 @@ def cmd_check(args: argparse.Namespace) -> int:
     # threshold reads as an RTL quality defect and sends the reader to the
     # wrong file.  This still BLOCKS — unmeasured is not verified — it just
     # stops blocking for the wrong reason.  Undecidable audits fall through.
-    _tb = data.get("testbench")
+    # A UNION IS DRIVEN IF ANY MEMBER DRIVES. `testbenches` is the honest
+    # population when the measurement is a union; `testbench` names one member
+    # and is what a pre-union payload carries, so both are consulted and the
+    # question asked of the set is the one this block has always asked of the
+    # single file: did ANY stimulus move a design input. Refusing a suite
+    # because its first member happens to be inert would re-introduce, on the
+    # judging side, exactly the one-member-stands-for-the-whole error the
+    # measuring side just stopped making.
+    _tbs = [str(x) for x in (data.get("testbenches") or []) if x]
+    if not _tbs and data.get("testbench"):
+        _tbs = [str(data["testbench"])]
+    _tb = _tbs[0] if _tbs else None
     if _tb:
-        _audit = functional_stimulus_audit(Path(str(_tb)))
+        _audits = [functional_stimulus_audit(Path(x)) for x in _tbs]
+        _audit = next((a for a in _audits if a["decidable"] and a["driven"]),
+                      _audits[0])
         if _audit["decidable"] and not _audit["driven"]:
             _proj = _cov_project_root(data)
             _unused = _cov_unused_stronger_stimulus(_proj) if _proj else None

@@ -47047,8 +47047,14 @@ def _si_mcf_repair_child_tcl(top: str, *, tech_lef_c: str, cell_lef_c: str,
         + _spare_safe_routing_clear_tcl("SI_MCF")
         + "  if {[catch {global_route} e]} { puts \"SI_MCF_GR_NONFATAL: $e\" }\n"
         "  if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
+        # The continuation below is a PLAIN string, not an f-string, so its
+        # braces are Tcl's own and must NOT be doubled. They were, and the
+        # emitted line read `...$_vic_drc_opt}} e]}} {` — brace-BALANCED, which
+        # is why an `info complete` parse test passed it, and syntactically
+        # wrong, which is why the real child died with "extra characters after
+        # close-brace" AFTER it had already done the repair. Measured on r19.
         f"  if {{[catch {{detailed_route -droute_end_iter {reroute_iters} "
-        "{*}$_vic_drc_opt}} e]}} { puts \"SI_MCF_DR_NONFATAL: $e\" }\n"
+        "{*}$_vic_drc_opt} e]} { puts \"SI_MCF_DR_NONFATAL: $e\" }\n"
         f"{refill_block}"
         + _min_area_patch_tcl("SI_MCF_MIN_AREA")
         + "}\n"
@@ -47170,8 +47176,16 @@ def _si_mcf_repair_seam(project: Path, top: str, pdk: "PdkConfig",
             container, f"openroad -no_init -exit {tcl_c}", marker=tcl_c)
         log = (out or "") + "\n" + (err or "")
         (txn / "si_mcf_repair_child.log").write_text(log)
+        # R-0915-50 (2) — the child's OWN account of how it ended, carried out
+        # of the seam so the producer can tell a tool that DIED from a
+        # candidate that was weighed and declined. `rc` alone cannot: 139 and
+        # 1 are both "non-zero" and only one of them is a crash.
+        _sig = _si_rep.signal_of(rc)
         after: Dict[str, Any] = {
             "router_drc_before": drc_before,
+            "child_signal": (_sig[0] if _sig else None),
+            "child_signal_name": (_sig[1] if _sig else None),
+            "child_crash_frames": (_si_rep.crash_frames(log) if _sig else []),
             "router_drc": None,
             "nominal_setup_ns": None,
             "mcf_setup_ns": None,

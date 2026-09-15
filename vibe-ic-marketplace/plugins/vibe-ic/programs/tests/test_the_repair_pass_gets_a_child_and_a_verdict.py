@@ -33,7 +33,6 @@ phase-3 project dir); it is skipped BY NAME when unset, never silently.
 """
 import hashlib
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -151,20 +150,56 @@ def _deck(**kw):
     return R._si_mcf_repair_child_tcl("subservient", **args)
 
 
-@needs_tclsh
-def test_the_child_deck_is_complete_tcl(tmp_path):
-    """An unbalanced deck is the one defect a child cannot report: it dies
-    before its receipt."""
-    script = tmp_path / "chk.tcl"
-    script.write_text(
-        'set fh [open [lindex $argv 0] r]; set t [read $fh]; close $fh\n'
-        'if {[info complete $t]} { puts COMPLETE } else { puts INCOMPLETE }\n')
+#: Walk the deck with every OpenROAD command stubbed, and make each stub return
+#: a DIFFERENT value so the design-signature comparison FAILS and the else arm —
+#: the reroute branch — is evaluated too.
+#:
+#: WHY IT IS NOT `info complete`. That only balances braces. The first version
+#: of this deck emitted
+#:     if {[catch {detailed_route -droute_end_iter 32 {*}$_vic_drc_opt}} e]}} {
+#: — brace-BALANCED and syntactically wrong — from a PLAIN string whose braces
+#: had been doubled as if it were an f-string. `info complete` passed it. So did
+#: a stub walk with EQUAL signatures, because Tcl does not check the syntax
+#: inside a braced body it never enters. The real child on r19 reached
+#:     Error: extra characters after close-brace
+#: only AFTER it had already run the repair, i.e. at the point where the work
+#: was done and the candidate was about to be written.
+_TCL_WALK = (
+    "set ::n 0\n"
+    "proc unknown {args} { incr ::n ; return \"stub$::n\" }\n"
+    "if {[catch {source [lindex $argv 0]} e]} { puts \"TCL_ERROR: $e\"; exit 1 }\n"
+    "puts TCL_OK\n")
+
+
+def _walk(tmp_path, deck_text):
+    script = tmp_path / "walk.tcl"
+    script.write_text(_TCL_WALK)
     deck = tmp_path / "child.tcl"
-    deck.write_text(_deck())
-    r = subprocess.run([tclsh, str(script), str(deck)],
-                       capture_output=True, text=True)
-    assert r.returncode == 0, r.stderr
-    assert "COMPLETE" in r.stdout
+    deck.write_text(deck_text)
+    return subprocess.run([tclsh, str(script), str(deck)],
+                          capture_output=True, text=True)
+
+
+@needs_tclsh
+def test_the_child_deck_parses_on_both_branches(tmp_path):
+    """A malformed deck is the one defect a child cannot report: it dies after
+    the work and before the receipt."""
+    r = _walk(tmp_path, _deck())
+    assert "TCL_OK" in r.stdout, r.stdout[-600:] + r.stderr[-600:]
+    assert "TCL_ERROR" not in r.stdout
+
+
+@needs_tclsh
+def test_the_walk_catches_a_balanced_but_wrong_brace(tmp_path):
+    """THE CONTROL FOR THE TEST ITSELF. Re-introduce r19's exact defect and the
+    walk must refuse — otherwise this file is checking nothing."""
+    broken = _deck().replace(
+        "{*}$_vic_drc_opt} e]} { puts",
+        "{*}$_vic_drc_opt}} e]}} { puts")
+    assert broken != _deck(), "the defect could not be re-introduced"
+    r = _walk(tmp_path, broken)
+    assert "TCL_ERROR" in r.stdout, r.stdout[-400:]
+    assert "close-brace" in r.stdout
 
 
 def test_the_child_restores_the_shipped_route_and_writes_only_a_candidate():
@@ -196,6 +231,24 @@ def test_the_pass_is_si_aware_and_runs_exactly_once():
     assert deck.count("repair_timing") == 1
     assert "-max_passes 1" in deck
     assert "-repair_tns 0" in deck
+
+
+def test_the_pass_may_not_remove_a_buffer():
+    """MEASURED, r19: removing a buffer MERGES the two nets it sat between, and
+    `dbNet::mergeNet` asks the global router to merge their routing. This
+    session restores a finished route from a DEF and never runs `global_route`,
+    so the router holds no state for those nets:
+
+        rsz::UnbufferCandidate::apply -> Resizer::removeBuffer
+          -> odb::dbNet::mergeNet -> grt::GlobalRouter::mergeNetsRouting
+          -> grt::GlobalRouter::connectRouting        SIGSEGV, 2.9 s in
+
+    Reproduced deterministically by re-running the emitted deck (rc=139), and
+    the same deck completes the repair with this flag. Sizing is what this pass
+    is for; the moves that ADD a net are safe because the deck re-routes when
+    the signature moves — only the move that MERGES two already-routed nets
+    needs router state this session does not have."""
+    assert "-skip_buffer_removal" in _deck()
 
 
 def test_a_repair_that_changed_nothing_does_not_spend_a_reroute():
@@ -466,29 +519,186 @@ def test_a_refusal_leaves_the_shipping_route_byte_identical(tmp_path, monkeypatc
     assert not (p / "phase3/stage3/pnr/routed.def.pre_si_mcf").exists()
 
 
-# ── the real-container control ─────────────────────────────────────────────
+# ── R-0915-50 (2): a child killed by a signal is an EXECUTION_ERROR ───────
 
-_REAL = os.environ.get("VIBEIC_SI_MCF_PROJECT", "").strip()
+_R19_TRACE = """[INFO] starting
+Stack trace:
+ 0# 0x000000000352A995 in openroad
+ 1# 0x0000000000045330 in /lib/x86_64-linux-gnu/libc.so.6
+ 2# grt::GlobalRouter::connectRouting(odb::dbNet*, odb::dbNet*) in openroad
+ 3# grt::GlobalRouter::mergeNetsRouting(odb::dbNet*, odb::dbNet*) in openroad
+ 4# odb::dbNet::mergeNet(odb::dbNet*) in openroad
+ 5# rsz::Resizer::removeBuffer(sta::Instance*) in openroad
+ 6# rsz::UnbufferCandidate::apply() in openroad
+"""
 
 
-@pytest.mark.skipif(
-    not _REAL,
-    reason="VIBEIC_SI_MCF_PROJECT is unset: the real-report control needs a "
-           "finished phase-3 project dir whose si_mcf_sta reported FAIL")
-def test_the_plan_and_the_deck_come_from_a_real_runs_own_reports():
-    """The control on r16's REAL reports: the victims, the folded SPEF and the
-    restored route are the ones that run produced — none is invented here."""
-    proj = Path(_REAL)
-    rep = json.loads((proj / "reports/phase3/si_mcf_sta.json").read_text())
-    assert rep.get("verdict") == "FAIL", "this control needs an OPEN envelope"
+def test_a_shell_signal_and_a_subprocess_signal_are_both_read():
+    assert S.signal_of(139) == (11, "SIGSEGV")
+    assert S.signal_of(-11) == (11, "SIGSEGV")
+    assert S.signal_of(134) == (6, "SIGABRT")
+
+
+def test_an_ordinary_failure_is_not_a_signal():
+    """A tool that exits 1 has REPORTED a failure; a tool that is killed had no
+    chance to. Collapsing the two would relabel every refusal as a crash."""
+    for rc in (0, 1, 2, 127, None, True, "139"):
+        assert S.signal_of(rc) is None, rc
+
+
+def test_the_top_frame_is_the_first_one_that_names_something():
+    frames = S.crash_frames(_R19_TRACE)
+    assert frames[0] == "grt::GlobalRouter::connectRouting(odb::dbNet*, odb::dbNet*)"
+    assert "rsz::Resizer::removeBuffer(sta::Instance*)" in frames
+    # address-only frames name nothing a reader can act on
+    assert not any(f.startswith("0x") for f in frames)
+
+
+def test_a_log_with_no_trace_names_no_frame():
+    assert S.crash_frames("it just died\n") == []
+
+
+def test_a_killed_child_is_an_execution_error_not_a_refusal(tmp_path):
+    """r19's EXACT record. "the candidate was refused" says the pass looked at
+    an outcome and declined it; SIGSEGV means there was no outcome to look at,
+    and only one of the two is a defect someone has to fix."""
+    # The frames are SPELLED OUT rather than read back through the new helper,
+    # so this case is EXECUTABLE against base sources and fails on the decision
+    # it is about — an AttributeError would prove nothing about the behaviour.
+    frames = ["grt::GlobalRouter::connectRouting(odb::dbNet*, odb::dbNet*)",
+              "grt::GlobalRouter::mergeNetsRouting(odb::dbNet*, odb::dbNet*)",
+              "odb::dbNet::mergeNet(odb::dbNet*)",
+              "rsz::Resizer::removeBuffer(sta::Instance*)",
+              "rsz::UnbufferCandidate::apply()"]
+
+    def _crashed(project, container="", victims=()):
+        return {"router_drc_before": 0, "router_drc": None,
+                "nominal_setup_ns": None, "mcf_setup_ns": None,
+                "mcf_hold_ns": None, "child_rc": 139, "child_signal": 11,
+                "child_signal_name": "SIGSEGV", "elapsed_s": 2.857,
+                "child_crash_frames": frames}
+    rec = S.run_once(_proj(tmp_path), runner=_crashed)
+    assert rec["decision"] == "EXECUTION_ERROR", rec["decision"]
+    assert rec["reason_class"] == "EXECUTION_ERROR"
+    assert "SIGSEGV" in rec["reason"] and "139" in rec["reason"]
+    assert "2.857" in rec["reason"]
+    assert "connectRouting" in rec["reason"]
+    assert "TOOL FAILURE" in rec["reason"]
+    assert rec["crash"]["signal"] == 11
+    assert rec["crash"]["frames"][0].startswith("grt::GlobalRouter")
+    assert rec["residual"] is None
+
+
+def test_an_ordinary_unmeasured_candidate_is_still_a_refusal(tmp_path):
+    """THE NEGATIVE CONTROL for the decision split: a child that exited 1 and
+    measured nothing is REFUSED, not relabelled a crash."""
+    def _quiet(project, container="", victims=()):
+        return {"router_drc_before": 0, "router_drc": None,
+                "nominal_setup_ns": None, "mcf_setup_ns": None,
+                "child_rc": 1, "child_crash_frames": []}
+    rec = S.run_once(_proj(tmp_path), runner=_quiet)
+    assert rec["decision"] == "REJECTED_CANDIDATE_DISCARDED"
+    assert "NOT MEASURED" in rec["reason"]
+    # `.get` on purpose: this is a NEGATIVE control and must be green in BOTH
+    # arms — the refusal path is exactly what this change may not disturb.
+    assert rec.get("reason_class") is None
+    assert rec.get("crash") is None
+
+
+def test_a_crash_promotes_nothing(tmp_path):
+    def _crashed(project, container="", victims=()):
+        return {"router_drc_before": 0, "child_rc": 139, "elapsed_s": 0.5,
+                "child_crash_frames": []}
+    rec = S.run_once(_proj(tmp_path), runner=_crashed)
+    assert rec["decision"] == "EXECUTION_ERROR"
+    assert "no stack trace" in rec["reason"]
+
+
+# ── R-0915-50 (1): the NEGATIVE control — the ordinary repair is unchanged ─
+
+def test_the_ordinary_postroute_repair_still_allows_buffer_removal():
+    """The SI child excludes the unbuffer move because IT has no global-route
+    state. The flow's own post-route repair session has, and this fix may not
+    quietly narrow it — a fix that disables a move everywhere is a different
+    change from the one that was measured."""
+    ship = R._ship_signoff_spef_repair_tcl(
+        "dut", "/pdk/t.lef", "/pdk/c.lef", "/pdk/ss.lib", "/w/pnr",
+        "/pdk/cap", "Metal", 4)
+    assert "repair_timing" in ship
+    assert "-skip_buffer_removal" not in ship
+
+
+def test_only_the_si_child_carries_the_exclusion():
+    assert "-skip_buffer_removal" in _deck()
+
+
+# ── the whole-project control, on the run's own MEASURED numbers ──────────
+# The reports below are a real run's, transcribed: subservient x gf180mcuD in
+# lane icsub2 reported these same three numbers and these same two victims in
+# r13, r14, r15, r16, r17, r18, r19 and r20 — eight trees. They are BUILT here
+# rather than read from a project directory so this control runs on every host
+# that measures this repo, which is the only place a control is worth anything.
+
+_MEASURED_SI_MCF = {
+    "verdict": "FAIL",
+    "nominal": {"worst_setup_slack_ns": 2.4975},
+    "corners": {
+        "setup": {"worst_slack_after_ns": -0.266,
+                  "worst_victim": {"net": "net690"}},
+        "hold": {"worst_slack_after_ns": 1.6242,
+                 "worst_victim": {"net": "clknet_leaf_21_i_clk"}}},
+}
+#: MEASURED: this design's si_crosstalk names NO coupling-dominated net at all,
+#: so both victims reach the plan through the MCF corners' own worst_victim
+#: fields. A control that handed the planner a populated crosstalk list would be
+#: testing a path this design never takes.
+_MEASURED_SI_CROSSTALK = {"coupling_dominated_nets": []}
+
+
+def test_the_plan_and_the_deck_come_from_the_runs_own_reports(tmp_path):
+    """The victims and the folded SPEF are the ones the reports name — none is
+    invented by the planner, and the deck carries exactly them."""
+    proj = tmp_path / "proj"
+    (proj / "reports" / "phase3").mkdir(parents=True)
+    (proj / "reports/phase3/si_mcf_sta.json").write_text(
+        json.dumps(_MEASURED_SI_MCF))
+    (proj / "reports/phase3/si_crosstalk.json").write_text(
+        json.dumps(_MEASURED_SI_CROSSTALK))
+    folded = proj / "phase3/stage3/extracted/si_mcf/subservient.mcf_setup.spef"
+    folded.parent.mkdir(parents=True)
+    folded.write_text("*SPEF \"IEEE 1481-1998\"\n")
+    sdc = proj / "phase3/stage3/pnr/constraint.sdc"
+    sdc.parent.mkdir(parents=True)
+    sdc.write_text("create_clock -period 10 [get_ports clk]\n")
+
     plan = S.plan(proj)
-    assert plan["run"] is True and plan["victims"], plan
-    folded = sorted((proj / "phase3/stage3/extracted").glob(
-        "si_mcf/*.mcf_setup.spef"))
-    assert folded, "the run wrote no MCF-bounded setup SPEF"
-    body = S.repair_tcl(folded_spef_c=str(folded[0]), victims=plan["victims"],
-                        sdc_c=str(proj / "phase3/stage3/pnr/constraint.sdc"))
+    assert plan["run"] is True, plan
+    assert plan["victims"] == ["net690", "clknet_leaf_21_i_clk"], plan["victims"]
+    body = S.repair_tcl(folded_spef_c=str(folded), victims=plan["victims"],
+                        sdc_c=str(sdc))
     for net in plan["victims"]:
         assert net in body
-    assert str(folded[0]) in body
+    assert str(folded) in body
     assert body.count("repair_timing") == 1
+    assert "-skip_buffer_removal" in body
+    # and the BEFORE trajectory a run records is these three numbers, not two
+    # of them and a default
+    rec = S.run_once(proj)
+    assert rec["before"] == {"nominal_setup_ns": 2.4975,
+                             "mcf_setup_ns": -0.266,
+                             "mcf_hold_ns": 1.6242}
+    assert rec["decision"] == "NOT_EXECUTED"
+
+
+def test_a_closed_envelope_on_the_same_shape_plans_nothing(tmp_path):
+    """THE NEGATIVE CONTROL on the identical project shape: only the FAIL
+    verdict opens this door, not the presence of the reports."""
+    proj = tmp_path / "proj"
+    (proj / "reports" / "phase3").mkdir(parents=True)
+    closed = dict(_MEASURED_SI_MCF, verdict="PASS")
+    (proj / "reports/phase3/si_mcf_sta.json").write_text(json.dumps(closed))
+    (proj / "reports/phase3/si_crosstalk.json").write_text(
+        json.dumps(_MEASURED_SI_CROSSTALK))
+    plan = S.plan(proj)
+    assert plan["run"] is False
+    assert plan["victims"] == []

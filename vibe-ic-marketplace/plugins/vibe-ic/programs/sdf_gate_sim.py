@@ -697,6 +697,244 @@ def build_reused_results_log(meta: Dict[str, object], sim_stdout: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+# ---------------------------------------------------------------------------
+# R-0915-54 — STEP 29 REUSES THE RUN'S OWN EXECUTED L10 SUITE.
+# ---------------------------------------------------------------------------
+#: A per-case L10 testbench announces itself as `[TB <id>] ...`. Its own header
+#: states the contract this parser is written against: "never prints a PASS for
+#: a check it did not run." So a PASS is claimed only from a POSITIVE marker;
+#: the absence of a FAIL line is NOT a pass, and a transcript with neither is
+#: NOT_EXECUTED by name rather than silently counted either way.
+_L10_FAIL_RE = re.compile(r"(?m)^\s*\[TB\s+(\S+)\]\s+FAIL\b")
+_L10_PASS_RE = re.compile(r"(?m)^\s*\[TB\s+(\S+)\]\s+PASS\b")
+
+
+def parse_l10_case_stdout(text: str) -> Dict[str, object]:
+    """Verdict for ONE L10 case from its gate-level transcript.
+
+    Positive checks only. An earlier defect in this lane read the ABSENCE of a
+    marker as its opposite; here a transcript that carries no verdict line at
+    all returns None, which the caller records as NOT_EXECUTED with its reason
+    rather than folding into pass or fail."""
+    shared = parse_self_check_stdout(text)
+    if shared.get("verdict") is not None:
+        return shared
+    if _L10_FAIL_RE.search(text or ""):
+        return {"verdict": "FAIL", "passed": 0, "total": 1,
+                "marker": "L10_TB_FAIL"}
+    if _L10_PASS_RE.search(text or ""):
+        return {"verdict": "PASS", "passed": 1, "total": 1,
+                "marker": "L10_TB_PASS"}
+    return {"verdict": None, "passed": 0, "total": 0, "marker": None}
+
+
+def find_l10_executed_cases(project: Path, top: str) -> Optional[Dict[str, object]]:
+    """The run's OWN L10 cases, partitioned into step-29 subjects and refusals.
+
+    Returns None when the project has no L10 execution record at all — then
+    step 29 has nothing of the run's to reuse and the caller falls through to
+    its older discovery. Otherwise every declared case is accounted for: one of
+    `cases` (executed at RTL and bindable to the gate netlist) or `skipped`
+    (with the reason it is not a subject). A case is NEVER dropped silently —
+    that is the whole complaint R-0915-54 was raised on.
+
+    Chip-AGNOSTIC: the record and the testbench paths come from the project."""
+    rec = _pl.reports_dir(project) / "phase2" / "sim" / "l10_execution.json"
+    if not rec.is_file():
+        return None
+    try:
+        data = json.loads(rec.read_text(errors="replace"))
+    except (ValueError, OSError) as exc:
+        return {"cases": [], "skipped": [], "declared": 0,
+                "unreadable": f"{rec}: {exc}"}
+    declared = list(data.get("cases") or [])
+    cases: List[Dict[str, object]] = []
+    skipped: List[Dict[str, object]] = []
+    for case in declared:
+        cid = str(case.get("id") or "?")
+        if not case.get("sim_executed"):
+            skipped.append({
+                "id": cid, "disposition": "NOT_EXECUTED_AT_RTL",
+                "detail": str(case.get("detail")
+                              or case.get("verdict") or "")[:240]})
+            continue
+        tb = case.get("tb_file")
+        tb_path = Path(str(tb)) if tb else None
+        if tb_path is None or not tb_path.is_file():
+            skipped.append({"id": cid, "disposition": "TB_ABSENT",
+                            "detail": str(tb)})
+            continue
+        try:
+            text = strip_comments(tb_path.read_text(errors="replace"))
+        except OSError as exc:
+            skipped.append({"id": cid, "disposition": "TB_UNREADABLE",
+                            "detail": str(exc)})
+            continue
+        module = _TB_MODULE_RE.search(text)
+        inst = _tb_dut_instance(text, top)
+        if not module or not inst:
+            # The case ran at RTL but its oracle cannot BIND to the gate
+            # netlist -- a renamed port, a wrapper the netlist does not carry.
+            # Named, not dropped.
+            skipped.append({
+                "id": cid, "disposition": "NO_GATE_BINDING",
+                "detail": (f"module_decl={bool(module)} "
+                           f"dut_instance_of_{top}={bool(inst)}")})
+            continue
+        cases.append({"id": cid, "path": tb_path, "text": text,
+                      "module": module.group(1), "dut_instance": inst})
+    return {"cases": cases, "skipped": skipped, "declared": len(declared)}
+
+
+def build_l10_results_log(rows: List[Dict[str, object]],
+                          skipped: List[Dict[str, object]],
+                          meta: Dict[str, object]) -> str:
+    """Step-29 evidence as a PER-CASE table, so a reader can see which case."""
+    out = [
+        "SDF-annotated post-layout gate-level simulation (Step 29)",
+        f"design        : {meta.get('top')}",
+        f"netlist       : {meta.get('netlist')}",
+        f"cell library  : {meta.get('pdk_lib')}",
+        f"sdf file      : {meta.get('sdf')}",
+        f"suite         : the run's own executed L10 cases, re-run against the "
+        f"routed netlist with SDF back-annotation",
+        f"cases declared: {meta.get('declared')}",
+        f"cases executed: {len(rows)}",
+        "",
+        f"{'case':<48} {'verdict':<14} {'vectors':<10} marker",
+        "-" * 96,
+    ]
+    for r in rows:
+        v = str(r.get("verdict") or "NOT_EXECUTED")
+        out.append(f"{str(r['id'])[:47]:<48} {v:<14} "
+                   f"{str(r.get('passed', 0)) + '/' + str(r.get('total', 0)):<10} "
+                   f"{r.get('marker') or '-'}")
+    if skipped:
+        out += ["", "-- not a step-29 subject, by name --"]
+        for sk in skipped:
+            out.append(f"{str(sk['id'])[:47]:<48} {sk['disposition']:<14} "
+                       f"{str(sk.get('detail') or '')[:90]}")
+    failed = [r for r in rows if r.get("verdict") == "FAIL"]
+    unrun = [r for r in rows if r.get("verdict") is None]
+    out.append("")
+    if rows and not failed and not unrun:
+        out.append(f"VERDICT: PASS — {len(rows)}/{len(rows)} executed L10 "
+                   f"case(s) passed against the routed netlist with SDF "
+                   f"annotation.")
+    elif failed:
+        out.append(f"VERDICT: FAIL — {len(failed)} of {len(rows)} executed L10 "
+                   f"case(s) did not pass at gate level: "
+                   f"{', '.join(str(r['id']) for r in failed)}.")
+    else:
+        out.append(f"VERDICT: NOT_EXECUTED — {len(unrun)} of {len(rows)} "
+                   f"case(s) produced no verdict line at gate level; a missing "
+                   f"marker is not a pass.")
+    return "\n".join(out) + "\n"
+
+
+def _run_l10_suite(project: Path, top: str, container: str, sim_dir: Path,
+                   netlist: Path, sdf: Path, models: "CellModels", used: set,
+                   suite: Dict[str, object], notes: list) -> Dict[str, object]:
+    """Re-run the run's OWN executed L10 cases against the routed netlist.
+
+    Same suite, gate netlist + SDF in place of the RTL. One compile and one
+    simulation per case, so a per-case verdict is a measurement and not a
+    division of one aggregate."""
+    ntext = netlist.read_text(errors="replace")
+    stubs = missing_empty_cell_stubs(ntext, used, models.text)
+    stub_path = sim_dir / "phys_cell_stubs.v"
+    stub_path.write_text(
+        "// Physical-only cells omitted from functional PDK models.\n"
+        "`timescale 1ns/1ps\n"
+        + "".join(f"module {cell} (); endmodule\n" for cell in stubs))
+
+    rows: List[Dict[str, object]] = []
+    skipped = list(suite.get("skipped") or [])
+    for case in (suite.get("cases") or []):
+        cid, tb_module = str(case["id"]), str(case["module"])
+        row: Dict[str, object] = {"id": cid, "module": tb_module,
+                                  "testbench": str(case["path"])}
+        try:
+            injected = inject_sdf_annotation(
+                str(case["text"]), tb_module, str(case["dut_instance"]),
+                str(sdf))
+        except ValueError as exc:
+            row.update(verdict=None, marker=None, passed=0, total=0,
+                       detail=f"SDF annotation could not be injected: {exc}")
+            rows.append(row)
+            continue
+        tb_path = sim_dir / f"{cid}_sdf_gate.v"
+        tb_path.write_text(injected)
+        vvp = sim_dir / f"{cid}_gatesim.vvp"
+        cc = (f"cd {shlex.quote(str(sim_dir))} && "
+              f"iverilog -g2012 -ginterconnect -s {shlex.quote(tb_module)} "
+              f"-o {shlex.quote(vvp.name)} {shlex.quote(tb_path.name)} "
+              f"{shlex.quote(str(netlist))} {shlex.quote(stub_path.name)} "
+              f"{models.arg} > {shlex.quote(cid)}.compile.log 2>&1; echo RC=$?")
+        try:
+            cr = _docker(container, cc, timeout=900)
+        except Exception as exc:
+            row.update(verdict=None, marker=None, passed=0, total=0,
+                       detail=f"compile invoke failed: {exc}")
+            rows.append(row)
+            continue
+        if "RC=0" not in (cr.stdout or ""):
+            # The case ran at RTL and its oracle will not COMPILE against the
+            # gate netlist. That is a binding failure, named, never a pass and
+            # never a silent drop.
+            row.update(verdict=None, marker=None, passed=0, total=0,
+                       detail="did not compile against the gate netlist")
+            rows.append(row)
+            continue
+        rr = (f"cd {shlex.quote(str(sim_dir))} && vvp {shlex.quote(vvp.name)} "
+              f"-sdf-info > {shlex.quote(cid)}.stdout.log "
+              f"2> {shlex.quote(cid)}.stderr.log; echo RC=$?")
+        try:
+            _docker(container, rr, timeout=900)
+        except Exception as exc:
+            row.update(verdict=None, marker=None, passed=0, total=0,
+                       detail=f"sim invoke failed: {exc}")
+            rows.append(row)
+            continue
+        so = sim_dir / f"{cid}.stdout.log"
+        text = so.read_text(errors="replace") if so.is_file() else ""
+        parsed = parse_l10_case_stdout(text)
+        row.update(parsed)
+        row["annotated_interconnect_delays"] = len(_ANNOT_RE.findall(text))
+        if parsed.get("verdict") is None:
+            row["detail"] = ("no verdict line at gate level; a missing marker "
+                             "is not a pass")
+        rows.append(row)
+
+    meta = {"top": top, "netlist": str(netlist), "pdk_lib": models.arg,
+            "sdf": str(sdf), "declared": suite.get("declared")}
+    _aa.write_text(sim_dir / "results.log",
+                   build_l10_results_log(rows, skipped, meta))
+    failed = [r for r in rows if r.get("verdict") == "FAIL"]
+    unrun = [r for r in rows if r.get("verdict") is None]
+    verdict = ("PASS" if rows and not failed and not unrun else
+               "FAIL" if failed else "NOT_EXECUTED")
+    _aa.write_text(sim_dir / "results.json", json.dumps({
+        "program": "sdf_gate_sim", "version": "1.2.0",
+        "suite": "l10_executed_cases", "verdict": verdict,
+        "declared": suite.get("declared"),
+        "executed": len(rows),
+        "cases": [{k: (str(v) if isinstance(v, Path) else v)
+                   for k, v in r.items()} for r in rows],
+        "not_a_subject": skipped,
+        "artifacts": {"netlist": str(netlist), "sdf": str(sdf)},
+    }, indent=2, ensure_ascii=False) + "\n")
+    if verdict == "PASS":
+        _aa.write_text(sim_dir / "pass.flag",
+                       f"PASS {len(rows)}/{len(rows)} executed L10 case(s) "
+                       f"on the routed netlist with SDF annotation\n")
+    notes.append(f"sdf_gate_sim: re-ran {len(rows)} executed L10 case(s) at "
+                 f"gate level ({verdict}); {len(skipped)} declared case(s) "
+                 f"were not subjects and are named in results.log")
+    return {"verdict": verdict, "executed": len(rows),
+            "declared": suite.get("declared"), "not_a_subject": len(skipped)}
+
+
 def _run_reused_testbench(project: Path, top: str, container: str,
                            sim_dir: Path, netlist: Path, sdf: Path,
                            models: CellModels, used: set,
@@ -908,6 +1146,48 @@ def run(project, top: str = "spm", container: str = DEFAULT_CONTAINER,
         return {"verdict": "NOT_APPLICABLE", "reason": "no pdk lib"}
 
     sim_dir.mkdir(parents=True, exist_ok=True)
+
+    # R-0915-54 — THE RUN'S OWN EXECUTED L10 SUITE IS THE FIRST SUBJECT.
+    #
+    # MEASURED on subservient r20: step 29 refused with "no reusable
+    # self-checking testbench ... and no compatible legacy generator", while
+    # `reports/phase2/sim/l10_execution.json` listed TEN executed self-checking
+    # L10 cases with their testbenches on disk. The note was true of the
+    # DISCOVERY below -- which accepts a bench only if it carries one of four
+    # marker strings and only globs *.v/*.sv in three directories -- and false
+    # as a statement about the run. Step 29's subject is the suite the run
+    # actually executed, re-run against the routed netlist with SDF in place of
+    # the RTL.
+    #
+    # Only a GENUINELY EMPTY executed suite reaches a refusal, and it carries a
+    # reason_class so the audit can classify it instead of recording an absence
+    # with no cause.
+    suite = find_l10_executed_cases(project, top)
+    if suite is not None and suite.get("cases"):
+        return _run_l10_suite(project, top, container, sim_dir, netlist, sdf,
+                              models, used, suite, notes)
+    if suite is not None:
+        declared = suite.get("declared") or 0
+        skipped = suite.get("skipped") or []
+        why = "; ".join(f"{sk['id']}={sk['disposition']}"
+                        for sk in skipped[:6]) or "no cases declared"
+        notes.append(
+            f"sdf_gate_sim: the run declared {declared} L10 case(s) and "
+            f"executed none that bind to the gate netlist ({why})")
+        return {
+            "verdict": "NOT_APPLICABLE" if declared else "ERROR",
+            "reason": (f"the L10 suite has no executed case to re-run at gate "
+                       f"level: {why}"),
+            # STATED CLASS, not a bare absence. Upstream produced the suite and
+            # did not execute its oracles, so step 29 has nothing of the run's
+            # to measure -- that is a blocked step, not a capability gap and
+            # not a design declaration of N/A.
+            "reason_class": ("BLOCKED_BY_UPSTREAM" if declared
+                             else "ZERO_DENOMINATOR"),
+            "declared": declared,
+            "not_a_subject": skipped,
+        }
+
     reusable = find_reusable_testbench(project, top)
     if reusable is not None:
         return _run_reused_testbench(
