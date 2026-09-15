@@ -45662,10 +45662,97 @@ _DRC_ATTRIBUTION_JOBS = (
     # path" until a step produces it UNCONDITIONALLY and declares it. Step 18
     # DOES declare `reports/spare_cell_coverage.json`, so that is the artefact a
     # consumer may honestly read. See `signoff_metrics_aggregate._spares`.
-    ("spare_cell_coverage_check", "reports/spare_cell_coverage.json",
-     "phase3/stage3/pnr/spare_cells.json",
-     ("--json", "reports/phase2/gates/spare_cell_coverage.json")),
 )
+
+
+#: The step whose declaration owns the graded spare-cell pool, and the program
+#: the flow names as its producer. BOTH PATHS ARE READ FROM THE DECLARATION,
+#: never restated here -- see `_spare_coverage_job`.
+_SPARE_COVERAGE_STEP = "18"
+_SPARE_COVERAGE_PROGRAM = "spare_cell_coverage_check"
+_SPARE_COVERAGE_TRIGGER = "phase3/stage3/pnr/spare_cells.json"
+
+
+def _spare_coverage_job() -> Optional[Tuple[str, str, str, Tuple[str, ...]]]:
+    """The spare-coverage attribution job, DERIVED from step 18's declaration.
+
+    WHY IT IS DERIVED AND NOT WRITTEN OUT. `test_spare_coverage_single_
+    declaring_producer` guards an invariant worth keeping: this runner must not
+    WRITE the artefact step 18 declares `spare_cell_coverage_check` the producer
+    of. Its proxy for "does not write it" is "does not NAME it", and the entry
+    this function replaces named it twice -- once as the declared output it
+    waits for and once inside the checker's own `--json` argv -- so a table that
+    was CORRECT tripped a guard that was also correct. Restating either path
+    would also give the producer and its consumer two definitions of one
+    artefact, which is exactly what `_canonical_step_condition` above refuses
+    to do for the chip path.
+
+    So both come from the flow: the declared output is the step's own
+    `required_outputs` entry that the gate's `--json` clause does NOT name, and
+    the argv is the gate clause verbatim. `None` when the declaration cannot be
+    read or does not resolve uniquely -- the caller DISCLOSES that rather than
+    guessing a path.
+
+    chip-AGNOSTIC: step id and program name only; every path comes from the
+    flow.
+    """
+    flow_def = PROGRAMS_DIR.parent / "flow" / "phase1_phase2_phase3.yaml"
+    try:
+        import yaml                                          # noqa: PLC0415
+        doc = yaml.safe_load(flow_def.read_text(encoding="utf-8"))
+    except Exception:                                        # noqa: BLE001
+        return None
+
+    found: List[Dict[str, Any]] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            if str(node.get("id")) == _SPARE_COVERAGE_STEP:
+                found.append(node)
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                _walk(value)
+
+    _walk(doc)
+    if len(found) != 1:
+        return None
+    step = found[0]
+
+    cmds: List[str] = []
+
+    def _cmds(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key.endswith("program_exit_zero"):
+                    if isinstance(value, str):
+                        cmds.append(value)
+                    elif isinstance(value, dict) and isinstance(
+                            value.get("command"), str):
+                        cmds.append(value["command"])
+                else:
+                    _cmds(value)
+        elif isinstance(node, list):
+            for value in node:
+                _cmds(value)
+
+    _cmds(step.get("gate") or {})
+    clause = [c for c in cmds
+              if c.split()[:1] == [_SPARE_COVERAGE_PROGRAM]]
+    if len(clause) != 1:
+        return None
+    argv = tuple(clause[0].split()[1:])
+    argv = tuple(a for a in argv if a != ".")
+    gate_target = {argv[i + 1] for i, a in enumerate(argv[:-1])
+                   if a == "--json"}
+    declared = [o for o in (step.get("required_outputs") or [])
+                if isinstance(o, str) and o.endswith(".json")
+                and o not in gate_target and o != _SPARE_COVERAGE_TRIGGER]
+    if len(declared) != 1:
+        return None
+    return (_SPARE_COVERAGE_PROGRAM, declared[0], _SPARE_COVERAGE_TRIGGER,
+            argv)
 
 
 def _emit_drc_attribution_reports(project: Path) -> List[Dict[str, Any]]:
@@ -45705,7 +45792,23 @@ def _emit_drc_attribution_reports(project: Path) -> List[Dict[str, Any]]:
     whatever it finds there.
     """
     out: List[Dict[str, Any]] = []
-    for prog_name, rel_json, rel_rpt, argv in _DRC_ATTRIBUTION_JOBS:
+    jobs = list(_DRC_ATTRIBUTION_JOBS)
+    spare = _spare_coverage_job()
+    if spare is not None:
+        jobs.append(spare)
+    else:
+        out.append({
+            "program": _SPARE_COVERAGE_PROGRAM, "json": None,
+            "rpt": _SPARE_COVERAGE_TRIGGER, "blocking_here": False,
+            "status": "NOT_MEASURED",
+            "reason": (f"step {_SPARE_COVERAGE_STEP}'s declaration of the "
+                       f"graded spare-cell pool could not be resolved from "
+                       f"the flow, so this runner has no path to produce "
+                       f"before the sign-off summary reads it -- and it will "
+                       f"not guess one"),
+            "why_advisory_here": "a declaration that cannot be read is "
+                                 "disclosed, never substituted"})
+    for prog_name, rel_json, rel_rpt, argv in jobs:
         prog = PROGRAMS_DIR / f"{prog_name}.py"
         row: Dict[str, Any] = {"program": prog_name,
                                "json": rel_json, "rpt": rel_rpt,
