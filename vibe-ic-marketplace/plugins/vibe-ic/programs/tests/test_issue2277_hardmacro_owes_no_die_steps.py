@@ -246,3 +246,43 @@ def test_a_tree_with_no_router_and_no_declaration_stays_NOT_DETERMINED(tmp_path)
     bare = tmp_path / "bare"
     (bare / "input" / "submission_template").mkdir(parents=True)
     assert DP.resolve(bare)["path"] == DP.PATH_NOT_DETERMINED
+
+
+# --------------------------------------------------------------------------- #
+# the enforcement register the new gate clause reaches
+# --------------------------------------------------------------------------- #
+# MEASURED on the branch: naming `perc_corpus_sweep` in a gate clause makes it a
+# gate-NAMED program, and `flow_gate_enforcement_audit` refuses a gate-named
+# program that is reachable only through the final audit and says nothing about
+# it -- `undeclared::perc_corpus_sweep`, the #1035 class, three red ratchets.
+# The repair is the DECLARATION, not a register entry: the three axes below are
+# the #1035 shape, and none of them is a grep for a string in a source file.
+import flow_gate_enforcement_audit as ENF                  # noqa: E402
+
+
+def test_the_new_gate_program_DECLARES_where_it_is_enforced():
+    """Axis 1 — the declaration exists AND the audit can SEE it (it must be an
+    opened line inside the reader's own window, which a grep would not prove)."""
+    assert ENF.declared_intent(PROGRAMS, "perc_corpus_sweep") == "advisory"
+
+
+def test_the_declaration_bought_no_demotion():
+    """Axis 2 — `advisory` on the audit's axis is the exact token a later change
+    could quote as licence to defang the refusal. It cannot: the refusal
+    predicate is a DIFFERENT program, and it is still the one wired to judge the
+    document this producer writes."""
+    gate = json.dumps(_steps()["31"]["gate"])
+    assert "sweep_reach_check --report reports/phase3/perc_sweep.json" in gate
+    assert gate.index("perc_corpus_sweep") < gate.index("sweep_reach_check")
+
+
+def test_the_audit_exits_zero_and_names_this_program_as_declared(tmp_path):
+    """Axis 3 — end to end, driven rather than read."""
+    import subprocess
+    out = tmp_path / "enf.json"
+    r = subprocess.run(
+        [sys.executable, str(PROGRAMS / "flow_gate_enforcement_audit.py"),
+         "--json", str(out)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout[-800:]
+    gates = {g["gate"]: g for g in json.loads(out.read_text())["gates"]}
+    assert gates["perc_corpus_sweep"]["declared"] == "advisory"

@@ -4,6 +4,31 @@ of already-routed designs, deterministically, with NO container needed.
 
 ROLE: producer/classifier
 
+ENFORCEMENT: advisory
+
+WHY A PRODUCER CARRIES AN ENFORCEMENT LINE AT ALL (vibe-ic#2277). Since step 31
+names this program in a gate clause -- so that `flow_declared_producer_run`,
+which the phase-3 runner invokes, writes `reports/phase3/perc_sweep.json`
+during the RUN instead of leaving the step's ninth declared output owed by
+nobody -- it is a gate-NAMED program, and `flow_gate_enforcement_audit` asks
+every one of those a question it will not let go unanswered: is this reachable
+where its exit status can stop a step while the step runs?
+
+The honest answer is NO, and `advisory` is that answer. No runner spawns this
+inline; the clause sits in `advisory_program_exit_zero`; and the rc 2 it
+returns on a vacuous sweep is a disclosure, not a refusal. Silence would have
+been the audit's actual finding -- `undeclared::perc_corpus_sweep`, the #1035
+class -- and a gate that could never block and never said so is the thing that
+ratchet exists to catch.
+
+THIS DOES NOT REOPEN #1980. That issue moved this sweep out of the GATE
+DENOMINATOR and gave the refusal predicate to `sweep_reach_check`, and both
+halves are unchanged: the refusal still belongs to that program, and declaring
+`advisory` here claims no tier this one has. The two axes are different
+questions -- which program may refuse, and whether a gate-named program said
+where it is enforced -- and answering the second has never been an answer to
+the first.
+
 Issue #1980 moved this sweep out of the gate denominator. The Step-31 output
 record retains WELLTAP_GAP / cross-domain INCOMPLETE findings; the separate
 `sweep_reach_check` program owns the refusal predicate.
