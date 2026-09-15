@@ -147,7 +147,23 @@ def docker_active_reservations(runner=subprocess.run) -> dict[str, int]:
     ids = (ps.stdout or "").split()
     if not ids:
         return {}
-    fmt = "{{.Id}}\\t{{.HostConfig.Memory}}\\t{{index .Config.Labels \\\"vibeic.corner.token\\\"}}"
+    # THE TEMPLATE IS PASSED TO execve, NOT TO A SHELL, so every character in
+    # this string reaches Docker's Go template parser verbatim (lane icadc,
+    # 2026-09-15, MEASURED). It used to carry LITERAL backslashes — `\t` as two
+    # characters and `\"` around the label key — and Go rejects them:
+    #
+    #     docker inspect -f '{{.Id}}\t...\"vibeic.corner.token\"...' <id>
+    #     rc=64  template parsing error: template: :1: unexpected "\\" in operand
+    #
+    # `docker_active_reservations` therefore raised
+    # `AdmissionRefused("cannot inspect active corner memory reservations")`
+    # WHENEVER AT LEAST ONE LABELLED CORNER WAS ALIVE — and returned cleanly
+    # only when there were none, which is why it looked healthy at the start of
+    # every sweep and failed from the second corner onwards. In
+    # `_run_pvt_corners` that refusal is recorded against EVERY pooled corner as
+    # `RAM_ADMISSION_REFUSED`, which is the `corners_executed 1/9` /
+    # `A4_PVT_SWEEP_NOT_MEASURED` that three tests have been red on main with.
+    fmt = '{{.Id}}\t{{.HostConfig.Memory}}\t{{index .Config.Labels "vibeic.corner.token"}}'
     cp = runner(["docker", "inspect", "-f", fmt, *ids],
                 capture_output=True, text=True, check=False, timeout=15)
     if cp.returncode:

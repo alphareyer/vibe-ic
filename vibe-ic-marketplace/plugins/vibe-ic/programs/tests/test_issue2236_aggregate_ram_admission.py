@@ -108,7 +108,22 @@ def test_live_docker_tokens_matching_ledger_entries_are_counted_once(tmp_path):
         docker_calls.append(argv)
         if argv[1:3] == ["ps", "-q"]:
             return subprocess.CompletedProcess(argv, 0, "\n".join(active) + "\n", "")
-        assert argv[1:4] == ["inspect", "-f", "{{.Id}}\\t{{.HostConfig.Memory}}\\t{{index .Config.Labels \\\"vibeic.corner.token\\\"}}"]
+        # REPAIRED 2026-09-15 (lane icadc). This line used to assert the
+        # format string LITERALLY, backslashes and all --- and the literal it
+        # pinned was one Go REFUSES to parse (`rc=64 template parsing error:
+        # unexpected "\\" in operand`), because the argv goes to execve and
+        # nothing ever unescapes it. Pinning the MECHANISM --- the exact
+        # characters --- instead of the PROPERTY --- "a template Docker
+        # accepts, rendering three tab-separated fields" --- is what let the
+        # defect live: the assertion was written from the source rather than
+        # from what Docker does with it. Assert the property. The arm that
+        # hands the template to Docker itself lives in
+        # test_corner_admission_inspect_template_is_one_docker_accepts.py.
+        assert argv[1:3] == ["inspect", "-f"]
+        assert argv[3].split("\t") == [
+            "{{.Id}}", "{{.HostConfig.Memory}}",
+            '{{index .Config.Labels "vibeic.corner.token"}}']
+        assert "\\" not in argv[3]
         return subprocess.CompletedProcess(
             argv, 0,
             "\n".join(f"{container}\t{32 * G}\t{token}"
