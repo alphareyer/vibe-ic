@@ -428,6 +428,19 @@ def test_the_shared_producer_and_gate_population_is_declared_here():
         ("37", "reports/phase3/gates/stage3_compliance.json"),
         ("37.5ip", "reports/phase3/digital_hardmacro.json"),
         ("37.5ic", "reports/phase3/tapeout_precheck.json"),
+        # ARRIVED 2026-09-15 (lane icspm3) on the SPM verdict run at main
+        # 79506306d. These two were NAMED in the first pass and deliberately
+        # left, because `flow_compliance_check`'s `--json` document carries
+        # none of `_GATE_DOCUMENT_IDENTITY_KEYS` — which is precisely why
+        # they had to be declared in the end: with no producer, whether the
+        # document exists before the audit begins is a RACE, and on a loaded
+        # host it landed the other way (step 2 MISSING instead of INCOMPLETE,
+        # stage1_compliance FAILING for the first time). They belong in this
+        # population for the population's own stated reason: content cannot
+        # decide their authorship, so the two timing facts have the last word
+        # — and a declared producer is what makes those facts deterministic.
+        ("2", "reports/phase1/gates/stage_phase1_compliance.json"),
+        ("14", "reports/analog/stage_analog_compliance.json"),
     }
     assert measured == pinned, (
         f"the BOTH-producer-and-gate population moved — arrived: "
