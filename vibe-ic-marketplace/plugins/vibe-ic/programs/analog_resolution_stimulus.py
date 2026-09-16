@@ -100,6 +100,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # ONE definition of "how few whole cycles is too few". The consumer refuses
 # below it; this producer must not emit below it either, and importing rather
 # than restating is what keeps the two from drifting.
+import analog_incremental_decimator as _inc
 from analog_adc_enob_corner_check import _MIN_SIGNAL_CYCLES
 
 PRODUCER = "analog_resolution_stimulus"
@@ -412,6 +413,103 @@ def _amplitude(facts: Dict[str, Any], node: str, dc_v: float
 
 
 # ── the transform ──────────────────────────────────────────────────────────
+# ── the INCREMENTAL DECODE this deck's converter needs ─────────────────────
+#
+# WHY IT IS STAMPED HERE. This module already renders the one deck the ENOB
+# gate reads, and it already holds both halves the decode needs — the spec
+# (which declares the conversion mode) and the topology IR (which declares the
+# window, the order, the coefficient and the loop's feedback delay). Nothing
+# else in the flow sees both at the point the deck exists. The stamp is a
+# SPICE comment, so the simulation is byte-for-byte the one that ran before.
+#
+# MEASURED, and this is why it is worth a stamp at all (lane icadc, F159/F161):
+# reading an INCREMENTAL converter's bitstream with a free-running converter's
+# FFT under-reads it, and decoding it with the INPUT's weights instead of the
+# DAC's under-reads it by 7.4 bit. Both are decode errors; neither is visible
+# in the deck unless the deck says which decode it needs.
+_INC_NO_WINDOW = "incremental_conversion_window_not_declared"
+_INC_NO_ORDER = "incremental_loop_order_not_declared"
+_INC_NO_COEFF = "incremental_loop_coefficient_not_declared"
+_INC_NO_DELAY = "incremental_feedback_delay_not_declared"
+_INC_UNEQUAL_COEFF = "incremental_cascade_coefficients_unequal"
+
+#: The IR constant a topology entry declares its loop's feedback delay in.
+FEEDBACK_DELAY_CONSTANT = "feedback_delay_clocks"
+
+
+def incremental_decode(spec: Any, topology: Any) -> Dict[str, Any]:
+    """The decode declaration for this block, or a NAMED refusal.
+
+    Always a dict; `declared` is the one field a caller must read. A block
+    whose spec does not declare an incremental converter is not refused — it
+    keeps the free-running instrument, which is right for it."""
+    rec: Dict[str, Any] = {"declared": False}
+    mode = _inc.conversion_mode(spec, topology)
+    rec["mode"] = mode
+    if mode != _inc.MODE_INCREMENTAL:
+        rec["reason"] = "converter_is_not_declared_incremental"
+        return rec
+    if not isinstance(topology, dict):
+        rec["reason"] = _INC_NO_WINDOW
+        rec["detail"] = "no topology IR beside the block"
+        return rec
+    consts = topology.get("constants") or {}
+    window = consts.get("window_clocks")
+    if not isinstance(window, (int, float)) or int(window) < 1:
+        rec["reason"] = _INC_NO_WINDOW
+        rec["detail"] = (
+            "the topology IR publishes no `constants.window_clocks`, so the "
+            "deck cannot say how many clocks one conversion is and a decoder "
+            "would have to assume it")
+        return rec
+
+    stage = topology.get("stage_expansion")
+    stage = stage if isinstance(stage, dict) else {}
+    order = stage.get("stages")
+    if stage.get("count_from") != "order" or not isinstance(order, int):
+        rec["reason"] = _INC_NO_ORDER
+        rec["detail"] = (
+            "the topology IR's signal cascade does not declare `count_from: "
+            "\"order\"`, so the loop order the decode has to run is not "
+            "stated by the design")
+        return rec
+    coeffs = [c for c in (stage.get("coefficients") or [])
+              if isinstance(c, (int, float)) and not isinstance(c, bool)]
+    if len(coeffs) != order:
+        rec["reason"] = _INC_NO_COEFF
+        rec["detail"] = (f"the cascade declares {len(coeffs)} coefficient(s) "
+                         f"for {order} stage(s)")
+        return rec
+    if any(abs(c - coeffs[0]) > 1e-12 * max(1.0, abs(coeffs[0]))
+           for c in coeffs):
+        # NOT decoded on the first one. The flat DAC term carries `a2` where
+        # the triangular term carries `a1*a2`, so unequal coefficients need
+        # them separately and `analog_incremental_decimator` takes one.
+        rec["reason"] = _INC_UNEQUAL_COEFF
+        rec["detail"] = (f"coefficients {coeffs} differ; the matched decode "
+                         f"takes one per-stage coefficient")
+        return rec
+    delay = consts.get(FEEDBACK_DELAY_CONSTANT)
+    if not isinstance(delay, (int, float)) or isinstance(delay, bool) \
+            or int(delay) < 0:
+        rec["reason"] = _INC_NO_DELAY
+        rec["detail"] = (
+            f"the topology IR publishes no `constants.{FEEDBACK_DELAY_CONSTANT}"
+            f"`. A CIFB that LATCHES its decision and presents it to the DAC "
+            f"on the next phase realises 1; one that transfers it in the same "
+            f"phase realises 0. The decode has to run the recurrence the loop "
+            f"realises, and a default would be a guess about the emitted "
+            f"circuit")
+        return rec
+
+    rec.update({"declared": True, "window_clocks": int(window),
+                "order": int(order), "coeff": float(coeffs[0]),
+                "feedback_delay_clocks": int(delay)})
+    rec["stamp"] = _inc.stamp(mode, int(window), int(order), float(coeffs[0]),
+                              int(delay))
+    return rec
+
+
 def plan(deck_text: str, spec: Any, topology: Any) -> Dict[str, Any]:
     """The record of what this transform would do to `deck_text`, applied or
     refused. Always a dict; `applied` is the one field a caller must read."""
@@ -510,6 +608,7 @@ def plan(deck_text: str, spec: Any, topology: Any) -> Dict[str, Any]:
         record["detail"] = why
         return record
 
+    record["incremental_decode"] = incremental_decode(spec, topology)
     record.update({
         "applied": True,
         "source": driver["name"],
@@ -549,5 +648,10 @@ def apply(deck_text: str, spec: Any, topology: Any, dump_ref: str
     lines.insert(record["source_line"], note)
     dump = f"wrdata {dump_ref} v({record['output_node']})"
     lines.insert(record["tran_line"] + 2, dump)
+    # The decode declaration travels ON THE DECK, beside the tone note, so the
+    # gate that reads the dump reads it off the same file. A SPICE comment.
+    _dec = record.get("incremental_decode") or {}
+    if _dec.get("declared"):
+        lines.insert(record["source_line"], _dec["stamp"])
     record["dump"] = dump_ref
     return "\n".join(lines) + "\n", record

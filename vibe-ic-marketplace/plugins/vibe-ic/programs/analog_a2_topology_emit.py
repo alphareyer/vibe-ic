@@ -1315,6 +1315,29 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
         "constants": {
             "w_cap": 10.0,
             "w_res": 0.35,
+            # HOW MANY CLOCKS BETWEEN A DECISION AND ITS CHARGE, measured on
+            # this entry's own emitted deck (lane icadc, F161). It is the one
+            # number a matched incremental DECODE cannot derive from the
+            # bitstream, and a decoder that assumed it would be guessing about
+            # the circuit this file emits — so this file, which emits it,
+            # states it.
+            #
+            # ZERO, and the measurement is the phase arrangement above: both
+            # branches SAMPLE on clk-HIGH and TRANSFER on clk-LOW, the latch
+            # fires at the falling edge, and the DAC therefore holds that
+            # decision for the whole of the SAME transfer phase. Read off the
+            # ideal-element harness of this exact topology: `bit_out` and
+            # `ndac` step together at every falling edge (1500 ns + k*1000 ns)
+            # and hold through the transfer phase that follows, so the
+            # decision sampled inside transfer phase n IS the charge injected
+            # in step n.
+            #
+            # A loop that registered the decision a second time — a full
+            # flip-flop clocked on the NEXT rising edge — would declare 1
+            # here, and `analog_incremental_decimator` would build different
+            # weights for it. The value belongs to the topology, not to the
+            # decoder.
+            "feedback_delay_clocks": 0.0,
             # Boltzmann's constant times 300 K. A UNIVERSAL physical
             # constant — the same on every process and in every design —
             # which is why it is a library constant and not a registry read.
