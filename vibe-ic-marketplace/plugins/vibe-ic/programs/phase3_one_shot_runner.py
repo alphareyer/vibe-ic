@@ -53830,8 +53830,32 @@ read_liberty {lib_c}
 {macro_libs_tcl}
 read_def {def_c}
 read_sdc {sdc_c}
-{read_spef_tcl}if {{[catch {{write_sdf {sdf_c}}} sdf_err]}} {{
-  puts "WRITE_SDF_FAIL: $sdf_err"
+{read_spef_tcl}# R-0915-75 — `-include_typ`, OR THE SDF ANNOTATES NOTHING AT ALL.
+#
+# MEASURED, sha256 x sky130A, lane icsha2 run15, front door. Without it
+# `write_sdf` emits the two-value form `(0.113::0.113)` — min and max with the
+# TYP FIELD EMPTY. Icarus selects TYP by default, finds nothing there, and says
+# so on the header it can reach (`Chosen value not defined` on VOLTAGE and
+# TEMPERATURE); for every DELAY it simply applies none. The run15 transcripts
+# carry 31063 `SDF ERROR` lines and ZERO `Putting delay` lines — not one delay,
+# cell or interconnect, was annotated, and `+mindelays` / `+typdelays` /
+# `+maxdelays` do not rescue it (measured, all three).
+#
+# Re-emitting the SAME design with `-include_typ` gives `(0.113:0.113:0.113)`
+# and 61976 `Putting delay` lines. The values are OpenSTA's own — this asks the
+# writer for the full triple it already has, and edits nothing.
+#
+# GUARDED, because the flag is a property of the tool in the image and this
+# runner must not turn an SDF into no SDF if it is absent: on refusal it falls
+# back to the plain form and SAYS SO, so a run without the triple is a run that
+# discloses it rather than one that silently annotates nothing.
+if {{[catch {{write_sdf -include_typ {sdf_c}}} sdf_typ_err]}} {{
+  puts "WRITE_SDF_INCLUDE_TYP_UNSUPPORTED: $sdf_typ_err"
+  if {{[catch {{write_sdf {sdf_c}}} sdf_err]}} {{
+    puts "WRITE_SDF_FAIL: $sdf_err"
+  }} else {{
+    puts "WRITE_SDF_TWO_VALUE_FORM: this SDF carries min::max with an EMPTY typ field; a simulator that selects typ will annotate NOTHING from it"
+  }}
 }}
 exit
 """)
