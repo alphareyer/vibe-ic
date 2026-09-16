@@ -26249,12 +26249,45 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "    }\n"
         f"    if {{[catch {{write_spef {out_dir_c}/sdr_pass.spef}} _sdr_sw]}} "
         "{ puts \"SDR_SPEFW_NONFATAL: $_sdr_sw\"; set _sdr_tx_error 1; break }\n"
+        # R-0915-83 — THE PARASITICS MUST REACH STA, AND IT IS ASSERTED.
+        # MEASURED (opentitan_aes x sky130A, 2026-09-16), one session on this
+        # run's own checkpoint DEF at the max corner:
+        #     extract_parasitics ONLY ............... 0 violators
+        #     the SAME extraction + write_spef + read_spef ... 45,237
+        # `extract_parasitics` populates the ODB; OpenSTA does not see it until
+        # a SPEF is read back. So a census taken after extraction alone reports
+        # ZERO and is byte-indistinguishable from a clean design -- a
+        # NOT_MEASURED that reads as green, and the loop would call it
+        # CONVERGED on pass 1. `_sdr_par_ok` is set ONLY on the line below,
+        # after `read_spef` returns without error, and nothing else sets it.
+        "    set _sdr_par_ok 0\n"
         f"    if {{[catch {{read_spef {out_dir_c}/sdr_pass.spef}} _sdr_sr]}} "
         "{ puts \"SDR_SPEFR_NONFATAL: $_sdr_sr\"; set _sdr_tx_error 1; break }\n"
+        "    set _sdr_par_ok 1\n"
         # Count the sign-off DRV the same way the Step-23 gate does: the
         # tool's own violator report, not a proxy.
-        f"    catch {{report_check_types -max_slew -max_capacitance -max_fanout "
-        f"-violators > {out_dir_c}/sdr_drv.rpt}}\n"
+        # R-0915-83 — and REFUSE BY NAME rather than report a number when the
+        # count cannot be trusted. Two ways it could not be, both of which
+        # previously produced a silent 0 that the loop read as convergence:
+        # no parasitics in STA, and a violator report that was never written.
+        # The `catch` below used to swallow a failed `report_check_types`,
+        # leaving `_sdr_n` at 0.
+        "    set _sdr_rpt_ok 1\n"
+        f"    if {{[catch {{report_check_types -max_slew -max_capacitance "
+        f"-max_fanout -violators > {out_dir_c}/sdr_drv.rpt}} _sdr_rc]}} "
+        "{ set _sdr_rpt_ok 0; puts \"SDR_DRV_REPORT_FAILED: $_sdr_rc\" }\n"
+        f"    if {{![file exists {out_dir_c}/sdr_drv.rpt]}} "
+        "{ set _sdr_rpt_ok 0 }\n"
+        "    if {!$_sdr_par_ok || !$_sdr_rpt_ok} {\n"
+        "      puts \"SDR_DRV_CENSUS_NOT_MEASURED: parasitics_in_sta="
+        "$_sdr_par_ok violator_report=$_sdr_rpt_ok -- a DRV census without "
+        "parasitics in STA reports 0 and cannot be told apart from a clean "
+        "design (MEASURED: 0 after extract_parasitics alone, 45237 after "
+        "read_spef of the SAME extraction). NO NUMBER IS REPORTED and the "
+        "repair loop does not run on it.\"\n"
+        "      set _sdr_tx_error 1\n"
+        "      break\n"
+        "    }\n"
         "    set _sdr_n 0\n"
         # COUNTED PER KIND, not just totalled: the repair that closes a
         # max-capacitance violator is not the one that closes a max-slew
@@ -26296,6 +26329,22 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "    if {$_sdr_n == 0} { puts \"SDR_CONVERGED: pass $_sdr_p\"; break }\n"
         "    set _sdr_stop 0\n"
         "    set _sdr_tx_mutated 1\n"
+        # R-0915-83 — DISCLOSE what the repair below is optimising against.
+        # MEASURED: on all four passes of the opentitan_aes run, OpenROAD
+        # printed `[WARNING EST-0027] no estimated parasitics. Using wire load
+        # models.` immediately after this census. The census itself is sound --
+        # `read_spef` above feeds STA, and the refusal there now proves it --
+        # but `repair_design` asks for ESTIMATED parasitics, finds none, and
+        # falls back to a wire-load model. So the loop is GRADED on SPEF and
+        # REPAIRS blind. That fallback is OpenROAD's own behaviour and this
+        # change does not paper over it; it makes it a named line in the log
+        # next to the number it explains, instead of a tool warning nobody
+        # reads. A repair whose model disagrees with its grader is the reason
+        # four passes moved 41,956 -> 1,896 and never closed.
+        "    puts \"SDR_REPAIR_MODEL: graded_on=spef "
+        "repair_sees_estimated_parasitics=unknown_to_tcl -- if OpenROAD prints "
+        "EST-0027 after this line, this pass's repair ran on WIRE LOAD MODELS "
+        "while its census came from the extracted SPEF\"\n"
         + f"    if {{[catch {{repair_design -max_wire_length $_sdr_mwl "
         f"-slew_margin {m} -cap_margin {m}}} _sdr_rd]}} {{\n"
         "      # A caught repair error is not a successful candidate.  Even a\n"
