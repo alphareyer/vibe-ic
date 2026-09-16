@@ -561,18 +561,38 @@ def _term_in(term: str, lowered_text: str) -> bool:
                      + r"(?![a-z0-9])", lowered_text) is not None
 
 
-def _input_carries_subject(l_doc_code: str,
-                           project_dir: Optional[Path]
-                           ) -> Optional[Dict[str, Any]]:
-    """Evidence that NO input document carries this layer's subject, or None.
+#: Terms that corroborate a CONDITION's declared absence against the INPUT.
+#:
+#: R-0915-64. Separate from `_INPUT_SUBJECT_TERMS` on purpose: that table
+#: decides what a phase-1 SKELETON is emitted as, and adding a layer to it
+#: changes the emitted document. This one answers a different question for a
+#: different consumer — `flow_compliance_check._l_doc_declares_absence`, which
+#: must cite an INPUT-level fact before it stands a step down — and changes no
+#: emitted byte. Same discipline, though: every term appears in the layer's own
+#: `_extraction_hints_for()` text, and a test holds it there, so the table
+#: cannot drift away from what the layer says it is looking for.
+_DECLARATION_CORROBORATION_TERMS: Dict[str, Tuple[str, ...]] = {
+    # 'Look for scan / DFT / BIST / JTAG sections.'
+    # 'Look for ATPG / test mode / scan-enable sections.'
+    "L20": ("scan", "DFT", "BIST", "JTAG", "ATPG", "test mode"),
+}
 
-    Returns None — leaving the layer APPLICABLE — whenever the question cannot
-    be answered honestly: the layer is not registered, there is no project, or
-    the design staged no readable input document at all. An empty corpus is
-    not a design saying "I have no sign-off requirements"; it is a scan with
-    no denominator, and the repo already refuses those.
+
+def scan_input_for_terms(project_dir: Optional[Path],
+                         terms: Optional[Tuple[str, ...]],
+                         layer: str) -> Optional[Dict[str, Any]]:
+    """Evidence that NO input document carries any of `terms`, or None.
+
+    THE ONE SCANNER. Two consumers ask this question — the skeleton emitter
+    (R-0915-36) and the compliance declarer (R-0915-64) — and they ask it of
+    the same corpus with the same word-boundary rule, because a second scanner
+    is a second answer waiting to disagree with the first.
+
+    Returns None whenever the question cannot be answered honestly: no terms,
+    no project, no readable input document, or a document that would not read.
+    An empty corpus is not a design declaring an absence; it is a scan with no
+    denominator, and the repo already refuses those.
     """
-    terms = _INPUT_SUBJECT_TERMS.get(str(l_doc_code or "").upper())
     if not terms or project_dir is None:
         return None
     docs = input_documents(Path(project_dir))
@@ -606,13 +626,42 @@ def _input_carries_subject(l_doc_code: str,
         return None
     return {
         "kind": "input-declares-no-subject",
-        "layer": str(l_doc_code).upper(),
+        "layer": str(layer).upper(),
         "documents_scanned": scanned,
         "documents_scanned_count": len(scanned),
         "terms_searched": list(terms),
         "documents_matching": 0,
-        "decided_by": "phase1_post_process._input_carries_subject",
+        "decided_by": "phase1_post_process.scan_input_for_terms",
     }
+
+
+def _input_carries_subject(l_doc_code: str,
+                           project_dir: Optional[Path]
+                           ) -> Optional[Dict[str, Any]]:
+    """R-0915-36's question: is this LAYER's subject absent from the input?
+
+    Unchanged in behaviour — the table lookup it always did, over the one
+    scanner. Kept as its own name because `emit_l_doc_skeleton` and three
+    tests call it, and because "which layers are decided from the input" is a
+    different fact from "how the input is searched".
+    """
+    code = str(l_doc_code or "").upper()
+    return scan_input_for_terms(
+        project_dir, _INPUT_SUBJECT_TERMS.get(code), code)
+
+
+def declaration_corroboration(l_doc_code: str,
+                              project_dir: Optional[Path]
+                              ) -> Optional[Dict[str, Any]]:
+    """R-0915-64's question: does the INPUT corroborate a declared absence?
+
+    The declarer in `flow_compliance_check` calls THIS rather than reading a
+    generated document's default field values. Fail-closed by construction: a
+    layer with no registered term set answers None, and None runs the step.
+    """
+    code = str(l_doc_code or "").upper()
+    return scan_input_for_terms(
+        project_dir, _DECLARATION_CORROBORATION_TERMS.get(code), code)
 
 
 def emit_l_doc_skeleton(l_doc_code: str,
@@ -861,6 +910,12 @@ def _extraction_hints_for(l_doc_code: str) -> List[str]:
         ],
         "L20": [
             "Look for scan / DFT / BIST / JTAG sections.",
+            # The two terms the DFT steps are NAMED for. Step 11 is "DFT
+            # insertion (scan chain + ATPG + at-speed + BSDL)" and DT1-DT3 are
+            # ATPG steps, so a document discussing ATPG or a test mode is
+            # discussing this layer's subject. Written down here because
+            # `_DECLARATION_CORROBORATION_TERMS` is held to these hints.
+            "Look for ATPG / test mode / scan-enable sections.",
             "Capture chain count, length, frequency.",
         ],
         "L21": [

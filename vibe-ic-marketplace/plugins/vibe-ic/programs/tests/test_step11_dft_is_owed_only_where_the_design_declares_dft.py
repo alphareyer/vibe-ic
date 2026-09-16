@@ -85,6 +85,23 @@ def _step11():
 
 
 def _project(tmp_path, fields, *, write=True, body=None):
+    # R-0915-64 — A DESIGN THAT DECLARES NO DFT HAS INPUT DOCUMENTS THAT SAY
+    # NOTHING ABOUT DFT, and this fixture used to have no input at all. Since
+    # R-0915-64 the declarer requires the design's OWN INPUT to corroborate the
+    # L-doc (documents scanned, terms searched, zero hits), because a GENERATED
+    # skeleton's initialisers are not an input statement. An empty corpus is a
+    # scan with no denominator and declares nothing, so without this the
+    # fixture describes a project that cannot exist.
+    #
+    # ONLY THE FIXTURE MOVES. Every assertion below is untouched: these cases
+    # exist to prove the L-DOC half decides, and they still do — the corpus
+    # here is deliberately silent about DFT so the L20 fields remain the only
+    # thing that varies between them.
+    docs = tmp_path / "input" / "docs"
+    docs.mkdir(parents=True, exist_ok=True)
+    (docs / "L1_product_metadata.md").write_text(
+        "# Part\nA small core that multiplies two numbers.\n",
+        encoding="utf-8")
     gd = tmp_path / "phase1" / "generated_docs"
     gd.mkdir(parents=True, exist_ok=True)
     if write:
@@ -145,7 +162,8 @@ def test_a_design_declaring_no_DFT_stands_the_step_down(tmp_path):
     got = F._l_doc_declares_absence(
         proj, _step11()["condition"]["l_doc_declares"])
     assert got is not None
-    cited, detail = got
+    # R-0915-64 widened the return to (cited, detail, input-scan evidence).
+    cited, detail, _evidence = got
     assert cited == "phase1/generated_docs/L20_DFT_SCAN_TOPOLOGY.json"
     for key in ABSENT:
         assert key in detail, (key, detail)
@@ -157,7 +175,10 @@ def test_the_skip_is_not_silent_it_names_the_document(tmp_path):
     authored: the two need different actions from a reviewer."""
     F = _F()
     proj = _project(tmp_path, ABSENT)
-    cited, detail = F._l_doc_declares_absence(
+    # R-0915-64 widened the return to (cited, detail, input-scan evidence).
+    # Unpacking only; both assertions below are the ones this case has always
+    # made about the L-doc citation.
+    cited, detail, _evidence = F._l_doc_declares_absence(
         proj, _step11()["condition"]["l_doc_declares"])
     assert cited.endswith("L20_DFT_SCAN_TOPOLOGY.json")
     assert "dft_present=False" in detail
