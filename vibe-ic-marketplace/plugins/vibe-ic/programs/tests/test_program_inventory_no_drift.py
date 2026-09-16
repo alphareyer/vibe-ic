@@ -192,12 +192,12 @@ def test_a_source_mismatch_is_not_checked_rather_than_a_drift_verdict():
     forged = json.loads(json.dumps(committed))
     forged["enumerated_from"] = "working-tree"
     status, msgs = gen.compare_committed(inv, forged)
-    assert status == "NOT_MEASURED", (status, msgs)
+    assert status == "NOT_CHECKED", (status, msgs)
     assert "different populations" in msgs[0]
 
     # an absent declaration is a mismatch too, not a pass by omission
     forged.pop("enumerated_from")
-    assert gen.compare_committed(inv, forged)[0] == "NOT_MEASURED"
+    assert gen.compare_committed(inv, forged)[0] == "NOT_CHECKED"
 
     # and a genuine drift inside the SAME population is still a drift, not
     # NOT_CHECKED — the two outcomes must not collapse into one another.

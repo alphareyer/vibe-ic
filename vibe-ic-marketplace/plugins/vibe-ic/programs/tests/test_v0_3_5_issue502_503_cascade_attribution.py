@@ -36,9 +36,17 @@ def _steps():
     return yaml.safe_load(_FLOW.read_text())["steps"]
 
 
-def _res(sid, status, reasons=None, name="step", stage="s"):
+def _res(sid, status, reasons=None, name="step", stage="s",
+         reason_class=None):
+    """One step row. R-0915-85 — the cascade rules read the REASON, because
+    the word that used to carry it (`MISSING`) is gone: a declared output that
+    does not exist is `FAIL(missing_artefact)`. A bare FAIL here is a gate's
+    own defect and is correctly NOT converted by a waived ancestor."""
+    if reason_class is None and status == "FAIL":
+        reason_class = "missing_artefact"
     return FCC.StepResult(id=sid, name=name, stage=stage, status=status,
-                          reasons=list(reasons or []))
+                          reasons=list(reasons or []),
+                          reason_class=reason_class or "")
 
 
 # ── #502: waiver chain propagates over blocks_on ─────────────────────
@@ -150,14 +158,23 @@ def _main_track_ids(steps):
 
 
 def test_post_fail_missing_is_annotated_blocked():
-    # REAL shape: step 5 FAIL (first), step 6 FAIL, steps 7+ MISSING →
-    # every post-5 MISSING annotated blocked-by-upstream(5); status
-    # stays MISSING; summary count keyed by the FIRST fail only.
+    # REAL shape: step 5 FAIL (first), step 6 FAIL, steps 7+ with their
+    # declared output absent -> every post-5 one annotated
+    # blocked-by-upstream(5); status unchanged; summary keyed by the FIRST
+    # fail only.
+    #
+    # R-0915-85 — the two roles the shape needs are two REASONS now, because
+    # `MISSING` and `FAIL` became one word. Steps 5 and 6 are gate defects
+    # (reason_class "", the root); 7+ are FAIL(missing_artefact), the cascade
+    # targets. Spelled out rather than left to the helper's default, because
+    # WHICH row is the root is the whole subject of this test.
     steps = _steps()
     ids = _main_track_ids(steps)
-    results = [_res(5, "FAIL"), _res(6, "FAIL")]
+    results = [_res(5, "FAIL", reason_class=""),
+               _res(6, "FAIL", reason_class="")]
     downstream = [i for i in ids if i > 6][:5]
-    results += [_res(i, "FAIL") for i in downstream]
+    results += [_res(i, "FAIL", reason_class="missing_artefact")
+                for i in downstream]
     info = FCC._attribute_cascade_verdicts(results, steps, waivers={})
     blocked = [r for r in results if r.cascade_note]
     assert len(blocked) == len(downstream)
@@ -169,7 +186,12 @@ def test_post_fail_missing_is_annotated_blocked():
 
 def test_missing_before_first_fail_stays_bare():
     steps = _steps()
-    results = [_res(3, "FAIL"), _res(5, "FAIL"), _res(7, "FAIL")]
+    # R-0915-85 — 3 and 7 are steps whose declared output is absent
+    # (FAIL(missing_artefact), the cascade TARGETS); 5 is the gate defect that
+    # is the ROOT. See `test_post_fail_missing_is_annotated_blocked`.
+    results = [_res(3, "FAIL", reason_class="missing_artefact"),
+               _res(5, "FAIL", reason_class=""),
+               _res(7, "FAIL", reason_class="missing_artefact")]
     FCC._attribute_cascade_verdicts(results, steps, waivers={})
     assert results[0].cascade_note == ""      # before the cut point
     assert results[2].cascade_note == "blocked-by-upstream(5)"
@@ -178,8 +200,8 @@ def test_missing_before_first_fail_stays_bare():
 def test_chains_are_isolated():
     # a FAIL in the main chain must NOT annotate analog-chain MISSING.
     steps = _steps()
-    main_fail = _res(5, "FAIL")
-    analog_missing = _res("A6", "FAIL")
+    main_fail = _res(5, "FAIL", reason_class="")
+    analog_missing = _res("A6", "FAIL", reason_class="missing_artefact")
     FCC._attribute_cascade_verdicts([main_fail, analog_missing],
                                     steps, waivers={})
     assert analog_missing.cascade_note == ""
@@ -214,9 +236,14 @@ def test_declared_dependency_relation_is_small():
 
     pairs = set()
     for waived in ids:
-        results = [FCC.StepResult(id=i, name="", stage="",
-                                  status=("PASS_WITH_WAIVERS" if i == waived
-                                          else "FAIL"))
+        # R-0915-85 — every non-waived row here is a step whose declared
+        # output is absent, which is the shape the deferral relation is about:
+        # FAIL(missing_artefact). A bare FAIL is a gate's own defect and is
+        # correctly never deferred by a waived ancestor.
+        results = [FCC.StepResult(
+            id=i, name="", stage="",
+            status=("PASS_WITH_WAIVERS" if i == waived else "FAIL"),
+            reason_class=("" if i == waived else "missing_artefact"))
                    for i in ids]
         info = FCC._attribute_cascade_verdicts(
             results, steps, {waived: {"ticket": "T"}})

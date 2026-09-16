@@ -15558,10 +15558,23 @@ def _attribute_cascade_verdicts(
             if r is None:
                 continue
             if first_fail is None:
-                if r.status == _T.Verdict.FAIL.value:
+                # R-0915-85 — THE TWO ROLES ARE STILL TWO, and the reason is
+                # what keeps them apart now that one word carries both. The
+                # ROOT is a step whose own gate found a defect; the CASCADE
+                # TARGET is a step whose declared output was never produced.
+                # `MISSING` used to say the second and `FAIL` the first;
+                # collapsing both to `FAIL` without reading the reason let a
+                # missing-artefact row become the root and renamed every
+                # downstream attribution (measured: `blocked-by-upstream(23)`
+                # where the flow says `waived-ancestor-undeclared(13)`).
+                if (r.status == _T.Verdict.FAIL.value
+                        and r.reason_class
+                        != _T.ReasonClass.MISSING_ARTEFACT.value):
                     first_fail = sid
                 continue
-            if r.status == _T.Verdict.FAIL.value:
+            if (r.status == _T.Verdict.FAIL.value
+                    and r.reason_class
+                    == _T.ReasonClass.MISSING_ARTEFACT.value):
                 r.cascade_note = f"blocked-by-upstream({first_fail})"
                 r.reasons.append(
                     f"blocked-by-upstream(step {first_fail}): cascade of "
