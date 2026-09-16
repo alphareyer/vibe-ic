@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1318
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1318)
+- **Total programs (excluding helpers / shims):** 1319
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1319)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1309 |
+| `any` | 1310 |
 
 ## Alphabetical listing
 
@@ -91,6 +91,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `analog_hw_spice_correlation_check` | any | — | deterministic gate for HW-vs-SPICE correlation |
 | `analog_hw_tb_de10lite_budget_check` | any | — | DE10-Lite board-budget gate. |
 | `analog_incremental_decimator` | any | — | R-0915-70: the matched decimator for an INCREMENTAL converter, DERIVED from the loop's own recurrence. |
+| `analog_incremental_resolution` | any | — | what resolution an INCREMENTAL loop can actually reach, MEASURED on its own recurrence. |
 | `analog_interface_classify` | any | — | structural L9 top-interface classifier (ORGANIC #144-sibling, filed as #141). |
 | `analog_lef_gds_outline_check` | any | — | Codifies the EXTRACT-NEW spot-check in |
 | `analog_liberty_nonzero_delay_check` | any | — | deterministic Liberty non-degeneracy gate. |
@@ -1390,7 +1391,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1309 programs)
+### `any` (1310 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1457,6 +1458,7 @@ _(no programs in this group)_
 - `analog_hw_spice_correlation_check` — deterministic gate for HW-vs-SPICE correlation
 - `analog_hw_tb_de10lite_budget_check` — DE10-Lite board-budget gate.
 - `analog_incremental_decimator` — R-0915-70: the matched decimator for an INCREMENTAL converter, DERIVED from the loop's own recurrence.
+- `analog_incremental_resolution` — what resolution an INCREMENTAL loop can actually reach, MEASURED on its own recurrence.
 - `analog_interface_classify` — structural L9 top-interface classifier (ORGANIC #144-sibling, filed as #141).
 - `analog_lef_gds_outline_check` — Codifies the EXTRACT-NEW spot-check in
 - `analog_liberty_nonzero_delay_check` — deterministic Liberty non-degeneracy gate.
