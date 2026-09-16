@@ -165,6 +165,7 @@ import _yosys_stat as _ystat  # shared yosys `stat` parser (step 9 stats.json)
 import quartus_map_audit as _qma  # step 6 .map.rpt silent-failure scanner
 import _hardmacro_stage as _hms  # staged SRAM/IP macro discovery + blackbox
 import l20_dft_scan_topology_actionable_check as _l20_dft  # design-owned DFT contract
+import l_doc_consumer_contract as _ldoc  # shared L-doc loader (L20 declaration)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
@@ -18566,10 +18567,85 @@ def dft_scan_insertion_contract(project: Path) -> Tuple[bool, str]:
 # step that shares phase2/stage2/synth/ (e.g. step-9 netlist.v). The named
 # capability_flag makes the deferral capability-AWARE; skips_required_output
 # names EXACTLY the absent output this marker stands in for.
+# WAS a capability claim, and is not one any more (2026-09-16, lane icspm5,
+# R-0915-57). It used to carry `capability_flag: cap:post_dft_scan_optimization`
+# -- "the open-source container cannot re-optimise a scan netlist" -- which is
+# refuted forty lines below in this same function: step 12 runs
+#     yosys -p 'read_verilog <scan_netlist>; opt_clean -purge;
+#               write_verilog -noattr <post_dft_netlist>'
+# on every run that HAS a scan netlist. The capability is present and
+# exercised; what the three sites below actually record is that this RUN did
+# not produce the netlist -- yosys exited non-zero, yosys errored, or scan
+# insertion delivered nothing. Those are findings about the run, exactly as
+# CZT-10 established for the transition-ATPG stall arm, and a finding about the
+# run must not be spendable as a tool's absence.
+#
+# `flow_compliance_check`'s #675 strict promotion requires a REGISTERED
+# capability flag, so with no flag here step 12 now reads MISSING on all three
+# -- an unmet requirement, visible to the verdict, with no exit. The marker
+# still NAMES the absent output so a reader can see which one it is; naming is
+# not deferring.
 _POST_DFT_SKIP_OWN = {
-    "capability_flag": "cap:post_dft_scan_optimization",
     "skips_required_output": "phase2/stage2/synth/post_dft_netlist.v",
 }
+
+
+# The SAME marker minus the capability claim, for the one cause that is not a
+# capability gap at all: the DESIGN declared no DFT, so there is no scan chain
+# to re-optimise and no tool -- open-source or commercial -- was missing.
+#
+# MEASURED 2026-09-16 (lane icspm5) on SPM run32's shape at main bac74aff0.
+# `_POST_DFT_SKIP_OWN` was written on BOTH causes, so a design-declared
+# absence minted `cap:post_dft_scan_optimization`; `flow_compliance_check`
+# read that registered flag through the #675 strict sibling promotion, set
+# `self_skip_disclosed`, found step id 12 in
+# `_OPEN_SOURCE_CONTAINER_BLOCKED_STEPS`, and published the IC's headline as
+# PASS_WITH_OPEN_SOURCE_CONSTRAINTS deferring "Post-DFT optimisation (Design
+# Compiler + DFT)". A commercial tool was named as the blocker for work the
+# design never asked for.
+#
+# `gate_reason: l20_dft_contract` is the SAME key step 11's own
+# `dft_atpg_not_run.json` already writes for this identical cause, so the two
+# markers now agree about why the DFT steps stood down, and the step-12 marker
+# still OWNS its output so it cannot mask a different step in the shared
+# phase2/stage2/synth/ directory.
+_POST_DFT_SKIP_DECLARED = {
+    "gate_reason": "l20_dft_contract",
+    "skips_required_output": "phase2/stage2/synth/post_dft_netlist.v",
+}
+
+#: The four L20 fields whose simultaneous absence IS the design's declaration
+#: that it carries no DFT. Byte-for-byte the `all_absent` clause that steps 11
+#: and 12 carry in `flow/phase1_phase2_phase3.yaml`, so the runner's marker and
+#: the flow's condition can never disagree about which designs declared none.
+#: `test_step12_declared_absence_is_not_a_capability_gap.py` asserts the two
+#: stay identical.
+_L20_DFT_ABSENT_FIELDS = {"dft_present": False, "scan_chains": [],
+                          "bist_mbist": [], "jtag_tap": None}
+
+
+def l20_declares_no_dft(project: Path) -> bool:
+    """Has the DESIGN's own L20 declared every DFT structure absent?
+
+    CONSERVATIVE IN THE SAME DIRECTION AS THE FLOW'S PREDICATE, and for the
+    same reason: absence of a declaration is not a declaration of absence. A
+    missing L20, one that will not parse, a field that is not there, or a
+    field whose value is not the declared-absent one all return False -- and
+    False keeps the honest capability disclosure, which is the answer that
+    costs the run something. Only an affirmative, complete declaration drops
+    the capability claim.
+    """
+    try:
+        _path, doc = _ldoc.load_l_doc(project, "L20")
+    except Exception:  # noqa: BLE001 -- an unreadable document declares nothing
+        return False
+    if _path is None or not isinstance(doc, dict):
+        return False
+    fields = _ldoc.l_doc_fields(doc)
+    if not isinstance(fields, dict):
+        return False
+    return all(k in fields and fields[k] == v
+               for k, v in _L20_DFT_ABSENT_FIELDS.items())
 
 SCAN_CHAIN_JSON_REL = "reports/phase2/dft/scan_chain.json"
 
@@ -20034,7 +20110,28 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                                f"post-DFT opt error: {exc}", _POST_DFT_SKIP_OWN)
             results.append(StepResult("post_dft_opt", "SKIP", time.time() - t0,
                            f"post-DFT opt errored ({exc}) → disclosed-skip"))
+    elif l20_declares_no_dft(project):
+        # NOT a capability gap. The design declared no DFT, so step 11 stood
+        # down on its own L20 contract and there is no scan chain in
+        # existence to re-optimise. Naming a missing capability here is what
+        # bought SPM run32 a PASS_WITH_OPEN_SOURCE_CONSTRAINTS headline for a
+        # commercial tool this flow has no path to; see
+        # `_POST_DFT_SKIP_DECLARED`.
+        _dft_disclose_skip(
+            synth_dir / "post_dft_not_run.json",
+            "no scan_netlist.v because the DESIGN declares no DFT: L20 records "
+            "dft_present=false, scan_chains=[], bist_mbist=[], jtag_tap=null, "
+            "so post-DFT optimization has nothing to optimise. This is the "
+            "design's own declaration, not a capability the toolchain lacks.",
+            _POST_DFT_SKIP_DECLARED)
+        results.append(StepResult(
+            "post_dft_opt", "SKIP", time.time() - t0,
+            "design declares no DFT (L20) → post-DFT design-declared N/A"))
     else:
+        # DFT was authorised, or the declaration is absent/unreadable rather
+        # than negative, and a scan netlist still did not appear. That IS a
+        # gap in what this run could produce, and it keeps the honest
+        # capability disclosure.
         _dft_disclose_skip(synth_dir / "post_dft_not_run.json",
                            "no scan_netlist.v (DFT was disclosed-skipped) — "
                            "post-DFT optimization has no scan netlist to optimise",

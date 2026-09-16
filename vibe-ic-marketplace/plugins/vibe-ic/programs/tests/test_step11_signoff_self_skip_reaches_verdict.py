@@ -37,6 +37,35 @@ import flow_compliance_check as fcc  # noqa: E402
 
 _TABLE = fcc._OPEN_SOURCE_CONTAINER_BLOCKED_STEPS
 
+# 2026-09-16 (lane icspm5, R-0915-57) — STEPS 11 / 12 / 13 LEFT `_TABLE`.
+#
+# This module's claim is unchanged and is the reason the module exists: a
+# disclosed capability-gap skip on a SIGN-OFF-BAR step must REACH the Overall
+# verdict. What changed is where step 11 lands once it gets there.
+#
+# The three DFT keys named commercial tools — Tessent Scan / DFTMAX, Design
+# Compiler, Formality / Conformal — as the reason the flow could not close
+# steps 11-13. The open-source paths are in the container and are wired in the
+# shipped flow: Fault ATPG + OpenROAD `dft` (11), yosys, run by
+# `design_one_shot_runner` itself (12), yosys `equiv_*` via `lec_run` (13). The
+# owner's ruling is that a false open-source reprieve is not a tier, so the
+# keys are gone — the SAME move `2a9d21368d` (#1974) already made for key 5
+# ("SymbiYosys IS in container"), which this file's own comment below records.
+#
+# Removing a key removed TWO behaviours, and only one should have gone:
+# membership made a disclosed self-skip VISIBLE (it joined `ok` like `missing`)
+# and PROMOTABLE (out to PASS_WITH_OPEN_SOURCE_CONSTRAINTS). The ruling
+# withdraws the promotion; dropping the visibility as well would have made a
+# real DFT gap cost-free, which is the relaxing direction. So
+# `_DFT_SIGNOFF_WITHDRAWN_STEPS` keeps steps 11-13 in `oss_blocked_skipped`
+# with no exit: the step is still counted, still named, still
+# `review_required`, and the run is now FAIL instead of a deferral.
+#
+# Every assertion below therefore keeps its DIRECTION. Only the expected
+# verdict for a withdrawn step moves, from PASS_WITH_OPEN_SOURCE_CONSTRAINTS
+# (deferred) to FAIL (visible, unpromotable).
+_WITHDRAWN = fcc._DFT_SIGNOFF_WITHDRAWN_STEPS
+
 # A minimal stage-3 flow: the two PASS_WITH_OPEN_SOURCE_CONSTRAINTS
 # prerequisites (steps 6 and 36) plus one step under test. Everything is
 # stage3 so `--stage 3` also switches the P0 structural umbrella off, keeping
@@ -108,15 +137,21 @@ def _overall(out: str) -> str:
 # The defect
 # ---------------------------------------------------------------------------
 def test_signoff_bar_self_skip_is_not_a_clean_pass(tmp_path):
-    """Step 11 is listed in `_OPEN_SOURCE_CONTAINER_BLOCKED_STEPS`. A
-    SKIPPED-CONDITION on it must not leave the run reported as a bare PASS."""
+    """Step 11 is a sign-off bar. A SKIPPED-CONDITION on it must not leave the
+    run reported as a bare PASS.
+
+    Since R-0915-57 it is FAIL rather than a deferral: step 11's open-source
+    path (Fault ATPG + OpenROAD `dft`) is in the container, so a disclosed gap
+    there is a finding about the run and has no commercial excuse to spend."""
     proj, flow = _mk(tmp_path, 11)
     r = _run(proj, flow)
     assert "SKIPPED-CONDITION" in r.stdout, r.stdout
-    assert _overall(r.stdout) == "PASS_WITH_OPEN_SOURCE_CONSTRAINTS", r.stdout
-    # named, with the review flag the tier exists to carry
+    assert _overall(r.stdout) == "FAIL", r.stdout
+    # still named, still carrying the review flag
     assert "Step 11" in r.stdout
-    assert "DEFERRED" in r.stdout
+    assert "SIGN-OFF step(s) SELF-SKIPPED" in r.stdout, r.stdout
+    assert "no commercial tool" in r.stdout, (
+        "the reader must be told the open-source path exists", r.stdout)
 
 
 def test_signoff_bar_self_skip_stays_in_the_required_denominator(tmp_path):
@@ -128,18 +163,22 @@ def test_signoff_bar_self_skip_stays_in_the_required_denominator(tmp_path):
     assert "(2/3 executed PASS" in r.stdout, r.stdout
 
 
-def test_deferral_is_recorded_in_the_audit_json(tmp_path):
+def test_the_self_skip_is_recorded_in_the_audit_json(tmp_path):
+    """Still recorded by step id, still review_required — and now with NO
+    deferral entry, because a withdrawn step has nothing to defer to."""
     proj, flow = _mk(tmp_path, 11)
     r = _run(proj, flow)
-    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.returncode == 1, r.stdout + r.stderr
     audit = json.loads(
         (proj / "reports/audit/phase23_completion_audit.json").read_text())
-    assert audit["verdict"] == "PASS_WITH_OPEN_SOURCE_CONSTRAINTS"
+    assert audit["verdict"] == "FAIL"
     skipped = audit["open_source_blocked_self_skipped_steps"]
     assert [e["step_id"] for e in skipped] == [11]
     assert skipped[0]["review_required"] is True
-    assert any(d["step_id"] == 11 and d["review_required"] is True
-               for d in audit["open_source_constraints_deferrals"])
+    assert "no commercial tool" in skipped[0]["commercial_tool_required"]
+    assert audit["open_source_constraints_deferrals"] == [], (
+        "a withdrawn step must not produce a deferral row",
+        audit["open_source_constraints_deferrals"])
 
 
 #: The table's DIGITAL step ids — the population this arm is keyed on, DERIVED
@@ -249,7 +288,7 @@ def test_inapplicable_signoff_step_stays_cost_free(tmp_path, sid):
     A step whose applicability CONDITION is unmet is genuinely inapplicable
     and must keep costing nothing.
     """
-    assert sid in _TABLE
+    assert sid in _TABLE or sid in _WITHDRAWN, sid
     proj, flow = _mk(tmp_path, sid, flow_tmpl=_FLOW_CONDITION_NA)
     r = _run(proj, flow)
     assert "SKIPPED-CONDITION" in r.stdout, r.stdout
@@ -266,13 +305,24 @@ def test_clean_run_with_no_skip_is_still_plain_pass(tmp_path):
     assert r.returncode == 0
 
 
-def test_promotion_still_exits_zero_so_ci_gating_is_unchanged(tmp_path):
+def test_promotion_still_exits_zero_for_a_step_still_in_the_table(tmp_path):
     """DIRECTION-1 GUARD — PASS_WITH_OPEN_SOURCE_CONSTRAINTS is a recognised
-    tier that exits 0. Routing the skip through it must not start failing CI
-    for projects that were passing."""
+    tier that exits 0, and R-0915-57 does not touch the tier. Measured on a
+    step that is STILL in the table, since step 11 no longer is."""
+    sid = next(k for k in _OSS_BLOCKED_DIGITAL_STEPS)
+    proj, flow = _mk(tmp_path, sid)
+    r = _run(proj, flow)
+    assert _overall(r.stdout) == "PASS_WITH_OPEN_SOURCE_CONSTRAINTS", r.stdout
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_a_withdrawn_step_exits_nonzero_because_it_has_no_tier(tmp_path):
+    """The other half of the guard above, and the point of the ruling: a
+    withdrawn step's disclosed gap reaches the verdict and stays there."""
     proj, flow = _mk(tmp_path, 11)
     r = _run(proj, flow)
-    assert r.returncode == 0, r.stdout + r.stderr
+    assert _overall(r.stdout) == "FAIL", r.stdout
+    assert r.returncode == 1, r.stdout + r.stderr
 
 
 def test_lenient_mode_tolerates_the_skip_exactly_like_missing(tmp_path):

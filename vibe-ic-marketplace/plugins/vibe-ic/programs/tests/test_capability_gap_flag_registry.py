@@ -101,10 +101,22 @@ import flow_compliance_check as fcc  # noqa: E402
 _RETIRED = "cap:sdf_annotated_gatelevel_sim"
 # A flag no producer has ever emitted: the "next marker" vector.
 _FORGED = "cap:invented_by_the_marker"
-# A flag the platform DOES declare open.
-_REGISTERED = "cap:post_dft_scan_optimization"
+# A flag the platform DOES declare open. It is an EXEMPLAR: these cases prove
+# the registry MECHANISM (a registered flag with ownership defers; a forged or
+# retired one does not), and any registered flag+output pair serves.
+#
+# It used to be `cap:post_dft_scan_optimization` bound to
+# "phase2/stage2/synth/post_dft_netlist.v". That flag was REMOVED from the
+# registry on 2026-09-16 (lane icspm5, R-0915-57) because the claim behind it
+# was false -- `design_one_shot_runner` re-optimises a scan netlist with yosys
+# on every run that has one, so the open-source container was never missing
+# that capability. The exemplar therefore moves to a pair that is still
+# registered; every assertion below is unchanged, because none of them was
+# ever about post-DFT optimisation in particular.
+_REGISTERED = "cap:atpg_signoff_coverage"
 
-_STEP12_OUT = "phase2/stage2/synth/post_dft_netlist.v"
+#: The exemplar's bound output, paired with `_REGISTERED` above.
+_STEP12_OUT = "phase2/stage2/dft/coverage.json"
 _STEP29_OUTS = ["phase3/stage3/sim_postlayout/results.log",
                 "phase3/stage3/sim_postlayout/pass.flag"]
 #: Step 31 — Physical Verification (DRC + LVS + ERC), an ALL-of required_outputs
@@ -177,8 +189,8 @@ def test_undeclared_flag_makes_the_whole_gate_exit_nonzero(tmp_path):
                           "--strict"])
 
     ok_proj = tmp_path / "declared"
-    _marker(ok_proj, "phase2/stage2/synth", _REGISTERED, _STEP12_OUT,
-            name="post_dft_not_run.json")
+    _marker(ok_proj, "phase2/stage2/dft", _REGISTERED, _STEP12_OUT,
+            name="atpg_not_run.json")
     rc_ok = fcc.main([str(ok_proj), "--flow-def", str(flow_def), "--strict"])
 
     assert (rc_forged, rc_ok) == (1, 0)
@@ -327,8 +339,8 @@ def test_every_producer_binding_is_honoured(tmp_path):
     Sourced from `design_one_shot_runner` / `phase3_one_shot_runner`, so a
     binding that drifts away from its producer turns this red."""
     cases = [
-        ("cap:post_dft_scan_optimization", "phase2/stage2/synth",
-         [_STEP12_OUT]),
+        # ("cap:post_dft_scan_optimization", …) — REMOVED with the registry
+        # entry on 2026-09-16 (lane icspm5, R-0915-57); no producer emits it.
         ("cap:at_speed_timing_graded_atpg", "reports/phase2/dft",
          ["reports/phase2/dft/transition_coverage.json"]),
         ("cap:at_speed_timing_graded_atpg", "reports/phase2/dft",
@@ -413,8 +425,8 @@ def test_the_registry_is_not_a_rubber_stamp():
 # ===========================================================================
 def test_guard_a_declared_flag_with_ownership_still_defers(tmp_path):
     """The mechanism the #675-strict promoter exists for is untouched."""
-    _marker(tmp_path, "phase2/stage2/synth", _REGISTERED, _STEP12_OUT,
-            name="post_dft_not_run.json")
+    _marker(tmp_path, "phase2/stage2/dft", _REGISTERED, _STEP12_OUT,
+            name="atpg_not_run.json")
     hint = fcc._declared_sibling_self_skip_for_missing(tmp_path, [_STEP12_OUT])
     assert hint and _REGISTERED in hint
 
@@ -436,8 +448,8 @@ def test_guard_declared_flag_owning_a_different_output_is_still_refused(
         tmp_path):
     """Ownership is still checked independently of the flag: a REGISTERED flag
     on a marker naming someone else's output must not mask this step."""
-    _marker(tmp_path, "phase2/stage2/synth", _REGISTERED,
-            "phase2/stage2/synth/netlist.v", name="post_dft_not_run.json")
+    _marker(tmp_path, "phase2/stage2/dft", _REGISTERED,
+            "phase2/stage2/dft/scan_netlist.v", name="atpg_not_run.json")
     assert fcc._declared_sibling_self_skip_for_missing(
         tmp_path, [_STEP12_OUT]) is None
 
