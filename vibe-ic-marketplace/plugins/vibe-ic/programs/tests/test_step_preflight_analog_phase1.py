@@ -246,11 +246,19 @@ def test_phase1_a_refusal_is_never_green_end_to_end(tmp_path):
     """The row must also SURVIVE the runner's own verdict ladder. Measured at
     855504f5: an empty project reported `PASS_WITH_WAIVERS` and exit 0."""
     import phase1_one_shot_runner as P1
-    row = P1.StepResult("phase1_ingest_render", SP.REFUSAL_STATUS, 0.0, "refused")
-    assert P1._aggregate_verdict([row]) == "FAIL"
-    ok = P1.StepResult("phase1_human_docs", "PASS_WITH_WAIVERS", 0.0, "no MD")
+    # R-0915-85 — the refusal row carries the REASON the pre-flight gives it,
+    # exactly as `_preflight_refusal` builds it; a NOT_MEASURED with no reason
+    # is refused at the row, which is the shape this test must exercise.
+    row = P1.StepResult("phase1_ingest_render", SP.REFUSAL_STATUS, 0.0,
+                        "refused", reason_class=SP.REFUSAL_REASON_CLASS)
+    # …and it is NOT_MEASURED, not FAIL: nothing about the design failed, the
+    # step was never given an input it could read. What matters, and what this
+    # file exists for, is that it is not GREEN.
+    assert P1._aggregate_verdict([row]) == "NOT_MEASURED"
+    ok = P1.StepResult("phase1_human_docs", "PASS_WITH_WAIVERS", 0.0, "no MD",
+                       attribution="the human documentation author")
     assert P1._aggregate_verdict([ok]) == "PASS_WITH_WAIVERS"   # reverse case
-    assert P1._aggregate_verdict([ok, row]) == "FAIL"
+    assert P1._aggregate_verdict([ok, row]) == "NOT_MEASURED"
 
 
 # --------------------------------------------------------------------------- #
@@ -260,14 +268,16 @@ def test_blocked_is_never_green_in_the_two_newly_wired_runners():
     import analog_one_shot_runner as A
     import phase1_one_shot_runner as P1
 
-    a_row = A.StepResult("A1_spec_extract", "blk_a", SP.REFUSAL_STATUS, 0.0, "x")
-    assert A._aggregate_verdict([a_row]) == "FAIL"
+    a_row = A.StepResult("A1_spec_extract", "blk_a", SP.REFUSAL_STATUS, 0.0,
+                         "x", reason_class=SP.REFUSAL_REASON_CLASS)
+    assert A._aggregate_verdict([a_row]) == "NOT_MEASURED"
     a_ok = A.StepResult("A1_spec_extract", "blk_a", "PASS", 0.0, "x")
     assert A._aggregate_verdict([a_ok]) == "PASS"               # reverse case
-    assert A._aggregate_verdict([a_ok, a_row]) == "FAIL"
+    assert A._aggregate_verdict([a_ok, a_row]) == "NOT_MEASURED"
 
-    p_row = P1.StepResult("x", SP.REFUSAL_STATUS, 0.0, "x")
-    assert P1._aggregate_verdict([p_row]) == "FAIL"
+    p_row = P1.StepResult("x", SP.REFUSAL_STATUS, 0.0, "x",
+                          reason_class=SP.REFUSAL_REASON_CLASS)
+    assert P1._aggregate_verdict([p_row]) == "NOT_MEASURED"
     assert P1._aggregate_verdict([P1.StepResult("y", "PASS", 0.0, "x")]) == "PASS"
 
 
@@ -276,13 +286,31 @@ def test_the_analog_ladder_keeps_every_tier_it_had(tmp_path):
     reachable, or this would be a rewrite wearing a refactor's clothes."""
     import analog_one_shot_runner as A
 
-    def row(status):
-        return A.StepResult("A1_spec_extract", "blk_a", status, 0.0, "x")
+    def row(status, **extra):
+        return A.StepResult("A1_spec_extract", "blk_a", status, 0.0, "x",
+                            **extra)
 
     assert A._aggregate_verdict([row("FAIL")]) == "FAIL"
-    assert A._aggregate_verdict([row("NOT_MEASURED")]) == "NOT_MEASURED"
-    assert A._aggregate_verdict([row("PASS_WITH_WAIVERS")]) == "PASS_WITH_WAIVERS"
-    assert A._aggregate_verdict([row("PASS_WITH_WAIVERS"), row("PASS")]) == "PASS_WITH_WAIVERS"
+    assert A._aggregate_verdict(
+        [row("NOT_MEASURED", reason_class="not_executed")]) == "NOT_MEASURED"
+    # A run whose ONLY row is N/A has an empty numerator, and an empty
+    # numerator is not a pass: `run_verdict` answers NOT_MEASURED. N/A itself
+    # still contributes nothing — one applicable step beside forty N/A ones is
+    # exactly as good as its one step, which the next two lines show.
+    assert A._aggregate_verdict(
+        [row("NOT_APPLICABLE",
+             declared_by="the input declares no analog block")]
+    ) == "NOT_MEASURED"
+    assert A._aggregate_verdict(
+        [row("NOT_APPLICABLE",
+             declared_by="the input declares no analog block"),
+         row("PASS")]) == "PASS"
+    assert A._aggregate_verdict(
+        [row("PASS_WITH_WAIVERS", attribution="the sign-off engineer")]
+    ) == "PASS_WITH_WAIVERS"
+    assert A._aggregate_verdict(
+        [row("PASS_WITH_WAIVERS", attribution="the sign-off engineer"),
+         row("PASS")]) == "PASS_WITH_WAIVERS"
     assert A._aggregate_verdict([row("PASS")]) == "PASS"
 
 
