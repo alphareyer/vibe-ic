@@ -1,0 +1,4 @@
+box 40 40 70 80
+feedback add "Illegal overlap between nwell and pdiff (types do not connect)" pale
+box 120 24 140 48
+feedback add "Illegal overlap between ndiff and pdiff (types do not connect)" pale

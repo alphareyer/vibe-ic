@@ -1196,6 +1196,17 @@ run "every program is reachable"        "$ROOT" python3 "$RUNTIME_ROOT/vibe-ic-m
 # after already publishing a wrong value. One vocabulary now (`_prose_polarity`),
 # and this finds the next extractor that does not consult it.
 run "prose extractors read polarity"    "$ROOT" python3 "$PG/prose_polarity_consulted_check.py"
+# R-0915-86(3) — the same shape one layer UP: the prose extractor above reads a
+# SENTENCE, and this reads what a TOOL said. Eight judgements were wrong the same
+# way in two days (DRT-1010 as a route abort; an "SDF-annotated" sim with 0
+# delays annotated; a supervisor watching the docker-exec client; a DRV census
+# with no parasitics reporting 0; INCONCLUSIVE booked SKIP; a tone on the bin an
+# SNDR removes as signal; two grammars named as prose extractors; an absent
+# feedback dump and an empty one as one number) — every one an INSTRUMENT, none
+# of them visible on a fixture its own author built, every one visible on a PAIR.
+# This refuses an instrument that reads a tool's own message grammar and is
+# neither CALIBRATED against a real pair nor declared with an owner.
+run "instruments are calibrated"        "$ROOT" python3 "$PG/instrument_calibration.py" --ratchet --root "$ROOT/vibe-ic-marketplace/plugins/vibe-ic"
 # The same shape one layer down: a program that parses N sources into records
 # and folds them with `dict.update` lets a source that says NOTHING about a key
 # overwrite one that said something — and which one wins is decided by the order
