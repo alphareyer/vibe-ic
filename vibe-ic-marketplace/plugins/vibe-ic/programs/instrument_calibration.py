@@ -1506,18 +1506,21 @@ def _ratchet_verdict(population: List[str], root: Path) -> int:
 
 # ══════════════════════════════════════════════════════════════════════════
 
-def _population_lines(root: Path, cals: Optional[Dict[str, Calibration]] = None
-                      ) -> None:
+def _population_lines(root: Path, cals: Optional[Dict[str, Calibration]] = None,
+                      population: Optional[List[str]] = None) -> None:
     """WHAT THIS VERDICT WAS TAKEN OVER, printed before it.
 
     A verdict about a population that never says how big the population was is
     a claim nobody can check — and `--root` is only meaningful if something
     actually reads it, so the tool-grammar scan is counted here in BOTH modes.
     """
-    try:
-        scanned = len(scan(root))
-    except Exception:
-        scanned = 0
+    if population is not None:
+        scanned = len(population)          # already walked; never walk twice
+    else:
+        try:
+            scanned = len(scan(root))
+        except Exception:
+            scanned = 0
     cals = cals if cals is not None else {}
     bad = sum(1 for c in cals.values() if c.state != CALIBRATED)
     print(f"  instruments registered:         {len(INSTRUMENTS)}")
@@ -1559,7 +1562,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as exc:                       # pragma: no cover
             print(f"[ERROR] could not scan {root}: {exc}")
             return 2
-        _population_lines(root)
+        _population_lines(root, population=population)
         rc = _ratchet_verdict(population, root)
         if a.json_out:
             _atomic_write_json(a.json_out, {

@@ -752,11 +752,14 @@ def test_nothing_but_check_can_put_a_name_in_the_reentrancy_guard():
 
 # ── the predicate's own measurement, re-derived ───────────────────────────
 
-def _clause_population(pred):
-    """Every `programs/*.py` function for which `pred(fn, grammar_names)` holds."""
-    out = []
-    prog = PROG
-    for p in sorted(prog.glob("*.py")):
+def _clause_populations():
+    """All three clauses over ONE parse of each file.
+
+    Parsed once, not once per clause: the first draft walked the 1471-file tree
+    four times and cost 40 s of the suite for an answer three passes already had.
+    """
+    grammar, record, status = [], [], []
+    for p in sorted(PROG.glob("*.py")):
         if p.stem.startswith("test_") or p.stem == "instrument_calibration":
             continue
         try:
@@ -765,9 +768,16 @@ def _clause_population(pred):
             continue
         gn = C._grammar_names(tree)
         for n in ast.walk(tree):
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and pred(n, gn):
-                out.append(f"{p.stem}::{n.name}")
-    return out
+            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            name = f"{p.stem}::{n.name}"
+            if C._matches_grammar(n, gn):
+                grammar.append(name)
+            if C._reads_record_verdict(n):
+                record.append(name)
+            if C._emits_status(n):
+                status.append(name)
+    return grammar, record, status
 
 
 def test_the_predicates_own_measurement_is_re_derived():
@@ -780,9 +790,7 @@ def test_the_predicates_own_measurement_is_re_derived():
     order of magnitude larger, and that is why the population is the CHANNEL and
     not the literal reading of "reads a tool artefact AND writes a status".
     """
-    grammar = _clause_population(lambda n, gn: C._matches_grammar(n, gn))
-    record = _clause_population(lambda n, gn: C._reads_record_verdict(n))
-    status = _clause_population(lambda n, gn: C._emits_status(n))
+    grammar, record, status = _clause_populations()
     both = [n for n in grammar if n in set(status)]
     assert len(grammar) < 60, len(grammar)
     assert len(record) > 10 * len(grammar), (len(record), len(grammar))
