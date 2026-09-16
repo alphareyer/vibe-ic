@@ -126,6 +126,11 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+# vibe-ic#1082: a declared report destination is written through the
+# atomic writer, so a crash mid-write leaves the previous report or none,
+# never a truncated JSON a later reader parses as a verdict.
+from _atomic_artefact import write_json as _atomic_write_json  # noqa: E402
 from typing import Any, Dict, List, Optional
 
 import _step_verdict_table as _svt
@@ -260,6 +265,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    # BOTH ARE REQUIRED AND THEY ARE NOT ALTERNATIVES: the snapshot is what is
+    # judged, --tree is the checkout whose programs judge it. The both-given
+    # case is therefore decided here, not refused -- except where the two
+    # names COLLIDE. A --tree that is the snapshot, or contains it, or sits
+    # inside it, would have the snapshot re-judged by its own frozen programs
+    # (or the judge read from the thing being judged), and the replay would
+    # report a verdict about a comparison that never happened.
+    if args.snapshot and args.tree:
+        _snap, _judge = args.snapshot.resolve(), args.tree.resolve()
+        if _snap == _judge or _judge in _snap.parents or _snap in _judge.parents:
+            print("AUDIT REPLAY REFUSED: the snapshot (%s) and --tree (%s) "
+                  "name the same or nested directories; the judging checkout "
+                  "must be separate from the snapshot it judges"
+                  % (args.snapshot, args.tree), file=_sys.stderr)
+            return 2
     report: Dict[str, Any] = {
         "schema_version": 1,
         "program": "audit_replay",
@@ -324,8 +344,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                      args.baseline))
             if args.json_out:
                 args.json_out.parent.mkdir(parents=True, exist_ok=True)
-                args.json_out.write_text(
-                    json.dumps(report, indent=2), encoding="utf-8")
+                _atomic_write_json(args.json_out, report, indent=2)
                 print("wrote %s" % args.json_out)
             return 0
 
@@ -366,8 +385,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.json_out:
         args.json_out.parent.mkdir(parents=True, exist_ok=True)
-        args.json_out.write_text(json.dumps(report, indent=2, sort_keys=False),
-                                 encoding="utf-8")
+        _atomic_write_json(args.json_out, report, indent=2, sort_keys=False)
         print("wrote %s" % args.json_out)
     return rc
 

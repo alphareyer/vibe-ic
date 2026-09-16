@@ -366,3 +366,36 @@ def test_no_timeout_kill_or_deadline_appears_in_this_program():
     for banned in ("timeout=", "subprocess.TimeoutExpired", ".kill(",
                    ".terminate(", "signal.alarm", "SIGKILL"):
         assert banned not in body, "%r must not appear in audit_replay" % banned
+
+
+# ── snapshot and --tree given together: decided, and refused only on collision ──
+
+def test_a_tree_that_is_the_snapshot_is_refused(tmp_path, capsys):
+    """RED on main: nothing decided the both-given case, so a --tree pointed at
+    the snapshot re-judged it with its own frozen programs and reported that
+    as a replay."""
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    rc = R.main([str(snap), "--tree", str(snap), "--workdir", str(tmp_path / "w")])
+    assert rc == 2
+    assert "same or nested" in capsys.readouterr().err
+
+
+def test_a_tree_nested_inside_the_snapshot_is_refused(tmp_path, capsys):
+    snap = tmp_path / "snap"
+    (snap / "checkout").mkdir(parents=True)
+    rc = R.main([str(snap), "--tree", str(snap / "checkout"),
+                 "--workdir", str(tmp_path / "w")])
+    assert rc == 2
+    assert "same or nested" in capsys.readouterr().err
+
+
+def test_separate_snapshot_and_tree_are_not_refused_by_this_check(tmp_path, capsys):
+    """CONTROL: the ordinary invocation (real_ic_arm.sh:298 passes both, always)
+    must not be caught by the collision refusal."""
+    snap = tmp_path / "snap"
+    tree = tmp_path / "tree"
+    snap.mkdir()
+    tree.mkdir()
+    R.main([str(snap), "--tree", str(tree), "--workdir", str(tmp_path / "w")])
+    assert "same or nested" not in capsys.readouterr().err
