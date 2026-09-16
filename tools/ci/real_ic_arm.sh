@@ -99,9 +99,34 @@ PROGRAMS="$TREE/vibe-ic-marketplace/plugins/vibe-ic/programs"
   exit 2
 }
 
-# The image pin is the PLUGIN's, read from the candidate tree itself. A pin kept
-# in this script would be a second copy of a number that moves.
+# THE PIN IS THE PLUGIN'S, AND SO IS THE RESOLUTION.
+#
+# `_eda_pin.IMAGE_DIGEST` is the IDENTITY a verdict can be replayed against, and
+# it is what `--require-image` compares. It is NOT a runnable reference: the
+# module says so itself (`is_bare_image_id` -> True, `IMAGE_ID_NOT_A_REFERENCE`),
+# and a `docker run sha256:89a8...` gets "No such image" from the daemon even on
+# a host that demonstrably holds those bytes. MEASURED: the third arm's first
+# landing run REFUSED for exactly that, on 2026-09-16.
+#
+# `_eda_pin.pinned_image_present()` is the resolver — it answers "does THIS host
+# hold an image whose registry digest is the pin, under ANY repository name" and
+# returns the runnable `<repo>@<digest>`. Calling it, rather than re-deriving a
+# reference here, is the whole point: this script must own no image logic, and
+# the one place that logic lives already handles the mirror-vs-ghcr name, the
+# dangling pulled-by-digest image (`docker image ls -a`), and the difference
+# between "absent" and "could not be asked".
 PIN=$(cd "$PROGRAMS" && python3 -c 'import _eda_pin; print(_eda_pin.IMAGE_DIGEST)' 2>/dev/null || true)
+resolve_runnable_image() {
+  (cd "$PROGRAMS" && python3 -c '
+import sys
+import _eda_pin
+ref, why = _eda_pin.pinned_image_present()
+if ref is None:
+    sys.stderr.write(why + "\n")
+    raise SystemExit(2)
+print(ref)
+')
+}
 CONTAINER=${EDA_CONTAINER:-real-ic-arm-eda}
 
 # ONLY the default container is auto-created. An EDA_CONTAINER the caller NAMED
@@ -113,15 +138,24 @@ if [ -z "${EDA_CONTAINER:-}" ] && ! docker inspect "$CONTAINER" >/dev/null 2>&1;
     echo "[real_ic_arm] REFUSED: no container $CONTAINER and the tree states no image pin" >&2
     exit 2
   fi
+  # A host that does not hold the pinned bytes REFUSES BY NAME and creates
+  # nothing. "Could not resolve the pin" is not "run it anyway with whatever is
+  # here": the resolver has no fallback to :latest or to the newest local tag,
+  # deliberately, and neither does this.
+  if ! RUNNABLE=$(resolve_runnable_image 2>"$OUTDIR/.pin_refusal"); then
+    echo "[real_ic_arm] REFUSED: the pinned image is not runnable on this host —" \
+         "$(cat "$OUTDIR/.pin_refusal" 2>/dev/null)" >&2
+    exit 2
+  fi
   # The memory ceiling is the PLUGIN's own computation, spliced after `run` —
   # never a number chosen here.
   MEMFLAGS=$(cd "$PROGRAMS" && python3 _docker_memory.py --flags | tr '\n' ' ')
-  echo "[real_ic_arm] creating $CONTAINER from $PIN"
+  echo "[real_ic_arm] creating $CONTAINER from $RUNNABLE (pin $PIN)"
   # shellcheck disable=SC2086
   docker run -d --name "$CONTAINER" $MEMFLAGS \
     -v "$HOME:$HOME" -v /tmp:/tmp -e USER=designer \
-    "$PIN" --skip sleep infinity >/dev/null || {
-      echo "[real_ic_arm] REFUSED: could not create $CONTAINER from the pinned image" >&2
+    "$RUNNABLE" --skip sleep infinity >/dev/null || {
+      echo "[real_ic_arm] REFUSED: could not create $CONTAINER from $RUNNABLE" >&2
       exit 2
     }
 fi

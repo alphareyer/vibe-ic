@@ -230,6 +230,98 @@ def test_a_tree_with_no_plugin_programs_REFUSES(bed):
     assert "no plugin programs" in (r.stdout + r.stderr)
 
 
+# ── the pinned image must be RESOLVED, never used as a bare digest ──────────
+#
+# MEASURED 2026-09-16: the third arm's FIRST landing run REFUSED because this
+# script did `docker run "$PIN"` with `_eda_pin.IMAGE_DIGEST` — a repo digest,
+# which the daemon answers with "No such image" even on a host that holds those
+# bytes. `_eda_pin` says so about itself (`is_bare_image_id` -> True, and it
+# names the shape `IMAGE_ID_NOT_A_REFERENCE`) and already owns the resolver.
+#
+# CALIBRATION (R-0915-86 (3)): the pair below is a host WITHOUT the image (must
+# REFUSE rc 2 and create nothing) and a host WITH it (must create the container,
+# from `<repo>@<digest>` and never from the bare digest). A `docker` STUB on
+# PATH is what makes "a host without the image" reachable at all — the real
+# daemon here holds the pin, so without the stub only one arm could ever run,
+# and a one-armed calibration proves nothing.
+
+_DOCKER_STUB = '''\
+#!/bin/sh
+# Records every invocation, then answers the two questions the arm asks.
+echo "$@" >> "$ARM_TEST_DOCKER_LOG"
+case "$1 $2" in
+  "image ls")
+    [ -n "$ARM_TEST_HOLDS_PIN" ] && echo "a.registry.example/vibeic-eda@$ARM_TEST_PIN"
+    exit 0 ;;
+esac
+case "$1" in
+  inspect) exit 1 ;;          # the container does not exist -> creation path
+  run)     echo stub-container-id; exit 0 ;;
+esac
+exit 0
+'''
+
+
+def _with_docker_stub(bed, holds_pin):
+    """A bin/ dir whose `docker` is the stub, plus the env the stub reads."""
+    import importlib, subprocess as sp
+    progs = (bed / "tree" / "vibe-ic-marketplace" / "plugins" / "vibe-ic"
+             / "programs")
+    binr = bed / ("bin_%s" % ("held" if holds_pin else "absent"))
+    binr.mkdir(parents=True, exist_ok=True)
+    (binr / "docker").write_text(_DOCKER_STUB, encoding="utf-8")
+    (binr / "docker").chmod(0o755)
+    log = bed / ("docker_%s.log" % ("held" if holds_pin else "absent"))
+    log.write_text("", encoding="utf-8")
+    pin = sp.run([sys.executable, "-c",
+                  "import _eda_pin;print(_eda_pin.IMAGE_DIGEST)"],
+                 cwd=str(progs), capture_output=True, text=True).stdout.strip()
+    env = {"PATH": "%s:%s" % (binr, os.environ.get("PATH", "")),
+           "ARM_TEST_DOCKER_LOG": str(log),
+           "ARM_TEST_PIN": pin,
+           "ARM_TEST_HOLDS_PIN": "1" if holds_pin else ""}
+    return env, log, pin
+
+
+def _tree_with_real_eda_pin(bed):
+    """The stub tree, plus the REAL `_eda_pin` and `_docker_memory` copied in —
+    the arm must call the plugin's own resolver, so a fake one would test
+    nothing."""
+    tree = _tree(bed / "tree", {"rc": 0, "report": _report("NO_REGRESSION")},
+                 {"rc": 0, "report": _report("NO_REGRESSION")})
+    progs = tree / "vibe-ic-marketplace" / "plugins" / "vibe-ic" / "programs"
+    real = Path(__file__).resolve().parents[2] / "vibe-ic-marketplace" \
+        / "plugins" / "vibe-ic" / "programs"
+    for mod in ("_eda_pin.py", "_docker_memory.py"):
+        shutil.copy2(real / mod, progs / mod)
+    return tree
+
+
+def test_KNOWN_NEGATIVE_a_host_WITHOUT_the_pinned_image_REFUSES_rc2(bed):
+    tree = _tree_with_real_eda_pin(bed)
+    env, log, _ = _with_docker_stub(bed, holds_pin=False)
+    r = _run(tree, bed / "corpus", bed / "out", _frozen(bed / "frozen", []),
+             dict(env, EDA_CONTAINER=""))     # unset: the arm owns creation
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "pinned image is not runnable on this host" in (r.stdout + r.stderr)
+    assert "run " not in log.read_text(), \
+        "a host that cannot resolve the pin must create NOTHING"
+
+
+def test_KNOWN_POSITIVE_a_host_WITH_it_runs_repo_at_digest_not_the_bare_digest(bed):
+    tree = _tree_with_real_eda_pin(bed)
+    env, log, pin = _with_docker_stub(bed, holds_pin=True)
+    r = _run(tree, bed / "corpus", bed / "out", _frozen(bed / "frozen", []),
+             dict(env, EDA_CONTAINER=""))
+    calls = log.read_text()
+    run_lines = [l for l in calls.splitlines() if l.startswith("run ")]
+    assert run_lines, "the container was never created:\n%s%s" % (r.stdout, r.stderr)
+    line = run_lines[0]
+    assert "a.registry.example/vibeic-eda@%s" % pin in line, line
+    assert " %s " % pin not in (" " + line + " "), \
+        "the BARE digest reached `docker run` — that is the defect (%s)" % line
+
+
 def test_no_timeout_or_kill_appears_in_either_landing_script():
     """The owner's standing rule, pinned in the files rather than promised."""
     for name in ("real_ic_arm.sh", "nightly_real_ic.sh"):
