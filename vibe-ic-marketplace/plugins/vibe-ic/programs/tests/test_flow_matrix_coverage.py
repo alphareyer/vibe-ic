@@ -195,7 +195,7 @@ _CELL_ID_RE = re.compile(r"^step(.+)$")
 #: `test_every_not_measured_cell_names_the_evidence_it_lacks` refuses it. And
 #: NOT_MEASURED never counts as a pass: see
 #: `test_a_not_measured_cell_is_never_counted_as_enforced`.
-VALID_STATES = ("ENFORCED", "PASS_WITH_WAIVERS", "NA", "NOT_MEASURED")
+VALID_STATES = ("ENFORCED", "WAIVED", "NA", "NOT_MEASURED")
 
 #: The one state that is neither enforcement nor a decision about the design.
 NOT_MEASURED = "NOT_MEASURED"
@@ -1154,7 +1154,7 @@ def test_every_cell_resolves_to_exactly_one_state():
         )
     # FOUR terms since the 2026-08-21 ruling. Spelled out rather than summing
     # `counts` so that a state added without a decision still breaks this line.
-    assert (counts["ENFORCED"] + counts["PASS_WITH_WAIVERS"] + counts["NA"]
+    assert (counts["ENFORCED"] + counts["WAIVED"] + counts["NA"]
             + counts[NOT_MEASURED]) == expected_cells()
 
 
@@ -1178,7 +1178,7 @@ def test_state_agrees_with_the_waiver_registry_and_the_collected_marks():
     for (sid, dim), state in sorted(census.items()):
         registry = W.waiver_for(sid, dim)
         marked = any(_xfail_marks(row) for row in cells[(sid, dim)])
-        if state == "PASS_WITH_WAIVERS":
+        if state == "WAIVED":
             if registry is None:
                 problems.append(
                     f"{sid}/d{dim}: the module reports WAIVED but "
@@ -1225,7 +1225,7 @@ def test_every_waived_cell_is_specific_evidence_backed_and_strict():
     """
     census = state_census()
     cells = collected_cells()
-    waived = sorted(k for k, v in census.items() if v == "PASS_WITH_WAIVERS")
+    waived = sorted(k for k, v in census.items() if v == "WAIVED")
     assert waived, (
         "no cell in the 504 is WAIVED. That is either genuinely perfect "
         "coverage or a registry that stopped being consulted; if the campaign "
@@ -1565,7 +1565,7 @@ def test_the_census_is_reported_for_humans(record_property):
             f"(own={buckets.count(SUB.OWN_MECHANISM)},"
             f"substituted={buckets.count(SUB.SUBSTITUTED)},"
             f"undeclared={buckets.count(SUB.UNDECLARED_BUCKET)}) "
-            f"WAIVED={per.count('PASS_WITH_WAIVERS')} "
+            f"WAIVED={per.count('WAIVED')} "
             f"NA={per.count('NA')}")
     totals = {s: sum(1 for v in census.values() if v == s) for s in VALID_STATES}
     split = {b: sum(1 for v in subs.values() if v == b) for b in SUB.BUCKETS}
@@ -1628,7 +1628,7 @@ def test_the_census_is_reported_for_humans(record_property):
 #: charging the design with a defect on evidence it just said it does not have.
 STATE_EXPECTS_OUTCOME: Dict[str, str] = {
     "ENFORCED": "passed",
-    "PASS_WITH_WAIVERS": "xfailed",
+    "WAIVED": "xfailed",
     "NA": "passed",
     NOT_MEASURED: "skipped",
 }
@@ -3149,7 +3149,7 @@ def test_synthetic_cell_red(step_id):
 
 
 @pytest.mark.xfail(strict=True, reason="synthetic waiver")
-@pytest.mark.parametrize("step_id", ["PASS_WITH_WAIVERS"], ids=["stepWAIVED"])
+@pytest.mark.parametrize("step_id", ["WAIVED"], ids=["stepWAIVED"])
 def test_synthetic_cell_waived(step_id):
     assert False, "synthetic waived predicate"
 '''
@@ -3191,10 +3191,10 @@ def test_the_second_axis_downgrades_a_red_cell_that_the_state_axis_counts():
 
     states = {("GREEN", 99): "ENFORCED",
               ("RED", 99): "ENFORCED",
-              ("PASS_WITH_WAIVERS", 99): "PASS_WITH_WAIVERS"}
+              ("WAIVED", 99): "WAIVED"}
     outcomes = {("GREEN", 99): ("passed",),
                 ("RED", 99): ("failed",),
-                ("PASS_WITH_WAIVERS", 99): ("xfailed",)}
+                ("WAIVED", 99): ("xfailed",)}
 
     # This is the defect, reproduced in miniature: the state axis alone counts
     # the red cell as enforcing.
@@ -3202,7 +3202,7 @@ def test_the_second_axis_downgrades_a_red_cell_that_the_state_axis_counts():
 
     joined = _join_axes(states, outcomes)
     assert joined[("GREEN", 99)].agrees
-    assert joined[("PASS_WITH_WAIVERS", 99)].agrees
+    assert joined[("WAIVED", 99)].agrees
     assert not joined[("RED", 99)].agrees, (
         "a cell configured ENFORCED whose predicate FAILED was still reported "
         "as enforcing — this is the defect ORGANIC-20260808 named")
@@ -3210,7 +3210,7 @@ def test_the_second_axis_downgrades_a_red_cell_that_the_state_axis_counts():
     counts = enforcement_counter(joined)
     assert counts.get("ENFORCED") == 1, counts
     assert counts.get("ENFORCED-CONTRADICTED") == 1, counts
-    assert counts.get("PASS_WITH_WAIVERS") == 1, counts
+    assert counts.get("WAIVED") == 1, counts
 
     # And an unobserved cell is a contradiction, not a pass: the second axis
     # must not be satisfiable by having looked at nothing.
@@ -3248,4 +3248,4 @@ def test_the_outcome_reducer_names_a_strict_xpass_rather_than_a_failure():
     ]) == "error"
     # And a WAIVED cell that XPASSes is a contradiction, not a healthy waiver.
     assert not _join_axes(
-        {("X", 9): "PASS_WITH_WAIVERS"}, {("X", 9): ("xpassed",)})[("X", 9)].agrees
+        {("X", 9): "WAIVED"}, {("X", 9): ("xpassed",)})[("X", 9)].agrees

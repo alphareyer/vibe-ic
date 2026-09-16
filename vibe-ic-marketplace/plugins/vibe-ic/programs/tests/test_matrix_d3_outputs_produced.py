@@ -6240,7 +6240,7 @@ DECLARED_OUTSIDE_THE_PUBLISH_CONTRACT: Tuple[Tuple[str, str], ...] = (
 #: Cell states that are a DETERMINATION about the step rather than an absence of
 #: one. `NA` is a fact about the design and `WAIVED` is a registered decision
 #: carrying evidence; both are answers. `NOT_MEASURED` is not — see below.
-_STATES_THAT_DECIDED = ("NA", "PASS_WITH_WAIVERS")
+_STATES_THAT_DECIDED = ("NA", "WAIVED")
 
 
 def _declared_outside_the_publish_contract() -> Tuple[Tuple[str, str], ...]:
@@ -7780,7 +7780,7 @@ def matrix_cell_state(step_id) -> str:
     if matrix_na_precondition(step_id) is not None:
         return "NA"
     if waiver_for(step_id) is not None:
-        return "PASS_WITH_WAIVERS"
+        return "WAIVED"
     if matrix_not_measured_reason(step_id) is not None:
         return "NOT_MEASURED"
     return "ENFORCED"

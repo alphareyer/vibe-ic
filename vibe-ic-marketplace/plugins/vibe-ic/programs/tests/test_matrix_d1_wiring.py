@@ -2230,9 +2230,9 @@ def matrix_na_precondition(step_id):
 
 
 def matrix_cell_state(step_id) -> str:
-    """``"ENFORCED"`` / ``"PASS_WITH_WAIVERS"`` / ``"NA"`` for one cell of this dimension."""
+    """``"ENFORCED"`` / ``"WAIVED"`` / ``"NA"`` for one cell of this dimension."""
     if matrix_na_precondition(step_id) is not None:
         return "NA"
     if waivers.waiver_for(step_id, DIM) is not None:
-        return "PASS_WITH_WAIVERS"
+        return "WAIVED"
     return "ENFORCED"
