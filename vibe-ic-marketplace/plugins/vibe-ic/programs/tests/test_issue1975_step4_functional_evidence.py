@@ -92,6 +92,26 @@ def _declarations_and_coverage(project: Path) -> None:
         "test_cases": [{"id": "add_nominal"}, {"id": "add_corner"}]}))
     (docs / "L12_BEHAVIORAL_SEQUENCES.json").write_text(json.dumps({
         "sequences": [{"id": "reset_then_add"}]}))
+    # R-0915-87(2) — this helper DECLARES two L10 cases, so the project must
+    # also record that they ran. Before the ruling the gate never asked, and a
+    # fixture could declare cases whose oracles never executed and still assert
+    # a functional PASS — which is the exact shape r27 shipped (ten declared,
+    # one executed, PASS granted off ten green JUnit rows). Every test in this
+    # file is about DISCOVERY of the functional evidence, not about the oracle
+    # gap, so the record says both cases executed and the assertions below are
+    # untouched.
+    ex = project / "reports/phase2/sim"
+    ex.mkdir(parents=True, exist_ok=True)
+    (ex / "l10_execution.json").write_text(json.dumps({
+        "schema": "vibeic.l10_execution.v1",
+        "cases": [{"id": "add_nominal", "verdict": "PASS",
+                   "sim_executed": True},
+                  {"id": "add_corner", "verdict": "PASS",
+                   "sim_executed": True}],
+        "producer": "test fixture",
+        "tb_dir": str(project / "phase2/stage1/sim/tb"),
+        "source_junit": "results.xml",
+    }))
     cov = project / "reports/phase2/coverage/coverage_verilator.json"
     cov.parent.mkdir(parents=True, exist_ok=True)
     cov.write_text(json.dumps({

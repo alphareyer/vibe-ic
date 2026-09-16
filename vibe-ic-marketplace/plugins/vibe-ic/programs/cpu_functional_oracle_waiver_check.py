@@ -38,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import _path_layout as _pl  # noqa: E402
 import _sim_results_bridge as _srb  # noqa: E402
+import _l10_execution as _l10x  # R-0915-87(2): the ONE execution reader  # noqa: E402
 
 # The capability-gap token retained on a connectivity-PASS evidence record.
 # A chip-AGNOSTIC capability identifier, NOT a chip/vendor/SKU literal.
@@ -263,6 +264,114 @@ def _process_only_count(path: Path, keys: "tuple[str, ...]") -> int:
     return len(process)
 
 
+
+# ── R-0915-87(2): a green ROW COUNT is not an EXECUTED ORACLE ───────────────
+def _declared_l10_case_ids(project: Path) -> "list[str]":
+    """Every declared L10 case id, in declaration order."""
+    gd = _pl.generated_docs_dir(project)
+    out = []
+    for row in _declared_rows(gd / "L10_TEST_CASES.json",
+                              ("test_cases", "cases", "vectors")):
+        if isinstance(row, dict):
+            name = row.get("name") or row.get("id") or row.get("case")
+            if name:
+                out.append(str(name))
+    return out
+
+
+def _oracles_that_actually_ran(project: Path) -> dict:
+    """Which declared L10 cases EXECUTED their oracle, by name.
+
+    THE FALSE GREEN THIS CLOSES. MEASURED on the subservient tapeout run r27
+    (lane icsub2, 2026-09-16), this gate returned
+
+        PASS: the record's functional_verified=true is SUBSTANTIATED by
+        .../l10_unit_tb/results.xml: tests=10 passed=10 failures=0 errors=0
+
+    while NINE of those ten cases never executed an oracle at all. The nine
+    testbenches exist and are green, but each is the SUBSTANCE FLOOR the
+    generator writes when no oracle is derivable: it asserts only that no
+    output stays X/Z after reset, and says so in machine-readable form with
+    `VIBEIC_TB_ORACLE: NONE (substance floor only)`. Ten scaffolds that check
+    almost nothing produce ten green JUnit rows, and a row count reads them as
+    ten verified functions. The single real oracle was
+    `reset_n_cycle_instruction` (reset-to-first-bus-activity latency). A CPU
+    whose instruction set was never exercised stood one gate away from a
+    published PASS.
+
+    So the JUnit predicate stops being SUFFICIENT. It stays NECESSARY — a
+    failing, vacuous or unresolvable transcript is refused exactly where it
+    always was — and this adds the question the transcript cannot answer: did
+    the declared case's own oracle RUN?
+
+    ASKED THROUGH THE READER THAT ALREADY OWNS IT. `_l10_execution` is the same
+    module `professional_tb_check` and `l10_tb_conformance_check` consult, and
+    it is fail-closed by construction: a missing record, an unreadable one, a
+    schema mismatch, a case absent from the record, or a row whose verdict is
+    not backed by `sim_executed=true` are each NOT_EXECUTED, never a silent
+    pass. A second reader here would be a second answer waiting to disagree
+    with theirs.
+    """
+    declared = _declared_l10_case_ids(project)
+    record = _l10x.load_record(project)
+    executed: list = []
+    not_executed: list = []
+    for case_id in declared:
+        state, why = _l10x.case_state(case_id, record)
+        if state == _l10x.PASS:
+            executed.append(case_id)
+        else:
+            not_executed.append({"case": case_id, "state": state, "why": why})
+    return {
+        "declared": declared,
+        "declared_count": len(declared),
+        "executed": executed,
+        "executed_count": len(executed),
+        "not_executed": not_executed,
+        "not_executed_count": len(not_executed),
+        "record_available": bool(record.get("available")),
+        "record_reason": record.get("reason"),
+        "asked_through": "_l10_execution.case_state",
+    }
+
+
+
+def _oracle_execution_refusal(project: Path, transcript: str) -> "str | None":
+    """The refusal a row-count PASS owes, or None when the oracles did run.
+
+    ONE GUARD, EVERY PASS ROUTE THAT RESTS ON A TRANSCRIPT. There are two —
+    the substantiated-claim route and the professional-TB slot route — and on
+    r27 BOTH would have passed off the same ten green rows. A predicate applied
+    at one of two doors is not a predicate.
+    """
+    ran = _oracles_that_actually_ran(project)
+    if ran["declared_count"] == 0:
+        # NARROW ON PURPOSE. A design that declares no L10 case asks a
+        # different question, and this guard does not answer it: the gate's own
+        # denominator path already reports "0 functional tests ran for N
+        # declared row(s)". Refusing here as well was scope I added and the
+        # ruling did not ask for, and it turned four landed fixtures red for a
+        # fact none of them is about. The comparison this guard owns is
+        # EXECUTED-versus-DECLARED, and over an empty declaration there is
+        # nothing to compare.
+        return None
+    if not ran["not_executed_count"]:
+        return None
+    named = ", ".join(f"{r['case']} [{r['state']}]"
+                      for r in ran["not_executed"][:6])
+    more = ran["not_executed_count"] - 6
+    return (
+        f"{transcript} is a passing transcript, but only "
+        f"{ran['executed_count']} of {ran['declared_count']} declared L10 "
+        f"case(s) EXECUTED their own oracle. A green row count over "
+        f"substance-floor scaffolds is not functional verification. Not "
+        f"executed: {named}" + (f" (+{more} more)" if more > 0 else "")
+        + f". Asked through {ran['asked_through']}"
+        + ("" if ran["record_available"]
+           else f"; execution record unavailable ({ran['record_reason']})")
+    )
+
+
 def _evidence_summary(project: Path) -> dict:
     """Machine-readable Step-4 denominator and coverage disclosure.
 
@@ -422,11 +531,20 @@ def _evaluate(project: Path) -> "tuple[int, str]":
                    if claimed else
                    "and carries no <functional_evidence> pointer")
                 + " — a claim that cannot be shown is a forged waiver.")
+        # R-0915-87(2) — the transcript proves a suite ran and did not fail;
+        # it cannot prove WHAT it checked. On r27 this very transcript read
+        # tests=10 passed=10 over NINE substance-floor scaffolds.
+        _refusal = _oracle_execution_refusal(project, shown["rel_path"])
+        if _refusal:
+            return 1, (
+                "FAIL: connectivity-PASS record asserts "
+                f"functional_verified=true and {_refusal}.")
         return 0, (
             "PASS: the record's functional_verified=true is SUBSTANTIATED by "
             f"{shown['rel_path']}: tests={shown['tests']} "
             f"passed={shown['passed']} failures={shown['failures']} "
-            f"errors={shown['errors']}. The connectivity binding and the "
+            f"errors={shown['errors']}, AND every declared L10 case executed "
+            "its own oracle. The connectivity binding and the "
             "functional oracle are both recorded, and the "
             f"{CAP_CPU_FUNCTIONAL_ORACLE} marker is retained for the "
             "per-case oracle gap it actually names.")
@@ -461,6 +579,16 @@ def _evaluate(project: Path) -> "tuple[int, str]":
     pro = _srb.find_professional_tb_pass(project)
     if pro:
         _nm = _srb.union_disclosure(union)
+        # R-0915-87(2) — the same guard, at the same height. This route reads
+        # the professional suite's own transcript, which on r27 is the file
+        # with the ten green rows.
+        _refusal = _oracle_execution_refusal(project, ";".join(pro["rel_paths"]))
+        if _refusal:
+            return 1, (
+                "INCOMPLETE: the professional-TB result slot cannot supersede "
+                f"the {CAP_CPU_FUNCTIONAL_ORACLE} capability record — "
+                f"{_refusal}. No waiver is granted and Step 4 is NOT a "
+                "functional PASS.")
         return 0, (
             "PASS: functional verification ACHIEVED by the professional-TB "
             "result slot (producer: "
