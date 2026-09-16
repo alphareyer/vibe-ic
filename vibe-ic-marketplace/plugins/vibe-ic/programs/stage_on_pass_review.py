@@ -714,7 +714,7 @@ def _norm_status(word: Any) -> str:
 #: 6 and 39 carry the machinery-sanctioned ENV_UNAVAILABLE fpga-board cap-gap
 #: deferral, the audit records both as `WAIVED`, and this program answered
 #:
-#:     rc=2 NOT MEASURED — stage stage1 did not pass (7 row(s) for stage1;
+#:     rc=2 NOT CHECKED — stage stage1 did not pass (7 row(s) for stage1;
 #:     non-green: INCOMPLETE, WAIVED)
 #:
 #: so steps 7, 15 and 37 — whose gate this program is — each went INCOMPLETE,
@@ -733,7 +733,7 @@ _STAGE_GREEN = frozenset({_T.FULL_PASS} | set(_T.EXCUSED)
 
 #: THE TIER THAT IS NEITHER GREEN NOR FAILED, registered by the flow itself.
 #:
-#: `verdict.NO_VERDICT_IN_SCOPE` is `{INCOMPLETE, NOT-MEASURED}` —
+#: `verdict.NO_VERDICT_IN_SCOPE` is `{NOT_MEASURED}` — one word where the
 #: deliberately in neither `EXCUSED` nor `NON_GREEN`, because "nobody measured
 #: it" is not "it passed" and is not "it failed" either. Read here so the
 #: exemption below can be stated over the tier the flow names, rather than over
@@ -4683,12 +4683,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     except ValueError as e:
         emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": str(e)})
-        print(f"{_NAME}: rc=2 NOT MEASURED — {e}")
+        print(f"{_NAME}: rc=2 NOT CHECKED — {e}")
         return 2
     if not decl:
         emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": "the stage declares no on_pass_review"})
-        print(f"{_NAME}: rc=2 NOT MEASURED — stage {a.stage!r} declares no "
+        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage!r} declares no "
               f"`on_pass_review:` block in {a.flow_def}. The review is "
               f"declared in the flow; a stage that does not declare one has "
               f"not been reviewed.")
@@ -4713,7 +4713,7 @@ def main(argv: Optional[List[str]] = None) -> int:
               "why": "the on_pass_review block declares no usable `verdict:`",
               "declared_verdict": decl.get("verdict"),
               "verdict_policies": list(VERDICT_POLICIES)})
-        print(f"{_NAME}: rc=2 NOT MEASURED — stage {a.stage!r} declares an "
+        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage!r} declares an "
               f"`on_pass_review:` block whose `verdict:` is "
               f"{decl.get('verdict')!r}, which is not one of "
               f"{list(VERDICT_POLICIES)}. Whether this review's rejection "
@@ -4733,7 +4733,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                       "`ENFORCEMENT:` declaration disagree"),
               "stage_verdict_policy": policy,
               "program_enforcement": DECLARED_ENFORCEMENT})
-        print(f"{_NAME}: rc=2 NOT MEASURED — stage {a.stage!r} declares "
+        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage!r} declares "
               f"`verdict: {policy}` while this program declares "
               f"`ENFORCEMENT: {DECLARED_ENFORCEMENT}` and no runner spawns it "
               f"inline. Wire it where it can block and re-declare it here, or "
@@ -4747,7 +4747,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if denied:
         emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": "denied intent path", "denied": denied})
-        print(f"{_NAME}: rc=2 NOT MEASURED — §4.05: {len(denied)} declared "
+        print(f"{_NAME}: rc=2 NOT CHECKED — §4.05: {len(denied)} declared "
               f"intent path(s) resolve under a denied segment:")
         for d in denied:
             print(f"    {d['path']}  (denied segment {d['denied_segment']!r})")
@@ -4766,7 +4766,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if str(declared_fires_on) != _SUPPORTED_FIRES_ON:
         emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": "unsupported fires_on", "fires_on": declared_fires_on})
-        print(f"{_NAME}: rc=2 NOT MEASURED — stage {a.stage!r} declares "
+        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage!r} declares "
               f"`fires_on: {declared_fires_on!r}` and this engine implements "
               f"only {_SUPPORTED_FIRES_ON!r}. It reviews a stage that PASSED; "
               f"it has no other firing condition to offer, so it declines "
@@ -4787,7 +4787,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": "emit_test_dir escapes the run",
               "emit_dir": str(declared_emit), "project": str(project)})
-        print(f"{_NAME}: rc=2 NOT MEASURED — the emitted regression would land "
+        print(f"{_NAME}: rc=2 NOT CHECKED — the emitted regression would land "
               f"OUTSIDE the run: {str(declared_emit)!r} does not resolve under "
               f"{str(project)!r}.")
         print(f"    A rejection's emitted test is the evidence that the "
@@ -4806,7 +4806,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if fired["passed"] is None:
         emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": fired["why"], "fires_on": decl.get("fires_on")})
-        print(f"{_NAME}: rc=2 NOT MEASURED — {fired['why']}. The review fires "
+        print(f"{_NAME}: rc=2 NOT CHECKED — {fired['why']}. The review fires "
               f"on {decl.get('fires_on')!r}; it does not run on an "
               f"unestablished verdict.")
         return 2
@@ -4853,7 +4853,7 @@ def main(argv: Optional[List[str]] = None) -> int:
               "declared_not_enabled": [
                   {"rule": r, "reason": _NOT_ENABLED_REASON[r]}
                   for r, _fn in rules]})
-        print(f"{_NAME}: rc=2 NOT MEASURED — stage {a.stage!r} declares "
+        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage!r} declares "
               f"{len(rules)} on-pass rule(s) that are DECLARED AND NOT "
               f"ENABLED:")
         for rule_id, _fn in rules:
@@ -4867,7 +4867,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if a.stage not in _RULES:
         emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": "no on-pass rule is implemented for this stage"})
-        print(f"{_NAME}: rc=2 NOT MEASURED — stage {a.stage!r} declares an "
+        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage!r} declares an "
               f"on-pass review but this program implements no rule for it.")
         return 2
 
@@ -4882,7 +4882,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     emit(rec)
 
     if rec["unproven_rejections"]:
-        print(f"{_NAME}: rc=2 NOT MEASURED — {len(rec['unproven_rejections'])} "
+        print(f"{_NAME}: rc=2 NOT CHECKED — {len(rec['unproven_rejections'])} "
               f"finding(s) could not be proven and were NOT emitted as "
               f"rejections:")
         for f in rec["unproven_rejections"]:
@@ -4937,7 +4937,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # exactly as before. rc 1 here means "at least one rule proved a
     # contradiction", never "everything else was checked".
     if rec["not_checked"]:
-        head = ("rc=2 NOT MEASURED — " if not rec["rejections"]
+        head = ("rc=2 NOT CHECKED — " if not rec["rejections"]
                 else "[NOT CHECKED] ")
         print(f"{_NAME}: {head}{len(rec['not_checked'])} rule(s) "
               f"could not read what they need:")
@@ -5006,7 +5006,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # NO question arose was not reviewed. Only reachable once a rule can
     # answer NOT_APPLICABLE at all.
     if not n_ok and not n_dis:
-        print(f"{_NAME}: rc=2 NOT MEASURED — every rule on stage {a.stage} "
+        print(f"{_NAME}: rc=2 NOT CHECKED — every rule on stage {a.stage} "
               f"answered NOT_APPLICABLE ({n_na}); the artefact was read and "
               f"no rule found a subject in it, so nothing here certifies "
               f"that the extraction is faithful.")

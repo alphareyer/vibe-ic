@@ -55,23 +55,43 @@ def test_every_EXCUSED_word_in_the_flows_register_is_green_here():
     assert not missing, missing
 
 
-def test_both_spellings_of_the_deferral_are_green():
-    """The exact pair that was half-registered."""
-    for word in ("PASS_WITH_WAIVERS", "WAIVED-DEFERRED"):
-        assert S._norm_status(word) in S._STAGE_GREEN, word
+def test_the_deferral_has_exactly_one_spelling_and_it_is_green():
+    """R-0915-85 answered the half-registered pair by DELETING the pair.
+
+    This file was written because `WAIVED` was registered green here and its
+    sibling `WAIVED-DEFERRED` was not, so the same tier answered two ways.
+    There is now ONE word for a sanctioned deferral, and the other spellings
+    are not "unregistered" — they are refused at the producer.
+    """
+    assert S._norm_status("PASS_WITH_WAIVERS") in S._STAGE_GREEN
+    for gone in ("WAIVED", "WAIVED-DEFERRED", "WAIVED_DEFERRED"):
+        with pytest.raises(T.UnknownVerdictWord):
+            T.parse(gone)
 
 
-def test_a_full_pass_is_green_and_the_vacuous_tiers_are_too():
-    for word in (T.FULL_PASS, "NOT_MEASURED", "NOT_MEASURED",
-                 "PASS", "PARTIALLY_VACUOUS"):
+def test_a_full_pass_is_green_and_an_unmeasured_row_is_not():
+    for word in (T.FULL_PASS, "PASS", "NOT_APPLICABLE"):
         assert S._norm_status(word) in S._STAGE_GREEN, word
+    # NOT_MEASURED is not green -- "nobody measured it" is not "it passed", and
+    # it blocks the run-level PASS, which is why it is in NON_GREEN. What it
+    # does NOT do is void anything downstream: that is the cascade rule, and it
+    # is asserted where it lives rather than inferred from this membership.
+    assert S._norm_status("NOT_MEASURED") not in S._STAGE_GREEN
+    assert "NOT_MEASURED" in T.NON_GREEN
+    assert T.cascade_to_dependent(
+        T.StepVerdict.not_measured("9", "x", reason_class=T.ReasonClass.STALLED,
+                                   reason="nobody looked")) is None
 
 
 def test_punctuation_is_not_the_answer():
-    """The tree writes `VACUOUS_PASS` and `PARTIALLY-VACUOUS` in ONE report,
-    so membership must normalise or it answers about the underscore."""
-    assert S._norm_status("vacuous_pass") == "VACUOUS_PASS"
-    assert S._norm_status("Waived-Deferred") == "WAIVED-DEFERRED"
+    """The five words have ONE spelling each, and `parse` refuses the rest.
+
+    Normalisation survives only for the ~450 gate programs whose own verdict
+    vocabulary still arrives in two spellings; it now folds toward the
+    underscore, which is how every one of the five is written.
+    """
+    assert S._norm_status("pass_with_waivers") == "PASS_WITH_WAIVERS"
+    assert S._norm_status("Not-Measured") == "NOT_MEASURED"
     assert S._norm_status(None) == "?"
 
 
@@ -93,7 +113,7 @@ def test_the_measured_shape_stops_naming_WAIVED(tmp_path):
         None)
     assert got["passed"] is False
     assert "WAIVED" not in got["why"], got["why"]
-    assert "INCOMPLETE" in got["why"]
+    assert "NOT_MEASURED" in got["why"]
 
 
 # ── direction 2: a stage that really failed still is not reviewed ─────────
