@@ -132,7 +132,7 @@ def test_a_producer_that_really_errored_is_still_the_errored_row(project,
     res = R.step_for_block(p, blk, "A3_netlist_gen")
     assert res.status == "NOT_MEASURED", (res.status, res.detail)
     assert "ERRORED rc=1" in res.detail, res.detail
-    assert res.extras.get("verdict_tier") != "NOT_MEASURED"
+    assert res.extras.get("verdict_tier") != "ENV_UNAVAILABLE"
 
 
 # ═══ the steps below it ═══════════════════════════════════════════════════

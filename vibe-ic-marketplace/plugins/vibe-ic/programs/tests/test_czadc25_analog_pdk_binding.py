@@ -150,7 +150,7 @@ def test_contradicting_pdk_refuses_and_names_both(tmp_path):
     assert "sky130A" in blob, "the refusal does not name the FLAG"
     assert "sg13g2" in blob, "the refusal does not name the DECLARATION"
     rep = json.loads(_report(proj).read_text())
-    assert rep["verdict"] == "NOT_MEASURED"
+    assert rep["verdict"] == "BLOCKED"
     assert rep["pdk_flag"] == "sky130A"
     assert rep["pdk_declared"] == "sg13g2"
     # NOTHING was simulated on the way to the refusal.

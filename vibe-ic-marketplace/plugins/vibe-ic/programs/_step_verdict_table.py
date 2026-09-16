@@ -28,7 +28,7 @@ TWO ARTEFACTS, ONE TABLE — MEASURED, NOT ASSUMED
     reports/audit/phase23_completion_audit.json   `verdict`  `step_counts`  `command_argv`
     the path given to --json                      `overall`  `counts`       (no argv)
 
-MEASURED 2026-09-16 on `/home/reyerchu/_frozen/subservient_r26`: one invocation
+MEASURED 2026-09-16 on `<home>/_frozen/subservient_r26`: one invocation
 with `--json` and one without produced `steps[]` lists that are element-for-
 element identical (69 steps, identical 18-key step records, identical counts);
 only the two top-level key names differ. A reader that knew one shape would read
@@ -118,8 +118,8 @@ invocation of a run overwrites `reports/audit/phase23_completion_audit.json`, so
 a stage-scoped invocation replaces the full table with its own. On the two frozen
 snapshots the orchestrator supplied:
 
-    /home/reyerchu/_frozen/subservient_r26      9 steps, argv stage4_compliance.py . --exclude-step 39
-    /home/reyerchu/_frozen/sha256_run16_pass2   9 steps, argv flow_compliance_check.py ... --stage-id stage_analog
+    <home>/_frozen/subservient_r26      9 steps, argv stage4_compliance.py . --exclude-step 39
+    <home>/_frozen/sha256_run16_pass2   9 steps, argv flow_compliance_check.py ... --stage-id stage_analog
 
 while a full `--strict` pass over the same trees yields 69. Diffing 69 against 9
 would report 60 REMOVED steps and read as a catastrophic regression; it is an

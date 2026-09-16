@@ -139,7 +139,7 @@ def test_pre_layout_basis_is_not_judged(tmp_path):
     """Before place, buffer and repair the tool has not yet had its chance."""
     body = _DRIVE.replace("POST_ROUTE_SPEF", "PRE_LAYOUT_ESTIMATE")
     rc, rep = _run(_project(tmp_path, body), tmp_path)
-    assert rc == 2 and rep["verdict"] == "NOT_MEASURED"
+    assert rc == 2 and rep["verdict"] == "NOT_CHECKED"
     assert rep["reports_skipped"][0]["declared_basis"] == "PRE_LAYOUT"
 
 
@@ -162,7 +162,7 @@ def test_met_design_passes_with_no_paths(tmp_path):
 
 def test_empty_project_is_not_checked(tmp_path):
     rc, rep = _run(tmp_path, tmp_path)
-    assert rc == 2 and rep["verdict"] == "NOT_MEASURED"
+    assert rc == 2 and rep["verdict"] == "NOT_CHECKED"
 
 
 def test_the_same_report_in_two_places_is_counted_once(tmp_path):

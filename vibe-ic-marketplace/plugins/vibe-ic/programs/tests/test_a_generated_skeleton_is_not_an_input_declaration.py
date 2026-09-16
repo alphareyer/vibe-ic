@@ -206,7 +206,7 @@ def test_there_is_one_scanner_not_two():
 # ── and on the real design's own input, vendored so it always runs ──────────
 #
 # THE FIRST VERSION OF THIS SECTION WAS WRONG, and it is worth saying how. It
-# read `/home/reyerchu/benchmark-data/...` behind
+# read `<home>/benchmark-data/...` behind
 # `@pytest.mark.skipif(not REAL.is_dir())`. That is an environment-gated skip on
 # a path that exists on exactly one machine: everywhere else the case did not
 # run and the file still reported green, which is the one thing a measuring

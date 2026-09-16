@@ -26,7 +26,7 @@ the tree doing the judging. So:
                 `_step_verdict_table` module, diffed the same way.
 
 No containers, no tools, no second harness (R-0915-85). MEASURED 2026-09-16 on
-`/home/reyerchu/_frozen/subservient_r26`: 7.4 s wall for a 69-step table, and
+`<home>/_frozen/subservient_r26`: 7.4 s wall for a 69-step table, and
 the snapshot byte-count unchanged (418 files before and after).
 
 `--baseline`: RECORD THE REFERENCE, ONCE, AT A NAMED TREE

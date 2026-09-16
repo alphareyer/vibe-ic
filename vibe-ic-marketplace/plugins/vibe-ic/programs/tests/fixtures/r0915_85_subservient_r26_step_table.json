@@ -1,7 +1,7 @@
 {
  "_what": "The step table subservient r26 produces under R-0915-85, measured.",
  "_provenance": {
-  "project": "8HD-4 /home/reyerchu/_lane_icsub2/c2_proj (frozen), copied whole to /home/reyerchu/_lane_icverdict/replays/subservient_r26",
+  "project": "host 8HD-4, lane icsub2: the subservient r26 project tree, frozen and copied whole into lane icverdict's replays/subservient_r26 (provenance by run + lane + host; the absolute path is deliberately not recorded in shipped source)",
   "command": "flow_compliance_check.py <replay> --strict --read-only --json \u2026",
   "tree": "next/icverdict on main 599640dcf",
   "run_verdict": "NOT_MEASURED",

@@ -432,7 +432,7 @@ def test_no_rtl_no_log_still_skip(tmp_path):
                         duration_s=0.1, detail="nothing", extras={},
                         declared_by="no RTL and no oracle log on this tree")
     P.step_emit_phase2_manifests(tmp_path, [step])
-    assert _cov(tmp_path)["verdict"] == "NOT_APPLICABLE"
+    assert _cov(tmp_path)["verdict"] == "SKIPPED-CONDITION"
 
 
 def test_source_has_no_canned_scenarios():

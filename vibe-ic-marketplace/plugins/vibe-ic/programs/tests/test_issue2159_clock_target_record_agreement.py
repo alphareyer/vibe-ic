@@ -302,7 +302,7 @@ def test_an_unreadable_record_that_exists_is_not_checked(tmp_path):
     (d / "clock_target_provenance.json").write_text("{ nope")
     _l19(proj2, clock_target={"status": "DECLARED", "period_ns": 20.0,
                               "pdk": "sky130", "tier": "l8_declared"})
-    assert gate.check(proj2)["verdict"] == "NOT_MEASURED", gate.check(proj2)
+    assert gate.check(proj2)["verdict"] == "NOT_CHECKED", gate.check(proj2)
 
 
 # ===========================================================================

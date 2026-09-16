@@ -430,7 +430,7 @@ def test_producer_always_appends_the_self_reference(tmp_path):
     emitted = json.loads((tmp_path / "waivers.json").read_text())
 
     entry = emitted["waivers"][0]
-    assert entry["verdict_tier"] == "NOT_MEASURED", entry
+    assert entry["verdict_tier"] == "ENV_UNAVAILABLE", entry
     assessment = _ei.assess(entry["evidence"], tmp_path)
     assert assessment.self_report == 1, entry["evidence"]
     # and the harvested `extras` scalar is a tool name, not a path — the same
