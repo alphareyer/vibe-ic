@@ -357,7 +357,8 @@ def test_condition_layer_cell(trees, cls, sid):
 # original defect stood on its head: 15.5ic on a self tape-out used to report
 # SKIPPED-CONDITION (nothing to see) and must now report MISSING (a pad ring
 # is owed and is not there).
-_NON_SKIP = ("FAIL", "FAIL", "PASS")
+# R-0915-85 — MISSING and FAIL are one word; the pair is now (FAIL, PASS).
+_NON_SKIP = ("FAIL", "PASS")
 
 
 @pytest.mark.parametrize("cls,sid", CELLS, ids=[f"{c}::{s}" for c, s in CELLS])
@@ -399,7 +400,7 @@ def test_the_forgotten_route_blocks_all_four_dependents_after_owner_rollup(
         assert row.status == MISSING, (row.id, row.status, row.reasons)
         assert row.cascade_note == "blocked-by-upstream(0.5ic)"
         reason = " ".join(row.reasons)
-        assert "Step 0.5ic verdict MISSING" in reason
+        assert "Step 0.5ic verdict FAIL" in reason
         assert "delivery_route declaration is MISSING" in reason
 
 

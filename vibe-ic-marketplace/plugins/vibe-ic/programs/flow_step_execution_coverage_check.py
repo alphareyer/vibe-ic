@@ -130,7 +130,24 @@ _REAL_DONE = {_T.FULL_PASS}
 # (#632) and INCOMPLETE (#599), both of which used to be in NO set here and so
 # escaped the ordering guard entirely while the producer's own arithmetic
 # counted them done. A tier added tomorrow lands here by construction.
-_VACUOUS = _T.is_qualified_done
+# R-0915-85 — THE CARVE-OUT MUST FOLLOW THE WORDS ITS MEMBERS BECAME.
+#
+# This was `is_qualified_done`, which is now `PASS_WITH_WAIVERS` alone. The set
+# it stands for is "the ancestor RAN and certified nothing" -- VACUOUS-PASS,
+# STRUCTURE-ONLY and INCOMPLETE, all of which are `NOT_MEASURED` now, plus
+# WAIVED, which is `PASS_WITH_WAIVERS`. Left as the one word, a NOT_MEASURED
+# ancestor fell straight through to `_emit` and every step depending on it was
+# reported out of order: MEASURED on this file's own fixture, D1 = NOT_MEASURED
+# raised `[1] Spec-to-RTL marked done while dependency [D1]`, which is the r26
+# shape -- one upstream that never looked, charged to the step below it.
+#
+# What still blocks is unchanged and is decided by `_blocks_when_vacuous`: a
+# SIGN-OFF, a TERMINAL hand-off or a stage-5 attestation that certified
+# nothing must still stop a downstream done-claim. A FAIL ancestor -- which is
+# what a MISSING artefact is now -- never reaches here at all.
+def _VACUOUS(status) -> bool:
+    return (_T.says_nothing_was_measured(status)
+            or _T.is_qualified_done(status))
 
 
 def _blocks_when_vacuous(step: dict) -> bool:

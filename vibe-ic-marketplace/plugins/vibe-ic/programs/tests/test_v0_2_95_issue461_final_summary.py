@@ -160,8 +160,11 @@ def test_counts_snapshot_single_definition():
     a measurement that never happened. It did NOT leave the denominator:
     it is an unmet requirement, unlike SKIPPED-CONDITION (the step's own
     condition was evaluated and not met), which is subtracted."""
+    # R-0915-85 — MISSING joined FAIL, so the two keys are one and the count
+    # is their sum. Written as one key: the duplicate literal this replaces
+    # silently kept only the last of the two.
     rollup = {"PASS": 30, "NOT_MEASURED": 4, "WAIVED-DEFERRED": 2,
-              "NOT_APPLICABLE": 5, "FAIL": 0, "FAIL": 1}
+              "NOT_APPLICABLE": 5, "FAIL": 1}
     total = 42
     snap = g._counts_snapshot(rollup, total)
     assert snap["executed_pass"] == 30

@@ -52,7 +52,12 @@ from flow_compliance_check import check_step  # noqa: E402
 # credit visible instead of being caught by the pre-existing net.
 _VACUOUS_GATE = {"program_exit_zero": "mixed_signal_merge_check ."}
 
-_DONE_CLAIMS = {"PASS", "NOT_MEASURED", "PASS_WITH_WAIVERS", "NOT_MEASURED"}
+# R-0915-85 — a DONE CLAIM is a step that says it delivered a result
+# about the design, and NOT_MEASURED says the opposite in the word.
+# `VACUOUS_PASS`, `STRUCTURE-ONLY` and `INCOMPLETE` were in this set
+# because they were PASS-shaped; two of them are NOT_MEASURED now and
+# leave it, which is the r26 correction reaching this consumer.
+_DONE_CLAIMS = {"PASS", "PASS_WITH_WAIVERS"}
 
 
 def _step(sid, outputs, gate=None):

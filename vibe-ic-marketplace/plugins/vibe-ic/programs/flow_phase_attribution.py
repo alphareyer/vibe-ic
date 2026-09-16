@@ -320,7 +320,8 @@ def _earlier_waive(rep: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     emitted on a later attempt can show both facts instead of one winning.
     """
     for st in rep.get("steps") or []:
-        if st.get("name") == "rtl_gen" and st.get("status") == "WAIVED":
+        if (st.get("name") == "rtl_gen"
+                and st.get("status") == _V.Verdict.PASS_WITH_WAIVERS.value):
             ex = st.get("extras") or {}
             if ex.get("fallback_skill"):
                 return {"fallback_skill": ex["fallback_skill"],

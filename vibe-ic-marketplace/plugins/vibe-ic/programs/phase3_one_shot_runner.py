@@ -39341,7 +39341,10 @@ def _pnr_chain_continues(pnr_row: Optional["StepResult"]) -> bool:
         return False
     if pnr_row.status == "PASS":
         return True
-    if pnr_row.status != "WAIVED":
+    # R-0915-85 — `WAIVED` is `PASS_WITH_WAIVERS`. Left as it was this line
+    # was DEAD and the #1412 defect was back: no row carries the old word,
+    # so every non-PASS PnR stopped the chain and the GDS was dropped again.
+    if pnr_row.status != _V.Verdict.PASS_WITH_WAIVERS.value:
         return False
     return bool((pnr_row.extras or {}).get("pnr_signoff_writes_complete"))
 

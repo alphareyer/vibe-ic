@@ -135,30 +135,37 @@ def test_flow_graph_stays_acyclic(graph):
 
 # ── behavioural discriminator: the guard must now fire ───────────────────────
 
-def _report(d1_status: str, step1_status: str = "PASS") -> dict:
+def _report(d1_status: str, step1_status: str = "PASS",
+            d1_reason: str = "") -> dict:
     return {"steps": [
         {"id": _PHASE1_STEP, "name": _D1_NAME, "status": d1_status,
-         "stage": "stage_phase1"},
+         "reason_class": d1_reason, "stage": "stage_phase1"},
         {"id": "1", "name": "Spec-to-RTL", "status": step1_status,
          "stage": "stage1"},
     ]}
 
 
-def _violation_ids(d1_status: str, graph: dict) -> list:
+def _violation_ids(d1_status: str, graph: dict,
+                   d1_reason: str = "") -> list:
     return [(v["terminal_id"], v["signoff_id"])
-            for v in _cov.analyze(_report(d1_status), graph)
-            .get("ordering_violations", [])]
+            for v in _cov.analyze(_report(d1_status, d1_reason=d1_reason),
+                                  graph).get("ordering_violations", [])]
 
 
-@pytest.mark.parametrize("d1_status", ["FAIL", "FAIL"])
-def test_failed_or_missing_phase1_reds_a_passing_spec_to_rtl(d1_status, graph):
+# R-0915-85 — `MISSING` is `FAIL(missing_artefact)`, so the two arms of this
+# parametrize became one word. The pair that still differs is the REASON,
+# which is what the arms carry now.
+@pytest.mark.parametrize("d1_status,d1_reason", [("FAIL", ""),
+                                                 ("FAIL", "missing_artefact")])
+def test_failed_or_missing_phase1_reds_a_passing_spec_to_rtl(d1_status,
+                                                             d1_reason, graph):
     """THE discriminator. A Step 1 that reports PASS while D1 FAILED/is MISSING
     must produce an ordering violation — which flow_compliance_check converts
     into a non-promotable forced Overall FAIL."""
-    got = _violation_ids(d1_status, graph)
+    got = _violation_ids(d1_status, graph, d1_reason=d1_reason)
     assert ("1", _PHASE1_STEP) in got, (
-        f"Step 1 = PASS with D1 = {d1_status} must be an ordering violation; "
-        f"got {got!r}")
+        f"Step 1 = PASS with D1 = {d1_status}({d1_reason}) must be an ordering "
+        f"violation; got {got!r}")
 
 
 def test_failed_phase1_reds_the_whole_downstream_main_track(graph):
@@ -225,8 +232,14 @@ def test_waived_phase1_defers_only_what_declares_it_reads_phase1(graph):
     S = _fcc.StepResult
     ids = [s["id"] for s in steps if str(s.get("id")) != "P0"]
     results = [
+        # R-0915-85 — the downstream rows stand for what `MISSING` used to
+        # say: the step's declared output is not on disk. That is
+        # FAIL(missing_artefact) now, and the attribution walk keys on the
+        # REASON, so a bare FAIL here would mean "a gate found a defect" and
+        # would correctly be left alone by the cascade.
         S(id=sid, name="", stage="",
           status=("PASS_WITH_WAIVERS" if sid == _PHASE1_STEP else "FAIL"),
+          reason_class=("" if sid == _PHASE1_STEP else "missing_artefact"),
           reasons=(["ticket=ABC-1"] if sid == _PHASE1_STEP else []))
         for sid in ids
     ]

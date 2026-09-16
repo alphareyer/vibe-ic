@@ -33,8 +33,20 @@ sys.path.insert(0, str(PROG))
 import phase3_one_shot_runner as R  # noqa: E402
 
 
+#: R-0915-85 — the fields each word REQUIRES, supplied here so a fixture can
+#: name a status without also having to remember its obligations. A
+#: NOT_MEASURED with no reason and a NOT_APPLICABLE with no declaration are
+#: refused at the row, which is the point: they are not sayable.
+_OBLIGATION = {
+    "NOT_MEASURED": {"reason_class": "not_executed"},
+    "NOT_APPLICABLE": {"declared_by": "the input declares no PnR"},
+    "PASS_WITH_WAIVERS": {"attribution": "the sign-off engineer"},
+}
+
+
 def _row(status, **extras):
-    return R.StepResult("pnr", status, 1.0, "detail", [], dict(extras))
+    return R.StepResult("pnr", status, 1.0, "detail", [], dict(extras),
+                        **_OBLIGATION.get(status, {}))
 
 
 # ── the predicate ────────────────────────────────────────────────────────────
@@ -59,7 +71,9 @@ def test_waived_pnr_without_completed_writes_does_NOT_continue():
 
 
 def test_failed_blocked_and_absent_pnr_do_not_continue():
-    for st in ("FAIL", "NOT_MEASURED", "SKIP", "NOT_MEASURED"):
+    # R-0915-85 — BLOCKED and ENV_UNAVAILABLE are both NOT_MEASURED, and
+    # SKIP is NOT_APPLICABLE. Three words, three rows, no duplicates.
+    for st in ("FAIL", "NOT_MEASURED", "NOT_APPLICABLE"):
         assert R._pnr_chain_continues(_row(st)) is False, st
     # even with the flag: a FAILed PnR is not admitted by carrying the key
     assert R._pnr_chain_continues(

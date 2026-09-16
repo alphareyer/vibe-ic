@@ -7201,7 +7201,11 @@ def step_rtl_gen(project: Path, ic_class: str,
             # or author-handoff artifacts.  A failed/refused branch has no
             # authority to leak a generator's partial staging writes into the
             # canonical project; its complete transaction is the baseline.
-            publish_changes = result.status in ("PASS", "WAIVED")
+            # R-0915-85 — `WAIVED` is `PASS_WITH_WAIVERS`. Left as it was
+            # this comparison was DEAD: no step carries the old word, so a
+            # waived generator stopped publishing its own complete staging.
+            publish_changes = result.status in (
+                _V.Verdict.PASS.value, _V.Verdict.PASS_WITH_WAIVERS.value)
             commit_manifest = final if publish_changes else baseline
             final_link = None
             if publish_changes:
@@ -21368,7 +21372,7 @@ def step_emit_phase2_manifests(project: Path,
         runs = len(observed)
         if usb_hid_tester_step.status == "PASS":
             result = "PASS"
-        elif usb_hid_tester_step.status == "WAIVED":
+        elif usb_hid_tester_step.status == _V.Verdict.PASS_WITH_WAIVERS.value:
             result = "WAIVED"
         else:
             result = usb_hid_tester_step.status or "?"
@@ -21464,7 +21468,7 @@ def step_emit_phase2_manifests(project: Path,
             "scenarios": scenarios,
             "evidence": usb_hid_tester_step.detail,
         }
-    elif usb_hid_tester_step.status == "WAIVED":
+    elif usb_hid_tester_step.status == _V.Verdict.PASS_WITH_WAIVERS.value:
         # usb_hid_tester_verify stashes waiver metadata in extras["waiver"]
         # (ticket, evidence, reason, review_required) plus
         # extras["all_scenarios_passed"]=True. Pull from there with
@@ -21551,7 +21555,8 @@ def step_emit_phase2_manifests(project: Path,
     # (observed bytes per run + expected hex + timestamp). chip-AGNOSTIC —
     # any AID-class project whose usb_hid_tester_verify runs and reaches PASS /
     # WAIVED tiers gets the same evidence emission.
-    if usb_hid_tester_step is not None and usb_hid_tester_step.status in ("PASS", "WAIVED"):
+    if usb_hid_tester_step is not None and usb_hid_tester_step.status in (
+            _V.Verdict.PASS.value, _V.Verdict.PASS_WITH_WAIVERS.value):
         extras = usb_hid_tester_step.extras or {}
         observed = extras.get("observed") or []
         expected = extras.get("expected") or "?"
@@ -22750,8 +22755,14 @@ def main() -> int:
         # NOT_EXECUTED joins them for the same reason and a stronger one: no
         # simulation ran, so there is no mismatch to repair and every retry
         # would re-dispatch the same absent simulator.
-        if (sr.status in ("PASS", "SKIP", "WAIVED", "INCOMPLETE",
-                          "NOT_EXECUTED") or
+        # R-0915-85 — five words where there were five. SKIP is
+        # NOT_APPLICABLE; INCOMPLETE and NOT_EXECUTED are both NOT_MEASURED,
+        # and the sentence above ("no simulation ran, so there is no
+        # mismatch to repair") is exactly what that word says.
+        if (sr.status in (_V.Verdict.PASS.value,
+                          _V.Verdict.NOT_APPLICABLE.value,
+                          _V.Verdict.PASS_WITH_WAIVERS.value,
+                          _V.Verdict.NOT_MEASURED.value) or
                 rtl_repair_retry >= args.max_rtl_repair_retries):
             break
         if _before_entry("rtl_gen", _entry_site):
@@ -22916,7 +22927,9 @@ def main() -> int:
                                    ic_class=ic_class)
             plan.append(sr)
             # v1.6.100: WAIVED is a canonical good state (no rig available, ticket emitted). Skip RTL repair retry.
-            if (sr.status in ("PASS", "SKIP", "WAIVED") or
+            if (sr.status in (_V.Verdict.PASS.value,
+                              _V.Verdict.NOT_APPLICABLE.value,
+                              _V.Verdict.PASS_WITH_WAIVERS.value) or
                     rtl_repair_retry >= args.max_rtl_repair_retries):
                 break
             rtl_repair_retry += 1
