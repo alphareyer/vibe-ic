@@ -52,6 +52,7 @@ import pytest
 
 import _plugin_tree  # noqa: F401 — puts programs/ on sys.path
 import _analog_producer_common as PC
+import verdict as _V  # noqa: E402
 import analog_one_shot_runner as R
 import step_preflight as SPF
 from _analog_producer_fixture import block, make_project
@@ -118,7 +119,13 @@ def test_the_refusal_cannot_round_up_to_a_green_verdict(project, monkeypatch):
     p, blk = project
     _a3_answers(monkeypatch, PC.EX_ENV_REFUSED, REFUSAL_LINE + "\n")
     res = R.step_for_block(p, blk, "A3_netlist_gen")
-    assert res.status in R._FAIL_STATUSES, (res.status, R._FAIL_STATUSES)
+    # R-0915-85 — `_FAIL_STATUSES` was this runner's own list of which words
+    # meant "not green"; the flow owns that now and there is exactly one
+    # answer. An env refusal is NOT a FAIL (nothing about the design failed)
+    # and is NOT green either.
+    assert _V.is_non_green(res.status), (res.status, res.detail)
+    assert res.status == _V.Verdict.NOT_MEASURED.value, res
+    assert res.reason_class, "an env refusal must name what stopped it"
     assert R._aggregate_verdict([res]) != "PASS"
 
 

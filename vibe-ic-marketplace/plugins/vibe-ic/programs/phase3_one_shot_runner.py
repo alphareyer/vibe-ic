@@ -618,8 +618,21 @@ class StepResult:
 # the tool IS present and the input IS present, but the input cannot support
 # the operation, so NOTHING is known about the design. Never green — see
 # `_aggregate_verdict`.
-_VERDICT_TIERS = ("PASS", "FAIL", "BLOCKED", "SKIP", "WAIVED",
-                  "ENV_UNAVAILABLE")
+# R-0915-85 — THE DECLARED VOCABULARY IS THE FIVE, AND IT IS DERIVED.
+#
+# The six words above are what this module used to declare, and the comments
+# that precede them are the argument for the collapse rather than against it:
+# BLOCKED, SKIP, WAIVED and ENV_UNAVAILABLE are FOUR spellings whose stated
+# differences are all reasons -- "the tool is not installed here", "the input
+# cannot support the operation", "defer with a waivers.json entry" -- and the
+# module itself says two of them "both aggregate to PASS_WITH_WAIVERS for
+# verdict purposes; the split is only for diagnostics". A distinction that is
+# only for diagnostics belongs in `reason_class`, which is published beside the
+# word and is what the diagnostics now read.
+#
+# DERIVED from `verdict.Verdict`, not retyped: a word cannot be in this
+# module's declared vocabulary and outside the one the aggregator grades.
+_VERDICT_TIERS = tuple(v.value for v in _V.Verdict)
 
 #: vibe-ic#2153 — the prefix of the word `_aggregate_verdict` returns when the
 #: plan carries a status outside its known vocabulary. A REFUSAL, not a

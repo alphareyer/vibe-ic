@@ -98,7 +98,13 @@ def summary_detail(detail: object, status: Optional[str] = None,
     caller that wants the whole string.
     """
     text = one_line(detail)
-    if _tiers.is_non_green(status):
+    # `status` is OPTIONAL and its default is "not stated", which is not a
+    # verdict word and must not be parsed as one: `verdict.parse` refuses
+    # `None` by design, and most callers here pass only a detail and a width.
+    # An unstated status bounds the text, which is the conservative half —
+    # the full reason is only ever returned for a row that SAYS it is
+    # non-green.
+    if status is not None and _tiers.is_non_green(status):
         return text
     if width <= 0 or len(text) <= width:
         return text

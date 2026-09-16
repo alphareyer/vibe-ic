@@ -425,7 +425,7 @@ def test_producer_always_appends_the_self_reference(tmp_path):
     plan = [p3.StepResult(
         "lvs", "NOT_MEASURED", 0.1,
         "open-source LVS needs magic+netgen in container PATH",
-        extras={"missing_tool": "magic,netgen"}, reason_class="not_executed")]
+        extras={"missing_tool": "magic,netgen"}, reason_class="tool_absent")]
     p3._autogen_waivers_json(tmp_path, plan)
     emitted = json.loads((tmp_path / "waivers.json").read_text())
 
@@ -448,7 +448,7 @@ def test_that_producers_output_is_honoured_not_refused(tmp_path):
 
     p3._autogen_waivers_json(tmp_path, [p3.StepResult(
         "lvs", "NOT_MEASURED", 0.1, "needs netgen in PATH",
-        extras={"missing_tool": "netgen"}, reason_class="not_executed")])
+        extras={"missing_tool": "netgen"}, reason_class="tool_absent")])
     fcc, waivers = _load(tmp_path)
     assert 31 in waivers and waivers[31]["_env_unavailable"] is True
     assert len(fcc._ENV_WAIVER_EVIDENCE_NOTES) == 1

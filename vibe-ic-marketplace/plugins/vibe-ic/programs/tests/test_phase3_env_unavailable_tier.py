@@ -28,7 +28,7 @@ def test_aggregate_verdict_env_unavailable_is_pass_with_waivers() -> None:
         StepResult("synth", "PASS"),
         StepResult("pnr", "PASS"),
         StepResult("gds", "PASS"),
-        StepResult("drc", "NOT_MEASURED", detail="calibre missing", reason_class="not_executed"),
+        StepResult("drc", "NOT_MEASURED", detail="calibre missing", reason_class="tool_absent"),
     ]
     assert _aggregate_verdict(plan) == "NOT_MEASURED"
 
@@ -225,7 +225,7 @@ def test_autogen_waivers_includes_env_unavailable_steps(
         StepResult("drc", "NOT_MEASURED",
                    detail="calibre missing in env",
                    extras={"missing_tool": "calibre",
-                           "calibre_drc_deck": "/x.rule"}, reason_class="not_executed"),
+                           "calibre_drc_deck": "/x.rule"}, reason_class="tool_absent"),
         StepResult("lvs", "PASS_WITH_WAIVERS",
                    detail="design defer; needs extraction",
                    extras={"extracted_netlist": "phase3/x.spice"}),
@@ -237,8 +237,14 @@ def test_autogen_waivers_includes_env_unavailable_steps(
     waivers = data["waivers"]
     assert len(waivers) == 2
     by_step = {w["step"]: w for w in waivers}
-    assert by_step["drc"]["verdict_tier"] == "NOT_MEASURED"
-    assert by_step["lvs"]["verdict_tier"] == "PASS_WITH_WAIVERS"
+    # R-0915-85 — `verdict_tier` is the BINDING key `flow_compliance_check`
+    # reads, not a step status, so it keeps its own two words. The step's own
+    # verdict travels beside it, and both are asserted so neither can drift.
+    assert by_step["drc"]["verdict_tier"] == "ENV_UNAVAILABLE"
+    assert by_step["drc"]["step_verdict"] == "NOT_MEASURED"
+    assert by_step["drc"]["step_reason_class"] == "tool_absent"
+    assert by_step["lvs"]["verdict_tier"] == "WAIVED"
+    assert by_step["lvs"]["step_verdict"] == "PASS_WITH_WAIVERS"
     # ENV_UNAVAILABLE ticket cites the missing tool.
     assert "CALIBRE" in by_step["drc"]["ticket"]
     # ENV_UNAVAILABLE rationale flags ENV gap.
@@ -263,7 +269,7 @@ def test_autogen_waivers_respects_existing_human_authored_file(
     p.mkdir()
     (p / "waivers.json").write_text('{"_human_authored": true}')
     plan = [StepResult("drc", "NOT_MEASURED",
-                       extras={"missing_tool": "calibre"}, reason_class="not_executed")]
+                       extras={"missing_tool": "calibre"}, reason_class="tool_absent")]
     _autogen_waivers_json(p, plan)
     # File was not overwritten.
     data = json.loads((p / "waivers.json").read_text())
