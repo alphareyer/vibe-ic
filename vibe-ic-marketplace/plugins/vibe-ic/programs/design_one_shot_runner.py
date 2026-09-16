@@ -18609,11 +18609,6 @@ _POST_DFT_SKIP_OWN = {
 # markers now agree about why the DFT steps stood down, and the step-12 marker
 # still OWNS its output so it cannot mask a different step in the shared
 # phase2/stage2/synth/ directory.
-_POST_DFT_SKIP_DECLARED = {
-    "gate_reason": "l20_dft_contract",
-    "skips_required_output": "phase2/stage2/synth/post_dft_netlist.v",
-}
-
 #: The four L20 fields whose simultaneous absence IS the design's declaration
 #: that it carries no DFT. Byte-for-byte the `all_absent` clause that steps 11
 #: and 12 carry in `flow/phase1_phase2_phase3.yaml`, so the runner's marker and
@@ -18622,6 +18617,36 @@ _POST_DFT_SKIP_DECLARED = {
 #: stay identical.
 _L20_DFT_ABSENT_FIELDS = {"dft_present": False, "scan_chains": [],
                           "bist_mbist": [], "jtag_tap": None}
+
+_POST_DFT_SKIP_DECLARED = {
+    "gate_reason": "l20_dft_contract",
+    "skips_required_output": "phase2/stage2/synth/post_dft_netlist.v",
+    # R-0915-63 — the marker carries the FACTS, not only the sentence.
+    #
+    # WHY A STRUCTURED CITATION AND NOT THE PROSE. The `reason` this marker
+    # ships already names L20 and its four fields in English, and it would
+    # have been easy to let the consumer read that. It is the same mistake I
+    # was corrected for in #2272: a DESIGN_DECLARED_NA granted from a sentence
+    # is a clue treated as a declaration. The consumer re-derives this
+    # citation FROM L20'S OWN BYTES, so the marker is a POINTER to evidence,
+    # never the evidence.
+    #
+    # MEASURED, and the reason R-0915-63 exists: run33 on main 7700250eb
+    # refused to dispatch PnR — "[preflight] pnr: REFUSED TO RUN: 1 declared
+    # input(s) ABSENT — phase2/stage2/synth/post_dft_netlist.v (owed by step
+    # 12, read by step 15)" — and 18 steps went MISSING. The ONLY difference
+    # from the green run before it was that this marker's `capability_flag`
+    # had gone null: R-0915-57 rightly replaced a capability-gap skip with a
+    # DESIGN-DECLARED one, a STRONGER statement, and the excuse path knew only
+    # how to honour the weaker. The flag is NOT restored — the design has no
+    # such capability gap, and re-minting one would be the false claim R-57
+    # removed.
+    "reason_class": "DESIGN_DECLARED_NA",
+    "declaration": {
+        "l_doc": "L20",
+        "fields": dict(sorted(_L20_DFT_ABSENT_FIELDS.items())),
+    },
+}
 
 
 def l20_declares_no_dft(project: Path) -> bool:
