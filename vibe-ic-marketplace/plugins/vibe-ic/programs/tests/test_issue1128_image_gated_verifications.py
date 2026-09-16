@@ -118,7 +118,7 @@ def test_an_unreachable_image_is_NOT_CHECKED_and_never_a_pass(tmp_path, capsys,
     rc = G.main(["--tests", str(d), "--image", _BOGUS])
     err = capsys.readouterr().err
     assert rc == G.RC_NOT_CHECKED == 2, (rc, err)
-    assert "NOT_MEASURED" in err, err
+    assert "NOT_CHECKED" in err, err
     assert "test_gated.py" in err, err
 
 

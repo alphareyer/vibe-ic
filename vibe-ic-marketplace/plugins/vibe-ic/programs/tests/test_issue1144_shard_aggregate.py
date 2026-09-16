@@ -80,7 +80,7 @@ def test_a_complete_partition_passes_and_states_its_denominator(tmp_path, roster
 @pytest.mark.parametrize("states,expect", [
     (["PASS"] * 6, RC_OK),
     (["PASS", "PASS", "FAIL", "PASS", "PASS", "PASS"], RC_NOT_CLEAN),
-    (["PASS", "NOT_MEASURED", "PASS", "PASS", "PASS", "PASS"], RC_NOT_CLEAN),
+    (["PASS", "NOT_CHECKED", "PASS", "PASS", "PASS", "PASS"], RC_NOT_CLEAN),
     (["PASS", "PASS", "PASS", "WROTE_CORPUS", "PASS", "PASS"], RC_NOT_CLEAN),
 ])
 def test_the_sharded_verdict_equals_the_serial_verdict(tmp_path, roster,

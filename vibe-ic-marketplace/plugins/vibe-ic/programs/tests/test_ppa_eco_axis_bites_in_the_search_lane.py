@@ -492,7 +492,7 @@ def test_route_the_search_bridge_stops_publishing_it_as_eligible(tmp_path):
     v = _bridge(routed, deleted_spares(), "deleted")
     assert v.verdict == S.FEAS_UNDETERMINED
     assert v.verdict != S.FEAS_ELIGIBLE
-    assert v.terms[F.ECO_AXIS] == "NOT_MEASURED"
+    assert v.terms[F.ECO_AXIS] == "NOT_CHECKED"
 
 
 def test_route_a_proven_ip_delivery_is_still_not_applicable(tmp_path):

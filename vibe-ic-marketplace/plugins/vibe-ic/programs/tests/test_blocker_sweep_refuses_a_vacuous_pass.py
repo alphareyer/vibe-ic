@@ -78,7 +78,7 @@ def test_a_corpus_of_only_pre_contract_reports_is_not_a_pass(tmp_path):
     rc, res = _sweep(tmp_path, {"old1.json": _pre_contract_report(1),
                                 "old2.json": _pre_contract_report(2)})
     assert rc == 2
-    assert res["verdict"] == "NOT_MEASURED"
+    assert res["verdict"] == "NOT_CHECKED"
     assert res["reports_checked"] == 2
     assert res["pre_contract_reports"] == 2
     assert res["reports_exercising_the_contract"] == 0
@@ -88,7 +88,7 @@ def test_a_tree_with_no_compliance_report_at_all_is_not_a_pass(tmp_path):
     """The emptier half of the same hole: JSON everywhere, none of it ours."""
     rc, res = _sweep(tmp_path, {"unrelated.json": {"hello": "world"}})
     assert rc == 2
-    assert res["verdict"] == "NOT_MEASURED"
+    assert res["verdict"] == "NOT_CHECKED"
     assert res["reports_checked"] == 0
     assert res["reports_exercising_the_contract"] == 0
     assert res["non_report_json_skipped"] == 1
