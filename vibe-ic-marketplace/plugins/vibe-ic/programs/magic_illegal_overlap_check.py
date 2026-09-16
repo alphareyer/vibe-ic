@@ -275,6 +275,121 @@ def parse_feedback(text: str) -> Tuple[List[Record], List[str]]:
     return records, defects
 
 
+#: R-0915-69c — 22 RECTANGLES ARE NOT 22 DEFECTS.
+#:
+#: MEASURED, sha256 x sky130A, lane icsha2 run15 (main 385445351), front door.
+#: This gate published, correctly and at the right threshold:
+#:
+#:     "the extractor reported 22 illegal overlap(s), against a threshold of 0"
+#:
+#: and a `magic_illegal_overlap.json` carrying all 22 boxes. A triager reading
+#: that has 22 bare rectangles and no way to know how many PLACES they are.
+#: Attributed by hand afterwards — intersecting every box with the LEF met1 OBS
+#: of all 11278 placed instances, transformed by placement and orientation —
+#: they are THREE flip-flop instances:
+#:
+#:     _18133_ edfxtp_1 @FS   5 rect   x 21.655..29.150 um
+#:     _18720_ dfxtp_1  @FS  10 rect   x 51.565..55.565 um  (incl. the one via1)
+#:     _18814_ dfxtp_1  @FS   7 rect   x 68.125..72.125 um
+#:
+#: all crossed by ONE horizontal met1 wire (`net4772`) at y = 417.450 um. The
+#: count over-states the defect count sevenfold, because magic files one
+#: feedback area per MAXIMAL RECTANGLE of a decomposed region — the same shape
+#: this repository already recorded once, where a tile reported a violation it
+#: did not own.
+#:
+#: WHAT IS ADDED IS DISCLOSURE, AND ONLY DISCLOSURE. The threshold stays 0, the
+#: gate still counts what it counted, `gate_count` is untouched and the verdict
+#: is taken from exactly the same number. What changes is that the finding also
+#: says how many CONNECTED REGIONS those rectangles form and where each one is,
+#: so the reader can go to the geometry instead of to a list of 22 slivers.
+#: Clustering can only ever GROUP rectangles, never drop one: every input box
+#: lands in exactly one region, and the module asserts that sum.
+#:
+#: TOUCHING COUNTS AS CONNECTED. magic decomposes a region into rectangles that
+#: share edges, so edge-contact is the join — an `<=` comparison, not `<`. Two
+#: rectangles that merely come close stay separate, which is why run15's 22
+#: yield FOUR regions and not three: `_18720_`'s overlap sits on two different
+#: met1 straps of the same cell with a 0.2 um gap between them, and calling
+#: those one region would be a claim the geometry does not make.
+def cluster_regions(
+        records: "List[Record]") -> List[Dict[str, Any]]:
+    """Group located records into connected regions (overlapping or touching).
+
+    PURE — records in, regions out, no filesystem and no tool. Records with no
+    box cannot be located and are returned as their own unlocated region, never
+    silently dropped.
+    """
+    boxed = [r for r in records if r.box]
+    parent = list(range(len(boxed)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(boxed)):
+        a = boxed[i].box
+        for j in range(i + 1, len(boxed)):
+            b = boxed[j].box
+            # `<=` — magic's own decomposition shares edges.
+            if a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]:
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[ri] = rj
+
+    groups: Dict[int, List[int]] = {}
+    for i in range(len(boxed)):
+        groups.setdefault(find(i), []).append(i)
+
+    regions: List[Dict[str, Any]] = []
+    for members in groups.values():
+        boxes = [boxed[i].box for i in members]
+        regions.append({
+            "rectangles": len(members),
+            "bbox": [min(b[0] for b in boxes), min(b[1] for b in boxes),
+                     max(b[2] for b in boxes), max(b[3] for b in boxes)],
+            "lines": sorted(boxed[i].line for i in members),
+        })
+    regions.sort(key=lambda r: (r["bbox"][0], r["bbox"][1]))
+    unlocated = [r for r in records if not r.box]
+    if unlocated:
+        # NEVER DROPPED. A record with no box is a record this module could not
+        # place, and saying so is the whole point of the `box=None` path above.
+        regions.append({"rectangles": len(unlocated), "bbox": None,
+                        "lines": sorted(r.line for r in unlocated)})
+    # Every input record lands in exactly one region — clustering groups, it
+    # never filters.
+    assert sum(r["rectangles"] for r in regions) == len(records)
+    return regions
+
+
+def _regions_sentence(regions: List[Dict[str, Any]], records: int) -> str:
+    """The WHERE clause appended to the verdict finding.
+
+    Says nothing when there is nothing to add — one rectangle, or no located
+    record at all — so a single-defect report is not padded with a restatement
+    of itself.
+    """
+    located = [r for r in regions if r["bbox"]]
+    if not located or records <= 1:
+        return ""
+    head = (f" Those {records} rectangle(s) form {len(located)} CONNECTED "
+            f"REGION(S) — magic files one feedback area per maximal rectangle "
+            f"of a decomposed region, so the count above is rectangles, not "
+            f"places. The regions, in magic internal units: ")
+    body = "; ".join(
+        f"[{r['bbox'][0]} {r['bbox'][1]} {r['bbox'][2]} {r['bbox'][3]}] "
+        f"({r['rectangles']} rect)" for r in located[:12])
+    tail = "." if len(located) <= 12 else f"; and {len(located) - 12} more."
+    unlocated = sum(r["rectangles"] for r in regions if not r["bbox"])
+    if unlocated:
+        tail += (f" {unlocated} record(s) carry no bounding box and could not "
+                 f"be placed — counted, never dropped.")
+    return head + body + tail
+
+
 def _unescape(s: str) -> str:
     return s.replace('\\"', '"').replace("\\\\", "\\")
 
@@ -446,6 +561,7 @@ def check(project: Path, under: Optional[str] = None) -> Dict[str, Any]:
     overlaps: List[Dict[str, Any]] = []
     unreadable: List[str] = []
     structural_defects: List[str] = []
+    all_records: List[Record] = []
 
     for path in files:
         try:
@@ -464,6 +580,7 @@ def check(project: Path, under: Optional[str] = None) -> Dict[str, Any]:
         record_count += len(f_records)
         structural_defects += [f"{path.name}: {d}" for d in defects]
         overlaps += [dict(r.as_dict(), file=path.name) for r in f_records]
+        all_records += f_records
         per_file.append({
             "file": path.name, "bytes": len(text),
             "string_count": f_string, "structural_count": f_structural,
@@ -475,6 +592,10 @@ def check(project: Path, under: Optional[str] = None) -> Dict[str, Any]:
     base["per_file"] = per_file
     base["overlaps"] = overlaps[:50]
     base["structural_defects"] = structural_defects[:50]
+    # R-0915-69c — WHERE, not just HOW MANY. See `cluster_regions`.
+    _regions = cluster_regions(all_records)
+    base["regions"] = _regions[:50]
+    base["region_count"] = len(_regions)
 
     # Every candidate file unreadable: the channel exists and we cannot read it.
     if unreadable and not per_file:
@@ -630,7 +751,8 @@ def check(project: Path, under: Optional[str] = None) -> Dict[str, Any]:
                 f"connect, so the `.subckt` it went on to write describes a "
                 f"design the layout does not. An LVS run over that netlist can "
                 f"report a unique match and mean nothing. Fix the layout at "
-                f"the reported rectangle(s) and re-extract; do not compare."),
+                f"the reported rectangle(s) and re-extract; do not compare."
+                + _regions_sentence(_regions, record_count)),
         })
         base["summary"] = {"skipped": False, "reason": "illegal_overlaps",
                            "files_found": len(per_file)}
