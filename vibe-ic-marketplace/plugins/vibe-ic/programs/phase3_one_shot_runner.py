@@ -30498,10 +30498,16 @@ def step_io_pad_chip_top_gen(project: Path, container: Optional[str] = None,
         rc, out, err = cp.returncode, cp.stdout, cp.stderr
     detail = (out or err or "").strip().splitlines()
     note = "; ".join(detail[-3:]) if detail else ""
-    status = {0: "PASS", 2: "SKIP"}.get(rc, "FAIL" if rc == 1
-                                        else "ENV_UNAVAILABLE")
+    # R-0915-85 — rc 2 was `SKIP`, an unexpected rc `ENV_UNAVAILABLE`. Both
+    # are NOT_MEASURED, told apart by the reason; rc 1 stays a real FAIL.
+    status, reason = {
+        0: (_V.Verdict.PASS.value, ""),
+        1: (_V.Verdict.FAIL.value, ""),
+        2: (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.NOT_EXECUTED.value),
+    }.get(rc, (_V.Verdict.NOT_MEASURED.value,
+               _V.ReasonClass.TOOL_ABSENT.value))
     return StepResult("io_pad_chip_top_gen", status, time.time() - t0,
-                      f"rc={rc} {note}".strip())
+                      f"rc={rc} {note}".strip(), reason_class=reason)
 
 
 def step_pad_ring_gen(project: Path, container: Optional[str] = None,
@@ -30515,7 +30521,10 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
     """
     t0 = time.time()
     notes: List[str] = []
-    status = "SKIP"
+    # R-0915-85 — the default before anything ran: nothing measured, because
+    # nothing was dispatched yet.
+    status = _V.Verdict.NOT_MEASURED.value
+    reason = _V.ReasonClass.NOT_EXECUTED.value
     try:
         pdk_root, pdk_tree = (_padring_pdk_root_and_tree(pdk, container)
                               if pdk else (None, None))
@@ -30565,10 +30574,14 @@ def step_pad_ring_gen(project: Path, container: Optional[str] = None,
         detail = (out or err or "").strip().splitlines()
         notes.append(f"{name}: rc={rc} {detail[0] if detail else ''}".strip())
         if rc == 0:
-            status = "PASS"
+            status, reason = _V.Verdict.PASS.value, ""
             continue
-        status = "SKIP" if rc == 2 else ("FAIL" if rc == 1
-                                          else "ENV_UNAVAILABLE")
+        status, reason = {
+            1: (_V.Verdict.FAIL.value, ""),
+            2: (_V.Verdict.NOT_MEASURED.value,
+                _V.ReasonClass.NOT_EXECUTED.value),
+        }.get(rc, (_V.Verdict.NOT_MEASURED.value,
+                   _V.ReasonClass.TOOL_ABSENT.value))
         break
 
     out_files = [
@@ -30988,7 +31001,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # to the floorplan.  The producer is idempotent and writes only its own
     # wrapper/record; a design with no declared pad placement SKIPs.
     _padring_producer = _padring_producer_dispatch(project, container, pdk)
-    if _padring_producer.status not in ("PASS", "SKIP"):
+    if _padring_producer.status not in (_V.Verdict.PASS.value,
+                                          _V.Verdict.NOT_MEASURED.value):
         print(f"[phase3] io_pad_chip_top_gen: {_padring_producer.status} — "
               f"{_padring_producer.detail}", file=sys.stderr)
 
@@ -48450,13 +48464,21 @@ def step_digital_hardmacro_gen(project: Path,
         return stopped
     detail = (cp.stdout or cp.stderr or "").strip().splitlines()
     msg = detail[0] if detail else f"rc={cp.returncode}"
-    status = {0: "PASS", 1: "SKIP"}.get(cp.returncode, "ENV_UNAVAILABLE")
+    # R-0915-85 — rc 1 was `SKIP` (the producer declined) and anything else
+    # `ENV_UNAVAILABLE` (it could not be launched here). Both are
+    # NOT_MEASURED; the reason is what told them apart and it is now said.
+    status, reason = {
+        0: (_V.Verdict.PASS.value, ""),
+        1: (_V.Verdict.NOT_MEASURED.value,
+            _V.ReasonClass.NOT_EXECUTED.value),
+    }.get(cp.returncode,
+          (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.TOOL_ABSENT.value))
     out: List[str] = []
     hm = project / "phase3" / "stage4" / "hardmacro"
     if hm.is_dir():
         out = [str(f) for f in sorted(hm.iterdir()) if f.is_file()]
     return StepResult("digital_hardmacro_gen", status, time.time() - t0,
-                      msg, out)
+                      msg, out, reason_class=reason)
 
 
 _IP_RELEASE_DOCS_CONTEXT_REL = Path(
@@ -48560,8 +48582,15 @@ def step_ip_release_docs_gen(
         return stopped
     detail_lines = (cp.stdout or cp.stderr or "").strip().splitlines()
     detail = detail_lines[0] if detail_lines else f"rc={cp.returncode}"
-    status = {0: "PASS", 1: "SKIP", 2: "SKIP"}.get(cp.returncode,
-                                                   "ENV_UNAVAILABLE")
+    # R-0915-85 — see `step_digital_hardmacro_gen`: rc 1/2 was `SKIP` (the
+    # producer declined) and anything else `ENV_UNAVAILABLE` (it could not be
+    # launched here). Both are NOT_MEASURED, told apart by the reason.
+    status, reason = {
+        0: (_V.Verdict.PASS.value, ""),
+        1: (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.NOT_EXECUTED.value),
+        2: (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.NOT_EXECUTED.value),
+    }.get(cp.returncode,
+          (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.TOOL_ABSENT.value))
     doc_root = project / "phase3" / "stage4" / "documentation" / "ip"
     outputs = [str(context)]
     if doc_root.is_dir():
@@ -48570,7 +48599,8 @@ def step_ip_release_docs_gen(
     return StepResult("ip_release_docs_gen", status, time.time() - t0,
                       detail, outputs,
                       {"producer_rc": cp.returncode, "flow_step": "37.5ip",
-                       "run_context": context.relative_to(project).as_posix()})
+                       "run_context": context.relative_to(project).as_posix()},
+                      reason_class=reason)
 
 
 def _canonical_step_condition(project: Path, step_id: str
@@ -48979,7 +49009,7 @@ def step_tapeout_docs_gen(project: Path) -> StepResult:
     detail_lines = (cp.stdout or cp.stderr or "").strip().splitlines()
     detail = detail_lines[0] if detail_lines else f"rc={cp.returncode}"
     status = "PASS" if cp.returncode == 0 else (
-        "SKIP" if cp.returncode == 1 else "ENV_UNAVAILABLE")
+        _V.Verdict.NOT_MEASURED.value)
     outputs = ([str(p) for p in sorted(out_dir.glob("*.html"))]
                if out_dir.is_dir() else [])
     return StepResult("tapeout_docs_gen", status, time.time() - t0,
@@ -49036,8 +49066,15 @@ def step_ic_release_docs_gen(project: Path) -> StepResult:
         return stopped
     detail_lines = (cp.stdout or cp.stderr or "").strip().splitlines()
     detail = detail_lines[0] if detail_lines else f"rc={cp.returncode}"
-    status = {0: "PASS", 1: "SKIP", 2: "SKIP"}.get(cp.returncode,
-                                                   "ENV_UNAVAILABLE")
+    # R-0915-85 — see `step_digital_hardmacro_gen`: rc 1/2 was `SKIP` (the
+    # producer declined) and anything else `ENV_UNAVAILABLE` (it could not be
+    # launched here). Both are NOT_MEASURED, told apart by the reason.
+    status, reason = {
+        0: (_V.Verdict.PASS.value, ""),
+        1: (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.NOT_EXECUTED.value),
+        2: (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.NOT_EXECUTED.value),
+    }.get(cp.returncode,
+          (_V.Verdict.NOT_MEASURED.value, _V.ReasonClass.TOOL_ABSENT.value))
     doc_root = project / "phase3" / "stage4" / "documentation" / "ic"
     outputs = ([str(f) for f in sorted(doc_root.rglob("*")) if f.is_file()]
                if doc_root.is_dir() else [])
@@ -61757,19 +61794,26 @@ def main() -> int:
                     _psc_result = _psc.check(project, _pnr_def)
                     _psc_verdict = _psc_result["verdict"]
                     _psc_note = _psc_result["note"]
-                    # PASS / VACUOUS_PASS -> PASS row (VACUOUS_PASS keeps its
-                    # own note so the vacuity is visible in the report).
-                    # FAIL -> FAIL row. ERROR ("could not parse the DEF") is
-                    # "cannot verify", NOT "violated": it becomes SKIP so the
-                    # gate never invents a violation it did not measure.
-                    _psc_status = {"PASS": "PASS", "VACUOUS_PASS": "PASS",
-                                   "FAIL": "FAIL"}.get(_psc_verdict, "SKIP")
+                    # The GATE's words on the left (that vocabulary is
+                    # untouched), the STEP's five on the right. R-0915-85:
+                    # ERROR ("could not parse the DEF") is "cannot verify", NOT
+                    # "violated" — NOT_MEASURED(execution_error), so the gate
+                    # never invents a violation it did not measure. VACUOUS_PASS
+                    # keeps its own note so the vacuity stays visible.
+                    _psc_status, _psc_reason = {
+                        "PASS": (_V.Verdict.PASS.value, ""),
+                        "VACUOUS_PASS": (_V.Verdict.PASS.value, ""),
+                        "FAIL": (_V.Verdict.FAIL.value, ""),
+                    }.get(_psc_verdict,
+                          (_V.Verdict.NOT_MEASURED.value,
+                           _V.ReasonClass.EXECUTION_ERROR.value))
                     plan.append(StepResult(
-                        "pad_side_constraint", _psc_status, 0.0, _psc_note))
+                        "pad_side_constraint", _psc_status, 0.0, _psc_note,
+                        reason_class=_psc_reason))
                 except Exception as _psc_exc:
                     plan.append(StepResult(
                         "pad_side_constraint", "NOT_MEASURED", 0.0,
-                        f"SKIP: pad_side_constraint_check could not run "
+                        f"NOT_MEASURED: pad_side_constraint_check could not run "
                         f"({_psc_exc}) — nothing is claimed about pad-side "
                         f"placement.", reason_class=_V.ReasonClass.EXECUTION_ERROR))
 

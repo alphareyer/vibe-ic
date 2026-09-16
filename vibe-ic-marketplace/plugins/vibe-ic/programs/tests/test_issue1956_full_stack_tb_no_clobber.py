@@ -129,7 +129,7 @@ def _tb(proj):
 def test_enhanced_tb_survives_rerun(tmp_path):
     proj = _scaffold(tmp_path)
     res1 = R.step_full_stack_tb_gen(proj, "proj_wrapper")
-    assert res1.status in ("PASS", "SKIP"), res1.detail
+    assert res1.status in ("PASS", "NOT_MEASURED"), res1.detail
     tb = _tb(proj)
     assert tb.is_file()
 
@@ -137,7 +137,7 @@ def test_enhanced_tb_survives_rerun(tmp_path):
     tb.write_text(_ENHANCED_TB)
 
     res2 = R.step_full_stack_tb_gen(proj, "proj_wrapper")
-    assert res2.status in ("PASS", "SKIP"), res2.detail
+    assert res2.status in ("PASS", "NOT_MEASURED"), res2.detail
     # THE defect: this used to come back as the 9%-coverage skeleton.
     assert tb.read_text() == _ENHANCED_TB, \
         "the enhanced full-stack TB was CLOBBERED by the rerun (#1956)"
@@ -184,7 +184,7 @@ def test_absent_tb_is_generated(tmp_path):
     tb = _tb(proj)
     assert not tb.exists()
     res = R.step_full_stack_tb_gen(proj, "proj_wrapper")
-    assert res.status in ("PASS", "SKIP"), res.detail
+    assert res.status in ("PASS", "NOT_MEASURED"), res.detail
     txt = tb.read_text()
     assert "module tb_proj_wrapper_full;" in txt
     assert "proj_wrapper u_dut (" in txt

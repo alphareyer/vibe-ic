@@ -1496,6 +1496,14 @@ def _write_sim_toolchain_record(run_dir: Path, project: Optional[Path],
 NOT_EXECUTED_STATUS = _V.Verdict.NOT_MEASURED.value
 NOT_EXECUTED_REASON = _V.ReasonClass.NOT_EXECUTED.value
 
+#: A sentinel row for `by_name.get(<step>, ...)` — "this runner never dispatched
+#: that step". It used to be built inline as `StepResult(name="x", status="?")`,
+#: and `"?"` was a word outside every vocabulary that only worked because
+#: nothing ever read it. The sentinel says what it is, in the five.
+_ABSENT_STEP = StepResult("<not dispatched>", _V.Verdict.NOT_MEASURED.value,
+                          reason_class=_V.ReasonClass.NOT_EXECUTED.value,
+                          detail="this runner did not dispatch that step")
+
 
 def _shutil_which(tool: str) -> Optional[str]:
     """`shutil.which`, named so a test can pin it without pinning every
@@ -10650,6 +10658,7 @@ def step_full_stack_tb_gen(project: Path,
     _rmc = results.get("register_map_coverage") or {}
     if results.get("functional_verified") is True:
         verdict_word = "PASS"
+        verdict_reason = ""
         note = (f"tb_{top_module}_full.v emitted + functionally verified "
                 f"({len(top_ports)} L9.top_ports → {len(inst_args)} DUT "
                 f"pins, {len(opcodes_hex)} L3 opcodes, golden-scored)")
@@ -10669,7 +10678,14 @@ def step_full_stack_tb_gen(project: Path,
         # anything. The detection kept computing; nothing acted on it.
         _rm_failed = (int(_rmc.get("scored_failed") or 0)
                       + int(_rmc.get("self_referential_failed") or 0))
-        verdict_word = "FAIL" if _rm_failed else "SKIP"
+        # R-0915-85 — the non-FAIL half is NOT a pass and never was: the note
+        # below says so in its own words ("NO blanket functional PASS is
+        # claimed"). Some registers were golden-scored and some cannot be —
+        # write-only addresses have no read golden — which is a PARTIAL
+        # population, and that is the reason the row now carries.
+        verdict_word = "FAIL" if _rm_failed else "NOT_MEASURED"
+        verdict_reason = ("" if _rm_failed
+                          else _V.ReasonClass.PARTIAL_POPULATION.value)
         note = (f"tb_{top_module}_full.v emitted; register-map TRANSACTION "
                 f"driver simulated {_rmc.get('addresses_probed')} documented "
                 f"address(es) and golden-scored "
@@ -10684,7 +10700,12 @@ def step_full_stack_tb_gen(project: Path,
                 f"have no read golden and the algorithmic RESULT oracle stays "
                 f"deferred, so NO blanket functional PASS is claimed.")
     else:
-        verdict_word = "SKIP"
+        # R-0915-85 — a CONNECTIVITY-ONLY skeleton golden-compares NOTHING, so
+        # nothing about functional correctness was measured. `no_population` is
+        # the reason: the oracle had no members, which a reader cannot tell
+        # from a partial run when both wear one word.
+        verdict_word = "NOT_MEASURED"
+        verdict_reason = _V.ReasonClass.NO_POPULATION.value
         note = (f"tb_{top_module}_full.v emitted as CONNECTIVITY-ONLY "
                 f"skeleton ({len(top_ports)} L9.top_ports → "
                 f"{len(inst_args)} DUT pins, {len(opcodes_hex)} L3 "
@@ -10719,7 +10740,7 @@ def step_full_stack_tb_gen(project: Path,
                       time.time() - t0,
                       note + _reconcile_note + _v1956_note + _warn_suffix,
                       [str(tb_path), str(sim_dir / "results.json")],
-                      _extras)
+                      _extras, reason_class=verdict_reason)
 
 
 # -------------------------------------------------------------------------
@@ -20880,7 +20901,7 @@ def step_emit_phase2_manifests(project: Path,
     rtl_dir = _pl.rtl_dir(project)
 
     # Step 2: lint
-    if (project / "reports").is_dir() or by_name.get("yosys_synth", StepResult(name="x", status="?")).status == "PASS":
+    if (project / "reports").is_dir() or by_name.get("yosys_synth", _ABSENT_STEP).status == _V.Verdict.PASS.value:
         w("reports/phase2/lint/rtl_hygiene.json", {
             "verdict": "PASS",
             "source": "yosys_synth (errors-as-fail)",

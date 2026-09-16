@@ -93,7 +93,14 @@ def _dispatch(proj: Path, site: str, fn=_ran) -> R.StepResult:
     sr = _spf.gate(proj, "design_one_shot_runner", site,
                    R._preflight_refusal(site), fn, proj, "chip_top")
     # `main()` records the site's row under the SITE name.
-    return R.StepResult(site, sr.status, 0.0, sr.detail, extras=sr.extras)
+    # R-0915-85 — a row re-published under the SITE name carries the
+    # structured fields with it. Dropping `reason_class` here is how a
+    # NOT_MEASURED row loses the reason its own producer named, which the row
+    # type now refuses outright.
+    return R.StepResult(site, sr.status, 0.0, sr.detail, extras=sr.extras,
+                        reason_class=getattr(sr, "reason_class", ""),
+                        declared_by=getattr(sr, "declared_by", ""),
+                        disclosures=list(getattr(sr, "disclosures", ()) or ()))
 
 
 def _registry(proj: Path, *sites: str) -> dict:
