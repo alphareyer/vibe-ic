@@ -195,20 +195,230 @@ def test_no_manifest_reader_treats_non_fail_as_a_pass() -> None:
                     f"manifest that reads INCONCLUSIVE as a pass: {line!r}")
 
 
+#: Ways a module can take the manifest's CONTENT, as they appear in an AST.
+_READ_METHODS = frozenset({"read_text", "read_bytes", "open", "readlines",
+                           "readline", "read"})
+_PARSE_FUNCS = frozenset({"load", "loads"})
+#: The CLI option through which a manifest reader is HANDED the path. Both
+#: shipped readers take it; see the second arm of `_manifest_readers_in`.
+_MANIFEST_OPTION = "--manifest"
+
+
+def _manifest_readers_in(path: Path) -> list:
+    """Where this module OPENS or PARSES `latest_results.jsonl`, by line.
+
+    NAMING THE FILE IS NOT READING IT, and the difference is the whole point of
+    this predicate. A module that builds the path and asks `.is_file()` learns
+    PRESENCE and never CONTENT: it cannot read a `status` field at all, so it
+    cannot read `INCONCLUSIVE` as a pass, which is the only thing the guard
+    above forbids. MEASURED 2026-09-16 (lane icsub2): `flow_compliance_check.py`
+    is exactly that shape at :8453 --
+    `str(project / "latest_results.jsonl") if (project /
+    "latest_results.jsonl").is_file() else None` -- handed to the P0 roster so
+    the MCP gate is N/A on a run that never drove the MCP server (R-0915-15).
+    It has named the file since 3ee62f3ae and has never opened it.
+
+    AND IT MUST NOT SIMPLY BE ADDED TO `known` EITHER, which is why this is a
+    predicate and not a longer list. It carries three genuine `!= "FAIL"` tests
+    -- over `result.status`, `r["verdict"]` and `overall` -- all in ITS OWN
+    verdict vocabulary, none of which is a value `writeManifest` ever wrote.
+    Listing it as a reader would make the source guard fire on three correct
+    lines, and the only ways out of that are a per-file exception list or a
+    weaker guard. Both are worse than asking the real question.
+
+    THE REAL QUESTION, asked of the AST rather than of the text, in TWO arms
+    because one was measurably not enough:
+
+      (a) does a manifest path expression reach a read? Taint starts at a
+          string literal containing `latest_results`, propagates through
+          assignment to a name, and is consumed by `open(x)`,
+          `json.load/loads(x)`, or `x.read_text()` and its siblings.
+
+      (b) does the module DECLARE `--manifest`? Arm (a) alone was WRONG, and
+          `test_the_two_known_readers_are_still_readers` is what said so:
+          `mcp_execution_verify.py` is a reader by trade and arm (a) could not
+          see it, because it is HANDED the path on the command line and reads
+          it in `parse_manifest(manifest_path)` -- the string `latest_results`
+          appears in that file only in its module docstring and in `--manifest`
+          help text. A predicate keyed on the literal is blind to every reader
+          that takes the path as an argument, which is how a reader is normally
+          written. `fpga_program_chain_attest_check.py` is the same shape.
+          `flow_compliance_check.py` declares no such option.
+
+    Narrow on purpose, and the residue is DISCLOSED rather than papered over: a
+    reader that neither names the file nor declares `--manifest` -- one handed
+    the path through some third channel -- is not caught here. The positive
+    control keeps arm (a) honest, the blindness control keeps both arms from
+    narrowing to nothing, and the source guard above is the second line of
+    defence in any case.
+    """
+    try:
+        src = path.read_text(errors="ignore")
+    except OSError:
+        return []
+    # SCOPE FIRST, and this is where the original test's predicate belongs: a
+    # module that never mentions `latest_results` is not about THIS manifest,
+    # so neither arm may speak about it. MEASURED: `--manifest` is a generic
+    # option name -- cross_layer_reference_check, handoff_bundle_check and
+    # content_pinned_authority_verified_only_at_merge each declare one for a
+    # manifest of their own, none of which writeManifest ever wrote. Arm (b)
+    # without this scope named all three.
+    if "latest_results" not in src:
+        return []
+    try:
+        tree = ast.parse(src)
+    except (SyntaxError, ValueError):
+        return []
+
+    def literal(node) -> bool:
+        return (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and "latest_results" in node.value)
+
+    tainted_names = set()
+
+    def tainted(node) -> bool:
+        if node is None:
+            return False
+        if isinstance(node, ast.Name) and node.id in tainted_names:
+            return True
+        return any(literal(n) or (isinstance(n, ast.Name)
+                                  and n.id in tainted_names)
+                   for n in ast.walk(node))
+
+    # Bindings first, and repeated until they settle, so a name assigned above
+    # its use -- or a chain of assignments -- is tainted by the time the read
+    # is examined.
+    for _ in range(4):
+        before = set(tainted_names)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and tainted(node.value):
+                targets = (node.targets if isinstance(node, ast.Assign)
+                           else [node.target])
+                for t in targets:
+                    for n in ast.walk(t):
+                        if isinstance(n, ast.Name):
+                            tainted_names.add(n.id)
+        if tainted_names == before:
+            break
+
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        # Arm (b): the module is handed the path on its own command line.
+        if isinstance(fn, ast.Attribute) and fn.attr == "add_argument":
+            for a in node.args:
+                if (isinstance(a, ast.Constant)
+                        and a.value == _MANIFEST_OPTION):
+                    hits.append("%s:%d declares %s"
+                                % (path.name, node.lineno, _MANIFEST_OPTION))
+        if isinstance(fn, ast.Name) and fn.id == "open":
+            if any(tainted(a) for a in node.args):
+                hits.append("%s:%d open(...)" % (path.name, node.lineno))
+        elif isinstance(fn, ast.Attribute):
+            if fn.attr in _READ_METHODS and tainted(fn.value):
+                hits.append("%s:%d .%s()" % (path.name, node.lineno, fn.attr))
+            elif fn.attr in _PARSE_FUNCS and any(tainted(a) for a in node.args):
+                hits.append("%s:%d json.%s()" % (path.name, node.lineno, fn.attr))
+    return sorted(set(hits))
+
+
 def test_the_reader_set_is_the_whole_set() -> None:
     """The guard above is only as good as its list of readers. Every program
-    that names the manifest file must be one of them (or be the producer-side
-    shell test), so adding a new reader without adding it here goes red."""
+    that READS the manifest must be one of them, so adding a real new reader
+    without adding it here goes red.
+
+    The membership test is `_manifest_readers_in`, not "mentions the filename":
+    the guard forbids a status comparison, and only a module that takes the
+    manifest's CONTENT can make one. There is deliberately NO exception list --
+    a module is in or out by what its own code does."""
     root = PROGRAMS.parent
-    named = set()
-    for path in root.rglob("*.py"):
-        if "latest_results" in path.read_text(errors="ignore"):
-            named.add(path.resolve())
     known = {VERIFY.resolve(), ATTEST.resolve()}
     tests_dir = (PROGRAMS / "tests").resolve()
-    extra = {p for p in named
-             if p not in known and tests_dir not in p.parents
-             and p.parent.name != "test"}
+    extra = {}
+    for path in root.rglob("*.py"):
+        p = path.resolve()
+        if p in known or tests_dir in p.parents or p.parent.name == "test":
+            continue
+        where = _manifest_readers_in(p)
+        if where:
+            extra[str(p)] = where
     assert not extra, (
         "new reader(s) of latest_results.jsonl are not covered by the "
-        f"non-FAIL guard: {sorted(str(p) for p in extra)}")
+        "non-FAIL guard: " + json.dumps(extra, indent=2))
+
+
+def test_a_planted_reader_is_detected(tmp_path: Path) -> None:
+    """POSITIVE CONTROL. A ratchet nobody can see fire is a ratchet nobody can
+    trust: the tightening above only narrows honestly if a REAL new reader
+    still trips it. Each body below is a shape a genuine consumer would use."""
+    shapes = {
+        "direct_open": 'open("latest_results.jsonl")\n',
+        "path_read_text": (
+            'from pathlib import Path\n'
+            'Path("x/latest_results.jsonl").read_text()\n'),
+        "bound_then_read": (
+            'from pathlib import Path\n'
+            'm = Path(root) / "latest_results.jsonl"\n'
+            'text = m.read_text()\n'),
+        "json_load": (
+            'import json\n'
+            'p = "latest_results.jsonl"\n'
+            'json.load(open(p))\n'),
+        "handed_the_path_on_argv": (
+            'import argparse, json\n'
+            'p = argparse.ArgumentParser()\n'
+            'p.add_argument("--manifest", required=True,\n'
+            '               help="Path to latest_results.jsonl")\n'
+            'a = p.parse_args()\n'
+            'json.loads(open(a.manifest).read())\n'),
+        "chained_binding": (
+            'from pathlib import Path\n'
+            'name = "latest_results.jsonl"\n'
+            'p = Path(d) / name\n'
+            'q = p\n'
+            'q.open()\n'),
+    }
+    for label, body in shapes.items():
+        f = tmp_path / (label + ".py")
+        f.write_text(body)
+        assert _manifest_readers_in(f), (
+            label + ": a real reader was NOT detected")
+
+
+def test_a_manifest_of_its_own_is_not_this_manifest(tmp_path: Path) -> None:
+    """NEGATIVE CONTROL for arm (b). `--manifest` is a generic option name:
+    three shipped programs declare one for a manifest of their own. Only a
+    module that is about THIS manifest may be judged by this ratchet."""
+    f = tmp_path / "other.py"
+    f.write_text(
+        'import argparse\n'
+        'p = argparse.ArgumentParser()\n'
+        'p.add_argument("--manifest", help="the handoff bundle manifest")\n'
+        'a = p.parse_args()\n'
+        'open(a.manifest).read()\n')
+    assert _manifest_readers_in(f) == []
+
+
+def test_a_presence_test_is_not_a_reader(tmp_path: Path) -> None:
+    """NEGATIVE CONTROL, and it is `flow_compliance_check.py`'s own shape,
+    transcribed. Asking whether the file EXISTS reaches no `status` field."""
+    f = tmp_path / "presence.py"
+    f.write_text(
+        'from pathlib import Path\n'
+        'def ctx(project):\n'
+        '    return {"mcp_manifest": (str(project / "latest_results.jsonl")\n'
+        '            if (project / "latest_results.jsonl").is_file()\n'
+        '            else None)}\n')
+    assert _manifest_readers_in(f) == []
+
+
+def test_the_two_known_readers_are_still_readers() -> None:
+    """The detector must not have narrowed so far that it sees nobody. If
+    either shipped reader stops being detected, this predicate has gone blind
+    and the ratchet above would be passing over an empty population."""
+    for reader in (VERIFY, ATTEST):
+        assert _manifest_readers_in(reader.resolve()), (
+            reader.name + " reads the manifest but the detector missed it — "
+            "the ratchet is measuring nothing")
