@@ -61,6 +61,16 @@ _BC = importlib.import_module("_blocker_classification")
 
 
 def _step(sid, status, **kw):
+    """R-0915-85 — a step row. `INCOMPLETE` is `NOT_MEASURED(partial_population)`
+    and `MISSING` is `FAIL(missing_artefact)`; #2186's subject is unchanged —
+    rule 7 tests whether the PREDECESSOR DELIVERED its declared outputs, not
+    what verdict word it wears."""
+    if status == "INCOMPLETE":
+        status, kw.setdefault("reason_class", "partial_population")
+        status = "NOT_MEASURED"
+    elif status == "MISSING":
+        kw.setdefault("reason_class", "missing_artefact")
+        status = "FAIL"
     rec = {
         "id": sid,
         "name": kw.pop("name", f"step {sid}"),
@@ -98,7 +108,7 @@ def test_delivered_predecessor_leaves_the_consumer_a_design_fact():
          "gate": {"program_exit_zero": "analog_a5_layout_check ."}},
     ]
     steps = [
-        _step("A4", "NOT_MEASURED",
+        _step("A4", "INCOMPLETE",
               reasons=["INCOMPLETE: the gate reports its input was applicable "
                        "and was NOT examined: analog_adc_enob_corner_check"],
               evidence=["phase3/analog/delta_sigma/corner_results.json",
@@ -132,7 +142,7 @@ def test_absent_predecessor_output_keeps_the_calibration_case_derived():
          "gate": {"program_exit_zero": "si_mcf_sta_check ."}},
     ]
     steps = [
-        _step(22, "FAIL",
+        _step(22, "MISSING",
               reasons=["no required_outputs found (expected: "
                        "['phase3/stage3/spef/*.spef'])"]),
         _step(23, "FAIL",
@@ -212,7 +222,7 @@ def test_the_hawaii_adc_analog_chain_publishes_two_design_facts():
     cascade = ("blocked-by-upstream(step A5): cascade of the first mid-chain "
                "FAIL — the chain stops at step A5")
     steps = [
-        _step("A4", "NOT_MEASURED",
+        _step("A4", "INCOMPLETE",
               reasons=["INCOMPLETE: the gate reports its input was applicable "
                        "and was NOT examined: analog_adc_enob_corner_check"],
               evidence=["phase3/analog/delta_sigma/corner_results.json",
@@ -229,14 +239,14 @@ def test_the_hawaii_adc_analog_chain_publishes_two_design_facts():
                        "LVS-match)"],
               evidence=["phase3/analog/delta_sigma/drc.report",
                         "phase3/analog/ldo/comp.json"]),
-        _step("A7", "FAIL",
+        _step("A7", "MISSING",
               reasons=["no required_outputs found (expected: "
                        "['phase3/analog/*/pre_vs_post.json'])", cascade],
               cascade_note=cascade),
         _step("A8", "FAIL",
               reasons=["program failed: analog_hardmacro_check ."],
               evidence=["phase3/analog/hardmacro/ldo/ldo.gds"]),
-        _step("A9", "FAIL",
+        _step("A9", "MISSING",
               reasons=["no required_outputs found (expected: "
                        "['phase3/mixed_signal/cosim/*.json'])", cascade],
               cascade_note=cascade),
@@ -273,10 +283,15 @@ def test_every_blocker_class_stays_reachable():
     ]
     steps = [
         _step("P", "FAIL", reasons=[f"{_BC.CRASH_MARKER} Traceback"]),
-        _step("D0", "NOT_MEASURED", reasons=["INCOMPLETE: one sub-gate"],
+        _step("D0", "INCOMPLETE", reasons=["INCOMPLETE: one sub-gate"],
               evidence=["phase3/analog/ldo/corner_results.json"]),
         _step("D", "FAIL", reasons=["program failed: a_check ."]),
-        _step("M", "NOT_MEASURED", reasons=["setup absent"]),
+        # R-0915-85 — `SKIPPED-SETUP-REQUIRED` is
+        # `NOT_MEASURED(input_absent)`: the step could not start because a
+        # declared input is not on this host. `_blocker_classification` reads
+        # the reason to reach MISSING_CAPABILITY, so the row must carry it.
+        _step("M", "NOT_MEASURED", reason_class="input_absent",
+              reasons=["setup absent"]),
         _step("U", "FAIL", reasons=[f"{_BC.TIMEOUT_MARKER} 0 progress"]),
     ]
     reached = {b["classification"]

@@ -50,7 +50,7 @@ def test_stale_reviewed_hash_blocks_without_sample(tmp_path):
     try:
         dispatch._export_accepted_shape_c_samples("verilogeval-v2", run)
     except SystemExit as exc:
-        assert "NOT_MEASURED" in str(exc)
+        assert "BLOCKED" in str(exc)
         assert "reviewed hash" in str(exc) or "ACCEPTED" in str(exc)
     else:
         raise AssertionError("stale hash did not block")
@@ -84,7 +84,7 @@ def test_compile_failure_blocks_the_claimed_blocking_emit(tmp_path):
     try:
         dispatch._export_accepted_shape_c_samples("verilogeval-v2", run)
     except SystemExit as exc:
-        assert "NOT_MEASURED" in str(exc)
+        assert "BLOCKED" in str(exc)
         assert "standalone iverilog -g2012 compile FAILED" in str(exc)
     else:
         raise AssertionError("a non-compiling sample reached the scorer")
@@ -145,7 +145,7 @@ def test_supplied_rtl_gate_is_read_from_not_attempted_on_export(tmp_path):
     """
     run, dataset, _ = _fixture(tmp_path)
     task = _task(run)
-    task["program_verification"]["rtl_gen"] = "NOT_APPLICABLE"
+    task["program_verification"]["rtl_gen"] = "SKIPPED-BY-ENTRY"
     (run / "needs_ai_review.jsonl").write_text(json.dumps(task) + "\n")
     solve = json.loads((run / "solve_report.json").read_text())
     # Model a real supplied-RTL re-entry: its Program report records the skip
@@ -154,7 +154,7 @@ def test_supplied_rtl_gate_is_read_from_not_attempted_on_export(tmp_path):
     doc = json.loads(report.read_text())
     for step in doc["steps"]:
         if step["name"] == "rtl_gen":
-            step["status"] = "NOT_APPLICABLE"
+            step["status"] = "SKIPPED-BY-ENTRY"
     report.write_text(json.dumps(doc) + "\n")
     solve["results"][0]["phases"]["phase3_verifying"] = \
         fpa.phase3_verifying(doc, None)
@@ -267,7 +267,7 @@ def test_malformed_solve_report_containers_block_without_sample(
     else:
         solve["results"][0]["phases"]["phase3_verifying"]["ran"] = "bad"
     (run / "solve_report.json").write_text(json.dumps(solve) + "\n")
-    with pytest.raises(SystemExit, match="NOT_MEASURED"):
+    with pytest.raises(SystemExit, match="BLOCKED"):
         dispatch._export_accepted_shape_c_samples(
             "verilogeval-v2", run)
     assert not (run / "samples" / "Prob900_neutral_sample01.sv").exists()

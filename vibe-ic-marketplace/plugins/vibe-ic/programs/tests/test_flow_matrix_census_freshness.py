@@ -10,7 +10,7 @@ WHAT WENT WRONG
 and, two lines underneath it, the command that disproves it. Run on
 ``origin/main`` at ``dee025059`` on 2026-08-09::
 
-    Counter({'ENFORCED': 481, 'NA': 12, 'PASS_WITH_WAIVERS': 11})
+    Counter({'ENFORCED': 481, 'NA': 12, 'WAIVED': 11})
 
 Four rows had drifted. Nothing recomputed the table, so the campaign's headline
 number was a number someone typed once — while every cell underneath it was
@@ -244,7 +244,7 @@ def enforcement_census():
     return {(step, dim): _Verdict(label)
             for dim in _dims()
             for step, label in (("1", "ENFORCED"),
-                                ("2", "PASS_WITH_WAIVERS"),
+                                ("2", "WAIVED"),
                                 ("3", "NA"))}
 
 
@@ -480,7 +480,7 @@ def test_the_published_total_equals_the_live_census(under_declared_provenance):
         "NOT_MEASURED": sum(
             1 for v in states.values()
             if v.endswith("-SKIPPED") or v == "NOT_MEASURED"),
-        "PASS_WITH_WAIVERS": sum(1 for v in states.values() if v == "PASS_WITH_WAIVERS"),
+        "WAIVED": sum(1 for v in states.values() if v == "WAIVED"),
         "NA": sum(1 for v in states.values() if v == "NA"),
     }
     live_split = {b: sum(1 for v in subs.values() if v == b) for b in SUB.BUCKETS}
@@ -493,9 +493,9 @@ def test_the_published_total_equals_the_live_census(under_declared_provenance):
         f"substituted={row['substituted']}, undeclared={row['undeclared']}) "
         f"does not reproduce; the tree says {live_split}.\n"
         f"Regenerate: {REGENERATE}")
-    assert (row["waived"], row["na"]) == (live["PASS_WITH_WAIVERS"], live["NA"]), (
+    assert (row["waived"], row["na"]) == (live["WAIVED"], live["NA"]), (
         f"the published WAIVED/NA ({row['waived']}/{row['na']}) does not "
-        f"reproduce; the tree says {live['PASS_WITH_WAIVERS']}/{live['NA']}.\n"
+        f"reproduce; the tree says {live['WAIVED']}/{live['NA']}.\n"
         f"Regenerate: {REGENERATE}")
     assert row["contradicted"] == live["CONTRADICTED"], (
         f"the published CONTRADICTED ({row['contradicted']}) does not "

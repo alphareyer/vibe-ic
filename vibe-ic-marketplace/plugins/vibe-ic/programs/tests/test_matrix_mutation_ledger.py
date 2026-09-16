@@ -463,7 +463,7 @@ def test_the_grid_gate_names_the_cell_that_moved():
 
     # 3. a non-ENFORCED cell changes KIND (a live NA becoming a registered
     #    waiver, or the reverse). The count cannot move at all.
-    other = "PASS_WITH_WAIVERS" if live[a_pinned] == "NA" else "NA"
+    other = "WAIVED" if live[a_pinned] == "NA" else "NA"
     switched = moved((a_pinned, other))
     assert shape(switched) == tuple(pinned_grid)
     found = grid_findings(switched, F.step_ids(), pinned_grid, pinned_cells)
@@ -2133,7 +2133,7 @@ def test_the_ledger_forms_no_second_opinion_about_cell_state():
     states = dict(cell_states())
     victim = enforced_cells()[0]
     assert L.census(states)["considered"] == len(enforced_cells())
-    states[victim] = "PASS_WITH_WAIVERS"
+    states[victim] = "WAIVED"
     assert L.census(states)["considered"] == len(enforced_cells()) - 1, (
         "census() ignored the state map it was given, which means it is "
         "deciding cell state for itself somewhere")

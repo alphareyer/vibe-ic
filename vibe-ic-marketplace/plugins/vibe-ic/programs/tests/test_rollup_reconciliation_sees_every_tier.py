@@ -22,7 +22,7 @@ A disagreement in those tiers was therefore reported as AGREEMENT, and the
 introduced *precisely* to say "this is NOT a pass", and the reconciliation could
 not see it.
 
-``verdict.PRODUCER_STATUSES`` is the authoritative vocabulary and
+``_flow_verdict_tiers.PRODUCER_STATUSES`` is the authoritative vocabulary and
 already carries an anti-drift test — "a word added there without a home below is
 a test failure, not a silent escape". That protection never reached this map,
 because the map was a COPY. The repair derives it instead.
@@ -46,7 +46,7 @@ PROGRAMS = plugin_path() / "programs"
 sys.path.insert(0, str(PROGRAMS))
 
 frg = pytest.importorskip("final_report_generate")
-tiers = pytest.importorskip("verdict")
+tiers = pytest.importorskip("_flow_verdict_tiers")
 
 
 def test_every_producer_status_resolves_to_a_bucket():
@@ -70,8 +70,8 @@ def test_the_deliberate_aliases_still_win():
     report-side renamings, or `SKIPPED` would stop folding into
     `SKIPPED-CONDITION` and the fix would trade one drift for another."""
     m = frg._TALLY_LABEL_TO_BUCKET
-    assert m["SKIPPED"] == "NOT_APPLICABLE", m.get("SKIPPED")
-    assert m["NOT_APPLICABLE"] == "NOT_APPLICABLE"
+    assert m["SKIPPED"] == "SKIPPED-CONDITION", m.get("SKIPPED")
+    assert m["SKIPPED-CONDITION"] == "SKIPPED-CONDITION"
     assert m["WAIVED-DEFERRED"] == "WAIVED-DEFERRED"
 
 
@@ -84,13 +84,13 @@ def test_the_nine_original_mappings_are_unchanged():
     expected = {
         "PASS": "PASS",
         "FAIL": "FAIL",
-        "FAIL": "FAIL",
+        "MISSING": "MISSING",
         "WAIVED-DEFERRED": "WAIVED-DEFERRED",
-        "NOT_MEASURED": "NOT_MEASURED",
-        "SKIPPED": "NOT_APPLICABLE",
-        "NOT_APPLICABLE": "NOT_APPLICABLE",
-        "NOT_MEASURED": "NOT_MEASURED",
-        "NOT_MEASURED": "NOT_MEASURED",
+        "DEFERRED-BY-UPSTREAM": "DEFERRED-BY-UPSTREAM",
+        "SKIPPED": "SKIPPED-CONDITION",
+        "SKIPPED-CONDITION": "SKIPPED-CONDITION",
+        "SKIPPED-SETUP-REQUIRED": "SKIPPED-SETUP-REQUIRED",
+        "VACUOUS-PASS": "VACUOUS-PASS",
     }
     for k, v in expected.items():
         assert frg._TALLY_LABEL_TO_BUCKET.get(k) == v, (
@@ -99,7 +99,7 @@ def test_the_nine_original_mappings_are_unchanged():
 
 
 @pytest.mark.parametrize(
-    "tier", ["PASS_WITH_WAIVERS", "NOT_MEASURED", "NOT_MEASURED"])
+    "tier", ["STRUCTURE-ONLY", "INCOMPLETE", "PASS-VOIDED-BY-DEPENDENCY"])
 def test_a_disagreement_in_a_formerly_blind_tier_is_reported(tier):
     """Behaviour, not just the map: the reconciliation must actually report it.
 
