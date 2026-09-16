@@ -853,6 +853,9 @@ ORACLE_SOURCE_FLOOR = "SUBSTANCE_FLOOR"
 #: from. Read back rather than re-asserted, so the published provenance cannot
 #: drift from the file it describes.
 _CITATION_RE = re.compile(r"^//\s*CITATION\s*:\s*(.+?)\s*$", re.M)
+#: The emitter term of `ORACLE_GENERATED_MARKER`: exactly what `stamp_generated`
+#: writes after the marker, which is a Python function name and nothing else.
+_EMITTER_TERM_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ORACLE_LINE_RE = re.compile(r"^//\s*ORACLE\s*:\s*(.+?)\s*$", re.M)
 
 
@@ -899,8 +902,23 @@ def oracle_provenance(project: Path) -> dict:
                                  "no case semantics")
             elif ORACLE_GENERATED_MARKER in text:
                 row["source"] = ORACLE_SOURCE_GENERATED
+                # THE LINE MUST BE EXACTLY THE GRAMMAR, OR THE EMITTER IS
+                # REFUSED. `stamp_generated` writes the marker, ONE identifier
+                # and a newline — nothing else, ever. MEASURED, TWICE:
+                #   * this first read `tail.splitlines()[0].strip()`, and every
+                #     word appended to the marker line was absorbed into the
+                #     published name (21 of 21 denial tokens moved it);
+                #   * the first repair took the LEADING identifier, and every
+                #     word spliced IN FRONT of the name was then published AS
+                #     the name — `emitter: "not"` (21 of 21 again).
+                # Neither is a polarity reading; both are a reader taking more
+                # or other than the grammar's one term. So the whole line tail
+                # must BE one identifier. Anything else publishes "" — an
+                # emitter this reader cannot name — and never a guess.
                 tail = text.split(ORACLE_GENERATED_MARKER, 1)[1]
-                row["emitter"] = tail.splitlines()[0].strip() if tail else ""
+                line = tail.split("\n", 1)[0].strip()
+                row["emitter"] = (line if _EMITTER_TERM_RE.fullmatch(line)
+                                  else "")
             else:
                 row["source"] = ORACLE_SOURCE_AUTHORED
                 cite = _CITATION_RE.search(text)

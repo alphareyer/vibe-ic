@@ -118,6 +118,33 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "testbench_gen::oracle_provenance":
+        "A CLOSED TESTBENCH-HEADER GRAMMAR with one producer per term: "
+        "`ORACLE_NONE_MARKER` and `stamp_generated` (marker + ONE identifier + "
+        "newline) in this same file, and the authored header's line-start "
+        "`// CITATION :` term. No term has a negation form -- a file that is "
+        "not a floor simply omits the marker. MEASURED, NOT ASSERTED, in "
+        "`test_r0915_89_oracle_provenance_reads_a_grammar_not_a_sentence`, "
+        "over all 21 tokens of `_prose_polarity`'s vocabulary (both tiers, CJK "
+        "included). THE MEASUREMENT CORRECTED THE READER TWICE before this "
+        "entry was written: the emitter was taken as the rest of the marker "
+        "line (21/21 appended tokens absorbed into the published name), then "
+        "as the leading word (21/21 spliced tokens published AS the name); the "
+        "line tail must now fullmatch one identifier or the emitter is "
+        "refused as \"\". WHAT REMAINS MOVES, AND ALWAYS ONE WAY: rival-"
+        "carrying denials at every line boundary, appended and prefixed, move "
+        "0 of 336 floor answers and 21 each for generated and authored; "
+        "splices inside the grammar move 42/63 floor, 63/63 generated, 21/63 "
+        "authored -- and EVERY move lands in one of two disclosed refusals, "
+        "emitter \"\" or AUTHORED-uncited (named in `authored_uncited`). A "
+        "denial MINTS NO citation (0 of 252). A denial that QUOTES a marker "
+        "verbatim costs authorship (authored -> floor/generated) and never "
+        "grants it, and `authored_oracle_preserved` makes the identical call "
+        "on those bytes, which is the contract this reader must keep rather "
+        "than second-guess. NEGATIVE CONTROLS: removing the floor marker, "
+        "changing the emitter, and changing the citation value each move the "
+        "published answer, so the zeros are about the grammar, not a fixture "
+        "that could not move.",
     "analog_incremental_decimator::read_stamp":
         "A CLOSED key=value GRAMMAR written by exactly one producer -- "
         "`stamp()`, four functions above it in the same file -- and read back "
