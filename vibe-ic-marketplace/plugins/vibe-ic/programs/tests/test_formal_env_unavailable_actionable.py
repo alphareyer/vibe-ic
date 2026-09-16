@@ -335,7 +335,7 @@ def test_failed_proof_retains_results_and_counterexample_verdict(tmp_path):
 
 _COMPLETE_WAIVER = {
     "step": "formal",
-    "verdict_tier": "NOT_MEASURED",
+    "verdict_tier": "ENV_UNAVAILABLE",
     "ticket": "EXAMPLE-FORMAL-1",
     "review_required": True,
     "evidence": ["phase2/stage1/formal/formal_env_unavailable.json"],
@@ -490,7 +490,7 @@ def test_incomplete_env_waiver_is_reported_with_what_is_missing(tmp_path):
     attestation fields are absent."""
     _write_waivers(tmp_path, [{
         "step": "formal",
-        "verdict_tier": "NOT_MEASURED",
+        "verdict_tier": "ENV_UNAVAILABLE",
         "review_required": True,
         "evidence": [],
         "rationale": "env gap",

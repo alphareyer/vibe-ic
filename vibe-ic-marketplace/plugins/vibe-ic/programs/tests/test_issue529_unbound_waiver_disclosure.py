@@ -126,7 +126,7 @@ def _entry(**over):
     e = {
         "step": "lvs",
         "phase": "3",
-        "verdict_tier": "PASS_WITH_WAIVERS",
+        "verdict_tier": "WAIVED",
         "rationale": GOOD_RATIONALE,
         "evidence": [SELF_REF],
         "ticket": "TAPEOUT-AUTOGEN-LVS",
@@ -420,7 +420,7 @@ def test_disclosure_reaches_the_report_advisories(tmp_path):
 # 4. No schema error may propagate (#519's failure mode)
 # ----------------------------------------------------------------------
 
-@pytest.mark.parametrize("tier", [7, ["PASS_WITH_WAIVERS"], {"t": "PASS_WITH_WAIVERS"}, 3.5, True])
+@pytest.mark.parametrize("tier", [7, ["WAIVED"], {"t": "WAIVED"}, 3.5, True])
 def test_a_non_string_tier_does_not_delete_the_report(tmp_path, tier):
     """Against the unfixed tree this exact input printed `cannot parse …` and
     produced a ZERO-line report: `.strip()` on a non-string raised, and the
@@ -541,7 +541,7 @@ def test_no_tier_value_but_env_unavailable_is_tested_anywhere(tmp_path):
         assert not _ws.is_env_unavailable({"verdict_tier": tier}), tier
         _fcc, waivers = _load(_project(tmp_path, _entry(verdict_tier=tier)))
         assert 31 not in waivers, tier
-    assert _ws.is_env_unavailable({"verdict_tier": "NOT_MEASURED"})
+    assert _ws.is_env_unavailable({"verdict_tier": "ENV_UNAVAILABLE"})
 
 
 def test_the_hygiene_gates_consume_the_entry_and_ignore_its_tier(tmp_path):

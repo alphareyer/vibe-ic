@@ -343,7 +343,7 @@ def _waive_a2(project: Path) -> None:
                        "ngspice [ticket=unit-test, review_required=True]"),
             "approver": "unit-test",
             "ticket": "unit-test",
-            "verdict_tier": "NOT_MEASURED",
+            "verdict_tier": "ENV_UNAVAILABLE",
             "review_required": True,
             "evidence": ["reports/phase3/analog_one_shot.json"],
         }],

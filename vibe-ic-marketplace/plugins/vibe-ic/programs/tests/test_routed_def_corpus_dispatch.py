@@ -877,7 +877,7 @@ def test_default_empty_population_preserves_legacy_no_process_shape(tmp_path):
     assert doc["declared"] == 1
     assert doc["gates"] == [{
         "label": label,
-        "state": "NOT_MEASURED",
+        "state": "NOT_CHECKED",
         "seconds": 0,
         "corpus": "an observed corpus",
         "corpus_item": 0,

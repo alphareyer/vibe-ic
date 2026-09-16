@@ -110,7 +110,7 @@ LIVE_STEP_GATES = {
 # a derived design absence on this fixture; the others are waiting for process
 # outputs and therefore remain incomplete.
 LIVE_STEP_EXPECTED = {
-    "analog_hardmacro_check": "NOT_MEASURED",
+    "spice_correlation_check": "INCOMPLETE",
     "analog_hw_spice_correlation_check": "NOT_MEASURED",
     "analog_netlist_pdk_check": "NOT_MEASURED",
     "analog_pre_vs_post_layout_check": "NOT_MEASURED",

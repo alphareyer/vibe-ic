@@ -91,7 +91,7 @@ GOOD_RATIONALE = (
 def _attestation(**over):
     entry = {
         "step": "lvs",
-        "verdict_tier": "NOT_MEASURED",
+        "verdict_tier": "ENV_UNAVAILABLE",
         "rationale": GOOD_RATIONALE,
         "evidence": [SELF_REF],
         "ticket": "TAPEOUT-ENV-LVS-NETGEN",

@@ -53,7 +53,7 @@ import _flow_reason_taxonomy as R  # noqa: E402
 
 DECLINED_REVIEW = {
     "gate": "stage_on_pass_review",
-    "verdict": "NOT_MEASURED",
+    "verdict": "NOT_CHECKED",
     "reason_class": R.BLOCKED_BY_UPSTREAM,
     "exit_code": 2,
 }

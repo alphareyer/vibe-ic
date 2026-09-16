@@ -722,7 +722,7 @@ class Scenario:
 #: A well-formed ENV_UNAVAILABLE waiver: every attestation field _load_waivers
 #: requires (ticket, review_required, non-empty evidence, >=40-char rationale).
 _GOOD_WAIVER: Dict[str, Any] = {
-    "verdict_tier": "NOT_MEASURED",
+    "verdict_tier": "ENV_UNAVAILABLE",
     "ticket": "matrix-d6-probe",
     "review_required": True,
     "evidence": ["`which <tool>` -> rc=1 on the matrix-d6 probe host"],
@@ -735,7 +735,7 @@ _GOOD_WAIVER: Dict[str, Any] = {
 #: The SAME claim with the machine-readable attestation stripped out — prose
 #: only. This is the "a code comment / a paragraph is not a disclosure" probe.
 _PROSE_ONLY_WAIVER: Dict[str, Any] = {
-    "verdict_tier": "NOT_MEASURED",
+    "verdict_tier": "ENV_UNAVAILABLE",
     "rationale": _GOOD_WAIVER["rationale"],
 }
 
@@ -1979,7 +1979,7 @@ def _leg5_waiver_channel(probe: Probe) -> List[str]:
             f"declared in machine-readable form; prose is not a disclosure."
         )
     rejections = [a for a in prose.advisories
-                  if "NOT_MEASURED" in a and role in a]
+                  if "ENV_UNAVAILABLE" in a and role in a]
     if not rejections:
         problems.append(
             f"L5 SILENT WAIVER REFUSAL: the prose-only ENV_UNAVAILABLE waiver "

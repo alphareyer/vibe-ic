@@ -229,7 +229,7 @@ def test_attribution_reads_the_sentinel_as_not_attempted(tmp_path):
              "detail": "run declared --exit-step 2"},
         ]}))
     r = fpa.attribute(p)["phase3_verifying"]
-    assert r["not_attempted"] == {"yosys_synth": "NOT_APPLICABLE"}
+    assert r["not_attempted"] == {"yosys_synth": "SKIPPED-BY-EXIT"}
     assert not r.get("unclassified_status"), r
 
 

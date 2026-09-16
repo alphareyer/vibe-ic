@@ -744,7 +744,7 @@ def test_an_unreachable_tool_is_reported_by_name_and_writes_no_layout(
     import analog_one_shot_runner as AOSR
     proj = _runner_project(tmp_path)
     said = json.dumps(
-        {"result": "NOT_MEASURED", "tool": "magic",
+        {"result": "ENV_UNAVAILABLE", "tool": "magic",
          "reason": "ENV_UNAVAILABLE: `magic` is not on PATH in vibeic-eda."})
     ran = _Ran(layout=proj / "phase3" / "analog" / "b" / "layout.mag",
                emit_rc=2, emit_out=said)
