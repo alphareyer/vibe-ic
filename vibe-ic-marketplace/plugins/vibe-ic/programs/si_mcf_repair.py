@@ -84,7 +84,16 @@ def envelope_is_open(si_mcf_report: Optional[Dict[str, Any]]) -> bool:
 
     ADVISORY and ERROR are NOT a licence to repair: ADVISORY means the analysis
     produced no slack to judge, and ERROR means the tool failed. Repairing on
-    either would be acting on an absence."""
+    either would be acting on an absence.
+
+    AND THIS READS THE STEP'S VERDICT, WHICH MAY NO LONGER BE THE ENVELOPE'S
+    (R-0915-66). When the coupling delta-delay screen reaches a genuine verdict
+    it becomes the step's, and `si_mcf_verdict_basis` records the envelope's own
+    FAIL under `verdict_basis.envelope` while the top-level `verdict` carries
+    the better-informed reading. So a run whose screen PASSES does not spend a
+    repair pass on a bound that a measurement has already superseded — which is
+    the right answer and not an accident of ordering: there is nothing left to
+    close. The envelope's number is still on the record, one key away."""
     return bool(si_mcf_report) and si_mcf_report.get("verdict") == "FAIL"
 
 

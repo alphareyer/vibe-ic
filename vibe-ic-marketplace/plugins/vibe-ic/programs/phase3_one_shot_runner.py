@@ -48755,6 +48755,29 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # anything in place: with no execution seam supplied it PLANS, records the
     # BEFORE trajectory and says `NOT_EXECUTED` -- which a reader must be able
     # to tell apart from "the pass ran and changed nothing".
+    # R-0915-66 — WHICH SI READING IS STEP 27's VERDICT. The envelope and the
+    # coupling delta-delay screen disagree on subservient (FAIL -0.266 against
+    # PASS over 35902 slack-checked pairs), and the screen is the better-
+    # informed of the two: it compares each overlapping pair's Miller-
+    # multiplied delta against the victim's OWN path slack, which the
+    # floating-victim envelope has no basis to do. When the screen reaches a
+    # GENUINE verdict it becomes the step's; when it does not, the envelope
+    # stays the verdict and says so. Either way the envelope's number is kept
+    # and disclosed. NONFATAL: an exception here leaves the envelope exactly as
+    # si_mcf_sta wrote it.
+    try:
+        import si_mcf_verdict_basis as _si_vb                 # noqa: PLC0415
+        _vb = _si_vb.apply(project)
+        if _vb is not None:
+            _b = _vb.get("verdict_basis") or {}
+            notes.append(
+                f"si_mcf verdict basis: {_b.get('mode')} — step 27 verdict "
+                f"{_vb.get('verdict')} from {_b.get('verdict_from')}; envelope "
+                f"{(_b.get('envelope') or {}).get('verdict')} at "
+                f"{(_b.get('envelope') or {}).get('mcf_setup_ns')} ns disclosed")
+    except Exception as _vb_exc:                              # noqa: BLE001
+        notes.append(f"si_mcf verdict basis non-fatal: {_vb_exc}")
+
     try:
         import si_mcf_repair as _si_rep                       # noqa: PLC0415
         # R-0915-41 part 3 — ARM the execution seam. Arming is separate from
