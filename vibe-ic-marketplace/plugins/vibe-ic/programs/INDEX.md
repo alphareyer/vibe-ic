@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1319
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1319)
+- **Total programs (excluding helpers / shims):** 1321
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1321)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1310 |
+| `any` | 1312 |
 
 ## Alphabetical listing
 
@@ -140,6 +140,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `atomic_write_pr_attribution` | any | — | Which OPEN PR owns each non-atomic declared-report write (vibe-ic#1468). |
 | `atpg_untestable_fault_classify` | any | — | which stuck-at faults NO test can detect. |
 | `attestation_preflight_check` | any | — | refuse a dirty tree BEFORE the hour, not after it. |
+| `audit_replay` | any | — | re-judge a FROZEN run snapshot with the CURRENT tree's programs, and say which step verdicts the JUDGEMENT moved. |
 | `auto_diagnostic_led_synth` | any | v0.114 | v0.114 (BACKLOG-v6 D1). |
 | `automotive_ethernet_protocol_synth` | any | v0.1.91 | Automotive Ethernet (single-twisted-pair Ethernet PHY) protocol synth. |
 | `avalon_protocol_synth` | any | — | Intel/Altera Avalon Interface protocol synth helper (protocol #54). |
@@ -1011,6 +1012,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `readme_usage_sequence_extractor` | any | — | for #36 Bug 2: README "usage sequence" / numbered-step picker. |
 | `readme_vendor_extractor` | any | — | best-effort vendor extraction from README text. |
 | `real_artefact_test_backing_check` | any | — | how many of a change's tests are driven by a REAL checked-in artefact, and how many by a fixture the author typed alongside the change. |
+| `real_ic_gate` | any | — | run ONE real IC end-to-end through the plugin's own front door on a candidate tree, and say which step verdicts moved. |
 | `record_prompt_context_bridge` | any | — | visible prompt/context record adapter. |
 | `reference_control_resolved_through_a_mutable_ref` | any | — | A control whose reference point is a name that moves. |
 | `refusal_names_its_remedy_census` | any | — | Refusals that do not name the channel a reader would fix them through. |
@@ -1391,7 +1393,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1310 programs)
+### `any` (1312 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1507,6 +1509,7 @@ _(no programs in this group)_
 - `atomic_write_pr_attribution` — Which OPEN PR owns each non-atomic declared-report write (vibe-ic#1468).
 - `atpg_untestable_fault_classify` — which stuck-at faults NO test can detect.
 - `attestation_preflight_check` — refuse a dirty tree BEFORE the hour, not after it.
+- `audit_replay` — re-judge a FROZEN run snapshot with the CURRENT tree's programs, and say which step verdicts the JUDGEMENT moved.
 - `auto_diagnostic_led_synth` — v0.114 (BACKLOG-v6 D1).  _[v0.114]_
 - `automotive_ethernet_protocol_synth` — Automotive Ethernet (single-twisted-pair Ethernet PHY) protocol synth.  _[v0.1.91]_
 - `avalon_protocol_synth` — Intel/Altera Avalon Interface protocol synth helper (protocol #54).
@@ -2373,6 +2376,7 @@ _(no programs in this group)_
 - `readme_usage_sequence_extractor` — for #36 Bug 2: README "usage sequence" / numbered-step picker.
 - `readme_vendor_extractor` — best-effort vendor extraction from README text.
 - `real_artefact_test_backing_check` — how many of a change's tests are driven by a REAL checked-in artefact, and how many by a fixture the author typed alongside the change.
+- `real_ic_gate` — run ONE real IC end-to-end through the plugin's own front door on a candidate tree, and say which step verdicts moved.
 - `record_prompt_context_bridge` — visible prompt/context record adapter.
 - `reference_control_resolved_through_a_mutable_ref` — A control whose reference point is a name that moves.
 - `refusal_names_its_remedy_census` — Refusals that do not name the channel a reader would fix them through.
