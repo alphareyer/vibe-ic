@@ -21707,6 +21707,44 @@ def _route_drc_report_tcl(rpt_path: str) -> str:
     )
 
 
+def _rsz_parasitics_source_tcl(tag: str) -> str:
+    """R-0915-84(a) — give the RESIZER its own parasitics before it repairs.
+
+    MEASURED (opentitan_aes x sky130A, 2026-09-16). On all four passes of the
+    post-route DRV loop OpenROAD printed, immediately after the census:
+
+        [WARNING EST-0027] no estimated parasitics. Using wire load models.
+
+    The census is sound -- `read_spef` feeds STA, and R-0915-83's refusal now
+    proves it -- but the RESIZER keeps its own parasitics source, and
+    `read_spef` does not set it. So `repair_design` / `repair_timing` optimised
+    against a WIRE LOAD MODEL while being GRADED on the extracted SPEF. Four
+    passes moved DRV 41,956 -> 1,896 and never closed, which is what a repair
+    whose model disagrees with its grader looks like.
+
+    `estimate_parasitics -global_routing` is the resizer's own source and is
+    what ORFS runs before its repair steps. It is emitted here, before every
+    repair, so `parasitics_src` cannot be `none` on any pass.
+
+    NONFATAL and DISCLOSED, never silent: the call needs global-routing results,
+    and a session that has none must say so rather than repair blind while
+    appearing to have been fixed. `<TAG>_RSZ_PARASITICS` names the outcome, and
+    a failure leaves the log saying exactly which pass repaired on wire load
+    models.
+
+    chip-AGNOSTIC: no PDK, layer, vendor or design literal.
+    """
+    return (
+        f"    if {{[catch {{estimate_parasitics -global_routing}} _rszp]}} {{\n"
+        f"      puts \"{tag}_RSZ_PARASITICS: FAILED $_rszp -- this repair runs "
+        "on WIRE LOAD MODELS (expect EST-0027) and its result is not comparable "
+        "with the SPEF census above\"\n"
+        f"    }} else {{ puts \"{tag}_RSZ_PARASITICS: estimate_parasitics "
+        "-global_routing OK -- the resizer has its own source, EST-0027 must "
+        "not appear for this pass\" }\n"
+    )
+
+
 def _spare_safe_clear_net_proc_tcl() -> str:
     """The ONE decision every routing-clear site in this runner makes, as a Tcl
     proc — and the only place `odb::dbWire_destroy` is written.
@@ -26345,6 +26383,7 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "repair_sees_estimated_parasitics=unknown_to_tcl -- if OpenROAD prints "
         "EST-0027 after this line, this pass's repair ran on WIRE LOAD MODELS "
         "while its census came from the extracted SPEF\"\n"
+        + _rsz_parasitics_source_tcl("SDR")
         + f"    if {{[catch {{repair_design -max_wire_length $_sdr_mwl "
         f"-slew_margin {m} -cap_margin {m}}} _sdr_rd]}} {{\n"
         "      # A caught repair error is not a successful candidate.  Even a\n"
@@ -26422,6 +26461,7 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # delay, and nothing re-timed the paths they sit on. This is the
         # same `repair_timing -setup` the flow already runs post-global-
         # route; it belongs after any buffer insertion, not only that one.
+        + _rsz_parasitics_source_tcl("SDR_SETUP")
         + "    if {[catch {repair_timing -setup} _sdr_rt]} "
         "{ puts \"SDR_REPAIR_TIMING_NONFATAL: $_sdr_rt\"; set _sdr_tx_error 1 }\n"
         # LEGALIZE AND VERIFY. A bare catch-guarded detailed_placement
