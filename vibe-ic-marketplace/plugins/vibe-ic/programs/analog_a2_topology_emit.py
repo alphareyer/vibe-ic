@@ -1287,8 +1287,15 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
                           "nn1", "nn2", "nqb",
                           # the conversion-window generator
                           "nall", "nallc", "nrm", "nrmb", "nrstb",
+                          # the RESET-GATED sampling clock of the feedback
+                          # branch, and its complement (F164/F165)
+                          "nndac", "nndacs", "nckdac", "nckdacb",
                           # the auto-zeroed quantiser input
                           "nqz"],
+        # The gate this entry builds carries the clock's own phase once the
+        # conversion-window reset is released — see `CLOCK_PHASE_ALIASES_KEY`
+        # and the devices that build it further down.
+        "clock_phase_aliases": {"nckdac": "clk", "nckdacb": "nclkb"},
         # Stated in the artefact so a reader is told what LEFT the boundary
         # and on whose authority, instead of finding two fewer pins.
         "boundary_notes": [
@@ -1907,6 +1914,65 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
             {"name": "mn_rstinv", "role": "nmos", "function":
              "complement of the conversion-window reset, pull-down",
              "nets": ["nrstb", "nall", "vss", "vss"], "w": 4.0, "l": 0.5},
+            # ── the FEEDBACK BRANCH'S RESET-GATED SAMPLING CLOCK ──────────
+            # WHY THIS EXISTS, MEASURED (lane icadc, F164/F165). The
+            # conversion-window reset shorted the INTEGRATORS and nothing
+            # else. The feedback branch went on sampling `ndac` through the
+            # reset, so the first charge transfer of every conversion carried
+            # the LAST DECISION OF THE PREVIOUS ONE — one full reference step
+            # of charge belonging to a different conversion, dumped into
+            # freshly zeroed integrators, and invisible to any decode because
+            # the bit that caused it is outside the window.
+            #
+            # Measured on the ideal-element harness of this exact topology,
+            # one variable, same deck and same tone: sine-fit ENOB 5.685 with
+            # the branch sampling through the reset, 13.532 with it held at
+            # the common-mode reference, and the fit residual falls 236x
+            # (0.008017 -> 0.000034). A pure-arithmetic model of the same
+            # change predicted +6.68 bit against SPICE's +7.85.
+            #
+            # The loop has made NO DECISION YET for the first step of a
+            # conversion, so the honest feedback there is ZERO — and a 1-bit
+            # DAC cannot produce zero any other way than by not sampling.
+            # `nckdac` is `clk AND nrstb`: outside the reset it IS the clock
+            # and the branch behaves exactly as it always did.
+            {"name": "mp_ndac1", "role": "pmos", "function":
+             "feedback-branch clock gate, NAND pull-up (clock leg)",
+             "nets": ["nndac", "clk", "vdd", "vdd"], "w": 4.0, "l": 0.15},
+            {"name": "mp_ndac2", "role": "pmos", "function":
+             "feedback-branch clock gate, NAND pull-up (reset-complement "
+             "leg) — either input low holds the gate off",
+             "nets": ["nndac", "nrstb", "vdd", "vdd"], "w": 4.0, "l": 0.15},
+            {"name": "mn_ndac1", "role": "nmos", "function":
+             "feedback-branch clock gate, NAND pull-down (clock leg)",
+             "nets": ["nndac", "clk", "nndacs", "vss"], "w": 4.0, "l": 0.15},
+            {"name": "mn_ndac2", "role": "nmos", "function":
+             "feedback-branch clock gate, NAND pull-down (reset-complement "
+             "leg), stacked — the series pair is the AND",
+             "nets": ["nndacs", "nrstb", "vss", "vss"], "w": 4.0, "l": 0.15},
+            {"name": "mp_ckdac", "role": "pmos", "function":
+             "feedback-branch sampling clock, pull-up: the NAND inverted, so "
+             "`nckdac` is high only while the clock is high AND the "
+             "conversion-window reset is released",
+             "nets": ["nckdac", "nndac", "vdd", "vdd"], "w": 8.0, "l": 0.5},
+            {"name": "mn_ckdac", "role": "nmos", "function":
+             "feedback-branch sampling clock, pull-down",
+             "nets": ["nckdac", "nndac", "vss", "vss"], "w": 4.0, "l": 0.5},
+            {"name": "mp_ckdacb", "role": "pmos", "function":
+             "complement of the feedback-branch sampling clock, pull-up: the "
+             "p-side of both feedback transmission gates takes it",
+             "nets": ["nckdacb", "nckdac", "vdd", "vdd"], "w": 8.0, "l": 0.5},
+            {"name": "mn_ckdacb", "role": "nmos", "function":
+             "complement of the feedback-branch sampling clock, pull-down",
+             "nets": ["nckdacb", "nckdac", "vss", "vss"], "w": 4.0, "l": 0.5},
+            # ── WHAT PHASE THE GATE ABOVE CARRIES ─────────────────────────
+            # declared beside the devices that build it, and consumed by
+            # `sc_branch_polarities` — see `CLOCK_PHASE_ALIASES_KEY`. With the
+            # conversion-window reset released, `nckdac` IS `clk` and
+            # `nckdacb` IS `nclkb`; the branch is sampled and returned on
+            # exactly the phases it always was, and the polarity derivation
+            # must read it that way or a gated clock reads as a re-timed
+            # branch. It is a statement about a NET, not about a polarity.
             # ── the 1-bit feedback DAC ───────────────────────────────────
             # The whole feedback path of a CIFB modulator: the decision
             # selects one END of the DECLARED reference pair onto `ndac`,
@@ -2573,27 +2639,34 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
                 {"name": "mn_dacs{i}", "role": "nmos", "function":
                  "stage {i} DAC SAMPLING switch (n-side): on the "
                  "clock-high phase the selected reference end is sampled "
-                 "onto the bottom plate of cf{i}",
-                 "nets": ["ndacs{i}", "clk", "ndac{alt}", "vss"],
+                 "onto the bottom plate of cf{i} — gated by `nckdac`, the "
+                 "clock ANDed with the reset's complement, so the branch "
+                 "samples NOTHING during the conversion-window reset and "
+                 "the first transfer of a conversion carries no charge "
+                 "from the previous one (F164/F165, +7.85 bit measured)",
+                 "nets": ["ndacs{i}", "nckdac", "ndac{alt}", "vss"],
                  "w": 2.0, "l": 0.15},
                 {"name": "mp_dacs{i}", "role": "pmos", "function":
                  "stage {i} DAC SAMPLING switch (p-side of the "
                  "transmission gate) — the reference ends sit at the "
                  "extremes of the declared span, so this half is what "
                  "carries the positive one at all",
-                 "nets": ["ndacs{i}", "nclkb", "ndac{alt}", "vdd"],
+                 "nets": ["ndacs{i}", "nckdacb", "ndac{alt}", "vdd"],
                  "w": 4.0, "l": 0.15},
                 {"name": "mn_dacr{i}", "role": "nmos", "function":
                  "stage {i} DAC RETURN switch (n-side): on the "
                  "charge-transfer phase cf{i}'s bottom plate returns to "
                  "the common-mode reference, so what the branch injects "
-                 "is the reference DIFFERENCE and not its absolute level",
-                 "nets": ["ndacs{i}", "nclkb", "vcm", "vss"],
+                 "is the reference DIFFERENCE and not its absolute level. "
+                 "Gated by the COMPLEMENT of the same reset-gated clock, so "
+                 "through the reset it holds the plate AT that reference — "
+                 "which is what makes the first step's feedback zero",
+                 "nets": ["ndacs{i}", "nckdacb", "vcm", "vss"],
                  "w": 2.0, "l": 0.15},
                 {"name": "mp_dacr{i}", "role": "pmos", "function":
                  "stage {i} DAC RETURN switch (p-side of the transmission "
                  "gate)",
-                 "nets": ["ndacs{i}", "clk", "vcm", "vdd"],
+                 "nets": ["ndacs{i}", "nckdac", "vcm", "vdd"],
                  "w": 4.0, "l": 0.15},
                 {"name": "cf{i}", "role": "cap", "function":
                  "stage {i} FEEDBACK DAC capacitor. It equals cs{i}, so "
@@ -4043,7 +4116,42 @@ def _sc_throws(node: str, groups: Dict[frozenset, Dict[str, str]]
     return t if len(t) >= 2 else {}
 
 
-def sc_branch_polarities(devices: Sequence[Dict[str, Any]]
+#: The entry key that names, for each gate net the entry BUILDS, which clock
+#: phase it carries once the conversion-window reset is released.
+#:
+#: WHY IT EXISTS (R-0915-73, lane icadc). `sc_branch_polarities` decides a
+#: branch's polarity by comparing the IDENTITY of two gate nets: the switch
+#: that drives the bottom plate's source, and the switch that throws the top
+#: plate onto the summing node. That is exactly right while every switch is on
+#: a raw clock. The feedback branch's sampling switch is now on `clk AND
+#: nrstb` — the SAME PHASE, released, and a different net — so an identity
+#: comparison reads it as a different phase and flips the derived parity.
+#:
+#: The alias says which phase a BUILT net carries. It does NOT say what any
+#: branch's polarity is: that is still read off the two branches, still
+#: changes when either integrator changes, and round17's four-row control
+#: still separates the four topologies. The entry that emits the gate is the
+#: one place that can state what its output is.
+CLOCK_PHASE_ALIASES_KEY = "clock_phase_aliases"
+
+
+def _resolve_phase(net: Optional[str],
+                   aliases: Optional[Dict[str, str]]) -> Optional[str]:
+    """`net` as the clock phase it carries, following the entry's declared
+    aliases to a fixed point. A cycle resolves to the net itself rather than
+    looping — a malformed alias must not hang an emitter."""
+    if not aliases or net is None:
+        return net
+    seen = set()
+    cur = str(net)
+    while cur in aliases and cur not in seen:
+        seen.add(cur)
+        cur = str(aliases[cur])
+    return cur
+
+
+def sc_branch_polarities(devices: Sequence[Dict[str, Any]],
+                         phase_aliases: Optional[Dict[str, str]] = None
                          ) -> Dict[str, Dict[str, Any]]:
     """`{branch capacitor: {"polarity": +1 delaying / -1 delay-free,
     "source": the node it samples}}` for one stage.
@@ -4109,6 +4217,8 @@ def sc_branch_polarities(devices: Sequence[Dict[str, Any]]
         g_sum = tt[next(iter(reach))]
         if g_src is None or g_sum is None:
             continue
+        g_src = _resolve_phase(g_src, phase_aliases)
+        g_sum = _resolve_phase(g_sum, phase_aliases)
         pol[str(c["name"])] = {"polarity": (-1 if g_src == g_sum else +1),
                                "source": src[0], "top_plate": top,
                                "bottom_plate": bot,
@@ -4118,7 +4228,8 @@ def sc_branch_polarities(devices: Sequence[Dict[str, Any]]
 
 def derived_feedback_suffixes(st: Dict[str, Any], count: int,
                               selectors: Dict[str, str],
-                              probe: Dict[str, Any]
+                              probe: Dict[str, Any],
+                              phase_aliases: Optional[Dict[str, str]] = None
                               ) -> Optional[Tuple[List[str], str]]:
     """`([suffix per stage 1..count], the selector net template)`, or None.
 
@@ -4143,7 +4254,7 @@ def derived_feedback_suffixes(st: Dict[str, Any], count: int,
         nd["nets"] = [str(n).format(**probe) for n in d.get("nets") or []]
         nd["name"] = str(d["name"]).format(**probe)
         probe_devs.append(nd)
-    pol = sc_branch_polarities(probe_devs)
+    pol = sc_branch_polarities(probe_devs, phase_aliases)
     if not pol:
         return None
     # the FEEDBACK branch is the one that SAMPLES the selector net. That node
@@ -4250,7 +4361,8 @@ def expand_stages(lib: Dict[str, Any], spec_values: Dict[str, float]
                 {"i": 1, "i1": 2, "in": "\u0001in\u0001",
                  "out": "\u0001out\u0001", "coeff": "1.0",
                  "alt": _SC_ALT_SENTINEL,
-                 "in2": "\u0001in2\u0001", "out2": "\u0001out2\u0001"})
+                 "in2": "\u0001in2\u0001", "out2": "\u0001out2\u0001"},
+                lib.get(CLOCK_PHASE_ALIASES_KEY))
             derived_alts = None if _derived is None else _derived[0]
             if _derived is not None:
                 _sel_template = _derived[1]
