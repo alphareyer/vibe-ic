@@ -96,7 +96,7 @@ def test_the_skip_CITES_the_designs_own_declaration(tmp_path, sid):
         _project(tmp_path),
         (_steps()[sid]["condition"] or {}).get("delivery_declares"))
     assert cited is not None
-    rel, detail = cited
+    rel, detail, _evidence = cited   # R-0915-64: third element, None here
     assert rel == "input/submission_template/tapeout_declaration.json"
     assert "HARDMACRO" in detail and "no operator slot is bound" in detail
 

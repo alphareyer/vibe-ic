@@ -1695,6 +1695,111 @@ def write_lef_with_magic(top: str, gds: Path, def_file: Path, out_lef: Path,
 
 # ── the run ───────────────────────────────────────────────────────────────
 
+
+# ── R-0915-87(3): the Liberty carries arcs from the run's OWN post-route STA ──
+#: Sidecar the check reads to state WHY a Liberty is uncharacterised.
+LIBERTY_TIMING_RECORD = "liberty_timing.json"
+#: The producer's WHOLE banner line (phase3_one_shot_runner mcorner emitter:
+#: `=== {kind} corner: process={label} liberty={lib}, SPEF={spef} ===`).
+#: Full-line match: text spliced in front of, inside or after a banner makes
+#: it not a banner, and a refusal follows, never a rival path.
+_STA_LIB_RE = re.compile(
+    r"^===\s(SETUP|HOLD) corner: process=\S+ liberty=(\S+?), SPEF=\S+ ===[ \t]*$",
+    re.M)
+
+
+
+def liberty_with_pg_pins(text: str, design: str, pins: List[Pin]) -> Optional[str]:
+    """`write_timing_model` emits no pg_pin; carry the DEF-derived supply
+    interface in `emit_liberty`'s own form (pg_type from USE, never DIRECTION)
+    so the kit's supply-interface integrity check sees the rails it derived.
+    None when the text has no `cell (<design>)` group to carry them."""
+    pg = "".join(
+        f"    pg_pin ({q.name}) {{ pg_type : "
+        f"{'primary_ground' if q.use.upper() == 'GROUND' else 'primary_power'}"
+        f" ; }}\n" for q in pins if q.is_pg)
+    out, n = re.subn(r'(cell\s*\(\s*"?' + re.escape(design)
+                     + r'"?\s*\)\s*\{\n)', lambda m: m.group(1) + pg,
+                     text, count=1)
+    return out if n == 1 else None
+
+def characterise_liberty(project: Path, design: str, container: str,
+                         out_dir: Path) -> Tuple[Optional[str], Dict[str, Any]]:
+    """OpenSTA `write_timing_model` over THIS run's post-route netlist, SDC and
+    max-corner SPEF, against the SETUP-corner Liberty its own multi-corner STA
+    report names. Returns (liberty_text, record); text is None when any input
+    is missing or the tool fails, and the record says which, by class.
+
+    MEASURED on subservient r27: 41 arcs (9 setup_rising, 9 hold_rising, 21
+    rising_edge, 2 clock-tree) where the interface-only view had 0."""
+    pnr = project / "phase3" / "stage3" / "pnr"
+    netlist = pnr / f"{design}_pnr.v"
+    sdc = pnr / "constraint.sdc"
+    spef = (project / "phase3" / "stage3" / "extracted" / "spef_corners"
+            / f"{design}.max.spef")
+    rpt = project / "reports" / "phase3" / "sta_mcorner_ocv.rpt"
+    rec: Dict[str, Any] = {"method": "opensta:write_timing_model",
+                           "netlist": str(netlist), "sdc": str(sdc),
+                           "spef": str(spef), "sta_report": str(rpt)}
+    missing = [str(x) for x in (netlist, sdc, spef, rpt) if not x.is_file()]
+    if missing:
+        rec.update(characterised=False, reason_class="BLOCKED_BY_UPSTREAM",
+                   why="post-route STA input(s) absent: " + ", ".join(missing))
+        return None, rec
+    # ONE banner, or no answer. The producer (phase3_one_shot_runner's mcorner
+    # emitter) writes exactly one `=== SETUP corner: … liberty=<lib>, …` line.
+    # MEASURED: `dict(findall)` kept the LAST SETUP match, so a second banner
+    # naming another library — 189 of 294 denial-quoting trials — silently
+    # chose the rival and reported the macro characterised against it.
+    # Two banners that disagree are refused by name, never ranked by position.
+    setups = sorted({lib for kind, lib in
+                     _STA_LIB_RE.findall(rpt.read_text(errors="replace"))
+                     if kind == "SETUP"})
+    if not setups:
+        rec.update(characterised=False, reason_class="BLOCKED_BY_UPSTREAM",
+                   why=f"{rpt.name} names no SETUP-corner liberty")
+        return None, rec
+    if len(setups) > 1:
+        rec.update(characterised=False, reason_class="EXECUTION_ERROR",
+                   why=(f"{rpt.name} carries {len(setups)} SETUP-corner banners "
+                        f"naming different libraries: {', '.join(setups)}"))
+        return None, rec
+    lib = setups[0]
+    rec["liberty"] = lib
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tcl = out_dir / f".{design}_etm.tcl"
+    lib_out = out_dir / f".{design}_etm.lib"
+    tcl.write_text("\n".join((
+        f"read_liberty {lib}", f"read_verilog {netlist}",
+        f"link_design {design}", f"read_sdc {sdc}", f"read_spef {spef}",
+        f"write_timing_model -library_name {design} -cell_name {design} "
+        f"{lib_out}", "")))
+    cmd = f"export PATH=/foss/tools/bin:$PATH; sta -no_splash -exit {tcl}"
+    argv = (["bash", "-lc", cmd] if shutil.which("sta") or not container
+            else _ce.docker_exec_argv(container, "bash", "-lc", cmd))
+    rc, out, err = _sh(argv)
+    text = lib_out.read_text(errors="replace") if lib_out.is_file() else ""
+    arcs = len(re.findall(r"\btiming\s*\(", text))
+    for tmp in (tcl, lib_out):
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    rec.update(rc=rc, arcs=arcs)
+    if rc != 0 or arcs == 0:
+        rec.update(characterised=False, reason_class="EXECUTION_ERROR",
+                   why=(f"write_timing_model rc={rc}, {arcs} timing arc(s); "
+                        + (err or out)[-400:]))
+        return None, rec
+    rec.update(characterised=True, reason_class=None,
+               why=f"{arcs} timing arc(s) from the run's own post-route STA")
+    header = (f"/* {design} — CHARACTERISED Liberty of a delivered hard macro.\n"
+              f" * Extracted by OpenSTA write_timing_model from this run's\n"
+              f" * post-route netlist + max-corner SPEF + SDC, against the\n"
+              f" * SETUP-corner library its own multi-corner STA used:\n"
+              f" * {lib}\n * {arcs} timing arc(s). */\n")
+    return header + text, rec
+
 def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
         container: str = "", cell_lef: str = "",
         metal_prefix: str = "met") -> Tuple[int, Record]:
@@ -1945,8 +2050,25 @@ def run(project: Path, pdk_root: str, full_lef: bool, pinonly: bool,
     def stage_other_views() -> None:
         stage(gds_path, lambda q: shutil.copy(gds, q))
         stage(v_path, lambda q: atomic_write_text(q, emit_verilog(design, pins)))
-        stage(lib_path,
-              lambda q: atomic_write_text(q, emit_liberty(design, pins)))
+        # R-0915-87(3): characterised from the run's own STA when it can be;
+        # the interface-only view otherwise, with the reason recorded beside
+        # it. Done INSIDE the write, so a kit this run leaves untouched is
+        # neither re-characterised nor given a sidecar (the landed contract in
+        # test_hardmacro_gen_grades_only_what_it_wrote).
+        def _write_lib(q: Path) -> None:
+            char, char_rec = characterise_liberty(project, design, container, hm)
+            if char:
+                char = liberty_with_pg_pins(char, design, pins)
+                if char is None:
+                    char_rec.update(characterised=False,
+                                    reason_class="EXECUTION_ERROR",
+                                    why="characterised Liberty has no cell "
+                                        f"({design}) group to carry pg_pins")
+            atomic_write_text(hm / LIBERTY_TIMING_RECORD,
+                              json.dumps(char_rec, indent=1))
+            atomic_write_text(q, char if char else emit_liberty(design, pins))
+
+        stage(lib_path, _write_lib)
 
     # ORDER IS A DECISION, AND IT DEPENDS ON WHETHER A DELIVERY IS AT RISK.
     #

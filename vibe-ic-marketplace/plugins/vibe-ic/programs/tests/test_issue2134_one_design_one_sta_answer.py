@@ -69,8 +69,13 @@ def test_a_disclosed_single_corner_pass_defers_to_a_failing_multicorner_gate(
     # The gate's own report still discloses its coverage, and still exists.
     doc = json.loads(
         (proj / "reports/phase3/sta/post_route_summary.json").read_text())
-    assert any(f.get("rule") == runner._STA_SINGLE_CORNER_RULE
-               for f in (doc.get("findings") or [])), doc.get("findings")
+    # R-0915-87(4): the report states its narrowness either as the #442
+    # single-corner finding or as corner coverage counted from the sign-off
+    # records it does not itself grade; both are its own disclosure.
+    assert (any(f.get("rule") == runner._STA_SINGLE_CORNER_RULE
+                for f in (doc.get("findings") or []))
+            or (doc.get("summary") or {}).get(
+                "signoff_corners_from_sta_records", 0) >= 1), doc
 
     row = res[_SIGNOFF]
     assert row.status == "BLOCKED", (

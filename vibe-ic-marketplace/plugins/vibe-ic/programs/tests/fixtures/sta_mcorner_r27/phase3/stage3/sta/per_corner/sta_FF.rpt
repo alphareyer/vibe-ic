@@ -1,0 +1,37 @@
+Startpoint: _3242_ (rising edge-triggered flip-flop clocked by clk)
+Endpoint: o_sram_we (output port clocked by clk)
+Path Group: clk
+Path Type: max
+
+  Delay    Time   Description
+---------------------------------------------------------
+   0.00    0.00   clock clk (rise edge)
+   0.00    0.00   clock network delay (ideal)
+   0.00    0.00 ^ _3242_/CLK (gf180mcu_fd_sc_mcu7t5v0__dffq_1)
+   0.51    0.51 ^ _3242_/Q (gf180mcu_fd_sc_mcu7t5v0__dffq_1)
+   0.17    0.68 v _2862_/ZN (gf180mcu_fd_sc_mcu7t5v0__nand2_1)
+   0.77    1.44 ^ _2865_/ZN (gf180mcu_fd_sc_mcu7t5v0__nor4_1)
+   0.14    1.58 v _3017_/ZN (gf180mcu_fd_sc_mcu7t5v0__oai22_1)
+   2.40    3.98 ^ _3018_/ZN (gf180mcu_fd_sc_mcu7t5v0__nor3_1)
+  -0.02    3.96 v _3019_/ZN (gf180mcu_fd_sc_mcu7t5v0__nor2_1)
+   0.50    4.46 v _3020_/Z (gf180mcu_fd_sc_mcu7t5v0__and3_1)
+   0.11    4.58 ^ _3032_/ZN (gf180mcu_fd_sc_mcu7t5v0__nor3_1)
+   0.00    4.58 ^ o_sram_we (out)
+           4.58   data arrival time
+
+  20.00   20.00   clock clk (rise edge)
+   0.00   20.00   clock network delay (ideal)
+   0.00   20.00   clock reconvergence pessimism
+  -4.00   16.00   output external delay
+          16.00   data required time
+---------------------------------------------------------
+          16.00   data required time
+          -4.58   data arrival time
+---------------------------------------------------------
+          11.42   slack (MET)
+
+
+tns max 0.00
+wns max 0.00
+STA_BASIS: PRE_LAYOUT_ESTIMATE
+STA_BASIS_NOTE: pre-layout basis FORCED (Step 10) — timed the pre-PnR synthesis netlist subservient_synth.v with NO parasitics, ignoring any routed netlist present from an earlier round. This is a PRE-LAYOUT ESTIMATE, NOT post-route sign-off: it excludes placement, CTS, resizing and all interconnect RC, so a corner shown as MET here may VIOLATE on the routed design

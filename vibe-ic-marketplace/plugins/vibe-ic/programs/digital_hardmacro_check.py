@@ -714,6 +714,10 @@ class Result:
     version: str = VERSION
     passed: bool = True
     verdict_tier: str = "PASS"
+    # R-0915-87(3): set only when the verdict is NOT_MEASURED, so the flow
+    # books the measurement that did not happen, never a PASS.
+    verdict: Optional[str] = None
+    reason_class: Optional[str] = None
     findings: List[Finding] = field(default_factory=list)
     summary: dict = field(default_factory=dict)
 
@@ -1265,9 +1269,8 @@ def check_package(name: str, views: Dict[str, Path], project: Path,
             message=(f"macro '{name}': the Liberty carries no non-zero timing "
                      f"number ({why}). Integration STA over this kit is "
                      f"vacuous — every path through the macro has zero delay, "
-                     f"so it can never violate setup or hold. Signed off in "
-                     f"the PASS_TIMING_UNCHARACTERISED tier, never as a plain "
-                     f"PASS.")))
+                     f"so it can never violate setup or hold. Reported "
+                     f"NOT_MEASURED (R-0915-87(3)), never as a PASS.")))
 
     detail["status"] = "PASS" if ok else "FAIL"
     detail["timing_uncharacterised"] = not lib_ok
@@ -1332,7 +1335,25 @@ def run_audit(project: Path, tol_pct: float = DEFAULT_TOL_PCT,
     if result.passed and undetermined:
         result.verdict_tier = "PASS_OBSTRUCTION_NOT_DETERMINED"
     elif result.passed and uncharacterised:
-        result.verdict_tier = "PASS_TIMING_UNCHARACTERISED"
+        # R-0915-87(3) — NOT A PASS. A Liberty with no timing arc is a timing
+        # measurement that did not happen; integration STA over it closes
+        # nothing. MEASURED on subservient r27: this tier returned rc 0 and the
+        # run counted it green. It is NOT_MEASURED by name now, with the class
+        # the generator recorded for WHY (liberty_timing.json), defaulting to
+        # EXECUTION_ERROR — never a skip-eligible class, which would re-green it.
+        why_cls = "EXECUTION_ERROR"
+        for name in uncharacterised:
+            rec_path = hm_dir / "liberty_timing.json"
+            try:
+                cls = json.loads(rec_path.read_text()).get("reason_class")
+            except (OSError, ValueError, AttributeError):
+                cls = None
+            if cls in ("BLOCKED_BY_UPSTREAM", "EXECUTION_ERROR"):
+                why_cls = cls
+        result.passed = False
+        result.verdict_tier = "NOT_MEASURED"
+        result.verdict = "NOT_MEASURED"
+        result.reason_class = why_cls
     result.summary = {
         "skipped": False,
         "reason": "",
@@ -1383,7 +1404,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     pass_token = (result.verdict_tier
                   if result.verdict_tier.startswith("PASS_") else "PASS")
 
-    if not args.json:
+    if not args.json and result.verdict != "NOT_MEASURED":
         print(_vx.verdict_line(GATE, result.passed, skipped, reason,
                                pass_token=pass_token))
         for f in result.findings:
@@ -1395,6 +1416,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         # `--json` path, which is the ONLY path the FLOW ever takes.
         _vx.announce_vacuous(GATE, reason)
 
+    if result.verdict == "NOT_MEASURED":
+        if not args.json:
+            print(f"[NOT_MEASURED] {GATE}: ({result.reason_class}) hardmacro "
+                  f"Liberty carries no timing arc: "
+                  f"{', '.join(result.summary.get('timing_uncharacterised') or [])}")
+            for f in result.findings:
+                if f.severity in ("ERROR", "WARNING"):
+                    print(f"  [{f.severity}] {f.rule}: {f.message}")
+        return _vx.RC_VACUOUS
     return _vx.exit_code(result.passed, skipped)
 
 

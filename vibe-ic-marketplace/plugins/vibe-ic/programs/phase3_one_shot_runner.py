@@ -45483,6 +45483,16 @@ def _sta_single_corner_disclosed(row: StepResult) -> bool:
         for f in (doc.get("findings") or []):
             if isinstance(f, dict) and f.get("rule") == _STA_SINGLE_CORNER_RULE:
                 return True
+        # R-0915-87(4): the report now counts the run's sign-off corner records
+        # toward multi-corner coverage instead of disclosing single-corner.
+        # Its own PASS still grades only its single-report scope, so a report
+        # whose coverage came from those records is exactly as narrow as the
+        # old disclosure said — the #2134 deferral must still see it. Read from
+        # the SAME readable report; an unreadable one still returns False.
+        summ = doc.get("summary") if isinstance(doc, dict) else None
+        if isinstance(summ, dict) and (summ.get(
+                "signoff_corners_from_sta_records") or 0) >= 1:
+            return True
     return False
 
 

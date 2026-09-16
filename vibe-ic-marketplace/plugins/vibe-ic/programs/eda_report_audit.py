@@ -3242,7 +3242,18 @@ def _check_sta(project_dir: Path) -> AuditResult:
     # own `per_corner/` directory alongside its summary report), so a genuine
     # pre-layout multi-corner run silences it and its absence is the only
     # thing that fires it.
-    multi_corner_executed = corners_ok and corner_distinct_matching >= 2
+    # R-0915-87(4) — COUNT THE SIGN-OFF CORNERS THE RUN ACTUALLY PRODUCED.
+    # MEASURED on subservient r27: sta_mcorner_ocv.rpt carries SETUP@SS and
+    # HOLD@FF, each `STA_BASIS: POST_ROUTE_SPEF`, and this summary still said
+    # STA_SINGLE_CORNER_ONLY because only per_corner/ was counted — while the
+    # SAME function already asked `_signoff_basis_corners_elsewhere` about that
+    # report to exempt the basis-mismatch rule. The multi-corner decision now
+    # asks the same reader (no second parser of the report). POST_ROUTE scope
+    # only: step 10's PRE_LAYOUT decision is unchanged.
+    signoff_corners = (_signoff_basis_corners_elsewhere(project_dir, "POST_ROUTE")
+                       if declared_basis == "POST_ROUTE" else 0)
+    multi_corner_executed = corners_ok and max(corner_distinct_matching,
+                                               signoff_corners) >= 2
     if not multi_corner_executed and corners_ok:
         _of = f" {declared_basis}" if declared_basis else ""
         result.findings.append(Finding(
@@ -3285,6 +3296,7 @@ def _check_sta(project_dir: Path) -> AuditResult:
                       "has_setup_hold": has_setup_hold,
                       "tool_authentic": authentic,
                       "corner_dirs_found": len(corner_dirs),
+                      "signoff_corners_from_sta_records": signoff_corners,
                       "corner_reports": corner_reports,
                       "corner_reports_distinct": corner_distinct,
                       # NAME THE QUESTION THAT WAS ASKED. `corners_ok` is
