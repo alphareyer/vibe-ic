@@ -140,6 +140,8 @@ import _analog_producer_common as _pc  # noqa: E402
 import pdk_analog_device_params as _pdp  # noqa: E402
 import pdk_analog_layout_minima as _minima  # noqa: E402
 import analog_transient_record as _record  # noqa: E402
+import analog_incremental_resolution as _res  # noqa: E402
+import analog_resolution_stimulus as _stim  # noqa: E402
 
 PRODUCER = "analog_a2_topology_emit"
 
@@ -456,6 +458,167 @@ _COEFFICIENT_BOUNDS_SEEN = []
 COEFFICIENT_DERIVATIONS = {
     "incremental_cifb": _incremental_cifb_coefficients,
 }
+
+
+#: An entry key: which DECLARED-RANGE spec this entry chooses inside, and
+#: against which GRADED spec it chooses.
+#:
+#: WHY IT EXISTS, MEASURED (lane icadc, R-0915-77). L5 declares this converter's
+#: oversampling ratio as `256` with a range of `64-512` and the note "(est)",
+#: and R3 of the same document says "SC or CT, single-loop or otherwise —
+#: designer's choice, as long as ENOB/OSR/range met". A target marked as an
+#: estimate inside a declared range is a FREE PARAMETER, and the generator was
+#: taking it as a fixed point: at 256 the loop it emits resolves 10.66 bit
+#: against a graded floor of 14, and no device work can close that, because the
+#: recurrence does not reach it with perfect devices.
+#:
+#: The choice is MEASURED, never a closed form: `analog_incremental_resolution`
+#: runs the loop's own recurrence with the matched decode. Sizing against
+#: `log2(N(N-1)/2)` — 14.994 at N=256 — would have said 256 was enough.
+GRADED_CHOICE_KEY = "graded_range_choice"
+
+#: What the ripple counter can realise: its period is a power of two, so the
+#: candidates inside a declared range are the powers of two it contains, plus
+#: the smallest power of two at or above the range's low end.
+def _power_of_two_candidates(lo: float, hi: float) -> List[int]:
+    out: List[int] = []
+    n = 1
+    while n <= hi:
+        if n >= lo:
+            out.append(n)
+        n *= 2
+    return out
+
+
+def _res_stim_delay_key() -> str:
+    """The constant name `analog_resolution_stimulus` reads it back under —
+    imported from that module so the two cannot drift."""
+    return _stim.FEEDBACK_DELAY_CONSTANT
+
+
+#: The entry key naming the device whose gate is the quantiser's STROBE — the
+#: phase on which the decision is committed.
+QUANTISER_STROBE_KEY = "quantiser_strobe_device"
+
+
+def derived_feedback_delay(lib: Dict[str, Any]) -> Optional[int]:
+    """How many clocks between a decision and its charge, DERIVED from the two
+    phases that decide it — or None for an entry that declares neither.
+
+    IT IS NOT THE BRANCH'S POLARITY, and that was the first answer here and it
+    was wrong. A switched-capacitor branch's polarity says whether it SAMPLES
+    then TRANSFERS or does both at once; it says nothing about WHEN the value
+    it samples was decided. The delay is the relation between the quantiser's
+    STROBE phase and the phase the feedback branch SAMPLES the DAC on:
+
+        strobe on the SAME phase the branch samples   the decision is made and
+                                                      taken in that phase -> 0
+        strobe on the OTHER phase                     the branch samples a
+                                                      decision made a phase
+                                                      earlier            -> 1
+
+    MEASURED on the emitted netlist by regression over 30 clocks (lane icadc,
+    F171): the shipped entry strobes on `nqstb` (the clock's complement) and
+    samples the DAC on `nckdac` (the clock), and its charge in step n carries
+    `ndac[n-1]` with -0.00005 on `ndac[n]` — delay 1, which is what this
+    derivation returns for it.
+
+    A typed constant here was the defect twice over: it was measured on a
+    HARNESS rather than on the emitted circuit (F169), and the first
+    derivation that replaced it read the wrong property (this docstring's
+    first paragraph). Derived from the two phases, it follows the circuit.
+    """
+    strobe_dev = lib.get(QUANTISER_STROBE_KEY)
+    groups = [g for g in _stage_groups(lib) if g.get("first_in")
+              and g.get(FEEDBACK_SELECTORS_KEY)]
+    if not strobe_dev or not groups:
+        return None
+    aliases = lib.get(CLOCK_PHASE_ALIASES_KEY)
+    strobe_gate = None
+    for d in lib.get("devices") or []:
+        if d.get("name") == strobe_dev and len(d.get("nets") or []) == 4:
+            strobe_gate = str(d["nets"][1])
+            break
+    if strobe_gate is None:
+        return None
+    st = groups[0]
+    probe = {"i": 1, "i1": 2, "in": "\u0001in\u0001",
+             "out": "\u0001out\u0001", "coeff": "1.0",
+             "alt": _SC_ALT_SENTINEL,
+             "in2": "\u0001in2\u0001", "out2": "\u0001out2\u0001"}
+    devs = []
+    for d in st.get("devices") or []:
+        nd = dict(d)
+        nd["nets"] = [str(n).format(**probe) for n in d.get("nets") or []]
+        nd["name"] = str(d["name"]).format(**probe)
+        devs.append(nd)
+    pol = sc_branch_polarities(devs, aliases)
+    fb = [b for b in pol.values() if _SC_ALT_SENTINEL in str(b["source"])]
+    if len(fb) != 1:
+        return None
+    # the phase the feedback branch SAMPLES its reference on: the gate of the
+    # switch that drives the bottom plate from the selector.
+    sample_gate = None
+    src = str(fb[0]["source"])
+    for d in devs:
+        nets = d.get("nets") or []
+        if len(nets) == 4 and str(nets[0]) == str(fb[0]["bottom_plate"]) \
+                and str(nets[2]) == src and str(d["name"]).startswith("mn_"):
+            sample_gate = str(nets[1])
+            break
+    if sample_gate is None:
+        return None
+    return 0 if (_resolve_phase(strobe_gate, aliases)
+                 == _resolve_phase(sample_gate, aliases)) else 1
+
+
+def resolve_graded_range_choice(lib: Dict[str, Any],
+                                spec_values: Dict[str, float],
+                                feedback_delay: int
+                                ) -> Optional[Dict[str, Any]]:
+    """The record of choosing the free spec inside its declared range, or None
+    when the entry declares no choice (every other entry is untouched).
+
+    The record is returned rather than applied so the caller decides — and so
+    the IR can carry every candidate's measurement, which is the difference
+    between a number a reader can check and a number they have to re-derive.
+    """
+    decl = lib.get(GRADED_CHOICE_KEY)
+    if not isinstance(decl, dict):
+        return None
+    free = str(decl.get("free_spec") or "")
+    graded = str(decl.get("graded_spec") or "")
+    lo = spec_values.get(free + "_min")
+    hi = spec_values.get(free + "_max")
+    target = spec_values.get(graded)
+    order = int(spec_values.get("order") or 0)
+    if not free or not graded or lo is None or hi is None or target is None:
+        # A declaration that states no RANGE is not a free parameter, and a
+        # graded spec that is not bound cannot choose anything. Both are
+        # honest "no choice here", not failures.
+        return {"applied": False, "reason": "range_or_graded_spec_not_bound",
+                "free_spec": free, "graded_spec": graded}
+    cands = _power_of_two_candidates(float(lo), float(hi))
+    if not cands or order < 1:
+        return {"applied": False, "reason": "no_candidate_in_the_declared_range",
+                "free_spec": free, "range": [lo, hi]}
+    deriv = COEFFICIENT_DERIVATIONS.get(lib.get(COEFFICIENT_DERIVATION_KEY))
+    consts = lib.get("constants") or {}
+
+    def _coeff_of(n: int) -> float:
+        env = dict(spec_values)
+        env[free] = float(n)
+        if deriv is None:
+            return 0.25
+        return float(deriv(order, env, consts)[0])
+
+    rec = _res.choose(cands, order, _coeff_of, feedback_delay, float(target),
+                      swing_max=_res.swing_budget(consts, spec_values))
+    rec.update({"applied": True, "free_spec": free, "graded_spec": graded,
+                "declared_range": [float(lo), float(hi)],
+                "declared_target": spec_values.get(free),
+                "why": decl.get("why")})
+    return rec
 
 #: Unit tokens that all mean "a pure number". A spec row's `unit` is
 #: human-typed prose lifted from a datasheet table, so the em-dash, the
@@ -1295,7 +1458,54 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
         # The gate this entry builds carries the clock's own phase once the
         # conversion-window reset is released — see `CLOCK_PHASE_ALIASES_KEY`
         # and the devices that build it further down.
-        "clock_phase_aliases": {"nckdac": "clk", "nckdacb": "nclkb"},
+        "clock_phase_aliases": {"nckdac": "clk", "nckdacb": "nclkb",
+                                # the quantiser's strobe chain: `nqd1` is the
+                                # clock inverted twice off `nclkb`, `nqstb`
+                                # once more — declared beside the devices that
+                                # build them, for the same reason the feedback
+                                # gate's phase is.
+                                "nqd1": "clk", "nqstb": "nclkb"},
+        # WHOSE GATE IS THE DECISION INSTANT. Read by
+        # `derived_feedback_delay`, which compares its phase with the phase the
+        # feedback branch samples the DAC on.
+        "quantiser_strobe_device": "mn_qtail",
+        # ── WHICH DECLARED-RANGE SPEC THIS ENTRY CHOOSES INSIDE ───────────
+        # L5 declares this converter's oversampling ratio as `256` over a
+        # range of `64-512` with the note "(est)", and the same document's R3
+        # says "SC or CT, single-loop or otherwise — designer's choice, as
+        # long as ENOB/OSR/range met". An estimate inside a declared range is
+        # a FREE PARAMETER of the design, and taking it as a fixed point is
+        # what left the loop short of a graded floor it can reach.
+        #
+        # MEASURED TWICE, and the two instruments agree on the CHOICE while
+        # disagreeing on the level. `analog_incremental_resolution` runs the
+        # loop's own recurrence (worst of four tone phases, matched decode,
+        # tone coprime with the conversion windows, scored against the
+        # input-weighted truth with no bin excluded); the ideal-element SPICE
+        # harness of this exact topology runs the same tone and the same
+        # decode over a 55-window coherent record:
+        #
+        #     window   recurrence model   SPICE-ideal harness   ceiling
+        #       64          6.31                 -              10.99
+        #      128          8.55                 -              13.00
+        #      256         10.66              12.654            14.99
+        #      512         12.70              14.358            17.00
+        #
+        # Both say 256 is short of 14 and 512 is the smallest candidate that
+        # is not. The model reads about 1.7 bit UNDER the harness and that gap
+        # is recorded as unexplained (lane icadc F168/F174) — it is in the
+        # conservative direction, so the model selects the ratio and refuses
+        # to certify it (`met` is false at every candidate); the REAL corner
+        # decides. `log2(N(N-1)/2)` would have said 256 was enough.
+        "graded_range_choice": {
+            "free_spec": "osr", "graded_spec": "enob",
+            "why": "L5 gives OSR as an estimate over a declared range and "
+                   "R3 makes the topology the designer's choice as long as "
+                   "ENOB/OSR/range are met; the analog spec also puts the "
+                   "decimation and read-out out of scope and declares the "
+                   "block's output to be the raw 1-bit stream, so no "
+                   "conversion or output rate is declared anywhere for a "
+                   "larger ratio to violate"},
         # Stated in the artefact so a reader is told what LEFT the boundary
         # and on whose authority, instead of finding two fewer pins.
         "boundary_notes": [
@@ -1322,44 +1532,12 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
         "constants": {
             "w_cap": 10.0,
             "w_res": 0.35,
-            # HOW MANY CLOCKS BETWEEN A DECISION AND ITS CHARGE, MEASURED
-            # by regression on this entry's own emitted loop (lane icadc,
-            # F163). It is the one number a matched incremental DECODE cannot
-            # derive from the bitstream, and a decoder that assumed it would
-            # be guessing about the circuit this file emits — so this file,
-            # which emits it, states it.
-            #
-            # ONE. Fitted over 2650 clocks of the ideal-element harness of
-            # this exact topology, dropping three clocks either side of every
-            # reset, against the decision sampled in transfer phase n:
-            #
-            #   d(vo1)  = +0.24893*(vin - vcm) + 0.24962*(ndac[n-1] - vcm)
-            #                                  + 0.00006*(ndac[n]   - vcm)
-            #   d(vint) = +0.24937*(vo1 - vcm) + 0.24960*(ndac[n-1] - vcm)
-            #                                  + 0.00004*(ndac[n]   - vcm)
-            #
-            # rms residual 4.2e-5 and 3.0e-5. Three things at once: the
-            # realised coefficients ARE the declared 0.2499 on both stages;
-            # the DAC reaches BOTH integrators with the same weight, which is
-            # what `analog_incremental_decimator`'s DAC-injected weights
-            # assume; and the charge transferred in step n carries
-            # `ndac[n-1]`, with ZERO on `ndac[n]`.
-            #
-            # WHY ONE AND NOT ZERO, which is what the phase diagram looks like
-            # at a glance: the feedback branch SAMPLES its reference during
-            # clk-HIGH and dumps it during clk-LOW, so the DAC voltage that
-            # ends up on the summing node is the one standing during the
-            # SAMPLING phase — the decision latched at the PREVIOUS falling
-            # edge. `bit_out` and `ndac` do step together at each falling
-            # edge; that is the transition, not the charge.
-            #
-            # CONFIRMED against a pure-arithmetic loop built both ways and
-            # decoded both ways (no simulator): a loop that realises 1 is
-            # decoded by delay-1 weights to an offset of +0.19992 against a
-            # true +0.20000, and by delay-0 weights to +0.20146 — and a loop
-            # that realises 0 inverts the preference, 2.5x on the residual.
-            # The decode has to match the loop, and this is the loop.
-            "feedback_delay_clocks": 1.0,
+            # `feedback_delay_clocks` is NOT typed here. It is DERIVED from
+            # this entry's own feedback branch — see `derived_feedback_delay`
+            # — because a typed constant about the emitted circuit is what
+            # this file exists to avoid, and because the first version of it
+            # was measured on a HARNESS rather than on the emitted netlist
+            # (lane icadc F169, settled by the regression in F171).
             # THIS CONVERTER IS GRADED IN THE DECODED DOMAIN. It resets and
             # accumulates per conversion window, so its answer is one decoded
             # sample per window and the tone it is graded at has to be
@@ -1702,7 +1880,16 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
              "value just integrated, so the decision is settled before the "
              "feedback DAC samples the reference it selects — and it is "
              "strobed by the DELAYED copy of that phase, so it does not "
-             "commit inside the edge's own injection transient",
+             "commit inside the edge's own injection transient. "
+             "RE-MEASURED at OSR 512 on the ideal-element harness of this "
+             "exact topology, one variable, same coprime tone, same decode, "
+             "same 28.672 ms record (lane icadc, R-0915-81): this phase "
+             "reads 14.358 bit and the SAMPLING phase reads 6.946 — 7.4 bit "
+             "WORSE. An arithmetic model of the recurrence predicted the "
+             "opposite, because a difference equation has no notion of which "
+             "physical instant a decision is taken at. Round 25's rule is "
+             "confirmed, not overturned, and this is the second measurement "
+             "that says so",
              "nets": ["nqtail", "nqstb", "vss", "vss"], "w": 16.0,
              "l": 0.5},
             # ── the quantiser's input is AUTO-ZEROED ────────────────────
@@ -5047,6 +5234,26 @@ def build_ir(block: str, btype: str, entry: Dict[str, Any],
              role_maxima: Optional[Dict[str, Any]] = None,
              maxima_source: Optional[str] = None,
              ) -> Dict[str, Any]:
+    # ── WHAT THE LOOP'S FEEDBACK DELAY IS, DERIVED FROM THE BRANCH ───────
+    # It used to be a typed constant, and a typed constant about the emitted
+    # circuit is exactly what this file exists to avoid. It is a consequence
+    # of the FEEDBACK BRANCH's polarity and of nothing else: a DELAYING branch
+    # (both plates on opposite phases, polarity +1) samples the reference one
+    # phase before it transfers it, so the charge in step n carries the
+    # decision from step n-1 — delay 1. A DELAY-FREE branch (polarity -1)
+    # carries the decision standing during the transfer itself — delay 0.
+    # MEASURED on the emitted netlist by regression over 30 clocks (lane
+    # icadc, F171): `d(vo1) = +0.10781*(vin-vcm) + 0.24553*(ndac[n-1]-vcm)
+    # - 0.00005*(ndac[n]-vcm)` — the shipped delaying branch carries
+    # `ndac[n-1]`, and nothing on `ndac[n]`.
+    spec_values = dict(spec_values)
+    _fb_delay = derived_feedback_delay(lib)
+    _choice = (resolve_graded_range_choice(lib, spec_values, _fb_delay)
+               if _fb_delay is not None else None)
+    if _choice and _choice.get("applied") and _choice.get("chosen"):
+        spec_values[str(_choice["free_spec"])] = float(
+            _choice["chosen"]["window_clocks"])
+
     knobs: Dict[str, Any] = {}
     knob_sources: Dict[str, str] = {}
     defaulted: List[str] = []
@@ -5065,6 +5272,12 @@ def build_ir(block: str, btype: str, entry: Dict[str, Any],
 
     role_minima = dict(role_minima or {})
     constants = dict(lib.get("constants") or {})
+    # DERIVED, never typed — see `derived_feedback_delay`. Published as a
+    # constant for the same reason `window_clocks` is: nothing downstream can
+    # compute it, and `analog_resolution_stimulus` stamps it onto the corner
+    # deck so the matched decode runs the recurrence the loop realises.
+    if _fb_delay is not None:
+        constants[_res_stim_delay_key()] = float(_fb_delay)
     # An entry with no `stage` key comes back with its own lists untouched,
     # so every pre-existing entry takes the identical path it always did.
     devices, internal_nets, param_exprs, stage_rec = expand_stages(
@@ -5154,6 +5367,10 @@ def build_ir(block: str, btype: str, entry: Dict[str, Any],
         "role_terminals": {r: ROLE_TERMINALS[r] for r in
                            sorted({d["role"] for d in devices})},
         "constants": constants,
+        # The record of choosing a DECLARED-RANGE spec inside its range, with
+        # EVERY candidate's measurement — so a reader checks the choice
+        # instead of re-deriving it. None for an entry that declares none.
+        "graded_range_choice": _choice,
         "devices": devices,
         "spec_knobs": [dict(k) for k in lib.get("spec_knobs", [])],
         "knobs": knobs,

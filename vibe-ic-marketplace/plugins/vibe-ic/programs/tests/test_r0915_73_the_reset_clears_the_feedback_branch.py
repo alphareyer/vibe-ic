@@ -238,8 +238,13 @@ def test_outside_the_reset_the_branch_is_on_the_clock_it_always_was(emitted_ir):
 # The entry that BUILDS the gate declares what phase its output carries, and
 # that declaration is about a NET, never about a polarity.
 def test_the_entry_declares_the_phase_its_gated_clock_carries():
+    """The two nets THIS change builds. The entry declares others too — the
+    quantiser's strobe chain, added by R-0915-77 — so the assertion is on the
+    pair this commit is about, by membership rather than by equality: a set
+    equality here would make every later gate a red in this file."""
     aliases = a2.LIBRARY["delta_sigma"][a2.CLOCK_PHASE_ALIASES_KEY]
-    assert aliases == {"nckdac": "clk", "nckdacb": "nclkb"}
+    assert aliases["nckdac"] == "clk"
+    assert aliases["nckdacb"] == "nclkb"
 
 
 def test_resolving_a_phase_follows_the_alias_and_terminates_on_a_cycle():
