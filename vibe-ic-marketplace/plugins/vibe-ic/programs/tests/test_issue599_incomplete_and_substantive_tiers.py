@@ -53,14 +53,14 @@ SRC = (_PROGRAMS / "flow_compliance_check.py").read_text(encoding="utf-8")
 
 # ── the detector ────────────────────────────────────────────────────────────
 def test_a_token_at_line_start_is_seen():
-    assert FC._stdout_signals_token("noise\n  INCOMPLETE: x\n", "INCOMPLETE")
+    assert FC._stdout_signals_token("noise\n  INCOMPLETE: x\n", "NOT_MEASURED")
 
 
 def test_a_token_mid_line_is_not():
     """Otherwise a gate MENTIONING the word in prose raises the tier — the
     text-matching failure this mechanism exists to avoid."""
     assert not FC._stdout_signals_token(
-        "the run was INCOMPLETE last time\n", "INCOMPLETE")
+        "the run was INCOMPLETE last time\n", "NOT_MEASURED")
 
 
 def test_the_old_vacuous_detector_is_one_caller_of_it():
@@ -117,14 +117,14 @@ def test_a_substantive_disclosure_turns_a_vacuous_step_into_a_pass(tmp_path, mon
 
 def test_an_unexamined_applicable_input_is_incomplete(tmp_path, monkeypatch):
     got = _status(tmp_path, "INCOMPLETE: the AI sub-track did not read", monkeypatch)
-    assert got == "INCOMPLETE", got
+    assert got == "NOT_MEASURED", got
 
 
 def test_incomplete_wins_over_vacuous_when_a_gate_raises_both(tmp_path, monkeypatch):
     """"Applicable and not examined" is the stronger statement."""
     got = _status(tmp_path, "VACUOUS_PASS: no rule applied\n"
                             "INCOMPLETE: the AI sub-track did not read", monkeypatch)
-    assert got == "INCOMPLETE", got
+    assert got == "NOT_MEASURED", got
 
 
 def test_a_plain_pass_is_untouched(tmp_path, monkeypatch):
@@ -162,11 +162,11 @@ def test_the_new_hints_are_held_out_of_the_displayed_reasons(tmp_path,
 
 #: The four maps #599 requires, read out of `main` BY NAME instead of by a
 #: byte sequence. Every one of the four assertions this replaced was a literal
-#: that included the character AFTER the value — `'"INCOMPLETE": 0}'`,
-#: `'"INCOMPLETE": "INCOMPLETE"}'` — so each of them was really asserting
+#: that included the character AFTER the value — `'"NOT_MEASURED": 0}'`,
+#: `'"NOT_MEASURED": "NOT_MEASURED"}'` — so each of them was really asserting
 #: "INCOMPLETE is the LAST key in this dict", which is not a contract #599
 #: states and not one anybody maintains. MEASURED: `3341a0d32` appended
-#: `"NOT-MEASURED": "NOT-MEASURED"` to the display-label map, the label for
+#: `"NOT_MEASURED": "NOT_MEASURED"` to the display-label map, the label for
 #: INCOMPLETE was untouched and still correct, and this test went red on main
 #: (vibe-ic#2111). Parsed, the same widening is invisible; a label that is
 #: actually WRONG or actually GONE still fails.
@@ -203,10 +203,10 @@ def _main_dict(name: str) -> dict:
 
 
 def test_incomplete_is_counted_labelled_and_rendered():
-    assert _main_dict("counts").get("INCOMPLETE") == 0, "not in the tally"
-    assert _main_dict("_label").get("INCOMPLETE") == "INCOMPLETE", \
+    assert _main_dict("counts").get("NOT_MEASURED") == 0, "not in the tally"
+    assert _main_dict("_label").get("NOT_MEASURED") == "NOT_MEASURED", \
         "no display label"
-    icon = _main_dict("_icon").get("INCOMPLETE")
+    icon = _main_dict("_icon").get("NOT_MEASURED")
     assert icon and icon != "?", "no icon, so it renders as `?`"
     assert "incomplete_str" in SRC, "absent from the summary line"
 
@@ -242,7 +242,7 @@ def test_it_is_a_disclosure_tier_not_a_failure():
     naming fix, which is a different decision with a corpus sweep in front of
     it."""
     for bucket in ("failing", "missing"):
-        assert f'"INCOMPLETE"' not in SRC[SRC.index(f"{bucket} ="):][:400], (
+        assert f'"NOT_MEASURED"' not in SRC[SRC.index(f"{bucket} ="):][:400], (
             f"INCOMPLETE leaked into the {bucket} bucket")
 
 
@@ -277,7 +277,7 @@ def test_d1_discloses_incomplete_only_when_the_ai_half_did_not_read():
     seg = src[src.index('if rep["verdict"] == "INCOMPLETE":'):][:1100]
     assert 'non-empty schema-readable review' in seg
     assert 'ai[\'status\']' in seg
-    assert 'VACUOUS_PASS' not in seg, (
+    assert 'NOT_MEASURED' not in seg, (
         "an unanswered expert handoff is still published as a pass tier")
 
 
@@ -288,6 +288,6 @@ def test_the_yosys_gate_still_runs_and_says_something(tmp_path):
         [sys.executable, str(_PROGRAMS / "yosys_hilomap_required_check.py"),
          str(tmp_path)], capture_output=True, text=True)
     out = r.stdout + r.stderr
-    assert "VACUOUS_PASS" in out, out
+    assert "NOT_MEASURED" in out, out
     assert "SUBSTANTIVE_PASS" not in out, (
         "nothing was read on this project and the gate claimed otherwise")

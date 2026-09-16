@@ -254,7 +254,7 @@ def test_a_declared_unmet_clause_leaves_the_signoff_step_and_its_successor_passi
     skip-eligible, so the same clause now lands the step in the INCOMPLETE tier
     instead. MEASURED on tree 5e850b3acee8:
 
-        mandatory   rc=1  {'23': 'INCOMPLETE', '32': 'PASS_VOIDED_BY_DEPENDENCY'}
+        mandatory   rc=1  {'23': 'NOT_MEASURED', '32': 'NOT_MEASURED'}
         optional    rc=0  {'23': 'PASS',       '32': 'PASS'}
 
     Every load-bearing half of the finding is unchanged: under the mandatory
@@ -264,8 +264,8 @@ def test_a_declared_unmet_clause_leaves_the_signoff_step_and_its_successor_passi
     pinned by the test above.
     """
     rc_a, a = _audit(tmp_path, _one_step_flow(tmp_path, False, "a"), "a")
-    assert a["23"] == "INCOMPLETE", a
-    assert a["32"] == "PASS_VOIDED_BY_DEPENDENCY", a
+    assert a["23"] == "NOT_MEASURED", a
+    assert a["32"] == "NOT_MEASURED", a
     assert rc_a != 0
 
     rc_b, b = _audit(tmp_path, _one_step_flow(tmp_path, True, "b"), "b")

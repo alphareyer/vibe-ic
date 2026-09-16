@@ -154,14 +154,14 @@ def test_counts_snapshot_single_definition():
 
     The numerator used to be ``PASS + VACUOUS-PASS``, mirroring the
     checker's retired ``pass_count = counts['PASS'] +
-    counts['VACUOUS_PASS']``. VACUOUS-PASS left the numerator by owner
+    counts['NOT_MEASURED']``. VACUOUS-PASS left the numerator by owner
     ruling — a gate that ran and found nothing to audit did not measure
     the step, so counting it as executed made the published number claim
     a measurement that never happened. It did NOT leave the denominator:
     it is an unmet requirement, unlike SKIPPED-CONDITION (the step's own
     condition was evaluated and not met), which is subtracted."""
-    rollup = {"PASS": 30, "VACUOUS-PASS": 4, "WAIVED-DEFERRED": 2,
-              "SKIPPED-CONDITION": 5, "FAIL": 0, "MISSING": 1}
+    rollup = {"PASS": 30, "NOT_MEASURED": 4, "WAIVED-DEFERRED": 2,
+              "NOT_APPLICABLE": 5, "FAIL": 0, "FAIL": 1}
     total = 42
     snap = g._counts_snapshot(rollup, total)
     assert snap["executed_pass"] == 30

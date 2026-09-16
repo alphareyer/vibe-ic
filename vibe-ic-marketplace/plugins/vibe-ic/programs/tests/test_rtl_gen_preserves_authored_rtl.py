@@ -508,5 +508,5 @@ def test_guard_ignores_ic_class_identity(tmp_path, monkeypatch):
         _author_rtl(project)
         outcomes.append(R.step_rtl_gen(project, class_name).status)
 
-    assert outcomes == ["WAIVED", "WAIVED"], (
+    assert outcomes == ["PASS_WITH_WAIVERS", "PASS_WITH_WAIVERS"], (
         "provenance decisions must not vary with the IC class label")

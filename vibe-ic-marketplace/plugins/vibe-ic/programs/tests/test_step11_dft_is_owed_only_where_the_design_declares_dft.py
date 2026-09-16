@@ -226,8 +226,8 @@ def test_SKIPPED_CONDITION_is_an_EXCUSED_status_so_the_cascade_clears():
     assumed: the ordering guard excuses a dependency whose status is in
     `_NOT_APPLICABLE`, and SKIPPED-CONDITION is one of those."""
     import flow_step_execution_coverage_check as C  # noqa: PLC0415
-    assert "SKIPPED-CONDITION" in C._NOT_APPLICABLE
-    assert "MISSING" not in C._NOT_APPLICABLE
+    assert "NOT_APPLICABLE" in C._NOT_APPLICABLE
+    assert "FAIL" not in C._NOT_APPLICABLE
 
 
 def test_step_11_names_no_condition_owner_and_why(tmp_path):

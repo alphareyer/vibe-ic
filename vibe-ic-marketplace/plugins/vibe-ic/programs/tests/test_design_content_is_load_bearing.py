@@ -227,9 +227,9 @@ def test_the_matrix_gives_a_library_default_its_own_cell(tmp_path):
     out = tmp_path / "m.json"
     _run(ANALOG_COMPLIANCE, root, "--json", str(out))
     m = json.loads(out.read_text())["summary"]["matrix"]["blk_alpha"]
-    assert m["A3"] == "PASS_STRUCTURE_ONLY", m
-    assert m["A4"] == "PASS_STRUCTURE_ONLY", m
-    assert m["A5"] == "MISSING", (
+    assert m["A3"] == "PASS_WITH_WAIVERS", m
+    assert m["A4"] == "PASS_WITH_WAIVERS", m
+    assert m["A5"] == "FAIL", (
         "PRECONDITION: an obligation that really is unmet must still read "
         "MISSING, or the new cell has simply replaced the old one")
 
@@ -249,7 +249,7 @@ def test_a_reader_of_the_line_alone_can_tell_the_two_apart(tmp_path):
         f"a structure-only A3 and a designed A3 print the SAME compliance "
         f"line:\n  {line_so}")
     assert "STRUCTURE-ONLY=2" in line_so, line_so
-    assert "STRUCTURE-ONLY" not in line_sized, line_sized
+    assert "PASS_WITH_WAIVERS" not in line_sized, line_sized
 
 
 def test_the_verdict_word_on_the_line_is_not_a_bare_pass(tmp_path):
@@ -282,4 +282,4 @@ def test_the_flow_compliance_line_carries_the_tier(tmp_path):
         f"library default from one that produced a design-bound artefact:\n"
         f"  {tally[0]}")
     step = [l for l in cp.stdout.splitlines() if "Step A3:" in l]
-    assert step and "STRUCTURE-ONLY" in step[0], step
+    assert step and "PASS_WITH_WAIVERS" in step[0], step

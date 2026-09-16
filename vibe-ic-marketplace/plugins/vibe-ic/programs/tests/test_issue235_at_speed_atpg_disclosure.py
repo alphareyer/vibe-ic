@@ -300,7 +300,7 @@ def test_an_exception_from_the_producer_is_disclosed(tmp_path):
     MUTATION THIS CATCHES: reverting the except branch to `notes.append(...)`.
     """
     _armed(tmp_path)
-    _coverage(tmp_path, "DT2", "BLOCKED")
+    _coverage(tmp_path, "DT2", "NOT_MEASURED")
 
     def _boom(cmd, **kw):
         # CZT2-15 — the STIMULUS changed because the mechanism did, and the
@@ -339,8 +339,8 @@ def test_a_real_measurement_leaves_no_record(tmp_path):
     MUTATION THIS CATCHES: writing the disclosure unconditionally.
     """
     _armed(tmp_path)
-    _coverage(tmp_path, "DT1", "BLOCKED")
-    _coverage(tmp_path, "DT2", "BLOCKED")
+    _coverage(tmp_path, "DT1", "NOT_MEASURED")
+    _coverage(tmp_path, "DT2", "NOT_MEASURED")
 
     def _fake(cmd, **kw):
         out = Path(cmd[cmd.index("--json") + 1])
@@ -369,7 +369,7 @@ def test_a_real_measurement_retires_a_stale_record(tmp_path):
     the run grades correctly and the gate still answers BLOCKED forever.
     """
     _armed(tmp_path)
-    _coverage(tmp_path, "DT2", "BLOCKED")
+    _coverage(tmp_path, "DT2", "NOT_MEASURED")
     stale = R.atpg_disclose_not_run(tmp_path, "DT2", "an earlier pass gave up",
                                     "precondition_unmet")
     assert stale.is_file()
@@ -450,8 +450,8 @@ def test_producer_argv_is_unchanged(tmp_path):
     silently change grading rather than fail loudly.
     """
     _armed(tmp_path)
-    _coverage(tmp_path, "DT1", "BLOCKED")
-    _coverage(tmp_path, "DT2", "BLOCKED")
+    _coverage(tmp_path, "DT1", "NOT_MEASURED")
+    _coverage(tmp_path, "DT2", "NOT_MEASURED")
     (tmp_path / "input" / "pdk").mkdir(parents=True)
     cmds: list = []
 
@@ -483,7 +483,7 @@ def test_producer_argv_is_unchanged(tmp_path):
 def test_no_pdk_dir_argument_when_there_is_no_staged_pdk(tmp_path):
     """Control for the argv test: --pdk-dir is conditional, as it was."""
     _armed(tmp_path)
-    _coverage(tmp_path, "DT2", "BLOCKED")
+    _coverage(tmp_path, "DT2", "NOT_MEASURED")
     cmds: list = []
 
     import phase3_one_shot_runner as _R
@@ -519,7 +519,7 @@ def test_missing_sdc_is_a_named_missing_input_not_a_crash(tmp_path):
 
 @pytest.mark.parametrize("verdict,regrade", [
     ("PASS", False), ("NOT_APPLICABLE", False),
-    ("BLOCKED", True), ("ENGINE_LIMITED", True), ("ERROR", True),
+    ("NOT_MEASURED", True), ("ENGINE_LIMITED", True), ("ERROR", True),
 ])
 def test_regrade_policy_is_unchanged(tmp_path, verdict, regrade):
     """A genuine measurement is never re-run; a non-graded placeholder is."""
@@ -720,11 +720,11 @@ def test_a_disclosed_not_run_is_never_cost_free_at_the_flow_level(tmp_path):
     assert _status_of(doc, "DT1") == "FAIL", doc["_stdout"]
     assert doc["overall"] == "FAIL", doc["_stdout"]
     assert rc == 1, doc["_stdout"]
-    assert doc["counts"]["MISSING"] >= 1, doc["counts"]
+    assert doc["counts"]["FAIL"] >= 1, doc["counts"]
 
     # DT2 DEFERS TO ITS UPSTREAM HERE, AND THAT IS NOT THE DISCOUNT.
     #
-    # This used to assert `DT2 == "MISSING"` and `MISSING >= 2`. DT2's arming
+    # This used to assert `DT2 == "FAIL"` and `MISSING >= 2`. DT2's arming
     # condition named `phase2/stage2/dft/cut_netlist.v`, which this tree has, so
     # DT2 armed and went red for a grade its own upstream had never produced.
     # DT2's condition is now DT1's DECLARED grade plus step 22's SPEF — the
@@ -786,7 +786,7 @@ def test_a_routed_extracted_design_with_no_dft_does_not_arm_dt2(tmp_path):
         + doc["_stdout"])
     dt2 = next(step for step in doc["steps"] if str(step.get("id")) == "DT2")
     assert str(declaration.relative_to(tmp_path)) in "\n".join(dt2["reasons"]), dt2
-    assert doc["counts"]["MISSING"] == 0, doc["_stdout"]
+    assert doc["counts"]["FAIL"] == 0, doc["_stdout"]
     assert doc["overall"] == "PASS", doc["_stdout"]
     assert rc == 0, doc["_stdout"]
 
@@ -842,7 +842,7 @@ def test_dt2_arms_and_goes_red_when_its_own_grade_is_absent(tmp_path):
         "a design carrying DT2's scan cut, its SPEF and its routed netlist, "
         "with NO at-speed grade on disk, did not go red — the step whose only "
         "job is to report that grade vanished instead:\n" + doc["_stdout"])
-    assert doc["counts"]["MISSING"] >= 1, doc["_stdout"]
+    assert doc["counts"]["FAIL"] >= 1, doc["_stdout"]
     assert doc["overall"] == "FAIL", doc["_stdout"]
     assert rc == 1, doc["_stdout"]
 

@@ -57,13 +57,13 @@ def test_every_EXCUSED_word_in_the_flows_register_is_green_here():
 
 def test_both_spellings_of_the_deferral_are_green():
     """The exact pair that was half-registered."""
-    for word in ("WAIVED", "WAIVED-DEFERRED"):
+    for word in ("PASS_WITH_WAIVERS", "WAIVED-DEFERRED"):
         assert S._norm_status(word) in S._STAGE_GREEN, word
 
 
 def test_a_full_pass_is_green_and_the_vacuous_tiers_are_too():
-    for word in (T.FULL_PASS, "VACUOUS-PASS", "VACUOUS_PASS",
-                 "PARTIALLY-VACUOUS", "PARTIALLY_VACUOUS"):
+    for word in (T.FULL_PASS, "NOT_MEASURED", "NOT_MEASURED",
+                 "PASS", "PARTIALLY_VACUOUS"):
         assert S._norm_status(word) in S._STAGE_GREEN, word
 
 
@@ -78,7 +78,7 @@ def test_punctuation_is_not_the_answer():
 # ── direction 1: a sanctioned deferral does not stop the review ───────────
 
 def test_a_stage_whose_only_non_PASS_row_is_WAIVED_is_reviewable(tmp_path):
-    got = S.stage_passed(_compliance(tmp_path, ["PASS", "PASS", "WAIVED"]),
+    got = S.stage_passed(_compliance(tmp_path, ["PASS", "PASS", "PASS_WITH_WAIVERS"]),
                          "stage1", None)
     assert got["passed"] is True, got
     assert "all green" in got["why"]
@@ -89,11 +89,11 @@ def test_the_measured_shape_stops_naming_WAIVED(tmp_path):
     still not reviewable — but WAIVED is no longer one of the reasons, which
     is the whole of what this change does."""
     got = S.stage_passed(
-        _compliance(tmp_path, ["PASS", "WAIVED", "INCOMPLETE"]), "stage1",
+        _compliance(tmp_path, ["PASS", "PASS_WITH_WAIVERS", "NOT_MEASURED"]), "stage1",
         None)
     assert got["passed"] is False
-    assert "WAIVED" not in got["why"], got["why"]
-    assert "INCOMPLETE" in got["why"]
+    assert "PASS_WITH_WAIVERS" not in got["why"], got["why"]
+    assert "NOT_MEASURED" in got["why"]
 
 
 # ── direction 2: a stage that really failed still is not reviewed ─────────

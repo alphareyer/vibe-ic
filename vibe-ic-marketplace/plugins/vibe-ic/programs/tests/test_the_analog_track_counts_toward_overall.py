@@ -106,7 +106,7 @@ def _flow_audit(project: Path, *extra: str) -> dict:
     # of `PASS_WITH_WAIVERS`). This is the value that becomes the runner's
     # `final_audit` step verdict, so it is what the tests below assert on.
     if "Overall: PASS_WITH_WAIVERS" in p.stdout:
-        rep["_runner_final_audit"] = "WAIVED"
+        rep["_runner_final_audit"] = "PASS_WITH_WAIVERS"
     elif "Overall: PASS" in p.stdout:
         rep["_runner_final_audit"] = "PASS"
     else:
@@ -382,7 +382,7 @@ def test_an_analog_track_that_produced_nothing_is_not_a_track_that_was_never_ask
         f"({rep_declared['counts']}), so this no longer isolates MISSING "
         f"from FAIL")
     track = {i: _statuses(rep_declared)[i] for i in _analog_ids(rep_declared)}
-    assert all(s == "MISSING" for s in track.values()), (
+    assert all(s == "FAIL" for s in track.values()), (
         f"PRECONDITION: the declared-but-empty track is not uniformly "
         f"MISSING ({track})")
 

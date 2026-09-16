@@ -111,7 +111,7 @@ def test_the_shipped_wiring_keeps_the_voided_disclosure(broken_chain):
     block = _step20(out)
     assert "[PASS-VOIDED" in block, block
     assert _VOIDED_RE.search(block), block
-    assert "VACUOUS-PASS" not in block, block
+    assert "NOT_MEASURED" not in block, block
 
 
 def test_the_classifier_is_a_program_output_not_a_gate():

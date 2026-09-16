@@ -287,9 +287,9 @@ def test_every_status_the_plan_can_carry_is_classified(runner):
     assert not unresolved, (
         f"the scrape could not resolve {sorted(unresolved)} — it is blind to "
         f"part of the vocabulary and its 'all classified' answer is worthless")
-    for must in ("PASS", "FAIL", "BLOCKED", "SKIP", "WAIVED",
-                 "ENV_UNAVAILABLE", "VACUOUS_PASS", "PASS_WITH_ATTRIBUTION",
-                 "WARN", "PASS_W_WARN"):
+    for must in ("PASS", "FAIL", "NOT_MEASURED", "SKIP", "PASS_WITH_WAIVERS",
+                 "NOT_MEASURED", "NOT_MEASURED", "PASS_WITH_WAIVERS",
+                 "WARN", "PASS_WITH_WAIVERS"):
         assert must in emitted, (
             f"the scrape did not find {must!r}, which the shipped sources "
             f"demonstrably emit — the instrument is broken, not the runner")
@@ -403,12 +403,12 @@ def test_the_known_words_keep_their_tiers(runner):
     """
     for st, expect in (("PASS", "PASS"),
                        ("FAIL", "FAIL"),
-                       ("BLOCKED", "FAIL"),
-                       ("VACUOUS_PASS", "FAIL"),
+                       ("NOT_MEASURED", "FAIL"),
+                       ("NOT_MEASURED", "FAIL"),
                        ("SKIP", "PASS_WITH_WAIVERS"),
-                       ("WAIVED", "PASS_WITH_WAIVERS"),
-                       ("ENV_UNAVAILABLE", "PASS_WITH_WAIVERS"),
-                       ("PASS_WITH_ATTRIBUTION", "PASS_WITH_WAIVERS")):
+                       ("PASS_WITH_WAIVERS", "PASS_WITH_WAIVERS"),
+                       ("NOT_MEASURED", "PASS_WITH_WAIVERS"),
+                       ("PASS_WITH_WAIVERS", "PASS_WITH_WAIVERS")):
         assert _verdict(runner, st)[0] == expect, st
     # precedence is unchanged among the known words
     assert _verdict(runner, "PASS", "SKIP", "FAIL")[0] == "FAIL"

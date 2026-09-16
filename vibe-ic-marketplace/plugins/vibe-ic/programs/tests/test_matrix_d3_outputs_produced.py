@@ -2728,7 +2728,7 @@ def test_d3_registered_inline_record_uses_strict_native_path(tmp_path, monkeypat
     # nonempty-file arm would incorrectly say produced here.
     result = produce_live("23", entry, rec)
     assert not result.produced, result.detail
-    assert "NOT_MEASURED" in result.detail or "BLOCKED" in result.detail
+    assert "NOT_MEASURED" in result.detail or "NOT_MEASURED" in result.detail
 
 
 def measure_new_signoff_output(step_id, entry: str) -> EntryVerdict:
@@ -6240,7 +6240,7 @@ DECLARED_OUTSIDE_THE_PUBLISH_CONTRACT: Tuple[Tuple[str, str], ...] = (
 #: Cell states that are a DETERMINATION about the step rather than an absence of
 #: one. `NA` is a fact about the design and `WAIVED` is a registered decision
 #: carrying evidence; both are answers. `NOT_MEASURED` is not — see below.
-_STATES_THAT_DECIDED = ("NA", "WAIVED")
+_STATES_THAT_DECIDED = ("NA", "PASS_WITH_WAIVERS")
 
 
 def _declared_outside_the_publish_contract() -> Tuple[Tuple[str, str], ...]:
@@ -7780,7 +7780,7 @@ def matrix_cell_state(step_id) -> str:
     if matrix_na_precondition(step_id) is not None:
         return "NA"
     if waiver_for(step_id) is not None:
-        return "WAIVED"
+        return "PASS_WITH_WAIVERS"
     if matrix_not_measured_reason(step_id) is not None:
         return "NOT_MEASURED"
     return "ENFORCED"

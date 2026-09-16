@@ -237,7 +237,7 @@ def test_absent_env_gate_fails_but_names_the_gap(tmp_path):
     assert r.returncode == 1, "an unreachable environment must not be vacuous"
 
     finding = " ".join(report["findings"])
-    assert "ENV_UNAVAILABLE" in finding
+    assert "NOT_MEASURED" in finding
     assert _ABSENT_CONTAINER in finding      # where the flow looked
     assert "not running" in finding          # what to do about it
 
@@ -463,7 +463,7 @@ def test_waived_formal_never_counts_as_a_pass_downstream(tmp_path):
         assert statuses[sid] != "PASS"
 
     assert report["counts"]["PASS"] == 0
-    assert report["counts"]["WAIVED"] == 1
+    assert report["counts"]["PASS_WITH_WAIVERS"] == 1
     assert report["overall"] == "FAIL"
     assert rc != 0
 

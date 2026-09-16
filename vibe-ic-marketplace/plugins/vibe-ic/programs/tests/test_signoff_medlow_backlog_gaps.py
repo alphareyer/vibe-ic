@@ -1131,7 +1131,7 @@ def _all_missing_results(fcc, waived=(), failed=()):
         if sid is None or str(sid) == "P0":
             continue
         status = ("PASS_WITH_WAIVERS" if sid in waived
-                  else "FAIL" if sid in failed else "MISSING")
+                  else "FAIL" if sid in failed else "FAIL")
         out.append(fcc.StepResult(id=sid, name=st.get("name", ""),
                                   stage=st.get("stage", ""), status=status))
     return out

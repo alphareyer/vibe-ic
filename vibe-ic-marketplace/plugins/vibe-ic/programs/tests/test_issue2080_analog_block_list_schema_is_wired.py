@@ -134,8 +134,8 @@ def test_the_row_can_never_move_the_analog_verdict() -> None:
         f"it BLOCKING, and this gate's does not.")
     advisory = AOSR.StepResult("block_list_schema", "", "ADVISORY", 0.0, "")
     for base in ([AOSR.StepResult("A1", "x", "PASS", 0.0, "")],
-                 [AOSR.StepResult("A1", "x", "VACUOUS_PASS", 0.0, "")],
-                 [AOSR.StepResult("A1", "x", "WAIVED", 0.0, "")],
+                 [AOSR.StepResult("A1", "x", "NOT_MEASURED", 0.0, "", reason_class="not_executed")],
+                 [AOSR.StepResult("A1", "x", "PASS_WITH_WAIVERS", 0.0, "")],
                  [AOSR.StepResult("A1", "x", "FAIL", 0.0, "")]):
         assert (AOSR._aggregate_verdict(base)
                 == AOSR._aggregate_verdict(base + [advisory])), (

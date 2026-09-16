@@ -1352,7 +1352,7 @@ def test_supplied_rtl_accepts_only_explicit_step2_reentry(tmp_path):
 
     assert ordinary["ok"] is False
     assert supplied["ok"] is True
-    assert supplied["rtl_gen"] == "SKIPPED-BY-ENTRY"
+    assert supplied["rtl_gen"] == "NOT_APPLICABLE"
     assert supplied["supplied_rtl"] is True
 
 

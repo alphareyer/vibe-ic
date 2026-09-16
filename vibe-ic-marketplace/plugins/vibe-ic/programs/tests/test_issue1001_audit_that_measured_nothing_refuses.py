@@ -60,7 +60,7 @@ CHECKER = PROGRAMS / "flow_compliance_check.py"
 NOTHING = dict(
     overall="FAIL",
     invoked_gate_count=0,
-    step_counts={"PASS": 0, "FAIL": 0, "MISSING": 40, "SKIPPED-CONDITION": 23},
+    step_counts={"PASS": 0, "FAIL": 0, "FAIL": 40, "NOT_APPLICABLE": 23},
     structural_fail_lines=[],
     step_artifact_fail_lines=[],
     registered_gate_count=246,
@@ -105,10 +105,10 @@ def test_an_unresolved_registered_population_still_states_what_it_had():
     ("one_gate_invoked", {"invoked_gate_count": 1}),
     # A step was decided as failing — the loudest possible numerator.
     ("one_step_failed",
-     {"step_counts": {"PASS": 0, "FAIL": 1, "MISSING": 40}}),
+     {"step_counts": {"PASS": 0, "FAIL": 1, "FAIL": 40}}),
     # A step was decided as passing: the audit read the design.
     ("one_step_passed",
-     {"step_counts": {"PASS": 1, "FAIL": 0, "MISSING": 40}}),
+     {"step_counts": {"PASS": 1, "FAIL": 0, "FAIL": 40}}),
     # Line-level evidence exists even though no gate reported a verdict.
     ("structural_line", {"structural_fail_lines": ["[9] some structural gate"]}),
     ("step_artifact_line",

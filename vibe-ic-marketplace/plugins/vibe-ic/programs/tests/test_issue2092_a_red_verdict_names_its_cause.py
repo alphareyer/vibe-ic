@@ -48,13 +48,13 @@ def _step(i, status, name="a step"):
 #: The icaes R3 step tally, by status, exactly as the artefact carries it.
 _ICAES_R3 = (
     [_step(i, "FAIL") for i in range(12)]
-    + [_step(100 + i, "MISSING") for i in range(16)]
-    + [_step(200 + i, "PASS_VOIDED_BY_DEPENDENCY") for i in range(7)]
-    + [_step(300 + i, "SKIPPED-CONDITION") for i in range(22)]
-    + [_step(400 + i, "INCOMPLETE") for i in range(5)]
+    + [_step(100 + i, "FAIL") for i in range(16)]
+    + [_step(200 + i, "NOT_MEASURED") for i in range(7)]
+    + [_step(300 + i, "NOT_APPLICABLE") for i in range(22)]
+    + [_step(400 + i, "NOT_MEASURED") for i in range(5)]
     + [_step(500 + i, "PASS") for i in range(3)]
-    + [_step(600 + i, "WAIVED") for i in range(3)]
-    + [_step(700, "PARTIALLY-VACUOUS")]
+    + [_step(600 + i, "PASS_WITH_WAIVERS") for i in range(3)]
+    + [_step(700, "PASS")]
 )
 
 
@@ -105,7 +105,7 @@ def test_a_gating_ordering_violation_is_a_cause_on_its_own():
     that legitimately-caused FAIL uncaused — and the frame canary would then
     redden a correct run over the audit's own blind spot."""
     c = F.verdict_causes(
-        "FAIL", [], [_step(1, "PASS"), _step(2, "VACUOUS_PASS")], [], [],
+        "FAIL", [], [_step(1, "PASS"), _step(2, "NOT_MEASURED")], [], [],
         ordering_gating_lines=[
             "[37] GDSII = PASS marked done while dependency [31] DRC = MISSING"])
     assert c["run_is_red"] is True

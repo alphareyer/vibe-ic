@@ -251,7 +251,7 @@ def test_the_vacuous_token_reaches_the_flow(tmp_path):
     proj = _grounded_only_project(tmp_path)
     r, _ = _run(proj)
     assert r.returncode == G.RC_VACUOUS
-    assert any(ln.lstrip().startswith("VACUOUS_PASS")
+    assert any(ln.lstrip().startswith("NOT_MEASURED")
                for ln in r.stderr.splitlines()), r.stderr
     json.loads(r.stdout)          # stdout is the report and nothing else
 
@@ -729,7 +729,7 @@ def test_declaring_the_class_changes_no_step_verdict(tmp_path):
     cannot buy a green: the grounded-only run stays INCOMPLETE and a genuinely
     coupled+folded run stays PASS. If either moves, the declared class has
     stopped being the honest one."""
-    assert _si_flow(_grounded_only_project(tmp_path / "vac"))[4] == "INCOMPLETE"
+    assert _si_flow(_grounded_only_project(tmp_path / "vac"))[4] == "NOT_MEASURED"
 
     s, h = _bounded_from_emitter(_SPEF_COUPLED)
     real = _project(tmp_path / "real", spef_text=_SPEF_COUPLED,

@@ -39,11 +39,11 @@ EXPECTED = {
     "PASS": 4,
     "FAIL": 7,
     "WAIVED-DEFERRED": 2,
-    "SKIPPED-CONDITION": 23,
-    "VACUOUS-PASS": 3,
-    "PARTIALLY-VACUOUS": 5,
-    "INCOMPLETE": 1,
-    "PASS-VOIDED-BY-DEPENDENCY": 24,
+    "NOT_APPLICABLE": 23,
+    "NOT_MEASURED": 3,
+    "PASS": 5,
+    "NOT_MEASURED": 1,
+    "NOT_MEASURED": 24,
 }
 
 
@@ -76,11 +76,11 @@ def _stdout_that_recounts_wrong(audit: dict) -> str:
     counts = audit["step_counts"]
     tally = (
         f"  PASS={counts['PASS']}  FAIL={counts['FAIL']}  "
-        f"MISSING={counts['MISSING']}  WAIVED-DEFERRED={counts['WAIVED']}  "
-        f"SKIPPED={counts['SKIPPED-CONDITION']}  "
-        f"VACUOUS-PASS={counts['VACUOUS_PASS']}  "
-        f"PARTIALLY-VACUOUS={counts['PARTIALLY-VACUOUS']}  "
-        f"INCOMPLETE={counts['INCOMPLETE']}"
+        f"MISSING={counts['FAIL']}  WAIVED-DEFERRED={counts['PASS_WITH_WAIVERS']}  "
+        f"SKIPPED={counts['NOT_APPLICABLE']}  "
+        f"VACUOUS-PASS={counts['NOT_MEASURED']}  "
+        f"PARTIALLY-VACUOUS={counts['PASS']}  "
+        f"INCOMPLETE={counts['NOT_MEASURED']}"
     )
     lines = [
         "=== Vibe-IC synthetic compliance ===",
@@ -97,7 +97,7 @@ def _stdout_that_recounts_wrong(audit: dict) -> str:
         sid = row["id"]
         lines.append(f"  x [{status:<24}] Step {sid}: {row['name']}  (stage1)")
         overwrite = status in {
-            "INCOMPLETE", "PARTIALLY-VACUOUS", "VACUOUS-PASS", "WAIVED",
+            "NOT_MEASURED", "PASS", "NOT_MEASURED", "PASS_WITH_WAIVERS",
         }
         if status == "NOT_APPLICABLE" and skip_overwrites < 2:
             overwrite = True
@@ -158,10 +158,10 @@ def test_renderer_consumes_json_counts_not_the_drifting_stdout_recount(
     # the other four buckets still to 0. A row in an overwriting status would
     # have moved the alias cycle and quietly changed what the test measures.
     assert total == 69
-    assert recounted.get("SKIPPED-CONDITION") == 21
-    assert recounted.get("INCOMPLETE", 0) == 0
-    assert recounted.get("PARTIALLY-VACUOUS", 0) == 0
-    assert recounted.get("VACUOUS-PASS", 0) == 0
+    assert recounted.get("NOT_APPLICABLE") == 21
+    assert recounted.get("NOT_MEASURED", 0) == 0
+    assert recounted.get("PASS", 0) == 0
+    assert recounted.get("NOT_MEASURED", 0) == 0
     assert recounted.get("WAIVED-DEFERRED", 0) == 0
 
     md = _render(monkeypatch, tmp_path, audit)
@@ -177,7 +177,7 @@ def test_reconciliation_banner_is_reserved_for_a_torn_audit_json(
     audit = _fixture()
     # Keep the denominator unchanged while making step_counts disagree with
     # the per-step records inside that SAME artifact.
-    audit["step_counts"]["INCOMPLETE"] = 0
+    audit["step_counts"]["NOT_MEASURED"] = 0
     audit["step_counts"]["PASS"] += 1
     md = _render(monkeypatch, tmp_path, audit)
     assert C.RECONCILIATION_FAILED_MARKER in md
@@ -212,13 +212,13 @@ def test_checker_serializes_per_step_verdicts_beside_step_counts(tmp_path):
     assert run.returncode == 1, run.stdout + run.stderr
     audit = json.loads((project / "reports" / "audit" /
                         "phase23_completion_audit.json").read_text())
-    assert audit["step_counts"]["MISSING"] == 1
+    assert audit["step_counts"]["FAIL"] == 1
     observed = audit.get("steps")
     assert isinstance(observed, list), (
         "the canonical audit published the tally but omitted the verdicts it "
         f"counted; keys={sorted(audit)}")
     observed_pairs = [(str(s["id"]), s["status"]) for s in observed]
-    assert ("1", "MISSING") in observed_pairs
+    assert ("1", "FAIL") in observed_pairs
     # The checker injects its P0 preflight into even a one-step probe flow.
     # Whatever final universe it counted, every unit has a step record.
     assert len(observed) == sum(audit["step_counts"].values())

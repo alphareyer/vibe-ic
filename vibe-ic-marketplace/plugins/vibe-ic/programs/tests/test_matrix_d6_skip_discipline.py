@@ -22,7 +22,7 @@ not a disclosure — silence is never disclosure.
 ====================================================================
 HOW THIS IS MEASURED — AND WHY IT IS NOT A SOURCE SCAN
 ====================================================================
-Nothing below greps program source for ``sys.exit(2)`` or ``"VACUOUS_PASS"``.
+Nothing below greps program source for ``sys.exit(2)`` or ``"NOT_MEASURED"``.
 That would be the mistake PR #460 shipped: this codebase dispatches through
 ``__import__(f"{name}_protocol_synth")``, glob+importlib and
 ``spec_from_file_location``, so a text scan sees neither the call sites nor the
@@ -137,7 +137,7 @@ L3c A SELF-DECLARED SKIP IS NOT INSIDE THE EXECUTED-PASS NUMERATOR.  L3 and
     L3b both stop at the LABEL. They are satisfied the moment a skip is moved
     off the plain PASS bucket onto its own tier — and ``flow_compliance_check``
     used to fold that tier straight back into the published metric
-    (``pass_count = counts["PASS"] + counts["VACUOUS_PASS"]``), so a step could
+    (``pass_count = counts["PASS"] + counts["NOT_MEASURED"]``), so a step could
     change label without the headline ``X/Y executed PASS`` moving by one.
     Measured: giving FS1 and step 30 their own tier left
     ``Steps: 1 total (1/1 executed PASS …)`` byte-identical before and after.
@@ -238,9 +238,9 @@ REACH_PY = F.PLUGIN_ROOT / "programs" / "flow_condition_reachability_check.py"
 #: Tiers that mean "this step did not do its work". Taken verbatim from
 #: flow_compliance_check's own `counts` dict / `_label` table, not invented.
 SKIP_TIERS: Tuple[str, ...] = (
-    "SKIPPED-CONDITION",
-    "VACUOUS_PASS",
-    "SKIPPED-SETUP-REQUIRED",
+    "NOT_APPLICABLE",
+    "NOT_MEASURED",
+    "NOT_MEASURED",
 )
 
 #: Normalised gate-report verdict/status values that are a self-declared
@@ -249,8 +249,8 @@ SKIP_TIERS: Tuple[str, ...] = (
 SELF_SKIP_VERDICTS: Tuple[str, ...] = (
     "SKIP",
     "SKIPPED",
-    "SKIPPED-CONDITION",
-    "VACUOUS-PASS",
+    "NOT_APPLICABLE",
+    "NOT_MEASURED",
     "VACUOUS-PASS-UNCONFIRMED",
     "NOT-APPLICABLE",
     "N/A",
@@ -418,7 +418,7 @@ def dim_waivers() -> Tuple[W.Waiver, ...]:
 #
 # LEG L3c IS NOT RETIRED WITH THE WAIVERS. It is the guard that keeps the
 # arithmetic honest: it re-reads the PUBLISHED X off the consumer's own stdout
-# every run, so re-adding `+ counts["VACUOUS_PASS"]` reddens every cell that
+# every run, so re-adding `+ counts["NOT_MEASURED"]` reddens every cell that
 # lands on the tier.
 #
 # `_mark_for` prefers the central registry, so a waiver applied centrally makes
@@ -973,7 +973,7 @@ def _disclosure_prefixes() -> Tuple[str, ...]:
     # tier origin/main gave it. So a gate that records it HAS disclosed, and
     # the flow's own tier machinery already agrees: measured on step 1.6x, the
     # tiers are {'EMPTY': 'FAIL', 'SEEDED': 'NOT_MEASURED',
-    # 'FLOW_COMPLETE': 'VACUOUS_PASS'} — the pass is already outside the plain
+    # 'FLOW_COMPLETE': 'NOT_MEASURED'} — the pass is already outside the plain
     # PASS bucket, which is precisely what L1b's first escape asks for.
     #
     # THIS DOES NOT WEAKEN L1b. An undisclosed pass on nothing still fires; the
@@ -1869,7 +1869,7 @@ def _leg3c_skip_not_inside_the_executed_pass_numerator(
     bucket while a blocking gate self-declared inapplicability. It says nothing
     about the ARITHMETIC, and `flow_compliance_check` folds the VACUOUS_PASS
     tier straight back into the published numerator
-    (``pass_count = counts["PASS"] + counts["VACUOUS_PASS"]``). So a step could
+    (``pass_count = counts["PASS"] + counts["NOT_MEASURED"]``). So a step could
     be moved off the PASS label and the headline number a reviewer reads would
     not move by one — which is exactly what happened when FS1 and step 30 were
     given their own tier: `Steps: 1 total (1/1 executed PASS …)` was
@@ -1883,7 +1883,7 @@ def _leg3c_skip_not_inside_the_executed_pass_numerator(
     The owner has since ruled and the consumer has moved:
     ``pass_count = counts["PASS"]``. This leg is therefore the STANDING guard
     on that arithmetic rather than a report of an open gap — it charges 0 cells
-    today, and re-adding ``+ counts["VACUOUS_PASS"]`` makes every cell that
+    today, and re-adding ``+ counts["NOT_MEASURED"]`` makes every cell that
     lands on the tier red again. Falsifiability is measured, both directions,
     by ``test_d6_l3c_fires_when_the_numerator_folds_the_tier_back_in``.
     """
@@ -1979,7 +1979,7 @@ def _leg5_waiver_channel(probe: Probe) -> List[str]:
             f"declared in machine-readable form; prose is not a disclosure."
         )
     rejections = [a for a in prose.advisories
-                  if "ENV_UNAVAILABLE" in a and role in a]
+                  if "NOT_MEASURED" in a and role in a]
     if not rejections:
         problems.append(
             f"L5 SILENT WAIVER REFUSAL: the prose-only ENV_UNAVAILABLE waiver "
@@ -1994,7 +1994,7 @@ def _leg5_waiver_channel(probe: Probe) -> List[str]:
             f"(ticket + review_required + evidence + >=40-char rationale) the "
             f"ENV_UNAVAILABLE waiver for role {role!r} left the step at "
             f"{formed.status!r} instead of promoting {natural.status!r} to "
-            f"'WAIVED'. The prose refusal above would then be measuring a dead "
+            f"'PASS_WITH_WAIVERS'. The prose refusal above would then be measuring a dead "
             f"channel rather than the form of the claim."
         )
     return problems
@@ -2359,7 +2359,7 @@ def test_d6_targetless_blocking_clause_census_is_live_and_non_empty():
 #: one, so a rename cannot leave this test silently mutating nothing.
 _PASS_COUNT_NOW = 'pass_count = counts["PASS"]\n'
 _PASS_COUNT_REFOLDED = ('pass_count = counts["PASS"] + '
-                        'counts["VACUOUS_PASS"]\n')
+                        'counts["NOT_MEASURED"]\n')
 _PROGRAMS_DIR_SRC = "PROGRAMS_DIR = Path(__file__).parent\n"
 
 #: A real gate program that vacuously passes on a project containing nothing —
@@ -2426,7 +2426,7 @@ def _refolded_checker(dest_dir: Path) -> Path:
     """A copy of the SHIPPED checker with the retired arithmetic restored.
 
     Two substitutions, each asserted to apply exactly once:
-      * ``pass_count`` goes back to ``counts["PASS"] + counts["VACUOUS_PASS"]``
+      * ``pass_count`` goes back to ``counts["PASS"] + counts["NOT_MEASURED"]``
         — the defect;
       * ``PROGRAMS_DIR`` is pinned to the real programs directory, because it
         is derived from ``__file__`` and the copy does not live there. Without
@@ -2477,7 +2477,7 @@ def test_d6_l3c_fires_when_the_numerator_folds_the_tier_back_in():
     defect and shows the leg catching it:
 
       * DEFECT DIRECTION — a copy of the shipped checker with
-        ``+ counts["VACUOUS_PASS"]`` restored publishes a headline X that
+        ``+ counts["NOT_MEASURED"]`` restored publishes a headline X that
         exceeds the plain-PASS counter from the same run, and L3c's predicate
         (``numerator > counts["PASS"]``) is TRUE.
       * LEGITIMATE DIRECTION — the SHIPPED checker, same flow, same project,
@@ -2514,7 +2514,7 @@ def test_d6_l3c_fires_when_the_numerator_folds_the_tier_back_in():
             mutant, flow, project, tmp / "refold.json")
 
         # The subject must exist, or neither direction measures anything.
-        assert counts_now.get("VACUOUS_PASS") == 1, (
+        assert counts_now.get("NOT_MEASURED") == 1, (
             f"the probe flow did not produce exactly one VACUOUS_PASS "
             f"(counts={counts_now}); gate program {program!r} no longer "
             f"vacuously passes and this test measured nothing.\n{out_now}"
@@ -2536,13 +2536,13 @@ def test_d6_l3c_fires_when_the_numerator_folds_the_tier_back_in():
             f"refold={x_refold!r}"
         )
         assert x_refold > counts_refold["PASS"], (
-            f"with `+ counts['VACUOUS_PASS']` restored the published X is "
+            f"with `+ counts['NOT_MEASURED']` restored the published X is "
             f"{x_refold} and the plain-PASS counter is "
             f"{counts_refold['PASS']} — leg L3c's predicate does NOT fire on "
             f"the very defect it exists to catch, so its silence on the "
             f"shipped tree means nothing.\n{out_refold}"
         )
-        assert x_refold == counts_refold["PASS"] + counts_refold["VACUOUS_PASS"]
+        assert x_refold == counts_refold["PASS"] + counts_refold["NOT_MEASURED"]
 
         # LEGITIMATE DIRECTION — same subject, shipped checker, no charge.
         assert x_now == counts_now["PASS"], (
@@ -2654,7 +2654,7 @@ def test_d6_l7_fires_on_the_measured_mutation():
         f"charged NOTHING. That is the exact mutation every other leg of this "
         f"module walks past, so L7's silence on the clean tree would mean "
         f"nothing.")
-    assert any("VACUOUS_PASS" in p for p in problems), problems
+    assert any("NOT_MEASURED" in p for p in problems), problems
 
     # …and the leg is clean again once the redirection is gone, so the charge
     # above came from the mutant and not from a cache this test poisoned.
@@ -2857,11 +2857,11 @@ def matrix_na_precondition(step_id):
 
 
 def matrix_cell_state(step_id) -> str:
-    """``"ENFORCED"`` / ``"WAIVED"`` / ``"NA"`` for one cell of this dimension."""
+    """``"ENFORCED"`` / ``"PASS_WITH_WAIVERS"`` / ``"NA"`` for one cell of this dimension."""
     if matrix_na_precondition(step_id) is not None:
         return "NA"
     if _waiver_for(step_id) is not None:
-        return "WAIVED"
+        return "PASS_WITH_WAIVERS"
     return "ENFORCED"
 
 
@@ -2921,7 +2921,7 @@ def test_d6_l6_separates_legitimate_skips_from_illegitimate_ones():
     assert {
         sid: probe_for(sid).scenarios["SEEDED"].status
         for sid in ("12", "30")
-    } == {"12": "INCOMPLETE", "30": "INCOMPLETE"}
+    } == {"12": "NOT_MEASURED", "30": "NOT_MEASURED"}
 
 
 def test_d6_l6_deferred_register_only_shrinks():

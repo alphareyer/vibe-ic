@@ -228,7 +228,7 @@ def test_the_disclosure_row_is_present_and_did_not_block_anything(
     # No project ships a pad-side table today, so the ordinary green path is
     # a VACUOUS_PASS row — the exact shape under which the stale GDS shipped.
     assert plan["pad_side_constraint"]["status"] == "PASS"
-    assert "VACUOUS_PASS" in plan["pad_side_constraint"]["detail"]
+    assert "NOT_MEASURED" in plan["pad_side_constraint"]["detail"]
     for step in ("gds", "drc", "lvs", "canonicalize_artefacts"):
         assert step in plan, f"{step} must still run after the disclosure row"
 

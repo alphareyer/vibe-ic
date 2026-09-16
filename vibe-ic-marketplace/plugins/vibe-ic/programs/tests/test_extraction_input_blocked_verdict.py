@@ -269,12 +269,12 @@ def test_stub_tech_file_is_blocked_not_fail_not_pass(tmp_path, monkeypatch):
     assert any("style" in m for m in missing), missing
 
     # says cannot-verify, in words that cannot be read as either verdict
-    assert "BLOCKED" in r.detail
+    assert "NOT_MEASURED" in r.detail
     assert "NOT a pass" in r.detail and "NOT a design failure" in r.detail
 
     v = _verdict(p)
     assert v["status"] == "NOT_MEASURED"
-    assert v["result"] == "BLOCKED"
+    assert v["result"] == "NOT_MEASURED"
     assert v["finding"] == "LVS_INPUT_TECH_INCAPABLE"
     assert "generic.tech" in v["tech_file"]
     assert v["capability"]["usable"] is False
@@ -414,7 +414,7 @@ def test_blocked_step_never_aggregates_to_a_green_run():
     """`_aggregate_verdict` returns PASS for any status it does not
     enumerate. A BLOCKED step must never reach that catch-all."""
     plan = [runner.StepResult("synth", "PASS"),
-            runner.StepResult("lvs", "BLOCKED")]
+            runner.StepResult("lvs", "NOT_MEASURED", reason_class="not_executed")]
     verdict = runner._aggregate_verdict(plan)
     assert verdict != "PASS"
     assert verdict != "PASS_WITH_WAIVERS"
@@ -423,7 +423,7 @@ def test_blocked_step_never_aggregates_to_a_green_run():
 
 def test_blocked_does_not_mask_other_failures():
     plan = [runner.StepResult("drc", "FAIL"),
-            runner.StepResult("lvs", "BLOCKED")]
+            runner.StepResult("lvs", "NOT_MEASURED", reason_class="not_executed")]
     assert runner._aggregate_verdict(plan) == "FAIL"
 
 
@@ -435,7 +435,7 @@ def test_all_clean_run_still_aggregates_to_pass():
 
 
 def test_blocked_is_in_the_verdict_tier_vocabulary():
-    assert "BLOCKED" in runner._VERDICT_TIERS
+    assert "NOT_MEASURED" in runner._VERDICT_TIERS
 
 
 def test_step31_gate_reports_blocked_and_refuses_signoff(tmp_path):
@@ -448,7 +448,7 @@ def test_step31_gate_reports_blocked_and_refuses_signoff(tmp_path):
     (proj / "reports" / "phase3").mkdir(parents=True)
     (proj / "reports" / "phase3" / "lvs_verdict.json").write_text(json.dumps({
         "status": "NOT_MEASURED",
-        "result": "BLOCKED",
+        "result": "NOT_MEASURED",
         "finding": "LVS_INPUT_TECH_INCAPABLE",
         "message": "technology file /pdk/generic.tech cannot support "
                    "extraction — missing extraction rules.",
@@ -461,7 +461,7 @@ def test_step31_gate_reports_blocked_and_refuses_signoff(tmp_path):
     rules = [f.rule for f in res.findings]
     assert "LVS_BLOCKED_INPUT_INCAPABLE" in rules
     msg = " ".join(f.message for f in res.findings)
-    assert "BLOCKED" in msg and "NOTHING is known" in msg
+    assert "NOT_MEASURED" in msg and "NOTHING is known" in msg
 
 
 def test_step31_gate_unchanged_when_no_verdict_artifact(tmp_path):
@@ -1091,7 +1091,7 @@ def test_blocked_run_exit_code_is_nonzero():
     for verdict in ("FAIL",):
         assert verdict not in ("PASS", "PASS_WITH_WAIVERS",
                                "PASS_WITH_OPEN_SOURCE_CONSTRAINTS")
-    blocked = runner.StepResult("lvs", "BLOCKED", 0.0, "")
+    blocked = runner.StepResult("lvs", "NOT_MEASURED", 0.0, "", reason_class="not_executed")
     assert runner._aggregate_verdict([blocked]) == "FAIL"
 
 

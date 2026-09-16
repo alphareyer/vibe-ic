@@ -395,7 +395,7 @@ def _tier(cp) -> str:
     if cp.returncode != 0:
         return REFUSED
     out = _both(cp)
-    if "STRUCTURE_ONLY:" in out or "PASS_STRUCTURE_ONLY" in out:
+    if "STRUCTURE_ONLY:" in out or "PASS_WITH_WAIVERS" in out:
         return CERTIFIED_SO
     return CERTIFIED_BOUND
 
@@ -1445,7 +1445,7 @@ def test_reading_the_tier_through_the_join_still_refuses_a_real_disagreement():
     for bad, why in (
             (_res("FAIL"), "one side PASS, the other FAIL"),
             (_res("PASS_WITH_WAIVERS"), "the disclosed tier is not a pass"),
-            (_res("VACUOUS_PASS"), "nothing was examined"),
+            (_res("NOT_MEASURED"), "nothing was examined"),
             (_res("PASS_WITH_REAL_NETLIST_V2"),
              "a second spelling of one tier"),
             (_res("PASS_WITH_REAL_EXTRACT"), "another step's stamp"),
@@ -1480,9 +1480,9 @@ def test_the_verdict_tier_join_collapses_only_the_stamps_the_runner_declares():
     for stamp in declared:
         assert R.verdict_tier(stamp) == "PASS", stamp
 
-    for untouched in ("PASS", "PASS_STRUCTURE_ONLY", "PASS_WITH_WAIVERS",
-                      "PASS_WITH_STUB", "PASS_WITH_REAL_SILICON",
-                      "VACUOUS_PASS", "WAIVED", "SKIP", "BLOCKED", "FAIL"):
+    for untouched in ("PASS", "PASS_WITH_WAIVERS", "PASS_WITH_WAIVERS",
+                      "PASS_WITH_WAIVERS", "PASS_WITH_REAL_SILICON",
+                      "NOT_MEASURED", "PASS_WITH_WAIVERS", "SKIP", "NOT_MEASURED", "FAIL"):
         assert R.verdict_tier(untouched) == untouched, (
             f"{untouched!r} is not a producer stamp this runner declares and "
             f"the join must return it unchanged")

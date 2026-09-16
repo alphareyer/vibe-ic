@@ -79,7 +79,7 @@ def _result(step_id, status: str, reasons=None):
 def _condition_skip(step_id):
     step = _step(step_id)
     return _result(
-        step_id, "SKIPPED-CONDITION",
+        step_id, "NOT_APPLICABLE",
         [f"condition not met: {step['condition']}"])
 
 
@@ -132,8 +132,8 @@ def test_real_flow_opts_dt2_and_dt3_into_dependency_classification():
 def test_explicit_no_dft_remains_skip_and_cites_its_declaration(tmp_path):
     declaration = _l20(tmp_path, "NOT_APPLICABLE")
     results = [
-        _result(11, "SKIPPED-CONDITION"),
-        _result("DT1", "SKIPPED-CONDITION"),
+        _result(11, "NOT_APPLICABLE"),
+        _result("DT1", "NOT_APPLICABLE"),
         _condition_skip("DT2"),
         _condition_skip("DT3"),
     ]
@@ -185,7 +185,7 @@ def test_pre_route_dft_blocks_dt2_on_step22_missing_spef(tmp_path):
     results = [
         _result(11, "PASS"),
         _result("DT1", "PASS"),
-        _result(22, "MISSING", ["SPEF was not produced"]),
+        _result(22, "FAIL", ["SPEF was not produced"]),
         _condition_skip("DT2"),
         _condition_skip("DT3"),
     ]
@@ -205,7 +205,7 @@ def test_completed_dt1_and_step22_reach_dt2s_own_missing_grade(tmp_path):
     _touch_grade(tmp_path, "reports/phase2/dft/transition_coverage.json")
     _write_json(tmp_path, "phase3/stage3/extracted/core.spef",
                 {"format": "synthetic"})
-    dt2 = _result("DT2", "MISSING", [
+    dt2 = _result("DT2", "FAIL", [
         "no required_outputs found: reports/phase2/dft/path_delay_coverage.json"
     ])
     results = [
@@ -227,7 +227,7 @@ def test_completed_dt2_paths_reach_dt3s_own_missing_grade(tmp_path):
     _touch_grade(tmp_path, "reports/phase2/dft/path_delay_coverage.json")
     _write_json(tmp_path, "phase3/stage3/extracted/core.spef",
                 {"format": "synthetic"})
-    dt3 = _result("DT3", "MISSING", [
+    dt3 = _result("DT3", "FAIL", [
         "no required_outputs found: reports/phase2/dft/sdd_coverage.json"
     ])
     results = [_result("DT1", "PASS"), _result(22, "PASS"),

@@ -141,11 +141,11 @@ def test_guard_shared_tier_vocabulary_is_untouched():
     whole analog track resolves to it on a pure-digital design. Moving that
     word out of EXCUSED would make every such run non-green — laundering the
     #925 finding away by breaking the tier it was introduced for."""
-    assert T.is_excused("SKIPPED-CONDITION") is True
-    assert T.is_non_green("SKIPPED-CONDITION") is False
+    assert T.is_excused("NOT_APPLICABLE") is True
+    assert T.is_non_green("NOT_APPLICABLE") is False
     assert T.scoped_into_verdict(
         {"status": "NOT_APPLICABLE", "stage": T.ANALOG_STAGE}) is False
-    assert "SKIPPED-CONDITION" in T.EXCUSED
+    assert "NOT_APPLICABLE" in T.EXCUSED
 
 
 def test_guard_a_design_dependent_or_env_absence_stays_excusable(tmp_path,

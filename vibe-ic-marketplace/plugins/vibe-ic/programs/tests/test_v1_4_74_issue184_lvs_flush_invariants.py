@@ -119,7 +119,7 @@ class ReadFlushedRealFsTest(unittest.TestCase):
         txt = _p3._read_lvs_report_flushed(
             self.rpt, attempts=1, base_delay=0.01, max_wait=0.05,
             rc=0, clean_exit_max_wait=0.3, clean_exit_attempts=4)
-        self.assertEqual(_lvt.classify(txt), "INCOMPLETE")
+        self.assertEqual(_lvt.classify(txt), "NOT_MEASURED")
 
     def test_absent_report_returns_empty(self):
         txt = _p3._read_lvs_report_flushed(

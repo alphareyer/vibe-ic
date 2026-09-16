@@ -160,7 +160,7 @@ def test_oracle_tb_catches_wrong_dut(tmp_path):
 #: author may sharpen WAIVED into a stricter word (cbe6154a6 did exactly that,
 #: WAIVED -> INCOMPLETE, for #1975) without this pin objecting; making it PASS
 #: again, or dropping the verdict entirely, must turn this test red.
-_SKELETON_DISCLOSURE_VERDICTS = {"WAIVED", "INCOMPLETE"}
+_SKELETON_DISCLOSURE_VERDICTS = {"PASS_WITH_WAIVERS", "NOT_MEASURED"}
 
 
 def test_skeleton_completion_is_waived_not_pass():
@@ -169,7 +169,7 @@ def test_skeleton_completion_is_waived_not_pass():
     # bound to a COMMENT quoting the same token in step_full_stack_tb_gen
     # (e5d569ace7), ~97,000 chars away, and the pin failed against correct
     # code; widening it would have reached the neighbouring `iverilog
-    # unavailable` return, whose own `"reference_tb", "WAIVED"` literal would
+    # unavailable` return, whose own `"reference_tb", "PASS_WITH_WAIVERS"` literal would
     # have satisfied this assertion on a tree where the pinned branch said
     # PASS. See _source_pin.if_block_src.
     block = if_block_src(_P2_SRC, "_reference_tb_generic_full_stack",

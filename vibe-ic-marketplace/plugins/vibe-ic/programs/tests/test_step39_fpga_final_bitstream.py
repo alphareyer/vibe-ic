@@ -222,7 +222,7 @@ def test_guard_waived_tier_manifest_shape_is_preserved(tmp_path):
          dr.StepResult("fpga_burn", "PASS", 1.0, "sof_burnt",
                        extras={"burn_provenance": {"sof_path": str(sof),
                                                    "sof_sha256": _sha(sof)}}),
-         dr.StepResult("usb_hid_tester_verify", "WAIVED", 1.0, "no rig",
+         dr.StepResult("usb_hid_tester_verify", "PASS_WITH_WAIVERS", 1.0, "no rig",
                        extras={"waiver": {"ticket": "no-tester-rig-v1.6.97",
                                           "review_required": True,
                                           "evidence": "rig absent"}})],

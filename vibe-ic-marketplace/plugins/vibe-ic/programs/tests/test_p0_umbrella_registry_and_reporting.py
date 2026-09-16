@@ -342,7 +342,7 @@ def test_skips_and_waivers_are_still_listed_verbatim(tmp_path, monkeypatch):
 
     The waiver is asserted IN ITS OWN UNIT. `counts` is a tally of STEPS and
     `gate_w` is a structural SUB-GATE inside the one step P0, so it contributes
-    0 there — #924/#930 removed the `counts["WAIVED"] += len(structural_waivers)`
+    0 there — #924/#930 removed the `counts["PASS_WITH_WAIVERS"] += len(structural_waivers)`
     addend precisely because a sub-gate that excused a step off a 63-step
     denominator made the published ratio RISE with the number of things waived.
     Both numbers are stated: 0 waived steps, and the sub-gate published verbatim
@@ -365,7 +365,7 @@ def test_skips_and_waivers_are_still_listed_verbatim(tmp_path, monkeypatch):
         f"(ticket={_flow._THIN_INPUT_WAIVER_TICKET}, "
         "review_required=true): why",
     ]
-    assert report["counts"]["WAIVED"] == 0, (
+    assert report["counts"]["PASS_WITH_WAIVERS"] == 0, (
         "a structural SUB-GATE waiver was counted as a waived STEP; that is "
         f"the #924 unit error. counts={report['counts']}")
     assert [w["gate"] for w in report["thin_input_waivers"]] == ["gate_w"], (

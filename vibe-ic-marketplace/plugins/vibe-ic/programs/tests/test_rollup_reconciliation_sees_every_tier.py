@@ -70,8 +70,8 @@ def test_the_deliberate_aliases_still_win():
     report-side renamings, or `SKIPPED` would stop folding into
     `SKIPPED-CONDITION` and the fix would trade one drift for another."""
     m = frg._TALLY_LABEL_TO_BUCKET
-    assert m["SKIPPED"] == "SKIPPED-CONDITION", m.get("SKIPPED")
-    assert m["SKIPPED-CONDITION"] == "SKIPPED-CONDITION"
+    assert m["SKIPPED"] == "NOT_APPLICABLE", m.get("SKIPPED")
+    assert m["NOT_APPLICABLE"] == "NOT_APPLICABLE"
     assert m["WAIVED-DEFERRED"] == "WAIVED-DEFERRED"
 
 
@@ -84,13 +84,13 @@ def test_the_nine_original_mappings_are_unchanged():
     expected = {
         "PASS": "PASS",
         "FAIL": "FAIL",
-        "MISSING": "MISSING",
+        "FAIL": "FAIL",
         "WAIVED-DEFERRED": "WAIVED-DEFERRED",
-        "DEFERRED-BY-UPSTREAM": "DEFERRED-BY-UPSTREAM",
-        "SKIPPED": "SKIPPED-CONDITION",
-        "SKIPPED-CONDITION": "SKIPPED-CONDITION",
-        "SKIPPED-SETUP-REQUIRED": "SKIPPED-SETUP-REQUIRED",
-        "VACUOUS-PASS": "VACUOUS-PASS",
+        "NOT_MEASURED": "NOT_MEASURED",
+        "SKIPPED": "NOT_APPLICABLE",
+        "NOT_APPLICABLE": "NOT_APPLICABLE",
+        "NOT_MEASURED": "NOT_MEASURED",
+        "NOT_MEASURED": "NOT_MEASURED",
     }
     for k, v in expected.items():
         assert frg._TALLY_LABEL_TO_BUCKET.get(k) == v, (

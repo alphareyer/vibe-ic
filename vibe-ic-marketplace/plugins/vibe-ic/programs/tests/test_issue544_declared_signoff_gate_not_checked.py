@@ -270,7 +270,7 @@ def test_absent_gate_programs_do_not_release_a_negative_signoff_corner(
     assert runner._SIGNOFF_NOT_CHECKED in corner.detail, corner.detail
     assert "post_route_signoff_corner_check.py" in corner.detail, corner.detail
     assert [results[n].status for n in ("sta_signoff", "sta_record")] == \
-        ["BLOCKED"] * 2, results
+        ["NOT_MEASURED"] * 2, results
     assert results["em_signoff"].status == "PASS", results["em_signoff"]
 
     verdict = runner._aggregate_verdict(list(results.values()))
@@ -593,7 +593,7 @@ def test_the_status_this_fix_returns_is_non_green_in_the_aggregate(runner):
     worth returning because `_aggregate_verdict` refuses to release on it. An
     edit that moved BLOCKED into the green bucket would silently reopen #544
     while every status assertion above still passed."""
-    blocked = runner.StepResult("sta_corner", "BLOCKED", 0.0, "x")
+    blocked = runner.StepResult("sta_corner", "NOT_MEASURED", 0.0, "x", reason_class="not_executed")
     assert runner._aggregate_verdict([blocked]) not in _RELEASING
     assert runner._aggregate_verdict(
         [runner.StepResult("sta_signoff", "PASS"), blocked]) not in _RELEASING

@@ -31,7 +31,7 @@ def test_p0_renders_skipped_condition():
     and the #447 rationale must be documented at that site.
 
     ASSERTED ON BEHAVIOUR FIRST. This used to be a source-substring test over
-    `main()` (`'"SKIPPED-CONDITION" if s_passed is None'`), keyed on the
+    `main()` (`'"NOT_APPLICABLE" if s_passed is None'`), keyed on the
     ENCLOSING FUNCTION rather than a byte window because #559's comment block
     had already pushed #447 1538 bytes away and the byte window read that as a
     regression. The verdict expression has since moved into
@@ -44,7 +44,7 @@ def test_p0_renders_skipped_condition():
     import inspect
     assert F.p0_umbrella_verdict(None, []) == "NOT_APPLICABLE"
     owner = inspect.getsource(F._p0_umbrella_status)
-    assert '"SKIPPED-CONDITION"' in owner
+    assert '"NOT_APPLICABLE"' in owner
     assert "#447" in owner
     fn = inspect.getsource(F.main)
     assert 'id="P0"' in fn

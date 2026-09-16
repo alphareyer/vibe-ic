@@ -81,7 +81,7 @@ def test_the_next_stage_is_reviewed_when_the_only_wound_is_the_last_review(
         tmp_path):
     """Step 7's exact r26 shape: everything green but the inherited decline."""
     reg = _register(tmp_path, [
-        _row(7, "INCOMPLETE",
+        _row(7, "NOT_MEASURED",
              [A_PASSING_GATE, DECLINED_REVIEW, A_ROSTER_NA_GATE]),
         {"id": "FS1", "status": "NOT_MEASURED"},
     ])
@@ -97,7 +97,7 @@ def test_the_next_stage_is_reviewed_when_the_only_wound_is_the_last_review(
 def test_a_genuinely_failing_gate_beside_the_decline_still_blocks(tmp_path):
     """The decline is not a blanket pardon for the row it appears in."""
     reg = _register(tmp_path, [
-        _row(7, "INCOMPLETE", [
+        _row(7, "NOT_MEASURED", [
             DECLINED_REVIEW,
             {"gate": "sdc_sanity_check", "verdict": "FAIL",
              "reason_class": None, "exit_code": 1},
@@ -116,7 +116,7 @@ def test_an_unexamined_gate_beside_the_decline_still_blocks(tmp_path):
     """
     for cls in (R.EXECUTION_ERROR, R.ZERO_DENOMINATOR):
         reg = _register(tmp_path, [
-            _row(7, "INCOMPLETE", [
+            _row(7, "NOT_MEASURED", [
                 DECLINED_REVIEW,
                 {"gate": "some_structural_check", "verdict": "INCOMPLETE",
                  "reason_class": cls, "exit_code": 2},
@@ -146,7 +146,7 @@ def test_a_row_with_no_gate_records_is_never_exempt(tmp_path):
 def test_some_other_programs_not_checked_is_not_this_exemption(tmp_path):
     """Only THIS program's own decline is inherited; nobody else's."""
     reg = _register(tmp_path, [
-        _row(7, "INCOMPLETE", [dict(DECLINED_REVIEW, gate="lvs_check")]),
+        _row(7, "NOT_MEASURED", [dict(DECLINED_REVIEW, gate="lvs_check")]),
     ])
     got = S.stage_passed(reg, "stage2", None)
     assert got["passed"] is False, got["why"]

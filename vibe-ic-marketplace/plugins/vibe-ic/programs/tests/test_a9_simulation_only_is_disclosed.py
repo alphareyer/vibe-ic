@@ -88,7 +88,7 @@ def test_simulation_only_close_is_not_a_bare_pass(tmp_path):
     # which is what the docstring above, and the #901 guard that names this
     # test by name, actually protect.
     assert r.status != "PASS", (r.status, r.reasons)
-    # 2026-08-22 — CORRECTED FROM `== "VACUOUS_PASS"`, and MEASURED before it
+    # 2026-08-22 — CORRECTED FROM `== "NOT_MEASURED"`, and MEASURED before it
     # was changed rather than argued.
     #
     # A9 dispatches two clauses over this tree. `analog_a9_hw_verify_check`
@@ -133,7 +133,7 @@ def _run_checker(project: Path) -> tuple[int, str]:
 
 
 @pytest.mark.parametrize("hw,rc,token", [
-    (None, 0, "VACUOUS_PASS"),                        # never measured
+    (None, 0, "NOT_MEASURED"),                        # never measured
     ({"measurements": {}}, 1, "FAIL"),                # measured, no numbers
     ({"measurements": {"gain_db": 42.1}}, 0, "PASS"),  # really measured
 ])

@@ -37,9 +37,9 @@ def one_record_per_reason_class():
         # that produces that subject has not run yet in this flow.
         (T.ASKED_BEFORE_PRODUCER, "SKIP",
          "no KLayout DRC artefacts found; phase-3 DRC has not run"),
-        (T.BLOCKED_BY_UPSTREAM, "BLOCKED", "the producing step has not run"),
-        (T.EXECUTION_ERROR, "INCOMPLETE", "the caller supplied the wrong path"),
-        (T.ZERO_DENOMINATOR, "INCOMPLETE", "0 of 13 documents were examined"),
+        (T.BLOCKED_BY_UPSTREAM, "NOT_MEASURED", "the producing step has not run"),
+        (T.EXECUTION_ERROR, "NOT_MEASURED", "the caller supplied the wrong path"),
+        (T.ZERO_DENOMINATOR, "NOT_MEASURED", "0 of 13 documents were examined"),
     ]
     return [
         F._p0_gate_record(f"reason_{i}_check", verdict, message,
@@ -65,9 +65,9 @@ def test_only_declared_na_capability_or_external_may_remain_skip(
 
 
 @pytest.mark.parametrize("reason_class, expected", [
-    (T.BLOCKED_BY_UPSTREAM, "BLOCKED"),
-    (T.EXECUTION_ERROR, "INCOMPLETE"),
-    (T.ZERO_DENOMINATOR, "INCOMPLETE"),
+    (T.BLOCKED_BY_UPSTREAM, "NOT_MEASURED"),
+    (T.EXECUTION_ERROR, "NOT_MEASURED"),
+    (T.ZERO_DENOMINATOR, "NOT_MEASURED"),
 ])
 def test_record_constructor_refuses_unsafe_skip_pairing(reason_class, expected):
     record = F._p0_gate_record(
@@ -80,9 +80,9 @@ def test_record_constructor_refuses_unsafe_skip_pairing(reason_class, expected):
     (T.DESIGN_DECLARED_NA, "PASS"),
     (T.CAPABILITY_ABSENT, "PASS"),
     (T.EXTERNAL, "PASS"),
-    (T.BLOCKED_BY_UPSTREAM, "INCOMPLETE"),
-    (T.EXECUTION_ERROR, "INCOMPLETE"),
-    (T.ZERO_DENOMINATOR, "INCOMPLETE"),
+    (T.BLOCKED_BY_UPSTREAM, "NOT_MEASURED"),
+    (T.EXECUTION_ERROR, "NOT_MEASURED"),
+    (T.ZERO_DENOMINATOR, "NOT_MEASURED"),
 ])
 def test_each_reason_class_changes_the_top_level_p0_tier(
         reason_class, expected):
@@ -124,11 +124,11 @@ def test_a_short_population_with_NOTHING_decisive_is_not_measured(reason_class):
 
 def test_caller_error_zero_denominator_and_missing_upstream_are_not_skips():
     cases = [
-        ("path not found", {}, T.EXECUTION_ERROR, "INCOMPLETE"),
+        ("path not found", {}, T.EXECUTION_ERROR, "NOT_MEASURED"),
         ("docs loaded NONE; 0/13 examined", {}, T.ZERO_DENOMINATOR,
-         "INCOMPLETE"),
+         "NOT_MEASURED"),
         ("no deliverable at RESULT.md — producer has not run", {},
-         T.BLOCKED_BY_UPSTREAM, "BLOCKED"),
+         T.BLOCKED_BY_UPSTREAM, "NOT_MEASURED"),
     ]
     for message, evidence, expected_class, expected_verdict in cases:
         reason_class = T.infer_nonverdict_reason(

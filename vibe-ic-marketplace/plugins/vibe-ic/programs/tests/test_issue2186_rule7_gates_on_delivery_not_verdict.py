@@ -98,7 +98,7 @@ def test_delivered_predecessor_leaves_the_consumer_a_design_fact():
          "gate": {"program_exit_zero": "analog_a5_layout_check ."}},
     ]
     steps = [
-        _step("A4", "INCOMPLETE",
+        _step("A4", "NOT_MEASURED",
               reasons=["INCOMPLETE: the gate reports its input was applicable "
                        "and was NOT examined: analog_adc_enob_corner_check"],
               evidence=["phase3/analog/delta_sigma/corner_results.json",
@@ -132,7 +132,7 @@ def test_absent_predecessor_output_keeps_the_calibration_case_derived():
          "gate": {"program_exit_zero": "si_mcf_sta_check ."}},
     ]
     steps = [
-        _step(22, "MISSING",
+        _step(22, "FAIL",
               reasons=["no required_outputs found (expected: "
                        "['phase3/stage3/spef/*.spef'])"]),
         _step(23, "FAIL",
@@ -212,7 +212,7 @@ def test_the_hawaii_adc_analog_chain_publishes_two_design_facts():
     cascade = ("blocked-by-upstream(step A5): cascade of the first mid-chain "
                "FAIL — the chain stops at step A5")
     steps = [
-        _step("A4", "INCOMPLETE",
+        _step("A4", "NOT_MEASURED",
               reasons=["INCOMPLETE: the gate reports its input was applicable "
                        "and was NOT examined: analog_adc_enob_corner_check"],
               evidence=["phase3/analog/delta_sigma/corner_results.json",
@@ -229,14 +229,14 @@ def test_the_hawaii_adc_analog_chain_publishes_two_design_facts():
                        "LVS-match)"],
               evidence=["phase3/analog/delta_sigma/drc.report",
                         "phase3/analog/ldo/comp.json"]),
-        _step("A7", "MISSING",
+        _step("A7", "FAIL",
               reasons=["no required_outputs found (expected: "
                        "['phase3/analog/*/pre_vs_post.json'])", cascade],
               cascade_note=cascade),
         _step("A8", "FAIL",
               reasons=["program failed: analog_hardmacro_check ."],
               evidence=["phase3/analog/hardmacro/ldo/ldo.gds"]),
-        _step("A9", "MISSING",
+        _step("A9", "FAIL",
               reasons=["no required_outputs found (expected: "
                        "['phase3/mixed_signal/cosim/*.json'])", cascade],
               cascade_note=cascade),
@@ -273,10 +273,10 @@ def test_every_blocker_class_stays_reachable():
     ]
     steps = [
         _step("P", "FAIL", reasons=[f"{_BC.CRASH_MARKER} Traceback"]),
-        _step("D0", "INCOMPLETE", reasons=["INCOMPLETE: one sub-gate"],
+        _step("D0", "NOT_MEASURED", reasons=["INCOMPLETE: one sub-gate"],
               evidence=["phase3/analog/ldo/corner_results.json"]),
         _step("D", "FAIL", reasons=["program failed: a_check ."]),
-        _step("M", "SKIPPED-SETUP-REQUIRED", reasons=["setup absent"]),
+        _step("M", "NOT_MEASURED", reasons=["setup absent"]),
         _step("U", "FAIL", reasons=[f"{_BC.TIMEOUT_MARKER} 0 progress"]),
     ]
     reached = {b["classification"]

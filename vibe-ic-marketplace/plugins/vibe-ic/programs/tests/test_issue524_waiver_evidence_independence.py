@@ -423,9 +423,9 @@ def test_producer_always_appends_the_self_reference(tmp_path):
     import phase3_one_shot_runner as p3
 
     plan = [p3.StepResult(
-        "lvs", "ENV_UNAVAILABLE", 0.1,
+        "lvs", "NOT_MEASURED", 0.1,
         "open-source LVS needs magic+netgen in container PATH",
-        extras={"missing_tool": "magic,netgen"})]
+        extras={"missing_tool": "magic,netgen"}, reason_class="not_executed")]
     p3._autogen_waivers_json(tmp_path, plan)
     emitted = json.loads((tmp_path / "waivers.json").read_text())
 
@@ -447,8 +447,8 @@ def test_that_producers_output_is_honoured_not_refused(tmp_path):
     import phase3_one_shot_runner as p3
 
     p3._autogen_waivers_json(tmp_path, [p3.StepResult(
-        "lvs", "ENV_UNAVAILABLE", 0.1, "needs netgen in PATH",
-        extras={"missing_tool": "netgen"})])
+        "lvs", "NOT_MEASURED", 0.1, "needs netgen in PATH",
+        extras={"missing_tool": "netgen"}, reason_class="not_executed")])
     fcc, waivers = _load(tmp_path)
     assert 31 in waivers and waivers[31]["_env_unavailable"] is True
     assert len(fcc._ENV_WAIVER_EVIDENCE_NOTES) == 1

@@ -49,8 +49,8 @@ def _register(tmp_path, rows, stage="stage1", name="c.json"):
 
 def test_stage_passed_names_the_rows_it_waits_on(tmp_path):
     got = S.stage_passed(
-        _register(tmp_path, [("1", "PASS"), ("2", "INCOMPLETE"),
-                             ("P0", "MISSING")]), "stage1", None)
+        _register(tmp_path, [("1", "PASS"), ("2", "NOT_MEASURED"),
+                             ("P0", "FAIL")]), "stage1", None)
     assert got["passed"] is False
     assert got["non_green_rows"] == [
         {"id": "2", "status": "NOT_MEASURED"},
@@ -59,7 +59,7 @@ def test_stage_passed_names_the_rows_it_waits_on(tmp_path):
 
 def test_a_green_stage_names_no_rows(tmp_path):
     got = S.stage_passed(
-        _register(tmp_path, [("1", "PASS"), ("6", "WAIVED")]), "stage1", None)
+        _register(tmp_path, [("1", "PASS"), ("6", "PASS_WITH_WAIVERS")]), "stage1", None)
     assert got["passed"] is True
     assert got["non_green_rows"] == []
 
@@ -79,7 +79,7 @@ def _run(tmp_path, register, stage="stage1"):
 
 
 def test_a_review_that_waits_states_BLOCKED_BY_UPSTREAM(tmp_path):
-    reg = _register(tmp_path, [("1", "PASS"), ("2", "INCOMPLETE")])
+    reg = _register(tmp_path, [("1", "PASS"), ("2", "NOT_MEASURED")])
     r, doc = _run(tmp_path, reg)
     assert r.returncode == 2, r.stdout + r.stderr
     assert doc is not None, "the review wrote no report"
@@ -91,7 +91,7 @@ def test_a_review_that_waits_states_BLOCKED_BY_UPSTREAM(tmp_path):
 def test_the_reader_takes_that_class_over_its_own_default(tmp_path):
     """The whole point: without a stated class the sentence falls through to
     the fail-closed EXECUTION_ERROR."""
-    reg = _register(tmp_path, [("1", "PASS"), ("2", "INCOMPLETE")])
+    reg = _register(tmp_path, [("1", "PASS"), ("2", "NOT_MEASURED")])
     _r, doc = _run(tmp_path, reg)
     assert R.infer_nonverdict_reason(
         verdict="NOT_MEASURED", message=doc["why"],
@@ -104,8 +104,8 @@ def test_the_reader_takes_that_class_over_its_own_default(tmp_path):
 
 
 def test_the_waiting_rows_reach_the_human_line(tmp_path):
-    reg = _register(tmp_path, [("1", "PASS"), ("2", "INCOMPLETE"),
-                               ("P0", "MISSING")])
+    reg = _register(tmp_path, [("1", "PASS"), ("2", "NOT_MEASURED"),
+                               ("P0", "FAIL")])
     r, _doc = _run(tmp_path, reg)
     assert "BLOCKED_BY_UPSTREAM, waiting on:" in r.stdout, r.stdout
     assert "2=INCOMPLETE" in r.stdout and "P0=MISSING" in r.stdout, r.stdout

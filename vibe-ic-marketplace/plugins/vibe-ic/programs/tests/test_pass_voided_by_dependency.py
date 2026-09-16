@@ -169,7 +169,7 @@ def test_the_disclosure_tiers_stay_out_of_the_executed_pass_numerator(
     a run of 1 PASS + 1 VACUOUS-PASS + 1 PASS-VOIDED + 1 MISSING, `X` is 1.
 
     This replaces a test that asserted the SOURCE still contained
-    `pass_count = counts["PASS"] + counts["VACUOUS_PASS"]`. That line was
+    `pass_count = counts["PASS"] + counts["NOT_MEASURED"]`. That line was
     dead when it shipped — the unconditional assignment below it overwrites it
     before the only read — so the string match certified a line that could not
     move a number, and passed unchanged while the demotion this module exists
@@ -192,7 +192,7 @@ def test_the_disclosure_tiers_stay_out_of_the_executed_pass_numerator(
         f"depends on `ZF3`, which is MISSING, so the write-back must have "
         f"demoted it. This is what fires when the demotion loop is disabled: "
         f"{tally}\n{out[:3000]}")
-    assert tally.get("VACUOUS-PASS") == 1, (
+    assert tally.get("NOT_MEASURED") == 1, (
         f"the probe produced no VACUOUS-PASS, so this guard cannot see the "
         f"fold it exists to catch. Gate program {_VACUOUS_GATE_PROGRAM!r} may "
         f"have stopped answering rc 2 on an empty project: {tally}\n"

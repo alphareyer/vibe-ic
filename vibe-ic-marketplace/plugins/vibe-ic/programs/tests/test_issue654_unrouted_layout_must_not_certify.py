@@ -123,7 +123,7 @@ def test_a_corrupt_artefact_is_none_not_a_crash(tmp_path):
 def test_an_unrouted_run_makes_a_signoff_step_vacuous(tmp_path):
     v = P._vacuous_on_unrouted(_project(tmp_path, True), "drc", 0.0)
     assert v is not None and v.status == "NOT_MEASURED"
-    assert "INCOMPLETE" in v.detail
+    assert "NOT_MEASURED" in v.detail
 
 
 def test_a_vacuous_signoff_makes_the_RUN_fail(tmp_path):
@@ -135,7 +135,7 @@ def test_a_vacuous_signoff_makes_the_RUN_fail(tmp_path):
     R = P.StepResult
     assert P._aggregate_verdict([R("a", "PASS")]) == "PASS"
     assert P._aggregate_verdict([R("a", "PASS"),
-                                 R("b", "VACUOUS_PASS")]) == "FAIL"
+                                 R("b", "NOT_MEASURED")]) == "FAIL"
 
 
 def test_the_established_waiver_states_are_untouched(tmp_path):
@@ -146,7 +146,7 @@ def test_the_established_waiver_states_are_untouched(tmp_path):
     producer's, and borrowing a classifier across two vocabularies is how a fix
     acquires a second defect."""
     R = P.StepResult
-    for w in ("SKIP", "WAIVED", "ENV_UNAVAILABLE"):
+    for w in ("SKIP", "PASS_WITH_WAIVERS", "NOT_MEASURED"):
         assert P._aggregate_verdict([R("a", "PASS"),
                                      R("b", w)]) == "PASS_WITH_WAIVERS", w
 
@@ -193,19 +193,19 @@ def _handoff(project):
 def test_the_handoff_pack_refuses_on_an_unrouted_layout(tmp_path):
     r = _handoff(_project(tmp_path, True))
     assert r.returncode == 2, r.stdout[-400:] + r.stderr[-400:]
-    assert "INCOMPLETE" in r.stderr
+    assert "NOT_MEASURED" in r.stderr
 
 
 def test_the_handoff_pack_does_not_refuse_a_routed_one(tmp_path):
     """The other direction, run for real. If this refused too, the fix would be
     "never hand off", which is not a fix."""
     r = _handoff(_project(tmp_path, False))
-    assert r.returncode != 2 or "INCOMPLETE" not in r.stderr
+    assert r.returncode != 2 or "NOT_MEASURED" not in r.stderr
 
 
 def test_the_handoff_pack_does_not_refuse_an_unrecorded_run(tmp_path):
     r = _handoff(_project(tmp_path, None))
-    assert r.returncode != 2 or "INCOMPLETE" not in r.stderr
+    assert r.returncode != 2 or "NOT_MEASURED" not in r.stderr
 
 
 def test_the_generator_names_the_fact_at_all():

@@ -110,11 +110,11 @@ LIVE_STEP_GATES = {
 # a derived design absence on this fixture; the others are waiting for process
 # outputs and therefore remain incomplete.
 LIVE_STEP_EXPECTED = {
-    "analog_hardmacro_check": "VACUOUS_PASS",
-    "analog_hw_spice_correlation_check": "INCOMPLETE",
-    "analog_netlist_pdk_check": "INCOMPLETE",
-    "analog_pre_vs_post_layout_check": "INCOMPLETE",
-    "spice_correlation_check": "INCOMPLETE",
+    "analog_hardmacro_check": "NOT_MEASURED",
+    "analog_hw_spice_correlation_check": "NOT_MEASURED",
+    "analog_netlist_pdk_check": "NOT_MEASURED",
+    "analog_pre_vs_post_layout_check": "NOT_MEASURED",
+    "spice_correlation_check": "NOT_MEASURED",
 }
 
 
@@ -460,17 +460,17 @@ _P0_REGISTERED = tuple(
 
 _P0_EXPECTED = {
     "analog_block_coverage_check": ("SKIP", "DESIGN_DECLARED_NA"),
-    "analog_corner_sweep_check": ("BLOCKED", "BLOCKED_BY_UPSTREAM"),
+    "analog_corner_sweep_check": ("NOT_MEASURED", "BLOCKED_BY_UPSTREAM"),
     "analog_digital_interface_check": ("SKIP", "DESIGN_DECLARED_NA"),
     "analog_hardmacro_check": ("SKIP", "DESIGN_DECLARED_NA"),
     "analog_hw_spice_correlation_check":
-        ("BLOCKED", "BLOCKED_BY_UPSTREAM"),
-    "analog_netlist_pdk_check": ("BLOCKED", "BLOCKED_BY_UPSTREAM"),
+        ("NOT_MEASURED", "BLOCKED_BY_UPSTREAM"),
+    "analog_netlist_pdk_check": ("NOT_MEASURED", "BLOCKED_BY_UPSTREAM"),
     "analog_pre_vs_post_layout_check":
-        ("BLOCKED", "BLOCKED_BY_UPSTREAM"),
+        ("NOT_MEASURED", "BLOCKED_BY_UPSTREAM"),
     "otp_image_layer_consistency_check":
-        ("BLOCKED", "BLOCKED_BY_UPSTREAM"),
-    "spice_correlation_check": ("BLOCKED", "BLOCKED_BY_UPSTREAM"),
+        ("NOT_MEASURED", "BLOCKED_BY_UPSTREAM"),
+    "spice_correlation_check": ("NOT_MEASURED", "BLOCKED_BY_UPSTREAM"),
     "tristate_active_drive_check": ("SKIP", "DESIGN_DECLARED_NA"),
 }
 

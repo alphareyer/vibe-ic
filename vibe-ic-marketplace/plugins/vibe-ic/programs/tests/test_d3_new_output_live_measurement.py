@@ -18,8 +18,8 @@ def _new_entry(monkeypatch):
 
 @pytest.mark.parametrize("case,produced,status", [
     ("met", True, "PASS"), ("violated", True, "FAIL"),
-    ("missing", False, "BLOCKED"), ("prelayout", False, "BLOCKED"),
-    ("untracked", False, "BLOCKED"), ("already_captured", False, None),
+    ("missing", False, "NOT_MEASURED"), ("prelayout", False, "NOT_MEASURED"),
+    ("untracked", False, "NOT_MEASURED"), ("already_captured", False, None),
 ])
 def test_new_output_requires_real_measured_production(monkeypatch, case, produced, status):
     _new_entry(monkeypatch)

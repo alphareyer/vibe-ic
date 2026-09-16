@@ -232,7 +232,7 @@ def test_connectivity_only_tb_is_incomplete_not_waived(tmp_path):
     assert rec["coverage"]["measured"] is True
     inline = RUNNER.step_step4_functional_evidence(tmp_path, "digital")
     assert inline.status == "FAIL", inline
-    assert "INCOMPLETE" in inline.detail
+    assert "NOT_MEASURED" in inline.detail
     assert inline.extras["fallback_skill"] == "testbench-gen"
     assert RUNNER._aggregate_verdict([inline]) == "FAIL"
 

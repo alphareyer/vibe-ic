@@ -52,7 +52,7 @@ from flow_compliance_check import check_step  # noqa: E402
 # credit visible instead of being caught by the pre-existing net.
 _VACUOUS_GATE = {"program_exit_zero": "mixed_signal_merge_check ."}
 
-_DONE_CLAIMS = {"PASS", "VACUOUS_PASS", "STRUCTURE-ONLY", "INCOMPLETE"}
+_DONE_CLAIMS = {"PASS", "NOT_MEASURED", "PASS_WITH_WAIVERS", "NOT_MEASURED"}
 
 
 def _step(sid, outputs, gate=None):

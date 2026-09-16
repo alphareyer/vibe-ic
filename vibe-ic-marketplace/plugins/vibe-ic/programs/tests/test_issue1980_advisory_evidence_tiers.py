@@ -300,7 +300,7 @@ def test_shipped_step31_keeps_perc_and_via_findings_out_of_gate_coverage(
     assert outputs["pnr_via_stack_completeness_check"]["reason_class"] == (
         "CAPABILITY_ABSENT")
     assert outputs["perc_corpus_sweep"]["findings"] == [
-        "INCOMPLETE", "WELLTAP_GAP"]
+        "NOT_MEASURED", "WELLTAP_GAP"]
     assert outputs["perc_corpus_sweep"]["verdict"] == "PRODUCED"
     assert all(record["enforcement"] == "NOT_A_GATE"
                for record in outputs.values())

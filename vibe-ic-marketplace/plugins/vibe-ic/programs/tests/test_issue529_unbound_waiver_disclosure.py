@@ -321,7 +321,7 @@ def test_disclosure_names_the_entry_the_step_the_tier_and_the_ticket(tmp_path):
     assert "entry 1" in notes[1] and "'drc'" in notes[1]
     for note in notes:
         assert "flow step 31" in note, note
-        assert "'WAIVED'" in note, note
+        assert "'PASS_WITH_WAIVERS'" in note, note
     assert "TAPEOUT-AUTOGEN-LVS" in notes[0]
     assert "TAPEOUT-AUTOGEN-DRC" in notes[1]
 
@@ -560,7 +560,7 @@ def test_the_hygiene_gates_consume_the_entry_and_ignore_its_tier(tmp_path):
         assert r.returncode == 0, r.stdout + r.stderr
         return r.returncode, r.stdout.replace(str(proj), "<P>")
 
-    baseline = _schema_stdout("WAIVED")
+    baseline = _schema_stdout("PASS_WITH_WAIVERS")
     assert "Waiver count: 1" in baseline[1], baseline[1]
     for tier in ("PASS_STRUCTURAL", "ZZZ_UNKNOWN_TIER", "NOT_MEASURED"):
         assert _schema_stdout(tier) == baseline, tier

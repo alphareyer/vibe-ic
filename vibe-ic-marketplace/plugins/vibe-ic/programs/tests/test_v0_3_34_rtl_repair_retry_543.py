@@ -46,13 +46,13 @@ def test_543_waived_reference_tb_breaks_rtl_repair_retry(tmp_path, monkeypatch):
     # Verify it by checking the runner's outer status-tuple includes it.
     import inspect
     src = inspect.getsource(R)
-    # The rtl_repair_retry break must include "WAIVED"
-    assert '"WAIVED"' in src or "'WAIVED'" in src
+    # The rtl_repair_retry break must include "PASS_WITH_WAIVERS"
+    assert '"PASS_WITH_WAIVERS"' in src or "'PASS_WITH_WAIVERS'" in src
     # And specifically, the break condition must appear after the
     # step_reference_tb call inside the while True loop.
     idx_while = src.index("while True:")
     idx_break_set = src.index(
-        '"PASS", "SKIP", "WAIVED"', idx_while)
+        '"PASS", "SKIP", "PASS_WITH_WAIVERS"', idx_while)
     assert idx_break_set > idx_while
 
 
@@ -60,5 +60,5 @@ def test_543_waived_not_entering_repair(monkeypatch):
     # Directly test the rtl_repair_retry break: status WAIVED must break early
     # without any RTL repair retry.  We simulate by checking that the
     # condition `sr.status in ("PASS", "SKIP", "PASS_WITH_WAIVERS")` is True for WAIVED.
-    waived = R.StepResult("reference_tb", "WAIVED", 0.0, "test")
+    waived = R.StepResult("reference_tb", "PASS_WITH_WAIVERS", 0.0, "test")
     assert waived.status in ("PASS", "SKIP", "PASS_WITH_WAIVERS")  # break fires

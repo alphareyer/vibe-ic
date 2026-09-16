@@ -340,7 +340,7 @@ def test_inline_signoff_executes_the_architectural_gate(tmp_path, monkeypatch, b
 
 @pytest.mark.parametrize("body, expected_rc, expected_verdict",
                          [(_ARCH, 1, "FAIL"), (_MET, 0, "PASS"),
-                          (None, 2, "INCOMPLETE")],
+                          (None, 2, "NOT_MEASURED")],
                          ids=["violated", "met", "missing"])
 @pytest.mark.parametrize("existing_report", [False, True],
                          ids=["absent-report", "existing-report"])

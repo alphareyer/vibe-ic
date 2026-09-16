@@ -392,8 +392,8 @@ def _satisfy_p0_ancestry(project: Path) -> Path:
 #: the precondition REFUSE rather than guess, so a renamed rendering reddens
 #: this file instead of quietly widening what counts as "closed".
 _LABEL_TO_PRODUCER_STATUS = {
-    "WAIVED-DEFERRED": "WAIVED",
-    "PASS-VOIDED": "PASS-VOIDED-BY-DEPENDENCY",
+    "WAIVED-DEFERRED": "PASS_WITH_WAIVERS",
+    "PASS-VOIDED": "NOT_MEASURED",
 }
 
 
@@ -411,7 +411,7 @@ def assert_p0_ancestry_closed(out: str) -> None:
     make the precondition and the assertion share a failure mode.
 
     WHAT IT MEASURES vs WHAT IT CLAIMED (vibe-ic#1351). Until now the test was
-    `!= "MISSING"`, i.e. it measured one spelling of one way to break the chain
+    `!= "FAIL"`, i.e. it measured one spelling of one way to break the chain
     while claiming the chain was CLOSED. Measured on this fixture's own tree,
     removing one artefact each and running the real gate:
 
@@ -725,13 +725,13 @@ def test_strict_structural_only_structural_gates(tmp_path,
 #
 # Each arm below breaks the chain a DIFFERENT way and the arm asserts which,
 # because that is the part that decayed: the pre-#1351 form of the precondition
-# tested `!= "MISSING"` and therefore accepted the FAIL arm outright.
+# tested `!= "FAIL"` and therefore accepted the FAIL arm outright.
 
 _ANCESTRY_BREAKS = (
     # (artefact removed from the closed tree, the word D1 then reports)
     # ABSENT — a `required_outputs` entry the fixture stops writing. This is the
     # break #1159 and #1348 both produced.
-    ("phase1/extraction_patterns.json", "MISSING"),
+    ("phase1/extraction_patterns.json", "FAIL"),
     # FAILED — an artefact D1's own gate clause reads and rejects the absence
     # of. Same voided P0, same two ordering violations, DIFFERENT word; accepted
     # by the pre-#1351 precondition.
@@ -838,7 +838,7 @@ def test_strict_step_artifacts_includes_step_gates(tmp_path,
     out = capsys.readouterr().out
     # With strict-step-artifacts, step-level MISSING/FAIL forces FAIL.
     # Empty project always has missing L*.json etc.
-    if "MISSING" in out or "FAIL" in out:
+    if "FAIL" in out or "FAIL" in out:
         # Verdict scope includes step-level → expect FAIL.
         assert ("Overall: FAIL" in out
                 or "strict-step-artifacts mode" in out
@@ -999,7 +999,7 @@ def test_wave93_vacuous_pass_counter_accurate(tmp_path):
         f"summary says VACUOUS-PASS={m.group(1)} but the per-step listing "
         f"labels {len(labelled)} step(s) [VACUOUS-PASS]: "
         f"{[ln.strip()[:80] for ln in labelled]}\n{counter_lines[0]}")
-    seen = _labelled_step_ids(r.stdout, "VACUOUS-PASS")
+    seen = _labelled_step_ids(r.stdout, "NOT_MEASURED")
     assert seen == _VAC2_EXPECTED_VACUOUS_STEPS, (
         f"the set of steps on the VACUOUS-PASS tier changed: expected "
         f"{sorted(_VAC2_EXPECTED_VACUOUS_STEPS)}, got {sorted(seen)}. A step "

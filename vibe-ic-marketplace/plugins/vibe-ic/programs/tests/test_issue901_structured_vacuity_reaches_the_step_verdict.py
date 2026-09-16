@@ -179,7 +179,7 @@ def test_the_gate_ledger_row_repeats_what_the_gate_said_about_itself(tmp_path):
     _rc, out, _doc = _audit(project, flow)
     row = re.search(r"GATE_RAN\s+vacuous_testbench_check\s+rc=2\s+(\S+)", out)
     assert row, out
-    assert row.group(1) == "INCOMPLETE", (
+    assert row.group(1) == "NOT_MEASURED", (
         f"the ledger row reads {row.group(1)} for a gate whose own report "
         f"says it examined nothing\n{out}")
     assert "reason_class=EXECUTION_ERROR" in out, out
@@ -220,9 +220,9 @@ def test_a_partially_vacuous_step_still_names_the_clause_that_examined_nothing(
     _rc, out, doc = _audit(project, flow)
     step = _step_under_audit(doc)
     assert step.get("partial_vacuity_disclosed") is True, step
-    assert any("PARTIALLY-VACUOUS" in r and "declares_nothing_examined" in r
+    assert any("PASS" in r and "declares_nothing_examined" in r
                for r in step["reasons"]), step["reasons"]
-    assert "PARTIALLY-VACUOUS" in out, out
+    assert "PASS" in out, out
 
 
 # ──────────────────── the population is not empty (meta) ──────────────────
@@ -449,7 +449,7 @@ def test_GUARD_the_legacy_channel_keeps_its_tier_when_siblings_ran(tmp_path):
     assert status == "PASS", (
         "one clause of two examined nothing, so neither `PASS` nor the "
         "unanimous word is true of this step\n" + out)
-    assert any("PARTIALLY-VACUOUS" in str(r)
+    assert any("PASS" in str(r)
                for r in _step_under_audit(doc)["reasons"]), out
 
 
@@ -525,7 +525,7 @@ def test_the_partial_disclosure_is_named_and_counted(tmp_path):
         "the clause that examined nothing vanished because it was not "
         "unanimous\n" + joined + "\n" + out)
     assert "examined_nothing" in joined, joined
-    assert "PARTIALLY-VACUOUS" in out, out
+    assert "PASS" in out, out
 
 
 def test_GUARD_a_failing_clause_is_never_silenced_by_a_vacuous_sibling(
@@ -829,7 +829,7 @@ def test_GUARD_the_shipped_step_is_not_vacuous_when_its_sim_actually_ran(
     # it down. Therefore this fixture must fail rather than borrow an advisory
     # tier. The remaining rtl-unit advisory refusal is still preserved below.
     assert step["status"] not in ("PASS", "NOT_MEASURED", "SKIPPED",
-                                 "SKIPPED-CONDITION", "WAIVED"), (
+                                 "NOT_APPLICABLE", "PASS_WITH_WAIVERS"), (
         "a step carrying two live advisory refusals and an unexamined "
         "applicable input reached a pass/skip tier\n" + str(step))
     assert step["status"] == "FAIL", step

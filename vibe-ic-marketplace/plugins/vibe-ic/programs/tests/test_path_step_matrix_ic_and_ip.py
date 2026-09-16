@@ -75,8 +75,8 @@ FLOW = PLUGIN / "flow" / "phase1_phase2_phase3.yaml"
 # The three states. Named rather than spelled inline so a cell can never be
 # written with a typo that quietly matches nothing.
 RUNS = "RUNS"
-SKIPPED = "SKIPPED-CONDITION"
-MISSING = "MISSING"
+SKIPPED = "NOT_APPLICABLE"
+MISSING = "FAIL"
 
 
 # --------------------------------------------------------------------------- #
@@ -289,7 +289,7 @@ def _state(project: Path, sid: str) -> str:
     cond = step.get("condition")
     if cond and not FCC._check_condition(project, cond):
         kind = step.get("condition_kind", "design_dependent")
-        return ("SKIPPED-SETUP-REQUIRED" if kind == "setup_required"
+        return ("NOT_MEASURED" if kind == "setup_required"
                 else SKIPPED)
     return RUNS
 
@@ -357,7 +357,7 @@ def test_condition_layer_cell(trees, cls, sid):
 # original defect stood on its head: 15.5ic on a self tape-out used to report
 # SKIPPED-CONDITION (nothing to see) and must now report MISSING (a pad ring
 # is owed and is not there).
-_NON_SKIP = ("MISSING", "FAIL", "PASS")
+_NON_SKIP = ("FAIL", "FAIL", "PASS")
 
 
 @pytest.mark.parametrize("cls,sid", CELLS, ids=[f"{c}::{s}" for c, s in CELLS])

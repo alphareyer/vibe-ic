@@ -28,7 +28,7 @@ def test_aggregate_verdict_env_unavailable_is_pass_with_waivers() -> None:
         StepResult("synth", "PASS"),
         StepResult("pnr", "PASS"),
         StepResult("gds", "PASS"),
-        StepResult("drc", "ENV_UNAVAILABLE", detail="calibre missing"),
+        StepResult("drc", "NOT_MEASURED", detail="calibre missing", reason_class="not_executed"),
     ]
     assert _aggregate_verdict(plan) == "PASS_WITH_WAIVERS"
 
@@ -36,8 +36,8 @@ def test_aggregate_verdict_env_unavailable_is_pass_with_waivers() -> None:
 def test_aggregate_verdict_mixed_waived_and_env_unavailable() -> None:
     plan = [
         StepResult("synth", "PASS"),
-        StepResult("drc", "ENV_UNAVAILABLE"),
-        StepResult("lvs", "WAIVED"),
+        StepResult("drc", "NOT_MEASURED", reason_class="not_executed"),
+        StepResult("lvs", "PASS_WITH_WAIVERS"),
     ]
     assert _aggregate_verdict(plan) == "PASS_WITH_WAIVERS"
 
@@ -45,7 +45,7 @@ def test_aggregate_verdict_mixed_waived_and_env_unavailable() -> None:
 def test_aggregate_verdict_fail_dominates_env_unavailable() -> None:
     plan = [
         StepResult("synth", "FAIL"),
-        StepResult("drc", "ENV_UNAVAILABLE"),
+        StepResult("drc", "NOT_MEASURED", reason_class="not_executed"),
     ]
     assert _aggregate_verdict(plan) == "FAIL"
 
@@ -222,11 +222,11 @@ def test_autogen_waivers_includes_env_unavailable_steps(
     p.mkdir()
     plan = [
         StepResult("synth", "PASS"),
-        StepResult("drc", "ENV_UNAVAILABLE",
+        StepResult("drc", "NOT_MEASURED",
                    detail="calibre missing in env",
                    extras={"missing_tool": "calibre",
-                           "calibre_drc_deck": "/x.rule"}),
-        StepResult("lvs", "WAIVED",
+                           "calibre_drc_deck": "/x.rule"}, reason_class="not_executed"),
+        StepResult("lvs", "PASS_WITH_WAIVERS",
                    detail="design defer; needs extraction",
                    extras={"extracted_netlist": "phase3/x.spice"}),
     ]
@@ -262,8 +262,8 @@ def test_autogen_waivers_respects_existing_human_authored_file(
     p = tmp_path / "proj"
     p.mkdir()
     (p / "waivers.json").write_text('{"_human_authored": true}')
-    plan = [StepResult("drc", "ENV_UNAVAILABLE",
-                       extras={"missing_tool": "calibre"})]
+    plan = [StepResult("drc", "NOT_MEASURED",
+                       extras={"missing_tool": "calibre"}, reason_class="not_executed")]
     _autogen_waivers_json(p, plan)
     # File was not overwritten.
     data = json.loads((p / "waivers.json").read_text())

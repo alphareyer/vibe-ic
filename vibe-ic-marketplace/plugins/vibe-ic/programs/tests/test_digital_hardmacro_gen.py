@@ -400,7 +400,7 @@ def test_the_runner_step_never_fails_the_run(tmp_path, monkeypatch):
     # producer runs. Retargeting the double is what keeps this test
     # measuring what it was written to measure.
     monkeypatch.setattr(runner._pr, "run", fake_run)
-    for rc, expect in ((0, "PASS"), (1, "SKIP"), (2, "ENV_UNAVAILABLE")):
+    for rc, expect in ((0, "PASS"), (1, "SKIP"), (2, "NOT_MEASURED")):
         seen["rc"] = rc
         res = runner.step_digital_hardmacro_gen(tmp_path)
         assert res.status == expect, (rc, res.status)

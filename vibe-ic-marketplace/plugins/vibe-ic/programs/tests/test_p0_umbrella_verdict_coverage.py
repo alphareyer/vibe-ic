@@ -412,8 +412,8 @@ def test_real_gates_a_fully_invoked_clean_registry_is_PASS(
 # the decision function, as a truth table
 # ===========================================================================
 @pytest.mark.parametrize("executed,records,expected", [
-    (None, [], "SKIPPED-CONDITION"),
-    (None, [_not_invocable("g")], "SKIPPED-CONDITION"),
+    (None, [], "NOT_APPLICABLE"),
+    (None, [_not_invocable("g")], "NOT_APPLICABLE"),
     (False, [_fail("g")], "FAIL"),
     (False, [_fail("g"), _not_invocable("h")], "FAIL"),
     # `len(fails) == 0` over a population of ZERO. Not reachable from the one
@@ -430,12 +430,12 @@ def test_real_gates_a_fully_invoked_clean_registry_is_PASS(
     # greenness moves, and the word now distinguishes "nothing answered" from
     # "some did not". The MIXED row below keeps `INCOMPLETE` and is what proves
     # the two cases have not been collapsed the other way.
-    (True, [], "NOT-MEASURED"),
+    (True, [], "NOT_MEASURED"),
     (True, [_pass("g")], "PASS"),
     (True, [_pass("g"), _skip("h")], "PASS"),
-    (True, [_not_invocable("g")], "NOT-MEASURED"),
-    (True, [_not_invocable("g"), _not_invocable("h")], "NOT-MEASURED"),
-    (True, [_pass("g"), _not_invocable("h")], "INCOMPLETE"),
+    (True, [_not_invocable("g")], "NOT_MEASURED"),
+    (True, [_not_invocable("g"), _not_invocable("h")], "NOT_MEASURED"),
+    (True, [_pass("g"), _not_invocable("h")], "NOT_MEASURED"),
 ])
 def test_umbrella_status_truth_table(executed, records, expected):
     assert F.p0_umbrella_verdict(executed, records) == expected
@@ -464,22 +464,22 @@ def test_incomplete_is_a_registered_producer_status():
 def test_incomplete_cannot_turn_a_green_run_red():
     """The whole reason this is not `FAIL`. A gate that blocks every landing
     gets deleted, not fixed — so the tier discloses and does not block."""
-    assert not _T.is_non_green("INCOMPLETE")
+    assert not _T.is_non_green("NOT_MEASURED")
 
 
 def test_incomplete_is_not_a_full_pass():
     """...and the whole reason it is not `PASS`. It is a QUALIFIED done-claim:
     it ran and did not fail, but it certified less than its population."""
-    assert _T.is_done_claim("INCOMPLETE")
-    assert not _T.is_full_pass("INCOMPLETE")
-    assert _T.is_qualified_done("INCOMPLETE")
+    assert _T.is_done_claim("NOT_MEASURED")
+    assert not _T.is_full_pass("NOT_MEASURED")
+    assert _T.is_qualified_done("NOT_MEASURED")
 
 
 def test_incomplete_is_not_excused_from_the_denominator():
     """`EXCUSED` is what `total_required` subtracts. A P0 that certified 210 of
     246 is still a step that was required; removing it from the denominator
     would make the coverage gap improve the published ratio."""
-    assert not _T.is_excused("INCOMPLETE")
+    assert not _T.is_excused("NOT_MEASURED")
 
 
 if __name__ == "__main__":

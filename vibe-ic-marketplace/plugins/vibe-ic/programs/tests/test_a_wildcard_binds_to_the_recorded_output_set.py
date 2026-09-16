@@ -84,7 +84,7 @@ from flow_compliance_check import check_step  # noqa: E402
 # these tests about the OUTPUT resolution and not about a gate's opinion.
 _VACUOUS_GATE = {"program_exit_zero": "mixed_signal_merge_check ."}
 
-_DONE_CLAIMS = {"PASS", "VACUOUS_PASS", "STRUCTURE-ONLY", "INCOMPLETE"}
+_DONE_CLAIMS = {"PASS", "NOT_MEASURED", "PASS_WITH_WAIVERS", "NOT_MEASURED"}
 
 _RTL_SPEC = "rtl/*.sv OR rtl/*.v"
 

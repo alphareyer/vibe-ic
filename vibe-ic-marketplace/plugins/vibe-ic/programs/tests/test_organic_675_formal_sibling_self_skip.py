@@ -254,7 +254,7 @@ def test_check_step_unanswerable_authoring_is_incomplete(tmp_path):
     assert res.status == "NOT_MEASURED", (res.status, res.reasons)
     joined = " ".join(res.reasons)
     assert "L6.fsm_state.IDLE" in joined
-    assert "SKIPPED-CONDITION" not in joined
+    assert "NOT_APPLICABLE" not in joined
 
 
 def test_proved_subset_with_open_denominator_is_incomplete(tmp_path):

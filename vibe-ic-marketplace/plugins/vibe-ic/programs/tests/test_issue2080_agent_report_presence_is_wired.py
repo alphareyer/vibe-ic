@@ -146,7 +146,7 @@ def test_a_project_with_no_report_card_records_a_FINDING(tmp_path: Path) -> None
     """
     p = tmp_path / "proj"
     p.mkdir()
-    assert ARSA.audit(p)[0] == "VACUOUS_PASS", (
+    assert ARSA.audit(p)[0] == "NOT_MEASURED", (
         "the sibling no longer declines this case; re-base the delegation "
         "claim on what it does now rather than deleting the measurement")
     row = _row(DOSR.step_agent_report_presence(p))

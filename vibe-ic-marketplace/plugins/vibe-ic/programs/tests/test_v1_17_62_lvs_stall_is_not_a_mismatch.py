@@ -127,7 +127,7 @@ def test_stalled_extraction_is_blocked_not_a_mismatch(tmp_path, monkeypatch):
     # THE CONTRACT, which is the whole point of the finding.
     assert v is not None, "no lvs_verdict.json was written for a stopped run"
     assert v["status"] == "NOT_MEASURED", v["status"]
-    assert v["result"] == "BLOCKED", v["result"]
+    assert v["result"] == "NOT_MEASURED", v["result"]
     assert v["finding"] == "LVS_EXTRACTION_STALLED"
     assert v["stopped_as"] == "STALLED"
 

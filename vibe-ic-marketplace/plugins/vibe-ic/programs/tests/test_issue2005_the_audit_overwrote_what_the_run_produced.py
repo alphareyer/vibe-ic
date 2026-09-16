@@ -232,7 +232,7 @@ def test_an_output_only_the_audit_ever_wrote_stays_missing(workdir):
         assert _REL not in res.evidence, (
             f"{_REL} exists only because this audit's own gate wrote it and it "
             f"was credited as run evidence: {list(res.evidence)!r}")
-    assert seen == ["MISSING", "MISSING", "MISSING"], (
+    assert seen == ["FAIL", "FAIL", "FAIL"], (
         f"the run produced nothing and the verdicts across three passes were "
         f"{seen} — the refusal must not decay with the number of passes")
 
@@ -268,9 +268,9 @@ def test_the_refusal_holds_for_a_gate_whose_document_carries_no_stamp(workdir):
         assert rel not in res.evidence, (
             f"the audit's own unstamped document was credited: "
             f"{list(res.evidence)!r}")
-    assert seen == ["MISSING"] * 3, (
+    assert seen == ["FAIL"] * 3, (
         f"three passes over an unchanged tree reported {seen}; the pre-fix "
-        f"code reported ['MISSING', 'INCOMPLETE', 'INCOMPLETE'] here")
+        f"code reported ['FAIL', 'NOT_MEASURED', 'NOT_MEASURED'] here")
     assert (project / rel).is_file(), (
         "fixture defect: the gate never wrote its --json target, so the "
         "second and third passes were not the case this test is about")

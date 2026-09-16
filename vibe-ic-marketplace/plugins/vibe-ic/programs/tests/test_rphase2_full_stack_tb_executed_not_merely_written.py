@@ -10,7 +10,7 @@ MEASURED on 8HD-6, main at 3c9724e8, from a clean clone, one node id::
     E  AssertionError: ... the simulator was NOT FOUND where the compile was
        dispatched (rc=127) ... Generic full-stack TB skeleton
        (tb_core_top_full.v) + results.json present but NO sim ran (#439).
-       assert 'WAIVED' == 'INCOMPLETE'
+       assert 'PASS_WITH_WAIVERS' == 'NOT_MEASURED'
 
 The container HAS iverilog and the tree sat outside its bind mounts, so
 `_iverilog_exec_container` declined it (correctly — the container cannot see
@@ -257,7 +257,7 @@ def test_the_constant_and_every_literal_spelling_are_the_same_word():
     # the aggregator classifies it, so it cannot reach the catch-all PASS
     assert f'_INCOMPLETE_STATUSES = ("NOT_MEASURED", "{word}")' in src
     # main's reference-TB repair loop treats it as terminal
-    assert f'"INCOMPLETE",\n                          "{word}") or' in src
+    assert f'"NOT_MEASURED",\n                          "{word}") or' in src
     # and the closed-loop registry's citation agrees with that tuple
     import closed_loop_executable_coverage_check as clc
     cited = clc.REGISTRY["4"]["evidence"]

@@ -179,8 +179,8 @@ def test_failed_phase1_reds_the_whole_downstream_main_track(graph):
 @pytest.mark.parametrize("d1_status", [
     "PASS",
     "NOT_MEASURED",       # the status D1 carries on the real digital spm run
-    "SKIPPED-CONDITION",  # generated_docs populated by external authoring
-    "WAIVED",
+    "NOT_APPLICABLE",  # generated_docs populated by external authoring
+    "PASS_WITH_WAIVERS",
 ])
 def test_legitimate_phase1_states_raise_no_violation(d1_status, graph):
     """Behaviour that must NOT change: none of these D1 states may red Step 1.

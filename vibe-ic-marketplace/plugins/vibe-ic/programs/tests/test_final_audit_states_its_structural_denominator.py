@@ -217,7 +217,7 @@ def test_a_real_finding_over_a_whole_population_still_fails(tmp_path):
 
 def test_incomplete_is_classified_and_is_neither_fail_nor_silently_green(capsys):
     mod = _load("design_one_shot_runner")
-    plan = [mod.StepResult("final_audit", "INCOMPLETE", 0.0, "x")]
+    plan = [mod.StepResult("final_audit", "NOT_MEASURED", 0.0, "x", reason_class="not_executed")]
     verdict = mod._aggregate_verdict(plan)
     assert verdict != "FAIL", "a gate that never ran said nothing about the design"
     assert verdict != "PASS", "a step that judged part of its population has not certified all of it"

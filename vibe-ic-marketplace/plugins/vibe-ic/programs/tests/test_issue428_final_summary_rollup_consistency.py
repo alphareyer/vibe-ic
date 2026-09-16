@@ -139,7 +139,7 @@ def test_unreadable_step_lands_in_named_bucket_not_missing():
     flow = _flow(["1", "2"])
     rollup, total = F._verdict_rollup(flow, {"1": "PASS"})
     assert total == 2
-    assert rollup.get("MISSING", 0) == 0, (
+    assert rollup.get("FAIL", 0) == 0, (
         "an unreadable verdict was booked as the blocking-artefact bucket")
     assert rollup[F.NO_VERDICT] == 1
 
@@ -149,7 +149,7 @@ def test_real_missing_verdict_still_lands_in_missing():
     the fix must not empty the bucket it stopped over-filling."""
     flow = _flow(["1", "2"])
     rollup, _ = F._verdict_rollup(flow, {"1": "PASS", "2": "FAIL"})
-    assert rollup["MISSING"] == 1
+    assert rollup["FAIL"] == 1
     assert F.NO_VERDICT not in rollup
 
 
@@ -166,12 +166,12 @@ def test_counts_snapshot_separates_no_verdict_from_missing():
 
 def test_parse_audit_tally_reads_the_quoted_line():
     text = _audit_text({"1": "PASS"},
-                       tally={"PASS": 35, "FAIL": 0, "MISSING": 0,
+                       tally={"PASS": 35, "FAIL": 0, "FAIL": 0,
                               "WAIVED-DEFERRED": 3, "SKIPPED": 22,
-                              "VACUOUS-PASS": 3})
+                              "NOT_MEASURED": 3})
     assert F._parse_audit_tally(text) == {
-        "PASS": 35, "FAIL": 0, "MISSING": 0, "WAIVED-DEFERRED": 3,
-        "SKIPPED-CONDITION": 22, "VACUOUS-PASS": 3}
+        "PASS": 35, "FAIL": 0, "FAIL": 0, "WAIVED-DEFERRED": 3,
+        "NOT_APPLICABLE": 22, "NOT_MEASURED": 3}
 
 
 def test_parse_audit_tally_returns_none_when_absent():
@@ -209,7 +209,7 @@ def test_parse_audit_tally_ignores_the_reports_own_prose_bullet():
 def test_parse_audit_tally_survives_the_blocked_by_upstream_parenthetical():
     text = ("  PASS=1  FAIL=0  MISSING=2 (1 blocked-by-upstream of step 7)  "
             "WAIVED-DEFERRED=0")
-    assert F._parse_audit_tally(text)["MISSING"] == 2
+    assert F._parse_audit_tally(text)["FAIL"] == 2
 
 
 # ─── 4. reconciliation: both directions ──────────────────────────────────
@@ -220,9 +220,9 @@ def test_reconcile_silent_when_they_agree():
 
 
 def test_reconcile_names_every_disagreeing_bucket():
-    diff = F._reconcile_rollup({"PASS": 28, "FAIL": 3, "MISSING": 6},
-                               {"PASS": 30, "FAIL": 4, "MISSING": 1})
-    assert diff == {"PASS": (28, 30), "FAIL": (3, 4), "MISSING": (6, 1)}
+    diff = F._reconcile_rollup({"PASS": 28, "FAIL": 3, "FAIL": 6},
+                               {"PASS": 30, "FAIL": 4, "FAIL": 1})
+    assert diff == {"PASS": (28, 30), "FAIL": (3, 4), "FAIL": (6, 1)}
 
 
 def test_reconcile_flags_a_bucket_the_tally_never_names():
@@ -268,7 +268,7 @@ def _audit_for_real_flow_with(word, marked_ids):
     labels = {str(s["id"]): (word if str(s["id"]) in marked else "PASS")
               for s in steps}
     tally = {"PASS": sum(1 for v in labels.values() if v == "PASS"),
-             "FAIL": 0, "MISSING": 0, "WAIVED-DEFERRED": 0}
+             "FAIL": 0, "FAIL": 0, "WAIVED-DEFERRED": 0}
     tally[word] = sum(1 for v in labels.values() if v == word)
     return _audit_text(labels, tally=tally)
 
@@ -308,9 +308,9 @@ def test_a_populated_not_measured_bucket_reaches_the_stage_breakdown(
     """
     marked = _rendered_stage_step_ids(3)
     md = _render_with(monkeypatch, tmp_path,
-                      _audit_for_real_flow_with("NOT-MEASURED", marked))
-    assert C.parse_rollup_table(md).get("NOT-MEASURED") == 3
-    assert _stage_breakdown_counts(md, "NOT-MEASURED") == 3, (
+                      _audit_for_real_flow_with("NOT_MEASURED", marked))
+    assert C.parse_rollup_table(md).get("NOT_MEASURED") == 3
+    assert _stage_breakdown_counts(md, "NOT_MEASURED") == 3, (
         "3 steps wear NOT-MEASURED and the Stage-breakdown table attributes "
         "none of them to it; that loop walks ROLLUP_ORDER and has no fallback")
 
@@ -326,13 +326,13 @@ def test_the_not_measured_slot_sits_among_the_qualified_done_claims():
     print, in the one table a reader opens, that the step failed.
     """
     import verdict as T
-    assert T.is_qualified_done("NOT-MEASURED")
+    assert T.is_qualified_done("NOT_MEASURED")
     order = list(F.ROLLUP_ORDER)
     non_green = [order.index(w) for w in T.NON_GREEN if w in order]
     excused = [order.index(w) for w in T.EXCUSED if w in order]
-    assert order.index("NOT-MEASURED") < min(non_green + excused)
+    assert order.index("NOT_MEASURED") < min(non_green + excused)
     # Split out of INCOMPLETE, so it prints beside the word it splits.
-    assert order.index("NOT-MEASURED") == order.index("INCOMPLETE") + 1
+    assert order.index("NOT_MEASURED") == order.index("NOT_MEASURED") + 1
 
 
 # ─── 6. end-to-end render: the two roll-ups in one document ──────────────
@@ -375,13 +375,13 @@ def _full_audit_for_real_flow(drop_ids=()):
     labels = {}
     for i, s in enumerate(steps):
         labels[str(s["id"])] = ("FAIL" if i % 17 == 0 else
-                                "SKIPPED-CONDITION" if i % 5 == 0 else "PASS")
+                                "NOT_APPLICABLE" if i % 5 == 0 else "PASS")
     tally = {"PASS": sum(1 for v in labels.values() if v == "PASS"),
              "FAIL": sum(1 for v in labels.values() if v == "FAIL"),
-             "MISSING": 0,
+             "FAIL": 0,
              "WAIVED-DEFERRED": 0,
              "SKIPPED": sum(1 for v in labels.values()
-                            if v == "SKIPPED-CONDITION")}
+                            if v == "NOT_APPLICABLE")}
     emitted = {k: v for k, v in labels.items() if k not in drop_ids}
     return _audit_text(emitted, tally=tally)
 
@@ -416,7 +416,7 @@ def test_rendered_report_names_the_disagreement_when_verdicts_are_unreadable(
     assert C.RECONCILIATION_FAILED_MARKER in md
     table = C.parse_rollup_table(md)
     assert table.get(F.NO_VERDICT, 0) == 0
-    assert table.get("MISSING", 0) == 0, (
+    assert table.get("FAIL", 0) == 0, (
         "missing per-step rows changed the producer-owned global tally")
     (tmp_path / "reports" / "final_summary.md").write_text(md, encoding="utf-8")
     ok, notes = C.check_project(tmp_path)

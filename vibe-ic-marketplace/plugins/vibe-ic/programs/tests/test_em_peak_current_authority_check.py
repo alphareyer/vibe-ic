@@ -151,7 +151,7 @@ def test_no_jmax_refuses_and_names_it(tmp_path):
     r = _run(proj)
     assert r.returncode == 2
     assert "[PASS]" not in r.stdout
-    assert any(l.lstrip().startswith("INCOMPLETE")
+    assert any(l.lstrip().startswith("NOT_MEASURED")
                for l in r.stdout.splitlines())
     assert "Jmax" in r.stdout
     # A PASS must say how much it looked at; so must a refusal.
@@ -174,7 +174,7 @@ def test_empty_project_refuses_and_discloses(tmp_path):
     r = _run(proj)
     assert r.returncode == 2
     assert "[PASS]" not in r.stdout
-    assert any(l.lstrip().startswith("INCOMPLETE")
+    assert any(l.lstrip().startswith("NOT_MEASURED")
                for l in r.stdout.splitlines())
     assert "read 0 peak-current figure(s)" in r.stdout
 
@@ -411,7 +411,7 @@ def test_publishing_the_class_changes_no_step_verdict(tmp_path):
     being published has stopped being the honest one."""
     empty = tmp_path / "empty"
     (empty / "reports" / "phase3").mkdir(parents=True)
-    assert _em_report(tmp_path, empty)[3] == "INCOMPLETE"
+    assert _em_report(tmp_path, empty)[3] == "NOT_MEASURED"
 
     real = _project(tmp_path / "real", peak="1.0e-06",
                     with_csv=True, with_jmax=True)

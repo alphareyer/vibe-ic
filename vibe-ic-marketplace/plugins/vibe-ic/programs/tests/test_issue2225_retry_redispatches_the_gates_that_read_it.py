@@ -231,8 +231,8 @@ def test_a_deliberate_entry_or_exit_skip_is_not_resurrected(tmp_path):
     """`SKIPPED-BY-ENTRY` / `SKIPPED-BY-EXIT` are designed non-dispatches, not
     starvation. A retry that resurrected them would violate --entry-step."""
     proj = _project(tmp_path, rtl=True)
-    plan = [R.StepResult("rtl_validate", "SKIPPED-BY-ENTRY", 0.0, "upstream"),
-            R.StepResult("sim", "SKIPPED-BY-EXIT", 0.0, "past the exit"),
+    plan = [R.StepResult("rtl_validate", "NOT_APPLICABLE", 0.0, "upstream"),
+            R.StepResult("sim", "NOT_APPLICABLE", 0.0, "past the exit"),
             _producer_ran()]
     called: list = []
     reg = {s: (lambda: called.append(s) or []) for s in ("rtl_validate", "sim")}

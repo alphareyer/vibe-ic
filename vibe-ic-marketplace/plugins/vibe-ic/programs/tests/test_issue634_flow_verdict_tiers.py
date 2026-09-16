@@ -1,253 +1,146 @@
-"""#634 — a pass tier the ordering guard could not see.
+#!/usr/bin/env python3
+"""vibe-ic#634's anti-drift property, carried forward onto `programs/verdict.py`.
 
-`#632` landed `STRUCTURE-ONLY` in the producer without telling the consumer that
-adjudicates dependency ordering. On `origin/main` before this change, the
-one-edge control `A4 blocks_on A3` with `A3 = FAIL` and only A4's word varying:
+WHAT #634 WAS. `flow_compliance_check` PRODUCED per-step verdict words and
+`flow_step_execution_coverage_check` CONSUMED them, and each kept its own list
+of which words meant "done". The lists drifted: a step wearing `STRUCTURE-ONLY`
+was counted as done by the producer's arithmetic and was invisible to the
+ordering guard, so a tree that DISCLOSED its content came from a library default
+scored where one that said nothing passed. `_flow_verdict_tiers` fixed it by
+DERIVING done-ness — "a word is a done-claim iff it is neither EXCUSED nor
+NON-GREEN" — so a tier invented tomorrow was adjudicated without anyone
+remembering to register it.
 
-    A4 = PASS             -> 1 ordering violation
-    A4 = VACUOUS-PASS     -> 1
-    A4 = STRUCTURE-ONLY   -> 0        <- and INCOMPLETE (#599) likewise 0
+WHY THAT MODULE IS GONE, AND THIS FILE IS NOT. Derivation-by-subtraction was the
+right answer to a vocabulary that could grow. R-0915-85 made it a vocabulary
+that cannot: five words at the producers, `verdict.parse` refusing a sixth, and
+a tree-wide ratchet (`step_verdict_vocabulary_ratchet`) that fails at the commit
+which introduces one. So the derivation goes with the module it lived in — but
+#634's PROPERTY does not, and it is pinned here against the replacement.
 
-So a step wearing either word was counted done by the producer's own arithmetic
-and escaped the guard — which inverts the incentive the tier exists to create:
-the tree that DISCLOSES a library default passed where the design-bound one
-failed.
-
-WHY THESE TESTS ARE MOSTLY ABOUT THE DERIVATION. Adding the two words to the
-consumer's set would fix today and reproduce the defect on the next tier, which
-is precisely how this one arrived. So the fix classifies by FUNCTION — a word is
-a done-claim iff it is neither excused nor non-green — and the load-bearing test
-below plants a word registered NOWHERE and requires the guard to adjudicate it.
-
-CALIBRATION, before adopting a stricter rule: 133 step-bearing compliance
-reports under `benchmark-data/` were scanned; NONE carries `STRUCTURE-ONLY` or
-`INCOMPLETE`, so no published verdict moves. And the producer's own headline was
-measured byte-identical on two real projects across the change:
-
-    sha256   Steps: 63 total (5/53 executed PASS, 2 DEFERRED via waiver,
-                              3 VACUOUS-PASS excluded from executed)
-    spm      Steps: 63 total (0/40 executed PASS, 0 DEFERRED via waiver)
-
-NOT IN SCOPE, deliberately. #634 also observes that a DISCLOSED tree sits below
-a SILENT one on the executed-PASS numerator, because `pass_count` counts only
-`PASS`. That is a flow-policy question about what the published X measures and
-it belongs to the owner; this change touches only which words the ordering guard
-adjudicates, where the current answer — none of them — has no policy defence.
+THE ONE ANSWER THAT MOVES, stated because it is a real behaviour change and not
+a rename: `INCOMPLETE`, `NOT-MEASURED`, `VACUOUS-PASS` and `STRUCTURE-ONLY` sat
+in NEITHER negative set, so by subtraction they were DONE-CLAIMS — a step that
+had measured nothing was adjudicated as claiming to be done. Two of them are
+`NOT_MEASURED` now and answer False. That is #634's own incentive argument
+reaching its conclusion.
 """
 from __future__ import annotations
 
-import importlib
-import pathlib
+import inspect
 import re
+import sys
 
-T = importlib.import_module("verdict")
-G = importlib.import_module("flow_step_execution_coverage_check")
-F = importlib.import_module("flow_compliance_check")
+import pytest
 
-_PROGRAMS = pathlib.Path(__file__).resolve().parents[1]
+from _plugin_tree import plugin_path
 
+sys.path.insert(0, str(plugin_path() / "programs"))
 
-def _violations(a4_status: str) -> int:
-    """The one-edge control from the issue: A4 depends on A3, A3 FAILed, and
-    only the word on A4 varies."""
-    report = {"steps": [{"id": "A3", "name": "a3", "status": "FAIL"},
-                        {"id": "A4", "name": "a4", "status": a4_status}]}
-    out = G.analyze(report, {"A4": ["A3"]})
-    return len(out.get("ordering_violations", []))
+import verdict as T  # noqa: E402
 
 
-# ── the defect, stated as the control that measured it ─────────────────────
-def test_STRUCTURE_ONLY_is_adjudicated():
-    """THE DEFECT. 0 before this change."""
-    assert _violations("STRUCTURE-ONLY") == 1
+# ── the vocabulary is closed, and that is now a fact not a convention ────
+
+def test_the_producer_vocabulary_is_exactly_the_five():
+    assert T.PRODUCER_STATUSES == frozenset(
+        {"PASS", "PASS_WITH_WAIVERS", "FAIL", "NOT_MEASURED",
+         "NOT_APPLICABLE"})
 
 
-def test_INCOMPLETE_is_adjudicated():
-    """The fourth tier in the same position (#599), found by the derivation
-    rather than by being remembered."""
-    assert _violations("INCOMPLETE") == 1
+def test_a_word_registered_nowhere_is_refused_not_adjudicated():
+    """#634's fail-SAFE direction, strengthened.
 
-
-def test_a_tier_registered_NOWHERE_is_still_adjudicated():
-    """LOAD-BEARING, and the only test here that distinguishes a derivation
-    from a longer list. A word invented today is in no set on either side; it
-    must still be adjudicated, because the failure this issue records is a word
-    added on one side and unknown on the other.
-
-    The fail-SAFE direction matters too: an unregistered word is treated as a
-    DONE-CLAIM (checked), never as excused (waved through)."""
-    assert _violations("TIER-INVENTED-TODAY") == 1
-    assert T.is_done_claim("TIER-INVENTED-TODAY")
-
-
-def test_the_tiers_that_already_worked_still_do():
-    """The accept case — this must not be a rewrite that moves the behaviour."""
-    assert _violations("PASS") == 1
-    assert _violations("VACUOUS-PASS") == 1
-
-
-def test_an_EXCUSED_word_is_still_not_a_done_claim():
-    """The other half of the derivation. If excusal broke, every waived and
-    condition-skipped step in every flow would start reporting violations."""
-    assert _violations("WAIVED") == 0
-    assert _violations("SKIPPED-CONDITION") == 0
-    assert _violations("DEFERRED-BY-UPSTREAM") == 0
-
-
-def test_a_FAILING_word_is_not_a_done_claim():
-    assert _violations("FAIL") == 0
-    assert _violations("MISSING") == 0
-
-
-# ── the classification itself ──────────────────────────────────────────────
-def test_the_two_spellings_are_one_word():
-    """The producer writes `VACUOUS_PASS`; reports and the consumer say
-    `VACUOUS-PASS`. A classifier that saw two words would answer differently
-    about the same step."""
-    assert T.normalize("VACUOUS_PASS") == T.normalize("VACUOUS-PASS")
-    assert _violations("VACUOUS_PASS") == _violations("VACUOUS-PASS") == 1
-
-
-def test_a_qualified_done_is_not_a_full_pass():
-    """The degree distinction the guard needs: a full PASS satisfies a
-    predecessor outright; every other done-claim only does so when the
-    predecessor's job was not to certify something."""
-    assert T.is_full_pass("PASS")
-    for w in ("VACUOUS-PASS", "STRUCTURE-ONLY", "INCOMPLETE", "NEW-TIER"):
-        assert T.is_qualified_done(w), w
-        assert not T.is_full_pass(w), w
-
-
-def test_an_empty_status_is_not_a_done_claim():
-    """`""`/None reach here from a malformed report. Treating an absent word as
-    a done-claim would make an unparseable step assert it finished."""
-    for bad in (None, "", "   "):
-        assert not T.is_done_claim(bad), repr(bad)
-
-
-# ── the anti-drift device ──────────────────────────────────────────────────
-def test_the_producers_vocabulary_is_pinned():
-    """WHY THIS TEST EXISTS. The derivation makes an unregistered word land on
-    the safe side, but "safe" is not "classified" — a new word that ought to be
-    EXCUSED would start blocking runs. So the producer's vocabulary is read out
-    of its own source and pinned: adding a word there fails this test, and a
-    human decides which set it joins instead of finding out from a verdict.
+    Its rule was "an unregistered word IS a done-claim, which is the fail-safe
+    side". The fail-safe side is now earlier: the word never becomes a row.
     """
-    src = pathlib.Path(F.__file__).read_text(encoding="utf-8")
-    found = {T.normalize(m) for m in
-             re.findall(r'\.status = "([A-Z][A-Z_-]+)"', src)}
-    # RB2-03 (#2063) — THE PIN WAS BLIND TO ONE PRODUCER. The P0 umbrella's
-    # word reaches the step as `status=_p0_umbrella_status(...)`, a keyword
-    # argument, so none of its literals ever matched the `.status = "..."`
-    # pattern above; `INCOMPLETE` only appeared in `found` because an unrelated
-    # site happens to assign it literally. A word this function can return and
-    # no other site assigns would have escaped the pin entirely — which is the
-    # exact escape this test exists to close. Read that function's own returns.
-    import inspect
-    found |= {T.normalize(m) for m in re.findall(
-        r'return "([A-Z][A-Z_-]+)"', inspect.getsource(F._p0_umbrella_status))}
-    assert found == T.PRODUCER_STATUSES, (
-        "flow_compliance_check's verdict vocabulary changed. Add the new word "
-        "to EXCUSED or NON_GREEN in verdict.py, or confirm it is a "
-        "done-claim, then update PRODUCER_STATUSES.\n"
-        f"  in the producer, not pinned: {sorted(found - T.PRODUCER_STATUSES)}\n"
-        f"  pinned, not in the producer: {sorted(T.PRODUCER_STATUSES - found)}")
+    for pred in (T.is_done_claim, T.is_excused, T.is_non_green,
+                 T.is_full_pass, T.is_qualified_done,
+                 T.says_nothing_was_measured):
+        with pytest.raises(T.UnknownVerdictWord):
+            pred("A-TIER-INVENTED-TOMORROW")
 
 
-def test_every_pinned_word_lands_in_exactly_one_place():
-    """No word may be both excused and failing, and every one must be
-    classifiable — the property the guard's `_REAL_DONE` quietly lacked."""
-    for w in T.PRODUCER_STATUSES:
-        n = sum((T.is_excused(w), T.is_non_green(w), T.is_done_claim(w)))
-        assert n == 1, (w, T.is_excused(w), T.is_non_green(w),
-                        T.is_done_claim(w))
+def test_the_two_negative_sets_still_partition_the_vocabulary():
+    """EXCUSED and NON_GREEN are disjoint, and what is in neither is a
+    done-claim — #634's derivation, asserted over the five it now covers."""
+    assert not (T.EXCUSED & T.NON_GREEN)
+    derived = T.PRODUCER_STATUSES - T.EXCUSED - T.NON_GREEN
+    assert derived == {w for w in T.PRODUCER_STATUSES if T.is_done_claim(w)}
+    assert derived == {"PASS", "PASS_WITH_WAIVERS"}
 
 
-def test_both_sides_read_the_same_table():
-    """The single-source claim, asserted rather than described."""
-    assert F._T is T
-    assert G._T is T
-    assert G._NOT_APPLICABLE is T.EXCUSED
-    assert G._REAL_DONE == {T.FULL_PASS}
+# ── the classifications, each in both directions ─────────────────────────
+
+@pytest.mark.parametrize("word,excused,non_green,done,full", [
+    ("PASS",              False, False, True,  True),
+    ("PASS_WITH_WAIVERS", False, False, True,  False),
+    ("FAIL",              False, True,  False, False),
+    ("NOT_MEASURED",      False, True,  False, False),
+    ("NOT_APPLICABLE",    True,  False, False, False),
+])
+def test_each_word_is_classified_one_way(word, excused, non_green, done, full):
+    assert T.is_excused(word) is excused
+    assert T.is_non_green(word) is non_green
+    assert T.is_done_claim(word) is done
+    assert T.is_full_pass(word) is full
 
 
-def test_the_excused_set_still_holds_exactly_what_it_held_before():
-    """`is T.EXCUSED` proves the two sides share an object, NOT that the object
-    kept its contents — a rewrite that silently dropped a word would satisfy
-    the identity check and start reporting violations on every waived step in
-    every flow. So the set is pinned to the literal contents the consumer
-    carried before the move."""
-    assert T.EXCUSED == {"SKIPPED-CONDITION", "SKIPPED", "WAIVED",
-                         "WAIVED-DEFERRED", "DEFERRED-BY-UPSTREAM",
-                         "DEFERRED",
-                         # 2026-08-25. Adding a word HERE adds an EXCUSE — it is
-                         # subtracted from total_required — so this pin is meant
-                         # to make that an explicit, reviewed edit and not a
-                         # quiet one. Recording why this one is legitimate:
-                         #
-                         # A run may declare, via --entry-step and BEFORE it
-                         # dispatches anything, that it enters the flow partway
-                         # through: a debug task arrives with RTL already
-                         # written and already wrong, and re-deriving documents
-                         # it was never given is ceremony, not verification.
-                         # Without a word for that, the upstream steps report
-                         # MISSING and the report is indistinguishable from a
-                         # Phase 1 that ran and broke.
-                         #
-                         # It is NOT a blanket skip. flow_compliance_check
-                         # grants it only when the step is upstream of the
-                         # DECLARED entry AND every one of its outputs that an
-                         # in-scope step actually reads is present on disk, and
-                         # never for a hard sign-off artefact. So it means "these
-                         # were supplied rather than produced here", never "we
-                         # skipped it and the artefacts are gone".
-                         "OUT-OF-SCOPE-BY-ENTRY"}
+def test_a_step_that_measured_nothing_is_no_longer_a_done_claim():
+    """THE ANSWER THAT MOVED. Under `_flow_verdict_tiers` this was True for
+    four words, which is how a disclosure came to cost more than silence."""
+    assert not T.is_done_claim("NOT_MEASURED")
+    assert T.says_nothing_was_measured("NOT_MEASURED")
+    # And the direction that made #634 necessary is now impossible: a step
+    # that DISCLOSES a library default is PASS_WITH_WAIVERS carrying
+    # Disclosure.STRUCTURE_ONLY, which is a done-claim, so disclosing costs
+    # nothing against a silent pass.
+    assert T.is_done_claim("PASS_WITH_WAIVERS")
+    assert T.is_qualified_done("PASS_WITH_WAIVERS")
 
 
-def test_the_done_claim_set_of_a_report_is_derived():
-    got = T.done_claims_in(["PASS", "WAIVED", "STRUCTURE-ONLY", "FAIL",
-                            "INCOMPLETE", "SKIPPED-CONDITION", "WHATEVER"])
-    assert got == {"PASS", "STRUCTURE-ONLY", "INCOMPLETE", "WHATEVER"}
+def test_only_the_full_pass_satisfies_a_predecessor_outright():
+    assert T.FULL_PASS == "PASS"
+    assert T.done_claims_in(
+        ["PASS", "PASS_WITH_WAIVERS", "NOT_MEASURED", "NOT_APPLICABLE"]) == {
+        "PASS", "PASS_WITH_WAIVERS"}
 
 
-# ── the producer's own second enumeration, one tier behind ─────────────────
-def test_the_missing_output_demotion_now_covers_every_done_claim():
-    """The same defect one layer over: the demotion that turns a done-claim
-    with an absent declared output into MISSING enumerated three tiers and had
-    already fallen behind `INCOMPLETE`, so such a step kept its tier.
+# ── the scope predicates that moved here with the module ─────────────────
 
-    Read from the source because the demotion sits mid-function in a
-    thousand-line evaluator with no seam to drive; an enumeration reappearing
-    there is what this asserts against."""
-    src = pathlib.Path(F.__file__).read_text(encoding="utf-8")
-    body = "\n".join(l for l in src.splitlines()
-                     if not l.lstrip().startswith("#"))
-    assert "_T.is_done_claim(result.status) and missing_entries" in body
-    assert 'result.status in ("PASS", "NOT_MEASURED", "PASS_WITH_WAIVERS")' \
-        not in body
+def test_only_a_declared_inapplicable_step_is_out_of_the_verdict_scope():
+    assert not T.scoped_into_verdict({"status": "NOT_APPLICABLE"})
+    for w in ("PASS", "PASS_WITH_WAIVERS", "FAIL", "NOT_MEASURED"):
+        assert T.scoped_into_verdict({"status": w}), w
 
 
-def test_the_total_required_subtraction_is_derived_not_enumerated():
-    src = pathlib.Path(F.__file__).read_text(encoding="utf-8")
-    body = "\n".join(l for l in src.splitlines()
-                     if not l.lstrip().startswith("#"))
-    seg = body[body.index("total_required = "):]
-    seg = seg[:seg.index("\n\n")]
-    assert "_T.is_excused" in seg, seg
-    assert 'counts["WAIVED"]' not in seg, seg
+def test_the_analog_track_is_read_from_the_steps_own_stage():
+    assert T.in_analog_track({"stage": "stage_analog"})
+    assert not T.in_analog_track({"stage": "stage_mixed_signal"})
 
-def test_pass_voided_by_dependency_is_not_a_done_claim():
-    """vibe-ic#695. #671 introduced this word precisely to say "this is NOT a
-    pass", and left it unregistered — so the subtraction rule read it as a
-    done-claim, which is the exact inversion this module exists to prevent.
 
-    The anti-drift test above caught it the moment the word appeared. This one
-    pins the ANSWER, so registering it in the wrong set later is also caught:
-    putting it in EXCUSED would make `total_required` subtract it, and a step
-    voided by a violated dependency is still a step that was required and did
-    not deliver."""
-    w = "PASS_VOIDED_BY_DEPENDENCY"
-    assert T.normalize(w) in T.PRODUCER_STATUSES
-    assert T.is_done_claim(w) is False
-    assert T.normalize(w) in T.NON_GREEN
-    assert T.normalize(w) not in T.EXCUSED
+# ── the anti-drift device itself ─────────────────────────────────────────
+
+def test_the_module_carries_no_alias_map():
+    """#634's successor must not acquire the one thing R-0915-85 forbids."""
+    src = inspect.getsource(T)
+    # CODE, not prose: the module's DESIGN section names `_LEGACY_STATUS_MAP`
+    # in the sentence that forbids it, so the scan strips comments and
+    # docstrings first — the same discipline `_NOT_PROSE` gates use.
+    code = "\n".join(l.split("#")[0] for l in src.splitlines())
+    for banned in ("_LEGACY_STATUS_MAP =", "def normalize(",
+                   '"SKIPPED-CONDITION":', '"INCOMPLETE":',
+                   '"SKIP":', '"WAIVED":'):
+        assert banned not in code, banned
+
+
+def test_the_ratchet_is_what_replaces_the_producer_status_pin():
+    """#634 pinned `PRODUCER_STATUSES` against the producer's own
+    `result.status = "..."` sites, so a word added there without a home failed
+    a test. That job is now the tree-wide ratchet's, which is stronger: it
+    scans EVERY producer, not one file."""
+    ratchet = (plugin_path() / "programs"
+               / "step_verdict_vocabulary_ratchet.py")
+    assert ratchet.is_file()
+    src = ratchet.read_text(encoding="utf-8")
+    assert "ALLOWED = frozenset(v.value for v in _V.Verdict)" in src

@@ -560,9 +560,9 @@ def test_arm_e_an_absent_capability_is_named_and_writes_nothing(
     project = _project(tmp_path, LEGAL_NARROW)
     rc, doc = _run(monkeypatch, project, stage)
     assert rc == A5E.RC_ENV_UNAVAILABLE
-    assert doc["result"] == "ENV_UNAVAILABLE"
+    assert doc["result"] == "NOT_MEASURED"
     assert doc["tool"] == tool
-    assert "ENV_UNAVAILABLE" in doc["reason"]
+    assert "NOT_MEASURED" in doc["reason"]
     assert needle in doc["reason"], doc["reason"]
     assert not (project / "phase3" / "analog" / "blk" / "layout.mag").exists()
 
@@ -744,14 +744,14 @@ def test_an_unreachable_tool_is_reported_by_name_and_writes_no_layout(
     import analog_one_shot_runner as AOSR
     proj = _runner_project(tmp_path)
     said = json.dumps(
-        {"result": "ENV_UNAVAILABLE", "tool": "magic",
+        {"result": "NOT_MEASURED", "tool": "magic",
          "reason": "ENV_UNAVAILABLE: `magic` is not on PATH in vibeic-eda."})
     ran = _Ran(layout=proj / "phase3" / "analog" / "b" / "layout.mag",
                emit_rc=2, emit_out=said)
     monkeypatch.setattr(AOSR, "_pr", ran)
     res = AOSR.step_for_block(proj, {"name": "b"}, "A5_layout", None)
     assert res.status == "PASS_WITH_WAIVERS", res
-    assert "ENV_UNAVAILABLE" in res.detail and "magic" in res.detail
+    assert "NOT_MEASURED" in res.detail and "magic" in res.detail
     assert not (proj / "phase3" / "analog" / "b" / "layout.mag").exists()
 
 

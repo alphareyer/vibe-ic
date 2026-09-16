@@ -248,7 +248,7 @@ def test_phase1_a_refusal_is_never_green_end_to_end(tmp_path):
     import phase1_one_shot_runner as P1
     row = P1.StepResult("phase1_ingest_render", SP.REFUSAL_STATUS, 0.0, "refused")
     assert P1._aggregate_verdict([row]) == "FAIL"
-    ok = P1.StepResult("phase1_human_docs", "WAIVED", 0.0, "no MD")
+    ok = P1.StepResult("phase1_human_docs", "PASS_WITH_WAIVERS", 0.0, "no MD")
     assert P1._aggregate_verdict([ok]) == "PASS_WITH_WAIVERS"   # reverse case
     assert P1._aggregate_verdict([ok, row]) == "FAIL"
 

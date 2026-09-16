@@ -155,7 +155,7 @@ def test_coverage_skip_on_oracle_waived_zero_vectors(tmp_path):
     _with_rtl(tmp_path)
     _oracle_log(tmp_path, "ORACLE_TB_DONE pass=0/0\n")
     P.step_emit_phase2_manifests(
-        tmp_path, [_oracle_step("WAIVED", 0, 0, False)])
+    assert _cov(tmp_path)["verdict"] == "SKIPPED-CONDITION"
     assert _cov(tmp_path)["verdict"] == "SKIPPED-CONDITION"
 
 
@@ -324,7 +324,7 @@ def test_e2e_oracle_pass_lifts_step4_out_of_skipped_condition(tmp_path):
     line = _step4_line(out)
     block = _step4_block(out)
     assert line, f"Step 4 not in output:\n{out}"
-    assert "SKIPPED-CONDITION" not in line, f"Step 4 back to #460's bug:\n{line}"
+    assert "NOT_APPLICABLE" not in line, f"Step 4 back to #460's bug:\n{line}"
     assert "[PASS" not in line, (
         f"an oracle PASS with no coverage measurement is not a Step-4 PASS:"
         f"\n{line}")
@@ -423,7 +423,7 @@ def test_no_rtl_no_log_still_skip(tmp_path):
     step = P.StepResult(name="reference_tb", status="SKIP",
                         duration_s=0.1, detail="nothing", extras={})
     P.step_emit_phase2_manifests(tmp_path, [step])
-    assert _cov(tmp_path)["verdict"] == "SKIPPED-CONDITION"
+    assert _cov(tmp_path)["verdict"] == "NOT_APPLICABLE"
 
 
 def test_source_has_no_canned_scenarios():

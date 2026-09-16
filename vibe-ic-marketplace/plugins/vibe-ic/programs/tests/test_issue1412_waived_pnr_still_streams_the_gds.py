@@ -46,20 +46,20 @@ def test_passing_pnr_continues_the_chain():
 def test_waived_pnr_with_completed_signoff_writes_continues_the_chain():
     """The #1412 shape. This is the case that was silently dropping the GDS."""
     assert R._pnr_chain_continues(
-        _row("WAIVED", pnr_signoff_writes_complete=True,
+        _row("PASS_WITH_WAIVERS", pnr_signoff_writes_complete=True,
              route_residual_waiver={"ticket": "vibe-ic#1412"})) is True
 
 
 def test_waived_pnr_without_completed_writes_does_NOT_continue():
     """A PnR that died mid-tcl must still stop the chain: WAIVED is not a
     password, the completed writes are."""
-    assert R._pnr_chain_continues(_row("WAIVED")) is False
+    assert R._pnr_chain_continues(_row("PASS_WITH_WAIVERS")) is False
     assert R._pnr_chain_continues(
-        _row("WAIVED", pnr_signoff_writes_complete=False)) is False
+        _row("PASS_WITH_WAIVERS", pnr_signoff_writes_complete=False)) is False
 
 
 def test_failed_blocked_and_absent_pnr_do_not_continue():
-    for st in ("FAIL", "BLOCKED", "SKIP", "ENV_UNAVAILABLE"):
+    for st in ("FAIL", "NOT_MEASURED", "SKIP", "NOT_MEASURED"):
         assert R._pnr_chain_continues(_row(st)) is False, st
     # even with the flag: a FAILed PnR is not admitted by carrying the key
     assert R._pnr_chain_continues(

@@ -63,8 +63,8 @@ _GATE = "eda_log_check"
 #: collection abort scrapes as zero failures, which is the weakest possible
 #: negative control. Literals here, membership asserted below.
 _SYNTH_LOG_REL = "phase2/stage2/synth/yosys.log"
-_NOT_ATTEMPTED = ("BLOCKED", "SKIP", "SKIPPED-BY-ENTRY", "SKIPPED-BY-EXIT",
-                  "SKIPPED-CONDITION")
+_NOT_ATTEMPTED = ("NOT_MEASURED", "SKIP", "NOT_APPLICABLE", "NOT_APPLICABLE",
+                  "NOT_APPLICABLE")
 
 _REAL_STAT_LOG = (
     "\n=== chip_top ===\n"

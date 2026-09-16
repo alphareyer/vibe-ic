@@ -54,10 +54,10 @@ def test_deferred_parent_converts_dependent_missing():
     # is `analog_a6_block_pv_check . --json ...` and declares no input at all,
     # so nothing in the flow said A6 reads A5's layout. It softened on ORDER.
     steps = _steps()
-    parent = _res(9, "WAIVED", reasons=[
+    parent = _res(9, "PASS_WITH_WAIVERS", reasons=[
         "ENV_UNAVAILABLE waiver applied (...) "
         "[ticket=pdk-substitution-v0.2.103, review_required=True]"])
-    child = _res(14, "MISSING",
+    child = _res(14, "FAIL",
                  reasons=["no required_outputs found"])
     results = [parent, child]
     info = FCC._attribute_cascade_verdicts(results, steps, waivers={})
@@ -70,8 +70,8 @@ def test_deferred_parent_converts_dependent_missing():
 
 def test_ticket_prefers_waivers_dict():
     steps = _steps()
-    parent = _res(9, "WAIVED")
-    child = _res(14, "MISSING")
+    parent = _res(9, "PASS_WITH_WAIVERS")
+    child = _res(14, "FAIL")
     FCC._attribute_cascade_verdicts(
         [parent, child], steps,
         waivers={9: {"ticket": "tkt-from-dict"}})
@@ -86,9 +86,9 @@ def test_deferral_is_transitive_over_the_declared_relation():
     # edge-by-edge, because this flow routinely orders a consumer several hops
     # behind its producer.
     steps = _steps()
-    d1 = _res("D1", "WAIVED", reasons=["[ticket=t1]"])
-    s1 = _res(1, "MISSING")
-    s2 = _res(2, "MISSING")
+    d1 = _res("D1", "PASS_WITH_WAIVERS", reasons=["[ticket=t1]"])
+    s1 = _res(1, "FAIL")
+    s2 = _res(2, "FAIL")
     FCC._attribute_cascade_verdicts([d1, s1, s2], steps, waivers={})
     assert s2.status == "NOT_MEASURED", s2.status
     assert "deferred-by-upstream(D1" in s2.cascade_note
@@ -107,10 +107,10 @@ def test_a_waived_ancestor_with_no_declared_relation_does_not_soften():
     The ordering fact is still recorded — attribution WITHOUT softening.
     """
     steps = _steps()
-    lec = _res(13, "WAIVED", reasons=["[ticket=t1]"])
+    lec = _res(13, "PASS_WITH_WAIVERS", reasons=["[ticket=t1]"])
     # M-track steps are excluded on purpose: #600 already stops them at M2's
     # declared `known_gap`, which is a different (and correct) attribution.
-    tail = [_res(sid, "MISSING") for sid in (23, 30, 38, 41, 44)]
+    tail = [_res(sid, "FAIL") for sid in (23, 30, 38, 41, 44)]
     info = FCC._attribute_cascade_verdicts([lec] + tail, steps, waivers={})
     assert info["deferred_by_upstream"] == [], info["deferred_by_upstream"]
     for r in tail:
@@ -125,8 +125,8 @@ def test_unrelated_missing_stays_missing():
     # 對照 (issue 驗收): a MISSING step with NO deferred ancestor keeps
     # its bare verdict — no false attribution.
     steps = _steps()
-    a5 = _res("A5", "WAIVED", reasons=["[ticket=t1]"])
-    s7 = _res(7, "MISSING")  # main track; no deferred ancestor
+    a5 = _res("A5", "PASS_WITH_WAIVERS", reasons=["[ticket=t1]"])
+    s7 = _res(7, "FAIL")  # main track; no deferred ancestor
     FCC._attribute_cascade_verdicts([a5, s7], steps, waivers={})
     assert s7.status == "FAIL"
     assert s7.cascade_note == ""
@@ -136,7 +136,7 @@ def test_fail_never_converts_to_deferred():
     # real counter-evidence survives: a FAIL downstream of a deferred
     # parent stays FAIL.
     steps = _steps()
-    a5 = _res("A5", "WAIVED", reasons=["[ticket=t1]"])
+    a5 = _res("A5", "PASS_WITH_WAIVERS", reasons=["[ticket=t1]"])
     a6 = _res("A6", "FAIL", reasons=["gate exit 1"])
     FCC._attribute_cascade_verdicts([a5, a6], steps, waivers={})
     assert a6.status == "FAIL"
@@ -157,7 +157,7 @@ def test_post_fail_missing_is_annotated_blocked():
     ids = _main_track_ids(steps)
     results = [_res(5, "FAIL"), _res(6, "FAIL")]
     downstream = [i for i in ids if i > 6][:5]
-    results += [_res(i, "MISSING") for i in downstream]
+    results += [_res(i, "FAIL") for i in downstream]
     info = FCC._attribute_cascade_verdicts(results, steps, waivers={})
     blocked = [r for r in results if r.cascade_note]
     assert len(blocked) == len(downstream)
@@ -169,7 +169,7 @@ def test_post_fail_missing_is_annotated_blocked():
 
 def test_missing_before_first_fail_stays_bare():
     steps = _steps()
-    results = [_res(3, "MISSING"), _res(5, "FAIL"), _res(7, "MISSING")]
+    results = [_res(3, "FAIL"), _res(5, "FAIL"), _res(7, "FAIL")]
     FCC._attribute_cascade_verdicts(results, steps, waivers={})
     assert results[0].cascade_note == ""      # before the cut point
     assert results[2].cascade_note == "blocked-by-upstream(5)"
@@ -179,7 +179,7 @@ def test_chains_are_isolated():
     # a FAIL in the main chain must NOT annotate analog-chain MISSING.
     steps = _steps()
     main_fail = _res(5, "FAIL")
-    analog_missing = _res("A6", "MISSING")
+    analog_missing = _res("A6", "FAIL")
     FCC._attribute_cascade_verdicts([main_fail, analog_missing],
                                     steps, waivers={})
     assert analog_missing.cascade_note == ""
@@ -188,7 +188,7 @@ def test_chains_are_isolated():
 
 def test_no_fail_no_annotation():
     steps = _steps()
-    results = [_res(5, "PASS"), _res(7, "MISSING")]
+    results = [_res(5, "PASS"), _res(7, "FAIL")]
     info = FCC._attribute_cascade_verdicts(results, steps, waivers={})
     assert results[1].cascade_note == ""
     assert info["blocked_by_upstream"] == {}
@@ -216,7 +216,7 @@ def test_declared_dependency_relation_is_small():
     for waived in ids:
         results = [FCC.StepResult(id=i, name="", stage="",
                                   status=("PASS_WITH_WAIVERS" if i == waived
-                                          else "MISSING"))
+                                          else "FAIL"))
                    for i in ids]
         info = FCC._attribute_cascade_verdicts(
             results, steps, {waived: {"ticket": "T"}})
