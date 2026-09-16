@@ -207,7 +207,7 @@ def test_the_sim_exit_code_is_kept_not_discarded():
     """It used to be thrown away, and that is why a killed case and a case that
     merely printed nothing were the same finding."""
     src = (PROG / "sdf_gate_sim.py").read_text()
-    i = src.index("sr = _docker(container, rr, timeout=900)")
+    i = src.index("sr = _docker(container, rr, budget_s=900)")
     # bounded by the END OF THE LOOP, not a byte count and not the first
     # `rows.append` (which belongs to the early `except` branch above).
     window = src[i:src.index("\n    meta = {", i)]
@@ -215,45 +215,96 @@ def test_the_sim_exit_code_is_kept_not_discarded():
     assert 'row["sim_rc"] = _rc' in window
 
 
-def test_a_truncated_transcript_is_named_as_a_killed_process():
+def test_a_truncated_transcript_is_named_as_read_while_still_being_written():
     """BEHAVIOURAL, not a text scan: an earlier version of this test asserted
     the source contained the words, and it survived setting `_truncated = False`
-    — a dead guard. It now calls the namer."""
+    — a dead guard. It now calls the namer.
+
+    R-0915-71 CORRECTED WHAT THIS SHAPE MEANS. It used to be named "a killed
+    process". Measured on run15, both cases carrying it FINISHED AND PASSED ~100
+    minutes after step 29 read them: what stopped was the reader, not the
+    simulator."""
     d = SG.name_unverdicted_case(rc=0, size=14241792, truncated=True)
-    assert "STOPPED mid-write" in d
+    assert "TRUNCATED" in d
     assert "4096-byte boundary" in d          # 14241792 == 3477 * 4096
-    assert "killed process" in d
+    assert "still being written" in d
+    assert "$finish long after the reader had moved on" in d
+    # the claim that was measured to be wrong must not come back
+    assert "killed process" not in d
 
 
-def test_an_unaligned_truncation_is_still_named_killed_without_the_boundary():
+def test_an_unaligned_truncation_is_still_named_without_the_boundary():
     d = SG.name_unverdicted_case(rc=0, size=14037595, truncated=True)
-    assert "STOPPED mid-write" in d
+    assert "TRUNCATED" in d
     assert "4096-byte boundary" not in d
 
-def test_a_nonzero_rc_without_a_verdict_is_distinguished_from_silence():
-    """Three outcomes, three sentences — behavioural."""
-    killed  = SG.name_unverdicted_case(rc=137, size=14241792, truncated=True)
+
+def test_a_reaped_case_is_named_as_a_reap_and_not_as_a_result():
+    """R-0915-71. A stall reap has its own sentence: the supervisor stopped, and
+    a reap is not a testbench result."""
+    import _container_exec as _ce
+    d = SG.name_unverdicted_case(rc=_ce.STALLED_RC, size=14241792,
+                                 truncated=True)
+    assert "REAPED" in d and "no forward progress in the container" in d
+    assert "a reap is not a testbench result" in d
+    # and it is a DIFFERENT sentence from a plain truncation
+    assert d != SG.name_unverdicted_case(rc=0, size=14241792, truncated=True)
+
+def test_four_outcomes_get_four_sentences():
+    """Behavioural, and the count is the point: a reap, a truncation, a non-zero
+    exit and a silent testbench are four different facts."""
+    import _container_exec as _ce
+    reaped  = SG.name_unverdicted_case(rc=_ce.STALLED_RC, size=14241792,
+                                       truncated=True)
+    trunc   = SG.name_unverdicted_case(rc=137, size=14241792, truncated=True)
     errored = SG.name_unverdicted_case(rc=1,   size=500,      truncated=False)
     silent  = SG.name_unverdicted_case(rc=0,   size=500,      truncated=False)
-    assert "STOPPED mid-write" in killed
-    assert "exited rc=1" in errored and "STOPPED" not in errored
+    assert "REAPED" in reaped
+    assert "TRUNCATED" in trunc and "REAPED" not in trunc
+    assert "exited rc=1" in errored and "TRUNCATED" not in errored
     assert "no verdict line at gate level" in silent and "rc=" not in silent
-    assert len({killed, errored, silent}) == 3
+    assert len({reaped, trunc, errored, silent}) == 4
 
 
-def test_none_of_this_turns_a_killed_case_into_a_pass():
-    """Naming WHY it did not finish must never change the verdict."""
-    for rc, size, trunc in ((137, 14241792, True), (1, 500, False),
+def test_naming_an_unverdicted_case_never_makes_it_a_pass():
+    """Naming WHY it did not finish must never change the verdict.
+
+    THIS GUARD WAS DEAD UNTIL R-0915-71. Two functions in this file carried the
+    name `test_none_of_this_turns_a_killed_case_into_a_pass`; the second
+    (a source scan) shadowed the first (this loop), so pytest collected one test
+    and the behavioural one never ran. Renaming them is what made it run — and
+    it immediately failed, on a substring screen (`"PASS" not in d.upper()`) so
+    crude that the SHIPPED sentence "a missing marker is not a pass" tripped it.
+    A screen that a correct output fails is not a guard, so it is now keyed on
+    what a false pass would actually look like: the word PASSED, or the L10
+    marker itself, appearing in the reason a case has NO verdict."""
+    import _container_exec as _ce
+    for rc, size, trunc in ((_ce.STALLED_RC, 14241792, True),
+                            (137, 14241792, True), (1, 500, False),
                             (0, 500, False), (None, 0, False)):
         d = SG.name_unverdicted_case(rc=rc, size=size, truncated=trunc)
-        assert "PASS" not in d.upper().replace("PASS.", "")
+        assert "PASSED" not in d.upper()
+        assert "L10_TB_PASS" not in d
         assert d.strip() != ""
+
+
+def test_this_file_declares_no_test_name_twice():
+    """The shadowing above, as a standing guard: a duplicate `def test_...` in
+    one module silently drops every earlier copy, and a dropped test reads as a
+    green line."""
+    import ast
+    import collections
+    tree = ast.parse(Path(__file__).read_text())
+    names = [n.name for n in tree.body
+             if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")]
+    dupes = [n for n, c in collections.Counter(names).items() if c > 1]
+    assert not dupes, dupes
 
 def test_none_of_this_turns_a_killed_case_into_a_pass():
     """The whole point of the guard: naming WHY it did not finish must not
     change the verdict, which stays absent."""
     src = (PROG / "sdf_gate_sim.py").read_text()
-    i = src.index("sr = _docker(container, rr, timeout=900)")
+    i = src.index("sr = _docker(container, rr, budget_s=900)")
     # bounded by the END OF THE LOOP, not a byte count and not the first
     # `rows.append` (which belongs to the early `except` branch above).
     window = src[i:src.index("\n    meta = {", i)]

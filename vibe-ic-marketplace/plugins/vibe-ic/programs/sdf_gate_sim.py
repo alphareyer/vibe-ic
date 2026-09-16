@@ -483,7 +483,7 @@ def _read_container_files(container: str, paths: List[str]) -> str:
     chunks: List[str] = []
     for p in paths:
         try:
-            r = _docker(container, f"cat {p}", timeout=120)
+            r = _docker(container, f"cat {p}", budget_s=120)
         except Exception:
             return ""
         if r.returncode != 0 or not r.stdout:
@@ -520,9 +520,9 @@ def resolve_cell_models(project: Path, used_cells: set,
     paths = _pcm.container_model_paths(pdk_id)
     if not paths:
         return None
-    def _run_argv(argv, timeout):
+    def _run_argv(argv, budget_s):
         quoted = " ".join(shlex.quote(str(x)) for x in argv)
-        r = _docker(container, quoted, timeout=timeout)
+        r = _docker(container, quoted, budget_s=budget_s)
         clean = "\n".join(line for line in (r.stdout or "").splitlines()
                             if not line.startswith("[INFO]"))
         return r.returncode, clean, r.stderr or ""
@@ -536,7 +536,7 @@ def resolve_cell_models(project: Path, used_cells: set,
     for model_path in paths:
         companion = model_path.rsplit("/", 1)[0] + "/primitives.v"
         probe = _docker(container, f"test -s {shlex.quote(companion)}",
-                        timeout=60)
+                        budget_s=60)
         clean_probe = "\n".join(
             line for line in (probe.stdout or "").splitlines()
             if not line.startswith("[INFO]"))
@@ -662,7 +662,7 @@ def inject_sdf_annotation(tb_text: str, tb_module: str, dut_instance: str,
 
 def _tool_pair_available(container: str) -> Optional[bool]:
     try:
-        r = _docker(container, "command -v iverilog && command -v vvp", timeout=60)
+        r = _docker(container, "command -v iverilog && command -v vvp", budget_s=60)
     except Exception:
         return None
     return r.returncode == 0 and len((r.stdout or "").splitlines()) >= 2
@@ -789,23 +789,51 @@ def find_l10_executed_cases(project: Path, top: str) -> Optional[Dict[str, objec
 def name_unverdicted_case(rc, size: int, truncated: bool) -> str:
     """Say WHY a gate-level case produced no verdict. PURE.
 
-    Three different things used to share one sentence. MEASURED on run14: nine
+    Four different things used to share one sentence. MEASURED on run14: nine
     cases ended `$finish called at ...` while the two longest ended MID-LINE at
     sizes that are EXACT multiples of 4096 (14241792 = 3477 x 4096, 14893056 =
-    3636 x 4096) — every passing transcript was unaligned. A file left on a page
-    boundary with a half-written line is a writer that was KILLED, not a
-    testbench that stayed silent, and all eleven carried the same 29532
-    `SDF ERROR` lines so the SDF was never the discriminator.
+    3636 x 4096) — every passing transcript was unaligned, and all eleven
+    carried the same 29532 `SDF ERROR` lines, so the SDF was never the
+    discriminator.
+
+    R-0915-71 CORRECTS WHAT THAT SHAPE MEANS, and the correction is measured,
+    not reasoned. The first version of this function said a page-aligned
+    half-written transcript is "a killed process". On run15 the same two cases
+    showed the same shape — and both of them went on to FINISH AND PASS, ~100
+    minutes later, while step 29 was reading the half-written file:
+
+        long_message_1m_bytes_of_a        sim wall 5980 s, runner's slot 197 s
+        random_..._vs_nist_go             sim wall 5725 s, runner's slot 197 s
+        (nine other cases: 107..137 s, slot 109..138 s)
+
+    What was killed was the `docker exec` CLIENT, by a host-side supervisor that
+    could see no progress because every byte the simulator writes goes to a file
+    INSIDE the container. The SIMULATOR was never stopped; it was ORPHANED. So a
+    truncated transcript means THE READER STOPPED READING, which is a different
+    fact from a killed writer and points at a different fix — see `_docker`.
 
     None of these is a pass. The verdict stays absent in every branch; what
     changes is whether a reader can act on it."""
+    if rc == _ce.STALLED_RC:
+        return (f"the supervisor REAPED this case as stalled (rc={rc}) after "
+                f"seeing no forward progress in the container; the transcript "
+                f"is {size} B"
+                + (", and it does not end in a newline, so the simulator was "
+                   "still writing when the reap landed"
+                   if truncated else "")
+                + " — no verdict was reached, and a reap is not a testbench "
+                  "result")
     if truncated:
-        return (f"the simulator was STOPPED mid-write: rc={rc}, transcript "
-                f"{size} B ending without a newline"
+        return (f"the transcript is TRUNCATED: rc={rc}, {size} B ending "
+                f"without a newline"
                 + (" and on an exact 4096-byte boundary"
                    if size and size % 4096 == 0 else "")
-                + " — the run did not reach a verdict, and this is a killed "
-                  "process rather than a silent testbench")
+                + " — it was read while it was still being written, so this "
+                  "case reached no verdict AT THE MOMENT IT WAS READ. That is "
+                  "not the same as a simulator that stopped: measured on "
+                  "run15, both cases with this shape ran on to their own "
+                  "$finish long after the reader had moved on. The verdict "
+                  "here is still absent, and absent is not a result")
     if rc not in (0, None):
         return (f"the simulator exited rc={rc} without printing a verdict line")
     return "no verdict line at gate level; a missing marker is not a pass"
@@ -897,7 +925,7 @@ def _run_l10_suite(project: Path, top: str, container: str, sim_dir: Path,
               f"{shlex.quote(str(netlist))} {shlex.quote(stub_path.name)} "
               f"{models.arg} > {shlex.quote(cid)}.compile.log 2>&1; echo RC=$?")
         try:
-            cr = _docker(container, cc, timeout=900)
+            cr = _docker(container, cc, budget_s=900)
         except Exception as exc:
             row.update(verdict=None, marker=None, passed=0, total=0,
                        detail=f"compile invoke failed: {exc}")
@@ -915,7 +943,7 @@ def _run_l10_suite(project: Path, top: str, container: str, sim_dir: Path,
               f"-sdf-info > {shlex.quote(cid)}.stdout.log "
               f"2> {shlex.quote(cid)}.stderr.log; echo RC=$?")
         try:
-            sr = _docker(container, rr, timeout=900)
+            sr = _docker(container, rr, budget_s=900)
         except Exception as exc:
             row.update(verdict=None, marker=None, passed=0, total=0,
                        detail=f"sim invoke failed: {exc}")
@@ -1010,7 +1038,7 @@ def _run_reused_testbench(project: Path, top: str, container: str,
           f"{shlex.quote(str(netlist))} {shlex.quote(stub_path.name)} "
           f"{models.arg} > compile.log 2>&1; echo RC=$?")
     try:
-        cr = _docker(container, cc, timeout=600)
+        cr = _docker(container, cc, budget_s=600)
     except Exception as exc:
         return {"verdict": "ERROR", "reason": f"compile invoke: {exc}"}
     if "RC=0" not in (cr.stdout or ""):
@@ -1025,7 +1053,7 @@ def _run_reused_testbench(project: Path, top: str, container: str,
     rr = (f"cd {shlex.quote(str(sim_dir))} && vvp {shlex.quote(vvp.name)} "
           "-sdf-info > sim_stdout.log 2> sim_stderr.log; echo RC=$?")
     try:
-        run_result = _docker(container, rr, timeout=600)
+        run_result = _docker(container, rr, budget_s=600)
     except Exception as exc:
         return {"verdict": "ERROR", "reason": f"sim invoke: {exc}"}
     sim_stdout_path = sim_dir / "sim_stdout.log"
@@ -1088,10 +1116,64 @@ def _run_reused_testbench(project: Path, top: str, container: str,
 # ---------------------------------------------------------------------------
 
 
-def _docker(container: str, cmd: str, timeout: int = 600):
-    return _pr.run(
-        _ce.docker_exec_argv(container, "bash", "-lc", _TOOL_PATH + cmd),
-        capture_output=True, text=True)
+#: R-0915-71 — THE SUPERVISOR WAS WATCHING THE CLIENT, NOT THE SIMULATOR.
+#:
+#: MEASURED, sha256 x sky130A, lane icsha2 run15 (main 385445351), front door.
+#: Step 29 published
+#:
+#:     VERDICT: NOT_EXECUTED — 2 of 11 case(s) produced no verdict line at gate
+#:     level; a missing marker is not a pass.
+#:
+#: over `long_message_1m_bytes_of_a` and
+#: `random_message_functional_equivalence_vs_nist_go`. BOTH OF THEM PASSED. The
+#: transcripts on disk now end:
+#:
+#:     [TB long_message_1m_bytes_of_a] PASS - 12 oracle check(s), 0 mismatch(es)
+#:     ... $finish called at 33996340000 (1ps)
+#:     [TB random_..._vs_nist_go] PASS - 10008 oracle check(s), 0 mismatch(es)
+#:     ... $finish called at 36734229000 (1ps)
+#:
+#: Timed from the artefacts' own mtimes — `<cid>_gatesim.vvp` built, to the last
+#: byte written to `<cid>.stdout.log`, against the slot the runner actually
+#: allowed before it started the next case:
+#:
+#:     nine cases          sim wall 107..137 s      slot 109..138 s
+#:     long_message        sim wall     5980 s      slot      197 s
+#:     random_message      sim wall     5725 s      slot      197 s
+#:
+#: The two long cases were ABANDONED at 197 s and went on computing for ~100
+#: minutes, to a PASS, orphaned inside the container, while step 29 read their
+#: half-written transcripts and called them unexecuted.
+#:
+#: WHY 197 s. This function ran `vvp ... > <cid>.stdout.log 2> <cid>.stderr.log`
+#: through a bare `_progress_run.run`. Every byte the simulator writes goes to a
+#: FILE INSIDE the command string, so the supervised `docker exec` client emits
+#: nothing for the whole run; the client itself burns no CPU and does no I/O,
+#: because the work is under the container runtime's shim and reachable from no
+#: ppid link it owns. Output flat, cpu flat, io flat — and `_progress_run`
+#: declared a stall and reaped the client. `_progress_run.run`'s own docstring
+#: names this exact shape ("a `stdout=<file>` redirect ... would take the output
+#: away from the progress meter without saying so"), and vibe-ic#2083 measured
+#: the identical thing on a magic LEF extraction: 1.00 CPU-s/s with RSS climbing
+#: 30 MB/s, "on every host-side signal the client exposes, indistinguishable
+#: from a corpse".
+#:
+#: THE FIX IS THE ONE THE REPO ALREADY WROTE FOR #2083, which this call site
+#: never adopted. `_container_exec.run_in_container_supervised` supervises with
+#: `container_tree_probe` — it reads the CONTAINER's work rather than the client
+#: that cannot see it — takes no clock at all, and on a genuine stall reaps by
+#: IDENTITY STAMP inside the container, so a still tool is killed where it lives
+#: and a computing one is never cut. The orphan this defect created is closed by
+#: the same change that stops the false stall.
+#:
+#: `budget_s` REPLACES A PARAMETER THAT BOUND NOTHING. Every call site here said
+#: `timeout=600` or `timeout=900`; the body dropped it on the floor, so the
+#: numbers read like limits and were not. It is now `ceiling_s` — a RECORDED
+#: BUDGET (vibe-ic#2051) whose crossing is announced ONCE and which stops
+#: nothing — and the name says which of the two it is.
+def _docker(container: str, cmd: str, budget_s: float = 600):
+    return _ce.run_in_container_supervised(
+        container, _TOOL_PATH + cmd, ceiling_s=float(budget_s))
 
 
 # sha256×sky130A / #SS-SETUP — DFT test-mode ports are NOT part of the functional
@@ -1309,7 +1391,7 @@ def run(project, top: str = "spm", container: str = DEFAULT_CONTAINER,
           f"-s {tb_name} -o {vvp.name} {tb_path.name} {netlist} "
           f"{stub_path.name} {models.arg} > compile.log 2>&1; echo RC=$?")
     try:
-        cr = _docker(container, cc, timeout=600)
+        cr = _docker(container, cc, budget_s=600)
     except Exception as e:                              # pragma: no cover
         notes.append(f"sdf_gate_sim: compile invocation failed: {e}")
         return {"verdict": "ERROR", "reason": f"compile invoke: {e}"}
@@ -1320,7 +1402,7 @@ def run(project, top: str = "spm", container: str = DEFAULT_CONTAINER,
     rr = (f"cd {sim_dir} && vvp {vvp.name} {runtime_flags} "
           f"> sim_stdout.log 2> sim_stderr.log; echo RC=$?")
     try:
-        _docker(container, rr, timeout=600)
+        _docker(container, rr, budget_s=600)
     except Exception as e:                              # pragma: no cover
         notes.append(f"sdf_gate_sim: sim invocation failed: {e}")
         return {"verdict": "ERROR", "reason": f"sim invoke: {e}"}
@@ -1353,7 +1435,7 @@ def run(project, top: str = "spm", container: str = DEFAULT_CONTAINER,
                 f"{_tb_nosdf.name} {netlist} {stub_path.name} {models.arg} "
                 f"> compile.log 2>&1; echo RC=$?")
         try:
-            _cr2 = _docker(container, _cc2, timeout=600)
+            _cr2 = _docker(container, _cc2, budget_s=600)
         except Exception as e:                              # pragma: no cover
             _cr2 = None
             notes.append(f"sdf_gate_sim: no-SDF retry compile invoke failed: {e}")
@@ -1361,7 +1443,7 @@ def run(project, top: str = "spm", container: str = DEFAULT_CONTAINER,
             _rr2 = (f"cd {sim_dir} && vvp {vvp.name} "
                     f"> sim_stdout.log 2> sim_stderr.log; echo RC=$?")
             try:
-                _docker(container, _rr2, timeout=600)
+                _docker(container, _rr2, budget_s=600)
                 sim_stdout = (sim_dir / "sim_stdout.log").read_text(
                     errors="replace")
                 parsed = parse_sim_stdout(sim_stdout)
