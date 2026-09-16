@@ -23542,6 +23542,51 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "      catch {file delete -- $f}\n"
         "    }\n"
         "  }\n"
+        # R-0915-69 — SIGN THE PER-ITERATION REPORT WITH THE COMMAND THAT
+        # WROTE IT.
+        #
+        # `check_antennas -report_violating_nets -report_file F` writes a bare
+        # `Net:` / `Pin:` / `Layer:` table with NO header — no tool name, no
+        # message code, no command. It is genuine tool output that carries no
+        # evidence of being tool output, and `eda_report_audit`'s antenna mode
+        # asks every discovered report for one of `openroad` / `check_antenna` /
+        # `ANT-` / `antenna check`. So the audit reads the loop's own honest
+        # trace and writes ANTENNA_NO_TOOL_SIGNATURE (ERROR) about it.
+        #
+        # MEASURED, sha256 x sky130A, lane icsha2 run15, through the front door:
+        # `26_antenna_check_gate_oxide_protection/antenna_signoff.json` carries
+        # `ANTENNA_NO_TOOL_SIGNATURE ERROR phase3/stage3/pnr/antenna_iter_0.rpt`
+        # over a 15945 B file that check_antennas wrote that minute.
+        #
+        # THE ANSWER IS TO NAME THE PRODUCER, NOT TO HIDE THE FILE. The
+        # alternative — dropping `antenna_iter_*.rpt` from the population the
+        # signature check reads — would shrink what the audit may look at, and a
+        # scope the audit cannot see is where a forged report would live. A
+        # header makes the artefact MORE attributable: it states the tool and
+        # the exact command, immediately above bytes that are otherwise
+        # untouched, and `summary.files_found` still counts every file.
+        #
+        # THE HEADER IS A COMMENT AND THE PARSER IS ANCHORED. `_vic_ant_nets`
+        # matches `^Net:\s+(\S.*)$` only, so a leading `#` line is inert to it,
+        # and the signing is IDEMPOTENT (a file already signed is left alone) so
+        # a re-entered stage cannot stack headers. An EMPTY report is never
+        # signed — `_vic_ant_rm_empty` runs first and a 0-byte report is removed,
+        # never dressed up as content.
+        "  proc _vic_ant_sign {f i} {\n"
+        "    if {![file exists $f]} { return }\n"
+        "    if {[file size $f] == 0} { return }\n"
+        "    if {[catch {set _sfh [open $f r]}]} { return }\n"
+        "    set _sbody [read $_sfh]\n"
+        "    catch {close $_sfh}\n"
+        "    if {[string match \"# OpenROAD check_antennas*\" $_sbody]} { return }\n"
+        "    if {[catch {set _sfh [open $f w]}]} { return }\n"
+        "    puts $_sfh \"# OpenROAD check_antennas -report_violating_nets "
+        "-report_file [file tail $f] (antenna check, iteration $i)\"\n"
+        "    puts $_sfh \"# The bytes below are the tool's own report, unmodified; "
+        "this header names the tool and the command that produced them.\"\n"
+        "    puts -nonewline $_sfh $_sbody\n"
+        "    catch {close $_sfh}\n"
+        "  }\n"
         "  set _ant_cap 6\n"
         "  set _ant_margin 0\n"
         f"  set _ant_dir {out_dir_c}\n"
@@ -23563,6 +23608,7 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "    }\n"
         "    set _ant_now [_vic_ant_nets $_ant_rf $_nv]\n"
         "    _vic_ant_rm_empty $_ant_rf\n"
+        "    _vic_ant_sign $_ant_rf $_i\n"
         "    if {$_nv > 0 && [llength $_ant_now] == 0} {\n"
         "      if {$_ant_membership} {\n"
         "        puts \"ANTENNA_LOOP_MEMBERSHIP_UNAVAILABLE: iter=$_i -- the "
@@ -23651,6 +23697,7 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "    } else {\n"
         "      set _ant_now [_vic_ant_nets $_ant_rf $_nv]\n"
         "      _vic_ant_rm_empty $_ant_rf\n"
+        "      _vic_ant_sign $_ant_rf final\n"
         "      lappend _ant_seq $_nv\n"
         "      lappend _ant_sets $_ant_now\n"
         "      puts \"ANTENNA_LOOP_ITER: iter=final nets=$_nv "
@@ -31225,6 +31272,21 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             pnr_tcl=pnr_tcl, log_text=(out or "") + (err or ""),
             hard_ceiling_s=_pnr_ceiling, spare_plan=spare_plan)
         if _sdr_adopt.get("status") != "NOT_REQUESTED":
+            # R-0915-69 — AND SWEEP AGAIN, BECAUSE THE ADOPT TAIL IS A SESSION
+            # TOO. The sweep above runs the instant `_docker_exec` returns, which
+            # is BEFORE the adopt tail has run; the tail re-enters the antenna
+            # stage in the SAME `out_dir` and writes its own
+            # `antenna_iter_*.rpt`. MEASURED, sha256 x sky130A, lane icsha2
+            # run15: `pnr_sdr_adopt_1`/`_2` both ran the loop
+            # (`ANTENNA_LOOP_SEQUENCE: 5 0` / `4 0`) and the directory shipped a
+            # 0-byte `antenna_iter_final.rpt` at 08:02 — `summary.unread_files:
+            # 1` in the step's own `antenna_signoff.json`, the state
+            # `eda_report_audit` judges NOT_MEASURED. The in-session cleanup
+            # cannot reach a file left by a session that did not return
+            # normally, and the pre-adopt sweep cannot reach a file that did not
+            # exist yet. Same function, same doctrine, the one instant that was
+            # missing.
+            _drop_empty_antenna_reports(out_dir)
             _sdr_adopt_records.append(_sdr_adopt)
             rc = _sdr_adopt.get("rc", rc)
             out = (out or "") + _sdr_adopt.get("combined_log", "")
@@ -41349,11 +41411,50 @@ def _write_lvs_verdict(project: Path, status: str, finding: str,
     rpt_dir = _pl.reports_phase3_dir(project)
     rpt_dir.mkdir(parents=True, exist_ok=True)
     path = rpt_dir / "lvs_verdict.json"
+    # R-0915-69b — WAS ANYTHING ACTUALLY COMPARED.
+    #
+    # MEASURED, sha256 x sky130A, lane icsha2 run15, front door. This function
+    # wrote, from the illegal-overlap refusal site:
+    #
+    #   "status": "FAIL", "finding": "LVS_EXTRACTION_ILLEGAL_OVERLAP",
+    #   "message": "... netgen was NOT run -- a compare against a netlist the
+    #               extractor could not decide is not evidence about this design."
+    #
+    # A record whose STATUS says FAIL and whose MESSAGE says nothing was
+    # compared. FAIL is a claim about a compare that happened and disagreed;
+    # here no compare happened at all. And the consequence was not cosmetic:
+    # `eda_report_audit._lvs_blocked_verdict` honours this artifact only when
+    # the status is literally BLOCKED, so it returned None, `_check_lvs` fell
+    # through to its no-report branch, and step 31 published
+    #
+    #   "No LVS report found (searched *lvs*.rpt/log, *comp*.out)"
+    #
+    # — an UNATTRIBUTED ABSENCE — with the flow's own named refusal sitting in
+    # the same directory, unread. That is the silent absence this artifact was
+    # created to abolish, reappearing one field away from where it was fixed.
+    #
+    # THE FACT IS MEASURED, NOT DECLARED, and not at 26 call sites. The netgen /
+    # KLayout transcript is `reports/phase3/lvs.rpt`; whether a non-empty one
+    # exists AT THE MOMENT THIS VERDICT IS WRITTEN is a fact about the
+    # filesystem, so every writer gets it right without any of them being
+    # trusted to say so. The field claims exactly that and no more: a transcript
+    # exists. It says NOTHING about what the transcript contains -- the status
+    # and the #189 classifier own that -- so it can never be read as a pass.
+    _cmp_rpt = rpt_dir / "lvs.rpt"
+    try:
+        _cmp_done = _cmp_rpt.is_file() and _cmp_rpt.stat().st_size > 0
+    except OSError:
+        _cmp_done = False
     payload: Dict[str, Any] = {
         "status": status,          # PASS / FAIL / INCOMPLETE / WARN
         "result": status,
         "finding": finding,        # named machine token
         "message": message,
+        # R-0915-69b — its own field, never folded into `status`: "the compare
+        # disagreed" and "there was no compare" are different facts, and the
+        # second one is what a sign-off may not pass over in silence.
+        "compare_performed": _cmp_done,
+        "compare_evidence": ("reports/phase3/lvs.rpt" if _cmp_done else None),
         "generated_by": "phase3_one_shot_runner:_run_extraction_lvs (#477)",
     }
     if extras:
@@ -54861,6 +54962,138 @@ def antenna_loop_trace(log_txt: str) -> Dict[str, Any]:
     }
 
 
+#: R-0915-69 — WHICH `REPAIR_ANTENNA_REROUTE_NONFATAL` IS A ROUTE ABORT.
+#:
+#: `_emit_antenna_report` reads `routing_incomplete` off a marker list, and that
+#: list carried the bare string `REPAIR_ANTENNA_REROUTE_NONFATAL`. That marker is
+#: printed when the antenna loop's INCREMENTAL `detailed_route` raises — and the
+#: loop prints the raising error ON THE SAME LINE, which the list never read.
+#:
+#: MEASURED, sha256 x sky130A, lane icsha2 run15 (main 385445351), through the
+#: front door. `phase3/stage3/pnr/openroad.log` carries exactly two of them:
+#:
+#:     1987: REPAIR_ANTENNA_REROUTE_NONFATAL: DRT-1010
+#:     2457: REPAIR_ANTENNA_REROUTE_NONFATAL: DRT-1010
+#:
+#: and beside them, in the same log:
+#:
+#:     1530: [INFO DRT-0702] Post-route verification: 0 violation(s).
+#:           ANTENNA_LOOP_SEQUENCE: 5 0   /   4 0     (both loops reached zero)
+#:           ANT-0002: 0 net violations, 0 pin violations
+#:
+#: DRT-1010 ("Unsupported non-orthogonal wire") is the router's READER refusing a
+#: wire the router itself WROTE — the cosmetic defect R-0915-33 retired the ext-
+#: wire relay over, after measuring that relaying those nets did not cure it and
+#: cost real timing. The geometry is legal, `DRT-0702` reports 0 violations over
+#: it, and `routed.def` is the routed design. So the flow reported
+#: `routing complete: NO` — and therefore `antenna clean: NO`, verdict FAIL — for
+#: a design that has a verified detailed route and zero antenna violations.
+#:
+#: WHAT IS NARROWED, AND WHAT IS NOT. Only the ONE marker that carries its cause
+#: is read by its cause, and only when the cause is DRT-1010 ALONE. Every other
+#: marker in the list is untouched and still unconditional: `DETAILED_ROUTE_
+#: NONFATAL`, `[ERROR DRT-0305]`, `[ERROR DRT-0085]`, `ANTENNA_POSTROUTE_CHECK_
+#: NONFATAL`, `[ERROR ANT-0008]`. A reroute refusal naming any OTHER code, or
+#: naming no code at all, is still an abort — the carve-out is an exact-set test,
+#: not a substring search, so an abort that merely MENTIONS DRT-1010 alongside a
+#: real failure keeps reporting incomplete.
+#:
+#: AND IT DOES NOT STAND ON THE CAUSE ALONE. The cosmetic reading is only taken
+#: when the router's own post-route verification ran — `[INFO DRT-0702] Post-route
+#: verification:`, which only `detailed_route` emits and only after it completes.
+#: Without that line there is no proof a detailed route exists, and the honest
+#: answer stays "incomplete". That is the corroboration, not the assumption.
+_ANTENNA_ABORT_MARKERS = (
+    "DETAILED_ROUTE_NONFATAL",
+    "[ERROR DRT-0305]", "[ERROR DRT-0085]",
+    "ANTENNA_POSTROUTE_CHECK_NONFATAL", "[ERROR ANT-0008]")
+_ANTENNA_REROUTE_MARKER = "REPAIR_ANTENNA_REROUTE_NONFATAL"
+_ANTENNA_COSMETIC_REROUTE_CAUSE = "DRT-1010"
+_ROUTE_VERIFIED_MARKER = "[INFO DRT-0702] Post-route verification:"
+_TOOL_ERROR_CODE_RE = re.compile(r"\b(?:DRT|ANT|GRT|ODB|RSZ|DPL)-\d{3,4}\b")
+
+
+def antenna_routing_incomplete(log_txt: str) -> bool:
+    """True when the PnR log says the design has NO realized detailed routing.
+
+    PURE — text in, bool out, no filesystem and no tool. See the note above for
+    what each marker means and why exactly one of them is read by its cause.
+    """
+    if any(m in log_txt for m in _ANTENNA_ABORT_MARKERS):
+        return True
+    refusals = [ln for ln in log_txt.splitlines()
+                if _ANTENNA_REROUTE_MARKER in ln]
+    if not refusals:
+        return False
+    for line in refusals:
+        if set(_TOOL_ERROR_CODE_RE.findall(line)) != {
+                _ANTENNA_COSMETIC_REROUTE_CAUSE}:
+            # Some OTHER failure, or none named at all. Abort.
+            return True
+    # Every incremental-reroute refusal was the cosmetic reader error. Believe
+    # that only on the router's own proof that a detailed route was verified.
+    return _ROUTE_VERIFIED_MARKER not in log_txt
+
+
+#: R-0915-69d — AND WHETHER THE VERIFICATION STILL DESCRIBES THE SHIPPED ROUTE.
+#:
+#: MEASURED, sha256 x sky130A, lane icsha2 run15, front door, AFTER R-0915-69
+#: was written — and it qualifies it. In that log:
+#:
+#:     1530: [INFO DRT-0702] Post-route verification: 0 violation(s).
+#:     1957/1987/2427/2457: the four antenna reroute refusals, all DRT-1010
+#:
+#: The corroboration R-0915-69 requires is REAL but it is OLDER than the last
+#: modification of the route. The antenna loop inserted 4 diodes
+#: (`[INFO GRT-0015] Inserted 4 diodes.`), which makes their nets dirty, and the
+#: incremental `detailed_route` that must re-route them RAISED and the loop
+#: `break`s — so whatever that aborted call had already written stays in the
+#: database, is written to `routed.def`, and NOTHING verifies it again.
+#:
+#: IT IS NOT HYPOTHETICAL. Traced across this run's own checkpoints, `net4772`
+#: does not exist at all in `routed_preantenna.def`, exists WITHOUT its
+#: y = 417.450 um met1 segment in the SDR `candidate.def`, and carries that
+#: segment in `routed.def` / `sha256.def` — and that segment is the conductor
+#: that magic's extractor then reported as 22 illegal overlaps over three
+#: flip-flops. The unverified modification is exactly where the defect entered.
+#:
+#: DISCLOSURE, NOT A VERDICT. This changes no gate: the design HAS a detailed
+#: route, `routing complete: YES` stays true, and the antenna counts are the
+#: post-repair ones. What it adds is the one fact a reader of this report needs
+#: and could not get: the route that ships was modified after the last time the
+#: router verified it. The extraction gate (step 31) is what catches what the
+#: modification did, and it did.
+def antenna_reroute_refusal_after_last_verification(log_txt: str) -> bool:
+    """True when a reroute refusal comes AFTER the last post-route verification.
+
+    PURE. False when there is no refusal, and False when there is no
+    verification at all — in the second case `antenna_routing_incomplete` has
+    already refused to call the route complete, and a second claim about
+    ordering over an absent event would say more than the log does.
+    """
+    lines = log_txt.splitlines()
+    last_ver = max((i for i, ln in enumerate(lines)
+                    if _ROUTE_VERIFIED_MARKER in ln), default=None)
+    last_ref = max((i for i, ln in enumerate(lines)
+                    if _ANTENNA_REROUTE_MARKER in ln
+                    or "ANTENNA_NATIVE_REROUTE_NONFATAL" in ln), default=None)
+    if last_ver is None or last_ref is None:
+        return False
+    return last_ref > last_ver
+
+
+def antenna_cosmetic_reroute_refusals(log_txt: str) -> int:
+    """How many reroute refusals were the cosmetic DRT-1010 — for DISCLOSURE.
+
+    Never silently absorbed: the report says the loop's reroute was refused and
+    on what grounds it was nonetheless read as a complete route.
+    """
+    return sum(1 for ln in log_txt.splitlines()
+               if _ANTENNA_REROUTE_MARKER in ln
+               and set(_TOOL_ERROR_CODE_RE.findall(ln)) == {
+                   _ANTENNA_COSMETIC_REROUTE_CAUSE})
+
+
 def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                          container: str, antenna_rpt: Path,
                          notes: List[str]) -> bool:
@@ -54917,12 +55150,12 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
             # design must be reported FAIL, never a silent antenna-clean pass on an
             # unrouted design (the silicon-DOA trap). These markers are emitted ONLY
             # on a routing failure, so a healthy run never trips them.
-            _route_fail_markers = (
-                "DETAILED_ROUTE_NONFATAL",
-                "REPAIR_ANTENNA_REROUTE_NONFATAL",
-                "[ERROR DRT-0305]", "[ERROR DRT-0085]",
-                "ANTENNA_POSTROUTE_CHECK_NONFATAL", "[ERROR ANT-0008]")
-            routing_incomplete = any(m in log_txt for m in _route_fail_markers)
+            # R-0915-69 — read the ONE marker that carries its cause BY that
+            # cause. See `antenna_routing_incomplete` above for the measurement.
+            routing_incomplete = antenna_routing_incomplete(log_txt)
+            _cosmetic_reroute = antenna_cosmetic_reroute_refusals(log_txt)
+            _unverified_after = (
+                antenna_reroute_refusal_after_last_verification(log_txt))
             # #552 — EVERY marker above is an `[ERROR ...]`, and our OpenROAD fork's
             # standing doctrine is abort -> warn + continue (RSZ-0089, DPL-0033,
             # DRT-0305, DRT-627). So each downgrade we add moves a condition OUT of
@@ -55015,6 +55248,35 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     "# routing. Reported FAIL, never a silent antenna-clean pass on an\n"
                     "# unrouted design.\n"
                     if routing_incomplete else "")
+                # R-0915-69 — DISCLOSE the refusal that was NOT read as an
+                # abort. The loop's incremental reroute really did refuse, and
+                # a reader of this report is entitled to know that and to know
+                # exactly what the flow stood on when it kept `routing
+                # complete: YES`.
+                _cosmetic_note = (
+                    f"\n# INCREMENTAL REROUTE REFUSED {_cosmetic_reroute} time(s),\n"
+                    "# each with DRT-1010 (\"Unsupported non-orthogonal wire\") and\n"
+                    "# nothing else — the router's READER refusing a wire the router\n"
+                    "# itself wrote. NOT read as a route abort, because the same log\n"
+                    "# carries `[INFO DRT-0702] Post-route verification:`, which only\n"
+                    "# a COMPLETED detailed_route emits. The antenna counts above are\n"
+                    "# therefore measured on a verified detailed route. Had the cause\n"
+                    "# been any other code, or none, this would read INCOMPLETE.\n"
+                    if (_cosmetic_reroute and not routing_incomplete) else "")
+                # R-0915-69d — and say so when the proof is OLDER than the
+                # route it is being used to vouch for.
+                _unverified_note = (
+                    "\n# THE SHIPPED ROUTE WAS MODIFIED AFTER IT WAS LAST\n"
+                    "# VERIFIED. The reroute refusal above comes AFTER the last\n"
+                    "# `[INFO DRT-0702] Post-route verification:` in this log, and\n"
+                    "# the antenna loop breaks on that refusal — so the diodes it\n"
+                    "# had already inserted, and whatever the aborted incremental\n"
+                    "# detailed_route had already written, ship unverified. The\n"
+                    "# antenna counts above are still the post-repair measurement;\n"
+                    "# this says only that the router's own clean bill predates the\n"
+                    "# last change to the route. The extraction gate (step 31) is\n"
+                    "# what measures what that change did.\n"
+                    if (_unverified_after and not routing_incomplete) else "")
                 _subject = _measured_subject(project, top, [def_file],
                                              tool_log=pnr_log)
                 antenna_rpt.write_text(
@@ -55077,7 +55339,8 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                        f"fork downgrades this from the fatal DRT-0073 so a repair "
                        f"can continue, so it is NOT visible as a routing "
                        f"failure)\n" if pins_unaccessed else "")
-                    + _incomplete_note)
+                    + _incomplete_note + _cosmetic_note
+                    + _unverified_note)
                 _aa.write_text(antenna_rpt.parent / "antenna.json", json.dumps({
                     "tool": "openroad",
                     "mode": "antenna_check_in_session_post_repair",
@@ -55091,6 +55354,15 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     "measured_on": _measured_on,
                     "shipped_route_measured": not _shipped_unmeasured,
                     "routing_incomplete": routing_incomplete,
+                    # R-0915-69 — its own field, never folded into the
+                    # boolean above: "the reroute was refused" and "the
+                    # design has no route" are different facts.
+                    "cosmetic_reroute_refusals": _cosmetic_reroute,
+                    # R-0915-69d — its own field again: "the reroute was
+                    # refused" and "the clean bill predates the route" are
+                    # different facts.
+                    "route_modified_after_last_verification":
+                        _unverified_after,
                     # #552 — its own field, not folded into routing_incomplete.
                     "pins_unaccessed": pins_unaccessed,
                     # ITS OWN FIELD. "3 violations remain" and "the loop held 2

@@ -2047,7 +2047,35 @@ def _lvs_blocked_verdict(project_dir: Path) -> Optional[dict]:
     if not isinstance(data, dict):
         return None
     status = str(data.get("status") or data.get("result") or "").strip().upper()
-    return data if status == "BLOCKED" else None
+    if status == "BLOCKED":
+        return data
+    # R-0915-69b — A REFUSAL WEARING ANOTHER STATUS IS STILL A REFUSAL.
+    #
+    # MEASURED, sha256 x sky130A, lane icsha2 run15, front door. The runner
+    # refused to run netgen because magic's extraction feedback reported 22
+    # illegal overlaps, and said so by name in this very file — finding
+    # `LVS_EXTRACTION_ILLEGAL_OVERLAP`, message "netgen was NOT run". It wrote
+    # that record under `"status": "FAIL"`, so the literal-BLOCKED test above
+    # returned None, and step 31 published "No LVS report found (searched
+    # *lvs*.rpt/log, *comp*.out)" — an unattributed absence — over a named
+    # refusal sitting in the same directory.
+    #
+    # The producer now records the fact this needs, MEASURED rather than
+    # declared: `compare_performed` is the presence of a non-empty
+    # `reports/phase3/lvs.rpt` at the instant the verdict was written. When it
+    # is explicitly False there was no compare, whatever word the status
+    # carries, and the caller must report the runner's own reason instead of an
+    # absence.
+    #
+    # `is False`, NOT falsy: a verdict written before this field existed has no
+    # key, `.get` returns None, and that record takes the old path unchanged.
+    # This widens what gets ATTRIBUTED, never what passes — `_check_lvs` keeps
+    # `passed = False` on both branches, and a record whose status is PASS can
+    # only reach here with no transcript on disk, which is itself a state no
+    # sign-off may pass over in silence.
+    if data.get("compare_performed") is False:
+        return data
+    return None
 
 
 def _check_lvs(project_dir: Path) -> AuditResult:
@@ -2074,13 +2102,22 @@ def _check_lvs(project_dir: Path) -> AuditResult:
             # so the existing token keeps its existing meaning.
             _bf = str(blocked.get("finding") or "").strip().upper()
             _stopped = _bf.endswith("_STALLED") or bool(blocked.get("stopped_as"))
+            _status = str(blocked.get("status") or blocked.get("result")
+                          or "").strip().upper()
             if _stopped:
                 _rule = "LVS_BLOCKED_RUN_STOPPED"
                 _cause = ("the LVS run was stopped before it could complete "
                           "(no forward progress)")
-            else:
+            elif _status == "BLOCKED":
                 _rule = "LVS_BLOCKED_INPUT_INCAPABLE"
                 _cause = "an extraction input cannot support extraction"
+            else:
+                # R-0915-69b — reached only via `compare_performed is False`:
+                # the flow decided, by name, not to compare. A THIRD cause, so
+                # the two existing tokens keep their exact existing meanings.
+                _rule = "LVS_BLOCKED_NO_COMPARE"
+                _cause = ("the flow refused to run the compare and no netgen "
+                          "transcript exists, so nothing was compared")
             _sup = blocked.get("supervision")
             _sup_note = ""
             if isinstance(_sup, dict) and _sup:
