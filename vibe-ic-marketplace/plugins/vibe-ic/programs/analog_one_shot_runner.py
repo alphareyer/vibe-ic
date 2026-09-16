@@ -2026,7 +2026,24 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
     The catch-all is gone by construction, not by enumeration: `verdict.parse`
     refuses a word outside the five at the row that carries it.
     """
-    return _V.run_verdict(_step_verdicts(plan)).value
+    # R-0915-85 — THE SKIP DISCLOSURE SURVIVES THE COLLAPSE. The predecessor
+    # printed every step it had excused to stderr, by name, so a green run said
+    # out loud which of its steps produced no verdict about the design. Five
+    # words say less per row than eighteen did, so each row is named here with
+    # the word AND the reason or declaration beside it. A run whose skips go
+    # silent is the run16 shape.
+    _rows = list(_step_verdicts(plan))
+    _skipped = [r for r in _rows
+                if r.verdict in (_V.Verdict.NOT_MEASURED,
+                                 _V.Verdict.NOT_APPLICABLE)]
+    if _skipped:
+        print(f"[verdict] {len(_skipped)} SKIPPED step(s) — produced no "
+              f"verdict about the design: " + ", ".join(
+                  f"{r.name}={r.verdict.value}"
+                  f"({(r.reason_class.value if r.reason_class else '')}"
+                  f"{r.declared_by and ' ' + r.declared_by})"
+                  for r in _skipped), file=sys.stderr)
+    return _V.run_verdict(_rows).value
 
 
 def _step_verdicts(plan):

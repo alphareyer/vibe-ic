@@ -77,7 +77,11 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-SCHEMA = 1
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import verdict as _V  # noqa: E402  R-0915-85 — the one vocabulary module
+
+SCHEMA = 2
 REPORT_NAME = "flow_phase_attribution.json"
 
 # The runner's step record, and WHY this file and not the other.
@@ -111,13 +115,30 @@ _STEP_REPORT_REASON = (
 # vocabulary: anything outside lands in `unclassified_status` BY NAME, the same
 # refusal-to-absorb that function makes, so a status invented tomorrow cannot
 # arrive here as a silent pass or a silent skip.
-_STATUS_RAN = frozenset({"PASS", "FAIL", "FAIL_RTL_REPAIR_INERT",
-                         "STALE_BOARD_DETECTED", "ADVISORY"})
-_STATUS_NOT_ATTEMPTED = frozenset({"SKIP", "SKIPPED-CONDITION",
-                                   "SKIPPED-BY-ENTRY", "SKIPPED-BY-EXIT",
-                                   "BLOCKED", "WAIVED"})
+# R-0915-85 — DERIVED FROM THE FIVE, and the partition is still TOTAL.
+#
+# `FAIL_RTL_REPAIR_INERT`, `STALE_BOARD_DETECTED` and `ADVISORY` were three
+# spellings of "it ran"; `SKIP`, `SKIPPED-CONDITION`, `SKIPPED-BY-ENTRY`,
+# `SKIPPED-BY-EXIT`, `BLOCKED` and `WAIVED` were six spellings of "it did not".
+# The question this module asks -- WAS THE GATE ATTEMPTED -- cuts the five the
+# same way it cut the eighteen:
+#   * PASS / PASS_WITH_WAIVERS / FAIL -- the step produced a verdict about the
+#     design. A waived step RAN; what is open is a row somebody owns, and that
+#     row is in `waiver_rows`, not in the word.
+#   * NOT_MEASURED / NOT_APPLICABLE -- nothing was measured, whether because
+#     the run declared the site out of scope or because the step could not
+#     look. WHICH of those is in `reason_class` / `declared_by`, published
+#     beside the word, so nothing that used to be a separate word goes silent.
+# Anything else still lands in `unclassified_status` BY NAME -- and `parse`
+# now refuses it upstream too, so an un-migrated producer cannot arrive here
+# as a silent pass or a silent skip.
+_STATUS_RAN = frozenset({_V.Verdict.PASS.value,
+                         _V.Verdict.PASS_WITH_WAIVERS.value,
+                         _V.Verdict.FAIL.value})
+_STATUS_NOT_ATTEMPTED = frozenset({_V.Verdict.NOT_MEASURED.value,
+                                   _V.Verdict.NOT_APPLICABLE.value})
 _STATUS_MARKER = frozenset({"RTL_REPAIR_RETRY"})
-_STATUS_FAILING = ("FAIL", "FAIL_RTL_REPAIR_INERT", "STALE_BOARD_DETECTED")
+_STATUS_FAILING = (_V.Verdict.FAIL.value,)
 
 # Repair / close-loop markers the runner appends, by the name it records them
 # under. Each value says what the marker IS, so the report explains itself.

@@ -62332,7 +62332,12 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
     raises `UnknownVerdictWord` at the row that carries it, which is earlier
     and louder than a headline string nobody greps for.
     """
-    return _V.run_verdict(
+    # R-0915-85 — THE SKIP DISCLOSURE SURVIVES THE COLLAPSE. Five words say
+    # less per row than eighteen did, so a green run must still say out loud
+    # which of its steps produced no verdict about the design, with the reason
+    # or the declaration beside the word. A run whose skips go silent is the
+    # run16 shape.
+    _rows = list(
         _V.StepVerdict(
             verdict=_V.parse(s.status), step_id=s.name, name=s.name,
             reason_class=(_V.ReasonClass(s.reason_class)
@@ -62342,7 +62347,18 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
                          for w in (getattr(s, "waiver_rows", None) or [])],
             attribution=getattr(s, "attribution", "") or "",
             disclosures=list(getattr(s, "disclosures", None) or ()),
-        ) for s in plan).value
+        ) for s in plan)
+    _skipped = [r for r in _rows
+                if r.verdict in (_V.Verdict.NOT_MEASURED,
+                                 _V.Verdict.NOT_APPLICABLE)]
+    if _skipped:
+        print(f"[verdict] {len(_skipped)} SKIPPED step(s) — produced no "
+              f"verdict about the design: " + ", ".join(
+                  f"{r.name}={r.verdict.value}"
+                  f"({(r.reason_class.value if r.reason_class else '')}"
+                  f"{r.declared_by and ' ' + r.declared_by})"
+                  for r in _skipped), file=sys.stderr)
+    return _V.run_verdict(_rows).value
 
 
 def _autogen_waivers_json(project: Path,
