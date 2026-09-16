@@ -169,7 +169,9 @@ def _num(value: float) -> str:
 
 
 # ── the record the tone needs ──────────────────────────────────────────────
-def coherent_record_samples(osr: float) -> Dict[str, Any]:
+def coherent_record_samples(osr: float,
+                            window_clocks: Optional[float] = None
+                            ) -> Dict[str, Any]:
     """The SHORTEST record, in converter samples, over which this file will
     emit a coherent in-band tone at oversampling ratio `osr`.
 
@@ -197,11 +199,31 @@ def coherent_record_samples(osr: float) -> Dict[str, Any]:
     if not math.isfinite(osr) or osr < 1.0:
         raise ValueError(f"osr must be finite and at least 1, got {osr!r}")
     min_bin = _MIN_SIGNAL_CYCLES + (1 - _MIN_SIGNAL_CYCLES % 2)
-    return {"samples": int(math.ceil(2.0 * osr * HARMONICS_IN_BAND * min_bin)),
-            "osr": osr,
-            "min_tone_bin": min_bin,
+    base = {"osr": osr, "min_tone_bin": min_bin,
             "min_signal_cycles": _MIN_SIGNAL_CYCLES,
             "harmonics_in_band": HARMONICS_IN_BAND}
+    # AN INCREMENTAL CONVERTER IS GRADED IN THE DECODED DOMAIN, so its record
+    # is counted in CONVERSION WINDOWS and not in raw samples: the tone has to
+    # be coherent over the windows that are decoded, one of them is dropped
+    # because the counter's power-up state is not a declared reset, and the
+    # cycle count has to be coprime with what remains (see `incremental_tone`
+    # — F167: without the coprimality the instrument read the WORST tone
+    # placement as 2.8 bit the BEST). An entry that publishes a conversion
+    # window IS that class; one that does not takes the path below, unchanged.
+    if isinstance(window_clocks, (int, float)) and not isinstance(
+            window_clocks, bool) and window_clocks >= 1:
+        windows = incremental_record_windows()
+        tone = incremental_tone(windows)
+        base.update({"samples": int(windows * int(window_clocks)),
+                     "window_clocks": int(window_clocks),
+                     "conversion_windows": windows,
+                     "graded_windows": tone["graded_windows"],
+                     "cycles": tone["cycles"],
+                     "rule": "coherent_over_the_decoded_conversion_windows"})
+        return base
+    base["samples"] = int(math.ceil(2.0 * osr * HARMONICS_IN_BAND * min_bin))
+    base["rule"] = "coherent_over_the_raw_record"
+    return base
 
 
 # ── what the DESIGN declares ───────────────────────────────────────────────
@@ -510,6 +532,80 @@ def incremental_decode(spec: Any, topology: Any) -> Dict[str, Any]:
     return rec
 
 
+
+# ── the tone an INCREMENTAL converter can actually be graded at ────────────
+#
+# WHAT WAS WRONG, MEASURED (lane icadc, F167). The rule below the incremental
+# branch picks `band_bins // HARMONICS_IN_BAND` — one third of the decoded
+# Nyquist, BY CONSTRUCTION. At OSR 256 over a 13824-sample record that is bin
+# 9 of 54 conversion windows: exactly ONE TONE CYCLE PER SIX WINDOWS, with
+# `gcd(9, 54) = 9`.
+#
+# An incremental converter's decoded error is DETERMINISTIC and periodic with
+# the tone. When the tone's period in conversion windows is a small integer,
+# so is the error's, and the error becomes a component AT THE SIGNAL'S OWN
+# FREQUENCY — which an SNDR removes as signal. Measured on a pure-arithmetic
+# ideal CIFB2, same loop, same graded span of 48 decoded windows, tone bin
+# swept: every bin from 2 to 15 reads 10.7 - 11.6 bit and bin 8 (= 48/6, the
+# bin the rule picks) reads 13.37. Against the method-free truth — the decoded
+# value against the input the loop actually saw, no spectrum anywhere — that
+# same placement is the WORST of the set (rms 3.35e-4 where the others are
+# 2.7e-4 to 3.0e-4, i.e. 10.54 bit). **The instrument read the worst placement
+# as 2.8 bit the best.** That is a false green in a graded metric, and it is
+# systematic: one third of a Nyquist is a simple rational of the decoded
+# record for every OSR whose band edge is divisible by three.
+#
+# THE RULE THAT REPLACES IT. The tone is chosen in the DECODED domain, where
+# the converter is actually graded: `c` whole cycles across `m` graded
+# conversion windows, with
+#
+#     gcd(c, m) == 1     so the error's period is the WHOLE graded span and
+#                        its energy cannot collapse onto the signal bin
+#     c odd              (kept from the old rule)
+#     c * HARMONICS_IN_BAND <= m / 2    so the harmonics are graded too
+#     c >= _MIN_SIGNAL_CYCLES           so the bin is not too coarse to mean
+#                                       anything
+#
+# and the record holds `m + 1` windows, because the gate drops the power-up
+# window — the counter's first reset can fall anywhere inside it.
+_INC_NO_GRADABLE_TONE = (
+    "no_tone_bin_is_coprime_with_the_conversion_window_count: every candidate "
+    "in the band would put the decoded error at the signal's own frequency, "
+    "where an SNDR removes it as signal")
+
+
+def incremental_tone(windows_total: int) -> Optional[Dict[str, Any]]:
+    """`{"graded_windows", "cycles"}` — the highest gradable tone over a record
+    of `windows_total` conversion windows, or None when none exists.
+
+    Highest, because a converter is graded nearest the band edge its OSR
+    declares; gradable, because of the coprimality above."""
+    m = int(windows_total) - 1
+    if m < 2:
+        return None
+    top = m // (2 * HARMONICS_IN_BAND)
+    c = top if top % 2 else top - 1
+    while c >= _MIN_SIGNAL_CYCLES:
+        if math.gcd(c, m) == 1:
+            return {"graded_windows": m, "cycles": c,
+                    "rule": "coprime_with_the_conversion_window_count"}
+        c -= 2
+    return None
+
+
+def incremental_record_windows() -> int:
+    """The fewest conversion windows a record needs for `incremental_tone` to
+    find one. Derived by searching, not typed: the bound is a coprimality and
+    there is no closed form for it."""
+    w = 2 * HARMONICS_IN_BAND * (_MIN_SIGNAL_CYCLES
+                                 + (1 - _MIN_SIGNAL_CYCLES % 2))
+    while w < 4096:
+        if incremental_tone(w) is not None:
+            return w
+        w += 1
+    raise AssertionError("no conversion-window count admits a gradable tone")
+
+
 def plan(deck_text: str, spec: Any, topology: Any) -> Dict[str, Any]:
     """The record of what this transform would do to `deck_text`, applied or
     refused. Always a dict; `applied` is the one field a caller must read."""
@@ -563,6 +659,11 @@ def plan(deck_text: str, spec: Any, topology: Any) -> Dict[str, Any]:
         return record
     record["fclk_hz"] = fclk
 
+    # THE DECODE DECLARATION IS READ BEFORE THE TONE, because for an
+    # incremental converter it decides which domain the tone is coherent in.
+    dec = incremental_decode(spec, topology)
+    record["incremental_decode"] = dec
+
     stop_s = facts["tran"]["stop_s"]
     samples = int(stop_s * fclk)
     osr = axis["osr"]
@@ -576,7 +677,8 @@ def plan(deck_text: str, spec: Any, topology: Any) -> Dict[str, Any]:
     # refused: at OSR 256 it is 13824 samples against 12288, and 12288 comes
     # back UNMEASURED. Caught by bisecting the real refusal rather than by
     # reading this arithmetic (vibe-ic#2188).
-    floor = coherent_record_samples(osr)
+    floor = coherent_record_samples(
+        osr, dec.get("window_clocks") if dec.get("declared") else None)
     min_bin = floor["min_tone_bin"]
     required = floor["samples"]
     record.update({"record_s": stop_s, "samples_available": samples,
@@ -584,8 +686,32 @@ def plan(deck_text: str, spec: Any, topology: Any) -> Dict[str, Any]:
                    "min_signal_cycles": floor["min_signal_cycles"],
                    "min_tone_bin": min_bin,
                    "harmonics_in_band": floor["harmonics_in_band"]})
-    highest = int(band_bins // HARMONICS_IN_BAND)
-    tone_bin = highest if highest % 2 else highest - 1
+    # THE INCREMENTAL BRANCH. The tone is `cycles` whole cycles across the
+    # GRADED conversion windows — the domain the matched decode measures in —
+    # and its cycle count is coprime with them, so the decoded error's period
+    # is the whole graded span instead of collapsing onto the signal's own
+    # frequency (F167). The free-running branch below is byte-for-byte the
+    # rule it always was: for a modulator the raw record IS the graded domain.
+    inc_tone = None
+    if dec.get("declared"):
+        inc_tone = incremental_tone(samples // int(dec["window_clocks"]))
+        if inc_tone is None:
+            record["reason"] = _INC_NO_GRADABLE_TONE
+            record["detail"] = (
+                f"the record holds "
+                f"{samples // int(dec['window_clocks'])} conversion window(s) "
+                f"of {int(dec['window_clocks'])} clocks; it needs at least "
+                f"{floor.get('conversion_windows')}")
+            return record
+        record.update({
+            "graded_windows": inc_tone["graded_windows"],
+            "cycles": inc_tone["cycles"],
+            "tone_rule": inc_tone["rule"],
+            "conversion_windows": samples // int(dec["window_clocks"])})
+        tone_bin = inc_tone["cycles"]
+    else:
+        highest = int(band_bins // HARMONICS_IN_BAND)
+        tone_bin = highest if highest % 2 else highest - 1
     if tone_bin < _MIN_SIGNAL_CYCLES:
         record["reason"] = "record_too_short_for_an_in_band_tone"
         record["detail"] = (
@@ -608,13 +734,17 @@ def plan(deck_text: str, spec: Any, topology: Any) -> Dict[str, Any]:
         record["detail"] = why
         return record
 
-    record["incremental_decode"] = incremental_decode(spec, topology)
     record.update({
         "applied": True,
         "source": driver["name"],
         "dc_offset_v": dc_v,
         "amplitude_v": amplitude,
-        "tone_hz": tone_bin * fclk / samples,
+        # For the incremental class the tone is `cycles` per GRADED WINDOW
+        # SPAN, not per raw record: those are different denominators and the
+        # difference is the whole of F167.
+        "tone_hz": (inc_tone["cycles"] * fclk
+                    / (inc_tone["graded_windows"] * int(dec["window_clocks"]))
+                    if inc_tone else tone_bin * fclk / samples),
         "replaced_source_card": driver["body"],
         "source_line": driver["line"],
         "tran_line": facts["tran"]["line"],

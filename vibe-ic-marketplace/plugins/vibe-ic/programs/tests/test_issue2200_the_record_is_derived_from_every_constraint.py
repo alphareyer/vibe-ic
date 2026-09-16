@@ -102,7 +102,12 @@ def test_every_measurement_card_still_ends_at_the_second_window():
 # ── the derived number ────────────────────────────────────────────────────
 def test_the_emitted_IR_carries_the_record_the_declared_RESOLUTION_needs():
     ir = _ir()
-    want = st.coherent_record_samples(_SPEC["osr"])["samples"]
+    # R-0915-74: this entry declares `decoded_in_conversion_windows`, so its
+    # record is counted in CONVERSION WINDOWS — the domain the matched decode
+    # grades in — and the floor takes the window as its second input. The
+    # assertion still reads the producer's own number and never restates it.
+    want = st.coherent_record_samples(
+        _SPEC["osr"], ir["constants"]["window_clocks"])["samples"]
     assert ir["constants"][rec.RECORD_CONSTANT] == float(want)
     d = ir["record_derivation"]
     assert d["binding_constraint"] == "coherent_in_band_tone"
@@ -146,9 +151,22 @@ def test_the_rendered_deck_is_one_the_resolution_producer_ACCEPTS():
                                            {"name": "osr", "target": 256.0}]},
                    ir)
     assert plan["applied"] is True, plan
-    assert plan["samples_available"] == plan["samples_required"]
+    # NO SLACK BEYOND THE POWER-ON HOLD. The deck's `tran` stop carries one
+    # extra clock period in front of the record (the rail rise and the first
+    # clock edge), so the honest bound is "at least the requirement, and over
+    # it by at most that hold". MEASURED, and the equality that stood here
+    # before held by floating-point luck: `int(13825000e-9 * 1e6)` truncates
+    # to 13824 while `int(14337000e-9 * 1e6)` rounds up to 14337, so the same
+    # deck shape read as exact at one record length and one sample long at
+    # another. A bound cannot depend on which way a double lands.
+    assert plan["samples_required"] <= plan["samples_available"] <= \
+        plan["samples_required"] + 1
     assert plan["tone_bin"] % 2 == 1
     assert plan["tone_bin"] >= plan["min_signal_cycles"]
+    # and it is the DECODED-domain tone: coprime with the graded windows
+    import math as _math
+    assert plan["tone_rule"] == "coprime_with_the_conversion_window_count"
+    assert _math.gcd(plan["cycles"], plan["graded_windows"]) == 1
 
 
 # ── backward: the guard did NOT stop refusing ─────────────────────────────
@@ -159,7 +177,8 @@ def test_a_record_that_is_GENUINELY_short_is_still_refused_by_name():
     ir = _ir()
     deck = _render(ir)
     osr = int(_SPEC["osr"])
-    need = st.coherent_record_samples(_SPEC["osr"])["samples"]
+    need = st.coherent_record_samples(
+        _SPEC["osr"], ir["constants"]["window_clocks"])["samples"]
     # The transient stop is read from the deck the producer emitted, not
     # typed: since the power-on sequence (ea2a9c4f1) the stop carries the
     # clock hold in front of the record (`need * 1000 + hold` ns), and a
@@ -175,7 +194,12 @@ def test_a_record_that_is_GENUINELY_short_is_still_refused_by_name():
     plan = st.plan(short, {"specs": [{"name": "enob", "min": 14.0},
                                      {"name": "osr", "target": 256.0}]}, ir)
     assert plan["applied"] is False
-    assert plan["reason"] == "record_too_short_for_an_in_band_tone"
+    # R-0915-74: for a converter graded in the decoded domain the short record
+    # is named by the tone it cannot carry THERE — it holds too few conversion
+    # windows for a cycle count coprime with them. Either name is the same
+    # refusal: a record that is too short, said by name, with the number.
+    assert plan["reason"] in ("record_too_short_for_an_in_band_tone",
+                              st._INC_NO_GRADABLE_TONE), plan
     assert plan["samples_required"] == need
 
 

@@ -135,6 +135,11 @@ class RecordNotDerivable(ValueError):
 
 
 # ── the one arithmetic that is not an expression ───────────────────────────
+#: The entry constant that says "this converter is graded in the DECODED
+#: domain" — one decoded sample per conversion window (R-0915-74).
+DECODED_IN_WINDOWS_CONSTANT = "decoded_in_conversion_windows"
+
+
 def _coherent_in_band_tone(env: Dict[str, float],
                            spec_values: Dict[str, float]) -> float:
     """The record a coherent in-band tone needs, in converter samples.
@@ -144,7 +149,16 @@ def _coherent_in_band_tone(env: Dict[str, float],
     computed from, and a second copy of it here is how the two would come to
     disagree. One sample is one clock for a converter clocked at `fclk`, which
     is the unit every other row is in."""
-    return float(coherent_record_samples(spec_values["osr"])["samples"])
+    # AN ENTRY THAT DECLARES IT IS GRADED IN THE DECODED DOMAIN is sized in
+    # CONVERSION WINDOWS, not in raw samples: the tone has to be coherent over
+    # the windows the matched decode measures. The declaration is the entry's
+    # own constant `decoded_in_conversion_windows` — publishing a window is not
+    # the same statement, because a converter can have one and still be graded
+    # on its raw bitstream. Passed through rather than branched on here, so the
+    # one definition stays in the one file the producer's refusal reads from.
+    windows = (env.get("window_clocks")
+               if env.get(DECODED_IN_WINDOWS_CONSTANT) else None)
+    return float(coherent_record_samples(spec_values["osr"], windows)["samples"])
 
 
 #: Every `clocks_rule` an entry may name. A rule the registry does not carry is
