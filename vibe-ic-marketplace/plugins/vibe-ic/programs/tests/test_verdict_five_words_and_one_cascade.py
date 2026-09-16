@@ -42,7 +42,7 @@ def test_parse_accepts_each_of_the_five(word):
     # The deleted vocabulary, spelled exactly as the producers used to write it.
     "SKIP", "SKIPPED", "SKIPPED-CONDITION", "SKIPPED-SETUP-REQUIRED",
     "SKIPPED-BY-ENTRY", "SKIPPED-BY-EXIT", "OUT-OF-SCOPE-BY-ENTRY",
-    "INCOMPLETE", "INCONCLUSIVE", "NOT_MEASURED", "NOT_EXECUTED", "NOT-MEASURED",
+    "INCOMPLETE", "INCONCLUSIVE", "NOT_CHECKED", "NOT_EXECUTED", "NOT-MEASURED",
     "NO_TOOL", "ENV_UNAVAILABLE", "BLOCKED", "BLOCKED_BY_UPSTREAM",
     "DEFERRED-BY-UPSTREAM", "DEFERRED", "WAIVED", "WAIVED-DEFERRED",
     "PASS_VOIDED_BY_DEPENDENCY", "PASS-VOIDED-BY-DEPENDENCY",
@@ -364,3 +364,33 @@ def test_the_module_carries_the_why_where_the_design_lives():
     assert "subservient r26" in src, "the cascade evidence"
     assert "run16" in src, "the laundering evidence"
     assert "status word is a schema change, not a string" in src
+
+
+# ── the three table-driven words the AST ratchet cannot see ──────────────
+
+def test_the_analog_provenance_stamps_are_gone_from_the_producer_table():
+    """`analog_one_shot_runner._A1_A3_PRODUCERS` holds a step's status in a
+    DICT, which reaches a row through `prod["status"]`.
+
+    Three words lived there — `PASS_WITH_REAL_EXTRACT`,
+    `PASS_WITH_DERIVED_TOPOLOGY`, `PASS_WITH_REAL_NETLIST` — each a `PASS` that
+    also named its producer. They survived the first migration pass and the
+    tree-wide ratchet could not see them: judging every `{"status": ...}` in a
+    producer file reports twenty per-gate JSON payload fields that are not step
+    verdicts at all (the ratchet's docstring records that experiment).
+
+    So they are pinned BY NAME here, which is the honest device when a scan
+    cannot reach a shape. The producer is still on the row — in
+    `extras["producer"]`, where a consumer reads provenance.
+    """
+    src = (plugin_path() / "programs"
+           / "analog_one_shot_runner.py").read_text(encoding="utf-8")
+    code = "\n".join(l.split("#")[0] for l in src.splitlines())
+    for w in ("PASS_WITH_REAL_EXTRACT", "PASS_WITH_DERIVED_TOPOLOGY",
+              "PASS_WITH_REAL_NETLIST"):
+        assert f'"{w}"' not in code, (
+            f"{w} is back in the producer table; the status carries the "
+            f"outcome and extras['producer'] carries the provenance")
+    import analog_one_shot_runner as A  # noqa: PLC0415
+    for name, prod in A._A1_A3_PRODUCERS.items():
+        assert V.parse(prod["status"]) is V.Verdict.PASS, (name, prod["status"])

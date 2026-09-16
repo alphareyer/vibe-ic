@@ -808,19 +808,43 @@ def producer_reuse_decision(project: Path, block: str,
 _A1_A3_PRODUCERS: Dict[str, Dict[str, Any]] = {
     "A1_spec_extract": {
         "program": "analog_a1_spec_emit.py",
-        "status": "PASS_WITH_REAL_EXTRACT",
+        "status": _V.Verdict.PASS.value,
+        # R-0915-85 — this used to be `PASS_WITH_REAL_EXTRACT`, a PASS that
+        # also named its producer. The producer is already in
+        # the row's `extras["producer"]`, which is where a
+        # consumer reads provenance; the STATUS carries the
+        # outcome and nothing else. `_STAMPED_VERDICT_TIER`
+        # below already collapsed all three to "PASS", so no
+        # tier moves — what goes is the third place the same
+        # fact was written.
         "strategy": "l5_structured_bind",
         "gap": "spec_gap.json",
     },
     "A2_topology_select": {
         "program": "analog_a2_topology_emit.py",
-        "status": "PASS_WITH_DERIVED_TOPOLOGY",
+        "status": _V.Verdict.PASS.value,
+        # R-0915-85 — this used to be `PASS_WITH_DERIVED_TOPOLOGY`, a PASS that
+        # also named its producer. The producer is already in
+        # the row's `extras["producer"]`, which is where a
+        # consumer reads provenance; the STATUS carries the
+        # outcome and nothing else. `_STAMPED_VERDICT_TIER`
+        # below already collapsed all three to "PASS", so no
+        # tier moves — what goes is the third place the same
+        # fact was written.
         "strategy": "type_topology_library",
         "gap": "topology_gap.json",
     },
     "A3_netlist_gen": {
         "program": "analog_a3_netlist_emit.py",
-        "status": "PASS_WITH_REAL_NETLIST",
+        "status": _V.Verdict.PASS.value,
+        # R-0915-85 — this used to be `PASS_WITH_REAL_NETLIST`, a PASS that
+        # also named its producer. The producer is already in
+        # the row's `extras["producer"]`, which is where a
+        # consumer reads provenance; the STATUS carries the
+        # outcome and nothing else. `_STAMPED_VERDICT_TIER`
+        # below already collapsed all three to "PASS", so no
+        # tier moves — what goes is the third place the same
+        # fact was written.
         "strategy": "topology_ir_render",
         "gap": "netlist_gap.json",
         "takes_container": True,
@@ -858,8 +882,12 @@ def verdict_tier(status: str) -> str:
     """The TIER a step's status lands in, with the producer-provenance stamp
     removed if it carries one.
 
-    `PASS_WITH_REAL_NETLIST` is a `PASS` that also names its producer. Any
-    status this module does not declare as a stamp is returned UNCHANGED — an unknown `PASS_WITH_*`
+    R-0915-85 made this an IDENTITY: the three provenance stamps it collapsed
+    (`PASS_WITH_REAL_EXTRACT` / `PASS_WITH_DERIVED_TOPOLOGY` /
+    `PASS_WITH_REAL_NETLIST`) are plain `PASS` at their source now, with the
+    producer in the row's own `extras["producer"]`. It is kept as the ONE place
+    a reader looks for "is a status carrying a second fact?", and the answer is
+    no. Any status this module does not declare as a stamp is returned UNCHANGED — an unknown `PASS_WITH_*`
     is not silently rounded up to a pass, and neither is a `FAIL`. Chip-
     AGNOSTIC.
     """

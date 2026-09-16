@@ -41,6 +41,22 @@ sixth run-level word, for nine months.
 
 WHAT IS DELIBERATELY NOT IN SCOPE
 =================================
+A TABLE-DRIVEN STATUS, and this is a MEASURED limit rather than an oversight.
+`analog_one_shot_runner._A1_A3_PRODUCERS` held a step's status in a dict
+literal that reaches a row through `prod["status"]`; three words
+(`PASS_WITH_REAL_EXTRACT`, `PASS_WITH_DERIVED_TOPOLOGY`,
+`PASS_WITH_REAL_NETLIST`) survived the first migration there and were found by a
+TEST, not by this scan. Judging every `{"status": ...}` in a file that also
+builds StepResults was tried and REJECTED: it reports 20 per-gate JSON payload
+fields (`WELLTAP_PRESENT`, `NOT_REQUESTED`, `MANUAL_REVIEW`, `AUTOMATED`, `NA`)
+that are a gate's own document and not a step verdict at all. Telling the two
+apart needs dataflow, not a pattern, so this scan says what it does not cover
+instead of crying wolf — and the three words it missed are pinned by name in
+`test_verdict_five_words_and_one_cascade`. The runtime backstop is real and is
+counted in every report: `verdict.parse` judges such a status when the row is
+built.
+
+
 `GATE PROGRAM` verdicts. A gate report's own `verdict` field is a DIFFERENT and
 much larger vocabulary (~450 programs, `PASS` / `VACUOUS_PASS` / `SKIP` /
 `NOT_INVOCABLE` / `INSUFFICIENT_DATA` / …), governed by `P0_GATE_VERDICTS` and
