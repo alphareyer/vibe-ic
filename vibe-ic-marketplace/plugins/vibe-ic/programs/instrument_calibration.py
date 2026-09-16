@@ -140,6 +140,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+# vibe-ic#1082 — a declared report destination is written atomically, so a
+# reader never sees a half-written verdict file.
+from _atomic_artefact import write_json as _atomic_write_json  # noqa: E402
+
 GATE = "instrument_calibration"
 
 #: The five step verdicts (R-0915-85). Nothing here emits any other word.
@@ -192,12 +196,44 @@ class Sample:
 
 
 @dataclass(frozen=True)
+class Miscalibration:
+    """What an instrument that FAILS its own pair on this tree does instead.
+
+    THIS IS NOT AN EXEMPTION AND IT DOES NOT SOFTEN ANYTHING. The instrument is
+    still MISCALIBRATED, `assert_calibrated` still refuses it, and every verdict
+    it would have produced is still `NOT_MEASURED` / `uncalibrated`. What this
+    adds is the one thing a bare "it is red" cannot: the EXACT wrong answer, so
+    the tests assert the MEASUREMENT rather than skipping it.
+
+    It lives HERE, at the source, beside the pair it is about — never as a list
+    in a test file. A list in a test file has to be hand-fed, and the day the
+    owner's fix lands it is stale with nothing to say so. This is the opposite:
+    `fires_with` is asserted, so the day the instrument starts behaving the test
+    goes RED and this object must be DELETED in the same commit. That is the
+    ratchet direction, and there is no other way out of it.
+
+    * `failed_sides` — which half of the pair fails ("positive" / "negative").
+    * `fires_with` — the exact outcome `judge()` returns on the sample that
+      SHOULD have made it fire. `None` means it stays silent when it must speak.
+    * `instead_of` — one line on what the tree sees because of it.
+    * `closed_by` — the ruling/owner whose landing removes this object.
+    """
+    failed_sides: Tuple[str, ...]
+    fires_with: Optional[str]
+    instead_of: str
+    closed_by: str
+
+
+@dataclass(frozen=True)
 class Instrument:
     """A reader that turns a tool artefact into a verdict, and its pair.
 
     `judge(artefact)` returns the NAMED OUTCOME when the instrument fires, and
     `None` when it stays silent. That signature is deliberate: "fired" and "what
     it said" are one value, so a pair cannot pass by firing for the wrong reason.
+
+    `miscalibrated_evidence` is set ONLY for an instrument this tree MEASURES as
+    failing its own pair — see `Miscalibration`.
     """
     name: str
     reads: str
@@ -208,6 +244,7 @@ class Instrument:
     positive: Sample
     expect: str
     negative: Sample
+    miscalibrated_evidence: Optional[Miscalibration] = None
 
 
 @dataclass
@@ -650,6 +687,24 @@ _register(Instrument(
             "(`SDR_DRV_BY_KIND: total=2 max_capacitance=2`). "
             "`calibration/drv_with_parasitics_negative.rpt`."),
         artefact=_drv_arm_with_parasitics),
+    miscalibrated_evidence=Miscalibration(
+        failed_sides=("positive",),
+        # MEASURED by running the emitted census in tclsh over the REAL 0-byte
+        # report, on cf37f6c92: it does not refuse. `judge` returns None.
+        fires_with=None,
+        instead_of=("the deck prints `SDR_DRV_BY_KIND: total=0 "
+                    "max_capacitance=0` over a design that has 2 violators — "
+                    "the same bytes a clean design produces, which is the "
+                    "phantom R-0915-83 exists to stop"),
+        closed_by=("icaes, R-0915-83 follow-up: (a) an EMPTY violator report "
+                   "is not a measured 0 — `file exists` is true for a 0-byte "
+                   "file, so `_sdr_rpt_ok` stays 1; (b) `parasitics_in_sta=0` "
+                   "is unreachable — a failing `read_spef` prints "
+                   "SDR_SPEFR_NONFATAL and BREAKS before the test that reads "
+                   "the flag. When either is fixed this census starts "
+                   "refusing, `fires_with` stops matching, and this object is "
+                   "deleted in that commit."),
+    ),
 ))
 
 _register(Instrument(
@@ -1447,20 +1502,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 2
         rc = _ratchet_verdict(population, root)
         if a.json_out:
-            Path(a.json_out).write_text(json.dumps({
+            _atomic_write_json(a.json_out, {
                 "gate": GATE, "mode": "ratchet", "population": population,
                 "calibrated": sorted(INSTRUMENTS),
-                "declared": _UNCALIBRATED_REGISTER, "rc": rc}, indent=2))
+                "declared": _UNCALIBRATED_REGISTER, "rc": rc})
         return rc
 
     cals = check_all()
     _report(cals)
     bad = [n for n, c in cals.items() if c.state != CALIBRATED]
     if a.json_out:
-        Path(a.json_out).write_text(json.dumps({
+        _atomic_write_json(a.json_out, {
             "gate": GATE, "mode": "calibrate",
             "instruments": {n: c.as_dict() for n, c in cals.items()},
-            "miscalibrated": bad}, indent=2))
+            "miscalibrated": bad})
     if bad:
         print(f"\n[FAIL] {len(bad)} of {len(cals)} instrument(s) MISCALIBRATED "
               f"— each may not judge; its verdict is NOT_MEASURED "

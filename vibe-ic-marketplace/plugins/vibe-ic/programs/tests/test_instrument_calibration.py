@@ -44,15 +44,29 @@ import instrument_calibration as C  # noqa: E402
 
 @pytest.mark.parametrize("name", sorted(C.INSTRUMENTS))
 def test_the_known_positive_makes_it_fire(name):
-    """A known-positive that leaves the instrument silent is the defect."""
+    """A known-positive that leaves the instrument silent is the defect.
+
+    AND FOR AN INSTRUMENT THIS TREE MEASURES AS BROKEN, THE MEASUREMENT IS
+    ASSERTED — never skipped. `miscalibrated_evidence.fires_with` is the EXACT
+    wrong answer, recorded at the source beside the pair, so the day the owner's
+    fix lands this test goes RED and the evidence must be deleted in that
+    commit. A skip would go green through the fix and say nothing; a list in
+    this file would have to be hand-fed and would be stale the same day.
+    """
     inst = C.INSTRUMENTS[name]
     outcome = inst.judge(inst.positive.artefact())
-    if name in _MISCALIBRATED_ON_THIS_TREE:
-        pytest.skip(f"{name} is MISCALIBRATED by measurement — "
-                    f"test_the_miscalibrated_instrument_is_named_with_its_reason "
-                    f"owns it")
+    ev = inst.miscalibrated_evidence
+    if ev is not None and "positive" in ev.failed_sides:
+        assert outcome == ev.fires_with, (
+            f"{name}: the positive now answers {outcome!r}, not the "
+            f"{ev.fires_with!r} its miscalibrated_evidence records.\n"
+            f"  If it now FIRES correctly the instrument is FIXED — delete its "
+            f"miscalibrated_evidence in the commit that fixed it.\n"
+            f"  closed_by: {ev.closed_by}")
+        return
     assert outcome is not None, (
-        f"{name}: the known-positive did not make it fire.\n"
+        f"{name}: the known-positive did not make it fire, and the entry "
+        f"records no miscalibrated_evidence for it.\n"
         f"  provenance: {inst.positive.provenance}")
     assert inst.expect in outcome, (
         f"{name}: fired with {outcome!r}, which does not carry the outcome the "
@@ -64,6 +78,13 @@ def test_the_known_positive_makes_it_fire(name):
 def test_the_known_negative_leaves_it_silent(name):
     inst = C.INSTRUMENTS[name]
     outcome = inst.judge(inst.negative.artefact())
+    ev = inst.miscalibrated_evidence
+    if ev is not None and "negative" in ev.failed_sides:
+        assert outcome == ev.fires_with, (
+            f"{name}: the negative now answers {outcome!r}, not the "
+            f"{ev.fires_with!r} its miscalibrated_evidence records. "
+            f"closed_by: {ev.closed_by}")
+        return
     assert outcome is None, (
         f"{name}: the known-negative made it fire with {outcome!r}.\n"
         f"  provenance: {inst.negative.provenance}")
@@ -73,49 +94,123 @@ def test_the_known_negative_leaves_it_silent(name):
 def test_the_pair_discriminates(name):
     """The two samples must produce DIFFERENT answers.
 
-    A pair whose halves an instrument cannot tell apart calibrates nothing,
-    and both sides can still 'hold' — the negative stays silent because the
-    instrument never fires on anything. This is the arm that catches that, and
-    it is the reason a fixture pair is not just two files.
+    A pair whose halves an instrument cannot tell apart calibrates nothing, and
+    both sides can still "hold" — the negative stays silent because the
+    instrument never fires on anything. This is the arm that catches that.
+
+    For an entry carrying evidence the expectation INVERTS: not discriminating
+    IS the measured state, and the day it starts discriminating this goes red
+    and the evidence is deleted.
     """
     inst = C.INSTRUMENTS[name]
     pos = inst.judge(inst.positive.artefact())
     neg = inst.judge(inst.negative.artefact())
-    if name in _MISCALIBRATED_ON_THIS_TREE:
+    ev = inst.miscalibrated_evidence
+    if ev is not None:
         assert pos == neg, (
-            f"{name} is recorded MISCALIBRATED because its pair does NOT "
-            f"discriminate; it now does ({pos!r} vs {neg!r}) — the entry is "
-            f"stale and must be re-measured")
+            f"{name} carries miscalibrated_evidence because its pair does NOT "
+            f"discriminate; it now does ({pos!r} vs {neg!r}) — delete or "
+            f"re-measure it. closed_by: {ev.closed_by}")
         return
     assert pos != neg, (
         f"{name}: both samples answer {pos!r} — the pair does not discriminate")
 
 
-# ── the state on this tree, named rather than counted ─────────────────────
-
-#: MEASURED on 599640dcf/8ddbd27a7, by RUNNING the emitted census in tclsh.
-#: Two findings, both in `instrument_calibration`'s entry for it:
-#:   (a) OpenSTA writes a 0-BYTE `report_check_types -violators` file for a
-#:       session with no parasitics; `file exists` is true for it, so the deck
-#:       prints `SDR_DRV_BY_KIND: total=0` — the R-0915-83 phantom, arriving
-#:       through the half the fix did not close;
-#:   (b) `parasitics_in_sta=0` is UNREACHABLE — a failing `read_spef` prints
-#:       `SDR_SPEFR_NONFATAL` and BREAKS before the test that reads the flag.
-#: Owner icaes, in its own batch. When that lands this set goes EMPTY and the
-#: tests above take over — which is the only way out of it.
-_MISCALIBRATED_ON_THIS_TREE = {
-    "phase3_one_shot_runner::_v1_8_100_signoff_drv_repair_tcl",
-}
-
+# ── the rule, over the MEASURED state — no list of names anywhere ─────────
 
 def test_the_miscalibrated_instrument_is_named_with_its_reason():
+    """`check()` MEASURES the state; the registry's evidence must agree with it.
+
+    Both directions, over every entry, with no set typed in this file:
+      * an entry carrying `miscalibrated_evidence` must MEASURE as
+        MISCALIBRATED, on exactly the sides the evidence names;
+      * an entry carrying none must MEASURE as CALIBRATED.
+    A landing that breaks an instrument fails the second; a landing that fixes
+    one fails the first, and the fix is to delete the evidence in that commit.
+    """
     cals = C.check_all()
-    bad = {n for n, c in cals.items() if c.state != C.CALIBRATED}
-    assert bad == _MISCALIBRATED_ON_THIS_TREE, (
-        f"the MISCALIBRATED set moved: {sorted(bad)} vs "
-        f"{sorted(_MISCALIBRATED_ON_THIS_TREE)}. A new one is a landing that "
-        f"broke an instrument; one fewer is a fix, and its entry here is "
-        f"deleted in the same commit.")
+    for name, cal in sorted(cals.items()):
+        ev = C.INSTRUMENTS[name].miscalibrated_evidence
+        if ev is None:
+            assert cal.state == C.CALIBRATED, (
+                f"{name} MEASURES {cal.state} ({cal.detail}) and carries no "
+                f"miscalibrated_evidence — either a landing broke it, or its "
+                f"evidence was deleted without fixing it")
+            continue
+        assert cal.state == C.MISCALIBRATED, (
+            f"{name} carries miscalibrated_evidence and now MEASURES "
+            f"{cal.state} — it is FIXED; delete the evidence in that commit. "
+            f"closed_by: {ev.closed_by}")
+        assert set(cal.failed_sides) == set(ev.failed_sides), (
+            f"{name} fails {sorted(cal.failed_sides)}, evidence says "
+            f"{sorted(ev.failed_sides)} — re-measure and re-state it")
+
+
+def test_an_instrument_carrying_evidence_may_not_judge():
+    """THE RULE, proven both directions over the measured state.
+
+    `assert_calibrated` must REFUSE exactly the entries carrying evidence and be
+    a no-op for every other one. That is what "an uncalibrated instrument may
+    not judge" means at the source: its verdict becomes NOT_MEASURED with
+    reason_class `uncalibrated`, never a PASS and never a FAIL.
+    """
+    refused, allowed = [], []
+    for name in sorted(C.INSTRUMENTS):
+        try:
+            C.assert_calibrated(name)
+            allowed.append(name)
+        except C.Uncalibrated as exc:
+            assert exc.verdict == "NOT_MEASURED", exc.verdict
+            assert exc.reason_class == C.UNCALIBRATED, exc.reason_class
+            assert exc.instrument == name
+            refused.append(name)
+    with_ev = sorted(n for n, i in C.INSTRUMENTS.items()
+                     if i.miscalibrated_evidence is not None)
+    assert refused == with_ev, (refused, with_ev)
+    assert allowed == sorted(set(C.INSTRUMENTS) - set(with_ev))
+    for name in refused:
+        assert C.verdict_for(name) == ("NOT_MEASURED", C.UNCALIBRATED)
+    for name in allowed:
+        assert C.verdict_for(name) is None
+
+
+def test_every_evidence_object_says_what_closes_it():
+    """An entry that cannot name its own exit is a permanent exemption.
+
+    `closed_by` names the owner and the change whose landing deletes it;
+    `instead_of` says what the tree SEES meanwhile. Both are what make this an
+    open finding rather than a quiet allowance.
+    """
+    for name, inst in sorted(C.INSTRUMENTS.items()):
+        ev = inst.miscalibrated_evidence
+        if ev is None:
+            continue
+        assert ev.failed_sides and set(ev.failed_sides) <= {"positive",
+                                                            "negative"}, ev
+        assert len(ev.closed_by) > 80, f"{name}: closed_by is too thin"
+        assert len(ev.instead_of) > 40, f"{name}: instead_of is too thin"
+
+
+def test_no_test_in_this_file_skips_or_xfails():
+    """The standing rule, asserted on this file's own source.
+
+    The first draft gated its positive-side assertion on a hand-typed set and
+    called `pytest.skip` for the instrument that fails. Two forbidden shapes at
+    once — a skip, and a register that must be hand-fed and goes stale the day
+    the fix lands with nothing to say so. The registry already MEASURES the
+    state; these tests read THAT.
+    """
+    tree = ast.parse(Path(__file__).read_text())
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
+                and n.func.attr in ("skip", "xfail", "importorskip"):
+            raise AssertionError(
+                f"pytest.{n.func.attr} at line {n.lineno} — this file asserts "
+                f"the measurement, it never steps around it")
+        if isinstance(n, ast.Attribute) and n.attr in ("skipif", "xfail") \
+                and isinstance(n.value, ast.Attribute) \
+                and n.value.attr == "mark":
+            raise AssertionError(f"pytest.mark.{n.attr} at line {n.lineno}")
 
 
 def test_the_drv_census_still_counts_the_empty_report():
@@ -162,15 +257,6 @@ def test_assert_calibrated_is_a_no_op_for_a_calibrated_instrument():
     C.assert_calibrated("sdf_gate_sim::sdf_annotation_census")
 
 
-def test_assert_calibrated_refuses_a_miscalibrated_instrument():
-    name = sorted(_MISCALIBRATED_ON_THIS_TREE)[0]
-    with pytest.raises(C.Uncalibrated) as exc:
-        C.assert_calibrated(name)
-    assert exc.value.verdict == "NOT_MEASURED"
-    assert exc.value.reason_class == C.UNCALIBRATED
-    assert exc.value.instrument == name
-
-
 def test_assert_calibrated_refuses_an_instrument_that_is_not_registered():
     with pytest.raises(C.Uncalibrated) as exc:
         C.assert_calibrated("some_program::some_reader")
@@ -180,8 +266,6 @@ def test_assert_calibrated_refuses_an_instrument_that_is_not_registered():
 
 def test_verdict_for_answers_the_same_question_the_same_way():
     assert C.verdict_for("sdf_gate_sim::sdf_annotation_census") is None
-    name = sorted(_MISCALIBRATED_ON_THIS_TREE)[0]
-    assert C.verdict_for(name) == ("NOT_MEASURED", C.UNCALIBRATED)
     assert C.verdict_for("nope::nope") == ("NOT_MEASURED", C.UNCALIBRATED)
 
 
@@ -521,9 +605,10 @@ def test_the_cli_report_exits_one_while_an_instrument_is_miscalibrated():
         [sys.executable, str(PROG / "instrument_calibration.py"),
          "--report", "--root", str(PLUGIN)],
         capture_output=True, text=True)
-    expected = 1 if _MISCALIBRATED_ON_THIS_TREE else 0
-    assert cp.returncode == expected, cp.stdout + cp.stderr
-    for name in _MISCALIBRATED_ON_THIS_TREE:
+    with_ev = [n for n, i in C.INSTRUMENTS.items()
+               if i.miscalibrated_evidence is not None]
+    assert cp.returncode == (1 if with_ev else 0), cp.stdout + cp.stderr
+    for name in with_ev:
         assert name in cp.stdout
 
 
