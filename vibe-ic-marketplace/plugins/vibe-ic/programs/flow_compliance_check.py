@@ -12964,6 +12964,14 @@ def _evidence_integrity_scan(project: Path,
     # EVIDENCE_MISSING branch changes when `self_failed` is empty.
     if self_failed or broken:
         result.status = _T.Verdict.FAIL.value
+        # R-0915-85 — A GATE DEFECT IS A BARE `FAIL`. The row's DEFAULT is
+        # `FAIL(missing_artefact)` (nothing on disk yet), so a clause that
+        # resolves a real gate failure must CLEAR the reason or it inherits a
+        # sentence about an absent artefact. MEASURED: step 9 read
+        # `FAIL(missing_artefact)` on a fixture whose synthesis gate had
+        # actually failed, which made it invisible to the cascade ROOT
+        # predicate and step 14 lost its `blocked-by-upstream(9)` note.
+        result.reason_class = ""
         if self_failed:
             result.reasons.append(
                 "VERDICT_SELF_REPORTS_FAIL (#433c): declared output(s) carry a "
@@ -14555,6 +14563,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         else:
             result.status = (_T.Verdict.PASS.value if passed
                              else _T.Verdict.FAIL.value)
+            # A gate that RAN and did not pass is a defect, not an absence.
+            result.reason_class = ""
             result.reasons.extend(non_hint_reasons)
         # vibe-ic#901 - the tier is a per-STEP word and a partially vacuous step
         # has no such word: some of its clauses examined the design and some
@@ -14891,7 +14901,16 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # FAIL the gate already found — owes what it declared, and an output that
     # does not exist is FAIL(missing_artefact) whatever the gate said about the
     # ones that are present.
-    _owes_its_declared_outputs = not _T.is_excused(result.status)
+    # AND A STEP THAT ALREADY FAILED KEEPS ITS FAIL AND ITS REASON. The rule
+    # this file already stated — "FAIL is a real defect the gate detected …
+    # replacing any of those with MISSING would destroy information" — reads
+    # differently now that both wear the word FAIL: what the downgrade would
+    # destroy is the REASON. MEASURED on the #1980 fixture: step 9's gate
+    # really failed, the downgrade relabelled it `missing_artefact`, and the
+    # cascade root predicate (which reads that reason) then found no root, so
+    # step 14 lost its `blocked-by-upstream(9)` attribution.
+    _owes_its_declared_outputs = result.status not in (
+        _T.Verdict.NOT_APPLICABLE.value, _T.Verdict.FAIL.value)
     _natural_done_claim = _owes_its_declared_outputs
 
     if _natural_done_claim and _audit_produced:
@@ -14936,6 +14955,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         if _unbound:
             _codes = sorted({str(spec.get("code")) for spec in _unbound})
             result.status = _T.Verdict.FAIL.value
+            # A gate defect, not an absent artefact — see the note above.
+            result.reason_class = ""
             result.reasons.append(
                 f"UNATTRIBUTED OUTPUT: {len(_unbound)} of "
                 f"{result.output_binding['n_specs']} declared output(s) were "
@@ -18071,7 +18092,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         label = _label.get(r.status, r.status)
         sid_str = f"{r.id:>2}" if isinstance(r.id, int) else f"{r.id:>2}"
         note = f"  [{r.cascade_note}]" if r.cascade_note else ""
-        print(f"  {icon} [{label:<17}] Step {sid_str}: {r.name}  ({r.stage}){note}")
+        # R-0915-85 — THE STEP LINE CARRIES ITS REASON AND ITS DISCLOSURES.
+        # Five words say less per line than eighteen did, and this is where the
+        # difference has to come back: a reader scanning the table could tell
+        # `VACUOUS-PASS` from `INCOMPLETE` at a glance, and both are
+        # `NOT_MEASURED` now. Printed beside the word rather than only in the
+        # reason list below, because the reason list is what a long run scrolls
+        # past.
+        _why = f" ({r.reason_class})" if r.reason_class else ""
+        _disc = (f" [{', '.join(r.disclosures)}]" if r.disclosures else "")
+        print(f"  {icon} [{label:<17}] Step {sid_str}: {r.name}  "
+              f"({r.stage}){_why}{_disc}{note}")
         for reason in r.reasons:
             print(f"       └─ {reason}")
 

@@ -447,7 +447,11 @@ def assert_p0_ancestry_closed(out: str) -> None:
     assert m, f"precondition: step D1 must appear in the report:\n{out}"
     label = m.group(1)
     status = _LABEL_TO_PRODUCER_STATUS.get(label, label)
-    assert _T.normalize(status) in _T.PRODUCER_STATUSES, (
+    # R-0915-85 — `normalize` is gone: the five have one spelling each, and
+    # tolerating a second is how a third arrives. The RENDERED label may still
+    # differ from the word (the table prints `WAIVED-DEFERRED`), which is what
+    # `_LABEL_TO_PRODUCER_STATUS` above is for.
+    assert status in _T.PRODUCER_STATUSES, (
         f"precondition NOT DETERMINED: the step listing rendered D1 as "
         f"{label!r}, which is neither one of `verdict."
         f"PRODUCER_STATUSES` nor a rendering this file knows how to translate. "
@@ -699,11 +703,15 @@ def test_strict_structural_only_structural_gates(tmp_path,
     assert_p0_ancestry_closed(out)
     # PRECONDITION #2, not decoration: if steps 2-6 were not MISSING this test
     # would be asserting that a clean run is clean.
+    # R-0915-85 — a declared output that does not exist is
+    # `FAIL(missing_artefact)`, and the step line carries the reason beside the
+    # word. The precondition is the same fact, read where it now lives.
     for sid in (2, 3, 4, 5, 6):
-        assert re.search(rf"^\s*\S*\s*\[MISSING\s*\] Step\s+{sid}:",
-                         out, re.M), (
-            f"precondition: step {sid} must be MISSING for the scope claim "
-            f"to mean anything:\n{out}")
+        assert re.search(
+            rf"^\s*\S*\s*\[FAIL\s*\] Step\s+{sid}:.*\(missing_artefact\)",
+            out, re.M), (
+            f"precondition: step {sid} must be FAIL(missing_artefact) for the "
+            f"scope claim to mean anything:\n{out}")
     assert "Phase 2 strict-structural mode" not in out, out
     # Overall verdict could be PASS or PASS_WITH_WAIVERS (but never
     # FAIL purely due to step-level MISSING when structural gates
@@ -821,7 +829,10 @@ def test_strict_structural_does_not_excuse_a_broken_p0_ancestry(
     assert rc == 1, out
     assert "Overall: FAIL" in out, out
     assert "Step-execution ordering violations" in out, out
-    assert re.search(r"\[P0\].*marked done while dependency", out), out
+    # R-0915-85 — the guard now reports the violation over P0 as a NOTE when
+    # the dependency is outside this run's verdict scope, which is the
+    # informational tier it has always had; the GATING line still names P0.
+    assert re.search(r"P0.*marked done while dependency", out), out
 
 
 def test_strict_step_artifacts_includes_step_gates(tmp_path,
@@ -906,7 +917,9 @@ def test_issue1980_step14_nested_nonverdict_is_classed_not_skipped(tmp_path):
     )
     (proj / "phase2" / "stage2" / "synth" / "netlist.v").write_text("module top(); endmodule\n")
     r = _run(str(proj), "--strict")
-    assert re.search(r"\[MISSING\s*\] Step\s+14:.*blocked-by-upstream\(9\)",
+    # R-0915-85 — `MISSING` is `FAIL(missing_artefact)`; the cascade note is
+    # unchanged and is what this test is about.
+    assert re.search(r"\[FAIL\s*\] Step\s+14:.*blocked-by-upstream\(9\)",
                      r.stdout), r.stdout
     # This line used to read `flow_compliance_check rc=1 verdict=CRASHED`, and
     # the crash it pinned was a DEFECT rather than a property of the fixture:
@@ -960,9 +973,15 @@ def _labelled_step_ids(stdout: str, label: str) -> set:
 
 
 def test_wave93_vacuous_pass_counter_accurate(tmp_path):
-    """The summary counter must equal the number of steps LABELLED
-    `[VACUOUS-PASS]` in the per-step listing — AND those steps must be the
-    ones this fixture is built to make vacuous.
+    """The summary counter must equal the number of steps LABELLED on the
+    vacuity tier in the per-step listing — AND those steps must be the ones
+    this fixture is built to make vacuous.
+
+    R-0915-85 — `VACUOUS-PASS` was a WORD in both places. It is now
+    `NOT_MEASURED(no_population)` on the step line and `vacuity` on the
+    `disclosed:` line beside the tally, so the two readings this test compares
+    come from two different lines. Both properties are unchanged and both are
+    still asserted.
 
     Two properties, deliberately both:
 
@@ -987,21 +1006,27 @@ def test_wave93_vacuous_pass_counter_accurate(tmp_path):
     r = _run(str(proj), "--strict")
     # Find the summary line
     counter_lines = [ln for ln in r.stdout.splitlines()
-                     if "VACUOUS-PASS=" in ln and "PASS=" in ln]
+                     if "disclosed:" in ln and "vacuity=" in ln]
     assert counter_lines, r.stdout
-    labelled = [ln for ln in r.stdout.splitlines() if "[VACUOUS-PASS" in ln]
+    # The VACUITY tier specifically — the step line carries its disclosures,
+    # and `NOT_MEASURED` now covers every reason nothing was measured, of which
+    # vacuity is one.
+    labelled = [ln for ln in r.stdout.splitlines()
+                if "[NOT_MEASURED" in ln and "[vacuity" in ln]
     assert labelled, (
-        "no step is LABELLED [VACUOUS-PASS] on a fixture that must produce at "
-        f"least Step 14's no-.ys vacuous pass:\n{r.stdout}")
-    m = re.search(r"VACUOUS-PASS=(\d+)", counter_lines[0])
+        "no step is labelled NOT_MEASURED carrying the vacuity disclosure, on "
+        f"a fixture that must produce at least Step 14's no-.ys vacuous "
+        f"pass:\n{r.stdout}")
+    m = re.search(r"vacuity=(\d+)", counter_lines[0])
     assert m, counter_lines[0]
     assert int(m.group(1)) == len(labelled), (
-        f"summary says VACUOUS-PASS={m.group(1)} but the per-step listing "
-        f"labels {len(labelled)} step(s) [VACUOUS-PASS]: "
+        f"the disclosure line says vacuity={m.group(1)} but the per-step "
+        f"listing labels {len(labelled)} step(s) NOT_MEASURED: "
         f"{[ln.strip()[:80] for ln in labelled]}\n{counter_lines[0]}")
-    seen = _labelled_step_ids(r.stdout, "NOT_MEASURED")
+    seen = {ln.split("Step", 1)[1].split(":", 1)[0].strip()
+            for ln in labelled}
     assert seen == _VAC2_EXPECTED_VACUOUS_STEPS, (
-        f"the set of steps on the VACUOUS-PASS tier changed: expected "
+        f"the set of steps on the vacuity tier changed: expected "
         f"{sorted(_VAC2_EXPECTED_VACUOUS_STEPS)}, got {sorted(seen)}. A step "
         f"joining the vacuous tier means a gate stopped measuring; a step "
         f"leaving it means a gate started, or stopped disclosing. Either is a "
