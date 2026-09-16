@@ -474,6 +474,81 @@ def test_KNOWN_NEGATIVE_a_path_already_covered_gets_no_second_mount():
     assert "/home/someone/work" not in out and "/tmp/scratch" not in out
 
 
+# ── one real-IC run at a time on a host ─────────────────────────────────────
+#
+# A full-flow run wants ~8 cores and a 31 GB EDA container. Two at once do not
+# halve the wall-clock; they make both runs measure the machine's contention
+# instead of the candidate, which destroys the gate's only claim — that a diff
+# it prints is about the TREE. The dispatcher put this lock in the fleet copy
+# after the first landing; it belongs in the shipped one so anybody running the
+# arm gets it.
+#
+# THE ARM WAITS. It does not refuse (a second landing during a run is normal —
+# the queue is serialised, not rejected) and it does not kill (the owner's
+# standing rule). `flock` is the primitive because the KERNEL releases it when
+# the holder dies: a killed landing cannot strand the host, and there is no
+# stale-lock timeout to get wrong.
+
+def test_KNOWN_POSITIVE_a_second_arm_WAITS_for_the_host_lock(bed):
+    """Held lock -> the arm announces the wait and makes no progress; released
+    -> it completes. Observed by RUNNING it, not by grepping the script for
+    reassuring words."""
+    import fcntl
+    import time
+    tree = _tree(bed / "tree", {"rc": 0, "report": _report("NO_REGRESSION")},
+                 {"rc": 0, "report": _report("NO_REGRESSION")})
+    lock = bed / "host.lock"
+    holder = open(lock, "w")
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    out = bed / "out"
+    env = dict(os.environ)
+    env.update({"REAL_IC_NAME": "anic", "REAL_IC_PDK": "anpdk",
+                "FROZEN_ROOT": str(_frozen(bed / "frozen", [])),
+                "EDA_CONTAINER": "real-ic-arm-test-container-that-does-not-exist",
+                "REAL_IC_LOCK": str(lock)})
+    proc = subprocess.Popen(
+        ["bash", str(_ARM), str(tree), str(bed / "corpus"), str(out)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+    try:
+        deadline = time.time() + 20
+        while time.time() < deadline and proc.poll() is None \
+                and not (out / ".subjects.jsonl").exists():
+            time.sleep(0.2)
+        assert proc.poll() is None, \
+            "the arm ran to completion while the host lock was held"
+        assert not (out / "real_ic_arm.json").exists()
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        holder.close()
+    stdout, _ = proc.communicate()
+    assert proc.returncode == 0, stdout
+    assert "WAITING" in stdout and str(lock) in stdout, stdout
+    assert (out / "real_ic_arm.json").exists()
+
+
+def test_KNOWN_NEGATIVE_a_free_lock_is_taken_without_waiting(bed):
+    """The guard must not make every run announce a wait it did not do."""
+    tree = _tree(bed / "tree", {"rc": 0, "report": _report("NO_REGRESSION")},
+                 {"rc": 0, "report": _report("NO_REGRESSION")})
+    out = bed / "out"
+    r = _run(tree, bed / "corpus", out, _frozen(bed / "frozen", []),
+             {"REAL_IC_LOCK": str(bed / "free.lock")})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "WAITING" not in r.stdout
+    assert "holding the host real-IC lock" in r.stdout
+
+
+def test_the_lock_is_RELEASED_before_the_replays(bed):
+    """Holding it through work that costs seconds would queue other landings
+    behind the cheap half. Asserted on the script's own ordering of the two
+    lines it prints, which is the thing that would silently change."""
+    src = _ARM.read_text(encoding="utf-8")
+    rel = src.index("exec 9>&-")
+    assert src.index("real_ic_gate.py") < rel, "released before the IC run"
+    assert rel < src.index("audit_replay.py"), \
+        "the lock is still held while the replays run"
+
+
 def test_no_timeout_or_kill_appears_in_either_landing_script():
     """The owner's standing rule, pinned in the files rather than promised."""
     for name in ("real_ic_arm.sh", "nightly_real_ic.sh"):

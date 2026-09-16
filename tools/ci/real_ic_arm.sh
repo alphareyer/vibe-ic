@@ -53,6 +53,11 @@
 #   FROZEN_ROOT         where the snapshots live          (default: $HOME/_frozen)
 #   EDA_CONTAINER       the container the run uses        (default: real-ic-arm-eda,
 #                       created from the plugin's own pin if absent)
+#   REAL_IC_LOCK        the host's one-real-IC-run-at-a-time lock file
+#                       (default: $TMPDIR/real_ic_arm.host.lock). The arm WAITS
+#                       on it — it never refuses and never kills. Give two
+#                       concurrent arms different paths only if they are on
+#                       different machines' filesystems.
 #   REAL_IC_REFERENCE   the table the IC run is judged against. Omitted: the
 #                       highest published cell for this ic+pdk — which, since
 #                       R-0915-88, this arm will normally REFUSE: a published
@@ -261,7 +266,36 @@ PY
 }
 
 # ── subject 1: the real IC, through the front door ───────────────────────────
+#
+# ONE REAL-IC RUN AT A TIME ON A HOST. A full-flow run wants ~8 cores and a 31 GB
+# EDA container; two at once do not halve the wall-clock, they make both runs
+# measure the machine's contention instead of the candidate — and this gate's
+# whole claim is that a diff it prints is about the TREE. `flock` is the right
+# primitive and a `while [ -e lockfile ]` loop is not: the kernel releases it
+# when the holder dies, so a killed landing cannot leave a lock that blocks the
+# host forever, and there is no stale-lock timeout to get wrong.
+#
+# IT WAITS; IT DOES NOT REFUSE AND IT DOES NOT KILL. A second landing arriving
+# during a run is NORMAL — the queue is serialised, not rejected — and the
+# owner's standing rule forbids a deadline that terminates a run. The wait is
+# announced with the lock path so a reader who wonders why nothing is happening
+# is not left guessing.
+REAL_IC_LOCK=${REAL_IC_LOCK:-${TMPDIR:-/tmp}/real_ic_arm.host.lock}
 GATE_JSON="$OUTDIR/real_ic_gate_${IC}.json"
+if command -v flock >/dev/null 2>&1 && exec 9>"$REAL_IC_LOCK" 2>/dev/null; then
+  if ! flock -n 9; then
+    echo "[real_ic_arm] another real-IC run holds $REAL_IC_LOCK — WAITING (no timeout, no kill)"
+    _lock_t0=$(date +%s)
+    flock 9
+    echo "[real_ic_arm] lock acquired after $(( $(date +%s) - _lock_t0 ))s"
+  fi
+  echo "[real_ic_arm] holding the host real-IC lock $REAL_IC_LOCK"
+else
+  # RECORDED, not passed over: without the lock two runs can overlap and each
+  # one's numbers are about the machine, not the tree.
+  echo "[real_ic_arm] NOTE: no host real-IC lock (flock unavailable or $REAL_IC_LOCK not writable) —" \
+       "a concurrent run on this host would make both measurements about contention" >&2
+fi
 echo "[real_ic_arm] $IC end-to-end on $TREE (container $CONTAINER)"
 python3 "$PROGRAMS/real_ic_gate.py" \
   --tree "$TREE" --ic "$IC" --pdk "$PDK" \
@@ -272,6 +306,10 @@ python3 "$PROGRAMS/real_ic_gate.py" \
   ${REAL_IC_REFERENCE:+--reference "$REAL_IC_REFERENCE"} \
   --json "$GATE_JSON" > "$OUTDIR/real_ic_gate_${IC}.log" 2>&1
 record "$IC" real_ic_gate "$?" "$GATE_JSON"
+# Released as soon as the IC run is done: the replays below need no container
+# and no cores worth serialising, and holding it through them would queue other
+# landings behind work that costs seconds.
+exec 9>&- 2>/dev/null || true
 
 # ── subject 2..n: every frozen snapshot, re-judged ───────────────────────────
 if [ -d "$FROZEN" ]; then
