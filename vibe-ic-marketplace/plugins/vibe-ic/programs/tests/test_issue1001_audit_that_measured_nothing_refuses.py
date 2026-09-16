@@ -60,7 +60,13 @@ CHECKER = PROGRAMS / "flow_compliance_check.py"
 NOTHING = dict(
     overall="FAIL",
     invoked_gate_count=0,
-    step_counts={"PASS": 0, "FAIL": 0, "FAIL": 40, "NOT_APPLICABLE": 23},
+    # R-0915-85 — `MISSING` was a word of its own and correctly did NOT count
+    # as a decision. It is `FAIL(missing_artefact)` now, so the 40 land in the
+    # FAIL bucket and the word-only count would say 40 steps were decided.
+    # `decided_step_count` carries the fact the word no longer can: the call
+    # site computes it from the rows, where the reason_class is.
+    step_counts={"PASS": 0, "FAIL": 40, "NOT_APPLICABLE": 23},
+    decided_step_count=0,
     structural_fail_lines=[],
     step_artifact_fail_lines=[],
     registered_gate_count=246,
@@ -76,7 +82,12 @@ def _verdict(**over):
 # ── POSITIVE: the real shape refuses ──────────────────────────────────────
 def test_an_audit_that_invoked_no_gate_and_decided_no_step_refuses():
     verdict, reason = _verdict()
-    assert verdict == "INSUFFICIENT_DATA", (verdict, reason)
+    # R-0915-85 — the refusal is the REASON beside the word, not a word of its
+    # own. `INSUFFICIENT_DATA` said what `NOT_MEASURED` says; what made it more
+    # than a verdict is `verdict_refusal_reason`, and that is asserted here
+    # rather than inferred from a spelling.
+    assert verdict == "NOT_MEASURED", (verdict, reason)
+    assert reason and "REFUSED, not FAILED" in reason, (verdict, reason)
     assert reason, "a refusal with no stated reason is not a disclosure"
 
 
@@ -105,10 +116,10 @@ def test_an_unresolved_registered_population_still_states_what_it_had():
     ("one_gate_invoked", {"invoked_gate_count": 1}),
     # A step was decided as failing — the loudest possible numerator.
     ("one_step_failed",
-     {"step_counts": {"PASS": 0, "FAIL": 1, "FAIL": 40}}),
+     {"step_counts": {"PASS": 0, "FAIL": 41}, "decided_step_count": 1}),
     # A step was decided as passing: the audit read the design.
     ("one_step_passed",
-     {"step_counts": {"PASS": 1, "FAIL": 0, "FAIL": 40}}),
+     {"step_counts": {"PASS": 1, "FAIL": 40}, "decided_step_count": 1}),
     # Line-level evidence exists even though no gate reported a verdict.
     ("structural_line", {"structural_fail_lines": ["[9] some structural gate"]}),
     ("step_artifact_line",
@@ -124,8 +135,7 @@ def test_the_refusal_does_not_leak(label, over):
 
 def test_a_passing_run_is_never_rewritten():
     """The refusal is scoped to FAIL; it can never touch a green verdict."""
-    for green in ("PASS", "PASS_WITH_WAIVERS",
-                  "PASS_WITH_OPEN_SOURCE_CONSTRAINTS"):
+    for green in ("PASS", "PASS_WITH_WAIVERS", "NOT_APPLICABLE"):
         verdict, reason = _verdict(overall=green)
         assert (verdict, reason) == (green, None), (green, verdict, reason)
 
@@ -151,8 +161,16 @@ def test_empty_project_refuses_in_the_artefact_and_still_exits_1(tmp_path):
          / "phase23_completion_audit.json").read_text(encoding="utf-8"))
     assert audit["invoked_gate_count"] == 0, audit["invoked_gate_count"]
     assert audit["step_counts"]["PASS"] == 0
-    assert audit["step_counts"]["FAIL"] == 0
-    assert audit["verdict"] == "INSUFFICIENT_DATA", audit["verdict"]
+    # R-0915-85 — the FAIL bucket is NOT empty any more: every declared output
+    # of an empty tree is absent, and an absent required artefact is
+    # `FAIL(missing_artefact)`. What this line has always meant — not one step
+    # was DECIDED against this design — is read off the reason, which is where
+    # that fact now lives.
+    _decided_fails = [r for r in audit["steps"]
+                      if r["status"] == "FAIL"
+                      and r["reason_class"] != "missing_artefact"]
+    assert _decided_fails == [], _decided_fails
+    assert audit["verdict"] == "NOT_MEASURED", audit["verdict"]
     assert audit["verdict_refusal_reason"], audit
     # The run's own status is untouched and still visible in the artefact.
     assert audit["run_status"] == "FAIL", audit["run_status"]
@@ -184,7 +202,9 @@ def test_the_refused_artefact_is_no_longer_read_as_a_step_internal_fail(
     nested = (proj / "reports" / "reports" / "audit"
               / "phase23_completion_audit.json")
     assert nested.is_file(), "fixture did not reproduce the wrong-root shape"
-    assert json.loads(nested.read_text())["verdict"] == "INSUFFICIENT_DATA"
+    _nested = json.loads(nested.read_text())
+    assert _nested["verdict"] == "NOT_MEASURED"
+    assert _nested.get("verdict_refusal_reason")
 
     gate = PROGRAMS / "step_internal_fail_bubble_up_check.py"
     r = _pr.run([sys.executable, str(gate), str(proj)],

@@ -1814,7 +1814,7 @@ def test_a_project_that_is_not_a_directory_is_rc2(tmp_path):
 def test_no_claim_source_reports_not_checked_never_pass(tmp_path):
     """An unmeasured thing must not read as a measured zero."""
     r, rep = _report(tmp_path, expect=RC_OK)
-    assert rep["claim_audit"] == "NOT_MEASURED"
+    assert rep["claim_audit"] == "NOT_CHECKED"
     assert rep["claims_examined"] == 0
     assert rep["claim_sources"] == []
     assert "NOT_MEASURED" in r.stdout
@@ -1847,5 +1847,5 @@ def test_an_early_refusal_still_writes_the_refusal_report(tmp_path):
     rep = json.loads(out.read_text())
     assert rep["verdict"] == "NOT_MEASURED"
     assert rep["declarations"] == 0
-    assert rep["claim_audit"] == "NOT_MEASURED"
+    assert rep["claim_audit"] == "NOT_CHECKED"
     assert "does not exist" in rep["missing_authority"]

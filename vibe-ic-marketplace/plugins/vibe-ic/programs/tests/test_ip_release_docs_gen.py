@@ -423,7 +423,7 @@ def test_the_producer_is_dispatched_by_the_runner_and_a_refusal_publishes_nothin
     harmed = build_project(tmp_path / "harmed", packages=(SUBJECT,))
     (harmed / "phase3" / "stage4" / "hardmacro" / f"{SUBJECT}.lef").unlink()
     harmed_result = runner.step_ip_release_docs_gen(harmed)
-    assert harmed_result.status == "SKIP", harmed_result
+    assert harmed_result.status == "NOT_MEASURED", harmed_result
     assert harmed_result.extras.get("producer_rc") == 1, harmed_result
     assert not (harmed / "phase3" / "stage4" / "documentation").exists(), (
         "a kit its own gate refuses published release documents")

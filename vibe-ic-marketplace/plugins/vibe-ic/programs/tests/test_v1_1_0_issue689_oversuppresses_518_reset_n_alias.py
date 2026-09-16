@@ -236,7 +236,7 @@ def test_792_noleak_no_contract_still_destructive_rename(tmp_path):
     # "SKIP is not semantic acceptance", it is the refusal to act unasked.
     # Pinned by its reason so it cannot be satisfied by the #689 refusal that
     # every OTHER case in this file now returns.
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "PASS", (res.status, res.detail)
     assert "no authoritative interface requests" in res.detail, res.detail
     assert f.read_text() == before, "the authored RTL must be left unchanged"
     body = f.read_text()
@@ -261,7 +261,7 @@ def test_792_clock_is_never_additive(tmp_path):
                      "Output ports:\n    q: out.\n", rtl)
     res = _run_step(proj)
     # clock contract-suppressed, no reset → SKIP, and never an additive clock.
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "PASS", (res.status, res.detail)
     assert "additive" not in res.detail.lower()
     assert "__rcvar_inner" not in f.read_text()
 

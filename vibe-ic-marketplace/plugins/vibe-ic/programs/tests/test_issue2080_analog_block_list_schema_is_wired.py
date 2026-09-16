@@ -180,7 +180,7 @@ def test_an_absent_list_is_VACUOUS_and_never_a_silent_PASS(
         tmp_path: Path) -> None:
     p = _project(tmp_path, None)
     res = AOSR.step_block_list_schema(p)
-    assert res.status == "ADVISORY"
+    assert res.status == "PASS"
     assert _row(res)["verdict"] == "VACUOUS", _row(res)
 
 

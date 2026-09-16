@@ -30,7 +30,7 @@ def test_aggregate_verdict_env_unavailable_is_pass_with_waivers() -> None:
         StepResult("gds", "PASS"),
         StepResult("drc", "NOT_MEASURED", detail="calibre missing", reason_class="not_executed"),
     ]
-    assert _aggregate_verdict(plan) == "PASS_WITH_WAIVERS"
+    assert _aggregate_verdict(plan) == "NOT_MEASURED"
 
 
 def test_aggregate_verdict_mixed_waived_and_env_unavailable() -> None:
@@ -39,7 +39,7 @@ def test_aggregate_verdict_mixed_waived_and_env_unavailable() -> None:
         StepResult("drc", "NOT_MEASURED", reason_class="not_executed"),
         StepResult("lvs", "PASS_WITH_WAIVERS"),
     ]
-    assert _aggregate_verdict(plan) == "PASS_WITH_WAIVERS"
+    assert _aggregate_verdict(plan) == "NOT_MEASURED"
 
 
 def test_aggregate_verdict_fail_dominates_env_unavailable() -> None:
@@ -207,7 +207,7 @@ def test_step_lvs_waived_only_for_missing_inputs_not_unconditionally(
         return_value=(0, "", ""),
     ):
         res = step_lvs(tmp_path, "top", pdk, "test-container")
-    assert res.status == "PASS_WITH_WAIVERS"
+    assert res.status == "NOT_MEASURED"
     assert "LVS inputs missing" in res.detail
 
 

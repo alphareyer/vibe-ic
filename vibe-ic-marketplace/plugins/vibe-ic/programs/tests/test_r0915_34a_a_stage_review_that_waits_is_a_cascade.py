@@ -140,4 +140,4 @@ def test_an_unestablished_verdict_is_not_a_cascade(tmp_path):
 def test_BLOCKED_BY_UPSTREAM_is_not_skip_eligible():
     """Accuracy only, as ruled: naming the cascade must not green anything."""
     assert R.BLOCKED_BY_UPSTREAM not in R.SKIP_ELIGIBLE
-    assert R.record_verdict(R.BLOCKED_BY_UPSTREAM) == "NOT_MEASURED"
+    assert R.record_verdict(R.BLOCKED_BY_UPSTREAM) == "BLOCKED"

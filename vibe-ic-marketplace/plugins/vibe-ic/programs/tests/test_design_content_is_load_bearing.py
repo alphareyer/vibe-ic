@@ -130,7 +130,7 @@ def test_a_refusal_records_no_design_content_rather_than_omitting_the_field(
     project = _project(tmp_path, [("blk_alpha", "ldo")])   # no netlist at all
     assert S.run_block(project, "blk_alpha", "fake", "sky130", "auto") == 2
     rec = _record(project, "blk_alpha")
-    assert rec["status"] == "NOT_MEASURED", "PRECONDITION: expected a refusal"
+    assert rec["status"] == "BLOCKED", "PRECONDITION: expected a refusal"
     assert rec.get("design_content") == "none", rec
 
 
@@ -227,7 +227,7 @@ def test_the_matrix_gives_a_library_default_its_own_cell(tmp_path):
     out = tmp_path / "m.json"
     _run(ANALOG_COMPLIANCE, root, "--json", str(out))
     m = json.loads(out.read_text())["summary"]["matrix"]["blk_alpha"]
-    assert m["A3"] == "PASS_WITH_WAIVERS", m
+    assert m["A3"] == "PASS_STRUCTURE_ONLY", m
     assert m["A4"] == "PASS_WITH_WAIVERS", m
     assert m["A5"] == "FAIL", (
         "PRECONDITION: an obligation that really is unmet must still read "

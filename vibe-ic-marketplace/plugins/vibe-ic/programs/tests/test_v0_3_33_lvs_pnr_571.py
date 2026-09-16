@@ -85,7 +85,7 @@ def test_571a_fallback_floorplan_def_is_skipped(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "_to_container_path", lambda s, c: s)
     monkeypatch.setattr(R, "_container_mounts", lambda c: [])
     r = R.step_lvs(tmp_path, "chip_top", pdk, "x")
-    assert r.status == "SKIP"
+    assert r.status == "NOT_MEASURED"
     assert r.extras.get("finding") == "LVS_INPUT_DEF_NOT_ROUTED"
 
 

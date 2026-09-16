@@ -116,7 +116,7 @@ def test_missing_inputs_waived_with_name(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "_docker_exec",
                         lambda c, cmd, timeout=0, **_: (0, "", ""))
     r = runner.step_lvs(tmp_path, "chip_top", _pdk(), "x")
-    assert r.status == "PASS_WITH_WAIVERS"
+    assert r.status == "NOT_MEASURED"
     assert "LVS inputs missing" in r.detail
 
 

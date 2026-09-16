@@ -92,14 +92,14 @@ def test_797_no_l10_skips(tmp_path):
     proj = tmp_path / "p2"
     (proj / "phase1" / "generated_docs").mkdir(parents=True)
     res = R.step_l10_unit_tb_gen(proj, "chip_top")
-    assert res.status == "SKIP"
+    assert res.status == "NOT_MEASURED"
 
 
 def test_797_no_functional_vector_case_skips(tmp_path):
     proj = _project(tmp_path, [{"name": "c1", "kind": "cmd_response",
                                 "opcode": "0x1", "expected": "0x2"}])
     res = R.step_l10_unit_tb_gen(proj, "chip_top")
-    assert res.status == "SKIP"
+    assert res.status == "NOT_MEASURED"
 
 
 def test_797_emit_unit_tbs_kind_filter_directly(tmp_path):
@@ -116,7 +116,7 @@ def test_797_step_skips_with_a_reason_when_dut_unresolvable(tmp_path):
     140 of."""
     proj = _project(tmp_path, _FV, rtl=None)
     res = R.step_l10_unit_tb_gen(proj, "chip_top")
-    assert res.status == "SKIP", res.detail
+    assert res.status == "NOT_MEASURED", res.detail
     assert "refused to fabricate" in res.detail
     assert list((_pl.sim_dir(proj) / "tb").glob("*.v")) == []
 

@@ -100,7 +100,7 @@ def test_an_environment_refusal_is_blocked_and_not_waived(project,
     assert res.status == SPF.REFUSAL_STATUS, (res.status, res.detail)
     assert res.status != "PASS_WITH_WAIVERS"
     assert "ERRORED rc=" not in res.detail, res.detail
-    assert res.extras.get("verdict_tier") == "NOT_MEASURED", res.extras
+    assert res.extras.get("verdict_tier") == "ENV_UNAVAILABLE", res.extras
     assert res.extras.get("env_refused") is True, res.extras
 
 
@@ -130,7 +130,7 @@ def test_a_producer_that_really_errored_is_still_the_errored_row(project,
     p, blk = project
     _a3_answers(monkeypatch, 1, "Traceback (most recent call last):\nboom\n")
     res = R.step_for_block(p, blk, "A3_netlist_gen")
-    assert res.status == "PASS_WITH_WAIVERS", (res.status, res.detail)
+    assert res.status == "NOT_MEASURED", (res.status, res.detail)
     assert "ERRORED rc=1" in res.detail, res.detail
     assert res.extras.get("verdict_tier") != "NOT_MEASURED"
 

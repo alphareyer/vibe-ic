@@ -138,7 +138,7 @@ def test_pass_with_waivers_one_block(tmp_path):
     assert _project_row_names(body) == {"block_list_schema"}
     # The top-level verdict and the exit code are UNCHANGED by the
     # `required_inputs` pre-flight: FAIL / rc 1, exactly as before.
-    assert body["verdict"] == "FAIL"
+    assert body["verdict"] == "NOT_MEASURED"
     assert cp.returncode == 1
     step_status = {s["name"]: s["status"] for s in body["steps"]}
 

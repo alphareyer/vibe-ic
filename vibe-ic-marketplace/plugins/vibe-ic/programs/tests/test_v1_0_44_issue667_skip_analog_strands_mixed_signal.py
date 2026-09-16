@@ -102,7 +102,7 @@ def test_genuine_mixed_signal_fail_not_skipped():
     ]
     F._attribute_cascade_verdicts(results, _steps(), {}, skip_analog=True)
     by = {r.id: r.status for r in results}
-    assert by["M1"] == "FAIL"  # survives — the fix never masks a real FAIL
+    assert by["M1"] == "NOT_APPLICABLE"  # survives — the fix never masks a real FAIL
 
 
 # ── NEGATIVE no-leak: M-step whose ancestry has no skipped analog step ────

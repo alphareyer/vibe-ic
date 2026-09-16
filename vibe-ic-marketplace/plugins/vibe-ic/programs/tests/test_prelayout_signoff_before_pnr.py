@@ -54,7 +54,7 @@ def test_no_op_skip_when_no_staged_corners(tmp_path):
         liberty = "/foss/pdks/x/nom.lib"
 
     res = R.step_prelayout_signoff(proj, "chip_top", _Pdk(), "no-such-container")
-    assert res.status == "SKIP", res.status
+    assert res.status == "NOT_MEASURED", res.status
     assert res.output_files == []
     # exactly one staged lib is still a SKIP (a single corner is not a matrix)
     (proj / "input" / "pdk" / "liberty" / "tt.lib").write_text("library(tt){}")
@@ -124,7 +124,7 @@ def test_skip_message_names_both_corner_sources(tmp_path):
         liberty = "/foss/pdks/x/nom.lib"
 
     res = R.step_prelayout_signoff(proj, "chip_top", _Pdk(), "no-such-container")
-    assert res.status == "SKIP"
+    assert res.status == "NOT_MEASURED"
     assert "staged" in res.detail and "container built-in" in res.detail, res.detail
 
 

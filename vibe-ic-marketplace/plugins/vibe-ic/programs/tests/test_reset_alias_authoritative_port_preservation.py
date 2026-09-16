@@ -64,7 +64,7 @@ def test_evolved_interface_preserves_authoritative_reset_byte_for_byte(tmp_path)
 
     result = R.step_reset_clock_variant_aliases(tmp_path, "dut")
 
-    assert result.status == "SKIP", (result.status, result.detail)
+    assert result.status == "PASS", (result.status, result.detail)
     assert source.read_bytes() == before
     assert _top_ports(source, "dut") == {
         "clk", "reset", "data_in", "data_out", "ready"}

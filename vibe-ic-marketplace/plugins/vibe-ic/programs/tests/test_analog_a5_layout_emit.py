@@ -560,7 +560,7 @@ def test_arm_e_an_absent_capability_is_named_and_writes_nothing(
     project = _project(tmp_path, LEGAL_NARROW)
     rc, doc = _run(monkeypatch, project, stage)
     assert rc == A5E.RC_ENV_UNAVAILABLE
-    assert doc["result"] == "NOT_MEASURED"
+    assert doc["result"] == "ENV_UNAVAILABLE"
     assert doc["tool"] == tool
     assert "NOT_MEASURED" in doc["reason"]
     assert needle in doc["reason"], doc["reason"]
@@ -750,7 +750,7 @@ def test_an_unreachable_tool_is_reported_by_name_and_writes_no_layout(
                emit_rc=2, emit_out=said)
     monkeypatch.setattr(AOSR, "_pr", ran)
     res = AOSR.step_for_block(proj, {"name": "b"}, "A5_layout", None)
-    assert res.status == "PASS_WITH_WAIVERS", res
+    assert res.status == "NOT_MEASURED", res
     assert "NOT_MEASURED" in res.detail and "magic" in res.detail
     assert not (proj / "phase3" / "analog" / "b" / "layout.mag").exists()
 

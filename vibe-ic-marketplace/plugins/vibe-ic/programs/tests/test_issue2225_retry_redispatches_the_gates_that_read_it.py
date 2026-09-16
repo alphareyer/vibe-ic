@@ -293,7 +293,7 @@ def test_an_unregisterable_site_is_recorded_unmeasured_not_left_standing(
     assert row.status == _spf.REFUSAL_STATUS, "not green, and not a zero"
     assert row.extras["finding"] == R.SUPERSEDED_UNMEASURED
     assert "NOT re-measured" in row.detail
-    assert R._aggregate_verdict([row]) == "FAIL", (
+    assert R._aggregate_verdict([row]) == "NOT_MEASURED", (
         "an unmeasured supersession must not become a pass; the runner's own "
         "aggregator has to still fail on it")
 

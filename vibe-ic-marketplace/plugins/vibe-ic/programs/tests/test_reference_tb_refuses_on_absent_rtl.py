@@ -97,7 +97,7 @@ def test_same_class_two_verdicts_are_reconcilable(tmp_path):
         "  assign y = a & b;\nendmodule\n")
     r_present = DOR.step_reference_tb(present, "chip_top", _NON_AID_CLASS)
 
-    assert r_present.status == "SKIP", (
+    assert r_present.status == "NOT_APPLICABLE", (
         f"precondition: this class SKIPs once rtl/ exists; got {r_present.status}")
     # The refusal must have SAID so, rather than leaving the reader to guess
     # that a FAIL and a SKIP were the same underlying situation.

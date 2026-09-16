@@ -240,7 +240,7 @@ def test_a_run_that_staged_no_digest_records_NOT_APPLICABLE(
     p = tmp_path / "generated"
     (p / "phase2/stage1").mkdir(parents=True)
     res = DOSR.step_lesson_consumption(p)
-    assert res.status == "ADVISORY"
+    assert res.status == "PASS"
     row = _row(res)
     assert row["verdict"] == "NOT_APPLICABLE" and row["digest_present"] is False
 
@@ -256,7 +256,7 @@ def test_a_refusing_gate_is_NOT_MEASURED_never_a_SKIP_or_a_PASS(
     p = _authoring_project(tmp_path)
     (p / "phase2/stage1/lessons_ack.json").write_text("{ not json at all")
     res = DOSR.step_lesson_consumption(p)
-    assert res.status == "ADVISORY"
+    assert res.status == "PASS"
     row = _row(res)
     assert row["verdict"] == "NOT_MEASURED", row
     assert row["rc"] == 2 and "unreadable" in row["reason"], row

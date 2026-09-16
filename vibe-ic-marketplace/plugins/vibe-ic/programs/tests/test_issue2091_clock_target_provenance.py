@@ -120,7 +120,7 @@ def test_absent_provenance_is_NOT_CHECKED_not_PASS(tmp_path):
     """vibe-ic#1140 — a gate with no input certifies nothing."""
     proj = _project(tmp_path, "empty")
     rep = gate.check(proj)
-    assert rep["verdict"] == "NOT_MEASURED"
+    assert rep["verdict"] == "NOT_CHECKED"
     assert gate.main([str(proj)]) == 2
 
 

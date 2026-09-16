@@ -274,7 +274,7 @@ def test_generic_program_first_hook_routes_to_expert_as_incomplete(
     assert step.extras["fallback_skill"] == "testbench-gen"
     rec = json.loads((tmp_path / "reports/phase2/gates/"
                       "professional_tb.json").read_text())
-    assert rec["status"] == "NOT_MEASURED"
+    assert rec["status"] == "INCOMPLETE"
     assert rec["fallback_skill"] == "testbench-gen"
 
 

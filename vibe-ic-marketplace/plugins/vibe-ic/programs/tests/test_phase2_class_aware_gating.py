@@ -123,7 +123,7 @@ def test_generic_class_reference_tb_skips_when_no_full_stack_tb(tmp_path):
            f"output data_out); assign data_out = data_in; endmodule\n")
     proj = _make_project_with_l9(tmp_path, rtl, top)
     sr = p2.step_reference_tb(proj, top, "processor_cpu")
-    assert sr.status == "SKIP"
+    assert sr.status == "NOT_APPLICABLE"
     assert "Phase 3" in sr.detail
     assert sr.extras.get("verification_track") == "generic_full_stack"
 
@@ -218,7 +218,7 @@ def test_qsf_gen_skips_for_generic_class_without_board_top(tmp_path):
     rtl = f"module {top}(input clk); endmodule\n"
     proj = _make_project_with_l9(tmp_path, rtl, top)
     sr = p2.step_qsf_gen(proj, top, "processor_cpu")
-    assert sr.status == "SKIP"
+    assert sr.status == "NOT_APPLICABLE"
     assert "board-pin" in sr.detail or "board" in sr.detail.lower()
 
 
@@ -227,7 +227,7 @@ def test_usb_hid_tester_skips_for_generic_class(tmp_path):
     rtl = f"module {top}(input clk); endmodule\n"
     proj = _make_project_with_l9(tmp_path, rtl, top)
     sr = p2.step_usb_hid_tester_verify(proj, ic_class="processor_cpu")
-    assert sr.status == "SKIP"
+    assert sr.status == "NOT_APPLICABLE"
     assert "Phase 3" in sr.detail
 
 

@@ -234,7 +234,7 @@ def test_no_binding_blocks_only_in_explicit_strict_mode(project):
         project,
         _step(99, ["out/good.json", "out/empty.json"], _VACUOUS_GATE),
         {}, strict_step_binding=True)
-    assert strict.status == "FAIL", (strict.status, strict.reasons)
+    assert strict.status == "NOT_MEASURED", (strict.status, strict.reasons)
     assert any("UNATTRIBUTED OUTPUT" in reason
                and "no_binding" in reason for reason in strict.reasons)
 
@@ -258,7 +258,7 @@ def test_a_run_ledger_that_omits_this_step_can_never_certify_it(project):
     # pre-fix control fails on the old program's wrong DONE value rather than
     # on the mere absence of a newly-added API parameter.
     result = check_step(project, step, {})
-    assert result.status == "FAIL", (result.status, result.reasons)
+    assert result.status == "NOT_MEASURED", (result.status, result.reasons)
     assert any("UNATTRIBUTED OUTPUT" in reason
                and "no_step_record" in reason
                for reason in result.reasons), result.reasons

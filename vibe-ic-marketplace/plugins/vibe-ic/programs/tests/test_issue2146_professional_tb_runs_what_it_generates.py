@@ -179,7 +179,7 @@ def test_a_dispatch_that_never_started_is_refused_by_that_name(
     D.step_professional_tb_gen(tmp_path, "dut", "some-container")
     rec = json.loads((out / REFUSAL).read_text())
     assert "COMMAND_NOT_FOUND" in rec["reason"], rec
-    assert _gate(tmp_path)["status"] == "NOT_MEASURED"
+    assert _gate(tmp_path)["status"] == "INCOMPLETE"
 
 
 def test_a_run_that_wrote_no_junit_is_refused_and_not_called_empty(
@@ -215,7 +215,7 @@ def test_a_skipped_transcript_is_still_not_a_pass(tmp_path, monkeypatch):
     step = D.step_professional_tb_gen(tmp_path, "dut", "c")
     assert step.status == "NOT_MEASURED"
     g = _gate(tmp_path)
-    assert g["status"] == "NOT_MEASURED"
+    assert g["status"] == "INCOMPLETE"
     assert "reference-model hook is unfilled" in g["reason"]
     assert g["cocotb_test_denominator"]["passed"] == 0
 
@@ -247,7 +247,7 @@ def test_a_class_the_generator_SKIPs_owes_no_bundle(tmp_path, monkeypatch):
         types.SimpleNamespace(generate=lambda _p: {"status": "SKIP",
                                                    "reason": "no interface"}))
     step = D.step_professional_tb_gen(tmp_path, "dut", "c")
-    assert step.status == "SKIP"
+    assert step.status == "NOT_MEASURED"
     assert not (tmp_path / "phase2/stage1/sim_professional").exists()
 
 

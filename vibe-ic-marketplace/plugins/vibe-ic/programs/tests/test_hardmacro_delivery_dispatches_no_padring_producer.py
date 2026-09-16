@@ -93,7 +93,7 @@ def test_hardmacro_with_a_slot_catalogue_does_not_dispatch_the_producer(
         "step 15.5ic's pad-ring producer was dispatched for a HARDMACRO "
         "delivery; its die_required_um then pins the floorplan to a ring "
         "nothing places")
-    assert res.status == "SKIP"
+    assert res.status == "NOT_APPLICABLE"
     assert "HARDMACRO" in res.detail
 
 
@@ -111,7 +111,7 @@ def test_a_delivery_with_no_submission_template_does_not_dispatch_it(
     p = _project(tmp_path)
     res = R._padring_producer_dispatch(p)
     assert spy == []
-    assert res.status == "SKIP"
+    assert res.status == "NOT_APPLICABLE"
 
 
 # ── the other direction: a DIE delivery must STILL get its ring ──────────────

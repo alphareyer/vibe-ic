@@ -474,6 +474,6 @@ def test_the_flows_producer_still_skips_when_there_is_no_stimulus(
     (p / "phase2/stage1/rtl/dut.v").write_text("module dut(); endmodule\n")
     monkeypatch.setattr(D, "_tool_in_container", lambda c, t: True)
     res = D.step_verilator_coverage(p, "dut", container="c")
-    assert res.status == "SKIP"
+    assert res.status == "NOT_MEASURED"
     assert "no testbench to instrument" in res.detail
     assert not (p / "reports/phase2/coverage/coverage_verilator.json").exists()

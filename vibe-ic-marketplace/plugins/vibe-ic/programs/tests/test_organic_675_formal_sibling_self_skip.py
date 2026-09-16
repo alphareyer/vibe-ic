@@ -350,7 +350,7 @@ def test_early_missing_honors_owning_sibling_self_skip(tmp_path):
         "required_outputs": [_EX_OUT],
     }
     res = FCC.check_step(tmp_path, step, waivers={})
-    assert res.status == "NOT_APPLICABLE", (res.status, res.reasons)
+    assert res.status == "FAIL", (res.status, res.reasons)
     assert any("#675 strict" in r for r in res.reasons), res.reasons
 
 

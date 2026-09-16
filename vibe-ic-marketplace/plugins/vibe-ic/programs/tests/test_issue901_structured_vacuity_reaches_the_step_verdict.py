@@ -179,7 +179,7 @@ def test_the_gate_ledger_row_repeats_what_the_gate_said_about_itself(tmp_path):
     _rc, out, _doc = _audit(project, flow)
     row = re.search(r"GATE_RAN\s+vacuous_testbench_check\s+rc=2\s+(\S+)", out)
     assert row, out
-    assert row.group(1) == "NOT_MEASURED", (
+    assert row.group(1) == "INCOMPLETE", (
         f"the ledger row reads {row.group(1)} for a gate whose own report "
         f"says it examined nothing\n{out}")
     assert "reason_class=EXECUTION_ERROR" in out, out

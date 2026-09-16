@@ -103,7 +103,7 @@ def _make_project(tmp_path: Path, rtl: str | None, *, spec: str = "") -> Path:
 
 def test_no_rtl_dir_skips(tmp_path):
     res = r.step_determinism_gates(tmp_path / "empty")
-    assert res.status == "SKIP"
+    assert res.status == "NOT_MEASURED"
 
 
 def test_self_toggle_or_divider_fails(tmp_path):

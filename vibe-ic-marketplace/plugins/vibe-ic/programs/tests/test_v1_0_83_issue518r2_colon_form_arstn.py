@@ -192,7 +192,7 @@ def test_runner_gate_suppresses_arstn_rename_with_colon_spec(tmp_path):
     # `emit_variant_alias_wrapper(additive_reset_map=...)` API. What this case is
     # ACTUALLY about — the contract spelling is never destructively renamed — is
     # preserved and in fact stronger: nothing is added either.
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "PASS", (res.status, res.detail)
     assert "#689" in res.detail, res.detail
     txt = rtl.read_text()
     assert txt == before, "the ruling promises the authored RTL is unchanged"

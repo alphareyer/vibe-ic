@@ -2653,7 +2653,7 @@ def test_d3_inline_native_missing_inputs_are_not_production(tmp_path):
     result = _produce_inline_signoff(tmp_path, entry, owner, "empty-input-control")
     assert not result.produced, result.detail
     report = json.loads((tmp_path / entry).read_text())
-    assert report["verdict"] == "NOT_MEASURED"
+    assert report["verdict"] == "NOT_CHECKED"
 
 
 @pytest.mark.parametrize("kind", ["preexisting", "dangling", "emitted_symlink", "missing_program"])

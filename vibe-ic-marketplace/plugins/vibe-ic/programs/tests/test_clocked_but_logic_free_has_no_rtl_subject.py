@@ -229,7 +229,7 @@ def test_step_rtl_gen_still_declares_it_when_there_is_a_subject(tmp_path):
 def test_step4_functional_evidence_skips_instead_of_failing(tmp_path):
     p = _mk_project(tmp_path, _CLOCKED_LOGIC_FREE)
     res = DOR.step_step4_functional_evidence(p, "data_converter")
-    assert res.status == "SKIP", res.detail
+    assert res.status == "NOT_APPLICABLE", res.detail
 
 
 def test_step4_still_runs_when_there_is_a_subject(tmp_path):

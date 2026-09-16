@@ -70,7 +70,7 @@ def test_a_full_pass_is_green_and_the_vacuous_tiers_are_too():
 def test_punctuation_is_not_the_answer():
     """The tree writes `VACUOUS_PASS` and `PARTIALLY-VACUOUS` in ONE report,
     so membership must normalise or it answers about the underscore."""
-    assert S._norm_status("vacuous_pass") == "NOT_MEASURED"
+    assert S._norm_status("vacuous_pass") == "VACUOUS_PASS"
     assert S._norm_status("Waived-Deferred") == "WAIVED-DEFERRED"
     assert S._norm_status(None) == "?"
 

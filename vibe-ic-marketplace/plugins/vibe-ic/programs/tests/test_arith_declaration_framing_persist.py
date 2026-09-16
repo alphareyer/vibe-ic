@@ -175,5 +175,5 @@ def test_wired_step_is_non_blocking_when_the_emitter_fail_closes(tmp_path):
     d = _load("design_one_shot_runner")
     # An empty project: no RTL, so the emitter cannot derive anything.
     res = d.step_arith_declaration_emit(tmp_path)
-    assert res.status == "SKIP", f"expected SKIP, got {res.status}"
+    assert res.status == "NOT_MEASURED", f"expected SKIP, got {res.status}"
     assert not (tmp_path / "plugin_output" / "declaration.json").exists()

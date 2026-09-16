@@ -125,7 +125,7 @@ def test_step_skips_rename_when_sdc_pins_original(tmp_path):
     _request_interface(tmp_path, "clk", "rst_ni", "o_data")
     chip = _stage_rtl(tmp_path, CHIP_TOP_CLK_I)
     res = R.step_reset_clock_variant_aliases(tmp_path, "chip_top")
-    assert res.status == "SKIP"
+    assert res.status == "PASS"
     assert "#618" in res.detail and "clk_i" in res.detail
     after = chip.read_text()
     assert "clk_i" in after, "the SDC-pinned port spelling must survive"

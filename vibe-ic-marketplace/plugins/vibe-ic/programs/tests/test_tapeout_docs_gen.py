@@ -292,7 +292,7 @@ def test_phase3_does_not_dispatch_37_5ic_on_the_ip_path(tmp_path):
     template.mkdir(parents=True)
     (template / "NO_TEMPLATE.txt").write_text("cell delivery\n", encoding="utf-8")
     result = runner.step_tapeout_docs_gen(tmp_path)
-    assert result.status == "SKIP", result
+    assert result.status == "NOT_APPLICABLE", result
     assert result.output_files == [], result
     assert not (tmp_path / "reports" / "phase3" / "docs").exists()
 

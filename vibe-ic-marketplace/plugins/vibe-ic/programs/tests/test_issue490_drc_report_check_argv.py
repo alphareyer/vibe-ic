@@ -191,7 +191,7 @@ def test_any_other_mode_is_refused_with_a_stated_reason(tmp_path, mode_args):
     assert mode_args[-1] in r.stderr, "the refusal must name what was requested"
     doc = json.loads(out.read_text())
     assert doc["passed"] is False
-    assert doc["summary"]["terminal_verdict"] == "NOT_MEASURED"
+    assert doc["summary"]["terminal_verdict"] == "NOT_CHECKED"
     assert doc["summary"]["pinned_mode"] == "drc"
 
 

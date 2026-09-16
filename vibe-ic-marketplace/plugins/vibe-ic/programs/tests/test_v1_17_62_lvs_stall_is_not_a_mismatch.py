@@ -126,7 +126,7 @@ def test_stalled_extraction_is_blocked_not_a_mismatch(tmp_path, monkeypatch):
 
     # THE CONTRACT, which is the whole point of the finding.
     assert v is not None, "no lvs_verdict.json was written for a stopped run"
-    assert v["status"] == "NOT_MEASURED", v["status"]
+    assert v["status"] == "BLOCKED", v["status"]
     assert v["result"] == "NOT_MEASURED", v["result"]
     assert v["finding"] == "LVS_EXTRACTION_STALLED"
     assert v["stopped_as"] == "STALLED"
@@ -161,7 +161,7 @@ def test_stalled_compare_is_blocked_not_a_mismatch(tmp_path, monkeypatch):
                     lvs_rpt_body="Netgen 1.5\nFlattening unmatched ")
     assert r.status == "NOT_MEASURED", (r.status, r.detail)
     assert r.extras.get("finding") == "LVS_COMPARE_STALLED"
-    assert v["status"] == "NOT_MEASURED"
+    assert v["status"] == "BLOCKED"
     assert v["finding"] == "LVS_COMPARE_STALLED"
     assert v["stopped_as"] == "STALLED"
     assert (v.get("supervision") or {}).get("watched") == "output+log+cpu"
@@ -204,7 +204,7 @@ def test_netgen_own_exit_without_terminal_token_is_still_incomplete(
                     lvs_rpt_body="Netgen 1.5\nFlattening unmatched ")
     assert r.status == "FAIL", (r.status, r.detail)
     assert r.extras.get("finding") == "LVS_NO_TERMINAL_VERDICT"
-    assert v["status"] == "NOT_MEASURED", v
+    assert v["status"] == "INCOMPLETE", v
     assert v["finding"] == "LVS_NO_TERMINAL_VERDICT", v
     assert "stopped_as" not in v, v
 

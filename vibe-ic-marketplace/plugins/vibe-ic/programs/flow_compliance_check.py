@@ -16583,6 +16583,7 @@ def completion_audit_verdict(
     structural_fail_lines: List[str],
     step_artifact_fail_lines: List[str],
     registered_gate_count: Optional[int] = None,
+    decided_step_count: Optional[int] = None,
 ) -> Tuple[str, Optional[str]]:
     """The `verdict` this run is ENTITLED to write into the completion audit.
 
@@ -16641,18 +16642,41 @@ def completion_audit_verdict(
     Returns (verdict, refusal_reason); refusal_reason is None whenever the
     verdict is `overall` unchanged. chip-AGNOSTIC — reads counts, not designs.
     """
-    if overall != "FAIL":
+    # R-0915-85 — THE REFUSAL FIRES ON THE TWO RED WORDS, and the second one
+    # is why: a run that measured nothing now reaches `NOT_MEASURED` at the
+    # ladder above, so keying only on FAIL meant this refusal could never fire
+    # again on exactly the run it was written for. Measured: #1001's fixture
+    # went from `INSUFFICIENT_DATA` to a bare `NOT_MEASURED` with no reason.
+    if overall not in (_T.Verdict.FAIL.value, _T.Verdict.NOT_MEASURED.value):
         return overall, None
     if invoked_gate_count != 0:
         return overall, None
-    if (step_counts or {}).get("PASS", 0) or (step_counts or {}).get("FAIL", 0):
+    # "WAS ANY STEP DECIDED?" — and R-0915-85 moved where that is readable.
+    # The test used to be `PASS or FAIL`, because `MISSING` (a declared output
+    # that does not exist) was a separate word and correctly did NOT count as a
+    # decision. `MISSING` is `FAIL(missing_artefact)` now, so a word-only count
+    # says every empty project decided dozens of steps and this refusal can
+    # never fire. `decided_step_count` is computed at the call site from the
+    # rows themselves, where the reason is; the word-only fallback is kept for
+    # callers that pass none, and it is the pre-reform behaviour.
+    _decided = (decided_step_count if decided_step_count is not None
+                else ((step_counts or {}).get("PASS", 0)
+                      + (step_counts or {}).get("FAIL", 0)))
+    if _decided:
         return overall, None
     if structural_fail_lines or step_artifact_fail_lines:
         return overall, None
     denom = ("of an unresolved registered-gate population"
              if registered_gate_count is None
              else f"of {registered_gate_count} registered")
-    return "INSUFFICIENT_DATA", (
+    # THE WORD IS `NOT_MEASURED` AND THE REFUSAL IS THE REASON BESIDE IT.
+    # `INSUFFICIENT_DATA` said exactly what NOT_MEASURED says — nothing about
+    # this design was measured — and said it in a word no other producer used.
+    # What made it more than a verdict is the `verdict_refusal_reason` it
+    # returns as the second element, which is published beside the word and is
+    # what `verdict_causes` keys on to tell a refusal from a judgement. That
+    # survives unchanged; only the word it accompanies is now one of the five.
+    return _T.Verdict.NOT_MEASURED.value, (
         f"REFUSED, not FAILED: 0 gate(s) {denom} were invoked and 0 step(s) "
         f"were decided (PASS 0 / FAIL 0), with no structural and no "
         f"step-artifact failure line. Nothing about this design was measured, "
@@ -19039,6 +19063,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             structural_fail_lines,
             step_artifact_fail_lines,
             structural_registered_count,
+            decided_step_count=sum(
+                1 for _r in results
+                if _r.status == _T.Verdict.PASS.value
+                or (_r.status == _T.Verdict.FAIL.value
+                    and _r.reason_class
+                    != _T.ReasonClass.MISSING_ARTEFACT.value)),
         )
 
         # vibe-ic#2092 — THE JOIN between the red and what caused it. Computed

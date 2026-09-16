@@ -320,7 +320,7 @@ def test_step_full_stack_tb_skip_when_l9_missing(tmp_path):
     project = tmp_path
     (project / "phase1" / "generated_docs").mkdir(parents=True, exist_ok=True)
     result = step_full_stack_tb_gen(project)
-    assert result.status == "SKIP", (
+    assert result.status == "NOT_MEASURED", (
         f"missing L9 should SKIP, not FAIL; got {result.status}"
     )
 

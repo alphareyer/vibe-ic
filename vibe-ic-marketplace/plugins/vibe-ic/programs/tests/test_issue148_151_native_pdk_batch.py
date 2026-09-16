@@ -84,7 +84,7 @@ def test_148_helper_digital_iface_present(tmp_path):
 def test_148_reference_tb_skips_on_all_analog(tmp_path):
     p = _l9_project(tmp_path, _ADC_ALL_ANALOG)
     r = DOR.step_reference_tb(p, "chip_top", "data_converter")
-    assert r.status == "SKIP"
+    assert r.status == "NOT_APPLICABLE"
     assert r.extras.get("deferred_to") == "analog_track"
     assert "rtl/ missing" not in r.detail
 
@@ -92,7 +92,7 @@ def test_148_reference_tb_skips_on_all_analog(tmp_path):
 def test_148_yosys_synth_skips_on_all_analog(tmp_path):
     p = _l9_project(tmp_path, _ADC_ALL_ANALOG)
     r = DOR.step_yosys_synth(p, "chip_top", "vibeic-eda", "data_converter")
-    assert r.status == "SKIP"
+    assert r.status == "NOT_APPLICABLE"
     assert r.extras.get("deferred_to") == "analog_track"
 
 

@@ -99,7 +99,7 @@ def test_aid_track_absent_compiler_skips_instead_of_failing(
     proj = _make_project(tmp_path)
     sr = dosr.step_reference_tb(proj, "core_top",
                                 "aid_class_half_duplex_single_wire")
-    assert sr.status == "SKIP", (sr.status, sr.detail)
+    assert sr.status == "NOT_MEASURED", (sr.status, sr.detail)
     assert sr.extras.get("iverilog_available") is False
     assert sr.extras.get("functional_verified") is False
     assert "NOT FOUND" in sr.detail

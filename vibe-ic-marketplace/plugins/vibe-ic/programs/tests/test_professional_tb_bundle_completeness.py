@@ -159,7 +159,7 @@ def test_DEFECT_absent_bundle_TREE_is_not_checked_rc2_not_a_fail(tmp_path):
     _report(tmp_path, _passing_record(
         tmp_path / "phase2" / "stage1" / "sim_professional" / "dut"))
     res = G.check(tmp_path)
-    assert res["verdict"] == "NOT_MEASURED", json.dumps(res, indent=2)
+    assert res["verdict"] == "NOT_CHECKED", json.dumps(res, indent=2)
     assert res["bundle"]["resolved_out_dir"] is None
     assert res["bundle"]["bundle_root_present"] is False
     assert res["bundle"]["state"] == "tree_absent"
