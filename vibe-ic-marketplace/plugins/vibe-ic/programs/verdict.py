@@ -660,6 +660,20 @@ def as_verdict_or_none(word: Any) -> Optional[Verdict]:
         return None
 
 
+def voids_dependents(upstream: Verdict) -> bool:
+    """THE CASCADE RULE, as the one-word question a caller can ask cheaply.
+
+    `cascade_to_dependent` is defined in terms of this, so the rule has ONE
+    owner and a caller that only needs the yes/no never has to build a
+    `StepVerdict` it is not going to publish. That is not a convenience: the
+    ordering-violation loop in `flow_compliance_check` used to construct a
+    stand-in for the upstream from nothing but its WORD, and a stand-in for an
+    upstream `NOT_MEASURED` has no reason_class to give, so the constructor
+    (rightly) refused and the whole run raised.
+    """
+    return parse(upstream) is Verdict.FAIL
+
+
 def cascade_to_dependent(upstream: StepVerdict,
                          dependent_id: str = "",
                          dependent_name: str = "") -> Optional[StepVerdict]:
@@ -690,7 +704,7 @@ def cascade_to_dependent(upstream: StepVerdict,
     not a verdict about everything downstream of it — `run_verdict` keeps the
     run off PASS, and the work that WAS done keeps the word it earned.
     """
-    if upstream.verdict is Verdict.FAIL:
+    if voids_dependents(upstream.verdict):
         return StepVerdict.not_measured(
             dependent_id, dependent_name,
             reason_class=ReasonClass.UPSTREAM_FAILED,

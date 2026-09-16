@@ -17678,15 +17678,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         # PASS (`run_verdict`'s precedence) and it takes nothing down with it;
         # the fact is still DISCLOSED on the dependent, in its reasons, which
         # is where a reader can act on it.
-        _up = _T.StepVerdict(
-            verdict=_T.parse(_v.get("signoff_status")),
-            step_id=str(_v.get("signoff_id") or ""),
-            name=str(_v.get("signoff") or ""),
-            reason_class=_T.ReasonClass.MISSING_ARTEFACT
-            if _T.parse(_v.get("signoff_status")) is _T.Verdict.FAIL else None,
-        ) if _v.get("signoff_status") else None
-        _cascaded = (_T.cascade_to_dependent(_up, _tid)
-                     if _up is not None else None)
+        # Ask the RULE before building anything. An upstream that does not
+        # void needs no stand-in — and could not have one: a NOT_MEASURED
+        # StepVerdict must name a reason_class, and all this record carries is
+        # the word. `voids_dependents` is the same rule `cascade_to_dependent`
+        # applies, read from the one module that owns it.
+        _up_word = (_T.parse(_v.get("signoff_status"))
+                    if _v.get("signoff_status") else None)
+        _cascaded = None
+        if _up_word is not None and _T.voids_dependents(_up_word):
+            _cascaded = _T.cascade_to_dependent(_T.StepVerdict(
+                verdict=_up_word,
+                step_id=str(_v.get("signoff_id") or ""),
+                name=str(_v.get("signoff") or ""),
+            ), _tid)
         for _r in results:
             if str(_r.id) != _tid:
                 continue
@@ -18374,9 +18379,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         # `r.status == "INCOMPLETE"`; the moment a second word for "this step
         # measured nothing" existed (`NOT-MEASURED`), the P0 violation was
         # printed and gated NOTHING. `verdict` owns the membership.
+        # R-0915-85 — AND NOT THE ONES THIS VERY VIOLATION MADE UNMEASURED.
+        # `PASS_VOIDED_BY_DEPENDENCY` used to keep the two apart by SPELLING:
+        # a step voided by its upstream was not in the no-verdict set, so the
+        # guard could not both void a terminal and then cite the voided
+        # terminal as proof that the violation gates. That word is gone, and
+        # the cascade now writes `NOT_MEASURED(upstream_failed)` — the same
+        # tier as "0 of 246 answered". MEASURED on this file's own #1429
+        # control: P0's 2 gates ran and passed, the cascade voided it off
+        # D1 = FAIL(missing_artefact), and the guard then read its own
+        # cascade back as evidence and forced the run to FAIL. The reason is
+        # what tells the two apart, so the reason is what is read.
         _no_verdict_ids = {str(r.id) for r in scoped
-                           if _T.says_nothing_was_measured(
-                               r.status)}
+                           if _T.says_nothing_was_measured(r.status)
+                           and getattr(r, "reason_class", "")
+                           != _T.ReasonClass.UPSTREAM_FAILED.value}
         # vibe-ic#2092 — ONE predicate, TWO projections. The gating lines and
         # the ids of the violations held informational were derived by two
         # copies of this condition; a second copy is a second place for the
