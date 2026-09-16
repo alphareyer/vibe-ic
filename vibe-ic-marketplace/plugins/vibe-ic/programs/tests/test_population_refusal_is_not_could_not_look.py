@@ -144,7 +144,7 @@ def test_an_empty_but_readable_corpus_still_refuses_and_is_blocking(tmp_path):
     text = proc.stdout + proc.stderr
 
     row = _structural_row(doc, "EMPTY")
-    assert row["state"] == "NOT_MEASURED", (
+    assert row["state"] == "NOT_CHECKED", (
         f"a MEASURED empty population stopped being a refusal: {row}")
     assert row["blocking_refusal"] is True, (
         f"the empty-corpus row is no longer blocking: {row}")
@@ -258,7 +258,7 @@ def test_the_two_facts_do_not_share_a_state_or_a_channel(tmp_path):
     # STILL TWO STATES -- this is where the distinction lives now.
     assert e["state"] != a["state"], (
         f"both facts still record one state: {e['state']}")
-    assert (e["state"], a["state"]) == ("NOT_MEASURED", "UNDETERMINED"), (e, a)
+    assert (e["state"], a["state"]) == ("NOT_CHECKED", "UNDETERMINED"), (e, a)
 
     # STILL TWO CHANNELS. A landing consumer reading the refusal list must be
     # reading refusals; a could-not-look must not be in it.

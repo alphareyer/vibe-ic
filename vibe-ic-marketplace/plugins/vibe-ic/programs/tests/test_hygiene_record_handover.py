@@ -195,7 +195,7 @@ def test_not_checked_still_counts_as_having_run():
     """The gate EXECUTED and refused. Dropping it from the denominator would
     hide a refusal inside a shrinking population, which is the opposite of what
     NOT_CHECKED exists to make visible."""
-    doc = _doc(["PASS", "NOT_MEASURED"])
+    doc = _doc(["PASS", "NOT_CHECKED"])
     assert "2/2 gate(s) ran" in R._hygiene_verdict(doc, 1).summary
 
 
@@ -218,7 +218,7 @@ def test_the_not_run_set_covers_every_state_the_dispatcher_records():
     for s in sorted(states):
         doc = _doc(["PASS", s])
         summary = R._hygiene_verdict(doc, 1).summary
-        expected = "2/2" if s in ("PASS", "FAIL", "NOT_MEASURED",
+        expected = "2/2" if s in ("PASS", "FAIL", "NOT_CHECKED",
                                   "WROTE_CORPUS") else "1/2"
         if f"{expected} gate(s) ran" not in summary:
             wrong.append(f"{s} (wanted {expected}, got {summary!r})")
@@ -347,7 +347,7 @@ def test_the_state_parser_finds_both_assignment_forms():
     repo = PROGRAMS.parents[3]
     disp = (repo / "tools" / "ci" / "_gate_dispatch.sh").read_text(encoding="utf-8")
     states = dispatcher_states(disp)
-    assert states == {"PASS", "FAIL", "NOT_MEASURED", "WROTE_CORPUS",
+    assert states == {"PASS", "FAIL", "NOT_CHECKED", "WROTE_CORPUS",
                       "LISTED", "OTHER_SHARD", "OUT_OF_SCOPE", "QUEUED",
                       "UNDETERMINED"}, sorted(states)
 

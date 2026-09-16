@@ -113,7 +113,7 @@ def test_the_empty_corpus_gate_is_IN_the_record_it_did_not_destroy(tmp_path):
 
     assert doc["declared"] == 2, doc
     assert doc["not_checked"] == 1, doc
-    labels = [g["label"] for g in doc["gates"] if g["state"] == "NOT_MEASURED"]
+    labels = [g["label"] for g in doc["gates"] if g["state"] == "NOT_CHECKED"]
     assert any("EMPTY" in l for l in labels), labels
     # #957's corpus row still reports the zero denominator beside it.
     assert any(c["items"] == 0 for c in doc["corpora"]), doc["corpora"]
@@ -128,7 +128,7 @@ def test_the_empty_corpus_gate_is_recorded_as_UNEXEMPTED(tmp_path):
     """
     _, doc = _run(tmp_path, _EMPTY_LOOP)
 
-    empty = [g for g in doc["gates"] if g["state"] == "NOT_MEASURED"][0]
+    empty = [g for g in doc["gates"] if g["state"] == "NOT_CHECKED"][0]
     assert empty["exempt_until"] is None, empty
     assert doc["not_checked_unexempted"] == [empty["label"]], doc
 
