@@ -116,7 +116,12 @@ def test_the_tone_row_IS_the_producer_s_own_floor_and_not_a_second_copy(osr):
     """The one thing that would reintroduce #2200 one file further along: a
     record sized by this module's restatement of an arithmetic the producer
     enforces from its own. So the rule must return the producer's own number
-    for every ratio, not a number that happens to agree at one of them."""
+    for every ratio, not a number that happens to agree at one of them.
+
+    R-0915-74: that floor now takes a SECOND input — an entry that declares
+    it is graded in the DECODED domain is sized in conversion windows. This
+    entry declares no such thing, so the number must be the raw-record one,
+    unchanged; the decoded case is pinned in the test below it."""
     out = r.derive(_entry(), {"window_clocks": 4.0},
                    {"enob": 14.0, "osr": osr}, _CONSUMER)
     tone = [c for c in out["constraints"]

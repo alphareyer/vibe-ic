@@ -1360,6 +1360,19 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
             # that realises 0 inverts the preference, 2.5x on the residual.
             # The decode has to match the loop, and this is the loop.
             "feedback_delay_clocks": 1.0,
+            # THIS CONVERTER IS GRADED IN THE DECODED DOMAIN. It resets and
+            # accumulates per conversion window, so its answer is one decoded
+            # sample per window and the tone it is graded at has to be
+            # coherent over THOSE — not over the raw bitstream, which is the
+            # right domain for a free-running modulator and the wrong one
+            # here. Read by `analog_transient_record`, which sizes the record
+            # in conversion windows when it is set, and by
+            # `analog_resolution_stimulus`, which then picks a cycle count
+            # COPRIME with them (F167: without that the decoded error becomes
+            # a component at the signal's own frequency and the SNDR removes
+            # it as signal — the instrument read the worst tone placement as
+            # 2.8 bit the best).
+            "decoded_in_conversion_windows": 1.0,
             # Boltzmann's constant times 300 K. A UNIVERSAL physical
             # constant — the same on every process and in every design —
             # which is why it is a library constant and not a registry read.
