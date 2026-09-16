@@ -31,11 +31,24 @@ S = importlib.import_module("_step_verdict_table")
 T = importlib.import_module("_flow_verdict_tiers")
 
 
-def _audit(steps, **kw):
+def _audit(steps, ledger=(), **kw):
+    """A compliance artefact. `gate_execution_ledger` is present BY DEFAULT and
+    empty, because that is what a real run with no unanswered hand-off looks
+    like — and because a table with no ledger is deliberately NOT comparable
+    (see `test_a_table_with_no_ledger_is_refused`), so a fixture without one
+    would be testing the refusal, not the rule under test."""
     doc = {"steps": [{"id": i, "name": "step %s" % i, "stage": "stage1",
-                      "status": s} for i, s in steps]}
+                      "status": s} for i, s in steps],
+           "gate_execution_ledger": list(ledger)}
     doc.update(kw)
     return doc
+
+
+def _awaiting_row(gate):
+    """A ledger row for a gate that reached the flow's AWAITING state — pass one
+    done, pass two is an agent's and nobody answered."""
+    return {"gate": gate, "cmd": "%s . --check-report" % gate, "rc": 0,
+            "verdict": "PASS", "exit_code": S.awaiting_exit_code()}
 
 
 # ── 1. the two artefact shapes are one table ─────────────────────────────────
@@ -238,6 +251,110 @@ def test_the_top_level_verdict_rising_is_not_a_regression():
     assert d["verdict"]["direction"] == S.IMPROVEMENT
     assert d["regressed"] is False
 
+
+# ── R-0915-88: the RUN SHAPE axis ───────────────────────────────────────────
+#
+# THE ESCAPE THIS CLOSES, MEASURED 2026-09-16 BY USING THE GATE. The flow is
+# program-first + AI-BACKUP: several steps complete only when an AGENT answers a
+# hand-off. A published cell produced by an agent-driven lane run and a table
+# produced by a program-only landing gate therefore disagree on those steps at
+# EVERY tree — measured at six, spanning a ten-landing range and current main,
+# with the tree never moving either verdict. Diffing the two printed "the IC
+# regressed" about a landing that had done nothing, in a report a human read.
+#
+# The discriminator is DERIVED, never a per-step exception list: the run's own
+# `gate_execution_ledger` records each gate's `exit_code`, and the AWAITING code
+# is `flow_compliance_check`'s own constant for "pass two is somebody else's
+# move". A tier invented tomorrow inherits this for free.
+
+def test_the_awaiting_code_is_the_flows_own():
+    """RETURNED VALUE against the defining module, not a literal `4` re-typed
+    here. A second copy of a constant is the drift this module exists to
+    delete, and it would drift silently: the wrong number simply finds no rows
+    and every run reads as agent-driven."""
+    fcc = importlib.import_module("flow_compliance_check")
+    assert S.awaiting_exit_code() == fcc._AWAITING_EXIT_CODE
+
+
+def test_run_shape_names_the_gates_whose_second_pass_nobody_answered():
+    shape = S.run_shape(_audit([("2", "PASS")],
+                               ledger=[_awaiting_row("a_track"),
+                                       {"gate": "other", "exit_code": 0}]))
+    assert shape["unanswered_second_pass"] == ["a_track"]
+    assert shape["agent_answered_every_handoff"] is False
+    assert shape["source"] == "gate_execution_ledger"
+
+
+def test_a_run_with_every_handoff_answered_has_an_empty_set_not_None():
+    """Empty and unknown are different states, and the difference decides
+    whether a diff may proceed."""
+    shape = S.run_shape(_audit([("2", "PASS")],
+                               ledger=[{"gate": "other", "exit_code": 0}]))
+    assert shape["unanswered_second_pass"] == []
+    assert shape["agent_answered_every_handoff"] is True
+
+
+def test_an_ABSENT_ledger_is_NOT_RECORDED_never_an_empty_set():
+    """The fail-safe direction. Reading an absent ledger as "nothing was left
+    unanswered" would make every artefact with no ledger look agent-driven —
+    which is the one reading that lets a cross-shape diff through."""
+    shape = S.run_shape({"steps": []})
+    assert shape["unanswered_second_pass"] is None
+    assert shape["source"] == "NOT_RECORDED"
+
+
+def test_KNOWN_POSITIVE_two_runs_that_disagree_on_a_handoff_are_NOT_COMPARABLE():
+    """THE MEASURED ESCAPE. Same steps, same producer, same flags — and the two
+    runs are still not the same experiment."""
+    agent_driven = S.table_from_audit(_audit([("2", "PASS")], verdict="PASS",
+                                             command_argv=_ARGV))
+    program_only = S.table_from_audit(
+        _audit([("2", "INCOMPLETE")], ledger=[_awaiting_row("an_expert_track")],
+               verdict="FAIL", command_argv=_ARGV))
+    ok, why = S.comparability(agent_driven, program_only)
+    assert ok is False
+    assert "different RUN SHAPE" in why
+    assert "an_expert_track" in why, "the refusal must NAME the hand-off"
+    d = S.diff_tables(agent_driven, program_only)
+    assert d["comparable"] is False
+
+
+def test_KNOWN_NEGATIVE_two_runs_of_the_same_shape_still_diff_normally():
+    """The guard must not refuse everything: two program-only runs with the SAME
+    unanswered hand-off are the same experiment, and a real regression between
+    them must still be reported."""
+    led = [_awaiting_row("an_expert_track")]
+    ref = S.table_from_audit(_audit([("2", "PASS")], ledger=led, verdict="PASS",
+                                    command_argv=_ARGV))
+    cur = S.table_from_audit(_audit([("2", "FAIL")], ledger=led, verdict="FAIL",
+                                    command_argv=_ARGV))
+    ok, why = S.comparability(ref, cur)
+    assert ok is True and "same run shape" in why
+    assert [e["id"] for e in S.diff_tables(ref, cur)["regressions"]] == ["2"]
+
+
+def test_a_table_with_no_ledger_is_refused_against_one_that_has_it():
+    """Same fail-safe rule as an unrecorded `command_argv`: an unknown shape is
+    not a matching shape."""
+    known = S.table_from_audit(_audit([("2", "PASS")], verdict="PASS",
+                                      command_argv=_ARGV))
+    unknown = S.table_from_audit({"steps": [{"id": "2", "status": "PASS"}],
+                                  "verdict": "PASS", "command_argv": _ARGV})
+    ok, why = S.comparability(unknown, known)
+    assert ok is False and "no gate execution ledger" in why
+
+
+def test_the_run_shape_is_rendered_so_a_reader_cannot_miss_it():
+    """A refusal a human reads must carry its own evidence; the rendered table
+    says which kind of run produced it, in both states."""
+    program_only = S.table_from_audit(
+        _audit([("2", "PASS")], ledger=[_awaiting_row("an_expert_track")],
+               verdict="FAIL", command_argv=_ARGV))
+    assert "PROGRAM-ONLY" in S.render(program_only)
+    assert "an_expert_track" in S.render(program_only)
+    agent_driven = S.table_from_audit(_audit([("2", "PASS")], verdict="PASS",
+                                             command_argv=_ARGV))
+    assert "no unanswered hand-off" in S.render(agent_driven)
 
 # ── the chip-AGNOSTIC declaration these three files make, ENFORCED ──────────
 #

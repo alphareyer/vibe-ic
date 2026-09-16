@@ -51,7 +51,11 @@ def _tmp() -> Path:
     return Path(tempfile.mkdtemp(prefix="ricgate_"))
 
 
-def _audit_doc(steps, verdict, project, when=None):
+def _audit_doc(steps, verdict, project, when=None, ledger=()):
+    """`gate_execution_ledger` is present BY DEFAULT and empty — that is what a
+    real run whose hand-offs were all answered looks like. R-0915-88: a table
+    with no ledger cannot state its RUN SHAPE and is deliberately refused, so a
+    fixture without one would be testing the refusal, not the rule under test."""
     return {
         "schema_version": 1,
         "version": "1.21.6",
@@ -60,9 +64,19 @@ def _audit_doc(steps, verdict, project, when=None):
         "command_argv": ["programs/flow_compliance_check.py", str(project),
                          "--strict"],
         "step_counts": {},
+        "gate_execution_ledger": list(ledger),
         "steps": [{"id": i, "name": "step %s" % i, "stage": "stage1",
                    "status": s} for i, s in steps],
     }
+
+
+def _awaiting_row(gate):
+    """A ledger row for a gate that reached the flow's AWAITING state: pass one
+    done, pass two is an agent's, and nobody answered."""
+    import importlib as _il
+    return {"gate": gate, "rc": 0, "verdict": "PASS",
+            "exit_code": _il.import_module(
+                "_step_verdict_table").awaiting_exit_code()}
 
 
 def _write_audit(project: Path, doc):
@@ -239,6 +253,78 @@ def test_no_published_cell_for_this_pdk_REFUSES():
     rep = json.loads(out.read_text(encoding="utf-8"))
     assert rc == 2 and "no published cell" in rep["refusal"]
 
+
+
+# ── R-0915-88: an AGENT-DRIVEN reference is the wrong reference for this gate ─
+#
+# THE MEASURED ESCAPE, and the reason this gate's first real run produced a
+# wrong headline. A landing gate runs the front door with NO AGENT attached. The
+# flow is program-first + AI-BACKUP, so the steps whose second pass is an
+# agent's cannot complete — `flow_compliance_check`'s own AWAITING tier says so:
+# "a PROGRAM cannot spawn the subagent pass two needs". A published cell an
+# agent-driven lane produced therefore disagrees with EVERY program-only run of
+# the same input, at every tree; measured at six trees spanning a ten-landing
+# range, the tree moved neither verdict. Diffing them reported a regression that
+# no landing had caused.
+
+def _shape_scenario(ref_unanswered, cur_unanswered):
+    base = _tmp()
+    ic, pdk = "anic", "anpdk"
+    corpus = _corpus(base / "bdata", ic, pdk, [("2", "PASS")], "PASS")
+    cell = (corpus / "ic" / ic / ("v1.21.6_%s" % pdk) / "reports" / "audit"
+            / "phase23_completion_audit.json")
+    doc = json.loads(cell.read_text(encoding="utf-8"))
+    doc["gate_execution_ledger"] = [_awaiting_row(g) for g in ref_unanswered]
+    cell.write_text(json.dumps(doc), encoding="utf-8")
+
+    tree = _fake_tree(base / "tree")
+    workdir = base / "wd"
+    project = workdir / ic
+    project.mkdir(parents=True, exist_ok=True)
+    _write_audit(project, _audit_doc(
+        [("2", "PASS")], "PASS", project,
+        ledger=[_awaiting_row(g) for g in cur_unanswered]))
+    out = base / "g.json"
+    rc = _run(ic, pdk, corpus, tree, workdir, out)
+    return rc, json.loads(out.read_text(encoding="utf-8"))
+
+
+def test_KNOWN_POSITIVE_an_agent_driven_reference_REFUSES_not_regresses():
+    """rc 2 and a named cause — NOT rc 1 with a step the landing never touched.
+    The distinction is the whole point: a refusal sends a reader to the
+    reference, a regression sends them hunting a defect that is not there."""
+    rc, rep = _shape_scenario(ref_unanswered=[],
+                              cur_unanswered=["an_expert_track"])
+    assert rc == 2
+    assert rep["verdict"] == "REFUSED"
+    assert "different RUN SHAPE" in rep["refusal"]
+    assert "an_expert_track" in rep["refusal"]
+
+
+def test_the_run_shape_of_BOTH_tables_is_recorded_even_on_a_refusal():
+    """A refusal whose own evidence was dropped is a refusal nobody can act on,
+    so the two shapes are written to the report BEFORE the refusal is raised."""
+    rc, rep = _shape_scenario([], ["an_expert_track"])
+    assert rc == 2
+    assert rep["run_shape"]["unanswered_second_pass"] == ["an_expert_track"]
+    assert rep["reference_run_shape"]["unanswered_second_pass"] == []
+
+
+def test_KNOWN_NEGATIVE_a_same_shape_reference_still_diffs_normally():
+    """The guard must not refuse everything: two program-only runs with the same
+    unanswered hand-off are the same experiment."""
+    rc, rep = _shape_scenario(["an_expert_track"], ["an_expert_track"])
+    assert rc == 0
+    assert rep["verdict"] == "NO_REGRESSION"
+    assert rep["diff"]["comparable"] is True
+
+
+def test_the_docstring_tells_the_operator_what_reference_to_use():
+    """A refusal that does not say what to do instead gets worked around. The
+    program states it in its own header, where the next author will meet it."""
+    doc = G.__doc__
+    assert "THE REFERENCE MUST BE A RUN OF THE SAME KIND" in doc
+    assert "PRIOR RUN OF THIS" in doc.upper()
 
 # ── §4.05 staging ────────────────────────────────────────────────────────────
 

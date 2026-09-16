@@ -189,6 +189,38 @@ def test_a_subject_that_writes_no_report_is_REFUSED_not_ignored(bed):
     assert rep["refused"] == ["anic"]
 
 
+def test_REAL_IC_REFERENCE_is_forwarded_to_the_gate(bed):
+    """R-0915-88: since a published cell is produced by an AGENT-DRIVEN lane run
+    and this arm runs the front door with no agent, the arm must be able to name
+    a headless baseline instead. A flag the arm silently dropped would leave the
+    gate judging against the wrong reference forever, and the refusal it printed
+    would look like the arm's own."""
+    tree = _tree(bed / "tree", {"rc": 0, "report": _report("NO_REGRESSION")},
+                 {"rc": 0, "report": _report("NO_REGRESSION")})
+    progs = tree / "vibe-ic-marketplace" / "plugins" / "vibe-ic" / "programs"
+    # A stub that RECORDS its own argv, so the assertion is about what the arm
+    # actually passed, not about what the script text says.
+    (progs / "real_ic_gate.py").write_text(
+        "import json,sys,pathlib\n"
+        "argv=sys.argv[1:]\n"
+        "out=argv[argv.index('--json')+1]\n"
+        "pathlib.Path(out).parent.mkdir(parents=True,exist_ok=True)\n"
+        "pathlib.Path(out).write_text(json.dumps("
+        "{'verdict':'NO_REGRESSION','argv':argv,'diff':{'comparable':True,"
+        "'regressions':[],'improvements':[],'laterals':[]}}))\n",
+        encoding="utf-8")
+    frozen = _frozen(bed / "frozen", [])
+    out = bed / "out"
+    baseline = bed / "headless_baseline.json"
+    baseline.write_text("{}", encoding="utf-8")
+    r = _run(tree, bed / "corpus", out, frozen,
+             {"REAL_IC_REFERENCE": str(baseline)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    gate = json.loads((out / "real_ic_gate_anic.json").read_text())
+    assert "--reference" in gate["argv"]
+    assert gate["argv"][gate["argv"].index("--reference") + 1] == str(baseline)
+
+
 def test_a_tree_with_no_plugin_programs_REFUSES(bed):
     out = bed / "out"
     empty = bed / "empty"

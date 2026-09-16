@@ -47,6 +47,17 @@
 #   FROZEN_ROOT         where the snapshots live          (default: $HOME/_frozen)
 #   EDA_CONTAINER       the container the run uses        (default: real-ic-arm-eda,
 #                       created from the plugin's own pin if absent)
+#   REAL_IC_REFERENCE   the table the IC run is judged against. Omitted: the
+#                       highest published cell for this ic+pdk — which, since
+#                       R-0915-88, this arm will normally REFUSE: a published
+#                       cell is produced by an AGENT-DRIVEN lane run and this arm
+#                       runs the front door with no agent, so the steps whose
+#                       second pass is an agent's disagree at every tree and the
+#                       two tables are not the same experiment. MEASURED on SPM:
+#                       D1 rc 0 vs rc 4 and step 5 PASS vs FAIL at six trees,
+#                       none of it caused by a landing. Point this at a PRIOR
+#                       real_ic_gate.json from a headless run and the diff
+#                       becomes the measurement the arm is actually for.
 #   REAL_IC_REPLAY_REF_DIR   directory of per-snapshot baseline reports to diff
 #                       against, named <snapshot>.json. Absent: each snapshot's
 #                       OWN recorded table is used, which REFUSES (rc 2) when the
@@ -119,6 +130,8 @@ STARTED=$(date -Is)
 SUBJECTS_JSON="$OUTDIR/.subjects.jsonl"
 : > "$SUBJECTS_JSON"
 
+echo "[real_ic_arm] IC reference: ${REAL_IC_REFERENCE:-<auto: highest published cell — expect a RUN SHAPE refusal, see the header>}"
+
 record() {  # name kind rc report
   python3 - "$1" "$2" "$3" "$4" "$SUBJECTS_JSON" <<'PY'
 import json, sys
@@ -156,6 +169,7 @@ python3 "$PROGRAMS/real_ic_gate.py" \
   --workdir "$OUTDIR/run" \
   --container "$CONTAINER" \
   ${PIN:+--require-image "$PIN"} \
+  ${REAL_IC_REFERENCE:+--reference "$REAL_IC_REFERENCE"} \
   --json "$GATE_JSON" > "$OUTDIR/real_ic_gate_${IC}.log" 2>&1
 record "$IC" real_ic_gate "$?" "$GATE_JSON"
 

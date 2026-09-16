@@ -40,6 +40,7 @@ out.write_text(json.dumps({
     "version": "stub", "run_at": "2026-09-16T00:00:00+00:00",
     "verdict": steps["verdict"],
     "command_argv": [__file__, str(proj), "--strict"],
+    "gate_execution_ledger": steps.get("ledger", []),
     "steps": steps["steps"]}))
 raise SystemExit(steps.get("rc", 0))
 '''
@@ -79,6 +80,10 @@ def _snapshot(root: Path, recorded_steps, recorded_verdict, argv=None):
             "verdict": recorded_verdict,
             "command_argv": argv or ["flow_compliance_check.py", "/orig",
                                      "--strict"],
+            # R-0915-88: present and empty is what a run whose hand-offs were
+            # all answered looks like; ABSENT means the table cannot state its
+            # RUN SHAPE and is refused, which is a different test.
+            "gate_execution_ledger": [],
             "steps": _steps(recorded_steps)}), encoding="utf-8")
     return root
 
@@ -171,6 +176,31 @@ def test_a_checker_rc_of_1_is_NOT_a_refusal():
     assert rep["replay"]["rc"] == 1
     assert rep["verdict"] == "NO_REGRESSION"
 
+
+
+# ── R-0915-88: the RUN SHAPE reaches the replay too ─────────────────────────
+
+def test_a_snapshot_recorded_by_an_agent_driven_run_REFUSES_against_a_replay():
+    """The replay re-judges with a program; if the snapshot's recorded table
+    came from a run whose hand-offs an agent answered, the two are not the same
+    experiment and the refusal must say so rather than print step moves the
+    current tree did not cause."""
+    from _step_verdict_table import awaiting_exit_code
+    base = _tmp()
+    snap = _snapshot(base / "snap", [("2", "PASS")], "PASS")   # ledger: []
+    tree = _tree(base / "tree",
+                 {"verdict": "FAIL", "steps": _steps([("2", "INCOMPLETE")]),
+                  "rc": 1,
+                  "ledger": [{"gate": "an_expert_track", "rc": 0,
+                              "verdict": "PASS",
+                              "exit_code": awaiting_exit_code()}]})
+    out = base / "o.json"
+    rc = _replay(snap, tree, base / "wd", out)
+    rep = json.loads(out.read_text(encoding="utf-8"))
+    assert rc == 2
+    assert "different RUN SHAPE" in rep["refusal"]
+    assert "an_expert_track" in rep["refusal"]
+    assert rep["table"] is not None, "the baseline table must survive a refusal"
 
 # ── the refusals ─────────────────────────────────────────────────────────────
 
