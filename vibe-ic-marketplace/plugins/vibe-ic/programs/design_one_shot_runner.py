@@ -17406,9 +17406,13 @@ _SYNTH_LOG_EXPECT = "|".join(
 #: these is not a finding — there was no run to leave one. Any other status
 #: means the step believed it ran a tool, and then the log must be there and
 #: must carry the tool's own accounting.
+#: R-0915-85 — the five words the set used to spell are two: the design (or the
+#: operator's --entry/--exit declaration) says synthesis does not apply
+#: (NOT_APPLICABLE), or it was not run and the row says why (NOT_MEASURED,
+#: which is what `_spf.REFUSAL_STATUS` now holds). Both mean NO TOOL RAN, which
+#: is the only thing this set is asked.
 _SYNTH_NOT_ATTEMPTED = frozenset({
-    "SKIP", "SKIPPED-CONDITION", "SKIPPED-BY-ENTRY", "SKIPPED-BY-EXIT",
-    _spf.REFUSAL_STATUS,
+    _V.Verdict.NOT_APPLICABLE.value, _V.Verdict.NOT_MEASURED.value,
 })
 
 
