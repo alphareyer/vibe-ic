@@ -96,6 +96,57 @@ def _status_for(doc) -> str:
 # does not get rewritten, and that is exactly the difference between evidence
 # and a claim about evidence.
 # ---------------------------------------------------------------------------
+def test_the_reason_agrees_with_the_PRODUCER_S_OWN_arithmetic():
+    """THE CHECK THAT WAS MISSING, and it is why the first version shipped two
+    wrong numbers.
+
+    `compared_points` IS THE PROVEN COUNT, whatever its name says: lec_run
+    writes `"compared_points": proven ...` (lec_run.py:2945) and reads it back
+    as `_proven` (lec_run.py:4211). MEASURED on sha256 run17 --
+    compared_points 846, unproven_points 481, miter_points 1327, and
+    846 + 481 == 1327 exactly, so the field is one HALF of the population.
+    Taking the name at face value printed "365 of 846 point(s) proven" beside a
+    record whose own `verdict_explanation` read "846/1327 proven, 481 unproven".
+
+    So this does not re-assert my arithmetic; it asserts that the sentence this
+    module writes carries the SAME two numbers the producer put in its own
+    explanation. A future rename of the field cannot silently split them."""
+    rec = dict(RUN16_UNCLOSED, miter_points=1327,
+               verdict_explanation="846/1327 proven, 481 unproven")
+    _status, reason = dosr.lec_inconclusive_disposition(rec)
+    assert "846 of 1327" in reason
+    assert "481 unproven" in reason
+    # and the pair must be internally consistent with the whole population
+    assert rec["compared_points"] + rec["unproven_points"] == rec["miter_points"]
+
+
+def test_the_denominator_is_never_the_proven_count():
+    """The exact mutation that shipped: using `compared_points` as the total.
+    It yields "365 of 846"; both numbers are wrong and neither is flagged."""
+    rec = dict(RUN16_UNCLOSED, miter_points=1327)
+    reason = dosr.lec_inconclusive_disposition(rec)[1]
+    assert "365" not in reason
+    assert "of 846" not in reason
+
+
+def test_miter_points_absent_falls_back_to_the_SUM_not_to_compared():
+    """A producer that did not write `miter_points` still gets a denominator
+    that spans the whole population."""
+    rec = dict(RUN16_UNCLOSED)
+    rec.pop("miter_points", None)
+    reason = dosr.lec_inconclusive_disposition(rec)[1]
+    assert "846 of 1327" in reason
+
+
+def test_inconclusive_naming_no_unproven_point_is_NOT_a_failure():
+    """An INCONCLUSIVE record that names no open point cannot describe what is
+    wrong, so it must not assert a failure it cannot attribute."""
+    rec = dict(RUN16_UNCLOSED, unproven_points=0, miter_points=846)
+    status, reason = dosr.lec_inconclusive_disposition(rec)
+    assert status == dosr.NOT_EXECUTED_STATUS
+    assert "no open point" in reason
+
+
 def test_a_completed_ladder_that_did_not_close_FAILS():
     """THE REGRESSION. Points were compared, the ladder finished, nothing ran
     out -- the equivalence question is OPEN and the flow may not walk past it.
