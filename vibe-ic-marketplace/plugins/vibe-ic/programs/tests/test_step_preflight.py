@@ -161,15 +161,36 @@ def test_forward_and_reverse_differ_only_in_that_one_file(tmp_path):
 # --------------------------------------------------------------------------- #
 def test_producer_disclosed_skip_is_not_an_absence(tmp_path):
     """Step 15 declares it reads step 12's post_dft_netlist.v. A design with no
-    scan chain never has one — step 12 writes an owning, capability-flagged
-    skip marker instead, and `flow_compliance_check` already promotes that to
-    SKIPPED-CONDITION. The pre-flight must agree, via the SAME function."""
+    scan chain never has one — step 12 writes an owning skip marker instead,
+    and `flow_compliance_check` promotes that to SKIPPED-CONDITION. The
+    pre-flight must agree, via the SAME function.
+
+    R-0915-63 — THE GROUND CHANGED AND THE INTENT DID NOT. This case used to
+    disclose `capability_flag: "cap:post_dft_scan_optimization"`, and
+    R-0915-57 RETIRED that flag from the registry because a design whose L20
+    declares no DFT has no such capability gap: the claim was false. With the
+    flag gone this test failed on main, and so did the real flow — run33
+    refused to dispatch PnR and 18 steps went MISSING.
+
+    The marker now discloses the DESIGN's own declaration instead, which is
+    the stronger statement, and `_declared_sibling_self_skip_for_missing`
+    verifies it against L20's bytes. Both halves of this test's intent are
+    kept: a disclosed skip is not an absence, and WITHOUT the marker the same
+    absence still refuses."""
     p = _synthetic_run(tmp_path, with_routed_def=True)
+    gd = p / "phase1" / "generated_docs"
+    gd.mkdir(parents=True, exist_ok=True)
+    (gd / "L20_DFT_SCAN_TOPOLOGY.json").write_text(json.dumps(
+        {"doc_id": "L20", "fields": {"dft_present": False, "scan_chains": [],
+                                     "bist_mbist": [], "jtag_tap": None}}))
     (p / "phase2/stage2/synth/post_dft_not_run.json").write_text(json.dumps({
         "verdict": "SKIPPED-CONDITION",
-        "capability_flag": "cap:post_dft_scan_optimization",
+        "reason_class": "DESIGN_DECLARED_NA",
+        "declaration": {"l_doc": "L20",
+                        "fields": {"dft_present": False, "scan_chains": [],
+                                   "bist_mbist": [], "jtag_tap": None}},
         "skips_required_output": "phase2/stage2/synth/post_dft_netlist.v",
-        "reason": "no scan_netlist.v (DFT was disclosed-skipped)",
+        "reason": "no scan_netlist.v — the DESIGN declares no DFT",
     }))
     d = SP.decide(p, "phase3_one_shot_runner", "pnr")
     assert d.allow is True

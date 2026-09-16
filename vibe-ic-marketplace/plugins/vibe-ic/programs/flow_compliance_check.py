@@ -2956,6 +2956,57 @@ def _capability_flag_may_defer(flag: str, output: str) -> bool:
     return any(fnmatch.fnmatchcase(o, _norm_out_path(pat)) for pat in allowed)
 
 
+def _marker_declares_output_not_applicable(project: Path,
+                                          data: Dict[str, Any]) -> Optional[str]:
+    """R-0915-63 ground (b): the DESIGN declared this output inapplicable.
+
+    An output owed by a step the design itself declares not applicable is not
+    owed. This is a SECOND ground for excusing an absent declared input; it
+    does not touch ground (a), the capability gap.
+
+    THE MARKER IS A POINTER, NOT THE EVIDENCE. It must carry
+    `reason_class: DESIGN_DECLARED_NA` and a `declaration` naming an L-doc and
+    the field/value pairs that constitute the declaration — and THIS function
+    re-reads that document and checks the bytes agree. A marker's own sentence
+    proves nothing: granting a DESIGN_DECLARED_NA from prose is exactly the
+    #2272 regression, where a clue was treated as a declaration.
+
+    Returns a short citation, or None. None means "no excuse on this ground",
+    and the caller keeps whatever it had — including REFUSED.
+    """
+    if _reason_taxonomy.normalise(
+            data.get("reason_class")) != _reason_taxonomy.DESIGN_DECLARED_NA:
+        return None
+    decl = data.get("declaration")
+    if not isinstance(decl, dict):
+        return None
+    code = str(decl.get("l_doc") or "").strip()
+    fields = decl.get("fields")
+    if not code or not isinstance(fields, dict) or not fields:
+        return None
+    try:
+        path, doc = _ldoc.load_l_doc(project, code)
+    except Exception:                                        # noqa: BLE001
+        return None
+    if path is None or not isinstance(doc, dict):
+        # A document that is not there, or will not parse, has declared
+        # nothing — the same fail-closed rule R-0915-19 was corrected into.
+        return None
+    actual = _ldoc.l_doc_fields(doc)
+    if not isinstance(actual, dict):
+        return None
+    for key, want in fields.items():
+        if key not in actual or actual[key] != want:
+            # The marker cites a document that does not say what it claims.
+            return None
+    try:
+        rel = str(Path(path).resolve().relative_to(Path(project).resolve()))
+    except ValueError:
+        rel = Path(path).name
+    stated = ", ".join(f"{k}={v!r}" for k, v in sorted(fields.items()))
+    return f"{rel} records {stated}"
+
+
 def _declared_sibling_self_skip_for_missing(project: Path,
                                             missing_patterns: List[str]
                                             ) -> Optional[str]:
@@ -3040,10 +3091,19 @@ def _declared_sibling_self_skip_for_missing(project: Path,
                 vd = str(data.get("verdict", "")).upper().replace("_", "-")
                 if vd not in _SELF_SKIP_VERDICTS:
                     continue
-                if not _is_declared_capability_gap(
-                        str(data.get("capability_flag", ""))):
+                # R-0915-63 — TWO grounds, checked in order. (a) is the
+                # capability gap, unchanged. (b) is the design's own
+                # declaration that the output is not applicable, verified
+                # against the cited document's bytes.
+                gap_ok = _is_declared_capability_gap(
+                    str(data.get("capability_flag", "")))
+                declared_na = (None if gap_ok else
+                               _marker_declares_output_not_applicable(
+                                   project, data))
+                if not gap_ok and not declared_na:
                     # capability-AWARE: absent, retired, mistyped or forged
-                    # flag → the platform makes no such claim → not eligible.
+                    # flag → the platform makes no such claim; and no verified
+                    # design declaration either → not eligible.
                     continue
                 declared = data.get("skips_required_output")
                 declared_list = ([declared] if isinstance(declared, str)
@@ -3054,6 +3114,20 @@ def _declared_sibling_self_skip_for_missing(project: Path,
                 if not owned:
                     continue  # marker does not OWN this step's absent output
                 flag_claim = str(data.get("capability_flag", ""))
+                if not gap_ok:
+                    # Ground (b): the entitlement question the flag registry
+                    # answers does not arise — the design says the output is
+                    # not applicable at all. The hard-sign-off refusal above
+                    # still stands over the whole missing set, so no DRC / LVS
+                    # / ERC / STA artefact can be deferred on this ground.
+                    try:
+                        sib_rel = str(sib.relative_to(project))
+                    except ValueError:
+                        sib_rel = sib.name
+                    return (f"{sib_rel}: owns this output "
+                            f"(skips_required_output) and self-reports "
+                            f"verdict={vd} [design-declared N/A: "
+                            f"{declared_na}]")
                 if not any(_capability_flag_may_defer(flag_claim, do)
                            for do in owned):
                     # The flag is registered but is not ENTITLED to this
