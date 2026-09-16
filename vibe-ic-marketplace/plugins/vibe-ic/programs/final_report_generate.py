@@ -933,14 +933,23 @@ def _parse_verdicts(audit_text: str) -> Dict[str, str]:
 # The checker's own tally line, e.g.
 #   "  PASS=35  FAIL=0  MISSING=0  WAIVED-DEFERRED=3  SKIPPED=22  VACUOUS-PASS=3"
 # MISSING may carry a "(N blocked-by-upstream of step X)" parenthetical.
-_TALLY_TOKEN_RE = re.compile(r"\b([A-Z][A-Z-]*[A-Z])=(\d+)")
-# The tally prints SKIPPED-CONDITION under the short label `SKIPPED`.
+#: R-0915-85 — UNDERSCORES ARE PART OF A LABEL NOW. The five words include
+#: `PASS_WITH_WAIVERS`, `NOT_MEASURED` and `NOT_APPLICABLE`; this pattern
+#: accepted only `[A-Z-]`, so it matched `PASS` inside `PASS_WITH_WAIVERS=3`
+#: and the bucket never resolved — measured: `_parse_audit_tally` returned None
+#: on a tally line carrying all five, which the caller reads as "no tally", and
+#: a roll-up disagreement is then reported as agreement.
+_TALLY_TOKEN_RE = re.compile(r"\b([A-Z][A-Z_-]*[A-Z])=(\d+)")
 #: Hand-written ALIASES only: report-side spellings that differ from the
 #: producer's own word. Everything else is derived below.
+#: R-0915-85 — the report's own label for a bucket, where it differs from the
+#: producer's word. `WAIVED-DEFERRED` is the sentence the headline and this
+#: tally have printed for as long as either existed, and four parsers key on it;
+#: the WORD behind it is `PASS_WITH_WAIVERS` now. That is a REPORT-SIDE RENAMING
+#: and is exactly what this map is for — it is not a status alias, and nothing
+#: here lets a producer write the old word.
 _TALLY_LABEL_ALIASES = {
-    "SKIPPED": "SKIPPED-CONDITION",
-    "WAIVED-DEFERRED": "WAIVED-DEFERRED",
-    "PASS-VOIDED": "PASS-VOIDED-BY-DEPENDENCY",
+    "WAIVED-DEFERRED": "PASS_WITH_WAIVERS",
 }
 
 
@@ -982,8 +991,15 @@ def _build_tally_label_map() -> dict:
 _TALLY_LABEL_TO_BUCKET = _build_tally_label_map()
 # The buckets `flow_compliance_check.py` prints UNCONDITIONALLY on its
 # tally line. A line missing any of them is not the tally.
+#: R-0915-85 — the quartet the checker prints UNCONDITIONALLY, in the five.
+#: `MISSING` is gone as a word (a declared output that does not exist is
+#: `FAIL(missing_artefact)`), so the mandatory set is the four verdicts the
+#: tally line always carries; `NOT_APPLICABLE` is the fifth and is also always
+#: printed, which is why it is here too. A line missing any of them is not the
+#: tally, and that is what stops the report's own prose bullet matching and
+#: producing agreement by construction.
 TALLY_MANDATORY_BUCKETS = frozenset(
-    {"PASS", "FAIL", "MISSING", "WAIVED-DEFERRED"})
+    {"PASS", "FAIL", "PASS_WITH_WAIVERS", "NOT_MEASURED", "NOT_APPLICABLE"})
 
 
 def _parse_audit_tally(audit_text: str) -> Optional[Dict[str, int]]:

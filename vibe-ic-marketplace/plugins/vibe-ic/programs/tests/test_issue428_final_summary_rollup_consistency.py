@@ -165,12 +165,15 @@ def test_counts_snapshot_separates_no_verdict_from_missing():
 # ─── 3. the checker tally reader ─────────────────────────────────────────
 
 def test_parse_audit_tally_reads_the_quoted_line():
+    # R-0915-85 — the tally line in the five, with the ONE report-side label
+    # the parser still resolves: `WAIVED-DEFERRED` is the sentence four parsers
+    # key on and it resolves to the bucket `PASS_WITH_WAIVERS`.
     text = _audit_text({"1": "PASS"},
-                       tally={"PASS": 35, "FAIL": 0, "FAIL": 0,
-                              "WAIVED-DEFERRED": 3, "SKIPPED": 22,
-                              "NOT_MEASURED": 3})
+                       tally={"PASS": 35, "FAIL": 0,
+                              "PASS_WITH_WAIVERS": 3, "WAIVED-DEFERRED": 3,
+                              "NOT_APPLICABLE": 22, "NOT_MEASURED": 3})
     assert F._parse_audit_tally(text) == {
-        "PASS": 35, "FAIL": 0, "FAIL": 0, "WAIVED-DEFERRED": 3,
+        "PASS": 35, "FAIL": 0, "PASS_WITH_WAIVERS": 3,
         "NOT_APPLICABLE": 22, "NOT_MEASURED": 3}
 
 
@@ -268,7 +271,8 @@ def _audit_for_real_flow_with(word, marked_ids):
     labels = {str(s["id"]): (word if str(s["id"]) in marked else "PASS")
               for s in steps}
     tally = {"PASS": sum(1 for v in labels.values() if v == "PASS"),
-             "FAIL": 0, "FAIL": 0, "WAIVED-DEFERRED": 0}
+             "FAIL": 0, "PASS_WITH_WAIVERS": 0,
+             "NOT_APPLICABLE": 0, "NOT_MEASURED": 0}
     tally[word] = sum(1 for v in labels.values() if v == word)
     return _audit_text(labels, tally=tally)
 
@@ -378,10 +382,10 @@ def _full_audit_for_real_flow(drop_ids=()):
                                 "NOT_APPLICABLE" if i % 5 == 0 else "PASS")
     tally = {"PASS": sum(1 for v in labels.values() if v == "PASS"),
              "FAIL": sum(1 for v in labels.values() if v == "FAIL"),
-             "FAIL": 0,
-             "WAIVED-DEFERRED": 0,
-             "SKIPPED": sum(1 for v in labels.values()
-                            if v == "NOT_APPLICABLE")}
+             "PASS_WITH_WAIVERS": 0,
+             "NOT_MEASURED": 0,
+             "NOT_APPLICABLE": sum(1 for v in labels.values()
+                                   if v == "NOT_APPLICABLE")}
     emitted = {k: v for k, v in labels.items() if k not in drop_ids}
     return _audit_text(emitted, tally=tally)
 

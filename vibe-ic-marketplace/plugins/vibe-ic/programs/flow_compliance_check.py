@@ -17994,7 +17994,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                      f"artefact — see structure_only below)")
     print(
         f"  PASS={counts['PASS']}  "
+        # `WAIVED-DEFERRED` is the REPORT-SIDE label four parsers key on
+        # (`final_report_generate._TALLY_LABEL_ALIASES`); the word behind it is
+        # PASS_WITH_WAIVERS. Both are printed so a reader sees the verdict and
+        # a parser keeps its contract.
         f"PASS_WITH_WAIVERS={counts['PASS_WITH_WAIVERS']}  "
+        f"WAIVED-DEFERRED={counts['PASS_WITH_WAIVERS']}  "
         f"{fail_str}  "
         f"NOT_MEASURED={counts['NOT_MEASURED']}  "
         f"NOT_APPLICABLE={counts['NOT_APPLICABLE']}"
