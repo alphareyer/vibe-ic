@@ -25,25 +25,41 @@ deck DID.
 """
 from __future__ import annotations
 
-import shutil
-import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 PROG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROG))
 import phase3_one_shot_runner as R  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _tcl_walk                                 # noqa: E402
 from _pnr_tcl_stub import STUB as _STUB          # noqa: E402
 from test_sdr_checkpoint_and_child import _full_pnr_tcl  # noqa: E402
 
-tclsh = shutil.which("tclsh")
-needs_tclsh = pytest.mark.skipif(tclsh is None, reason="tclsh not installed")
+# NO `skipif(tclsh is None)` HERE, DELIBERATELY. A tool-absent skip turns a
+# test that COULD NOT RUN into a green line on the very host doing the
+# measuring, and nothing downstream can tell it from a test that ran and
+# passed. `_tcl_walk.walk` resolves tclsh the way the RUNNER does -- host
+# first, then the pinned EDA container through the runner's own exec seam --
+# and raises `TclNotMeasured` (an AssertionError, so pytest reports a FAILURE)
+# naming both routes when neither answers.
 
 SITE = "postroute_drv_repair"
+
+# The deck IS the deck: the walker's only job is to source it, so the text
+# under test travels as `deck_text` and the container route gets it through
+# the helper's heredoc rather than through a mount that does not exist.
+_WALKER = "source [lindex $argv 0]\n"
+
+
+class _Ran:
+    """What the walk produced. No returncode: `walk` does not expose one, and
+    the deck's own last marker is the stronger statement anyway -- a deck that
+    died mid-way cannot print it."""
+
+    def __init__(self, stdout, stderr, route):
+        self.stdout, self.stderr, self.route = stdout, stderr, route
 
 
 def _run_child(tmp_path: Path, drc_counts, *, drv_counts=None):
@@ -140,10 +156,8 @@ def _run_child(tmp_path: Path, drc_counts, *, drv_counts=None):
         "{ puts $f \"  net_$i   0.1   0.2   -0.1 (VIOLATED)\" }\n"
         "  close $f\n"
         "}\n")
-    script = tmp_path / "child.tcl"
-    script.write_text(_STUB + harness + child)
-    r = subprocess.run([tclsh, str(script)], text=True, capture_output=True)
-    return r
+    out, err, route = _tcl_walk.walk(_WALKER, _STUB + harness + child, tmp_path)
+    return _Ran(out, err, route)
 
 
 def _marker(out: str, token: str) -> str:
@@ -155,18 +169,18 @@ def _marker(out: str, token: str) -> str:
 
 # ────────────────── the deck still parses and still stops ──────────────────
 
-@needs_tclsh
 def test_the_instrumented_child_deck_is_still_valid_tcl(tmp_path):
     """NEGATIVE CONTROL for the whole change: a deck the parent `exec`s and
     cannot debug must parse and run to its own end."""
     r = _run_child(tmp_path, [3, 2, 1])
     assert "missing close-bracket" not in r.stderr
-    assert r.returncode == 0, r.stderr
+    # Ran to its OWN end, which is what "the parent cannot debug it" needs.
+    assert "SDR_CHILD_DONE" in r.stdout, f"[{r.route}] {r.stdout[-2000:]}"
+    assert "invalid command name" not in r.stderr, r.stderr
 
 
 # ───────────────────────── the ledger is written ───────────────────────────
 
-@needs_tclsh
 def test_every_pass_is_recorded_with_its_own_count(tmp_path):
     r = _run_child(tmp_path, [5, 4, 3])
     assert "SDR_PASS_RESULT:" in r.stdout, r.stdout[-2000:]
@@ -176,7 +190,6 @@ def test_every_pass_is_recorded_with_its_own_count(tmp_path):
 
 # ─────────────── a later pass that REGRESSES does not displace ─────────────
 
-@needs_tclsh
 def test_a_regressing_pass_does_not_displace_the_better_one(tmp_path):
     """The measured shape: pass 1 is best, later passes are worse."""
     r = _run_child(tmp_path, [1, 11, 39])
@@ -186,7 +199,6 @@ def test_a_regressing_pass_does_not_displace_the_better_one(tmp_path):
     assert "best_router_drc=1" in src, src
 
 
-@needs_tclsh
 def test_a_regression_is_named_not_silently_dropped(tmp_path):
     r = _run_child(tmp_path, [2, 40])
     line = _marker(r.stdout, "SDR_PASS_REJECTED_SEGMENT:")
@@ -197,7 +209,6 @@ def test_a_regression_is_named_not_silently_dropped(tmp_path):
 
 # ───────────────── a pass that IMPROVES is kept (both directions) ───────────
 
-@needs_tclsh
 def test_an_improving_pass_becomes_the_best(tmp_path):
     """NEGATIVE CONTROL: the selection must not simply always pick pass 1."""
     r = _run_child(tmp_path, [9, 4, 2])
@@ -209,7 +220,6 @@ def test_an_improving_pass_becomes_the_best(tmp_path):
 
 # ───────────────────────── clean stops the loop early ──────────────────────
 
-@needs_tclsh
 def test_a_pass_that_reaches_zero_stops_the_loop(tmp_path):
     """A later pass cannot beat clean, so the loop must not run on and risk
     spoiling it — the measured failure this ruling came from."""
@@ -224,7 +234,6 @@ def test_a_pass_that_reaches_zero_stops_the_loop(tmp_path):
 
 # ─────────── no clean pass: the best count is still what is offered ────────
 
-@needs_tclsh
 def test_with_no_clean_pass_the_lowest_count_is_offered(tmp_path):
     r = _run_child(tmp_path, [30, 12, 25])
     src = _marker(r.stdout, "SDR_CANDIDATE_SOURCE:")
