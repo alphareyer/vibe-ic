@@ -728,6 +728,70 @@ def parse_l10_case_stdout(text: str) -> Dict[str, object]:
     return {"verdict": None, "passed": 0, "total": 0, "marker": None}
 
 
+#: R-0915-75 — WHAT THE ANNOTATION ACTUALLY DID, COUNTED.
+#:
+#: Step 29 is declared as an "SDF-annotated post-layout gate-level simulation".
+#: Nothing in it ever checked that a single delay was annotated, so run15 —
+#: 31063 `SDF ERROR` lines and ZERO `Putting delay` lines, not one delay applied
+#: cell or interconnect — published nine PASSes under that name. A zero-delay
+#: re-run of the L10 suite is worth having and is NOT what the step says it is.
+#:
+#: The simulator says exactly what it did, under `-sdf-info`, and these two
+#: counts are the whole story:
+#:
+#:   `Putting delay ...`             one per delay actually applied
+#:   `Unable to match ModPath X -> Y` one per cell arc the SDF could not attach
+#:
+#: MEASURED across four arms on run15's own netlist (fips1804_sha256_abc):
+#:
+#:   as shipped   (min::max,  no -gspecify)  ModPath fail 31061  delays     0
+#:   -include_typ (full triple, no -gspecify) ModPath fail 31061  delays 61976
+#:   + -gspecify                              ModPath fail     0  delays 61976
+#:
+#: COUNTED AND PUBLISHED, NEVER GATED HERE. This function decides nothing; it
+#: reports. A verdict taken from it would be a second opinion about a case the
+#: transcript has already answered, and the point is that a reader can see
+#: whether the run deserves the name the step gives it.
+_SDF_APPLIED_RE = re.compile(r"^SDF INFO:.*Putting delay", re.M)
+_SDF_MODPATH_FAIL_RE = re.compile(
+    r"^SDF ERROR:.*Unable to match ModPath", re.M)
+
+
+def sdf_annotation_census(text: str) -> Dict[str, object]:
+    """How many delays the simulator applied, and how many arcs it could not.
+
+    PURE — transcript in, counts out. `annotated` is False ONLY when not one
+    delay was applied, which is the state that makes "SDF-annotated" false.
+    """
+    applied = len(_SDF_APPLIED_RE.findall(text or ""))
+    unmatched = len(_SDF_MODPATH_FAIL_RE.findall(text or ""))
+    return {"delays_applied": applied,
+            "modpath_unmatched": unmatched,
+            "annotated": applied > 0}
+
+
+def name_unannotated_run(census: Dict[str, object]) -> Optional[str]:
+    """The sentence for a run that carries the name without the timing. PURE.
+
+    None when at least one delay was applied — this never speaks about a run
+    that annotated.
+    """
+    if census.get("annotated"):
+        return None
+    unmatched = census.get("modpath_unmatched") or 0
+    return (
+        "NOT SDF-ANNOTATED: the simulator applied 0 delays"
+        + (f" and could not match {unmatched} cell arc(s) to the SDF"
+           if unmatched else "")
+        + " — this run is a ZERO-DELAY gate-level simulation, so its result "
+          "says nothing about timing whatever the per-case verdicts are. Two "
+          "causes are known and both are in the flow's own hands: `write_sdf` "
+          "without `-include_typ` emits min::max with an EMPTY typ field, from "
+          "which Icarus applies no delay at all; and `iverilog` without "
+          "`-gspecify` builds no module paths for `$sdf_annotate` to attach an "
+          "IOPATH to.")
+
+
 def find_l10_executed_cases(project: Path, top: str) -> Optional[Dict[str, object]]:
     """The run's OWN L10 cases, partitioned into step-29 subjects and refusals.
 
@@ -853,6 +917,10 @@ def build_l10_results_log(rows: List[Dict[str, object]],
         f"routed netlist with SDF back-annotation",
         f"cases declared: {meta.get('declared')}",
         f"cases executed: {len(rows)}",
+        f"compile flags : {meta.get('compile_flags')}",
+        # R-0915-75 — the step's NAME, checked. See `sdf_annotation_census`.
+        f"sdf annotation: {meta.get('delays_applied')} delay(s) applied, "
+        f"{meta.get('modpath_unmatched')} cell arc(s) unmatched",
         "",
         f"{'case':<48} {'verdict':<14} {'vectors':<10} marker",
         "-" * 96,
@@ -882,6 +950,15 @@ def build_l10_results_log(rows: List[Dict[str, object]],
         out.append(f"VERDICT: NOT_EXECUTED — {len(unrun)} of {len(rows)} "
                    f"case(s) produced no verdict line at gate level; a missing "
                    f"marker is not a pass.")
+    # R-0915-75 — AND WHETHER THE STEP EARNED ITS OWN NAME. Appended AFTER the
+    # per-case verdict, never instead of it: the cases said what they said, and
+    # this says whether any of it was measured with timing.
+    _unann = name_unannotated_run({
+        "annotated": bool(meta.get("delays_applied")),
+        "modpath_unmatched": meta.get("modpath_unmatched") or 0})
+    if _unann:
+        out.append("")
+        out.append(_unann)
     return "\n".join(out) + "\n"
 
 
@@ -920,7 +997,7 @@ def _run_l10_suite(project: Path, top: str, container: str, sim_dir: Path,
         tb_path.write_text(injected)
         vvp = sim_dir / f"{cid}_gatesim.vvp"
         cc = (f"cd {shlex.quote(str(sim_dir))} && "
-              f"iverilog -g2012 -ginterconnect -s {shlex.quote(tb_module)} "
+              f"iverilog {_IVERILOG_FLAGS} -s {shlex.quote(tb_module)} "
               f"-o {shlex.quote(vvp.name)} {shlex.quote(tb_path.name)} "
               f"{shlex.quote(str(netlist))} {shlex.quote(stub_path.name)} "
               f"{models.arg} > {shlex.quote(cid)}.compile.log 2>&1; echo RC=$?")
@@ -977,12 +1054,23 @@ def _run_l10_suite(project: Path, top: str, container: str, sim_dir: Path,
         row["sim_rc"] = _rc
         row["transcript_bytes"] = _size
         row["transcript_complete"] = not _truncated
+        # R-0915-75 — per case, from the simulator's own `-sdf-info` output.
+        _census = sdf_annotation_census(text)
+        row["sdf_delays_applied"] = _census["delays_applied"]
+        row["sdf_modpath_unmatched"] = _census["modpath_unmatched"]
         if parsed.get("verdict") is None:
             row["detail"] = name_unverdicted_case(_rc, _size, _truncated)
         rows.append(row)
 
+    # R-0915-75 — the SUITE's annotation, summed over the cases that ran. Not a
+    # maximum and not a sample: a case that annotated nothing contributes
+    # nothing, so a suite reads as annotated only if some case really was.
+    _delays = sum(int(r.get("sdf_delays_applied") or 0) for r in rows)
+    _unmatched = sum(int(r.get("sdf_modpath_unmatched") or 0) for r in rows)
     meta = {"top": top, "netlist": str(netlist), "pdk_lib": models.arg,
-            "sdf": str(sdf), "declared": suite.get("declared")}
+            "sdf": str(sdf), "declared": suite.get("declared"),
+            "compile_flags": _IVERILOG_FLAGS,
+            "delays_applied": _delays, "modpath_unmatched": _unmatched}
     _aa.write_text(sim_dir / "results.log",
                    build_l10_results_log(rows, skipped, meta))
     failed = [r for r in rows if r.get("verdict") == "FAIL"]
@@ -997,6 +1085,12 @@ def _run_l10_suite(project: Path, top: str, container: str, sim_dir: Path,
         "cases": [{k: (str(v) if isinstance(v, Path) else v)
                    for k, v in r.items()} for r in rows],
         "not_a_subject": skipped,
+        # R-0915-75 — its own field, so a consumer can ask whether this run was
+        # timing-annotated without parsing prose.
+        "sdf_annotation": {"delays_applied": _delays,
+                           "modpath_unmatched": _unmatched,
+                           "annotated": _delays > 0,
+                           "compile_flags": _IVERILOG_FLAGS},
         "artifacts": {"netlist": str(netlist), "sdf": str(sdf)},
     }, indent=2, ensure_ascii=False) + "\n")
     if verdict == "PASS":
@@ -1031,7 +1125,7 @@ def _run_reused_testbench(project: Path, top: str, container: str,
     tb_path = sim_dir / f"{tb_module}_sdf_reused.v"
     tb_path.write_text(injected)
     vvp = sim_dir / f"{top}_gatesim.vvp"
-    compile_flags = "-g2012 -ginterconnect"
+    compile_flags = _IVERILOG_FLAGS
     cc = (f"cd {shlex.quote(str(sim_dir))} && "
           f"iverilog {compile_flags} -s {shlex.quote(tb_module)} "
           f"-o {shlex.quote(vvp.name)} {shlex.quote(tb_path.name)} "
@@ -1171,6 +1265,43 @@ def _run_reused_testbench(project: Path, top: str, container: str,
 #: numbers read like limits and were not. It is now `ceiling_s` — a RECORDED
 #: BUDGET (vibe-ic#2051) whose crossing is announced ONCE and which stops
 #: nothing — and the name says which of the two it is.
+#: R-0915-75 — WITHOUT `-gspecify` THE SDF ANNOTATES NOTHING.
+#:
+#: MEASURED, sha256 x sky130A, lane icsha2 run15 (main 385445351), front door.
+#: Every one of the eleven gate-level transcripts carries ~31000 lines of
+#:
+#:     SDF ERROR: .../sha256.sdf:31014: Unable to match ModPath A -> Y in
+#:                fips1804_sha256_abc.u_dut._08841_
+#:
+#: — 5166 `A -> Y`, 5040 `B -> Y`, 4753 `A2 -> Y`, 2560 `B2 -> Y`, 1867
+#: `CLK -> Q`, i.e. essentially EVERY cell arc in the design. `_08841_` is a
+#: `sky130_fd_sc_hd__inv_1` and the SDF holds `(IOPATH A Y (0.113::0.113)
+#: (0.098::0.098))` for it, so the entry and the cell were both there.
+#:
+#: REPRODUCED IN ISOLATION in the pinned image — one inverter, the flow's exact
+#: flags, the PDK's own models, a two-line SDF — and MEASURED as a delay rather
+#: than as the absence of an error, because "no error" is not "annotated":
+#:
+#:     iverilog -g2012 -ginterconnect              SDF ERROR, delay   0 ps
+#:     iverilog -g2012 -ginterconnect -gspecify    no error,   delay  98 ps
+#:     ... -gspecify -DFUNCTIONAL                  SDF ERROR, delay   0 ps
+#:
+#: Icarus PARSES a `specify` block by default and does not BUILD the module
+#: paths from it; `-gspecify` is what creates them, and `$sdf_annotate` has
+#: nothing to attach an IOPATH to without them. The `-DFUNCTIONAL` arm is the
+#: control: sky130's models ship four variants per cell and only the two
+#: non-FUNCTIONAL ones carry a `specify`, so the error comes straight back when
+#: the functional variant is selected — which is what makes the mechanism the
+#: specify block and not something else about the flag.
+#:
+#: WHAT THIS MEANS FOR WHAT SHIPPED. Step 29 is declared as an "SDF-annotated
+#: post-layout gate-level simulation". Every run of it so far was a ZERO-DELAY
+#: simulation wearing that name: functionally a re-run of the L10 suite against
+#: the routed netlist, which is worth having and is NOT what the step says it
+#: is. Nine cases passing said nothing about timing.
+_IVERILOG_FLAGS = "-g2012 -ginterconnect -gspecify"
+
+
 def _docker(container: str, cmd: str, budget_s: float = 600):
     return _ce.run_in_container_supervised(
         container, _TOOL_PATH + cmd, ceiling_s=float(budget_s))
@@ -1384,7 +1515,7 @@ def run(project, top: str = "spm", container: str = DEFAULT_CONTAINER,
     # enabled here to keep the functional sim sound. See docs/ADVANCED_NODE_
     # EXTENSION.md "cell-arc gate-sim".
     vvp = sim_dir / f"{top}_gatesim.vvp"
-    compile_flags = "-g2012 -ginterconnect"
+    compile_flags = _IVERILOG_FLAGS
     runtime_flags = "-sdf-info"
     cc = (f"cd {sim_dir} && "
           f"iverilog {compile_flags} -DSDF_FILE='\"{sdf}\"' -DHALF={half_period} "
@@ -1430,7 +1561,8 @@ def run(project, top: str = "spm", container: str = DEFAULT_CONTAINER,
         _tb_nosdf_text = re.sub(r"\$sdf_annotate\([^)]*\)", "#0", tb)
         _tb_nosdf = sim_dir / f"{tb_name}_nosdf.v"
         _tb_nosdf.write_text(_tb_nosdf_text)
-        _cc2 = (f"cd {sim_dir} && iverilog -g2012 -DSDF_FILE='\"{sdf}\"' "
+        _cc2 = (f"cd {sim_dir} && iverilog {_IVERILOG_FLAGS} "
+                f"-DSDF_FILE='\"{sdf}\"' "
                 f"-DHALF={half_period} -s {tb_name} -o {vvp.name} "
                 f"{_tb_nosdf.name} {netlist} {stub_path.name} {models.arg} "
                 f"> compile.log 2>&1; echo RC=$?")
