@@ -391,7 +391,7 @@ def test_real_gates_a_clean_registry_with_one_uninvoked_gate_is_INCOMPLETE(
         real_umbrella["proj"], records_out=records)
     assert fails == [], "the scoped registry must contain no failing gate"
     assert F._p0_not_invocable_count(records) >= 1
-    assert F._p0_umbrella_status(passed, records) == "NOT_MEASURED"
+    assert F.p0_umbrella_verdict(passed, records) == "NOT_MEASURED"
 
 
 def test_real_gates_a_fully_invoked_clean_registry_is_PASS(
@@ -405,7 +405,7 @@ def test_real_gates_a_fully_invoked_clean_registry_is_PASS(
         real_umbrella["proj"], records_out=records)
     assert fails == []
     assert F._p0_not_invocable_count(records) == 0
-    assert F._p0_umbrella_status(passed, records) == "PASS"
+    assert F.p0_umbrella_verdict(passed, records) == "PASS"
 
 
 # ===========================================================================
@@ -438,7 +438,7 @@ def test_real_gates_a_fully_invoked_clean_registry_is_PASS(
     (True, [_pass("g"), _not_invocable("h")], "INCOMPLETE"),
 ])
 def test_umbrella_status_truth_table(executed, records, expected):
-    assert F._p0_umbrella_status(executed, records) == expected
+    assert F.p0_umbrella_verdict(executed, records) == expected
 
 
 def test_not_invocable_count_counts_only_that_verdict():

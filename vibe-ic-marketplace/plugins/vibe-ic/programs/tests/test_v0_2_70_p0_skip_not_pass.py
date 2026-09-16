@@ -42,7 +42,7 @@ def test_p0_renders_skipped_condition():
     The `main()` half is kept as a wiring assertion: the owner is only the owner
     if the site that publishes the step actually calls it."""
     import inspect
-    assert F._p0_umbrella_status(None, []) == "NOT_APPLICABLE"
+    assert F.p0_umbrella_verdict(None, []) == "NOT_APPLICABLE"
     owner = inspect.getsource(F._p0_umbrella_status)
     assert '"SKIPPED-CONDITION"' in owner
     assert "#447" in owner

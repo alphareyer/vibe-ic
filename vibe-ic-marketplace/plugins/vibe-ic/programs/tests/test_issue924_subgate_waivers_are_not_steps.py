@@ -309,14 +309,14 @@ def test_p0_is_never_excused_at_step_level():
                         waived + [F._p0_gate_record(
                             "a", "NOT_INVOCABLE", "argparse rejected argv",
                             {"exit_code": 2})]):
-            reachable.add(F._p0_umbrella_status(executed, records))
+            reachable.add(F.p0_umbrella_verdict(executed, records))
     assert "WAIVED" not in reachable, (
         f"P0's own verdict CAN be WAIVED now ({sorted(reachable)}) — the "
         f"reasoning that a sub-gate waiver must not excuse a step needs "
         f"re-deriving before this file is trusted")
 
     with_waiver = {
-        F._p0_umbrella_status(not any(r["verdict"] == "FAIL" for r in recs),
+        F.p0_umbrella_verdict(not any(r["verdict"] == "FAIL" for r in recs),
                               recs)
         for recs in (list(waived), waived + [_pass("a")])}
     excused = {s for s in with_waiver if _T.is_excused(s)}

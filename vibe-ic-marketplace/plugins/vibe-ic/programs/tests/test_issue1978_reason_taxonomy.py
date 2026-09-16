@@ -103,7 +103,7 @@ def test_each_reason_class_changes_the_top_level_p0_tier(
               "reason_class": reason_class, "message": "same message",
               "evidence": {"exit_code": 2}}
     answered = {"name": "another_gate", "verdict": "PASS"}
-    assert F._p0_umbrella_status(True, [record, answered]) == expected
+    assert F.p0_umbrella_verdict(True, [record, answered]) == expected
 
 
 @pytest.mark.parametrize("reason_class", [
@@ -119,7 +119,7 @@ def test_a_short_population_with_NOTHING_decisive_is_not_measured(reason_class):
     record = {"name": "same_gate", "verdict": "SKIP",
               "reason_class": reason_class, "message": "m",
               "evidence": {"exit_code": 2}}
-    assert F._p0_umbrella_status(True, [record]) == "NOT_MEASURED"
+    assert F.p0_umbrella_verdict(True, [record]) == "NOT_MEASURED"
 
 
 def test_caller_error_zero_denominator_and_missing_upstream_are_not_skips():

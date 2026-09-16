@@ -9656,6 +9656,25 @@ def _p0_umbrella_status(executed: Optional[bool],
     return _T.Verdict.PASS.value, ""
 
 
+def p0_umbrella_verdict(executed: Optional[bool],
+                        records: List[Dict[str, Any]]) -> str:
+    """Just the WORD of `_p0_umbrella_status`'s pair.
+
+    R-0915-85 made that function return `(verdict, reason_class)` because two
+    of its four old words — `INCOMPLETE` and `NOT-MEASURED` — differed only in
+    whether the population was partly or wholly unanswered, which is a reason,
+    not an outcome. Every consumer that only wants the word says so here rather
+    than indexing `[0]` at ten sites.
+    """
+    return _p0_umbrella_status(executed, records)[0]
+
+
+def p0_umbrella_reason(executed: Optional[bool],
+                       records: List[Dict[str, Any]]) -> str:
+    """The other half: which reason a NOT_MEASURED umbrella carries."""
+    return _p0_umbrella_status(executed, records)[1]
+
+
 def _p0_passed_count(records: List[Dict[str, Any]]) -> int:
     """How many registered gates ran and PASSED.
 
@@ -17871,9 +17890,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     # are claimed as done. Byte-identical to the previous three-term
     # subtraction for the current vocabulary — the extra spellings in `EXCUSED`
     # are consumer-side tolerance the producer never emits, so they count 0.
+    # R-0915-85 — WHAT `total_required` SUBTRACTS IS UNCHANGED, and it takes
+    # two words to say now where it took one. The old `EXCUSED` set was
+    # "precisely what `total_required` subtracts" and held BOTH the skip
+    # spellings (now `NOT_APPLICABLE`) AND `WAIVED` (now `PASS_WITH_WAIVERS`).
+    # Under the five, `is_excused` is only the first of those, because a waived
+    # step DID run — so the second is named here explicitly rather than by
+    # widening `is_excused`, which would make a waiver invisible to the
+    # ordering guard and to every other consumer of that predicate.
+    #
+    # The arithmetic is byte-identical to before: a deferred step sits in
+    # neither the numerator (`counts["PASS"]`) nor the denominator, exactly as
+    # it did when the word was `WAIVED`. No published X/Y moves.
     total_required = (len(steps)
                       - sum(_n for _k, _n in counts.items()
-                            if _T.is_excused(_k))
+                            if _T.is_excused(_k)
+                            or _k == _T.Verdict.PASS_WITH_WAIVERS.value)
                       + len(oss_blocked_skipped))
     # ADJUDICATED AT MERGE, v1.7.96 (supersedes Wave 93) — this is NOT an
     # owner ruling and must not be read as one; the repo's real ones carry a
@@ -17930,8 +17962,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"  {r}={n}" for r, n in sorted(reason_counts.items()) if n)
     subgate_head = (f", {p0_subgate_waivers} P0 sub-gate waiver(s) "
                     f"(not steps)" if p0_subgate_waivers else "")
+    # THE HEADLINE'S WORDING IS A CONTRACT, not prose. `final_report_generate
+    # ._parse_audit_tally` and this repo's own tests key on `X/Y executed PASS,`
+    # then `W DEFERRED via waiver`; R-0915-85 renamed the WORD a step wears, not
+    # the sentence a reader and four parsers agreed on. The count behind
+    # `DEFERRED` is now `PASS_WITH_WAIVERS`, which is exactly what `WAIVED`
+    # counted before.
     print(f"Steps: {len(steps)} total ({pass_count}/{total_required} executed "
-          f"PASS, {counts['PASS_WITH_WAIVERS']} with open waiver rows"
+          f"PASS, {counts['PASS_WITH_WAIVERS']} DEFERRED via waiver"
           f"{subgate_head})")
     # v0.3.5 — #503: split cascade FAILs from independent gaps so the
     # actionable root-cause surface is visible at a glance.

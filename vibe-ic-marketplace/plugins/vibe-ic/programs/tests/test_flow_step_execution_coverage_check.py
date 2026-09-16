@@ -14,8 +14,17 @@ def _report(*steps):
     return {"steps": list(steps)}
 
 
-def _s(sid, name, status, stage="stage3"):
-    return {"id": sid, "name": name, "status": status, "stage": stage}
+def _s(sid, name, status, stage="stage3", reason_class=None):
+    """One step row. R-0915-85 — a `FAIL` row carries the REASON that says
+    which kind it is, and `applicable_missing` reads `missing_artefact` off it
+    rather than off a word (`MISSING`) that no longer exists. Defaulted so a
+    row that only needs a verdict still reads as one line."""
+    row = {"id": sid, "name": name, "status": status, "stage": stage}
+    if reason_class is None and status == "FAIL":
+        reason_class = "missing_artefact"
+    if reason_class:
+        row["reason_class"] = reason_class
+    return row
 
 
 def _pairs(res):
@@ -52,7 +61,7 @@ def test_ordering_violation_terminal_before_signoff():
     # GDS marked done while the PV step it blocks_on is MISSING → FAIL.
     r = _report(
         _s(30, "Post-Layout SPICE Verification", "PASS"),
-        _s(31, "Physical Verification (DRC + LVS + ERC + Density)", "MISSING"),
+        _s(31, "Physical Verification (DRC + LVS + ERC + Density)", "FAIL"),
         _s(37, "GDSII output (only if Step 31 PV fully clean)", "PASS"),
     )
     res = cov.analyze(r, GRAPH)
@@ -79,7 +88,7 @@ def test_na_signoff_does_not_block_terminal():
     r = _report(
         _s(30, "Post-Layout SPICE Verification", "PASS"),
         _s(31, "Physical Verification (DRC + LVS + ERC + Density)",
-           "SKIPPED-CONDITION"),
+           "NOT_APPLICABLE"),
         _s(37, "GDSII output (only if Step 31 PV fully clean)", "PASS"),
     )
     res = cov.analyze(r, GRAPH)
@@ -89,8 +98,8 @@ def test_na_signoff_does_not_block_terminal():
 def test_applicable_missing_is_a_skip():
     # An applicable step that never produced output → no-skip violation.
     r = _report(
-        _s(2, "Lint (RTL + Quartus-unsafe patterns)", "MISSING", stage="stage1"),
-        _s(37, "GDSII output", "MISSING"),
+        _s(2, "Lint (RTL + Quartus-unsafe patterns)", "FAIL", stage="stage1"),
+        _s(37, "GDSII output", "FAIL"),
     )
     res = cov.analyze(r, {})
     assert res["verdict"] == "FAIL"
@@ -102,7 +111,7 @@ def test_name_based_fallback_when_no_blocks_on_edges():
     # Terminal ships EMPTY blocks_on (the real GDSII/handoff data bug): the
     # name-based fallback must still guard it against an unfinished sign-off step.
     r = _report(
-        _s(31, "Physical Verification (DRC + LVS + ERC)", "MISSING"),
+        _s(31, "Physical Verification (DRC + LVS + ERC)", "FAIL"),
         _s(38, "Foundry Handoff (mask spec + WAT plan)", "PASS"),
     )
     res = cov.analyze(r, {})  # empty graph → fallback path
@@ -114,7 +123,7 @@ def test_vacuous_pass_SIGNOFF_ancestor_still_blocks():
     # A VACUOUS-PASS SIGN-OFF predecessor (SPICE verification verified nothing)
     # is dangerous → must still block a downstream done-claim.
     r = _report(
-        _s(30, "Post-Layout SPICE Verification", "VACUOUS-PASS"),
+        _s(30, "Post-Layout SPICE Verification", "NOT_MEASURED"),
         _s(31, "Physical Verification", "PASS"),
         _s(37, "GDSII output", "PASS"),
     )
@@ -128,8 +137,13 @@ def test_vacuous_pass_NONsignoff_ancestor_is_acceptable():
     # downstream steps that depend on it. (The exact spm step-14 false positive.)
     graph = {"16": ["14"], "15": ["14"], "14": []}
     r = _report(
+        # R-0915-85 — the spm step-14 false positive was a step that RAN and
+        # did not fail (`VACUOUS-PASS`). That half of the old word is
+        # `PASS_WITH_WAIVERS`; `NOT_MEASURED` is the other half and IS reported,
+        # which `test_ordinary_process_steps_still_acceptable_when_vacuous`
+        # asserts in the same file.
         _s(14, "Synthesis handoff gate (pre-PnR yosys script + netlist audit)",
-           "VACUOUS-PASS", stage="stage2"),
+           "PASS_WITH_WAIVERS", stage="stage2"),
         _s(15, "Floorplan + PDN", "PASS"),
         _s(16, "Clock planning", "PASS"),
     )
@@ -156,7 +170,7 @@ def test_wafer_sort_not_credited_over_vacuous_fab_intake():
     graph = {"41": ["40"], "40": ["38"], "38": []}
     r = _report(
         _s(38, "Foundry Handoff (mask spec + WAT plan)", "PASS", stage="stage4"),
-        _s(40, _FAB, "VACUOUS-PASS", stage="stage5_manufacturing"),
+        _s(40, _FAB, "NOT_MEASURED", stage="stage5_manufacturing"),
         _s(41, _SORT, "PASS", stage="stage5_manufacturing"),
     )
     res = cov.analyze(r, graph)
@@ -170,7 +184,7 @@ def test_vacuous_silicon_ancestor_blocks_on_stage_alone():
     # so a future rewording of the step title cannot re-open the hole.
     graph = {"91": ["90"], "90": []}
     r = _report(
-        _s(90, "External vendor step", "VACUOUS-PASS",
+        _s(90, "External vendor step", "NOT_MEASURED",
            stage="stage5_manufacturing"),
         _s(91, "Downstream silicon step", "PASS", stage="stage5_manufacturing"),
     )
@@ -192,15 +206,36 @@ def test_vacuous_silicon_ancestor_blocks_on_name_when_report_has_no_stage():
     assert ("41", "40") in _pairs(res)
 
 
-def _vacuous_ancestor_blocks(sid, name, stage):
-    """Does a VACUOUS-PASS on this step block a PASS child that blocks_on it?"""
+def _ancestor_blocks(sid, name, stage, status):
+    """Does *status* on this step block a PASS child that blocks_on it?"""
     child = f"{sid}__child"
     r = _report(
-        {"id": sid, "name": name, "status": "NOT_MEASURED", "stage": stage},
+        {"id": sid, "name": name, "status": status, "stage": stage},
         {"id": child, "name": "downstream", "status": "PASS", "stage": stage},
     )
     res = cov.analyze(r, {child: [sid], sid: []})
     return (child, sid) in _pairs(res), res
+
+
+def _vacuous_ancestor_blocks(sid, name, stage):
+    """R-0915-85 — the OLD `VACUOUS-PASS` ancestor, in the five.
+
+    That word said two things at once: "this step ran and did not fail" and
+    "it examined nothing about the design". The reduction separated them, and
+    the two halves land on OPPOSITE sides of this guard, so the tests that used
+    it have to say which half they mean:
+
+      PASS_WITH_WAIVERS  ran, certified less than a full pass — still an
+                         acceptable predecessor under an ORDINARY process step
+                         (`_ancestor_blocks(..., "PASS_WITH_WAIVERS")`)
+      NOT_MEASURED       nobody measured it — a hole, and a done-claim standing
+                         on it is reported wherever it is reported now
+
+    This helper keeps the second, because every caller left using it is a
+    "must block" case. The ordinary-process case calls `_ancestor_blocks`
+    directly with the first.
+    """
+    return _ancestor_blocks(sid, name, stage, "NOT_MEASURED")
 
 
 def test_every_stage5_step_of_the_real_flow_blocks_when_vacuous():
@@ -249,7 +284,7 @@ def test_vacuous_foundry_handoff_does_not_credit_fabrication():
     graph = {"40": ["38"], "38": ["31"], "31": []}
     r = _report(
         _s(31, "Physical Verification (DRC + LVS + ERC)", "PASS", stage="stage4"),
-        _s(38, "Foundry Handoff (mask spec + WAT plan)", "VACUOUS-PASS",
+        _s(38, "Foundry Handoff (mask spec + WAT plan)", "NOT_MEASURED",
            stage="stage4"),
         _s(40, _FAB, "PASS", stage="stage5_manufacturing"),
     )
@@ -306,10 +341,18 @@ def test_ordinary_process_steps_still_acceptable_when_vacuous():
         assert not cov._TERMINAL_RE.search(name), (
             f"step {sid} was renamed into terminal hand-off vocabulary — it is "
             f"no longer an ordinary process step and this guard needs rewriting")
-        blocked, res = _vacuous_ancestor_blocks(sid, name, stage)
+        blocked, res = _ancestor_blocks(sid, name, stage,
+                                        "PASS_WITH_WAIVERS")
         assert not blocked, (
-            f"{sid} ({name}) vacuous must stay an acceptable predecessor, "
-            f"got {res['ordering_violations']}")
+            f"{sid} ({name}) PASS_WITH_WAIVERS must stay an acceptable "
+            f"predecessor, got {res['ordering_violations']}")
+        # THE OTHER HALF OF THE OLD WORD, asserted in the same loop so the
+        # split cannot be read as a relaxation: the same ordinary process step
+        # NOT_MEASURED IS reported, because nobody measured it.
+        blocked_nm, _ = _ancestor_blocks(sid, name, stage, "NOT_MEASURED")
+        assert blocked_nm, (
+            f"{sid} ({name}) NOT_MEASURED must be reported under a done-claim "
+            f"child — a step nobody measured is a hole, not a quiet pass")
 
 
 def test_skipped_condition_silicon_ancestor_does_not_block():
@@ -318,7 +361,7 @@ def test_skipped_condition_silicon_ancestor_does_not_block():
     # applicable" and must never flag anything.
     graph = {"41": ["40"], "40": []}
     r = _report(
-        _s(40, _FAB, "SKIPPED-CONDITION", stage="stage5_manufacturing"),
+        _s(40, _FAB, "NOT_APPLICABLE", stage="stage5_manufacturing"),
         _s(41, _SORT, "PASS", stage="stage5_manufacturing"),
     )
     res = cov.analyze(r, graph)
@@ -519,8 +562,8 @@ def test_zero_step_report_is_not_checked_not_pass():
 
 def test_all_steps_not_applicable_is_not_checked_not_pass():
     r = _report(
-        _s(40, _FAB, "SKIPPED-CONDITION", stage="stage5_manufacturing"),
-        _s(41, _SORT, "WAIVED", stage="stage5_manufacturing"),
+        _s(40, _FAB, "NOT_APPLICABLE", stage="stage5_manufacturing"),
+        _s(41, _SORT, "NOT_APPLICABLE", stage="stage5_manufacturing"),
     )
     res = cov.analyze(r, {"41": ["40"]})
     assert res["verdict"] == "NOT-CHECKED"
@@ -532,7 +575,7 @@ def test_fail_still_wins_over_not_checked():
     # is still a violation. FAIL must not be softened into NOT-CHECKED by a
     # zero-edge graph.
     r = _report(
-        _s(31, "Physical Verification (DRC + LVS + ERC)", "MISSING"),
+        _s(31, "Physical Verification (DRC + LVS + ERC)", "FAIL"),
         _s(38, "Foundry Handoff (mask spec + WAT plan)", "PASS"),
     )
     res = cov.analyze(r, {})       # zero edges → name fallback only
@@ -548,7 +591,8 @@ def test_cli_fail_still_exits_1_even_with_an_edgeless_graph(tmp_path):
         flow_text="steps:\n  - id: 40\n    name: a\n    blocks_on: []\n",
         compliance=_json.dumps({"overall": "FAIL", "steps": [
             {"id": 2, "name": "Lint (RTL + Quartus-unsafe patterns)",
-             "status": "FAIL", "stage": "stage1"}]}))
+             "status": "FAIL", "reason_class": "missing_artefact",
+             "stage": "stage1"}]}))
     assert r.returncode == 1, f"rc={r.returncode} stdout={r.stdout}"
     assert res["verdict"] == "FAIL"
 

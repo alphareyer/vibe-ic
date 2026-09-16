@@ -159,7 +159,15 @@ def _blocks_when_vacuous(step: dict) -> bool:
 
 
 def _norm(status: str) -> str:
-    return str(status or "").upper().replace("_", "-").strip()
+    """R-0915-85 — an IDENTITY for the five, which have one spelling each.
+
+    It used to upper-case and swap `_` for `-` because the producer wrote
+    `VACUOUS_PASS` and the reports said `VACUOUS-PASS`. `verdict.parse` refuses
+    a second spelling now, so normalising here would turn every word it touched
+    into one `parse` cannot read — measured: `NOT_APPLICABLE` became
+    `NOT-APPLICABLE` and every predicate below raised.
+    """
+    return str(status or "").strip()
 
 
 class NotChecked(Exception):
@@ -282,7 +290,13 @@ def analyze(report: dict, graph: dict | None = None,
         st = _norm(s.get("status"))
         if st not in _NOT_APPLICABLE:
             steps_applicable += 1
-        if st not in _NOT_APPLICABLE and st == "MISSING":
+        # R-0915-85 — a declared output that does not exist is
+        # `FAIL(missing_artefact)`; the bucket is read off the reason, which is
+        # where the fact now lives.
+        if (st not in _NOT_APPLICABLE
+                and st == _T.Verdict.FAIL.value
+                and str(s.get("reason_class") or "")
+                == _T.ReasonClass.MISSING_ARTEFACT.value):
             applicable_missing.append(s)
         if _SIGNOFF_RE.search(name):
             signoff_steps.append(s)

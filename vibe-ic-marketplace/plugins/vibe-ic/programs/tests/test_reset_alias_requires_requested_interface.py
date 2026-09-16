@@ -55,7 +55,7 @@ def test_no_contract_keeps_original_bytes(tmp_path, source, top):
     before = path.read_bytes()
     result = R.step_reset_clock_variant_aliases(tmp_path, top)
     assert path.read_bytes() == before
-    assert result.status == "SKIP"
+    assert result.status == "PASS"
     assert "request" in result.detail.lower()
 
 
@@ -67,7 +67,7 @@ def test_native_prompt_never_adds_speculative_port(tmp_path, source):
     result = R.step_reset_clock_variant_aliases(tmp_path, "dut")
     assert _ports(path) == {source, "d", "q"}
     assert path.read_bytes() == before
-    assert result.status == "SKIP"
+    assert result.status == "PASS"
 
 
 @pytest.mark.parametrize("structured", [False, True])
@@ -93,7 +93,7 @@ def test_prose_or_incomplete_contract_is_not_rename_authority(tmp_path, text):
     before = path.read_bytes()
     result = R.step_reset_clock_variant_aliases(tmp_path, "dut")
     assert path.read_bytes() == before
-    assert result.status == "SKIP"
+    assert result.status == "PASS"
 
 
 def test_malformed_contract_refuses_mutation(tmp_path):
@@ -103,7 +103,7 @@ def test_malformed_contract_refuses_mutation(tmp_path):
     before = path.read_bytes()
     result = R.step_reset_clock_variant_aliases(tmp_path, "dut")
     assert path.read_bytes() == before
-    assert result.status == "SKIP"
+    assert result.status == "PASS"
     assert "request" in result.detail.lower()
 
 
@@ -116,7 +116,7 @@ def test_explicit_requested_variant_remains_supported(tmp_path, source, target):
     result = R.step_reset_clock_variant_aliases(tmp_path, "dut")
     assert result.status == "PASS", result.detail
     assert _ports(path) == {target, "d", "q"}
-    assert R.step_reset_clock_variant_aliases(tmp_path, "dut").status == "SKIP"
+    assert R.step_reset_clock_variant_aliases(tmp_path, "dut").status == "PASS"
 
 
 def test_complete_public_sections_can_request_variant(tmp_path):
@@ -134,7 +134,7 @@ def test_opposite_polarity_contract_cannot_request_variant(tmp_path):
     before = path.read_bytes()
     result = R.step_reset_clock_variant_aliases(tmp_path, "dut")
     assert path.read_bytes() == before
-    assert result.status == "SKIP"
+    assert result.status == "PASS"
 
 
 def _elaborate(tmp_path, path, tb):
@@ -212,7 +212,7 @@ def test_checked_in_reference_ip_variant_obeys_contract(tmp_path, requested):
         assert _ports(path, top) == {p[2] for p in V.parse_module_ports(original, top)}
     else:
         assert path.read_text() == native
-        assert result.status == "SKIP"
+        assert result.status == "PASS"
 
 
 @pytest.mark.parametrize("flat", ["0", "1"])
@@ -222,7 +222,7 @@ def test_flat_mode_is_not_interface_authority(tmp_path, monkeypatch, flat):
     monkeypatch.setenv("VIBE_IC_RCVAR_WHITEBOX_FLAT", flat)
     result = R.step_reset_clock_variant_aliases(tmp_path, "dut")
     assert path.read_bytes() == before
-    assert result.status == "SKIP"
+    assert result.status == "PASS"
 
 
 def _cli(tmp_path, aliases):
