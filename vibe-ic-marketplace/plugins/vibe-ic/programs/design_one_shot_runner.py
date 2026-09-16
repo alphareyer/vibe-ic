@@ -9152,6 +9152,32 @@ def step_l10_unit_tb_gen(project: Path,
         return StepResult("l10_unit_tb_gen", "SKIP", time.time() - t0,
                           f"L10 unreadable: {e}")
 
+    # R-0915-89(ii) — PUBLISH WHICH ORACLES THIS RUN DID NOT WRITE.
+    #
+    # `testbench_gen.authored_oracle_preserved` has refused to regenerate over
+    # a delivered oracle since v1.15.45, and it records each one it kept in the
+    # producer's in-memory `report` — which reached no file. MEASURED: r18
+    # preserved all TEN delivered oracles and executed them (10/10
+    # `sim_executed`) and published no record of it; r27 wrote one real oracle
+    # and nine substance floors and published no record of that either. A
+    # reader of either run could not tell a delivered oracle from a generated
+    # one from a scaffold asserting only "no output stays X/Z" — which is the
+    # distinction r27's 1-of-10 turned on, and the distinction R-0915-87(2)
+    # made the Step-4 waiver gate refuse over.
+    #
+    # Written unconditionally and derived from the FILES rather than from
+    # `_tb_report`, so it describes the directory as it stands after every
+    # emitter has run — including a case this step SKIPPED.
+    try:
+        _prov = _tbg.oracle_provenance(project)
+        _prov_path = (_pl.reports_dir(project) / "phase2" / "sim"
+                      / "l10_oracle_provenance.json")
+        _prov_path.parent.mkdir(parents=True, exist_ok=True)
+        _prov_path.write_text(json.dumps(_prov, indent=1, ensure_ascii=False),
+                              encoding="utf-8")
+    except Exception:  # pragma: no cover — disclosure must never fail the step
+        pass
+
     def _consequence(scope: dict) -> str:
         """#761 — name the CONSUMER and what it will do with the cases this
         producer did not write a TB for. A SKIP that does not say who grades

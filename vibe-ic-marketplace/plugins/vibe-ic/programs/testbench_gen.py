@@ -842,6 +842,107 @@ def _emit_case_known_answer_vector(project: Path, case: dict, dut_module: str,
     return f
 
 
+
+# ── R-0915-89(ii): the run must SAY which oracles it did not write ──────────
+#: The three ways a file under `sim/tb/` can have got there.
+ORACLE_SOURCE_AUTHORED = "PRESERVED_AUTHORED"
+ORACLE_SOURCE_GENERATED = "GENERATED"
+ORACLE_SOURCE_FLOOR = "SUBSTANCE_FLOOR"
+
+#: An authored oracle states, in its own header, which input line it derives
+#: from. Read back rather than re-asserted, so the published provenance cannot
+#: drift from the file it describes.
+_CITATION_RE = re.compile(r"^//\s*CITATION\s*:\s*(.+?)\s*$", re.M)
+#: The emitter term of `ORACLE_GENERATED_MARKER`: exactly what `stamp_generated`
+#: writes after the marker, which is a Python function name and nothing else.
+_EMITTER_TERM_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_ORACLE_LINE_RE = re.compile(r"^//\s*ORACLE\s*:\s*(.+?)\s*$", re.M)
+
+
+def oracle_provenance(project: Path) -> dict:
+    """Per-case: was this testbench AUTHORED, GENERATED, or a SUBSTANCE FLOOR?
+
+    R-0915-89(ii). `authored_oracle_preserved` already recognises a delivered
+    oracle and refuses to regenerate over it — correctly, and since v1.15.45.
+    What no artefact said is WHICH files that happened to. MEASURED: r18
+    preserved all TEN of the testbench-author role's delivered oracles and
+    executed them (10/10 `sim_executed`), and `preserved_authored` went into an
+    in-memory dict that reached no published file; r27 generated one real
+    oracle and nine substance floors, and said no more than that either. A
+    reader of either run cannot tell a delivered oracle from a generated one
+    from a scaffold that checks almost nothing — which is exactly the
+    distinction r27's 1-of-10 turned on.
+
+    DERIVED FROM THE FILES, NOT FROM A LEDGER. Each testbench already declares
+    what it is: the substance floor carries `ORACLE_NONE_MARKER`, this
+    producer's own output carries `ORACLE_GENERATED_MARKER` plus the emitter
+    name, and a file carrying NEITHER is authored — the same three-way test
+    `authored_oracle_preserved` makes, so the disclosure and the
+    never-regenerate rule cannot disagree. An authored oracle's own
+    `// CITATION :` line is read back verbatim, so the published provenance is
+    the file's own claim about which input line it derives from, not a
+    second-hand copy that could drift.
+    """
+    out_dir = _pl.sim_dir(project) / "tb"
+    cases: list = []
+    if out_dir.is_dir():
+        for tb in sorted(out_dir.glob("*.v")):
+            try:
+                text = tb.read_text(errors="replace")
+            except OSError as exc:
+                cases.append({"case": tb.stem, "source": "UNREADABLE",
+                              "why": f"{type(exc).__name__}"})
+                continue
+            row = {"case": tb.stem,
+                   "path": str(tb.relative_to(project))
+                           if tb.is_relative_to(project) else str(tb)}
+            if ORACLE_NONE_MARKER in text:
+                row["source"] = ORACLE_SOURCE_FLOOR
+                row["checks"] = ("no output remains X/Z after reset release; "
+                                 "no case semantics")
+            elif ORACLE_GENERATED_MARKER in text:
+                row["source"] = ORACLE_SOURCE_GENERATED
+                # THE LINE MUST BE EXACTLY THE GRAMMAR, OR THE EMITTER IS
+                # REFUSED. `stamp_generated` writes the marker, ONE identifier
+                # and a newline — nothing else, ever. MEASURED, TWICE:
+                #   * this first read `tail.splitlines()[0].strip()`, and every
+                #     word appended to the marker line was absorbed into the
+                #     published name (21 of 21 denial tokens moved it);
+                #   * the first repair took the LEADING identifier, and every
+                #     word spliced IN FRONT of the name was then published AS
+                #     the name — `emitter: "not"` (21 of 21 again).
+                # Neither is a polarity reading; both are a reader taking more
+                # or other than the grammar's one term. So the whole line tail
+                # must BE one identifier. Anything else publishes "" — an
+                # emitter this reader cannot name — and never a guess.
+                tail = text.split(ORACLE_GENERATED_MARKER, 1)[1]
+                line = tail.split("\n", 1)[0].strip()
+                row["emitter"] = (line if _EMITTER_TERM_RE.fullmatch(line)
+                                  else "")
+            else:
+                row["source"] = ORACLE_SOURCE_AUTHORED
+                cite = _CITATION_RE.search(text)
+                what = _ORACLE_LINE_RE.search(text)
+                row["citation"] = cite.group(1) if cite else None
+                row["oracle"] = what.group(1) if what else None
+                if not row["citation"]:
+                    # An authored oracle that cites no input line is DISCLOSED
+                    # as uncited rather than quietly counted as provenanced.
+                    row["uncited"] = True
+            cases.append(row)
+    counts: dict = {}
+    for row in cases:
+        counts[row["source"]] = counts.get(row["source"], 0) + 1
+    return {
+        "schema": "vibeic.l10_oracle_provenance.v1",
+        "tb_dir": str(out_dir),
+        "cases": cases,
+        "counts": counts,
+        "authored_uncited": [r["case"] for r in cases if r.get("uncited")],
+        "decided_by": "testbench_gen.oracle_provenance",
+    }
+
+
 def emit_unit_tbs(project: Path, top: str = "chip_top",
                   kind: "str | None" = None,
                   report: "dict | None" = None) -> int:
