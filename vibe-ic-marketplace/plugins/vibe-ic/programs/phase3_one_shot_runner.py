@@ -24844,6 +24844,31 @@ _SDR_CANDIDATE_DEF_NAME = "candidate.def"
 #: both. Both must therefore be measured on this leg: DRT-0047 = 0 AND
 #: DRT-1010 = 0 in every adopt session.
 _SDR_CANDIDATE_ODB_NAME = "candidate.odb"
+
+#: R-0915-68 — one ODB per DRV pass of the child's bounded repair loop, plus a
+#: ledger naming every pass's router-DRC count and which one was offered.
+#:
+#: WHY THE CHILD NEEDS THIS AT ALL. MEASURED (opentitan_aes x sky130A,
+#: 2026-09-16): the child's 6-pass DRV loop drove DRV 41,956 -> 19,013 ->
+#: 2,647, and its PASS-1 route closed at **0 router violations** — strictly
+#: better than the `before=2` the transaction judges against. Passes 2 and 3
+#: then re-degraded the route to 11 and 39. The child offered whatever state
+#: it happened to END in, so a pass that had already reached clean was thrown
+#: away because a LATER pass spoiled it, and the parent refused a candidate
+#: that had been worth accepting two passes earlier.
+#:
+#: WHY IT IS A FILE COPY AND NOT A ROLLBACK. The child NEVER walks back inside
+#: its own session. This deck's own antenna loop records the measurement that
+#: forbids it: `odb::dbChip_destroy` + `read_db` restores the routing and then
+#: `report_worst_slack -max` dies with `[CRITICAL ORD-2008] unknown master term
+#: type`, while the same session without the restore finishes; and the ECO
+#: journal rolls instances back (5963 -> 5994 -> 5963) while leaving the
+#: re-routed wires, so `check_antennas` reads a third state that never existed.
+#: Selecting the best pass is therefore done by choosing WHICH FILE becomes
+#: `candidate.odb`. The parent's adopt tail restores it in a FRESH session,
+#: which is the one place a restore is safe.
+_SDR_PASS_ODB_FMT = "pass{}.odb"
+_SDR_PASS_LEDGER_NAME = "pass_ledger.tsv"
 _SDR_CANDIDATE_DRC_NAME = "candidate_router.drc.rpt"
 #: The two SDR sites, and the transaction directory each owns. They used to
 #: share one directory, and `begin` starts by `file delete -force`-ing it — so
@@ -25819,8 +25844,11 @@ def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
     child_log_c = f"{out_dir_c}/{_sdr_child_log_name(stage)}"
     def_tcl_c = f"{out_dir_c}/{_sdr_child_def_leg_tcl_name(stage)}"
     def_log_c = f"{out_dir_c}/{_sdr_child_def_leg_log_name(stage)}"
+    # R-0915-68 — the per-pass ledger is evidence too: if the ODB leg is
+    # rejected and the DEF leg runs, the DEF child overwrites the ledger, and
+    # the record of which pass the ODB leg had reached would be gone.
     keep = " ".join((_SDR_CHILD_RECEIPT_NAME, _SDR_CANDIDATE_DEF_NAME,
-                     _SDR_CANDIDATE_DRC_NAME))
+                     _SDR_CANDIDATE_DRC_NAME, _SDR_PASS_LEDGER_NAME))
     return (
         "  if {$_sdr_tx_ready} {\n"
         "    set _sdr_tx_leg odb\n"
@@ -26047,6 +26075,17 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "      set _sdr_mwl $_sdr_crit\n"
         "    }\n"
         "  } _sdr_cw]} { puts \"SDR_CRIT_WIRE_LEN_NONFATAL: $_sdr_cw\" }\n"
+        # R-0915-68 — per-pass best tracking. Initialised OUTSIDE the
+        # `$_sdr_ok` guard on purpose: the epilogue reads these unconditionally,
+        # and a deck where the repair loop never ran must still answer "no pass
+        # produced a measured route" rather than die on an unset variable.
+        # `-1` means unmeasured, which is NOT 0 and must never be read as it;
+        # `_sdr_p` is pre-set so the epilogue's "did the session end on the best
+        # pass?" test is well-defined when there were no passes at all.
+        "  set _sdr_best_n -1\n"
+        "  set _sdr_best_p 0\n"
+        "  set _sdr_p 0\n"
+        "  set _sdr_pass_ledger {}\n"
         "  if {$_sdr_ok} {\n"
         f"  for {{set _sdr_p 1}} {{$_sdr_p <= {n}}} {{incr _sdr_p}} {{\n"
         "    catch {define_process_corner -ext_model_index 0 X}\n"
@@ -26232,6 +26271,45 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "    if {[catch {detailed_route {*}$_vic_drc_opt} _sdr_dr]} "
         "{ puts \"SDR_DR_NONFATAL: $_sdr_dr\"; set _sdr_tx_error 1; set _sdr_tx_route_ok 0; break }\n"
         "    set _sdr_tx_route_ok 1\n"
+        # ---- R-0915-68: MEASURE AND CHECKPOINT THIS PASS ----------------
+        # The route above wrote its own DRC report; count it now, while this
+        # pass's geometry is what is in the db. Then write this pass's ODB.
+        # A write failure is DISCLOSED and leaves the pass unselectable — it
+        # is never silently treated as if it had been checkpointed.
+        + _sdr_router_drc_count_proc_tcl()
+        + "    set _sdr_pass_n -1\n"
+        f"    catch {{set _sdr_pass_n [_sdr_tx_count_router_drc {child_drc_c}]}}\n"
+        f"    set _sdr_pass_odb {txn_c}/pass${{_sdr_p}}.odb\n"
+        "    set _sdr_pass_saved 0\n"
+        "    if {$_sdr_pass_n >= 0} {\n"
+        "      if {[catch {write_db $_sdr_pass_odb} _sdr_pw]} {\n"
+        "        puts \"SDR_PASS_CHECKPOINT_NONFATAL pass $_sdr_p: $_sdr_pw\"\n"
+        "      } else { set _sdr_pass_saved 1 }\n"
+        "    }\n"
+        "    lappend _sdr_pass_ledger [list $_sdr_p $_sdr_pass_n $_sdr_pass_saved]\n"
+        "    puts \"SDR_PASS_RESULT: pass=$_sdr_p router_drc=$_sdr_pass_n "
+        "checkpointed=$_sdr_pass_saved\"\n"
+        # STRICTLY BETTER WINS, TIES KEEP THE EARLIER PASS. A later pass that
+        # merely equals the best does not displace it: the earlier state was
+        # reached with less churn, and the tie-break must be deterministic.
+        "    if {$_sdr_pass_saved && $_sdr_pass_n >= 0 && "
+        "($_sdr_best_n < 0 || $_sdr_pass_n < $_sdr_best_n)} {\n"
+        "      set _sdr_best_n $_sdr_pass_n\n"
+        "      set _sdr_best_p $_sdr_p\n"
+        "      puts \"SDR_PASS_BEST_SO_FAR: pass=$_sdr_p router_drc=$_sdr_pass_n\"\n"
+        "    } elseif {$_sdr_best_p > 0 && $_sdr_pass_n > $_sdr_best_n} {\n"
+        # NOT a rollback: the loop keeps running on the degraded state, and the
+        # regression is named. What it cannot do is DISPLACE the better
+        # checkpoint, which is the whole point.
+        "      puts \"SDR_PASS_REJECTED_SEGMENT: pass=$_sdr_p router_drc=$_sdr_pass_n "
+        "worse than pass=$_sdr_best_p router_drc=$_sdr_best_n; the better "
+        "checkpoint stands and this pass will not be offered\"\n"
+        "    }\n"
+        # A pass that reached 0 cannot be beaten, and the loop's own
+        # SDR_CONVERGED test only fires on the DRV count at the TOP of the
+        # next pass. Stop here on a measured-clean ROUTE.
+        "    if {$_sdr_pass_n == 0} { puts \"SDR_PASS_ROUTE_CLEAN: pass $_sdr_p "
+        "closed at 0 router violations; no later pass can improve on clean\"; break }\n"
         # v1.8.100 r2 — the seed is HELD, not halved. MEASURED (iter1): halving
         # the repeater spacing each pass drove the count 314 -> 747 -> 647 -> 70
         # — over-splitting creates short nets whose OWN pins then violate, the
@@ -26298,10 +26376,49 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # clear route_ok: the candidate was still routed and measured, and the
         # ONE place that decides what happens to a candidate with no restore
         # point is the parent's refusal, which names the absent file.
+        # ---- R-0915-68: THE CANDIDATE IS THE BEST PASS, NOT THE LAST ----
+        # Write the ledger first, so every pass's count is on disk whatever
+        # happens next, then choose which ODB becomes the candidate.
+        "  if {[catch {\n"
+        f"    set _sdr_lfh [open {txn_c}/{_SDR_PASS_LEDGER_NAME} w]\n"
+        "    puts $_sdr_lfh \"pass\\trouter_drc\\tcheckpointed\"\n"
+        "    foreach _sdr_row $_sdr_pass_ledger {\n"
+        "      puts $_sdr_lfh \"[lindex $_sdr_row 0]\\t[lindex $_sdr_row 1]"
+        "\\t[lindex $_sdr_row 2]\"\n"
+        "    }\n"
+        "    close $_sdr_lfh\n"
+        "  } _sdr_lw]} { puts \"SDR_PASS_LEDGER_WRITE_NONFATAL: $_sdr_lw\" }\n"
+        "  puts \"SDR_PASS_LEDGER: $_sdr_pass_ledger\"\n"
+        # SELECT BY FILE COPY. The child never restores over itself (the
+        # antenna loop's ORD-2008 measurement forbids it); it chooses which
+        # already-written ODB the parent will restore in its OWN fresh adopt
+        # session. When the best pass is the one the session is already sitting
+        # in, or when no pass was checkpointed at all, fall back to writing the
+        # live state — that is the pre-R-0915-68 behaviour, byte for byte.
+        f"  set _sdr_cand_odb {txn_c}/{_SDR_CANDIDATE_ODB_NAME}\n"
+        "  set _sdr_cand_src \"live\"\n"
+        "  if {$_sdr_best_p > 0 && $_sdr_best_p != $_sdr_p} {\n"
+        f"    set _sdr_best_odb {txn_c}/pass${{_sdr_best_p}}.odb\n"
+        "    if {[file exists $_sdr_best_odb]} {\n"
+        "      if {[catch {file copy -force $_sdr_best_odb $_sdr_cand_odb} _sdr_cp]} {\n"
+        "        puts \"SDR_CANDIDATE_FROM_BEST_PASS_NONFATAL: $_sdr_cp\"\n"
+        "      } else {\n"
+        "        set _sdr_cand_src \"pass$_sdr_best_p\"\n"
+        "        puts \"SDR_CANDIDATE_FROM_BEST_PASS: pass=$_sdr_best_p "
+        "router_drc=$_sdr_best_n (the session ended on pass $_sdr_p; the "
+        "better pass is offered instead)\"\n"
+        "      }\n"
+        "    } else { puts \"SDR_CANDIDATE_BEST_PASS_ODB_ABSENT: "
+        "$_sdr_best_odb\" }\n"
+        "  }\n"
+        "  if {$_sdr_cand_src eq \"live\"} {\n"
         f"  if {{[catch {{write_db {txn_c}/{_SDR_CANDIDATE_ODB_NAME}}} "
         f"_sdr_codb]}} {{ puts \"SDR_CHILD_CANDIDATE_ODB_NONFATAL: "
         f"$_sdr_codb\" }} else {{ puts \"SDR_CHILD_CANDIDATE_ODB_WRITTEN: "
         f"{txn_c}/{_SDR_CANDIDATE_ODB_NAME}\" }}\n"
+        "  }\n"
+        "  puts \"SDR_CANDIDATE_SOURCE: $_sdr_cand_src best_pass=$_sdr_best_p "
+        "best_router_drc=$_sdr_best_n\"\n"
         "  if {[catch {\n"
         f"    set _sdr_fh [open {txn_c}/{_SDR_CHILD_RECEIPT_NAME} w]\n"
         "    puts $_sdr_fh \"mutated\\terror\\troute_ok\\tplacement_violations\"\n"
