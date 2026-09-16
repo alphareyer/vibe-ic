@@ -41411,11 +41411,50 @@ def _write_lvs_verdict(project: Path, status: str, finding: str,
     rpt_dir = _pl.reports_phase3_dir(project)
     rpt_dir.mkdir(parents=True, exist_ok=True)
     path = rpt_dir / "lvs_verdict.json"
+    # R-0915-69b — WAS ANYTHING ACTUALLY COMPARED.
+    #
+    # MEASURED, sha256 x sky130A, lane icsha2 run15, front door. This function
+    # wrote, from the illegal-overlap refusal site:
+    #
+    #   "status": "FAIL", "finding": "LVS_EXTRACTION_ILLEGAL_OVERLAP",
+    #   "message": "... netgen was NOT run -- a compare against a netlist the
+    #               extractor could not decide is not evidence about this design."
+    #
+    # A record whose STATUS says FAIL and whose MESSAGE says nothing was
+    # compared. FAIL is a claim about a compare that happened and disagreed;
+    # here no compare happened at all. And the consequence was not cosmetic:
+    # `eda_report_audit._lvs_blocked_verdict` honours this artifact only when
+    # the status is literally BLOCKED, so it returned None, `_check_lvs` fell
+    # through to its no-report branch, and step 31 published
+    #
+    #   "No LVS report found (searched *lvs*.rpt/log, *comp*.out)"
+    #
+    # — an UNATTRIBUTED ABSENCE — with the flow's own named refusal sitting in
+    # the same directory, unread. That is the silent absence this artifact was
+    # created to abolish, reappearing one field away from where it was fixed.
+    #
+    # THE FACT IS MEASURED, NOT DECLARED, and not at 26 call sites. The netgen /
+    # KLayout transcript is `reports/phase3/lvs.rpt`; whether a non-empty one
+    # exists AT THE MOMENT THIS VERDICT IS WRITTEN is a fact about the
+    # filesystem, so every writer gets it right without any of them being
+    # trusted to say so. The field claims exactly that and no more: a transcript
+    # exists. It says NOTHING about what the transcript contains -- the status
+    # and the #189 classifier own that -- so it can never be read as a pass.
+    _cmp_rpt = rpt_dir / "lvs.rpt"
+    try:
+        _cmp_done = _cmp_rpt.is_file() and _cmp_rpt.stat().st_size > 0
+    except OSError:
+        _cmp_done = False
     payload: Dict[str, Any] = {
         "status": status,          # PASS / FAIL / INCOMPLETE / WARN
         "result": status,
         "finding": finding,        # named machine token
         "message": message,
+        # R-0915-69b — its own field, never folded into `status`: "the compare
+        # disagreed" and "there was no compare" are different facts, and the
+        # second one is what a sign-off may not pass over in silence.
+        "compare_performed": _cmp_done,
+        "compare_evidence": ("reports/phase3/lvs.rpt" if _cmp_done else None),
         "generated_by": "phase3_one_shot_runner:_run_extraction_lvs (#477)",
     }
     if extras:
