@@ -23426,6 +23426,17 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         # PROPERTY, not a name — so it covers whatever the flow protected
         # without knowing why, and costs one pass over the instance list.
         # NONFATAL-guarded throughout. chip-AGNOSTIC.
+        # R-0915-74(a) — THE TRANSACTION'S STATE IS DECLARED AT THE TOP.
+        # MEASURED by this repo's own `test_clean_design_is_a_noop_no_repair_
+        # called` the moment it was not: the repair loop lives inside the
+        # `$_ant_pre != 0` branch, and the refusal check at the end of the block
+        # does not, so a design that was ALREADY CLEAN reached
+        # `if {$_ant_refused ne ""}` with no such variable and the whole deck
+        # died. A clean design must reach the end of this block having done
+        # nothing, which is exactly what these three defaults say.
+        f"set _ant_ckpt \"\"\n"
+        "set _ant_refused \"\"\n"
+        "set _ant_ckpt_ok 0\n"
         "set _ant_firm {}\n"
         "if {![catch {set _ablk [ord::get_db_block]} _abe]} {\n"
         "  foreach _ai [$_ablk getInsts] {\n"
@@ -23596,12 +23607,43 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "  set _ant_best_i -1\n"
         "  set _ant_stop CAP\n"
         "  set _ant_membership 1\n"
+        # R-0915-74(a) — THE VERIFIED STATE, WRITTEN DOWN BEFORE ANYTHING
+        # TOUCHES IT.
+        #
+        # MEASURED, sha256 x sky130A, lane icsha2 run15. This loop inserted 4
+        # diodes (`[INFO GRT-0015] Inserted 4 diodes.`), which makes their nets
+        # dirty; the incremental `detailed_route` that must re-route them RAISED
+        # (`REPAIR_ANTENNA_REROUTE_NONFATAL: DRT-1010`) and the loop `break`s.
+        # Whatever that aborted call had already written stayed in the database,
+        # was written to `routed.def`, and NOTHING verified it again — the
+        # router's last `[INFO DRT-0702] Post-route verification:` is at log line
+        # 1530 and the refusals are at 1957/1987/2427/2457. The conductor that
+        # entered in that window (`net4772`, met1 at y = 417.450 um) is the one
+        # magic's extractor then reported as 22 illegal overlaps over three
+        # flip-flops.
+        #
+        # SO THE VERIFIED ROUTE IS CHECKPOINTED FIRST. `write_db` only — this
+        # deck's own `ANTENNA_LOOP_BEST_NOT_RESTORED` note records why a
+        # mid-session rollback is not available on this tool: `dbChip_destroy` +
+        # `read_db` restores the routing and then kills the STA network the rest
+        # of this session runs on (ORD-2008), measured against a control that
+        # survives without it. The checkpoint is therefore a FILE, and the
+        # restore happens where the SDR transaction already proved it is safe —
+        # a FRESH session, driven by the parent.
+        f"  set _ant_ckpt $_ant_dir/{_ANTENNA_CHECKPOINT_NAME}\n"
+        "  if {[catch {write_db $_ant_ckpt} _ant_ck_e]} {\n"
+        "    puts \"ANTENNA_PRE_REPAIR_CHECKPOINT_FAILED: $_ant_ck_e\"\n"
+        "  } else {\n"
+        "    set _ant_ckpt_ok 1\n"
+        "    puts \"ANTENNA_PRE_REPAIR_CHECKPOINT: $_ant_ckpt\"\n"
+        "  }\n"
         "  for {set _i 0} {$_i < $_ant_cap} {incr _i} {\n"
         "    set _nv -1\n"
         "    set _ant_rf $_ant_dir/antenna_iter_$_i.rpt\n"
         "    if {[catch {set _nv [check_antennas -report_violating_nets "
         "-report_file $_ant_rf]} _ac]} {\n"
         "      puts \"ANTENNA_LOOP_CHECK_NONFATAL: $_ac\"\n"
+        "      set _ant_refused \"ANTENNA_LOOP_CHECK_NONFATAL: $_ac\"\n"
         "      set _ant_stop CHECK_FAILED\n"
         "      _vic_ant_rm_empty $_ant_rf\n"
         "      break\n"
@@ -23669,16 +23711,19 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "      # FALLBACK (build without -reroute): external repair then an\n"
         "      # incremental detailed_route of the diode-dirty nets.\n"
         "      puts \"ANTENNA_NATIVE_REROUTE_NONFATAL: $_ra_native\"\n"
+        "      set _ant_refused \"ANTENNA_NATIVE_REROUTE_NONFATAL: $_ra_native\"\n"
         "      if {[catch {repair_antennas "
         f"{pdk.antenna_diode_cell}"
         " -iterations 1 -ratio_margin $_ant_margin} _ra_err]} {\n"
         "        puts \"REPAIR_ANTENNA_NONFATAL: $_ra_err\"\n"
+        "        set _ant_refused \"REPAIR_ANTENNA_NONFATAL: $_ra_err\"\n"
         "        break\n"
         "      }\n"
         "      # INCREMENTAL reroute — re-routes ONLY the dirty nets.\n"
         "      if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
         "      if {[catch {detailed_route -verbose 0 {*}$_vic_drc_opt} _ra_dr]} {\n"
         "        puts \"REPAIR_ANTENNA_REROUTE_NONFATAL: $_ra_dr\"\n"
+        "        set _ant_refused \"REPAIR_ANTENNA_REROUTE_NONFATAL: $_ra_dr\"\n"
         "        break\n"
         "      }\n"
         "    }\n"
@@ -23801,6 +23846,37 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "-- $_afe\" }\n"
         "}\n"
         "puts \"ANTENNA_FIRM_RESTORED: $_ant_firm_n of [llength $_ant_firm]\"\n"
+        # R-0915-74(a) — THE REQUEST, NOT A ROLLBACK. If any repair or reroute
+        # REFUSED, this session is standing on a route that was modified and
+        # never re-verified, and it MUST NOT be the one that ships. It does not
+        # restore the checkpoint itself (ORD-2008, see the checkpoint note): it
+        # asks the parent to re-enter the post-route tail from the checkpoint in
+        # a FRESH session with the antenna stages omitted — exactly the shape the
+        # SDR adopt tail already uses and the one place a restore is proven safe.
+        #
+        # THE ANTENNA RESULT IS NOT LAUNDERED BY THIS. Rolling back means the
+        # repair did not happen, so the violations are whatever they were before
+        # it was attempted; the parent records `antenna_repair=NOT_APPLIED` with
+        # the refusal named, and a design that fails the antenna spec still fails
+        # it. What is removed is the unverified route, not the finding.
+        "if {$_ant_refused ne \"\"} {\n"
+        "  if {$_ant_ckpt_ok} {\n"
+        "    puts \"ANTENNA_REPAIR_REFUSED_ROLLBACK_REQUEST: checkpoint=$_ant_ckpt "
+        "reason=$_ant_refused\"\n"
+        "  } else {\n"
+        "    puts \"ANTENNA_REPAIR_REFUSED_NO_CHECKPOINT: reason=$_ant_refused "
+        "-- the pre-repair state was never written, so this route cannot be "
+        "rolled back and ships UNVERIFIED\"\n"
+        "  }\n"
+        "} elseif {$_ant_ckpt_ok} {\n"
+        "  puts \"ANTENNA_REPAIR_APPLIED: no repair or reroute refused\"\n"
+        "  catch {file delete -- $_ant_ckpt}\n"
+        "} else {\n"
+        # A design that was ALREADY CLEAN never entered the loop, so there was
+        # nothing to checkpoint and nothing to refuse. Saying so is not the same
+        # as saying the repair applied.
+        "  puts \"ANTENNA_REPAIR_NOT_ATTEMPTED: the route was already clean\"\n"
+        "}\n"
         "puts \"ANTENNA_POSTROUTE_DONE\"\n")
 
 
@@ -28659,6 +28735,234 @@ def _sdr_adopt_request(log_text: str) -> Optional[Dict[str, str]]:
     return found
 
 
+#: R-0915-74(a) — THE ANTENNA REPAIR'S OWN TRANSACTION.
+#:
+#: The antenna loop is the one stage that MUTATES A VERIFIED ROUTE and has no
+#: way to undo it. MEASURED, sha256 x sky130A, lane icsha2 run15: it inserted 4
+#: diodes, the incremental `detailed_route` that must re-route their nets RAISED
+#: (`REPAIR_ANTENNA_REROUTE_NONFATAL: DRT-1010`) and the loop broke. What that
+#: aborted call had already written stayed in the database, was written to
+#: `routed.def`, and nothing verified it again — the router's last
+#: `[INFO DRT-0702] Post-route verification:` is at log line 1530, the refusals
+#: at 1957/1987/2427/2457 — and the conductor that entered in that window
+#: (`net4772`, met1 at y = 417.450 um) is the one magic's extractor then
+#: reported as 22 illegal overlaps across three flip-flops.
+#:
+#: SO THE REFUSAL BECOMES A TRANSACTION, in the shape this repo already proved.
+#: The session checkpoints the verified route with `write_db` BEFORE it touches
+#: anything, and on any refusal it does NOT roll back in place — that is
+#: measured to be unavailable (`ANTENNA_LOOP_BEST_NOT_RESTORED`: dbChip_destroy
+#: + read_db restores the routing and then kills the STA network the rest of the
+#: session runs on, ORD-2008). It prints a REQUEST, and this function re-enters
+#: the post-route tail from the checkpoint in a FRESH session — the one place a
+#: restore is proven safe — with both antenna stages omitted.
+#:
+#: NOTHING IS LAUNDERED. A rollback means the repair DID NOT HAPPEN, so the
+#: antenna violations are whatever they were before it was attempted. The record
+#: this writes says `antenna_repair: NOT_APPLIED` with the refusal named, and a
+#: design that fails the antenna spec still fails it. What is removed is an
+#: unverified route, never a finding.
+#:
+#: BOUNDED BY CONSTRUCTION, like the SDR adopt: the tail has the antenna stages
+#: omitted, so it cannot reach the refusal again. One rollback per run, at most.
+_ANTENNA_ROLLBACK_MARKER = "ANTENNA_REPAIR_REFUSED_ROLLBACK_REQUEST:"
+_ANTENNA_NO_CHECKPOINT_MARKER = "ANTENNA_REPAIR_REFUSED_NO_CHECKPOINT:"
+_ANTENNA_STAGES = ("postroute_antenna_repair",
+                   "postroute_antenna_reconverge")
+#: The checkpoint file name, stated ONCE. The Tcl writes
+#: `$_ant_dir/antenna_pre_repair.odb` and this is that name.
+_ANTENNA_CHECKPOINT_NAME = "antenna_pre_repair.odb"
+
+
+def antenna_rollback_request(log_text: str) -> Optional[Dict[str, str]]:
+    """The LAST antenna rollback request in a transcript, or None. PURE.
+
+    Parsed from the marker the refusing branch itself prints, so the request and
+    the refusal are one fact rather than two that can disagree. `reason=` is the
+    REST of the line, because a tool's error text carries spaces.
+    """
+    found: Optional[Dict[str, str]] = None
+    for line in (log_text or "").splitlines():
+        i = line.find(_ANTENNA_ROLLBACK_MARKER)
+        if i < 0:
+            continue
+        rest = line[i + len(_ANTENNA_ROLLBACK_MARKER):].strip()
+        m = re.match(r"checkpoint=(\S+)\s+reason=(.*)$", rest)
+        if not m:
+            continue
+        found = {"checkpoint": m.group(1), "reason": m.group(2).strip()}
+    return found
+
+
+def antenna_refused_without_checkpoint(log_text: str) -> Optional[str]:
+    """The reason a refusal could NOT be rolled back, or None. PURE.
+
+    Its own marker and its own function: "the repair refused" and "the repair
+    refused and the verified state was never written down" are different facts,
+    and only the second one ships an unverified route.
+    """
+    for line in (log_text or "").splitlines():
+        i = line.find(_ANTENNA_NO_CHECKPOINT_MARKER)
+        if i >= 0:
+            return line[i + len(_ANTENNA_NO_CHECKPOINT_MARKER):].strip()
+    return None
+
+
+def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
+                                         out_dir_c: str, pnr_tcl: Path,
+                                         log_text: str,
+                                         hard_ceiling_s: int,
+                                         spare_plan: Optional[Dict[str, Any]]
+                                         = None) -> Dict[str, Any]:
+    """Re-enter the post-route tail from the pre-repair checkpoint.
+
+    Returns a record ALWAYS — `status` NOT_REQUESTED when no refusal happened,
+    ROLLED_BACK when the tail ran, FAILED when it could not. A FAILED rollback
+    is never papered over: `routed.def` is whatever the refusing session left,
+    and the record says the route ships unverified.
+    """
+    rec: Dict[str, Any] = {"status": "NOT_REQUESTED", "antenna_repair": None,
+                           "combined_log": "", "rc": 0}
+    unrolled = antenna_refused_without_checkpoint(log_text)
+    if unrolled:
+        rec["status"] = "NO_CHECKPOINT"
+        rec["antenna_repair"] = "NOT_APPLIED"
+        rec["reason"] = unrolled
+        rec["route_verified"] = False
+        return rec
+    req = antenna_rollback_request(log_text)
+    if req is None:
+        return rec
+    # DERIVED FROM THIS MODULE'S OWN CONSTANT, not parsed back out of a
+    # container path — a reverse path map would be a second thing that can
+    # disagree with the name the emitter used. The marker's path is still read,
+    # and a basename that is not the one we emit is refused rather than
+    # silently redirected.
+    ckpt_c = req["checkpoint"]
+    if PurePosixPath(ckpt_c).name != _ANTENNA_CHECKPOINT_NAME:
+        rec["status"] = "FAILED"
+        rec["antenna_repair"] = "NOT_APPLIED"
+        rec["reason"] = (
+            f"the antenna repair REFUSED ({req['reason']}) and named "
+            f"{ckpt_c} as its checkpoint, which is not "
+            f"{_ANTENNA_CHECKPOINT_NAME}; refused rather than restored from a "
+            f"file this module did not write")
+        rec["route_verified"] = False
+        rec["rc"] = 1
+        return rec
+    ckpt = out_dir / _ANTENNA_CHECKPOINT_NAME
+    ckpt_c = f"{out_dir_c}/{_ANTENNA_CHECKPOINT_NAME}"
+    if not ckpt.is_file():
+        rec["status"] = "FAILED"
+        rec["antenna_repair"] = "NOT_APPLIED"
+        rec["reason"] = (
+            f"the antenna repair REFUSED ({req['reason']}) and named "
+            f"{ckpt_c} as the pre-repair checkpoint, but it does not exist — "
+            f"there is nothing to roll back to, so the route that ships was "
+            f"modified after the router last verified it")
+        rec["route_verified"] = False
+        rec["rc"] = 1
+        return rec
+    try:
+        deck = pnr_tcl.read_text(errors="replace")
+        tail_text = _build_pnr_resume_tcl_text(
+            deck, checkpoint_def_c=ckpt_c,
+            omit_stages=list(_ANTENNA_STAGES),
+            restore_odb_c=ckpt_c,
+            after_restore_tcl=_after_restore_tcl(
+                deck, spare_plan, reroutes_immediately=False))
+    except (PnrResumeUnavailable, OSError) as exc:
+        rec["status"] = "FAILED"
+        rec["antenna_repair"] = "NOT_APPLIED"
+        rec["reason"] = f"rollback tail could not be derived: {exc}"
+        rec["route_verified"] = False
+        rec["rc"] = 1
+        return rec
+    tail_text = _route_drc_report_tcl(
+        f"{out_dir_c}/{ROUTER_DRC_REPORT_NAME}") + tail_text
+    tail_name = "pnr_antenna_rollback.tcl"
+    tail_log = "pnr_antenna_rollback.log"
+    (out_dir / tail_name).write_text(tail_text)
+    print(f"[pnr] ANTENNA ROLLBACK: the repair refused ({req['reason']}); "
+          f"finishing the post-route tail from {ckpt.name} with "
+          f"{', '.join(_ANTENNA_STAGES)} omitted", file=sys.stderr)
+    cmd = (f"export PATH={TOOLS_IN_CONTAINER}/openroad/bin:"
+           f"{TOOLS_IN_CONTAINER}/bin:$PATH && "
+           f"openroad -no_init -exit {out_dir_c}/{tail_name} 2>&1 | "
+           f"tee {out_dir_c}/{tail_log}")
+    t_rc, t_out, t_err = _docker_exec(
+        container, cmd, marker=f"{out_dir_c}/{tail_name}",
+        log_path=out_dir / tail_log, hard_ceiling_s=hard_ceiling_s)
+    rec["combined_log"] = ("\n=== PNR ANTENNA ROLLBACK (from "
+                           f"{ckpt}, {', '.join(_ANTENNA_STAGES)} omitted) "
+                           "===\n" + (t_out or "") + (t_err or ""))
+    rec["rc"] = t_rc
+    rec["status"] = "ROLLED_BACK" if t_rc == 0 else "FAILED"
+    rec["antenna_repair"] = "NOT_APPLIED"
+    rec["reason"] = req["reason"]
+    rec["checkpoint"] = str(ckpt)
+    rec["tcl"] = tail_name
+    rec["log"] = tail_log
+    rec["route_verified"] = (t_rc == 0)
+    return rec
+
+
+#: R-0915-74(b) — THE INVARIANT AT SHIP: the route that ships is the route the
+#: router last verified.
+#:
+#: `antenna_reroute_refusal_after_last_verification` (R-0915-69d) can SEE the
+#: violation; this is what makes it false. After the rollback has had its turn,
+#: the run's own log is re-read and the answer is recorded beside the antenna
+#: record. It is a DISCLOSURE and a refusal to claim, never a silent repair:
+#: when the invariant does not hold, the artefact says the shipped route was
+#: modified after the last `[INFO DRT-0702] Post-route verification:` and names
+#: why the rollback did not close it.
+def _disclose_antenna_rollback(project: Path, out_dir: Path,
+                               records: List[Dict[str, Any]],
+                               log_text: str) -> Optional[Path]:
+    """Write `reports/phase3/antenna_repair_transaction.json`. Best-effort.
+
+    Written on EVERY run that has a record, including a run where nothing
+    refused — a reader must be able to tell "the repair applied" from "nothing
+    was recorded", and only one of those is an answer.
+    """
+    if not records:
+        return None
+    rec = records[-1]
+    modified_after = route_modified_after_last_verification(log_text)
+    doc = {
+        "program": "phase3_one_shot_runner:_pnr_rollback_refused_antenna_repair",
+        "ruling": "R-0915-74",
+        "status": rec.get("status"),
+        "antenna_repair": rec.get("antenna_repair"),
+        "refusal": rec.get("reason"),
+        "checkpoint": rec.get("checkpoint"),
+        "tcl": rec.get("tcl"),
+        "log": rec.get("log"),
+        # (b) — the invariant, as a fact and not as a hope.
+        "route_modified_after_last_verification": bool(modified_after),
+        "route_verified_at_ship": bool(rec.get("route_verified"))
+        and not modified_after,
+        "note": (
+            "antenna_repair NOT_APPLIED means the repair was attempted, "
+            "REFUSED, and rolled back to the state the router had verified. "
+            "The antenna violations reported for this run are therefore the "
+            "PRE-REPAIR ones and a design that fails the antenna spec still "
+            "fails it — the rollback removes an unverified route, never a "
+            "finding."),
+    }
+    try:
+        d = _pl.reports_phase3_dir(project)
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / "antenna_repair_transaction.json"
+        path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+        return path
+    except OSError as exc:
+        print(f"[pnr] ANTENNA_ROLLBACK_RECORD_NOT_WRITTEN reason={exc}",
+              file=sys.stderr)
+        return None
+
+
 def _pnr_adopt_sdr_candidates(*, container: str, out_dir: Path,
                               out_dir_c: str, pnr_tcl: Path,
                               log_text: str,
@@ -31189,6 +31493,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     resize_history: List[Dict[str, Any]] = []
     #: #2253 — one entry per SDR candidate adoption this step performed.
     _sdr_adopt_records: List[Dict[str, Any]] = []
+    _ant_roll_records: List[Dict[str, Any]] = []
     #: ...and what each SDR site decided, read back from its own receipt.
     _sdr_txn_records: List[Dict[str, Any]] = []
     # #307 — declines are NOT resizes: a refused proposal changed no
@@ -31294,8 +31599,28 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                   f"stages={_sdr_adopt.get('omitted_stages')} rc={rc}"
                   + (f" reason={_sdr_adopt.get('reason')}"
                      if _sdr_adopt.get("reason") else ""), file=sys.stderr)
+        # R-0915-74(a) — AND THE ANTENNA REPAIR'S OWN REFUSAL, on the SAME
+        # seam and for the same reason. AFTER the SDR adopt, because the adopt
+        # tail RE-RUNS the antenna stage and its refusal is the one that
+        # decides what ships; running this first would roll back a route the
+        # adopt is about to replace.
+        _ant_roll = _pnr_rollback_refused_antenna_repair(
+            container=container, out_dir=out_dir, out_dir_c=out_dir_c,
+            pnr_tcl=pnr_tcl, log_text=(out or "") + (err or ""),
+            hard_ceiling_s=_pnr_ceiling, spare_plan=spare_plan)
+        if _ant_roll.get("status") != "NOT_REQUESTED":
+            _ant_roll_records.append(_ant_roll)
+            if _ant_roll.get("status") == "ROLLED_BACK":
+                rc = _ant_roll.get("rc", rc)
+                out = (out or "") + _ant_roll.get("combined_log", "")
+                _drop_empty_antenna_reports(out_dir)
+            print(f"[pnr] ANTENNA_ROLLBACK {_ant_roll.get('status')} "
+                  f"antenna_repair={_ant_roll.get('antenna_repair')} "
+                  f"reason={_ant_roll.get('reason')}", file=sys.stderr)
         _sdr_txn_records = _disclose_sdr_transactions(
             project, out_dir, _sdr_adopt_records, _sdr_child_deck_failures)
+        _disclose_antenna_rollback(project, out_dir, _ant_roll_records,
+                                   (out or "") + (err or ""))
         if rc in (_RC_STALLED, 124):
             # Genuinely hung route (stall) or the 24h+ pathological ceiling —
             # isolate the half-written final DEF so a downstream step never
@@ -55087,6 +55412,47 @@ def antenna_routing_incomplete(log_txt: str) -> bool:
 #: and could not get: the route that ships was modified after the last time the
 #: router verified it. The extraction gate (step 31) is what catches what the
 #: modification did, and it did.
+#: R-0915-74(b) — ANY modification after the last verification, not only a
+#: refused one.
+#:
+#: `antenna_reroute_refusal_after_last_verification` answers a narrower
+#: question — it exists for antenna.rpt, where the subject IS the refusal. The
+#: ruling's invariant is broader: the route that ships must be the route the
+#: router last verified, and a repair that SUCCEEDED and was never re-verified
+#: breaks it exactly as a refused one does.
+#:
+#: So the marker set is every line the antenna stage prints when it has CHANGED
+#: the database: the two reroute refusals, the two repair refusals, and
+#: `REPAIR_ANTENNA_DONE` — the loop's own record of a repair that went through.
+#: Diode insertion alone changes placement and makes nets dirty, so it counts.
+_ROUTE_MUTATION_MARKERS = (
+    "REPAIR_ANTENNA_DONE",
+    "REPAIR_ANTENNA_REROUTE_NONFATAL",
+    "ANTENNA_NATIVE_REROUTE_NONFATAL",
+    "REPAIR_ANTENNA_NONFATAL",
+    "ANTENNA_LOOP_CHECK_NONFATAL",
+)
+
+
+def route_modified_after_last_verification(log_txt: str) -> bool:
+    """True when the route was CHANGED after the router last verified it. PURE.
+
+    False when nothing changed it, and False when the log carries no
+    verification at all — in the second case `antenna_routing_incomplete` has
+    already refused to call the route complete, and a claim about the order of
+    an event that never happened would say more than the log does.
+    """
+    lines = log_txt.splitlines()
+    last_ver = max((i for i, ln in enumerate(lines)
+                    if _ROUTE_VERIFIED_MARKER in ln), default=None)
+    last_mut = max((i for i, ln in enumerate(lines)
+                    if any(m in ln for m in _ROUTE_MUTATION_MARKERS)),
+                   default=None)
+    if last_ver is None or last_mut is None:
+        return False
+    return last_mut > last_ver
+
+
 def antenna_reroute_refusal_after_last_verification(log_txt: str) -> bool:
     """True when a reroute refusal comes AFTER the last post-route verification.
 
