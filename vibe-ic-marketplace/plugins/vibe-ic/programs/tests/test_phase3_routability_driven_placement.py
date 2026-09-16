@@ -232,10 +232,30 @@ def test_surrounding_flow_structure_unchanged():
     ]
     last = -1
     for a in anchors:
-        idx = tcl.find(a)
+        idx = _command_index(tcl, a)
         assert idx != -1, f"missing flow anchor: {a}"
         assert idx > last, f"flow anchor out of order: {a}"
         last = idx
+
+
+# An anchor is a STAGE COMMAND, not a token. The docstring above protects the
+# order in which the flow's stages RUN; `str.find` answered a different
+# question -- where the word first appears -- and the deck legitimately names
+# `global_route` long before it calls it: the route-guide discipline preamble
+# (982c8d222) asks `info commands global_route`, `rename`s it and wraps it in a
+# `proc` at line 16 of the emitted deck, while the stage's own call is at line
+# 608. The substring match read that preamble as the global_route stage and
+# reported "out of order" for a deck whose stages had not moved.
+#
+# A command word is one that begins a Tcl command: at line start, or directly
+# after `{`, `[` or `;` (which covers `if {[catch {detailed_route ...`). A word
+# used as an ARGUMENT -- `info commands global_route`, `rename global_route`,
+# `proc global_route`, a comment -- is not a command and cannot stand in for a
+# stage. Every anchor must still be present and still in order.
+def _command_index(tcl: str, word: str) -> int:
+    m = re.search(r"(?m)(?:^|[\[{;])[ \t]*" + re.escape(word) + r"(?=[\s}\]]|$)",
+                  tcl)
+    return -1 if m is None else m.start() + m.group(0).index(word)
 
 
 def test_padding_does_not_perturb_surrounding_structure():
