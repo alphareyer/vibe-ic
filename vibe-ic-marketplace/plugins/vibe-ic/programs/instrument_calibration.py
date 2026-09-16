@@ -75,9 +75,11 @@ oracle or from a published cell — a calibration structure (a two-inverter chai
 built from the PDK's own standard cells; a five-rectangle layout) is to an
 instrument what a calibration net is to an extractor.
 
-Produced on 8HD-6 (192.168.1.108) on 2026-09-16 inside the pinned image
-`sha256:89a8fd7295208ee6d06e216ade9edc6161d26db52099e9f22ceb77a2d76e3f49`
-(image id `da2314d4100c`), with:
+Produced on 8HD-6 (192.168.1.108) on 2026-09-16 inside the pinned image — the
+one `_eda_pin.IMAGE_DIGEST` names, resolved to image id `da2314d4100c` on that
+host. The digest is NOT spelled here: a second literal does not fail, it sits
+there being right until the pin moves and it is the only thing that did not.
+With:
 
   magic 8.3 revision 683 ........ the feedback save format, both sides
   OpenSTA 2.7.0 f21d4a3878 ...... `write_sdf` with and without `-include_typ`;
@@ -245,6 +247,15 @@ class Instrument:
     expect: str
     negative: Sample
     miscalibrated_evidence: Optional[Miscalibration] = None
+    #: WHERE `assert_calibrated` is called, when that is not the instrument's
+    #: own body. Declared, never implied — see `call_site` and the one entry
+    #: that sets it.
+    calls_at: Optional[str] = None
+
+    @property
+    def call_site(self) -> str:
+        """`module::function` that must carry this instrument's one line."""
+        return self.calls_at or self.name
 
 
 @dataclass
@@ -623,6 +634,33 @@ _register(Instrument(
          "same shape with nothing stubbed — every byte to a file, once with a "
          "process doing real work and once with one doing none."),
     judge=_judge_progress,
+    #: THE ONE INSTRUMENT WHOSE LINE IS NOT IN ITS OWN BODY, and the reason is
+    #: MEASURED, not a preference.
+    #:
+    #: `container_tree_probe` is a probe FACTORY that `_container_exec` calls on
+    #: every supervised run, including from inside tests that stub the world.
+    #: Calibrating a LIVE-PROCESS detector costs live processes, and
+    #: `test_issue2083_container_progress_watches_the_tool_not_the_client`
+    #: builds its subject with `monkeypatch.setattr(ce.os, "listdir", ...)` —
+    #: and `ce.os` IS the `os` module, so that patch replaces `os.listdir`
+    #: PROCESS-WIDE. MEASURED:
+    #:
+    #:     >>> import os, _container_exec as ce; ce.os is os
+    #:     True
+    #:
+    #: A calibration reached inside that window walks a `/proc` holding one
+    #: fake pid, finds no descendant of its own worker, reads flat, and reaps
+    #: its own known-negative — so `container_tree_probe` RAISED `Uncalibrated`
+    #: and 29 landed tests went red on a calibration question they never asked.
+    #: The rule did not change what the probe measures; the CALL SITE did, and
+    #: that is the defect.
+    #:
+    #: So the line lives at the consumer R-0915-86 actually names — the
+    #: GATE-SIM SUPERVISOR, `sdf_gate_sim::_docker`, which is the call site
+    #: R-0915-71/72 was written about ("`sdf_gate_sim._docker` ran `vvp ... >
+    #: log` through a bare `_progress_run.run`"). `_container_exec` returns,
+    #: raises and supervises exactly what it did before this batch.
+    calls_at="sdf_gate_sim::_docker",
     positive=Sample(
         provenance=("A live `sleep` whose output goes to a file: no output, no "
                     "cpu, no io. A progress detector that cannot fire here "
@@ -1468,6 +1506,27 @@ def _ratchet_verdict(population: List[str], root: Path) -> int:
 
 # ══════════════════════════════════════════════════════════════════════════
 
+def _population_lines(root: Path, cals: Optional[Dict[str, Calibration]] = None
+                      ) -> None:
+    """WHAT THIS VERDICT WAS TAKEN OVER, printed before it.
+
+    A verdict about a population that never says how big the population was is
+    a claim nobody can check — and `--root` is only meaningful if something
+    actually reads it, so the tool-grammar scan is counted here in BOTH modes.
+    """
+    try:
+        scanned = len(scan(root))
+    except Exception:
+        scanned = 0
+    cals = cals if cals is not None else {}
+    bad = sum(1 for c in cals.values() if c.state != CALIBRATED)
+    print(f"  instruments registered:         {len(INSTRUMENTS)}")
+    print(f"  calibrated:                     {len(cals) - bad}")
+    print(f"  miscalibrated:                  {bad}")
+    print(f"  declared uncalibrated:          {len(_UNCALIBRATED_REGISTER)}")
+    print(f"  tool-grammar readers in tree:   {scanned}")
+
+
 def _report(cals: Dict[str, Calibration]) -> None:
     for name in sorted(cals):
         c = cals[name]
@@ -1500,6 +1559,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as exc:                       # pragma: no cover
             print(f"[ERROR] could not scan {root}: {exc}")
             return 2
+        _population_lines(root)
         rc = _ratchet_verdict(population, root)
         if a.json_out:
             _atomic_write_json(a.json_out, {
@@ -1509,6 +1569,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return rc
 
     cals = check_all()
+    _population_lines(root, cals)
     _report(cals)
     bad = [n for n, c in cals.items() if c.state != CALIBRATED]
     if a.json_out:

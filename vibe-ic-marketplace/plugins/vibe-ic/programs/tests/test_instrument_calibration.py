@@ -626,52 +626,76 @@ def test_the_json_output_carries_both_sides_of_every_pair(tmp_path):
 
 # ── the wiring at the source ──────────────────────────────────────────────
 
-_WIRED = {
-    "phase3_one_shot_runner": ("antenna_routing_incomplete",
-                               "_detail_route_completed",
-                               "route_modified_after_last_verification",
-                               "antenna_reroute_refusal_after_last_verification"),
-    "sdf_gate_sim": ("sdf_annotation_census",),
-    "_container_exec": ("container_tree_probe",),
-    "design_one_shot_runner": ("lec_inconclusive_disposition",),
-    "analog_resolution_stimulus": ("incremental_tone",),
-    "magic_illegal_overlap_check": ("parse_feedback",),
-    "prose_polarity_consulted_check": ("scan",),
-    "_signoff_drc_format": ("router_loop_iter_counts",
-                            "router_post_route_final_count"),
-    "sta_signoff_rigor_check": ("_check_types_violations",),
-}
-
-
 def test_every_calibrated_instrument_calls_the_rule_at_its_own_source():
-    """ONE LINE, AT THE SOURCE — no decorator, no wrapper module (R-0915-85).
+    """ONE LINE, AT THE DECLARED SITE — no decorator, no wrapper (R-0915-85).
 
-    Structural: the call must be a statement inside the instrument's OWN body,
-    naming ITSELF. A call somewhere else in the module would be a wrapper by
-    another name, and a call naming a different instrument would be a check of
-    somebody else's ruler.
+    The site is the instrument's own body unless its entry DECLARES another one
+    in `calls_at`, and the declaration has to carry its reason. Structural: the
+    call must be a statement inside that function, naming THIS instrument. A
+    call elsewhere in the module would be a wrapper by another name, and a call
+    naming a different instrument would be a check of somebody else's ruler.
     """
-    for module, fns in _WIRED.items():
+    for name, inst in sorted(C.INSTRUMENTS.items()):
+        if inst.miscalibrated_evidence is not None:
+            continue          # it may not judge; nothing calls it yet
+        module, _, fn = inst.call_site.partition("::")
         tree = ast.parse((PROG / f"{module}.py").read_text(errors="replace"))
-        for fn in fns:
-            node = next((n for n in ast.walk(tree)
-                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                         and n.name == fn), None)
-            assert node is not None, f"{module}::{fn} is gone"
-            names = [
-                a.value for c in ast.walk(node)
-                if isinstance(c, ast.Call)
-                and isinstance(c.func, ast.Attribute)
-                and c.func.attr == "assert_calibrated"
-                for a in c.args
-                if isinstance(a, ast.Constant) and isinstance(a.value, str)]
-            assert names == [f"{module}::{fn}"], (
-                f"{module}::{fn} does not call assert_calibrated on itself "
-                f"(found {names})")
+        node = next((n for n in ast.walk(tree)
+                     if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and n.name == fn), None)
+        assert node is not None, f"{inst.call_site} is gone"
+        named = [
+            a.value for c in ast.walk(node)
+            if isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Attribute)
+            and c.func.attr == "assert_calibrated"
+            for a in c.args
+            if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+        assert name in named, (
+            f"{inst.call_site} does not call assert_calibrated({name!r}) "
+            f"(found {named})")
+
+
+def test_a_declared_call_site_says_why_it_is_not_the_instruments_own_body():
+    """`calls_at` is the one place this design could hide a wrapper.
+
+    So every entry that sets it must argue for it AT THE SOURCE, in the entry,
+    with enough of a reason that a reader can check the claim rather than take
+    it. The one that sets it today was forced by a MEASUREMENT: 29 landed tests
+    went red because a live-process calibration was reached inside a window
+    where `os.listdir` is patched process-wide.
+    """
+    src = (PROG / "instrument_calibration.py").read_text()
+    for name, inst in sorted(C.INSTRUMENTS.items()):
+        if inst.calls_at is None:
+            continue
+        i = src.index(f'calls_at="{inst.calls_at}"')
+        window = src[max(0, i - 2200):i]
+        assert "MEASURED" in window, (
+            f"{name} declares calls_at={inst.calls_at!r} with no measurement "
+            f"beside it")
 
 
 def test_the_wired_set_is_exactly_the_calibrated_set():
-    wired = {f"{m}::{f}" for m, fns in _WIRED.items() for f in fns}
+    """Derived from the tree, never from a list in this file.
+
+    Every `assert_calibrated("X")` anywhere in `programs/*.py` must name an
+    instrument that MEASURES CALIBRATED, and every calibrated instrument must be
+    named by one. A newly-calibrated instrument that nobody wired is an
+    instrument the rule does not reach.
+    """
+    wired = set()
+    for f in sorted(PROG.glob("*.py")):
+        try:
+            tree = ast.parse(f.read_text(errors="replace"))
+        except (OSError, SyntaxError):
+            continue
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) \
+                    and n.func.attr == "assert_calibrated":
+                wired |= {a.value for a in n.args
+                          if isinstance(a, ast.Constant)
+                          and isinstance(a.value, str)}
     calibrated = {n for n, c in C.check_all().items()
                   if c.state == C.CALIBRATED}
     assert wired == calibrated, (

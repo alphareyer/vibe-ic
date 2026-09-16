@@ -1306,6 +1306,16 @@ _IVERILOG_FLAGS = "-g2012 -ginterconnect -gspecify"
 
 
 def _docker(container: str, cmd: str, budget_s: float = 600):
+    # R-0915-86(3) — THE GATE-SIM SUPERVISOR'S PROGRESS DETECTOR, calibrated
+    # before it judges. This is the call site R-0915-71/72 was written about:
+    # it ran `vvp ... > log` through a bare `_progress_run.run`, every byte went
+    # to a file, and two simulations that reached `$finish` with 0 mismatches
+    # were reaped at 197 s. The line is HERE and not inside
+    # `_container_exec.container_tree_probe` because that factory is called on
+    # every supervised run, including from inside tests that patch `os.listdir`
+    # process-wide — see the entry's `calls_at` note.
+    _instrument_calibration.assert_calibrated(
+        "_container_exec::container_tree_probe")  # R-0915-86(3)
     return _ce.run_in_container_supervised(
         container, _TOOL_PATH + cmd, ceiling_s=float(budget_s))
 
