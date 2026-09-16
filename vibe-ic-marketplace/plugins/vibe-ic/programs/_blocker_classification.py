@@ -143,7 +143,14 @@ _ABSENCE_PREFIXES = ("no required_outputs found",
 #: ran and told you its output was not design-bound. Named as a set here so a
 #: tier added to the producer lands on `no-rule-matched` — visible — rather
 #: than being quietly absorbed by a substring test.
-_DISCLOSURE_TIERS = frozenset({"VACUOUS-PASS", "STRUCTURE-ONLY", "INCOMPLETE"})
+#: R-0915-85 — the three words became two FACTS, and each is read where it now
+#: lives. "It ran without measuring design-bound content" is
+#: `NOT_MEASURED` (whatever its reason) or a `PASS_WITH_WAIVERS` carrying
+#: `Disclosure.STRUCTURE_ONLY`. A tier added to the producer is impossible now
+#: (`verdict.parse` refuses a sixth word), so this set no longer has to be the
+#: visibility device its old comment describes.
+_DISCLOSURE_VERDICTS = frozenset({_T.Verdict.NOT_MEASURED.value})
+_DISCLOSURE_TIERS = _DISCLOSURE_VERDICTS
 
 #: The producer's words for "this step RAN and reached a verdict of its own".
 #: Read by `predecessor_delivered_outputs`, which is what rule 7 tests instead
@@ -156,14 +163,37 @@ _DISCLOSURE_TIERS = frozenset({"VACUOUS-PASS", "STRUCTURE-ONLY", "INCOMPLETE"})
 #: status word invented tomorrow lands on the CONSERVATIVE side (rule 7 keeps
 #: firing) rather than being silently promoted to DESIGN_FACT.
 _PREDECESSOR_REACHED_VERDICT_STATUSES = frozenset({
-    "FAIL", "INCOMPLETE", "NOT-MEASURED", "VACUOUS-PASS",
-    "STRUCTURE-ONLY", "PARTIALLY-VACUOUS"})
+    _T.Verdict.FAIL.value, _T.Verdict.NOT_MEASURED.value,
+    _T.Verdict.PASS_WITH_WAIVERS.value})
+
+#: R-0915-85 — the set above is no longer the whole test, because the word that
+#: had to be EXCLUDED from it was `MISSING`, and `MISSING` is now
+#: `FAIL(missing_artefact)`. The exclusion moved from the status to the reason,
+#: and it is named here so the calibration example stays exactly where the
+#: docstring above puts it: `si_mcf_sta_check` under a step 22 whose declared
+#: outputs are not there is still rule 7, not a design fact.
+_PREDECESSOR_DID_NOT_DELIVER_REASONS = frozenset({
+    _T.ReasonClass.MISSING_ARTEFACT.value,
+    _T.ReasonClass.INPUT_ABSENT.value,
+    _T.ReasonClass.UPSTREAM_REFUSED.value,
+    _T.ReasonClass.UPSTREAM_FAILED.value,
+    _T.ReasonClass.NOT_EXECUTED.value,
+})
 
 #: Hint markers filtered out of the operator-facing `observed` text. They are
 #: control signals for the producer's own tier promotion, not observations.
 _HINT_PREFIXES = ("__VACUOUS_HINT__", "__SKIP_HINT__", "__WAIVER_HINT__",
                   "__STRUCTURE_ONLY_HINT__", "__SUBSTANTIVE_HINT__",
                   "__INCOMPLETE_HINT__", "__ADVISORY_HINT__")
+
+
+def _field_list(step: Any, name: str) -> list:
+    """A list-valued field off a step record in either shape. Companion to
+    `_field`, for `disclosures` — which R-0915-85 made the place a
+    structure-only fact lives instead of the status word."""
+    raw = (step.get(name) if isinstance(step, dict)
+           else getattr(step, name, None))
+    return list(raw or ())
 
 
 def _field(step: Any, name: str, default: Any = "") -> Any:
@@ -216,9 +246,18 @@ def is_blocker(step: Any) -> bool:
     rather than dropped: dropping them is how a report stops summing.
     """
     status = _field(step, "status")
-    if _T.is_full_pass(status):
+    # R-0915-85 — READ TOLERANTLY HERE, AND ONLY HERE, IN THE FAIL-SAFE
+    # DIRECTION. This module's whole contract includes
+    # `test_a_verdict_word_this_module_has_never_seen_is_still_a_blocker`: a
+    # word nobody registered must land ON the list, never off it. `parse` would
+    # raise and take the blocker list with it, which is the opposite outcome.
+    # `as_verdict_or_none` returns None for such a word and every predicate
+    # below then answers "not a pass, not excused" — so it is a blocker, which
+    # is exactly what that test demands. Nothing is translated.
+    _v = _T.as_verdict_or_none(status)
+    if _v is _T.Verdict.PASS:
         return False
-    if _T.is_excused(status):
+    if _v is _T.Verdict.NOT_APPLICABLE:
         # NOT_APPLICABLE: the INPUT says there is nothing here. It reaches the
         # blocker list only when the RUNNER disclosed a capability gap for it
         # (the #608/#675 self-skip evidence) — which is a real unmet
@@ -294,6 +333,9 @@ def predecessor_delivered_outputs(
     """
     status = _field(step, "status")
     if status not in _PREDECESSOR_REACHED_VERDICT_STATUSES:
+        return False
+    if (_field(step, "reason_class")
+            in _PREDECESSOR_DID_NOT_DELIVER_REASONS):
         return False
     if _has_marker(step, CRASH_MARKER) or _has_marker(step, TIMEOUT_MARKER):
         return False
@@ -375,7 +417,12 @@ def classify(step: Any,
         return ("MISSING_CAPABILITY", "disclosed-capability-gap",
                 "the runner disclosed a named capability gap in place of the "
                 "sign-off artefact this step declares")
-    if status == "SKIPPED-SETUP-REQUIRED":
+    # R-0915-85 — `SKIPPED-SETUP-REQUIRED` is
+    # `NOT_MEASURED(input_absent)`: the step could not start because a declared
+    # input is not on this host. The fact moved from the word to the reason.
+    if (status == _T.Verdict.NOT_MEASURED.value
+            and _field(step, "reason_class")
+            == _T.ReasonClass.INPUT_ABSENT.value):
         return ("MISSING_CAPABILITY", "setup-required",
                 "the step could not start: its declared setup is not present "
                 "on this host")
@@ -468,7 +515,9 @@ def classify(step: Any,
     #     so it gets its own basis; it is not a different CLASS, because
     #     which of the three closes it is exactly what the disclosure does not
     #     say.
-    if status in _DISCLOSURE_TIERS:
+    if (status in _DISCLOSURE_VERDICTS
+            or _T.Disclosure.STRUCTURE_ONLY.value
+            in (_field_list(step, "disclosures"))):
         return ("UNCLASSIFIED", "disclosure-tier",
                 f"the step disclosed {status}: it ran without measuring "
                 f"design-bound content, which names no cause to act on")

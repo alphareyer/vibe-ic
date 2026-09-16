@@ -95,7 +95,12 @@ def test_every_non_pass_step_the_producer_can_emit_is_on_the_list():
     genuinely-inapplicable skip has to appear, or the list is not the thing it
     claims to be.
     """
-    inapplicable = {"PASS", "SKIPPED-CONDITION"}
+    # R-0915-85 — the two words that are not blockers, in the five. A
+    # `NOT_APPLICABLE` step reaches the list only when the RUNNER disclosed a
+    # capability gap for it (`self_skip_disclosed`), which these bare fixtures
+    # do not set — that discrimination is `_blocker_classification`'s and is
+    # pinned by `test_an_inapplicable_skip_is_never_read_as_setup_required`.
+    inapplicable = {"PASS", "NOT_APPLICABLE"}
     steps = [_step(f"s{i}", w)
              for i, w in enumerate(sorted(_T.PRODUCER_STATUSES))]
     blockers = _BC.build_blockers(steps)
@@ -128,11 +133,11 @@ def test_the_list_is_not_shrinkable_by_status_filtering():
     membership is the complement of (full PASS + inapplicable skip), so any
     narrowing shows up as a missing entry rather than a smaller number.
     """
-    steps = [_step(1, "FAIL"), _step(2, "MISSING"), _step(3, "WAIVED"),
-             _step(4, "PASS-VOIDED-BY-DEPENDENCY"), _step(5, "VACUOUS_PASS"),
-             _step(6, "STRUCTURE-ONLY"), _step(7, "INCOMPLETE"),
-             _step(8, "SKIPPED-SETUP-REQUIRED"),
-             _step(9, "DEFERRED-BY-UPSTREAM")]
+    steps = [_step(1, "FAIL"), _step(2, "FAIL"), _step(3, "PASS_WITH_WAIVERS"),
+             _step(4, "PASS-VOIDED-BY-DEPENDENCY"), _step(5, "NOT_MEASURED"),
+             _step(6, "PASS_WITH_WAIVERS"), _step(7, "NOT_MEASURED"),
+             _step(8, "NOT_MEASURED"),
+             _step(9, "NOT_MEASURED")]
     assert len(_BC.build_blockers(steps)) == len(steps)
 
 
@@ -149,9 +154,9 @@ def test_an_inapplicable_skip_is_not_a_blocker_but_a_disclosed_gap_is():
     third is an unmet requirement. Conflating them either buries the list under
     ~97 'this digital chip has no analog blocks' entries, or hides a real
     disclosed capability gap. Both directions are asserted here."""
-    na = _step("A1", "SKIPPED-CONDITION",
+    na = _step("A1", "NOT_APPLICABLE",
                reasons=["condition not met: {'files_exist': ['x.json']}"])
-    gap = _step(11, "SKIPPED-CONDITION", self_skip_disclosed=True)
+    gap = _step(11, "NOT_APPLICABLE", self_skip_disclosed=True)
     assert not _BC.is_blocker(na)
     assert _BC.is_blocker(gap)
     out = _BC.build_blockers([na, gap])
@@ -234,7 +239,8 @@ def test_the_same_gate_failure_downstream_of_a_gap_is_not_a_design_fact():
         [_step(22, "PASS"), _step(23, "FAIL", reasons=reasons)],
         flow_steps=flow)[0]
     gapped_up = _BC.build_blockers(
-        [_step(22, "MISSING"), _step(23, "FAIL", reasons=reasons)],
+        [_step(22, "FAIL", reason_class="missing_artefact"),
+         _step(23, "FAIL", reasons=reasons)],
         flow_steps=flow)
     downstream = next(b for b in gapped_up if b["step_id"] == 23)
 
@@ -248,7 +254,7 @@ def test_the_same_gate_failure_downstream_of_a_gap_is_not_a_design_fact():
 
 
 def test_env_unavailable_waiver_is_a_named_missing_capability():
-    s = _step(6, "WAIVED", reasons=[
+    s = _step(6, "PASS_WITH_WAIVERS", reasons=[
         "ENV_UNAVAILABLE waiver applied (natural verdict was FAIL/MISSING): "
         "ENV_UNAVAILABLE (fpga-board-prototype cap-gap): no board on host"])
     b = _BC.build_blockers([s])[0]
@@ -260,7 +266,7 @@ def test_an_ordinary_waiver_is_not_a_missing_capability():
     """OVER-CORRECTION GUARD. Reading every waiver as a capability gap turns
     'somebody signed this off' into 'the host lacks a tool', which sends the
     reviewer to buy hardware for a decision a human already made."""
-    s = _step(13, "WAIVED", reasons=[
+    s = _step(13, "PASS_WITH_WAIVERS", reasons=[
         "WAIVED-DEFERRED: waiver id=13 reason='reviewed by owner 2026-07'"])
     b = _BC.build_blockers([s])[0]
     assert b["classification"] == "UNCLASSIFIED"
@@ -271,7 +277,7 @@ def test_a_bare_absent_artefact_is_unclassified():
     """ANTI-GUESS. A missing file is equally consistent with a plugin that
     never wrote it, a tool that is not installed, and a step nobody ran. The
     record says so rather than picking one."""
-    s = _step(12, "MISSING", reasons=[
+    s = _step(12, "FAIL", reasons=[
         "no required_outputs found (expected: ['phase2/synth/netlist.v'])"])
     b = _BC.build_blockers([s])[0]
     assert b["classification"] == "UNCLASSIFIED"
@@ -279,14 +285,26 @@ def test_a_bare_absent_artefact_is_unclassified():
 
 
 def test_a_disclosure_tier_is_unclassified_with_its_own_basis():
-    """VACUOUS-PASS / STRUCTURE-ONLY / INCOMPLETE say the step ran and measured
-    nothing design-bound. That is a real fact and a distinct one from 'no rule
-    matched', so it gets a basis — but it still names no cause to act on, so it
-    is not promoted to a class."""
-    for word in ("VACUOUS_PASS", "STRUCTURE-ONLY", "INCOMPLETE"):
-        b = _BC.build_blockers([_step("D1", word)])[0]
-        assert b["classification"] == "UNCLASSIFIED", word
-        assert b["basis"] == "disclosure-tier", word
+    """The step ran and measured nothing design-bound. A real fact, distinct
+    from 'no rule matched', so it gets a basis — but it names no cause to act
+    on, so it is not promoted to a class.
+
+    R-0915-85 — the three words became TWO FACTS in two fields, and the test
+    reads each where it now lives: `NOT_MEASURED` is the verdict (VACUOUS-PASS
+    and INCOMPLETE both land there), and a structure-only pass is
+    `PASS_WITH_WAIVERS` carrying `Disclosure.STRUCTURE_ONLY`. A
+    `PASS_WITH_WAIVERS` with no such disclosure is an ordinary waived step and
+    is NOT a disclosure tier, which the negative case below asserts.
+    """
+    for row in (_step("D1", "NOT_MEASURED"),
+                dict(_step("D1", "PASS_WITH_WAIVERS"),
+                     disclosures=["structure_only"])):
+        b = _BC.build_blockers([row])[0]
+        assert b["classification"] == "UNCLASSIFIED", row["status"]
+        assert b["basis"] == "disclosure-tier", row["status"]
+    # NEGATIVE: a waived step that disclosed nothing is not a disclosure tier.
+    plain = _BC.build_blockers([_step("D1", "PASS_WITH_WAIVERS")])[0]
+    assert plain["basis"] != "disclosure-tier"
 
 
 # ── 4. per-gate records inside an umbrella step ────────────────────────────
@@ -345,8 +363,8 @@ def test_gate_records_three_states_survive_into_sub_blockers():
 
 # ── 5. no class without a rule ─────────────────────────────────────────────
 def test_every_emitted_record_names_the_rule_that_decided_it():
-    steps = [_step(1, "FAIL"), _step(2, "MISSING"), _step(3, "WAIVED"),
-             _step(4, "VACUOUS_PASS"), _step(5, "ODD-NEW-TIER")]
+    steps = [_step(1, "FAIL"), _step(2, "FAIL"), _step(3, "PASS_WITH_WAIVERS"),
+             _step(4, "NOT_MEASURED"), _step(5, "ODD-NEW-TIER")]
     for b in _BC.build_blockers(steps):
         assert b["basis"].strip(), b
         assert b["classification"] in _BC.BLOCKER_CLASSES
@@ -381,7 +399,7 @@ def _record(sid, cls="UNCLASSIFIED", basis="declared-artefact-absent"):
 
 def test_guard_catches_a_dropped_blocker():
     v, _ = _GUARD.check_report(
-        _report([_step(1, "FAIL"), _step(2, "MISSING")], [_record(1)]))
+        _report([_step(1, "FAIL"), _step(2, "FAIL")], [_record(1)]))
     assert any("absent from `blockers`" in x for x in v), v
 
 
@@ -428,8 +446,8 @@ def test_guard_accepts_a_report_this_producer_writes(tmp_path):
     """Round-trip: whatever `build_blockers` emits satisfies the guard. A
     producer and a guard that disagree are two contracts, not one."""
     steps = [_step(1, "PASS"), _step(2, "FAIL", reasons=["program failed: g ."]),
-             _step("A1", "SKIPPED-CONDITION", reasons=["condition not met"]),
-             _step(3, "MISSING", reasons=["no required_outputs found (x)"])]
+             _step("A1", "NOT_APPLICABLE", reasons=["condition not met"]),
+             _step(3, "FAIL", reasons=["no required_outputs found (x)"])]
     blockers = _BC.build_blockers(steps)
     doc = _report(steps, blockers,
                   blocker_class_counts=_BC.class_counts(blockers),
@@ -458,7 +476,7 @@ def test_every_producer_status_is_adjudicated_by_membership():
     for word in _T.PRODUCER_STATUSES:
         s = _step("x", word)
         decided = (_T.is_full_pass(word)
-                   or _T.normalize(word) == "SKIPPED-CONDITION"
+                   or word == "NOT_APPLICABLE"
                    or _BC.is_blocker(s))
         assert decided, word
 
@@ -486,7 +504,7 @@ def test_a_step_the_run_routed_into_the_oss_deferral_is_a_named_missing_capabili
     that would close it. Deleting the rule drops this to
     `declared-artefact-absent`/UNCLASSIFIED, so this assertion is what keeps the
     rule alive."""
-    step = _step(13, "MISSING",
+    step = _step(13, "FAIL",
                  reasons=["no required_outputs found (expected: ['equiv.json'])"])
     b = _classify_one(step, oss={13: "Formality / Conformal LEC"})[0]
     assert b["classification"] == "MISSING_CAPABILITY"
@@ -503,7 +521,7 @@ def test_the_oss_class_is_driven_by_the_map_the_caller_passes_not_the_step():
     that keyed on bare table membership would make this step MISSING_CAPABILITY
     and is caught end-to-end by
     `test_membership_in_the_oss_table_alone_...` in the report-contract module."""
-    step = _step(13, "MISSING",
+    step = _step(13, "FAIL",
                  reasons=["no required_outputs found (expected: ['equiv.json'])"])
     b = _classify_one(step, oss={})[0]
     assert b["classification"] == "UNCLASSIFIED"
@@ -519,8 +537,8 @@ def test_setup_required_is_a_named_missing_capability_distinct_from_a_disclosed_
     reader cannot tell 'never started' from 'started and self-reported'.
     Deleting the setup-required rule drops the first to
     no-rule-matched/UNCLASSIFIED; this pins it."""
-    setup = _step(11, "SKIPPED-SETUP-REQUIRED")
-    disclosed = _step(12, "SKIPPED-CONDITION", self_skip_disclosed=True)
+    setup = _step(11, "NOT_MEASURED", reason_class="input_absent")
+    disclosed = _step(12, "NOT_APPLICABLE", self_skip_disclosed=True)
     b_setup = _BC.build_blockers([setup])[0]
     b_disc = _BC.build_blockers([disclosed])[0]
     assert b_setup["classification"] == "MISSING_CAPABILITY"
@@ -536,7 +554,7 @@ def test_an_inapplicable_skip_is_never_read_as_setup_required():
     setup-required capability gap. The over-correction — reading every skip as
     'setup missing' — would put ~97 inapplicable skips on the list wearing a
     MISSING_CAPABILITY badge."""
-    na = _step("A5", "SKIPPED-CONDITION",
+    na = _step("A5", "NOT_APPLICABLE",
                reasons=["condition not met: analog track skipped via --skip-analog"])
     assert not _BC.is_blocker(na)
     assert _BC.build_blockers([na]) == []
