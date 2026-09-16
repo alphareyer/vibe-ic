@@ -33,8 +33,6 @@ already handles, because the emitter's own docstring says an unavailable slack
 degrades that pin to advisory.
 """
 import json
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -42,11 +40,16 @@ import pytest
 
 PROG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROG))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import si_signoff_timing_aware as M  # noqa: E402
 import phase3_one_shot_runner as R   # noqa: E402
+from _tcl_walk import walk           # noqa: E402
 
-tclsh = shutil.which("tclsh")
-needs_tclsh = pytest.mark.skipif(tclsh is None, reason="tclsh not installed")
+# NO SKIP. `tclsh` is resolved the way the PROGRAM resolves a tool it needs —
+# host first, then the runner's own exec seam into the container it names — and
+# when neither answers the walk raises an AssertionError naming NOT_MEASURED
+# and both routes. A tool-absent skip would turn a measurement that did not
+# happen into a green line on the host doing the measuring.
 
 #: OpenSTA reports `---` where it has no value. This is the token, and the
 #: walker below hands it back from `report_required` for exactly one pin.
@@ -72,19 +75,19 @@ puts "TCL_OK"
 '''.replace("PH", _PLACEHOLDER)
 
 
+class _R:
+    def __init__(self, out, err, route):
+        self.stdout, self.stderr, self.route = out, err, route
+
+
 def _run_deck(tmp_path):
     out_json = tmp_path / "si_timing.json"
-    deck = tmp_path / "si_timing.tcl"
-    deck.write_text(M.build_opensta_si_tcl(
-        "/p/ss.lib", "/p/n.v", "dut", "/p/c.sdc", "/p/x.spef", str(out_json)))
-    walk = tmp_path / "walk.tcl"
-    walk.write_text(_WALK)
-    r = subprocess.run([tclsh, str(walk), str(deck)],
-                       capture_output=True, text=True, timeout=120)
-    return r, out_json
+    deck_text = M.build_opensta_si_tcl(
+        "/p/ss.lib", "/p/n.v", "dut", "/p/c.sdc", "/p/x.spef", str(out_json))
+    out, err, route = walk(_WALK, deck_text, tmp_path)
+    return _R(out, err, route), out_json
 
 
-@needs_tclsh
 def test_the_placeholder_does_not_abort_the_emit(tmp_path):
     r, out_json = _run_deck(tmp_path)
     assert "TCL_ERROR" not in r.stdout, r.stdout[-400:]
@@ -92,7 +95,6 @@ def test_the_placeholder_does_not_abort_the_emit(tmp_path):
     assert "SI_TIMING_JSON_EMIT_DONE" in r.stdout, r.stdout[-400:]
 
 
-@needs_tclsh
 def test_the_json_it_leaves_behind_parses(tmp_path):
     """The whole failure was a file that existed, was 1 MB, and did not parse."""
     _r, out_json = _run_deck(tmp_path)
@@ -100,7 +102,6 @@ def test_the_json_it_leaves_behind_parses(tmp_path):
     assert len(data["pins"]) == 3, sorted(data["pins"])
 
 
-@needs_tclsh
 def test_the_pin_with_no_required_time_records_null_not_a_token(tmp_path):
     """`null` is the answer the consumers already handle; `---` is not a
     number and must never be written as one."""
@@ -112,7 +113,6 @@ def test_the_pin_with_no_required_time_records_null_not_a_token(tmp_path):
     assert pins["top/pinB"]["arr_rise_max"] == 2.0
 
 
-@needs_tclsh
 def test_the_other_pins_keep_their_real_numbers(tmp_path):
     """THE NEGATIVE CONTROL: the guard may not turn every slack into null."""
     _r, out_json = _run_deck(tmp_path)
@@ -208,3 +208,50 @@ def test_an_absent_json_keeps_its_own_older_refusal(tmp_path, monkeypatch):
                                 tmp_path / "netlist", out_json, notes)
     assert ok is False
     assert "did not produce the timing JSON" in " ".join(notes)
+
+
+# ── the walker itself: no skip, and a named refusal when it cannot run ────
+
+def test_the_walk_runs_through_the_runners_seam_when_the_host_has_no_tclsh(
+        tmp_path, monkeypatch):
+    """THE CONTROL THE RULE ASKS FOR. With `tclsh` unreachable on the host, the
+    walk must still RUN — through the same exec seam the flow dispatches every
+    tool through — and the deck must still come back TCL_OK on these sources.
+    It is not skipped, and its route says which way it went."""
+    import _tcl_walk as TW
+    monkeypatch.setattr(TW.shutil, "which", lambda *_a, **_k: None)
+    r, out_json = _run_deck(tmp_path)
+    assert r.route.startswith("runner-exec:"), r.route
+    assert "TCL_OK" in r.stdout, r.stdout[-400:]
+    assert "SI_TIMING_JSON_EMIT_DONE" in r.stdout
+    assert json.loads(out_json.read_text())["pins"]
+
+
+def test_a_walk_that_cannot_run_is_NOT_MEASURED_and_fails(tmp_path,
+                                                          monkeypatch):
+    """A tool nobody could reach is a MISSING measurement. It must raise —
+    pytest reports a failure — and name both routes it tried. The one thing it
+    may never do is pass, and the second thing it may never do is skip."""
+    import _tcl_walk as TW
+    monkeypatch.setattr(TW.shutil, "which", lambda *_a, **_k: None)
+    monkeypatch.setattr(TW, "container_name", lambda: "")
+    with pytest.raises(AssertionError) as e:
+        TW.walk("puts TCL_OK\n", "set x 1\n", tmp_path)
+    msg = str(e.value)
+    assert "NOT_MEASURED" in msg
+    assert "host PATH" in msg and "container" in msg
+    assert "not a passing one" in msg
+
+
+def test_the_walker_asks_the_runner_for_the_container_name():
+    """One resolver, not two: the container is the one the RUNNER would use."""
+    import _tcl_walk as TW
+    import _eda_pin as _pin
+    import os as _os
+    if not (_os.environ.get("VIBEIC_EDA_CONTAINER")
+            or _os.environ.get("EDA_CONTAINER")):
+        assert TW.container_name() == _pin.default_container_name()
+    else:
+        assert TW.container_name() in (
+            _os.environ.get("VIBEIC_EDA_CONTAINER"),
+            _os.environ.get("EDA_CONTAINER"))

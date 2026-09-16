@@ -33,8 +33,6 @@ phase-3 project dir); it is skipped BY NAME when unset, never silently.
 """
 import hashlib
 import json
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
@@ -45,8 +43,11 @@ sys.path.insert(0, str(PROG))
 import si_mcf_repair as S          # noqa: E402
 import phase3_one_shot_runner as R  # noqa: E402
 
-tclsh = shutil.which("tclsh")
-needs_tclsh = pytest.mark.skipif(tclsh is None, reason="tclsh not installed")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _tcl_walk import walk  # noqa: E402
+
+# NO SKIP — see tests/_tcl_walk.py. The walk runs where the PROGRAM would run
+# it, and a tool it cannot reach either way is NOT_MEASURED and fails.
 
 _OPEN = {"verdict": "FAIL",
          "nominal": {"worst_setup_slack_ns": 2.4975},
@@ -171,16 +172,16 @@ _TCL_WALK = (
     "puts TCL_OK\n")
 
 
+class _R:
+    def __init__(self, out, err, route):
+        self.stdout, self.stderr, self.route = out, err, route
+
+
 def _walk(tmp_path, deck_text):
-    script = tmp_path / "walk.tcl"
-    script.write_text(_TCL_WALK)
-    deck = tmp_path / "child.tcl"
-    deck.write_text(deck_text)
-    return subprocess.run([tclsh, str(script), str(deck)],
-                          capture_output=True, text=True)
+    out, err, route = walk(_TCL_WALK, deck_text, tmp_path)
+    return _R(out, err, route)
 
 
-@needs_tclsh
 def test_the_child_deck_parses_on_both_branches(tmp_path):
     """A malformed deck is the one defect a child cannot report: it dies after
     the work and before the receipt."""
@@ -189,7 +190,6 @@ def test_the_child_deck_parses_on_both_branches(tmp_path):
     assert "TCL_ERROR" not in r.stdout
 
 
-@needs_tclsh
 def test_the_walk_catches_a_balanced_but_wrong_brace(tmp_path):
     """THE CONTROL FOR THE TEST ITSELF. Re-introduce r19's exact defect and the
     walk must refuse — otherwise this file is checking nothing."""
@@ -784,7 +784,6 @@ def test_only_the_victims_are_re_routed():
     assert scoped < full
 
 
-@needs_tclsh
 def test_the_shield_deck_parses_on_both_branches(tmp_path):
     r = _walk(tmp_path, _shield_deck())
     assert "TCL_OK" in r.stdout, r.stdout[-600:]
