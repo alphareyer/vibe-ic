@@ -82,32 +82,71 @@ MODE_INCREMENTAL = "incremental"
 MODE_FREE_RUNNING = "free_running"
 
 
-def matched_weights(window: int, order: int = 2) -> List[float]:
-    """The decimation weights the loop's OWN recurrence implies.
+def _impulse_response(window: int, order: int, at_dac: bool,
+                      coeff: float) -> List[float]:
+    """The final integrator's response to a unit impulse injected at ONE node.
 
-    Computed by running the cascade of `order` accumulators on a unit impulse
-    at each clock and reading the final state — so a depth this file does not
-    anticipate gets the weights its recurrence implies rather than a closed
-    form typed here. For order 2 this reproduces `N-1-k` exactly, summing to
-    `N(N-1)/2`; for order 1 it is flat, summing to `N`.
+    `at_dac=False` injects at the INPUT, which reaches only the first
+    integrator. `at_dac=True` injects at the DAC, which in a CIFB reaches
+    EVERY integrator — and that difference is the correction below.
     """
-    if not isinstance(window, int) or window < 1:
-        raise ValueError(f"window must be a positive integer, got {window!r}")
-    if not isinstance(order, int) or order < 1 or order > 4:
-        raise ValueError(f"{BAD_ORDER}: order must be 1..4, got {order!r}")
     out: List[float] = []
     for k in range(window):
         state = [0.0] * order
         for n in range(window):
             e = 1.0 if n == k else 0.0
-            # the cascade updates from the LAST stage backwards, so each stage
-            # integrates the PREVIOUS stage's value before it is updated —
-            # which is the one-clock delay a CIFB cascade has.
+            d = e if at_dac else 0.0
+            u = 0.0 if at_dac else e
+            # last stage first, so each stage integrates the PREVIOUS stage's
+            # value before it is updated — the one-clock delay a CIFB has.
             for s in range(order - 1, 0, -1):
-                state[s] += state[s - 1]
-            state[0] += e
+                state[s] += coeff * (state[s - 1] - d)
+            state[0] += coeff * (u - d)
         out.append(state[order - 1])
     return out
+
+
+def input_weights(window: int, order: int = 2, coeff: float = 0.25
+                  ) -> List[float]:
+    """The INPUT's response — the NORMALISER, and not the bit weights."""
+    return _impulse_response(window, order, False, coeff)
+
+
+def matched_weights(window: int, order: int = 2, coeff: float = 0.25
+                    ) -> List[float]:
+    """The BIT weights the recurrence implies — the DAC's response, not the
+    input's.
+
+    CORRECTED (R-0915-70, second pass), and the correction is worth 7.4 bits.
+    The first version injected the impulse at the INPUT and took the triangular
+    `N-1-k` response. **The bits do not enter at the input.** In a CIFB the DAC
+    feeds EVERY integrator — `a1*d` into the first, `a2*d` into the second — so
+    the bit-to-output response carries a FLAT term the input's does not:
+
+        input -> output    a1*a2*(N-1-k)
+        bit   -> output  -(a1*a2*(N-1-k) + a2)
+
+    Decoding the bits with the INPUT's weights drops that flat `a2*sum(d)`
+    term: a signal-dependent error of order `a2*N`. MEASURED on a
+    pure-arithmetic ideal CIFB2 — no simulator — scored by ABSOLUTE error
+    against the true input over 512 held levels:
+
+        DAC-injected weights    gain 0.99986   rms error   1.60 LSB   14.315 bit
+        input-injected weights  gain 0.96898   rms error 263.53 LSB    6.953 bit
+
+    **7.4 bits, and a 3 % gain error.** The input weights give a SMALL residual
+    about their own WRONG line, which is exactly why the mistake survived a
+    residual-only check: only comparing against the true input exposes it.
+
+    Still derived, not typed — the response is computed by running the cascade,
+    from the right injection point. `coeff` scales every weight and the flat
+    term alike, so the normalised decode is insensitive to it.
+    """
+    if not isinstance(window, int) or window < 1:
+        raise ValueError(f"window must be a positive integer, got {window!r}")
+    if not isinstance(order, int) or order < 1 or order > 4:
+        raise ValueError(f"{BAD_ORDER}: order must be 1..4, got {order!r}")
+    return [-w for w in _impulse_response(window, order, True, coeff)]
 
 
 def conversion_mode(spec: Any, topology: Any = None) -> str:
@@ -148,9 +187,13 @@ def decimate(bits: Sequence[float], window: int, order: int = 2
                       "window": window}
     try:
         w = matched_weights(window, order)
+        wn = input_weights(window, order)
     except ValueError as exc:
         return None, {"reason": str(exc)}
-    total = float(sum(w))
+    # NORMALISE BY THE INPUT's weight sum, not the bits'. The two differ by the
+    # flat DAC term, and using the bits' sum for both reintroduces the gain
+    # error this correction removes.
+    total = float(sum(wn))
     if total <= 0:
         return None, {"reason": BAD_ORDER, "weight_sum": total}
     n_win = len(bits) // window
@@ -159,5 +202,9 @@ def decimate(bits: Sequence[float], window: int, order: int = 2
     return out, {"producer": PRODUCER, "windows": n_win, "window": window,
                  "order": order, "weight_sum": total,
                  "weights_head": w[:3], "weights_tail": w[-3:],
-                 "quantisation_bits": math.log2(total) if total > 1 else 0.0,
+                 # the LSB count the loop can resolve: the input weight sum divided
+           # by the per-stage coefficient product, which is what the
+           # normalisation leaves. log2 of it is the theoretical ceiling.
+           "quantisation_bits": (math.log2(total / (0.25 ** order))
+                                 if total > 0 else 0.0),
                  "rule": "matched_decimation_from_the_loop_recurrence"}
