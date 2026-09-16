@@ -127,7 +127,7 @@ def test_container_pdk_fallback_resolves_when_host_staging_absent(tmp_path,
             self.stdout = out
             self.stderr = ""
 
-    def fake_docker(container, cmd, timeout=600):
+    def fake_docker(container, cmd, budget_s=600):
         seen.append((container, cmd))
         return _R(SG13G2_MODEL)
 
@@ -171,7 +171,7 @@ def test_container_fallback_is_all_or_nothing_on_read_failure(tmp_path,
             self.stdout = out
             self.stderr = ""
 
-    def fake_docker(container, cmd, timeout=600):
+    def fake_docker(container, cmd, budget_s=600):
         calls["n"] += 1
         return _R(0, SG13G2_MODEL) if calls["n"] == 1 else _R(1, "")
 
