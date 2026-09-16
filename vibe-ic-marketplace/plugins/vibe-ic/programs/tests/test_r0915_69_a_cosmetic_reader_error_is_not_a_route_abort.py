@@ -352,3 +352,72 @@ def test_the_signed_report_satisfies_the_audit_and_still_parses(tmp_path: Path):
         "\nSIGNED_TEXT_END", 1)[0]
     assert A._has_tool_signature(signed, "antenna")[0] is True
     assert re.findall(r"(?m)^Net:\s+(\S.*)$", signed) == ["net1234"]
+
+
+# --------------------------------------------------------------------------
+# 4. R-0915-69d — the clean bill may be OLDER than the route it vouches for
+# --------------------------------------------------------------------------
+_REF = "REPAIR_ANTENNA_REROUTE_NONFATAL: DRT-1010\n"
+_NAT = "ANTENNA_NATIVE_REROUTE_NONFATAL: DRT-1010\n"
+
+
+def test_a_refusal_after_the_verification_is_disclosed():
+    """run15's shape: DRT-0702 at line 1530, the four refusals at 1957-2457."""
+    assert R.antenna_reroute_refusal_after_last_verification(
+        _VERIFIED + _NAT + _REF) is True
+
+
+def test_a_refusal_before_the_verification_is_not():
+    """NEGATIVE CONTROL. A refusal that the router then verified over is
+    exactly the state this must NOT flag."""
+    assert R.antenna_reroute_refusal_after_last_verification(
+        _REF + _VERIFIED) is False
+
+
+def test_the_last_of_each_is_what_counts():
+    """A refusal, a verification, then another refusal: the route was modified
+    after the last clean bill."""
+    assert R.antenna_reroute_refusal_after_last_verification(
+        _REF + _VERIFIED + _REF) is True
+    assert R.antenna_reroute_refusal_after_last_verification(
+        _VERIFIED + _REF + _VERIFIED) is False
+
+
+def test_no_refusal_is_not_a_disclosure():
+    assert R.antenna_reroute_refusal_after_last_verification(_VERIFIED) is False
+
+
+def test_no_verification_at_all_says_nothing_about_ordering():
+    """It is already INCOMPLETE by `antenna_routing_incomplete`; a second claim
+    about the order of an event that never happened would say more than the log
+    does."""
+    assert R.antenna_reroute_refusal_after_last_verification(_REF) is False
+    assert R.antenna_routing_incomplete(_REF) is True
+
+
+def test_the_native_reroute_refusal_counts_too():
+    """`repair_antennas -reroute` raises under its own marker, and it is the
+    same modification."""
+    assert R.antenna_reroute_refusal_after_last_verification(
+        _VERIFIED + _NAT) is True
+
+
+def test_the_disclosure_changes_no_verdict():
+    """The design still HAS a detailed route: this is a note, not a gate."""
+    log = _VERIFIED + _NAT + _REF
+    assert R.antenna_routing_incomplete(log) is False
+    assert R.antenna_reroute_refusal_after_last_verification(log) is True
+
+
+def test_the_report_carries_the_note_and_its_own_field():
+    src = Path(R.__file__).read_text()
+    assert "THE SHIPPED ROUTE WAS MODIFIED AFTER IT WAS LAST" in src
+    assert '"route_modified_after_last_verification"' in src
+    assert "_unverified_note" in src
+
+
+def test_the_ordering_helper_is_pure():
+    import inspect
+    s = inspect.getsource(R.antenna_reroute_refusal_after_last_verification)
+    for forbidden in ("open(", "Path(", "subprocess", "_docker_exec"):
+        assert forbidden not in s, forbidden

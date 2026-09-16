@@ -55035,6 +55035,53 @@ def antenna_routing_incomplete(log_txt: str) -> bool:
     return _ROUTE_VERIFIED_MARKER not in log_txt
 
 
+#: R-0915-69d — AND WHETHER THE VERIFICATION STILL DESCRIBES THE SHIPPED ROUTE.
+#:
+#: MEASURED, sha256 x sky130A, lane icsha2 run15, front door, AFTER R-0915-69
+#: was written — and it qualifies it. In that log:
+#:
+#:     1530: [INFO DRT-0702] Post-route verification: 0 violation(s).
+#:     1957/1987/2427/2457: the four antenna reroute refusals, all DRT-1010
+#:
+#: The corroboration R-0915-69 requires is REAL but it is OLDER than the last
+#: modification of the route. The antenna loop inserted 4 diodes
+#: (`[INFO GRT-0015] Inserted 4 diodes.`), which makes their nets dirty, and the
+#: incremental `detailed_route` that must re-route them RAISED and the loop
+#: `break`s — so whatever that aborted call had already written stays in the
+#: database, is written to `routed.def`, and NOTHING verifies it again.
+#:
+#: IT IS NOT HYPOTHETICAL. Traced across this run's own checkpoints, `net4772`
+#: does not exist at all in `routed_preantenna.def`, exists WITHOUT its
+#: y = 417.450 um met1 segment in the SDR `candidate.def`, and carries that
+#: segment in `routed.def` / `sha256.def` — and that segment is the conductor
+#: that magic's extractor then reported as 22 illegal overlaps over three
+#: flip-flops. The unverified modification is exactly where the defect entered.
+#:
+#: DISCLOSURE, NOT A VERDICT. This changes no gate: the design HAS a detailed
+#: route, `routing complete: YES` stays true, and the antenna counts are the
+#: post-repair ones. What it adds is the one fact a reader of this report needs
+#: and could not get: the route that ships was modified after the last time the
+#: router verified it. The extraction gate (step 31) is what catches what the
+#: modification did, and it did.
+def antenna_reroute_refusal_after_last_verification(log_txt: str) -> bool:
+    """True when a reroute refusal comes AFTER the last post-route verification.
+
+    PURE. False when there is no refusal, and False when there is no
+    verification at all — in the second case `antenna_routing_incomplete` has
+    already refused to call the route complete, and a second claim about
+    ordering over an absent event would say more than the log does.
+    """
+    lines = log_txt.splitlines()
+    last_ver = max((i for i, ln in enumerate(lines)
+                    if _ROUTE_VERIFIED_MARKER in ln), default=None)
+    last_ref = max((i for i, ln in enumerate(lines)
+                    if _ANTENNA_REROUTE_MARKER in ln
+                    or "ANTENNA_NATIVE_REROUTE_NONFATAL" in ln), default=None)
+    if last_ver is None or last_ref is None:
+        return False
+    return last_ref > last_ver
+
+
 def antenna_cosmetic_reroute_refusals(log_txt: str) -> int:
     """How many reroute refusals were the cosmetic DRT-1010 — for DISCLOSURE.
 
@@ -55107,6 +55154,8 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
             # cause. See `antenna_routing_incomplete` above for the measurement.
             routing_incomplete = antenna_routing_incomplete(log_txt)
             _cosmetic_reroute = antenna_cosmetic_reroute_refusals(log_txt)
+            _unverified_after = (
+                antenna_reroute_refusal_after_last_verification(log_txt))
             # #552 — EVERY marker above is an `[ERROR ...]`, and our OpenROAD fork's
             # standing doctrine is abort -> warn + continue (RSZ-0089, DPL-0033,
             # DRT-0305, DRT-627). So each downgrade we add moves a condition OUT of
@@ -55214,6 +55263,20 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     "# therefore measured on a verified detailed route. Had the cause\n"
                     "# been any other code, or none, this would read INCOMPLETE.\n"
                     if (_cosmetic_reroute and not routing_incomplete) else "")
+                # R-0915-69d — and say so when the proof is OLDER than the
+                # route it is being used to vouch for.
+                _unverified_note = (
+                    "\n# THE SHIPPED ROUTE WAS MODIFIED AFTER IT WAS LAST\n"
+                    "# VERIFIED. The reroute refusal above comes AFTER the last\n"
+                    "# `[INFO DRT-0702] Post-route verification:` in this log, and\n"
+                    "# the antenna loop breaks on that refusal — so the diodes it\n"
+                    "# had already inserted, and whatever the aborted incremental\n"
+                    "# detailed_route had already written, ship unverified. The\n"
+                    "# antenna counts above are still the post-repair measurement;\n"
+                    "# this says only that the router's own clean bill predates the\n"
+                    "# last change to the route. The extraction gate (step 31) is\n"
+                    "# what measures what that change did.\n"
+                    if (_unverified_after and not routing_incomplete) else "")
                 _subject = _measured_subject(project, top, [def_file],
                                              tool_log=pnr_log)
                 antenna_rpt.write_text(
@@ -55276,7 +55339,8 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                        f"fork downgrades this from the fatal DRT-0073 so a repair "
                        f"can continue, so it is NOT visible as a routing "
                        f"failure)\n" if pins_unaccessed else "")
-                    + _incomplete_note + _cosmetic_note)
+                    + _incomplete_note + _cosmetic_note
+                    + _unverified_note)
                 _aa.write_text(antenna_rpt.parent / "antenna.json", json.dumps({
                     "tool": "openroad",
                     "mode": "antenna_check_in_session_post_repair",
@@ -55294,6 +55358,11 @@ def _emit_antenna_report(project: Path, top: str, pdk: PdkConfig,
                     # boolean above: "the reroute was refused" and "the
                     # design has no route" are different facts.
                     "cosmetic_reroute_refusals": _cosmetic_reroute,
+                    # R-0915-69d — its own field again: "the reroute was
+                    # refused" and "the clean bill predates the route" are
+                    # different facts.
+                    "route_modified_after_last_verification":
+                        _unverified_after,
                     # #552 — its own field, not folded into routing_incomplete.
                     "pins_unaccessed": pins_unaccessed,
                     # ITS OWN FIELD. "3 violations remain" and "the loop held 2
