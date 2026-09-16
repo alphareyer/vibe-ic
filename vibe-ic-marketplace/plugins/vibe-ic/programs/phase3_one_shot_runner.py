@@ -21710,7 +21710,7 @@ def _route_drc_report_tcl(rpt_path: str) -> str:
     )
 
 
-def _rsz_parasitics_source_tcl(tag: str) -> str:
+def _rsz_parasitics_source_tcl(tag: str, spef: str = "") -> str:
     """R-0915-84(a) — give the RESIZER its own parasitics before it repairs.
 
     MEASURED (opentitan_aes x sky130A, 2026-09-16). On all four passes of the
@@ -21736,17 +21736,61 @@ def _rsz_parasitics_source_tcl(tag: str) -> str:
     models.
 
     chip-AGNOSTIC: no PDK, layer, vendor or design literal.
+
+    R-0915-92 (lane icsub2) — AN ESTIMATE THAT HIDES THE GRADER'S VIOLATIONS IS
+    REFUSED. MEASURED on subservient x gf180mcuD: on the post-route SDR
+    checkpoint, worst setup slack read -1.108 ns under the extracted SPEF and
+    +4.013 ns after `estimate_parasitics -global_routing` (global routes the
+    resizer cannot build: RSZ-0074 "found route to 1 pins"). `repair_timing
+    -setup` then printed RSZ-0098 "No setup violations found" and repaired
+    nothing, and sign-off measured SS -0.71 ns (r28; bisected to this helper's
+    landing, r27 +0.03 with it reverted). Re-reading the SPEF after the estimate
+    restored -1.108 and the same repair found 26 violating endpoints and closed
+    at +0.132 — identical to no estimate at all.
+
+    So when `spef` (the grader's SPEF) is given: record the grader's WNS first;
+    if it is negative and the estimate reports >= 0, the estimate hides
+    violations the grader sees — re-read the SPEF and say so as
+    `<TAG>_RSZ_PARASITICS: REFUSED_HIDES_VIOLATIONS`. An estimate that is
+    optimistic but still shows violations is kept (the AES DRV-loop case this
+    helper was written for), and a design whose grader WNS is not negative
+    never reaches the refusal.
     """
+    guard_pre = (
+        "    if {[catch {set _rszp_spef_wns [sta::worst_slack -max]}]} "
+        "{ set _rszp_spef_wns {} }\n" if spef else "")
+    ok_line = (f"puts \"{tag}_RSZ_PARASITICS: estimate_parasitics "
+               "-global_routing OK -- the resizer has its own source, EST-0027 "
+               "must not appear for this pass\"")
+    if spef:
+        ok_body = (
+            "      if {[catch {set _rszp_est_wns [sta::worst_slack -max]}]} "
+            "{ set _rszp_est_wns {} }\n"
+            "      if {$_rszp_spef_wns ne {} && $_rszp_est_wns ne {} "
+            "&& $_rszp_spef_wns < 0 && $_rszp_est_wns >= 0} {\n"
+            f"        if {{[catch {{read_spef {spef}}} _rszp_rs]}} {{\n"
+            f"          puts \"{tag}_RSZ_PARASITICS: REFUSED_HIDES_VIOLATIONS "
+            "spef_wns=$_rszp_spef_wns est_wns=$_rszp_est_wns -- SPEF re-read "
+            "FAILED $_rszp_rs; this repair sees the estimate\"\n"
+            "        } else {\n"
+            f"          puts \"{tag}_RSZ_PARASITICS: REFUSED_HIDES_VIOLATIONS "
+            "spef_wns=$_rszp_spef_wns est_wns=$_rszp_est_wns -- the estimate "
+            "hides setup violations the grader sees; SPEF re-read, this pass "
+            "repairs against the grader's parasitics\"\n"
+            "        }\n"
+            f"      }} else {{ {ok_line} }}\n")
+    else:
+        ok_body = f"      {ok_line}\n"
     return (
-        f"    if {{[catch {{estimate_parasitics -global_routing}} _rszp]}} {{\n"
+        guard_pre
+        + "    if {[catch {estimate_parasitics -global_routing} _rszp]} {\n"
         f"      puts \"{tag}_RSZ_PARASITICS: FAILED $_rszp -- this repair runs "
         "on WIRE LOAD MODELS (expect EST-0027) and its result is not comparable "
         "with the SPEF census above\"\n"
-        f"    }} else {{ puts \"{tag}_RSZ_PARASITICS: estimate_parasitics "
-        "-global_routing OK -- the resizer has its own source, EST-0027 must "
-        "not appear for this pass\" }\n"
+        "    } else {\n"
+        + ok_body
+        + "    }\n"
     )
-
 
 def _spare_safe_clear_net_proc_tcl() -> str:
     """The ONE decision every routing-clear site in this runner makes, as a Tcl
@@ -26386,7 +26430,7 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "repair_sees_estimated_parasitics=unknown_to_tcl -- if OpenROAD prints "
         "EST-0027 after this line, this pass's repair ran on WIRE LOAD MODELS "
         "while its census came from the extracted SPEF\"\n"
-        + _rsz_parasitics_source_tcl("SDR")
+        + _rsz_parasitics_source_tcl("SDR", f"{out_dir_c}/sdr_pass.spef")
         + f"    if {{[catch {{repair_design -max_wire_length $_sdr_mwl "
         f"-slew_margin {m} -cap_margin {m}}} _sdr_rd]}} {{\n"
         "      # A caught repair error is not a successful candidate.  Even a\n"
@@ -26464,7 +26508,7 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # delay, and nothing re-timed the paths they sit on. This is the
         # same `repair_timing -setup` the flow already runs post-global-
         # route; it belongs after any buffer insertion, not only that one.
-        + _rsz_parasitics_source_tcl("SDR_SETUP")
+        + _rsz_parasitics_source_tcl("SDR_SETUP", f"{out_dir_c}/sdr_pass.spef")
         + "    if {[catch {repair_timing -setup} _sdr_rt]} "
         "{ puts \"SDR_REPAIR_TIMING_NONFATAL: $_sdr_rt\"; set _sdr_tx_error 1 }\n"
         # LEGALIZE AND VERIFY. A bare catch-guarded detailed_placement
@@ -28739,6 +28783,33 @@ def _read_sdr_receipts(out_dir: Path) -> List[Dict[str, Any]]:
     return out
 
 
+_PARASITICS_REFUSED_RE = re.compile(
+    r"^(\w+)_RSZ_PARASITICS: REFUSED_HIDES_VIOLATIONS spef_wns=(\S+) "
+    r"est_wns=(\S+) -- (SPEF re-read FAILED)?", re.M)
+
+
+def _parasitics_estimate_refusals(out_dir: Path, stage: str) -> List[Dict[str, Any]]:
+    """R-0915-92: every REFUSED_HIDES_VIOLATIONS a child of `stage` printed.
+
+    The refusal happens inside the child OpenROAD session, so its only trace was
+    the child's stdout. An instrument refusal the step record cannot show is
+    invisible to the audit; this lifts it into the transaction record the PnR
+    step already publishes (reports/phase3/sdr_transactions.json and the step's
+    `sdr_transactions` extras). Read from every `sdr_child*{stage}*.log`."""
+    found: List[Dict[str, Any]] = []
+    for log in sorted(Path(out_dir).glob(f"sdr_child*{stage}*.log")):
+        try:
+            text = log.read_text(errors="replace")
+        except OSError:
+            continue
+        for tag, spef_wns, est_wns, failed in _PARASITICS_REFUSED_RE.findall(text):
+            found.append({"tag": tag, "grader_spef_wns": spef_wns,
+                          "estimate_wns": est_wns,
+                          "spef_reread": "FAILED" if failed else "OK",
+                          "log": log.name})
+    return found
+
+
 def _disclose_sdr_transactions(project: Path, out_dir: Path,
                                adoptions: Sequence[Dict[str, Any]],
                                child_deck_failures: Dict[str, str]
@@ -28757,6 +28828,9 @@ def _disclose_sdr_transactions(project: Path, out_dir: Path,
         why = child_deck_failures.get(str(rec.get("stage")))
         if why:
             rec["child_deck_not_written"] = why
+        refused = _parasitics_estimate_refusals(out_dir, str(rec.get("stage")))
+        if refused:
+            rec["parasitics_estimate_refused"] = refused
     payload = {
         "schema_version": 1,
         "note": ("Each post-route sign-off DRV-repair (SDR) pass is a "
@@ -28767,6 +28841,11 @@ def _disclose_sdr_transactions(project: Path, out_dir: Path,
                  "was measured and refused and the checkpointed route shipped "
                  "unchanged; it is a disclosure, not a failure."),
         "transactions": records,
+        # R-0915-92: count of estimates refused because they hid violations the
+        # grader's SPEF shows. Non-zero means a repair would otherwise have run
+        # blind; each record above names its tag, both WNS values and the log.
+        "parasitics_estimate_refusals": sum(
+            len(r.get("parasitics_estimate_refused") or []) for r in records),
         # WITHOUT `combined_log`. The adopt transcript is already folded into
         # `openroad.log` by the function that produced it, and publishing a
         # second copy here made this file 294 KB on its first real run — a
@@ -28784,6 +28863,11 @@ def _disclose_sdr_transactions(project: Path, out_dir: Path,
         print(f"[pnr] SDR_TRANSACTION_DISCLOSURE_NOT_WRITTEN "
               f"reason={type(exc).__name__}: {exc}", file=sys.stderr)
     for rec in records:
+        for ref in rec.get("parasitics_estimate_refused") or []:
+            print(f"[pnr] SDR_PARASITICS_ESTIMATE_REFUSED {rec.get('stage')} "
+                  f"tag={ref['tag']} grader_spef_wns={ref['grader_spef_wns']} "
+                  f"estimate_wns={ref['estimate_wns']} "
+                  f"spef_reread={ref['spef_reread']}", file=sys.stderr)
         print(f"[pnr] SDR_TRANSACTION {rec.get('stage')}: "
               f"{rec.get('status')} reason={rec.get('reason', '-')} "
               f"router_drc {rec.get('before_router_drc', '-')} -> "
