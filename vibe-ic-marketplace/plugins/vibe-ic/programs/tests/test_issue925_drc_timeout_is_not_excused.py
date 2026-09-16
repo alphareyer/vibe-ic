@@ -13,12 +13,12 @@ report. The WORD was not:
     `return "PASS"`.  MEASURED on the unfixed tree: a plan whose only non-PASS
     step was a timed-out sign-off DRC aggregated to a plain green `"PASS"` —
     not even PASS_WITH_WAIVERS.
-  * `_flow_verdict_tiers.is_excused("SKIPPED-CONDITION")` is True, so wherever
+  * `verdict.is_excused("SKIPPED-CONDITION")` is True, so wherever
     the word IS adjudicated the step is subtracted from `total_required`: a DRC
     that ran out of time stopped being owed an answer at all.
 
 The tests below ASK THE PROGRAMS — the real `_try_svrf_native_drc`, the real
-`_aggregate_verdict`, the real `_flow_verdict_tiers` — and never recompute a
+`_aggregate_verdict`, the real `verdict` — and never recompute a
 rule locally.
 
 TWO ARMS, both required by the issue's acceptance criteria:
@@ -40,7 +40,7 @@ from pathlib import Path
 PROG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROG))
 import phase3_one_shot_runner as R   # noqa: E402
-import _flow_verdict_tiers as T      # noqa: E402
+import verdict as T      # noqa: E402
 
 
 def _pdk(**kw):

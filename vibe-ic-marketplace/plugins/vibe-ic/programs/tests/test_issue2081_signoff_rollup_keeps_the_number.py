@@ -31,7 +31,7 @@ analog — so this is ONE root cause with four sites, not four defects.
 WHAT THIS FILE PINS
 -------------------
   * a NON_GREEN row keeps its reason IN FULL, so the number survives;
-  * the classification is `_flow_verdict_tiers.NON_GREEN`, not a literal set
+  * the classification is `verdict.NON_GREEN`, not a literal set
     of words re-spelled in a renderer;
   * the ANTI-CHEAT: a passing row is still BOUNDED — this landing is not "print
     everything", which would be a different change wearing this issue's number;
@@ -59,7 +59,7 @@ _PROGRAMS = Path(__file__).resolve().parents[1]
 if str(_PROGRAMS) not in sys.path:
     sys.path.insert(0, str(_PROGRAMS))
 
-import _flow_verdict_tiers as _tiers  # noqa: E402
+import verdict as _tiers  # noqa: E402
 
 # IMPORTED SOFTLY, ON PURPOSE. The falsifier's red arm is `live main sources +
 # ONLY these tests`, where `programs/_runner_summary.py` does not exist. A bare
@@ -93,7 +93,7 @@ _MEASURED_DETAIL = (
 #: The runners whose rollup used a NON-DEFAULT width. Everything else about
 #: the population is DERIVED below, never listed: an enumerated set of four
 #: names would go quiet on the fifth runner that grows the same line, which is
-#: the allow-list failure `_flow_verdict_tiers`'s own docstring is about.
+#: the allow-list failure `verdict`'s own docstring is about.
 _NON_DEFAULT_WIDTH = {"analog_one_shot_runner.py": 60}
 
 
@@ -146,7 +146,7 @@ def test_a_short_row_is_untouched_and_carries_no_marker():
 
 def test_the_classification_is_the_shared_tier_not_a_local_literal():
     """A renderer that re-spelled the status words is the drift
-    `_flow_verdict_tiers` exists to delete, so the tier is consulted live."""
+    `verdict` exists to delete, so the tier is consulted live."""
     src = (_PROGRAMS / "_runner_summary.py").read_text()
     assert "is_non_green" in src
     for word in ("\"FAIL\"", "'FAIL'"):

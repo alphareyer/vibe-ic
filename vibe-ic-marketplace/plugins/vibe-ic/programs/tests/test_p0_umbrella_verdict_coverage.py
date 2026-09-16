@@ -66,7 +66,7 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import _flow_verdict_tiers as _T  # noqa: E402
+import verdict as _T  # noqa: E402
 import _p0_umbrella_probe_flow as _probe  # noqa: E402
 import flow_compliance_check as F  # noqa: E402
 
@@ -426,7 +426,7 @@ def test_real_gates_a_fully_invoked_clean_registry_is_PASS(
     #
     # RB2-03 (#2063) moved the two ZERO-population rows from `INCOMPLETE` to
     # `NOT-MEASURED`: both are adjudicated identically (a qualified done-claim,
-    # in neither EXCUSED nor NON_GREEN — see `_flow_verdict_tiers`), so no run's
+    # in neither EXCUSED nor NON_GREEN — see `verdict`), so no run's
     # greenness moves, and the word now distinguishes "nothing answered" from
     # "some did not". The MIXED row below keeps `INCOMPLETE` and is what proves
     # the two cases have not been collapsed the other way.
@@ -455,7 +455,7 @@ def test_not_invocable_count_counts_only_that_verdict():
 # not against a belief about it
 # ===========================================================================
 def test_incomplete_is_a_registered_producer_status():
-    """`_flow_verdict_tiers` derives done-claim membership BY SUBTRACTION, so an
+    """`verdict` derives done-claim membership BY SUBTRACTION, so an
     unregistered word silently becomes a done-claim. INCOMPLETE was registered
     by #599; the umbrella is a new PRODUCER of it and that must stay true."""
     assert "INCOMPLETE" in _T.PRODUCER_STATUSES

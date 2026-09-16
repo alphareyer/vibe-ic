@@ -53,7 +53,7 @@ import importlib
 from pathlib import Path
 
 _BC = importlib.import_module("_blocker_classification")
-_T = importlib.import_module("_flow_verdict_tiers")
+_T = importlib.import_module("verdict")
 _GUARD = importlib.import_module("blocker_classification_check")
 _FCCMOD = importlib.import_module("flow_compliance_check")
 
@@ -108,7 +108,7 @@ def test_every_non_pass_step_the_producer_can_emit_is_on_the_list():
 
 
 def test_a_verdict_word_this_module_has_never_seen_is_still_a_blocker():
-    """Fail-SAFE derivation, the same device `_flow_verdict_tiers` uses.
+    """Fail-SAFE derivation, the same device `verdict` uses.
 
     A tier invented tomorrow must land ON the list without anyone remembering
     to come here. The alternative — an enumerated set of blocking words — goes

@@ -40,7 +40,7 @@ import importlib
 import pathlib
 import re
 
-T = importlib.import_module("_flow_verdict_tiers")
+T = importlib.import_module("verdict")
 G = importlib.import_module("flow_step_execution_coverage_check")
 F = importlib.import_module("flow_compliance_check")
 
@@ -148,7 +148,7 @@ def test_the_producers_vocabulary_is_pinned():
         r'return "([A-Z][A-Z_-]+)"', inspect.getsource(F._p0_umbrella_status))}
     assert found == T.PRODUCER_STATUSES, (
         "flow_compliance_check's verdict vocabulary changed. Add the new word "
-        "to EXCUSED or NON_GREEN in _flow_verdict_tiers.py, or confirm it is a "
+        "to EXCUSED or NON_GREEN in verdict.py, or confirm it is a "
         "done-claim, then update PRODUCER_STATUSES.\n"
         f"  in the producer, not pinned: {sorted(found - T.PRODUCER_STATUSES)}\n"
         f"  pinned, not in the producer: {sorted(T.PRODUCER_STATUSES - found)}")

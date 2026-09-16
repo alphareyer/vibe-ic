@@ -11,14 +11,14 @@ records both as `WAIVED`, and this program answered::
 
 This program is the gate of steps 2, 7, 15 and 37, so each of them went
 INCOMPLETE, which kept stage1/2/3 from being green, which kept this program
-declining. `_flow_verdict_tiers.EXCUSED` registers BOTH spellings; one was
+declining. `verdict.EXCUSED` registers BOTH spellings; one was
 registered here and one was not.
 
 BOTH DIRECTIONS. A sanctioned deferral does not stop a stage being reviewable;
 a FAIL, a MISSING, a PASS-VOIDED-BY-DEPENDENCY and a SKIPPED-SETUP-REQUIRED
 still do — the fix must not turn the reviewer into one that fires on anything.
 
-chip-AGNOSTIC: the green set is re-derived from `_flow_verdict_tiers` here, so
+chip-AGNOSTIC: the green set is re-derived from `verdict` here, so
 a word that leaves that register fails this file rather than living on.
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ if str(PROGRAMS) not in sys.path:
 
 import pytest  # noqa: E402
 
-import _flow_verdict_tiers as T  # noqa: E402
+import verdict as T  # noqa: E402
 import stage_on_pass_review as S  # noqa: E402
 
 

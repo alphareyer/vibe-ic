@@ -15,7 +15,7 @@ producer added a SUB-GATE population into it::
 
 `structural_waivers` is one entry per P0 structural sub-gate whose FAIL was
 converted to a deferred waiver — all of them INSIDE the single step `P0`. And
-`WAIVED` is in `_flow_verdict_tiers.EXCUSED`, which is precisely what the
+`WAIVED` is in `verdict.EXCUSED`, which is precisely what the
 denominator subtracts::
 
     total_required = (len(steps)
@@ -75,7 +75,7 @@ with a guard that must hold IDENTICALLY before and after:
   * a run with ZERO sub-gate waivers must be untouched in every field.
 
 DISCOVERED, NOT ENUMERATED. No verdict word, bucket name or tally label is typed
-in this file. The verdict vocabulary comes from `_flow_verdict_tiers` (the
+in this file. The verdict vocabulary comes from `verdict` (the
 producer's own classifier), the tally labels are scraped out of the line the
 program itself printed, and the waivable gate names come from the producer's own
 `_THIN_INPUT_WAIVER_GATES`. A bucket added tomorrow is compared by these tests
@@ -100,7 +100,7 @@ import pytest
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 
-import _flow_verdict_tiers as _T  # noqa: E402
+import verdict as _T  # noqa: E402
 import flow_compliance_check as F  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _p0_umbrella_probe_flow as _probe  # noqa: E402

@@ -1476,16 +1476,25 @@ def _write_sim_toolchain_record(run_dir: Path, project: Optional[Path],
 #: matter was settled, and `_aggregate_verdict` folded it into
 #: PASS_WITH_WAIVERS beside genuinely-disposed items.
 #:
-#: Three states, three words, none of them green:
-#:   INCOMPLETE       the sim RAN and reached completion — connectivity only
-#:   FAIL             the sim RAN and the design did not survive it
-#:   NOT_EXECUTED     nothing ran; there is no evidence about the design
+#: Three states, and since R-0915-85 they are told apart by a VERDICT plus a
+#: REASON rather than by three words:
+#:   NOT_MEASURED(partial_population)  the sim RAN and reached completion —
+#:                                     connectivity only
+#:   FAIL                              the sim RAN and the design did not
+#:                                     survive it
+#:   NOT_MEASURED(not_executed)        nothing ran; there is no evidence about
+#:                                     the design
 #:
 #: NOT a failure of the DUT (vibe-ic#1394: an unreachable compiler accuses
-#: nobody), and never a pass either. Enumerated in `_aggregate_verdict`, so it
-#: cannot arrive as a silent green, and carried in `extras["sim_executed"]`
-#: so a consumer can ask the question without parsing prose.
-NOT_EXECUTED_STATUS = "NOT_EXECUTED"
+#: nobody), and never a pass either. `verdict.run_verdict` keeps it off the
+#: run's PASS, and `extras["sim_executed"]` still carries the fact so a
+#: consumer can ask the question without parsing prose.
+#:
+#: The NAME is kept because thirteen sites and several tests reference it, and
+#: because "not executed" is exactly the reason it now carries; what it holds
+#: is the five-word verdict.
+NOT_EXECUTED_STATUS = _V.Verdict.NOT_MEASURED.value
+NOT_EXECUTED_REASON = _V.ReasonClass.NOT_EXECUTED.value
 
 
 def _shutil_which(tool: str) -> Optional[str]:
@@ -9345,14 +9354,14 @@ def step_analog_acceptance_tb_run(project: Path) -> StepResult:
     except Exception as e:  # pragma: no cover — defensive import guard
         return StepResult("analog_acceptance_tb_run", NOT_EXECUTED_STATUS,
                           time.time() - t0, f"executor unavailable: {e}",
-                          extras={"sim_executed": False})
+                          extras={"sim_executed": False}, reason_class=NOT_EXECUTED_REASON)
     rep: dict = {}
     try:
         executed = _acc.run_acceptance_checks(project, rep)
     except Exception as e:
         return StepResult("analog_acceptance_tb_run", NOT_EXECUTED_STATUS,
                           time.time() - t0, f"executor raised: {e}",
-                          extras={"sim_executed": False})
+                          extras={"sim_executed": False}, reason_class=NOT_EXECUTED_REASON)
     if executed == -1:
         return StepResult("analog_acceptance_tb_run", "NOT_MEASURED", time.time() - t0,
                           str(rep.get("reason")),
@@ -10764,14 +10773,14 @@ def step_l10_unit_tb_run(project: Path, container: "str | None") -> StepResult:
     except Exception as e:  # pragma: no cover — defensive import guard
         return StepResult("l10_unit_tb_run", NOT_EXECUTED_STATUS,
                           time.time() - t0, f"executor unavailable: {e}",
-                          extras={"sim_executed": False})
+                          extras={"sim_executed": False}, reason_class=NOT_EXECUTED_REASON)
     rep: dict = {}
     try:
         executed = _tbg.run_unit_tbs(project, container, rep)
     except Exception as e:
         return StepResult("l10_unit_tb_run", NOT_EXECUTED_STATUS,
                           time.time() - t0, f"executor raised: {e}",
-                          extras={"sim_executed": False})
+                          extras={"sim_executed": False}, reason_class=NOT_EXECUTED_REASON)
     if executed == -1:
         # Nothing to execute is the producer's story to tell, not a failure of
         # this step — but it is NOT a pass over any testbench either.
@@ -10781,7 +10790,7 @@ def step_l10_unit_tb_run(project: Path, container: "str | None") -> StepResult:
     if executed == -2:
         return StepResult("l10_unit_tb_run", NOT_EXECUTED_STATUS,
                           time.time() - t0, str(rep.get("reason")),
-                          extras={"sim_executed": False})
+                          extras={"sim_executed": False}, reason_class=NOT_EXECUTED_REASON)
     extra = rep.get("extra_sources_from_design_input") or []
     detail = (f"{rep['tb_total']} unit TB(s): {rep['passed']} passed, "
               f"{rep['failed']} failed, {rep['errored']} errored "
@@ -12555,7 +12564,7 @@ def _reference_tb_generic_full_stack(project: Path, top_name: str,
                             "sim_executed": False,
                             "fallback_skill": "testbench-gen",
                             "iverilog_available": False,
-                            "tb_frontend": tb_frontend})
+                            "tb_frontend": tb_frontend}, reason_class=NOT_EXECUTED_REASON)
             return StepResult(
                 "reference_tb", NOT_EXECUTED_STATUS,
                 time.time() - t0,
@@ -12565,7 +12574,7 @@ def _reference_tb_generic_full_stack(project: Path, top_name: str,
                         "functional_verified": False,
                         "sim_executed": False,
                         "iverilog_available": False,
-                        "tb_frontend": tb_frontend})
+                        "tb_frontend": tb_frontend}, reason_class=NOT_EXECUTED_REASON)
         if rc != 0:
             # A genuine compile/elaboration failure of the DUT is a REAL
             # functional/structural defect — FAIL (honesty preserved). Only
@@ -12666,7 +12675,7 @@ def _reference_tb_generic_full_stack(project: Path, top_name: str,
                     "functional_verified": False,
                     "sim_executed": False,
                     "fallback_skill": "testbench-gen",
-                    "iverilog_available": False})
+                    "iverilog_available": False}, reason_class=NOT_EXECUTED_REASON)
     return StepResult(
         "reference_tb", NOT_EXECUTED_STATUS,
         time.time() - t0,
@@ -12678,7 +12687,7 @@ def _reference_tb_generic_full_stack(project: Path, top_name: str,
                 "aid_tb_skipped_reason": track_reason,
                 "functional_verified": False,
                 "sim_executed": False,
-                "iverilog_available": False})
+                "iverilog_available": False}, reason_class=NOT_EXECUTED_REASON)
 
 
 # ---------------------------------------------------------------------------
@@ -18818,6 +18827,34 @@ _LEC_EXHAUSTION_FLAGS = (
 )
 
 
+def lec_inconclusive_reason_class(doc: dict) -> str:
+    """The `verdict.ReasonClass` an INCONCLUSIVE record earns, beside its word.
+
+    R-0915-85 gives the two NOT_MEASURED branches of
+    `lec_inconclusive_disposition` their own reasons, which is the distinction
+    sha256 run16 pass 2 destroyed by booking both as `SKIP`:
+
+        stopped by a resource   -> budget_exhausted   (R-0915-5's case)
+        0 points compared       -> no_population      (the miter judged nothing)
+        record unreadable       -> execution_error
+
+    The FAIL branch — points compared, nothing ran out, points unproven —
+    needs no reason class: it is a verdict about the design's netlist, not an
+    absence of one.
+    """
+    if not isinstance(doc, dict):
+        return _V.ReasonClass.EXECUTION_ERROR.value
+    if lec_exhausted_resource_note(doc):
+        return _V.ReasonClass.BUDGET_EXHAUSTED.value
+    try:
+        compared = int(doc.get("compared_points") or 0)
+    except (TypeError, ValueError):
+        compared = 0
+    if compared <= 0:
+        return _V.ReasonClass.NO_POPULATION.value
+    return ""
+
+
 def lec_exhausted_resource_note(doc: dict) -> str:
     """Name the resource an INCONCLUSIVE record says it ran out of, or "".
 
@@ -18882,6 +18919,9 @@ def lec_inconclusive_disposition(doc: dict) -> Tuple[str, str]:
         return NOT_EXECUTED_STATUS, "record unreadable — nothing measured"
     stopped_by = lec_exhausted_resource_note(doc)
     if stopped_by:
+        # R-0915-85: `budget_exhausted` is the reason_class for exactly this —
+        # a declared budget spent without a verdict (R-0915-5). The caller
+        # carries it onto the row.
         return (NOT_EXECUTED_STATUS,
                 f"NOT_MEASURED: the proof was stopped before it finished "
                 f"({stopped_by}) — R-0915-5/R-0915-48: report the elapsed state "
@@ -20464,6 +20504,15 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                                if str(_verdict).upper() == "INCONCLUSIVE"
                                else "")
                 _lec_reuse = lec_record_reuse_note(_lec_doc)
+                # R-0915-85 — the two fields that make pass 2 legible. The
+                # reason class says WHY nothing was measured (budget_exhausted
+                # / no_population / execution_error, from the producer's own
+                # record); the REUSED_RECORD disclosure says this answer was
+                # not computed in this run. sha256 run16 pass 2 returned pass
+                # 1's identical INCONCLUSIVE record in 2 s instead of 8306 s
+                # and the report said neither.
+                _lec_rc = (lec_inconclusive_reason_class(_lec_doc)
+                           if str(_verdict).upper() == "INCONCLUSIVE" else "")
                 results.append(StepResult("lec_equivalence", _status,
                                time.time() - t0,
                                f"yosys equiv: verdict={_verdict or 'UNKNOWN'} "
@@ -20477,7 +20526,10 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                                # a healthy run keeps its original message.
                                + (f"; gate-netlist WARNING: {_lec_netlist_note}"
                                   if _lec_gate_is_cut else ""),
-                               output_files=["reports/lec.json", "reports/lec.rpt"]))
+                               output_files=["reports/lec.json", "reports/lec.rpt"],
+                               reason_class=_lec_rc,
+                               disclosures=([_V.Disclosure.REUSED_RECORD.value]
+                                            if _lec_reuse else [])))
             else:
                 tail = (r.stderr or r.stdout or "")[-300:]
                 _dft_disclose_skip(reports_dir / "lec_not_run.json",

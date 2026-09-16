@@ -302,7 +302,7 @@ def test_a_populated_not_measured_bucket_reaches_the_stage_breakdown(
     ABSENT, and the stage rows stop accounting for the steps they count.
 
     MEASURED on 0fe74ebc325a (tree 98f2cf217d76), the tree that shipped
-    `NOT-MEASURED` in `_flow_verdict_tiers.PRODUCER_STATUSES` and not in
+    `NOT-MEASURED` in `verdict.PRODUCER_STATUSES` and not in
     `ROLLUP_ORDER`: this render attributed 0 of its 3 NOT-MEASURED steps to any
     stage row.
     """
@@ -319,13 +319,13 @@ def test_the_not_measured_slot_sits_among_the_qualified_done_claims():
     """WHERE the slot is, asserted against the classification rather than
     against a remembered index.
 
-    `_flow_verdict_tiers` puts NOT-MEASURED in neither `EXCUSED` nor
+    `verdict` puts NOT-MEASURED in neither `EXCUSED` nor
     `NON_GREEN`, which by that module's own derivation makes it a QUALIFIED
     DONE-CLAIM. `ROLLUP_ORDER` is ordered "full pass, then qualified
     done-claims, then excused, then non-green", so a slot below `FAIL` would
     print, in the one table a reader opens, that the step failed.
     """
-    import _flow_verdict_tiers as T
+    import verdict as T
     assert T.is_qualified_done("NOT-MEASURED")
     order = list(F.ROLLUP_ORDER)
     non_green = [order.index(w) for w in T.NON_GREEN if w in order]

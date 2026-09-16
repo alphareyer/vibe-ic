@@ -387,7 +387,7 @@ def _satisfy_p0_ancestry(project: Path) -> Path:
 #: The step listing abbreviates exactly two of the producer's own status words;
 #: every other label is the word itself. Kept as a rendering map, NOT as a
 #: judgement about done-ness — the judgement below stays derived from
-#: `_flow_verdict_tiers`, the one place a verdict word is classified (#634). A
+#: `verdict`, the one place a verdict word is classified (#634). A
 #: label that is neither an alias here nor a `PRODUCER_STATUSES` member makes
 #: the precondition REFUSE rather than guess, so a renamed rendering reddens
 #: this file instead of quietly widening what counts as "closed".
@@ -434,14 +434,14 @@ def assert_p0_ancestry_closed(out: str) -> None:
     and only a sign-off / terminal hand-off / stage-5 attestation ancestor is
     held to full PASS (`_blocks_when_vacuous`). D1 is none of those and cannot
     become one without a flow change far larger than this file. The predicate is
-    imported from `_flow_verdict_tiers`, which exists precisely so this
+    imported from `verdict`, which exists precisely so this
     classification is not re-enumerated per consumer and so a tier invented
     tomorrow is adjudicated without anyone remembering to come here.
     """
     # Function-local: `programs/` is on `sys.path` via conftest, and a helper
     # this file's other 30-odd tests do not use should not be able to error the
     # whole module at collection time if that ever stops being true.
-    import _flow_verdict_tiers as _T
+    import verdict as _T
 
     m = re.search(r"^\s*\S*\s*\[([\w-]+)\s*\] Step\s+D1:", out, re.M)
     assert m, f"precondition: step D1 must appear in the report:\n{out}"
@@ -449,7 +449,7 @@ def assert_p0_ancestry_closed(out: str) -> None:
     status = _LABEL_TO_PRODUCER_STATUS.get(label, label)
     assert _T.normalize(status) in _T.PRODUCER_STATUSES, (
         f"precondition NOT DETERMINED: the step listing rendered D1 as "
-        f"{label!r}, which is neither one of `_flow_verdict_tiers."
+        f"{label!r}, which is neither one of `verdict."
         f"PRODUCER_STATUSES` nor a rendering this file knows how to translate. "
         f"A precondition that cannot classify the word cannot say the chain is "
         f"closed, so it refuses instead of guessing. Add the rendering to "
@@ -791,7 +791,7 @@ def test_the_p0_ancestry_precondition_refuses_a_word_it_cannot_classify():
     """A precondition that cannot classify the verdict word has NOT looked, so
     it must refuse rather than fall through to "not MISSING, therefore closed".
     Planted word, no gate run — the point is the classification, and
-    `_flow_verdict_tiers` is where a real new word gets its home."""
+    `verdict` is where a real new word gets its home."""
     planted = "  ? [MOSTLY-FINE      ] Step D1: Phase 1 Doc Extraction  (stage_phase1)\n"
     with pytest.raises(AssertionError) as exc:
         assert_p0_ancestry_closed(planted)

@@ -140,7 +140,7 @@ def test_a_vacuous_signoff_makes_the_RUN_fail(tmp_path):
 
 def test_the_established_waiver_states_are_untouched(tmp_path):
     """LOAD-BEARING, and the second defect the first attempt had. Deriving the
-    answer from `_flow_verdict_tiers` marks bare SKIP and ENV_UNAVAILABLE as
+    answer from `verdict` marks bare SKIP and ENV_UNAVAILABLE as
     qualified done-claims too — both long-established PASS_WITH_WAIVERS states
     HERE. StepResult.status is a different vocabulary from the flow-compliance
     producer's, and borrowing a classifier across two vocabularies is how a fix

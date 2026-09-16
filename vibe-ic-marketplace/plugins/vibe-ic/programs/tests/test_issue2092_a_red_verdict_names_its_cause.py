@@ -37,7 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import _flow_verdict_tiers as _T  # noqa: E402
+import verdict as _T  # noqa: E402
 import flow_compliance_check as F  # noqa: E402
 
 
@@ -119,7 +119,7 @@ def test_a_gating_ordering_violation_is_a_cause_on_its_own():
 def test_a_self_skipped_signoff_step_is_a_cause_on_its_own():
     """THE FIFTH SOURCE, and it wears an EXCUSED word. `ok` is false when
     `oss_blocked_skipped` is non-empty, and those rows are SKIPPED-CONDITION —
-    which `_flow_verdict_tiers` puts in EXCUSED, not NON_GREEN. So this run is
+    which `verdict` puts in EXCUSED, not NON_GREEN. So this run is
     red with no failed gate, no non-green step and no failure line."""
     class _R:
         id, name = "DT1", "Transition-delay-fault ATPG"
@@ -137,10 +137,10 @@ def test_a_self_skipped_signoff_step_is_a_cause_on_its_own():
 #: input added later has no entry here and reddens this row.
 _RED_INPUTS = {
     # `ok = ...` — the statuses
-    "failing": "status FAIL is in _flow_verdict_tiers.NON_GREEN",
-    "missing": "status MISSING is in _flow_verdict_tiers.NON_GREEN",
+    "failing": "status FAIL is in verdict.NON_GREEN",
+    "missing": "status MISSING is in verdict.NON_GREEN",
     "setup_required_skipped":
-        "status SKIPPED-SETUP-REQUIRED is in _flow_verdict_tiers.NON_GREEN",
+        "status SKIPPED-SETUP-REQUIRED is in verdict.NON_GREEN",
     # `ok = ...` — the one that is NOT a status
     "oss_blocked_skipped": "self_skipped_signoff_steps",
     # `forced_fail = True` — the lists
@@ -204,9 +204,9 @@ def test_a_refusal_names_nothing_on_purpose_and_says_not_measured():
 
 
 def test_the_non_green_tiers_are_read_from_the_module_that_owns_them():
-    """DERIVED, not a literal. A tier added to `_flow_verdict_tiers.NON_GREEN`
+    """DERIVED, not a literal. A tier added to `verdict.NON_GREEN`
     becomes a cause the day it is added, not the day someone remembers."""
-    import _flow_verdict_tiers as tiers
+    import verdict as tiers
     for word in tiers.NON_GREEN:
         c = F.verdict_causes("FAIL", [], [_step(1, word)], [], [])
         assert c["names_its_cause"] is True, word
@@ -214,7 +214,7 @@ def test_the_non_green_tiers_are_read_from_the_module_that_owns_them():
 
 
 def test_an_excused_step_is_never_counted_as_a_cause():
-    import _flow_verdict_tiers as tiers
+    import verdict as tiers
     for word in tiers.EXCUSED:
         c = F.verdict_causes("FAIL", [], [_step(1, word)], [], [])
         assert c["non_green_steps"] == [], word

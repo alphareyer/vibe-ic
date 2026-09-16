@@ -276,7 +276,7 @@ def test_a_green_run_names_no_cause():
 
 @pytest.mark.parametrize("d", list(V.Disclosure))
 def test_a_disclosure_never_moves_a_verdict(d):
-    """The inversion `_flow_verdict_tiers` recorded — a tree that DISCLOSED its
+    """The inversion `verdict` recorded — a tree that DISCLOSED its
     content came from a library default scored below one that said nothing —
     is not expressible any more."""
     plain = V.StepVerdict.pass_("14")

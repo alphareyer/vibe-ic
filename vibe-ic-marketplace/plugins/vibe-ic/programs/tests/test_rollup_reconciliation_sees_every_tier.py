@@ -22,7 +22,7 @@ A disagreement in those tiers was therefore reported as AGREEMENT, and the
 introduced *precisely* to say "this is NOT a pass", and the reconciliation could
 not see it.
 
-``_flow_verdict_tiers.PRODUCER_STATUSES`` is the authoritative vocabulary and
+``verdict.PRODUCER_STATUSES`` is the authoritative vocabulary and
 already carries an anti-drift test — "a word added there without a home below is
 a test failure, not a silent escape". That protection never reached this map,
 because the map was a COPY. The repair derives it instead.
@@ -46,7 +46,7 @@ PROGRAMS = plugin_path() / "programs"
 sys.path.insert(0, str(PROGRAMS))
 
 frg = pytest.importorskip("final_report_generate")
-tiers = pytest.importorskip("_flow_verdict_tiers")
+tiers = pytest.importorskip("verdict")
 
 
 def test_every_producer_status_resolves_to_a_bucket():

@@ -24,7 +24,7 @@ dependency could be marked down. A tree whose analog steps simply FAILED made no
 claim to adjudicate and could not be. Doing nothing was structurally cheaper
 than doing something badly and saying so.
 
-`_flow_verdict_tiers`' own module docstring records this as the flow-POLICY
+`verdict`' own module docstring records this as the flow-POLICY
 question it deliberately left open and called "the owner's to settle".
 
 OWNER POLICY (2026-08-02), vibe-ic#634: THE ANALOG TRACK COUNTS TOWARD
@@ -65,7 +65,7 @@ PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import _flow_verdict_tiers as TIERS                              # noqa: E402
+import verdict as TIERS                              # noqa: E402
 import test_silence_is_not_cheaper_than_disclosure as THIN       # noqa: E402
 import test_two_gates_over_one_artefact_cannot_disagree as FULL  # noqa: E402
 

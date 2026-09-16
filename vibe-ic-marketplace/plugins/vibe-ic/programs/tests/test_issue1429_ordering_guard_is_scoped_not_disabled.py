@@ -373,7 +373,7 @@ def test_the_scope_boundary_is_the_real_flows_own_boundary():
     onto the analog track, or if `P0` stops being a step id.
     """
     import yaml
-    import _flow_verdict_tiers as tiers
+    import verdict as tiers
     import _hostpaths
 
     flow = _hostpaths.require_repo(
