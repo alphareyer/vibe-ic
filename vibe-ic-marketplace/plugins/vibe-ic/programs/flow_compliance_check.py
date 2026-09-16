@@ -18389,7 +18389,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     # does not have to be either.
     if not ok or forced_fail:
         overall = _T.Verdict.FAIL.value
-    elif counts[_T.Verdict.NOT_MEASURED.value] > 0:
+    elif any(r.status == _T.Verdict.NOT_MEASURED.value for r in scoped):
+        # OVER `scoped`, NOT over `counts`. `counts` is the census of EVERY
+        # row; `scoped` is what this invocation's verdict is ABOUT, and under
+        # `--phase 2 --strict-structural` that is the P0 umbrella plus the
+        # analog track by design ("step-level MISSING/FAIL for steps 1-6 is
+        # REPORTED but not factored into Overall"). Reading the census here
+        # would let an out-of-scope step decide a scoped verdict — measured:
+        # one vacuous step-level row turned a structurally clean phase-2 run
+        # non-green, which is the exact complaint Wave 21 was written for.
         overall = _T.Verdict.NOT_MEASURED.value
     elif counts[_T.Verdict.PASS_WITH_WAIVERS.value] > 0 or p0_subgate_waivers > 0:
         # vibe-ic#924 — the second disjunct is what the removed addend was

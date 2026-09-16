@@ -827,12 +827,17 @@ def test_strict_structural_does_not_excuse_a_broken_p0_ancestry(
     rc = mod.main([str(project), "--phase", "2", "--strict-structural"])
     out = capsys.readouterr().out
     assert rc == 1, out
-    assert "Overall: FAIL" in out, out
+    # R-0915-85 — the run is NOT_MEASURED, not FAIL, and that is the STRONGER
+    # statement about this fixture: the P0 umbrella reports `0 of 246 checkers
+    # returned a verdict`, so nothing about the structural population was
+    # measured at all. Calling that FAIL would assert a defect nobody found.
+    # The PROPERTY this test is named for is unchanged and is asserted below:
+    # strict-structural does not EXCUSE the broken ancestry — the run is
+    # non-green (rc 1) and the umbrella says why in its own reason.
+    assert "Overall: NOT_MEASURED" in out, out
+    assert re.search(r"Step P0:.*\(no_population\)", out), out
     assert "Step-execution ordering violations" in out, out
-    # R-0915-85 — the guard now reports the violation over P0 as a NOTE when
-    # the dependency is outside this run's verdict scope, which is the
-    # informational tier it has always had; the GATING line still names P0.
-    assert re.search(r"P0.*marked done while dependency", out), out
+    assert re.search(r"marked done while dependency", out), out
 
 
 def test_strict_step_artifacts_includes_step_gates(tmp_path,
