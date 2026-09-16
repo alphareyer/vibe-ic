@@ -639,3 +639,64 @@ def test_nothing_but_check_can_put_a_name_in_the_reentrancy_guard():
                       None)
             writers.add((fn.name if fn else "<module>", n.func.attr))
     assert writers == {("check", "add"), ("check", "discard")}, writers
+
+
+# ── the predicate's own measurement, re-derived ───────────────────────────
+
+def _clause_population(pred):
+    """Every `programs/*.py` function for which `pred(fn, grammar_names)` holds."""
+    out = []
+    prog = PROG
+    for p in sorted(prog.glob("*.py")):
+        if p.stem.startswith("test_") or p.stem == "instrument_calibration":
+            continue
+        try:
+            tree = ast.parse(p.read_text(errors="replace"))
+        except (OSError, SyntaxError):
+            continue
+        gn = C._grammar_names(tree)
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and pred(n, gn):
+                out.append(f"{p.stem}::{n.name}")
+    return out
+
+
+def test_the_predicates_own_measurement_is_re_derived():
+    """`scan`'s docstring argues from four populations. They are MEASURED here.
+
+    Not pinned to the integers the docstring quotes — those are a DATED
+    OBSERVATION and every landing moves them, which would make this test
+    measure the landing schedule. What is pinned is the ARGUMENT: the grammar
+    clause is the small one, the record-verdict and status clauses are each an
+    order of magnitude larger, and that is why the population is the CHANNEL and
+    not the literal reading of "reads a tool artefact AND writes a status".
+    """
+    grammar = _clause_population(lambda n, gn: C._matches_grammar(n, gn))
+    record = _clause_population(lambda n, gn: C._reads_record_verdict(n))
+    status = _clause_population(lambda n, gn: C._emits_status(n))
+    both = [n for n in grammar if n in set(status)]
+    assert len(grammar) < 60, len(grammar)
+    assert len(record) > 10 * len(grammar), (len(record), len(grammar))
+    assert len(status) > 5 * len(record), (len(status), len(record))
+    assert len(both) < len(grammar), (len(both), len(grammar))
+    assert sorted(grammar) == C.scan(PLUGIN), (
+        "scan() is no longer the grammar clause alone")
+
+
+def test_adding_the_status_clause_would_drop_the_instrument_r0915_75_is_about():
+    """The measurement that decided the predicate, kept as a falsifier.
+
+    `sdf_gate_sim::sdf_annotation_census` returns three counts and lets its
+    caller name the verdict. A predicate that also demanded a status word in the
+    function's own body would not name it — and it is the instrument that
+    published nine PASSes over a simulation with 0 delays annotated.
+    """
+    tree = ast.parse((PROG / "sdf_gate_sim.py").read_text(errors="replace"))
+    gn = C._grammar_names(tree)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef)
+              and n.name == "sdf_annotation_census")
+    assert C._matches_grammar(fn, gn), "the grammar clause no longer names it"
+    assert not C._emits_status(fn), (
+        "sdf_annotation_census now emits a status word in its own body — "
+        "re-measure the predicate argument in scan()'s docstring")

@@ -134,7 +134,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -1343,6 +1342,12 @@ def scan(root: Path) -> List[str]:
     return sorted(set(found))
 
 
+def _module_present(root: Path, name: str) -> bool:
+    """Does this subject carry `programs/<module>.py` for `module::function`?"""
+    module, _, _fn = name.partition("::")
+    return (root / "programs" / f"{module}.py").is_file()
+
+
 def _defines_function(root: Path, name: str) -> bool:
     module, _, fn = name.partition("::")
     src = root / "programs" / f"{module}.py"
@@ -1368,9 +1373,17 @@ def _ratchet_verdict(population: List[str], root: Path) -> int:
     """
     known = set(INSTRUMENTS) | set(_UNCALIBRATED_REGISTER)
     new = [n for n in population if n not in known]
-    stale = [n for n in _UNCALIBRATED_REGISTER
+    # THE REGISTER SPEAKS ONLY ABOUT MODULES THIS SUBJECT CARRIES. A subject
+    # without `programs/<module>.py` at all is not a tree the entry is about —
+    # it is a different tree — and reporting eleven "does not exist" findings
+    # over one would bury the finding that matters. When the module IS here,
+    # both directions are live: the function gone is an entry that outlived its
+    # instrument, and the function present but no longer named by the scan is an
+    # entry whose offender was fixed without deleting its line.
+    here = [n for n in _UNCALIBRATED_REGISTER if _module_present(root, n)]
+    stale = [n for n in here
              if _defines_function(root, n) and n not in population]
-    gone = [n for n in _UNCALIBRATED_REGISTER if not _defines_function(root, n)]
+    gone = [n for n in here if not _defines_function(root, n)]
     rc = 0
     if new:
         rc = 1
