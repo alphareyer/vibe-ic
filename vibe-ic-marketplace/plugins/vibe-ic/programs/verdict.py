@@ -699,6 +699,81 @@ def run_verdict_record(steps: Sequence[StepVerdict]) -> Dict[str, Any]:
     }
 
 
+
+# ── the predicates consumers used to keep as their own lists ─────────────
+#
+# `_flow_verdict_tiers` (vibe-ic#634) existed because the PRODUCER and the
+# CONSUMER of a step status each kept a list of which words meant "done", and
+# the lists drifted: a step wearing `STRUCTURE-ONLY` was counted as done by the
+# producer's arithmetic and was invisible to the ordering guard. Its answer was
+# to DERIVE done-ness by subtraction from two negative sets, so a tier invented
+# tomorrow would be adjudicated without anyone remembering to register it.
+#
+# That was the right answer to a vocabulary that could grow. This one cannot:
+# `parse` refuses a sixth word. So the derivation goes too, and each predicate
+# below is a one-line statement over the five. The MODULE is gone, not moved —
+# a second classifier beside this one is the 疊床架屋 the ruling forbids.
+
+#: The whole vocabulary, for a consumer that wants to assert against it.
+#: Replaces `_flow_verdict_tiers.PRODUCER_STATUSES`, which was a hand-pinned
+#: list of the producer's words kept in sync by a test.
+PRODUCER_STATUSES = frozenset(v.value for v in Verdict)
+
+#: The step is not claimed as done and is not held against the run. Replaces
+#: `EXCUSED`, which held seven spellings of "skipped" plus two of "deferred".
+EXCUSED = frozenset({Verdict.NOT_APPLICABLE.value})
+
+#: The step is a defect or a hole — what keeps a run from being green.
+#: Replaces `NON_GREEN`.
+NON_GREEN = frozenset({Verdict.FAIL.value, Verdict.NOT_MEASURED.value})
+
+#: The one word that satisfies a predecessor outright.
+FULL_PASS = Verdict.PASS.value
+
+
+def is_excused(status: Any) -> bool:
+    """Out of the verdict's scope because the INPUT said so."""
+    return parse(status) is Verdict.NOT_APPLICABLE
+
+
+def is_non_green(status: Any) -> bool:
+    """Keeps the run off a pass: a measured defect, or a hole."""
+    return parse(status) in (Verdict.FAIL, Verdict.NOT_MEASURED)
+
+
+def is_full_pass(status: Any) -> bool:
+    return parse(status) is Verdict.PASS
+
+
+def is_done_claim(status: Any) -> bool:
+    """The step claims it delivered a result about the design.
+
+    Derived by subtraction in `_flow_verdict_tiers` ("neither excused nor
+    non-green"); stated directly here, and the two agree on every word that
+    still exists. What changed is that `INCOMPLETE`, `NOT-MEASURED`,
+    `VACUOUS-PASS` and `STRUCTURE-ONLY` USED to answer True to this — they were
+    in neither negative set — so a step that had measured nothing was
+    adjudicated as claiming to be done. Two of those are now
+    `NOT_MEASURED` and answer False, which is the r26 correction reaching the
+    ordering guard as well as the roll-up.
+    """
+    return parse(status) in (Verdict.PASS, Verdict.PASS_WITH_WAIVERS)
+
+
+def is_qualified_done(status: Any) -> bool:
+    """A done-claim that is not a full pass: rows remain open."""
+    return parse(status) is Verdict.PASS_WITH_WAIVERS
+
+
+def says_nothing_was_measured(status: Any) -> bool:
+    """Replaces `NO_VERDICT_IN_SCOPE = {INCOMPLETE, NOT-MEASURED}`."""
+    return parse(status) is Verdict.NOT_MEASURED
+
+
+def done_claims_in(statuses: Iterable[Any]) -> set:
+    return {parse(s).value for s in statuses if is_done_claim(s)}
+
+
 # ── which TRACK a step is on, and whether it reaches the verdict ─────────
 #
 # Moved here verbatim in intent from `_flow_verdict_tiers`, which this module
