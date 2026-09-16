@@ -199,3 +199,66 @@ def test_a_transcript_with_neither_marker_yields_no_verdict():
 def test_the_shared_oracle_marker_still_wins_when_present():
     v = SG.parse_l10_case_stdout("ORACLE_TB_DONE pass=7/7\n")
     assert v["verdict"] == "PASS" and v["total"] == 7
+
+
+# ------------------------- R-0915-67(2): a killed case is named as killed
+
+def test_the_sim_exit_code_is_kept_not_discarded():
+    """It used to be thrown away, and that is why a killed case and a case that
+    merely printed nothing were the same finding."""
+    src = (PROG / "sdf_gate_sim.py").read_text()
+    i = src.index("sr = _docker(container, rr, timeout=900)")
+    # bounded by the END OF THE LOOP, not a byte count and not the first
+    # `rows.append` (which belongs to the early `except` branch above).
+    window = src[i:src.index("\n    meta = {", i)]
+    assert 'r"RC=(\\d+)"' in window or 'RC=(\\d+)' in window
+    assert 'row["sim_rc"] = _rc' in window
+
+
+def test_a_truncated_transcript_is_named_as_a_killed_process():
+    """BEHAVIOURAL, not a text scan: an earlier version of this test asserted
+    the source contained the words, and it survived setting `_truncated = False`
+    — a dead guard. It now calls the namer."""
+    d = SG.name_unverdicted_case(rc=0, size=14241792, truncated=True)
+    assert "STOPPED mid-write" in d
+    assert "4096-byte boundary" in d          # 14241792 == 3477 * 4096
+    assert "killed process" in d
+
+
+def test_an_unaligned_truncation_is_still_named_killed_without_the_boundary():
+    d = SG.name_unverdicted_case(rc=0, size=14037595, truncated=True)
+    assert "STOPPED mid-write" in d
+    assert "4096-byte boundary" not in d
+
+def test_a_nonzero_rc_without_a_verdict_is_distinguished_from_silence():
+    """Three outcomes, three sentences — behavioural."""
+    killed  = SG.name_unverdicted_case(rc=137, size=14241792, truncated=True)
+    errored = SG.name_unverdicted_case(rc=1,   size=500,      truncated=False)
+    silent  = SG.name_unverdicted_case(rc=0,   size=500,      truncated=False)
+    assert "STOPPED mid-write" in killed
+    assert "exited rc=1" in errored and "STOPPED" not in errored
+    assert "no verdict line at gate level" in silent and "rc=" not in silent
+    assert len({killed, errored, silent}) == 3
+
+
+def test_none_of_this_turns_a_killed_case_into_a_pass():
+    """Naming WHY it did not finish must never change the verdict."""
+    for rc, size, trunc in ((137, 14241792, True), (1, 500, False),
+                            (0, 500, False), (None, 0, False)):
+        d = SG.name_unverdicted_case(rc=rc, size=size, truncated=trunc)
+        assert "PASS" not in d.upper().replace("PASS.", "")
+        assert d.strip() != ""
+
+def test_none_of_this_turns_a_killed_case_into_a_pass():
+    """The whole point of the guard: naming WHY it did not finish must not
+    change the verdict, which stays absent."""
+    src = (PROG / "sdf_gate_sim.py").read_text()
+    i = src.index("sr = _docker(container, rr, timeout=900)")
+    # bounded by the END OF THE LOOP, not a byte count and not the first
+    # `rows.append` (which belongs to the early `except` branch above).
+    window = src[i:src.index("\n    meta = {", i)]
+    # every branch below sits under `if parsed.get("verdict") is None:`
+    j = window.index('if parsed.get("verdict") is None:')
+    tail = window[j:]
+    for bad in ('verdict"] = "PASS"', "verdict'] = 'PASS'"):
+        assert bad not in tail
