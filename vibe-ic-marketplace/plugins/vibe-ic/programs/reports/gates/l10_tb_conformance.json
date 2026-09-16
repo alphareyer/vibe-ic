@@ -1,7 +1,20 @@
 {
   "total": 1,
   "ok": 0,
-  "fail": 1,
+  "fail": 0,
+  "not_executed": 1,
+  "sim_executed": false,
+  "execution_record": {
+    "available": false,
+    "reason": "no_execution_record",
+    "path": null,
+    "producer": null,
+    "schema_ok": false,
+    "l10_binding_ok": false,
+    "rows_declared": 0,
+    "malformed_rows": [],
+    "unclaimed_rows": []
+  },
   "waived": 0,
   "checklist_gaps": 0,
   "capability_gap": null,
@@ -23,7 +36,8 @@
       "functional",
       "functional_test",
       "functional_vector",
-      "instruction_test"
+      "instruction_test",
+      "known_answer_vector"
     ],
     "in_scaffold_scope": 0,
     "out_of_scaffold_scope": 1,
@@ -35,7 +49,7 @@
   "sim_tree_drives_dut": false,
   "vacuous_sim_tree": true,
   "vacuous_testbench_files": [
-    "/tmp/pytest-of-reyerchu/pytest-21619/test_noleak_a_mislabelled_digi0/p/phase2/stage1/sim/tb/tb_dummy.v"
+    "/tmp/pytest-of-reyerchu/pytest-1318/test_noleak_a_mislabelled_digi0/p/phase2/stage1/sim/tb/tb_dummy.v"
   ],
   "results": [
     {
@@ -45,10 +59,12 @@
       "producer_scaffold_scope": "out",
       "oracle_resolution": "no_l3:no readable L3 in phase1/generated_docs",
       "evidence": [
-        "NO PRODUCER: kind=verification_intent is outside the TB producer's scaffold scope (cpu_functional, functional, functional_test, functional_vector, instruction_test); this gate grades every L10 case, so the case FAILs — no testbench was written for it and none was fabricated (ORGANIC #761)"
+        "NOT_EXECUTED — no per-case execution evidence (no_execution_record)",
+        "NO PRODUCER: kind=verification_intent is outside the TB producer's scaffold scope (cpu_functional, functional, functional_test, functional_vector, instruction_test, known_answer_vector); the case is WAIVED-DEFERRED (None) for want of an oracle, but no testbench was written for it either and the waiver does not supply one (ORGANIC #761)"
       ],
       "pass": false,
-      "status": "fail",
+      "status": "NOT_EXECUTED",
+      "sim_executed": false,
       "waived": false,
       "review_required": false,
       "capability_gap": null
