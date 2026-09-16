@@ -104,6 +104,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import _path_layout as _pl
+import analog_incremental_decimator as _inc
 
 GATE = "analog_adc_enob_corner_check"
 
@@ -509,6 +510,150 @@ def sndr_db_from_transient(deck_text: str, dump_text: str,
     }
 
 
+#: The incremental path's own refusals. An incremental converter's decoded
+#: stream is `window` times shorter than its bitstream, so the cycle floor
+#: bites there first and the number that would come back is a spectrum over
+#: two or three bins. Refused by name, like every other precondition here.
+_INC_TOO_FEW_CYCLES = (
+    "decimated_record_holds_fewer_than_{n}_tone_cycles: an incremental "
+    "converter's decoded stream is one sample per conversion window, so the "
+    "record has to hold that many cycles AFTER decimation")
+_INC_NO_CLOCK_CARD = (
+    "sample_clock_card_not_readable: the incremental decode has to start on "
+    "the clock edge the window counter starts on, and no single top-level "
+    "pulse source names it")
+_INC_SHORT_RECORD = "record_shorter_than_one_conversion_window"
+
+
+def sample_clock_card(deck_text: str) -> Optional[Tuple[float, float, float]]:
+    """`(first_edge_s, period_s, high_v)` from the ONE top-level pulse source,
+    or None when the deck names none or more than one.
+
+    `sample_clock_hz` already reads the period off this card; the incremental
+    decode needs the DELAY too, because the window counter powers up in its
+    reset state and is clocked by this same edge — so the deck's own `td` is
+    where conversion window 0 begins. Deriving it rather than assuming t=0 is
+    the difference between windows aligned to the resets and windows that
+    straddle two conversions."""
+    cards = []
+    for body in _PULSE_RE.findall(deck_text or ""):
+        f = body.split()
+        if len(f) < 7:
+            continue
+        v2, td, per = _si(f[1]), _si(f[2]), _si(f[6])
+        if per and per > 0 and td is not None and v2 is not None:
+            cards.append((td, per, v2))
+    return cards[0] if len(cards) == 1 else None
+
+
+def sndr_db_incremental(deck_text: str, dump_text: str, column: int = 1
+                        ) -> Tuple[Optional[float], dict]:
+    """SNDR in dB from the MATCHED DECIMATION of one incremental corner, or
+    (None, {"reason": ...}).
+
+    The instrument the converter's declared conversion mode calls for. An
+    incremental converter resets and accumulates per conversion window BY
+    DESIGN and earns its resolution from the matched decode of each window; an
+    FFT of its raw bitstream measures a modulator that is not there and
+    UNDER-READS it (vibe-ic#2321, #2322).
+
+    Every input is read off THE DECK THAT RAN — the decode declaration the
+    producer stamped on it, the clock card the counter starts on, the tone the
+    deck drives — for the same reason `sndr_db_from_transient` reads the band
+    off the deck: a document the deck did not honour puts the measurement
+    somewhere the record never was.
+    """
+    decl, why = _inc.read_stamp(deck_text)
+    if decl is None:
+        return None, why
+    if decl.get("mode") != _inc.MODE_INCREMENTAL:
+        return None, {"reason": "deck_declares_a_free_running_converter",
+                      "mode": decl.get("mode")}
+    m = _SIN_RE.search(deck_text or "")
+    if not m:
+        return None, {"reason": _UNMEASURABLE_NO_TONE}
+    f_sig = _si(m.group(3))
+    if not f_sig or f_sig <= 0:
+        return None, {"reason": _UNMEASURABLE_NO_TONE}
+    card = sample_clock_card(deck_text)
+    if card is None:
+        return None, {"reason": _INC_NO_CLOCK_CARD}
+    td, period, v_high = card
+
+    times: List[float] = []
+    vals: List[float] = []
+    for line in (dump_text or "").splitlines():
+        parts = line.split()
+        if len(parts) <= column:
+            continue
+        try:
+            t = float(parts[0])
+            v = float(parts[column])
+        except ValueError:
+            continue
+        times.append(t)
+        vals.append(v)
+    if len(times) < 64:
+        return None, {"reason": _UNMEASURABLE_NO_ROWS, "rows": len(times)}
+
+    bits, bmeta = _inc.sample_decisions(times, vals, td, period, v_high / 2.0)
+    if not bits:
+        return None, bmeta
+    window = int(decl["window_clocks"])
+    if len(bits) < 2 * window:
+        return None, {"reason": _INC_SHORT_RECORD, "clocks": len(bits),
+                      "window": window}
+    samples, dmeta = _inc.decimate(
+        bits, window, order=int(decl["order"]), coeff=float(decl["coeff"]),
+        feedback_delay=int(decl["feedback_delay_clocks"]))
+    if samples is None:
+        return None, dmeta
+
+    # THE FIRST WINDOW IS NOT A CONVERSION. The counter's power-up state is not
+    # a declared reset instant, so its first boundary can fall anywhere inside
+    # that window — the emitted deck's own condition line says exactly this.
+    # Dropped rather than measured, because a window that is part of two
+    # conversions is not one.
+    samples = samples[1:]
+    f_dec = 1.0 / (window * period)
+    cycles = int(len(samples) * f_sig / f_dec)
+    if cycles < _MIN_SIGNAL_CYCLES:
+        return None, {"reason": _INC_TOO_FEW_CYCLES.format(
+            n=_MIN_SIGNAL_CYCLES), "signal_hz": f_sig,
+            "decimated_rate_hz": f_dec, "windows_available": len(samples),
+            "cycles_available": cycles, "window_clocks": window}
+    n = int(round(cycles * f_dec / f_sig))
+    if n > len(samples):
+        return None, {"reason": _INC_TOO_FEW_CYCLES.format(
+            n=_MIN_SIGNAL_CYCLES), "windows_available": len(samples),
+            "windows_required": n}
+    grid = samples[-n:]
+    top = n // 2 - 1
+    if top < cycles + 1:
+        return None, {"reason": _UNMEASURABLE_OUT_OF_BAND,
+                      "signal_bin": cycles, "band_edge_bin": top,
+                      "decimated_rate_hz": f_dec, "signal_hz": f_sig}
+    power = _in_band_power(grid, top)
+    sig_bins = {b for b in (cycles - 1, cycles, cycles + 1) if 1 <= b <= top}
+    p_sig = sum(power[b - 1] for b in sig_bins)
+    p_noise = sum(power) - p_sig
+    if p_sig <= 0 or p_noise <= 0:
+        return None, {"reason": _UNMEASURABLE_NO_ROWS, "rows": len(times)}
+    return 10.0 * math.log10(p_sig / p_noise), {
+        "method": "matched_incremental_decimation_then_dft",
+        "conversion_mode": _inc.MODE_INCREMENTAL,
+        "window_clocks": window, "order": decl["order"],
+        "coeff": decl["coeff"],
+        "feedback_delay_clocks": decl["feedback_delay_clocks"],
+        "signal_hz": f_sig, "signal_bin": cycles, "cycles": cycles,
+        "decimated_rate_hz": f_dec, "windows_decoded": dmeta["windows"],
+        "windows_graded": n, "clocks_sampled": bmeta["clocks"],
+        "first_clock_s": td, "sample_clock_hz": 1.0 / period,
+        "rows_read": len(times),
+        "grid_rule": "one_sample_per_conversion_window_matched_decode",
+    }
+
+
 def _measure_corner_from_transient(block_dir: Path, project: Path,
                                    corner: dict, osr: float = 1.0
                                    ) -> Tuple[Optional[float], dict]:
@@ -537,8 +682,16 @@ def _measure_corner_from_transient(block_dir: Path, project: Path,
     dump = deck.parent / Path(md.group(1)).name
     if not dump.is_file():
         return None, {"reason": _UNMEASURABLE_NO_DUMP, "declared": md.group(1)}
-    sndr, meta = sndr_db_from_transient(
-        text, dump.read_text(encoding="utf-8", errors="replace"), osr=osr)
+    dump_text = dump.read_text(encoding="utf-8", errors="replace")
+    # THE INSTRUMENT FOLLOWS THE DECLARED CONVERSION MODE. A deck the producer
+    # stamped with an incremental decode declaration is decoded, not FFT'd:
+    # reading an incremental converter with a free-running converter's
+    # instrument under-reads it, and the deck is where the design says which
+    # it is. No stamp => the FFT path, byte-for-byte as before.
+    if _inc.read_stamp(text)[0] is not None:
+        sndr, meta = sndr_db_incremental(text, dump_text)
+    else:
+        sndr, meta = sndr_db_from_transient(text, dump_text, osr=osr)
     if sndr is None:
         return None, meta
     meta["sndr_db"] = round(sndr, 3)

@@ -1315,6 +1315,44 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
         "constants": {
             "w_cap": 10.0,
             "w_res": 0.35,
+            # HOW MANY CLOCKS BETWEEN A DECISION AND ITS CHARGE, MEASURED
+            # by regression on this entry's own emitted loop (lane icadc,
+            # F163). It is the one number a matched incremental DECODE cannot
+            # derive from the bitstream, and a decoder that assumed it would
+            # be guessing about the circuit this file emits — so this file,
+            # which emits it, states it.
+            #
+            # ONE. Fitted over 2650 clocks of the ideal-element harness of
+            # this exact topology, dropping three clocks either side of every
+            # reset, against the decision sampled in transfer phase n:
+            #
+            #   d(vo1)  = +0.24893*(vin - vcm) + 0.24962*(ndac[n-1] - vcm)
+            #                                  + 0.00006*(ndac[n]   - vcm)
+            #   d(vint) = +0.24937*(vo1 - vcm) + 0.24960*(ndac[n-1] - vcm)
+            #                                  + 0.00004*(ndac[n]   - vcm)
+            #
+            # rms residual 4.2e-5 and 3.0e-5. Three things at once: the
+            # realised coefficients ARE the declared 0.2499 on both stages;
+            # the DAC reaches BOTH integrators with the same weight, which is
+            # what `analog_incremental_decimator`'s DAC-injected weights
+            # assume; and the charge transferred in step n carries
+            # `ndac[n-1]`, with ZERO on `ndac[n]`.
+            #
+            # WHY ONE AND NOT ZERO, which is what the phase diagram looks like
+            # at a glance: the feedback branch SAMPLES its reference during
+            # clk-HIGH and dumps it during clk-LOW, so the DAC voltage that
+            # ends up on the summing node is the one standing during the
+            # SAMPLING phase — the decision latched at the PREVIOUS falling
+            # edge. `bit_out` and `ndac` do step together at each falling
+            # edge; that is the transition, not the charge.
+            #
+            # CONFIRMED against a pure-arithmetic loop built both ways and
+            # decoded both ways (no simulator): a loop that realises 1 is
+            # decoded by delay-1 weights to an offset of +0.19992 against a
+            # true +0.20000, and by delay-0 weights to +0.20146 — and a loop
+            # that realises 0 inverts the preference, 2.5x on the residual.
+            # The decode has to match the loop, and this is the loop.
+            "feedback_delay_clocks": 1.0,
             # Boltzmann's constant times 300 K. A UNIVERSAL physical
             # constant — the same on every process and in every design —
             # which is why it is a library constant and not a registry read.
