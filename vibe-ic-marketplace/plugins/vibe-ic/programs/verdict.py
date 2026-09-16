@@ -256,16 +256,27 @@ class Disclosure(str, enum.Enum):
     """
 
     #: The step ran and examined nothing about THIS design — the artefact it
-    #: audits was absent, or its clauses were all predicates. Replaces
-    #: `VACUOUS_PASS`.
+    #: audits was absent, or its clauses were all predicates. Disclosed BESIDE
+    #: `NOT_MEASURED(no_population)`, which is the verdict such a step wears:
+    #: the old `VACUOUS_PASS` spelled both halves into one word, and the half
+    #: that mattered (nothing was measured) kept being read as the half that
+    #: did not (it passed). Both halves are here, each in its own field.
     VACUITY = "vacuity"
 
     #: Some clauses examined the design and some examined nothing. Replaces
-    #: `PARTIALLY-VACUOUS`.
+    #: `PARTIALLY-VACUOUS`. Disclosed beside `PASS`, because part of the
+    #: population WAS examined and returned a verdict — which is precisely the
+    #: distinction #2063 split out of `INCOMPLETE` and could not then express.
     PARTIAL_VACUITY = "partial_vacuity"
 
     #: The content examined came from a library default / template rather than
-    #: from the design. Replaces `STRUCTURE-ONLY`.
+    #: from the design. Replaces `STRUCTURE-ONLY` and `PASS_STRUCTURE_ONLY`.
+    #: Disclosed beside `PASS_WITH_WAIVERS`, because every number measured on a
+    #: library default is a number about the default and somebody must come
+    #: back and replace it — which is what a waiver row IS. Note the direction:
+    #: `_flow_verdict_tiers` recorded that a tree DISCLOSING a library default
+    #: scored BELOW one that silently said PASS. It cannot now, because the
+    #: disclosure is not the verdict.
     STRUCTURE_ONLY = "structure_only"
 
     #: The step reports for information and cannot move any verdict. Replaces
@@ -516,6 +527,53 @@ def parse(word: Any) -> Verdict:
         ) from None
 
 
+
+def validate_step_row(row: Any) -> None:
+    """Enforce the five-word contract on a RUNNER's own `StepResult` row.
+
+    The runners keep their own lightweight dataclass (it carries durations,
+    output files and per-step extras this module has no business knowing
+    about), so they call this from `__post_init__` rather than re-deriving the
+    rules. Same rules, one implementation.
+
+    THREE REFUSALS, each naming the defect it prevents, and ONE derivation:
+
+      * a word outside the five             -> `UnknownVerdictWord`
+      * NOT_MEASURED with no `reason_class` -> the undifferentiated bag
+      * NOT_APPLICABLE with no `declared_by`-> the run16 laundering
+
+    and PASS_WITH_WAIVERS with no rows DERIVES one from the step's own name and
+    detail rather than refusing. This is deliberate and is a STRENGTHENING: the
+    old `WAIVED` word required no row at all, so a waived step could reach a
+    published verdict with nothing on any must-close list. Every waived step
+    now produces exactly one row a reviewer can grep for, and a site that knows
+    better still passes its own rows.
+    """
+    status = parse(getattr(row, "status", None))
+    rc = getattr(row, "reason_class", "") or ""
+    if rc:
+        ReasonClass(rc)          # refuses a reason nobody declared
+    for d in (getattr(row, "disclosures", None) or ()):
+        Disclosure(d)
+    name = getattr(row, "name", "") or "<unnamed step>"
+    if status is Verdict.NOT_MEASURED and not rc:
+        raise ValueError(
+            f"{name}: NOT_MEASURED without a reason_class. Every NOT_MEASURED "
+            f"says WHY — pick one of {[r.value for r in ReasonClass]}.")
+    if status is Verdict.NOT_APPLICABLE and not (
+            getattr(row, "declared_by", "") or ""):
+        raise ValueError(
+            f"{name}: NOT_APPLICABLE without declared_by. N/A is a claim about "
+            f"the INPUT and must name the line that makes it; without one the "
+            f"honest word is NOT_MEASURED with a reason_class.")
+    if status is Verdict.PASS_WITH_WAIVERS and not (
+            getattr(row, "waiver_rows", None)
+            or getattr(row, "attribution", "")):
+        row.waiver_rows = [WaiverRow(
+            id=name,
+            reason=(getattr(row, "detail", "") or "")[:400] or
+            "waived with no reason recorded at the site").to_dict()]
+
 # ── THE CASCADE RULE ─────────────────────────────────────────────────────
 
 def cascade_to_dependent(upstream: StepVerdict,
@@ -594,7 +652,7 @@ def review_gate_verdict(step_id: str, name: str, *, inputs_present: bool,
 #: NOT_MEASURED sits ABOVE both passes: a run holding an unmeasured sign-off
 #: step is not a pass, whatever the measured steps say. It sits BELOW FAIL:
 #: a measured defect outranks a hole.
-_RUN_PRECEDENCE: Sequence[Verdict] = (
+RUN_PRECEDENCE: Sequence[Verdict] = (
     Verdict.FAIL,
     Verdict.NOT_MEASURED,
     Verdict.PASS_WITH_WAIVERS,
@@ -615,7 +673,7 @@ def run_verdict(steps: Iterable[StepVerdict]) -> Verdict:
     single most-cited hazard in their own comments.
     """
     worn = {s.verdict for s in steps if s.verdict is not Verdict.NOT_APPLICABLE}
-    for v in _RUN_PRECEDENCE:
+    for v in RUN_PRECEDENCE:
         if v in worn:
             return v
     return Verdict.NOT_MEASURED

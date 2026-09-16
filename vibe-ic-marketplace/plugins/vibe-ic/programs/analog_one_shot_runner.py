@@ -60,6 +60,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import _path_layout as _pl
+import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _analog_a_check_common as _acc
 import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch site
@@ -88,6 +89,22 @@ class StepResult:
     # v1.6.171 (#60 P1-6) — structured extras for deterministic-stub
     # provenance (stub_paths / extraction_strategy / low_confidence).
     extras: Dict[str, Any] = field(default_factory=dict)
+    # ── the structured fields R-0915-85 put beside the verdict ──────────
+    # `status` above is now one of the FIVE words in `programs/verdict.py`, and
+    # every distinction the deleted vocabulary carried lives here. The module's
+    # DESIGN section says why; `_V.StepVerdict` is where the same rules are
+    # enforced for readers. Validated in `__post_init__` below, so a site that
+    # says NOT_MEASURED without a reason — or NOT_APPLICABLE without naming the
+    # input line that declares it — is a loud error where it is written, not a
+    # quiet hole in a published report.
+    reason_class: str = ""
+    declared_by: str = ""
+    waiver_rows: List[Dict[str, str]] = field(default_factory=list)
+    attribution: str = ""
+    disclosures: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        _V.validate_step_row(self)
 
 
 def _preflight_refusal(name: str, block: str):
@@ -95,11 +112,11 @@ def _preflight_refusal(name: str, block: str):
 
     `BLOCKED` carries the same meaning it does in the other three runners: the
     step was NOT attempted because an INPUT could not support it, so NOTHING is
-    known. It is listed in `_aggregate_verdict._FAIL_STATUSES` — without that it
+    known. It is `NOT_MEASURED(input_absent)` in the one vocabulary — which is
     would have fallen through that function's catch-all `return "PASS"` and a
     refusal would have produced a GREEN run, which is the defect class this
     whole pre-flight exists to remove. Measured on this ladder specifically: a
-    refusal is neither FAIL, nor VACUOUS_PASS, nor PASS_STRUCTURE_ONLY, nor
+    refusal is neither FAIL, nor a vacuity disclosure, nor structure-only, nor
     WAIVED/SKIP, so every one of the four tiers above the catch-all would have
     declined it and an all-refused analog track would have scored a clean PASS.
 
@@ -109,13 +126,18 @@ def _preflight_refusal(name: str, block: str):
     """
     def _mk(detail: str, extras: Dict[str, Any]) -> StepResult:
         return StepResult(name, block, _spf.REFUSAL_STATUS, 0.0, detail,
-                          extras=extras)
+                          extras=extras, reason_class=_spf.REFUSAL_REASON_CLASS)
     return _mk
 
 
 # Statuses that must NOT reach a green verdict. `BLOCKED` is `step_preflight`'s
 # refusal status; the rest is this runner's pre-existing FAIL tier, unchanged.
-_FAIL_STATUSES = ("FAIL", _spf.REFUSAL_STATUS)
+#: RETIRED by R-0915-85. Two runners kept their own "these words are failures"
+#: tuple beside `_aggregate_verdict`, and the pre-flight refusal had to be
+#: remembered into each of them (it was not, once, and a refusal produced a
+#: GREEN run — #544). There is one roll-up now, `verdict.run_verdict`, and a
+#: refusal is `NOT_MEASURED(input_absent)`: not green, and — per the one
+#: cascade rule — voiding nothing downstream.
 
 
 _AI_STEP_NAMES = (
@@ -823,10 +845,10 @@ _A1_A3_PRODUCERS: Dict[str, Dict[str, Any]] = {
 #:
 #: This is the join between them, and it is an ENUMERATION, never a prefix
 #: rule: only the stamps the runner itself declares above collapse, and each
-#: collapses to exactly one tier. `PASS_STRUCTURE_ONLY` is NOT in it and never
-#: can be — it is a different TIER (disclosed, library-default content), not a
-#: stamped `PASS` — so it survives `verdict_tier` unchanged, which is what
-#: keeps the disclosure ordering readable.
+#: collapses to exactly one tier. A structure-only row is NOT in it and never
+#: can be — since R-0915-85 it is `PASS_WITH_WAIVERS` carrying
+#: `Disclosure.STRUCTURE_ONLY`, a different thing from a stamped `PASS` — so it
+#: survives `verdict_tier` unchanged, which is what keeps the ordering readable.
 _STAMPED_VERDICT_TIER: Dict[str, str] = {
     _p["status"]: "PASS" for _p in _A1_A3_PRODUCERS.values()
 }
@@ -836,9 +858,8 @@ def verdict_tier(status: str) -> str:
     """The TIER a step's status lands in, with the producer-provenance stamp
     removed if it carries one.
 
-    `PASS_WITH_REAL_NETLIST` is a `PASS` that also names its producer;
-    `PASS_STRUCTURE_ONLY` is not a `PASS` at all. Any status this module does
-    not declare as a stamp is returned UNCHANGED — an unknown `PASS_WITH_*`
+    `PASS_WITH_REAL_NETLIST` is a `PASS` that also names its producer. Any
+    status this module does not declare as a stamp is returned UNCHANGED — an unknown `PASS_WITH_*`
     is not silently rounded up to a pass, and neither is a `FAIL`. Chip-
     AGNOSTIC.
     """
@@ -898,7 +919,7 @@ _STRUCTURE_ONLY_SENTINEL = "STRUCTURE_ONLY:"
 #: field into `pre_vs_post.json`, while the pre-layout corner result the
 #: comparison is against — the artefact `analog_a4_corner_sweep_check` is the
 #: gate of record for — carries it. Until this entry existed, the runner
-#: recorded a PASS_STRUCTURE_ONLY A7 step with EMPTY extras: it read the
+#: recorded a structure-only A7 step with EMPTY extras: it read the
 #: gate's sentinel and then had nothing to say about what the step contained,
 #: which is the same defect one layer down.
 #:
@@ -944,7 +965,7 @@ def _structure_only_disclosure(cp) -> Optional[str]:
 # the field into. The GATE was measured certifying a design-bound pass off that
 # token over a silent baseline; this function reads the same two files in the
 # same order, so it would have recorded `design_content: structure_and_geometry`
-# beside a step the gate had just refused, or beside a PASS_STRUCTURE_ONLY
+# beside a step the gate had just refused, or beside a structure-only
 # status — a run record contradicting itself in two adjacent fields.
 #
 # Only the ceiling ARTEFACT is named here. The ranking itself is imported from
@@ -1057,7 +1078,7 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
             f"upstream {_ustep} refused: {_uline}",
             extras={"verdict_tier": "ENV_UNAVAILABLE",
                     "env_refused_upstream": _ustep,
-                    "env_refused_detail": _uline})
+                    "env_refused_detail": _uline}, reason_class=_spf.REFUSAL_REASON_CLASS)
 
     # v1.6.35: every A1-A9 step now has a deterministic
     # artefact-presence + substance gate. Missing artefact → rc=2,
@@ -1300,8 +1321,10 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
             # only on the existing literal sentinel, no chip names.
             stdout_tail = cp.stdout.splitlines()[-1] if cp.stdout else "ran"
             if "VACUOUS_PASS" in cp.stdout:
-                return StepResult(step_name, bname, "VACUOUS_PASS",
-                                  time.time() - t0, stdout_tail)
+                return StepResult(step_name, bname, "NOT_MEASURED",
+                                  time.time() - t0, stdout_tail,
+                                  reason_class=_V.ReasonClass.NO_POPULATION,
+                                  disclosures=[_V.Disclosure.VACUITY])
             if step_name == "A8_hardmacro_gen":
                 # DOES THE CIRCUIT DO WHAT ITS TOPOLOGY SAYS IT IS FOR?
                 # Every gate from here on answers a DIFFERENT question —
@@ -1411,11 +1434,17 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     "producer": _prd["program"],
                 })
             if so:
-                return StepResult(step_name, bname, "PASS_STRUCTURE_ONLY",
+                # R-0915-85: a step whose content came from a library default
+                # is a PASS somebody must come back to — a waiver row, with the
+                # fact disclosed beside it. The old word said both in one
+                # breath and the "come back to" half reached no must-close list.
+                return StepResult(step_name, bname, "PASS_WITH_WAIVERS",
                                   time.time() - t0, so,
                                   output_files=_step_outputs(project, bname,
                                                              step_name),
-                                  extras=_extras)
+                                  extras=_extras,
+                                  disclosures=[
+                                      _V.Disclosure.STRUCTURE_ONLY])
             return StepResult(step_name, bname, _status,
                               time.time() - t0, stdout_tail,
                               output_files=_step_outputs(project, bname,
@@ -1464,9 +1493,11 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                             so = _structure_only_disclosure(cp_prod)
                             return StepResult(
                                 step_name, bname,
-                                "PASS_STRUCTURE_ONLY" if so
+                                "PASS_WITH_WAIVERS" if so
                                 else prod["status"],
                                 time.time() - t0, so or tail,
+                                disclosures=([_V.Disclosure.STRUCTURE_ONLY]
+                                             if so else []),
                                 output_files=_step_outputs(project, bname,
                                                            step_name),
                                 extras={
@@ -1479,7 +1510,7 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     gap = _producer_gap(project, bname, prod)
                     if gap:
                         return StepResult(
-                            step_name, bname, "WAIVED", time.time() - t0,
+                            step_name, bname, "PASS_WITH_WAIVERS", time.time() - t0,
                             (f"deterministic producer declined and RECORDED "
                              f"why: {gap} — invoke skill `{skill}`"),
                             extras={"gap_path": gap,
@@ -1503,7 +1534,7 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     # The producer says so in its EXIT CODE — `EX_ENV_REFUSED`,
                     # its own tier — so this is decided on a number and not on
                     # prose. The row is `_spf.REFUSAL_STATUS` (in
-                    # `_FAIL_STATUSES`, so it cannot be green), carries the
+                    # NOT_MEASURED, so it cannot be green), carries the
                     # refusal's OWN line, and is remembered for the steps
                     # downstream that would otherwise report an absence this
                     # producer never caused.
@@ -1519,17 +1550,17 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                             extras={"producer": prod["program"],
                                     "producer_rc": pcp.returncode,
                                     "verdict_tier": "ENV_UNAVAILABLE",
-                                    "env_refused": True})
+                                    "env_refused": True}, reason_class=_spf.REFUSAL_REASON_CLASS)
                     if pcp is not None and pcp.returncode not in (0, 2):
                         return StepResult(
-                            step_name, bname, "WAIVED", time.time() - t0,
+                            step_name, bname, "NOT_MEASURED", time.time() - t0,
                             (f"deterministic producer ERRORED rc="
                              f"{pcp.returncode} and wrote NO gap file — this "
                              f"is not an honest gap: "
                              f"{(pcp.stderr or '').strip().splitlines()[-1] if (pcp.stderr or '').strip() else 'no stderr'}"),
                             extras={"producer": prod["program"],
                                     "producer_rc": pcp.returncode,
-                                    "producer_error": True})
+                                    "producer_error": True}, reason_class=_V.ReasonClass.EXECUTION_ERROR)
             # v1.6.214 (ORGANIC-20260512) — BEFORE the stub fallback,
             # try a REAL ngspice sweep via analog_real_corner_sweep.py.
             # chip-AGNOSTIC: only kicks in when (a) docker container
@@ -1582,10 +1613,10 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     # deferral — and never write a layout.mag to cover it.
                     why = _a5_emit_reason(em_cp)
                     return StepResult(
-                        step_name, bname, "WAIVED", time.time() - t0, why,
+                        step_name, bname, "NOT_MEASURED", time.time() - t0, why,
                         extras={"producer": emit_prog.name,
                                 "producer_rc": em_cp.returncode,
-                                "suggested_skill": skill})
+                                "suggested_skill": skill}, reason_class=_V.ReasonClass.TOOL_ABSENT)
 
             if step_name == "A4_corner_sweep":
                 real_prog = PROGRAMS_DIR / "analog_real_corner_sweep.py"
@@ -1627,7 +1658,7 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     # open-PDK fast path. A refusal here therefore blocks runs
                     # the sweep can complete, and it does — it turns
                     # `test_the_run_record_names_the_circuit_a4_measured`
-                    # (a real deck, no L19) from PASS_STRUCTURE_ONLY into a
+                    # (a real deck, no L19) from structure-only into a
                     # refusal, and pre-empts the sweep's own upstream
                     # A3-absent blocker in
                     # `test_runner_records_blocked_block_as_fail_not_waived`.
@@ -1647,7 +1678,7 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     # asks a reader to invoke `ams-sim` — but no skill can
                     # supply a container or an ngspice binary, so the advice
                     # could not be acted on and the environment gap was never
-                    # named. The row is BLOCKED (in `_FAIL_STATUSES`, so it
+                    # named. The row is NOT_MEASURED (not green, so it
                     # cannot round up to a green verdict) and carries the
                     # ENV_UNAVAILABLE tier and the container name in `extras`.
                     _env_gap = _producer_env_gap(rs_cp)
@@ -1661,7 +1692,7 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                                     "container": _a4_container,
                                     "pdk": _a4_pdk,
                                     "verdict_tier": "ENV_UNAVAILABLE",
-                                    "env_unavailable": "container"})
+                                    "env_unavailable": "container"}, reason_class=_spf.REFUSAL_REASON_CLASS)
                     # Re-run the substance gate whenever the sweep left an
                     # artefact behind — not only when the sweep exited 0.
                     #
@@ -1720,7 +1751,7 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                                        f"{_live.get('reason', '')} — {_on}")
                             return StepResult(
                                 step_name, bname,
-                                "PASS_STRUCTURE_ONLY" if so
+                                "PASS_WITH_WAIVERS" if so
                                 else "PASS_WITH_REAL_SIM",
                                 time.time() - t0,
                                 # BOTH facts, disclosure FIRST: the console
@@ -1779,7 +1810,7 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
             # Artefact not yet emitted — defer to skill (back-compat).
             msg = (cp.stderr.splitlines()[-1] if cp.stderr
                    else f"artefact missing — invoke skill `{skill}`")
-            return StepResult(step_name, bname, "WAIVED",
+            return StepResult(step_name, bname, "PASS_WITH_WAIVERS",
                               time.time() - t0, msg)
         # rc=1: artefact present but stub / fails substance check —
         # OR (A6 per-block PV only) DRC/LVS evidence missing-but-required.
@@ -1845,7 +1876,7 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                           time.time() - t0,
                           cp.stderr[-500:] or cp.stdout[-500:])
     # No deterministic program shipped (should not happen post-v1.6.35).
-    return StepResult(step_name, bname, "WAIVED",
+    return StepResult(step_name, bname, "PASS_WITH_WAIVERS",
                       time.time() - t0,
                       f"deterministic gate not yet shipped — "
                       f"caller should invoke skill `{skill}`")
@@ -1874,11 +1905,11 @@ def step_block_list_schema(project: Path) -> StepResult:
     resolution arm would be answering about a tree the run had not built yet.
 
     ADVISORY, per vibe-ic#2080 (BLOCKING only where the gate's own docstring
-    says so; this one's does not). `_aggregate_verdict` reaches its tiers
-    through `_FAIL_STATUSES`, `VACUOUS_PASS`, `PASS_STRUCTURE_ONLY`,
-    `WAIVED`/`SKIP` and `PASS`, and `ADVISORY` is none of them, so this row
+    says so; this one's does not). Since R-0915-85 that is said in the row
+    itself: the verdict is `PASS` and `Disclosure.ADVISORY` sits beside it, and
+    `verdict.run_verdict` gives a disclosure no arithmetic at all — so this row
     cannot move the analog verdict in any direction. That neutrality is pinned
-    by a test rather than left as a reading of the ladder.
+    by a test rather than left as a reading of a ladder.
 
     THE ROW IS WRITTEN WHENEVER THE TRACK RAN, carrying PASS / FINDING /
     VACUOUS / NOT_MEASURED. `--project` is used, not file mode: the whole point
@@ -1907,11 +1938,11 @@ def step_block_list_schema(project: Path) -> StepResult:
     except Exception as exc:                                 # noqa: BLE001
         row["verdict"] = "NOT_MEASURED"
         row["reason"] = f"{type(exc).__name__}: {exc}"
-        return StepResult("block_list_schema", "", "ADVISORY",
+        return StepResult("block_list_schema", "", "PASS",
                           time.time() - t0,
                           f"block-list schema NOT_MEASURED — the gate raised "
                           f"{type(exc).__name__}: {exc}",
-                          extras={"block_list_schema": row})
+                          extras={"block_list_schema": row}, disclosures=[_V.Disclosure.ADVISORY])
     row["rc"] = rc
     try:
         rep = json.loads(out.read_text())
@@ -1937,56 +1968,50 @@ def step_block_list_schema(project: Path) -> StepResult:
         detail = ("block-list schema FINDING (ADVISORY, never changes this "
                   "run's verdict) — " + "; ".join(str(f) for f in
                                                   row["findings"][:4]))
-    return StepResult("block_list_schema", "", "ADVISORY", time.time() - t0,
+    return StepResult("block_list_schema", "", "PASS", time.time() - t0,
                       detail, output_files=[str(out)],
-                      extras={"block_list_schema": row})
+                      extras={"block_list_schema": row}, disclosures=[_V.Disclosure.ADVISORY])
 
 
 def _aggregate_verdict(plan: List[StepResult]) -> str:
-    """The analog track's top-level verdict.
+    """The run's verdict, from `verdict.run_verdict`. ONE rule for the flow.
 
-    v1.6.129 (#50 Fix 2) — VACUOUS_PASS must NOT roll up into PASS.
-    Severity ladder (highest first):
-      FAIL          — any step explicitly failed, OR was BLOCKED by the
-                      pre-flight (see `_preflight_refusal`: a refusal is not a
-                      FAIL of the step, but it is certainly not green, and this
-                      function's catch-all `return "PASS"` is exactly where an
-                      unenumerated status goes to become one).
-      VACUOUS_PASS  — at least one step was VACUOUS_PASS (gate inapplicable)
-                      AND no step actually PASSed. Top-level verdict downgraded
-                      to VACUOUS_PASS so downstream sign-off gates see it as
-                      "no real evidence" rather than confirmed PASS.
-      PASS_STRUCTURE_ONLY — see `_STRUCTURE_ONLY_SENTINEL`.
-      PASS_WITH_WAIVERS — has WAIVED/SKIP, but at least one PASS (real evidence
-                      exists for some block). VACUOUS_PASS leaves are ALSO a
-                      waiver tier in this label-honest mode.
-      PASS          — every step is a real PASS.
+    WHAT THIS REPLACES, and why the replacement is a deletion rather than a
+    migration. Every one-shot runner carried its own hand-maintained lists of
+    which words meant what, and the lists disagreed: phase 2 read `SKIP` as
+    clean while phase 3 read the identical word as a waiver, over the same
+    forty-four steps. This function's own predecessor said so in its comments
+    and declined to fix it because fixing it "would restate every published
+    phase-2 result". R-0915-85 is the decision to restate them: there is one
+    vocabulary, five words, and one roll-up — `verdict.run_verdict` — whose
+    precedence is FAIL > NOT_MEASURED > PASS_WITH_WAIVERS > PASS.
 
-    EXTRACTED from `main()` unchanged except for the BLOCKED tier, so a control
-    can assert the non-greenness directly instead of re-running the whole
-    runner to observe it. Chip-AGNOSTIC.
+    The catch-all is gone by construction, not by enumeration: `verdict.parse`
+    refuses a word outside the five at the row that carries it.
     """
-    has_fail = any(s.status in _FAIL_STATUSES for s in plan)
-    has_vacuous = any(s.status == "VACUOUS_PASS" for s in plan)
-    has_waiver = any(s.status in ("WAIVED", "SKIP") for s in plan)
-    has_real_pass = any(s.status == "PASS" for s in plan)
-    # STRUCTURE-ONLY joins the ladder BELOW a waiver-free pass and ABOVE
-    # nothing: the step ran and produced its declared artefact from a library
-    # default. It is not a real pass (every number measured on it is a number
-    # about the default), it is not vacuous (the gate examined something), and
-    # it is not a FAIL — a run honest about its ceiling must not score below
-    # one that invented content to fill the gap, or the next run stops being
-    # honest. Counted here so the top-level verdict cannot round it up.
-    structure_only = [s for s in plan if s.status == "PASS_STRUCTURE_ONLY"]
-    if has_fail:
-        return "FAIL"
-    if has_vacuous and not has_real_pass and not structure_only:
-        return "VACUOUS_PASS"
-    if structure_only:
-        return "PASS_STRUCTURE_ONLY"
-    if has_vacuous or has_waiver:
-        return "PASS_WITH_WAIVERS"
-    return "PASS"
+    return _V.run_verdict(_step_verdicts(plan)).value
+
+
+def _step_verdicts(plan):
+    """This runner's own rows, as `verdict.StepVerdict` records.
+
+    One conversion, here, so no consumer re-derives the structured fields from
+    a `StepResult` and no two of them do it differently.
+    """
+    for s in plan:
+        yield _V.StepVerdict(
+            verdict=_V.parse(s.status),
+            step_id=getattr(s, "name", ""), name=getattr(s, "name", ""),
+            reason_class=(_V.ReasonClass(s.reason_class)
+                          if getattr(s, "reason_class", "") else None),
+            reason=getattr(s, "detail", "") or "",
+            declared_by=getattr(s, "declared_by", "") or "",
+            waiver_rows=[_V.WaiverRow(**w)
+                         for w in (getattr(s, "waiver_rows", None) or [])],
+            attribution=getattr(s, "attribution", "") or "",
+            disclosures=list(getattr(s, "disclosures", None) or ()),
+        )
+
 
 
 def main() -> int:
@@ -2198,7 +2223,11 @@ def main() -> int:
     _dispatched(step_block_list_schema(project))
 
     verdict = _aggregate_verdict(plan)
-    structure_only = [s for s in plan if s.status == "PASS_STRUCTURE_ONLY"]
+    # R-0915-85: the tier is a DISCLOSURE beside the verdict now, so the
+    # reader asks for the disclosure rather than for a word that meant both.
+    structure_only = [s for s in plan
+                      if _V.Disclosure.STRUCTURE_ONLY.value
+                      in (s.disclosures or ())]
     summary = {
         "phase": "analog",
         "project": str(project),

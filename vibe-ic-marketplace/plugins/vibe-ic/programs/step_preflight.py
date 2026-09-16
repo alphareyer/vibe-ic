@@ -140,11 +140,23 @@ The refusal ALSO becomes the step's own row in the runner's plan, with status
 attempted because an INPUT could not support it … Never green") and
 `extras.finding = "REQUIRED_INPUT_ABSENT"`. So a reader can tell
 
-    BLOCKED / REQUIRED_INPUT_ABSENT   refused for want of input — never ran
-    FAIL                              ran and did not pass
-    MISSING (compliance)              ran and produced nothing
+    NOT_MEASURED(input_absent)        refused for want of input — never ran
+    FAIL                              ran and did not pass, OR a required
+                                      output does not exist
 
-apart, which is the whole point.
+apart, which is the whole point. (R-0915-85 folded `MISSING` into `FAIL` and
+`BLOCKED` into `NOT_MEASURED(input_absent)`; see `programs/verdict.py`.)
+
+A NOTE ON THIS MODULE'S OWN VOCABULARY
+======================================
+The words listed above under "WHAT REFUSES" — `READY`, `REFUSED`,
+`PRODUCER-SKIPPED`, `NOT-JUDGED`, `WAIVED-ONLY`, `UNDECLARED`, `NOT-YET-DUE`,
+`UNAVAILABLE` — are this pre-flight's DISPATCH DECISIONS, recorded in its own
+ledger. They are NOT step verdicts and no report reads them as one: the only
+thing this module contributes to a step table is `REFUSAL_STATUS` above. They
+are therefore deliberately left alone by R-0915-85, whose subject is the word a
+STEP wears. If a future change makes one of them reach a step table, it becomes
+a step verdict and must be one of the five.
 """
 from __future__ import annotations
 
@@ -164,12 +176,20 @@ if str(_HERE) not in sys.path:
 LEDGER_REL = "reports/audit/step_preflight.json"
 STRICT_ENV = "VIBE_IC_PREFLIGHT_STRICT"
 
-# Statuses that must NOT reach a dispatched step. `BLOCKED` is the existing
-# phase-3 vocabulary word, documented there as "never green"; `_aggregate_verdict`
-# in both runners must group it with FAIL (design's did not, and its catch-all
-# `return "PASS"` would have turned a refusal into a green run — fixed in the
-# same change that added this module).
-REFUSAL_STATUS = "BLOCKED"
+# The row a refused step wears in the runner's plan. R-0915-85 replaced the
+# old `BLOCKED` word with the five-verdict vocabulary: nothing was measured,
+# and the reason is that a declared INPUT is not on disk — which is exactly
+# `NOT_MEASURED(input_absent)` and is now SAID rather than implied by a word
+# whose meaning lived in three different comments.
+#
+# The runner-side consequence is UNCHANGED and is the point of #544: this row
+# is not green, and (per `verdict.cascade_to_dependent`) it voids nothing
+# downstream — the steps that DID run keep the words they earned, and the run
+# cannot be called a PASS while this row is in it.
+import verdict as _V  # noqa: E402 — after the sys.path insert above
+
+REFUSAL_STATUS = _V.Verdict.NOT_MEASURED.value
+REFUSAL_REASON_CLASS = _V.ReasonClass.INPUT_ABSENT.value
 REFUSAL_FINDING = "REQUIRED_INPUT_ABSENT"
 
 

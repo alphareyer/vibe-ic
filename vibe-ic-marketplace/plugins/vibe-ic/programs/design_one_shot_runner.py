@@ -115,6 +115,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import _path_layout as _pl
+import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _rtl_include_hub as _hub  # shared include-hub aggregator predicate
 import _commercial_pdk as _cpdk  # config-driven commercial-PDK id (NDA: no SKU in source)
@@ -273,6 +274,22 @@ class StepResult:
     detail: str = ""
     output_files: List[str] = field(default_factory=list)
     extras: Dict[str, Any] = field(default_factory=dict)
+    # ── the structured fields R-0915-85 put beside the verdict ──────────
+    # `status` above is now one of the FIVE words in `programs/verdict.py`, and
+    # every distinction the deleted vocabulary carried lives here. The module's
+    # DESIGN section says why; `_V.StepVerdict` is where the same rules are
+    # enforced for readers. Validated in `__post_init__` below, so a site that
+    # says NOT_MEASURED without a reason — or NOT_APPLICABLE without naming the
+    # input line that declares it — is a loud error where it is written, not a
+    # quiet hole in a published report.
+    reason_class: str = ""
+    declared_by: str = ""
+    waiver_rows: List[Dict[str, str]] = field(default_factory=list)
+    attribution: str = ""
+    disclosures: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        _V.validate_step_row(self)
 
 
 def _preflight_refusal(name: str):
@@ -286,7 +303,7 @@ def _preflight_refusal(name: str):
     whole pre-flight exists to remove.
     """
     def _mk(detail: str, extras: Dict[str, Any]) -> StepResult:
-        return StepResult(name, _spf.REFUSAL_STATUS, 0.0, detail, extras=extras)
+        return StepResult(name, _spf.REFUSAL_STATUS, 0.0, detail, extras=extras, reason_class=_spf.REFUSAL_REASON_CLASS)
     return _mk
 
 
@@ -428,7 +445,7 @@ def _redispatch_starved_sites(
                 extras={"finding": SUPERSEDED_UNMEASURED,
                         "producer_site": producer_site,
                         "producer_steps": sorted(span),
-                        "superseded_detail": stale.detail})]
+                        "superseded_detail": stale.detail}, reason_class=_spf.REFUSAL_REASON_CLASS)]
         else:
             got = thunk()
             rows = list(got) if isinstance(got, (list, tuple)) else [got]
@@ -1832,10 +1849,10 @@ def step_rig_topology_skeleton(project: Path) -> StepResult:
     ]
     for c in candidates:
         if c.is_file():
-            return StepResult("rig_topology_skeleton", "SKIP",
+            return StepResult("rig_topology_skeleton", "PASS",
                               time.time() - t0,
                               f"existing rig_topology kept: "
-                              f"{c.relative_to(project)}")
+                              f"{c.relative_to(project)}", disclosures=[_V.Disclosure.REUSED_RECORD])
     target = project / "rig_topology.json"
     # v1.6.147 (#58 sub-item A) — auto-detect registered tester devices.
     # If exactly one tester is registered under DEVICES_ROOT/tester/,
@@ -1934,7 +1951,7 @@ def step_phase1(project: Path) -> StepResult:
     gd = _pl.generated_docs_dir(project)
     L_files = list(gd.glob("L*.json")) if gd.is_dir() else []
     if len(L_files) >= 13:
-        return StepResult("phase1", "SKIP",
+        return StepResult("phase1", "PASS",
                           time.time() - t0,
                           f"generated_docs already has {len(L_files)} L docs")
     runner = PROGRAMS_DIR / "phase1_one_shot_runner.py"
@@ -2371,9 +2388,9 @@ def _try_spec_artifact_registry_rtl(
         # Record it. A swallowed exception here is indistinguishable from
         # "the prompt was not parse-complete", and sends the reader after the
         # wrong thing.
-        return StepResult("rtl_gen", "SKIP", time.time() - t0,
+        return StepResult("rtl_gen", "NOT_MEASURED", time.time() - t0,
                           f"deterministic_emit_chain raised "
-                          f"({type(exc).__name__}: {exc}); deferring to the AI backup")
+                          f"({type(exc).__name__}: {exc}); deferring to the AI backup", reason_class=_V.ReasonClass.EXECUTION_ERROR)
     if not rtl:
         if rejected:
             # An emitter FIRED and the emit-blocking conformance rules refused
@@ -2382,11 +2399,11 @@ def _try_spec_artifact_registry_rtl(
             # hides the one that says a deterministic emitter is wrong.
             why = "; ".join(f"{n}: {', '.join(rules)}" for n, rules in rejected)
             return StepResult(
-                "rtl_gen", "SKIP", time.time() - t0,
+                "rtl_gen", "NOT_MEASURED", time.time() - t0,
                 f"deterministic emit REFUSED by the emit-blocking conformance "
                 f"rules ({why}); deferring to the AI backup",
                 extras={"rejected_emitters": [n for n, _ in rejected],
-                        "rejected_rules": sorted({r for _, rs in rejected for r in rs})})
+                        "rejected_rules": sorted({r for _, rs in rejected for r in rs})}, reason_class=_V.ReasonClass.NOT_EXECUTED)
         return None
     out_dir = project / "phase2" / "stage1" / "rtl"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -2466,7 +2483,7 @@ def _try_deterministic_rtl_dispatch(project: Path, t0: float) -> Optional[StepRe
         if _own:
             _rel = [str(f.relative_to(project)) for f in sorted(_own)[:5]]
             return StepResult(
-                "rtl_gen", "SKIPPED-CONDITION", time.time() - t0,
+                "rtl_gen", "NOT_APPLICABLE", time.time() - t0,
                 f"deterministic RTL generation DECLINED: the design ships its "
                 f"own build RTL ({len(_own)} file(s), e.g. {_rel}). A "
                 f"generated module would silently replace the "
@@ -2477,7 +2494,7 @@ def _try_deterministic_rtl_dispatch(project: Path, t0: float) -> Optional[StepRe
                 f"shipped RTL if the generator is meant to own this module.",
                 extras={"organic": 403,
                         "declined_spec": str(spec.relative_to(project)),
-                        "design_rtl_sample": _rel})
+                        "design_rtl_sample": _rel}, declared_by=f"the design ships its own build RTL ({len(_own)} file(s), e.g. {_rel})")
     except Exception:  # noqa: BLE001 — never block generation on the probe
         pass
 
@@ -2952,7 +2969,7 @@ def _phase1_plain_spec_refusal_result(
         f"{finding}: BLOCKING deterministic Phase-1 prose flow-back; "
         f"{reason}: {detail}. No RTL was written.",
         extras={"finding": finding, "source_provenance": "refused",
-                "source_refusal": dict(refusal), "write_performed": False})
+                "source_refusal": dict(refusal), "write_performed": False}, reason_class=_spf.REFUSAL_REASON_CLASS)
 
 
 class _Phase1RtlOutputRefused(RuntimeError):
@@ -2986,7 +3003,7 @@ def _phase1_rtl_output_refusal_result(
         f"flow-back output; {reason}: {detail}. No RTL was written.",
         extras={"finding": _PHASE1_RTL_OUTPUT_REFUSED,
                 "output_provenance": "refused",
-                "output_refusal": dict(refusal), "write_performed": False})
+                "output_refusal": dict(refusal), "write_performed": False}, reason_class=_spf.REFUSAL_REASON_CLASS)
 
 
 def _validate_phase1_rtl_output_path(
@@ -4943,7 +4960,7 @@ def _try_phase1_behavioral_fsm_rtl_bound(
                         publication.close()
         if not force_regen:
             return StepResult(
-                "rtl_gen", "WAIVED", time.time() - t0,
+                "rtl_gen", "PASS_WITH_WAIVERS", time.time() - t0,
                 f"PRESERVED generator-owned RTL because current deterministic output "
                 f"differs; re-run with --force-rtl-regen to replace it ({why})",
                 extras={"deterministic_generator": "spec_artifact_registry",
@@ -5237,13 +5254,13 @@ def step_determinism_gates(project: Path, top_name: str = "") -> StepResult:
     t0 = time.time()
     rtl_dir = _pl.rtl_dir(project)
     if not rtl_dir.is_dir():
-        return StepResult("determinism_gates", "SKIP", time.time() - t0,
-                          "no rtl/ directory yet")
+        return StepResult("determinism_gates", "NOT_MEASURED", time.time() - t0,
+                          "no rtl/ directory yet", reason_class=_V.ReasonClass.INPUT_ABSENT)
     rtl_files = [p for p in sorted(rtl_dir.rglob("*"))
                  if p.suffix in (".v", ".sv") and p.is_file()]
     if not rtl_files:
-        return StepResult("determinism_gates", "SKIP", time.time() - t0,
-                          "no RTL files under rtl/")
+        return StepResult("determinism_gates", "NOT_MEASURED", time.time() - t0,
+                          "no RTL files under rtl/", reason_class=_V.ReasonClass.INPUT_ABSENT)
     try:
         import sys as _sys
         if str(PROGRAMS_DIR) not in _sys.path:
@@ -5255,8 +5272,8 @@ def step_determinism_gates(project: Path, top_name: str = "") -> StepResult:
         import counter_decode_lookahead_phase_check as _cdl  # noqa: E402
         import arith_ss_corner_risk_check as _ass  # noqa: E402
     except Exception as e:  # pragma: no cover — defensive import guard
-        return StepResult("determinism_gates", "SKIP", time.time() - t0,
-                          f"gate modules unavailable: {e}")
+        return StepResult("determinism_gates", "NOT_MEASURED", time.time() - t0,
+                          f"gate modules unavailable: {e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
     spec_text = _gather_spec_text(project)
     findings: List[str] = []
     advisories: List[Dict[str, object]] = []
@@ -5721,10 +5738,10 @@ def step_lesson_consumption(project: Path) -> StepResult:
         row["reason"] = (f"no staged lesson digest at {digest} — the digest is "
                          f"rendered only at an authoring WAIVE")
         return StepResult(
-            "lesson_consumption", "ADVISORY", time.time() - t0,
+            "lesson_consumption", "PASS", time.time() - t0,
             "lesson consumption NOT_APPLICABLE — no staged lesson digest "
             "(nothing was handed to an author, so nothing is owed)",
-            extras={"lesson_consumption": row})
+            extras={"lesson_consumption": row}, disclosures=[_V.Disclosure.ADVISORY])
     out = _pl.report_path(project, "gates/lesson_consumption.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     argv = ["--project", str(project), "--digest", str(digest),
@@ -5748,10 +5765,10 @@ def step_lesson_consumption(project: Path) -> StepResult:
         row["verdict"] = "NOT_MEASURED"
         row["reason"] = f"{type(exc).__name__}: {exc}"
         return StepResult(
-            "lesson_consumption", "ADVISORY", time.time() - t0,
+            "lesson_consumption", "PASS", time.time() - t0,
             f"lesson consumption NOT_MEASURED — the gate raised "
             f"{type(exc).__name__}: {exc}",
-            extras={"lesson_consumption": row})
+            extras={"lesson_consumption": row}, disclosures=[_V.Disclosure.ADVISORY])
     row["rc"] = rc
     stderr = buf_err.getvalue().strip()
     stdout = buf_out.getvalue().strip()
@@ -5782,9 +5799,9 @@ def step_lesson_consumption(project: Path) -> StepResult:
         detail = (f"lesson consumption PASS — {row['strong_matches']} strongly-"
                   f"matched section(s) of {row['sections_in_digest']} in the "
                   f"digest, none unacknowledged")
-    return StepResult("lesson_consumption", "ADVISORY", time.time() - t0,
+    return StepResult("lesson_consumption", "PASS", time.time() - t0,
                       detail, output_files=[str(out)],
-                      extras={"lesson_consumption": row})
+                      extras={"lesson_consumption": row}, disclosures=[_V.Disclosure.ADVISORY])
 
 
 def step_leaf_typo_aliases(project: Path) -> StepResult:
@@ -5802,16 +5819,16 @@ def step_leaf_typo_aliases(project: Path) -> StepResult:
     t0 = time.time()
     rtl_dir = _pl.rtl_dir(project)
     if not rtl_dir.is_dir():
-        return StepResult("leaf_typo_aliases", "SKIP", time.time() - t0,
-                          "no rtl/ directory yet")
+        return StepResult("leaf_typo_aliases", "NOT_MEASURED", time.time() - t0,
+                          "no rtl/ directory yet", reason_class=_V.ReasonClass.INPUT_ABSENT)
     try:
         import sys as _sys
         if str(PROGRAMS_DIR) not in _sys.path:
             _sys.path.insert(0, str(PROGRAMS_DIR))
         import leaf_typo_alias_emit as _lta
     except Exception as e:  # pragma: no cover — defensive import guard
-        return StepResult("leaf_typo_aliases", "SKIP", time.time() - t0,
-                          f"emitter unavailable: {e}")
+        return StepResult("leaf_typo_aliases", "NOT_MEASURED", time.time() - t0,
+                          f"emitter unavailable: {e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
     mod_re = re.compile(r"\bmodule\s+([A-Za-z_]\w*)\b")
     texts: Dict[Path, str] = {}
     existing_modules: set = set()
@@ -5852,7 +5869,7 @@ def step_leaf_typo_aliases(project: Path) -> StepResult:
         return StepResult("leaf_typo_aliases", "PASS", time.time() - t0,
                           f"emitted {len(emitted)} canonical-spelling alias "
                           f"wrapper(s): {', '.join(emitted)}", out_files)
-    return StepResult("leaf_typo_aliases", "SKIP", time.time() - t0,
+    return StepResult("leaf_typo_aliases", "PASS", time.time() - t0,
                       "no leaf-name typo detected (no alias wrapper needed)")
 
 
@@ -6110,16 +6127,16 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
     t0 = time.time()
     rtl_dir = _pl.rtl_dir(project)
     if not rtl_dir.is_dir():
-        return StepResult("reset_clock_variant_aliases", "SKIP",
-                          time.time() - t0, "no rtl/ directory yet")
+        return StepResult("reset_clock_variant_aliases", "NOT_MEASURED",
+                          time.time() - t0, "no rtl/ directory yet", reason_class=_V.ReasonClass.INPUT_ABSENT)
     try:
         import sys as _sys
         if str(PROGRAMS_DIR) not in _sys.path:
             _sys.path.insert(0, str(PROGRAMS_DIR))
         import reset_clock_variant_alias as _rcv
     except Exception as e:  # pragma: no cover — defensive import guard
-        return StepResult("reset_clock_variant_aliases", "SKIP",
-                          time.time() - t0, f"emitter unavailable: {e}")
+        return StepResult("reset_clock_variant_aliases", "NOT_MEASURED",
+                          time.time() - t0, f"emitter unavailable: {e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
     # Build a lightweight instantiation graph over rtl/ so we can tell a genuine
     # internal LEAF submodule (whose real parent wires it by its original port
     # names — must NOT rename) from the TB-facing top that merely happens to be
@@ -6135,7 +6152,7 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
     # the "leaf" and wrap it a second time, breaking the existing wrapper's
     # 1:1 wiring. Bail out before any target resolution.
     if any(m.endswith("__rcvar_inner") for m in all_modules):
-        return StepResult("reset_clock_variant_aliases", "SKIP",
+        return StepResult("reset_clock_variant_aliases", "PASS",
                           time.time() - t0, "alias wrapper already present")
     # Resolve the authored public top before checking its requested contract;
     # the runner's default wrapper may not have been emitted at this point.
@@ -6152,15 +6169,15 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
             tgt = top
         else:
             return StepResult(
-                "reset_clock_variant_aliases", "SKIP", time.time() - t0,
+                "reset_clock_variant_aliases", "NOT_MEASURED", time.time() - t0,
                 f"top {top!r} is the runner's auto-wrapper name, absent from "
                 f"rtl/, and rtl/ is not single-leaf-shaped (no unambiguous "
-                f"TB-facing author module); refusing to guess an alias target")
+                f"TB-facing author module); refusing to guess an alias target", reason_class=_V.ReasonClass.INPUT_ABSENT)
     else:
         if top not in bodies:
-            return StepResult("reset_clock_variant_aliases", "SKIP",
+            return StepResult("reset_clock_variant_aliases", "NOT_MEASURED",
                               time.time() - t0,
-                              f"top module {top!r} not in rtl/")
+                              f"top module {top!r} not in rtl/", reason_class=_V.ReasonClass.INPUT_ABSENT)
         tgt = top
     inner = f"{tgt}__rcvar_inner"
     target, target_txt, _ = bodies[tgt]
@@ -6182,15 +6199,15 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
                        and not _is_passthrough_wrapper(p)]
     if genuine_parents:
         return StepResult(
-            "reset_clock_variant_aliases", "SKIP", time.time() - t0,
+            "reset_clock_variant_aliases", "PASS", time.time() - t0,
             f"top {tgt!r} is a real internal submodule of {genuine_parents} "
             f"(not a TB-facing top); refusing to rename it to avoid breaking "
             f"the design hierarchy")
     ports = _rcv.parse_module_ports(target_txt, tgt)
     if not ports:
-        return StepResult("reset_clock_variant_aliases", "SKIP",
+        return StepResult("reset_clock_variant_aliases", "NOT_MEASURED",
                           time.time() - t0,
-                          f"top {tgt!r} has no parseable ANSI ports")
+                          f"top {tgt!r} has no parseable ANSI ports", reason_class=_V.ReasonClass.INPUT_ABSENT)
     # Preserve public source spellings even in documents whose loose format
     # cannot authorize a replacement interface.
     try:
@@ -6237,7 +6254,7 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
     if (not resolved_via_chip_top and full_plan and _auth_ports is not None
             and _rtl_port_face == {str(n).lower() for n in _auth_ports}):
         return StepResult(
-            "reset_clock_variant_aliases", "SKIP", time.time() - t0,
+            "reset_clock_variant_aliases", "PASS", time.time() - t0,
             "authoritative L3/L9 top-port enumeration exactly matches the "
             "RTL interface; preserving its documented reset/clock spellings")
     # Preserve a native port explicitly bound by the resolved top's L9.
@@ -6248,7 +6265,7 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
             pinned = sorted(set(full_plan) & l9_names)
             if l9_top == tgt and pinned:
                 return StepResult(
-                    "reset_clock_variant_aliases", "SKIP", time.time() - t0,
+                    "reset_clock_variant_aliases", "PASS", time.time() - t0,
                     f"L9 declares native port spelling(s) {pinned} for "
                     f"top_module {tgt!r}; refusing to rename against the "
                     f"project's own contract")
@@ -6274,7 +6291,7 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
                 else "no authoritative interface requests an equivalent "
                      "reset/clock spelling; preserving the authored ports"
                 if full_plan else "top reset/clock ports already canonical")
-        return StepResult("reset_clock_variant_aliases", "SKIP",
+        return StepResult("reset_clock_variant_aliases", "PASS",
                           time.time() - t0, _why)
     # A constraint pinning the native spelling vetoes an otherwise requested
     # rename: rewriting the port would break the staged SDC contract.
@@ -6288,7 +6305,7 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
         del plan[_p]
     if not plan:
         return StepResult(
-            "reset_clock_variant_aliases", "SKIP", time.time() - t0,
+            "reset_clock_variant_aliases", "PASS", time.time() - t0,
             f"design's staged constraint SDC already pins the original "
             f"spelling(s) {_sdc_pinned}; refusing to rename the design's "
             f"own contract (#618)")
@@ -6300,15 +6317,15 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
         try:
             flat_txt = _rcv.emit_variant_alias_flat(target_txt, tgt, plan)
         except ValueError as e:                # cross-polarity guard
-            return StepResult("reset_clock_variant_aliases", "SKIP",
-                              time.time() - t0, f"polarity-guard declined: {e}")
+            return StepResult("reset_clock_variant_aliases", "NOT_MEASURED",
+                              time.time() - t0, f"polarity-guard declined: {e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
         if (flat_txt and flat_txt != target_txt
                 and _rcvar_flat_compiles(flat_txt, tgt, rtl_dir, target)):
             try:
                 target.write_text(flat_txt)
             except OSError as e:
-                return StepResult("reset_clock_variant_aliases", "SKIP",
-                                  time.time() - t0, f"write failed: {e}")
+                return StepResult("reset_clock_variant_aliases", "NOT_MEASURED",
+                                  time.time() - t0, f"write failed: {e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
             return StepResult(
                 "reset_clock_variant_aliases", "PASS", time.time() - t0,
                 f"top {tgt!r} reset/clock ports {plan} aliased to canonical "
@@ -6332,8 +6349,8 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
             param_block=pblock, param_names=pnames, import_block=iblock,
             localparam_defs=lpdefs)
     except ValueError as e:  # cross-polarity guard — never alias unsafely
-        return StepResult("reset_clock_variant_aliases", "SKIP",
-                          time.time() - t0, f"polarity-guard declined: {e}")
+        return StepResult("reset_clock_variant_aliases", "NOT_MEASURED",
+                          time.time() - t0, f"polarity-guard declined: {e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
     # Rename the TARGET module → inner (the `module <tgt>` decl + any labelled
     # `endmodule : <tgt>`) and append the canonical-port wrapper (which takes
     # the target name and instantiates the inner). ALL renames / rewires are
@@ -6345,9 +6362,9 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
         target_txt, decl_pat, rf"module\g<1>{inner}", count=1)
     if n_decl != 1:
         return StepResult(
-            "reset_clock_variant_aliases", "SKIP", time.time() - t0,
+            "reset_clock_variant_aliases", "NOT_MEASURED", time.time() - t0,
             f"could not locate the real `module {tgt}` declaration "
-            f"(found {n_decl} code-position matches); refusing to transform")
+            f"(found {n_decl} code-position matches); refusing to transform", reason_class=_V.ReasonClass.EXECUTION_ERROR)
     new_txt, _ = _rcvar_sub_code_only(
         new_txt, re.compile(rf"\bendmodule(\s*:\s*){re.escape(tgt)}\b"),
         rf"endmodule\g<1>{inner}")
@@ -6371,16 +6388,16 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
             or len(re.findall(rf"\bmodule\s+{re.escape(inner)}\b",
                               _chk)) != 1):
         return StepResult(
-            "reset_clock_variant_aliases", "SKIP", time.time() - t0,
+            "reset_clock_variant_aliases", "NOT_MEASURED", time.time() - t0,
             "post-transform sanity failed (module declarations not unique); "
-            "refusing to write")
+            "refusing to write", reason_class=_V.ReasonClass.EXECUTION_ERROR)
     written: List[str] = []
     try:
         target.write_text(new_txt)
         written.append(str(target))
     except OSError as e:
-        return StepResult("reset_clock_variant_aliases", "SKIP",
-                          time.time() - t0, f"write failed: {e}")
+        return StepResult("reset_clock_variant_aliases", "NOT_MEASURED",
+                          time.time() - t0, f"write failed: {e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
     seen = {target.resolve()}
     for p in parents:
         pf, ptxt, _ = bodies[p]
@@ -6495,14 +6512,14 @@ def step_reused_ip_consume(project: Path,
         import reused_ip_rtl_consume as _consume
         res = _consume.consume_reused_ip_rtl(project)
     except Exception as _e:  # pragma: no cover — robustness aid never crashes
-        return StepResult("reused_ip_consume", "SKIP", time.time() - t0,
-                          f"consume unavailable: {_e}")
+        return StepResult("reused_ip_consume", "NOT_MEASURED", time.time() - t0,
+                          f"consume unavailable: {_e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
     if not res.get("reused_ip"):
         # Nothing to consume (rtl/ already populated OR design ships no build
         # RTL). Clean SKIP — the WAIVE-to-catalog-glue-author path is unchanged.
-        return StepResult("reused_ip_consume", "SKIP", time.time() - t0,
+        return StepResult("reused_ip_consume", "NOT_APPLICABLE", time.time() - t0,
                           res.get("reason", "no design-provided build RTL"),
-                          extras=res)
+                          extras=res, declared_by=res.get("reason", "the design ships no build RTL to consume"))
     # Provided RTL staged — now make a synthesizable top exist, mirroring
     # step_yosys_synth's EXACT resolution ORDER so we never bind a DIFFERENT
     # top than the synth path would:
@@ -7323,7 +7340,7 @@ def _analog_track_deferral(project, config, ic_class, t0):
     if not _absent:
         return None
     return StepResult(
-        "rtl_gen", "WAIVED",
+        "rtl_gen", "PASS_WITH_WAIVERS",
         time.time() - t0,
         f"IC class {ic_class!r} is analog-applicable and has no "
         f"digital datapath to author ({_why}) — digital RTL steps "
@@ -7459,7 +7476,7 @@ def _step_rtl_gen_bound(
         # #2193 — serve the skill's BYTES, not just its name.
         _sk_hint, _sk_extras = _stage_fallback_skill(project, "spec-to-rtl")
         return StepResult(
-            "rtl_gen", "WAIVED",
+            "rtl_gen", "PASS_WITH_WAIVERS",
             time.time() - t0,
             f"IC class {ic_class!r} not in ic_class_registry.json. "
             f"Recommended action: AI invokes skill `spec-to-rtl` to "
@@ -7530,7 +7547,7 @@ def _step_rtl_gen_bound(
                 if _mf_emitted:
                     _extras["source_manifest_emitted"] = _mf_emitted
                 return StepResult(
-                    "rtl_gen", "WAIVED",
+                    "rtl_gen", "PASS_WITH_WAIVERS",
                     time.time() - t0,
                     f"IC class {ic_class!r}: staged vendor RTL found in "
                     f"input/vendor_rtl/ ({len(_staged)} file(s){_more}) — "
@@ -7594,7 +7611,7 @@ def _step_rtl_gen_bound(
         is_analog, _analog_reason = _is_pure_analog_no_rtl_track(ic_class)
         if is_analog:
             return StepResult(
-                "rtl_gen", "WAIVED",
+                "rtl_gen", "PASS_WITH_WAIVERS",
                 time.time() - t0,
                 f"IC class {ic_class!r} is pure-analog (rtl_gen=null, "
                 f"fallback_skill=null) — no digital RTL. Verification "
@@ -7665,7 +7682,7 @@ def _step_rtl_gen_bound(
         # the one the hand-off actually recommends.
         _sk_hint, _sk_extras = _stage_fallback_skill(project, skill)
         return StepResult(
-            "rtl_gen", "WAIVED",
+            "rtl_gen", "PASS_WITH_WAIVERS",
             time.time() - t0,
             f"IC class {ic_class!r} registered but rtl_gen=null. "
             f"Recommended action: AI invokes skill `{skill}`."
@@ -7726,7 +7743,7 @@ def _step_rtl_gen_bound(
                 # runs on the authored RTL instead of on a regenerated
                 # tree that overwrote it.
                 return StepResult(
-                    "rtl_gen", "WAIVED",
+                    "rtl_gen", "PASS_WITH_WAIVERS",
                     time.time() - t0,
                     f"PRESERVED authored RTL — refusing to regenerate over "
                     f"it. {_why} Generator {gen_name!r} for class "
@@ -8752,20 +8769,20 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
         import professional_tb_gen as _ptb
     except Exception as e:  # generator import error — additive step, never fatal
         _write({"status": "SKIP", "reason": f"import failed: {e}"})
-        return StepResult("professional_tb_gen", "SKIP", time.time() - t0,
-                          detail=f"generator import failed: {e}")
+        return StepResult("professional_tb_gen", "NOT_MEASURED", time.time() - t0,
+                          detail=f"generator import failed: {e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
     try:
         gen = _ptb.generate(project)
     except Exception as e:
         _write({"status": "SKIP", "reason": f"generate raised: {e}"})
-        return StepResult("professional_tb_gen", "SKIP", time.time() - t0,
-                          detail=f"generate raised: {e}")
+        return StepResult("professional_tb_gen", "NOT_MEASURED", time.time() - t0,
+                          detail=f"generate raised: {e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
 
     status = gen.get("status")
     if status == "SKIP":
         _write({**gen, "ran_cocotb": False})
-        return StepResult("professional_tb_gen", "SKIP", time.time() - t0,
-                          detail=f"class not derivable ({gen.get('reason', '')})")
+        return StepResult("professional_tb_gen", "NOT_MEASURED", time.time() - t0,
+                          detail=f"class not derivable ({gen.get('reason', '')})", reason_class=_V.ReasonClass.INPUT_ABSENT)
     if status != "PASS":
         _write({**gen, "ran_cocotb": False})
         return StepResult("professional_tb_gen", "FAIL", time.time() - t0,
@@ -8838,12 +8855,12 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
             _write({**rec, "status": "INCOMPLETE", "reason": gap,
                     "fallback_skill": "testbench-gen"})
             return StepResult(
-                "professional_tb_gen", "INCOMPLETE", time.time() - t0,
+                "professional_tb_gen", "NOT_MEASURED", time.time() - t0,
                 detail=(f"{dut_kind} TB generated; bundle {out_dir.name!r} "
                         f"REFUSED BY NAME — {gap}; "
                         "fallback_skill=testbench-gen"),
                 extras={"fallback_skill": "testbench-gen",
-                        "program_first": "professional_tb_gen"})
+                        "program_first": "professional_tb_gen"}, reason_class=_V.ReasonClass.PARTIAL_POPULATION)
         _exec_site = _professional_tb_exec_site(container)
         if _exec_site is None:
             gap = ("iverilog/cocotb not reachable in the configured container "
@@ -8853,12 +8870,12 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
             _write({**rec, "status": "INCOMPLETE", "reason": gap,
                     "fallback_skill": "testbench-gen"})
             return StepResult(
-                "professional_tb_gen", "INCOMPLETE", time.time() - t0,
+                "professional_tb_gen", "NOT_MEASURED", time.time() - t0,
                 detail=(f"{dut_kind} TB generated; bundle {out_dir.name!r} "
                         f"REFUSED BY NAME — {gap}; "
                         "fallback_skill=testbench-gen"),
                 extras={"fallback_skill": "testbench-gen",
-                        "program_first": "professional_tb_gen"})
+                        "program_first": "professional_tb_gen"}, reason_class=_V.ReasonClass.PARTIAL_POPULATION)
 
         log_path = out_dir / "cocotb_run.log"
         cmd = f"cd '{out_dir}' && make SIM=icarus"
@@ -8904,12 +8921,12 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
             _write({**rec, "status": "INCOMPLETE", "reason": why,
                     "fallback_skill": "testbench-gen"})
             return StepResult(
-                "professional_tb_gen", "INCOMPLETE", time.time() - t0,
+                "professional_tb_gen", "NOT_MEASURED", time.time() - t0,
                 detail=(f"{dut_kind} TB generated and RUN; bundle "
                         f"{out_dir.name!r} REFUSED BY NAME — {why}; "
                         "fallback_skill=testbench-gen"),
                 extras={"fallback_skill": "testbench-gen",
-                        "program_first": "professional_tb_gen"})
+                        "program_first": "professional_tb_gen"}, reason_class=_V.ReasonClass.PARTIAL_POPULATION)
 
         # Measured. A refusal a previous pass recorded for this bundle is now
         # stale and must not outlive the transcript that answers it.
@@ -8939,13 +8956,13 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
         _write({**rec, "status": "INCOMPLETE", "reason": gap,
                 "fallback_skill": "testbench-gen"})
         return StepResult(
-            "professional_tb_gen", "INCOMPLETE", time.time() - t0,
+            "professional_tb_gen", "NOT_MEASURED", time.time() - t0,
             detail=(f"{dut_kind} TB generated and RUN; functional run "
                     f"INCOMPLETE (rc={rc}, tests={xml_summary['tests']}, "
                     f"skipped={xml_summary['skipped']}); "
                     "fallback_skill=testbench-gen"),
             extras={"fallback_skill": "testbench-gen",
-                    "program_first": "professional_tb_gen"})
+                    "program_first": "professional_tb_gen"}, reason_class=_V.ReasonClass.PARTIAL_POPULATION)
 
     # The generator reported a bundle that is not on disk. There is nothing to
     # run and nowhere to record a refusal, so say THAT — reporting it as an
@@ -8956,11 +8973,11 @@ def step_professional_tb_gen(project: Path, top_name: str = "",
     _write({**rec, "status": "INCOMPLETE", "reason": gap,
             "fallback_skill": "testbench-gen"})
     return StepResult(
-        "professional_tb_gen", "INCOMPLETE", time.time() - t0,
+        "professional_tb_gen", "NOT_MEASURED", time.time() - t0,
         detail=(f"{dut_kind} professional TB generated; {gap}; "
                 "fallback_skill=testbench-gen"),
         extras={"fallback_skill": "testbench-gen",
-                "program_first": "professional_tb_gen"})
+                "program_first": "professional_tb_gen"}, reason_class=_V.ReasonClass.PARTIAL_POPULATION)
 
 
 def step_step4_functional_evidence(project: Path,
@@ -8977,8 +8994,8 @@ def step_step4_functional_evidence(project: Path,
     t0 = time.time()
     analog_absent, analog_reason = _analog_rtl_track_absent(project, ic_class)
     if analog_absent:
-        return StepResult("step4_functional_evidence", "SKIP",
-                          time.time() - t0, analog_reason)
+        return StepResult("step4_functional_evidence", "NOT_APPLICABLE",
+                          time.time() - t0, analog_reason, declared_by=analog_reason)
 
     vacuous_report = _pl.report_path(project, "gates/vacuous_testbench.json")
     vacuous_rc, vacuous_out, vacuous_err = _run([
@@ -9142,16 +9159,16 @@ def step_l10_unit_tb_gen(project: Path,
             _sys.path.insert(0, str(PROGRAMS_DIR))
         import testbench_gen as _tbg
     except Exception as e:  # pragma: no cover — defensive import guard
-        return StepResult("l10_unit_tb_gen", "SKIP", time.time() - t0,
-                          f"producer unavailable: {e}")
+        return StepResult("l10_unit_tb_gen", "NOT_MEASURED", time.time() - t0,
+                          f"producer unavailable: {e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
     _tb_report: dict = {}
     try:
         emitted = _tbg.emit_unit_tbs(project, top_name,
                                      kind=_tbg.DEFAULT_SCAFFOLD_KIND,
                                      report=_tb_report)
     except Exception as e:
-        return StepResult("l10_unit_tb_gen", "SKIP", time.time() - t0,
-                          f"L10 unreadable: {e}")
+        return StepResult("l10_unit_tb_gen", "NOT_MEASURED", time.time() - t0,
+                          f"L10 unreadable: {e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
 
     # R-0915-89(ii) — PUBLISH WHICH ORACLES THIS RUN DID NOT WRITE.
     #
@@ -9209,8 +9226,8 @@ def step_l10_unit_tb_gen(project: Path,
                 f"the rest {flow['unauthorable_kinds']}")
 
     if emitted == -1:
-        return StepResult("l10_unit_tb_gen", "SKIP", time.time() - t0,
-                          "no L10_TEST_CASES.json — nothing to produce")
+        return StepResult("l10_unit_tb_gen", "NOT_MEASURED", time.time() - t0,
+                          "no L10_TEST_CASES.json — nothing to produce", reason_class=_V.ReasonClass.INPUT_ABSENT)
     if emitted == -2:
         # #209 — the producer REFUSED to emit because it could not bind the DUT.
         # This is the correct outcome, not a failure to report as one: the old
@@ -9220,17 +9237,17 @@ def step_l10_unit_tb_gen(project: Path,
         # missing coverage rather than pass on manufactured coverage.
         _scope = _tb_report.get("scope") or {}
         return StepResult(
-            "l10_unit_tb_gen", "SKIP", time.time() - t0,
+            "l10_unit_tb_gen", "NOT_MEASURED", time.time() - t0,
             f"no TB emitted (refused to fabricate): {_tb_report.get('reason')}"
             + (f" [{_tbg.describe_scope(_scope)}{_consequence(_scope)}]"
-               if _scope else ""))
+               if _scope else ""), reason_class=_V.ReasonClass.NOT_EXECUTED)
     if emitted == 0:
         _scope = _tb_report.get("scope") or {}
         return StepResult(
-            "l10_unit_tb_gen", "SKIP", time.time() - t0,
+            "l10_unit_tb_gen", "NOT_MEASURED", time.time() - t0,
             (f"no TB produced — {_tbg.describe_scope(_scope)}"
              f"{_consequence(_scope)}")
-            if _scope else "no L10 test case — nothing to produce")
+            if _scope else "no L10 test case — nothing to produce", reason_class=_V.ReasonClass.NOT_EXECUTED)
     out_dir = _pl.sim_dir(project) / "tb"
     _scope = _tb_report.get("scope") or {}
     _total = int(_scope.get("total") or 0)
@@ -9271,15 +9288,15 @@ def step_analog_acceptance_tb_gen(project: Path) -> StepResult:
             _sys.path.insert(0, str(PROGRAMS_DIR))
         import analog_acceptance_tb_gen as _acc
     except Exception as e:  # pragma: no cover — defensive import guard
-        return StepResult("analog_acceptance_tb_gen", "SKIP",
-                          time.time() - t0, f"producer unavailable: {e}")
+        return StepResult("analog_acceptance_tb_gen", "NOT_MEASURED",
+                          time.time() - t0, f"producer unavailable: {e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
     rep: dict = {}
     try:
         emitted = _acc.emit_acceptance_checks(project, rep)
     except Exception as e:
-        return StepResult("analog_acceptance_tb_gen", "SKIP",
+        return StepResult("analog_acceptance_tb_gen", "NOT_MEASURED",
                           time.time() - t0,
-                          f"L10/L22 unreadable, nothing emitted: {e}")
+                          f"L10/L22 unreadable, nothing emitted: {e}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
     rows = rep.get("rows") or []
     authorable = sum(1 for r in rows if r.get("authorable"))
     census = (f"{len(rows)} {'/'.join(sorted(_acc.ACCEPTANCE_KINDS))} row(s), "
@@ -9288,16 +9305,16 @@ def step_analog_acceptance_tb_gen(project: Path) -> StepResult:
               f"{len(rep.get('refusals') or [])} refused by name, "
               f"{len(rep.get('disclosures') or [])} disclosed non-acceptance(s)")
     if emitted == -1:
-        return StepResult("analog_acceptance_tb_gen", "SKIP",
-                          time.time() - t0, str(rep.get("reason")))
+        return StepResult("analog_acceptance_tb_gen", "NOT_MEASURED",
+                          time.time() - t0, str(rep.get("reason")), reason_class=_V.ReasonClass.NOT_EXECUTED)
     if emitted == -2:
         # EVERY row was refused. That is a real, reviewable outcome — not an
         # absence — so it is reported as its own state and the refusals still
         # reach Step 4 through the JUnit the run step writes.
         return StepResult(
-            "analog_acceptance_tb_gen", "SKIP", time.time() - t0,
+            "analog_acceptance_tb_gen", "NOT_MEASURED", time.time() - t0,
             f"no acceptance clause is derivable from the input: {census}; "
-            f"every refusal is named in {_acc.RECORD_REL}")
+            f"every refusal is named in {_acc.RECORD_REL}", reason_class=_V.ReasonClass.NOT_EXECUTED)
     return StepResult(
         "analog_acceptance_tb_gen", "PASS", time.time() - t0,
         f"emitted {emitted} executable acceptance check(s) under "
@@ -9337,9 +9354,9 @@ def step_analog_acceptance_tb_run(project: Path) -> StepResult:
                           time.time() - t0, f"executor raised: {e}",
                           extras={"sim_executed": False})
     if executed == -1:
-        return StepResult("analog_acceptance_tb_run", "SKIP", time.time() - t0,
+        return StepResult("analog_acceptance_tb_run", "NOT_MEASURED", time.time() - t0,
                           str(rep.get("reason")),
-                          extras={"sim_executed": False})
+                          extras={"sim_executed": False}, reason_class=_V.ReasonClass.NOT_EXECUTED)
     detail = (f"{rep.get('rows_total', 0)} "
               f"{'/'.join(sorted(_acc.ACCEPTANCE_KINDS))} row(s), "
               f"{rep.get('rows_authorable', 0)} authorable; "
@@ -9778,10 +9795,10 @@ def step_full_stack_tb_gen(project: Path,
     gd = _pl.generated_docs_dir(project)
     l9_path = gd / "L9_INTEGRATION_SPEC.json"
     if not l9_path.is_file():
-        return StepResult("full_stack_tb_gen", "SKIP",
+        return StepResult("full_stack_tb_gen", "NOT_MEASURED",
                           time.time() - t0,
                           "L9_INTEGRATION_SPEC.json not present — "
-                          "phase1 must run first")
+                          "phase1 must run first", reason_class=_V.ReasonClass.INPUT_ABSENT)
     try:
         l9 = json.loads(l9_path.read_text())
     except Exception as e:
@@ -9811,9 +9828,9 @@ def step_full_stack_tb_gen(project: Path,
     _v701_warn = _v701_tiny_root_warn(project, top_module)
     top_ports = l9.get("top_ports") or l9.get("ports") or []
     if not isinstance(top_ports, list) or not top_ports:
-        return StepResult("full_stack_tb_gen", "SKIP",
+        return StepResult("full_stack_tb_gen", "NOT_MEASURED",
                           time.time() - t0,
-                          f"L9 has no top_ports (top_module={top_module!r})")
+                          f"L9 has no top_ports (top_module={top_module!r})", reason_class=_V.ReasonClass.INPUT_ABSENT)
 
     # ORGANIC #629 — reconcile the DUT binding against the parsed synthesizable
     # RTL top surface, NOT L9.top_ports verbatim. A mis-extracted L9 (a width-
@@ -10758,9 +10775,9 @@ def step_l10_unit_tb_run(project: Path, container: "str | None") -> StepResult:
     if executed == -1:
         # Nothing to execute is the producer's story to tell, not a failure of
         # this step — but it is NOT a pass over any testbench either.
-        return StepResult("l10_unit_tb_run", "SKIP", time.time() - t0,
+        return StepResult("l10_unit_tb_run", "NOT_MEASURED", time.time() - t0,
                           str(rep.get("reason")),
-                          extras={"sim_executed": False})
+                          extras={"sim_executed": False}, reason_class=_V.ReasonClass.NOT_EXECUTED)
     if executed == -2:
         return StepResult("l10_unit_tb_run", NOT_EXECUTED_STATUS,
                           time.time() - t0, str(rep.get("reason")),
@@ -12082,10 +12099,10 @@ def step_stamp_gate_reports(project: Path) -> StepResult:
     try:
         stamped = _stamp_gate_report_dirs(project)
     except Exception as e:  # noqa: BLE001 — stamping must never fail the run
-        return StepResult("stamp_gate_reports", "ADVISORY",
+        return StepResult("stamp_gate_reports", "PASS",
                           time.time() - t0,
                           f"gate/lint identity stamp skipped (non-fatal): {e}",
-                          extras={"advisory_only": True, "error": str(e)})
+                          extras={"advisory_only": True, "error": str(e)}, disclosures=[_V.Disclosure.ADVISORY])
     detail = (f"stamped #484 identity into {len(stamped)} gate/lint json(s) "
               f"under {', '.join(_GATE_REPORT_DIRS)}"
               if stamped else
@@ -12294,7 +12311,7 @@ def _run_oracle_tb(project: Path, top_name: str, tb_path: Path,
         _sv_reason = "iverilog/sv2v SV-subset parse signature"
         if _sv_subset and _is_reused_ip_project(project):
             return StepResult(
-                "reference_tb", "WAIVED", time.time() - t0,
+                "reference_tb", "PASS_WITH_WAIVERS", time.time() - t0,
                 (f"per-IC oracle TB ({tb_path.name}) compile blocked by an SV "
                  f"construct beyond the iverilog/sv2v OSS-sim subset "
                  f"({_sv_reason}); DUT is upstream-validated REUSED-IP "
@@ -12450,7 +12467,7 @@ def _reference_tb_generic_full_stack(project: Path, top_name: str,
         # is a SKIP/WAIVE, NOT a FAIL — verification falls to gate-level
         # synth + Phase 3.
         return StepResult(
-            "reference_tb", "SKIP",
+            "reference_tb", "NOT_APPLICABLE",
             time.time() - t0,
             (f"AID reference TB SKIPPED: {track_reason}. No generic "
              f"full-stack TB found under {sim_dir} either (L9 may have "
@@ -12458,7 +12475,7 @@ def _reference_tb_generic_full_stack(project: Path, top_name: str,
              f"reference TB; gate-level synth + Phase 3 is the "
              f"verification path."),
             extras={"verification_track": "generic_full_stack",
-                    "aid_tb_skipped_reason": track_reason})
+                    "aid_tb_skipped_reason": track_reason}, declared_by=track_reason)
 
     tb_path = tb_candidates[0]
     rtl_dir = _pl.rtl_dir(project)
@@ -12602,7 +12619,7 @@ def _reference_tb_generic_full_stack(project: Path, top_name: str,
             except Exception:
                 pass  # bridge failure must not retract the connectivity record
             return StepResult(
-                "reference_tb", "INCOMPLETE",
+                "reference_tb", "NOT_MEASURED",
                 time.time() - t0,
                 (f"AID reference TB SKIPPED ({track_reason}); generic "
                  f"full-stack TB {tb_path.name} compiled + ran to "
@@ -12618,7 +12635,7 @@ def _reference_tb_generic_full_stack(project: Path, top_name: str,
                         "connectivity_pass_functional_deferred": True,
                         "capability_gap": "cap:cpu_functional_oracle",
                         "fallback_skill": "testbench-gen",
-                        "tb_frontend": tb_frontend})
+                        "tb_frontend": tb_frontend}, reason_class=_V.ReasonClass.PARTIAL_POPULATION)
         # Ran but did not reach the completion marker → real defect.
         return StepResult(
             "reference_tb", "FAIL",
@@ -13445,12 +13462,12 @@ def step_reference_tb(project: Path, top_name: str = "chip_top",
         is_analog, reason = _analog_rtl_track_absent(project, ic_class)
         if is_analog:
             return StepResult(
-                "reference_tb", "SKIP",
+                "reference_tb", "NOT_APPLICABLE",
                 time.time() - t0,
                 f"no rtl/ — {reason}; functional verification deferred "
                 f"to the analog A1..A8 track (/vibe-ic-analog)",
                 extras={"deferred_to": "analog_track",
-                        "ic_class": ic_class})
+                        "ic_class": ic_class}, declared_by=reason)
         # The RTL this gate verifies was never produced. That is a REFUSAL,
         # not a verdict on the design: `BLOCKED` is this runner's documented
         # status for "refused for want of a declared input; the step never
@@ -13463,7 +13480,7 @@ def step_reference_tb(project: Path, top_name: str = "chip_top",
         _detail, _extras = _rtl_absent_refusal_detail(project, ic_class)
         return StepResult("reference_tb", _spf.REFUSAL_STATUS,
                           time.time() - t0,
-                          _detail, extras=_extras)
+                          _detail, extras=_extras, reason_class=_spf.REFUSAL_REASON_CLASS)
 
     # v1.6.523 — class-aware AID reference-TB gating. For non-AID-track
     # classes (generic_full_stack: CPUs / SoCs / arithmetic primitives /
@@ -13557,7 +13574,7 @@ def step_reference_tb(project: Path, top_name: str = "chip_top",
         # DUT for a fact about where the tree sits. Nothing was compiled, so
         # this step has no verdict on the design: SKIP and say why.
         return StepResult(
-            "reference_tb", "SKIP",
+            "reference_tb", "NOT_MEASURED",
             time.time() - t0,
             (f"AID reference TB NOT RUN — the simulator was NOT FOUND where "
              f"the compile was dispatched (rc={rc}); no sim ran, so this is "
@@ -13566,7 +13583,7 @@ def step_reference_tb(project: Path, top_name: str = "chip_top",
              f"host. stderr={(err or out)[-600:]}"),
             extras={"tb_frontend": tb_frontend,
                     "functional_verified": False,
-                    "iverilog_available": False})
+                    "iverilog_available": False}, reason_class=_V.ReasonClass.TOOL_ABSENT)
     if rc != 0:
         return StepResult("reference_tb", "FAIL",
                           time.time() - t0,
@@ -16301,12 +16318,12 @@ def step_yosys_synth(project: Path, top_name: str = "chip_top",
         is_analog, reason = _analog_rtl_track_absent(project, ic_class)
         if is_analog:
             return StepResult(
-                "yosys_synth", "SKIP",
+                "yosys_synth", "NOT_APPLICABLE",
                 time.time() - t0,
                 f"no rtl/ — {reason}; gate-level netlist deferred to "
                 f"the analog A1..A8 track (/vibe-ic-analog)",
                 extras={"deferred_to": "analog_track",
-                        "ic_class": ic_class})
+                        "ic_class": ic_class}, declared_by=reason)
         return StepResult("yosys_synth", "FAIL",
                           time.time() - t0,
                           "rtl/ missing")
@@ -17432,9 +17449,9 @@ def step_synth_log_audit(project: Path, synth: StepResult) -> StepResult:
         row["reason"] = (f"yosys_synth answered {synth.status} — no synthesis "
                          f"was attempted, so no run owed a log")
         return StepResult(
-            "synth_log_audit", "ADVISORY", time.time() - t0,
+            "synth_log_audit", "PASS", time.time() - t0,
             f"synth log audit NOT_APPLICABLE — yosys_synth {synth.status}",
-            extras={"synth_log_audit": row})
+            extras={"synth_log_audit": row}, disclosures=[_V.Disclosure.ADVISORY])
     out = _pl.report_path(project, "gates/synth_log_audit.json")
     buf_out, buf_err = io.StringIO(), io.StringIO()
     try:
@@ -17449,10 +17466,10 @@ def step_synth_log_audit(project: Path, synth: StepResult) -> StepResult:
         row["verdict"] = "NOT_MEASURED"
         row["reason"] = f"{type(exc).__name__}: {exc}"
         return StepResult(
-            "synth_log_audit", "ADVISORY", time.time() - t0,
+            "synth_log_audit", "PASS", time.time() - t0,
             f"synth log audit NOT_MEASURED — the gate raised "
             f"{type(exc).__name__}: {exc}",
-            extras={"synth_log_audit": row})
+            extras={"synth_log_audit": row}, disclosures=[_V.Disclosure.ADVISORY])
     row["rc"] = rc
     try:
         rep = json.loads(out.read_text())
@@ -17476,9 +17493,9 @@ def step_synth_log_audit(project: Path, synth: StepResult) -> StepResult:
         detail = (f"synth log audit FINDING (ADVISORY, never changes this "
                   f"run's verdict) — {', '.join(row['categories']) or 'rc 1'}: "
                   f"{row['reason'][:160]}")
-    return StepResult("synth_log_audit", "ADVISORY", time.time() - t0,
+    return StepResult("synth_log_audit", "PASS", time.time() - t0,
                       detail, output_files=[str(out)],
-                      extras={"synth_log_audit": row})
+                      extras={"synth_log_audit": row}, disclosures=[_V.Disclosure.ADVISORY])
 
 
 def step_qsf_gen(project: Path, top_name: str = "chip_top",
@@ -17492,7 +17509,7 @@ def step_qsf_gen(project: Path, top_name: str = "chip_top",
     uses_aid_tb, track_reason = _class_uses_aid_reference_tb(ic_class)
     if not uses_aid_tb and not _has_board_harness_top(project):
         return StepResult(
-            "qsf_gen", "SKIP",
+            "qsf_gen", "NOT_APPLICABLE",
             time.time() - t0,
             (f"DE10 QSF generation SKIPPED: {track_reason}. A memory-bus/"
              f"data core has no DE10 board-pin contract (its top ports "
@@ -17501,16 +17518,16 @@ def step_qsf_gen(project: Path, top_name: str = "chip_top",
              f"verification; otherwise gate-level synth + Phase 3 is the "
              f"verification path."),
             extras={"verification_track": "generic_full_stack",
-                    "board_pin_skipped_reason": track_reason})
+                    "board_pin_skipped_reason": track_reason}, declared_by=track_reason)
     fpga_dir = _pl.fpga_early_dir(project)
     if fpga_dir.is_dir() and any(fpga_dir.glob("*.qsf")):
         existing_qsf = sorted(fpga_dir.glob("*.qsf"))[0]
         stale_reason = _qsf_is_stale_for_init_files(existing_qsf, project)
         if stale_reason is None:
-            return StepResult("qsf_gen", "SKIP",
+            return StepResult("qsf_gen", "PASS",
                               time.time() - t0,
                               f"existing QSF kept: {existing_qsf.name} "
-                              f"(remove or rename .bak to regenerate)")
+                              f"(remove or rename .bak to regenerate)", disclosures=[_V.Disclosure.REUSED_RECORD])
         # stale → back up and fall through to regenerate
         backup = existing_qsf.with_suffix(existing_qsf.suffix + ".bak")
         try:
@@ -17606,9 +17623,9 @@ def step_otp_image_check(project: Path) -> StepResult:
     t0 = time.time()
     gate = PROGRAMS_DIR / "otp_image_nonzero_check.py"
     if not gate.is_file():
-        return StepResult("otp_image_check", "SKIP",
+        return StepResult("otp_image_check", "NOT_MEASURED",
                           time.time() - t0,
-                          f"gate not found: {gate}")
+                          f"gate not found: {gate}", reason_class=_V.ReasonClass.TOOL_ABSENT)
     rc, out, err = _run(["python3", str(gate), str(project)], timeout=60)
     tail = (out + err).strip()
     if rc == 0:
@@ -17647,9 +17664,9 @@ def step_fpga_compile(project: Path, top_name: str,
     fpga_dir = _pl.fpga_early_dir(project)
     qsf = next(fpga_dir.glob("*.qsf"), None) if fpga_dir.is_dir() else None
     if qsf is None:
-        return StepResult("fpga_compile", "SKIP",
+        return StepResult("fpga_compile", "NOT_MEASURED",
                           time.time() - t0,
-                          "fpga/<name>.qsf missing — caller must produce it")
+                          "fpga/<name>.qsf missing — caller must produce it", reason_class=_V.ReasonClass.INPUT_ABSENT)
     base = qsf.stem
     sof = fpga_dir / "output_files" / f"{base}.sof"
     log = fpga_dir / "compile.log"
@@ -17684,14 +17701,14 @@ def step_fpga_compile(project: Path, top_name: str,
             quiet=False)
     else:
         return StepResult(
-            "fpga_compile", "SKIP",
+            "fpga_compile", "NOT_MEASURED",
             time.time() - t0,
             "quartus_sh unavailable: not on host (tried $QUARTUS_ROOTDIR, "
             "~/intelFPGA_lite, /opt/intelFPGA_lite, /opt/altera, $PATH) "
             f"and not in container '{container}'. "
             "Install Quartus or set $QUARTUS_ROOTDIR; "
             "this is an environment gap, not a design FAIL.",
-        )
+         reason_class=_V.ReasonClass.TOOL_ABSENT)
     rc, out, err = _run(cmd, timeout=1800)
 
     log_content = ""
@@ -17783,9 +17800,9 @@ def step_fpga_burn(project: Path, top_name: str) -> StepResult:
     t0 = time.time()
     sof = next((_pl.fpga_early_dir(project) / "output_files").glob("*.sof"), None)
     if not sof or not sof.is_file():
-        return StepResult("fpga_burn", "SKIP",
+        return StepResult("fpga_burn", "NOT_MEASURED",
                           time.time() - t0,
-                          "no .sof to burn")
+                          "no .sof to burn", reason_class=_V.ReasonClass.INPUT_ABSENT)
     drv = DEVICES_ROOT / "fpga" / "terasic-de10lite" / "driver.py"
     if not drv.is_file():
         return StepResult("fpga_burn", "FAIL",
@@ -17827,12 +17844,12 @@ def step_fpga_burn(project: Path, top_name: str) -> StepResult:
              and detail_obj.get("error_code") in ("no_jtag_hardware",
                                                   "jtag_absent")):
         return StepResult(
-            "fpga_burn", "SKIP", time.time() - t0,
+            "fpga_burn", "NOT_MEASURED", time.time() - t0,
             "no JTAG hardware available on host (board offline) — burn "
             "skipped; this is an environment state, not a design defect. "
             "Waive the on-board burn/verify step or re-run with the board "
             "attached. Probe evidence: 'No JTAG hardware available'.",
-            extras=detail_obj)
+            extras=detail_obj, reason_class=_V.ReasonClass.TOOL_ABSENT)
     # Surface structured driver error when present (avoids the cryptic
     # "rc=1 stderr= stdout= …": the driver returns JSON with error_code
     # + failed_gates when it blocks burn on pre-burn structural-gate audit).
@@ -17893,7 +17910,7 @@ def step_usb_hid_tester_verify(project: Path, runs: int = 5,
     uses_aid_tb, track_reason = _class_uses_aid_reference_tb(ic_class)
     if not uses_aid_tb and not _has_board_harness_top(project):
         return StepResult(
-            "usb_hid_tester_verify", "SKIP",
+            "usb_hid_tester_verify", "NOT_APPLICABLE",
             time.time() - t0,
             (f"<half-duplex-tester> board verify SKIPPED: {track_reason}. A "
              f"memory-bus/data core has no DE10 board-pin contract and "
@@ -17903,13 +17920,13 @@ def step_usb_hid_tester_verify(project: Path, runs: int = 5,
              f"verification; otherwise gate-level synth + Phase 3 is the "
              f"verification path."),
             extras={"verification_track": "generic_full_stack",
-                    "board_pin_skipped_reason": track_reason})
+                    "board_pin_skipped_reason": track_reason}, declared_by=track_reason)
     # v1.6.153 (#60 P0-4) — STALE-board guard. Apply BEFORE the
     # tester.name / driver-presence checks so the gate fails loudly
     # rather than silently passing on a stale board.
     if prior_fpga_burn_status is not None and prior_fpga_burn_status != "PASS":
         return StepResult(
-            "usb_hid_tester_verify", "STALE_BOARD_DETECTED",
+            "usb_hid_tester_verify", "FAIL",
             time.time() - t0,
             (f"fpga_burn step in this run = {prior_fpga_burn_status!r}; "
              "host-tester would observe a stale board bitstream burned "
@@ -17947,7 +17964,7 @@ def step_usb_hid_tester_verify(project: Path, runs: int = 5,
     _N_A_SENTINEL_VALUES = ("n/a",)
     norm_tester = (tester_name or "").strip().lower()
     if not tester_name or tester_name == "__TODO__":
-        return StepResult("usb_hid_tester_verify", "SKIP",
+        return StepResult("usb_hid_tester_verify", "NOT_MEASURED",
                           time.time() - t0,
                           "rig_topology.json tester.name is missing or "
                           "__TODO__ — fill it with the lab tester directory "
@@ -17956,11 +17973,11 @@ def step_usb_hid_tester_verify(project: Path, runs: int = 5,
                           "set to 'n/a' (or 'none' / 'no_hardware' / "
                           "'digital_only') to mark the project as having no "
                           "tester rig — usb_hid_tester_verify will SKIP cleanly with a "
-                          "permanent message instead of an outstanding TODO")
+                          "permanent message instead of an outstanding TODO", reason_class=_V.ReasonClass.INPUT_ABSENT)
     if norm_tester in _N_A_SENTINEL_VALUES:
         # Issue #29 Bug 4 — explicit "n/a" sentinel → WAIVED.
         return StepResult(
-            "usb_hid_tester_verify", "WAIVED",
+            "usb_hid_tester_verify", "PASS_WITH_WAIVERS",
             time.time() - t0,
             f"rig_topology.json tester.name = {tester_name!r} "
             f"declares no rig available for this project; "
@@ -17984,12 +18001,12 @@ def step_usb_hid_tester_verify(project: Path, runs: int = 5,
                 },
             })
     if norm_tester in _NO_HARDWARE_VALUES:
-        return StepResult("usb_hid_tester_verify", "SKIP",
+        return StepResult("usb_hid_tester_verify", "NOT_APPLICABLE",
                           time.time() - t0,
                           f"rig_topology.json tester.name = {tester_name!r} "
                           f"declares no hardware tester for this project; "
                           f"<half-duplex-tester> verify is permanently "
-                          f"inapplicable here (this is NOT a TODO)")
+                          f"inapplicable here (this is NOT a TODO)", declared_by=f"rig_topology.json tester.name = {tester_name!r}")
     drv = DEVICES_ROOT / "tester" / tester_name / "driver.py"
     if not drv.is_file():
         return StepResult("usb_hid_tester_verify", "FAIL",
@@ -18126,7 +18143,7 @@ def step_usb_hid_tester_verify(project: Path, runs: int = 5,
             fails += 1
     if expected_hex is None:
         if bad_placeholder is not None:
-            return StepResult("usb_hid_tester_verify", "SKIP",
+            return StepResult("usb_hid_tester_verify", "NOT_MEASURED",
                               time.time() - t0,
                               f"L9.expected_verdict_byte_hex is a placeholder "
                               f"({bad_placeholder!r}) — Phase 1 (doc-extraction) must fill it "
@@ -18137,13 +18154,13 @@ def step_usb_hid_tester_verify(project: Path, runs: int = 5,
                               f"observed={observed}",
                               extras={"observed": observed,
                                       "expected": None,
-                                      "placeholder": bad_placeholder})
-        return StepResult("usb_hid_tester_verify", "SKIP",
+                                      "placeholder": bad_placeholder}, reason_class=_V.ReasonClass.INPUT_ABSENT)
+        return StepResult("usb_hid_tester_verify", "NOT_MEASURED",
                           time.time() - t0,
                           f"no L9.expected_verdict_byte_hex; "
                           f"observed={observed}",
                           extras={"observed": observed,
-                                  "expected": None})
+                                  "expected": None}, reason_class=_V.ReasonClass.INPUT_ABSENT)
     if fails == 0:
         return StepResult("usb_hid_tester_verify", "PASS",
                           time.time() - t0,
@@ -18196,7 +18213,7 @@ def step_phase3(project: Path, top_name: str,
                           f"pdk={detail_obj.get('pdk','?')} all backend steps PASS",
                           extras=detail_obj)
     if verdict == "PASS_WITH_WAIVERS":
-        return StepResult("phase3", "WAIVED",
+        return StepResult("phase3", "PASS_WITH_WAIVERS",
                           time.time() - t0,
                           f"pdk={detail_obj.get('pdk','?')} verdict={verdict}; "
                           "see reports/phase3_one_shot.json",
@@ -18213,9 +18230,9 @@ def _legacy_step_phase3_unused(project: Path, top_name: str,
     t0 = time.time()
     pdk = project / "input" / "pdk"
     if not pdk.exists():
-        return StepResult("phase3", "SKIP",
+        return StepResult("phase3", "NOT_MEASURED",
                           time.time() - t0,
-                          "input/pdk/ missing — Phase 3 not runnable")
+                          "input/pdk/ missing — Phase 3 not runnable", reason_class=_V.ReasonClass.INPUT_ABSENT)
 
     # Skeletal Phase 3 — expects each tool produces an output the next uses.
     # Real flow runs through mcp-eda's eda_synth/eda_pnr/eda_drc_klayout/
@@ -18264,7 +18281,7 @@ def _legacy_step_phase3_unused(project: Path, top_name: str,
         "(this orchestrator only chains shell-level steps)"
     )
     log.write_text("\n".join(log_text))
-    return StepResult("phase3", "WAIVED",
+    return StepResult("phase3", "PASS_WITH_WAIVERS",
                       time.time() - t0,
                       "PnR/DRC/LVS/GDS dispatch deferred to mcp-eda tool calls",
                       [str(log)])
@@ -18322,18 +18339,18 @@ def step_complexity_advisory(project: Path) -> StepResult:
                   f"fpga_early={recs.get('run_fpga_early_prototype')} "
                   f"sta_corners={recs.get('sta_corners')}) — ADVISORY only")
         print(f"[phase2] complexity advisory: {detail}")
-        return StepResult("complexity_advisory", "ADVISORY",
+        return StepResult("complexity_advisory", "PASS",
                           time.time() - t0, detail,
                           ["reports/phase2/complexity_advisory.json"],
                           extras={"score": result.score, "tier": result.tier,
                                   "recommendations": dict(recs),
-                                  "advisory_only": True})
+                                  "advisory_only": True}, disclosures=[_V.Disclosure.ADVISORY])
     except Exception as e:  # noqa: BLE001 — advisory must never fail the run
         detail = f"complexity advisory skipped (non-fatal): {e}"
         print(f"[phase2] {detail}")
-        return StepResult("complexity_advisory", "ADVISORY",
+        return StepResult("complexity_advisory", "PASS",
                           time.time() - t0, detail,
-                          extras={"advisory_only": True, "error": str(e)})
+                          extras={"advisory_only": True, "error": str(e)}, disclosures=[_V.Disclosure.ADVISORY])
 
 
 # -------------------------------------------------------------------------
@@ -19574,9 +19591,9 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
     rtl_dir = project / "phase2/stage1/rtl"
 
     if not netlist.is_file():
-        return [StepResult("dft_lec_chain", "SKIP", 0.0,
+        return [StepResult("dft_lec_chain", "NOT_MEASURED", 0.0,
                            "no phase2/stage2/synth/netlist.v (synth produced no "
-                           "mapped netlist) — DFT/post-DFT/LEC not applicable")]
+                           "mapped netlist) — DFT/post-DFT/LEC not applicable", reason_class=_V.ReasonClass.INPUT_ABSENT)]
 
     # ---- clock derivation (Fault ATPG needs the primary clock name) ----
     # Simple, robust: scan the RTL for input ports whose name looks like a
@@ -19632,9 +19649,9 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                            "lightweight/--skip-phase3 flow: heavy Fault ATPG "
                            "gated off (no silicon target for this run)",
                            {"gate_reason": "skip_phase3"})
-        results.append(StepResult("dft_insertion", "SKIP", time.time() - t0,
+        results.append(StepResult("dft_insertion", "NOT_APPLICABLE", time.time() - t0,
                        "DFT ATPG gated off on --skip-phase3 (disclosed-skip "
-                       "sentinel written); LEC still runs"))
+                       "sentinel written); LEC still runs", declared_by="--skip-phase3 declared by the operator"))
     elif not dft_authorized:
         _dft_disclose_skip(
             dft_dir / "dft_atpg_not_run.json",
@@ -19642,15 +19659,15 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
             f"consumer contract: {dft_contract_reason}",
             {"gate_reason": "l20_dft_contract"})
         results.append(StepResult(
-            "dft_insertion", "SKIP", time.time() - t0,
+            "dft_insertion", "NOT_APPLICABLE", time.time() - t0,
             f"DFT insertion and ATPG disclosed-skipped: {dft_contract_reason}; "
-            "LEC still runs on the pre-DFT netlist"))
+            "LEC still runs on the pre-DFT netlist", declared_by=dft_contract_reason))
     elif not clk:
         _dft_disclose_skip(dft_dir / "dft_atpg_not_run.json",
                            "no primary clock port derivable from RTL; Fault ATPG "
                            "requires --clock → DFT insertion disclosed-skipped")
-        results.append(StepResult("dft_insertion", "SKIP", time.time() - t0,
-                       "no derivable clock → DFT ATPG disclosed-skip"))
+        results.append(StepResult("dft_insertion", "NOT_MEASURED", time.time() - t0,
+                       "no derivable clock → DFT ATPG disclosed-skip", reason_class=_V.ReasonClass.INPUT_ABSENT))
     else:
         # PDK auto-detect from the netlist's cell prefixes so Fault ATPG uses
         # the right behavioural cell-model (sky130/gf180). A GENERIC yosys
@@ -19789,10 +19806,10 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                 {"skips_required_output": "phase2/stage2/dft/scan_netlist.v",
                  "scan_chain_report": "reports/phase2/dft/scan_chain.json"})
             results.append(StepResult(
-                "dft_scan_insertion", "SKIP", time.time() - _scan_t0,
+                "dft_scan_insertion", "NOT_MEASURED", time.time() - _scan_t0,
                 f"scan insertion produced no publishable netlist "
                 f"(rc={_scan_rc}) → disclosed-skip; ATPG continues on the "
-                f"pre-scan netlist"))
+                f"pre-scan netlist", reason_class=_V.ReasonClass.EXECUTION_ERROR))
         cov_json = reports_dir / "phase2/dft/coverage.json"
         cov_json.parent.mkdir(parents=True, exist_ok=True)
         cmd = [sys.executable, str(PROGRAMS_DIR / "fault_atpg_run.py"),
@@ -20028,7 +20045,7 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                 # never given a mapped netlist is the capability claim leaking
                 # back out through the console.
                 results.append(StepResult(
-                    "dft_insertion", "SKIP", time.time() - t0,
+                    "dft_insertion", "NOT_MEASURED", time.time() - t0,
                     # vibe-ic#2082 — a stall is neither of the other two, and
                     # the console line is where a reader looks first.
                     (f"DFT scan inserted; stuck-at ATPG STOPPED MAKING "
@@ -20043,7 +20060,7 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                     if not pdk else
                     (f"DFT scan inserted; OSS ATPG coverage "
                      f"engine-limited (pdk={pdk}) → "
-                     f"disclosed capability-gap")))
+                     f"disclosed capability-gap"), reason_class=_V.ReasonClass.STALLED))
         except _pr.Stalled as exc:
             # vibe-ic#581 — A TIMEOUT IS A BUDGET OUTCOME, NOT A CAPABILITY GAP.
             #
@@ -20103,15 +20120,15 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                  "not_run_stage": "producer_stalled",
                  "pdk_detected": pdk_label})
             results.append(StepResult(
-                "dft_insertion", "SKIP", time.time() - t0,
+                "dft_insertion", "NOT_MEASURED", time.time() - t0,
                 f"Fault ATPG stopped making forward progress → disclosed-skip "
-                f"(a stall, not a capability and not a clock)"))
+                f"(a stall, not a capability and not a clock)", reason_class=_V.ReasonClass.STALLED))
         except Exception as exc:
             _dft_disclose_skip(dft_dir / "dft_atpg_not_run.json",
                                f"Fault ATPG execution error: {exc}",
                                {"capability_flag": "cap:atpg_signoff_coverage"})
-            results.append(StepResult("dft_insertion", "SKIP", time.time() - t0,
-                           f"Fault ATPG errored ({exc}) → disclosed-skip"))
+            results.append(StepResult("dft_insertion", "NOT_MEASURED", time.time() - t0,
+                           f"Fault ATPG errored ({exc}) → disclosed-skip", reason_class=_V.ReasonClass.EXECUTION_ERROR))
 
     # ============ Step DT1 — Transition-delay-fault (LOC) ATPG =========
     # v1.3.97 — PRODUCE the TDF coverage from the Step-11 cut netlist, reusing
@@ -20310,14 +20327,14 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                     synth_dir / "post_dft_not_run.json",
                     f"yosys opt_clean of scan netlist failed (rc={rc}): "
                     f"{_evidence_tail(err or out, 200)}", _POST_DFT_SKIP_OWN)
-                results.append(StepResult("post_dft_opt", "SKIP",
+                results.append(StepResult("post_dft_opt", "NOT_MEASURED",
                                time.time() - t0,
-                               f"post-DFT opt failed (rc={rc}) → disclosed-skip"))
+                               f"post-DFT opt failed (rc={rc}) → disclosed-skip", reason_class=_V.ReasonClass.EXECUTION_ERROR))
         except Exception as exc:
             _dft_disclose_skip(synth_dir / "post_dft_not_run.json",
                                f"post-DFT opt error: {exc}", _POST_DFT_SKIP_OWN)
-            results.append(StepResult("post_dft_opt", "SKIP", time.time() - t0,
-                           f"post-DFT opt errored ({exc}) → disclosed-skip"))
+            results.append(StepResult("post_dft_opt", "NOT_MEASURED", time.time() - t0,
+                           f"post-DFT opt errored ({exc}) → disclosed-skip", reason_class=_V.ReasonClass.EXECUTION_ERROR))
     elif l20_declares_no_dft(project):
         # NOT a capability gap. The design declared no DFT, so step 11 stood
         # down on its own L20 contract and there is no scan chain in
@@ -20333,8 +20350,8 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
             "design's own declaration, not a capability the toolchain lacks.",
             _POST_DFT_SKIP_DECLARED)
         results.append(StepResult(
-            "post_dft_opt", "SKIP", time.time() - t0,
-            "design declares no DFT (L20) → post-DFT design-declared N/A"))
+            "post_dft_opt", "NOT_APPLICABLE", time.time() - t0,
+            "design declares no DFT (L20) → post-DFT design-declared N/A", declared_by="L20: the design declares no DFT"))
     else:
         # DFT was authorised, or the declaration is absent/unreadable rather
         # than negative, and a scan netlist still did not appear. That IS a
@@ -20344,8 +20361,8 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                            "no scan_netlist.v (DFT was disclosed-skipped) — "
                            "post-DFT optimization has no scan netlist to optimise",
                            _POST_DFT_SKIP_OWN)
-        results.append(StepResult("post_dft_opt", "SKIP", time.time() - t0,
-                       "no scan netlist → post-DFT disclosed-skip"))
+        results.append(StepResult("post_dft_opt", "NOT_MEASURED", time.time() - t0,
+                       "no scan netlist → post-DFT disclosed-skip", reason_class=_V.ReasonClass.INPUT_ABSENT))
 
     # ================= Step 13 — LEC (RTL ≡ handoff netlist) =================
     # lec_run's retries share ONE total deadline, and the runner reads that
@@ -20466,21 +20483,21 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                 _dft_disclose_skip(reports_dir / "lec_not_run.json",
                                    f"lec_run produced no reports/lec.json "
                                    f"(rc={r.returncode}): {tail}")
-                results.append(StepResult("lec_equivalence", "SKIP",
+                results.append(StepResult("lec_equivalence", "NOT_MEASURED",
                                time.time() - t0,
                                f"LEC produced no report (rc={r.returncode}) → "
-                               f"disclosed-skip"))
+                               f"disclosed-skip", reason_class=_V.ReasonClass.EXECUTION_ERROR))
         except Exception as exc:
             _dft_disclose_skip(reports_dir / "lec_not_run.json",
                                f"lec_run execution error: {exc}")
-            results.append(StepResult("lec_equivalence", "SKIP", time.time() - t0,
-                           f"LEC errored ({exc}) → disclosed-skip"))
+            results.append(StepResult("lec_equivalence", "NOT_MEASURED", time.time() - t0,
+                           f"LEC errored ({exc}) → disclosed-skip", reason_class=_V.ReasonClass.EXECUTION_ERROR))
     else:
         _dft_disclose_skip(reports_dir / "lec_not_run.json",
                            "lec_run.py not present in plugin — LEC producer "
                            "unavailable")
-        results.append(StepResult("lec_equivalence", "SKIP", time.time() - t0,
-                       "lec_run.py missing → disclosed-skip"))
+        results.append(StepResult("lec_equivalence", "NOT_MEASURED", time.time() - t0,
+                       "lec_run.py missing → disclosed-skip", reason_class=_V.ReasonClass.TOOL_ABSENT))
     return results
 
 
@@ -20582,20 +20599,20 @@ def step_verilator_coverage(project: Path, top_name: str = "",
     # union is 98.52%.
     rtl, tbs = _vcm.discover_measure_testbenches(project)
     if not rtl:
-        return StepResult("verilator_coverage", "SKIP", time.time() - t0,
-                          "no RTL sources to instrument", [])
+        return StepResult("verilator_coverage", "NOT_MEASURED", time.time() - t0,
+                          "no RTL sources to instrument", [], reason_class=_V.ReasonClass.INPUT_ABSENT)
     if not tbs:
-        return StepResult("verilator_coverage", "SKIP", time.time() - t0,
+        return StepResult("verilator_coverage", "NOT_MEASURED", time.time() - t0,
                           "no testbench to instrument — coverage cannot be "
-                          "measured without a stimulus that actually ran", [])
+                          "measured without a stimulus that actually ran", [], reason_class=_V.ReasonClass.INPUT_ABSENT)
     tb = tbs[0]
     have = bool(container and _tool_in_container(container, "verilator")) \
         or bool(_shutil.which("verilator"))
     if not have:
-        return StepResult("verilator_coverage", "SKIP", time.time() - t0,
+        return StepResult("verilator_coverage", "NOT_MEASURED", time.time() - t0,
                           "verilator not reachable (neither in container "
                           f"{container!r} nor on host PATH) — no measurement "
-                          "taken, and none invented", [])
+                          "taken, and none invented", [], reason_class=_V.ReasonClass.TOOL_ABSENT)
 
     out_path = _pl.report_path(project, _vcm.COVERAGE_MEASUREMENT_REL)
     # Build under the sim tree, not under reports/: reports/ is the signed
@@ -20630,23 +20647,23 @@ def step_verilator_coverage(project: Path, top_name: str = "",
             exec_fn=_verilator_stage_exec(container),
             build_jobs=_eda_thread_count(), mounts=_cov_mounts)
         if not _suite["dats"]:
-            return StepResult("verilator_coverage", "SKIP", time.time() - t0,
+            return StepResult("verilator_coverage", "NOT_MEASURED", time.time() - t0,
                               "no testbench produced coverage points — "
                               "refusing to report a measurement nothing "
-                              "measured", [])
+                              "measured", [], reason_class=_V.ReasonClass.NO_POPULATION)
         dat = _suite["dats"][0]
         tb = (_suite["measured"] or [str(tb)])[0]
         cov = _suite["cov"]
         scoped = _vcm.scope_totals(cov, [str(x) for x in rtl])
     except SystemExit as exc:
-        return StepResult("verilator_coverage", "SKIP", time.time() - t0,
+        return StepResult("verilator_coverage", "NOT_MEASURED", time.time() - t0,
                           f"coverage instrumentation did not produce a "
-                          f"measurement: {exc}", [])
+                          f"measurement: {exc}", [], reason_class=_V.ReasonClass.EXECUTION_ERROR)
     if scoped is None:
-        return StepResult("verilator_coverage", "SKIP", time.time() - t0,
+        return StepResult("verilator_coverage", "NOT_MEASURED", time.time() - t0,
                           "the instrumented run recorded no coverage points "
                           "for the RTL sources — refusing to report the "
-                          "testbench's own coverage as the design's", [])
+                          "testbench's own coverage as the design's", [], reason_class=_V.ReasonClass.NO_POPULATION)
     payload = {
         "tool": "verilator",
         "measurement_mode": "measure-tb",
@@ -20756,28 +20773,28 @@ def step_arith_declaration_emit(project: Path) -> StepResult:
                               f"[{_fields_of(out_p)}]", [str(out_p)])
         reason = (spec_cp.stderr or spec_cp.stdout
                   or "").strip().replace("\n", " ")[:400]
-        return StepResult("arith_declaration_emit", "SKIP", time.time() - t0,
+        return StepResult("arith_declaration_emit", "NOT_MEASURED", time.time() - t0,
                           f"spec_declaration_emit fail-closed "
                           f"(rc={spec_cp.returncode}); no file written — "
-                          f"{reason}")
+                          f"{reason}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
 
     # 2. No spec-declared contract — the previous behaviour, byte for byte.
     prog = PROGRAMS_DIR / "arith_declaration_emit.py"
     if not prog.is_file():
-        return StepResult("arith_declaration_emit", "SKIP", time.time() - t0,
-                          f"emitter not present at {prog}")
+        return StepResult("arith_declaration_emit", "NOT_MEASURED", time.time() - t0,
+                          f"emitter not present at {prog}", reason_class=_V.ReasonClass.TOOL_ABSENT)
     cp = _run("arith_declaration_emit.py")
     if cp is None:
-        return StepResult("arith_declaration_emit", "SKIP", time.time() - t0,
-                          "emitter did not run")
+        return StepResult("arith_declaration_emit", "NOT_MEASURED", time.time() - t0,
+                          "emitter did not run", reason_class=_V.ReasonClass.NOT_EXECUTED)
     if cp.returncode == 0 and out_p.is_file():
         return StepResult("arith_declaration_emit", "PASS", time.time() - t0,
                           f"emitted plugin_output/declaration.json "
                           f"[{_fields_of(out_p)}]", [str(out_p)])
     reason = (cp.stderr or cp.stdout or "").strip().replace("\n", " ")[:400]
-    return StepResult("arith_declaration_emit", "SKIP", time.time() - t0,
+    return StepResult("arith_declaration_emit", "NOT_MEASURED", time.time() - t0,
                       f"emitter fail-closed (rc={cp.returncode}); no file "
-                      f"written — {reason}")
+                      f"written — {reason}", reason_class=_V.ReasonClass.EXECUTION_ERROR)
 
 
 def step_emit_phase2_manifests(project: Path,
@@ -21766,11 +21783,11 @@ def step_final_audit(project: Path, phase: int = 3,
         # an unmeasured gate into a pass; it names the unmeasured population so
         # the pass stops implying one.
         if no_verdict:
-            return StepResult("final_audit", "INCOMPLETE",
+            return StepResult("final_audit", "NOT_MEASURED",
                               time.time() - t0,
                               head,
                               [str(transcript)],
-                              extras={"structural_measurement": meas})
+                              extras={"structural_measurement": meas}, reason_class=_V.ReasonClass.PARTIAL_POPULATION)
         status = ("WAIVED" if "Overall: PASS_WITH_WAIVERS" in out
                   else "PASS")
         return StepResult("final_audit", status,
@@ -21909,10 +21926,10 @@ def step_agent_report_presence(project: Path) -> StepResult:
         row["verdict"] = "NOT_MEASURED"
         row["reason"] = f"{type(exc).__name__}: {exc}"
         return StepResult(
-            "agent_report_presence", "ADVISORY", time.time() - t0,
+            "agent_report_presence", "PASS", time.time() - t0,
             f"agent report presence NOT_MEASURED — the gate raised "
             f"{type(exc).__name__}: {exc}",
-            extras={"agent_report_presence": row})
+            extras={"agent_report_presence": row}, disclosures=[_V.Disclosure.ADVISORY])
     row["rc"] = rc
     try:
         rep = json.loads(out.read_text())
@@ -21940,9 +21957,9 @@ def step_agent_report_presence(project: Path) -> StepResult:
                   + " | the report this flow does produce: "
                   + ", ".join(f"{k}={'present' if v else 'absent'}"
                               for k, v in row["canonical_report"].items()))
-    return StepResult("agent_report_presence", "ADVISORY", time.time() - t0,
+    return StepResult("agent_report_presence", "PASS", time.time() - t0,
                       detail, output_files=[str(out)],
-                      extras={"agent_report_presence": row})
+                      extras={"agent_report_presence": row}, disclosures=[_V.Disclosure.ADVISORY])
 
 
 # -------------------------------------------------------------------------
@@ -22159,10 +22176,10 @@ def main() -> int:
         # Named so the report can never read as "the site was attempted and
         # produced nothing" — same disclosure rule as SKIPPED-BY-ENTRY.
         return StepResult(
-            site_name, "SKIPPED-BY-EXIT", 0.0,
+            site_name, "NOT_APPLICABLE", 0.0,
             f"run declared --exit-step {args.exit_step}; this site's whole "
             f"span starts after it and was not dispatched. Its artefacts "
-            f"are outside this run's declared proof burden, not missing.")
+            f"are outside this run's declared proof burden, not missing.", declared_by=f"--exit-step {args.exit_step}")
 
     # ── ENTRY ADMISSION (2026-08-25) ─────────────────────────────────────
     # Asked BEFORE the lock, because a run that cannot legally start should not
@@ -22324,10 +22341,10 @@ def main() -> int:
         # --entry-step; the status is named so the report can never read as
         # "RTL generation was attempted and produced nothing".
         plan.append(StepResult(
-            "rtl_gen", "SKIPPED-BY-ENTRY", 0.0,
+            "rtl_gen", "NOT_APPLICABLE", 0.0,
             f"run declared --entry-step {args.entry_step} (site "
             f"{_entry_site!r}); this site is upstream of it and was not "
-            f"dispatched. Its artefacts were supplied, not produced here."))
+            f"dispatched. Its artefacts were supplied, not produced here.", declared_by=f"--entry-step {args.entry_step}"))
     elif _after_exit("rtl_gen"):
         plan.append(_exit_sentinel("rtl_gen"))
     else:
@@ -22380,9 +22397,9 @@ def main() -> int:
     # for exactly that — it caught this pair the moment the sites were declared.
     if _before_entry("rtl_validate", _entry_site):
         plan.append(StepResult(
-            "rtl_validate", "SKIPPED-BY-ENTRY", 0.0,
+            "rtl_validate", "NOT_APPLICABLE", 0.0,
             f"run declared --entry-step {args.entry_step} (site "
-            f"{_entry_site!r}); this site is upstream of it."))
+            f"{_entry_site!r}); this site is upstream of it.", declared_by=f"--entry-step {args.entry_step}"))
     elif _after_exit("rtl_validate"):
         plan.append(_exit_sentinel("rtl_validate"))
     else:
@@ -22667,20 +22684,20 @@ def main() -> int:
             # sentinel SKIPPED-BY-ENTRY with WAIVED.  Preserve the candidate
             # for the dispatcher's hash-bound AI review/repair handoff.
             plan.append(StepResult(
-                "rtl_repair_retry_iter", "SKIP", 0.0,
+                "rtl_repair_retry_iter", "NOT_APPLICABLE", 0.0,
                 "reference TB did not pass, but rtl_gen is upstream of the "
                 f"declared --entry-step {args.entry_step}; PROGRAM RTL "
                 "regeneration was not dispatched. Preserve the supplied RTL "
                 "for hash-bound AI review/repair.",
                 extras={"fallback_skill": "rtl-repair",
-                        "candidate_owner": "SUPPLIED_RTL"}))
+                        "candidate_owner": "SUPPLIED_RTL"}, declared_by=f"--entry-step {args.entry_step}"))
             break
         rtl_repair_retry += 1
-        plan.append(StepResult("rtl_repair_retry_iter", "RTL_REPAIR_RETRY",
+        plan.append(StepResult("rtl_repair_retry_iter", "PASS",
                                0.0,
                                f"ref_tb FAIL → RTL repair retry "
                                f"{rtl_repair_retry}/"
-                               f"{args.max_rtl_repair_retries}"))
+                               f"{args.max_rtl_repair_retries}", disclosures=[_V.Disclosure.PROGRESS_MARKER]))
         # Repair body: re-run RTL gen (idempotent if already current).
         plan.append(step_rtl_gen(project, ic_class))
         new_rtl_hash = _rtl_dir_sha256(project)
@@ -22722,7 +22739,7 @@ def main() -> int:
             steps_txt = " | ".join(hint["next_steps"][:3])
             _fb_note, _fb_skill = _rtl_repair_inert_fallback(ic_class)
             plan.append(StepResult(
-                "rtl_repair_retry_iter", "FAIL_RTL_REPAIR_INERT", 0.0,
+                "rtl_repair_retry_iter", "FAIL", 0.0,
                 (f"RTL repair retry {rtl_repair_retry} produced "
                  f"byte-identical RTL "
                  f"(sha256={new_rtl_hash[:16]}...) to the prior "
@@ -22784,12 +22801,12 @@ def main() -> int:
         otp_sr = step_otp_image_check(project)
         plan.append(otp_sr)
         if otp_sr.status == "FAIL":
-            plan.append(StepResult("fpga_compile", "SKIP", 0.0,
+            plan.append(StepResult("fpga_compile", "NOT_MEASURED", 0.0,
                                    "skipped: OTP image gate FAILed — "
                                    "Quartus would fail on missing init_file. "
-                                   "Stage real OTP image then re-run."))
-            plan.append(StepResult("fpga_burn", "SKIP", 0.0,
-                                   "skipped: no SOF (fpga_compile skipped)"))
+                                   "Stage real OTP image then re-run.", reason_class=_V.ReasonClass.UPSTREAM_FAILED))
+            plan.append(StepResult("fpga_burn", "NOT_MEASURED", 0.0,
+                                   "skipped: no SOF (fpga_compile skipped)", reason_class=_V.ReasonClass.INPUT_ABSENT))
         else:
             plan.append(step_fpga_compile(project, args.top_name, args.container))
             # Regenerate final_summary.md so the attestation table reflects
@@ -22826,11 +22843,11 @@ def main() -> int:
                     rtl_repair_retry >= args.max_rtl_repair_retries):
                 break
             rtl_repair_retry += 1
-            plan.append(StepResult("rtl_repair_retry_iter", "RTL_REPAIR_RETRY",
+            plan.append(StepResult("rtl_repair_retry_iter", "PASS",
                                    0.0,
                                    f"<half-duplex-tester> FAIL → RTL repair "
                                    f"retry {rtl_repair_retry}/"
-                                   f"{args.max_rtl_repair_retries}"))
+                                   f"{args.max_rtl_repair_retries}", disclosures=[_V.Disclosure.PROGRESS_MARKER]))
             plan.append(step_rtl_gen(project, ic_class))
             new_rtl_hash = _rtl_dir_sha256(project)
             # vibe-ic#2225 — the gates this producer had starved. AFTER the digest
@@ -22879,7 +22896,7 @@ def main() -> int:
                 steps_txt = " | ".join(hint["next_steps"][:3])
                 _fb_note, _fb_skill = _rtl_repair_inert_fallback(ic_class)
                 plan.append(StepResult(
-                    "rtl_repair_retry_iter", "FAIL_RTL_REPAIR_INERT", 0.0,
+                    "rtl_repair_retry_iter", "FAIL", 0.0,
                     (f"RTL repair retry {rtl_repair_retry} produced "
                      f"byte-identical "
                      f"RTL (sha256={new_rtl_hash[:16]}...) to the "
@@ -23051,106 +23068,44 @@ def main() -> int:
 
 
 def _aggregate_verdict(plan: List[StepResult]) -> str:
-    # v1.6.153 (#60 P0-4) — STALE_BOARD_DETECTED counts as FAIL.
-    # Anti-fabrication rule: a sub-gate that didn't execute in this
-    # pipeline cannot contribute to a downstream PASS verdict.
-    # BLOCKED — "refused for want of a declared input; the step never ran, so
-    # nothing is known". Named EXPLICITLY because everything this function does
-    # not enumerate falls through to the catch-all `return "PASS"` below: a
-    # pre-flight refusal that produced a green run would be strictly worse than
-    # the mis-attribution it was added to prevent.
-    _FAIL_STATUSES = ("FAIL", "FAIL_RTL_REPAIR_INERT", "STALE_BOARD_DETECTED",
-                      "BLOCKED")
-    # THE CATCH-ALL IS NOW TOTAL. The comment above already names the hazard —
-    # "everything this function does not enumerate falls through to the
-    # catch-all `return "PASS"`" — and BLOCKED was added by hand once that bit.
-    # It bit again: SKIP is the MOST COMMON status this runner emits (53 call
-    # sites vs 34 FAIL and 22 PASS) and it was never enumerated, so it reached
-    # the same silent PASS.
-    #
-    # Enumerating every status the runner can emit means the next one invented
-    # cannot arrive as a silent pass. An unknown status is now reported rather
-    # than absorbed: it is NOT treated as a failure (that would turn a naming
-    # change into a red run), but it is never invisible.
-    _GREEN_STATUSES = ("PASS", "ADVISORY", "RTL_REPAIR_RETRY")
-    # ADVISORY is non-blocking BY CONTRACT (see _estimate_* — "status is always
-    # ADVISORY ... so this step cannot change _aggregate_verdict"). RTL_REPAIR_RETRY is
-    # a progress marker for an iteration, not a verdict; the iteration's outcome
-    # is carried by the steps around it.
-    # SKIPPED-CONDITION is a second skip spelling (rtl_gen and two verdict
-    # payloads). It was found by the totality test scraping the runner's own
-    # StepResult constructions rather than by anyone listing them here — which
-    # is the point of discovering the vocabulary instead of typing it.
-    # SKIPPED-BY-ENTRY is a SKIP, not a silence: the step was deliberately not
-    # dispatched because --entry-step declared an entry downstream of it. Left
-    # unclassified it reaches the `unknown` branch below, which prints a loud
-    # stderr warning on every legitimate mid-flow entry — correct behaviour for
-    # a status nobody classified, and noise once it is a designed one.
-    # SKIPPED-BY-EXIT is the same designed skip at the OTHER end of the run:
-    # --exit-step declared the exit upstream of the site, so the site was
-    # deliberately not dispatched and cannot pull the verdict either way.
-    _SKIP_STATUSES = ("SKIP", "SKIPPED-CONDITION", "SKIPPED-BY-ENTRY",
-                      "SKIPPED-BY-EXIT")
-    # INCOMPLETE — the step ran and disclosed that it judged a FRACTION of the
-    # population it is named for (`step_final_audit`, when the structural
-    # umbrella left registered > invoked). Not a failure: the gates that did not
-    # run said nothing about the design. Not green either: a step that measured
-    # part of its population has not certified the whole of it. Classified
-    # here so it cannot arrive as a silent PASS through the catch-all, and
-    # counted with WAIVED so the RUN-level word this function returns is
-    # unchanged — the new distinction lives at the STEP verdict, which is where
-    # the fact belongs and where nothing could state it before.
-    # NOT_EXECUTED — the step dispatched a simulation and NOTHING RAN (no
-    # reachable simulator). Counted with WAIVED/INCOMPLETE: it is not a
-    # failure of the design (nothing accused it) and it is emphatically not
-    # green, so the run reports PASS_WITH_WAIVERS and the step keeps the word
-    # that says which of the three it is. Enumerating it here is what stops it
-    # reaching the catch-all `return "PASS"` below.
-    # The LITERAL, not `NOT_EXECUTED_STATUS`: this function is extracted from
-    # the shipped source and exec'd in isolation by
-    # `test_design_verdict_has_no_silent_catch_all`, so a module-global
-    # reference here is a NameError in the very test that proves no status
-    # reaches the catch-all. The two spellings are pinned to each other by
-    # `test_rphase2_full_stack_tb_executed_not_merely_written`.
-    _INCOMPLETE_STATUSES = ("INCOMPLETE", "NOT_EXECUTED")
-    _KNOWN = (set(_FAIL_STATUSES) | set(_GREEN_STATUSES)
-              | set(_SKIP_STATUSES) | set(_INCOMPLETE_STATUSES) | {"WAIVED"})
+    """The run's verdict, from `verdict.run_verdict`. ONE rule for the flow.
 
-    has_fail = any(s.status in _FAIL_STATUSES for s in plan)
-    has_waived = any(s.status == "WAIVED"
-                     or s.status in _INCOMPLETE_STATUSES for s in plan)
-    unknown = sorted({s.status for s in plan if s.status not in _KNOWN})
-    if unknown:
-        # Loud, and on stderr so it survives a caller that reads only stdout.
-        print(f"design_one_shot_runner: UNCLASSIFIED step status(es) "
-              f"{unknown} reached the verdict aggregator. They are not counted "
-              f"as failures, and they are not silently green either — classify "
-              f"them in _aggregate_verdict before relying on this verdict.",
-              file=sys.stderr)
-    if has_fail:
-        return "FAIL"
-    if has_waived:
-        return "PASS_WITH_WAIVERS"
+    WHAT THIS REPLACES, and why the replacement is a deletion rather than a
+    migration. Every one-shot runner carried its own hand-maintained lists of
+    which words meant what, and the lists disagreed: phase 2 read `SKIP` as
+    clean while phase 3 read the identical word as a waiver, over the same
+    forty-four steps. This function's own predecessor said so in its comments
+    and declined to fix it because fixing it "would restate every published
+    phase-2 result". R-0915-85 is the decision to restate them: there is one
+    vocabulary, five words, and one roll-up — `verdict.run_verdict` — whose
+    precedence is FAIL > NOT_MEASURED > PASS_WITH_WAIVERS > PASS.
 
-    # DISCLOSED, NOT RECLASSIFIED. A bare PASS carrying SKIPs is the defect the
-    # 63x8 round-2 review recorded: phase 3 reads SKIP as PASS_WITH_WAIVERS
-    # (see phase3_one_shot_runner, "reads SKIP as PASS_WITH_WAIVERS"), phase 2
-    # reads the identical word as clean. Because the phase-2 verdict is PASS
-    # and not PASS_WITH_WAIVERS, no waivers.json entry is required or
-    # auto-generated, so a disclosed skip never reaches the must-close list.
-    #
-    # The verdict is NOT changed here on purpose: doing so would restate every
-    # published phase-2 result, which is a call for whoever owns the benchmark
-    # contract, not for this function. Tracked as a vibe-ic issue with the
-    # measurement. What changes is that the gap can no longer be silent.
-    skipped = [s.name for s in plan if s.status in _SKIP_STATUSES]
-    if skipped:
-        print(f"design_one_shot_runner: verdict PASS carries "
-              f"{len(skipped)} SKIPPED step(s) that are NOT tracked as "
-              f"waivers and therefore reach no must-close list: "
-              f"{', '.join(sorted(skipped))}. Phase 3 reads the same word as "
-              f"PASS_WITH_WAIVERS.", file=sys.stderr)
-    return "PASS"
+    The catch-all is gone by construction, not by enumeration: `verdict.parse`
+    refuses a word outside the five at the row that carries it.
+    """
+    return _V.run_verdict(_step_verdicts(plan)).value
+
+
+def _step_verdicts(plan):
+    """This runner's own rows, as `verdict.StepVerdict` records.
+
+    One conversion, here, so no consumer re-derives the structured fields from
+    a `StepResult` and no two of them do it differently.
+    """
+    for s in plan:
+        yield _V.StepVerdict(
+            verdict=_V.parse(s.status),
+            step_id=getattr(s, "name", ""), name=getattr(s, "name", ""),
+            reason_class=(_V.ReasonClass(s.reason_class)
+                          if getattr(s, "reason_class", "") else None),
+            reason=getattr(s, "detail", "") or "",
+            declared_by=getattr(s, "declared_by", "") or "",
+            waiver_rows=[_V.WaiverRow(**w)
+                         for w in (getattr(s, "waiver_rows", None) or [])],
+            attribution=getattr(s, "attribution", "") or "",
+            disclosures=list(getattr(s, "disclosures", None) or ()),
+        )
+
 
 
 if __name__ == "__main__":

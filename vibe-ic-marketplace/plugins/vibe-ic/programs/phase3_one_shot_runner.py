@@ -81,6 +81,7 @@ from pathlib import Path, PurePosixPath
 from typing import (Any, Callable, Dict, FrozenSet, Iterable, List,
                     NamedTuple, Optional, Sequence, Set, Tuple)
 import _path_layout as _pl
+import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _prose_polarity as _pp
 import _runner_measurement as _rmeas
@@ -585,6 +586,22 @@ class StepResult:
     detail: str = ""
     output_files: List[str] = field(default_factory=list)
     extras: Dict[str, Any] = field(default_factory=dict)
+    # ── the structured fields R-0915-85 put beside the verdict ──────────
+    # `status` above is now one of the FIVE words in `programs/verdict.py`, and
+    # every distinction the deleted vocabulary carried lives here. The module's
+    # DESIGN section says why; `_V.StepVerdict` is where the same rules are
+    # enforced for readers. Validated in `__post_init__` below, so a site that
+    # says NOT_MEASURED without a reason — or NOT_APPLICABLE without naming the
+    # input line that declares it — is a loud error where it is written, not a
+    # quiet hole in a published report.
+    reason_class: str = ""
+    declared_by: str = ""
+    waiver_rows: List[Dict[str, str]] = field(default_factory=list)
+    attribution: str = ""
+    disclosures: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        _V.validate_step_row(self)
 
 
 # v1.6.54 — verdict-tier vocabulary. ENV_UNAVAILABLE distinguishes
@@ -637,7 +654,7 @@ def _preflight_refusal(name: str):
     (FAIL).
     """
     def _mk(detail: str, extras: Dict[str, Any]) -> StepResult:
-        return StepResult(name, _spf.REFUSAL_STATUS, 0.0, detail, extras=extras)
+        return StepResult(name, _spf.REFUSAL_STATUS, 0.0, detail, extras=extras, reason_class=_spf.REFUSAL_REASON_CLASS)
     return _mk
 
 
@@ -12746,7 +12763,7 @@ def _run_producer(step: str, cmd: List[str], t0: float, *,
         cp = _pr.run(cmd, capture_output=True, text=True, errors="replace")
     except _pr.Stalled as exc:
         return None, StepResult(
-            step, "BLOCKED", time.time() - t0,
+            step, "NOT_MEASURED", time.time() - t0,
             f"{noun} STALLED: {exc}. It was launched and then made no forward "
             f"progress on ANY readable signal, so it was stopped as hung -- "
             f"this is not a slow host and not a missing tool, and NOTHING is "
@@ -12754,11 +12771,11 @@ def _run_producer(step: str, cmd: List[str], t0: float, *,
             extras={"stopped_as": "STALLED",
                     "stall_looks": getattr(exc, "looks", None),
                     "stall_elapsed_s": getattr(exc, "elapsed_s", None),
-                    "stall_signals": getattr(exc, "signals", None)})
+                    "stall_signals": getattr(exc, "signals", None)}, reason_class=_V.ReasonClass.STALLED)
     except OSError as exc:
         return None, StepResult(
-            step, "ENV_UNAVAILABLE", time.time() - t0,
-            f"{noun} could not be launched: {exc}")
+            step, "NOT_MEASURED", time.time() - t0,
+            f"{noun} could not be launched: {exc}", reason_class=_V.ReasonClass.TOOL_ABSENT)
     return cp, None
 
 
@@ -30196,11 +30213,11 @@ def _padring_producer_dispatch(project: Path,
         return step_io_pad_chip_top_gen(project, container, pdk)
     declared, why = _declaration_deliverable_answer(project)
     return StepResult(
-        "io_pad_chip_top_gen", "SKIP", 0.0,
+        "io_pad_chip_top_gen", "NOT_APPLICABLE", 0.0,
         f"no pad ring is built for this delivery (deliverable="
         f"{declared or 'UNDECLARED'}; {why}), so step 15.5ic's IO pad "
         f"chip-top producer is not dispatched. Dispatching it would write a "
-        f"die_required_um that pins the floorplan to a ring nothing places.")
+        f"die_required_um that pins the floorplan to a ring nothing places.", declared_by=f"deliverable={declared or 'UNDECLARED'}; {why}")
 
 
 def _declaration_deliverable_answer(project: Path) -> Tuple[Optional[str], str]:
@@ -30467,8 +30484,8 @@ def step_io_pad_chip_top_gen(project: Path, container: Optional[str] = None,
         ])
     prog = PROGRAMS_DIR / "io_pad_chip_top_gen.py"
     if not prog.is_file():  # pragma: no cover - shipped tree always has it
-        return StepResult("io_pad_chip_top_gen", "ENV_UNAVAILABLE",
-                          time.time() - t0, "program absent")
+        return StepResult("io_pad_chip_top_gen", "NOT_MEASURED",
+                          time.time() - t0, "program absent", reason_class=_V.ReasonClass.TOOL_ABSENT)
     if container:
         prog_c = _to_container_path(str(prog), container)
         project_c = _to_container_path(str(project), container)
@@ -33492,7 +33509,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                          "bterms": int(b)} for n, t, i, b in _unrouted]})
     if _pg_audit is None:
         return StepResult(
-            "pnr", "BLOCKED", time.time() - t0,
+            "pnr", "NOT_MEASURED", time.time() - t0,
             ("PG_NET_OWNERSHIP_UNMEASURED: the routed design emitted no "
              "PG_NET_OWNERSHIP_AUDIT line, so it is not known whether the "
              "power/ground terminals of the placed instances are attached to "
@@ -33502,18 +33519,18 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
              "A PnR result whose PG terminals were never even counted is not a "
              "sign-off result — it is the exact state in which orphaned "
              "physical-only cells ship unnoticed."),
-            _pg_evidence, extras={"finding": "PG_NET_OWNERSHIP_UNMEASURED"})
+            _pg_evidence, extras={"finding": "PG_NET_OWNERSHIP_UNMEASURED"}, reason_class=_V.ReasonClass.INPUT_ABSENT)
     _pg_total, _pg_bad, _pg_masters = _pg_audit
     if _pg_total == 0:
         return StepResult(
-            "pnr", "BLOCKED", time.time() - t0,
+            "pnr", "NOT_MEASURED", time.time() - t0,
             ("PG_NET_OWNERSHIP_ZERO_TERMINALS: the design reports zero POWER/"
              "GROUND instance terminals. Either the cell library declares no "
              "PG pins or the audit could not read them; either way not even "
              "net ownership was established and the result cannot be signed "
              "off."),
             _pg_evidence, extras={"finding": "PG_NET_OWNERSHIP_ZERO_TERMINALS",
-                                  "pg_terminals_total": _pg_total})
+                                  "pg_terminals_total": _pg_total}, reason_class=_V.ReasonClass.INPUT_ABSENT)
     if _pg_bad > 0:
         _pg_pct = 100.0 * _pg_bad / _pg_total
         return StepResult(
@@ -33686,10 +33703,10 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _pdn_verdict, _pdn_mk = _pnr_pdn_grid_verdict(project)
     if _pdn_verdict == "BAD":
         return StepResult(
-            "pnr", "BLOCKED", time.time() - t0,
+            "pnr", "NOT_MEASURED", time.time() - t0,
             f"power grid not connected — {_pdn_mk}. {detail}",
             pnr_outputs,
-            extras={"pdn_status": _pdn_mk, **spare_extras})
+            extras={"pdn_status": _pdn_mk, **spare_extras}, reason_class=_V.ReasonClass.INPUT_ABSENT)
     detail += f" | pdn: {_pdn_mk}"
     # Which netlist was actually built, in the step record itself. A run that
     # routed a chainless netlist must say so rather than look like any other
@@ -38676,8 +38693,10 @@ def _vacuous_on_unrouted(project: Path, step_name: str,
     the fact was never recorded, so a healthy run is untouched."""
     if routing_is_incomplete(project) is not True:
         return None
-    return StepResult(step_name, "VACUOUS_PASS", time.time() - t0,
-                      _ROUTING_INCOMPLETE_NOTE)
+    return StepResult(step_name, "NOT_MEASURED", time.time() - t0,
+                      _ROUTING_INCOMPLETE_NOTE,
+                      reason_class=_V.ReasonClass.NO_POPULATION,
+                      disclosures=[_V.Disclosure.VACUITY])
 
 
 def _sha256_file(path: Path) -> str:
@@ -40226,8 +40245,8 @@ def step_gds(project: Path, top: str, pdk: PdkConfig,
     def_file = pnr_dir / f"{top}.def"
     gds_out = pnr_dir / f"{top}.gds"
     if not def_file.is_file():
-        return StepResult("gds", "SKIP", time.time() - t0,
-                          f"DEF missing: {def_file}")
+        return StepResult("gds", "NOT_MEASURED", time.time() - t0,
+                          f"DEF missing: {def_file}", reason_class=_V.ReasonClass.INPUT_ABSENT)
 
     # THE STREAM-OUT IS WHERE THE TECHNOLOGY IS BOUND, so it is where the
     # database unit gets DECLARED rather than left NOT_DETERMINED forever.
@@ -41788,7 +41807,7 @@ def _try_svrf_native_drc(project: Path, top: str, pdk: PdkConfig,
                 124: "hit the pathological-loop backstop"}.get(
                     rc, f"was stopped (rc={rc})")
         return StepResult(
-            "drc", "BLOCKED", time.time() - t0,
+            "drc", "NOT_MEASURED", time.time() - t0,
             f"svrf-native commercial DRC {_why} (rc={rc}) — a svrfdrc performance "
             f"ceiling on large/dense geometry (single-thread derived-layer "
             f"build), NOT a proven violation. No sign-off from a partial report; "
@@ -41804,7 +41823,7 @@ def _try_svrf_native_drc(project: Path, top: str, pdk: PdkConfig,
                     "stopped_as": {_RC_ABORTED: "ABORTED_NO_OUTPUT",
                                    _RC_STALLED: "STALLED",
                                    124: "CEILING"}.get(rc, f"rc={rc}"),
-                    "abort_reason_tail": (err or "")[-300:]})
+                    "abort_reason_tail": (err or "")[-300:]}, reason_class=_V.ReasonClass.EXECUTION_ERROR)
     if not rpt.is_file():
         return StepResult("drc", "FAIL", time.time() - t0,
                           f"svrf-native commercial DRC produced no report; "
@@ -41919,7 +41938,7 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
                 _gds_p = _pl.pnr_dir(project) / f"{top}.gds"
                 if _svrf_bin is not None and not _gds_p.is_file():
                     return StepResult(
-                        "drc", "SKIP", time.time() - t0,
+                        "drc", "NOT_MEASURED", time.time() - t0,
                         f"DRC_NO_LAYOUT: the native sign-off engine IS present "
                         f"in container {container!r} ({_svrf_bin}), but there is "
                         f"no layout to check — {_gds_p} does not exist, so an "
@@ -41929,9 +41948,9 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
                         extras={"calibre_drc_deck": pdk.calibre_drc,
                                 "gds": str(_gds_p),
                                 "svrfdrc_bin": _svrf_bin,
-                                "missing_input": "gds"})
+                                "missing_input": "gds"}, reason_class=_V.ReasonClass.INPUT_ABSENT)
                 return StepResult(
-                    "drc", "ENV_UNAVAILABLE", time.time() - t0,
+                    "drc", "NOT_MEASURED", time.time() - t0,
                     f"Calibre DRC deck present at {pdk.calibre_drc} but the "
                     f"native `svrfdrc` buddy was not found on PATH in container "
                     f"{container!r} (env VIBE_IC_SVRFDRC_BIN overrides the "
@@ -41941,31 +41960,31 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
                     f"it. ENV gap, not a design defect.",
                     extras={"calibre_drc_deck": pdk.calibre_drc,
                             "gds": str(_pl.pnr_dir(project) / f"{top}.gds"),
-                            "missing_tool": "calibre|svrfdrc"})
+                            "missing_tool": "calibre|svrfdrc"}, reason_class=_V.ReasonClass.TOOL_ABSENT)
             return StepResult(
-                "drc", "WAIVED", time.time() - t0,
+                "drc", "PASS_WITH_WAIVERS", time.time() - t0,
                 f"Calibre DRC deck present at {pdk.calibre_drc} and "
                 f"`calibre` binary available — runner does not invoke "
                 f"Calibre directly; run `calibre -drc -hier` offline "
                 f"against the GDS for sign-off",
                 extras={"calibre_drc_deck": pdk.calibre_drc,
                         "gds": str(_pl.pnr_dir(project) / f"{top}.gds")})
-        return StepResult("drc", "SKIP", time.time() - t0,
+        return StepResult("drc", "NOT_MEASURED", time.time() - t0,
                           f"PDK {pdk.name} ships no DRC deck — caller must "
-                          "supply one or accept WAIVED-DEFERRED")
+                          "supply one or accept WAIVED-DEFERRED", reason_class=_V.ReasonClass.TOOL_ABSENT)
     gds = _pl.pnr_dir(project) / f"{top}.gds"
     if not gds.is_file():
-        return StepResult("drc", "SKIP", time.time() - t0,
-                          f"GDS missing: {gds}")
+        return StepResult("drc", "NOT_MEASURED", time.time() - t0,
+                          f"GDS missing: {gds}", reason_class=_V.ReasonClass.INPUT_ABSENT)
     # v1.6.54 — pre-flight check: klayout binary in PATH? If not,
     # ENV_UNAVAILABLE (skip the 1-hour timeout we'd otherwise wait).
     if not _tool_in_path(container, "klayout"):
         return StepResult(
-            "drc", "ENV_UNAVAILABLE", time.time() - t0,
+            "drc", "NOT_MEASURED", time.time() - t0,
             f"klayout DRC deck found at {pdk.drc_deck} but `klayout` "
             f"binary not in container {container!r} PATH; install "
             f"KLayout to run open-source pre-flight DRC",
-            extras={"drc_deck": pdk.drc_deck, "missing_tool": "klayout"})
+            extras={"drc_deck": pdk.drc_deck, "missing_tool": "klayout"}, reason_class=_V.ReasonClass.TOOL_ABSENT)
     rpt = project / "phase3" / "reports" / "drc.rpt"
     rpt.parent.mkdir(parents=True, exist_ok=True)
     # v1.6.550 — for #DRC-PATH P2. Translate host paths to container
@@ -42003,7 +42022,7 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
                 124: "hit the pathological-loop backstop"}.get(
                     rc, f"was stopped (rc={rc})")
         return StepResult(
-            "drc", "BLOCKED", time.time() - t0,
+            "drc", "NOT_MEASURED", time.time() - t0,
             f"open-source DRC {_why} (rc={rc}) — no sign-off from a partial "
             f"report, and the partial report (if any) was isolated to "
             f"*.timeout.partial. NOTHING is known about the layout's DRC "
@@ -42013,7 +42032,7 @@ def step_drc(project: Path, top: str, pdk: PdkConfig,
             extras={"finding": "DRC_RUN_INCOMPLETE",
                     "stopped_as": {_RC_ABORTED: "ABORTED",
                                    _RC_STALLED: "STALLED",
-                                   124: "CEILING"}.get(rc, f"rc={rc}")})
+                                   124: "CEILING"}.get(rc, f"rc={rc}")}, reason_class=_V.ReasonClass.EXECUTION_ERROR)
     if not rpt.is_file():
         return StepResult("drc", "FAIL", time.time() - t0,
                           f"rc={rc} log_tail={(out+err)[-1000:]}")
@@ -42683,7 +42702,7 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
     if (upstream_pnr is not None and upstream_pnr.status != "PASS"
             and not _pnr_writes_done):
         return StepResult(
-            "lvs", "SKIP", time.time() - t0,
+            "lvs", "NOT_MEASURED", time.time() - t0,
             (f"LVS skipped: upstream pnr step is "
              f"{upstream_pnr.status} — the final DEF / pin-label stages "
              f"were never completed, so any compare would mismatch by "
@@ -42691,7 +42710,7 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
              f"pnr failure first: "
              f"{_rsum.summary_detail(upstream_pnr.detail, width=400)}"),
             extras={"finding": "LVS_UPSTREAM_PNR_INCOMPLETE",
-                    "upstream_pnr_status": upstream_pnr.status})
+                    "upstream_pnr_status": upstream_pnr.status}, reason_class=_V.ReasonClass.UPSTREAM_FAILED)
     # v1.4.70/#182 — DEVICE-level LVS route. A PDK whose registry declares a
     # `device_lvs_program` (asap7 -> asap7_finfet_lvs.py) has an OSS device-LVS
     # route: KLayout geometric transistor extraction (GATE_CUT-severed real gate)
@@ -42706,11 +42725,11 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
     if _dev_lvs_prog and _lvs_reg.get("cdl_netlist") and _lvs_reg.get("klayout_lvs_tech"):
         if not _tool_in_path(container, "klayout"):
             return StepResult(
-                "lvs", "ENV_UNAVAILABLE", time.time() - t0,
+                "lvs", "NOT_MEASURED", time.time() - t0,
                 f"{pdk.name}: device-level LVS route ({_dev_lvs_prog}) needs "
                 f"`klayout` in container {container!r} PATH.",
                 extras={"missing_tool": "klayout",
-                        "device_lvs_program": _dev_lvs_prog})
+                        "device_lvs_program": _dev_lvs_prog}, reason_class=_V.ReasonClass.TOOL_ABSENT)
         # #182 — DESIGN-level device LVS when a routed design GDS + a gate netlist
         # exist. A routed sign-off GDS + its gate netlist are the two inputs the
         # design-level extract+compare needs; run it for a real PASS/FAIL.
@@ -42725,7 +42744,7 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
         # verification and a pointer to the design-level route.
         _dev_ver = _lvs_reg.get("device_lvs_verified") or {}
         return StepResult(
-            "lvs", "WAIVED", time.time() - t0,
+            "lvs", "PASS_WITH_WAIVERS", time.time() - t0,
             f"{pdk.name}: open-source DEVICE-level LVS is available via "
             f"{_dev_lvs_prog} — KLayout geometric transistor extraction "
             f"(GATE_CUT-severed real gate) compared against the CDL "
@@ -42761,7 +42780,7 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
             # honest ENV gap.
             if not (pdk.bridge_magicrc and pdk.bridge_netgen_setup):
                 return StepResult(
-                    "lvs", "ENV_UNAVAILABLE", time.time() - t0,
+                    "lvs", "NOT_MEASURED", time.time() - t0,
                     f"Calibre LVS deck at {pdk.calibre_lvs}"
                     + (f" + device file {pdk.calibre_lvs_device}"
                        if pdk.calibre_lvs_device else "")
@@ -42775,10 +42794,10 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
                             "calibre_lvs_device": pdk.calibre_lvs_device,
                             "macro_gds": pdk.macro_gds,
                             "macro_v":   pdk.macro_v,
-                            "missing_tool": "calibre"})
+                            "missing_tool": "calibre"}, reason_class=_V.ReasonClass.TOOL_ABSENT)
         if calibre_present:
             return StepResult(
-                "lvs", "WAIVED", time.time() - t0,
+                "lvs", "PASS_WITH_WAIVERS", time.time() - t0,
                 f"Calibre LVS deck at {pdk.calibre_lvs}"
                 + (f" + device file {pdk.calibre_lvs_device}"
                    if pdk.calibre_lvs_device else "")
@@ -42804,10 +42823,10 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
                      if not _tool_in_path(container, t)]
     if missing_tools:
         return StepResult(
-            "lvs", "ENV_UNAVAILABLE", time.time() - t0,
+            "lvs", "NOT_MEASURED", time.time() - t0,
             f"open-source LVS needs {'+'.join(missing_tools)} in "
             f"container {container!r} PATH; install to enable (#443)",
-            extras={"missing_tool": ",".join(missing_tools)})
+            extras={"missing_tool": ",".join(missing_tools)}, reason_class=_V.ReasonClass.TOOL_ABSENT)
     # v1.3.83 — a commercial PDK carries its Magic tech + netgen setup in
     # the project bridge (input/pdk/bridge/{magic,netgen}); the OSS PDKs
     # keep the in-container libs.tech convention.
@@ -42825,10 +42844,10 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
                                     timeout=10)[0] != 0]
     if missing_tech:
         return StepResult(
-            "lvs", "ENV_UNAVAILABLE", time.time() - t0,
+            "lvs", "NOT_MEASURED", time.time() - t0,
             "open-source LVS needs the PDK Magic tech + netgen setup; "
             "missing: " + ", ".join(missing_tech) + " (#443)",
-            extras={"missing_tech": missing_tech})
+            extras={"missing_tech": missing_tech}, reason_class=_V.ReasonClass.TOOL_ABSENT)
     # EXTRACTION-INPUT PRECONDITION — the BLOCKED verdict.
     #
     # `test -f` above proves the tech file EXISTS. It does not prove the file
@@ -42870,7 +42889,7 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
                     "capability": _cap.to_dict(),
                     "blocked": True})
         return StepResult(
-            "lvs", "BLOCKED", time.time() - t0,
+            "lvs", "NOT_MEASURED", time.time() - t0,
             f"LVS BLOCKED — cannot verify: technology file {_cap.path} is "
             f"structurally incapable of extraction (missing {_caps_missing}). "
             f"No netlist can be produced, so no compare is possible. This is "
@@ -42879,7 +42898,7 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
                     "tech_file": _cap.path,
                     "missing_capabilities": _cap.missing_capability_names,
                     "capability": _cap.to_dict(),
-                    "lvs_verdict": verdict})
+                    "lvs_verdict": verdict}, reason_class=_V.ReasonClass.INPUT_ABSENT)
     # v0.3.13 — ORGANIC #508/#509 FINAL: DEF-DIRECT cell-level LVS. The
     # layout source is the ROUTED DEF (not the GDS) — Magic reads it
     # directly + `port makeall` promotes the DEF top pins to ports, the
@@ -42912,11 +42931,11 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
         netlist = _pl.synth_dir(project) / f"{top}_synth.v"  # for the guard msg
     if not def_file.is_file() or not netlist.is_file():
         return StepResult(
-            "lvs", "WAIVED", time.time() - t0,
+            "lvs", "NOT_MEASURED", time.time() - t0,
             "LVS inputs missing: "
             + ("routed-DEF " if not def_file.is_file() else "")
             + ("gate-netlist" if not netlist.is_file() else "")
-            + " — run PnR first (#443/#509)")
+            + " — run PnR first (#443/#509)", reason_class=_V.ReasonClass.INPUT_ABSENT)
     # ORGANIC-20260606 #477 — run-completion honesty check (b): a 0-byte
     # layout source must NEVER feed a "clean" LVS. Extracting from an empty
     # DEF yields an empty netlist + a meaningless compare; FAIL here BEFORE
@@ -42944,14 +42963,14 @@ def step_lvs(project: Path, top: str, pdk: PdkConfig,
     # ~2h in Magic ext2spice on an interconnect-less layout.
     if _def_fell_back and not _def_has_routing(def_file):
         return StepResult(
-            "lvs", "SKIP", time.time() - t0,
+            "lvs", "NOT_MEASURED", time.time() - t0,
             f"LVS skipped: DEF {def_file.name} carries no routing geometry "
             f"(no '+ ROUTED' wiring / SPECIALNETS) — it is a floorplan/"
             f"placement-stage DEF, not a routed layout. Extracting it would "
             f"burn ~2h producing an interconnect-less netlist. Run "
             f"detailed_route first (#571).",
             extras={"finding": "LVS_INPUT_DEF_NOT_ROUTED",
-                    "def": str(def_file)})
+                    "def": str(def_file)}, reason_class=_V.ReasonClass.INPUT_ABSENT)
     # SIGNAL-ROUTING honesty guard — a DEF can pass the check above on power
     # SPECIALNETS alone yet carry ZERO signal-net routing (interconnect never
     # written to THIS DEF: write_def ran before/without detailed_route, or the
@@ -44123,15 +44142,15 @@ def _run_klayout_lvs(project: Path, top: str, pdk: PdkConfig,
             project, "ENV_UNAVAILABLE", "LVS_NO_CELL_GDS",
             "KLayout LVS needs the standard-cell library GDS (pdk.cell_gds); "
             "none configured.")
-        return StepResult("lvs", "ENV_UNAVAILABLE", time.time() - t0,
+        return StepResult("lvs", "NOT_MEASURED", time.time() - t0,
                           "KLayout LVS: no cell-library GDS (pdk.cell_gds)",
                           extras={"finding": "LVS_NO_CELL_GDS",
-                                  "lvs_verdict": verdict})
+                                  "lvs_verdict": verdict}, reason_class=_V.ReasonClass.TOOL_ABSENT)
     for tool in ("klayout", "netgen"):
         if not _tool_in_path(container, tool):
-            return StepResult("lvs", "ENV_UNAVAILABLE", time.time() - t0,
+            return StepResult("lvs", "NOT_MEASURED", time.time() - t0,
                               f"KLayout LVS needs {tool} in container PATH",
-                              extras={"missing_tool": tool})
+                              extras={"missing_tool": tool}, reason_class=_V.ReasonClass.TOOL_ABSENT)
 
     klvs_c = _to_container_path(str(_ship_program("klayout_pdk_lvs.py", ext_dir)),
                                container)
@@ -44401,9 +44420,9 @@ def _run_asap7_device_lvs(project: Path, top: str, pdk: PdkConfig,
             f"{pdk.name} device LVS needs the staged CDL golden (registry "
             f"'cdl_netlist'); none configured.")
         return StepResult(
-            "lvs", "ENV_UNAVAILABLE", time.time() - t0,
+            "lvs", "NOT_MEASURED", time.time() - t0,
             f"{pdk.name} device LVS: no CDL golden in registry",
-            extras={"finding": "LVS_NO_CDL_GOLDEN", "lvs_verdict": verdict})
+            extras={"finding": "LVS_NO_CDL_GOLDEN", "lvs_verdict": verdict}, reason_class=_V.ReasonClass.TOOL_ABSENT)
     # ship the three programs (ONE source of truth — the files themselves)
     a7_c = _to_container_path(str(_ship_program("asap7_finfet_lvs.py", ext_dir)),
                              container)
@@ -44893,12 +44912,12 @@ def _run_extraction_lvs(project: Path, top: str, pdk: PdkConfig,
                     "supervision": _sup,
                     "transcript_tail": (out + err)[-600:]})
         return StepResult(
-            "lvs", "BLOCKED", time.time() - t0, _detail,
+            "lvs", "NOT_MEASURED", time.time() - t0, _detail,
             extras={"finding": "LVS_EXTRACTION_STALLED",
                     "stopped_as": _stopped_as,
                     "supervision": _sup,
                     "lvs_verdict": verdict,
-                    "transcript_tail": (out + err)[-600:]})
+                    "transcript_tail": (out + err)[-600:]}, reason_class=_V.ReasonClass.STALLED)
     if not spice_out.is_file() or spice_out.stat().st_size == 0:
         # Say WHERE it stopped instead of only that a file is missing.
         # MEASURED in the image: `magic` exits 0 even when a `lef read` /
@@ -45205,14 +45224,14 @@ def _run_extraction_lvs(project: Path, top: str, pdk: PdkConfig,
                         "ext2spice_warning": ext_warning,
                         "transcript_tail": transcript[-600:]})
             return StepResult(
-                "lvs", "BLOCKED", time.time() - t0, _detail,
+                "lvs", "NOT_MEASURED", time.time() - t0, _detail,
                 extras={"finding": "LVS_COMPARE_STALLED",
                         "stopped_as": _stopped_as,
                         "supervision": _sup,
                         "lvs_report": "reports/phase3/lvs.rpt",
                         "lvs_verdict": verdict,
                         "ext2spice_warning": ext_warning,
-                        "transcript_tail": transcript[-600:]})
+                        "transcript_tail": transcript[-600:]}, reason_class=_V.ReasonClass.STALLED)
         verdict = _write_lvs_verdict(
             project, "INCOMPLETE", "LVS_NO_TERMINAL_VERDICT",
             f"netgen LVS transcript+report carry NO terminal verdict "
@@ -46560,8 +46579,8 @@ def _signoff_not_checked(name: str, t0: float, why: str,
     where triage reads it — the step's own status and its detail — exactly as
     `_aggregate_verdict`'s own comment describes for the BLOCKED tier.
     """
-    return StepResult(name, "BLOCKED", time.time() - t0,
-                      f"{_SIGNOFF_NOT_CHECKED}: {why}", list(outputs))
+    return StepResult(name, "NOT_MEASURED", time.time() - t0,
+                      f"{_SIGNOFF_NOT_CHECKED}: {why}", list(outputs), reason_class=_V.ReasonClass.NOT_EXECUTED)
 
 
 def _run_declared_signoff_gate(project: Path, name: str, program: str,
@@ -46838,7 +46857,7 @@ def _reconcile_sta_verdict(rows: List[StepResult]) -> List[StepResult]:
     if not refusing or not _sta_single_corner_disclosed(verdict_row):
         return rows
     deferred = StepResult(
-        verdict_row.name, "BLOCKED", verdict_row.duration_s,
+        verdict_row.name, "NOT_MEASURED", verdict_row.duration_s,
         f"{_SIGNOFF_NOT_CHECKED}: DEFERRED-TO-{'+'.join(refusing)} — this "
         f"gate's own report discloses {_STA_SINGLE_CORNER_RULE}, and the "
         f"declared multi-corner sign-off gate(s) {', '.join(refusing)} FAILed "
@@ -46847,7 +46866,7 @@ def _reconcile_sta_verdict(rows: List[StepResult]) -> List[StepResult]:
         f"verdict and the run's one STA answer is the multi-corner refusal "
         f"(vibe-ic#2134). Its own finding was: "
         f"{_rsum.summary_detail(verdict_row.detail, width=240)}",
-        list(verdict_row.output_files), dict(verdict_row.extras))
+        list(verdict_row.output_files), dict(verdict_row.extras), reason_class=_V.ReasonClass.UPSTREAM_FAILED)
     return [deferred if r.name == _STA_VERDICT_GATE else r for r in rows]
 
 #: Every step name this module plans as a DECLARED sign-off gate, in plan order.
@@ -47604,13 +47623,13 @@ def run_step11_dft_after_synth(project: Path, top: str,
         # it already exists on disk. Adding a second, weaker claim on top of it
         # would be noise, so this reports the probe and changes nothing.
         return [StepResult(
-            "dft_atpg_order_selfheal", "SKIP", time.time() - t0,
+            "dft_atpg_order_selfheal", "NOT_MEASURED", time.time() - t0,
             f"canonical Step 11 is unmeasured ({why_needs}) but no "
             f"tech-mapped netlist is available to re-measure it on: {why_map}. "
             f"The phase-2 producer's own disclosure stands.",
             extras={"step11_needs_rerun": True,
                     "mapped_netlist_available": False,
-                    "probe": why_map})]
+                    "probe": why_map}, reason_class=_V.ReasonClass.INPUT_ABSENT)]
     # ---- CZT-18: BOUND THE RE-INVOCATION BY WHAT THE TRIGGER READ ---------
     #
     # This re-invokes `step_dft_lec_chain`, which is Steps 11, 12 AND 13. The
@@ -47635,7 +47654,7 @@ def run_step11_dft_after_synth(project: Path, top: str,
     lec_stop = _lec_leg_stop_evidence(project)
     if repeat is not None:
         return [StepResult(
-            "dft_atpg_order_selfheal", "SKIP", time.time() - t0,
+            "dft_atpg_order_selfheal", "NOT_MEASURED", time.time() - t0,
             f"canonical Step 11 is still unmeasured ({why_needs}), and this "
             f"chain was ALREADY re-invoked on byte-identical inputs at "
             f"{repeat.get('when')} — same trigger, same absent outputs, same "
@@ -47648,7 +47667,7 @@ def run_step11_dft_after_synth(project: Path, top: str,
                     "bounded_by": "recorded state, not a count",
                     "prior_invocation": repeat.get("when"),
                     "fingerprint": fingerprint,
-                    "ledger": _SELFHEAL_LEDGER_REL})]
+                    "ledger": _SELFHEAL_LEDGER_REL}, reason_class=_V.ReasonClass.INPUT_ABSENT)]
     if lec_stop is not None:
         # NAMED, not prevented. Nothing downstream CAN resume the proof: the
         # proved set lives inside yosys and `equiv_induct` has no partial-proof
@@ -47955,11 +47974,11 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
             # built-in): a single-corner PDK cannot substantiate multi-corner
             # sign-off, so defer rather than emit a 1-corner "matrix".
             return StepResult(
-                "prelayout_signoff", "SKIP", time.time() - t0,
+                "prelayout_signoff", "NOT_MEASURED", time.time() - t0,
                 f"fewer than 2 corner libs available — staged "
                 f"input/pdk/liberty={len(staged_libs)}, container built-in "
                 f"PDK={len(_found)} — pre-layout stage-2 sign-off deferred "
-                f"to step_canonicalize_artefacts (no-op; no regression)", [])
+                f"to step_canonicalize_artefacts (no-op; no regression)", [], reason_class=_V.ReasonClass.INPUT_ABSENT)
     notes.append(f"corner source: {corner_source}")
 
     constraints_out = _pl.constraints_dir(project)
@@ -48232,7 +48251,12 @@ def step_prelayout_signoff(project: Path, top: str, pdk: PdkConfig,
                   f"(pre_pnr_timing.rpt declared "
                   f"{_pre_pnr_basis or 'no STA_BASIS'}, not PRE_LAYOUT) — "
                   + detail)
-    return StepResult("prelayout_signoff", "PASS" if ok else "WARN",
+    # `WARN` (the pre-layout sign-off BASIS is unsubstantiated) is a pass the
+    # step itself declined to make clean — R-0915-85's word for that is
+    # PASS_WITH_WAIVERS, and `validate_step_row` derives the must-close row
+    # from this step's own detail.
+    return StepResult("prelayout_signoff",
+                      "PASS" if ok else "PASS_WITH_WAIVERS",
                       time.time() - t0, detail, written)
 
 
@@ -48396,8 +48420,8 @@ def step_digital_hardmacro_gen(project: Path,
             "reports/phase3/digital_hardmacro_gen.json", _cited, _evidence)
     prog = PROGRAMS_DIR / "digital_hardmacro_gen.py"
     if not prog.is_file():  # pragma: no cover - shipped tree always has it
-        return StepResult("digital_hardmacro_gen", "SKIP", 0.0,
-                          f"{prog.name} not present in this tree")
+        return StepResult("digital_hardmacro_gen", "NOT_MEASURED", 0.0,
+                          f"{prog.name} not present in this tree", reason_class=_V.ReasonClass.TOOL_ABSENT)
     report = project / "reports" / "phase3" / "digital_hardmacro_gen.json"
     report.parent.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, str(prog), str(project), "--json", str(report)]
@@ -48520,15 +48544,15 @@ def step_ip_release_docs_gen(
             "reports/phase3/ip_release_docs_gen.json", _cited, _evidence)
     prog = PROGRAMS_DIR / "ip_release_docs_gen.py"
     if not prog.is_file():  # pragma: no cover - shipped tree always has it
-        return StepResult("ip_release_docs_gen", "SKIP", 0.0,
-                          f"{prog.name} not present in this tree")
+        return StepResult("ip_release_docs_gen", "NOT_MEASURED", 0.0,
+                          f"{prog.name} not present in this tree", reason_class=_V.ReasonClass.TOOL_ABSENT)
     try:
         context = _write_ip_release_docs_context(
             project, design_name, pdk_name, source_sha, module_role)
     except (OSError, ValueError) as exc:
         return StepResult(
-            "ip_release_docs_gen", "ENV_UNAVAILABLE", time.time() - t0,
-            f"runner derivation manifest could not be written: {exc}")
+            "ip_release_docs_gen", "NOT_MEASURED", time.time() - t0,
+            f"runner derivation manifest could not be written: {exc}", reason_class=_V.ReasonClass.TOOL_ABSENT)
     cmd = [sys.executable, str(prog), str(project), "--run-context",
            context.relative_to(project).as_posix()]
     cp, stopped = _run_producer("ip_release_docs_gen", cmd, t0)
@@ -48871,8 +48895,8 @@ def step_signoff_metrics_aggregate(project: Path) -> StepResult:
     t0 = time.time()
     prog = PROGRAMS_DIR / "signoff_metrics_aggregate.py"
     if not prog.is_file():  # pragma: no cover - shipped tree always has it
-        return StepResult("signoff_metrics_aggregate", "BLOCKED",
-                          time.time() - t0, f"producer not present: {prog}")
+        return StepResult("signoff_metrics_aggregate", "NOT_MEASURED",
+                          time.time() - t0, f"producer not present: {prog}", reason_class=_V.ReasonClass.INPUT_ABSENT)
 
     drc_attr = _emit_drc_attribution_reports(project)
 
@@ -48932,16 +48956,16 @@ def step_tapeout_docs_gen(project: Path) -> StepResult:
     t0 = time.time()
     applies, why = _canonical_step_condition(project, "37.5ic")
     if applies is None:
-        return StepResult("tapeout_docs_gen", "BLOCKED", time.time() - t0,
-                          why)
+        return StepResult("tapeout_docs_gen", "NOT_MEASURED", time.time() - t0,
+                          why, reason_class=_V.ReasonClass.INPUT_ABSENT)
     if not applies:
-        return StepResult("tapeout_docs_gen", "SKIP", time.time() - t0,
-                          why)
+        return StepResult("tapeout_docs_gen", "NOT_APPLICABLE", time.time() - t0,
+                          why, declared_by=why)
 
     prog = PROGRAMS_DIR / "tapeout_docs_gen.py"
     if not prog.is_file():  # pragma: no cover - shipped tree always has it
-        return StepResult("tapeout_docs_gen", "BLOCKED", time.time() - t0,
-                          f"producer not present: {prog}")
+        return StepResult("tapeout_docs_gen", "NOT_MEASURED", time.time() - t0,
+                          f"producer not present: {prog}", reason_class=_V.ReasonClass.INPUT_ABSENT)
     out_dir = project / "reports" / "phase3" / "docs"
     cmd = [sys.executable, str(prog), "--project", str(project),
            "--out-dir", str(out_dir)]
@@ -48949,9 +48973,9 @@ def step_tapeout_docs_gen(project: Path) -> StepResult:
         cp = subprocess.run(cmd, capture_output=True, text=True,
                             errors="replace", timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return StepResult("tapeout_docs_gen", "ENV_UNAVAILABLE",
+        return StepResult("tapeout_docs_gen", "NOT_MEASURED",
                           time.time() - t0,
-                          f"producer did not complete: {exc}")
+                          f"producer did not complete: {exc}", reason_class=_V.ReasonClass.TOOL_ABSENT)
     detail_lines = (cp.stdout or cp.stderr or "").strip().splitlines()
     detail = detail_lines[0] if detail_lines else f"rc={cp.returncode}"
     status = "PASS" if cp.returncode == 0 else (
@@ -48997,15 +49021,15 @@ def step_ic_release_docs_gen(project: Path) -> StepResult:
     t0 = time.time()
     applies, why = _canonical_step_condition(project, "37.5ic")
     if applies is None:
-        return StepResult("ic_release_docs_gen", "BLOCKED", time.time() - t0,
-                          why)
+        return StepResult("ic_release_docs_gen", "NOT_MEASURED", time.time() - t0,
+                          why, reason_class=_V.ReasonClass.INPUT_ABSENT)
     if not applies:
-        return StepResult("ic_release_docs_gen", "SKIP", time.time() - t0, why)
+        return StepResult("ic_release_docs_gen", "NOT_APPLICABLE", time.time() - t0, why, declared_by=why)
 
     prog = PROGRAMS_DIR / "ic_release_docs_gen.py"
     if not prog.is_file():  # pragma: no cover - shipped tree always has it
-        return StepResult("ic_release_docs_gen", "SKIP", time.time() - t0,
-                          f"{prog.name} not present in this tree")
+        return StepResult("ic_release_docs_gen", "NOT_MEASURED", time.time() - t0,
+                          f"{prog.name} not present in this tree", reason_class=_V.ReasonClass.TOOL_ABSENT)
     cmd = [sys.executable, str(prog), str(project)]
     cp, stopped = _run_producer("ic_release_docs_gen", cmd, t0)
     if stopped is not None:
@@ -61404,10 +61428,10 @@ def main() -> int:
             ("lvs", "digital-backend LVS"),
         ):
             plan.append(StepResult(
-                stepname, "WAIVED", 0.0,
+                stepname, "NOT_APPLICABLE", 0.0,
                 f"{what} N/A for pure-analog IC — {pa_reason}; "
                 f"physical implementation handled by the analog A5..A6 "
-                f"layout track (/vibe-ic-analog)."))
+                f"layout track (/vibe-ic-analog).", declared_by=pa_reason))
     else:
         # v1.6.36 — preserve provenance: skip synth/PnR/GDS re-runs when the
         # output already exists. Re-running synth invalidates the hash that
@@ -61723,10 +61747,10 @@ def main() -> int:
             _pnr_def = _pl.pnr_dir(project) / f"{effective_top}.def"
             if not _pnr_def.is_file():
                 plan.append(StepResult(
-                    "pad_side_constraint", "SKIP", 0.0,
+                    "pad_side_constraint", "NOT_MEASURED", 0.0,
                     f"SKIP: PnR reported PASS but the canonical DEF "
                     f"{_pnr_def.name} is absent — pad-side placement cannot "
-                    f"be measured (nothing is claimed about it)."))
+                    f"be measured (nothing is claimed about it).", reason_class=_V.ReasonClass.INPUT_ABSENT))
             else:
                 try:
                     import pad_side_constraint_check as _psc  # noqa: PLC0415
@@ -61744,10 +61768,10 @@ def main() -> int:
                         "pad_side_constraint", _psc_status, 0.0, _psc_note))
                 except Exception as _psc_exc:
                     plan.append(StepResult(
-                        "pad_side_constraint", "SKIP", 0.0,
+                        "pad_side_constraint", "NOT_MEASURED", 0.0,
                         f"SKIP: pad_side_constraint_check could not run "
                         f"({_psc_exc}) — nothing is claimed about pad-side "
-                        f"placement."))
+                        f"placement.", reason_class=_V.ReasonClass.EXECUTION_ERROR))
 
         if _chain_ok:
             # #527 estimate-vs-SPEF — SHIPPED post-route real-SPEF setup repair at
@@ -62199,16 +62223,22 @@ def main() -> int:
         print(f"  {s.status:6} {s.name:8} "
               f"{_rsum.summary_detail(s.detail, s.status)}")
     print(f"final summary: {'reports/final_summary.md' if fs_ok else 'NOT generated'}")
-    return 0 if summary["verdict"] in ("PASS", "PASS_WITH_WAIVERS",
-                                       "PASS_WITH_OPEN_SOURCE_CONSTRAINTS") else 1
+    return 0 if _V.parse(summary["verdict"]) in (
+        _V.Verdict.PASS, _V.Verdict.PASS_WITH_WAIVERS) else 1
 
 
 # #437(f) — verdict-tier ordering for headline derivation: the headline
 # is the WEAKER of (own-steps verdict, completion-audit verdict), so the
 # orchestrator can never surface PASS_WITH_WAIVERS beside a completion
 # audit / final summary that says FAIL. chip-AGNOSTIC: tier lattice only.
-_VERDICT_RANK = {"PASS": 0, "PASS_WITH_WAIVERS": 1,
-                 "PASS_WITH_OPEN_SOURCE_CONSTRAINTS": 1, "FAIL": 2}
+#: R-0915-85 — the headline is the WEAKER of (own-steps verdict, completion
+#: audit verdict), ranked by the ONE precedence in `programs/verdict.py`. The
+#: hand-written lattice this replaces carried a fourth word,
+#: `PASS_WITH_OPEN_SOURCE_CONSTRAINTS`, ranked equal to PASS_WITH_WAIVERS; an
+#: open-source constraint is a waiver ROW, not an outcome, and R-0915-57 had
+#: already emptied that tier at its producer.
+_VERDICT_RANK = {v.value: i for i, v in
+                 enumerate(reversed(_V.RUN_PRECEDENCE))}
 
 
 def _derive_headline_verdict(project: Path, steps_verdict: str
@@ -62236,173 +62266,39 @@ def _derive_headline_verdict(project: Path, steps_verdict: str
 
 
 def _aggregate_verdict(plan: List[StepResult]) -> str:
-    """The run's own-steps verdict. BLOCKING: `main()` returns 0 only for
-    PASS / PASS_WITH_WAIVERS / PASS_WITH_OPEN_SOURCE_CONSTRAINTS, so every
-    other word this function can return — FAIL and the UNKNOWN_STATUS refusal
-    below — exits the runner non-zero.
+    """The run's own-steps verdict, from `verdict.run_verdict`.
 
-    vibe-ic#2153 — THERE IS NO CATCH-ALL ANY MORE. This function used to end
-    `return "PASS"`, so any status it did not enumerate turned the whole run
-    green: the system did not recognise something and reported success, which
-    is invisible exactly when a new tier, a renamed status or a typo is
-    introduced. It bit three times in a row by hand — BLOCKED (#544),
-    VACUOUS_PASS (#654), PASS_WITH_ATTRIBUTION (#2148) — each time discovered
-    by an author who happened to look.
+    WHAT THIS FUNCTION USED TO BE, and why R-0915-85 deleted it. It carried a
+    function-local `_TIERS` table mapping this runner's OWN eleven-word step
+    vocabulary onto three headline words, plus a refusal for anything outside
+    it. The table's own comments record it being extended by hand five times
+    after a word slipped through — BLOCKED (#544), VACUOUS_PASS (#654),
+    PASS_WITH_ATTRIBUTION (#2148), WARN and PASS_W_WARN (#2153), NOT_EXECUTED
+    (R-0915-82) — every one of them discovered by somebody who happened to look.
 
-    MEASURED at the time of the fix, by walking every `StepResult` construction
-    that reaches this plan: TWO statuses were arriving green through the
-    catch-all with nobody having listed them —
+    It also said, at length, that it must NOT delegate to the flow's classifier
+    because `StepResult.status` was "a DIFFERENT vocabulary". That was TRUE and
+    it was the defect: two vocabularies over the same forty-four steps is how
+    phase 2 read `SKIP` as clean while phase 3 read it as a waiver, and how
+    sha256 run16 pass 2 booked an INCONCLUSIVE proof as a skip. There is one
+    vocabulary now, so there is one roll-up, and the tier table is gone rather
+    than migrated.
 
-        WARN          `step_prelayout_signoff` (the pre-layout sign-off basis
-                      is UNSUBSTANTIATED), appended to `plan` in `main()`
-        PASS_W_WARN   `design_one_shot_runner.step_dft_lec_chain`'s
-                      `dft_insertion` row, republished verbatim as
-                      `step11_dft_insertion` by `run_step11_dft_after_synth`
-
-    `PASS_W_WARN` is not hypothetical: it is present in the published corpus
-    (caravel_user_project v1.9.43, `step11_dft_insertion`, ATPG rc=1 at 60.5%
-    stuck-at coverage) and contributed nothing to that run's verdict. Both are
-    now classified as QUALIFIED (PASS_WITH_WAIVERS) — a warning is a pass the
-    step itself declined to make clean.
-
-    THE KNOWN SET IS DERIVED, NOT TYPED. `_TIERS` below is the ONE source: the
-    known vocabulary is `union(_TIERS.values())`, so a status cannot be
-    classified-but-unknown or known-but-unclassified, and "someone remembered
-    to update the second list" is not a state this function can be in.
-
-    NOT `_flow_verdict_tiers`. The issue proposed deriving from it; that module
-    is the authority for `flow_compliance_check`'s words, and `StepResult.status`
-    is a different vocabulary — routing these words through that classifier
-    marks bare SKIP and ENV_UNAVAILABLE as qualified-done, which is a different
-    answer than this function's established PASS_WITH_WAIVERS. Tried, measured
-    and rejected once already; the rejection is recorded in the VACUOUS_PASS
-    comment below and stands.
-
-    `_TIERS` is FUNCTION-LOCAL on purpose, and the literal
-    `"UNKNOWN_STATUS:"` is spelled out rather than referenced from
-    `UNKNOWN_STATUS_PREFIX`: sibling suites lift this function out of its
-    module by source and exec it in isolation, where a module-global reference
-    is a NameError in the very test that proves the guard works. The two
-    spellings are pinned to each other by
-    `test_issue2153_phase3_verdict_refuses_unknown_status.py`.
+    The refusal survives, and is now `verdict.parse`'s: a word outside the five
+    raises `UnknownVerdictWord` at the row that carries it, which is earlier
+    and louder than a headline string nobody greps for.
     """
-    # THE ONE SOURCE. Every word this runner's plan can carry, and the headline
-    # tier it rolls up to. Nothing else enumerates the vocabulary.
-    _TIERS = {
-        # BLOCKED ("the check could not run; nothing is known") is grouped with
-        # FAIL, and this grouping is LOAD-BEARING: a "cannot verify" step that
-        # produced a green run would be a worse defect than the ambiguity
-        # BLOCKED was introduced to remove. The BLOCKED-vs-FAIL distinction is
-        # preserved where triage reads it — the step's own status, its
-        # `finding`, and lvs_verdict.json.
-        #
-        # ORGANIC #654 — a VACUOUS sign-off is not a pass, and fell through
-        # both of the tests that used to sit around it. MEASURED: a step
-        # returning VACUOUS_PASS matched neither the FAIL/BLOCKED test nor the
-        # WAIVED/SKIP/ENV_UNAVAILABLE one, so the run returned "PASS" — which
-        # would have made the unrouted sign-off steps produce a GREEN run, the
-        # defect #654 is about, inside its own fix. Found by a test asserting
-        # the tier, not by reading the code.
-        #
-        # Stated in THIS function's vocabulary on purpose. `_flow_verdict_tiers`
-        # is the authority for `flow_compliance_check`'s words and correctly
-        # ranks VACUOUS-PASS as a QUALIFIED done-claim, but StepResult.status is
-        # a DIFFERENT vocabulary, and routing its words through that classifier
-        # marks bare `SKIP` and `ENV_UNAVAILABLE` as qualified too — both
-        # established PASS_WITH_WAIVERS states here. Tried, measured, and
-        # rejected: borrowing a classifier across two vocabularies is how a fix
-        # acquires a second defect.
-        "FAIL": ("FAIL", "BLOCKED", "VACUOUS_PASS"),
-        # v1.6.54 — ENV_UNAVAILABLE counts toward PASS_WITH_WAIVERS the same
-        # way as WAIVED / SKIP. The verdict tier is preserved at the step level
-        # for diagnostics; the project-level acceptance gate treats both the
-        # same (CLAUDE.md SOLE ACCEPTANCE CRITERION explicitly recognises
-        # PASS_WITH_WAIVERS as a real verdict).
-        #
-        # vibe-ic#2148 — PASS_WITH_ATTRIBUTION is a QUALIFIED tier: a delivery
-        # whose die-level density is the integrator's has NOT closed those
-        # rules, so the run is qualified, never plain PASS.
-        #
-        # vibe-ic#2153 — WARN and PASS_W_WARN join them. Both were reaching the
-        # catch-all and scoring a CLEAN pass, which is strictly weaker than
-        # what the emitting step said about itself:
-        #   WARN         step_prelayout_signoff, when the pre-layout basis is
-        #                unsubstantiated (`pre_pnr_timing.rpt` declares no
-        #                PRE_LAYOUT STA_BASIS).
-        #   PASS_W_WARN  the ATPG producer returned non-zero while coverage was
-        #                still measured. The number stands; the run that
-        #                produced it does not stand clean.
-        # This STRENGTHENS the verdict for both — neither can now yield a bare
-        # "PASS" — and moves no other word.
-        #
-        # R-0915-82 — NOT_EXECUTED joins them, and it MUST, because that change
-        # is what first puts the word in this plan. `step_dft_lec_chain` now
-        # answers an INCONCLUSIVE LEC record with NOT_EXECUTED when the proof
-        # was STOPPED (the R-0915-48 backstop firing, the stall watchdog, an
-        # operator rung cap) or compared nothing at all, and
-        # `run_step11_dft_after_synth` republishes that row verbatim as
-        # `step11_lec_equivalence`. Left unclassified it would reach the
-        # refusal above and turn every such run into UNKNOWN_STATUS — a
-        # correction to one step silently voiding the whole phase-3 verdict.
-        # It belongs HERE and not in the FAIL tier: "the prover was cut off"
-        # is a disclosed gap, which is exactly the tier SKIP already sits in,
-        # so R-0915-48's contract (the backstop fires, phase 3 proceeds) is
-        # preserved word for word. The INCONCLUSIVE that is NOT a disclosed
-        # gap — a ladder that ran to its last rung and did not close — comes
-        # through as FAIL and is graded by the tier above.
-        "PASS_WITH_WAIVERS": ("WAIVED", "SKIP", "ENV_UNAVAILABLE",
-                              "PASS_WITH_ATTRIBUTION", "WARN", "PASS_W_WARN",
-                              "NOT_EXECUTED"),
-        "PASS": ("PASS",),
-    }
-    _known = {w for words in _TIERS.values() for w in words}
-
-    # REFUSE BY NAME, and FIRST. An aggregator holding a word it cannot
-    # classify does not know what this run's verdict is — not even that the
-    # FAIL beside it is the whole story — so it says so instead of grading.
-    # NOT a silent PASS, and deliberately NOT a silent FAIL either: a silent
-    # FAIL is the same disease with the sign flipped, and it gets switched back
-    # the first time it inconveniences somebody. The word names the exact
-    # unknown string AND the step it came from, so the reader never has to go
-    # looking for which row poisoned the roll-up.
-    _unknown, _seen = [], set()
-    for s in plan:
-        if s.status not in _known and (s.status, s.name) not in _seen:
-            _seen.add((s.status, s.name))
-            _unknown.append(f"{s.status}@{s.name}")
-    if _unknown:
-        # Loud, and on stderr so it survives a caller that reads only stdout.
-        print(f"phase3_one_shot_runner: REFUSING to aggregate a verdict — "
-              f"{len(_unknown)} step status(es) are outside this runner's "
-              f"known vocabulary {sorted(_known)}: {', '.join(_unknown)}. "
-              f"Classify them in `_aggregate_verdict._TIERS` (the one source) "
-              f"before relying on this verdict. This is NOT a pass and it is "
-              f"NOT a design failure; it is the aggregator declining to grade "
-              f"a plan it does not understand.", file=sys.stderr)
-        return "UNKNOWN_STATUS:" + ",".join(_unknown)
-
-    if any(s.status in _TIERS["FAIL"] for s in plan):
-        return "FAIL"
-    # ORGANIC #654 — a VACUOUS sign-off is not a pass, and fell through both
-    # of the tests around it. MEASURED: a step returning VACUOUS_PASS matched
-    # neither the FAIL/BLOCKED test above nor the WAIVED/SKIP/ENV_UNAVAILABLE
-    # test below, so the run returned "PASS" — which would have made the unrouted
-    # sign-off steps produce a GREEN run, the defect #654 is about, inside its
-    # own fix. Found by a test asserting the tier, not by reading the code.
-    #
-    # Stated in THIS function's vocabulary on purpose. `_flow_verdict_tiers` is
-    # the authority for `flow_compliance_check`'s words and correctly ranks
-    # VACUOUS-PASS as a QUALIFIED done-claim, but StepResult.status is a
-    # DIFFERENT vocabulary (PASS/FAIL/BLOCKED/SKIP/WAIVED/ENV_UNAVAILABLE), and
-    # routing its words through that classifier marks bare `SKIP` and
-    # `ENV_UNAVAILABLE` as qualified too — both established PASS_WITH_WAIVERS
-    # states here. Tried, measured, and rejected: borrowing a classifier across
-    # two vocabularies is how a fix acquires a second defect.
-    if any(s.status in _TIERS["PASS_WITH_WAIVERS"] for s in plan):
-        return "PASS_WITH_WAIVERS"
-    # NOT a catch-all: every word that reaches this line is in `_TIERS["PASS"]`,
-    # because anything else was refused above.
-    return "PASS"
+    return _V.run_verdict(
+        _V.StepVerdict(
+            verdict=_V.parse(s.status), step_id=s.name, name=s.name,
+            reason_class=(_V.ReasonClass(s.reason_class)
+                          if getattr(s, "reason_class", "") else None),
+            declared_by=getattr(s, "declared_by", "") or "",
+            waiver_rows=[_V.WaiverRow(**w)
+                         for w in (getattr(s, "waiver_rows", None) or [])],
+            attribution=getattr(s, "attribution", "") or "",
+            disclosures=list(getattr(s, "disclosures", None) or ()),
+        ) for s in plan).value
 
 
 def _autogen_waivers_json(project: Path,
