@@ -59,8 +59,11 @@ class LecStepVerdictTest(unittest.TestCase):
         status = _status_for({"verdict": "INCONCLUSIVE",
                               "equivalent": False,
                               "compared_points": 0})
-        self.assertNotIn(status, ("PASS", "FAIL"))
-        self.assertEqual(status, dosr.NOT_EXECUTED_STATUS)
+        # BARE asserts: pytest rewrites them, so a control run over a pre-fix
+        # tree reports the VALUE it observed instead of a bespoke message that
+        # `control_substance_check` cannot tell apart from an absent symbol.
+        assert status not in ("PASS", "FAIL")
+        assert status == dosr.NOT_EXECUTED_STATUS
 
     def test_skipped_condition_is_a_disclosed_skip(self):
         self.assertEqual(_status_for({"verdict": "SKIPPED-CONDITION",
