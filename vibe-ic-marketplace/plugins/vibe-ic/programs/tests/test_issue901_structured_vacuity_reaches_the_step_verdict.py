@@ -220,7 +220,7 @@ def test_a_partially_vacuous_step_still_names_the_clause_that_examined_nothing(
     _rc, out, doc = _audit(project, flow)
     step = _step_under_audit(doc)
     assert step.get("partial_vacuity_disclosed") is True, step
-    assert any("PASS" in r and "declares_nothing_examined" in r
+    assert any("PARTIALLY-VACUOUS" in r and "declares_nothing_examined" in r
                for r in step["reasons"]), step["reasons"]
     assert "PASS" in out, out
 
@@ -449,7 +449,7 @@ def test_GUARD_the_legacy_channel_keeps_its_tier_when_siblings_ran(tmp_path):
     assert status == "PASS", (
         "one clause of two examined nothing, so neither `PASS` nor the "
         "unanimous word is true of this step\n" + out)
-    assert any("PASS" in str(r)
+    assert any("PARTIALLY-VACUOUS" in str(r)
                for r in _step_under_audit(doc)["reasons"]), out
 
 
@@ -828,7 +828,7 @@ def test_GUARD_the_shipped_step_is_not_vacuous_when_its_sim_actually_ran(
     # executed, cross-checked design-owned zero-population contract may stand
     # it down. Therefore this fixture must fail rather than borrow an advisory
     # tier. The remaining rtl-unit advisory refusal is still preserved below.
-    assert step["status"] not in ("PASS", "NOT_MEASURED", "SKIPPED",
+    assert step["status"] not in ("PASS", "VACUOUS_PASS", "SKIPPED",
                                  "NOT_APPLICABLE", "PASS_WITH_WAIVERS"), (
         "a step carrying two live advisory refusals and an unexamined "
         "applicable input reached a pass/skip tier\n" + str(step))
@@ -850,7 +850,7 @@ def test_the_shipped_step_preserves_the_remaining_live_advisory_refusal(tmp_path
     _rc, _out, step = _shipped_step4(tmp_path, ran=True)
     # The behavioural-evidence check is no longer advisory; the one remaining
     # advisory refusal after that blocking failure must still be recorded.
-    assert step["status"] not in ("PASS", "NOT_MEASURED", "PASS_WITH_WAIVERS"), step
+    assert step["status"] not in ("PASS", "VACUOUS_PASS", "WAIVED"), step
     blocking = [record for record in step.get("advisory_gate_records", [])
                 if record.get("enforcement") == "BLOCKING"]
     assert {record["gate"] for record in blocking} == {
@@ -917,4 +917,4 @@ def test_the_other_self_aware_shipped_gate_also_reaches_the_tier(tmp_path):
         f"professional_tb_check's non-verdict is typed {cls}, which is "
         f"skip-eligible — an unrun producer would be laundered into a clean "
         f"vacuous pass\n{out}")
-    assert verdict in ("NOT_MEASURED", "NOT_MEASURED"), (verdict, cls, out)
+    assert verdict in ("INCOMPLETE", "BLOCKED"), (verdict, cls, out)

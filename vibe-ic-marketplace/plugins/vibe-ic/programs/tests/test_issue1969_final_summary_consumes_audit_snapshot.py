@@ -218,7 +218,7 @@ def test_checker_serializes_per_step_verdicts_beside_step_counts(tmp_path):
         "the canonical audit published the tally but omitted the verdicts it "
         f"counted; keys={sorted(audit)}")
     observed_pairs = [(str(s["id"]), s["status"]) for s in observed]
-    assert ("1", "FAIL") in observed_pairs
+    assert ("1", "MISSING") in observed_pairs
     # The checker injects its P0 preflight into even a one-step probe flow.
     # Whatever final universe it counted, every unit has a step record.
     assert len(observed) == sum(audit["step_counts"].values())

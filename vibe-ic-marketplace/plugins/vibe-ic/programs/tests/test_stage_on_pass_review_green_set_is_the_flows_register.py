@@ -92,8 +92,8 @@ def test_the_measured_shape_stops_naming_WAIVED(tmp_path):
         _compliance(tmp_path, ["PASS", "PASS_WITH_WAIVERS", "NOT_MEASURED"]), "stage1",
         None)
     assert got["passed"] is False
-    assert "PASS_WITH_WAIVERS" not in got["why"], got["why"]
-    assert "NOT_MEASURED" in got["why"]
+    assert "WAIVED" not in got["why"], got["why"]
+    assert "INCOMPLETE" in got["why"]
 
 
 # ── direction 2: a stage that really failed still is not reviewed ─────────

@@ -2728,7 +2728,7 @@ def test_d3_registered_inline_record_uses_strict_native_path(tmp_path, monkeypat
     # nonempty-file arm would incorrectly say produced here.
     result = produce_live("23", entry, rec)
     assert not result.produced, result.detail
-    assert "NOT_MEASURED" in result.detail or "NOT_MEASURED" in result.detail
+    assert "NOT_CHECKED" in result.detail or "BLOCKED" in result.detail
 
 
 def measure_new_signoff_output(step_id, entry: str) -> EntryVerdict:

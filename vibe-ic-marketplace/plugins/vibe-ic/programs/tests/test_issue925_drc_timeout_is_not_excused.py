@@ -145,7 +145,7 @@ def test_guard_shared_tier_vocabulary_is_untouched():
     assert T.is_non_green("NOT_APPLICABLE") is False
     assert T.scoped_into_verdict(
         {"status": "NOT_APPLICABLE", "stage": T.ANALOG_STAGE}) is False
-    assert "NOT_APPLICABLE" in T.EXCUSED
+    assert "SKIPPED-CONDITION" in T.EXCUSED
 
 
 def test_guard_a_design_dependent_or_env_absence_stays_excusable(tmp_path,

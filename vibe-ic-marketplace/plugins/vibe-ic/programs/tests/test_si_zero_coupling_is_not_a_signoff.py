@@ -333,7 +333,7 @@ def test_the_tier_is_not_bought_by_a_relabel(tmp_path):
     proj = _grounded_only_project(tmp_path)
 
     _, _, cls, tier = _flow_disposition(proj)
-    assert cls not in T.SKIP_ELIGIBLE and tier == "NOT_MEASURED", (cls, tier)
+    assert cls not in T.SKIP_ELIGIBLE and tier == "INCOMPLETE", (cls, tier)
 
     orig = T.infer_nonverdict_reason
     try:

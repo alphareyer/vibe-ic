@@ -222,7 +222,7 @@ def test_a4_refusals_do_not_defer_to_a_skill():
     for chunk in chunks:
         head = chunk[:900]
         assert "suggested_skill" not in head
-        assert "NOT_MEASURED" in head, (
+        assert "ENV_UNAVAILABLE" in head, (
             "an A4 refusal must carry the ENV_UNAVAILABLE tier so a reader "
             "can tell an environment gap from a design gap")
 

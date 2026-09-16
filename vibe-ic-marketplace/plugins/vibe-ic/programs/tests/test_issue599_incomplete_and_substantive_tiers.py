@@ -203,7 +203,7 @@ def _main_dict(name: str) -> dict:
 
 
 def test_incomplete_is_counted_labelled_and_rendered():
-    assert _main_dict("counts").get("NOT_MEASURED") == 0, "not in the tally"
+    assert _main_dict("counts").get("INCOMPLETE") == 0, "not in the tally"
     assert _main_dict("_label").get("NOT_MEASURED") == "NOT_MEASURED", \
         "no display label"
     icon = _main_dict("_icon").get("NOT_MEASURED")
@@ -242,7 +242,7 @@ def test_it_is_a_disclosure_tier_not_a_failure():
     naming fix, which is a different decision with a corpus sweep in front of
     it."""
     for bucket in ("failing", "missing"):
-        assert f'"NOT_MEASURED"' not in SRC[SRC.index(f"{bucket} ="):][:400], (
+        assert f'"INCOMPLETE"' not in SRC[SRC.index(f"{bucket} ="):][:400], (
             f"INCOMPLETE leaked into the {bucket} bucket")
 
 
@@ -277,7 +277,7 @@ def test_d1_discloses_incomplete_only_when_the_ai_half_did_not_read():
     seg = src[src.index('if rep["verdict"] == "INCOMPLETE":'):][:1100]
     assert 'non-empty schema-readable review' in seg
     assert 'ai[\'status\']' in seg
-    assert 'NOT_MEASURED' not in seg, (
+    assert 'VACUOUS_PASS' not in seg, (
         "an unanswered expert handoff is still published as a pass tier")
 
 
@@ -288,6 +288,6 @@ def test_the_yosys_gate_still_runs_and_says_something(tmp_path):
         [sys.executable, str(_PROGRAMS / "yosys_hilomap_required_check.py"),
          str(tmp_path)], capture_output=True, text=True)
     out = r.stdout + r.stderr
-    assert "NOT_MEASURED" in out, out
+    assert "VACUOUS_PASS" in out, out
     assert "SUBSTANTIVE_PASS" not in out, (
         "nothing was read on this project and the gate claimed otherwise")

@@ -237,7 +237,7 @@ def test_absent_env_gate_fails_but_names_the_gap(tmp_path):
     assert r.returncode == 1, "an unreachable environment must not be vacuous"
 
     finding = " ".join(report["findings"])
-    assert "NOT_MEASURED" in finding
+    assert "ENV_UNAVAILABLE" in finding
     assert _ABSENT_CONTAINER in finding      # where the flow looked
     assert "not running" in finding          # what to do about it
 

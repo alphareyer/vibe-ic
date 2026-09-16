@@ -350,7 +350,7 @@ def test_a_failing_analog_track_still_reds_structural_only_mode(
     analog_steps = {s["id"]: s["status"] for s in doc["steps"]
                     if str(s.get("stage")) == "stage_analog"}
     assert analog_steps, "PRECONDITION: the analog track must be in scope"
-    assert any(st in ("FAIL", "FAIL") for st in analog_steps.values()), (
+    assert any(st in ("FAIL", "MISSING") for st in analog_steps.values()), (
         f"PRECONDITION: the analog track must be non-green here; "
         f"got {analog_steps!r}")
 

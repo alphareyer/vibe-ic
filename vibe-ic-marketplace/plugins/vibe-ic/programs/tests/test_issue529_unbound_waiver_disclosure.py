@@ -271,7 +271,7 @@ def test_corpus_waivers_dialect_carries_no_env_unavailable_entry():
         tier = (entry.get("verdict_tier") or "").strip().upper()
         tiers[tier] = tiers.get(tier, 0) + 1
     assert sum(tiers.values()) == len(rows), (tiers, len(rows))
-    assert "NOT_MEASURED" not in tiers, tiers
+    assert "ENV_UNAVAILABLE" not in tiers, tiers
     # The tier vocabulary is closed: a NEW tier appearing in the corpus is a
     # change to the picture this issue rests on and must not pass unnoticed.
     assert set(tiers) <= {"PASS_WITH_WAIVERS", "PASS_STRUCTURAL"}, tiers
@@ -321,7 +321,7 @@ def test_disclosure_names_the_entry_the_step_the_tier_and_the_ticket(tmp_path):
     assert "entry 1" in notes[1] and "'drc'" in notes[1]
     for note in notes:
         assert "flow step 31" in note, note
-        assert "'PASS_WITH_WAIVERS'" in note, note
+        assert "'WAIVED'" in note, note
     assert "TAPEOUT-AUTOGEN-LVS" in notes[0]
     assert "TAPEOUT-AUTOGEN-DRC" in notes[1]
 

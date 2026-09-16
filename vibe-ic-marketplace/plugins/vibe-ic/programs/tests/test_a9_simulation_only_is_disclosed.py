@@ -121,7 +121,7 @@ def test_simulation_only_close_is_still_legal(tmp_path):
     headless/CI analog run must still be able to close. VACUOUS_PASS is a
     pass-tier verdict — this must NOT become FAIL or MISSING."""
     r = FCC.check_step(_project(tmp_path, hw=None), _a9(), {}, None)
-    assert r.status not in ("FAIL", "FAIL"), (r.status, r.reasons)
+    assert r.status not in ("FAIL", "MISSING"), (r.status, r.reasons)
 
 
 # ── the checker's own three tiers ────────────────────────────────────────────

@@ -233,7 +233,7 @@ def test_acceptance_a3_waived_deferred_with_disclosure_then_fail_without(
     _, out2 = _run_strict(proj)
     a3_2 = _a3_block(out2)
     assert "[FAIL" in a3_2, out2
-    assert "PASS_WITH_WAIVERS" not in a3_2
+    assert "WAIVED" not in a3_2
 
 
 def test_acceptance_undisclosed_no_a3_waiver_in_listing(tmp_path):

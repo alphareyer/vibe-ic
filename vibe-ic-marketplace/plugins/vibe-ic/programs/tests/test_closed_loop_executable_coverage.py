@@ -1817,7 +1817,7 @@ def test_no_claim_source_reports_not_checked_never_pass(tmp_path):
     assert rep["claim_audit"] == "NOT_CHECKED"
     assert rep["claims_examined"] == 0
     assert rep["claim_sources"] == []
-    assert "NOT_MEASURED" in r.stdout
+    assert "NOT_CHECKED" in r.stdout
 
 
 def test_a_bad_argument_is_rc3_never_a_design_finding():

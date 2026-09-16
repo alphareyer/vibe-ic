@@ -382,7 +382,7 @@ def test_an_analog_track_that_produced_nothing_is_not_a_track_that_was_never_ask
         f"({rep_declared['counts']}), so this no longer isolates MISSING "
         f"from FAIL")
     track = {i: _statuses(rep_declared)[i] for i in _analog_ids(rep_declared)}
-    assert all(s == "FAIL" for s in track.values()), (
+    assert all(s == "MISSING" for s in track.values()), (
         f"PRECONDITION: the declared-but-empty track is not uniformly "
         f"MISSING ({track})")
 

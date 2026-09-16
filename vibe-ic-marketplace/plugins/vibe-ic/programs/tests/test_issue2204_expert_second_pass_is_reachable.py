@@ -620,7 +620,7 @@ def test_empty_answer_is_recorded_without_consumption_credit(tmp_path):
     result = _invoke_lifecycle(p, "01_empty")
     assert result["track"]["ai_subtrack"]["status"] == TRACK.AI_CONSUMED_EMPTY
     assert result["track"]["execution"]["complete"] is False
-    assert "NOT_MEASURED" in result["summary"]["second_track"]
+    assert "INCOMPLETE" in result["summary"]["second_track"]
     assert P1._expert_track_completion(result["track"])[0] is False
     assert ORCH._phase1_decision(p, False) == (False, "")
     _answer_path(p).write_text(json.dumps(_ANSWER))

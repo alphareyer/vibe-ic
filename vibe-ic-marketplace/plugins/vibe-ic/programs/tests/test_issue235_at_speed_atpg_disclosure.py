@@ -747,10 +747,10 @@ def test_a_disclosed_not_run_is_never_cost_free_at_the_flow_level(tmp_path):
     # same way, for the same reason.
     #
     # WHAT IS STILL REFUSED: DT2 may never come out of this tree GREEN.
-    assert _status_of(doc, "DT2") in ("FAIL", "NOT_APPLICABLE"), (
+    assert _status_of(doc, "DT2") in ("MISSING", "SKIPPED-CONDITION"), (
         "DT2 reported something other than red-or-deferred on a tree where "
         "no at-speed grade exists at all:\n" + doc["_stdout"])
-    assert _status_of(doc, "DT3") in ("FAIL", "NOT_APPLICABLE"), (
+    assert _status_of(doc, "DT3") in ("MISSING", "SKIPPED-CONDITION"), (
         "DT3 likewise:\n" + doc["_stdout"])
 
 

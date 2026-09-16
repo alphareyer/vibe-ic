@@ -232,7 +232,7 @@ def test_connectivity_only_tb_is_incomplete_not_waived(tmp_path):
     assert rec["coverage"]["measured"] is True
     inline = RUNNER.step_step4_functional_evidence(tmp_path, "digital")
     assert inline.status == "FAIL", inline
-    assert "NOT_MEASURED" in inline.detail
+    assert "INCOMPLETE" in inline.detail
     assert inline.extras["fallback_skill"] == "testbench-gen"
     assert RUNNER._aggregate_verdict([inline]) == "FAIL"
 
@@ -247,7 +247,7 @@ def test_connectivity_only_result_stops_step4_by_run(tmp_path):
 
 def test_absent_tb_cannot_release_step4(tmp_path):
     result = FLOW.check_step(tmp_path, _step4_gate(), waivers={})
-    assert result.status not in {"PASS", "PASS_WITH_WAIVERS"}, (
+    assert result.status not in {"PASS", "WAIVED"}, (
         result.status, result.reasons)
     vac = VACUOUS.check(tmp_path)
     assert vac["verdict"] == "NOT_APPLICABLE"

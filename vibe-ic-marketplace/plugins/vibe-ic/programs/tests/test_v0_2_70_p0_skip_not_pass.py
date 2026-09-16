@@ -44,7 +44,7 @@ def test_p0_renders_skipped_condition():
     import inspect
     assert F.p0_umbrella_verdict(None, []) == "NOT_APPLICABLE"
     owner = inspect.getsource(F._p0_umbrella_status)
-    assert '"NOT_APPLICABLE"' in owner
+    assert '"SKIPPED-CONDITION"' in owner
     assert "#447" in owner
     fn = inspect.getsource(F.main)
     assert 'id="P0"' in fn

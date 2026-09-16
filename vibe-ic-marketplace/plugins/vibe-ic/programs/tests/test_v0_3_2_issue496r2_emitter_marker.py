@@ -226,7 +226,7 @@ def test_acceptance_prose_artifact_a3_waived_deferred(tmp_path):
     rc2, out2 = _run_strict(proj)
     a3_2 = _a3_block(out2)
     assert "[FAIL" in a3_2, out2
-    assert "PASS_WITH_WAIVERS" not in a3_2
+    assert "WAIVED" not in a3_2
 
 
 # ════════════════ HALF 1 (EMITTER): structured marker is written ════════════

@@ -255,9 +255,9 @@ def test_the_constant_and_every_literal_spelling_are_the_same_word():
     src = (PROGRAMS / "design_one_shot_runner.py").read_text(errors="replace")
     word = dosr.NOT_EXECUTED_STATUS
     # the aggregator classifies it, so it cannot reach the catch-all PASS
-    assert f'_INCOMPLETE_STATUSES = ("NOT_MEASURED", "{word}")' in src
+    assert f'_INCOMPLETE_STATUSES = ("INCOMPLETE", "{word}")' in src
     # main's reference-TB repair loop treats it as terminal
-    assert f'"NOT_MEASURED",\n                          "{word}") or' in src
+    assert f'"INCOMPLETE",\n                          "{word}") or' in src
     # and the closed-loop registry's citation agrees with that tuple
     import closed_loop_executable_coverage_check as clc
     cited = clc.REGISTRY["4"]["evidence"]

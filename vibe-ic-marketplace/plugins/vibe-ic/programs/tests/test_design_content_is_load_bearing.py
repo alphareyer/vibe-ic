@@ -249,7 +249,7 @@ def test_a_reader_of_the_line_alone_can_tell_the_two_apart(tmp_path):
         f"a structure-only A3 and a designed A3 print the SAME compliance "
         f"line:\n  {line_so}")
     assert "STRUCTURE-ONLY=2" in line_so, line_so
-    assert "PASS_WITH_WAIVERS" not in line_sized, line_sized
+    assert "STRUCTURE-ONLY" not in line_sized, line_sized
 
 
 def test_the_verdict_word_on_the_line_is_not_a_bare_pass(tmp_path):
@@ -282,4 +282,4 @@ def test_the_flow_compliance_line_carries_the_tier(tmp_path):
         f"library default from one that produced a design-bound artefact:\n"
         f"  {tally[0]}")
     step = [l for l in cp.stdout.splitlines() if "Step A3:" in l]
-    assert step and "PASS_WITH_WAIVERS" in step[0], step
+    assert step and "STRUCTURE-ONLY" in step[0], step

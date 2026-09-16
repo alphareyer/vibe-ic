@@ -254,7 +254,7 @@ def test_check_step_unanswerable_authoring_is_incomplete(tmp_path):
     assert res.status == "NOT_MEASURED", (res.status, res.reasons)
     joined = " ".join(res.reasons)
     assert "L6.fsm_state.IDLE" in joined
-    assert "NOT_APPLICABLE" not in joined
+    assert "SKIPPED-CONDITION" not in joined
 
 
 def test_proved_subset_with_open_denominator_is_incomplete(tmp_path):
@@ -467,7 +467,7 @@ def test_early_missing_present_output_passes_no_sibling_consult(tmp_path):
     step = {"id": 999, "name": "Post-DFT optimization",
             "required_outputs": [_EX_OUT]}
     res = FCC.check_step(tmp_path, step, waivers={})
-    assert res.status not in ("FAIL", "NOT_APPLICABLE"), (res.status, res.reasons)
+    assert res.status not in ("MISSING", "SKIPPED-CONDITION"), (res.status, res.reasons)
     assert any("coverage.json" in e for e in res.evidence), res.evidence
 
 

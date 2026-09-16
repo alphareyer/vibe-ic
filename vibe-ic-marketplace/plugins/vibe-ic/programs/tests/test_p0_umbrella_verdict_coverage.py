@@ -458,7 +458,7 @@ def test_incomplete_is_a_registered_producer_status():
     """`verdict` derives done-claim membership BY SUBTRACTION, so an
     unregistered word silently becomes a done-claim. INCOMPLETE was registered
     by #599; the umbrella is a new PRODUCER of it and that must stay true."""
-    assert "NOT_MEASURED" in _T.PRODUCER_STATUSES
+    assert "INCOMPLETE" in _T.PRODUCER_STATUSES
 
 
 def test_incomplete_cannot_turn_a_green_run_red():

@@ -123,7 +123,7 @@ def test_a_corrupt_artefact_is_none_not_a_crash(tmp_path):
 def test_an_unrouted_run_makes_a_signoff_step_vacuous(tmp_path):
     v = P._vacuous_on_unrouted(_project(tmp_path, True), "drc", 0.0)
     assert v is not None and v.status == "NOT_MEASURED"
-    assert "NOT_MEASURED" in v.detail
+    assert "INCOMPLETE" in v.detail
 
 
 def test_a_vacuous_signoff_makes_the_RUN_fail(tmp_path):
@@ -193,7 +193,7 @@ def _handoff(project):
 def test_the_handoff_pack_refuses_on_an_unrouted_layout(tmp_path):
     r = _handoff(_project(tmp_path, True))
     assert r.returncode == 2, r.stdout[-400:] + r.stderr[-400:]
-    assert "NOT_MEASURED" in r.stderr
+    assert "INCOMPLETE" in r.stderr
 
 
 def test_the_handoff_pack_does_not_refuse_a_routed_one(tmp_path):

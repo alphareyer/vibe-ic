@@ -324,7 +324,7 @@ def test_e2e_oracle_pass_lifts_step4_out_of_skipped_condition(tmp_path):
     line = _step4_line(out)
     block = _step4_block(out)
     assert line, f"Step 4 not in output:\n{out}"
-    assert "NOT_APPLICABLE" not in line, f"Step 4 back to #460's bug:\n{line}"
+    assert "SKIPPED-CONDITION" not in line, f"Step 4 back to #460's bug:\n{line}"
     assert "[PASS" not in line, (
         f"an oracle PASS with no coverage measurement is not a Step-4 PASS:"
         f"\n{line}")

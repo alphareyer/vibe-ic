@@ -338,7 +338,7 @@ def test_the_tier_is_not_bought_by_a_relabel(tmp_path):
     # tier — see `test_issue1978_reason_taxonomy::
     # test_the_reclassification_greens_nothing`.
     assert cls == T.ZERO_DENOMINATOR, (cls, tier)
-    assert cls not in T.SKIP_ELIGIBLE and tier == "NOT_MEASURED", (cls, tier)
+    assert cls not in T.SKIP_ELIGIBLE and tier == "INCOMPLETE", (cls, tier)
 
     orig = T.infer_nonverdict_reason
     try:
