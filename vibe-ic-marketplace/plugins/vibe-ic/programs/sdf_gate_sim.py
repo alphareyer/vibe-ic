@@ -786,6 +786,31 @@ def find_l10_executed_cases(project: Path, top: str) -> Optional[Dict[str, objec
     return {"cases": cases, "skipped": skipped, "declared": len(declared)}
 
 
+def name_unverdicted_case(rc, size: int, truncated: bool) -> str:
+    """Say WHY a gate-level case produced no verdict. PURE.
+
+    Three different things used to share one sentence. MEASURED on run14: nine
+    cases ended `$finish called at ...` while the two longest ended MID-LINE at
+    sizes that are EXACT multiples of 4096 (14241792 = 3477 x 4096, 14893056 =
+    3636 x 4096) — every passing transcript was unaligned. A file left on a page
+    boundary with a half-written line is a writer that was KILLED, not a
+    testbench that stayed silent, and all eleven carried the same 29532
+    `SDF ERROR` lines so the SDF was never the discriminator.
+
+    None of these is a pass. The verdict stays absent in every branch; what
+    changes is whether a reader can act on it."""
+    if truncated:
+        return (f"the simulator was STOPPED mid-write: rc={rc}, transcript "
+                f"{size} B ending without a newline"
+                + (" and on an exact 4096-byte boundary"
+                   if size and size % 4096 == 0 else "")
+                + " — the run did not reach a verdict, and this is a killed "
+                  "process rather than a silent testbench")
+    if rc not in (0, None):
+        return (f"the simulator exited rc={rc} without printing a verdict line")
+    return "no verdict line at gate level; a missing marker is not a pass"
+
+
 def build_l10_results_log(rows: List[Dict[str, object]],
                           skipped: List[Dict[str, object]],
                           meta: Dict[str, object]) -> str:
@@ -890,20 +915,42 @@ def _run_l10_suite(project: Path, top: str, container: str, sim_dir: Path,
               f"-sdf-info > {shlex.quote(cid)}.stdout.log "
               f"2> {shlex.quote(cid)}.stderr.log; echo RC=$?")
         try:
-            _docker(container, rr, timeout=900)
+            sr = _docker(container, rr, timeout=900)
         except Exception as exc:
             row.update(verdict=None, marker=None, passed=0, total=0,
                        detail=f"sim invoke failed: {exc}")
             rows.append(row)
             continue
+        # R-0915-67(2) — KEEP THE EXIT CODE. It used to be discarded, and that
+        # is why a killed case and a case that merely printed nothing were the
+        # same finding.
+        #
+        # MEASURED on run14: nine cases ended `$finish called at ...`; the two
+        # longest ended MID-LINE with no trailing newline, at sizes that are
+        # EXACT multiples of 4096 (14241792 = 3477 x 4096, 14893056 = 3636 x
+        # 4096) while every passing transcript is unaligned. A file left on a
+        # page boundary with a half-written line is a writer that was killed,
+        # not a simulator that finished. All eleven carried the SAME 29532
+        # `SDF ERROR` lines, so the SDF was never the discriminator, and the
+        # container's OOM counters were 0.
+        #
+        # So the outcome is NAMED from what is observable — the tool's own exit
+        # code and whether its transcript terminates — instead of all of it
+        # collapsing into "no verdict line".
+        _rc_m = re.search(r"RC=(\d+)", sr.stdout or "")
+        _rc = int(_rc_m.group(1)) if _rc_m else None
         so = sim_dir / f"{cid}.stdout.log"
         text = so.read_text(errors="replace") if so.is_file() else ""
+        _size = so.stat().st_size if so.is_file() else 0
+        _truncated = bool(text) and not text.endswith("\n")
         parsed = parse_l10_case_stdout(text)
         row.update(parsed)
         row["annotated_interconnect_delays"] = len(_ANNOT_RE.findall(text))
+        row["sim_rc"] = _rc
+        row["transcript_bytes"] = _size
+        row["transcript_complete"] = not _truncated
         if parsed.get("verdict") is None:
-            row["detail"] = ("no verdict line at gate level; a missing marker "
-                             "is not a pass")
+            row["detail"] = name_unverdicted_case(_rc, _size, _truncated)
         rows.append(row)
 
     meta = {"top": top, "netlist": str(netlist), "pdk_lib": models.arg,
