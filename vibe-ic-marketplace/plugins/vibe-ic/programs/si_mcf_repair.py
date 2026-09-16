@@ -120,7 +120,8 @@ def dominant_victims(si_crosstalk: Optional[Dict[str, Any]],
     return out
 
 
-def accepts(before: Dict[str, Any], after: Dict[str, Any]) -> Tuple[bool, str]:
+def accepts(before: Dict[str, Any], after: Dict[str, Any], *,
+            nominal_floor_ns: Optional[float] = None) -> Tuple[bool, str]:
     """`(accept, reason)` for ONE repair candidate, by the same rules the SDR
     children are judged by, plus the one this producer adds.
 
@@ -163,9 +164,22 @@ def accepts(before: Dict[str, Any], after: Dict[str, Any]) -> Tuple[bool, str]:
     a_nom = after.get("nominal_setup_ns")
     if (isinstance(b_nom, (int, float)) and isinstance(a_nom, (int, float))
             and a_nom < b_nom):
-        return False, (f"nominal setup {b_nom:+.4g} -> {a_nom:+.4g} ns: the "
-                       f"candidate buys ENVELOPE margin with REAL margin, "
-                       f"which this producer may not trade on its own")
+        # A DECLARED FLOOR IS THE ONLY THING THAT BUYS A REGRESSION, and the
+        # default is still "none at all" (R-0915-56). Without a floor this
+        # producer may not trade real margin for envelope margin on its own
+        # judgement — the landed rule, unchanged. WITH one, the trade is
+        # bounded by a number someone declared, and the reason says what was
+        # spent and what is left rather than only that it was refused.
+        if nominal_floor_ns is None:
+            return False, (f"nominal setup {b_nom:+.4g} -> {a_nom:+.4g} ns: "
+                           f"the candidate buys ENVELOPE margin with REAL "
+                           f"margin, which this producer may not trade on its "
+                           f"own")
+        if a_nom < nominal_floor_ns:
+            return False, (f"nominal setup {b_nom:+.4g} -> {a_nom:+.4g} ns "
+                           f"falls BELOW the declared floor "
+                           f"{nominal_floor_ns:+.4g} ns: a bounded trade is "
+                           f"still a bound, and this candidate is outside it")
     b_mcf = before.get("mcf_setup_ns")
     a_mcf = after.get("mcf_setup_ns")
     if (isinstance(b_mcf, (int, float)) and isinstance(a_mcf, (int, float))
@@ -280,6 +294,101 @@ def repair_tcl(*, folded_spef_c: str, victims: List[str],
         "}\n")
 
 
+#: The non-default rule the spacing remedy creates. Named so a reader of the
+#: DEF can find it, and so a second run recognises its own work.
+SHIELD_NDR_NAME = "VIBEIC_SI_SHIELD"
+
+#: How much wider the victim's spacing becomes, as a MULTIPLE of the layer's
+#: own minimum. 2.0 is one extra track of air on each side, the smallest
+#: spacing change that can move a coupling cap at all; a multiplier rather than
+#: a length, so nothing here carries a PDK dimension.
+DEFAULT_SHIELD_SPACING_MULT = 2.0
+
+
+def shield_tcl(*, victims: List[str],
+               spacing_mult: float = DEFAULT_SHIELD_SPACING_MULT,
+               ndr_name: str = SHIELD_NDR_NAME) -> str:
+    """SPACING, NOT SIZING — the remedy a COUPLING victim actually takes.
+
+    R-0915-50 measured what sizing does here: one bounded `repair_timing` on the
+    MCF-bounded loads moved `mcf_setup` from -0.2660 to -1.5703 ns and spent
+    0.834 ns of real nominal margin. The child's own log showed why — the repair
+    had very nearly closed the envelope in-session
+    (`SI_MCF_WNS_AFTER_REPAIR: 0.00857`) and then `SI_MCF_ROUTING_CLEARED: 2323`
+    threw the whole route away and re-made it worse.
+
+    TWO THINGS FOLLOW, and this deck is both of them.
+
+    (1) A CLOCK-LEAF VICTIM IS NOT A SIZING PROBLEM. One of subservient's two
+    victims is `clknet_leaf_21_i_clk`. Resizing the driver of a clock leaf
+    changes the clock, which is the one net every other arrival is measured
+    against; the remedy for a clock victim is to move the aggressor away from
+    it. The classification is made BY THE TOOL at run time (`getSigType` on the
+    net), never by reading its name — a name-matched "clknet" rule is a
+    chip-specific rule wearing a general coat.
+
+    (2) RE-ROUTE THE VICTIMS, NOT THE DESIGN. The caller clears and re-routes
+    only the nets this rule is assigned to, so the 2323-net reroute that cost
+    1.30 ns of envelope cannot happen.
+
+    The spacing is derived from each ROUTING layer's OWN minimum at run time and
+    multiplied, so this file carries no PDK dimension and the rule means the
+    same thing on any process. Emits NOTHING when there is no victim: a deck
+    that assigns a rule over an empty set is a deck that can still move a
+    wire."""
+    if not victims:
+        return ""
+    names = " ".join(victims)
+    return (
+        "# === R-0915-56(b): SPACING for coupling victims, sizing for nothing.\n"
+        "# The rule's spacing comes from each routing layer's own minimum,\n"
+        "# multiplied - no PDK dimension is written here.\n"
+        "set _si_ndr_mult " + repr(float(spacing_mult)) + "\n"
+        "set _si_victims {" + names + "}\n"
+        "set _si_sp {}\n"
+        "set _si_tech [ord::get_db_tech]\n"
+        "set _si_dbu [$_si_tech getDbUnitsPerMicron]\n"
+        "foreach _si_lyr [$_si_tech getLayers] {\n"
+        '  if {[$_si_lyr getType] ne "ROUTING"} { continue }\n'
+        "  set _si_ms 0\n"
+        "  catch {set _si_ms [$_si_lyr getSpacing]}\n"
+        "  if {$_si_ms <= 0} { continue }\n"
+        "  lappend _si_sp [$_si_lyr getName] "
+        "[expr {double($_si_ms) / $_si_dbu * $_si_ndr_mult}]\n"
+        "}\n"
+        "set ::_si_shielded {}\n"
+        "if {[llength $_si_sp] == 0} {\n"
+        '  puts "SI_MCF_SHIELD_UNAVAILABLE: this tech reports no routing layer '
+        'with a minimum spacing, so no spacing rule could be derived and NONE '
+        'was invented"\n'
+        "} else {\n"
+        "  if {[catch {create_ndr -name " + ndr_name + " -spacing $_si_sp} "
+        "_si_e]} {\n"
+        '    puts "SI_MCF_SHIELD_NDR_NONFATAL: $_si_e"\n'
+        "  } else {\n"
+        '    puts "SI_MCF_SHIELD_NDR: ' + ndr_name + ' spacing $_si_sp"\n'
+        "  }\n"
+        "  set _si_blk [ord::get_db_block]\n"
+        "  set _si_clk 0; set _si_dat 0; set _si_miss 0\n"
+        "  foreach _si_vn $_si_victims {\n"
+        "    set _si_n [$_si_blk findNet $_si_vn]\n"
+        '    if {$_si_n eq "NULL" || $_si_n eq ""} { incr _si_miss ; '
+        'puts "SI_MCF_SHIELD_NET_ABSENT: $_si_vn" ; continue }\n'
+        "    set _si_st [$_si_n getSigType]\n"
+        '    if {$_si_st eq "CLOCK"} { incr _si_clk } else { incr _si_dat }\n'
+        "    if {[catch {assign_ndr -ndr " + ndr_name + " -net $_si_vn} "
+        "_si_e2]} {\n"
+        '      puts "SI_MCF_SHIELD_ASSIGN_NONFATAL: $_si_vn $_si_e2"\n'
+        "    } else {\n"
+        "      lappend ::_si_shielded $_si_vn\n"
+        '      puts "SI_MCF_SHIELD_ASSIGNED: $_si_vn sigType=$_si_st"\n'
+        "    }\n"
+        "  }\n"
+        '  puts "SI_MCF_SHIELD_SUMMARY: clock=$_si_clk data=$_si_dat '
+        'absent=$_si_miss assigned=[llength $::_si_shielded]"\n'
+        "}\n")
+
+
 def _corner_numbers(si_mcf: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """The three numbers the trajectory is measured in, from a report."""
     c = (si_mcf or {}).get("corners") or {}
@@ -338,7 +447,8 @@ def crash_frames(log_text: str, limit: int = 6) -> List[str]:
 
 
 def run_once(project: Path, *, container: str = "",
-             runner: Any = None, no_seam_reason: str = "") -> Dict[str, Any]:
+             runner: Any = None, no_seam_reason: str = "",
+             nominal_floor_ns: Optional[float] = None) -> Dict[str, Any]:
     """Plan, and record the trajectory. ONE pass, and NEVER in place.
 
     `runner` is the callable that executes a candidate and returns the AFTER
@@ -367,6 +477,7 @@ def run_once(project: Path, *, container: str = "",
         "plan": p, "before": before, "after": None,
         "decision": None, "reason": None, "residual": None,
         "reason_class": None, "crash": None,
+        "nominal_floor_ns": nominal_floor_ns,
     }
     if not p.get("run"):
         record["decision"] = "NOT_RUN"
@@ -415,7 +526,8 @@ def run_once(project: Path, *, container: str = "",
             ok, why = accepts({**before,
                                **{"router_drc":
                                   (after or {}).get("router_drc_before")}},
-                              after or {})
+                              after or {},
+                              nominal_floor_ns=nominal_floor_ns)
             record["decision"] = ("ADOPTED" if ok
                                   else "REJECTED_CANDIDATE_DISCARDED")
             record["reason"] = why
