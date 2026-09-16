@@ -16603,6 +16603,26 @@ def main(argv: Optional[List[str]] = None) -> int:
             # NOT a fallback to writing. A caller that asked for read-only
             # got no audit rather than an audit that mutated its evidence.
             return 2
+        # DECLARE the relocation to the sub-gates.
+        #
+        # `report_belongs_to_project_check` compares each runner report's
+        # recorded `project` against the directory it sits in. In this copy
+        # EVERY report records the original path, so without this the flag
+        # whose entire purpose is auditing "a published corpus, another
+        # agent's run" makes all of them read as foreign — measured on a
+        # converged spm run: `Overall: PASS_WITH_WAIVERS` rc 0 in place became
+        # `Overall: FAIL` rc 1 on the copy, step 36 refusing and voiding four
+        # downstream PASSes. The audit affordance red-flagged the very runs it
+        # exists to audit.
+        #
+        # An env var and not an argv edit: the gate command is a string in the
+        # canonical flow yaml, shared by every caller, and threading a new
+        # argument through would make the flow row describe a mode only this
+        # one invocation uses. The gate excuses a WHOLESALE relocation only
+        # (one foreign root, and it must be this one); a mixture — the #587
+        # laundering shape — is still FAIL, so this declares provenance and
+        # weakens nothing.
+        os.environ["VIBEIC_AUDIT_RELOCATED_FROM"] = str(project)
         project = _ro_copy
         # `atexit` and not a `try/finally`: `main` returns from ~20 places
         # below, and a finally wrapping all of them would be a 400-line
