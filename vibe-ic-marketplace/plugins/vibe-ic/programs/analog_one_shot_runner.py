@@ -1118,7 +1118,7 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
     # A4's `analog_real_corner_sweep` fall-through: an unreachable container
     # is its disclosed rc=2 and must not turn A8 into a FAIL that the gate
     # below has not itself found. A deterministic-stub layout is skipped by
-    # the producer, so PASS_WITH_STUB is untouched.
+    # the producer, so the stub disclosure is untouched.
     #
     # THIS IS THE ONLY PRODUCTION SITE. The producer was briefly also wired
     # into A8's flow gate; that was withdrawn on 2026-07-28 because
@@ -1795,8 +1795,14 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                     cp2 = _pr.run(cmd, capture_output=True,
                                           text=True)
                     if cp2.returncode == 0:
+                        # R-0915-85 — the gate passed over a DETERMINISTIC
+                        # STUB this runner emitted, not over the design. That
+                        # is a pass somebody must come back to and replace,
+                        # which is a waiver row, with the fact disclosed beside
+                        # it. The old word said both in one breath and the
+                        # "come back to" half reached no must-close list.
                         return StepResult(
-                            step_name, bname, "PASS_WITH_STUB",
+                            step_name, bname, "PASS_WITH_WAIVERS",
                             time.time() - t0,
                             (f"deterministic stub emitted "
                              f"({len(stub_paths)} file(s)); gate "
@@ -1806,7 +1812,7 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                                 "extraction_strategy":
                                     "deterministic_stub",
                                 "low_confidence": True,
-                            })
+                            }, disclosures=[_V.Disclosure.STRUCTURE_ONLY])
             # Artefact not yet emitted — defer to skill (back-compat).
             msg = (cp.stderr.splitlines()[-1] if cp.stderr
                    else f"artefact missing — invoke skill `{skill}`")
@@ -1862,8 +1868,11 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                 cp2 = _pr.run(cmd, capture_output=True,
                                       text=True)
                 if cp2.returncode == 0:
+                    # R-0915-85 — see the sibling site above: a gate that
+                    # passed over an emitted stub is PASS_WITH_WAIVERS carrying
+                    # Disclosure.STRUCTURE_ONLY.
                     return StepResult(
-                        step_name, bname, "PASS_WITH_STUB",
+                        step_name, bname, "PASS_WITH_WAIVERS",
                         time.time() - t0,
                         (f"deterministic PV stub emitted "
                          f"({len(stub_paths)} file(s)); gate re-ran PASS"),
@@ -1871,7 +1880,7 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                             "stub_paths": [str(p) for p in stub_paths],
                             "extraction_strategy": "deterministic_stub",
                             "low_confidence": True,
-                        })
+                        }, disclosures=[_V.Disclosure.STRUCTURE_ONLY])
         return StepResult(step_name, bname, "FAIL",
                           time.time() - t0,
                           cp.stderr[-500:] or cp.stdout[-500:])
@@ -2026,7 +2035,8 @@ def main() -> int:
                           "minimal-substance stub tagged "
                           "`extraction_strategy: deterministic_stub` "
                           "+ re-run the gate. Returns "
-                          "PASS_WITH_STUB instead of WAIVED. "
+                          "PASS_WITH_WAIVERS carrying "
+                          "Disclosure.STRUCTURE_ONLY (R-0915-85). "
                           "Also controllable via the "
                           "ANALOG_DETERMINISTIC_STUBS=1 env var."))
     p.add_argument("--blocks", default="",
