@@ -21707,6 +21707,44 @@ def _route_drc_report_tcl(rpt_path: str) -> str:
     )
 
 
+def _rsz_parasitics_source_tcl(tag: str) -> str:
+    """R-0915-84(a) — give the RESIZER its own parasitics before it repairs.
+
+    MEASURED (opentitan_aes x sky130A, 2026-09-16). On all four passes of the
+    post-route DRV loop OpenROAD printed, immediately after the census:
+
+        [WARNING EST-0027] no estimated parasitics. Using wire load models.
+
+    The census is sound -- `read_spef` feeds STA, and R-0915-83's refusal now
+    proves it -- but the RESIZER keeps its own parasitics source, and
+    `read_spef` does not set it. So `repair_design` / `repair_timing` optimised
+    against a WIRE LOAD MODEL while being GRADED on the extracted SPEF. Four
+    passes moved DRV 41,956 -> 1,896 and never closed, which is what a repair
+    whose model disagrees with its grader looks like.
+
+    `estimate_parasitics -global_routing` is the resizer's own source and is
+    what ORFS runs before its repair steps. It is emitted here, before every
+    repair, so `parasitics_src` cannot be `none` on any pass.
+
+    NONFATAL and DISCLOSED, never silent: the call needs global-routing results,
+    and a session that has none must say so rather than repair blind while
+    appearing to have been fixed. `<TAG>_RSZ_PARASITICS` names the outcome, and
+    a failure leaves the log saying exactly which pass repaired on wire load
+    models.
+
+    chip-AGNOSTIC: no PDK, layer, vendor or design literal.
+    """
+    return (
+        f"    if {{[catch {{estimate_parasitics -global_routing}} _rszp]}} {{\n"
+        f"      puts \"{tag}_RSZ_PARASITICS: FAILED $_rszp -- this repair runs "
+        "on WIRE LOAD MODELS (expect EST-0027) and its result is not comparable "
+        "with the SPEF census above\"\n"
+        f"    }} else {{ puts \"{tag}_RSZ_PARASITICS: estimate_parasitics "
+        "-global_routing OK -- the resizer has its own source, EST-0027 must "
+        "not appear for this pass\" }\n"
+    )
+
+
 def _spare_safe_clear_net_proc_tcl() -> str:
     """The ONE decision every routing-clear site in this runner makes, as a Tcl
     proc — and the only place `odb::dbWire_destroy` is written.
@@ -26249,12 +26287,45 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "    }\n"
         f"    if {{[catch {{write_spef {out_dir_c}/sdr_pass.spef}} _sdr_sw]}} "
         "{ puts \"SDR_SPEFW_NONFATAL: $_sdr_sw\"; set _sdr_tx_error 1; break }\n"
+        # R-0915-83 — THE PARASITICS MUST REACH STA, AND IT IS ASSERTED.
+        # MEASURED (opentitan_aes x sky130A, 2026-09-16), one session on this
+        # run's own checkpoint DEF at the max corner:
+        #     extract_parasitics ONLY ............... 0 violators
+        #     the SAME extraction + write_spef + read_spef ... 45,237
+        # `extract_parasitics` populates the ODB; OpenSTA does not see it until
+        # a SPEF is read back. So a census taken after extraction alone reports
+        # ZERO and is byte-indistinguishable from a clean design -- a
+        # NOT_MEASURED that reads as green, and the loop would call it
+        # CONVERGED on pass 1. `_sdr_par_ok` is set ONLY on the line below,
+        # after `read_spef` returns without error, and nothing else sets it.
+        "    set _sdr_par_ok 0\n"
         f"    if {{[catch {{read_spef {out_dir_c}/sdr_pass.spef}} _sdr_sr]}} "
         "{ puts \"SDR_SPEFR_NONFATAL: $_sdr_sr\"; set _sdr_tx_error 1; break }\n"
+        "    set _sdr_par_ok 1\n"
         # Count the sign-off DRV the same way the Step-23 gate does: the
         # tool's own violator report, not a proxy.
-        f"    catch {{report_check_types -max_slew -max_capacitance -max_fanout "
-        f"-violators > {out_dir_c}/sdr_drv.rpt}}\n"
+        # R-0915-83 — and REFUSE BY NAME rather than report a number when the
+        # count cannot be trusted. Two ways it could not be, both of which
+        # previously produced a silent 0 that the loop read as convergence:
+        # no parasitics in STA, and a violator report that was never written.
+        # The `catch` below used to swallow a failed `report_check_types`,
+        # leaving `_sdr_n` at 0.
+        "    set _sdr_rpt_ok 1\n"
+        f"    if {{[catch {{report_check_types -max_slew -max_capacitance "
+        f"-max_fanout -violators > {out_dir_c}/sdr_drv.rpt}} _sdr_rc]}} "
+        "{ set _sdr_rpt_ok 0; puts \"SDR_DRV_REPORT_FAILED: $_sdr_rc\" }\n"
+        f"    if {{![file exists {out_dir_c}/sdr_drv.rpt]}} "
+        "{ set _sdr_rpt_ok 0 }\n"
+        "    if {!$_sdr_par_ok || !$_sdr_rpt_ok} {\n"
+        "      puts \"SDR_DRV_CENSUS_NOT_MEASURED: parasitics_in_sta="
+        "$_sdr_par_ok violator_report=$_sdr_rpt_ok -- a DRV census without "
+        "parasitics in STA reports 0 and cannot be told apart from a clean "
+        "design (MEASURED: 0 after extract_parasitics alone, 45237 after "
+        "read_spef of the SAME extraction). NO NUMBER IS REPORTED and the "
+        "repair loop does not run on it.\"\n"
+        "      set _sdr_tx_error 1\n"
+        "      break\n"
+        "    }\n"
         "    set _sdr_n 0\n"
         # COUNTED PER KIND, not just totalled: the repair that closes a
         # max-capacitance violator is not the one that closes a max-slew
@@ -26296,6 +26367,23 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "    if {$_sdr_n == 0} { puts \"SDR_CONVERGED: pass $_sdr_p\"; break }\n"
         "    set _sdr_stop 0\n"
         "    set _sdr_tx_mutated 1\n"
+        # R-0915-83 — DISCLOSE what the repair below is optimising against.
+        # MEASURED: on all four passes of the opentitan_aes run, OpenROAD
+        # printed `[WARNING EST-0027] no estimated parasitics. Using wire load
+        # models.` immediately after this census. The census itself is sound --
+        # `read_spef` above feeds STA, and the refusal there now proves it --
+        # but `repair_design` asks for ESTIMATED parasitics, finds none, and
+        # falls back to a wire-load model. So the loop is GRADED on SPEF and
+        # REPAIRS blind. That fallback is OpenROAD's own behaviour and this
+        # change does not paper over it; it makes it a named line in the log
+        # next to the number it explains, instead of a tool warning nobody
+        # reads. A repair whose model disagrees with its grader is the reason
+        # four passes moved 41,956 -> 1,896 and never closed.
+        "    puts \"SDR_REPAIR_MODEL: graded_on=spef "
+        "repair_sees_estimated_parasitics=unknown_to_tcl -- if OpenROAD prints "
+        "EST-0027 after this line, this pass's repair ran on WIRE LOAD MODELS "
+        "while its census came from the extracted SPEF\"\n"
+        + _rsz_parasitics_source_tcl("SDR")
         + f"    if {{[catch {{repair_design -max_wire_length $_sdr_mwl "
         f"-slew_margin {m} -cap_margin {m}}} _sdr_rd]}} {{\n"
         "      # A caught repair error is not a successful candidate.  Even a\n"
@@ -26373,6 +26461,7 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # delay, and nothing re-timed the paths they sit on. This is the
         # same `repair_timing -setup` the flow already runs post-global-
         # route; it belongs after any buffer insertion, not only that one.
+        + _rsz_parasitics_source_tcl("SDR_SETUP")
         + "    if {[catch {repair_timing -setup} _sdr_rt]} "
         "{ puts \"SDR_REPAIR_TIMING_NONFATAL: $_sdr_rt\"; set _sdr_tx_error 1 }\n"
         # LEGALIZE AND VERIFY. A bare catch-guarded detailed_placement
@@ -60491,8 +60580,25 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
         #                produced it does not stand clean.
         # This STRENGTHENS the verdict for both — neither can now yield a bare
         # "PASS" — and moves no other word.
+        #
+        # R-0915-82 — NOT_EXECUTED joins them, and it MUST, because that change
+        # is what first puts the word in this plan. `step_dft_lec_chain` now
+        # answers an INCONCLUSIVE LEC record with NOT_EXECUTED when the proof
+        # was STOPPED (the R-0915-48 backstop firing, the stall watchdog, an
+        # operator rung cap) or compared nothing at all, and
+        # `run_step11_dft_after_synth` republishes that row verbatim as
+        # `step11_lec_equivalence`. Left unclassified it would reach the
+        # refusal above and turn every such run into UNKNOWN_STATUS — a
+        # correction to one step silently voiding the whole phase-3 verdict.
+        # It belongs HERE and not in the FAIL tier: "the prover was cut off"
+        # is a disclosed gap, which is exactly the tier SKIP already sits in,
+        # so R-0915-48's contract (the backstop fires, phase 3 proceeds) is
+        # preserved word for word. The INCONCLUSIVE that is NOT a disclosed
+        # gap — a ladder that ran to its last rung and did not close — comes
+        # through as FAIL and is graded by the tier above.
         "PASS_WITH_WAIVERS": ("WAIVED", "SKIP", "ENV_UNAVAILABLE",
-                              "PASS_WITH_ATTRIBUTION", "WARN", "PASS_W_WARN"),
+                              "PASS_WITH_ATTRIBUTION", "WARN", "PASS_W_WARN",
+                              "NOT_EXECUTED"),
         "PASS": ("PASS",),
     }
     _known = {w for words in _TIERS.values() for w in words}

@@ -18737,10 +18737,9 @@ def lec_step_status_from_report(lec_json: Path) -> Tuple[str, str]:
         PASS                         -> ("PASS", …)   — proven equivalent
         FAIL                         -> ("FAIL", …)   — a real non-equivalence
         SKIPPED-CONDITION            -> ("SKIP", …)   — disclosed tool/budget gap
-        INCONCLUSIVE                 -> ("SKIP", …)   — 0 points compared
-                                                       (e.g. an unstaged hard
-                                                       macro, a frontend abort,
-                                                       or a wall-budget kill)
+        INCONCLUSIVE                 -> `lec_inconclusive_disposition` decides,
+                                        on the record's OWN evidence — it is
+                                        NOT one state (R-0915-82)
         unreadable / missing verdict -> ("SKIP", …)   — never a false PASS
 
     PASS is granted ONLY on an explicit PASS verdict; absence of a clean verdict
@@ -18757,9 +18756,142 @@ def lec_step_status_from_report(lec_json: Path) -> Tuple[str, str]:
         return "PASS", verdict
     if verdict == "FAIL":
         return "FAIL", verdict
-    if verdict in ("SKIPPED-CONDITION", "INCONCLUSIVE"):
+    if verdict == "INCONCLUSIVE":
+        return lec_inconclusive_disposition(doc)[0], verdict
+    if verdict == "SKIPPED-CONDITION":
         return "SKIP", verdict
     return "SKIP", verdict
+
+
+#: Fields in which `lec_run` records that the proof was STOPPED by something it
+#: ran out of, rather than finishing. Any one of them true means the ladder did
+#: not get to say what it would have said.
+_LEC_EXHAUSTION_FLAGS = (
+    "budget_exhausted",            # this program's own budget-kill marker
+    "step_budget_exhausted",       # the step deadline
+    "step_budget_stopped_this_proof",
+    "progress_stalled",            # the container progress watchdog
+)
+
+
+def lec_exhausted_resource_note(doc: dict) -> str:
+    """Name the resource an INCONCLUSIVE record says it ran out of, or "".
+
+    PURE. Reads only fields `lec_run` writes. The R-0915-48 backstop firing,
+    the stall watchdog, the step deadline and an operator-requested rung cap
+    all land here — each is "the proof was cut off", which is a different fact
+    from "the proof finished and did not close"."""
+    if not isinstance(doc, dict):
+        return ""
+    for flag in _LEC_EXHAUSTION_FLAGS:
+        if doc.get(flag):
+            return flag
+    res = doc.get("exhausted_resource")
+    if res:
+        return f"exhausted_resource={res}"
+    policy = doc.get("bounded_rung_policy")
+    if isinstance(policy, dict) and policy.get("limit_reached"):
+        return "bounded_rung_policy.limit_reached"
+    for att in (doc.get("lec_attempts_detail") or []):
+        if isinstance(att, dict) and att.get("killed_by_budget"):
+            return "lec_attempts_detail.killed_by_budget"
+    return ""
+
+
+def lec_inconclusive_disposition(doc: dict) -> Tuple[str, str]:
+    """Decide what an INCONCLUSIVE `lec.json` record EARNS. Returns
+    ``(status, reason)``. PURE — dict in, tuple out.
+
+    R-0915-82. INCONCLUSIVE used to map to SKIP unconditionally, on the
+    docstring premise that it means "0 points compared (e.g. an unstaged hard
+    macro, a frontend abort, or a wall-budget kill)". THE RECORD CAN CONTRADICT
+    THAT PREMISE, and on sha256 run16 it did: `compared_points 846`,
+    `unproven_points 481`, `non_equivalent_points 0`, `budget_exhausted false`,
+    `exhausted_resource null`, `progress_stalled false` — a ladder that ran to
+    its LAST rung (`equiv_induct -seq 64`, `LEC_LADDER`'s top) in 8306 s of a
+    28800 s budget and still did not close. That was booked SKIP, phase 2 went
+    PASS_WITH_WAIVERS, and phase 3 measured sign-off on a netlist whose
+    equivalence to the RTL nobody had proven.
+
+    TWO STATES THAT ONE SKIP CONFLATED:
+
+      NOTHING WAS MEASURED -> (NOT_EXECUTED, reason). Either no point was
+          compared at all, or the proof was STOPPED by a resource it ran out
+          of. Nothing is known about the netlist. This is R-0915-5's
+          NOT_MEASURED-by-name, and it keeps R-0915-48's contract exactly as
+          written: when the backstop fires, the step does not block and phase 3
+          proceeds. Calling this FAIL would assert a non-equivalence nobody
+          measured — the #192 error inverted.
+
+      THE COMPARISON RAN AND DID NOT CLOSE -> (FAIL, reason). Points WERE
+          compared, nothing ran out, and points remain unproven. Non-convergence
+          is still NOT non-equivalence — the reason string says so and no
+          counterexample is claimed — but an OPEN equivalence question is not a
+          step the flow may walk past, because every downstream sign-off number
+          is measured on that netlist.
+
+    Ordering matters: exhaustion is checked FIRST, so a proof that was cut off
+    before it could compare anything is reported as cut off, not as unclosed."""
+    if not isinstance(doc, dict):
+        return NOT_EXECUTED_STATUS, "record unreadable — nothing measured"
+    stopped_by = lec_exhausted_resource_note(doc)
+    if stopped_by:
+        return (NOT_EXECUTED_STATUS,
+                f"NOT_MEASURED: the proof was stopped before it finished "
+                f"({stopped_by}) — R-0915-5/R-0915-48: report the elapsed state "
+                f"and let the flow proceed, never a verdict the prover did not "
+                f"reach")
+    try:
+        compared = int(doc.get("compared_points") or 0)
+    except (TypeError, ValueError):
+        compared = 0
+    if compared <= 0:
+        return (NOT_EXECUTED_STATUS,
+                "NOT_MEASURED: 0 point(s) were compared — the miter never "
+                "judged anything (e.g. an unstaged hard macro or a frontend "
+                "abort), so nothing is known about this netlist")
+    try:
+        unproven = int(doc.get("unproven_points") or 0)
+    except (TypeError, ValueError):
+        unproven = 0
+    return ("FAIL",
+            f"the comparison RAN and did not close: {compared - unproven} of "
+            f"{compared} point(s) proven, {unproven} unproven, and no resource "
+            f"ran out (budget_exhausted/exhausted_resource/progress_stalled all "
+            f"clear). Non-convergence is NOT non-equivalence — no counterexample "
+            f"was recorded — but the netlist's equivalence to the RTL is OPEN "
+            f"and every downstream sign-off is measured on that netlist")
+
+
+def lec_record_reuse_note(doc: dict) -> str:
+    """"" when this record was earned by work done in THIS invocation; a note
+    naming the reuse when it was not. PURE.
+
+    R-0915-82. A re-entered run read sha256 run16's kept INCONCLUSIVE record in
+    2 s and reported it in the same sentence a fresh 8306 s proof would have
+    used. `execution_mode` said `fresh-yosys-proof` — true of the PROCESS, and
+    useless to a reader — while `lec_resume.resumed` was true,
+    `rungs_recorded_this_run` was empty and the one ladder leg carried
+    `rungs_in_this_process: 0`. The producer already records the reuse
+    honestly; nothing was reading it."""
+    if not isinstance(doc, dict):
+        return ""
+    if str(doc.get("execution_mode", "")) == "exact-pass-cache-hit":
+        return "REUSED: exact pass-cache hit; no proof ran in this invocation"
+    resume = doc.get("lec_resume")
+    if not isinstance(resume, dict) or not resume.get("resumed"):
+        return ""
+    if resume.get("rungs_recorded_this_run"):
+        return ""
+    ladder = doc.get("lec_ladder")
+    legs = (ladder or {}).get("legs") if isinstance(ladder, dict) else None
+    if isinstance(legs, list) and legs:
+        if any((leg or {}).get("rungs_in_this_process") for leg in legs
+               if isinstance(leg, dict)):
+            return ""
+    frm = (resume.get("resumed_from") or {}).get("rung") or "a checkpoint"
+    return (f"REUSED: resumed from {frm} and climbed 0 rung(s) in this "
+            f"invocation — this verdict was earned by an earlier run")
 
 
 def _dft_atpg_sniff_pdk(project: Path, netlist_rel: str) -> Tuple[Path, str]:
@@ -20251,6 +20383,19 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                 # is an honest SKIP, never PASS nor a cascading FAIL.
                 _status, _verdict = lec_step_status_from_report(lec_json)
                 _lec_elapsed = time.time() - _lec_started
+                # R-0915-82 — WHY this status, and WHOSE work earned it. The
+                # step used to print one sentence for a fresh 8306 s proof and
+                # for a 2 s re-read of that proof's kept record, and to call
+                # both SKIP. Both halves are read off the producer's own
+                # report; neither is inferred here.
+                try:
+                    _lec_doc = json.loads(lec_json.read_text(errors="replace"))
+                except (OSError, ValueError):
+                    _lec_doc = {}
+                _lec_reason = (lec_inconclusive_disposition(_lec_doc)[1]
+                               if str(_verdict).upper() == "INCONCLUSIVE"
+                               else "")
+                _lec_reuse = lec_record_reuse_note(_lec_doc)
                 results.append(StepResult("lec_equivalence", _status,
                                time.time() - t0,
                                f"yosys equiv: verdict={_verdict or 'UNKNOWN'} "
@@ -20258,6 +20403,8 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                                f", elapsed={_lec_elapsed:.0f}s, declared step "
                                f"budget={_LEC_PRODUCER_TIMEOUT_S}s — RECORDED, "
                                f"not enforced: a progressing proof is never cut off)"
+                               + (f"; {_lec_reuse}" if _lec_reuse else "")
+                               + (f"; {_lec_reason}" if _lec_reason else "")
                                # Only annotate when the artifact is unusable —
                                # a healthy run keeps its original message.
                                + (f"; gate-netlist WARNING: {_lec_netlist_note}"
