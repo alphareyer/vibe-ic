@@ -151,7 +151,10 @@ def test_no_jmax_refuses_and_names_it(tmp_path):
     r = _run(proj)
     assert r.returncode == 2
     assert "[PASS]" not in r.stdout
-    assert any(l.lstrip().startswith("NOT_MEASURED")
+    # R-0915-85 — `INCOMPLETE:` here is the GATE PROGRAM's own refusal token,
+    # not a step status: this gate is one of the ~450 checkers whose stdout
+    # `flow_compliance_check` reads, and that vocabulary is not this batch's.
+    assert any(l.lstrip().startswith("INCOMPLETE")
                for l in r.stdout.splitlines())
     assert "Jmax" in r.stdout
     # A PASS must say how much it looked at; so must a refusal.
@@ -174,7 +177,10 @@ def test_empty_project_refuses_and_discloses(tmp_path):
     r = _run(proj)
     assert r.returncode == 2
     assert "[PASS]" not in r.stdout
-    assert any(l.lstrip().startswith("NOT_MEASURED")
+    # R-0915-85 — `INCOMPLETE:` here is the GATE PROGRAM's own refusal token,
+    # not a step status: this gate is one of the ~450 checkers whose stdout
+    # `flow_compliance_check` reads, and that vocabulary is not this batch's.
+    assert any(l.lstrip().startswith("INCOMPLETE")
                for l in r.stdout.splitlines())
     assert "read 0 peak-current figure(s)" in r.stdout
 
@@ -338,7 +344,9 @@ def test_the_tier_is_not_bought_by_a_relabel(tmp_path):
     # tier — see `test_issue1978_reason_taxonomy::
     # test_the_reclassification_greens_nothing`.
     assert cls == T.ZERO_DENOMINATOR, (cls, tier)
-    assert cls not in T.SKIP_ELIGIBLE and tier == "INCOMPLETE", (cls, tier)
+    # R-0915-85 — the STEP tier is NOT_MEASURED; the gate's own refusal token
+    # above is still `INCOMPLETE`, and the two are different vocabularies.
+    assert cls not in T.SKIP_ELIGIBLE and tier == "NOT_MEASURED", (cls, tier)
 
     orig = T.infer_nonverdict_reason
     try:
