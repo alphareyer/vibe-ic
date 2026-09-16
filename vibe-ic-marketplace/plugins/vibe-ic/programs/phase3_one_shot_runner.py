@@ -21770,7 +21770,8 @@ def _spare_safe_clear_net_proc_tcl() -> str:
     )
 
 
-def _spare_safe_routing_clear_tcl(marker_prefix: str = "SHIP") -> str:
+def _spare_safe_routing_clear_tcl(marker_prefix: str = "SHIP",
+                                  drop_protected: bool = False) -> str:
     """Emit a TCL fragment that clears signal-net routing while preserving
     spare / dont_touch nets. Self-contained, NONFATAL-guarded;
     ``marker_prefix`` differentiates the log tokens across call sites.
@@ -21823,7 +21824,36 @@ def _spare_safe_routing_clear_tcl(marker_prefix: str = "SHIP") -> str:
     that every multi-terminal signal net has a wire, and the promotion gate
     refuses any repaired route that leaves one unrouted. That is strictly
     stronger than the name filter — it covers spare AND non-spare nets, and it
-    reports the offenders by name instead of failing silently."""
+    reports the offenders by name instead of failing silently.
+
+    === R-0915-71 — `drop_protected`, for a clear that RE-ROUTES everything ===
+    v1.8.43 deleted the `*spare*` NAME filter for a measured reason. It did not
+    touch the `isDoNotTouch` filter, and on a design carrying spare cells those
+    two predicates select THE SAME NETS — so the failure came back by the other
+    route. MEASURED (opentitan_aes x sky130A, 2026-09-16) from that run's own
+    `pre_repair.odb`:
+
+        PG=2  PROTECTED=604 (spare-named=604  other=0)
+        UNROUTED=703  CLEARABLE=39780
+
+    All 604 protected nets are `spare_tielo_*`, and ALL 604 are WIRED, so all
+    604 carried stale detailed routing across the global re-route. Pass 4 of
+    the SDR loop then died exactly as v1.8.42 did:
+
+        Error: spare_tielo_spare_inverter_107 1 pin not visited #guides = 7
+        Error: checkConnectivity break, net spare_tielo_spare_inverter_107
+        [ERROR DRT-0206] checkConnectivity error.
+
+    ONE net -- `checkConnectivity` stops at the first failure -- and it cost a
+    5.4-hour route, `route_ok=0`, and the entire repaired candidate.
+
+    Whether preserving a wire is safe depends on what the caller does NEXT, so
+    `drop_protected` is passed IN rather than decided here. A caller that
+    clears and then runs `global_route` + `detailed_route` regenerates every
+    guide, so a preserved stale route has nothing left to be reconciled against
+    and IS the hazard; a caller that does not re-route must keep those wires.
+    The default is False, so no existing site changes behaviour. The PG skip is
+    never optional and is not reachable through this argument."""
     return (
         _spare_safe_clear_net_proc_tcl()
         + "if {[catch {\n"
@@ -21831,7 +21861,8 @@ def _spare_safe_routing_clear_tcl(marker_prefix: str = "SHIP") -> str:
         "  foreach _net [[ord::get_db_block] getNets] {\n"
         # THE DECISION LIVES IN THE PROC, not here. It used to be typed out
         # in this loop and typed out AGAIN in the NAMED_VIOL_REROUTE loop.
-        "    switch -- [_vibeic_spare_safe_clear_net $_net] {\n"
+        "    switch -- [_vibeic_spare_safe_clear_net $_net "
+        + str(int(drop_protected)) + "] {\n"
         "      PROTECTED { incr _skip }\n"
         "      CLEARED   { incr _rrc }\n"
         "    }\n"
@@ -26381,7 +26412,17 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # not load-bearing. The emitted marker moves from
         # `(dont_touch_preserved=…)` to `(spare_preserved=…)`; nothing parses
         # either — the only consumer of that token is the helper's own test.
-        + _spare_safe_routing_clear_tcl("SDR")
+        # R-0915-71 — DROP the protected wires at THIS site. What follows is
+        # `global_route` + `detailed_route`, which regenerates every guide, so
+        # a preserved stale detailed route has nothing to be reconciled against
+        # and is the hazard itself: MEASURED here as
+        # `[ERROR DRT-0206] checkConnectivity error` on ONE net,
+        # `spare_tielo_spare_inverter_107`, which cost a 5.4-hour route and the
+        # whole candidate. The ECO binding is NOT in the wire --
+        # `odb::dbWire_destroy` destroys a WIRE, never the net or its iterms --
+        # and the hazard that the preservation was written for is caught below
+        # by MEASURING it instead of hoping.
+        + _spare_safe_routing_clear_tcl("SDR", drop_protected=True)
         +
         "    if {[catch {global_route} _sdr_gr]} "
         "{ puts \"SDR_GR_NONFATAL: $_sdr_gr\"; set _sdr_tx_error 1; break }\n"
@@ -26394,6 +26435,15 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "    if {[catch {detailed_route {*}$_vic_drc_opt} _sdr_dr]} "
         "{ puts \"SDR_DR_NONFATAL: $_sdr_dr\"; set _sdr_tx_error 1; set _sdr_tx_route_ok 0; break }\n"
         "    set _sdr_tx_route_ok 1\n"
+        # R-0915-71 — the REPLACEMENT protection, which v1.8.43 introduced for
+        # exactly this and which this site never emitted. A net with two or
+        # more terminals and no wire after `detailed_route` is unrouted,
+        # whatever its name; extraction then merges its pins into neighbours,
+        # which is the v1.5.65 LVS mismatch the preservation existed to
+        # prevent. Emitting it here makes that failure OBSERVABLE at the site
+        # that now drops those wires, instead of trusting that dropping them
+        # was safe.
+        + _routing_integrity_check_tcl("SDR")
         # ---- R-0915-68: MEASURE AND CHECKPOINT THIS PASS ----------------
         # The route above wrote its own DRC report; count it now, while this
         # pass's geometry is what is in the db. Then write this pass's ODB.
