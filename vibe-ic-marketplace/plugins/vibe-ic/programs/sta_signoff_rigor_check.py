@@ -84,6 +84,9 @@ import re
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Set
+# The plugin's programs are loaded BY PATH, not as a package (#2104), so a
+# sibling only resolves once this directory is on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import instrument_calibration as _instrument_calibration  # noqa: E402  R-0915-86(3)
 
 # The OCV-derate marker line emitted by _emit_spef_sta (native-Tcl file append).
