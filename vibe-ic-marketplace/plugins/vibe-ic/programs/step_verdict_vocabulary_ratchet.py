@@ -175,7 +175,104 @@ def scan_source(src: str, path: str = "<src>") -> Dict[str, Any]:
                     isinstance(node.value, ast.Constant) and \
                     isinstance(node.value.value, str):
                 _record(node.value, node.value.value, ".status:")
+    # THE COMPARISON PASS. Same scope, same allowed set, different SHAPE — and
+    # the helpers it uses are defined below, beside the note that says why.
+    if _builds_step_results:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Compare):
+                continue
+            if not _reads_a_step_status(node.left):
+                continue
+            for word in _compared_words(node):
+                if word in DELETED_STEP_WORDS:
+                    findings.append({"file": path, "line": node.lineno,
+                                     "word": word, "site": "comparison"})
+                    checked += 1
     return {"checked": checked, "findings": findings, "unresolved": unresolved}
+
+
+#: THE SECOND HALF OF THE RATCHET: a COMPARISON is not an assignment.
+#:
+#: MEASURED, and it is why this exists. `design_one_shot_runner` carried
+#: `publish_changes = result.status in ("PASS", "WAIVED")`, `phase3` carried
+#: `if pnr_row.status != "WAIVED"`, and both scanned CLEAN under the literal
+#: pass above -- nothing assigns the word, so nothing is judged. They were
+#: DEAD: no row carries `WAIVED` any more, so the first stopped publishing a
+#: waived generator's staging and the second dropped the GDS on every waived
+#: PnR, which is vibe-ic#1412 exactly as that issue describes it.
+#:
+#: A dead comparison is worse than a wrong literal, because it fails SILENTLY
+#: and in the safe-looking direction. Judged with the same scope rule as the
+#: literals: only in a module that builds the FLOW's `StepResult`, and only on
+#: an expression that reads a step's own status field.
+_STATUS_READS = ("status", "signoff_status", "terminal_verdict", "run_verdict")
+
+#: THE WORDS R-0915-85 DELETED, listed so a comparison against one can be
+#: REFUSED. This is a refusal register, not a translation table: no entry has a
+#: target, nothing here can be read as "X means Y", and no producer or consumer
+#: imports it — it lives in the CHECKER, whose whole job is to say no.
+#:
+#: Why only these and not "any ALL-CAPS word": `status` is a common key name,
+#: and a module that builds a flow StepResult also compares `record["status"]`
+#: of a dozen other payloads — MANUAL_REVIEW, GUARDBAND, APPLIED, N/A. Those
+#: are other vocabularies and are none of this ruling's business. What IS its
+#: business is a comparison that can never again be true.
+DELETED_STEP_WORDS = frozenset({
+    "WAIVED", "WAIVED-DEFERRED", "DEFERRED-BY-UPSTREAM",
+    "SKIP", "SKIPPED", "SKIPPED-CONDITION", "SKIPPED_CONDITION",
+    "SKIPPED-SETUP-REQUIRED", "SKIPPED-BY-ENTRY", "SKIPPED-BY-EXIT",
+    "MISSING", "INCOMPLETE", "NOT_CHECKED", "NOT-CHECKED",
+    "NOT_EXECUTED", "NOT-EXECUTED", "NOT_EVALUATED", "NO_POPULATION",
+    "VACUOUS_PASS", "VACUOUS-PASS", "PARTIALLY-VACUOUS", "PARTIALLY_VACUOUS",
+    "PASS_VOIDED_BY_DEPENDENCY", "PASS-VOIDED-BY-DEPENDENCY",
+    "PASS_STRUCTURE_ONLY", "STRUCTURE-ONLY", "STRUCTURE_ONLY",
+    "PASS_WITH_OPEN_SOURCE_CONSTRAINTS", "PASS_WITH_ATTRIBUTION",
+    "INSUFFICIENT_DATA", "ENV_UNAVAILABLE", "BLOCKED", "ADVISORY",
+    "PASS_WITH_REAL_EXTRACT", "PASS_WITH_REAL_NETLIST",
+})
+
+
+#: The three keys that are UNAMBIGUOUS as dict reads. `status` is not among
+#: them on purpose — see `_reads_a_step_status`.
+_UNAMBIGUOUS_KEYS = ("signoff_status", "terminal_verdict", "run_verdict")
+
+
+def _reads_a_step_status(node: ast.AST) -> bool:
+    """True when `node` reads a FLOW STEP's own verdict field.
+
+    ATTRIBUTE access is judged for all four keys: the flow's step row is a
+    dataclass, so `row.status` is always a step status and never a gate
+    report's payload.
+
+    DICT access is judged only for the three unambiguous keys. `status` is one
+    of the commonest key names in this tree, and a module that builds a flow
+    StepResult also parses a dozen gate reports that carry their own
+    `status` — `analog_block_list_schema_check` answers `VACUOUS_PASS` there,
+    which is ITS vocabulary and none of this ruling's business. Judging
+    `rep.get("status")` would report that as a defect, so it is NOT judged, and
+    saying so here is the difference between a scope and a blind spot.
+    """
+    if isinstance(node, ast.Attribute):
+        return node.attr in _STATUS_READS
+    if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+        return node.slice.value in _UNAMBIGUOUS_KEYS
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get" and node.args
+            and isinstance(node.args[0], ast.Constant)):
+        return node.args[0].value in _UNAMBIGUOUS_KEYS
+    return False
+
+
+def _compared_words(cmp_node: ast.Compare) -> List[str]:
+    out: List[str] = []
+    for c in cmp_node.comparators:
+        if isinstance(c, ast.Constant) and isinstance(c.value, str):
+            out.append(c.value)
+        elif isinstance(c, (ast.Tuple, ast.List, ast.Set)):
+            for e in c.elts:
+                if isinstance(e, ast.Constant) and isinstance(e.value, str):
+                    out.append(e.value)
+    return out
 
 
 def scan_tree(root: Path) -> Dict[str, Any]:

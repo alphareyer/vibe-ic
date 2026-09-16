@@ -418,8 +418,13 @@ def _redispatch_starved_sites(
     # produced nothing — there is no new tree for a starved reader to be
     # re-measured against, and claiming otherwise would manufacture a dispatch.
     own = _last_record_per_site(plan, [producer_site]).get(producer_site)
-    if own is None or own.status in (_spf.REFUSAL_STATUS, "SKIPPED-BY-ENTRY",
-                                     "SKIPPED-BY-EXIT"):
+    # R-0915-85 — the entry and exit sentinels ARE `NOT_APPLICABLE`, declared
+    # by the run's own `--entry-step` / `--exit-step`, and the pre-flight
+    # refusal is `NOT_MEASURED(input_absent)`. Left as the two old spellings
+    # this test was DEAD: a site the run never dispatched would have been
+    # re-dispatched as though its producer had delivered a tree.
+    if own is None or own.status in (_V.Verdict.NOT_MEASURED.value,
+                                     _V.Verdict.NOT_APPLICABLE.value):
         return []
     fresh: List[StepResult] = []
     for site in _sites_starved_by(plan, span, runner):
