@@ -717,7 +717,7 @@ def test_a_disclosed_not_run_is_never_cost_free_at_the_flow_level(tmp_path):
             f"executed-PASS denominator")
 
     rc, doc = _fcc(tmp_path, _dt_subflow(tmp_path))
-    assert _status_of(doc, "DT1") == "MISSING", doc["_stdout"]
+    assert _status_of(doc, "DT1") == "FAIL", doc["_stdout"]
     assert doc["overall"] == "FAIL", doc["_stdout"]
     assert rc == 1, doc["_stdout"]
     assert doc["counts"]["MISSING"] >= 1, doc["counts"]
@@ -747,10 +747,10 @@ def test_a_disclosed_not_run_is_never_cost_free_at_the_flow_level(tmp_path):
     # same way, for the same reason.
     #
     # WHAT IS STILL REFUSED: DT2 may never come out of this tree GREEN.
-    assert _status_of(doc, "DT2") in ("MISSING", "SKIPPED-CONDITION"), (
+    assert _status_of(doc, "DT2") in ("FAIL", "NOT_APPLICABLE"), (
         "DT2 reported something other than red-or-deferred on a tree where "
         "no at-speed grade exists at all:\n" + doc["_stdout"])
-    assert _status_of(doc, "DT3") in ("MISSING", "SKIPPED-CONDITION"), (
+    assert _status_of(doc, "DT3") in ("FAIL", "NOT_APPLICABLE"), (
         "DT3 likewise:\n" + doc["_stdout"])
 
 
@@ -779,8 +779,8 @@ def test_a_routed_extracted_design_with_no_dft_does_not_arm_dt2(tmp_path):
     pnr.write_text("module top(); endmodule\n")
 
     rc, doc = _fcc(tmp_path, _dt_subflow(tmp_path))
-    assert _status_of(doc, "DT1") == "SKIPPED-CONDITION", doc["_stdout"]
-    assert _status_of(doc, "DT2") == "SKIPPED-CONDITION", (
+    assert _status_of(doc, "DT1") == "NOT_APPLICABLE", doc["_stdout"]
+    assert _status_of(doc, "DT2") == "NOT_APPLICABLE", (
         "a routed+extracted design with NO DFT armed DT2 and took a hard "
         "MISSING for a grade no producer was ever asked for:\n"
         + doc["_stdout"])
@@ -838,7 +838,7 @@ def test_dt2_arms_and_goes_red_when_its_own_grade_is_absent(tmp_path):
     _coverage(tmp_path, "DT1")
 
     rc, doc = _fcc(tmp_path, _dt_subflow(tmp_path))
-    assert _status_of(doc, "DT2") == "MISSING", (
+    assert _status_of(doc, "DT2") == "FAIL", (
         "a design carrying DT2's scan cut, its SPEF and its routed netlist, "
         "with NO at-speed grade on disk, did not go red — the step whose only "
         "job is to report that grade vanished instead:\n" + doc["_stdout"])
@@ -871,10 +871,10 @@ def test_dt2_blocks_when_dt1_produced_no_grade_and_names_the_dependency(tmp_path
     pnr.write_text("module top(); endmodule\n")
 
     rc, doc = _fcc(tmp_path, _dt_subflow(tmp_path))
-    assert _status_of(doc, "DT1") == "MISSING", (
+    assert _status_of(doc, "DT1") == "FAIL", (
         "DT1 armed on the scan cut and owes a transition grade this tree does "
         "not have; it must carry the red:\n" + doc["_stdout"])
-    assert _status_of(doc, "DT2") == "MISSING", (
+    assert _status_of(doc, "DT2") == "FAIL", (
         "DT2 treated DT1's missing grade as design inapplicability:\n"
         + doc["_stdout"])
     dt2 = next(step for step in doc["steps"] if str(step.get("id")) == "DT2")

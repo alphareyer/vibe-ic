@@ -126,7 +126,7 @@ def _entry(**over):
     e = {
         "step": "lvs",
         "phase": "3",
-        "verdict_tier": "WAIVED",
+        "verdict_tier": "PASS_WITH_WAIVERS",
         "rationale": GOOD_RATIONALE,
         "evidence": [SELF_REF],
         "ticket": "TAPEOUT-AUTOGEN-LVS",
@@ -259,7 +259,7 @@ def test_corpus_waivers_dialect_carries_no_env_unavailable_entry():
     in the corpus takes the tier `continue`, so #216's mechanism protected none
     of them. A corpus edit that changes this picture must not pass unnoticed."""
     rows = _corpus_waiver_entries()
-    # `len(rows) == 8` and `tiers == {"WAIVED": 7, "PASS_STRUCTURAL": 1}` were
+    # `len(rows) == 8` and `tiers == {"PASS_WITH_WAIVERS": 7, "PASS_STRUCTURAL": 1}` were
     # the corpus' size written down twice. The measurement the issue turns on
     # is not how many entries there are — it is that NOT ONE of them carries
     # ENV_UNAVAILABLE, so #216's mechanism protected none of them. That
@@ -271,11 +271,11 @@ def test_corpus_waivers_dialect_carries_no_env_unavailable_entry():
         tier = (entry.get("verdict_tier") or "").strip().upper()
         tiers[tier] = tiers.get(tier, 0) + 1
     assert sum(tiers.values()) == len(rows), (tiers, len(rows))
-    assert "ENV_UNAVAILABLE" not in tiers, tiers
+    assert "NOT_MEASURED" not in tiers, tiers
     # The tier vocabulary is closed: a NEW tier appearing in the corpus is a
     # change to the picture this issue rests on and must not pass unnoticed.
-    assert set(tiers) <= {"WAIVED", "PASS_STRUCTURAL"}, tiers
-    assert tiers.get("WAIVED"), tiers
+    assert set(tiers) <= {"PASS_WITH_WAIVERS", "PASS_STRUCTURAL"}, tiers
+    assert tiers.get("PASS_WITH_WAIVERS"), tiers
 
 
 def test_every_corpus_entry_is_well_formed_so_none_is_a_rejection():
@@ -359,7 +359,7 @@ def test_env_unavailable_entry_produces_no_unbound_disclosure(tmp_path):
     """The signal has to mean something. An entry this checker DOES bind must
     produce no disclosure at all, or every report grows noise."""
     fcc, waivers = _load(_project(tmp_path, _entry(
-        verdict_tier="ENV_UNAVAILABLE")))
+        verdict_tier="NOT_MEASURED")))
     assert 31 in waivers and waivers[31]["_env_unavailable"] is True
     assert fcc._WAIVER_NOT_BOUND_DISCLOSURES == []
 
@@ -420,7 +420,7 @@ def test_disclosure_reaches_the_report_advisories(tmp_path):
 # 4. No schema error may propagate (#519's failure mode)
 # ----------------------------------------------------------------------
 
-@pytest.mark.parametrize("tier", [7, ["WAIVED"], {"t": "WAIVED"}, 3.5, True])
+@pytest.mark.parametrize("tier", [7, ["PASS_WITH_WAIVERS"], {"t": "PASS_WITH_WAIVERS"}, 3.5, True])
 def test_a_non_string_tier_does_not_delete_the_report(tmp_path, tier):
     """Against the unfixed tree this exact input printed `cannot parse …` and
     produced a ZERO-line report: `.strip()` on a non-string raised, and the
@@ -503,7 +503,7 @@ def test_a_superseded_entry_is_disclosed_and_the_step_stays_waived(tmp_path):
             "id": 31, "reason": "hand-authored deferral for physical "
                                 "verification pending the foundry deck",
             "approver": "signoff-engineer", "approved_at": "2026-01-01"}],
-        "waivers": [_entry(verdict_tier="ENV_UNAVAILABLE")],
+        "waivers": [_entry(verdict_tier="NOT_MEASURED")],
     }, indent=2))
     fcc, waivers = _load(tmp_path)
     assert 31 in waivers
@@ -537,11 +537,11 @@ def test_no_tier_value_but_env_unavailable_is_tested_anywhere(tmp_path):
     """The disclosure asserts that no gate binds a non-ENV_UNAVAILABLE tier.
     Pinned by EXECUTION at the two places that test a tier at all: this
     module's loader, and `waiver_staleness`."""
-    for tier in ("WAIVED", "PASS_STRUCTURAL", "ZZZ_UNKNOWN_TIER", "PASS"):
+    for tier in ("PASS_WITH_WAIVERS", "PASS_STRUCTURAL", "ZZZ_UNKNOWN_TIER", "PASS"):
         assert not _ws.is_env_unavailable({"verdict_tier": tier}), tier
         _fcc, waivers = _load(_project(tmp_path, _entry(verdict_tier=tier)))
         assert 31 not in waivers, tier
-    assert _ws.is_env_unavailable({"verdict_tier": "ENV_UNAVAILABLE"})
+    assert _ws.is_env_unavailable({"verdict_tier": "NOT_MEASURED"})
 
 
 def test_the_hygiene_gates_consume_the_entry_and_ignore_its_tier(tmp_path):
@@ -562,7 +562,7 @@ def test_the_hygiene_gates_consume_the_entry_and_ignore_its_tier(tmp_path):
 
     baseline = _schema_stdout("WAIVED")
     assert "Waiver count: 1" in baseline[1], baseline[1]
-    for tier in ("PASS_STRUCTURAL", "ZZZ_UNKNOWN_TIER", "ENV_UNAVAILABLE"):
+    for tier in ("PASS_STRUCTURAL", "ZZZ_UNKNOWN_TIER", "NOT_MEASURED"):
         assert _schema_stdout(tier) == baseline, tier
 
 
@@ -602,7 +602,7 @@ def _tiers_the_producer_emits():
 
     emitted_tiers = set()
     with tempfile.TemporaryDirectory() as td:
-        for status in ("WAIVED", "ENV_UNAVAILABLE", "PASS", "FAIL", "SKIP"):
+        for status in ("PASS_WITH_WAIVERS", "NOT_MEASURED", "PASS", "FAIL", "SKIP"):
             sub = Path(td) / status
             sub.mkdir()
             p3._autogen_waivers_json(sub, [p3.StepResult(
@@ -631,7 +631,7 @@ def test_pass_structural_is_written_by_no_producer():
     below is guarded.
     """
     emitted_tiers = _tiers_the_producer_emits()
-    assert emitted_tiers == {"WAIVED", "ENV_UNAVAILABLE"}, emitted_tiers
+    assert emitted_tiers == {"PASS_WITH_WAIVERS", "NOT_MEASURED"}, emitted_tiers
     assert "PASS_STRUCTURAL" not in emitted_tiers
 
 

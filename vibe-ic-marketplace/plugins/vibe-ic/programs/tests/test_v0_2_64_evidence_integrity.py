@@ -58,7 +58,7 @@ def test_stub_tagged_evidence_downgrades_to_waived(tmp_path):
         "extraction_strategy": "deterministic_stub",
         "low_confidence": True}))
     r = F.check_step(tmp_path, _step(), waivers={})
-    assert r.status == "WAIVED", r
+    assert r.status == "PASS_WITH_WAIVERS", r
     joined = " ".join(r.reasons)
     assert "stub-backed" in joined and "review_required" in joined
 
@@ -111,7 +111,7 @@ def test_self_reported_skip_becomes_step_skip(tmp_path):
         "verdict": "SKIPPED-CONDITION",
         "reason": "no formal proof tool ran in this chain"}))
     r = F.check_step(tmp_path, _step(), waivers={})
-    assert r.status == "SKIPPED-CONDITION", r
+    assert r.status == "NOT_APPLICABLE", r
     assert "no formal proof tool" in " ".join(r.reasons)
 
 

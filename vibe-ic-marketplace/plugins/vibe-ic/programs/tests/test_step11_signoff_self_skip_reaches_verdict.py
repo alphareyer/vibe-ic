@@ -225,7 +225,7 @@ def test_every_oss_blocked_signoff_step_is_covered(tmp_path, sid):
     assert sid in _TABLE, f"fixture stale: step {sid} left the OSS-blocked table"
     proj, flow = _mk(tmp_path, sid)
     r = _run(proj, flow)
-    assert _overall(r.stdout) == "PASS_WITH_OPEN_SOURCE_CONSTRAINTS", r.stdout
+    assert _overall(r.stdout) == "PASS_WITH_WAIVERS", r.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -312,7 +312,7 @@ def test_promotion_still_exits_zero_for_a_step_still_in_the_table(tmp_path):
     sid = next(k for k in _OSS_BLOCKED_DIGITAL_STEPS)
     proj, flow = _mk(tmp_path, sid)
     r = _run(proj, flow)
-    assert _overall(r.stdout) == "PASS_WITH_OPEN_SOURCE_CONSTRAINTS", r.stdout
+    assert _overall(r.stdout) == "PASS_WITH_WAIVERS", r.stdout
     assert r.returncode == 0, r.stdout + r.stderr
 
 

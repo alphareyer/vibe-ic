@@ -223,7 +223,7 @@ def test_the_missing_output_demotion_now_covers_every_done_claim():
     body = "\n".join(l for l in src.splitlines()
                      if not l.lstrip().startswith("#"))
     assert "_T.is_done_claim(result.status) and missing_entries" in body
-    assert 'result.status in ("PASS", "VACUOUS_PASS", "STRUCTURE-ONLY")' \
+    assert 'result.status in ("PASS", "NOT_MEASURED", "PASS_WITH_WAIVERS")' \
         not in body
 
 

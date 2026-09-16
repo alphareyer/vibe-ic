@@ -53,7 +53,7 @@ import _flow_reason_taxonomy as R  # noqa: E402
 
 DECLINED_REVIEW = {
     "gate": "stage_on_pass_review",
-    "verdict": "NOT_CHECKED",
+    "verdict": "NOT_MEASURED",
     "reason_class": R.BLOCKED_BY_UPSTREAM,
     "exit_code": 2,
 }
@@ -83,7 +83,7 @@ def test_the_next_stage_is_reviewed_when_the_only_wound_is_the_last_review(
     reg = _register(tmp_path, [
         _row(7, "INCOMPLETE",
              [A_PASSING_GATE, DECLINED_REVIEW, A_ROSTER_NA_GATE]),
-        {"id": "FS1", "status": "VACUOUS_PASS"},
+        {"id": "FS1", "status": "NOT_MEASURED"},
     ])
     got = S.stage_passed(reg, "stage2", None)
     assert got["passed"] is True, got["why"]
@@ -128,7 +128,7 @@ def test_an_unexamined_gate_beside_the_decline_still_blocks(tmp_path):
 
 def test_a_failed_row_is_never_exempt_however_it_is_gated(tmp_path):
     """The exemption is reachable only from the NO_VERDICT_IN_SCOPE tier."""
-    for status in ("FAIL", "MISSING", "PASS_VOIDED_BY_DEPENDENCY"):
+    for status in ("FAIL", "FAIL", "NOT_MEASURED"):
         reg = _register(tmp_path,
                         [_row(7, status, [DECLINED_REVIEW])],
                         name=f"c_{status}.json")
@@ -138,7 +138,7 @@ def test_a_failed_row_is_never_exempt_however_it_is_gated(tmp_path):
 
 def test_a_row_with_no_gate_records_is_never_exempt(tmp_path):
     """An exemption granted over an empty population is a vacuous pass."""
-    reg = _register(tmp_path, [{"id": 7, "status": "INCOMPLETE"}])
+    reg = _register(tmp_path, [{"id": 7, "status": "NOT_MEASURED"}])
     got = S.stage_passed(reg, "stage2", None)
     assert got["passed"] is False, got["why"]
 
@@ -155,7 +155,7 @@ def test_some_other_programs_not_checked_is_not_this_exemption(tmp_path):
 def test_the_head_of_the_cascade_still_declines(tmp_path):
     """P0's shape: a real gate returned no verdict. Nothing pardons that."""
     reg = _register(tmp_path, [
-        {"id": "P0", "stage": "stage1", "status": "INCOMPLETE",
+        {"id": "P0", "stage": "stage1", "status": "NOT_MEASURED",
          "gate_records": [
              {"name": "waiver_staleness_check", "verdict": "INCOMPLETE",
               "reason_class": R.ZERO_DENOMINATOR}]},

@@ -433,7 +433,7 @@ def test_shipped_step_30_is_incomplete_without_correlation_inputs(
     (proj / "reports" / "phase3" / "spice_correlation.json").write_text("{}")
 
     result = _flow.check_step(proj, step, waivers={})
-    assert result.status == "INCOMPLETE", (result.status, result.reasons)
+    assert result.status == "NOT_MEASURED", (result.status, result.reasons)
 
 
 def test_the_live_step_wiring_is_what_this_change_measured(tmp_path):

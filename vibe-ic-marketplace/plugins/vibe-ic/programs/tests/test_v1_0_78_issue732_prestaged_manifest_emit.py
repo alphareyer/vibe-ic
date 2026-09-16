@@ -96,7 +96,7 @@ def test_a_step_rtl_gen_emits_on_prestaged_waive(tmp_path):
     # digital_cmd_driven: rtl_gen=null, fallback=spec-to-rtl, NOT pure-analog —
     # the input/vendor_rtl/ branch fires before the catalog/analog branches.
     res = R.step_rtl_gen(proj, "digital_cmd_driven")
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     assert res.extras.get("fallback_skill") == "catalog-glue-author"
     assert "source_manifest_emitted" in res.extras
     mf_path = proj / "phase2" / "stage1" / "rtl" / "SOURCE_MANIFEST.json"

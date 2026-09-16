@@ -151,7 +151,7 @@ def test_a_properly_bought_exemption_is_still_accepted(tmp_path):
 
     assert not (doc.get("wiring_errors") or []), doc["wiring_errors"]
     row = _probe_row(doc)
-    assert row["state"] == "NOT_CHECKED", row
+    assert row["state"] == "NOT_MEASURED", row
     assert row["exempt_until"] == "2999-01-01", row
     assert row["exempt_reason"] == "a stated reason", row
     assert proc.returncode == 0, (

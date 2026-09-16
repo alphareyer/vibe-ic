@@ -179,7 +179,7 @@ def test_a_dispatch_that_never_started_is_refused_by_that_name(
     D.step_professional_tb_gen(tmp_path, "dut", "some-container")
     rec = json.loads((out / REFUSAL).read_text())
     assert "COMMAND_NOT_FOUND" in rec["reason"], rec
-    assert _gate(tmp_path)["status"] == "INCOMPLETE"
+    assert _gate(tmp_path)["status"] == "NOT_MEASURED"
 
 
 def test_a_run_that_wrote_no_junit_is_refused_and_not_called_empty(
@@ -213,9 +213,9 @@ def test_a_skipped_transcript_is_still_not_a_pass(tmp_path, monkeypatch):
     _bundle_project(tmp_path, "generic", monkeypatch)
     _simulator_that_writes(monkeypatch, _SKIPPED_XML)
     step = D.step_professional_tb_gen(tmp_path, "dut", "c")
-    assert step.status == "INCOMPLETE"
+    assert step.status == "NOT_MEASURED"
     g = _gate(tmp_path)
-    assert g["status"] == "INCOMPLETE"
+    assert g["status"] == "NOT_MEASURED"
     assert "reference-model hook is unfilled" in g["reason"]
     assert g["cocotb_test_denominator"]["passed"] == 0
 

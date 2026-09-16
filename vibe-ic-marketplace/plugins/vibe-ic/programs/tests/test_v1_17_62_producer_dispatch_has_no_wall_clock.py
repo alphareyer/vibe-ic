@@ -88,7 +88,7 @@ def test_a_stalled_producer_is_BLOCKED_and_says_so(monkeypatch):
     monkeypatch.setattr(runner._pr, "run", stall)
     cp, stopped = runner._run_producer("release_docs", ["x"], time.time())
     assert cp is None
-    assert stopped.status == "BLOCKED", (stopped.status, stopped.detail)
+    assert stopped.status == "NOT_MEASURED", (stopped.status, stopped.detail)
     assert stopped.extras["stopped_as"] == "STALLED"
     assert stopped.extras["stall_looks"] == 12
     assert stopped.extras["stall_elapsed_s"] == 361.2
@@ -110,7 +110,7 @@ def test_a_producer_that_cannot_be_launched_is_still_ENV_UNAVAILABLE(
     monkeypatch.setattr(runner._pr, "run", boom)
     cp, stopped = runner._run_producer("s", ["/nonexistent"], time.time())
     assert cp is None
-    assert stopped.status == "ENV_UNAVAILABLE", stopped.status
+    assert stopped.status == "NOT_MEASURED", stopped.status
     assert "could not be launched" in stopped.detail
     assert "stopped_as" not in (stopped.extras or {})
 

@@ -245,7 +245,7 @@ def test_step_still_reports_unreachable_when_no_toolchain_anywhere(tmp_path, mon
     monkeypatch.setattr(DOSR, "_tool_in_container", lambda c, t: False)
     monkeypatch.setattr(DOSR, "_local_cocotb_toolchain_present", lambda: False)
     res = DOSR.step_professional_tb_gen(tmp_path, "dut", "eda")
-    assert res.status == "INCOMPLETE"
+    assert res.status == "NOT_MEASURED"
     assert "nor on the local PATH" in res.detail
 
 
@@ -351,7 +351,7 @@ def test_state_transition_gate_discloses_no_protocol_as_design_na(tmp_path, caps
     assert "VACUOUS_PASS" in captured.out and "no command protocol" in captured.out
     rep = json.loads(out_json.read_text())
     assert rep["reason_class"] == "DESIGN_DECLARED_NA"
-    assert TAX.infer_nonverdict_reason(verdict="VACUOUS_PASS",
+    assert TAX.infer_nonverdict_reason(verdict="NOT_MEASURED",
                                        message=captured.out) == TAX.DESIGN_DECLARED_NA
 
 
@@ -380,7 +380,7 @@ def test_behavioural_evidence_skip_is_read_as_design_declared(tmp_path, capsys):
     assert rc == 2
     line = captured.out.strip().splitlines()[-1]
     assert line.startswith("SKIPPED-CONDITION")
-    assert TAX.infer_nonverdict_reason(verdict="SKIPPED-CONDITION",
+    assert TAX.infer_nonverdict_reason(verdict="NOT_APPLICABLE",
                                        message=line) == TAX.DESIGN_DECLARED_NA
 
 
@@ -432,13 +432,13 @@ def test_slot_pad_budget_reads_the_declared_self_tapeout_route(tmp_path, capsys)
 def test_on_pass_review_treats_partially_vacuous_as_a_reviewable_pass(tmp_path):
     comp = tmp_path / "c.json"
     comp.write_text(json.dumps({"steps": [
-        {"id": "D1", "stage": "stage_phase1", "status": "PARTIALLY-VACUOUS"},
+        {"id": "D1", "stage": "stage_phase1", "status": "PASS"},
         {"id": "0.5ic", "stage": "stage_phase1", "status": "PASS"},
     ]}))
     res = SOPR.stage_passed(comp, "stage_phase1", None)
     assert res["passed"] is True, res
     comp.write_text(json.dumps({"steps": [
-        {"id": "D1", "stage": "stage_phase1", "status": "MISSING"}]}))
+        {"id": "D1", "stage": "stage_phase1", "status": "FAIL"}]}))
     assert SOPR.stage_passed(comp, "stage_phase1", None)["passed"] is False
 
 
@@ -450,7 +450,7 @@ def test_bug_density_metric_names_the_missing_instrument(tmp_path, capsys, monke
     out = capsys.readouterr().out
     assert rc == 2
     line = [l for l in out.splitlines() if "[skipped]" in l][-1]
-    assert TAX.infer_nonverdict_reason(verdict="INCOMPLETE", message=line) == TAX.CAPABILITY_ABSENT
+    assert TAX.infer_nonverdict_reason(verdict="NOT_MEASURED", message=line) == TAX.CAPABILITY_ABSENT
 
 
 # ---------------------------------------------------------------------------

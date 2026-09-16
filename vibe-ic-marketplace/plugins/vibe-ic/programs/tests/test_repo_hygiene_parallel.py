@@ -197,7 +197,7 @@ def test_out_of_scope_cannot_hide_an_owned_gate(
 
 def test_unexempted_not_checked_blocks_even_with_another_verdict():
     reference, a, b, attest = fixture()
-    a["gates"][0] = gate("ordinary", "NOT_CHECKED")
+    a["gates"][0] = gate("ordinary", "NOT_MEASURED")
     attest[0] = process_attestation("ordinary", "unknown", 2, ["gate"])
     problems = []
     doc = P.merge_records(reference, [(Path("a"), a), (Path("b"), b)],
@@ -228,7 +228,7 @@ def test_exact_legacy_routed_empty_keeps_phase1_aggregate_compatible():
         "expansion": "EXPANDED",
     }]
     owned = dict(legacy)
-    owned["state"] = "NOT_CHECKED"
+    owned["state"] = "NOT_MEASURED"
     other = dict(legacy)
     other["state"] = "OTHER_SHARD"
     a["gates"].insert(1, owned)
@@ -272,7 +272,7 @@ def _routed_corpus_record(label, expansion):
         "expansion": expansion,
     }]
     owned = dict(legacy)
-    owned["state"] = "NOT_CHECKED"
+    owned["state"] = "NOT_MEASURED"
     other = dict(legacy)
     other["state"] = "OTHER_SHARD"
     a["gates"].insert(1, owned)
@@ -286,7 +286,7 @@ def _routed_corpus_record(label, expansion):
     # to the run instead of testing a shape the wiring never produces.
     if not P._legacy_empty_without_process(reference, label):
         attest.insert(1, process_attestation(label, "", 2, ["true"],
-                                             state="NOT_CHECKED"))
+                                             state="NOT_MEASURED"))
     problems = []
     doc = P.merge_records(reference, [(Path("a"), a), (Path("b"), b)],
                           attest, 12, problems)
@@ -1035,7 +1035,7 @@ def _attested_population_record(with_attestation=True):
         "expansion": "EXPANDED",
     }]
     owned = dict(row)
-    owned["state"] = "NOT_CHECKED"
+    owned["state"] = "NOT_MEASURED"
     other = dict(row)
     other["state"] = "OTHER_SHARD"
     a["gates"].insert(1, owned)
@@ -1043,7 +1043,7 @@ def _attested_population_record(with_attestation=True):
     a["corpora"] = b["corpora"] = reference["corpora"]
     if with_attestation:
         attest.insert(1, process_attestation(label, "", 2, ["true"],
-                                             state="NOT_CHECKED"))
+                                             state="NOT_MEASURED"))
     return reference, a, b, attest, label
 
 

@@ -183,7 +183,7 @@ def test_step_rtl_gen_waive_then_consume_skip_end_to_end(tmp_path):
     following CONSUME step SKIPs — no RTL is fabricated from nowhere."""
     _write_l9(tmp_path, "some_top")
     waive = R.step_rtl_gen(tmp_path, "digital_cmd_driven")
-    assert waive.status == "WAIVED"
+    assert waive.status == "PASS_WITH_WAIVERS"
     consume = R.step_reused_ip_consume(tmp_path, "chip_top")
     assert consume.status == "SKIP"
     rtl = _staged_rtl_dir(tmp_path)

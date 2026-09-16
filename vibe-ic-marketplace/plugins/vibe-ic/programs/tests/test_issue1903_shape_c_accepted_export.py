@@ -154,7 +154,7 @@ def test_supplied_rtl_gate_is_read_from_not_attempted_on_export(tmp_path):
     doc = json.loads(report.read_text())
     for step in doc["steps"]:
         if step["name"] == "rtl_gen":
-            step["status"] = "SKIPPED-BY-ENTRY"
+            step["status"] = "NOT_APPLICABLE"
     report.write_text(json.dumps(doc) + "\n")
     solve["results"][0]["phases"]["phase3_verifying"] = \
         fpa.phase3_verifying(doc, None)

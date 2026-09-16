@@ -137,7 +137,7 @@ def test_a_truncated_sweep_is_NOT_CHECKED_and_never_PASS(tmp_path):
     root = _truncating_repo(tmp_path)
     res = G.audit_ci(root, timeout=60, budget=_BUDGET_S)
     assert res.findings == [], "the fixture's gates all disclose; no finding"
-    assert res.verdict == "NOT_CHECKED", res.verdict
+    assert res.verdict == "NOT_MEASURED", res.verdict
     assert res.verdict != "PASS"
 
 

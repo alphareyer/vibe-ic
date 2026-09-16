@@ -303,7 +303,7 @@ def test_runner_serial_multifile_commit_rolls_back_as_one_transaction(
 
     result = runner.step_rtl_gen(proj, "digital_arithmetic_primitive")
 
-    assert result.status == "BLOCKED"
+    assert result.status == "NOT_MEASURED"
     assert result.extras["output_refusal"]["reason"] == (
         "RTL_TRANSACTION_COMMIT_REFUSED")
     assert result.output_files == []

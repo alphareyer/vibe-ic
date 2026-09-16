@@ -152,7 +152,7 @@ L3c A SELF-DECLARED SKIP IS NOT INSIDE THE EXECUTED-PASS NUMERATOR.  L3 and
     leg charged 4 cells (4, 14, 30, FS1) on the host that measured it; three
     were waived and step 4, waived nowhere, was the red on ``main``. It charges
     0 today and stays armed: it re-reads the published X every run, so restoring
-    ``+ counts["VACUOUS_PASS"]`` reddens every cell that lands on the tier.
+    ``+ counts["NOT_MEASURED"]`` reddens every cell that lands on the tier.
 
 L4  YAML SKIP SURFACES ARE RUNTIME-CONDITIONED AND REACHABLE.
     Every ``optional_program_exit_zero`` declares a non-empty
@@ -722,7 +722,7 @@ class Scenario:
 #: A well-formed ENV_UNAVAILABLE waiver: every attestation field _load_waivers
 #: requires (ticket, review_required, non-empty evidence, >=40-char rationale).
 _GOOD_WAIVER: Dict[str, Any] = {
-    "verdict_tier": "ENV_UNAVAILABLE",
+    "verdict_tier": "NOT_MEASURED",
     "ticket": "matrix-d6-probe",
     "review_required": True,
     "evidence": ["`which <tool>` -> rc=1 on the matrix-d6 probe host"],
@@ -735,7 +735,7 @@ _GOOD_WAIVER: Dict[str, Any] = {
 #: The SAME claim with the machine-readable attestation stripped out — prose
 #: only. This is the "a code comment / a paragraph is not a disclosure" probe.
 _PROSE_ONLY_WAIVER: Dict[str, Any] = {
-    "verdict_tier": "ENV_UNAVAILABLE",
+    "verdict_tier": "NOT_MEASURED",
     "rationale": _GOOD_WAIVER["rationale"],
 }
 
@@ -972,7 +972,7 @@ def _disclosure_prefixes() -> Tuple[str, ...]:
     # been a BARE PASS into VACUOUS_PASS and can never take a step out of a
     # tier origin/main gave it. So a gate that records it HAS disclosed, and
     # the flow's own tier machinery already agrees: measured on step 1.6x, the
-    # tiers are {'EMPTY': 'MISSING', 'SEEDED': 'VACUOUS_PASS',
+    # tiers are {'EMPTY': 'FAIL', 'SEEDED': 'NOT_MEASURED',
     # 'FLOW_COMPLETE': 'VACUOUS_PASS'} — the pass is already outside the plain
     # PASS bucket, which is precisely what L1b's first escape asks for.
     #
@@ -1890,7 +1890,7 @@ def _leg3c_skip_not_inside_the_executed_pass_numerator(
     problems = []
     for name in _STATUS_SCENARIOS:
         sc = probe.scenarios.get(name)
-        if sc is None or sc.status != "VACUOUS_PASS":
+        if sc is None or sc.status != "NOT_MEASURED":
             continue
         if sc.numerator is None or sc.counts is None:
             problems.append(
@@ -1988,7 +1988,7 @@ def _leg5_waiver_channel(probe: Probe) -> List[str]:
             f"waiver was even attempted. Advisories emitted: "
             f"{list(prose.advisories) or '[]'}"
         )
-    if natural.status in ("FAIL", "MISSING") and formed.status != "WAIVED":
+    if natural.status in ("FAIL", "FAIL") and formed.status != "PASS_WITH_WAIVERS":
         problems.append(
             f"L5 WAIVER CHANNEL DEAD: with every attestation field present "
             f"(ticket + review_required + evidence + >=40-char rationale) the "
@@ -2261,7 +2261,7 @@ def leg_capability(step_id) -> Dict[str, bool]:
         "L3b": bool(_targetless_blocking_clauses(sid)),
         # L3c needs a probed scenario that actually lands on VACUOUS_PASS —
         # the only tier whose fold into `pass_count` it can observe.
-        "L3c": any(sc.status == "VACUOUS_PASS"
+        "L3c": any(sc.status == "NOT_MEASURED"
                    for sc in probe.scenarios.values()),
         # L6 needs a scenario that lands on a skip tier at all — the same
         # subject L2 needs, asked of a different pair of fixtures.

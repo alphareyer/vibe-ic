@@ -42,7 +42,7 @@ def test_543_stale_only_falls_back_when_no_named(tmp_path):
 def test_543_waived_reference_tb_breaks_rtl_repair_retry(tmp_path, monkeypatch):
     # When step_reference_tb returns WAIVED, the rtl_repair_retry must NOT enter.
     # We can't call main() easily, but we can test the break condition
-    # logic by inspecting that "WAIVED" is in the allowed statuses.
+    # logic by inspecting that "PASS_WITH_WAIVERS" is in the allowed statuses.
     # Verify it by checking the runner's outer status-tuple includes it.
     import inspect
     src = inspect.getsource(R)
@@ -59,6 +59,6 @@ def test_543_waived_reference_tb_breaks_rtl_repair_retry(tmp_path, monkeypatch):
 def test_543_waived_not_entering_repair(monkeypatch):
     # Directly test the rtl_repair_retry break: status WAIVED must break early
     # without any RTL repair retry.  We simulate by checking that the
-    # condition `sr.status in ("PASS", "SKIP", "WAIVED")` is True for WAIVED.
+    # condition `sr.status in ("PASS", "SKIP", "PASS_WITH_WAIVERS")` is True for WAIVED.
     waived = R.StepResult("reference_tb", "WAIVED", 0.0, "test")
-    assert waived.status in ("PASS", "SKIP", "WAIVED")  # break fires
+    assert waived.status in ("PASS", "SKIP", "PASS_WITH_WAIVERS")  # break fires

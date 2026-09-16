@@ -96,7 +96,7 @@ def test_a_step_declaring_its_own_gap_stays_missing():
     results = [_res(13, "WAIVED"), _res("M2", "MISSING")]
     _cascade(steps, results)
     m2 = results[1]
-    assert m2.status == "MISSING", m2.status
+    assert m2.status == "FAIL", m2.status
     assert m2.cascade_note == "known-gap(M2)"
     assert "no emitter writes these" in " ".join(m2.reasons)
 
@@ -112,7 +112,7 @@ def test_a_descendant_of_a_declared_gap_is_attributed_to_it_not_to_the_waiver():
                _res("M3", "MISSING"), _res("M4", "MISSING")]
     _cascade(steps, results)
     for r in results[2:]:
-        assert r.status == "MISSING", f"{r.id}: {r.status}"
+        assert r.status == "FAIL", f"{r.id}: {r.status}"
         assert r.cascade_note == "blocked-by-known-gap(M2)", r.cascade_note
         assert "no emitter" in " ".join(r.reasons)
 
@@ -127,7 +127,7 @@ def test_the_softer_verdict_is_not_reachable_through_a_declared_gap():
     info = _cascade(steps, results)
     assert not [x for x in info["deferred_by_upstream"]
                 if x[0] in ("M2", "M3")], info["deferred_by_upstream"]
-    assert all(r.status != "DEFERRED-BY-UPSTREAM" for r in results[1:])
+    assert all(r.status != "NOT_MEASURED" for r in results[1:])
 
 
 # ── the legitimate cascade is untouched ─────────────────────────────────────
@@ -138,7 +138,7 @@ def test_a_plain_waived_ancestor_still_defers():
     steps = _steps(_writes(12), _reads(13, [12]))
     results = [_res(12, "WAIVED"), _res(13, "MISSING")]
     _cascade(steps, results, {12: {"ticket": "T-1"}})
-    assert results[1].status == "DEFERRED-BY-UPSTREAM"
+    assert results[1].status == "NOT_MEASURED"
     assert "ticket=T-1" in results[1].cascade_note
 
 
@@ -149,7 +149,7 @@ def test_the_same_chain_without_the_declaration_does_not_soften():
     steps = _steps({"id": 12}, {"id": 13, "blocks_on": [12]})
     results = [_res(12, "WAIVED"), _res(13, "MISSING")]
     info = _cascade(steps, results, {12: {"ticket": "T-1"}})
-    assert results[1].status == "MISSING", results[1].status
+    assert results[1].status == "FAIL", results[1].status
     assert results[1].cascade_note == "waived-ancestor-undeclared(12)"
     assert info["deferred_by_upstream"] == []
 
@@ -178,7 +178,7 @@ def test_a_gap_declared_but_empty_is_not_a_gap():
     steps = _steps(_writes(12), _reads(13, [12], known_gap="  "))
     results = [_res(12, "WAIVED"), _res(13, "MISSING")]
     _cascade(steps, results, {12: {"ticket": "T-1"}})
-    assert results[1].status == "DEFERRED-BY-UPSTREAM"
+    assert results[1].status == "NOT_MEASURED"
 
 
 def test_an_ANCESTOR_whose_gap_is_empty_does_not_stop_the_walk():
@@ -191,7 +191,7 @@ def test_an_ANCESTOR_whose_gap_is_empty_does_not_stop_the_walk():
                    _reads(13, [12]))
     results = [_res(11, "WAIVED"), _res(12, "MISSING"), _res(13, "MISSING")]
     _cascade(steps, results, {11: {"ticket": "T-9"}})
-    assert results[2].status == "DEFERRED-BY-UPSTREAM", results[2].status
+    assert results[2].status == "NOT_MEASURED", results[2].status
     assert "known-gap" not in results[2].cascade_note, results[2].cascade_note
 
 

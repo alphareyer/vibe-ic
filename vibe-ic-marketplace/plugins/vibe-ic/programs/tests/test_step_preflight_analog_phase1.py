@@ -280,9 +280,9 @@ def test_the_analog_ladder_keeps_every_tier_it_had(tmp_path):
         return A.StepResult("A1_spec_extract", "blk_a", status, 0.0, "x")
 
     assert A._aggregate_verdict([row("FAIL")]) == "FAIL"
-    assert A._aggregate_verdict([row("VACUOUS_PASS")]) == "VACUOUS_PASS"
-    assert A._aggregate_verdict([row("PASS_STRUCTURE_ONLY")]) == "PASS_STRUCTURE_ONLY"
-    assert A._aggregate_verdict([row("WAIVED"), row("PASS")]) == "PASS_WITH_WAIVERS"
+    assert A._aggregate_verdict([row("NOT_MEASURED")]) == "NOT_MEASURED"
+    assert A._aggregate_verdict([row("PASS_WITH_WAIVERS")]) == "PASS_WITH_WAIVERS"
+    assert A._aggregate_verdict([row("PASS_WITH_WAIVERS"), row("PASS")]) == "PASS_WITH_WAIVERS"
     assert A._aggregate_verdict([row("PASS")]) == "PASS"
 
 
@@ -343,7 +343,7 @@ def _waive_a2(project: Path) -> None:
                        "ngspice [ticket=unit-test, review_required=True]"),
             "approver": "unit-test",
             "ticket": "unit-test",
-            "verdict_tier": "ENV_UNAVAILABLE",
+            "verdict_tier": "NOT_MEASURED",
             "review_required": True,
             "evidence": ["reports/phase3/analog_one_shot.json"],
         }],

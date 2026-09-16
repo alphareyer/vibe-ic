@@ -617,7 +617,7 @@ def test_the_dispatcher_gives_absent_and_empty_different_rows(tmp_path):
     # THE READ-BUT-EMPTY ROW: a population WAS opened and measured at zero.
     # That is a finding about the tree, so it is a refusal — NOT_CHECKED —
     # and it carries the unexempted-refusal list.
-    assert e_doc["gates"][0]["state"] == "NOT_CHECKED", e_doc["gates"][0]
+    assert e_doc["gates"][0]["state"] == "NOT_MEASURED", e_doc["gates"][0]
     assert e_doc["not_checked_unexempted"] == [empty_label], e_doc
     assert e_doc.get("undetermined") == 0, e_doc
 
@@ -848,7 +848,7 @@ def test_empty_population_has_one_shard_owner_attestation_and_progress(tmp_path)
 
     proc, doc, attestations, progress = owner
     assert proc.returncode == 2, proc.stdout + proc.stderr
-    assert doc["gates"][0]["state"] == "NOT_CHECKED"
+    assert doc["gates"][0]["state"] == "NOT_MEASURED"
     assert doc["not_checked_unexempted"] == [label]
     assert doc["wiring_errors"] == []
     assert len(attestations) == len(progress) == 1
@@ -877,7 +877,7 @@ def test_default_empty_population_preserves_legacy_no_process_shape(tmp_path):
     assert doc["declared"] == 1
     assert doc["gates"] == [{
         "label": label,
-        "state": "NOT_CHECKED",
+        "state": "NOT_MEASURED",
         "seconds": 0,
         "corpus": "an observed corpus",
         "corpus_item": 0,
@@ -917,7 +917,7 @@ def test_failed_producer_is_a_distinct_blocking_attested_result(tmp_path):
     assert "CORPUS PRODUCER FAILED" in text
     assert "EMPTY CORPUS" not in text
     assert doc["corpora"][0]["expansion"] == "PRODUCER_FAILED"
-    assert doc["gates"][0]["state"] == "NOT_CHECKED"
+    assert doc["gates"][0]["state"] == "NOT_MEASURED"
     assert doc["not_checked_unexempted"] == [label]
     assert len(attestations) == len(progress) == 1
     assert attestations[0]["returncode"] == 2
@@ -973,7 +973,7 @@ def test_a_population_refusal_cannot_buy_an_uncheckable_exemption(tmp_path):
     states = {gate["label"]: gate for gate in doc["gates"]}
 
     assert states[decided]["state"] == "PASS", doc
-    assert states[_EMPTY_LABEL]["state"] == "NOT_CHECKED", doc
+    assert states[_EMPTY_LABEL]["state"] == "NOT_MEASURED", doc
     assert "cannot consume an uncheckable exemption" in text, (
         "an empty population accepted a dated exemption; the one mechanism "
         "keeping 'never a pass' true has been removed")
@@ -1019,7 +1019,7 @@ def test_the_shipped_producer_over_an_empty_corpus_blocks_and_never_passes(
     # population — NOT a producer failure, and NOT a pass.
     assert doc["corpora"][0]["items"] == 0
     assert doc["corpora"][0]["expansion"] == "EXPANDED"
-    assert doc["gates"][0]["state"] == "NOT_CHECKED"
+    assert doc["gates"][0]["state"] == "NOT_MEASURED"
     assert doc["not_checked_unexempted"] == [_EMPTY_LABEL], doc
     assert doc["gates"][0]["exempt_until"] is None
     assert proc.returncode == 2, text

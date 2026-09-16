@@ -51,7 +51,7 @@ def test_no_layout_is_not_an_environment_gap(project, monkeypatch):
     _patch(monkeypatch, engine="/tools/svrfdrc", gds_present=False,
            project=project, top="topx")
     res = R.step_drc(project, "topx", _Pdk(), "somecontainer")
-    assert res.status != "ENV_UNAVAILABLE", (
+    assert res.status != "NOT_MEASURED", (
         "a missing GDS must never claim the environment is missing a tool — "
         "that claim carries a waiver tier")
     assert res.status == "SKIP"
@@ -66,7 +66,7 @@ def test_a_genuinely_absent_engine_is_still_an_environment_gap(
     _patch(monkeypatch, engine=None, gds_present=True,
            project=project, top="topx")
     res = R.step_drc(project, "topx", _Pdk(), "somecontainer")
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
     assert res.extras["missing_tool"] == "calibre|svrfdrc"
 
 
@@ -76,7 +76,7 @@ def test_engine_absent_and_no_layout_still_reports_the_environment(
     _patch(monkeypatch, engine=None, gds_present=False,
            project=project, top="topx")
     res = R.step_drc(project, "topx", _Pdk(), "somecontainer")
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
 
 
 def test_the_native_path_running_is_unchanged(project, monkeypatch):

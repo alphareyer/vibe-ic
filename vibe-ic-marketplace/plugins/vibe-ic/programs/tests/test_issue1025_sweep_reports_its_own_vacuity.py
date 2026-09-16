@@ -274,7 +274,7 @@ def test_the_merge_gate_refuses_a_record_in_which_nothing_decided(tmp_path):
     This is the half that actually gates a landing: the script's exit code is
     consulted, but the RECORD is what produces the verdict a maintainer reads.
     """
-    res = GR._hygiene_verdict(_record(["NOT_CHECKED"] * 6), 2)
+    res = GR._hygiene_verdict(_record(["NOT_MEASURED"] * 6), 2)
 
     assert res.rc == 2, (
         f"the merge gate answers rc {res.rc} over a sweep that reached no "
@@ -289,7 +289,7 @@ def test_the_merge_gate_refuses_a_record_in_which_nothing_decided(tmp_path):
 
 def test_the_merge_gate_still_passes_a_record_that_decided_something(tmp_path):
     """ARM B — the control. One PASS among five refusals is still MERGE_OK."""
-    res = GR._hygiene_verdict(_record(["PASS"] + ["NOT_CHECKED"] * 5), 0)
+    res = GR._hygiene_verdict(_record(["PASS"] + ["NOT_MEASURED"] * 5), 0)
 
     assert res.rc == 0 and res.green, (
         f"a record in which a gate DID decide is being refused as vacuous: "
@@ -343,7 +343,7 @@ def test_a_corpus_writer_stays_the_headline_over_a_vacuous_sweep():
     The writer wins: any other result in that run may be about the leftovers
     rather than about the change, which is the misattribution that cost hours.
     """
-    res = GR._hygiene_verdict(_record(["WROTE_CORPUS"] + ["NOT_CHECKED"] * 3), 1)
+    res = GR._hygiene_verdict(_record(["WROTE_CORPUS"] + ["NOT_MEASURED"] * 3), 1)
 
     assert res.rc == 1, res.summary
     assert "WROTE INTO the corpus" in res.summary, res.summary

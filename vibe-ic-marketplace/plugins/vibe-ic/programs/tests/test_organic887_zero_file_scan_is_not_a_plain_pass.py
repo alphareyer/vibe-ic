@@ -284,7 +284,7 @@ def test_flow_clause_promotes_the_step_out_of_plain_pass(
     assert status != "PASS", (
         f"{gate}'s zero-file scan reached check_step as a plain PASS; the "
         f"whole point of organic887 is that it must not")
-    assert status in ("VACUOUS_PASS", "INCOMPLETE", "BLOCKED"), status
+    assert status in ("NOT_MEASURED", "NOT_MEASURED", "NOT_MEASURED"), status
 
 
 @pytest.mark.parametrize("gate,json_rel", STEP3_GATES)

@@ -397,7 +397,7 @@ def test_a_record_predating_the_exemption_mechanism_fails_SAFE():
     """
     stale = {"declared": 2, "seconds": 1, "gates": [
         {"label": "a green gate", "state": "PASS", "seconds": 0},
-        {"label": "a refusing gate", "state": "NOT_CHECKED", "seconds": 0},
+        {"label": "a refusing gate", "state": "NOT_MEASURED", "seconds": 0},
     ]}
     res = GR._hygiene_verdict(stale, 0)
     assert res.rc == 1, (

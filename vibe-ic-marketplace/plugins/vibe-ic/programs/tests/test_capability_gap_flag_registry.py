@@ -166,7 +166,7 @@ def test_step_with_an_undeclared_flag_marker_stays_missing(tmp_path, flag):
     step = {"id": 999, "name": "Post-DFT optimization",
             "required_outputs": [_STEP12_OUT]}
     res = fcc.check_step(tmp_path, step, waivers={})
-    assert res.status == "MISSING", (res.status, res.reasons)
+    assert res.status == "FAIL", (res.status, res.reasons)
     assert res.self_skip_disclosed is False
 
 
@@ -232,7 +232,7 @@ def test_step_31_stays_missing_end_to_end_under_a_registered_flag(tmp_path):
     step = {"id": 998, "name": "Physical Verification",
             "required_outputs": list(_STEP31_OUTS)}
     res = fcc.check_step(tmp_path, step, waivers={})
-    assert res.status == "MISSING", (res.status, res.reasons)
+    assert res.status == "FAIL", (res.status, res.reasons)
     assert res.self_skip_disclosed is False
 
 
@@ -433,7 +433,7 @@ def test_guard_a_declared_flag_with_ownership_still_defers(tmp_path):
     step = {"id": 999, "name": "Post-DFT optimization",
             "required_outputs": [_STEP12_OUT]}
     res = fcc.check_step(tmp_path, step, waivers={})
-    assert res.status == "SKIPPED-CONDITION", (res.status, res.reasons)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.reasons)
     assert res.self_skip_disclosed is True
 
 

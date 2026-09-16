@@ -924,7 +924,7 @@ def test_exactly_one_step_after_the_IP_terminal_has_no_way_to_not_apply(
         "39 is waivable via --skip-hardware; if that changed it becomes a "
         "second instance of the same gap")
     assert FCC.check_step(proj, _step_by_id("39"), {},
-                          skip_hardware=True).status == "WAIVED"
+                          skip_hardware=True).status == "PASS_WITH_WAIVERS"
 
 
 def _step_by_id(sid: str) -> dict:

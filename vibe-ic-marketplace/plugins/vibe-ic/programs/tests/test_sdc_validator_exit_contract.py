@@ -238,7 +238,7 @@ def test_an_unusable_positional_does_not_reach_a_plain_pass_in_the_gate(
     assert passed, out                                   # rc 2 is not a FAIL
     assert not out.startswith(_fcc._VACUOUS_HINT_PREFIX), out
     assert cls not in _reason_taxonomy().SKIP_ELIGIBLE, out
-    assert tier == "INCOMPLETE", (tier, out)
+    assert tier == "NOT_MEASURED", (tier, out)
     # the gate's own words reach the flow snippet now; they used to be deleted.
     assert "NOT CHECKED" in out, out
 

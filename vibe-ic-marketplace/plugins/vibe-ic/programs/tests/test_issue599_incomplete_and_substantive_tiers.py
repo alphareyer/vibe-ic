@@ -104,7 +104,7 @@ def _reasons(tmp_path, prints, monkeypatch):
 
 def test_a_gate_that_examined_nothing_is_still_vacuous(tmp_path, monkeypatch):
     """THE ACCEPT CASE, and the one the other two must not swallow."""
-    assert _status(tmp_path, "VACUOUS_PASS: nothing applied", monkeypatch) == "VACUOUS_PASS"
+    assert _status(tmp_path, "VACUOUS_PASS: nothing applied", monkeypatch) == "NOT_MEASURED"
 
 
 def test_a_substantive_disclosure_turns_a_vacuous_step_into_a_pass(tmp_path, monkeypatch):

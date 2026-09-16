@@ -103,10 +103,10 @@ def test_555b_period_mismatch_with_pll_is_warn_not_fail():
         )
         _write_l8_with_period(p / "phase1" / "generated_docs", 10.0)
         verdict, msgs = audit(p)
-        assert verdict in ("PASS", "WARN"), (
+        assert verdict in ("PASS", "PASS_WITH_WAIVERS"), (
             f"Expected PASS/WARN but got {verdict}: {msgs}")
         combined = " ".join(msgs)
-        if verdict == "WARN":
+        if verdict == "PASS_WITH_WAIVERS":
             assert "PLL" in combined or "generated" in combined.lower()
 
 
@@ -312,7 +312,7 @@ def test_542_vendor_rtl_check_waives_to_reused_ip():
         vendor.mkdir(parents=True)
         (vendor / "core.v").write_text("module core(); endmodule\n")
         result = step_rtl_gen(p, "processor_cpu")
-        assert result.status == "WAIVED"
+        assert result.status == "PASS_WITH_WAIVERS"
         assert "catalog-glue-author" in str(result.detail)
         assert "vendor_rtl" in str(result.detail)
 

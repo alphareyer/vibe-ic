@@ -315,7 +315,7 @@ def test_a_stage_that_omits_its_verdict_is_not_checked(tmp_path):
         f"rc={cp.returncode} — a stage that never said whether this review "
         f"blocks was reviewed anyway\n{cp.stdout[-2000:]}")
     rec = json.loads(out.read_text())
-    assert rec["verdict"] == "NOT_CHECKED"
+    assert rec["verdict"] == "NOT_MEASURED"
     assert "verdict" in rec["why"]
 
 

@@ -120,13 +120,13 @@ def _run(tmp_path, monkeypatch, **kw):
 def test_stalled_extraction_is_blocked_not_a_mismatch(tmp_path, monkeypatch):
     p, r, v = _run(tmp_path, monkeypatch, stall_leg="magic")
 
-    assert r.status == "BLOCKED", (r.status, r.detail)
+    assert r.status == "NOT_MEASURED", (r.status, r.detail)
     assert r.extras.get("finding") == "LVS_EXTRACTION_STALLED"
     assert r.extras.get("stopped_as") == "STALLED"
 
     # THE CONTRACT, which is the whole point of the finding.
     assert v is not None, "no lvs_verdict.json was written for a stopped run"
-    assert v["status"] == "BLOCKED", v["status"]
+    assert v["status"] == "NOT_MEASURED", v["status"]
     assert v["result"] == "BLOCKED", v["result"]
     assert v["finding"] == "LVS_EXTRACTION_STALLED"
     assert v["stopped_as"] == "STALLED"
@@ -159,9 +159,9 @@ def test_stalled_compare_is_blocked_not_a_mismatch(tmp_path, monkeypatch):
     _p, r, v = _run(tmp_path, monkeypatch, stall_leg="netgen",
                     netgen_transcript="Netgen 1.5\nFlattening unmatched ",
                     lvs_rpt_body="Netgen 1.5\nFlattening unmatched ")
-    assert r.status == "BLOCKED", (r.status, r.detail)
+    assert r.status == "NOT_MEASURED", (r.status, r.detail)
     assert r.extras.get("finding") == "LVS_COMPARE_STALLED"
-    assert v["status"] == "BLOCKED"
+    assert v["status"] == "NOT_MEASURED"
     assert v["finding"] == "LVS_COMPARE_STALLED"
     assert v["stopped_as"] == "STALLED"
     assert (v.get("supervision") or {}).get("watched") == "output+log+cpu"
@@ -204,7 +204,7 @@ def test_netgen_own_exit_without_terminal_token_is_still_incomplete(
                     lvs_rpt_body="Netgen 1.5\nFlattening unmatched ")
     assert r.status == "FAIL", (r.status, r.detail)
     assert r.extras.get("finding") == "LVS_NO_TERMINAL_VERDICT"
-    assert v["status"] == "INCOMPLETE", v
+    assert v["status"] == "NOT_MEASURED", v
     assert v["finding"] == "LVS_NO_TERMINAL_VERDICT", v
     assert "stopped_as" not in v, v
 
@@ -218,7 +218,7 @@ def test_blocked_still_aggregates_to_fail():
     the word change above becomes a weakening and this test says so."""
     def _sr(status):
         return runner.StepResult("lvs", status, 0.0, "d", extras={})
-    assert runner._aggregate_verdict([_sr("BLOCKED")]) == "FAIL"
+    assert runner._aggregate_verdict([_sr("NOT_MEASURED")]) == "FAIL"
     assert runner._aggregate_verdict([_sr("FAIL")]) == "FAIL"
     assert runner._aggregate_verdict([_sr("PASS")]) == "PASS"
     # And the danger of an INVENTED word — still asserted, so the reason a new

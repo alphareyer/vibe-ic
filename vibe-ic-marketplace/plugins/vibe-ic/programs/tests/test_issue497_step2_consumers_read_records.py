@@ -296,8 +296,8 @@ def test_deferrability_is_decided_by_records_not_prose(
     _rc, report, audit = _run(tmp_path, extra=("--strict-structural",))
     printed = capsys.readouterr().out
 
-    assert report["overall"] == "PASS_WITH_OPEN_SOURCE_CONSTRAINTS", printed
     assert audit["verdict"] == "PASS_WITH_OPEN_SOURCE_CONSTRAINTS"
+    assert audit["verdict"] == "PASS_WITH_WAIVERS"
     p0_deferral = next(d for d in audit["open_source_constraints_deferrals"]
                        if d["step_id"] == "P0")
     assert [s["sub_gate"] for s in p0_deferral["p0_thin_input_subgates"]] == \

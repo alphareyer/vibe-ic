@@ -66,7 +66,7 @@ def test_the_measured_icaes_red_now_names_its_cause():
     assert len(c["non_green_steps"]) == 35
     assert c["named_cause_count"] == 35
     statuses = {s["status"] for s in c["non_green_steps"]}
-    assert statuses == {"FAIL", "MISSING", "PASS_VOIDED_BY_DEPENDENCY"}
+    assert statuses == {"FAIL", "FAIL", "NOT_MEASURED"}
 
 
 def test_a_red_that_names_nothing_at_all_is_reported_as_a_defect():
@@ -123,7 +123,7 @@ def test_a_self_skipped_signoff_step_is_a_cause_on_its_own():
     red with no failed gate, no non-green step and no failure line."""
     class _R:
         id, name = "DT1", "Transition-delay-fault ATPG"
-    c = F.verdict_causes("FAIL", [], [_step(1, "SKIPPED-CONDITION")], [], [],
+    c = F.verdict_causes("FAIL", [], [_step(1, "NOT_APPLICABLE")], [], [],
                          self_skipped_signoff_steps=[_R()])
     assert c["run_is_red"] is True
     assert c["names_its_cause"] is True

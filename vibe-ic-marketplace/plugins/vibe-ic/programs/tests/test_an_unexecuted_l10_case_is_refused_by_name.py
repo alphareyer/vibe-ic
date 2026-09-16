@@ -84,7 +84,7 @@ def test_every_unexecuted_case_is_named_with_its_own_reason(tmp_path, monkeypatc
         gamma=("NOT_EXECUTED", "no hex image was built for this case"))
     _wire(monkeypatch, states, proj)
     out = P.l10_unit_tb_track(proj)
-    assert out["verdict"] == "NOT_CHECKED", out
+    assert out["verdict"] == "NOT_MEASURED", out
     named = {r["case"]: r for r in out["cases_not_executed"]}
     assert set(named) == {"beta", "gamma"}, named
     assert named["gamma"]["reason"] == "no hex image was built for this case"

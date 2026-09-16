@@ -159,7 +159,7 @@ def test_DEFECT_absent_bundle_TREE_is_not_checked_rc2_not_a_fail(tmp_path):
     _report(tmp_path, _passing_record(
         tmp_path / "phase2" / "stage1" / "sim_professional" / "dut"))
     res = G.check(tmp_path)
-    assert res["verdict"] == "NOT_CHECKED", json.dumps(res, indent=2)
+    assert res["verdict"] == "NOT_MEASURED", json.dumps(res, indent=2)
     assert res["bundle"]["resolved_out_dir"] is None
     assert res["bundle"]["bundle_root_present"] is False
     assert res["bundle"]["state"] == "tree_absent"
@@ -222,7 +222,7 @@ def test_DEFECT_complete_bundle_is_recorded_as_verified(tmp_path):
 
 
 @pytest.mark.parametrize("own_tree,expect,rc", [
-    (False, "NOT_CHECKED", 2),   # project has no bundle tree of its own
+    (False, "NOT_MEASURED", 2),   # project has no bundle tree of its own
     (True, "FAIL", 1),           # project HAS one; the foreign dir is not it
 ])
 def test_DEFECT_out_of_project_dir_never_certifies(tmp_path, own_tree, expect,

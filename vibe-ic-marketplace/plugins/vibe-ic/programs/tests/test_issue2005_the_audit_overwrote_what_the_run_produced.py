@@ -191,7 +191,7 @@ def test_a_run_produced_output_survives_the_audit_overwriting_it(workdir):
     assert before, "fixture defect: the producer wrote an empty artefact"
 
     first = FCC.check_step(project, _isolated_step(), {})
-    assert first.status not in ("MISSING",), (
+    assert first.status not in ("FAIL",), (
         f"the RUN produced {_REL} before this audit began and the audit's own "
         f"gate then rewrote the same path; reporting {first.status!r} says the "
         f"step has no run evidence for an artefact the run demonstrably "

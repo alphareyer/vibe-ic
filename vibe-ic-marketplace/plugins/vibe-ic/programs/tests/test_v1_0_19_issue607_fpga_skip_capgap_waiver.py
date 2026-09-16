@@ -76,22 +76,22 @@ def test_disclosed_skip_synthesises_waiver(tmp_path):
 def test_disclosed_skip_waives_step(tmp_path):
     _proj(tmp_path, {"verdict": "SKIP", "sof_present": False,
                      "evidence": "fpga_compile not run"})
-    assert _status(tmp_path) == "WAIVED"
+    assert _status(tmp_path) == "PASS_WITH_WAIVERS"
 
 
 def test_undisclosed_no_audit_still_fails(tmp_path):
     _proj(tmp_path, audit=None)
-    assert _status(tmp_path) not in ("WAIVED", "PASS", "SKIPPED-CONDITION")
+    assert _status(tmp_path) not in ("PASS_WITH_WAIVERS", "PASS", "NOT_APPLICABLE")
 
 
 def test_nonskip_verdict_still_fails(tmp_path):
     _proj(tmp_path, {"verdict": "FAIL", "sof_present": False})
-    assert _status(tmp_path) not in ("WAIVED", "PASS")
+    assert _status(tmp_path) not in ("PASS_WITH_WAIVERS", "PASS")
 
 
 def test_sof_present_claim_but_absent_still_fails(tmp_path):
     _proj(tmp_path, {"verdict": "SKIP", "sof_present": True})
-    assert _status(tmp_path) not in ("WAIVED", "PASS")
+    assert _status(tmp_path) not in ("PASS_WITH_WAIVERS", "PASS")
 
 
 def test_real_sof_present_passes(tmp_path):

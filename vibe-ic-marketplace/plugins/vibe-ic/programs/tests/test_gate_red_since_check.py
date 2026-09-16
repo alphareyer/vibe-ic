@@ -42,7 +42,7 @@ def _record(*gates, declared=None, listed_only=False):
         "ran": len(rows),
         "passed": sum(1 for _, s in gates if s == "PASS"),
         "failed": sum(1 for _, s in gates if s == "FAIL"),
-        "not_checked": sum(1 for _, s in gates if s == "NOT_CHECKED"),
+        "not_checked": sum(1 for _, s in gates if s == "NOT_MEASURED"),
         "wrote_corpus": sum(1 for _, s in gates if s == "WROTE_CORPUS"),
         "deferred": sum(1 for _, s in gates if s == "LISTED"),
         "seconds": 1,
@@ -179,7 +179,7 @@ def test_every_non_pass_state_counts_as_red_not_only_FAIL():
     """NOT_CHECKED and WROTE_CORPUS are results a reader must act on too.
     Counting them keeps an acknowledgement alive; it can never retire one."""
     _, _, new = G.adjudicate(
-        _record(("refused", "NOT_CHECKED"), ("writer", "WROTE_CORPUS"),
+        _record(("refused", "NOT_MEASURED"), ("writer", "WROTE_CORPUS"),
                 ("ok", "PASS")), [], _age(1))
     assert new == ["refused", "writer"]
 
@@ -409,7 +409,7 @@ def _exempt(record, label, until, expired=False):
 
 def test_a_red_carrying_a_live_dispatcher_exemption_is_not_owned_by_nobody(
         tmp_path):
-    rec = _exempt(_record(("dated gate", "NOT_CHECKED"), ("bare gate", "FAIL")),
+    rec = _exempt(_record(("dated gate", "NOT_MEASURED"), ("bare gate", "FAIL")),
                   "dated gate", "2027-02-28")
     res = _cli(tmp_path, rec, [])
     assert res.returncode == 0, res.stdout + res.stderr
@@ -430,7 +430,7 @@ def test_an_EXPIRED_dispatcher_exemption_stays_in_the_unowned_bucket(tmp_path):
     surface. If it moved a red out of the unowned bucket, this partition would
     have become a place to hide exactly the reds it was built to expose.
     """
-    rec = _exempt(_record(("dated gate", "NOT_CHECKED")),
+    rec = _exempt(_record(("dated gate", "NOT_MEASURED")),
                   "dated gate", "2020-01-01", expired=True)
     res = _cli(tmp_path, rec, [])
     assert res.returncode == 0, res.stdout + res.stderr
@@ -448,7 +448,7 @@ def test_the_partition_cannot_move_the_verdict(tmp_path):
     and this test is what keeps that true: a partition of a report that could
     also buy a pass would be a baseline with a different name.
     """
-    rec = _exempt(_record(("owned gate", "FAIL"), ("other gate", "NOT_CHECKED")),
+    rec = _exempt(_record(("owned gate", "FAIL"), ("other gate", "NOT_MEASURED")),
                   "other gate", "2027-02-28")
     # DATED FROM THE REPOSITORY, never typed: a row whose stated date and whose
     # anchor disagree is `misdated`, which is a different finding and would let
@@ -498,8 +498,8 @@ def test_dispatcher_exemptions_reads_only_LIVE_dates():
     tolerance for rc 2 only, so there was never a state in which that credit
     was true.
     """
-    rec = _record(("a", "NOT_CHECKED"), ("b", "NOT_CHECKED"),
-                  ("c", "NOT_CHECKED"))
+    rec = _record(("a", "NOT_MEASURED"), ("b", "NOT_MEASURED"),
+                  ("c", "NOT_MEASURED"))
     _exempt(rec, "a", "2027-02-28")
     _exempt(rec, "b", "2020-01-01", expired=True)
     assert G.dispatcher_exemptions(rec) == {"a": "2027-02-28"}
@@ -518,7 +518,7 @@ def test_a_FAILED_gate_is_not_owned_by_an_uncheckable_exemption():
     exited 1 on it — nothing was made green — but the one bucket a reader acts
     on, `owned by nobody`, had a blocking red taken out of it.
     """
-    rec = _record(("failed gate", "FAIL"), ("refused gate", "NOT_CHECKED"))
+    rec = _record(("failed gate", "FAIL"), ("refused gate", "NOT_MEASURED"))
     _exempt(rec, "failed gate", "2027-02-28")
     _exempt(rec, "refused gate", "2027-02-28")
     # BOTH directions in one record, so this cannot pass by crediting nothing:

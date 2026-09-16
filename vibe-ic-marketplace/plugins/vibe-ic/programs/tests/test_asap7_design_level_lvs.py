@@ -182,7 +182,7 @@ def test_step_lvs_library_only_waives_when_no_routed_design(tmp_path, monkeypatc
     empty.mkdir()
     pdk = types.SimpleNamespace(name="asap7", calibre_lvs=None)
     res = R.step_lvs(empty, "tiny", pdk, "vibeic-eda", upstream_pnr=None)
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     assert res.extras.get("finding") == "LVS_DEVICE_LEVEL_AVAILABLE"
     assert "159/208" in res.detail
     assert "NOT an ENV gap" in res.detail
@@ -195,5 +195,5 @@ def test_step_lvs_klayout_missing_names_klayout(tmp_path, monkeypatch):
     monkeypatch.setattr(R, "_tool_in_path", lambda c, t: False)   # klayout absent
     pdk = types.SimpleNamespace(name="asap7", calibre_lvs=None)
     res = R.step_lvs(proj, "tiny", pdk, "vibeic-eda", upstream_pnr=None)
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
     assert res.extras.get("missing_tool") == "klayout"

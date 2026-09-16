@@ -104,7 +104,7 @@ def test_a_declining_producer_leaves_the_step_WAIVED_and_names_the_gap(
     p = make_project(tmp_path, [block("keeper_x", "pull", specs=None)])
     res = R.step_for_block(p, {"name": "keeper_x", "type": "pull"},
                            "A1_spec_extract")
-    assert res.status == "WAIVED", res.detail
+    assert res.status == "PASS_WITH_WAIVERS", res.detail
     assert res.extras.get("gap_path", "").endswith("spec_gap.json"), res.extras
     assert "analog-spec-extract" in res.detail
     assert not (bdir(p, "keeper_x") / "spec.json").exists()
@@ -138,7 +138,7 @@ def test_a_crashing_producer_does_not_turn_a_step_into_a_FAIL(
     assert exploded, (
         "the producer was never dispatched, so nothing crashed and the "
         "WAIVED below would prove nothing")
-    assert res.status == "WAIVED", (
+    assert res.status == "PASS_WITH_WAIVERS", (
         f"a producer crash must leave the step where the GATE left it, not "
         f"invent a failure: {res.status} / {res.detail}")
 
@@ -167,7 +167,7 @@ def test_the_full_analog_chain_produces_what_each_step_declares(tmp_path):
         assert r.status.startswith("PASS"), (step, r.status, r.detail)
         assert r.output_files, (step, "produced nothing it can name")
         r2 = got[("widget_q", step)]
-        assert r2.status == "WAIVED", (step, r2.status)
+        assert r2.status == "PASS_WITH_WAIVERS", (step, r2.status)
         assert r2.extras.get("gap_path"), (
             f"{step} deferred on widget_q without recording where it said "
             f"why")
@@ -246,7 +246,7 @@ def test_the_run_record_names_the_circuit_a4_measured(tmp_path, monkeypatch):
     # structure-only tier rather than a plain real-sim pass. "PASS_WITH_REAL_SIM"
     # here would be the original defect in the run log: a status that is true
     # about the SIMULATOR and silent about the SUBJECT.
-    assert res.status == "PASS_STRUCTURE_ONLY", res.detail
+    assert res.status == "PASS_WITH_WAIVERS", res.detail
     assert res.extras.get("design_content") == "structure_only", res.extras
     assert (res.extras.get("design_content_source") or "").endswith(
         "corner_results.json"), res.extras

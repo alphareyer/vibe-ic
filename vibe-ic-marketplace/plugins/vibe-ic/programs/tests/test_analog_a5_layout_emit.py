@@ -750,7 +750,7 @@ def test_an_unreachable_tool_is_reported_by_name_and_writes_no_layout(
                emit_rc=2, emit_out=said)
     monkeypatch.setattr(AOSR, "_pr", ran)
     res = AOSR.step_for_block(proj, {"name": "b"}, "A5_layout", None)
-    assert res.status == "WAIVED", res
+    assert res.status == "PASS_WITH_WAIVERS", res
     assert "ENV_UNAVAILABLE" in res.detail and "magic" in res.detail
     assert not (proj / "phase3" / "analog" / "b" / "layout.mag").exists()
 

@@ -42,7 +42,7 @@ def test_main_scopes_step4_producers_and_real_consumer(tmp_path, monkeypatch, ex
     rows = {row['name']: row for row in report['steps']}
     if exit_step == '2':
         for name in ['sim', 'reference_tb', 'step4_functional_evidence', 'verilator_coverage']:
-            assert rows[name]['status'] == 'SKIPPED-BY-EXIT', rows[name]
+            assert rows[name]['status'] == 'NOT_APPLICABLE', rows[name]
         assert not any(name in calls for name in ['step_full_stack_tb_gen', 'step_reference_tb',
                                                   'step_professional_tb_gen', 'step_verilator_coverage'])
         assert rc == 0, report

@@ -388,7 +388,7 @@ def test_records_are_empty_not_null_when_no_gate_was_considered(tmp_path):
     F.main([str(proj), "--json", str(out), "--lenient"])
     report = json.loads(out.read_text())
     p0 = next(s for s in report["steps"] if s["id"] == "P0")
-    assert p0["status"] == "SKIPPED-CONDITION"
+    assert p0["status"] == "NOT_APPLICABLE"
     assert p0["gate_records"] == []
     for line in p0["reasons"]:
         assert not any(_line_names(line, g)

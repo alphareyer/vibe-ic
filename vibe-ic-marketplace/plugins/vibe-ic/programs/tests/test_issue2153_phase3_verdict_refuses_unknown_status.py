@@ -141,7 +141,7 @@ def test_an_unknown_status_is_not_a_silent_fail(runner):
 def test_warn_is_not_a_clean_pass(runner):
     """``step_prelayout_signoff`` emits WARN when the pre-layout basis is
     unsubstantiated. It reached the catch-all and scored a clean PASS."""
-    v, _ = _verdict(runner, "PASS", "WARN")
+    v, _ = _verdict(runner, "PASS", "PASS_WITH_WAIVERS")
     assert v != "PASS", (
         "a run whose pre-layout sign-off basis is UNSUBSTANTIATED reported a "
         "clean PASS")
@@ -151,7 +151,7 @@ def test_warn_is_not_a_clean_pass(runner):
 def test_pass_w_warn_is_not_a_clean_pass(runner):
     """``step11_dft_insertion`` republishes PASS_W_WARN from phase 2 (the ATPG
     producer returned non-zero while coverage was still measured)."""
-    v, _ = _verdict(runner, "PASS", "PASS_W_WARN")
+    v, _ = _verdict(runner, "PASS", "PASS_WITH_WAIVERS")
     assert v != "PASS", (
         "a run carrying an ATPG row the producer itself did not call clean "
         "reported a clean PASS")

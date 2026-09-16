@@ -59,7 +59,7 @@ def test_absent_rtl_is_a_refusal_not_a_design_verdict(tmp_path):
     assert not DOR._pl.rtl_dir(p).is_dir(), "precondition: rtl/ absent"
     r = DOR.step_reference_tb(p, "chip_top", _NON_AID_CLASS)
 
-    assert r.status == DOR._spf.REFUSAL_STATUS == "BLOCKED", (
+    assert r.status == DOR._spf.REFUSAL_STATUS == "NOT_MEASURED", (
         f"absent RTL must be a refusal, not a design verdict; got {r.status}")
     # It must name the PRODUCER, not just restate its own input check.
     assert r.extras.get("producer_step") == "rtl_gen"
@@ -110,7 +110,7 @@ def test_refusal_says_the_design_is_untested_when_the_gate_does_apply(tmp_path):
     claim the gate would have skipped."""
     p = _plain_phase1_project(tmp_path)
     r = DOR.step_reference_tb(p, "chip_top", _AID_CLASS)
-    assert r.status == "BLOCKED"
+    assert r.status == "NOT_MEASURED"
     assert r.extras.get("would_apply_when_present") is True
     assert "genuinely untested" in r.detail
     assert "will SKIP" not in r.detail
@@ -139,7 +139,7 @@ def test_refusal_keeps_the_repair_recovery_loop_engaged():
     """The RTL repair/retry loop in `main()` exits on PASS / SKIP / WAIVED and iterates on
     anything else. The 15 recoveries measured on that run depended on the
     absent-RTL verdict NOT being one of the exit statuses."""
-    rtl_repair_retry_exit_statuses = ("PASS", "SKIP", "WAIVED")
+    rtl_repair_retry_exit_statuses = ("PASS", "SKIP", "PASS_WITH_WAIVERS")
     assert DOR._spf.REFUSAL_STATUS not in rtl_repair_retry_exit_statuses, (
         "the refusal status exits the RTL repair/retry loop -- rtl_gen would never be "
         "re-run and the recovery would be lost")
@@ -157,7 +157,7 @@ def test_flow_back_plain_phase1_doc_no_harness(tmp_path):
     assert harness_shaped == [], f"harness leaked into the fixture: {harness_shaped}"
 
     r = DOR.step_reference_tb(p, "chip_top", _NON_AID_CLASS)
-    assert r.status == "BLOCKED"
+    assert r.status == "NOT_MEASURED"
     assert r.extras.get("producer_step") == "rtl_gen"
     # and the message it produced carries no benchmark vocabulary
     low = r.detail.lower()

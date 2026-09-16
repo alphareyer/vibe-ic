@@ -184,7 +184,7 @@ def test_vacuous_silicon_ancestor_blocks_on_name_when_report_has_no_stage():
     # report shape) must still be guarded, via the step-name limb.
     graph = {"41": ["40"], "40": []}
     r = _report(
-        {"id": 40, "name": _FAB, "status": "VACUOUS-PASS"},
+        {"id": 40, "name": _FAB, "status": "NOT_MEASURED"},
         {"id": 41, "name": _SORT, "status": "PASS"},
     )
     res = cov.analyze(r, graph)
@@ -196,7 +196,7 @@ def _vacuous_ancestor_blocks(sid, name, stage):
     """Does a VACUOUS-PASS on this step block a PASS child that blocks_on it?"""
     child = f"{sid}__child"
     r = _report(
-        {"id": sid, "name": name, "status": "VACUOUS-PASS", "stage": stage},
+        {"id": sid, "name": name, "status": "NOT_MEASURED", "stage": stage},
         {"id": child, "name": "downstream", "status": "PASS", "stage": stage},
     )
     res = cov.analyze(r, {child: [sid], sid: []})
@@ -263,7 +263,7 @@ def test_vacuous_gdsii_output_blocks_on_name_when_report_has_no_stage():
     graph = {"38": ["37"], "37": []}
     r = _report(
         {"id": 37, "name": "GDSII output (only if Step 31 PV fully clean)",
-         "status": "VACUOUS-PASS"},
+         "status": "NOT_MEASURED"},
         {"id": 38, "name": "Foundry Handoff (mask spec + WAT plan)",
          "status": "PASS"},
     )
@@ -345,7 +345,7 @@ def test_cli_exits_1_and_reports_the_pair_end_to_end(tmp_path):
 
     comp = tmp_path / "compliance.json"
     comp.write_text(json.dumps({"overall": "FAIL", "steps": [
-        {"id": 40, "name": _FAB, "status": "VACUOUS_PASS",
+        {"id": 40, "name": _FAB, "status": "NOT_MEASURED",
          "stage": "stage5_manufacturing"},
         {"id": 41, "name": _SORT, "status": "PASS",
          "stage": "stage5_manufacturing"},
@@ -548,7 +548,7 @@ def test_cli_fail_still_exits_1_even_with_an_edgeless_graph(tmp_path):
         flow_text="steps:\n  - id: 40\n    name: a\n    blocks_on: []\n",
         compliance=_json.dumps({"overall": "FAIL", "steps": [
             {"id": 2, "name": "Lint (RTL + Quartus-unsafe patterns)",
-             "status": "MISSING", "stage": "stage1"}]}))
+             "status": "FAIL", "stage": "stage1"}]}))
     assert r.returncode == 1, f"rc={r.returncode} stdout={r.stdout}"
     assert res["verdict"] == "FAIL"
 

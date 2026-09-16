@@ -225,7 +225,7 @@ def test_attribution_reads_the_sentinel_as_not_attempted(tmp_path):
         "steps": [
             {"name": "rtl_gen", "status": "PASS", "detail": "",
              "extras": {"deterministic_generator": "multiplexer"}},
-            {"name": "yosys_synth", "status": "SKIPPED-BY-EXIT",
+            {"name": "yosys_synth", "status": "NOT_APPLICABLE",
              "detail": "run declared --exit-step 2"},
         ]}))
     r = fpa.attribute(p)["phase3_verifying"]

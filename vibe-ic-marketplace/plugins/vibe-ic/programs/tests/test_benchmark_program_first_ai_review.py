@@ -1342,7 +1342,7 @@ def test_supplied_rtl_accepts_only_explicit_step2_reentry(tmp_path):
     report.write_text(json.dumps({
         "verdict": "PASS",
         "steps": [{
-            "name": "rtl_gen", "status": "SKIPPED-BY-ENTRY",
+            "name": "rtl_gen", "status": "NOT_APPLICABLE",
             "detail": "run declared --entry-step 2",
         }],
     }))
@@ -1393,7 +1393,7 @@ def test_ai_repair_reenters_at_validation_without_regeneration(
         report.write_text(json.dumps({
             "verdict": "PASS",
             "steps": [{
-                "name": "rtl_gen", "status": "SKIPPED-BY-ENTRY",
+                "name": "rtl_gen", "status": "NOT_APPLICABLE",
                 "detail": "run declared --entry-step 2",
             }],
         }))

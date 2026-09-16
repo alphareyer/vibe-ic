@@ -68,10 +68,10 @@ def _gate(label, state, corpus=None, expired=False):
 def _attestation(row):
     """One real helper-shaped process record."""
     state = row["state"]
-    rc = {"PASS": 0, "FAIL": 1, "NOT_CHECKED": 2,
+    rc = {"PASS": 0, "FAIL": 1, "NOT_MEASURED": 2,
           "WROTE_CORPUS": 0}[state]
     verdict = ("[PASS] checked" if state == "PASS" else
-               "[NOT_CHECKED] unavailable" if state == "NOT_CHECKED" else
+               "[NOT_CHECKED] unavailable" if state == "NOT_MEASURED" else
                "[FAIL] named finding")
     return A.process_attestation(
         row["label"], verdict + "\n", rc,
@@ -88,13 +88,13 @@ def _record(gates, **over):
         "decided": counts["PASS"] + counts["FAIL"],
         "passed": counts["PASS"],
         "failed": counts["FAIL"],
-        "not_checked": counts["NOT_CHECKED"],
+        "not_checked": counts["NOT_MEASURED"],
         "wrote_corpus": counts["WROTE_CORPUS"],
         "deferred": counts["LISTED"],
         "other_shard": counts["OTHER_SHARD"],
         "out_of_scope": counts["OUT_OF_SCOPE"],
         "not_checked_unexempted": [
-            g["label"] for g in gates if g["state"] == "NOT_CHECKED"
+            g["label"] for g in gates if g["state"] == "NOT_MEASURED"
             and g.get("exempt_until") in (None, "")],
         "exemptions_expired": [
             g["label"] for g in gates if g.get("exemption_expired")],
@@ -157,7 +157,7 @@ _BENCHMARK_SHA = "a" * 40
 def _transition_pair(*, replacement_state="PASS", benchmark_sha=_BENCHMARK_SHA):
     """The exact future EMPTY -> external routed-DEF declaration shape."""
     common = _gate("common hygiene finding", "FAIL")
-    empty = _gate(H.ROUTED_DEF_EMPTY_LABEL, "NOT_CHECKED",
+    empty = _gate(H.ROUTED_DEF_EMPTY_LABEL, "NOT_MEASURED",
                   H.ROUTED_DEF_CORPUS)
     empty.update(corpus_item=0, corpus_items=0)
     base = _record(
@@ -220,7 +220,7 @@ def _transition_pair(*, replacement_state="PASS", benchmark_sha=_BENCHMARK_SHA):
 
 def _empty_structural_record(*, attested):
     """Aggregate form of the measured 116b/cab8 structural protocols."""
-    empty = _gate(H.ROUTED_DEF_EMPTY_LABEL, "NOT_CHECKED",
+    empty = _gate(H.ROUTED_DEF_EMPTY_LABEL, "NOT_MEASURED",
                   H.ROUTED_DEF_CORPUS)
     empty.update(corpus_item=0, corpus_items=0)
     doc = _record(
@@ -824,7 +824,7 @@ def test_transition_refuses_an_unrelated_candidate_gate_addition():
 
 def test_transition_refuses_an_unexempted_candidate_not_checked():
     base, candidate, evidence = _transition_pair(
-        replacement_state="NOT_CHECKED")
+        replacement_state="NOT_MEASURED")
     with pytest.raises(H.Refusal) as e:
         H.delta(base, candidate, evidence)
     assert "unexempted NOT_CHECKED" in str(e.value)
@@ -832,7 +832,7 @@ def test_transition_refuses_an_unexempted_candidate_not_checked():
 
 def test_transition_discloses_a_bounded_candidate_not_checked():
     base, candidate, evidence = _transition_pair(
-        replacement_state="NOT_CHECKED")
+        replacement_state="NOT_MEASURED")
     row = candidate["gates"][1]
     row.update(exempt_until="2026-08-16", exempt_reason="known prerequisite",
                exemption_expired=False)
@@ -946,7 +946,7 @@ def test_a_corpus_nothing_opened_is_not_reported_as_one_that_was_read():
     # for either to be a denominator for the other, and the property under
     # test is the PARTITION between them, not a difference between the arms.
     def population(corpus):
-        row = _gate(f'corpus "{corpus}" population', "NOT_CHECKED",
+        row = _gate(f'corpus "{corpus}" population', "NOT_MEASURED",
                     corpus=corpus)
         row["corpus_item"] = 0
         row["corpus_items"] = 0

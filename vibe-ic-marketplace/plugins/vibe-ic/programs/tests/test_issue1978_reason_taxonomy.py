@@ -119,7 +119,7 @@ def test_a_short_population_with_NOTHING_decisive_is_not_measured(reason_class):
     record = {"name": "same_gate", "verdict": "SKIP",
               "reason_class": reason_class, "message": "m",
               "evidence": {"exit_code": 2}}
-    assert F._p0_umbrella_status(True, [record]) == "NOT-MEASURED"
+    assert F._p0_umbrella_status(True, [record]) == "NOT_MEASURED"
 
 
 def test_caller_error_zero_denominator_and_missing_upstream_are_not_skips():
@@ -284,8 +284,8 @@ def test_the_reclassification_greens_nothing():
     INCOMPLETE; only the published row's wording changes."""
     for cls in (T.ZERO_DENOMINATOR, T.EXECUTION_ERROR):
         assert cls not in T.SKIP_ELIGIBLE
-        assert T.record_verdict(cls) == "INCOMPLETE"
-        assert T.p0_tier_for_reason_classes([cls]) == "INCOMPLETE"
+        assert T.record_verdict(cls) == "NOT_MEASURED"
+        assert T.p0_tier_for_reason_classes([cls]) == "NOT_MEASURED"
 
 
 def test_zero_of_zero_and_zero_of_n_are_not_the_same_question():
@@ -367,7 +367,7 @@ def test_the_declared_class_decides_both_and_the_prose_decides_neither():
     # getting it wrong is not a cosmetic error.
     assert T.ZERO_DENOMINATOR not in T.SKIP_ELIGIBLE
     assert T.DESIGN_DECLARED_NA in T.SKIP_ELIGIBLE
-    assert T.p0_tier_for_reason_classes([T.ZERO_DENOMINATOR]) == "INCOMPLETE"
+    assert T.p0_tier_for_reason_classes([T.ZERO_DENOMINATOR]) == "NOT_MEASURED"
     assert T.p0_tier_for_reason_classes([T.DESIGN_DECLARED_NA]) == "PASS"
 
 

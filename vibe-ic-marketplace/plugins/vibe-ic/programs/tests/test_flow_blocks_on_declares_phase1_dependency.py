@@ -150,7 +150,7 @@ def _violation_ids(d1_status: str, graph: dict) -> list:
             .get("ordering_violations", [])]
 
 
-@pytest.mark.parametrize("d1_status", ["FAIL", "MISSING"])
+@pytest.mark.parametrize("d1_status", ["FAIL", "FAIL"])
 def test_failed_or_missing_phase1_reds_a_passing_spec_to_rtl(d1_status, graph):
     """THE discriminator. A Step 1 that reports PASS while D1 FAILED/is MISSING
     must produce an ordering violation — which flow_compliance_check converts
@@ -178,7 +178,7 @@ def test_failed_phase1_reds_the_whole_downstream_main_track(graph):
 
 @pytest.mark.parametrize("d1_status", [
     "PASS",
-    "VACUOUS-PASS",       # the status D1 carries on the real digital spm run
+    "NOT_MEASURED",       # the status D1 carries on the real digital spm run
     "SKIPPED-CONDITION",  # generated_docs populated by external authoring
     "WAIVED",
 ])
@@ -226,7 +226,7 @@ def test_waived_phase1_defers_only_what_declares_it_reads_phase1(graph):
     ids = [s["id"] for s in steps if str(s.get("id")) != "P0"]
     results = [
         S(id=sid, name="", stage="",
-          status=("WAIVED" if sid == _PHASE1_STEP else "MISSING"),
+          status=("PASS_WITH_WAIVERS" if sid == _PHASE1_STEP else "FAIL"),
           reasons=(["ticket=ABC-1"] if sid == _PHASE1_STEP else []))
         for sid in ids
     ]
@@ -240,7 +240,7 @@ def test_waived_phase1_defers_only_what_declares_it_reads_phase1(graph):
         assert (sid, _PHASE1_STEP, "ABC-1") in info["deferred_by_upstream"], info
 
     # DIRECTION-1: the ordering fact is recorded, not discarded, and it costs.
-    assert by_id[1].status == "MISSING", by_id[1].status
+    assert by_id[1].status == "FAIL", by_id[1].status
     assert by_id[1].cascade_note == f"waived-ancestor-undeclared({_PHASE1_STEP})"
 
 
@@ -253,10 +253,10 @@ def test_guard_a_failed_phase1_never_converts_to_deferred(graph):
     S = _fcc.StepResult
     results = [
         S(id=_PHASE1_STEP, name=_D1_NAME, stage="stage_phase1", status="FAIL"),
-        S(id=1, name="Spec-to-RTL", stage="stage1", status="MISSING"),
+        S(id=1, name="Spec-to-RTL", stage="stage1", status="FAIL"),
     ]
     _fcc._attribute_cascade_verdicts(results, steps, {}, skip_analog=False)
-    assert results[1].status == "MISSING", results[1].status
+    assert results[1].status == "FAIL", results[1].status
 
 
 def test_guard_skip_analog_mixed_track_pass_is_unaffected(graph):
@@ -271,12 +271,12 @@ def test_guard_skip_analog_mixed_track_pass_is_unaffected(graph):
         S(id=_PHASE1_STEP, name=_D1_NAME, stage="stage_phase1", status="PASS"),
         S(id=1, name="Spec-to-RTL", stage="stage1", status="PASS"),
         S(id="A8", name="Hardmacro Generation", stage="stage_analog",
-          status="SKIPPED-CONDITION"),
+          status="NOT_APPLICABLE"),
         S(id="M2", name="Mixed-signal merge", stage="stage_mixed",
-          status="MISSING"),
+          status="FAIL"),
     ]
     _fcc._attribute_cascade_verdicts(results, steps, {}, skip_analog=True)
-    assert results[3].status == "SKIPPED-CONDITION"
+    assert results[3].status == "NOT_APPLICABLE"
     assert results[3].cascade_note == "skipped-by-upstream-analog(A8)"
 
 

@@ -209,7 +209,7 @@ def test_asking_the_stage_returns_exactly_two_and_says_why(tmp_path):
     assert "DECLARED AND NOT ENABLED" in r.stdout
     assert "R5_PACKAGE_CANNOT_BOND_DESIGN" in r.stdout
     rec = json.loads((tmp_path / "r.json").read_text())
-    assert rec["verdict"] == "NOT_CHECKED"
+    assert rec["verdict"] == "NOT_MEASURED"
     assert rec["declared_not_enabled"][0]["rule"] == "R5_PACKAGE_CANNOT_BOND_DESIGN"
 
 
@@ -356,7 +356,7 @@ def test_an_empty_pin_population_is_not_checked_not_accepted(tmp_path):
     shape = {"package_info": {"package_type": "QFP", "pin_count": 0},
              "no_package_in_input": False, "external_pins": [], "pin_table": []}
     v = S.intent_self_contradicts(S.read_package_intent(l1(tmp_path, shape)))
-    assert v["verdict"] == "NOT_CHECKED"
+    assert v["verdict"] == "NOT_MEASURED"
     assert "refutes nothing" in v["why"]
 
 
@@ -447,7 +447,7 @@ def test_removing_the_disarm_moves_a_label_and_not_the_rejection_set():
     assert on.get("REJECT") == off.get("REJECT"), (
         "removing the disarm changed the rejection set; the docstring says it "
         "does not, and one of the two is now wrong")
-    assert on.get("DISARMED") == off.get("NOT_CHECKED")
+    assert on.get("DISARMED") == off.get("NOT_MEASURED")
 
 
 # ═════════════════════════════════════════════════════════════════════════════

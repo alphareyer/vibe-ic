@@ -114,5 +114,5 @@ def test_unexecuted_l10_rows_cannot_become_professional_pass(tmp_path):
     _report(tmp_path, {"status": "SKIP", "ran_cocotb": False})
     _l10_unit_track(tmp_path, sim_executed=False)
     res = G.check(tmp_path)
-    assert res["verdict"] == "NOT_CHECKED"
+    assert res["verdict"] == "NOT_MEASURED"
     assert res["reason_class"] == "BLOCKED_BY_UPSTREAM"

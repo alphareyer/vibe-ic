@@ -61,7 +61,7 @@ def test_deferred_parent_converts_dependent_missing():
                  reasons=["no required_outputs found"])
     results = [parent, child]
     info = FCC._attribute_cascade_verdicts(results, steps, waivers={})
-    assert child.status == "DEFERRED-BY-UPSTREAM"
+    assert child.status == "NOT_MEASURED"
     assert "deferred-by-upstream(9" in child.cascade_note
     assert "ticket=pdk-substitution-v0.2.103" in child.cascade_note
     assert info["deferred_by_upstream"] == [
@@ -90,7 +90,7 @@ def test_deferral_is_transitive_over_the_declared_relation():
     s1 = _res(1, "MISSING")
     s2 = _res(2, "MISSING")
     FCC._attribute_cascade_verdicts([d1, s1, s2], steps, waivers={})
-    assert s2.status == "DEFERRED-BY-UPSTREAM", s2.status
+    assert s2.status == "NOT_MEASURED", s2.status
     assert "deferred-by-upstream(D1" in s2.cascade_note
 
 
@@ -114,7 +114,7 @@ def test_a_waived_ancestor_with_no_declared_relation_does_not_soften():
     info = FCC._attribute_cascade_verdicts([lec] + tail, steps, waivers={})
     assert info["deferred_by_upstream"] == [], info["deferred_by_upstream"]
     for r in tail:
-        assert r.status == "MISSING", (r.id, r.status)
+        assert r.status == "FAIL", (r.id, r.status)
         assert r.cascade_note == "waived-ancestor-undeclared(13)", r.cascade_note
         joined = " ".join(r.reasons)
         assert "declares reading" in joined
@@ -128,7 +128,7 @@ def test_unrelated_missing_stays_missing():
     a5 = _res("A5", "WAIVED", reasons=["[ticket=t1]"])
     s7 = _res(7, "MISSING")  # main track; no deferred ancestor
     FCC._attribute_cascade_verdicts([a5, s7], steps, waivers={})
-    assert s7.status == "MISSING"
+    assert s7.status == "FAIL"
     assert s7.cascade_note == ""
 
 
@@ -162,7 +162,7 @@ def test_post_fail_missing_is_annotated_blocked():
     blocked = [r for r in results if r.cascade_note]
     assert len(blocked) == len(downstream)
     for r in blocked:
-        assert r.status == "MISSING"          # strict semantics unchanged
+        assert r.status == "FAIL"          # strict semantics unchanged
         assert r.cascade_note == "blocked-by-upstream(5)"
     assert info["blocked_by_upstream"] == {5: len(downstream)}
 
@@ -183,7 +183,7 @@ def test_chains_are_isolated():
     FCC._attribute_cascade_verdicts([main_fail, analog_missing],
                                     steps, waivers={})
     assert analog_missing.cascade_note == ""
-    assert analog_missing.status == "MISSING"
+    assert analog_missing.status == "FAIL"
 
 
 def test_no_fail_no_annotation():
@@ -215,7 +215,7 @@ def test_declared_dependency_relation_is_small():
     pairs = set()
     for waived in ids:
         results = [FCC.StepResult(id=i, name="", stage="",
-                                  status=("WAIVED" if i == waived
+                                  status=("PASS_WITH_WAIVERS" if i == waived
                                           else "MISSING"))
                    for i in ids]
         info = FCC._attribute_cascade_verdicts(

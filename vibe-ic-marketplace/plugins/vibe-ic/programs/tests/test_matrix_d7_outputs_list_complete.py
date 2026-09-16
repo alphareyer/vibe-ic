@@ -2629,7 +2629,7 @@ def test_a_step_whose_gate_is_its_only_producer_stays_missing():
             project.mkdir()
             _seed_conditions(project, step)
             result = FCC.check_step(project, step, {})
-            assert result.status == "MISSING", (
+            assert result.status == "FAIL", (
                 f"step {sid} declares {outs}, every one of which only its own "
                 f"gate writes, and NONE of them was on disk when the audit "
                 f"began — yet check_step returned {result.status!r} with "
@@ -2713,7 +2713,7 @@ def test_audit_created_evidence_is_excluded_by_default_and_preexisting_passes():
             _survived = [rel for rel in self_written
                          if (project / rel).is_file()
                          and (project / rel).read_text() == _SELF_EVIDENCE_BODY]
-            if preexisting.status in ("PASS", "VACUOUS_PASS"):
+            if preexisting.status in ("PASS", "NOT_MEASURED"):
                 paired_done_claims += 1
                 assert any(rel in preexisting.evidence
                            for rel in self_written), (
@@ -2785,7 +2785,7 @@ def test_audit_created_evidence_is_excluded_by_default_and_preexisting_passes():
                     f"step {sid}: audit-created {rel} was tagged but still "
                     f"credited as evidence {list(default.evidence)!r}"
                 )
-            assert default.status not in ("PASS", "VACUOUS_PASS"), (
+            assert default.status not in ("PASS", "NOT_MEASURED"), (
                 f"step {sid}: default audit resolved to {default.status!r} "
                 f"while declared output(s) {created} existed only because "
                 f"this audit wrote them"
@@ -2820,7 +2820,7 @@ def test_audit_created_evidence_is_excluded_by_default_and_preexisting_passes():
             # exact verdict on pass 2 and one (26.5ic) moves MISSING -> FAIL,
             # because `die_finishing_check` reads the very path it writes —
             # a flow-WIRING collision recorded in LAND.md, not a credit defect.
-            assert again.status not in ("PASS", "VACUOUS_PASS"), (
+            assert again.status not in ("PASS", "NOT_MEASURED"), (
                 f"step {sid}: the audit refused {created} on pass 1 "
                 f"({default.status!r}) and reported {again.status!r} on pass "
                 f"2 — a done claim bought by running the auditor twice"
@@ -2852,7 +2852,7 @@ def test_audit_created_evidence_is_excluded_by_default_and_preexisting_passes():
                     break
             explicit_false = FCC.check_step(
                 project, step, {}, strict_audit_evidence=False)
-            assert explicit_false.status not in ("PASS", "VACUOUS_PASS"), (
+            assert explicit_false.status not in ("PASS", "NOT_MEASURED"), (
                 f"step {sid}: strict_audit_evidence=False weakened the "
                 f"default; status={explicit_false.status!r}, "
                 f"audit-created outputs={created}"

@@ -90,13 +90,13 @@ def test_disclosed_skip_synthesises_waiver_for_both_board_steps(tmp_path):
 def test_disclosed_skip_defers_final_signoff_step(tmp_path):
     # The #663 core symptom: final-signoff was a hard FAIL; now WAIVED-DEFERRED.
     _proj(tmp_path, {"verdict": "SKIP", "sof_present": False})
-    assert _status(tmp_path, FINAL_STEP) == "WAIVED"
+    assert _status(tmp_path, FINAL_STEP) == "PASS_WITH_WAIVERS"
 
 
 def test_keep_607_early_prototype_still_deferred(tmp_path):
     # #607 positive case must still pass (no regression).
     _proj(tmp_path, {"verdict": "SKIP", "sof_present": False})
-    assert _status(tmp_path, EARLY_STEP) == "WAIVED"
+    assert _status(tmp_path, EARLY_STEP) == "PASS_WITH_WAIVERS"
 
 
 # ── NEGATIVE no-leak: undisclosed missing bitstream still FAILs ───────────
@@ -104,7 +104,7 @@ def test_undisclosed_no_audit_final_signoff_still_fails(tmp_path):
     _proj(tmp_path, audit=None)
     w = F._load_waivers(tmp_path)
     assert FINAL not in w and EARLY not in w
-    assert _status(tmp_path, FINAL_STEP) not in ("WAIVED", "PASS",
+    assert _status(tmp_path, FINAL_STEP) not in ("PASS_WITH_WAIVERS", "PASS",
                                                  "SKIPPED-CONDITION")
 
 
@@ -112,14 +112,14 @@ def test_nonskip_verdict_final_signoff_still_fails(tmp_path):
     _proj(tmp_path, {"verdict": "FAIL", "sof_present": False})
     w = F._load_waivers(tmp_path)
     assert FINAL not in w
-    assert _status(tmp_path, FINAL_STEP) not in ("WAIVED", "PASS")
+    assert _status(tmp_path, FINAL_STEP) not in ("PASS_WITH_WAIVERS", "PASS")
 
 
 def test_sof_present_claim_final_signoff_still_fails(tmp_path):
     _proj(tmp_path, {"verdict": "SKIP", "sof_present": True})
     w = F._load_waivers(tmp_path)
     assert FINAL not in w
-    assert _status(tmp_path, FINAL_STEP) not in ("WAIVED", "PASS")
+    assert _status(tmp_path, FINAL_STEP) not in ("PASS_WITH_WAIVERS", "PASS")
 
 
 def test_genuine_nonboard_attestation_fail_untouched(tmp_path):
@@ -134,4 +134,4 @@ def test_genuine_nonboard_attestation_fail_untouched(tmp_path):
     }
     w = F._load_waivers(tmp_path)
     assert 31 not in w
-    assert F.check_step(tmp_path, nonboard, w).status not in ("WAIVED", "PASS")
+    assert F.check_step(tmp_path, nonboard, w).status not in ("PASS_WITH_WAIVERS", "PASS")

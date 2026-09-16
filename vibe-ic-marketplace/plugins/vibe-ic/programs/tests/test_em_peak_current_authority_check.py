@@ -296,7 +296,7 @@ def test_the_refusal_reaches_the_flow_as_not_a_pass(tmp_path):
     assert not out.startswith(fcc._VACUOUS_HINT_PREFIX), out  # ... nor a skip
     # ... and it is not a PASS either, which is what #1017 was about.
     assert cls not in _reason_taxonomy().SKIP_ELIGIBLE, out
-    assert tier == "INCOMPLETE", (tier, out)
+    assert tier == "NOT_MEASURED", (tier, out)
     # the gate's OWN sentence now survives into the flow's snippet, which is
     # what the substituted marker used to delete.
     assert "NOT screened" in out, out
@@ -338,7 +338,7 @@ def test_the_tier_is_not_bought_by_a_relabel(tmp_path):
     # tier — see `test_issue1978_reason_taxonomy::
     # test_the_reclassification_greens_nothing`.
     assert cls == T.ZERO_DENOMINATOR, (cls, tier)
-    assert cls not in T.SKIP_ELIGIBLE and tier == "INCOMPLETE", (cls, tier)
+    assert cls not in T.SKIP_ELIGIBLE and tier == "NOT_MEASURED", (cls, tier)
 
     orig = T.infer_nonverdict_reason
     try:
@@ -349,7 +349,7 @@ def test_the_tier_is_not_bought_by_a_relabel(tmp_path):
         T.infer_nonverdict_reason = orig
         fcc._reason_taxonomy.infer_nonverdict_reason = orig
     assert out_r.startswith(fcc._VACUOUS_HINT_PREFIX), out_r
-    assert tier_r == "VACUOUS_PASS", (
+    assert tier_r == "NOT_MEASURED", (
         "the two dispositions must remain DISTINGUISHABLE at the step tier; "
         "if this stops being true the assertion above has stopped measuring "
         f"anything: {tier_r}")

@@ -166,7 +166,7 @@ _NONE_ANSWERED = ("STRUCTURAL MEASUREMENT: registered=246 invoked=0 "
 def test_a_pass_over_a_partial_population_is_not_recorded_as_a_pass(tmp_path):
     sr = _run_step(tmp_path, "Overall: PASS_WITH_WAIVERS  (strict=True)",
                    _PARTIAL)
-    assert sr.status == "INCOMPLETE", (
+    assert sr.status == "NOT_MEASURED", (
         "210 of 246 sub-gates answered; the step recorded the same word it "
         "records when all 246 answered.")
     assert sr.extras["structural_measurement"]["no_verdict"] == 36
@@ -179,21 +179,21 @@ def test_a_pass_over_the_whole_population_is_still_a_pass(tmp_path):
     assert _run_step(tmp_path, "Overall: PASS  (strict=True)",
                      _WHOLE).status == "PASS"
     assert _run_step(tmp_path, "Overall: PASS_WITH_WAIVERS  (strict=True)",
-                     _WHOLE).status == "WAIVED"
+                     _WHOLE).status == "PASS_WITH_WAIVERS"
 
 
 def test_an_undisclosed_audit_keeps_its_previous_status(tmp_path):
     """No disclosure line at all (an older flow_compliance_check) must not be
     read as a partial population OR as a whole one."""
     sr = _run_step(tmp_path, "Overall: PASS_WITH_WAIVERS  (strict=True)")
-    assert sr.status == "WAIVED"
+    assert sr.status == "PASS_WITH_WAIVERS"
     assert sr.extras["structural_measurement"]["disclosed"] is False
 
 
 def test_zero_of_the_population_answering_is_not_a_pass_tier(tmp_path):
     sr = _run_step(tmp_path, "Overall: PASS_WITH_WAIVERS  (strict=True)",
                    _NONE_ANSWERED)
-    assert sr.status == "INCOMPLETE"
+    assert sr.status == "NOT_MEASURED"
     assert sr.extras["structural_measurement"]["invoked"] == 0
 
 

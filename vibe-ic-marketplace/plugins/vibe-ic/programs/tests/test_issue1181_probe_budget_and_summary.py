@@ -270,7 +270,7 @@ def test_an_exhausted_budget_is_a_NAMED_finding_not_a_quiet_shrink(tmp_path):
     assert res.verdict != "PASS", (
         "a run that never reached its gates reported PASS — that is a smaller "
         "denominator wearing a clean verdict")
-    assert res.verdict == "NOT_CHECKED", res.verdict
+    assert res.verdict == "NOT_MEASURED", res.verdict
     assert any("aggregate budget" in why for _label, why in res.not_driven), (
         f"truncation is not NAMED in not_driven: {res.not_driven}")
 

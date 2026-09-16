@@ -161,7 +161,7 @@ def test_an_exemption_cannot_buy_off_an_empty_population_refusal(tmp_path):
                for ln in wiring), wiring
 
     row = _row(doc)
-    assert row["state"] == "NOT_CHECKED", row
+    assert row["state"] == "NOT_MEASURED", row
     assert proc.returncode != 0, (
         "the sweep certified a run in which the only population it declared "
         "was never examined\n" + text)
@@ -211,7 +211,7 @@ def test_the_refusal_is_caused_by_the_exemption_and_not_by_the_shape(tmp_path):
         "an ordinary attested-population loop is now reported as mis-wired, "
         "so ARM A proves nothing about the exemption\n" + text)
     row = _row(doc)
-    assert row["state"] == "NOT_CHECKED", row
+    assert row["state"] == "NOT_MEASURED", row
     assert not row.get("exempt_until"), row
     assert proc.returncode != 0, text
     assert any("UNEXEMPTED NOT_CHECKED" in ln for ln in text.splitlines()), (

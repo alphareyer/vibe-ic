@@ -275,7 +275,7 @@ def test_a_run_with_no_signoff_report_is_still_not_checked(tmp_path):
     (d / "pdn_em_sizing.json").write_text(
         json.dumps({"sizing_basis": BOUND_BASIS}), encoding="utf-8")
     rep = MOD.check(tmp_path)
-    assert rep["verdict"] == "NOT_CHECKED", rep
+    assert rep["verdict"] == "NOT_MEASURED", rep
     assert "has no input" in rep["reason"], rep["reason"]
 
 

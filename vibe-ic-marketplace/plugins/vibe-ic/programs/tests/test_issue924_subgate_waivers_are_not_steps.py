@@ -437,7 +437,7 @@ def test_a_step_level_waiver_still_removes_exactly_one_step_each(
     base = _run(tmp_path, monkeypatch, n_subgate_waivers=n, probe_flow=False)
     arm = _run(tmp_path, monkeypatch, n_subgate_waivers=n, probe_flow=False,
                waived_steps=(33, 34))
-    waived_steps_seen = _step_status_tally(arm["report"])["WAIVED"]
+    waived_steps_seen = _step_status_tally(arm["report"])["PASS_WITH_WAIVERS"]
     assert waived_steps_seen > 0, (
         "the fixture produced no step-level WAIVED step, so this guard would "
         "pass vacuously; the waivers.json path must be repaired before this "

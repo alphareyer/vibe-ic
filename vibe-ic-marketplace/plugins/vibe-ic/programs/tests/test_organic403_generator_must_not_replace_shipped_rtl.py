@@ -66,7 +66,7 @@ def test_the_generator_declines_when_the_design_ships_its_own_rtl(tmp_path,
                                                                   route):
     p = _project(tmp_path, route)
     res = D._try_deterministic_rtl_dispatch(p, 0.0)
-    assert res is not None and res.status == "SKIPPED-CONDITION", res
+    assert res is not None and res.status == "NOT_APPLICABLE", res
     assert _staged(p) == [], "nothing may be written before consume runs"
     assert "403" in json.dumps(getattr(res, "extras", {}) or {})
 

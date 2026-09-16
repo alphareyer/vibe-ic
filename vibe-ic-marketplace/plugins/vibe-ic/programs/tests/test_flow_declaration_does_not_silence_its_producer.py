@@ -286,7 +286,7 @@ def test_a_declaring_trap_shape_step_is_never_certified_by_its_own_gate(
     record_property("status", res.status)
     record_property("declared", list(F.required_outputs(step_id) or []))
 
-    assert res.status == "MISSING", (
+    assert res.status == "FAIL", (
         f"step {step_id} declares only paths its own gate writes "
         f"{list(_json_outputs(step_id))} and check_step returned "
         f"{res.status} on a tree seeded with nothing but {seeded}. A passing "
@@ -352,7 +352,7 @@ def test_declaring_them_would_suppress_the_producer(step_id, tmp_path, record_pr
         f"reasons={[str(r)[:200] for r in res_a.reasons][:3]}"
     )
 
-    assert res_b.status == "MISSING" and not produced_b, (
+    assert res_b.status == "FAIL" and not produced_b, (
         f"step {step_id}: declaring the paths its own gate writes NO LONGER "
         f"suppresses the producer — ARM A {res_a.status} produced "
         f"{produced_a}; ARM B (declaring {list(gate_json)}) returned "

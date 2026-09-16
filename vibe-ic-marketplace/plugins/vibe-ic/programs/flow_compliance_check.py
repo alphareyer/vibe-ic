@@ -274,7 +274,7 @@ def _step_failure_is_informational_only(result: "StepResult") -> bool:
     so a mis-parse here is a VERDICT change. Non-P0 steps take the original
     path unchanged (they publish no records; their reasons are a different
     grammar written by `_evaluate_gate`)."""
-    if result.status != "FAIL" or not result.reasons:
+    if result.status != _T.Verdict.FAIL.value or not result.reasons:
         return False
     saw_informational = False
     if getattr(result, "id", None) == "P0":
@@ -3749,7 +3749,16 @@ _INCOMPLETE_STDOUT_TOKEN = "INCOMPLETE"
 # verdict-self-report doctrine + the VACUOUS_HINT promotion pattern.
 _SKIP_HINT_PREFIX = "__SKIP_HINT__: "
 # Verdict tokens (normalised upper, `_`→`-`) that count as an honest skip.
-_SELF_SKIP_VERDICTS = frozenset({"SKIP", "SKIPPED", "SKIPPED-CONDITION"})
+_SELF_SKIP_VERDICTS = frozenset({
+    "SKIP", "SKIPPED", "SKIPPED-CONDITION",
+    # R-0915-85 — a GATE PROGRAM that has itself been migrated writes the step
+    # vocabulary's words. A gate report saying NOT_APPLICABLE (the input
+    # declares this inapplicable) or NOT_MEASURED (nobody measured it) is the
+    # same honest self-disclosure #675 added this set for; not reading them
+    # would make a migrated gate's disclosure invisible, which is the failure
+    # this set exists to prevent.
+    "NOT_APPLICABLE", "NOT_MEASURED",
+})
 
 # #651 — PASS_WITH_WAIVERS hint. A `program_exit_zero` gate program (notably
 # `tapeout_signoff_check` = signoff_audit --mode tapeout) signals "I PASSED
@@ -5558,9 +5567,9 @@ def _os_constraints_prereq_satisfied(result: Any,
     PASS_WITH_OPEN_SOURCE_CONSTRAINTS carrying these rows, never bare PASS.
     """
     status = getattr(result, "status", None)
-    if status == "PASS":
+    if status == _T.Verdict.PASS.value:
         return True
-    if status != "WAIVED":
+    if status != _T.Verdict.PASS_WITH_WAIVERS.value:
         return False
     w = waivers.get(getattr(result, "id", None)) or {}
     return bool(w.get("ticket")) and bool(w.get("approver")) \
@@ -12364,7 +12373,7 @@ def _resolve_dependency_condition_results(
             continue
         # Only the condition-generated skip is eligible. A run-mode or
         # class-level skip has a different owner and must not be rewritten.
-        if result.status != "SKIPPED-CONDITION" or not any(
+        if result.status != _T.Verdict.NOT_APPLICABLE.value or not any(
                 str(reason).startswith("condition not met:")
                 for reason in result.reasons):
             continue
@@ -12858,7 +12867,7 @@ _SELF_FAIL_VERDICTS = frozenset({"FAIL", "FAILED", "FAILURE"})
 
 def _evidence_integrity_scan(project: Path,
                              result: "StepResult") -> "StepResult":
-    if result.status != "PASS" or not result.evidence:
+    if result.status != _T.Verdict.PASS.value or not result.evidence:
         return result
     stub_hits: List[str] = []
     broken: List[str] = []
@@ -12964,10 +12973,18 @@ def _apply_capability_gap(result: "StepResult", sid) -> "StepResult":
     exit of check_step (the early required_outputs return included) so the
     conversion is never silently skipped; evidence-backed verdicts are
     untouched."""
-    if (result.status == "MISSING" and isinstance(sid, int)
+    # R-0915-85 — the would-be-MISSING verdict is now
+    # FAIL(missing_artefact); the conversion target is NOT_APPLICABLE, because
+    # a REGISTERED platform capability gap is a declaration about this
+    # platform, and `declared_by` names the flag.
+    if (result.status == _T.Verdict.FAIL.value
+            and result.reason_class == _T.ReasonClass.MISSING_ARTEFACT.value
+            and isinstance(sid, int)
             and sid in _PLATFORM_CAPABILITY_GAPS):
         flag = _PLATFORM_CAPABILITY_GAPS[sid]
         result.status = _T.Verdict.NOT_APPLICABLE.value
+        result.reason_class = ""
+        result.declared_by = f"platform capability gap flag [{flag}]"
         # v1.3.94 — a flag with an ACCURATE rationale override (a step the
         # runner DOES implement but cannot complete for a data/model gap) uses
         # its own text; the rest use the generic "not implemented yet".
@@ -14501,7 +14518,10 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # emptiness through the structured channel are named HERE - on the step
         # line, in `reasons`, in a typed field and in the tally - rather than
         # being dropped for failing to be unanimous.
-        if result.status != "VACUOUS_PASS" and json_vacuous_hints:
+        # R-0915-85 — the vacuity tier is NOT_MEASURED(no_population)
+        # carrying Disclosure.VACUITY; read the disclosure, not a word.
+        if (_T.Disclosure.VACUITY.value not in (result.disclosures or ())
+                and json_vacuous_hints):
             result.partial_vacuity_disclosed = True
             for h in json_vacuous_hints:
                 result.reasons.append(
@@ -14547,7 +14567,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # touches `result.status` on no path, so it cannot move a step into or
         # out of any bucket or numerator. The WAIVED branch already printed its
         # own line, so it is excluded here rather than printing twice.
-        if result.status != "WAIVED" and waiver_hints:
+        if (result.status != _T.Verdict.PASS_WITH_WAIVERS.value
+                and waiver_hints):
             for h in waiver_hints:
                 result.reasons.append(
                     f"WAIVED-DEFERRED (disclosed, tier NOT granted — the "
@@ -14810,7 +14831,23 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # mentioned the one that is missing. Neither block changes a status here
     # that the other has not already set to MISSING; what was lost was only
     # the second disclosure.
-    _natural_done_claim = _T.is_done_claim(result.status)
+    # R-0915-85 — THE PREDICATE IS "DOES THIS STEP OWE THE ARTEFACT", not "did
+    # it claim to be done". Those coincided under the old vocabulary because
+    # `is_done_claim` was derived by subtraction and INCLUDED the tiers that had
+    # measured nothing — `INCOMPLETE`, `NOT-MEASURED`, `VACUOUS-PASS`,
+    # `STRUCTURE-ONLY` were in neither negative set, so the downgrade reached
+    # them. They are `NOT_MEASURED` now and `is_done_claim` correctly answers
+    # False, which silently removed the downgrade from exactly the tier this
+    # file's own `test_d8_vacuous_pass_is_downgraded_too` exists to pin.
+    #
+    # ONLY `NOT_APPLICABLE` is exempt, and for the reason the whole word exists:
+    # the INPUT says there is nothing here, so there is no declared output this
+    # step owes. Everything else — PASS, PASS_WITH_WAIVERS, NOT_MEASURED and a
+    # FAIL the gate already found — owes what it declared, and an output that
+    # does not exist is FAIL(missing_artefact) whatever the gate said about the
+    # ones that are present.
+    _owes_its_declared_outputs = not _T.is_excused(result.status)
+    _natural_done_claim = _owes_its_declared_outputs
 
     if _natural_done_claim and _audit_produced:
         result.status = _T.Verdict.FAIL.value
@@ -14870,7 +14907,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # waiver entry carries ticket + review_required=true so foundry
     # tapeout review must still close it before production. The PASS
     # path is NOT touched — a real evidence + gate-PASS keeps PASS.
-    if (result.status in ("FAIL", "MISSING")
+    if (result.status == _T.Verdict.FAIL.value
             and sid in waivers
             and bool(waivers[sid].get("_env_unavailable"))):
         original_reasons = list(result.reasons)
@@ -14966,7 +15003,8 @@ def _attribute_condition_owner_blocks(
 
         config_ok = bool(owner_id and declaration_name and patterns)
         declaration_ok = (len(matched) == 1 if exact_one else bool(matched))
-        if (config_ok and owner_row.status == "PASS" and declaration_ok):
+        if (config_ok and owner_row.status == _T.Verdict.PASS.value
+                and declaration_ok):
             continue
 
         if not config_ok:
@@ -15215,11 +15253,13 @@ def _attribute_cascade_verdicts(
     if skip_analog:
         skipped_analog_ids = {
             r.id for r in results
-            if r.status == "SKIPPED-CONDITION" and _track_of(r.id) == "analog"
+            if r.status == _T.Verdict.NOT_APPLICABLE.value
+            and _track_of(r.id) == "analog"
         }
         if skipped_analog_ids:
             for r in results:
-                if r.status != "MISSING" or _track_of(r.id) != "mixed":
+                if (r.status != _T.Verdict.FAIL.value
+                        or _track_of(r.id) != "mixed"):
                     continue
                 # BFS over blocks_on ancestry → reaches a skipped analog step?
                 queue = list(parents_of.get(r.id, []))
@@ -15250,7 +15290,8 @@ def _attribute_cascade_verdicts(
                 ))
 
     # ── #502: waiver-chain propagation over blocks_on ancestry ──────
-    deferred_ids = {r.id for r in results if r.status == "WAIVED"}
+    deferred_ids = {r.id for r in results
+                    if r.status == _T.Verdict.PASS_WITH_WAIVERS.value}
     _ticket_re = re.compile(r"ticket=([^\s,\]]+)")
 
     def _ticket_for(pid: Any) -> str:
@@ -15387,7 +15428,10 @@ def _attribute_cascade_verdicts(
         return None, None
 
     for r in results:
-        if r.status != "MISSING":
+        # R-0915-85 — a step ordered behind a waived ancestor is one whose
+        # own declared output is not on disk: FAIL(missing_artefact).
+        if (r.status != _T.Verdict.FAIL.value
+                or r.reason_class != _T.ReasonClass.MISSING_ARTEFACT.value):
             continue
         own_gap = known_gap_of.get(r.id)
         if own_gap:
@@ -15469,10 +15513,10 @@ def _attribute_cascade_verdicts(
             if r is None:
                 continue
             if first_fail is None:
-                if r.status == "FAIL":
+                if r.status == _T.Verdict.FAIL.value:
                     first_fail = sid
                 continue
-            if r.status == "MISSING":
+            if r.status == _T.Verdict.FAIL.value:
                 r.cascade_note = f"blocked-by-upstream({first_fail})"
                 r.reasons.append(
                     f"blocked-by-upstream(step {first_fail}): cascade of "
@@ -17352,7 +17396,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # waivers.json at all, so a reader could not tell "considered and
     # inapplicable" from "nobody read this file".
     advisories.extend(_WAIVER_NOT_BOUND_DISCLOSURES)
-    step20_pass = any(r.id == 20 and r.status == "PASS" for r in results)
+    step20_pass = any(r.id == 20 and r.status == _T.Verdict.PASS.value
+                      for r in results)
     has_mcorner = bool(
         list(project.glob("sta/mcorner_*.rpt"))
         or list(project.glob("reports/sta/mcorner_*.json"))
@@ -17660,10 +17705,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                   or (_T.in_analog_track(r) and _T.scoped_into_verdict(r))]
     else:
         scoped = results
-    failing = [r for r in scoped if r.status == "FAIL"]
-    missing = [r for r in scoped if r.status == "MISSING"]
-    setup_required_skipped = [r for r in scoped
-                              if r.status == "SKIPPED-SETUP-REQUIRED"]
+    # R-0915-85 — `MISSING` and `SKIPPED-SETUP-REQUIRED` are gone as words.
+    # The two buckets survive as what they always measured, read off the
+    # reason: a declared output that does not exist is a FAIL that says
+    # `missing_artefact`, and a step whose SETUP was absent is a NOT_MEASURED
+    # that says `input_absent`. Both are still separate from a gate's own
+    # defect, which is the distinction the two buckets exist for.
+    failing = [r for r in scoped
+               if r.status == _T.Verdict.FAIL.value
+               and r.reason_class != _T.ReasonClass.MISSING_ARTEFACT.value]
+    missing = [r for r in scoped
+               if r.status == _T.Verdict.FAIL.value
+               and r.reason_class == _T.ReasonClass.MISSING_ARTEFACT.value]
+    setup_required_skipped = [
+        r for r in scoped
+        if r.status == _T.Verdict.NOT_MEASURED.value
+        and r.reason_class == _T.ReasonClass.INPUT_ABSENT.value]
 
     # DFT_FCC / 11-d7 — the THIRD bucket: a sign-off-bar step that
     # self-skipped.
@@ -17711,7 +17768,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     #     leave it again through the promotion below.
     oss_blocked_skipped = [
         r for r in scoped
-        if r.status == "SKIPPED-CONDITION"
+        if r.status == _T.Verdict.NOT_APPLICABLE.value
         and r.self_skip_disclosed
         and (r.id in _OPEN_SOURCE_CONTAINER_BLOCKED_STEPS
              or r.id in _DFT_SIGNOFF_WITHDRAWN_STEPS)
@@ -17955,7 +18012,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.phase == "2" and (
             args.strict_structural or args.strict_step_artifacts):
         for r in results:
-            if r.id == "P0" and r.status == "FAIL":
+            if r.id == "P0" and r.status == _T.Verdict.FAIL.value:
                 # #497 step 2 — projected from the umbrella's records. This is
                 # the highest-stakes of the four consumers: it is what sets
                 # `forced_fail` under `--phase 2 --strict-structural`, the
@@ -17976,7 +18033,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # step-level verdict.
                 structural_fail_lines.extend(
                     _p0_structural_fail_lines(_p0_gate_records(r)))
-            elif r.status in ("FAIL", "MISSING") and \
+            elif r.status == _T.Verdict.FAIL.value and \
                     isinstance(r.id, int) and 1 <= r.id <= 13:
                 # Phase 2 step-level FAIL/MISSING. With --strict-step-
                 # artifacts these contribute. With --strict-structural
@@ -18325,7 +18382,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if not _os_constraints_prereq_satisfied(match, waivers):
                     prereq_pass = False
                     break
-                if match.status == "WAIVED":
+                if match.status == _T.Verdict.PASS_WITH_WAIVERS.value:
                     w = waivers.get(sid) or {}
                     os_prereq_waived.append({
                         # The printer and every consumer branch on this: these

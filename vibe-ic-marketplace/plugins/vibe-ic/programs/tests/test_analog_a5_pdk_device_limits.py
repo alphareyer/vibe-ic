@@ -102,13 +102,13 @@ def test_an_unreadable_pdk_is_NOT_CHECKED_never_a_default(tmp_path):
         capture_output=True, text=True)
     assert cp.returncode == 2
     out = json.loads(cp.stdout)
-    assert out["result"] == "NOT_CHECKED"
+    assert out["result"] == "NOT_MEASURED"
     assert "ABSENT, never a default" in out["reason"]
 
 
 def test_a_model_with_no_gencell_entry_is_NOT_CHECKED(tmp_path):
     rc, out = _run(tmp_path, "--model", "sg13_hv_nmos", "--check-w", "0.5")
-    assert rc == 2 and out["result"] == "NOT_CHECKED"
+    assert rc == 2 and out["result"] == "NOT_MEASURED"
 
 
 def test_a_deck_missing_the_space_rule_yields_no_clearance(tmp_path):

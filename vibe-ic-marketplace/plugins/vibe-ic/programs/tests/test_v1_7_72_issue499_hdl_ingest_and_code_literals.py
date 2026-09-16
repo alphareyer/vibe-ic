@@ -405,7 +405,7 @@ def test_dropped_document_cannot_produce_a_vacuous_pass(
     r = _run(f"{gate}.py", str(dropped_doc_project))
     combined = (r.stdout or "") + (r.stderr or "")
     assert "VACUOUS_PASS" not in combined, combined
-    assert "NOT_CHECKED" in combined, combined
+    assert "NOT_MEASURED" in combined, combined
     assert r.returncode == 2, combined
     assert "commands.qqq" in combined
 

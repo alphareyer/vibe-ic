@@ -178,7 +178,7 @@ def test_a_clean_sweep_with_one_uninvoked_gate_is_not_a_PASS(
     assert step["status"] != "PASS", (
         "the umbrella certified 5 registered checkers on the strength of the 4 "
         f"that answered; status={step['status']!r}")
-    assert step["status"] == "INCOMPLETE"
+    assert step["status"] == "NOT_MEASURED"
     assert rc == 0, (
         "INCOMPLETE is a disclosure tier, not a failure — it must not turn a "
         "run red on its own")
@@ -265,7 +265,7 @@ def test_no_RTL_is_still_SKIPPED_CONDITION(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     step = next(s for s in json.loads(report.read_text())["steps"]
                 if s["id"] == "P0")
-    assert step["status"] == "SKIPPED-CONDITION"
+    assert step["status"] == "NOT_APPLICABLE"
 
 
 # ===========================================================================
@@ -391,7 +391,7 @@ def test_real_gates_a_clean_registry_with_one_uninvoked_gate_is_INCOMPLETE(
         real_umbrella["proj"], records_out=records)
     assert fails == [], "the scoped registry must contain no failing gate"
     assert F._p0_not_invocable_count(records) >= 1
-    assert F._p0_umbrella_status(passed, records) == "INCOMPLETE"
+    assert F._p0_umbrella_status(passed, records) == "NOT_MEASURED"
 
 
 def test_real_gates_a_fully_invoked_clean_registry_is_PASS(
@@ -458,7 +458,7 @@ def test_incomplete_is_a_registered_producer_status():
     """`verdict` derives done-claim membership BY SUBTRACTION, so an
     unregistered word silently becomes a done-claim. INCOMPLETE was registered
     by #599; the umbrella is a new PRODUCER of it and that must stay true."""
-    assert "INCOMPLETE" in _T.PRODUCER_STATUSES
+    assert "NOT_MEASURED" in _T.PRODUCER_STATUSES
 
 
 def test_incomplete_cannot_turn_a_green_run_red():

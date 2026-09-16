@@ -266,7 +266,7 @@ def test_declared_analog_step_is_still_deferred(tmp_path):
     _digital_rtl(proj)
     r = F.check_step(proj, _step("A5", "stage_analog"),
                      waivers={}, skip_analog=True)
-    assert r.status == "SKIPPED-CONDITION"
+    assert r.status == "NOT_APPLICABLE"
     assert _ANALOG_SKIP_REASON in r.reasons
 
 
@@ -296,7 +296,7 @@ def test_every_analog_step_in_the_shipped_flow_still_defers(tmp_path):
     _digital_rtl(proj)
     for s in analog_steps:
         r = F.check_step(proj, s, waivers={}, skip_analog=True)
-        assert r.status == "SKIPPED-CONDITION", (
+        assert r.status == "NOT_APPLICABLE", (
             f"step {s.get('id')} declares stage_analog and must still be "
             f"deferred by --skip-analog")
         assert _ANALOG_SKIP_REASON in r.reasons

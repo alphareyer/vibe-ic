@@ -2575,7 +2575,7 @@ def _produce_inline_signoff(project: Path, entry: str, owner: tuple,
         # The normal runner records a non-verdict's native rc in this clause.
         # Preserve the existing TWO-lock capability disclosure classification;
         # it remains not-produced, never a measured PASS or a design FAIL.
-        unmeasured = (result.status == "BLOCKED"
+        unmeasured = (result.status == "NOT_MEASURED"
                       and "(rc=2):" in result.detail
                       and _fcc._stdout_signals_vacuous(
                           result.detail.split("(rc=2):", 1)[1].lstrip()))
@@ -2598,10 +2598,10 @@ def _produce_inline_signoff(project: Path, entry: str, owner: tuple,
 @pytest.mark.parametrize("status,body,expected", [
     ("PASS", '{"verdict":"PASS"}', True),
     ("FAIL", '{"verdict":"FAIL"}', True),
-    ("BLOCKED", '{"verdict":"NOT_CHECKED"}', False),
+    ("BLOCKED", '{"verdict":"NOT_MEASURED"}', False),
     ("PASS", '{"verdict":"FAIL"}', False),
     ("FAIL", '{"verdict":"PASS"}', False),
-    ("PASS", '{"verdict":"NOT_CHECKED"}', False),
+    ("PASS", '{"verdict":"NOT_MEASURED"}', False),
     ("PASS", '[]', False),
     ("PASS", 'not-json', False),
     ("PASS", '', False),
@@ -2653,7 +2653,7 @@ def test_d3_inline_native_missing_inputs_are_not_production(tmp_path):
     result = _produce_inline_signoff(tmp_path, entry, owner, "empty-input-control")
     assert not result.produced, result.detail
     report = json.loads((tmp_path / entry).read_text())
-    assert report["verdict"] == "NOT_CHECKED"
+    assert report["verdict"] == "NOT_MEASURED"
 
 
 @pytest.mark.parametrize("kind", ["preexisting", "dangling", "emitted_symlink", "missing_program"])
@@ -2728,7 +2728,7 @@ def test_d3_registered_inline_record_uses_strict_native_path(tmp_path, monkeypat
     # nonempty-file arm would incorrectly say produced here.
     result = produce_live("23", entry, rec)
     assert not result.produced, result.detail
-    assert "NOT_CHECKED" in result.detail or "BLOCKED" in result.detail
+    assert "NOT_MEASURED" in result.detail or "BLOCKED" in result.detail
 
 
 def measure_new_signoff_output(step_id, entry: str) -> EntryVerdict:

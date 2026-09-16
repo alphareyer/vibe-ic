@@ -115,7 +115,7 @@ def test_stub_names_every_term_as_not_checked():
     term that was renamed (which is not)."""
     v = S.stub_feasibility(_cand())
     assert set(v.terms) == set(S.FEASIBILITY_TERMS)
-    assert set(v.terms.values()) == {"NOT_CHECKED"}
+    assert set(v.terms.values()) == {"NOT_MEASURED"}
     assert S.FEASIBILITY_TERMS == (
         "setup", "hold", "drv", "drc", "lvs", "antenna", "ir", "em",
         "equivalence", "eco_readiness")

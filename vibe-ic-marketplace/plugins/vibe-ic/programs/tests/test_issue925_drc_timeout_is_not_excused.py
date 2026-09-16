@@ -13,7 +13,7 @@ report. The WORD was not:
     `return "PASS"`.  MEASURED on the unfixed tree: a plan whose only non-PASS
     step was a timed-out sign-off DRC aggregated to a plain green `"PASS"` —
     not even PASS_WITH_WAIVERS.
-  * `verdict.is_excused("SKIPPED-CONDITION")` is True, so wherever
+  * `verdict.is_excused("NOT_APPLICABLE")` is True, so wherever
     the word IS adjudicated the step is subtracted from `total_required`: a DRC
     that ran out of time stopped being owed an answer at all.
 
@@ -144,7 +144,7 @@ def test_guard_shared_tier_vocabulary_is_untouched():
     assert T.is_excused("SKIPPED-CONDITION") is True
     assert T.is_non_green("SKIPPED-CONDITION") is False
     assert T.scoped_into_verdict(
-        {"status": "SKIPPED-CONDITION", "stage": T.ANALOG_STAGE}) is False
+        {"status": "NOT_APPLICABLE", "stage": T.ANALOG_STAGE}) is False
     assert "SKIPPED-CONDITION" in T.EXCUSED
 
 

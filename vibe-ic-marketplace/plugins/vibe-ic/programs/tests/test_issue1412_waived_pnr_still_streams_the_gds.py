@@ -100,7 +100,7 @@ def test_step_pnr_sets_the_evidence_this_predicate_reads():
     elsewhere in this same file family, is why LVS sign-off metrics are
     permanently NOT_MEASURED."""
     src = inspect.getsource(R.step_pnr)
-    assert '_status = "WAIVED"' in src
+    assert '_status = "PASS_WITH_WAIVERS"' in src
     assert '"pnr_signoff_writes_complete"' in src, (
         "step_pnr no longer records pnr_signoff_writes_complete, so "
         "_pnr_chain_continues can never admit a WAIVED PnR")

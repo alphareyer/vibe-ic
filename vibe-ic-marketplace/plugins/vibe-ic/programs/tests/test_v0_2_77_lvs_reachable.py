@@ -107,7 +107,7 @@ def test_missing_tools_env_unavailable(tmp_path, monkeypatch):
         lambda c, cmd, timeout=0, **_: (1, "", "") if cmd.startswith("command -v")
         else (0, "", ""))
     r = runner.step_lvs(p, "chip_top", _pdk(), "x")
-    assert r.status == "ENV_UNAVAILABLE"
+    assert r.status == "NOT_MEASURED"
     assert "magic" in r.extras.get("missing_tool", "")
 
 
@@ -116,7 +116,7 @@ def test_missing_inputs_waived_with_name(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "_docker_exec",
                         lambda c, cmd, timeout=0, **_: (0, "", ""))
     r = runner.step_lvs(tmp_path, "chip_top", _pdk(), "x")
-    assert r.status == "WAIVED"
+    assert r.status == "PASS_WITH_WAIVERS"
     assert "LVS inputs missing" in r.detail
 
 

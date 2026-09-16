@@ -99,7 +99,7 @@ def test_the_nine_original_mappings_are_unchanged():
 
 
 @pytest.mark.parametrize(
-    "tier", ["STRUCTURE-ONLY", "INCOMPLETE", "PASS-VOIDED-BY-DEPENDENCY"])
+    "tier", ["PASS_WITH_WAIVERS", "NOT_MEASURED", "NOT_MEASURED"])
 def test_a_disagreement_in_a_formerly_blind_tier_is_reported(tier):
     """Behaviour, not just the map: the reconciliation must actually report it.
 

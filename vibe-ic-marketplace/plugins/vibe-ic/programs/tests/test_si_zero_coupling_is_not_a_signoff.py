@@ -299,7 +299,7 @@ def test_step_27_sees_the_disclosure_and_not_a_pass(tmp_path):
     assert ok, out[:200]                      # rc 2 is still not a FAIL ...
     assert not out.startswith(_VACUOUS_PREFIX()), out[:200]   # ... nor a skip
     assert cls not in _reason_taxonomy().SKIP_ELIGIBLE, out[:400]
-    assert tier == "INCOMPLETE", (tier, out[:400])
+    assert tier == "NOT_MEASURED", (tier, out[:400])
 
     s, h = _bounded_from_emitter(_SPEF_COUPLED)
     real = _project(tmp_path / "real", spef_text=_SPEF_COUPLED,
@@ -333,7 +333,7 @@ def test_the_tier_is_not_bought_by_a_relabel(tmp_path):
     proj = _grounded_only_project(tmp_path)
 
     _, _, cls, tier = _flow_disposition(proj)
-    assert cls not in T.SKIP_ELIGIBLE and tier == "INCOMPLETE", (cls, tier)
+    assert cls not in T.SKIP_ELIGIBLE and tier == "NOT_MEASURED", (cls, tier)
 
     orig = T.infer_nonverdict_reason
     try:
@@ -344,7 +344,7 @@ def test_the_tier_is_not_bought_by_a_relabel(tmp_path):
         T.infer_nonverdict_reason = orig
         F._reason_taxonomy.infer_nonverdict_reason = orig
     assert out_r.startswith(F._VACUOUS_HINT_PREFIX), out_r[:200]
-    assert tier_r == "VACUOUS_PASS", (
+    assert tier_r == "NOT_MEASURED", (
         "the two dispositions must remain DISTINGUISHABLE at the step tier; "
         "if this stops being true the assertions above measure nothing: "
         f"{tier_r}")

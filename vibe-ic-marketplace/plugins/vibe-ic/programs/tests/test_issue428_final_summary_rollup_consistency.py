@@ -16,7 +16,7 @@ is internally plausible on its own — which is why neither looks wrong.
 ROOT CAUSE (not two questions — one parse gap):
 `_parse_verdicts` enumerated only the `<n>` / `A<n>` / `M<n>` / `P0`
 step-id shapes, so the flow's other lettered ids matched NOTHING and
-`.get(sid, "MISSING")` booked each of them as the compliance verdict
+`.get(sid, "FAIL")` booked each of them as the compliance verdict
 MISSING. On a live `--strict` audit of that same cell the five
 unreadable ids and their REAL verdicts were:
 
@@ -148,16 +148,16 @@ def test_real_missing_verdict_still_lands_in_missing():
     """POSITIVE pair: a genuine MISSING verdict line is still MISSING —
     the fix must not empty the bucket it stopped over-filling."""
     flow = _flow(["1", "2"])
-    rollup, _ = F._verdict_rollup(flow, {"1": "PASS", "2": "MISSING"})
+    rollup, _ = F._verdict_rollup(flow, {"1": "PASS", "2": "FAIL"})
     assert rollup["MISSING"] == 1
     assert F.NO_VERDICT not in rollup
 
 
 def test_counts_snapshot_separates_no_verdict_from_missing():
     flow = _flow(["1", "2", "3"])
-    rollup, total = F._verdict_rollup(flow, {"1": "MISSING"})
+    rollup, total = F._verdict_rollup(flow, {"1": "FAIL"})
     snap = F._counts_snapshot(rollup, total, flow=flow,
-                              verdicts={"1": "MISSING"})
+                              verdicts={"1": "FAIL"})
     assert snap["missing"] == 1
     assert snap["no_verdict"] == 2
 

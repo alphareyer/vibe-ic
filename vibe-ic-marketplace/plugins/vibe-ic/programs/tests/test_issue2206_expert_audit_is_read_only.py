@@ -60,7 +60,7 @@ def test_pending_answer_is_not_consumed_by_the_real_d1_clause(tmp_path):
     assert track.main([str(p)]) == track.AWAITING_EXIT_CODE
     _answer_path(p).write_text(json.dumps(_ANSWER))
     result = _audit_unchanged(p)
-    assert result.status == 'INCOMPLETE', result
+    assert result.status == 'NOT_MEASURED', result
     assert json.loads(_report(p).read_text())['ai_subtrack']['status'] == track.AI_HANDOFF_EMITTED
 
 

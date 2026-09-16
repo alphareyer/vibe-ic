@@ -208,7 +208,7 @@ def _inject_violations(monkeypatch, signoff_ids):
             {"terminal_id": "9", "terminal": "Synthesis",
              "terminal_status": "PASS",
              "signoff_id": sid, "signoff": f"synthetic signoff {sid}",
-             "signoff_status": "MISSING"}
+             "signoff_status": "FAIL"}
             for sid in signoff_ids]}
 
     monkeypatch.setattr(_cov, "analyze", _fake_analyze)

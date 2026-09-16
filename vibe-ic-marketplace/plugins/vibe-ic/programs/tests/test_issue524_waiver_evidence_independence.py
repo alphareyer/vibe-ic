@@ -91,7 +91,7 @@ GOOD_RATIONALE = (
 def _attestation(**over):
     entry = {
         "step": "lvs",
-        "verdict_tier": "ENV_UNAVAILABLE",
+        "verdict_tier": "NOT_MEASURED",
         "rationale": GOOD_RATIONALE,
         "evidence": [SELF_REF],
         "ticket": "TAPEOUT-ENV-LVS-NETGEN",
@@ -384,7 +384,7 @@ def test_a_run_with_uncorroborated_evidence_still_produces_a_report(tmp_path):
     assert report.get("steps"), "report has no steps"
 
     step31 = [s for s in report["steps"] if str(s.get("id")) == "31"]
-    assert step31 and step31[0]["status"] == "WAIVED", step31
+    assert step31 and step31[0]["status"] == "PASS_WITH_WAIVERS", step31
 
     disclosed = [a for a in (report.get("advisories") or [])
                  if "UNCORROBORATED" in a]
@@ -430,7 +430,7 @@ def test_producer_always_appends_the_self_reference(tmp_path):
     emitted = json.loads((tmp_path / "waivers.json").read_text())
 
     entry = emitted["waivers"][0]
-    assert entry["verdict_tier"] == "ENV_UNAVAILABLE", entry
+    assert entry["verdict_tier"] == "NOT_MEASURED", entry
     assessment = _ei.assess(entry["evidence"], tmp_path)
     assert assessment.self_report == 1, entry["evidence"]
     # and the harvested `extras` scalar is a tool name, not a path — the same

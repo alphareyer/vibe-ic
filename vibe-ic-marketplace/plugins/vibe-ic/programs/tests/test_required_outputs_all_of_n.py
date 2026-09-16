@@ -61,7 +61,7 @@ def test_one_present_one_absent_is_missing_not_pass(tmp_path):
         "id": 9, "name": "Synthesis",
         "required_outputs": ["phase2/stage2/synth/netlist.v",
                              "phase2/stage2/synth/area.rpt"]})
-    assert r.status == "MISSING", r.reasons
+    assert r.status == "FAIL", r.reasons
     assert any("area.rpt" in x for x in r.reasons), r.reasons
 
 
@@ -73,7 +73,7 @@ def test_all_present_is_not_missing(tmp_path):
         "id": 9, "name": "Synthesis",
         "required_outputs": ["phase2/stage2/synth/netlist.v",
                              "phase2/stage2/synth/area.rpt"]})
-    assert r.status != "MISSING", r.reasons
+    assert r.status != "FAIL", r.reasons
 
 
 def test_none_present_still_missing_with_the_original_wording(tmp_path):
@@ -83,7 +83,7 @@ def test_none_present_still_missing_with_the_original_wording(tmp_path):
         "id": 9, "name": "Synthesis",
         "required_outputs": ["phase2/stage2/synth/netlist.v",
                              "phase2/stage2/synth/area.rpt"]})
-    assert r.status == "MISSING"
+    assert r.status == "FAIL"
     assert any("no required_outputs found" in x for x in r.reasons), r.reasons
 
 
@@ -106,7 +106,7 @@ def test_or_inside_one_entry_is_satisfied_by_either_side(tmp_path, present):
     r = _check(tmp_path, {
         "id": 9, "name": "Synthesis",
         "required_outputs": ["a/netlist.v", "a/area.rpt OR a/stats.json"]})
-    assert r.status != "MISSING", (present, r.reasons)
+    assert r.status != "FAIL", (present, r.reasons)
 
 
 def test_or_entry_with_neither_side_present_is_missing(tmp_path):
@@ -114,7 +114,7 @@ def test_or_entry_with_neither_side_present_is_missing(tmp_path):
     r = _check(tmp_path, {
         "id": 9, "name": "Synthesis",
         "required_outputs": ["a/netlist.v", "a/area.rpt OR a/stats.json"]})
-    assert r.status == "MISSING", r.reasons
+    assert r.status == "FAIL", r.reasons
 
 
 # ── the reported counts must be about ENTRIES, not evidence hits ─────────────
@@ -128,7 +128,7 @@ def test_satisfied_count_counts_entries_not_evidence_hits(tmp_path):
     r = _check(tmp_path, {
         "id": 9, "name": "Synthesis",
         "required_outputs": ["a/area.rpt OR a/stats.json", "a/missing.log"]})
-    assert r.status == "MISSING"
+    assert r.status == "FAIL"
     joined = " ".join(r.reasons)
     assert "satisfied: 1/2" in joined, joined
 
@@ -142,7 +142,7 @@ def test_dependency_guard_fires_once_an_upstream_can_reach_missing():
     behaviour so the claim is not re-derived wrongly: given an upstream MISSING,
     a downstream PASS IS an ordering violation."""
     report = {"steps": [
-        {"id": "43", "name": "Final Test", "status": "MISSING"},
+        {"id": "43", "name": "Final Test", "status": "FAIL"},
         {"id": "44", "name": "Reliability qualification", "status": "PASS"},
     ]}
     res = COV.analyze(report, {"44": ["43"]})

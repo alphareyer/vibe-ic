@@ -207,8 +207,8 @@ def test_CONTROL_the_fixture_really_drove_both_steps(driven):
     """A fixture that silently stopped reaching one of the two steps would make
     every assertion above vacuous while staying green."""
     proj, stages, rtl, emit = driven
-    assert rtl.status in ("PASS", "WAIVED"), rtl.status
-    assert emit.status in ("PASS", "WAIVED"), emit.status
+    assert rtl.status in ("PASS", "PASS_WITH_WAIVERS"), rtl.status
+    assert emit.status in ("PASS", "PASS_WITH_WAIVERS"), emit.status
     assert (proj / _CONTRACT).is_file(), (
         "step_emit_phase2_manifests published no property contract")
 

@@ -1,0 +1,564 @@
+{
+ "_what": "The step table subservient r26 produces under R-0915-85, measured.",
+ "_provenance": {
+  "project": "8HD-4 /home/reyerchu/_lane_icsub2/c2_proj (frozen), copied whole to /home/reyerchu/_lane_icverdict/replays/subservient_r26",
+  "command": "flow_compliance_check.py <replay> --strict --read-only --json \u2026",
+  "tree": "next/icverdict on main 599640dcf",
+  "run_verdict": "NOT_MEASURED",
+  "note": "ids/names/verdicts only \u2014 no design content, no oracle, no golden."
+ },
+ "steps": [
+  {
+   "id": "P0",
+   "name": "Structural-RTL gates (P0 umbrella, 246 of 246 checkers returned a verdict)",
+   "status": "NOT_MEASURED",
+   "reason_class": "partial_population",
+   "declared_by": "",
+   "stage": "stage1"
+  },
+  {
+   "id": "D1",
+   "name": "Phase 1 Doc Extraction (17 skills + dialogue entry \u2192 L1-L27)",
+   "status": "NOT_MEASURED",
+   "reason_class": "partial_population",
+   "declared_by": "",
+   "stage": "stage_phase1"
+  },
+  {
+   "id": "0.5ic",
+   "name": "Submission Template Ingest \u2014 the operator's slot geometry and fixtures (chip/IC path only)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_phase1"
+  },
+  {
+   "id": "1",
+   "name": "Spec-to-RTL",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage1"
+  },
+  {
+   "id": "2",
+   "name": "\ud83d\udd01 RTL validation (rewrite fidelity + lint + Quartus-unsafe patterns + RTL-bug claim schema",
+   "status": "NOT_MEASURED",
+   "reason_class": "partial_population",
+   "declared_by": "",
+   "stage": "stage1"
+  },
+  {
+   "id": "3",
+   "name": "\ud83d\udd01 CDC / RDC check",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage1"
+  },
+  {
+   "id": "4",
+   "name": "\ud83d\udd01 Simulation (testbench-based + L10/L12 coverage + Verilator coverage)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage1"
+  },
+  {
+   "id": "5",
+   "name": "\ud83d\udd01 Formal verification (assertions proved + bit-level full-stack phase2/stage1/tb)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage1"
+  },
+  {
+   "id": "6",
+   "name": "FPGA early prototype + verification report audit",
+   "status": "PASS_WITH_WAIVERS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage1"
+  },
+  {
+   "id": "7",
+   "name": "Constraint setup (SDC + PVT matrix)",
+   "status": "NOT_MEASURED",
+   "reason_class": "partial_population",
+   "declared_by": "",
+   "stage": "stage2"
+  },
+  {
+   "id": "8",
+   "name": "\ud83d\udd01 SDC validation",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage2"
+  },
+  {
+   "id": "9",
+   "name": "Synthesis (Yosys \u2192 mapped netlist)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage2"
+  },
+  {
+   "id": "10",
+   "name": "\ud83d\udd01 Pre-layout STA (multi-corner)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage2"
+  },
+  {
+   "id": "11",
+   "name": "DFT insertion (scan chain + ATPG + at-speed + BSDL)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage2"
+  },
+  {
+   "id": "FS1",
+   "name": "ISO-26262 FMEDA diagnostic-coverage (fault-injection; safety designs only)",
+   "status": "NOT_MEASURED",
+   "reason_class": "no_population",
+   "declared_by": "",
+   "stage": "stage2"
+  },
+  {
+   "id": "DT1",
+   "name": "Transition-delay-fault (at-speed LOC) ATPG",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage2"
+  },
+  {
+   "id": "12",
+   "name": "Post-DFT optimization (resynth / buffering)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage2"
+  },
+  {
+   "id": "13",
+   "name": "\ud83d\udd01 Equivalence check (RTL \u2261 post-DFT netlist)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage2"
+  },
+  {
+   "id": "A1",
+   "name": "Analog Spec Extraction",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_analog"
+  },
+  {
+   "id": "A2",
+   "name": "Analog Topology Selection",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_analog"
+  },
+  {
+   "id": "A3",
+   "name": "Analog Netlist Generation",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_analog"
+  },
+  {
+   "id": "A4",
+   "name": "Analog Corner Sweep (PVT)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_analog"
+  },
+  {
+   "id": "A5",
+   "name": "Analog Layout",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_analog"
+  },
+  {
+   "id": "A6",
+   "name": "Analog Physical Verification (per-block DRC + LVS before merge)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_analog"
+  },
+  {
+   "id": "A7",
+   "name": "\ud83d\udd01 Post-Layout Resimulation",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_analog"
+  },
+  {
+   "id": "A8",
+   "name": "Hardmacro Generation (LEF + Liberty + GDS + Verilog)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_analog"
+  },
+  {
+   "id": "A9",
+   "name": "\ud83d\udd01 Co-Simulation (+ HW correlation when bench data exists)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_analog"
+  },
+  {
+   "id": "14",
+   "name": "\ud83d\udd01 Synthesis handoff gate (pre-PnR Yosys script + netlist audit; open-source-flow specific)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage2"
+  },
+  {
+   "id": "15",
+   "name": "Floorplan + PDN",
+   "status": "NOT_MEASURED",
+   "reason_class": "partial_population",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "15.5ic",
+   "name": "Pad Ring (chip/IC path only)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "16",
+   "name": "Clock planning",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "17",
+   "name": "Placement (global + detailed)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "18",
+   "name": "Spare-cell + ECO-prep insertion (Design-for-ECO)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "19",
+   "name": "CTS (Clock Tree Synthesis)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "20",
+   "name": "\ud83d\udd01 Post-CTS hold fixing",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "21",
+   "name": "Routing (global + detailed)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "22",
+   "name": "Parasitic Extraction (RC \u2192 SPEF)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "DT2",
+   "name": "Path-delay-fault (at-speed, timing-graded) ATPG",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage2"
+  },
+  {
+   "id": "DT3",
+   "name": "Small-delay-defect (SDD) at-speed grade",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage2"
+  },
+  {
+   "id": "23",
+   "name": "\ud83d\udd01 Post-route STA (multi-corner multi-mode sign-off)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "24",
+   "name": "\ud83d\udd01 IR Drop (static + dynamic)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "25",
+   "name": "\ud83d\udd01 EM check (electromigration lifetime)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "26",
+   "name": "\ud83d\udd01 Antenna check (gate-oxide protection)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "26.5ic",
+   "name": "Die Finishing \u2014 seal ring + die identification (chip/IC path only)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "27",
+   "name": "\ud83d\udd01 Signal Integrity (Crosstalk / Noise / Glitch + MCF crosstalk-delay)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "28",
+   "name": "\ud83d\udd01 PERC / Reliability sign-off (ESD + latch-up + cross-domain)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "29",
+   "name": "Post-Layout Gate-Level Simulation (Post-Sim + SDF)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "30",
+   "name": "Post-Layout SPICE Verification (critical-path correlation + analog)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "31",
+   "name": "\ud83d\udd01 Physical Verification (DRC + LVS + ERC + Density)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "32",
+   "name": "\ud83d\udd01 Post-route timing repair pass (multi-corner repair_design + repair_timing + reroute)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage3"
+  },
+  {
+   "id": "33",
+   "name": "Power analysis (pre/post-layout)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage4"
+  },
+  {
+   "id": "34",
+   "name": "Metal Fill (ECO-aware density fill insertion)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage4"
+  },
+  {
+   "id": "35",
+   "name": "DFM screen (CMP density + redundant-via ratio + foundry-side OPC/RET disclosure)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage4"
+  },
+  {
+   "id": "36",
+   "name": "Tapeout checklist (final sign-off confirmation)",
+   "status": "PASS_WITH_WAIVERS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage4"
+  },
+  {
+   "id": "37",
+   "name": "GDSII output (only if Step 31 PV fully clean)",
+   "status": "NOT_MEASURED",
+   "reason_class": "partial_population",
+   "declared_by": "",
+   "stage": "stage4"
+  },
+  {
+   "id": "37.4",
+   "name": "Sign-off metrics aggregation \u2014 the run's own checker verdicts, under the names the release",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage4"
+  },
+  {
+   "id": "37.5ip",
+   "name": "Digital Hardmacro Generation \u2014 LEF + Liberty + GDS + Verilog (delivered on EVERY route)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage4"
+  },
+  {
+   "id": "37.5ic",
+   "name": "Tape-out Precheck \u2014 our general ladder, plus the operator's own refusal where the PDK ship",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage4"
+  },
+  {
+   "id": "38",
+   "name": "Foundry Handoff (mask spec + WAT plan + scribe layout + corner test kit)",
+   "status": "PASS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage4"
+  },
+  {
+   "id": "39",
+   "name": "FPGA final sign-off (recompile + on-board test)",
+   "status": "PASS_WITH_WAIVERS",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage4"
+  },
+  {
+   "id": "M1",
+   "name": "Mixed-Signal Top-Level Integration (A+D GDS merge + macro placement)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_mixed_signal"
+  },
+  {
+   "id": "M2",
+   "name": "Mixed-Signal Power Domain + Level Shifter / Isolation Verification",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_mixed_signal"
+  },
+  {
+   "id": "M3",
+   "name": "Mixed-Signal Verification (AMS co-sim + RNM + interface signal integrity)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_mixed_signal"
+  },
+  {
+   "id": "M4",
+   "name": "Mixed-Signal Sign-Off (top-level PV + final verdict)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage_mixed_signal"
+  },
+  {
+   "id": "40",
+   "name": "Fabrication (foundry mask-set + wafer fab \u2014 external)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage5_manufacturing"
+  },
+  {
+   "id": "41",
+   "name": "Wafer Sort / Probe Test (ATE + probe card)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage5_manufacturing"
+  },
+  {
+   "id": "42",
+   "name": "Packaging (assembly: wirebond / FC-CSP / WLCSP)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage5_manufacturing"
+  },
+  {
+   "id": "43",
+   "name": "Final Test (ATE: functional + parametric + burn-in)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage5_manufacturing"
+  },
+  {
+   "id": "44",
+   "name": "Reliability qualification (HTOL / FIT attestation)",
+   "status": "NOT_APPLICABLE",
+   "reason_class": "",
+   "declared_by": "",
+   "stage": "stage5_manufacturing"
+  }
+ ]
+}

@@ -130,7 +130,7 @@ def test_a_refusal_records_no_design_content_rather_than_omitting_the_field(
     project = _project(tmp_path, [("blk_alpha", "ldo")])   # no netlist at all
     assert S.run_block(project, "blk_alpha", "fake", "sky130", "auto") == 2
     rec = _record(project, "blk_alpha")
-    assert rec["status"] == "BLOCKED", "PRECONDITION: expected a refusal"
+    assert rec["status"] == "NOT_MEASURED", "PRECONDITION: expected a refusal"
     assert rec.get("design_content") == "none", rec
 
 

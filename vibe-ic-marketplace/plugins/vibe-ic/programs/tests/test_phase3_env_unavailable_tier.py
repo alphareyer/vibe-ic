@@ -124,7 +124,7 @@ def test_step_drc_env_unavailable_when_calibre_deck_present_but_binary_absent(
         return_value=None,
     ):
         res = step_drc(tmp_path, "top", pdk, "test-container")
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
     assert res.extras.get("missing_tool") == "calibre|svrfdrc"
     assert "ENV gap" in res.detail
 
@@ -146,7 +146,7 @@ def test_step_drc_waived_when_calibre_binary_present_but_svrf_engine_absent(
         return_value=None,
     ):
         res = step_drc(tmp_path, "top", pdk, "test-container")
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     assert "missing_tool" not in (res.extras or {})
 
 
@@ -163,7 +163,7 @@ def test_step_drc_env_unavailable_when_klayout_deck_but_no_binary(
         side_effect=lambda c, t: False if t == "klayout" else True,
     ):
         res = step_drc(tmp_path, "top", pdk, "test-container")
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
     assert res.extras.get("missing_tool") == "klayout"
 
 
@@ -175,7 +175,7 @@ def test_step_lvs_env_unavailable_when_calibre_lvs_no_binary(
         return_value=False,
     ):
         res = step_lvs(tmp_path, "top", pdk, "test-container")
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
     assert res.extras.get("missing_tool") == "calibre"
 
 
@@ -189,7 +189,7 @@ def test_step_lvs_env_unavailable_when_no_deck_and_no_tools(
         return_value=False,
     ):
         res = step_lvs(tmp_path, "top", pdk, "test-container")
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
     assert res.extras.get("missing_tool") == "magic,netgen"
 
 
@@ -207,7 +207,7 @@ def test_step_lvs_waived_only_for_missing_inputs_not_unconditionally(
         return_value=(0, "", ""),
     ):
         res = step_lvs(tmp_path, "top", pdk, "test-container")
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     assert "LVS inputs missing" in res.detail
 
 
@@ -237,8 +237,8 @@ def test_autogen_waivers_includes_env_unavailable_steps(
     waivers = data["waivers"]
     assert len(waivers) == 2
     by_step = {w["step"]: w for w in waivers}
-    assert by_step["drc"]["verdict_tier"] == "ENV_UNAVAILABLE"
-    assert by_step["lvs"]["verdict_tier"] == "WAIVED"
+    assert by_step["drc"]["verdict_tier"] == "NOT_MEASURED"
+    assert by_step["lvs"]["verdict_tier"] == "PASS_WITH_WAIVERS"
     # ENV_UNAVAILABLE ticket cites the missing tool.
     assert "CALIBRE" in by_step["drc"]["ticket"]
     # ENV_UNAVAILABLE rationale flags ENV gap.

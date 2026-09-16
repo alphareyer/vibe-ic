@@ -46,7 +46,7 @@ def _waive(tmp):
 
 def test_waive_writes_lessons_digest_and_points_author_at_it(tmp_path):
     proj, res = _waive(tmp_path)
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     ex = res.extras or {}
     assert ex.get("fallback_skill") == "spec-to-rtl"
     ld = ex.get("lessons_digest")
@@ -82,7 +82,7 @@ def test_knowledge_digest_writer_is_staged_and_never_adopts_replaced_root(
 
     result = r.step_rtl_gen(project, _NULL_RTL_CLASS)
 
-    assert result.status == "BLOCKED"
+    assert result.status == "NOT_MEASURED"
     assert result.extras["output_refusal"]["reason"] == (
         "PROJECT_BOUNDARY_REPLACED_DURING_PUBLICATION")
     assert len(seen_stage1) == 1
@@ -153,7 +153,7 @@ def test_scrubber_case_insensitive_and_cvdp_and_breaks_oracle_binding():
 def test_pure_analog_waive_surfaces_no_digest(tmp_path):
     proj = Path(tmp_path)
     res = r.step_rtl_gen(proj, "pure_analog")
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     ex = res.extras or {}
     # analog has no digital RTL author -> no lesson digest, no stray file
     assert ex.get("lessons_digest") is None

@@ -78,7 +78,7 @@ def test_a_verdict_on_a_check_that_has_no_verdict_spelling_is_not_a_clean():
     checks = {k: {"violations": 0} for k in FLOOR if k != "drc"}
     checks["drc"] = {"verdict": "looks fine"}
     v, d = B.derive_feasibility(arm(checks))
-    assert v == "NOT_CHECKED" and "drc" in d["not_checked"]
+    assert v == "NOT_MEASURED" and "drc" in d["not_checked"]
     assert "no verdict spelling" in d["reasons"]["drc"]
 
 
@@ -86,16 +86,16 @@ def test_a_check_stating_nothing_at_all_is_not_checked():
     checks = {k: {"violations": 0} for k in FLOOR}
     checks["drv"] = {"source": "somewhere.rpt"}
     v, d = B.derive_feasibility(arm(checks))
-    assert v == "NOT_CHECKED" and "drv" in d["not_checked"]
+    assert v == "NOT_MEASURED" and "drv" in d["not_checked"]
 
 
 def test_status_not_checked_outranks_a_leftover_count():
     """An explicit 'I did not check this' must not be resurrected by a count
     left over from an earlier run."""
     checks = {k: {"violations": 0} for k in FLOOR}
-    checks["hold"] = {"status": "NOT_CHECKED", "violations": 0}
+    checks["hold"] = {"status": "NOT_MEASURED", "violations": 0}
     v, d = B.derive_feasibility(arm(checks))
-    assert v == "NOT_CHECKED" and "hold" in d["not_checked"]
+    assert v == "NOT_MEASURED" and "hold" in d["not_checked"]
 
 
 def test_a_self_contradicting_check_is_decided_by_the_measured_count():
@@ -122,7 +122,7 @@ def test_a_missing_floor_check_is_still_not_checked():
     asked about DRV look like one that was."""
     v, d = B.derive_feasibility(
         arm({k: {"status": "CLEAN"} for k in FLOOR if k != "drv"}))
-    assert v == "NOT_CHECKED" and d["not_checked"] == ["drv"]
+    assert v == "NOT_MEASURED" and d["not_checked"] == ["drv"]
 
 
 def test_a_count_shaped_arm_derives_exactly_as_it_did_before():
@@ -132,8 +132,8 @@ def test_a_count_shaped_arm_derives_exactly_as_it_did_before():
     assert B.derive_feasibility(
         arm({**{k: {"violations": 0} for k in FLOOR},
              "drc": {"violations": 2}}))[0] == "INFEASIBLE"
-    assert B.derive_feasibility(arm({}))[0] == "NOT_CHECKED"
-    assert B.derive_feasibility({"flow": "x"})[0] == "NOT_CHECKED"
+    assert B.derive_feasibility(arm({}))[0] == "NOT_MEASURED"
+    assert B.derive_feasibility({"flow": "x"})[0] == "NOT_MEASURED"
 
 
 def test_the_schema_documents_all_three_shapes():

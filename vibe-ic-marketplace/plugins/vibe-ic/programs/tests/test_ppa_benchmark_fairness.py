@@ -528,7 +528,7 @@ def test_an_asserted_feasibility_verdict_that_agrees_is_accepted(tmp_path):
     pytest.param(lambda a: a["feasibility"]["checks"].pop("lvs"),
                  "a floor check missing", id="floor-check-missing"),
     pytest.param(lambda a: a["feasibility"]["checks"].__setitem__(
-                     "drc", {"status": "NOT_CHECKED"}),
+                     "drc", {"status": "NOT_MEASURED"}),
                  "a check that says it did not run", id="explicit-not-checked"),
 ])
 def test_VACUOUS_unestablished_feasibility_is_rc2_not_rc0_and_not_rc1(

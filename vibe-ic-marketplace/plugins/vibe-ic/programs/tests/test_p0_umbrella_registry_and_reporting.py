@@ -238,7 +238,7 @@ def test_NEGATIVE_CONTROL_withholding_the_seed_brings_the_void_back(
                            ("--lenient",), seed_dependency_chain=False)
     capsys.readouterr()
     p0 = _p0(report)
-    assert p0 is not None and p0["status"] == "PASS_VOIDED_BY_DEPENDENCY", (
+    assert p0 is not None and p0["status"] == "NOT_MEASURED", (
         f"the ordering rule no longer voids a P0 PASS over a MISSING "
         f"dependency; status={p0 and p0['status']!r}")
     assert any("PASS voided" in r for r in p0["reasons"]), p0["reasons"]
@@ -329,7 +329,7 @@ def test_no_rtl_umbrella_still_reports_SKIPPED_CONDITION(
     rc, report = _run_main(tmp_path, monkeypatch, [], ("--lenient",),
                            dispatched=False)
     p0 = _p0(report)
-    assert p0 is not None and p0["status"] == "SKIPPED-CONDITION"
+    assert p0 is not None and p0["status"] == "NOT_APPLICABLE"
     assert p0["reasons"] == [f"SKIP: {_flow._P0_NO_RTL_NOTE}"]
     assert p0["gate_records"] == [], (
         "no gate was considered, so there is no gate record — and the line "

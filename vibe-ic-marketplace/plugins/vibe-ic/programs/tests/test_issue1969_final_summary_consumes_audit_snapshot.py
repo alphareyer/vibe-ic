@@ -99,7 +99,7 @@ def _stdout_that_recounts_wrong(audit: dict) -> str:
         overwrite = status in {
             "INCOMPLETE", "PARTIALLY-VACUOUS", "VACUOUS-PASS", "WAIVED",
         }
-        if status == "SKIPPED-CONDITION" and skip_overwrites < 2:
+        if status == "NOT_APPLICABLE" and skip_overwrites < 2:
             overwrite = True
             skip_overwrites += 1
         if overwrite:

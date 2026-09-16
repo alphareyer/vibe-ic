@@ -186,7 +186,7 @@ def test_both_rules_broken_reports_both(tmp_path):
 def test_missing_file_exits_2(tmp_path):
     code, out, err = _run(["--ys-file", str(tmp_path / "gone.ys")])
     assert code == 2
-    assert "NOT_CHECKED" in out + err
+    assert "NOT_MEASURED" in out + err
     assert "file not found" in out + err
     assert "VACUOUS_PASS:" in err
 

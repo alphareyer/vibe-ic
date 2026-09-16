@@ -245,7 +245,7 @@ def test_a_converter_with_no_datapath_still_routes_to_the_analog_track(tmp_path)
     deferral is now evaluated BEFORE the generator/null split.
     """
     res = DOR.step_rtl_gen(_no_subject_project(tmp_path), "data_converter")
-    assert res.status == "WAIVED", res.detail
+    assert res.status == "PASS_WITH_WAIVERS", res.detail
     assert res.extras.get("deferred_to") == "analog_track"
     assert res.extras.get("fallback_skill") is None
     assert res.extras.get("digital_datapath_absent") is True
@@ -282,6 +282,6 @@ def test_item4_removing_the_generator_returns_the_routed_to_analog_behaviour(
     monkeypatch.setattr(DOR, "_lookup_class", _without_generator)
     without_gen = DOR.step_rtl_gen(_no_subject_project(tmp_path / "b"),
                                    "data_converter")
-    assert with_gen.status == without_gen.status == "WAIVED"
+    assert with_gen.status == without_gen.status == "PASS_WITH_WAIVERS"
     assert (with_gen.extras.get("deferred_to")
             == without_gen.extras.get("deferred_to") == "analog_track")

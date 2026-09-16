@@ -614,7 +614,7 @@ def test_the_run_record_cannot_claim_a_content_the_step_did_not_reach(
                        blocks=("blk_alpha",))
     res = R.step_for_block(project, {"name": "blk_alpha", "type": "ldo"},
                            "A7_post_layout_resim")
-    assert res.status == "PASS_STRUCTURE_ONLY", (res.status, res.detail)
+    assert res.status == "PASS_WITH_WAIVERS", (res.status, res.detail)
     assert res.extras.get("design_content") == STRUCTURE_ONLY, res.extras
     assert res.extras.get("structure_only") is True, res.extras
     assert (res.extras.get("design_content_source") or "").endswith(
@@ -1391,7 +1391,7 @@ def test_the_a3_gate_and_the_run_record_agree_on_every_tree(tmp_path):
         res = R.step_for_block(project, {"name": "blk_alpha", "type": "ldo"},
                                "A3_netlist_gen")
         record = (REFUSED if res.status == "FAIL"
-                  else CERTIFIED_SO if res.status == "PASS_STRUCTURE_ONLY"
+                  else CERTIFIED_SO if res.status == "PASS_WITH_WAIVERS"
                   else CERTIFIED_BOUND)
         assert gate == record == want, (
             f"the gate and the run record disagree about the {tree!r} tree "
@@ -1444,7 +1444,7 @@ def test_reading_the_tier_through_the_join_still_refuses_a_real_disagreement():
 
     for bad, why in (
             (_res("FAIL"), "one side PASS, the other FAIL"),
-            (_res("PASS_STRUCTURE_ONLY"), "the disclosed tier is not a pass"),
+            (_res("PASS_WITH_WAIVERS"), "the disclosed tier is not a pass"),
             (_res("VACUOUS_PASS"), "nothing was examined"),
             (_res("PASS_WITH_REAL_NETLIST_V2"),
              "a second spelling of one tier"),
@@ -1517,11 +1517,11 @@ def test_the_a3_run_record_names_the_content_it_certified(tmp_path):
         _project(tmp_path / "so", STRUCTURE_ONLY, blocks=("blk_alpha",),
                  netlist_bytes=A3_SUBSTANTIVE),
         {"name": "blk_alpha", "type": "ldo"}, "A3_netlist_gen")
-    assert so.status == "PASS_STRUCTURE_ONLY", (so.status, so.detail)
+    assert so.status == "PASS_WITH_WAIVERS", (so.status, so.detail)
     # The join must not round the disclosed tier up to a pass. Asserted HERE,
     # not only in the helper's own tests, because this is the ordering whose
     # loss would be invisible: every assertion below would still be green.
-    assert R.verdict_tier(so.status) == "PASS_STRUCTURE_ONLY", so.status
+    assert R.verdict_tier(so.status) == "PASS_WITH_WAIVERS", so.status
     assert so.extras.get("design_content") == STRUCTURE_ONLY, so.extras
     assert so.extras.get("structure_only") is True, so.extras
 

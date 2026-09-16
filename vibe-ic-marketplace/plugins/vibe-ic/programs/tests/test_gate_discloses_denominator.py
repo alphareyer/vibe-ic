@@ -199,7 +199,7 @@ def test_the_real_ci_gate_set_is_currently_clean():
 
     # AND THE TRUNCATION, IF ANY, IS DISCLOSED — never folded into a pass.
     if res.truncated:
-        assert res.verdict == "NOT_CHECKED", res.verdict
+        assert res.verdict == "NOT_MEASURED", res.verdict
         assert any("aggregate budget" in w for _g, w in res.not_driven)
     else:
         assert res.verdict == "PASS", res.findings

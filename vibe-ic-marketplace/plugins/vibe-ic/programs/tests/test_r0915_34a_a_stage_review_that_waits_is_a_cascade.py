@@ -53,8 +53,8 @@ def test_stage_passed_names_the_rows_it_waits_on(tmp_path):
                              ("P0", "MISSING")]), "stage1", None)
     assert got["passed"] is False
     assert got["non_green_rows"] == [
-        {"id": "2", "status": "INCOMPLETE"},
-        {"id": "P0", "status": "MISSING"}], got
+        {"id": "2", "status": "NOT_MEASURED"},
+        {"id": "P0", "status": "FAIL"}], got
 
 
 def test_a_green_stage_names_no_rows(tmp_path):
@@ -84,7 +84,7 @@ def test_a_review_that_waits_states_BLOCKED_BY_UPSTREAM(tmp_path):
     assert r.returncode == 2, r.stdout + r.stderr
     assert doc is not None, "the review wrote no report"
     assert doc["reason_class"] == R.BLOCKED_BY_UPSTREAM, doc
-    assert doc["blocked_by"] == [{"id": "2", "status": "INCOMPLETE"}], doc
+    assert doc["blocked_by"] == [{"id": "2", "status": "NOT_MEASURED"}], doc
     assert R.report_reason_class(doc) == R.BLOCKED_BY_UPSTREAM
 
 
@@ -94,12 +94,12 @@ def test_the_reader_takes_that_class_over_its_own_default(tmp_path):
     reg = _register(tmp_path, [("1", "PASS"), ("2", "INCOMPLETE")])
     _r, doc = _run(tmp_path, reg)
     assert R.infer_nonverdict_reason(
-        verdict="NOT_CHECKED", message=doc["why"],
+        verdict="NOT_MEASURED", message=doc["why"],
         evidence={"reason_class": R.report_reason_class(doc)}
     ) == R.BLOCKED_BY_UPSTREAM
     # and the same sentence with NO stated class keeps the old reading
     assert R.infer_nonverdict_reason(
-        verdict="NOT_CHECKED", message=doc["why"],
+        verdict="NOT_MEASURED", message=doc["why"],
         evidence={"exit_code": 2}) != R.BLOCKED_BY_UPSTREAM
 
 
@@ -140,4 +140,4 @@ def test_an_unestablished_verdict_is_not_a_cascade(tmp_path):
 def test_BLOCKED_BY_UPSTREAM_is_not_skip_eligible():
     """Accuracy only, as ruled: naming the cascade must not green anything."""
     assert R.BLOCKED_BY_UPSTREAM not in R.SKIP_ELIGIBLE
-    assert R.record_verdict(R.BLOCKED_BY_UPSTREAM) == "BLOCKED"
+    assert R.record_verdict(R.BLOCKED_BY_UPSTREAM) == "NOT_MEASURED"

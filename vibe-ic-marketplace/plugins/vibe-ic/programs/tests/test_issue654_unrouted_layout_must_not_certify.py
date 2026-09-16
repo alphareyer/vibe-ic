@@ -122,7 +122,7 @@ def test_a_corrupt_artefact_is_none_not_a_crash(tmp_path):
 # ── what the sign-off steps do with it ────────────────────────────────────
 def test_an_unrouted_run_makes_a_signoff_step_vacuous(tmp_path):
     v = P._vacuous_on_unrouted(_project(tmp_path, True), "drc", 0.0)
-    assert v is not None and v.status == "VACUOUS_PASS"
+    assert v is not None and v.status == "NOT_MEASURED"
     assert "INCOMPLETE" in v.detail
 
 

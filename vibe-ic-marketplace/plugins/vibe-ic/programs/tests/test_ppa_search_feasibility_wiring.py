@@ -165,7 +165,7 @@ def test_the_stub_verdict_is_undetermined_in_both_worlds(monkeypatch):
                             lambda landed=landed: landed)
         v = S.stub_feasibility(S.Candidate({}))
         assert v.verdict == S.FEAS_UNDETERMINED
-        assert set(v.terms.values()) == {"NOT_CHECKED"}
+        assert set(v.terms.values()) == {"NOT_MEASURED"}
         assert sorted(v.terms) == sorted(S.FEASIBILITY_TERMS)
 
 
@@ -397,7 +397,7 @@ def test_no_translation_arm_can_manufacture_eligibility():
         S.FEAS_UNDETERMINED
     assert S.FEAS_ELIGIBLE not in \
         {v for k, v in SF.VERDICT_MAP.items() if k != F.FEASIBLE}
-    assert SF.TERM_MAP.get("SOMETHING_NEW", "NOT_CHECKED") == "NOT_CHECKED"
+    assert SF.TERM_MAP.get("SOMETHING_NEW", "NOT_MEASURED") == "NOT_MEASURED"
     assert "PASS" not in {v for k, v in SF.TERM_MAP.items()
                           if k != F.AXIS_SATISFIED}
 

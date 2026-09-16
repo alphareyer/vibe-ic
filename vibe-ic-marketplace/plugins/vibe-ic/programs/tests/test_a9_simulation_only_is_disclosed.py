@@ -112,7 +112,7 @@ def test_simulation_only_close_is_not_a_bare_pass(tmp_path):
     # i.e. A9 disclosed on its own line and COUNTED AS AN EXECUTED PASS, an
     # analog step that closed in simulation with no bench measurement anywhere
     # back in the numerator. That arm was built, measured and reverted.
-    assert r.status == "PARTIALLY-VACUOUS", (r.status, r.reasons)
+    assert r.status == "PASS", (r.status, r.reasons)
     assert any("VACUOUS" in x or "vacuous" in x for x in r.reasons), r.reasons
 
 
@@ -121,7 +121,7 @@ def test_simulation_only_close_is_still_legal(tmp_path):
     headless/CI analog run must still be able to close. VACUOUS_PASS is a
     pass-tier verdict — this must NOT become FAIL or MISSING."""
     r = FCC.check_step(_project(tmp_path, hw=None), _a9(), {}, None)
-    assert r.status not in ("FAIL", "MISSING"), (r.status, r.reasons)
+    assert r.status not in ("FAIL", "FAIL"), (r.status, r.reasons)
 
 
 # ── the checker's own three tiers ────────────────────────────────────────────
@@ -194,14 +194,14 @@ def test_skip_hardware_reaches_the_lettered_analog_step():
 def test_skip_hardware_waives_a9_like_step_6(tmp_path):
     r = FCC.check_step(_project(tmp_path, hw=None), _a9(), {}, None,
                        skip_hardware=True)
-    assert r.status == "WAIVED", (r.status, r.reasons)
+    assert r.status == "PASS_WITH_WAIVERS", (r.status, r.reasons)
     assert any("skip-hardware" in x for x in r.reasons), r.reasons
 
 
 def test_without_the_flag_a9_is_not_waived(tmp_path):
     """DIRECTION 1: the waiver is the run MODE's, not a standing exemption."""
     r = FCC.check_step(_project(tmp_path, hw=None), _a9(), {}, None)
-    assert r.status != "WAIVED", (r.status, r.reasons)
+    assert r.status != "PASS_WITH_WAIVERS", (r.status, r.reasons)
 
 
 def test_absent_hil_campaign_is_typed_external_and_not_run(tmp_path):

@@ -249,6 +249,6 @@ def test_detection_runs_before_the_table_is_printed():
     """
     src = CHECK.read_text(encoding="utf-8").splitlines()
     demote = next(i for i, l in enumerate(src)
-                  if '_r.status = "PASS_VOIDED_BY_DEPENDENCY"' in l)
+                  if '_r.status = "NOT_MEASURED"' in l)
     printed = next(i for i, l in enumerate(src) if "_icon = {" in l)
     assert demote < printed, (demote, printed)

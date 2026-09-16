@@ -48,7 +48,7 @@ def test_missing_gap_step_converts_to_skipped_with_named_flag(tmp_path,
     # synthetic entry — the real table is empty since v1.3.99.
     monkeypatch.setitem(F._PLATFORM_CAPABILITY_GAPS, 99, "cap:test_synthetic")
     r = F.check_step(tmp_path, _step(99), waivers={})
-    assert r.status == "SKIPPED-CONDITION", r.status
+    assert r.status == "NOT_APPLICABLE", r.status
     joined = " ".join(r.reasons)
     assert "cap:test_synthetic" in joined, joined
     assert "MISSING" in joined  # the conversion is disclosed, not silent
@@ -59,7 +59,7 @@ def test_formal_step_no_longer_masked(tmp_path):
     # the honest natural MISSING (the runner's formal_not_run.json sentinel
     # separately promotes an honest self-skip via #608 when it exists).
     r = F.check_step(tmp_path, _step(5), waivers={})
-    assert r.status == "MISSING", r.status
+    assert r.status == "FAIL", r.status
 
 
 def test_step_with_evidence_keeps_natural_verdict(tmp_path):
@@ -76,7 +76,7 @@ def test_step_with_evidence_keeps_natural_verdict(tmp_path):
 def test_unlisted_step_still_reports_missing(tmp_path):
     # step 18 (and any other unlisted id) keeps the honest MISSING
     r = F.check_step(tmp_path, _step(18), waivers={})
-    assert r.status == "MISSING", r.status
+    assert r.status == "FAIL", r.status
 
 
 def test_env_unavailable_waiver_still_wins_over_gap(tmp_path):
@@ -85,4 +85,4 @@ def test_env_unavailable_waiver_still_wins_over_gap(tmp_path):
     waivers = {11: {"_env_unavailable": True, "reason": "no scan tool on host",
                     "approver": "review-board"}}
     r = F.check_step(tmp_path, _step(11), waivers=waivers)
-    assert r.status == "WAIVED", r.status
+    assert r.status == "PASS_WITH_WAIVERS", r.status

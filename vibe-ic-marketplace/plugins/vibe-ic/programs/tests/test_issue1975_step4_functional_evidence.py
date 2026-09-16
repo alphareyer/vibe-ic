@@ -247,7 +247,7 @@ def test_connectivity_only_result_stops_step4_by_run(tmp_path):
 
 def test_absent_tb_cannot_release_step4(tmp_path):
     result = FLOW.check_step(tmp_path, _step4_gate(), waivers={})
-    assert result.status not in {"PASS", "WAIVED"}, (
+    assert result.status not in {"PASS", "PASS_WITH_WAIVERS"}, (
         result.status, result.reasons)
     vac = VACUOUS.check(tmp_path)
     assert vac["verdict"] == "NOT_APPLICABLE"
@@ -269,12 +269,12 @@ def test_generic_program_first_hook_routes_to_expert_as_incomplete(
 
     step = RUNNER.step_professional_tb_gen(
         tmp_path, "dut_core", "configured-container")
-    assert step.status == "INCOMPLETE", step
+    assert step.status == "NOT_MEASURED", step
     assert step.extras["program_first"] == "professional_tb_gen"
     assert step.extras["fallback_skill"] == "testbench-gen"
     rec = json.loads((tmp_path / "reports/phase2/gates/"
                       "professional_tb.json").read_text())
-    assert rec["status"] == "INCOMPLETE"
+    assert rec["status"] == "NOT_MEASURED"
     assert rec["fallback_skill"] == "testbench-gen"
 
 

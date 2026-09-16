@@ -102,7 +102,7 @@ def _gate(label, state, corpus=None, expired=False):
 
 
 def _attestation(gate):
-    rc = {"PASS": 0, "FAIL": 1, "NOT_CHECKED": 2,
+    rc = {"PASS": 0, "FAIL": 1, "NOT_MEASURED": 2,
           "WROTE_CORPUS": 0}[gate["state"]]
     return A.process_attestation(
         gate["label"], "[PASS] checked\n" if rc == 0 else "[FAIL] named\n",
@@ -114,21 +114,21 @@ def _record(gates):
     return {
         "listed_only": False, "declared": len(gates),
         "ran": sum(count(s) for s in
-                   ("PASS", "FAIL", "NOT_CHECKED", "WROTE_CORPUS")),
+                   ("PASS", "FAIL", "NOT_MEASURED", "WROTE_CORPUS")),
         "decided": count("PASS") + count("FAIL"),
         "passed": count("PASS"), "failed": count("FAIL"),
-        "not_checked": count("NOT_CHECKED"),
+        "not_checked": count("NOT_MEASURED"),
         "wrote_corpus": count("WROTE_CORPUS"),
         "deferred": count("LISTED"), "other_shard": count("OTHER_SHARD"),
         "out_of_scope": count("OUT_OF_SCOPE"),
         "not_checked_unexempted": [
-            g["label"] for g in gates if g["state"] == "NOT_CHECKED"
+            g["label"] for g in gates if g["state"] == "NOT_MEASURED"
             and not g.get("exempt_until")],
         "exemptions_expired": [], "wiring_errors": [], "corpora": [],
         "shard": None, "today": "2026-08-15", "gates": gates,
         "process_attestations": [
             _attestation(g) for g in gates if g["state"] in
-            ("PASS", "FAIL", "NOT_CHECKED", "WROTE_CORPUS")],
+            ("PASS", "FAIL", "NOT_MEASURED", "WROTE_CORPUS")],
     }
 
 

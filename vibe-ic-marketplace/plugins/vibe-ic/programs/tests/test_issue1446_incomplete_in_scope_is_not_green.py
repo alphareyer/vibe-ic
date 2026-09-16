@@ -355,7 +355,7 @@ def test_the_ancestry_control_really_closes_the_chain(
     _audit(mod, project)
     out = capsys.readouterr().out
 
-    assert _status(out, "D1") != "MISSING", (
+    assert _status(out, "D1") != "FAIL", (
         "`_close_ancestry` no longer closes P0's ancestry — D1 gained a "
         "`required_outputs` entry the helper does not stage. The report names "
         "it on D1's `required_outputs missing:` line:\n" + out)
@@ -385,7 +385,7 @@ def test_a_voided_but_measured_p0_over_a_broken_chain_stays_green(
     assert re.search(r"\[P0\].*marked done while dependency", out), (
         "PRECONDITION: this control needs the SAME violation as the defect "
         "case, so that P0's tier is the only variable:\n" + out)
-    assert _status(out, "P0") != "INCOMPLETE", out
+    assert _status(out, "P0") != "NOT_MEASURED", out
     assert rc == 0, (
         "a P0 whose gates measured and passed must stay informational when "
         "its dependency is out of verdict scope (vibe-ic#1429):\n" + out)

@@ -170,7 +170,7 @@ def test_unresolved_route_blocks_all_four_and_names_owner_verdict(tmp_path):
 
     for sid in PATH_STEPS:
         row = rows[sid]
-        assert row["status"] == "MISSING", (sid, row)
+        assert row["status"] == "FAIL", (sid, row)
         assert row["cascade_note"] == "blocked-by-upstream(0.5ic)"
         reason = " ".join(row["reasons"])
         assert "Step 0.5ic" in reason
@@ -193,9 +193,9 @@ def test_explicit_chip_ip_and_shuttle_keep_the_opposite_path_na(
     rows = _rows(report)
     assert rows[OWNER]["status"] == "PASS", rows[OWNER]
     assert {sid for sid in PATH_STEPS
-            if rows[sid]["status"] == "SKIPPED-CONDITION"} == expected_skips
+            if rows[sid]["status"] == "NOT_APPLICABLE"} == expected_skips
     assert {sid for sid in PATH_STEPS
-            if rows[sid]["status"] == "MISSING"} == expected_runs
+            if rows[sid]["status"] == "FAIL"} == expected_runs
     for sid in expected_skips:
         assert not rows[sid].get("cascade_note"), rows[sid]
 
@@ -206,7 +206,7 @@ def test_failed_owner_blocks_even_when_one_route_file_exists(tmp_path):
     assert rc == 1
     assert rows[OWNER]["status"] == "FAIL"
     for sid in PATH_STEPS:
-        assert rows[sid]["status"] == "MISSING", (sid, rows[sid])
+        assert rows[sid]["status"] == "FAIL", (sid, rows[sid])
         reason = " ".join(rows[sid]["reasons"])
         assert "verdict FAIL" in reason
         assert "present as input/route/IP_DELIVERY.txt" in reason
@@ -219,7 +219,7 @@ def test_conflicting_routers_block_both_paths_instead_of_running_both(tmp_path):
     assert rc == 1
     assert rows[OWNER]["status"] == "FAIL"
     for sid in PATH_STEPS:
-        assert rows[sid]["status"] == "MISSING", (sid, rows[sid])
+        assert rows[sid]["status"] == "FAIL", (sid, rows[sid])
         reason = " ".join(rows[sid]["reasons"])
         assert "verdict FAIL" in reason
         assert "delivery_route declaration is CONFLICTING" in reason
@@ -240,6 +240,6 @@ def test_removing_owner_distinction_reproduces_exactly_four_false_skips(
         if fixed_rows[sid]["status"] != mutated_rows[sid]["status"]}
     assert changed == set(PATH_STEPS)
     assert {sid for sid in PATH_STEPS
-            if mutated_rows[sid]["status"] == "SKIPPED-CONDITION"} == set(
+            if mutated_rows[sid]["status"] == "NOT_APPLICABLE"} == set(
                 PATH_STEPS)
-    assert all(fixed_rows[sid]["status"] == "MISSING" for sid in PATH_STEPS)
+    assert all(fixed_rows[sid]["status"] == "FAIL" for sid in PATH_STEPS)

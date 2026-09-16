@@ -172,7 +172,7 @@ def test_load_waivers_synthesises_all_affected_a_steps(tmp_path):
         assert sid in waivers, sid
         w = waivers[sid]
         # mirrors the digital ENV_UNAVAILABLE waiver shape exactly.
-        assert w["verdict_tier"] == "ENV_UNAVAILABLE"
+        assert w["verdict_tier"] == "NOT_MEASURED"
         assert w["_env_unavailable"] is True
         assert w["_pdk_substitution"] is True
         assert w["review_required"] is True

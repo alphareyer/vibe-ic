@@ -253,7 +253,7 @@ def test_stub_tech_file_is_blocked_not_fail_not_pass(tmp_path, monkeypatch):
     """
     p, r = _run(tmp_path, monkeypatch, STUB_TECH, MATCH_TRANSCRIPT)
 
-    assert r.status == "BLOCKED", (r.status, r.detail)
+    assert r.status == "NOT_MEASURED", (r.status, r.detail)
     assert r.status != "PASS"
     assert r.status != "FAIL"
     assert r.extras.get("finding") == "LVS_INPUT_TECH_INCAPABLE"
@@ -273,7 +273,7 @@ def test_stub_tech_file_is_blocked_not_fail_not_pass(tmp_path, monkeypatch):
     assert "NOT a pass" in r.detail and "NOT a design failure" in r.detail
 
     v = _verdict(p)
-    assert v["status"] == "BLOCKED"
+    assert v["status"] == "NOT_MEASURED"
     assert v["result"] == "BLOCKED"
     assert v["finding"] == "LVS_INPUT_TECH_INCAPABLE"
     assert "generic.tech" in v["tech_file"]
@@ -325,12 +325,12 @@ def test_stub_tech_that_actually_extracts_nothing_is_blocked_not_fail(
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
     r = runner.step_lvs(p, "chip_top", _pdk(), "x")
 
-    assert r.status == "BLOCKED", (r.status, r.detail)
+    assert r.status == "NOT_MEASURED", (r.status, r.detail)
     assert r.extras.get("finding") == "LVS_INPUT_TECH_INCAPABLE"
     assert r.extras.get("finding") != "LVS_EXTRACTION_NO_NETLIST"
     # the verdict names the CAUSE (the tech file), not just the symptom (a log)
     assert "generic.tech" in r.detail
-    assert _verdict(p)["status"] == "BLOCKED"
+    assert _verdict(p)["status"] == "NOT_MEASURED"
 
 
 def test_blocked_verdict_reports_which_sections_were_empty_vs_absent(
@@ -351,7 +351,7 @@ def test_complete_tech_with_matching_design_still_passes(tmp_path,
     alarm, not a checker. A complete tech file must not be blocked."""
     p, r = _run(tmp_path, monkeypatch, COMPLETE_TECH, MATCH_TRANSCRIPT)
     assert r.status == "PASS", (r.status, r.detail)
-    assert r.status != "BLOCKED"
+    assert r.status != "NOT_MEASURED"
     assert r.extras.get("finding") != "LVS_INPUT_TECH_INCAPABLE"
 
 
@@ -401,10 +401,10 @@ def test_complete_tech_with_real_mismatch_still_fails(tmp_path, monkeypatch):
     """
     p, r = _run(tmp_path, monkeypatch, COMPLETE_TECH, MISMATCH_TRANSCRIPT)
     assert r.status == "FAIL", (r.status, r.detail)
-    assert r.status != "BLOCKED"
+    assert r.status != "NOT_MEASURED"
     assert r.extras.get("finding") != "LVS_INPUT_TECH_INCAPABLE"
     v = _verdict(p)
-    assert v["status"] != "BLOCKED"
+    assert v["status"] != "NOT_MEASURED"
 
 
 # ==========================================================================
@@ -447,7 +447,7 @@ def test_step31_gate_reports_blocked_and_refuses_signoff(tmp_path):
     proj = tmp_path
     (proj / "reports" / "phase3").mkdir(parents=True)
     (proj / "reports" / "phase3" / "lvs_verdict.json").write_text(json.dumps({
-        "status": "BLOCKED",
+        "status": "NOT_MEASURED",
         "result": "BLOCKED",
         "finding": "LVS_INPUT_TECH_INCAPABLE",
         "message": "technology file /pdk/generic.tech cannot support "
@@ -456,7 +456,7 @@ def test_step31_gate_reports_blocked_and_refuses_signoff(tmp_path):
     }))
     res = audit._check_lvs(proj)
     assert res.passed is False
-    assert res.summary.get("terminal_verdict") == "BLOCKED"
+    assert res.summary.get("terminal_verdict") == "NOT_MEASURED"
     assert res.summary.get("blocked") is True
     rules = [f.rule for f in res.findings]
     assert "LVS_BLOCKED_INPUT_INCAPABLE" in rules
@@ -662,7 +662,7 @@ def test_stub_with_unreadable_include_is_not_blocked_by_the_runner(
     monkeypatch.setattr(runner, "_docker_exec", fake)
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
     r = runner.step_lvs(p, "chip_top", _pdk(), "x")
-    assert r.status != "BLOCKED", (r.status, r.detail)
+    assert r.status != "NOT_MEASURED", (r.status, r.detail)
 
 
 def test_magicrc_tech_path_resolution():
@@ -674,7 +674,7 @@ def test_magicrc_tech_path_resolution():
     assert eicap.tech_path_from_magicrc_text("puts hi\n") is None
 
 
-@pytest.mark.parametrize("status", ["PASS", "FAIL", "INCOMPLETE", "WARN"])
+@pytest.mark.parametrize("status", ["PASS", "FAIL", "NOT_MEASURED", "PASS_WITH_WAIVERS"])
 def test_gate_only_reacts_to_the_blocked_status(tmp_path, status):
     (tmp_path / "reports" / "phase3").mkdir(parents=True)
     (tmp_path / "reports" / "phase3" / "lvs_verdict.json").write_text(
@@ -945,7 +945,7 @@ def test_tcl_variable_tech_load_is_a_finding_not_a_silent_pass(tmp_path,
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
     r = runner.step_lvs(p, "chip_top", _pdk(), "x")
     # never a false BLOCKED — we still cannot judge the technology
-    assert r.status != "BLOCKED"
+    assert r.status != "NOT_MEASURED"
     pre = json.loads((p / "reports" / "phase3"
                       / "lvs_extraction_preflight.json").read_text())
     assert pre["performed"] is False
@@ -973,7 +973,7 @@ def test_magicrc_naming_a_nonexistent_tech_file_is_blocked(tmp_path,
     monkeypatch.setattr(runner, "_docker_exec", fake)
     monkeypatch.setattr(runner, "_to_container_path", lambda s, c: s)
     r = runner.step_lvs(p, "chip_top", _pdk(), "x")
-    assert r.status == "BLOCKED", (r.status, r.detail)
+    assert r.status == "NOT_MEASURED", (r.status, r.detail)
     assert "generic.tech" in r.detail
 
 
@@ -991,7 +991,7 @@ def test_complete_generic_tech_still_passes_end_to_end(tmp_path, monkeypatch):
     """
     p, r = _run(tmp_path, monkeypatch, COMPLETE_GENERIC_TECH, MATCH_TRANSCRIPT)
     assert r.status == "PASS", (r.status, r.detail)
-    assert _verdict(p)["status"] != "BLOCKED"
+    assert _verdict(p)["status"] != "NOT_MEASURED"
 
 
 def test_a_passing_run_still_records_that_the_preflight_ran(tmp_path,
@@ -1012,8 +1012,8 @@ def test_complete_generic_tech_with_a_real_mismatch_still_fails(tmp_path,
     p, r = _run(tmp_path, monkeypatch, COMPLETE_GENERIC_TECH,
                 MISMATCH_TRANSCRIPT)
     assert r.status == "FAIL", (r.status, r.detail)
-    assert r.status != "BLOCKED"
-    assert _verdict(p)["status"] not in ("BLOCKED", "PASS")
+    assert r.status != "NOT_MEASURED"
+    assert _verdict(p)["status"] not in ("NOT_MEASURED", "PASS")
 
 
 def test_every_new_requirement_is_recipe_derived_not_hardcoded():
@@ -1073,7 +1073,7 @@ def test_every_new_blocked_path_lands_non_green(tmp_path, monkeypatch,
     flow reach the compare, it would borrow a pass it never earned.
     """
     p, r = _run(tmp_path, monkeypatch, tech, MATCH_TRANSCRIPT)
-    assert r.status == "BLOCKED", (label, r.status, r.detail)
+    assert r.status == "NOT_MEASURED", (label, r.status, r.detail)
     # the real aggregate, not a re-implementation of it
     assert runner._aggregate_verdict([r]) == "FAIL", label
     assert runner._aggregate_verdict(
@@ -1083,7 +1083,7 @@ def test_every_new_blocked_path_lands_non_green(tmp_path, monkeypatch,
     assert blocked is not None, label
     # and the verdict artifact is not a pass under any spelling
     v = _verdict(p)
-    assert v["status"] == "BLOCKED" and v["result"] == "BLOCKED", label
+    assert v["status"] == "NOT_MEASURED" and v["result"] == "NOT_MEASURED", label
 
 
 def test_blocked_run_exit_code_is_nonzero():

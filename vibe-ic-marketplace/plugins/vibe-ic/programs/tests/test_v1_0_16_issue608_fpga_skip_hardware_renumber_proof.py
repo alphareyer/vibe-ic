@@ -65,7 +65,7 @@ def test_skip_hardware_waives_fpga_final_by_name(tmp_path):
     proj = _proj(tmp_path, {"verdict": "SKIP"})
     r = F.check_step(proj, _step(FPGA_FINAL_ID, "FPGA final sign-off"),
                      {}, skip_hardware=True)
-    assert r.status == "WAIVED"
+    assert r.status == "PASS_WITH_WAIVERS"
 
 
 def test_skip_hardware_does_not_waive_gdsii_step(tmp_path):
@@ -81,7 +81,7 @@ def test_default_run_self_reported_skip_is_skipped_condition(tmp_path):
     # SKIP and lacks the success field → SKIPPED-CONDITION, not FAIL.
     proj = _proj(tmp_path, {"verdict": "SKIP", "evidence": "not run"})
     r = F.check_step(proj, _step(FPGA_FINAL_ID, "FPGA final sign-off"), {})
-    assert r.status == "SKIPPED-CONDITION"
+    assert r.status == "NOT_APPLICABLE"
 
 
 def test_real_fpga_failure_still_fails(tmp_path):

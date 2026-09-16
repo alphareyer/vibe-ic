@@ -239,7 +239,7 @@ def test_a6_report_evidence_reaches_the_gate(tmp_path: Path):
     MISSING on the flag-only declaration and never ran the gate."""
     project = _a6_reports_project(tmp_path)
     res = fcc.check_step(project, _steps_by_id()["A6"], {})
-    assert res.status != "MISSING", res.reasons
+    assert res.status != "FAIL", res.reasons
     assert res.status == "PASS", (res.status, res.reasons)
 
 
@@ -294,7 +294,7 @@ def test_a9_aggregate_cosim_report_reaches_the_gate(tmp_path: Path):
     _block_list(tmp_path)
     _passing_aggregate(tmp_path)
     res = fcc.check_step(tmp_path, _steps_by_id()["A9"], {})
-    assert res.status != "MISSING", res.reasons
+    assert res.status != "FAIL", res.reasons
 
 
 def test_guard_a9_per_block_cosim_results_still_accepted(tmp_path: Path):
@@ -306,7 +306,7 @@ def test_guard_a9_per_block_cosim_results_still_accepted(tmp_path: Path):
     (d / "ldo_cosim_results.json").write_text(json.dumps(
         {"block": "ldo", "scenarios": [{"name": "s1", "status": "PASS"}]}))
     res = fcc.check_step(tmp_path, _steps_by_id()["A9"], {})
-    assert res.status != "MISSING", res.reasons
+    assert res.status != "FAIL", res.reasons
 
 
 def test_a9_hw_measurements_alternative_names_the_gates_own_path(
@@ -329,4 +329,4 @@ def test_guard_a9_empty_project_still_missing(tmp_path: Path):
     an empty project."""
     _block_list(tmp_path)
     res = fcc.check_step(tmp_path, _steps_by_id()["A9"], {})
-    assert res.status == "MISSING", (res.status, res.reasons)
+    assert res.status == "FAIL", (res.status, res.reasons)

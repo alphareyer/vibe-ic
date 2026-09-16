@@ -157,7 +157,7 @@ def test_generic_class_reference_tb_runs_full_stack_tb(tmp_path):
     # it exists. SKIP remains correct for the sibling case where no
     # full-stack TB was built at all, so both words are still asserted in
     # this file and the two states cannot collapse into one another.
-    assert sr.status == "INCOMPLETE", sr.detail
+    assert sr.status == "NOT_MEASURED", sr.detail
     assert sr.extras.get("verification_track") == "generic_full_stack"
     assert "aid" in sr.detail.lower()
     assert sr.extras.get("functional_verified") is False

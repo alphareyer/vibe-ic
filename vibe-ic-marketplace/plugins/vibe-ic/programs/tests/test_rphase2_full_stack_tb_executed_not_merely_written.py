@@ -101,7 +101,7 @@ def test_sim_that_ran_to_completion_is_incomplete_and_says_it_executed(
         tmp_path, monkeypatch):
     _pin_stage(monkeypatch, [(0, "", ""), (0, "FULL_STACK_TB_DONE\n", "")])
     sr = dosr.step_reference_tb(_project(tmp_path), _TOP, "processor_cpu")
-    assert sr.status == "INCOMPLETE", (sr.status, sr.detail)
+    assert sr.status == "NOT_MEASURED", (sr.status, sr.detail)
     assert sr.extras.get("sim_executed") is True
     assert sr.extras.get("functional_verified") is False
 
@@ -124,7 +124,7 @@ def test_no_simulator_anywhere_is_not_executed_and_never_a_pass(
     _pin_stage(monkeypatch, [_ABSENT])
     sr = dosr.step_reference_tb(_project(tmp_path), _TOP, "processor_cpu")
     assert sr.status == dosr.NOT_EXECUTED_STATUS, (sr.status, sr.detail)
-    assert sr.status != "WAIVED"
+    assert sr.status != "PASS_WITH_WAIVERS"
     assert sr.extras.get("sim_executed") is False
     assert sr.extras.get("functional_verified") is False
     # it must not accuse the DUT for a fact about where the tree sits.
@@ -255,7 +255,7 @@ def test_the_constant_and_every_literal_spelling_are_the_same_word():
     src = (PROGRAMS / "design_one_shot_runner.py").read_text(errors="replace")
     word = dosr.NOT_EXECUTED_STATUS
     # the aggregator classifies it, so it cannot reach the catch-all PASS
-    assert f'_INCOMPLETE_STATUSES = ("INCOMPLETE", "{word}")' in src
+    assert f'_INCOMPLETE_STATUSES = ("NOT_MEASURED", "{word}")' in src
     # main's reference-TB repair loop treats it as terminal
     assert f'"INCOMPLETE",\n                          "{word}") or' in src
     # and the closed-loop registry's citation agrees with that tuple

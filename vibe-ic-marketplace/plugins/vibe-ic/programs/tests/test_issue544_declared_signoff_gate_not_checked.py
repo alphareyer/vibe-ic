@@ -264,7 +264,7 @@ def test_absent_gate_programs_do_not_release_a_negative_signoff_corner(
     results = {r.name: r for r in runner.step_declared_signoff_gates(proj)}
 
     corner = results["sta_corner"]
-    assert corner.status == "BLOCKED", (
+    assert corner.status == "NOT_MEASURED", (
         "the gate that FAILs on a negative sign-off corner was absent and the "
         "runner recorded it as neutral", corner)
     assert runner._SIGNOFF_NOT_CHECKED in corner.detail, corner.detail
@@ -295,7 +295,7 @@ def test_a_single_absent_declared_gate_withholds_the_release(
         _deployment(tmp_path, omit=("post_route_signoff_corner_check.py",)))
     results = {r.name: r for r in runner.step_declared_signoff_gates(proj)}
 
-    assert results["sta_corner"].status == "BLOCKED", results["sta_corner"]
+    assert results["sta_corner"].status == "NOT_MEASURED", results["sta_corner"]
     assert [results[n].status for n in ("sta_signoff", "sta_record",
                                         "em_signoff")] == ["PASS"] * 3, results
     assert not any(r.status == "FAIL" for r in results.values()), (
@@ -339,7 +339,7 @@ def test_the_absent_gates_are_the_only_reason_the_run_did_not_release(
     # what it always meant — no gate went unchecked because the runner could not
     # run it — and is strictly more specific than the line it replaces.
     for name, r in results.items():
-        if r.status != "BLOCKED":
+        if r.status != "NOT_MEASURED":
             continue
         assert name == "sta_signoff", (name, r)
         assert "DEFERRED-TO-" in r.detail, r.detail
@@ -355,7 +355,7 @@ def test_absent_gate_program_blocks_the_drv_promotion_step_too(
         runner, "PROGRAMS_DIR",
         _deployment(tmp_path, omit=("drv_promotion_corroboration_check.py",)))
     r = runner.step_drv_promotion_corroboration(proj)
-    assert r.status == "BLOCKED", r
+    assert r.status == "NOT_MEASURED", r
     assert runner._aggregate_verdict([r]) not in _RELEASING, r
 
 
@@ -375,7 +375,7 @@ def test_rc2_from_a_declared_signoff_gate_does_not_release(tmp_path, runner):
     r = runner._run_declared_signoff_gate(
         proj, "sta_signoff", "sta_report_check.py",
         "reports/phase3/sta/post_route_summary.json", ("--mode", "bogus"))
-    assert r.status == "BLOCKED", r
+    assert r.status == "NOT_MEASURED", r
     assert "rc=2" in r.detail, r.detail
     assert runner._aggregate_verdict([r]) not in _RELEASING, r
 
@@ -417,7 +417,7 @@ def test_every_non_verdict_exit_code_is_non_releasing(tmp_path, runner,
     r = runner._run_declared_signoff_gate(
         proj, "sta_corner", "stub_signoff_gate.py",
         "reports/phase3/sta/post_route_signoff_corner.json")
-    assert r.status == "BLOCKED", (rc, r)
+    assert r.status == "NOT_MEASURED", (rc, r)
     assert f"rc={rc}" in r.detail, r.detail
     assert runner._aggregate_verdict([r]) not in _RELEASING, (rc, r)
 
@@ -767,5 +767,5 @@ def test_every_gate_this_file_drives_reaches_a_real_verdict(tmp_path, runner):
         assert r.status in runner._VERDICT_TIERS, (
             f"{r.name} reached {r.status!r}, which is not in the runner's "
             f"declared verdict vocabulary {runner._VERDICT_TIERS}")
-        assert r.status != "NOT_CHECKED" or r.detail, (
+        assert r.status != "NOT_MEASURED" or r.detail, (
             f"{r.name} could not be checked and did not say why")

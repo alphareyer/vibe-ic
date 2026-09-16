@@ -337,7 +337,7 @@ HOLLOW = [
      lambda p: (p / DRC_REL).write_text(json.dumps(
          {"program": "drc_report_check", "passed": False, "findings": [],
           "summary": {"files_found": 0, "checked": False,
-                      "terminal_verdict": "NOT_CHECKED"}}), encoding="utf-8")),
+                      "terminal_verdict": "NOT_MEASURED"}}), encoding="utf-8")),
     ("lvs_no_verdict", "LVS_NO_VERDICT",
      lambda p: (p / LVS_REL).write_text(json.dumps(
          {"program": "lvs_report_check", "summary": {}}), encoding="utf-8")),

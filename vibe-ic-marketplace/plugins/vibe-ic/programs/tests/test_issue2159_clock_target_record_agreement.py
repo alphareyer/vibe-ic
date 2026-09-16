@@ -291,7 +291,7 @@ def test_an_unreadable_record_that_exists_is_not_checked(tmp_path):
     (proj / "phase1/generated_docs/L19_CONSTRAINTS_PDK.json").write_text(
         "{ this is not json")
     rep = gate.check(proj)
-    assert rep["verdict"] == "NOT_CHECKED", rep
+    assert rep["verdict"] == "NOT_MEASURED", rep
     r = subprocess.run([sys.executable, str(PROGRAMS / GATE_PROGRAM),
                         str(proj)], capture_output=True, text=True)
     assert r.returncode == 2, r.stdout
@@ -302,7 +302,7 @@ def test_an_unreadable_record_that_exists_is_not_checked(tmp_path):
     (d / "clock_target_provenance.json").write_text("{ nope")
     _l19(proj2, clock_target={"status": "DECLARED", "period_ns": 20.0,
                               "pdk": "sky130", "tier": "l8_declared"})
-    assert gate.check(proj2)["verdict"] == "NOT_CHECKED", gate.check(proj2)
+    assert gate.check(proj2)["verdict"] == "NOT_MEASURED", gate.check(proj2)
 
 
 # ===========================================================================

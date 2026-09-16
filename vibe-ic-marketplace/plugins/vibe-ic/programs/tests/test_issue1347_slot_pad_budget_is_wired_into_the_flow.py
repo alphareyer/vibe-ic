@@ -383,7 +383,7 @@ def test_the_cell_path_lands_in_VACUOUS_PASS_not_plain_PASS():
     """The disclosed tier is a DIFFERENT verdict from a clean one, which is
     what keeps 'there was nothing to ask' readable as itself rather than as
     'asked and fine'."""
-    assert _step_status(T._RTL_FITS, False) == "VACUOUS_PASS"
+    assert _step_status(T._RTL_FITS, False) == "NOT_MEASURED"
 
 
 def test_the_step_tiers_are_four_distinct_values():
