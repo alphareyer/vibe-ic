@@ -67,6 +67,50 @@ laundering"): a step that used to run and pass, now not run at all. Ranking
 to green a table, which is the incentive inversion `_flow_verdict_tiers` was
 written to delete.
 
+TWO TABLES ARE COMPARABLE ONLY IF THE SAME EXPERIMENT PRODUCED THEM
+===================================================================
+There are TWO ways two tables can be answers to different questions, and this
+module refuses on both. The second one was found BY USING THIS GATE, on its very
+first real run, and it cost a wrong headline.
+
+  1. THE INSTRUMENT'S SCOPE — `command_argv`. See the section below.
+
+  2. THE RUN SHAPE — did an AGENT answer the flow's hand-offs, or did a program
+     run alone? The flow is program-first + AI-BACKUP: several steps complete by
+     handing work to an agent and consuming its answer. `flow_compliance_check`
+     names that state itself, in `_AWAITING_EXIT_CODE`'s own comment: *"pass one
+     completed and pass two is somebody else's move … a PROGRAM cannot spawn the
+     subagent pass two needs."*
+
+     MEASURED 2026-09-16 (R-0915-88), SPM, the published cell
+     `ic/spm/v1.21.6_gf180mcuD` versus a program-only run of the same input:
+
+         D1  phase1_expert_parse_track --check-report   cell rc 0 PASS   /  program-only rc 4 INCOMPLETE
+         5   formal_proof_evidence_check                cell PASS        /  program-only FAIL
+
+     and the SAME split at SIX trees spanning `845ef5247..a8d39cb70` plus current
+     main — the tree never moved either verdict. The cell's own artefacts say why:
+     `expert_parse_track.json` records `ai_subtrack.status=CONSUMED,
+     observed_ai_consumed=6`, and `phase2/stage1/formal/formal_expert_review.json`
+     records `invocation_status=INVOKED, invoked_by="lane icspm3 (formal-verify
+     expert role)"` with 5 hand-authored properties. A landing gate runs the front
+     door with no agent attached, so it CANNOT reproduce either — and diffing the
+     two tables reported "SPM regressed" about a landing that had done nothing.
+
+     `run_shape` is DERIVED, never declared by the reader and never a per-step
+     exception list: the run's own `gate_execution_ledger` already records every
+     gate's `exit_code`, and the set of gates that exited AWAITING is the set of
+     second passes nobody answered. A tier invented tomorrow inherits this for
+     free, because the constant is imported from the module that defines it.
+
+     THE LIMIT, STATED. Root (b) above leaves NO awaiting row — its gate exits 1
+     like any other failure — so on these two runs it is caught only because D1's
+     awaiting row refuses the whole table. A future run whose ONLY difference is
+     a (b)-shaped one would still diff. That is the honest bound of a derived
+     signal, and the remedy is the one this module already recommends for the
+     replay: make the reference a prior run of the SAME gate, where the shape is
+     equal by construction.
+
 COMPARABILITY IS CHECKED BEFORE ANY DIFF IS PRINTED
 ===================================================
 MEASURED 2026-09-16, and the reason this section exists: the LAST compliance
@@ -121,6 +165,60 @@ UNCHANGED = "UNCHANGED"
 #: `--stage`, `--stage-id`, `--phase`, `--exclude-step`, `--skip-*` — narrows the
 #: population and makes the two tables answers to different questions.
 _SCOPE_NEUTRAL_FLAGS = {"--json", "--read-only", "--flow", "--flow-def"}
+
+
+#: Cached so a consumer that builds many tables pays the owning module's import
+#: once. The VALUE is never re-typed here — see `awaiting_exit_code`.
+_AWAITING: Optional[int] = None
+
+
+def awaiting_exit_code() -> int:
+    """The flow's OWN constant for "pass one completed and pass two is somebody
+    else's move", imported from the module that DEFINES the tier.
+
+    `flow_compliance_check._AWAITING_EXIT_CODE` is the single place this repo
+    decides that an exit code means a pending agent pass, and its comment there
+    is the contract. A literal `4` here would be a second copy of a rule, which
+    is precisely what this module exists to avoid; the import costs 0.44 s and
+    is taken lazily so a reader that never asks about run shape never pays it.
+    `test_the_awaiting_code_is_the_flows_own` pins the two together.
+    """
+    global _AWAITING
+    if _AWAITING is None:
+        import flow_compliance_check as _fcc      # lazy: see docstring
+        _AWAITING = int(_fcc._AWAITING_EXIT_CODE)
+    return _AWAITING
+
+
+def run_shape(audit: Dict[str, Any]) -> Dict[str, Any]:
+    """WHO ran this flow — a program alone, or a program whose hand-offs an
+    AGENT answered.
+
+    DERIVED from the run's own `gate_execution_ledger`, which already records
+    every invoked gate's `exit_code`. The gates that exited AWAITING are exactly
+    the second passes nobody answered; a run with none of them either had its
+    hand-offs answered or was never asked, and in both cases it is a different
+    experiment from one that has them.
+
+    Returns `unanswered_second_pass: None` when the artefact carries no ledger —
+    "not recorded" is its own outcome, never an empty set. An absent ledger read
+    as "nothing was left unanswered" would make every pre-ledger artefact look
+    like an agent-driven run, which is the fail-DANGEROUS direction.
+    """
+    ledger = audit.get("gate_execution_ledger")
+    if not isinstance(ledger, list):
+        return {"source": "NOT_RECORDED",
+                "unanswered_second_pass": None,
+                "agent_answered_every_handoff": None,
+                "ledger_rows": None}
+    aw = awaiting_exit_code()
+    gates = sorted({str(r.get("gate")) for r in ledger
+                    if isinstance(r, dict) and r.get("exit_code") == aw})
+    return {"source": "gate_execution_ledger",
+            "awaiting_exit_code": aw,
+            "ledger_rows": len(ledger),
+            "unanswered_second_pass": gates,
+            "agent_answered_every_handoff": not gates}
 
 
 class TableUnreadable(Exception):
@@ -217,6 +315,7 @@ def table_from_audit(audit: Dict[str, Any], source: str = "") -> Dict[str, Any]:
     refusal = audit.get("verdict_refusal_reason")
     return {
         "source": source,
+        "run_shape": run_shape(audit),
         "verdict": verdict,
         "verdict_key": verdict_key,
         "verdict_refusal_reason": refusal,
@@ -309,8 +408,55 @@ def comparability(ref: Dict[str, Any], cur: Dict[str, Any]) -> Tuple[bool, str]:
                        "(reference-only %s; current-only %s)"
                        % (sorted(rs[1]) or ["<none>"], sorted(cs[1]) or ["<none>"],
                           only_ref or ["<none>"], only_cur or ["<none>"]))
-    return True, "same producer (%s) and same scoping flags %s" % (
-        rs[0], sorted(rs[1]) or ["<none>"])
+
+    # SECOND AXIS — the RUN SHAPE. The module docstring carries the
+    # measurement: a program-only run and an agent-driven one disagree on the
+    # steps whose second pass is an agent's, at every tree, so their tables are
+    # answers to different questions and the difference is not about a landing.
+    # (The IC name stays in the module docstring; this file declares
+    # CHIP_AGNOSTIC: strict-logic, and its own test refuses one here.)
+    ok, why = _run_shape_comparability(ref, cur)
+    if not ok:
+        return False, why
+    return True, ("same producer (%s), same scoping flags %s, and %s"
+                  % (rs[0], sorted(rs[1]) or ["<none>"], why))
+
+
+def _run_shape_comparability(ref: Dict[str, Any],
+                             cur: Dict[str, Any]) -> Tuple[bool, str]:
+    """Did the same KIND of run produce both tables?
+
+    A table with no recorded shape cannot be shown to match one that has a
+    shape, so it REFUSES — the same fail-safe direction as an unrecorded
+    `command_argv`. The refusal NAMES the gates whose second pass went
+    unanswered and says what to do instead, because "NOT_COMPARABLE" on its own
+    sends a reader looking for a defect that is not there.
+    """
+    rshape = ref.get("run_shape") or {}
+    cshape = cur.get("run_shape") or {}
+    rset, cset = (rshape.get("unanswered_second_pass"),
+                  cshape.get("unanswered_second_pass"))
+    if rset is None or cset is None:
+        which = [n for n, v in (("reference", rset), ("current", cset))
+                 if v is None]
+        return False, (
+            "the %s table(s) record no gate execution ledger, so the RUN SHAPE "
+            "they were produced at is unknown — a program-only run and an agent-driven "
+            "one disagree on every step whose second pass is an agent's, and the "
+            "two cannot be shown to be the same experiment"
+            % " and ".join(which))
+    if set(rset) != set(cset):
+        return False, (
+            "different RUN SHAPE: the flow is program-first + AI-backup, and the "
+            "two runs disagree about which hand-offs an agent answered. "
+            "Unanswered second pass — reference: %s; current: %s. The difference "
+            "between these tables is about who ran the flow, not about the tree. "
+            "Use a reference produced by the SAME kind of run (for a landing "
+            "gate: a prior headless run of this gate), not a published cell an "
+            "agent-driven lane produced."
+            % (sorted(rset) or ["<none>"], sorted(cset) or ["<none>"]))
+    return True, ("the same run shape (unanswered second pass: %s)"
+                  % (sorted(rset) or ["<none>"]))
 
 
 # ── the diff ─────────────────────────────────────────────────────────────────
@@ -438,6 +584,15 @@ def render(table: Dict[str, Any], diff: Optional[Dict[str, Any]] = None) -> str:
                   table.get("step_count", 0),
                   " ".join(str(a) for a in (table.get("command_argv") or []))
                   or "<argv not recorded>"))
+    shape = table.get("run_shape") or {}
+    unanswered = shape.get("unanswered_second_pass")
+    out.append("RUN SHAPE: %s (%s)"
+               % ("PROGRAM-ONLY — %d hand-off(s) an agent never answered: %s"
+                  % (len(unanswered), ", ".join(unanswered))
+                  if unanswered else
+                  "no unanswered hand-off" if unanswered == []
+                  else "NOT RECORDED — this table cannot say who ran the flow",
+                  shape.get("source", "?")))
     if table.get("duplicate_step_ids"):
         out.append("DUPLICATE STEP IDS (the table cannot say what these are): %s"
                    % ", ".join(table["duplicate_step_ids"]))

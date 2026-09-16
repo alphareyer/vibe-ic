@@ -29,6 +29,37 @@ No containers, no tools, no second harness (R-0915-85). MEASURED 2026-09-16 on
 `/home/reyerchu/_frozen/subservient_r26`: 7.4 s wall for a 69-step table, and
 the snapshot byte-count unchanged (418 files before and after).
 
+`--baseline`: RECORD THE REFERENCE, ONCE, AT A NAMED TREE
+=========================================================
+MEASURED on the third arm's first full landing run (2026-09-16): BOTH frozen
+snapshots came back `NOT_COMPARABLE`, because the reference each one offers is
+its own recorded audit and the LAST compliance invocation of a run overwrites
+that file —
+
+    subservient_r26      reference written by stage4_compliance.py (9 steps)
+    sha256_run16_pass2   reference flags ['--stage-id=stage_analog','--strict'] (9 steps)
+
+against a full `--strict` replay's 69. The refusal was CORRECT and the arm was
+still useless: every replay refused forever, and a gate that always refuses is a
+gate nobody reads.
+
+`--baseline` closes it without weakening anything. It replays the snapshot ONCE
+at the full scope this program always uses, and writes the resulting table as
+the snapshot's REFERENCE FILE, stamped with the tree sha that produced it and
+the argv that produced it. Every later replay diffs against THAT — same subject,
+same instrument scope, same run shape by construction, and the only variable is
+the tree, which is the experiment.
+
+IT IS NOT A `--write-baseline`. Nothing is re-tiered, no verdict is edited and
+no refusal is turned green: the file recorded is the table the current tree
+ACTUALLY produced, byte for byte, and a later diff against it is refused exactly
+as strictly as before if its producer or scope does not match. The only thing
+`--baseline` adds is that the reference is a table this program made rather than
+one a run happened to leave behind. The tree sha is stamped so a reader can
+always ask "compared with WHAT", and `--baseline` REFUSES to overwrite an
+existing reference unless `--force-baseline` is given, so a baseline cannot be
+silently re-cut to make a red diff disappear.
+
 THE REFERENCE IS THE HARD PART, AND IT IS WHY THIS PROGRAM REFUSES
 ==================================================================
 MEASURED, and the reason `comparability` exists in `_step_verdict_table`: the
@@ -180,6 +211,18 @@ def replay(snapshot: Path, tree: Path, workdir: Path,
             "log": str(log), "copy": str(copy), "table": table}
 
 
+def tree_identity(tree: Path) -> Dict[str, Any]:
+    """WHICH tree did the judging. A baseline that cannot say what produced it
+    answers "did the judgement change?" with "changed from what?"."""
+    try:
+        out = subprocess.run(["git", "-C", str(tree), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=False)
+        head = out.stdout.strip() if out.returncode == 0 else None
+    except Exception:                                       # pragma: no cover
+        head = None
+    return {"tree": str(tree), "head": head}
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
@@ -199,6 +242,18 @@ def build_parser() -> argparse.ArgumentParser:
                          "(repeatable). Changing it changes the SCOPE, so two "
                          "tables produced with different values are refused as "
                          "NOT_COMPARABLE rather than diffed.")
+    ap.add_argument("--baseline", type=Path, default=None,
+                    help="RECORD the replayed table at this path as the "
+                         "snapshot's reference, stamped with the tree sha and "
+                         "argv that produced it, and exit 0. Later runs pass "
+                         "the same path as --reference. REFUSES to overwrite an "
+                         "existing file without --force-baseline: a reference "
+                         "that can be silently re-cut is a reference that makes "
+                         "red diffs disappear.")
+    ap.add_argument("--force-baseline", action="store_true",
+                    help="overwrite an existing --baseline file. State WHY in "
+                         "the handback: every diff taken against the old one "
+                         "becomes unreproducible.")
     ap.add_argument("--json", dest="json_out", type=Path, default=None)
     return ap
 
@@ -231,6 +286,48 @@ def main(argv: Optional[List[str]] = None) -> int:
         cur = rep.pop("table")
         report["replay"] = rep
         report["table"] = cur
+
+        if args.baseline is not None:
+            # RECORD, then stop. Nothing is diffed and nothing is graded: the
+            # table below is what the CURRENT tree actually produced on this
+            # frozen subject, and a later run diffs against it. See the
+            # `--baseline` section of the module docstring for why this is not
+            # a `--write-baseline`.
+            if args.baseline.exists() and not args.force_baseline:
+                raise Refusal(
+                    "%s already exists — a reference that can be silently "
+                    "re-cut is a reference that makes red diffs disappear. Pass "
+                    "--force-baseline and say WHY in the handback, or diff "
+                    "against it with --reference." % args.baseline)
+            record = {
+                "schema_version": 1,
+                "program": "audit_replay --baseline",
+                "generated_at": report["generated_at"],
+                "snapshot": str(args.snapshot),
+                "recorded_by_tree": tree_identity(args.tree),
+                "replay_argv": rep["argv"],
+                "snapshot_recorded": report["snapshot_recorded"],
+                "table": cur,
+            }
+            args.baseline.parent.mkdir(parents=True, exist_ok=True)
+            args.baseline.write_text(
+                json.dumps(record, indent=2), encoding="utf-8")
+            report["verdict"] = "BASELINE_RECORDED"
+            report["baseline"] = str(args.baseline)
+            report["recorded_by_tree"] = record["recorded_by_tree"]
+            print(_svt.render(cur))
+            print("")
+            print("BASELINE RECORDED: %s — %d step(s) from %s at tree %s. "
+                  "Diff later runs against it with --reference %s"
+                  % (args.baseline, cur.get("step_count"), args.snapshot.name,
+                     (record["recorded_by_tree"].get("head") or "<unknown>")[:9],
+                     args.baseline))
+            if args.json_out:
+                args.json_out.parent.mkdir(parents=True, exist_ok=True)
+                args.json_out.write_text(
+                    json.dumps(report, indent=2), encoding="utf-8")
+                print("wrote %s" % args.json_out)
+            return 0
 
         if args.reference is not None:
             ref = _svt.load_table(args.reference)

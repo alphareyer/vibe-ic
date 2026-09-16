@@ -40,6 +40,7 @@ out.write_text(json.dumps({
     "version": "stub", "run_at": "2026-09-16T00:00:00+00:00",
     "verdict": steps["verdict"],
     "command_argv": [__file__, str(proj), "--strict"],
+    "gate_execution_ledger": steps.get("ledger", []),
     "steps": steps["steps"]}))
 raise SystemExit(steps.get("rc", 0))
 '''
@@ -79,6 +80,10 @@ def _snapshot(root: Path, recorded_steps, recorded_verdict, argv=None):
             "verdict": recorded_verdict,
             "command_argv": argv or ["flow_compliance_check.py", "/orig",
                                      "--strict"],
+            # R-0915-88: present and empty is what a run whose hand-offs were
+            # all answered looks like; ABSENT means the table cannot state its
+            # RUN SHAPE and is refused, which is a different test.
+            "gate_execution_ledger": [],
             "steps": _steps(recorded_steps)}), encoding="utf-8")
     return root
 
@@ -171,6 +176,113 @@ def test_a_checker_rc_of_1_is_NOT_a_refusal():
     assert rep["replay"]["rc"] == 1
     assert rep["verdict"] == "NO_REGRESSION"
 
+
+
+
+# ── R-0915-88 follow-up: `--baseline`, the reference this program RECORDS ────
+#
+# MEASURED on the arm's first full landing run: BOTH frozen snapshots came back
+# NOT_COMPARABLE, because the reference each offers is its own recorded audit and
+# the LAST compliance pass of a run overwrites that file (9 steps from a
+# stage-scoped pass, against a full pass's 69). The refusal was CORRECT and the
+# arm was still useless — it refused forever, and a gate that always refuses is a
+# gate nobody reads.
+
+def _baseline_run(base, snap, tree, path, extra=()):
+    argv = [str(snap), "--tree", str(tree), "--workdir", str(base / "wd"),
+            "--baseline", str(path), "--json", str(base / "r.json"), *extra]
+    return R.main(argv), json.loads((base / "r.json").read_text())
+
+
+def test_baseline_records_the_table_AND_the_tree_that_produced_it():
+    """A baseline that cannot say what produced it answers "did the judgement
+    change?" with "changed from what?"."""
+    base = _tmp()
+    steps = [("2", "PASS"), ("7", "INCOMPLETE")]
+    snap = _snapshot(base / "snap", steps, "PASS")
+    tree = _tree(base / "tree", {"verdict": "PASS", "steps": _steps(steps)})
+    path = base / "ref" / "snap.json"
+    rc, rep = _baseline_run(base, snap, tree, path)
+    assert rc == 0 and rep["verdict"] == "BASELINE_RECORDED"
+    rec = json.loads(path.read_text())
+    assert rec["table"]["step_count"] == 2
+    assert rec["recorded_by_tree"]["tree"] == str(tree)
+    assert "replay_argv" in rec and "--strict" in rec["replay_argv"]
+    assert rep["diff"] is None, "--baseline records; it does not grade"
+
+
+def test_KNOWN_POSITIVE_a_baseline_REFUSES_to_overwrite_without_force():
+    """A reference that can be silently re-cut is a reference that makes red
+    diffs disappear — the `--write-baseline` shape this repo forbids."""
+    base = _tmp()
+    steps = [("2", "PASS")]
+    snap = _snapshot(base / "snap", steps, "PASS")
+    tree = _tree(base / "tree", {"verdict": "PASS", "steps": _steps(steps)})
+    path = base / "ref.json"
+    assert _baseline_run(base, snap, tree, path)[0] == 0
+    before = path.read_text()
+    rc, rep = _baseline_run(base, snap, tree, path)
+    assert rc == 2 and "already exists" in rep["refusal"]
+    assert path.read_text() == before, "the existing reference was overwritten"
+
+
+def test_KNOWN_NEGATIVE_force_baseline_does_overwrite():
+    """The escape hatch exists and is explicit — the refusal must be a refusal,
+    not an impossibility."""
+    base = _tmp()
+    snap = _snapshot(base / "snap", [("2", "PASS")], "PASS")
+    tree_a = _tree(base / "ta", {"verdict": "PASS",
+                                 "steps": _steps([("2", "PASS")])})
+    path = base / "ref.json"
+    assert _baseline_run(base, snap, tree_a, path)[0] == 0
+    tree_b = _tree(base / "tb", {"verdict": "FAIL",
+                                 "steps": _steps([("2", "FAIL")]), "rc": 1})
+    rc, _ = _baseline_run(base, snap, tree_b, path, extra=["--force-baseline"])
+    assert rc == 0
+    assert json.loads(path.read_text())["table"]["steps"]["2"]["status"] == "FAIL"
+
+
+def test_a_recorded_baseline_is_the_reference_the_next_run_diffs_against():
+    """The whole point: subject, scope and run shape equal by construction, and
+    the TREE the only variable — which is the experiment."""
+    base = _tmp()
+    steps = [("2", "PASS"), ("7", "PASS")]
+    snap = _snapshot(base / "snap", steps, "PASS")
+    tree_a = _tree(base / "ta", {"verdict": "PASS", "steps": _steps(steps)})
+    path = base / "ref.json"
+    assert _baseline_run(base, snap, tree_a, path)[0] == 0
+
+    worse = [("2", "PASS"), ("7", "FAIL")]
+    tree_b = _tree(base / "tb", {"verdict": "FAIL", "steps": _steps(worse),
+                                 "rc": 1})
+    out = base / "after.json"
+    rc = _replay(snap, tree_b, base / "wd_b", out, reference=path)
+    rep = json.loads(out.read_text(encoding="utf-8"))
+    assert rc == 1
+    assert [e["id"] for e in rep["diff"]["regressions"]] == ["7"]
+# ── R-0915-88: the RUN SHAPE reaches the replay too ─────────────────────────
+
+def test_a_snapshot_recorded_by_an_agent_driven_run_REFUSES_against_a_replay():
+    """The replay re-judges with a program; if the snapshot's recorded table
+    came from a run whose hand-offs an agent answered, the two are not the same
+    experiment and the refusal must say so rather than print step moves the
+    current tree did not cause."""
+    from _step_verdict_table import awaiting_exit_code
+    base = _tmp()
+    snap = _snapshot(base / "snap", [("2", "PASS")], "PASS")   # ledger: []
+    tree = _tree(base / "tree",
+                 {"verdict": "FAIL", "steps": _steps([("2", "INCOMPLETE")]),
+                  "rc": 1,
+                  "ledger": [{"gate": "an_expert_track", "rc": 0,
+                              "verdict": "PASS",
+                              "exit_code": awaiting_exit_code()}]})
+    out = base / "o.json"
+    rc = _replay(snap, tree, base / "wd", out)
+    rep = json.loads(out.read_text(encoding="utf-8"))
+    assert rc == 2
+    assert "different RUN SHAPE" in rep["refusal"]
+    assert "an_expert_track" in rep["refusal"]
+    assert rep["table"] is not None, "the baseline table must survive a refusal"
 
 # ── the refusals ─────────────────────────────────────────────────────────────
 

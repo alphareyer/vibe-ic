@@ -41,12 +41,29 @@
 #     [outdir]                where real_ic_arm.json and the per-subject reports
 #                             land. Default: $PWD/real_ic_arm_out
 #
+#   tools/ci/real_ic_arm.sh --print-mounts <path>...
+#                             print the `-v` flags a container would need to see
+#                             those paths, and exit. A diagnostic for the
+#                             "container cannot see ..." refusal below; it
+#                             creates nothing and runs nothing.
+#
 # ENV (all optional; each one is RECORDED into real_ic_arm.json)
 #   REAL_IC_NAME        the IC to run end-to-end          (default: spm)
 #   REAL_IC_PDK         its PDK                           (default: gf180mcuD)
 #   FROZEN_ROOT         where the snapshots live          (default: $HOME/_frozen)
 #   EDA_CONTAINER       the container the run uses        (default: real-ic-arm-eda,
 #                       created from the plugin's own pin if absent)
+#   REAL_IC_REFERENCE   the table the IC run is judged against. Omitted: the
+#                       highest published cell for this ic+pdk — which, since
+#                       R-0915-88, this arm will normally REFUSE: a published
+#                       cell is produced by an AGENT-DRIVEN lane run and this arm
+#                       runs the front door with no agent, so the steps whose
+#                       second pass is an agent's disagree at every tree and the
+#                       two tables are not the same experiment. MEASURED on SPM:
+#                       D1 rc 0 vs rc 4 and step 5 PASS vs FAIL at six trees,
+#                       none of it caused by a landing. Point this at a PRIOR
+#                       real_ic_gate.json from a headless run and the diff
+#                       becomes the measurement the arm is actually for.
 #   REAL_IC_REPLAY_REF_DIR   directory of per-snapshot baseline reports to diff
 #                       against, named <snapshot>.json. Absent: each snapshot's
 #                       OWN recorded table is used, which REFUSES (rc 2) when the
@@ -71,6 +88,36 @@ usage() {
   exit 2
 }
 
+# WHICH HOST PATHS THE CONTAINER MUST BE ABLE TO SEE.
+#
+# $HOME and /tmp are mounted because most runs live there; each of the three
+# paths this run actually touches is mounted too, UNLESS one of those already
+# covers it (a duplicate nested mount is an error, and a redundant one is noise).
+# See the measured defect at the creation site below.
+mounts_for() {
+  local out="-v $HOME:$HOME -v /tmp:/tmp" d m covered
+  for d in "$@"; do
+    covered=""
+    for m in "$HOME" /tmp; do
+      case "$d" in "$m"|"$m"/*) covered=1 ;; esac
+    done
+    [ -n "$covered" ] && continue
+    case " $out " in *" -v $d:$d "*) continue ;; esac
+    out="$out -v $d:$d"
+  done
+  printf '%s' "$out"
+}
+
+# A DIAGNOSTIC, not a test hook: "why can't the container see my workdir?" is
+# the first question after the refusal below, and it must be answerable without
+# starting a 17-minute run or creating a container.
+if [ "${1:-}" = "--print-mounts" ]; then
+  shift
+  mounts_for "$@"
+  echo
+  exit 0
+fi
+
 [ "$#" -ge 2 ] || usage
 TREE=$(cd "$1" && pwd) || usage
 CORPUS=$(cd "$2" && pwd) || usage
@@ -88,9 +135,34 @@ PROGRAMS="$TREE/vibe-ic-marketplace/plugins/vibe-ic/programs"
   exit 2
 }
 
-# The image pin is the PLUGIN's, read from the candidate tree itself. A pin kept
-# in this script would be a second copy of a number that moves.
+# THE PIN IS THE PLUGIN'S, AND SO IS THE RESOLUTION.
+#
+# `_eda_pin.IMAGE_DIGEST` is the IDENTITY a verdict can be replayed against, and
+# it is what `--require-image` compares. It is NOT a runnable reference: the
+# module says so itself (`is_bare_image_id` -> True, `IMAGE_ID_NOT_A_REFERENCE`),
+# and a `docker run sha256:89a8...` gets "No such image" from the daemon even on
+# a host that demonstrably holds those bytes. MEASURED: the third arm's first
+# landing run REFUSED for exactly that, on 2026-09-16.
+#
+# `_eda_pin.pinned_image_present()` is the resolver — it answers "does THIS host
+# hold an image whose registry digest is the pin, under ANY repository name" and
+# returns the runnable `<repo>@<digest>`. Calling it, rather than re-deriving a
+# reference here, is the whole point: this script must own no image logic, and
+# the one place that logic lives already handles the mirror-vs-ghcr name, the
+# dangling pulled-by-digest image (`docker image ls -a`), and the difference
+# between "absent" and "could not be asked".
 PIN=$(cd "$PROGRAMS" && python3 -c 'import _eda_pin; print(_eda_pin.IMAGE_DIGEST)' 2>/dev/null || true)
+resolve_runnable_image() {
+  (cd "$PROGRAMS" && python3 -c '
+import sys
+import _eda_pin
+ref, why = _eda_pin.pinned_image_present()
+if ref is None:
+    sys.stderr.write(why + "\n")
+    raise SystemExit(2)
+print(ref)
+')
+}
 CONTAINER=${EDA_CONTAINER:-real-ic-arm-eda}
 
 # ONLY the default container is auto-created. An EDA_CONTAINER the caller NAMED
@@ -102,22 +174,63 @@ if [ -z "${EDA_CONTAINER:-}" ] && ! docker inspect "$CONTAINER" >/dev/null 2>&1;
     echo "[real_ic_arm] REFUSED: no container $CONTAINER and the tree states no image pin" >&2
     exit 2
   fi
+  # A host that does not hold the pinned bytes REFUSES BY NAME and creates
+  # nothing. "Could not resolve the pin" is not "run it anyway with whatever is
+  # here": the resolver has no fallback to :latest or to the newest local tag,
+  # deliberately, and neither does this.
+  if ! RUNNABLE=$(resolve_runnable_image 2>"$OUTDIR/.pin_refusal"); then
+    echo "[real_ic_arm] REFUSED: the pinned image is not runnable on this host —" \
+         "$(cat "$OUTDIR/.pin_refusal" 2>/dev/null)" >&2
+    exit 2
+  fi
   # The memory ceiling is the PLUGIN's own computation, spliced after `run` —
   # never a number chosen here.
   MEMFLAGS=$(cd "$PROGRAMS" && python3 _docker_memory.py --flags | tr '\n' ' ')
-  echo "[real_ic_arm] creating $CONTAINER from $PIN"
+  # EVERY PATH THIS RUN TOUCHES IS MOUNTED, not just $HOME.
+  #
+  # MEASURED 2026-09-16, the arm's first run on a host whose workdir is NOT under
+  # $HOME: with `-v $HOME:$HOME -v /tmp:/tmp` alone a workdir on another
+  # filesystem is INVISIBLE inside the container, every in-container step dies in
+  # seconds ("cd: .../sim_professional/<top>: No such file or directory"; LEC
+  # "FAIL rc=1 elapsed=3s"), and the gate then reports dozens of PHANTOM
+  # regressions with a straight face. A landing arm that manufactures its own
+  # findings is worse than no arm.
+  MOUNTS=$(mounts_for "$OUTDIR" "$TREE" "$CORPUS")
+  echo "[real_ic_arm] creating $CONTAINER from $RUNNABLE (pin $PIN); mounts:$MOUNTS"
   # shellcheck disable=SC2086
-  docker run -d --name "$CONTAINER" $MEMFLAGS \
-    -v "$HOME:$HOME" -v /tmp:/tmp -e USER=designer \
-    "$PIN" --skip sleep infinity >/dev/null || {
-      echo "[real_ic_arm] REFUSED: could not create $CONTAINER from the pinned image" >&2
+  docker run -d --name "$CONTAINER" $MEMFLAGS $MOUNTS -e USER=designer \
+    "$RUNNABLE" --skip sleep infinity >/dev/null || {
+      echo "[real_ic_arm] REFUSED: could not create $CONTAINER from $RUNNABLE" >&2
       exit 2
     }
+fi
+
+# THE CONTAINER MUST BE ABLE TO SEE WHAT THE RUN WILL WRITE — checked BEFORE the
+# runner starts, on whatever container is in use, including one the caller
+# named and this script did not create. Asked of the container itself rather
+# than inferred from the `-v` flags: a mount that exists in the argv and not in
+# the namespace answers the wrong question. Skipped when the container does not
+# exist at all — `real_ic_gate` refuses on that by name, and two lanes refusing
+# the same thing is the duplication this arm avoids everywhere else.
+if docker inspect "$CONTAINER" >/dev/null 2>&1; then
+  UNSEEN=""
+  for d in "$OUTDIR" "$TREE"; do
+    docker exec "$CONTAINER" test -d "$d" >/dev/null 2>&1 || UNSEEN="$UNSEEN $d"
+  done
+  if [ -n "$UNSEEN" ]; then
+    echo "[real_ic_arm] REFUSED: container $CONTAINER cannot see:$UNSEEN —" \
+         "the run's in-container steps would fail in seconds and the gate would" \
+         "report phantom regressions. Mount those paths, or name a container" \
+         "that already does." >&2
+    exit 2
+  fi
 fi
 
 STARTED=$(date -Is)
 SUBJECTS_JSON="$OUTDIR/.subjects.jsonl"
 : > "$SUBJECTS_JSON"
+
+echo "[real_ic_arm] IC reference: ${REAL_IC_REFERENCE:-<auto: highest published cell — expect a RUN SHAPE refusal, see the header>}"
 
 record() {  # name kind rc report
   python3 - "$1" "$2" "$3" "$4" "$SUBJECTS_JSON" <<'PY'
@@ -156,6 +269,7 @@ python3 "$PROGRAMS/real_ic_gate.py" \
   --workdir "$OUTDIR/run" \
   --container "$CONTAINER" \
   ${PIN:+--require-image "$PIN"} \
+  ${REAL_IC_REFERENCE:+--reference "$REAL_IC_REFERENCE"} \
   --json "$GATE_JSON" > "$OUTDIR/real_ic_gate_${IC}.log" 2>&1
 record "$IC" real_ic_gate "$?" "$GATE_JSON"
 
@@ -165,16 +279,31 @@ if [ -d "$FROZEN" ]; then
     [ -d "${snap}reports" ] || continue          # not a run snapshot
     name=$(basename "$snap")
     ref=""
-    if [ -n "${REAL_IC_REPLAY_REF_DIR:-}" ] && [ -f "$REAL_IC_REPLAY_REF_DIR/$name.json" ]; then
-      ref="$REAL_IC_REPLAY_REF_DIR/$name.json"
+    mkbase=""
+    if [ -n "${REAL_IC_REPLAY_REF_DIR:-}" ]; then
+      if [ -f "$REAL_IC_REPLAY_REF_DIR/$name.json" ]; then
+        ref="$REAL_IC_REPLAY_REF_DIR/$name.json"
+      else
+        # FIRST ENCOUNTER. A snapshot's OWN recorded audit is written by whichever
+        # compliance pass ran LAST in that run, which is routinely a stage-scoped
+        # one (measured: 9 steps vs a full pass's 69) — so using it refuses
+        # forever, and a gate that always refuses is a gate nobody reads. Record
+        # the full-scope table once, at THIS tree, stamped with its sha; every
+        # later run diffs against it. Reported as BASELINE_RECORDED, never as a
+        # pass: this snapshot was not measured on this run.
+        mkbase="$REAL_IC_REPLAY_REF_DIR/$name.json"
+      fi
     fi
-    echo "[real_ic_arm] replay $name${ref:+ against $ref}"
+    echo "[real_ic_arm] replay $name${ref:+ against $ref}${mkbase:+ — FIRST ENCOUNTER, recording a baseline at $mkbase}"
     python3 "$PROGRAMS/audit_replay.py" "${snap%/}" \
       --tree "$TREE" --workdir "$OUTDIR/replay" \
       ${ref:+--reference "$ref"} \
+      ${mkbase:+--baseline "$mkbase"} \
       --json "$OUTDIR/audit_replay_$name.json" \
       > "$OUTDIR/audit_replay_$name.log" 2>&1
-    record "$name" audit_replay "$?" "$OUTDIR/audit_replay_$name.json"
+    rc_subject=$?
+    if [ -n "$mkbase" ]; then kind=audit_replay_baseline; else kind=audit_replay; fi
+    record "$name" "$kind" "$rc_subject" "$OUTDIR/audit_replay_$name.json"
   done
 else
   echo "[real_ic_arm] NOTE: no frozen snapshots at $FROZEN — the replay half of" \
@@ -207,12 +336,16 @@ def _image(name):
 
 regressed = [r for r in rows if r["rc"] == 1]
 refused = [r for r in rows if r["rc"] == 2]
-rc = 1 if regressed else (2 if refused else 0)
+# A subject seen for the FIRST time records a baseline instead of diffing. It is
+# not a pass — nothing about the candidate was measured on it — so it is counted
+# apart, and an arm whose subjects were ALL baselines measured nothing at all.
+baselined = [r for r in rows if r["kind"] == "audit_replay_baseline"
+             and r["rc"] == 0]
+measured = [r for r in rows if r not in baselined]
+rc = 1 if regressed else (2 if refused else (0 if measured else 2))
 verdict = ("REGRESSION" if regressed else
            "REFUSED" if refused else
-           "NO_REGRESSION" if rows else "NOTHING_MEASURED")
-if not rows:
-    rc = 2
+           "NO_REGRESSION" if measured else "NOTHING_MEASURED")
 report = {
     "schema_version": 1, "arm": "real_ic_arm", "started_at": started,
     "tree": tree, "tree_head": _sha(tree),
@@ -223,12 +356,16 @@ report = {
     "subject_count": len(rows),
     "regressed": [r["subject"] for r in regressed],
     "refused": [r["subject"] for r in refused],
+    "baselined_this_run": [r["subject"] for r in baselined],
+    "measured_subject_count": len(measured),
     "subjects": rows,
 }
 open(out, "w").write(json.dumps(report, indent=2))
 print("")
-print("REAL-IC ARM %s — %d subject(s): %d regressed, %d refused"
-      % (verdict, len(rows), len(regressed), len(refused)))
+print("REAL-IC ARM %s — %d subject(s): %d measured, %d regressed, %d refused, "
+      "%d baselined (first encounter, NOT a pass)"
+      % (verdict, len(rows), len(measured), len(regressed), len(refused),
+         len(baselined)))
 for r in rows:
     print("  %-26s %-14s rc=%d %s%s"
           % (r["subject"], r["kind"], r["rc"], r.get("verdict"),

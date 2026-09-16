@@ -59,6 +59,35 @@ directory, so no step of the run can see it.
 WRITES it, and a lane that froze all of `input/` read-only was producing a
 staging error and reading it as a finding.
 
+THE REFERENCE MUST BE A RUN OF THE SAME KIND (R-0915-88, MEASURED)
+==================================================================
+This gate runs the front door with NO AGENT ATTACHED. The flow is program-first
++ AI-BACKUP, and several steps complete only when an agent answers a hand-off:
+`flow_compliance_check`'s own `_AWAITING_EXIT_CODE` comment says it — *"pass one
+completed and pass two is somebody else's move … a PROGRAM cannot spawn the
+subagent pass two needs."*
+
+MEASURED on SPM, the published cell `ic/spm/v1.21.6_gf180mcuD` (produced by an
+agent-driven lane run) against a program-only run of the SAME input:
+
+    D1  phase1_expert_parse_track --check-report    cell rc 0 PASS / program-only rc 4 INCOMPLETE
+    5   formal_proof_evidence_check                 cell PASS      / program-only FAIL
+
+at SIX trees spanning `845ef5247..a8d39cb70` and current main — the TREE never
+moved either verdict. The cell's own artefacts say why: `expert_parse_track.json`
+records `ai_subtrack.status=CONSUMED, observed_ai_consumed=6`, and
+`phase2/stage1/formal/formal_expert_review.json` records
+`invocation_status=INVOKED, invoked_by="lane icspm3 (formal-verify expert role)"`
+beside 5 hand-authored properties, where a program-only run authors 1 and then
+requests the fallback it has nobody to call.
+
+So a published cell is the WRONG reference for this gate, and on its first real
+run that mistake produced a headline saying SPM had regressed when nothing had
+landed. `_step_verdict_table.comparability` now REFUSES across run shapes and
+names the cause; the reference to pass with `--reference` is a PRIOR RUN OF THIS
+GATE. That is the same rule `audit_replay` already states for a snapshot's own
+recorded table, arrived at from the other direction.
+
 THE REFUSAL RULE — AND WHERE IT DEPARTS FROM THE BRIEF, DELIBERATELY
 ===================================================================
 The dispatch brief said "REFUSE when the run did not complete (rc != 0 ...)".
@@ -93,8 +122,9 @@ EXIT CODES
      the top-level verdict fell.
   2  a REFUSAL — nothing is claimed. The run did not produce its own table, the
      image/container could not be resolved, the input was missing, the project
-     directory was not empty, or the reference is NOT COMPARABLE to this run
-     (different producer or different scoping flags: see `_step_verdict_table`).
+     directory was not empty, or the reference is NOT COMPARABLE to this run —
+     a different producer, different scoping flags, or a DIFFERENT RUN SHAPE
+     (see `_step_verdict_table`). A refusal is not a pass and not a regression.
 
 TIME IS RECORDED, NEVER ENFORCED (owner's standing rule; R-0915-5). There is no
 `timeout`, no kill and no deadline anywhere in this file. `--budget-s` only
@@ -463,6 +493,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         cur_table = read_own_table(project, report["run"])
         report["table"] = cur_table
         report["orchestrator"] = read_orchestrator(project)
+        # RECORDED BEFORE the comparability refusal, not after: the run shape is
+        # the DISCLOSURE that explains a run-shape refusal, and a refusal whose
+        # own evidence was dropped sends a reader looking for a defect.
+        report["run_shape"] = cur_table.get("run_shape")
+        report["reference_run_shape"] = ref_table.get("run_shape")
 
         diff = _svt.diff_tables(ref_table, cur_table)
         report["diff"] = diff
