@@ -60,8 +60,15 @@ def _load():
 FC = _load()
 
 
-def _res(sid, status, name="s"):
-    return FC.StepResult(id=sid, name=name, stage="x", status=status)
+def _res(sid, status, name="s", reason_class=None):
+    """R-0915-85 — the cascade rules read the REASON: a step whose declared
+    output is absent is `FAIL(missing_artefact)`, and that is the shape a
+    known-gap / deferral attribution is about. A bare FAIL is a gate's own
+    defect and is correctly never attributed to an ancestor."""
+    if reason_class is None and status == "FAIL":
+        reason_class = "missing_artefact"
+    return FC.StepResult(id=sid, name=name, stage="x", status=status,
+                         reason_class=reason_class or "")
 
 
 def _steps(*specs):

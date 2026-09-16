@@ -37,9 +37,9 @@ def one_record_per_reason_class():
         # that produces that subject has not run yet in this flow.
         (T.ASKED_BEFORE_PRODUCER, "SKIP",
          "no KLayout DRC artefacts found; phase-3 DRC has not run"),
-        (T.BLOCKED_BY_UPSTREAM, "NOT_MEASURED", "the producing step has not run"),
-        (T.EXECUTION_ERROR, "NOT_MEASURED", "the caller supplied the wrong path"),
-        (T.ZERO_DENOMINATOR, "NOT_MEASURED", "0 of 13 documents were examined"),
+        (T.BLOCKED_BY_UPSTREAM, "BLOCKED", "the producing step has not run"),
+        (T.EXECUTION_ERROR, "INCOMPLETE", "the caller supplied the wrong path"),
+        (T.ZERO_DENOMINATOR, "INCOMPLETE", "0 of 13 documents were examined"),
     ]
     return [
         F._p0_gate_record(f"reason_{i}_check", verdict, message,
@@ -65,9 +65,9 @@ def test_only_declared_na_capability_or_external_may_remain_skip(
 
 
 @pytest.mark.parametrize("reason_class, expected", [
-    (T.BLOCKED_BY_UPSTREAM, "NOT_MEASURED"),
-    (T.EXECUTION_ERROR, "NOT_MEASURED"),
-    (T.ZERO_DENOMINATOR, "NOT_MEASURED"),
+    (T.BLOCKED_BY_UPSTREAM, "BLOCKED"),
+    (T.EXECUTION_ERROR, "INCOMPLETE"),
+    (T.ZERO_DENOMINATOR, "INCOMPLETE"),
 ])
 def test_record_constructor_refuses_unsafe_skip_pairing(reason_class, expected):
     record = F._p0_gate_record(
@@ -76,6 +76,10 @@ def test_record_constructor_refuses_unsafe_skip_pairing(reason_class, expected):
     assert record["verdict"] == expected
 
 
+#: R-0915-85 — the expectations here are the STEP's word (this is the P0
+#: umbrella's step verdict), so the three non-skip-eligible gate reason classes
+#: now land on `NOT_MEASURED`. The three skip-eligible ones still land on PASS,
+#: which is the discrimination #1978 exists for and it is unchanged.
 @pytest.mark.parametrize("reason_class, expected", [
     (T.DESIGN_DECLARED_NA, "PASS"),
     (T.CAPABILITY_ABSENT, "PASS"),
@@ -124,11 +128,11 @@ def test_a_short_population_with_NOTHING_decisive_is_not_measured(reason_class):
 
 def test_caller_error_zero_denominator_and_missing_upstream_are_not_skips():
     cases = [
-        ("path not found", {}, T.EXECUTION_ERROR, "NOT_MEASURED"),
+        ("path not found", {}, T.EXECUTION_ERROR, "INCOMPLETE"),
         ("docs loaded NONE; 0/13 examined", {}, T.ZERO_DENOMINATOR,
-         "NOT_MEASURED"),
+         "INCOMPLETE"),
         ("no deliverable at RESULT.md — producer has not run", {},
-         T.BLOCKED_BY_UPSTREAM, "NOT_MEASURED"),
+         T.BLOCKED_BY_UPSTREAM, "BLOCKED"),
     ]
     for message, evidence, expected_class, expected_verdict in cases:
         reason_class = T.infer_nonverdict_reason(
@@ -284,8 +288,8 @@ def test_the_reclassification_greens_nothing():
     INCOMPLETE; only the published row's wording changes."""
     for cls in (T.ZERO_DENOMINATOR, T.EXECUTION_ERROR):
         assert cls not in T.SKIP_ELIGIBLE
-        assert T.record_verdict(cls) == "NOT_MEASURED"
-        assert T.p0_tier_for_reason_classes([cls]) == "NOT_MEASURED"
+        assert T.record_verdict(cls) == "INCOMPLETE"
+        assert T.p0_tier_for_reason_classes([cls]) == "INCOMPLETE"
 
 
 def test_zero_of_zero_and_zero_of_n_are_not_the_same_question():
@@ -367,7 +371,7 @@ def test_the_declared_class_decides_both_and_the_prose_decides_neither():
     # getting it wrong is not a cosmetic error.
     assert T.ZERO_DENOMINATOR not in T.SKIP_ELIGIBLE
     assert T.DESIGN_DECLARED_NA in T.SKIP_ELIGIBLE
-    assert T.p0_tier_for_reason_classes([T.ZERO_DENOMINATOR]) == "NOT_MEASURED"
+    assert T.p0_tier_for_reason_classes([T.ZERO_DENOMINATOR]) == "INCOMPLETE"
     assert T.p0_tier_for_reason_classes([T.DESIGN_DECLARED_NA]) == "PASS"
 
 
