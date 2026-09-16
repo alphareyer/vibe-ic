@@ -265,6 +265,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    # BOTH ARE REQUIRED AND THEY ARE NOT ALTERNATIVES: the snapshot is what is
+    # judged, --tree is the checkout whose programs judge it. The both-given
+    # case is therefore decided here, not refused -- except where the two
+    # names COLLIDE. A --tree that is the snapshot, or contains it, or sits
+    # inside it, would have the snapshot re-judged by its own frozen programs
+    # (or the judge read from the thing being judged), and the replay would
+    # report a verdict about a comparison that never happened.
+    if args.snapshot and args.tree:
+        _snap, _judge = args.snapshot.resolve(), args.tree.resolve()
+        if _snap == _judge or _judge in _snap.parents or _snap in _judge.parents:
+            print("AUDIT REPLAY REFUSED: the snapshot (%s) and --tree (%s) "
+                  "name the same or nested directories; the judging checkout "
+                  "must be separate from the snapshot it judges"
+                  % (args.snapshot, args.tree), file=_sys.stderr)
+            return 2
     report: Dict[str, Any] = {
         "schema_version": 1,
         "program": "audit_replay",
