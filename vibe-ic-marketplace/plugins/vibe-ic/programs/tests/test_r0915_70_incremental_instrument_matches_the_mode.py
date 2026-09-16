@@ -91,17 +91,27 @@ def _enob(decoded, expected):
 
 
 # ── the weights are the recurrence's own ───────────────────────────────────
-def test_the_order2_weights_fall_linearly_and_sum_to_the_theoretical_count():
-    w = D.matched_weights(N, 2)
-    assert w[:3] == [255.0, 254.0, 253.0]
-    assert w[-3:] == [2.0, 1.0, 0.0]
-    assert sum(w) == N * (N - 1) / 2 == 32640
-    assert math.log2(sum(w)) == pytest.approx(14.994, abs=0.001)
+def test_the_BIT_weights_are_the_DACs_response_and_carry_the_flat_term():
+    """CORRECTED (second pass). The bits enter at the DAC, which in a CIFB
+    feeds EVERY integrator, so their response is the input's triangular one
+    PLUS a flat `a2` term. Decoding with the input's weights instead drops it
+    and costs 7.4 bits — measured in this module's docstring."""
+    a = 0.25
+    wb = D.matched_weights(N, 2, a)
+    wi = D.input_weights(N, 2, a)
+    assert all(b == pytest.approx(i + a) for b, i in zip(wb, wi))
+    # the input response is the triangular one, scaled by a1*a2
+    assert wi[0] == pytest.approx(a * a * (N - 1))
+    assert wi[-1] == pytest.approx(0.0)
+    assert sum(wi) / (a * a) == pytest.approx(N * (N - 1) / 2) == pytest.approx(32640)
+    assert math.log2(sum(wi) / (a * a)) == pytest.approx(14.994, abs=0.001)
 
 
-def test_the_order1_weights_are_flat_which_is_the_plain_mean():
-    w = D.matched_weights(N, 1)
-    assert set(w) == {1.0} and sum(w) == N
+def test_the_order1_input_weights_are_flat_which_is_the_plain_mean():
+    a = 0.25
+    wi = D.input_weights(N, 1, a)
+    assert all(x == pytest.approx(a) for x in wi)
+    assert sum(wi) / a == pytest.approx(N)
 
 
 def test_the_weights_are_computed_not_typed():
@@ -113,7 +123,9 @@ def test_the_weights_are_computed_not_typed():
     # above it necessarily names it, which is why this reads the body alone.
     code = body.split('"""')[-1]
     assert "N - 1 - k" not in code and "window - 1 - k" not in code
-    assert "for n in range(window)" in code and "state[s - 1]" in code
+    inner = inspect.getsource(D._impulse_response)
+    assert "for n in range(window)" in inner and "state[s - 1]" in inner
+    assert "at_dac" in inner, "the injection point must be a parameter"
     for order in (1, 2, 3):
         w = D.matched_weights(8, order)
         assert len(w) == 8 and sum(w) > 0
@@ -208,5 +220,5 @@ def test_an_unsupported_order_is_refused_by_name():
 def test_the_detail_carries_the_quantisation_bits_the_weights_imply():
     out, d = D.decimate([1.0] * (2 * N), N, 2)
     assert out is not None
-    assert d["quantisation_bits"] == pytest.approx(14.994, abs=0.001)
+    assert d["quantisation_bits"] == pytest.approx(14.994, abs=0.001), d
     assert d["windows"] == 2 and d["window"] == N
