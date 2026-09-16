@@ -21772,7 +21772,7 @@ def step_final_audit(project: Path, phase: int = 3,
         # same false claim pointing the other way — this is the reasoning
         # `flow_compliance_check._p0_umbrella_status` already settled for the
         # umbrella's own status, and `INCOMPLETE` is the tier this repo built
-        # for it (`_flow_verdict_tiers.PRODUCER_STATUSES`): a DONE-CLAIM that is
+        # for it (`verdict.PRODUCER_STATUSES`): a DONE-CLAIM that is
         # not a full pass. It is classified in `_aggregate_verdict` as
         # not-green and not-failing, so the RUN-level word is unchanged.
         #

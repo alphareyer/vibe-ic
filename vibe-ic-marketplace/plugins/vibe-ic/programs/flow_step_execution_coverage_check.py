@@ -77,7 +77,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 # vibe-ic#634 — the producer and this guard read the SAME classification of
 # verdict words, so a tier added on one side cannot be unknown on the other.
-import _flow_verdict_tiers as _T                           # noqa: E402
+import verdict as _T                           # noqa: E402
 
 # Exit codes. 2 = NOT CHECKED is a first-class verdict, not an error code: it is
 # what the gate must return whenever it could not actually inspect the run.

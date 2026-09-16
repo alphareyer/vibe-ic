@@ -95,7 +95,7 @@ WAIVER_MIN_LEN = 40
 #                  flow_compliance_check excludes it from the executed-PASS
 #                  count in the very line it prints it on.
 #   PASS-VOIDED    a pass withdrawn because a dependency failed
-#                  (_flow_verdict_tiers).
+#                  (verdict.py).
 #
 # Both appear in the tally line a RESULT.md is expected to quote VERBATIM as
 # its evidence, so matching the bare token inside them reads an honest FAIL

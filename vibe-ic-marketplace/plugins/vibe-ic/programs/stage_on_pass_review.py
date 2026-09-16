@@ -438,7 +438,7 @@ import _design_module_set as _dms  # noqa: E402
 # here rather than growing this module's own copy, which is the
 # divergence `_prose_polarity`'s own header exists to end.
 import _prose_polarity  # noqa: E402
-import _flow_verdict_tiers as _T  # noqa: E402
+import verdict as _T  # noqa: E402
 import _flow_reason_taxonomy as _reason_taxonomy  # noqa: E402
 # THE GDSII READER IS NOT WRITTEN TWICE. `gds_topcell_name_check.parse_structures`
 # already walks the record stream and returns (defined, referenced, valid_header);
@@ -533,7 +533,7 @@ def proof_is_inside_the_run(project: Path, test_value: Any) -> bool:
 #: top_undeclared` and `top_module_status: top_undeclared`, the same refusal the
 #: other front door publishes. Both readers below already handle that shape —
 #: `read_intent_top` keys `declares_no_top` on `no_top_module_in_input` (still
-#: stamped True on exactly that branch), and R2 returns NOT_CHECKED on a
+#: stamped True on exactly that branch), and R2 returns NOT_MEASURED on a
 #: non-string `top_module` before it reaches the disarm. This constant is kept
 #: because L9 documents PUBLISHED BEFORE #2052 are still on disk and still carry
 #: the placeholder; a review that reads them must keep disarming on it.
@@ -698,7 +698,11 @@ def _norm_status(word: Any) -> str:
     `VACUOUS_PASS` and `PARTIALLY-VACUOUS` in one report — so a set membership
     test has to normalise or it answers about the punctuation.
     """
-    return str(word or "?").strip().upper().replace("_", "-")
+    # R-0915-85 left this as an IDENTITY for step statuses — the five words
+    # have one spelling each, and `verdict.parse` refuses anything else. It is
+    # kept only because gate-record verdicts (a different vocabulary, written
+    # by ~450 independent programs) still arrive in two spellings.
+    return str(word or "?").strip().upper().replace("-", "_")
 
 
 #: The verdict words that do NOT stop this stage from being reviewable.
@@ -710,12 +714,12 @@ def _norm_status(word: Any) -> str:
 #: 6 and 39 carry the machinery-sanctioned ENV_UNAVAILABLE fpga-board cap-gap
 #: deferral, the audit records both as `WAIVED`, and this program answered
 #:
-#:     rc=2 NOT CHECKED — stage stage1 did not pass (7 row(s) for stage1;
+#:     rc=2 NOT MEASURED — stage stage1 did not pass (7 row(s) for stage1;
 #:     non-green: INCOMPLETE, WAIVED)
 #:
 #: so steps 7, 15 and 37 — whose gate this program is — each went INCOMPLETE,
 #: which kept stage1/2/3 from being green, which kept this program declining.
-#: `_flow_verdict_tiers.EXCUSED` registers BOTH spellings; one of them was
+#: `verdict.EXCUSED` registers BOTH spellings; one of them was
 #: registered here and one was not.
 #:
 #: The two VACUOUS tiers are NOT excused rows and are added on their own
@@ -723,22 +727,18 @@ def _norm_status(word: Any) -> str:
 #: disclosed a design-declared N/A has not failed, and it is the done tier the
 #: audit itself counts it as. Reviewing such a stage is this program's job, not
 #: the repair tier's.
-_STAGE_GREEN = frozenset(
-    _norm_status(w) for w in (
-        {_T.FULL_PASS}
-        | set(_T.EXCUSED)
-        | {"VACUOUS-PASS", "PARTIALLY-VACUOUS"}))
+_STAGE_GREEN = frozenset({_T.FULL_PASS} | set(_T.EXCUSED)
+                         | {_T.Verdict.PASS_WITH_WAIVERS.value})
 
 
 #: THE TIER THAT IS NEITHER GREEN NOR FAILED, registered by the flow itself.
 #:
-#: `_flow_verdict_tiers.NO_VERDICT_IN_SCOPE` is `{INCOMPLETE, NOT-MEASURED}` —
+#: `verdict.NO_VERDICT_IN_SCOPE` is `{INCOMPLETE, NOT-MEASURED}` —
 #: deliberately in neither `EXCUSED` nor `NON_GREEN`, because "nobody measured
 #: it" is not "it passed" and is not "it failed" either. Read here so the
 #: exemption below can be stated over the tier the flow names, rather than over
 #: two words retyped at this site.
-_NO_VERDICT_IN_SCOPE = frozenset(_norm_status(w)
-                                 for w in _T.NO_VERDICT_IN_SCOPE)
+_NO_VERDICT_IN_SCOPE = frozenset({_T.Verdict.NOT_MEASURED.value})
 
 #: This program's own name as it appears in a step row's gate records.
 _SELF_GATE = "stage_on_pass_review"
@@ -748,6 +748,12 @@ _SELF_GATE = "stage_on_pass_review"
 #: make the step they belong to non-green.
 _GATE_VERDICT_GREEN = frozenset({
     "PASS", "VACUOUS_PASS", "PARTIALLY_VACUOUS", "SKIP", "WAIVED",
+    # R-0915-85: a GATE PROGRAM's own verdict word is a different vocabulary
+    # from the STEP's — these are `advisory_gate_records[].verdict`, written by
+    # ~450 independent gate programs, and the ruling's subject is the step. The
+    # step's five words are added so a migrated gate is recognised too.
+    _T.Verdict.PASS.value, _T.Verdict.PASS_WITH_WAIVERS.value,
+    _T.Verdict.NOT_APPLICABLE.value,
 })
 
 
@@ -778,11 +784,11 @@ def blocked_only_by_a_declined_review(row: Dict[str, Any]) -> bool:
     function returns False for it. What is not correct is the INHERITANCE: a
     later stage's rows are not less measured because an earlier stage's review
     declined, so the earlier decline is disclosed (it stays in the report, and
-    the step it gates stays INCOMPLETE) without also deciding the next stage.
+    the step it gates stays NOT_MEASURED) without also deciding the next stage.
 
     TYPED EVIDENCE, NEVER PROSE. The row publishes `advisory_gate_records` with
     `gate`, `verdict` and `reason_class` fields; the decline is recognised as
-    THIS program's own record carrying `NOT_CHECKED` / `BLOCKED_BY_UPSTREAM`,
+    THIS program's own record carrying `NOT_MEASURED` / `BLOCKED_BY_UPSTREAM`,
     which is the pair the blocking emit writes. Nothing here reads a sentence.
 
     THE NEGATIVE CONTROL IS THE `return False` IN THE LOOP. Every other gate in
@@ -793,14 +799,14 @@ def blocked_only_by_a_declined_review(row: Dict[str, Any]) -> bool:
     exemption granted over an empty population is the vacuous pass this repo
     keeps having to remove.
     """
-    if _norm_status(row.get("status")) not in _NO_VERDICT_IN_SCOPE:
+    if str(row.get("status") or "") not in _NO_VERDICT_IN_SCOPE:
         return False
     saw_declined_review = False
     for rec in _gate_records_of(row):
         verdict = str(rec.get("verdict") or "").strip().upper().replace("-", "_")
         reason_class = _reason_taxonomy.normalise(rec.get("reason_class"))
         if (str(rec.get("gate") or "") == _SELF_GATE
-                and verdict == "NOT_CHECKED"
+                and verdict == "NOT_MEASURED"
                 and reason_class == _reason_taxonomy.BLOCKED_BY_UPSTREAM):
             saw_declined_review = True
             continue
@@ -844,7 +850,7 @@ def stage_passed(compliance: Optional[Path], stage_id: str,
                 "why": f"{compliance} carries no row for stage {stage_id!r}",
                 "source": str(compliance)}
     non_green = [r for r in mine
-                 if _norm_status(r.get("status")) not in _STAGE_GREEN]
+                 if str(r.get("status") or "?") not in _STAGE_GREEN]
     # THE INHERITED DECLINE IS DISCLOSED, NOT OBEYED. A row whose only
     # non-green gate is a PREVIOUS stage's declined review says nothing about
     # THIS stage's evidence — see `blocked_only_by_a_declined_review`, which
@@ -950,16 +956,16 @@ def rule_intent_top_not_built(project: Path, decl: Dict[str, Any]) -> Dict[str, 
     l9 = next((project / r for r in intent_rel
                if r.endswith("L9_INTEGRATION_SPEC.json")), None)
     if l9 is None:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": ("the stage's `intent:` names no L9_INTEGRATION_SPEC.json; "
                         "R1 has no intent to read")}
     if not l9.exists():
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": f"{l9} does not exist; the intent was never published"}
     intent = read_intent_top(l9)
     intent["intent_rel"] = str(l9.relative_to(project))
     if not intent.get("readable"):
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": f"{l9}: {intent.get('why')}"}
 
     rtl_dirs = [project / r for r in artefact_rel
@@ -982,7 +988,7 @@ def rule_intent_top_not_built(project: Path, decl: Dict[str, Any]) -> Dict[str, 
     # the same defect as a gate that certifies an empty corpus. Both are
     # NOT CHECKED, and the reason says which.
     if rec["verdict"] == _dms.UNVERIFIABLE:
-        return {"verdict": "NOT_CHECKED", "intent": intent, "artefact": artefact,
+        return {"verdict": "NOT_MEASURED", "intent": intent, "artefact": artefact,
                 "reconcile": rec,
                 "why": ("the stage staged no readable module: "
                         + (", ".join(artefact["rtl_dirs"])
@@ -990,7 +996,7 @@ def rule_intent_top_not_built(project: Path, decl: Dict[str, Any]) -> Dict[str, 
                         + " yields an EMPTY module set, which refutes nothing "
                           "and certifies nothing")}
     if rec["verdict"] == _dms.NO_DECLARATION:
-        return {"verdict": "NOT_CHECKED", "intent": intent, "artefact": artefact,
+        return {"verdict": "NOT_MEASURED", "intent": intent, "artefact": artefact,
                 "reconcile": rec,
                 "why": (f"{l9.name} declares no `top_module`; there is no "
                         f"intent for the artefact to contradict, and an "
@@ -1230,18 +1236,18 @@ def rule_intent_pin_not_in_netlist(project: Path,
     l9 = next((project / r for r in intent_rel
                if r.endswith("L9_INTEGRATION_SPEC.json")), None)
     if l9 is None:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": ("the stage's `intent:` names no L9_INTEGRATION_SPEC.json; "
                         "R2 has no intent to read")}
     if not l9.exists():
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": f"{l9} does not exist; the intent was never published"}
     intent = read_intent_pins(l9)
     intent["intent_rel"] = str(l9.relative_to(project))
     if not intent.get("readable"):
-        return {"verdict": "NOT_CHECKED", "why": f"{l9}: {intent.get('why')}"}
+        return {"verdict": "NOT_MEASURED", "why": f"{l9}: {intent.get('why')}"}
     if not intent["pins"]:
-        return {"verdict": "NOT_CHECKED", "intent": intent,
+        return {"verdict": "NOT_MEASURED", "intent": intent,
                 "why": (f"{l9.name} declares no external pin in any of "
                         f"{', '.join(_INTENT_PIN_FIELDS)}; there is no intent "
                         f"for the artefact to contradict, and an absent "
@@ -1250,7 +1256,7 @@ def rule_intent_pin_not_in_netlist(project: Path,
     nets = [project / r for r in artefact_rel
             if str(r).endswith(".v") and (project / r).is_file()]
     if not nets:
-        return {"verdict": "NOT_CHECKED", "intent": intent,
+        return {"verdict": "NOT_MEASURED", "intent": intent,
                 "why": ("none of the declared artefact paths resolves to a "
                         "netlist file: "
                         + (", ".join(artefact_rel) or "(no artefact declared)")
@@ -1260,10 +1266,10 @@ def rule_intent_pin_not_in_netlist(project: Path,
     art = read_netlist_interface(netlist)
     art["artefact_rel"] = str(netlist.relative_to(project))
     if not art.get("readable"):
-        return {"verdict": "NOT_CHECKED", "intent": intent, "artefact": art,
+        return {"verdict": "NOT_MEASURED", "intent": intent, "artefact": art,
                 "why": f"{netlist}: {art.get('why')}"}
     if not art["ports"]:
-        return {"verdict": "NOT_CHECKED", "intent": intent, "artefact": art,
+        return {"verdict": "NOT_MEASURED", "intent": intent, "artefact": art,
                 "why": (f"the netlist's structural top {art['top']!r} declares "
                         f"NO port; an empty interface refutes nothing and "
                         f"certifies nothing")}
@@ -1470,7 +1476,7 @@ def rule_cited_input_absent(project: Path, decl: Dict[str, Any]) -> Dict[str, An
     docs_dirs = [project / r for r in artefact_rel
                  if (project / r).is_dir() and "generated_docs" in str(r)]
     if not docs_dirs:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": ("the stage's `artefact:` names no readable "
                         "phase1/generated_docs directory; there is no "
                         "translation to review")}
@@ -1481,7 +1487,7 @@ def rule_cited_input_absent(project: Path, decl: Dict[str, Any]) -> Dict[str, An
     # records no provenance at all refutes nothing and certifies nothing —
     # the same rule R1 applies to an empty module set one stage down.
     if not cites:
-        return {"verdict": "NOT_CHECKED", "why": (
+        return {"verdict": "NOT_MEASURED", "why": (
             f"{docs_dirs[0].relative_to(project)} carries {len(found['docs'])} "
             f"L-doc(s) and NOT ONE path-shaped provenance claim among them "
             f"({found['disclosures']} disclosure(s) that name no file). There "
@@ -1734,7 +1740,7 @@ def rule_signoff_clock_slower_than_intent(project: Path,
 
     l8, l9 = _named("L8_TIMING_WAVEFORM.json"), _named("L9_INTEGRATION_SPEC.json")
     if l8 is None and l9 is None:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": ("the stage's `intent:` names neither "
                         "L8_TIMING_WAVEFORM.json nor L9_INTEGRATION_SPEC.json; "
                         "R3 has no intent to read")}
@@ -1742,35 +1748,35 @@ def rule_signoff_clock_slower_than_intent(project: Path,
     sdc = next((project / r for r in artefact_rel
                 if r.endswith("constraint.sdc")), None)
     if sdc is None:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": ("the stage's `artefact:` names no sign-off "
                         "constraint.sdc; R3 has no artefact to read")}
     if not sdc.exists():
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": (f"{sdc.relative_to(project)} does not exist: this run "
                         f"staged no stage-3 sign-off deck, which refutes "
                         f"nothing and certifies nothing")}
 
     deck = read_signoff_deck(sdc, project)
     if not deck.get("readable"):
-        return {"verdict": "NOT_CHECKED", "why": f"{sdc}: {deck.get('why')}"}
+        return {"verdict": "NOT_MEASURED", "why": f"{sdc}: {deck.get('why')}"}
     artefact = {"file": deck["file"], "clocks": deck["clocks"],
                 "clock_count": len(deck["clocks"])}
     if not deck["clocks"]:
-        return {"verdict": "NOT_CHECKED", "artefact": artefact,
+        return {"verdict": "NOT_MEASURED", "artefact": artefact,
                 "why": (f"{deck['file']} creates no clock with a period; the "
                         f"deck constrains nothing, so there is no sign-off "
                         f"period for the intent to contradict")}
 
     intent = read_intent_period(l8, l9, project)
     if intent.get("declared") is None:
-        return {"verdict": "NOT_CHECKED", "intent": intent, "artefact": artefact,
+        return {"verdict": "NOT_MEASURED", "intent": intent, "artefact": artefact,
                 "why": intent.get("why")}
     if intent.get("declared") is False:
         # AN ABSENT DECLARATION IS NOT AN AGREEMENT — the same rule R1 applies
         # to a missing `top_module`. Answering ACCEPT here would certify every
         # deck on every run whose intent never stated a frequency.
-        return {"verdict": "NOT_CHECKED", "intent": intent, "artefact": artefact,
+        return {"verdict": "NOT_MEASURED", "intent": intent, "artefact": artefact,
                 "why": intent.get("why")}
 
     asked = float(intent["period_ns"])
@@ -1949,18 +1955,18 @@ def rule_intent_spec_not_the_graded_spec(project: Path,
     l5 = next((project / r for r in intent_rel
                if r.endswith("L5_ADI_SPEC.json")), None)
     if l5 is None:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": ("the stage's `intent:` names no L5_ADI_SPEC.json; "
                         "R_ANALOG has no intent to read")}
     if not l5.exists():
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": f"{l5} does not exist; the intent was never published"}
     try:
         doc = json.loads(l5.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError) as e:
-        return {"verdict": "NOT_CHECKED", "why": f"{l5}: {e}"}
+        return {"verdict": "NOT_MEASURED", "why": f"{l5}: {e}"}
     if not isinstance(doc, dict):
-        return {"verdict": "NOT_CHECKED", "why": f"{l5} is not a mapping"}
+        return {"verdict": "NOT_MEASURED", "why": f"{l5} is not a mapping"}
 
     intent: Dict[str, Any] = {
         "file": str(l5), "intent_rel": str(l5.relative_to(project)),
@@ -2054,7 +2060,7 @@ def rule_intent_spec_not_the_graded_spec(project: Path,
     # is zero and nothing was measured. Reporting that as "no contradiction
     # found" is how a review of nothing reports a pass.
     if not in_scope:
-        return {"verdict": "NOT_CHECKED", "intent": intent, "artefact": artefact,
+        return {"verdict": "NOT_MEASURED", "intent": intent, "artefact": artefact,
                 "disarmed": disarmed, "unreadable": unreadable,
                 "why": ("no analog block is in scope: "
                         f"{len(disarmed)} disarmed by the intent's own "
@@ -2216,19 +2222,19 @@ def rule_die_is_not_the_design(project: Path, decl: Dict[str, Any]) -> Dict[str,
     l9 = next((project / r for r in intent_rel
                if r.endswith("L9_INTEGRATION_SPEC.json")), None)
     if l9 is None:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": ("the stage's `intent:` names no L9_INTEGRATION_SPEC.json; "
                         "R4 has no intent to read")}
     if not l9.exists():
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": f"{l9} does not exist; the intent was never published"}
     intent = read_intent_top(l9)
     intent["intent_rel"] = str(l9.relative_to(project))
     if not intent.get("readable"):
-        return {"verdict": "NOT_CHECKED", "why": f"{l9}: {intent.get('why')}"}
+        return {"verdict": "NOT_MEASURED", "why": f"{l9}: {intent.get('why')}"}
     declared = intent.get("value")
     if not declared:
-        return {"verdict": "NOT_CHECKED", "intent": intent,
+        return {"verdict": "NOT_MEASURED", "intent": intent,
                 "why": (f"{l9.name} declares no `top_module`; there is no "
                         f"intent for the die to contradict, and an absent "
                         f"declaration is not an agreement")}
@@ -2240,19 +2246,19 @@ def rule_die_is_not_the_design(project: Path, decl: Dict[str, Any]) -> Dict[str,
     # "I could not look", and answering ACCEPT to any of them would make
     # DELETING the die the cheapest way to pass an on-pass review.
     if not die["files"]:
-        return {"verdict": "NOT_CHECKED", "intent": intent, "artefact": artefact,
+        return {"verdict": "NOT_MEASURED", "intent": intent, "artefact": artefact,
                 "why": ("the stage published no layout in its die slot ("
                         + (", ".join(die["die_dirs"])
                            or "no gds dir among the declared artefact paths")
                         + "); an absent die refutes nothing and certifies "
                           "nothing")}
     if not die["structures_defined"]:
-        return {"verdict": "NOT_CHECKED", "intent": intent, "artefact": artefact,
+        return {"verdict": "NOT_MEASURED", "intent": intent, "artefact": artefact,
                 "why": ("no file in the die slot defines a single GDSII "
                         "structure; there is no hierarchy to read, which is a "
                         "different statement from `the hierarchy is wrong`")}
     if not die["top_cells"]:
-        return {"verdict": "NOT_CHECKED", "intent": intent, "artefact": artefact,
+        return {"verdict": "NOT_MEASURED", "intent": intent, "artefact": artefact,
                 "why": ("every structure in the die slot is referenced by "
                         "another, so no hierarchy root can be read; R4 "
                         "compares a root and there is none")}
@@ -2489,7 +2495,7 @@ def rule_cited_constant_not_in_source(project: Path,
              if (project / r).is_dir() and "generated_docs" in str(r)]
     l_docs = sorted({p for d in gdirs for p in d.glob("L*.json")})
     if not l_docs:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": ("the stage staged no L-doc: "
                         + (", ".join(str(d.relative_to(project)) for d in gdirs)
                            or "no generated_docs among the declared artefact "
@@ -2499,7 +2505,7 @@ def rule_cited_constant_not_in_source(project: Path,
 
     texts = input_text(project, intent_rel)
     if not texts:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": (f"none of the declared intent paths "
                         f"({', '.join(intent_rel) or 'none'}) carries a "
                         f"readable text-bearing input document. A constant "
@@ -2643,7 +2649,7 @@ def rule_cited_constant_not_in_source(project: Path,
         # FAIL-CLOSED, and it is the whole difference from #2272's prose
         # reading: a document that could not be READ has declared nothing, so
         # a zero here is "I could not look", not "it is not there".
-        return {"verdict": "NOT_CHECKED", "intent": intent,
+        return {"verdict": "NOT_MEASURED", "intent": intent,
                 "artefact": artefact, "intent_dirs": intent_dirs,
                 "why": (f"{len(unreadable)} of {len(l_docs)} L-doc(s) could "
                         f"not be parsed ({', '.join(unreadable[:6])}"
@@ -2811,16 +2817,16 @@ def rule_top_module_provenance_refuted(project: Path,
 
     l9 = in_artefact("L9_INTEGRATION_SPEC.json")
     if l9 is None:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": ("the stage's `artefact:` carries no "
                         "L9_INTEGRATION_SPEC.json; there is no declared top "
                         "module to trace")}
     intent_top = read_intent_top(l9)          # the same reader R1 uses
     if not intent_top.get("readable"):
-        return {"verdict": "NOT_CHECKED", "why": f"{l9}: {intent_top.get('why')}"}
+        return {"verdict": "NOT_MEASURED", "why": f"{l9}: {intent_top.get('why')}"}
     top = intent_top.get("value")
     if not isinstance(top, str) or not top.strip():
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "artefact": {"file": str(l9.relative_to(project))},
                 "why": ("L9 declares no `top_module`; a document that claims "
                         "nothing cannot be contradicted, and an absent claim "
@@ -2841,7 +2847,7 @@ def rule_top_module_provenance_refuted(project: Path,
     design_input = read_design_input(
         project, intent_rel, [str(x) for x in (decl.get("intent_deny") or [])])
     if not design_input["files"]:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "artefact": {"file": str(l9.relative_to(project)),
                              "top_module": top, "strategy": strategy},
                 "why": (f"none of the declared intent paths "
@@ -2871,7 +2877,7 @@ def rule_top_module_provenance_refuted(project: Path,
         except (OSError, ValueError):
             ic_name = None
     if not isinstance(ic_name, str) or not ic_name.strip():
-        return {"verdict": "NOT_CHECKED", "intent": intent,
+        return {"verdict": "NOT_MEASURED", "intent": intent,
                 "artefact": {"file": str(l9.relative_to(project)),
                              "top_module": top, "strategy": strategy},
                 "why": (f"{top!r} is not in the design input, and L1 declares "
@@ -3367,7 +3373,7 @@ def intent_self_contradicts(intent: Dict[str, Any]) -> Dict[str, Any]:
     R5 depends on, exercised where evidence exists.
     """
     if not intent.get("readable"):
-        return {"verdict": "NOT_CHECKED", "why": intent.get("why")}
+        return {"verdict": "NOT_MEASURED", "why": intent.get("why")}
     if intent.get("declares_no_package"):
         return {"verdict": "DISARMED",
                 "observation": (
@@ -3376,11 +3382,11 @@ def intent_self_contradicts(intent: Dict[str, Any]) -> Dict[str, Any]:
                     f"{intent.get('package_type')!r} is a placeholder, not a "
                     f"claim about this design")}
     if intent.get("provides") is None:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": ("the intent states no package_info.pin_count; an "
                         "absent declaration is not an agreement")}
     if intent.get("needs") is None:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": ("the intent enumerates no external pin; an empty pin "
                         "population refutes nothing and certifies nothing")}
     if int(intent["provides"]) >= int(intent["needs"]):
@@ -3411,31 +3417,31 @@ def rule_package_cannot_bond_design(project: Path, decl: Dict[str, Any]) -> Dict
     l1 = next((project / r for r in intent_rel
                if r.endswith("L1_DATASHEET.json")), None)
     if l1 is None:
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": ("the stage's `intent:` names no L1_DATASHEET.json; R5 "
                         "has no intent to read")}
     if not l1.exists():
-        return {"verdict": "NOT_CHECKED",
+        return {"verdict": "NOT_MEASURED",
                 "why": f"{l1} does not exist; the intent was never published"}
     intent = read_package_intent(l1)
     intent["intent_rel"] = str(l1.relative_to(project))
     if not intent.get("readable"):
-        return {"verdict": "NOT_CHECKED", "why": f"{l1}: {intent.get('why')}"}
+        return {"verdict": "NOT_MEASURED", "why": f"{l1}: {intent.get('why')}"}
 
     log = next((project / r for r in artefact_rel
                 if r.endswith("packaging_log.json")), project / _PACKAGING_LOG)
     if not log.exists():
         # THE ONLY BRANCH ANY REAL RUN HAS EVER REACHED. Not an acceptance:
         # nothing was assembled, so nothing was reviewed.
-        return {"verdict": "NOT_CHECKED", "intent": intent,
+        return {"verdict": "NOT_MEASURED", "intent": intent,
                 "why": (f"{log} does not exist; stage 5 assembled nothing, so "
                         f"there is no package for the intent to contradict")}
     try:
         art = json.loads(log.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError) as e:
-        return {"verdict": "NOT_CHECKED", "intent": intent, "why": f"{log}: {e}"}
+        return {"verdict": "NOT_MEASURED", "intent": intent, "why": f"{log}: {e}"}
     if not isinstance(art, dict):
-        return {"verdict": "NOT_CHECKED", "intent": intent,
+        return {"verdict": "NOT_MEASURED", "intent": intent,
                 "why": f"{log} is not a mapping"}
 
     assembled = _as_pin_count(art.get("pin_count"))
@@ -3443,14 +3449,14 @@ def rule_package_cannot_bond_design(project: Path, decl: Dict[str, Any]) -> Dict
                 "package_type": art.get("package_type"),
                 "pin_count": assembled}
     if assembled is None:
-        return {"verdict": "NOT_CHECKED", "intent": intent, "artefact": artefact,
+        return {"verdict": "NOT_MEASURED", "intent": intent, "artefact": artefact,
                 "why": (f"{log} states no pin_count; an artefact that does not "
                         f"say what it assembled cannot be compared")}
     if intent.get("declares_no_package"):
         return {"verdict": "DISARMED", "intent": intent, "artefact": artefact,
                 "observation": intent_self_contradicts(intent)["observation"]}
     if intent.get("needs") is None:
-        return {"verdict": "NOT_CHECKED", "intent": intent, "artefact": artefact,
+        return {"verdict": "NOT_MEASURED", "intent": intent, "artefact": artefact,
                 "why": ("the intent enumerates no external pin; an empty pin "
                         "population refutes nothing and certifies nothing")}
     if assembled >= int(intent["needs"]):
@@ -3845,7 +3851,7 @@ def test_the_declared_top_module_came_from_the_input_or_its_declared_source():
         return  # the document discloses a placeholder; nothing is claimed
     assert top, (
         "%s declares no top_module at all. DELETING THE CLAIM IS NOT A REPAIR: "
-        "over an absent claim the review reports NOT_CHECKED -- 'a document "
+        "over an absent claim the review reports NOT_MEASURED -- 'a document "
         "that claims nothing cannot be contradicted, and an absent claim is "
         "not a grounded one' -- and this test must not certify green what the "
         "review declines to certify. To disclose that the input named no top "
@@ -4658,7 +4664,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     def emit(rec: Dict[str, Any]) -> None:
         # vibe-ic#1082 — ATOMIC, because this record is a VERDICT.
         #
-        # Every `emit()` call below carries the review's answer: NOT_CHECKED
+        # Every `emit()` call below carries the review's answer: NOT_MEASURED
         # with its reason, or the rejections a landing acts on. A `write_text`
         # that dies mid-write leaves a half-parsed verdict at the declared
         # destination, and the next reader takes it as this step's evidence —
@@ -4675,14 +4681,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         decl = load_declaration(a.flow_def, a.stage)
     except ValueError as e:
-        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_CHECKED",
+        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": str(e)})
-        print(f"{_NAME}: rc=2 NOT CHECKED — {e}")
+        print(f"{_NAME}: rc=2 NOT MEASURED — {e}")
         return 2
     if not decl:
-        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_CHECKED",
+        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": "the stage declares no on_pass_review"})
-        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage!r} declares no "
+        print(f"{_NAME}: rc=2 NOT MEASURED — stage {a.stage!r} declares no "
               f"`on_pass_review:` block in {a.flow_def}. The review is "
               f"declared in the flow; a stage that does not declare one has "
               f"not been reviewed.")
@@ -4703,11 +4709,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     # loud one.
     policy = declared_verdict(decl)
     if policy is None:
-        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_CHECKED",
+        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": "the on_pass_review block declares no usable `verdict:`",
               "declared_verdict": decl.get("verdict"),
               "verdict_policies": list(VERDICT_POLICIES)})
-        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage!r} declares an "
+        print(f"{_NAME}: rc=2 NOT MEASURED — stage {a.stage!r} declares an "
               f"`on_pass_review:` block whose `verdict:` is "
               f"{decl.get('verdict')!r}, which is not one of "
               f"{list(VERDICT_POLICIES)}. Whether this review's rejection "
@@ -4722,12 +4728,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     # the docstring. This does not forbid blocking: wire the program where its
     # rc can stop a step, re-declare it there, and the two move together.
     if policy != DECLARED_ENFORCEMENT:
-        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_CHECKED",
+        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": ("the stage's `verdict:` and this program's "
                       "`ENFORCEMENT:` declaration disagree"),
               "stage_verdict_policy": policy,
               "program_enforcement": DECLARED_ENFORCEMENT})
-        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage!r} declares "
+        print(f"{_NAME}: rc=2 NOT MEASURED — stage {a.stage!r} declares "
               f"`verdict: {policy}` while this program declares "
               f"`ENFORCEMENT: {DECLARED_ENFORCEMENT}` and no runner spawns it "
               f"inline. Wire it where it can block and re-declare it here, or "
@@ -4739,9 +4745,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     denied = denied_intent_paths(project, [str(x) for x in decl.get("intent") or []],
                                  [str(x) for x in decl.get("intent_deny") or []])
     if denied:
-        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_CHECKED",
+        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": "denied intent path", "denied": denied})
-        print(f"{_NAME}: rc=2 NOT CHECKED — §4.05: {len(denied)} declared "
+        print(f"{_NAME}: rc=2 NOT MEASURED — §4.05: {len(denied)} declared "
               f"intent path(s) resolve under a denied segment:")
         for d in denied:
             print(f"    {d['path']}  (denied segment {d['denied_segment']!r})")
@@ -4758,9 +4764,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     # nobody can act on. Producing a pile of them is worse than declining.
     declared_fires_on = decl.get("fires_on")
     if str(declared_fires_on) != _SUPPORTED_FIRES_ON:
-        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_CHECKED",
+        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": "unsupported fires_on", "fires_on": declared_fires_on})
-        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage!r} declares "
+        print(f"{_NAME}: rc=2 NOT MEASURED — stage {a.stage!r} declares "
               f"`fires_on: {declared_fires_on!r}` and this engine implements "
               f"only {_SUPPORTED_FIRES_ON!r}. It reviews a stage that PASSED; "
               f"it has no other firing condition to offer, so it declines "
@@ -4778,10 +4784,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     declared_emit = a.emit_test or (project / str(
         decl.get("emit_test_dir") or _DEFAULT_EMIT_DIR))
     if emit_dir_escapes(project, declared_emit):
-        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_CHECKED",
+        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": "emit_test_dir escapes the run",
               "emit_dir": str(declared_emit), "project": str(project)})
-        print(f"{_NAME}: rc=2 NOT CHECKED — the emitted regression would land "
+        print(f"{_NAME}: rc=2 NOT MEASURED — the emitted regression would land "
               f"OUTSIDE the run: {str(declared_emit)!r} does not resolve under "
               f"{str(project)!r}.")
         print(f"    A rejection's emitted test is the evidence that the "
@@ -4798,52 +4804,56 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     fired = stage_passed(a.compliance, a.stage, a.stage_verdict)
     if fired["passed"] is None:
-        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_CHECKED",
+        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": fired["why"], "fires_on": decl.get("fires_on")})
-        print(f"{_NAME}: rc=2 NOT CHECKED — {fired['why']}. The review fires "
+        print(f"{_NAME}: rc=2 NOT MEASURED — {fired['why']}. The review fires "
               f"on {decl.get('fires_on')!r}; it does not run on an "
               f"unestablished verdict.")
         return 2
     if not fired["passed"]:
-        # R-0915-34(a) — THIS IS A CASCADE, AND IT SAYS SO IN ITS OWN WORDS.
+        # R-0915-85 — THE REVIEW RUNS. It used to return here, rc 2, and that
+        # return is the subservient r26 defect at its source.
         #
-        # Declining because the stage under review is not green is not a fault
-        # in this program: it looked, it read the register, and it is WAITING
-        # on rows somebody else owns. Booked as EXECUTION_ERROR it read as a
-        # program defect, and because this review is the gate of steps 2, 7,
-        # 14, 15, 37 and 39, every one of them inherited INCOMPLETE from a
-        # sentence about someone else's step. MEASURED on spm x gf180mcuD.
+        # WHAT IT USED TO SAY, and why the sentence was wrong: "this review
+        # reviews a PASS; a stage that failed is the repair tier's, not this
+        # one's". The stage's artefacts are on disk either way, and the rules
+        # this program applies are about THOSE artefacts, not about the
+        # stage's word. Declining produced `NOT_CHECKED / BLOCKED_BY_UPSTREAM`,
+        # which the completion audit read as the step's whole population being
+        # unexamined, which made steps 2, 7, 15 and 37 NOT_MEASURED, which made
+        # the stage they belong to non-green, which made THIS program decline
+        # for the next stage. MEASURED on r26: every gate that looked at the
+        # design passed and the run was published FAIL.
         #
-        # The class is STATED here, in the field `report_reason_class` reads
-        # before any prose recogniser (#2275/#2276), together with the ROWS it
-        # waits on so the reader can act on it. `_p0_declared_absent`'s rule
-        # applies in spirit: the register EXISTS and says these rows are not
-        # green. The neighbouring `passed is None` branch — no register, an
-        # unreadable one, or no row for this stage at all — states NOTHING and
-        # keeps the fail-closed EXECUTION_ERROR, because a review that truly
-        # could not run has established nothing.
-        blocked = fired.get("non_green_rows") or []
-        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_CHECKED",
-              "why": fired["why"], "fires_on": decl.get("fires_on"),
-              "reason_class": "BLOCKED_BY_UPSTREAM",
-              "blocked_by": blocked})
-        named = ", ".join(f"{r['id']}={r['status']}" for r in blocked[:8])
-        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage} did not pass "
-              f"({fired['why']}). This review reviews a PASS; a stage that "
-              f"failed is the repair tier's, not this one's. BLOCKED_BY_"
-              f"UPSTREAM, waiting on: "
-              f"{named or 'no row this register names'}"
-              + (f", and {len(blocked) - 8} more" if len(blocked) > 8 else ""))
-        return 2
+        # The ruling's clause: a review gate runs whenever its INPUTS exist,
+        # and reports NOT_MEASURED with a reason only when they do not. The
+        # `passed is None` branch above is that case — no register, an
+        # unreadable one, or no row for this stage — and it is untouched.
+        #
+        # THE NON-GREEN ROWS ARE NOT LOST. They are disclosed in this
+        # program's own record under `reviewed_over_non_green_rows`, so a
+        # reader sees exactly what the review proceeded past, which is strictly
+        # more than the old decline ever published.
+        _blocked_rows = fired.get("non_green_rows") or []
+        _named = ", ".join(f"{r['id']}={r['status']}" for r in _blocked_rows[:8])
+        print(f"{_NAME}: stage {a.stage} is not green ({fired['why']}) — "
+              f"REVIEWING ANYWAY (R-0915-85: this review reads the stage's "
+              f"artefacts, not the stage's word). Non-green rows disclosed: "
+              f"{_named or 'none named by the register'}"
+              + (f", and {len(_blocked_rows) - 8} more"
+                 if len(_blocked_rows) > 8 else ""))
+        _reviewed_over_non_green = _blocked_rows
+    else:
+        _reviewed_over_non_green = []
 
     if a.stage in _DECLARED_NOT_ENABLED and a.stage not in _RULES:
         rules = _DECLARED_NOT_ENABLED[a.stage]
-        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_CHECKED",
+        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": "declared but not enabled",
               "declared_not_enabled": [
                   {"rule": r, "reason": _NOT_ENABLED_REASON[r]}
                   for r, _fn in rules]})
-        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage!r} declares "
+        print(f"{_NAME}: rc=2 NOT MEASURED — stage {a.stage!r} declares "
               f"{len(rules)} on-pass rule(s) that are DECLARED AND NOT "
               f"ENABLED:")
         for rule_id, _fn in rules:
@@ -4855,19 +4865,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     if a.stage not in _RULES:
-        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_CHECKED",
+        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_MEASURED",
               "why": "no on-pass rule is implemented for this stage"})
-        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage!r} declares an "
+        print(f"{_NAME}: rc=2 NOT MEASURED — stage {a.stage!r} declares an "
               f"on-pass review but this program implements no rule for it.")
         return 2
 
     rec = review(project, a.stage, decl,
                  emit_dir=a.emit_test.resolve() if a.emit_test else None)
     rec["stage_pass"] = fired
+    # R-0915-85 — WHAT THE REVIEW PROCEEDED PAST, on the record. The old
+    # decline published only that it had declined; this publishes the rows it
+    # reviewed over, so a reader gets strictly more than before.
+    if _reviewed_over_non_green:
+        rec["reviewed_over_non_green_rows"] = _reviewed_over_non_green
     emit(rec)
 
     if rec["unproven_rejections"]:
-        print(f"{_NAME}: rc=2 NOT CHECKED — {len(rec['unproven_rejections'])} "
+        print(f"{_NAME}: rc=2 NOT MEASURED — {len(rec['unproven_rejections'])} "
               f"finding(s) could not be proven and were NOT emitted as "
               f"rejections:")
         for f in rec["unproven_rejections"]:
@@ -4922,7 +4937,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # exactly as before. rc 1 here means "at least one rule proved a
     # contradiction", never "everything else was checked".
     if rec["not_checked"]:
-        head = ("rc=2 NOT CHECKED — " if not rec["rejections"]
+        head = ("rc=2 NOT MEASURED — " if not rec["rejections"]
                 else "[NOT CHECKED] ")
         print(f"{_NAME}: {head}{len(rec['not_checked'])} rule(s) "
               f"could not read what they need:")
@@ -4991,7 +5006,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # NO question arose was not reviewed. Only reachable once a rule can
     # answer NOT_APPLICABLE at all.
     if not n_ok and not n_dis:
-        print(f"{_NAME}: rc=2 NOT CHECKED — every rule on stage {a.stage} "
+        print(f"{_NAME}: rc=2 NOT MEASURED — every rule on stage {a.stage} "
               f"answered NOT_APPLICABLE ({n_na}); the artefact was read and "
               f"no rule found a subject in it, so nothing here certifies "
               f"that the extraction is faithful.")

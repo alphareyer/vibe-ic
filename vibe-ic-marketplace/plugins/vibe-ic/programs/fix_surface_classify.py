@@ -111,11 +111,11 @@ PRODUCER_PATTERNS = [
 #: `classif` / `_emit` identifier), so the single most on-the-nose consumer
 #: change in the commit read as `unknown` -> ambiguous -> MIXED.
 try:                                       # pragma: no cover - import shim
-    from _flow_verdict_tiers import PRODUCER_STATUSES as _VERDICT_TOKENS
+    from verdict import PRODUCER_STATUSES as _VERDICT_TOKENS
 except ImportError:                        # pragma: no cover
     import sys as _sys, pathlib as _pl
     _sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
-    from _flow_verdict_tiers import PRODUCER_STATUSES as _VERDICT_TOKENS
+    from verdict import PRODUCER_STATUSES as _VERDICT_TOKENS
 
 #: Both spellings: the flow tier table writes `VACUOUS-PASS`, a program prints
 #: `VACUOUS_PASS:`. Anchored to a token boundary so `PASS` cannot match inside

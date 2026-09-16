@@ -53842,7 +53842,7 @@ def emit_coverage_report(project: Path,
     # WHY A NEW WORD IS SAFE, MEASURED rather than assumed. Every reader of
     # this field was enumerated: no allow-list, no enum and no JSON schema
     # constrains it (the three status registries that exist —
-    # `_flow_verdict_tiers.PRODUCER_STATUSES`, `vibe_ic_log.VALID_STATUSES`,
+    # `verdict.PRODUCER_STATUSES`, `vibe_ic_log.VALID_STATUSES`,
     # `analog_hil_report_schema_check._VALID_STATUS` — are each scoped to a
     # different artifact). Exactly one consumer reads it as a verdict at all,
     # `benchmark_evidence_publish._citations_under_a_pass`, and it fails OPEN:

@@ -73,7 +73,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-import _flow_verdict_tiers as _T
+import verdict as _T
 
 __all__ = [
     "BLOCKER_CLASSES",
@@ -170,7 +170,7 @@ def _field(step: Any, name: str, default: Any = "") -> Any:
     """One field off a step in either shape — `StepResult` in the producer,
     plain dict in the `--json` report and in every test. A predicate that knew
     only one shape would answer correctly in one place and silently return the
-    default in the other; `_flow_verdict_tiers._field` exists for the same
+    default in the other; `verdict._field` exists for the same
     reason and this is deliberately the same device."""
     if isinstance(step, Mapping):
         val = step.get(name, default)
@@ -197,7 +197,7 @@ def _starts_with_any(reason: str, prefixes: Sequence[str]) -> bool:
 def is_blocker(step: Any) -> bool:
     """Is this step something a reader has to close before tape-out?
 
-    DERIVED from `_flow_verdict_tiers`, never from a list of statuses kept
+    DERIVED from `verdict`, never from a list of statuses kept
     here: a tier invented tomorrow lands on the blocking side by construction,
     which is the fail-SAFE direction and the same derivation the ordering guard
     uses. Two adjustments, and they are the producer's own semantics:
@@ -215,10 +215,14 @@ def is_blocker(step: Any) -> bool:
     the disclosure tiers, and cascades. Cascades are marked `derived_from`
     rather than dropped: dropping them is how a report stops summing.
     """
-    status = _T.normalize(_field(step, "status"))
+    status = _field(step, "status")
     if _T.is_full_pass(status):
         return False
-    if status == "SKIPPED-CONDITION":
+    if _T.is_excused(status):
+        # NOT_APPLICABLE: the INPUT says there is nothing here. It reaches the
+        # blocker list only when the RUNNER disclosed a capability gap for it
+        # (the #608/#675 self-skip evidence) — which is a real unmet
+        # requirement wearing an explanation, not a declaration.
         return bool(_field(step, "self_skip_disclosed", False))
     return bool(status)
 
@@ -288,7 +292,7 @@ def predecessor_delivered_outputs(
     Conservative by construction: every path that cannot positively establish
     delivery returns False, which leaves rule 7 firing exactly as before.
     """
-    status = _T.normalize(_field(step, "status"))
+    status = _field(step, "status")
     if status not in _PREDECESSOR_REACHED_VERDICT_STATUSES:
         return False
     if _has_marker(step, CRASH_MARKER) or _has_marker(step, TIMEOUT_MARKER):
@@ -330,7 +334,7 @@ def classify(step: Any,
     "delivered". An explicit ``[]`` means the caller looked and every
     predecessor delivered.
     """
-    status = _T.normalize(_field(step, "status"))
+    status = _field(step, "status")
     reasons = _reasons(step)
 
     # 1. The gate program died. Whatever it was going to say about the design,
@@ -598,7 +602,7 @@ def build_blockers(results: Sequence[Any],
         if isinstance(fs, Mapping) and "id" in fs:
             by_id[fs["id"]] = fs
     status_by_id: Dict[Any, str] = {
-        _field(r, "id"): _T.normalize(_field(r, "status")) for r in results}
+        _field(r, "id"): _field(r, "status") for r in results}
     result_by_id: Dict[Any, Any] = {_field(r, "id"): r for r in results}
     oss_blocked = oss_blocked or {}
 

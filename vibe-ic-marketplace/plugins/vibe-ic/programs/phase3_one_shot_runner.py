@@ -38687,7 +38687,7 @@ def _vacuous_on_unrouted(project: Path, step_name: str,
     """VACUOUS-PASS for a sign-off step whose inputs are an unrouted layout.
 
     VACUOUS-PASS, not FAIL, deliberately: the check RAN and its own result is
-    honest — what is missing is the precondition. `_flow_verdict_tiers` already
+    honest — what is missing is the precondition. `verdict` already
     ranks VACUOUS-PASS as non-green, so the audit and the step now agree instead
     of the audit alone knowing. Returns None when routing is complete, or when
     the fact was never recorded, so a healthy run is untouched."""
@@ -41774,7 +41774,7 @@ def _try_svrf_native_drc(project: Path, top: str, pdk: PdkConfig,
         # `return "PASS"`. MEASURED on this tree before the change: a plan whose
         # only non-PASS step was a timed-out sign-off DRC aggregated to a plain
         # green `"PASS"` — not even PASS_WITH_WAIVERS. Downstream,
-        # `_flow_verdict_tiers.is_excused("SKIPPED-CONDITION")` is True, so
+        # `verdict.is_excused("SKIPPED-CONDITION")` is True, so
         # wherever that word IS adjudicated the step is subtracted from
         # `total_required` as well: a DRC that ran out of time stopped being
         # owed at all.

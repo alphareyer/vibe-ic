@@ -77,7 +77,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import _path_layout as _pl
 import _analog_a_check_common as _acc
-import _flow_verdict_tiers as _T
+import verdict as _T
 import _watchdog as _wd  # progress-stall process supervision
 
 
@@ -207,7 +207,7 @@ ROLLUP_ORDER = (
     # qualified done-claim tier split by a count, so it belongs next to the
     # word it splits and before the other qualified tiers.
     "VACUOUS-PASS", "PARTIALLY-VACUOUS", "STRUCTURE-ONLY", "INCOMPLETE",
-    # RB2-03 (#2063) registered NOT-MEASURED in `_flow_verdict_tiers.
+    # RB2-03 (#2063) registered NOT-MEASURED in `verdict.
     # PRODUCER_STATUSES` and stopped there. `_TALLY_LABEL_TO_BUCKET` is DERIVED
     # from that set, so the word became emittable the same commit; this list is
     # a presentation order and cannot be derived, so it stayed one word short
@@ -229,7 +229,7 @@ ROLLUP_ORDER = (
     "WAIVED", "WAIVED-DEFERRED", "DEFERRED-BY-UPSTREAM",
     # Beside the other EXCUSED words, because it is one: a step the run declared
     # OUT of its scope via --entry-step. Registering the status in
-    # _flow_verdict_tiers was not enough — a bucket the roll-up cannot PRINT is
+    # verdict was not enough — a bucket the roll-up cannot PRINT is
     # invisible in the summary the reader actually looks at, which is what
     # `final_summary_rollup_consistency_check` exists to catch.
     "OUT-OF-SCOPE-BY-ENTRY",
@@ -496,14 +496,15 @@ def _load_fresh_audit_snapshot(
 
 
 def _audit_bucket(raw: Any) -> str:
-    """One report spelling for a producer count/status key."""
-    bucket = _T.normalize(str(raw or ""))
-    # Internally the producer calls this step status WAIVED; its stdout and the
-    # report call the same bucket WAIVED-DEFERRED.  This is an alias, not a new
-    # classification.
-    if bucket in {"WAIVED", "WAIVED-DEFERRED"}:
-        return "WAIVED-DEFERRED"
-    return bucket
+    """One report spelling for a producer count/status key.
+
+    R-0915-85 made this a no-op and the function is kept only as the one place
+    a reader looks for "is there a second spelling?". There is not: the producer
+    writes one of the five words and the report prints the same five. The
+    WAIVED / WAIVED-DEFERRED alias this used to fold is gone with both words —
+    a deferral is `PASS_WITH_WAIVERS` and the rows are in `waiver_rows`.
+    """
+    return str(raw or "")
 
 
 def _audit_step_counts(
@@ -962,14 +963,14 @@ def _build_tally_label_map() -> dict:
     direction. PASS-VOIDED-BY-DEPENDENCY is the sharpest of the three: it is
     the word #671 introduced precisely to say "this is NOT a pass".
 
-    ``_flow_verdict_tiers.PRODUCER_STATUSES`` is the authoritative vocabulary
+    ``verdict.PRODUCER_STATUSES`` is the authoritative vocabulary
     and already carries an anti-drift test ("a word added there without a home
     below is a test failure, not a silent escape"). That protection never
     reached this copy because this copy was a copy. Deriving from it means the
     next tier is covered without anyone remembering this file exists.
     """
     try:
-        from _flow_verdict_tiers import PRODUCER_STATUSES
+        from verdict import PRODUCER_STATUSES
     except ImportError:  # pragma: no cover — shared module always ships
         PRODUCER_STATUSES = set()
     out = {s: s for s in PRODUCER_STATUSES}

@@ -54,7 +54,7 @@ class AuditResult:
 
 
 #: ORGANIC #887 — the verdict word for "I ran, but the input I audit was not
-#: there". Spelled the way `_flow_verdict_tiers.normalize` reads it.
+#: there". Spelled the way `verdict.normalize` reads it.
 _VACUOUS_VERDICT = "VACUOUS_PASS"
 
 #: The gate's OWN machine-readable skip-reason token, and a TOKEN on purpose:

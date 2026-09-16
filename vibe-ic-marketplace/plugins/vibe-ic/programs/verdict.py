@@ -574,7 +574,75 @@ def validate_step_row(row: Any) -> None:
             reason=(getattr(row, "detail", "") or "")[:400] or
             "waived with no reason recorded at the site").to_dict()]
 
+
+# ── the ONE boundary with the GATE reason vocabulary ─────────────────────
+
+#: `_flow_reason_taxonomy` is a DIFFERENT schema's field, not an older spelling
+#: of this one: it classifies why a GATE PROGRAM returned no verdict
+#: (DESIGN_DECLARED_NA / CAPABILITY_ABSENT / EXTERNAL / ASKED_BEFORE_PRODUCER /
+#: BLOCKED_BY_UPSTREAM / EXECUTION_ERROR / ZERO_DENOMINATOR), it is already
+#: single-sourced in one module, and it carries its own doctrine
+#: (`SKIP_ELIGIBLE`, `INCOMPLETE`). None of its seven words is one of the
+#: step-status words R-0915-85 deleted.
+#:
+#: WHY THIS IS NOT THE FORBIDDEN TRANSLATION TABLE. The table the ruling
+#: forbids maps an OLD STEP WORD to a NEW STEP WORD, so that a producer can go
+#: on writing `SKIP` and a reader go on understanding it — the thing that lets
+#: the deleted vocabulary survive its own deletion. This maps a NEIGHBOURING
+#: SCHEMA's field into this one at the single point where a gate's answer
+#: becomes a step's, which is what any boundary between two schemas is. It is
+#: stated ONCE, here, so there is exactly one place it can drift.
+#:
+#: The other reading — fold the gate vocabulary into `ReasonClass` — is the
+#: right eventual shape and is NOT done in this batch: it is 22 more programs
+#: and a doctrine (`SKIP_ELIGIBLE`) whose members would have to be re-argued,
+#: and the ruling's subject is the word a STEP wears. Named in the handback as
+#: the follow-up it is.
+_GATE_REASON_TO_STEP_REASON: Dict[str, ReasonClass] = {
+    "CAPABILITY_ABSENT": ReasonClass.TOOL_ABSENT,
+    "BLOCKED_BY_UPSTREAM": ReasonClass.UPSTREAM_REFUSED,
+    "EXECUTION_ERROR": ReasonClass.EXECUTION_ERROR,
+    "ZERO_DENOMINATOR": ReasonClass.NO_POPULATION,
+    "ASKED_BEFORE_PRODUCER": ReasonClass.INPUT_ABSENT,
+    "EXTERNAL": ReasonClass.INPUT_ABSENT,
+}
+
+
+def step_reason_for_gate_reason(gate_reason: Any) -> Optional[ReasonClass]:
+    """A gate's reason class, as the STEP's.
+
+    Returns `None` for `DESIGN_DECLARED_NA`, deliberately and loudly: a gate
+    that says the DESIGN DECLARED this inapplicable is not giving a reason
+    nothing was measured — it is giving the step `NOT_APPLICABLE`, and the
+    caller must carry the declaration into `declared_by`. Collapsing it to a
+    reason class is exactly how a declaration and an absence became
+    indistinguishable in the first place.
+    """
+    if not gate_reason:
+        return None
+    return _GATE_REASON_TO_STEP_REASON.get(str(gate_reason).strip().upper())
+
+
 # ── THE CASCADE RULE ─────────────────────────────────────────────────────
+
+def as_verdict_or_none(word: Any) -> Optional[Verdict]:
+    """`parse`, for text that is NOT known to be a step status.
+
+    THE ONE TOLERANT READER, and its scope is stated so it cannot spread. Two
+    consumers compare a step verdict against PROSE a human wrote in a report
+    card — `ic_run_status_derive.disagreements` asks whether a sentence claims
+    a pass the machine record does not support. Prose is not a status, so
+    `parse` raising on it would be wrong; returning `None` says "that text is
+    not one of the five", which is exactly the question being asked.
+
+    It is NOT a fallback reader for reports. A step record's `status` goes
+    through `parse` and an old word stops the reader — see the module DESIGN.
+    """
+    try:
+        return parse(word)
+    except UnknownVerdictWord:
+        return None
+
 
 def cascade_to_dependent(upstream: StepVerdict,
                          dependent_id: str = "",

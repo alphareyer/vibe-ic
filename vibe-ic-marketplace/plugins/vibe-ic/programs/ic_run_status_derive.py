@@ -98,7 +98,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import _eda_pin
-import _flow_verdict_tiers as _T
+import verdict as _T
 import _path_layout as _pl
 
 NOT_MEASURED = "NOT_MEASURED"
@@ -498,13 +498,19 @@ def disagreements(machine: str, claims: List[Dict[str, Any]]) -> List[str]:
     a machine non-green is the disagreement this rule exists for.
     """
     out = []
-    m = _T.normalize(machine)
-    machine_is_done = _T.is_done_claim(m) and m != NO_VERDICT
+    # R-0915-85: the machine word is one of the five and goes through `parse`;
+    # the PROSE claim is a sentence somebody wrote and goes through
+    # `as_verdict_or_none`, which answers "is that text one of the five" without
+    # refusing when it is not. The old `normalize` blurred the two.
+    _m = _T.as_verdict_or_none(machine)
+    machine_is_done = bool(_m) and _T.is_done_claim(_m) and machine != NO_VERDICT
     for c in claims:
         claim = c.get("claim")
         if not claim:
             continue
-        prose_is_done = claim in ("PRODUCTION-READY",) or _T.is_done_claim(_T.normalize(claim))
+        _c = _T.as_verdict_or_none(claim)
+        prose_is_done = (claim in ("PRODUCTION-READY",)
+                         or (bool(_c) and _T.is_done_claim(_c)))
         if prose_is_done and not machine_is_done:
             out.append(f"{c['file']} states {claim!r} while the run states {machine!r}")
     return out
