@@ -1,0 +1,22 @@
+SDF INFO: Loading cal_typ.sdf from cal_tb.v:6
+SDF INFO: cal_typ.sdf:2: Version: 3.0
+SDF INFO: cal_typ.sdf:3: Design: cal_chain
+SDF INFO: cal_typ.sdf:4: Date: Wed Sep 16 08:49:09 2026
+SDF INFO: cal_typ.sdf:5: Vendor: Parallax
+SDF INFO: cal_typ.sdf:6: Program: STA
+SDF INFO: cal_typ.sdf:7: Program Version: 2.7.0
+SDF INFO: cal_typ.sdf:8: Divider: "/"
+SDF ERROR: cal_typ.sdf:9: Chosen value not defined.
+SDF INFO: cal_typ.sdf:10: Process: 1.000::1.000
+SDF ERROR: cal_typ.sdf:11: Chosen value not defined.
+SDF INFO: cal_typ.sdf:12: Timescale: 1ns
+SDF INFO: cal_typ.sdf:18: INTERCONNECT with port1 = A index = 0, port2 = u1.A index = 0
+SDF INFO: cal_typ.sdf:18: Created a vpiInterModPath
+SDF INFO: cal_typ.sdf:18: Putting delay: 0.000000 for index 0
+SDF INFO: cal_typ.sdf:19: INTERCONNECT with port1 = u1.Y index = 0, port2 = u2.A index = 0
+SDF INFO: cal_typ.sdf:19: Created a vpiInterModPath
+SDF INFO: cal_typ.sdf:19: Putting delay: 0.000000 for index 0
+SDF INFO: cal_typ.sdf:20: INTERCONNECT with port1 = u2.Y index = 0, port2 = Y index = 0
+SDF INFO: cal_typ.sdf:20: Created a vpiInterModPath
+SDF INFO: cal_typ.sdf:20: Putting delay: 0.000000 for index 0
+cal_tb.v:7: $finish called at 3000 (1ps)

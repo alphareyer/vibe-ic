@@ -52,6 +52,7 @@ import json
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import instrument_calibration as _instrument_calibration  # noqa: E402  R-0915-86(3)
 
 # --- producer kinds ---------------------------------------------------------
 #: A rule deck was applied to a layout — a sign-off producer.
@@ -235,6 +236,8 @@ def router_loop_iter_counts(text: str) -> List[int]:
     series returns 11 and rules the remedy out.
 
     chip-AGNOSTIC: OpenROAD/TritonRoute log grammar only."""
+    _instrument_calibration.assert_calibrated(
+        "_signoff_drc_format::router_loop_iter_counts")  # R-0915-86(3)
     if not text:
         return []
     text = selected_route_log(text)
@@ -314,6 +317,8 @@ def router_post_route_final_count(text: str) -> Optional[int]:
     ``router_iter_counts`` appends it only when a real loop count already
     exists.
     """
+    _instrument_calibration.assert_calibrated(
+        "_signoff_drc_format::router_post_route_final_count")  # R-0915-86(3)
     if not text:
         return None
     text = selected_route_log(text)

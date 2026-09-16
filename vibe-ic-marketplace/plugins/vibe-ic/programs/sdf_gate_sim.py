@@ -54,6 +54,7 @@ import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
 from _specrtl_common import strip_comments  # noqa: E402
+import instrument_calibration as _instrument_calibration  # noqa: E402  R-0915-86(3)
 
 try:
     import _path_layout as _pl
@@ -763,6 +764,8 @@ def sdf_annotation_census(text: str) -> Dict[str, object]:
     PURE — transcript in, counts out. `annotated` is False ONLY when not one
     delay was applied, which is the state that makes "SDF-annotated" false.
     """
+    _instrument_calibration.assert_calibrated(
+        "sdf_gate_sim::sdf_annotation_census")  # R-0915-86(3)
     applied = len(_SDF_APPLIED_RE.findall(text or ""))
     unmatched = len(_SDF_MODPATH_FAIL_RE.findall(text or ""))
     return {"delays_applied": applied,

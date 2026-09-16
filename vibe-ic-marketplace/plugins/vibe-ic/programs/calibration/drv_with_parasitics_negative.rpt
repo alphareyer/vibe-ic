@@ -1,0 +1,8 @@
+max capacitance
+
+Pin                                    Limit     Cap   Slack
+------------------------------------------------------------
+A                                       0.00    0.01   -0.00 (VIOLATED)
+
+u1/Y                                    0.00    0.01   -0.00 (VIOLATED)
+

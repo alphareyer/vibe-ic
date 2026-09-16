@@ -12447,6 +12447,7 @@ import _atomic_artefact as _aa  # noqa: E402  (vibe-ic#1082)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
+import instrument_calibration as _instrument_calibration  # noqa: E402  R-0915-86(3)
 
 
 def _run_producer(step: str, cmd: List[str], t0: float, *,
@@ -15585,6 +15586,8 @@ def _detail_route_completed(log_text: str) -> bool:
     """True when the router printed its own completion line. This is the
     evidence that separates "routing failed" from "routing succeeded and
     something after it died". Chip-AGNOSTIC: tool marker only."""
+    _instrument_calibration.assert_calibrated(
+        "phase3_one_shot_runner::_detail_route_completed")  # R-0915-86(3)
     return bool(_DRT_COMPLETE_RE.search(log_text or ""))
 
 
@@ -55524,6 +55527,8 @@ def antenna_routing_incomplete(log_txt: str) -> bool:
     PURE — text in, bool out, no filesystem and no tool. See the note above for
     what each marker means and why exactly one of them is read by its cause.
     """
+    _instrument_calibration.assert_calibrated(
+        "phase3_one_shot_runner::antenna_routing_incomplete")  # R-0915-86(3)
     if any(m in log_txt for m in _ANTENNA_ABORT_MARKERS):
         return True
     refusals = [ln for ln in log_txt.splitlines()
@@ -55598,6 +55603,8 @@ def route_modified_after_last_verification(log_txt: str) -> bool:
     already refused to call the route complete, and a claim about the order of
     an event that never happened would say more than the log does.
     """
+    _instrument_calibration.assert_calibrated(
+        "phase3_one_shot_runner::route_modified_after_last_verification")  # R-0915-86(3)
     lines = log_txt.splitlines()
     last_ver = max((i for i, ln in enumerate(lines)
                     if _ROUTE_VERIFIED_MARKER in ln), default=None)
@@ -55617,6 +55624,8 @@ def antenna_reroute_refusal_after_last_verification(log_txt: str) -> bool:
     already refused to call the route complete, and a second claim about
     ordering over an absent event would say more than the log does.
     """
+    _instrument_calibration.assert_calibrated(
+        "phase3_one_shot_runner::antenna_reroute_refusal_after_last_verification")  # R-0915-86(3)
     lines = log_txt.splitlines()
     last_ver = max((i for i, ln in enumerate(lines)
                     if _ROUTE_VERIFIED_MARKER in ln), default=None)

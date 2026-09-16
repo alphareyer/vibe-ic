@@ -102,6 +102,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # than restating is what keeps the two from drifting.
 import analog_incremental_decimator as _inc
 from analog_adc_enob_corner_check import _MIN_SIGNAL_CYCLES
+import instrument_calibration as _instrument_calibration  # noqa: E402  R-0915-86(3)
 
 PRODUCER = "analog_resolution_stimulus"
 
@@ -580,6 +581,8 @@ def incremental_tone(windows_total: int) -> Optional[Dict[str, Any]]:
 
     Highest, because a converter is graded nearest the band edge its OSR
     declares; gradable, because of the coprimality above."""
+    _instrument_calibration.assert_calibrated(
+        "analog_resolution_stimulus::incremental_tone")  # R-0915-86(3)
     m = int(windows_total) - 1
     if m < 2:
         return None

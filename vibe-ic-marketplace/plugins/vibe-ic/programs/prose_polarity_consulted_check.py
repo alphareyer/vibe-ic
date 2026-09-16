@@ -89,6 +89,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _ratchet_baseline as _ratchet  # noqa: E402
+import instrument_calibration as _instrument_calibration  # noqa: E402  R-0915-86(3)
 
 _BASELINE_NAME = "prose_polarity_baseline.json"
 _POLARITY_MODULE = "_prose_polarity"
@@ -1704,6 +1705,8 @@ _OFFENDER_REGISTER: Dict[str, str] = {}
 
 def scan(root: Path) -> List[str]:
     """`module::function` for every polarity-blind prose extractor."""
+    _instrument_calibration.assert_calibrated(
+        "prose_polarity_consulted_check::scan")  # R-0915-86(3)
     found: List[str] = []
     for p in sorted((root / "programs").glob("*.py")):
         if p.stem.startswith("test_") or p.stem == Path(__file__).stem:

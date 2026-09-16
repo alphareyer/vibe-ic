@@ -1,0 +1,14 @@
+                                     Required  Actual
+Pin                                    Width   Width   Slack
+------------------------------------------------------------
+_65_/CLK (low)                          0.20    0.02   -0.17 (VIOLATED)
+_66_/CLK (low)                          0.20    0.02   -0.17 (VIOLATED)
+_67_/CLK (low)                          0.20    0.02   -0.17 (VIOLATED)
+_68_/CLK (low)                          0.20    0.02   -0.17 (VIOLATED)
+_69_/CLK (low)                          0.20    0.02   -0.17 (VIOLATED)
+_65_/CLK (high)                         0.16    0.02   -0.13 (VIOLATED)
+_66_/CLK (high)                         0.16    0.02   -0.13 (VIOLATED)
+_67_/CLK (high)                         0.16    0.02   -0.13 (VIOLATED)
+_68_/CLK (high)                         0.16    0.02   -0.13 (VIOLATED)
+_69_/CLK (high)                         0.16    0.02   -0.13 (VIOLATED)
+

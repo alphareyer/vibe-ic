@@ -84,6 +84,7 @@ import re
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Set
+import instrument_calibration as _instrument_calibration  # noqa: E402  R-0915-86(3)
 
 # The OCV-derate marker line emitted by _emit_spef_sta (native-Tcl file append).
 _OCV_MARKER_RE = re.compile(
@@ -185,6 +186,8 @@ def _check_types_violations(report_text: str) -> List[str]:
     or endpoint description is read straight out of the report and quoted
     back verbatim (truncated) so the finding is self-evidencing.
     """
+    _instrument_calibration.assert_calibrated(
+        "sta_signoff_rigor_check::_check_types_violations")  # R-0915-86(3)
     found: List[str] = []
     for hm in _MPW_TABLE_HEADER_RE.finditer(report_text):
         after = report_text[hm.end():]

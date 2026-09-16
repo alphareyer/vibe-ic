@@ -207,6 +207,7 @@ PROGRAMS_DIR = _THIS.parent  # always the directory containing this script
 if str(PROGRAMS_DIR) not in sys.path:
     sys.path.insert(0, str(PROGRAMS_DIR))
 import _full_stack_memory_binding as _fsmb  # noqa: E402
+import instrument_calibration as _instrument_calibration  # noqa: E402  R-0915-86(3)
 
 # ─── authored-RTL guard state ────────────────────────────────────────────
 # Set by --force-rtl-regen: the EXPLICIT opt-in to let the generator
@@ -18858,6 +18859,8 @@ def lec_inconclusive_disposition(doc: dict) -> Tuple[str, str]:
 
     Ordering matters: exhaustion is checked FIRST, so a proof that was cut off
     before it could compare anything is reported as cut off, not as unclosed."""
+    _instrument_calibration.assert_calibrated(
+        "design_one_shot_runner::lec_inconclusive_disposition")  # R-0915-86(3)
     if not isinstance(doc, dict):
         return NOT_EXECUTED_STATUS, "record unreadable — nothing measured"
     stopped_by = lec_exhausted_resource_note(doc)

@@ -76,6 +76,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _progress_run as _pr  # noqa: E402
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
+import instrument_calibration as _instrument_calibration  # noqa: E402  R-0915-86(3)
 
 __all__ = [
     "run_in_container",
@@ -303,6 +304,8 @@ def container_tree_probe(container: str):
     ``signals`` records whether the channel was actually readable, so a stall
     reported with it missing can be told from one reported with it present.
     """
+    _instrument_calibration.assert_calibrated(
+        "_container_exec::container_tree_probe")  # R-0915-86(3)
     def factory(signals):
         cid = container_id(container)
         # The launch instant, in the same units /proc/<pid>/stat field 22 uses.

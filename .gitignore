@@ -38,6 +38,15 @@ yarn-error.log*
 # half — logs that live beside the reports they prove are deliverables. Adds
 # in this repo are always explicit paths, so nothing is swept in by this.
 !benchmark-data/**/reports/**/*.log
+
+# R-0915-86(3), consumer side. A CALIBRATION FIXTURE is a tool's own log, and
+# a fixture the ignore rule drops is a pair that exists on the author's host
+# and nowhere else — which is the failure mode `instrument_calibration` was
+# written to end. These are OpenROAD / iverilog transcripts produced from the
+# PDK by `programs/calibration/`'s own structures; they are evidence, not
+# build noise, and `test_instrument_calibration.test_every_on_disk_sample_exists`
+# is what notices if one of them stops shipping.
+!vibe-ic-marketplace/plugins/vibe-ic/programs/calibration/*.log
 # vibe-ic review F10, the other half of the same hole. The rescue above covers
 # `reports/**` only, and a formal proof transcript does not live there: the
 # runner writes it beside its task, at `phase2/stage1/formal/<stem>.sby.log`.

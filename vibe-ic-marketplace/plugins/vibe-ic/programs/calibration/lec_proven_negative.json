@@ -1,0 +1,637 @@
+{
+  "bounded_rung_policy": {
+    "completed_rungs_this_invocation": 5,
+    "enabled": false,
+    "limit_reached": false,
+    "max_completed_rungs": null,
+    "reason": "not requested",
+    "schema_version": "vibeic.lec.completed-rung-cap.v1",
+    "stopped_before_rung": null
+  },
+  "budget_exhausted": false,
+  "cache": {
+    "cache_key": "sha256:11fda73c7b97c6ca0a04d4de214ff9fe48bb86f700ac4a5a959384dac70d9513",
+    "directory": "reports/lec_pass_cache",
+    "enabled": true,
+    "hit": false
+  },
+  "compared_points": 5,
+  "controlled_limit_receipt": null,
+  "elapsed_sec": 5.96,
+  "equivalent": true,
+  "execution_mode": "fresh-yosys-proof",
+  "exhausted_resource": null,
+  "exhausted_resource_evidence": null,
+  "gate": "cal_lec.v (synth)",
+  "gold": "cal_lec (RTL)",
+  "gold_defines": null,
+  "gold_frontend": "verilog",
+  "gold_frontend_reason": null,
+  "gold_rtl_files": [
+    "cal_lec.v"
+  ],
+  "inconclusive": false,
+  "induction_wall_kind": "induction_depth",
+  "lec_attempts": 5,
+  "lec_attempts_detail": [
+    {
+      "attempt": 1,
+      "budget_sec": 900,
+      "elapsed_sec": 1.19,
+      "gold_defines": "-DSIMULATION -DYOSYS",
+      "gold_frontend": "verilog",
+      "kill_cause": {
+        "memory_max_bytes": null,
+        "oom_kill_delta": 0,
+        "oom_kills_after": 0,
+        "oom_kills_before": 0,
+        "returncode": 0
+      },
+      "killed_by_budget": false,
+      "launched": true
+    },
+    {
+      "attempt": 2,
+      "budget_sec": 899,
+      "elapsed_sec": 1.17,
+      "gold_defines": "-DSIMULATION -DYOSYS",
+      "gold_frontend": "verilog",
+      "kill_cause": {
+        "memory_max_bytes": null,
+        "oom_kill_delta": 0,
+        "oom_kills_after": 0,
+        "oom_kills_before": 0,
+        "returncode": 0
+      },
+      "killed_by_budget": false,
+      "launched": true
+    },
+    {
+      "attempt": 3,
+      "budget_sec": 898,
+      "elapsed_sec": 1.18,
+      "gold_defines": "-DSIMULATION -DYOSYS",
+      "gold_frontend": "verilog",
+      "kill_cause": {
+        "memory_max_bytes": null,
+        "oom_kill_delta": 0,
+        "oom_kills_after": 0,
+        "oom_kills_before": 0,
+        "returncode": 0
+      },
+      "killed_by_budget": false,
+      "launched": true
+    },
+    {
+      "attempt": 4,
+      "budget_sec": 896,
+      "elapsed_sec": 1.2,
+      "gold_defines": "-DSIMULATION -DYOSYS",
+      "gold_frontend": "verilog",
+      "kill_cause": {
+        "memory_max_bytes": null,
+        "oom_kill_delta": 0,
+        "oom_kills_after": 0,
+        "oom_kills_before": 0,
+        "returncode": 0
+      },
+      "killed_by_budget": false,
+      "launched": true
+    },
+    {
+      "attempt": 5,
+      "budget_sec": 895,
+      "elapsed_sec": 1.21,
+      "gold_defines": "-DSIMULATION -DYOSYS",
+      "gold_frontend": "verilog",
+      "kill_cause": {
+        "memory_max_bytes": null,
+        "oom_kill_delta": 0,
+        "oom_kills_after": 0,
+        "oom_kills_before": 0,
+        "returncode": 0
+      },
+      "killed_by_budget": false,
+      "launched": true
+    }
+  ],
+  "lec_ladder": {
+    "complete": true,
+    "legs": [
+      {
+        "attempt": 1,
+        "budget_sec": 900,
+        "checkpoint_recorded": [
+          "equiv_simple_short"
+        ],
+        "elapsed_sec": 1.19,
+        "launched": true,
+        "leg": 1,
+        "peak_rss_kib": 52992,
+        "peak_rss_kib_sampled": null,
+        "peak_rss_kib_self_reported": 52992,
+        "peak_rss_kib_source": "yosys end-of-script",
+        "position_read_back_only": false,
+        "proved_at_entry": null,
+        "proved_at_exit": 5,
+        "resumed_from_rung": null,
+        "rung": "equiv_simple_short",
+        "rung_index": 0,
+        "rungs_in_this_process": 1,
+        "script_sha256": "sha256:d2a30438a63f1524f0845d2306e8d6f3d0739fa710778995dc7bbaceb0b52b51",
+        "stopped": false,
+        "unproven_at_entry": null,
+        "unproven_at_exit": 0
+      },
+      {
+        "attempt": 2,
+        "budget_sec": 899,
+        "checkpoint_recorded": [
+          "equiv_simple_full"
+        ],
+        "elapsed_sec": 1.17,
+        "launched": true,
+        "leg": 2,
+        "peak_rss_kib": 19456,
+        "peak_rss_kib_sampled": null,
+        "peak_rss_kib_self_reported": 19456,
+        "peak_rss_kib_source": "yosys end-of-script",
+        "position_read_back_only": false,
+        "proved_at_entry": 5,
+        "proved_at_exit": 5,
+        "resumed_from_rung": "equiv_simple_short",
+        "rung": "equiv_simple_full",
+        "rung_index": 1,
+        "rungs_in_this_process": 1,
+        "script_sha256": "sha256:681c4030bd3e1ff218261eecea04e9897810505cd70a37daa86cdcd87f9d07b7",
+        "stopped": false,
+        "unproven_at_entry": 0,
+        "unproven_at_exit": 0
+      },
+      {
+        "attempt": 3,
+        "budget_sec": 898,
+        "checkpoint_recorded": [
+          "equiv_induct_seq4"
+        ],
+        "elapsed_sec": 1.18,
+        "launched": true,
+        "leg": 3,
+        "peak_rss_kib": 19456,
+        "peak_rss_kib_sampled": null,
+        "peak_rss_kib_self_reported": 19456,
+        "peak_rss_kib_source": "yosys end-of-script",
+        "position_read_back_only": false,
+        "proved_at_entry": 5,
+        "proved_at_exit": 5,
+        "resumed_from_rung": "equiv_simple_full",
+        "rung": "equiv_induct_seq4",
+        "rung_index": 2,
+        "rungs_in_this_process": 1,
+        "script_sha256": "sha256:a1d6d53a61f9893b0fb8bf037cfdd4eb2972a726471ce5307d99d4b9a9962328",
+        "stopped": false,
+        "unproven_at_entry": 0,
+        "unproven_at_exit": 0
+      },
+      {
+        "attempt": 4,
+        "budget_sec": 896,
+        "checkpoint_recorded": [
+          "equiv_induct_seq16"
+        ],
+        "elapsed_sec": 1.2,
+        "launched": true,
+        "leg": 4,
+        "peak_rss_kib": 19200,
+        "peak_rss_kib_sampled": null,
+        "peak_rss_kib_self_reported": 19200,
+        "peak_rss_kib_source": "yosys end-of-script",
+        "position_read_back_only": false,
+        "proved_at_entry": 5,
+        "proved_at_exit": 5,
+        "resumed_from_rung": "equiv_induct_seq4",
+        "rung": "equiv_induct_seq16",
+        "rung_index": 3,
+        "rungs_in_this_process": 1,
+        "script_sha256": "sha256:9ea2341ad34a58192ec0f666ded4b116ac3dd4f7e3288ae00dbece58b3e27166",
+        "stopped": false,
+        "unproven_at_entry": 0,
+        "unproven_at_exit": 0
+      },
+      {
+        "attempt": 5,
+        "budget_sec": 895,
+        "checkpoint_recorded": [
+          "equiv_induct_seq64"
+        ],
+        "elapsed_sec": 1.21,
+        "launched": true,
+        "leg": 5,
+        "peak_rss_kib": 19712,
+        "peak_rss_kib_sampled": null,
+        "peak_rss_kib_self_reported": 19712,
+        "peak_rss_kib_source": "yosys end-of-script",
+        "position_read_back_only": false,
+        "proved_at_entry": 5,
+        "proved_at_exit": 5,
+        "resumed_from_rung": "equiv_induct_seq16",
+        "rung": "equiv_induct_seq64",
+        "rung_index": 4,
+        "rungs_in_this_process": 1,
+        "script_sha256": "sha256:43aa40e0b2ed9f98d3584ed4acbd8ad7ee5e2dad2cb264c00d1340143b0c69e6",
+        "stopped": false,
+        "unproven_at_entry": 0,
+        "unproven_at_exit": 0
+      }
+    ],
+    "peak_rss_kib": 52992,
+    "peak_rss_kib_source": "max over per-rung processes",
+    "per_rung_processes": true,
+    "processes": 5,
+    "processes_launched": 5,
+    "proof_state_carry": {
+      "boundaries": [
+        {
+          "carried": true,
+          "from_rung": "equiv_simple_short",
+          "proved_at_entry": 5,
+          "proved_at_exit": 5,
+          "to_rung": "equiv_simple_full"
+        },
+        {
+          "carried": true,
+          "from_rung": "equiv_simple_full",
+          "proved_at_entry": 5,
+          "proved_at_exit": 5,
+          "to_rung": "equiv_induct_seq4"
+        },
+        {
+          "carried": true,
+          "from_rung": "equiv_induct_seq4",
+          "proved_at_entry": 5,
+          "proved_at_exit": 5,
+          "to_rung": "equiv_induct_seq16"
+        },
+        {
+          "carried": true,
+          "from_rung": "equiv_induct_seq16",
+          "proved_at_entry": 5,
+          "proved_at_exit": 5,
+          "to_rung": "equiv_induct_seq64"
+        }
+      ],
+      "boundaries_measured": 4,
+      "boundaries_total": 4,
+      "carried": true
+    },
+    "rungs": [
+      "equiv_simple_short",
+      "equiv_simple_full",
+      "equiv_induct_seq4",
+      "equiv_induct_seq16",
+      "equiv_induct_seq64"
+    ],
+    "schema_version": "vibeic.lec.ladder.v2-short-checkpoint",
+    "stopped_because": "the ladder is complete",
+    "stopped_on_no_progress": false,
+    "sum_of_rung_peaks_kib": 130816
+  },
+  "lec_resume": {
+    "base_script_sha256": "sha256:8a22bd8bf98ddaffc54518b967f80d146adbed19bfcb3cd48de5d8d5fd1e05fd",
+    "checkpoint_key": "sha256:174988bb6015c7f5f196c8297f84a22ada05ea63c1e96695c478828541b31b43",
+    "directory": "reports/lec_checkpoints/174988bb6015c7f5f196c8297f84a22ada05ea63c1e96695c478828541b31b43",
+    "enabled": true,
+    "reason": null,
+    "resumable_from_rung": null,
+    "resumed": false,
+    "resumed_from": null,
+    "rungs_available": [
+      "equiv_simple_short",
+      "equiv_simple_full",
+      "equiv_induct_seq4",
+      "equiv_induct_seq16",
+      "equiv_induct_seq64"
+    ],
+    "rungs_recorded_this_run": [
+      "equiv_simple_short",
+      "equiv_simple_full",
+      "equiv_induct_seq4",
+      "equiv_induct_seq16",
+      "equiv_induct_seq64"
+    ],
+    "rungs_recovered_from_a_killed_run": [],
+    "schema_version": "vibeic.lec.checkpoint.v1",
+    "state": "COMPLETE",
+    "state_label": "PASS",
+    "statement": "the proof ran to a completed equiv_status; the checkpoints on disk (['equiv_simple_short', 'equiv_simple_full', 'equiv_induct_seq4', 'equiv_induct_seq16', 'equiv_induct_seq64']) are evidence, not work to be finished"
+  },
+  "liberty": "/foss/pdks/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib",
+  "liberty_source": "default",
+  "miter_points": 5,
+  "non_convergence": false,
+  "non_equivalent_points": 0,
+  "parse_error": false,
+  "program": "lec_run",
+  "progress_stalled": false,
+  "proof_execution": {
+    "canonical_recipe_sha256": "sha256:8a22bd8bf98ddaffc54518b967f80d146adbed19bfcb3cd48de5d8d5fd1e05fd",
+    "equivalence_script_sha256_executed": "sha256:d2a30438a63f1524f0845d2306e8d6f3d0739fa710778995dc7bbaceb0b52b51",
+    "evidence_legs": [
+      {
+        "bytes": 43131,
+        "leg": "this_invocation",
+        "path": "lec.live.20260916T065844-533f4988e932.rpt",
+        "sha256": "sha256:1a2ca3cdc5fd06d1da84ae080dc1d56f9073c595455338f4287b4fd669837d87"
+      }
+    ],
+    "ladder_leg_script_sha256s": [
+      "sha256:d2a30438a63f1524f0845d2306e8d6f3d0739fa710778995dc7bbaceb0b52b51",
+      "sha256:681c4030bd3e1ff218261eecea04e9897810505cd70a37daa86cdcd87f9d07b7",
+      "sha256:a1d6d53a61f9893b0fb8bf037cfdd4eb2972a726471ce5307d99d4b9a9962328",
+      "sha256:9ea2341ad34a58192ec0f666ded4b116ac3dd4f7e3288ae00dbece58b3e27166",
+      "sha256:43aa40e0b2ed9f98d3584ed4acbd8ad7ee5e2dad2cb264c00d1340143b0c69e6"
+    ],
+    "path": "from-zero",
+    "schema_version": "vibeic.lec.proof-execution.v1"
+  },
+  "proof_identity": {
+    "container": {
+      "image_digest": "sha256:da2314d4100c246a1a6655a4e5f7eca816232f18ac20bcfa132e6e46cf6112f2"
+    },
+    "equivalence_script": {
+      "sha256": "sha256:8a22bd8bf98ddaffc54518b967f80d146adbed19bfcb3cd48de5d8d5fd1e05fd"
+    },
+    "gate_netlist": {
+      "path": "synth/cal_lec.v",
+      "sha256": "sha256:c29f6c3904256e1fd7d2e296f879907dbe1d0af8f9660e095c3d72162a120d7f"
+    },
+    "gold_defines": null,
+    "gold_frontend": "verilog",
+    "gold_rtl": [
+      {
+        "path": "rtl/cal_lec.v",
+        "sha256": "sha256:e82327e7eae3da8b32f950164ed29559ed78f8ef1efb4dc72ef50ef071495617"
+      }
+    ],
+    "liberty": {
+      "path": "/foss/pdks/sky130A/libs.ref/sky130_fd_sc_hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib",
+      "sha256": "sha256:8e78e14442062dba34d414fca6490b2f6b96038d4510d1438ca44fee31487135"
+    },
+    "recipe_schema_version": "vibeic.lec.recipe.v3-checkpointed",
+    "scan": {
+      "gate_wrapper": {
+        "state": "absent"
+      },
+      "gold_wrapper": {
+        "state": "absent"
+      },
+      "metadata": {
+        "state": "absent"
+      }
+    },
+    "slang_load_prefix": null,
+    "top": "cal_lec",
+    "yosys": {
+      "version": "Yosys 0.68+ (git sha1 aa4f0d7d6, Release, GNU /usr/bin/c++ 13.3.0) [github.com/vibeic/yosys at HEAD]"
+    }
+  },
+  "proof_stages_attempted": [
+    "Verilog-2005 frontend: <calibration-project>/rtl/cal_lec.v",
+    "PREP pass.",
+    "HIERARCHY pass (managing design hierarchy).",
+    "PROC pass (convert processes to netlists).",
+    "PROC_CLEAN pass (remove empty switches from decision trees).",
+    "PROC_RMDEAD pass (remove dead branches from decision trees).",
+    "PROC_PRUNE pass (remove redundant assignments in processes).",
+    "PROC_INIT pass (extract init attributes).",
+    "PROC_ARST pass (detect async resets in processes).",
+    "PROC_ROM pass (convert switches to ROMs).",
+    "PROC_MUX pass (convert decision trees to multiplexers).",
+    "PROC_DLATCH pass (convert process syncs to latches).",
+    "PROC_DFF pass (convert process syncs to FFs).",
+    "PROC_MEMWR pass (convert process memory writes to cells).",
+    "PROC_CLEAN pass (remove empty switches from decision trees).",
+    "OPT_EXPR pass (perform const folding).",
+    "FUTURE pass.",
+    "OPT_EXPR pass (perform const folding).",
+    "OPT_CLEAN pass (remove unused cells and wires).",
+    "CHECK pass (checking for obvious problems).",
+    "OPT pass (performing simple optimizations).",
+    "OPT_EXPR pass (perform const folding).",
+    "OPT_MERGE pass (detect identical cells).",
+    "OPT_MUXTREE pass (detect dead branches in mux trees).",
+    "OPT_REDUCE pass (consolidate $*mux and $reduce_* inputs).",
+    "OPT_MERGE pass (detect identical cells).",
+    "OPT_CLEAN pass (remove unused cells and wires).",
+    "OPT_EXPR pass (perform const folding).",
+    "WREDUCE pass (reducing word size of cells).",
+    "OPT_CLEAN pass (remove unused cells and wires).",
+    "MEMORY_COLLECT pass (generating $mem cells).",
+    "OPT pass (performing simple optimizations).",
+    "OPT_EXPR pass (perform const folding).",
+    "OPT_MERGE pass (detect identical cells).",
+    "OPT_CLEAN pass (remove unused cells and wires).",
+    "SORT pass.",
+    "CHECK pass (checking for obvious problems).",
+    "MEMORY_MAP pass (converting memories to logic and flip-flops).",
+    "FLATTEN pass (flatten design).",
+    "ASYNC2SYNC pass."
+  ],
+  "sat_model_unsupported_cells": [],
+  "scan_functional_mode": {
+    "applied": false,
+    "reason": "no --scan-meta given",
+    "requested": false
+  },
+  "source_proof_timestamp": "2026-09-16T06:58:51.444153+00:00",
+  "step_budget_exhausted": false,
+  "step_budget_sec": 900,
+  "step_budget_stopped_this_proof": false,
+  "step_elapsed_sec": 5.97,
+  "telemetry": {
+    "available": true,
+    "path": "reports/lec.telemetry.20260916T065844-533f4988e932.json",
+    "record": {
+      "attempt": 5,
+      "attempts": [
+        {
+          "attempt": 1,
+          "budget_sec": 86400,
+          "current_pass": "equiv_simple_short",
+          "defines": "-DSIMULATION -DYOSYS",
+          "elapsed_sec": 0.597,
+          "frontend": "verilog",
+          "returncode": 0,
+          "started_monotonic_offset_sec": 0,
+          "status": "complete"
+        },
+        {
+          "attempt": 2,
+          "budget_sec": 86400,
+          "current_pass": "equiv_simple_full",
+          "defines": "-DSIMULATION -DYOSYS",
+          "elapsed_sec": 0.584,
+          "frontend": "verilog",
+          "returncode": 0,
+          "started_monotonic_offset_sec": 0.597,
+          "status": "complete"
+        },
+        {
+          "attempt": 3,
+          "budget_sec": 86400,
+          "current_pass": "equiv_induct_seq4",
+          "defines": "-DSIMULATION -DYOSYS",
+          "elapsed_sec": 0.581,
+          "frontend": "verilog",
+          "returncode": 0,
+          "started_monotonic_offset_sec": 1.181,
+          "status": "complete"
+        },
+        {
+          "attempt": 4,
+          "budget_sec": 86400,
+          "current_pass": "equiv_induct_seq16",
+          "defines": "-DSIMULATION -DYOSYS",
+          "elapsed_sec": 0.604,
+          "frontend": "verilog",
+          "returncode": 0,
+          "started_monotonic_offset_sec": 1.762,
+          "status": "complete"
+        },
+        {
+          "attempt": 5,
+          "budget_sec": 86400,
+          "current_pass": "equiv_induct_seq64",
+          "defines": "-DSIMULATION -DYOSYS",
+          "elapsed_sec": 0.606,
+          "frontend": "verilog",
+          "returncode": 0,
+          "started_monotonic_offset_sec": 2.366,
+          "status": "complete"
+        }
+      ],
+      "carried_evidence": null,
+      "checkpoint_key": "sha256:174988bb6015c7f5f196c8297f84a22ada05ea63c1e96695c478828541b31b43",
+      "checkpoint_state": "COMPLETE",
+      "current_pass": "equiv_induct_seq64",
+      "defines": "-DSIMULATION -DYOSYS",
+      "elapsed_sec": 2.972,
+      "equivalent": true,
+      "finished_timestamp": "2026-09-16T06:58:51.443250+00:00",
+      "frontend": "verilog",
+      "invocation_id": "20260916T065844-533f4988e932",
+      "invocation_timestamp": "2026-09-16T06:58:44.783618+00:00",
+      "ladder_leg": 5,
+      "latest": {
+        "attempt": 5,
+        "cpu_seconds": null,
+        "current_pass": "equiv_induct_seq64",
+        "elapsed_sec": 2.971,
+        "peak_rss_kib": null,
+        "process_count": null,
+        "proved": 5,
+        "resource_probe_degraded": true,
+        "root_pid": null,
+        "rss_kib": null,
+        "threads": null,
+        "unproven": 0
+      },
+      "pidfile": "/tmp/.vibeic-job-3de3ab36b1995d09.pid",
+      "proved": 5,
+      "resumed_from": null,
+      "returncode": 0,
+      "rung": "equiv_induct_seq64",
+      "rungs_recorded": [
+        "equiv_simple_short",
+        "equiv_simple_full",
+        "equiv_induct_seq4",
+        "equiv_induct_seq16",
+        "equiv_induct_seq64"
+      ],
+      "samples": [
+        {
+          "attempt": 1,
+          "cpu_seconds": null,
+          "current_pass": "equiv_simple_short",
+          "elapsed_sec": 0.595,
+          "peak_rss_kib": null,
+          "process_count": null,
+          "proved": 5,
+          "resource_probe_degraded": true,
+          "root_pid": null,
+          "rss_kib": null,
+          "threads": null,
+          "unproven": 0
+        },
+        {
+          "attempt": 2,
+          "cpu_seconds": null,
+          "current_pass": "equiv_simple_full",
+          "elapsed_sec": 1.18,
+          "peak_rss_kib": null,
+          "process_count": null,
+          "proved": 5,
+          "resource_probe_degraded": true,
+          "root_pid": null,
+          "rss_kib": null,
+          "threads": null,
+          "unproven": 0
+        },
+        {
+          "attempt": 3,
+          "cpu_seconds": null,
+          "current_pass": "equiv_induct_seq4",
+          "elapsed_sec": 1.76,
+          "peak_rss_kib": null,
+          "process_count": null,
+          "proved": 5,
+          "resource_probe_degraded": true,
+          "root_pid": null,
+          "rss_kib": null,
+          "threads": null,
+          "unproven": 0
+        },
+        {
+          "attempt": 4,
+          "cpu_seconds": null,
+          "current_pass": "equiv_induct_seq16",
+          "elapsed_sec": 2.364,
+          "peak_rss_kib": null,
+          "process_count": null,
+          "proved": 5,
+          "resource_probe_degraded": true,
+          "root_pid": null,
+          "rss_kib": null,
+          "threads": null,
+          "unproven": 0
+        },
+        {
+          "attempt": 5,
+          "cpu_seconds": null,
+          "current_pass": "equiv_induct_seq64",
+          "elapsed_sec": 2.971,
+          "peak_rss_kib": null,
+          "process_count": null,
+          "proved": 5,
+          "resource_probe_degraded": true,
+          "root_pid": null,
+          "rss_kib": null,
+          "threads": null,
+          "unproven": 0
+        }
+      ],
+      "schema_version": "vibeic.lec.telemetry.v1",
+      "status": "complete",
+      "unproven": 0,
+      "verdict": "PASS"
+    },
+    "sha256": "sha256:e396e726d673a351efa12bca0cef1542125d6e72899ba4c7df79fdaba3f9b0b6"
+  },
+  "tool": "yosys equiv_make+equiv_simple+equiv_induct",
+  "undefined_macro_modules": [],
+  "unproven_cells": [],
+  "unproven_points": 0,
+  "verdict": "PASS",
+  "verdict_explanation": "all 5/5 $equiv cells proven; RTL and gate netlist structurally equivalent (Yosys: Equivalence successfully proven!)",
+  "yosys_budget_s": 900
+}
