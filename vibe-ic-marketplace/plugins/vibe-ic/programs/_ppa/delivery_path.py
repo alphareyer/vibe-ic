@@ -313,7 +313,11 @@ def resolve(project: Optional[Any]) -> Dict[str, Any]:
     _declared_na = FCC._delivery_declares_absence(
         root, (conditions[PATH_CHIP] or {}).get("delivery_declares"))
     if _declared_na is not None:
-        _cited, _detail = _declared_na
+        # R-0915-64 made both declarers return (cited, detail, evidence);
+        # evidence is None on this route. Unpacking two raised ValueError on
+        # every declared-hardmacro tree (red on main in
+        # test_a_declared_hardmacro_resolves_to_the_IP_ROUTE).
+        _cited, _detail, _evidence = _declared_na
         evidence["declaration"] = {"file": _cited, "detail": _detail}
         return {"path": PATH_IP,
                 "reason": (f"the design's own declaration at {_cited} records "
