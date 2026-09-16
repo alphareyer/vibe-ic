@@ -439,6 +439,7 @@ import _design_module_set as _dms  # noqa: E402
 # divergence `_prose_polarity`'s own header exists to end.
 import _prose_polarity  # noqa: E402
 import _flow_verdict_tiers as _T  # noqa: E402
+import _flow_reason_taxonomy as _reason_taxonomy  # noqa: E402
 # THE GDSII READER IS NOT WRITTEN TWICE. `gds_topcell_name_check.parse_structures`
 # already walks the record stream and returns (defined, referenced, valid_header);
 # R4 reads a die with it rather than shipping a second parser that could drift
@@ -729,6 +730,88 @@ _STAGE_GREEN = frozenset(
         | {"VACUOUS-PASS", "PARTIALLY-VACUOUS"}))
 
 
+#: THE TIER THAT IS NEITHER GREEN NOR FAILED, registered by the flow itself.
+#:
+#: `_flow_verdict_tiers.NO_VERDICT_IN_SCOPE` is `{INCOMPLETE, NOT-MEASURED}` —
+#: deliberately in neither `EXCUSED` nor `NON_GREEN`, because "nobody measured
+#: it" is not "it passed" and is not "it failed" either. Read here so the
+#: exemption below can be stated over the tier the flow names, rather than over
+#: two words retyped at this site.
+_NO_VERDICT_IN_SCOPE = frozenset(_norm_status(w)
+                                 for w in _T.NO_VERDICT_IN_SCOPE)
+
+#: This program's own name as it appears in a step row's gate records.
+_SELF_GATE = "stage_on_pass_review"
+
+#: Per-GATE verdict words (a different vocabulary from the per-STEP status
+#: words above: these come from `advisory_gate_records[].verdict`) that do not
+#: make the step they belong to non-green.
+_GATE_VERDICT_GREEN = frozenset({
+    "PASS", "VACUOUS_PASS", "PARTIALLY_VACUOUS", "SKIP", "WAIVED",
+})
+
+
+def _gate_records_of(row: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every per-gate record a step row publishes, blocking and advisory."""
+    out: List[Dict[str, Any]] = []
+    for key in ("gate_records", "advisory_gate_records"):
+        val = row.get(key)
+        if isinstance(val, list):
+            out.extend(r for r in val if isinstance(r, dict))
+    return out
+
+
+def blocked_only_by_a_declined_review(row: Dict[str, Any]) -> bool:
+    """Is this row non-green ONLY because a PREVIOUS review declined to run?
+
+    THE CASCADE THIS ENDS, measured on the subservient tapeout run (r26, lane
+    icsub2, 2026-09-16). This program is the gate of steps 2, 7, 14, 15, 37 and
+    39 — the comment at the blocking emit says so — so when it declines on
+    stage N, step N+1 inherits INCOMPLETE, which makes stage N+1 non-green,
+    which makes it decline there too. One declined review at stage 1 therefore
+    silenced the review of every later stage and voided three phase-3 steps
+    whose own gates had all passed: the run's verdict was FAIL with
+    `failed_gates: []`.
+
+    The refusal at the HEAD of that chain is correct and is left alone — a
+    stage with an unexamined gate in it is genuinely unreviewed, and this
+    function returns False for it. What is not correct is the INHERITANCE: a
+    later stage's rows are not less measured because an earlier stage's review
+    declined, so the earlier decline is disclosed (it stays in the report, and
+    the step it gates stays INCOMPLETE) without also deciding the next stage.
+
+    TYPED EVIDENCE, NEVER PROSE. The row publishes `advisory_gate_records` with
+    `gate`, `verdict` and `reason_class` fields; the decline is recognised as
+    THIS program's own record carrying `NOT_CHECKED` / `BLOCKED_BY_UPSTREAM`,
+    which is the pair the blocking emit writes. Nothing here reads a sentence.
+
+    THE NEGATIVE CONTROL IS THE `return False` IN THE LOOP. Every other gate in
+    the row must be green or skip-eligible. A row that carries a FAIL, a
+    MISSING, an EXECUTION_ERROR or a ZERO_DENOMINATOR alongside the declined
+    review keeps blocking, because then the decline is not the only thing wrong
+    with it — and a row with NO gate records at all is never exempt, since an
+    exemption granted over an empty population is the vacuous pass this repo
+    keeps having to remove.
+    """
+    if _norm_status(row.get("status")) not in _NO_VERDICT_IN_SCOPE:
+        return False
+    saw_declined_review = False
+    for rec in _gate_records_of(row):
+        verdict = str(rec.get("verdict") or "").strip().upper().replace("-", "_")
+        reason_class = _reason_taxonomy.normalise(rec.get("reason_class"))
+        if (str(rec.get("gate") or "") == _SELF_GATE
+                and verdict == "NOT_CHECKED"
+                and reason_class == _reason_taxonomy.BLOCKED_BY_UPSTREAM):
+            saw_declined_review = True
+            continue
+        if verdict in _GATE_VERDICT_GREEN:
+            continue
+        if reason_class and reason_class in _reason_taxonomy.SKIP_ELIGIBLE:
+            continue
+        return False
+    return saw_declined_review
+
+
 def stage_passed(compliance: Optional[Path], stage_id: str,
                  explicit: Optional[str]) -> Dict[str, Any]:
     """Did this stage PASS? Returns {"passed": bool|None, "why": str}.
@@ -760,21 +843,37 @@ def stage_passed(compliance: Optional[Path], stage_id: str,
         return {"passed": None,
                 "why": f"{compliance} carries no row for stage {stage_id!r}",
                 "source": str(compliance)}
-    bad = sorted({str(r.get("status") or "?") for r in mine
-                  if _norm_status(r.get("status")) not in _STAGE_GREEN})
+    non_green = [r for r in mine
+                 if _norm_status(r.get("status")) not in _STAGE_GREEN]
+    # THE INHERITED DECLINE IS DISCLOSED, NOT OBEYED. A row whose only
+    # non-green gate is a PREVIOUS stage's declined review says nothing about
+    # THIS stage's evidence — see `blocked_only_by_a_declined_review`, which
+    # reads the row's typed gate records and keeps every other shape blocking.
+    # The rows are partitioned rather than dropped: they are published below
+    # under their own name, so a reader sees that the review proceeded and what
+    # it proceeded past.
+    inherited = [r for r in non_green if blocked_only_by_a_declined_review(r)]
+    blocking = [r for r in non_green if r not in inherited]
+    bad = sorted({str(r.get("status") or "?") for r in blocking})
     # R-0915-34(a) — WHICH ROWS, not only which WORDS. A cascade has to name
     # what it waits on or the reader cannot act on it, and the caller states
     # this program's class from exactly these rows.
-    rows = sorted(
-        ({"id": str(r.get("id")), "status": str(r.get("status") or "?")}
-         for r in mine
-         if _norm_status(r.get("status")) not in _STAGE_GREEN),
-        key=lambda r: r["id"])
+    def _named(rs):
+        return sorted(({"id": str(r.get("id")),
+                        "status": str(r.get("status") or "?")} for r in rs),
+                      key=lambda r: r["id"])
+    rows = _named(blocking)
+    waived_rows = _named(inherited)
+    why = f"{len(mine)} row(s) for {stage_id}"
+    why += f"; non-green: {', '.join(bad)}" if bad else "; all green"
+    if waived_rows:
+        why += ("; proceeded past "
+                + ", ".join(f"{r['id']}={r['status']}" for r in waived_rows)
+                + " (a previous stage's declined review, disclosed there)")
     return {"passed": not bad,
-            "why": (f"{len(mine)} row(s) for {stage_id}"
-                    + (f"; non-green: {', '.join(bad)}" if bad else
-                       "; all green")),
+            "why": why,
             "non_green_rows": rows,
+            "proceeded_past_inherited_decline": waived_rows,
             "source": str(compliance)}
 
 
