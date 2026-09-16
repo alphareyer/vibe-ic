@@ -248,6 +248,19 @@ def test_the_sweep_never_touches_a_report_with_content(tmp_path: Path):
 
 # --------------------------------------------------------------------------
 # 2b. the signing proc, EXECUTED — not asserted by eye
+#
+# NO SKIP. An earlier version of this file gated both tests on
+# `shutil.which("tclsh")`, which turns a measurement that COULD NOT RUN into a
+# green line indistinguishable from one that ran. `tests/_tcl_walk` (#2314)
+# resolves tclsh the way the RUNNER does — host first, then the pinned EDA
+# container through the runner's own `_docker_exec` — and raises
+# `TclNotMeasured`, an AssertionError, when neither route answers.
+#
+# THE SCRIPT IS SELF-CONTAINED, deliberately: it creates, signs and re-reads its
+# own files and prints the answers, so the assertions are over STDOUT and hold
+# identically on a host run and on a container run, where `tmp_path` is not
+# mounted and a host-side file check would measure the mount rather than the
+# proc.
 # --------------------------------------------------------------------------
 def _sign_proc_source() -> str:
     tcl = _antenna_tcl_rendered()
@@ -261,53 +274,81 @@ def _antenna_tcl_rendered() -> str:
     return R._antenna_repair_tcl(_Pdk(), "/w/pnr")
 
 
-@pytest.mark.skipif(not __import__("shutil").which("tclsh"),
-                    reason="tclsh not installed")
+_BODY = "Net: net1234\n  Pin:   x/A (cell)\n    Layer: met1\n"
+
+_WALKER = r'''
+# argv 0 is the report the harness wrote: the tool's own bytes, unsigned.
+set f [lindex $argv 0]
+set d [file dirname $f]
+set e $d/antenna_iter_final.rpt
+set fh [open $e w] ; close $fh          ;# a 0-byte report, as check_antennas leaves
+_vic_ant_sign $f 0
+_vic_ant_sign $f 0                       ;# idempotence
+_vic_ant_sign $e final                   ;# an empty report is never signed
+set fh [open $f r] ; set got [read $fh] ; close $fh
+set n 0
+foreach line [split $got "\n"] {
+  if {[string match "# OpenROAD check_antennas*" $line]} { incr n }
+}
+puts "HEADERS $n"
+puts "TAIL_OK [string equal [string range $got [expr {[string length $got] - [string length $::BODY]}] end] $::BODY]"
+set nets {}
+foreach line [split $got "\n"] {
+  if {[regexp {^Net:\s+(\S.*)$} $line -> nm]} { lappend nets [string trim $nm] }
+}
+puts "NETS $nets"
+puts "EMPTY_SIZE [file size $e]"
+puts "SIGNED_TEXT_BEGIN"
+puts -nonewline $got
+puts "\nSIGNED_TEXT_END"
+'''
+
+
+def _run_walk(tmp_path: Path):
+    from tests import _tcl_walk  # noqa: PLC0415
+    walker = (_sign_proc_source()
+              + "set ::BODY " + _tcl_brace(_BODY) + "\n"
+              + _WALKER)
+    return _tcl_walk.walk(walker, _BODY, tmp_path)
+
+
+def _tcl_brace(s: str) -> str:
+    """A Tcl brace-quoted literal — no substitution, no escaping surprises."""
+    assert "{" not in s and "}" not in s
+    return "{" + s + "}"
+
+
+def _walk_fields(out: str) -> dict:
+    fields = {}
+    for line in out.splitlines():
+        if line.startswith("SIGNED_TEXT_BEGIN"):
+            break
+        if " " in line:
+            k, v = line.split(" ", 1)
+            fields[k] = v
+    return fields
+
+
 def test_the_signing_proc_runs_and_does_what_it_claims(tmp_path: Path):
-    """THE REAL THING: the emitted Tcl is handed to tclsh and run twice over a
-    report and once over an empty one.  Shape assertions cannot catch a proc
-    that parses and misbehaves."""
-    import subprocess
-
-    body = "Net: net1234\n  Pin:   x/A (cell)\n    Layer: met1\n"
-    rpt = tmp_path / "antenna_iter_0.rpt"
-    rpt.write_text(body)
-    empty = tmp_path / "antenna_iter_final.rpt"
-    empty.write_text("")
-
-    script = _sign_proc_source() + (
-        f"_vic_ant_sign {rpt} 0\n"
-        f"_vic_ant_sign {rpt} 0\n"          # idempotence
-        f"_vic_ant_sign {empty} final\n"
-        "puts EXIT_OK\n")
-    run = subprocess.run(["tclsh"], input=script, capture_output=True,
-                         text=True)
-    assert run.returncode == 0, run.stderr
-    assert "EXIT_OK" in run.stdout
-
-    signed = rpt.read_text()
-    # signed exactly once, even after two calls
-    assert signed.count("# OpenROAD check_antennas") == 1
-    # the tool's bytes are untouched, and still last
-    assert signed.endswith(body)
-    # an empty report is never dressed up as content
-    assert empty.read_text() == ""
+    """THE REAL THING: the emitted Tcl is executed — twice over a report and
+    once over an empty one.  Shape assertions cannot catch a proc that parses
+    and misbehaves."""
+    out, err, route = _run_walk(tmp_path)
+    f = _walk_fields(out)
+    assert f.get("HEADERS") == "1", (out, err, route)   # signed once, called twice
+    assert f.get("TAIL_OK") == "1", (out, err, route)   # tool bytes untouched, last
+    assert f.get("EMPTY_SIZE") == "0", (out, err, route)  # empty never dressed up
 
 
-@pytest.mark.skipif(not __import__("shutil").which("tclsh"),
-                    reason="tclsh not installed")
 def test_the_signed_report_satisfies_the_audit_and_still_parses(tmp_path: Path):
     """End to end over the two consumers that disagreed: `eda_report_audit`'s
     signature check now says yes, and the loop's own membership regex reads the
     same net it read before."""
-    import subprocess
-
     import eda_report_audit as A
 
-    rpt = tmp_path / "antenna_iter_0.rpt"
-    rpt.write_text("Net: net1234\n  Pin:   x/A (cell)\n    Layer: met1\n")
-    subprocess.run(["tclsh"], text=True, capture_output=True,
-                   input=_sign_proc_source() + f"_vic_ant_sign {rpt} 0\n")
-    text = rpt.read_text()
-    assert A._has_tool_signature(text, "antenna")[0] is True
-    assert re.findall(r"(?m)^Net:\s+(\S.*)$", text) == ["net1234"]
+    out, err, route = _run_walk(tmp_path)
+    assert _walk_fields(out).get("NETS") == "net1234", (out, err, route)
+    signed = out.split("SIGNED_TEXT_BEGIN\n", 1)[1].rsplit(
+        "\nSIGNED_TEXT_END", 1)[0]
+    assert A._has_tool_signature(signed, "antenna")[0] is True
+    assert re.findall(r"(?m)^Net:\s+(\S.*)$", signed) == ["net1234"]
