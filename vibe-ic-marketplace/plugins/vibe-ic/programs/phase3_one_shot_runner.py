@@ -62419,8 +62419,20 @@ def _autogen_waivers_json(project: Path,
     # ticket + review_required) but the rationale records the missing
     # tool so the foundry / sign-off engineer can plan the environment
     # they need to bring up before tape-out release.
+    # R-0915-85 — the two words are one word and a reason now. `WAIVED` is
+    # `PASS_WITH_WAIVERS`; `ENV_UNAVAILABLE` is `NOT_MEASURED(tool_absent)`,
+    # and the env-vs-design split below reads that reason rather than a second
+    # spelling. Left as `("WAIVED", "ENV_UNAVAILABLE")` this list was DEAD: no
+    # step carries either word any more, so the runner emitted no waivers.json
+    # at all and every deferral this file exists to publish went silent.
+    def _env_gap(s) -> bool:
+        return (s.status == _V.Verdict.NOT_MEASURED.value
+                and getattr(s, "reason_class", "")
+                == _V.ReasonClass.TOOL_ABSENT.value)
+
     waived = [s for s in plan
-              if s.status in ("WAIVED", "ENV_UNAVAILABLE")]
+              if s.status == _V.Verdict.PASS_WITH_WAIVERS.value
+              or _env_gap(s)]
     if not waived:
         # Nothing waives now. If our own stale file says otherwise, RETRACT it
         # — leaving it is the defect above, spelled the other way round.
@@ -62456,7 +62468,7 @@ def _autogen_waivers_json(project: Path,
         # cite the missing tool from `extras.missing_tool` so the
         # foundry / sign-off engineer knows exactly what to install
         # before re-running.
-        if s.status == "ENV_UNAVAILABLE":
+        if _env_gap(s):
             tool = (s.extras or {}).get("missing_tool", "<tool>")
             ticket = f"TAPEOUT-ENV-{s.name.upper()}-{tool.upper()}"
             rationale = (
@@ -62481,7 +62493,15 @@ def _autogen_waivers_json(project: Path,
         waivers.append({
             "step": s.name,
             "phase": "3",
-            "verdict_tier": s.status,
+            # The waiver-entry `verdict_tier` is NOT a step status and is not
+            # one of the five: `flow_compliance_check` binds ONLY
+            # `ENV_UNAVAILABLE` entries to a flow step, and that binding key
+            # is this file's contract with that consumer. The step's own word
+            # travels beside it as `step_verdict` so nothing is lost.
+            "verdict_tier": ("ENV_UNAVAILABLE" if _env_gap(s)
+                             else "WAIVED"),
+            "step_verdict": s.status,
+            "step_reason_class": getattr(s, "reason_class", "") or "",
             "rationale": rationale,
             "evidence": evidence,
             "ticket": ticket,

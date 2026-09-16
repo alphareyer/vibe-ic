@@ -359,7 +359,7 @@ def test_env_unavailable_entry_produces_no_unbound_disclosure(tmp_path):
     """The signal has to mean something. An entry this checker DOES bind must
     produce no disclosure at all, or every report grows noise."""
     fcc, waivers = _load(_project(tmp_path, _entry(
-        verdict_tier="NOT_MEASURED")))
+        verdict_tier="ENV_UNAVAILABLE")))
     assert 31 in waivers and waivers[31]["_env_unavailable"] is True
     assert fcc._WAIVER_NOT_BOUND_DISCLOSURES == []
 
@@ -503,7 +503,7 @@ def test_a_superseded_entry_is_disclosed_and_the_step_stays_waived(tmp_path):
             "id": 31, "reason": "hand-authored deferral for physical "
                                 "verification pending the foundry deck",
             "approver": "signoff-engineer", "approved_at": "2026-01-01"}],
-        "waivers": [_entry(verdict_tier="NOT_MEASURED")],
+        "waivers": [_entry(verdict_tier="ENV_UNAVAILABLE")],
     }, indent=2))
     fcc, waivers = _load(tmp_path)
     assert 31 in waivers
@@ -562,7 +562,7 @@ def test_the_hygiene_gates_consume_the_entry_and_ignore_its_tier(tmp_path):
 
     baseline = _schema_stdout("PASS_WITH_WAIVERS")
     assert "Waiver count: 1" in baseline[1], baseline[1]
-    for tier in ("PASS_STRUCTURAL", "ZZZ_UNKNOWN_TIER", "NOT_MEASURED"):
+    for tier in ("PASS_STRUCTURAL", "ZZZ_UNKNOWN_TIER", "ENV_UNAVAILABLE"):
         assert _schema_stdout(tier) == baseline, tier
 
 
@@ -588,7 +588,7 @@ def test_the_entry_is_listed_for_a_human_by_final_report_generate(tmp_path):
     assert listed[0].get("ticket") == "TAPEOUT-AUTOGEN-LVS", listed
 
 
-def _tiers_the_producer_emits():
+def _tiers_the_producer_emits(field="verdict_tier"):
     """EXECUTE `_autogen_waivers_json` over every step status it could be handed
     and collect the `verdict_tier` values it actually writes.
 
@@ -602,16 +602,25 @@ def _tiers_the_producer_emits():
 
     emitted_tiers = set()
     with tempfile.TemporaryDirectory() as td:
-        for status in ("PASS_WITH_WAIVERS", "NOT_MEASURED", "PASS", "FAIL", "SKIP"):
+        # R-0915-85 — the five, each with the fields its word REQUIRES. A
+        # NOT_MEASURED with no reason_class and a NOT_APPLICABLE with no
+        # declared_by are refused at the row, so a fixture that omitted them
+        # would be exercising a shape the producer cannot emit.
+        for status, extra in (
+                ("PASS_WITH_WAIVERS", {"attribution": "the signoff engineer"}),
+                ("NOT_MEASURED", {"reason_class": "tool_absent"}),
+                ("PASS", {}),
+                ("FAIL", {}),
+                ("NOT_APPLICABLE", {"declared_by": "L20 declares no LVS"})):
             sub = Path(td) / status
             sub.mkdir()
             p3._autogen_waivers_json(sub, [p3.StepResult(
                 "lvs", status, 0.1, "deferred to the signoff engineer",
-                extras={"missing_tool": "netgen"})])
+                extras={"missing_tool": "netgen"}, **extra)])
             wp = sub / "waivers.json"
             if wp.is_file():
                 for e in json.loads(wp.read_text())["waivers"]:
-                    emitted_tiers.add(e["verdict_tier"])
+                    emitted_tiers.add(e[field])
     return emitted_tiers
 
 
@@ -630,9 +639,16 @@ def test_pass_structural_is_written_by_no_producer():
     the blanket-skip failure mode. Only the half that reads published waivers
     below is guarded.
     """
+    # R-0915-85 — `verdict_tier` stays the BINDING key it always was: it is
+    # not a step status and is not one of the five, because
+    # `flow_compliance_check` binds ONLY `ENV_UNAVAILABLE` entries to a flow
+    # step. The step's own word now travels beside it as `step_verdict`, so
+    # this half of the finding is asserted on BOTH fields.
     emitted_tiers = _tiers_the_producer_emits()
-    assert emitted_tiers == {"PASS_WITH_WAIVERS", "NOT_MEASURED"}, emitted_tiers
+    assert emitted_tiers == {"WAIVED", "ENV_UNAVAILABLE"}, emitted_tiers
     assert "PASS_STRUCTURAL" not in emitted_tiers
+    assert _tiers_the_producer_emits(field="step_verdict") == {
+        "PASS_WITH_WAIVERS", "NOT_MEASURED"}
 
 
 def test_pass_structural_is_read_by_no_consumer_yet_sits_in_the_corpus():
