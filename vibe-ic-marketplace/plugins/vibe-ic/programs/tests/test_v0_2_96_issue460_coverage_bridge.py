@@ -155,7 +155,7 @@ def test_coverage_skip_on_oracle_waived_zero_vectors(tmp_path):
     _with_rtl(tmp_path)
     _oracle_log(tmp_path, "ORACLE_TB_DONE pass=0/0\n")
     P.step_emit_phase2_manifests(
-    assert _cov(tmp_path)["verdict"] == "SKIPPED-CONDITION"
+        tmp_path, [_oracle_step("PASS_WITH_WAIVERS", 0, 0, False)])
     assert _cov(tmp_path)["verdict"] == "SKIPPED-CONDITION"
 
 
@@ -349,14 +349,22 @@ def test_e2e_oracle_pass_is_deferred_not_counted_without_coverage(tmp_path):
     _build_oracle_replica(good, 3, 3, "PASS")
     good_out = _run_compliance_stage1(good)
 
-    # Still DISTINGUISHABLE from a failing oracle (the honesty #460 bought).
+    # Still DISTINGUISHABLE from a failing oracle (the honesty #460 bought) —
+    # and R-0915-85 moved where the distinction is WRITTEN. Both rows are FAIL
+    # now; what separates "the oracle failed" from "the coverage artefact was
+    # never produced" is the reason beside the word, which the step line
+    # prints. Comparing only the bracket would compare two identical words and
+    # pass on a report that had stopped saying anything.
     assert "FAIL" in _step4_line(base_out), _step4_line(base_out)
-    assert "FAIL" not in _step4_line(good_out), _step4_line(good_out)
-    assert _step4_line(good_out).split("]")[0] \
-        != _step4_line(base_out).split("]")[0], (
-        f"an oracle PASS and an oracle FAIL resolved to the same Step-4 tier\n"
-        f"--- base ---\n{_step4_line(base_out)}\n"
-        f"--- good ---\n{_step4_line(good_out)}")
+    _base_cause = _step4_block(base_out)
+    _good_cause = _step4_block(good_out)
+    assert "missing_artefact" in _good_cause, (
+        f"an oracle PASS with no coverage measurement must read as an absent "
+        f"artefact, not as a design defect:\n{_good_cause}")
+    assert _good_cause != _base_cause, (
+        f"an oracle PASS and an oracle FAIL resolved to the same Step-4 "
+        f"disposition\n--- base ---\n{_base_cause}\n"
+        f"--- good ---\n{_good_cause}")
 
     # But NOT certified: no coverage was measured, so the executed-PASS
     # numerator must not grow, and the deferral must be visible.
@@ -420,8 +428,9 @@ def test_ref_tb_path_still_pass(tmp_path):
 def test_no_rtl_no_log_still_skip(tmp_path):
     # pure shape with neither ref_tb.log nor a genuine oracle → SKIP.
     (PL.rtl_dir(tmp_path)).mkdir(parents=True, exist_ok=True)
-    step = P.StepResult(name="reference_tb", status="SKIP",
-                        duration_s=0.1, detail="nothing", extras={})
+    step = P.StepResult(name="reference_tb", status="NOT_APPLICABLE",
+                        duration_s=0.1, detail="nothing", extras={},
+                        declared_by="no RTL and no oracle log on this tree")
     P.step_emit_phase2_manifests(tmp_path, [step])
     assert _cov(tmp_path)["verdict"] == "NOT_APPLICABLE"
 
