@@ -269,12 +269,12 @@ def test_stub_tech_file_is_blocked_not_fail_not_pass(tmp_path, monkeypatch):
     assert any("style" in m for m in missing), missing
 
     # says cannot-verify, in words that cannot be read as either verdict
-    assert "NOT_MEASURED" in r.detail
+    assert "BLOCKED" in r.detail
     assert "NOT a pass" in r.detail and "NOT a design failure" in r.detail
 
     v = _verdict(p)
-    assert v["status"] == "NOT_MEASURED"
-    assert v["result"] == "NOT_MEASURED"
+    assert v["status"] == "BLOCKED"
+    assert v["result"] == "BLOCKED"
     assert v["finding"] == "LVS_INPUT_TECH_INCAPABLE"
     assert "generic.tech" in v["tech_file"]
     assert v["capability"]["usable"] is False
@@ -330,7 +330,7 @@ def test_stub_tech_that_actually_extracts_nothing_is_blocked_not_fail(
     assert r.extras.get("finding") != "LVS_EXTRACTION_NO_NETLIST"
     # the verdict names the CAUSE (the tech file), not just the symptom (a log)
     assert "generic.tech" in r.detail
-    assert _verdict(p)["status"] == "NOT_MEASURED"
+    assert _verdict(p)["status"] == "BLOCKED"
 
 
 def test_blocked_verdict_reports_which_sections_were_empty_vs_absent(
@@ -435,7 +435,7 @@ def test_all_clean_run_still_aggregates_to_pass():
 
 
 def test_blocked_is_in_the_verdict_tier_vocabulary():
-    assert "NOT_MEASURED" in runner._VERDICT_TIERS
+    assert "BLOCKED" in runner._VERDICT_TIERS
 
 
 def test_step31_gate_reports_blocked_and_refuses_signoff(tmp_path):
@@ -447,8 +447,8 @@ def test_step31_gate_reports_blocked_and_refuses_signoff(tmp_path):
     proj = tmp_path
     (proj / "reports" / "phase3").mkdir(parents=True)
     (proj / "reports" / "phase3" / "lvs_verdict.json").write_text(json.dumps({
-        "status": "NOT_MEASURED",
-        "result": "NOT_MEASURED",
+        "status": "BLOCKED",
+        "result": "BLOCKED",
         "finding": "LVS_INPUT_TECH_INCAPABLE",
         "message": "technology file /pdk/generic.tech cannot support "
                    "extraction — missing extraction rules.",
@@ -456,12 +456,12 @@ def test_step31_gate_reports_blocked_and_refuses_signoff(tmp_path):
     }))
     res = audit._check_lvs(proj)
     assert res.passed is False
-    assert res.summary.get("terminal_verdict") == "NOT_MEASURED"
+    assert res.summary.get("terminal_verdict") == "BLOCKED"
     assert res.summary.get("blocked") is True
     rules = [f.rule for f in res.findings]
     assert "LVS_BLOCKED_INPUT_INCAPABLE" in rules
     msg = " ".join(f.message for f in res.findings)
-    assert "NOT_MEASURED" in msg and "NOTHING is known" in msg
+    assert "BLOCKED" in msg and "NOTHING is known" in msg
 
 
 def test_step31_gate_unchanged_when_no_verdict_artifact(tmp_path):
@@ -1075,15 +1075,21 @@ def test_every_new_blocked_path_lands_non_green(tmp_path, monkeypatch,
     p, r = _run(tmp_path, monkeypatch, tech, MATCH_TRANSCRIPT)
     assert r.status == "NOT_MEASURED", (label, r.status, r.detail)
     # the real aggregate, not a re-implementation of it
-    assert runner._aggregate_verdict([r]) == "FAIL", label
+    # R-0915-85 — the row is NOT_MEASURED(input_absent) now, and so is the run.
+    # Its meaning is unchanged and is what #544 asked for: "cannot verify" is
+    # never green. What changed is that it is no longer spelled FAIL, because
+    # nothing about the design failed — the tech file could not support the
+    # operation. The run is still non-green and `main()` still exits non-zero.
+    assert runner._aggregate_verdict([r]) == "NOT_MEASURED", label
     assert runner._aggregate_verdict(
-        [runner.StepResult("synth", "PASS", 0.0, ""), r]) == "FAIL", label
+        [runner.StepResult("synth", "PASS", 0.0, ""), r]) == "NOT_MEASURED", (
+        label)
     # the Step-31 sign-off gate refuses it and names the file
     blocked = audit._lvs_blocked_verdict(p)
     assert blocked is not None, label
     # and the verdict artifact is not a pass under any spelling
     v = _verdict(p)
-    assert v["status"] == "NOT_MEASURED" and v["result"] == "NOT_MEASURED", label
+    assert v["status"] == "BLOCKED" and v["result"] == "BLOCKED", label
 
 
 def test_blocked_run_exit_code_is_nonzero():
@@ -1092,7 +1098,7 @@ def test_blocked_run_exit_code_is_nonzero():
         assert verdict not in ("PASS", "PASS_WITH_WAIVERS",
                                "PASS_WITH_OPEN_SOURCE_CONSTRAINTS")
     blocked = runner.StepResult("lvs", "NOT_MEASURED", 0.0, "", reason_class="not_executed")
-    assert runner._aggregate_verdict([blocked]) == "FAIL"
+    assert runner._aggregate_verdict([blocked]) == "NOT_MEASURED"
 
 
 def test_preflight_artifact_never_asserts_a_pass(tmp_path, monkeypatch):
