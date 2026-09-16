@@ -118,6 +118,30 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "digital_hardmacro_gen::characterise_liberty":
+        "THE MCORNER STA BANNER, a closed grammar with ONE producer: "
+        "phase3_one_shot_runner's emitter writes each whole line as `=== "
+        "{kind} corner: process={label} liberty={lib}, SPEF={spef} ===`. It is "
+        "read only to choose the SETUP-corner library; the arcs come from "
+        "OpenSTA write_timing_model, not from the report. No term has a "
+        "negation form. MEASURED, NOT ASSERTED, in "
+        "`test_r0915_87_characterise_liberty_reads_a_banner_not_a_sentence`, "
+        "over all 21 `_prose_polarity` tokens on r27's vendored report. THE "
+        "MEASUREMENT CORRECTED THE READER before this entry was written: "
+        "`dict(findall)` kept the LAST SETUP banner, so 189 of 294 "
+        "banner-quoting denials chose a RIVAL library and reported the macro "
+        "characterised against it, and after refusing disagreeing banners a "
+        "banner-shaped prefix on the real line still won 21. The banner must "
+        "now match the producer's WHOLE line, and SETUP banners naming "
+        "different libraries are refused (EXECUTION_ERROR). WHAT REMAINS "
+        "MOVES, ALWAYS INTO A REFUSAL: plain-sentence rivals at every boundary, "
+        "appended and prefixed, 42 of 294; banner-quoting rivals 42 of 294; "
+        "tokens spliced inside the banner 105 of 105 -- every one "
+        "BLOCKED_BY_UPSTREAM, and 0 of 693 publish a library the report's own "
+        "banner does not name. NEGATIVE CONTROLS: changing the banner's "
+        "library path moves the published library, and removing the banner "
+        "refuses, so the zeros are about the grammar and not a fixture that "
+        "could not move.",
     "testbench_gen::oracle_provenance":
         "A CLOSED TESTBENCH-HEADER GRAMMAR with one producer per term: "
         "`ORACLE_NONE_MARKER` and `stamp_generated` (marker + ONE identifier + "

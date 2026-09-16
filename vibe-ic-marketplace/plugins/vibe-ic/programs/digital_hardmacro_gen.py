@@ -1699,7 +1699,13 @@ def write_lef_with_magic(top: str, gds: Path, def_file: Path, out_lef: Path,
 # ── R-0915-87(3): the Liberty carries arcs from the run's OWN post-route STA ──
 #: Sidecar the check reads to state WHY a Liberty is uncharacterised.
 LIBERTY_TIMING_RECORD = "liberty_timing.json"
-_STA_LIB_RE = re.compile(r"^===\s*(SETUP|HOLD) corner:.*?liberty=(\S+?),", re.M)
+#: The producer's WHOLE banner line (phase3_one_shot_runner mcorner emitter:
+#: `=== {kind} corner: process={label} liberty={lib}, SPEF={spef} ===`).
+#: Full-line match: text spliced in front of, inside or after a banner makes
+#: it not a banner, and a refusal follows, never a rival path.
+_STA_LIB_RE = re.compile(
+    r"^===\s(SETUP|HOLD) corner: process=\S+ liberty=(\S+?), SPEF=\S+ ===[ \t]*$",
+    re.M)
 
 
 
@@ -1740,12 +1746,25 @@ def characterise_liberty(project: Path, design: str, container: str,
         rec.update(characterised=False, reason_class="BLOCKED_BY_UPSTREAM",
                    why="post-route STA input(s) absent: " + ", ".join(missing))
         return None, rec
-    corners = dict(_STA_LIB_RE.findall(rpt.read_text(errors="replace")))
-    lib = corners.get("SETUP")
-    if not lib:
+    # ONE banner, or no answer. The producer (phase3_one_shot_runner's mcorner
+    # emitter) writes exactly one `=== SETUP corner: … liberty=<lib>, …` line.
+    # MEASURED: `dict(findall)` kept the LAST SETUP match, so a second banner
+    # naming another library — 189 of 294 denial-quoting trials — silently
+    # chose the rival and reported the macro characterised against it.
+    # Two banners that disagree are refused by name, never ranked by position.
+    setups = sorted({lib for kind, lib in
+                     _STA_LIB_RE.findall(rpt.read_text(errors="replace"))
+                     if kind == "SETUP"})
+    if not setups:
         rec.update(characterised=False, reason_class="BLOCKED_BY_UPSTREAM",
                    why=f"{rpt.name} names no SETUP-corner liberty")
         return None, rec
+    if len(setups) > 1:
+        rec.update(characterised=False, reason_class="EXECUTION_ERROR",
+                   why=(f"{rpt.name} carries {len(setups)} SETUP-corner banners "
+                        f"naming different libraries: {', '.join(setups)}"))
+        return None, rec
+    lib = setups[0]
     rec["liberty"] = lib
     out_dir.mkdir(parents=True, exist_ok=True)
     tcl = out_dir / f".{design}_etm.tcl"
