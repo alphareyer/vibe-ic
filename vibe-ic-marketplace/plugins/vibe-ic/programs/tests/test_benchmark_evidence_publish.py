@@ -874,11 +874,26 @@ def test_the_kind_comes_from_the_route_not_from_the_design_name(tmp_path):
     assert bep.design_kind(run)[0] == "IP"
     _declare_route(run, _TD.DELIVERABLE_DIE)
     assert bep.design_kind(run)[0] == "IC"
-    # The operator's answer outranks the declaration.
+    # R-0915-65 — THE OPERATOR'S BINDING OUTRANKS THE DECLARATION; THE
+    # OPERATOR'S CATALOGUE DOES NOT. This step used to assert that ingesting
+    # `slots/*.yaml` alone flipped a HARDMACRO to IC. MEASURED on spm x
+    # gf180mcuD: since step 0.5ic's fetch was wired, every design whose PDK has
+    # a live shuttle gets the operator's whole catalogue ingested, bought or
+    # not — so a HARDMACRO that binds nothing classified IC, and the publisher
+    # then refused the cell for step 37.5ic's nine die-path outputs while the
+    # run's own 37.5ic sat at design-declared NOT_APPLICABLE. A catalogue is
+    # information, not a purchase.
     slots = run / "input" / "submission_template" / "slots"
     slots.mkdir(parents=True, exist_ok=True)
     (slots / "s.yaml").write_text("SLOT: a\n")
     _declare_route(run, _TD.DELIVERABLE_HARDMACRO)
+    assert bep.design_kind(run)[0] == "IP", (
+        "an ingested catalogue is not a binding")
+
+    # …and a BINDING still does outrank it, which is the half that must not be
+    # lost: the design names the slot it bought.
+    (run / "input" / "step_0_5ic_answers.json").write_text(json.dumps(
+        {"operator_template": {"path": None, "slot": "s"}}))
     assert bep.design_kind(run)[0] == "IC"
 
 
