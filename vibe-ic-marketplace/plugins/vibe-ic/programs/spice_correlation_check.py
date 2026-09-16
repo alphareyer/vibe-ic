@@ -2640,6 +2640,107 @@ def _check_path_correlation_json(project: Path) -> Optional[dict]:
     return _load_json(_path_correlation_json_path(project))
 
 
+#: Step 30 declares `phase3/stage3/spice/correlation.json OR
+#: reports/phase3/spice_correlation.json`. The SUCCESS path writes both
+#: (R-0915-43). Every REFUSAL used to write neither, and that is the hole
+#: R-0915-71 closes.
+_DECLARED_CORRELATION_NAMES = (
+    ("spice", "correlation.json"),
+    ("reports", "spice_correlation.json"),
+)
+
+#: Which taxonomy class a refusal belongs to, decided from the refusal's own
+#: sentence rather than from where in the function it was raised — the sentence
+#: is what a reader sees and the two must not be able to disagree.
+_UPSTREAM_MARKERS = ("routed netlist or SPEF absent", "active Liberty unreadable")
+
+
+def _correlation_reason_class(status: str, reason: str) -> str:
+    if status == "NO_TOOL":
+        return "CAPABILITY_ABSENT"
+    if any(m in (reason or "") for m in _UPSTREAM_MARKERS):
+        return "BLOCKED_BY_UPSTREAM"
+    return "EXECUTION_ERROR"
+
+
+def _persist_declared_refusal(project: Path, result: dict) -> dict:
+    """Leave step 30's declared record, then hand the driver's own dict back.
+
+    Wrapping each refusal AT THE RETURN keeps the whole driver one function —
+    which is what several landed contracts read it as. `test_spm_tail_antenna_
+    dbu_and_pdk_gap` asserts the deck and the report take the stage load from
+    ONE function by looking for `per_stage_load_source` inside this driver's
+    source, and R-0915-43's file reads the declared write the same way. A
+    wrapper in front of a renamed inner satisfied neither, while changing no
+    behaviour at all — the properties were true and had moved out of the window
+    the tests read. One function, fifteen wrapped returns, and every one of
+    those properties is textually where it was."""
+    _write_declared_correlation_refusal(
+        project, str((result or {}).get("status")),
+        str((result or {}).get("reason")
+            or "the correlation driver returned no reason"))
+    return result
+
+
+def _write_declared_correlation_refusal(project: Path, status: str,
+                                        reason: str) -> List[str]:
+    """Leave step 30's DECLARED record saying why the correlation did not run.
+
+    MEASURED on subservient x gf180mcuD (lane icsub2, r25, main c0dcb5e27) —
+    the run that had nothing else wrong with it. The deck was built and
+    simulated (`correlation.spice` 6616 B, `correlation.log` 16807 B beside it)
+    and `spice_correlation_check` PASSED, and then the driver refused:
+
+        per-stage delay not measurable: stage 2: 0 of 2 drive polarities
+        produced the declared output transition with a full swing; the arc is
+        unresolved and no delay is taken from it; ngspice also exited non-zero
+
+    That refusal went into a return value nobody persisted. The runner's own
+    disclosure-writer did not fire either, because it is guarded on "no deck
+    exists" and a deck DID exist. So step 30 read
+
+        required_outputs missing: ['phase3/stage3/spice/correlation.json OR
+        reports/phase3/spice_correlation.json'] (satisfied: 1/2)
+
+    and a design whose every other step was green failed on a silence. A step
+    that reached a conclusion and wrote it nowhere is worse than one that
+    failed loudly: the reader cannot tell it from a step that never ran.
+
+    Writes BOTH declared names with the SAME dict — two documents describing
+    one refusal are two things that can disagree — and never overwrites a
+    record a successful correlation already left."""
+    out: List[str] = []
+    payload = {
+        "program": "spice_correlation_check",
+        "step": 30,
+        "verdict": "NOT_MEASURED",
+        "status": status,
+        "reason": reason,
+        "reason_class": _correlation_reason_class(status, reason),
+        "correlation_ran": False,
+        "scope": ("Step 30's declared correlation record. The transistor-level "
+                  "critical-path correlation did NOT produce a measurement, "
+                  "and this is the named refusal that says so at the path the "
+                  "flow declares — never silence, and never a number nobody "
+                  "measured."),
+    }
+    for kind, name in _DECLARED_CORRELATION_NAMES:
+        try:
+            if kind == "spice":
+                target = _pl.spice_dir(project) / name
+            else:
+                target = _pl.reports_dir(project) / "phase3" / name
+            if target.is_file():
+                continue          # a real correlation already spoke here
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(payload, indent=2,
+                                         ensure_ascii=False) + "\n")
+            out.append(str(target))
+        except OSError:
+            continue
+    return out
+
+
 def run_installed_pdk_path_correlation(
     project: Path,
     liberty_path: str,
@@ -2656,14 +2757,14 @@ def run_installed_pdk_path_correlation(
     """
     project = Path(project)
     if _resolve_ngspice(container) is None:
-        return {"status": "NO_TOOL", "reason": "ngspice executable absent"}
+        return _persist_declared_refusal(project, {"status": "NO_TOOL", "reason": "ngspice executable absent"})
     liberty_text = _read_container_text(container, liberty_path)
     if not liberty_text:
-        return {"status": "ERROR", "reason": "active Liberty unreadable"}
+        return _persist_declared_refusal(project, {"status": "ERROR", "reason": "active Liberty unreadable"})
     netlist = _find_gate_netlist(project)
     spef = next(iter(sorted(_pl.extracted_dir(project).glob("*.spef"))), None)
     if not netlist or not spef:
-        return {"status": "ERROR", "reason": "routed netlist or SPEF absent"}
+        return _persist_declared_refusal(project, {"status": "ERROR", "reason": "routed netlist or SPEF absent"})
 
     netlist_text = netlist.read_text(errors="replace")
     inst_map = parse_verilog_instances(netlist_text)
@@ -2675,16 +2776,16 @@ def run_installed_pdk_path_correlation(
     probe = discover_installed_pdk_sources(
         container, liberty_path, required_cells)
     if not probe:
-        return {"status": "ERROR",
-                "reason": "installed cell SPICE or model section unresolved"}
+        return _persist_declared_refusal(project, {"status": "ERROR",
+                "reason": "installed cell SPICE or model section unresolved"})
 
     sta_report = _pick_sta_report(project, probe["subckt_names"])
     if not sta_report:
-        return {"status": "ERROR", "reason": "critical STA path unresolved"}
+        return _persist_declared_refusal(project, {"status": "ERROR", "reason": "critical STA path unresolved"})
     sta_text = sta_report.read_text(errors="replace")
     sta_path = parse_sta_path(sta_text)
     if not sta_path:
-        return {"status": "ERROR", "reason": "critical STA path unparseable"}
+        return _persist_declared_refusal(project, {"status": "ERROR", "reason": "critical STA path unparseable"})
 
     # ── CORNER ALIGNMENT ────────────────────────────────────────────────────
     # Correlate the report against the library the report itself says it was
@@ -2698,40 +2799,40 @@ def run_installed_pdk_path_correlation(
     if len(declared_corners) > 1:
         # SPM-12. Picking one of two stamped corners is not a measurement of
         # this design; it is a measurement of regex order.
-        return {"status": "ERROR",
+        return _persist_declared_refusal(project, {"status": "ERROR",
                 "reason": f"{sta_report.name} declares "
                           f"{len(declared_corners)} DIFFERENT corner libraries "
                           f"({', '.join(Path(c).name for c in declared_corners)})"
                           f", so the corner the SPICE deck must be built at is "
                           f"unknown; refusing a cross-corner correlation rather "
-                          f"than picking one of them"}
+                          f"than picking one of them"})
     corner_liberty = basis["liberty"] or ""
     if not corner_liberty:
-        return {"status": "ERROR",
+        return _persist_declared_refusal(project, {"status": "ERROR",
                 "reason": f"{sta_report.name} declares no corner liberty, so "
                           f"the corner the SPICE deck must be built at is "
-                          f"unknown; refusing a cross-corner correlation"}
+                          f"unknown; refusing a cross-corner correlation"})
     corner_text = (liberty_text if corner_liberty == liberty_path
                    else _read_container_text(container, corner_liberty))
     if not corner_text:
-        return {"status": "ERROR",
+        return _persist_declared_refusal(project, {"status": "ERROR",
                 "reason": f"{sta_report.name} was produced with "
                           f"{Path(corner_liberty).name}, which is unreadable; "
-                          f"refusing to correlate it against another corner"}
+                          f"refusing to correlate it against another corner"})
     corner_aligned = corner_liberty == liberty_path
     liberty_text = corner_text
     sources = (probe if corner_aligned else discover_installed_pdk_sources(
         container, corner_liberty, required_cells))
     if not sources:
-        return {"status": "ERROR",
+        return _persist_declared_refusal(project, {"status": "ERROR",
                 "reason": f"no installed device-model section resolves for "
                           f"{Path(corner_liberty).name}, the corner "
-                          f"{sta_report.name} was produced with"}
+                          f"{sta_report.name} was produced with"})
     resolved = resolve_path_stages(
         sta_path, inst_map, parse_spef_caps(spef.read_text(errors="replace")),
         sources["subckt_names"], liberty_text, max_stages)
     if not resolved:
-        return {"status": "ERROR", "reason": "critical path not stitchable"}
+        return _persist_declared_refusal(project, {"status": "ERROR", "reason": "critical path not stitchable"})
 
     # The STA side carries the run's OCV LATE derate; the SPICE side carries
     # no derate at all, so the raw report number is the model prediction times
@@ -2745,8 +2846,8 @@ def run_installed_pdk_path_correlation(
     tolerance = derive_liberty_path_tolerance(
         liberty_text, resolved["stages"], expected_ns)
     if not tolerance:
-        return {"status": "ERROR",
-                "reason": "Liberty grid tolerance could not be derived"}
+        return _persist_declared_refusal(project, {"status": "ERROR",
+                "reason": "Liberty grid tolerance could not be derived"})
 
     subckts = {}
     for stage in resolved["stages"]:
@@ -2754,8 +2855,8 @@ def run_installed_pdk_path_correlation(
         if cell not in subckts:
             subckt = extract_subckt(sources["cell_text"], cell, model_map={})
             if not subckt:
-                return {"status": "ERROR",
-                        "reason": f"cell SPICE subckt absent: {cell}"}
+                return _persist_declared_refusal(project, {"status": "ERROR",
+                        "reason": f"cell SPICE subckt absent: {cell}"})
             subckts[cell] = subckt
 
     hdr = parse_liberty_header(liberty_text)
@@ -2796,15 +2897,15 @@ def run_installed_pdk_path_correlation(
     stage_ns, why = parse_stagewise_meas(
         transcript, len(resolved["stages"]), vdd)
     if stage_ns is None:
-        return {"status": "ERROR",
+        return _persist_declared_refusal(project, {"status": "ERROR",
                 "reason": (f"per-stage delay not measurable: {why}"
                            + ("" if ok else "; ngspice also exited non-zero")),
-                "deck": str(deck_path), "log": str(log_path)}
+                "deck": str(deck_path), "log": str(log_path)})
     direction = sta_path["endpoint_transition"]
     spice_ns = sum(stage_ns)
     if spice_ns <= 0 or expected_ns <= 0:
-        return {"status": "ERROR", "reason": "path delay measurement absent",
-                "deck": str(deck_path), "log": str(log_path)}
+        return _persist_declared_refusal(project, {"status": "ERROR", "reason": "path delay measurement absent",
+                "deck": str(deck_path), "log": str(log_path)})
     # THE UNCORRECTED NUMBER IS KEPT, ALWAYS. It is the sum of the PDK's
     # characterisation gap and the design's own error, and it is what this gate
     # used to publish as if it were the design's alone. It stays in the report
