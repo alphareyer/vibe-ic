@@ -189,3 +189,73 @@ def test_a_negative_feedback_delay_is_refused():
     with pytest.raises(ValueError) as exc:
         D.matched_weights(N, 2, COEFF, -1)
     assert D.BAD_DELAY in str(exc.value)
+
+
+# ── the declared delay has to MATCH THE LOOP, and both directions prove it ──
+def _delayed_loop(delay, amplitude=0.72, offset=0.20):
+    """An ideal incremental CIFB2 in which a latched decision's charge reaches
+    the summing nodes `delay` clocks later. `bits[n]` is the decision LATCHED
+    at the end of clock n — the one the gate samples in transfer phase n."""
+    n_clk = WINDOWS * N
+    f_sig = TONE_BIN * FCLK / n_clk
+    bits = []
+    for w in range(WINDOWS):
+        i1 = i2 = 0.0
+        pipe = [0.0] * delay
+        for k in range(N):
+            n = w * N + k
+            u = offset + amplitude * math.sin(2 * math.pi * f_sig * n / FCLK)
+            v = 1.0 if i2 > 0.0 else -1.0
+            d = v if delay == 0 else pipe[0]
+            i2 += COEFF * (i1 - d)
+            i1 += COEFF * (u - d)
+            if delay:
+                pipe = pipe[1:] + [v]
+            bits.append(v)
+    return bits, f_sig
+
+
+def _fit(samples, f_sig):
+    """(amplitude, offset, rms residual) of a 3-parameter fit at `f_sig`."""
+    n = len(samples)
+    f_dec = FCLK / N
+    rows = [[math.cos(2 * math.pi * f_sig * (k + 1) / f_dec),
+             math.sin(2 * math.pi * f_sig * (k + 1) / f_dec), 1.0]
+            for k in range(n)]
+    m = [[sum(rows[i][r] * rows[i][c] for i in range(n)) for c in range(3)]
+         for r in range(3)]
+    y = [sum(rows[i][r] * samples[i] for i in range(n)) for r in range(3)]
+    for i in range(3):
+        piv = m[i][i]
+        for j in range(i + 1, 3):
+            f = m[j][i] / piv
+            for c in range(3):
+                m[j][c] -= f * m[i][c]
+            y[j] -= f * y[i]
+    x = [0.0] * 3
+    for i in (2, 1, 0):
+        x[i] = (y[i] - sum(m[i][c] * x[c] for c in range(i + 1, 3))) / m[i][i]
+    res = [samples[i] - sum(rows[i][c] * x[c] for c in range(3))
+           for i in range(n)]
+    return math.hypot(x[0], x[1]), x[2], math.sqrt(sum(r * r for r in res) / n)
+
+
+@pytest.mark.parametrize("loop_delay", [0, 1])
+def test_the_weights_must_match_the_loops_own_feedback_delay(loop_delay):
+    """BOTH DIRECTIONS. A loop that realises delay D is decoded best by
+    delay-D weights, and the preference INVERTS with D — which is what makes
+    `constants.feedback_delay_clocks` a declaration about the circuit and not
+    a free parameter. The statistic is the OFFSET, because the amplitude is
+    attenuated in every arm alike by the input moving inside the window."""
+    bits, f_sig = _delayed_loop(loop_delay)
+    errs = {}
+    for weights_delay in (0, 1):
+        samples, meta = D.decimate(bits, N, order=2, coeff=COEFF,
+                                   feedback_delay=weights_delay)
+        assert samples is not None, meta
+        _, offset, _ = _fit(samples[1:], f_sig)
+        errs[weights_delay] = abs(offset - 0.20)
+    assert errs[loop_delay] < errs[1 - loop_delay], (
+        f"loop realises delay {loop_delay}; offset error "
+        f"{errs[loop_delay]:.6f} with matching weights vs "
+        f"{errs[1 - loop_delay]:.6f} with the other set")
