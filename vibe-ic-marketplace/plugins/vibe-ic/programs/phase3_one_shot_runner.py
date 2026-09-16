@@ -47624,13 +47624,20 @@ def _si_mcf_repair_child_tcl(top: str, *, tech_lef_c: str, cell_lef_c: str,
         # Power/ground, special nets and the spare pool are left intact.
         + _spare_safe_routing_clear_tcl("SI_MCF")
         + "  if {[catch {global_route} e]} { puts \"SI_MCF_GR_NONFATAL: $e\" }\n"
-        "  if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
         # The continuation below is a PLAIN string, not an f-string, so its
         # braces are Tcl's own and must NOT be doubled. They were, and the
         # emitted line read `...$_vic_drc_opt}} e]}} {` — brace-BALANCED, which
         # is why an `info complete` parse test passed it, and syntactically
         # wrong, which is why the real child died with "extra characters after
         # close-brace" AFTER it had already done the repair. Measured on r19.
+        #
+        # The `info exists` default stays DIRECTLY above the use it protects.
+        # It was here all along, six comment lines further up, and that is not
+        # good enough: `test_a_site_that_forgets_the_option_still_defines_it`
+        # reads a three-line window of executable text, and a comment between
+        # the guard and the call is exactly what makes a guarded site look
+        # unguarded to a reader — human or otherwise.
+        "  if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
         f"  if {{[catch {{detailed_route -droute_end_iter {reroute_iters} "
         "{*}$_vic_drc_opt} e]} { puts \"SI_MCF_DR_NONFATAL: $e\" }\n"
         f"{refill_block}"

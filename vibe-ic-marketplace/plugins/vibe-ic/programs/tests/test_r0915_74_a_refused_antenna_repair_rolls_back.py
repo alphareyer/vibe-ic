@@ -131,12 +131,19 @@ def test_a_run_that_did_not_refuse_says_so_and_drops_the_checkpoint():
     assert "file delete -- $_ant_ckpt" in t[i:i + 200]
 
 
-def test_the_emitted_antenna_block_is_valid_tcl():
-    """The whole block, through the resolver the runner uses."""
+def test_the_emitted_antenna_block_is_valid_tcl(tmp_path: Path):
+    """The whole block, through the resolver the runner uses.
+
+    `tmp_path`, NOT a shared directory. `_tcl_walk.walk` writes `walk.tcl` and
+    `deck.tcl` into whatever it is given, so handing it `/tmp` makes two
+    concurrent runs of this suite overwrite each other's scripts — which is
+    exactly what a two-arm falsifier does, and it turned this test red in the
+    GREEN arm while a clean serial checkout passed 34 of 34.
+    """
     from tests import _tcl_walk   # noqa: PLC0415
     out, err, route = _tcl_walk.walk(
         "proc _vic_check {} {\n" + _tcl() + "\n}\nputs TCL_PARSE_OK\n",
-        "# deck\n", Path("/tmp"))
+        "# deck\n", tmp_path)
     assert "TCL_PARSE_OK" in out, (out, err, route)
 
 
