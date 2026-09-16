@@ -302,6 +302,7 @@ import _published_tree
 import _release_docs_contract
 import _submission_template
 import _tapeout_declaration
+import submission_template_check as _submission_template_check
 import sys
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional, Tuple
@@ -1912,6 +1913,32 @@ _KIND_ARMS: Dict[str, Tuple[str, ...]] = {
 _KIND_DECLARED_OUTPUT_ARMS: Tuple[str, ...] = ("ic",)
 
 
+def _declared_operator_slot(run_dir: Path) -> Any:
+    """The operator slot THE DESIGN BOUND, or None.
+
+    R-0915-65. Read from the design's own `input/step_0_5ic_answers.json`
+    (`operator_template.slot`, falling back to `.path`) — the file whose
+    `absent_reason` the run writes when no operator applies. A declaration
+    that cannot be read returns None, and `slot_rules_are_owed` then degrades
+    towards OWING the slot contract, which is the fail-closed direction it
+    already documents: "I could not read the declaration" is not "the design
+    declared HARDMACRO".
+    """
+    path = run_dir / "input" / "step_0_5ic_answers.json"
+    try:
+        doc = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    tmpl = doc.get("operator_template") if isinstance(doc, dict) else None
+    if not isinstance(tmpl, dict):
+        return None
+    for key in ("slot", "path"):
+        value = tmpl.get(key)
+        if value not in (None, "", [], {}):
+            return value
+    return None
+
+
 def design_kind(run_dir: Path) -> Tuple[str, str]:
     """(the kind this run declared, the sentence that says how it was decided).
 
@@ -1938,24 +1965,60 @@ def design_kind(run_dir: Path) -> Tuple[str, str]:
     doc, err = _tapeout_declaration.load(decl_path)
     if doc is None:
         return _KIND_UNDECLARED, f"{err}"
-    slots_dir = run_dir / _submission_template.SLOTS_DIR_REL
-    has_slots = bool(
-        sorted(slots_dir.glob("*.yaml")) + sorted(slots_dir.glob("*.yml")))
-    route = _tapeout_declaration.route_of(doc, has_slots)
-    if route == _tapeout_declaration.ROUTE_IP:
+    # R-0915-65 — THE ROUTE IS THE BINDING, NOT THE CATALOGUE.
+    #
+    # This read `slots/*.yaml` and called any run that had them a shuttle.
+    # MEASURED on spm x gf180mcuD: since step 0.5ic's fetch was wired, a PDK
+    # with a LIVE shuttle in the registry has the operator's whole CATALOGUE
+    # ingested — four slot files — whether or not the design bought one. So a
+    # HARDMACRO that binds no slot classified as IC, and the publisher then
+    # demanded step 37.5ic's nine die-path outputs and a
+    # `documentation/ic/` tree from a macro somebody else PLACES inside their
+    # die. It refused the cell with "release documentation INVARIANT (#2017)"
+    # while the run's own 37.5ic sat at SKIPPED-CONDITION, design-declared
+    # NOT_APPLICABLE, saying `deliverable='HARDMACRO' and no operator slot is
+    # bound`.
+    #
+    # THE FLOW ALREADY SETTLED THIS, in the same words, for step 37.5ic's own
+    # condition (vibe-ic#2277): "a live shuttle in the registry, on the PDK
+    # the design names, is INFORMATION, not a requirement". So this asks the
+    # SAME READER the run and the audit use --
+    # `submission_template_check.slot_rules_are_owed` -- instead of a second
+    # predicate that can disagree with them about one design's route.
+    # `slot_rules_are_owed` does the binding read ITSELF -- its own words:
+    # "A catalogue is not a purchase, but an affirmative operator binding is.
+    # Read the same input as step 0.5ic, not guessed declaration field names."
+    # So it is passed None, exactly as `flow_compliance_check` calls it, and
+    # there is no second predicate here at all. An earlier cut of this change
+    # read `operator_template` separately and passed the result in, which
+    # SHORT-CIRCUITED the function at its first line.
+    declared_slot = _declared_operator_slot(run_dir)
+    owed, _why_not = _submission_template_check.slot_rules_are_owed(
+        run_dir, None)
+    if not owed:
         return _KIND_IP, (
             f"{_tapeout_declaration.DECLARATION_REL} declares deliverable "
-            f"{_tapeout_declaration.DELIVERABLE_HARDMACRO} and no operator "
-            f"slot file was ingested — route "
-            f"{_tapeout_declaration.ROUTE_IP}")
-    if route in (_tapeout_declaration.ROUTE_SHUTTLE,
-                 _tapeout_declaration.ROUTE_SELF_TAPEOUT):
-        return _KIND_IC, (
-            f"route {route} — "
-            + ("an operator slot file was ingested"
-               if has_slots else
-               f"{_tapeout_declaration.DECLARATION_REL} declares deliverable "
-               f"{_tapeout_declaration.DELIVERABLE_DIE}"))
+            f"{_tapeout_declaration.DELIVERABLE_HARDMACRO} and the design "
+            f"binds no operator slot (step_0_5ic_answers.json "
+            f"operator_template.path/.slot are null) — route "
+            f"{_tapeout_declaration.ROUTE_IP}. An ingested slot CATALOGUE is "
+            f"not a binding.")
+    # OWED IS THE DECISION; `route_of` only supplies the word. An earlier cut
+    # kept `if route in (SHUTTLE, SELF_TAPEOUT)` here, and a run whose answers
+    # file could not be READ — owed, therefore the die path — produced
+    # ROUTE_IP from the declaration and fell through to UNDECLARED. Owing the
+    # slot contract IS the die path, whatever the declaration says about
+    # itself.
+    route = _tapeout_declaration.route_of(doc, declared_slot is not None)
+    if route == _tapeout_declaration.ROUTE_IP:
+        route = _tapeout_declaration.ROUTE_SHUTTLE
+    if declared_slot is not None:
+        bound = f"the design binds operator slot {declared_slot!r}"
+    else:
+        bound = ("the slot contract is owed: "
+                 + (_why_not or "the design does not declare itself out of "
+                                "the operator path"))
+    return _KIND_IC, f"route {route} — {bound}"
     return _KIND_UNDECLARED, (
         f"{_tapeout_declaration.DECLARATION_REL} names no deliverable, so "
         f"`route_of` selected no terminal")
