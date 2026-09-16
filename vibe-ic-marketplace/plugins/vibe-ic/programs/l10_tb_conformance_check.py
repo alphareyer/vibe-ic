@@ -2013,12 +2013,54 @@ def _resolve_summary(given: str) -> str:
     return given
 
 
+#: The default record path, relative to the project.
+DEFAULT_OUT_REL = "reports/gates/l10_tb_conformance.json"
+
+#: What `--tb-dir` looks like inside a project. Used ONLY to find the project
+#: root for the default output path — never to validate the argument.
+_TB_DIR_TAIL = ("phase2", "stage1", "sim", "tb")
+
+
+def default_out_path(tb_dir: str) -> Path:
+    """Where the record goes when the caller named no `--out`.
+
+    THE DEFECT THIS CLOSES. The default used to be the bare relative string
+    `reports/gates/l10_tb_conformance.json`, which `Path(...).write_text`
+    resolves against the PROCESS CWD. Run from the plugin's own `programs/`
+    directory — which is where the test suite runs — it writes
+    `programs/reports/gates/l10_tb_conformance.json` INTO THE CHECKOUT, and
+    that file was committed, carrying a `/tmp/pytest-of-<user>/pytest-NNNNN/`
+    path in its body. Every lane that ran the suite then rewrote it and shipped
+    the churn.
+
+    PRODUCTION WAS NEVER WRONG AND DOES NOT CHANGE. The flow passes
+    `--out reports/phase2/gates/l10_tb_conformance.json` explicitly and
+    `flow_compliance_check` launches every gate with `cwd=project`, so the
+    declared relative path lands inside the run directory exactly as declared.
+    An explicit `--out` therefore keeps its CWD-relative meaning, byte for byte.
+
+    Only the DEFAULT changes, and it anchors to the project the `--tb-dir`
+    names: a `--tb-dir` ending `phase2/stage1/sim/tb` identifies its project
+    four components up. When it does not — a caller pointing at some other
+    directory — there is no project to anchor to and the CWD-relative default
+    stands, because inventing a root would be worse than the behaviour it
+    replaces."""
+    tb = Path(tb_dir)
+    if tb.is_absolute() and tb.parts[-4:] == _TB_DIR_TAIL:
+        return tb.parents[3] / DEFAULT_OUT_REL
+    return Path(DEFAULT_OUT_REL)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--l10", required=True, help="phase1/generated_docs/L10_TEST_CASES.json")
     p.add_argument("--tb-dir", default="phase2/stage1/sim/tb", help="directory containing testbench .v files")
     p.add_argument("--summary", default="phase2/stage1/sim/work/summary.txt", help="sim summary file")
-    p.add_argument("--out", default="reports/gates/l10_tb_conformance.json")
+    p.add_argument(
+        "--out", default=None,
+        help="where to write the record; default "
+             "reports/gates/l10_tb_conformance.json, anchored to the PROJECT "
+             "the --tb-dir names rather than to the process CWD")
     p.add_argument("--strict", action="store_true", help="fail on ANY case lacking evidence (default)")
     p.add_argument("--warn-only", action="store_true", help="print warnings but exit 0")
     p.add_argument(
@@ -2180,6 +2222,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "vacuous_testbench_files": vacuous_files,
         "results": results,
     }
+    if args.out is None:
+        args.out = str(default_out_path(args.tb_dir))
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(out, indent=2, ensure_ascii=False))
 
