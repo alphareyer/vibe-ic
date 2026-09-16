@@ -153,12 +153,18 @@ def test_real_missing_verdict_still_lands_in_missing():
     assert F.NO_VERDICT not in rollup
 
 
-def test_counts_snapshot_separates_no_verdict_from_missing():
+def test_counts_snapshot_separates_no_verdict_from_a_failed_step():
+    """R-0915-85 — the pair this test exists for is UNCHANGED and one of its
+    two words moved. `no_verdict` is "the report carries no row for this step";
+    a step that HAS a row saying its declared output is absent is
+    `FAIL(missing_artefact)`. The `missing` snapshot key is kept at 0 so a
+    reader diffing an old published summary sees a number, not a hole."""
     flow = _flow(["1", "2", "3"])
     rollup, total = F._verdict_rollup(flow, {"1": "FAIL"})
     snap = F._counts_snapshot(rollup, total, flow=flow,
                               verdicts={"1": "FAIL"})
-    assert snap["missing"] == 1
+    assert snap["fail"] == 1
+    assert snap["missing"] == 0
     assert snap["no_verdict"] == 2
 
 
@@ -210,8 +216,13 @@ def test_parse_audit_tally_ignores_the_reports_own_prose_bullet():
 
 
 def test_parse_audit_tally_survives_the_blocked_by_upstream_parenthetical():
-    text = ("  PASS=1  FAIL=0  MISSING=2 (1 blocked-by-upstream of step 7)  "
-            "WAIVED-DEFERRED=0")
+    """The producer annotates a bucket in parentheses; the parser reads the
+    number, not the sentence. R-0915-85 — the annotated bucket is `FAIL`, whose
+    reason says `missing_artefact`; the old `MISSING=` label is gone with the
+    word."""
+    text = ("  PASS=1  PASS_WITH_WAIVERS=0  "
+            "FAIL=2 (1 blocked-by-upstream of step 7)  "
+            "NOT_MEASURED=0  NOT_APPLICABLE=0")
     assert F._parse_audit_tally(text)["FAIL"] == 2
 
 
@@ -223,9 +234,10 @@ def test_reconcile_silent_when_they_agree():
 
 
 def test_reconcile_names_every_disagreeing_bucket():
-    diff = F._reconcile_rollup({"PASS": 28, "FAIL": 3, "FAIL": 6},
-                               {"PASS": 30, "FAIL": 4, "FAIL": 1})
-    assert diff == {"PASS": (28, 30), "FAIL": (3, 4), "FAIL": (6, 1)}
+    diff = F._reconcile_rollup(
+        {"PASS": 28, "FAIL": 3, "NOT_MEASURED": 6},
+        {"PASS": 30, "FAIL": 4, "NOT_MEASURED": 1})
+    assert diff == {"PASS": (28, 30), "FAIL": (3, 4), "NOT_MEASURED": (6, 1)}
 
 
 def test_reconcile_flags_a_bucket_the_tally_never_names():
@@ -319,24 +331,32 @@ def test_a_populated_not_measured_bucket_reaches_the_stage_breakdown(
         "none of them to it; that loop walks ROLLUP_ORDER and has no fallback")
 
 
-def test_the_not_measured_slot_sits_among_the_qualified_done_claims():
+def test_the_not_measured_slot_sits_with_the_non_green_words():
     """WHERE the slot is, asserted against the classification rather than
-    against a remembered index.
+    against a remembered index — AND THE ANSWER MOVED.
 
-    `verdict` puts NOT-MEASURED in neither `EXCUSED` nor
-    `NON_GREEN`, which by that module's own derivation makes it a QUALIFIED
-    DONE-CLAIM. `ROLLUP_ORDER` is ordered "full pass, then qualified
-    done-claims, then excused, then non-green", so a slot below `FAIL` would
-    print, in the one table a reader opens, that the step failed.
+    Under `_flow_verdict_tiers`, `NOT-MEASURED` was in neither `EXCUSED` nor
+    `NON_GREEN`, so by that module's derivation it was a QUALIFIED DONE-CLAIM
+    and this test demanded a slot ABOVE the non-green run: printing it beside
+    FAIL would have said, in the one table a reader opens, that the step
+    failed.
+
+    R-0915-85 decided the opposite, deliberately: a step nobody measured is not
+    a claim that it is done. `NOT_MEASURED` IS in `NON_GREEN` now, so the slot
+    belongs there, and printing it beside FAIL says what the word adjudicates
+    instead of contradicting it. The test still reads the classification rather
+    than an index, so it moves with the module and not with anyone's memory.
     """
     import verdict as T
-    assert T.is_qualified_done("NOT_MEASURED")
+    assert not T.is_qualified_done("NOT_MEASURED")
+    assert T.is_non_green("NOT_MEASURED")
     order = list(F.ROLLUP_ORDER)
-    non_green = [order.index(w) for w in T.NON_GREEN if w in order]
     excused = [order.index(w) for w in T.EXCUSED if w in order]
-    assert order.index("NOT_MEASURED") < min(non_green + excused)
-    # Split out of INCOMPLETE, so it prints beside the word it splits.
-    assert order.index("NOT_MEASURED") == order.index("NOT_MEASURED") + 1
+    # Excused first, then the non-green run; NOT_MEASURED is in the latter.
+    assert order.index("NOT_MEASURED") > max(excused)
+    # And it sits ABOVE `FAIL`: a hole is not a measured defect, and the
+    # ladder reads worst-last.
+    assert order.index("NOT_MEASURED") < order.index("FAIL")
 
 
 # ─── 6. end-to-end render: the two roll-ups in one document ──────────────
@@ -420,7 +440,11 @@ def test_rendered_report_names_the_disagreement_when_verdicts_are_unreadable(
     assert C.RECONCILIATION_FAILED_MARKER in md
     table = C.parse_rollup_table(md)
     assert table.get(F.NO_VERDICT, 0) == 0
-    assert table.get("FAIL", 0) == 0, (
+    # R-0915-85 — the property is unchanged and is now stated over the bucket
+    # that survived: the dropped per-step rows must not move the
+    # producer-owned global tally, so the rendered FAIL equals the tally's.
+    assert table.get("FAIL", 0) == F._parse_audit_tally(
+        _full_audit_for_real_flow(drop_ids=dropped))["FAIL"], (
         "missing per-step rows changed the producer-owned global tally")
     (tmp_path / "reports" / "final_summary.md").write_text(md, encoding="utf-8")
     ok, notes = C.check_project(tmp_path)

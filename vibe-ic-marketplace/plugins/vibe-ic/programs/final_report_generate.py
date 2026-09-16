@@ -202,39 +202,25 @@ def section_heading(canonical: str) -> str:
 #
 # Order: full pass, then qualified done-claims, then excused, then non-green.
 ROLLUP_ORDER = (
+    # R-0915-85 — FIVE SLOTS, in the order this list has always had: full pass,
+    # then the qualified done-claim, then excused, then non-green. The
+    # eighteen-word ladder it replaces is in the history above and every one of
+    # its entries is now either one of these or a `reason_class` / `Disclosure`
+    # printed beside the table rather than as a row of it.
+    #
+    # THE ORDERING ARGUMENT THAT SURVIVES, because it is the reason this list
+    # cannot be derived: `NOT_MEASURED` prints in the NON-GREEN run of the
+    # ladder now, and that is a CHANGE. The old note here put `NOT-MEASURED`
+    # among the qualified done-claims "for the reason the tier module states in
+    # its own words: it is in neither EXCUSED nor NON_GREEN". It IS in
+    # `NON_GREEN` now — that is precisely what R-0915-85 decided — so printing
+    # it beside FAIL says what the word adjudicates instead of the opposite.
+    # `NOT_APPLICABLE` keeps the excused slot it always had.
     "PASS",
-    # vibe-ic#901 — PARTIALLY-VACUOUS beside VACUOUS-PASS: it is the same
-    # qualified done-claim tier split by a count, so it belongs next to the
-    # word it splits and before the other qualified tiers.
-    "VACUOUS-PASS", "PARTIALLY-VACUOUS", "STRUCTURE-ONLY", "INCOMPLETE",
-    # RB2-03 (#2063) registered NOT-MEASURED in `verdict.
-    # PRODUCER_STATUSES` and stopped there. `_TALLY_LABEL_TO_BUCKET` is DERIVED
-    # from that set, so the word became emittable the same commit; this list is
-    # a presentation order and cannot be derived, so it stayed one word short
-    # and a populated NOT-MEASURED bucket had no print slot at all.
-    #
-    # HERE, and not down beside FAIL/MISSING, for the reason the tier module
-    # states in its own words: NOT-MEASURED is in neither `EXCUSED` nor
-    # `NON_GREEN`, so by that module's derivation it is a QUALIFIED DONE-CLAIM,
-    # and this list's order is "full pass, then qualified done-claims, then
-    # excused, then non-green". Printing it in the non-green run of the ladder
-    # would say, in the one table a reader actually looks at, that the step
-    # failed — which is the opposite of what the word adjudicates.
-    #
-    # IMMEDIATELY AFTER `INCOMPLETE` for the same reason PARTIALLY-VACUOUS sits
-    # beside VACUOUS-PASS above: it was SPLIT OUT of INCOMPLETE ("0 of N
-    # sub-gates answered" vs "some of N did"), it only ever replaces INCOMPLETE,
-    # and it belongs next to the word it splits.
-    "NOT-MEASURED",
-    "WAIVED", "WAIVED-DEFERRED", "DEFERRED-BY-UPSTREAM",
-    # Beside the other EXCUSED words, because it is one: a step the run declared
-    # OUT of its scope via --entry-step. Registering the status in
-    # verdict was not enough — a bucket the roll-up cannot PRINT is
-    # invisible in the summary the reader actually looks at, which is what
-    # `final_summary_rollup_consistency_check` exists to catch.
-    "OUT-OF-SCOPE-BY-ENTRY",
-    "SKIPPED-CONDITION", "SKIPPED-SETUP-REQUIRED",
-    "PASS-VOIDED-BY-DEPENDENCY", "FAIL", "MISSING",
+    "PASS_WITH_WAIVERS",
+    "NOT_APPLICABLE",
+    "NOT_MEASURED",
+    "FAIL",
     NO_VERDICT,
 )
 STAGE_TITLE = [
@@ -1248,7 +1234,14 @@ def _counts_snapshot(
     waived = rollup.get("WAIVED-DEFERRED", 0)
     skipped = rollup.get("SKIPPED-CONDITION", 0)
     fail = rollup.get("FAIL", 0)
-    missing = rollup.get("MISSING", 0)
+    # R-0915-85 — `MISSING` is gone as a bucket: a declared output that does
+    # not exist is `FAIL(missing_artefact)`, so it is already inside `fail`.
+    # The snapshot key is KEPT and set to 0 rather than removed, because
+    # published `final_summary.md` snapshots carry it and a reader diffing an
+    # old one against a new one must see a number, not a hole. It is the only
+    # honest value: this roll-up can no longer tell the two apart, and the
+    # reason that can is on the step row.
+    missing = 0
     # ORGANIC #428 — surfaced separately from `missing` so a reader (and
     # the roll-up-consistency gate) can tell an unreadable verdict apart
     # from an absent required output.
