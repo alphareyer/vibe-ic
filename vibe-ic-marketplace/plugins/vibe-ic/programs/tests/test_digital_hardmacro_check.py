@@ -601,9 +601,14 @@ def test_a_project_dir_that_is_not_a_directory_is_rc2(tmp_path):
     assert run(f).returncode == 2
 
 
-# ───────────────── TIER — disclosure, not a plain PASS ─────────────────────
+# ───────────────── TIER — NOT_MEASURED, not a PASS (R-0915-87(3)) ──────────
+# These two cases used to assert rc 0 and a `[PASS_TIMING_UNCHARACTERISED]`
+# verdict word. R-0915-87(3) overrules that tier: a Liberty with no timing arc
+# is a timing measurement that did not happen, and on subservient r27 the rc-0
+# tier was counted green. The intent is kept — the finding is still named and
+# it is still never a plain PASS — and the verdict is now NOT_MEASURED, rc 2.
 
-def test_uncharacterised_liberty_is_disclosed_on_the_verdict_word(tmp_path):
+def test_uncharacterised_liberty_is_not_measured_not_a_pass(tmp_path):
     p = make_kit(tmp_path, lib="""library (macro_a_lib) {
   cell (macro_a) {
     area : 5000.0 ;
@@ -615,18 +620,25 @@ def test_uncharacterised_liberty_is_disclosed_on_the_verdict_word(tmp_path):
 }
 """)
     r = run(p)
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert "[PASS_TIMING_UNCHARACTERISED]" in r.stdout
-    assert "[PASS] digital_hardmacro_check" not in r.stdout
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "NOT_MEASURED" in r.stdout
+    assert "PASS" not in r.stdout.split("NOT_MEASURED")[0]
     assert "LIB_TIMING_UNCHARACTERISED" in rules(p)
 
 
-def test_all_zero_timing_is_uncharacterised_not_a_plain_pass(tmp_path):
+def test_all_zero_timing_is_not_measured_not_a_pass(tmp_path):
     p = make_kit(tmp_path, lib=LIB_OK.replace('"0.235"', '"0.0"')
                                      .replace('"0.211"', '"0.0"'))
     r = run(p)
-    assert r.returncode == 0
-    assert "[PASS_TIMING_UNCHARACTERISED]" in r.stdout
+    assert r.returncode == 2
+    assert "NOT_MEASURED" in r.stdout
+
+
+def test_a_characterised_liberty_is_still_a_plain_pass(tmp_path):
+    """The negative control: real arcs keep rc 0."""
+    r = run(make_kit(tmp_path))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "NOT_MEASURED" not in r.stdout
 
 
 # ───────────────── multi-kit and reporting hygiene ─────────────────────────
