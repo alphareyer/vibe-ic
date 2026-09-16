@@ -143,6 +143,47 @@ def scan_source(src: str, path: str = "<src>") -> Dict[str, Any]:
             findings.append({"file": path, "line": getattr(node, "lineno", 0),
                              "word": word, "site": where})
 
+    # THE THIRD PASS, and the blind spot it closes was REAL. A status argument
+    # that is a NAME is reported unresolved above — 239 of them on the live
+    # tree — and `design_one_shot_runner` hid one there:
+    #
+    #     status = ("WAIVED" if "Overall: PASS_WITH_WAIVERS" in out else "PASS")
+    #     return StepResult("final_audit", status, ...)
+    #
+    # i.e. it READ the audit's `PASS_WITH_WAIVERS` and wrote the deleted word
+    # beside it — a translation, at a site no literal scan could see. So a name
+    # bound ONCE in the module to a constant, or to an if/else over constants,
+    # is resolved here and judged like a literal. Bound twice, or bound to
+    # anything else, it stays unresolved: this resolves what it can PROVE, and
+    # says so for the rest.
+    _const_names: Dict[str, List[ast.AST]] = {}
+    _rebound: set = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        tgt = node.targets[0]
+        if not isinstance(tgt, ast.Name):
+            continue
+        vals: List[ast.AST] = []
+        if isinstance(node.value, ast.Constant) and isinstance(
+                node.value.value, str):
+            vals = [node.value]
+        elif isinstance(node.value, ast.IfExp):
+            for branch in (node.value.body, node.value.orelse):
+                if isinstance(branch, ast.Constant) and isinstance(
+                        branch.value, str):
+                    vals.append(branch)
+                else:
+                    vals = []
+                    break
+        if not vals:
+            _rebound.add(tgt.id)
+            continue
+        if tgt.id in _const_names:
+            _rebound.add(tgt.id)
+        else:
+            _const_names[tgt.id] = vals
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             fn = node.func
@@ -158,6 +199,23 @@ def scan_source(src: str, path: str = "<src>") -> Dict[str, Any]:
                         if w and w.replace("_", "").replace(
                                 "-", "").replace("/", "").isupper():
                             _record(arg, w, "StepResult")
+                    elif isinstance(arg, ast.Name) and \
+                            arg.id in _const_names and \
+                            arg.id not in _rebound:
+                        for _c in _const_names[arg.id]:
+                            _w = _c.value
+                            if _w and _w.replace("_", "").replace(
+                                    "-", "").replace("/", "").isupper():
+                                _record(_c, _w, f"StepResult via {arg.id}")
+                    elif isinstance(arg, ast.IfExp) and all(
+                            isinstance(b, ast.Constant)
+                            and isinstance(b.value, str)
+                            for b in (arg.body, arg.orelse)):
+                        for _b in (arg.body, arg.orelse):
+                            _w = _b.value
+                            if _w and _w.replace("_", "").replace(
+                                    "-", "").replace("/", "").isupper():
+                                _record(_b, _w, "StepResult (inline if/else)")
                     elif isinstance(arg, (ast.Name, ast.Attribute,
                                           ast.IfExp, ast.Call, ast.Subscript)):
                         unresolved.append(

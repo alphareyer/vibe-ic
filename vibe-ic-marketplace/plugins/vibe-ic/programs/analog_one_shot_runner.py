@@ -1779,8 +1779,11 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                                        f"{_live.get('reason', '')} — {_on}")
                             return StepResult(
                                 step_name, bname,
-                                "PASS_WITH_WAIVERS" if so
-                                else "PASS_WITH_REAL_SIM",
+                                # R-0915-85 — `PASS_WITH_REAL_SIM` is a PASS
+                                # that names its evidence; the detail below
+                                # carries that fact verbatim.
+                                _V.Verdict.PASS_WITH_WAIVERS.value if so
+                                else _V.Verdict.PASS.value,
                                 time.time() - t0,
                                 # BOTH facts, disclosure FIRST: the console
                                 # line is truncated, so whichever comes first
@@ -1879,7 +1882,12 @@ def step_for_block(project: Path, block: Dict[str, Any], step_name: str,
                 passed = cp2.returncode == 0
                 return StepResult(
                     step_name, bname,
-                    "PASS_WITH_NATIVE_PV" if passed else "FAIL",
+                    # R-0915-85 — `PASS_WITH_NATIVE_PV` said PASS and named
+                    # the EVIDENCE it rested on. The evidence belongs in the
+                    # detail (it is already there, in full), not in a sixth
+                    # word only this site writes.
+                    _V.Verdict.PASS.value if passed
+                    else _V.Verdict.FAIL.value,
                     time.time() - t0,
                     (f"native per-block PV executed "
                      f"(DRC={_pv_verdict(native, 'drc')}, "

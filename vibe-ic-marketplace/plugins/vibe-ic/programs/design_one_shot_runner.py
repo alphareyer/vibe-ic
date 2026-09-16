@@ -19984,7 +19984,11 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                     _outs.insert(0, "phase2/stage2/dft/scan_netlist.v")
                 results.append(StepResult(
                     "dft_insertion",
-                    "PASS" if r.returncode == 0 else "PASS_W_WARN",
+                    # R-0915-85 — `PASS_W_WARN` was a PASS carrying a
+                    # warning. The warning is in the detail and the rc is in
+                    # it too; the word is PASS either way, and a reader who
+                    # needs the rc reads the line that states it.
+                    _V.Verdict.PASS.value,
                     time.time() - t0,
                     f"Fault ATPG measured stuck-at coverage="
                     f"{cov.get('coverage_pct')}% (rc={r.returncode}, clock={clk}, "
@@ -21875,13 +21879,20 @@ def step_final_audit(project: Path, phase: int = 3,
                               head,
                               [str(transcript)],
                               extras={"structural_measurement": meas}, reason_class=_V.ReasonClass.PARTIAL_POPULATION)
-        status = ("WAIVED" if "Overall: PASS_WITH_WAIVERS" in out
-                  else "PASS")
+        # R-0915-85 — the audit's own word, straight through. This site read
+        # the audit's `Overall: PASS_WITH_WAIVERS` and then wrote `WAIVED`,
+        # which is the translation the ruling forbids and which the literal
+        # ratchet could not see because the status argument is a variable.
+        _waived = "Overall: PASS_WITH_WAIVERS" in out
+        status = (_V.Verdict.PASS_WITH_WAIVERS.value if _waived
+                  else _V.Verdict.PASS.value)
         return StepResult("final_audit", status,
                           time.time() - t0,
                           head,
                           [str(transcript)],
-                          extras={"structural_measurement": meas})
+                          extras={"structural_measurement": meas},
+                          attribution=("the compliance audit's own waiver "
+                                       "rows" if _waived else ""))
     return StepResult("final_audit", "FAIL",
                       time.time() - t0,
                       head,
@@ -22811,8 +22822,13 @@ def main() -> int:
                     project, hint)
                 plan.append(StepResult(
                     "rtl_repair_remediation",
-                    "PASS" if remediated else "SKIP",
+                    # R-0915-85 — a remediation that did not fire measured
+                    # nothing; `SKIP` said that without saying WHY.
+                    _V.Verdict.PASS.value if remediated
+                    else _V.Verdict.NOT_MEASURED.value,
                     0.0, detail,
+                    reason_class=(None if remediated
+                                  else _V.ReasonClass.NOT_EXECUTED.value),
                     extras={"hint_signatures":
                             [s.get("kind") for s in
                              (hint.get("signatures") or [])]}))
@@ -22962,8 +22978,11 @@ def main() -> int:
                         project, hint)
                     plan.append(StepResult(
                         "rtl_repair_remediation",
-                        "PASS" if remediated else "SKIP",
+                        _V.Verdict.PASS.value if remediated
+                        else _V.Verdict.NOT_MEASURED.value,
                         0.0, detail,
+                        reason_class=(None if remediated
+                                      else _V.ReasonClass.NOT_EXECUTED.value),
                         extras={"hint_signatures":
                                 [s.get("kind") for s in
                                  (hint.get("signatures") or [])]}))

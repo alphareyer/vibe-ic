@@ -34,18 +34,29 @@ def test_lvs_skips_on_upstream_pnr_fail(tmp_path):
         "violations remaining (final DRT-0199).")
     r = R.step_lvs(tmp_path, "chip_top", _pdk(), "",
                    upstream_pnr=pnr_fail)
-    assert r.status == "SKIP"
+    assert r.status == "NOT_MEASURED"
+    assert r.reason_class == "upstream_failed"
     assert r.extras["finding"] == "LVS_UPSTREAM_PNR_INCOMPLETE"
     assert "ROUTE_NOT_CONVERGED" in r.detail
     assert "design/extraction defect" not in r.detail.split("not a")[0]
 
 
 def test_lvs_skips_on_upstream_pnr_timeout(tmp_path):
-    pnr_to = R.StepResult("pnr", "TIMEOUT", 3600.0, "rc=124 killed")
+    """A KILLED pnr is a FAIL, and the ruling on timeouts is why.
+
+    `TIMEOUT` was a status of its own. R-0915-85 does not give it one, and the
+    owner's standing ruling on timeouts says why that is right: a run that was
+    stopped is SUPERVISED, never relabelled into a softer tier. The step
+    failed; that it failed by being killed at 3600 s is in its DETAIL, which is
+    what this test reads.
+    """
+    pnr_to = R.StepResult("pnr", "FAIL", 3600.0, "rc=124 killed after 3600s")
     r = R.step_lvs(tmp_path, "chip_top", _pdk(), "",
                    upstream_pnr=pnr_to)
-    assert r.status == "SKIP"
-    assert r.extras["upstream_pnr_status"] == "TIMEOUT"
+    assert r.status == "NOT_MEASURED"
+    assert r.reason_class == "upstream_failed"
+    assert r.extras["upstream_pnr_status"] == "FAIL"
+    assert "rc=124 killed" in r.detail
 
 
 def test_lvs_proceeds_on_upstream_pnr_pass(tmp_path):
