@@ -44,12 +44,23 @@ class LecStepVerdictTest(unittest.TestCase):
                                       "compared_points": 66,
                                       "unproven_points": 2}), "FAIL")
 
-    def test_inconclusive_is_a_disclosed_skip(self):
-        """A 0-compared-points INCONCLUSIVE (e.g. an unstaged hard macro) is a
-        disclosed SKIP — never a hard FAIL that cascades, never a vacuous PASS."""
-        self.assertEqual(_status_for({"verdict": "INCONCLUSIVE",
-                                      "equivalent": False,
-                                      "compared_points": 0}), "SKIP")
+    def test_inconclusive_with_nothing_compared_is_not_measured(self):
+        """A 0-compared-points INCONCLUSIVE (e.g. an unstaged hard macro) is
+        never a hard FAIL that cascades and never a vacuous PASS — the
+        INVARIANT this test was written for, unchanged.
+
+        R-0915-82 moved only its NAME. It used to be an undifferentiated SKIP,
+        which is the same word the flow uses for "the tool was not available"
+        and for "the ladder finished and did not close"; it is now
+        NOT_EXECUTED with the reason named. The properties are asserted here
+        rather than the literal, so the next honest renaming does not have to
+        edit this file to stay true. The states that ARE new live in
+        `test_r0915_82_inconclusive_lec_is_never_skip.py`."""
+        status = _status_for({"verdict": "INCONCLUSIVE",
+                              "equivalent": False,
+                              "compared_points": 0})
+        self.assertNotIn(status, ("PASS", "FAIL"))
+        self.assertEqual(status, dosr.NOT_EXECUTED_STATUS)
 
     def test_skipped_condition_is_a_disclosed_skip(self):
         self.assertEqual(_status_for({"verdict": "SKIPPED-CONDITION",

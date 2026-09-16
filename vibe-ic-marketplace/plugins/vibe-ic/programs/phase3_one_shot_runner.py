@@ -60491,8 +60491,25 @@ def _aggregate_verdict(plan: List[StepResult]) -> str:
         #                produced it does not stand clean.
         # This STRENGTHENS the verdict for both — neither can now yield a bare
         # "PASS" — and moves no other word.
+        #
+        # R-0915-82 — NOT_EXECUTED joins them, and it MUST, because that change
+        # is what first puts the word in this plan. `step_dft_lec_chain` now
+        # answers an INCONCLUSIVE LEC record with NOT_EXECUTED when the proof
+        # was STOPPED (the R-0915-48 backstop firing, the stall watchdog, an
+        # operator rung cap) or compared nothing at all, and
+        # `run_step11_dft_after_synth` republishes that row verbatim as
+        # `step11_lec_equivalence`. Left unclassified it would reach the
+        # refusal above and turn every such run into UNKNOWN_STATUS — a
+        # correction to one step silently voiding the whole phase-3 verdict.
+        # It belongs HERE and not in the FAIL tier: "the prover was cut off"
+        # is a disclosed gap, which is exactly the tier SKIP already sits in,
+        # so R-0915-48's contract (the backstop fires, phase 3 proceeds) is
+        # preserved word for word. The INCONCLUSIVE that is NOT a disclosed
+        # gap — a ladder that ran to its last rung and did not close — comes
+        # through as FAIL and is graded by the tier above.
         "PASS_WITH_WAIVERS": ("WAIVED", "SKIP", "ENV_UNAVAILABLE",
-                              "PASS_WITH_ATTRIBUTION", "WARN", "PASS_W_WARN"),
+                              "PASS_WITH_ATTRIBUTION", "WARN", "PASS_W_WARN",
+                              "NOT_EXECUTED"),
         "PASS": ("PASS",),
     }
     _known = {w for words in _TIERS.values() for w in words}
