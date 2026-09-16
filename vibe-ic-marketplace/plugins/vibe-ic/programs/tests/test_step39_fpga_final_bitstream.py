@@ -184,7 +184,7 @@ def test_guard_failed_burn_stages_nothing(tmp_path):
         [dr.StepResult("fpga_compile", "PASS", 1.0, "sof=top.sof size=10"),
          dr.StepResult("fpga_burn", "FAIL", 1.0, "rc=1",
                        extras={"burn_provenance": {"sof_path": str(sof)}}),
-         dr.StepResult("usb_hid_tester_verify", "SKIP", 1.0, "no board")],
+         dr.StepResult("usb_hid_tester_verify", "NOT_MEASURED", 1.0, "no board", reason_class="not_executed")],
         top_name="top")
     assert list((proj / "phase2/stage1/fpga").glob("final/*.sof")) == []
 

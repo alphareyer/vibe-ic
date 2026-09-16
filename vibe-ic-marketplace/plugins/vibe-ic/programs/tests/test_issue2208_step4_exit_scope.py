@@ -21,7 +21,7 @@ def test_main_scopes_step4_producers_and_real_consumer(tmp_path, monkeypatch, ex
             continue
         def stub(*args, _name=name, **kwargs):
             calls.append(_name)
-            result = runner.StepResult(_name.removeprefix('step_'), 'SKIP', 0.0, 'unrelated tool stub')
+            result = runner.StepResult(_name.removeprefix('step_'), "NOT_MEASURED", 0.0, 'unrelated tool stub', reason_class="not_executed")
             return [result] if _name == 'step_dft_lec_chain' else result
         monkeypatch.setattr(runner, name, stub)
     monkeypatch.setattr(runner._spf, 'gate', lambda project, owner, site, refuse, fn, *a, **kw:

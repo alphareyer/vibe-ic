@@ -152,7 +152,7 @@ def _drive(p, monkeypatch, calls):
         def step_dft_lec_chain(project, top, container, ic_class,
                                full_chip=True):
             calls.append(project)
-            return [R.StepResult("dft_insertion", "SKIP", 0.0, "stub")]
+            return [R.StepResult("dft_insertion", "NOT_MEASURED", 0.0, "stub", reason_class="not_executed")]
 
     monkeypatch.setitem(sys.modules, "design_one_shot_runner", _FakeD2)
     monkeypatch.setitem(sys.modules, "ic_class_profile",
