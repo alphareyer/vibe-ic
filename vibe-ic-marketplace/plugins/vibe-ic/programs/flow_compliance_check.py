@@ -108,6 +108,7 @@ import _gate_invocation
 import _flow_reason_taxonomy as _reason_taxonomy
 import _watchdog
 import l_doc_consumer_contract as _ldoc
+import phase1_post_process as _p1pp  # R-0915-64: the ONE input scanner
 import clock_contract as _clock_contract
 # vibe-ic#634 — the ONE classification of verdict words, shared with
 # `flow_step_execution_coverage_check` so a tier added here cannot be
@@ -11924,7 +11925,7 @@ def _load_waivers(project: Path, max_step: int = 40) -> Dict[int, Dict[str, str]
 #: document and the sentence a reader can check. `None` means the design did
 #: NOT declare the absence, which is the only answer that lets a step run.
 def _l_doc_declares_absence(project: Path, spec: Any
-                            ) -> Optional[Tuple[str, str]]:
+                            ) -> Optional[Tuple[str, str, Optional[Dict[str, Any]]]]:
     """Has the DESIGN's own L-doc declared this capability absent?
 
     MEASURED 2026-09-15 (lane icspm3) on `spm` x gf180mcuD. Step 11 (DFT
@@ -11978,13 +11979,45 @@ def _l_doc_declares_absence(project: Path, spec: Any
     except (ValueError, OSError):
         cited = str(path)
     detail = ", ".join(f"{k}={fields[k]!r}" for k in sorted(absent))
-    return cited, detail
+
+    # R-0915-64 — A GENERATED DOCUMENT IS NOT AN INPUT STATEMENT, and until
+    # here this function could not tell the difference.
+    #
+    # MEASURED on the subservient tapeout run r27 (lane icsub2, 2026-09-16):
+    # five steps — 11, 12, DT1, DT2, DT3 — stood down citing
+    # `phase1/generated_docs/L20_DFT_SCAN_TOPOLOGY.json records bist_mbist=[],
+    # dft_present=False, jtag_tap=None, scan_chains=[]`. That document is a
+    # SKELETON. Its own body says so: `extraction_status:
+    # NOT_YET_EXTRACTED`, `source_documents: []`, `extraction_evidence: {}`,
+    # `emitted_by: phase1_post_process.emit_l_doc_skeleton`. Every one of the
+    # four field values the citation quotes is the skeleton's INITIALISER, not
+    # a reading of anything. The design was never asked, and five steps' worth
+    # of outputs stopped being owed on the strength of a default.
+    #
+    # The docstring above is still right about what it checks — it just was
+    # not enough. The fields remain NECESSARY (one field asserting a scan
+    # chain, a TAP or a BIST block still makes the outputs owed). What is
+    # added is the fact the record was missing: the DESIGN'S OWN INPUT was
+    # searched for this layer's subject and carried none of it. That is the
+    # R-0915-36 shape — a derived absence with its search recorded — and it is
+    # asked through the SAME scanner R-0915-36 uses, so the phase-1 emitter and
+    # this audit cannot disagree about one design's input.
+    #
+    # STRICTLY CONSERVATIVE: this can only REFUSE an N/A that used to be
+    # granted, never grant one that used to be refused. A single mention of
+    # `scan`, `DFT`, `BIST`, `JTAG`, `ATPG` or `test mode` in any input
+    # document, an unreadable document, an empty input corpus, or an L-doc
+    # with no registered term set all return None — and None RUNS the step.
+    corroboration = _p1pp.declaration_corroboration(doc_id, project)
+    if corroboration is None:
+        return None
+    return cited, detail, corroboration
 
 
 #: The `delivery_declares` predicate's answer, when it has one: the cited
 #: declaration and the detail a reader needs to check it.
 def _delivery_declares_absence(project: Path, spec: Any
-                               ) -> Optional[Tuple[str, str]]:
+                               ) -> Optional[Tuple[str, str, Optional[Dict[str, Any]]]]:
     """Whether the DELIVERY the design declared has no die (vibe-ic#2277).
 
     THE MEASURED DEFECT. Steps 15.5ic (Pad Ring), 26.5ic (Die Finishing) and
@@ -12049,7 +12082,13 @@ def _delivery_declares_absence(project: Path, spec: Any
         return None
     if owed:
         return None
-    return rel, f"{field}={value!r} and no operator slot is bound"
+    # R-0915-64 — SAME ARITY AS THE L-DOC ROUTE, evidence `None`. This route
+    # needs no input scan and is given none: its declaration is ALREADY an
+    # input file (`input/step_0_5ic_answers.json`, written by the design), so
+    # it never had the defect R-0915-64 names. Returning the same shape means
+    # the caller branches on WHETHER THERE IS EVIDENCE rather than on a tuple
+    # length, and a third route added later cannot silently pick the wrong arm.
+    return rel, f"{field}={value!r} and no operator slot is bound", None
 
 
 def _check_condition(project: Path, condition: Dict[str, Any]) -> bool:
@@ -13639,13 +13678,38 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 _decl = _delivery_declares_absence(
                     project, (condition or {}).get("delivery_declares"))
             if _decl is not None:
-                _cited, _detail = _decl
-                result.reasons.append(
-                    f"design-declared NOT_APPLICABLE: {_cited} records "
-                    f"{_detail}, so this step's outputs are not owed by this "
-                    f"design. The declaration is the design's own; a missing, "
-                    f"unparseable or partly-filled document would have run the "
-                    f"step instead.")
+                # R-0915-64 — the citation names the INPUT, because that is
+                # what the claim rests on. `_l_doc_declares_absence` returns a
+                # third element for the L-doc route: the input scan's own
+                # evidence (documents by path, terms, zero matches). The
+                # `delivery_declares` route returns the 2-tuple it always did
+                # and keeps its own sentence — its declaration IS an input
+                # file (`input/step_0_5ic_answers.json`), so it never had this
+                # defect and is not given a scan it does not need.
+                _cited, _detail, _ev = _decl
+                if _ev is not None:
+                    _docs = _ev.get("documents_scanned") or []
+                    _terms = _ev.get("terms_searched") or []
+                    result.reasons.append(
+                        f"design-declared NOT_APPLICABLE, derived from the "
+                        f"design's own INPUT: all "
+                        f"{_ev.get('documents_scanned_count', len(_docs))} "
+                        f"input document(s) — {', '.join(_docs)} — were "
+                        f"searched for {len(_terms)} term(s) "
+                        f"({', '.join(_terms)}) and NONE matched, so this "
+                        f"step's outputs are not owed by this design. "
+                        f"Corroborated by {_cited}, which records {_detail}. "
+                        f"A single mention of any term in any input document, "
+                        f"an unreadable document, an empty input corpus, or a "
+                        f"missing/unparseable/partly-filled L-doc would have "
+                        f"run the step instead.")
+                else:
+                    result.reasons.append(
+                        f"design-declared NOT_APPLICABLE: {_cited} records "
+                        f"{_detail}, so this step's outputs are not owed by "
+                        f"this design. The declaration is the design's own; a "
+                        f"missing, unparseable or partly-filled document "
+                        f"would have run the step instead.")
             else:
                 result.reasons.append(f"condition not met: {condition}")
         return result

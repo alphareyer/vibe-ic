@@ -87,6 +87,23 @@ def _steps():
 def _project(tmp_path, fields, marker=None, *, write_l20=True, body=None):
     """A project shaped like the run, with nothing in it but the declaration
     and the runner's own marker."""
+    # R-0915-64 — A DESIGN THAT DECLARES NO DFT HAS INPUT DOCUMENTS THAT SAY
+    # NOTHING ABOUT DFT, and this fixture used to have no input at all. Since
+    # R-0915-64 the declarer requires the design's OWN INPUT to corroborate the
+    # L-doc (documents scanned, terms searched, zero hits), because a GENERATED
+    # skeleton's initialisers are not an input statement. An empty corpus is a
+    # scan with no denominator and declares nothing, so without this the
+    # fixture describes a project that cannot exist.
+    #
+    # ONLY THE FIXTURE MOVES. Every assertion below is untouched: these cases
+    # exist to prove the L-DOC half decides, and they still do — the corpus
+    # here is deliberately silent about DFT so the L20 fields remain the only
+    # thing that varies between them.
+    docs = tmp_path / "input" / "docs"
+    docs.mkdir(parents=True, exist_ok=True)
+    (docs / "L1_product_metadata.md").write_text(
+        "# Part\nA small core that multiplies two numbers.\n",
+        encoding="utf-8")
     gd = tmp_path / "phase1" / "generated_docs"
     gd.mkdir(parents=True, exist_ok=True)
     if write_l20:
