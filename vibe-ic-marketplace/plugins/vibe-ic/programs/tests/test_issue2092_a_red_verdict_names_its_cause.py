@@ -63,10 +63,14 @@ def test_the_measured_icaes_red_now_names_its_cause():
     assert c["run_is_red"] is True
     assert c["names_its_cause"] is True
     assert c["failed_gates"] == [], "no gate failed, and that stays true"
-    assert len(c["non_green_steps"]) == 35
-    assert c["named_cause_count"] == 35
+    # R-0915-85 — the tally is 40, not 35, and the 5 that joined are the
+    # NOT_MEASURED rows. `INCOMPLETE` used to sit outside NON_GREEN, so a run
+    # could be red while five of its rows said nobody had looked and none of
+    # them counted as a named cause. A hole in the report is a cause.
+    assert len(c["non_green_steps"]) == 40
+    assert c["named_cause_count"] == 40
     statuses = {s["status"] for s in c["non_green_steps"]}
-    assert statuses == {"FAIL", "FAIL", "NOT_MEASURED"}
+    assert statuses == {"FAIL", "NOT_MEASURED"}
 
 
 def test_a_red_that_names_nothing_at_all_is_reported_as_a_defect():
@@ -111,9 +115,14 @@ def test_a_gating_ordering_violation_is_a_cause_on_its_own():
     assert c["run_is_red"] is True
     assert c["names_its_cause"] is True
     assert c["failed_gates"] == []
-    assert c["non_green_steps"] == []
+    # R-0915-85 — the NOT_MEASURED row is itself a named cause now, so this
+    # case carries two: the ordering line AND the step nobody measured. The
+    # property under test is unchanged — the ordering line reaches the cause
+    # set on its own — and is asserted directly rather than through an
+    # emptiness that the vocabulary change made untrue.
+    assert [s["step_id"] for s in c["non_green_steps"]] == ["2"]
     assert c["ordering_gating_line_count"] == 1
-    assert c["named_cause_count"] == 1
+    assert c["named_cause_count"] == 2
 
 
 def test_a_self_skipped_signoff_step_is_a_cause_on_its_own():
@@ -138,9 +147,12 @@ def test_a_self_skipped_signoff_step_is_a_cause_on_its_own():
 _RED_INPUTS = {
     # `ok = ...` — the statuses
     "failing": "status FAIL is in verdict.NON_GREEN",
-    "missing": "status MISSING is in verdict.NON_GREEN",
+    # R-0915-85 — both buckets still exist and still mean what they measured;
+    # what carries the distinction is the REASON beside the word, because the
+    # words `MISSING` and `SKIPPED-SETUP-REQUIRED` are gone.
+    "missing": "status FAIL is in verdict.NON_GREEN",
     "setup_required_skipped":
-        "status SKIPPED-SETUP-REQUIRED is in verdict.NON_GREEN",
+        "status NOT_MEASURED is in verdict.NON_GREEN",
     # `ok = ...` — the one that is NOT a status
     "oss_blocked_skipped": "self_skipped_signoff_steps",
     # `forced_fail = True` — the lists
@@ -223,9 +235,13 @@ def test_an_excused_step_is_never_counted_as_a_cause():
 def test_the_green_tiers_are_the_ones_main_exits_zero_on():
     """Spelt once. If the exit-code decision at the bottom of `main` and this
     tuple ever disagree, a run could be green to the shell and red here."""
+    # R-0915-85 — the exit-code decision no longer retypes the tuple; it reads
+    # `GREEN_RUN_STATUSES`, so the two CANNOT disagree. That is this test's
+    # subject satisfied by construction, and what is asserted is the one fact
+    # that still could be got wrong: which words are green.
     src = (Path(F.__file__).read_text(encoding="utf-8")
-           .split('if overall in ("PASS", "PASS_WITH_WAIVERS",')[1]
+           .split("if overall in GREEN_RUN_STATUSES:")[1]
            .split("return 0")[0])
-    assert "PASS_WITH_OPEN_SOURCE_CONSTRAINTS" in src
-    assert set(F.GREEN_RUN_STATUSES) == {
-        "PASS", "PASS_WITH_WAIVERS", "PASS_WITH_OPEN_SOURCE_CONSTRAINTS"}
+    assert src.strip() == "", src
+    assert set(F.GREEN_RUN_STATUSES) == {"PASS", "PASS_WITH_WAIVERS"}
+    assert "NOT_MEASURED" not in F.GREEN_RUN_STATUSES

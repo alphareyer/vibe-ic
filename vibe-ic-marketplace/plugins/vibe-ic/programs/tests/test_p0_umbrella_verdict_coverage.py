@@ -179,9 +179,15 @@ def test_a_clean_sweep_with_one_uninvoked_gate_is_not_a_PASS(
         "the umbrella certified 5 registered checkers on the strength of the 4 "
         f"that answered; status={step['status']!r}")
     assert step["status"] == "NOT_MEASURED"
-    assert rc == 0, (
-        "INCOMPLETE is a disclosure tier, not a failure — it must not turn a "
-        "run red on its own")
+    # R-0915-85 — NOT FAIL, AND NOT GREEN EITHER. #599 read "not a failure" as
+    # "rc 0", and that reading is what sha256 run16 shipped: the only step in
+    # scope had certified 4 of 5 and the run answered green. The tier is still
+    # a disclosure and still never FAIL; what it no longer does is let the run
+    # claim a PASS it did not measure.
+    assert rc == 1, (
+        "a run whose scope holds a step nobody measured cannot be PASS; it is "
+        "NOT_MEASURED, which is neither a failure nor a pass")
+    assert audit["verdict"] == "NOT_MEASURED", audit["verdict"]
 
 
 def test_a_clean_sweep_with_every_gate_invoked_IS_a_PASS(
@@ -454,25 +460,43 @@ def test_not_invocable_count_counts_only_that_verdict():
 # where INCOMPLETE lands in the roll-up — asserted against the tier module,
 # not against a belief about it
 # ===========================================================================
-def test_incomplete_is_a_registered_producer_status():
-    """`verdict` derives done-claim membership BY SUBTRACTION, so an
-    unregistered word silently becomes a done-claim. INCOMPLETE was registered
-    by #599; the umbrella is a new PRODUCER of it and that must stay true."""
-    assert "INCOMPLETE" in _T.PRODUCER_STATUSES
+def test_the_tier_is_a_registered_producer_status():
+    """Membership is no longer derived by SUBTRACTION, which is the repair.
+
+    `_flow_verdict_tiers` worked out "is this a done-claim" by subtracting two
+    registers, so a word nobody registered silently became one. The umbrella's
+    own word went through that hole once already. `verdict.PRODUCER_STATUSES`
+    is the five, and `parse` refuses everything else, so the hole is closed by
+    construction rather than by remembering to register.
+    """
+    assert "NOT_MEASURED" in _T.PRODUCER_STATUSES
+    with pytest.raises(_T.UnknownVerdictWord):
+        _T.parse("INCOMPLETE")
 
 
-def test_incomplete_cannot_turn_a_green_run_red():
-    """The whole reason this is not `FAIL`. A gate that blocks every landing
-    gets deleted, not fixed — so the tier discloses and does not block."""
-    assert not _T.is_non_green("NOT_MEASURED")
+def test_the_tier_is_never_FAIL_but_is_not_green():
+    """A gate that blocks every landing gets deleted, not fixed — so the tier
+    is still never a FAIL. It IS non-green: it keeps the run off PASS, and
+    `cascade_to_dependent` still takes nothing down with it."""
+    assert _T.parse("NOT_MEASURED") is not _T.Verdict.FAIL
+    assert _T.is_non_green("NOT_MEASURED")
+    assert _T.cascade_to_dependent(_T.StepVerdict.not_measured(
+        "P0", "umbrella", reason_class=_T.ReasonClass.PARTIAL_POPULATION,
+        reason="4 of 5")) is None
 
 
-def test_incomplete_is_not_a_full_pass():
-    """...and the whole reason it is not `PASS`. It is a QUALIFIED done-claim:
-    it ran and did not fail, but it certified less than its population."""
-    assert _T.is_done_claim("NOT_MEASURED")
+def test_the_tier_is_not_a_done_claim_at_all():
+    """...and this is the r26 correction reaching the ordering guard.
+
+    `INCOMPLETE` was a QUALIFIED done-claim: it ran, it did not fail, it
+    certified less than its population — so the ordering guard read a step
+    that had measured NOTHING as claiming to have delivered a result, and
+    raised "marked done while dependency … = MISSING" against it.
+    NOT_MEASURED says the opposite in the word.
+    """
+    assert not _T.is_done_claim("NOT_MEASURED")
     assert not _T.is_full_pass("NOT_MEASURED")
-    assert _T.is_qualified_done("NOT_MEASURED")
+    assert not _T.is_qualified_done("NOT_MEASURED")
 
 
 def test_incomplete_is_not_excused_from_the_denominator():
