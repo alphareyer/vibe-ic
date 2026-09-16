@@ -3595,9 +3595,10 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
             # cannot take it.
             return _ProgramCheckOutcome(
                 True,
-                (f"INCOMPLETE: the gate reached a stated wait, not a verdict "
-                 f"(rc {_AWAITING_EXIT_CODE}) — a second pass it cannot "
-                 f"perform itself has not happened: {cmd_str}\n{snippet}"),
+                (f"INCOMPLETE: {_AWAITING_STDOUT_TOKEN} — the gate reached a "
+                 f"stated wait, not a verdict (rc {_AWAITING_EXIT_CODE}): a "
+                 f"second pass it cannot perform itself, because only an AGENT "
+                 f"can, has not happened: {cmd_str}\n{snippet}"),
                 r.returncode)
         if (r.returncode == _WAIVER_EXIT_CODE
                 and _stdout_signals_waiver(r.stdout)
@@ -3736,6 +3737,14 @@ _STRUCTURE_ONLY_STDOUT_SENTINEL = "STRUCTURE_ONLY:"
 # apart from "nothing applied".
 _SUBSTANTIVE_HINT_PREFIX = "__SUBSTANTIVE_HINT__: "
 _INCOMPLETE_HINT_PREFIX = "__INCOMPLETE_HINT__: "
+#: R-0915-85 / R-0915-88 — the AWAITING half of the INCOMPLETE tier, carried as
+#: its OWN typed hint so `check_step` can give the step
+#: `NOT_MEASURED(awaiting_agent_pass)` instead of the undifferentiated
+#: `partial_population`. A TOKEN, never a sentence: this file's own rule is
+#: "TYPED EVIDENCE, NEVER PROSE", and sniffing the rc-4 message for the word
+#: "wait" is exactly the prose recogniser that rule exists to forbid.
+_AWAITING_HINT_PREFIX = "__AWAITING_HINT__: "
+_AWAITING_STDOUT_TOKEN = "AWAITING_AGENT_PASS"
 
 #: What a gate PRINTS to raise each. Line-start, leading whitespace allowed —
 #: the same shape as the `VACUOUS_PASS:` disclosure that already exists.
@@ -10978,6 +10987,8 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
             reasons.append(f"{_SUBSTANTIVE_HINT_PREFIX}{cmd}")
         if passed and _stdout_signals_token(out, _INCOMPLETE_STDOUT_TOKEN):
             reasons.append(f"{_INCOMPLETE_HINT_PREFIX}{cmd}")
+            if _stdout_signals_token(out, _AWAITING_STDOUT_TOKEN):
+                reasons.append(f"{_AWAITING_HINT_PREFIX}{cmd}")
         return passed, reasons
 
     # `advisory_program_exit_zero` (#306/#1980) — RUNS the program and records
@@ -14272,6 +14283,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                              if r.startswith(_SUBSTANTIVE_HINT_PREFIX)]
         incomplete_hints = [r for r in reasons
                             if r.startswith(_INCOMPLETE_HINT_PREFIX)]
+        awaiting_hints = [r for r in reasons
+                          if r.startswith(_AWAITING_HINT_PREFIX)]
         # vibe-ic#901 - the DENOMINATOR: clauses that dispatched a gate program.
         # Predicate-only clauses (`files_exist`, `json_field_true`) are
         # deliberately NOT counted: they cannot populate the numerator, so
@@ -14303,6 +14316,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                             and not r.startswith(_ADVISORY_RECORD_HINT_PREFIX)
                             and not r.startswith(_SUBSTANTIVE_HINT_PREFIX)
                             and not r.startswith(_INCOMPLETE_HINT_PREFIX)
+                            and not r.startswith(_AWAITING_HINT_PREFIX)
                             and not r.startswith(_NOT_APPLICABLE_HINT_PREFIX)
                             and not r.startswith(
                                 _EXECUTED_DECLARED_NA_HINT_PREFIX)]
@@ -14312,7 +14326,19 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # sibling or a waiver must not launder the incomplete clause into
             # SKIPPED-CONDITION / WAIVED.
             result.status = _T.Verdict.NOT_MEASURED.value
-            result.reason_class = _T.ReasonClass.PARTIAL_POPULATION.value
+            # R-0915-88 — WHICH of the two states this is. `AWAITING` says the
+            # flow is waiting on an AGENT pass, not that the gate examined part
+            # of its subject, and it is the root of subservient r26's and SPM's
+            # NOT_MEASURED. Naming it sends the reader to the hand-off instead
+            # of to the gate.
+            result.reason_class = (
+                _T.ReasonClass.AWAITING_AGENT_PASS.value if awaiting_hints
+                else _T.ReasonClass.PARTIAL_POPULATION.value)
+            for h in awaiting_hints:
+                result.reasons.append(
+                    f"AWAITING an agent pass: the gate completed pass one of a "
+                    f"two-pass protocol and pass two is not a program's to "
+                    f"make: {h[len(_AWAITING_HINT_PREFIX):]}")
             for h in incomplete_hints:
                 result.reasons.append(
                     f"INCOMPLETE: the gate reports its input was applicable "

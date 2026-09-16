@@ -238,6 +238,22 @@ class ReasonClass(str, enum.Enum):
     #: `INCOMPLETE`.
     NO_POPULATION = "no_population"
 
+    #: Pass one of a two-pass protocol completed and pass two is an AGENT's
+    #: move, which has not happened. Replaces the `AWAITING` exit-code state
+    #: (`flow_compliance_check._AWAITING_EXIT_CODE`, #2014 D1) landing on the
+    #: undifferentiated `INCOMPLETE` tier.
+    #:
+    #: IT IS ITS OWN REASON BECAUSE IT NAMES A DIFFERENT OWNER. Every other
+    #: member here says something about the run or the tree; this one says the
+    #: flow is waiting on a person or an agent, and the flow is program-first
+    #: + AI-BACKUP by design — several steps complete only by handing work to
+    #: an agent and consuming its answer. Booked as `partial_population` it
+    #: read as "this gate examined part of its subject", which sent the reader
+    #: to the gate instead of to the hand-off. MEASURED on subservient r26 and
+    #: on SPM: D1's `phase1_expert_parse_track --check-report` is exactly this
+    #: state, and it is the root of both runs' NOT_MEASURED (R-0915-88).
+    AWAITING_AGENT_PASS = "awaiting_agent_pass"
+
     #: A required OUTPUT of this step does not exist. Carried with
     #: `Verdict.FAIL`, not NOT_MEASURED — see `Verdict.FAIL`. Named in this
     #: enum because `reason_class` is the one place a reader looks for the

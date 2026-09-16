@@ -13,7 +13,7 @@ Two properties have to hold or both programs lie in the same way:
      would read the other as a table with no verdict — i.e. would rank it
      NON_GREEN and report a catastrophic regression that never happened.
 
-  2. The direction rule adds NO vocabulary. It is `_flow_verdict_tiers`'
+  2. The direction rule adds NO vocabulary. It is `verdict`'
      classification, which adjudicates BY SUBTRACTION so a word invented
      tomorrow lands somewhere without anyone remembering to come here. The
      load-bearing test below plants a word registered NOWHERE and requires a
@@ -28,7 +28,7 @@ from __future__ import annotations
 import importlib
 
 S = importlib.import_module("_step_verdict_table")
-T = importlib.import_module("_flow_verdict_tiers")
+T = importlib.import_module("verdict")
 
 
 def _audit(steps, ledger=(), **kw):
@@ -79,7 +79,7 @@ def test_a_document_with_no_steps_list_is_unreadable_not_empty():
 
 def test_a_refusal_is_ranked_below_a_judgement():
     """`INSUFFICIENT_DATA` means the audit measured nothing. Ranking it as a
-    done-claim (which is what `_flow_verdict_tiers` does with any unregistered
+    done-claim (which is what `verdict` does with any unregistered
     word, correctly, for STEPS) would let a run that refuses read as an
     improvement over a run that judged. The artefact's OWN
     `verdict_refusal_reason` field is what distinguishes them."""
@@ -91,14 +91,25 @@ def test_a_refusal_is_ranked_below_a_judgement():
 # ── 2. the direction rule is derived, not enumerated ─────────────────────────
 
 def test_an_unregistered_word_still_gets_a_direction():
-    """THE LOAD-BEARING PROPERTY. A word in neither EXCUSED nor NON_GREEN is a
-    done-claim by subtraction, so it ranks 2 and PASS -> it is a REGRESSION —
-    without this module carrying a list anybody has to remember to extend."""
+    """THE LOAD-BEARING PROPERTY, re-pointed by R-0915-85 and STRENGTHENED.
+
+    It used to be: a word in neither EXCUSED nor NON_GREEN is a done-claim by
+    subtraction, so it ranks 2. That derivation existed because the vocabulary
+    could grow. It cannot now — `verdict.parse` refuses a sixth word — so an
+    unregistered word is not a tier this module has to adjudicate, it is an
+    artefact written by a producer that does not speak the vocabulary.
+
+    It ranks 0, the FAIL-SAFE side, which is a STRICTER answer than the old
+    rank 2: an unreadable word can make a diff look like a REGRESSION and can
+    never make one look like an improvement. `PASS -> it` stays a REGRESSION;
+    `FAIL -> it` is now a LATERAL rather than an IMPROVEMENT, because nothing
+    about the artefact says anything got better.
+    """
     word = "A-TIER-INVENTED-TOMORROW"
     assert word not in T.PRODUCER_STATUSES
-    assert S.rank(word) == 2
+    assert S.rank(word) == 0
     assert S.direction("PASS", word) == S.REGRESSION
-    assert S.direction("FAIL", word) == S.IMPROVEMENT
+    assert S.direction("FAIL", word) == S.LATERAL
 
 
 def test_pass_to_skip_is_a_regression_not_a_lateral():
@@ -106,15 +117,29 @@ def test_pass_to_skip_is_a_regression_not_a_lateral():
     pass, now not run at all. EXCUSED ranks BELOW a qualified done-claim on
     purpose — ranking 'not run' above 'ran and measured little' would make
     laundering the cheapest route to a green table."""
-    assert S.direction("PASS", "SKIPPED-CONDITION") == S.REGRESSION
-    assert S.rank("SKIPPED-CONDITION") < S.rank("INCOMPLETE")
+    assert S.direction("PASS", "NOT_APPLICABLE") == S.REGRESSION
+    assert S.direction("PASS", "NOT_MEASURED") == S.REGRESSION
+    # R-0915-85 — the order between the two non-pass words FLIPS, and the flip
+    # is the ruling working. `SKIPPED-CONDITION` (excused, rank 1) used to rank
+    # BELOW `INCOMPLETE` (a done-claim by subtraction, rank 2), so a step that
+    # measured NOTHING out-ranked one the input declared inapplicable. Now
+    # `NOT_MEASURED` (0) ranks below `NOT_APPLICABLE` (1): "nobody measured it"
+    # is worse than "the input says there is nothing here", which is the whole
+    # distinction the five words were reduced to carry.
+    assert S.rank("NOT_MEASURED") < S.rank("NOT_APPLICABLE")
 
 
 def test_a_rename_at_the_same_rank_is_lateral():
     """R-0915-85 is deleting 23 words down to 5 AT THE PRODUCERS. The gate's job
     during that reform is to tell a rename from a judgement change."""
-    assert S.direction("VACUOUS_PASS", "PARTIALLY-VACUOUS") == S.LATERAL
-    assert S.direction("VACUOUS_PASS", "VACUOUS-PASS") == S.UNCHANGED
+    # R-0915-85 landed; the words below are its five. A LATERAL is now a real
+    # re-classification at the same rank rather than a spelling change, because
+    # the five have one spelling each — `verdict.parse` refuses a second, which
+    # is why the old `VACUOUS_PASS` / `VACUOUS-PASS` pair no longer exists to
+    # test.
+    assert S.direction("FAIL", "NOT_MEASURED") == S.LATERAL
+    assert S.direction("NOT_MEASURED", "NOT_MEASURED") == S.UNCHANGED
+    assert S.direction("NOT_APPLICABLE", "PASS_WITH_WAIVERS") == S.IMPROVEMENT
 
 
 # ── comparability: the refusal that keeps 69-vs-9 off the page ───────────────
