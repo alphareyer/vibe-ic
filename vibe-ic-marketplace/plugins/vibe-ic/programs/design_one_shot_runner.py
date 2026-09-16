@@ -18867,22 +18867,44 @@ def lec_inconclusive_disposition(doc: dict) -> Tuple[str, str]:
                 f"({stopped_by}) — R-0915-5/R-0915-48: report the elapsed state "
                 f"and let the flow proceed, never a verdict the prover did not "
                 f"reach")
-    try:
-        compared = int(doc.get("compared_points") or 0)
-    except (TypeError, ValueError):
-        compared = 0
-    if compared <= 0:
+    def _int(key: str) -> int:
+        try:
+            return int(doc.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    # `compared_points` IS THE PROVEN COUNT, whatever its name says.
+    # `lec_run.build_report` writes `"compared_points": proven if proven is not
+    # None else 0` (lec_run.py:2945) and reads it straight back as `_proven`
+    # (lec_run.py:4211). MEASURED on sha256 run17: compared_points 846,
+    # unproven_points 481, miter_points 1327 -- and 846 + 481 = 1327 exactly,
+    # so the field is one HALF of the population, not the whole of it.
+    # The first version of this function took the name at face value and
+    # printed `{compared - unproven} of {compared} point(s) proven` = "365 of
+    # 846", against a record whose own verdict_explanation said "846/1327
+    # proven, 481 unproven". Two numbers wrong in the sentence written to make
+    # the failure legible.
+    proven = _int("compared_points")
+    unproven = _int("unproven_points")
+    # The denominator is the whole miter. Fall back to the sum only when the
+    # producer did not write `miter_points`, never to `compared_points`.
+    total = _int("miter_points") or (proven + unproven)
+    if proven <= 0 and unproven <= 0:
         return (NOT_EXECUTED_STATUS,
                 "NOT_MEASURED: 0 point(s) were compared — the miter never "
                 "judged anything (e.g. an unstaged hard macro or a frontend "
                 "abort), so nothing is known about this netlist")
-    try:
-        unproven = int(doc.get("unproven_points") or 0)
-    except (TypeError, ValueError):
-        unproven = 0
+    if unproven <= 0:
+        # Every point that exists is proven, yet the producer still said
+        # INCONCLUSIVE. Nothing here can name what is open, so this does not
+        # get to assert a failure it cannot describe.
+        return (NOT_EXECUTED_STATUS,
+                f"NOT_MEASURED: the record is INCONCLUSIVE but names no "
+                f"unproven point ({proven} proven of {total}) — there is no "
+                f"open point to attribute a failure to")
     return ("FAIL",
-            f"the comparison RAN and did not close: {compared - unproven} of "
-            f"{compared} point(s) proven, {unproven} unproven, and no resource "
+            f"the comparison RAN and did not close: {proven} of "
+            f"{total} point(s) proven, {unproven} unproven, and no resource "
             f"ran out (budget_exhausted/exhausted_resource/progress_stalled all "
             f"clear). Non-convergence is NOT non-equivalence — no counterexample "
             f"was recorded — but the netlist's equivalence to the RTL is OPEN "
