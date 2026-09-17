@@ -150,6 +150,17 @@ import { createHash } from "crypto";
 import { readFileSync, existsSync, appendFileSync, mkdirSync, writeFileSync as require_fs_writeFileSync, unlinkSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
+// ESM/CJS bridge. package.json declares "type":"module", so this file is an
+// ES module and `require` is NOT defined in its scope — yet five call sites
+// below still reach for it, and every tool routed through them threw
+// "require is not defined" on every invocation. Two of those failures were
+// silent: canonicalizeNetlistSrcCoords is wrapped in `catch { return false }`,
+// so synthesis quietly stopped canonicalizing netlist coordinates, and
+// eda_workflow_run reported a manifest path it had not written.
+// createRequire() gives this module a real CJS resolver anchored at its own
+// URL. No identifier named `require` exists anywhere else in this file.
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
 // Wave 33 (mcp-eda v0.99.9): top-level spawnSync import so the
 // eda_fpga_program wrapper can synchronously delegate to the
 // device_fpga_de10lite_program driver. The legacy import at
@@ -8034,6 +8045,23 @@ server.tool(
 // programs/phase23_completion_self_audit_check.py which itself wraps
 // flow_compliance_check.py --strict. Embeds the rule into the tool
 // description so any agent picking up the tool inventory cannot miss it.
+//
+// The gate used to be resolved under `vibe-ic-d`, the plugin Wave 82 retired.
+// That path exists in NO layout — installed or checkout — so the tool never
+// ran, and reported the miss as `phase23_complete:false`, which is the same
+// shape a genuinely incomplete project produces. This file already calls
+// vibe-ic-d "a plugin that no longer exists" where VIBE_IC_PROGRAMS_DIR is
+// defined; that resolver (used by ~15 other program-backed tools) is correct
+// in both layouts and is what the handler now uses.
+//
+// The host-side timeout is a BACKSTOP, not the budget. The gate's own budget
+// is AUDIT_TIMEOUT_DEFAULT_S=900 .. AUDIT_TIMEOUT_CAP_S=3600
+// (programs/_path_layout.py). The previous 300_000 ms was SHORTER than the
+// inner budget, so the gate's own AUDIT_TIMEOUT branch could not be reached
+// through this tool and a host-side kill surfaced as `exit_code:1` — again
+// indistinguishable from a real FAIL verdict. 3_620_000 = AUDIT_TIMEOUT_CAP_S
+// * 1000 + _INNER_TIMEOUT_GRACE_MS, so the inner kill always lands first —
+// the same rule this file states for docker exec above.
 server.tool(
   "eda_phase23_completion_audit",
   "⛔ SOLE PHASE 2+3 ACCEPTANCE CRITERION — call this before claiming "
@@ -8054,20 +8082,41 @@ server.tool(
     try {
       assertSafePath(project_dir, "project_dir");
     } catch (e) { return guardError(e); }
-    const path = await import("path");
-    const here = path.dirname(new URL(import.meta.url).pathname);
-    const gate = path.resolve(here, "..", "..", "vibe-ic-marketplace", "plugins", "vibe-ic-d", "programs", "phase23_completion_self_audit_check.py");
+    const gate = join(VIBE_IC_PROGRAMS_DIR, "phase23_completion_self_audit_check.py");
+    // THREE STATES, NOT TWO: "could not run" is not a verdict. See above.
+    const notMeasured = (cls, why) => ({
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          success: false, status: "NOT_MEASURED", not_measured_class: cls,
+          not_measured_reason: why, audit_ran: false,
+          phase23_complete: false, gate,
+        }, null, 2),
+      }],
+    });
+    if (!existsSync(gate)) {
+      return notMeasured("TOOL_DID_NOT_RUN", "gate not found at " + gate
+        + "; set $VIBE_IC_PROGRAMS_DIR or repair the install");
+    }
     let output, exitCode;
     {
       // security hardening: run via argv (no shell) so project_dir is never
       // shell-parsed.
       const r = _spawnSync("python3", [gate, project_dir, "--json", "-"], {
         encoding: "utf-8",
-        timeout: 300_000,
+        timeout: 3_620_000,
         maxBuffer: 32 * 1024 * 1024,
       });
+      if (r.error) {
+        return notMeasured("TOOL_DID_NOT_RUN",
+          "could not start: " + (r.error.code || r.error.message));
+      }
+      if (r.signal) {
+        return notMeasured("TOOL_DID_NOT_RUN",
+          "killed by " + r.signal + " before it produced a verdict");
+      }
       output = (r.stdout || "") + (r.stderr || "");
-      exitCode = r.error ? 1 : (r.status ?? 1);
+      exitCode = r.status;
     }
     let parsed;
     try {
@@ -8075,11 +8124,17 @@ server.tool(
     } catch {
       parsed = { raw_output: output };
     }
+    if (parsed && parsed.summary && parsed.summary.overall === "AUDIT_TIMEOUT") {
+      return notMeasured("TOOL_DID_NOT_RUN",
+        "timed out before completing; INCONCLUSIVE, not a verdict");
+    }
     return {
       content: [{
         type: "text",
         text: JSON.stringify({
           ...parsed,
+          status: "MEASURED",
+          audit_ran: true,
           exit_code: exitCode,
           phase23_complete: exitCode === 0,
         }, null, 2),
