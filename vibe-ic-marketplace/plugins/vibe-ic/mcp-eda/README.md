@@ -22,15 +22,13 @@ GDS file (tapeout-ready)
 claude plugin marketplace add https://github.com/vibeic/vibe-ic
 claude plugin install vibe-ic
 
-# 2. Pull the EDA image.
-docker pull ghcr.io/vibeic/vibeic-eda:latest
-
-# 3. From the installed plugin root, create the named container safely.
+# 2. From the installed plugin root, pull the image the plugin is pinned to
+#    (by digest, never :latest) and create the named container on it.
 export VIBEIC_DESIGNS="/absolute/path/to/your/projects"
-DESIGNS_DIR="$VIBEIC_DESIGNS" \
-  bash tools/vibeic-eda/restart-eda.sh ghcr.io/vibeic/vibeic-eda:latest
+DESIGNS_DIR="$VIBEIC_DESIGNS" PULL=1 \
+  bash tools/vibeic-eda/restart-eda.sh
 
-# 4. Start a new Claude Code session and run eda_doctor(skip_versions=false).
+# 3. Start a new Claude Code session and run eda_doctor(skip_versions=false).
 claude
 ```
 
