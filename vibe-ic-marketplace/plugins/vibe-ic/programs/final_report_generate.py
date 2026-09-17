@@ -279,21 +279,39 @@ def _is_manufacturing_step(step: Dict[str, Any]) -> bool:
 def _split_skipped_by_stage(
     flow: Dict[str, Any], verdicts: Dict[str, str]
 ) -> Tuple[int, int]:
-    """#652 — split the SKIPPED-CONDITION rollup BY STAGE.
+    """#652 — split the NOT_APPLICABLE rollup BY STAGE.
 
     Returns ``(manufacturing_skipped, midflow_skipped)``. A step counts
-    as manufacturing-skipped only when its verdict is SKIPPED-CONDITION
+    as manufacturing-skipped only when its verdict is NOT_APPLICABLE
     AND it is a manufacturing-stage step (`_is_manufacturing_step`);
-    every other SKIPPED-CONDITION step is a mid-flow skip. The two
-    buckets are mutually exclusive and sum to the total SKIPPED-CONDITION
+    every other NOT_APPLICABLE step is a mid-flow skip. The two
+    buckets are mutually exclusive and sum to the total NOT_APPLICABLE
     rollup, so the report stays honest (mid-flow + manufacturing ==
     total skipped). chip-AGNOSTIC: structural stage classification only.
+
+    R-0915-85 — THIS COMPARISON WAS DEAD AND THE INVARIANT ABOVE WAS FALSE ON
+    EVERY REAL RUN. `SKIPPED-CONDITION` is `NOT_APPLICABLE`, and its sibling
+    two hundred lines down already reads the new word
+    (`skipped = rollup.get("NOT_APPLICABLE", 0)`). Left as the old word here,
+    no verdict ever matched: both buckets returned 0 while `skipped` counted
+    N, so the report printed "N skipped" with nothing in either half and
+    `skipped_manufacturing + skipped_midflow == skipped` — the promise this
+    docstring makes — held only when N was 0.
+
+    The file's own tests could not see it: they feed the OLD word, under which
+    the split works and `skipped` reads 0. The two halves were broken in
+    OPPOSITE directions, so every assertion about one was satisfied by the
+    fixture that broke the other.
+
+    Neither is it a shape the ratchet can reach: `verdicts` is a plain dict of
+    id -> word, so `verdicts.get(sid)` is not one of the four step-status keys
+    and the comparison pass has nothing to judge (see `verdict.py` DESIGN).
     """
     mfg = 0
     midflow = 0
     for s in flow.get("steps", []):
         sid = str(s.get("id"))
-        if verdicts.get(sid, NO_VERDICT) != "SKIPPED-CONDITION":
+        if verdicts.get(sid, NO_VERDICT) != _T.Verdict.NOT_APPLICABLE.value:
             continue
         if _is_manufacturing_step(s):
             mfg += 1

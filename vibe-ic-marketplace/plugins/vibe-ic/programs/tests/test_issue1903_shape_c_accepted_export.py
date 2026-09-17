@@ -137,7 +137,12 @@ def test_nonzero_broader_runner_rc_is_disclosed_but_does_not_block_rtl_sample(
 
 
 def test_supplied_rtl_gate_is_read_from_not_attempted_on_export(tmp_path):
-    """Mid-flow re-entry honestly records rtl_gen as SKIPPED-BY-ENTRY.
+    """Mid-flow re-entry honestly records rtl_gen as NOT_APPLICABLE.
+
+    R-0915-85 — `SKIPPED-BY-ENTRY` is `NOT_APPLICABLE`, declared by the run's
+    own `--entry-step`. MEASURED: both sites in `design_one_shot_runner` that
+    leave `rtl_gen` on that word say the same thing — the RTL was SUPPLIED,
+    not produced here — which is exactly the claim this export path makes.
 
     It is not a gate that ran, so flow attribution places it under
     ``not_attempted``. The export guard must compare that exact status with
@@ -145,7 +150,7 @@ def test_supplied_rtl_gate_is_read_from_not_attempted_on_export(tmp_path):
     """
     run, dataset, _ = _fixture(tmp_path)
     task = _task(run)
-    task["program_verification"]["rtl_gen"] = "SKIPPED-BY-ENTRY"
+    task["program_verification"]["rtl_gen"] = "NOT_APPLICABLE"
     (run / "needs_ai_review.jsonl").write_text(json.dumps(task) + "\n")
     solve = json.loads((run / "solve_report.json").read_text())
     # Model a real supplied-RTL re-entry: its Program report records the skip
@@ -154,7 +159,7 @@ def test_supplied_rtl_gate_is_read_from_not_attempted_on_export(tmp_path):
     doc = json.loads(report.read_text())
     for step in doc["steps"]:
         if step["name"] == "rtl_gen":
-            step["status"] = "SKIPPED-BY-ENTRY"
+            step["status"] = "NOT_APPLICABLE"
     report.write_text(json.dumps(doc) + "\n")
     solve["results"][0]["phases"]["phase3_verifying"] = \
         fpa.phase3_verifying(doc, None)

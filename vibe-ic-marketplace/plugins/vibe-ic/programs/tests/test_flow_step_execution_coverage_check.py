@@ -1,4 +1,23 @@
-"""Tests for flow_step_execution_coverage_check.analyze (synthetic data only)."""
+"""Tests for flow_step_execution_coverage_check.analyze (synthetic data only).
+
+R-0915-85 — THE FIXTURE WORDS MOVED WITH THE PRODUCERS, and the distinctions
+these tests exist to draw are preserved one for one:
+
+    MISSING           -> FAIL              a required output that is absent is
+                                           a defect; it never reaches the
+                                           vacuity carve-out at all
+    SKIPPED-CONDITION -> NOT_APPLICABLE    the input declares there is nothing
+                                           here; `_NOT_APPLICABLE` (= EXCUSED)
+                                           and it does NOT block
+    VACUOUS-PASS      -> NOT_MEASURED      the gate RAN and certified nothing;
+                                           `_VACUOUS`, and it still blocks a
+                                           sign-off / terminal / stage-5 heir
+    WAIVED            -> PASS_WITH_WAIVERS a done-claim that is not a full PASS
+
+`verdict.parse` refuses the old words outright, so every one of these fixtures
+raised `UnknownVerdictWord` rather than testing anything — which is the refusal
+working, not a defect in it.
+"""
 import sys
 from pathlib import Path
 
@@ -14,8 +33,25 @@ def _report(*steps):
     return {"steps": list(steps)}
 
 
-def _s(sid, name, status, stage="stage3"):
-    return {"id": sid, "name": name, "status": status, "stage": stage}
+def _s(sid, name, status, stage="stage3", reason_class=""):
+    row = {"id": sid, "name": name, "status": status, "stage": stage}
+    if reason_class:
+        row["reason_class"] = reason_class
+    return row
+
+
+def _missing(sid, name, stage="stage3"):
+    """A step whose declared output is ABSENT — the old `MISSING`.
+
+    R-0915-85 — that is `FAIL` carrying `missing_artefact`, and the REASON is
+    load-bearing here, not decoration: `analyze` buckets a row into
+    `applicable_missing` only when the FAIL says WHICH kind of FAIL it is,
+    because a FAIL a gate REACHED is a defect in the design and a FAIL that is
+    an absent artefact is a step that never produced. The one word could not
+    tell them apart; the pair can.
+    """
+    return _s(sid, name, "FAIL", stage=stage,
+              reason_class="missing_artefact")
 
 
 def _pairs(res):
@@ -52,7 +88,7 @@ def test_ordering_violation_terminal_before_signoff():
     # GDS marked done while the PV step it blocks_on is MISSING → FAIL.
     r = _report(
         _s(30, "Post-Layout SPICE Verification", "PASS"),
-        _s(31, "Physical Verification (DRC + LVS + ERC + Density)", "MISSING"),
+        _missing(31, "Physical Verification (DRC + LVS + ERC + Density)"),
         _s(37, "GDSII output (only if Step 31 PV fully clean)", "PASS"),
     )
     res = cov.analyze(r, GRAPH)
@@ -79,7 +115,7 @@ def test_na_signoff_does_not_block_terminal():
     r = _report(
         _s(30, "Post-Layout SPICE Verification", "PASS"),
         _s(31, "Physical Verification (DRC + LVS + ERC + Density)",
-           "SKIPPED-CONDITION"),
+           "NOT_APPLICABLE"),
         _s(37, "GDSII output (only if Step 31 PV fully clean)", "PASS"),
     )
     res = cov.analyze(r, GRAPH)
@@ -89,8 +125,8 @@ def test_na_signoff_does_not_block_terminal():
 def test_applicable_missing_is_a_skip():
     # An applicable step that never produced output → no-skip violation.
     r = _report(
-        _s(2, "Lint (RTL + Quartus-unsafe patterns)", "MISSING", stage="stage1"),
-        _s(37, "GDSII output", "MISSING"),
+        _missing(2, "Lint (RTL + Quartus-unsafe patterns)", stage="stage1"),
+        _missing(37, "GDSII output"),
     )
     res = cov.analyze(r, {})
     assert res["verdict"] == "FAIL"
@@ -102,7 +138,7 @@ def test_name_based_fallback_when_no_blocks_on_edges():
     # Terminal ships EMPTY blocks_on (the real GDSII/handoff data bug): the
     # name-based fallback must still guard it against an unfinished sign-off step.
     r = _report(
-        _s(31, "Physical Verification (DRC + LVS + ERC)", "MISSING"),
+        _missing(31, "Physical Verification (DRC + LVS + ERC)"),
         _s(38, "Foundry Handoff (mask spec + WAT plan)", "PASS"),
     )
     res = cov.analyze(r, {})  # empty graph → fallback path
@@ -114,7 +150,7 @@ def test_vacuous_pass_SIGNOFF_ancestor_still_blocks():
     # A VACUOUS-PASS SIGN-OFF predecessor (SPICE verification verified nothing)
     # is dangerous → must still block a downstream done-claim.
     r = _report(
-        _s(30, "Post-Layout SPICE Verification", "VACUOUS-PASS"),
+        _s(30, "Post-Layout SPICE Verification", "NOT_MEASURED"),
         _s(31, "Physical Verification", "PASS"),
         _s(37, "GDSII output", "PASS"),
     )
@@ -129,7 +165,7 @@ def test_vacuous_pass_NONsignoff_ancestor_is_acceptable():
     graph = {"16": ["14"], "15": ["14"], "14": []}
     r = _report(
         _s(14, "Synthesis handoff gate (pre-PnR yosys script + netlist audit)",
-           "VACUOUS-PASS", stage="stage2"),
+           "NOT_MEASURED", stage="stage2"),
         _s(15, "Floorplan + PDN", "PASS"),
         _s(16, "Clock planning", "PASS"),
     )
@@ -156,7 +192,7 @@ def test_wafer_sort_not_credited_over_vacuous_fab_intake():
     graph = {"41": ["40"], "40": ["38"], "38": []}
     r = _report(
         _s(38, "Foundry Handoff (mask spec + WAT plan)", "PASS", stage="stage4"),
-        _s(40, _FAB, "VACUOUS-PASS", stage="stage5_manufacturing"),
+        _s(40, _FAB, "NOT_MEASURED", stage="stage5_manufacturing"),
         _s(41, _SORT, "PASS", stage="stage5_manufacturing"),
     )
     res = cov.analyze(r, graph)
@@ -170,7 +206,7 @@ def test_vacuous_silicon_ancestor_blocks_on_stage_alone():
     # so a future rewording of the step title cannot re-open the hole.
     graph = {"91": ["90"], "90": []}
     r = _report(
-        _s(90, "External vendor step", "VACUOUS-PASS",
+        _s(90, "External vendor step", "NOT_MEASURED",
            stage="stage5_manufacturing"),
         _s(91, "Downstream silicon step", "PASS", stage="stage5_manufacturing"),
     )
@@ -184,7 +220,7 @@ def test_vacuous_silicon_ancestor_blocks_on_name_when_report_has_no_stage():
     # report shape) must still be guarded, via the step-name limb.
     graph = {"41": ["40"], "40": []}
     r = _report(
-        {"id": 40, "name": _FAB, "status": "VACUOUS-PASS"},
+        {"id": 40, "name": _FAB, "status": "NOT_MEASURED"},
         {"id": 41, "name": _SORT, "status": "PASS"},
     )
     res = cov.analyze(r, graph)
@@ -196,7 +232,7 @@ def _vacuous_ancestor_blocks(sid, name, stage):
     """Does a VACUOUS-PASS on this step block a PASS child that blocks_on it?"""
     child = f"{sid}__child"
     r = _report(
-        {"id": sid, "name": name, "status": "VACUOUS-PASS", "stage": stage},
+        {"id": sid, "name": name, "status": "NOT_MEASURED", "stage": stage},
         {"id": child, "name": "downstream", "status": "PASS", "stage": stage},
     )
     res = cov.analyze(r, {child: [sid], sid: []})
@@ -249,7 +285,7 @@ def test_vacuous_foundry_handoff_does_not_credit_fabrication():
     graph = {"40": ["38"], "38": ["31"], "31": []}
     r = _report(
         _s(31, "Physical Verification (DRC + LVS + ERC)", "PASS", stage="stage4"),
-        _s(38, "Foundry Handoff (mask spec + WAT plan)", "VACUOUS-PASS",
+        _s(38, "Foundry Handoff (mask spec + WAT plan)", "NOT_MEASURED",
            stage="stage4"),
         _s(40, _FAB, "PASS", stage="stage5_manufacturing"),
     )
@@ -263,7 +299,7 @@ def test_vacuous_gdsii_output_blocks_on_name_when_report_has_no_stage():
     graph = {"38": ["37"], "37": []}
     r = _report(
         {"id": 37, "name": "GDSII output (only if Step 31 PV fully clean)",
-         "status": "VACUOUS-PASS"},
+         "status": "NOT_MEASURED"},
         {"id": 38, "name": "Foundry Handoff (mask spec + WAT plan)",
          "status": "PASS"},
     )
@@ -318,7 +354,7 @@ def test_skipped_condition_silicon_ancestor_does_not_block():
     # applicable" and must never flag anything.
     graph = {"41": ["40"], "40": []}
     r = _report(
-        _s(40, _FAB, "SKIPPED-CONDITION", stage="stage5_manufacturing"),
+        _s(40, _FAB, "NOT_APPLICABLE", stage="stage5_manufacturing"),
         _s(41, _SORT, "PASS", stage="stage5_manufacturing"),
     )
     res = cov.analyze(r, graph)
@@ -345,7 +381,7 @@ def test_cli_exits_1_and_reports_the_pair_end_to_end(tmp_path):
 
     comp = tmp_path / "compliance.json"
     comp.write_text(json.dumps({"overall": "FAIL", "steps": [
-        {"id": 40, "name": _FAB, "status": "VACUOUS_PASS",
+        {"id": 40, "name": _FAB, "status": "NOT_MEASURED",
          "stage": "stage5_manufacturing"},
         {"id": 41, "name": _SORT, "status": "PASS",
          "stage": "stage5_manufacturing"},
@@ -518,13 +554,44 @@ def test_zero_step_report_is_not_checked_not_pass():
 
 
 def test_all_steps_not_applicable_is_not_checked_not_pass():
+    """R-0915-85 — THE SUBJECT IS RESTORED, AND IT MOVED.
+
+    The second row used to be `WAIVED`, and it belonged in this fixture
+    because main's EXCUSED set held BOTH the skips AND `WAIVED` — so a run of
+    one skip and one waiver had a denominator of zero and read NOT-CHECKED.
+
+    `EXCUSED` is `{NOT_APPLICABLE}` alone now: `PASS_WITH_WAIVERS` says the
+    step RAN and reached a verdict, and the open work is in its waiver ROWS,
+    not in its word. A waived step is therefore APPLICABLE, and this test —
+    whose whole subject is "every step is not applicable" — needs two rows
+    that actually are. The fact the old row carried is not dropped; it is
+    pinned, with its new answer, by the test below.
+    """
     r = _report(
-        _s(40, _FAB, "SKIPPED-CONDITION", stage="stage5_manufacturing"),
-        _s(41, _SORT, "WAIVED", stage="stage5_manufacturing"),
+        _s(40, _FAB, "NOT_APPLICABLE", stage="stage5_manufacturing"),
+        _s(41, _SORT, "NOT_APPLICABLE", stage="stage5_manufacturing"),
     )
     res = cov.analyze(r, {"41": ["40"]})
     assert res["verdict"] == "NOT-CHECKED"
     assert res["counts"]["steps_applicable"] == 0
+
+
+def test_a_waived_step_is_APPLICABLE_and_the_run_is_not_not_checked():
+    """The other half of the move above, asserted rather than assumed.
+
+    A `PASS_WITH_WAIVERS` step is a done-claim over a real denominator, so it
+    counts toward `steps_applicable` and a run containing one has been CHECKED.
+    Under main's EXCUSED set this same report read NOT-CHECKED over a
+    denominator of zero — a run that adjudicated nothing reported as one that
+    had nothing to adjudicate.
+    """
+    r = _report(
+        _s(40, _FAB, "NOT_APPLICABLE", stage="stage5_manufacturing"),
+        _s(41, _SORT, "PASS_WITH_WAIVERS", stage="stage5_manufacturing"),
+    )
+    res = cov.analyze(r, {"41": ["40"]})
+    assert res["counts"]["steps_applicable"] == 1
+    assert res["verdict"] != "NOT-CHECKED"
 
 
 def test_fail_still_wins_over_not_checked():
@@ -532,7 +599,7 @@ def test_fail_still_wins_over_not_checked():
     # is still a violation. FAIL must not be softened into NOT-CHECKED by a
     # zero-edge graph.
     r = _report(
-        _s(31, "Physical Verification (DRC + LVS + ERC)", "MISSING"),
+        _missing(31, "Physical Verification (DRC + LVS + ERC)"),
         _s(38, "Foundry Handoff (mask spec + WAT plan)", "PASS"),
     )
     res = cov.analyze(r, {})       # zero edges → name fallback only
@@ -548,7 +615,8 @@ def test_cli_fail_still_exits_1_even_with_an_edgeless_graph(tmp_path):
         flow_text="steps:\n  - id: 40\n    name: a\n    blocks_on: []\n",
         compliance=_json.dumps({"overall": "FAIL", "steps": [
             {"id": 2, "name": "Lint (RTL + Quartus-unsafe patterns)",
-             "status": "MISSING", "stage": "stage1"}]}))
+             "status": "FAIL", "reason_class": "missing_artefact",
+              "stage": "stage1"}]}))
     assert r.returncode == 1, f"rc={r.returncode} stdout={r.stdout}"
     assert res["verdict"] == "FAIL"
 
