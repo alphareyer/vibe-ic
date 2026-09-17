@@ -3766,7 +3766,12 @@ _SELF_SKIP_VERDICTS = frozenset({
     # same honest self-disclosure #675 added this set for; not reading them
     # would make a migrated gate's disclosure invisible, which is the failure
     # this set exists to prevent.
-    "NOT_APPLICABLE", "NOT_MEASURED",
+    # SPELT WITH HYPHENS because that is the shape the readers hand it: both
+    # call sites normalise with `.upper().replace("_", "-")` before testing
+    # membership, so an underscore member is UNREACHABLE. Measured: written
+    # with underscores, a migrated gate's `NOT_APPLICABLE` marker matched
+    # nothing and #675's own fixture went back to a hard FAIL.
+    "NOT-APPLICABLE", "NOT-MEASURED",
 })
 
 # #651 — PASS_WITH_WAIVERS hint. A `program_exit_zero` gate program (notably

@@ -400,10 +400,16 @@ def test_the_runner_step_never_fails_the_run(tmp_path, monkeypatch):
     # producer runs. Retargeting the double is what keeps this test
     # measuring what it was written to measure.
     monkeypatch.setattr(runner._pr, "run", fake_run)
-    for rc, expect in ((0, "PASS"), (1, "SKIP"), (2, "NOT_MEASURED")):
+    # R-0915-85 — rc 1 (the producer RAN and declined) and rc 2 (it could not
+    # be launched) were `SKIP` and `ENV_UNAVAILABLE`; both are NOT_MEASURED,
+    # told apart by the reason, and the reason is asserted below.
+    for rc, expect, reason in ((0, "PASS", ""),
+                               (1, "NOT_MEASURED", "not_executed"),
+                               (2, "NOT_MEASURED", "tool_absent")):
         seen["rc"] = rc
         res = runner.step_digital_hardmacro_gen(tmp_path)
         assert res.status == expect, (rc, res.status)
+        assert (res.reason_class or "") == reason, (rc, res.reason_class)
         assert res.name == "digital_hardmacro_gen"
     # and it hands the producer the report path the flow names
     assert "--json" in seen["cmd"]
