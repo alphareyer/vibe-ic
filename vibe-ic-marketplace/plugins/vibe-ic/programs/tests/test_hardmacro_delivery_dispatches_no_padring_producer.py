@@ -41,6 +41,7 @@ import pytest
 
 _PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROGRAMS))
+import _owner_declared as _OD                              # noqa: E402
 import phase3_one_shot_runner as R  # noqa: E402
 
 
@@ -62,8 +63,9 @@ def _project(tmp_path: Path, *, deliverable=None, slots=False,
                                              encoding="utf-8")
     if deliverable is not None:
         (st / "tapeout_declaration.json").write_text(
-            json.dumps({"schema": "vibe-ic/tapeout_declaration/1",
-                        "answers": {"deliverable": deliverable}}),
+            json.dumps(_OD.attest(
+                {"schema": "vibe-ic/tapeout_declaration/1",
+                 "answers": {"deliverable": deliverable}})),
             encoding="utf-8")
     return p
 

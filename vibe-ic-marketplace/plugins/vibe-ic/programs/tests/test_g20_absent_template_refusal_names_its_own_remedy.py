@@ -57,6 +57,7 @@ sys.path.insert(0, str(PROGRAMS))
 
 import _submission_template as ST   # noqa: E402
 import _tapeout_declaration as TD   # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 import _progress_run as _pr         # noqa: E402
 
 
@@ -85,7 +86,10 @@ def project():
 def _answers(project: Path, doc):
     path = project / ST.DESIGN_ANSWERS_REL
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    # A fixture that answers `deliverable` is modelling a design whose owner
+    # declared the route; since R-0915-95 it has to say so (`_owner_declared`).
+    path.write_text(json.dumps(_OD.attest(doc), indent=2) + "\n",
+                    encoding="utf-8")
 
 
 def _drive(project: Path) -> "tuple[int, str]":

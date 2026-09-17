@@ -44,6 +44,7 @@ PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 
 import _submission_template as ST         # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 import submission_template_ingest as ING  # noqa: E402
 import submission_template_check as CHK   # noqa: E402
 
@@ -944,6 +945,7 @@ def test_two_routers_at_once_exit_ONE_a_refusal_and_never_TWO_a_skip(tmp_path):
         import _tapeout_declaration as TD
         doc, _ig = TD.merge_answers(TD.blank_declaration(),
                                     {"deliverable": "DIE"})
+        _OD.attest(doc)
         (root / TD.DECLARATION_REL).write_text(json.dumps(doc, indent=2))
         rep = root / "reports/phase1/tapeout_declaration.json"
         rc = TDC.main([str(root), "--json", str(rep)])
@@ -997,7 +999,9 @@ def _step_0_5ic_verdicts(project: Path):
 
 def _answers(project: Path, doc) -> None:
     import _tapeout_declaration as TD
-    doc = dict(doc)
+    # A fixture that answers `deliverable` is modelling a design whose owner
+    # declared the route, and since R-0915-95 it has to say who did.
+    doc = _OD.attest(dict(doc))
     doc.setdefault(TD.SYNTHESIS_AREA_BUDGET_KEY, {
         "status": TD.AREA_BUDGET_NOT_APPLICABLE,
         "rationale": (

@@ -41,6 +41,7 @@ from pathlib import Path
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 import _tapeout_declaration as TD  # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 import die_finishing_gen as G  # noqa: E402
 
 
@@ -48,8 +49,9 @@ def _declare(project: Path, **answers):
     """Write a tape-out declaration carrying exactly `answers`."""
     path = project / TD.DECLARATION_REL
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"schema": TD.SCHEMA, "answers": dict(answers)},
-                               indent=2) + "\n")
+    path.write_text(json.dumps(
+        _OD.attest({"schema": TD.SCHEMA, "answers": dict(answers)}),
+        indent=2) + "\n")
     return path
 
 

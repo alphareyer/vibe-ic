@@ -45,6 +45,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import _owner_declared as _OD                              # noqa: E402
 import die_level_deck_rule_attribution as D  # noqa: E402
 
 DIE = [0.0, 0.0, 100.0, 100.0]
@@ -138,9 +139,9 @@ def _project(tmp_path, name, deliverable=None):
     proj = tmp_path / name
     (proj / "input" / "submission_template").mkdir(parents=True)
     (proj / "input" / "submission_template" /
-     "tapeout_declaration.json").write_text(json.dumps(
+     "tapeout_declaration.json").write_text(json.dumps(_OD.attest(
          {"schema": "vibe-ic/tapeout_declaration/1",
-          "answers": {"deliverable": deliverable}}))
+          "answers": {"deliverable": deliverable}})))
     (proj / "reports" / "phase3").mkdir(parents=True)
     return proj
 

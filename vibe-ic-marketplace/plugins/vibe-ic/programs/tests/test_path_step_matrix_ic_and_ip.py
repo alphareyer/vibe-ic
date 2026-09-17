@@ -62,6 +62,7 @@ if str(PROGRAMS) not in sys.path:
 
 import _submission_template as ST          # noqa: E402
 import _tapeout_declaration as TD          # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 import flow_compliance_check as FCC        # noqa: E402
 import tapeout_readiness_check as TRC      # noqa: E402
 
@@ -599,8 +600,9 @@ def _populated(root: Path) -> Path:
     (proj / "input/submission_template/SELF_TAPEOUT.txt").write_text(
         "# tapeout_declaration: self tape-out, no operator\n")
     (proj / "input/submission_template/tapeout_declaration.json").write_text(
-        '{"schema": "vibe-ic/tapeout_declaration/1", '
-        '"answers": {"deliverable": "DIE", "top_cell": "top"}}')
+        json.dumps(_OD.attest(
+            {"schema": "vibe-ic/tapeout_declaration/1",
+             "answers": {"deliverable": "DIE", "top_cell": "top"}})))
     (proj / "phase3/stage3/pnr/floorplan.def").write_text(
         "VERSION 5.8 ;\nDESIGN top ;\nUNITS DISTANCE MICRONS 1000 ;\n"
         "DIEAREA ( 0 0 ) ( 100000 100000 ) ;\nEND DESIGN\n")
@@ -845,7 +847,8 @@ def test_the_route_predicate_exists_and_the_operator_arm_does_not_consult_it():
     """
     import tapeout_precheck as TP
 
-    assert TD.route_of({"answers": {"deliverable": TD.DELIVERABLE_DIE}},
+    assert TD.route_of(_OD.attest(
+        {"answers": {"deliverable": TD.DELIVERABLE_DIE}}),
                        has_slots=False) == TD.ROUTE_SELF_TAPEOUT
     src = (PROGRAMS / "tapeout_precheck.py").read_text()
     body = src[src.index("def operator_arm_applicability"):]
@@ -1273,6 +1276,7 @@ def _drive_step_0_5ic(root: Path, *, deliverable: str) -> Path:
     answers = root.parent / "answers.json"
     answers.write_text(json.dumps({
         "deliverable": deliverable,
+        TD.PROVENANCE_KEY: _OD.provenance(),
         TD.SYNTHESIS_AREA_BUDGET_KEY: {
             "status": TD.AREA_BUDGET_NOT_APPLICABLE,
             "rationale": (

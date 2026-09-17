@@ -36,6 +36,7 @@ sys.path.insert(0, str(HERE))
 import pytest                                            # noqa: E402
 
 import _tapeout_declaration as TD                        # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 import flow_compliance_check as F                        # noqa: E402
 import flow_declared_producer_run as P                   # noqa: E402
 
@@ -64,15 +65,16 @@ def _project(tmp_path, *, deliverable="HARDMACRO", operator=None,
         doc, _ = TD.merge_answers(TD.blank_declaration(),
                                   {"deliverable": deliverable,
                                    "top_cell": "top"})
+        _OD.attest(doc)
         assert not TD.validate(doc)
         (tmpl / "tapeout_declaration.json").write_text(json.dumps(doc))
     else:
         (tmpl / "tapeout_declaration.json").write_text("{ not json")
-    (p / "input" / "step_0_5ic_answers.json").write_text(json.dumps({
+    (p / "input" / "step_0_5ic_answers.json").write_text(json.dumps(_OD.attest({
         "schema": "vibe-ic/step_0_5ic_answers/1",
         "operator_template": operator or {"path": None, "slot": None,
                                           "absent_reason": "no operator"},
-        "answers": {"deliverable": deliverable, "top_cell": "top"}}))
+        "answers": {"deliverable": deliverable, "top_cell": "top"}})))
     return p
 
 

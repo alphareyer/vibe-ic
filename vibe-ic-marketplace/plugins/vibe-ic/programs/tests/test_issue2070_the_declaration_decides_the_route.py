@@ -40,6 +40,7 @@ if str(_PROGRAMS) not in sys.path:
 
 import _submission_template as ST                             # noqa: E402
 import _tapeout_declaration as TD                             # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 import submission_template_check as STC                       # noqa: E402
 import submission_template_fetch as STF                       # noqa: E402
 
@@ -53,6 +54,7 @@ def _declared(tmp_path: Path, deliverable) -> Path:
     doc = TD.blank_declaration()
     if deliverable is not None:
         doc["answers"]["deliverable"] = deliverable
+    _OD.attest(doc)
     path = proj / TD.DECLARATION_REL
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(doc), encoding="utf-8")
@@ -155,7 +157,7 @@ def test_catalogue_route_and_seal_consumer_share_the_record_authority(
         own["answers"]["seal_ring_required"] = "false"
     if case == "stale_ring_answer":
         own["answers"]["seal_ring_required"] = True
-    (proj / ST.DESIGN_ANSWERS_REL).write_text(json.dumps(own))
+    (proj / ST.DESIGN_ANSWERS_REL).write_text(json.dumps(_OD.attest(own)))
     if case == "malformed":
         declaration = json.loads((proj / TD.DECLARATION_REL).read_text())
         declaration["schema"] = "wrong"
@@ -221,9 +223,9 @@ def test_the_records_own_integrity_is_owed_by_every_design(tmp_path):
 def _design_answers(tmp_path: Path, deliverable, slot=None) -> Path:
     proj = tmp_path / "d"
     (proj / "input").mkdir(parents=True)
-    (proj / ST.DESIGN_ANSWERS_REL).write_text(json.dumps({
+    (proj / ST.DESIGN_ANSWERS_REL).write_text(json.dumps(_OD.attest({
         "answers": {"deliverable": deliverable},
-        "operator_template": {"slot": slot}}), encoding="utf-8")
+        "operator_template": {"slot": slot}})), encoding="utf-8")
     return proj
 
 

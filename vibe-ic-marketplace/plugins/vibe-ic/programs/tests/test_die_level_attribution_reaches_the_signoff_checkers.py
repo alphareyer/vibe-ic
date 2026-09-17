@@ -51,6 +51,7 @@ from pathlib import Path
 
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
+import _owner_declared as _OD                              # noqa: E402
 import die_level_deck_rule_attribution as D  # noqa: E402
 
 # DEFERRED, and that is the point. `_die_level_attribution_consult` does not
@@ -112,8 +113,8 @@ def make_project(tmp_path: Path, record=None, deliverable="HARDMACRO",
                  handoff_rules=("XX.9", "YY.9")) -> Path:
     (tmp_path / "input/submission_template").mkdir(parents=True, exist_ok=True)
     (tmp_path / "input/submission_template/tapeout_declaration.json").write_text(
-        json.dumps({"schema": "vibe-ic/tapeout_declaration/1",
-                    "answers": {"deliverable": deliverable}}))
+        json.dumps(_OD.attest({"schema": "vibe-ic/tapeout_declaration/1",
+                               "answers": {"deliverable": deliverable}})))
     (tmp_path / "reports/phase3").mkdir(parents=True, exist_ok=True)
     (tmp_path / "reports/phase3/die_level_rule_attribution.json").write_text(
         json.dumps(record if record is not None else _record()))

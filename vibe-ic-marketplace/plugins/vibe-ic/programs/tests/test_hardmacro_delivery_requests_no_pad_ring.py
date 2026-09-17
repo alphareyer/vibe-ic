@@ -40,6 +40,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import _owner_declared as _OD                              # noqa: E402
 import phase3_one_shot_runner as R  # noqa: E402
 
 
@@ -54,10 +55,10 @@ def _slots(project: Path) -> Path:
 def _declare(project: Path, deliverable) -> None:
     tmpl = project / "input" / "submission_template"
     tmpl.mkdir(parents=True, exist_ok=True)
-    (tmpl / "tapeout_declaration.json").write_text(json.dumps(
+    (tmpl / "tapeout_declaration.json").write_text(json.dumps(_OD.attest(
         {"schema": "vibe-ic/tapeout_declaration/1",
          "answers": {"deliverable": deliverable, "top_cell": "spm",
-                     "pad_order_by_side": "NOT_DETERMINED"}}) + "\n")
+                     "pad_order_by_side": "NOT_DETERMINED"}})) + "\n")
 
 
 def test_hardmacro_declaration_suppresses_the_ring_despite_a_slot_catalogue(

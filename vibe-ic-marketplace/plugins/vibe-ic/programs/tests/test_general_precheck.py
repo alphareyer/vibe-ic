@@ -43,6 +43,7 @@ sys.path.insert(0, str(PROGRAMS))
 
 import _gds_geometry as GEOM              # noqa: E402
 import _tapeout_declaration as TD         # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 import general_precheck as GP             # noqa: E402
 import tapeout_declaration_check as TDC   # noqa: E402
 import tapeout_declaration_gen as TDG     # noqa: E402
@@ -216,6 +217,7 @@ def _project(tmp_path: Path, gds_maker, answers: dict) -> Path:
     proj = tmp_path / "proj"
     gds_maker(proj / "phase3" / "stage4" / "gds" / "chip_top.gds")
     doc, ignored = TD.merge_answers(TD.blank_declaration(), answers)
+    _OD.attest(doc)   # a fixture that answers `deliverable` declared it
     assert not ignored, f"test wrote an unknown answer key: {ignored}"
     p = proj / TD.DECLARATION_REL
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -302,6 +304,7 @@ def test_g2_two_top_level_cells_are_refused(tmp_path):
     })
     doc, _ = TD.merge_answers(TD.blank_declaration(),
                               {"deliverable": "DIE", "top_cell": "chip_top"})
+    _OD.attest(doc)
     p = proj / TD.DECLARATION_REL
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(doc))
@@ -472,6 +475,7 @@ def test_g7_this_route_does_not_weaken_the_shuttle_route():
     anything the design declares about itself.
     """
     doc, _ = TD.merge_answers(TD.blank_declaration(), {"deliverable": "DIE"})
+    _OD.attest(doc)
     assert TD.route_of(doc, has_slots=True) == TD.ROUTE_SHUTTLE
     assert TD.route_of(doc, has_slots=False) == TD.ROUTE_SELF_TAPEOUT
 
@@ -530,7 +534,8 @@ def test_g8_declaring_a_die_selects_the_self_tapeout_route(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
     ans = proj / "answers.json"
-    ans.write_text(json.dumps({"deliverable": "DIE", "top_cell": "chip_top"}))
+    ans.write_text(json.dumps({"deliverable": "DIE", "top_cell": "chip_top",
+                               TD.PROVENANCE_KEY: _OD.provenance()}))
     assert TDG.main([str(proj), "--answers", str(ans)]) == 0
     assert (proj / TD.SELF_TAPEOUT_REL).is_file()
     _assert_declaration_is_incomplete_not_malformed(proj)
@@ -541,7 +546,8 @@ def test_g8_two_router_files_at_once_are_refused_not_resolved(tmp_path):
     proj = tmp_path / "proj"
     (proj / "input/submission_template").mkdir(parents=True)
     ans = proj / "answers.json"
-    ans.write_text(json.dumps({"deliverable": "DIE"}))
+    ans.write_text(json.dumps({"deliverable": "DIE",
+                               TD.PROVENANCE_KEY: _OD.provenance()}))
     TDG.main([str(proj), "--answers", str(ans)])       # writes SELF_TAPEOUT
     # A NO_TEMPLATE.txt this flow did NOT write appears beside it. The tree now
     # selects two terminals at once, and `files_exist` cannot express "and not".
@@ -561,7 +567,8 @@ def test_g8_a_die_retires_only_a_marker_this_flow_itself_wrote(tmp_path):
     (proj / "input/submission_template").mkdir(parents=True)
     (proj / ST.NO_TEMPLATE_REL).write_text(ST.NO_TEMPLATE_MARKER + "\nstale\n")
     ans = proj / "answers.json"
-    ans.write_text(json.dumps({"deliverable": "DIE"}))
+    ans.write_text(json.dumps({"deliverable": "DIE",
+                               TD.PROVENANCE_KEY: _OD.provenance()}))
     TDG.main([str(proj), "--answers", str(ans)])
     assert not (proj / ST.NO_TEMPLATE_REL).exists()   # ours, retired
 
@@ -643,6 +650,7 @@ def test_g9_every_question_names_a_consumer_that_exists():
 def test_g9_a_hardmacro_owes_fewer_answers_and_the_report_says_which():
     doc, _ = TD.merge_answers(TD.blank_declaration(),
                               {"deliverable": "HARDMACRO"})
+    _OD.attest(doc)   # only a DECLARED hardmacro owes fewer answers
     audit = TD.audit(doc)
     assert audit["not_applicable"] > 0
     na = audit["sections"]["2B_pad_ring"]["not_applicable_keys"]

@@ -54,6 +54,7 @@ import phase3_one_shot_runner as r          # noqa: E402
 import signoff_metrics_aggregate as sma     # noqa: E402
 import general_precheck as gp               # noqa: E402
 import _tapeout_declaration as td           # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 
 
 # ───────────────────────── 1. the CT-03 pin rectangle ──────────────────────
@@ -280,31 +281,48 @@ def _io_pad_report(project, sides):
                           "side_signals": sides}}))
 
 
-def test_deliverable_is_a_DIE_when_the_input_names_the_die_sides(tmp_path):
-    """spm's OWN case. `_ppa/delivery_path` cannot answer, because the route
-    is chosen from a router file step 0.5ic writes only once THIS field is
-    answered — measured as `route NOT_DETERMINED … no router file was written`.
-    The design's own input breaks that deadlock."""
+def test_the_input_naming_four_die_sides_does_not_answer_the_deliverable(
+        tmp_path):
+    """RE-AUTHORED BY OWNER RULING R-0915-95 (2026-09-17), and this test is the
+    record of what it replaced.
+
+    It used to assert the opposite: that a design's own input assigning
+    top-level ports to four named sides ANSWERED `deliverable=DIE`, on the
+    reasoning that "a hardmacro has no north, south, east or west of its own".
+    That derivation was written to break a deadlock — the route comes from a
+    router file step 0.5ic writes only once this field is answered — and the
+    deadlock was really an unasked question.
+
+    `deliverable` asks what the party taking delivery has DECIDED. On
+    2026-09-06 the same kind of reading, run the other way (HARDMACRO from
+    these documents' silence about a pad ring), routed five designs onto the
+    IP terminal for eleven days. A document cannot answer this question by
+    speaking and it cannot answer it by staying quiet, so the derivation is
+    deleted and this asserts that it is gone."""
     _io_pad_report(tmp_path, {"N": ["x[size-1:0]"], "S": ["rst"],
                               "E": ["clk"], "W": ["p", "y"]})
-    value, basis = r._declared_deliverable(tmp_path)
-    assert value == td.DELIVERABLE_DIE
-    assert "4 side(s)" in basis
-    assert "L3_external_interface.md" in basis
-    assert "Physical Pad Placement" in basis
+    value, why = r._declared_deliverable(tmp_path)
+    assert value is None, f"inferred {value!r} from the design's documents"
+    assert "OWNER" in why and "no reading of the design's own documents" in why
 
 
 def test_deliverable_is_NOT_DETERMINED_when_nothing_has_said(tmp_path):
     value, why = r._declared_deliverable(tmp_path)
     assert value is None
-    assert "io_pad_chip_top.json is not on disk" in why
+    assert "the flow has not said what leaves it" in why
 
 
-def test_deliverable_refuses_one_named_side(tmp_path):
-    """One side is not a die. A hardmacro's spec can name an edge too."""
+def test_one_named_side_does_not_answer_it_either(tmp_path):
+    """THE COUNT NEVER MATTERED, and that is now sayable in one line: one side
+    and four sides reach the SAME verdict. Before the ruling these two arms
+    disagreed — four was a die, one was "not enough to say" — which made the
+    threshold look like the finding when the whole derivation was."""
     _io_pad_report(tmp_path, {"N": ["x"], "S": [], "E": [], "W": []})
-    value, why = r._declared_deliverable(tmp_path)
-    assert value is None and "1 die side(s)" in why
+    one_side, one_why = r._declared_deliverable(tmp_path)
+    _io_pad_report(tmp_path, {"N": ["x"], "S": ["y"], "E": ["z"], "W": ["w"]})
+    four_sides, four_why = r._declared_deliverable(tmp_path)
+    assert one_side is None and four_sides is None
+    assert one_why == four_why
 
 
 # ───────────────────────── 6. `forbidden_layers` ───────────────────────────
@@ -350,11 +368,18 @@ class _Pdk:
     cell_gds = ""
 
 
-def _project(tmp_path, *, decl=True):
+def _project(tmp_path, *, decl=True, deliverable=None):
+    """`deliverable` is DECLARED, never derived, since R-0915-95. A fixture
+    that wants the publisher to act on one has to state it and attest it --
+    which is what a real project's step-0.5ic answers file now does."""
     (tmp_path / "input" / "submission_template").mkdir(parents=True)
     if decl:
+        _doc = td.blank_declaration()
+        if deliverable is not None:
+            _doc["answers"]["deliverable"] = deliverable
+            _OD.attest(_doc)
         (tmp_path / td.DECLARATION_REL).write_text(
-            json.dumps(td.blank_declaration(), indent=2))
+            json.dumps(_doc, indent=2))
     (tmp_path / "phase3" / "stage3" / "pnr").mkdir(parents=True)
     (tmp_path / "phase3" / "stage3" / "pnr" / "routed.def").write_text(_DEF)
     _record(tmp_path)
@@ -375,21 +400,38 @@ def seal_absent(monkeypatch):
     monkeypatch.setattr(r, "_docker_exec", lambda *a, **k: (1, "", "no such"))
 
 
-def test_publish_answers_the_six_it_can_and_names_the_one_it_cannot(
+def test_publish_answers_the_five_it_can_and_names_the_one_it_cannot(
         tmp_path, seal_present):
-    """SIX since vibe-ic#2122 added `core_area_um`. The declaration has always
-    ASKED for it — `_tapeout_declaration` refuses a die that pins a die and
-    omits its core — and nothing derived it, so every self-tape-out owed an
-    answer the run had already written into its own floorplan record."""
-    project = _project(tmp_path)
+    """SIX since vibe-ic#2122 added `core_area_um`; FIVE derived since
+    R-0915-95 took `deliverable` off the derivable list altogether.
+
+    The declaration has always ASKED for `core_area_um` — `_tapeout_declaration`
+    refuses a die that pins a die and omits its core — and nothing derived it,
+    so every self-tape-out owed an answer the run had already written into its
+    own floorplan record. `deliverable` is the opposite case: the publisher
+    used to DERIVE it from the design's own documents, and that is the
+    derivation the owner ruling deleted. The project DECLARES it, and the
+    publisher still reports it NOT_DETERMINED — which is exactly right, and is
+    the assertion worth having: `not_determined` here means "THIS PROGRAM did
+    not derive it", not "nobody answered it". It cannot reach
+    `already_answered`, because that branch is only ever taken for a key the
+    publisher derived, and there is no longer any derivation to outrank."""
+    project = _project(tmp_path, deliverable=td.DELIVERABLE_DIE)
     rec = r.publish_tapeout_declarations(
         project, _Pdk(), "c", project / "phase3/stage3/pnr/routed.def", "spm")
     assert set(rec["published"]) == {
-        "top_cell", "deliverable", "die_origin_um", "die_area_um",
+        "top_cell", "die_origin_um", "die_area_um",
         "core_area_um", "seal_ring_required"}
-    # `macro_*` is REFUSED BY NAME on a DIE, not silently absent (vibe-ic#2118).
-    assert set(rec["not_determined"]) == {"forbidden_layers", "macro_area_um",
-                                          "macro_origin_um"}
+    assert "deliverable" not in rec["published"]
+    assert "deliverable" in rec["not_determined"]
+    assert "OWNER" in rec["not_determined"]["deliverable"]
+    # …and the DECLARATION still answers it, untouched by the publisher.
+    _doc, _e = td.load(project / td.DECLARATION_REL)
+    assert td.answer(_doc, "deliverable") == td.DELIVERABLE_DIE
+    # `macro_*` is REFUSED BY NAME on a DIE, not silently absent (vibe-ic#2118);
+    # `deliverable` joins them for the different reason above.
+    assert set(rec["not_determined"]) == {"deliverable", "forbidden_layers",
+                                          "macro_area_um", "macro_origin_um"}
     doc, err = td.load(project / td.DECLARATION_REL)
     assert err is None
     assert td.answer(doc, "top_cell") == "spm"
@@ -444,6 +486,7 @@ def test_a_HARDMACRO_is_not_asked_for_a_core_and_is_refused_BY_NAME(
     doc, err = td.load(project / td.DECLARATION_REL)
     assert err is None
     doc, _ig = td.merge_answers(doc, {"deliverable": td.DELIVERABLE_HARDMACRO})
+    _OD.attest(doc)
     (project / td.DECLARATION_REL).write_text(json.dumps(doc, indent=2))
     rec = r.publish_tapeout_declarations(
         project, _Pdk(), "c", project / "phase3/stage3/pnr/routed.def", "spm")

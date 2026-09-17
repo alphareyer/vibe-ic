@@ -37,6 +37,7 @@ import pytest
 
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
+import _owner_declared as _OD                              # noqa: E402
 
 import die_level_deck_rule_attribution as D  # noqa: E402
 import flow_compliance_check as F  # noqa: E402
@@ -115,9 +116,9 @@ def _project(tmp_path, deliverable):
     proj = tmp_path / f"p_{deliverable.lower()}"
     (proj / "input" / "submission_template").mkdir(parents=True)
     (proj / "input" / "submission_template" /
-     "tapeout_declaration.json").write_text(json.dumps(
+     "tapeout_declaration.json").write_text(json.dumps(_OD.attest(
          {"schema": "vibe-ic/tapeout_declaration/1",
-          "answers": {"deliverable": deliverable}}))
+          "answers": {"deliverable": deliverable}})))
     (proj / "reports" / "phase3").mkdir(parents=True)
     (proj / "reports" / "phase3" / "cmp_fill_emit.json").write_text(
         json.dumps(_fill_report()))
