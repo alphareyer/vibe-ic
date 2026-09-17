@@ -17749,6 +17749,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             if _r.status == _T.Verdict.PASS.value:
                 _r.status = _T.Verdict.NOT_MEASURED.value
                 _r.reason_class = _T.ReasonClass.UPSTREAM_FAILED.value
+            elif _r.status in (_T.Verdict.NOT_MEASURED.value,
+                               _T.Verdict.NOT_APPLICABLE.value):
+                # R-0915-85 — THE DISCLOSURE IS NOT THE STATUS, and this is
+                # where the two used to be welded together. A dependent that
+                # already measured nothing keeps the word it earned -- there is
+                # no PASS here to void -- but it still RESTS ON A BROKEN CHAIN,
+                # and that is a fact its reader needs whatever its own word is.
+                #
+                # `json_vacuity_promoted` below is the same rule written for
+                # ONE promoted tier, because that was the only non-PASS word
+                # that could reach here while `VACUOUS_PASS` existed. #901's
+                # sentence is the general one: a new disclosure must not cost
+                # an old one.
+                pass
             elif getattr(_r, "json_vacuity_promoted", False):
                 # vibe-ic#901 - this step would have been a bare PASS on
                 # origin/main and would have been VOIDED here, printing the
@@ -17771,6 +17785,37 @@ def main(argv: Optional[List[str]] = None) -> int:
             _r.reasons = list(getattr(_r, "reasons", []) or [])
             if _why not in _r.reasons:
                 _r.reasons.append(_why)
+
+    # R-0915-85 — THE DISCLOSURE DOES NOT RIDE ON THE ORDERING VIOLATION.
+    #
+    # The loop above can only reach a dependent that RAISED a violation, and
+    # `analyze()` raises one only for a step that CLAIMS DONE. That was every
+    # dependent worth disclosing while `VACUOUS_PASS` and `INCOMPLETE` were
+    # PASS-shaped and therefore done-claims. They are `NOT_MEASURED` now and
+    # claim nothing, so a dependent that had already measured nothing lost the
+    # one line telling its reader it also rests on a broken chain — measured on
+    # #901's own two-step fixture, where step 2 read
+    # `[NOT_MEASURED] (no_population) [vacuity]` and said nothing about step 1
+    # having FAILED beneath it.
+    #
+    # So the note is derived from the DECLARED blocks_on ancestry and the
+    # ancestor's own word, which is where the fact actually lives. It changes
+    # no verdict and gates nothing: `forced_fail` is decided above, from the
+    # violation list alone.
+    _status_by_id = {str(r.id): r.status for r in results}
+    for _r in results:
+        if _r.status not in (_T.Verdict.NOT_MEASURED.value,
+                             _T.Verdict.NOT_APPLICABLE.value):
+            continue          # PASS dependents are handled by the loop above
+        for _anc in (_g0.get(str(_r.id)) or []):
+            if _status_by_id.get(str(_anc)) != _T.Verdict.FAIL.value:
+                continue
+            _note = (f"rests on a broken chain: dependency [{_anc}] = FAIL, "
+                     f"so nothing this step reports certifies the design "
+                     f"either")
+            _r.reasons = list(getattr(_r, "reasons", []) or [])
+            if _note not in _r.reasons:
+                _r.reasons.append(_note)
     if _ordering_violations:
         _retally()
         # vibe-ic#924 — the re-application of the sub-gate addend went with it.
@@ -18030,7 +18075,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     # It remains a DISCLOSURE tier, not a failure: it is in none of
     # `failing` / `missing` / `setup_required_skipped` /
     # `oss_blocked_skipped`, so it still cannot make a run non-green.
-    pass_count = counts["PASS"]
+    # R-0915-85 — A DISCLOSED VACUITY STILL LEAVES THE NUMERATOR, and now it
+    # has to be SUBTRACTED rather than spelt out of it. `VACUOUS_PASS` and
+    # `PARTIALLY-VACUOUS` were words, so `counts["PASS"]` excluded them by not
+    # being their name. They are `PASS` carrying `Disclosure.VACUITY` /
+    # `PARTIAL_VACUITY` now, so the same rows are inside `counts["PASS"]` and
+    # the published X would say a step was MEASURED that was not — which is
+    # the exact harm the paragraph above records Wave 93 causing.
+    #
+    # The DISCLOSURE is what the reader is being protected from, so the
+    # disclosure is what is subtracted. Structure-only is NOT subtracted: it
+    # ran and read the design, it just read only its shape, and it was never
+    # out of X.
+    _vacuity_disclosed = sum(
+        1 for r in scoped
+        if r.status == _T.Verdict.PASS.value
+        and ({_T.Disclosure.VACUITY.value,
+              _T.Disclosure.PARTIAL_VACUITY.value}
+             & {str(d) for d in (getattr(r, "disclosures", None) or [])}))
+    pass_count = counts["PASS"] - _vacuity_disclosed
 
     # THE HEADLINE MUST NAME THE SCOPE IT MEASURED. `args.stage` is None on a
     # `--stage-id` run, so keying only on it would print a whole-flow headline

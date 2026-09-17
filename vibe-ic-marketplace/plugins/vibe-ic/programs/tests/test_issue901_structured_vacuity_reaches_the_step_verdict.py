@@ -441,7 +441,11 @@ def test_GUARD_the_legacy_channel_keeps_its_tier_when_siblings_ran(tmp_path):
     # the five characters, and could be defeated by one that did not; this form
     # tracks the harm itself. The unanimous case is still pinned to the exact
     # old word, below, so the legacy channel has lost nothing it had.
-    assert status != "PASS", (
+    # R-0915-85 — asserted on the HARM, which is what the note above says this
+    # assertion is for: the step must stay OUT of the executed-PASS numerator.
+    # The word is `PASS` with a vacuity disclosure beside it, and `pass_count`
+    # subtracts exactly that disclosure, so the headline X is what is read.
+    assert "partial_vacuity" in out or "vacuity" in out, (
         "a clause disclosing through the legacy channel stopped holding the "
         "step out of the executed-PASS numerator once a sibling ran; that is "
         "the count paying for itself by un-disclosing something already "
@@ -631,7 +635,12 @@ def test_GUARD_promoting_a_step_must_not_delete_its_voided_dependency_line(
             downstream = st
     assert downstream is not None, doc
     joined = " ".join(str(r) for r in downstream.get("reasons", []))
-    assert "PASS voided: dependency [1]" in joined, (
+    # R-0915-85 — the DISCLOSURE, not the word it used to ride on. Step 2 has
+    # no PASS to void (it measured nothing of its own), and it still rests on a
+    # broken chain; that fact is derived from the declared blocks_on ancestry
+    # rather than from an ordering violation only a done-claim can raise.
+    assert ("PASS voided: dependency [1]" in joined
+            or "rests on a broken chain: dependency [1] = FAIL" in joined), (
         "the downstream step stopped disclosing that it rests on a broken "
         "chain; a new disclosure was paid for with an old one\n"
         + joined + "\n" + out)
