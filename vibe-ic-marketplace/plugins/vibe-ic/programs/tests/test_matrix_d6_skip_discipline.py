@@ -237,18 +237,61 @@ REACH_PY = F.PLUGIN_ROOT / "programs" / "flow_condition_reachability_check.py"
 
 #: Tiers that mean "this step did not do its work". Taken verbatim from
 #: flow_compliance_check's own `counts` dict / `_label` table, not invented.
-# R-0915-85 — the three words are two. `SKIPPED-CONDITION` is
-# `NOT_APPLICABLE` (the input declares there is nothing here);
-# `VACUOUS_PASS` and `SKIPPED-SETUP-REQUIRED` are both `NOT_MEASURED`, told
-# apart by the reason. Left as the old three this tuple named NOTHING any
-# producer writes, so every membership test below answered False and the
-# whole skip-discipline harness measured an EMPTY population while reading
-# green -- including the register-shrink rule, whose "measured []" was
-# vacuous rather than a shrink.
+# R-0915-85 — THE SAME THREE TIERS, ASKED AS A WORD **AND** A REASON.
+#
+# Left as the old three this tuple named NOTHING any producer writes, so every
+# membership test below answered False and the whole skip-discipline harness
+# measured an EMPTY population while reading green -- including the
+# register-shrink rule, whose "measured []" was vacuous rather than a shrink.
+#
+# But the word ALONE is now WIDER than the three it replaces, and widening it
+# would be a different dimension, not this one. Measured against
+# origin/main's eleven-tier `counts` dict, the three tiers this module named
+# and the eight it deliberately did not:
+#
+#     SKIPPED-CONDITION      -> NOT_APPLICABLE                     IN
+#     SKIPPED-SETUP-REQUIRED -> NOT_MEASURED(input_absent)         IN
+#     VACUOUS_PASS           -> NOT_MEASURED(no_population)        IN
+#     ---
+#     INCOMPLETE             -> NOT_MEASURED(partial_population)   out
+#     DEFERRED-BY-UPSTREAM   -> NOT_MEASURED(upstream_refused)     out
+#     MISSING                -> FAIL(missing_artefact)             out
+#     PARTIALLY-VACUOUS      -> PASS + Disclosure.PARTIAL_VACUITY  out
+#     STRUCTURE-ONLY         -> PASS_WITH_WAIVERS + STRUCTURE_ONLY out
+#
+# A step that examined PART of its population, and a step an upstream refusal
+# blocked, are both `NOT_MEASURED` now and were both OUT of main's set: the
+# first did work, the second's absence is the upstream's discipline and not
+# this step's. So membership is `is_skip_tier(status, reason_class)` — the
+# word for NOT_APPLICABLE, the word AND the reason for NOT_MEASURED — and the
+# reason travels in `Scenario.reason_class` beside the word, from the same
+# `steps[]` row.
 SKIP_TIERS: Tuple[str, ...] = (
     "NOT_APPLICABLE",
     "NOT_MEASURED",
 )
+
+#: The only two `NOT_MEASURED` reasons that mean "this step declined to do its
+#: work", as opposed to "it did part of it" or "it was blocked upstream".
+SKIP_REASONS: Tuple[str, ...] = (
+    "input_absent",
+    "no_population",
+)
+
+
+def is_skip_tier(status: Optional[str], reason_class: str = "") -> bool:
+    """Did this step decline to do its work? — the word, and for one word the
+    reason.
+
+    `NOT_APPLICABLE` is unconditional: the step's own input declares there is
+    nothing here. `NOT_MEASURED` is a skip only for the two reasons above; the
+    others name a step that measured something or one an upstream stopped.
+    """
+    if status == "NOT_APPLICABLE":
+        return True
+    if status == "NOT_MEASURED":
+        return (reason_class or "") in SKIP_REASONS
+    return False
 
 #: Normalised gate-report verdict/status values that are a self-declared
 #: inapplicability. Every one of these was OBSERVED being emitted by a gate
@@ -719,6 +762,26 @@ class Scenario:
     #: The report's ``counts`` dict, so X can be compared against the discrete
     #: per-tier counters instead of being re-derived here.
     counts: Optional[Dict[str, int]] = None
+    #: R-0915-85 — the WHY that travels with a `NOT_MEASURED`, read off the
+    #: same ``steps[]`` row as ``status``. Without it this module cannot tell
+    #: a skip from a partial measurement; see ``is_skip_tier``.
+    reason_class: str = ""
+
+    @property
+    def vacuous(self) -> bool:
+        """The step RAN and examined nothing — the old `VACUOUS_PASS` tier.
+
+        Two fields, because the one word said two things at once: the verdict
+        (nothing was measured) and the disclosure (why). `no_population` is
+        the reason `verdict.Disclosure.VACUITY` is disclosed beside.
+        """
+        return (self.status == "NOT_MEASURED"
+                and self.reason_class == "no_population")
+
+    @property
+    def skipped(self) -> bool:
+        """This scenario resolved the step to a SKIP tier."""
+        return is_skip_tier(self.status, self.reason_class)
 
     @property
     def blocking_self_skips(self):
@@ -837,6 +900,7 @@ def _run_scenario(step_id, name: str, *, seeded: bool, rtl: bool = False,
              "--flow-def", str(flow), "--json", str(report)],
             capture_output=True, text=True)
         status: Optional[str] = None
+        reason_class: str = ""
         reasons: Tuple[str, ...] = ()
         advisories: Tuple[str, ...] = ()
         counts: Optional[Dict[str, int]] = None
@@ -849,6 +913,7 @@ def _run_scenario(step_id, name: str, *, seeded: bool, rtl: bool = False,
             for entry in doc.get("steps") or []:
                 if str(entry.get("id")) == F.normalize_id(step_id):
                     status = entry.get("status")
+                    reason_class = str(entry.get("reason_class") or "")
                     reasons = tuple(str(r) for r in (entry.get("reasons") or []))
         # The headline X/Y is printed, not reported: L3c compares the number a
         # reviewer READS against the discrete per-tier counters, so it has to
@@ -882,6 +947,7 @@ def _run_scenario(step_id, name: str, *, seeded: bool, rtl: bool = False,
             orphan_runs=orphan_runs,
             numerator=numerator,
             counts=counts,
+            reason_class=reason_class,
         )
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -1830,14 +1896,18 @@ def _leg3b_targetless_clause_skip_is_not_folded(probe: Probe) -> List[str]:
 
 
 def _leg2_skip_is_conditional(probe: Probe) -> List[str]:
-    observed = {name: sc.status for name, sc in probe.scenarios.items()
+    observed = {name: (sc.status if not sc.reason_class
+                       else f"{sc.status}({sc.reason_class})")
+                for name, sc in probe.scenarios.items()
                 if name in _STATUS_SCENARIOS}
-    non_skip = {n: s for n, s in observed.items() if s not in SKIP_TIERS}
+    non_skip = {n: observed[n] for n, sc in probe.scenarios.items()
+                if n in _STATUS_SCENARIOS and not sc.skipped}
     if non_skip:
         return []
     return [
         f"L2 SKIP NOT SHOWN CONDITIONAL: every constructed input resolves this "
-        f"step to a skip tier — {observed}. Skip tiers are {list(SKIP_TIERS)}. "
+        f"step to a skip tier — {observed}. Skip tiers are NOT_APPLICABLE and "
+        f"NOT_MEASURED for reason {list(SKIP_REASONS)}. "
         f"No input was found under which the step does NOT skip, so the skip "
         f"branch is indistinguishable from one taken on every input. Paths "
         f"seeded from the step's own declarations: "
@@ -1897,11 +1967,12 @@ def _leg3c_skip_not_inside_the_executed_pass_numerator(
     problems = []
     for name in _STATUS_SCENARIOS:
         sc = probe.scenarios.get(name)
-        if sc is None or sc.status != "VACUOUS_PASS":
+        if sc is None or not sc.vacuous:
             continue
         if sc.numerator is None or sc.counts is None:
             problems.append(
-                f"L3c UNMEASURED [{name}]: the step resolved to VACUOUS_PASS "
+                f"L3c UNMEASURED [{name}]: the step resolved to "
+                f"NOT_MEASURED(no_population) with a disclosed vacuity "
                 f"but the headline `X/Y executed PASS` line could not be read "
                 f"off the consumer's stdout, so whether the skip is inside X "
                 f"is UNKNOWN. Unmeasured is not zero."
@@ -1911,8 +1982,9 @@ def _leg3c_skip_not_inside_the_executed_pass_numerator(
         if sc.numerator > plain:
             problems.append(
                 f"L3c SKIP INSIDE THE EXECUTED-PASS NUMERATOR [{name}]: the "
-                f"step resolved to VACUOUS_PASS — its own label and its own "
-                f"counter — but the published headline reads "
+                f"step resolved to NOT_MEASURED(no_population) — its own "
+                f"word, its own reason and its own counter — but the "
+                f"published headline reads "
                 f"{sc.numerator}/… executed PASS while only {plain} step(s) "
                 f"are on the plain PASS tier. The skip is inside the X a "
                 f"reviewer reads: counts={sc.counts}. Moving the label "
@@ -1995,7 +2067,10 @@ def _leg5_waiver_channel(probe: Probe) -> List[str]:
             f"waiver was even attempted. Advisories emitted: "
             f"{list(prose.advisories) or '[]'}"
         )
-    if natural.status in ("FAIL", "MISSING") and formed.status != "PASS_WITH_WAIVERS":
+    # R-0915-85 — `MISSING` is `FAIL(missing_artefact)`, so the pair is one
+    # word now: a required output that does not exist is a defect, not an
+    # absence, and it wears the verdict that says so.
+    if natural.status == "FAIL" and formed.status != "PASS_WITH_WAIVERS":
         problems.append(
             f"L5 WAIVER CHANNEL DEAD: with every attestation field present "
             f"(ticket + review_required + evidence + >=40-char rationale) the "
@@ -2041,9 +2116,9 @@ def _leg6_skip_is_keyed_on_something_the_flow_never_promises(
     full = probe.scenarios.get("FLOW_COMPLETE")
     if not seeded or not full:
         return problems
-    if seeded.status not in SKIP_TIERS:
+    if not seeded.skipped:
         return problems
-    if full.status in SKIP_TIERS:
+    if full.skipped:
         return problems                       # legitimate: keyed on a non-promise
     sid = F.normalize_id(probe.step_id)
     if sid in _DEFERRED_L6_SKIPS:
@@ -2261,18 +2336,17 @@ def leg_capability(step_id) -> Dict[str, bool]:
         # L1b has a subject wherever the step declares a gate at all.
         "L1b": F.has_gate(sid),
         # L2 needs at least one probed scenario to land on a skip tier.
-        "L2": any(sc.status in SKIP_TIERS for sc in probe.scenarios.values()),
+        "L2": any(sc.skipped for sc in probe.scenarios.values()),
         # L3 needs at least one BLOCKING clause that writes a report.
         "L3": bool(targets and blocking),
         # L3b needs at least one BLOCKING exec clause that writes none.
         "L3b": bool(_targetless_blocking_clauses(sid)),
-        # L3c needs a probed scenario that actually lands on VACUOUS_PASS —
-        # the only tier whose fold into `pass_count` it can observe.
-        "L3c": any(sc.status == "VACUOUS_PASS"
-                   for sc in probe.scenarios.values()),
+        # L3c needs a probed scenario that actually lands on the vacuity
+        # tier — the only tier whose fold into `pass_count` it can observe.
+        "L3c": any(sc.vacuous for sc in probe.scenarios.values()),
         # L6 needs a scenario that lands on a skip tier at all — the same
         # subject L2 needs, asked of a different pair of fixtures.
-        "L6": any(sc.status in SKIP_TIERS for sc in probe.scenarios.values()),
+        "L6": any(sc.skipped for sc in probe.scenarios.values()),
         # L4 needs an optional clause or a step-level condition.
         "L4": any(c.kind == F.K_OPTIONAL for c in clauses) or bool(cond),
         # L5 needs an ENV_UNAVAILABLE role binding.
@@ -2364,15 +2438,27 @@ def test_d6_targetless_blocking_clause_census_is_live_and_non_empty():
 #: The shipped arithmetic, and the arithmetic it replaced. Both are matched
 #: against the real source; the harness FAILS if either count is not exactly
 #: one, so a rename cannot leave this test silently mutating nothing.
-# R-0915-85 — THE NUMERATOR LINE MOVED BECAUSE THE TIER DID. `VACUOUS_PASS`
-# was a WORD, so `counts["PASS"]` excluded it by not being its name; it is
-# `PASS` carrying `Disclosure.VACUITY` now, so the same rows are inside
-# `counts["PASS"]` and the producer SUBTRACTS the disclosure instead. The
-# mutation this harness applies is unchanged in meaning -- fold the vacuous
-# rows back INTO the numerator -- and is now written as removing that
-# subtraction.
+# R-0915-85 — THE NUMERATOR LINE MOVED BECAUSE THE TIER DID, AND THE MUTATION
+# HAD TO MOVE WITH IT.
+#
+# `VACUOUS_PASS` was a WORD, so `counts["PASS"]` excluded it by not being its
+# name. MEASURED on this module's own two-step probe: a UNANIMOUSLY vacuous
+# step now resolves to `NOT_MEASURED(no_population)` carrying
+# `Disclosure.VACUITY`, and a PARTIALLY vacuous one to `PASS` carrying
+# `PARTIAL_VACUITY`. Only the second is inside `counts["PASS"]`, which is what
+# `- _vacuity_disclosed` takes back out.
+#
+# So deleting the subtraction is NOT the retired arithmetic any more: on this
+# probe it folds nothing, both arms publish the same X, and the leg would read
+# green while measuring nothing. The mutation is written as what
+# `+ counts["VACUOUS_PASS"]` DID — every disclosed vacuity back inside the
+# published X — over the fields that carry it now.
 _PASS_COUNT_NOW = 'pass_count = counts["PASS"] - _vacuity_disclosed\n'
-_PASS_COUNT_REFOLDED = 'pass_count = counts["PASS"]\n
+_PASS_COUNT_REFOLDED = (
+    'pass_count = counts["PASS"] - _vacuity_disclosed + sum(\n'
+    '        1 for r in scoped\n'
+    '        if _T.Disclosure.VACUITY.value\n'
+    '        in (getattr(r, "disclosures", None) or []))\n')
 _PROGRAMS_DIR_SRC = "PROGRAMS_DIR = Path(__file__).parent\n"
 
 #: A real gate program that vacuously passes on a project containing nothing —
@@ -2465,9 +2551,25 @@ def _refolded_checker(dest_dir: Path) -> Path:
     return dest
 
 
+def _vacuous_row(rows) -> Optional[Dict[str, Any]]:
+    """The one step row that RAN and examined nothing, or None.
+
+    R-0915-85 — three fields where there was one word: the verdict says
+    nothing was measured, `reason_class` says the population was empty, and
+    `Disclosure.VACUITY` is the disclosure the producer prints beside it. A
+    row missing any of the three is not this tier, and the harness must not
+    settle for two out of three.
+    """
+    found = [r for r in rows
+             if r.get("status") == "NOT_MEASURED"
+             and r.get("reason_class") == "no_population"
+             and "vacuity" in (r.get("disclosures") or [])]
+    return found[0] if len(found) == 1 else None
+
+
 def _headline_and_counts(checker: Path, flow: Path, project: Path,
                          report: Path) -> Tuple[Optional[int], Dict[str, int],
-                                                str]:
+                                                str, List[Dict[str, Any]]]:
     env = dict(os.environ)
     env["PYTHONPATH"] = (str(F.PROGRAMS_DIR) + os.pathsep
                          + env.get("PYTHONPATH", ""))
@@ -2478,7 +2580,8 @@ def _headline_and_counts(checker: Path, flow: Path, project: Path,
     m = _HEADLINE_RE.search(proc.stdout or "")
     doc = json.loads(report.read_text(encoding="utf-8")) if report.is_file() else {}
     counts = {str(k): int(v) for k, v in (doc.get("counts") or {}).items()}
-    return (int(m.group(1)) if m else None), counts, proc.stdout or ""
+    rows = [r for r in (doc.get("steps") or []) if isinstance(r, dict)]
+    return (int(m.group(1)) if m else None), counts, proc.stdout or "", rows
 
 
 def test_d6_l3c_fires_when_the_numerator_folds_the_tier_back_in():
@@ -2520,17 +2623,29 @@ def test_d6_l3c_fires_when_the_numerator_folds_the_tier_back_in():
         project.mkdir()
         (project / "md6_seed.txt").write_text("stub\n", encoding="utf-8")
 
-        x_now, counts_now, out_now = _headline_and_counts(
+        x_now, counts_now, out_now, report_now = _headline_and_counts(
             FCC_PY, flow, project, tmp / "now.json")
         mutant = _refolded_checker(tmp)
-        x_refold, counts_refold, out_refold = _headline_and_counts(
+        x_refold, counts_refold, out_refold, _ = _headline_and_counts(
             mutant, flow, project, tmp / "refold.json")
 
         # The subject must exist, or neither direction measures anything.
-        assert counts_now.get("VACUOUS_PASS") == 1, (
-            f"the probe flow did not produce exactly one VACUOUS_PASS "
-            f"(counts={counts_now}); gate program {program!r} no longer "
-            f"vacuously passes and this test measured nothing.\n{out_now}"
+        # R-0915-85 — the tier is a VERDICT plus a REASON plus a DISCLOSURE,
+        # so the subject is asserted on all three off the report's own row,
+        # not on a word in `counts`.
+        _seen = [(r.get("id"), r.get("status"), r.get("reason_class"),
+                  r.get("disclosures")) for r in report_now]
+        assert _vacuous_row(report_now) is not None, (
+            f"the probe flow did not produce exactly one step at "
+            f"NOT_MEASURED(no_population) disclosing vacuity (steps={_seen}); "
+            f"gate program {program!r} no longer vacuously passes and this "
+            f"test measured nothing.\n{out_now}"
+        )
+        assert counts_now.get("NOT_MEASURED") == 1, (
+            f"the probe flow produced {counts_now.get('NOT_MEASURED')} "
+            f"NOT_MEASURED step(s), not the single vacuous one this harness "
+            f"builds (counts={counts_now}) — the arithmetic below would not "
+            f"be isolated to it.\n{out_now}"
         )
         assert counts_now.get("PASS") == 1, (
             f"the probe flow's plain-PASS step did not pass "
@@ -2549,13 +2664,16 @@ def test_d6_l3c_fires_when_the_numerator_folds_the_tier_back_in():
             f"refold={x_refold!r}"
         )
         assert x_refold > counts_refold["PASS"], (
-            f"with `+ counts['VACUOUS_PASS']` restored the published X is "
+            f"with the disclosed vacuity folded back in the published X is "
             f"{x_refold} and the plain-PASS counter is "
             f"{counts_refold['PASS']} — leg L3c's predicate does NOT fire on "
             f"the very defect it exists to catch, so its silence on the "
             f"shipped tree means nothing.\n{out_refold}"
         )
-        assert x_refold == counts_refold["PASS"] + counts_refold["VACUOUS_PASS"]
+        assert x_refold == counts_refold["PASS"] + 1, (
+            f"the refold moved X by {x_refold - counts_refold['PASS']} rather "
+            f"than by the single disclosed vacuity it folds back in: "
+            f"X={x_refold} counts={counts_refold}")
 
         # LEGITIMATE DIRECTION — same subject, shipped checker, no charge.
         assert x_now == counts_now["PASS"], (
@@ -2565,21 +2683,33 @@ def test_d6_l3c_fires_when_the_numerator_folds_the_tier_back_in():
         )
         assert x_now == x_refold - 1, (
             f"the two runs differ by {x_refold - x_now} rather than by the "
-            f"single VACUOUS_PASS step; something other than the aggregation "
-            f"moved"
+            f"single vacuous step; something other than the aggregation moved"
         )
 
-        # …and the disclosure tier is still a DISCLOSURE, not a failure.
+        # …and the step still says, on the reviewer's own stdout, BOTH halves
+        # of what `VACUOUS_PASS` used to say in one word.
         for label, out in (("shipped", out_now), ("refolded", out_refold)):
-            assert "[VACUOUS-PASS     ] Step MD6VAC" in out, (
-                f"{label}: the vacuous step is no longer on the VACUOUS_PASS "
-                f"tier:\n{out}"
+            assert "[NOT_MEASURED     ] Step MD6VAC" in out, (
+                f"{label}: the vacuous step no longer prints the verdict "
+                f"NOT_MEASURED:\n{out}"
             )
-        assert "Overall: PASS" in out_now and "Overall: PASS" in out_refold, (
-            f"leaving the numerator turned the vacuous step into a blocking "
-            f"failure — it is a disclosure tier and must not gate.\n"
-            f"shipped:\n{out_now}\nrefolded:\n{out_refold}"
-        )
+            assert "(no_population) [vacuity]" in out, (
+                f"{label}: the step printed NOT_MEASURED without the reason "
+                f"and the disclosure that say WHY — which is the whole of "
+                f"what the one word carried:\n{out}"
+            )
+        # R-0915-85 — AND THE RUN IS NOT GREEN. The tier was `VACUOUS_PASS`
+        # and this assertion read `Overall: PASS`, on the reasoning that a
+        # disclosure "must not gate". That is exactly the sentence the ruling
+        # deletes: a step that measured nothing cannot be reported as one that
+        # passed, in the tally OR in the headline. It is still not a FAIL —
+        # nothing is wrong with the design — and that is the distinction the
+        # two assertions below draw.
+        for label, out in (("shipped", out_now), ("refolded", out_refold)):
+            assert "Overall: NOT_MEASURED" in out, (
+                f"{label}: a run whose only non-PASS step measured nothing "
+                f"reported an Overall verdict other than NOT_MEASURED:\n{out}"
+            )
         assert counts_now["FAIL"] == 0, (
             f"the vacuous step joined the FAIL bucket: {counts_now}"
         )
@@ -2925,16 +3055,24 @@ def test_d6_l6_separates_legitimate_skips_from_illegitimate_ones():
         probe = probe_for(sid)
         seeded = probe.scenarios.get("SEEDED")
         full = probe.scenarios.get("FLOW_COMPLETE")
-        if not seeded or not full or seeded.status not in SKIP_TIERS:
+        if not seeded or not full or not seeded.skipped:
             continue
-        (legit if full.status in SKIP_TIERS else illegit).append(
+        (legit if full.skipped else illegit).append(
             F.normalize_id(sid))
     assert legit == [], legit
     assert illegit == ["P0"], illegit
+    # R-0915-85 — `INCOMPLETE` was the word that kept 12 and 30 out of this
+    # leg, and it is `NOT_MEASURED(partial_population)` now: the step RAN and
+    # examined PART of its population. Pinned as the PAIR, because the verdict
+    # alone no longer carries the distinction — `NOT_MEASURED` also spells the
+    # two reasons that ARE skips (`is_skip_tier`), and pinning the word alone
+    # would let a step that examined nothing drift in here wearing it.
     assert {
-        sid: probe_for(sid).scenarios["SEEDED"].status
+        sid: (probe_for(sid).scenarios["SEEDED"].status,
+              probe_for(sid).scenarios["SEEDED"].reason_class)
         for sid in ("12", "30")
-    } == {"12": "INCOMPLETE", "30": "INCOMPLETE"}
+    } == {"12": ("NOT_MEASURED", "partial_population"),
+          "30": ("NOT_MEASURED", "partial_population")}
 
 
 def test_d6_l6_deferred_register_only_shrinks():
@@ -2952,10 +3090,10 @@ def test_d6_l6_deferred_register_only_shrinks():
         probe = probe_for(sid)
         seeded = probe.scenarios.get("SEEDED")
         full = probe.scenarios.get("FLOW_COMPLETE")
-        if seeded is None or seeded.status not in SKIP_TIERS:
+        if seeded is None or not seeded.skipped:
             stale.append(f"{sid} no longer skips under SEEDED "
                          f"(status={seeded.status if seeded else None!r})")
-        elif full is not None and full.status in SKIP_TIERS:
+        elif full is not None and full.skipped:
             stale.append(f"{sid}'s skip is now keyed on something the flow "
                          f"does not promise (FLOW_COMPLETE={full.status!r}) — "
                          f"it is legitimate, so delete the register entry")
@@ -2977,9 +3115,9 @@ def test_d6_l6_the_register_is_the_only_thing_holding_those_cells_green():
         probe = probe_for(sid)
         seeded = probe.scenarios.get("SEEDED")
         full = probe.scenarios.get("FLOW_COMPLETE")
-        if not seeded or not full or seeded.status not in SKIP_TIERS:
+        if not seeded or not full or not seeded.skipped:
             continue
-        if full.status not in SKIP_TIERS:
+        if not full.skipped:
             charged.add(F.normalize_id(sid))
     assert charged == set(_DEFERRED_L6_SKIPS), (
         f"the register and the live measurement disagree: measured "
