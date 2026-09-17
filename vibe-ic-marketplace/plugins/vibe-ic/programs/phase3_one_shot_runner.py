@@ -7124,6 +7124,7 @@ def _pad_connected_ring_tcl(pdk: "PdkConfig") -> Dict[str, str]:
             "extend": "",
             "connects": "",
             "note": "",
+            "clip": "",
         }
 
     offset, clearance, widths_f, spacings_f, footprint = _pdn_ring_dimensions(cfg)
@@ -7216,7 +7217,80 @@ def _pad_connected_ring_tcl(pdk: "PdkConfig") -> Dict[str, str]:
         "extend": " {*}${_vibeic_ring_extend}",
         "connects": extra,
         "note": f" + pad_ring({layer_s};pads={pad_layer_s};runtime-fit)",
+        "clip": _pdn_pad_footprint_clip_tcl(pad_layers),
     }
+
+
+def _pdn_pad_footprint_clip_tcl(pad_layers: Sequence[str]) -> str:
+    """Tcl run right after `pdngen`: the core grid stays out of pad cells.
+
+    `-connect_to_pads` routes the supply to the pad pins on the declared pad
+    layer(s), and `add_pdn_connect` then drops a via stack wherever a grid
+    stripe overlaps that connection -- without regard to the pad master's own
+    obstructions. MEASURED on spm x gf180mcuD, DIE route (v1.22.3, image
+    sha256:89a8fd72...): a Metal4 grid stripe crossed the supply pad's Metal2
+    connection, so pdngen started the stripe, a Metal3 DRCFILL and twelve
+    via2/via3 arrays 4.7 um INSIDE `gf180mcu_fd_io__dvdd`, whose LEF obstructs
+    Metal3/Metal4 over that band. Sign-off DRC: V3.1 x48 + V3.2a x85, all in
+    that one 3 x 3 um spot; Magic extraction: 139 illegal obsm3/obsm4 overlaps
+    at the same spot, so LVS was BLOCKED and never compared.
+
+    Only special-net geometry that OVERLAPS a placed PAD-class instance is
+    touched: a via there is removed, and a wire on any layer other than the
+    declared pad layer(s) is cut back to the pad boundary along its length (a
+    wire wholly inside a pad is removed). The pad-layer connection itself --
+    the only thing a pad owes the grid -- is left exactly as pdngen drew it,
+    and every via outside the pad remains. Disclosed by one marker line; an
+    odb error propagates to the surrounding pdngen catch. No PDK, cell, net or
+    layer literal: the kept layers are the caller's configured pad layers."""
+    keep = " ".join(str(v) for v in pad_layers)
+    return f"""  if {{$_vibeic_pad_ring_active}} {{
+    set _vpc_block [ord::get_db_block]
+    set _vpc_pads {{}}
+    foreach _vpc_i [$_vpc_block getInsts] {{
+      if {{[[$_vpc_i getMaster] isPad] && [$_vpc_i isPlaced]}} {{ lappend _vpc_pads [$_vpc_i getBBox] }}
+    }}
+    set _vpc_todo {{}}
+    foreach _vpc_n [$_vpc_block getNets] {{
+      if {{[$_vpc_n getSigType] ni {{POWER GROUND}}}} {{ continue }}
+      foreach _vpc_sw [$_vpc_n getSWires] {{
+        foreach _vpc_s [$_vpc_sw getWires] {{
+          foreach _vpc_pb $_vpc_pads {{
+            if {{[$_vpc_s xMax] <= [$_vpc_pb xMin] || [$_vpc_s xMin] >= [$_vpc_pb xMax] || [$_vpc_s yMax] <= [$_vpc_pb yMin] || [$_vpc_s yMin] >= [$_vpc_pb yMax]}} {{ continue }}
+            lappend _vpc_todo [list $_vpc_sw $_vpc_s $_vpc_pb]
+            break
+          }}
+        }}
+      }}
+    }}
+    set _vpc_vias 0; set _vpc_clipped 0; set _vpc_dropped 0
+    foreach _vpc_t $_vpc_todo {{
+      lassign $_vpc_t _vpc_sw _vpc_s _vpc_pb
+      if {{[$_vpc_s isVia]}} {{ odb::dbSBox_destroy $_vpc_s; incr _vpc_vias; continue }}
+      set _vpc_layer [$_vpc_s getTechLayer]
+      if {{[$_vpc_layer getName] in {{{keep}}}}} {{ continue }}
+      set _vpc_x0 [$_vpc_s xMin]; set _vpc_y0 [$_vpc_s yMin]
+      set _vpc_x1 [$_vpc_s xMax]; set _vpc_y1 [$_vpc_s yMax]
+      set _vpc_shape [$_vpc_s getWireShapeType]
+      set _vpc_pieces {{}}
+      if {{($_vpc_y1 - $_vpc_y0) >= ($_vpc_x1 - $_vpc_x0)}} {{
+        if {{$_vpc_y0 < [$_vpc_pb yMin]}} {{ lappend _vpc_pieces [list $_vpc_x0 $_vpc_y0 $_vpc_x1 [$_vpc_pb yMin]] }}
+        if {{$_vpc_y1 > [$_vpc_pb yMax]}} {{ lappend _vpc_pieces [list $_vpc_x0 [$_vpc_pb yMax] $_vpc_x1 $_vpc_y1] }}
+      }} else {{
+        if {{$_vpc_x0 < [$_vpc_pb xMin]}} {{ lappend _vpc_pieces [list $_vpc_x0 $_vpc_y0 [$_vpc_pb xMin] $_vpc_y1] }}
+        if {{$_vpc_x1 > [$_vpc_pb xMax]}} {{ lappend _vpc_pieces [list [$_vpc_pb xMax] $_vpc_y0 $_vpc_x1 $_vpc_y1] }}
+      }}
+      odb::dbSBox_destroy $_vpc_s
+      if {{![llength $_vpc_pieces]}} {{ incr _vpc_dropped; continue }}
+      foreach _vpc_pc $_vpc_pieces {{
+        lassign $_vpc_pc _vpc_a _vpc_b _vpc_c _vpc_d
+        odb::dbSBox_create $_vpc_sw $_vpc_layer $_vpc_a $_vpc_b $_vpc_c $_vpc_d $_vpc_shape
+      }}
+      incr _vpc_clipped
+    }}
+    puts "PDN_PAD_FOOTPRINT_CLIP: vias_removed=$_vpc_vias wires_clipped=$_vpc_clipped wires_dropped=$_vpc_dropped pads=[llength $_vpc_pads] kept_layers={keep}"
+  }}
+"""
 
 
 def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
@@ -7582,7 +7656,8 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
             + _mg_tcl
             + _stub_tcl
             + "  pdngen\n"
-            "} _pdn_err]} {\n"
+            + ring.get("clip", "")
+            + "} _pdn_err]} {\n"
             "  puts \"PDN_NONFATAL: $_pdn_err\"\n"
             "} else {\n"
             + _ok_marker

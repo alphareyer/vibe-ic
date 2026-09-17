@@ -196,6 +196,17 @@ _LEDGER = frozenset({
     "_build_auto_silicon_sdc", "_build_clock_records_from_sdcs",
     "_build_hardmacro_supply_gc_tcl", "_build_macro_pdn_grid_tcl",
     "_build_macro_pdn_refusal_tcl", "_build_pdn_tcl",
+    # RECORDED with the commit that adds it. `_pdn_pad_footprint_clip_tcl` is
+    # PDN Tcl CONSTRUCTION of the same class as `_build_pdn_tcl` two names up:
+    # it emits the odb pass that runs right after `pdngen` and keeps the core
+    # grid out of the pad cells' footprints. It reads no PPA artefact and
+    # returns no figure -- its whole output is a Tcl string, and the geometry
+    # it acts on exists only inside the running OpenROAD session (odb sboxes
+    # and instance bboxes), which `_ppa/power.py` has no way to reach: that
+    # module takes IR-drop / EM REPORTS in and emits verdict rows. A Tcl
+    # emitter placed there would sit among report readers as a stranger, and
+    # the six PDN emitters already ledgered here are the precedent.
+    "_pdn_pad_footprint_clip_tcl",
     "_build_sparse_die_aware_filler_tcl",
     "_c4_l8_clock_port_on_top_surface", "_clock_plan_stale_inputs",
     # RECORDED with the commit that adds it. `_clock_port_against_the_design`
