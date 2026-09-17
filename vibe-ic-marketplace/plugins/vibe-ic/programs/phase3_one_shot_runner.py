@@ -19341,6 +19341,35 @@ def _discover_spare_cells_from_liberty(
     return out
 
 
+def _reserved_instance_names(spare_plan: Dict[str, Any],
+                              wrapper_verilog: Optional[Path] = None
+                              ) -> Tuple[List[str], List[str]]:
+    """(names the route deck must find, planned spare pads nothing instantiated).
+
+    Every planned spare CELL is inserted by this runner, so each is reserved.
+    A planned spare PAD is reserved only when the chip wrapper actually
+    instantiates it: no producer places spare pads today, and the deck's
+    `RESERVED_INSTANCE_MISSING` check errors on a name the database does not
+    carry. MEASURED on subservient x gf180mcuD as a DIE (r35): the EM-resize
+    re-route reached that check and PnR died on `spare_pad_in_0`, a pad the
+    plan named and no netlist ever contained. The second list is the
+    disclosure: planned, not placed.
+    """
+    names = [str(i["name"]) for i in spare_plan.get("instances", []) or []
+             if isinstance(i, dict) and i.get("name")]
+    pads = [str(i["name"]) for i in spare_plan.get("spare_pads", []) or []
+            if isinstance(i, dict) and i.get("name")]
+    if not pads:
+        return names, []
+    try:
+        text = wrapper_verilog.read_text(errors="replace") if wrapper_verilog else ""
+    except OSError:
+        text = ""
+    tokens = set(re.findall(r"[A-Za-z_][A-Za-z0-9_$]*", text))
+    placed = [n for n in pads if n in tokens]
+    return names + placed, [n for n in pads if n not in tokens]
+
+
 def _build_spare_cells_plan(placed_cells: int, density: float,
                             core_box: Tuple[int, int, int, int],
                             liberty_path: str = "",
@@ -28183,8 +28212,21 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
         # working once they are read back.
         lines = [ln for ln in lines if not ln.startswith("read_lef ")]
     i_rv = _index_of(lambda ln: ln.startswith("read_verilog "), "read_verilog")
-    if not lines[i_rv + 1:i_rv + 2] or \
-            not lines[i_rv + 1].startswith("link_design "):
+    # THE LOAD SITE IS A BLOCK, NOT A PAIR. A chip-path deck reads the core
+    # netlist AND the pad-carrying chip top before linking (MEASURED on
+    # subservient x gf180mcuD as a DIE, r35: `read_verilog <core>`, a comment,
+    # `read_verilog chip_top_io.v`, a blank line, `link_design chip_top`), and
+    # requiring `link_design` on the very next line refused both SDR child
+    # decks, so the post-route DRV repair never ran on a die. The block is
+    # every consecutive `read_verilog`, comment or blank line up to the
+    # `link_design` that closes it; any other command in between still refuses,
+    # because then the design-load site is not what this function replaces.
+    i_ld = i_rv + 1
+    while i_ld < len(lines) and (lines[i_ld].startswith("read_verilog ")
+                                 or not lines[i_ld].strip()
+                                 or lines[i_ld].lstrip().startswith("#")):
+        i_ld += 1
+    if i_ld >= len(lines) or not lines[i_ld].startswith("link_design "):
         raise PnrResumeUnavailable(
             "pnr.tcl does not follow read_verilog with link_design; the "
             "design-load site could not be identified")
@@ -28203,7 +28245,7 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
             "# instead of rebuilt from the netlist (see _build_pnr_resume_tcl_text).",
             f"read_def {checkpoint_def_c}",
         ]
-    lines[i_rv:i_rv + 2] = _load + (
+    lines[i_rv:i_ld + 1] = _load + (
         [after_restore_tcl.rstrip("\n")] if after_restore_tcl.strip() else [])
 
     def _drop(begin: str, end: str, replacement: Sequence[str],
@@ -31412,9 +31454,12 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # use the PDK's declared ROOT master when one exists.  Falling back to the
     # ordinary CTS buffer preserves PDKs that expose only a single legal cell.
     _fanout_root_buffer_cell = clk_buf_root or clk_buf
-    _reserved_names = [item["name"]
-                       for key in ("instances", "spare_pads")
-                       for item in spare_plan.get(key, []) if item.get("name")]
+    _reserved_names, _spare_pads_unplaced = _reserved_instance_names(
+        spare_plan, out_dir / "chip_top_io.v")
+    if _spare_pads_unplaced:
+        print(f"[pnr] SPARE_PADS_PLANNED_NOT_PLACED: {_spare_pads_unplaced} — "
+              f"no producer instantiates them, so the route deck does not "
+              f"reserve them", file=sys.stderr)
     spef_repair_block = _post_route_spef_repair_tcl(
         out_dir_c, tech_lef_c, cell_lef_c,
         fork_repair_capable=_fork_repair_capable,
@@ -31691,9 +31736,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         sizing_limits_block=sizing_limits_block,
         sizing_drv_report_block=sizing_drv_report_block,
         fanout_root_repair_block=_pnr_fanout_root_repair,
-        reserved_instance_names=[
-            item["name"] for key in ("instances", "spare_pads")
-            for item in spare_plan.get(key, []) if item.get("name")])
+        reserved_instance_names=_reserved_names)
 
     _chip_padring = _chip_path_requests_pad_ring(project)
 
