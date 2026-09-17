@@ -182,6 +182,54 @@ def lattice_width_for_floor(space, drawn_frac, free_frac, floor):
     return float(space) * r / (1.0 - r)
 
 
+def snap_up(v, grid_dbu):
+    """`v` raised to the next manufacturing-grid multiple (pure, dbu)."""
+    return v if grid_dbu <= 1 else int(math.ceil(v / grid_dbu)) * grid_dbu
+
+
+def conformal_tile(width_fwd, top_fwd, grid_dbu, factor=16):
+    """Side of the conformal tile: the widest square this engine already
+    places (`factor` x the configured width), never narrower than the winning
+    lattice square. Pure, dbu."""
+    cand = int(round(width_fwd * factor))
+    cand = cand if grid_dbu <= 1 else int(round(cand / grid_dbu)) * grid_dbu
+    return max(cand, top_fwd)
+
+
+def conformal_lanes(bbox4, tile, sp, pitch):
+    """The `sp`-wide lanes that cut the room into tiles, as (l, b, r, t) boxes.
+
+    Vertical lanes first, then horizontal, starting half a tile inside the
+    measurement box so the first tile is a whole one. Pure, dbu.
+    """
+    left, bottom, right, top = bbox4
+    out = []
+    x = left + (tile // 2)
+    while x < right:
+        out.append((x, bottom, x + sp, top))
+        x += pitch
+    y = bottom + (tile // 2)
+    while y < top:
+        out.append((left, y, right, y + sp))
+        y += pitch
+    return out
+
+
+def conformal_repair_cut(bbox4, sp, grid_dbu):
+    """A spacing violation's bounding box grown by `sp` and snapped OUTWARD to
+    the grid.
+
+    MEASURED: cutting with the edge pair's own polygon — a skewed quadrilateral
+    — left 40 ACUTE and 77 OFFGRID violations where it had removed 15 spacing
+    ones. A grid-snapped box trades no rule for another. Pure, dbu.
+    """
+    left, bottom, right, top = bbox4
+    return ((left - sp) // grid_dbu * grid_dbu,
+            (bottom - sp) // grid_dbu * grid_dbu,
+            -((-(right + sp)) // grid_dbu) * grid_dbu,
+            -((-(top + sp)) // grid_dbu) * grid_dbu)
+
+
 def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
     import pya
     dbu = ly.dbu
@@ -384,19 +432,15 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
         coordinates are integer dbu on the manufacturing grid.
         """
         before_c = _measure().area() / float(bbox.area())
-        tile = max(_snap_near(int(round(float(width) * 16.0 / dbu))), top_fwd)
-        pitch_c = _snap_up(tile + sp)
-        half = max(_snap_up(int(math.ceil(floor_fwd / 2.0))), grid_dbu)
+        tile = conformal_tile(int(round(float(width) / dbu)), top_fwd, grid_dbu)
+        pitch_c = snap_up(tile + sp, grid_dbu)
+        half = max(snap_up(int(math.ceil(floor_fwd / 2.0)), grid_dbu), grid_dbu)
         room = (pya.Region(bbox) - drawn_block - _fill_now().sized(sp)).merged()
         lanes = pya.Region()
-        x = bbox.left + (tile // 2)
-        while x < bbox.right:
-            lanes.insert(pya.Box(x, bbox.bottom, x + sp, bbox.top))
-            x += pitch_c
-        y = bbox.bottom + (tile // 2)
-        while y < bbox.top:
-            lanes.insert(pya.Box(bbox.left, y, bbox.right, y + sp))
-            y += pitch_c
+        for _l, _b, _r, _t in conformal_lanes(
+                (bbox.left, bbox.bottom, bbox.right, bbox.top),
+                tile, sp, pitch_c):
+            lanes.insert(pya.Box(_l, _b, _r, _t))
         pieces = (room - lanes.merged()).merged().sized(-half).sized(half)
         pieces.merge()
         # OPENING IS NOT SPACING. Removing a neck narrower than the smallest
@@ -423,11 +467,8 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
             cut = pya.Region()
             for ep in viol.each():
                 b = ep.bbox()
-                cut.insert(pya.Box(
-                    (b.left - sp) // grid_dbu * grid_dbu,
-                    (b.bottom - sp) // grid_dbu * grid_dbu,
-                    -((-(b.right + sp)) // grid_dbu) * grid_dbu,
-                    -((-(b.top + sp)) // grid_dbu) * grid_dbu))
+                cut.insert(pya.Box(*conformal_repair_cut(
+                    (b.left, b.bottom, b.right, b.top), sp, grid_dbu)))
             pieces = (pieces - cut).merged().sized(-half).sized(half)
             pieces.merge()
         viol = pieces.space_check(sp) + pieces.width_check(2 * half)

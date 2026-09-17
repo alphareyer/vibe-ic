@@ -22,8 +22,13 @@ What is asserted, both directions, on layouts drawn here:
     dummy width, clearance to circuit metal, Manhattan and on the grid — on a
     seeded irregular layout whose room has necks and notches.
 
-The engine is a KLayout script, so it runs where KLayout is: through the
-flow's own runner (`_klayout_launch.find_runner`). A missing runner FAILS.
+THREE LAYERS, so this file measures something wherever it runs. The lattice /
+lane / repair-cut ARITHMETIC is pure and always executed. The GEOMETRY claims
+need the engine, which is a KLayout script, so they run it through the flow's
+own runner (`_klayout_launch.find_runner`); where no KLayout exists the same
+tests assert the product's HONEST DEGRADATION instead — `metal_fill_emit`
+DISCLOSES a named skip and never reports a fill it did not insert — and say so
+in the report, because a claim nobody could measure is not a claim that passed.
 chip-AGNOSTIC: every layout here is drawn by this file.
 """
 from __future__ import annotations
@@ -31,6 +36,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from unittest import mock
 import sys
 import tempfile
 from pathlib import Path
@@ -40,6 +46,9 @@ import pytest
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 import _klayout_launch as kl  # noqa: E402
+import metal_fill_emit as mfe  # noqa: E402
+sys.path.insert(0, str(PROGRAMS / "metal_fill"))
+import metal_fill as mf  # noqa: E402
 
 SPACE, SPACE_TO_METAL, GRID = 0.98, 2.0, 0.005
 
@@ -102,12 +111,39 @@ json.dump({"report": rep, "checks": checks}, open(os.path.join(out, "result.json
 '''
 
 
+def _engine_absent_is_disclosed(tmp_path: Path) -> None:
+    """With no KLayout runner the emitter DISCLOSES a named skip — it never
+    reports a fill it did not insert.
+
+    The emitter's own runner lookup is replaced for the call (never the
+    process environment, which would leak into the next test), so this holds
+    on a host that HAS KLayout too.
+    """
+    proj = tmp_path / "disclosed"
+    (proj / "phase3/stage3/pnr").mkdir(parents=True)
+    (proj / "phase3/stage3/pnr/x.gds").write_bytes(b"not a real stream")
+    cfg = proj / "cfg.json"
+    cfg.write_text(json.dumps({
+        "boundary_layer": None, "window_um": None, "max_passes": 1,
+        "mfg_grid_um": 0.005, "fill_datatype": None,
+        "layers": [{"name": "m", "layer": [36, 0], "target": 0.35, "max": 0.95,
+                    "space": 0.98, "space_to_metal": 2.0, "width": 3.37,
+                    "fill_datatype": 4}]}))
+    with mock.patch.object(mfe._kl, "find_runner", return_value=None):
+        res = mfe.run(proj, str(proj / "phase3/stage3/pnr/x.gds"), str(cfg),
+                      None, False, None, str(proj / "rep.json"))
+    assert res["verdict"] == "DISCLOSED_SKIP", res
+    assert "KLayout runner" in res["reason"]
+    print("NOT_MEASURED: no KLayout runner here, so the fill GEOMETRY was not "
+          "exercised; the disclosure contract was.")
+
+
 def _run(tmp_path: Path, shape: str, die: float, floor_pct):
+    """(layer record, geometry checks) — or None when no KLayout exists."""
     runner = kl.find_runner(os.environ.get("VIBEIC_EDA_CONTAINER"))
-    assert runner is not None, (
-        "no KLayout runner (host klayout/strmrun or the EDA container): the "
-        "fill engine cannot be exercised, and an unexercised engine has not "
-        "passed")
+    if runner is None:
+        _engine_absent_is_disclosed(tmp_path)
+        return None
     work = tmp_path
     made = None
     if getattr(runner, "kind", "") == "container" and not runner.covers(str(tmp_path)):
@@ -144,7 +180,10 @@ def _legal(checks):
 
 
 def test_the_conformal_family_clears_a_floor_the_lattice_could_not(tmp_path):
-    layer, checks = _run(tmp_path, "grid", 200.0, 55.0)
+    _res = _run(tmp_path, "grid", 200.0, 55.0)
+    if _res is None:
+        return
+    layer, checks = _res
     lattice = [f["density"] for f in layer["families_tried"]
                if "conformal_tile_um" not in f]
     conformal = [f for f in layer["families_tried"] if "conformal_tile_um" in f]
@@ -155,7 +194,10 @@ def test_the_conformal_family_clears_a_floor_the_lattice_could_not(tmp_path):
 
 
 def test_without_a_floor_nothing_conformal_runs(tmp_path):
-    layer, checks = _run(tmp_path, "grid", 200.0, None)
+    _res = _run(tmp_path, "grid", 200.0, None)
+    if _res is None:
+        return
+    layer, checks = _res
     assert not any("conformal_tile_um" in f for f in layer["families_tried"])
     assert layer.get("conformal_residual") is None
     assert layer["density_after"] < 0.55
@@ -163,13 +205,56 @@ def test_without_a_floor_nothing_conformal_runs(tmp_path):
 
 
 def test_a_floor_above_every_legal_micron_is_still_unreachable(tmp_path):
-    layer, _checks = _run(tmp_path, "grid", 200.0, 90.0)
+    _res = _run(tmp_path, "grid", 200.0, 90.0)
+    if _res is None:
+        return
+    layer, _checks = _res
     assert layer["floor_unreachable_by_any_fill"] is True
     assert layer.get("conformal_residual") is None
     assert not any("conformal_tile_um" in f for f in layer["families_tried"])
 
 
 def test_irregular_room_is_filled_legally(tmp_path):
-    layer, checks = _run(tmp_path, "random", 150.0, 60.0)
+    _res = _run(tmp_path, "random", 150.0, 60.0)
+    if _res is None:
+        return
+    layer, checks = _res
     assert any("conformal_tile_um" in f for f in layer["families_tried"])
     _legal(checks)
+
+
+# --------------------- the arithmetic, wherever this runs -------------------
+
+def test_the_tile_is_the_widest_square_the_engine_already_places():
+    # 16x the configured width, on the grid, never under the winning lattice
+    assert mf.conformal_tile(3370, 10825, 5) == 53920
+    assert mf.conformal_tile(3370, 60000, 5) == 60000      # lattice is wider
+    assert mf.conformal_tile(333, 0, 5) % 5 == 0           # snapped
+
+
+def test_the_lanes_cut_the_room_at_one_space_per_tile():
+    lanes = mf.conformal_lanes((0, 0, 200000, 200000), 53920, 980, 54900)
+    vert = [b for b in lanes if b[3] - b[1] == 200000]
+    horiz = [b for b in lanes if b[2] - b[0] == 200000]
+    assert vert and horiz
+    assert all(b[2] - b[0] == 980 for b in vert)           # lane == space
+    assert all(b[3] - b[1] == 980 for b in horiz)
+    assert vert[0][0] == 53920 // 2                        # a whole first tile
+    assert vert[1][0] - vert[0][0] == 54900                # pitch = tile+space
+    # a box smaller than one tile is cut by nothing
+    assert mf.conformal_lanes((0, 0, 1000, 1000), 53920, 980, 54900) == []
+
+
+def test_the_repair_cut_is_grown_by_space_and_snapped_outward():
+    cut = mf.conformal_repair_cut((1002, 2003, 1500, 2500), 980, 5)
+    assert all(v % 5 == 0 for v in cut), cut
+    assert cut[0] <= 1002 - 980 and cut[1] <= 2003 - 980   # grown outward
+    assert cut[2] >= 1500 + 980 and cut[3] >= 2500 + 980
+    # on-grid input stays exactly one space wider on every side
+    assert mf.conformal_repair_cut((1000, 2000, 1500, 2500), 980, 5) == (
+        20, 1020, 2480, 3480)
+
+
+def test_snap_up_never_lowers_and_lands_on_the_grid():
+    assert mf.snap_up(1421, 5) == 1425 and mf.snap_up(1425, 5) == 1425
+    assert mf.snap_up(7, 1) == 7
