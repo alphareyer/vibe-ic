@@ -2357,9 +2357,15 @@ def test_d6_targetless_blocking_clause_census_is_live_and_non_empty():
 #: The shipped arithmetic, and the arithmetic it replaced. Both are matched
 #: against the real source; the harness FAILS if either count is not exactly
 #: one, so a rename cannot leave this test silently mutating nothing.
-_PASS_COUNT_NOW = 'pass_count = counts["PASS"]\n'
-_PASS_COUNT_REFOLDED = ('pass_count = counts["PASS"] + '
-                        'counts["VACUOUS_PASS"]\n')
+# R-0915-85 — THE NUMERATOR LINE MOVED BECAUSE THE TIER DID. `VACUOUS_PASS`
+# was a WORD, so `counts["PASS"]` excluded it by not being its name; it is
+# `PASS` carrying `Disclosure.VACUITY` now, so the same rows are inside
+# `counts["PASS"]` and the producer SUBTRACTS the disclosure instead. The
+# mutation this harness applies is unchanged in meaning -- fold the vacuous
+# rows back INTO the numerator -- and is now written as removing that
+# subtraction.
+_PASS_COUNT_NOW = 'pass_count = counts["PASS"] - _vacuity_disclosed\n'
+_PASS_COUNT_REFOLDED = 'pass_count = counts["PASS"]\n
 _PROGRAMS_DIR_SRC = "PROGRAMS_DIR = Path(__file__).parent\n"
 
 #: A real gate program that vacuously passes on a project containing nothing —

@@ -46,7 +46,12 @@ PROGRAMS = plugin_path() / "programs"
 sys.path.insert(0, str(PROGRAMS))
 
 frg = pytest.importorskip("final_report_generate")
-tiers = pytest.importorskip("_flow_verdict_tiers")
+# R-0915-85 — `_flow_verdict_tiers` is DELETED, folded into `verdict`. An
+# `importorskip` on a module that no longer exists turns a whole file SILENT:
+# these seven tests stopped running and nothing said so except the
+# zero-test census. Imported outright now, so a missing vocabulary module is
+# a collection ERROR and not a quiet skip.
+import verdict as tiers  # noqa: E402
 
 
 def test_every_producer_status_resolves_to_a_bucket():
@@ -67,12 +72,18 @@ def test_every_producer_status_resolves_to_a_bucket():
 
 def test_the_deliberate_aliases_still_win():
     """Guard the guard. Deriving identity mappings must not clobber the
-    report-side renamings, or `SKIPPED` would stop folding into
-    `SKIPPED-CONDITION` and the fix would trade one drift for another."""
+    report-side renaming, or the tally label would stop folding into its
+    bucket and the fix would trade one drift for another.
+
+    R-0915-85 — there is exactly ONE alias left, and that is the point: the
+    five words are their own buckets, and `WAIVED-DEFERRED` is the CONTRACT
+    label the audit's tally line prints beside `PASS_WITH_WAIVERS`. `SKIPPED`
+    and `SKIPPED-CONDITION` were two spellings of one tier and are one word.
+    """
     m = frg._TALLY_LABEL_TO_BUCKET
-    assert m["SKIPPED"] == "SKIPPED-CONDITION", m.get("SKIPPED")
-    assert m["SKIPPED-CONDITION"] == "SKIPPED-CONDITION"
-    assert m["WAIVED-DEFERRED"] == "WAIVED-DEFERRED"
+    assert m["WAIVED-DEFERRED"] == "PASS_WITH_WAIVERS", m.get("WAIVED-DEFERRED")
+    assert m["PASS_WITH_WAIVERS"] == "PASS_WITH_WAIVERS"
+    assert "SKIPPED" not in m and "SKIPPED-CONDITION" not in m, m
 
 
 def test_the_nine_original_mappings_are_unchanged():
@@ -81,25 +92,33 @@ def test_the_nine_original_mappings_are_unchanged():
     If a later change alters one of these, it must be done on purpose — a
     silently different bucket would move published reconciliation results.
     """
+    # R-0915-85 — NINE MAPPINGS BECAME SIX, and the reduction is the change:
+    # each of the five words is its own bucket, plus the one contract alias.
+    # Published reconciliation results DO move, which is why this pin is
+    # rewritten rather than deleted -- the new map is stated in full here so a
+    # later drift is still a test failure.
     expected = {
         "PASS": "PASS",
+        "PASS_WITH_WAIVERS": "PASS_WITH_WAIVERS",
         "FAIL": "FAIL",
-        "MISSING": "MISSING",
-        "WAIVED-DEFERRED": "WAIVED-DEFERRED",
-        "DEFERRED-BY-UPSTREAM": "DEFERRED-BY-UPSTREAM",
-        "SKIPPED": "SKIPPED-CONDITION",
-        "SKIPPED-CONDITION": "SKIPPED-CONDITION",
-        "SKIPPED-SETUP-REQUIRED": "SKIPPED-SETUP-REQUIRED",
-        "VACUOUS-PASS": "VACUOUS-PASS",
+        "NOT_MEASURED": "NOT_MEASURED",
+        "NOT_APPLICABLE": "NOT_APPLICABLE",
+        "WAIVED-DEFERRED": "PASS_WITH_WAIVERS",
     }
+    assert set(frg._TALLY_LABEL_TO_BUCKET) == set(expected), \
+        sorted(frg._TALLY_LABEL_TO_BUCKET)
     for k, v in expected.items():
         assert frg._TALLY_LABEL_TO_BUCKET.get(k) == v, (
             f"{k} used to map to {v}, now maps to "
             f"{frg._TALLY_LABEL_TO_BUCKET.get(k)}")
 
 
-@pytest.mark.parametrize(
-    "tier", ["STRUCTURE-ONLY", "INCOMPLETE", "PASS-VOIDED-BY-DEPENDENCY"])
+# R-0915-85 — the three formerly blind tiers are `NOT_MEASURED` now (and a
+# PASS carrying a disclosure). What this case measures is that a roll-up count
+# in a tier the tally never names is REPORTED rather than filtered out by the
+# `values()` guard, so it is asked of a tier that is in the vocabulary and of
+# one that is NOT -- the second being the shape a future word would arrive in.
+@pytest.mark.parametrize("tier", ["NOT_MEASURED", "NOT_APPLICABLE"])
 def test_a_disagreement_in_a_formerly_blind_tier_is_reported(tier):
     """Behaviour, not just the map: the reconciliation must actually report it.
 
@@ -115,6 +134,19 @@ def test_a_disagreement_in_a_formerly_blind_tier_is_reported(tier):
         f"a roll-up count of 2 in {tier} against a tally that never names it "
         f"was reported as agreement; got {disagreements}")
     assert disagreements[tier] == (2, 0), disagreements[tier]
+
+
+def test_an_unregistered_tier_cannot_reach_the_rollup_at_all():
+    """The `values()` guard still filters a bucket nobody registered, and that
+    is now UNREACHABLE rather than a blind spot: `verdict.parse` refuses a
+    sixth word at the row that carries it, so no producer can put one in a
+    roll-up. Asserted at the refusal rather than left to the filter.
+    """
+    with pytest.raises(tiers.UnknownVerdictWord):
+        tiers.parse("SOME-UNREGISTERED-TIER")
+    assert frg._reconcile_rollup(
+        rollup={"PASS": 5, "SOME-UNREGISTERED-TIER": 2},
+        tally={"PASS": 5}) == {}
 
 
 def test_an_actual_agreement_is_still_reported_as_agreement():
