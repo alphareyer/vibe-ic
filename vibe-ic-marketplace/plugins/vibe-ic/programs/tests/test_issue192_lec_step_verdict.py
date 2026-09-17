@@ -66,8 +66,14 @@ class LecStepVerdictTest(unittest.TestCase):
         assert status == dosr.NOT_EXECUTED_STATUS
 
     def test_skipped_condition_is_a_disclosed_skip(self):
-        self.assertEqual(_status_for({"verdict": "SKIPPED-CONDITION",
-                                      "equivalent": False}), "SKIP")
+        """R-0915-85 — the word moves, the meaning does not: nothing was
+        compared, so it is NOT_MEASURED, and it is still neither PASS nor a
+        cascading FAIL. Both halves are asserted, because the whole point of
+        the old word was that it was not either of those."""
+        doc = {"verdict": "SKIPPED-CONDITION", "equivalent": False}
+        self.assertEqual(_status_for(doc), "NOT_MEASURED")
+        self.assertNotEqual(_status_for(doc), "PASS")
+        self.assertNotEqual(_status_for(doc), "FAIL")
 
     def test_missing_verdict_is_never_a_vacuous_pass(self):
         """Absence of a clean verdict must not buy a PASS — the exact
@@ -76,7 +82,8 @@ class LecStepVerdictTest(unittest.TestCase):
                                          "compared_points": 65}), "PASS")
 
     def test_unreadable_report_is_never_a_pass(self):
-        self.assertEqual(_status_for("{ this is not json"), "SKIP")
+        """R-0915-85 — an unreadable record measured nothing."""
+        self.assertEqual(_status_for("{ this is not json"), "NOT_MEASURED")
 
 
 if __name__ == "__main__":

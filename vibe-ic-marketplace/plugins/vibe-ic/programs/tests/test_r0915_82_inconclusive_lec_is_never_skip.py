@@ -229,12 +229,35 @@ def test_FAIL_is_untouched():
 
 
 def test_SKIPPED_CONDITION_is_untouched():
-    assert _status_for({"verdict": "SKIPPED-CONDITION",
-                        "equivalent": False}) == "SKIP"
+    """R-0915-82's point survives R-0915-85's word change.
+
+    What this pinned was that R-0915-82 moved ONLY the INCONCLUSIVE arm and
+    left this one alone. It still does: `SKIPPED-CONDITION` is NOT_MEASURED —
+    nothing was compared — and it is emphatically not the FAIL that
+    R-0915-82 gave a ladder that RAN and did not close. The reason class is
+    asserted beside the word, because that is where the distinction lives now.
+    """
+    doc = {"verdict": "SKIPPED-CONDITION", "equivalent": False}
+    assert _status_for(doc) == "NOT_MEASURED"
+    assert _status_for(doc) != "FAIL"
+    assert dosr.lec_inconclusive_reason_class(doc) == "no_population"
+
+
+def test_a_sat_abort_is_inconclusive_not_an_empty_population():
+    """`lec_run` emits SKIPPED-CONDITION on a SAT abort with points already
+    proven. The tool RAN and could not decide, which is a different sentence
+    from "there was nothing to decide" — and the reason field is the only
+    place that difference can now live."""
+    doc = {"verdict": "SKIPPED-CONDITION", "equivalent": False,
+           "compared_points": 65,
+           "sat_model_unsupported_cells": [{"cell_type": "gf180mcu_fd_io__bi_t"}]}
+    assert _status_for(doc) == "NOT_MEASURED"
+    assert dosr.lec_inconclusive_reason_class(doc) == "inconclusive"
 
 
 def test_an_unreadable_report_is_untouched():
-    assert _status_for("{ not json") == "SKIP"
+    assert _status_for("{ not json") == "NOT_MEASURED"
+    assert dosr.lec_inconclusive_reason_class("{ not json") == "execution_error"
 
 
 # ---------------------------------------------------------------------------

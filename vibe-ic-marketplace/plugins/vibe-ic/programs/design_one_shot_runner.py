@@ -18859,31 +18859,44 @@ def lec_step_status_from_report(lec_json: Path) -> Tuple[str, str]:
 
         PASS                         -> ("PASS", …)   — proven equivalent
         FAIL                         -> ("FAIL", …)   — a real non-equivalence
-        SKIPPED-CONDITION            -> ("SKIP", …)   — disclosed tool/budget gap
+        SKIPPED-CONDITION            -> NOT_MEASURED — nothing was compared
         INCONCLUSIVE                 -> `lec_inconclusive_disposition` decides,
                                         on the record's OWN evidence — it is
                                         NOT one state (R-0915-82)
-        unreadable / missing verdict -> ("SKIP", …)   — never a false PASS
+        unreadable / missing verdict -> NOT_MEASURED — never a false PASS
 
     PASS is granted ONLY on an explicit PASS verdict; absence of a clean verdict
-    is a disclosed SKIP, never a vacuous PASS (mirrors the gate's fail-safe).
+    is NOT_MEASURED, never a vacuous PASS (mirrors the gate's fail-safe).
+
+    R-0915-85 — THIS FUNCTION RETURNED A DELETED WORD, AND THE RATCHET COULD
+    NOT SEE IT. Its three `SKIP` returns flow straight into
+    `StepResult("lec_equivalence", _status, …)` as a NAME, so the literal pass
+    had nothing to judge and the comparison pass had no comparison. Measured on
+    the shipped tree: `lec_run` writes `SKIPPED-CONDITION` at three sites and
+    every one of them means NOTHING WAS COMPARED — a proof stopped before
+    `equiv_status` with 0 points and no mismatch, a SAT abort on cell types the
+    model does not cover, or no resolvable `--top`. That is `NOT_MEASURED`, and
+    WHICH of the three is in the reason class the caller reads off the same
+    record. `lec_run`'s own report keeps its word: `SKIPPED-CONDITION` is the
+    GATE's vocabulary and this function is its reader, not its owner.
+
     Returns (status, verdict_string). PURE / filesystem-only."""
     try:
         doc = json.loads(lec_json.read_text(errors="replace"))
         if not isinstance(doc, dict):
-            return "SKIP", ""
+            return _V.Verdict.NOT_MEASURED.value, ""
     except (OSError, ValueError):
-        return "SKIP", ""
+        return _V.Verdict.NOT_MEASURED.value, ""
     verdict = str(doc.get("verdict", "")).strip().upper()
     if verdict == "PASS":
-        return "PASS", verdict
+        return _V.Verdict.PASS.value, verdict
     if verdict == "FAIL":
-        return "FAIL", verdict
+        return _V.Verdict.FAIL.value, verdict
     if verdict == "INCONCLUSIVE":
         return lec_inconclusive_disposition(doc)[0], verdict
     if verdict == "SKIPPED-CONDITION":
-        return "SKIP", verdict
-    return "SKIP", verdict
+        return _V.Verdict.NOT_MEASURED.value, verdict
+    return _V.Verdict.NOT_MEASURED.value, verdict
 
 
 #: Fields in which `lec_run` records that the proof was STOPPED by something it
@@ -18905,6 +18918,7 @@ def lec_inconclusive_reason_class(doc: dict) -> str:
     sha256 run16 pass 2 destroyed by booking both as `SKIP`:
 
         stopped by a resource   -> budget_exhausted   (R-0915-5's case)
+        cells SAT cannot model  -> inconclusive       (it tried and could not)
         0 points compared       -> no_population      (the miter judged nothing)
         record unreadable       -> execution_error
 
@@ -18916,6 +18930,13 @@ def lec_inconclusive_reason_class(doc: dict) -> str:
         return _V.ReasonClass.EXECUTION_ERROR.value
     if lec_exhausted_resource_note(doc):
         return _V.ReasonClass.BUDGET_EXHAUSTED.value
+    # R-0915-85 — `SKIPPED-CONDITION` reaches here too (see
+    # `lec_step_status_from_report`), and `lec_run` emits it at three sites.
+    # One of them is a SAT abort on cell types the model does not cover: the
+    # tool RAN and could not decide, which is `inconclusive`, not an empty
+    # population. Read off the producer's own field, not inferred.
+    if doc.get("sat_model_unsupported_cells"):
+        return _V.ReasonClass.INCONCLUSIVE.value
     try:
         compared = int(doc.get("compared_points") or 0)
     except (TypeError, ValueError):
@@ -20585,8 +20606,14 @@ def step_dft_lec_chain(project: Path, top_name: str, container: str,
                 # not computed in this run. sha256 run16 pass 2 returned pass
                 # 1's identical INCONCLUSIVE record in 2 s instead of 8306 s
                 # and the report said neither.
+                # R-0915-85 — EVERY NOT_MEASURED owes a reason, not only the
+                # INCONCLUSIVE one. `SKIPPED-CONDITION` and an unreadable
+                # record are NOT_MEASURED too, and keyed on the word alone they
+                # reached the step table with an empty `reason_class` — the bag
+                # the old vocabulary was. The reason is read off the same
+                # record by the same function; it needs no new table.
                 _lec_rc = (lec_inconclusive_reason_class(_lec_doc)
-                           if str(_verdict).upper() == "INCONCLUSIVE" else "")
+                           if _status == _V.Verdict.NOT_MEASURED.value else "")
                 results.append(StepResult("lec_equivalence", _status,
                                time.time() - t0,
                                f"yosys equiv: verdict={_verdict or 'UNKNOWN'} "
