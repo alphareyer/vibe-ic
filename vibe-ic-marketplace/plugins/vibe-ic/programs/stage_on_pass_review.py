@@ -1093,6 +1093,24 @@ def _supply_declared(pin: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _optional_declared(pin: Dict[str, Any]) -> Optional[str]:
+    """The intent's OWN declaration that this pin is OPTIONAL, or None.
+
+    Phase 1 writes `optional: true` on a pin whose source row the design input
+    itself marks optional (`(optional) i_gpio | optional | input | ... (if the
+    Plugin adopts a bidirectional GPIO)`), and `l9_rtl_pin_consistency_check`
+    (#491 R4) already reads the same field to make that pin's absence advisory.
+    A design that does not take the option legitimately builds no such port.
+
+    Only the boolean `True` counts. A string such as "false" is truthy, and a
+    reviewer that disarmed on it would be silencing a pin the intent did not
+    release.
+    """
+    if pin.get("optional") is True:
+        return "optional=True"
+    return None
+
+
 def read_intent_pins(l9_path: Path) -> Dict[str, Any]:
     """The intent's declared external pin list, and which field carried it."""
     try:
@@ -1195,6 +1213,17 @@ def rule_intent_pin_not_in_netlist(project: Path,
     rejection set is 3 of 11 cells, and 2 of those 3 are the same cell's two
     supply pins. With it the set is 1 of 11. The disarm reads the intent's own
     declared ROLE field and nothing else — see `_supply_declared`.
+
+    THE SECOND DISARM: a pin the intent itself declares OPTIONAL. MEASURED on
+    the subservient hardmacro run r32 (gf180mcuD, tree eecc69bec): the design
+    input's interface table lists `(optional) i_gpio` "if the Plugin adopts a
+    bidirectional GPIO", phase 1 carried that into L9 as `optional: true`, the
+    design declared a single output-only GPIO, and this rule REJECTED the run
+    for not building i_gpio — putting stage_on_pass_review into the completion
+    audit's `failed_gates` of an otherwise green run and publishing a design
+    shortfall the input never asked for. `l9_rtl_pin_consistency_check` (#491
+    R4) already treats the same field as advisory. Read off the intent's own
+    boolean and nothing else — see `_optional_declared`.
     """
     intent_rel = [str(x) for x in (decl.get("intent") or [])]
     artefact_rel = [str(x) for x in (decl.get("artefact") or [])]
@@ -1247,11 +1276,15 @@ def rule_intent_pin_not_in_netlist(project: Path,
         if name in built:
             continue
         why_supply = _supply_declared(pin)
+        why_optional = None if why_supply else _optional_declared(pin)
         row = {"name": name,
                "direction": pin.get("direction") or pin.get("mode"),
                "evidence": pin.get("evidence")}
         if why_supply:
             row["intent_declares_supply"] = why_supply
+            disarmed.append(row)
+        elif why_optional:
+            row["intent_declares_optional"] = why_optional
             disarmed.append(row)
         else:
             absent_signal.append(row)
@@ -1264,16 +1297,32 @@ def rule_intent_pin_not_in_netlist(project: Path,
     if not absent_signal:
         out = {"verdict": "ACCEPT", **common}
         if disarmed:
+            supply = [r for r in disarmed if r.get("intent_declares_supply")]
+            optional = [r for r in disarmed
+                        if r.get("intent_declares_optional")]
+            parts = []
+            if supply:
+                parts.append(
+                    f"{len(supply)} of them THE INTENT ITSELF declares a "
+                    f"supply rather than a signal ("
+                    + "; ".join(f"{r['name']} [{r['intent_declares_supply']}]"
+                                for r in supply)
+                    + "); a non-power-aware synthesised netlist carries no "
+                      "supply port, and supply connectivity is signed off in "
+                      "stage 3 by the power grid and power-aware LVS, not here")
+            if optional:
+                parts.append(
+                    f"{len(optional)} of them THE INTENT ITSELF declares "
+                    f"optional ("
+                    + "; ".join(f"{r['name']} [{r['intent_declares_optional']}]"
+                                for r in optional)
+                    + "); a design that does not take the option builds no "
+                      "such port, which is not a contradiction of the intent")
             out["verdict"] = "DISARMED"
             out["observation"] = (
                 f"{len(disarmed)} intent pin(s) are absent from the netlist's "
-                f"top {art['top']!r} and every one of them is a pin THE INTENT "
-                f"ITSELF declares a supply rather than a signal ("
-                + "; ".join(f"{r['name']} [{r['intent_declares_supply']}]"
-                            for r in disarmed)
-                + "); a non-power-aware synthesised netlist carries no supply "
-                  "port, and supply connectivity is signed off in stage 3 by "
-                  "the power grid and power-aware LVS, not here")
+                f"top {art['top']!r} and every one of them is released by the "
+                f"intent's own declaration: " + "; and ".join(parts))
         return out
 
     names = [r["name"] for r in absent_signal]
@@ -3071,7 +3120,8 @@ _EMITTED_TEST_R2 = (
         "cells — and asserting on them would make this file red for the flow doing its\n"
         "job. It also does not assert on a pin the intent itself marks a supply: a\n"
         "non-power-aware netlist carries no supply port, and that is stage 3's to sign\n"
-        "off.")
+        "off. Nor on a pin the intent itself marks optional (`optional: true`): a\n"
+        "design that does not take the option builds no such port.")
     + _emitted_prelude(r'''INTENT_REL = {intent_rel!r}
 INTENT_FIELD = {intent_field!r}
 NETLIST_REL = {netlist_rel!r}
@@ -3097,6 +3147,10 @@ _MODULE_RE = re.compile(
         if isinstance(v, str) and v.strip().lower().startswith("supply"):
             return True
     return False
+
+
+def _is_optional(pin) -> bool:
+    return pin.get("optional") is True
 
 
 def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
@@ -3136,7 +3190,8 @@ def test_every_pin_the_intent_declares_is_built_by_the_synthesised_top():
         "refutes nothing" % roots[0])
 
     absent = sorted(str(p["name"]) for p in pins
-                    if str(p["name"]) not in built and not _is_supply(p))
+                    if str(p["name"]) not in built and not _is_supply(p)
+                    and not _is_optional(p))
     assert not absent, (
         "%s::%s declares %d pin(s); the netlist %s tops out at %r carrying %d "
         "port(s), and %d declared signal pin(s) are not among them: %s. The "
@@ -4327,8 +4382,9 @@ def _print_r2(f: Dict[str, Any]) -> None:
               f"{r['evidence']}")
     if f.get("disarmed"):
         print(f"    DISARMED {len(f['disarmed'])} further absent pin(s) the "
-              f"intent itself declares a supply, not counted: "
-              + ", ".join(f"{r['name']} [{r['intent_declares_supply']}]"
+              f"intent itself declares a supply or optional, not counted: "
+              + ", ".join(f"{r['name']} ["
+                          f"{r.get('intent_declares_supply') or r.get('intent_declares_optional')}]"
                           for r in f["disarmed"]))
     if art.get("extra_ports_not_in_intent"):
         print(f"    NOT A FINDING the netlist also carries "
