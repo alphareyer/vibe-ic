@@ -251,7 +251,10 @@ def test_the_vacuous_token_reaches_the_flow(tmp_path):
     proj = _grounded_only_project(tmp_path)
     r, _ = _run(proj)
     assert r.returncode == G.RC_VACUOUS
-    assert any(ln.lstrip().startswith("NOT_MEASURED")
+    # `VACUOUS_PASS` here is the GATE PROGRAM's own line-start token, which
+    # `flow_compliance_check` scans for; the STEP tier it produces is asserted
+    # separately below. Two vocabularies, both pinned.
+    assert any(ln.lstrip().startswith("VACUOUS_PASS")
                for ln in r.stderr.splitlines()), r.stderr
     json.loads(r.stdout)          # stdout is the report and nothing else
 
@@ -333,7 +336,8 @@ def test_the_tier_is_not_bought_by_a_relabel(tmp_path):
     proj = _grounded_only_project(tmp_path)
 
     _, _, cls, tier = _flow_disposition(proj)
-    assert cls not in T.SKIP_ELIGIBLE and tier == "INCOMPLETE", (cls, tier)
+    # …and the STEP tier the same gate produces is NOT_MEASURED.
+    assert cls not in T.SKIP_ELIGIBLE and tier == "NOT_MEASURED", (cls, tier)
 
     orig = T.infer_nonverdict_reason
     try:

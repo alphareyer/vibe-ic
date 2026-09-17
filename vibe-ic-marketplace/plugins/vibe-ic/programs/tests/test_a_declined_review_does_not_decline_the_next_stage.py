@@ -86,11 +86,19 @@ def test_the_next_stage_is_reviewed_when_the_only_wound_is_the_last_review(
         {"id": "FS1", "status": "NOT_MEASURED"},
     ])
     got = S.stage_passed(reg, "stage2", None)
-    assert got["passed"] is True, got["why"]
-    # DISCLOSED, not dropped.
+    # THE SUBJECT, UNCHANGED: the inherited decline is PARTITIONED OUT and
+    # disclosed, never counted as this stage's own wound.
     assert [r["id"] for r in got["proceeded_past_inherited_decline"]] == ["7"]
-    assert got["non_green_rows"] == []
-    assert "proceeded past 7=INCOMPLETE" in got["why"]
+    assert "proceeded past 7=NOT_MEASURED" in got["why"]
+    # R-0915-85 — FS1 WAS `VACUOUS_PASS`, a word inside EXCUSED, so the stage
+    # read green over a formal-sign-off step that had examined nothing. It is
+    # NOT_MEASURED now and it is NOT green, which is the ruling's whole point;
+    # it is the only row this stage is charged with, and it is named.
+    assert [r["id"] for r in got["non_green_rows"]] == ["FS1"]
+    assert got["passed"] is False, got["why"]
+    # …and the decline is gone anyway: the next stage IS reviewed. That is the
+    # r26 repair, and it is asserted here rather than left to the caller.
+    assert "7" not in [r["id"] for r in got["non_green_rows"]]
 
 
 # ── the negative controls: what must STILL block ─────────────────────────────
@@ -128,12 +136,26 @@ def test_an_unexamined_gate_beside_the_decline_still_blocks(tmp_path):
 
 def test_a_failed_row_is_never_exempt_however_it_is_gated(tmp_path):
     """The exemption is reachable only from the NO_VERDICT_IN_SCOPE tier."""
-    for status in ("FAIL", "FAIL", "NOT_MEASURED"):
+    # R-0915-85 — the exempt tier is `NOT_MEASURED` and nothing else, so the
+    # non-green words OUTSIDE it reduce to FAIL: `MISSING` and
+    # `SKIPPED-SETUP-REQUIRED` were two more spellings of one fact each. The
+    # loop is stated over the vocabulary rather than over three spellings of
+    # two facts, and the arm below keeps the pair the file needs — a row IN the
+    # exempt tier whose gates do not carry the declined review is still
+    # blocking, so the exemption rests on the RECORDS and not on the word.
+    for status in ("FAIL",):
         reg = _register(tmp_path,
                         [_row(7, status, [DECLINED_REVIEW])],
                         name=f"c_{status}.json")
-        got = S.stage_passed(reg, "stage2", None)
+        got = _S_passed = S.stage_passed(reg, "stage2", None)
         assert got["passed"] is False, f"{status}: {got['why']}"
+
+    _other_gate = {"gate": "some_other_gate", "verdict": "NOT_CHECKED",
+                   "reason_class": R.EXECUTION_ERROR, "exit_code": 2}
+    reg = _register(tmp_path, [_row(7, "NOT_MEASURED", [_other_gate])],
+                    name="c_not_measured_other_gate.json")
+    got = S.stage_passed(reg, "stage2", None)
+    assert got["passed"] is False, got["why"]
 
 
 def test_a_row_with_no_gate_records_is_never_exempt(tmp_path):
