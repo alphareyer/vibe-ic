@@ -300,7 +300,7 @@ def test_an_exception_from_the_producer_is_disclosed(tmp_path):
     MUTATION THIS CATCHES: reverting the except branch to `notes.append(...)`.
     """
     _armed(tmp_path)
-    _coverage(tmp_path, "DT2", "NOT_MEASURED")
+    _coverage(tmp_path, "DT2", "BLOCKED")
 
     def _boom(cmd, **kw):
         # CZT2-15 — the STIMULUS changed because the mechanism did, and the
@@ -339,8 +339,8 @@ def test_a_real_measurement_leaves_no_record(tmp_path):
     MUTATION THIS CATCHES: writing the disclosure unconditionally.
     """
     _armed(tmp_path)
-    _coverage(tmp_path, "DT1", "NOT_MEASURED")
-    _coverage(tmp_path, "DT2", "NOT_MEASURED")
+    _coverage(tmp_path, "DT1", "BLOCKED")
+    _coverage(tmp_path, "DT2", "BLOCKED")
 
     def _fake(cmd, **kw):
         out = Path(cmd[cmd.index("--json") + 1])
@@ -369,7 +369,7 @@ def test_a_real_measurement_retires_a_stale_record(tmp_path):
     the run grades correctly and the gate still answers BLOCKED forever.
     """
     _armed(tmp_path)
-    _coverage(tmp_path, "DT2", "NOT_MEASURED")
+    _coverage(tmp_path, "DT2", "BLOCKED")
     stale = R.atpg_disclose_not_run(tmp_path, "DT2", "an earlier pass gave up",
                                     "precondition_unmet")
     assert stale.is_file()
@@ -450,8 +450,8 @@ def test_producer_argv_is_unchanged(tmp_path):
     silently change grading rather than fail loudly.
     """
     _armed(tmp_path)
-    _coverage(tmp_path, "DT1", "NOT_MEASURED")
-    _coverage(tmp_path, "DT2", "NOT_MEASURED")
+    _coverage(tmp_path, "DT1", "BLOCKED")
+    _coverage(tmp_path, "DT2", "BLOCKED")
     (tmp_path / "input" / "pdk").mkdir(parents=True)
     cmds: list = []
 
@@ -483,7 +483,7 @@ def test_producer_argv_is_unchanged(tmp_path):
 def test_no_pdk_dir_argument_when_there_is_no_staged_pdk(tmp_path):
     """Control for the argv test: --pdk-dir is conditional, as it was."""
     _armed(tmp_path)
-    _coverage(tmp_path, "DT2", "NOT_MEASURED")
+    _coverage(tmp_path, "DT2", "BLOCKED")
     cmds: list = []
 
     import phase3_one_shot_runner as _R
@@ -519,7 +519,10 @@ def test_missing_sdc_is_a_named_missing_input_not_a_crash(tmp_path):
 
 @pytest.mark.parametrize("verdict,regrade", [
     ("PASS", False), ("NOT_APPLICABLE", False),
-    ("NOT_MEASURED", True), ("ENGINE_LIMITED", True), ("ERROR", True),
+    # `verdict` in `*_coverage.json` is the ATPG PRODUCER's own word --
+    # BLOCKED / ENGINE_LIMITED / ERROR / PASS / NOT_APPLICABLE -- and is what
+    # `atpg_needs_regrade` reads. It is not a step status.
+    ("BLOCKED", True), ("ENGINE_LIMITED", True), ("ERROR", True),
 ])
 def test_regrade_policy_is_unchanged(tmp_path, verdict, regrade):
     """A genuine measurement is never re-run; a non-graded placeholder is."""
@@ -675,6 +678,15 @@ def _status_of(doc: dict, step: str) -> Optional[str]:
     return None
 
 
+def _reason_of(doc: dict, step: str) -> Optional[str]:
+    """R-0915-85 — the reason beside the word; two rows can share FAIL and
+    mean different things, and this file needs the difference."""
+    for s in doc["steps"]:
+        if str(s.get("id")) == step:
+            return s.get("reason_class")
+    return None
+
+
 def test_a_disclosed_not_run_is_never_cost_free_at_the_flow_level(tmp_path):
     """THE DEFECT INPUT. A tree that has a scan cut, post-layout parasitics and
     a routed netlist, and NO at-speed grade at all — every one of DT1/DT2/DT3
@@ -747,11 +759,20 @@ def test_a_disclosed_not_run_is_never_cost_free_at_the_flow_level(tmp_path):
     # same way, for the same reason.
     #
     # WHAT IS STILL REFUSED: DT2 may never come out of this tree GREEN.
-    assert _status_of(doc, "DT2") in ("MISSING", "SKIPPED-CONDITION"), (
-        "DT2 reported something other than red-or-deferred on a tree where "
-        "no at-speed grade exists at all:\n" + doc["_stdout"])
-    assert _status_of(doc, "DT3") in ("MISSING", "SKIPPED-CONDITION"), (
-        "DT3 likewise:\n" + doc["_stdout"])
+    # R-0915-85 — the two words are `FAIL` (its coverage artefact is absent)
+    # and `NOT_APPLICABLE` (its own condition was evaluated and not met). What
+    # is still refused is unchanged and is the line this assertion exists for:
+    # DT2 may never come out of this tree GREEN.
+    for _sid in ("DT2", "DT3"):
+        _st = _status_of(doc, _sid)
+        assert _st == "FAIL", (
+            f"{_sid} reported something other than red-or-deferred on a tree "
+            f"where no at-speed grade exists at all:\n" + doc["_stdout"])
+        assert _reason_of(doc, _sid) == "missing_artefact", (
+            f"{_sid} is FAIL for a reason other than its absent coverage "
+            f"artefact:\n" + doc["_stdout"])
+        assert _st not in ("PASS", "PASS_WITH_WAIVERS"), (
+            f"{_sid} came out of this tree GREEN:\n" + doc["_stdout"])
 
 
 def test_a_routed_extracted_design_with_no_dft_does_not_arm_dt2(tmp_path):
