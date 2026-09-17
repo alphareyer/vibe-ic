@@ -33771,8 +33771,18 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # downstream upstream-incomplete gate, which exists for a pnr that DIED
     # mid-tcl and must not fire for one that finished.
     _status = "PASS"
+    _status_attribution = ""
     if _route_residual_waiver is not None:
-        _status = "WAIVED"
+        # R-0915-85 — `WAIVED` is `PASS_WITH_WAIVERS`, and this is the OTHER
+        # END of vibe-ic#1412. `_pnr_chain_continues` tested `!= "WAIVED"` and
+        # this site wrote it; migrating only one of them would have left the
+        # chain broken in the same way, so both are named in the same commit.
+        # The word needs an owner: the residual marker is a row the SIGN-OFF
+        # DRC deck arbitrates, which is exactly what the waive is for.
+        _status = "PASS_WITH_WAIVERS"
+        _status_attribution = (
+            "the sign-off DRC deck, which evaluates MERGED polygons on the "
+            "streamed GDS and keeps its own verdict")
         detail += (
             " | ROUTE_RESIDUAL_MARKER_NOT_A_DRAWN_OBJECT: the router published "
             f"{_route_residual_waiver['drt_violations']} residual violation(s) "
@@ -33799,12 +33809,14 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                           extras={"resize_history": resize_history,
                                  "loosen_declines": loosen_declines,
                                   "pdn_status": _pdn_mk,
-                                  **_nl_extras, **spare_extras})
+                                  **_nl_extras, **spare_extras},
+                          attribution=_status_attribution)
     return StepResult("pnr", _status, time.time() - t0,
                       detail,
                       pnr_outputs,
                       extras={"pdn_status": _pdn_mk,
-                              **_nl_extras, **spare_extras})
+                              **_nl_extras, **spare_extras},
+                      attribution=_status_attribution)
 
 
 def _decap_route_short_guard(project: Path, top: str,

@@ -179,10 +179,13 @@ def scan_source(src: str, path: str = "<src>") -> Dict[str, Any]:
         if not vals:
             _rebound.add(tgt.id)
             continue
-        if tgt.id in _const_names:
-            _rebound.add(tgt.id)
-        else:
-            _const_names[tgt.id] = vals
+        # BOUND MORE THAN ONCE IS STILL PROVABLE, as long as EVERY binding is
+        # a constant: an `if/elif/else` ladder that sets `status` four times is
+        # the commonest shape in these runners, and it hid a fifth defect
+        # (`design_one_shot_runner.step_slot_pad_budget`, whose `else` branch
+        # assigned `"SKIP"`). Only a binding to something this pass cannot read
+        # marks the name unresolvable.
+        _const_names.setdefault(tgt.id, []).extend(vals)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):

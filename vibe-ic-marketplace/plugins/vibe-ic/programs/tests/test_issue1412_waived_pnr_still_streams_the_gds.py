@@ -114,7 +114,12 @@ def test_step_pnr_sets_the_evidence_this_predicate_reads():
     elsewhere in this same file family, is why LVS sign-off metrics are
     permanently NOT_MEASURED."""
     src = inspect.getsource(R.step_pnr)
-    assert '_status = "WAIVED"' in src
+    # R-0915-85 — BOTH ENDS OF #1412 IN ONE ASSERTION. The producer wrote
+    # `WAIVED` and `_pnr_chain_continues` tested for it; migrating one and not
+    # the other would have left the chain broken in exactly the way this file
+    # exists to stop, so the word is pinned at the producer and the predicate
+    # is driven above.
+    assert '_status = "PASS_WITH_WAIVERS"' in src
     assert '"pnr_signoff_writes_complete"' in src, (
         "step_pnr no longer records pnr_signoff_writes_complete, so "
         "_pnr_chain_continues can never admit a WAIVED PnR")

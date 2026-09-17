@@ -12123,9 +12123,16 @@ def step_slot_pad_budget(project: Path, top_name: str) -> StepResult:
         status = "FAIL"
         detail = f"the pad-budget gate REJECTED this step's command line: {detail}"
     else:
-        status = "SKIP"
+        # R-0915-85 — rc 2 is the gate saying its INPUT is not applicable: this
+        # design declares no slot template, so there is no pad budget to
+        # measure. `NOT_APPLICABLE` is that sentence, and it must NAME the
+        # declaration that makes it — the gate's own reason, which is what
+        # `detail` already holds.
+        status = "NOT_APPLICABLE"
     return StepResult("slot_pad_budget", status, time.time() - t0, detail,
-                      [out_rel], extras={"exit_code": rc})
+                      [out_rel], extras={"exit_code": rc},
+                      declared_by=(detail
+                                   if status == "NOT_APPLICABLE" else ""))
 
 
 def step_stamp_gate_reports(project: Path) -> StepResult:

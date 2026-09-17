@@ -238,7 +238,11 @@ def test_the_runner_spawns_it_and_the_exit_status_decides_the_step():
     no_slot = _project(T._RTL_FITS, with_slots=False)
     assert R.step_slot_pad_budget(hopeless, "chip_top").status == "FAIL"
     assert R.step_slot_pad_budget(fits, "chip_top").status == "PASS"
-    assert R.step_slot_pad_budget(no_slot, "chip_top").status == "SKIP"
+    # R-0915-85 — rc 2 is "this design declares no slot template", which is a
+    # claim about the INPUT: NOT_APPLICABLE, naming the declaration.
+    _row = R.step_slot_pad_budget(no_slot, "chip_top")
+    assert _row.status == "NOT_APPLICABLE", (_row.status, _row.detail)
+    assert _row.declared_by, "an N/A must name the line that makes it N/A"
 
 
 def test_the_skip_carries_the_programs_own_reason_not_a_silence():
@@ -250,7 +254,7 @@ def test_the_skip_carries_the_programs_own_reason_not_a_silence():
     # exact conflation v1.15.45 split apart.
     declared = R.step_slot_pad_budget(
         _project(T._RTL_FITS, with_slots=False), "chip_top")
-    assert declared.status == "SKIP"
+    assert declared.status == "NOT_APPLICABLE"
     assert "NOT_APPLICABLE" in declared.detail
     assert "no operator template" in declared.detail
     unrun = R.step_slot_pad_budget(
@@ -365,6 +369,14 @@ def _isolated_step2() -> dict:
     return out
 
 
+def _step_disposition(rtl, with_slots: bool,
+                      route: str = "NO_TEMPLATE.txt") -> tuple:
+    """(status, reason_class, disclosures) — the unit of a tier now that four
+    readings share two words."""
+    row = F.check_step(_project(rtl, with_slots, route), _isolated_step2(), {})
+    return (row.status, getattr(row, "reason_class", "") or "",
+            tuple(getattr(row, "disclosures", ()) or ()))
+
 def _step_status(rtl, with_slots: bool,
                  route: str = "NO_TEMPLATE.txt") -> str:
     return F.check_step(_project(rtl, with_slots, route),
@@ -392,10 +404,15 @@ def test_the_step_tiers_are_four_distinct_values():
     another. FOUR since #1978 split the last one out of the skip tier — the
     file's header says the four tiers are not three, and this is where the
     fourth is counted."""
-    seen = {_step_status(_HOPELESS, True),
-            _step_status(T._RTL_FITS, True),
-            _step_status(T._RTL_FITS, False),
-            _step_status(T._RTL_FITS, False, route=None)}
+    # R-0915-85 — THE FOUR READINGS ARE STILL FOUR, but two of them now share
+    # a WORD and are told apart by the reason beside it, which is the whole
+    # shape of this ruling. So the tuple compared is (status, reason_class):
+    # a bare `len(set(status)) == 4` would have read three and reported a
+    # collapse that has not happened.
+    seen = {_step_disposition(_HOPELESS, True),
+            _step_disposition(T._RTL_FITS, True),
+            _step_disposition(T._RTL_FITS, False),
+            _step_disposition(T._RTL_FITS, False, route=None)}
     assert len(seen) == 4, seen
 
 
@@ -681,8 +698,12 @@ def test_the_runners_four_tiers_are_four_distinct_readings():
     fits = R.step_slot_pad_budget(_project(T._RTL_FITS, True), "chip_top").status
     red = R.step_slot_pad_budget(_project(_HOPELESS, True), "chip_top").status
     skip = R.step_slot_pad_budget(_project(T._RTL_FITS, False), "chip_top").status
-    assert (fits, red, skip, usage) == ("PASS", "FAIL", "SKIP", "FAIL")
-    # the two FAILs are the same verdict but must be distinguishable by rc
+    # R-0915-85 — FOUR READINGS, and they are still four. The skip is
+    # NOT_APPLICABLE (the input declares no slot template) and the rejected
+    # command line is FAIL (this step's own bug, #712) — the collision the rc-3
+    # tier exists to end is still ended, and the assertion below still says so.
+    assert (fits, red, skip, usage) == ("PASS", "FAIL", "NOT_APPLICABLE",
+                                        "FAIL")
     assert skip != usage, "a skip and a rejected command line share a reading"
 
 
