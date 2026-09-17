@@ -10550,6 +10550,30 @@ def _refusal_examined_nothing(report: Any) -> bool:
         # No population is a different fact (nothing to census at all) and is
         # deliberately not claimed here.
         return False
+    # R-0915-85 — "WAS ANYTHING DECIDED" IS NO LONGER READABLE FROM THE FAIL
+    # COUNT. `MISSING` was a bucket of its own and correctly did not count as a
+    # decision; it is `FAIL(missing_artefact)` now, so on any tree with an
+    # absent declared output the FAIL count is non-zero and this predicate
+    # answered False for a nested run that had decided NOTHING. Measured on
+    # `test_w4_absent_condition_is_not_a_pass`'s own fixture: the nested
+    # stage_phase1 report went from DISCLOSED_INCOMPLETE to BLOCKING, and an
+    # ADVISORY clause started failing its step — which is exactly the
+    # "distinction without a difference" between the two slot names that the
+    # block below exists to prevent.
+    #
+    # The fact moved to the reason, so the reason is what is read; the count is
+    # kept as the fallback for a report that publishes no rows, and that is the
+    # pre-reform behaviour.
+    _rows = report.get("steps")
+    if isinstance(_rows, list) and _rows:
+        _decided = sum(
+            1 for r in _rows
+            if isinstance(r, dict)
+            and (str(r.get("status")) == _T.Verdict.PASS.value
+                 or (str(r.get("status")) == _T.Verdict.FAIL.value
+                     and str(r.get("reason_class") or "")
+                     != _T.ReasonClass.MISSING_ARTEFACT.value)))
+        return _decided == 0
     return numeric.get("PASS", 0) == 0 and numeric.get("FAIL", 0) == 0
 
 
