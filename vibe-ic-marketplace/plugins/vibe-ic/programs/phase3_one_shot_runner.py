@@ -47771,8 +47771,21 @@ def run_step11_dft_after_synth(project: Path, top: str,
     # sub-step that fails must stay visible as a failure -- the self-heal
     # reports what the producer said, it does not re-grade it.
     for r in rows:
+        # R-0915-85 — VERBATIM MEANS THE WHOLE ROW. This copied the status and
+        # dropped every structured field beside it, so a re-published
+        # NOT_MEASURED arrived with no reason and the constructor refused it --
+        # i.e. the self-heal could not republish the very disposition it exists
+        # to carry. The reason, the declaration, the waiver rows and the
+        # disclosures are as much the producer's verdict as the word is.
         out.append(StepResult(f"step11_{r.name}", r.status, r.duration_s,
-                              r.detail, list(r.output_files), dict(r.extras)))
+                              r.detail, list(r.output_files), dict(r.extras),
+                              reason_class=getattr(r, "reason_class", "") or "",
+                              declared_by=getattr(r, "declared_by", "") or "",
+                              waiver_rows=list(
+                                  getattr(r, "waiver_rows", None) or []),
+                              attribution=getattr(r, "attribution", "") or "",
+                              disclosures=list(
+                                  getattr(r, "disclosures", None) or [])))
     return out
 
 

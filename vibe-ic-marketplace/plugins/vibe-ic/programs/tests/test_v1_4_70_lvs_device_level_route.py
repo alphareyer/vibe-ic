@@ -62,6 +62,13 @@ def test_upstream_pnr_fail_still_skips_before_device_route(monkeypatch):
     monkeypatch.setattr(R, "_pdk_registry_entry", lambda n: _ASAP7_REG)
     monkeypatch.setattr(R, "_tool_in_path", lambda c, t: True)
     pdk = types.SimpleNamespace(name="asap7", calibre_lvs=None)
-    bad = types.SimpleNamespace(status="ROUTE_NOT_CONVERGED", detail="died")
+    # R-0915-85 — the upstream is a FAIL (the route did not converge; the word
+    # `ROUTE_NOT_CONVERGED` lives in the DETAIL, where the reader acts on it),
+    # and a step standing on a failed input certifies nothing: NOT_MEASURED,
+    # naming the upstream.
+    bad = types.SimpleNamespace(status="FAIL",
+                                detail="ROUTE_NOT_CONVERGED: died",
+                                extras={})
     res = R.step_lvs(Path("/tmp/proj"), "top", pdk, "vibeic-eda", upstream_pnr=bad)
-    assert res.status == "SKIP"
+    assert res.status == "NOT_MEASURED"
+    assert res.reason_class == "upstream_failed"
