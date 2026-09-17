@@ -78,37 +78,39 @@ def _run(tmp_path, register, stage="stage1"):
     return r, doc
 
 
-def test_a_review_that_waits_states_BLOCKED_BY_UPSTREAM(tmp_path):
+def test_the_review_no_longer_waits_and_publishes_what_it_went_past(tmp_path):
+    """R-0915-34a's WAIT is exactly what R-0915-85 deleted, and this file is
+    where the two rulings meet.
+
+    R-0915-34a was right that a review which waits must SAY it is waiting and
+    on what — the alternative was a silent NOT_CHECKED that the completion
+    audit read as "this step's whole population is unexamined". What R-0915-85
+    changes is the waiting, not the saying: the review reads the stage's
+    ARTEFACTS, which are on disk either way, and r26 measured what waiting
+    costs — steps 2, 7, 15 and 37 NOT_MEASURED behind one review that never
+    looked, and a run published FAIL in which every gate that looked passed.
+
+    So the disclosure is STRICTLY LARGER than the one 34a asked for: the record
+    names the rows the review proceeded past, rather than naming the rows it
+    refused over.
+    """
     reg = _register(tmp_path, [("1", "PASS"), ("2", "NOT_MEASURED")])
     r, doc = _run(tmp_path, reg)
-    assert r.returncode == 2, r.stdout + r.stderr
     assert doc is not None, "the review wrote no report"
-    assert doc["reason_class"] == R.BLOCKED_BY_UPSTREAM, doc
-    assert doc["blocked_by"] == [{"id": "2", "status": "NOT_MEASURED"}], doc
-    assert R.report_reason_class(doc) == R.BLOCKED_BY_UPSTREAM
+    assert doc.get("reviewed_over_non_green_rows") == [
+        {"id": "2", "status": "NOT_MEASURED"}], doc
+    assert "REVIEWING ANYWAY" in r.stdout, r.stdout
+    # and it did not simply refuse: the record it wrote is the REVIEW's own,
+    # carrying the rules it applied rather than a single decline word.
+    assert doc.get("rules") or doc.get("unproven_rejections") is not None, doc
 
 
-def test_the_reader_takes_that_class_over_its_own_default(tmp_path):
-    """The whole point: without a stated class the sentence falls through to
-    the fail-closed EXECUTION_ERROR."""
-    reg = _register(tmp_path, [("1", "PASS"), ("2", "NOT_MEASURED")])
-    _r, doc = _run(tmp_path, reg)
-    assert R.infer_nonverdict_reason(
-        verdict="NOT_MEASURED", message=doc["why"],
-        evidence={"reason_class": R.report_reason_class(doc)}
-    ) == R.BLOCKED_BY_UPSTREAM
-    # and the same sentence with NO stated class keeps the old reading
-    assert R.infer_nonverdict_reason(
-        verdict="NOT_MEASURED", message=doc["why"],
-        evidence={"exit_code": 2}) != R.BLOCKED_BY_UPSTREAM
-
-
-def test_the_waiting_rows_reach_the_human_line(tmp_path):
+def test_the_rows_it_went_past_reach_the_human_line(tmp_path):
     reg = _register(tmp_path, [("1", "PASS"), ("2", "NOT_MEASURED"),
                                ("P0", "FAIL")])
     r, _doc = _run(tmp_path, reg)
-    assert "BLOCKED_BY_UPSTREAM, waiting on:" in r.stdout, r.stdout
-    assert "2=INCOMPLETE" in r.stdout and "P0=MISSING" in r.stdout, r.stdout
+    assert "Non-green rows disclosed:" in r.stdout, r.stdout
+    assert "2=NOT_MEASURED" in r.stdout and "P0=FAIL" in r.stdout, r.stdout
 
 
 # ── direction 2: a review that truly cannot run is still a fault ──────────
