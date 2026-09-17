@@ -110,6 +110,7 @@ import json
 import os
 import re
 import sys
+import hashlib
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -308,6 +309,15 @@ def census(runner, engine: Path, gds, out_json: Path,
         return (json.loads(out_json.read_text()) or {}).get("shape_census")
     except (OSError, ValueError):
         return None
+
+
+def _sha256_file(path: Path) -> str:
+    """The file's sha256 — the identity a removed probe leaves behind."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _layers_with_geometry(cen: Dict[str, int]) -> Dict[int, int]:
@@ -588,6 +598,29 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
                 per_pass[sib] = sorted(touched - without)
                 if sorted(set(contested) & set(per_pass[sib])) == clash:
                     keep_probe = (sib, probe_out.read_bytes())
+            # THE PROBE LAYOUT IS A PROBE, NOT AN ARTEFACT (dispatcher
+            # 2026-09-18). It is written to answer ONE question -- which
+            # sibling pass writes the contested layers -- and nothing in the
+            # flow reads it afterwards; its bytes are already in memory when
+            # they are needed (`keep_probe`). On the die route it is a FULL
+            # copy of the sign-off stream: MEASURED on spm x gf180mcuD,
+            # 1,136,500,018 bytes, one of three identical copies the pnr
+            # directory was carrying (3.4 GB). Its identity is kept as a
+            # hash, which is what a reader can check; the byte copy is not.
+            if probe_out.is_file():
+                probe_log["probe_layout"] = {
+                    "path": str(probe_out.name),
+                    "bytes": probe_out.stat().st_size,
+                    "sha256": _sha256_file(probe_out),
+                    "removed": True,
+                    "reason": ("a probe with no consumer; its bytes are held "
+                               "in memory for the promotion that needs them"),
+                }
+                try:
+                    probe_out.unlink()
+                except OSError as exc:        # pragma: no cover - defensive
+                    probe_log["probe_layout"]["removed"] = False
+                    probe_log["probe_layout"]["reason"] = f"unlink failed: {exc}"
             probe_log["layers_per_pass"] = per_pass
             skip_passes = [sib for sib, layers in per_pass.items()
                            if set(layers) & set(contested)]

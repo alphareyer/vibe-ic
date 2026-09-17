@@ -616,3 +616,34 @@ def test_an_unreachable_engine_is_staged_into_a_directory_that_is_reachable(tmp_
     assert why is None
     assert got == into / _MEASURE.name
     assert got.read_bytes() == _MEASURE.read_bytes()
+
+
+def test_the_probe_layout_is_removed_and_leaves_its_hash(tmp_path, monkeypatch):
+    """A PROBE IS NOT AN ARTEFACT (dispatcher 2026-09-18).
+
+    `<top>.probe.gds` answers one question — which sibling pass writes the
+    contested layers — and nothing reads it afterwards; the bytes it needs for
+    the promotion are already in memory. On the die route it is a FULL copy of
+    the sign-off stream: MEASURED on spm x gf180mcuD, 1,136,500,018 bytes, one
+    of three identical copies the pnr directory carried (3.4 GB). It is removed
+    and its sha256, size and reason are recorded in the probe log.
+    """
+    gds = _project(tmp_path)
+    before = _measurement(DIE, DIE, {34: 1000.0})
+    after = _measurement(DIE, DIE, {22: 1200.0, 30: 1400.0, 34: 1000.0})
+    cen_in = {"%d/4" % layer: 1 for layer in (34, 36, 42, 46, 81)}
+    runner = _FakeRunner([before, after], censuses=[cen_in],
+                         pass_layers=_PASS_LAYERS, siblings=_SIBLINGS)
+    monkeypatch.setattr(DDF._kl, "find_runner", lambda *a, **k: runner)
+    probe = tmp_path / "phase3/stage3/pnr/spm.probe.gds"
+    res = DDF.run(tmp_path, str(gds), "/pdk/fill_all.rb", None, "somepdk",
+                  1936, 2531, "spm", 8, False, None, True, None, 60,
+                  owned_layers=[34, 36, 42, 46, 81])
+    rec = res["fill"]["probe"]["probe_layout"]
+    assert rec["removed"] is True, rec
+    assert rec["path"] == "spm.probe.gds"
+    assert rec["bytes"] > 0 and len(rec["sha256"]) == 64
+    assert not probe.exists(), "the probe copy is still on disk"
+    # the decision the probe existed to make is unchanged
+    assert res["fill"]["skipped_passes"] == ["fill_metal.rb"]
+    assert json.loads(gds.read_text()) == ["fill_metal.rb"]
