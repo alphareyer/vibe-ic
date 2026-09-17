@@ -35,6 +35,43 @@ code path anywhere in this module that invents a value. A consumer handed
 `NOT_DETERMINED` must report NOT_DETERMINED — which is a non-pass — and that is
 the intended and only behaviour.
 
+AN AGENT'S ANSWER IS NOT A DECLARATION (R-0915-95, 2026-09-17)
+==============================================================
+Some of these questions are not about the design at all. `deliverable` — "is
+what leaves this flow a DIE that will be fabricated, or a HARDMACRO that
+somebody else will place" — is a decision by the party that takes delivery.
+Nothing in a design's own documents answers it, and their SILENCE answers it
+least of all.
+
+MEASURED, and it is the whole reason a provenance exists here. On 2026-09-06
+an agent authored `input/step_0_5ic_answers.json` for five designs and wrote
+`deliverable` into each of them "cited from the input docs", inferring
+HARDMACRO from the documents' silence about a pad ring. The files were
+well-formed. Every other field in them was honest. And this module had no way
+to tell an answer somebody was ENTITLED to give from an answer somebody had
+WORKED OUT, because it recorded what was answered and never who answered it —
+so an inference and a declaration were the same bytes.
+
+`tapeout_declaration_check` reported PASS. `route_of` selected the IP
+terminal. Every lane ran the IP route for ELEVEN DAYS, and an IP result was
+published as an IC PASS. The owner ruled on 2026-09-17 (R-0915-95) that all
+five are dies. No check in this tree could have caught it: there was nothing
+wrong with the file.
+
+So an owner-only question carries its own provenance, and an answer without
+the owner's attestation is NOT A DECLARATION. `answer()` reports it
+`NOT_DETERMINED` — refused, not believed, so nothing downstream can route on
+it — and `owner_attestation_refusals()` names it `NOT_DECLARED` so the step
+that asks the question HALTS with the question surfaced instead of proceeding
+on an inference.
+
+THE ATTESTATION IS A CLAIM, NOT A PROOF, and it is not trying to be one: a
+citation can be typed by anyone with the file open. What it cannot be is
+SILENT. Before this, an inference reached the route with nothing written down
+at all, and eleven days is what that cost. An attribution somebody has to
+write, name and cite is a thing a reviewer can check and an author has to
+stand behind; the silence was not.
+
 WHERE THE 18 COME FROM — DERIVED, NOT INVENTED
 ==============================================
 Each question exists because a REAL CONSUMER in this tree reads it. The
@@ -173,6 +210,45 @@ SECTION_SEAL_RING = "2C_seal_ring"
 ANSWERED_BY_DESIGN = "the design"
 ANSWERED_BY_TECHNOLOGY = "the technology"
 
+# --------------------------------------------------------------------------- #
+# THE THIRD ENTITLEMENT (R-0915-95)
+#
+# `ANSWERED_BY_OWNER` is the one a design cannot buy with evidence. The other
+# two can be satisfied by reading something: the design reads its own
+# artefacts, the technology reads its own files. An owner-only question has no
+# such source — it asks what the party taking delivery has DECIDED — so it is
+# answered by the owner or it is not answered, and an agent that works it out
+# from the documents has produced a reading, not a decision. See the module
+# header for the eleven days that reading cost.
+ANSWERED_BY_OWNER = "the owner"
+
+#: Where the per-answer provenance lands: a TOP-LEVEL map, question key ->
+#: record, carried into the declaration by `merge_answers` like every other
+#: `EXTRA_KEYS` field. NOT inside `answers`: `answers` is WHAT was answered and
+#: this is WHO answered it, and keeping them apart is what lets every existing
+#: consumer of `answers.<key>` go on reading exactly one thing. The same map is
+#: read out of the design's own staged answers file and out of the generated
+#: declaration, by the same function, so there is no second reader to disagree.
+PROVENANCE_KEY = "answer_provenance"
+
+#: The two vocabularies of `answered_by`, and only the first one declares.
+#: `agent` is spelled out rather than left as "anything that is not owner",
+#: because an author who did the work has to be able to SAY so: an agent answer
+#: that names itself is the honest state this guard exists to surface, and it
+#: must not be more expensive to write than silence.
+ANSWERED_BY_OWNER_VALUE = "owner"
+ANSWERED_BY_AGENT_VALUE = "agent"
+
+#: What `attestation_of` reports for a question nobody attributed. It is this
+#: module's word for SILENCE and is not a value anybody may write into a file.
+#: It is the exact state the five 2026-09-06 files were in.
+ANSWERED_BY_MISSING = "missing"
+
+#: The refusal an answered owner-only question earns when the owner did not
+#: give it. Named beside the vocabulary it belongs to so the producer and the
+#: gate cannot spell it two ways.
+RULE_NOT_DECLARED = "NOT_DECLARED"
+
 #: The refusal a design's claim about the technology earns. Named here, beside
 #: the vocabulary it belongs to, so the producer and the validator cannot spell
 #: it two ways.
@@ -220,10 +296,19 @@ _2A: Tuple[Question, ...] = (
         "Is what leaves this flow a DIE that will be fabricated, or a "
         "HARDMACRO that somebody else will place?",
         "enum", "general_precheck", DELIVERABLES, choices=DELIVERABLES,
+        answered_by=ANSWERED_BY_OWNER,
         note="Asked first because it decides whether the other six are "
              "required at all, and because it decides the origin rule: a die "
              "must start at (0,0); a hardmacro's LEF ORIGIN may declare an "
-             "offset instead."),
+             "offset instead. "
+             "THE OWNER'S, NOT THE DESIGN'S (R-0915-95): it asks what the "
+             "party taking delivery has decided, and no line of any design "
+             "document states it. An agent that reads HARDMACRO out of a "
+             "document's silence about a pad ring has produced a reading, not "
+             "a declaration; that is exactly what happened on 2026-09-06 and "
+             "it routed five designs onto the IP terminal for eleven days. "
+             "So this answer is not believed without an owner attestation "
+             f"under `{PROVENANCE_KEY}` — see the module header."),
     Question(
         "top_cell", SECTION_DIE_SIZE,
         "Which cell name must be the top cell of the streamed layout?",
@@ -429,6 +514,10 @@ EXTRA_KEYS: Tuple[str, ...] = (
     FORBIDDEN_LAYERS_KEY,
     SYNTHESIS_AREA_BUDGET_KEY,
     TECHNOLOGY_KEY,
+    # Carried, not required. `blank_declaration` does not pre-create it for
+    # the same reason it does not pre-create `TECHNOLOGY_KEY`: an empty
+    # provenance map would be a document asserting that somebody was asked.
+    PROVENANCE_KEY,
 )
 
 #: Every question whose answer is transcribed from the technology rather than
@@ -436,6 +525,22 @@ EXTRA_KEYS: Tuple[str, ...] = (
 #: of key names is a second place to forget one.
 TECHNOLOGY_ANSWERED: Tuple[str, ...] = tuple(
     q.key for q in QUESTIONS if q.answered_by == ANSWERED_BY_TECHNOLOGY)
+
+#: Every question the OWNER alone may answer. Derived from the questions
+#: themselves for the same reason as the line above: a second list of key names
+#: is a second place to forget one, and a question that joins this set must do
+#: so by declaring its own entitlement rather than by being remembered here.
+#:
+#: MEASURED 2026-09-17, and stated because the population is the finding: this
+#: set has exactly ONE member today. `seal_ring_required` ("does the party that
+#: takes this layout require a seal ring?") and `forbidden_layers` ("forbidden
+#: by whom?") ask the same SHAPE of question and are NOT in it, because the
+#: owner has ruled on `deliverable` and not on them. Adding them here would
+#: halt every design in the corpus on a question nobody has been asked, which
+#: is the same error in the other direction. They are reported as candidates;
+#: they join this set when there is a ruling to cite, never before.
+OWNER_ANSWERED: Tuple[str, ...] = tuple(
+    q.key for q in QUESTIONS if q.answered_by == ANSWERED_BY_OWNER)
 
 
 def question(key: str) -> Optional[Question]:
@@ -622,7 +727,14 @@ def route_of(doc: Dict[str, Any], has_slots: bool) -> str:
     """
     if has_slots:
         return ROUTE_SHUTTLE
-    deliverable = (doc.get("answers") or {}).get("deliverable")
+    # THROUGH `answer()`, NOT INTO THE DICT. This line used to read
+    # `doc["answers"]["deliverable"]` itself, which made it a SECOND reader of
+    # the one field `answer()` exists to arbitrate — and the two could
+    # disagree, because only one of them knows that an owner-only answer with
+    # no owner behind it is not an answer. On 2026-09-06 that is precisely
+    # what this function did: it selected the IP terminal from a value
+    # `answer()` would have refused.
+    deliverable = answer(doc, "deliverable")
     if deliverable == DELIVERABLE_DIE:
         return ROUTE_SELF_TAPEOUT
     if deliverable == DELIVERABLE_HARDMACRO:
@@ -698,7 +810,13 @@ def audit(doc: Dict[str, Any]) -> Dict[str, Any]:
     NOT_DETERMINED.
     """
     ans = doc.get("answers") or {}
-    deliverable = ans.get("deliverable")
+    # Through `answer()` for the same reason as `route_of`. An owner-only
+    # answer nobody attested is NOT_DETERMINED here too, which makes every
+    # question applicable — the safe direction this function already documents
+    # for an undeclared deliverable, and the correct one: a delivery whose
+    # route was never declared owes every question, not the subset an
+    # unattested word would have excused it from.
+    deliverable = answer(doc, "deliverable")
     sections: Dict[str, Dict[str, Any]] = {}
     for sec in (SECTION_DIE_SIZE, SECTION_PAD_RING, SECTION_SEAL_RING):
         qs = [q for q in QUESTIONS if q.section == sec]
@@ -732,8 +850,12 @@ def audit(doc: Dict[str, Any]) -> Dict[str, Any]:
         FORBIDDEN_LAYERS_KEY + "_answered": is_answered(
             doc.get(FORBIDDEN_LAYERS_KEY)),
         "synthesis_area_budget": area_budget_resolution(doc),
-        "deliverable": deliverable if is_answered(deliverable)
-        else NOT_DETERMINED,
+        "deliverable": deliverable,
+        #: WHO answered it, reported beside it. A reader holding an audit that
+        #: says NOT_DETERMINED for a file whose `answers` plainly carries a
+        #: word needs to be told why, in the same record, or the audit reads
+        #: as a bug in the audit.
+        "deliverable_attestation": attestation_of(doc, "deliverable"),
     }
 
 
@@ -915,10 +1037,170 @@ def load(path: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         return None, f"{path} is not JSON: {exc}"
 
 
+def raw_answer(doc: Dict[str, Any], key: str) -> Any:
+    """The bytes on disk for `key`, FOR DISCLOSURE ONLY. Never for a decision.
+
+    `answer()` is the one thing entitled to say what a declaration ANSWERS,
+    and it withholds an owner-only value nobody attested. A refusal still has
+    to be able to QUOTE the value it is refusing -- a message that says "that
+    is not an answer" without naming what was on disk sends the reader back to
+    the file to guess -- and quoting it is the only thing this is for.
+
+    It exists so that nothing has to reach into `doc["answers"]` to do it. A
+    hand-rolled `.get("deliverable")` is how the second and third readers of
+    this field got written, and both of them started life as disclosure.
+    """
+    if key in EXTRA_KEYS:
+        return doc.get(key)
+    return (doc.get("answers") or {}).get(key)
+
+
+def attestation_of(doc: Dict[str, Any], key: str) -> Dict[str, Any]:
+    """WHO answered `key`, and whether that makes the answer a DECLARATION.
+
+    ONE READER FOR BOTH SHAPES. The design's own staged answers file and the
+    generated declaration carry the same top-level `PROVENANCE_KEY` map, so
+    this one function answers for both. That is deliberate: `deliverable` was
+    already being read out of four different places by four hand-rolled
+    snippets, and a provenance that each of them re-implemented would be a
+    provenance they could disagree about.
+
+    Returns one record — never a bare word — because "who answered" and "does
+    that count" are two facts and a caller needs both:
+
+        answered_by  `ANSWERED_BY_OWNER_VALUE`, `ANSWERED_BY_AGENT_VALUE`, any
+                     other string a file actually carries, or
+                     `ANSWERED_BY_MISSING` for silence.
+        citation     what was cited, or None.
+        declares     True only for the owner WITH a citation.
+        why_not      why `declares` is False, in words, or None.
+
+    THE CITATION IS REQUIRED OF THE OWNER SPECIFICALLY. `answered_by: owner`
+    with nothing to check is the same unattributable assertion this map exists
+    to refuse, and it must never be cheaper to write than the truth is. An
+    agent answer needs no citation: it is not being believed either way, and
+    demanding paperwork for the honest disclosure would buy nothing and would
+    make `agent` more expensive than silence.
+
+    Never raises. A map that is not a mapping, a record that is not a mapping,
+    and an `answered_by` that is not a non-empty string are all SILENCE, and
+    are reported as such rather than being read past.
+    """
+    prov = doc.get(PROVENANCE_KEY) if isinstance(doc, dict) else None
+    rec = prov.get(key) if isinstance(prov, dict) else None
+    if not isinstance(rec, dict):
+        return {"answered_by": ANSWERED_BY_MISSING, "citation": None,
+                "declares": False,
+                "why_not": (f"no `{PROVENANCE_KEY}.{key}` record says who "
+                            f"answered it")}
+    raw = rec.get("answered_by")
+    who = raw.strip() if isinstance(raw, str) and raw.strip() else None
+    cited = rec.get("citation")
+    citation = cited.strip() if isinstance(cited, str) and cited.strip() else None
+    if who is None:
+        return {"answered_by": ANSWERED_BY_MISSING, "citation": citation,
+                "declares": False,
+                "why_not": (f"`{PROVENANCE_KEY}.{key}` carries no "
+                            f"`answered_by`")}
+    if who != ANSWERED_BY_OWNER_VALUE:
+        return {"answered_by": who, "citation": citation, "declares": False,
+                "why_not": (f"`{PROVENANCE_KEY}.{key}.answered_by` is {who!r}, "
+                            f"and only {ANSWERED_BY_OWNER_VALUE!r} declares")}
+    if citation is None:
+        return {"answered_by": who, "citation": None, "declares": False,
+                "why_not": (f"`{PROVENANCE_KEY}.{key}` claims the owner and "
+                            f"cites nothing; an attestation nobody can check "
+                            f"is the silence this record exists to replace")}
+    return {"answered_by": who, "citation": citation, "declares": True,
+            "why_not": None}
+
+
+def not_declared_message(doc: Dict[str, Any], key: str) -> str:
+    """The `NOT_DECLARED` sentence, built in ONE place.
+
+    Opens with the exact words the owner's ruling specifies, so a reader
+    scanning a log for the refusal finds the same string wherever it is
+    printed, and then names its own remedy: the file, the key and who has to
+    write it. A refusal that does not say what would fix it sends the reader
+    back to the very inference that caused this.
+    """
+    att = attestation_of(doc, key)
+    return (
+        f"NOT_DECLARED: {key} — answered_by={att['answered_by']}; "
+        f"the owner must answer. "
+        f"{(att['why_not'] or '').rstrip('.')}. "
+        f"An answer worked out from the design's documents is a reading, not "
+        f"a declaration, and their SILENCE is not evidence either way: on "
+        f"2026-09-06 exactly that reading routed five designs onto the wrong "
+        f"delivery terminal for eleven days (R-0915-95). The value on disk is "
+        f"refused, not believed — every consumer is handed {NOT_DETERMINED} — "
+        f"and this step stops here until the owner answers. "
+        f"WHERE THE ANSWER GOES: the design's own step-0.5ic answers file, "
+        f"key `{PROVENANCE_KEY}.{key}`, as "
+        f"{{\"answered_by\": \"{ANSWERED_BY_OWNER_VALUE}\", "
+        f"\"citation\": \"<the owner's ruling or message>\"}}. "
+        f"An author who worked the value out instead must write "
+        f"{ANSWERED_BY_AGENT_VALUE!r} there and leave this refusal standing.")
+
+
+def owner_attestation_refusals(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """`NOT_DECLARED` for every owner-only question ANSWERED without the owner.
+
+    ONLY FOR AN ANSWERED QUESTION, and the line is drawn there on purpose. An
+    owner-only question nobody has answered is already `NOT_DETERMINED` at
+    every consumer and is reported by whichever check needed it — the same
+    rule the other nineteen follow, and the reason a blank declaration is
+    still a legal one. What is refused here is the one shape that has no other
+    reader: a value that LOOKS like a declaration, routes like one, and was
+    not declared by anybody entitled to declare it.
+
+    Note that `answer()` has already withheld that value, so this is not what
+    stops the flow acting on it — it is what stops the flow acting SILENTLY.
+    Both are needed: the first makes the wrong route unreachable, the second
+    makes the unanswered question visible instead of leaving a reader to
+    wonder why a declared design suddenly declares nothing.
+    """
+    out: List[Dict[str, Any]] = []
+    if not isinstance(doc, dict):
+        return out
+    answers = doc.get("answers")
+    if not isinstance(answers, dict):
+        return out
+    for key in OWNER_ANSWERED:
+        if not is_answered(answers.get(key)):
+            continue
+        att = attestation_of(doc, key)
+        if att["declares"]:
+            continue
+        out.append(_refusal(
+            RULE_NOT_DECLARED, not_declared_message(doc, key),
+            key=key, answered=answers.get(key),
+            answered_by=att["answered_by"], citation=att["citation"]))
+    return out
+
+
 def answer(doc: Dict[str, Any], key: str) -> Any:
-    """The answer to `key`, or `NOT_DETERMINED`. Never invents one."""
+    """The answer to `key`, or `NOT_DETERMINED`. Never invents one.
+
+    THE ONE READER. Everything in this tree that wants to know what a
+    declaration says goes through here — including `route_of` and `audit`
+    below, which used to reach into `doc["answers"]` themselves and so could
+    (and did) answer a question this function would have refused.
+
+    AN OWNER-ONLY ANSWER WITHOUT THE OWNER IS NOT AN ANSWER. It is reported
+    `NOT_DETERMINED`, which is this module's word for "nobody has said", and
+    that is what an agent's inference amounts to. The value is not discarded
+    quietly: `owner_attestation_refusals` names it, the gate FAILs on it and
+    the producer exits non-zero. Withholding it HERE is what makes the wrong
+    route unreachable rather than merely reported — the 2026-09-06 files were
+    reported on by a gate that passed them.
+    """
     if key in EXTRA_KEYS:
         v = doc.get(key)
     else:
         v = (doc.get("answers") or {}).get(key)
-    return v if is_answered(v) else NOT_DETERMINED
+    if not is_answered(v):
+        return NOT_DETERMINED
+    if key in OWNER_ANSWERED and not attestation_of(doc, key)["declares"]:
+        return NOT_DETERMINED
+    return v

@@ -83,6 +83,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 import _submission_template as _st                            # noqa: E402
+import _tapeout_declaration as _decl                          # noqa: E402
 import _docker_memory as _dmem                                # noqa: E402
 import tapeout_readiness_check as _theirs                     # noqa: E402
 from _atomic_artefact import write_text as atomic_write_text  # noqa: E402
@@ -714,6 +715,14 @@ def design_route(project: Path) -> Dict[str, Any]:
 
     Nothing is inferred. A design that has staged no answers, or answered no
     `deliverable`, gets `None` and this program says nothing about its route.
+
+    NOR IS ANYTHING BELIEVED THAT NOBODY DECLARED (R-0915-95). `deliverable`
+    is an OWNER-ONLY question, and the attestation that makes an answer to it
+    a declaration lives in the SAME staged file, so this reads it here rather
+    than reporting a route the rest of the flow will refuse. The entitlement
+    and the attestation are both `_tapeout_declaration`'s to decide -- this
+    program asks it, and does not re-implement the test, because a second
+    opinion about who answered is exactly the shape that cost eleven days.
     """
     rec: Dict[str, Any] = {"deliverable": None, "slot": None,
                            "source": _st.DESIGN_ANSWERS_REL}
@@ -730,7 +739,21 @@ def design_route(project: Path) -> Dict[str, Any]:
     answers = doc.get("answers") if isinstance(doc.get("answers"), dict) else {}
     d = answers.get("deliverable")
     if isinstance(d, str) and d.strip() and d.strip() != "NOT_DETERMINED":
-        rec["deliverable"] = d.strip()
+        att = _decl.attestation_of(doc, "deliverable")
+        if att["declares"]:
+            rec["deliverable"] = d.strip()
+            rec["deliverable_answered_by"] = att["answered_by"]
+            rec["deliverable_citation"] = att["citation"]
+        else:
+            # NOT dropped in silence. The word is on disk and a reader who
+            # opens the file will see it, so the record has to say why this
+            # program did not act on it -- an omission with no reason beside
+            # it reads as "the design said nothing", which is the very
+            # confusion this field now exists to prevent.
+            rec["deliverable_withheld"] = d.strip()
+            rec["deliverable_answered_by"] = att["answered_by"]
+            rec["deliverable_why_not"] = _decl.not_declared_message(
+                doc, "deliverable")
     operator = doc.get("operator_template")
     if isinstance(operator, dict):
         s = operator.get("slot")
