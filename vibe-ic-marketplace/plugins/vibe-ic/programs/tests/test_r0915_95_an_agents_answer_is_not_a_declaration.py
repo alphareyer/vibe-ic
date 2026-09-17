@@ -54,8 +54,32 @@ import tapeout_declaration_gen as GEN                          # noqa: E402
 #: The owner's own words, cited the way a real answers file cites them.
 CITATION = 'R-0915-95 (2026-09-17, owner ruling: the IC path)'
 
+#: THE VOCABULARY AS LITERALS, and this is not laziness — it is what makes this
+#: file a falsifier. Written as `TD.ANSWERED_BY_OWNER_VALUE` at module scope
+#: (in a default argument and in the `parametrize` lists below) the whole file
+#: raises AttributeError AT COLLECTION on a tree without the fix, and pytest
+#: reports `1 error` instead of fifteen failures. A scraper looking for
+#: "failed" then reads ZERO, which is the shape this repository has been bitten
+#: by before: an unimportable test file is indistinguishable from a passing one.
+#: So the literals are here, the file COLLECTS on a tree with no fix at all,
+#: every case fails for its own attributable reason — and
+#: `test_the_vocabulary_is_the_modules_own` below pins each literal to the
+#: constant it stands for, so they cannot drift apart in silence.
+OWNER = "owner"
+AGENT = "agent"
+MISSING = "missing"
 
-def _attested(by=TD.ANSWERED_BY_OWNER_VALUE, citation=CITATION):
+
+def test_the_vocabulary_is_the_modules_own():
+    """The literals above ARE the module's constants. Asserted, not assumed."""
+    assert TD.ANSWERED_BY_OWNER_VALUE == OWNER
+    assert TD.ANSWERED_BY_AGENT_VALUE == AGENT
+    assert TD.ANSWERED_BY_MISSING == MISSING
+    assert TD.PROVENANCE_KEY == "answer_provenance"
+    assert TD.RULE_NOT_DECLARED == "NOT_DECLARED"
+
+
+def _attested(by=OWNER, citation=CITATION):
     """One `answer_provenance` map for `deliverable`."""
     rec = {}
     if by is not None:
@@ -122,14 +146,12 @@ def test_the_owners_answer_reaches_the_producer_and_the_gate(tmp_path):
 # 2. NEGATIVE — the same bytes, nobody entitled behind them
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("provenance,expected_word", [
-    (None, TD.ANSWERED_BY_MISSING),
-    ({}, TD.ANSWERED_BY_MISSING),
-    (_attested(by=TD.ANSWERED_BY_AGENT_VALUE, citation="cited from the input "
-                                                       "docs"),
-     TD.ANSWERED_BY_AGENT_VALUE),
-    (_attested(by=None), TD.ANSWERED_BY_MISSING),
-    (_attested(citation=None), TD.ANSWERED_BY_OWNER_VALUE),
-    ({"deliverable": "owner"}, TD.ANSWERED_BY_MISSING),
+    (None, MISSING),
+    ({}, MISSING),
+    (_attested(by=AGENT, citation="cited from the input docs"), AGENT),
+    (_attested(by=None), MISSING),
+    (_attested(citation=None), OWNER),
+    ({"deliverable": "owner"}, MISSING),
 ])
 def test_an_answer_the_owner_did_not_give_is_not_declared(provenance,
                                                           expected_word):
@@ -157,8 +179,7 @@ def test_the_refusal_names_where_the_answer_goes():
     msg = TD.not_declared_message(
         _declaration(TD.DELIVERABLE_HARDMACRO), "deliverable")
     assert TD.PROVENANCE_KEY in msg
-    assert TD.ANSWERED_BY_OWNER_VALUE in msg
-    assert TD.ANSWERED_BY_AGENT_VALUE in msg
+    assert OWNER in msg and AGENT in msg
 
 
 def test_the_producer_halts_step_0_5_and_writes_no_router_file(tmp_path):
@@ -280,7 +301,7 @@ def test_the_audit_says_who_answered_beside_what_was_answered():
     `answers` plainly carries a word has to be told why in the same record."""
     att = TD.audit(_declaration(TD.DELIVERABLE_DIE))["deliverable_attestation"]
     assert att["declares"] is False
-    assert att["answered_by"] == TD.ANSWERED_BY_MISSING
+    assert att["answered_by"] == MISSING
     assert att["why_not"]
 
 
