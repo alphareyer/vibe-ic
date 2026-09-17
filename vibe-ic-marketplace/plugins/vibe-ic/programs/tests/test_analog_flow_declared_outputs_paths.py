@@ -294,8 +294,11 @@ def test_a9_aggregate_cosim_report_reaches_the_gate(tmp_path: Path):
     _block_list(tmp_path)
     _passing_aggregate(tmp_path)
     res = fcc.check_step(tmp_path, _steps_by_id()["A9"], {})
-    print("A9PROBE", res.status, [str(r)[:90] for r in res.reasons][:4])
-    assert res.status != "FAIL", res.reasons
+    # R-0915-85 — the discriminator is that the aggregate REACHES the gate,
+    # i.e. the step no longer short-circuits on an absent declared artefact.
+    # `MISSING` was exactly that sentence; `!= "FAIL"` is a different one.
+    assert not (res.status == "FAIL"
+                and res.reason_class == "missing_artefact"), res.reasons
 
 
 def test_guard_a9_per_block_cosim_results_still_accepted(tmp_path: Path):
