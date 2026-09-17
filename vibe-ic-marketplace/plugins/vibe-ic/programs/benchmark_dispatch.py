@@ -379,6 +379,10 @@ def _entry(name: str) -> dict:
 # Shape-D run missing `docker`, or a Shape-A/B run missing `yosys`, printed a
 # clean environment line and then failed inside the runner.
 import benchmark_setup as _setup                       # noqa: E402
+# R-0915-85 — the five words, imported. See `benchmark_io_adapter`: the export
+# door below read `SKIPPED-BY-ENTRY`, which no producer writes any more, and
+# refused every supplied-RTL export while looking like a working guard.
+import verdict as _V                                     # noqa: E402
 
 
 def _env_check():
@@ -3467,7 +3471,7 @@ def _shape_c_task_binding_reasons(task: dict, run_p: Path,
         ran = {}
     recorded_rtl_gen = ran.get("rtl_gen")
     # A supplied-RTL re-entry does not *run* the upstream owner; attribution
-    # correctly records it under not_attempted as SKIPPED-BY-ENTRY. Looking
+    # correctly records it under not_attempted as NOT_APPLICABLE. Looking
     # only in ``ran`` made every repaired/backup candidate fail export even
     # though the task and solve report carried the same honest gate status.
     if recorded_rtl_gen is None:
@@ -3478,7 +3482,10 @@ def _shape_c_task_binding_reasons(task: dict, run_p: Path,
         recorded_rtl_gen = not_attempted.get("rtl_gen")
     if verification.get("rtl_gen") != recorded_rtl_gen:
         reasons.append("RTL-owning Program gate differs from solve_report")
-    if recorded_rtl_gen not in {"PASS", "SKIPPED-BY-ENTRY"}:
+    # R-0915-85 — `SKIPPED-BY-ENTRY` is `NOT_APPLICABLE`. Dead as the old
+    # word, this set refused every supplied-RTL export at the second door.
+    if recorded_rtl_gen not in {_V.Verdict.PASS.value,
+                                _V.Verdict.NOT_APPLICABLE.value}:
         reasons.append("RTL-owning Program gate did not pass its allowed status")
     # #2216 — the RTL-OWNING gate is one gate, not the ledger. Export is the
     # second door onto the same claim as the resume accept path, so it asks the

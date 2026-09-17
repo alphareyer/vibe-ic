@@ -117,6 +117,28 @@ def scan_source(src: str, path: str = "<src>") -> Dict[str, Any]:
         and (n.func.attr if isinstance(n.func, ast.Attribute)
              else getattr(n.func, "id", "")) == "StepResult"
         for n in ast.walk(tree))
+    # …OR DECLARES ITSELF A READER OF THE VOCABULARY, by importing it.
+    #
+    # MEASURED, and it is why this clause exists. `flow_phase_attribution`
+    # BUILDS no StepResult -- it READS the runner's step report -- and carried
+    # `elif status == "WAIVED"`, `elif status in ("FAIL", "BLOCKED")` and
+    # `_STATUS_MARKER = {"RTL_REPAIR_RETRY"}`. All three were dead, all three
+    # failed OPEN: a waived-to-a-skill run reached `_unknown` and the
+    # attribution reported its own vocabulary as unclassified about the one
+    # hand-off it exists to name, and a progress-marker row counted as a gate
+    # that produced a verdict. None was in scope, because the scope asked who
+    # WRITES a step row and the harm was in who READS one.
+    #
+    # A module that imports `verdict` has said, in its own source, that the
+    # five words are its vocabulary. MEASURED before landing: 31 modules in
+    # this tree do so without building a StepResult, and they contribute ZERO
+    # new findings -- so this widens the scope without widening the answer,
+    # which is the only kind of widening a ratchet may take.
+    _imports_the_vocabulary = any(
+        (isinstance(n, ast.Import) and any(a.name == "verdict" for a in n.names))
+        or (isinstance(n, ast.ImportFrom) and n.module == "verdict")
+        for n in ast.walk(tree))
+    _builds_step_results = _builds_step_results or _imports_the_vocabulary
     # A SECOND `StepResult` EXISTS and is not the flow's. `mcp_execution_verify`
     # defines its own — `step / status / timestamp / tool / age_hours`, whose
     # five words (FOUND_PASS / FOUND_FAIL / FOUND_INCONCLUSIVE / NOT_FOUND /

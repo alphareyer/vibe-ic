@@ -1124,7 +1124,17 @@ def test_step33_gate_audit_trail_is_not_written_over_its_own_input():
 
 
 def _all_missing_results(fcc, waived=(), failed=()):
-    """One StepResult per real flow step, all MISSING except as directed."""
+    """One StepResult per real flow step, all MISSING except as directed.
+
+    R-0915-85 — `MISSING` is `FAIL(missing_artefact)`: a required OUTPUT that
+    does not exist is a defect, and the reason says WHICH defect. The reason
+    is load-bearing here, not decoration. `_attribute_cascade_verdicts` walks
+    ancestry only for rows whose FAIL is a missing artefact, because a FAIL a
+    gate REACHED — it read the design and found something wrong — can never be
+    explained by an ancestor's waiver, and the one word could not tell the two
+    apart. Omit it and every row in this fixture is a gate-found defect, the
+    walk never starts, and the test reads green about a cascade that never ran.
+    """
     out = []
     for st in _flow_steps():
         sid = st.get("id")
@@ -1132,8 +1142,11 @@ def _all_missing_results(fcc, waived=(), failed=()):
             continue
         status = ("PASS_WITH_WAIVERS" if sid in waived
                   else "FAIL" if sid in failed else "FAIL")
-        out.append(fcc.StepResult(id=sid, name=st.get("name", ""),
-                                  stage=st.get("stage", ""), status=status))
+        out.append(fcc.StepResult(
+            id=sid, name=st.get("name", ""), stage=st.get("stage", ""),
+            status=status,
+            reason_class=("" if sid in waived
+                          else fcc._T.ReasonClass.MISSING_ARTEFACT.value)))
     return out
 
 

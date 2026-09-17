@@ -137,7 +137,20 @@ _STATUS_RAN = frozenset({_V.Verdict.PASS.value,
                          _V.Verdict.FAIL.value})
 _STATUS_NOT_ATTEMPTED = frozenset({_V.Verdict.NOT_MEASURED.value,
                                    _V.Verdict.NOT_APPLICABLE.value})
-_STATUS_MARKER = frozenset({"RTL_REPAIR_RETRY"})
+# R-0915-85 — A MARKER IS A DISCLOSURE, NOT A VERDICT. `RTL_REPAIR_RETRY` was
+# a status word for "this row is a progress marker inside an iteration", which
+# put a non-outcome in the field every consumer reads for an outcome. The
+# runner records the marker as `PASS` carrying `Disclosure.PROGRESS_MARKER`
+# now, so the question is asked of the disclosures. Left as the word this set
+# matched NOTHING and every marker row fell through to `ran`, where it counted
+# as a gate that produced a verdict about the design.
+_MARKER_DISCLOSURE = _V.Disclosure.PROGRESS_MARKER.value
+
+
+def _is_progress_marker(step: Dict[str, Any]) -> bool:
+    """This row records that an iteration advanced, not that a gate decided."""
+    return _MARKER_DISCLOSURE in [
+        str(d) for d in (step.get("disclosures") or ())]
 _STATUS_FAILING = (_V.Verdict.FAIL.value,)
 
 # Repair / close-loop markers the runner appends, by the name it records them
@@ -406,7 +419,11 @@ def phase2_solving(rep: Optional[Dict[str, Any]], why: Optional[str],
                         f"`deterministic_generator`; extras keys present: "
                         f"{sorted(ex)}; detail: {detail[:200]}",
         })
-    elif status == "WAIVED":
+    elif status == _V.Verdict.PASS_WITH_WAIVERS.value:
+        # R-0915-85 — `WAIVED` is `PASS_WITH_WAIVERS`. Dead as the old word,
+        # this branch never fired and every waived-to-a-skill run fell through
+        # to `_unknown`: the attribution said the vocabulary was unclassified
+        # about the one hand-off it exists to name.
         skill = ex.get("fallback_skill")
         out.update({
             "solved_by": "AI_BACKUP" if skill else "WAIVED_NO_SKILL",
@@ -414,14 +431,21 @@ def phase2_solving(rep: Optional[Dict[str, Any]], why: Optional[str],
             "actor": skill or "UNKNOWN",
             "emitter": None,
             "emitter_absent_reason":
-                "no deterministic emitter fired; the runner WAIVED rtl_gen to "
+                "no deterministic emitter fired; the runner passed rtl_gen "
+                "WITH WAIVERS to "
                 f"the AI skill {skill!r} — a handover, not an emit"
                 if skill else
-                f"rtl_gen WAIVED with no fallback_skill: {detail[:200]}",
+                f"rtl_gen PASS_WITH_WAIVERS with no fallback_skill: "
+                f"{detail[:200]}",
             "ai_authored_in_this_invocation": False,
-            "evidence": f"rtl_gen WAIVED, extras.fallback_skill={skill!r}",
+            "evidence": f"rtl_gen PASS_WITH_WAIVERS, "
+                        f"extras.fallback_skill={skill!r}",
         })
-    elif status in ("FAIL", "BLOCKED"):
+    # R-0915-85 — `BLOCKED` is `NOT_MEASURED(input_absent)`, which the
+    # NOT-ATTEMPTED arm below already owns. It is dropped here rather than
+    # translated: a step that could not look is not a step that looked and
+    # found nothing, and this branch is the second.
+    elif status == _V.Verdict.FAIL.value:
         out.update({
             "solved_by": "NONE",
             "mechanism": "PROGRAM",
@@ -470,14 +494,16 @@ def phase3_verifying(rep: Optional[Dict[str, Any]],
         name = str(s.get("name"))
         status = str(s.get("status"))
         repeats[name] = repeats.get(name, 0) + 1
-        if status in _STATUS_RAN:
+        # ASKED FIRST, because a marker's verdict word is `PASS` and the
+        # `_STATUS_RAN` test below would claim it.
+        if _is_progress_marker(s):
+            markers[name] = status
+        elif status in _STATUS_RAN:
             ran[name] = status
             not_attempted.pop(name, None)
         elif status in _STATUS_NOT_ATTEMPTED:
             if name not in ran:
                 not_attempted[name] = status
-        elif status in _STATUS_MARKER:
-            markers[name] = status
         else:
             unclassified[name] = status
     return {
