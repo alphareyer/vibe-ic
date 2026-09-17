@@ -21756,13 +21756,22 @@ def _rsz_parasitics_source_tcl(tag: str, spef: str = "") -> str:
     helper was written for), and a design whose grader WNS is not negative
     never reaches the refusal.
     """
+    # THE GRADER'S NUMBER IS READ UNDER THE GRADER'S PARASITICS. MEASURED on
+    # r29: measuring `sta::worst_slack` as-is let the SETUP site read the
+    # parasitics left active by the steps between the DRV and SETUP sites; it
+    # printed OK and the setup repair saw nothing (RSZ-0098). Re-running r29's
+    # own child with the SPEF re-read here: SETUP refused (grader -5.924,
+    # estimate +5.500) and the repair found 175 violating endpoints.
     guard_pre = (
+        f"    if {{[catch {{read_spef {spef}}} _rszp_pre_rs]}} "
+        f"{{ puts \"{tag}_RSZ_PARASITICS: GRADER_SPEF_UNREADABLE $_rszp_pre_rs\" }}\n"
         "    if {[catch {set _rszp_spef_wns [sta::worst_slack -max]}]} "
         "{ set _rszp_spef_wns {} }\n" if spef else "")
     ok_line = (f"puts \"{tag}_RSZ_PARASITICS: estimate_parasitics "
                "-global_routing OK -- the resizer has its own source, EST-0027 "
                "must not appear for this pass\"")
     if spef:
+        ok_line = ok_line[:-1] + ' spef_wns=$_rszp_spef_wns est_wns=$_rszp_est_wns"'
         ok_body = (
             "      if {[catch {set _rszp_est_wns [sta::worst_slack -max]}]} "
             "{ set _rszp_est_wns {} }\n"
