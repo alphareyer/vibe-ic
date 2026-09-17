@@ -112,7 +112,9 @@ import _sta_basis  # the ONE reader of the `STA_BASIS:` stamp (no second copy)
 import emitted_script_portability_check as _esp  # the ONE host-path predicate
 import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch site
 from _staged_pdk_tech_lef import (
+    SignoffConfigUnreadable as _SignoffConfigUnreadable,
     TechLefResolutionError as _TechLefResolutionError,
+    load_signoff_config as _load_signoff_config,
     discover_staged_tech_lefs as _discover_staged_tech_lefs,
     select_staged_tech_lef as _resolve_staged_tech_lef,
 )
@@ -11335,28 +11337,27 @@ def _detect_pdk(project: Path, override: Optional[str] = None
             cell_gds = _gds_cands[0] if _gds_cands else None
             # Auto-detect SITE name from cell LEF (chip-AGNOSTIC: any
             # PDK exposes its row site via `SITE <name>` declaration).
+            #
+            # vibe-ic#2361 — no `except` here. Both reads below used to sit in
+            # `except Exception: pass`, so an unreadable LEF silently became
+            # SITE "unit" / prefix "met": the same "could not read it" read as
+            # "read it and found nothing" that #2361 removes from the bridge
+            # config. `errors="ignore"` leaves OSError as the only failure, and
+            # an unreadable staged cell/tech LEF must halt, naming the file.
             site_name = "unit"
-            try:
-                import re as _re
-                m = _re.search(r"^\s*SITE\s+([A-Za-z_][A-Za-z0-9_]*)",
-                                cell_lef.read_text(errors="ignore"),
-                                _re.MULTILINE)
-                if m:
-                    site_name = m.group(1)
-            except Exception:
-                pass
+            m = re.search(r"^\s*SITE\s+([A-Za-z_][A-Za-z0-9_]*)",
+                          cell_lef.read_text(errors="ignore"), re.MULTILINE)
+            if m:
+                site_name = m.group(1)
             # Auto-detect metal layer prefix (e.g. "met" for sky130, "MET"
             # for <foundry>, "ME" for some 28nm flows).
             metal_prefix = "met"
-            try:
-                t = tech_lef.read_text(errors="ignore") if tech_lef else ""
-                # Pick the prefix from the FIRST routing layer NAME
-                m = _re.search(r"LAYER\s+([A-Za-z_]+)\d+\s*\n[^L]*?TYPE\s+ROUTING",
-                                t, _re.IGNORECASE)
-                if m:
-                    metal_prefix = m.group(1)
-            except Exception:
-                pass
+            t = tech_lef.read_text(errors="ignore") if tech_lef else ""
+            # Pick the prefix from the FIRST routing layer NAME
+            m = re.search(r"LAYER\s+([A-Za-z_]+)\d+\s*\n[^L]*?TYPE\s+ROUTING",
+                          t, re.IGNORECASE)
+            if m:
+                metal_prefix = m.group(1)
             # Discover local IP macros (input/pdk_local/<vendor>/) — hoisted
             # into _discover_local_macros so the NAMED open-PDK overrides
             # integrate hard macros identically (see helper docstring).
@@ -11444,13 +11445,16 @@ def _detect_pdk(project: Path, override: Optional[str] = None
             # a commercial PDK run the #443 Magic+netgen LVS route instead
             # of dead-ending on a missing `calibre` binary.
             _bridge = pdk_dir / "bridge"
-            _signoff_cfg: Dict[str, Any] = {}
             _cfg_f = _bridge / "signoff_config.json"
-            if _cfg_f.is_file():
-                try:
-                    _signoff_cfg = json.loads(_cfg_f.read_text())
-                except Exception:
-                    _signoff_cfg = {}
+            # vibe-ic#2361 — a file that exists but does not parse is a
+            # REFUSAL, never `{}`: reading it as absent silently reverts
+            # lvs_engine (and every other declared key) to its default while
+            # the verdict records the engine that ran. Halts here, the same
+            # way an unresolvable declared tech LEF does above.
+            try:
+                _signoff_cfg: Dict[str, Any] = _load_signoff_config(pdk_dir)
+            except _SignoffConfigUnreadable as exc:
+                raise SystemExit(str(exc)) from exc
             # v1.4.36 — FLOOR-DRC: WARN loudly when a commercial DRC deck is
             # present but no std-cell exclusion marker is configured (the silent
             # config miss that re-checks qualified cell interiors → false FEOL
