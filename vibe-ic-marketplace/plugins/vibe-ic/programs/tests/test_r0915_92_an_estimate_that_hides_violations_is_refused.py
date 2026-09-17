@@ -26,10 +26,10 @@ from _tcl_walk import walk          # noqa: E402
 SPEF = "/grader/sdr_pass.spef"
 
 
-def _run(tmp_path, spef_wns, est_wns, est_fails=False):
+def _run(tmp_path, spef_wns, est_wns, est_fails=False, start="spef"):
     walker = f"""
 namespace eval sta {{}}
-set ::phase spef
+set ::phase {start}
 proc sta::worst_slack {{args}} {{ if {{$::phase eq "spef"}} {{ return {spef_wns} }} else {{ return {est_wns} }} }}
 proc estimate_parasitics {{args}} {{ {"error EST-0005" if est_fails else "set ::phase est"} }}
 proc read_spef {{path}} {{ set ::phase spef; puts "STUB_READ_SPEF $path" }}
@@ -50,15 +50,25 @@ def test_an_estimate_that_hides_the_graders_violations_is_refused(tmp_path):
 
 def test_an_optimistic_estimate_that_still_shows_violations_is_kept(tmp_path):
     out = _run(tmp_path, -1.108, -0.4)
-    assert "REFUSED" not in out and "STUB_READ_SPEF" not in out
-    assert "estimate_parasitics -global_routing OK" in out
+    assert "REFUSED" not in out
+    ok = next(l for l in out.splitlines() if "estimate_parasitics -global_routing OK" in l)
+    assert "spef_wns=-1.108" in ok and "est_wns=-0.4" in ok, ok
     assert "PHASE_AFTER est" in out
 
 
 def test_a_grader_without_violations_never_reaches_the_refusal(tmp_path):
     out = _run(tmp_path, 0.5, 4.013)
-    assert "REFUSED" not in out and "STUB_READ_SPEF" not in out
+    assert "REFUSED" not in out
     assert "PHASE_AFTER est" in out
+
+
+def test_parasitics_left_active_by_an_earlier_step_cannot_pose_as_the_grader(tmp_path):
+    """r29's shape: the SETUP site ran after steps that left the ESTIMATE active,
+    so reading worst_slack as-is returned the estimate (+4.0) as the "grader"
+    and the guard said OK. The guard now re-reads the grader SPEF first."""
+    out = _run(tmp_path, -5.924, 5.5, start="est")
+    assert "REFUSED_HIDES_VIOLATIONS spef_wns=-5.924 est_wns=5.5" in out
+    assert out.count(f"STUB_READ_SPEF {SPEF}") == 2   # before measuring, and on refusal
 
 
 def test_a_failed_estimate_still_says_wire_load(tmp_path):
