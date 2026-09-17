@@ -267,11 +267,34 @@ def _process_only_count(path: Path, keys: "tuple[str, ...]") -> int:
 
 # ── R-0915-87(2): a green ROW COUNT is not an EXECUTED ORACLE ───────────────
 def _declared_l10_case_ids(project: Path) -> "list[str]":
-    """Every declared L10 case id, in declaration order."""
+    """Every declared EXECUTABLE L10 case id, in declaration order.
+
+    THE SAME SCOPE THIS GATE ALREADY LANDED, APPLIED AT THE NEW DOOR. The
+    executed-oracle guard (R-0915-87(2), 5fc0a5593) asked over EVERY declared
+    row, and so re-opened the failure `_split_executable` above was written to
+    close. MEASURED, opentitan_aes run_aes_h (e322992a6, 2026-09-18):
+
+        only 8 of 111 declared L10 case(s) EXECUTED their own oracle ...
+        Not executed: spec_complete [NOT_EXECUTED], csr_defined [NOT_EXECUTED],
+        clkrst_connected [NOT_EXECUTED], ip_top, ip_instantiable,
+        physical_macros_defined_80 (+97 more)
+
+    L10 there declares 111 rows: 8 `known_answer_vector` (all 8 EXECUTED, all
+    PASS) and 103 `verification_checklist` rows harvested from the vendor's DV
+    CHECKLIST, whose stimulus is "DV checklist item SPEC_COMPLETE -- Done".
+    Nothing can execute an oracle for a process milestone, so the guard
+    demanded 103 things that can never happen, and every executable case had
+    in fact run. Those rows are still declared and still REPORTED by
+    `_evidence_summary` under their own key; they are only kept out of the
+    executed-versus-declared comparison, exactly as the denominator path
+    already keeps them out. A functional row hidden among checklist rows is
+    still counted and still demanded -- the controls pin that.
+    """
     gd = _pl.generated_docs_dir(project)
     out = []
-    for row in _declared_rows(gd / "L10_TEST_CASES.json",
-                              ("test_cases", "cases", "vectors")):
+    rows, _process_only = _split_executable(_declared_rows(
+        gd / "L10_TEST_CASES.json", ("test_cases", "cases", "vectors")))
+    for row in rows:
         if isinstance(row, dict):
             name = row.get("name") or row.get("id") or row.get("case")
             if name:

@@ -214,3 +214,65 @@ def test_the_execution_question_is_asked_through_the_shared_reader():
     assert "_l10x.case_state" in src
     ran = C._oracles_that_actually_ran(Path("/nonexistent-project"))
     assert ran["asked_through"] == "_l10_execution.case_state"
+
+
+# ── R-0915-96: a DV checklist row is not a case that owes an oracle ──────────
+#
+# MEASURED, opentitan_aes run_aes_h (e322992a6): "only 8 of 111 declared L10
+# case(s) EXECUTED their own oracle" -- where the 111 were 8 known_answer_vector
+# rows (all EXECUTED, all PASS) and 103 verification_checklist rows harvested
+# from the vendor's DV checklist ("DV checklist item SPEC_COMPLETE -- Done").
+# This gate already keeps that kind out of its denominator (`_split_executable`);
+# the executed-oracle guard asked over every row and re-opened the failure.
+
+def _aes_project(tmp_path: Path, kav_executed=8, hidden_functional=None) -> Path:
+    proj = tmp_path / "aes"
+    gd = proj / "phase1" / "generated_docs"
+    gd.mkdir(parents=True)
+    kav = [f"kav_{i}" for i in range(8)]
+    rows = [{"name": c, "kind": "known_answer_vector"} for c in kav]
+    rows += [{"name": f"dv_item_{i}", "kind": "verification_checklist",
+              "stimulus": f"DV checklist item ITEM_{i} -- Done"}
+             for i in range(103)]
+    if hidden_functional:
+        rows.insert(50, {"name": hidden_functional, "kind": "functional_vector"})
+    (gd / "L10_TEST_CASES.json").write_text(json.dumps(
+        {"fields": {"test_cases": rows}}))
+    rec = [{"id": c, "verdict": "PASS", "sim_executed": True}
+           for c in kav[:kav_executed]]
+    out = proj / "reports" / "phase2" / "sim"
+    out.mkdir(parents=True)
+    (out / "l10_execution.json").write_text(json.dumps({
+        "schema": _l10x.SCHEMA, "cases": rec,
+        "producer": "testbench_gen.run_unit_tbs",
+        "tb_dir": str(proj / "phase2" / "stage1" / "sim" / "tb"),
+        "source_junit": "results.xml"}))
+    return proj
+
+
+def test_aes_checklist_rows_do_not_owe_an_oracle(tmp_path):
+    """RED on 5fc0a5593..e322992a6: refused 8 of 111."""
+    proj = _aes_project(tmp_path)
+    ran = C._oracles_that_actually_ran(proj)
+    assert ran["declared_count"] == 8, ran["declared_count"]
+    assert ran["not_executed_count"] == 0
+    assert C._oracle_execution_refusal(proj, "results.xml") is None
+
+
+def test_a_functional_row_hidden_among_checklist_rows_is_still_demanded(tmp_path):
+    """CONTROL behind the mechanism: the narrowing must not blind the guard."""
+    proj = _aes_project(tmp_path, hidden_functional="aes_gcm_tag_check")
+    refusal = C._oracle_execution_refusal(proj, "results.xml")
+    # Both arms: the hidden functional row is refused BY NAME. (The count in
+    # the sentence differs by arm, so it is not what this control pins.)
+    assert refusal is not None
+    ran = C._oracles_that_actually_ran(proj)
+    assert "aes_gcm_tag_check" in [r["case"] for r in ran["not_executed"]]
+
+
+def test_a_known_answer_vector_that_did_not_run_is_still_refused(tmp_path):
+    """CONTROL: an executable kind short of its oracle still refuses."""
+    proj = _aes_project(tmp_path, kav_executed=7)
+    assert C._oracle_execution_refusal(proj, "results.xml") is not None
+    ran = C._oracles_that_actually_ran(proj)
+    assert "kav_7" in [r["case"] for r in ran["not_executed"]]
