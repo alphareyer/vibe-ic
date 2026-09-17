@@ -2507,6 +2507,21 @@ def _render(project: Path, run_audit: bool = True,
                   f"nor counted as blocking failures.")
         md.append("")
 
+    # #2359 (D3) — the HARDMACRO integrator handoff. Conditional: only a
+    # delivery whose attribution record names die-level rules gets it. Same
+    # reader as the six IP documents (ip_release_docs_gen.integrator_handoff),
+    # so the card and the release cannot state different numbers.
+    try:
+        import ip_release_docs_gen as _ipd  # noqa: PLC0415
+        _handoff = _ipd.integrator_handoff(project)
+    except Exception:  # pragma: no cover — disclosure must never fail the card
+        _handoff = None
+    if _handoff is not None:
+        md.append(f"## {_ipd.INTEGRATOR_HANDOFF_HEADING}")
+        md.append("")
+        md.append(_handoff[0])
+        md.append("")
+
     # Waivers — full text (no truncation)
     md.append(section_heading("Waivers"))
     md.append("")
