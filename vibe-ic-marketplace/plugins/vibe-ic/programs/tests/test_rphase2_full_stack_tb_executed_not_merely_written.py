@@ -156,7 +156,8 @@ def test_not_executed_is_classified_and_is_not_a_pass(capsys):
     enumerate. A new status word must be classified BEFORE it can be emitted,
     or the first run that emits it is silently green."""
     plan = [dosr.StepResult("reference_tb", dosr.NOT_EXECUTED_STATUS,
-                            0.0, "no sim ran")]
+                            0.0, "no sim ran",
+                            reason_class=dosr.NOT_EXECUTED_REASON)]
     assert dosr._aggregate_verdict(plan) != "PASS"
     assert "UNCLASSIFIED" not in capsys.readouterr().err
 
@@ -254,10 +255,17 @@ def test_the_constant_and_every_literal_spelling_are_the_same_word():
     drift apart. This is the pin that stops it."""
     src = (PROGRAMS / "design_one_shot_runner.py").read_text(errors="replace")
     word = dosr.NOT_EXECUTED_STATUS
-    # the aggregator classifies it, so it cannot reach the catch-all PASS
-    assert f'_INCOMPLETE_STATUSES = ("INCOMPLETE", "{word}")' in src
-    # main's reference-TB repair loop treats it as terminal
-    assert f'"INCOMPLETE",\n                          "{word}") or' in src
+    # R-0915-85 — THE CATCH-ALL IS GONE, so the first of the two hand-spelt
+    # sites it pinned is gone with it: `_aggregate_verdict` is
+    # `verdict.run_verdict` over rows `verdict.parse` has already refused an
+    # unknown word at, and `_INCOMPLETE_STATUSES` was a list this file had to
+    # keep in step with. What survives, and still has to be spelt by hand, is
+    # main's terminal tuple — the closed-loop checker reads it as an AST
+    # literal collection and cannot name a module constant.
+    assert f'"PASS_WITH_WAIVERS", "{word}") or' in src, (
+        "main's reference-TB repair loop no longer spells the terminal set as "
+        "literals; the closed-loop coverage checker reads it as an AST "
+        "literal collection and would report the loop unwired")
     # and the closed-loop registry's citation agrees with that tuple
     import closed_loop_executable_coverage_check as clc
     cited = clc.REGISTRY["4"]["evidence"]

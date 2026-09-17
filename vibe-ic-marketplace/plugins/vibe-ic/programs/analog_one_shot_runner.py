@@ -2317,7 +2317,12 @@ def main() -> int:
     print(f"\n=== analog_one_shot_runner DONE ===")
     print(f"verdict: {summary['verdict']}")
     print(f"final summary: {'reports/final_summary.md' if fs_ok else 'NOT generated'}")
-    return 0 if summary["verdict"] != "FAIL" else 1
+    # R-0915-85 — THE EXIT CODE IS THE RUN WORD, the same rule the other three
+    # runners now apply. `!= "FAIL"` exited 0 on every word that is not FAIL,
+    # which after the collapse includes NOT_MEASURED: an analog track where
+    # nothing was measured would have told the shell it passed.
+    return 0 if _V.parse(summary["verdict"]) in (
+        _V.Verdict.PASS, _V.Verdict.PASS_WITH_WAIVERS) else 1
 
 
 if __name__ == "__main__":

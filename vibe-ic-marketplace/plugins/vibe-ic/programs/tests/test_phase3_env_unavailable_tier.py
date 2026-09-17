@@ -37,7 +37,7 @@ def test_aggregate_verdict_mixed_waived_and_env_unavailable() -> None:
     plan = [
         StepResult("synth", "PASS"),
         StepResult("drc", "NOT_MEASURED", reason_class="not_executed"),
-        StepResult("lvs", "PASS_WITH_WAIVERS"),
+        StepResult("lvs", "PASS_WITH_WAIVERS", attribution="the fixture's owner"),
     ]
     assert _aggregate_verdict(plan) == "NOT_MEASURED"
 
@@ -228,7 +228,7 @@ def test_autogen_waivers_includes_env_unavailable_steps(
                            "calibre_drc_deck": "/x.rule"}, reason_class="tool_absent"),
         StepResult("lvs", "PASS_WITH_WAIVERS",
                    detail="design defer; needs extraction",
-                   extras={"extracted_netlist": "phase3/x.spice"}),
+                   extras={"extracted_netlist": "phase3/x.spice"}, attribution="the fixture's owner"),
     ]
     _autogen_waivers_json(p, plan)
     waivers_file = p / "waivers.json"

@@ -178,14 +178,23 @@ def test_the_step_can_never_move_the_run_verdict() -> None:
     """
     src = Path(DOSR.__file__).read_text(errors="replace")
     tree = ast.parse(src)
-    fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == "_aggregate_verdict")
-    green = next(
-        ast.literal_eval(t.value) for t in ast.walk(fn)
-        if isinstance(t, ast.Assign) and len(t.targets) == 1
+    # R-0915-85 — `_GREEN_STATUSES` is GONE, and that is the repair rather than
+    # a gap: `_aggregate_verdict` was a ladder of hand-kept status lists, and
+    # this test existed because one of them could silently drop a word. It is
+    # `verdict.run_verdict` now, whose precedence is the only place greenness
+    # is decided, so the drift this guard watched for cannot happen. What is
+    # asserted instead is the fact that mattered: PASS is green there.
+    assert not any(
+        isinstance(t, ast.Assign) and len(t.targets) == 1
         and isinstance(t.targets[0], ast.Name)
-        and t.targets[0].id == "_GREEN_STATUSES")
-    assert "ADVISORY" in green
+        and t.targets[0].id == "_GREEN_STATUSES"
+        for t in ast.walk(tree)), (
+        "a hand-kept `_GREEN_STATUSES` list is back in the runner; greenness "
+        "is `verdict.run_verdict`'s precedence and nowhere else")
+    import verdict as _V
+    assert _V.run_verdict([_V.StepVerdict(verdict=_V.Verdict.PASS,
+                                          step_id="x", name="x")]) \
+        is _V.Verdict.PASS
     step = next(n for n in ast.walk(tree)
                 if isinstance(n, ast.FunctionDef)
                 and n.name == "step_lesson_consumption")
@@ -193,9 +202,13 @@ def test_the_step_can_never_move_the_run_verdict() -> None:
                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
                 and c.func.id == "StepResult" and len(c.args) >= 2
                 and isinstance(c.args[1], ast.Constant)}
-    assert statuses == {"ADVISORY"}, (
+    # R-0915-85 — `ADVISORY` was a VERDICT meaning "this row may never move the
+    # run's". It is `PASS` carrying `Disclosure.ADVISORY` now, and the property
+    # stops being a special case: `run_verdict`'s precedence means a PASS row
+    # cannot move the run word in either direction.
+    assert statuses == {"PASS"}, (
         f"step_lesson_consumption returns {sorted(statuses)}; every return must "
-        f"be ADVISORY. A blocking verdict from a natural-language overlap score "
+        f"be a row carrying the advisory disclosure. A blocking verdict from a natural-language overlap score "
         f"is how a gate gets turned off.")
 
 

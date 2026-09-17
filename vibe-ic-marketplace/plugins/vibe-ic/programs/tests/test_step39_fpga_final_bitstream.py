@@ -225,7 +225,7 @@ def test_guard_waived_tier_manifest_shape_is_preserved(tmp_path):
          dr.StepResult("usb_hid_tester_verify", "PASS_WITH_WAIVERS", 1.0, "no rig",
                        extras={"waiver": {"ticket": "no-tester-rig-v1.6.97",
                                           "review_required": True,
-                                          "evidence": "rig absent"}})],
+                                          "evidence": "rig absent"}}, attribution="the fixture's owner")],
         top_name="top")
     m = _manifest(proj)
     assert m["verdict"] == "WAIVED"

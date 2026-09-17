@@ -46,6 +46,7 @@ import pytest
 _PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_PROGRAMS))
 
+import verdict as _V  # noqa: E402
 import analog_one_shot_runner as AOSR                  # noqa: E402
 import analog_block_list_emit_check as ABLE            # noqa: E402
 import _path_layout as _pl                             # noqa: E402
@@ -128,14 +129,29 @@ def test_the_row_can_never_move_the_analog_verdict() -> None:
                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
                 and c.func.id == "StepResult" and len(c.args) >= 3
                 and isinstance(c.args[2], ast.Constant)}
-    assert statuses == {"ADVISORY"}, (
+    # R-0915-85 — `ADVISORY` was a VERDICT that meant "this row may never move
+    # the run's". It is `PASS` carrying `Disclosure.ADVISORY` now, and the
+    # property is no longer a special case: `run_verdict`'s precedence means a
+    # PASS row cannot move the run word in EITHER direction, which is what the
+    # loop below drives. The disclosure is asserted too, so the row is still
+    # distinguishable from a gate that really examined the design.
+    assert statuses == {"PASS"}, (
         f"step_block_list_schema returns {sorted(statuses)}; vibe-ic#2080 "
-        f"wires a recorded-unwired gate ADVISORY unless its docstring declares "
-        f"it BLOCKING, and this gate's does not.")
-    advisory = AOSR.StepResult("block_list_schema", "", "ADVISORY", 0.0, "")
+        f"wires a recorded-unwired gate as a row that cannot move the verdict, "
+        f"unless its docstring declares it BLOCKING, and this gate's does not.")
+    _disc = {d.value for c in ast.walk(step)
+             if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+             and c.func.id == "StepResult"
+             for k in c.keywords if k.arg == "disclosures"
+             for d in [_V.Disclosure.ADVISORY]}
+    assert _disc == {"advisory"}, (
+        "the row no longer carries the advisory disclosure, so a reader "
+        "cannot tell it from a gate that examined the design")
+    advisory = AOSR.StepResult("block_list_schema", "", "PASS", 0.0, "",
+                               disclosures=[_V.Disclosure.ADVISORY])
     for base in ([AOSR.StepResult("A1", "x", "PASS", 0.0, "")],
                  [AOSR.StepResult("A1", "x", "NOT_MEASURED", 0.0, "", reason_class="not_executed")],
-                 [AOSR.StepResult("A1", "x", "PASS_WITH_WAIVERS", 0.0, "")],
+                 [AOSR.StepResult("A1", "x", "PASS_WITH_WAIVERS", 0.0, "", attribution="the fixture's owner")],
                  [AOSR.StepResult("A1", "x", "FAIL", 0.0, "")]):
         assert (AOSR._aggregate_verdict(base)
                 == AOSR._aggregate_verdict(base + [advisory])), (

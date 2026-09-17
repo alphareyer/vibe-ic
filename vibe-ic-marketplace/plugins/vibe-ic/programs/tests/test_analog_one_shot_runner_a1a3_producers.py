@@ -24,13 +24,18 @@ import analog_one_shot_runner as R
 from _analog_producer_fixture import block, make_project, bdir, read_json
 
 
+#: R-0915-85 — the three provenance words are gone and the word is `PASS`.
+#: `PASS_WITH_REAL_EXTRACT`, `PASS_WITH_DERIVED_TOPOLOGY` and
+#: `PASS_WITH_REAL_NETLIST` were one verdict -- it passed -- with the
+#: PROVENANCE of the artefact welded onto it, and the provenance is already
+#: recorded where a reader can act on it: `extras["producer"]` names the
+#: program that made it and `output_files` names what it made. Both are
+#: asserted below, so nothing this vocabulary carried is lost.
 STEPS = [
-    ("A1_spec_extract", "analog_a1_spec_emit.py", "PASS_WITH_REAL_EXTRACT",
-     "spec.json"),
-    ("A2_topology_select", "analog_a2_topology_emit.py",
-     "PASS_WITH_DERIVED_TOPOLOGY", "topology.md"),
-    ("A3_netlist_gen", "analog_a3_netlist_emit.py", "PASS_WITH_REAL_NETLIST",
-     "vreg_alpha.sp"),
+    ("A1_spec_extract", "analog_a1_spec_emit.py", "PASS", "spec.json"),
+    ("A2_topology_select", "analog_a2_topology_emit.py", "PASS",
+     "topology.md"),
+    ("A3_netlist_gen", "analog_a3_netlist_emit.py", "PASS", "vreg_alpha.sp"),
 ]
 
 
