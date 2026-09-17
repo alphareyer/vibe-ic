@@ -27669,6 +27669,20 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
     # Third bare call, found while wiring #296: the post-global-placement
     # legalization. Same shape, same DPL-0036 kill. Same ladder.
     _initial_legalize = _build_escalating_legalize_tcl("INITIAL_DPL", "_ip")
+    # FOURTH SITE, found by r41: the post-global-route repairs. `repair_design`
+    # / `repair_timing -setup|-hold` run again after the global-route estimate
+    # and insert and upsize cells; the legalization that followed was the bare
+    # `catch {detailed_placement}` + NONFATAL shape this very ladder exists to
+    # replace — no `check_placement` proof, no displacement escalation, no
+    # clock-buffer downsize rung. MEASURED on subservient x gf180mcuD as a DIE
+    # (r41): post_cts.def and post_hold.def are legal, routed_preantenna.def
+    # carries 4 violations — two PAIRS of `clkbuf_16` clock leaves at IDENTICAL
+    # coordinates, the master the flow's own cap had already reported at the
+    # placeability bound (50 sites against a 50-site free run). The overlap was
+    # created here, nothing proved otherwise, and the run shipped it to
+    # streamout, where PNR_PLACEMENT_ILLEGAL refused the whole DEF.
+    _gr_repair_legalize = _build_escalating_legalize_tcl(
+        "GR_REPAIR", "_gr", clk_sink_buf=clk_buf)
     # v1.8.43 — the two in-flow DRV repairs get the estimate guard-band. Built
     # HERE (not inline) so BOTH sites are emitted from the ONE builder and can
     # never drift apart — the failure mode the in-flight hand-patch of this idea
@@ -27868,12 +27882,7 @@ if {{[catch {{repair_timing -hold}} _rth2_err]}} {{
 {fanout_root_repair_block}# Residual per-pin max-fanout roots are inserted here,
 # after CTS and the global-route estimate but before final legalization/route.
 # The block is empty when the active PDK has no authoritative buffer master.
-if {{[catch {{detailed_placement}} _gr_dp_err]}} {{
-  if {{[catch {{detailed_placement -use_diamond_legalizer}} _gr_dp_errd]}} {{
-    puts "GR_REPAIR_LEGALIZE_NONFATAL: $_gr_dp_err | diamond: $_gr_dp_errd"
-  }} else {{ puts "GR_REPAIR_LEGALIZE_OK disp=diamond" }}
-}}
-# Detailed route emits the actual `+ ROUTED ...` wire geometry that
+{_gr_repair_legalize}# Detailed route emits the actual `+ ROUTED ...` wire geometry that
 # def_stage_progression_check requires. Without it, routed.def carries
 # only NETS without geometry. Best-effort: surface a NONFATAL note if
 # detailed_route fails (open-source iic-osic-tools has it; some custom
