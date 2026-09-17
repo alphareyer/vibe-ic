@@ -478,6 +478,27 @@ def image_version(ref: str) -> Tuple[Optional[str], str, str]:
 def judged_image(env=None, *, explicit: Optional[str] = None,
                  allow_pull: bool = False, repo: str = IMAGE_REPO
                  ) -> JudgedImage:
+    """Wrapper: an unresolvable identity is NOT_MEASURED, never an escape.
+
+    `_eda_pin` raises `ImageNotResolvable` when no step can name an image —
+    the right shape for a caller that asked for an identity and must not be
+    handed a guess. But a verdict-bearing gate calling THIS function already
+    has a channel for "nothing was measured": `ref=None` with `why_not` set,
+    which every caller turns into its own rc-2 marker. Letting the exception
+    escape instead makes a gate exit 1, and rc 1 is its word for a FINDING
+    ABOUT SILICON — inventing a finding out of an absent toolchain is the one
+    direction `test_VACUOUS_no_docker_is_rc2_with_the_marker` exists to forbid.
+    """
+    try:
+        return _judged_image(env, explicit=explicit, allow_pull=allow_pull,
+                             repo=repo)
+    except _pin.ImageNotResolvable as exc:
+        return JudgedImage(None, None, "", "", str(exc))
+
+
+def _judged_image(env=None, *, explicit: Optional[str] = None,
+                  allow_pull: bool = False, repo: str = IMAGE_REPO
+                  ) -> JudgedImage:
     """The image a VERDICT-BEARING gate judges, pinned by digest.
 
     THE THIRD QUESTION, and the one vibe-ic#927 asked first. `resolve()` asks the

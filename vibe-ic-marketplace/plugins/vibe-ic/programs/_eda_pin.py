@@ -91,6 +91,10 @@ from typing import Optional, Sequence, Tuple
 
 __all__ = [
     "IMAGE_DIGEST",
+    "ImageNotResolvable",
+    "IMAGE_NOT_RESOLVABLE",
+    "resolved_image_digest",
+    "reset_resolved_image_digest",
     "IMAGE_REPO_DEFAULT",
     "IMAGE_REPO_ENV",
     "CONTAINER_NAME_ENV",
@@ -115,13 +119,54 @@ __all__ = [
     "container_pin_state",
 ]
 
-#: THE PIN. One literal, in one place on the plugin side, spelled exactly as
-#: `tools/ci/hermetic_candidate_runner.IMAGE_DIGEST` spells it — see
-#: `tests/test_the_run_path_resolves_the_pinned_image.py`, which reads that file
-#: and refuses to let the two drift.
-IMAGE_DIGEST = (
-    "sha256:89a8fd7295208ee6d06e216ade9edc6161d26db52099e9f22ceb77a2d76e3f49"
-)
+#: THE IDENTITY IS RESOLVED, NOT REMEMBERED.
+#:
+#: This module used to carry the digest as a literal, which made adopting a new
+#: EDA image an edit to plugin SOURCE — two repositories with two release
+#: cadences forced to move together. `f1653caa4`
+#: ("stop storing vibeic-eda's version number in this repo") had already removed
+#: exactly that coupling; `11a82fb68` reintroduced it while fixing a real
+#: incident (one host naming three different images in one minute). Both
+#: properties are kept here: the digest is still the IDENTITY every verdict is
+#: recorded against, and it is still compared before attaching to a container —
+#: it is simply ASKED FOR rather than stored.
+#:
+#: RESOLUTION ORDER — the one `_eda_image.judged_image` documented before the pin:
+#:
+#:   1. an explicit `VIBEIC_EDA_IMAGE` / `IIC_EDA_IMAGE` override, reduced to its
+#:      digest. Naming an image by hand is the operator's deliberate call.
+#:   2. the vibeic-eda image ALREADY ON THIS HOST, newest first, by its digest.
+#:      No network and no pull — and, the load-bearing half, **a local image
+#:      cannot move under you**, so two gates in one run cannot resolve to
+#:      different bytes.
+#:   3. the registry, ONLY when the caller passes `allow_pull=True`. A gate that
+#:      silently starts a multi-gigabyte fetch is a gate people switch off.
+#:
+#: RESOLVED ONCE PER PROCESS. The first read fixes the answer for the whole run,
+#: which is the run-wide consistency the literal was reaching for.
+#:
+#: UNRESOLVABLE IS NOT A VERDICT. With none of the three available this raises
+#: `ImageNotResolvable` rather than returning a string nobody measured: "I could
+#: not read which image this is" and "I read it and it was the wrong one" must
+#: never reach a caller in the same shape — the same rule `CONTAINER_IMAGE_MISMATCH`
+#: and `IMAGE_NOT_PRESENT` already state for their own failures.
+IMAGE_NOT_RESOLVABLE = "IMAGE_NOT_RESOLVABLE"
+
+
+class ImageNotResolvable(RuntimeError):
+    """No EDA image identity could be established on this host.
+
+    Carries the reasons each resolution step failed, in order, so the caller
+    reports what was tried instead of a bare absence.
+    """
+
+    def __init__(self, tried: Sequence[str]):
+        self.tried = tuple(tried)
+        super().__init__(
+            f"{IMAGE_NOT_RESOLVABLE}: no vibeic-eda image identity could be "
+            f"resolved on this host; tried: " + "; ".join(self.tried))
+
+
 IMAGE_REPO_DEFAULT = "ghcr.io/vibeic/vibeic-eda"
 IMAGE_REPO_ENV = "VIBEIC_EDA_IMAGE_REPO"
 
@@ -180,6 +225,215 @@ def image_repo(env=None) -> str:
     return (env.get(IMAGE_REPO_ENV) or "").strip() or IMAGE_REPO_DEFAULT
 
 
+#: The envs an operator uses to name an image by hand. Same two `_eda_image`
+#: has always honoured, in the same order.
+_IMAGE_OVERRIDE_ENVS = ("VIBEIC_EDA_IMAGE", "IIC_EDA_IMAGE")
+
+#: One resolve per process. `reset_resolved_image_digest()` clears it; tests use
+#: that, and nothing in a run should.
+_RESOLVED: dict = {}
+
+
+#: Set alongside the cache when THIS module published the identity, so a reset
+#: can tell its own export from one the operator set.
+_EXPORTED = "_vibeic_eda_image_exported_by_pin"
+
+
+def reset_resolved_image_digest() -> None:
+    """Forget the resolved identity, INCLUDING the copy published to the env.
+
+    Clearing only the in-process cache left `VIBEIC_EDA_IMAGE` behind, and the
+    next resolve then took step 1 (the explicit override) and answered with the
+    stale value — which silently bypasses whatever the caller reset in order to
+    exercise. Measured: it turned three mutation arms of
+    `test_the_eda_image_is_resolved_not_remembered` green against mutations
+    they exist to catch. An operator-set override is NOT removed; only the one
+    this module wrote.
+    """
+    if _RESOLVED.pop(_EXPORTED, None):
+        os.environ.pop("VIBEIC_EDA_IMAGE", None)
+    _RESOLVED.clear()
+
+
+#: The shape vibeic-eda stamps on itself from 0.3.19. A label that does not
+#: match is not this image's version — see `_version_key`.
+_FORK_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+
+
+def _host_image_digest(repo: str) -> Tuple[Optional[str], str]:
+    """The newest EDA image ON THIS HOST, by its own version label, as a digest.
+
+    THREE THINGS THIS HAS TO GET RIGHT, all of them measured on the fleet
+    2026-09-17 and all of them wrong in the obvious implementation:
+
+    ACROSS EVERY REPOSITORY NAME, not the configured one. The same bytes are
+    held under different names on different hosts, and docker attaches the
+    RepoDigest to the name it was actually PULLED from. Measured: on one host
+    the ghcr name carried the digest and the mirror name showed `<none>`; on
+    another the mirror carried it and ghcr showed `<none>` — for the identical
+    image. Asking only the configured repository finds nothing on half the
+    fleet and then silently answers with something older.
+
+    ONLY ENTRIES THAT CARRY A REGISTRY DIGEST. A locally built or `docker
+    load`ed image has an Id but no RepoDigest, and an Id is not an identity any
+    other host can replay (`IMAGE_ID_NOT_A_REFERENCE`). Offering one here makes
+    the attach check refuse the host's own correct container.
+
+    NEWEST BY THE IMAGE'S OWN `org.opencontainers.image.version` LABEL, not by
+    tag text and not by docker's ordering. Tags are re-pointed — a mirror
+    `latest` was measured sitting on an image five releases old — so the label
+    the build stamped on itself is the only statement of which release this is.
+    """
+    rc, out, _err = _docker("image", "ls", "--digests", "--format",
+                            "{{.Repository}}\t{{.Digest}}\t{{.ID}}")
+    if rc == -1:
+        return None, _err
+    if rc != 0:
+        return None, f"docker image ls failed: {rc}"
+
+    short = repo.rsplit("/", 1)[-1]
+    seen, candidates = set(), []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        name, digest, image_id = (x.strip() for x in parts[:3])
+        if short not in name:
+            continue
+        got = reference_digest(f"{name}@{digest}") if digest and digest != "<none>" else None
+        if not got or got in seen:
+            continue
+        seen.add(got)
+        candidates.append((got, image_id))
+
+    if not candidates:
+        # FALL BACK TO ASKING THE CONFIGURED REPOSITORY DIRECTLY. The listing
+        # above is the better question -- it sees the image under whatever name
+        # this host pulled it as -- but it is not the only one, and an
+        # environment whose docker does not answer `images` in this shape would
+        # otherwise report "no image" while holding one. Asking the configured
+        # reference by inspect is the narrow question, and a narrow answer beats
+        # a wrong absence.
+        digests, why_direct = local_repo_digests(repo)
+        got = next((d for d in (reference_digest(x) for x in digests) if d), None)
+        if got:
+            return got, ""
+        return None, (f"no {short} image on this host carries a registry digest "
+                      f"(listing found none; {repo}: {why_direct or 'no digest'})")
+
+    def _version_key(image_id: str):
+        rc2, o2, _ = _docker("image", "inspect", "--format",
+                             '{{index .Config.Labels "org.opencontainers.image.version"}}',
+                             image_id)
+        label = o2.strip() if rc2 == 0 else ""
+        # THE FORK'S OWN VERSION ONLY. Images before vibeic-eda 0.3.19 inherit
+        # upstream iic-osic-tools' `2026.06` in this label — a calendar stamp,
+        # not a release of this image. Sorted numerically it outranks every
+        # 0.3.x, so an inherited label on a months-old build would present
+        # itself as the newest thing on the host (MEASURED: it did, and picked
+        # a 0.3.13 image over 0.3.63). Only the three-part shape the fork
+        # stamps counts; anything else is NO version statement.
+        m = _FORK_VERSION_RE.fullmatch(label)
+        return tuple(int(x) for x in m.groups()) if m else ()
+
+    ranked = sorted(candidates, key=lambda c: _version_key(c[1]), reverse=True)
+    top, _ = ranked[0]
+    if not _version_key(ranked[0][1]):
+        return None, (f"{len(candidates)} {short} image(s) carry a digest but none "
+                      "states org.opencontainers.image.version; which release this "
+                      "is cannot be read, and a guess is not an identity")
+    return top, ""
+
+
+def _registry_image_digest(repo: str) -> Tuple[Optional[str], str]:
+    """What the registry currently calls `repo:latest`, by digest."""
+    rc, out, err = _docker("manifest", "inspect", "-v", f"{repo}:latest",
+                           timeout=60)
+    if rc != 0:
+        return None, f"registry did not answer for {repo}:latest: " \
+                     f"{(err or out).strip()[:120] or rc}"
+    m = re.search(r'"digest"\s*:\s*"(sha256:[0-9a-f]{64})"', out)
+    return (m.group(1), "") if m else (
+        None, f"registry answer for {repo}:latest carried no digest")
+
+
+def resolved_image_digest(env=None, *, allow_pull: bool = False) -> str:
+    """THE identity, resolved once per process. Never stored in this repo.
+
+    Raises `ImageNotResolvable` when no step answers — see the doctrine comment
+    above `IMAGE_NOT_RESOLVABLE`.
+    """
+    env = os.environ if env is None else env
+    if "digest" in _RESOLVED:
+        return _RESOLVED["digest"]
+
+    def _hold(digest: str) -> str:
+        """Fix this identity for the whole PROCESS TREE, not just this process.
+
+        A run is many processes: the runner spawns a step, the step spawns a
+        gate. If each resolved independently, an image landing on the host
+        mid-run would move the answer under them — and the attach check, which
+        re-asks on EVERY exec, would start refusing the very container the run
+        has been using for hours. Publishing the resolved identity into the
+        environment makes every child take step 1 (the explicit override) and
+        agree by construction, which is what "resolve once per run" means when
+        the run is not one process.
+        """
+        _RESOLVED["digest"] = digest
+        if not (env.get("VIBEIC_EDA_IMAGE") or "").strip():
+            try:
+                os.environ["VIBEIC_EDA_IMAGE"] = f"{image_repo(env)}@{digest}"
+                _RESOLVED[_EXPORTED] = True
+            except Exception:
+                pass
+        return digest
+
+    tried = []
+    repo = image_repo(env)
+
+    for key in _IMAGE_OVERRIDE_ENVS:
+        named = (env.get(key) or "").strip()
+        if not named:
+            continue
+        if is_bare_image_id(named):
+            tried.append(f"{key}={named} is {IMAGE_ID_NOT_A_REFERENCE}")
+            continue
+        got = reference_digest(named)
+        if got:
+            return _hold(got)
+        digests, why = local_repo_digests(named)
+        got = next((d for d in (reference_digest(x) for x in digests) if d), None)
+        if got:
+            return _hold(got)
+        tried.append(f"{key}={named} carries no digest ({why or 'not present'})")
+
+    got, why = _host_image_digest(repo)
+    if got:
+        return _hold(got)
+    tried.append(f"this host: {why}")
+
+    if allow_pull:
+        got, why = _registry_image_digest(repo)
+        if got:
+            return _hold(got)
+        tried.append(f"registry: {why}")
+    else:
+        tried.append("registry: not asked (allow_pull=False)")
+
+    raise ImageNotResolvable(tried)
+
+
+def __getattr__(name):
+    """`IMAGE_DIGEST` stays readable as a module attribute (PEP 562).
+
+    Every caller in this tree reads it as `_pin.IMAGE_DIGEST`; keeping that
+    spelling is what lets the identity become resolved without touching them.
+    """
+    if name == "IMAGE_DIGEST":
+        return resolved_image_digest()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def image_reference(env=None) -> str:
     """`<configured repo>@<pinned digest>` — the only reference this plugin runs.
 
@@ -187,7 +441,7 @@ def image_reference(env=None) -> str:
     definition of the runtime, which is precisely how the harness and the
     landing preflight came to name images forty patch releases apart.
     """
-    return f"{image_repo(env)}@{IMAGE_DIGEST}"
+    return f"{image_repo(env)}@{resolved_image_digest(env)}"
 
 
 def is_bare_image_id(value) -> bool:
@@ -336,7 +590,8 @@ def pinned_image_present(env=None) -> Tuple[Optional[str], str]:
     """
     ref = image_reference(env)
     digests, why = local_repo_digests(ref)
-    if not why and any(reference_digest(d) == IMAGE_DIGEST for d in digests):
+    pinned = resolved_image_digest(env)
+    if not why and any(reference_digest(d) == pinned for d in digests):
         # The configured repository holds the pinned bytes. Answer with the
         # reference the operator named, so a reader sees the name they set.
         return ref, ""
@@ -344,14 +599,14 @@ def pinned_image_present(env=None) -> Tuple[Optional[str], str]:
     # is not held here, or docker resolved it to bytes carrying a different
     # digest. Both are answered by the same question, asked correctly: does
     # THIS HOST hold an image whose digest is the pinned one, under ANY name?
-    held, why_ls = local_references_for_digest(IMAGE_DIGEST)
+    held, why_ls = local_references_for_digest(pinned)
     if held:
         return held[0], ""
     if why_ls:
         # "Could not read it" is not "read it and it was absent".
-        return None, (f"{IMAGE_NOT_PRESENT}: {IMAGE_DIGEST} (this host could "
+        return None, (f"{IMAGE_NOT_PRESENT}: {pinned} (this host could "
                       f"not be asked what it holds: {why_ls})")
-    return None, (f"{IMAGE_NOT_PRESENT}: {IMAGE_DIGEST} (no image on this host "
+    return None, (f"{IMAGE_NOT_PRESENT}: {pinned} (no image on this host "
                   f"carries that digest under any repository; {ref} "
                   + (f"is not present: {why}" if why else
                      f"resolved to an image whose RepoDigests are "
@@ -361,21 +616,28 @@ def pinned_image_present(env=None) -> Tuple[Optional[str], str]:
 def default_container_name(env=None) -> str:
     """The container name a run uses when the operator names none.
 
-    DERIVED FROM THE REQUIRED DIGEST, so that two different pins are two
-    different containers by construction. The shared literal `vibeic-eda` is
-    what let a run attach to another lane's 0.3.46 container and report a PASS
-    about it; a name that carries the digest cannot collide that way, and a
-    reader of `docker ps` can still see what it is.
+    THE SHARED NAME, which is also what `.mcp.json` sets as `EDA_CONTAINER`, so
+    the MCP tools and the programs address ONE container instead of two.
 
-    `VIBEIC_EDA_CONTAINER` still names one explicitly — that is the operator's
-    call and it is honoured. It moves the NAME only: `container_matches_pin`
-    still has to agree about the bytes.
+    This was a digest-derived name while the digest was a literal: with a pin
+    that never moved, the shared name was guaranteed to hold the wrong bytes,
+    and deriving the name from the pin was the way to avoid attaching to it.
+    That reasoning does not survive the pin's removal — the identity is now
+    whatever this host actually has, so the shared container IS the right one by
+    construction, and the two paths were only ever split because the pin had
+    gone stale.
+
+    THE SAFETY THAT MATTERS IS UNCHANGED, and it never lived in the name:
+    `container_matches_pin` still measures the container's image digest and
+    still refuses a container holding different bytes. A name cannot make that
+    check weaker; it only decides which container gets asked.
+
+    `VIBEIC_EDA_CONTAINER` still names one explicitly, for an operator running
+    lanes side by side that must not share a container.
     """
     env = os.environ if env is None else env
     named = (env.get(CONTAINER_NAME_ENV) or "").strip()
-    if named:
-        return named
-    return f"{CONTAINER_NAME_PREFIX}-{IMAGE_DIGEST.split(':', 1)[1][:12]}"
+    return named or CONTAINER_NAME_PREFIX
 
 
 def container_image_digest(container: str) -> Tuple[Optional[str], str]:
@@ -485,12 +747,13 @@ def container_pin_state(container: str, env=None) -> Tuple[str, str]:
     got, why = container_image_digest(container)
     if got is None:
         return "UNREADABLE", (why or f"{CONTAINER_ABSENT}: {container}")
-    if got == IMAGE_DIGEST:
+    required = resolved_image_digest(env)
+    if got == required:
         return "MATCH", ""
     return "MISMATCH", (
         f"{CONTAINER_IMAGE_MISMATCH}: container {container} runs {got}, "
-        f"but the pinned runtime is {image_repo(env)}@{IMAGE_DIGEST}; "
-        f"required {IMAGE_DIGEST}, found {got}")
+        f"but the pinned runtime is {image_repo(env)}@{required}; "
+        f"required {required}, found {got}")
 
 
 def container_matches_pin(container: str, env=None) -> str:
