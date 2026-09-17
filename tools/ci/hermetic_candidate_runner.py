@@ -55,9 +55,34 @@ SCHEMA = 1
 #: ONE config point that defaults to the published repository.  A deployment
 #: that serves the same bytes from elsewhere sets the env; it does NOT edit this
 #: file, and it CANNOT change which bytes are demanded.
-IMAGE_DIGEST = (
-    "sha256:89a8fd7295208ee6d06e216ade9edc6161d26db52099e9f22ceb77a2d76e3f49"
-)
+#: RESOLVED, NOT REMEMBERED. The digest was a literal here and a second literal
+#: in `programs/_eda_pin.py`, bound to each other by a drift test — two copies
+#: of a number this repo had to edit every time the EDA image released. The
+#: image and the plugin are separate products on separate cadences; a run takes
+#: the newest EDA image this host holds. `_eda_pin` is the one place that asks.
+def _resolve_digest() -> str:
+    import sys as _sys
+    _p = str(Path(__file__).resolve().parents[2] / "vibe-ic-marketplace"
+             / "plugins" / "vibe-ic" / "programs")
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+    import _eda_pin as _pin
+    return _pin.resolved_image_digest()
+
+
+def __getattr__(name):
+    """`IMAGE_DIGEST` stays readable (PEP 562), resolved rather than stored.
+
+    Callers across this repo — the landing arms, the suite harness and the
+    tests — read `hermetic_candidate_runner.IMAGE_DIGEST` as a module
+    attribute. Keeping that spelling is what lets the identity stop being a
+    literal without rewriting any of them; the same seam `_eda_pin` carries.
+    """
+    if name == "IMAGE_DIGEST":
+        return _resolve_digest()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 IMAGE_REPO_DEFAULT = "ghcr.io/vibeic/vibeic-eda"
 IMAGE_REPO_ENV = "VIBEIC_EDA_IMAGE_REPO"
 
@@ -73,7 +98,7 @@ def image_repo() -> str:
 
 def image_reference() -> str:
     """`<configured repo>@<pinned digest>` -- the only reference this runner uses."""
-    return f"{image_repo()}@{IMAGE_DIGEST}"
+    return f"{image_repo()}@{_resolve_digest()}"
 
 
 #: Resolved once, at import, so that every check in this module and every
@@ -815,7 +840,14 @@ def carries_pinned_digest(ref: Any) -> bool:
     is refused. What it stops asserting is which registry name the same bytes
     were fetched under, which is a fact about a host's network.
     """
-    return reference_digest(ref) == IMAGE_DIGEST
+    # COMPARE AGAINST THE IMAGE THIS RUN RESOLVED, not a fresh resolve. `IMAGE`
+    # is fixed once at module load (and a caller may rebind it — the fixed-image
+    # path does exactly that at :893). Re-resolving here would ask the HOST a
+    # second time and could answer differently, which is the mid-run drift this
+    # decoupling had to avoid; it also makes the check unanswerable for any
+    # caller that set `IMAGE` deliberately.
+    required = reference_digest(IMAGE)
+    return required is not None and reference_digest(ref) == required
 
 
 def _local_reference_carrying_pin(docker: Docker) -> str | None:
@@ -889,7 +921,7 @@ def _image_profile(docker: Docker) -> dict[str, Any]:
         # host. Both references are named, here and in the receipt, so the
         # substitution is auditable after the fact rather than inferable.
         print(f"[DISCLOSURE] the configured runtime reference {configured} is "
-              f"not present on this host; the pinned digest {IMAGE_DIGEST} was "
+              f"not present on this host; the resolved digest {_resolve_digest()} was "
               f"found under {IMAGE} and that is what will be run",
               file=sys.stderr)
     return {
