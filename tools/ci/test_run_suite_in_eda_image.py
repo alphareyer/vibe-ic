@@ -213,33 +213,30 @@ def test_no_engine_declares_itself_as_the_control_it_is():
 
 
 def _pinned_parts() -> dict:
-    """The two constants the harness reads: the pinned DIGEST and the DEFAULT
-    repository.
+    """The identity the runner will use, ASKED not parsed.
 
-    The pin is split on purpose. The digest is the identity -- the bytes -- and
-    is asserted everywhere. The repository is deployment configuration, because
-    the same bytes are served from the published registry and from a LAN one and
-    which a host can reach is a fact about the network. This helper composes them
-    exactly as the harness does, so the test moves with the harness and not with
-    a copy of its answer.
+    This used to `ast.parse` `hermetic_candidate_runner.py` for an
+    `IMAGE_DIGEST` assignment — right while the digest was a literal, and the
+    reason it was read here rather than copied. There is no literal now: the
+    identity is resolved from whatever EDA image this host holds, so a source
+    parse finds nothing and this raised on every id in the file. Ask the module,
+    which is still the OTHER module and still refuses rather than falling back.
     """
-    import ast
-    wanted = ("IMAGE_DIGEST", "IMAGE_REPO_DEFAULT")
-    src = (_REPO / "tools/ci/hermetic_candidate_runner.py").read_text(
-        encoding="utf-8")
-    found = {}
-    for node in ast.parse(src).body:
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            name = getattr(target, "id", "")
-            if name in wanted and name not in found:
-                found[name] = ast.literal_eval(node.value)
-    missing = [name for name in wanted if name not in found]
-    if missing:
+    import importlib.util as _u
+    import sys as _sys
+    p = _CI / "hermetic_candidate_runner.py"
+    spec = _u.spec_from_file_location("_hcr_suite_probe", p)
+    mod = _u.module_from_spec(spec)
+    # Register before exec: the runner defines dataclasses, and @dataclass
+    # resolves `sys.modules.get(cls.__module__).__dict__` while processing them.
+    _sys.modules["_hcr_suite_probe"] = mod
+    spec.loader.exec_module(mod)
+    digest = mod._resolve_digest()
+    if not digest:
         raise AssertionError(
-            f"hermetic_candidate_runner.py pins no {', '.join(missing)}")
-    return found
+            "hermetic_candidate_runner resolved no image identity on this host")
+    return {"IMAGE_DIGEST": digest,
+            "IMAGE_REPO_DEFAULT": mod.IMAGE_REPO_DEFAULT}
 
 
 def _pinned_image() -> str:
@@ -288,14 +285,21 @@ def test_the_pinned_image_is_a_digest_and_matches_the_landing_preflight():
     assert digest not in preflight, (
         "the landing runtime preflight has grown a literal digest again")
 
-    import ast
-    pin_src = (programs / "_eda_pin.py").read_text(encoding="utf-8")
-    plugin_pin = None
-    for node in ast.parse(pin_src).body:
-        if isinstance(node, ast.Assign) and any(
-                getattr(t, "id", "") == "IMAGE_DIGEST" for t in node.targets):
-            plugin_pin = ast.literal_eval(node.value)
-            break
+    # THE TWO HALVES STILL HAVE TO AGREE, and now they agree by construction:
+    # both ASK `_eda_pin.resolved_image_digest()` rather than each holding a
+    # literal that could drift from the other. This used to `ast.parse` the
+    # plugin module for an `IMAGE_DIGEST` assignment; there is no assignment to
+    # find, so it read None. Asking the module keeps the question — "do the
+    # harness and the plugin name the same image" — answerable, and it is still
+    # a real question: the harness reaches the identity through the runner and
+    # the plugin through its own module, so a seam between them would show.
+    import importlib.util as _u
+    import sys as _sys
+    _spec = _u.spec_from_file_location("_pin_agree_probe", programs / "_eda_pin.py")
+    _pin = _u.module_from_spec(_spec)
+    _sys.modules["_pin_agree_probe"] = _pin
+    _spec.loader.exec_module(_pin)
+    plugin_pin = _pin.resolved_image_digest()
     assert plugin_pin == digest, (
         "the pinned runtime and the plugin's pin name different images: "
         f"harness {digest} vs plugin {plugin_pin}")
@@ -364,7 +368,7 @@ def test_the_harness_refuses_when_the_pin_cannot_be_read():
     """A read that fails must REFUSE, never fall back to a literal — a fallback
     is exactly how the second copy comes back."""
     text = _HARNESS.read_text(encoding="utf-8")
-    assert "cannot read the pinned runtime image" in text
+    assert "cannot resolve the EDA runtime image" in text
     assert "there is deliberately no fallback literal here" in text
 
 

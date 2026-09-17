@@ -156,33 +156,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" \
 # demanded, and a host that reaches those bytes at a different registry sets
 # VIBEIC_EDA_IMAGE_REPO instead of editing either file.
 _PIN_SRC="$REPO_ROOT/tools/ci/hermetic_candidate_runner.py"
-_PIN_PARTS="$(python3 - "$_PIN_SRC" <<'PY' || true
-import ast, sys
-WANTED = ("IMAGE_DIGEST", "IMAGE_REPO_DEFAULT")
-try:
-    tree = ast.parse(open(sys.argv[1], encoding="utf-8").read())
-except Exception:
-    sys.exit(1)
-found = {}
-for node in tree.body:
-    if not isinstance(node, ast.Assign):
-        continue
-    for target in node.targets:
-        name = getattr(target, "id", "")
-        if name in WANTED and name not in found:
-            try:
-                value = ast.literal_eval(node.value)
-            except Exception:
-                sys.exit(1)
-            if not isinstance(value, str) or not value:
-                sys.exit(1)
-            found[name] = value
-if len(found) != len(WANTED):
-    sys.exit(1)
-print(found["IMAGE_DIGEST"])
-print(found["IMAGE_REPO_DEFAULT"])
-PY
-)"
+_PIN_DIR="$REPO_ROOT/vibe-ic-marketplace/plugins/vibe-ic/programs"
+# RESOLVED, NOT PARSED. This used to ast.parse hermetic_candidate_runner.py
+# for an IMAGE_DIGEST assignment; the identity is no longer a literal
+# anywhere -- it is asked of this host at run time -- so a source parse
+# finds nothing and the old reader exited 1, which this script turns into
+# `die`. Ask the module, which is the only thing that knows.
+_PIN_PY='import _eda_pin as p; print(p.resolved_image_digest()); print(p.IMAGE_REPO_DEFAULT)'
+_PIN_PARTS="$(cd "$_PIN_DIR" && python3 -c "$_PIN_PY" 2>/dev/null || true)"
 _PIN_DIGEST="$(printf '%s\n' "$_PIN_PARTS" | sed -n 1p)"
 _PIN_REPO_DEFAULT="$(printf '%s\n' "$_PIN_PARTS" | sed -n 2p)"
 _PIN_REPO="${VIBEIC_EDA_IMAGE_REPO:-$_PIN_REPO_DEFAULT}"
@@ -193,7 +174,7 @@ else
 fi
 case "$IMAGE_DEFAULT" in
   *"@sha256:"*) ;;
-  *) die "cannot read the pinned runtime image (IMAGE_DIGEST + IMAGE_REPO_DEFAULT) from $_PIN_SRC.
+  *) die "cannot resolve the EDA runtime image from $_PIN_DIR.
     That constant is the single place this repo pins the runtime, and this
     harness reads it rather than keeping a copy that can drift. Fix the pin, or
     pass --image explicitly; there is deliberately no fallback literal here." ;;

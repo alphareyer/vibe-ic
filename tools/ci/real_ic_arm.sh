@@ -156,7 +156,14 @@ PROGRAMS="$TREE/vibe-ic-marketplace/plugins/vibe-ic/programs"
 # the one place that logic lives already handles the mirror-vs-ghcr name, the
 # dangling pulled-by-digest image (`docker image ls -a`), and the difference
 # between "absent" and "could not be asked".
-PIN=$(cd "$PROGRAMS" && python3 -c 'import _eda_pin; print(_eda_pin.IMAGE_DIGEST)' 2>/dev/null || true)
+# NO `|| true` HERE. "could not resolve" is a reachable state now, and
+# swallowing it left PIN empty, which downstream reads as "no requirement"
+# and FAILS OPEN. An arm that cannot name its runtime must refuse.
+PIN=$(cd "$PROGRAMS" && python3 -c 'import _eda_pin; print(_eda_pin.IMAGE_DIGEST)' 2>/dev/null)
+if [ -z "${PIN:-}" ]; then
+  echo "[REFUSE] real_ic_arm: the EDA image identity could not be resolved on this host; nothing was measured." >&2
+  exit 2
+fi
 resolve_runnable_image() {
   (cd "$PROGRAMS" && python3 -c '
 import sys

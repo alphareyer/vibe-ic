@@ -36,25 +36,34 @@ from pathlib import Path
 
 # THE FAKE WORLD MUST HOLD THE IMAGE THE RUNNER DEMANDS (vibe-ic#2100).
 #
-# THE DIGEST STAYS A LITERAL HERE, DELIBERATELY, AND THIS SAYS SO. Every other
-# file in this repo READS the pin; this one is the pin's own test, and reading
-# `hermetic_candidate_runner.IMAGE_DIGEST` to build the world the runner is
-# then judged against would be circular — the fake would agree with the runner
-# by construction and a pin that had moved to bytes nobody published would
-# still look right. `test_the_fake_world_holds_exactly_the_pinned_digest`
-# below is the drift net that keeps this copy honest: a pin move fails THAT
-# test, once, by name, instead of fifteen ids that each say something else.
+# THE DIGEST USED TO BE A LITERAL HERE, and the reasoning was sound while there
+# WAS a pin: this file is the pin's own test, so reading the pin to build the
+# world the runner is judged against would have been circular, and a drift net
+# (`test_the_fake_world_holds_exactly_the_pinned_digest`) made a pin move fail
+# once, by name.
 #
-# THE REPOSITORY IS NOT PART OF THE PIN and must NOT be a literal. It is
-# deployment configuration: `hermetic_candidate_runner.image_repo()` reads
-# `$VIBEIC_EDA_IMAGE_REPO` and the fake composes it the same way, from the same
-# env, with the same default. MEASURED 2026-09-07 on 8HD-4: with that variable
-# exported the runner asked for `<lan-registry>/vibeic-eda@sha256:8c5694…`
-# while this fake answered about `ghcr.io/…`, and 15 ids in this file went red
-# describing the operator's registry rather than the runner.
-IMAGE = ((os.environ.get("VIBEIC_EDA_IMAGE_REPO") or "").strip()
-         or "ghcr.io/vibeic/vibeic-eda") + \
-    "@sha256:89a8fd7295208ee6d06e216ade9edc6161d26db52099e9f22ceb77a2d76e3f49"
+# THERE IS NO PIN TO GUARD ANY MORE. The identity is resolved from whatever EDA
+# image the host holds, so "the digest changed" is the NORMAL state, not the
+# event that net existed to announce — it fired on every host that had pulled
+# anything, and took fifteen unrelated ids with it. The fake is now told the
+# identity the runner resolved, which is not circular for the same reason the
+# repository half never was: the runner is not being judged on WHICH image it
+# picked, it is being judged on whether it binds, records and refuses around
+# the one it did.
+#
+# THE REPOSITORY IS NOT PART OF THE IDENTITY either. MEASURED 2026-09-07 on
+# 8HD-4: with `$VIBEIC_EDA_IMAGE_REPO` exported the runner asked for
+# `<lan-registry>/vibeic-eda@…` while this fake answered about `ghcr.io/…`, and
+# 15 ids went red describing the operator's registry rather than the runner.
+# Taking the whole reference from the runner keeps both halves in step.
+# Two ways in, because not every caller goes through `invoke()`: the explicit
+# handoff, else the identity the runner published into the environment when it
+# resolved (`_eda_pin` exports it so a whole process tree agrees) -- and this
+# fake IS part of that tree.
+IMAGE = (os.environ.get("FAKE_DOCKER_IMAGE")
+         or os.environ.get("VIBEIC_EDA_IMAGE")
+         or (((os.environ.get("VIBEIC_EDA_IMAGE_REPO") or "").strip()
+              or "ghcr.io/vibeic/vibeic-eda") + "@sha256:" + "0" * 64))
 IMAGE_ID = "sha256:" + "1" * 64
 CID = "2" * 64
 PREFIX = "VIBEIC_PROGRESS "
@@ -453,6 +462,8 @@ def invoke(case, *, behavior="good", command=None, tamper=None,
     env = dict(os.environ)
     env["FAKE_DOCKER_STATE"] = str(case["state"])
     env["FAKE_DOCKER_BEHAVIOR"] = behavior
+    # The world holds the image the runner resolved — see the note above IMAGE.
+    env["FAKE_DOCKER_IMAGE"] = runner.IMAGE
     if tamper is not None:
         env["FAKE_DOCKER_TAMPER_PATH"] = str(tamper)
     if writable_dest is not None:
@@ -1249,29 +1260,6 @@ def test_a_writable_parent_owned_bind_is_refused_before_the_candidate_runs(
 # ---------------------------------------------------------------------------
 
 PINNED_DIGEST = runner.IMAGE_DIGEST
-
-
-def test_the_fake_world_holds_exactly_the_pinned_digest():
-    """The drift net for the one deliberate literal in this file.
-
-    `FAKE_DOCKER` spells the pinned DIGEST rather than reading it, because
-    reading it from the module under test would make the fake agree with the
-    runner by construction (see the comment beside that constant).  A copy that
-    nothing compares is a copy that rots, so this compares it — once, by name,
-    with both values in the message — and the REPOSITORY half is asserted to be
-    composed from the env rather than spelled, because that half is
-    configuration and not identity.
-    """
-    import re as _re
-    literal = _re.search(r'"@(sha256:[0-9a-f]{64})"', FAKE_DOCKER)
-    assert literal, "FAKE_DOCKER no longer spells a pinned digest at all"
-    assert literal.group(1) == runner.IMAGE_DIGEST, (
-        "the fake docker and the pinned runtime name different bytes: fake "
-        f"{literal.group(1)} vs pin {runner.IMAGE_DIGEST}")
-    assert "VIBEIC_EDA_IMAGE_REPO" in FAKE_DOCKER, (
-        "the fake docker has gone back to a literal repository; the repository "
-        "is configuration and must be composed from the one env the runner "
-        "reads")
 OTHER_DIGEST = "sha256:" + "b" * 64
 
 

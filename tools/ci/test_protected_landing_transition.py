@@ -90,27 +90,28 @@ def _pinned_runner_image() -> str:
     REFUSAL, never a fallback literal, because a fallback is how the second
     copy comes back.
     """
-    import ast
-    wanted = ("IMAGE_DIGEST", "IMAGE_REPO_DEFAULT")
-    tree = ast.parse((_HERE / "hermetic_candidate_runner.py").read_text(
-        encoding="utf-8"))
-    found = {}
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        for target in node.targets:
-            name = getattr(target, "id", "")
-            if name in wanted and name not in found:
-                found[name] = ast.literal_eval(node.value)
-    missing = [name for name in wanted if name not in found]
-    assert not missing, (
-        f"hermetic_candidate_runner.py pins no {', '.join(missing)}; this file "
-        "reads the pin and deliberately keeps no copy to fall back to")
-    # THE DEFAULT REPOSITORY, NEVER THE ENVIRONMENT.  This is the COMMITTED
-    # reference — the one `_runner_profile` requires a manifest to carry — and
-    # a committed reference cannot depend on which registry the host running
-    # the test happens to be configured for.  See the docstring above.
-    return f"{found['IMAGE_REPO_DEFAULT']}@{found['IMAGE_DIGEST']}"
+    # THE DRIFT NET HAS NOTHING LEFT TO GUARD. This read existed because the
+    # digest was a literal in TWO modules that could move apart. Both literals
+    # are gone -- the identity is resolved from this host at run time -- so
+    # parsing a source file for a constant finds nothing and asserts. Ask the
+    # runner for the identity it will actually use: still the OTHER module (not
+    # circular), still a refusal rather than a fallback literal.
+    import importlib.util as _u
+    import sys as _sys
+    _p = Path(__file__).resolve().parent / "hermetic_candidate_runner.py"
+    _spec = _u.spec_from_file_location("_hcr_pin_probe", _p)
+    _mod = _u.module_from_spec(_spec)
+    # REGISTER BEFORE EXEC: that module defines dataclasses, and @dataclass
+    # resolves `sys.modules.get(cls.__module__).__dict__` while processing the
+    # class -- an unregistered module makes that None and the exec dies naming
+    # dataclasses.py rather than this loader.
+    _sys.modules["_hcr_pin_probe"] = _mod
+    _spec.loader.exec_module(_mod)
+    digest = _mod._resolve_digest()
+    assert digest, (
+        "hermetic_candidate_runner resolved no image identity; this file reads "
+        "the runner and deliberately keeps no copy to fall back to")
+    return f"{_mod.IMAGE_REPO_DEFAULT}@{digest}"
 
 
 _RUNNER_IMAGE = _pinned_runner_image()
