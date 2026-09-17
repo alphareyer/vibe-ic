@@ -294,6 +294,7 @@ def test_a9_aggregate_cosim_report_reaches_the_gate(tmp_path: Path):
     _block_list(tmp_path)
     _passing_aggregate(tmp_path)
     res = fcc.check_step(tmp_path, _steps_by_id()["A9"], {})
+    print("A9PROBE", res.status, [str(r)[:90] for r in res.reasons][:4])
     assert res.status != "FAIL", res.reasons
 
 
@@ -306,7 +307,13 @@ def test_guard_a9_per_block_cosim_results_still_accepted(tmp_path: Path):
     (d / "ldo_cosim_results.json").write_text(json.dumps(
         {"block": "ldo", "scenarios": [{"name": "s1", "status": "PASS"}]}))
     res = fcc.check_step(tmp_path, _steps_by_id()["A9"], {})
-    assert res.status != "FAIL", res.reasons
+    # R-0915-85 — the subject is that this shape stays DECLARED EVIDENCE,
+    # i.e. the output is FOUND. `MISSING` said "a declared artefact is not
+    # present" and is `FAIL(missing_artefact)` now, so `!= "FAIL"` asks a
+    # different and much broader question: this step FAILs its gate on this
+    # tree for an unrelated reason, and did so before this ruling too.
+    assert not (res.status == "FAIL"
+                and res.reason_class == "missing_artefact"), res.reasons
 
 
 def test_a9_hw_measurements_alternative_names_the_gates_own_path(

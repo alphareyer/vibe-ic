@@ -222,7 +222,10 @@ def test_DEFECT_complete_bundle_is_recorded_as_verified(tmp_path):
 
 
 @pytest.mark.parametrize("own_tree,expect,rc", [
-    (False, "NOT_MEASURED", 2),   # project has no bundle tree of its own
+    # `verdict` here is the professional-TB GATE's own word, not a step
+    # status: R-0915-85 claims neither it nor the `status` field beside it,
+    # which this same record carries as PASS.
+    (False, "NOT_CHECKED", 2),   # project has no bundle tree of its own
     (True, "FAIL", 1),           # project HAS one; the foreign dir is not it
 ])
 def test_DEFECT_out_of_project_dir_never_certifies(tmp_path, own_tree, expect,
