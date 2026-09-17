@@ -112,10 +112,11 @@ def test_every_repair_in_the_sdr_loop_is_preceded_by_a_parasitics_source(
         assert call in loop, f"{call!r} is not in the SDR loop at all"
         i = lo + loop.index(call)
         head = child[:i]
-        assert "estimate_parasitics -global_routing" in head, (
+        # R-0915-93: the source is the grader SPEF of the pass, not an estimate.
+        assert "sdr_pass.spef} _rszp" in head, (
             f"{call!r} runs with no resizer parasitics source before it; "
             "EST-0027 and a wire-load repair are the measured consequence")
-        gap = len(head) - head.rindex("estimate_parasitics -global_routing")
+        gap = len(head) - head.rindex("sdr_pass.spef} _rszp")
         assert gap < 4000, (
             f"the nearest parasitics source is {gap} chars before {call!r}; "
             "it is probably not the one that governs this call")
@@ -166,7 +167,7 @@ def test_with_parasitics_the_census_still_reports_a_real_number(tmp_path):
         "  set f [open $path w]; puts $f SPEF; close $f\n"
         "}\n"
         "proc extract_parasitics {args} { return }\n"
-        "proc estimate_parasitics {args} { set ::EP 1; return }\n"
+        "proc estimate_parasitics {args} { puts STUB_ESTIMATE_CALLED; return }\n"
         "set ::EP 0\n"
         "proc report_check_types {args} {\n"
         "  set path \"\"; set take 0\n"
@@ -201,8 +202,10 @@ def test_with_parasitics_the_census_still_reports_a_real_number(tmp_path):
         "source [lindex $argv 0]\n", _STUB + harness + child, tmp_path)
     assert "SDR_DRV_BY_KIND: total=7" in out, (
         f"[{route}] the census stopped grading: {out[-1500:]}")
-    assert "SDR_RSZ_PARASITICS: estimate_parasitics -global_routing OK" in out, (
-        f"[{route}] the resizer source did not run: {out[-1500:]}")
+    assert "SDR_RSZ_PARASITICS: grader SPEF read" in out, (
+        "R-0915-93: the post-route repair must read its pass's grader SPEF")
+    assert "STUB_ESTIMATE_CALLED" not in out, (
+        "R-0915-93: the post-route SDR repair must never call estimate_parasitics")
     assert blind_passes(out) == [], (
         f"[{route}] a pass still repaired on wire load models")
 
