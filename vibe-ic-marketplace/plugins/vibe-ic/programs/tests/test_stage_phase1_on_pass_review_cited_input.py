@@ -520,7 +520,7 @@ def test_an_artefact_with_no_provenance_claim_is_not_checked_rather_than_accepte
     # on the RULE, so this cannot pass because a sibling happened to be the
     # one that could not look
     assert verdict_of(json.loads((tmp_path / "r.json").read_text())) \
-        == "NOT_MEASURED", r.stdout
+        == "NOT_CHECKED", r.stdout
 
 
 def test_a_missing_generated_docs_directory_is_not_checked(tmp_path):
@@ -704,7 +704,7 @@ def test_the_partition_over_the_published_corpus_does_not_move():
     scratch = Path(tempfile.mkdtemp(prefix="phase1_on_pass_review_corpus_"))
     rejects, accepts, unchecked = set(), set(), set()
     records, run_dirs = {}, {}
-    mine = {"ACCEPT": set(), "REJECT": set(), "NOT_MEASURED": set(),
+    mine = {"ACCEPT": set(), "REJECT": set(), "NOT_CHECKED": set(),
             "DISARMED": set()}
     for i, cell in enumerate(cells):
         rel = str(cell.relative_to(root))

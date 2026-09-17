@@ -328,7 +328,7 @@ def test_step_top_only_does_not_touch_submodule(tmp_path):
         " sub u(.clk(clk),.reset_n(rst_n),.q(q)); endmodule\n")
     # top is already canonical (rst_n) → SKIP; sub must be untouched.
     r = P.step_reset_clock_variant_aliases(tmp_path, "top")
-    assert r.status == "PASS"
+    assert r.status == "NOT_APPLICABLE"
     assert "module sub(" in (rtl / "sub.v").read_text()
     assert "reset_n" in (rtl / "sub.v").read_text()
 
@@ -595,7 +595,7 @@ def test_step_round4_l9_native_spelling_guards_skip(tmp_path):
                       {"name": "data_in"}, {"name": "detected"}]}))
     before = (rtl / "sequence_detector.v").read_text()
     r = P.step_reset_clock_variant_aliases(tmp_path, "chip_top")
-    assert r.status == "PASS", (r.status, r.detail)
+    assert r.status == "NOT_APPLICABLE", (r.status, r.detail)
     assert "L9 declares native port spelling" in r.detail
     assert (rtl / "sequence_detector.v").read_text() == before
 
@@ -613,7 +613,7 @@ def test_step_round4_l9_empty_ports_does_not_authorize_alias(tmp_path):
         "top_module": "sequence_detector", "top_ports": []}))
     before = (rtl / "sequence_detector.v").read_bytes()
     r = P.step_reset_clock_variant_aliases(tmp_path, "chip_top")
-    assert r.status == "PASS", (r.status, r.detail)
+    assert r.status == "NOT_APPLICABLE", (r.status, r.detail)
     assert (rtl / "sequence_detector.v").read_bytes() == before
     assert "request" in r.detail.lower()
 
@@ -690,7 +690,7 @@ def test_step_multi_instance_parent_is_genuine_not_thin(tmp_path):
         "  core u1(.clk(clk), .reset_n(reset_n), .q(q1));\n"
         "  assign q = q0 ^ q1;\nendmodule\n")
     r = P.step_reset_clock_variant_aliases(tmp_path, "core")
-    assert r.status == "PASS", (r.status, r.detail)
+    assert r.status == "NOT_APPLICABLE", (r.status, r.detail)
     assert "real internal submodule" in r.detail
     r2 = P.step_reset_clock_variant_aliases(tmp_path, "chip_top")
     assert r2.status == "NOT_MEASURED", (r2.status, r2.detail)
@@ -715,7 +715,7 @@ def test_step_skips_when_top_is_genuine_leaf_submodule(tmp_path):
         "  leaf u1(.clk(clk), .reset_n(reset_n), .q(q1));\n"
         "  other u2(.clk(clk), .q(q2));\nendmodule\n")
     r = P.step_reset_clock_variant_aliases(tmp_path, "leaf")
-    assert r.status == "PASS", (r.status, r.detail)
+    assert r.status == "NOT_APPLICABLE", (r.status, r.detail)
     assert "module leaf(" in (rtl / "leaf.v").read_text()
     assert "__rcvar_inner" not in (rtl / "leaf.v").read_text()
     iv = shutil.which("iverilog")

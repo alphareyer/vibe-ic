@@ -56,6 +56,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import phase3_one_shot_runner as runner  # noqa: E402
+import verdict as _V  # noqa: E402  R-0915-85
 import extraction_input_capability_check as eicap  # noqa: E402
 import eda_report_audit as audit  # noqa: E402
 
@@ -435,7 +436,18 @@ def test_all_clean_run_still_aggregates_to_pass():
 
 
 def test_blocked_is_in_the_verdict_tier_vocabulary():
-    assert "BLOCKED" in runner._VERDICT_TIERS
+    """R-0915-85 — `BLOCKED` is a VERDICT plus a REASON, and both must exist.
+
+    The tier vocabulary is the five now, so asserting the old word would only
+    say that a deleted string is absent. What this test protects is that the
+    runner can still EXPRESS "this step could not look": the verdict
+    `NOT_MEASURED` is one of its tiers, and `input_absent` — the reason
+    `verdict.ReasonClass` records as the replacement for the `step_preflight`
+    BLOCKED refusal — is a reason the vocabulary has. Both halves, because a
+    word with no reason is the bag the old vocabulary was.
+    """
+    assert _V.Verdict.NOT_MEASURED.value in runner._VERDICT_TIERS
+    assert _V.ReasonClass.INPUT_ABSENT.value in {r.value for r in _V.ReasonClass}
 
 
 def test_step31_gate_reports_blocked_and_refuses_signoff(tmp_path):

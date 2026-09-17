@@ -1973,9 +1973,12 @@ def step_phase1(project: Path) -> StepResult:
     gd = _pl.generated_docs_dir(project)
     L_files = list(gd.glob("L*.json")) if gd.is_dir() else []
     if len(L_files) >= 13:
+        # main: SKIP. The documents this step emits are already on disk,
+        # so the outcome is present and was NOT computed in this run.
         return StepResult("phase1", "PASS",
                           time.time() - t0,
-                          f"generated_docs already has {len(L_files)} L docs")
+                          f"generated_docs already has {len(L_files)} L docs",
+                          disclosures=[_V.Disclosure.REUSED_RECORD])
     runner = PROGRAMS_DIR / "phase1_one_shot_runner.py"
     if not runner.is_file():
         return StepResult("phase1", "FAIL",
@@ -5891,8 +5894,11 @@ def step_leaf_typo_aliases(project: Path) -> StepResult:
         return StepResult("leaf_typo_aliases", "PASS", time.time() - t0,
                           f"emitted {len(emitted)} canonical-spelling alias "
                           f"wrapper(s): {', '.join(emitted)}", out_files)
-    return StepResult("leaf_typo_aliases", "PASS", time.time() - t0,
-                      "no leaf-name typo detected (no alias wrapper needed)")
+    # main: SKIP. No typo means no subject — the RTL itself declares this
+    # step inapplicable. `PASS` here would claim an alias wrapper was emitted.
+    return StepResult("leaf_typo_aliases", "NOT_APPLICABLE", time.time() - t0,
+                      "no leaf-name typo detected (no alias wrapper needed)",
+                      declared_by="the leaf module names in rtl/")
 
 
 _RCVAR_STRING_RE = re.compile(r'"(?:[^"\\\n]|\\.)*"')
@@ -6174,8 +6180,12 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
     # the "leaf" and wrap it a second time, breaking the existing wrapper's
     # 1:1 wiring. Bail out before any target resolution.
     if any(m.endswith("__rcvar_inner") for m in all_modules):
+        # main: SKIP. The wrapper this step exists to emit is already on
+        # disk, so the outcome is present and was not computed in this run —
+        # `PASS` carrying the record it reused, never a bare PASS.
         return StepResult("reset_clock_variant_aliases", "PASS",
-                          time.time() - t0, "alias wrapper already present")
+                          time.time() - t0, "alias wrapper already present",
+                          disclosures=[_V.Disclosure.REUSED_RECORD])
     # Resolve the authored public top before checking its requested contract;
     # the runner's default wrapper may not have been emitted at this point.
     resolved_via_chip_top = False
@@ -6220,11 +6230,14 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
                        if not _rcvar_is_chip_top_name(p)
                        and not _is_passthrough_wrapper(p)]
     if genuine_parents:
+        # main: SKIP. The design's own hierarchy says this is not a
+        # TB-facing top, so the step has no subject here.
         return StepResult(
-            "reset_clock_variant_aliases", "PASS", time.time() - t0,
+            "reset_clock_variant_aliases", "NOT_APPLICABLE", time.time() - t0,
             f"top {tgt!r} is a real internal submodule of {genuine_parents} "
             f"(not a TB-facing top); refusing to rename it to avoid breaking "
-            f"the design hierarchy")
+            f"the design hierarchy",
+            declared_by="the RTL instantiation graph")
     ports = _rcv.parse_module_ports(target_txt, tgt)
     if not ports:
         return StepResult("reset_clock_variant_aliases", "NOT_MEASURED",
@@ -6275,10 +6288,13 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
             del plan[_p]
     if (not resolved_via_chip_top and full_plan and _auth_ports is not None
             and _rtl_port_face == {str(n).lower() for n in _auth_ports}):
+        # main: SKIP. The authoritative enumeration already matches, so
+        # there is nothing here to rename.
         return StepResult(
-            "reset_clock_variant_aliases", "PASS", time.time() - t0,
+            "reset_clock_variant_aliases", "NOT_APPLICABLE", time.time() - t0,
             "authoritative L3/L9 top-port enumeration exactly matches the "
-            "RTL interface; preserving its documented reset/clock spellings")
+            "RTL interface; preserving its documented reset/clock spellings",
+            declared_by="L3/L9 top-port enumeration")
     # Preserve a native port explicitly bound by the resolved top's L9.
     if resolved_via_chip_top:
         l9_info = _rcvar_l9_top_ports(project)
@@ -6286,11 +6302,17 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
             l9_top, l9_names = l9_info
             pinned = sorted(set(full_plan) & l9_names)
             if l9_top == tgt and pinned:
+                # main: SKIP. The project's OWN contract says these spellings
+                # are native, so there is nothing here to rename — the input
+                # declares the step inapplicable and names itself as the
+                # declarer.
                 return StepResult(
-                    "reset_clock_variant_aliases", "PASS", time.time() - t0,
+                    "reset_clock_variant_aliases", "NOT_APPLICABLE",
+                    time.time() - t0,
                     f"L9 declares native port spelling(s) {pinned} for "
                     f"top_module {tgt!r}; refusing to rename against the "
-                    f"project's own contract")
+                    f"project's own contract",
+                    declared_by="L9_INTEGRATION_SPEC top_module port spellings")
     # Port recognition only proposes a same-polarity spelling. Authorization
     # must come from the requested interface, not guessed downstream bindings.
     # Loose mentions can preserve a source spelling but cannot authorize a new
@@ -6313,8 +6335,12 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
                 else "no authoritative interface requests an equivalent "
                      "reset/clock spelling; preserving the authored ports"
                 if full_plan else "top reset/clock ports already canonical")
-        return StepResult("reset_clock_variant_aliases", "PASS",
-                          time.time() - t0, _why)
+        # main: SKIP. Every branch of `_why` above is the same sentence —
+        # the design's own contract (or the absence of any request) says this
+        # step has nothing to rename. NOT_APPLICABLE, with the declarer named.
+        return StepResult("reset_clock_variant_aliases", "NOT_APPLICABLE",
+                          time.time() - t0, _why,
+                          declared_by="the design's own top-port contract")
     # A constraint pinning the native spelling vetoes an otherwise requested
     # rename: rewriting the port would break the staged SDC contract.
     try:
@@ -6326,11 +6352,14 @@ def step_reset_clock_variant_aliases(project: Path, top: str) -> StepResult:
     for _p in _sdc_pinned:
         del plan[_p]
     if not plan:
+        # main: SKIP. The staged SDC pins the original spellings, so the
+        # design's own constraints declare this step inapplicable.
         return StepResult(
-            "reset_clock_variant_aliases", "PASS", time.time() - t0,
+            "reset_clock_variant_aliases", "NOT_APPLICABLE", time.time() - t0,
             f"design's staged constraint SDC already pins the original "
             f"spelling(s) {_sdc_pinned}; refusing to rename the design's "
-            f"own contract (#618)")
+            f"own contract (#618)",
+            declared_by="the project's staged SDC constraints")
     # Explicit flat-output preference changes representation only AFTER the
     # public interface has authorized the rename. It is not naming authority.
     # Keep internal references accessible when no parent needs rewiring.

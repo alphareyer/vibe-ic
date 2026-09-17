@@ -119,7 +119,7 @@ def test_a_stage_with_one_NA_rule_and_one_accept_is_reviewed(tmp_path):
 def test_an_unparseable_document_keeps_the_rule_NOT_CHECKED(tmp_path):
     proj = _project(tmp_path, {"L1_DATASHEET.json": "{ this is not json"})
     out = S.rule_cited_constant_not_in_source(proj, DECL)
-    assert out["verdict"] == "NOT_MEASURED", out
+    assert out["verdict"] == "NOT_CHECKED", out
     assert "could not be parsed" in out["why"]
     assert "NOT established" in out["why"]
 
@@ -130,14 +130,14 @@ def test_one_unparseable_document_among_readable_ones_still_refuses(tmp_path):
     proj = _project(tmp_path, {"L1_DATASHEET.json": {"doc_id": "L1"},
                                "L2_FRS.json": "{ broken"})
     out = S.rule_cited_constant_not_in_source(proj, DECL)
-    assert out["verdict"] == "NOT_MEASURED", out
+    assert out["verdict"] == "NOT_CHECKED", out
     assert "L2_FRS.json" in out["why"]
 
 
 def test_no_documents_at_all_is_still_NOT_CHECKED(tmp_path):
     proj = _project(tmp_path, {})
     out = S.rule_cited_constant_not_in_source(proj, DECL)
-    assert out["verdict"] == "NOT_MEASURED", out
+    assert out["verdict"] == "NOT_CHECKED", out
     assert "no L*.json" in out["why"].lower() or "NO L*.json" in out["why"]
 
 
@@ -148,7 +148,7 @@ def test_an_unreadable_design_input_is_still_NOT_CHECKED(tmp_path):
     out = S.rule_cited_constant_not_in_source(
         proj, {"intent": ["input/nowhere"],
                "artefact": ["phase1/generated_docs"]})
-    assert out["verdict"] == "NOT_MEASURED", out
+    assert out["verdict"] == "NOT_CHECKED", out
 
 
 # ── direction 3: a design that DOES cite one keeps the rule live ──────────

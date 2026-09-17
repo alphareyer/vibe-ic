@@ -439,7 +439,9 @@ def test_full_stack_step_publishes_real_scored_vectors(tmp_path):
     # the algorithmic RESULT oracle is still deferred -> no blanket PASS
     assert rj["functional_verified"] is False
     assert rmc["result_oracle_deferred"] is True
-    assert res.status == "SKIP"
+    # R-0915-85 — the algorithmic RESULT oracle is deferred, so the step
+    # scored PART of its population and measured none of the rest.
+    assert res.status == "NOT_MEASURED"
     assert "golden-scored 2 of 4" in res.detail
 
 

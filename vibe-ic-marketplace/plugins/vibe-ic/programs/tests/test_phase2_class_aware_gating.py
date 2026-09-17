@@ -141,7 +141,11 @@ def test_generic_class_reference_tb_runs_full_stack_tb(tmp_path):
     # rather than a fabricated functional PASS. The TB file is still
     # emitted, which is all step_reference_tb needs.
     gen = p2.step_full_stack_tb_gen(proj, top)
-    assert gen.status in ("PASS", "SKIP")
+    # R-0915-85 — the honest no-golden verdict is
+    # NOT_MEASURED(no_population): the TB was emitted and NOTHING was
+    # scored against it. `SKIP` matched no row any more, so this pair
+    # was a dead comparison over the one word it exists to accept.
+    assert gen.status in ("PASS", "NOT_MEASURED")
     tb = (proj / "phase2" / "stage1" / "sim_full_stack"
           / f"tb_{top}_full.v")
     assert tb.is_file()
@@ -183,7 +187,11 @@ def test_generic_class_real_compile_failure_still_fails(tmp_path):
     gen = p2.step_full_stack_tb_gen(proj, top)
     # ORGANIC-20260528: TB-gen verdict is honest (SKIP without a golden),
     # but the TB file is still emitted so step_reference_tb can compile it.
-    assert gen.status in ("PASS", "SKIP")
+    # R-0915-85 — the honest no-golden verdict is
+    # NOT_MEASURED(no_population): the TB was emitted and NOTHING was
+    # scored against it. `SKIP` matched no row any more, so this pair
+    # was a dead comparison over the one word it exists to accept.
+    assert gen.status in ("PASS", "NOT_MEASURED")
     sr = p2.step_reference_tb(proj, top, "processor_cpu")
     assert sr.status == "FAIL"
     assert "defect" in sr.detail.lower() or "compile" in sr.detail.lower()

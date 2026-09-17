@@ -131,7 +131,7 @@ def test_step_authoritative_l3_suppresses_additive_9th_port(tmp_path):
     f = _stage_rtl(tmp_path)
     _stage_l3_json(tmp_path)
     res = R.step_reset_clock_variant_aliases(tmp_path, "sha256")
-    assert res.status == "PASS", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     # Pinned by its REASON since v1.17.48 (76e5960ee) made SKIP the answer for
     # an unstaged project too: without this line the case below — a project with
     # no documents at all — satisfies every other assertion in this test, and
@@ -169,7 +169,7 @@ def test_step_prose_only_keeps_792_additive(tmp_path):
         "| Signal | Dir |\n|---|---|\n| clk | input |\n"
         "| reset_n | input |\n| cs | input |\n")
     res = R.step_reset_clock_variant_aliases(tmp_path, "sha256")
-    assert res.status == "PASS", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     # THE DISCRIMINATOR: the design's own contract declared the spelling, so the
     # refusal is the #689 one — not the "nobody asked" refusal below.
     assert "#689" in res.detail, res.detail
@@ -195,7 +195,7 @@ def test_step_no_contract_still_renames_518(tmp_path):
     """
     f = _stage_rtl(tmp_path)
     res = R.step_reset_clock_variant_aliases(tmp_path, "sha256")
-    assert res.status == "PASS", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     assert "no authoritative interface requests" in res.detail, res.detail
     body = f.read_text()
     assert "__rcvar_inner" not in body, "the authored RTL must be left unchanged"
