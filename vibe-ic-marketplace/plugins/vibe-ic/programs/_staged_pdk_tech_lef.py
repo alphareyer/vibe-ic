@@ -11,11 +11,57 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Sequence, Tuple
 
 
 class TechLefResolutionError(RuntimeError):
     """The staged tree carried technology-LEF material but no unique choice."""
+
+
+#: Refusal code for a bridge ``signoff_config.json`` that exists but cannot be
+#: read as a JSON object (vibe-ic#2361).
+SIGNOFF_CONFIG_UNREADABLE = "SIGNOFF_CONFIG_UNREADABLE"
+
+
+class SignoffConfigUnreadable(TechLefResolutionError):
+    """``bridge/signoff_config.json`` exists but is not a readable JSON object.
+
+    A subclass of :class:`TechLefResolutionError` because the declared
+    ``tech_lef`` lives in that file: every consumer that already refuses on an
+    unresolvable stack refuses on this too, and names the parse error rather
+    than a downstream symptom of it.
+    """
+
+
+def load_signoff_config(pdk_dir: Path) -> Dict[str, Any]:
+    """The staged PDK's bridge sign-off declaration, or ``{}`` when absent.
+
+    ABSENT and UNREADABLE are different statements. An absent file declares
+    nothing, so every key takes its default. A file that exists but does not
+    parse to a JSON object declared SOMETHING that cannot be known — reading it
+    as ``{}`` runs a different sign-off than the integrator declared (for
+    example ``lvs_engine`` reverting to its default) and records the engine
+    that ran, so nothing downstream contradicts it (vibe-ic#2361). That case
+    raises :class:`SignoffConfigUnreadable` naming the path and the error.
+    """
+    cfg_f = pdk_dir / "bridge" / "signoff_config.json"
+    if not cfg_f.is_file():
+        return {}
+    try:
+        data = json.loads(cfg_f.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:  # ValueError covers JSON + UTF-8
+        raise SignoffConfigUnreadable(
+            f"[FAIL] {SIGNOFF_CONFIG_UNREADABLE}: {cfg_f}: "
+            f"{exc.__class__.__name__}: {exc}. REFUSING to continue on "
+            f"defaults — every sign-off key this file declares (lvs_engine, "
+            f"tech_lef, tap_geom_layers, ...) would silently take a value "
+            f"nobody chose. Fix the file or remove it.") from exc
+    if not isinstance(data, dict):
+        raise SignoffConfigUnreadable(
+            f"[FAIL] {SIGNOFF_CONFIG_UNREADABLE}: {cfg_f}: top level is "
+            f"{type(data).__name__}, not a JSON object. REFUSING to continue "
+            f"on defaults.")
+    return data
 
 
 @dataclass(frozen=True)
@@ -52,13 +98,7 @@ def discover_staged_tech_lefs(
 
 
 def _declared_path(pdk_dir: Path) -> Optional[Path]:
-    cfg_f = pdk_dir / "bridge" / "signoff_config.json"
-    if not cfg_f.is_file():
-        return None
-    try:
-        declared = (json.loads(cfg_f.read_text()) or {}).get("tech_lef")
-    except Exception:
-        declared = None
+    declared = load_signoff_config(pdk_dir).get("tech_lef")
     if not declared:
         return None
     path = ((pdk_dir / str(declared)) if not os.path.isabs(str(declared))

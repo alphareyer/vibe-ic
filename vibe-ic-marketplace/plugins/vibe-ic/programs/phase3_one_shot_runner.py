@@ -112,7 +112,9 @@ import _sta_basis  # the ONE reader of the `STA_BASIS:` stamp (no second copy)
 import emitted_script_portability_check as _esp  # the ONE host-path predicate
 import step_preflight as _spf  # required_inputs PRE-FLIGHT at every dispatch site
 from _staged_pdk_tech_lef import (
+    SignoffConfigUnreadable as _SignoffConfigUnreadable,
     TechLefResolutionError as _TechLefResolutionError,
+    load_signoff_config as _load_signoff_config,
     discover_staged_tech_lefs as _discover_staged_tech_lefs,
     select_staged_tech_lef as _resolve_staged_tech_lef,
 )
@@ -7740,6 +7742,74 @@ def _discover_antenna_diode_from_lef(lef_paths: List[Optional[str]],
     return None
 
 
+_WELLTAP_RE = re.compile(
+    r"MACRO\s+(\S+)\b(?:(?!\bMACRO\b).)*?\bCLASS\s+CORE\s+WELLTAP\b",
+    re.S | re.I)
+
+
+def _derive_tapcell_master(declaration: Dict[str, Any], declared_in: str,
+                           lef_paths: Sequence[Optional[str]],
+                           container: Optional[str] = None
+                           ) -> Tuple[Optional[str], str]:
+    """THE one derivation of a PDK's tapcell master (vibe-ic#2360).
+
+    Returns ``(master, source)``. ``master`` is None only when the PDK was
+    positively found or declared to ship none; ``source`` says which.
+
+    Why one function: `None` is not a neutral default here. It is read by the
+    tapcell step (`TAPCELL_SKIPPED`) and by the PERC latch-up gate (the
+    TAPLESS-CELL path) as a positive statement that the library has no tap
+    master. The registry and asap7 sites each derived it with their own
+    `reg.get("tapcell_master")`, and the staged `input/pdk/` site did not
+    derive it at all — so every project-local PDK inherited the dataclass
+    default and was routed down the tapless path whether or not its LEF ships
+    a WELLTAP cell.
+
+    Order, most authoritative first:
+      1. DECLARED — the key is present in ``declaration`` (a registry entry or
+         a staged PDK's bridge signoff_config.json). A null value is a
+         declaration of taplessness, exactly as `pdk_registry_selectable_check`
+         treats it.
+      2. ASKED — the key is absent, so read the LEFs the flow loads for its
+         standard cells and take the first ``CLASS CORE WELLTAP`` macro, the
+         same marker discovery `_discover_antenna_diode_from_lef` does for
+         ``ANTENNACELL``.
+      3. NONE — every LEF was read and none carries that class: a measured
+         tapless finding, recorded by name with the files that were read.
+    A LEF that cannot be read is not a LEF with no tap cell: that REFUSES
+    (`TAPCELL_MASTER_UNDETERMINED`) rather than becoming a NONE."""
+    if "tapcell_master" in declaration:
+        master = declaration["tapcell_master"]
+        if master is None:
+            return None, f"DECLARED_NONE by {declared_in}"
+        return str(master), f"DECLARED by {declared_in}"
+    _c = container or os.environ.get("EDA_CONTAINER")
+    read: List[str] = []
+    unread: List[str] = []
+    for lp in lef_paths:
+        if not lp:
+            continue
+        text = _read_pdk_text(lp, _c)
+        if text is None:
+            unread.append(str(lp))
+            continue
+        read.append(str(lp))
+        m = _WELLTAP_RE.search(text)
+        if m:
+            return m.group(1), f"LEF CLASS CORE WELLTAP in {lp}"
+    if unread or not read:
+        raise SystemExit(
+            f"[FAIL] TAPCELL_MASTER_UNDETERMINED: {declared_in} does not "
+            f"declare `tapcell_master` and the LEF(s) that would answer it "
+            f"could not be read ({', '.join(unread) or 'none given'}). "
+            f"REFUSING to assume a tapless-cell PDK — that skips tapcell "
+            f"insertion and routes the latch-up gate down the tapless path. "
+            f"Declare `tapcell_master` (a cell name, or null for a tapless "
+            f"PDK) in {declared_in}.")
+    return None, ("NONE: no CLASS CORE WELLTAP macro in "
+                  + ", ".join(read))
+
+
 def _filler_masters_for_pdk(pdk: "PdkConfig") -> List[str]:
     """v0.1.48 — return the decap+fill cell-master set for this PDK.
 
@@ -8856,6 +8926,12 @@ class PdkConfig:
     # sky130_fd_sc_hd this is `sky130_fd_sc_hd__tapvpwrvgnd_1`; for other
     # PDKs the runner emits a NONFATAL skip.
     tapcell_master: Optional[str] = None
+    #: vibe-ic#2360 — WHY `tapcell_master` holds its value, as stated by
+    #: `_derive_tapcell_master`: a declaration (naming where), a LEF
+    #: `CLASS CORE WELLTAP` finding (naming the file), or `NONE` naming the
+    #: LEFs that were read and carried no such macro. None only on the
+    #: hand-written named branches, whose literal is itself the declaration.
+    tapcell_master_source: Optional[str] = None
     tapcell_distance_um: float = 14.0  # SKY130 latch-up rule typical
     # Antenna-repair diode cell (v0.2.14). OpenROAD `repair_antenna` inserts these
     # after detailed_route to fix process-antenna violations; None → step SKIPPED.
@@ -10989,6 +11065,9 @@ def _pdk_config_from_registry(project: Path, reg: Dict[str, Any]
 
     _mlibs, _mlefs, _mgds, _mv = _discover_local_macros(
         project, tech_lef, container)
+    _tap, _tap_src = _derive_tapcell_master(
+        reg, f"pdk_registry.json:{reg.get('name')}", [cell_lef, tech_lef],
+        container)
     return PdkConfig(
         name=reg.get("name") or "unknown",
         liberty=liberty,
@@ -10998,11 +11077,12 @@ def _pdk_config_from_registry(project: Path, reg: Dict[str, Any]
         site=site,
         drc_deck=_opt("drc_deck"),
         metal_prefix=metal_prefix,
-        # Absent in the registry => the PDK ships no such master and the
-        # dependent step self-skips (disclosed NONFATAL). It is NEVER
-        # defaulted to another PDK's cell name, which would be an
-        # unroutable/nonexistent master in this library.
-        tapcell_master=reg.get("tapcell_master"),
+        # Declared (a name, or null = tapless) or asked of this PDK's own
+        # LEF by `_derive_tapcell_master`. It is NEVER defaulted to another
+        # PDK's cell name, which would be an unroutable/nonexistent master in
+        # this library, and never defaulted to None either (vibe-ic#2360).
+        tapcell_master=_tap,
+        tapcell_master_source=_tap_src,
         tapcell_distance_um=float(reg.get("tapcell_distance_um") or 14.0),
         antenna_diode_cell=reg.get("antenna_diode_cell"),
         clk_buf=reg.get("clk_buf_cell"),
@@ -11209,6 +11289,9 @@ def _detect_pdk(project: Path, override: Optional[str] = None
             _mlibs, _mlefs, _mgds, _mv = _discover_local_macros(
                 project, _tlef, _container)
             _croot = reg["container_path"]
+            _tap, _tap_src = _derive_tapcell_master(
+                reg, "pdk_registry.json:asap7",
+                [f"{_croot}/{reg['cell_lef_glob']}", str(_tlef)], _container)
             return PdkConfig(
                 name="asap7",
                 liberty=str(_lib),
@@ -11230,8 +11313,10 @@ def _detect_pdk(project: Path, override: Optional[str] = None
                 # latch-up gate then read the 0-tap DEF as a TAPLESS-cell PDK
                 # and returned INCOMPLETE. A real latch-up exposure reported as
                 # a non-blocking indeterminate — the "strictly worse" direction
-                # the tapless carve-out was written to avoid (#586).
-                tapcell_master=reg.get("tapcell_master"),
+                # the tapless carve-out was written to avoid (#586). Derived by
+                # the ONE shared function the registry and staged sites use.
+                tapcell_master=_tap,
+                tapcell_master_source=_tap_src,
                 # Absent for this entry, so the generic 14.0 um default applies.
                 # That is CONSERVATIVE at 7nm (more taps than needed), not
                 # unsafe, and it is not an ASAP7-specific number — declare one
@@ -11335,28 +11420,27 @@ def _detect_pdk(project: Path, override: Optional[str] = None
             cell_gds = _gds_cands[0] if _gds_cands else None
             # Auto-detect SITE name from cell LEF (chip-AGNOSTIC: any
             # PDK exposes its row site via `SITE <name>` declaration).
+            #
+            # vibe-ic#2361 — no `except` here. Both reads below used to sit in
+            # `except Exception: pass`, so an unreadable LEF silently became
+            # SITE "unit" / prefix "met": the same "could not read it" read as
+            # "read it and found nothing" that #2361 removes from the bridge
+            # config. `errors="ignore"` leaves OSError as the only failure, and
+            # an unreadable staged cell/tech LEF must halt, naming the file.
             site_name = "unit"
-            try:
-                import re as _re
-                m = _re.search(r"^\s*SITE\s+([A-Za-z_][A-Za-z0-9_]*)",
-                                cell_lef.read_text(errors="ignore"),
-                                _re.MULTILINE)
-                if m:
-                    site_name = m.group(1)
-            except Exception:
-                pass
+            m = re.search(r"^\s*SITE\s+([A-Za-z_][A-Za-z0-9_]*)",
+                          cell_lef.read_text(errors="ignore"), re.MULTILINE)
+            if m:
+                site_name = m.group(1)
             # Auto-detect metal layer prefix (e.g. "met" for sky130, "MET"
             # for <foundry>, "ME" for some 28nm flows).
             metal_prefix = "met"
-            try:
-                t = tech_lef.read_text(errors="ignore") if tech_lef else ""
-                # Pick the prefix from the FIRST routing layer NAME
-                m = _re.search(r"LAYER\s+([A-Za-z_]+)\d+\s*\n[^L]*?TYPE\s+ROUTING",
-                                t, _re.IGNORECASE)
-                if m:
-                    metal_prefix = m.group(1)
-            except Exception:
-                pass
+            t = tech_lef.read_text(errors="ignore") if tech_lef else ""
+            # Pick the prefix from the FIRST routing layer NAME
+            m = re.search(r"LAYER\s+([A-Za-z_]+)\d+\s*\n[^L]*?TYPE\s+ROUTING",
+                          t, re.IGNORECASE)
+            if m:
+                metal_prefix = m.group(1)
             # Discover local IP macros (input/pdk_local/<vendor>/) — hoisted
             # into _discover_local_macros so the NAMED open-PDK overrides
             # integrate hard macros identically (see helper docstring).
@@ -11444,13 +11528,16 @@ def _detect_pdk(project: Path, override: Optional[str] = None
             # a commercial PDK run the #443 Magic+netgen LVS route instead
             # of dead-ending on a missing `calibre` binary.
             _bridge = pdk_dir / "bridge"
-            _signoff_cfg: Dict[str, Any] = {}
             _cfg_f = _bridge / "signoff_config.json"
-            if _cfg_f.is_file():
-                try:
-                    _signoff_cfg = json.loads(_cfg_f.read_text())
-                except Exception:
-                    _signoff_cfg = {}
+            # vibe-ic#2361 — a file that exists but does not parse is a
+            # REFUSAL, never `{}`: reading it as absent silently reverts
+            # lvs_engine (and every other declared key) to its default while
+            # the verdict records the engine that ran. Halts here, the same
+            # way an unresolvable declared tech LEF does above.
+            try:
+                _signoff_cfg: Dict[str, Any] = _load_signoff_config(pdk_dir)
+            except _SignoffConfigUnreadable as exc:
+                raise SystemExit(str(exc)) from exc
             # v1.4.36 — FLOOR-DRC: WARN loudly when a commercial DRC deck is
             # present but no std-cell exclusion marker is configured (the silent
             # config miss that re-checks qualified cell interiors → false FEOL
@@ -11487,6 +11574,14 @@ def _detect_pdk(project: Path, override: Optional[str] = None
             for _n in _sp_notes:
                 print(_n, file=sys.stderr)
 
+            # vibe-ic#2360 — ASK this PDK for its tapcell master (bridge
+            # declaration first, then its own cell LEF) instead of inheriting
+            # the dataclass None, which the flow reads as "tapless".
+            _tap, _tap_src = _derive_tapcell_master(
+                _signoff_cfg, str(_cfg_f), [str(cell_lef), str(tech_lef)])
+            print(f"[tapcell] tapcell_master={_tap!r} ({_tap_src})",
+                  file=sys.stderr)
+
             return PdkConfig(
                 name=f"custom:{pdk_dir.name}",
                 liberty=str(liberty),
@@ -11500,6 +11595,8 @@ def _detect_pdk(project: Path, override: Optional[str] = None
                 # resolve its PnR cell-exclusion file directly (librelane-first,
                 # both filenames). None → get_lib_cells family fallback (NONFATAL).
                 pnr_exclude_cell_file=_resolve_pnr_exclude_cell_file(pdk_dir),
+                tapcell_master=_tap,
+                tapcell_master_source=_tap_src,
                 macro_libs=macro_libs,
                 macro_lefs=macro_lefs,
                 macro_gds=macro_gds,

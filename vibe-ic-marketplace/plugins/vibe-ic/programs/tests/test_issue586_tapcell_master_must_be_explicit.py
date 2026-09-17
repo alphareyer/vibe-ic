@@ -197,9 +197,17 @@ def test_the_asap7_branch_reads_the_registry_rather_than_hardcoding():
                      if not ln.lstrip().startswith("#"))
     i = code.find('name="asap7"')
     assert i != -1, "the asap7 branch moved"
-    assert 'tapcell_master=reg.get("tapcell_master")' in code[i:i + 4000], (
+    # vibe-ic#2360 — the branch no longer spells its own `reg.get`: it takes
+    # the value from the ONE shared derivation, applied to this same registry
+    # entry, immediately before it builds the PdkConfig. Both halves are
+    # required: the derivation over `reg`, and the field actually passed.
+    assert "tapcell_master=_tap," in code[i:i + 4000], (
         "the asap7 branch does not carry tapcell_master, so it resolves to "
         "None and asap7 is treated as a tapless-cell PDK again")
+    assert re.search(r'_derive_tapcell_master\(\s*reg,\s*"pdk_registry\.json:asap7"',
+                     code[max(0, i - 800):i]), (
+        "the asap7 branch's tapcell_master is not derived from its registry "
+        "entry by `_derive_tapcell_master`")
 
 
 # ── the value is a real cell, verified in the image ──────────────────────────
