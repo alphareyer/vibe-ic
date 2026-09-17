@@ -85,3 +85,33 @@ def test_growth_stops_at_the_rings_own_inset():
 def test_a_core_already_inside_the_target_does_not_move():
     assert R.ring_core_pad_for_util(RING_DIE, RING_DIE, 900, 900,
                                     30.0, 40.0, RING_PAD) is None
+
+
+# ---- and a clock tree that had to be downsized means the core is too tight --
+
+def test_one_loosen_rung_of_core_growth():
+    """r42: the legalizer's last resort swapped 43 clkbuf_16 down to clkbuf_4;
+    placement went legal and setup fell from +0.32 ns to -12.27 ns."""
+    pad = R.ring_core_pad_one_loosen_rung(RING_DIE, RING_DIE, 382, 382, RING_PAD)
+    assert pad is not None
+    core = RING_DIE - 2 * pad
+    assert 382 < core <= RING_DIE - 2 * RING_PAD
+    # the ladder's own first ratio, not a number typed here
+    r0, r1 = R._ROUTE_LOOSEN_UTIL_LADDER[0], R._ROUTE_LOOSEN_UTIL_LADDER[1]
+    assert core == int(382 * (r0 / r1) ** 0.5)
+
+
+def test_growth_after_a_downsize_stops_at_the_ring_inset():
+    assert R.ring_core_pad_one_loosen_rung(
+        RING_DIE, RING_DIE, RING_DIE - 2 * RING_PAD, RING_DIE - 2 * RING_PAD,
+        RING_PAD) is None
+    # a core one rung from the floor is clamped to the floor, never past it
+    assert R.ring_core_pad_one_loosen_rung(
+        RING_DIE, RING_DIE, 900, 900, RING_PAD) >= RING_PAD
+
+
+def test_a_ladder_that_does_not_loosen_grows_nothing():
+    assert R.ring_core_pad_one_loosen_rung(RING_DIE, RING_DIE, 382, 382,
+                                           RING_PAD, ladder=(0.5,)) is None
+    assert R.ring_core_pad_one_loosen_rung(RING_DIE, RING_DIE, 382, 382,
+                                           RING_PAD, ladder=(0.2, 0.5)) is None

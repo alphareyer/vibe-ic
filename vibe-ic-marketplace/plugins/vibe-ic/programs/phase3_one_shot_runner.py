@@ -18045,6 +18045,38 @@ def _floorplan_rectangles_record(project: Path,
     return rec
 
 
+def ring_core_pad_one_loosen_rung(die_w: int, die_h: int, core_w: int,
+                                  core_h: int, ring_core_pad: int,
+                                  ladder: Sequence[float] = ()) -> Optional[int]:
+    """The core inset one LOOSEN rung wider, inside a ring-pinned die.
+
+    WHY A RUN ASKS FOR THIS. A clock tree is built from the widest buffer the
+    PDK registry names, and a core sized to the area the cells need can leave
+    no free-site run wider than that master — the flow's own cap reports it
+    (`CTS_MASTER_AT_PLACEABILITY_BOUND`). The in-session ladder's last resort
+    then SWAPS those buffers down so the design legalizes. MEASURED on
+    subservient x gf180mcuD as a DIE: r41 kept `clkbuf_16`, closed setup at
+    +0.32 ns and shipped 4 overlapping clock leaves; r42 swapped 43 of them to
+    `clkbuf_4`, legalized (0 violations) and setup fell to -12.27 ns. Neither
+    is the answer: on a ring die the band around the core is EMPTY SILICON, so
+    the remedy is room, and the downsize stays the last resort it was.
+
+    Grows the core side by the loosen ladder's own first ratio
+    (sqrt(rung0 / rung1)), clamped at the ring's inset. None when the core is
+    already there. Pure.
+    """
+    rungs = [float(r) for r in (ladder or _ROUTE_LOOSEN_UTIL_LADDER) if r]
+    if len(rungs) < 2 or not (0.0 < rungs[1] < rungs[0]):
+        return None
+    span = min(int(die_w), int(die_h))
+    want = int(max(int(core_w), int(core_h)) * (rungs[0] / rungs[1]) ** 0.5)
+    pad = (span - want) // 2
+    if pad < int(ring_core_pad):
+        pad = int(ring_core_pad)
+    current = (span - min(int(core_w), int(core_h))) // 2
+    return pad if pad < current else None
+
+
 def ring_core_pad_for_util(die_w: int, die_h: int, core_w: int, core_h: int,
                            actual_util_pct: float, target_util_pct: float,
                            ring_core_pad: int) -> Optional[int]:
@@ -32103,6 +32135,45 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             # a hang → fall through to the rc!=0 FAIL gate.
             _docker_timeout_isolate([out_dir / f"{top}.def"])
             break
+        # A CLOCK TREE THAT HAD TO BE DOWNSIZED IS A CORE THAT IS TOO TIGHT.
+        # The in-session legalization ladder's last resort swaps over-wide
+        # clock buffers down to the sink so the design legalizes. It works, and
+        # on a ring die it is the wrong trade: MEASURED on subservient x
+        # gf180mcuD, r41 kept `clkbuf_16` (setup +0.32 ns, 4 overlapping clock
+        # leaves) and r42 swapped 43 of them (0 violations, setup -12.27 ns).
+        # The band around the core is empty silicon, so the run buys the room
+        # instead — bounded by the same upsize budget, and the swap stays in
+        # place as the last resort when no room is left.
+        if (_ring_pinned_die and _upsize_tries < _PNR_UPSIZE_RETRIES
+                and re.search(r"_CLKBUF_DOWNSIZE swapped=([1-9]\d*)",
+                              (out or "") + (err or ""))):
+            _grow_pad = ring_core_pad_one_loosen_rung(
+                die_w, die_h, core_w, core_h, _ring_floor_pad)
+            if _grow_pad is not None:
+                resize_history.append({
+                    "iteration": _retry_i,
+                    "direction": "grow_core_after_clkbuf_downsize",
+                    "from_core_um": f"{core_w}x{core_h}",
+                    "to_core_um": (f"{die_w - 2 * _grow_pad}x"
+                                   f"{die_h - 2 * _grow_pad}"),
+                    "die_um": f"{die_w}x{die_h}",
+                })
+                core_pad = _grow_pad
+                core_w = die_w - 2 * core_pad
+                core_h = die_h - 2 * core_pad
+                print(f"[phase3] the legalizer had to downsize clock buffers: "
+                      f"core grown to {core_w}x{core_h} um inside the "
+                      f"{die_w}x{die_h} um ring die (inset {core_pad} um, ring "
+                      f"floor {_ring_floor_pad} um) so the clock tree keeps the "
+                      f"drive CTS chose", file=sys.stderr)
+                _generic_pnr_tcl = _rewrite_pnr_floorplan_die(
+                    _generic_pnr_tcl, die_w, die_h, core_pad, core_w, core_h,
+                    fp_rect)
+                _pad_install_failure = _install_route_deck()
+                if _pad_install_failure is not None:
+                    return _pad_install_failure
+                _upsize_tries += 1
+                continue
         actual_util = _extract_overutil_pct(out + err)
         if actual_util is None:
             # The route COMPLETED without an over-util placement error. Two
