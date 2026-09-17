@@ -369,8 +369,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     a = ap.parse_args(argv)
     rep = scan_tree(Path(a.root))
     if a.json:
-        Path(a.json).write_text(json.dumps(rep, indent=2) + "\n",
-                                encoding="utf-8")
+        # vibe-ic#1082 — a declared report destination is written ATOMICALLY.
+        # A half-written report is indistinguishable from a report about a
+        # half-scanned tree, which is the same class of lie this module exists
+        # to refuse.
+        from _atomic_artefact import write_json as _atomic_write_json
+        _atomic_write_json(a.json, rep)
     print(f"step-verdict vocabulary ratchet: {rep['files']} file(s), "
           f"{rep['literals_checked']} status literal(s) judged against "
           f"{rep['allowed']}")
