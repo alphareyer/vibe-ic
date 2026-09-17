@@ -167,7 +167,27 @@ def tracked_markdown(repo: Path) -> Optional[List[Path]]:
                 capture_output=True, text=True)
     if r.returncode != 0:
         return None
-    return [repo / p for p in r.stdout.split("\0") if p]
+    return [repo / p for p in r.stdout.split("\0")
+            if p and not is_vendored_fixture(p)]
+
+
+def is_vendored_fixture(rel: str) -> bool:
+    """Is this tracked path a VENDORED INPUT under a test fixture directory?
+
+    The shipped corpus is the plugin's OWN documents. A file under
+    `tests/fixtures/` is a copy of somebody else's input, kept so a test can run
+    on real bytes without a host path — e.g. `subservient_input_docs/`, the
+    design's specification excerpts vendored from benchmark-data with their
+    source path and sha256 in each header. Those bytes must stay as the dataset
+    wrote them: "fixing" a table row there would make the fixture stop being the
+    input it stands for, and every test built on it would then measure a
+    document nobody shipped. MEASURED: four ORPHAN TABLE ROW hits on main
+    847858856, all inside that vendored directory (L2, L3, L7, L9). So they are
+    excluded from the corpus sweep; a PATH named on the command line is still
+    checked, so the checker can be pointed at a fixture deliberately."""
+    parts = Path(rel).parts
+    return any(a == "tests" and b == "fixtures"
+               for a, b in zip(parts, parts[1:]))
 
 
 def _expand(paths: List[Path]) -> List[Path]:

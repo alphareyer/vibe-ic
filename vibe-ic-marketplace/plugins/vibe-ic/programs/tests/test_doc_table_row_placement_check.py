@@ -162,3 +162,43 @@ def test_reverting_the_delimiter_rule_lets_the_fragment_pass(tmp_path):
     assert r.returncode == RC_PASS, (
         "the mutant still refused, so the refusal does not come from the "
         "delimiter rule:\n" + r.stdout + r.stderr)
+
+
+# ── the corpus is the plugin's own documents, not vendored fixtures ─────────
+
+def _git_repo(tmp_path, files):
+    import subprocess
+    repo = tmp_path / "repo"
+    for rel, text in files.items():
+        f = repo / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    return repo
+
+
+def test_an_orphan_row_in_a_vendored_fixture_is_not_in_the_shipped_corpus(tmp_path):
+    repo = _git_repo(tmp_path, {
+        "plugin/programs/tests/fixtures/vendored_input/L3.md": SWALLOWED,
+        "plugin/docs/good.md": REAL_TABLE,
+    })
+    r = _run("--repo", repo)
+    assert r.returncode == RC_PASS, r.stdout + r.stderr
+
+
+def test_the_same_row_in_a_shipped_document_still_fails(tmp_path):
+    repo = _git_repo(tmp_path, {
+        "plugin/programs/tests/fixtures/vendored_input/L3.md": SWALLOWED,
+        "plugin/docs/bad.md": SWALLOWED,
+    })
+    r = _run("--repo", repo)
+    assert r.returncode != RC_PASS, r.stdout
+    assert "docs/bad.md" in r.stdout and "fixtures" not in r.stdout, r.stdout
+
+
+def test_a_fixture_named_explicitly_is_still_checked(tmp_path):
+    f = tmp_path / "tests" / "fixtures" / "x.md"
+    f.parent.mkdir(parents=True)
+    f.write_text(SWALLOWED)
+    assert _run(f).returncode != RC_PASS
