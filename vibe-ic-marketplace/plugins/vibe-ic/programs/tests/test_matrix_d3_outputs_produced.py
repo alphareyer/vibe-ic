@@ -2598,7 +2598,10 @@ def _produce_inline_signoff(project: Path, entry: str, owner: tuple,
 @pytest.mark.parametrize("status,body,expected", [
     ("PASS", '{"verdict":"PASS"}', True),
     ("FAIL", '{"verdict":"FAIL"}', True),
-    ("BLOCKED", '{"verdict":"NOT_CHECKED"}', False),
+    # R-0915-85 — the STEP row's word for "the checker could not check what it
+    # audits (rc 2)" is NOT_MEASURED; the JSON it wrote carries the GATE's own
+    # `NOT_CHECKED`, which is a different vocabulary and is unchanged.
+    ("NOT_MEASURED", '{"verdict":"NOT_CHECKED"}', False),
     ("PASS", '{"verdict":"FAIL"}', False),
     ("FAIL", '{"verdict":"PASS"}', False),
     ("PASS", '{"verdict":"NOT_CHECKED"}', False),
@@ -2619,7 +2622,12 @@ def test_d3_inline_production_requires_a_matching_measured_verdict(
         target.parent.mkdir(parents=True, exist_ok=True)
         if body is not None:
             target.write_text(body)
-        return runner.StepResult(name, status, 0.0, "controlled native outcome", [])
+        # R-0915-85 — a NOT_MEASURED row must NAME what stopped it, so the
+        # stub builds the row the way the producer does.
+        _kw = ({"reason_class": "no_population"}
+               if status == "NOT_MEASURED" else {})
+        return runner.StepResult(name, status, 0.0,
+                                 "controlled native outcome", [], **_kw)
 
     monkeypatch.setattr(runner, "_run_declared_signoff_gate", emit)
     result = _produce_inline_signoff(tmp_path, entry, owner, "probe")
@@ -2728,7 +2736,10 @@ def test_d3_registered_inline_record_uses_strict_native_path(tmp_path, monkeypat
     # nonempty-file arm would incorrectly say produced here.
     result = produce_live("23", entry, rec)
     assert not result.produced, result.detail
-    assert "NOT_CHECKED" in result.detail or "BLOCKED" in result.detail
+    # The gate's own `NOT CHECKED` prose survives verbatim; the STEP word
+    # beside it is NOT_MEASURED. Both are asserted so neither can go quiet.
+    assert "NOT CHECKED" in result.detail or "NOT_CHECKED" in result.detail
+    assert "NOT_MEASURED" in result.detail
 
 
 def measure_new_signoff_output(step_id, entry: str) -> EntryVerdict:

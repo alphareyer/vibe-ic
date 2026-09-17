@@ -49036,14 +49036,21 @@ def step_tapeout_docs_gen(project: Path) -> StepResult:
                           f"producer did not complete: {exc}", reason_class=_V.ReasonClass.TOOL_ABSENT)
     detail_lines = (cp.stdout or cp.stderr or "").strip().splitlines()
     detail = detail_lines[0] if detail_lines else f"rc={cp.returncode}"
-    status = "PASS" if cp.returncode == 0 else (
-        _V.Verdict.NOT_MEASURED.value)
+    # R-0915-85 — a NOT_MEASURED row NAMES what stopped it. The producer
+    # declining (it ran and refused) and the producer not being launchable are
+    # different facts, and the rc is what tells them apart.
+    status, reason = (
+        (_V.Verdict.PASS.value, "") if cp.returncode == 0
+        else (_V.Verdict.NOT_MEASURED.value,
+              _V.ReasonClass.NOT_EXECUTED.value if cp.returncode in (1, 2)
+              else _V.ReasonClass.TOOL_ABSENT.value))
     outputs = ([str(p) for p in sorted(out_dir.glob("*.html"))]
                if out_dir.is_dir() else [])
     return StepResult("tapeout_docs_gen", status, time.time() - t0,
                       detail, outputs,
                       {"producer_rc": cp.returncode,
-                       "flow_step": "37.5ic"})
+                       "flow_step": "37.5ic"},
+                      reason_class=reason)
 
 
 def step_ic_release_docs_gen(project: Path) -> StepResult:
@@ -49108,7 +49115,8 @@ def step_ic_release_docs_gen(project: Path) -> StepResult:
                if doc_root.is_dir() else [])
     return StepResult("ic_release_docs_gen", status, time.time() - t0,
                       detail, outputs,
-                      {"producer_rc": cp.returncode, "flow_step": "37.5ic"})
+                      {"producer_rc": cp.returncode, "flow_step": "37.5ic"},
+                      reason_class=reason)
 
 
 # ── R-0915-41 part 3 — THE EXECUTION SEAM FOR THE ONE SI-AWARE REPAIR PASS ──

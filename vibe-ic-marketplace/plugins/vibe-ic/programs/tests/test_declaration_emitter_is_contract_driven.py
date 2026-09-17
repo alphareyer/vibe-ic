@@ -130,7 +130,9 @@ def test_step_never_returns_fail(tmp_path):
     for spec in (_SPEC_WITH_CONTRACT, _SPEC_WITHOUT_CONTRACT):
         project = _project(tmp_path / f"p{hash(spec) & 0xffff}", spec)
         res = d.step_arith_declaration_emit(project)
-        assert res.status in ("PASS", "SKIP"), (
+        # R-0915-85 — "never block" means never FAIL. A producer that had
+        # nothing to emit measured nothing and says so.
+        assert res.status in ("PASS", "NOT_MEASURED"), (
             f"the declaration producer must never block; got {res.status}")
 
 

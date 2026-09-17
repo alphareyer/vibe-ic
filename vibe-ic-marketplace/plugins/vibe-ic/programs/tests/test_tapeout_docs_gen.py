@@ -278,7 +278,9 @@ def test_phase3_dispatches_the_real_37_5ic_producer_and_mutation_refuses(tmp_pat
 
     harmed = _project("one-property-harm", -1.53)
     harmed_result = runner.step_tapeout_docs_gen(harmed)
-    assert harmed_result.status == "SKIP", harmed_result
+    # R-0915-85 — the producer declined and NAMED why (producer_rc below),
+    # so nothing about the docs was measured.
+    assert harmed_result.status == "NOT_MEASURED", harmed_result
     assert harmed_result.extras.get("producer_rc") == 1, harmed_result
     assert not (harmed / "reports" / "phase3" / "docs").exists(), (
         "a negative setup slack published release documents")

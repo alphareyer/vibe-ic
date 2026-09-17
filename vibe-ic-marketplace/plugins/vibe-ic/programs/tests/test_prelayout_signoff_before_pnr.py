@@ -59,7 +59,7 @@ def test_no_op_skip_when_no_staged_corners(tmp_path):
     # exactly one staged lib is still a SKIP (a single corner is not a matrix)
     (proj / "input" / "pdk" / "liberty" / "tt.lib").write_text("library(tt){}")
     res1 = R.step_prelayout_signoff(proj, "chip_top", _Pdk(), "no-such-container")
-    assert res1.status == "SKIP", res1.status
+    assert res1.status == "NOT_MEASURED", res1.status
 
 
 def test_container_builtin_corners_are_used_when_none_are_staged(tmp_path,
