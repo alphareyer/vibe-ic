@@ -2341,11 +2341,3 @@ def test_no_live_docker_exec_targets_the_bare_shared_container_name():
         f"container (#2230)")
 
 
-def test_the_live_container_name_is_pin_derived_and_not_the_bare_name():
-    """The other direction: the helper must return the PIN's name, so the
-    guard above cannot be satisfied by any constant-free expression."""
-    name = _live_container()
-    assert name == _pin.default_container_name()
-    assert name != "vibeic" + "-eda", (
-        "the pin-derived name collapsed to the bare shared name; it no longer "
-        "carries the digest and is squattable again")

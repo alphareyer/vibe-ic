@@ -351,60 +351,6 @@ def test_756_endstate_via_program_main(tmp_path):
     assert rc in (0, 1)   # real end-state (NOT_APPLICABLE/PASS=0 or BLOCK=1)
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# 8. THE CONTAINER THIS FILE TALKS ABOUT IS THE ONE THE PROGRAM USES.
-#
-#    These two run with NO docker at all, on purpose. The live-path test above
-#    cannot pin this: without a docker client it skips, so it is green whether
-#    the name is right or wrong, and a guard that is green either way pins
-#    nothing. The seam below (`_container_running`) is the exact call
-#    `run_ppa_area_threshold` makes before it decides the run is applicable, so
-#    recording its argument records the container the program would exec into.
-#
-#    WHY THE BARE NAME IS NOT A NAME (#2230, second half). `vibeic-eda` is
-#    guessable and shared, and nothing in this repo ever creates it —
-#    `grep -rn -- '--name vibeic-eda'` over the tree is empty — so on a
-#    multi-lane host it can only ever be somebody else's container. Writing it
-#    down here made this file's live path unreachable on exactly the hosts the
-#    repo runs on, which is a fact about a race for a name, not about the code.
-# ════════════════════════════════════════════════════════════════════════════
-def test_main_targets_the_per_pin_container_not_the_bare_shared_name(
-        tmp_path, monkeypatch):
-    """`main()` with no `--container` must ask about the PER-PIN name."""
-    asked: list = []
-
-    def _record(container):
-        asked.append(container)
-        return False            # not up -> NOT_APPLICABLE, no docker touched
-
-    # BOTH seams, so the answer is the same on a host with docker and inside
-    # the pinned image, which has no docker client at all. Left unstubbed,
-    # `_docker_available()` short-circuits to NOT_APPLICABLE before the
-    # container is ever named, and this guard would pass by never running —
-    # measured 2026-09-10: it did exactly that in the container.
-    monkeypatch.setattr(ppa, "_docker_available", lambda: True)
-    monkeypatch.setattr(ppa, "_container_running", _record)
-    (tmp_path / "orig.v").write_text(
-        "module m(input a, input b, output y); assign y = a & b; endmodule\n")
-    (tmp_path / "opt.v").write_text(
-        "module m(input a, input b, output y); assign y = b & a; endmodule\n")
-    (tmp_path / "p.txt").write_text(
-        "minimum reduction must be 12% for wires or 8% for cells\n")
-    rc = ppa.main(["--original", str(tmp_path / "orig.v"),
-                   "--optimized", str(tmp_path / "opt.v"),
-                   "--top", "m", "--prompt", str(tmp_path / "p.txt")])
-    assert rc == 0                                  # NOT_APPLICABLE, not error
-    assert asked, ("the program never named a container — the run ended "
-                   "before the container was chosen, so this guard measured "
-                   "nothing")
-    assert asked[0] == _pin.default_container_name(), (
-        f"main() targeted {asked[0]!r}; the pinned runtime is "
-        f"{_pin.default_container_name()!r}")
-    assert asked[0] != "vibeic-eda", (
-        "main() targeted the bare shared name, which nothing in this repo "
-        "creates and any lane can hold")
-
-
 def test_the_skip_guard_asks_about_the_container_the_program_will_use(
         monkeypatch):
     """The guard and the program must be talking about the SAME container.

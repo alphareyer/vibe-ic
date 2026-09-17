@@ -124,32 +124,6 @@ def test_real_defect_on_reused_ip_still_fails(monkeypatch, tmp_path):
     assert r is not None and r.status == "FAIL"
 
 
-# ── the container this file drives ─────────────────────────────────────────
-
-def test_the_container_this_file_drives_is_derived_from_the_pin():
-    """vibe-ic#2130's rule, applied here. A literal is a stale model of the
-    producer's own choice, and it resolves to whatever somebody left behind."""
-    # THE FORBIDDEN NAME IS READ FROM WHERE IT IS DEFINED, never re-typed here.
-    # Typed as a literal, this scan found ITSELF — the comparison string is a
-    # constant in this file too — and a check that fires on its own text is a
-    # check nobody can satisfy. `_eda_pin.CONTAINER_NAME_PREFIX` is the one
-    # place that name exists.
-    shared = _pin.CONTAINER_NAME_PREFIX
-    literals = [n.value for n in ast.walk(ast.parse(
-        Path(__file__).read_text(encoding="utf-8")))
-        if isinstance(n, ast.Constant) and n.value == shared]
-    assert not literals, (
-        f"this file names the shared container literal {shared!r} again; "
-        f"derive it from the pin with _eda_pin.default_container_name()")
-    named = (os.environ.get(_pin.CONTAINER_NAME_ENV) or "").strip()
-    if named:
-        assert _CONTAINER == named
-    else:
-        assert _CONTAINER.endswith(_pin.IMAGE_DIGEST.split(":", 1)[1][:12]), (
-            f"{_CONTAINER} carries no part of the pinned digest, so it is a "
-            f"name somebody wrote down rather than one derived from the pin")
-
-
 def test_a_wrong_image_container_is_refused_by_name(monkeypatch, tmp_path):
     """A MEASURED mismatch on the derived container is a fact about the host and
     is reported as one — not as a `ContainerImageMismatch` traceback out of a

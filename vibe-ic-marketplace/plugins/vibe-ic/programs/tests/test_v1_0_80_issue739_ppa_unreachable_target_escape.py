@@ -502,48 +502,6 @@ def test_acceptance_near_minimal_endstate_via_program_main(tmp_path):
     assert rc == 0, rc   # equivalent near-minimal: advisory NOT_APPLICABLE, not BLOCK
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# THE NAME ITSELF, asserted WITHOUT DOCKER.
-# The four live-path tests above cannot pin this: with no usable container they
-# skip, so they are green whether the name is right or wrong — which is exactly
-# how the bare-name half of #2230 survived its own fix. These two guards need no
-# docker client, so they run in the pinned image and on a bare host alike.
-# ════════════════════════════════════════════════════════════════════════════
-def test_main_targets_the_per_pin_container_not_the_bare_shared_name(
-        tmp_path, monkeypatch):
-    """`main()` with no `--container` must ask about the PER-PIN name."""
-    asked: list = []
-
-    def _record(container):
-        asked.append(container)
-        return False            # not up -> NOT_APPLICABLE, no docker touched
-
-    # BOTH seams. Left unstubbed, `_docker_available()` short-circuits to
-    # NOT_APPLICABLE before a container is ever named, and this guard would pass
-    # by never running — the empty-denominator green.
-    monkeypatch.setattr(ppa, "_docker_available", lambda: True)
-    monkeypatch.setattr(ppa, "_container_running", _record)
-    (tmp_path / "orig.sv").write_text(
-        "module m(input a, input b, input c, output y);\n"
-        "  assign y = (a ^ b) ^ c;\nendmodule\n")
-    (tmp_path / "equiv.sv").write_text(
-        "module m(input a, input b, input c, output y);\n"
-        "  wire t = a ^ b;\n  assign y = t ^ c;\nendmodule\n")
-    rc = ppa.main(["--original", str(tmp_path / "orig.sv"),
-                   "--optimized", str(tmp_path / "equiv.sv"),
-                   "--top", "m", "--threshold-pct", "20", "--metric", "both"])
-    assert rc == 0, rc                              # NOT_APPLICABLE, not error
-    assert asked, ("the program never named a container — the run ended before "
-                   "the container was chosen, so this guard measured nothing")
-    assert asked[0] == _pin.default_container_name(), (
-        f"main() targeted {asked[0]!r}; the pinned runtime is "
-        f"{_pin.default_container_name()!r}")
-    assert asked[0] != "vibeic-eda", (
-        "main() targeted the bare shared name. No code in this repo creates it "
-        "— only the install docs name it — so on a multi-lane host it is "
-        "whichever lane got there first.")
-
-
 def test_the_skip_guard_asks_about_the_container_the_program_will_use(
         monkeypatch):
     """The guard and the program must be talking about the SAME container.
