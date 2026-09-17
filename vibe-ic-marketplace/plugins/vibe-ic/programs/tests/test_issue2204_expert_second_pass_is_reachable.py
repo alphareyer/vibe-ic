@@ -560,8 +560,12 @@ def test_actual_first_pass_failure_survives_consumption(tmp_path):
     p = tmp_path / "no_input"
     p.mkdir()
     first = _invoke_lifecycle(p, "01_no_input", first_pass=True)
+    # R-0915-85 — rc 1 is unchanged and is what this case is about: a first
+    # pass over a project with NO INPUT is not green. The WORD is NOT_MEASURED,
+    # because nothing failed -- D1 was refused for want of anything to read --
+    # and publishing FAIL would claim a finding about a design nobody examined.
     assert first["rc"] == 1, first
-    assert first["summary"]["verdict"] == "FAIL"
+    assert first["summary"]["verdict"] == "NOT_MEASURED", first["summary"]
     # Provide synthetic L-docs/answer for the retry seam without re-extraction.
     (p / "input/docs").mkdir(parents=True)
     (p / "input/docs/spec.md").write_text(_INPUT_DOC)

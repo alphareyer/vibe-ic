@@ -126,7 +126,11 @@ def test_oracle_track_absent_compiler_never_names_the_dut(
     proj = _make_project(tmp_path)
     _seed_oracle_tb(proj)
     sr = dosr.step_reference_tb(proj, "core_top", "processor_cpu")
-    assert sr.status in ("WAIVED", "SKIP"), (sr.status, sr.detail)
+    # R-0915-85 — the AID reference TB does not cover this interface family,
+    # which the INPUT's own class declaration settles: NOT_APPLICABLE, naming
+    # the declaration. It is not a waiver — nobody owns a row here.
+    assert sr.status == "NOT_APPLICABLE", (sr.status, sr.detail)
+    assert sr.declared_by, "an N/A must name the line that makes it N/A"
     assert "structural defect" not in sr.detail
     assert sr.extras.get("functional_verified") is not True
 

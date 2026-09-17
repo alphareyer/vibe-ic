@@ -51,10 +51,16 @@ def test_no_layout_is_not_an_environment_gap(project, monkeypatch):
     _patch(monkeypatch, engine="/tools/svrfdrc", gds_present=False,
            project=project, top="topx")
     res = R.step_drc(project, "topx", _Pdk(), "somecontainer")
-    assert res.status != "NOT_MEASURED", (
+    # R-0915-85 — THE CLAIM MOVED FROM THE WORD TO THE REASON, and this file
+    # is about exactly that claim. "no layout" and "no tool" are both
+    # NOT_MEASURED now, so asserting on the word can no longer tell them apart
+    # -- the reason_class can, and it is what the waiver machinery binds on.
+    # An absent INPUT must never read as an absent TOOL.
+    assert res.status == "NOT_MEASURED", (res.status, res.detail)
+    assert res.reason_class == "input_absent", (
         "a missing GDS must never claim the environment is missing a tool — "
-        "that claim carries a waiver tier")
-    assert res.status == "SKIP"
+        f"that claim carries a waiver tier; got {res.reason_class!r}")
+    assert res.reason_class != "tool_absent"
     assert "DRC_NO_LAYOUT" in res.detail
     # it must say the engine IS there, so no reader goes chasing the image
     assert "/tools/svrfdrc" in res.detail
