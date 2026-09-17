@@ -36,6 +36,8 @@ from pathlib import Path
 import pytest
 
 _ARM = Path(__file__).resolve().parent / "real_ic_arm.sh"
+_REAL_PROGRAMS = (Path(__file__).resolve().parents[2] / "vibe-ic-marketplace"
+                  / "plugins" / "vibe-ic" / "programs")
 
 _STUB = '''\
 import json, sys
@@ -74,6 +76,9 @@ def _tree(root: Path, gate_spec, replay_spec) -> Path:
     (progs / "_stub_gate.json").write_text(json.dumps(gate_spec), encoding="utf-8")
     (progs / "_stub_replay.json").write_text(json.dumps(replay_spec),
                                              encoding="utf-8")
+    # The arm resolves its image through the plugin's REAL resolver, in every
+    # tree, so every stub tree carries it.
+    shutil.copy2(_REAL_PROGRAMS / "_eda_pin.py", progs / "_eda_pin.py")
     return root
 
 
@@ -83,9 +88,19 @@ def _frozen(root: Path, names) -> Path:
     return root
 
 
+#: A resolvable image for arms that are not ABOUT resolution. Synthetic on
+#: purpose: the repository keeps no real digest (R-0915-96), and the explicit
+#: override is the resolver's first step, so no docker is needed to answer it.
+_FAKE_DIGEST = "sha256:" + "ab" * 32
+_FAKE_REF = "registry.example.invalid/vibeic-eda@" + _FAKE_DIGEST
+
+
 def _run(tree, corpus, outdir, frozen, env_extra=None):
     env = dict(os.environ)
+    for key in ("VIBEIC_EDA_IMAGE", "IIC_EDA_IMAGE"):
+        env.pop(key, None)
     env.update({
+        "VIBEIC_EDA_IMAGE": _FAKE_REF,
         "REAL_IC_NAME": "anic", "REAL_IC_PDK": "anpdk",
         "FROZEN_ROOT": str(frozen),
         # NAMED by the caller, so the arm never creates or touches a container.
@@ -299,12 +314,24 @@ def test_a_tree_with_no_plugin_programs_REFUSES(bed):
 
 _DOCKER_STUB = '''\
 #!/bin/sh
-# Records every invocation, then answers the two questions the arm asks.
+# Records every invocation, then answers the questions the arm and the REAL
+# resolver ask: the digest-carrying listing, the version label, the
+# RepoDigests of a reference, and the digest-wide `-a` listing.
 echo "$@" >> "$ARM_TEST_DOCKER_LOG"
-case "$1 $2" in
-  "image ls")
-    [ -n "$ARM_TEST_HOLDS_PIN" ] && echo "a.registry.example/vibeic-eda@$ARM_TEST_PIN"
+REPO=a.registry.example/vibeic-eda
+case "$*" in
+  "image ls --digests --format "*)
+    [ -n "$ARM_TEST_HOLDS_PIN" ] && printf '%s\\t%s\\t%s\\n' "$REPO" "$ARM_TEST_PIN" stubimageid
     exit 0 ;;
+  "image ls -a "*)
+    [ -n "$ARM_TEST_HOLDS_PIN" ] && echo "$REPO@$ARM_TEST_PIN"
+    exit 0 ;;
+  "image inspect --format {{index "*)
+    [ -n "$ARM_TEST_HOLDS_PIN" ] && { echo 0.3.99; exit 0; }
+    exit 1 ;;
+  "image inspect --format {{json .RepoDigests}} "*)
+    [ -n "$ARM_TEST_HOLDS_PIN" ] && { echo "[\\"$REPO@$ARM_TEST_PIN\\"]"; exit 0; }
+    exit 1 ;;
 esac
 case "$1" in
   inspect) [ -n "$ARM_TEST_CONTAINER_EXISTS" ] && exit 0; exit 1 ;;
@@ -316,23 +343,24 @@ exit 0
 
 
 def _with_docker_stub(bed, holds_pin):
-    """A bin/ dir whose `docker` is the stub, plus the env the stub reads."""
-    import importlib, subprocess as sp
-    progs = (bed / "tree" / "vibe-ic-marketplace" / "plugins" / "vibe-ic"
-             / "programs")
+    """A bin/ dir whose `docker` is the stub, plus the env the stub reads.
+
+    The digest the stub "holds" is SYNTHETIC -- there is no digest in this tree
+    to read -- and the resolution is left to the REAL `_eda_pin`: the explicit
+    override is cleared so the arm has to ask the host."""
     binr = bed / ("bin_%s" % ("held" if holds_pin else "absent"))
     binr.mkdir(parents=True, exist_ok=True)
     (binr / "docker").write_text(_DOCKER_STUB, encoding="utf-8")
     (binr / "docker").chmod(0o755)
     log = bed / ("docker_%s.log" % ("held" if holds_pin else "absent"))
     log.write_text("", encoding="utf-8")
-    pin = sp.run([sys.executable, "-c",
-                  "import _eda_pin;print(_eda_pin.IMAGE_DIGEST)"],
-                 cwd=str(progs), capture_output=True, text=True).stdout.strip()
+    pin = "sha256:" + "cd" * 32
     env = {"PATH": "%s:%s" % (binr, os.environ.get("PATH", "")),
            "ARM_TEST_DOCKER_LOG": str(log),
            "ARM_TEST_PIN": pin,
            "ARM_TEST_HOLDS_PIN": "1" if holds_pin else "",
+           "VIBEIC_EDA_IMAGE": "",
+           "VIBEIC_EDA_IMAGE_REPO": "a.registry.example/vibeic-eda",
            # The container the stub reports on. Default: absent, so the
            # visibility preflight is skipped and the pre-existing tests behave
            # exactly as they did.
@@ -361,9 +389,9 @@ def test_KNOWN_NEGATIVE_a_host_WITHOUT_the_pinned_image_REFUSES_rc2(bed):
     r = _run(tree, bed / "corpus", bed / "out", _frozen(bed / "frozen", []),
              dict(env, EDA_CONTAINER=""))     # unset: the arm owns creation
     assert r.returncode == 2, r.stdout + r.stderr
-    assert "pinned image is not runnable on this host" in (r.stdout + r.stderr)
-    assert "run " not in log.read_text(), \
-        "a host that cannot resolve the pin must create NOTHING"
+    assert "could not be resolved on this host" in (r.stdout + r.stderr)
+    assert not [l for l in log.read_text().splitlines() if l.startswith("run ")], \
+        "a host that cannot resolve the image must create NOTHING"
 
 
 def test_KNOWN_POSITIVE_a_host_WITH_it_runs_repo_at_digest_not_the_bare_digest(bed):
@@ -505,6 +533,7 @@ def test_KNOWN_POSITIVE_a_second_arm_WAITS_for_the_host_lock(bed):
     env.update({"REAL_IC_NAME": "anic", "REAL_IC_PDK": "anpdk",
                 "FROZEN_ROOT": str(_frozen(bed / "frozen", [])),
                 "EDA_CONTAINER": "real-ic-arm-test-container-that-does-not-exist",
+                "VIBEIC_EDA_IMAGE": _FAKE_REF,
                 "REAL_IC_LOCK": str(lock)})
     proc = subprocess.Popen(
         ["bash", str(_ARM), str(tree), str(bed / "corpus"), str(out)],
@@ -564,3 +593,106 @@ def test_the_nightly_states_its_cron_line():
     src = (_ARM.parent / "nightly_real_ic.sh").read_text(encoding="utf-8")
     assert "CRON_TZ=Asia/Taipei" in src
     assert "nightly_real_ic.sh" in src.split("THE CRON LINE", 1)[1][:600]
+
+
+# ── R-0915-96: the image is RESOLVED once, and an unresolved image REFUSES ──
+#
+# The arm used to read `_eda_pin.IMAGE_DIGEST` with `|| true` and pass it as
+# `${PIN:+--require-image "$PIN"}`. When nothing resolved, PIN was empty and the
+# flag silently VANISHED: on a host whose container already existed the gate ran
+# against whatever that container held and the arm reported as if pinned. Both
+# directions below go through the REAL `_eda_pin` and a docker stub.
+
+def _argv_recording_gate(tree):
+    progs = tree / "vibe-ic-marketplace" / "plugins" / "vibe-ic" / "programs"
+    (progs / "real_ic_gate.py").write_text(
+        "import json,sys,pathlib\n"
+        "argv=sys.argv[1:]\n"
+        "out=argv[argv.index('--json')+1]\n"
+        "pathlib.Path(out).parent.mkdir(parents=True,exist_ok=True)\n"
+        "pathlib.Path(out).write_text(json.dumps("
+        "{'verdict':'NO_REGRESSION','argv':argv,'diff':{'comparable':True,"
+        "'regressions':[],'improvements':[],'laterals':[]}}))\n",
+        encoding="utf-8")
+
+
+def test_KNOWN_NEGATIVE_an_unresolvable_image_REFUSES_even_with_a_container(bed):
+    """A NAMED, EXISTING, VISIBLE container and no resolvable image: rc 2, and
+    the gate is never started -- never an unpinned run."""
+    tree = _tree_with_real_eda_pin(bed)
+    _argv_recording_gate(tree)
+    env, _log, _ = _with_docker_stub(bed, holds_pin=False)
+    env.update({"ARM_TEST_CONTAINER_EXISTS": "1",
+                "ARM_TEST_WORKDIR_VISIBLE": "1"})
+    out = bed / "out"
+    r = _run(tree, bed / "corpus", out, _frozen(bed / "frozen", ["snapA"]),
+             dict(env, EDA_CONTAINER="a-container-the-caller-named"))
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "could not be resolved on this host" in r.stderr
+    assert not (out / "real_ic_gate_anic.json").exists(), \
+        "the gate ran although no image could be resolved"
+    assert not (out / "real_ic_arm.json").exists()
+
+
+def test_KNOWN_POSITIVE_a_resolved_image_is_REQUIRED_and_recorded(bed):
+    tree = _tree_with_real_eda_pin(bed)
+    _argv_recording_gate(tree)
+    env, _log, pin = _with_docker_stub(bed, holds_pin=True)
+    env.update({"ARM_TEST_CONTAINER_EXISTS": "1",
+                "ARM_TEST_WORKDIR_VISIBLE": "1"})
+    out = bed / "out"
+    r = _run(tree, bed / "corpus", out, _frozen(bed / "frozen", []),
+             dict(env, EDA_CONTAINER="a-container-the-caller-named"))
+    assert r.returncode == 0, r.stdout + r.stderr
+    argv = json.loads((out / "real_ic_gate_anic.json").read_text())["argv"]
+    assert "--require-image" in argv, argv
+    assert argv[argv.index("--require-image") + 1] == pin
+    rep = json.loads((out / "real_ic_arm.json").read_text())
+    assert rep["image_digest"] == pin
+    assert rep["image_reference"] == "a.registry.example/vibeic-eda@" + pin
+
+
+def _replay_bed(bed, recorded_on):
+    tree = _tree(bed / "tree", {"rc": 0, "report": _report("NO_REGRESSION")},
+                 {"rc": 0, "report": _report("NO_REGRESSION")})
+    refdir = bed / "refs"
+    refdir.mkdir()
+    (refdir / "snapA.json").write_text("{}", encoding="utf-8")
+    if recorded_on is not None:
+        (refdir / "snapA.image").write_text(recorded_on + "\n", encoding="utf-8")
+    out = bed / "out"
+    r = _run(tree, bed / "corpus", out, _frozen(bed / "frozen", ["snapA"]),
+             {"REAL_IC_REPLAY_REF_DIR": str(refdir)})
+    return r, out, refdir
+
+
+def test_a_reference_recorded_on_ANOTHER_image_is_NOT_COMPARABLE(bed):
+    other = "sha256:" + "ef" * 32
+    r, out, refdir = _replay_bed(bed, other)
+    rep = json.loads((out / "real_ic_arm.json").read_text())
+    row = [x for x in rep["subjects"] if x["subject"] == "snapA"][0]
+    assert row["kind"] == "audit_replay_baseline", row
+    assert row["not_comparable"] == \
+        "NOT_COMPARABLE: image %s vs %s" % (other, _FAKE_DIGEST)
+    assert rep["not_comparable"] == ["snapA"]
+    assert (refdir / "snapA.image").read_text().strip() == _FAKE_DIGEST
+    assert list(refdir.glob("snapA.superseded-*.json")), \
+        "the old reference must be set aside, not destroyed"
+
+
+def test_a_reference_recorded_on_THIS_image_is_diffed_normally(bed):
+    r, out, _ = _replay_bed(bed, _FAKE_DIGEST)
+    assert r.returncode == 0, r.stdout + r.stderr
+    rep = json.loads((out / "real_ic_arm.json").read_text())
+    row = [x for x in rep["subjects"] if x["subject"] == "snapA"][0]
+    assert row["kind"] == "audit_replay", row
+    assert "not_comparable" not in row
+    assert rep["not_comparable"] == []
+
+
+def test_a_reference_that_never_recorded_its_image_is_NOT_COMPARABLE(bed):
+    _r, out, _ = _replay_bed(bed, None)
+    rep = json.loads((out / "real_ic_arm.json").read_text())
+    row = [x for x in rep["subjects"] if x["subject"] == "snapA"][0]
+    assert row["kind"] == "audit_replay_baseline"
+    assert "<unrecorded>" in row["not_comparable"]

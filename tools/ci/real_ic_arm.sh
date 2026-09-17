@@ -164,6 +164,9 @@ if [ -z "${PIN:-}" ]; then
   echo "[REFUSE] real_ic_arm: the EDA image identity could not be resolved on this host; nothing was measured." >&2
   exit 2
 fi
+# The reference this run is judged on, recorded in real_ic_arm.json, and the
+# digest a replay reference must have been recorded on to be comparable.
+IMAGE_REF="$(cd "$PROGRAMS" && python3 -c 'import _eda_pin; print(_eda_pin.image_repo())' 2>/dev/null)@$PIN"
 resolve_runnable_image() {
   (cd "$PROGRAMS" && python3 -c '
 import sys
@@ -244,11 +247,13 @@ SUBJECTS_JSON="$OUTDIR/.subjects.jsonl"
 
 echo "[real_ic_arm] IC reference: ${REAL_IC_REFERENCE:-<auto: highest published cell — expect a RUN SHAPE refusal, see the header>}"
 
-record() {  # name kind rc report
-  python3 - "$1" "$2" "$3" "$4" "$SUBJECTS_JSON" <<'PY'
+record() {  # name kind rc report [not_comparable]
+  python3 - "$1" "$2" "$3" "$4" "$SUBJECTS_JSON" "${5:-}" <<'PY'
 import json, sys
-name, kind, rc, report, out = sys.argv[1:6]
+name, kind, rc, report, out, not_comparable = sys.argv[1:7]
 row = {"subject": name, "kind": kind, "rc": int(rc), "report": report}
+if not_comparable:
+    row["not_comparable"] = not_comparable
 try:
     d = json.load(open(report))
     row["verdict"] = d.get("verdict")
@@ -325,7 +330,24 @@ if [ -d "$FROZEN" ]; then
     name=$(basename "$snap")
     ref=""
     mkbase=""
+    notcomp=""
     if [ -n "${REAL_IC_REPLAY_REF_DIR:-}" ]; then
+      # A REFERENCE IS ONLY COMPARABLE ON THE IMAGE IT WAS RECORDED ON. The image
+      # is no longer fixed by the tree, so a baseline recorded before the host
+      # moved to a newer EDA image describes a different toolchain, and diffing
+      # against it would charge the image's delta to the candidate. The digest a
+      # baseline was recorded on sits beside it; when it is not THIS run's digest
+      # (or was never recorded) the old table is set aside, a fresh baseline is
+      # recorded, and the row says NOT_COMPARABLE -- it is not a pass.
+      recorded_on=""
+      if [ -f "$REAL_IC_REPLAY_REF_DIR/$name.json" ]; then
+        recorded_on=$(cat "$REAL_IC_REPLAY_REF_DIR/$name.image" 2>/dev/null || true)
+        if [ "$recorded_on" != "$PIN" ]; then
+          notcomp="NOT_COMPARABLE: image ${recorded_on:-<unrecorded>} vs $PIN"
+          mv -f "$REAL_IC_REPLAY_REF_DIR/$name.json" \
+                "$REAL_IC_REPLAY_REF_DIR/$name.superseded-$(date +%Y%m%dT%H%M%S).json"
+        fi
+      fi
       if [ -f "$REAL_IC_REPLAY_REF_DIR/$name.json" ]; then
         ref="$REAL_IC_REPLAY_REF_DIR/$name.json"
       else
@@ -347,8 +369,14 @@ if [ -d "$FROZEN" ]; then
       --json "$OUTDIR/audit_replay_$name.json" \
       > "$OUTDIR/audit_replay_$name.log" 2>&1
     rc_subject=$?
-    if [ -n "$mkbase" ]; then kind=audit_replay_baseline; else kind=audit_replay; fi
-    record "$name" "$kind" "$rc_subject" "$OUTDIR/audit_replay_$name.json"
+    if [ -n "$mkbase" ]; then
+      kind=audit_replay_baseline
+      [ "$rc_subject" = 0 ] && printf '%s\n' "$PIN" > "$REAL_IC_REPLAY_REF_DIR/$name.image"
+    else
+      kind=audit_replay
+    fi
+    [ -n "$notcomp" ] && echo "[real_ic_arm] $name: $notcomp — a fresh baseline was recorded"
+    record "$name" "$kind" "$rc_subject" "$OUTDIR/audit_replay_$name.json" "$notcomp"
   done
 else
   echo "[real_ic_arm] NOTE: no frozen snapshots at $FROZEN — the replay half of" \
@@ -357,9 +385,10 @@ fi
 
 # ── aggregate ────────────────────────────────────────────────────────────────
 python3 - "$SUBJECTS_JSON" "$OUTDIR/real_ic_arm.json" "$TREE" "$CORPUS" \
-         "$CONTAINER" "$STARTED" "$FROZEN" <<'PY'
+         "$CONTAINER" "$STARTED" "$FROZEN" "$IMAGE_REF" "$PIN" <<'PY'
 import json, subprocess, sys
-subjects_path, out, tree, corpus, container, started, frozen = sys.argv[1:8]
+(subjects_path, out, tree, corpus, container, started, frozen, image_ref,
+ image_digest) = sys.argv[1:10]
 rows = [json.loads(l) for l in open(subjects_path) if l.strip()]
 
 
@@ -396,6 +425,10 @@ report = {
     "tree": tree, "tree_head": _sha(tree),
     "benchmark_data": corpus, "benchmark_data_head": _sha(corpus),
     "container": container, "container_image": _image(container),
+    # The image every verdict below was judged on, as the resolver answered it
+    # once for this run. A later run on a different digest is not comparable.
+    "image_reference": image_ref, "image_digest": image_digest,
+    "not_comparable": [r["subject"] for r in rows if r.get("not_comparable")],
     "frozen_root": frozen,
     "verdict": verdict,
     "subject_count": len(rows),
@@ -414,7 +447,8 @@ print("REAL-IC ARM %s — %d subject(s): %d measured, %d regressed, %d refused, 
 for r in rows:
     print("  %-26s %-14s rc=%d %s%s"
           % (r["subject"], r["kind"], r["rc"], r.get("verdict"),
-             (" — " + (r.get("refusal") or "")[:100]) if r.get("refusal") else ""))
+             (" — " + (r.get("refusal") or r.get("not_comparable") or "")[:100])
+             if (r.get("refusal") or r.get("not_comparable")) else ""))
 print("wrote %s" % out)
 sys.exit(rc)
 PY
