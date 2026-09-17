@@ -254,18 +254,24 @@ def test_a_declared_unmet_clause_leaves_the_signoff_step_and_its_successor_passi
     skip-eligible, so the same clause now lands the step in the INCOMPLETE tier
     instead. MEASURED on tree 5e850b3acee8:
 
-        mandatory   rc=1  {'23': 'NOT_MEASURED', '32': 'NOT_MEASURED'}
-        optional    rc=0  {'23': 'PASS',       '32': 'PASS'}
+        mandatory   rc=1  {'23': 'NOT_MEASURED', '32': 'PASS'}
+        optional    rc=0  {'23': 'PASS',         '32': 'PASS'}
 
-    Every load-bearing half of the finding is unchanged: under the mandatory
-    wiring the rarely-applicable clause still costs the sign-off step its tier
-    and still voids the successor it sits above, and rc is still non-zero. Only
-    the word for "not a clean PASS" is more precise. The class it rests on is
-    pinned by the test above.
+    R-0915-85 CHANGED THE SUCCESSOR, deliberately, and this is the site that
+    says so. The clause still costs the sign-off step its tier and the run is
+    still rc 1 -- both load-bearing halves stand. What it no longer does is
+    VOID step 32: NOT_MEASURED cascades to nothing, because a step nobody
+    measured is a hole in the report and not a verdict about everything
+    downstream of it. Step 32 ran, produced its own artefact and passed its own
+    gate; stamping it non-green for step 23's silence is the subservient-r26
+    shape exactly, and the run stays off PASS through step 23's own word
+    instead.
     """
     rc_a, a = _audit(tmp_path, _one_step_flow(tmp_path, False, "a"), "a")
     assert a["23"] == "NOT_MEASURED", a
-    assert a["32"] == "NOT_MEASURED", a
+    assert a["32"] == "PASS", (
+        f"step 32 is {a['32']}: it ran and passed its own gate, and step 23's "
+        f"NOT_MEASURED voided it anyway — the r26 cascade, back")
     assert rc_a != 0
 
     rc_b, b = _audit(tmp_path, _one_step_flow(tmp_path, True, "b"), "b")

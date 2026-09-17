@@ -17609,8 +17609,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     #
     # WHY NOT "EXCUSE AT MOST ITS OWN STEP" (contribute `min(1, N)`). That
     # reading assumes a waived sub-gate leaves P0 itself excused. It does not:
-    # `_p0_umbrella_status` returns only SKIPPED-CONDITION / FAIL / INCOMPLETE
-    # / PASS and CANNOT return WAIVED, and with a WAIVED record present the
+    # `_p0_umbrella_status` returns only NOT_APPLICABLE / FAIL / NOT_MEASURED
+    # / PASS and CANNOT return PASS_WITH_WAIVERS, and with a waived record
+    # present the
     # reachable set is {PASS, FAIL} — neither of which is EXCUSED. So `min(1,
     # N)` would remove from the denominator a step that is simultaneously
     # counted in the numerator. Same unit error, magnitude 1. The committed log

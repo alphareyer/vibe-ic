@@ -44,11 +44,22 @@ def test_p0_renders_skipped_condition():
     import inspect
     assert F.p0_umbrella_verdict(None, []) == "NOT_APPLICABLE"
     owner = inspect.getsource(F._p0_umbrella_status)
-    assert '"SKIPPED-CONDITION"' in owner
+    # R-0915-85 — the word the owner writes is `NOT_APPLICABLE`, and it must
+    # DECLARE what makes it so; #447's sentence is unchanged and the reference
+    # to it stays, which is what keeps this a wiring assertion about the one
+    # owner rather than about a spelling.
+    assert '_T.Verdict.NOT_APPLICABLE.value' in owner or \
+        '"NOT_APPLICABLE"' in owner, owner[:400]
     assert "#447" in owner
     fn = inspect.getsource(F.main)
     assert 'id="P0"' in fn
-    assert "_p0_umbrella_status(s_passed, structural_gate_records)" in fn
+    # The call spans two lines since R-0915-85 gave the owner a PAIR to return
+    # (the word and the reason beside it), so the wiring is asserted on the
+    # call, not on one line's worth of it.
+    _flat = " ".join(fn.split())
+    assert "_p0_umbrella_status( s_passed, structural_gate_records)" in _flat \
+        or "_p0_umbrella_status(s_passed, structural_gate_records)" in _flat, \
+        _flat[:400]
 
 
 def test_rtl_present_still_executes(tmp_path):
