@@ -8135,6 +8135,7 @@ server.tool(
           ...parsed,
           status: "MEASURED",
           audit_ran: true,
+          gate,  // which program produced this verdict — the resolved path
           exit_code: exitCode,
           phase23_complete: exitCode === 0,
         }, null, 2),
