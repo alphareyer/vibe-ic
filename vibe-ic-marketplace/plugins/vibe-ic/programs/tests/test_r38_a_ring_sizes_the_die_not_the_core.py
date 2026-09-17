@@ -54,3 +54,34 @@ def test_a_rectangular_answer_uses_its_larger_side():
 def test_a_smaller_die_dimension_decides_the_fit():
     pad = R.ring_die_core_pad(2400, 1962, RING_PAD, (500, 500))
     assert pad == (1962 - 500) // 2
+
+
+# ---- and when that core turns out too small, the CORE is what grows --------
+
+def test_an_over_utilised_core_grows_inside_the_ring_die():
+    """r40: the 225 um core measured 114.217 % and the retry tried to grow the
+    1962 um RING die, hit the 2000 um cap, and FAILed telling the operator to
+    raise a --die-um the ring had decided."""
+    pad = R.ring_core_pad_for_util(RING_DIE, RING_DIE, 225, 225,
+                                   114.217, 40.0, RING_PAD)
+    assert pad is not None and pad < (RING_DIE - 225) // 2      # the core grew
+    core = RING_DIE - 2 * pad
+    assert core > 225 and pad >= RING_PAD                       # never under the pads
+    # it grew far enough to reach the target, not further than the ring allows
+    assert core * core >= 225 * 225 * (114.217 / 40.0) * 0.98
+
+
+def test_growth_stops_at_the_rings_own_inset():
+    # a core that still misses the target but is already at the ring floor
+    assert R.ring_core_pad_for_util(RING_DIE, RING_DIE,
+                                    RING_DIE - 2 * RING_PAD,
+                                    RING_DIE - 2 * RING_PAD,
+                                    114.2, 40.0, RING_PAD) is None
+    # one that needs more than the ring leaves is clamped to the floor
+    assert R.ring_core_pad_for_util(RING_DIE, RING_DIE, 700, 700,
+                                    114.2, 40.0, RING_PAD) == RING_PAD
+
+
+def test_a_core_already_inside_the_target_does_not_move():
+    assert R.ring_core_pad_for_util(RING_DIE, RING_DIE, 900, 900,
+                                    30.0, 40.0, RING_PAD) is None
