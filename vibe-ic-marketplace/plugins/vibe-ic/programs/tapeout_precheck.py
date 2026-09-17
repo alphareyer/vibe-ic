@@ -347,8 +347,65 @@ def default_runner(cmd: List[str], timeout: Optional[float]
 # --------------------------------------------------------------------------- #
 # Which PDK is this, and does it ship a shuttle precheck?
 # --------------------------------------------------------------------------- #
+#: Where step 0.5ic records the PDK the run was invoked with.
+RUN_PDK_RECORD_REL = "reports/phase1/submission_template_fetch.json"
+
+
+def run_invoked_pdk(project: Path) -> Tuple[Optional[str], Optional[str]]:
+    """(pdk, where) the RUN was told to build, as step 0.5ic recorded it.
+
+    Only a value whose own recorded source is the run's `--pdk` counts; a
+    family step 0.5ic resolved from the documents is a declaration, not an
+    invocation. Unreadable or absent -> (None, None), never a default."""
+    try:
+        doc = json.loads((project / RUN_PDK_RECORD_REL).read_text())
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(doc, dict) or doc.get("pdk_source") != "--pdk":
+        return None, None
+    pdk = doc.get("pdk")
+    if not isinstance(pdk, str) or not pdk.strip():
+        return None, None
+    return pdk.strip(), f"{RUN_PDK_RECORD_REL}:pdk (pdk_source=--pdk)"
+
+
 def resolve_pdk(project: Path,
                 explicit: str = "") -> Tuple[Optional[str], Optional[str]]:
+    """(pdk, where it was read from), refined to the run's own distribution.
+
+    THE AUDITOR RE-RUN HAS NO `--pdk`. MEASURED on spm x gf180mcuD, DIE route
+    (v1.22.3): the runner called this program with `--pdk gf180mcuD` and its
+    density rung passed; `flow_compliance_check` then re-ran step 37.5ic's
+    clause, which carries no `--pdk`, and OVERWROTE the report. The declared
+    answer below is the FAMILY `gf180mcu`, the registry knows only
+    `gf180mcuD`, so the density windows and the layer table came back
+    unknown and the shipped report failed a rung the runner had passed.
+
+    When the design's declared/corroborated target and the run's recorded
+    `--pdk` share identity, the run's more specific distribution is returned;
+    with no declaration, the run's record stands. A run PDK that shares no
+    identity with the declaration is NOT substituted -- that contradiction
+    belongs to `declared_pdk_is_the_pdk_used_check`."""
+    ans, src = _resolve_declared_pdk(project, explicit)
+    if explicit.strip():
+        return ans, src
+    run_pdk, run_src = run_invoked_pdk(project)
+    if not run_pdk or run_pdk == ans:
+        return ans, src
+    if ans is None:
+        return run_pdk, run_src
+    try:
+        import declared_pdk_is_the_pdk_used_check as _pdkid
+    except ImportError:                       # pragma: no cover - defensive
+        return ans, src
+    if _pdkid.shares_identity(_pdkid.tokens(ans), run_pdk):
+        return run_pdk, (f"{run_src}; the distribution of the target {ans!r} "
+                         f"resolved from {src}")
+    return ans, src
+
+
+def _resolve_declared_pdk(project: Path,
+                          explicit: str = "") -> Tuple[Optional[str], Optional[str]]:
     """(pdk, where it was read from) — or (None, None) when nobody said.
 
     NOT re-derived here. `declared_pdk_is_the_pdk_used_check.declared_target`
