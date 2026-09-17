@@ -1739,7 +1739,24 @@ REAL_GATE_LEFT_THE_PASS_TIER: Dict[str, str] = {
     # step 2's gate reports FAIL. Under the old reader the nested word was
     # invisible and the outer step inherited the weaker INCOMPLETE. The step is
     # further from a pass tier, not closer.
-    "2": "FAIL",
+    #
+    # 2026-09-17 (R-0915-85), FAIL -> NOT_MEASURED(partial_population), and the
+    # cause is a REPAIR inside this same batch, not a drift. MEASURED by
+    # running step 2's real gate on the seeded fixture: the nested clause
+    # reports `[verdict=FAIL, reason_class=ZERO_DENOMINATOR]` — a nested run
+    # that DECIDED NOTHING — and 9 of this step's 18 clauses examined nothing.
+    # The commit "an ADVISORY clause started FAILING its step, on a nested run
+    # that decided nothing" stopped a nested zero-denominator FAIL from being
+    # read as a defect this gate found, which is the whole point: FAIL says a
+    # gate looked at the design and something was wrong, and a zero denominator
+    # is the sentence "nothing was looked at". Part of the population WAS
+    # examined here, so the reason is `partial_population` and not
+    # `no_population`.
+    #
+    # NEITHER WORD IS GREEN. `verdict.is_non_green` is FAIL | NOT_MEASURED, so
+    # this move takes no step out of any blocking set and the step is no nearer
+    # a PASS tier than it was — which is the property this map exists to watch.
+    "2": "NOT_MEASURED",
     "4": "FAIL",
     "12": "NOT_MEASURED",
     "14": "NOT_MEASURED",
