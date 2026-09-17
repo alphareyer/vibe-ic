@@ -1229,10 +1229,20 @@ def _counts_snapshot(
     when they are not supplied the whole total is conservatively booked
     as mid-flow (no step is silently mislabelled as a silicon skip).
     `skipped_manufacturing + skipped_midflow == skipped` always holds."""
+    # R-0915-85 — THE ROLL-UP KEYS ARE THE FIVE. Left as they were, three of
+    # these four `.get`s named a bucket no producer writes and silently
+    # returned 0: `vacuous` and `skipped` read zero on every run, so the
+    # denominator stopped subtracting the inapplicable steps and
+    # `executed_pass < executed_total` -- the sentence this snapshot exists to
+    # make true -- became unfalsifiable.
     pass_only = rollup.get("PASS", 0)
-    vacuous = rollup.get("VACUOUS-PASS", 0)
-    waived = rollup.get("WAIVED-DEFERRED", 0)
-    skipped = rollup.get("SKIPPED-CONDITION", 0)
+    vacuous = rollup.get("NOT_MEASURED", 0)
+    # `WAIVED-DEFERRED` is the CONTRACT label the audit's tally line prints
+    # beside `PASS_WITH_WAIVERS`; both are read so a snapshot taken from either
+    # spelling of the same line agrees with itself.
+    waived = (rollup.get("WAIVED-DEFERRED", 0)
+              or rollup.get("PASS_WITH_WAIVERS", 0))
+    skipped = rollup.get("NOT_APPLICABLE", 0)
     fail = rollup.get("FAIL", 0)
     # R-0915-85 — `MISSING` is gone as a bucket: a declared output that does
     # not exist is `FAIL(missing_artefact)`, so it is already inside `fail`.
