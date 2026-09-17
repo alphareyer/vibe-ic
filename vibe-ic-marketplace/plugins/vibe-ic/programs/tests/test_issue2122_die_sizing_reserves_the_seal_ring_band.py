@@ -237,9 +237,11 @@ def test_a_hardmacro_reserves_nothing(tmp_path):
     `die_finishing_gen._hardmacro_skip` refuses one step later on the same
     fact."""
     import _tapeout_declaration as _td
+    import _owner_declared as _OD
     (tmp_path / "input" / "submission_template").mkdir(parents=True)
     doc = _td.blank_declaration()
     doc, _ig = _td.merge_answers(doc, {"deliverable": _td.DELIVERABLE_HARDMACRO})
+    _OD.attest(doc)
     (tmp_path / _td.DECLARATION_REL).write_text(json.dumps(doc, indent=2))
     margin, rec = P3._seal_ring_core_margin_um(tmp_path, None, "no-container")
     assert margin is None

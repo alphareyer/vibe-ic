@@ -47,6 +47,7 @@ if str(_PROGRAMS) not in sys.path:
     sys.path.insert(0, str(_PROGRAMS))
 
 import _tapeout_declaration as TD                             # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 import submission_template_fetch as STF                       # noqa: E402
 import phase1_one_shot_runner as P1                           # noqa: E402
 
@@ -72,11 +73,22 @@ def test_exactly_the_database_unit_is_answered_by_the_technology():
             if q.answered_by == TD.ANSWERED_BY_TECHNOLOGY}
     assert tech == {"database_unit_um"}
     assert set(TD.TECHNOLOGY_ANSWERED) == tech
-    # And the other direction: everything else is still the design's.
+    # And the other direction: every other question is the DESIGN's or the
+    # OWNER's, and the three sets partition the twenty with nothing left over.
+    #
+    # THE OWNER SET IS NAMED HERE BECAUSE THIS TEST CAUGHT IT. R-0915-95 moved
+    # `deliverable` out of the design's authority and into the owner's, and
+    # this assertion went red by NAME — which is what a membership test is for,
+    # and why it is not written as a count.
     design = {q.key for q in TD.QUESTIONS
               if q.answered_by == TD.ANSWERED_BY_DESIGN}
-    assert design and not (design & tech)
-    assert design | tech == {q.key for q in TD.QUESTIONS}
+    owner = {q.key for q in TD.QUESTIONS
+             if q.answered_by == TD.ANSWERED_BY_OWNER}
+    assert owner == {"deliverable"}
+    assert set(TD.OWNER_ANSWERED) == owner
+    assert design and not (design & tech) and not (design & owner)
+    assert not (owner & tech)
+    assert design | tech | owner == {q.key for q in TD.QUESTIONS}
 
 
 def test_the_provenance_key_is_carried_by_the_declaration():
@@ -375,8 +387,9 @@ def _project(tmp_path: Path, design_answers: dict, technology: dict) -> Path:
     (proj / "input").mkdir(parents=True)
     (proj / "reports" / "phase1").mkdir(parents=True)
     ans = proj / "input" / "step_0_5ic_answers.json"
-    ans.write_text(json.dumps({"schema": "vibe-ic/step_0_5ic_answers/1",
-                               "answers": design_answers}), encoding="utf-8")
+    ans.write_text(json.dumps(_OD.attest(
+        {"schema": "vibe-ic/step_0_5ic_answers/1",
+         "answers": design_answers})), encoding="utf-8")
     fetch_rep = proj / "reports" / "phase1" / "fetch.json"
     fetch_rep.write_text(json.dumps({"program": "submission_template_fetch",
                                      "technology": technology}),

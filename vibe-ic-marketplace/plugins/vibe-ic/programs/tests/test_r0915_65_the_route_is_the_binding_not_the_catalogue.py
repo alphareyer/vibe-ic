@@ -42,6 +42,7 @@ import pytest  # noqa: E402
 
 import benchmark_evidence_publish as B  # noqa: E402
 import _tapeout_declaration as TD  # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 
 
 def _run(tmp_path, deliverable="HARDMACRO", catalogue=True, slot=None,
@@ -55,6 +56,7 @@ def _run(tmp_path, deliverable="HARDMACRO", catalogue=True, slot=None,
     doc = TD.blank_declaration()
     doc.setdefault("answers", {})["deliverable"] = deliverable
     doc["answers"]["top_cell"] = "x"
+    _OD.attest(doc)
     (st / "tapeout_declaration.json").write_text(json.dumps(doc))
     if catalogue:
         slots = st / "slots"

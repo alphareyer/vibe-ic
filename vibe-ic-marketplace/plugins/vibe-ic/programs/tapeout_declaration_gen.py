@@ -194,6 +194,12 @@ def build(project: Path, answers_path: Optional[Path]) -> Dict[str, Any]:
         "project": str(project),
         "declaration": doc,
         "declaration_refusals": TD.validate(doc),
+        # KEPT APART FROM THE MALFORMED ONES ON PURPOSE. `validate` answers
+        # "can anybody read this?"; these answer "did anybody entitled to
+        # answer it actually answer it?". Both are rc 1 below, and a reader
+        # sorting a failing run has to be able to tell which of the two it is
+        # holding without re-reading the messages.
+        "attestation_refusals": TD.owner_attestation_refusals(doc),
         "audit": TD.audit(doc),
         "answers_source": source,
         "operator_slot_files": [str(p) for p in slots],
@@ -313,6 +319,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     # nobody can read. An UNANSWERED one is the intended output and is rc 0.
     if rec["declaration_refusals"]:
         for r in rec["declaration_refusals"]:
+            print(f"  REFUSED {r['rule']}: {r['message']}", file=sys.stderr)
+        return 1
+    # THE HALT AT STEP 0.5 (R-0915-95). This program is BLOCKING in step
+    # 0.5ic's producer chain -- `phase1_one_shot_runner._run_step_0_5ic` fails
+    # the whole of Phase 1 on a non-zero rc here -- so this is where an
+    # owner-only question that nobody entitled to answer has answered actually
+    # STOPS the flow, with the question surfaced. The sibling gate
+    # `tapeout_declaration_check` reports the same refusal in the compliance
+    # channel; one fix, two consumers, and neither is allowed to be the only
+    # one that notices.
+    if rec["attestation_refusals"]:
+        for r in rec["attestation_refusals"]:
             print(f"  REFUSED {r['rule']}: {r['message']}", file=sys.stderr)
         return 1
     if rec["answers_source"]["error"]:

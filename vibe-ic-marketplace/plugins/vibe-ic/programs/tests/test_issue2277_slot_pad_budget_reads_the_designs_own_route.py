@@ -33,6 +33,7 @@ sys.path.insert(0, str(PROG))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _tapeout_declaration as TD                      # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 import flow_compliance_check as F                      # noqa: E402
 import slot_pad_budget_check as S                      # noqa: E402
 import test_slot_pad_budget_check as T                 # noqa: E402  slot fixture
@@ -69,15 +70,16 @@ def _project(*, deliverable, operator_template, rtl=_RTL_SPM_TOP,
         doc, _ = TD.merge_answers(
             TD.blank_declaration(),
             {"deliverable": deliverable, "top_cell": "spm"})
+        _OD.attest(doc)
         assert not TD.validate(doc)
         (tmpl / "tapeout_declaration.json").write_text(json.dumps(doc))
     else:
         (tmpl / "tapeout_declaration.json").write_text("{ not json")
-    (d / "input" / "step_0_5ic_answers.json").write_text(json.dumps({
+    (d / "input" / "step_0_5ic_answers.json").write_text(json.dumps(_OD.attest({
         "schema": "vibe-ic/step_0_5ic_answers/1",
         "operator_template": operator_template,
         "answers": {"deliverable": deliverable, "top_cell": "spm"},
-    }))
+    })))
     r = d / "phase2" / "stage1" / "rtl"
     r.mkdir(parents=True)
     (r / "spm.v").write_text(rtl)

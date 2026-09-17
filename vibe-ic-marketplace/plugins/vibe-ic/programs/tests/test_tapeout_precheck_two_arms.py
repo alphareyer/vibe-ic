@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _submission_template as ST         # noqa: E402
 import _tapeout_declaration as TD          # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 import general_precheck as GP              # noqa: E402
 import tapeout_precheck as TP              # noqa: E402
 import _watchdog                           # noqa: E402
@@ -98,6 +99,7 @@ def _project(tmp_path: Path, gds_maker, answers: dict, *,
     proj = tmp_path / "proj"
     gds_maker(proj / "phase3" / "stage4" / "gds" / "chip_top.gds")
     doc, ignored = TD.merge_answers(TD.blank_declaration(), answers)
+    _OD.attest(doc)
     assert not ignored, f"test wrote an unknown answer key: {ignored}"
     p = proj / TD.DECLARATION_REL
     p.parent.mkdir(parents=True, exist_ok=True)

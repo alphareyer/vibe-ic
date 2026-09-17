@@ -20,6 +20,7 @@ PLUGIN = PROGRAMS.parent
 sys.path.insert(0, str(PROGRAMS))
 
 import _tapeout_declaration as TD  # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 import _submission_template as ST  # noqa: E402
 import flow_compliance_check as FCC  # noqa: E402
 import phase1_doc_one_shot_runner as P1  # noqa: E402
@@ -230,6 +231,7 @@ def test_unset_authority_is_executed_as_an_incomplete_flow_clause(tmp_path):
                 "per-slot pad list for this step to ingest."),
         },
         "answers": {"deliverable": TD.DELIVERABLE_DIE},
+        TD.PROVENANCE_KEY: _OD.provenance(),
         AREA_KEY: TD.NOT_DETERMINED,
     })
 

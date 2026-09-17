@@ -679,6 +679,7 @@ def test_a_closure_staged_document_is_itself_closed_and_recorded_on_a_restage(tm
 sys.path.insert(0, str(PROG.parent))
 import _release_docs_contract as _RDC  # noqa: E402
 import _tapeout_declaration as _TD  # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 
 #: The set the spm run measured, and the shape any IP release takes: the five
 #: contract-required documents, the manifest that binds them to the artefacts,
@@ -707,6 +708,7 @@ def _declare_route(run: Path, deliverable: str) -> None:
     """The run's delivery route, written the way step 0.5ic writes it."""
     doc = _TD.blank_declaration()
     doc, _ignored = _TD.merge_answers(doc, {"deliverable": deliverable})
+    _OD.attest(doc)   # the fixture means "the owner declared this route"
     p = run / _TD.DECLARATION_REL
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(doc, indent=2))

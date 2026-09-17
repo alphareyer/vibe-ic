@@ -29742,29 +29742,46 @@ def _padring_producer_dispatch(project: Path,
 def _declaration_deliverable_answer(project: Path) -> Tuple[Optional[str], str]:
     """The delivery's OWN declared `deliverable`, or (None, why not).
 
-    Read straight from `input/submission_template/tapeout_declaration.json` --
-    the party who has to accept the result. Deliberately NOT
-    `_declared_deliverable`, which DERIVES a route and, for this design, reads
-    the L3 pad-placement table's four named sides as evidence of a die; that
-    derivation is what a declaration is entitled to overrule, and
-    `_effective_deliverable` already prefers the declaration for exactly this
-    reason. NOT_DETERMINED and an unreadable or absent file are not answers and
-    leave behaviour unchanged.
+    Read from the tape-out declaration -- the party who has to accept the
+    result -- THROUGH `_tapeout_declaration.answer`, which is the one reader
+    of that field in this tree.
+
+    IT USED TO BE A SECOND READER, and that was the defect (R-0915-95). This
+    function re-opened the file by a hard-coded path and re-implemented
+    "is this an answer?" as a string test, so it believed a `deliverable` the
+    declaration module itself would have refused: an OWNER-ONLY question that
+    an agent had worked out of the design's documents. Two readers of one
+    field is two answers waiting to differ, and on 2026-09-06 they differed in
+    the direction that routes a die onto the IP terminal. There is now one
+    reader, and everything asking this question gets the same answer from it.
+
+    NOT_DETERMINED, an unreadable or absent file, and an answer the owner did
+    not give are all "nothing was declared" and leave behaviour unchanged.
     """
-    path = (project / "input" / "submission_template"
-            / "tapeout_declaration.json")
+    _here = str(Path(__file__).resolve().parent)
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+    try:
+        import _tapeout_declaration as _td                      # noqa: PLC0415
+    except Exception as exc:                                    # noqa: BLE001
+        return None, f"the declaration module could not be imported: {exc}"
+    path = project / _td.DECLARATION_REL
     if not path.is_file():
         return None, f"{path.name} is not on disk, so nothing was declared"
-    try:
-        doc = json.loads(path.read_text(errors="replace"))
-    except (OSError, ValueError) as exc:
-        return None, f"{path.name} could not be read: {exc}"
-    answer = ((doc or {}).get("answers") or {}).get("deliverable")
-    if not isinstance(answer, str) or answer.strip().upper() in (
-            "", "NOT_DETERMINED", "NOT_APPLICABLE"):
-        return None, (f"{path.name} declares deliverable="
-                      f"{answer!r}, which is not an answer")
-    return answer.strip().upper(), f"declared in {path.name}"
+    doc, err = _td.load(path)
+    if err is not None or not isinstance(doc, dict):
+        return None, (err or f"{path.name}'s top level is not a mapping")
+    got = _td.answer(doc, "deliverable")
+    if not _td.is_answered(got):
+        att = _td.attestation_of(doc, "deliverable")
+        why = (f"{path.name} declares deliverable="
+               f"{_td.raw_answer(doc, 'deliverable')!r}, which is "
+               f"not an answer")
+        if not att["declares"] and att["why_not"]:
+            why += (f" -- it is an OWNER-ONLY question and {att['why_not']}, "
+                    f"so it is refused rather than believed")
+        return None, why
+    return str(got).strip().upper(), f"declared in {path.name}"
 
 
 def _padring_pdk_root_and_tree(pdk: PdkConfig,
@@ -38574,13 +38591,29 @@ _DECLARATION_PUBLISH_KEYS: Tuple[str, ...] = (
 def _declared_deliverable(project: Path) -> Tuple[Optional[str], str]:
     """(DIE | HARDMACRO, basis) or (None, why not) — never a guess.
 
-    FIRST the flow's own route, which a design cannot accidentally omit;
-    THEN the design's own input documents, because a route is only established
-    once step 0.5ic has written a router artefact and that step needs THIS
-    answer to choose one. Without the second authority the pair is a deadlock:
-    measured on spm, `tapeout_declaration_gen` reported "route NOT_DETERMINED …
-    no router file was written" and `_ppa/delivery_path` then reported
-    NOT_DETERMINED for want of that file.
+    THE FLOW'S OWN ROUTE, and nothing else. That route is a RESTATEMENT of
+    the declaration -- step 0.5ic writes the router artefact from it -- so
+    this function reports what was declared and never anything derived.
+
+    THE SECOND AUTHORITY WAS DELETED, NOT DISABLED (R-0915-95). It read
+    `reports/phase3/io_pad_chip_top.json` and concluded DIE from the design's
+    input documents assigning top-level ports to two or more named sides: "a
+    hardmacro has no north, south, east or west of its own". The reasoning is
+    plausible and it is still an INFERENCE, made by this program, about a
+    question that belongs to the party taking delivery -- the same shape of
+    reading that on 2026-09-06 concluded HARDMACRO from those documents'
+    SILENCE about a pad ring and routed five designs onto the IP terminal for
+    eleven days. A document cannot answer this question by speaking and it
+    cannot answer it by staying quiet.
+
+    It was written to break a deadlock: `tapeout_declaration_gen` reported
+    "route NOT_DETERMINED, no router file was written" and `_ppa/delivery_path`
+    then reported NOT_DETERMINED for want of that file. The deadlock was real
+    and the diagnosis was wrong. Nothing was stuck; the question had simply
+    never been put to the one party who can answer it. Step 0.5ic now HALTS
+    there and surfaces it, which is what the deadlock was asking for. Until
+    the owner answers, this returns (None, why not) -- an honest
+    NOT_DETERMINED, which is what the state actually is.
     """
     _here = str(Path(__file__).resolve().parent)
     if _here not in sys.path:
@@ -38597,36 +38630,13 @@ def _declared_deliverable(project: Path) -> Tuple[Optional[str], str]:
         return "HARDMACRO", ("the flow's own delivery route: the IP/hardmacro "
                              "terminal alone (_ppa/delivery_path)")
 
-    # THE DESIGN'S OWN INPUT. `io_pad_chip_top_gen` reads the input documents
-    # and records which top-level ports the design puts on which SIDE of the
-    # die, naming the document and the heading it read them from. Four named
-    # sides is a die: a hardmacro is placed inside somebody else's die and has
-    # no north, south, east or west of its own.
-    rep = _pl.reports_dir(project) / "phase3" / "io_pad_chip_top.json"
-    if not rep.is_file():
-        return None, (f"the delivery route is {route or 'unreadable'} and "
-                      f"reports/phase3/io_pad_chip_top.json is not on disk, so "
-                      f"neither the flow nor the design's input has said what "
-                      f"leaves this flow")
-    try:
-        doc = json.loads(rep.read_text(errors="replace"))
-    except (OSError, ValueError) as exc:
-        return None, (f"the delivery route is {route or 'unreadable'} and "
-                      f"reports/phase3/io_pad_chip_top.json could not be read: "
-                      f"{exc}")
-    placement = (doc or {}).get("pad_placement") or {}
-    sides = placement.get("side_signals") or {}
-    named = sorted(k for k, v in sides.items() if v)
-    if len(named) >= 2:
-        return "DIE", (
-            f"the design's own input assigns top-level ports to {len(named)} "
-            f"side(s) of a die ({', '.join(named)}) — "
-            f"{placement.get('source')} § {placement.get('heading')!r}; a "
-            f"hardmacro has no die sides")
     return None, (
-        f"the delivery route is {route or 'unreadable'} and the design's input "
-        f"assigns top-level ports to {len(named)} die side(s), which is not "
-        f"enough to say a die is what leaves this flow")
+        f"the delivery route is {route or 'unreadable'}, so the flow has not "
+        f"said what leaves it. Nothing else is consulted: `deliverable` is "
+        f"the OWNER's question and no reading of the design's own documents "
+        f"-- what they state or what they leave out -- is an answer to it. "
+        f"The route becomes readable when the owner answers at step 0.5ic; "
+        f"until then this is NOT_DETERMINED and says so")
 
 
 def _effective_deliverable(project: Path,

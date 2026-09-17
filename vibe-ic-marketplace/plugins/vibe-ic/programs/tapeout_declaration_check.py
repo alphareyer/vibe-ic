@@ -25,6 +25,14 @@ the typed step-0.5ic declaration. When both are absent this owning declaration
 step is INCOMPLETE (rc 2); an explicit typed NOT_APPLICABLE remains distinct
 from an unset field.
 
+    NOT_DECLARED -> FAIL here.  An OWNER-ONLY question (today: `deliverable`)
+                                carrying an answer that the owner did not
+                                give. The value is not believed by
+                                `_tapeout_declaration.answer`, so no consumer
+                                can route on it; this is where the flow is
+                                told WHY the question is suddenly unanswered,
+                                and stops. See that module's header for the
+                                eleven days.
     MALFORMED   -> FAIL here.   A question absent altogether; a rectangle that
                                 is not four numbers; an enum outside its
                                 choices; a database unit that is zero or
@@ -132,6 +140,13 @@ def evaluate(project: Path,
         else:
             doc = loaded
             refusals.extend(TD.validate(doc))
+            # AN OWNER-ONLY ANSWER WITH NO OWNER BEHIND IT (R-0915-95).
+            # MALFORMED -> FAIL is this gate's own rule and this is the same
+            # shape of defect: a declaration nobody can READ and a declaration
+            # nobody DECLARED are both documents that cannot be acted on. The
+            # difference is that this one looks perfectly readable, which is
+            # why it passed here on 2026-09-06 and cost eleven days.
+            refusals.extend(TD.owner_attestation_refusals(doc))
 
     routers = _routers_present(project)
     present = [name for name, ok in routers.items() if ok]

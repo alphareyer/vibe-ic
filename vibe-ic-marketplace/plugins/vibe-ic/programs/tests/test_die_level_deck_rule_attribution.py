@@ -28,6 +28,7 @@ from pathlib import Path
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 import _tapeout_declaration as TD  # noqa: E402
+import _owner_declared as _OD                              # noqa: E402
 import die_level_deck_rule_attribution as A  # noqa: E402
 
 # Verbatim, `libs.tech/klayout/tech/drc/generic_layers.rb` + `rule_decks/
@@ -211,8 +212,8 @@ def test_a_not_measured_link_is_said_even_when_nothing_is_attributed():
 def _project(tmp_path, deliverable, die_finishing):
     d = tmp_path / TD.DECLARATION_REL
     d.parent.mkdir(parents=True, exist_ok=True)
-    d.write_text(json.dumps({"schema": TD.SCHEMA,
-                             "answers": {"deliverable": deliverable}}))
+    d.write_text(json.dumps(_OD.attest(
+        {"schema": TD.SCHEMA, "answers": {"deliverable": deliverable}})))
     r = tmp_path / "reports" / "phase3" / "die_finishing.json"
     r.parent.mkdir(parents=True, exist_ok=True)
     r.write_text(json.dumps(die_finishing))
