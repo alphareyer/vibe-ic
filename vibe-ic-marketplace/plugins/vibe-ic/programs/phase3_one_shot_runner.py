@@ -18045,6 +18045,92 @@ def _floorplan_rectangles_record(project: Path,
     return rec
 
 
+def ring_core_pad_one_loosen_rung(die_w: int, die_h: int, core_w: int,
+                                  core_h: int, ring_core_pad: int,
+                                  ladder: Sequence[float] = ()) -> Optional[int]:
+    """The core inset one LOOSEN rung wider, inside a ring-pinned die.
+
+    WHY A RUN ASKS FOR THIS. A clock tree is built from the widest buffer the
+    PDK registry names, and a core sized to the area the cells need can leave
+    no free-site run wider than that master — the flow's own cap reports it
+    (`CTS_MASTER_AT_PLACEABILITY_BOUND`). The in-session ladder's last resort
+    then SWAPS those buffers down so the design legalizes. MEASURED on
+    subservient x gf180mcuD as a DIE: r41 kept `clkbuf_16`, closed setup at
+    +0.32 ns and shipped 4 overlapping clock leaves; r42 swapped 43 of them to
+    `clkbuf_4`, legalized (0 violations) and setup fell to -12.27 ns. Neither
+    is the answer: on a ring die the band around the core is EMPTY SILICON, so
+    the remedy is room, and the downsize stays the last resort it was.
+
+    Grows the core side by the loosen ladder's own first ratio
+    (sqrt(rung0 / rung1)), clamped at the ring's inset. None when the core is
+    already there. Pure.
+    """
+    rungs = [float(r) for r in (ladder or _ROUTE_LOOSEN_UTIL_LADDER) if r]
+    if len(rungs) < 2 or not (0.0 < rungs[1] < rungs[0]):
+        return None
+    span = min(int(die_w), int(die_h))
+    want = int(max(int(core_w), int(core_h)) * (rungs[0] / rungs[1]) ** 0.5)
+    pad = (span - want) // 2
+    if pad < int(ring_core_pad):
+        pad = int(ring_core_pad)
+    current = (span - min(int(core_w), int(core_h))) // 2
+    return pad if pad < current else None
+
+
+def ring_core_pad_for_util(die_w: int, die_h: int, core_w: int, core_h: int,
+                           actual_util_pct: float, target_util_pct: float,
+                           ring_core_pad: int) -> Optional[int]:
+    """The looser core inset when the CORE is over-utilised inside a ring die.
+
+    A ring pins the die, so the over-utilisation remedy cannot be "grow the
+    die": MEASURED on subservient x gf180mcuD (r40) the retry tried exactly
+    that, the 1962 um ring die hit the 2000 um cap, and PnR FAILed with
+    "increase --die-um manually" about a die the ring had already decided. The
+    core is what has room to grow — outward into the band between it and the
+    ring, never past the ring's own inset.
+
+    Returns the new (smaller) inset, or None when the core cannot grow any
+    further inside this ring — the caller then reports THAT, not a die cap.
+    Pure.
+    """
+    span = min(int(die_w), int(die_h))
+    grown = _compute_resized_die(int(core_w), int(core_h), actual_util_pct,
+                                 target_util_pct, die_max_um=span)
+    if grown is None:
+        return None
+    pad = (span - max(grown)) // 2
+    if pad < int(ring_core_pad):
+        pad = int(ring_core_pad)
+    current = (span - min(int(core_w), int(core_h))) // 2
+    return pad if pad < current else None
+
+
+def ring_die_core_pad(die_w: int, die_h: int, ring_core_pad: int,
+                      core_sized_um: Optional[Tuple[int, int]]) -> int:
+    """The core inset to use inside a die a PAD RING sized.
+
+    A ring's die comes from its PERIMETER (two corner cells plus the pads on
+    the longest side); the area the cells need is a different question, and the
+    auto-sizer already answered it. Returns the inset that CENTRES that
+    core-sized rectangle in the ring's die, or `ring_core_pad` unchanged when
+    that is already as tight (the ring inset is always the floor, so the core
+    can never reach under the pads), when nothing was auto-sized, or when the
+    core-sized rectangle is not smaller than the die.
+
+    MEASURED on subservient x gf180mcuD as a DIE (r37): 33 pads forced a
+    1962 um die, `die - 2*393` made the core 1176 um at 10.4 % utilisation, and
+    the netlist that closed setup at +0.03 ns as a 413 um hardmacro missed by
+    13.1 ns at SS. Pure.
+    """
+    if not core_sized_um:
+        return ring_core_pad
+    want = max(int(core_sized_um[0]), int(core_sized_um[1]))
+    if want <= 0:
+        return ring_core_pad
+    centred = (min(int(die_w), int(die_h)) - want) // 2
+    return centred if centred > ring_core_pad else ring_core_pad
+
+
 def ct03_pin_rect(fp_rect: Optional[Sequence[int]],
                   ring_inset_um: Optional[float],
                   core_pad: int, core_w: int, core_h: int,
@@ -27615,6 +27701,20 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
     # Third bare call, found while wiring #296: the post-global-placement
     # legalization. Same shape, same DPL-0036 kill. Same ladder.
     _initial_legalize = _build_escalating_legalize_tcl("INITIAL_DPL", "_ip")
+    # FOURTH SITE, found by r41: the post-global-route repairs. `repair_design`
+    # / `repair_timing -setup|-hold` run again after the global-route estimate
+    # and insert and upsize cells; the legalization that followed was the bare
+    # `catch {detailed_placement}` + NONFATAL shape this very ladder exists to
+    # replace — no `check_placement` proof, no displacement escalation, no
+    # clock-buffer downsize rung. MEASURED on subservient x gf180mcuD as a DIE
+    # (r41): post_cts.def and post_hold.def are legal, routed_preantenna.def
+    # carries 4 violations — two PAIRS of `clkbuf_16` clock leaves at IDENTICAL
+    # coordinates, the master the flow's own cap had already reported at the
+    # placeability bound (50 sites against a 50-site free run). The overlap was
+    # created here, nothing proved otherwise, and the run shipped it to
+    # streamout, where PNR_PLACEMENT_ILLEGAL refused the whole DEF.
+    _gr_repair_legalize = _build_escalating_legalize_tcl(
+        "GR_REPAIR", "_gr", clk_sink_buf=clk_buf)
     # v1.8.43 — the two in-flow DRV repairs get the estimate guard-band. Built
     # HERE (not inline) so BOTH sites are emitted from the ONE builder and can
     # never drift apart — the failure mode the in-flight hand-patch of this idea
@@ -27814,12 +27914,7 @@ if {{[catch {{repair_timing -hold}} _rth2_err]}} {{
 {fanout_root_repair_block}# Residual per-pin max-fanout roots are inserted here,
 # after CTS and the global-route estimate but before final legalization/route.
 # The block is empty when the active PDK has no authoritative buffer master.
-if {{[catch {{detailed_placement}} _gr_dp_err]}} {{
-  if {{[catch {{detailed_placement -use_diamond_legalizer}} _gr_dp_errd]}} {{
-    puts "GR_REPAIR_LEGALIZE_NONFATAL: $_gr_dp_err | diamond: $_gr_dp_errd"
-  }} else {{ puts "GR_REPAIR_LEGALIZE_OK disp=diamond" }}
-}}
-# Detailed route emits the actual `+ ROUTED ...` wire geometry that
+{_gr_repair_legalize}# Detailed route emits the actual `+ ROUTED ...` wire geometry that
 # def_stage_progression_check requires. Without it, routed.def carries
 # only NETS without geometry. Best-effort: surface a NONFATAL note if
 # detailed_route fails (open-source iic-osic-tools has it; some custom
@@ -30802,6 +30897,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     #     contradiction inside the design's own inputs, and silently growing a
     #     die somebody pinned would replace their floorplan with ours. It
     #     REFUSES, and the message names both numbers.
+    _core_sized_um: Optional[Tuple[int, int]] = None
     _ring_side, _ring_basis = _padring_required_die_um(project)
     if _ring_side is not None:
         _mandated = not _auto_die_requested
@@ -30824,6 +30920,10 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             print(f"[phase3] die-um=auto and the design's own pad ring needs "
                   f"{_ring_side}x{_ring_side} um ({_ring_basis}) — adopting "
                   f"it over the core-sized {die_um}", file=sys.stderr)
+            # WHAT THE CORE NEEDED IS STILL TRUE AFTER THE RING GREW THE DIE.
+            # Kept here, where the auto-sizer's answer is still in hand, and
+            # applied to the CORE rectangle below.
+            _core_sized_um = (_cur_w, _cur_h) if _cur_w and _cur_h else None
             die_um = f"{_ring_side}x{_ring_side}"
             # AND IT IS NO LONGER AUTO. `_auto_die_requested` is the opt-in for
             # the over-sparse DOWNSIZE retry, whose premise is that a die the
@@ -30903,6 +31003,29 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         str(_seal_rec.get("margin_basis") or ""))
     if _seal_too_small:
         return StepResult("pnr", "FAIL", time.time() - t0, _seal_too_small)
+
+    # === THE RING SIZES THE DIE; THE DESIGN STILL SIZES THE CORE ===========
+    # A pad ring's die comes from its PERIMETER — two corner cells plus the
+    # pads on the longest side — and has nothing to do with how much area the
+    # cells need. Letting the core then be `die - 2*inset` spreads a small
+    # design across the whole inner rectangle. MEASURED on subservient x
+    # gf180mcuD as a DIE (r37): 33 pads forced a 1962 um die, the core became
+    # 1176 x 1176 um at 10.4 % utilisation, and the SAME netlist that closed
+    # setup at +0.03 ns as a 413 um hardmacro missed by 13.1 ns at SS, on paths
+    # whose delay is wire. The auto-sizer's own answer — the core-sized die it
+    # produced from this netlist and the requested utilisation — is kept and
+    # becomes the core, CENTRED in the ring's die. The ring inset stays the
+    # floor, so the core can never move under the pads; a mandated die, a slot,
+    # and a design with no ring are all untouched.
+    _ring_floor_pad = core_pad
+    _ring_pinned_die = _core_sized_um is not None
+    core_pad = ring_die_core_pad(die_w, die_h, core_pad, _core_sized_um)
+    if core_pad != _ring_floor_pad:
+        print(f"[phase3] core := {max(_core_sized_um)} um square centred in "
+              f"the {die_w}x{die_h} um ring die (inset {core_pad} um, ring "
+              f"floor {_ring_floor_pad} um) — the area this netlist asked for "
+              f"at the requested utilisation; the ring's die is a perimeter "
+              f"requirement, not an area one", file=sys.stderr)
 
     core_w = die_w - 2 * core_pad
     core_h = die_h - 2 * core_pad
@@ -32012,6 +32135,45 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             # a hang → fall through to the rc!=0 FAIL gate.
             _docker_timeout_isolate([out_dir / f"{top}.def"])
             break
+        # A CLOCK TREE THAT HAD TO BE DOWNSIZED IS A CORE THAT IS TOO TIGHT.
+        # The in-session legalization ladder's last resort swaps over-wide
+        # clock buffers down to the sink so the design legalizes. It works, and
+        # on a ring die it is the wrong trade: MEASURED on subservient x
+        # gf180mcuD, r41 kept `clkbuf_16` (setup +0.32 ns, 4 overlapping clock
+        # leaves) and r42 swapped 43 of them (0 violations, setup -12.27 ns).
+        # The band around the core is empty silicon, so the run buys the room
+        # instead — bounded by the same upsize budget, and the swap stays in
+        # place as the last resort when no room is left.
+        if (_ring_pinned_die and _upsize_tries < _PNR_UPSIZE_RETRIES
+                and re.search(r"_CLKBUF_DOWNSIZE swapped=([1-9]\d*)",
+                              (out or "") + (err or ""))):
+            _grow_pad = ring_core_pad_one_loosen_rung(
+                die_w, die_h, core_w, core_h, _ring_floor_pad)
+            if _grow_pad is not None:
+                resize_history.append({
+                    "iteration": _retry_i,
+                    "direction": "grow_core_after_clkbuf_downsize",
+                    "from_core_um": f"{core_w}x{core_h}",
+                    "to_core_um": (f"{die_w - 2 * _grow_pad}x"
+                                   f"{die_h - 2 * _grow_pad}"),
+                    "die_um": f"{die_w}x{die_h}",
+                })
+                core_pad = _grow_pad
+                core_w = die_w - 2 * core_pad
+                core_h = die_h - 2 * core_pad
+                print(f"[phase3] the legalizer had to downsize clock buffers: "
+                      f"core grown to {core_w}x{core_h} um inside the "
+                      f"{die_w}x{die_h} um ring die (inset {core_pad} um, ring "
+                      f"floor {_ring_floor_pad} um) so the clock tree keeps the "
+                      f"drive CTS chose", file=sys.stderr)
+                _generic_pnr_tcl = _rewrite_pnr_floorplan_die(
+                    _generic_pnr_tcl, die_w, die_h, core_pad, core_w, core_h,
+                    fp_rect)
+                _pad_install_failure = _install_route_deck()
+                if _pad_install_failure is not None:
+                    return _pad_install_failure
+                _upsize_tries += 1
+                continue
         actual_util = _extract_overutil_pct(out + err)
         if actual_util is None:
             # The route COMPLETED without an over-util placement error. Two
@@ -32248,6 +32410,57 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         # identical to the pre-loosen `range(4)` loop.
         if _upsize_tries >= _PNR_UPSIZE_RETRIES:
             break
+        if _ring_pinned_die:
+            # THE DIE IS THE RING'S; THE CORE IS THE REMEDY. Growing a
+            # ring-sized die is not available (it is a perimeter requirement,
+            # and r40 measured the attempt: 1962 um -> the 2000 um cap -> a FAIL
+            # telling the operator to raise a --die-um the ring had decided).
+            _new_pad = ring_core_pad_for_util(die_w, die_h, core_w, core_h,
+                                              actual_util, target_util_pct,
+                                              _ring_floor_pad)
+            if _new_pad is None:
+                return StepResult(
+                    "pnr", "FAIL", time.time() - t0,
+                    (f"PADRING_CORE_TOO_SMALL: core utilization "
+                     f"{actual_util}% exceeds target {target_util_pct}% and "
+                     f"the core is already the whole {die_w}x{die_h} um ring "
+                     f"die minus the ring's own {_ring_floor_pad} um inset "
+                     f"({core_w}x{core_h} um). The cells do not fit inside "
+                     f"this ring: the remedy is a ring with more/larger pads "
+                     f"(a bigger die) or a smaller netlist, not a core that "
+                     f"reaches under the pads."),
+                    [str(out_dir / "openroad.log")],
+                    extras={"resize_history": resize_history,
+                            "final_util_pct": actual_util,
+                            "die_um": f"{die_w}x{die_h}",
+                            "core_um": f"{core_w}x{core_h}",
+                            "ring_floor_pad_um": _ring_floor_pad})
+            resize_history.append({
+                "iteration": _retry_i,
+                "direction": "grow_core_in_ring_die",
+                "from_core_um": f"{core_w}x{core_h}",
+                "to_core_um": (f"{die_w - 2 * _new_pad}x"
+                               f"{die_h - 2 * _new_pad}"),
+                "die_um": f"{die_w}x{die_h}",
+                "actual_util_pct": actual_util,
+                "target_util_pct": target_util_pct,
+            })
+            core_pad = _new_pad
+            core_w = die_w - 2 * core_pad
+            core_h = die_h - 2 * core_pad
+            print(f"[phase3] core grown to {core_w}x{core_h} um inside the "
+                  f"{die_w}x{die_h} um ring die (inset {core_pad} um, ring "
+                  f"floor {_ring_floor_pad} um): utilization {actual_util}% "
+                  f"exceeded the {target_util_pct}% target and the die is the "
+                  f"ring's to decide", file=sys.stderr)
+            _generic_pnr_tcl = _rewrite_pnr_floorplan_die(
+                _generic_pnr_tcl, die_w, die_h, core_pad, core_w, core_h,
+                fp_rect)
+            _pad_install_failure = _install_route_deck()
+            if _pad_install_failure is not None:
+                return _pad_install_failure
+            _upsize_tries += 1
+            continue
         new_dims = _compute_resized_die(die_w, die_h, actual_util,
                                          target_util_pct)
         if new_dims is None:

@@ -627,14 +627,44 @@ def _step_database_unit(ev: StepEvidence, geom: Optional[Dict[str, Any]],
                        "the wrong grid")
 
 
+#: Step 15.5ic's own record of the pad-carrying top it built (io_pad_chip_top_gen).
+DERIVED_CHIP_TOP_REL = "reports/phase3/io_pad_chip_top.json"
+
+
+def _recorded_physical_top(project: Any) -> Optional[Dict[str, str]]:
+    """{chip_top, core, record} when this run BUILT a pad ring, else None.
+
+    On the die path step 15.5ic wraps the declared core in a pad-carrying top
+    and the stream's top cell is that wrapper, so comparing the layout against
+    `top_cell` alone reports "this layout is not this design" about the design's
+    own ring. The substitution is not inferred from the name: it is read from
+    the producer's record, which names both modules.
+    """
+    try:
+        rec = json.loads((Path(project) / DERIVED_CHIP_TOP_REL)
+                         .read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError, TypeError):
+        return None
+    chip_top, core = rec.get("chip_top_module"), rec.get("core_module")
+    if not isinstance(chip_top, str) or not isinstance(core, str):
+        return None
+    if not chip_top or not core or chip_top == core:
+        return None
+    return {"chip_top": chip_top, "core": core,
+            "record": DERIVED_CHIP_TOP_REL}
+
+
 def _step_top_level(ev: StepEvidence, geom: Optional[Dict[str, Any]],
-                    declared_top: Any) -> None:
+                    declared_top: Any,
+                    physical_top: Optional[Dict[str, str]] = None) -> None:
     if geom is None:
         ev.evidence = "the layout was not read, so its top cell is unknown"
         return
     tops = geom["top_cells"]
     ev.measured = {"top_cells": tops, "top_cell_count": len(tops),
                    "declared_top_cell": declared_top}
+    if physical_top:
+        ev.measured["physical_top"] = dict(physical_top)
     if len(tops) != 1:
         ev.verdict = FAIL
         ev.evidence = (
@@ -648,6 +678,20 @@ def _step_top_level(ev: StepEvidence, geom: Optional[Dict[str, Any]],
     if tops[0] == declared_top:
         ev.verdict = PASS
         ev.evidence = f"the single top-level cell is {tops[0]!r}, as declared"
+    elif (physical_top and tops[0] == physical_top["chip_top"]
+            and physical_top["core"] == declared_top):
+        # THE RING IS PART OF THIS DESIGN. The declared `top_cell` names the
+        # core; this run's own step-15.5ic record says it wrapped that core in
+        # `chip_top` to carry the pads, and the stream's top cell is exactly
+        # that wrapper. MEASURED on subservient x gf180mcuD as a DIE (r37): the
+        # precheck REFUSED its own die with "this layout is not this design".
+        # Any other name still fails, and a run with no such record is judged
+        # exactly as before.
+        ev.verdict = PASS
+        ev.evidence = (
+            f"the single top-level cell is {tops[0]!r}: the pad-carrying top "
+            f"this run built around the declared core {declared_top!r}, per "
+            f"{physical_top['record']}")
     else:
         ev.verdict = FAIL
         ev.evidence = (f"the top-level cell is {tops[0]!r}; the declaration "
@@ -1306,7 +1350,8 @@ def evaluate(project: Path,
         elif step.step_id == "General.DatabaseUnit":
             _step_database_unit(ev, geom, _decl.answer(doc, "database_unit_um"))
         elif step.step_id == "KLayout.CheckTopLevel":
-            _step_top_level(ev, geom, _decl.answer(doc, "top_cell"))
+            _step_top_level(ev, geom, _decl.answer(doc, "top_cell"),
+                            _recorded_physical_top(project))
         elif step.step_id == "KLayout.CheckSize":
             _step_size(ev, geom, deliverable,
                        _decl.answer(doc, "die_origin_um"),
