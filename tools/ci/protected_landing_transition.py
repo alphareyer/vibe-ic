@@ -162,18 +162,68 @@ def _runner_image_digest() -> str:
     return _pin.resolved_image_digest()
 
 
-RUNNER_IMAGE_DIGEST = _runner_image_digest()
 #: The one env, and the one default. Same names `hermetic_candidate_runner` uses.
 RUNNER_IMAGE_REPO_ENV = "VIBEIC_EDA_IMAGE_REPO"
 RUNNER_IMAGE_REPO_DEFAULT = "ghcr.io/vibeic/vibeic-eda"
-#: THE COMMITTED reference — what a register carries and what this file accepts.
-RUNNER_IMAGE = f"{RUNNER_IMAGE_REPO_DEFAULT}@{RUNNER_IMAGE_DIGEST}"
-#: THE RUNTIME reference — same digest, whatever repository this host is told to
-#: serve those bytes from.
-RUNNER_IMAGE_RUNTIME = (
-    (os.environ.get(RUNNER_IMAGE_REPO_ENV) or RUNNER_IMAGE_REPO_DEFAULT)
-    + "@" + RUNNER_IMAGE_DIGEST
-)
+
+
+#: RESOLVED ON READ, NOT AT IMPORT (PEP 562) — the same seam
+#: `hermetic_candidate_runner.__getattr__` carries, and for a reason measured
+#: rather than assumed.
+#:
+#: MEASURED 2026-09-18 on 8HD-8, in the pinned image with no Docker CLI (which
+#: is exactly what a hermetic candidate container is: `--network none`, no
+#: engine, no socket):
+#:
+#:     import protected_landing_transition
+#:     -> _eda_pin.ImageNotResolvable: IMAGE_NOT_RESOLVABLE ... docker unusable
+#:
+#: Resolving at import makes the MODULE unimportable there, and every process
+#: that merely READS this file's state machine dies — including the B1/B2
+#: landing arms, whose inner pytest imports it during collection: 23 ids in
+#: `programs/tests/test_landing_merge_verdict.py` recorded `[NORECORD] ...
+#: candidate ended without the exact semantic terminal record` about a
+#: candidate that never reached a test.
+#:
+#: Nothing is stored and nothing is relaxed: the digest is still resolved from
+#: this host by `_eda_pin`, still never a literal, and a reader that actually
+#: needs the identity still gets the resolver's refusal — just at the moment it
+#: asks, which is on a host that has an engine, instead of at import on one that
+#: does not.
+_RESOLVED_RUNNER_IMAGE: dict[str, str] = {}
+
+
+def runner_image_digest() -> str:
+    """The resolved digest, once per process."""
+    if "digest" not in _RESOLVED_RUNNER_IMAGE:
+        _RESOLVED_RUNNER_IMAGE["digest"] = _runner_image_digest()
+    return _RESOLVED_RUNNER_IMAGE["digest"]
+
+
+def runner_image() -> str:
+    """THE COMMITTED reference — what a register carries and what this file
+    accepts. The DEFAULT repository, never the environment."""
+    return f"{RUNNER_IMAGE_REPO_DEFAULT}@{runner_image_digest()}"
+
+
+def runner_image_runtime() -> str:
+    """THE RUNTIME reference — same digest, whatever repository this host is
+    told to serve those bytes from."""
+    return ((os.environ.get(RUNNER_IMAGE_REPO_ENV) or RUNNER_IMAGE_REPO_DEFAULT)
+            + "@" + runner_image_digest())
+
+
+def __getattr__(name: str) -> str:
+    """`RUNNER_IMAGE_DIGEST`, `RUNNER_IMAGE` and `RUNNER_IMAGE_RUNTIME` stay
+    readable as module attributes; every reader in this repo spells them that
+    way and keeping the spelling is what lets the resolution move."""
+    if name == "RUNNER_IMAGE_DIGEST":
+        return runner_image_digest()
+    if name == "RUNNER_IMAGE":
+        return runner_image()
+    if name == "RUNNER_IMAGE_RUNTIME":
+        return runner_image_runtime()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 #: THE RUNNER PROFILE, ONCE.  `_runner_profile` VALIDATES against this and
 #: `protected_landing_manifest_author.render` BUILDS from it, so the register
@@ -214,7 +264,7 @@ RUNNER_PROFILE_EXPECTED = {
 def derived_runner() -> dict:
     """The runner row a manifest must carry, built from this file's own rules."""
     return {"schema": 1, "profile_id": RUNNER_PROFILE_ID, "engine": "docker",
-            "image": RUNNER_IMAGE, **{k: (list(v) if isinstance(v, list) else v)
+            "image": runner_image(), **{k: (list(v) if isinstance(v, list) else v)
                                       for k, v in RUNNER_PROFILE_EXPECTED.items()}}
 
 
@@ -504,7 +554,7 @@ def _runner_profile(value: Any, what: str = "manifest.runner"
     # pins — the digest — is the same digest `RUNNER_IMAGE_RUNTIME` starts, and
     # that binding is asserted where all four copies are in one place rather
     # than re-derived here.
-    if image != RUNNER_IMAGE:
+    if image != runner_image():
         raise Refusal(f"{what}.image is not the BASE-owned runner image")
     expected = RUNNER_PROFILE_EXPECTED
     for key, expected_value in expected.items():
