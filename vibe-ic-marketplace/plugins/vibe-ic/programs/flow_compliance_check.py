@@ -14945,7 +14945,22 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # `no_binding` preserves the established default for legacy runs and only
     # blocks under the explicit producer-migration flag.  The status is FAIL,
     # not MISSING: the file exists, but its ownership evidence does not.
-    if _T.is_done_claim(result.status) and result.output_binding:
+    # R-0915-85 — THE PREDICATE IS "DOES THIS ROW CREDIT ITS OUTPUTS", NOT
+    # "IS IT A DONE CLAIM". The two were the same question while `VACUOUS_PASS`
+    # was PASS-shaped and therefore a done-claim: a vacuous row published its
+    # `evidence` and the guard fired on it. `NOT_MEASURED` is not a done-claim,
+    # so keying on that here FAILED OPEN — measured on this guard's own
+    # fixture, a step whose declared output was discharged by a project-wide
+    # glob with nothing tying the file to it walked straight past, which is
+    # exactly the credit the guard exists to refuse.
+    #
+    # A row credits its outputs unless it FAILED (it has no credit to give) or
+    # the input declares it NOT_APPLICABLE (it was never asked to produce
+    # anything). Everything else — including a row nobody measured — publishes
+    # evidence a consumer reads.
+    _credits_its_outputs = result.status not in (
+        _T.Verdict.FAIL.value, _T.Verdict.NOT_APPLICABLE.value)
+    if _credits_its_outputs and result.output_binding:
         _unbound = [
             spec for spec in _bind_specs
             if spec.get("satisfied")

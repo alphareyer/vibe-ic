@@ -52,12 +52,20 @@ from flow_compliance_check import check_step  # noqa: E402
 # credit visible instead of being caught by the pre-existing net.
 _VACUOUS_GATE = {"program_exit_zero": "mixed_signal_merge_check ."}
 
-# R-0915-85 — a DONE CLAIM is a step that says it delivered a result
-# about the design, and NOT_MEASURED says the opposite in the word.
-# `VACUOUS_PASS`, `STRUCTURE-ONLY` and `INCOMPLETE` were in this set
-# because they were PASS-shaped; two of them are NOT_MEASURED now and
-# leave it, which is the r26 correction reaching this consumer.
-_DONE_CLAIMS = {"PASS", "PASS_WITH_WAIVERS"}
+# R-0915-85 — WHAT THIS SET IS FOR, restated over the five.
+#
+# Every case in this file runs `_VACUOUS_GATE` above, whose whole job is to
+# leave the step in the tier `_evidence_integrity_scan` does NOT scan — that is
+# what makes a 0-byte credit visible here instead of being caught by the
+# pre-existing net. The old name for that tier was `VACUOUS_PASS`, a DONE-CLAIM,
+# and the set was the three PASS-shaped words.
+#
+# The tier is `NOT_MEASURED` now and it is NOT a done-claim, which is the r26
+# correction reaching this consumer. The property the file actually tests is
+# unchanged and is what the name now says: the step KEPT ITS OUTPUT CREDIT —
+# the binding stood, so the row is not a FAIL and not a missing artefact. A
+# single word, pinned, never a widened set.
+_KEPT_ITS_OUTPUT_CREDIT = {"NOT_MEASURED"}
 
 
 def _step(sid, outputs, gate=None):
@@ -136,7 +144,7 @@ def test_a_zero_byte_declared_output_is_not_credited_as_produced(project):
 
     r = check_step(project, _step(99, ["out/good.json", "out/empty.json"],
                                   _VACUOUS_GATE), {})
-    assert r.status not in _DONE_CLAIMS, (
+    assert r.status not in _KEPT_ITS_OUTPUT_CREDIT, (
         f"a declared output this step's own write record calls zero_byte was "
         f"credited: status={r.status} evidence={r.evidence}")
     assert "out/empty.json" not in r.evidence, (
@@ -191,7 +199,7 @@ def test_a_dangling_symlink_the_step_records_is_not_credited(project):
         not_produced=[("out/gone.json", "dangling_symlink")])
     r = check_step(project, _step(99, ["out/good.json", "out/gone.json"],
                                   _VACUOUS_GATE), {})
-    assert r.status not in _DONE_CLAIMS, (r.status, r.evidence)
+    assert r.status not in _KEPT_ITS_OUTPUT_CREDIT, (r.status, r.evidence)
     assert "out/gone.json" not in r.evidence
 
 
@@ -206,7 +214,7 @@ def test_a_real_output_still_reads_as_produced(project):
         not_produced=[])
     r = check_step(project, _step(99, ["out/good.json", "out/second.json"],
                                   _VACUOUS_GATE), {})
-    assert r.status in _DONE_CLAIMS, (r.status, r.reasons)
+    assert r.status in _KEPT_ITS_OUTPUT_CREDIT, (r.status, r.reasons)
     assert sorted(r.evidence) == ["out/good.json", "out/second.json"]
 
 
@@ -225,7 +233,7 @@ def test_a_run_with_no_steps_tree_keeps_the_pre_change_verdict(project):
     assert not (project / "steps").exists()
     r = check_step(project, _step(99, ["out/good.json", "out/empty.json"],
                                   _VACUOUS_GATE), {})
-    assert r.status in _DONE_CLAIMS, (r.status, r.reasons)
+    assert r.status in _KEPT_ITS_OUTPUT_CREDIT, (r.status, r.reasons)
     assert "out/empty.json" in r.evidence
 
 
@@ -239,7 +247,12 @@ def test_no_binding_blocks_only_in_explicit_strict_mode(project):
         project,
         _step(99, ["out/good.json", "out/empty.json"], _VACUOUS_GATE),
         {}, strict_step_binding=True)
-    assert strict.status == "NOT_MEASURED", (strict.status, strict.reasons)
+    # R-0915-85 — the UNATTRIBUTED-OUTPUT guard sets FAIL, and the comment at
+    # its site says why it is FAIL and not a missing artefact: the file EXISTS,
+    # its ownership evidence does not. That is a gate-layer defect, so the row
+    # carries no reason_class.
+    assert strict.status == "FAIL", (strict.status, strict.reasons)
+    assert strict.reason_class == "", strict.reason_class
     assert any("UNATTRIBUTED OUTPUT" in reason
                and "no_binding" in reason for reason in strict.reasons)
 
@@ -263,7 +276,7 @@ def test_a_run_ledger_that_omits_this_step_can_never_certify_it(project):
     # pre-fix control fails on the old program's wrong DONE value rather than
     # on the mere absence of a newly-added API parameter.
     result = check_step(project, step, {})
-    assert result.status == "NOT_MEASURED", (result.status, result.reasons)
+    assert result.status == "FAIL", (result.status, result.reasons)
     assert any("UNATTRIBUTED OUTPUT" in reason
                and "no_step_record" in reason
                for reason in result.reasons), result.reasons
@@ -300,7 +313,7 @@ def test_a_step_folder_claiming_an_absent_artefact_cannot_make_it_green(project)
     r = check_step(project, _step(99, ["out/good.json",
                                        "out/never_written.json"],
                                   _VACUOUS_GATE), {})
-    assert r.status not in _DONE_CLAIMS, (
+    assert r.status not in _KEPT_ITS_OUTPUT_CREDIT, (
         f"a step folder that CLAIMS an artefact which is not on disk was "
         f"allowed to certify it: status={r.status} evidence={r.evidence}")
     assert "out/never_written.json" not in r.evidence
@@ -325,7 +338,7 @@ def test_an_artefact_declared_by_two_steps_is_green_for_both(project):
                        not_produced=[])
     for sid in (9, 14):
         r = check_step(project, _step(sid, ["out/good.json"], _VACUOUS_GATE), {})
-        assert r.status in _DONE_CLAIMS, (sid, r.status, r.reasons)
+        assert r.status in _KEPT_ITS_OUTPUT_CREDIT, (sid, r.status, r.reasons)
         assert r.evidence == ["out/good.json"], (sid, r.evidence)
 
 
@@ -343,5 +356,5 @@ def test_an_unreadable_step_record_degrades_instead_of_failing(project):
     (project / "steps").mkdir()
     (project / "steps" / "index.json").write_text("{not json")
     r = check_step(project, _step(99, ["out/good.json"], _VACUOUS_GATE), {})
-    assert r.status in _DONE_CLAIMS, (r.status, r.reasons)
+    assert r.status in _KEPT_ITS_OUTPUT_CREDIT, (r.status, r.reasons)
     assert r.evidence == ["out/good.json"]
