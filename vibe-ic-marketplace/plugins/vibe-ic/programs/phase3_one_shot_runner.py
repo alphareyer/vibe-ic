@@ -26068,7 +26068,18 @@ def _postroute_sdr_transaction_finish_tcl(
         "      _sdr_tx_reject_candidate unreadable_candidate_router_drc $_sdr_tx_before -1\n"
         "    } else {\n"
         "      puts \"SDR_TRANSACTION_ROUTER_DRC: before=$_sdr_tx_before after=$_sdr_tx_after\"\n"
-        "      if {$_sdr_tx_after == 0 && $_sdr_tx_before == 0} {\n"
+        # A CLEAN ROUTE ON AN ILLEGAL PLACEMENT IS NOT A CLEAN CANDIDATE.
+        # MEASURED on subservient x gf180mcuD as a DIE (r36): both children
+        # ended router_drc 0 -> 0 with placement_violations 8 and 34 (resized
+        # buffers on top of tap cells), both were ACCEPTED on router DRC alone,
+        # and the shipped DEF failed PNR_PLACEMENT_ILLEGAL. The error branch
+        # above already demands `_sdr_pv == 0`; this branch now refuses a
+        # MEASURED non-zero count too (-1 = check_placement itself failed).
+        # Core-only r32 children measured 0, so that path is unchanged.
+        "      if {[info exists _sdr_pv] && $_sdr_pv != 0} {\n"
+        "        puts \"SDR_TRANSACTION_CANDIDATE_PLACEMENT_VIOLATIONS: $_sdr_pv\"\n"
+        "        _sdr_tx_reject_candidate candidate_placement_illegal $_sdr_tx_before $_sdr_tx_after\n"
+        "      } elseif {$_sdr_tx_after == 0 && $_sdr_tx_before == 0} {\n"
         "        file copy -force $_sdr_tx_cand_report $_sdr_tx_dir/accepted_router.drc.rpt\n"
         "        _sdr_tx_receipt ACCEPTED router_drc_preserved_clean $_sdr_tx_before $_sdr_tx_after\n"
         "        puts \"SDR_TRANSACTION_ACCEPTED: router_drc clean-preserved ($_sdr_tx_before -> $_sdr_tx_after)\"\n"
