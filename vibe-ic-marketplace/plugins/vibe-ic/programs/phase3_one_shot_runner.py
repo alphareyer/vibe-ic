@@ -7124,6 +7124,7 @@ def _pad_connected_ring_tcl(pdk: "PdkConfig") -> Dict[str, str]:
             "extend": "",
             "connects": "",
             "note": "",
+            "clip": "",
         }
 
     offset, clearance, widths_f, spacings_f, footprint = _pdn_ring_dimensions(cfg)
@@ -7216,7 +7217,80 @@ def _pad_connected_ring_tcl(pdk: "PdkConfig") -> Dict[str, str]:
         "extend": " {*}${_vibeic_ring_extend}",
         "connects": extra,
         "note": f" + pad_ring({layer_s};pads={pad_layer_s};runtime-fit)",
+        "clip": _pdn_pad_footprint_clip_tcl(pad_layers),
     }
+
+
+def _pdn_pad_footprint_clip_tcl(pad_layers: Sequence[str]) -> str:
+    """Tcl run right after `pdngen`: the core grid stays out of pad cells.
+
+    `-connect_to_pads` routes the supply to the pad pins on the declared pad
+    layer(s), and `add_pdn_connect` then drops a via stack wherever a grid
+    stripe overlaps that connection -- without regard to the pad master's own
+    obstructions. MEASURED on spm x gf180mcuD, DIE route (v1.22.3, image
+    sha256:89a8fd72...): a Metal4 grid stripe crossed the supply pad's Metal2
+    connection, so pdngen started the stripe, a Metal3 DRCFILL and twelve
+    via2/via3 arrays 4.7 um INSIDE `gf180mcu_fd_io__dvdd`, whose LEF obstructs
+    Metal3/Metal4 over that band. Sign-off DRC: V3.1 x48 + V3.2a x85, all in
+    that one 3 x 3 um spot; Magic extraction: 139 illegal obsm3/obsm4 overlaps
+    at the same spot, so LVS was BLOCKED and never compared.
+
+    Only special-net geometry that OVERLAPS a placed PAD-class instance is
+    touched: a via there is removed, and a wire on any layer other than the
+    declared pad layer(s) is cut back to the pad boundary along its length (a
+    wire wholly inside a pad is removed). The pad-layer connection itself --
+    the only thing a pad owes the grid -- is left exactly as pdngen drew it,
+    and every via outside the pad remains. Disclosed by one marker line; an
+    odb error propagates to the surrounding pdngen catch. No PDK, cell, net or
+    layer literal: the kept layers are the caller's configured pad layers."""
+    keep = " ".join(str(v) for v in pad_layers)
+    return f"""  if {{$_vibeic_pad_ring_active}} {{
+    set _vpc_block [ord::get_db_block]
+    set _vpc_pads {{}}
+    foreach _vpc_i [$_vpc_block getInsts] {{
+      if {{[[$_vpc_i getMaster] isPad] && [$_vpc_i isPlaced]}} {{ lappend _vpc_pads [$_vpc_i getBBox] }}
+    }}
+    set _vpc_todo {{}}
+    foreach _vpc_n [$_vpc_block getNets] {{
+      if {{[$_vpc_n getSigType] ni {{POWER GROUND}}}} {{ continue }}
+      foreach _vpc_sw [$_vpc_n getSWires] {{
+        foreach _vpc_s [$_vpc_sw getWires] {{
+          foreach _vpc_pb $_vpc_pads {{
+            if {{[$_vpc_s xMax] <= [$_vpc_pb xMin] || [$_vpc_s xMin] >= [$_vpc_pb xMax] || [$_vpc_s yMax] <= [$_vpc_pb yMin] || [$_vpc_s yMin] >= [$_vpc_pb yMax]}} {{ continue }}
+            lappend _vpc_todo [list $_vpc_sw $_vpc_s $_vpc_pb]
+            break
+          }}
+        }}
+      }}
+    }}
+    set _vpc_vias 0; set _vpc_clipped 0; set _vpc_dropped 0
+    foreach _vpc_t $_vpc_todo {{
+      lassign $_vpc_t _vpc_sw _vpc_s _vpc_pb
+      if {{[$_vpc_s isVia]}} {{ odb::dbSBox_destroy $_vpc_s; incr _vpc_vias; continue }}
+      set _vpc_layer [$_vpc_s getTechLayer]
+      if {{[$_vpc_layer getName] in {{{keep}}}}} {{ continue }}
+      set _vpc_x0 [$_vpc_s xMin]; set _vpc_y0 [$_vpc_s yMin]
+      set _vpc_x1 [$_vpc_s xMax]; set _vpc_y1 [$_vpc_s yMax]
+      set _vpc_shape [$_vpc_s getWireShapeType]
+      set _vpc_pieces {{}}
+      if {{($_vpc_y1 - $_vpc_y0) >= ($_vpc_x1 - $_vpc_x0)}} {{
+        if {{$_vpc_y0 < [$_vpc_pb yMin]}} {{ lappend _vpc_pieces [list $_vpc_x0 $_vpc_y0 $_vpc_x1 [$_vpc_pb yMin]] }}
+        if {{$_vpc_y1 > [$_vpc_pb yMax]}} {{ lappend _vpc_pieces [list $_vpc_x0 [$_vpc_pb yMax] $_vpc_x1 $_vpc_y1] }}
+      }} else {{
+        if {{$_vpc_x0 < [$_vpc_pb xMin]}} {{ lappend _vpc_pieces [list $_vpc_x0 $_vpc_y0 [$_vpc_pb xMin] $_vpc_y1] }}
+        if {{$_vpc_x1 > [$_vpc_pb xMax]}} {{ lappend _vpc_pieces [list [$_vpc_pb xMax] $_vpc_y0 $_vpc_x1 $_vpc_y1] }}
+      }}
+      odb::dbSBox_destroy $_vpc_s
+      if {{![llength $_vpc_pieces]}} {{ incr _vpc_dropped; continue }}
+      foreach _vpc_pc $_vpc_pieces {{
+        lassign $_vpc_pc _vpc_a _vpc_b _vpc_c _vpc_d
+        odb::dbSBox_create $_vpc_sw $_vpc_layer $_vpc_a $_vpc_b $_vpc_c $_vpc_d $_vpc_shape
+      }}
+      incr _vpc_clipped
+    }}
+    puts "PDN_PAD_FOOTPRINT_CLIP: vias_removed=$_vpc_vias wires_clipped=$_vpc_clipped wires_dropped=$_vpc_dropped pads=[llength $_vpc_pads] kept_layers={keep}"
+  }}
+"""
 
 
 def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
@@ -7582,7 +7656,8 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
             + _mg_tcl
             + _stub_tcl
             + "  pdngen\n"
-            "} _pdn_err]} {\n"
+            + ring.get("clip", "")
+            + "} _pdn_err]} {\n"
             "  puts \"PDN_NONFATAL: $_pdn_err\"\n"
             "} else {\n"
             + _ok_marker
@@ -34231,6 +34306,36 @@ gds_in = os.environ["GDS_IN"]
 gds_out = os.environ["GDS_OUT"]
 ly = pya.Layout()
 ly.read(gds_in)
+# THE RING'S AS-STREAMED PLACEMENT, KEPT BEFORE THE FLATTEN DESTROYS IT.
+# The flatten below removes every structure reference, which is the only axis
+# `step_pad_ring_final_evidence` could count the pad ring on. When the caller
+# names the ring masters, their cells and top-level placements are written to a
+# small side layout first, so the final flat GDS can be checked GEOMETRICALLY
+# against exactly what the stream-out placed (see _PADRING_GEOMETRY_PROOF_PY).
+_ring_masters = set(m for m in os.environ.get("RING_MASTERS", "").split(",")
+                    if m)
+_ring_ref_out = os.environ.get("RING_REF_OUT", "")
+if _ring_masters and _ring_ref_out:
+    _ref = pya.Layout()
+    _ref.dbu = ly.dbu
+    _written = 0
+    for tc in ly.top_cells():
+        _rtop = _ref.create_cell(tc.name)
+        _map = {}
+        for inst in tc.each_inst():
+            src = inst.cell
+            if src.name not in _ring_masters:
+                continue
+            if src.cell_index() not in _map:
+                _tgt = _ref.create_cell(src.name)
+                _tgt.copy_tree(src)
+                _map[src.cell_index()] = _tgt.cell_index()
+            _ca = inst.cell_inst.dup()
+            _ca.cell_index = _map[src.cell_index()]
+            _rtop.insert(_ca)
+            _written += _ca.size()
+    _ref.write(_ring_ref_out)
+    print("RING_REFERENCE_WRITTEN instances=%d" % _written)
 # Flatten so abutting geometry across cell-instance boundaries becomes
 # co-resident in one cell and merges (a hierarchical merge would not union
 # a cell pin against a top-level route).
@@ -34277,10 +34382,20 @@ def _klayout_merge_layers(project: Path, top: str, pdk: PdkConfig,
     script = pnr_dir / "gds_layer_merge.py"
     script.write_text(_GDS_LAYER_MERGE_PY)
     merged = pnr_dir / f"{top}.merged.gds"
+    ring_ref = _padring_reference_path(gds_path)
+    try:
+        ring_ref.unlink()           # never let a previous run's placement stand
+    except OSError:
+        pass
+    ring_masters = _padring_record_masters(project)
+    ring_env = (f"RING_MASTERS={','.join(sorted(ring_masters))} "
+                f"RING_REF_OUT={_to_container_path(str(ring_ref), container)} "
+                if ring_masters else "")
     cmd = (
         f"export QT_QPA_PLATFORM=offscreen && "
         f"export GDS_IN={_to_container_path(str(gds_path), container)} "
-        f"GDS_OUT={_to_container_path(str(merged), container)} && "
+        f"GDS_OUT={_to_container_path(str(merged), container)} "
+        f"{ring_env}&& "
         f"klayout -zz -b -r {_to_container_path(str(script), container)}"
     )
     rc, out, err = _docker_exec(container, cmd, marker=_to_container_path(str(script), container))
@@ -37981,8 +38096,237 @@ def _gds_structure_element_counts(path: Path) -> Dict[str, int]:
     return counts
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  THE RING IN A FLAT GDS  (spm x gf180mcuD, DIE route, v1.22.3)
+#
+#  #2181 named the state and left it NOT PROVEN: a flat GDS carries no
+#  structure reference, so reference counting cannot see the ring. MEASURED on
+#  this run the file is flat BY DESIGN, not by accident: `_klayout_merge_layers`
+#  (#601) calls `tc.flatten(-1, True)` on every KLayout stream-out so abutting
+#  same-layer geometry merges before sign-off DRC. So every KLayout-streamed
+#  die failed this BLOCKING gate, whatever its ring -- a gate that cannot pass.
+#
+#  The ring is proven on the file that ships, by geometry, against what the
+#  stream-out itself placed:
+#    1. before it flattens, the merge writes the ring masters' cells and their
+#       top-level placements to `<top>.ring_reference.gds` (only when the
+#       producer's padring.json names masters; the file is unlinked first so a
+#       previous run's placement can never stand in);
+#    2. that reference must still hold one structure reference per expected
+#       ring instance -- the same count this gate always required;
+#    3. every placed instance's geometry, layer by layer, must be COVERED by
+#       the final GDS (`instance - final` empty). Merge, seal ring, fill and
+#       heal only ever ADD area, so a covered ring is the ring that was placed;
+#       a missing polygon, a missing layer or a moved cell is not covered.
+#  Any unreadable input leaves the old finding standing: NOT PROVEN is still
+#  the answer when the proof cannot run. Nothing here reads a verdict.
+# ══════════════════════════════════════════════════════════════════════════
+
+_PADRING_REFERENCE_SUFFIX = ".ring_reference.gds"
+
+
+def _padring_reference_path(gds_path: Path) -> Path:
+    """The ONE spelling of the pre-flatten ring reference beside a GDS.
+
+    Named after the GDS FILE, not after a top-cell name: on a pad-ring route
+    the merge is handed the physical top (`chip_top`) while the file and the
+    evidence gate use the runner's top (`spm`). MEASURED on the first front-
+    door run of this proof: the merge wrote `chip_top.ring_reference.gds`, the
+    gate looked for `spm.ring_reference.gds`, and the proof reported
+    NOT_MEASURED beside a reference that was sitting right there."""
+    gds_path = Path(gds_path)
+    return gds_path.with_name(gds_path.stem + _PADRING_REFERENCE_SUFFIX)
+
+_PADRING_GEOMETRY_PROOF_PY = r'''
+import json
+import os
+import pya
+
+ref_path = os.environ["REF_GDS"]
+final_path = os.environ["FINAL_GDS"]
+top = os.environ["TOP"]
+out_path = os.environ["JSON_OUT"]
+rep = {"top": top, "verdict": "NOT_MEASURED", "reason": "",
+       "masters": {}, "uncovered": [], "instances_checked": 0}
+try:
+    ref = pya.Layout()
+    ref.read(ref_path)
+    fin = pya.Layout()
+    fin.read(final_path)
+    rtop = ref.cell(top)
+    ftop = fin.cell(top)
+    if rtop is None or ftop is None:
+        rep["reason"] = ("top %r absent from the %s" % (
+            top, "reference" if rtop is None else "final GDS"))
+    elif abs(ref.dbu - fin.dbu) > 1e-12:
+        rep["reason"] = "database units differ: reference %g, final %g" % (
+            ref.dbu, fin.dbu)
+    else:
+        _cache = {}
+        ref_layers = [(li, ref.get_info(li)) for li in ref.layer_indexes()]
+
+        def _master_region(cell, li):
+            key = (cell.cell_index(), li)
+            if key not in _cache:
+                reg = pya.Region(cell.begin_shapes_rec(li))
+                reg.merge()
+                _cache[key] = reg
+            return _cache[key]
+
+        n_uncovered = 0
+        for inst in rtop.each_inst():
+            cell = inst.cell
+            m = rep["masters"].setdefault(
+                cell.name, {"instances": 0, "covered": 0})
+            for tr in inst.cell_inst.each_cplx_trans():
+                m["instances"] += 1
+                rep["instances_checked"] += 1
+                missing_layers = []
+                for li, info in ref_layers:
+                    local = _master_region(cell, li)
+                    if local.is_empty():
+                        continue
+                    placed = local.transformed(tr)
+                    fli = fin.find_layer(info)
+                    if fli is None:
+                        missing_layers.append([str(info), placed.area()])
+                        continue
+                    have = pya.Region(ftop.begin_shapes_rec_touching(
+                        fli, placed.bbox()))
+                    lost = placed - have
+                    if not lost.is_empty():
+                        missing_layers.append([str(info), lost.area()])
+                if missing_layers:
+                    n_uncovered += 1
+                    if len(rep["uncovered"]) < 12:
+                        d = tr.disp
+                        rep["uncovered"].append({
+                            "master": cell.name,
+                            "origin_dbu": [d.x, d.y],
+                            "missing_dbu2_by_layer": missing_layers[:8]})
+                else:
+                    m["covered"] += 1
+        if rep["instances_checked"] == 0:
+            rep["reason"] = "the reference places no ring instance"
+        elif n_uncovered:
+            rep["verdict"] = "FAIL"
+            rep["reason"] = ("%d of %d placed ring instance(s) are not covered "
+                             "by the final GDS" % (n_uncovered,
+                                                   rep["instances_checked"]))
+        else:
+            rep["verdict"] = "PASS"
+            rep["reason"] = ("every one of %d placed ring instance(s) is "
+                             "covered, layer by layer, by the final GDS"
+                             % rep["instances_checked"])
+except Exception as exc:
+    rep["verdict"] = "NOT_MEASURED"
+    rep["reason"] = "proof did not run: %s" % exc
+with open(out_path, "w") as fh:
+    json.dump(rep, fh, indent=2)
+print("PADRING_GEOMETRY_PROOF %s" % rep["verdict"])
+'''
+
+
+def _padring_record_masters(project: Path) -> Set[str]:
+    """Ring masters the pad-ring producer recorded (pads, corners, fillers).
+    Empty when there is no readable record -- the route places no ring."""
+    try:
+        report = json.loads((project / "reports" / "phase3" / "padring.json")
+                            .read_text(errors="replace"))
+    except (OSError, ValueError):
+        return set()
+    producer = (report.get("producer") if isinstance(report, dict)
+                and isinstance(report.get("producer"), dict) else report)
+    if not isinstance(producer, dict):
+        return set()
+    return {str(r.get("master")) for key in ("pads", "corners", "fillers")
+            for r in (producer.get(key) or []) if isinstance(r, dict)
+            and r.get("master")}
+
+
+def _padring_flat_geometry_proof(project: Path, container: Optional[str],
+                                 gds: Path, physical_top: str,
+                                 expected_by_master: Dict[str, int]
+                                 ) -> Dict[str, Any]:
+    """Prove the ring in a FLAT final GDS against the pre-flatten reference.
+
+    Returns a record whose ``verdict`` is PASS only when the reference still
+    references every expected ring instance AND the container-side geometry
+    proof covered every one of them. Anything unreadable is NOT_MEASURED."""
+    ref = _padring_reference_path(gds)
+    rec: Dict[str, Any] = {"reference": str(ref.relative_to(project))
+                           if ref.is_relative_to(project) else str(ref),
+                           "verdict": "NOT_MEASURED", "reason": ""}
+    if not container:
+        rec["reason"] = "no container to run the geometry proof in"
+        return rec
+    if not ref.is_file():
+        rec["reason"] = ("no pre-flatten ring reference beside the GDS -- the "
+                         "stream-out was not merged by this run's klayout pass")
+        return rec
+    rec["reference_sha256"] = _sha256_file(ref)
+    try:
+        ref_refs = _gds_reference_counts(ref, physical_top)
+    except (OSError, UnicodeError, ValueError) as exc:
+        rec["reason"] = f"reference unreadable: {exc}"
+        return rec
+    short = {m: {"expected": n, "reference_references": ref_refs.get(m, 0)}
+             for m, n in expected_by_master.items() if ref_refs.get(m, 0) < n}
+    rec["reference_references"] = {m: ref_refs.get(m, 0)
+                                   for m in sorted(expected_by_master)}
+    if short:
+        rec["verdict"] = "FAIL"
+        rec["reason"] = f"the stream-out did not place the ring: {short}"
+        return rec
+    script = _pl.pnr_dir(project) / "padring_geometry_proof.py"
+    out_json = project / "reports" / "phase3" / "padring_geometry_proof.json"
+    try:
+        script.write_text(_PADRING_GEOMETRY_PROOF_PY)
+        out_json.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        rec["reason"] = f"proof script not staged: {exc}"
+        return rec
+    cmd = (f"export QT_QPA_PLATFORM=offscreen && "
+           f"export REF_GDS={_to_container_path(str(ref), container)} "
+           f"FINAL_GDS={_to_container_path(str(gds), container)} "
+           f"TOP={physical_top} "
+           f"JSON_OUT={_to_container_path(str(out_json), container)} && "
+           f"klayout -zz -b -r {_to_container_path(str(script), container)}")
+    rc, out, err = _docker_exec(container, cmd,
+                                marker=_to_container_path(str(script), container),
+                                outputs=[out_json])
+    try:
+        proof = json.loads(out_json.read_text())
+    except (OSError, ValueError) as exc:
+        rec["reason"] = (f"proof wrote no record (rc={rc}): {exc}; "
+                         f"{((out or '') + (err or ''))[-300:]}")
+        return rec
+    rec["proof"] = proof
+    covered = {m: (proof.get("masters") or {}).get(m, {}).get("covered", 0)
+               for m in expected_by_master}
+    rec["covered_by_master"] = covered
+    if proof.get("verdict") != "PASS":
+        rec["verdict"] = ("FAIL" if proof.get("verdict") == "FAIL"
+                          else "NOT_MEASURED")
+        rec["reason"] = str(proof.get("reason") or "no reason recorded")
+        return rec
+    low = {m: (covered[m], n) for m, n in expected_by_master.items()
+           if covered[m] < n}
+    if low:
+        rec["verdict"] = "FAIL"
+        rec["reason"] = f"covered instances below the expected count: {low}"
+        return rec
+    rec["verdict"] = "PASS"
+    rec["reason"] = str(proof.get("reason"))
+    return rec
+
+
 def step_pad_ring_final_evidence(project: Path, top: str,
-                                 gds_result: StepResult) -> StepResult:
+                                 gds_result: StepResult,
+                                 container: Optional[str] = None
+                                 ) -> StepResult:
     """BLOCKING proof that the routed DEF and streamed GDS carry the ring.
 
     The proof re-parses the producer's pad/corner/filler population from all three
@@ -38083,6 +38427,7 @@ def step_pad_ring_final_evidence(project: Path, top: str,
         findings.append("PADRING_GDS_MISSING_OR_EMPTY")
     gds_refs: Optional[Dict[str, int]] = None
     _padring_gds_flat = False
+    _flat_proof: Optional[Dict[str, Any]] = None
     if gds.is_file() and records:
         try:
             gds_refs = _gds_reference_counts(gds, physical_top)
@@ -38125,6 +38470,9 @@ def step_pad_ring_final_evidence(project: Path, top: str,
                 _no_master_referenced
                 and _gds_structure_element_counts(gds).get(physical_top, 0) > 0)
             if _padring_gds_flat:
+                _flat_proof = _padring_flat_geometry_proof(
+                    project, container, gds, physical_top, expected_by_master)
+            if _padring_gds_flat and _flat_proof.get("verdict") != "PASS":
                 findings.append(
                     "PADRING_GDS_HIERARCHY_ABSENT: this GDS references NONE of "
                     f"the {len(final_def_masters)} master(s) the final DEF "
@@ -38138,8 +38486,10 @@ def step_pad_ring_final_evidence(project: Path, top: str,
                     "not about the ring, whose DEF chain matched "
                     f"{len(records)}/{len(records)} at every stage. Streamed by "
                     f"{gds_result.extras.get('streamout_engine')}; which step "
-                    "dropped the hierarchy is NOT MEASURED here.")
-            elif lost:
+                    "dropped the hierarchy is NOT MEASURED here. Geometry "
+                    f"proof: {_flat_proof.get('verdict')} -- "
+                    f"{_flat_proof.get('reason')}")
+            elif lost and not _padring_gds_flat:
                 findings.append(f"PADRING_GDS_REFERENCES_LOST:{lost}")
         except (OSError, UnicodeError, ValueError) as exc:
             findings.append(f"PADRING_GDS_HIERARCHY_UNREADABLE:{exc}")
@@ -38166,6 +38516,7 @@ def step_pad_ring_final_evidence(project: Path, top: str,
                           ("hierarchical" if gds_refs is not None
                            else "NOT_MEASURED")),
         "final_def_master_count": len(final_def_masters),
+        "flat_ring_geometry_proof": _flat_proof,
         "gds_source_def": f"phase3/stage3/pnr/{top}.def",
         "gds_source_def_sha256": (
             _sha256_file(pnr_dir / f"{top}.def")
@@ -60290,7 +60641,7 @@ def main() -> int:
                     _write_producer_identity(_pnr_out, "gds")
             if _chip_path_requests_pad_ring(project):
                 _pad_final = step_pad_ring_final_evidence(
-                    project, effective_top, _gds_dispatched)
+                    project, effective_top, _gds_dispatched, args.container)
                 plan.append(_pad_final)
                 _chain_ok = (_pad_final.status == "PASS")
         # PRE-FLIGHT (canonical step 31 — DRC/LVS/ERC/Density, split across the
