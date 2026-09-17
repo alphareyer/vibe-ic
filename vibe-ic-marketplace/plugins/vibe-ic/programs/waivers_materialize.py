@@ -229,7 +229,8 @@ def _root_ids(entries: List[Any]) -> List[Any]:
 _TIER_RATIONALE = (
     "SIGN-OFF TIER waiver(s), recorded by the auditor that issued the tier. "
     "Each one records a sign-off step that reached its evidence threshold "
-    "with a slot credited via a waiver rather than measured clean, carries "
+    "with a slot credited via a waiver, or via a die-level attribution its "
+    "entry names, rather than measured clean, carries "
     "the tier it was demoted to, a review ticket, `review_required: true` OPEN "
     "against production tape-out review, and the evidence file(s) the auditor "
     "read. This clause justifies exactly the waivers listed beside it and no "

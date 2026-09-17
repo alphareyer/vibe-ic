@@ -11518,6 +11518,7 @@ def _synthesise_fpga_skip_waivers(
     promotion never reaches; check_step's fallback honours this waiver."""
     if not _fpga_skip_disclosed(project):
         return
+    _cause_key, _cause_sentence, _cause_evidence = _fpga_skip_cause(project)
     # renumber-proof: derive from the canonical step-name→id table (single
     # source of truth, kept in sync with the flow YAML) rather than literals.
     for sid in sorted(_FPGA_BOARD_STEP_IDS, key=lambda x: (str(type(x)), x)):
@@ -11529,8 +11530,7 @@ def _synthesise_fpga_skip_waivers(
                 "ENV_UNAVAILABLE (fpga-board-prototype cap-gap): the runner "
                 "HONESTLY self-reports a deliberate FPGA skip "
                 "(reports/phase2/fpga/quartus_map_audit.json verdict=SKIP, "
-                "sof_present=false) — no DE10-class board-pin contract for this "
-                "IC class and/or no Quartus on host. The on-board .sof "
+                "sof_present=false) — " + _cause_sentence + ". The on-board .sof "
                 "(early-prototype AND final sign-off) is DEFERRED to board "
                 "bring-up (NOT executed-PASS) "
                 f"[ticket={_FPGA_SKIP_WAIVER_TICKET}, review_required=True, "
@@ -11539,10 +11539,55 @@ def _synthesise_fpga_skip_waivers(
             "ticket": _FPGA_SKIP_WAIVER_TICKET,
             "verdict_tier": "ENV_UNAVAILABLE",
             "review_required": True,
-            "evidence": ["reports/phase2/fpga/quartus_map_audit.json"],
+            "evidence": ["reports/phase2/fpga/quartus_map_audit.json"]
+                        + _cause_evidence,
+            "cause": _cause_key,
             "_env_unavailable": True,
             "_fpga_skip": True,
         }
+
+
+_PHASE2_REPORT = "reports/orchestrator/phase2_one_shot.json"
+
+
+def _fpga_skip_cause(project: Path) -> Tuple[str, str, List[str]]:
+    """J3: WHICH condition skipped the FPGA board steps — one, named, cited.
+
+    The waiver said "no DE10-class board-pin contract for this IC class and/or no
+    Quartus on host". A waiver must name its actual cause, and the run records
+    it: `fpga_compile` SKIPs either on "fpga/<name>.qsf missing" (the board-pin
+    contract was never produced — `qsf_gen` says why) or on "quartus_sh
+    unavailable" (the toolchain is absent). MEASURED on subservient r32:
+    qsf_gen SKIP ("a memory-bus/data core has no DE10 board-pin contract"),
+    fpga_compile SKIP on the missing .qsf, fpga_burn SKIP — Quartus was never
+    reached. A record that names neither is reported as NOT RECORDED rather than
+    guessed.
+    """
+    rep = project / _PHASE2_REPORT
+    try:
+        steps = {st.get("name"): st for st in
+                 (json.loads(rep.read_text()).get("steps") or [])
+                 if isinstance(st, dict)}
+    except (OSError, ValueError, AttributeError):
+        steps = {}
+    compile_detail = str((steps.get("fpga_compile") or {}).get("detail") or "")
+    qsf_detail = str((steps.get("qsf_gen") or {}).get("detail") or "")
+    if ".qsf missing" in compile_detail:
+        why = (" — qsf_gen: " + qsf_detail[:240]) if qsf_detail else ""
+        return ("board_pin_contract_absent",
+                "cause: no DE10-class board-pin contract was produced for this "
+                "design, so fpga_compile never reached Quartus (fpga_compile: "
+                f"{compile_detail.strip()}){why}",
+                [_PHASE2_REPORT])
+    if "quartus_sh unavailable" in compile_detail:
+        return ("quartus_absent",
+                "cause: Quartus is not available on this host or its container "
+                f"(fpga_compile: {compile_detail.strip()[:240]})",
+                [_PHASE2_REPORT])
+    return ("cause_not_recorded",
+            "cause: NOT RECORDED — the run's fpga_compile step names neither a "
+            f"missing .qsf nor an absent Quartus ({_PHASE2_REPORT})",
+            [_PHASE2_REPORT] if rep.exists() else [])
 
 
 def _synthesise_pdk_substitution_waivers(

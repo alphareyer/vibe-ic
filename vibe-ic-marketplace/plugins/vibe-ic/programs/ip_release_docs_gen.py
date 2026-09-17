@@ -117,6 +117,7 @@ from _release_docs_build import (
     measured,
     not_measured_body,
     one_line,
+    read_json,
     register_rich,
     sha256_of,
     table,
@@ -740,6 +741,50 @@ def _kit_view_conflicts(kit: Kit) -> List[str]:
     return out
 
 
+#: The attribution record a HARDMACRO delivery hands to its integrator.
+INTEGRATOR_REQUIREMENTS = f"{KIT_DIR}/integrator_requirements.json"
+INTEGRATOR_HANDOFF_HEADING = "Integrator handoff (HARDMACRO)"
+
+
+def integrator_handoff(project: Path) -> Optional[Tuple[str, List[Field]]]:
+    """#2359 (D3): what the integrator must close, in every delivered document.
+
+    A HARDMACRO is placed inside somebody else's die, so rules whose measurement
+    window is the WHOLE DIE (the metal density floors) cannot be closed by the
+    macro. `die_level_deck_rule_attribution` names them in
+    `integrator_requirements.json` with the achieved coverage, the deck floor and
+    the engine's legal ceiling. MEASURED on subservient r32: M2.4 0.2366 and M3.4
+    0.2436 against a 0.30 floor — and neither `final_summary.md` nor any of the
+    six IP documents said so, so a human reading the deliverable could not learn
+    that their die must close two rules this release leaves open.
+
+    Every number is a sourced field (release_docs_check resolves and digests the
+    record). No record, or a record with no requirement, returns None and the
+    documents carry no section — this never invents an obligation.
+    """
+    rec = read_json(project / INTEGRATOR_REQUIREMENTS)
+    reqs = (rec or {}).get("requirements") or []
+    if not reqs:
+        return None
+    src = INTEGRATOR_REQUIREMENTS
+    fields: List[Field] = []
+    for r in reqs:
+        rule = r.get("rule") or "?"
+        for key, label in (("achieved", "achieved in this macro"),
+                           ("floor", "deck floor"),
+                           ("legal_ceiling", "engine legal ceiling")):
+            if r.get(key) is not None:
+                fields.append(measured(f"{rule} ({r.get('layer', '?')}) {label}",
+                                       r[key], src, f"requirements[{rule}].{key}"))
+    body = (
+        "This delivery is a HARDMACRO. The rules below are DIE-LEVEL: their "
+        "measurement window is the whole die this macro is placed in, so they "
+        "are NOT closed by this release and are NOT waived — the integrator's "
+        "die must close them. The per-die-size requirement (coverage the rest "
+        f"of the die must reach) is in `{src}`.\n\n" + table(fields))
+    return body, fields
+
+
 def build_release(project: Path, kit: Kit,
                   context: RunnerContext = RunnerContext()) -> Release:
     design, pdk = identity(project)
@@ -1140,6 +1185,13 @@ def emit(project: Path, out_dir: Path, kit: Kit,
 
     text, fields = application_note(rel)
     built.append(("AN001_REFERENCE_INTEGRATION.md", text, fields))
+
+    handoff = integrator_handoff(project)
+    if handoff is not None:
+        h_body, h_fields = handoff
+        built = [(fn, text.rstrip() + f"\n\n## {INTEGRATOR_HANDOFF_HEADING}\n\n"
+                  + h_body + "\n", fields + list(h_fields))
+                 for fn, text, fields in built]
 
     out_dir.mkdir(parents=True, exist_ok=True)
     written: List[Tuple[str, Path]] = []

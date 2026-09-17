@@ -1247,6 +1247,10 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
     # false account of WHY the tapeout verdict carries a waiver tier. Same
     # demotion contract, different fact.
     drc_die_level_attributed = False
+    # What the die-level attribution credited, by name, so the Step-36 waiver
+    # entry can say WHICH rules and WHERE the handoff is rather than calling
+    # the credit a waiver (see `_tapeout_tier_credits`).
+    drc_die_level_attribution: dict = {}
     # 2026-07-27: set when the LVS slot is credited by a POWER_PIN_ONLY
     # netgen waiver rather than a genuine match — same demotion contract.
     lvs_power_pin_waived = False
@@ -1603,6 +1607,18 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
             evidence["drc"] = "die_level_attributed"
             evidence_count += 1
             drc_die_level_attributed = True
+            drc_die_level_attribution = {
+                "rules": sorted(str(r) for r in
+                                (_att.get("attributed_rules") or {})),
+                "drc_report": _project_rel(project_dir, chosen),
+            }
+            try:
+                import _die_level_attribution_consult as _dlac  # noqa: PLC0415
+                drc_die_level_attribution["attribution_report"] = \
+                    _dlac.ATTRIBUTION_REL
+                drc_die_level_attribution["handoff"] = _dlac.HANDOFF_REL
+            except Exception:                              # noqa: BLE001
+                pass
             result.findings.append(Finding(
                 rule="TAPEOUT_DRC_DIE_LEVEL_ATTRIBUTED", severity="WARNING",
                 message=(f"signoff DRC report '{chosen.name}' carries "
@@ -1895,6 +1911,7 @@ def _check_tapeout(project_dir: Path) -> AuditResult:
         "env_unavailable_steps": env_unavailable_steps,
         "drc_library_internal_waived": drc_library_internal_waived,
         "drc_die_level_attributed": drc_die_level_attributed,
+        "drc_die_level_attribution": drc_die_level_attribution,
         "lvs_power_pin_only_waived": lvs_power_pin_waived,
         "lvs_report": str(lvs_report) if lvs_report else "",
         "lvs_verdict": lvs_verdict or "",
@@ -2012,6 +2029,77 @@ MODE_MAP = {
 # also keys on it.)
 _TAPEOUT_WAIVER_TICKET = "ORGANIC-20260613-tapeout-drc-waiver"
 
+#: The sentence the Step-36 entry carried for every tier before the credit
+#: that produced the tier was named. Still the reason when nothing more
+#: specific is recorded, so an entry this program cannot account for says no
+#: less than it used to.
+_TAPEOUT_WAIVER_REASON = (
+    "tapeout sign-off reached the evidence threshold but a DRC/LVS slot was "
+    "credited via a waiver (verdict_tier=PASS_WITH_WAIVERS) — NOT a "
+    "bare/absolute PASS. Production tapeout review must close the waived slot "
+    "before mask order (CLAUDE.md rule 11).")
+
+
+def _project_rel(project_dir: Path, path) -> str:
+    """`path` relative to the project when it lies inside it, else as given."""
+    try:
+        return str(Path(path).resolve().relative_to(
+            Path(project_dir).resolve()))
+    except (ValueError, OSError):
+        return str(path)
+
+
+def _tapeout_tier_credits(project_dir: Path, summary: dict) -> list:
+    """What credited a PASS_WITH_WAIVERS tapeout tier, one row per credit.
+
+    MEASURED on the subservient hardmacro run r32 (gf180mcuD, tree eecc69bec):
+    the ONLY credit was a die-level ATTRIBUTION — two whole-die density rules
+    handed to the integrator, `drc_library_internal_waived: false`, no LVS or
+    SI waiver, no ENV_UNAVAILABLE step — and the Step-36 entry still read "a
+    DRC/LVS slot was credited via a waiver", beside a checklist whose own
+    finding says "This is not a waiver", with neither the rules nor the
+    handoff record among its evidence. A reviewer reading waivers.json (or the
+    final summary's Waivers section, which quotes it) was told to close a
+    waiver that does not exist and was not shown the obligation that does.
+
+    Read off the summary THIS auditor wrote; nothing is inferred."""
+    rows = []
+    env = [str(s) for s in (summary.get("env_unavailable_steps") or [])]
+    if env:
+        rows.append({"kind": "env_unavailable", "evidence": [],
+                     "clause": (f"phase-3 step(s) {', '.join(env)} could not "
+                                f"run (ENV_UNAVAILABLE), their slot(s) credited "
+                                f"via a waiver")})
+    if summary.get("drc_library_internal_waived"):
+        rows.append({"kind": "drc_library_internal_waiver", "evidence": [],
+                     "clause": ("the DRC slot credited via a "
+                                "library-internal waiver (design-level count "
+                                "0)")})
+    att = summary.get("drc_die_level_attribution") or {}
+    if summary.get("drc_die_level_attributed"):
+        rules = [str(r) for r in (att.get("rules") or [])]
+        handoff = att.get("handoff")
+        ev = [x for x in (att.get("drc_report"), att.get("attribution_report"),
+                          handoff) if x]
+        rows.append({
+            "kind": "drc_die_level_attribution", "rules": rules,
+            "handoff": handoff, "evidence": ev,
+            "clause": (f"the DRC slot credited by a DIE-LEVEL ATTRIBUTION, "
+                       f"not a waiver: rule(s) {', '.join(rules) or '(unnamed)'} "
+                       f"measure the whole die and this HARDMACRO delivery "
+                       f"hands them to its integrator"
+                       + (f" in {handoff}" if handoff else ""))})
+    if summary.get("lvs_power_pin_only_waived"):
+        rows.append({"kind": "lvs_power_pin_only_waiver", "evidence": [],
+                     "clause": ("the LVS slot credited via a "
+                                "POWER_PIN_ONLY waiver, not a genuine match")})
+    si = summary.get("si_signoff") or {}
+    if isinstance(si, dict) and si.get("waived"):
+        rows.append({"kind": "si_vacuity_waiver", "evidence": [],
+                     "clause": (f"SI crosstalk sign-off credited via a "
+                                f"vacuity waiver ({si.get('vacuity_code')})")})
+    return rows
+
 
 def _emit_tapeout_waiver_entry(project_dir: Path, result: "AuditResult") -> None:
     """Record the tapeout DRC/LVS waiver in <project>/waivers.json so
@@ -2029,22 +2117,50 @@ def _emit_tapeout_waiver_entry(project_dir: Path, result: "AuditResult") -> None
     summary = result.summary or {}
     evidence_files = [f.file for f in result.findings
                       if f.file and "WAIVED" in f.rule]
+    credits = _tapeout_tier_credits(project_dir, summary)
+    for c in credits:
+        for e in c["evidence"]:
+            if e not in evidence_files:
+                evidence_files.append(e)
+    kinds = [c["kind"] for c in credits]
+    if credits and all(k == "drc_die_level_attribution" for k in kinds):
+        reason = (
+            "tapeout sign-off reached the evidence threshold with "
+            + credits[0]["clause"] + " (verdict_tier=PASS_WITH_WAIVERS) — NOT "
+            "a bare/absolute PASS. Nothing here was waived: production tapeout "
+            "review must confirm the integrator's closure of the handed-over "
+            "rule(s) before mask order (CLAUDE.md rule 11).")
+    elif credits:
+        reason = (
+            "tapeout sign-off reached the evidence threshold with slot(s) "
+            "credited other than by a clean measurement: "
+            + "; ".join(c["clause"] for c in credits)
+            + " (verdict_tier=PASS_WITH_WAIVERS) — NOT a bare/absolute PASS. "
+            "Production tapeout review must close each of them before mask "
+            "order (CLAUDE.md rule 11).")
+    else:
+        reason = _TAPEOUT_WAIVER_REASON
     waiver_entry = {
         "id": _TAPEOUT_STEP_ID,
-        "reason": ("tapeout sign-off reached the evidence threshold but a "
-                   "DRC/LVS slot was credited via a waiver "
-                   "(verdict_tier=PASS_WITH_WAIVERS) — NOT a bare/absolute "
-                   "PASS. Production tapeout review must close the waived "
-                   "slot before mask order (CLAUDE.md rule 11)."),
+        "reason": reason,
         "ticket": _TAPEOUT_WAIVER_TICKET,
         "review_required": True,
         "approver": "tapeout-review-pending",
         "evidence": evidence_files or ["reports/audit/tapeout_checklist.json"],
         "verdict_tier": "PASS_WITH_WAIVERS",
+        "credited_by": kinds,
         "drc_library_internal_waived": bool(
             summary.get("drc_library_internal_waived")),
+        "drc_die_level_attributed": bool(
+            summary.get("drc_die_level_attributed")),
         "env_unavailable_steps": list(summary.get("env_unavailable_steps", [])),
     }
+    att = next((c for c in credits
+                if c["kind"] == "drc_die_level_attribution"), None)
+    if att is not None:
+        waiver_entry["attributed_rules"] = att["rules"]
+        if att.get("handoff"):
+            waiver_entry["integrator_handoff"] = att["handoff"]
     wpath = project_dir / "waivers.json"
     try:
         if wpath.exists():
