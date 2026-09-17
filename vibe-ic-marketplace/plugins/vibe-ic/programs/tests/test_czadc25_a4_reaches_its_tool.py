@@ -199,7 +199,17 @@ def test_a4_env_refusal_status_is_in_the_fail_tier():
     BLOCKED, which IS enumerated."""
     import analog_one_shot_runner as r
     import step_preflight as spf
-    assert spf.REFUSAL_STATUS in r._FAIL_STATUSES
+    import verdict as _V
+    # R-0915-85 — `_FAIL_STATUSES` was this runner's own list of which words
+    # are failures, and the catch-all this test was written about is gone:
+    # `parse` refuses a sixth word at the row that carries it, so a status
+    # cannot fall through to a green run any more. What is asserted instead is
+    # the property that mattered — the refusal is NOT GREEN — driven through
+    # the real aggregator rather than read off a list.
+    assert _V.is_non_green(spf.REFUSAL_STATUS)
+    assert r._aggregate_verdict(
+        [r.StepResult("A4_sim", "blk", spf.REFUSAL_STATUS, 0.0, "x",
+                      reason_class=spf.REFUSAL_REASON_CLASS)]) != "PASS"
     a4 = _a4_dispatch_src()
     assert a4.count("_spf.REFUSAL_STATUS") == 1, (
         "expected exactly one A4 refusal — the unreachable container. A "

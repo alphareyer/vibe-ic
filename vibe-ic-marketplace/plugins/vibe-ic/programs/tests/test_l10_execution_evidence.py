@@ -169,7 +169,22 @@ def test_executed_failure_cannot_be_waived():
 
 
 def test_not_executed_vocabulary_matches_runner():
-    assert EXEC.NOT_EXECUTED == RUNNER.NOT_EXECUTED_STATUS
+    """R-0915-85 — TWO VOCABULARIES, ONE TIE, and the tie is the reason.
+
+    `_l10_execution.NOT_EXECUTED` is the EXECUTION RECORD's per-case word — one
+    of PASS / FAIL / NOT_EXECUTED about a single L10 case — and the runner's is
+    a STEP status. Asserting they are the same STRING was the cross-vocabulary
+    borrowing this ruling separates; it happened to hold while the step had a
+    word of its own for it.
+
+    The tie that is real, and that still catches a drift: the step's word is
+    NOT_MEASURED and the REASON it carries is exactly the record's word,
+    lower-cased. A record word nobody can name as a reason would fail here.
+    """
+    import verdict as _V
+    assert RUNNER.NOT_EXECUTED_STATUS == _V.Verdict.NOT_MEASURED.value
+    assert RUNNER.NOT_EXECUTED_REASON == _V.ReasonClass.NOT_EXECUTED.value
+    assert EXEC.NOT_EXECUTED.lower() == RUNNER.NOT_EXECUTED_REASON
 
 
 def test_flow_declares_execution_record_consumer():

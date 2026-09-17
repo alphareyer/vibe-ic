@@ -140,7 +140,7 @@ def test_a_passing_row_is_still_bounded_and_says_it_was_cut():
 
 def test_a_short_row_is_untouched_and_carries_no_marker():
     """The paired acceptance: a marker that always appeared would say nothing."""
-    for status in ("PASS", "SKIP", "FAIL", None):
+    for status in ("PASS", "NOT_APPLICABLE", "FAIL", None):
         assert R().summary_detail("short reason", status) == "short reason"
 
 
