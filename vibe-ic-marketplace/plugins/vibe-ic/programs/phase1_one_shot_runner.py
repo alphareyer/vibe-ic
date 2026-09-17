@@ -1633,9 +1633,21 @@ def main() -> int:
     reports = project / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     pass1_verdict = _aggregate_verdict(plan)
-    pass1_rc = max(1 if pass1_verdict == "FAIL" or _gap else 0, rc_route)
-    if pass1_rc:
-        pass1_verdict = "FAIL"
+    # R-0915-85 — THE EXIT CODE IS THE RUN WORD, and NOT_MEASURED is not green.
+    # This ladder read only `== "FAIL"`, so an empty project — D1 refused for
+    # want of any input at all — aggregated to NOT_MEASURED and EXITED 0. That
+    # is the run16 shape exactly: nothing was measured and the shell was told
+    # the phase had passed.
+    #
+    # And the word is NOT overwritten into FAIL when the rc is 1. A run that
+    # measured nothing did not fail; `run_verdict` already put it off PASS, and
+    # rewriting it here would make the artefact claim a finding the run never
+    # made. Only a route failure — which IS a failure — sets FAIL.
+    _not_green = pass1_verdict in (_V.Verdict.FAIL.value,
+                                   _V.Verdict.NOT_MEASURED.value)
+    pass1_rc = max(1 if _not_green or _gap else 0, rc_route)
+    if rc_route or _gap:
+        pass1_verdict = _V.Verdict.FAIL.value
     summary = {
         "phase": 1,
         "mode": mode,
@@ -1645,7 +1657,14 @@ def main() -> int:
         "project": str(project),
         "ic_name": args.ic_name,
         "steps": [asdict(s) for s in plan],
-        "verdict": "FAIL" if max(pass1_rc, rc_second) else pass1_verdict,
+        # R-0915-85 — the published word is the RUN's word, not the exit code
+        # spelled as a word. A non-zero rc means "not green", and NOT_MEASURED
+        # is not green; overwriting it with FAIL made the artefact claim a
+        # finding about a design nothing had looked at, which is the one thing
+        # this ruling exists to stop.
+        "verdict": (_V.Verdict.FAIL.value
+                    if (rc_second or pass1_verdict == _V.Verdict.FAIL.value)
+                    else pass1_verdict),
         "pass1": {"verdict": pass1_verdict, "rc": pass1_rc,
                   "source": "extraction, sufficiency and route without expert track"},
         "second_track": ("not run — D1 was REFUSED" if _refused else
@@ -1679,8 +1698,15 @@ def main() -> int:
               "reads a port list would report a verdict over ZERO ports. See "
               "reports/phase1/phase1_sufficiency.json (ports_reason="
               "extraction_gap)")
-    return max(0 if summary["verdict"] != "FAIL" else 1, rc_second, rc_route,
-               1 if _gap else 0)
+    # R-0915-85 — THE EXIT CODE IS THE RUN WORD. This read `!= "FAIL"`, so
+    # every word that is not FAIL exited 0, and after the line above stopped
+    # overwriting NOT_MEASURED into FAIL that included "nothing was measured".
+    # `verdict.GREEN` is the two words a run may exit 0 on; everything else is
+    # rc 1, whether it failed or was never looked at.
+    return max(0 if summary["verdict"] in (_V.Verdict.PASS.value,
+                                           _V.Verdict.PASS_WITH_WAIVERS.value)
+               else 1,
+               rc_second, rc_route, 1 if _gap else 0)
 
 
 if __name__ == "__main__":

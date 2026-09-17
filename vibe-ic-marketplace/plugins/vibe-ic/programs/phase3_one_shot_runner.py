@@ -62297,8 +62297,15 @@ def main() -> int:
 #: `PASS_WITH_OPEN_SOURCE_CONSTRAINTS`, ranked equal to PASS_WITH_WAIVERS; an
 #: open-source constraint is a waiver ROW, not an outcome, and R-0915-57 had
 #: already emptied that tier at its producer.
+# R-0915-85 — `RUN_PRECEDENCE` is the four words that CONTRIBUTE; N/A is the
+# fifth and contributes nothing, so it must rank with PASS rather than fall to
+# the `.get(..., FAIL)` default. Measured: without this line a step the input
+# declares inapplicable ranked as a FAIL, and `_is_green` said no to a run
+# whose only non-PASS row was "this design has none of that".
 _VERDICT_RANK = {v.value: i for i, v in
                  enumerate(reversed(_V.RUN_PRECEDENCE))}
+_VERDICT_RANK[_V.Verdict.NOT_APPLICABLE.value] = \
+    _VERDICT_RANK[_V.Verdict.PASS.value]
 
 
 def _derive_headline_verdict(project: Path, steps_verdict: str

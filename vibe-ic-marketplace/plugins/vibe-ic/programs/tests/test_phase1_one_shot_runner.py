@@ -121,7 +121,12 @@ def test_empty_fixture_is_blocked_not_a_pass(tmp_path):
     assert rep.is_file()
     body = json.loads(rep.read_text())
     assert body["phase"] == 1
-    assert body["verdict"] == "FAIL"
+    # R-0915-85 — NOT `FAIL`. Nothing about this design failed: D1 was refused
+    # because the project holds none of the five declared inputs, so no L-doc
+    # was ever examined. The run is NOT GREEN — rc 1, asserted above — and it
+    # says which of the two kinds of not-green it is. Publishing FAIL here
+    # would claim a finding about a design nothing looked at.
+    assert body["verdict"] == "NOT_MEASURED", body["verdict"]
     ingest = next((s for s in body["steps"]
                     if s["name"] == "phase1_ingest_render"), None)
     assert ingest is not None
