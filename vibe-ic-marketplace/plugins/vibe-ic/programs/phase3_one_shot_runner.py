@@ -53209,6 +53209,28 @@ def _gold_only_supply_ports(gate_v: Path, gold_v: Path, top: str) -> List[str]:
     return sorted(p for p in (gold_ports - gate_ports) if _is_supply_name(p))
 
 
+def _lec_gold_core_flatten(wrapper_text: str, gate_text: str,
+                           logical_top: str) -> Optional[Tuple[str, str, str]]:
+    """(core module, core instance, separator) when the routed gate names the
+    wrapper's core cells `<instance><sep><cell>`, else None.
+
+    Read from the two netlists, never assumed: the core instance is the one
+    instantiation of `logical_top` in the recorded wrapper, and the separator
+    is the character the routed netlist actually writes after that instance
+    name. None keeps the post-layout LEC script byte-identical.
+    """
+    insts = re.findall(r"^\s*\\?" + re.escape(logical_top)
+                       + r"\s+(?:#\s*\(.*?\)\s*)?\\?([A-Za-z_][\w$]*)\s*\(",
+                       wrapper_text or "", flags=re.M | re.S)
+    if len(set(insts)) != 1:
+        return None
+    inst = insts[0]
+    seps = set(re.findall(r"\\" + re.escape(inst) + r"([/.|:])\S", gate_text or ""))
+    if len(seps) != 1:
+        return None
+    return logical_top, inst, seps.pop()
+
+
 def _lec_physical_top_gold(project: Path, logical_top: str,
                            physical_top: str, core_gold: Path,
                            out_dir: Path) -> Tuple[Path, Dict[str, Any]]:
@@ -53878,6 +53900,23 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
         return {side: list(json.loads(path.read_text())["modules"][top]["netnames"])
                 for side, path in _native_inventory.items()}
 
+    _gcf_memo: List[Optional[Tuple[str, str, str]]] = []
+
+    def _gold_core_flatten() -> Optional[Tuple[str, str, str]]:
+        """The chip-path gold core's (module, instance, separator) as the routed
+        gate names it — see `_lec_gold_core_flatten`. None off the chip path."""
+        if not _gcf_memo:
+            _v = None
+            if physical_top != logical_top:
+                try:
+                    _v = _lec_gold_core_flatten(
+                        Path(str(physical_gold["wrapper"])).read_text(errors="replace"),
+                        Path(str(gate)).read_text(errors="replace"), logical_top)
+                except (OSError, KeyError, TypeError):
+                    _v = None
+            _gcf_memo.append(_v)
+        return _gcf_memo[0]
+
     def _run_lec(functional_lib: bool, blacklist_c: Optional[str] = None,
                  gate_renames: Optional[List[Tuple[str, str]]] = None,
                  screen_only: bool = False):
@@ -53900,6 +53939,8 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
             _kw["wire_inventory_paths"] = {
                 side: _to_container_path(str(path), container)
                 for side, path in _native_inventory.items()}
+        if functional_lib and _gold_core_flatten():
+            _kw["gold_core_flatten"] = _gold_core_flatten()
         ys = mod.build_yosys_equiv_script(gold_c, gate_c, lib_c, top,
                                           blackbox_v=blackbox,
                                           strip_gate_ports=strip_gate_ports,
@@ -54027,7 +54068,8 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                     _s_names,
                     gold.read_text(errors="replace") if gold.is_file() else "",
                     gate.read_text(errors="replace") if gate.is_file() else "",
-                    _s_libtext)
+                    _s_libtext,
+                    gold_core_flatten=_gold_core_flatten())
                 _pre_renames, _s_recs = mod.build_pin_correspondence_renames(
                     _s_cls.get("accepted") or [], _s_names,
                     native_wire_names=_native_wire_names())
@@ -54091,7 +54133,7 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                 _names,
                 gold.read_text(errors="replace") if gold.is_file() else "",
                 gate.read_text(errors="replace") if gate.is_file() else "",
-                _lib_text)
+                _lib_text, gold_core_flatten=_gold_core_flatten())
         except Exception as exc:  # noqa: BLE001 — classification is best-effort
             _names, _cls = [], {"accepted": [], "rejected": [],
                                 "error": repr(exc)}
