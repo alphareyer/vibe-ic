@@ -34231,6 +34231,36 @@ gds_in = os.environ["GDS_IN"]
 gds_out = os.environ["GDS_OUT"]
 ly = pya.Layout()
 ly.read(gds_in)
+# THE RING'S AS-STREAMED PLACEMENT, KEPT BEFORE THE FLATTEN DESTROYS IT.
+# The flatten below removes every structure reference, which is the only axis
+# `step_pad_ring_final_evidence` could count the pad ring on. When the caller
+# names the ring masters, their cells and top-level placements are written to a
+# small side layout first, so the final flat GDS can be checked GEOMETRICALLY
+# against exactly what the stream-out placed (see _PADRING_GEOMETRY_PROOF_PY).
+_ring_masters = set(m for m in os.environ.get("RING_MASTERS", "").split(",")
+                    if m)
+_ring_ref_out = os.environ.get("RING_REF_OUT", "")
+if _ring_masters and _ring_ref_out:
+    _ref = pya.Layout()
+    _ref.dbu = ly.dbu
+    _written = 0
+    for tc in ly.top_cells():
+        _rtop = _ref.create_cell(tc.name)
+        _map = {}
+        for inst in tc.each_inst():
+            src = inst.cell
+            if src.name not in _ring_masters:
+                continue
+            if src.cell_index() not in _map:
+                _tgt = _ref.create_cell(src.name)
+                _tgt.copy_tree(src)
+                _map[src.cell_index()] = _tgt.cell_index()
+            _ca = inst.cell_inst.dup()
+            _ca.cell_index = _map[src.cell_index()]
+            _rtop.insert(_ca)
+            _written += _ca.size()
+    _ref.write(_ring_ref_out)
+    print("RING_REFERENCE_WRITTEN instances=%d" % _written)
 # Flatten so abutting geometry across cell-instance boundaries becomes
 # co-resident in one cell and merges (a hierarchical merge would not union
 # a cell pin against a top-level route).
@@ -34277,10 +34307,20 @@ def _klayout_merge_layers(project: Path, top: str, pdk: PdkConfig,
     script = pnr_dir / "gds_layer_merge.py"
     script.write_text(_GDS_LAYER_MERGE_PY)
     merged = pnr_dir / f"{top}.merged.gds"
+    ring_ref = pnr_dir / f"{top}{_PADRING_REFERENCE_SUFFIX}"
+    try:
+        ring_ref.unlink()           # never let a previous run's placement stand
+    except OSError:
+        pass
+    ring_masters = _padring_record_masters(project)
+    ring_env = (f"RING_MASTERS={','.join(sorted(ring_masters))} "
+                f"RING_REF_OUT={_to_container_path(str(ring_ref), container)} "
+                if ring_masters else "")
     cmd = (
         f"export QT_QPA_PLATFORM=offscreen && "
         f"export GDS_IN={_to_container_path(str(gds_path), container)} "
-        f"GDS_OUT={_to_container_path(str(merged), container)} && "
+        f"GDS_OUT={_to_container_path(str(merged), container)} "
+        f"{ring_env}&& "
         f"klayout -zz -b -r {_to_container_path(str(script), container)}"
     )
     rc, out, err = _docker_exec(container, cmd, marker=_to_container_path(str(script), container))
@@ -37981,8 +38021,224 @@ def _gds_structure_element_counts(path: Path) -> Dict[str, int]:
     return counts
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  THE RING IN A FLAT GDS  (spm x gf180mcuD, DIE route, v1.22.3)
+#
+#  #2181 named the state and left it NOT PROVEN: a flat GDS carries no
+#  structure reference, so reference counting cannot see the ring. MEASURED on
+#  this run the file is flat BY DESIGN, not by accident: `_klayout_merge_layers`
+#  (#601) calls `tc.flatten(-1, True)` on every KLayout stream-out so abutting
+#  same-layer geometry merges before sign-off DRC. So every KLayout-streamed
+#  die failed this BLOCKING gate, whatever its ring -- a gate that cannot pass.
+#
+#  The ring is proven on the file that ships, by geometry, against what the
+#  stream-out itself placed:
+#    1. before it flattens, the merge writes the ring masters' cells and their
+#       top-level placements to `<top>.ring_reference.gds` (only when the
+#       producer's padring.json names masters; the file is unlinked first so a
+#       previous run's placement can never stand in);
+#    2. that reference must still hold one structure reference per expected
+#       ring instance -- the same count this gate always required;
+#    3. every placed instance's geometry, layer by layer, must be COVERED by
+#       the final GDS (`instance - final` empty). Merge, seal ring, fill and
+#       heal only ever ADD area, so a covered ring is the ring that was placed;
+#       a missing polygon, a missing layer or a moved cell is not covered.
+#  Any unreadable input leaves the old finding standing: NOT PROVEN is still
+#  the answer when the proof cannot run. Nothing here reads a verdict.
+# ══════════════════════════════════════════════════════════════════════════
+
+_PADRING_REFERENCE_SUFFIX = ".ring_reference.gds"
+
+_PADRING_GEOMETRY_PROOF_PY = r'''
+import json
+import os
+import pya
+
+ref_path = os.environ["REF_GDS"]
+final_path = os.environ["FINAL_GDS"]
+top = os.environ["TOP"]
+out_path = os.environ["JSON_OUT"]
+rep = {"top": top, "verdict": "NOT_MEASURED", "reason": "",
+       "masters": {}, "uncovered": [], "instances_checked": 0}
+try:
+    ref = pya.Layout()
+    ref.read(ref_path)
+    fin = pya.Layout()
+    fin.read(final_path)
+    rtop = ref.cell(top)
+    ftop = fin.cell(top)
+    if rtop is None or ftop is None:
+        rep["reason"] = ("top %r absent from the %s" % (
+            top, "reference" if rtop is None else "final GDS"))
+    elif abs(ref.dbu - fin.dbu) > 1e-12:
+        rep["reason"] = "database units differ: reference %g, final %g" % (
+            ref.dbu, fin.dbu)
+    else:
+        _cache = {}
+        ref_layers = [(li, ref.get_info(li)) for li in ref.layer_indexes()]
+
+        def _master_region(cell, li):
+            key = (cell.cell_index(), li)
+            if key not in _cache:
+                reg = pya.Region(cell.begin_shapes_rec(li))
+                reg.merge()
+                _cache[key] = reg
+            return _cache[key]
+
+        n_uncovered = 0
+        for inst in rtop.each_inst():
+            cell = inst.cell
+            m = rep["masters"].setdefault(
+                cell.name, {"instances": 0, "covered": 0})
+            for tr in inst.cell_inst.each_cplx_trans():
+                m["instances"] += 1
+                rep["instances_checked"] += 1
+                missing_layers = []
+                for li, info in ref_layers:
+                    local = _master_region(cell, li)
+                    if local.is_empty():
+                        continue
+                    placed = local.transformed(tr)
+                    fli = fin.find_layer(info)
+                    if fli is None:
+                        missing_layers.append([str(info), placed.area()])
+                        continue
+                    have = pya.Region(ftop.begin_shapes_rec_touching(
+                        fli, placed.bbox()))
+                    lost = placed - have
+                    if not lost.is_empty():
+                        missing_layers.append([str(info), lost.area()])
+                if missing_layers:
+                    n_uncovered += 1
+                    if len(rep["uncovered"]) < 12:
+                        d = tr.disp
+                        rep["uncovered"].append({
+                            "master": cell.name,
+                            "origin_dbu": [d.x, d.y],
+                            "missing_dbu2_by_layer": missing_layers[:8]})
+                else:
+                    m["covered"] += 1
+        if rep["instances_checked"] == 0:
+            rep["reason"] = "the reference places no ring instance"
+        elif n_uncovered:
+            rep["verdict"] = "FAIL"
+            rep["reason"] = ("%d of %d placed ring instance(s) are not covered "
+                             "by the final GDS" % (n_uncovered,
+                                                   rep["instances_checked"]))
+        else:
+            rep["verdict"] = "PASS"
+            rep["reason"] = ("every one of %d placed ring instance(s) is "
+                             "covered, layer by layer, by the final GDS"
+                             % rep["instances_checked"])
+except Exception as exc:
+    rep["verdict"] = "NOT_MEASURED"
+    rep["reason"] = "proof did not run: %s" % exc
+with open(out_path, "w") as fh:
+    json.dump(rep, fh, indent=2)
+print("PADRING_GEOMETRY_PROOF %s" % rep["verdict"])
+'''
+
+
+def _padring_record_masters(project: Path) -> Set[str]:
+    """Ring masters the pad-ring producer recorded (pads, corners, fillers).
+    Empty when there is no readable record -- the route places no ring."""
+    try:
+        report = json.loads((project / "reports" / "phase3" / "padring.json")
+                            .read_text(errors="replace"))
+    except (OSError, ValueError):
+        return set()
+    producer = (report.get("producer") if isinstance(report, dict)
+                and isinstance(report.get("producer"), dict) else report)
+    if not isinstance(producer, dict):
+        return set()
+    return {str(r.get("master")) for key in ("pads", "corners", "fillers")
+            for r in (producer.get(key) or []) if isinstance(r, dict)
+            and r.get("master")}
+
+
+def _padring_flat_geometry_proof(project: Path, container: Optional[str],
+                                 gds: Path, physical_top: str,
+                                 expected_by_master: Dict[str, int]
+                                 ) -> Dict[str, Any]:
+    """Prove the ring in a FLAT final GDS against the pre-flatten reference.
+
+    Returns a record whose ``verdict`` is PASS only when the reference still
+    references every expected ring instance AND the container-side geometry
+    proof covered every one of them. Anything unreadable is NOT_MEASURED."""
+    ref = _pl.pnr_dir(project) / f"{Path(gds).stem}{_PADRING_REFERENCE_SUFFIX}"
+    rec: Dict[str, Any] = {"reference": str(ref.relative_to(project))
+                           if ref.is_relative_to(project) else str(ref),
+                           "verdict": "NOT_MEASURED", "reason": ""}
+    if not container:
+        rec["reason"] = "no container to run the geometry proof in"
+        return rec
+    if not ref.is_file():
+        rec["reason"] = ("no pre-flatten ring reference beside the GDS -- the "
+                         "stream-out was not merged by this run's klayout pass")
+        return rec
+    rec["reference_sha256"] = _sha256_file(ref)
+    try:
+        ref_refs = _gds_reference_counts(ref, physical_top)
+    except (OSError, UnicodeError, ValueError) as exc:
+        rec["reason"] = f"reference unreadable: {exc}"
+        return rec
+    short = {m: {"expected": n, "reference_references": ref_refs.get(m, 0)}
+             for m, n in expected_by_master.items() if ref_refs.get(m, 0) < n}
+    rec["reference_references"] = {m: ref_refs.get(m, 0)
+                                   for m in sorted(expected_by_master)}
+    if short:
+        rec["verdict"] = "FAIL"
+        rec["reason"] = f"the stream-out did not place the ring: {short}"
+        return rec
+    script = _pl.pnr_dir(project) / "padring_geometry_proof.py"
+    out_json = project / "reports" / "phase3" / "padring_geometry_proof.json"
+    try:
+        script.write_text(_PADRING_GEOMETRY_PROOF_PY)
+        out_json.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        rec["reason"] = f"proof script not staged: {exc}"
+        return rec
+    cmd = (f"export QT_QPA_PLATFORM=offscreen && "
+           f"export REF_GDS={_to_container_path(str(ref), container)} "
+           f"FINAL_GDS={_to_container_path(str(gds), container)} "
+           f"TOP={physical_top} "
+           f"JSON_OUT={_to_container_path(str(out_json), container)} && "
+           f"klayout -zz -b -r {_to_container_path(str(script), container)}")
+    rc, out, err = _docker_exec(container, cmd,
+                                marker=_to_container_path(str(script), container),
+                                outputs=[out_json])
+    try:
+        proof = json.loads(out_json.read_text())
+    except (OSError, ValueError) as exc:
+        rec["reason"] = (f"proof wrote no record (rc={rc}): {exc}; "
+                         f"{((out or '') + (err or ''))[-300:]}")
+        return rec
+    rec["proof"] = proof
+    covered = {m: (proof.get("masters") or {}).get(m, {}).get("covered", 0)
+               for m in expected_by_master}
+    rec["covered_by_master"] = covered
+    if proof.get("verdict") != "PASS":
+        rec["verdict"] = ("FAIL" if proof.get("verdict") == "FAIL"
+                          else "NOT_MEASURED")
+        rec["reason"] = str(proof.get("reason") or "no reason recorded")
+        return rec
+    low = {m: (covered[m], n) for m, n in expected_by_master.items()
+           if covered[m] < n}
+    if low:
+        rec["verdict"] = "FAIL"
+        rec["reason"] = f"covered instances below the expected count: {low}"
+        return rec
+    rec["verdict"] = "PASS"
+    rec["reason"] = str(proof.get("reason"))
+    return rec
+
+
 def step_pad_ring_final_evidence(project: Path, top: str,
-                                 gds_result: StepResult) -> StepResult:
+                                 gds_result: StepResult,
+                                 container: Optional[str] = None
+                                 ) -> StepResult:
     """BLOCKING proof that the routed DEF and streamed GDS carry the ring.
 
     The proof re-parses the producer's pad/corner/filler population from all three
@@ -38083,6 +38339,7 @@ def step_pad_ring_final_evidence(project: Path, top: str,
         findings.append("PADRING_GDS_MISSING_OR_EMPTY")
     gds_refs: Optional[Dict[str, int]] = None
     _padring_gds_flat = False
+    _flat_proof: Optional[Dict[str, Any]] = None
     if gds.is_file() and records:
         try:
             gds_refs = _gds_reference_counts(gds, physical_top)
@@ -38125,6 +38382,9 @@ def step_pad_ring_final_evidence(project: Path, top: str,
                 _no_master_referenced
                 and _gds_structure_element_counts(gds).get(physical_top, 0) > 0)
             if _padring_gds_flat:
+                _flat_proof = _padring_flat_geometry_proof(
+                    project, container, gds, physical_top, expected_by_master)
+            if _padring_gds_flat and _flat_proof.get("verdict") != "PASS":
                 findings.append(
                     "PADRING_GDS_HIERARCHY_ABSENT: this GDS references NONE of "
                     f"the {len(final_def_masters)} master(s) the final DEF "
@@ -38138,8 +38398,10 @@ def step_pad_ring_final_evidence(project: Path, top: str,
                     "not about the ring, whose DEF chain matched "
                     f"{len(records)}/{len(records)} at every stage. Streamed by "
                     f"{gds_result.extras.get('streamout_engine')}; which step "
-                    "dropped the hierarchy is NOT MEASURED here.")
-            elif lost:
+                    "dropped the hierarchy is NOT MEASURED here. Geometry "
+                    f"proof: {_flat_proof.get('verdict')} -- "
+                    f"{_flat_proof.get('reason')}")
+            elif lost and not _padring_gds_flat:
                 findings.append(f"PADRING_GDS_REFERENCES_LOST:{lost}")
         except (OSError, UnicodeError, ValueError) as exc:
             findings.append(f"PADRING_GDS_HIERARCHY_UNREADABLE:{exc}")
@@ -38166,6 +38428,7 @@ def step_pad_ring_final_evidence(project: Path, top: str,
                           ("hierarchical" if gds_refs is not None
                            else "NOT_MEASURED")),
         "final_def_master_count": len(final_def_masters),
+        "flat_ring_geometry_proof": _flat_proof,
         "gds_source_def": f"phase3/stage3/pnr/{top}.def",
         "gds_source_def_sha256": (
             _sha256_file(pnr_dir / f"{top}.def")
@@ -60290,7 +60553,7 @@ def main() -> int:
                     _write_producer_identity(_pnr_out, "gds")
             if _chip_path_requests_pad_ring(project):
                 _pad_final = step_pad_ring_final_evidence(
-                    project, effective_top, _gds_dispatched)
+                    project, effective_top, _gds_dispatched, args.container)
                 plan.append(_pad_final)
                 _chain_ok = (_pad_final.status == "PASS")
         # PRE-FLIGHT (canonical step 31 — DRC/LVS/ERC/Density, split across the
