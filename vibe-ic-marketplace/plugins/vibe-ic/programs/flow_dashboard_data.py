@@ -39,6 +39,11 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+import sys as _sys
+if str(Path(__file__).resolve().parent) not in _sys.path:
+    _sys.path.insert(0, str(Path(__file__).resolve().parent))
+import verdict as _V  # noqa: E402  R-0915-85 — the one vocabulary module
 from typing import Any, Dict, List, Optional, Tuple
 
 # Resolve the plugin root as the parent of the programs/ dir this module lives
@@ -559,8 +564,15 @@ def _is_failure_verdict(raw: str) -> bool:
     Covers the FAIL tiers (FAIL, FAIL_RTL_REPAIR_INERT, ...) and the pre-flight
     refusal word BLOCKED, which `step_preflight` documents as "never green"
     and both runners' `_aggregate_verdict` already group with FAIL."""
+    # R-0915-85 — `BLOCKED` is `NOT_MEASURED`, and the sentence this function
+    # was written around is unchanged: `step_preflight`'s refusal is "never
+    # green" and both runners' roll-ups group it with FAIL for the purpose of
+    # NOT publishing a success. Left as `== "BLOCKED"` this test was dead -- no
+    # row carries that word -- and a pre-flight refusal stopped reaching the
+    # dashboard at all, which is the one place an operator looks for it.
     up = str(raw or "").upper()
-    return "FAIL" in up or up == "BLOCKED"
+    return ("FAIL" in up
+            or up == _V.Verdict.NOT_MEASURED.value)
 
 
 def _runner_verdict_overrides(project: Path) -> Dict[str, dict]:
