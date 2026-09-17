@@ -34382,7 +34382,7 @@ def _klayout_merge_layers(project: Path, top: str, pdk: PdkConfig,
     script = pnr_dir / "gds_layer_merge.py"
     script.write_text(_GDS_LAYER_MERGE_PY)
     merged = pnr_dir / f"{top}.merged.gds"
-    ring_ref = pnr_dir / f"{top}{_PADRING_REFERENCE_SUFFIX}"
+    ring_ref = _padring_reference_path(gds_path)
     try:
         ring_ref.unlink()           # never let a previous run's placement stand
     except OSError:
@@ -38124,6 +38124,19 @@ def _gds_structure_element_counts(path: Path) -> Dict[str, int]:
 
 _PADRING_REFERENCE_SUFFIX = ".ring_reference.gds"
 
+
+def _padring_reference_path(gds_path: Path) -> Path:
+    """The ONE spelling of the pre-flatten ring reference beside a GDS.
+
+    Named after the GDS FILE, not after a top-cell name: on a pad-ring route
+    the merge is handed the physical top (`chip_top`) while the file and the
+    evidence gate use the runner's top (`spm`). MEASURED on the first front-
+    door run of this proof: the merge wrote `chip_top.ring_reference.gds`, the
+    gate looked for `spm.ring_reference.gds`, and the proof reported
+    NOT_MEASURED beside a reference that was sitting right there."""
+    gds_path = Path(gds_path)
+    return gds_path.with_name(gds_path.stem + _PADRING_REFERENCE_SUFFIX)
+
 _PADRING_GEOMETRY_PROOF_PY = r'''
 import json
 import os
@@ -38240,7 +38253,7 @@ def _padring_flat_geometry_proof(project: Path, container: Optional[str],
     Returns a record whose ``verdict`` is PASS only when the reference still
     references every expected ring instance AND the container-side geometry
     proof covered every one of them. Anything unreadable is NOT_MEASURED."""
-    ref = _pl.pnr_dir(project) / f"{Path(gds).stem}{_PADRING_REFERENCE_SUFFIX}"
+    ref = _padring_reference_path(gds)
     rec: Dict[str, Any] = {"reference": str(ref.relative_to(project))
                            if ref.is_relative_to(project) else str(ref),
                            "verdict": "NOT_MEASURED", "reason": ""}

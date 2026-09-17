@@ -204,7 +204,7 @@ def _project(tmp_path: Path, *, with_reference: bool = True,
             ly.layer(L2)).clear())
     (pnr / "spm.gds").write_bytes(final.read_bytes())
     if with_reference:
-        (pnr / f"spm{p3._PADRING_REFERENCE_SUFFIX}").write_bytes(
+        p3._padring_reference_path(pnr / "spm.gds").write_bytes(
             ref.read_bytes())
     return project
 
@@ -277,3 +277,30 @@ def test_a_reference_short_of_the_expected_ring_fails_before_klayout(tmp_path, m
     assert res.status == "FAIL"
     proof = doc["flat_ring_geometry_proof"]
     assert proof["verdict"] == "FAIL" and "did not place the ring" in proof["reason"]
+
+
+def test_merge_and_gate_agree_on_the_reference_path_whatever_the_top(tmp_path, monkeypatch):
+    """The merge is handed the physical top (`chip_top`), the gate the file.
+    MEASURED: `chip_top.ring_reference.gds` written, `spm.ring_reference.gds`
+    sought, proof NOT_MEASURED. Both now spell it from the GDS file."""
+    project = tmp_path / "proj"
+    pnr = p3._pl.pnr_dir(project)
+    pnr.mkdir(parents=True)
+    reports = project / "reports" / "phase3"
+    reports.mkdir(parents=True)
+    (reports / "padring.json").write_text(json.dumps({"producer": {
+        "pads": [{"instance": "u_pad0", "master": PAD}]}}))
+    gds = pnr / "spm.gds"
+    gds.write_bytes(b"x")
+    seen = {}
+    monkeypatch.setattr(p3, "_tool_in_path", lambda c, t: True)
+    monkeypatch.setattr(p3, "_to_container_path", lambda p, c: p)
+
+    def fake(container, cmd, timeout=1800, **kw):
+        seen["cmd"] = cmd
+        return 1, "", "not run"
+    monkeypatch.setattr(p3, "_docker_exec", fake)
+    p3._klayout_merge_layers(project, "chip_top", None, "c", gds)
+    want = str(p3._padring_reference_path(gds))
+    assert want.endswith("spm.ring_reference.gds")
+    assert f"RING_REF_OUT={want} " in seen["cmd"]
