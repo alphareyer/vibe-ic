@@ -239,10 +239,18 @@ def test_the_shipped_register_still_parses_when_a_repository_is_configured():
             f"{module.RUNNER_IMAGE_REPO_DEFAULT}@{module.RUNNER_IMAGE_DIGEST}")
         assert _CONFIGURED_REPO not in module.RUNNER_IMAGE
         # ...and the runtime reference does, keeping the same identity.
+        #
+        # ASKED UNDER THE SAME ENVIRONMENT IT IS ABOUT. The references resolve
+        # ON READ rather than at import (an import-time resolve makes this
+        # module unimportable in an engine-less process — measured: the landing
+        # arms), so "the runtime reference follows $VIBEIC_EDA_IMAGE_REPO" is a
+        # statement about the env at the moment of the read, and reading it
+        # outside the arm's env would assert about this host instead.
         expected_repo = env.get(module.RUNNER_IMAGE_REPO_ENV,
                                 module.RUNNER_IMAGE_REPO_DEFAULT)
-        assert module.RUNNER_IMAGE_RUNTIME == (
-            f"{expected_repo}@{module.RUNNER_IMAGE_DIGEST}")
+        with mock.patch.dict(os.environ, env, clear=True):
+            assert module.RUNNER_IMAGE_RUNTIME == (
+                f"{expected_repo}@{module.RUNNER_IMAGE_DIGEST}")
 
 
 def test_the_authored_register_never_carries_a_deployment_address():
