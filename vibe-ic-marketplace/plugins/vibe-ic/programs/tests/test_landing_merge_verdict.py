@@ -2128,6 +2128,10 @@ def sandbox(tmp_path_factory):
         "step_internal_fail_bubble_up_check.py",
         "step_metrics.py",
         "tool_diagnostic_id_gate.py",
+        # The hermetic runner and the landing transition verifier both resolve
+        # the EDA image through the plugin's resolver in the BASE runtime
+        # (R-0915-96); without it the arm dies on `No module named _eda_pin`.
+        "_eda_pin.py",
     ):
         shutil.copy2(_PROGRAMS / name, plugin / "programs" / name)
     # Keep the fixture's deliberately tiny subject-facing stubs, but copy the

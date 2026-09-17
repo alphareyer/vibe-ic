@@ -57,7 +57,12 @@ def repo(tmp_path):
     paths = {row["path"] for row in P.derived_paths()} | {
         P.MANIFEST_PATH, "tools/ci/protected_runtime_store.py",
         "tools/ci/landing_execution_plan.py",
-        "tools/ci/protected_landing_manifest_author.py"} | {
+        "tools/ci/protected_landing_manifest_author.py",
+        # protected_landing_transition.py resolves the EDA image through the
+        # plugin's resolver at import (R-0915-96), so the runtime this fixture
+        # stages has to carry it or every command that loads the verifier dies
+        # on `No module named _eda_pin`.
+        "vibe-ic-marketplace/plugins/vibe-ic/programs/_eda_pin.py"} | {
             f"vibe-ic-marketplace/plugins/vibe-ic/programs/{name}"
             for name in P.PUSH_PREFLIGHT_BASE_FILES}
     for path in paths:

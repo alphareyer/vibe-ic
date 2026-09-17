@@ -100,50 +100,21 @@ sys.path.insert(0, str(_PROGRAMS))
 import _watchdog                                              # noqa: E402
 
 
+#: THE IMAGE THE PREFLIGHT RESOLVES IN THESE ARMS (R-0915-96). There is no
+#: digest in the tree to read: `landing_pytest_runtime_preflight` composes its
+#: reference through `_eda_pin.image_reference()`, whose first step is the
+#: explicit `VIBEIC_EDA_IMAGE` override. The arms hand it this synthetic
+#: identity, so what is asserted is that the refusal names THE image the
+#: program resolved -- whole reference, digest included -- on any host, with or
+#: without an engine. The repository half still follows `$VIBEIC_EDA_IMAGE_REPO`
+#: exactly as the program does (vibe-ic#2100, measured on 8HD-4).
+_RESOLVED_DIGEST = "sha256:" + "6d" * 32
+
+
 def _pinned_runner_image() -> str:
-    """The digest-pinned runtime reference, COMPOSED the way the runtime does.
-
-    vibe-ic#2100.  Two assertions in this file used to spell the literal
-    `"ghcr.io/vibeic/vibeic-eda@sha256:"`.  The digest half was absent, so the
-    stale-pin trap did not apply — but the REPOSITORY half is deployment
-    configuration, and `landing_pytest_runtime_preflight` composes it from
-    `$VIBEIC_EDA_IMAGE_REPO` exactly as everything else on the run path does.
-    MEASURED 2026-09-07 on 8HD-4:
-    `test_the_full_tier_refuses_once_when_it_cannot_run_the_test_runtime` red
-    with the env SET ("the refusal does not name the digest-pinned runner
-    image" — it did, at the fleet registry) and green with it unset.  A gate
-    test that fails on the hosts that carry the fleet configuration is
-    reporting the network, not the gate.
-
-    READ by `ast` from `hermetic_candidate_runner.py`, the ONE place this repo
-    pins the runtime, rather than from `_eda_pin` — the module the program
-    under test composes through.  Reading the subject's own source to check the
-    subject is how two definitions move together unnoticed; reading the other
-    definition makes this a drift net.  No fallback literal: an unreadable pin
-    is a refusal, because a fallback is how the second copy comes back.
-    """
-    # THE DRIFT NET HAS NOTHING LEFT TO GUARD. This read existed because the
-    # digest was a literal in TWO modules that could move apart. Both literals
-    # are gone -- the identity is resolved from this host at run time -- so
-    # parsing a source file for a constant finds nothing and asserts. Ask the
-    # runner for the identity it will actually use: still the OTHER module (not
-    # circular), still a refusal rather than a fallback literal.
-    import importlib.util as _u
-    import sys as _sys
-    _p = Path(__file__).resolve().parent / "hermetic_candidate_runner.py"
-    _spec = _u.spec_from_file_location("_hcr_pin_probe", _p)
-    _mod = _u.module_from_spec(_spec)
-    # REGISTER BEFORE EXEC: that module defines dataclasses, and @dataclass
-    # resolves `sys.modules.get(cls.__module__).__dict__` while processing the
-    # class -- an unregistered module makes that None and the exec dies naming
-    # dataclasses.py rather than this loader.
-    _sys.modules["_hcr_pin_probe"] = _mod
-    _spec.loader.exec_module(_mod)
-    digest = _mod._resolve_digest()
-    assert digest, (
-        "hermetic_candidate_runner resolved no image identity; this file reads "
-        "the runner and deliberately keeps no copy to fall back to")
-    return f"{_mod.IMAGE_REPO_DEFAULT}@{digest}"
+    repo = (os.environ.get("VIBEIC_EDA_IMAGE_REPO") or "").strip() \
+        or "ghcr.io/vibeic/vibeic-eda"
+    return f"{repo}@{_RESOLVED_DIGEST}"
 
 
 _RUNNER_IMAGE = _pinned_runner_image()
@@ -277,6 +248,8 @@ def _shim_env(*, lane: str | None) -> dict[str, str]:
            if not key.startswith("VIBEIC_PYTEST_PROGRESS")
            and key not in _RUNNER_PATH_ENV}
     env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    env.pop("IIC_EDA_IMAGE", None)
+    env["VIBEIC_EDA_IMAGE"] = _RUNNER_IMAGE
     env.pop(_HOST_LANE_ENV, None)
     if lane is not None:
         env[_HOST_LANE_ENV] = lane
