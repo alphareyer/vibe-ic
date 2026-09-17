@@ -40,15 +40,13 @@ claude plugin install vibe-ic
 One plugin install provides the skills, deterministic programs, MCP server,
 bootstrap wrapper, and the container-remediation helper.
 
-## 2. Pull the EDA image
+## 2. The EDA image is named by the plugin, not by you
 
-```bash
-docker pull ghcr.io/vibeic/vibeic-eda:latest
-```
-
-Pulling a newer tag does not update an existing container. Docker resolves the
-tag only when the container is created, so use the helper in the next section
-to create or replace the named container.
+The plugin checks the `vibeic-eda` container's image BY DIGEST against the pin
+it ships (`programs/_eda_pin.py`). A container on any other image — `:latest`,
+an older tag, or the upstream base — is refused as `CONTAINER_IMAGE_MISMATCH`,
+so never fetch a tag by hand. The helper in the next section asks the
+plugin for the pinned reference and, with `PULL=1`, fetches exactly that.
 
 ## 3. Create the `vibeic-eda` container
 
@@ -63,8 +61,8 @@ Run the helper from the installed plugin root (the directory containing
 export VIBEIC_DESIGNS="/absolute/path/to/your/projects"
 [ -d "$VIBEIC_DESIGNS" ] || { echo "choose an existing projects directory"; exit 1; }
 
-DESIGNS_DIR="$VIBEIC_DESIGNS" \
-  bash tools/vibeic-eda/restart-eda.sh ghcr.io/vibeic/vibeic-eda:latest
+DESIGNS_DIR="$VIBEIC_DESIGNS" PULL=1 \
+  bash tools/vibeic-eda/restart-eda.sh
 ```
 
 The helper:
@@ -142,11 +140,12 @@ docker exec vibeic-eda openroad -version
 
 ## Updating or repairing the container
 
-Pull the desired image, then run the packaged helper again from the plugin root:
+Update the plugin first, then run the UPDATED plugin's helper again from its
+root. It pulls the image that plugin version is pinned to and recreates the
+container on it:
 
 ```bash
-docker pull ghcr.io/vibeic/vibeic-eda:latest
-bash tools/vibeic-eda/restart-eda.sh ghcr.io/vibeic/vibeic-eda:latest
+PULL=1 bash tools/vibeic-eda/restart-eda.sh
 ```
 
 The helper reuses the existing container configuration. When there is no

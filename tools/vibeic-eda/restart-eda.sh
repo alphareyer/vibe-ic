@@ -20,12 +20,23 @@
 #   ./restart-eda.sh 0.2.11               # bare tag  -> vibeic/vibeic-eda:0.2.11
 #   ./restart-eda.sh vibeic/vibeic-eda:latest   # full ref honored as-is (explicit floating opt-in)
 #   FORCE=1 ./restart-eda.sh              # recreate even if an EDA job is running
+#   PULL=1 ./restart-eda.sh               # first install / upgrade: fetch the pinned image if absent
 #
 # Env overrides:
 #   NAME=vibeic-eda            container name to manage
 #   IMAGE_REPO=vibeic/vibeic-eda   repo prepended to a bare tag argument
 #   DESIGNS_DIR=/path/to/your/designs   existing designs dir mounted at /foss/designs (fresh-container fallback only; must already exist)
 #   RESTART_EDA_PRINT_IMAGE=1  print the resolved image ref and exit (no docker)
+#   PULL=1                     fetch the resolved image when this host does not hold it
+#
+# PULL=1 IS THE INSTALL ROUTE, and the published manual uses it (vibe-ic#2349).
+# The manual used to `docker pull …:latest` and `docker run --name vibeic-eda …`
+# by hand, so every container it produced ran whatever `latest` meant that day —
+# never the digest `_eda_pin` checks — and was refused as CONTAINER_IMAGE_MISMATCH.
+# With PULL=1 the image is still named by the SAME resolver (`--judged
+# --allow-pull`, which asks about the pinned digest, never about `latest`), and
+# this script fetches exactly those bytes. Nothing outside the plugin states the
+# image identity, so the manual cannot drift from the pin again.
 #
 # After a successful recreate, confirm the toolchain from Claude Code with the
 # MCP tool `eda_doctor` (skip_versions=false) — expect "14/14 checks passed".
@@ -78,7 +89,9 @@ else
   RESOLVER="$(find_plugin_program _eda_image.py || true)"
   [[ -n "$RESOLVER" ]] || die \
     "no tag argument and no plugin programs/_eda_image.py above ${SCRIPT_DIR} — pass a tag explicitly"
-  arg="$(python3 "$RESOLVER" --judged)" || die \
+  declare -a JUDGED=( --judged )
+  [[ "${PULL:-0}" == "1" ]] && JUDGED+=( --allow-pull )
+  arg="$(python3 "$RESOLVER" "${JUDGED[@]}")" || die \
     "no tag argument and ${RESOLVER} could not name an image on this host — pass a tag explicitly"
   [[ -n "$arg" ]] || die "${RESOLVER} --judged printed nothing — pass a tag explicitly"
 fi
@@ -94,10 +107,15 @@ echo "== target image : ${IMAGE}"
 
 command -v docker >/dev/null 2>&1 || die "docker CLI not found on PATH"
 
-# --- the image must exist locally (never silently pull) --------------------
+# --- the image must exist locally (pulled only on an explicit PULL=1) -------
+if [[ "${PULL:-0}" == "1" ]] && ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "== PULL=1: '${IMAGE}' is not on this host — pulling exactly that reference"
+  docker pull "$IMAGE" || die "docker pull '${IMAGE}' failed — nothing was stopped or removed" 1
+fi
 docker image inspect "$IMAGE" >/dev/null 2>&1 || die \
   "image '${IMAGE}' not found locally. Build or pull it first, e.g.:
        docker pull ${IMAGE}
+   (or re-run with PULL=1)
    (available local tags:)
 $(docker images "${IMAGE_REPO}" --format '       {{.Repository}}:{{.Tag}} {{.ID}}' 2>/dev/null | sort -u)" 1
 TARGET_ID="$(docker image inspect "$IMAGE" --format '{{.Id}}')"
