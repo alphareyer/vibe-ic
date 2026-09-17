@@ -209,7 +209,9 @@ def test_asking_the_stage_returns_exactly_two_and_says_why(tmp_path):
     assert "DECLARED AND NOT ENABLED" in r.stdout
     assert "R5_PACKAGE_CANNOT_BOND_DESIGN" in r.stdout
     rec = json.loads((tmp_path / "r.json").read_text())
-    assert rec["verdict"] == "NOT_MEASURED"
+    # R-0915-85 — the REVIEW's own rule vocabulary is ACCEPT / REJECT /
+    # DISARMED / NOT_CHECKED; it is not a step status and is not renamed.
+    assert rec["verdict"] == "NOT_CHECKED"
     assert rec["declared_not_enabled"][0]["rule"] == "R5_PACKAGE_CANNOT_BOND_DESIGN"
 
 
@@ -356,7 +358,7 @@ def test_an_empty_pin_population_is_not_checked_not_accepted(tmp_path):
     shape = {"package_info": {"package_type": "QFP", "pin_count": 0},
              "no_package_in_input": False, "external_pins": [], "pin_table": []}
     v = S.intent_self_contradicts(S.read_package_intent(l1(tmp_path, shape)))
-    assert v["verdict"] == "NOT_MEASURED"
+    assert v["verdict"] == "NOT_CHECKED"
     assert "refutes nothing" in v["why"]
 
 
