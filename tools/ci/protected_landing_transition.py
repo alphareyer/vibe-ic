@@ -144,8 +144,25 @@ IMAGE_RE = re.compile(
 #: `test_manifest_and_runtime_use_one_exact_base_owned_image` binds every copy —
 #: this one, the runtime one, the runner module's, and the manifest's — to ONE
 #: digest, and binds the two COMMITTED ones byte for byte.
-RUNNER_IMAGE_DIGEST = (
-    "sha256:89a8fd7295208ee6d06e216ade9edc6161d26db52099e9f22ceb77a2d76e3f49")
+def _runner_image_digest() -> str:
+    """RESOLVED, NOT REMEMBERED — see hermetic_candidate_runner._resolve_digest.
+
+    This was the third stored copy of the EDA digest. The plugin's `_eda_pin`
+    held the first and `hermetic_candidate_runner` the second; both now ask.
+    A register that names an image by a literal has to be hand-edited on every
+    image release, which is the coupling `eda-image-decouple-v1` removed and
+    this file quietly kept.
+    """
+    import sys as _sys
+    _p = str(Path(__file__).resolve().parents[2] / "vibe-ic-marketplace"
+             / "plugins" / "vibe-ic" / "programs")
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
+    import _eda_pin as _pin
+    return _pin.resolved_image_digest()
+
+
+RUNNER_IMAGE_DIGEST = _runner_image_digest()
 #: The one env, and the one default. Same names `hermetic_candidate_runner` uses.
 RUNNER_IMAGE_REPO_ENV = "VIBEIC_EDA_IMAGE_REPO"
 RUNNER_IMAGE_REPO_DEFAULT = "ghcr.io/vibeic/vibeic-eda"
