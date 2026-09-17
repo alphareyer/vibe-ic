@@ -11,34 +11,19 @@ Edge   : exit code 0 → phase23_complete:true; non-zero → false.
 SKIP   : description forbids skipping — claims without this audit
          are explicitly called out as a process violation.
 """
+import json
+import os
+import select
+import shutil
+import subprocess
+import time
 from pathlib import Path
+
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 INDEX_JS = ROOT / "src" / "index.js"
-# Locate the canonical phase23 gate. This test file is mirrored byte-for-byte
-# between two layouts, and ROOT differs in each, so we probe candidates for
-# both rather than assuming one:
-#   - canonical repo:  ROOT = <repo>/mcp-eda
-#       → gate at ROOT/../vibe-ic-marketplace/plugins/vibe-ic/programs/
-#   - plugin mirror:   ROOT = .../plugins/vibe-ic/mcp-eda  (bundled copy)
-#       → gate at ROOT/../programs/   (sibling of the bundled mcp-eda)
-# Wave 82 merged vibe-ic-d / vibe-ic into vibe-ic; the legacy split path
-# is kept last as a fallback for older checkouts. Probing both layouts is what
-# lets the broad CI collection (run from the plugin root, which picks up the
-# mirror copy) resolve the gate — a single canonical-only path silently
-# doubled into a non-existent dir there.
-_GATE_CANDIDATES = [
-    ROOT / ".." / "vibe-ic-marketplace" / "plugins" / "vibe-ic"
-         / "programs" / "phase23_completion_self_audit_check.py",
-    ROOT / ".." / "programs" / "phase23_completion_self_audit_check.py",
-    ROOT / ".." / "vibe-ic-marketplace" / "plugins" / "vibe-ic-d"
-         / "programs" / "phase23_completion_self_audit_check.py",
-]
-GATE = next(
-    (c.resolve() for c in _GATE_CANDIDATES if c.resolve().exists()),
-    _GATE_CANDIDATES[0].resolve(),
-)
+GATE_NAME = "phase23_completion_self_audit_check.py"
 
 
 def _slice():
@@ -109,12 +94,64 @@ def test_description_forbids_skipping():
     )
 
 
-def test_canonical_gate_exists_on_disk():
-    """SKIP-equivalent: if the gate script is missing the tool would
-    fail at runtime; surface that at test time. Note: this previously
-    carried a v2-rename xfail marker; the gate now resolves cleanly via
-    the merged path (_MERGED above) so the marker is no longer needed."""
-    assert GATE.exists(), (
-        f"canonical gate {GATE} missing — phase23 audit tool would "
-        f"fail at runtime"
-    )
+@pytest.mark.skipif(
+    shutil.which("node") is None
+    or not (ROOT / "node_modules" / "@modelcontextprotocol" / "sdk").is_dir(),
+    reason="NOT_MEASURED: node or mcp-eda/node_modules absent (run `npm ci`)",
+)
+def test_canonical_gate_exists_on_disk(tmp_path):
+    """Ask the TOOL where its gate is, then check that path.
+
+    This test used to probe its OWN candidate list, which included the
+    current layout, so it stayed green while the tool resolved a `vibe-ic-d`
+    path that exists nowhere (#2348). Now the server is booted over MCP stdio
+    with $VIBE_IC_PROGRAMS_DIR unset (the default resolver) and the tool's
+    own answer is checked: it must have RUN, and the gate it names must be
+    the canonical program on disk."""
+    env = {k: v for k, v in os.environ.items() if k != "VIBE_IC_PROGRAMS_DIR"}
+    env["TMPDIR"] = str(tmp_path)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    msgs = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                    "clientInfo": {"name": "t", "version": "0"}}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+         "params": {"name": "eda_phase23_completion_audit",
+                    "arguments": {"project_dir": str(proj)}}},
+    ]
+    p = subprocess.Popen(["node", str(INDEX_JS)], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                         text=True, env=env, cwd=str(tmp_path))
+    try:
+        for m in msgs:
+            p.stdin.write(json.dumps(m) + "\n")
+        p.stdin.flush()
+        reply, end = None, time.time() + 600
+        while reply is None and time.time() < end:
+            if not select.select([p.stdout], [], [], 1)[0]:
+                continue
+            line = p.stdout.readline()
+            if not line:
+                break
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            if m.get("id") == 2:
+                reply = m
+    finally:
+        p.kill()
+        p.wait()
+    assert reply is not None, "the tool never answered"
+    res = reply["result"]
+    out = json.loads("".join(c.get("text", "") for c in res["content"]))
+    gate = out.get("gate")
+    assert gate, f"the tool did not report its resolved gate: {out}"
+    assert out.get("status") == "MEASURED" and out.get("audit_ran") is True, (
+        f"the tool could not run its gate at {gate}: {out}")
+    gate = Path(gate)
+    assert gate.name == GATE_NAME and gate.is_file(), gate
+    assert gate.resolve() == (ROOT.parent / "programs" / GATE_NAME).resolve(), (
+        f"the tool resolved {gate}, not the plugin's own programs/ gate")
