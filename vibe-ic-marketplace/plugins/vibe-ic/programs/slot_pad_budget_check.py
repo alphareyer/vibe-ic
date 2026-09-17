@@ -473,6 +473,54 @@ def _width(rest: str, params: Optional[Dict[str, int]] = None) -> Optional[int]:
     return abs(a - b) + 1
 
 
+_PARAM_DEFAULT_RE = re.compile(
+    r"\bparameter\b(?:\s+(?:integer|int|signed|unsigned|logic|bit))?"
+    r"(?:\s*\[[^\]]*\])?\s+([A-Za-z_]\w*)\s*=\s*"
+    r"((?:\d+'[dD])?\d+|0[xX][0-9a-fA-F]+)\s*(?=[,)])")
+
+
+def top_parameter_defaults(text: str, top: str) -> Dict[str, int]:
+    """The TOP module's own `#( parameter NAME = <integer literal> )` defaults.
+
+    WHY THEY ARE NOT A GUESS. A module elaborated as the top has no parent to
+    override its parameters, so its header defaults ARE the elaboration values
+    synthesis builds — the same role `--param` plays for a core a chip_top
+    instantiates with overrides. MEASURED on subservient x gf180mcuD (r34, a
+    DIE whose top is the core itself): `output wire [AW-1:0] o_sram_addr` with
+    `parameter integer AW = 10` answered UNDECIDED, so a die's pad budget was
+    never asked, while L9 and the synthesised netlist both carry 10 bits.
+
+    Only plain integer literals are read (`10`, `32'd10`, `0x10`); an
+    expression default (`AW = $clog2(MEMSIZE)`) stays unresolved, so the
+    UNDECIDED path still owns every width this reader cannot state exactly.
+    """
+    stripped = _strip_hdl_attributes(_strip_hdl_comments(text))
+    m = re.search(r"\bmodule\s+" + re.escape(top) + r"\b\s*(?:import[^;]*;\s*)*#\s*\(",
+                  stripped)
+    if not m:
+        return {}
+    depth, end = 1, None
+    for n, ch in enumerate(stripped[m.end():], m.end()):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                end = n
+                break
+    if end is None:
+        return {}
+    block = stripped[m.end():end] + ")"
+    out: Dict[str, int] = {}
+    for name, lit in _PARAM_DEFAULT_RE.findall(block):
+        lit = re.sub(r"^\d+'[dD]", "", lit)
+        try:
+            out[name] = int(lit, 0)
+        except ValueError:
+            continue
+    return out
+
+
 def parse_top_ports(text: str, top: str,
                     params: Optional[Dict[str, int]] = None
                     ) -> Optional[List[Dict[str, Any]]]:
@@ -930,10 +978,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     # An explicit --rtl always wins; discovery is the fallback the flow uses.
     rtl_files = list(a.rtl) or _discover_rtl(a.project)
     ports: Optional[List[Dict[str, Any]]] = None
+    defaults_used: Dict[str, int] = {}
     for f in rtl_files:
         try:
             with open(f, "r", encoding="utf-8", errors="replace") as fh:
-                ports = parse_top_ports(fh.read(), a.top, params)
+                _text = fh.read()
+            defaults_used = {k: v for k, v in
+                             top_parameter_defaults(_text, a.top).items()
+                             if k not in params}
+            ports = parse_top_ports(_text, a.top, {**defaults_used, **params})
         except OSError:
             ports = None
         if ports:
@@ -985,6 +1038,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         rep = evaluate(slots, ports)
         rc = int(rep["rc"])
+    if defaults_used:
+        rep["params_from_top_module_defaults"] = defaults_used
 
     if a.out_json:
         # WHERE A RELATIVE --json LANDS (#712). It used to land wherever the

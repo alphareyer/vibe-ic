@@ -19341,6 +19341,35 @@ def _discover_spare_cells_from_liberty(
     return out
 
 
+def _reserved_instance_names(spare_plan: Dict[str, Any],
+                              wrapper_verilog: Optional[Path] = None
+                              ) -> Tuple[List[str], List[str]]:
+    """(names the route deck must find, planned spare pads nothing instantiated).
+
+    Every planned spare CELL is inserted by this runner, so each is reserved.
+    A planned spare PAD is reserved only when the chip wrapper actually
+    instantiates it: no producer places spare pads today, and the deck's
+    `RESERVED_INSTANCE_MISSING` check errors on a name the database does not
+    carry. MEASURED on subservient x gf180mcuD as a DIE (r35): the EM-resize
+    re-route reached that check and PnR died on `spare_pad_in_0`, a pad the
+    plan named and no netlist ever contained. The second list is the
+    disclosure: planned, not placed.
+    """
+    names = [str(i["name"]) for i in spare_plan.get("instances", []) or []
+             if isinstance(i, dict) and i.get("name")]
+    pads = [str(i["name"]) for i in spare_plan.get("spare_pads", []) or []
+            if isinstance(i, dict) and i.get("name")]
+    if not pads:
+        return names, []
+    try:
+        text = wrapper_verilog.read_text(errors="replace") if wrapper_verilog else ""
+    except OSError:
+        text = ""
+    tokens = set(re.findall(r"[A-Za-z_][A-Za-z0-9_$]*", text))
+    placed = [n for n in pads if n in tokens]
+    return names + placed, [n for n in pads if n not in tokens]
+
+
 def _build_spare_cells_plan(placed_cells: int, density: float,
                             core_box: Tuple[int, int, int, int],
                             liberty_path: str = "",
@@ -26039,7 +26068,18 @@ def _postroute_sdr_transaction_finish_tcl(
         "      _sdr_tx_reject_candidate unreadable_candidate_router_drc $_sdr_tx_before -1\n"
         "    } else {\n"
         "      puts \"SDR_TRANSACTION_ROUTER_DRC: before=$_sdr_tx_before after=$_sdr_tx_after\"\n"
-        "      if {$_sdr_tx_after == 0 && $_sdr_tx_before == 0} {\n"
+        # A CLEAN ROUTE ON AN ILLEGAL PLACEMENT IS NOT A CLEAN CANDIDATE.
+        # MEASURED on subservient x gf180mcuD as a DIE (r36): both children
+        # ended router_drc 0 -> 0 with placement_violations 8 and 34 (resized
+        # buffers on top of tap cells), both were ACCEPTED on router DRC alone,
+        # and the shipped DEF failed PNR_PLACEMENT_ILLEGAL. The error branch
+        # above already demands `_sdr_pv == 0`; this branch now refuses a
+        # MEASURED non-zero count too (-1 = check_placement itself failed).
+        # Core-only r32 children measured 0, so that path is unchanged.
+        "      if {[info exists _sdr_pv] && $_sdr_pv != 0} {\n"
+        "        puts \"SDR_TRANSACTION_CANDIDATE_PLACEMENT_VIOLATIONS: $_sdr_pv\"\n"
+        "        _sdr_tx_reject_candidate candidate_placement_illegal $_sdr_tx_before $_sdr_tx_after\n"
+        "      } elseif {$_sdr_tx_after == 0 && $_sdr_tx_before == 0} {\n"
         "        file copy -force $_sdr_tx_cand_report $_sdr_tx_dir/accepted_router.drc.rpt\n"
         "        _sdr_tx_receipt ACCEPTED router_drc_preserved_clean $_sdr_tx_before $_sdr_tx_after\n"
         "        puts \"SDR_TRANSACTION_ACCEPTED: router_drc clean-preserved ($_sdr_tx_before -> $_sdr_tx_after)\"\n"
@@ -28183,8 +28223,21 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
         # working once they are read back.
         lines = [ln for ln in lines if not ln.startswith("read_lef ")]
     i_rv = _index_of(lambda ln: ln.startswith("read_verilog "), "read_verilog")
-    if not lines[i_rv + 1:i_rv + 2] or \
-            not lines[i_rv + 1].startswith("link_design "):
+    # THE LOAD SITE IS A BLOCK, NOT A PAIR. A chip-path deck reads the core
+    # netlist AND the pad-carrying chip top before linking (MEASURED on
+    # subservient x gf180mcuD as a DIE, r35: `read_verilog <core>`, a comment,
+    # `read_verilog chip_top_io.v`, a blank line, `link_design chip_top`), and
+    # requiring `link_design` on the very next line refused both SDR child
+    # decks, so the post-route DRV repair never ran on a die. The block is
+    # every consecutive `read_verilog`, comment or blank line up to the
+    # `link_design` that closes it; any other command in between still refuses,
+    # because then the design-load site is not what this function replaces.
+    i_ld = i_rv + 1
+    while i_ld < len(lines) and (lines[i_ld].startswith("read_verilog ")
+                                 or not lines[i_ld].strip()
+                                 or lines[i_ld].lstrip().startswith("#")):
+        i_ld += 1
+    if i_ld >= len(lines) or not lines[i_ld].startswith("link_design "):
         raise PnrResumeUnavailable(
             "pnr.tcl does not follow read_verilog with link_design; the "
             "design-load site could not be identified")
@@ -28203,7 +28256,7 @@ def _pnr_deck_from_checkpoint(pnr_tcl_text: str, *, checkpoint_def_c: str,
             "# instead of rebuilt from the netlist (see _build_pnr_resume_tcl_text).",
             f"read_def {checkpoint_def_c}",
         ]
-    lines[i_rv:i_rv + 2] = _load + (
+    lines[i_rv:i_ld + 1] = _load + (
         [after_restore_tcl.rstrip("\n")] if after_restore_tcl.strip() else [])
 
     def _drop(begin: str, end: str, replacement: Sequence[str],
@@ -31412,9 +31465,12 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # use the PDK's declared ROOT master when one exists.  Falling back to the
     # ordinary CTS buffer preserves PDKs that expose only a single legal cell.
     _fanout_root_buffer_cell = clk_buf_root or clk_buf
-    _reserved_names = [item["name"]
-                       for key in ("instances", "spare_pads")
-                       for item in spare_plan.get(key, []) if item.get("name")]
+    _reserved_names, _spare_pads_unplaced = _reserved_instance_names(
+        spare_plan, out_dir / "chip_top_io.v")
+    if _spare_pads_unplaced:
+        print(f"[pnr] SPARE_PADS_PLANNED_NOT_PLACED: {_spare_pads_unplaced} — "
+              f"no producer instantiates them, so the route deck does not "
+              f"reserve them", file=sys.stderr)
     spef_repair_block = _post_route_spef_repair_tcl(
         out_dir_c, tech_lef_c, cell_lef_c,
         fork_repair_capable=_fork_repair_capable,
@@ -31691,9 +31747,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         sizing_limits_block=sizing_limits_block,
         sizing_drv_report_block=sizing_drv_report_block,
         fanout_root_repair_block=_pnr_fanout_root_repair,
-        reserved_instance_names=[
-            item["name"] for key in ("instances", "spare_pads")
-            for item in spare_plan.get(key, []) if item.get("name")])
+        reserved_instance_names=_reserved_names)
 
     _chip_padring = _chip_path_requests_pad_ring(project)
 
@@ -53155,6 +53209,28 @@ def _gold_only_supply_ports(gate_v: Path, gold_v: Path, top: str) -> List[str]:
     return sorted(p for p in (gold_ports - gate_ports) if _is_supply_name(p))
 
 
+def _lec_gold_core_flatten(wrapper_text: str, gate_text: str,
+                           logical_top: str) -> Optional[Tuple[str, str, str]]:
+    """(core module, core instance, separator) when the routed gate names the
+    wrapper's core cells `<instance><sep><cell>`, else None.
+
+    Read from the two netlists, never assumed: the core instance is the one
+    instantiation of `logical_top` in the recorded wrapper, and the separator
+    is the character the routed netlist actually writes after that instance
+    name. None keeps the post-layout LEC script byte-identical.
+    """
+    insts = re.findall(r"^\s*\\?" + re.escape(logical_top)
+                       + r"\s+(?:#\s*\(.*?\)\s*)?\\?([A-Za-z_][\w$]*)\s*\(",
+                       wrapper_text or "", flags=re.M | re.S)
+    if len(set(insts)) != 1:
+        return None
+    inst = insts[0]
+    seps = set(re.findall(r"\\" + re.escape(inst) + r"([/.|:])\S", gate_text or ""))
+    if len(seps) != 1:
+        return None
+    return logical_top, inst, seps.pop()
+
+
 def _lec_physical_top_gold(project: Path, logical_top: str,
                            physical_top: str, core_gold: Path,
                            out_dir: Path) -> Tuple[Path, Dict[str, Any]]:
@@ -53824,6 +53900,23 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
         return {side: list(json.loads(path.read_text())["modules"][top]["netnames"])
                 for side, path in _native_inventory.items()}
 
+    _gcf_memo: List[Optional[Tuple[str, str, str]]] = []
+
+    def _gold_core_flatten() -> Optional[Tuple[str, str, str]]:
+        """The chip-path gold core's (module, instance, separator) as the routed
+        gate names it — see `_lec_gold_core_flatten`. None off the chip path."""
+        if not _gcf_memo:
+            _v = None
+            if physical_top != logical_top:
+                try:
+                    _v = _lec_gold_core_flatten(
+                        Path(str(physical_gold["wrapper"])).read_text(errors="replace"),
+                        Path(str(gate)).read_text(errors="replace"), logical_top)
+                except (OSError, KeyError, TypeError):
+                    _v = None
+            _gcf_memo.append(_v)
+        return _gcf_memo[0]
+
     def _run_lec(functional_lib: bool, blacklist_c: Optional[str] = None,
                  gate_renames: Optional[List[Tuple[str, str]]] = None,
                  screen_only: bool = False):
@@ -53846,6 +53939,8 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
             _kw["wire_inventory_paths"] = {
                 side: _to_container_path(str(path), container)
                 for side, path in _native_inventory.items()}
+        if functional_lib and _gold_core_flatten():
+            _kw["gold_core_flatten"] = _gold_core_flatten()
         ys = mod.build_yosys_equiv_script(gold_c, gate_c, lib_c, top,
                                           blackbox_v=blackbox,
                                           strip_gate_ports=strip_gate_ports,
@@ -53973,7 +54068,8 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                     _s_names,
                     gold.read_text(errors="replace") if gold.is_file() else "",
                     gate.read_text(errors="replace") if gate.is_file() else "",
-                    _s_libtext)
+                    _s_libtext,
+                    gold_core_flatten=_gold_core_flatten())
                 _pre_renames, _s_recs = mod.build_pin_correspondence_renames(
                     _s_cls.get("accepted") or [], _s_names,
                     native_wire_names=_native_wire_names())
@@ -54037,7 +54133,7 @@ def _emit_lec_post_layout(project: Path, top: str, pdk: PdkConfig,
                 _names,
                 gold.read_text(errors="replace") if gold.is_file() else "",
                 gate.read_text(errors="replace") if gate.is_file() else "",
-                _lib_text)
+                _lib_text, gold_core_flatten=_gold_core_flatten())
         except Exception as exc:  # noqa: BLE001 — classification is best-effort
             _names, _cls = [], {"accepted": [], "rejected": [],
                                 "error": repr(exc)}

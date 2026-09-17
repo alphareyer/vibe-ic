@@ -204,6 +204,47 @@ def _read_top_ports(project: Path) -> List[Dict[str, object]]:
     return [p for p in ports if isinstance(p, dict)]
 
 
+def _drop_unimplemented_optional_ports(
+        project: Path, ports: Sequence[Dict[str, object]]
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    """An OPTIONAL L9 port the implemented core does not carry gets no pad.
+
+    L9 records `optional: true` when the input marks a port optional
+    (`(optional) i_gpio` in the interface table). Whether the design built it
+    is the IMPLEMENTED core's answer, not the document's. MEASURED on
+    subservient x gf180mcuD r34 (a DIE): the wrapper gave `i_gpio` a pad and
+    wired `.i_gpio(...)` into a core whose synthesised netlist has no such
+    port, and routing refused with PADRING_CORE_PORT_CONNECTION_MISMATCH
+    unknown=['i_gpio'].
+
+    Only `optional is True` ports that are ABSENT from the selected netlist are
+    dropped, and each is recorded. A required port that is absent stays, so
+    the runner's connection check still refuses it; when the netlist cannot be
+    read nothing is dropped, for the same reason.
+    """
+    try:
+        from phase3_one_shot_runner import pnr_input_netlist
+        from lec_run import netlist_top_ports
+        spec = project / "phase1/generated_docs/L9_INTEGRATION_SPEC.json"
+        core = str(json.loads(spec.read_text()).get("top_module") or "core")
+        netlist, _note, _scan = pnr_input_netlist(project, core)
+        implemented = {name for _d, _r, name in
+                       netlist_top_ports(netlist.read_text(), core)}
+    except Exception:  # noqa: BLE001 — unreadable: drop nothing
+        return list(ports), []
+    if not implemented:
+        return list(ports), []
+    kept, dropped = [], []
+    for p in ports:
+        if p.get("optional") is True and str(p.get("name")) not in implemented:
+            dropped.append({"name": p.get("name"), "optional": True,
+                            "evidence": p.get("evidence"),
+                            "netlist": str(netlist)})
+        else:
+            kept.append(p)
+    return kept, dropped
+
+
 def _check_scan_interface(project: Path,
                           ports: Sequence[Dict[str, object]]) -> Dict[str, object]:
     """Do not emit a wrapper with floating controls on the selected scan core.
@@ -1028,7 +1069,10 @@ def run(project: Path, pdk_root: Optional[str], pdk: Optional[str],
                       "the IO cell type to the PDK, so this producer will not "
                       "choose one on its behalf")
 
-    ports = _read_top_ports(project)
+    ports, optional_absent = _drop_unimplemented_optional_ports(
+        project, _read_top_ports(project))
+    if optional_absent:
+        rec["optional_ports_not_implemented"] = optional_absent
     rec["functional_top_port_count"] = len(ports)
     test_ports, test_sides, test_record = _declared_test_access(project, ports)
     functional_ports = ports

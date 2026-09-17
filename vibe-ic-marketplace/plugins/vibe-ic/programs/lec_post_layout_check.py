@@ -412,7 +412,8 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
                              gate_renames: Optional[List[Tuple[str, str]]] = None,
                              fsm_encfile: Optional[str] = None,
                              screen_only: bool = False,
-                             wire_inventory_paths: Optional[Dict[str, str]] = None
+                             wire_inventory_paths: Optional[Dict[str, str]] = None,
+                             gold_core_flatten: Optional[Tuple[str, str, str]] = None
                              ) -> str:
     """Emit the Yosys .ys that structurally proves gold_v == gate_v.
 
@@ -574,12 +575,13 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
         # the Liberty DID model keeps its function (see _read_blackbox_cmd).
         def _func_side(read_v: str, stash: str, extra_strip: str = "",
                        constants: Optional[Dict[str, int]] = None,
-                       renames: str = "") -> str:
+                       renames: str = "", pre_flatten: str = "") -> str:
             return (f"{_read_liberties(True)}"
                     f"{bb_block}{read_v}\n"
                     f"{_constant_block(constants)}"
                     f"prep -top {top}\n"
                     f"{extra_strip}"
+                    f"{pre_flatten}"
                     f"tribuf -formal\n"
                     f"flatten\n"
                     f"async2sync\n"
@@ -598,9 +600,25 @@ def build_yosys_equiv_script(gold_v: str, gate_v: str, lib: str, top: str,
         #  * this port (next/cxspm44 32d03831b) strips unmatched supply ports on
         #    BOTH arms, because the physical wrapper GOLD can declare rails the
         #    routed GATE omits -- main stripped the gate arm only.
+        # THE GOLD CORE IS FLATTENED WITH THE GATE'S OWN SEPARATOR. On a chip
+        # path the gold is hierarchical (wrapper -> core instance -> Liberty
+        # cells) and the routed gate is flat with the core's names written as
+        # `u_core/_3306_`. A plain `flatten` names the gold `u_core._3306_`,
+        # so `equiv_make` paired NOTHING inside the core: MEASURED on
+        # subservient x gf180mcuD as a DIE (r36) the miter held 23 points (the
+        # ports), 21 unproven. Flattening the Liberty cells inside the core
+        # first (default `.`) and then the core instance with the gate's
+        # separator gives `u_core/_3306_.D` on both sides: 1822 points, 1778
+        # proven, the rest pin permutations the reproof pairs. `None` (every
+        # non-chip caller) emits nothing and the script is byte-identical.
+        gold_pre = ""
+        if gold_core_flatten:
+            _core_mod, _core_inst, _sep = gold_core_flatten
+            gold_pre = (f"flatten {_core_mod}\n"
+                        f"flatten -separator {_sep} {top}/{_core_inst}\n")
         gold_block = _func_side(
             f"read_verilog -sv {gold_v}", "gold", gold_strip_block,
-            constant_gold_wires)
+            constant_gold_wires, pre_flatten=gold_pre)
         gate_block = _func_side(
             f"read_verilog -sv {gate_v}", "gate", gate_strip_block,
             constant_gate_wires, _rename_block(gate_renames, top))
@@ -1196,8 +1214,58 @@ def output_buffer_path(downstream: str, upstream: str,
     return path
 
 
+_MODULE_RE = re.compile(r"^\s*module\s+\\?([A-Za-z_][\w$]*)\b(.*?)^\s*endmodule\b",
+                        re.M | re.S)
+
+
+def _gold_instances_flattened(gold_text: str,
+                              gold_core_flatten: Tuple[str, str, str]
+                              ) -> Dict[str, Tuple[str, Dict[str, str]]]:
+    """The gold's instances under the names the flattened routed gate uses.
+
+    On a chip path the gold is hierarchical (wrapper -> core instance) and the
+    routed gate is flat with the core written `<inst><sep><name>`. The
+    screen pairs instances and compares their pin nets BY NAME, so the core
+    module's instances AND nets are prefixed `<inst><sep>`, and a net that is
+    one of the core's own ports is replaced by the wrapper net that port is
+    connected to. MEASURED on subservient x gf180mcuD as a DIE (r36 replay):
+    without this 0 of 44 unproven points could be paired (gold 2026
+    instances, gate 4989, shared 179). A name this mapping cannot produce
+    simply stays unpaired and its point stays unproven.
+    """
+    core_mod, inst, sep = gold_core_flatten
+    bodies = {m.group(1): m.group(2) for m in _MODULE_RE.finditer(gold_text or "")}
+    core_body = bodies.get(core_mod)
+    if core_body is None:
+        return _parse_netlist_instances(gold_text)
+    out: Dict[str, Tuple[str, Dict[str, str]]] = {}
+    port_map: Dict[str, str] = {}
+    for mod_name, body in bodies.items():
+        if mod_name == core_mod:
+            continue
+        for name, (cell, pins) in _parse_netlist_instances(body).items():
+            if cell == core_mod and name == inst:
+                port_map = dict(pins)
+                continue
+            out[name] = (cell, pins)
+
+    def _net(n: str) -> str:
+        base, br, rest = n.partition("[")
+        if base in port_map:
+            conn = port_map[base]
+            if br and re.fullmatch(r"[A-Za-z_][\w$]*", conn or ""):
+                return f"{conn}[{rest}"
+            return conn if not br else ""
+        return f"{inst}{sep}{n}" if n else n
+
+    for name, (cell, pins) in _parse_netlist_instances(core_body).items():
+        out[f"{inst}{sep}{name}"] = (cell, {p: _net(n) for p, n in pins.items()})
+    return out
+
+
 def classify_pin_permutation_points(names: List[str], gold_text: str,
-                                    gate_text: str, liberty_text: str
+                                    gate_text: str, liberty_text: str,
+                                    gold_core_flatten: Optional[Tuple[str, str, str]] = None
                                     ) -> Dict[str, List[Dict[str, object]]]:
     """Split UNPROVEN point names into `accepted` (a proven symmetry of the
     cell — a naming artefact of the flattened recipe) and `rejected` (with the
@@ -1220,7 +1288,8 @@ def classify_pin_permutation_points(names: List[str], gold_text: str,
     `accepted` and `rejected` are unchanged — a rejected point keeps its cut
     point and stays unproven either way, so no verdict moves; what changes is
     that the record now says the screen made no observation."""
-    gold_i = _parse_netlist_instances(gold_text)
+    gold_i = (_gold_instances_flattened(gold_text, gold_core_flatten)
+              if gold_core_flatten else _parse_netlist_instances(gold_text))
     gate_i = _parse_netlist_instances(gate_text)
     lib = _parse_liberty_pins(liberty_text)
     # A post-route repair may PERMUTE a cell's commutative inputs AND REBUFFER

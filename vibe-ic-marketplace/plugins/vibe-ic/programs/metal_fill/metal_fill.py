@@ -182,6 +182,54 @@ def lattice_width_for_floor(space, drawn_frac, free_frac, floor):
     return float(space) * r / (1.0 - r)
 
 
+def snap_up(v, grid_dbu):
+    """`v` raised to the next manufacturing-grid multiple (pure, dbu)."""
+    return v if grid_dbu <= 1 else int(math.ceil(v / grid_dbu)) * grid_dbu
+
+
+def conformal_tile(width_fwd, top_fwd, grid_dbu, factor=16):
+    """Side of the conformal tile: the widest square this engine already
+    places (`factor` x the configured width), never narrower than the winning
+    lattice square. Pure, dbu."""
+    cand = int(round(width_fwd * factor))
+    cand = cand if grid_dbu <= 1 else int(round(cand / grid_dbu)) * grid_dbu
+    return max(cand, top_fwd)
+
+
+def conformal_lanes(bbox4, tile, sp, pitch):
+    """The `sp`-wide lanes that cut the room into tiles, as (l, b, r, t) boxes.
+
+    Vertical lanes first, then horizontal, starting half a tile inside the
+    measurement box so the first tile is a whole one. Pure, dbu.
+    """
+    left, bottom, right, top = bbox4
+    out = []
+    x = left + (tile // 2)
+    while x < right:
+        out.append((x, bottom, x + sp, top))
+        x += pitch
+    y = bottom + (tile // 2)
+    while y < top:
+        out.append((left, y, right, y + sp))
+        y += pitch
+    return out
+
+
+def conformal_repair_cut(bbox4, sp, grid_dbu):
+    """A spacing violation's bounding box grown by `sp` and snapped OUTWARD to
+    the grid.
+
+    MEASURED: cutting with the edge pair's own polygon — a skewed quadrilateral
+    — left 40 ACUTE and 77 OFFGRID violations where it had removed 15 spacing
+    ones. A grid-snapped box trades no rule for another. Pure, dbu.
+    """
+    left, bottom, right, top = bbox4
+    return ((left - sp) // grid_dbu * grid_dbu,
+            (bottom - sp) // grid_dbu * grid_dbu,
+            -((-(right + sp)) // grid_dbu) * grid_dbu,
+            -((-(top + sp)) // grid_dbu) * grid_dbu)
+
+
 def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
     import pya
     dbu = ly.dbu
@@ -364,6 +412,83 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
                     break                               # size saturated -> go smaller
         return used
 
+    def _run_conformal(tag):
+        """Fill the legal ROOM itself, not squares inside it.
+
+        Every lattice pass lays SQUARES on a grid, so room is only used where a
+        whole square fits and each square pays a `space` halo on all four
+        sides. MEASURED on a gf180mcuD 413x413um die (subservient r33): metal2
+        had 0.2438 of the die legally free for dummy metal (ceiling 0.3388
+        against a 0.30 floor), yet six lattice families plus three half-pitch
+        and twelve quarter-pitch phases all stopped at 0.2366 (0.58 of the
+        room); tiling only the rim the lattice left added 0.004. So the room is
+        tiled directly: (die - circuit metal grown by `space_to_metal` -
+        keep-outs - existing fill grown by `space`), cut by `space`-wide lanes
+        at a pitch of the widest square this engine already places, then
+        OPENED by the ladder's own smallest square so no piece is narrower than
+        a square the lattice would have used. Spacing holds by construction:
+        to circuit metal and keep-outs through `drawn_block`, to prior fill
+        through `fill.sized(space)`, between tiles through the lanes. All
+        coordinates are integer dbu on the manufacturing grid.
+        """
+        before_c = _measure().area() / float(bbox.area())
+        tile = conformal_tile(int(round(float(width) / dbu)), top_fwd, grid_dbu)
+        pitch_c = snap_up(tile + sp, grid_dbu)
+        half = max(snap_up(int(math.ceil(floor_fwd / 2.0)), grid_dbu), grid_dbu)
+        room = (pya.Region(bbox) - drawn_block - _fill_now().sized(sp)).merged()
+        lanes = pya.Region()
+        for _l, _b, _r, _t in conformal_lanes(
+                (bbox.left, bbox.bottom, bbox.right, bbox.top),
+                tile, sp, pitch_c):
+            lanes.insert(pya.Box(_l, _b, _r, _t))
+        pieces = (room - lanes.merged()).merged().sized(-half).sized(half)
+        pieces.merge()
+        # OPENING IS NOT SPACING. Removing a neck narrower than the smallest
+        # square splits one piece into two separated by the neck's LENGTH, and
+        # a concave inlet of the room survives as a notch. MEASURED on the r33
+        # layout with the PDK's own sign-off deck: the density rules closed and
+        # 15 dummy-to-dummy space violations (11 on metal2, 4 on metal3) at
+        # 0.46um against 0.98um appeared. So spacing is checked with the same
+        # euclidean space check the deck uses, the offending geometry is cut
+        # back by `space` and re-opened, and whatever still violates after a
+        # bounded number of rounds is dropped whole — a piece is never kept on
+        # the hope that it is legal.
+        repair_rounds = 0
+        for repair_rounds in range(1, 5):
+            viol = pieces.space_check(sp) + pieces.width_check(2 * half)
+            if viol.is_empty():
+                repair_rounds -= 1
+                break
+            # The cut is the violation's BOUNDING BOX grown by `space` and
+            # snapped outward to the grid: an edge pair's own polygon is a
+            # skewed quadrilateral, and subtracting it was MEASURED to leave
+            # acute and off-grid vertices (40 ACUTE, 77 OFFGRID on the same
+            # layout) — trading one rule for two.
+            cut = pya.Region()
+            for ep in viol.each():
+                b = ep.bbox()
+                cut.insert(pya.Box(*conformal_repair_cut(
+                    (b.left, b.bottom, b.right, b.top), sp, grid_dbu)))
+            pieces = (pieces - cut).merged().sized(-half).sized(half)
+            pieces.merge()
+        viol = pieces.space_check(sp) + pieces.width_check(2 * half)
+        dropped_pieces = 0
+        if not viol.is_empty():
+            bad = pieces.interacting(viol.polygons(1))
+            dropped_pieces = bad.count()
+            pieces = (pieces - bad).merged()
+        n_pieces = pieces.count()
+        if n_pieces:
+            ccell = _new_fill_cell(f"FILL_{spec['name']}_conformal_{tag}")
+            ccell.shapes(fill_lidx).insert(pieces)
+            top.insert(pya.CellInstArray(ccell.cell_index(), pya.Trans()))
+        return {"tile_um": round(tile * dbu, 4), "lane_um": round(sp * dbu, 4),
+                "min_width_um": round(2 * half * dbu, 4), "pieces": n_pieces,
+                "spacing_repair_rounds": repair_rounds,
+                "pieces_dropped_for_spacing": dropped_pieces,
+                "density_before": round(before_c, 4),
+                "density_after": round(_measure().area() / float(bbox.area()), 4)}
+
     def _drop_own_fill():
         """Delete only cells allocated by this invocation on this layer."""
         for index in owned_cells:
@@ -425,6 +550,16 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
             if _d > best_d:
                 best_d, best_top, best_pitches = _d, _tf, _pi
                 best_added = _fill_now() - initial_fill
+        # The ROOM tiled directly competes as one more family: it pays one
+        # `space` lane per tile instead of a halo around every square.
+        _drop_own_fill()
+        _ci = _run_conformal("family")
+        _d = _measure().area() / float(bbox.area())
+        families.append({"conformal_tile_um": _ci["tile_um"],
+                         "density": round(_d, 4), "conformal": _ci})
+        if _d > best_d:
+            best_d, best_top, best_pitches = _d, top_fwd, []
+            best_added = _fill_now() - initial_fill
         # Restore the actual winning geometry, not a recipe identified only
         # by width. The first winner can include inherited fill that no width
         # can reconstruct; rounded report densities must not rank candidates.
@@ -480,6 +615,15 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
             if achieved >= float(floor):
                 break
 
+    # === CONFORMAL RESIDUAL ================================================
+    # Whatever legal room the winning family and the phase trials left is
+    # tiled once more (see `_run_conformal`); cheap, and additive only.
+    conformal = None
+    if (floor is not None and separate and ceiling_any > float(floor)
+            and min(_measure().area() / float(bbox.area()),
+                    _worst_window_density(_measure(), bbox, wd)) < float(floor)):
+        conformal = _run_conformal("residual")
+
     metal_after = _measure()
     d_after = metal_after.area() / float(bbox.area())
     worst_after = _worst_window_density(metal_after, bbox, wd)
@@ -518,6 +662,7 @@ def fill_layer(ly, top, spec, wd, max_passes, fill_dt, grid_dbu):
         "families_tried": families,
         "residual_phase_trials": phase_trials,
         "residual_quarter_phase_trials": quarter_trials,
+        "conformal_residual": conformal,
         "below_floor": (None if floor is None
                         else bool(min(d_after, worst_after) < float(floor) - 1e-9)),
         "floor_unreachable_by_any_fill": (None if floor is None
