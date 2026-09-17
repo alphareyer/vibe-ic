@@ -99,47 +99,45 @@ def test_the_detector_finds_none_in_a_clean_log():
 
 # ───────────────── the deck gives the resizer a source ─────────────────────
 
-def test_every_repair_in_the_sdr_loop_is_preceded_by_a_parasitics_source(
+def test_every_repair_in_the_sdr_loop_is_governed_by_the_census_read(
         tmp_path):
+    """R-0915-94 (supersedes 84(a)'s estimate-before-repair contract): each
+    repair is governed by the pass's ONE census `read_spef`, and nothing on the
+    main path re-reads a SPEF or estimates between that read and the repair.
+    The EST-0104 recovery inside a failed repair_design is r27's and excluded."""
+    import re
     child = _child(tmp_path)
-    # SCOPE TO THE SDR LOOP. `repair_timing -setup` also appears in the
-    # parent deck's own postroute stage, far earlier; asserting on the FIRST
-    # occurrence would measure a call this change does not govern.
-    lo = child.index("SDR_DRV_PASS")
-    hi = child.index("SDR_CHILD_RECEIPT")
-    loop = child[lo:hi]
+    lo = child.index("write_spef")
+    hi = child.index("SDR_CHILD_RECEIPT", lo)
+    reg = re.sub(r"# --- R9 EST-0104 recovery.*?EST0104_RECOVERED[^\n]*\n", "",
+                 child[lo:hi], flags=re.S)
+    code = re.sub(r'"[^"\n]*"', '""', reg)
+    census = code.find("read_spef")
+    assert census >= 0 and "sdr_pass.spef} _sdr_sr" in reg, "no census SPEF read"
     for call in ("repair_design -max_wire_length", "repair_timing -setup"):
-        assert call in loop, f"{call!r} is not in the SDR loop at all"
-        i = lo + loop.index(call)
-        head = child[:i]
-        # R-0915-93: the source is the grader SPEF of the pass, not an estimate.
-        assert "sdr_pass.spef} _rszp" in head, (
-            f"{call!r} runs with no resizer parasitics source before it; "
-            "EST-0027 and a wire-load repair are the measured consequence")
-        gap = len(head) - head.rindex("sdr_pass.spef} _rszp")
-        assert gap < 4000, (
-            f"the nearest parasitics source is {gap} chars before {call!r}; "
-            "it is probably not the one that governs this call")
+        i = code.find(call, census)
+        assert i > census, f"{call!r} is not after the census read"
+        between = code[census + len("read_spef"):i]
+        assert "read_spef" not in between and "estimate_parasitics" not in between, (
+            f"{call!r} is not governed by the census read")
 
 
 def test_the_outcome_is_named_either_way(tmp_path):
-    """A source that silently fails is the original defect with a new name."""
+    """R-0915-94: the repair's parasitics are disclosed ONCE, beside the census,
+    naming EST-0027 and the wire-load fallback — not by a per-repair Tcl line."""
     child = _child(tmp_path)
-    assert "SDR_RSZ_PARASITICS" in child
-    i = child.index("SDR_RSZ_PARASITICS")
-    win = child[i:i + 700]
-    assert "FAILED" in win and "WIRE LOAD MODELS" in win, (
-        "a failed estimate_parasitics does not say the repair went blind")
-    assert "EST-0027" in win, (
-        "the disclosure does not name the tool warning a reader must check")
+    assert "_RSZ_PARASITICS" not in child
+    i = child.index("SDR_REPAIR_MODEL")
+    win = child[i:i + 400]
+    assert "EST-0027" in win and "WIRE LOAD MODELS" in win, win
 
 
-def test_both_repair_kinds_get_their_own_marker(tmp_path):
-    """The DRV repair and the setup repair are separate calls and must be
-    separately attributable in the log."""
+def test_both_repair_kinds_are_attributed_by_the_transaction_record(tmp_path):
+    """R-0915-94: attribution moved from per-repair Tcl markers to the SDR
+    transaction record (`repair_parasitics`, per stage)."""
     child = _child(tmp_path)
-    assert "SDR_RSZ_PARASITICS" in child
-    assert "SDR_SETUP_RSZ_PARASITICS" in child
+    assert "SDR_RSZ_PARASITICS" not in child and "SDR_SETUP_RSZ_PARASITICS" not in child
+    assert "repair_parasitics" in Path(R.__file__).read_text()
 
 
 # ───────────────────────── it still grades ─────────────────────────────────
@@ -202,10 +200,10 @@ def test_with_parasitics_the_census_still_reports_a_real_number(tmp_path):
         "source [lindex $argv 0]\n", _STUB + harness + child, tmp_path)
     assert "SDR_DRV_BY_KIND: total=7" in out, (
         f"[{route}] the census stopped grading: {out[-1500:]}")
-    assert "SDR_RSZ_PARASITICS: grader SPEF read" in out, (
-        "R-0915-93: the post-route repair must read its pass's grader SPEF")
+    assert "_RSZ_PARASITICS" not in out, (
+        "R-0915-94: the parasitics disclosure is recorded, not emitted into the loop")
     assert "STUB_ESTIMATE_CALLED" not in out, (
-        "R-0915-93: the post-route SDR repair must never call estimate_parasitics")
+        "R-0915-94: the post-route SDR repair must never call estimate_parasitics")
     assert blind_passes(out) == [], (
         f"[{route}] a pass still repaired on wire load models")
 
