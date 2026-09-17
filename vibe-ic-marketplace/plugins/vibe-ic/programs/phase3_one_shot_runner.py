@@ -18045,6 +18045,32 @@ def _floorplan_rectangles_record(project: Path,
     return rec
 
 
+def ring_die_core_pad(die_w: int, die_h: int, ring_core_pad: int,
+                      core_sized_um: Optional[Tuple[int, int]]) -> int:
+    """The core inset to use inside a die a PAD RING sized.
+
+    A ring's die comes from its PERIMETER (two corner cells plus the pads on
+    the longest side); the area the cells need is a different question, and the
+    auto-sizer already answered it. Returns the inset that CENTRES that
+    core-sized rectangle in the ring's die, or `ring_core_pad` unchanged when
+    that is already as tight (the ring inset is always the floor, so the core
+    can never reach under the pads), when nothing was auto-sized, or when the
+    core-sized rectangle is not smaller than the die.
+
+    MEASURED on subservient x gf180mcuD as a DIE (r37): 33 pads forced a
+    1962 um die, `die - 2*393` made the core 1176 um at 10.4 % utilisation, and
+    the netlist that closed setup at +0.03 ns as a 413 um hardmacro missed by
+    13.1 ns at SS. Pure.
+    """
+    if not core_sized_um:
+        return ring_core_pad
+    want = max(int(core_sized_um[0]), int(core_sized_um[1]))
+    if want <= 0:
+        return ring_core_pad
+    centred = (min(int(die_w), int(die_h)) - want) // 2
+    return centred if centred > ring_core_pad else ring_core_pad
+
+
 def ct03_pin_rect(fp_rect: Optional[Sequence[int]],
                   ring_inset_um: Optional[float],
                   core_pad: int, core_w: int, core_h: int,
@@ -30802,6 +30828,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     #     contradiction inside the design's own inputs, and silently growing a
     #     die somebody pinned would replace their floorplan with ours. It
     #     REFUSES, and the message names both numbers.
+    _core_sized_um: Optional[Tuple[int, int]] = None
     _ring_side, _ring_basis = _padring_required_die_um(project)
     if _ring_side is not None:
         _mandated = not _auto_die_requested
@@ -30824,6 +30851,10 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             print(f"[phase3] die-um=auto and the design's own pad ring needs "
                   f"{_ring_side}x{_ring_side} um ({_ring_basis}) — adopting "
                   f"it over the core-sized {die_um}", file=sys.stderr)
+            # WHAT THE CORE NEEDED IS STILL TRUE AFTER THE RING GREW THE DIE.
+            # Kept here, where the auto-sizer's answer is still in hand, and
+            # applied to the CORE rectangle below.
+            _core_sized_um = (_cur_w, _cur_h) if _cur_w and _cur_h else None
             die_um = f"{_ring_side}x{_ring_side}"
             # AND IT IS NO LONGER AUTO. `_auto_die_requested` is the opt-in for
             # the over-sparse DOWNSIZE retry, whose premise is that a die the
@@ -30903,6 +30934,28 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         str(_seal_rec.get("margin_basis") or ""))
     if _seal_too_small:
         return StepResult("pnr", "FAIL", time.time() - t0, _seal_too_small)
+
+    # === THE RING SIZES THE DIE; THE DESIGN STILL SIZES THE CORE ===========
+    # A pad ring's die comes from its PERIMETER — two corner cells plus the
+    # pads on the longest side — and has nothing to do with how much area the
+    # cells need. Letting the core then be `die - 2*inset` spreads a small
+    # design across the whole inner rectangle. MEASURED on subservient x
+    # gf180mcuD as a DIE (r37): 33 pads forced a 1962 um die, the core became
+    # 1176 x 1176 um at 10.4 % utilisation, and the SAME netlist that closed
+    # setup at +0.03 ns as a 413 um hardmacro missed by 13.1 ns at SS, on paths
+    # whose delay is wire. The auto-sizer's own answer — the core-sized die it
+    # produced from this netlist and the requested utilisation — is kept and
+    # becomes the core, CENTRED in the ring's die. The ring inset stays the
+    # floor, so the core can never move under the pads; a mandated die, a slot,
+    # and a design with no ring are all untouched.
+    _ring_core_pad = core_pad
+    core_pad = ring_die_core_pad(die_w, die_h, core_pad, _core_sized_um)
+    if core_pad != _ring_core_pad:
+        print(f"[phase3] core := {max(_core_sized_um)} um square centred in "
+              f"the {die_w}x{die_h} um ring die (inset {core_pad} um, ring "
+              f"floor {_ring_core_pad} um) — the area this netlist asked for "
+              f"at the requested utilisation; the ring's die is a perimeter "
+              f"requirement, not an area one", file=sys.stderr)
 
     core_w = die_w - 2 * core_pad
     core_h = die_h - 2 * core_pad
