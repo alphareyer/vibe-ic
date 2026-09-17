@@ -237,10 +237,17 @@ REACH_PY = F.PLUGIN_ROOT / "programs" / "flow_condition_reachability_check.py"
 
 #: Tiers that mean "this step did not do its work". Taken verbatim from
 #: flow_compliance_check's own `counts` dict / `_label` table, not invented.
+# R-0915-85 — the three words are two. `SKIPPED-CONDITION` is
+# `NOT_APPLICABLE` (the input declares there is nothing here);
+# `VACUOUS_PASS` and `SKIPPED-SETUP-REQUIRED` are both `NOT_MEASURED`, told
+# apart by the reason. Left as the old three this tuple named NOTHING any
+# producer writes, so every membership test below answered False and the
+# whole skip-discipline harness measured an EMPTY population while reading
+# green -- including the register-shrink rule, whose "measured []" was
+# vacuous rather than a shrink.
 SKIP_TIERS: Tuple[str, ...] = (
-    "SKIPPED-CONDITION",
-    "VACUOUS_PASS",
-    "SKIPPED-SETUP-REQUIRED",
+    "NOT_APPLICABLE",
+    "NOT_MEASURED",
 )
 
 #: Normalised gate-report verdict/status values that are a self-declared
