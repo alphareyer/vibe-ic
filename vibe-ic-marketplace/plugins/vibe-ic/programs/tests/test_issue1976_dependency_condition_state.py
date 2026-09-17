@@ -277,6 +277,10 @@ def test_dependency_condition_is_blocking_in_the_real_cli(tmp_path):
     )
 
     assert proc.returncode == 1, proc.stdout
-    assert "[MISSING          ] Step DT2" in proc.stdout, proc.stdout
+    # R-0915-85 — the rendered label is the WORD, and the reason is printed
+    # beside it. `MISSING` was both at once; `FAIL (missing_artefact)` is the
+    # same fact with the two halves separated, so both are asserted.
+    assert "[FAIL             ] Step DT2" in proc.stdout, proc.stdout
+    assert "(missing_artefact)" in proc.stdout, proc.stdout
     assert "blocked-by-upstream(DT1)" in proc.stdout, proc.stdout
     assert "reports/phase2/dft/transition_coverage.json" in proc.stdout, proc.stdout

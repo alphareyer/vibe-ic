@@ -287,7 +287,14 @@ def test_strict_structural_verdict_is_not_decided_over_an_empty_scope(
                            ("--phase", "2", "--strict-structural"))
     assert _p0(report) is not None, (
         "strict-structural verdict computed with no P0 result in scope")
-    assert rc == 0
+    # R-0915-85 — THE SUBJECT IS THE OPPOSITE OF rc 0, and this test's own
+    # docstring says so: "the tool reports PASS having examined nothing" is
+    # the defect it was written about. With no structural gate records the
+    # umbrella measured nothing, the only step in scope is NOT_MEASURED, and
+    # the run says so and exits 1. `rc == 0` was the pre-ruling answer to the
+    # very complaint above it.
+    assert _p0(report)["status"] == "NOT_MEASURED", _p0(report)
+    assert rc == 1
 
 
 # --- direction 1: the outcomes that already worked must not change ---------

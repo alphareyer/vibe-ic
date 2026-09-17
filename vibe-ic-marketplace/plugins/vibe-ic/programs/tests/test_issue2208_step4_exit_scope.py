@@ -21,7 +21,15 @@ def test_main_scopes_step4_producers_and_real_consumer(tmp_path, monkeypatch, ex
             continue
         def stub(*args, _name=name, **kwargs):
             calls.append(_name)
-            result = runner.StepResult(_name.removeprefix('step_'), "NOT_MEASURED", 0.0, 'unrelated tool stub', reason_class="not_executed")
+            # R-0915-85 — the stub stands for "some other step ran and is not
+            # this test's subject", which was `SKIP`. That is `NOT_APPLICABLE`
+            # -- declared out of this case's scope -- and NOT `NOT_MEASURED`,
+            # which would make every stubbed row a hole and put the whole run
+            # off PASS for a reason the fixture invented.
+            result = runner.StepResult(
+                _name.removeprefix('step_'), "NOT_APPLICABLE", 0.0,
+                'unrelated tool stub',
+                declared_by='this test stubs every step but its subject')
             return [result] if _name == 'step_dft_lec_chain' else result
         monkeypatch.setattr(runner, name, stub)
     monkeypatch.setattr(runner._spf, 'gate', lambda project, owner, site, refuse, fn, *a, **kw:
