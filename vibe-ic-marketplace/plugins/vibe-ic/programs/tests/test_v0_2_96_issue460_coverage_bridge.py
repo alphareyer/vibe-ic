@@ -324,8 +324,11 @@ def test_e2e_oracle_pass_lifts_step4_out_of_skipped_condition(tmp_path):
     line = _step4_line(out)
     block = _step4_block(out)
     assert line, f"Step 4 not in output:\n{out}"
-    assert "SKIPPED-CONDITION" not in line, f"Step 4 back to #460's bug:\n{line}"
-    assert "[PASS" not in line, (
+    assert "NOT_APPLICABLE" not in line, f"Step 4 back to #460's bug:\n{line}"
+    # R-0915-85 — `[PASS` is a PREFIX of `[PASS_WITH_WAIVERS]`, so the bare
+    # form now asserts the opposite of what it means. The property is that
+    # Step 4 is not a FULL pass.
+    assert "[PASS             ]" not in line, (
         f"an oracle PASS with no coverage measurement is not a Step-4 PASS:"
         f"\n{line}")
     assert "PASS_WITH_WAIVERS" in block, (
