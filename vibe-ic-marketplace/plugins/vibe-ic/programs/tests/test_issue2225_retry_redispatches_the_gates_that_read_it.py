@@ -272,7 +272,9 @@ def test_a_blocked_row_that_is_not_a_preflight_refusal_is_never_claimed(
     this repair claim to know how to re-dispatch a step whose refusal it cannot
     even attribute."""
     plan = [R.StepResult("rtl_validate", _spf.REFUSAL_STATUS, 0.0,
-                         "rtl/ missing -- REFUSED TO RUN"), _producer_ran()]
+                         "rtl/ missing -- REFUSED TO RUN",
+                         reason_class=_spf.REFUSAL_REASON_CLASS),
+            _producer_ran()]
     assert R._refusal_producers(plan[0]) == set()
     assert R._redispatch_starved_sites(plan, "rtl_gen", {}) == []
 

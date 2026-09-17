@@ -1413,13 +1413,16 @@ def _assert_design_bound_record_agrees(res, step_name):
     prod = R._A1_A3_PRODUCERS[step_name]
     assert R.verdict_tier(res.status) == "PASS", (res.status, res.detail)
     assert res.status in ("PASS", prod["status"]), (
-        f"the design-bound tier is spelled `PASS`, optionally stamped with "
-        f"the one token this step's producer declares ({prod['status']!r}); "
-        f"{res.status!r} is a third spelling of the same tier and no consumer "
-        f"can be expected to know it")
-    if res.status != "PASS":
-        # A stamp is a CLAIM that a producer ran. It stands only with the
-        # producer named beside it, or the stamp is itself the disagreement.
+        f"the design-bound tier is spelled `PASS`; {res.status!r} is a second "
+        f"spelling of the same tier and no consumer can be expected to know it")
+    # R-0915-85 — WHERE THE CLAIM MOVED. The stamp used to be a WORD
+    # (`PASS_WITH_REAL_NETLIST`) that only the producer could write, so
+    # "does this row claim a producer ran" was answerable from the status.
+    # The word is `PASS` now and the claim lives in `extras["producer"]` —
+    # which is where every consumer already read the provenance. So the
+    # agreement is asked of the CLAIM: a row that names a producer must name
+    # the right one, and must not be hedging while it does.
+    if res.extras.get("producer") is not None:
         assert res.extras.get("producer") == prod["program"], res.extras
         assert res.extras.get("low_confidence") is False, res.extras
 
@@ -1432,9 +1435,13 @@ def test_reading_the_tier_through_the_join_still_refuses_a_real_disagreement():
     stamp with no producer behind it. All three must still be refused."""
     import analog_one_shot_runner as R
 
-    def _res(status, extras=None):
+    def _res(status, extras=None, **kw):
+        if status == "NOT_MEASURED":
+            kw.setdefault("reason_class", "no_population")
+        if status == "PASS_WITH_WAIVERS":
+            kw.setdefault("attribution", "the fixture's owner")
         return R.StepResult("A3_netlist_gen", "blk_alpha", status, 0.0,
-                            "manufactured", extras=dict(extras or {}))
+                            "manufactured", extras=dict(extras or {}), **kw)
 
     good = _res(R._A1_A3_PRODUCERS["A3_netlist_gen"]["status"],
                 {"producer": "analog_a3_netlist_emit.py",
@@ -1442,15 +1449,25 @@ def test_reading_the_tier_through_the_join_still_refuses_a_real_disagreement():
     _assert_design_bound_record_agrees(good, "A3_netlist_gen")   # the control
     _assert_design_bound_record_agrees(_res("PASS"), "A3_netlist_gen")
 
+    # R-0915-85 — the two invented spellings are refused EARLIER than this
+    # join can see: `verdict.parse` raises at the row, so they cannot be
+    # constructed to be offered here. That is strictly stronger than the join
+    # declining them, and it is asserted as such rather than dropped.
+    import pytest as _pytest
+    import verdict as _V
+    for gone in ("PASS_WITH_REAL_NETLIST_V2", "PASS_WITH_REAL_EXTRACT"):
+        with _pytest.raises(_V.UnknownVerdictWord):
+            _res(gone)
+
     for bad, why in (
             (_res("FAIL"), "one side PASS, the other FAIL"),
             (_res("PASS_WITH_WAIVERS"), "the disclosed tier is not a pass"),
             (_res("NOT_MEASURED"), "nothing was examined"),
-            (_res("PASS_WITH_REAL_NETLIST_V2"),
-             "a second spelling of one tier"),
-            (_res("PASS_WITH_REAL_EXTRACT"), "another step's stamp"),
-            (_res(R._A1_A3_PRODUCERS["A3_netlist_gen"]["status"]),
-             "a stamp claiming a producer ran, with no producer named"),
+            (_res("PASS", {"producer": "some_other_emitter.py"}),
+             "a stamp claiming a producer ran, naming the WRONG producer"),
+            (_res("PASS", {"producer": "analog_a3_netlist_emit.py",
+                           "low_confidence": True}),
+             "a stamp that names its producer and hedges in the same breath"),
     ):
         try:
             _assert_design_bound_record_agrees(bad, "A3_netlist_gen")

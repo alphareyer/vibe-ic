@@ -280,8 +280,13 @@ def test_step_full_stack_tb_emits_tb_full_v(tmp_path):
     # ORGANIC-20260528: with no concrete L3 golden, the TB-gen emits a
     # connectivity-only skeleton and HONESTLY returns SKIP — it must NOT
     # fabricate a green functional PASS. The TB file is still emitted.
-    assert result.status in ("PASS", "SKIP"), (
-        f"step_full_stack_tb_gen should PASS/SKIP; got "
+    # R-0915-85 — the step emits `NOT_MEASURED(no_population)` where it used
+    # to emit `SKIP`: a CONNECTIVITY-ONLY skeleton golden-compares NOTHING, so
+    # functional correctness was not measured. The detail said so already; the
+    # word says it now. This test's subject is the EMITTED TB, so what it
+    # needs is that the step did not FAIL.
+    assert result.status in ("PASS", "NOT_MEASURED"), (
+        f"step_full_stack_tb_gen should PASS or NOT_MEASURED; got "
         f"status={result.status} detail={result.detail}"
     )
     tb = (project / "phase2" / "stage1" / "sim_full_stack"
