@@ -1410,7 +1410,7 @@ def test_ai_repair_reenters_at_validation_without_regeneration(
     assert len(refreshed["verification_challenges"]) == 1
 
     # The next resume must accept the independently reviewed repair even
-    # though rtl_gen correctly remains SKIPPED-BY-ENTRY from re-entry step 2.
+    # though rtl_gen correctly remains NOT_APPLICABLE from re-entry step 2.
     _write_review(refreshed, _valid_review(refreshed))
     assert bd.cmd_resume("rtllm", "/unused", str(run)) == 0
     acceptance = json.loads((run / bd._ACCEPTANCE_REPORT).read_text())
