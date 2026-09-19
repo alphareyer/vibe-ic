@@ -185,6 +185,51 @@ def _as_list(value: Any) -> List[Any]:
     return []
 
 
+def _regression_rows(value: Any) -> List[dict]:
+    """Return typed width-regression rows without treating arbitrary prose as data."""
+    if not isinstance(value, dict):
+        return []
+    rows = value.get("rows")
+    if not isinstance(rows, list):
+        return []
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _input_width_regression_claims(project: Path) -> List[dict]:
+    """Find primary/secondary width rows stated by the design input."""
+    claims: List[dict] = []
+    for _path, text in input_doc_texts(project):
+        size_table = False
+        for line in text.splitlines():
+            low = line.lower()
+            cells = [c.strip() for c in line.split("|")]
+            is_table = len(cells) >= 3 and "|" in line
+            if is_table and any(re.fullmatch(r"(?:size|width)", c, re.I)
+                                for c in cells):
+                size_table = True
+                continue
+            if not is_table:
+                size_table = False
+            label = cells[1] if is_table and cells[0] == "" else (cells[0] if is_table else "")
+            row_match = (size_table and re.fullmatch(
+                r"(?:primary|secondary)(?:\s*\([^|]*\))?", label, re.I))
+            level = (row_match.group(0).split("(", 1)[0].strip().lower()
+                     if row_match else None)
+            if level is None and not is_table:
+                explicit = re.search(r"\b(primary|secondary)\b", low)
+                if explicit and re.search(r"\bsize\s*(?:param(?:eter)?)?\s*[:=]", low):
+                    level = explicit.group(1).lower()
+            if level is None:
+                continue
+            widths: List[int] = []
+            for cell in cells:
+                if re.fullmatch(r"\d+(?:\s*/\s*\d+)*", cell):
+                    widths.extend(int(v) for v in re.findall(r"\d+", cell))
+            if widths:
+                claims.extend({"level": level, "width": w} for w in widths)
+    return claims
+
+
 def _truthy_assertion(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -289,6 +334,45 @@ def inspect(project: Path) -> Dict[str, Any]:
     result["evidence"]["prose_item_count"] = prose_items
     result["evidence"]["verification_plan_present"] = present
     result["evidence"]["regression_matrix_populated"] = bool(regression)
+
+    # L22's regression matrix is a finite width-by-obligation contract.  A
+    # non-empty object with no required primary row is still uncheckable.  A
+    # secondary row is intentionally optional and never carries physical
+    # sign-off weight; this keeps size8/16 functional probes from blocking the
+    # size32 physical acceptance path.
+    matrix_rows = _regression_rows(regression)
+    result["evidence"]["regression_matrix_row_count"] = len(matrix_rows)
+    primary_rows = [r for r in matrix_rows
+                    if str(r.get("level", "")).lower() == "primary"]
+    secondary_rows = [r for r in matrix_rows
+                      if str(r.get("level", "")).lower() == "secondary"]
+    result["evidence"]["primary_regression_rows"] = len(primary_rows)
+    result["evidence"]["secondary_regression_rows"] = len(secondary_rows)
+    input_width_claims = _input_width_regression_claims(project)
+    result["evidence"]["input_width_regression_claims"] = input_width_claims
+    input_primary = [r for r in input_width_claims if r["level"] == "primary"]
+    if input_primary and not primary_rows:
+        result["blocking_findings"].append({
+            "id": "REGRESSION_MATRIX_MISSING",
+            "detail": ("the input states a primary width regression row, "
+                       "but L22 regression_matrix has no primary row."),
+        })
+    if regression and not primary_rows:
+        result["blocking_findings"].append({
+            "id": "REGRESSION_PRIMARY_MISSING",
+            "detail": ("regression_matrix is populated but has no required "
+                       "level=primary row; the primary width obligation is "
+                       "not comparable."),
+        })
+    bad_secondary = [r for r in secondary_rows
+                     if r.get("required") is not False
+                     or r.get("physical_signoff_required") is not False]
+    if bad_secondary:
+        result["blocking_findings"].append({
+            "id": "REGRESSION_SECONDARY_BLOCKS_PHYSICAL",
+            "detail": ("secondary regression rows must remain optional and "
+                       "must not require physical sign-off."),
+        })
 
     # ── F1 UNCOMPARABLE_COVERAGE_GOAL (BLOCKS) ───────────────────────
     bad_goals: List[str] = []

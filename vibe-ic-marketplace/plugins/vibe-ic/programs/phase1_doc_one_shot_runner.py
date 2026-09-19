@@ -31241,27 +31241,14 @@ def _v1_6_505_normalize_value(raw: str) -> Optional[str]:
 
 
 def _v1_6_505_lift_scalar_reset_broader_vocab(
-        window: str) -> Optional[str]:
-    """v1.6.505 — for #347 R10. Apply v1.6.505 broader reset-
-    vocab regex set to `window`. Returns the first non-None
-    normalised value, or None if no pattern matches. Idempotent
-    — pure-string function. Chip-AGNOSTIC."""
-    if not isinstance(window, str) or not window:
-        return None
-    for rx in (_V1_6_505_DEFAULT_VALUE_RE,
-               _V1_6_505_POWER_UP_RE,
-               _V1_6_505_INITIALIZED_RE):
-        m = rx.search(window)
-        if not m:
-            continue
-        norm = _v1_6_505_normalize_value(m.group("val"))
-        if norm is not None:
-            return norm
-    # `is cleared by reset` / `writes 0 on reset` shape has no
-    # value group — treat match as canonical 0x0.
-    if _V1_6_505_CLEARED_BY_RESET_RE.search(window):
-        return "0x0"
-    return None
+        window: str, reg_name: Optional[str] = None,
+        address: Optional[int] = None) -> Optional[str]:
+    """Resolve only an explicit full scalar declaration for this register.
+
+    A caller without a bound register cannot establish reset authority.
+    """
+    from _scalar_reset_declarations import candidates, unique_value
+    return unique_value(candidates(window, reg_name, address))
 
 
 # v1.6.508 — for #347 R12. Real-benchmark SoC memory-map docs
@@ -31348,31 +31335,13 @@ def _v1_6_508_lift_reset_from_adoc_table_row(
 def _v1_6_503_lift_scalar_reset_from_prose(
         registers: List[Dict[str, Any]],
         extracted: Dict[str, str]) -> int:
-    """v1.6.503 — for #347 R9 Class C. For each scalar register
-    with null reset_value (no bracket index, NOT a RISC-V GPR /
-    FPR which v1.6.497 already handles), scan extracted prose
-    for adjacent reset hint. Reuse v1.6.482
-    `_v1_6_482_lift_reset_value_from_prose` with all-occurrence
-    iteration (similar to v1.6.491 pattern).
+    """Fill absent scalar resets only from source-bound whole-register facts.
 
-    Returns number of entries filled. Idempotent — already-
-    filled entries are skipped on subsequent runs.
-
-    Chip-AGNOSTIC: pure structural name-shape filter + prose-
-    adjacency lift via existing v1.6.482 helper; no chip-class
-    literal.
-
-    v1.6.507 — for #347 R11 DIAGNOSTIC. When env var
-    `PHASE2A_DEBUG_SCALAR_LIFT=1` is set, write a per-register
-    diagnostic log to `phase1_scalar_lift_debug.log` in the
-    current working directory. Each line records the register
-    name, skip reason ("already-has-reset" / "indexed-array" /
-    "gpr-fpr" / "name-too-short" / "name-not-found-in-any-doc"
-    / "no-prose-match"), evidence files where the name was
-    found, and (for "no-prose-match") a 120-char snippet of the
-    first ≤4 occurrences' ±400 window. chip-AGNOSTIC: pure
-    structural diagnostic; no chip-class literal touched.
-    Default OFF — no production overhead."""
+    Existing values and the indexed/GPR exclusions are preserved. Explicit
+    declarations must agree; partial fields, proximity and unsupported text
+    cannot establish scalar authority. Optional diagnostics retain the legacy
+    PHASE2A_DEBUG_SCALAR_LIFT switch.
+    """
     if not isinstance(registers, list) or not isinstance(extracted, dict):
         return 0
     import os as _os_v1_6_507
@@ -31419,54 +31388,26 @@ def _v1_6_503_lift_scalar_reset_from_prose(
                 _debug_lines_v1_6_507.append(
                     f"{name}: skip=name-too-short")
             continue
-        # Scan every occurrence in every extracted doc.
-        lifted: Optional[str] = None
-        lifted_source: Optional[str] = None
+        # Bind to the owning input file when the register has source authority;
+        # otherwise require all explicit declarations to agree. Never combine
+        # a nearby field value with an unrelated bare register mention.
+        from _scalar_reset_declarations import candidates, unique_value
+        values = set()
+        source = r.get("evidence")
+        address = r.get("address_int")
+        if address is None and isinstance(r.get("address"), str):
+            try:
+                address = int(r["address"], 16)
+            except ValueError:
+                pass
         _debug_occurrences_v1_6_507: List[str] = []
         for _fname, text in extracted.items():
-            if not isinstance(text, str) or not text:
+            if (isinstance(source, str) and source.startswith("input/docs/")
+                    and source != f"input/docs/{_fname}"):
                 continue
-            for nm in re.finditer(
-                    r"\b" + re.escape(name) + r"\b", text):
-                lo = max(0, nm.start() - 400)
-                hi = min(len(text), nm.end() + 400)
-                window = text[lo: hi]
-                lifted = _v1_6_482_lift_reset_value_from_prose(window)
-                if lifted:
-                    lifted_source = "scalar_prose_adjacency_v1_6_503"
-                    break
-                # v1.6.505 — for #347 R10. If v1.6.482 set didn't
-                # match, try the broader scalar-only vocab
-                # (default value / power-up value / initialised to
-                # / cleared by reset). chip-AGNOSTIC fallback.
-                lifted = _v1_6_505_lift_scalar_reset_broader_vocab(
-                    window)
-                if lifted:
-                    lifted_source = "scalar_prose_broader_v1_6_505"
-                    break
-                # v1.6.508 — for #347 R12. If both v1.6.482 + v1.6.505
-                # prose-vocab sets miss, try the AsciiDoc 4-col reset-
-                # table-row shape `| <addr> | <NAME> | <reset_value> |
-                # <access> |` (no prose vocab; pure column-position
-                # match). Real-benchmark SoC memmap docs render scalar
-                # reset values in this shape. chip-AGNOSTIC fallback.
-                lifted = _v1_6_508_lift_reset_from_adoc_table_row(
-                    window, name)
-                if lifted:
-                    lifted_source = "adoc_table_row_reset_v1_6_508"
-                    break
-                # v1.6.507 — for #347 R11 DIAGNOSTIC. Record first
-                # ≤4 unmatched window snippets (±120 char excerpt
-                # with newlines collapsed) so the field agent can
-                # see what vocab the prose actually uses.
-                if _debug_enabled_v1_6_507 and len(
-                        _debug_occurrences_v1_6_507) < 4:
-                    _snippet = window.replace("\n", " ")[:120]
-                    _debug_occurrences_v1_6_507.append(
-                        f"  - file={_fname} "
-                        f"snippet={_snippet!r}")
-            if lifted:
-                break
+            values.update(candidates(text, name, address))
+        lifted = unique_value(values)
+        lifted_source = "scalar_explicit_binding"
         if lifted:
             r["reset_value"] = lifted
             r["reset_value_source"] = lifted_source
@@ -32295,7 +32236,7 @@ def _extract_memmap_range_constants(
     a list of L4 register-style constant entries — one per endpoint.
 
     Each entry:
-      {address, address_int, name, access: "RO", kind:
+      {address, address_int, name, access: "RO"|"WO"|"RW"|"", kind:
        "indexed_register_address", endpoint: "low"|"high",
        range: "0x.. - 0x..", evidence: "input/docs/<file>",
        evidence_line: "<verbatim source line>", extraction_strategy:
@@ -32305,10 +32246,43 @@ def _extract_memmap_range_constants(
     low endpoint must be <= high endpoint (else the pair is not a
     range and is skipped). Endpoints are deduped on (address_int).
     """
+    # Resolve only access columns on explicit pipe-table range rows. A bare
+    # address-space range is not a read-only register declaration. Collect all
+    # declarations before deduplication so file order cannot hide a conflict.
+    access_by_range: Dict[Tuple[int, int], Set[str]] = {}
+    access_aliases = {"R": "RO", "RO": "RO", "W": "WO", "WO": "WO",
+                      "RW": "RW", "R/W": "RW"}
+    if isinstance(extracted, dict):
+        for text in extracted.values():
+            if not isinstance(text, str):
+                continue
+            access_column = address_column = None
+            for line in text.splitlines():
+                if not line.strip().startswith("|"):
+                    access_column = address_column = None
+                    continue
+                cells = [c.strip().strip("`*") for c in line.strip().strip("|").split("|")]
+                headers = [c.lower() for c in cells]
+                if any(c in {"address", "addr", "位址(hex)", "地址", "offset"} for c in headers):
+                    address_column = next(i for i, c in enumerate(headers)
+                                          if c in {"address", "addr", "位址(hex)", "地址", "offset"})
+                    access_column = next((i for i, c in enumerate(headers)
+                                          if c in {"r/w", "access", "rw"}), None)
+                    continue
+                if (access_column is None or address_column is None or
+                        max(access_column, address_column) >= len(cells)):
+                    continue
+                access = access_aliases.get(cells[access_column].upper())
+                if not access:
+                    continue
+                for match in _RE_MEMMAP_RANGE.finditer(cells[address_column]):
+                    key = (int(match.group("lo"), 16), int(match.group("hi"), 16))
+                    access_by_range.setdefault(key, set()).add(access)
     out: List[Dict[str, Any]] = []
     if not isinstance(extracted, dict):
         return out
-    seen: Set[int] = set()
+    seen: Dict[int, Dict[str, Any]] = {}
+    endpoint_accesses: Dict[int, Set[str]] = {}
     for fname, text in sorted(extracted.items()):
         if not isinstance(text, str) or not text:
             continue
@@ -32328,14 +32302,17 @@ def _extract_memmap_range_constants(
                 src_line = line.strip()[:200]
                 for endpoint, addr_s, addr_i in (
                         ("low", lo_s, lo_i), ("high", hi_s, hi_i)):
+                    values = endpoint_accesses.setdefault(addr_i, set())
+                    values.update(access_by_range.get((lo_i, hi_i), set()))
+                    access = next(iter(values)) if len(values) == 1 else ""
                     if addr_i in seen:
+                        seen[addr_i]["access"] = access
                         continue
-                    seen.add(addr_i)
-                    out.append({
+                    entry = {
                         "address": addr_s,
                         "address_int": addr_i,
                         "name": f"MEMMAP_{endpoint.upper()}_{addr_i:08X}",
-                        "access": "RO",
+                        "access": access,
                         "default": "",
                         "description": (
                             f"memory-map {endpoint} endpoint of range "
@@ -32346,7 +32323,9 @@ def _extract_memmap_range_constants(
                         "extraction_strategy": "memmap_range_prose_v_orch",
                         "evidence": f"input/docs/{fname}",
                         "evidence_line": src_line,
-                    })
+                    }
+                    seen[addr_i] = entry
+                    out.append(entry)
     return out
 
 
@@ -33797,20 +33776,16 @@ def gen_l4_regmap(project: Path,
     # chip-class literal participates.
     _v1_6_576_apply_asciidoc_summary_addresses(registers, extracted)
 
-    # v-orch — prose memory-map RANGE constants. Scan extracted docs for
-    # `0x.. - 0x..` ranges (e.g. "RAM 0x0000 - 0x3FFF") and emit BOTH
-    # endpoints as address-map constants (kind=indexed_register_address).
-    # Dedup against already-emitted register addresses so a range whose
-    # endpoint coincides with a discrete register row is not duplicated.
-    _existing_addr_ints = {
-        r.get("address_int") for r in registers
-        if isinstance(r, dict) and r.get("address_int") is not None
-    }
-    for _mm in _extract_memmap_range_constants(extracted):
-        if _mm.get("address_int") in _existing_addr_ints:
-            continue
-        _existing_addr_ints.add(_mm.get("address_int"))
-        registers.append(_mm)
+    # Named register ranges declare instances; bare address-space boundaries
+    # do not. Keep the documented range producer, but do not promote synthetic
+    # MEMMAP_LOW/HIGH constants into registers[]. A real register explicitly
+    # named like an endpoint remains authoritative through the table parsers.
+    from _documented_register_ranges import append_documented_ranges
+    append_documented_ranges(registers, extracted)
+
+    # Scalar summary widths are explicit register facts, not field layouts.
+    from _documented_scalar_widths import attach_documented_scalar_widths
+    attach_documented_scalar_widths(registers, extracted)
 
     # v1.6.577 — for #393 P3 ORGANIC. Peripheral-CSR namespace
     # collision qualifier. When N peripherals each have `CTRL` /
@@ -33843,6 +33818,11 @@ def gen_l4_regmap(project: Path,
     # late walker (defeats stale-kind-on-overwrite). See the
     # `_v1_6_591_backfill_reset_value_kind` call near content =
     # {...} assembly below for the new wire-in point.
+
+    # Explicit same-source name/address bit tables precede the lossy
+    # WHOLE_REG fallback; existing richer producer fields remain authoritative.
+    from _named_register_fields import attach_named_fields
+    attach_named_fields(registers, extracted)
 
     # v1.6.278 — for #134 round-4 ORGANIC field-agent counter-evidence.
     # Summary-table-only WHOLE_REG promotion. Many registers on real RV
@@ -46462,6 +46442,28 @@ def _extract_top_module_from_docs(extracted: Dict[str, str]) -> Optional[str]:
     if _real:
         return _normalize_top_module_case(_real, extracted)
 
+    # A subject-first declaration names the design, rather than merely
+    # mentioning a top module. Anchor the entire affirmative clause so
+    # historical, negative, hypothetical and example prose cannot qualify.
+    # Repeated agreement is valid; multiple explicit names remain unknown.
+    subject_top_names = set()
+    subject_top = re.compile(
+        r"^\s*`(?P<name>[A-Za-z_][A-Za-z0-9_$]*)`\s*"
+        r"(?:為|是|is\s+(?:the\s+)?)\s*(?:\*\*)?"
+        r"(?:單一\s+|single\s+)top\s+module(?:\*\*)?"
+        r"(?=\s*(?:[,，.。;；]|$))", re.I)
+    for text in extracted.values():
+        for line in (text or "").splitlines():
+            hit = subject_top.match(line)
+            # The affirmative, quoted subject is explicit identifier authority.
+            # Loose-prose vocabulary filters (e.g. algorithm/tool words) must
+            # not discard a name the input actually declares as its top.
+            if hit:
+                subject_top_names.add(hit.group("name"))
+    if subject_top_names:
+        return (next(iter(subject_top_names))
+                if len(subject_top_names) == 1 else None)
+
     # ORGANIC-20260705 — no real declaration: an explicit "Module Name:" label
     # or an inline ``module `<name>` `` prose reference is the next-strongest
     # signal (author states the exact RTL identifier to implement). This wins
@@ -52525,6 +52527,29 @@ def _harvest_test_cases_from_input_tables(
                             "evidence": (f"input/docs/{fname} "
                                          "(verification-plan table)"),
                         }
+                        # A percent-PASS criterion over a coverage scope is
+                        # a plan requirement, not one executable input/output
+                        # vector. Require BOTH header roles, so a concrete
+                        # input table with a percent-valued result is untouched.
+                        _headers = [h.strip().strip('`*').lower().replace('_', ' ')
+                                    for h in hdr]
+                        _criteria_header = (exp_i is not None and
+                            _headers[exp_i] in {'判定', 'pass criterion',
+                                'pass criteria', 'acceptance criterion',
+                                'acceptance criteria'})
+                        _scope_i = next((k for k, h in enumerate(_headers)
+                            if h in {'範圍', '范围', 'scope', 'coverage',
+                                     'coverage scope'} and k < len(cells)), None)
+                        if (_criteria_header and _scope_i is not None and
+                                not any(h in {'input', 'stimulus', '輸入', '输入'}
+                                        for h in _headers) and
+                                re.fullmatch(r'\d+(?:\.\d+)?\s*%\s*PASS(?:\s*\(binary\))?',
+                                             last, re.I)):
+                            _case['kind'] = 'coverage_goal'
+                            _case['coverage_scope'] = re.sub(
+                                r'[`*]', '', cells[_scope_i]).strip()
+                            _case['classification_reason'] = (
+                                'percent-PASS acceptance criterion over a coverage scope')
                         if _assertion_row:
                             _case["oracle_from_assertion_row"] = True
                             _case["assertion_affirmation"] = last
@@ -60810,25 +60835,9 @@ def _v1_6_369_classify_reset_polarity(name_lc: str) -> str:
 
 
 def _v1_6_369_classify_reset_sync(name: str, evidence_text: str) -> str:
-    """v1.6.369 — for #264 P2. Scan a ±200-char window around the
-    port name in the joined extracted-doc text for sync/async
-    keywords. Returns `synchronous` / `asynchronous` / `unknown`.
-
-    Chip-AGNOSTIC: pure keyword-window scan.
-    """
-    if not evidence_text:
-        return "unknown"
-    idx = evidence_text.lower().find(name.lower())
-    if idx < 0:
-        return "unknown"
-    lo = max(0, idx - 200)
-    hi = min(len(evidence_text), idx + 200)
-    window = evidence_text[lo:hi].lower()
-    if "asynchronous" in window or "async" in window or "async_reset" in window:
-        return "asynchronous"
-    if "synchronous" in window or "sync_reset" in window or "synced reset" in window:
-        return "synchronous"
-    return "unknown"
+    """Resolve explicit current-design clauses for this port, not a window."""
+    from _reset_input_semantics import reset_semantics
+    return reset_semantics(name, evidence_text).get("sync", "unknown")
 
 
 def _v1_6_369_emit_reset_domains(l9: dict, extracted: dict) -> None:
@@ -60873,7 +60882,10 @@ def _v1_6_369_emit_reset_domains(l9: dict, extracted: dict) -> None:
         _dirpref_v1_6_382 = m_reset.group("dirpref") or None
         polarity = _v1_6_369_classify_reset_polarity(
             _stem_v1_6_382.lower())
-        sync = _v1_6_369_classify_reset_sync(name, evidence_joined)
+        from _reset_input_semantics import reset_semantics
+        explicit = reset_semantics(name, evidence_joined)
+        polarity = explicit.get("polarity", polarity)
+        sync = explicit.get("sync", "unknown")
         out.append({
             "name": name,
             "polarity": polarity,

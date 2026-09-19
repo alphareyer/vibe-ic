@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -96,6 +97,40 @@ def _run(args: list, timeout: int = 90) -> subprocess.CompletedProcess:
         capture_output=True, text=True)
 
 
+def _admitted_empty_project(project):
+    """Declare this neutral DIE fixture through the real admission contract.
+
+    These tests exercise downstream no-RTL/report behavior. Admission itself
+    remains enabled; the missing-declaration control below removes its input.
+    """
+    import _owner_declared as OD
+    import _submission_template as ST
+    import _tapeout_declaration as TD
+
+    doc = OD.attest({"answers": {"deliverable": "DIE"}})
+    for rel in (ST.DESIGN_ANSWERS_REL, TD.DECLARATION_REL):
+        path = project / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc))
+    (project / TD.SELF_TAPEOUT_REL).write_text(TD.SELF_TAPEOUT_MARKER + "\n")
+
+
+def test_missing_delivery_declaration_refused_before_backend(tmp_path):
+    import _tapeout_declaration as TD
+
+    project = tmp_path / "proj"
+    _admitted_empty_project(project)
+    (project / TD.DECLARATION_REL).unlink()
+    cp = _run([str(project)])
+    assert cp.returncode == 2
+    assert "DELIVERY_AUTHORITY_STALE_OR_UNDECLARED" in cp.stderr
+    report = json.loads(
+        (project / "reports/phase3/delivery_admission.json").read_text())
+    assert report["verdict"] == "REFUSED"
+    assert report["reason"] == "DELIVERY_AUTHORITY_STALE_OR_UNDECLARED"
+    assert not (project / "reports/orchestrator/phase3_one_shot.json").exists()
+
+
 def test_positive_fail_missing_project(tmp_path):
     missing = tmp_path / "no_such"
     cp = _run([str(missing)])
@@ -106,7 +141,7 @@ def test_positive_fail_missing_project(tmp_path):
 def test_positive_fail_no_rtl(tmp_path):
     """Empty project → synth step FAIL → orchestrator exits 1."""
     project = tmp_path / "proj"
-    project.mkdir(parents=True, exist_ok=True)
+    _admitted_empty_project(project)
     cp = _run([str(project)])
     # synth FAIL → verdict FAIL → exit 1.
     assert cp.returncode == 1
@@ -117,7 +152,7 @@ def test_positive_fail_no_rtl(tmp_path):
 
 def test_integration_report_shape(tmp_path):
     project = tmp_path / "proj"
-    project.mkdir(parents=True, exist_ok=True)
+    _admitted_empty_project(project)
     cp = _run([str(project)])
     rep = project / "reports" / "orchestrator" / "phase3_one_shot.json"
     body = json.loads(rep.read_text())
@@ -130,7 +165,7 @@ def test_integration_report_shape(tmp_path):
 
 def test_edge_custom_top_name(tmp_path):
     project = tmp_path / "proj"
-    project.mkdir(parents=True, exist_ok=True)
+    _admitted_empty_project(project)
     cp = _run([str(project), "--top-name", "tst_chip_top"])
     body = json.loads(
         (project / "reports" / "orchestrator" / "phase3_one_shot.json").read_text())
@@ -139,7 +174,7 @@ def test_edge_custom_top_name(tmp_path):
 
 def test_steps_include_drc_and_lvs(tmp_path):
     project = tmp_path / "proj"
-    project.mkdir(parents=True, exist_ok=True)
+    _admitted_empty_project(project)
     cp = _run([str(project)])
     body = json.loads(
         (project / "reports" / "orchestrator" / "phase3_one_shot.json").read_text())
@@ -152,7 +187,7 @@ def test_steps_include_drc_and_lvs(tmp_path):
 def test_edge_explicit_pdk_sky130a(tmp_path):
     """Explicit --pdk sky130A is accepted (uses container paths)."""
     project = tmp_path / "proj"
-    project.mkdir(parents=True, exist_ok=True)
+    _admitted_empty_project(project)
     cp = _run([str(project), "--pdk", "sky130A"])
     body = json.loads(
         (project / "reports" / "orchestrator" / "phase3_one_shot.json").read_text())
@@ -380,6 +415,41 @@ def test_the_same_io_physical_views_feed_seed_route_and_streamout(
     assert ingest < consumer.index("\nglobal_placement")
     assert pdk.macro_lefs == ["/pdk/io_a.lef", "/pdk/io_b.lef"]
     assert pdk.macro_gds == ["/pdk/io.gds"]
+
+
+def test_padring_seam_records_the_complete_pnr_lef_inventory(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    out_dir = project / "phase3/stage3/pnr"
+    out_dir.mkdir(parents=True)
+
+    def seed_only(*_args, **_kwargs):
+        (out_dir / "floorplan.def").write_text("seed exists\n")
+        return 0, "seed complete", ""
+
+    monkeypatch.setattr(RUNNER, "_docker_exec", seed_only)
+    (out_dir / "padring.def").write_text("ring exists\n")
+
+    def passing_gate(*_a, **_k):
+        return RUNNER.StepResult("pad_ring_gen", "PASS")
+
+    pdk = _real_pdk()
+    pdk.macro_lefs = ["/pdk/existing_macro.lef"]
+    deck = _pnr_contract_deck().replace(
+        "read_lef /pdk/core.lef\n",
+        f"read_lef {pdk.tech_lef}\nread_lef {pdk.cell_lef}\n"
+        "read_lef /pdk/existing_macro.lef\n")
+    result, consumer = RUNNER._prepare_padring_for_route(
+        project, pdk, "container", out_dir, "/work/pnr",
+        deck, pad_ring_step=passing_gate,
+        io_view_discover=lambda *_args: (
+            ["/pdk/io_a.lef", "/pdk/io_b.lef"], ["/pdk/io.gds"]))
+    assert result.status == "PASS"
+    record = json.loads((project / RUNNER.PHYSICAL_VIEW_INVENTORY_REL).read_text())
+    assert record["verdict"] == "RECORDED"
+    assert record["scope"] == "pnr_read_lef_inputs"
+    assert record["read_lef_paths"] == re.findall(
+        r"(?m)^\s*read_lef\s+(\S+)\s*$", consumer)
+    assert record["read_lef_paths"][-2:] == ["/pdk/io_a.lef", "/pdk/io_b.lef"]
 
 
 def test_checked_in_step_15_5ic_is_the_contract_the_runner_consumes(tmp_path):

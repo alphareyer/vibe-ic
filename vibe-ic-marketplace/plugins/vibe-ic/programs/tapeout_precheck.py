@@ -511,7 +511,10 @@ def delivery_route(project: Path) -> Tuple[str, str]:
     if (project / _st.NO_TEMPLATE_REL).is_file():
         if (project / _st.DESIGN_ANSWERS_REL).exists():
             import submission_template_check as _template_check
-            if _template_check.slot_rules_are_owed(project, None)[0]:
+            doc, err = _decl.load(project / _decl.DECLARATION_REL)
+            if (err or not isinstance(doc, dict)
+                    or _decl.answer(doc, "deliverable") != _decl.DELIVERABLE_HARDMACRO
+                    or _template_check.slot_rules_are_owed(project, None)[0]):
                 return ROUTE_UNDECLARED, "operator binding does not establish an IP route"
         return ROUTE_IP, _st.NO_TEMPLATE_REL
     return ROUTE_UNDECLARED, ""
@@ -614,13 +617,19 @@ def template_was_fetched(project: Path) -> bool:
     return any(p.is_file() for p in project.glob(TEMPLATE_SLOTS_GLOB))
 
 
-def operator_arm_applicability(project: Path, pdk: Optional[str]
+def operator_arm_applicability(project: Path, pdk: Optional[str],
+                               explicit_slot: str = ""
                                ) -> Tuple[str, str, Optional[Any]]:
     """(state, reason, shuttle) for the OPERATOR's arm.
 
     The four states are the ones in this module's docstring, and the whole
     point of having four is that only ONE of them is a legitimate absence.
     """
+    import submission_template_check as template_check
+    if not explicit_slot.strip():
+        is_self, reason = template_check.catalogue_selects_self_tapeout(project)
+        if is_self:
+            return NOT_APPLICABLE, reason, None
     if not pdk:
         return (NOT_DETERMINED,
                 "the design declares no PDK target that this flow could read, "
@@ -787,8 +796,12 @@ def evaluate(project: Path,
              allow_pull: bool = False,
              runner: Optional[Runner] = None,
              programs_dir: Optional[Path] = None,
-             timeout: Optional[float] = 7200.0) -> MergedReport:
-    """Run both arms — or say, in writing, why one of them did not run."""
+             timeout: Optional[float] = 7200.0,
+             pdk_container: str = "") -> MergedReport:
+    """Run both arms — or say, in writing, why one of them did not run.
+
+    `pdk_container` is forwarded to OUR arm only: `general_precheck` reads the
+    PDK volume, whose paths are container paths, from a host process."""
     run = runner or default_runner
     pdir = programs_dir or _HERE
     resolved_pdk, pdk_source = resolve_pdk(project, pdk)
@@ -852,6 +865,12 @@ def evaluate(project: Path,
     # no windows, and nothing is laundered into a clean density result.
     if resolved_pdk:
         cmd += ["--pdk", resolved_pdk]
+    # AND WHOSE FILESYSTEM THE PDK IS ON. Our ladder's technology rungs read
+    # the PDK volume, whose paths are CONTAINER paths, from a HOST process —
+    # see `general_precheck.evaluate`'s `pdk_container`. Forwarded only when
+    # the caller named one; absent, the reading is local exactly as before.
+    if pdk_container:
+        cmd += ["--pdk-container", pdk_container]
     if layout is not None:
         cmd += ["--gds", str(layout)]
     if declaration_path is not None:
@@ -876,7 +895,7 @@ def evaluate(project: Path,
             detail={"command": cmd}))
 
     # ---------------- ARM 2 — THEIRS, when there is a THEM ------------------
-    state, why, shuttle = operator_arm_applicability(project, resolved_pdk)
+    state, why, shuttle = operator_arm_applicability(project, resolved_pdk, explicit_slot=slot)
     # WHICH SLOT — and NOT_DETERMINED rather than a guess. This runs only after
     # applicability, so it can never turn the legitimate absence
     # (NOT_APPLICABLE: no live shuttle for this PDK) into a defect. It fires in
@@ -1102,6 +1121,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="Seconds to allow each arm (default: %(default)s). A "
                         "real DRC ladder takes minutes to hours; a short "
                         "timeout reports zeros that look like success.")
+    p.add_argument("--pdk-container", default="", dest="pdk_container",
+                   help="Container whose filesystem holds the PDK volume, "
+                        "forwarded to our own arm (general_precheck). The "
+                        "registry's PDK paths are container paths and this "
+                        "program runs on the host.")
     p.add_argument("--json", type=Path, dest="out_json", default=None,
                    help="Write the merged verdict JSON here (default: "
                         "<project>/" + MERGED_ARTEFACT + ").")
@@ -1116,7 +1140,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                    declaration_path=args.declaration, slot=args.slot,
                    cob=args.cob, top=args.top, die_id=args.die_id,
                    image=args.image, allow_pull=args.pull,
-                   timeout=args.timeout)
+                   timeout=args.timeout, pdk_container=args.pdk_container)
     payload = rep.as_dict()
     out_json = args.out_json or (args.project / MERGED_ARTEFACT)
     out_json.parent.mkdir(parents=True, exist_ok=True)

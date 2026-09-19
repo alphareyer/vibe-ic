@@ -19502,6 +19502,46 @@ def _discover_spare_cells_from_liberty(
     return out
 
 
+def _spare_insertion_provenance(spare_plan: Dict[str, Any],
+                                 wrapper: Path) -> Optional[Dict[str, Any]]:
+    """Bind optional insertion intent to the actual wrapper the runner read.
+
+    The cell insertion producer owns every `instances` obligation. A wrapper
+    can establish optional names, but cannot cancel those cell obligations.
+    Missing source is unknown, never evidence that a planned name was omitted.
+    """
+    import hashlib
+    required = [str(i["name"]) for i in spare_plan.get("instances", []) or []
+                if isinstance(i, dict) and i.get("name")]
+    optional = [str(i["name"]) for i in spare_plan.get("spare_pads", []) or []
+                if isinstance(i, dict) and i.get("name")]
+    if not spare_plan.get("spare_pads"):
+        return None  # No optional insertion claim needs a wrapper witness.
+    result = {"version": 1, "status": "UNVERIFIED",
+              "required_insertions": required, "planned_not_inserted": [],
+              "wrapper": {"path": str(wrapper), "read_status": "UNREADABLE"}}
+    try:
+        with wrapper.open("rb") as stream:
+            raw = stream.read(8 * 1024 * 1024 + 1)
+        text = raw.decode("utf-8")
+        if not text.strip() or len(raw) > 8 * 1024 * 1024:
+            raise ValueError("empty or truncated wrapper")
+        text = re.sub(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', ' ', text,
+                      flags=re.S)
+        if not re.search(r"\bmodule\b.*\bendmodule\b", text, re.S):
+            raise ValueError("wrapper has no complete module")
+    except (OSError, ValueError) as exc:
+        result["reason"] = str(exc)
+        return result
+    tokens = set(re.findall(r"[A-Za-z_][A-Za-z0-9_$]*", text))
+    result.update(status="OBSERVED",
+                  required_insertions=required + [n for n in optional if n in tokens],
+                  planned_not_inserted=[n for n in optional if n not in tokens])
+    result["wrapper"].update(read_status="READ",
+                             sha256=hashlib.sha256(raw).hexdigest())
+    return result
+
+
 def _reserved_instance_names(spare_plan: Dict[str, Any],
                               wrapper_verilog: Optional[Path] = None
                               ) -> Tuple[List[str], List[str]]:
@@ -27483,6 +27523,108 @@ def _clock_path_drive_sizing_tcl(marker: str = CLKPATH_SIZE_MARKER) -> str:
         f"}} else {{ puts \"{m}_LEGALIZE_OK disp=default\" }}\n")
 
 
+def _pnr_sta_corner_binding_tcl(report: str, primary_reads: str,
+                                extra_reads: str) -> str:
+    """Bind each native path to its loaded primary Liberty, preserving order.
+
+    The report's Corner selects the mapping, not active PDK/SS preference or
+    declaration order. Unsupported/contradictory declarations remain unbound.
+    Extra IO/macro views are disclosed separately from the core model basis.
+    This session can contain estimates or extracted RC; neither is attested
+    here. In particular, another signoff report's max/min SPEF is not its RC.
+    """
+    def word(value: str) -> str:
+        return '"' + ''.join('\\' + c if c in '\\"$[]' else
+                              '\\n' if c == '\n' else c for c in value) + '"'
+
+    declared = []
+    reads = {}
+    bare = []
+    valid = True
+    for line in primary_reads.splitlines():
+        tokens = line.split()
+        if not tokens:
+            continue
+        if tokens[0] == "define_corners" and len(tokens) > 1 and not declared:
+            declared = tokens[1:]
+        elif len(tokens) == 4 and tokens[:2] == ["read_liberty", "-corner"]:
+            reads.setdefault(tokens[2], set()).add(tokens[3])
+        elif len(tokens) == 2 and tokens[0] == "read_liberty":
+            bare.append(tokens[1])
+        else:
+            valid = False
+    if declared:
+        valid = valid and not bare and len(set(declared)) == len(declared)
+        valid = valid and set(reads) == set(declared)
+    else:
+        valid = valid and not reads and len(bare) == 1
+    mapping = {k: next(iter(v)) for k, v in reads.items() if len(v) == 1} if valid else {}
+    single = bare[0] if valid and not declared else ""
+    pairs = " ".join(word(x) for pair in mapping.items() for x in pair)
+    return (f"set _vic_sta_map [dict create {pairs}]\n"
+            f"set _vic_sta_single {word(single)}\n"
+            f"set _vic_sta_extra {word(extra_reads)}\n"
+            f"set _vic_sta_file {word(report)}\n" + r'''
+# report_checks selects the paths first; bind its actual per-path Corner.
+proc _vic_stamp_sta_path {f chunk mapping single extra} {
+    set corners {}
+    foreach {match value} [regexp -all -inline -line {^Corner:[ \t]*([^\n]+)$} $chunk] {
+        lappend corners [string trim $value]
+    }
+    set kinds {}
+    foreach {match value} [regexp -all -inline -line {^Path Type:[ \t]*([^\n]+)$} $chunk] {
+        lappend kinds [string trim $value]
+    }
+    set lib ""
+    if {$kinds eq "max"} {
+        if {[llength $corners] == 1 && [dict exists $mapping [lindex $corners 0]]} {
+            set lib [dict get $mapping [lindex $corners 0]]
+        } elseif {[llength $corners] == 0 && $single ne ""} {
+            set lib $single
+        }
+    }
+    if {$lib ne ""} {
+        puts $f "=== SETUP corner: native_path ==="
+        puts $f "STA_BASIS_LIBERTY: $lib"
+        puts $f "STA_CORNER_BINDING_SOURCE: loaded_primary_liberty/native_path_corner"
+    } else {
+        puts $f "=== UNVERIFIED corner: native_path ==="
+        puts $f "STA_CORNER_BINDING_REFUSED: missing_unknown_or_conflicting_setup_basis"
+    }
+    puts $f "STA_PARASITICS_PROVENANCE: PNR_SESSION_UNVERIFIED"
+    foreach line [split $extra "\n"] {
+        if {$line ne ""} { puts $f "STA_EXTRA_LIBERTY_READ: $line" }
+    }
+    puts -nonewline $f $chunk
+}
+set _vic_sta_f [open $_vic_sta_file r]
+set _vic_sta_text [read $_vic_sta_f]
+close $_vic_sta_f
+set _vic_sta_f [open $_vic_sta_file w]
+set _vic_sta_chunk ""
+set _vic_sta_in_path 0
+foreach line [split [string trimright $_vic_sta_text "\n"] "\n"] {
+    if {[string match "Startpoint:*" $line]} {
+        if {$_vic_sta_in_path} {
+            _vic_stamp_sta_path $_vic_sta_f $_vic_sta_chunk $_vic_sta_map $_vic_sta_single $_vic_sta_extra
+        } else {
+            puts -nonewline $_vic_sta_f $_vic_sta_chunk
+        }
+        set _vic_sta_chunk ""
+        set _vic_sta_in_path 1
+    }
+    append _vic_sta_chunk $line "\n"
+}
+if {$_vic_sta_in_path} {
+    _vic_stamp_sta_path $_vic_sta_f $_vic_sta_chunk $_vic_sta_map $_vic_sta_single $_vic_sta_extra
+} else {
+    puts -nonewline $_vic_sta_f $_vic_sta_chunk
+}
+close $_vic_sta_f
+rename _vic_stamp_sta_path {}
+''')
+
+
 def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
                         macro_lefs_tcl: str, liberty_c: str,
                         macro_libs_tcl: str, netlist_c: str, top: str,
@@ -28011,8 +28153,8 @@ if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_tr
 }}
 write_def {out_dir_c}/{top}.def
 write_verilog {out_dir_c}/{top}_pnr.v
-report_checks > {out_dir_c}/sta.rpt
-report_design_area > {out_dir_c}/area.rpt
+report_checks -path_delay max > {out_dir_c}/sta.rpt
+{_pnr_sta_corner_binding_tcl(out_dir_c + "/sta.rpt", _corner_lib_stanza, macro_libs_tcl)}report_design_area > {out_dir_c}/area.rpt
 # === #147 — post-route real-SPEF setup-repair ESTIMATE (LAST — after every
 # shipped artifact + the authoritative clean sta.rpt, so it can only MEASURE the
 # recoverable setup, never modify routed.def/<top>.def/<top>_pnr.v). Empty on
@@ -30112,6 +30254,25 @@ def _inject_padring_io_lefs(full_pnr_tcl: str,
     return full_pnr_tcl[:anchors[0].start()] + block + full_pnr_tcl[anchors[0].start():]
 
 
+PHYSICAL_VIEW_INVENTORY_REL = "reports/phase3/physical_view_inventory.json"
+
+
+def _record_physical_view_inventory(project: Path, pnr_tcl: str) -> Path:
+    """Record the exact LEF paths emitted to this run's PnR reader."""
+    paths = re.findall(r"(?m)^\s*read_lef\s+(\S+)\s*$", pnr_tcl)
+    rec = {
+        "schema": "vibe-ic/physical-view-inventory/1",
+        "producer": "phase3_one_shot_runner",
+        "verdict": "RECORDED",
+        "scope": "pnr_read_lef_inputs",
+        "read_lef_paths": paths,
+    }
+    out = project / PHYSICAL_VIEW_INVENTORY_REL
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(rec, indent=2) + "\n")
+    return out
+
+
 def _inject_padring_chip_top(full_pnr_tcl: str, chip_top_v_c: str,
                              chip_top: str, core: str) -> str:
     """Elaborate the PAD-CARRYING chip top instead of the bare core.
@@ -30458,6 +30619,7 @@ def _prepare_padring_for_route(
     for view in io_gds:
         if view not in pdk.macro_gds:
             pdk.macro_gds.append(view)
+    _record_physical_view_inventory(project, consumer)
     result.output_files += [str(seed), str(seed_log)]
     return result, consumer
 
@@ -31664,6 +31826,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # ordinary CTS buffer preserves PDKs that expose only a single legal cell.
     _fanout_root_buffer_cell = clk_buf_root or clk_buf
     _reserved_names, _spare_pads_unplaced = _reserved_instance_names(
+        spare_plan, out_dir / "chip_top_io.v")
+    spare_plan["insertion_provenance"] = _spare_insertion_provenance(
         spare_plan, out_dir / "chip_top_io.v")
     if _spare_pads_unplaced:
         print(f"[pnr] SPARE_PADS_PLANNED_NOT_PLACED: {_spare_pads_unplaced} — "
@@ -34551,9 +34715,15 @@ if _ring_masters and _ring_ref_out:
     print("RING_REFERENCE_WRITTEN instances=%d" % _written)
 # Flatten so abutting geometry across cell-instance boundaries becomes
 # co-resident in one cell and merges (a hierarchical merge would not union
-# a cell pin against a top-level route).
-for tc in ly.top_cells():
-    tc.flatten(-1, True)
+# a cell pin against a top-level route). KEEP_HIERARCHY=1 is set only when
+# the deck in hand has been MEASURED to merge across the hierarchy already
+# (see _deck_merges_across_hierarchy); the per-layer merge below still runs
+# on the top cell's own shapes.
+_keep_hier = os.environ.get("KEEP_HIERARCHY") == "1"
+if not _keep_hier:
+    for tc in ly.top_cells():
+        tc.flatten(-1, True)
+print("GDS_LAYER_MERGE_HIERARCHY %s" % ("kept" if _keep_hier else "flattened"))
 merged_layers = 0
 for tc in ly.top_cells():
     for li in ly.layer_indexes():
@@ -34575,6 +34745,203 @@ for tc in ly.top_cells():
 ly.write(gds_out)
 print("GDS_LAYER_MERGE_DONE layers=%d" % merged_layers)
 '''
+
+
+
+# ── DOES THIS DECK NEED THE FLATTEN AT ALL?  (icspm5, measured 2026-09-18) ───
+# #601 flattens every KLayout stream-out before the per-layer merge, because a
+# deck that does NOT merge across a cell-instance boundary reads two abutting
+# same-layer polygons as a zero-spacing edge pair. That is a property of the
+# DECK AND THE TOOL, not a law, and it is measurable in under ten seconds.
+#
+# MEASURED on spm x gf180mcuD (v1.22.10, klayout 0.30.9, the pinned image),
+# with the PDK's own deck in its default deep mode: two 2x2 um Metal1 rects
+# abutting across a cell-instance boundary -> 0 violations; and two rects each
+# 0.2 um wide (BELOW the 0.23 um min width), abutting across the same
+# boundary, so ONLY a merge makes them legal -> M1.1 does not fire, 0
+# violations. The deck already merges across the hierarchy.
+#
+# What that flatten costs on a die, same DEF, same deck: GDS 1,136,500,018 B
+# flat vs 81,021,436 B hierarchical (14x), sign-off DRC 2554 s / 26 GB vs
+# 318 s / 2.9 GB (8x / 9x), plus 1.75 h of `magic lef write` reading the flat
+# stream in `digital_hardmacro_gen` and three 1.1 GB copies in the pnr dir.
+#
+# So the flatten is CONDITIONAL on the answer this probe measures, never on a
+# name: the probe builds its geometry from THIS PDK's own layer map and tech
+# LEF, runs THIS PDK's own deck twice, and compares. Anything unreadable --
+# no deck, no layer map, no min width, a probe that will not run -- returns
+# None and the flatten happens exactly as before. A deck that DOES need the
+# merge measures a violation on the hierarchical arm and keeps it.
+_MERGE_PROBE_PY = r'''
+import os
+import pya
+
+out_dir = os.environ["PROBE_DIR"]
+layer = int(os.environ["PROBE_LAYER"])
+dtype = int(os.environ["PROBE_DATATYPE"])
+w_dbu = int(os.environ["PROBE_WIDTH_DBU"])     # HALF the min width, per rect
+h_dbu = int(os.environ["PROBE_LENGTH_DBU"])
+
+ly = pya.Layout()
+ly.dbu = 0.001
+li = ly.layer(pya.LayerInfo(layer, dtype))
+cell = ly.create_cell("PROBE_CELL")
+cell.shapes(li).insert(pya.Box(0, 0, w_dbu, h_dbu))
+top = ly.create_cell("PROBE")
+top.insert(pya.CellInstArray(cell.cell_index(), pya.Trans(0, False, 0, 0)))
+top.insert(pya.CellInstArray(cell.cell_index(), pya.Trans(0, False, w_dbu, 0)))
+ly.write(os.path.join(out_dir, "probe_hier.gds"))
+top.flatten(-1, True)
+reg = pya.Region(top.shapes(li))
+reg.merge()
+top.shapes(li).clear()
+top.shapes(li).insert(reg)
+ly.write(os.path.join(out_dir, "probe_flat.gds"))
+print("MERGE_PROBE_WRITTEN %d/%d %d x %d dbu" % (layer, dtype, w_dbu, h_dbu))
+'''
+
+
+#: One answer per (deck, layer) in a process: the probe is a property of the
+#: technology, not of the design, and a run has one of each.
+_MERGE_PROBE_CACHE: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+
+def _probe_routing_layer(pdk: "PdkConfig", container: str
+                         ) -> Tuple[Optional[str], Optional[Tuple[int, int]],
+                                    Optional[float], str]:
+    """(LEF layer name, its GDS pair, its min width um, why-not).
+
+    All three come from THIS PDK's own files: the layer map the stream-out
+    already uses for name -> number, and the tech LEF for the width. No layer
+    number, no width and no PDK name is written here."""
+    name = f"{getattr(pdk, 'metal_prefix', '') or ''}1"
+    if not name.strip("1"):
+        return None, None, None, "this PDK declares no metal prefix"
+    mp = getattr(pdk, "lefdef_layermap", None)
+    text = _read_pdk_text(str(mp), container) if mp else ""
+    pair = None
+    if text:
+        for line in text.splitlines():
+            parts = line.split()
+            if len(parts) >= 4 and parts[0] == name and parts[-2].isdigit() \
+                    and parts[-1].isdigit():
+                pair = (int(parts[-2]), int(parts[-1]))
+                break
+    if pair is None:
+        return name, None, None, (
+            f"no GDS layer/datatype for {name!r} in the PDK's layer map "
+            f"({mp or 'none declared'})")
+    tlef = _read_pdk_text(str(getattr(pdk, "tech_lef", "")), container)
+    width = None
+    if tlef:
+        m = re.search(r"(?ims)^\s*LAYER\s+" + re.escape(name)
+                      + r"\b(.*?)^\s*END\s+" + re.escape(name), tlef)
+        if m:
+            w = re.search(r"(?im)^\s*WIDTH\s+([0-9.]+)\s*;", m.group(1))
+            if w:
+                try:
+                    width = float(w.group(1))
+                except ValueError:
+                    width = None
+    if not width or width <= 0:
+        return name, pair, None, (
+            f"the tech LEF states no WIDTH for layer {name!r}")
+    return name, pair, width, ""
+
+
+def _deck_merges_across_hierarchy(project: Path, pdk: "PdkConfig",
+                                  container: str) -> Dict[str, Any]:
+    """Does THIS deck already merge same-layer geometry across the hierarchy?
+
+    Returns a record whose `answer` is True (it merges -- the flatten buys
+    nothing), False (it does not -- the flatten is load-bearing) or None (not
+    measured, and then the caller flattens exactly as before)."""
+    deck = _signoff_drc_deck(getattr(pdk, "calibre_drc", None),
+                             getattr(pdk, "drc_deck", None))
+    rec: Dict[str, Any] = {"answer": None, "deck": deck, "reason": ""}
+    if not deck:
+        rec["reason"] = "this PDK runs no sign-off DRC deck"
+        return rec
+    if not str(deck).endswith((".drc", ".lydrc")):
+        rec["reason"] = f"the sign-off deck {deck} is not a KLayout DSL deck"
+        return rec
+    key = (str(getattr(pdk, "name", "")), str(deck))
+    if key in _MERGE_PROBE_CACHE:
+        return _MERGE_PROBE_CACHE[key]
+    name, pair, width, why = _probe_routing_layer(pdk, container)
+    rec.update({"layer": name, "gds_pair": list(pair) if pair else None,
+                "min_width_um": width})
+    if pair is None or not width:
+        rec["reason"] = why
+        _MERGE_PROBE_CACHE[key] = rec
+        return rec
+    if not _tool_in_path(container, "klayout"):
+        rec["reason"] = "klayout is not in the container PATH"
+        _MERGE_PROBE_CACHE[key] = rec
+        return rec
+    pdir = _pl.pnr_dir(project) / "merge_probe"
+    pdir.mkdir(parents=True, exist_ok=True)
+    script = pdir / "merge_probe.py"
+    script.write_text(_MERGE_PROBE_PY)
+    half = max(1, int(round(width * 1000 / 2.0)))   # each rect UNDER min width
+    length = max(half * 10, 1000)
+    pdir_c = _to_container_path(str(pdir), container)
+    cmd = (f"export QT_QPA_PLATFORM=offscreen && "
+           f"export PROBE_DIR={pdir_c} PROBE_LAYER={pair[0]} "
+           f"PROBE_DATATYPE={pair[1]} PROBE_WIDTH_DBU={half} "
+           f"PROBE_LENGTH_DBU={length} && "
+           f"klayout -zz -b -r {_to_container_path(str(script), container)}")
+    rc, out, err = _docker_exec(container, cmd,
+                                marker=_to_container_path(str(script), container))
+    if rc != 0 or not (pdir / "probe_hier.gds").is_file():
+        rec["reason"] = f"probe layout not written (rc={rc}): {(out + err)[-200:]}"
+        _MERGE_PROBE_CACHE[key] = rec
+        return rec
+    counts: Dict[str, Optional[int]] = {}
+    for arm in ("hier", "flat"):
+        gds = pdir / f"probe_{arm}.gds"
+        rdb = pdir / f"probe_{arm}.lyrdb"
+        cmd = (f"klayout -b -r {_to_container_path(str(deck), container)} "
+               f"-rd input={_to_container_path(str(gds), container)} "
+               f"-rd report={_to_container_path(str(rdb), container)} "
+               f"-rd top_cell=PROBE")
+        rc, out, err = _docker_exec(container, cmd, marker=str(gds))
+        try:
+            counts[arm] = (rdb.read_text(errors="replace").count("<item>")
+                           if rdb.is_file() else None)
+        except OSError:
+            counts[arm] = None
+        if counts[arm] is None:
+            rec["reason"] = (f"the {arm} arm produced no report (rc={rc}): "
+                             f"{(out + err)[-200:]}")
+            rec["violations"] = counts
+            _MERGE_PROBE_CACHE[key] = rec
+            return rec
+    rec["violations"] = counts
+    # STRICTLY THREE ANSWERS, and the middle one is not a guess. The two arms
+    # are the SAME geometry; the only difference is whether the tool was shown
+    # it across a cell boundary. Equal counts mean the boundary cost nothing —
+    # the deck merged it already. MORE on the hierarchical arm is the defect
+    # #601 was written for, and the flatten stays. FEWER is a third thing
+    # nobody has explained, so it is not classified as either.
+    if counts["hier"] == counts["flat"]:
+        rec["answer"] = True
+        _verdict = " — this deck already merges across the hierarchy"
+    elif counts["hier"] > counts["flat"]:
+        rec["answer"] = False
+        _verdict = " — this deck needs the flatten to see them as one shape"
+    else:
+        rec["answer"] = None
+        _verdict = (" — fewer violations WITHOUT the merge is not a result "
+                    "this probe can classify, so it decides nothing")
+    rec["reason"] = (
+        f"two abutting {width}um-min-width rects of {half/1000.0}um each, "
+        f"split across a cell-instance boundary on {name} "
+        f"({pair[0]}/{pair[1]}): the hierarchical arm reports "
+        f"{counts['hier']} violation(s), the flattened+merged arm "
+        f"{counts['flat']}" + _verdict)
+    _MERGE_PROBE_CACHE[key] = rec
+    return rec
 
 
 def _klayout_merge_layers(project: Path, top: str, pdk: PdkConfig,
@@ -34600,6 +34967,15 @@ def _klayout_merge_layers(project: Path, top: str, pdk: PdkConfig,
         ring_ref.unlink()           # never let a previous run's placement stand
     except OSError:
         pass
+    # THE FLATTEN IS CONDITIONAL ON THE DECK, and the deck is asked.
+    _merge_probe = _deck_merges_across_hierarchy(project, pdk, container)
+    _keep_hier = bool(_merge_probe.get("answer") is True)
+    try:
+        _probe_out = project / "reports" / "phase3" / "signoff_merge_probe.json"
+        _probe_out.parent.mkdir(parents=True, exist_ok=True)
+        _aa.write_text(_probe_out, json.dumps(_merge_probe, indent=2) + "\n")
+    except OSError:
+        pass
     ring_masters = _padring_record_masters(project)
     ring_env = (f"RING_MASTERS={','.join(sorted(ring_masters))} "
                 f"RING_REF_OUT={_to_container_path(str(ring_ref), container)} "
@@ -34608,6 +34984,7 @@ def _klayout_merge_layers(project: Path, top: str, pdk: PdkConfig,
         f"export QT_QPA_PLATFORM=offscreen && "
         f"export GDS_IN={_to_container_path(str(gds_path), container)} "
         f"GDS_OUT={_to_container_path(str(merged), container)} "
+        f"{'KEEP_HIERARCHY=1 ' if _keep_hier else ''}"
         f"{ring_env}&& "
         f"klayout -zz -b -r {_to_container_path(str(script), container)}"
     )
@@ -34617,7 +34994,10 @@ def _klayout_merge_layers(project: Path, top: str, pdk: PdkConfig,
             merged.replace(gds_path)
         except Exception as exc:
             return False, f"merge wrote {merged.name} but swap failed: {exc}"
-        return True, "klayout-native per-layer merge applied (#601)"
+        return True, ("klayout-native per-layer merge applied (#601); "
+                      + ("hierarchy KEPT — " if _keep_hier
+                         else "flattened — ")
+                      + str(_merge_probe.get("reason") or "deck not probed"))
     return False, f"layer-merge NONFATAL: rc={rc} {(out + err)[-300:]}"
 
 
@@ -39263,23 +39643,68 @@ def _effective_deliverable(project: Path,
 
     The declaration's OWN answer first — that is the party who has to accept
     the result, and `publish_tapeout_declarations` already refuses to overwrite
-    it — then the derivation. Returns None when neither has said, which is the
-    only safe answer: an UNDECLARED delivery owes every question, exactly as
-    `_tapeout_declaration.applicable` says.
+    it — then the derivation ONLY when there is no declaration. An unreadable
+    or unattested declaration must not regain its refused value through an
+    old router marker. Standalone Phase 3 also checks this before any PDK/EDA
+    work in `_delivery_admission_refusal`.
     """
     _here = str(Path(__file__).resolve().parent)
     if _here not in sys.path:
         sys.path.insert(0, _here)
     try:
         import _tapeout_declaration as _td                      # noqa: PLC0415
-        doc, err = _td.load(project / _td.DECLARATION_REL)
+        path = project / _td.DECLARATION_REL
+        if not path.exists():
+            return derived
+        doc, err = _td.load(path)
         if err is None and isinstance(doc, dict):
             got = _td.answer(doc, "deliverable")
             if _td.is_answered(got):
-                return str(got)
+                return str(got).strip().upper()
     except Exception:                                          # noqa: BLE001
         pass
-    return derived
+    return None
+
+
+def _delivery_admission_refusal(project: Path) -> Optional[str]:
+    """BLOCKING: a resumed backend needs a current, owner-declared route.
+
+    A copied project can carry new design answers alongside old declaration
+    and router files. Do not regenerate them here or infer a replacement:
+    step 0.5ic owns that transition. Compare the delivery answer and its owner
+    provenance, not unrelated physical fields filled by later producers.
+    An attested declaration may stand alone when no raw answers file exists.
+    """
+    import _submission_template as _st                         # noqa: PLC0415
+    import _tapeout_declaration as _td                          # noqa: PLC0415
+
+    def read_delivery(rel: str) -> Tuple[Dict[str, Any], str]:
+        doc, err = _td.load(project / rel)
+        if (err or not isinstance(doc, dict)
+                or not isinstance(doc.get("answers"), dict)):
+            raise ValueError(f"{rel}: {err or 'invalid answer mapping'}")
+        answer = str(_td.answer(doc, "deliverable")).strip().upper()
+        if answer not in _td.DELIVERABLES:
+            raise ValueError(f"{rel}: no owner-attested DIE or HARDMACRO answer")
+        return doc, answer
+
+    try:
+        declaration, delivery = read_delivery(_td.DECLARATION_REL)
+        if (project / _st.DESIGN_ANSWERS_REL).exists():
+            raw, current = read_delivery(_st.DESIGN_ANSWERS_REL)
+            if (current != delivery or
+                    _td.attestation_of(raw, "deliverable") !=
+                    _td.attestation_of(declaration, "deliverable")):
+                raise ValueError(
+                    f"{_td.DECLARATION_REL}: delivery or owner provenance "
+                    f"does not match {_st.DESIGN_ANSWERS_REL}")
+        routed, basis = _declared_deliverable(project)
+        if routed != delivery:
+            raise ValueError(f"declaration says {delivery}, but router says "
+                             f"{routed!r}: {basis}")
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        return f"{exc}; refresh step 0.5ic before starting Phase 3"
+    return None
 
 
 def _declared_seal_ring_required(project: Path, pdk: "PdkConfig",
@@ -39406,6 +39831,55 @@ def _declared_forbidden_layers(project: Path) -> Tuple[Optional[List[str]], str]
                   + " — and an empty forbidden set is NOT published in their "
                     "place, because 'nobody said' and 'nobody minds' are "
                     "different facts and only one of them can be checked")
+
+
+def _declared_answer_is_the_core_this_die_wraps(
+        project: Path, key: str, declared: Any, derived: Any
+        ) -> Tuple[bool, str]:
+    """May this derivation supersede the declared answer? Only for `top_cell`,
+    only on a DIE, and only when THIS flow's own wrapper record proves the
+    declared name is the CORE it wrapped.
+
+    MEASURED on spm x gf180mcuD, DIE route (v1.22.10): the design's answers
+    file says `top_cell = spm` -- L8's RTL module, and NOT owner-attested --
+    while the flow generated the physical wrapper `chip_top` around it, routed
+    it, streamed it and named the DEF `DESIGN chip_top`. The declaration kept
+    `spm`, so `general_precheck`'s `KLayout.CheckTopLevel` compared the streamed
+    top against the CORE's name and refused: "the top-level cell is 'chip_top';
+    the declaration names 'spm'. This layout is not this design." Both names
+    are right about different artefacts; the rung asks about the LAYOUT.
+
+    The supersede is refused unless every link holds: the key is `top_cell`,
+    the delivery is a DIE, `io_pad_chip_top_gen` recorded verdict WROTE with
+    `core_module` == the declared answer and `chip_top_module` == the derived
+    one. Anything else -- a declaration that already names the physical top, a
+    hardmacro, an unreadable or disagreeing record -- keeps the old rule, under
+    which the declared answer always wins."""
+    if key != "top_cell" or not isinstance(declared, str) or not isinstance(derived, str):
+        return False, ""
+    if declared == derived:
+        return False, ""
+    _here = str(Path(__file__).resolve().parent)
+    if _here not in sys.path:
+        sys.path.insert(0, _here)
+    import _tapeout_declaration as _td3                        # noqa: PLC0415
+    if _effective_deliverable(project, None) != _td3.DELIVERABLE_DIE:
+        return False, ""
+    rec_path = project / "reports" / "phase3" / "io_pad_chip_top.json"
+    try:
+        wrapper = json.loads(rec_path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return False, ""
+    if (not isinstance(wrapper, dict) or wrapper.get("verdict") != "WROTE"
+            or wrapper.get("core_module") != declared
+            or wrapper.get("chip_top_module") != derived):
+        return False, ""
+    return True, (
+        f"the declaration's {declared!r} is the CORE module this delivery "
+        f"wraps: {rec_path.name} records verdict=WROTE, core_module="
+        f"{declared!r}, chip_top_module={derived!r}, and this is a DIE, whose "
+        f"layout is topped by the wrapper. The layout's top cell is published; "
+        f"the core's name is unchanged everywhere it is the right answer")
 
 
 def publish_tapeout_declarations(project: Path, pdk: "PdkConfig",
@@ -39595,11 +40069,16 @@ def publish_tapeout_declarations(project: Path, pdk: "PdkConfig",
                 for key, info in derived.items():
                     already = _td.answer(doc, key)
                     if _td.is_answered(already):
-                        rec["already_answered"][key] = (
-                            f"the declaration already answers {key}="
-                            f"{already!r}, and that answer outranks this "
-                            f"derivation")
-                        continue
+                        _super, _why = _declared_answer_is_the_core_this_die_wraps(
+                            project, key, already, info["value"])
+                        if not _super:
+                            rec["already_answered"][key] = (
+                                f"the declaration already answers {key}="
+                                f"{already!r}, and that answer outranks this "
+                                f"derivation")
+                            continue
+                        rec["superseded"] = dict(rec.get("superseded") or {},
+                                                 **{key: _why})
                     merge[key] = info["value"]
                 if merge:
                     doc, ignored = _td.merge_answers(doc, merge)
@@ -46050,7 +46529,8 @@ _PDK_AWARE_SIGNOFF_GATES = frozenset({"tapeout_precheck"})
 
 
 def step_declared_signoff_gates(project: Path,
-                                pdk_name: str = "") -> List[StepResult]:
+                                pdk_name: str = "",
+                                container: str = "") -> List[StepResult]:
     """Every flow-declared step-23/25 sign-off gate, one StepResult each.
 
     `pdk_name` is the run's OWN `PdkConfig.name` — the distribution the flow was
@@ -46115,6 +46595,14 @@ def step_declared_signoff_gates(project: Path,
                       f"{_exc}")
         if pdk_name and name in _PDK_AWARE_SIGNOFF_GATES:
             extra_argv = tuple(extra_argv) + ("--pdk", pdk_name)
+        # AND WHOSE FILESYSTEM THE PDK IS ON. The precheck's technology rungs
+        # read the PDK volume at its CONTAINER path from a HOST process:
+        # MEASURED on spm x gf180mcuD (v1.22.10, run5) both attempts were
+        # `/foss/pdks/gf180mcuD`, the host has no `/foss`, and
+        # `General.ForbiddenLayers` reported NOT_DETERMINED over 37 pairs.
+        # Forwarded to the same named set, for the same reason `--pdk` is.
+        if container and name in _PDK_AWARE_SIGNOFF_GATES:
+            extra_argv = tuple(extra_argv) + ("--pdk-container", container)
         out.append(_run_declared_signoff_gate(
             project, name, program, out_rel, extra_argv))
     return _reconcile_sta_verdict(out)
@@ -49176,16 +49664,19 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
 
     # --- Step 23: SPEF-based post-route STA (#527) ----------------------
     spef_sta_rpt = sta_out / "sta_spef_based.rpt"
+    spef_sta_attempt_ok = None
     if (spef_out.is_file() and spef_out.stat().st_size > 0
             and _signoff_regen(spef_sta_rpt, primary_def)):
-        if _emit_spef_sta(project, top, pdk, container, spef_out,
-                          spef_sta_rpt, notes):
+        spef_sta_attempt_ok = _emit_spef_sta(project, top, pdk, container, spef_out,
+                                             spef_sta_rpt, notes)
+        if spef_sta_attempt_ok:
             written.append(str(spef_sta_rpt))
             mirror = rpt_phase3 / "sta_spef_based.rpt"
             if _signoff_regen(mirror, primary_def):
                 written.extend(_publish_artefact_mirror(
                     spef_sta_rpt, mirror, project, "_emit_spef_sta"))
-    spef_sta_ok = spef_sta_rpt.is_file() and spef_sta_rpt.stat().st_size > 0
+    spef_sta_ok = (spef_sta_attempt_ok is not False
+                   and spef_sta_rpt.is_file() and spef_sta_rpt.stat().st_size > 0)
 
     # --- TAPEOUT-SIGNOFF P1: multi-corner SPEF (min/nom/max) + corner STA -----
     # Extract a per-corner SPEF set so SETUP is signed off at the slow/max-RC
@@ -49445,6 +49936,12 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
     # #527 — SPEF-based is CANONICAL when available (closer to sign-off
     # reality); the estimate-based report_checks is the fallback only.
     post_route_rpt = sta_out / "post_route_timing.rpt"
+    # An attempted measurement supersedes the alias, including on failure.
+    # Archive prior bytes for diagnosis; never let them stand for this attempt.
+    if spef_sta_attempt_ok is not None and post_route_rpt.is_file():
+        import uuid
+        post_route_rpt.replace(post_route_rpt.with_name(
+            post_route_rpt.name + ".previous-" + uuid.uuid4().hex))
     # RESUME-upgrade (adversarial-review fix): a resumed project may carry a
     # STALE estimate-based alias written before the SPEF run existed; once
     # the SPEF-based report exists the alias MUST be upgraded (and a stale
@@ -49470,7 +49967,7 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 "phase3/stage3/pnr/sta.rpt for comparison.\n"
                 + spef_sta_rpt.read_text())
             written.append(str(post_route_rpt))
-        elif primary_sta.is_file():
+        elif spef_sta_attempt_ok is not False and primary_sta.is_file():
             post_route_rpt.write_text(primary_sta.read_text())
             written.append(str(post_route_rpt))
 
@@ -49746,6 +50243,10 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 _dyn_lef_args += ["--tech-lef", str(pdk.tech_lef)]
             if getattr(pdk, "cell_lef", None):
                 _dyn_lef_args += ["--cell-lef", str(pdk.cell_lef)]
+            # The routed DEF also instantiates hardmacro/IO masters. The pad
+            # producer adds its resolved physical views to this same inventory.
+            for _dyn_macro_lef in (getattr(pdk, "macro_lefs", None) or []):
+                _dyn_lef_args += ["--macro-lef", str(_dyn_macro_lef)]
             if getattr(pdk, "liberty", None):
                 _dyn_lef_args += ["--liberty", str(pdk.liberty)]
             # CZT-11 — a transient PSM solve is exactly the shape a wall
@@ -51546,6 +52047,185 @@ def _pnr_io_liberties_tcl(project: Path, pdk: PdkConfig, container: str,
     return "\n".join(dict.fromkeys(lines))
 
 
+def _sta_link_census_tcl():
+    """Enumerate actual linked leaf instances, never infer linking from silence."""
+    return '''set _linked 0
+set _missing 0
+set _total 0
+foreach _inst [get_cells -hierarchical *] {
+  if {[$_inst is_leaf]} {
+    incr _total
+    set _libcell [$_inst liberty_cell]
+    if {$_libcell eq "NULL" || $_libcell eq ""} {
+      incr _missing
+      puts $_f "STA_LINK_INSTANCE [get_full_name $_inst] UNRESOLVED"
+    } else {
+      incr _linked
+      set _pins [$_inst pin_iterator]
+      while {[$_pins has_next]} {
+        set _pin [$_pins next]
+        set _net [$_pin net]
+        if {[$_pin is_driver] && ![$_pin is_load] && ($_net eq "NULL" || $_net eq "") && [$_pin liberty_port] ne "NULL" && [$_pin liberty_port] ne ""} {
+          puts $_f "STA_UNCONNECTED_OUTPUT [get_full_name $_pin]"
+        }
+      }
+      $_pins finish
+      puts $_f "STA_LINK_INSTANCE [get_full_name $_inst] [get_full_name $_libcell]"
+    }
+  }
+}
+puts $_f "STA_LINK_CENSUS total=$_total linked=$_linked missing=$_missing"
+'''
+
+
+def _sta_native_census_complete(body, def_file=None):
+    """Require explicit non-vacuous link counts and both native annotation counts.
+
+    OpenSTA's report_parasitic_annotation emits unannotated and partially
+    unannotated driver counts. An absent/changed dialect is unverified, not zero.
+    Native detail lines remain in the report for diagnosis.
+    """
+    linked = re.findall(r'^STA_LINK_CENSUS total=(\d+) linked=(\d+) missing=(\d+)$', body, re.M)
+    missing = re.findall(r'^Found (\d+) unannotated drivers\.$', body, re.M)
+    partial = re.findall(r'^Found (\d+) partially unannotated drivers\.$', body, re.M)
+    if len(linked) != 1 or len(missing) != 1 or partial != ['0']:
+        return False
+    if missing != ['0']:
+        if def_file is None:
+            return False
+        from sta_annotation_population import classify
+        if not classify(body, def_file)['complete']:
+            return False
+    total, resolved, unresolved = map(int, linked[0])
+    instances = re.findall(r'^STA_LINK_INSTANCE (.+)$', body, re.M)
+    return (total > 0 and resolved == total and unresolved == 0
+            and len(instances) == total
+            and not any(x.endswith(' UNRESOLVED') for x in instances))
+
+
+def _emit_declared_process_sta(project, top, pdk, container, spef_path,
+                               rpt_out, notes, required):
+    """Own fresh canonical native sections for explicit input process obligations.
+
+    Each process gets an isolated STA invocation; native report commands write
+    directly to the owned report. No historical report is imported or merged.
+    Success means complete measurements, never nonnegative timing closure.
+    """
+    import math
+    import shlex
+    import uuid
+    destination = rpt_out
+    rpt_out = rpt_out.with_name(rpt_out.name + ".attempt-" + uuid.uuid4().hex)
+    from sta_corner_record_completeness_check import _split_sections, extract_slacks
+
+    def refuse(reason):
+        notes.append('declared process STA refused: ' + reason)
+        return False
+
+    def tq(value):
+        value = str(value)
+        if any(c in value for c in '{}\\\n\r'):
+            raise ValueError('unsafe Tcl path')
+        return '{' + value + '}'
+
+    netlist = _pl.pnr_dir(project) / f'{top}_pnr.v'
+    sdc = _pl.pnr_dir(project) / 'constraint.sdc'
+    if any(not f.is_file() or not f.stat().st_size for f in (netlist, sdc, spef_path)):
+        return refuse('nonempty routed netlist, SDC and SPEF required')
+    if _discover_aocv_table(project, pdk, container):
+        return refuse('declared AOCV table requires qualified multi-process ingestion; no flat downgrade')
+    libs = _resolve_signoff_corner_libs(project, pdk, container)
+    if any(c not in libs for c in required) or len({libs[c] for c in required}) != len(required):
+        return refuse('missing or collapsed process libraries')
+    staged = project / 'input/pdk/liberty'
+    for c in required:
+        if sum(_classify_corner_from_name(f.name) == c for f in staged.glob('*.lib')) > 1:
+            return refuse('ambiguous staged core library for ' + c)
+    io_record = project / 'reports/phase3/io_pad_chip_top.json'
+    io_views = []
+    if io_record.exists():
+        try:
+            io_views = json.loads(io_record.read_text())['io_library_liberty']
+            if not isinstance(io_views, list) or not io_views or not all(isinstance(x, str) and x for x in io_views):
+                raise ValueError('invalid IO inventory')
+        except (OSError, ValueError, KeyError, TypeError):
+            return refuse('invalid declared IO Liberty inventory')
+    inventory = {}
+    for c in required:
+        lib = libs[c]
+        if _classify_corner_from_name(Path(lib).name) != c:
+            return refuse('core process identity mismatch: ' + c)
+        suffix = Path(lib).stem.partition('__')[2]
+        ios = sorted(set(x for x in io_views if suffix and Path(x).stem.endswith('__' + suffix)))
+        # One view per IO library family; several families are legitimate.
+        families = [Path(x).stem.rpartition('__')[0] for x in ios]
+        if io_views and (not ios or len(set(families)) != len(families)):
+            return refuse('missing or ambiguous exact-PVT IO library for ' + c)
+        declared_families = {Path(x).stem.rpartition('__')[0] for x in io_views}
+        if io_views and set(families) != declared_families:
+            return refuse('incomplete IO family inventory for ' + c)
+        inventory[c] = list(dict.fromkeys([lib] + ios + [str(x) for x in (pdk.macro_libs or [])]))
+    try:
+        rpt_out.parent.mkdir(parents=True, exist_ok=True)
+        report = _to_container_path(str(rpt_out), container)
+        inputs = [_to_container_path(str(f), container) for f in (netlist, sdc, spef_path)]
+        scripts = []
+        for i, c in enumerate(required):
+            views = [_to_container_path(x, container) for x in inventory[c]]
+            tcl = ''.join(f'if {{![file readable {tq(f)}] || [file size {tq(f)}] == 0}} {{error "unreadable STA input"}}\n' for f in views + inputs)
+            tcl += ''.join(f'read_liberty {tq(f)}\n' for f in views)
+            tcl += f'read_verilog {tq(inputs[0])}\nlink_design {tq(_sta_link_top(project, top, netlist, True))}\nread_sdc {tq(inputs[1])}\nread_spef {tq(inputs[2])}\n'
+            tcl += _propagated_clock_tcl() + _flat_ocv_derate_tcl()
+            for j, (role, flag) in enumerate((('SETUP', 'max'), ('HOLD', 'min'))):
+                mode = 'w' if i == 0 and j == 0 else 'a'
+                tcl += f'set _f [open {tq(report)} {mode}]\n'
+                for line in [f'=== {role} corner: process={c} ===', 'STA_BASIS: POST_ROUTE_SPEF',
+                             f'STA_BASIS_LIBERTY: {views[0]}', f'STA_BASIS_NETLIST: {inputs[0]}',
+                             f'STA_BASIS_SDC: {inputs[1]}', f'STA_BASIS_SPEF: {inputs[2]}',
+                             'STA_BASIS_CORNER: nom',
+                             f'OCV_DERATE_APPLIED early={_FLAT_OCV_DERATE_EARLY} late={_FLAT_OCV_DERATE_LATE} flat-OCV'] + [f'STA_BASIS_IO_LIBERTY: {_to_container_path(x, container)}' for x in inventory[c][1:] if x in io_views]:
+                    tcl += f'puts $_f {tq(line)}\n'
+                if j == 0:
+                    tcl += _sta_link_census_tcl()
+                tcl += 'close $_f\n'
+                if j == 0:
+                    tcl += f'report_parasitic_annotation -report_unannotated >> {tq(report)}\n'
+                tcl += f'report_checks -path_delay {flag} >> {tq(report)}\nreport_worst_slack -{flag} >> {tq(report)}\nreport_tns -{flag} >> {tq(report)}\n'
+            tcl += _report_check_types_tcl(tq(report)) + 'exit\n'
+            path = rpt_out.parent / f'sta_declared_{c.lower()}.tcl'
+            scripts.append((c, path, tcl))
+        for c, path, tcl in scripts:
+            path.write_text(tcl)
+            mapped = _to_container_path(str(path), container)
+            rc, out, err = _docker_exec(container, f'sta -no_init -exit {shlex.quote(mapped)} 2>&1', marker=mapped, outputs=[rpt_out], inputs=[netlist, sdc, spef_path, path] + ([_pl.pnr_dir(project) / f'{top}.def'] if (_pl.pnr_dir(project) / f'{top}.def').is_file() else []) + [Path(x) for x in inventory[c] if Path(x).is_file()])
+            if rc != 0 or re.search(r'(?mi)^\s*Error(?:\s|:)', out + '\n' + err):
+                return refuse(f'native execution failed rc={rc}; partial report is not complete')
+    except (OSError, ValueError) as exc:
+        return refuse(str(exc))
+    if not rpt_out.is_file():
+        return refuse('native report absent')
+    measured = set()
+    populations = {}
+    from sta_annotation_population import classify
+    sections = _split_sections(rpt_out.read_text(errors='replace'))
+    def_file = _pl.pnr_dir(project) / f'{top}.def'
+    for role, corner, body in sections:
+        if role == 'SETUP':
+            populations[corner] = classify(body, def_file)
+    rpt_out.with_name(rpt_out.name + '.population.json').write_text(json.dumps(populations, indent=2) + '\n')
+    for role, corner, body in sections:
+        if role == 'SETUP' and not _sta_native_census_complete(body, def_file):
+            return refuse(f'{corner}: incomplete linked-master or parasitic annotation census')
+        if role in ('SETUP', 'HOLD'):
+            value = extract_slacks(body).get('setup_wns_ns' if role == 'SETUP' else 'hold_wns_ns')
+            if value is not None and math.isfinite(value):
+                measured.add((corner, role))
+    if measured != {(c, role) for c in required for role in ('SETUP', 'HOLD')}:
+        return refuse('native process/role measurements incomplete')
+    rpt_out.replace(destination)
+    return True
+
+
 def _emit_spef_sta(project: Path, top: str, pdk: PdkConfig, container: str,
                    spef_path: Path, rpt_out: Path,
                    notes: List[str]) -> bool:
@@ -51564,6 +52244,14 @@ def _emit_spef_sta(project: Path, top: str, pdk: PdkConfig, container: str,
     report_checks + report_tns + report_wns. Best-effort: any missing
     prerequisite or tool failure returns False and the caller falls back
     to the estimate-based report (the pre-#527 behavior)."""
+    from l24_signoff_requirements_extract import extract_signoff_requirements
+    obligations = extract_signoff_requirements(project) or {}
+    required = sorted({c for row in obligations.get('signoff_requirements', [])
+                       if row.get('check') == 'STA' and row.get('stated')
+                       for c in row.get('corners', [])})
+    if required:
+        return _emit_declared_process_sta(project, top, pdk, container,
+                                          spef_path, rpt_out, notes, required)
     pnr_out = _pl.pnr_dir(project)
     routed_netlist = pnr_out / f"{top}_pnr.v"
     netlist = routed_netlist
@@ -60233,6 +60921,21 @@ def main() -> int:
     if _lock is None:
         return 3
 
+    _delivery_refusal = _delivery_admission_refusal(project)
+    if _delivery_refusal:
+        _delivery_record = {
+            "program": "phase3_one_shot_runner",
+            "verdict": "REFUSED",
+            "reason": "DELIVERY_AUTHORITY_STALE_OR_UNDECLARED",
+            "detail": _delivery_refusal,
+        }
+        print(f"REFUSED: {_delivery_record['reason']}: {_delivery_refusal}",
+              file=sys.stderr)
+        _delivery_report = _pl.reports_phase3_dir(project) / "delivery_admission.json"
+        _delivery_report.parent.mkdir(parents=True, exist_ok=True)
+        _delivery_report.write_text(json.dumps(_delivery_record, indent=2) + "\n")
+        return 2
+
     _canonical = _canonical_admission.admit_span(
         project, "phase3", PROGRAMS_DIR, args.container,
         {"top_name": args.top_name, "ic_name": args.ic_name,
@@ -60910,7 +61613,7 @@ def main() -> int:
     # what emits `phase3/stage3/sta/*.rpt` and `reports/phase3/em.rpt`, and
     # BEFORE the derived-artefact generators build the hand-off pack and
     # tape-out checklist on top of a sign-off nobody checked.
-    plan.extend(step_declared_signoff_gates(project, pdk.name))
+    plan.extend(step_declared_signoff_gates(project, pdk.name, args.container))
 
     # ORDERING (measured on `spm`, image 0.3.46, plugin v1.17.42): the
     # sign-off gates below WRITE three of the reports the sign-off metrics

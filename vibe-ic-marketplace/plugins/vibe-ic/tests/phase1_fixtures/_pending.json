@@ -1,0 +1,123 @@
+[
+  {
+    "issue": "LOCAL:SHA1100_RESET_SEMANTICS",
+    "project": "reset_historical_comparison",
+    "layer": "L9",
+    "field": "reset_domains[].sync; integration.reset_boot.normalized_semantics",
+    "expected": "synchronous active_low",
+    "actual": "sync=unknown; normalized=synchronous active-high",
+    "version_observed": "d7d1891b41c7a6c07dbbc3a6abaebd5f93f0e699",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/reset_historical_comparison/reset.md"
+  },
+  {
+    "issue": "LOCAL:SHA1110_REGISTER_SEMANTICS",
+    "project": "register_contract_local",
+    "layer": "L4",
+    "field": "registers[].access, fields, reset_value",
+    "expected": "BLOCK range W; named CTRL INIT NEXT MODE and STATUS READY VALID; no unscoped reset value",
+    "actual": "range endpoints RO; WHOLE_REG fields; CTRL reset_value 0x1",
+    "version_observed": "d7d1891b41c7a6c07dbbc3a6abaebd5f93f0e699",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/register_contract_local/L5_register_map.md"
+  },
+  {
+    "issue": "LOCAL:SHA1120_NAMED_FIELDS",
+    "project": "named_register_fields_local",
+    "layer": "L4",
+    "field": "registers[].fields[].field_name/bits",
+    "expected": "CTRL INIT0 NEXT1 MODE2; STATUS READY0 VALID1",
+    "actual": "WHOLE_REG only",
+    "version_observed": "d7d1891b41c7a6c07dbbc3a6abaebd5f93f0e699",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/named_register_fields_local/L5_register_map.md"
+  },
+  {
+    "issue": "LOCAL:SHA1130_SCALAR_RESET",
+    "project": "scalar_reset_binding_local",
+    "layer": "L4",
+    "field": "registers[].reset_value",
+    "expected": "CTRL scalar reset remains unknown; field-level declarations do not define full scalar",
+    "actual": "CTRL reset_value0x1 from broad scalar proximity",
+    "version_observed": "d7d1891b41c7a6c07dbbc3a6abaebd5f93f0e699",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/scalar_reset_binding_local/L4_command_protocol.md"
+  },
+  {
+    "issue": "LOCAL:SHA1300_TOP_PRESENCE",
+    "project": "explicit_top_context_local",
+    "layer": "L9",
+    "field": "top_module/no_top_module_in_input",
+    "expected": "explicit top sha256; absence flag false",
+    "actual": "fallback sha256; no_top_module_in_input true",
+    "version_observed": "8a5557dd135204e505a6df22412524f384303082",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/explicit_top_context_local/L8_submodule_integration.md"
+  },
+  {
+    "issue": "LOCAL:SHA1930_DOCUMENTED_RANGES",
+    "project": "documented_register_ranges_local",
+    "layer": "L4",
+    "field": "registers",
+    "expected": "all declared range bindings represented with address/access/element width, flat or equivalent array",
+    "actual": "BLOCK/DIGEST name bindings absent; synthetic endpoints not equivalent",
+    "version_observed": "43f84790d55b07a2cb9eb5e5ae8911be0e33c3e0",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/documented_register_ranges_local/L5_register_map.md"
+  },
+  {
+    "issue": "LOCAL:SHA1950_ADDRESS_SPACE_ENDPOINT",
+    "project": "address_space_endpoints_local",
+    "layer": "L4",
+    "field": "registers",
+    "expected": "CONFIG remains a real register; prose address-space boundaries never create register instances",
+    "actual": "MEMMAP_HIGH_000000FF and synthetic boundary records emitted as registers",
+    "version_observed": "261bd78f2f1e342800b8658de7130f45260a622c",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/address_space_endpoints_local/registers.md"
+  },
+  {
+    "issue": "LOCAL:SHA2000_SCALAR_WIDTH",
+    "project": "scalar_register_width_local",
+    "layer": "L4",
+    "field": "registers[].width_bits",
+    "expected": "PAYLOAD width_bits=16 as explicitly documented; no other semantics invented",
+    "actual": "PAYLOAD emitted without width_bits",
+    "version_observed": "4972fbf57ab075d803c96fd33ea28f4a7c29cd01",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/scalar_register_width_local/registers.md"
+  },
+  {
+    "issue": "LOCAL:SHA2036_CONTINUATION",
+    "project": "usage_continuation_local",
+    "layer": "L12",
+    "field": "behavioral_sequences[].steps",
+    "expected": "one procedure retains indented launch action in order; original repeat2-6 covers expanded steps2-7",
+    "actual": "launch write dropped, one procedure split into2, repeat targets no longer local",
+    "version_observed": "7f777b34f89bee3dbc4bfc769f03cf93493ac389",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/usage_continuation_local/register_usage.md"
+  },
+  {
+    "issue": "LOCAL:SHA2055_COVERAGE_GOALS",
+    "project": "coverage_goal_table_local",
+    "layer": "L10",
+    "field": "test_cases[].kind",
+    "expected": "four percent-PASS acceptance/scope rows remain coverage_goal metadata, not executable functional vectors",
+    "actual": "all four rows functional_vector, anchor gate counts them executable",
+    "version_observed": "46e51026bd67ba986e8ab623e13080f651818375",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/coverage_goal_table_local/verification_plan.md"
+  },
+  {
+    "issue": "LOCAL:SHA2120_L22",
+    "project": "acceptance_targets_local",
+    "layer": "L22",
+    "field": "fields.coverage_goals",
+    "expected": "five named percent-PASS table requirements retain numeric percentage and exact criterion/scope/population; no measured results",
+    "actual": "zero goals; consumer SKIP rc2",
+    "version_observed": "f4b278dfd9668a132bd249d126ea1b85b824836e",
+    "version_lkg": "",
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/acceptance_targets_local/verification_plan.md"
+  }
+]

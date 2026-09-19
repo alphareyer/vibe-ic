@@ -86,8 +86,11 @@ from __future__ import annotations
 import sys
 import json
 import re
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import _signoff_drc_format as _sdf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from l_doc_evidence_util import (  # noqa: E402
@@ -312,6 +315,67 @@ def _report_verdict_of(payload: Any) -> Optional[str]:
     return None
 
 
+def _report_engine(path: str, payload: Any, project: Path) -> Optional[str]:
+    """Identify a DRC engine from the audit's native producer provenance.
+
+    A filename or free-form ``engine`` label is operator-controlled metadata.
+    The only admissible identity is the producer classification emitted by
+    ``eda_report_audit:drc`` plus a digest check over its subject files.
+    """
+    if not isinstance(payload, dict) or payload.get("program") != "eda_report_audit:drc":
+        return None
+    summary = payload.get("summary")
+    producers = summary.get("producers") if isinstance(summary, dict) else None
+    if not isinstance(producers, list) or len(producers) != 1:
+        return None
+    producer = producers[0]
+    if not isinstance(producer, dict) or producer.get("is_signoff_deck") is not True:
+        return None
+    engine = producer.get("producer")
+    if engine not in {"magic", "klayout"}:
+        return None
+    if not isinstance(producer.get("file"), str) or not producer["file"]:
+        return None
+    subject = payload.get("subject")
+    if not isinstance(subject, dict) or subject.get("basis") != "content":
+        return None
+    items = subject.get("items")
+    if not isinstance(items, list) or len(items) != 1:
+        return None
+    seen = set()
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            return None
+        rel = Path(item["path"])
+        if rel in seen:
+            return None
+        seen.add(rel)
+        path_obj = (project / rel).resolve()
+        if not path_obj.is_relative_to(project.resolve()) or not path_obj.is_file():
+            return None
+        expected = item.get("sha256")
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            return None
+        digest = hashlib.sha256(path_obj.read_bytes()).hexdigest()
+        if digest != expected:
+            return None
+        native = _sdf.classify_file(path_obj)
+        if native.kind != engine or not native.is_signoff_deck:
+            return None
+        if engine == "klayout" and producer.get("deck") != native.deck:
+            return None
+    return engine
+
+
+def _report_engine_for_path(project: Path, path: str) -> Optional[str]:
+    """Read an already selected report to preserve a typed engine field."""
+    try:
+        payload = json.loads((project / path).read_text(errors="replace"))
+    except (OSError, ValueError):
+        payload = None
+    return _report_engine(path, payload, project)
+
+
 #: How a requirement's population was chosen. Carried into the gate's own
 #: `--json` record so a reader can tell a flow-DECLARED sign-off reading from
 #: the name scan that is still all some checks have.
@@ -417,6 +481,99 @@ def _phase3_has_run(project: Path) -> bool:
     return d.is_dir() and any(d.rglob("*.json"))
 
 
+def _required_sta_corners(project: Path, required: Any,
+                          declared_paths: Tuple[str, ...]) -> Dict[str, Any]:
+    """Bind explicit L24 process obligations to the declared audit's native bytes.
+
+    Aggregate PASS/counts and unrelated discovered reports cannot supply a
+    missing corner. This checks native setup/hold readings, not library or
+    netlist correctness, which retain their separate owning gates.
+    """
+    import math
+    import _audit_receipt as receipt
+    import _sta_basis as basis
+    import sta_corner_record_completeness_check as native
+    out: Dict[str, Any] = {"required": required, "covered": [], "issues": [],
+                           "native_records": []}
+    issues = out["issues"]
+    if (not isinstance(required, list) or not required
+            or any(not isinstance(c, str) or c not in {"SS", "TT", "FF", "SF", "FS"}
+                   for c in required)):
+        issues.append("required process corners are malformed or unknown")
+        return out
+    roles: Dict[str, set] = {c: set() for c in required}
+    # Other flow-declared STA gates publish their own schemas (corner record,
+    # architectural residual, RC sweep). Only this audit owns subject.items.
+    audit_rel = "reports/phase3/sta/post_route_summary.json"
+    if audit_rel not in declared_paths:
+        issues.append("no flow-declared canonical STA audit to bind corner evidence")
+    for rel in (p for p in declared_paths if p == audit_rel):
+        try:
+            report_path = (project / rel).resolve()
+            if not report_path.is_relative_to(project.resolve()):
+                raise ValueError("audit path escapes project")
+            payload = json.loads(report_path.read_text())
+            if payload.get("program") != "eda_report_audit:sta" or payload.get("passed") is not True:
+                raise ValueError("not the passing canonical STA audit producer")
+            subject = payload.get("subject")
+            if not isinstance(subject, dict) or subject.get("basis") != "content":
+                raise ValueError("native content binding absent")
+            items = subject.get("items")
+            if not isinstance(items, list) or not items:
+                raise ValueError("empty native subject")
+            paths = []
+            for item in items:
+                if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                    raise ValueError("malformed native subject item")
+                path = (project / item["path"]).resolve()
+                if not path.is_relative_to(project.resolve()) or not path.is_file():
+                    raise ValueError("native path missing or outside project")
+                paths.append(path)
+            actual = receipt.subject_of(paths, relative_to=project)
+            if any(subject.get(k) != actual[k] for k in ("basis", "items", "sha256")):
+                raise ValueError("native subject content or identity changed")
+            for path in paths:
+                text = path.read_text()
+                sections = native._split_sections(text)
+                if not sections:
+                    labels = re.findall(r"(?m)^\s*STA_SIGNOFF_CORNER:\s*(\S+)", text)
+                    sections = [("BOTH", labels[0] if len(set(labels)) == 1 else None, text)]
+                for kind, corner, body in sections:
+                    if corner not in roles:
+                        continue
+                    stamps = basis.STAMP_RE.findall(body)
+                    if not stamps or any(basis.normalise_basis(v) != "POST_ROUTE" for v in stamps):
+                        issues.append(f"{path.name}:{corner} lacks unambiguous POST_ROUTE basis")
+                        continue
+                    for marker in ("STA_BASIS_LIBERTY", "STA_BASIS_SPEF"):
+                        values = re.findall(r"(?m)^\s*" + marker + r":\s*(\S+)", body)
+                        if len(set(values)) != 1:
+                            issues.append(f"{path.name}:{corner} lacks unambiguous {marker}")
+                    if re.search(r"(?im)^\s*(?:worst slack|wns|tns).*\b(?:nan|[-+]?inf(?:inity)?)\b", body):
+                        issues.append(f"{path.name}:{corner} contains a non-finite timing reading")
+                    vals = native.extract_slacks(body)
+                    if vals.get("tns_ns") is not None and (not math.isfinite(vals["tns_ns"]) or vals["tns_ns"] < 0):
+                        issues.append(f"{path.name}:{corner} has failing total negative slack")
+                    record = {"path": str(path.relative_to(project.resolve())),
+                              "corner": corner, "role": kind, "slacks": vals}
+                    out["native_records"].append(record)
+                    for role, key in (("SETUP", "setup_wns_ns"), ("HOLD", "hold_wns_ns")):
+                        if kind not in (role, "BOTH"):
+                            continue
+                        value = vals.get(key)
+                        if value is None or not math.isfinite(value) or value < 0:
+                            issues.append(f"{path.name}:{corner}:{role} has no finite met slack")
+                        else:
+                            roles[corner].add(role)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            issues.append(f"{rel}: {exc}")
+    out["covered"] = sorted(c for c, found in roles.items() if found == {"SETUP", "HOLD"})
+    out["missing"] = sorted(set(required) - set(out["covered"]))
+    if out["missing"]:
+        issues.append("required corners lack setup/hold evidence: " + ", ".join(out["missing"]))
+    return out
+
+
 def _requirements_backed(project: Path, doc: Any, rel: str,
                          rows_out: Optional[List[Dict[str, Any]]] = None
                          ) -> Tuple[List[str], List[str]]:
@@ -500,6 +657,44 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
                 f"and this run measured it as "
                 + ", ".join(f"{v!r} in {p}" for p, v in failed[:3]))
             continue
+        required_engines = row.get("engines")
+        if check == "DRC" and isinstance(required_engines, list) and required_engines:
+            engine_records: Dict[str, List[Tuple[str, Optional[str]]]] = {
+                str(engine).lower(): [] for engine in required_engines
+            }
+            for path, verdict in found:
+                engine = _report_engine_for_path(project, path)
+                if engine in engine_records:
+                    engine_records[engine].append((path, verdict))
+            missing_engines = sorted(engine for engine, records in engine_records.items()
+                                     if not any(verdict not in _ABSENT_VERDICTS
+                                                and verdict is not None
+                                                for _path, verdict in records))
+            failing_engines = sorted(engine for engine, records in engine_records.items()
+                                     if any(verdict in _FAILING_VERDICTS
+                                            for _path, verdict in records))
+            if missing_engines or failing_engines:
+                record["outcome"] = "UNMET_ENGINE_EVIDENCE"
+                detail = []
+                if missing_engines:
+                    detail.append("missing " + ", ".join(missing_engines))
+                if failing_engines:
+                    detail.append("failing " + ", ".join(failing_engines))
+                failures.append(
+                    f"{rel}: the input REQUIRES DRC engines "
+                    f"{sorted(engine_records)} at {where}, but "
+                    + "; ".join(detail))
+                continue
+        required_corners = row.get("corners")
+        if check == "STA" and required_corners not in (None, []):
+            coverage = _required_sta_corners(project, required_corners, declared_paths)
+            record["corner_coverage"] = coverage
+            if coverage["issues"]:
+                record["outcome"] = "UNMET_CORNER_EVIDENCE"
+                failures.append(
+                    f"{rel}: the input REQUIRES STA corners {required_corners!r} "
+                    f"at {where}, but " + "; ".join(coverage["issues"]))
+                continue
         record["outcome"] = "BACKED"
         msgs.append(
             f"{rel}: {check} {requirement or '(prose)'} required at {where} — "
