@@ -32,6 +32,7 @@ import pytest
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent))
 import phase3_one_shot_runner as R  # noqa: E402
+from not_verified_tier import skip_not_verified  # noqa: E402
 
 _ENV = "EDA_CONTAINER"
 
@@ -106,7 +107,15 @@ def test_the_leak_this_restoration_prevents(tmp_path, monkeypatch):
 
     monkeypatch.setenv(_ENV, "a-container-that-answers-for-its-own-filesystem")
     leaked, why2, _t2 = PLA.resolve_volume("hosttech")
-    if leaked is not None:                       # no docker client on this host
-        pytest.skip("no container route from this host; the leak is unreachable "
-                    "here and the restoration above is what is being pinned")
+    if leaked is not None:
+        # DECLARED, not a bare `pytest.skip` (vibe-ic#1128). With no docker
+        # client there is no container route at all, so the leak this case
+        # demonstrates cannot be reached here — and a verification that did not
+        # happen must say so rather than read as a pass. The restoration itself
+        # is still pinned by the three cases above, which need no container.
+        skip_not_verified(
+            "no container route from this host, so a PDK read cannot be "
+            "diverted into a container and the leak is unreachable",
+            "install a docker client, or run this file inside the pinned "
+            "vibeic-eda image")
     assert "hosttech" in why2
