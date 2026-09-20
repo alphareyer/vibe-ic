@@ -848,6 +848,9 @@ def _emit_case_known_answer_vector(project: Path, case: dict, dut_module: str,
 ORACLE_SOURCE_AUTHORED = "PRESERVED_AUTHORED"
 ORACLE_SOURCE_GENERATED = "GENERATED"
 ORACLE_SOURCE_FLOOR = "SUBSTANCE_FLOOR"
+#: A fourth way, and the one a pristine front-door run has to have: the
+#: design DELIVERED the case's own test program with its input.
+ORACLE_SOURCE_DELIVERED = "DELIVERED_INPUT"
 
 #: An authored oracle states, in its own header, which input line it derives
 #: from. Read back rather than re-asserted, so the published provenance cannot
@@ -857,6 +860,151 @@ _CITATION_RE = re.compile(r"^//\s*CITATION\s*:\s*(.+?)\s*$", re.M)
 #: writes after the marker, which is a Python function name and nothing else.
 _EMITTER_TERM_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ORACLE_LINE_RE = re.compile(r"^//\s*ORACLE\s*:\s*(.+?)\s*$", re.M)
+#: A DELIVERED oracle states, in its own header, which INPUT path it was
+#: installed from. Same read-it-back rule as CITATION.
+_DELIVERED_TERM = "DELIVERED"
+_DELIVERED_RE = re.compile(r"^//\s*DELIVERED\s*:\s*(.+?)\s*$", re.M)
+
+
+#: Where a delivered test program is looked for, in order. These are INPUT
+#: paths: the design's own test programs, delivered with the design (§4.05 —
+#: the input only; an oracle/golden/harness tree is never read, and the
+#: exclusion below enforces that on every candidate).
+_DELIVERED_TB_DIRS = ("input/sim/tb", "input/tb", "input/sim")
+#: Program/stimulus images a delivered TB may need beside it ($readmemh, ...).
+_DELIVERED_PROGRAM_DIRS = ("input/sim/programs", "input/programs", "input/sim")
+#: §4.05 — never read from these, wherever they sit under input/.
+_INPUT_FORBIDDEN_PARTS = frozenset(
+    {"golden", "oracle", "reference_flow", "harness", "submission_template"})
+
+
+def _input_safe(rel_parts) -> bool:
+    return not any(part.lower() in _INPUT_FORBIDDEN_PARTS for part in rel_parts)
+
+
+def delivered_case_oracle(project: Path, name: str) -> "Path | None":
+    """The delivered testbench for this case, or None.
+
+    WHY THIS EXISTS. MEASURED on subservient x gf180mcuD, front door, run r48
+    (lane icsub2, host 8HD-4, tree 41d3b39b8, image 0.3.67): 1 of 10 declared
+    L10 cases executed its own oracle. The one that did was GENERATED in-flow
+    by `_emit_case_boot_latency_oracle`; the other nine got the substance-floor
+    scaffold. Earlier runs of the same IC scored 10/10 only because nine
+    authored testbenches had been placed into `phase2/stage1/sim/tb/` BY HAND,
+    where `authored_oracle_preserved` then found them.
+
+    The reason a front-door run could never reproduce that: NOTHING in this
+    producer ever looked at the design INPUT for a delivered test program. The
+    only input-reading helper here, `_resolve_from_design_input`, resolves a
+    MODULE DEFINITION a testbench instantiates -- not a testbench, and not a
+    program. So a dataset could deliver the case's own test program and no step
+    in the flow would consult it. This is the path that makes delivery
+    meaningful; without it, "deliver the programs" has nowhere to land.
+
+    These are the design's OWN test programs, delivered as input -- not the
+    benchmark's hidden oracle. §4.05 is enforced structurally: any candidate
+    whose path carries a `golden`/`oracle`/`reference_flow`/`harness`/
+    `submission_template` segment is refused, wherever it sits.
+
+    Fail-closed: no delivered file, no behaviour change -- the caller falls
+    through to exactly the emitters and scaffold it used before.
+    """
+    if not _LEGAL_ID_RE.match(str(name)):
+        return None
+    for rel in _DELIVERED_TB_DIRS:
+        d = Path(project) / rel
+        if not d.is_dir():
+            continue
+        for ext in (".v", ".sv"):
+            cand = d / f"{name}{ext}"
+            if not cand.is_file():
+                continue
+            try:
+                parts = cand.relative_to(Path(project)).parts
+            except ValueError:
+                continue
+            if not _input_safe(parts):
+                continue
+            return cand
+    return None
+
+
+def delivered_case_program(project: Path, stimulus: str) -> "Path | None":
+    """The delivered stimulus image a case's own declared text names, or None.
+
+    A case whose stimulus is a firmware image (`blinky.hex`) needs the image
+    itself, not only a testbench. The name comes from the case's OWN declared
+    stimulus text, so this cannot reach a file the design did not name.
+    """
+    stim = (stimulus or "").strip()
+    m = re.search(r"([A-Za-z0-9_.-]+\.(?:hex|bin|mem|elf|vmem))", stim)
+    if not m:
+        return None
+    leaf = m.group(1)
+    for rel in _DELIVERED_PROGRAM_DIRS:
+        d = Path(project) / rel
+        if not d.is_dir():
+            continue
+        cand = d / leaf
+        if not cand.is_file():
+            continue
+        try:
+            parts = cand.relative_to(Path(project)).parts
+        except ValueError:
+            continue
+        if not _input_safe(parts):
+            continue
+        return cand
+    return None
+
+
+def _emit_case_delivered_oracle(project: Path, case: dict, out_dir: Path,
+                                report: "dict | None") -> "Path | None":
+    """Install the DELIVERED testbench for this case into the L10 run.
+
+    Runs BEFORE every generator: a program the design delivered outranks
+    anything this producer could derive. An oracle already AUTHORED in the run
+    directory outranks both -- `authored_oracle_preserved` is asked first, so
+    re-running the flow never clobbers work in progress.
+    """
+    name = case.get("name", "")
+    kept = authored_oracle_preserved(out_dir, name, report)
+    if kept is not None:
+        return kept
+    src = delivered_case_oracle(project, name)
+    if src is None:
+        return None
+    try:
+        text = src.read_text(errors="replace")
+    except OSError:
+        return None
+    if not text.strip():
+        return None
+    dst = Path(out_dir) / f"{name}.v"
+    prog = delivered_case_program(project, str(case.get("stimulus", "")))
+    # The installed copy STATES where it came from, so `oracle_provenance`
+    # reads the file's own claim rather than a second-hand ledger -- the
+    # same discipline as `// CITATION :`. Without it a delivered oracle is
+    # indistinguishable from one a lane hand-placed, which is exactly the
+    # confusion r46-vs-r48 turned on.
+    stamp = (f"// {_DELIVERED_TERM} : "
+             f"{src.relative_to(Path(project))}\n")
+    if prog is not None:
+        stamp += (f"// {_DELIVERED_TERM}_PROGRAM : "
+                  f"{prog.relative_to(Path(project))}\n")
+    try:
+        dst.write_text(stamp + text)
+        if prog is not None:
+            (Path(out_dir) / prog.name).write_bytes(prog.read_bytes())
+    except OSError:
+        return None
+    if report is not None:
+        report.setdefault("delivered_oracles", []).append(
+            {"case": name,
+             "from": str(src.relative_to(Path(project))),
+             "program": (str(prog.relative_to(Path(project)))
+                         if prog is not None else None)})
+    return dst
 
 
 def oracle_provenance(project: Path) -> dict:
@@ -896,6 +1044,12 @@ def oracle_provenance(project: Path) -> dict:
             row = {"case": tb.stem,
                    "path": str(tb.relative_to(project))
                            if tb.is_relative_to(project) else str(tb)}
+            _dlv = _DELIVERED_RE.search(text)
+            if _dlv is not None:
+                row["source"] = ORACLE_SOURCE_DELIVERED
+                row["delivered_from"] = _dlv.group(1)
+                cases.append(row)
+                continue
             if ORACLE_NONE_MARKER in text:
                 row["source"] = ORACLE_SOURCE_FLOOR
                 row["checks"] = ("no output remains X/Z after reset release; "
@@ -1021,8 +1175,11 @@ def emit_unit_tbs(project: Path, top: str = "chip_top",
         # FIRST: its oracle is stated by the design, so it outranks a
         # closed-form re-derivation. Fail-closed, so a vector that does not
         # bind falls straight through to the emitters below.
-        wrote = _emit_case_known_answer_vector(project, c, dut_module, ports,
-                                               out_dir, report)
+        # A program the DESIGN DELIVERED outranks anything derived here.
+        wrote = _emit_case_delivered_oracle(project, c, out_dir, report)
+        if wrote is None:
+            wrote = _emit_case_known_answer_vector(project, c, dut_module,
+                                                   ports, out_dir, report)
         if wrote is None:
             wrote = _emit_case_golden_oracle(project, ic_class, c, out_dir,
                                              report)
