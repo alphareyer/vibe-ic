@@ -199,7 +199,38 @@ def _project(tmp_path: Path, *, stamp: bool) -> Path:
     # than on the cache verdict they assert. Admission still runs; this supplies
     # the input a tree that has reached PnR would carry.
     _declare(tmp_path, "DIE")
+    # THE THIRD, and the same kind again. `_cached_stage_decision` gained a
+    # pad-ring clause: on a chip path the PnR cache is valid only while
+    # `reports/phase3/pad_ring_route_evidence.json` still HASH-BINDS the DEF
+    # and the GDS it was written for. Without it the disclosure reads
+    #
+    #   [pnr] cache invalid — geometry unchanged (...); producer unchanged
+    #         (...); chip-path pad-ring route evidence absent, stale or
+    #         hash-mismatched
+    #
+    # and PnR re-runs for a reason that is not the producer key these tests are
+    # about. The premise is "everything already exists from the previous run",
+    # and on a DIE that has reached PnR that includes its route evidence.
+    #
+    # NOTHING IS FAKED: the two hashes are computed from THIS fixture's own DEF
+    # and GDS, so the record binds the bytes it actually describes — which is
+    # what makes the clause still able to fire (see
+    # `test_a_stale_pad_ring_record_still_invalidates_the_pnr_cache`).
+    _pad_ring_evidence(tmp_path)
     return tmp_path
+
+
+def _pad_ring_evidence(project: Path) -> Path:
+    """The route evidence a chip-path PnR leaves behind, hash-bound to it."""
+    pnr = R._pl.pnr_dir(project)
+    path = project / "reports" / "phase3" / "pad_ring_route_evidence.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "verdict": "PASS",
+        "gds_source_def_sha256": R._sha256_file(pnr / f"{TOP}.def"),
+        "gds_evidence": {"sha256": R._sha256_file(pnr / f"{TOP}.gds")},
+    }) + "\n")
+    return path
 
 
 def _drive(monkeypatch, project: Path) -> list:
@@ -287,6 +318,33 @@ def test_unstamped_gds_forces_a_gds_rerun(tmp_path, monkeypatch):
         f"control: stamped netlist+DEF must be reused; called={called}")
     assert "gds" in called, (
         f"an unstamped GDS was reused. gds row: {_plan(project)['gds']}")
+
+
+def test_a_stale_pad_ring_record_still_invalidates_the_pnr_cache(
+        tmp_path, monkeypatch):
+    """THE CONTROL FOR THE FIXTURE'S OWN THIRD CATCH-UP.
+
+    `_project` now writes `reports/phase3/pad_ring_route_evidence.json`, because
+    without it the chip-path clause in `_cached_stage_decision` invalidates the
+    PnR cache for a reason none of these tests is about. Supplying evidence is
+    only honest if the clause can still FIRE — otherwise the fixture would have
+    switched a guard off and every cache assertion above would be green over a
+    check that no longer runs.
+
+    So: the same tree, with the record's GDS hash no longer binding the GDS it
+    describes. The clause must refuse the cached route and PnR must re-run.
+    """
+    project = _project(tmp_path, stamp=True)
+    rec = project / "reports" / "phase3" / "pad_ring_route_evidence.json"
+    doc = json.loads(rec.read_text())
+    doc["gds_evidence"]["sha256"] = "0" * 64        # no longer the shipped GDS
+    rec.write_text(json.dumps(doc) + "\n")
+
+    called = _drive(monkeypatch, project)
+    R.main()
+    assert "pnr" in called, (
+        f"a pad-ring record that no longer binds its GDS was accepted; "
+        f"pnr row: {_plan(project)['pnr']}")
 
 
 def test_stamped_tree_still_hits_every_cache(tmp_path, monkeypatch):
