@@ -23154,6 +23154,56 @@ def main() -> int:
     # --skip-hardware / --skip-phase3 path was missing it, producing a
     # spurious FAIL on CVDP-class atomic runs (captured from v0.1.57).
     _pl.emit_final_summary(project, PROGRAMS_DIR)
+    # ── THE RUN WRITES THE DOCUMENTS THE FLOW SAYS THE RUN WRITES ───────────
+    # R-0915-101 follow-up (lane icslot2). `flow_declared_producer_run` has
+    # existed since f119083ec and was wired into `phase3_one_shot_runner` ONLY.
+    # `git log -S'flow_declared_producer_run' -- design_one_shot_runner.py` is
+    # EMPTY FOR ALL HISTORY: this runner never invoked it, so on a PHASE-2-ONLY
+    # run nothing executed the producers step 2's own yaml declares and the
+    # final audit was left to author them itself — which the auditor then
+    # correctly refused as its own evidence.
+    #
+    # MEASURED on subservient x gf180mcuD, the same design twice:
+    #   r46 ran phase 3, so it reached the phase-3 site: its
+    #     `reports/audit/flow_declared_producer_run.json` exists, verdict
+    #     PRODUCED, and names `reports/phase1/gates/stage_phase1_compliance.json`
+    #     for step "2". Step 2 read `OUTPUT ATTRIBUTION: step-attributed (4/4)`.
+    #   r47 halted in phase 2, so that file does not exist at all. Step 2 read
+    #     `AUDIT-CREATED OUTPUT REFUSED ... PRODUCER GAP: no pre-audit producer
+    #     supplied these paths` and was booked FAIL / missing_artefact, which
+    #     voided step 4's 10/10 L10 oracles as `dependency [2] = FAIL`.
+    # The differing variable was THE PHASE THE RUN REACHED, not a landing.
+    #
+    # THIS IS THE RUNNER, NOT THE AUDITOR, and that is the whole distinction: a
+    # run executing the producers its own flow declares is what a flow does; an
+    # auditor executing them and then grading its own output is
+    # self-certification. `flow_compliance_check` does not import this.
+    #
+    # BEFORE `step_final_audit`, because the audit is what reads the documents.
+    # Its own rc is RECORDED, not gating — the step gates below re-run these
+    # programs and keep their verdicts — and it never overwrites the run's own
+    # work or manufactures work for a step this delivery does not have (see
+    # `flow_declared_producer_run.owed` / `already_produced_by_the_run`).
+    # Same shape and same guarantees as the phase-3 site, which is untouched.
+    try:
+        _dp = subprocess.run(
+            [sys.executable,
+             str(PROGRAMS_DIR / "flow_declared_producer_run.py"),
+             str(project)],
+            timeout=_pl.audit_timeout_s(project) + 120,
+            check=False, capture_output=True, text=True)
+        for _ln in (_dp.stdout or "").strip().splitlines():
+            print(f"[phase2] {_ln}")
+        if _dp.returncode != 0:
+            print(f"[INFO] flow_declared_producer_run rc={_dp.returncode}: a "
+                  f"declared producer could not be EXECUTED (not a verdict "
+                  f"about the design); {(_dp.stderr or '').strip()[-300:]}",
+                  file=sys.stderr)
+    except Exception as _dp_exc:  # nosec — must not abort the audit
+        print(f"[WARN] flow_declared_producer_run did NOT run ({_dp_exc}); the "
+              f"documents the flow declares this run's steps to produce may "
+              f"still be authored by the audit and refused as its own "
+              f"evidence", file=sys.stderr)
     plan.append(step_final_audit(project, phase=2, skip_analog=args.skip_analog))
 
     # vibe-ic#2080 — the run's report card, asked by a gate that nothing ran.
