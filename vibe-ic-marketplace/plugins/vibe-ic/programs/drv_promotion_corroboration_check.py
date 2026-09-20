@@ -77,6 +77,8 @@ _PROMOTION_MARKER = "routed_base_prerepair.def"
 # gate can answer PASS on evidence instead of passing on silence.
 _NOT_RUN_RECORD = "drv_promotion_not_run.json"
 _REPAIR_LOG = "signoff_spef_repair.log"
+#: The promotion's own statement of what its number is a number OF.
+_PROMOTION_CLAIM = "drv_promotion_claim.json"
 
 # The report the acceptance gate reads. Same candidate paths as
 # sta_corner_record_completeness_check, so the two can never diverge.
@@ -145,6 +147,25 @@ def repair_log(project: Path) -> Optional[Path]:
         if p.is_file():
             return p
     return None
+
+
+def promotion_claim(project: Path) -> Dict[str, object]:
+    """The promotion's own claim record, or {} when it left none.
+
+    Searched over the same `_PNR_DIRS` as the marker, so claim and marker
+    cannot be looked for in different places.
+    """
+    for d in _PNR_DIRS:
+        p = project / d / _PROMOTION_CLAIM
+        if p.is_file():
+            try:
+                rec = json.loads(p.read_text(errors="replace"))
+                if isinstance(rec, dict):
+                    rec["_record"] = str(p)
+                    return rec
+            except (OSError, ValueError):
+                return {}
+    return {}
 
 
 def claimed_drv_after(log_text: str) -> Optional[int]:
@@ -251,14 +272,57 @@ def check(project: Path) -> dict:
 
     out = {"promoted": True, "signoff_report": str(rpt),
            "signoff_drv_violations": actual, "claimed_drv_after": claimed}
+    # THE TWO NUMBERS MUST BE NUMBERS OF THE SAME THING. The promotion's own
+    # transcript counts what its resizer session saw at ITS corner; this gate
+    # counts DRV rows in the MULTI-CORNER sign-off report (setup corner AND
+    # hold corner). MEASURED on subservient x gf180mcuD as a DIE (r46): 11
+    # in-session against 14 rows, and this gate called it a route that must not
+    # ship. When the promotion re-measured THIS report at promotion time, that
+    # number is the comparable one and is used. When it could not (the report
+    # is written later in the run), the difference is NOT evidence of a worse
+    # route and is reported as such — which is not a pass either.
+    claim = promotion_claim(project)
+    same_basis = claim.get("signoff_drv_at_promotion")
+    out["promotion_claim_record"] = claim.get("_record")
+    out["claim_basis"] = claim.get("claim_basis")
+    if isinstance(same_basis, int):
+        out["signoff_drv_at_promotion"] = same_basis
+        if actual > same_basis:
+            out.update({
+                "verdict": "FAIL", "rc": 1,
+                "reason": (f"measured on the SAME sign-off report, the "
+                           f"promotion recorded {same_basis} DRV violation(s) "
+                           f"at promotion time and the report now shows "
+                           f"{actual}. The promoted route is worse than what "
+                           f"was promoted — do not ship this route.")})
+            return out
+        out.update({"verdict": "PASS", "rc": 0,
+                    "reason": (f"promotion corroborated on the same sign-off "
+                               f"report ({actual} DRV violation(s), "
+                               f"{same_basis} at promotion time)")})
+        return out
+    _basis = (claim.get("claim_basis")
+              or "its own in-session STA at the repair corner")
     if claimed is not None and actual > claimed:
+        # The verdict is UNCHANGED — an uncorroborated promotion does not ship.
+        # What is added is WHICH measurements these two numbers are, so the
+        # reader is not left to assume they are the same one. MEASURED on
+        # subservient x gf180mcuD as a DIE (r46): 11 came from the resizer's
+        # own session at ITS corner, 14 from DRV rows across the multi-corner
+        # sign-off report. The promotion now records `signoff_drv_at_promotion`
+        # whenever that report already exists, and the branch above uses it;
+        # this branch is what is left when it does not.
         out.update({
             "verdict": "FAIL", "rc": 1,
             "reason": (f"the promotion claimed it ended at {claimed} DRV "
                        f"violation(s) from its own session, but the sign-off "
                        f"report the acceptance gate reads shows {actual}. "
                        f"Passing your own re-measurement is not passing the "
-                       f"downstream gate — do not ship this route.")})
+                       f"downstream gate — do not ship this route. "
+                       f"(claim basis: {_basis}; this gate counts DRV rows in "
+                       f"{rpt}. No same-basis number was recorded at promotion "
+                       f"time, so the promotion could not be corroborated on "
+                       f"the report itself.)")})
         return out
     out.update({"verdict": "PASS", "rc": 0,
                 "reason": (f"promotion corroborated by the sign-off report "
