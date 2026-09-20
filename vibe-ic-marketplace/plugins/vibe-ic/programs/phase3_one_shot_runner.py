@@ -3666,6 +3666,59 @@ def _declared_period_disclosure(project: Path, pdk_name: str,
     return ""
 
 
+#: Where the boundary I/O delay may come from. `DECLARED_OR_PLUGIN` is what
+#: every run has always done: the design's declaration when it makes one, else
+#: this plugin's own literal. `DECLARED_ONLY` emits an external delay ONLY when
+#: the design declares one, and otherwise emits NONE and says so — the
+#: boundary paths are then NOT TIMED, which is a disclosure, never a pass.
+IO_DELAY_DECLARED_OR_PLUGIN = "declared_or_plugin"
+IO_DELAY_DECLARED_ONLY = "declared_only"
+IO_DELAY_SOURCE_ENV = "VIBEIC_IO_DELAY_SOURCE"
+
+
+def io_delay_source(env: Optional[Dict[str, str]] = None) -> str:
+    """The selected I/O-delay source, defaulting to today's behaviour.
+
+    A run that sets nothing is byte-identical to every run before this one.
+    An unrecognised value is the DEFAULT, not an error: this switch exists so
+    an owner's ruling can be measured in one run, and a typo must not silently
+    change what a sign-off is timed against.
+    """
+    raw = (env if env is not None else os.environ).get(IO_DELAY_SOURCE_ENV, "")
+    return (IO_DELAY_DECLARED_ONLY
+            if str(raw).strip().lower() == IO_DELAY_DECLARED_ONLY
+            else IO_DELAY_DECLARED_OR_PLUGIN)
+
+
+def io_delay_contract(declared_ns: Optional[float], plugin_ns: float,
+                      source: str) -> Dict[str, Any]:
+    """What the boundary paths are timed against, as a record.
+
+    `declared_ns` is the design's own number (None when it declares none);
+    `plugin_ns` is the literal this flow would otherwise use. Returns the
+    value actually emitted, who it came from, and — the field a reader of a
+    sign-off needs — whether the boundary paths are TIMED at all. Pure.
+    """
+    if declared_ns is not None:
+        return {"variant": "A/B", "source": "design_declaration",
+                "io_delay_ns": float(declared_ns),
+                "boundary_paths_timed": True,
+                "note": "the design declares its own I/O delay"}
+    if source == IO_DELAY_DECLARED_ONLY:
+        return {"variant": "A", "source": "none_declared",
+                "io_delay_ns": None,
+                "boundary_paths_timed": False,
+                "note": ("the design declares no I/O delay and this run was "
+                         "asked for DECLARED_ONLY, so no external delay is "
+                         "emitted and the boundary paths are NOT TIMED — "
+                         "their timing is NOT_MEASURED, which is not a pass")}
+    return {"variant": "B", "source": "plugin_assumption",
+            "io_delay_ns": float(plugin_ns),
+            "boundary_paths_timed": True,
+            "note": ("the design declares no I/O delay; the boundary paths "
+                     "are timed against THIS PLUGIN'S assumption")}
+
+
 def _declared_io_delay_ns(project: Path, clk_period_ns: float) -> tuple:
     """(io_delay_ns, disclosure) for a design that declares its I/O delay as a
     FRACTION of its own clock period, else (None, "").
@@ -3792,6 +3845,14 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
     _io_ns, _io_note = _declared_io_delay_ns(project, clk_period_ns)
     # No declaration ⇒ the historical literal 2, byte-identical.
     _io_val = 2.0 if _io_ns is None else float(_io_ns)
+    _io_contract = io_delay_contract(_io_ns, 2.0, io_delay_source())
+    _io_omit = not _io_contract["boundary_paths_timed"]
+    if _io_omit:
+        _io_note += ("# VIBEIC_IO_DELAY_OMITTED: " + _io_contract["note"]
+                     + "\n#   No set_input_delay / set_output_delay is "
+                       "emitted, so NOTHING here constrains a boundary path. "
+                       "A gate that reports those paths must report them as "
+                       "NOT_MEASURED.\n")
     if _tu_scale == 1.0:
         _period_str = f"{clk_period_ns}"
         _io_str = "2" if _io_ns is None else f"{_io_val:g}"
@@ -3840,9 +3901,10 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
         "puts \"VIBEIC_INPUT_DELAY_PORTS [llength $_vibeic_data_in] of "
         "[llength [all_inputs]] (clock port(s) excluded — OpenSTA rejects "
         "set_input_delay on the port its own clock is defined on)\"\n"
-        "if {[llength $_vibeic_data_in] > 0} { set_input_delay  "
-        f"{_io_str} -clock clk $_vibeic_data_in " + "}\n"
-        f"set_output_delay {_io_str} -clock clk [all_outputs]\n"
+        + ("" if _io_omit else
+           "if {[llength $_vibeic_data_in] > 0} { set_input_delay  "
+           f"{_io_str} -clock clk $_vibeic_data_in " + "}\n"
+           f"set_output_delay {_io_str} -clock clk [all_outputs]\n")
     )
     # GAP-E2E-7 — carry ONLY the timing exceptions the design's own staged
     # reference flow (input/constraints + input/reference_flow) explicitly
@@ -31024,6 +31086,20 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
             drv_note=str(_drv.get("note") or ""),
             liberty_path=str(pdk.liberty),
             pdk_name=str(pdk.name)))
+        # WHAT THE BOUNDARY PATHS ARE TIMED AGAINST, as a record a gate can
+        # read. The SDC says it in comments; a sign-off consumer should not
+        # have to parse comments to learn whether an external delay came from
+        # the design, from this plugin, or was omitted entirely.
+        try:
+            _io_ns_rec, _ = _declared_io_delay_ns(
+                project, _resolve_clock_spec(project)[0])
+        except Exception:                                    # noqa: BLE001
+            _io_ns_rec = None
+        _aa.write_json(
+            project / "reports" / "phase3" / "io_delay_contract.json",
+            dict(io_delay_contract(_io_ns_rec, 2.0, io_delay_source()),
+                 **{"schema": "vibe-ic/io-delay-contract/1",
+                    "sdc": str(sdc)}))
         # Same CTS-clustering target as the staged branch above; the
         # auto-SDC path has no design SDC to declare a fanout cap in, so
         # priority collapses to L9 / RTL-replication / liberty default —
