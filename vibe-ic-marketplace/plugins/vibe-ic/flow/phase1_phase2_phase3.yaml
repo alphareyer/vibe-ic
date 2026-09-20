@@ -8245,11 +8245,32 @@ steps:
         - "input/submission_template/NO_TEMPLATE.txt"
         - "input/submission_template/SELF_TAPEOUT.txt"
         - "input/submission_template/slots/*.yaml"
+      # AND THE OWNER'S OWN DECLARATION, ahead of the routers (R-0915,
+      # 2026-09-20, derived from deliverable=DIE / R-0915-95): "a DIE owes NO
+      # IP delivery set". The 2026-09-02 ruling above widened this step to
+      # every route on the reading that a die also ships the IP deliverable
+      # set; the owner has now decided the other way for a declared DIE, and
+      # this is where that decision is recorded rather than in a producer's
+      # silence. A die therefore reaches this row as SKIPPED-BY-CONDITION with
+      # the declaration cited — not run, and not laundered into a producer
+      # SKIP that would leave `digital_hardmacro_check` refusing an absent kit.
+      #
+      # `corroborated_by: owner_attestation` is load-bearing and is NOT the
+      # default used by 15.5ic/26.5ic/37.5ic: `deliverable` is owner-answered
+      # (vibe-ic#2369), so an agent's inference reads as NOT_DETERMINED and
+      # runs the step, exactly as every other unreadable answer does. The
+      # HARDMACRO rows keep their own corroboration (no operator slot bound),
+      # which is the opposite question and would always answer "owed" here.
+      delivery_declares:
+        declaration: "input/submission_template/tapeout_declaration.json"
+        field: "answers.deliverable"
+        absent_when: ["DIE"]
+        corroborated_by: owner_attestation
     # D6 (vibe-ic#1744). `design_dependent`, not `setup_required`: this
     # condition tests WHICH PATH the design is on, and step 0.5ic's
     # required_outputs declares the mutually-exclusive route artefacts, so on
     # any run where 0.5ic itself passed, precisely one of them exists — and
-    # this step now accepts each of them. An IP legitimately has no pad ring,
+    # this step accepts each of them unless the owner declared a DIE. An IP legitimately has no pad ring,
     # seal ring or shuttle precheck; that N/A is 37.5ic's to record, and a
     # design-derived N/A is correct only after 0.5ic PASSes. The owner link
     # makes an unresolved/failed route a hard upstream blocker rather than the

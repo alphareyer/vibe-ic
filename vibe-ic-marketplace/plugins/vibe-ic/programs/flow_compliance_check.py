@@ -12116,16 +12116,49 @@ def _delivery_declares_absence(project: Path, spec: Any
         value = value[part]
     if not isinstance(value, str) or value.strip().upper() not in absent_when:
         return None
-    # The DIE word alone is not enough: a hardmacro that bought an operator
-    # slot is going through that operator and owes the slot's rules. This is
-    # the same predicate `slot_pad_budget_check` now calls, and it degrades
-    # towards OWING the steps on anything it cannot read.
-    try:
-        import submission_template_check as _stc  # noqa: PLC0415
-        owed, _why = _stc.slot_rules_are_owed(project, None)
-    except Exception:  # noqa: BLE001 — cannot read the route: run the step
-        return None
-    if owed:
+    # THE WORD ALONE IS NEVER ENOUGH, and WHICH corroboration applies is the
+    # clause's to name (R-0915 2026-09-20). Two rows use this predicate and
+    # they stand a step down for opposite reasons:
+    #
+    #   no_operator_slot (the default, and every pre-existing row): a hardmacro
+    #       that bought an operator slot is going through that operator and
+    #       owes the slot's rules, so the declaration is corroborated by
+    #       `slot_rules_are_owed` saying no slot is bound. Unchanged.
+    #
+    #   owner_attestation: the DIE side. `deliverable` is OWNER-ANSWERED
+    #       (vibe-ic#2369): `_tapeout_declaration.answer` reports an
+    #       un-attested value as NOT_DETERMINED precisely so an agent's
+    #       inference cannot route a delivery. A row that stands 37.5ip down
+    #       because the owner declared a DIE is corroborated by that
+    #       attestation and by nothing else — asking `slot_rules_are_owed`
+    #       there would be asking the HARDMACRO question of a die, which
+    #       always answers "owed" and would make the clause dead.
+    #
+    # An unrecognised corroboration RUNS the step: an unknown word is not a
+    # licence to skip.
+    corroboration = str(spec.get("corroborated_by")
+                        or "no_operator_slot").strip().lower()
+    if corroboration == "no_operator_slot":
+        try:
+            import submission_template_check as _stc  # noqa: PLC0415
+            owed, _why = _stc.slot_rules_are_owed(project, None)
+        except Exception:  # noqa: BLE001 — cannot read the route: run the step
+            return None
+        if owed:
+            return None
+        _why_corroborated = "no operator slot is bound"
+    elif corroboration == "owner_attestation":
+        try:
+            import _tapeout_declaration as _td_mod  # noqa: PLC0415
+            _key = field.split(".")[-1]
+            _att = _td_mod.attestation_of(doc, _key)
+        except Exception:  # noqa: BLE001 — cannot read it: run the step
+            return None
+        if not isinstance(_att, dict) or _att.get("declares") is not True:
+            return None
+        _why_corroborated = (
+            f"{_key} is owner-attested ({_att.get('answered_by')})")
+    else:
         return None
     # R-0915-64 — SAME ARITY AS THE L-DOC ROUTE, evidence `None`. This route
     # needs no input scan and is given none: its declaration is ALREADY an
@@ -12133,7 +12166,7 @@ def _delivery_declares_absence(project: Path, spec: Any
     # it never had the defect R-0915-64 names. Returning the same shape means
     # the caller branches on WHETHER THERE IS EVIDENCE rather than on a tuple
     # length, and a third route added later cannot silently pick the wrong arm.
-    return rel, f"{field}={value!r} and no operator slot is bound", None
+    return rel, f"{field}={value!r} and {_why_corroborated}", None
 
 
 def _check_condition(project: Path, condition: Dict[str, Any]) -> bool:

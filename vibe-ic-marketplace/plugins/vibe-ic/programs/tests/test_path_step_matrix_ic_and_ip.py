@@ -1331,9 +1331,19 @@ def test_a_die_that_tapes_itself_out_can_pass_step_0_5ics_own_gate(tmp_path):
 
     assert _state(proj, "15.5ic") == RUNS
     assert _state(proj, "37.5ic") == RUNS
-    # BOTH terminals, per the 2026-09-02 owner ruling: the die ships its own
-    # IP deliverable kit alongside its chip documents.
-    assert _state(proj, "37.5ip") == RUNS
+    # 37.5ip STANDS DOWN FOR THIS DIE, and by its DECLARATION rather than by a
+    # router file. OWNER RULING 2026-09-20 (R-0915), derived from the same
+    # owner-attested `deliverable` R-0915-95 fixed: "a DIE owes NO IP delivery
+    # set". It supersedes the 2026-09-02 reading recorded in the MATRIX above
+    # — that a die also ships the IP kit — for a delivery the OWNER declared a
+    # DIE, and only for that: the MATRIX rows below, whose trees carry no
+    # owner-attested declaration, still reach 37.5ip, and so does the pure-IP
+    # row, whose whole deliverable it is. MEASURED on spm x gf180mcuD (run6,
+    # v1.22.10): the kit cost 7278.5 s, the run's longest step by two and a
+    # half times, and `ip_release_docs_gen` refused it anyway.
+    assert _state(proj, "37.5ip") == SKIPPED, (
+        "an owner-attested DIE must reach 37.5ip as a declared non-applicable, "
+        "not run it: R-0915 2026-09-20")
 
 
 def test_an_IP_can_pass_step_0_5ics_own_gate_too(tmp_path):

@@ -48287,6 +48287,83 @@ def _hardmacro_pdk_dir(pdk: Optional["PdkConfig"],
     return None
 
 
+#: Step 37.5ip's two producers ask this before they run.
+_IP_KIT_NA_REASON = (
+    "a DIE owes no IP delivery set (R-0915, 2026-09-20, derived from the "
+    "owner-attested deliverable of R-0915-95)")
+
+
+def _ip_delivery_declared_na(project: Path) -> Tuple[bool, str, Dict[str, Any]]:
+    """(stand down, the citation, the typed evidence) for step 37.5ip.
+
+    THE OWNER'S DECLARATION DECIDES, AND ONLY THE OWNER'S. `deliverable` is
+    owner-answered (vibe-ic#2369): `_tapeout_declaration.answer` reports an
+    un-attested value as NOT_DETERMINED, so an agent's reading of a design's
+    documents can never stand this step down — it runs, exactly as it does for
+    a HARDMACRO, a NOT_DETERMINED, an unreadable declaration or an absent one.
+
+    MEASURED on spm x gf180mcuD, DIE route (v1.22.10, run6): the IP kit was
+    built for a die at a cost of 7278.5 s — the run's longest step by a factor
+    of two and a half — and `ip_release_docs_gen` then refused the kit anyway.
+    The flow row is stood down by 37.5ip's own `delivery_declares` condition;
+    this is the same answer on the RUNNER channel, which dispatches these two
+    producers directly and would otherwise build a kit the flow did not ask
+    for. Nothing is laundered into a silent SKIP: the citation travels with the
+    row and a typed record is written where the producer's own would go."""
+    try:
+        import _tapeout_declaration as _td_na              # noqa: PLC0415
+        doc, err = _td_na.load(project / _td_na.DECLARATION_REL)
+        if err is not None or not isinstance(doc, dict):
+            return False, "", {}
+        value = _td_na.answer(doc, "deliverable")
+        if value != _td_na.DELIVERABLE_DIE:
+            return False, "", {}
+        # The attestation is read for the CITATION, not as a second gate:
+        # `answer` above already reports an un-attested `deliverable` as
+        # NOT_DETERMINED (vibe-ic#2369), which is what refuses an agent's
+        # reading. Kept explicit so the record carries who said it, and
+        # belt-and-braces if that enforcement ever moves.
+        att = _td_na.attestation_of(doc, "deliverable")
+        if not isinstance(att, dict) or att.get("declares") is not True:
+            return False, "", {}
+    except Exception:                                      # noqa: BLE001
+        return False, "", {}
+    cited = (f"{_td_na.DECLARATION_REL}:answers.deliverable={value!r} "
+             f"(answered_by={att.get('answered_by')!r})")
+    evidence = {
+        "kind": "owner-declared-delivery",
+        "declaration_path": _td_na.DECLARATION_REL,
+        "field": "answers.deliverable",
+        "value": value,
+        "answered_by": att.get("answered_by"),
+        "citation": att.get("citation"),
+    }
+    return True, cited, evidence
+
+
+def _record_ip_kit_na(project: Path, program: str, rel: str,
+                      cited: str, evidence: Dict[str, Any]) -> StepResult:
+    """Write the producer's own typed N/A record and return its row."""
+    report = project / rel
+    payload = {
+        "program": program,
+        "verdict": "NOT_APPLICABLE",
+        "reason_class": "DESIGN_DECLARED_NA",
+        "reason": f"{_IP_KIT_NA_REASON}; {cited}",
+        "applicability_evidence": evidence,
+        "produced": [],
+        "note": "not run: the delivery this design declared owes no IP kit",
+    }
+    try:
+        report.parent.mkdir(parents=True, exist_ok=True)
+        _aa.write_text(report, json.dumps(payload, indent=2) + "\n")
+    except OSError:
+        pass
+    return StepResult(program, "SKIP", 0.0,
+                      f"DESIGN-DECLARED-N/A — {_IP_KIT_NA_REASON}; {cited}",
+                      [str(report)] if report.is_file() else [])
+
+
 def step_digital_hardmacro_gen(project: Path,
                                pdk: Optional["PdkConfig"] = None,
                                container: str = "") -> StepResult:
@@ -48312,6 +48389,11 @@ def step_digital_hardmacro_gen(project: Path,
     evidence rather than on this step's exit code.
     """
     t0 = time.time()
+    _na, _cited, _evidence = _ip_delivery_declared_na(project)
+    if _na:
+        return _record_ip_kit_na(
+            project, "digital_hardmacro_gen",
+            "reports/phase3/digital_hardmacro_gen.json", _cited, _evidence)
     prog = PROGRAMS_DIR / "digital_hardmacro_gen.py"
     if not prog.is_file():  # pragma: no cover - shipped tree always has it
         return StepResult("digital_hardmacro_gen", "SKIP", 0.0,
@@ -48431,6 +48513,11 @@ def step_ip_release_docs_gen(
     rather than on this step's exit code.
     """
     t0 = time.time()
+    _na, _cited, _evidence = _ip_delivery_declared_na(project)
+    if _na:
+        return _record_ip_kit_na(
+            project, "ip_release_docs_gen",
+            "reports/phase3/ip_release_docs_gen.json", _cited, _evidence)
     prog = PROGRAMS_DIR / "ip_release_docs_gen.py"
     if not prog.is_file():  # pragma: no cover - shipped tree always has it
         return StepResult("ip_release_docs_gen", "SKIP", 0.0,
