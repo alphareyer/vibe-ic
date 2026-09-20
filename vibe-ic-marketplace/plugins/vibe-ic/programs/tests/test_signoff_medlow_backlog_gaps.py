@@ -908,33 +908,81 @@ def _predicate_gate_self_skip_project(tmp_path: Path) -> Path:
     return proj
 
 
-def test_self_skip_discloses_a_gate_that_declares_no_program(fcc, tmp_path):
-    """The fix, END-TO-END on the shape it was written for.
+def test_an_unregistered_flag_names_the_output_but_does_not_defer_it(
+        fcc, tmp_path):
+    """R-0915-57: NAMING IS NOT DEFERRING. Re-pinned, and not weakened.
 
-    Step 12's gate is `files_exist: [post_dft_netlist.v]`. The disclosure used
-    to be conditional on the gate naming a PROGRAM, so on this — the only
-    population the #675-strict self-skip resolves on across the corpus — the
-    ADVISORY was never emitted.
+    THESE TWO CASES USED TO ASSERT `SKIPPED-CONDITION` on this fixture. That
+    was the rule when `cap:post_dft_scan_optimization` was a registered
+    capability gap, and lane icspm5 RETIRED it on 2026-09-16 with the
+    measurement that refutes it: step 12 runs
+
+        yosys -p 'read_verilog <scan>; opt_clean -purge; write_verilog ...'
+
+    on every run that HAS a scan netlist, so the capability is present and
+    exercised. What the marker actually records is that THIS RUN produced
+    nothing — yosys exited non-zero, yosys errored, or scan insertion delivered
+    nothing — and `design_one_shot_runner` says so in its own words: "a finding
+    about the run must not be spendable as a tool's absence", so the marker
+    "still NAMES the absent output ... naming is not deferring".
+
+    The step therefore reads MISSING — an unmet requirement, visible to the
+    verdict, with no exit — and the advisory question never arises because
+    nothing was deferred.
+
+    ASSERTED IN BOTH DIRECTIONS, because `== "MISSING"` alone would also hold
+    for a checker that had simply stopped promoting anything:
+    `test_a_registered_entitled_flag_still_defers` below drives the SAME
+    promotion path to SKIPPED-CONDITION with a flag the registry does bind.
     """
     proj = _predicate_gate_self_skip_project(tmp_path)
     res = fcc.check_step(proj, _step(12), {})
 
-    assert res.status == "SKIPPED-CONDITION", res.reasons
-    advisory = [r for r in res.reasons if "NOT evaluated" in r]
-    assert advisory, f"no ADVISORY for the un-run gate: {res.reasons}"
-    assert "post_dft_netlist.v" in advisory[0], advisory[0]
+    assert res.status == "MISSING", res.reasons
+    assert not any("NOT evaluated" in r for r in res.reasons), res.reasons
+    # The absent output is still NAMED, which is the half the ruling kept.
+    assert any("post_dft_netlist.v" in r for r in res.reasons), res.reasons
 
 
-def test_self_skip_on_a_truly_gateless_step_invents_no_advisory(fcc, tmp_path):
-    """DIRECTION-1 guard: a step that declares NO gate must not gain a
-    disclosure about a gate that does not exist."""
+def test_a_gateless_step_invents_no_advisory_either(fcc, tmp_path):
+    """DIRECTION-1 guard, unchanged in what it guards.
+
+    A step that declares NO gate must not gain a disclosure about a gate that
+    does not exist. Only the status moved, for the reason above.
+    """
     proj = _predicate_gate_self_skip_project(tmp_path)
     step = dict(_step(12))
     step.pop("gate", None)
     res = fcc.check_step(proj, step, {})
 
-    assert res.status == "SKIPPED-CONDITION", res.reasons
+    assert res.status == "MISSING", res.reasons
     assert not any("NOT evaluated" in r for r in res.reasons), res.reasons
+
+
+def test_a_registered_entitled_flag_still_defers(fcc, tmp_path):
+    """THE POSITIVE ARM the two cases above need to mean anything.
+
+    The #675-strict promotion is not gone — it refuses an UNREGISTERED flag.
+    A marker whose flag the registry both registers AND binds to the output it
+    names still carries the step to SKIPPED-CONDITION. MEASURED pairing:
+    `cap:sdf_gatelevel_simulator_toolchain` is entitled to defer step 29's
+    `phase3/stage3/sim_postlayout/results.log`, and no registered flag is
+    entitled to defer step 12's `post_dft_netlist.v` — which is R-0915-57's
+    binding, read back.
+    """
+    proj = tmp_path / "entitled"
+    d = proj / "phase3/stage3/sim_postlayout"
+    d.mkdir(parents=True)
+    (d / "results_skipped.json").write_text(json.dumps({
+        "verdict": "SKIPPED-CONDITION",
+        "reason": "no SDF-capable gate-level simulator in the container",
+        "capability_flag": "cap:sdf_gatelevel_simulator_toolchain",
+        "skips_required_output": [
+            "phase3/stage3/sim_postlayout/results.log"],
+    }) + "\n")
+    res = fcc.check_step(proj, _step(29), {})
+
+    assert res.status == "SKIPPED-CONDITION", res.reasons
 
 
 def test_undisclosed_absence_is_still_missing(fcc, tmp_path):
