@@ -46453,7 +46453,20 @@ def _extract_top_module_from_docs(extracted: Dict[str, str]) -> Optional[str]:
         r"(?:單一\s+|single\s+)top\s+module(?:\*\*)?"
         r"(?=\s*(?:[,，.。;；]|$))", re.I)
     for text in extracted.values():
-        for line in (text or "").splitlines():
+        # vibe-ic#731, the same reason as the two sibling scans in this file:
+        # this convention reads a SENTENCE, so it must not read a commented-out
+        # one. The clause is anchored at line start, so a `//` comment can never
+        # match it — but a BLOCK comment can, because the line inside
+        #
+        #     /*
+        #     `foo_top` is the single top module
+        #     */
+        #
+        # does begin with the quoted subject. That is the author showing code,
+        # not this design declaring its top. `_doc_top_module_name_label` and
+        # `_doc_design_request_module_name` already strip the same values;
+        # this makes the property hold per-scan rather than per-caller.
+        for line in _strip_hdl_comments(text or "").splitlines():
             hit = subject_top.match(line)
             # The affirmative, quoted subject is explicit identifier authority.
             # Loose-prose vocabulary filters (e.g. algorithm/tool words) must

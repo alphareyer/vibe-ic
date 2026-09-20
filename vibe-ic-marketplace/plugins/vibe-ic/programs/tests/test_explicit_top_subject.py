@@ -17,6 +17,22 @@ import phase1_doc_one_shot_runner as D
 def test_subject(text,expected):
  assert D._extract_top_module_from_docs({'input.md':text})==expected
 
+# vibe-ic#731 — the convention reads a SENTENCE, so it must not read a
+# commented-out one. MEASURED before the strip landed: the BLOCK-comment case
+# below returned `foo_top`, i.e. an author SHOWING code was read as this design
+# declaring its top. The `//` case was already safe by the anchor (`^\s*` then
+# the quoted subject, which `//` precedes) and is pinned beside it so the two
+# reasons are not confused with one.
+@pytest.mark.parametrize('text,expected',[
+ ('/*\n`foo_top` is the single top module.\n*/','block_commented_out'),
+ ('// `foo_top` is the single top module.','line_commented_out'),
+ ('`foo_top` is the single top module.','real'),
+],ids=['block_comment','line_comment','uncommented_control'])
+def test_a_commented_out_declaration_is_not_this_designs_top(text,expected):
+ got=D._extract_top_module_from_docs({'input.md':text})
+ assert got==(None if expected!='real' else 'foo_top'), (expected,got)
+
+
 def test_full_minimal_l9_producer(tmp_path):
  fixture=Path(__file__).resolve().parents[2]/'tests/phase1_fixtures/explicit_top_context_local/L8_submodule_integration.md'
  docs={fixture.name:fixture.read_text()}
