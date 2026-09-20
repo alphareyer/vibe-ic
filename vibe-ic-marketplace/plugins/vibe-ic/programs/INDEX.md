@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1329
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1329)
+- **Total programs (excluding helpers / shims):** 1331
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1331)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1320 |
+| `any` | 1322 |
 
 ## Alphabetical listing
 
@@ -1220,6 +1220,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `step_preflight` | any | — | the ORCHESTRATOR side of `required_inputs`. |
 | `step_repro_bundle` | any | — | everything one step reads, in one file, plus what it ran on. |
 | `step_required_inputs_check` | any | — | refuse to run a step that has nothing to read. |
+| `step_verdict_vocabulary_ratchet` | any | — | Tree-wide ratchet: no producer writes a step status outside the five. |
 | `step_write_ledger` | any | — | record what a run ACTUALLY WROTE, then residual it against what the flow DECLARED. |
 | `structured_table_extractor` | any | — | ONE general extractor for the whole TABLE tier. |
 | `submission_template_answers` | any | — | the operator's constants, as an answers file. |
@@ -1313,6 +1314,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `vector_ops_synth` | any | — | deterministic SOLVER for the VECTOR-MANIPULATION family (spec -> RTL): bit/byte reverse, sign/zero-extend, replicate, split, concat-reorder. |
 | `vendor_fpga_reference_table_extraction_check` | any | v0.119.30 | gate (LL-29) that catches Category-A spec-extraction failures on vendor FPGA reference timing tables. |
 | `vendored_attribution_retained_check` | any | — | third-party source that SHIPS must ship with the record that names where it came from. vibe-ic#1043. |
+| `verdict` | any | — | the ONE step-verdict vocabulary of the flow, and its ONE cascade rule. |
 | `verdict_arm_disabled_by_a_constant_check` | any | — | A verdict arm a constant switched off — every structure intact, no decision. |
 | `verdict_token_propagation_check` | any | — | META-audit: producer -> consumer verdict-token propagation guard (ORGANIC #722, captured Bucket C). |
 | `verify_fail_triage` | any | — | mechanical CVDP fail-mode classifier (ORGANIC #534). |
@@ -1401,7 +1403,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1320 programs)
+### `any` (1322 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2590,6 +2592,7 @@ _(no programs in this group)_
 - `step_preflight` — the ORCHESTRATOR side of `required_inputs`.
 - `step_repro_bundle` — everything one step reads, in one file, plus what it ran on.
 - `step_required_inputs_check` — refuse to run a step that has nothing to read.
+- `step_verdict_vocabulary_ratchet` — Tree-wide ratchet: no producer writes a step status outside the five.
 - `step_write_ledger` — record what a run ACTUALLY WROTE, then residual it against what the flow DECLARED.
 - `structured_table_extractor` — ONE general extractor for the whole TABLE tier.
 - `submission_template_answers` — the operator's constants, as an answers file.
@@ -2683,6 +2686,7 @@ _(no programs in this group)_
 - `vector_ops_synth` — deterministic SOLVER for the VECTOR-MANIPULATION family (spec -> RTL): bit/byte reverse, sign/zero-extend, replicate, split, concat-reorder.
 - `vendor_fpga_reference_table_extraction_check` — gate (LL-29) that catches Category-A spec-extraction failures on vendor FPGA reference timing tables.  _[v0.119.30]_
 - `vendored_attribution_retained_check` — third-party source that SHIPS must ship with the record that names where it came from. vibe-ic#1043.
+- `verdict` — the ONE step-verdict vocabulary of the flow, and its ONE cascade rule.
 - `verdict_arm_disabled_by_a_constant_check` — A verdict arm a constant switched off — every structure intact, no decision.
 - `verdict_token_propagation_check` — META-audit: producer -> consumer verdict-token propagation guard (ORGANIC #722, captured Bucket C).
 - `verify_fail_triage` — mechanical CVDP fail-mode classifier (ORGANIC #534).
