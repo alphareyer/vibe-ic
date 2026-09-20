@@ -1256,6 +1256,31 @@ _UNCALIBRATED_REGISTER: Dict[str, str] = {
         "icsha2 — a private helper of the entry above, and it takes the "
         "caller's compiled pattern rather than a log: it is calibrated when "
         "its caller is.",
+
+    # ── a code the PINNED IMAGE does not carry ───────────────────────────
+    "phase3_one_shot_runner::_sdr_repair_parasitics_disclosure":
+        "icmainred2 — I tried to calibrate it first and MEASURED that neither "
+        "side of a pair exists on the image this flow runs. The reader counts "
+        "`EST-0027` in the SDR child logs, and the pinned digest "
+        "sha256:943f53b3 (OpenROAD 26Q3-2578-g36711c6c34) does not carry that "
+        "string ANYWHERE: `strings /foss/tools/openroad/bin/openroad | grep -c "
+        "EST-0027` is 0, `grep -oE '\\bEST-[0-9]{4}\\b'` over the same "
+        "binary returns NOTHING AT ALL, the phrase `no estimated parasitics` "
+        "is absent from it, and `grep -rl EST-0027 /foss/tools` finds no file. "
+        "A positive sample would have to be a transcript this toolchain cannot "
+        "produce, and a negative one is every transcript it does — so the pair "
+        "would prove nothing about the reader. IT IS A DISCLOSURE AND NOT A "
+        "VERDICT (`estimate_parasitics: not used`, a count and a file list; no "
+        "status field), which is why an uncalibrated reading is survivable "
+        "here at all. AND IT CARRIES A FINDING, stated rather than hidden by "
+        "this entry: on this image `est0027_warnings` can only ever be 0, so "
+        "the number is the absence of the code and not the absence of the "
+        "condition. R-0915-94's figures were taken before the pin moved. "
+        "CLOSES when either the counted code is re-derived from a message the "
+        "pinned image does emit, or the image carries EST-0027 again — at "
+        "which point both samples are producible from `calibration/cal_chain.v` "
+        "plus `cal_chain.spef`, the pair the DRV-census instrument already "
+        "uses for exactly this with/without-parasitics distinction.",
 }
 
 
