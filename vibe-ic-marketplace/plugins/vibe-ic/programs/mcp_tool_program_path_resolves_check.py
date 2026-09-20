@@ -300,6 +300,8 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 # ---------------------------------------------------------------------------
 
+from _atomic_artefact import write_json as _atomic_write_json  # noqa: E402
+
 import argparse
 import json
 import posixpath
@@ -1571,7 +1573,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.json_out == "-":
             print(text)
         else:
-            Path(args.json_out).write_text(text + "\n")
+            # Through `_atomic_artefact` (#1082): whole or not at all.
+            _atomic_write_json(args.json_out, payload)
 
     if cannot:
         print(f"[REFUSE] {CHECK_NAME}: CANNOT-CHECK — {cannot}")
