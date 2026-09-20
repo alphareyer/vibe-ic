@@ -850,12 +850,29 @@ def _discover_rtl(project: str) -> List[str]:
 # --------------------------------------------------------------------------- #
 # 37.5self — THE DIE IS ITS OWN OPERATOR  (R-0915, 2026-09-20)
 # --------------------------------------------------------------------------- #
-#: Where the flow records the ring it built for this die.
-PADRING_RECORD_REL = os.path.join("reports", "phase3", "padring.json")
 #: Where the design records its own free choices (parameter values included).
 DESIGN_DECLARATION_REL = os.path.join("plugin_output", "declaration.json")
-#: Where the flow records the physical wrapper it generated and the core it wraps.
-CHIP_TOP_RECORD_REL = os.path.join("reports", "phase3", "io_pad_chip_top.json")
+
+#: The step that BUILDS this die's ring, and the gate that measures the
+#: design's pins against it. NAMED HERE, NEVER READ: this gate runs at step 2,
+#: in phase 2, and `reports/phase3/padring.json` is step 15.5ic's declared
+#: required_output. Reading it here is the dependency `test_matrix_d5_deps_-
+#: correct` refuses and cannot repair -- 15.5ic already has step 2 in its own
+#: ancestry, so the edge "step 2 blocks_on 15.5ic" is CIRCULAR (D5-MISSING-EDGE,
+#: would-cycle). The measurement is not lost and is not duplicated:
+#: `pad_bterm_coincidence_check` at 15.5ic already proves, per net and
+#: geometrically, that each top-level port's BTerm lands on its pad's bond
+#: terminal -- the die's own budget, measured where its ring exists.
+OWN_RING_STEP = "15.5ic"
+OWN_RING_GATE = "pad_bterm_coincidence_check"
+#: The same step's unconditional half: `pad_ring_check` refuses
+#: BTERM_WITHOUT_PAD on the ring it checks, with or without a tech LEF.
+OWN_RING_GATE_ALWAYS = "pad_ring_check (BTERM_WITHOUT_PAD)"
+OWN_RING_EVIDENCE_REL = os.path.join("reports", "phase3",
+                                     "pad_bterm_coincidence.json")
+#: The die's OWN slot file: its declaration, written at step 0.5ic, which IS
+#: in step 2's blocks_on closure.
+DECLARED_RING_KEYS = ("pad_signal_map", "pad_order_by_side")
 
 
 def _operator_template_is_bound(project: str) -> bool:
@@ -885,33 +902,50 @@ def _json_at(project: str, rel: str) -> Optional[Dict[str, Any]]:
     return doc if isinstance(doc, dict) else None
 
 
-def own_ring_pads(project: str) -> Optional[List[Dict[str, Any]]]:
-    """The pad instances the flow placed for THIS die, from its own record.
+def declared_own_ring(doc: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The pad ring THE DESIGN DECLARED for itself, from its own declaration.
 
-    None when the ring has not been built yet — which is a different answer
-    from an empty ring and is reported as such."""
-    doc = _json_at(project, PADRING_RECORD_REL)
-    if doc is None:
-        return None
-    producer = doc.get("producer") if isinstance(doc.get("producer"), dict) else doc
-    pads = producer.get("pads")
-    if not isinstance(pads, list):
-        return None
-    return [p for p in pads if isinstance(p, dict)]
+    A die binds no operator, so the file that plays the operator slot's part
+    is the design's own `tapeout_declaration.json`: `pad_signal_map`
+    ({instance: port}) is the die's pad list, and `pad_order_by_side` is the
+    side order. Both are step 0.5ic's declared outputs, and 0.5ic is in step
+    2's blocks_on closure -- so this is a budget a phase-2 step may measure.
 
-
-def own_ring_inventory(pads: List[Dict[str, Any]],
-                       ports: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """The die's own ring, counted AGAINST THE PINS THE DESIGN DECLARES.
-
-    A die has no operator, so the thing its interface must fit is the ring
-    this run built. The comparison is by SIGNAL NAME, not by a total: a ring
-    with the right number of pads bonded to the wrong nets is not a ring that
-    carries this design's pins, and a count cannot tell the two apart. Bus
-    bits are matched per bit (`x[7]`), which is how the pad record names them.
+    BY SIGNAL NAME, NOT BY A COUNT. `pad_order_by_side` alone names INSTANCES,
+    and a ring with the right number of pads bonded to the wrong nets is not a
+    ring that carries this design's pins: a count cannot tell the two apart.
+    So a side order without a signal map is reported as `measurable=False`,
+    with which key was present, rather than budgeted.
     """
-    bonded = {str(p.get("signal") or "").strip() for p in pads
-              if str(p.get("signal") or "").strip()}
+    out: Dict[str, Any] = {"measurable": False, "signal_map": {},
+                           "instances": [], "keys_present": []}
+    if not isinstance(doc, dict):
+        return out
+    smap = _TD.answer(doc, "pad_signal_map")
+    if isinstance(smap, dict):
+        out["signal_map"] = {str(k): str(v).strip() for k, v in smap.items()
+                             if isinstance(v, str) and str(v).strip()}
+    sides = _TD.answer(doc, "pad_order_by_side")
+    if isinstance(sides, dict):
+        for _side in sorted(sides):
+            lst = sides[_side]
+            if isinstance(lst, list):
+                out["instances"].extend(str(x) for x in lst)
+    out["keys_present"] = [k for k, v in (("pad_signal_map", out["signal_map"]),
+                                          ("pad_order_by_side", out["instances"]))
+                           if v]
+    out["measurable"] = bool(out["signal_map"])
+    return out
+
+
+def declared_ring_inventory(ring: Dict[str, Any],
+                            ports: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The die's declared ring, counted AGAINST THE PINS THE DESIGN DECLARES.
+
+    Bus bits are matched per bit (`x[7]`), which is how a signal map names
+    them; a map that brings out the whole bus under its base name counts for
+    every bit of it, because that is what it says."""
+    bonded = set(ring["signal_map"].values())
     need: List[str] = []
     for port in ports:
         if _CLK_RST_RE.match(port["name"]):
@@ -923,14 +957,16 @@ def own_ring_inventory(pads: List[Dict[str, Any]],
             need.append(port["name"])
         else:
             need.extend(f"{port['name']}[{i}]" for i in range(int(width)))
-    missing = [n for n in need if n not in bonded]
+    missing = [n for n in need
+               if n not in bonded and n.split("[", 1)[0] not in bonded]
     return {
-        "ring_pads_total": len(pads),
-        "ring_signals": sorted(bonded),
+        "declared_pads_total": len(ring["instances"] or ring["signal_map"]),
+        "declared_ring_signals": sorted(bonded),
         "declared_signal_bits": len(need),
         "bonded_declared_bits": len(need) - len(missing),
         "unbonded_declared_bits": missing[:24],
         "unbonded_count": len(missing),
+        "declared_by": ring["keys_present"],
     }
 
 
@@ -954,17 +990,18 @@ def _design_declared_params(project: str) -> Dict[str, int]:
     return out
 
 
-def _core_top_from_the_run(project: str) -> Optional[str]:
-    """The module whose pins the ring bonds out, as the flow recorded it.
+def _declared_top_cell(doc: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The top cell the design DECLARED, from step 0.5ic's own output.
 
-    On a die the physical top is a generated wrapper (`chip_top`) and the
-    module carrying the design's pins is the core inside it. The flow writes
-    both in `io_pad_chip_top.json`; this reads the core."""
-    doc = _json_at(project, CHIP_TOP_RECORD_REL) or {}
-    if doc.get("verdict") != "WROTE":
+    The clause the auditor re-runs passes no `--top`, so the gate takes its
+    default and can refuse a design that has answered. The declaration is the
+    run's own answer to exactly this question and is a required_output of
+    0.5ic, which IS in step 2's closure -- so reading it adds no dependency
+    the flow does not already declare."""
+    if not isinstance(doc, dict):
         return None
-    core = doc.get("core_module")
-    return str(core) if isinstance(core, str) and core.strip() else None
+    top = _TD.answer(doc, "top_cell")
+    return str(top).strip() or None if isinstance(top, str) and top != _TD.NOT_DETERMINED else None
 
 
 def _load_slots(project: str) -> Dict[str, Dict[str, Any]]:
@@ -1067,11 +1104,34 @@ def main(argv: Optional[List[str]] = None) -> int:
                           if _decl_err is None and isinstance(_decl_doc, dict)
                           else _TD.NOT_DETERMINED)
     _operator_bound = _operator_template_is_bound(str(a.project))
+    # THE DECLARED WORD SELECTS THE BASIS — attestation gates a STAND-DOWN,
+    # not a measurement (R-0915-98(2)). `answer` withholds an un-attested
+    # `deliverable` (vibe-ic#2369) and that is right for a step that would be
+    # skipped; here the question is WHICH budget to measure, and a design that
+    # says DIE is measured as a die whoever wrote the word. The raw field is
+    # consulted only after `answer` declines, and the report says which.
+    _raw_deliverable = ""
+    if isinstance(_decl_doc, dict):
+        _raw = (_decl_doc.get("answers") or {}).get("deliverable")
+        _raw_deliverable = str(_raw).strip() if isinstance(_raw, str) else ""
+    _declared_die = (_route_deliverable == _TD.DELIVERABLE_DIE
+                     or _raw_deliverable.upper() == _TD.DELIVERABLE_DIE)
+    _die_word_source = ("answers.deliverable (owner-attested)"
+                        if _route_deliverable == _TD.DELIVERABLE_DIE
+                        else "answers.deliverable (declared, not attested)")
     _route_na: Optional[Dict[str, Any]] = None
     try:
         _owed, _why_not = _stc.slot_rules_are_owed(Path(a.project), None)
     except (OSError, ValueError, TypeError):  # degrade towards owing it
         _owed, _why_not = True, None
+    # A DIE IS NEVER "NOT APPLICABLE" HERE, and ONE place decides that: the
+    # die branch below is consulted first and owns every outcome a die can
+    # have, including the two that cannot measure. This branch is the
+    # HARDMACRO answer — nobody's slot, so no budget — and since
+    # `slot_rules_are_owed` learned to say the same of a die that binds no
+    # operator, a die was taking it and the landed contract
+    # (`test_a_DIE_against_the_same_catalogue_still_gets_a_real_verdict`) was
+    # red: a die still gets a REAL verdict, measured against its own ring.
     if not _owed and _why_not:
         _route_doc, _route_error = _TD.load(Path(a.project) / _TD.DECLARATION_REL)
         _route_deliverable = _TD.answer(_route_doc, "deliverable")
@@ -1122,7 +1182,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 if k not in params}
     _param_conflicts: Dict[str, Dict[str, int]] = {}
     _top_source = "--top"
-    _core_top = _core_top_from_the_run(str(a.project))
+    _core_top = _declared_top_cell(_decl_doc)
     # An explicit --rtl always wins; discovery is the fallback the flow uses.
     rtl_files = list(a.rtl) or _discover_rtl(a.project)
     ports: Optional[List[Dict[str, Any]]] = None
@@ -1154,9 +1214,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                 break
         if ports:
             if _top_try != a.top:
-                _top_source = (f"{CHIP_TOP_RECORD_REL}:core_module — the "
-                               f"module whose pins this die's ring bonds out; "
-                               f"{a.top!r} is not in the staged RTL")
+                _top_source = (f"{_TD.DECLARATION_REL}:answers.top_cell — "
+                               f"the design's own answer; {a.top!r} is not in "
+                               f"the staged RTL")
                 a.top = _top_try
             break
 
@@ -1179,24 +1239,28 @@ def main(argv: Optional[List[str]] = None) -> int:
                                        "submission_template", _name)):
             _declared_no_slot = _why
             break
-    # 37.5self — THE DIE IS ITS OWN OPERATOR (R-0915, 2026-09-20).
+    # 37.5self — THE DIE IS ITS OWN OPERATOR (R-0915-98(2), 2026-09-20).
     # A die binds no operator template, so there is no external slot to
     # measure against and the catalogue on disk is information, not a
-    # purchase. What its interface must fit is the ring THIS RUN BUILT, and
-    # that is what is measured here, by signal name. The ring is produced at
-    # step 15.5ic, so a phase-2 invocation legitimately has none yet: that is
-    # BLOCKED_BY_UPSTREAM naming its producer, never a pass and never a
-    # ZERO_DENOMINATOR about an argument.
-    _own_ring = None
-    # A DIE OUTRANKS THE ROUTE-N/A. `_route_na` above is the HARDMACRO answer
+    # purchase. What plays the slot file's part is the design's OWN
+    # declaration, written at step 0.5ic: the pad ring it declares for itself,
+    # measured by signal name against the pins it declares. Where the design
+    # declared no ring and left it to the flow to generate, that ring is
+    # step 15.5ic's output and this step neither reads it (the edge would be
+    # circular) nor repeats the measurement 15.5ic already makes -- it says
+    # so, and does not pass.
+    #
+    # A DIE OUTRANKS THE ROUTE-N/A. `_route_na` below is the HARDMACRO answer
     # — "nobody's slot, so no budget" — and since `slot_rules_are_owed` learned
     # to say the same of an owner-attested DIE that binds no operator, a die
     # was taking it too. A die is not exempt from a pad budget; it is its own
     # operator, and its budget is the ring below.
-    _die_is_its_own_operator = (
-        _route_deliverable == _TD.DELIVERABLE_DIE and not _operator_bound)
-    if _die_is_its_own_operator and ports:
-        _own_ring = own_ring_pads(str(a.project))
+    _die_is_its_own_operator = _declared_die and not _operator_bound
+    _declared_ring = (declared_own_ring(_decl_doc) if _die_is_its_own_operator
+                      else None)
+    # TWO ANSWERS ABOUT ONE WIDTH FIRST, for every route. A contradiction in
+    # the design's own records is not made smaller by the branch that would
+    # have read it, and a deferral printed over it would hide it.
     if _param_conflicts:
         rep = {"check": "slot_pad_budget", "verdict": "UNDECIDED", "rc": 2,
                "reason_class": _reason_taxonomy.ZERO_DENOMINATOR,
@@ -1210,20 +1274,64 @@ def main(argv: Optional[List[str]] = None) -> int:
                "parameter_conflicts": _param_conflicts,
                "note": "a question with two answers has not been answered"}
         rc = 2
-    elif _die_is_its_own_operator and ports and _own_ring is None:
-        rep = {"check": "slot_pad_budget", "verdict": "UNDECIDED", "rc": 2,
-               "reason_class": _reason_taxonomy.BLOCKED_BY_UPSTREAM,
-               "reason": (f"this delivery is a DIE and binds no operator "
-                          f"template, so the budget is its own pad ring — and "
-                          f"{PADRING_RECORD_REL} is not here yet. The ring is "
-                          f"built at step 15.5ic by `pad_ring_gen`; until it "
-                          f"is, there is nothing to measure the declared pins "
-                          f"against"),
-               "note": "a question that could not be asked has not passed",
-               "budget_basis": "37.5self:own_pad_ring"}
+    elif _die_is_its_own_operator and not _declared_ring["measurable"]:
+        # THE RING THIS DIE WILL HAVE IS NOT DECLARED AND IS NOT HERE. It is
+        # generated at 15.5ic and measured against these same declared pins
+        # there. This is a real verdict and never a pass; it is not
+        # NOT_APPLICABLE, because the budget IS owed (R-0915-98(2)) — it is
+        # owed at the step that has the ring.
+        _sides_only = bool(_declared_ring["instances"])
+        rep = {
+            "check": "slot_pad_budget",
+            "verdict": "UNDECIDED",
+            "rc": 2,
+            "reason_class": _reason_taxonomy.BLOCKED_BY_UPSTREAM,
+            "budget_basis": "37.5self:own_pad_ring",
+            "deliverable_source": _die_word_source,
+            "reason": (
+                "this delivery is a DIE and binds no operator template, so the "
+                "die is its own operator and its budget is its own pad ring — "
+                + ("`pad_order_by_side` names "
+                   f"{len(_declared_ring['instances'])} pad instance(s) but "
+                   "`pad_signal_map` is NOT_DETERMINED, so which SIGNAL each "
+                   "pad brings out is unstated and a pad count cannot tell a "
+                   "ring that carries these pins from one that does not"
+                   if _sides_only else
+                   "and the design declares none of it "
+                   f"({', '.join(DECLARED_RING_KEYS)} are NOT_DETERMINED in "
+                   f"{_TD.DECLARATION_REL}), leaving the ring to be generated")
+                + f". That ring is built at step {OWN_RING_STEP}, and the pins "
+                  f"this gate reads are measured against it there — per net "
+                  f"and geometrically — by {OWN_RING_GATE} "
+                  f"({OWN_RING_EVIDENCE_REL}), and by "
+                  f"{OWN_RING_GATE_ALWAYS} whether or not that one runs. "
+                  f"This step does not read that "
+                  f"output (step {OWN_RING_STEP} has step 2 in its own "
+                  f"ancestry, so the dependency would be circular) and cannot "
+                  f"pass in its place"),
+            "own_ring_measured_by": {"step": OWN_RING_STEP,
+                                     "gate": OWN_RING_GATE,
+                                     "gate_always": OWN_RING_GATE_ALWAYS,
+                                     "evidence": OWN_RING_EVIDENCE_REL},
+            "declared_ring": _declared_ring,
+            "note": "a question this step cannot ask has not passed",
+        }
         rc = 2
-    elif _die_is_its_own_operator and ports:
-        _inv = own_ring_inventory(_own_ring, ports)
+    elif _die_is_its_own_operator and not ports:
+        # A die whose declared pins could not be read is UNDECIDED about its
+        # own ring — not "not applicable", and not a pass.
+        rep = {"check": "slot_pad_budget", "verdict": "UNDECIDED", "rc": 2,
+               "reason_class": _reason_taxonomy.EXECUTION_ERROR,
+               "reason": (f"this delivery is a DIE and binds no operator "
+                          f"template, so its budget is the pad ring it "
+                          f"declares against the pins it declares — and top "
+                          f"module '{a.top}' was not found in "
+                          f"{rtl_files or '(no --rtl given and no RTL under ' + os.path.join(*_RTL_DIR_REL) + ')'}"),
+               "budget_basis": "37.5self:own_pad_ring",
+               "deliverable_source": _die_word_source,
+               "note": "a question that could not be asked has not passed"}
+        rc = 2
+    elif _die_is_its_own_operator:
         _budget = interface_budget(ports)
         if _budget["unresolved_width_ports"]:
             rep = {"check": "slot_pad_budget", "verdict": "UNDECIDED", "rc": 2,
@@ -1237,9 +1345,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                               + " — a width this gate invented would be a pad "
                                 "count nobody chose"),
                    "unresolved_width_ports": _budget["unresolved_width_ports"],
-                   "budget_basis": "37.5self:own_pad_ring"}
+                   "budget_basis": "37.5self:own_pad_ring",
+                   "deliverable_source": _die_word_source}
             rc = 2
         else:
+            _inv = declared_ring_inventory(_declared_ring, ports)
             _fits = _inv["unbonded_count"] == 0
             rep = {
                 "check": "slot_pad_budget",
@@ -1249,21 +1359,27 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "basis": (
                     "this delivery is a DIE and binds no operator template, so "
                     "the die is its own operator: the budget is the pad ring "
-                    f"this run built ({PADRING_RECORD_REL}, "
-                    f"{_inv['ring_pads_total']} pad instance(s)) against the "
-                    f"{_inv['declared_signal_bits']} signal bit(s) the design "
-                    f"declares on top module {a.top!r}. No external slot "
-                    "exists to measure against; the operator catalogue on disk "
-                    "is information, not a purchase"),
+                    f"the design declares for itself ({_TD.DECLARATION_REL}, "
+                    f"{_inv['declared_pads_total']} pad(s) from "
+                    f"{'+'.join(_inv['declared_by'])}) against the "
+                    f"{_inv['declared_signal_bits']} signal bit(s) it declares "
+                    f"on top module {a.top!r}. No external slot exists to "
+                    "measure against; the operator catalogue on disk is "
+                    "information, not a purchase"),
                 "own_ring": _inv,
+                "own_ring_measured_by": {"step": OWN_RING_STEP,
+                                         "gate": OWN_RING_GATE,
+                                         "gate_always": OWN_RING_GATE_ALWAYS,
+                                         "evidence": OWN_RING_EVIDENCE_REL},
                 "interface_budget": _budget,
                 "top": a.top,
                 "top_source": _top_source,
+                "deliverable_source": _die_word_source,
             }
             if not _fits:
                 rep["reason"] = (
                     f"{_inv['unbonded_count']} declared signal bit(s) have no "
-                    f"pad in the ring this run built: "
+                    f"pad in the ring this design declares: "
                     + ", ".join(_inv["unbonded_declared_bits"]))
             rc = rep["rc"]
     elif _route_na is not None:
