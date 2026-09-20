@@ -63,7 +63,7 @@ def test_step_skips_gracefully_without_ldocs(tmp_path):
     """Empty project → generate() SKIPs → step returns SKIP and NEVER touches
     the container (safe/additive for every non-arithmetic design)."""
     sr = D.step_professional_tb_gen(tmp_path, "chip_top", "no_such_container")
-    assert sr.status == "SKIP"
+    assert sr.status == "NOT_MEASURED"
     # the report is written even on SKIP, so the gate is a no-op N-A
     rep = tmp_path / "reports" / "phase2" / "gates" / "professional_tb.json"
     assert rep.is_file()

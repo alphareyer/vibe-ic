@@ -61,6 +61,16 @@ _BC = importlib.import_module("_blocker_classification")
 
 
 def _step(sid, status, **kw):
+    """R-0915-85 — a step row. `INCOMPLETE` is `NOT_MEASURED(partial_population)`
+    and `MISSING` is `FAIL(missing_artefact)`; #2186's subject is unchanged —
+    rule 7 tests whether the PREDECESSOR DELIVERED its declared outputs, not
+    what verdict word it wears."""
+    if status == "INCOMPLETE":
+        status, kw.setdefault("reason_class", "partial_population")
+        status = "NOT_MEASURED"
+    elif status == "MISSING":
+        kw.setdefault("reason_class", "missing_artefact")
+        status = "FAIL"
     rec = {
         "id": sid,
         "name": kw.pop("name", f"step {sid}"),
@@ -276,7 +286,12 @@ def test_every_blocker_class_stays_reachable():
         _step("D0", "INCOMPLETE", reasons=["INCOMPLETE: one sub-gate"],
               evidence=["phase3/analog/ldo/corner_results.json"]),
         _step("D", "FAIL", reasons=["program failed: a_check ."]),
-        _step("M", "SKIPPED-SETUP-REQUIRED", reasons=["setup absent"]),
+        # R-0915-85 — `SKIPPED-SETUP-REQUIRED` is
+        # `NOT_MEASURED(input_absent)`: the step could not start because a
+        # declared input is not on this host. `_blocker_classification` reads
+        # the reason to reach MISSING_CAPABILITY, so the row must carry it.
+        _step("M", "NOT_MEASURED", reason_class="input_absent",
+              reasons=["setup absent"]),
         _step("U", "FAIL", reasons=[f"{_BC.TIMEOUT_MARKER} 0 progress"]),
     ]
     reached = {b["classification"]

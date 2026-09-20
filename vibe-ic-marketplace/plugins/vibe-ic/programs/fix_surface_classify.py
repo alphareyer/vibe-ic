@@ -111,11 +111,36 @@ PRODUCER_PATTERNS = [
 #: `classif` / `_emit` identifier), so the single most on-the-nose consumer
 #: change in the commit read as `unknown` -> ambiguous -> MIXED.
 try:                                       # pragma: no cover - import shim
-    from _flow_verdict_tiers import PRODUCER_STATUSES as _VERDICT_TOKENS
+    from verdict import PRODUCER_STATUSES as _LIVE_VERDICT_TOKENS
 except ImportError:                        # pragma: no cover
     import sys as _sys, pathlib as _pl
     _sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))
-    from _flow_verdict_tiers import PRODUCER_STATUSES as _VERDICT_TOKENS
+    from verdict import PRODUCER_STATUSES as _LIVE_VERDICT_TOKENS
+
+#: R-0915-85 — THIS FILE READS HISTORY, so it must still RECOGNISE the words the
+#: ruling deleted. It classifies `git show <sha>` output, and most of the
+#: commits it will ever be pointed at predate the reform: #599's own hunk, the
+#: worked example three comments above, changes `VACUOUS_PASS:` to
+#: `INCOMPLETE:` — two words that no longer exist. With the live five alone the
+#: single most on-the-nose consumer change in that commit stopped matching and
+#: #599 went back to MIXED, which is the exact regression the note above
+#: records being fixed once already.
+#:
+#: RECOGNITION IS NOT TRANSLATION. Nothing here maps an old word to a new one;
+#: there is no target and no ordering. The set answers one question — "does
+#: this changed line mention a verdict word at all" — and a word that is dead
+#: in the tree is still a word a 2026-08 diff mentions. The peer of
+#: `_step_verdict_table.rank`, which is the other place a pre-reform artefact
+#: is READ and never rewritten.
+_PRE_REFORM_VERDICT_TOKENS = frozenset({
+    "WAIVED", "WAIVED-DEFERRED", "DEFERRED-BY-UPSTREAM", "SKIP", "SKIPPED",
+    "SKIPPED-CONDITION", "SKIPPED-SETUP-REQUIRED", "MISSING", "INCOMPLETE",
+    "NOT_CHECKED", "NOT_EXECUTED", "NOT_EVALUATED", "VACUOUS_PASS",
+    "PARTIALLY-VACUOUS", "PASS_VOIDED_BY_DEPENDENCY", "STRUCTURE-ONLY",
+    "PASS_WITH_OPEN_SOURCE_CONSTRAINTS", "INSUFFICIENT_DATA",
+    "ENV_UNAVAILABLE", "BLOCKED", "ADVISORY",
+})
+_VERDICT_TOKENS = frozenset(_LIVE_VERDICT_TOKENS) | _PRE_REFORM_VERDICT_TOKENS
 
 #: Both spellings: the flow tier table writes `VACUOUS-PASS`, a program prints
 #: `VACUOUS_PASS:`. Anchored to a token boundary so `PASS` cannot match inside

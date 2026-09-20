@@ -65,6 +65,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import _path_layout as _pl
+import verdict as _V  # R-0915-85: the five step verdicts + the one cascade rule
 import _runner_summary as _rsum  # noqa: E402  vibe-ic#2081
 import _runner_lock  # ORGANIC #588 — single-driver lock (all 4 runners)
 import _watchdog as _wd  # progress supervision — never a runtime bound
@@ -112,6 +113,22 @@ class StepResult:
     # where the ledger is. Additive and defaulted, so every existing
     # construction site and every existing `asdict(...)` reader is unchanged.
     extras: Dict[str, Any] = field(default_factory=dict)
+    # ── the structured fields R-0915-85 put beside the verdict ──────────
+    # `status` above is now one of the FIVE words in `programs/verdict.py`, and
+    # every distinction the deleted vocabulary carried lives here. The module's
+    # DESIGN section says why; `_V.StepVerdict` is where the same rules are
+    # enforced for readers. Validated in `__post_init__` below, so a site that
+    # says NOT_MEASURED without a reason — or NOT_APPLICABLE without naming the
+    # input line that declares it — is a loud error where it is written, not a
+    # quiet hole in a published report.
+    reason_class: str = ""
+    declared_by: str = ""
+    waiver_rows: List[Dict[str, str]] = field(default_factory=list)
+    attribution: str = ""
+    disclosures: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        _V.validate_step_row(self)
 
 
 def _preflight_refusal(name: str):
@@ -119,7 +136,7 @@ def _preflight_refusal(name: str):
 
     `BLOCKED` carries the same meaning it does in the other three runners: the
     step was NOT attempted because an INPUT could not support it, so NOTHING is
-    known. It is listed in `_aggregate_verdict._FAIL_STATUSES` — without that it
+    known. It is `NOT_MEASURED(input_absent)` in the one vocabulary — which is
     would have fallen through that function's catch-all `return "PASS"` and a
     refusal would have produced a GREEN run, which is the defect class this
     whole pre-flight exists to remove. Measured on this ladder specifically:
@@ -128,13 +145,18 @@ def _preflight_refusal(name: str):
     possible green run over a Phase 1 that was never given a document.
     """
     def _mk(detail: str, extras: Dict[str, Any]) -> StepResult:
-        return StepResult(name, _spf.REFUSAL_STATUS, 0.0, detail, extras=extras)
+        return StepResult(name, _spf.REFUSAL_STATUS, 0.0, detail, extras=extras, reason_class=_spf.REFUSAL_REASON_CLASS)
     return _mk
 
 
 # Statuses that must NOT reach a green verdict. `BLOCKED` is `step_preflight`'s
 # refusal status; `FAIL` is this runner's pre-existing one, unchanged.
-_FAIL_STATUSES = ("FAIL", _spf.REFUSAL_STATUS)
+#: RETIRED by R-0915-85. Two runners kept their own "these words are failures"
+#: tuple beside `_aggregate_verdict`, and the pre-flight refusal had to be
+#: remembered into each of them (it was not, once, and a refusal produced a
+#: GREEN run — #544). There is one roll-up now, `verdict.run_verdict`, and a
+#: refusal is `NOT_MEASURED(input_absent)`: not green, and — per the one
+#: cascade rule — voiding nothing downstream.
 
 #: How long a dispatched Phase-1 producer may be COMPLETELY IDLE — no CPU, no
 #: I/O, no output anywhere in its process tree — before it is called wedged.
@@ -147,14 +169,61 @@ _TRACK_STALL_GRACE_S = 600
 
 
 def _aggregate_verdict(plan: List[StepResult]) -> str:
-    """Phase 1's top-level verdict. Extracted from `main()` unchanged except
-    for the BLOCKED tier, so a control can assert the non-greenness directly
-    rather than re-running the whole dispatcher to observe it."""
-    if any(s.status in _FAIL_STATUSES for s in plan):
-        return "FAIL"
-    if any(s.status in ("WAIVED", "SKIP") for s in plan):
-        return "PASS_WITH_WAIVERS"
-    return "PASS"
+    """The run's verdict, from `verdict.run_verdict`. ONE rule for the flow.
+
+    WHAT THIS REPLACES, and why the replacement is a deletion rather than a
+    migration. Every one-shot runner carried its own hand-maintained lists of
+    which words meant what, and the lists disagreed: phase 2 read `SKIP` as
+    clean while phase 3 read the identical word as a waiver, over the same
+    forty-four steps. This function's own predecessor said so in its comments
+    and declined to fix it because fixing it "would restate every published
+    phase-2 result". R-0915-85 is the decision to restate them: there is one
+    vocabulary, five words, and one roll-up — `verdict.run_verdict` — whose
+    precedence is FAIL > NOT_MEASURED > PASS_WITH_WAIVERS > PASS.
+
+    The catch-all is gone by construction, not by enumeration: `verdict.parse`
+    refuses a word outside the five at the row that carries it.
+    """
+    # R-0915-85 — THE SKIP DISCLOSURE SURVIVES THE COLLAPSE. The predecessor
+    # printed every step it had excused to stderr, by name, so a green run said
+    # out loud which of its steps produced no verdict about the design. Five
+    # words say less per row than eighteen did, so each row is named here with
+    # the word AND the reason or declaration beside it. A run whose skips go
+    # silent is the run16 shape.
+    _rows = list(_step_verdicts(plan))
+    _skipped = [r for r in _rows
+                if r.verdict in (_V.Verdict.NOT_MEASURED,
+                                 _V.Verdict.NOT_APPLICABLE)]
+    if _skipped:
+        print(f"[verdict] {len(_skipped)} SKIPPED step(s) — produced no "
+              f"verdict about the design: " + ", ".join(
+                  f"{r.name}={r.verdict.value}"
+                  f"({(r.reason_class.value if r.reason_class else '')}"
+                  f"{r.declared_by and ' ' + r.declared_by})"
+                  for r in _skipped), file=sys.stderr)
+    return _V.run_verdict(_rows).value
+
+
+def _step_verdicts(plan):
+    """This runner's own rows, as `verdict.StepVerdict` records.
+
+    One conversion, here, so no consumer re-derives the structured fields from
+    a `StepResult` and no two of them do it differently.
+    """
+    for s in plan:
+        yield _V.StepVerdict(
+            verdict=_V.parse(s.status),
+            step_id=getattr(s, "name", ""), name=getattr(s, "name", ""),
+            reason_class=(_V.ReasonClass(s.reason_class)
+                          if getattr(s, "reason_class", "") else None),
+            reason=getattr(s, "detail", "") or "",
+            declared_by=getattr(s, "declared_by", "") or "",
+            waiver_rows=[_V.WaiverRow(**w)
+                         for w in (getattr(s, "waiver_rows", None) or [])],
+            attribution=getattr(s, "attribution", "") or "",
+            disclosures=list(getattr(s, "disclosures", None) or ()),
+        )
+
 
 
 # ── Input-mode detection ────────────────────────────────────────────
@@ -355,13 +424,13 @@ def step_ingest_render(project: Path, ic_name: str) -> StepResult:
             (docs_dir / "design_description.md").write_text(prompt_md.read_text())
             src = docs_dir
         else:
-            return StepResult("phase1_ingest_render", "SKIP",
+            return StepResult("phase1_ingest_render", "NOT_MEASURED",
                               time.time() - t0,
                               "neither input/phase1_structured.yaml nor "
                               "input/docs/ nor input/phase1_prompt.md "
                               "present — Phase 1 needs at least one input. "
                               "Caller (IC Expert Agent) must populate "
-                              "input/phase1_structured.yaml from dialogue.")
+                              "input/phase1_structured.yaml from dialogue.", reason_class=_V.ReasonClass.INPUT_ABSENT)
     # cli.py uses package-relative imports (``from .ingest import ...``),
     # so it must be run as a module (``python -m phase1_engine.cli``) with
     # the package parent dir on sys.path — NOT as a standalone script, which
@@ -539,7 +608,7 @@ def step_human_docs(project: Path) -> StepResult:
     t0 = time.time()
     hd = project / "human_docs"
     if not hd.is_dir() or not list(hd.glob("L*.md")):
-        return StepResult("phase1_human_docs", "WAIVED",
+        return StepResult("phase1_human_docs", "PASS_WITH_WAIVERS",
                           time.time() - t0,
                           "human_docs/L*.md not produced (engine cli "
                           "may not have --also-human; caller can "
@@ -1564,9 +1633,21 @@ def main() -> int:
     reports = project / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     pass1_verdict = _aggregate_verdict(plan)
-    pass1_rc = max(1 if pass1_verdict == "FAIL" or _gap else 0, rc_route)
-    if pass1_rc:
-        pass1_verdict = "FAIL"
+    # R-0915-85 — THE EXIT CODE IS THE RUN WORD, and NOT_MEASURED is not green.
+    # This ladder read only `== "FAIL"`, so an empty project — D1 refused for
+    # want of any input at all — aggregated to NOT_MEASURED and EXITED 0. That
+    # is the run16 shape exactly: nothing was measured and the shell was told
+    # the phase had passed.
+    #
+    # And the word is NOT overwritten into FAIL when the rc is 1. A run that
+    # measured nothing did not fail; `run_verdict` already put it off PASS, and
+    # rewriting it here would make the artefact claim a finding the run never
+    # made. Only a route failure — which IS a failure — sets FAIL.
+    _not_green = pass1_verdict in (_V.Verdict.FAIL.value,
+                                   _V.Verdict.NOT_MEASURED.value)
+    pass1_rc = max(1 if _not_green or _gap else 0, rc_route)
+    if rc_route or _gap:
+        pass1_verdict = _V.Verdict.FAIL.value
     summary = {
         "phase": 1,
         "mode": mode,
@@ -1576,7 +1657,14 @@ def main() -> int:
         "project": str(project),
         "ic_name": args.ic_name,
         "steps": [asdict(s) for s in plan],
-        "verdict": "FAIL" if max(pass1_rc, rc_second) else pass1_verdict,
+        # R-0915-85 — the published word is the RUN's word, not the exit code
+        # spelled as a word. A non-zero rc means "not green", and NOT_MEASURED
+        # is not green; overwriting it with FAIL made the artefact claim a
+        # finding about a design nothing had looked at, which is the one thing
+        # this ruling exists to stop.
+        "verdict": (_V.Verdict.FAIL.value
+                    if (rc_second or pass1_verdict == _V.Verdict.FAIL.value)
+                    else pass1_verdict),
         "pass1": {"verdict": pass1_verdict, "rc": pass1_rc,
                   "source": "extraction, sufficiency and route without expert track"},
         "second_track": ("not run — D1 was REFUSED" if _refused else
@@ -1610,8 +1698,15 @@ def main() -> int:
               "reads a port list would report a verdict over ZERO ports. See "
               "reports/phase1/phase1_sufficiency.json (ports_reason="
               "extraction_gap)")
-    return max(0 if summary["verdict"] != "FAIL" else 1, rc_second, rc_route,
-               1 if _gap else 0)
+    # R-0915-85 — THE EXIT CODE IS THE RUN WORD. This read `!= "FAIL"`, so
+    # every word that is not FAIL exited 0, and after the line above stopped
+    # overwriting NOT_MEASURED into FAIL that included "nothing was measured".
+    # `verdict.GREEN` is the two words a run may exit 0 on; everything else is
+    # rc 1, whether it failed or was never looked at.
+    return max(0 if summary["verdict"] in (_V.Verdict.PASS.value,
+                                           _V.Verdict.PASS_WITH_WAIVERS.value)
+               else 1,
+               rc_second, rc_route, 1 if _gap else 0)
 
 
 if __name__ == "__main__":

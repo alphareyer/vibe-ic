@@ -1,144 +1,136 @@
 #!/usr/bin/env python3
-"""`_aggregate_verdict` must not turn an unenumerated status into a silent PASS.
+"""The phase-2 verdict aggregator has no catch-all — RETIRED ON PURPOSE and rewritten.
 
-WHAT WENT WRONG
-===============
-``design_one_shot_runner._aggregate_verdict`` classified four FAIL statuses and
-``WAIVED``, and returned ``PASS`` for everything else. Its own comment names the
-hazard::
+WHAT THIS FILE USED TO PIN, and why it is rewritten rather than deleted.
 
-    everything this function does not enumerate falls through to the catch-all
-    `return "PASS"` below
+`design_one_shot_runner._aggregate_verdict` classified four FAIL statuses and
+`WAIVED`, and returned `PASS` for everything else. Its own comment named the
+hazard — "everything this function does not enumerate falls through to the
+catch-all `return "PASS"`" — and the hazard bit twice: `BLOCKED` (#544) was
+added by hand after the first time, and `SKIP`, the status the runner emitted
+MORE than any other, reached the same silent PASS.
 
-``BLOCKED`` was added by hand after that bit once. It bit again, on the status
-the runner emits MORE than any other: ``SKIP`` appears at 53 call sites (against
-34 ``FAIL`` and 22 ``PASS``) and was never enumerated, so it reached the same
-silent ``PASS``.
+This file's job was to make that visible: an unknown status had to be REPORTED
+rather than absorbed. And it ended with a deliberate pin,
+`test_the_published_verdicts_are_unchanged`, carrying this instruction:
 
-The consequence is cross-phase and was found by the 63x8 round-2 review: phase 3
-reads ``SKIP`` as ``PASS_WITH_WAIVERS``, phase 2 reads the identical word as
-clean. Because the phase-2 verdict is ``PASS`` rather than ``PASS_WITH_WAIVERS``,
-no ``waivers.json`` entry is required or auto-generated, so a disclosed skip
-never reaches the must-close list. The same word, two opposite meanings, in two
-runners over the same 63-step matrix.
+    If a later change promotes SKIP to PASS_WITH_WAIVERS, this test must be
+    retired ON PURPOSE, with the published-result restatement acknowledged —
+    not quietly adjusted to match new behaviour.
 
-WHAT THIS FILE LOCKS, AND WHAT IT DELIBERATELY DOES NOT
-=======================================================
-Locked: the classification is TOTAL. An unknown status is reported rather than
-absorbed, and a ``PASS`` carrying skips says so.
+R-0915-85 IS THAT CHANGE, AND THIS IS THAT ACKNOWLEDGEMENT. The ruling reduced
+the vocabulary to five words at the producers. `SKIP` no longer exists: each of
+its 118 sites in this runner was classified individually into `PASS` (the step
+ran and correctly had nothing to change), `NOT_APPLICABLE` (a declaration in the
+input says it does not apply) or `NOT_MEASURED` with a reason. The published
+phase-2 results ARE restated by that, and the four frozen replays in
+`test_r0915_85_the_frozen_replays.py` are where the restatement is measured
+rather than asserted.
 
-NOT locked: the verdict itself. Promoting ``SKIP`` to ``PASS_WITH_WAIVERS``
-would restate every published phase-2 result, which is a decision for whoever
-owns the benchmark contract. The gap is disclosed here and tracked upstream; it
-is not silently repaired by the reviewer who found it.
+WHAT IS PINNED NOW, and it is STRICTLY STRONGER than what this file pinned
+before. The old property was "an unknown status is visible". The new one is
+that an unknown status cannot exist: `verdict.parse` raises
+`UnknownVerdictWord` at the row that carries it, which is earlier and louder
+than a stderr line nobody greps. The catch-all is gone by construction rather
+than by enumeration, so there is no list left to forget to extend — which is
+what every one of the three hand-patches above was.
 """
 from __future__ import annotations
 
-import contextlib
-import io
-import re
 import sys
 
 import pytest
 
 from _plugin_tree import plugin_path
 
+sys.path.insert(0, str(plugin_path() / "programs"))
+
+import verdict as V  # noqa: E402
+
 RUNNER = plugin_path() / "programs" / "design_one_shot_runner.py"
 
 
 @pytest.fixture(scope="module")
 def agg():
-    """The real function, lifted out of a module too heavy to import.
+    """The real runner's aggregator and its row type, imported not copied."""
+    import design_one_shot_runner as D  # noqa: PLC0415 — heavy, module-scoped
+    return D._aggregate_verdict, D.StepResult
 
-    Extracted by source so the assertions run against the SHIPPED text rather
-    than a copy of it — a re-implementation here would pass whatever the runner
-    did, which is the failure mode this whole file is about.
+
+def _v(fn, rows):
+    return fn(rows)
+
+
+# ── the catch-all is gone BY CONSTRUCTION ────────────────────────────────
+
+def test_an_unknown_status_cannot_reach_the_aggregator_at_all(agg):
+    """The replacement for "an unknown status is reported, not absorbed".
+
+    It is not reported, because it cannot be built: the row refuses it.
     """
+    _, SR = agg
+    with pytest.raises(V.UnknownVerdictWord):
+        SR("b", "SOME_NEW_STATUS")
+
+
+def test_the_deleted_word_this_file_was_written_about_is_refused(agg):
+    """`SKIP` — 118 sites in this runner, and the one that reached the
+    catch-all. It is not a status any more."""
+    _, SR = agg
+    with pytest.raises(V.UnknownVerdictWord):
+        SR("lec", "SKIP")
+
+
+def test_the_aggregator_has_no_return_pass_catch_all_in_its_source():
+    """Read off the SHIPPED text, because a re-implementation here would pass
+    whatever the runner did — the failure mode this whole file is about."""
     src = RUNNER.read_text(encoding="utf-8")
-    m = re.search(r"def _aggregate_verdict.*?(?=\nif __name__)", src, re.S)
-    assert m, "could not locate _aggregate_verdict in the shipped runner"
-    ns: dict = {"sys": sys}
-    exec(  # noqa: S102 — executing our own shipped source, by design
-        "from typing import List\n"
-        "class StepResult:\n"
-        "    def __init__(self, name, status):\n"
-        "        self.name = name; self.status = status\n" + m.group(0),
-        ns,
-    )
-    return ns["_aggregate_verdict"], ns["StepResult"]
+    start = src.index("def _aggregate_verdict")
+    body = src[start:start + 4000]
+    assert 'return "PASS"' not in body, (
+        "the aggregator has a literal catch-all again; R-0915-85 replaced the "
+        "whole function with verdict.run_verdict precisely to delete it")
+    assert "_V.run_verdict" in body
 
 
-def _run(agg_fn, plan):
-    err = io.StringIO()
-    with contextlib.redirect_stderr(err):
-        verdict = agg_fn(plan)
-    return verdict, err.getvalue()
+# ── the roll-up, in both directions ──────────────────────────────────────
 
-
-def test_an_unknown_status_is_reported_not_absorbed(agg):
-    """The catch-all. Fails on the unfixed function, which said nothing."""
+def test_a_run_of_passes_is_a_pass(agg):
     fn, SR = agg
-    verdict, err = _run(fn, [SR("a", "PASS"), SR("b", "SOME_NEW_STATUS")])
-    assert "UNCLASSIFIED" in err, (
-        "an unenumerated status reached the verdict aggregator and produced no "
-        f"diagnostic at all; stderr was {err!r}")
-    assert "SOME_NEW_STATUS" in err, err
+    assert _v(fn, [SR("a", "PASS"), SR("b", "PASS")]) == "PASS"
 
 
-def test_an_unknown_status_does_not_become_a_failure(agg):
-    """Guard the guard, in the other direction.
-
-    Making unknown statuses FAIL would turn a rename into a red run and would
-    be its own kind of lie. The requirement is visibility, not severity.
-    """
+def test_one_fail_fails_the_run(agg):
     fn, SR = agg
-    verdict, _ = _run(fn, [SR("a", "PASS"), SR("b", "SOME_NEW_STATUS")])
-    assert verdict != "FAIL", verdict
+    assert _v(fn, [SR("a", "PASS"), SR("b", "FAIL")]) == "FAIL"
 
 
-def test_a_pass_carrying_skips_discloses_them(agg):
-    """A bare PASS must not hide that steps were skipped."""
+def test_a_waived_step_makes_the_run_pass_with_waivers(agg):
     fn, SR = agg
-    verdict, err = _run(fn, [SR("synth", "PASS"), SR("lec", "SKIP")])
-    assert "SKIPPED step(s)" in err, err
-    assert "lec" in err, "the disclosure does not name the skipped step"
-    assert "waivers" in err, (
-        "the disclosure does not say why a skipped step matters — that it "
-        "reaches no must-close list")
+    assert _v(fn, [SR("a", "PASS_WITH_WAIVERS", detail="a row to close")]) == \
+        "PASS_WITH_WAIVERS"
 
 
-def test_the_published_verdicts_are_unchanged(agg):
-    """Deliberately pinned: this change discloses, it does not reclassify.
-
-    If a later change promotes SKIP to PASS_WITH_WAIVERS, this test must be
-    retired ON PURPOSE, with the published-result restatement acknowledged —
-    not quietly adjusted to match new behaviour.
-    """
+def test_an_unmeasured_step_keeps_the_run_off_pass(agg):
+    """THE RESTATEMENT, in one assertion. This is the case that used to be
+    `SKIP` and used to return a clean `PASS` — and that phase 3 read as
+    PASS_WITH_WAIVERS over the same forty-four steps, which is the
+    two-vocabularies defect R-0915-85 deleted."""
     fn, SR = agg
-    assert _run(fn, [SR("a", "PASS")])[0] == "PASS"
-    assert _run(fn, [SR("a", "PASS"), SR("b", "SKIP")])[0] == "PASS"
-    assert _run(fn, [SR("a", "FAIL")])[0] == "FAIL"
-    assert _run(fn, [SR("a", "WAIVED")])[0] == "PASS_WITH_WAIVERS"
-    assert _run(fn, [SR("a", "ADVISORY")])[0] == "PASS"
-    assert _run(fn, [SR("a", "BLOCKED")])[0] == "FAIL"
+    assert _v(fn, [SR("a", "PASS"),
+                   SR("lec", "NOT_MEASURED",
+                      reason_class="inconclusive")]) == "NOT_MEASURED"
 
 
-def test_every_status_the_runner_emits_is_classified(agg):
-    """Totality against the runner's OWN vocabulary, discovered not typed.
-
-    Scrapes the statuses actually constructed in the shipped source, so a new
-    one added tomorrow is covered by construction rather than by remembering to
-    extend a list here.
-    """
+def test_a_not_applicable_step_costs_the_run_nothing(agg):
+    """The other direction: a declaration in the input is not a hole."""
     fn, SR = agg
-    src = RUNNER.read_text(encoding="utf-8")
-    emitted = set(re.findall(r'StepResult\([^,]+,\s*"([A-Z][A-Z_0-9-]+)"', src))
-    assert emitted, "found no StepResult statuses — the scrape is broken"
-    unclassified = []
-    for st in sorted(emitted):
-        _, err = _run(fn, [SR("s", st)])
-        if "UNCLASSIFIED" in err:
-            unclassified.append(st)
-    assert not unclassified, (
-        f"the runner emits status(es) {unclassified} that its own verdict "
-        f"aggregator does not classify")
+    assert _v(fn, [SR("a", "PASS"),
+                   SR("A3", "NOT_APPLICABLE",
+                      declared_by="L5: no analog blocks")]) == "PASS"
+
+
+def test_a_run_with_no_contributing_step_is_not_a_pass(agg):
+    """The empty numerator the old catch-all turned green."""
+    fn, SR = agg
+    assert _v(fn, []) == "NOT_MEASURED"

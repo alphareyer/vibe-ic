@@ -60,8 +60,15 @@ def _load():
 FC = _load()
 
 
-def _res(sid, status, name="s"):
-    return FC.StepResult(id=sid, name=name, stage="x", status=status)
+def _res(sid, status, name="s", reason_class=None):
+    """R-0915-85 — the cascade rules read the REASON: a step whose declared
+    output is absent is `FAIL(missing_artefact)`, and that is the shape a
+    known-gap / deferral attribution is about. A bare FAIL is a gate's own
+    defect and is correctly never attributed to an ancestor."""
+    if reason_class is None and status == "FAIL":
+        reason_class = "missing_artefact"
+    return FC.StepResult(id=sid, name=name, stage="x", status=status,
+                         reason_class=reason_class or "")
 
 
 def _steps(*specs):
@@ -93,10 +100,10 @@ def _reads(sid, blocks_on, **extra):
 def test_a_step_declaring_its_own_gap_stays_missing():
     steps = _steps({"id": 13}, {"id": "M2", "blocks_on": [13],
                                 "known_gap": "no emitter writes these"})
-    results = [_res(13, "WAIVED"), _res("M2", "MISSING")]
+    results = [_res(13, "PASS_WITH_WAIVERS"), _res("M2", "FAIL")]
     _cascade(steps, results)
     m2 = results[1]
-    assert m2.status == "MISSING", m2.status
+    assert m2.status == "FAIL", m2.status
     assert m2.cascade_note == "known-gap(M2)"
     assert "no emitter writes these" in " ".join(m2.reasons)
 
@@ -108,11 +115,11 @@ def test_a_descendant_of_a_declared_gap_is_attributed_to_it_not_to_the_waiver():
                    {"id": "M2", "blocks_on": [13], "known_gap": "no emitter"},
                    {"id": "M3", "blocks_on": ["M2"]},
                    {"id": "M4", "blocks_on": ["M3"]})
-    results = [_res(13, "WAIVED"), _res("M2", "MISSING"),
-               _res("M3", "MISSING"), _res("M4", "MISSING")]
+    results = [_res(13, "PASS_WITH_WAIVERS"), _res("M2", "FAIL"),
+               _res("M3", "FAIL"), _res("M4", "FAIL")]
     _cascade(steps, results)
     for r in results[2:]:
-        assert r.status == "MISSING", f"{r.id}: {r.status}"
+        assert r.status == "FAIL", f"{r.id}: {r.status}"
         assert r.cascade_note == "blocked-by-known-gap(M2)", r.cascade_note
         assert "no emitter" in " ".join(r.reasons)
 
@@ -123,11 +130,11 @@ def test_the_softer_verdict_is_not_reachable_through_a_declared_gap():
     steps = _steps({"id": 13},
                    {"id": "M2", "blocks_on": [13], "known_gap": "g"},
                    {"id": "M3", "blocks_on": ["M2"]})
-    results = [_res(13, "WAIVED"), _res("M2", "MISSING"), _res("M3", "MISSING")]
+    results = [_res(13, "PASS_WITH_WAIVERS"), _res("M2", "FAIL"), _res("M3", "FAIL")]
     info = _cascade(steps, results)
     assert not [x for x in info["deferred_by_upstream"]
                 if x[0] in ("M2", "M3")], info["deferred_by_upstream"]
-    assert all(r.status != "DEFERRED-BY-UPSTREAM" for r in results[1:])
+    assert all(r.status != "NOT_MEASURED" for r in results[1:])
 
 
 # ── the legitimate cascade is untouched ─────────────────────────────────────
@@ -136,9 +143,9 @@ def test_a_plain_waived_ancestor_still_defers():
     deferred never ran — when the flow DECLARES the step reads what the
     predecessor writes (#776)."""
     steps = _steps(_writes(12), _reads(13, [12]))
-    results = [_res(12, "WAIVED"), _res(13, "MISSING")]
+    results = [_res(12, "PASS_WITH_WAIVERS"), _res(13, "FAIL")]
     _cascade(steps, results, {12: {"ticket": "T-1"}})
-    assert results[1].status == "DEFERRED-BY-UPSTREAM"
+    assert results[1].status == "NOT_MEASURED"
     assert "ticket=T-1" in results[1].cascade_note
 
 
@@ -147,9 +154,9 @@ def test_the_same_chain_without_the_declaration_does_not_soften():
     waiver, only the declaration removed. This is the shape that produced
     `DEFERRED-BY-UPSTREAM(13)` on 1153 of the flow's 1221 ancestor pairs."""
     steps = _steps({"id": 12}, {"id": 13, "blocks_on": [12]})
-    results = [_res(12, "WAIVED"), _res(13, "MISSING")]
+    results = [_res(12, "PASS_WITH_WAIVERS"), _res(13, "FAIL")]
     info = _cascade(steps, results, {12: {"ticket": "T-1"}})
-    assert results[1].status == "MISSING", results[1].status
+    assert results[1].status == "FAIL", results[1].status
     assert results[1].cascade_note == "waived-ancestor-undeclared(12)"
     assert info["deferred_by_upstream"] == []
 
@@ -159,7 +166,7 @@ def test_the_deferral_reason_no_longer_asserts_what_it_cannot_check():
     deferred" off an ORDERING edge alone. #776: it may say so only where the
     flow declares the read, and it must still never use the old phrasing."""
     steps = _steps(_writes(12), _reads(13, [12]))
-    results = [_res(12, "WAIVED"), _res(13, "MISSING")]
+    results = [_res(12, "PASS_WITH_WAIVERS"), _res(13, "FAIL")]
     _cascade(steps, results, {12: {"ticket": "T-1"}})
     reason = " ".join(results[1].reasons)
     assert "consumes outputs" not in reason, reason
@@ -168,7 +175,7 @@ def test_the_deferral_reason_no_longer_asserts_what_it_cannot_check():
 
 def test_a_failing_step_is_still_never_converted():
     steps = _steps({"id": 12}, {"id": 13, "blocks_on": [12]})
-    results = [_res(12, "WAIVED"), _res(13, "FAIL")]
+    results = [_res(12, "PASS_WITH_WAIVERS"), _res(13, "FAIL")]
     _cascade(steps, results, {12: {"ticket": "T-1"}})
     assert results[1].status == "FAIL"
 
@@ -176,9 +183,9 @@ def test_a_failing_step_is_still_never_converted():
 def test_a_gap_declared_but_empty_is_not_a_gap():
     """`known_gap: ""` states nothing; it must not silence the cascade."""
     steps = _steps(_writes(12), _reads(13, [12], known_gap="  "))
-    results = [_res(12, "WAIVED"), _res(13, "MISSING")]
+    results = [_res(12, "PASS_WITH_WAIVERS"), _res(13, "FAIL")]
     _cascade(steps, results, {12: {"ticket": "T-1"}})
-    assert results[1].status == "DEFERRED-BY-UPSTREAM"
+    assert results[1].status == "NOT_MEASURED"
 
 
 def test_an_ANCESTOR_whose_gap_is_empty_does_not_stop_the_walk():
@@ -189,9 +196,9 @@ def test_an_ANCESTOR_whose_gap_is_empty_does_not_stop_the_walk():
     steps = _steps(_writes(11),
                    _reads(12, [11], known_gap="   "),
                    _reads(13, [12]))
-    results = [_res(11, "WAIVED"), _res(12, "MISSING"), _res(13, "MISSING")]
+    results = [_res(11, "PASS_WITH_WAIVERS"), _res(12, "FAIL"), _res(13, "FAIL")]
     _cascade(steps, results, {11: {"ticket": "T-9"}})
-    assert results[2].status == "DEFERRED-BY-UPSTREAM", results[2].status
+    assert results[2].status == "NOT_MEASURED", results[2].status
     assert "known-gap" not in results[2].cascade_note, results[2].cascade_note
 
 

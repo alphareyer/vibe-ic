@@ -93,7 +93,14 @@ def _dispatch(proj: Path, site: str, fn=_ran) -> R.StepResult:
     sr = _spf.gate(proj, "design_one_shot_runner", site,
                    R._preflight_refusal(site), fn, proj, "chip_top")
     # `main()` records the site's row under the SITE name.
-    return R.StepResult(site, sr.status, 0.0, sr.detail, extras=sr.extras)
+    # R-0915-85 — a row re-published under the SITE name carries the
+    # structured fields with it. Dropping `reason_class` here is how a
+    # NOT_MEASURED row loses the reason its own producer named, which the row
+    # type now refuses outright.
+    return R.StepResult(site, sr.status, 0.0, sr.detail, extras=sr.extras,
+                        reason_class=getattr(sr, "reason_class", ""),
+                        declared_by=getattr(sr, "declared_by", ""),
+                        disclosures=list(getattr(sr, "disclosures", ()) or ()))
 
 
 def _registry(proj: Path, *sites: str) -> dict:
@@ -231,8 +238,8 @@ def test_a_deliberate_entry_or_exit_skip_is_not_resurrected(tmp_path):
     """`SKIPPED-BY-ENTRY` / `SKIPPED-BY-EXIT` are designed non-dispatches, not
     starvation. A retry that resurrected them would violate --entry-step."""
     proj = _project(tmp_path, rtl=True)
-    plan = [R.StepResult("rtl_validate", "SKIPPED-BY-ENTRY", 0.0, "upstream"),
-            R.StepResult("sim", "SKIPPED-BY-EXIT", 0.0, "past the exit"),
+    plan = [R.StepResult("rtl_validate", "NOT_APPLICABLE", 0.0, "upstream", declared_by="the fixture declares this step not applicable"),
+            R.StepResult("sim", "NOT_APPLICABLE", 0.0, "past the exit", declared_by="the fixture declares this step not applicable"),
             _producer_ran()]
     called: list = []
     reg = {s: (lambda: called.append(s) or []) for s in ("rtl_validate", "sim")}
@@ -265,7 +272,9 @@ def test_a_blocked_row_that_is_not_a_preflight_refusal_is_never_claimed(
     this repair claim to know how to re-dispatch a step whose refusal it cannot
     even attribute."""
     plan = [R.StepResult("rtl_validate", _spf.REFUSAL_STATUS, 0.0,
-                         "rtl/ missing -- REFUSED TO RUN"), _producer_ran()]
+                         "rtl/ missing -- REFUSED TO RUN",
+                         reason_class=_spf.REFUSAL_REASON_CLASS),
+            _producer_ran()]
     assert R._refusal_producers(plan[0]) == set()
     assert R._redispatch_starved_sites(plan, "rtl_gen", {}) == []
 
@@ -286,7 +295,7 @@ def test_an_unregisterable_site_is_recorded_unmeasured_not_left_standing(
     assert row.status == _spf.REFUSAL_STATUS, "not green, and not a zero"
     assert row.extras["finding"] == R.SUPERSEDED_UNMEASURED
     assert "NOT re-measured" in row.detail
-    assert R._aggregate_verdict([row]) == "FAIL", (
+    assert R._aggregate_verdict([row]) == "NOT_MEASURED", (
         "an unmeasured supersession must not become a pass; the runner's own "
         "aggregator has to still fail on it")
 

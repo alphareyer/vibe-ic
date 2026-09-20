@@ -124,7 +124,7 @@ def _run_gate(monkeypatch, proj: Path, extra=(), executed=None):
 def test_761_skip_states_the_layer_not_the_filter(tmp_path):
     proj = _project(tmp_path, _measured_cases())
     res = R.step_l10_unit_tb_gen(proj, _DUT_MODULE)
-    assert res.status == "SKIP", res.detail
+    assert res.status == "NOT_MEASURED", res.detail
     d = res.detail
 
     # the LAYER: how many cases exist, and of which kinds

@@ -214,7 +214,7 @@ def test_structured_advisory_counts_as_a_substantive_nonblocking_run(
         {"advisory_program_exit_zero": {
             "command": "advisory_check --json advisory.json"}},
     ]})
-    assert res.status == "PARTIALLY-VACUOUS", res.reasons
+    assert res.status == "PASS", res.reasons
     assert any(r.startswith("ADVISORY (non-blocking") for r in res.reasons)
     assert res.advisory_gate_records[0]["structured_verdict"] == \
         "PASS_WITH_ADVISORIES"

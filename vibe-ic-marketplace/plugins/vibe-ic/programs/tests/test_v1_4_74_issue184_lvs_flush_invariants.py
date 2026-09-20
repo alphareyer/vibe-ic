@@ -119,6 +119,9 @@ class ReadFlushedRealFsTest(unittest.TestCase):
         txt = _p3._read_lvs_report_flushed(
             self.rpt, attempts=1, base_delay=0.01, max_wait=0.05,
             rc=0, clean_exit_max_wait=0.3, clean_exit_attempts=4)
+        # `lvs_verdict_tokens.classify` is the LVS report reader's own
+        # vocabulary — a classification of the TEXT, not a step status — and
+        # R-0915-85 claims neither it nor the gate word it feeds.
         self.assertEqual(_lvt.classify(txt), "INCOMPLETE")
 
     def test_absent_report_returns_empty(self):

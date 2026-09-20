@@ -81,23 +81,31 @@ def test_the_next_stage_is_reviewed_when_the_only_wound_is_the_last_review(
         tmp_path):
     """Step 7's exact r26 shape: everything green but the inherited decline."""
     reg = _register(tmp_path, [
-        _row(7, "INCOMPLETE",
+        _row(7, "NOT_MEASURED",
              [A_PASSING_GATE, DECLINED_REVIEW, A_ROSTER_NA_GATE]),
-        {"id": "FS1", "status": "VACUOUS_PASS"},
+        {"id": "FS1", "status": "NOT_MEASURED"},
     ])
     got = S.stage_passed(reg, "stage2", None)
-    assert got["passed"] is True, got["why"]
-    # DISCLOSED, not dropped.
+    # THE SUBJECT, UNCHANGED: the inherited decline is PARTITIONED OUT and
+    # disclosed, never counted as this stage's own wound.
     assert [r["id"] for r in got["proceeded_past_inherited_decline"]] == ["7"]
-    assert got["non_green_rows"] == []
-    assert "proceeded past 7=INCOMPLETE" in got["why"]
+    assert "proceeded past 7=NOT_MEASURED" in got["why"]
+    # R-0915-85 — FS1 WAS `VACUOUS_PASS`, a word inside EXCUSED, so the stage
+    # read green over a formal-sign-off step that had examined nothing. It is
+    # NOT_MEASURED now and it is NOT green, which is the ruling's whole point;
+    # it is the only row this stage is charged with, and it is named.
+    assert [r["id"] for r in got["non_green_rows"]] == ["FS1"]
+    assert got["passed"] is False, got["why"]
+    # …and the decline is gone anyway: the next stage IS reviewed. That is the
+    # r26 repair, and it is asserted here rather than left to the caller.
+    assert "7" not in [r["id"] for r in got["non_green_rows"]]
 
 
 # ── the negative controls: what must STILL block ─────────────────────────────
 def test_a_genuinely_failing_gate_beside_the_decline_still_blocks(tmp_path):
     """The decline is not a blanket pardon for the row it appears in."""
     reg = _register(tmp_path, [
-        _row(7, "INCOMPLETE", [
+        _row(7, "NOT_MEASURED", [
             DECLINED_REVIEW,
             {"gate": "sdc_sanity_check", "verdict": "FAIL",
              "reason_class": None, "exit_code": 1},
@@ -116,7 +124,7 @@ def test_an_unexamined_gate_beside_the_decline_still_blocks(tmp_path):
     """
     for cls in (R.EXECUTION_ERROR, R.ZERO_DENOMINATOR):
         reg = _register(tmp_path, [
-            _row(7, "INCOMPLETE", [
+            _row(7, "NOT_MEASURED", [
                 DECLINED_REVIEW,
                 {"gate": "some_structural_check", "verdict": "INCOMPLETE",
                  "reason_class": cls, "exit_code": 2},
@@ -128,17 +136,31 @@ def test_an_unexamined_gate_beside_the_decline_still_blocks(tmp_path):
 
 def test_a_failed_row_is_never_exempt_however_it_is_gated(tmp_path):
     """The exemption is reachable only from the NO_VERDICT_IN_SCOPE tier."""
-    for status in ("FAIL", "MISSING", "PASS_VOIDED_BY_DEPENDENCY"):
+    # R-0915-85 — the exempt tier is `NOT_MEASURED` and nothing else, so the
+    # non-green words OUTSIDE it reduce to FAIL: `MISSING` and
+    # `SKIPPED-SETUP-REQUIRED` were two more spellings of one fact each. The
+    # loop is stated over the vocabulary rather than over three spellings of
+    # two facts, and the arm below keeps the pair the file needs — a row IN the
+    # exempt tier whose gates do not carry the declined review is still
+    # blocking, so the exemption rests on the RECORDS and not on the word.
+    for status in ("FAIL",):
         reg = _register(tmp_path,
                         [_row(7, status, [DECLINED_REVIEW])],
                         name=f"c_{status}.json")
-        got = S.stage_passed(reg, "stage2", None)
+        got = _S_passed = S.stage_passed(reg, "stage2", None)
         assert got["passed"] is False, f"{status}: {got['why']}"
+
+    _other_gate = {"gate": "some_other_gate", "verdict": "NOT_CHECKED",
+                   "reason_class": R.EXECUTION_ERROR, "exit_code": 2}
+    reg = _register(tmp_path, [_row(7, "NOT_MEASURED", [_other_gate])],
+                    name="c_not_measured_other_gate.json")
+    got = S.stage_passed(reg, "stage2", None)
+    assert got["passed"] is False, got["why"]
 
 
 def test_a_row_with_no_gate_records_is_never_exempt(tmp_path):
     """An exemption granted over an empty population is a vacuous pass."""
-    reg = _register(tmp_path, [{"id": 7, "status": "INCOMPLETE"}])
+    reg = _register(tmp_path, [{"id": 7, "status": "NOT_MEASURED"}])
     got = S.stage_passed(reg, "stage2", None)
     assert got["passed"] is False, got["why"]
 
@@ -146,7 +168,7 @@ def test_a_row_with_no_gate_records_is_never_exempt(tmp_path):
 def test_some_other_programs_not_checked_is_not_this_exemption(tmp_path):
     """Only THIS program's own decline is inherited; nobody else's."""
     reg = _register(tmp_path, [
-        _row(7, "INCOMPLETE", [dict(DECLINED_REVIEW, gate="lvs_check")]),
+        _row(7, "NOT_MEASURED", [dict(DECLINED_REVIEW, gate="lvs_check")]),
     ])
     got = S.stage_passed(reg, "stage2", None)
     assert got["passed"] is False, got["why"]
@@ -155,7 +177,7 @@ def test_some_other_programs_not_checked_is_not_this_exemption(tmp_path):
 def test_the_head_of_the_cascade_still_declines(tmp_path):
     """P0's shape: a real gate returned no verdict. Nothing pardons that."""
     reg = _register(tmp_path, [
-        {"id": "P0", "stage": "stage1", "status": "INCOMPLETE",
+        {"id": "P0", "stage": "stage1", "status": "NOT_MEASURED",
          "gate_records": [
              {"name": "waiver_staleness_check", "verdict": "INCOMPLETE",
               "reason_class": R.ZERO_DENOMINATOR}]},

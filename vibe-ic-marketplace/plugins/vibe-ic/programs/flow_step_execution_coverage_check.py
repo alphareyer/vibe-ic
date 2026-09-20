@@ -77,7 +77,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 # vibe-ic#634 — the producer and this guard read the SAME classification of
 # verdict words, so a tier added on one side cannot be unknown on the other.
-import _flow_verdict_tiers as _T                           # noqa: E402
+import verdict as _T                           # noqa: E402
 
 # Exit codes. 2 = NOT CHECKED is a first-class verdict, not an error code: it is
 # what the gate must return whenever it could not actually inspect the run.
@@ -130,7 +130,24 @@ _REAL_DONE = {_T.FULL_PASS}
 # (#632) and INCOMPLETE (#599), both of which used to be in NO set here and so
 # escaped the ordering guard entirely while the producer's own arithmetic
 # counted them done. A tier added tomorrow lands here by construction.
-_VACUOUS = _T.is_qualified_done
+# R-0915-85 — THE CARVE-OUT MUST FOLLOW THE WORDS ITS MEMBERS BECAME.
+#
+# This was `is_qualified_done`, which is now `PASS_WITH_WAIVERS` alone. The set
+# it stands for is "the ancestor RAN and certified nothing" -- VACUOUS-PASS,
+# STRUCTURE-ONLY and INCOMPLETE, all of which are `NOT_MEASURED` now, plus
+# WAIVED, which is `PASS_WITH_WAIVERS`. Left as the one word, a NOT_MEASURED
+# ancestor fell straight through to `_emit` and every step depending on it was
+# reported out of order: MEASURED on this file's own fixture, D1 = NOT_MEASURED
+# raised `[1] Spec-to-RTL marked done while dependency [D1]`, which is the r26
+# shape -- one upstream that never looked, charged to the step below it.
+#
+# What still blocks is unchanged and is decided by `_blocks_when_vacuous`: a
+# SIGN-OFF, a TERMINAL hand-off or a stage-5 attestation that certified
+# nothing must still stop a downstream done-claim. A FAIL ancestor -- which is
+# what a MISSING artefact is now -- never reaches here at all.
+def _VACUOUS(status) -> bool:
+    return (_T.says_nothing_was_measured(status)
+            or _T.is_qualified_done(status))
 
 
 def _blocks_when_vacuous(step: dict) -> bool:
@@ -159,7 +176,15 @@ def _blocks_when_vacuous(step: dict) -> bool:
 
 
 def _norm(status: str) -> str:
-    return str(status or "").upper().replace("_", "-").strip()
+    """R-0915-85 — an IDENTITY for the five, which have one spelling each.
+
+    It used to upper-case and swap `_` for `-` because the producer wrote
+    `VACUOUS_PASS` and the reports said `VACUOUS-PASS`. `verdict.parse` refuses
+    a second spelling now, so normalising here would turn every word it touched
+    into one `parse` cannot read — measured: `NOT_APPLICABLE` became
+    `NOT-APPLICABLE` and every predicate below raised.
+    """
+    return str(status or "").strip()
 
 
 class NotChecked(Exception):
@@ -282,7 +307,13 @@ def analyze(report: dict, graph: dict | None = None,
         st = _norm(s.get("status"))
         if st not in _NOT_APPLICABLE:
             steps_applicable += 1
-        if st not in _NOT_APPLICABLE and st == "MISSING":
+        # R-0915-85 — a declared output that does not exist is
+        # `FAIL(missing_artefact)`; the bucket is read off the reason, which is
+        # where the fact now lives.
+        if (st not in _NOT_APPLICABLE
+                and st == _T.Verdict.FAIL.value
+                and str(s.get("reason_class") or "")
+                == _T.ReasonClass.MISSING_ARTEFACT.value):
             applicable_missing.append(s)
         if _SIGNOFF_RE.search(name):
             signoff_steps.append(s)

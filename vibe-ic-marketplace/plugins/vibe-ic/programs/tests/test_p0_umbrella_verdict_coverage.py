@@ -66,7 +66,7 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import _flow_verdict_tiers as _T  # noqa: E402
+import verdict as _T  # noqa: E402
 import _p0_umbrella_probe_flow as _probe  # noqa: E402
 import flow_compliance_check as F  # noqa: E402
 
@@ -178,10 +178,16 @@ def test_a_clean_sweep_with_one_uninvoked_gate_is_not_a_PASS(
     assert step["status"] != "PASS", (
         "the umbrella certified 5 registered checkers on the strength of the 4 "
         f"that answered; status={step['status']!r}")
-    assert step["status"] == "INCOMPLETE"
-    assert rc == 0, (
-        "INCOMPLETE is a disclosure tier, not a failure — it must not turn a "
-        "run red on its own")
+    assert step["status"] == "NOT_MEASURED"
+    # R-0915-85 — NOT FAIL, AND NOT GREEN EITHER. #599 read "not a failure" as
+    # "rc 0", and that reading is what sha256 run16 shipped: the only step in
+    # scope had certified 4 of 5 and the run answered green. The tier is still
+    # a disclosure and still never FAIL; what it no longer does is let the run
+    # claim a PASS it did not measure.
+    assert rc == 1, (
+        "a run whose scope holds a step nobody measured cannot be PASS; it is "
+        "NOT_MEASURED, which is neither a failure nor a pass")
+    assert audit["verdict"] == "NOT_MEASURED", audit["verdict"]
 
 
 def test_a_clean_sweep_with_every_gate_invoked_IS_a_PASS(
@@ -265,7 +271,7 @@ def test_no_RTL_is_still_SKIPPED_CONDITION(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     step = next(s for s in json.loads(report.read_text())["steps"]
                 if s["id"] == "P0")
-    assert step["status"] == "SKIPPED-CONDITION"
+    assert step["status"] == "NOT_APPLICABLE"
 
 
 # ===========================================================================
@@ -391,7 +397,7 @@ def test_real_gates_a_clean_registry_with_one_uninvoked_gate_is_INCOMPLETE(
         real_umbrella["proj"], records_out=records)
     assert fails == [], "the scoped registry must contain no failing gate"
     assert F._p0_not_invocable_count(records) >= 1
-    assert F._p0_umbrella_status(passed, records) == "INCOMPLETE"
+    assert F.p0_umbrella_verdict(passed, records) == "NOT_MEASURED"
 
 
 def test_real_gates_a_fully_invoked_clean_registry_is_PASS(
@@ -405,15 +411,15 @@ def test_real_gates_a_fully_invoked_clean_registry_is_PASS(
         real_umbrella["proj"], records_out=records)
     assert fails == []
     assert F._p0_not_invocable_count(records) == 0
-    assert F._p0_umbrella_status(passed, records) == "PASS"
+    assert F.p0_umbrella_verdict(passed, records) == "PASS"
 
 
 # ===========================================================================
 # the decision function, as a truth table
 # ===========================================================================
 @pytest.mark.parametrize("executed,records,expected", [
-    (None, [], "SKIPPED-CONDITION"),
-    (None, [_not_invocable("g")], "SKIPPED-CONDITION"),
+    (None, [], "NOT_APPLICABLE"),
+    (None, [_not_invocable("g")], "NOT_APPLICABLE"),
     (False, [_fail("g")], "FAIL"),
     (False, [_fail("g"), _not_invocable("h")], "FAIL"),
     # `len(fails) == 0` over a population of ZERO. Not reachable from the one
@@ -426,19 +432,19 @@ def test_real_gates_a_fully_invoked_clean_registry_is_PASS(
     #
     # RB2-03 (#2063) moved the two ZERO-population rows from `INCOMPLETE` to
     # `NOT-MEASURED`: both are adjudicated identically (a qualified done-claim,
-    # in neither EXCUSED nor NON_GREEN — see `_flow_verdict_tiers`), so no run's
+    # in neither EXCUSED nor NON_GREEN — see `verdict`), so no run's
     # greenness moves, and the word now distinguishes "nothing answered" from
     # "some did not". The MIXED row below keeps `INCOMPLETE` and is what proves
     # the two cases have not been collapsed the other way.
-    (True, [], "NOT-MEASURED"),
+    (True, [], "NOT_MEASURED"),
     (True, [_pass("g")], "PASS"),
     (True, [_pass("g"), _skip("h")], "PASS"),
-    (True, [_not_invocable("g")], "NOT-MEASURED"),
-    (True, [_not_invocable("g"), _not_invocable("h")], "NOT-MEASURED"),
-    (True, [_pass("g"), _not_invocable("h")], "INCOMPLETE"),
+    (True, [_not_invocable("g")], "NOT_MEASURED"),
+    (True, [_not_invocable("g"), _not_invocable("h")], "NOT_MEASURED"),
+    (True, [_pass("g"), _not_invocable("h")], "NOT_MEASURED"),
 ])
 def test_umbrella_status_truth_table(executed, records, expected):
-    assert F._p0_umbrella_status(executed, records) == expected
+    assert F.p0_umbrella_verdict(executed, records) == expected
 
 
 def test_not_invocable_count_counts_only_that_verdict():
@@ -454,32 +460,50 @@ def test_not_invocable_count_counts_only_that_verdict():
 # where INCOMPLETE lands in the roll-up — asserted against the tier module,
 # not against a belief about it
 # ===========================================================================
-def test_incomplete_is_a_registered_producer_status():
-    """`_flow_verdict_tiers` derives done-claim membership BY SUBTRACTION, so an
-    unregistered word silently becomes a done-claim. INCOMPLETE was registered
-    by #599; the umbrella is a new PRODUCER of it and that must stay true."""
-    assert "INCOMPLETE" in _T.PRODUCER_STATUSES
+def test_the_tier_is_a_registered_producer_status():
+    """Membership is no longer derived by SUBTRACTION, which is the repair.
+
+    `_flow_verdict_tiers` worked out "is this a done-claim" by subtracting two
+    registers, so a word nobody registered silently became one. The umbrella's
+    own word went through that hole once already. `verdict.PRODUCER_STATUSES`
+    is the five, and `parse` refuses everything else, so the hole is closed by
+    construction rather than by remembering to register.
+    """
+    assert "NOT_MEASURED" in _T.PRODUCER_STATUSES
+    with pytest.raises(_T.UnknownVerdictWord):
+        _T.parse("INCOMPLETE")
 
 
-def test_incomplete_cannot_turn_a_green_run_red():
-    """The whole reason this is not `FAIL`. A gate that blocks every landing
-    gets deleted, not fixed — so the tier discloses and does not block."""
-    assert not _T.is_non_green("INCOMPLETE")
+def test_the_tier_is_never_FAIL_but_is_not_green():
+    """A gate that blocks every landing gets deleted, not fixed — so the tier
+    is still never a FAIL. It IS non-green: it keeps the run off PASS, and
+    `cascade_to_dependent` still takes nothing down with it."""
+    assert _T.parse("NOT_MEASURED") is not _T.Verdict.FAIL
+    assert _T.is_non_green("NOT_MEASURED")
+    assert _T.cascade_to_dependent(_T.StepVerdict.not_measured(
+        "P0", "umbrella", reason_class=_T.ReasonClass.PARTIAL_POPULATION,
+        reason="4 of 5")) is None
 
 
-def test_incomplete_is_not_a_full_pass():
-    """...and the whole reason it is not `PASS`. It is a QUALIFIED done-claim:
-    it ran and did not fail, but it certified less than its population."""
-    assert _T.is_done_claim("INCOMPLETE")
-    assert not _T.is_full_pass("INCOMPLETE")
-    assert _T.is_qualified_done("INCOMPLETE")
+def test_the_tier_is_not_a_done_claim_at_all():
+    """...and this is the r26 correction reaching the ordering guard.
+
+    `INCOMPLETE` was a QUALIFIED done-claim: it ran, it did not fail, it
+    certified less than its population — so the ordering guard read a step
+    that had measured NOTHING as claiming to have delivered a result, and
+    raised "marked done while dependency … = MISSING" against it.
+    NOT_MEASURED says the opposite in the word.
+    """
+    assert not _T.is_done_claim("NOT_MEASURED")
+    assert not _T.is_full_pass("NOT_MEASURED")
+    assert not _T.is_qualified_done("NOT_MEASURED")
 
 
 def test_incomplete_is_not_excused_from_the_denominator():
     """`EXCUSED` is what `total_required` subtracts. A P0 that certified 210 of
     246 is still a step that was required; removing it from the denominator
     would make the coverage gap improve the published ratio."""
-    assert not _T.is_excused("INCOMPLETE")
+    assert not _T.is_excused("NOT_MEASURED")
 
 
 if __name__ == "__main__":

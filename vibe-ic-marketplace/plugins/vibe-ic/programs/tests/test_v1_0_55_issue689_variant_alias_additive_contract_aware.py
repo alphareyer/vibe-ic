@@ -472,7 +472,7 @@ def test_noleak_sdc_guard_618_still_works(tmp_path):
     # CLOCK alias is on the table and the #618 SDC guard is what decides it.
     _request_interface(tmp_path, "chip_top", "clk", "rst_ni", "o")
     res = R.step_reset_clock_variant_aliases(tmp_path, "chip_top")
-    assert res.status == "SKIP"
+    assert res.status == "NOT_APPLICABLE"
     assert "#618" in res.detail and "clk_i" in res.detail
     assert "clk_i" in f.read_text() and "__rcvar_inner" not in f.read_text()
 
@@ -488,7 +488,7 @@ def test_noleak_l9_guard_518_still_works(tmp_path):
                       {"name": "data_in"}, {"name": "detected"}]}))
     before = f.read_text()
     res = R.step_reset_clock_variant_aliases(tmp_path, "chip_top")
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     assert "L9 declares native port spelling" in res.detail
     assert f.read_text() == before
 
@@ -523,7 +523,7 @@ def test_explicit_top_still_obeys_authoritative_l9_port_contract(tmp_path):
 
     res = R.step_reset_clock_variant_aliases(tmp_path, "generic_cdc")
 
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     assert "authoritative" in res.detail.lower()
     assert f.read_text() == before
     assert "__rcvar_inner" not in f.read_text()
@@ -548,7 +548,7 @@ def test_explicit_prompt_interface_does_not_gain_reset_synonym(tmp_path):
         "  value [15:0]: counter value\n")
     before = f.read_text()
     res = R.step_reset_clock_variant_aliases(tmp_path, "generic_counter")
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     assert f.read_text() == before
     assert " rst" not in f.read_text()
     assert "__rcvar_inner" not in f.read_text()

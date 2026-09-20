@@ -326,10 +326,21 @@ def test_an_unestablished_stage_verdict_is_not_checked(tree):
     assert "unestablished" in r.stdout
 
 
-def test_a_failed_stage_is_not_this_rungs_business(tree):
+def test_a_failed_stage_is_reviewed_anyway_and_the_rows_are_disclosed(tree):
+    """R-0915-85 DELETED the decline; r26 is why.
+
+    "Not this rung's business" was the sentence that produced r26: one review
+    that never looked put three more at NOT CHECKED, and steps that had
+    produced and verified their own artefacts were voided behind them. The
+    review reads the stage's ARTEFACTS, which are on disk either way, so a
+    failed stage is precisely the stage whose artefacts most need reading. It
+    runs, discloses that it is running over a non-green stage, and answers with
+    its OWN verdict.
+    """
     r = run(tree(REJECT), "--stage-verdict", "FAIL")
-    assert r.returncode == 2, r.stdout
-    assert "did not pass" in r.stdout
+    assert r.returncode == 1, r.stdout
+    assert "REVIEWING ANYWAY" in r.stdout, r.stdout
+    assert "not green" in r.stdout, r.stdout
 
 
 def test_an_empty_scope_is_not_checked_never_accepted(tree):

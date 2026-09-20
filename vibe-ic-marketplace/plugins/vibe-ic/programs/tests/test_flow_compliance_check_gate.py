@@ -387,13 +387,13 @@ def _satisfy_p0_ancestry(project: Path) -> Path:
 #: The step listing abbreviates exactly two of the producer's own status words;
 #: every other label is the word itself. Kept as a rendering map, NOT as a
 #: judgement about done-ness — the judgement below stays derived from
-#: `_flow_verdict_tiers`, the one place a verdict word is classified (#634). A
+#: `verdict`, the one place a verdict word is classified (#634). A
 #: label that is neither an alias here nor a `PRODUCER_STATUSES` member makes
 #: the precondition REFUSE rather than guess, so a renamed rendering reddens
 #: this file instead of quietly widening what counts as "closed".
 _LABEL_TO_PRODUCER_STATUS = {
-    "WAIVED-DEFERRED": "WAIVED",
-    "PASS-VOIDED": "PASS-VOIDED-BY-DEPENDENCY",
+    "WAIVED-DEFERRED": "PASS_WITH_WAIVERS",
+    "PASS-VOIDED": "NOT_MEASURED",
 }
 
 
@@ -411,7 +411,7 @@ def assert_p0_ancestry_closed(out: str) -> None:
     make the precondition and the assertion share a failure mode.
 
     WHAT IT MEASURES vs WHAT IT CLAIMED (vibe-ic#1351). Until now the test was
-    `!= "MISSING"`, i.e. it measured one spelling of one way to break the chain
+    `!= "FAIL"`, i.e. it measured one spelling of one way to break the chain
     while claiming the chain was CLOSED. Measured on this fixture's own tree,
     removing one artefact each and running the real gate:
 
@@ -434,22 +434,26 @@ def assert_p0_ancestry_closed(out: str) -> None:
     and only a sign-off / terminal hand-off / stage-5 attestation ancestor is
     held to full PASS (`_blocks_when_vacuous`). D1 is none of those and cannot
     become one without a flow change far larger than this file. The predicate is
-    imported from `_flow_verdict_tiers`, which exists precisely so this
+    imported from `verdict`, which exists precisely so this
     classification is not re-enumerated per consumer and so a tier invented
     tomorrow is adjudicated without anyone remembering to come here.
     """
     # Function-local: `programs/` is on `sys.path` via conftest, and a helper
     # this file's other 30-odd tests do not use should not be able to error the
     # whole module at collection time if that ever stops being true.
-    import _flow_verdict_tiers as _T
+    import verdict as _T
 
     m = re.search(r"^\s*\S*\s*\[([\w-]+)\s*\] Step\s+D1:", out, re.M)
     assert m, f"precondition: step D1 must appear in the report:\n{out}"
     label = m.group(1)
     status = _LABEL_TO_PRODUCER_STATUS.get(label, label)
-    assert _T.normalize(status) in _T.PRODUCER_STATUSES, (
+    # R-0915-85 — `normalize` is gone: the five have one spelling each, and
+    # tolerating a second is how a third arrives. The RENDERED label may still
+    # differ from the word (the table prints `WAIVED-DEFERRED`), which is what
+    # `_LABEL_TO_PRODUCER_STATUS` above is for.
+    assert status in _T.PRODUCER_STATUSES, (
         f"precondition NOT DETERMINED: the step listing rendered D1 as "
-        f"{label!r}, which is neither one of `_flow_verdict_tiers."
+        f"{label!r}, which is neither one of `verdict."
         f"PRODUCER_STATUSES` nor a rendering this file knows how to translate. "
         f"A precondition that cannot classify the word cannot say the chain is "
         f"closed, so it refuses instead of guessing. Add the rendering to "
@@ -699,11 +703,15 @@ def test_strict_structural_only_structural_gates(tmp_path,
     assert_p0_ancestry_closed(out)
     # PRECONDITION #2, not decoration: if steps 2-6 were not MISSING this test
     # would be asserting that a clean run is clean.
+    # R-0915-85 — a declared output that does not exist is
+    # `FAIL(missing_artefact)`, and the step line carries the reason beside the
+    # word. The precondition is the same fact, read where it now lives.
     for sid in (2, 3, 4, 5, 6):
-        assert re.search(rf"^\s*\S*\s*\[MISSING\s*\] Step\s+{sid}:",
-                         out, re.M), (
-            f"precondition: step {sid} must be MISSING for the scope claim "
-            f"to mean anything:\n{out}")
+        assert re.search(
+            rf"^\s*\S*\s*\[FAIL\s*\] Step\s+{sid}:.*\(missing_artefact\)",
+            out, re.M), (
+            f"precondition: step {sid} must be FAIL(missing_artefact) for the "
+            f"scope claim to mean anything:\n{out}")
     assert "Phase 2 strict-structural mode" not in out, out
     # Overall verdict could be PASS or PASS_WITH_WAIVERS (but never
     # FAIL purely due to step-level MISSING when structural gates
@@ -725,13 +733,13 @@ def test_strict_structural_only_structural_gates(tmp_path,
 #
 # Each arm below breaks the chain a DIFFERENT way and the arm asserts which,
 # because that is the part that decayed: the pre-#1351 form of the precondition
-# tested `!= "MISSING"` and therefore accepted the FAIL arm outright.
+# tested `!= "FAIL"` and therefore accepted the FAIL arm outright.
 
 _ANCESTRY_BREAKS = (
     # (artefact removed from the closed tree, the word D1 then reports)
     # ABSENT — a `required_outputs` entry the fixture stops writing. This is the
     # break #1159 and #1348 both produced.
-    ("phase1/extraction_patterns.json", "MISSING"),
+    ("phase1/extraction_patterns.json", "FAIL"),
     # FAILED — an artefact D1's own gate clause reads and rejects the absence
     # of. Same voided P0, same two ordering violations, DIFFERENT word; accepted
     # by the pre-#1351 precondition.
@@ -791,7 +799,7 @@ def test_the_p0_ancestry_precondition_refuses_a_word_it_cannot_classify():
     """A precondition that cannot classify the verdict word has NOT looked, so
     it must refuse rather than fall through to "not MISSING, therefore closed".
     Planted word, no gate run — the point is the classification, and
-    `_flow_verdict_tiers` is where a real new word gets its home."""
+    `verdict` is where a real new word gets its home."""
     planted = "  ? [MOSTLY-FINE      ] Step D1: Phase 1 Doc Extraction  (stage_phase1)\n"
     with pytest.raises(AssertionError) as exc:
         assert_p0_ancestry_closed(planted)
@@ -819,9 +827,17 @@ def test_strict_structural_does_not_excuse_a_broken_p0_ancestry(
     rc = mod.main([str(project), "--phase", "2", "--strict-structural"])
     out = capsys.readouterr().out
     assert rc == 1, out
-    assert "Overall: FAIL" in out, out
+    # R-0915-85 — the run is NOT_MEASURED, not FAIL, and that is the STRONGER
+    # statement about this fixture: the P0 umbrella reports `0 of 246 checkers
+    # returned a verdict`, so nothing about the structural population was
+    # measured at all. Calling that FAIL would assert a defect nobody found.
+    # The PROPERTY this test is named for is unchanged and is asserted below:
+    # strict-structural does not EXCUSE the broken ancestry — the run is
+    # non-green (rc 1) and the umbrella says why in its own reason.
+    assert "Overall: NOT_MEASURED" in out, out
+    assert re.search(r"Step P0:.*\(no_population\)", out), out
     assert "Step-execution ordering violations" in out, out
-    assert re.search(r"\[P0\].*marked done while dependency", out), out
+    assert re.search(r"marked done while dependency", out), out
 
 
 def test_strict_step_artifacts_includes_step_gates(tmp_path,
@@ -838,7 +854,7 @@ def test_strict_step_artifacts_includes_step_gates(tmp_path,
     out = capsys.readouterr().out
     # With strict-step-artifacts, step-level MISSING/FAIL forces FAIL.
     # Empty project always has missing L*.json etc.
-    if "MISSING" in out or "FAIL" in out:
+    if "FAIL" in out or "FAIL" in out:
         # Verdict scope includes step-level → expect FAIL.
         assert ("Overall: FAIL" in out
                 or "strict-step-artifacts mode" in out
@@ -906,7 +922,9 @@ def test_issue1980_step14_nested_nonverdict_is_classed_not_skipped(tmp_path):
     )
     (proj / "phase2" / "stage2" / "synth" / "netlist.v").write_text("module top(); endmodule\n")
     r = _run(str(proj), "--strict")
-    assert re.search(r"\[MISSING\s*\] Step\s+14:.*blocked-by-upstream\(9\)",
+    # R-0915-85 — `MISSING` is `FAIL(missing_artefact)`; the cascade note is
+    # unchanged and is what this test is about.
+    assert re.search(r"\[FAIL\s*\] Step\s+14:.*blocked-by-upstream\(9\)",
                      r.stdout), r.stdout
     # This line used to read `flow_compliance_check rc=1 verdict=CRASHED`, and
     # the crash it pinned was a DEFECT rather than a property of the fixture:
@@ -960,9 +978,15 @@ def _labelled_step_ids(stdout: str, label: str) -> set:
 
 
 def test_wave93_vacuous_pass_counter_accurate(tmp_path):
-    """The summary counter must equal the number of steps LABELLED
-    `[VACUOUS-PASS]` in the per-step listing — AND those steps must be the
-    ones this fixture is built to make vacuous.
+    """The summary counter must equal the number of steps LABELLED on the
+    vacuity tier in the per-step listing — AND those steps must be the ones
+    this fixture is built to make vacuous.
+
+    R-0915-85 — `VACUOUS-PASS` was a WORD in both places. It is now
+    `NOT_MEASURED(no_population)` on the step line and `vacuity` on the
+    `disclosed:` line beside the tally, so the two readings this test compares
+    come from two different lines. Both properties are unchanged and both are
+    still asserted.
 
     Two properties, deliberately both:
 
@@ -987,21 +1011,27 @@ def test_wave93_vacuous_pass_counter_accurate(tmp_path):
     r = _run(str(proj), "--strict")
     # Find the summary line
     counter_lines = [ln for ln in r.stdout.splitlines()
-                     if "VACUOUS-PASS=" in ln and "PASS=" in ln]
+                     if "disclosed:" in ln and "vacuity=" in ln]
     assert counter_lines, r.stdout
-    labelled = [ln for ln in r.stdout.splitlines() if "[VACUOUS-PASS" in ln]
+    # The VACUITY tier specifically — the step line carries its disclosures,
+    # and `NOT_MEASURED` now covers every reason nothing was measured, of which
+    # vacuity is one.
+    labelled = [ln for ln in r.stdout.splitlines()
+                if "[NOT_MEASURED" in ln and "[vacuity" in ln]
     assert labelled, (
-        "no step is LABELLED [VACUOUS-PASS] on a fixture that must produce at "
-        f"least Step 14's no-.ys vacuous pass:\n{r.stdout}")
-    m = re.search(r"VACUOUS-PASS=(\d+)", counter_lines[0])
+        "no step is labelled NOT_MEASURED carrying the vacuity disclosure, on "
+        f"a fixture that must produce at least Step 14's no-.ys vacuous "
+        f"pass:\n{r.stdout}")
+    m = re.search(r"vacuity=(\d+)", counter_lines[0])
     assert m, counter_lines[0]
     assert int(m.group(1)) == len(labelled), (
-        f"summary says VACUOUS-PASS={m.group(1)} but the per-step listing "
-        f"labels {len(labelled)} step(s) [VACUOUS-PASS]: "
+        f"the disclosure line says vacuity={m.group(1)} but the per-step "
+        f"listing labels {len(labelled)} step(s) NOT_MEASURED: "
         f"{[ln.strip()[:80] for ln in labelled]}\n{counter_lines[0]}")
-    seen = _labelled_step_ids(r.stdout, "VACUOUS-PASS")
+    seen = {ln.split("Step", 1)[1].split(":", 1)[0].strip()
+            for ln in labelled}
     assert seen == _VAC2_EXPECTED_VACUOUS_STEPS, (
-        f"the set of steps on the VACUOUS-PASS tier changed: expected "
+        f"the set of steps on the vacuity tier changed: expected "
         f"{sorted(_VAC2_EXPECTED_VACUOUS_STEPS)}, got {sorted(seen)}. A step "
         f"joining the vacuous tier means a gate stopped measuring; a step "
         f"leaving it means a gate started, or stopped disclosing. Either is a "

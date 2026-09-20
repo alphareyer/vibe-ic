@@ -109,7 +109,7 @@ def test_the_whole_emitted_step_record_is_clean():
     """The report is JSON: assert over the SERIALIZED bytes, not one field."""
     step = dosr.StepResult(
         name="rtl_gen",
-        status="WAIVED",
+        status="PASS_WITH_WAIVERS",
         duration_s=2.05,
         detail=MEASURED_DETAIL,
         output_files=[str(STAGE / "phase2" / "stage1" / "rtl" / "top.sv"),
@@ -118,6 +118,7 @@ def test_the_whole_emitted_step_record_is_clean():
                 "project_root": str(STAGE),
                 "nested": {"ack": [str(STAGE / "a.json"), str(STAGE)]},
                 "lessons_count": 212},
+        attribution="the fixture's owner",
     )
     step.detail = dosr._phase1_remap_stage_value(step.detail, STAGE, LIVE)
     step.output_files = dosr._phase1_remap_stage_value(

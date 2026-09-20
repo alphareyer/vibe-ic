@@ -90,7 +90,7 @@ def _assert_gather_refusal(project, reason, finding=None):
 def _assert_flowback_refusal(project, reason, finding=None):
     result = runner._try_phase1_behavioral_fsm_rtl(project, 0.0)
     actual_status = result.status if result is not None else "SILENT_NONE"
-    assert actual_status == "BLOCKED"
+    assert actual_status == "NOT_MEASURED"
     assert result.extras["source_provenance"] == "refused"
     assert result.extras["source_refusal"]["reason"] == reason
     assert result.extras["write_performed"] is False
@@ -428,7 +428,7 @@ def test_step_root_replaced_after_publish_rolls_back_before_refusal(
     result = runner.step_rtl_gen(
         project, "deliberately_unregistered_class")
 
-    assert result.status == "BLOCKED"
+    assert result.status == "NOT_MEASURED"
     assert result.extras["output_refusal"]["reason"] == (
         "PROJECT_BOUNDARY_REPLACED_DURING_PUBLICATION")
     assert not (displaced / "phase2").exists()
@@ -450,7 +450,7 @@ def test_unreadable_project_directory_is_named_blocked_without_writes(
         result = runner.step_rtl_gen(
             project, "digital_arithmetic_primitive")
 
-        assert result.status == "BLOCKED"
+        assert result.status == "NOT_MEASURED"
         assert result.extras["output_refusal"]["reason"] == (
             "PROJECT_SNAPSHOT_OPEN_REFUSED")
         assert phase2.stat().st_mode & 0o777 == 0o000
@@ -834,7 +834,7 @@ def test_stage_temp_cleanup_failure_rolls_back_before_finalize(
         project, "deliberately_unregistered_class")
 
     assert injected
-    assert result.status == "BLOCKED"
+    assert result.status == "NOT_MEASURED"
     assert result.extras["output_refusal"]["reason"] == (
         "RTL_TRANSACTION_STAGE_CLEANUP_REFUSED")
     assert not (project / "phase2").exists()
@@ -926,7 +926,7 @@ def test_ordinary_grammar_nonmatch_is_not_a_provenance_blocker(tmp_path):
     routed = runner.step_rtl_gen(project, "deliberately_unregistered_class")
 
     assert direct is None
-    assert routed.status == "WAIVED"
+    assert routed.status == "PASS_WITH_WAIVERS"
     assert routed.extras.get("finding") is None
     assert not (project / "phase2" / "stage1" / "rtl").exists()
 
@@ -974,7 +974,7 @@ def test_step_preflight_blocks_symlink_before_earlier_canonical_writer(
 
     result = runner.step_rtl_gen(project, "deliberately_unregistered_class")
 
-    assert result.status == "BLOCKED"
+    assert result.status == "NOT_MEASURED"
     assert result.extras["finding"] == (
         "PHASE1_OPERATOR_PROSE_PROVENANCE_REFUSED")
     assert result.extras["source_refusal"]["reason"] == "SOURCE_OUT_OF_ROOT"
@@ -1031,7 +1031,7 @@ def test_canonical_writer_refuses_root_replaced_after_emit_before_write(
     result = runner.step_rtl_gen(
         project, "deliberately_unregistered_class")
 
-    assert result.status == "BLOCKED"
+    assert result.status == "NOT_MEASURED"
     assert result.extras["output_refusal"]["reason"] == (
         "PROJECT_BOUNDARY_REPLACED_DURING_PUBLICATION")
     assert result.extras["write_performed"] is False
@@ -1052,7 +1052,7 @@ def test_symlinked_phase1_ancestor_cannot_relabel_external_l9_as_program_first(
 
     _assert_gather_refusal(project, "SOURCE_ANCESTOR_SYMLINK")
     result = runner.step_rtl_gen(project, "deliberately_unregistered_class")
-    assert result.status == "BLOCKED"
+    assert result.status == "NOT_MEASURED"
     assert result.extras["finding"] == (
         "PHASE1_OPERATOR_PROSE_PROVENANCE_REFUSED")
     assert result.extras["source_refusal"]["reason"] == (
@@ -1123,7 +1123,7 @@ def test_invalid_utf8_operator_prose_is_named_parse_refusal(tmp_path):
         project, "SOURCE_TEXT_PARSE_FAILED",
         "PHASE1_OPERATOR_PROSE_PARSE_REFUSED")
     result = runner.step_rtl_gen(project, "deliberately_unregistered_class")
-    assert result.status == "BLOCKED"
+    assert result.status == "NOT_MEASURED"
     assert result.extras["finding"] == "PHASE1_OPERATOR_PROSE_PARSE_REFUSED"
     assert result.extras["source_refusal"]["reason"] == (
         "SOURCE_TEXT_PARSE_FAILED")
@@ -1146,7 +1146,7 @@ def test_source_refusal_is_repeatable_and_preserves_existing_rtl(tmp_path):
     first = runner.step_rtl_gen(project, "deliberately_unregistered_class")
     second = runner.step_rtl_gen(project, "deliberately_unregistered_class")
 
-    assert first.status == second.status == "BLOCKED"
+    assert first.status == second.status == "NOT_MEASURED"
     assert first.extras["source_refusal"] == second.extras["source_refusal"]
     assert first.extras["write_performed"] is False
     assert second.extras["write_performed"] is False
@@ -1175,7 +1175,7 @@ def test_operator_prose_read_failure_is_named_and_retained(
         project, "SOURCE_READ_FAILED",
         "PHASE1_OPERATOR_PROSE_READ_REFUSED")
     result = runner.step_rtl_gen(project, "deliberately_unregistered_class")
-    assert result.status == "BLOCKED"
+    assert result.status == "NOT_MEASURED"
     assert result.extras["finding"] == "PHASE1_OPERATOR_PROSE_READ_REFUSED"
     assert result.extras["source_refusal"]["reason"] == "SOURCE_READ_FAILED"
     assert result.extras["write_performed"] is False
@@ -1327,7 +1327,7 @@ def test_deleted_sole_primary_with_source_drift_is_not_regenerated(
     assert rtl_provenance.classify(project)[0] == rtl_provenance.GENERATED
     held = runner._try_phase1_behavioral_fsm_rtl(project, 0.0)
 
-    assert held is not None and held.status == "WAIVED"
+    assert held is not None and held.status == "PASS_WITH_WAIVERS"
     assert held.extras["preserved"] is True
     assert not primary.exists() and not primary.is_symlink()
     assert rtl_provenance.ledger_path(project).read_bytes() == ledger_before
@@ -1377,7 +1377,7 @@ def test_primary_symlink_never_reads_as_idempotent_or_writes_external_target(
     runner._RTL_SESSION_PROJECT = None
     result = runner._try_phase1_behavioral_fsm_rtl(project, 0.0)
 
-    assert result is not None and result.status == "BLOCKED"
+    assert result is not None and result.status == "NOT_MEASURED"
     assert result.extras["finding"] == (
         "PHASE1_RTL_OUTPUT_PROVENANCE_REFUSED")
     expected_reason = ("RTL_OUTPUT_SYMLINK" if target_exists
@@ -1413,7 +1413,7 @@ def test_every_output_ancestor_symlink_is_a_no_write_refusal(
 
     result = runner._try_phase1_behavioral_fsm_rtl(project, 0.0)
 
-    assert result is not None and result.status == "BLOCKED"
+    assert result is not None and result.status == "NOT_MEASURED"
     reason = result.extras["output_refusal"]["reason"]
     assert reason == ("RTL_ANCESTOR_SYMLINK" if target_exists
                       else "RTL_ANCESTOR_BROKEN_SYMLINK")
@@ -1437,7 +1437,7 @@ def test_no_clobber_publication_loses_race_without_touching_foreign_file(
     monkeypatch.setattr(runner.os, "link", _racing_link)
     result = runner._try_phase1_behavioral_fsm_rtl(project, 0.0)
 
-    assert result is not None and result.status == "BLOCKED"
+    assert result is not None and result.status == "NOT_MEASURED"
     assert result.extras["output_refusal"]["reason"] == (
         "RTL_OUTPUT_ALREADY_EXISTS")
     assert result.extras["write_performed"] is False
@@ -1520,7 +1520,7 @@ def test_ancestor_replacement_after_output_publish_rolls_back_held_tree(
 
     result = runner._try_phase1_behavioral_fsm_rtl(project, 0.0)
 
-    assert result is not None and result.status == "BLOCKED"
+    assert result is not None and result.status == "NOT_MEASURED"
     assert result.extras["output_refusal"]["reason"] == (
         "RTL_ANCESTOR_REPLACED_DURING_PUBLICATION")
     assert result.extras["write_performed"] is False
@@ -1560,7 +1560,7 @@ def test_project_root_replacement_after_output_publish_is_blocked_and_rolled_bac
 
     result = runner._try_phase1_behavioral_fsm_rtl(project, 0.0)
 
-    assert result is not None and result.status == "BLOCKED"
+    assert result is not None and result.status == "NOT_MEASURED"
     assert result.extras["output_refusal"]["reason"] == (
         "PROJECT_BOUNDARY_REPLACED_DURING_PUBLICATION")
     assert result.extras["write_performed"] is False
@@ -1612,7 +1612,7 @@ def test_project_root_replaced_before_publisher_cannot_become_new_baseline(
 
     result = runner._try_phase1_behavioral_fsm_rtl(project, 0.0)
 
-    assert result is not None and result.status == "BLOCKED"
+    assert result is not None and result.status == "NOT_MEASURED"
     assert result.extras["output_refusal"]["reason"] == (
         "PROJECT_BOUNDARY_REPLACED_DURING_PUBLICATION")
     assert result.extras["write_performed"] is False
@@ -1673,7 +1673,7 @@ def test_deleted_primary_with_stale_digest_requires_force(tmp_path):
 
     held = runner._try_phase1_behavioral_fsm_rtl(project, 0.0)
 
-    assert held is not None and held.status == "WAIVED"
+    assert held is not None and held.status == "PASS_WITH_WAIVERS"
     assert held.extras["preserved"] is True
     assert held.extras["override_flag"] == "--force-rtl-regen"
     assert not (rtl_dir / "TopModule.v").exists()
@@ -1707,7 +1707,7 @@ def test_force_regen_updates_changed_generator_owned_rtl(tmp_path):
     source.write_text(COMPLETE_DIRECTIONAL_FALL.replace("bump_left", "hit_left"))
 
     held = runner._try_phase1_behavioral_fsm_rtl(project, 0.0)
-    assert held is not None and held.status == "WAIVED"
+    assert held is not None and held.status == "PASS_WITH_WAIVERS"
     forced = runner._try_phase1_behavioral_fsm_rtl(
         project, 0.0, force_regen=True)
     assert forced is not None and forced.status == "PASS"

@@ -27,7 +27,7 @@ def test_asap7_uses_device_lvs_route_not_false_env_unavailable(monkeypatch):
     monkeypatch.setattr(R, "_tool_in_path", lambda c, t: True)  # klayout present
     pdk = types.SimpleNamespace(name="asap7", calibre_lvs=None)
     res = R.step_lvs(Path("/tmp/proj"), "top", pdk, "vibeic-eda", upstream_pnr=None)
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     assert res.extras.get("finding") == "LVS_DEVICE_LEVEL_AVAILABLE"
     assert res.extras.get("device_lvs_program") == "asap7_finfet_lvs.py"
     assert res.extras.get("lvs_method") == "klayout_device_geometric"
@@ -43,7 +43,7 @@ def test_device_route_klayout_missing_names_klayout_not_netgen(monkeypatch):
     monkeypatch.setattr(R, "_tool_in_path", lambda c, t: False)  # klayout absent
     pdk = types.SimpleNamespace(name="asap7", calibre_lvs=None)
     res = R.step_lvs(Path("/tmp/proj"), "top", pdk, "vibeic-eda", upstream_pnr=None)
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
     assert res.extras.get("missing_tool") == "klayout"  # klayout, NOT magic/netgen
 
 
@@ -62,6 +62,13 @@ def test_upstream_pnr_fail_still_skips_before_device_route(monkeypatch):
     monkeypatch.setattr(R, "_pdk_registry_entry", lambda n: _ASAP7_REG)
     monkeypatch.setattr(R, "_tool_in_path", lambda c, t: True)
     pdk = types.SimpleNamespace(name="asap7", calibre_lvs=None)
-    bad = types.SimpleNamespace(status="ROUTE_NOT_CONVERGED", detail="died")
+    # R-0915-85 — the upstream is a FAIL (the route did not converge; the word
+    # `ROUTE_NOT_CONVERGED` lives in the DETAIL, where the reader acts on it),
+    # and a step standing on a failed input certifies nothing: NOT_MEASURED,
+    # naming the upstream.
+    bad = types.SimpleNamespace(status="FAIL",
+                                detail="ROUTE_NOT_CONVERGED: died",
+                                extras={})
     res = R.step_lvs(Path("/tmp/proj"), "top", pdk, "vibeic-eda", upstream_pnr=bad)
-    assert res.status == "SKIP"
+    assert res.status == "NOT_MEASURED"
+    assert res.reason_class == "upstream_failed"

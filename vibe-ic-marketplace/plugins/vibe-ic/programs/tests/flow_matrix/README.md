@@ -341,8 +341,8 @@ Corpus at generation: NOT_OFFERED — no published cell was read. Every figure b
 
 `ENFORCED` is published SPLIT, because it is not one thing. It means a live predicate ran and passed; it does not say WHAT it ran against, and that turns out to be three different answers:
 
-* **10** — measured against the step's OWN mechanism. This is the only figure that means what "enforcing" sounds like, and it is a floor: the two rows below are not evidence against it, they are the part nobody has evidence for.
-* **126** — measured against a SUBSTITUTED stand-in. The predicate runs and passes; what it exercises is not the mechanism the cell is named after. Each one carries a disclosure from the module that owns it.
+* **5** — measured against the step's OWN mechanism. This is the only figure that means what "enforcing" sounds like, and it is a floor: the two rows below are not evidence against it, they are the part nobody has evidence for.
+* **131** — measured against a SUBSTITUTED stand-in. The predicate runs and passes; what it exercises is not the mechanism the cell is named after. Each one carries a disclosure from the module that owns it.
 * **405** — in dimensions that have not answered the question at all. NOT counted as clean: UNDECLARED is a state, not a synonym for "own mechanism". See `substitution.py`, "WHY UNDECLARED IS A STATE AND NOT A DEFAULT".
 
 The 7 WAIVED and 17 NA cells are not enforcing anything and enter none of those columns. There is deliberately no single "enforcing" total to quote.
@@ -356,9 +356,9 @@ The 7 WAIVED and 17 NA cells are not enforcing anything and enter none of those 
 | 5 | `deps_correct` — Is blocks_on the true upstream set — no missing and no phantom edge? | 0 | 0 | 68 | 0 | 0 | 1 | 0 |
 | 6 | `skip_discipline` — Is every skip / vacuous-pass disclosed rather than counted as a pass? | 0 | 0 | 69 | 0 | 0 | 0 | 0 |
 | 7 | `outputs_list_complete` — Is required_outputs complete — does the step emit artefacts it never declares? | 0 | 0 | 64 | 0 | 0 | 4 | 1 |
-| 8 | `missing_caught` — When a declared output IS missing, which mechanism catches it? | 9 | 58 | 0 | 0 | 0 | 0 | 2 |
+| 8 | `missing_caught` — When a declared output IS missing, which mechanism catches it? | 4 | 63 | 0 | 0 | 0 | 0 | 2 |
 | 9 | `verdict_consumed` — When this step FAILs, does the verdict reach the exit code — or is it reported and discarded? | 1 | 68 | 0 | 0 | 0 | 0 | 0 |
-| **total** | | **10** | **126** | **405** | **0** | **56** | **7** | **17** |
+| **total** | | **5** | **131** | **405** | **0** | **56** | **7** | **17** |
 
 **NOT MEASURED is not a pass and not a defect.** Those 56 cells have a predicate that declined to run, naming a resource it could not reach — most often a published corpus this checkout does not carry. They are counted here so a dimension whose cells could not be driven cannot read as a dimension with nothing to report; read them as UNKNOWN, never as coverage.
 

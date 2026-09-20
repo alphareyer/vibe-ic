@@ -138,7 +138,7 @@ def test_pass_with_waivers_one_block(tmp_path):
     assert _project_row_names(body) == {"block_list_schema"}
     # The top-level verdict and the exit code are UNCHANGED by the
     # `required_inputs` pre-flight: FAIL / rc 1, exactly as before.
-    assert body["verdict"] == "FAIL"
+    assert body["verdict"] == "NOT_MEASURED"
     assert cp.returncode == 1
     step_status = {s["name"]: s["status"] for s in body["steps"]}
 
@@ -161,7 +161,7 @@ def test_pass_with_waivers_one_block(tmp_path):
     for name in ("A1_spec_extract", "A2_topology_select", "A3_netlist_gen",
                  "A4_corner_sweep", "A5_layout", "A6_block_pv",
                  "A7_post_layout_resim"):
-        assert step_status[name] == "BLOCKED", (
+        assert step_status[name] == "NOT_MEASURED", (
             f"{name} should be refused for want of input, not run")
     a1 = next(s for s in body["steps"] if s["name"] == "A1_spec_extract")
     assert "L5_ADI_SPEC.json" in a1["detail"] and "owed by step D1" in a1["detail"]
@@ -169,7 +169,7 @@ def test_pass_with_waivers_one_block(tmp_path):
     # A8/A9 declare NO required_inputs in the flow, so nothing can be charged
     # to them and they still run and WAIVE on their own evidence.
     for name in ("A8_hardmacro_gen", "A9_hw_verify"):
-        assert step_status[name] == "WAIVED"
+        assert step_status[name] == "PASS_WITH_WAIVERS"
 
 
 def test_integration_report_shape(tmp_path):

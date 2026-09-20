@@ -28,7 +28,7 @@ TWO ARTEFACTS, ONE TABLE — MEASURED, NOT ASSUMED
     reports/audit/phase23_completion_audit.json   `verdict`  `step_counts`  `command_argv`
     the path given to --json                      `overall`  `counts`       (no argv)
 
-MEASURED 2026-09-16 on `/home/reyerchu/_frozen/subservient_r26`: one invocation
+MEASURED 2026-09-16 on `<home>/_frozen/subservient_r26`: one invocation
 with `--json` and one without produced `steps[]` lists that are element-for-
 element identical (69 steps, identical 18-key step records, identical counts);
 only the two top-level key names differ. A reader that knew one shape would read
@@ -37,10 +37,10 @@ it found.
 
 THE DIRECTION RULE IS DERIVED, NOT ENUMERATED
 =============================================
-`_flow_verdict_tiers` is already "the ONE place a flow-compliance verdict word is
-classified", and it classifies BY SUBTRACTION precisely so a word invented
-tomorrow is adjudicated without anyone remembering to come here. This module
-therefore adds NO vocabulary. It ranks a word with that module's own predicates:
+`programs/verdict.py` is "the ONE place a flow verdict word is classified"
+(R-0915-85 reduced the vocabulary to five AT THE PRODUCERS and folded
+`_flow_verdict_tiers` into it). This module therefore adds NO vocabulary. It
+ranks a word with that module's own predicates:
 
     3 FULL_PASS       `is_full_pass`      the only word that satisfies a
                                           predecessor outright
@@ -118,8 +118,8 @@ invocation of a run overwrites `reports/audit/phase23_completion_audit.json`, so
 a stage-scoped invocation replaces the full table with its own. On the two frozen
 snapshots the orchestrator supplied:
 
-    /home/reyerchu/_frozen/subservient_r26      9 steps, argv stage4_compliance.py . --exclude-step 39
-    /home/reyerchu/_frozen/sha256_run16_pass2   9 steps, argv flow_compliance_check.py ... --stage-id stage_analog
+    <home>/_frozen/subservient_r26      9 steps, argv stage4_compliance.py . --exclude-step 39
+    <home>/_frozen/sha256_run16_pass2   9 steps, argv flow_compliance_check.py ... --stage-id stage_analog
 
 while a full `--strict` pass over the same trees yields 69. Diffing 69 against 9
 would report 60 REMOVED steps and read as a catastrophic regression; it is an
@@ -144,7 +144,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import _flow_verdict_tiers as _tiers
+import verdict as _tiers
 
 #: Rank names, lowest first. Exposed so a report can print the word rather than
 #: the integer, and so a test can pin the ordering without re-typing it.
@@ -229,20 +229,56 @@ class TableUnreadable(Exception):
 
 
 def rank(status: Optional[str]) -> int:
-    """Where a verdict word sits, using `_flow_verdict_tiers`' own predicates.
+    """Where a verdict word sits, using `verdict.py`'s own predicates.
 
     Order of the tests matters only for cost, not for the answer: the four
-    predicates partition the vocabulary (a word is excused, non-green, or — by
-    subtraction — a done-claim, full or qualified).
+    predicates partition the vocabulary.
+
+    R-0915-85 — WHAT THE REDUCTION DID TO THIS LADDER, and why it did not need
+    re-designing. The five words map ONE TO ONE onto the four ranks:
+
+        3 FULL_PASS       PASS
+        2 QUALIFIED_DONE  PASS_WITH_WAIVERS
+        1 EXCUSED         NOT_APPLICABLE
+        0 NON_GREEN       FAIL and NOT_MEASURED
+
+    and the last line is the one worth reading twice. Under the old vocabulary
+    `INCOMPLETE`, `NOT-MEASURED`, `VACUOUS-PASS` and `STRUCTURE-ONLY` were in
+    neither negative set, so by subtraction they ranked 2 — a step that had
+    measured NOTHING scored as a qualified done-claim. They are `NOT_MEASURED`
+    now and rank 0, so a run that stops measuring something reads as a
+    REGRESSION here instead of as a lateral. That is the direction this gate
+    exists to catch, and the docstring above predicted it: a rename that is not
+    lateral is the signal, not the false alarm.
     """
-    if _tiers.is_full_pass(status):
-        return 3
-    if _tiers.is_non_green(status):
+    try:
+        if _tiers.is_full_pass(status):
+            return 3
+        if _tiers.is_non_green(status):
+            return 0
+        if _tiers.is_excused(status):
+            return 1
+        if _tiers.is_done_claim(status):
+            return 2
+    except _tiers.UnknownVerdictWord:
+        # A WORD OUTSIDE THE FIVE, RANKED NON_GREEN AND NEVER TRANSLATED.
+        #
+        # THIS IS THE ONE PLACE A PRE-REFORM WORD MAY BE READ AT ALL, and the
+        # reason is what this module is for: it DIFFS a frozen baseline against
+        # the current tree, and every baseline frozen before R-0915-85 speaks
+        # the deleted vocabulary. A hard refusal here would make the landing
+        # gate unable to read its own three frozen snapshots — it would not
+        # stop the old words existing, it would stop anyone measuring them.
+        #
+        # IT IS NOT A TRANSLATION TABLE, and the difference is the whole point:
+        # nothing here maps `SKIPPED-CONDITION` to `NOT_APPLICABLE` or lets a
+        # producer go on writing it. The word is ranked 0 — the FAIL-SAFE
+        # direction, identical to the empty-word case below — so an unreadable
+        # word can only ever make a diff look like a REGRESSION, never like an
+        # improvement. `table_from_audit` records which words these were under
+        # `pre_reform_words`, so a reader is told the baseline is old rather
+        # than being handed a silently-degraded table.
         return 0
-    if _tiers.is_excused(status):
-        return 1
-    if _tiers.is_done_claim(status):
-        return 2
     # Only reachable for an empty/None word — a step record with no status at
     # all. That is an absence, not a pass.
     return 0
@@ -254,7 +290,10 @@ def rank_name(status: Optional[str]) -> str:
 
 def direction(ref_status: Optional[str], cur_status: Optional[str]) -> str:
     """Which way the word moved. LATERAL is a word change at the same rank."""
-    rs, cs = _tiers.normalize(ref_status), _tiers.normalize(cur_status)
+    # R-0915-85 deleted `normalize`: with five words there is ONE spelling each
+    # and tolerating a second is how a third arrives. A word outside the five
+    # reaches `rank` below, where `parse` refuses it by name.
+    rs, cs = str(ref_status or ""), str(cur_status or "")
     if rs == cs:
         return UNCHANGED
     rr, cr = rank(ref_status), rank(cur_status)
@@ -294,6 +333,10 @@ def table_from_audit(audit: Dict[str, Any], source: str = "") -> Dict[str, Any]:
 
     rows: Dict[str, Dict[str, Any]] = {}
     duplicates: List[str] = []
+    #: Words this artefact carries that R-0915-85 deleted. Named, so a reader
+    #: knows a baseline predates the reform instead of wondering why half its
+    #: steps rank NON_GREEN.
+    pre_reform: List[str] = []
     for s in steps:
         if not isinstance(s, dict):
             continue
@@ -304,6 +347,9 @@ def table_from_audit(audit: Dict[str, Any], source: str = "") -> Dict[str, Any]:
             # Two records for one step id: the table can no longer say what that
             # step's verdict is. Recorded, never silently last-wins.
             duplicates.append(sid)
+        if (s.get("status")
+                and _tiers.as_verdict_or_none(s.get("status")) is None):
+            pre_reform.append(str(s.get("status")))
         rows[sid] = {
             "status": s.get("status"),
             "stage": s.get("stage"),
@@ -325,6 +371,11 @@ def table_from_audit(audit: Dict[str, Any], source: str = "") -> Dict[str, Any]:
         "command_argv": audit.get("command_argv"),
         "step_count": len(rows),
         "duplicate_step_ids": sorted(set(duplicates)),
+        # R-0915-85 — the words in this artefact that the reform deleted. A
+        # baseline frozen before it carries them; `rank` ranks each NON_GREEN
+        # and never translates one (see `rank`). Empty on any artefact a
+        # migrated producer wrote.
+        "pre_reform_words": sorted(set(pre_reform)),
         "step_counts": counts,
         "steps": rows,
     }
@@ -534,8 +585,9 @@ def diff_tables(ref: Dict[str, Any], cur: Dict[str, Any]) -> Dict[str, Any]:
     if ref.get("verdict_refusal_reason") or cur.get("verdict_refusal_reason"):
         rr = ref.get("verdict_rank", rank(ref.get("verdict")))
         cr = cur.get("verdict_rank", rank(cur.get("verdict")))
-        vdir = (UNCHANGED if (rr == cr and _tiers.normalize(ref.get("verdict"))
-                              == _tiers.normalize(cur.get("verdict")))
+        vdir = (UNCHANGED if (rr == cr
+                              and str(ref.get("verdict") or "")
+                              == str(cur.get("verdict") or ""))
                 else REGRESSION if cr < rr else IMPROVEMENT if cr > rr
                 else LATERAL)
 

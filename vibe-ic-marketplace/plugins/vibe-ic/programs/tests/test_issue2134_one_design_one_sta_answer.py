@@ -78,7 +78,7 @@ def test_a_disclosed_single_corner_pass_defers_to_a_failing_multicorner_gate(
                 "signoff_corners_from_sta_records", 0) >= 1), doc
 
     row = res[_SIGNOFF]
-    assert row.status == "BLOCKED", (
+    assert row.status == "NOT_MEASURED", (
         "a disclosed SINGLE-CORNER result was rendered as a sign-off STA PASS "
         "beside two gates refusing the same timing", row)
     assert runner._SIGNOFF_NOT_CHECKED in row.detail, row.detail
@@ -143,9 +143,18 @@ def test_the_reconciliation_never_promotes_anything(runner):
     plans, no row's status improves and only `sta_signoff` can change."""
     R = runner
     mk = R.StepResult
-    for status in ("PASS", "FAIL", "BLOCKED", "SKIP", "ENV_UNAVAILABLE"):
-        rows = [mk("sta_signoff", status), mk("sta_corner", "FAIL"),
-                mk("sta_record", "FAIL")]
+    # R-0915-85 — EVERY status this module plans is one of the five, and each
+    # is built with the fields its word REQUIRES. `SKIP` and the second
+    # `NOT_MEASURED` were two more spellings of rows already in this list.
+    for status, extra in (
+            ("PASS", {}),
+            ("FAIL", {}),
+            ("NOT_MEASURED", {"reason_class": "not_executed"}),
+            ("NOT_MEASURED", {"reason_class": "tool_absent"}),
+            ("NOT_APPLICABLE", {"declared_by": "L20 declares no STA sign-off"}),
+            ("PASS_WITH_WAIVERS", {"attribution": "the sign-off engineer"})):
+        rows = [mk("sta_signoff", status, **extra),
+                mk("sta_corner", "FAIL"), mk("sta_record", "FAIL")]
         out = {r.name: r.status for r in R._reconcile_sta_verdict(rows)}
         assert out["sta_corner"] == "FAIL" and out["sta_record"] == "FAIL", out
         # No output json on these synthetic rows, so the disclosure is absent

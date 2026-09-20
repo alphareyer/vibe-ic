@@ -337,7 +337,7 @@ HOLLOW = [
      lambda p: (p / DRC_REL).write_text(json.dumps(
          {"program": "drc_report_check", "passed": False, "findings": [],
           "summary": {"files_found": 0, "checked": False,
-                      "terminal_verdict": "NOT_CHECKED"}}), encoding="utf-8")),
+                      "terminal_verdict": "NOT_MEASURED"}}), encoding="utf-8")),
     ("lvs_no_verdict", "LVS_NO_VERDICT",
      lambda p: (p / LVS_REL).write_text(json.dumps(
          {"program": "lvs_report_check", "summary": {}}), encoding="utf-8")),
@@ -516,7 +516,8 @@ def test_the_producer_is_dispatched_by_the_runner_and_a_refusal_publishes_nothin
     (harmed / "phase3/stage4/gds" / f"{SUBJECT}.gds").write_bytes(
         build_gds_without_geometry(SUBJECT))
     harmed_result = runner.step_ic_release_docs_gen(harmed)
-    assert harmed_result.status == "SKIP", harmed_result
+    # R-0915-85 — the producer declined and NAMED why (producer_rc below).
+    assert harmed_result.status == "NOT_MEASURED", harmed_result
     assert harmed_result.extras.get("producer_rc") == RC_FAIL, harmed_result
     assert not documentation(harmed).exists(), (
         "a run whose GDS carries no geometry published release documents")

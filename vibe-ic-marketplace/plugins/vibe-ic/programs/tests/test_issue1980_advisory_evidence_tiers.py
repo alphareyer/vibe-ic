@@ -85,7 +85,7 @@ print('SKIP: no live input')
         {},
     )
 
-    assert result.status == "INCOMPLETE", result.reasons
+    assert result.status == "NOT_MEASURED", result.reasons
     assert getattr(result, "advisory_gate_records", []) == [{
         "gate": "structured_skip",
         "command": command,
@@ -125,7 +125,7 @@ print('SKIP: design declared no command protocol')
         {},
     )
 
-    assert result.status == "SKIPPED-CONDITION", result.reasons
+    assert result.status == "NOT_APPLICABLE", result.reasons
     assert result.advisory_gate_records == [{
         "gate": "classified_skip",
         "command": command,
@@ -155,7 +155,7 @@ def test_scoped_approved_step_waiver_prevents_the_refusal_from_running(
         }},
     )
 
-    assert result.status == "WAIVED"
+    assert result.status == "PASS_WITH_WAIVERS"
     assert called["count"] == 0
     assert result.advisory_gate_records == []
 
@@ -286,7 +286,7 @@ def test_shipped_step31_keeps_perc_and_via_findings_out_of_gate_coverage(
         'layer table", "reason_class": "CAPABILITY_ABSENT"}')
     (reports / "perc_sweep.json").write_text(
         '{"rows": [{"welltap": {"status": "WELLTAP_GAP"}, '
-        '"xdomain": {"status": "INCOMPLETE"}}], '
+        '"xdomain": {"status": "NOT_MEASURED"}}], '
         '"reach": {"is_vacuous": false}}')
     (reports / "lvs_triage.json").write_text(
         '{"total": 1, "counts": {"unmatched_net": 1}}')
@@ -300,7 +300,7 @@ def test_shipped_step31_keeps_perc_and_via_findings_out_of_gate_coverage(
     assert outputs["pnr_via_stack_completeness_check"]["reason_class"] == (
         "CAPABILITY_ABSENT")
     assert outputs["perc_corpus_sweep"]["findings"] == [
-        "INCOMPLETE", "WELLTAP_GAP"]
+        "NOT_MEASURED", "WELLTAP_GAP"]
     assert outputs["perc_corpus_sweep"]["verdict"] == "PRODUCED"
     assert all(record["enforcement"] == "NOT_A_GATE"
                for record in outputs.values())

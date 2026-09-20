@@ -37,7 +37,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import _flow_verdict_tiers as _T  # noqa: E402
+import verdict as _T  # noqa: E402
 import flow_compliance_check as F  # noqa: E402
 
 
@@ -48,13 +48,13 @@ def _step(i, status, name="a step"):
 #: The icaes R3 step tally, by status, exactly as the artefact carries it.
 _ICAES_R3 = (
     [_step(i, "FAIL") for i in range(12)]
-    + [_step(100 + i, "MISSING") for i in range(16)]
-    + [_step(200 + i, "PASS_VOIDED_BY_DEPENDENCY") for i in range(7)]
-    + [_step(300 + i, "SKIPPED-CONDITION") for i in range(22)]
-    + [_step(400 + i, "INCOMPLETE") for i in range(5)]
+    + [_step(100 + i, "FAIL") for i in range(16)]
+    + [_step(200 + i, "NOT_MEASURED") for i in range(7)]
+    + [_step(300 + i, "NOT_APPLICABLE") for i in range(22)]
+    + [_step(400 + i, "NOT_MEASURED") for i in range(5)]
     + [_step(500 + i, "PASS") for i in range(3)]
-    + [_step(600 + i, "WAIVED") for i in range(3)]
-    + [_step(700, "PARTIALLY-VACUOUS")]
+    + [_step(600 + i, "PASS_WITH_WAIVERS") for i in range(3)]
+    + [_step(700, "PASS")]
 )
 
 
@@ -63,10 +63,14 @@ def test_the_measured_icaes_red_now_names_its_cause():
     assert c["run_is_red"] is True
     assert c["names_its_cause"] is True
     assert c["failed_gates"] == [], "no gate failed, and that stays true"
-    assert len(c["non_green_steps"]) == 35
-    assert c["named_cause_count"] == 35
+    # R-0915-85 — the tally is 40, not 35, and the 5 that joined are the
+    # NOT_MEASURED rows. `INCOMPLETE` used to sit outside NON_GREEN, so a run
+    # could be red while five of its rows said nobody had looked and none of
+    # them counted as a named cause. A hole in the report is a cause.
+    assert len(c["non_green_steps"]) == 40
+    assert c["named_cause_count"] == 40
     statuses = {s["status"] for s in c["non_green_steps"]}
-    assert statuses == {"FAIL", "MISSING", "PASS_VOIDED_BY_DEPENDENCY"}
+    assert statuses == {"FAIL", "NOT_MEASURED"}
 
 
 def test_a_red_that_names_nothing_at_all_is_reported_as_a_defect():
@@ -105,25 +109,30 @@ def test_a_gating_ordering_violation_is_a_cause_on_its_own():
     that legitimately-caused FAIL uncaused — and the frame canary would then
     redden a correct run over the audit's own blind spot."""
     c = F.verdict_causes(
-        "FAIL", [], [_step(1, "PASS"), _step(2, "VACUOUS_PASS")], [], [],
+        "FAIL", [], [_step(1, "PASS"), _step(2, "NOT_MEASURED")], [], [],
         ordering_gating_lines=[
             "[37] GDSII = PASS marked done while dependency [31] DRC = MISSING"])
     assert c["run_is_red"] is True
     assert c["names_its_cause"] is True
     assert c["failed_gates"] == []
-    assert c["non_green_steps"] == []
+    # R-0915-85 — the NOT_MEASURED row is itself a named cause now, so this
+    # case carries two: the ordering line AND the step nobody measured. The
+    # property under test is unchanged — the ordering line reaches the cause
+    # set on its own — and is asserted directly rather than through an
+    # emptiness that the vocabulary change made untrue.
+    assert [s["step_id"] for s in c["non_green_steps"]] == ["2"]
     assert c["ordering_gating_line_count"] == 1
-    assert c["named_cause_count"] == 1
+    assert c["named_cause_count"] == 2
 
 
 def test_a_self_skipped_signoff_step_is_a_cause_on_its_own():
     """THE FIFTH SOURCE, and it wears an EXCUSED word. `ok` is false when
     `oss_blocked_skipped` is non-empty, and those rows are SKIPPED-CONDITION —
-    which `_flow_verdict_tiers` puts in EXCUSED, not NON_GREEN. So this run is
+    which `verdict` puts in EXCUSED, not NON_GREEN. So this run is
     red with no failed gate, no non-green step and no failure line."""
     class _R:
         id, name = "DT1", "Transition-delay-fault ATPG"
-    c = F.verdict_causes("FAIL", [], [_step(1, "SKIPPED-CONDITION")], [], [],
+    c = F.verdict_causes("FAIL", [], [_step(1, "NOT_APPLICABLE")], [], [],
                          self_skipped_signoff_steps=[_R()])
     assert c["run_is_red"] is True
     assert c["names_its_cause"] is True
@@ -137,10 +146,13 @@ def test_a_self_skipped_signoff_step_is_a_cause_on_its_own():
 #: input added later has no entry here and reddens this row.
 _RED_INPUTS = {
     # `ok = ...` — the statuses
-    "failing": "status FAIL is in _flow_verdict_tiers.NON_GREEN",
-    "missing": "status MISSING is in _flow_verdict_tiers.NON_GREEN",
+    "failing": "status FAIL is in verdict.NON_GREEN",
+    # R-0915-85 — both buckets still exist and still mean what they measured;
+    # what carries the distinction is the REASON beside the word, because the
+    # words `MISSING` and `SKIPPED-SETUP-REQUIRED` are gone.
+    "missing": "status FAIL is in verdict.NON_GREEN",
     "setup_required_skipped":
-        "status SKIPPED-SETUP-REQUIRED is in _flow_verdict_tiers.NON_GREEN",
+        "status NOT_MEASURED is in verdict.NON_GREEN",
     # `ok = ...` — the one that is NOT a status
     "oss_blocked_skipped": "self_skipped_signoff_steps",
     # `forced_fail = True` — the lists
@@ -204,9 +216,9 @@ def test_a_refusal_names_nothing_on_purpose_and_says_not_measured():
 
 
 def test_the_non_green_tiers_are_read_from_the_module_that_owns_them():
-    """DERIVED, not a literal. A tier added to `_flow_verdict_tiers.NON_GREEN`
+    """DERIVED, not a literal. A tier added to `verdict.NON_GREEN`
     becomes a cause the day it is added, not the day someone remembers."""
-    import _flow_verdict_tiers as tiers
+    import verdict as tiers
     for word in tiers.NON_GREEN:
         c = F.verdict_causes("FAIL", [], [_step(1, word)], [], [])
         assert c["names_its_cause"] is True, word
@@ -214,7 +226,7 @@ def test_the_non_green_tiers_are_read_from_the_module_that_owns_them():
 
 
 def test_an_excused_step_is_never_counted_as_a_cause():
-    import _flow_verdict_tiers as tiers
+    import verdict as tiers
     for word in tiers.EXCUSED:
         c = F.verdict_causes("FAIL", [], [_step(1, word)], [], [])
         assert c["non_green_steps"] == [], word
@@ -223,9 +235,13 @@ def test_an_excused_step_is_never_counted_as_a_cause():
 def test_the_green_tiers_are_the_ones_main_exits_zero_on():
     """Spelt once. If the exit-code decision at the bottom of `main` and this
     tuple ever disagree, a run could be green to the shell and red here."""
+    # R-0915-85 — the exit-code decision no longer retypes the tuple; it reads
+    # `GREEN_RUN_STATUSES`, so the two CANNOT disagree. That is this test's
+    # subject satisfied by construction, and what is asserted is the one fact
+    # that still could be got wrong: which words are green.
     src = (Path(F.__file__).read_text(encoding="utf-8")
-           .split('if overall in ("PASS", "PASS_WITH_WAIVERS",')[1]
+           .split("if overall in GREEN_RUN_STATUSES:")[1]
            .split("return 0")[0])
-    assert "PASS_WITH_OPEN_SOURCE_CONSTRAINTS" in src
-    assert set(F.GREEN_RUN_STATUSES) == {
-        "PASS", "PASS_WITH_WAIVERS", "PASS_WITH_OPEN_SOURCE_CONSTRAINTS"}
+    assert src.strip() == "", src
+    assert set(F.GREEN_RUN_STATUSES) == {"PASS", "PASS_WITH_WAIVERS"}
+    assert "NOT_MEASURED" not in F.GREEN_RUN_STATUSES

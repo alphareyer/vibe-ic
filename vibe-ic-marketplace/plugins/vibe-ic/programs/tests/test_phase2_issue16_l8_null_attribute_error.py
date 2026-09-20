@@ -212,7 +212,7 @@ def test_rtl_dir_not_wiped_on_crash(tmp_path: Path):
         importlib.reload(sys.modules["design_one_shot_runner"])
     p2b = importlib.import_module("design_one_shot_runner")
     result = p2b.step_rtl_gen(project, "totally_unregistered_class_xyz")
-    assert result.status == "WAIVED"
+    assert result.status == "PASS_WITH_WAIVERS"
     assert sentinel.is_file(), (
         "WAIVED early-return must not touch rtl/ — sentinel gone"
     )

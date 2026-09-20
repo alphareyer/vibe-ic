@@ -875,7 +875,7 @@ def test_self_skip_step_discloses_the_gate_it_did_not_run(fcc, tmp_path):
     step = _step(29)
     res = fcc.check_step(proj, step, {})
 
-    assert res.status == "SKIPPED-CONDITION"
+    assert res.status == "NOT_APPLICABLE"
     assert any("post_layout_sim_check" in r and "NOT evaluated" in r
                for r in res.reasons), (
         f"the un-run declared gate is not disclosed: {res.reasons}")
@@ -886,7 +886,7 @@ def test_self_skip_disclosure_does_not_change_the_verdict(fcc, tmp_path):
     disclosed capability gap into a FAIL, and must not create a PASS."""
     proj = _self_skip_project(tmp_path)
     res = fcc.check_step(proj, _step(29), {})
-    assert res.status == "SKIPPED-CONDITION"
+    assert res.status == "NOT_APPLICABLE"
     assert res.self_skip_disclosed is True
 
 
@@ -938,9 +938,18 @@ def test_an_unregistered_flag_names_the_output_but_does_not_defer_it(
     proj = _predicate_gate_self_skip_project(tmp_path)
     res = fcc.check_step(proj, _step(12), {})
 
-    assert res.status == "MISSING", res.reasons
+    # MAIN'S SEMANTICS, IN THE FIVE WORDS. Main moved this case after this
+    # branch forked: the status is the absent OUTPUT's, there is NO invented
+    # advisory about a gate that never ran, and the missing artefact is still
+    # NAMED. Under R-0915-85 `MISSING` is `FAIL` carrying `missing_artefact` —
+    # a required output that does not exist is a defect, and the reason says
+    # WHICH kind. The branch's own earlier answer (NOT_APPLICABLE + an
+    # advisory) is discarded: main is the contract, and this is main's
+    # sentence, not a re-litigation of it.
+    assert res.status == "FAIL", res.reasons
+    assert res.reason_class == "missing_artefact", (res.status,
+                                                    res.reason_class)
     assert not any("NOT evaluated" in r for r in res.reasons), res.reasons
-    # The absent output is still NAMED, which is the half the ruling kept.
     assert any("post_dft_netlist.v" in r for r in res.reasons), res.reasons
 
 
@@ -955,7 +964,9 @@ def test_a_gateless_step_invents_no_advisory_either(fcc, tmp_path):
     step.pop("gate", None)
     res = fcc.check_step(proj, step, {})
 
-    assert res.status == "MISSING", res.reasons
+    # Same move, same reason: main's word for an absent declared output,
+    # spelled in the five.
+    assert res.status == "FAIL", res.reasons
     assert not any("NOT evaluated" in r for r in res.reasons), res.reasons
 
 
@@ -982,7 +993,13 @@ def test_a_registered_entitled_flag_still_defers(fcc, tmp_path):
     }) + "\n")
     res = fcc.check_step(proj, _step(29), {})
 
-    assert res.status == "SKIPPED-CONDITION", res.reasons
+    # R-0915-85 — the STEP's word is `NOT_APPLICABLE`: the entitled capability
+    # flag is the INPUT declaring there is nothing here to measure. The gate's
+    # OWN record above keeps `"verdict": "SKIPPED-CONDITION"` — that is the
+    # capability/waiver channel `flow_compliance_check` reads, a neighbouring
+    # vocabulary this ruling does not claim, and moving it would be the second
+    # mistake this batch already made once and reverted.
+    assert res.status == "NOT_APPLICABLE", res.reasons
 
 
 def test_undisclosed_absence_is_still_missing(fcc, tmp_path):
@@ -991,7 +1008,7 @@ def test_undisclosed_absence_is_still_missing(fcc, tmp_path):
     proj = tmp_path / "bare"
     (proj / "phase3/stage3/sim_postlayout").mkdir(parents=True)
     res = fcc.check_step(proj, _step(29), {})
-    assert res.status == "MISSING"
+    assert res.status == "FAIL"
     assert not any("NOT evaluated" in r for r in res.reasons)
 
 
@@ -1043,11 +1060,11 @@ def test_declared_outputs_are_all_required(fcc, tmp_path, sid, files, dropped):
         _touch(proj, rel)
     step = dict(_step(sid))
     step.pop("gate", None)          # isolate the required_outputs verdict
-    assert fcc.check_step(proj, step, {}).status != "MISSING"
+    assert fcc.check_step(proj, step, {}).status != "FAIL"
 
     (proj / dropped).unlink()
     res = fcc.check_step(proj, step, {})
-    assert res.status == "MISSING", (
+    assert res.status == "FAIL", (
         f"step {sid} still {res.status} without {dropped}")
     assert any(dropped.rsplit("/", 1)[-1] in r for r in res.reasons)
 
@@ -1113,16 +1130,29 @@ def test_step33_gate_audit_trail_is_not_written_over_its_own_input():
 
 
 def _all_missing_results(fcc, waived=(), failed=()):
-    """One StepResult per real flow step, all MISSING except as directed."""
+    """One StepResult per real flow step, all MISSING except as directed.
+
+    R-0915-85 — `MISSING` is `FAIL(missing_artefact)`: a required OUTPUT that
+    does not exist is a defect, and the reason says WHICH defect. The reason
+    is load-bearing here, not decoration. `_attribute_cascade_verdicts` walks
+    ancestry only for rows whose FAIL is a missing artefact, because a FAIL a
+    gate REACHED — it read the design and found something wrong — can never be
+    explained by an ancestor's waiver, and the one word could not tell the two
+    apart. Omit it and every row in this fixture is a gate-found defect, the
+    walk never starts, and the test reads green about a cascade that never ran.
+    """
     out = []
     for st in _flow_steps():
         sid = st.get("id")
         if sid is None or str(sid) == "P0":
             continue
-        status = ("WAIVED" if sid in waived
-                  else "FAIL" if sid in failed else "MISSING")
-        out.append(fcc.StepResult(id=sid, name=st.get("name", ""),
-                                  stage=st.get("stage", ""), status=status))
+        status = ("PASS_WITH_WAIVERS" if sid in waived
+                  else "FAIL" if sid in failed else "FAIL")
+        out.append(fcc.StepResult(
+            id=sid, name=st.get("name", ""), stage=st.get("stage", ""),
+            status=status,
+            reason_class=("" if sid in waived
+                          else fcc._T.ReasonClass.MISSING_ARTEFACT.value)))
     return out
 
 
@@ -1154,7 +1184,7 @@ def test_step39_does_not_inherit_a_step6_waiver(fcc):
         results, _flow_steps(), {6: {"ticket": "TKT-FPGA-6"}})
     by_id = {r.id: r for r in results}
 
-    assert by_id[39].status == "MISSING", by_id[39].status
+    assert by_id[39].status == "FAIL", by_id[39].status
     assert by_id[39].cascade_note == "waived-ancestor-undeclared(6)", (
         by_id[39].cascade_note)
     assert info["deferred_by_upstream"] == [], (
@@ -1167,7 +1197,7 @@ def test_no_waiver_leaves_step39_in_the_denominator(fcc):
     results = _all_missing_results(fcc)
     info = fcc._attribute_cascade_verdicts(results, _flow_steps(), {})
     by_id = {r.id: r for r in results}
-    assert by_id[39].status == "MISSING"
+    assert by_id[39].status == "FAIL"
     assert info["deferred_by_upstream"] == []
 
 
@@ -1180,7 +1210,7 @@ def test_a_step6_fail_does_not_deduct_step39(fcc):
     results = _all_missing_results(fcc, failed=(6,))
     info = fcc._attribute_cascade_verdicts(results, _flow_steps(), {})
     by_id = {r.id: r for r in results}
-    assert by_id[39].status == "MISSING", by_id[39].status
+    assert by_id[39].status == "FAIL", by_id[39].status
     assert info["deferred_by_upstream"] == []
 
 

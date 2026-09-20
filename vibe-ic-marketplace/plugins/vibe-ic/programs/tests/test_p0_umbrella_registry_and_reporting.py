@@ -238,7 +238,7 @@ def test_NEGATIVE_CONTROL_withholding_the_seed_brings_the_void_back(
                            ("--lenient",), seed_dependency_chain=False)
     capsys.readouterr()
     p0 = _p0(report)
-    assert p0 is not None and p0["status"] == "PASS_VOIDED_BY_DEPENDENCY", (
+    assert p0 is not None and p0["status"] == "NOT_MEASURED", (
         f"the ordering rule no longer voids a P0 PASS over a MISSING "
         f"dependency; status={p0 and p0['status']!r}")
     assert any("PASS voided" in r for r in p0["reasons"]), p0["reasons"]
@@ -287,7 +287,14 @@ def test_strict_structural_verdict_is_not_decided_over_an_empty_scope(
                            ("--phase", "2", "--strict-structural"))
     assert _p0(report) is not None, (
         "strict-structural verdict computed with no P0 result in scope")
-    assert rc == 0
+    # R-0915-85 — THE SUBJECT IS THE OPPOSITE OF rc 0, and this test's own
+    # docstring says so: "the tool reports PASS having examined nothing" is
+    # the defect it was written about. With no structural gate records the
+    # umbrella measured nothing, the only step in scope is NOT_MEASURED, and
+    # the run says so and exits 1. `rc == 0` was the pre-ruling answer to the
+    # very complaint above it.
+    assert _p0(report)["status"] == "NOT_MEASURED", _p0(report)
+    assert rc == 1
 
 
 # --- direction 1: the outcomes that already worked must not change ---------
@@ -329,7 +336,7 @@ def test_no_rtl_umbrella_still_reports_SKIPPED_CONDITION(
     rc, report = _run_main(tmp_path, monkeypatch, [], ("--lenient",),
                            dispatched=False)
     p0 = _p0(report)
-    assert p0 is not None and p0["status"] == "SKIPPED-CONDITION"
+    assert p0 is not None and p0["status"] == "NOT_APPLICABLE"
     assert p0["reasons"] == [f"SKIP: {_flow._P0_NO_RTL_NOTE}"]
     assert p0["gate_records"] == [], (
         "no gate was considered, so there is no gate record — and the line "
@@ -342,7 +349,7 @@ def test_skips_and_waivers_are_still_listed_verbatim(tmp_path, monkeypatch):
 
     The waiver is asserted IN ITS OWN UNIT. `counts` is a tally of STEPS and
     `gate_w` is a structural SUB-GATE inside the one step P0, so it contributes
-    0 there — #924/#930 removed the `counts["WAIVED"] += len(structural_waivers)`
+    0 there — #924/#930 removed the `counts["PASS_WITH_WAIVERS"] += len(structural_waivers)`
     addend precisely because a sub-gate that excused a step off a 63-step
     denominator made the published ratio RISE with the number of things waived.
     Both numbers are stated: 0 waived steps, and the sub-gate published verbatim
@@ -365,7 +372,7 @@ def test_skips_and_waivers_are_still_listed_verbatim(tmp_path, monkeypatch):
         f"(ticket={_flow._THIN_INPUT_WAIVER_TICKET}, "
         "review_required=true): why",
     ]
-    assert report["counts"]["WAIVED"] == 0, (
+    assert report["counts"]["PASS_WITH_WAIVERS"] == 0, (
         "a structural SUB-GATE waiver was counted as a waived STEP; that is "
         f"the #924 unit error. counts={report['counts']}")
     assert [w["gate"] for w in report["thin_input_waivers"]] == ["gate_w"], (

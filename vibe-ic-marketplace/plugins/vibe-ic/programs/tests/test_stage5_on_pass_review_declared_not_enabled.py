@@ -209,6 +209,8 @@ def test_asking_the_stage_returns_exactly_two_and_says_why(tmp_path):
     assert "DECLARED AND NOT ENABLED" in r.stdout
     assert "R5_PACKAGE_CANNOT_BOND_DESIGN" in r.stdout
     rec = json.loads((tmp_path / "r.json").read_text())
+    # R-0915-85 — the REVIEW's own rule vocabulary is ACCEPT / REJECT /
+    # DISARMED / NOT_CHECKED; it is not a step status and is not renamed.
     assert rec["verdict"] == "NOT_CHECKED"
     assert rec["declared_not_enabled"][0]["rule"] == "R5_PACKAGE_CANNOT_BOND_DESIGN"
 
@@ -447,7 +449,7 @@ def test_removing_the_disarm_moves_a_label_and_not_the_rejection_set():
     assert on.get("REJECT") == off.get("REJECT"), (
         "removing the disarm changed the rejection set; the docstring says it "
         "does not, and one of the two is now wrong")
-    assert on.get("DISARMED") == off.get("NOT_CHECKED")
+    assert on.get("DISARMED") == off.get("NOT_MEASURED")
 
 
 # ═════════════════════════════════════════════════════════════════════════════

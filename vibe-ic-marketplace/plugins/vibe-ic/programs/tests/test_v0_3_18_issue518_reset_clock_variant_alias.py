@@ -256,8 +256,15 @@ def test_step_idempotent(tmp_path):
     _request_interface(tmp_path, "sequence_detector", "clk", "rst_n", "data_in", "detected")
     assert P.step_reset_clock_variant_aliases(
         tmp_path, "sequence_detector").status == "PASS"
+    # R-0915-85 — the SECOND run is a PASS too, and that is the point of the
+    # reduction rather than a relaxation of this test. The old `SKIP` meant
+    # "the alias wrapper is already present, so this step changed nothing" —
+    # a step that RAN, examined the RTL and correctly did nothing, which is a
+    # pass. It never meant "nobody measured it", and the five words no longer
+    # let the two be spelled the same. Idempotence is still what is asserted:
+    # the second call reaches the same verdict over the same tree.
     assert P.step_reset_clock_variant_aliases(
-        tmp_path, "sequence_detector").status == "SKIP"
+        tmp_path, "sequence_detector").status == "PASS"
 
 
 def test_step_parameterized_top_forwards_params(tmp_path):
@@ -321,7 +328,7 @@ def test_step_top_only_does_not_touch_submodule(tmp_path):
         " sub u(.clk(clk),.reset_n(rst_n),.q(q)); endmodule\n")
     # top is already canonical (rst_n) → SKIP; sub must be untouched.
     r = P.step_reset_clock_variant_aliases(tmp_path, "top")
-    assert r.status == "SKIP"
+    assert r.status == "NOT_APPLICABLE"
     assert "module sub(" in (rtl / "sub.v").read_text()
     assert "reset_n" in (rtl / "sub.v").read_text()
 
@@ -329,7 +336,7 @@ def test_step_top_only_does_not_touch_submodule(tmp_path):
 def test_step_skip_when_no_rtl(tmp_path):
     P, _pl = _runner()
     r = P.step_reset_clock_variant_aliases(tmp_path, "whatever")
-    assert r.status == "SKIP"
+    assert r.status == "NOT_MEASURED"
 
 
 def test_step_thin_wrapper_parent_still_aliases_and_rewires(tmp_path):
@@ -508,7 +515,7 @@ def test_step_round4_multimodule_project_skips_no_guess(tmp_path):
         "  regs u2(.clk(clk), .reset_n(reset_n), .q(q2));\nendmodule\n")
     before = {f.name: f.read_text() for f in rtl.glob("*.v")}
     r = P.step_reset_clock_variant_aliases(tmp_path, "chip_top")
-    assert r.status == "SKIP", (r.status, r.detail)
+    assert r.status == "NOT_MEASURED", (r.status, r.detail)
     assert "not single-leaf-shaped" in r.detail
     after = {f.name: f.read_text() for f in rtl.glob("*.v")}
     assert before == after
@@ -526,10 +533,10 @@ def test_step_round4_rerun_after_alias_skips_globally(tmp_path):
     assert P.step_reset_clock_variant_aliases(
         tmp_path, "chip_top").status == "PASS"
     r2 = P.step_reset_clock_variant_aliases(tmp_path, "chip_top")
-    assert r2.status == "SKIP"
+    assert r2.status == "PASS"
     assert "already present" in r2.detail
     r3 = P.step_reset_clock_variant_aliases(tmp_path, "sequence_detector")
-    assert r3.status == "SKIP"
+    assert r3.status == "PASS"
     assert "already present" in r3.detail
 
 
@@ -588,7 +595,7 @@ def test_step_round4_l9_native_spelling_guards_skip(tmp_path):
                       {"name": "data_in"}, {"name": "detected"}]}))
     before = (rtl / "sequence_detector.v").read_text()
     r = P.step_reset_clock_variant_aliases(tmp_path, "chip_top")
-    assert r.status == "SKIP", (r.status, r.detail)
+    assert r.status == "NOT_APPLICABLE", (r.status, r.detail)
     assert "L9 declares native port spelling" in r.detail
     assert (rtl / "sequence_detector.v").read_text() == before
 
@@ -606,7 +613,7 @@ def test_step_round4_l9_empty_ports_does_not_authorize_alias(tmp_path):
         "top_module": "sequence_detector", "top_ports": []}))
     before = (rtl / "sequence_detector.v").read_bytes()
     r = P.step_reset_clock_variant_aliases(tmp_path, "chip_top")
-    assert r.status == "SKIP", (r.status, r.detail)
+    assert r.status == "NOT_APPLICABLE", (r.status, r.detail)
     assert (rtl / "sequence_detector.v").read_bytes() == before
     assert "request" in r.detail.lower()
 
@@ -660,7 +667,7 @@ def test_step_display_string_is_not_an_instantiation(tmp_path):
         "  assign q=clk;\nendmodule\n")
     before = {f.name: f.read_text() for f in rtl.glob("*.v")}
     r = P.step_reset_clock_variant_aliases(tmp_path, "chip_top")
-    assert r.status == "SKIP", (r.status, r.detail)
+    assert r.status == "NOT_MEASURED", (r.status, r.detail)
     after = {f.name: f.read_text() for f in rtl.glob("*.v")}
     assert before == after
 
@@ -683,10 +690,10 @@ def test_step_multi_instance_parent_is_genuine_not_thin(tmp_path):
         "  core u1(.clk(clk), .reset_n(reset_n), .q(q1));\n"
         "  assign q = q0 ^ q1;\nendmodule\n")
     r = P.step_reset_clock_variant_aliases(tmp_path, "core")
-    assert r.status == "SKIP", (r.status, r.detail)
+    assert r.status == "NOT_APPLICABLE", (r.status, r.detail)
     assert "real internal submodule" in r.detail
     r2 = P.step_reset_clock_variant_aliases(tmp_path, "chip_top")
-    assert r2.status == "SKIP", (r2.status, r2.detail)
+    assert r2.status == "NOT_MEASURED", (r2.status, r2.detail)
 
 
 def test_step_skips_when_top_is_genuine_leaf_submodule(tmp_path):
@@ -708,7 +715,7 @@ def test_step_skips_when_top_is_genuine_leaf_submodule(tmp_path):
         "  leaf u1(.clk(clk), .reset_n(reset_n), .q(q1));\n"
         "  other u2(.clk(clk), .q(q2));\nendmodule\n")
     r = P.step_reset_clock_variant_aliases(tmp_path, "leaf")
-    assert r.status == "SKIP", (r.status, r.detail)
+    assert r.status == "NOT_APPLICABLE", (r.status, r.detail)
     assert "module leaf(" in (rtl / "leaf.v").read_text()
     assert "__rcvar_inner" not in (rtl / "leaf.v").read_text()
     iv = shutil.which("iverilog")

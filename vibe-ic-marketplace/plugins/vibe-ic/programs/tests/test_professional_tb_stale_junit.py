@@ -40,7 +40,7 @@ def test_unfilled_current_run_invalidates_prior_green_junit(
 
     step = SUBJECT.step_professional_tb_gen(
         tmp_path, "dut", "configured-container")
-    assert step.status == "INCOMPLETE"
+    assert step.status == "NOT_MEASURED"
     assert stale.exists() is False
     report = (tmp_path / "reports/phase2/gates/professional_tb.json").read_text()
     assert '"stale_results_invalidated": true' in report

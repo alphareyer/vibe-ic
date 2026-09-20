@@ -1625,7 +1625,8 @@ MUTATIONS: Tuple[Mutation, ...] = (
         what="hoist `_run_structural_rtl_gates`'s no-RTL early return to the "
              "top of the function, so the P0 umbrella skips on every input",
         breaks="a skip taken unconditionally while still being reported as "
-               "SKIPPED-CONDITION. The cell's own words: 'L2 SKIP NOT SHOWN "
+               "NOT_APPLICABLE — a word that claims the INPUT declared there "
+               "was nothing here. The cell's own words: 'L2 SKIP NOT SHOWN "
                "CONDITIONAL: every constructed input resolves this step to a "
                "skip tier'.",
         red_signal="L2 SKIP NOT SHOWN CONDITIONAL",

@@ -260,7 +260,7 @@ def test_every_corner_failing_is_a_warn_not_a_pass(tmp_path, monkeypatch):
     assert _sta_basis.declared_basis(published) != "POST_ROUTE", (
         "a POST_ROUTE body is published under the PRE-LAYOUT header: "
         + published)
-    assert res.status == "WARN", (
+    assert res.status == "PASS_WITH_WAIVERS", (
         "the step could not substantiate its pre-layout artefact and still "
         f"reported {res.status}: {res.detail}")
     assert "UNSUBSTANTIATED" in res.detail, res.detail
@@ -325,7 +325,7 @@ def test_undeclared_pre_pnr_is_reported_not_deleted(tmp_path, monkeypatch):
     assert pre_pnr.read_text() == undeclared, "an UNDECLARED report was edited"
     assert not (R._pl.sta_dir(proj)
                 / "pre_pnr_timing.rpt.stale_basis").is_file()
-    assert res.status == "WARN", (res.status, res.detail)
+    assert res.status == "PASS_WITH_WAIVERS", (res.status, res.detail)
 
 
 # ---------------------------------------------------------------------------

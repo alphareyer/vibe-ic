@@ -147,10 +147,18 @@ def test_step_level_missing_alone_does_not_red_structural_only_mode(
     _stub_structural_gates(monkeypatch, mod)
     rc = _audit(mod, project, "--phase", "2", "--strict-structural")
     out = capsys.readouterr().out
+    # R-0915-85 — #1429's finding is UNCHANGED and is the first assertion: a
+    # step-level absent artefact must not FAIL the mode that declares
+    # step-level gates informational. What changed is the OTHER half. D1's
+    # absent output is `FAIL(missing_artefact)` now, so the cascade voids P0 --
+    # the only step in this mode's verdict scope -- and a scope whose one step
+    # certifies nothing cannot exit 0. The run is NOT_MEASURED, which is
+    # neither the FAIL #1429 removed nor the green it left behind.
     assert "Overall: FAIL" not in out, (
         "a step-level MISSING must not red the mode that declares step-level "
         "gates informational:\n" + out)
-    assert rc == 0, out
+    assert "Overall: NOT_MEASURED" in out, out
+    assert rc == 1, out
 
 
 # ══ 1. THE SAME TREE, THE SAME VIOLATIONS, STILL RED WHERE THEY COUNT ══════
@@ -208,7 +216,7 @@ def _inject_violations(monkeypatch, signoff_ids):
             {"terminal_id": "9", "terminal": "Synthesis",
              "terminal_status": "PASS",
              "signoff_id": sid, "signoff": f"synthetic signoff {sid}",
-             "signoff_status": "MISSING"}
+             "signoff_status": "FAIL"}
             for sid in signoff_ids]}
 
     monkeypatch.setattr(_cov, "analyze", _fake_analyze)
@@ -373,7 +381,7 @@ def test_the_scope_boundary_is_the_real_flows_own_boundary():
     onto the analog track, or if `P0` stops being a step id.
     """
     import yaml
-    import _flow_verdict_tiers as tiers
+    import verdict as tiers
     import _hostpaths
 
     flow = _hostpaths.require_repo(

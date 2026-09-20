@@ -390,7 +390,7 @@ def test_a_checker_fault_is_not_a_design_failure_and_is_not_neutral_either(
     r = R._run_declared_signoff_gate(
         _project(tmp_path), "sta_signoff", "sta_report_check.py",
         "reports/phase3/sta/post_route_summary.json", ("--mode", "bogus"))
-    assert r.status == "BLOCKED", r
+    assert r.status == "NOT_MEASURED", r
     assert r.status != "FAIL", "a checker fault is not a verdict on the design"
     assert "rc=2" in r.detail, r.detail
     assert R._aggregate_verdict([r]) not in _RELEASING, r
@@ -407,7 +407,7 @@ def test_a_missing_project_is_not_fabricated_into_existence(tmp_path):
         missing, "sta_corner", "post_route_signoff_corner_check.py",
         "reports/phase3/sta/post_route_signoff_corner.json")
     # #544: a project that is not there is not a project that passed.
-    assert r.status == "BLOCKED", r
+    assert r.status == "NOT_MEASURED", r
     assert not missing.exists(), (
         "the gate helper created the project directory it was asked to audit")
 

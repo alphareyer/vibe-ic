@@ -110,7 +110,7 @@ def test_the_registry_still_has_classes_that_hand_off_to_a_skill():
 def test_the_handoff_message_names_a_readable_path_for_the_skill():
     with tempfile.TemporaryDirectory() as td:
         res = _waive(Path(td))
-        assert res.status == "WAIVED", res.detail
+        assert res.status == "PASS_WITH_WAIVERS", res.detail
         p = (res.extras or {}).get("fallback_skill_path") or ""
         observed = (bool(p), Path(p).is_file() if p else False,
                     bool(p) and p in str(res.detail))

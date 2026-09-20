@@ -120,12 +120,14 @@ def _run(tmp_path, monkeypatch, **kw):
 def test_stalled_extraction_is_blocked_not_a_mismatch(tmp_path, monkeypatch):
     p, r, v = _run(tmp_path, monkeypatch, stall_leg="magic")
 
-    assert r.status == "BLOCKED", (r.status, r.detail)
+    assert r.status == "NOT_MEASURED", (r.status, r.detail)
     assert r.extras.get("finding") == "LVS_EXTRACTION_STALLED"
     assert r.extras.get("stopped_as") == "STALLED"
 
     # THE CONTRACT, which is the whole point of the finding.
     assert v is not None, "no lvs_verdict.json was written for a stopped run"
+    # `lvs_verdict.json` is the GATE's own artefact and carries the gate's own
+    # vocabulary; R-0915-85 claims the STEP's word, not this one.
     assert v["status"] == "BLOCKED", v["status"]
     assert v["result"] == "BLOCKED", v["result"]
     assert v["finding"] == "LVS_EXTRACTION_STALLED"
@@ -159,7 +161,7 @@ def test_stalled_compare_is_blocked_not_a_mismatch(tmp_path, monkeypatch):
     _p, r, v = _run(tmp_path, monkeypatch, stall_leg="netgen",
                     netgen_transcript="Netgen 1.5\nFlattening unmatched ",
                     lvs_rpt_body="Netgen 1.5\nFlattening unmatched ")
-    assert r.status == "BLOCKED", (r.status, r.detail)
+    assert r.status == "NOT_MEASURED", (r.status, r.detail)
     assert r.extras.get("finding") == "LVS_COMPARE_STALLED"
     assert v["status"] == "BLOCKED"
     assert v["finding"] == "LVS_COMPARE_STALLED"
@@ -216,10 +218,18 @@ def test_blocked_still_aggregates_to_fail():
     """BLOCKED and FAIL are the same run-level verdict, so nothing green can be
     manufactured by moving the step's own word.  If this ever stops holding,
     the word change above becomes a weakening and this test says so."""
-    def _sr(status):
-        return runner.StepResult("lvs", status, 0.0, "d", extras={})
-    assert runner._aggregate_verdict([_sr("BLOCKED")]) == "FAIL"
+    def _sr(status, **kw):
+        return runner.StepResult("lvs", status, 0.0, "d", extras={}, **kw)
+    # R-0915-85 — a NOT_MEASURED row must NAME what stopped it; the
+    # constructor refuses one that does not, which is the guard, not a
+    # nuisance. And the run word is NOT_MEASURED, not FAIL: the step did
+    # not fail, nothing examined it. What this test asserts is what it
+    # always asserted -- nothing green can be manufactured by moving the
+    # step's own word.
+    assert runner._aggregate_verdict(
+        [_sr("NOT_MEASURED", reason_class="stalled")]) == "NOT_MEASURED"
     assert runner._aggregate_verdict([_sr("FAIL")]) == "FAIL"
+    assert runner._aggregate_verdict([_sr("PASS")]) == "PASS"
     assert runner._aggregate_verdict([_sr("PASS")]) == "PASS"
     # And the danger of an INVENTED word — still asserted, so the reason a new
     # status word was not introduced here stays MEASURED rather than stated.
@@ -233,8 +243,16 @@ def test_blocked_still_aggregates_to_fail():
     # is now the safe one, so nothing this test guarded has been weakened: the
     # word `STALLED` was dangerous because it was silent, and it is no longer
     # silent.
-    assert (runner._aggregate_verdict([_sr("STALLED")])
-            == "UNKNOWN_STATUS:STALLED@lvs")
+    # R-0915-85 — the refusal moved EARLIER and got louder. #2153's aggregator
+    # returned an `UNKNOWN_STATUS:` word, which is a refusal a caller has to
+    # remember to look for; `verdict.parse` raises `UnknownVerdictWord` at the
+    # ROW that carries the invented word, before any roll-up sees it. The
+    # intent is unchanged and the answer is safer: `STALLED` was dangerous
+    # because it was silent, and it cannot be constructed at all now.
+    import pytest as _pytest
+    import verdict as _V
+    with _pytest.raises(_V.UnknownVerdictWord):
+        runner._aggregate_verdict([_sr("STALLED")])
 
 
 # ---------------------------------------------------------------------------

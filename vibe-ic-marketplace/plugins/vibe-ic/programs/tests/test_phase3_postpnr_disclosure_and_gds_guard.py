@@ -228,6 +228,8 @@ def test_the_disclosure_row_is_present_and_did_not_block_anything(
     # No project ships a pad-side table today, so the ordinary green path is
     # a VACUOUS_PASS row — the exact shape under which the stale GDS shipped.
     assert plan["pad_side_constraint"]["status"] == "PASS"
+    # The GATE PROGRAM's own word, which R-0915-85 did not touch: it is
+    # `pad_side_constraint_check`'s stdout, not a step status.
     assert "VACUOUS_PASS" in plan["pad_side_constraint"]["detail"]
     for step in ("gds", "drc", "lvs", "canonicalize_artefacts"):
         assert step in plan, f"{step} must still run after the disclosure row"
@@ -432,5 +434,5 @@ def test_unmeasurable_pad_side_is_skip_not_fail(tmp_path, monkeypatch):
     R.main()
 
     row = _plan(project)["pad_side_constraint"]
-    assert row["status"] == "SKIP", (
+    assert row["status"] == "NOT_MEASURED", (
         f"'could not parse the DEF' is not a pad-side violation: {row}")

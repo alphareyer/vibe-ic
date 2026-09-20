@@ -155,7 +155,11 @@ def _tally(out: str) -> dict:
     assert m is not None, (
         f"the checker printed no per-verdict tally line, so every premise "
         f"below is unmeasurable:\n{out[:3000]}")
-    return {k: int(v) for k, v in re.findall(r"([A-Z][A-Z-]*)=(\d+)",
+    # R-0915-85 — the token class MUST include the underscore. Four of the
+    # five words carry one, and `[A-Z][A-Z-]*` matched `PASS_WITH_WAIVERS=3`
+    # as `PASS`, so the tally read back as a different run than the one that
+    # was printed.
+    return {k: int(v) for k, v in re.findall(r"([A-Z][A-Z_-]*)=(\d+)",
                                              m.group(0))}
 
 
@@ -169,7 +173,7 @@ def test_the_disclosure_tiers_stay_out_of_the_executed_pass_numerator(
     a run of 1 PASS + 1 VACUOUS-PASS + 1 PASS-VOIDED + 1 MISSING, `X` is 1.
 
     This replaces a test that asserted the SOURCE still contained
-    `pass_count = counts["PASS"] + counts["VACUOUS_PASS"]`. That line was
+    `pass_count = counts["PASS"] + counts["NOT_MEASURED"]`. That line was
     dead when it shipped — the unconditional assignment below it overwrites it
     before the only read — so the string match certified a line that could not
     move a number, and passed unchanged while the demotion this module exists
@@ -187,14 +191,20 @@ def test_the_disclosure_tiers_stay_out_of_the_executed_pass_numerator(
     # three tiers must FAIL here rather than agree vacuously below. Ordered
     # most-diagnostic first, so disabling the write-back reports THAT rather
     # than its downstream arithmetic.
-    assert tally.get("PASS-VOIDED") == 1, (
-        f"the probe produced no PASS-VOIDED. `ZD4` passes its own gate and "
-        f"depends on `ZF3`, which is MISSING, so the write-back must have "
-        f"demoted it. This is what fires when the demotion loop is disabled: "
-        f"{tally}\n{out[:3000]}")
-    assert tally.get("VACUOUS-PASS") == 1, (
-        f"the probe produced no VACUOUS-PASS, so this guard cannot see the "
-        f"fold it exists to catch. Gate program {_VACUOUS_GATE_PROGRAM!r} may "
+    # R-0915-85 — BOTH disclosure tiers are `NOT_MEASURED` now, and what tells
+    # them apart is the reason printed beside the word, not a word of their
+    # own. So the premises are asserted on the REASONS: the fold this guard
+    # exists to catch is still visible, and a probe that stopped producing
+    # either tier still fails here rather than agreeing vacuously below.
+    assert "upstream_failed" in out, (
+        f"the probe produced no voided row. `ZD4` passes its own gate and "
+        f"depends on `ZF3`, whose declared output is absent -- a "
+        f"FAIL(missing_artefact) -- so the cascade must have demoted it. This "
+        f"is what fires when the write-back is disabled: {tally}\n"
+        f"{out[:3000]}")
+    assert tally.get("NOT_MEASURED") == 2, (
+        f"the probe did not produce BOTH unmeasured rows -- the voided one "
+        f"and the vacuous one. Gate program {_VACUOUS_GATE_PROGRAM!r} may "
         f"have stopped answering rc 2 on an empty project: {tally}\n"
         f"{out[:3000]}")
     assert tally.get("PASS") == 1, (
@@ -228,12 +238,21 @@ def test_the_disclosure_tiers_stay_out_of_the_executed_pass_numerator(
     # per-step line is the half a human actually reads.
     zd4 = next((l for l in out.splitlines() if "Step ZD4:" in l), None)
     assert zd4 is not None, f"no per-step line for ZD4:\n{out[:3000]}"
-    assert "[PASS-VOIDED" in zd4, (
-        f"the step whose dependency is MISSING is not labelled PASS-VOIDED; "
-        f"a reader takes this line to mean the step is good: {zd4!r}")
-    assert "[VACUOUS-PASS" not in zd4, (
-        f"a voided PASS was rendered as a vacuous one, erasing the "
-        f"distinction: {zd4!r}")
+    # R-0915-85 — the label is `NOT_MEASURED` and the DISTINCTION is the
+    # reason printed beside it. `PASS-VOIDED` vs `VACUOUS-PASS` was that same
+    # distinction spelt as two words, and it was applied to two different
+    # facts: a step voided by a FAILED dependency, and a step voided by an
+    # upstream nobody had measured. The second of those is what subservient
+    # r26 turned into three false causes, which is why the word is gone
+    # rather than renamed. Here the dependency really did fail.
+    assert "[NOT_MEASURED" in zd4, (
+        f"the step whose dependency did not deliver is not labelled "
+        f"NOT_MEASURED; a reader takes this line to mean the step is good: "
+        f"{zd4!r}")
+    assert "(upstream_failed)" in zd4, (
+        f"a row voided by a FAILED dependency was rendered without the reason "
+        f"that says so, so it is indistinguishable from a vacuous one: "
+        f"{zd4!r}")
 
 
 def test_detection_runs_before_the_table_is_printed():
@@ -249,6 +268,6 @@ def test_detection_runs_before_the_table_is_printed():
     """
     src = CHECK.read_text(encoding="utf-8").splitlines()
     demote = next(i for i, l in enumerate(src)
-                  if '_r.status = "PASS_VOIDED_BY_DEPENDENCY"' in l)
+                  if "_r.status = _T.Verdict.NOT_MEASURED.value" in l)
     printed = next(i for i, l in enumerate(src) if "_icon = {" in l)
     assert demote < printed, (demote, printed)

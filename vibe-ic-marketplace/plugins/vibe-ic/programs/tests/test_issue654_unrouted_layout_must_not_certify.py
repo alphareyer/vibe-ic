@@ -122,7 +122,7 @@ def test_a_corrupt_artefact_is_none_not_a_crash(tmp_path):
 # ── what the sign-off steps do with it ────────────────────────────────────
 def test_an_unrouted_run_makes_a_signoff_step_vacuous(tmp_path):
     v = P._vacuous_on_unrouted(_project(tmp_path, True), "drc", 0.0)
-    assert v is not None and v.status == "VACUOUS_PASS"
+    assert v is not None and v.status == "NOT_MEASURED"
     assert "INCOMPLETE" in v.detail
 
 
@@ -134,21 +134,42 @@ def test_a_vacuous_signoff_makes_the_RUN_fail(tmp_path):
     inside its own fix."""
     R = P.StepResult
     assert P._aggregate_verdict([R("a", "PASS")]) == "PASS"
-    assert P._aggregate_verdict([R("a", "PASS"),
-                                 R("b", "VACUOUS_PASS")]) == "FAIL"
+    # R-0915-85 — NOT `FAIL`. #654's finding is that an unrouted sign-off must
+    # not produce a GREEN run, and that is unchanged and asserted here: the run
+    # word is NOT_MEASURED, which is not green and exits 1. FAIL would say the
+    # design failed; nothing examined it. The vacuity that made this test's own
+    # fix defective is now impossible — `parse` refuses a sixth word, so no row
+    # can fall past every tier the way VACUOUS_PASS did.
+    assert P._aggregate_verdict(
+        [R("a", "PASS"),
+         R("b", "NOT_MEASURED",
+           reason_class="no_population")]) == "NOT_MEASURED"
 
 
 def test_the_established_waiver_states_are_untouched(tmp_path):
     """LOAD-BEARING, and the second defect the first attempt had. Deriving the
-    answer from `_flow_verdict_tiers` marks bare SKIP and ENV_UNAVAILABLE as
+    answer from `verdict` marks bare SKIP and ENV_UNAVAILABLE as
     qualified done-claims too — both long-established PASS_WITH_WAIVERS states
     HERE. StepResult.status is a different vocabulary from the flow-compliance
     producer's, and borrowing a classifier across two vocabularies is how a fix
     acquires a second defect."""
     R = P.StepResult
-    for w in ("SKIP", "WAIVED", "ENV_UNAVAILABLE"):
-        assert P._aggregate_verdict([R("a", "PASS"),
-                                     R("b", w)]) == "PASS_WITH_WAIVERS", w
+    # R-0915-85 — the established non-FAIL states are three words, and SKIP
+    # is NOT_APPLICABLE among them.
+    # R-0915-85 — three words, each with the fields it REQUIRES, and they no
+    # longer roll up to ONE answer: that was the collapse this file's own
+    # docstring warns about, made explicit. A waived row rolls up to
+    # PASS_WITH_WAIVERS; a row nobody measured rolls up to NOT_MEASURED; a row
+    # the input declares inapplicable contributes nothing and leaves the PASS.
+    for w, extra, expect in (
+            ("NOT_APPLICABLE",
+             {"declared_by": "the input declares no such block"}, "PASS"),
+            ("PASS_WITH_WAIVERS",
+             {"attribution": "the sign-off engineer"}, "PASS_WITH_WAIVERS"),
+            ("NOT_MEASURED",
+             {"reason_class": "not_executed"}, "NOT_MEASURED")):
+        assert P._aggregate_verdict(
+            [R("a", "PASS"), R("b", w, **extra)]) == expect, w
 
 
 def test_a_routed_run_is_untouched(tmp_path):
@@ -200,12 +221,12 @@ def test_the_handoff_pack_does_not_refuse_a_routed_one(tmp_path):
     """The other direction, run for real. If this refused too, the fix would be
     "never hand off", which is not a fix."""
     r = _handoff(_project(tmp_path, False))
-    assert r.returncode != 2 or "INCOMPLETE" not in r.stderr
+    assert r.returncode != 2 or "NOT_MEASURED" not in r.stderr
 
 
 def test_the_handoff_pack_does_not_refuse_an_unrecorded_run(tmp_path):
     r = _handoff(_project(tmp_path, None))
-    assert r.returncode != 2 or "INCOMPLETE" not in r.stderr
+    assert r.returncode != 2 or "NOT_MEASURED" not in r.stderr
 
 
 def test_the_generator_names_the_fact_at_all():

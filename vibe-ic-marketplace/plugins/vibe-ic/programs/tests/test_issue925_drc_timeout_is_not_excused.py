@@ -13,12 +13,12 @@ report. The WORD was not:
     `return "PASS"`.  MEASURED on the unfixed tree: a plan whose only non-PASS
     step was a timed-out sign-off DRC aggregated to a plain green `"PASS"` —
     not even PASS_WITH_WAIVERS.
-  * `_flow_verdict_tiers.is_excused("SKIPPED-CONDITION")` is True, so wherever
+  * `verdict.is_excused("NOT_APPLICABLE")` is True, so wherever
     the word IS adjudicated the step is subtracted from `total_required`: a DRC
     that ran out of time stopped being owed an answer at all.
 
 The tests below ASK THE PROGRAMS — the real `_try_svrf_native_drc`, the real
-`_aggregate_verdict`, the real `_flow_verdict_tiers` — and never recompute a
+`_aggregate_verdict`, the real `verdict` — and never recompute a
 rule locally.
 
 TWO ARMS, both required by the issue's acceptance criteria:
@@ -36,11 +36,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+import pytest
 
 PROG = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROG))
 import phase3_one_shot_runner as R   # noqa: E402
-import _flow_verdict_tiers as T      # noqa: E402
+import verdict as T      # noqa: E402
 
 
 def _pdk(**kw):
@@ -141,26 +142,47 @@ def test_guard_shared_tier_vocabulary_is_untouched():
     whole analog track resolves to it on a pure-digital design. Moving that
     word out of EXCUSED would make every such run non-green — laundering the
     #925 finding away by breaking the tier it was introduced for."""
-    assert T.is_excused("SKIPPED-CONDITION") is True
-    assert T.is_non_green("SKIPPED-CONDITION") is False
+    assert T.is_excused("NOT_APPLICABLE") is True
+    assert T.is_non_green("NOT_APPLICABLE") is False
     assert T.scoped_into_verdict(
-        {"status": "SKIPPED-CONDITION", "stage": T.ANALOG_STAGE}) is False
-    assert "SKIPPED-CONDITION" in T.EXCUSED
+        {"status": "NOT_APPLICABLE", "stage": T.ANALOG_STAGE}) is False
+    # R-0915-85 — the word is `NOT_APPLICABLE` and `EXCUSED` holds it alone.
+    # `SKIPPED-CONDITION` is refused at `parse`, which is a STRONGER guard than
+    # the membership this line used to assert: the word cannot re-enter the
+    # register by being written somewhere, because it cannot be written.
+    assert T.EXCUSED == frozenset({"NOT_APPLICABLE"}), T.EXCUSED
+    with pytest.raises(T.UnknownVerdictWord):
+        T.parse("SKIPPED-CONDITION")
 
 
-def test_guard_a_design_dependent_or_env_absence_stays_excusable(tmp_path,
-                                                                 monkeypatch):
-    """Every OTHER way `step_drc` can decline must keep its own tier and must
-    keep the run shippable. Discovered by driving the real `step_drc` down each
-    branch — not by asserting a list of words."""
+def test_guard_a_design_dependent_or_env_absence_is_NOT_a_failure(tmp_path,
+                                                                  monkeypatch):
+    """Every OTHER way `step_drc` can decline keeps its own tier, is NOT a
+    FAIL, and NAMES what stopped it. Driven down each real branch.
+
+    R-0915-85 CHANGED THE SECOND HALF OF THIS GUARD, and says so here. It used
+    to read "…and must keep the run shippable", which was true while these
+    branches wore `SKIP` — a word inside EXCUSED, so a run whose DRC never
+    executed exited 0. The ruling refuses that: nothing about DRC was measured
+    on any of these three branches, and a green a run cannot support is not a
+    success. They are NOT_MEASURED, each with the reason that separates it from
+    the #925 TIMEOUT, and the run is off PASS.
+
+    #925's own finding is untouched and is asserted above: a DRC that was
+    KILLED is not excused. What this guard still forbids is the other failure
+    mode — turning a design/env absence into a FAIL, which would report a
+    finding about a design nothing looked at.
+    """
     # (a) the PDK ships no DRC deck at all — a design/PDK property.
     monkeypatch.setattr(R, "_tool_in_path", lambda c, t: False)
     res = R.step_drc(tmp_path, "top", _pdk(drc_deck=None, calibre_drc=None),
                      "img")
-    assert _is_green(_headline(res)), (res.status, res.detail)
+    assert res.status == "NOT_MEASURED" and res.reason_class == "tool_absent", (
+        res.status, res.reason_class, res.detail)
 
     # (b) a Calibre deck AND the calibre binary — the runner defers to an
-    #     offline sign-off run rather than invoking it.
+    #     offline sign-off run rather than invoking it. THIS one is a real
+    #     deferral: somebody owns the row, so it is the waiver tier.
     monkeypatch.setattr(R, "_tool_in_path", lambda c, t: True)
     res = R.step_drc(tmp_path, "top", _pdk(), "img")
     assert _is_green(_headline(res)), (res.status, res.detail)
@@ -169,7 +191,11 @@ def test_guard_a_design_dependent_or_env_absence_stays_excusable(tmp_path,
     monkeypatch.setattr(R, "_tool_in_path", lambda c, t: False)
     monkeypatch.setattr(R, "_svrfdrc_bin_container", lambda c: None)
     res = R.step_drc(tmp_path, "top", _pdk(), "img")
-    assert _is_green(_headline(res)), (res.status, res.detail)
+    assert res.status == "NOT_MEASURED", (res.status, res.detail)
+    assert res.reason_class, "an env gap must name what stopped it"
+
+    # NONE of them is a FAIL — that is the half of this guard that stands.
+    assert res.status != "FAIL"
 
 
 def test_guard_a_completed_clean_drc_is_still_a_full_pass(tmp_path,

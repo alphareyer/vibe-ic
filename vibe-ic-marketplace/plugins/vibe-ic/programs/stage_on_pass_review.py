@@ -438,7 +438,7 @@ import _design_module_set as _dms  # noqa: E402
 # here rather than growing this module's own copy, which is the
 # divergence `_prose_polarity`'s own header exists to end.
 import _prose_polarity  # noqa: E402
-import _flow_verdict_tiers as _T  # noqa: E402
+import verdict as _T  # noqa: E402
 import _flow_reason_taxonomy as _reason_taxonomy  # noqa: E402
 # THE GDSII READER IS NOT WRITTEN TWICE. `gds_topcell_name_check.parse_structures`
 # already walks the record stream and returns (defined, referenced, valid_header);
@@ -533,7 +533,7 @@ def proof_is_inside_the_run(project: Path, test_value: Any) -> bool:
 #: top_undeclared` and `top_module_status: top_undeclared`, the same refusal the
 #: other front door publishes. Both readers below already handle that shape —
 #: `read_intent_top` keys `declares_no_top` on `no_top_module_in_input` (still
-#: stamped True on exactly that branch), and R2 returns NOT_CHECKED on a
+#: stamped True on exactly that branch), and R2 returns NOT_MEASURED on a
 #: non-string `top_module` before it reaches the disarm. This constant is kept
 #: because L9 documents PUBLISHED BEFORE #2052 are still on disk and still carry
 #: the placeholder; a review that reads them must keep disarming on it.
@@ -698,7 +698,11 @@ def _norm_status(word: Any) -> str:
     `VACUOUS_PASS` and `PARTIALLY-VACUOUS` in one report — so a set membership
     test has to normalise or it answers about the punctuation.
     """
-    return str(word or "?").strip().upper().replace("_", "-")
+    # R-0915-85 left this as an IDENTITY for step statuses — the five words
+    # have one spelling each, and `verdict.parse` refuses anything else. It is
+    # kept only because gate-record verdicts (a different vocabulary, written
+    # by ~450 independent programs) still arrive in two spellings.
+    return str(word or "?").strip().upper().replace("-", "_")
 
 
 #: The verdict words that do NOT stop this stage from being reviewable.
@@ -715,7 +719,7 @@ def _norm_status(word: Any) -> str:
 #:
 #: so steps 7, 15 and 37 — whose gate this program is — each went INCOMPLETE,
 #: which kept stage1/2/3 from being green, which kept this program declining.
-#: `_flow_verdict_tiers.EXCUSED` registers BOTH spellings; one of them was
+#: `verdict.EXCUSED` registers BOTH spellings; one of them was
 #: registered here and one was not.
 #:
 #: The two VACUOUS tiers are NOT excused rows and are added on their own
@@ -723,22 +727,18 @@ def _norm_status(word: Any) -> str:
 #: disclosed a design-declared N/A has not failed, and it is the done tier the
 #: audit itself counts it as. Reviewing such a stage is this program's job, not
 #: the repair tier's.
-_STAGE_GREEN = frozenset(
-    _norm_status(w) for w in (
-        {_T.FULL_PASS}
-        | set(_T.EXCUSED)
-        | {"VACUOUS-PASS", "PARTIALLY-VACUOUS"}))
+_STAGE_GREEN = frozenset({_T.FULL_PASS} | set(_T.EXCUSED)
+                         | {_T.Verdict.PASS_WITH_WAIVERS.value})
 
 
 #: THE TIER THAT IS NEITHER GREEN NOR FAILED, registered by the flow itself.
 #:
-#: `_flow_verdict_tiers.NO_VERDICT_IN_SCOPE` is `{INCOMPLETE, NOT-MEASURED}` —
+#: `verdict.NO_VERDICT_IN_SCOPE` is `{NOT_MEASURED}` — one word where the
 #: deliberately in neither `EXCUSED` nor `NON_GREEN`, because "nobody measured
 #: it" is not "it passed" and is not "it failed" either. Read here so the
 #: exemption below can be stated over the tier the flow names, rather than over
 #: two words retyped at this site.
-_NO_VERDICT_IN_SCOPE = frozenset(_norm_status(w)
-                                 for w in _T.NO_VERDICT_IN_SCOPE)
+_NO_VERDICT_IN_SCOPE = frozenset({_T.Verdict.NOT_MEASURED.value})
 
 #: This program's own name as it appears in a step row's gate records.
 _SELF_GATE = "stage_on_pass_review"
@@ -748,6 +748,12 @@ _SELF_GATE = "stage_on_pass_review"
 #: make the step they belong to non-green.
 _GATE_VERDICT_GREEN = frozenset({
     "PASS", "VACUOUS_PASS", "PARTIALLY_VACUOUS", "SKIP", "WAIVED",
+    # R-0915-85: a GATE PROGRAM's own verdict word is a different vocabulary
+    # from the STEP's — these are `advisory_gate_records[].verdict`, written by
+    # ~450 independent gate programs, and the ruling's subject is the step. The
+    # step's five words are added so a migrated gate is recognised too.
+    _T.Verdict.PASS.value, _T.Verdict.PASS_WITH_WAIVERS.value,
+    _T.Verdict.NOT_APPLICABLE.value,
 })
 
 
@@ -778,11 +784,11 @@ def blocked_only_by_a_declined_review(row: Dict[str, Any]) -> bool:
     function returns False for it. What is not correct is the INHERITANCE: a
     later stage's rows are not less measured because an earlier stage's review
     declined, so the earlier decline is disclosed (it stays in the report, and
-    the step it gates stays INCOMPLETE) without also deciding the next stage.
+    the step it gates stays NOT_MEASURED) without also deciding the next stage.
 
     TYPED EVIDENCE, NEVER PROSE. The row publishes `advisory_gate_records` with
     `gate`, `verdict` and `reason_class` fields; the decline is recognised as
-    THIS program's own record carrying `NOT_CHECKED` / `BLOCKED_BY_UPSTREAM`,
+    THIS program's own record carrying `NOT_MEASURED` / `BLOCKED_BY_UPSTREAM`,
     which is the pair the blocking emit writes. Nothing here reads a sentence.
 
     THE NEGATIVE CONTROL IS THE `return False` IN THE LOOP. Every other gate in
@@ -793,7 +799,7 @@ def blocked_only_by_a_declined_review(row: Dict[str, Any]) -> bool:
     exemption granted over an empty population is the vacuous pass this repo
     keeps having to remove.
     """
-    if _norm_status(row.get("status")) not in _NO_VERDICT_IN_SCOPE:
+    if str(row.get("status") or "") not in _NO_VERDICT_IN_SCOPE:
         return False
     saw_declined_review = False
     for rec in _gate_records_of(row):
@@ -844,7 +850,7 @@ def stage_passed(compliance: Optional[Path], stage_id: str,
                 "why": f"{compliance} carries no row for stage {stage_id!r}",
                 "source": str(compliance)}
     non_green = [r for r in mine
-                 if _norm_status(r.get("status")) not in _STAGE_GREEN]
+                 if str(r.get("status") or "?") not in _STAGE_GREEN]
     # THE INHERITED DECLINE IS DISCLOSED, NOT OBEYED. A row whose only
     # non-green gate is a PREVIOUS stage's declined review says nothing about
     # THIS stage's evidence — see `blocked_only_by_a_declined_review`, which
@@ -3845,7 +3851,7 @@ def test_the_declared_top_module_came_from_the_input_or_its_declared_source():
         return  # the document discloses a placeholder; nothing is claimed
     assert top, (
         "%s declares no top_module at all. DELETING THE CLAIM IS NOT A REPAIR: "
-        "over an absent claim the review reports NOT_CHECKED -- 'a document "
+        "over an absent claim the review reports NOT_MEASURED -- 'a document "
         "that claims nothing cannot be contradicted, and an absent claim is "
         "not a grounded one' -- and this test must not certify green what the "
         "review declines to certify. To disclose that the input named no top "
@@ -4658,7 +4664,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     def emit(rec: Dict[str, Any]) -> None:
         # vibe-ic#1082 — ATOMIC, because this record is a VERDICT.
         #
-        # Every `emit()` call below carries the review's answer: NOT_CHECKED
+        # Every `emit()` call below carries the review's answer: NOT_MEASURED
         # with its reason, or the rejections a landing acts on. A `write_text`
         # that dies mid-write leaves a half-parsed verdict at the declared
         # destination, and the next reader takes it as this step's evidence —
@@ -4805,36 +4811,40 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"unestablished verdict.")
         return 2
     if not fired["passed"]:
-        # R-0915-34(a) — THIS IS A CASCADE, AND IT SAYS SO IN ITS OWN WORDS.
+        # R-0915-85 — THE REVIEW RUNS. It used to return here, rc 2, and that
+        # return is the subservient r26 defect at its source.
         #
-        # Declining because the stage under review is not green is not a fault
-        # in this program: it looked, it read the register, and it is WAITING
-        # on rows somebody else owns. Booked as EXECUTION_ERROR it read as a
-        # program defect, and because this review is the gate of steps 2, 7,
-        # 14, 15, 37 and 39, every one of them inherited INCOMPLETE from a
-        # sentence about someone else's step. MEASURED on spm x gf180mcuD.
+        # WHAT IT USED TO SAY, and why the sentence was wrong: "this review
+        # reviews a PASS; a stage that failed is the repair tier's, not this
+        # one's". The stage's artefacts are on disk either way, and the rules
+        # this program applies are about THOSE artefacts, not about the
+        # stage's word. Declining produced `NOT_CHECKED / BLOCKED_BY_UPSTREAM`,
+        # which the completion audit read as the step's whole population being
+        # unexamined, which made steps 2, 7, 15 and 37 NOT_MEASURED, which made
+        # the stage they belong to non-green, which made THIS program decline
+        # for the next stage. MEASURED on r26: every gate that looked at the
+        # design passed and the run was published FAIL.
         #
-        # The class is STATED here, in the field `report_reason_class` reads
-        # before any prose recogniser (#2275/#2276), together with the ROWS it
-        # waits on so the reader can act on it. `_p0_declared_absent`'s rule
-        # applies in spirit: the register EXISTS and says these rows are not
-        # green. The neighbouring `passed is None` branch — no register, an
-        # unreadable one, or no row for this stage at all — states NOTHING and
-        # keeps the fail-closed EXECUTION_ERROR, because a review that truly
-        # could not run has established nothing.
-        blocked = fired.get("non_green_rows") or []
-        emit({"program": _NAME, "stage": a.stage, "verdict": "NOT_CHECKED",
-              "why": fired["why"], "fires_on": decl.get("fires_on"),
-              "reason_class": "BLOCKED_BY_UPSTREAM",
-              "blocked_by": blocked})
-        named = ", ".join(f"{r['id']}={r['status']}" for r in blocked[:8])
-        print(f"{_NAME}: rc=2 NOT CHECKED — stage {a.stage} did not pass "
-              f"({fired['why']}). This review reviews a PASS; a stage that "
-              f"failed is the repair tier's, not this one's. BLOCKED_BY_"
-              f"UPSTREAM, waiting on: "
-              f"{named or 'no row this register names'}"
-              + (f", and {len(blocked) - 8} more" if len(blocked) > 8 else ""))
-        return 2
+        # The ruling's clause: a review gate runs whenever its INPUTS exist,
+        # and reports NOT_MEASURED with a reason only when they do not. The
+        # `passed is None` branch above is that case — no register, an
+        # unreadable one, or no row for this stage — and it is untouched.
+        #
+        # THE NON-GREEN ROWS ARE NOT LOST. They are disclosed in this
+        # program's own record under `reviewed_over_non_green_rows`, so a
+        # reader sees exactly what the review proceeded past, which is strictly
+        # more than the old decline ever published.
+        _blocked_rows = fired.get("non_green_rows") or []
+        _named = ", ".join(f"{r['id']}={r['status']}" for r in _blocked_rows[:8])
+        print(f"{_NAME}: stage {a.stage} is not green ({fired['why']}) — "
+              f"REVIEWING ANYWAY (R-0915-85: this review reads the stage's "
+              f"artefacts, not the stage's word). Non-green rows disclosed: "
+              f"{_named or 'none named by the register'}"
+              + (f", and {len(_blocked_rows) - 8} more"
+                 if len(_blocked_rows) > 8 else ""))
+        _reviewed_over_non_green = _blocked_rows
+    else:
+        _reviewed_over_non_green = []
 
     if a.stage in _DECLARED_NOT_ENABLED and a.stage not in _RULES:
         rules = _DECLARED_NOT_ENABLED[a.stage]
@@ -4864,6 +4874,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     rec = review(project, a.stage, decl,
                  emit_dir=a.emit_test.resolve() if a.emit_test else None)
     rec["stage_pass"] = fired
+    # R-0915-85 — WHAT THE REVIEW PROCEEDED PAST, on the record. The old
+    # decline published only that it had declined; this publishes the rows it
+    # reviewed over, so a reader gets strictly more than before.
+    if _reviewed_over_non_green:
+        rec["reviewed_over_non_green_rows"] = _reviewed_over_non_green
     emit(rec)
 
     if rec["unproven_rejections"]:

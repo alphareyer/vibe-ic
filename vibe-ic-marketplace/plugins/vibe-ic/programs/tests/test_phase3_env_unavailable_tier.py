@@ -28,24 +28,24 @@ def test_aggregate_verdict_env_unavailable_is_pass_with_waivers() -> None:
         StepResult("synth", "PASS"),
         StepResult("pnr", "PASS"),
         StepResult("gds", "PASS"),
-        StepResult("drc", "ENV_UNAVAILABLE", detail="calibre missing"),
+        StepResult("drc", "NOT_MEASURED", detail="calibre missing", reason_class="tool_absent"),
     ]
-    assert _aggregate_verdict(plan) == "PASS_WITH_WAIVERS"
+    assert _aggregate_verdict(plan) == "NOT_MEASURED"
 
 
 def test_aggregate_verdict_mixed_waived_and_env_unavailable() -> None:
     plan = [
         StepResult("synth", "PASS"),
-        StepResult("drc", "ENV_UNAVAILABLE"),
-        StepResult("lvs", "WAIVED"),
+        StepResult("drc", "NOT_MEASURED", reason_class="not_executed"),
+        StepResult("lvs", "PASS_WITH_WAIVERS", attribution="the fixture's owner"),
     ]
-    assert _aggregate_verdict(plan) == "PASS_WITH_WAIVERS"
+    assert _aggregate_verdict(plan) == "NOT_MEASURED"
 
 
 def test_aggregate_verdict_fail_dominates_env_unavailable() -> None:
     plan = [
         StepResult("synth", "FAIL"),
-        StepResult("drc", "ENV_UNAVAILABLE"),
+        StepResult("drc", "NOT_MEASURED", reason_class="not_executed"),
     ]
     assert _aggregate_verdict(plan) == "FAIL"
 
@@ -124,7 +124,7 @@ def test_step_drc_env_unavailable_when_calibre_deck_present_but_binary_absent(
         return_value=None,
     ):
         res = step_drc(tmp_path, "top", pdk, "test-container")
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
     assert res.extras.get("missing_tool") == "calibre|svrfdrc"
     assert "ENV gap" in res.detail
 
@@ -146,7 +146,7 @@ def test_step_drc_waived_when_calibre_binary_present_but_svrf_engine_absent(
         return_value=None,
     ):
         res = step_drc(tmp_path, "top", pdk, "test-container")
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     assert "missing_tool" not in (res.extras or {})
 
 
@@ -163,7 +163,7 @@ def test_step_drc_env_unavailable_when_klayout_deck_but_no_binary(
         side_effect=lambda c, t: False if t == "klayout" else True,
     ):
         res = step_drc(tmp_path, "top", pdk, "test-container")
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
     assert res.extras.get("missing_tool") == "klayout"
 
 
@@ -175,7 +175,7 @@ def test_step_lvs_env_unavailable_when_calibre_lvs_no_binary(
         return_value=False,
     ):
         res = step_lvs(tmp_path, "top", pdk, "test-container")
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
     assert res.extras.get("missing_tool") == "calibre"
 
 
@@ -189,7 +189,7 @@ def test_step_lvs_env_unavailable_when_no_deck_and_no_tools(
         return_value=False,
     ):
         res = step_lvs(tmp_path, "top", pdk, "test-container")
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
     assert res.extras.get("missing_tool") == "magic,netgen"
 
 
@@ -207,7 +207,7 @@ def test_step_lvs_waived_only_for_missing_inputs_not_unconditionally(
         return_value=(0, "", ""),
     ):
         res = step_lvs(tmp_path, "top", pdk, "test-container")
-    assert res.status == "WAIVED"
+    assert res.status == "NOT_MEASURED"
     assert "LVS inputs missing" in res.detail
 
 
@@ -222,13 +222,13 @@ def test_autogen_waivers_includes_env_unavailable_steps(
     p.mkdir()
     plan = [
         StepResult("synth", "PASS"),
-        StepResult("drc", "ENV_UNAVAILABLE",
+        StepResult("drc", "NOT_MEASURED",
                    detail="calibre missing in env",
                    extras={"missing_tool": "calibre",
-                           "calibre_drc_deck": "/x.rule"}),
-        StepResult("lvs", "WAIVED",
+                           "calibre_drc_deck": "/x.rule"}, reason_class="tool_absent"),
+        StepResult("lvs", "PASS_WITH_WAIVERS",
                    detail="design defer; needs extraction",
-                   extras={"extracted_netlist": "phase3/x.spice"}),
+                   extras={"extracted_netlist": "phase3/x.spice"}, attribution="the fixture's owner"),
     ]
     _autogen_waivers_json(p, plan)
     waivers_file = p / "waivers.json"
@@ -237,8 +237,14 @@ def test_autogen_waivers_includes_env_unavailable_steps(
     waivers = data["waivers"]
     assert len(waivers) == 2
     by_step = {w["step"]: w for w in waivers}
+    # R-0915-85 — `verdict_tier` is the BINDING key `flow_compliance_check`
+    # reads, not a step status, so it keeps its own two words. The step's own
+    # verdict travels beside it, and both are asserted so neither can drift.
     assert by_step["drc"]["verdict_tier"] == "ENV_UNAVAILABLE"
+    assert by_step["drc"]["step_verdict"] == "NOT_MEASURED"
+    assert by_step["drc"]["step_reason_class"] == "tool_absent"
     assert by_step["lvs"]["verdict_tier"] == "WAIVED"
+    assert by_step["lvs"]["step_verdict"] == "PASS_WITH_WAIVERS"
     # ENV_UNAVAILABLE ticket cites the missing tool.
     assert "CALIBRE" in by_step["drc"]["ticket"]
     # ENV_UNAVAILABLE rationale flags ENV gap.
@@ -262,8 +268,8 @@ def test_autogen_waivers_respects_existing_human_authored_file(
     p = tmp_path / "proj"
     p.mkdir()
     (p / "waivers.json").write_text('{"_human_authored": true}')
-    plan = [StepResult("drc", "ENV_UNAVAILABLE",
-                       extras={"missing_tool": "calibre"})]
+    plan = [StepResult("drc", "NOT_MEASURED",
+                       extras={"missing_tool": "calibre"}, reason_class="tool_absent")]
     _autogen_waivers_json(p, plan)
     # File was not overwritten.
     data = json.loads((p / "waivers.json").read_text())

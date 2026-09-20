@@ -527,6 +527,25 @@ def umbrella_step_id() -> str:
                     )
         if not bound:
             continue
+        # R-0915-85 — FOLLOW ONE LEVEL OF INDIRECTION. The umbrella's verdict
+        # used to be computed inline in the `StepResult(...)` call, so the row
+        # referenced `s_passed` directly. It is a PAIR now -- the word and the
+        # reason beside it -- so it is computed into locals first and the row
+        # references those. A scan that only knew the direct shape measured []
+        # and raised, which is this helper refusing to guess rather than a
+        # defect; teaching it the one extra hop keeps it derived from the
+        # module instead of hard-coding "P0" here.
+        for _ in range(2):
+            for node in ast.walk(fn):
+                if not (isinstance(node, ast.Assign)
+                        and isinstance(node.value, ast.Call)):
+                    continue
+                if not ({n.id for n in ast.walk(node.value)
+                         if isinstance(n, ast.Name)} & bound):
+                    continue
+                for tgt in node.targets:
+                    bound.update(n.id for n in ast.walk(tgt)
+                                 if isinstance(n, ast.Name))
         for node in ast.walk(fn):
             if not (
                 isinstance(node, ast.Call)

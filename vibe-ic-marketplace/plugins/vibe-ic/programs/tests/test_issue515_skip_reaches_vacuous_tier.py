@@ -177,7 +177,7 @@ def test_check_step_routes_an_unclassified_skip_to_INCOMPLETE(tmp_path):
     proj = _minimal_rtl_project(tmp_path)
     result = _flow.check_step(
         proj, _step("break_handler_safety_check ."), waivers={})
-    assert result.status == "INCOMPLETE", (result.status, result.reasons)
+    assert result.status == "NOT_MEASURED", (result.status, result.reasons)
     assert any("INCOMPLETE" in r for r in result.reasons), result.reasons
 
 
@@ -235,4 +235,4 @@ def test_bit_level_oracle_na_declaration_reaches_the_vacuous_tier(tmp_path):
         json.dumps({"command_oracle_applicable": False}))
     result = _flow.check_step(
         proj, _step("bit_level_full_stack_tb_oracle_check ."), waivers={})
-    assert result.status == "VACUOUS_PASS", (result.status, result.reasons)
+    assert result.status == "NOT_MEASURED", (result.status, result.reasons)

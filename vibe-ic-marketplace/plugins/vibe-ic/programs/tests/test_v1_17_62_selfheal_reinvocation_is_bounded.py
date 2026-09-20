@@ -152,7 +152,7 @@ def _drive(p, monkeypatch, calls):
         def step_dft_lec_chain(project, top, container, ic_class,
                                full_chip=True):
             calls.append(project)
-            return [R.StepResult("dft_insertion", "SKIP", 0.0, "stub")]
+            return [R.StepResult("dft_insertion", "NOT_MEASURED", 0.0, "stub", reason_class="not_executed")]
 
     monkeypatch.setitem(sys.modules, "design_one_shot_runner", _FakeD2)
     monkeypatch.setitem(sys.modules, "ic_class_profile",
@@ -188,7 +188,12 @@ def test_the_first_invocation_runs_and_the_identical_second_does_not(
         "same trigger, same absent outputs, same netlist digest. Step 13's "
         "post-layout LEC restarts its proof from zero on every one of these: "
         f"{calls}")
-    assert second[0].status == "SKIP", (second[0].status, second[0].detail)
+    # R-0915-85 — the bound is recorded state: the chain was ALREADY
+    # re-invoked on this exact input, so this invocation measured nothing and
+    # says why (the previous verdicts stand).
+    assert second[0].status == "NOT_MEASURED", (second[0].status,
+                                                second[0].detail)
+    assert second[0].reason_class, "a bounded re-invocation must name its bound"
     assert "ALREADY re-invoked" in second[0].detail
 
     # ...and only now, the shape of the record that makes it possible.

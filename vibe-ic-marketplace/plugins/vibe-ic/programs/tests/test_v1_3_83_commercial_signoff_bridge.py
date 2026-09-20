@@ -376,7 +376,7 @@ def test_step_lvs_falls_through_to_oss_route_when_bridge_present(tmp_path, monke
     monkeypatch.setattr(p3, "_tool_in_path", lambda c, t: False)
     res = p3.step_lvs(tmp_path, "x", pdk, "nonexistent")
     assert "install Calibre (commercial)" not in res.detail
-    assert "#443" in res.detail or res.status != "ENV_UNAVAILABLE"
+    assert "#443" in res.detail or res.status != "NOT_MEASURED"
 
 
 def test_step_lvs_env_unavailable_without_bridge(tmp_path, monkeypatch):
@@ -385,7 +385,7 @@ def test_step_lvs_env_unavailable_without_bridge(tmp_path, monkeypatch):
                        calibre_lvs="/deck/lvs.rule")
     monkeypatch.setattr(p3, "_tool_in_path", lambda c, t: False)
     res = p3.step_lvs(tmp_path, "x", pdk, "nonexistent")
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
     assert "bridge" in res.detail
 
 

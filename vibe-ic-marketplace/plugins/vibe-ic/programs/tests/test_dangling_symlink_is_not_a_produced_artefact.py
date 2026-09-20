@@ -108,7 +108,7 @@ def test_dangling_symlink_does_not_satisfy_required_outputs(tmp_path):
             "required_outputs": ["phase3/stage4/gds/*.gds"]}
     r = FCC.check_step(tmp_path, step, {})
 
-    assert r.status == "MISSING", (
+    assert r.status == "FAIL", (
         f"a step whose only declared output is a broken symlink reported "
         f"{r.status!r}; it produced nothing")
     assert r.evidence == [], (

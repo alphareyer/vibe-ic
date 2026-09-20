@@ -106,7 +106,7 @@ def test_dt1_runs_when_step11_did_not_and_does_not_raise(tmp_path, spawned):
     rows = _drive(proj)
     assert [r.name for r in rows] == ["dft_insertion", "post_dft_opt",
                                       "lec_equivalence"]
-    assert rows[0].status == "SKIP", rows[0].detail
+    assert rows[0].status == "NOT_APPLICABLE", rows[0].detail
     # and DT1 really reached its producer — otherwise the line that reads `pdk`
     # was never executed and this test would pass without touching the defect
     assert _tdf_argv(spawned)[3:5] == ["--clock", "clk"]

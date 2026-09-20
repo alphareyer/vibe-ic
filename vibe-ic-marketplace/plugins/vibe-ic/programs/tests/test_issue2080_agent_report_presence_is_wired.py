@@ -128,9 +128,13 @@ def test_the_step_can_never_move_the_run_verdict() -> None:
                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
                 and c.func.id == "StepResult" and len(c.args) >= 2
                 and isinstance(c.args[1], ast.Constant)}
-    assert statuses == {"ADVISORY"}, (
+    # R-0915-85 — `ADVISORY` was a VERDICT meaning "this row may never move the
+    # run's". It is `PASS` carrying `Disclosure.ADVISORY` now, and the property
+    # stops being a special case: `run_verdict`'s precedence means a PASS row
+    # cannot move the run word in either direction.
+    assert statuses == {"PASS"}, (
         f"step_agent_report_presence returns {sorted(statuses)}; vibe-ic#2080 "
-        f"wires a recorded-unwired gate ADVISORY unless its docstring declares "
+        f"wires a recorded-unwired gate a row carrying the advisory disclosure unless its docstring declares "
         f"it BLOCKING, and this gate's does not.")
 
 

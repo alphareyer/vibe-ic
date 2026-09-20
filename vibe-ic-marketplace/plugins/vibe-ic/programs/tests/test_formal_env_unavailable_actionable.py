@@ -385,7 +385,7 @@ def _declared_formal_dependents() -> set:
 
     ids = [s["id"] for s in steps if str(s["id"]) != "P0"]
     results = [_fcc.StepResult(id=i, name="", stage="",
-                               status=("WAIVED" if i == 5 else "MISSING"))
+                               status=("PASS_WITH_WAIVERS" if i == 5 else "FAIL"))
                for i in ids]
     info = _fcc._attribute_cascade_verdicts(results, steps,
                                             {5: {"ticket": "T"}})
@@ -401,7 +401,7 @@ def test_formal_env_waiver_binds_to_the_formal_step(tmp_path):
     _write_waivers(tmp_path, [_COMPLETE_WAIVER])
     _, report = _compliance(tmp_path, tmp_path / "r.json")
     step5 = next(s for s in report["steps"] if s["id"] == 5)
-    assert step5["status"] == "WAIVED"
+    assert step5["status"] == "PASS_WITH_WAIVERS"
 
 
 def test_cascade_defers_only_genuinely_dependent_steps(tmp_path):
@@ -431,13 +431,13 @@ def test_cascade_defers_only_genuinely_dependent_steps(tmp_path):
         f"cascade touched steps it should not have: {sorted(changed)}")
 
     deferred = {s["id"] for s in waived["steps"]
-                if s["status"] == "DEFERRED-BY-UPSTREAM"}
+                if s["status"] == "NOT_MEASURED"}
     assert deferred == _declared_formal_dependents()
     # And each deferral names the parent it inherited from, so a reader can
     # tell "skipped because a dependency was waived" from "ran, produced
     # nothing".
     for s in waived["steps"]:
-        if s["status"] == "DEFERRED-BY-UPSTREAM":
+        if s["status"] == "NOT_MEASURED":
             assert "deferred-by-upstream(5" in s["cascade_note"]
 
     # #776 — the ordering fact is not thrown away, it is recorded WITHOUT
@@ -447,7 +447,7 @@ def test_cascade_defers_only_genuinely_dependent_steps(tmp_path):
                       if "waived-ancestor-undeclared(5)" in s["cascade_note"]}
     assert ordered_behind, "the ordering fact must still be attributed"
     for sid in ordered_behind:
-        assert waived_status[sid] == "MISSING", (sid, waived_status[sid])
+        assert waived_status[sid] == "FAIL", (sid, waived_status[sid])
 
 
 def test_waived_formal_never_counts_as_a_pass_downstream(tmp_path):
@@ -458,12 +458,12 @@ def test_waived_formal_never_counts_as_a_pass_downstream(tmp_path):
     rc, report = _compliance(tmp_path, tmp_path / "r.json")
 
     statuses = {s["id"]: s["status"] for s in report["steps"]}
-    assert statuses[5] == "WAIVED"
+    assert statuses[5] == "PASS_WITH_WAIVERS"
     for sid in _declared_formal_dependents():
         assert statuses[sid] != "PASS"
 
     assert report["counts"]["PASS"] == 0
-    assert report["counts"]["WAIVED"] == 1
+    assert report["counts"]["PASS_WITH_WAIVERS"] == 1
     assert report["overall"] == "FAIL"
     assert rc != 0
 
@@ -481,7 +481,7 @@ def test_unbindable_env_waiver_is_reported_not_silently_dropped(tmp_path):
     # The remedy lists the role names that WOULD bind.
     assert "formal" in advisory
     # Rejection is not leniency: the step is still not waived.
-    assert next(s for s in report["steps"] if s["id"] == 5)["status"] != "WAIVED"
+    assert next(s for s in report["steps"] if s["id"] == 5)["status"] != "PASS_WITH_WAIVERS"
 
 
 def test_incomplete_env_waiver_is_reported_with_what_is_missing(tmp_path):
@@ -501,7 +501,7 @@ def test_incomplete_env_waiver_is_reported_with_what_is_missing(tmp_path):
     assert "ticket" in advisory
     assert "evidence" in advisory
     assert "rationale" in advisory
-    assert next(s for s in report["steps"] if s["id"] == 5)["status"] != "WAIVED"
+    assert next(s for s in report["steps"] if s["id"] == 5)["status"] != "PASS_WITH_WAIVERS"
 
 
 # ── the classifier itself, on ANY host (no Docker required) ───────────────

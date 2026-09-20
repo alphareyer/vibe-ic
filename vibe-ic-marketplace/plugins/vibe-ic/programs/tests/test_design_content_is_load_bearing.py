@@ -227,6 +227,9 @@ def test_the_matrix_gives_a_library_default_its_own_cell(tmp_path):
     out = tmp_path / "m.json"
     _run(ANALOG_COMPLIANCE, root, "--json", str(out))
     m = json.loads(out.read_text())["summary"]["matrix"]["blk_alpha"]
+    # `matrix` is the ANALOG-COMPLIANCE gate's own per-cell vocabulary, not a
+    # step status: R-0915-85 claims `status / signoff_status / terminal_verdict
+    # / run_verdict`, and this is none of them.
     assert m["A3"] == "PASS_STRUCTURE_ONLY", m
     assert m["A4"] == "PASS_STRUCTURE_ONLY", m
     assert m["A5"] == "MISSING", (
@@ -277,9 +280,16 @@ def test_the_flow_compliance_line_carries_the_tier(tmp_path):
     cp = _run(FLOW_COMPLIANCE, root)
     tally = [l for l in cp.stdout.splitlines() if l.startswith("  PASS=")]
     assert tally, cp.stdout[:2000]
-    assert "STRUCTURE-ONLY=" in tally[0], (
+    # R-0915-85 — `STRUCTURE-ONLY` was a WORD in the tally line; it is a
+    # DISCLOSURE now, and the compliance line prints the disclosure counts
+    # beside the five words. So the distinction this test protects -- a step
+    # that produced a library default vs one that produced a design-bound
+    # artefact -- is still on the line a reader reads, and the step line still
+    # carries it too. Both are asserted, at their new spelling.
+    _disc = [l for l in cp.stdout.splitlines() if "structure_only" in l]
+    assert _disc, (
         f"the 63-step compliance line cannot tell a step that produced a "
         f"library default from one that produced a design-bound artefact:\n"
-        f"  {tally[0]}")
+        f"  {tally[0]}\n{cp.stdout[:2000]}")
     step = [l for l in cp.stdout.splitlines() if "Step A3:" in l]
-    assert step and "STRUCTURE-ONLY" in step[0], step
+    assert step and "structure_only" in step[0], step

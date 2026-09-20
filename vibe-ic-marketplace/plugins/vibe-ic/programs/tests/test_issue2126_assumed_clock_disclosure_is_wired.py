@@ -289,5 +289,5 @@ def test_an_absent_provenance_report_is_not_checked_never_a_pass(tmp_path):
     proj = _assumed_project(tmp_path)
     row = R._run_declared_signoff_gate(
         proj, GATE_STEP, GATE_PROGRAM, GATE_OUT_REL, ())
-    assert row.status == "BLOCKED", (row.status, row.detail)
+    assert row.status == "NOT_MEASURED", (row.status, row.detail)
     assert R._SIGNOFF_NOT_CHECKED in row.detail, row.detail

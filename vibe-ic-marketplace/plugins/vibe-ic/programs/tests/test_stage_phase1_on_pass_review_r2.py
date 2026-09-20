@@ -569,11 +569,25 @@ def test_an_absent_l1_ic_name_is_not_checked_rather_than_refuted(tmp_path):
 # ─────────────────────────────────────────────────────────────────────────────
 # it fires on SUCCESS, and only on an ESTABLISHED success
 # ─────────────────────────────────────────────────────────────────────────────
-def test_the_review_does_not_run_on_a_stage_that_failed(tmp_path):
-    r = run(tree(tmp_path, REJECT), "--stage-verdict", "FAIL")
-    assert r.returncode == 2, r.stdout
-    assert "did not pass" in r.stdout
+def test_the_review_runs_on_a_stage_that_failed_and_discloses_it(tmp_path):
+    """R-0915-85 DELETED the decline. This is the r26 root, so it is pinned in
+    both directions rather than deleted along with it.
 
+    The review reads the stage's ARTEFACTS, not the stage's word, so a stage
+    that failed is precisely the stage whose artefacts most need reading.
+    Declining produced r26's shape: one upstream review that never looked put
+    three reviews at NOT CHECKED, and steps that had produced and verified
+    their own outputs were voided behind them. The review now RUNS over a
+    non-green stage, DISCLOSES that it is doing so, and answers with its OWN
+    verdict -- rc 1 on this rejecting tree, rc 0 on the accepting one, which is
+    what proves it really read the artefacts instead of echoing the word.
+    """
+    r = run(tree(tmp_path, REJECT), "--stage-verdict", "FAIL")
+    assert r.returncode == 1, r.stdout
+    assert "REVIEWING ANYWAY" in r.stdout, r.stdout
+    assert "not green" in r.stdout, r.stdout
+    ok = run(tree(tmp_path / "ok", BOTH_OK), "--stage-verdict", "FAIL")
+    assert ok.returncode == 0, ok.stdout + ok.stderr
 
 def test_an_unestablished_verdict_is_not_a_pass(tmp_path):
     r = run(tree(tmp_path, REJECT))
@@ -592,7 +606,7 @@ def test_a_compliance_report_supplies_the_verdict_both_ways(tmp_path):
     assert run(tree(tmp_path, REJECT), "--compliance", str(green)).returncode == 1
     assert run(tree(tmp_path, BOTH_OK), "--compliance", str(green)).returncode == 0
     assert run(tree(tmp_path / "red", REJECT),
-               "--compliance", str(red)).returncode == 2
+               "--compliance", str(red)).returncode == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────

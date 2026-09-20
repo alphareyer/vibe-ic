@@ -307,7 +307,7 @@ def test_next_section_cannot_relabel_the_previous_setup_path():
     assert [p["corner"] for p in paths] == ["SS", "TT"]
 
 
-@pytest.mark.parametrize("body, expected", [(_ARCH, "FAIL"), (_MET, "PASS"), (None, "BLOCKED")],
+@pytest.mark.parametrize("body, expected", [(_ARCH, "FAIL"), (_MET, "PASS"), (None, "NOT_MEASURED")],
                          ids=["violated", "met", "missing"])
 def test_inline_signoff_executes_the_architectural_gate(tmp_path, monkeypatch, body, expected):
     import phase3_one_shot_runner as runner
@@ -332,7 +332,7 @@ def test_inline_signoff_executes_the_architectural_gate(tmp_path, monkeypatch, b
     if expected == "FAIL":
         assert "SS" in own[0].detail and "0.88" in own[0].detail
         assert runner._aggregate_verdict(rows) == "FAIL"
-    elif expected == "BLOCKED":
+    elif expected == "NOT_MEASURED":
         assert runner._aggregate_verdict(rows) not in ("PASS", "PASS_WITH_WAIVERS")
     else:
         assert runner._aggregate_verdict(rows) == "PASS"

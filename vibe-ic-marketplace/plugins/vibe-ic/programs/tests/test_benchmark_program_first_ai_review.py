@@ -1342,7 +1342,7 @@ def test_supplied_rtl_accepts_only_explicit_step2_reentry(tmp_path):
     report.write_text(json.dumps({
         "verdict": "PASS",
         "steps": [{
-            "name": "rtl_gen", "status": "SKIPPED-BY-ENTRY",
+            "name": "rtl_gen", "status": "NOT_APPLICABLE",
             "detail": "run declared --entry-step 2",
         }],
     }))
@@ -1352,7 +1352,7 @@ def test_supplied_rtl_accepts_only_explicit_step2_reentry(tmp_path):
 
     assert ordinary["ok"] is False
     assert supplied["ok"] is True
-    assert supplied["rtl_gen"] == "SKIPPED-BY-ENTRY"
+    assert supplied["rtl_gen"] == "NOT_APPLICABLE"
     assert supplied["supplied_rtl"] is True
 
 
@@ -1393,7 +1393,7 @@ def test_ai_repair_reenters_at_validation_without_regeneration(
         report.write_text(json.dumps({
             "verdict": "PASS",
             "steps": [{
-                "name": "rtl_gen", "status": "SKIPPED-BY-ENTRY",
+                "name": "rtl_gen", "status": "NOT_APPLICABLE",
                 "detail": "run declared --entry-step 2",
             }],
         }))
@@ -1410,7 +1410,7 @@ def test_ai_repair_reenters_at_validation_without_regeneration(
     assert len(refreshed["verification_challenges"]) == 1
 
     # The next resume must accept the independently reviewed repair even
-    # though rtl_gen correctly remains SKIPPED-BY-ENTRY from re-entry step 2.
+    # though rtl_gen correctly remains NOT_APPLICABLE from re-entry step 2.
     _write_review(refreshed, _valid_review(refreshed))
     assert bd.cmd_resume("rtllm", "/unused", str(run)) == 0
     acceptance = json.loads((run / bd._ACCEPTANCE_REPORT).read_text())

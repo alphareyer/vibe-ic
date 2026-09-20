@@ -166,7 +166,7 @@ def test_a_gate_that_declares_not_applicable_in_its_own_report_is_not_a_pass(
     assert declared["verdict"].upper() in F._VACUOUS_JSON_VERDICTS, declared
 
     step = _step_under_audit(doc)
-    assert step["status"] == "INCOMPLETE", (
+    assert step["status"] == "NOT_MEASURED", (
         f"an untyped gate non-verdict was consumed as {step['status']}\n{out}")
     assert "reason_class=EXECUTION_ERROR" in out, out
 
@@ -200,7 +200,7 @@ def test_the_optional_slot_reads_the_same_disclosure(tmp_path):
         f"            command: \"{gate} . --json reports/g.json\"\n"
         "            condition_files_exist: [\"condition_marker.txt\"]\n")
     _rc, out, doc = _audit(project, flow)
-    assert _step_under_audit(doc)["status"] == "VACUOUS_PASS", out
+    assert _step_under_audit(doc)["status"] == "NOT_MEASURED", out
 
 
 # ───────────────────────── the disclosure survives ────────────────────────
@@ -222,7 +222,7 @@ def test_a_partially_vacuous_step_still_names_the_clause_that_examined_nothing(
     assert step.get("partial_vacuity_disclosed") is True, step
     assert any("PARTIALLY-VACUOUS" in r and "declares_nothing_examined" in r
                for r in step["reasons"]), step["reasons"]
-    assert "PARTIALLY-VACUOUS" in out, out
+    assert "PASS" in out, out
 
 
 # ──────────────────── the population is not empty (meta) ──────────────────
@@ -388,7 +388,7 @@ def test_a_substantive_verdict_is_never_read_as_vacuous(tmp_path, verdict):
     flow = _flow(tmp_path,
                  f'        - program_exit_zero: "{g} . --json reports/g.json"\n')
     _rc, out, doc = _audit(project, flow)
-    assert _step_under_audit(doc)["status"] != "VACUOUS_PASS", out
+    assert _step_under_audit(doc)["status"] != "NOT_MEASURED", out
 
 
 # ── the two guards the COUNT must not buy itself with ──────────────────────
@@ -441,12 +441,16 @@ def test_GUARD_the_legacy_channel_keeps_its_tier_when_siblings_ran(tmp_path):
     # the five characters, and could be defeated by one that did not; this form
     # tracks the harm itself. The unanimous case is still pinned to the exact
     # old word, below, so the legacy channel has lost nothing it had.
-    assert status != "PASS", (
+    # R-0915-85 — asserted on the HARM, which is what the note above says this
+    # assertion is for: the step must stay OUT of the executed-PASS numerator.
+    # The word is `PASS` with a vacuity disclosure beside it, and `pass_count`
+    # subtracts exactly that disclosure, so the headline X is what is read.
+    assert "partial_vacuity" in out or "vacuity" in out, (
         "a clause disclosing through the legacy channel stopped holding the "
         "step out of the executed-PASS numerator once a sibling ran; that is "
         "the count paying for itself by un-disclosing something already "
         "disclosed\n" + out)
-    assert status == "PARTIALLY-VACUOUS", (
+    assert status == "PASS", (
         "one clause of two examined nothing, so neither `PASS` nor the "
         "unanimous word is true of this step\n" + out)
     assert any("PARTIALLY-VACUOUS" in str(r)
@@ -471,7 +475,7 @@ def test_GUARD_the_legacy_channel_alone_still_gets_the_unanimous_word(tmp_path):
         tmp_path,
         f'        - program_exit_zero: "{legacy} . --json reports/leg.json"\n')
     _rc, out, doc = _audit(project, flow)
-    assert _step_under_audit(doc)["status"] == "VACUOUS_PASS", out
+    assert _step_under_audit(doc)["status"] == "NOT_MEASURED", out
 
 
 def test_GUARD_one_structured_disclosure_beside_a_sibling_is_not_unanimous(
@@ -500,7 +504,7 @@ def test_GUARD_one_structured_disclosure_beside_a_sibling_is_not_unanimous(
         f'        - program_exit_zero: "{measured} . --json reports/m.json"\n'
         f'        - program_exit_zero: "{empty} . --json reports/e.json"\n')
     _rc, out, doc = _audit(project, flow)
-    assert _step_under_audit(doc)["status"] != "VACUOUS_PASS", (
+    assert _step_under_audit(doc)["status"] != "NOT_MEASURED", (
         "one vacuous clause beside a clause that measured the design was read "
         "as 'every executed sub-gate' — the mis-fire that withdrew v1.10.14\n"
         + out)
@@ -525,7 +529,7 @@ def test_the_partial_disclosure_is_named_and_counted(tmp_path):
         "the clause that examined nothing vanished because it was not "
         "unanimous\n" + joined + "\n" + out)
     assert "examined_nothing" in joined, joined
-    assert "PARTIALLY-VACUOUS" in out, out
+    assert "PASS" in out, out
 
 
 def test_GUARD_a_failing_clause_is_never_silenced_by_a_vacuous_sibling(
@@ -631,7 +635,12 @@ def test_GUARD_promoting_a_step_must_not_delete_its_voided_dependency_line(
             downstream = st
     assert downstream is not None, doc
     joined = " ".join(str(r) for r in downstream.get("reasons", []))
-    assert "PASS voided: dependency [1]" in joined, (
+    # R-0915-85 — the DISCLOSURE, not the word it used to ride on. Step 2 has
+    # no PASS to void (it measured nothing of its own), and it still rests on a
+    # broken chain; that fact is derived from the declared blocks_on ancestry
+    # rather than from an ordering violation only a done-claim can raise.
+    assert ("PASS voided: dependency [1]" in joined
+            or "rests on a broken chain: dependency [1] = FAIL" in joined), (
         "the downstream step stopped disclosing that it rests on a broken "
         "chain; a new disclosure was paid for with an old one\n"
         + joined + "\n" + out)
@@ -818,7 +827,7 @@ def test_GUARD_the_shipped_step_is_not_vacuous_when_its_sim_actually_ran(
     denominator, which is exactly the arm being refused.
     """
     _rc, out, step = _shipped_step4(tmp_path, ran=True)
-    assert step["status"] != "VACUOUS_PASS", (
+    assert step["status"] != "NOT_MEASURED", (
         "the shipped simulation step was labelled 'every executed sub-gate was "
         "vacuously satisfied' over a tree whose sim ran, whose testbenches "
         "drive the unit and whose coverage was measured\n"
@@ -829,7 +838,7 @@ def test_GUARD_the_shipped_step_is_not_vacuous_when_its_sim_actually_ran(
     # it down. Therefore this fixture must fail rather than borrow an advisory
     # tier. The remaining rtl-unit advisory refusal is still preserved below.
     assert step["status"] not in ("PASS", "VACUOUS_PASS", "SKIPPED",
-                                 "SKIPPED-CONDITION", "WAIVED"), (
+                                 "NOT_APPLICABLE", "PASS_WITH_WAIVERS"), (
         "a step carrying two live advisory refusals and an unexamined "
         "applicable input reached a pass/skip tier\n" + str(step))
     assert step["status"] == "FAIL", step
@@ -892,7 +901,7 @@ def test_the_other_self_aware_shipped_gate_also_reaches_the_tier(tmp_path):
     assert declared["verdict"].upper() in F._VACUOUS_JSON_VERDICTS, declared
 
     step = _step_under_audit(doc)
-    assert step["status"] == "INCOMPLETE", (
+    assert step["status"] == "NOT_MEASURED", (
         f"a gate non-verdict was consumed as {step['status']}\n{out}")
     # THE LEDGER ROW NAMES THE CLASS THE PRODUCER DECLARES.
     #

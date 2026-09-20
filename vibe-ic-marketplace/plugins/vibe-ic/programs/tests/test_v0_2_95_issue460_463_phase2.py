@@ -328,11 +328,11 @@ def test_manifest_emitter_skips_when_oracle_failed(tmp_path):
 def test_manifest_emitter_skips_when_waived_no_vectors(tmp_path):
     # skeleton-WAIVED oracle (functional_verified false / 0 vectors) → SKIP.
     waived = P.StepResult(
-        name="reference_tb", status="WAIVED", duration_s=0.1,
+        name="reference_tb", status="PASS_WITH_WAIVERS", duration_s=0.1,
         detail="connectivity only",
         extras={"verification_track": "oracle_tb",
                 "functional_verified": False,
-                "vectors_passed": 0, "vectors_total": 0})
+                "vectors_passed": 0, "vectors_total": 0}, attribution="the fixture's owner")
     P.step_emit_phase2_manifests(tmp_path, [waived])
     import json
     xml_json = json.loads((tmp_path / "sim" / "results.xml").read_text())

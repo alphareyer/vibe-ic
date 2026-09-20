@@ -192,7 +192,7 @@ def test_runner_gate_suppresses_arstn_rename_with_colon_spec(tmp_path):
     # `emit_variant_alias_wrapper(additive_reset_map=...)` API. What this case is
     # ACTUALLY about — the contract spelling is never destructively renamed — is
     # preserved and in fact stronger: nothing is added either.
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     assert "#689" in res.detail, res.detail
     txt = rtl.read_text()
     assert txt == before, "the ruling promises the authored RTL is unchanged"
@@ -236,7 +236,9 @@ def test_runner_control_no_contract_renames_and_breaks_arstn_bind(tmp_path):
     # so the authored ports are preserved and the step reports an advisory SKIP.
     # Pinned by its own reason so it stays distinguishable from the #689 refusal
     # in the case above — after the ruling both are SKIP on unchanged bytes.
-    assert res.status == "SKIP", (res.status, res.detail)
+    # R-0915-85 — "no authority to rename" is the INPUT declaring this step
+    # inapplicable, so the word is NOT_APPLICABLE and the declarer is named.
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     assert "no authoritative interface requests" in res.detail, res.detail
     txt = rtl.read_text()
     assert txt == before, "the ruling promises the authored RTL is unchanged"

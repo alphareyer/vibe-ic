@@ -151,6 +151,9 @@ def test_no_jmax_refuses_and_names_it(tmp_path):
     r = _run(proj)
     assert r.returncode == 2
     assert "[PASS]" not in r.stdout
+    # R-0915-85 — `INCOMPLETE:` here is the GATE PROGRAM's own refusal token,
+    # not a step status: this gate is one of the ~450 checkers whose stdout
+    # `flow_compliance_check` reads, and that vocabulary is not this batch's.
     assert any(l.lstrip().startswith("INCOMPLETE")
                for l in r.stdout.splitlines())
     assert "Jmax" in r.stdout
@@ -174,6 +177,9 @@ def test_empty_project_refuses_and_discloses(tmp_path):
     r = _run(proj)
     assert r.returncode == 2
     assert "[PASS]" not in r.stdout
+    # R-0915-85 — `INCOMPLETE:` here is the GATE PROGRAM's own refusal token,
+    # not a step status: this gate is one of the ~450 checkers whose stdout
+    # `flow_compliance_check` reads, and that vocabulary is not this batch's.
     assert any(l.lstrip().startswith("INCOMPLETE")
                for l in r.stdout.splitlines())
     assert "read 0 peak-current figure(s)" in r.stdout
@@ -296,7 +302,7 @@ def test_the_refusal_reaches_the_flow_as_not_a_pass(tmp_path):
     assert not out.startswith(fcc._VACUOUS_HINT_PREFIX), out  # ... nor a skip
     # ... and it is not a PASS either, which is what #1017 was about.
     assert cls not in _reason_taxonomy().SKIP_ELIGIBLE, out
-    assert tier == "INCOMPLETE", (tier, out)
+    assert tier == "NOT_MEASURED", (tier, out)
     # the gate's OWN sentence now survives into the flow's snippet, which is
     # what the substituted marker used to delete.
     assert "NOT screened" in out, out
@@ -338,7 +344,9 @@ def test_the_tier_is_not_bought_by_a_relabel(tmp_path):
     # tier — see `test_issue1978_reason_taxonomy::
     # test_the_reclassification_greens_nothing`.
     assert cls == T.ZERO_DENOMINATOR, (cls, tier)
-    assert cls not in T.SKIP_ELIGIBLE and tier == "INCOMPLETE", (cls, tier)
+    # R-0915-85 — the STEP tier is NOT_MEASURED; the gate's own refusal token
+    # above is still `INCOMPLETE`, and the two are different vocabularies.
+    assert cls not in T.SKIP_ELIGIBLE and tier == "NOT_MEASURED", (cls, tier)
 
     orig = T.infer_nonverdict_reason
     try:
@@ -349,7 +357,7 @@ def test_the_tier_is_not_bought_by_a_relabel(tmp_path):
         T.infer_nonverdict_reason = orig
         fcc._reason_taxonomy.infer_nonverdict_reason = orig
     assert out_r.startswith(fcc._VACUOUS_HINT_PREFIX), out_r
-    assert tier_r == "VACUOUS_PASS", (
+    assert tier_r == "NOT_MEASURED", (
         "the two dispositions must remain DISTINGUISHABLE at the step tier; "
         "if this stops being true the assertion above has stopped measuring "
         f"anything: {tier_r}")
@@ -411,7 +419,7 @@ def test_publishing_the_class_changes_no_step_verdict(tmp_path):
     being published has stopped being the honest one."""
     empty = tmp_path / "empty"
     (empty / "reports" / "phase3").mkdir(parents=True)
-    assert _em_report(tmp_path, empty)[3] == "INCOMPLETE"
+    assert _em_report(tmp_path, empty)[3] == "NOT_MEASURED"
 
     real = _project(tmp_path / "real", peak="1.0e-06",
                     with_csv=True, with_jmax=True)

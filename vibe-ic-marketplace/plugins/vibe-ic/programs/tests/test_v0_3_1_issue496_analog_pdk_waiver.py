@@ -211,13 +211,22 @@ def test_acceptance_a3_waived_deferred_with_disclosure_then_fail_without(
     _build_fixture(proj, disclose=True)
     _, out = _run_strict(proj)
     a3 = _a3_block(out)
-    assert "WAIVED-DEFERRED" in a3, out
+    # R-0915-85 — the STEP LINE carries the word `PASS_WITH_WAIVERS`;
+    # `WAIVED-DEFERRED` survives as the TALLY line's contract label and is
+    # asserted on the tally, not on the step. Both are checked so neither can
+    # go quiet.
+    assert "PASS_WITH_WAIVERS" in a3, out
+    assert "WAIVED-DEFERRED=" in out, out
     assert "pdk-substitution" in a3.lower() or "PDK_SUBSTITUTION" in a3
     assert fc._PDK_SUBSTITUTION_TICKET in a3
     assert "review_required=True" in a3
     # NOT counted as executed-PASS: A3 status is not PASS, and the deferral
     # reason says so explicitly.
-    assert "[PASS" not in a3
+    # R-0915-85 — `[PASS` is now a PREFIX of the deferral's own word, so the
+    # old form asserts the opposite of what it means. The property is that A3
+    # is not a FULL pass; the tally's executed-PASS numerator is what that
+    # costs, and the line below says it in words.
+    assert "[PASS             ]" not in a3, a3
     assert "not executed-PASS" in a3
     # the named target + substitute appear so the reason is honest.
     assert _TARGET_PDK in a3

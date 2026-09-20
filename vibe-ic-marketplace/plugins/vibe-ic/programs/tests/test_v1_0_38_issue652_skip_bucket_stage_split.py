@@ -1,24 +1,24 @@
 """ORGANIC #652 [reporting honesty] — the SOLE-ACCEPTANCE narrative in
-final_report_generate.py labelled the ENTIRE SKIPPED-CONDITION bucket as
+final_report_generate.py labelled the ENTIRE NOT_APPLICABLE bucket as
 "manufacturing-skipped", mislabelling mid-flow capability-gap / cascade-
 blocked / FPGA-board-absent skips as silicon-stage skips.
 
 Evidence: `final_report_generate.py:1396-1401` printed
 `manufacturing-skipped: {snap['skipped']}` where `snap['skipped']` is the
-TOTAL SKIPPED-CONDITION rollup (line 605), not just manufacturing-stage
+TOTAL NOT_APPLICABLE rollup (line 605), not just manufacturing-stage
 steps; the prose bullet (~:1098) generalised the whole bucket as
 "manufacturing steps awaiting silicon". A committed artifact reported
 `manufacturing-skipped: 10` while only steps 40-44 (5) are manufacturing.
 
-Fix: split the SKIPPED-CONDITION rollup BY STAGE. Only manufacturing-stage
+Fix: split the NOT_APPLICABLE rollup BY STAGE. Only manufacturing-stage
 steps (stage `stage5_manufacturing`, equivalently the documented step-id
 range 40-44) count as `manufacturing-skipped`; every earlier
-SKIPPED-CONDITION step is reported as `mid-flow-skipped`. The two buckets
-are mutually exclusive and sum to the total SKIPPED-CONDITION rollup, so
+NOT_APPLICABLE step is reported as `mid-flow-skipped`. The two buckets
+are mutually exclusive and sum to the total NOT_APPLICABLE rollup, so
 the report stays honest.
 
 POSITIVE (#652): a snapshot with N mid-flow + M manufacturing
-SKIPPED-CONDITION steps → manufacturing bucket == M, mid-flow bucket == N
+NOT_APPLICABLE steps → manufacturing bucket == M, mid-flow bucket == N
 (NOT N+M), and M + N == total skipped.
 
 NEGATIVE no-leak: a run with ONLY manufacturing skips → manufacturing
@@ -88,7 +88,7 @@ def test_is_manufacturing_step_stage_field_wins_over_id_range():
 # ─── _split_skipped_by_stage: the core split ─────────────────────────────
 
 def test_split_skipped_positive_mixed_midflow_and_manufacturing():
-    # N=3 mid-flow SKIPPED-CONDITION + M=2 manufacturing SKIPPED-CONDITION.
+    # N=3 mid-flow NOT_APPLICABLE + M=2 manufacturing NOT_APPLICABLE.
     steps = [
         _midflow_step(11, stage="stage1"),  # skipped, mid-flow
         _midflow_step(22, stage="stage3"),  # skipped, mid-flow
@@ -99,19 +99,19 @@ def test_split_skipped_positive_mixed_midflow_and_manufacturing():
         _mfg_step(42),                        # PASS — must NOT be counted
     ]
     verdicts = {
-        "11": "SKIPPED-CONDITION",
-        "22": "SKIPPED-CONDITION",
-        "33": "SKIPPED-CONDITION",
-        "40": "SKIPPED-CONDITION",
-        "41": "SKIPPED-CONDITION",
+        "11": "NOT_APPLICABLE",
+        "22": "NOT_APPLICABLE",
+        "33": "NOT_APPLICABLE",
+        "40": "NOT_APPLICABLE",
+        "41": "NOT_APPLICABLE",
         "5": "PASS",
         "42": "PASS",
     }
     mfg, midflow = F._split_skipped_by_stage(_flow(steps), verdicts)
     assert mfg == 2, mfg
     assert midflow == 3, midflow
-    # honesty invariant: buckets sum to the total SKIPPED-CONDITION rollup
-    total_skipped = sum(1 for v in verdicts.values() if v == "SKIPPED-CONDITION")
+    # honesty invariant: buckets sum to the total NOT_APPLICABLE rollup
+    total_skipped = sum(1 for v in verdicts.values() if v == "NOT_APPLICABLE")
     assert mfg + midflow == total_skipped == 5
 
 
@@ -120,7 +120,7 @@ def test_split_skipped_noleak_only_manufacturing():
     # count, mid-flow bucket is 0 (unchanged behaviour for pure-silicon).
     steps = [_mfg_step(40), _mfg_step(41), _mfg_step(42),
              _mfg_step(43), _mfg_step(44)]
-    verdicts = {str(s["id"]): "SKIPPED-CONDITION" for s in steps}
+    verdicts = {str(s["id"]): "NOT_APPLICABLE" for s in steps}
     mfg, midflow = F._split_skipped_by_stage(_flow(steps), verdicts)
     assert mfg == 5, mfg
     assert midflow == 0, midflow
@@ -128,7 +128,7 @@ def test_split_skipped_noleak_only_manufacturing():
 
 def test_split_skipped_only_midflow():
     steps = [_midflow_step(10, "stage2"), _midflow_step(20, "stage3")]
-    verdicts = {"10": "SKIPPED-CONDITION", "20": "SKIPPED-CONDITION"}
+    verdicts = {"10": "NOT_APPLICABLE", "20": "NOT_APPLICABLE"}
     mfg, midflow = F._split_skipped_by_stage(_flow(steps), verdicts)
     assert mfg == 0
     assert midflow == 2
@@ -157,11 +157,11 @@ def test_counts_snapshot_populates_split_buckets():
         _mfg_step(41),
     ]
     verdicts = {
-        "11": "SKIPPED-CONDITION",
-        "22": "SKIPPED-CONDITION",
-        "33": "SKIPPED-CONDITION",
-        "40": "SKIPPED-CONDITION",
-        "41": "SKIPPED-CONDITION",
+        "11": "NOT_APPLICABLE",
+        "22": "NOT_APPLICABLE",
+        "33": "NOT_APPLICABLE",
+        "40": "NOT_APPLICABLE",
+        "41": "NOT_APPLICABLE",
     }
     rollup = _rollup_for(verdicts)
     snap = F._counts_snapshot(rollup, total_steps=len(steps),
@@ -177,8 +177,8 @@ def test_counts_snapshot_populates_split_buckets():
 
 def test_counts_snapshot_noleak_only_manufacturing():
     steps = [_mfg_step(40), _mfg_step(41), _mfg_step(42)]
-    verdicts = {"40": "SKIPPED-CONDITION", "41": "SKIPPED-CONDITION",
-                "42": "SKIPPED-CONDITION"}
+    verdicts = {"40": "NOT_APPLICABLE", "41": "NOT_APPLICABLE",
+                "42": "NOT_APPLICABLE"}
     rollup = _rollup_for(verdicts)
     snap = F._counts_snapshot(rollup, total_steps=len(steps),
                               flow=_flow(steps), verdicts=verdicts)
@@ -191,7 +191,7 @@ def test_counts_snapshot_noleak_only_manufacturing():
 def test_counts_snapshot_without_flow_books_as_midflow():
     # Conservative fallback: no per-step context → never silently label a
     # skip as silicon-stage; the whole bucket is booked mid-flow.
-    rollup = {"SKIPPED-CONDITION": 4, "PASS": 1}
+    rollup = {"NOT_APPLICABLE": 4, "PASS": 1}
     snap = F._counts_snapshot(rollup, total_steps=5)
     assert snap["skipped"] == 4
     assert snap["skipped_manufacturing"] == 0
@@ -207,7 +207,7 @@ def test_issue652_scenario_no_overreport():
         [_midflow_step(i, "stage3") for i in (24, 25, 30, 35, 38)]  # 5 mid
         + [_mfg_step(i) for i in (40, 41, 42, 43, 44)]              # 5 mfg
     )
-    verdicts = {str(s["id"]): "SKIPPED-CONDITION" for s in steps}
+    verdicts = {str(s["id"]): "NOT_APPLICABLE" for s in steps}
     rollup = _rollup_for(verdicts)
     snap = F._counts_snapshot(rollup, total_steps=len(steps),
                               flow=_flow(steps), verdicts=verdicts)

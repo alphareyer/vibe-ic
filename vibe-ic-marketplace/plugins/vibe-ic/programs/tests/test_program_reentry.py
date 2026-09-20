@@ -167,9 +167,20 @@ def _gate(monkeypatch, produce: str):
         (project / "phase2" / "stage1" / "rtl" / "dut.v").write_text(produce)
         report = project / "reports" / "orchestrator" / "phase2_one_shot.json"
         report.parent.mkdir(parents=True, exist_ok=True)
+        # R-0915-85 — THIS STUB MODELS THE PRODUCER, so it has to speak the
+        # producer's word. `design_one_shot_runner` writes `NOT_APPLICABLE`
+        # with `declared_by` naming the entry step at BOTH sites that leave
+        # `rtl_gen` on this tier; `benchmark_io_adapter.collect` accepts that
+        # word under `supplied_rtl=True`. Left as `SKIPPED-BY-ENTRY` the stub
+        # described a producer that no longer exists, `collect` answered
+        # ok=False, the re-gate took its rejection branch, and ONE fixture line
+        # turned 111 of this module's tests red — every one of them reporting
+        # `candidate_origin == "PROGRAM"` or an unpreserved `pre_gate_input`
+        # rather than naming the word that caused it.
         report.write_text(json.dumps({
             "verdict": "PASS",
-            "steps": [{"name": "rtl_gen", "status": "SKIPPED-BY-ENTRY",
+            "steps": [{"name": "rtl_gen", "status": "NOT_APPLICABLE",
+                       "declared_by": "--entry-step 2",
                        "detail": "run declared --entry-step 2"}],
         }))
         return SimpleNamespace(returncode=0)
@@ -288,8 +299,10 @@ def _case(tmp_path, monkeypatch, *, reviewed=False, exit_step="2"):
             current.write_text(current.read_text().replace("y = a", "y = 1'b0"))
         report = candidate / "reports/orchestrator/phase2_one_shot.json"
         report.parent.mkdir(parents=True, exist_ok=True)
+        # R-0915-85 — the producer's word for a site upstream of --entry-step.
         report.write_text(json.dumps({"verdict": "FAIL" if state["rc"] else "PASS",
-            "steps": [{"name": "rtl_gen", "status": "SKIPPED-BY-ENTRY"}]}))
+            "steps": [{"name": "rtl_gen", "status": "NOT_APPLICABLE",
+                       "declared_by": "--entry-step 2"}]}))
         if state["on_run"]:
             state["on_run"](candidate)
         assert kwargs["env"]["OMP_NUM_THREADS"] == "1"

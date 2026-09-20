@@ -107,7 +107,7 @@ _REAL_DEFECT_ERR = "error: Unknown module type: missing_child_module"
 
 def test_sv_subset_on_reused_ip_is_waived(monkeypatch, tmp_path):
     r = _drive_oracle_with_compile(monkeypatch, tmp_path, True, _SV_SUBSET_ERR)
-    assert r is not None and r.status == "WAIVED"
+    assert r is not None and r.status == "PASS_WITH_WAIVERS"
     assert r.extras.get("sv_subset_waived") is True
 
 
@@ -149,5 +149,5 @@ def test_the_waiver_still_holds_with_the_pinned_container_present(monkeypatch,
                         lambda c: (_pin.IMAGE_DIGEST, "") if c == _CONTAINER
                         else (None, f"{_pin.CONTAINER_ABSENT}: {c}"))
     r = _drive_oracle_with_compile(monkeypatch, tmp_path, True, _SV_SUBSET_ERR)
-    assert r is not None and r.status == "WAIVED"
+    assert r is not None and r.status == "PASS_WITH_WAIVERS"
     assert r.extras.get("sv_subset_waived") is True

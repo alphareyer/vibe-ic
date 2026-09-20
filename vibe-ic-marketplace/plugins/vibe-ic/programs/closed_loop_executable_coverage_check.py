@@ -344,8 +344,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
                  "file": "programs/design_one_shot_runner.py",
                  "caller": "main", "trigger_callee": "step_reference_tb",
                  "trigger_field": "status",
-                 "terminal_values": ["PASS", "SKIP", "WAIVED", "INCOMPLETE",
-                                     "NOT_EXECUTED"],
+                 # R-0915-85 — the five. SKIP is NOT_APPLICABLE, WAIVED is
+                 # PASS_WITH_WAIVERS, and INCOMPLETE and NOT_EXECUTED are both
+                 # NOT_MEASURED: four words became two, so the loop's terminal
+                 # set is four entries where it was five.
+                 "terminal_values": ["PASS", "NOT_APPLICABLE",
+                                     "PASS_WITH_WAIVERS", "NOT_MEASURED"],
                  "callee": "step_rtl_gen"},
             ],
             "remeasure": [
@@ -353,8 +357,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
                  "file": "programs/design_one_shot_runner.py",
                  "caller": "main", "trigger_callee": "step_reference_tb",
                  "trigger_field": "status",
-                 "terminal_values": ["PASS", "SKIP", "WAIVED", "INCOMPLETE",
-                                     "NOT_EXECUTED"],
+                 # R-0915-85 — the five. SKIP is NOT_APPLICABLE, WAIVED is
+                 # PASS_WITH_WAIVERS, and INCOMPLETE and NOT_EXECUTED are both
+                 # NOT_MEASURED: four words became two, so the loop's terminal
+                 # set is four entries where it was five.
+                 "terminal_values": ["PASS", "NOT_APPLICABLE",
+                                     "PASS_WITH_WAIVERS", "NOT_MEASURED"],
                  "actuator_callee": "step_rtl_gen",
                  "callee": "step_reference_tb"},
             ],

@@ -144,7 +144,13 @@ def test_emitted_tb_binds_synth_top_not_phantom(tmp_path):
     proj = _scaffold(tmp_path, l9_top="phantom_top",
                      waiver_synth_top="vendor_core")
     res = R.step_full_stack_tb_gen(proj, "chip_top")
-    assert res.status in ("PASS", "SKIP"), res.detail
+    # R-0915-85 — the step emits `NOT_MEASURED(no_population)` where it used
+    # to emit `SKIP`: a CONNECTIVITY-ONLY skeleton golden-compares NOTHING, so
+    # functional correctness was not measured. The detail said so already; the
+    # word says it now. This test's subject is the EMITTED TB, so what it
+    # needs is that the step did not FAIL.
+    assert res.status in ("PASS", "NOT_MEASURED"), res.detail
+    assert res.status != "FAIL", res.detail
     sim = _pl.sim_full_stack_dir(proj)
     tb = sim / "tb_vendor_core_full.v"
     assert tb.is_file(), sorted(p.name for p in sim.glob("*"))

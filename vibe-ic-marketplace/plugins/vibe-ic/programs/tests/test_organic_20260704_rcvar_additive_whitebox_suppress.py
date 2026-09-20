@@ -87,7 +87,7 @@ def _assert_untouched(res, before, body):
     intentional compatibility callers." This DUT documents its own `resetn`, so
     the step refuses under #689 and leaves the file alone.
     """
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     assert "#689" in res.detail, res.detail
     assert body == before, "the ruling promises the RTL is left UNCHANGED"
     # the harness-breaking shapes this file was written about, still absent

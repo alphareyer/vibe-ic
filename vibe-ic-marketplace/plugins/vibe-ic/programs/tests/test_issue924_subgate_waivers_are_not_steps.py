@@ -15,7 +15,7 @@ producer added a SUB-GATE population into it::
 
 `structural_waivers` is one entry per P0 structural sub-gate whose FAIL was
 converted to a deferred waiver — all of them INSIDE the single step `P0`. And
-`WAIVED` is in `_flow_verdict_tiers.EXCUSED`, which is precisely what the
+`WAIVED` is in `verdict.EXCUSED`, which is precisely what the
 denominator subtracts::
 
     total_required = (len(steps)
@@ -75,7 +75,7 @@ with a guard that must hold IDENTICALLY before and after:
   * a run with ZERO sub-gate waivers must be untouched in every field.
 
 DISCOVERED, NOT ENUMERATED. No verdict word, bucket name or tally label is typed
-in this file. The verdict vocabulary comes from `_flow_verdict_tiers` (the
+in this file. The verdict vocabulary comes from `verdict` (the
 producer's own classifier), the tally labels are scraped out of the line the
 program itself printed, and the waivable gate names come from the producer's own
 `_THIN_INPUT_WAIVER_GATES`. A bucket added tomorrow is compared by these tests
@@ -100,7 +100,7 @@ import pytest
 PROGRAMS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROGRAMS))
 
-import _flow_verdict_tiers as _T  # noqa: E402
+import verdict as _T  # noqa: E402
 import flow_compliance_check as F  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _p0_umbrella_probe_flow as _probe  # noqa: E402
@@ -309,14 +309,14 @@ def test_p0_is_never_excused_at_step_level():
                         waived + [F._p0_gate_record(
                             "a", "NOT_INVOCABLE", "argparse rejected argv",
                             {"exit_code": 2})]):
-            reachable.add(F._p0_umbrella_status(executed, records))
+            reachable.add(F.p0_umbrella_verdict(executed, records))
     assert "WAIVED" not in reachable, (
         f"P0's own verdict CAN be WAIVED now ({sorted(reachable)}) — the "
         f"reasoning that a sub-gate waiver must not excuse a step needs "
         f"re-deriving before this file is trusted")
 
     with_waiver = {
-        F._p0_umbrella_status(not any(r["verdict"] == "FAIL" for r in recs),
+        F.p0_umbrella_verdict(not any(r["verdict"] == "FAIL" for r in recs),
                               recs)
         for recs in (list(waived), waived + [_pass("a")])}
     excused = {s for s in with_waiver if _T.is_excused(s)}
@@ -437,7 +437,7 @@ def test_a_step_level_waiver_still_removes_exactly_one_step_each(
     base = _run(tmp_path, monkeypatch, n_subgate_waivers=n, probe_flow=False)
     arm = _run(tmp_path, monkeypatch, n_subgate_waivers=n, probe_flow=False,
                waived_steps=(33, 34))
-    waived_steps_seen = _step_status_tally(arm["report"])["WAIVED"]
+    waived_steps_seen = _step_status_tally(arm["report"])["PASS_WITH_WAIVERS"]
     assert waived_steps_seen > 0, (
         "the fixture produced no step-level WAIVED step, so this guard would "
         "pass vacuously; the waivers.json path must be repaired before this "

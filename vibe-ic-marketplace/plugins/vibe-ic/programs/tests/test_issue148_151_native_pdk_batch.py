@@ -84,7 +84,7 @@ def test_148_helper_digital_iface_present(tmp_path):
 def test_148_reference_tb_skips_on_all_analog(tmp_path):
     p = _l9_project(tmp_path, _ADC_ALL_ANALOG)
     r = DOR.step_reference_tb(p, "chip_top", "data_converter")
-    assert r.status == "SKIP"
+    assert r.status == "NOT_APPLICABLE"
     assert r.extras.get("deferred_to") == "analog_track"
     assert "rtl/ missing" not in r.detail
 
@@ -92,7 +92,7 @@ def test_148_reference_tb_skips_on_all_analog(tmp_path):
 def test_148_yosys_synth_skips_on_all_analog(tmp_path):
     p = _l9_project(tmp_path, _ADC_ALL_ANALOG)
     r = DOR.step_yosys_synth(p, "chip_top", "vibeic-eda", "data_converter")
-    assert r.status == "SKIP"
+    assert r.status == "NOT_APPLICABLE"
     assert r.extras.get("deferred_to") == "analog_track"
 
 
@@ -109,7 +109,7 @@ def test_148_reference_tb_refuses_on_digital_iface(tmp_path):
     producer that failed to fill it."""
     p = _l9_project(tmp_path, _CONV_DIGITAL_IFACE)
     r = DOR.step_reference_tb(p, "chip_top", "data_converter")
-    assert r.status == DOR._spf.REFUSAL_STATUS == "BLOCKED"
+    assert r.status == DOR._spf.REFUSAL_STATUS == "NOT_MEASURED"
     assert "rtl/ missing" in r.detail
     # the load-bearing #148 property: must not leak into the analog track
     assert r.extras.get("deferred_to") != "analog_track"

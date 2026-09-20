@@ -84,7 +84,12 @@ from flow_compliance_check import check_step  # noqa: E402
 # these tests about the OUTPUT resolution and not about a gate's opinion.
 _VACUOUS_GATE = {"program_exit_zero": "mixed_signal_merge_check ."}
 
-_DONE_CLAIMS = {"PASS", "VACUOUS_PASS", "STRUCTURE-ONLY", "INCOMPLETE"}
+# R-0915-85 — every case here runs `_VACUOUS_GATE` above, so the row's own
+# word is `NOT_MEASURED` whatever the binding does; what this file measures is
+# whether the step KEPT ITS OUTPUT CREDIT. A refused binding sets FAIL at the
+# UNATTRIBUTED-OUTPUT guard, so the two sides of every assertion below are one
+# word each and neither is a widened set.
+_KEPT_ITS_OUTPUT_CREDIT = {"NOT_MEASURED"}
 
 _RTL_SPEC = "rtl/*.sv OR rtl/*.v"
 
@@ -158,7 +163,7 @@ def test_a_renamed_recorded_output_does_not_keep_the_wildcard_green(project):
     """
     (project / "rtl" / "spm.v").rename(project / "rtl" / "spm_copy.v")
     r = check_step(project, _step(99, [_RTL_SPEC], _VACUOUS_GATE), {})
-    assert r.status not in _DONE_CLAIMS, (
+    assert r.status not in _KEPT_ITS_OUTPUT_CREDIT, (
         f"a wildcard whose entire recorded output set is gone was discharged "
         f"by an unrecorded file that happens to match it: status={r.status} "
         f"evidence={r.evidence}")
@@ -197,9 +202,9 @@ def test_a_second_step_cannot_discharge_this_ones_wildcard(project):
                        produced=[(_RTL_SPEC, "rtl/other.v")])
 
     r99 = check_step(project, _step(99, [_RTL_SPEC], _VACUOUS_GATE), {})
-    assert r99.status not in _DONE_CLAIMS, (r99.status, r99.evidence)
+    assert r99.status not in _KEPT_ITS_OUTPUT_CREDIT, (r99.status, r99.evidence)
     r98 = check_step(project, _step(98, [_RTL_SPEC], _VACUOUS_GATE), {})
-    assert r98.status in _DONE_CLAIMS, (r98.status, r98.reasons)
+    assert r98.status in _KEPT_ITS_OUTPUT_CREDIT, (r98.status, r98.reasons)
     assert "rtl/other.v" in r98.evidence
 
 
@@ -223,7 +228,7 @@ def test_a_partial_recorded_set_is_a_different_fact_from_an_absence(project):
     (project / "rtl" / "b.v").unlink()
 
     r = check_step(project, _step(99, [_RTL_SPEC], _VACUOUS_GATE), {})
-    assert r.status in _DONE_CLAIMS, (
+    assert r.status in _KEPT_ITS_OUTPUT_CREDIT, (
         f"two of three recorded outputs are still on disk; that is a "
         f"residual, not an absence: {r.status} {r.reasons}")
     blob = " ".join(r.reasons)
@@ -245,7 +250,7 @@ def test_a_dangling_link_matching_the_wildcard_cannot_stand_in(project):
     (project / "rtl" / "spm.v").rename(project / "rtl" / "spm_copy.v")
     (project / "rtl" / "spm.v").symlink_to(project / "rtl" / "nowhere.v")
     r = check_step(project, _step(99, [_RTL_SPEC], _VACUOUS_GATE), {})
-    assert r.status not in _DONE_CLAIMS, (r.status, r.evidence)
+    assert r.status not in _KEPT_ITS_OUTPUT_CREDIT, (r.status, r.evidence)
     assert "rtl/spm.v" not in r.evidence
 
 
@@ -260,7 +265,7 @@ def test_a_new_file_matching_the_wildcard_is_not_a_regression(project):
     file nobody has looked at yet."""
     (project / "rtl" / "extra.sv").write_text("module extra; endmodule\n")
     r = check_step(project, _step(99, [_RTL_SPEC], _VACUOUS_GATE), {})
-    assert r.status in _DONE_CLAIMS, (r.status, r.reasons)
+    assert r.status in _KEPT_ITS_OUTPUT_CREDIT, (r.status, r.reasons)
     assert "rtl/spm.v" in r.evidence
     assert "rtl/extra.sv" in r.evidence, (
         f"a file the wildcard matches must stay in the evidence the integrity "
@@ -288,7 +293,7 @@ def test_a_literal_or_alternative_still_counts_when_the_recorded_path_is_gone(
         project / "extracted" / "parasitic.spef")
 
     r = check_step(project, _step(97, [spec], _VACUOUS_GATE), {})
-    assert r.status in _DONE_CLAIMS, (
+    assert r.status in _KEPT_ITS_OUTPUT_CREDIT, (
         f"a literal alternative the spec NAMES by path was refused: "
         f"{r.status} {r.reasons}")
     assert "extracted/parasitic.spef" in r.evidence
@@ -309,7 +314,7 @@ def test_a_run_with_no_write_record_keeps_the_pre_change_verdict(project):
     (project / "rtl" / "spm.v").rename(project / "rtl" / "spm_copy.v")
 
     r = check_step(project, _step(99, [_RTL_SPEC], _VACUOUS_GATE), {})
-    assert r.status in _DONE_CLAIMS, (r.status, r.reasons)
+    assert r.status in _KEPT_ITS_OUTPUT_CREDIT, (r.status, r.reasons)
     assert "rtl/spm_copy.v" in r.evidence
     attribution = [x for x in r.reasons if x.startswith("OUTPUT ATTRIBUTION:")]
     assert len(attribution) == 1 and "PROJECT-WIDE" in attribution[0], (
@@ -326,9 +331,9 @@ def test_a_literal_spec_is_judged_exactly_as_before(project):
     _write_step_record(project, 96, "phase2/stage1/96_lit",
                        produced=[("reports/r.json", "reports/r.json")])
     r = check_step(project, _step(96, ["reports/r.json"], _VACUOUS_GATE), {})
-    assert r.status in _DONE_CLAIMS, (r.status, r.reasons)
+    assert r.status in _KEPT_ITS_OUTPUT_CREDIT, (r.status, r.reasons)
     assert r.evidence == ["reports/r.json"]
 
     (project / "reports" / "r.json").unlink()
     r2 = check_step(project, _step(96, ["reports/r.json"], _VACUOUS_GATE), {})
-    assert r2.status not in _DONE_CLAIMS, (r2.status, r2.evidence)
+    assert r2.status not in _KEPT_ITS_OUTPUT_CREDIT, (r2.status, r2.evidence)

@@ -92,7 +92,7 @@ def pruner():
     src = RUNNER.read_text(encoding="utf-8")
     m = re.search(r"def _exit_pruned_sites.*?(?=\ndef main\b)", src, re.S)
     assert m, "could not locate _exit_pruned_sites in the shipped runner"
-    ns: dict = {"_spf": spf}
+    ns: dict = {"_spf": spf, "_V": __import__("verdict")}
     exec(m.group(0), ns)  # noqa: S102 — executing our own shipped source
     return ns["_exit_pruned_sites"]
 
@@ -174,12 +174,24 @@ def agg():
     src = RUNNER.read_text(encoding="utf-8")
     m = re.search(r"def _aggregate_verdict.*?(?=\nif __name__)", src, re.S)
     assert m, "could not locate _aggregate_verdict in the shipped runner"
-    ns: dict = {"sys": sys}
+    ns: dict = {"sys": sys, "_V": __import__("verdict")}  # _V: R-0915-85 — the lifted source names the vocabulary module
     exec(  # noqa: S102 — executing our own shipped source, by design
         "from typing import List\n"
+        # R-0915-85 — the lifted aggregator builds real `verdict.StepVerdict`
+        # rows, which REFUSE a NOT_APPLICABLE with no `declared_by` and a
+        # NOT_MEASURED with no `reason_class`. The stub therefore carries the
+        # structured fields the shipped StepResult carries; a stub that did
+        # not would be testing a row shape the runner never emits.
         "class StepResult:\n"
-        "    def __init__(self, name, status):\n"
-        "        self.name = name; self.status = status\n" + m.group(0),
+        "    def __init__(self, name, status, declared_by='', "
+        "reason_class='', waiver_rows=None, attribution='', "
+        "disclosures=None):\n"
+        "        self.name = name; self.status = status\n"
+        "        self.declared_by = declared_by\n"
+        "        self.reason_class = reason_class\n"
+        "        self.waiver_rows = waiver_rows or []\n"
+        "        self.attribution = attribution\n"
+        "        self.disclosures = disclosures or []\n" + m.group(0),
         ns,
     )
     return ns["_aggregate_verdict"], ns["StepResult"]
@@ -197,7 +209,8 @@ def test_skipped_by_exit_is_a_designed_skip_not_noise(agg):
     and disclosed in the skipped-steps line like every other skip."""
     fn, SR = agg
     verdict, err = _agg_run(fn, [SR("rtl_gen", "PASS"),
-                                 SR("dft_lec_chain", "SKIPPED-BY-EXIT")])
+                                 SR("dft_lec_chain", "NOT_APPLICABLE",
+                                    declared_by="--exit-step 2")])
     assert verdict == "PASS", verdict
     assert "UNCLASSIFIED" not in err, err
     assert "SKIPPED step(s)" in err and "dft_lec_chain" in err, err
@@ -206,7 +219,8 @@ def test_skipped_by_exit_is_a_designed_skip_not_noise(agg):
 def test_skipped_by_exit_cannot_excuse_a_real_failure(agg):
     fn, SR = agg
     verdict, _ = _agg_run(fn, [SR("rtl_gen", "FAIL"),
-                               SR("dft_lec_chain", "SKIPPED-BY-EXIT")])
+                               SR("dft_lec_chain", "NOT_APPLICABLE",
+                                  declared_by="--exit-step 2")])
     assert verdict == "FAIL", verdict
 
 
@@ -225,11 +239,16 @@ def test_attribution_reads_the_sentinel_as_not_attempted(tmp_path):
         "steps": [
             {"name": "rtl_gen", "status": "PASS", "detail": "",
              "extras": {"deterministic_generator": "multiplexer"}},
-            {"name": "yosys_synth", "status": "SKIPPED-BY-EXIT",
+            {"name": "yosys_synth", "status": "NOT_APPLICABLE",
+             "declared_by": "--exit-step 2",
              "detail": "run declared --exit-step 2"},
         ]}))
     r = fpa.attribute(p)["phase3_verifying"]
-    assert r["not_attempted"] == {"yosys_synth": "SKIPPED-BY-EXIT"}
+    # R-0915-85 — the bucket is the same; the word recorded in it is the one
+    # the runner now writes. WHICH kind of not-attempted this is — declared
+    # out of scope by `--exit-step`, rather than unmeasurable — is in
+    # `declared_by`, published beside the word, so nothing goes silent.
+    assert r["not_attempted"] == {"yosys_synth": "NOT_APPLICABLE"}
     assert not r.get("unclassified_status"), r
 
 
@@ -479,7 +498,9 @@ def test_midflow_reentry_cannot_call_the_upstream_rtl_generator_for_repair():
     generator = loop.index("plan.append(step_rtl_gen(project, ic_class))")
     assert guard < generator
     guarded = loop[guard:generator]
-    assert '"rtl_repair_retry_iter", "SKIP"' in guarded
+    # R-0915-85 — the guard records NOT_APPLICABLE and names the declaration
+    # that makes it N/A; `SKIP` was the same fact without the naming.
+    assert '"rtl_repair_retry_iter", "NOT_APPLICABLE"' in guarded
     assert "candidate_owner\": \"SUPPLIED_RTL" in guarded
     assert "break" in guarded
 

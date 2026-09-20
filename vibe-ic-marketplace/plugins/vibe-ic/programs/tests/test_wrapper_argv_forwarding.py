@@ -350,7 +350,7 @@ def test_gate_produced_reprobe_does_not_excuse_an_upstream_output(tmp_path):
                 "--json reports/phase3/antenna_signoff.json"}]},
     }
     res = FCC.check_step(proj, step, {})
-    assert res.status == "MISSING", res.status
+    assert res.status == "FAIL", res.status
     assert any("never_produced_by_anyone.json" in r for r in res.reasons), \
         res.reasons
 

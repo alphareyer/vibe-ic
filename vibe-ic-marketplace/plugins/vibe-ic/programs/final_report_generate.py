@@ -77,7 +77,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import _path_layout as _pl
 import _analog_a_check_common as _acc
-import _flow_verdict_tiers as _T
+import verdict as _T
 import _watchdog as _wd  # progress-stall process supervision
 
 
@@ -202,39 +202,25 @@ def section_heading(canonical: str) -> str:
 #
 # Order: full pass, then qualified done-claims, then excused, then non-green.
 ROLLUP_ORDER = (
+    # R-0915-85 — FIVE SLOTS, in the order this list has always had: full pass,
+    # then the qualified done-claim, then excused, then non-green. The
+    # eighteen-word ladder it replaces is in the history above and every one of
+    # its entries is now either one of these or a `reason_class` / `Disclosure`
+    # printed beside the table rather than as a row of it.
+    #
+    # THE ORDERING ARGUMENT THAT SURVIVES, because it is the reason this list
+    # cannot be derived: `NOT_MEASURED` prints in the NON-GREEN run of the
+    # ladder now, and that is a CHANGE. The old note here put `NOT-MEASURED`
+    # among the qualified done-claims "for the reason the tier module states in
+    # its own words: it is in neither EXCUSED nor NON_GREEN". It IS in
+    # `NON_GREEN` now — that is precisely what R-0915-85 decided — so printing
+    # it beside FAIL says what the word adjudicates instead of the opposite.
+    # `NOT_APPLICABLE` keeps the excused slot it always had.
     "PASS",
-    # vibe-ic#901 — PARTIALLY-VACUOUS beside VACUOUS-PASS: it is the same
-    # qualified done-claim tier split by a count, so it belongs next to the
-    # word it splits and before the other qualified tiers.
-    "VACUOUS-PASS", "PARTIALLY-VACUOUS", "STRUCTURE-ONLY", "INCOMPLETE",
-    # RB2-03 (#2063) registered NOT-MEASURED in `_flow_verdict_tiers.
-    # PRODUCER_STATUSES` and stopped there. `_TALLY_LABEL_TO_BUCKET` is DERIVED
-    # from that set, so the word became emittable the same commit; this list is
-    # a presentation order and cannot be derived, so it stayed one word short
-    # and a populated NOT-MEASURED bucket had no print slot at all.
-    #
-    # HERE, and not down beside FAIL/MISSING, for the reason the tier module
-    # states in its own words: NOT-MEASURED is in neither `EXCUSED` nor
-    # `NON_GREEN`, so by that module's derivation it is a QUALIFIED DONE-CLAIM,
-    # and this list's order is "full pass, then qualified done-claims, then
-    # excused, then non-green". Printing it in the non-green run of the ladder
-    # would say, in the one table a reader actually looks at, that the step
-    # failed — which is the opposite of what the word adjudicates.
-    #
-    # IMMEDIATELY AFTER `INCOMPLETE` for the same reason PARTIALLY-VACUOUS sits
-    # beside VACUOUS-PASS above: it was SPLIT OUT of INCOMPLETE ("0 of N
-    # sub-gates answered" vs "some of N did"), it only ever replaces INCOMPLETE,
-    # and it belongs next to the word it splits.
-    "NOT-MEASURED",
-    "WAIVED", "WAIVED-DEFERRED", "DEFERRED-BY-UPSTREAM",
-    # Beside the other EXCUSED words, because it is one: a step the run declared
-    # OUT of its scope via --entry-step. Registering the status in
-    # _flow_verdict_tiers was not enough — a bucket the roll-up cannot PRINT is
-    # invisible in the summary the reader actually looks at, which is what
-    # `final_summary_rollup_consistency_check` exists to catch.
-    "OUT-OF-SCOPE-BY-ENTRY",
-    "SKIPPED-CONDITION", "SKIPPED-SETUP-REQUIRED",
-    "PASS-VOIDED-BY-DEPENDENCY", "FAIL", "MISSING",
+    "PASS_WITH_WAIVERS",
+    "NOT_APPLICABLE",
+    "NOT_MEASURED",
+    "FAIL",
     NO_VERDICT,
 )
 STAGE_TITLE = [
@@ -293,21 +279,39 @@ def _is_manufacturing_step(step: Dict[str, Any]) -> bool:
 def _split_skipped_by_stage(
     flow: Dict[str, Any], verdicts: Dict[str, str]
 ) -> Tuple[int, int]:
-    """#652 — split the SKIPPED-CONDITION rollup BY STAGE.
+    """#652 — split the NOT_APPLICABLE rollup BY STAGE.
 
     Returns ``(manufacturing_skipped, midflow_skipped)``. A step counts
-    as manufacturing-skipped only when its verdict is SKIPPED-CONDITION
+    as manufacturing-skipped only when its verdict is NOT_APPLICABLE
     AND it is a manufacturing-stage step (`_is_manufacturing_step`);
-    every other SKIPPED-CONDITION step is a mid-flow skip. The two
-    buckets are mutually exclusive and sum to the total SKIPPED-CONDITION
+    every other NOT_APPLICABLE step is a mid-flow skip. The two
+    buckets are mutually exclusive and sum to the total NOT_APPLICABLE
     rollup, so the report stays honest (mid-flow + manufacturing ==
     total skipped). chip-AGNOSTIC: structural stage classification only.
+
+    R-0915-85 — THIS COMPARISON WAS DEAD AND THE INVARIANT ABOVE WAS FALSE ON
+    EVERY REAL RUN. `SKIPPED-CONDITION` is `NOT_APPLICABLE`, and its sibling
+    two hundred lines down already reads the new word
+    (`skipped = rollup.get("NOT_APPLICABLE", 0)`). Left as the old word here,
+    no verdict ever matched: both buckets returned 0 while `skipped` counted
+    N, so the report printed "N skipped" with nothing in either half and
+    `skipped_manufacturing + skipped_midflow == skipped` — the promise this
+    docstring makes — held only when N was 0.
+
+    The file's own tests could not see it: they feed the OLD word, under which
+    the split works and `skipped` reads 0. The two halves were broken in
+    OPPOSITE directions, so every assertion about one was satisfied by the
+    fixture that broke the other.
+
+    Neither is it a shape the ratchet can reach: `verdicts` is a plain dict of
+    id -> word, so `verdicts.get(sid)` is not one of the four step-status keys
+    and the comparison pass has nothing to judge (see `verdict.py` DESIGN).
     """
     mfg = 0
     midflow = 0
     for s in flow.get("steps", []):
         sid = str(s.get("id"))
-        if verdicts.get(sid, NO_VERDICT) != "SKIPPED-CONDITION":
+        if verdicts.get(sid, NO_VERDICT) != _T.Verdict.NOT_APPLICABLE.value:
             continue
         if _is_manufacturing_step(s):
             mfg += 1
@@ -496,14 +500,15 @@ def _load_fresh_audit_snapshot(
 
 
 def _audit_bucket(raw: Any) -> str:
-    """One report spelling for a producer count/status key."""
-    bucket = _T.normalize(str(raw or ""))
-    # Internally the producer calls this step status WAIVED; its stdout and the
-    # report call the same bucket WAIVED-DEFERRED.  This is an alias, not a new
-    # classification.
-    if bucket in {"WAIVED", "WAIVED-DEFERRED"}:
-        return "WAIVED-DEFERRED"
-    return bucket
+    """One report spelling for a producer count/status key.
+
+    R-0915-85 made this a no-op and the function is kept only as the one place
+    a reader looks for "is there a second spelling?". There is not: the producer
+    writes one of the five words and the report prints the same five. The
+    WAIVED / WAIVED-DEFERRED alias this used to fold is gone with both words —
+    a deferral is `PASS_WITH_WAIVERS` and the rows are in `waiver_rows`.
+    """
+    return str(raw or "")
 
 
 def _audit_step_counts(
@@ -932,14 +937,23 @@ def _parse_verdicts(audit_text: str) -> Dict[str, str]:
 # The checker's own tally line, e.g.
 #   "  PASS=35  FAIL=0  MISSING=0  WAIVED-DEFERRED=3  SKIPPED=22  VACUOUS-PASS=3"
 # MISSING may carry a "(N blocked-by-upstream of step X)" parenthetical.
-_TALLY_TOKEN_RE = re.compile(r"\b([A-Z][A-Z-]*[A-Z])=(\d+)")
-# The tally prints SKIPPED-CONDITION under the short label `SKIPPED`.
+#: R-0915-85 — UNDERSCORES ARE PART OF A LABEL NOW. The five words include
+#: `PASS_WITH_WAIVERS`, `NOT_MEASURED` and `NOT_APPLICABLE`; this pattern
+#: accepted only `[A-Z-]`, so it matched `PASS` inside `PASS_WITH_WAIVERS=3`
+#: and the bucket never resolved — measured: `_parse_audit_tally` returned None
+#: on a tally line carrying all five, which the caller reads as "no tally", and
+#: a roll-up disagreement is then reported as agreement.
+_TALLY_TOKEN_RE = re.compile(r"\b([A-Z][A-Z_-]*[A-Z])=(\d+)")
 #: Hand-written ALIASES only: report-side spellings that differ from the
 #: producer's own word. Everything else is derived below.
+#: R-0915-85 — the report's own label for a bucket, where it differs from the
+#: producer's word. `WAIVED-DEFERRED` is the sentence the headline and this
+#: tally have printed for as long as either existed, and four parsers key on it;
+#: the WORD behind it is `PASS_WITH_WAIVERS` now. That is a REPORT-SIDE RENAMING
+#: and is exactly what this map is for — it is not a status alias, and nothing
+#: here lets a producer write the old word.
 _TALLY_LABEL_ALIASES = {
-    "SKIPPED": "SKIPPED-CONDITION",
-    "WAIVED-DEFERRED": "WAIVED-DEFERRED",
-    "PASS-VOIDED": "PASS-VOIDED-BY-DEPENDENCY",
+    "WAIVED-DEFERRED": "PASS_WITH_WAIVERS",
 }
 
 
@@ -962,14 +976,14 @@ def _build_tally_label_map() -> dict:
     direction. PASS-VOIDED-BY-DEPENDENCY is the sharpest of the three: it is
     the word #671 introduced precisely to say "this is NOT a pass".
 
-    ``_flow_verdict_tiers.PRODUCER_STATUSES`` is the authoritative vocabulary
+    ``verdict.PRODUCER_STATUSES`` is the authoritative vocabulary
     and already carries an anti-drift test ("a word added there without a home
     below is a test failure, not a silent escape"). That protection never
     reached this copy because this copy was a copy. Deriving from it means the
     next tier is covered without anyone remembering this file exists.
     """
     try:
-        from _flow_verdict_tiers import PRODUCER_STATUSES
+        from verdict import PRODUCER_STATUSES
     except ImportError:  # pragma: no cover — shared module always ships
         PRODUCER_STATUSES = set()
     out = {s: s for s in PRODUCER_STATUSES}
@@ -981,8 +995,15 @@ def _build_tally_label_map() -> dict:
 _TALLY_LABEL_TO_BUCKET = _build_tally_label_map()
 # The buckets `flow_compliance_check.py` prints UNCONDITIONALLY on its
 # tally line. A line missing any of them is not the tally.
+#: R-0915-85 — the quartet the checker prints UNCONDITIONALLY, in the five.
+#: `MISSING` is gone as a word (a declared output that does not exist is
+#: `FAIL(missing_artefact)`), so the mandatory set is the four verdicts the
+#: tally line always carries; `NOT_APPLICABLE` is the fifth and is also always
+#: printed, which is why it is here too. A line missing any of them is not the
+#: tally, and that is what stops the report's own prose bullet matching and
+#: producing agreement by construction.
 TALLY_MANDATORY_BUCKETS = frozenset(
-    {"PASS", "FAIL", "MISSING", "WAIVED-DEFERRED"})
+    {"PASS", "FAIL", "PASS_WITH_WAIVERS", "NOT_MEASURED", "NOT_APPLICABLE"})
 
 
 def _parse_audit_tally(audit_text: str) -> Optional[Dict[str, int]]:
@@ -1226,12 +1247,29 @@ def _counts_snapshot(
     when they are not supplied the whole total is conservatively booked
     as mid-flow (no step is silently mislabelled as a silicon skip).
     `skipped_manufacturing + skipped_midflow == skipped` always holds."""
+    # R-0915-85 — THE ROLL-UP KEYS ARE THE FIVE. Left as they were, three of
+    # these four `.get`s named a bucket no producer writes and silently
+    # returned 0: `vacuous` and `skipped` read zero on every run, so the
+    # denominator stopped subtracting the inapplicable steps and
+    # `executed_pass < executed_total` -- the sentence this snapshot exists to
+    # make true -- became unfalsifiable.
     pass_only = rollup.get("PASS", 0)
-    vacuous = rollup.get("VACUOUS-PASS", 0)
-    waived = rollup.get("WAIVED-DEFERRED", 0)
-    skipped = rollup.get("SKIPPED-CONDITION", 0)
+    vacuous = rollup.get("NOT_MEASURED", 0)
+    # `WAIVED-DEFERRED` is the CONTRACT label the audit's tally line prints
+    # beside `PASS_WITH_WAIVERS`; both are read so a snapshot taken from either
+    # spelling of the same line agrees with itself.
+    waived = (rollup.get("WAIVED-DEFERRED", 0)
+              or rollup.get("PASS_WITH_WAIVERS", 0))
+    skipped = rollup.get("NOT_APPLICABLE", 0)
     fail = rollup.get("FAIL", 0)
-    missing = rollup.get("MISSING", 0)
+    # R-0915-85 — `MISSING` is gone as a bucket: a declared output that does
+    # not exist is `FAIL(missing_artefact)`, so it is already inside `fail`.
+    # The snapshot key is KEPT and set to 0 rather than removed, because
+    # published `final_summary.md` snapshots carry it and a reader diffing an
+    # old one against a new one must see a number, not a hole. It is the only
+    # honest value: this roll-up can no longer tell the two apart, and the
+    # reason that can is on the step row.
+    missing = 0
     # ORGANIC #428 — surfaced separately from `missing` so a reader (and
     # the roll-up-consistency gate) can tell an unreadable verdict apart
     # from an absent required output.

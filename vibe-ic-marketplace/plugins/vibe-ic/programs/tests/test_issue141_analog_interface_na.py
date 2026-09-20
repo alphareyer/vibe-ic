@@ -104,7 +104,7 @@ def test_classifier_cli_exit_codes(tmp_path):
 def test_step_rtl_gen_all_analog_routes_to_analog_track(tmp_path):
     p = _mk_project(tmp_path, _ADC_ALL_ANALOG)
     res = DOR.step_rtl_gen(p, "data_converter")
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     assert res.extras.get("deferred_to") == "analog_track"
     assert res.extras.get("fallback_skill") is None
     assert res.extras.get("digital_datapath_absent") is True
@@ -137,7 +137,7 @@ def test_step_rtl_gen_digital_iface_keeps_spec_to_rtl(tmp_path):
     # a converter WITH a digital interface still authors RTL via spec-to-rtl
     assert res.extras.get("fallback_skill") == "spec-to-rtl"
     assert res.extras.get("deferred_to") != "analog_track"
-    assert res.status in ("WAIVED", "FAIL"), res.detail
+    assert res.status in ("PASS_WITH_WAIVERS", "FAIL"), res.detail
     if res.status == "FAIL":
         assert "does not state" in (res.detail or ""), (
             "a refusal must name the declared field it lacked, not merely "

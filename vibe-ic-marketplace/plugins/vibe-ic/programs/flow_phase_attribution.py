@@ -77,7 +77,11 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-SCHEMA = 1
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import verdict as _V  # noqa: E402  R-0915-85 — the one vocabulary module
+
+SCHEMA = 2
 REPORT_NAME = "flow_phase_attribution.json"
 
 # The runner's step record, and WHY this file and not the other.
@@ -111,13 +115,43 @@ _STEP_REPORT_REASON = (
 # vocabulary: anything outside lands in `unclassified_status` BY NAME, the same
 # refusal-to-absorb that function makes, so a status invented tomorrow cannot
 # arrive here as a silent pass or a silent skip.
-_STATUS_RAN = frozenset({"PASS", "FAIL", "FAIL_RTL_REPAIR_INERT",
-                         "STALE_BOARD_DETECTED", "ADVISORY"})
-_STATUS_NOT_ATTEMPTED = frozenset({"SKIP", "SKIPPED-CONDITION",
-                                   "SKIPPED-BY-ENTRY", "SKIPPED-BY-EXIT",
-                                   "BLOCKED", "WAIVED"})
-_STATUS_MARKER = frozenset({"RTL_REPAIR_RETRY"})
-_STATUS_FAILING = ("FAIL", "FAIL_RTL_REPAIR_INERT", "STALE_BOARD_DETECTED")
+# R-0915-85 — DERIVED FROM THE FIVE, and the partition is still TOTAL.
+#
+# `FAIL_RTL_REPAIR_INERT`, `STALE_BOARD_DETECTED` and `ADVISORY` were three
+# spellings of "it ran"; `SKIP`, `SKIPPED-CONDITION`, `SKIPPED-BY-ENTRY`,
+# `SKIPPED-BY-EXIT`, `BLOCKED` and `WAIVED` were six spellings of "it did not".
+# The question this module asks -- WAS THE GATE ATTEMPTED -- cuts the five the
+# same way it cut the eighteen:
+#   * PASS / PASS_WITH_WAIVERS / FAIL -- the step produced a verdict about the
+#     design. A waived step RAN; what is open is a row somebody owns, and that
+#     row is in `waiver_rows`, not in the word.
+#   * NOT_MEASURED / NOT_APPLICABLE -- nothing was measured, whether because
+#     the run declared the site out of scope or because the step could not
+#     look. WHICH of those is in `reason_class` / `declared_by`, published
+#     beside the word, so nothing that used to be a separate word goes silent.
+# Anything else still lands in `unclassified_status` BY NAME -- and `parse`
+# now refuses it upstream too, so an un-migrated producer cannot arrive here
+# as a silent pass or a silent skip.
+_STATUS_RAN = frozenset({_V.Verdict.PASS.value,
+                         _V.Verdict.PASS_WITH_WAIVERS.value,
+                         _V.Verdict.FAIL.value})
+_STATUS_NOT_ATTEMPTED = frozenset({_V.Verdict.NOT_MEASURED.value,
+                                   _V.Verdict.NOT_APPLICABLE.value})
+# R-0915-85 — A MARKER IS A DISCLOSURE, NOT A VERDICT. `RTL_REPAIR_RETRY` was
+# a status word for "this row is a progress marker inside an iteration", which
+# put a non-outcome in the field every consumer reads for an outcome. The
+# runner records the marker as `PASS` carrying `Disclosure.PROGRESS_MARKER`
+# now, so the question is asked of the disclosures. Left as the word this set
+# matched NOTHING and every marker row fell through to `ran`, where it counted
+# as a gate that produced a verdict about the design.
+_MARKER_DISCLOSURE = _V.Disclosure.PROGRESS_MARKER.value
+
+
+def _is_progress_marker(step: Dict[str, Any]) -> bool:
+    """This row records that an iteration advanced, not that a gate decided."""
+    return _MARKER_DISCLOSURE in [
+        str(d) for d in (step.get("disclosures") or ())]
+_STATUS_FAILING = (_V.Verdict.FAIL.value,)
 
 # Repair / close-loop markers the runner appends, by the name it records them
 # under. Each value says what the marker IS, so the report explains itself.
@@ -299,7 +333,8 @@ def _earlier_waive(rep: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     emitted on a later attempt can show both facts instead of one winning.
     """
     for st in rep.get("steps") or []:
-        if st.get("name") == "rtl_gen" and st.get("status") == "WAIVED":
+        if (st.get("name") == "rtl_gen"
+                and st.get("status") == _V.Verdict.PASS_WITH_WAIVERS.value):
             ex = st.get("extras") or {}
             if ex.get("fallback_skill"):
                 return {"fallback_skill": ex["fallback_skill"],
@@ -384,7 +419,11 @@ def phase2_solving(rep: Optional[Dict[str, Any]], why: Optional[str],
                         f"`deterministic_generator`; extras keys present: "
                         f"{sorted(ex)}; detail: {detail[:200]}",
         })
-    elif status == "WAIVED":
+    elif status == _V.Verdict.PASS_WITH_WAIVERS.value:
+        # R-0915-85 — `WAIVED` is `PASS_WITH_WAIVERS`. Dead as the old word,
+        # this branch never fired and every waived-to-a-skill run fell through
+        # to `_unknown`: the attribution said the vocabulary was unclassified
+        # about the one hand-off it exists to name.
         skill = ex.get("fallback_skill")
         out.update({
             "solved_by": "AI_BACKUP" if skill else "WAIVED_NO_SKILL",
@@ -392,14 +431,21 @@ def phase2_solving(rep: Optional[Dict[str, Any]], why: Optional[str],
             "actor": skill or "UNKNOWN",
             "emitter": None,
             "emitter_absent_reason":
-                "no deterministic emitter fired; the runner WAIVED rtl_gen to "
+                "no deterministic emitter fired; the runner passed rtl_gen "
+                "WITH WAIVERS to "
                 f"the AI skill {skill!r} — a handover, not an emit"
                 if skill else
-                f"rtl_gen WAIVED with no fallback_skill: {detail[:200]}",
+                f"rtl_gen PASS_WITH_WAIVERS with no fallback_skill: "
+                f"{detail[:200]}",
             "ai_authored_in_this_invocation": False,
-            "evidence": f"rtl_gen WAIVED, extras.fallback_skill={skill!r}",
+            "evidence": f"rtl_gen PASS_WITH_WAIVERS, "
+                        f"extras.fallback_skill={skill!r}",
         })
-    elif status in ("FAIL", "BLOCKED"):
+    # R-0915-85 — `BLOCKED` is `NOT_MEASURED(input_absent)`, which the
+    # NOT-ATTEMPTED arm below already owns. It is dropped here rather than
+    # translated: a step that could not look is not a step that looked and
+    # found nothing, and this branch is the second.
+    elif status == _V.Verdict.FAIL.value:
         out.update({
             "solved_by": "NONE",
             "mechanism": "PROGRAM",
@@ -448,14 +494,16 @@ def phase3_verifying(rep: Optional[Dict[str, Any]],
         name = str(s.get("name"))
         status = str(s.get("status"))
         repeats[name] = repeats.get(name, 0) + 1
-        if status in _STATUS_RAN:
+        # ASKED FIRST, because a marker's verdict word is `PASS` and the
+        # `_STATUS_RAN` test below would claim it.
+        if _is_progress_marker(s):
+            markers[name] = status
+        elif status in _STATUS_RAN:
             ran[name] = status
             not_attempted.pop(name, None)
         elif status in _STATUS_NOT_ATTEMPTED:
             if name not in ran:
                 not_attempted[name] = status
-        elif status in _STATUS_MARKER:
-            markers[name] = status
         else:
             unclassified[name] = status
     return {

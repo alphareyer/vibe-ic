@@ -313,12 +313,17 @@ def test_blocked_is_never_green_in_either_runner():
     import design_one_shot_runner as D
     import phase3_one_shot_runner as P3
     for mod in (D, P3):
-        row = mod.StepResult("x", SP.REFUSAL_STATUS, 0.0, "refused")
-        assert mod._aggregate_verdict([row]) == "FAIL", (
+        row = mod.StepResult("x", SP.REFUSAL_STATUS, 0.0, "refused",
+                             reason_class=SP.REFUSAL_REASON_CLASS)
+        # R-0915-85 — a pre-flight refusal is NOT_MEASURED(input_absent): the
+        # step was never given an input it could read, so nothing FAILED. What
+        # this test forbids is the refusal reaching a GREEN verdict.
+        assert mod._aggregate_verdict([row]) == "NOT_MEASURED", (
             f"{mod.__name__}._aggregate_verdict lets a pre-flight refusal "
             f"reach a green verdict")
         ok = mod.StepResult("y", "PASS", 0.0, "ran")
-        assert mod._aggregate_verdict([ok, row]) == "FAIL"
+        # …and a PASS beside it does not absorb it.
+        assert mod._aggregate_verdict([ok, row]) == "NOT_MEASURED"
 
 
 def test_gate_returns_exactly_one_object_so_plan_minus_one_still_works(tmp_path):

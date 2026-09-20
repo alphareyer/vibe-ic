@@ -177,7 +177,7 @@ def test_step_drc_env_unavailable_names_buddy(tmp_path, monkeypatch):
                       cell_lef="x", cell_gds=None, site="unit", drc_deck=None,
                       calibre_drc="/x/DRC.rule")
     res = R.step_drc(tmp_path, "spm", pdk, "vibeic-eda")
-    assert res.status == "ENV_UNAVAILABLE"
+    assert res.status == "NOT_MEASURED"
     assert "svrfdrc" in res.detail
 
 
@@ -244,7 +244,7 @@ def test_try_svrf_native_drc_stop_is_blocked_not_excused_and_says_which(
     """
     monkeypatch.delenv("VIBE_IC_DRC_BUDGET_S", raising=False)
     res, _seen = _drc_probe_harness(tmp_path, monkeypatch, rc)
-    assert res.status == "BLOCKED"
+    assert res.status == "NOT_MEASURED"
     assert res.extras.get("finding") == "SVRFDRC_PERF_CEILING"
     assert res.extras.get("stopped_as") == expect
 
@@ -280,7 +280,7 @@ def test_a_killed_open_source_drc_is_blocked_not_a_claimed_violation(
                     cell_gds=None, site="unit", drc_deck="/x/deck.lydrc",
                     calibre_drc=None),
         "vibeic-eda")
-    assert res.status == "BLOCKED", (
+    assert res.status == "NOT_MEASURED", (
         f"a DRC that never finished looking is booked {res.status!r} — that "
         f"asserts a violation the deck never found")
     assert res.extras.get("stopped_as") == expect
@@ -294,11 +294,18 @@ def test_blocked_is_not_a_softening_the_run_verdict_is_identical():
     """ARM 2a. The whole safety of ARM 1 rests on this: `_aggregate_verdict`
     must treat BLOCKED exactly as FAIL, so the change moves a STEP's word and
     not a RUN's verdict. Asked of the real function, never recomputed."""
-    mk = lambda st: R.StepResult("drc", st, 0.0, "")      # noqa: E731
+    mk = lambda st, **kw: R.StepResult("drc", st, 0.0, "", **kw)  # noqa: E731
     ok = R.StepResult("pnr", "PASS", 0.0, "")
-    assert R._aggregate_verdict([ok, mk("BLOCKED")]) == "FAIL"
+    # R-0915-85 — a NOT_MEASURED row must NAME what stopped it; the
+    # constructor refuses one that does not, which is the guard, not a
+    # nuisance. And the run word is NOT_MEASURED, not FAIL: the step did
+    # not fail, nothing examined it. What this test asserts is what it
+    # always asserted -- nothing green can be manufactured by moving the
+    # step's own word.
+    assert R._aggregate_verdict(
+        [ok, mk("NOT_MEASURED", reason_class="tool_absent")]) == "NOT_MEASURED"
     assert R._aggregate_verdict([ok, mk("FAIL")]) == "FAIL"
-    assert R._aggregate_verdict([ok, mk("PASS")]) != "FAIL"
+    assert R._aggregate_verdict([ok, mk("PASS")]) == "PASS"
 
 
 def test_a_drc_that_found_violations_is_still_a_fail(tmp_path, monkeypatch):
@@ -320,7 +327,7 @@ def test_a_drc_that_found_violations_is_still_a_fail(tmp_path, monkeypatch):
                     cell_gds=None, site="unit", drc_deck="/x/deck.lydrc",
                     calibre_drc=None),
         "vibeic-eda")
-    assert res.status != "BLOCKED", (
+    assert res.status != "NOT_MEASURED", (
         "a deck that RAN and found violations was relabelled as 'could not "
         "look' — that is the weakening this arm exists to refuse")
 

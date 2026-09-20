@@ -63,8 +63,9 @@ _GATE = "eda_log_check"
 #: collection abort scrapes as zero failures, which is the weakest possible
 #: negative control. Literals here, membership asserted below.
 _SYNTH_LOG_REL = "phase2/stage2/synth/yosys.log"
-_NOT_ATTEMPTED = ("BLOCKED", "SKIP", "SKIPPED-BY-ENTRY", "SKIPPED-BY-EXIT",
-                  "SKIPPED-CONDITION")
+# R-0915-85 — the five spellings collapse to the two words that mean NO TOOL
+# RAN. A row is built for each below, so each needs the field its word requires.
+_NOT_ATTEMPTED = ("NOT_MEASURED", "NOT_APPLICABLE")
 
 _REAL_STAT_LOG = (
     "\n=== chip_top ===\n"
@@ -83,7 +84,15 @@ def _project(tmp: Path, log: str | None = None) -> Path:
 
 
 def _synth(status: str):
-    return DOSR.StepResult("yosys_synth", status, 0.0, "")
+    """A synth row wearing *status*. R-0915-85 — NOT_APPLICABLE must name the
+    input line that declares it and NOT_MEASURED must say why; the row type
+    refuses either without, which is the point."""
+    kw = {}
+    if status == "NOT_APPLICABLE":
+        kw["declared_by"] = "L1: the design declares no digital RTL"
+    if status == "NOT_MEASURED":
+        kw["reason_class"] = "not_executed"
+    return DOSR.StepResult("yosys_synth", status, 0.0, "", **kw)
 
 
 def _row(res):
@@ -136,14 +145,27 @@ def test_the_step_can_never_move_the_run_verdict() -> None:
     step = next(n for n in ast.walk(ast.parse(src))
                 if isinstance(n, ast.FunctionDef)
                 and n.name == "step_synth_log_audit")
-    statuses = {c.args[1].value for c in ast.walk(step)
-                if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-                and c.func.id == "StepResult" and len(c.args) >= 2
-                and isinstance(c.args[1], ast.Constant)}
-    assert statuses == {"ADVISORY"}, (
+    calls = [c for c in ast.walk(step)
+             if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+             and c.func.id == "StepResult" and len(c.args) >= 2
+             and isinstance(c.args[1], ast.Constant)]
+    statuses = {c.args[1].value for c in calls}
+    # R-0915-85 — `ADVISORY` was a STATUS that meant "this row cannot move the
+    # verdict". It is a DISCLOSURE beside a `PASS` now, and the property #2080
+    # pins is unchanged: `run_verdict` gives a disclosure no arithmetic at all,
+    # so the row still cannot move anything. Asserted in BOTH halves, because
+    # a PASS without the disclosure would be a row that CAN move the verdict.
+    assert statuses == {"PASS"}, (
         f"step_synth_log_audit returns {sorted(statuses)}; vibe-ic#2080 wires a "
-        f"recorded-unwired gate ADVISORY unless its docstring declares it "
+        f"recorded-unwired gate as non-moving unless its docstring declares it "
         f"BLOCKING, and this gate's does not.")
+    for c in calls:
+        kw = {k.arg: k.value for k in c.keywords}
+        disc = ast.unparse(kw["disclosures"]) if "disclosures" in kw else ""
+        assert "ADVISORY" in disc, (
+            f"a StepResult in step_synth_log_audit is a bare PASS: without "
+            f"Disclosure.ADVISORY beside it, the row CAN move the run verdict, "
+            f"which is exactly what #2080 forbids")
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +237,8 @@ def test_this_file_measures_the_same_log_and_the_same_skip_set() -> None:
     """
     assert _SYNTH_LOG_REL == DOSR._SYNTH_LOG_REL
     assert set(_NOT_ATTEMPTED) == set(DOSR._SYNTH_NOT_ATTEMPTED)
+    # The pre-flight refusal is still in the set — it is NOT_MEASURED now, and
+    # a refused synth step is exactly "no tool ran".
     assert _spf.REFUSAL_STATUS in DOSR._SYNTH_NOT_ATTEMPTED
 
 

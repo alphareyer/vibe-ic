@@ -213,7 +213,7 @@ def test_the_step_record_names_the_gates_that_gated(tmp_path, monkeypatch):
 def test_the_step_record_carries_a_waived_verdict_too(tmp_path, monkeypatch):
     out = _long_transcript("Overall: PASS_WITH_WAIVERS  (strict=True)")
     r = _drive(tmp_path, monkeypatch, out, 0)
-    assert r.status == "WAIVED", r.status
+    assert r.status == "PASS_WITH_WAIVERS", r.status
     assert "Overall: PASS_WITH_WAIVERS" in r.detail
 
 

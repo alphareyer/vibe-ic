@@ -113,13 +113,13 @@ import clock_contract as _clock_contract
 # vibe-ic#634 — the ONE classification of verdict words, shared with
 # `flow_step_execution_coverage_check` so a tier added here cannot be
 # unknown to the guard that adjudicates dependency ordering.
-import _flow_verdict_tiers as _T
+import verdict as _T
 # The classified blocker list emitted BESIDE the tally. Import-only-downward:
-# this module reads `_flow_verdict_tiers` and nothing from here, so the verdict
+# this module reads `verdict` and nothing from here, so the verdict
 # path above cannot acquire a dependency on a classification.
 import _blocker_classification as _bc
 # The GUARD on the list `_bc` builds. Same downward direction: it reads
-# `_blocker_classification` and `_flow_verdict_tiers` and nothing from here, so
+# `_blocker_classification` and `verdict` and nothing from here, so
 # importing it cannot give the verdict path a dependency on a classification.
 import blocker_classification_check as _bcc
 import fpga_board_capability as _fpga_cap
@@ -274,7 +274,7 @@ def _step_failure_is_informational_only(result: "StepResult") -> bool:
     so a mis-parse here is a VERDICT change. Non-P0 steps take the original
     path unchanged (they publish no records; their reasons are a different
     grammar written by `_evaluate_gate`)."""
-    if result.status != "FAIL" or not result.reasons:
+    if result.status != _T.Verdict.FAIL.value or not result.reasons:
         return False
     saw_informational = False
     if getattr(result, "id", None) == "P0":
@@ -1643,7 +1643,15 @@ class StepResult:
     id: Any  # int for main-track steps (1-40), str for analog ("A1"-"A9") / mixed-signal ("M1"-"M4") / preflight ("P0")
     name: str
     stage: str
-    status: str  # PASS, FAIL, MISSING, WAIVED, DEFERRED-BY-UPSTREAM, SKIPPED-CONDITION
+    #: One of the FIVE in `programs/verdict.py`. R-0915-85 deleted the rest;
+    #: every distinction they carried is in the fields below.
+    status: str
+    #: REQUIRED on NOT_MEASURED. A `verdict.ReasonClass` value.
+    reason_class: str = ""
+    #: REQUIRED on NOT_APPLICABLE: the INPUT line that declares it so.
+    declared_by: str = ""
+    #: Informational, arithmetic-free: `verdict.Disclosure` values.
+    disclosures: List[str] = field(default_factory=list)
     reasons: List[str] = field(default_factory=list)
     evidence: List[str] = field(default_factory=list)
     gate_output: str = ""
@@ -3587,9 +3595,10 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
             # cannot take it.
             return _ProgramCheckOutcome(
                 True,
-                (f"INCOMPLETE: the gate reached a stated wait, not a verdict "
-                 f"(rc {_AWAITING_EXIT_CODE}) — a second pass it cannot "
-                 f"perform itself has not happened: {cmd_str}\n{snippet}"),
+                (f"INCOMPLETE: {_AWAITING_STDOUT_TOKEN} — the gate reached a "
+                 f"stated wait, not a verdict (rc {_AWAITING_EXIT_CODE}): a "
+                 f"second pass it cannot perform itself, because only an AGENT "
+                 f"can, has not happened: {cmd_str}\n{snippet}"),
                 r.returncode)
         if (r.returncode == _WAIVER_EXIT_CODE
                 and _stdout_signals_waiver(r.stdout)
@@ -3728,6 +3737,14 @@ _STRUCTURE_ONLY_STDOUT_SENTINEL = "STRUCTURE_ONLY:"
 # apart from "nothing applied".
 _SUBSTANTIVE_HINT_PREFIX = "__SUBSTANTIVE_HINT__: "
 _INCOMPLETE_HINT_PREFIX = "__INCOMPLETE_HINT__: "
+#: R-0915-85 / R-0915-88 — the AWAITING half of the INCOMPLETE tier, carried as
+#: its OWN typed hint so `check_step` can give the step
+#: `NOT_MEASURED(awaiting_agent_pass)` instead of the undifferentiated
+#: `partial_population`. A TOKEN, never a sentence: this file's own rule is
+#: "TYPED EVIDENCE, NEVER PROSE", and sniffing the rc-4 message for the word
+#: "wait" is exactly the prose recogniser that rule exists to forbid.
+_AWAITING_HINT_PREFIX = "__AWAITING_HINT__: "
+_AWAITING_STDOUT_TOKEN = "AWAITING_AGENT_PASS"
 
 #: What a gate PRINTS to raise each. Line-start, leading whitespace allowed —
 #: the same shape as the `VACUOUS_PASS:` disclosure that already exists.
@@ -3741,7 +3758,21 @@ _INCOMPLETE_STDOUT_TOKEN = "INCOMPLETE"
 # verdict-self-report doctrine + the VACUOUS_HINT promotion pattern.
 _SKIP_HINT_PREFIX = "__SKIP_HINT__: "
 # Verdict tokens (normalised upper, `_`→`-`) that count as an honest skip.
-_SELF_SKIP_VERDICTS = frozenset({"SKIP", "SKIPPED", "SKIPPED-CONDITION"})
+_SELF_SKIP_VERDICTS = frozenset({
+    "SKIP", "SKIPPED", "SKIPPED-CONDITION",
+    # R-0915-85 — a GATE PROGRAM that has itself been migrated writes the step
+    # vocabulary's words. A gate report saying NOT_APPLICABLE (the input
+    # declares this inapplicable) or NOT_MEASURED (nobody measured it) is the
+    # same honest self-disclosure #675 added this set for; not reading them
+    # would make a migrated gate's disclosure invisible, which is the failure
+    # this set exists to prevent.
+    # SPELT WITH HYPHENS because that is the shape the readers hand it: both
+    # call sites normalise with `.upper().replace("_", "-")` before testing
+    # membership, so an underscore member is UNREACHABLE. Measured: written
+    # with underscores, a migrated gate's `NOT_APPLICABLE` marker matched
+    # nothing and #675's own fixture went back to a hard FAIL.
+    "NOT-APPLICABLE", "NOT-MEASURED",
+})
 
 # #651 — PASS_WITH_WAIVERS hint. A `program_exit_zero` gate program (notably
 # `tapeout_signoff_check` = signoff_audit --mode tapeout) signals "I PASSED
@@ -4411,7 +4442,17 @@ def _report_verdict(report: Any) -> Optional[str]:
     """Return a report's top-level verdict without retiering it."""
     if not isinstance(report, dict):
         return None
-    for key in ("verdict", "status"):
+    for key in ("verdict", "status",
+                # R-0915-85 — `overall` is THIS PROGRAM'S OWN run word, and
+                # this program is a sub-gate of steps 2, 7, 15 and 37
+                # (`flow_compliance_check --stage-id <stage>`). A nested
+                # report's word was therefore invisible here and the caller
+                # graded it by exit code: MEASURED on subservient r26, the
+                # nested stage_phase1 audit returned NOT_MEASURED (its D1 row
+                # is) and step 2 was published FAIL — this audit converting its
+                # own "nobody measured this" into "the design failed" one
+                # level up, which is the r26 defect in a second spelling.
+                "overall"):
         v = report.get(key)
         if isinstance(v, str) and v.strip():
             return v.strip().upper()
@@ -5540,9 +5581,9 @@ def _os_constraints_prereq_satisfied(result: Any,
     PASS_WITH_OPEN_SOURCE_CONSTRAINTS carrying these rows, never bare PASS.
     """
     status = getattr(result, "status", None)
-    if status == "PASS":
+    if status == _T.Verdict.PASS.value:
         return True
-    if status != "WAIVED":
+    if status != _T.Verdict.PASS_WITH_WAIVERS.value:
         return False
     w = waivers.get(getattr(result, "id", None)) or {}
     return bool(w.get("ticket")) and bool(w.get("approver")) \
@@ -9533,7 +9574,7 @@ def _p0_umbrella_status(executed: Optional[bool],
     this repo already built for exactly this sentence: "the input WAS applicable
     and was NOT examined... a vacuous step is one nobody needs to come back to;
     this is one somebody does." It is a registered producer status
-    (`_flow_verdict_tiers.PRODUCER_STATUSES`), a DONE-CLAIM that is not a full
+    (`verdict.PRODUCER_STATUSES`), a DONE-CLAIM that is not a full
     pass (`is_qualified_done`), and it is in none of `failing` / `missing` /
     `setup_required_skipped` / `oss_blocked_skipped` — so it cannot make a run
     non-green on its own, and it leaves the executed-PASS numerator, which is
@@ -9568,10 +9609,19 @@ def _p0_umbrella_status(executed: Optional[bool],
     gates answering said nothing about the design, so calling it a failure is
     the opposite false claim.
     """
+    # R-0915-85 — this function returns a PAIR, `(status, reason_class)`. It
+    # used to return four words that were really one word plus a reason:
+    # SKIPPED-CONDITION / FAIL / INCOMPLETE / NOT-MEASURED / PASS, where the
+    # middle two differed ONLY in whether the population was partially or
+    # wholly unanswered — a reason, not an outcome. Both are now
+    # NOT_MEASURED, and the thing a reader needed all along is in the second
+    # element.
     if executed is None:
-        return "SKIPPED-CONDITION"
+        # The INPUT declares the structural track inapplicable. The caller
+        # carries the declaration into `declared_by`.
+        return _T.Verdict.NOT_APPLICABLE.value, ""
     if not executed:
-        return "FAIL"
+        return _T.Verdict.FAIL.value, ""
     # RB2-03 (#2063) — ZERO ANSWERED IS NOT "PARTIALLY ANSWERED". `INCOMPLETE`
     # says "the input WAS applicable and was NOT examined", which is the right
     # sentence about a population some of which answered. When NOT ONE
@@ -9580,7 +9630,7 @@ def _p0_umbrella_status(executed: Optional[bool],
     # said so in its own words ("NONE of the N registered structural sub-gate(s)
     # returned a verdict") while the VERDICT — the field a consumer reads —
     # said the same word as a 245-of-246 run. `NOT-MEASURED` is adjudicated
-    # identically to `INCOMPLETE` (`_flow_verdict_tiers`: a qualified
+    # identically to `INCOMPLETE` (`verdict`: a qualified
     # done-claim, in neither EXCUSED nor NON_GREEN), so no run's greenness
     # moves; the word now distinguishes the two.
     #
@@ -9589,7 +9639,8 @@ def _p0_umbrella_status(executed: Optional[bool],
     # function is the ONE OWNER of the verdict for every caller, including the
     # next one.
     if not records:
-        return "NOT-MEASURED"
+        return (_T.Verdict.NOT_MEASURED.value,
+                _T.ReasonClass.NO_POPULATION.value)
     nonverdict_classes = [
         str(r.get("reason_class") or "") for r in records
         if r.get("verdict") in _P0_NONDECISIVE_VERDICTS
@@ -9603,9 +9654,30 @@ def _p0_umbrella_status(executed: Optional[bool],
         # as before.
         if not any(r.get("verdict") not in _P0_NONDECISIVE_VERDICTS
                    for r in records):
-            return "NOT-MEASURED"
-        return "INCOMPLETE"
-    return "PASS"
+            return (_T.Verdict.NOT_MEASURED.value,
+                    _T.ReasonClass.NO_POPULATION.value)
+        return (_T.Verdict.NOT_MEASURED.value,
+                _T.ReasonClass.PARTIAL_POPULATION.value)
+    return _T.Verdict.PASS.value, ""
+
+
+def p0_umbrella_verdict(executed: Optional[bool],
+                        records: List[Dict[str, Any]]) -> str:
+    """Just the WORD of `_p0_umbrella_status`'s pair.
+
+    R-0915-85 made that function return `(verdict, reason_class)` because two
+    of its four old words — `INCOMPLETE` and `NOT-MEASURED` — differed only in
+    whether the population was partly or wholly unanswered, which is a reason,
+    not an outcome. Every consumer that only wants the word says so here rather
+    than indexing `[0]` at ten sites.
+    """
+    return _p0_umbrella_status(executed, records)[0]
+
+
+def p0_umbrella_reason(executed: Optional[bool],
+                       records: List[Dict[str, Any]]) -> str:
+    """The other half: which reason a NOT_MEASURED umbrella carries."""
+    return _p0_umbrella_status(executed, records)[1]
 
 
 def _p0_passed_count(records: List[Dict[str, Any]]) -> int:
@@ -10415,6 +10487,14 @@ _ADVISORY_SKIP_VERDICTS = frozenset({
 })
 _ADVISORY_INCOMPLETE_VERDICTS = frozenset({
     "INCOMPLETE", "NOT CHECKED", "NOT-CHECKED",
+    # R-0915-85 — a GATE that speaks the STEP vocabulary. This audit runs
+    # ITSELF as a sub-gate of steps 2, 7, 15 and 37 (`--stage-id <stage>`), so
+    # a nested run's own `overall` arrives here as a gate verdict. MEASURED on
+    # subservient r26: the nested stage_phase1 audit came back NOT_MEASURED
+    # (its D1 row is), this set did not know the word, the classifier fell to
+    # `"PASS" if ok else "FAIL"`, and step 2 was published FAIL — a run turning
+    # its own "nobody measured this" into "the design failed" one level up.
+    "NOT-MEASURED",
 })
 _ADVISORY_REFUSAL_VERDICTS = frozenset({
     "FAIL", "FAILED", "ERROR", "REFUSED", "BLOCKED", "INVALID",
@@ -10475,6 +10555,30 @@ def _refusal_examined_nothing(report: Any) -> bool:
         # No population is a different fact (nothing to census at all) and is
         # deliberately not claimed here.
         return False
+    # R-0915-85 — "WAS ANYTHING DECIDED" IS NO LONGER READABLE FROM THE FAIL
+    # COUNT. `MISSING` was a bucket of its own and correctly did not count as a
+    # decision; it is `FAIL(missing_artefact)` now, so on any tree with an
+    # absent declared output the FAIL count is non-zero and this predicate
+    # answered False for a nested run that had decided NOTHING. Measured on
+    # `test_w4_absent_condition_is_not_a_pass`'s own fixture: the nested
+    # stage_phase1 report went from DISCLOSED_INCOMPLETE to BLOCKING, and an
+    # ADVISORY clause started failing its step — which is exactly the
+    # "distinction without a difference" between the two slot names that the
+    # block below exists to prevent.
+    #
+    # The fact moved to the reason, so the reason is what is read; the count is
+    # kept as the fallback for a report that publishes no rows, and that is the
+    # pre-reform behaviour.
+    _rows = report.get("steps")
+    if isinstance(_rows, list) and _rows:
+        _decided = sum(
+            1 for r in _rows
+            if isinstance(r, dict)
+            and (str(r.get("status")) == _T.Verdict.PASS.value
+                 or (str(r.get("status")) == _T.Verdict.FAIL.value
+                     and str(r.get("reason_class") or "")
+                     != _T.ReasonClass.MISSING_ARTEFACT.value)))
+        return _decided == 0
     return numeric.get("PASS", 0) == 0 and numeric.get("FAIL", 0) == 0
 
 
@@ -10540,6 +10644,12 @@ def _advisory_execution_record(cmd: str, ledger_start: int,
         verdict = execution.verdict
     elif row.get("verdict"):
         verdict = row["verdict"]
+    elif row.get("overall"):
+        # A NESTED flow-compliance report. Its run word lives under `overall`,
+        # not `verdict`, and reading it is what stops this audit grading its
+        # own nested answer by exit code alone (see `_ADVISORY_INCOMPLETE_
+        # VERDICTS` above for the r26 measurement).
+        verdict = row["overall"]
     elif out.startswith(_VACUOUS_HINT_PREFIX):
         verdict = "VACUOUS_PASS"
     elif out.startswith(_WAIVER_HINT_PREFIX):
@@ -10925,6 +11035,8 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
             reasons.append(f"{_SUBSTANTIVE_HINT_PREFIX}{cmd}")
         if passed and _stdout_signals_token(out, _INCOMPLETE_STDOUT_TOKEN):
             reasons.append(f"{_INCOMPLETE_HINT_PREFIX}{cmd}")
+            if _stdout_signals_token(out, _AWAITING_STDOUT_TOKEN):
+                reasons.append(f"{_AWAITING_HINT_PREFIX}{cmd}")
         return passed, reasons
 
     # `advisory_program_exit_zero` (#306/#1980) — RUNS the program and records
@@ -12320,7 +12432,7 @@ def _resolve_dependency_condition_results(
             continue
         # Only the condition-generated skip is eligible. A run-mode or
         # class-level skip has a different owner and must not be rewritten.
-        if result.status != "SKIPPED-CONDITION" or not any(
+        if result.status != _T.Verdict.NOT_APPLICABLE.value or not any(
                 str(reason).startswith("condition not met:")
                 for reason in result.reasons):
             continue
@@ -12355,7 +12467,8 @@ def _resolve_dependency_condition_results(
                                else "NOT_EVALUATED")
             blocked.append((producer_label, pattern, upstream_status))
 
-        result.status = "MISSING"
+        result.status = _T.Verdict.FAIL.value
+        result.reason_class = _T.ReasonClass.MISSING_ARTEFACT.value
         if blocked and blocked[0][0] != "UNDECLARED":
             result.cascade_note = f"blocked-by-upstream({blocked[0][0]})"
         if blocked:
@@ -12813,7 +12926,7 @@ _SELF_FAIL_VERDICTS = frozenset({"FAIL", "FAILED", "FAILURE"})
 
 def _evidence_integrity_scan(project: Path,
                              result: "StepResult") -> "StepResult":
-    if result.status != "PASS" or not result.evidence:
+    if result.status != _T.Verdict.PASS.value or not result.evidence:
         return result
     stub_hits: List[str] = []
     broken: List[str] = []
@@ -12879,7 +12992,15 @@ def _evidence_integrity_scan(project: Path,
     # reasons while the status stayed the same. Nothing about the pre-existing
     # EVIDENCE_MISSING branch changes when `self_failed` is empty.
     if self_failed or broken:
-        result.status = "FAIL"
+        result.status = _T.Verdict.FAIL.value
+        # R-0915-85 — A GATE DEFECT IS A BARE `FAIL`. The row's DEFAULT is
+        # `FAIL(missing_artefact)` (nothing on disk yet), so a clause that
+        # resolves a real gate failure must CLEAR the reason or it inherits a
+        # sentence about an absent artefact. MEASURED: step 9 read
+        # `FAIL(missing_artefact)` on a fixture whose synthesis gate had
+        # actually failed, which made it invisible to the cascade ROOT
+        # predicate and step 14 lost its `blocked-by-upstream(9)` note.
+        result.reason_class = ""
         if self_failed:
             result.reasons.append(
                 "VERDICT_SELF_REPORTS_FAIL (#433c): declared output(s) carry a "
@@ -12892,14 +13013,14 @@ def _evidence_integrity_scan(project: Path,
                 "evidence that does not exist or is empty — a PASS nothing "
                 "substantiates is not a PASS: " + "; ".join(broken[:4]))
     elif stub_hits:
-        result.status = "WAIVED"
+        result.status = _T.Verdict.PASS_WITH_WAIVERS.value
         result.reasons.append(
             "stub-backed (#434, review_required): evidence tagged "
             "deterministic_stub/low_confidence is DEFERRED work, not "
             "executed verification — excluded from strict PASS: "
             + "; ".join(stub_hits[:4]))
     elif self_skipped:
-        result.status = "SKIPPED-CONDITION"
+        result.status = _T.Verdict.NOT_APPLICABLE.value
         result.reasons.append(
             "verdict artifact self-reports SKIPPED-CONDITION (#433c): "
             + "; ".join(self_skipped[:3]))
@@ -12919,10 +13040,18 @@ def _apply_capability_gap(result: "StepResult", sid) -> "StepResult":
     exit of check_step (the early required_outputs return included) so the
     conversion is never silently skipped; evidence-backed verdicts are
     untouched."""
-    if (result.status == "MISSING" and isinstance(sid, int)
+    # R-0915-85 — the would-be-MISSING verdict is now
+    # FAIL(missing_artefact); the conversion target is NOT_APPLICABLE, because
+    # a REGISTERED platform capability gap is a declaration about this
+    # platform, and `declared_by` names the flag.
+    if (result.status == _T.Verdict.FAIL.value
+            and result.reason_class == _T.ReasonClass.MISSING_ARTEFACT.value
+            and isinstance(sid, int)
             and sid in _PLATFORM_CAPABILITY_GAPS):
         flag = _PLATFORM_CAPABILITY_GAPS[sid]
-        result.status = "SKIPPED-CONDITION"
+        result.status = _T.Verdict.NOT_APPLICABLE.value
+        result.reason_class = ""
+        result.declared_by = f"platform capability gap flag [{flag}]"
         # v1.3.94 — a flag with an ACCURATE rationale override (a step the
         # runner DOES implement but cannot complete for a data/model gap) uses
         # its own text; the rest use the generic "not implemented yet".
@@ -13656,7 +13785,12 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         id=sid,
         name=step.get("name", ""),
         stage=step.get("stage", ""),
-        status="MISSING",
+        # The DEFAULT a step starts at: nothing is on disk for it yet.
+        # R-0915-85 — `MISSING` is `FAIL(missing_artefact)`: a declared
+        # output that does not exist is a defect of the run, not an absence
+        # of measurement, and it is the one non-PASS that CASCADES.
+        status=_T.Verdict.FAIL.value,
+        reason_class=_T.ReasonClass.MISSING_ARTEFACT.value,
     )
     result.program_output_records = _collect_program_output_records(
         project, step)
@@ -13666,7 +13800,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # `stage: stage_analog`); tightening only — a step that merely SPELLS like
     # an analog one keeps gating. See `_step_owned_by_analog_track`.
     if skip_analog and _step_owned_by_analog_track(step):
-        result.status = "SKIPPED-CONDITION"
+        result.status = _T.Verdict.NOT_APPLICABLE.value
         result.reasons.append("analog track skipped via --skip-analog")
         return result
 
@@ -13682,7 +13816,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # table (_FPGA_BOARD_STEP_IDS = {6, 39}), not the stale literal (6, 37) that
     # a Wave 90 renumber broke (37 became GDSII; FPGA-final moved to 39).
     if skip_hardware and isinstance(sid, int) and sid in _FPGA_BOARD_STEP_IDS:
-        result.status = "WAIVED"
+        result.status = _T.Verdict.PASS_WITH_WAIVERS.value
         result.reasons.append(
             "FPGA-board step waived via --skip-hardware: no physical FPGA "
             "attached for a headless doc→GDS run (review_required at "
@@ -13698,7 +13832,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # needs a lab bench — disclosed nothing at all. Same run mode, same absent
     # hardware, two different stories. This states A9's, using the same tier.
     if skip_hardware and str(sid) in _ANALOG_BENCH_STEP_IDS:
-        result.status = "WAIVED"
+        result.status = _T.Verdict.PASS_WITH_WAIVERS.value
         result.reasons.append(
             "analog bench-hardware step waived via --skip-hardware: no lab "
             "measurement for a headless doc→GDS run (review_required before "
@@ -13720,7 +13854,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # stages to SKIPPED-CONDITION instead of MISSING/FAIL.
         is_na, na_reason = _digital_backend_is_na(project)
         if is_na:
-            result.status = "SKIPPED-CONDITION"
+            result.status = _T.Verdict.NOT_APPLICABLE.value
             result.reasons.append(
                 f"N/A for analog IC (no digital datapath): stage "
                 f"{step_stage!r} is the digital RTL→GDS backend — {na_reason}.")
@@ -13737,7 +13871,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         #     SKIPPED-SETUP-REQUIRED unless an explicit waiver exists.
         kind = step.get("condition_kind", "design_dependent")
         if kind == "setup_required" and sid not in waivers:
-            result.status = "SKIPPED-SETUP-REQUIRED"
+            result.status = _T.Verdict.NOT_MEASURED.value
+            result.reason_class = _T.ReasonClass.INPUT_ABSENT.value
             result.reasons.append(
                 f"condition not met: {condition} — step is marked "
                 f"`setup_required` but no waiver exists. Either author "
@@ -13745,7 +13880,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 f"<project>/waivers.json with explicit justification."
             )
         else:
-            result.status = "SKIPPED-CONDITION"
+            result.status = _T.Verdict.NOT_APPLICABLE.value
             # A DESIGN-DECLARED skip CITES THE DECLARATION. Without this the
             # reason reads `condition not met: {...}` and a reviewer cannot
             # tell a design that declared the capability absent from a trigger
@@ -13812,7 +13947,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         else:
             is_env_unavailable = bool(waivers[sid].get("_env_unavailable"))
             if not is_env_unavailable:
-                result.status = "WAIVED"
+                result.status = _T.Verdict.PASS_WITH_WAIVERS.value
                 result.reasons.append(
                     f"waived: {waivers[sid].get('reason', '(no reason)')}"
                     f" (approver: {waivers[sid].get('approver', '?')})"
@@ -13933,7 +14068,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # during the audit) is tagged audit_created and refused by default below;
     # the legacy flag cannot weaken that rule.
     if outputs and missing_entries and not result.evidence:
-        result.status = "MISSING"
+        result.status = _T.Verdict.FAIL.value
+        result.reason_class = _T.ReasonClass.MISSING_ARTEFACT.value
         result.reasons.append(
             f"no required_outputs found (expected: {outputs})")
         _own_audit_targets = _gate_json_targets(step)
@@ -13949,7 +14085,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # v1.6.269 (#126) — ENV_UNAVAILABLE fallback at early MISSING.
         if sid in waivers and bool(waivers[sid].get("_env_unavailable")):
             natural_reason = result.reasons[-1] if result.reasons else "MISSING"
-            result.status = "WAIVED"
+            result.status = _T.Verdict.PASS_WITH_WAIVERS.value
             result.reasons = [
                 f"ENV_UNAVAILABLE waiver applied (required artefact "
                 f"absent because tool not on host): "
@@ -13991,7 +14127,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             skip_hint = _declared_sibling_self_skip_for_missing(
                 project, missing_pats)
             if skip_hint:
-                result.status = "SKIPPED-CONDITION"
+                result.status = _T.Verdict.NOT_APPLICABLE.value
                 result.self_skip_disclosed = True   # DFT_FCC / 11-d7
                 result.reasons.append(
                     "SKIPPED-CONDITION: canonical output absent but a co-located "
@@ -14203,6 +14339,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                              if r.startswith(_SUBSTANTIVE_HINT_PREFIX)]
         incomplete_hints = [r for r in reasons
                             if r.startswith(_INCOMPLETE_HINT_PREFIX)]
+        awaiting_hints = [r for r in reasons
+                          if r.startswith(_AWAITING_HINT_PREFIX)]
         # vibe-ic#901 - the DENOMINATOR: clauses that dispatched a gate program.
         # Predicate-only clauses (`files_exist`, `json_field_true`) are
         # deliberately NOT counted: they cannot populate the numerator, so
@@ -14234,6 +14372,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                             and not r.startswith(_ADVISORY_RECORD_HINT_PREFIX)
                             and not r.startswith(_SUBSTANTIVE_HINT_PREFIX)
                             and not r.startswith(_INCOMPLETE_HINT_PREFIX)
+                            and not r.startswith(_AWAITING_HINT_PREFIX)
                             and not r.startswith(_NOT_APPLICABLE_HINT_PREFIX)
                             and not r.startswith(
                                 _EXECUTED_DECLARED_NA_HINT_PREFIX)]
@@ -14242,7 +14381,20 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # benign non-pass tier beside it.  In particular, a declared N/A
             # sibling or a waiver must not launder the incomplete clause into
             # SKIPPED-CONDITION / WAIVED.
-            result.status = "INCOMPLETE"
+            result.status = _T.Verdict.NOT_MEASURED.value
+            # R-0915-88 — WHICH of the two states this is. `AWAITING` says the
+            # flow is waiting on an AGENT pass, not that the gate examined part
+            # of its subject, and it is the root of subservient r26's and SPM's
+            # NOT_MEASURED. Naming it sends the reader to the hand-off instead
+            # of to the gate.
+            result.reason_class = (
+                _T.ReasonClass.AWAITING_AGENT_PASS.value if awaiting_hints
+                else _T.ReasonClass.PARTIAL_POPULATION.value)
+            for h in awaiting_hints:
+                result.reasons.append(
+                    f"AWAITING an agent pass: the gate completed pass one of a "
+                    f"two-pass protocol and pass two is not a program's to "
+                    f"make: {h[len(_AWAITING_HINT_PREFIX):]}")
             for h in incomplete_hints:
                 result.reasons.append(
                     f"INCOMPLETE: the gate reports its input was applicable "
@@ -14282,7 +14434,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # WAIVED -- both sit outside the executed-PASS numerator and inside
             # `total_required`, so no numerator moves and nothing turns green
             # that was not already passing.
-            result.status = "WAIVED"
+            result.status = _T.Verdict.PASS_WITH_WAIVERS.value
             for h in waiver_hints:
                 result.reasons.append(
                     f"WAIVED-DEFERRED: gate program signalled PASS_WITH_WAIVERS "
@@ -14300,7 +14452,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # surfaces. (#608 originally required `not vacuous_hints`; that left
             # the formal step FALLING THROUGH to VACUOUS_PASS, masking the
             # disclosed skip — relaxed here.)
-            result.status = "SKIPPED-CONDITION"
+            result.status = _T.Verdict.NOT_APPLICABLE.value
             result.self_skip_disclosed = True   # DFT_FCC / 11-d7
             for h in skip_hints:
                 result.reasons.append(
@@ -14316,7 +14468,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # word deliberately, so the gate is not what is wrong; the roll-up
             # simply never read the second half. A substantive verification is a
             # PASS.
-            result.status = "PASS"
+            result.status = _T.Verdict.PASS.value
             for h in substantive_hints:
                 result.reasons.append(
                     f"substantive: the audited artefact was absent, and the "
@@ -14368,7 +14520,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # now, instead of being approximated by pinning a label.
             unanimous = len(all_vacuous_cmds) >= len(ran_hints)
             # SPELLED AS TWO STATEMENTS, NOT A TERNARY, ON PURPOSE.
-            # `test_issue634_flow_verdict_tiers::test_the_producers_vocabulary_
+            # `test_issue634verdict::test_the_producers_vocabulary_
             # is_pinned` discovers this file's vocabulary by scanning its SOURCE
             # for status assignments to a quoted upper-case literal, which is
             # the anti-drift device that makes
@@ -14378,9 +14530,12 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # NEXT tier added the same way would never be noticed at all. Two
             # plain assignments keep both words visible to the scanner.
             if unanimous:
-                result.status = "VACUOUS_PASS"
+                result.status = _T.Verdict.NOT_MEASURED.value
+                result.reason_class = _T.ReasonClass.NO_POPULATION.value
+                result.disclosures = [_T.Disclosure.VACUITY.value]
             else:
-                result.status = "PARTIALLY-VACUOUS"
+                result.status = _T.Verdict.PASS.value
+                result.disclosures = [_T.Disclosure.PARTIAL_VACUITY.value]
             for h in vacuous_hints:
                 # Strip the internal prefix; surface a human-friendly
                 # diagnostic so reviewers see *why* it was vacuous.
@@ -14406,7 +14561,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         elif passed and structure_only_hints and not non_hint_reasons:
             # The step ran and produced its declared artefact — from a library
             # default. PASS would say the artefact is design-bound; it is not.
-            result.status = "STRUCTURE-ONLY"
+            result.status = _T.Verdict.PASS_WITH_WAIVERS.value
+            result.disclosures = [_T.Disclosure.STRUCTURE_ONLY.value]
         elif (passed and json_vacuous_hints and not non_hint_reasons
                 and not skip_hints
                 and len(all_vacuous_cmds) >= len(ran_hints)):
@@ -14424,7 +14580,9 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # RAN marker; the comparison may only ever WITHHOLD this tier from a
             # step some clause substantively examined, never grant it to one no
             # clause did.
-            result.status = "VACUOUS_PASS"
+            result.status = _T.Verdict.NOT_MEASURED.value
+            result.reason_class = _T.ReasonClass.NO_POPULATION.value
+            result.disclosures = [_T.Disclosure.VACUITY.value]
             result.json_vacuity_promoted = True
             for c in sorted(all_vacuous_cmds):
                 result.reasons.append(
@@ -14432,7 +14590,10 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                     f"examined nothing, and it is {len(all_vacuous_cmds)} of "
                     f"{len(ran_hints)} gate clause(s) that ran here: {c}")
         else:
-            result.status = "PASS" if passed else "FAIL"
+            result.status = (_T.Verdict.PASS.value if passed
+                             else _T.Verdict.FAIL.value)
+            # A gate that RAN and did not pass is a defect, not an absence.
+            result.reason_class = ""
             result.reasons.extend(non_hint_reasons)
         # vibe-ic#901 - the tier is a per-STEP word and a partially vacuous step
         # has no such word: some of its clauses examined the design and some
@@ -14441,7 +14602,10 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # emptiness through the structured channel are named HERE - on the step
         # line, in `reasons`, in a typed field and in the tally - rather than
         # being dropped for failing to be unanimous.
-        if result.status != "VACUOUS_PASS" and json_vacuous_hints:
+        # R-0915-85 — the vacuity tier is NOT_MEASURED(no_population)
+        # carrying Disclosure.VACUITY; read the disclosure, not a word.
+        if (_T.Disclosure.VACUITY.value not in (result.disclosures or ())
+                and json_vacuous_hints):
             result.partial_vacuity_disclosed = True
             for h in json_vacuous_hints:
                 result.reasons.append(
@@ -14487,7 +14651,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         # touches `result.status` on no path, so it cannot move a step into or
         # out of any bucket or numerator. The WAIVED branch already printed its
         # own line, so it is excluded here rather than printing twice.
-        if result.status != "WAIVED" and waiver_hints:
+        if (result.status != _T.Verdict.PASS_WITH_WAIVERS.value
+                and waiver_hints):
             for h in waiver_hints:
                 result.reasons.append(
                     f"WAIVED-DEFERRED (disclosed, tier NOT granted — the "
@@ -14528,7 +14693,10 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 f"enforcement={_clause_enforcement_label(rec)}")
     else:
         # No gate — just presence of outputs counts
-        result.status = "PASS" if result.evidence else "MISSING"
+        result.status = (_T.Verdict.PASS.value if result.evidence
+                         else _T.Verdict.FAIL.value)
+        if result.status == _T.Verdict.FAIL.value:
+            result.reason_class = _T.ReasonClass.MISSING_ARTEFACT.value
 
     # ── GATE-PRODUCED declared outputs: probed after the gate, and SAID ────
     # `missing_entries` above is computed BEFORE the gate runs, which is right
@@ -14717,7 +14885,7 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             _verdict = _rem.excusable(_man, sid, _my_outputs,
                                       _consumed, project)
             if _verdict.get("excusable"):
-                result.status = "OUT-OF-SCOPE-BY-ENTRY"
+                result.status = _T.Verdict.NOT_APPLICABLE.value
                 result.reasons.append(
                     f"out of scope by declared entry: {_verdict['reason']}")
                 return result
@@ -14747,10 +14915,36 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # mentioned the one that is missing. Neither block changes a status here
     # that the other has not already set to MISSING; what was lost was only
     # the second disclosure.
-    _natural_done_claim = _T.is_done_claim(result.status)
+    # R-0915-85 — THE PREDICATE IS "DOES THIS STEP OWE THE ARTEFACT", not "did
+    # it claim to be done". Those coincided under the old vocabulary because
+    # `is_done_claim` was derived by subtraction and INCLUDED the tiers that had
+    # measured nothing — `INCOMPLETE`, `NOT-MEASURED`, `VACUOUS-PASS`,
+    # `STRUCTURE-ONLY` were in neither negative set, so the downgrade reached
+    # them. They are `NOT_MEASURED` now and `is_done_claim` correctly answers
+    # False, which silently removed the downgrade from exactly the tier this
+    # file's own `test_d8_vacuous_pass_is_downgraded_too` exists to pin.
+    #
+    # ONLY `NOT_APPLICABLE` is exempt, and for the reason the whole word exists:
+    # the INPUT says there is nothing here, so there is no declared output this
+    # step owes. Everything else — PASS, PASS_WITH_WAIVERS, NOT_MEASURED and a
+    # FAIL the gate already found — owes what it declared, and an output that
+    # does not exist is FAIL(missing_artefact) whatever the gate said about the
+    # ones that are present.
+    # AND A STEP THAT ALREADY FAILED KEEPS ITS FAIL AND ITS REASON. The rule
+    # this file already stated — "FAIL is a real defect the gate detected …
+    # replacing any of those with MISSING would destroy information" — reads
+    # differently now that both wear the word FAIL: what the downgrade would
+    # destroy is the REASON. MEASURED on the #1980 fixture: step 9's gate
+    # really failed, the downgrade relabelled it `missing_artefact`, and the
+    # cascade root predicate (which reads that reason) then found no root, so
+    # step 14 lost its `blocked-by-upstream(9)` attribution.
+    _owes_its_declared_outputs = result.status not in (
+        _T.Verdict.NOT_APPLICABLE.value, _T.Verdict.FAIL.value)
+    _natural_done_claim = _owes_its_declared_outputs
 
     if _natural_done_claim and _audit_produced:
-        result.status = "MISSING"
+        result.status = _T.Verdict.FAIL.value
+        result.reason_class = _T.ReasonClass.MISSING_ARTEFACT.value
         result.reasons.append(
             f"AUDIT-CREATED OUTPUT REFUSED: {_audit_produced} — present, but "
             f"written by this step's own gate rather than by the run, so the "
@@ -14759,7 +14953,8 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             f"refused on every pass.")
 
     if _natural_done_claim and missing_entries:
-        result.status = "MISSING"
+        result.status = _T.Verdict.FAIL.value
+        result.reason_class = _T.ReasonClass.MISSING_ARTEFACT.value
         _by_record = [p for p in missing_entries
                       if _bind_modes.get(p) == "step_attributed"]
         result.reasons.append(
@@ -14779,7 +14974,22 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # `no_binding` preserves the established default for legacy runs and only
     # blocks under the explicit producer-migration flag.  The status is FAIL,
     # not MISSING: the file exists, but its ownership evidence does not.
-    if _T.is_done_claim(result.status) and result.output_binding:
+    # R-0915-85 — THE PREDICATE IS "DOES THIS ROW CREDIT ITS OUTPUTS", NOT
+    # "IS IT A DONE CLAIM". The two were the same question while `VACUOUS_PASS`
+    # was PASS-shaped and therefore a done-claim: a vacuous row published its
+    # `evidence` and the guard fired on it. `NOT_MEASURED` is not a done-claim,
+    # so keying on that here FAILED OPEN — measured on this guard's own
+    # fixture, a step whose declared output was discharged by a project-wide
+    # glob with nothing tying the file to it walked straight past, which is
+    # exactly the credit the guard exists to refuse.
+    #
+    # A row credits its outputs unless it FAILED (it has no credit to give) or
+    # the input declares it NOT_APPLICABLE (it was never asked to produce
+    # anything). Everything else — including a row nobody measured — publishes
+    # evidence a consumer reads.
+    _credits_its_outputs = result.status not in (
+        _T.Verdict.FAIL.value, _T.Verdict.NOT_APPLICABLE.value)
+    if _credits_its_outputs and result.output_binding:
         _unbound = [
             spec for spec in _bind_specs
             if spec.get("satisfied")
@@ -14788,7 +14998,9 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
         ]
         if _unbound:
             _codes = sorted({str(spec.get("code")) for spec in _unbound})
-            result.status = "FAIL"
+            result.status = _T.Verdict.FAIL.value
+            # A gate defect, not an absent artefact — see the note above.
+            result.reason_class = ""
             result.reasons.append(
                 f"UNATTRIBUTED OUTPUT: {len(_unbound)} of "
                 f"{result.output_binding['n_specs']} declared output(s) were "
@@ -14805,11 +15017,11 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
     # waiver entry carries ticket + review_required=true so foundry
     # tapeout review must still close it before production. The PASS
     # path is NOT touched — a real evidence + gate-PASS keeps PASS.
-    if (result.status in ("FAIL", "MISSING")
+    if (result.status == _T.Verdict.FAIL.value
             and sid in waivers
             and bool(waivers[sid].get("_env_unavailable"))):
         original_reasons = list(result.reasons)
-        result.status = "WAIVED"
+        result.status = _T.Verdict.PASS_WITH_WAIVERS.value
         result.reasons = [
             f"ENV_UNAVAILABLE waiver applied (natural verdict was "
             f"{original_reasons and 'FAIL/MISSING' or 'FAIL/MISSING'}): "
@@ -14901,7 +15113,8 @@ def _attribute_condition_owner_blocks(
 
         config_ok = bool(owner_id and declaration_name and patterns)
         declaration_ok = (len(matched) == 1 if exact_one else bool(matched))
-        if (config_ok and owner_row.status == "PASS" and declaration_ok):
+        if (config_ok and owner_row.status == _T.Verdict.PASS.value
+                and declaration_ok):
             continue
 
         if not config_ok:
@@ -14929,7 +15142,8 @@ def _attribute_condition_owner_blocks(
             f"Until the owner passes with an authoritative declaration, this "
             f"row's unmet predicate cannot be interpreted as design-derived "
             f"N/A.")
-        row.status = "MISSING"
+        row.status = _T.Verdict.FAIL.value
+        row.reason_class = _T.ReasonClass.MISSING_ARTEFACT.value
         row.cascade_note = f"blocked-by-upstream({owner_id})"
         row.reasons = [primary]
         if prior_reasons:
@@ -15149,11 +15363,13 @@ def _attribute_cascade_verdicts(
     if skip_analog:
         skipped_analog_ids = {
             r.id for r in results
-            if r.status == "SKIPPED-CONDITION" and _track_of(r.id) == "analog"
+            if r.status == _T.Verdict.NOT_APPLICABLE.value
+            and _track_of(r.id) == "analog"
         }
         if skipped_analog_ids:
             for r in results:
-                if r.status != "MISSING" or _track_of(r.id) != "mixed":
+                if (r.status != _T.Verdict.FAIL.value
+                        or _track_of(r.id) != "mixed"):
                     continue
                 # BFS over blocks_on ancestry → reaches a skipped analog step?
                 queue = list(parents_of.get(r.id, []))
@@ -15170,7 +15386,9 @@ def _attribute_cascade_verdicts(
                     queue.extend(parents_of.get(pid, []))
                 if hit is None:
                     continue
-                r.status = "SKIPPED-CONDITION"
+                r.status = _T.Verdict.NOT_APPLICABLE.value
+                r.declared_by = (f"--skip-analog, inherited through "
+                                 f"blocks_on from analog step {hit}")
                 r.cascade_note = f"skipped-by-upstream-analog({hit})"
                 r.reasons.insert(0, (
                     f"mixed-signal track skipped via --skip-analog: this "
@@ -15182,7 +15400,8 @@ def _attribute_cascade_verdicts(
                 ))
 
     # ── #502: waiver-chain propagation over blocks_on ancestry ──────
-    deferred_ids = {r.id for r in results if r.status == "WAIVED"}
+    deferred_ids = {r.id for r in results
+                    if r.status == _T.Verdict.PASS_WITH_WAIVERS.value}
     _ticket_re = re.compile(r"ticket=([^\s,\]]+)")
 
     def _ticket_for(pid: Any) -> str:
@@ -15319,7 +15538,10 @@ def _attribute_cascade_verdicts(
         return None, None
 
     for r in results:
-        if r.status != "MISSING":
+        # R-0915-85 — a step ordered behind a waived ancestor is one whose
+        # own declared output is not on disk: FAIL(missing_artefact).
+        if (r.status != _T.Verdict.FAIL.value
+                or r.reason_class != _T.ReasonClass.MISSING_ARTEFACT.value):
             continue
         own_gap = known_gap_of.get(r.id)
         if own_gap:
@@ -15373,7 +15595,11 @@ def _attribute_cascade_verdicts(
             continue
         hit = dep_hit
         ticket = _ticket_for(hit)
-        r.status = "DEFERRED-BY-UPSTREAM"
+        # R-0915-85: an upstream WAIVER is not a declaration that this step
+        # is inapplicable, and it is not a measurement either. The step was
+        # not measured because the step it waits on was deferred.
+        r.status = _T.Verdict.NOT_MEASURED.value
+        r.reason_class = _T.ReasonClass.UPSTREAM_REFUSED.value
         r.cascade_note = f"deferred-by-upstream({hit}, ticket={ticket})"
         r.reasons.insert(0, (
             f"deferred-by-upstream({hit}, ticket={ticket}): step {hit} is a "
@@ -15397,10 +15623,23 @@ def _attribute_cascade_verdicts(
             if r is None:
                 continue
             if first_fail is None:
-                if r.status == "FAIL":
+                # R-0915-85 — THE TWO ROLES ARE STILL TWO, and the reason is
+                # what keeps them apart now that one word carries both. The
+                # ROOT is a step whose own gate found a defect; the CASCADE
+                # TARGET is a step whose declared output was never produced.
+                # `MISSING` used to say the second and `FAIL` the first;
+                # collapsing both to `FAIL` without reading the reason let a
+                # missing-artefact row become the root and renamed every
+                # downstream attribution (measured: `blocked-by-upstream(23)`
+                # where the flow says `waived-ancestor-undeclared(13)`).
+                if (r.status == _T.Verdict.FAIL.value
+                        and r.reason_class
+                        != _T.ReasonClass.MISSING_ARTEFACT.value):
                     first_fail = sid
                 continue
-            if r.status == "MISSING":
+            if (r.status == _T.Verdict.FAIL.value
+                    and r.reason_class
+                    == _T.ReasonClass.MISSING_ARTEFACT.value):
                 r.cascade_note = f"blocked-by-upstream({first_fail})"
                 r.reasons.append(
                     f"blocked-by-upstream(step {first_fail}): cascade of "
@@ -15766,7 +16005,11 @@ def audit_reconciliation(audit: Dict[str, Any]) -> Dict[str, Any]:
     broken = [c for c in checks if c["holds"] is False]
     unchecked = [c for c in checks if c["holds"] is None]
     return {
-        "schema_version": 1,
+        # R-0915-85 — bumped WITH the vocabulary. A reader that meets
+        # version 1 is reading a report written in the deleted words and must
+        # refuse it, not translate it (`verdict.parse`).
+        "schema_version": 2,
+        "step_status_schema_version": _T.SCHEMA_VERSION,
         "declared": (
             "BLOCKING — a report whose own equations do not hold is written "
             "with `reconciled: false` and exits non-zero. `run_status` is "
@@ -16260,8 +16503,9 @@ def gate_population_reconciliation(
 #: here: it is a REFUSAL, the run is still red, and `verdict_causes` handles it
 #: through `verdict_refusal_reason` — a refusal names nothing on purpose,
 #: which is a different sentence from "there was nothing to name".
+#: R-0915-85 — the green run words are `verdict`'s, and there are two of them.
 GREEN_RUN_STATUSES: Tuple[str, ...] = (
-    "PASS", "PASS_WITH_WAIVERS", "PASS_WITH_OPEN_SOURCE_CONSTRAINTS")
+    _T.Verdict.PASS.value, _T.Verdict.PASS_WITH_WAIVERS.value)
 
 
 def verdict_causes(
@@ -16293,7 +16537,7 @@ def verdict_causes(
     together — a red that names nothing — was the wrong one.
 
     So this states the join. `failed_gates` is one term and the non-green STEPS
-    are another; `_flow_verdict_tiers.NON_GREEN` owns which words those are, so
+    are another; `verdict.NON_GREEN` owns which words those are, so
     a tier added later is a cause here the day it is added rather than the day
     somebody remembers to list it. The last two terms are the lists `main`
     actually sets `forced_fail` from — the structural / step-artifact failure
@@ -16363,7 +16607,7 @@ def verdict_causes(
         "ordering_gating_line_count": len(ordering_gating_lines or []),
         # THE FIFTH, and it wears an EXCUSED word. `ok` is false when
         # `oss_blocked_skipped` is non-empty, and those rows are
-        # SKIPPED-CONDITION — a status `_flow_verdict_tiers` puts in EXCUSED,
+        # SKIPPED-CONDITION — a status `verdict` puts in EXCUSED,
         # not in NON_GREEN. So a run red for this reason alone has no failed
         # gate, no non-green step and no failure line, and a cause set built
         # from the first four terms would call it uncaused. The audit already
@@ -16383,6 +16627,7 @@ def completion_audit_verdict(
     structural_fail_lines: List[str],
     step_artifact_fail_lines: List[str],
     registered_gate_count: Optional[int] = None,
+    decided_step_count: Optional[int] = None,
 ) -> Tuple[str, Optional[str]]:
     """The `verdict` this run is ENTITLED to write into the completion audit.
 
@@ -16441,18 +16686,41 @@ def completion_audit_verdict(
     Returns (verdict, refusal_reason); refusal_reason is None whenever the
     verdict is `overall` unchanged. chip-AGNOSTIC — reads counts, not designs.
     """
-    if overall != "FAIL":
+    # R-0915-85 — THE REFUSAL FIRES ON THE TWO RED WORDS, and the second one
+    # is why: a run that measured nothing now reaches `NOT_MEASURED` at the
+    # ladder above, so keying only on FAIL meant this refusal could never fire
+    # again on exactly the run it was written for. Measured: #1001's fixture
+    # went from `INSUFFICIENT_DATA` to a bare `NOT_MEASURED` with no reason.
+    if overall not in (_T.Verdict.FAIL.value, _T.Verdict.NOT_MEASURED.value):
         return overall, None
     if invoked_gate_count != 0:
         return overall, None
-    if (step_counts or {}).get("PASS", 0) or (step_counts or {}).get("FAIL", 0):
+    # "WAS ANY STEP DECIDED?" — and R-0915-85 moved where that is readable.
+    # The test used to be `PASS or FAIL`, because `MISSING` (a declared output
+    # that does not exist) was a separate word and correctly did NOT count as a
+    # decision. `MISSING` is `FAIL(missing_artefact)` now, so a word-only count
+    # says every empty project decided dozens of steps and this refusal can
+    # never fire. `decided_step_count` is computed at the call site from the
+    # rows themselves, where the reason is; the word-only fallback is kept for
+    # callers that pass none, and it is the pre-reform behaviour.
+    _decided = (decided_step_count if decided_step_count is not None
+                else ((step_counts or {}).get("PASS", 0)
+                      + (step_counts or {}).get("FAIL", 0)))
+    if _decided:
         return overall, None
     if structural_fail_lines or step_artifact_fail_lines:
         return overall, None
     denom = ("of an unresolved registered-gate population"
              if registered_gate_count is None
              else f"of {registered_gate_count} registered")
-    return "INSUFFICIENT_DATA", (
+    # THE WORD IS `NOT_MEASURED` AND THE REFUSAL IS THE REASON BESIDE IT.
+    # `INSUFFICIENT_DATA` said exactly what NOT_MEASURED says — nothing about
+    # this design was measured — and said it in a word no other producer used.
+    # What made it more than a verdict is the `verdict_refusal_reason` it
+    # returns as the second element, which is published beside the word and is
+    # what `verdict_causes` keys on to tell a refusal from a judgement. That
+    # survives unchanged; only the word it accompanies is now one of the five.
+    return _T.Verdict.NOT_MEASURED.value, (
         f"REFUSED, not FAILED: 0 gate(s) {denom} were invoked and 0 step(s) "
         f"were decided (PASS 0 / FAIL 0), with no structural and no "
         f"step-artifact failure line. Nothing about this design was measured, "
@@ -17006,7 +17274,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 id=14,
                 name="Pre-PnR Yosys auditor gate (Step 14, Wave 91)",
                 stage="stage2",
-                status="PASS" if passed else "FAIL",
+                status=(_T.Verdict.PASS.value if passed
+                        else _T.Verdict.FAIL.value),
                 reasons=reasons,
                 evidence=[],
             )
@@ -17136,6 +17405,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         structural_invoked_count = _n_verdict
         structural_not_invocable_count = _p0_not_invocable_count(
             structural_gate_records)
+        _p0_status, _p0_reason = _p0_umbrella_status(
+            s_passed, structural_gate_records)
         structural_result = StepResult(
             id="P0",
             name=(f"Structural-RTL gates (P0 umbrella, {_n_verdict} of "
@@ -17149,7 +17420,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             # same `s_passed` flag) and adds the one the two numbers above imply:
             # a clean sweep with a never-validly-invoked gate in it is
             # INCOMPLETE, not PASS.
-            status=_p0_umbrella_status(s_passed, structural_gate_records),
+            status=_p0_status,
+            reason_class=_p0_reason,
+            declared_by=("the input declares no structural-RTL track"
+                         if _p0_status == _T.Verdict.NOT_APPLICABLE.value
+                         else ""),
             reasons=reasons_combined,
             evidence=[],
             # #497 step 1 — published ALONGSIDE `reasons`, which is unchanged.
@@ -17268,7 +17543,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # waivers.json at all, so a reader could not tell "considered and
     # inapplicable" from "nobody read this file".
     advisories.extend(_WAIVER_NOT_BOUND_DISCLOSURES)
-    step20_pass = any(r.id == 20 and r.status == "PASS" for r in results)
+    step20_pass = any(r.id == 20 and r.status == _T.Verdict.PASS.value
+                      for r in results)
     has_mcorner = bool(
         list(project.glob("sta/mcorner_*.rpt"))
         or list(project.glob("reports/sta/mcorner_*.json"))
@@ -17286,24 +17562,55 @@ def main(argv: Optional[List[str]] = None) -> int:
     # executed vs. vacuously satisfied (the gate ran but found no input to
     # audit). It is NOT counted into `pass_count`; see the adjudication
     # beside `pass_count` below.
-    counts = {"PASS": 0, "FAIL": 0, "MISSING": 0, "WAIVED": 0,
-              "DEFERRED-BY-UPSTREAM": 0,
-              "SKIPPED-CONDITION": 0, "SKIPPED-SETUP-REQUIRED": 0,
-              "VACUOUS_PASS": 0,
-              # vibe-ic#901 — the step ran, some clauses examined the design
-              # and some examined nothing. Counted and rendered separately
-              # from VACUOUS-PASS for the reason INCOMPLETE is: same
-              # aggregation (a disclosure tier, never a failure, never part of
-              # `pass_count`), a different word, because "every sub-gate was
-              # vacuous" is a false sentence about such a step.
-              "PARTIALLY-VACUOUS": 0, "STRUCTURE-ONLY": 0,
-              # #599 — counted and rendered separately from VACUOUS-PASS.
-              # Same aggregation (a disclosure tier, never a failure); a
-              # different word, because a vacuous step is one nobody needs to
-              # come back to and this is one somebody does.
-              "INCOMPLETE": 0}
-    for r in results:
-        counts[r.status] = counts.get(r.status, 0) + 1
+    # R-0915-85 — the tally is over the FIVE, and the disclosure tiers that
+    # used to be buckets of their own (VACUOUS_PASS, PARTIALLY-VACUOUS,
+    # STRUCTURE-ONLY) are counted separately BECAUSE THEY ARE NOT OUTCOMES: a
+    # bucket a step can be in twice is not a partition, and every one of the
+    # old eleven buckets had to sum to the step total for the tally line to be
+    # readable. `disclosure_counts` can overlap `counts` and says so.
+    counts = {v.value: 0 for v in _T.Verdict}
+    disclosure_counts = {d.value: 0 for d in _T.Disclosure}
+    reason_counts = {r.value: 0 for r in _T.ReasonClass}
+    def _retally() -> None:
+        # THE FIELDS MUST AGREE WITH THE WORD. A row starts life as
+        # FAIL(missing_artefact) — the default before anything is on disk —
+        # and is then resolved, often several times, by the clause chain. A
+        # `reason_class` left behind by an earlier word is a reason for a
+        # verdict the step no longer has, and it was 63 phantom
+        # `missing_artefact` rows on subservient r26 the first time this ran.
+        # Cleared HERE, at the single point every row passes through, rather
+        # than at thirty assignment sites.
+        for _row in results:
+            _v = _T.parse(_row.status)
+            if _v not in (_T.Verdict.NOT_MEASURED, _T.Verdict.FAIL):
+                _row.reason_class = ""
+            if _v is not _T.Verdict.NOT_APPLICABLE:
+                _row.declared_by = ""
+            if _v is _T.Verdict.NOT_MEASURED and not _row.reason_class:
+                # FAIL-LOUD-BY-NAME rather than fail-silent: a step nobody
+                # measured that cannot say why is the undifferentiated bag
+                # R-0915-85 deleted, and naming it here is how the next one
+                # gets a reason at its own site instead of inheriting this.
+                _row.reason_class = _T.ReasonClass.NOT_EXECUTED.value
+                _row.reasons = list(getattr(_row, "reasons", []) or [])
+                _row.reasons.append(
+                    "NOT_MEASURED with no reason recorded at the site that "
+                    "decided it — booked not_executed by flow_compliance_check")
+        for k in counts:
+            counts[k] = 0
+        for k in disclosure_counts:
+            disclosure_counts[k] = 0
+        for k in reason_counts:
+            reason_counts[k] = 0
+        for _row in results:
+            counts[_T.parse(_row.status).value] += 1
+            for _d in (getattr(_row, "disclosures", None) or ()):
+                disclosure_counts[_d] = disclosure_counts.get(_d, 0) + 1
+            _rc = getattr(_row, "reason_class", "") or ""
+            if _rc:
+                reason_counts[_rc] = reason_counts.get(_rc, 0) + 1
+
+    _retally()
     # vibe-ic#924 — `counts` IS A TALLY OF STEPS AND NOTHING ELSE.
     #
     # It is built one line above by `for r in results: counts[r.status] += 1`,
@@ -17313,7 +17620,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # reached four consumers at once:
     #
     #   * `total_required = len(steps) - <excused> + …`, where WAIVED is
-    #     EXCUSED (`_flow_verdict_tiers.EXCUSED`), so N waived SUB-GATES
+    #     EXCUSED (`verdict.EXCUSED`), so N waived SUB-GATES
     #     removed N STEPS from a 63-step denominator. Numerator unchanged,
     #     denominator smaller: the published ratio ROSE, and it rose with the
     #     number of things waived.
@@ -17331,8 +17638,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     #
     # WHY NOT "EXCUSE AT MOST ITS OWN STEP" (contribute `min(1, N)`). That
     # reading assumes a waived sub-gate leaves P0 itself excused. It does not:
-    # `_p0_umbrella_status` returns only SKIPPED-CONDITION / FAIL / INCOMPLETE
-    # / PASS and CANNOT return WAIVED, and with a WAIVED record present the
+    # `_p0_umbrella_status` returns only NOT_APPLICABLE / FAIL / NOT_MEASURED
+    # / PASS and CANNOT return PASS_WITH_WAIVERS, and with a waived record
+    # present the
     # reachable set is {PASS, FAIL} — neither of which is EXCUSED. So `min(1,
     # N)` would remove from the denominator a step that is simultaneously
     # counted in the numerator. Same unit error, magnitude 1. The committed log
@@ -17400,11 +17708,66 @@ def main(argv: Optional[List[str]] = None) -> int:
     # voided one is a step somebody does.
     for _v in _ordering_violations:
         _tid = str(_v.get("terminal_id"))
+        # ── THE ONE CASCADE RULE (R-0915-85) ─────────────────────────────
+        # ONLY a FAILED dependency voids a dependent. `verdict.cascade_to_
+        # dependent` owns the rule and is the only thing consulted here.
+        #
+        # THIS LINE IS THE subservient r26 FIX. Before it, ANY non-green
+        # upstream voided: step 37 went NOT_MEASURED because one review gate
+        # declined to look, and steps 37.4 / 37.5ip / 38 — each of which had
+        # produced and verified its own artefact — were stamped
+        # `PASS_VOIDED_BY_DEPENDENCY` and published as the run's only named
+        # causes. Nothing about the design had failed.
+        #
+        # A step nobody measured is a hole in the report. It keeps the run off
+        # PASS (`run_verdict`'s precedence) and it takes nothing down with it;
+        # the fact is still DISCLOSED on the dependent, in its reasons, which
+        # is where a reader can act on it.
+        # Ask the RULE before building anything. An upstream that does not
+        # void needs no stand-in — and could not have one: a NOT_MEASURED
+        # StepVerdict must name a reason_class, and all this record carries is
+        # the word. `voids_dependents` is the same rule `cascade_to_dependent`
+        # applies, read from the one module that owns it.
+        _up_word = (_T.parse(_v.get("signoff_status"))
+                    if _v.get("signoff_status") else None)
+        _cascaded = None
+        if _up_word is not None and _T.voids_dependents(_up_word):
+            _cascaded = _T.cascade_to_dependent(_T.StepVerdict(
+                verdict=_up_word,
+                step_id=str(_v.get("signoff_id") or ""),
+                name=str(_v.get("signoff") or ""),
+            ), _tid)
         for _r in results:
             if str(_r.id) != _tid:
                 continue
-            if _r.status == "PASS":
-                _r.status = "PASS_VOIDED_BY_DEPENDENCY"
+            if _cascaded is None:
+                # NOT voided. Disclose the upstream hole on the dependent and
+                # leave the verdict the step earned.
+                _note = (f"upstream [{_v.get('signoff_id')}] "
+                         f"{_v.get('signoff')} = {_v.get('signoff_status')}; "
+                         f"this step ran and reports its own verdict "
+                         f"(R-0915-85: NOT_MEASURED voids nothing)")
+                _r.reasons = list(getattr(_r, "reasons", []) or [])
+                if _note not in _r.reasons:
+                    _r.reasons.append(_note)
+                continue
+            if _r.status == _T.Verdict.PASS.value:
+                _r.status = _T.Verdict.NOT_MEASURED.value
+                _r.reason_class = _T.ReasonClass.UPSTREAM_FAILED.value
+            elif _r.status in (_T.Verdict.NOT_MEASURED.value,
+                               _T.Verdict.NOT_APPLICABLE.value):
+                # R-0915-85 — THE DISCLOSURE IS NOT THE STATUS, and this is
+                # where the two used to be welded together. A dependent that
+                # already measured nothing keeps the word it earned -- there is
+                # no PASS here to void -- but it still RESTS ON A BROKEN CHAIN,
+                # and that is a fact its reader needs whatever its own word is.
+                #
+                # `json_vacuity_promoted` below is the same rule written for
+                # ONE promoted tier, because that was the only non-PASS word
+                # that could reach here while `VACUOUS_PASS` existed. #901's
+                # sentence is the general one: a new disclosure must not cost
+                # an old one.
+                pass
             elif getattr(_r, "json_vacuity_promoted", False):
                 # vibe-ic#901 - this step would have been a bare PASS on
                 # origin/main and would have been VOIDED here, printing the
@@ -17427,10 +17790,39 @@ def main(argv: Optional[List[str]] = None) -> int:
             _r.reasons = list(getattr(_r, "reasons", []) or [])
             if _why not in _r.reasons:
                 _r.reasons.append(_why)
+
+    # R-0915-85 — THE DISCLOSURE DOES NOT RIDE ON THE ORDERING VIOLATION.
+    #
+    # The loop above can only reach a dependent that RAISED a violation, and
+    # `analyze()` raises one only for a step that CLAIMS DONE. That was every
+    # dependent worth disclosing while `VACUOUS_PASS` and `INCOMPLETE` were
+    # PASS-shaped and therefore done-claims. They are `NOT_MEASURED` now and
+    # claim nothing, so a dependent that had already measured nothing lost the
+    # one line telling its reader it also rests on a broken chain — measured on
+    # #901's own two-step fixture, where step 2 read
+    # `[NOT_MEASURED] (no_population) [vacuity]` and said nothing about step 1
+    # having FAILED beneath it.
+    #
+    # So the note is derived from the DECLARED blocks_on ancestry and the
+    # ancestor's own word, which is where the fact actually lives. It changes
+    # no verdict and gates nothing: `forced_fail` is decided above, from the
+    # violation list alone.
+    _status_by_id = {str(r.id): r.status for r in results}
+    for _r in results:
+        if _r.status not in (_T.Verdict.NOT_MEASURED.value,
+                             _T.Verdict.NOT_APPLICABLE.value):
+            continue          # PASS dependents are handled by the loop above
+        for _anc in (_g0.get(str(_r.id)) or []):
+            if _status_by_id.get(str(_anc)) != _T.Verdict.FAIL.value:
+                continue
+            _note = (f"rests on a broken chain: dependency [{_anc}] = FAIL, "
+                     f"so nothing this step reports certifies the design "
+                     f"either")
+            _r.reasons = list(getattr(_r, "reasons", []) or [])
+            if _note not in _r.reasons:
+                _r.reasons.append(_note)
     if _ordering_violations:
-        counts = {k: 0 for k in counts}
-        for _r in results:
-            counts[_r.status] = counts.get(_r.status, 0) + 1
+        _retally()
         # vibe-ic#924 — the re-application of the sub-gate addend went with it.
         # This branch RESETS `counts` and re-tallies from `results`, so it
         # reproduces the step tally exactly; re-adding a sub-gate population
@@ -17484,7 +17876,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # and the two SILENT trees audited PASS with 4 — no ordering
         # violation between them. Doing nothing outranked doing something
         # badly and saying so, one level above the gates built to price that
-        # trade. `_flow_verdict_tiers`' own docstring records this as the
+        # trade. `verdict`' own docstring records this as the
         # flow-POLICY question it deliberately left open; the owner settled
         # it, and this is where the answer lands.
         #
@@ -17511,10 +17903,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                   or (_T.in_analog_track(r) and _T.scoped_into_verdict(r))]
     else:
         scoped = results
-    failing = [r for r in scoped if r.status == "FAIL"]
-    missing = [r for r in scoped if r.status == "MISSING"]
-    setup_required_skipped = [r for r in scoped
-                              if r.status == "SKIPPED-SETUP-REQUIRED"]
+    # R-0915-85 — `MISSING` and `SKIPPED-SETUP-REQUIRED` are gone as words.
+    # The two buckets survive as what they always measured, read off the
+    # reason: a declared output that does not exist is a FAIL that says
+    # `missing_artefact`, and a step whose SETUP was absent is a NOT_MEASURED
+    # that says `input_absent`. Both are still separate from a gate's own
+    # defect, which is the distinction the two buckets exist for.
+    failing = [r for r in scoped
+               if r.status == _T.Verdict.FAIL.value
+               and r.reason_class != _T.ReasonClass.MISSING_ARTEFACT.value]
+    missing = [r for r in scoped
+               if r.status == _T.Verdict.FAIL.value
+               and r.reason_class == _T.ReasonClass.MISSING_ARTEFACT.value]
+    setup_required_skipped = [
+        r for r in scoped
+        if r.status == _T.Verdict.NOT_MEASURED.value
+        and r.reason_class == _T.ReasonClass.INPUT_ABSENT.value]
 
     # DFT_FCC / 11-d7 — the THIRD bucket: a sign-off-bar step that
     # self-skipped.
@@ -17562,7 +17966,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     #     leave it again through the promotion below.
     oss_blocked_skipped = [
         r for r in scoped
-        if r.status == "SKIPPED-CONDITION"
+        if r.status == _T.Verdict.NOT_APPLICABLE.value
         and r.self_skip_disclosed
         and (r.id in _OPEN_SOURCE_CONTAINER_BLOCKED_STEPS
              or r.id in _DFT_SIGNOFF_WITHDRAWN_STEPS)
@@ -17639,9 +18043,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     # are claimed as done. Byte-identical to the previous three-term
     # subtraction for the current vocabulary — the extra spellings in `EXCUSED`
     # are consumer-side tolerance the producer never emits, so they count 0.
+    # R-0915-85 — WHAT `total_required` SUBTRACTS IS UNCHANGED, and it takes
+    # two words to say now where it took one. The old `EXCUSED` set was
+    # "precisely what `total_required` subtracts" and held BOTH the skip
+    # spellings (now `NOT_APPLICABLE`) AND `WAIVED` (now `PASS_WITH_WAIVERS`).
+    # Under the five, `is_excused` is only the first of those, because a waived
+    # step DID run — so the second is named here explicitly rather than by
+    # widening `is_excused`, which would make a waiver invisible to the
+    # ordering guard and to every other consumer of that predicate.
+    #
+    # The arithmetic is byte-identical to before: a deferred step sits in
+    # neither the numerator (`counts["PASS"]`) nor the denominator, exactly as
+    # it did when the word was `WAIVED`. No published X/Y moves.
     total_required = (len(steps)
                       - sum(_n for _k, _n in counts.items()
-                            if _T.is_excused(_k))
+                            if _T.is_excused(_k)
+                            or _k == _T.Verdict.PASS_WITH_WAIVERS.value)
                       + len(oss_blocked_skipped))
     # ADJUDICATED AT MERGE, v1.7.96 (supersedes Wave 93) — this is NOT an
     # owner ruling and must not be read as one; the repo's real ones carry a
@@ -17663,7 +18080,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     # It remains a DISCLOSURE tier, not a failure: it is in none of
     # `failing` / `missing` / `setup_required_skipped` /
     # `oss_blocked_skipped`, so it still cannot make a run non-green.
-    pass_count = counts["PASS"]
+    # R-0915-85 — A DISCLOSED VACUITY STILL LEAVES THE NUMERATOR, and now it
+    # has to be SUBTRACTED rather than spelt out of it. `VACUOUS_PASS` and
+    # `PARTIALLY-VACUOUS` were words, so `counts["PASS"]` excluded them by not
+    # being their name. They are `PASS` carrying `Disclosure.VACUITY` /
+    # `PARTIAL_VACUITY` now, so the same rows are inside `counts["PASS"]` and
+    # the published X would say a step was MEASURED that was not — which is
+    # the exact harm the paragraph above records Wave 93 causing.
+    #
+    # The DISCLOSURE is what the reader is being protected from, so the
+    # disclosure is what is subtracted. Structure-only is NOT subtracted: it
+    # ran and read the design, it just read only its shape, and it was never
+    # out of X.
+    _vacuity_disclosed = sum(
+        1 for r in scoped
+        if r.status == _T.Verdict.PASS.value
+        and ({_T.Disclosure.VACUITY.value,
+              _T.Disclosure.PARTIAL_VACUITY.value}
+             & {str(d) for d in (getattr(r, "disclosures", None) or [])}))
+    pass_count = counts["PASS"] - _vacuity_disclosed
 
     # THE HEADLINE MUST NAME THE SCOPE IT MEASURED. `args.stage` is None on a
     # `--stage-id` run, so keying only on it would print a whole-flow headline
@@ -17679,110 +18114,86 @@ def main(argv: Optional[List[str]] = None) -> int:
     # (`X/Y executed PASS,` then `W DEFERRED`), and deliberately without an
     # `=` so it can never be mistaken for the per-verdict tally line that
     # `final_report_generate._parse_audit_tally` scans for.
-    vacuous_head = (f", {counts['VACUOUS_PASS']} VACUOUS-PASS excluded from "
-                    f"executed" if counts.get("VACUOUS_PASS") else "")
-    # vibe-ic#901 — ON THE HEADLINE TOO, for the reason spelled out beside
-    # `voided_str` below: a bucket this line does not name is a bucket whose
-    # steps silently vanish from the reader's arithmetic.
-    vacuous_head += (
-        f", {counts['PARTIALLY-VACUOUS']} PARTIALLY-VACUOUS excluded from "
-        f"executed" if counts.get("PARTIALLY-VACUOUS") else "")
-    vacuous_head += (
-        f", {counts['STRUCTURE-ONLY']} STRUCTURE-ONLY excluded from executed"
-        if counts.get("STRUCTURE-ONLY") else "")
-    # vibe-ic#924 — the sub-gate waivers keep their place on the line a
-    # reader actually reads, now NAMING THEIR UNIT so the number cannot be
-    # read as steps. Appended AFTER the two fields every existing parser keys
-    # on (`X/Y executed PASS,` then `W DEFERRED`) and with no `=`, per the
-    # note above, so `final_report_generate._parse_audit_tally` still cannot
-    # mistake this line for the per-verdict tally.
+    # R-0915-85 — THE TALLY IS THE FIVE, AND ITS PARTS SUM TO THE TOTAL.
+    #
+    # The line this replaces carried eleven buckets and three annotations, and
+    # its own comments record the sum breaking twice ("the line read
+    # 4+16+12+1+1+9+2 = 45 out of 63 and the other 18 simply vanished") because
+    # a new tier arrived without a token. Five buckets partition the steps by
+    # construction: `counts` is keyed on the enum, `_retally` walks every row,
+    # and a word outside the five cannot exist to be forgotten.
+    #
+    # The disclosures and reason classes are printed BESIDE it, never among it.
+    # That is the whole distinction the old line could not make: a disclosure
+    # is a fact about a step that is already counted somewhere, so adding it to
+    # the tally is what stopped the parts summing.
+    disclosure_str = "".join(
+        f"  {d}={n}" for d, n in sorted(disclosure_counts.items()) if n)
+    reason_str = "".join(
+        f"  {r}={n}" for r, n in sorted(reason_counts.items()) if n)
     subgate_head = (f", {p0_subgate_waivers} P0 sub-gate waiver(s) "
                     f"(not steps)" if p0_subgate_waivers else "")
-    print(f"Steps: {len(steps)} total ({pass_count}/{total_required} executed PASS, "
-          f"{counts['WAIVED']} DEFERRED via waiver{vacuous_head}{subgate_head})")
-    skipped_str = f"  SKIPPED={counts.get('SKIPPED-CONDITION', 0)}" if counts.get("SKIPPED-CONDITION") else ""
-    vacuous_str = (f"  VACUOUS-PASS={counts['VACUOUS_PASS']}"
-                   if counts.get("VACUOUS_PASS") else "")
-    vacuous_str += (f"  PARTIALLY-VACUOUS={counts['PARTIALLY-VACUOUS']}"
-                    if counts.get("PARTIALLY-VACUOUS") else "")
-    # ON THE LINE, or the parts stop summing to the total. The first cut of the
-    # dependency write-back demoted 18 of 63 steps into a bucket this summary
-    # does not print, so the line read 4+16+12+1+1+9+2 = 45 out of 63 and the
-    # other 18 simply vanished — the silent loss this whole change exists to
-    # remove, reintroduced by the change itself.
-    voided_str = (f"  PASS-VOIDED={counts['PASS_VOIDED_BY_DEPENDENCY']}"
-                  if counts.get("PASS_VOIDED_BY_DEPENDENCY") else "")
-    incomplete_str = (f"  INCOMPLETE={counts['INCOMPLETE']}"
-                      if counts.get("INCOMPLETE") else "")
-    # v0.3.5 — #503: split cascade MISSING from independent gaps in the
-    # summary so the actionable root-cause surface is visible at a
-    # glance; #502: surface the waiver-chain bucket separately.
-    missing_str = f"MISSING={counts['MISSING']}"
+    # THE HEADLINE'S WORDING IS A CONTRACT, not prose. `final_report_generate
+    # ._parse_audit_tally` and this repo's own tests key on `X/Y executed PASS,`
+    # then `W DEFERRED via waiver`; R-0915-85 renamed the WORD a step wears, not
+    # the sentence a reader and four parsers agreed on. The count behind
+    # `DEFERRED` is now `PASS_WITH_WAIVERS`, which is exactly what `WAIVED`
+    # counted before.
+    print(f"Steps: {len(steps)} total ({pass_count}/{total_required} executed "
+          f"PASS, {counts['PASS_WITH_WAIVERS']} DEFERRED via waiver"
+          f"{subgate_head})")
+    # v0.3.5 — #503: split cascade FAILs from independent gaps so the
+    # actionable root-cause surface is visible at a glance.
     _blocked = cascade_info.get("blocked_by_upstream") or {}
     _clauses = [f"{n} blocked-by-upstream of step {sid}"
                 for sid, n in _blocked.items()]
-    # vibe-ic#776 — these MISSING steps used to be DEFERRED-BY-UPSTREAM and
-    # were subtracted from the denominator on an ORDERING edge alone. They are
-    # counted here now, and the reader is told WHY they are all one shape, so
-    # the honest MISSING does not read as N independent gaps. This is an
-    # ATTRIBUTION over the MISSING bucket, not an additional bucket.
     _undeclared: Dict[Any, int] = {}
     for _sid, _anc in (cascade_info.get("waived_ancestor_undeclared") or []):
         _undeclared[_anc] = _undeclared.get(_anc, 0) + 1
     _clauses += [
-        f"{n} ordered behind waived step {sid}, which declares no artefact "
-        f"they read — MISSING, not deferred"
+        f"{n} ordered behind a waived step that declares no artefact they "
+        f"read — FAIL(missing_artefact), not deferred"
         for sid, n in _undeclared.items()]
-    if _clauses:
-        missing_str += " (" + "; ".join(_clauses) + ")"
-    dbu_str = (f"  DEFERRED-BY-UPSTREAM={counts['DEFERRED-BY-UPSTREAM']}"
-               if counts.get("DEFERRED-BY-UPSTREAM") else "")
-    # THE THIRD DISPOSITION, ON THE LINE. Two shapes, because the fact is true
-    # in two situations and a reader needs it in both:
-    #   * a step that produced ONLY library-default artefacts and was
-    #     otherwise clean lands in its own bucket, out of PASS;
-    #   * a step that FAILED for another reason and ALSO produced one keeps
-    #     the FAIL and carries the disclosure as a parenthetical, exactly the
-    #     shape MISSING already uses for blocked-by-upstream. Nothing is
-    #     double-counted: the parenthetical annotates a bucket, it is not one.
-    so_failing = sum(1 for r in results
-                     if r.status == "FAIL" and r.structure_only_disclosed)
     fail_str = f"FAIL={counts['FAIL']}"
+    if _clauses:
+        fail_str += " (" + "; ".join(_clauses) + ")"
+    so_failing = sum(1 for r in results
+                     if r.status == _T.Verdict.FAIL.value
+                     and r.structure_only_disclosed)
     if so_failing:
         fail_str += (f" ({so_failing} also produced a library-default "
-                     f"artefact, see STRUCTURE-ONLY below)")
-    so_str = (f"  STRUCTURE-ONLY={counts['STRUCTURE-ONLY']}"
-              if counts.get("STRUCTURE-ONLY") else "")
-    # vibe-ic#901 - an ANNOTATION over the buckets, never a bucket. These steps
-    # are already counted in whatever tier they resolved to (usually PASS);
-    # adding them again would stop the parts summing to the total. What it says
-    # is the thing the tier word cannot: N steps here contain at least one gate
-    # clause that ran and examined nothing.
-    partial_vacuous = sum(1 for r in results
-                          if getattr(r, "partial_vacuity_disclosed", False))
-    pv_str = (f"  ({partial_vacuous} step(s) PARTIALLY-VACUOUS: a gate clause "
-              f"ran and examined nothing)" if partial_vacuous else "")
-    # W4 — the SAME kind of annotation for the clauses that never ran at all,
-    # and kept apart from PARTIALLY-VACUOUS because they are a different fact:
-    # that one is a clause that ran and found nothing to look at, this one is a
-    # clause that was not dispatched because its input was absent. Both leave
-    # the tier alone (an ANNOTATION over the buckets, never a bucket, so the
-    # parts still sum to the total); without this line the only trace of an
-    # unexecuted clause is the per-step reason, and the number a reviewer reads
-    # is the tally.
-    na_steps = sum(1 for r in results
-                   if getattr(r, "declared_not_applicable", None))
+                     f"artefact — see structure_only below)")
+    print(
+        f"  PASS={counts['PASS']}  "
+        # `WAIVED-DEFERRED` is the REPORT-SIDE label four parsers key on
+        # (`final_report_generate._TALLY_LABEL_ALIASES`); the word behind it is
+        # PASS_WITH_WAIVERS. Both are printed so a reader sees the verdict and
+        # a parser keeps its contract.
+        f"PASS_WITH_WAIVERS={counts['PASS_WITH_WAIVERS']}  "
+        f"WAIVED-DEFERRED={counts['PASS_WITH_WAIVERS']}  "
+        f"{fail_str}  "
+        f"NOT_MEASURED={counts['NOT_MEASURED']}  "
+        f"NOT_APPLICABLE={counts['NOT_APPLICABLE']}"
+    )
+    if reason_str:
+        print(f"  why nothing was measured:{reason_str}")
+    if disclosure_str:
+        # ANNOTATIONS over the buckets, never buckets. A step here is already
+        # counted above; these say the thing the verdict word cannot.
+        print(f"  disclosed:{disclosure_str}")
     na_clauses = sum(len(getattr(r, "declared_not_applicable", ()) or ())
                      for r in results)
-    na_str = (f"  ({na_clauses} gate clause(s) across {na_steps} step(s) "
-              f"NOT-APPLICABLE: the declared input was absent, so the clause "
-              f"did not run)" if na_clauses else "")
-    print(
-        f"  PASS={counts['PASS']}  {fail_str}  "
-        f"{missing_str}  WAIVED-DEFERRED={counts['WAIVED']}"
-        f"{dbu_str}{skipped_str}{vacuous_str}{voided_str}{so_str}"
-        f"{incomplete_str}{pv_str}{na_str}\n"
-    )
+    na_steps = sum(1 for r in results
+                   if getattr(r, "declared_not_applicable", None))
+    if na_clauses:
+        print(f"  ({na_clauses} gate clause(s) across {na_steps} step(s) did "
+              f"not run because the declared input was absent)")
+    partial_vacuous = sum(1 for r in results
+                          if getattr(r, "partial_vacuity_disclosed", False))
+    if partial_vacuous:
+        print(f"  ({partial_vacuous} step(s) contain a gate clause that ran "
+              f"and examined nothing)")
+    print("")
     if p0_subgate_waivers:
         # vibe-ic#924 — ITS OWN LINE, deliberately not a token on the tally
         # line above. That line's contract is that its parts sum to the step
@@ -17806,29 +18217,29 @@ def main(argv: Optional[List[str]] = None) -> int:
             "defect this tier exists to make visible).\n"
         )
 
-    _icon = {"PASS": "✓", "FAIL": "✗", "MISSING": "·", "WAIVED": "~",
-             "INCOMPLETE": "…", "NOT-MEASURED": "…",
-             "DEFERRED-BY-UPSTREAM": "~",
-             "SKIPPED-CONDITION": "-", "SKIPPED-SETUP-REQUIRED": "!",
-             "VACUOUS_PASS": "○", "PARTIALLY-VACUOUS": "◔",
-             "STRUCTURE-ONLY": "◐",
-             "PASS_VOIDED_BY_DEPENDENCY": "⊘"}
-    _label = {"PASS": "PASS", "FAIL": "FAIL", "MISSING": "MISSING", "WAIVED": "WAIVED-DEFERRED",
-              "DEFERRED-BY-UPSTREAM": "DEFERRED-BY-UPSTREAM",
-              "SKIPPED-CONDITION": "SKIPPED-CONDITION",
-              "SKIPPED-SETUP-REQUIRED": "SKIPPED-SETUP-REQUIRED",
-              "VACUOUS_PASS": "VACUOUS-PASS",
-              "PARTIALLY-VACUOUS": "PARTIALLY-VACUOUS",
-              "PASS_VOIDED_BY_DEPENDENCY": "PASS-VOIDED",
-              "STRUCTURE-ONLY": "STRUCTURE-ONLY",
-              "INCOMPLETE": "INCOMPLETE",
-              "NOT-MEASURED": "NOT-MEASURED"}
+    # R-0915-85 — five icons, five labels, no table to forget to extend.
+    _icon = {_T.Verdict.PASS.value: "✓",
+             _T.Verdict.PASS_WITH_WAIVERS.value: "~",
+             _T.Verdict.FAIL.value: "✗",
+             _T.Verdict.NOT_MEASURED.value: "…",
+             _T.Verdict.NOT_APPLICABLE.value: "-"}
+    _label = {v.value: v.value for v in _T.Verdict}
     for r in results:
         icon = _icon.get(r.status, "?")
         label = _label.get(r.status, r.status)
         sid_str = f"{r.id:>2}" if isinstance(r.id, int) else f"{r.id:>2}"
         note = f"  [{r.cascade_note}]" if r.cascade_note else ""
-        print(f"  {icon} [{label:<17}] Step {sid_str}: {r.name}  ({r.stage}){note}")
+        # R-0915-85 — THE STEP LINE CARRIES ITS REASON AND ITS DISCLOSURES.
+        # Five words say less per line than eighteen did, and this is where the
+        # difference has to come back: a reader scanning the table could tell
+        # `VACUOUS-PASS` from `INCOMPLETE` at a glance, and both are
+        # `NOT_MEASURED` now. Printed beside the word rather than only in the
+        # reason list below, because the reason list is what a long run scrolls
+        # past.
+        _why = f" ({r.reason_class})" if r.reason_class else ""
+        _disc = (f" [{', '.join(r.disclosures)}]" if r.disclosures else "")
+        print(f"  {icon} [{label:<17}] Step {sid_str}: {r.name}  "
+              f"({r.stage}){_why}{_disc}{note}")
         for reason in r.reasons:
             print(f"       └─ {reason}")
 
@@ -17851,7 +18262,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.phase == "2" and (
             args.strict_structural or args.strict_step_artifacts):
         for r in results:
-            if r.id == "P0" and r.status == "FAIL":
+            if r.id == "P0" and r.status == _T.Verdict.FAIL.value:
                 # #497 step 2 — projected from the umbrella's records. This is
                 # the highest-stakes of the four consumers: it is what sets
                 # `forced_fail` under `--phase 2 --strict-structural`, the
@@ -17872,7 +18283,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # step-level verdict.
                 structural_fail_lines.extend(
                     _p0_structural_fail_lines(_p0_gate_records(r)))
-            elif r.status in ("FAIL", "MISSING") and \
+            elif r.status == _T.Verdict.FAIL.value and \
                     isinstance(r.id, int) and 1 <= r.id <= 13:
                 # Phase 2 step-level FAIL/MISSING. With --strict-step-
                 # artifacts these contribute. With --strict-structural
@@ -18075,10 +18486,22 @@ def main(argv: Optional[List[str]] = None) -> int:
         # RB2-03 (#2063) — DERIVED, not a literal. This set used to read
         # `r.status == "INCOMPLETE"`; the moment a second word for "this step
         # measured nothing" existed (`NOT-MEASURED`), the P0 violation was
-        # printed and gated NOTHING. `_flow_verdict_tiers` owns the membership.
+        # printed and gated NOTHING. `verdict` owns the membership.
+        # R-0915-85 — AND NOT THE ONES THIS VERY VIOLATION MADE UNMEASURED.
+        # `PASS_VOIDED_BY_DEPENDENCY` used to keep the two apart by SPELLING:
+        # a step voided by its upstream was not in the no-verdict set, so the
+        # guard could not both void a terminal and then cite the voided
+        # terminal as proof that the violation gates. That word is gone, and
+        # the cascade now writes `NOT_MEASURED(upstream_failed)` — the same
+        # tier as "0 of 246 answered". MEASURED on this file's own #1429
+        # control: P0's 2 gates ran and passed, the cascade voided it off
+        # D1 = FAIL(missing_artefact), and the guard then read its own
+        # cascade back as evidence and forced the run to FAIL. The reason is
+        # what tells the two apart, so the reason is what is read.
         _no_verdict_ids = {str(r.id) for r in scoped
-                           if _T.says_nothing_was_measured(
-                               r.status)}
+                           if _T.says_nothing_was_measured(r.status)
+                           and getattr(r, "reason_class", "")
+                           != _T.ReasonClass.UPSTREAM_FAILED.value}
         # vibe-ic#2092 — ONE predicate, TWO projections. The gating lines and
         # the ids of the violations held informational were derived by two
         # copies of this condition; a second copy is a second place for the
@@ -18103,18 +18526,38 @@ def main(argv: Optional[List[str]] = None) -> int:
         ordering_informational_step_ids = []
         _ordering_violations = []
 
+    # R-0915-85 — THE RUN WORD IS `verdict.run_verdict`'s PRECEDENCE:
+    # FAIL > NOT_MEASURED > PASS_WITH_WAIVERS > PASS.
+    #
+    # `NOT_MEASURED` IS THE NEW RUNG and it is the sha256 run16 fix. Before it
+    # this ladder had two rungs below FAIL, so every step that measured nothing
+    # had to be sorted into one of them; pass 1 put the LEC step's INCONCLUSIVE
+    # record on the FAIL rung and pass 2 put the IDENTICAL record on the
+    # PASS_WITH_WAIVERS rung, and phase 3 launched on an unproven netlist. A
+    # run holding a step nobody measured is neither of those things, and now it
+    # does not have to be either.
     if not ok or forced_fail:
-        overall = "FAIL"
-    elif counts["WAIVED"] > 0 or p0_subgate_waivers > 0:
+        overall = _T.Verdict.FAIL.value
+    elif any(r.status == _T.Verdict.NOT_MEASURED.value for r in scoped):
+        # OVER `scoped`, NOT over `counts`. `counts` is the census of EVERY
+        # row; `scoped` is what this invocation's verdict is ABOUT, and under
+        # `--phase 2 --strict-structural` that is the P0 umbrella plus the
+        # analog track by design ("step-level MISSING/FAIL for steps 1-6 is
+        # REPORTED but not factored into Overall"). Reading the census here
+        # would let an out-of-scope step decide a scoped verdict — measured:
+        # one vacuous step-level row turned a structurally clean phase-2 run
+        # non-green, which is the exact complaint Wave 21 was written for.
+        overall = _T.Verdict.NOT_MEASURED.value
+    elif counts[_T.Verdict.PASS_WITH_WAIVERS.value] > 0 or p0_subgate_waivers > 0:
         # vibe-ic#924 — the second disjunct is what the removed addend was
         # actually for (v1.6.97 / issue #29: "so Overall verdict resolves to
         # PASS_WITH_WAIVERS (not bare PASS) whenever the --allow-thin-input
         # waiver actually fired"). It was expressed as an addend into a step
         # counter, but the consumer is this `> 0` test, so a boolean carries
         # it exactly and no run changes its verdict word.
-        overall = "PASS_WITH_WAIVERS"
+        overall = _T.Verdict.PASS_WITH_WAIVERS.value
     else:
-        overall = "PASS"
+        overall = _T.Verdict.PASS.value
 
     # v1.6.210 (#91) — PASS_WITH_OPEN_SOURCE_CONSTRAINTS promotion.
     # v1.6.211 (#92) — extended to recognise P0 as deferrable when
@@ -18136,7 +18579,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # breakdown so the tape-out reviewer sees exactly which structural
     # gaps were deferred and why.
     os_constraints_deferrals: List[Dict[str, Any]] = []
-    if (overall == "FAIL"
+    if (overall == _T.Verdict.FAIL.value
             and not args.strict_no_os_constraints):
         # v1.6.211 — locate P0 result + categorise its sub-gate fails.
         p0_result = next((r for r in results if r.id == "P0"), None)
@@ -18148,7 +18591,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         p0_subgate_fails = _p0_failing_gate_names(_p0_gate_records(p0_result))
         p0_is_deferrable = (
             p0_result is not None
-            and p0_result.status == "FAIL"
+            and p0_result.status == _T.Verdict.FAIL.value
             and p0_subgate_fails
             and all(g in _P0_THIN_INPUT_DEFERRABLE_SUBGATES
                     for g in p0_subgate_fails)
@@ -18209,7 +18652,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 if not _os_constraints_prereq_satisfied(match, waivers):
                     prereq_pass = False
                     break
-                if match.status == "WAIVED":
+                if match.status == _T.Verdict.PASS_WITH_WAIVERS.value:
                     w = waivers.get(sid) or {}
                     os_prereq_waived.append({
                         # The printer and every consumer branch on this: these
@@ -18280,22 +18723,30 @@ def main(argv: Optional[List[str]] = None) -> int:
             # on a waiver and then not naming it would be the silent green
             # this tier exists to refuse.
             os_constraints_deferrals.extend(os_prereq_waived)
-            overall = "PASS_WITH_OPEN_SOURCE_CONSTRAINTS"
+            # R-0915-85 — the tier is a LIST OF ROWS, not a sixth word. Every
+            # entry here already carries `review_required: True`; that is what
+            # a waiver row IS, and `os_constraints_deferrals` is published
+            # beside the verdict so nothing goes silent. (R-0915-57 had already
+            # emptied this list at its producer; the word outliving the tier is
+            # exactly the residue this ruling deletes.)
+            overall = _T.Verdict.PASS_WITH_WAIVERS.value
 
     print(f"\nOverall: {overall}  (strict={not args.lenient})")
-    if overall == "PASS_WITH_WAIVERS":
+    if overall == _T.Verdict.PASS_WITH_WAIVERS.value:
         # vibe-ic#924 — this sentence says "step(s)", so it gets the STEP
         # count. The sub-gate waivers are a second sentence in their own unit
         # rather than a silent addition to this one; a run waived only at
         # sub-gate level used to print "N step(s) DEFERRED" with N steps
         # deferred being zero.
-        if counts["WAIVED"]:
-            print(f"  ⚠ {counts['WAIVED']} step(s) DEFERRED via waiver — production tapeout review must close them.")
+        if counts[_T.Verdict.PASS_WITH_WAIVERS.value]:
+            print(f"  ⚠ {counts[_T.Verdict.PASS_WITH_WAIVERS.value]} step(s) "
+                  f"carry open waiver rows — production tapeout review must "
+                  f"close them.")
         if p0_subgate_waivers:
             print(f"  ⚠ {p0_subgate_waivers} P0 sub-gate(s) DEFERRED via "
                   f"waiver (structural sub-gates inside step P0, not steps) — "
                   f"production tapeout review must close them.")
-    if overall == "PASS_WITH_OPEN_SOURCE_CONSTRAINTS":
+    if os_constraints_deferrals:
         print(f"  ⚠ {len(os_constraints_deferrals)} step(s) DEFERRED — "
               f"required commercial tools unavailable in iic-osic-tools "
               f"container. NOT a green pass; tapeout vendor must close "
@@ -18320,7 +18771,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                       f"{d.get('commercial_tool_required', '?')}")
     # DFT_FCC / 11-d7 — never let a sign-off-bar self-skip pass unmentioned at
     # the verdict line, whether or not the promotion tier fired.
-    if oss_blocked_skipped and overall != "PASS_WITH_OPEN_SOURCE_CONSTRAINTS":
+    if oss_blocked_skipped and not os_constraints_deferrals:
         print(f"  ⚠ {len(oss_blocked_skipped)} SIGN-OFF step(s) SELF-SKIPPED "
               f"(disclosed capability gap on a step this flow lists as an "
               f"open-source-container sign-off bar) — review required:")
@@ -18737,6 +19188,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             structural_fail_lines,
             step_artifact_fail_lines,
             structural_registered_count,
+            decided_step_count=sum(
+                1 for _r in results
+                if _r.status == _T.Verdict.PASS.value
+                or (_r.status == _T.Verdict.FAIL.value
+                    and _r.reason_class
+                    != _T.ReasonClass.MISSING_ARTEFACT.value)),
         )
 
         # vibe-ic#2092 — THE JOIN between the red and what caused it. Computed
@@ -18764,7 +19221,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         from datetime import datetime, timezone
         audit = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "step_status_schema_version": _T.SCHEMA_VERSION,
             # Was the string literal "0.119.62" from the initial public
             # release: all 28 tracked audit artefacts carry it, so an audit
             # written by 1.0.0 and one written by 1.9.79 made byte-identical
@@ -18993,8 +19451,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"  (the run's own status is unchanged and still {overall}.)")
         return 1
 
-    if overall in ("PASS", "PASS_WITH_WAIVERS",
-                   "PASS_WITH_OPEN_SOURCE_CONSTRAINTS"):
+    # THE EXIT CODE IS THE RUN WORD. `NOT_MEASURED` exits non-zero and that is
+    # the point: a run holding a step nobody measured has not passed, and the
+    # caller that greps for rc 0 must not be told otherwise.
+    if overall in GREEN_RUN_STATUSES:
         return 0
     return 1
 

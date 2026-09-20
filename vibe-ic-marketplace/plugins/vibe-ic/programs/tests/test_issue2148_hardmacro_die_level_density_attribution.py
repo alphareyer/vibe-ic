@@ -325,7 +325,25 @@ def test_the_new_tier_is_enumerated_by_the_runners_aggregator():
     does not enumerate turns the whole run green. PASS_WITH_ATTRIBUTION must be
     a QUALIFIED verdict, never a plain pass."""
     import phase3_one_shot_runner as P
-    plan = [P.StepResult("drc", D.TIER_PASS_WITH_ATTRIBUTION),
-            P.StepResult("lvs", "PASS")]
+    # R-0915-85 — `PASS_WITH_ATTRIBUTION` IS `PASS_WITH_WAIVERS` carrying an
+    # `attribution`: an item this run attributes to somebody else rather than
+    # measuring is a row somebody owns, which is what a waiver row is. The
+    # catch-all this test was written about is gone — `parse` refuses a sixth
+    # word at the row — so the property is asserted where it now lives: the
+    # attributed row is a QUALIFIED verdict, never a plain pass, and it must
+    # NAME its owner.
+    _attributed = P.StepResult(
+        "drc", "PASS_WITH_WAIVERS",
+        attribution=D.TIER_PASS_WITH_ATTRIBUTION)
+    assert _attributed.attribution, "an attributed row must name its owner"
+    plan = [_attributed, P.StepResult("lvs", "PASS")]
     assert P._aggregate_verdict(plan) == "PASS_WITH_WAIVERS"
+    # …and a row that attributes NOTHING and waives NOTHING cannot wear the
+    # word: `verdict.StepVerdict` refuses it at the roll-up, which is where
+    # every consumer of this runner meets the row.
+    import pytest as _pytest
+    import verdict as _V
+    with _pytest.raises(ValueError):
+        _V.StepVerdict(verdict=_V.Verdict.PASS_WITH_WAIVERS,
+                       step_id="drc", name="drc")
     assert P._aggregate_verdict([P.StepResult("lvs", "PASS")]) == "PASS"

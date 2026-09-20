@@ -51,9 +51,14 @@ PLUGIN = PROGRAMS.parent
 FLOW = PLUGIN / "flow" / "phase1_phase2_phase3.yaml"
 FCC = PROGRAMS / "flow_compliance_check.py"
 
+# R-0915-85 — the disclosure has TWO shapes now, and both say the same fact.
+# A dependent that had a PASS to void still reads "PASS voided"; one that had
+# already measured nothing has no PASS to void and reads "rests on a broken
+# chain". Either is the disclosure this file protects.
 _VOIDED_RE = re.compile(
-    r"PASS voided: dependency \[19\] CTS.*= FAIL, so this step's PASS "
-    r"certifies nothing about the design")
+    r"(PASS voided: dependency \[19\] CTS.*= FAIL, so this step's PASS "
+    r"certifies nothing about the design"
+    r"|rests on a broken chain: dependency \[19\] = FAIL)")
 
 
 def _def(ncomp: int, tag: str) -> str:
@@ -109,9 +114,13 @@ def _step20(out: str) -> str:
 def test_the_shipped_wiring_keeps_the_voided_disclosure(broken_chain):
     out = _audit(broken_chain, FLOW)
     block = _step20(out)
-    assert "[PASS-VOIDED" in block, block
+    # R-0915-85 — the WORD is NOT_MEASURED and the REASON is `upstream_failed`,
+    # which is what `PASS-VOIDED` said. The disclosure line is what a reader
+    # acts on and it is asserted below; the word and its reason are asserted
+    # here so the two cannot part.
+    assert "[NOT_MEASURED" in block, block
+    assert "(upstream_failed)" in block, block
     assert _VOIDED_RE.search(block), block
-    assert "VACUOUS-PASS" not in block, block
 
 
 def test_the_classifier_is_a_program_output_not_a_gate():
@@ -126,9 +135,20 @@ def test_the_classifier_is_a_program_output_not_a_gate():
     }]
 
 
-def test_POSITIVE_CONTROL_the_blocking_slot_deletes_the_voided_line(
+def test_POSITIVE_CONTROL_the_blocking_slot_still_retiers_the_step(
         broken_chain, tmp_path):
-    """Adding the classifier back as a gate recreates the tier defect."""
+    """Adding the classifier back as a gate recreates the TIER defect.
+
+    R-0915-85 — AND ONLY THE TIER DEFECT NOW. This control also asserted that
+    the blocking slot DELETED the dependency-voided disclosure, which was true
+    and was a second defect riding on the first: the line was appended only to
+    a dependent that still had a PASS to void, so re-tiering the step away from
+    PASS took its disclosure with it. That is #901's own sentence -- a new
+    disclosure must not cost an old one -- and the broken-chain note is now
+    derived from the DECLARED ancestry instead, so it survives the re-tier.
+    The control's subject is unchanged and is asserted below; what it no longer
+    asserts is a loss it was only ever recording.
+    """
     flow = yaml.safe_load(FLOW.read_text(encoding="utf-8"))
     step20 = next(step for step in flow["steps"] if step["id"] == 20)
     step20["gate"]["all_of"].insert(0, {
@@ -144,11 +164,15 @@ def test_POSITIVE_CONTROL_the_blocking_slot_deletes_the_voided_line(
     # benign vacuous skip.  The control's subject is unchanged: putting the
     # classifier back in the gate denominator re-tiers Step 20 away from PASS
     # and deletes the dependency-voided disclosure.
-    assert "[INCOMPLETE" in block, block
+    # The blocking slot re-tiers Step 20 away from PASS: the classifier could
+    # not judge, so nothing was measured, and the reason says which kind.
+    assert "[NOT_MEASURED" in block, block
+    assert "(partial_population)" in block or "(execution_error)" in block, \
+        block
     assert re.search(
         r"GATE_RAN hold_area_budget_check\s+rc=2\s+INCOMPLETE "
         r"reason_class=EXECUTION_ERROR", out), out
-    assert not _VOIDED_RE.search(block), (
-        "the blocking slot was supposed to delete the voided disclosure; if "
-        "it no longer does, the tier interaction was fixed elsewhere and this "
-        "wiring choice should be revisited\n" + block)
+    assert _VOIDED_RE.search(block), (
+        "the re-tier took the dependency disclosure with it: the step is no "
+        "longer saying that it rests on a broken chain, which is the defect "
+        "the derived note exists to stop\n" + block)

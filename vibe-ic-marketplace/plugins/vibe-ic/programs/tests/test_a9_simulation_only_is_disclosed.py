@@ -87,8 +87,16 @@ def test_simulation_only_close_is_not_a_bare_pass(tmp_path):
     # line is the whole of "must not rejoin the executed-PASS numerator" —
     # which is what the docstring above, and the #901 guard that names this
     # test by name, actually protect.
-    assert r.status != "PASS", (r.status, r.reasons)
-    # 2026-08-22 — CORRECTED FROM `== "VACUOUS_PASS"`, and MEASURED before it
+    # R-0915-85 — THE SUBJECT IS THE NUMERATOR, and it is unchanged: a step
+    # that examined only half its clauses must not rejoin the executed-PASS
+    # count. `PARTIALLY-VACUOUS` was a WORD that kept it out; it is a
+    # DISCLOSURE on a PASS now, so the row carries `partial_vacuity` and
+    # `pass_count` -- which is `counts["PASS"]` and nothing else -- must not
+    # count a row that discloses it. Both halves are asserted here rather than
+    # inferred from a spelling.
+    assert "partial_vacuity" in [str(d) for d in (r.disclosures or [])], (
+        r.status, r.disclosures, r.reasons)
+    # 2026-08-22 — CORRECTED FROM `== "NOT_MEASURED"`, and MEASURED before it
     # was changed rather than argued.
     #
     # A9 dispatches two clauses over this tree. `analog_a9_hw_verify_check`
@@ -112,7 +120,7 @@ def test_simulation_only_close_is_not_a_bare_pass(tmp_path):
     # i.e. A9 disclosed on its own line and COUNTED AS AN EXECUTED PASS, an
     # analog step that closed in simulation with no bench measurement anywhere
     # back in the numerator. That arm was built, measured and reverted.
-    assert r.status == "PARTIALLY-VACUOUS", (r.status, r.reasons)
+    assert r.status == "PASS", (r.status, r.reasons)
     assert any("VACUOUS" in x or "vacuous" in x for x in r.reasons), r.reasons
 
 
@@ -133,6 +141,8 @@ def _run_checker(project: Path) -> tuple[int, str]:
 
 
 @pytest.mark.parametrize("hw,rc,token", [
+    # The GATE's own tokens, not step statuses: this runs the checker as a
+    # subprocess and reads its stdout.
     (None, 0, "VACUOUS_PASS"),                        # never measured
     ({"measurements": {}}, 1, "FAIL"),                # measured, no numbers
     ({"measurements": {"gain_db": 42.1}}, 0, "PASS"),  # really measured
@@ -194,14 +204,14 @@ def test_skip_hardware_reaches_the_lettered_analog_step():
 def test_skip_hardware_waives_a9_like_step_6(tmp_path):
     r = FCC.check_step(_project(tmp_path, hw=None), _a9(), {}, None,
                        skip_hardware=True)
-    assert r.status == "WAIVED", (r.status, r.reasons)
+    assert r.status == "PASS_WITH_WAIVERS", (r.status, r.reasons)
     assert any("skip-hardware" in x for x in r.reasons), r.reasons
 
 
 def test_without_the_flag_a9_is_not_waived(tmp_path):
     """DIRECTION 1: the waiver is the run MODE's, not a standing exemption."""
     r = FCC.check_step(_project(tmp_path, hw=None), _a9(), {}, None)
-    assert r.status != "WAIVED", (r.status, r.reasons)
+    assert r.status != "PASS_WITH_WAIVERS", (r.status, r.reasons)
 
 
 def test_absent_hil_campaign_is_typed_external_and_not_run(tmp_path):

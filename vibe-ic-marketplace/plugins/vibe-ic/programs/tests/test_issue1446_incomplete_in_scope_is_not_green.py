@@ -257,13 +257,13 @@ def _status(out: str, step_id: str) -> str:
 
 def _no_verdict_word(status):
     """RB2-03 (#2063) — "the step measured nothing in its own scope", asked of
-    the TIER rather than of one spelling. `_flow_verdict_tiers` owns the set;
+    the TIER rather than of one spelling. `verdict` owns the set;
     `INCOMPLETE` and `NOT-MEASURED` are both in it and are adjudicated
     identically, so every property this module tests holds of either."""
     import sys as _sys
     from pathlib import Path as _P
     _sys.path.insert(0, str(_P(__file__).resolve().parent.parent))
-    import _flow_verdict_tiers as _T
+    import verdict as _T
     return _T.says_nothing_was_measured(status)
 
 
@@ -287,14 +287,30 @@ def test_a_no_verdict_p0_over_a_broken_chain_is_not_green(
     # passing for a reason it does not name.
     # RB2-03 (#2063): the P0 word for a 0-of-N population is now
     # `NOT-MEASURED`, a sibling of `INCOMPLETE` in
-    # `_flow_verdict_tiers.NO_VERDICT_IN_SCOPE` and adjudicated identically.
+    # `verdict.NO_VERDICT_IN_SCOPE` and adjudicated identically.
     # The precondition is asked of the TIER, not of one spelling, so a future
     # word in that set cannot walk past this case the way NOT-MEASURED did.
     assert _no_verdict_word(_status(out, "P0")), out
-    assert re.search(r"\[P0\].*marked done while dependency", out), out
+    # R-0915-85 — THE CONTRADICTION THIS PRECONDITION LOOKED FOR IS DISSOLVED,
+    # not lost. `[P0] … marked done while dependency [D1] … = FAIL` could only
+    # be raised because `INCOMPLETE` answered True to "does this step claim it
+    # is done" — it was in neither negative set, so a step that had measured
+    # nothing was adjudicated as claiming to have delivered a result.
+    # `NOT_MEASURED` says the opposite in the word itself, so there is no
+    # contradiction left to detect: the step does not claim to be done, and
+    # the guard correctly raises nothing. What must NOT happen is the run
+    # going green on the back of that, which is what the two lines below own.
+    assert not re.search(r"\[P0\].*marked done while dependency", out), out
+    assert re.search(r"D1.*(FAIL|missing)", out), out
 
+    # R-0915-85 — STILL NOT GREEN, and now it says WHY in the word itself.
+    # This case used to read `Overall: FAIL`, produced by the ordering guard
+    # forcing the verdict. The run did not FAIL: nothing about the design was
+    # examined. `NOT_MEASURED` is that sentence, it is still rc 1, and it is
+    # the rung this file's whole subject ("a no-verdict P0 in scope is not
+    # green") was asking for before there was a word for it.
     assert rc == 1, out
-    assert "Overall: FAIL" in out, out
+    assert "Overall: NOT_MEASURED" in out, out
 
 
 def test_the_violation_that_gates_is_named_as_gating(
@@ -309,12 +325,28 @@ def test_the_violation_that_gates_is_named_as_gating(
     rep = tmp_path / "gating.json"
     mod.main([str(project), "--phase", "2", "--strict-structural",
               "--json", str(rep)])
-    capsys.readouterr()
+    out = capsys.readouterr().out
 
     doc = json.loads(rep.read_text())
     gating = doc["ordering_violations_gating"]
-    assert [ln for ln in gating if "[P0]" in ln], (
-        f"the P0 violation must reach the verdict; gating={gating!r}")
+    every = doc["ordering_violations"]
+    info = [ln for ln in every if ln not in gating]
+    # R-0915-85 — THE SUBJECT, RESTATED OVER WHAT SURVIVES. This case was
+    # written when a no-verdict P0 raised a violation that had to reach the
+    # verdict rather than the "reported, NOT gating" tail. `NOT_MEASURED` is
+    # not a done-claim, so this fixture raises no P0 violation at all and
+    # there is nothing to mis-file. What #2092 settled is still testable and
+    # is what is tested: the printed disclosure and the recorded one are TWO
+    # PROJECTIONS OF ONE PREDICATE, so a violation may never be in both, and
+    # every violation must be in exactly one.
+    assert set(gating) <= set(every), (gating, every)
+    assert len(gating) + len(info) == len(every), (gating, info, every)
+    assert not (set(gating) & set(info)), (gating, info)
+    # The stdout disclosure counts the SAME partition, so the printed and the
+    # recorded account cannot drift.
+    assert f"{len(info)} of {len(every)} " in out, out
+    # And the run is still off PASS, named by the step that measured nothing.
+    assert doc["overall"] == "NOT_MEASURED", doc["overall"]
 
 
 # ══ 2. CONTROL A — INCOMPLETE alone must stay green ═══════════════════════
@@ -335,9 +367,25 @@ def test_an_incomplete_p0_over_a_closed_chain_stays_green(
         "PRECONDITION: this control is only meaningful while P0 still "
         "measured nothing — it is the OTHER condition that is supposed to have "
         "changed:\n" + out)
-    assert rc == 0, (
-        "INCOMPLETE alone must not turn a run red — #599's tier is a "
-        "disclosure, not a failure:\n" + out)
+    # R-0915-85 OVERTURNS #599's HALF OF THIS CONTROL, deliberately, and this
+    # is the site that says so.
+    #
+    # #599 ruled that INCOMPLETE "is a disclosure tier, not a failure" and must
+    # not turn a run red on its own. That reading is what sha256 run16 was
+    # built on: the ONLY step in verdict scope measured nothing, the run
+    # answered rc 0, and phase 3 launched on an unproven netlist. The ruling
+    # keeps the substance of #599 — the run is NOT FAIL, nothing failed — and
+    # changes the exit: a run whose scope holds a step nobody measured cannot
+    # be PASS either. `run_verdict`'s precedence puts it at NOT_MEASURED, rc 1.
+    #
+    # The CHAIN is still the other variable and is still closed here, which is
+    # what keeps this a control: the verdict below is NOT_MEASURED, never FAIL,
+    # and the ordering guard contributes nothing.
+    assert rc == 1, (
+        "a closed chain removes the ordering violation, not the hole: P0 "
+        "measured nothing, so the run is NOT_MEASURED:\n" + out)
+    assert "Overall: NOT_MEASURED" in out, out
+    assert not re.search(r"\[P0\].*marked done while dependency", out), out
 
 
 def test_the_ancestry_control_really_closes_the_chain(
@@ -355,7 +403,7 @@ def test_the_ancestry_control_really_closes_the_chain(
     _audit(mod, project)
     out = capsys.readouterr().out
 
-    assert _status(out, "D1") != "MISSING", (
+    assert _status(out, "D1") != "FAIL", (
         "`_close_ancestry` no longer closes P0's ancestry — D1 gained a "
         "`required_outputs` entry the helper does not stage. The report names "
         "it on D1's `required_outputs missing:` line:\n" + out)
@@ -385,10 +433,27 @@ def test_a_voided_but_measured_p0_over_a_broken_chain_stays_green(
     assert re.search(r"\[P0\].*marked done while dependency", out), (
         "PRECONDITION: this control needs the SAME violation as the defect "
         "case, so that P0's tier is the only variable:\n" + out)
-    assert _status(out, "P0") != "INCOMPLETE", out
-    assert rc == 0, (
-        "a P0 whose gates measured and passed must stay informational when "
-        "its dependency is out of verdict scope (vibe-ic#1429):\n" + out)
+    # R-0915-85 — P0's gates RAN and PASSED, and the cascade then voided it
+    # off `D1 = FAIL(missing_artefact)`, so its own tier is now
+    # NOT_MEASURED(upstream_failed) rather than the deleted
+    # PASS_VOIDED_BY_DEPENDENCY. The two are the SAME fact under one word.
+    assert _status(out, "P0") == "NOT_MEASURED", out
+    # #1429's rule survives where it was measured: the violation is REPORTED
+    # and does NOT gate. What it must not do is read its own cascade back as
+    # evidence — a terminal this very violation voided is not a terminal that
+    # "returned no verdict of its own", and the reason_class is what keeps
+    # them apart now that the word does not.
+    assert "[P0]" not in " ".join(json.loads(
+        (project / "reports" / "audit"
+         / "phase23_completion_audit.json").read_text(encoding="utf-8")
+    ).get("ordering_violations_gating", [])), out
+    # The run is still not green — but because P0 certifies nothing, not
+    # because the guard forced it. FAIL would say the design failed; it did
+    # not, and D1's absence is the only measured fact.
+    assert rc == 1, (
+        "a P0 voided off a FAILED dependency certifies nothing, so the run "
+        "cannot be PASS (R-0915-85):\n" + out)
+    assert "Overall: NOT_MEASURED" in out, out
 
 
 def test_the_step_level_violation_never_gates_either_way(

@@ -75,7 +75,7 @@ def test_non_derivable_spec_falls_through(tmp_path):
     res = p2.step_rtl_gen(proj, ic_class="__no_such_class__")
     assert not res.extras.get("program_first")
     # falls to the class path → WAIVED (unregistered class)
-    assert res.status in ("WAIVED", "FAIL", "SKIP")
+    assert res.status in ("PASS_WITH_WAIVERS", "FAIL", "SKIP")
 
 
 def test_input_dir_spec_location_also_works(tmp_path):

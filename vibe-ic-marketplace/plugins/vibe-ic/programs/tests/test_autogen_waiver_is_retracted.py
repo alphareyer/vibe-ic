@@ -33,8 +33,8 @@ def _read(p):
 
 def test_it_writes_a_waiver_for_a_waived_step(tmp_path):
     _autogen_waivers_json(
-        tmp_path, [StepResult("drc", "ENV_UNAVAILABLE", 0.0, "no engine", [],
-                              {"missing_tool": "someengine"})])
+        tmp_path, [StepResult("drc", "NOT_MEASURED", 0.0, "no engine", [],
+                              {"missing_tool": "someengine"}, reason_class="tool_absent")])
     w = _read(tmp_path)["waivers"]
     assert [x["step"] for x in w] == ["drc"]
     assert w[0]["_autogen"] is True
@@ -43,21 +43,21 @@ def test_it_writes_a_waiver_for_a_waived_step(tmp_path):
 def test_its_own_stale_waiver_is_regenerated_not_kept(tmp_path):
     """Two steps waived, then only one — the file must follow the run."""
     _autogen_waivers_json(
-        tmp_path, [StepResult("drc", "ENV_UNAVAILABLE", 0.0, "d", [],
-                              {"missing_tool": "a"}),
-                   StepResult("lvs", "WAIVED", 0.0, "l", [])])
+        tmp_path, [StepResult("drc", "NOT_MEASURED", 0.0, "d", [],
+                              {"missing_tool": "a"}, reason_class="tool_absent"),
+                   StepResult("lvs", "PASS_WITH_WAIVERS", 0.0, "l", [], attribution="the fixture's owner")])
     assert {x["step"] for x in _read(tmp_path)["waivers"]} == {"drc", "lvs"}
     _autogen_waivers_json(
         tmp_path, [StepResult("drc", "PASS", 0.0, "ran clean", []),
-                   StepResult("lvs", "WAIVED", 0.0, "l", [])])
+                   StepResult("lvs", "PASS_WITH_WAIVERS", 0.0, "l", [], attribution="the fixture's owner")])
     assert {x["step"] for x in _read(tmp_path)["waivers"]} == {"lvs"}, (
         "the drc waiver must be gone: this run's drc step did not waive")
 
 
 def test_a_run_that_waives_nothing_retracts_the_file(tmp_path):
     _autogen_waivers_json(
-        tmp_path, [StepResult("drc", "ENV_UNAVAILABLE", 0.0, "d", [],
-                              {"missing_tool": "a"})])
+        tmp_path, [StepResult("drc", "NOT_MEASURED", 0.0, "d", [],
+                              {"missing_tool": "a"}, reason_class="tool_absent")])
     assert (tmp_path / "waivers.json").is_file()
     _autogen_waivers_json(tmp_path, [StepResult("drc", "FAIL", 0.0, "15", [])])
     assert not (tmp_path / "waivers.json").exists(), (
@@ -71,7 +71,7 @@ def test_a_hand_authored_waiver_always_wins(tmp_path):
                           "review_required": True}]}
     (tmp_path / "waivers.json").write_text(json.dumps(human))
     _autogen_waivers_json(
-        tmp_path, [StepResult("lvs", "WAIVED", 0.0, "l", [])])
+        tmp_path, [StepResult("lvs", "PASS_WITH_WAIVERS", 0.0, "l", [], attribution="the fixture's owner")])
     assert _read(tmp_path) == human, "a human file must never be rewritten"
 
 

@@ -135,30 +135,37 @@ def test_flow_graph_stays_acyclic(graph):
 
 # ── behavioural discriminator: the guard must now fire ───────────────────────
 
-def _report(d1_status: str, step1_status: str = "PASS") -> dict:
+def _report(d1_status: str, step1_status: str = "PASS",
+            d1_reason: str = "") -> dict:
     return {"steps": [
         {"id": _PHASE1_STEP, "name": _D1_NAME, "status": d1_status,
-         "stage": "stage_phase1"},
+         "reason_class": d1_reason, "stage": "stage_phase1"},
         {"id": "1", "name": "Spec-to-RTL", "status": step1_status,
          "stage": "stage1"},
     ]}
 
 
-def _violation_ids(d1_status: str, graph: dict) -> list:
+def _violation_ids(d1_status: str, graph: dict,
+                   d1_reason: str = "") -> list:
     return [(v["terminal_id"], v["signoff_id"])
-            for v in _cov.analyze(_report(d1_status), graph)
-            .get("ordering_violations", [])]
+            for v in _cov.analyze(_report(d1_status, d1_reason=d1_reason),
+                                  graph).get("ordering_violations", [])]
 
 
-@pytest.mark.parametrize("d1_status", ["FAIL", "MISSING"])
-def test_failed_or_missing_phase1_reds_a_passing_spec_to_rtl(d1_status, graph):
+# R-0915-85 — `MISSING` is `FAIL(missing_artefact)`, so the two arms of this
+# parametrize became one word. The pair that still differs is the REASON,
+# which is what the arms carry now.
+@pytest.mark.parametrize("d1_status,d1_reason", [("FAIL", ""),
+                                                 ("FAIL", "missing_artefact")])
+def test_failed_or_missing_phase1_reds_a_passing_spec_to_rtl(d1_status,
+                                                             d1_reason, graph):
     """THE discriminator. A Step 1 that reports PASS while D1 FAILED/is MISSING
     must produce an ordering violation — which flow_compliance_check converts
     into a non-promotable forced Overall FAIL."""
-    got = _violation_ids(d1_status, graph)
+    got = _violation_ids(d1_status, graph, d1_reason=d1_reason)
     assert ("1", _PHASE1_STEP) in got, (
-        f"Step 1 = PASS with D1 = {d1_status} must be an ordering violation; "
-        f"got {got!r}")
+        f"Step 1 = PASS with D1 = {d1_status}({d1_reason}) must be an ordering "
+        f"violation; got {got!r}")
 
 
 def test_failed_phase1_reds_the_whole_downstream_main_track(graph):
@@ -178,9 +185,9 @@ def test_failed_phase1_reds_the_whole_downstream_main_track(graph):
 
 @pytest.mark.parametrize("d1_status", [
     "PASS",
-    "VACUOUS-PASS",       # the status D1 carries on the real digital spm run
-    "SKIPPED-CONDITION",  # generated_docs populated by external authoring
-    "WAIVED",
+    "NOT_MEASURED",       # the status D1 carries on the real digital spm run
+    "NOT_APPLICABLE",  # generated_docs populated by external authoring
+    "PASS_WITH_WAIVERS",
 ])
 def test_legitimate_phase1_states_raise_no_violation(d1_status, graph):
     """Behaviour that must NOT change: none of these D1 states may red Step 1.
@@ -225,8 +232,14 @@ def test_waived_phase1_defers_only_what_declares_it_reads_phase1(graph):
     S = _fcc.StepResult
     ids = [s["id"] for s in steps if str(s.get("id")) != "P0"]
     results = [
+        # R-0915-85 — the downstream rows stand for what `MISSING` used to
+        # say: the step's declared output is not on disk. That is
+        # FAIL(missing_artefact) now, and the attribution walk keys on the
+        # REASON, so a bare FAIL here would mean "a gate found a defect" and
+        # would correctly be left alone by the cascade.
         S(id=sid, name="", stage="",
-          status=("WAIVED" if sid == _PHASE1_STEP else "MISSING"),
+          status=("PASS_WITH_WAIVERS" if sid == _PHASE1_STEP else "FAIL"),
+          reason_class=("" if sid == _PHASE1_STEP else "missing_artefact"),
           reasons=(["ticket=ABC-1"] if sid == _PHASE1_STEP else []))
         for sid in ids
     ]
@@ -240,7 +253,7 @@ def test_waived_phase1_defers_only_what_declares_it_reads_phase1(graph):
         assert (sid, _PHASE1_STEP, "ABC-1") in info["deferred_by_upstream"], info
 
     # DIRECTION-1: the ordering fact is recorded, not discarded, and it costs.
-    assert by_id[1].status == "MISSING", by_id[1].status
+    assert by_id[1].status == "FAIL", by_id[1].status
     assert by_id[1].cascade_note == f"waived-ancestor-undeclared({_PHASE1_STEP})"
 
 
@@ -253,10 +266,10 @@ def test_guard_a_failed_phase1_never_converts_to_deferred(graph):
     S = _fcc.StepResult
     results = [
         S(id=_PHASE1_STEP, name=_D1_NAME, stage="stage_phase1", status="FAIL"),
-        S(id=1, name="Spec-to-RTL", stage="stage1", status="MISSING"),
+        S(id=1, name="Spec-to-RTL", stage="stage1", status="FAIL"),
     ]
     _fcc._attribute_cascade_verdicts(results, steps, {}, skip_analog=False)
-    assert results[1].status == "MISSING", results[1].status
+    assert results[1].status == "FAIL", results[1].status
 
 
 def test_guard_skip_analog_mixed_track_pass_is_unaffected(graph):
@@ -271,12 +284,12 @@ def test_guard_skip_analog_mixed_track_pass_is_unaffected(graph):
         S(id=_PHASE1_STEP, name=_D1_NAME, stage="stage_phase1", status="PASS"),
         S(id=1, name="Spec-to-RTL", stage="stage1", status="PASS"),
         S(id="A8", name="Hardmacro Generation", stage="stage_analog",
-          status="SKIPPED-CONDITION"),
+          status="NOT_APPLICABLE"),
         S(id="M2", name="Mixed-signal merge", stage="stage_mixed",
-          status="MISSING"),
+          status="FAIL"),
     ]
     _fcc._attribute_cascade_verdicts(results, steps, {}, skip_analog=True)
-    assert results[3].status == "SKIPPED-CONDITION"
+    assert results[3].status == "NOT_APPLICABLE"
     assert results[3].cascade_note == "skipped-by-upstream-analog(A8)"
 
 

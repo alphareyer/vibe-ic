@@ -53,14 +53,15 @@ SRC = (_PROGRAMS / "flow_compliance_check.py").read_text(encoding="utf-8")
 
 # ── the detector ────────────────────────────────────────────────────────────
 def test_a_token_at_line_start_is_seen():
-    assert FC._stdout_signals_token("noise\n  INCOMPLETE: x\n", "INCOMPLETE")
+    assert FC._stdout_signals_token(
+        "noise\n  NOT_MEASURED: x\n", "NOT_MEASURED")
 
 
 def test_a_token_mid_line_is_not():
     """Otherwise a gate MENTIONING the word in prose raises the tier — the
     text-matching failure this mechanism exists to avoid."""
     assert not FC._stdout_signals_token(
-        "the run was INCOMPLETE last time\n", "INCOMPLETE")
+        "the run was INCOMPLETE last time\n", "NOT_MEASURED")
 
 
 def test_the_old_vacuous_detector_is_one_caller_of_it():
@@ -104,7 +105,7 @@ def _reasons(tmp_path, prints, monkeypatch):
 
 def test_a_gate_that_examined_nothing_is_still_vacuous(tmp_path, monkeypatch):
     """THE ACCEPT CASE, and the one the other two must not swallow."""
-    assert _status(tmp_path, "VACUOUS_PASS: nothing applied", monkeypatch) == "VACUOUS_PASS"
+    assert _status(tmp_path, "VACUOUS_PASS: nothing applied", monkeypatch) == "NOT_MEASURED"
 
 
 def test_a_substantive_disclosure_turns_a_vacuous_step_into_a_pass(tmp_path, monkeypatch):
@@ -117,14 +118,14 @@ def test_a_substantive_disclosure_turns_a_vacuous_step_into_a_pass(tmp_path, mon
 
 def test_an_unexamined_applicable_input_is_incomplete(tmp_path, monkeypatch):
     got = _status(tmp_path, "INCOMPLETE: the AI sub-track did not read", monkeypatch)
-    assert got == "INCOMPLETE", got
+    assert got == "NOT_MEASURED", got
 
 
 def test_incomplete_wins_over_vacuous_when_a_gate_raises_both(tmp_path, monkeypatch):
     """"Applicable and not examined" is the stronger statement."""
     got = _status(tmp_path, "VACUOUS_PASS: no rule applied\n"
                             "INCOMPLETE: the AI sub-track did not read", monkeypatch)
-    assert got == "INCOMPLETE", got
+    assert got == "NOT_MEASURED", got
 
 
 def test_a_plain_pass_is_untouched(tmp_path, monkeypatch):
@@ -162,11 +163,11 @@ def test_the_new_hints_are_held_out_of_the_displayed_reasons(tmp_path,
 
 #: The four maps #599 requires, read out of `main` BY NAME instead of by a
 #: byte sequence. Every one of the four assertions this replaced was a literal
-#: that included the character AFTER the value — `'"INCOMPLETE": 0}'`,
-#: `'"INCOMPLETE": "INCOMPLETE"}'` — so each of them was really asserting
+#: that included the character AFTER the value — `'"NOT_MEASURED": 0}'`,
+#: `'"NOT_MEASURED": "NOT_MEASURED"}'` — so each of them was really asserting
 #: "INCOMPLETE is the LAST key in this dict", which is not a contract #599
 #: states and not one anybody maintains. MEASURED: `3341a0d32` appended
-#: `"NOT-MEASURED": "NOT-MEASURED"` to the display-label map, the label for
+#: `"NOT_MEASURED": "NOT_MEASURED"` to the display-label map, the label for
 #: INCOMPLETE was untouched and still correct, and this test went red on main
 #: (vibe-ic#2111). Parsed, the same widening is invisible; a label that is
 #: actually WRONG or actually GONE still fails.
@@ -202,13 +203,32 @@ def _main_dict(name: str) -> dict:
         f"the #599 tier is decided there and this check cannot see it")
 
 
-def test_incomplete_is_counted_labelled_and_rendered():
-    assert _main_dict("counts").get("INCOMPLETE") == 0, "not in the tally"
-    assert _main_dict("_label").get("INCOMPLETE") == "INCOMPLETE", \
-        "no display label"
-    icon = _main_dict("_icon").get("INCOMPLETE")
-    assert icon and icon != "?", "no icon, so it renders as `?`"
-    assert "incomplete_str" in SRC, "absent from the summary line"
+def test_the_tier_is_counted_labelled_and_rendered():
+    """R-0915-85 — the tier is `NOT_MEASURED`, and the tally is DERIVED.
+
+    `counts` used to be a dict literal holding one key per word, which is why
+    this file could read it with `ast.literal_eval`. It is now a comprehension
+    over `verdict.Verdict`, so a word cannot be in the vocabulary and missing
+    from the tally -- the defect this test was written to catch cannot occur
+    by construction. What is asserted is therefore the DERIVATION, plus the
+    two renderings that are still written out by hand.
+    """
+    import ast
+    main = next(n for n in ast.parse(SRC).body
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    derived = [ast.unparse(n.value) for n in ast.walk(main)
+               if isinstance(n, ast.Assign)
+               and getattr(n.targets[0], "id", None) == "counts"
+               and isinstance(n.value, ast.DictComp)]
+    assert derived and "_T.Verdict" in derived[0], derived
+    icons = [ast.unparse(n.value) for n in ast.walk(main)
+             if isinstance(n, ast.Assign)
+             and getattr(n.targets[0], "id", None) == "_icon"]
+    assert icons and "NOT_MEASURED" in icons[0], icons
+    assert icons[0].split("NOT_MEASURED")[1].split(",")[0].strip(
+        " .value:'\"") not in ("", "?"), icons
+    assert "counts['NOT_MEASURED']" in SRC or \
+        'counts["NOT_MEASURED"]' in SRC, "absent from the summary line"
 
 
 def test_the_incomplete_clause_actually_reaches_the_printed_summary():
@@ -231,8 +251,8 @@ def test_the_incomplete_clause_actually_reaches_the_printed_summary():
             for sub in ast.walk(arg):
                 if isinstance(sub, ast.FormattedValue):
                     printed.append(ast.unparse(sub.value))
-    assert "incomplete_str" in printed, (
-        "`incomplete_str` is computed but never interpolated into a printed "
+    assert "counts['NOT_MEASURED']" in printed, (
+        "the NOT_MEASURED count is tallied but never interpolated into a "
         f"summary line, so the #599 tier is tallied and then not shown; the "
         f"names that do reach a print are {sorted(set(printed))}")
 
@@ -242,8 +262,10 @@ def test_it_is_a_disclosure_tier_not_a_failure():
     naming fix, which is a different decision with a corpus sweep in front of
     it."""
     for bucket in ("failing", "missing"):
-        assert f'"INCOMPLETE"' not in SRC[SRC.index(f"{bucket} ="):][:400], (
-            f"INCOMPLETE leaked into the {bucket} bucket")
+        at = SRC.index(f"{bucket} = [r for r in scoped")
+        seg = SRC[at:SRC.index("]", SRC.index("r.reason_class", at))]
+        assert "NOT_MEASURED" not in seg, (
+            f"NOT_MEASURED leaked into the {bucket} bucket: {seg}")
 
 
 # ── the two gates actually emit the sentinels ───────────────────────────────

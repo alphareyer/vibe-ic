@@ -185,7 +185,10 @@ def test_end_state_emitted_tb_binds_real_pins(tmp_path):
     import design_one_shot_runner as P2
     proj = _build_l9_project(tmp_path)
     res = P2.step_full_stack_tb_gen(proj, "chip_top")
-    assert res.status in ("SKIP", "PASS", "WAIVED"), res.status
+    # R-0915-85 — three words where the step now has three: NOT_MEASURED for
+    # a skeleton that compared nothing, PASS, and PASS_WITH_WAIVERS.
+    assert res.status in ("NOT_MEASURED", "PASS", "PASS_WITH_WAIVERS"), \
+        res.status
     tb = (proj / "phase2" / "stage1" / "sim_full_stack"
           / "tb_chip_top_full.v").read_text()
     assert ".tl_i(tl_i)" in tb

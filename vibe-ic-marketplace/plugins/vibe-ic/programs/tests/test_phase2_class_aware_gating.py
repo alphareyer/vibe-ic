@@ -123,7 +123,7 @@ def test_generic_class_reference_tb_skips_when_no_full_stack_tb(tmp_path):
            f"output data_out); assign data_out = data_in; endmodule\n")
     proj = _make_project_with_l9(tmp_path, rtl, top)
     sr = p2.step_reference_tb(proj, top, "processor_cpu")
-    assert sr.status == "SKIP"
+    assert sr.status == "NOT_APPLICABLE"
     assert "Phase 3" in sr.detail
     assert sr.extras.get("verification_track") == "generic_full_stack"
 
@@ -141,7 +141,11 @@ def test_generic_class_reference_tb_runs_full_stack_tb(tmp_path):
     # rather than a fabricated functional PASS. The TB file is still
     # emitted, which is all step_reference_tb needs.
     gen = p2.step_full_stack_tb_gen(proj, top)
-    assert gen.status in ("PASS", "SKIP")
+    # R-0915-85 — the honest no-golden verdict is
+    # NOT_MEASURED(no_population): the TB was emitted and NOTHING was
+    # scored against it. `SKIP` matched no row any more, so this pair
+    # was a dead comparison over the one word it exists to accept.
+    assert gen.status in ("PASS", "NOT_MEASURED")
     tb = (proj / "phase2" / "stage1" / "sim_full_stack"
           / f"tb_{top}_full.v")
     assert tb.is_file()
@@ -157,7 +161,7 @@ def test_generic_class_reference_tb_runs_full_stack_tb(tmp_path):
     # it exists. SKIP remains correct for the sibling case where no
     # full-stack TB was built at all, so both words are still asserted in
     # this file and the two states cannot collapse into one another.
-    assert sr.status == "INCOMPLETE", sr.detail
+    assert sr.status == "NOT_MEASURED", sr.detail
     assert sr.extras.get("verification_track") == "generic_full_stack"
     assert "aid" in sr.detail.lower()
     assert sr.extras.get("functional_verified") is False
@@ -183,7 +187,11 @@ def test_generic_class_real_compile_failure_still_fails(tmp_path):
     gen = p2.step_full_stack_tb_gen(proj, top)
     # ORGANIC-20260528: TB-gen verdict is honest (SKIP without a golden),
     # but the TB file is still emitted so step_reference_tb can compile it.
-    assert gen.status in ("PASS", "SKIP")
+    # R-0915-85 — the honest no-golden verdict is
+    # NOT_MEASURED(no_population): the TB was emitted and NOTHING was
+    # scored against it. `SKIP` matched no row any more, so this pair
+    # was a dead comparison over the one word it exists to accept.
+    assert gen.status in ("PASS", "NOT_MEASURED")
     sr = p2.step_reference_tb(proj, top, "processor_cpu")
     assert sr.status == "FAIL"
     assert "defect" in sr.detail.lower() or "compile" in sr.detail.lower()
@@ -218,7 +226,7 @@ def test_qsf_gen_skips_for_generic_class_without_board_top(tmp_path):
     rtl = f"module {top}(input clk); endmodule\n"
     proj = _make_project_with_l9(tmp_path, rtl, top)
     sr = p2.step_qsf_gen(proj, top, "processor_cpu")
-    assert sr.status == "SKIP"
+    assert sr.status == "NOT_APPLICABLE"
     assert "board-pin" in sr.detail or "board" in sr.detail.lower()
 
 
@@ -227,7 +235,7 @@ def test_usb_hid_tester_skips_for_generic_class(tmp_path):
     rtl = f"module {top}(input clk); endmodule\n"
     proj = _make_project_with_l9(tmp_path, rtl, top)
     sr = p2.step_usb_hid_tester_verify(proj, ic_class="processor_cpu")
-    assert sr.status == "SKIP"
+    assert sr.status == "NOT_APPLICABLE"
     assert "Phase 3" in sr.detail
 
 

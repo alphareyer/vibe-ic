@@ -259,7 +259,7 @@ def test_corpus_waivers_dialect_carries_no_env_unavailable_entry():
     in the corpus takes the tier `continue`, so #216's mechanism protected none
     of them. A corpus edit that changes this picture must not pass unnoticed."""
     rows = _corpus_waiver_entries()
-    # `len(rows) == 8` and `tiers == {"WAIVED": 7, "PASS_STRUCTURAL": 1}` were
+    # `len(rows) == 8` and `tiers == {"PASS_WITH_WAIVERS": 7, "PASS_STRUCTURAL": 1}` were
     # the corpus' size written down twice. The measurement the issue turns on
     # is not how many entries there are — it is that NOT ONE of them carries
     # ENV_UNAVAILABLE, so #216's mechanism protected none of them. That
@@ -274,8 +274,8 @@ def test_corpus_waivers_dialect_carries_no_env_unavailable_entry():
     assert "ENV_UNAVAILABLE" not in tiers, tiers
     # The tier vocabulary is closed: a NEW tier appearing in the corpus is a
     # change to the picture this issue rests on and must not pass unnoticed.
-    assert set(tiers) <= {"WAIVED", "PASS_STRUCTURAL"}, tiers
-    assert tiers.get("WAIVED"), tiers
+    assert set(tiers) <= {"PASS_WITH_WAIVERS", "PASS_STRUCTURAL"}, tiers
+    assert tiers.get("PASS_WITH_WAIVERS"), tiers
 
 
 def test_every_corpus_entry_is_well_formed_so_none_is_a_rejection():
@@ -537,7 +537,7 @@ def test_no_tier_value_but_env_unavailable_is_tested_anywhere(tmp_path):
     """The disclosure asserts that no gate binds a non-ENV_UNAVAILABLE tier.
     Pinned by EXECUTION at the two places that test a tier at all: this
     module's loader, and `waiver_staleness`."""
-    for tier in ("WAIVED", "PASS_STRUCTURAL", "ZZZ_UNKNOWN_TIER", "PASS"):
+    for tier in ("PASS_WITH_WAIVERS", "PASS_STRUCTURAL", "ZZZ_UNKNOWN_TIER", "PASS"):
         assert not _ws.is_env_unavailable({"verdict_tier": tier}), tier
         _fcc, waivers = _load(_project(tmp_path, _entry(verdict_tier=tier)))
         assert 31 not in waivers, tier
@@ -560,7 +560,7 @@ def test_the_hygiene_gates_consume_the_entry_and_ignore_its_tier(tmp_path):
         assert r.returncode == 0, r.stdout + r.stderr
         return r.returncode, r.stdout.replace(str(proj), "<P>")
 
-    baseline = _schema_stdout("WAIVED")
+    baseline = _schema_stdout("PASS_WITH_WAIVERS")
     assert "Waiver count: 1" in baseline[1], baseline[1]
     for tier in ("PASS_STRUCTURAL", "ZZZ_UNKNOWN_TIER", "ENV_UNAVAILABLE"):
         assert _schema_stdout(tier) == baseline, tier
@@ -588,7 +588,7 @@ def test_the_entry_is_listed_for_a_human_by_final_report_generate(tmp_path):
     assert listed[0].get("ticket") == "TAPEOUT-AUTOGEN-LVS", listed
 
 
-def _tiers_the_producer_emits():
+def _tiers_the_producer_emits(field="verdict_tier"):
     """EXECUTE `_autogen_waivers_json` over every step status it could be handed
     and collect the `verdict_tier` values it actually writes.
 
@@ -602,16 +602,25 @@ def _tiers_the_producer_emits():
 
     emitted_tiers = set()
     with tempfile.TemporaryDirectory() as td:
-        for status in ("WAIVED", "ENV_UNAVAILABLE", "PASS", "FAIL", "SKIP"):
+        # R-0915-85 — the five, each with the fields its word REQUIRES. A
+        # NOT_MEASURED with no reason_class and a NOT_APPLICABLE with no
+        # declared_by are refused at the row, so a fixture that omitted them
+        # would be exercising a shape the producer cannot emit.
+        for status, extra in (
+                ("PASS_WITH_WAIVERS", {"attribution": "the signoff engineer"}),
+                ("NOT_MEASURED", {"reason_class": "tool_absent"}),
+                ("PASS", {}),
+                ("FAIL", {}),
+                ("NOT_APPLICABLE", {"declared_by": "L20 declares no LVS"})):
             sub = Path(td) / status
             sub.mkdir()
             p3._autogen_waivers_json(sub, [p3.StepResult(
                 "lvs", status, 0.1, "deferred to the signoff engineer",
-                extras={"missing_tool": "netgen"})])
+                extras={"missing_tool": "netgen"}, **extra)])
             wp = sub / "waivers.json"
             if wp.is_file():
                 for e in json.loads(wp.read_text())["waivers"]:
-                    emitted_tiers.add(e["verdict_tier"])
+                    emitted_tiers.add(e[field])
     return emitted_tiers
 
 
@@ -630,9 +639,16 @@ def test_pass_structural_is_written_by_no_producer():
     the blanket-skip failure mode. Only the half that reads published waivers
     below is guarded.
     """
+    # R-0915-85 — `verdict_tier` stays the BINDING key it always was: it is
+    # not a step status and is not one of the five, because
+    # `flow_compliance_check` binds ONLY `ENV_UNAVAILABLE` entries to a flow
+    # step. The step's own word now travels beside it as `step_verdict`, so
+    # this half of the finding is asserted on BOTH fields.
     emitted_tiers = _tiers_the_producer_emits()
     assert emitted_tiers == {"WAIVED", "ENV_UNAVAILABLE"}, emitted_tiers
     assert "PASS_STRUCTURAL" not in emitted_tiers
+    assert _tiers_the_producer_emits(field="step_verdict") == {
+        "PASS_WITH_WAIVERS", "NOT_MEASURED"}
 
 
 def test_pass_structural_is_read_by_no_consumer_yet_sits_in_the_corpus():

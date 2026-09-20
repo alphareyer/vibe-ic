@@ -30,7 +30,7 @@ carried the number, which is indistinguishable from a gate that never had one.
 TWO PROPERTIES, BOTH LOAD-BEARING
 ---------------------------------
 1. A ROW THAT KEEPS THE RUN FROM BEING GREEN PRINTS ITS REASON IN FULL.
-   `_flow_verdict_tiers.NON_GREEN` owns that classification and is reused
+   `verdict.NON_GREEN` owns that classification and is reused
    rather than re-spelled here — a literal set of status words in a renderer
    is exactly the drift that module was created to delete. For every other
    row the bound stays, because the rollup is a rollup.
@@ -66,7 +66,7 @@ import sys
 from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import _flow_verdict_tiers as _tiers  # noqa: E402
+import verdict as _tiers  # noqa: E402
 
 #: The width the four runners already used for a bounded row. Kept as the
 #: default so this landing changes no PASS row's rendering.
@@ -98,7 +98,13 @@ def summary_detail(detail: object, status: Optional[str] = None,
     caller that wants the whole string.
     """
     text = one_line(detail)
-    if _tiers.is_non_green(status):
+    # `status` is OPTIONAL and its default is "not stated", which is not a
+    # verdict word and must not be parsed as one: `verdict.parse` refuses
+    # `None` by design, and most callers here pass only a detail and a width.
+    # An unstated status bounds the text, which is the conservative half —
+    # the full reason is only ever returned for a row that SAYS it is
+    # non-green.
+    if status is not None and _tiers.is_non_green(status):
         return text
     if width <= 0 or len(text) <= width:
         return text

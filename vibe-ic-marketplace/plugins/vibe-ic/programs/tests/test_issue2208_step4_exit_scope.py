@@ -21,7 +21,15 @@ def test_main_scopes_step4_producers_and_real_consumer(tmp_path, monkeypatch, ex
             continue
         def stub(*args, _name=name, **kwargs):
             calls.append(_name)
-            result = runner.StepResult(_name.removeprefix('step_'), 'SKIP', 0.0, 'unrelated tool stub')
+            # R-0915-85 — the stub stands for "some other step ran and is not
+            # this test's subject", which was `SKIP`. That is `NOT_APPLICABLE`
+            # -- declared out of this case's scope -- and NOT `NOT_MEASURED`,
+            # which would make every stubbed row a hole and put the whole run
+            # off PASS for a reason the fixture invented.
+            result = runner.StepResult(
+                _name.removeprefix('step_'), "NOT_APPLICABLE", 0.0,
+                'unrelated tool stub',
+                declared_by='this test stubs every step but its subject')
             return [result] if _name == 'step_dft_lec_chain' else result
         monkeypatch.setattr(runner, name, stub)
     monkeypatch.setattr(runner._spf, 'gate', lambda project, owner, site, refuse, fn, *a, **kw:
@@ -42,7 +50,7 @@ def test_main_scopes_step4_producers_and_real_consumer(tmp_path, monkeypatch, ex
     rows = {row['name']: row for row in report['steps']}
     if exit_step == '2':
         for name in ['sim', 'reference_tb', 'step4_functional_evidence', 'verilator_coverage']:
-            assert rows[name]['status'] == 'SKIPPED-BY-EXIT', rows[name]
+            assert rows[name]['status'] == 'NOT_APPLICABLE', rows[name]
         assert not any(name in calls for name in ['step_full_stack_tb_gen', 'step_reference_tb',
                                                   'step_professional_tb_gen', 'step_verilator_coverage'])
         assert rc == 0, report

@@ -181,7 +181,10 @@ def test_supplied_rtl_re_entry_with_skipped_by_entry_still_accepts():
     honest skip, and it must not read as a failure."""
     ledger = BD._required_gate_ledger(_solve(
         ran={"rtl_validate": "PASS"},
-        not_attempted={"rtl_gen": "SKIPPED-BY-ENTRY"}))
+        # R-0915-85 — `SKIPPED-BY-ENTRY` is `NOT_APPLICABLE`, declared by
+        # the run's own `--entry-step`; `flow_phase_attribution` books it
+        # under `not_attempted` exactly as before.
+        not_attempted={"rtl_gen": "NOT_APPLICABLE"}))
     assert ledger["failed_required"] == []
     assert ledger["eligibility"] == "ELIGIBLE"
 

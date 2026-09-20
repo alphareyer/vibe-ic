@@ -239,7 +239,7 @@ def test_a6_report_evidence_reaches_the_gate(tmp_path: Path):
     MISSING on the flag-only declaration and never ran the gate."""
     project = _a6_reports_project(tmp_path)
     res = fcc.check_step(project, _steps_by_id()["A6"], {})
-    assert res.status != "MISSING", res.reasons
+    assert res.status != "FAIL", res.reasons
     assert res.status == "PASS", (res.status, res.reasons)
 
 
@@ -294,7 +294,11 @@ def test_a9_aggregate_cosim_report_reaches_the_gate(tmp_path: Path):
     _block_list(tmp_path)
     _passing_aggregate(tmp_path)
     res = fcc.check_step(tmp_path, _steps_by_id()["A9"], {})
-    assert res.status != "MISSING", res.reasons
+    # R-0915-85 — the discriminator is that the aggregate REACHES the gate,
+    # i.e. the step no longer short-circuits on an absent declared artefact.
+    # `MISSING` was exactly that sentence; `!= "FAIL"` is a different one.
+    assert not (res.status == "FAIL"
+                and res.reason_class == "missing_artefact"), res.reasons
 
 
 def test_guard_a9_per_block_cosim_results_still_accepted(tmp_path: Path):
@@ -306,7 +310,13 @@ def test_guard_a9_per_block_cosim_results_still_accepted(tmp_path: Path):
     (d / "ldo_cosim_results.json").write_text(json.dumps(
         {"block": "ldo", "scenarios": [{"name": "s1", "status": "PASS"}]}))
     res = fcc.check_step(tmp_path, _steps_by_id()["A9"], {})
-    assert res.status != "MISSING", res.reasons
+    # R-0915-85 — the subject is that this shape stays DECLARED EVIDENCE,
+    # i.e. the output is FOUND. `MISSING` said "a declared artefact is not
+    # present" and is `FAIL(missing_artefact)` now, so `!= "FAIL"` asks a
+    # different and much broader question: this step FAILs its gate on this
+    # tree for an unrelated reason, and did so before this ruling too.
+    assert not (res.status == "FAIL"
+                and res.reason_class == "missing_artefact"), res.reasons
 
 
 def test_a9_hw_measurements_alternative_names_the_gates_own_path(
@@ -329,4 +339,4 @@ def test_guard_a9_empty_project_still_missing(tmp_path: Path):
     an empty project."""
     _block_list(tmp_path)
     res = fcc.check_step(tmp_path, _steps_by_id()["A9"], {})
-    assert res.status == "MISSING", (res.status, res.reasons)
+    assert res.status == "FAIL", (res.status, res.reasons)

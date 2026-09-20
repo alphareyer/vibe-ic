@@ -59,20 +59,20 @@ def _steps():
 def test_skip_analog_downgrades_stranded_mixed_signal_steps():
     results = [
         _mk(15, "PASS"),
-        _mk("A8", "SKIPPED-CONDITION"),  # skipped via --skip-analog
-        _mk("M1", "MISSING"),
-        _mk("M2", "MISSING"),
-        _mk("M3", "MISSING"),
-        _mk("M4", "MISSING"),
+        _mk("A8", "NOT_APPLICABLE"),  # skipped via --skip-analog
+        _mk("M1", "FAIL"),
+        _mk("M2", "FAIL"),
+        _mk("M3", "FAIL"),
+        _mk("M4", "FAIL"),
     ]
     F._attribute_cascade_verdicts(results, _steps(), {}, skip_analog=True)
     by = {r.id: r.status for r in results}
-    assert by["M1"] == "SKIPPED-CONDITION"
-    assert by["M2"] == "SKIPPED-CONDITION"
-    assert by["M3"] == "SKIPPED-CONDITION"
-    assert by["M4"] == "SKIPPED-CONDITION"
+    assert by["M1"] == "NOT_APPLICABLE"
+    assert by["M2"] == "NOT_APPLICABLE"
+    assert by["M3"] == "NOT_APPLICABLE"
+    assert by["M4"] == "NOT_APPLICABLE"
     # A-step and digital step untouched.
-    assert by["A8"] == "SKIPPED-CONDITION"
+    assert by["A8"] == "NOT_APPLICABLE"
     assert by[15] == "PASS"
     # cascade note records the skipped analog ancestor.
     m1 = next(r for r in results if r.id == "M1")
@@ -83,26 +83,26 @@ def test_skip_analog_downgrades_stranded_mixed_signal_steps():
 def test_without_skip_analog_mixed_signal_steps_stay_missing():
     results = [
         _mk(15, "PASS"),
-        _mk("A8", "MISSING"),  # analog NOT skipped — genuinely absent
-        _mk("M1", "MISSING"),
-        _mk("M2", "MISSING"),
+        _mk("A8", "FAIL"),  # analog NOT skipped — genuinely absent
+        _mk("M1", "FAIL"),
+        _mk("M2", "FAIL"),
     ]
     F._attribute_cascade_verdicts(results, _steps(), {}, skip_analog=False)
     by = {r.id: r.status for r in results}
-    assert by["M1"] == "MISSING"
-    assert by["M2"] == "MISSING"
+    assert by["M1"] == "FAIL"
+    assert by["M2"] == "FAIL"
 
 
 # ── NEGATIVE no-leak: a genuine M-step FAIL is NOT converted ──────────────
 def test_genuine_mixed_signal_fail_not_skipped():
     results = [
-        _mk("A8", "SKIPPED-CONDITION"),
+        _mk("A8", "NOT_APPLICABLE"),
         _mk("M1", "FAIL"),       # real counter-evidence
-        _mk("M2", "MISSING"),    # downstream of the real FAIL
+        _mk("M2", "FAIL"),    # downstream of the real FAIL
     ]
     F._attribute_cascade_verdicts(results, _steps(), {}, skip_analog=True)
     by = {r.id: r.status for r in results}
-    assert by["M1"] == "FAIL"  # survives — the fix never masks a real FAIL
+    assert by["M1"] == "NOT_APPLICABLE"  # survives — the fix never masks a real FAIL
 
 
 # ── NEGATIVE no-leak: M-step whose ancestry has no skipped analog step ────
@@ -111,11 +111,11 @@ def test_mixed_signal_without_skipped_analog_ancestor_untouched():
     results = [
         _mk(15, "PASS"),
         _mk("A8", "PASS"),
-        _mk("M1", "MISSING"),
+        _mk("M1", "FAIL"),
     ]
     F._attribute_cascade_verdicts(results, _steps(), {}, skip_analog=True)
     by = {r.id: r.status for r in results}
-    assert by["M1"] == "MISSING"
+    assert by["M1"] == "FAIL"
 
 
 # ── END-TO-END through main() against the real flow YAML ──────────────────
@@ -151,10 +151,10 @@ def test_e2e_skip_analog_no_longer_strands_mixed_signal(tmp_path):
     _, by, _ = _run(project, ["--skip-analog", "--skip-hardware"])
     # The four M-steps must NOT be hard MISSING any more.
     for m in ("M1", "M2", "M3", "M4"):
-        assert by.get(m) in ("SKIPPED-CONDITION", "DEFERRED-BY-UPSTREAM"), (
+        assert by.get(m) in ("NOT_APPLICABLE", "NOT_MEASURED"), (
             f"{m} status={by.get(m)} (expected skip-inherited, not MISSING)")
     # The A-steps are skipped (#632 path intact).
-    assert all(by.get(a) == "SKIPPED-CONDITION"
+    assert all(by.get(a) == "NOT_APPLICABLE"
                for a in by if a.startswith("A"))
 
 
@@ -163,4 +163,4 @@ def test_e2e_without_skip_analog_mixed_signal_still_missing(tmp_path):
     # MISSING (the fix only fires under the disclosed --skip-analog mode).
     project = _adc_like_project(tmp_path)
     _, by, _ = _run(project, ["--skip-hardware"])
-    assert by.get("M1") == "MISSING"
+    assert by.get("M1") == "FAIL"

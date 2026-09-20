@@ -193,7 +193,7 @@ def test_rerun_preserves_authored_rtl(tmp_path, monkeypatch):
         assert f.read_text() == body, f"authored file {name} was overwritten"
     # And the generator's own output did NOT reappear over the top.
     assert not (_rtl(project) / "gen_top.v").exists()
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
 
 
 def test_preserving_rerun_is_repeatable(tmp_path, monkeypatch):
@@ -241,7 +241,7 @@ def test_rtl_of_unknown_provenance_is_preserved(tmp_path, monkeypatch):
 
     res = R.step_rtl_gen(project, CLASS_NAME)
 
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     assert _names(_rtl(project)) == sorted(authored)
     assert not (_rtl(project) / "gen_top.v").exists()
 
@@ -259,7 +259,7 @@ def test_modified_generated_file_is_treated_as_authored(tmp_path,
 
     res = R.step_rtl_gen(project, CLASS_NAME)
 
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     assert (_rtl(project) / "gen_top.v").read_text() == edited
 
 
@@ -408,7 +408,7 @@ def test_registered_generator_is_staged_and_never_adopts_replaced_root(
 
     res = R.step_rtl_gen(project, CLASS_NAME)
 
-    assert res.status == "BLOCKED"
+    assert res.status == "NOT_MEASURED"
     assert res.extras["output_refusal"]["reason"] == (
         "PROJECT_BOUNDARY_REPLACED_DURING_PUBLICATION")
     assert generator_roots and len(generator_roots) == 1
@@ -508,5 +508,5 @@ def test_guard_ignores_ic_class_identity(tmp_path, monkeypatch):
         _author_rtl(project)
         outcomes.append(R.step_rtl_gen(project, class_name).status)
 
-    assert outcomes == ["WAIVED", "WAIVED"], (
+    assert outcomes == ["PASS_WITH_WAIVERS", "PASS_WITH_WAIVERS"], (
         "provenance decisions must not vary with the IC class label")

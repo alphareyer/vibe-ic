@@ -75,8 +75,8 @@ FLOW = PLUGIN / "flow" / "phase1_phase2_phase3.yaml"
 # The three states. Named rather than spelled inline so a cell can never be
 # written with a typo that quietly matches nothing.
 RUNS = "RUNS"
-SKIPPED = "SKIPPED-CONDITION"
-MISSING = "MISSING"
+SKIPPED = "NOT_APPLICABLE"
+MISSING = "FAIL"
 
 
 # --------------------------------------------------------------------------- #
@@ -289,7 +289,7 @@ def _state(project: Path, sid: str) -> str:
     cond = step.get("condition")
     if cond and not FCC._check_condition(project, cond):
         kind = step.get("condition_kind", "design_dependent")
-        return ("SKIPPED-SETUP-REQUIRED" if kind == "setup_required"
+        return ("NOT_MEASURED" if kind == "setup_required"
                 else SKIPPED)
     return RUNS
 
@@ -357,7 +357,8 @@ def test_condition_layer_cell(trees, cls, sid):
 # original defect stood on its head: 15.5ic on a self tape-out used to report
 # SKIPPED-CONDITION (nothing to see) and must now report MISSING (a pad ring
 # is owed and is not there).
-_NON_SKIP = ("MISSING", "FAIL", "PASS")
+# R-0915-85 — MISSING and FAIL are one word; the pair is now (FAIL, PASS).
+_NON_SKIP = ("FAIL", "PASS")
 
 
 @pytest.mark.parametrize("cls,sid", CELLS, ids=[f"{c}::{s}" for c, s in CELLS])
@@ -399,7 +400,7 @@ def test_the_forgotten_route_blocks_all_four_dependents_after_owner_rollup(
         assert row.status == MISSING, (row.id, row.status, row.reasons)
         assert row.cascade_note == "blocked-by-upstream(0.5ic)"
         reason = " ".join(row.reasons)
-        assert "Step 0.5ic verdict MISSING" in reason
+        assert "Step 0.5ic verdict FAIL" in reason
         assert "delivery_route declaration is MISSING" in reason
 
 
@@ -924,7 +925,7 @@ def test_exactly_one_step_after_the_IP_terminal_has_no_way_to_not_apply(
         "39 is waivable via --skip-hardware; if that changed it becomes a "
         "second instance of the same gap")
     assert FCC.check_step(proj, _step_by_id("39"), {},
-                          skip_hardware=True).status == "WAIVED"
+                          skip_hardware=True).status == "PASS_WITH_WAIVERS"
 
 
 def _step_by_id(sid: str) -> dict:

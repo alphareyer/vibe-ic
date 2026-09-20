@@ -439,7 +439,9 @@ def test_full_stack_step_publishes_real_scored_vectors(tmp_path):
     # the algorithmic RESULT oracle is still deferred -> no blanket PASS
     assert rj["functional_verified"] is False
     assert rmc["result_oracle_deferred"] is True
-    assert res.status == "SKIP"
+    # R-0915-85 — the algorithmic RESULT oracle is deferred, so the step
+    # scored PART of its population and measured none of the rest.
+    assert res.status == "NOT_MEASURED"
     assert "golden-scored 2 of 4" in res.detail
 
 
@@ -513,7 +515,11 @@ def test_step_is_unchanged_when_the_driver_declines(tmp_path, monkeypatch):
     assert rj["functional_verified"] is False
     assert rj["verdict"] != "PASS" and rj["pass"] is not True
     assert "register_map_coverage" not in rj
-    assert res.status == "SKIP" and "CONNECTIVITY-ONLY" in res.detail
+    # R-0915-85 — a CONNECTIVITY-ONLY skeleton golden-compares nothing, so the
+    # step measured nothing about functional correctness; the shortfall the
+    # three assertions above STATE is exactly the reason beside the word.
+    assert res.status == "NOT_MEASURED" and "CONNECTIVITY-ONLY" in res.detail
+    assert res.reason_class == "no_population", res.reason_class
 
 
 def _write_results(tmp_path, coverage, scored):

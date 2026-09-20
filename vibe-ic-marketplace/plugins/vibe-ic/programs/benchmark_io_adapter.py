@@ -49,6 +49,15 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 import rtl_final_bundle_integrity as bundle_integrity  # noqa: E402
+# R-0915-85 — THE VOCABULARY, IMPORTED RATHER THAN SPELLED.
+# This module READS the runner's step table and decides on its words. Spelling
+# them as bare literals is how `SKIPPED-BY-ENTRY` survived here after the word
+# was deleted: nothing in this file or in the ratchet could see that the set
+# below had stopped matching anything, and every supplied-RTL candidate was
+# refused as scaffolding. Through the enum a deleted word is an AttributeError
+# at import, and the import itself puts this file inside the ratchet's
+# comparison pass.
+import verdict as _V                                     # noqa: E402
 
 
 class OracleAccess(RuntimeError):
@@ -381,9 +390,18 @@ def collect(fmt_name: str, problem_id: str, project: Path, *,
         return {"id": problem_id, "ok": False, "rtl_gen": None,
                 "reason": "the run wrote no phase2 report — cannot tell whether "
                           "this RTL was produced or merely scaffolded"}
-    accepted_statuses = {"PASS"}
+    accepted_statuses = {_V.Verdict.PASS.value}
     if supplied_rtl:
-        accepted_statuses.add("SKIPPED-BY-ENTRY")
+        # R-0915-85 — `SKIPPED-BY-ENTRY` is `NOT_APPLICABLE`, declared_by the
+        # run's own `--entry-step`. MEASURED: both sites in
+        # `design_one_shot_runner` that leave `rtl_gen` on this word say the
+        # same thing — the RTL was SUPPLIED, not produced here (the entry-step
+        # sentinel, and the DECLINE when the design ships its own build RTL).
+        # That is exactly the claim `supplied_rtl=True` makes, and it is the
+        # caller who makes it, so the word admits nothing the flag does not.
+        # Left as the deleted word this set accepted NOTHING any producer
+        # writes and every supplied-RTL candidate was refused as scaffolding.
+        accepted_statuses.add(_V.Verdict.NOT_APPLICABLE.value)
     if verdict["status"] not in accepted_statuses:
         return {"id": problem_id, "ok": False, "rtl_gen": verdict["status"],
                 "reason": f"rtl_gen reported {verdict['status']}, so what is on "

@@ -73,7 +73,13 @@ def test_changed_identity_refreshes_tb_dut_ts(tmp_path):
     proj, sim = _scaffold(tmp_path)
     _seed_rich(sim, tb="tb_phantom_full.v", dut="phantom_top", ts=1.0)
     res = R.step_full_stack_tb_gen(proj, "chip_top")
-    assert res.status in ("PASS", "SKIP"), res.detail
+    # R-0915-85 — the step emits `NOT_MEASURED(no_population)` where it used
+    # to emit `SKIP`: a CONNECTIVITY-ONLY skeleton golden-compares NOTHING, so
+    # functional correctness was not measured. The detail said so already; the
+    # word says it now. This test's subject is the EMITTED TB, so what it
+    # needs is that the step did not FAIL.
+    assert res.status in ("PASS", "NOT_MEASURED"), res.detail
+    assert res.status != "FAIL", res.detail
     out = json.loads((sim / "results.json").read_text())
     # identity REFRESHED to the real DUT this pass compiled.
     assert out["dut"] == "real_wrapper"

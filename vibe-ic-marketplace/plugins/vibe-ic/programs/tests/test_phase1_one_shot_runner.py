@@ -121,11 +121,16 @@ def test_empty_fixture_is_blocked_not_a_pass(tmp_path):
     assert rep.is_file()
     body = json.loads(rep.read_text())
     assert body["phase"] == 1
-    assert body["verdict"] == "FAIL"
+    # R-0915-85 — NOT `FAIL`. Nothing about this design failed: D1 was refused
+    # because the project holds none of the five declared inputs, so no L-doc
+    # was ever examined. The run is NOT GREEN — rc 1, asserted above — and it
+    # says which of the two kinds of not-green it is. Publishing FAIL here
+    # would claim a finding about a design nothing looked at.
+    assert body["verdict"] == "NOT_MEASURED", body["verdict"]
     ingest = next((s for s in body["steps"]
                     if s["name"] == "phase1_ingest_render"), None)
     assert ingest is not None
-    assert ingest["status"] == "BLOCKED"
+    assert ingest["status"] == "NOT_MEASURED"
     assert ingest["extras"]["finding"] == "REQUIRED_INPUT_ABSENT"
     # …and it says WHAT was missing, not merely that something was.
     assert "input/phase1_prompt.md" in ingest["detail"]
@@ -147,7 +152,7 @@ def test_reverse_one_staged_input_and_the_same_run_completes(tmp_path):
     assert body["verdict"] in ("PASS", "PASS_WITH_WAIVERS")
     ingest = next(s for s in body["steps"]
                   if s["name"] == "phase1_ingest_render")
-    assert ingest["status"] != "BLOCKED"
+    assert ingest["status"] != "NOT_MEASURED"
 
 
 def test_positive_fail_missing_project(tmp_path):

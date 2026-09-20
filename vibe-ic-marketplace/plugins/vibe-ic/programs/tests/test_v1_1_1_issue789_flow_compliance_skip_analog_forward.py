@@ -144,7 +144,7 @@ def test_positive_check_step_skip_analog_waived_not_fail(tmp_path):
     same step with skip_analog=False is FAIL (the flag had no effect pre-fix)."""
     proj = _make_project(tmp_path, _ANALOG_L10)
     r_flag = F.check_step(proj, _l10_step(), waivers={}, skip_analog=True)
-    assert r_flag.status == "WAIVED", (r_flag.status, r_flag.reasons)
+    assert r_flag.status == "PASS_WITH_WAIVERS", (r_flag.status, r_flag.reasons)
     r_noflag = F.check_step(proj, _l10_step(), waivers={}, skip_analog=False)
     assert r_noflag.status == "FAIL", (r_noflag.status, r_noflag.reasons)
 

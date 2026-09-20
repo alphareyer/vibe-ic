@@ -41,7 +41,7 @@ def _run(notes: str):
 
 def test_registry_handoff_survives_an_undeclared_catalog_match():
     res = _run("A minimal bit-serial rv32i core, authored for this tapeout.")
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     assert res.extras.get("fallback_skill") == "spec-to-rtl"
     assert res.extras.get("ip_catalog_declared_reuse") == []
     assert "`spec-to-rtl`" in str(res.detail)
@@ -52,7 +52,7 @@ def test_a_match_the_docs_declare_as_reuse_does_redirect_the_handoff():
     the input docs name the IP, the glue path IS the right hand-off."""
     res = _run("A minimal bit-serial rv32i core. The serv core is reused "
                "as the CPU; this design only integrates it.")
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     if not res.extras.get("ip_catalog_matches"):
         # No catalog on this checkout -> nothing to redirect; the assertion
         # above (registry stands) is the whole contract then. Say so rather

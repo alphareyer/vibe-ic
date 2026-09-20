@@ -10,7 +10,7 @@ MEASURED on 8HD-6, main at 3c9724e8, from a clean clone, one node id::
     E  AssertionError: ... the simulator was NOT FOUND where the compile was
        dispatched (rc=127) ... Generic full-stack TB skeleton
        (tb_core_top_full.v) + results.json present but NO sim ran (#439).
-       assert 'WAIVED' == 'INCOMPLETE'
+       assert 'PASS_WITH_WAIVERS' == 'NOT_MEASURED'
 
 The container HAS iverilog and the tree sat outside its bind mounts, so
 `_iverilog_exec_container` declined it (correctly — the container cannot see
@@ -101,7 +101,7 @@ def test_sim_that_ran_to_completion_is_incomplete_and_says_it_executed(
         tmp_path, monkeypatch):
     _pin_stage(monkeypatch, [(0, "", ""), (0, "FULL_STACK_TB_DONE\n", "")])
     sr = dosr.step_reference_tb(_project(tmp_path), _TOP, "processor_cpu")
-    assert sr.status == "INCOMPLETE", (sr.status, sr.detail)
+    assert sr.status == "NOT_MEASURED", (sr.status, sr.detail)
     assert sr.extras.get("sim_executed") is True
     assert sr.extras.get("functional_verified") is False
 
@@ -124,7 +124,7 @@ def test_no_simulator_anywhere_is_not_executed_and_never_a_pass(
     _pin_stage(monkeypatch, [_ABSENT])
     sr = dosr.step_reference_tb(_project(tmp_path), _TOP, "processor_cpu")
     assert sr.status == dosr.NOT_EXECUTED_STATUS, (sr.status, sr.detail)
-    assert sr.status != "WAIVED"
+    assert sr.status != "PASS_WITH_WAIVERS"
     assert sr.extras.get("sim_executed") is False
     assert sr.extras.get("functional_verified") is False
     # it must not accuse the DUT for a fact about where the tree sits.
@@ -156,7 +156,8 @@ def test_not_executed_is_classified_and_is_not_a_pass(capsys):
     enumerate. A new status word must be classified BEFORE it can be emitted,
     or the first run that emits it is silently green."""
     plan = [dosr.StepResult("reference_tb", dosr.NOT_EXECUTED_STATUS,
-                            0.0, "no sim ran")]
+                            0.0, "no sim ran",
+                            reason_class=dosr.NOT_EXECUTED_REASON)]
     assert dosr._aggregate_verdict(plan) != "PASS"
     assert "UNCLASSIFIED" not in capsys.readouterr().err
 
@@ -254,10 +255,17 @@ def test_the_constant_and_every_literal_spelling_are_the_same_word():
     drift apart. This is the pin that stops it."""
     src = (PROGRAMS / "design_one_shot_runner.py").read_text(errors="replace")
     word = dosr.NOT_EXECUTED_STATUS
-    # the aggregator classifies it, so it cannot reach the catch-all PASS
-    assert f'_INCOMPLETE_STATUSES = ("INCOMPLETE", "{word}")' in src
-    # main's reference-TB repair loop treats it as terminal
-    assert f'"INCOMPLETE",\n                          "{word}") or' in src
+    # R-0915-85 — THE CATCH-ALL IS GONE, so the first of the two hand-spelt
+    # sites it pinned is gone with it: `_aggregate_verdict` is
+    # `verdict.run_verdict` over rows `verdict.parse` has already refused an
+    # unknown word at, and `_INCOMPLETE_STATUSES` was a list this file had to
+    # keep in step with. What survives, and still has to be spelt by hand, is
+    # main's terminal tuple — the closed-loop checker reads it as an AST
+    # literal collection and cannot name a module constant.
+    assert f'"PASS_WITH_WAIVERS", "{word}") or' in src, (
+        "main's reference-TB repair loop no longer spells the terminal set as "
+        "literals; the closed-loop coverage checker reads it as an AST "
+        "literal collection and would report the loop unwired")
     # and the closed-loop registry's citation agrees with that tuple
     import closed_loop_executable_coverage_check as clc
     cited = clc.REGISTRY["4"]["evidence"]

@@ -110,11 +110,17 @@ LIVE_STEP_GATES = {
 # a derived design absence on this fixture; the others are waiting for process
 # outputs and therefore remain incomplete.
 LIVE_STEP_EXPECTED = {
-    "analog_hardmacro_check": "VACUOUS_PASS",
-    "analog_hw_spice_correlation_check": "INCOMPLETE",
-    "analog_netlist_pdk_check": "INCOMPLETE",
-    "analog_pre_vs_post_layout_check": "INCOMPLETE",
-    "spice_correlation_check": "INCOMPLETE",
+    # R-0915-85 — `VACUOUS_PASS` is `PASS` carrying the `vacuity` disclosure;
+    # `INCOMPLETE` is `NOT_MEASURED`. Each word below is the one the step
+    # PRODUCED on this fixture, read off the run, not translated.
+    # Measured: the gate signals RC_VACUOUS ("input not applicable") and the
+    # step carries that through as NOT_MEASURED, not as a pass. `VACUOUS_PASS`
+    # was a PASS that examined nothing; R-0915-85 refuses to call that green.
+    "analog_hardmacro_check": "NOT_MEASURED",
+    "analog_hw_spice_correlation_check": "NOT_MEASURED",
+    "analog_netlist_pdk_check": "NOT_MEASURED",
+    "analog_pre_vs_post_layout_check": "NOT_MEASURED",
+    "spice_correlation_check": "NOT_MEASURED",
 }
 
 
@@ -433,7 +439,7 @@ def test_shipped_step_30_is_incomplete_without_correlation_inputs(
     (proj / "reports" / "phase3" / "spice_correlation.json").write_text("{}")
 
     result = _flow.check_step(proj, step, waivers={})
-    assert result.status == "INCOMPLETE", (result.status, result.reasons)
+    assert result.status == "NOT_MEASURED", (result.status, result.reasons)
 
 
 def test_the_live_step_wiring_is_what_this_change_measured(tmp_path):

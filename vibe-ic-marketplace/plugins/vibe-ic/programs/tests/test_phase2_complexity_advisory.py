@@ -14,6 +14,7 @@ from pathlib import Path
 
 PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
+import verdict as _V  # noqa: E402
 import design_one_shot_runner as p2  # noqa: E402
 import design_complexity_estimator as dce  # noqa: E402
 
@@ -36,7 +37,7 @@ def test_advisory_emitted_for_toy_project(tmp_path):
     sr = p2.step_complexity_advisory(proj)
 
     # (a) advisory is emitted and non-gating
-    assert sr.status == "ADVISORY"
+    assert sr.status == "PASS"
     adv = proj / "reports" / "phase2" / "complexity_advisory.json"
     assert adv.is_file()
     data = json.loads(adv.read_text())
@@ -62,7 +63,7 @@ def test_estimator_exception_does_not_propagate(tmp_path, monkeypatch):
 
     # must NOT raise
     sr = p2.step_complexity_advisory(proj)
-    assert sr.status == "ADVISORY"           # still advisory, never FAIL
+    assert sr.status == "PASS"           # still advisory, never FAIL
     assert "estimator blew up" in (sr.extras.get("error") or "")
 
 
@@ -70,7 +71,10 @@ def test_advisory_status_cannot_change_aggregate_verdict():
     """An ADVISORY step among all-PASS steps keeps the verdict PASS, and
     among a FAIL keeps FAIL — i.e. it never alters pass/fail logic."""
     SR = p2.StepResult
-    advisory = SR("complexity_advisory", "ADVISORY")
+    # R-0915-85 — ADVISORY is a DISCLOSURE on a PASS; a PASS row cannot move
+    # the run word in either direction, which is what this test drives.
+    advisory = SR("complexity_advisory", "PASS",
+                  disclosures=[_V.Disclosure.ADVISORY])
 
     all_pass = [SR("a", "PASS"), advisory, SR("b", "PASS")]
     assert p2._aggregate_verdict(all_pass) == "PASS"

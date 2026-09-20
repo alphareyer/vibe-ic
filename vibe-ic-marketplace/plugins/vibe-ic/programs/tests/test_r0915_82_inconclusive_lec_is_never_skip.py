@@ -229,12 +229,35 @@ def test_FAIL_is_untouched():
 
 
 def test_SKIPPED_CONDITION_is_untouched():
-    assert _status_for({"verdict": "SKIPPED-CONDITION",
-                        "equivalent": False}) == "SKIP"
+    """R-0915-82's point survives R-0915-85's word change.
+
+    What this pinned was that R-0915-82 moved ONLY the INCONCLUSIVE arm and
+    left this one alone. It still does: `SKIPPED-CONDITION` is NOT_MEASURED —
+    nothing was compared — and it is emphatically not the FAIL that
+    R-0915-82 gave a ladder that RAN and did not close. The reason class is
+    asserted beside the word, because that is where the distinction lives now.
+    """
+    doc = {"verdict": "SKIPPED-CONDITION", "equivalent": False}
+    assert _status_for(doc) == "NOT_MEASURED"
+    assert _status_for(doc) != "FAIL"
+    assert dosr.lec_inconclusive_reason_class(doc) == "no_population"
+
+
+def test_a_sat_abort_is_inconclusive_not_an_empty_population():
+    """`lec_run` emits SKIPPED-CONDITION on a SAT abort with points already
+    proven. The tool RAN and could not decide, which is a different sentence
+    from "there was nothing to decide" — and the reason field is the only
+    place that difference can now live."""
+    doc = {"verdict": "SKIPPED-CONDITION", "equivalent": False,
+           "compared_points": 65,
+           "sat_model_unsupported_cells": [{"cell_type": "gf180mcu_fd_io__bi_t"}]}
+    assert _status_for(doc) == "NOT_MEASURED"
+    assert dosr.lec_inconclusive_reason_class(doc) == "inconclusive"
 
 
 def test_an_unreadable_report_is_untouched():
-    assert _status_for("{ not json") == "SKIP"
+    assert _status_for("{ not json") == "NOT_MEASURED"
+    assert dosr.lec_inconclusive_reason_class("{ not json") == "execution_error"
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +341,8 @@ def p3():
 
 def test_NOT_EXECUTED_is_inside_the_known_vocabulary(p3):
     plan = [p3.StepResult("pnr", "PASS"),
-            p3.StepResult("step11_lec_equivalence", dosr.NOT_EXECUTED_STATUS)]
+            p3.StepResult("step11_lec_equivalence", dosr.NOT_EXECUTED_STATUS,
+                          reason_class=dosr.NOT_EXECUTED_REASON)]
     verdict = p3._aggregate_verdict(plan)
     assert not str(verdict).startswith("UNKNOWN_STATUS:")
 
@@ -327,8 +351,13 @@ def test_a_stopped_proof_does_not_block_phase3(p3):
     """R-0915-48 word for word: the backstop fires, the flow proceeds. The tier
     must be the disclosed-gap tier, not FAIL."""
     plan = [p3.StepResult("pnr", "PASS"),
-            p3.StepResult("step11_lec_equivalence", dosr.NOT_EXECUTED_STATUS)]
-    assert p3._aggregate_verdict(plan) == "PASS_WITH_WAIVERS"
+            p3.StepResult("step11_lec_equivalence", dosr.NOT_EXECUTED_STATUS,
+                          reason_class=dosr.NOT_EXECUTED_REASON)]
+    # R-0915-85 — the disclosed-gap tier is `NOT_MEASURED(not_executed)`, and
+    # that is the whole R-0915-48 sentence in one row: the proof was STOPPED,
+    # so nothing was measured; it is not a FAIL, and it is not a waiver either
+    # (nobody owns a row here). The run is off PASS and says why.
+    assert p3._aggregate_verdict(plan) == "NOT_MEASURED"
 
 
 def test_an_unclosed_ladder_DOES_block_phase3(p3):

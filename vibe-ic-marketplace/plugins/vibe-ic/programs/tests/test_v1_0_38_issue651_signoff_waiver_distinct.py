@@ -258,7 +258,7 @@ def test_check_step_three_way_status(tmp_path):
     clean_p = _clean_project((tmp_path / "c"))
     fail_p = _fail_project((tmp_path / "f"))
 
-    assert fc.check_step(waiver_p, step, waivers={}).status == "WAIVED"
+    assert fc.check_step(waiver_p, step, waivers={}).status == "PASS_WITH_WAIVERS"
     assert fc.check_step(clean_p, step, waivers={}).status == "PASS"
     assert fc.check_step(fail_p, step, waivers={}).status == "FAIL"
 
@@ -272,7 +272,7 @@ def test_waived_status_is_not_bare_pass(tmp_path):
                      "tapeout_signoff_check . --mode tapeout"}}
     r = fc.check_step(_waiver_project((tmp_path / "w")), step, waivers={})
     assert r.status != "PASS"
-    assert r.status == "WAIVED"
+    assert r.status == "PASS_WITH_WAIVERS"
     # the reason makes the deferral explicit + cites #651.
     assert any("PASS_WITH_WAIVERS" in reason and "#651" in reason
                for reason in r.reasons)

@@ -150,9 +150,14 @@ def test_negative_arm_without_the_judging_clause_the_step_passes(tmp_path):
     mutated = tmp_path / "flow.yaml"
     mutated.write_text(text.replace(_CLAUSE, ""), encoding="utf-8")
     verdict = _step8_verdict(p, flow_def=mutated)
+    # R-0915-85 — the presence entry alone does not FAIL the step, which is
+    # what this negative arm is for. It does not PASS it either: with the
+    # judging clause removed nothing examined the SDC, and NOT_MEASURED is
+    # that sentence. The arm's property -- deleting the clause must not turn
+    # the row red -- is asserted directly.
     assert verdict != "FAIL", verdict
-    assert verdict.startswith("PASS"), (
-        f"expected the presence entry alone to pass; got {verdict}")
+    assert verdict == "NOT_MEASURED", (
+        f"expected the presence entry alone to measure nothing; got {verdict}")
 
 
 def test_the_judging_clause_is_still_declared(flow_doc):

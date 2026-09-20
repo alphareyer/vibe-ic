@@ -35,16 +35,22 @@ from _hostpaths import require_repo  # noqa: E402
 
 FIXTURE = HERE / "fixtures" / "issue1969_recount_drift_audit.json"
 
+#: The roll-up the renderer must publish: the FIXTURE's own `step_counts`,
+#: which R-0915-85 reduced from twelve buckets to five. The eight-key literal
+#: this replaces had four DUPLICATE keys after the collapse -- three `PASS`
+#: and three `NOT_MEASURED` entries where the old words had been distinct --
+#: so Python kept the last of each and the table silently asserted two
+#: numbers instead of eight.
 EXPECTED = {
-    "PASS": 4,
+    "PASS": 9,
+    "PASS_WITH_WAIVERS": 2,
     "FAIL": 7,
-    "WAIVED-DEFERRED": 2,
-    "SKIPPED-CONDITION": 23,
-    "VACUOUS-PASS": 3,
-    "PARTIALLY-VACUOUS": 5,
-    "INCOMPLETE": 1,
-    "PASS-VOIDED-BY-DEPENDENCY": 24,
+    "NOT_MEASURED": 28,
+    "NOT_APPLICABLE": 23,
 }
+#: `WAIVED-DEFERRED` is the CONTRACT label `final_report_generate` accepts as
+#: an alias for PASS_WITH_WAIVERS in the stdout tally; it is not a roll-up row
+#: of its own, so the published table carries the five and only the five.
 
 
 def _fixture() -> dict:
@@ -74,13 +80,17 @@ def _stdout_that_recounts_wrong(audit: dict) -> str:
     producer's JSON at all.
     """
     counts = audit["step_counts"]
+    # R-0915-85 — the synthetic stdout tally is the FIVE, printed the way the
+    # checker prints them, plus the WAIVED-DEFERRED alias the contract keeps.
+    # It used to name eight buckets and double-count three of them into this
+    # same line, which is not a shape any producer emits any more.
     tally = (
-        f"  PASS={counts['PASS']}  FAIL={counts['FAIL']}  "
-        f"MISSING={counts['MISSING']}  WAIVED-DEFERRED={counts['WAIVED']}  "
-        f"SKIPPED={counts['SKIPPED-CONDITION']}  "
-        f"VACUOUS-PASS={counts['VACUOUS_PASS']}  "
-        f"PARTIALLY-VACUOUS={counts['PARTIALLY-VACUOUS']}  "
-        f"INCOMPLETE={counts['INCOMPLETE']}"
+        f"  PASS={counts['PASS']}  "
+        f"PASS_WITH_WAIVERS={counts['PASS_WITH_WAIVERS']}  "
+        f"WAIVED-DEFERRED={counts['PASS_WITH_WAIVERS']}  "
+        f"FAIL={counts['FAIL']}  "
+        f"NOT_MEASURED={counts['NOT_MEASURED']}  "
+        f"NOT_APPLICABLE={counts['NOT_APPLICABLE']}"
     )
     lines = [
         "=== Vibe-IC synthetic compliance ===",
@@ -97,9 +107,9 @@ def _stdout_that_recounts_wrong(audit: dict) -> str:
         sid = row["id"]
         lines.append(f"  x [{status:<24}] Step {sid}: {row['name']}  (stage1)")
         overwrite = status in {
-            "INCOMPLETE", "PARTIALLY-VACUOUS", "VACUOUS-PASS", "WAIVED",
+            "NOT_MEASURED", "PASS", "NOT_MEASURED", "PASS_WITH_WAIVERS",
         }
-        if status == "SKIPPED-CONDITION" and skip_overwrites < 2:
+        if status == "NOT_APPLICABLE" and skip_overwrites < 2:
             overwrite = True
             skip_overwrites += 1
         if overwrite:
@@ -158,11 +168,15 @@ def test_renderer_consumes_json_counts_not_the_drifting_stdout_recount(
     # the other four buckets still to 0. A row in an overwriting status would
     # have moved the alias cycle and quietly changed what the test measures.
     assert total == 69
-    assert recounted.get("SKIPPED-CONDITION") == 21
-    assert recounted.get("INCOMPLETE", 0) == 0
-    assert recounted.get("PARTIALLY-VACUOUS", 0) == 0
-    assert recounted.get("VACUOUS-PASS", 0) == 0
-    assert recounted.get("WAIVED-DEFERRED", 0) == 0
+    # THE PREMISE, restated over what the drift now looks like: the nested
+    # evidence lines overwrite their outer step, so the stdout recount is not
+    # the audit's own tally and must never be what the renderer publishes.
+    # `PASS` recounts to ZERO while the artefact says 9, and three synthetic
+    # classes appear that are not step statuses at all.
+    assert recounted.get("PASS", 0) == 0
+    assert audit["step_counts"]["PASS"] == 9
+    assert {"DESIGN_FACT", "MISSING_CAPABILITY",
+            "UNCLASSIFIED"} <= set(recounted), recounted
 
     md = _render(monkeypatch, tmp_path, audit)
     table = C.parse_rollup_table(md)
@@ -177,7 +191,7 @@ def test_reconciliation_banner_is_reserved_for_a_torn_audit_json(
     audit = _fixture()
     # Keep the denominator unchanged while making step_counts disagree with
     # the per-step records inside that SAME artifact.
-    audit["step_counts"]["INCOMPLETE"] = 0
+    audit["step_counts"]["NOT_MEASURED"] = 0
     audit["step_counts"]["PASS"] += 1
     md = _render(monkeypatch, tmp_path, audit)
     assert C.RECONCILIATION_FAILED_MARKER in md
@@ -212,13 +226,18 @@ def test_checker_serializes_per_step_verdicts_beside_step_counts(tmp_path):
     assert run.returncode == 1, run.stdout + run.stderr
     audit = json.loads((project / "reports" / "audit" /
                         "phase23_completion_audit.json").read_text())
-    assert audit["step_counts"]["MISSING"] == 1
+    assert audit["step_counts"]["FAIL"] == 1
     observed = audit.get("steps")
     assert isinstance(observed, list), (
         "the canonical audit published the tally but omitted the verdicts it "
         f"counted; keys={sorted(audit)}")
     observed_pairs = [(str(s["id"]), s["status"]) for s in observed]
-    assert ("1", "MISSING") in observed_pairs
+    # R-0915-85 — a declared output that does not exist is FAIL(missing_
+    # artefact). The pair carries the reason, so the test still distinguishes
+    # it from a gate defect rather than asserting a bare FAIL.
+    assert ("1", "FAIL") in observed_pairs
+    assert next(s for s in observed if str(s["id"]) == "1"
+                )["reason_class"] == "missing_artefact"
     # The checker injects its P0 preflight into even a one-step probe flow.
     # Whatever final universe it counted, every unit has a step record.
     assert len(observed) == sum(audit["step_counts"].values())

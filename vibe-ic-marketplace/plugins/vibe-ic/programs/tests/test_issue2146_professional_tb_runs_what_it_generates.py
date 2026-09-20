@@ -213,7 +213,7 @@ def test_a_skipped_transcript_is_still_not_a_pass(tmp_path, monkeypatch):
     _bundle_project(tmp_path, "generic", monkeypatch)
     _simulator_that_writes(monkeypatch, _SKIPPED_XML)
     step = D.step_professional_tb_gen(tmp_path, "dut", "c")
-    assert step.status == "INCOMPLETE"
+    assert step.status == "NOT_MEASURED"
     g = _gate(tmp_path)
     assert g["status"] == "INCOMPLETE"
     assert "reference-model hook is unfilled" in g["reason"]
@@ -247,7 +247,7 @@ def test_a_class_the_generator_SKIPs_owes_no_bundle(tmp_path, monkeypatch):
         types.SimpleNamespace(generate=lambda _p: {"status": "SKIP",
                                                    "reason": "no interface"}))
     step = D.step_professional_tb_gen(tmp_path, "dut", "c")
-    assert step.status == "SKIP"
+    assert step.status == "NOT_MEASURED"
     assert not (tmp_path / "phase2/stage1/sim_professional").exists()
 
 

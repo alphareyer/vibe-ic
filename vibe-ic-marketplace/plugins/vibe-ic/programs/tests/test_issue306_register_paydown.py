@@ -323,6 +323,6 @@ def test_306_drv_promotion_step_does_not_fail_on_a_checker_fault(tmp_path):
     r = R.step_drv_promotion_corroboration(missing)
     assert r.status != "FAIL", (
         "a checker fault is not a verdict about the design", r)
-    assert r.status == "BLOCKED", r
+    assert r.status == "NOT_MEASURED", r
     assert not missing.exists(), (
         "the step created the project directory it was asked to audit")

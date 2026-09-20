@@ -296,8 +296,11 @@ def test_deferrability_is_decided_by_records_not_prose(
     _rc, report, audit = _run(tmp_path, extra=("--strict-structural",))
     printed = capsys.readouterr().out
 
-    assert report["overall"] == "PASS_WITH_OPEN_SOURCE_CONSTRAINTS", printed
-    assert audit["verdict"] == "PASS_WITH_OPEN_SOURCE_CONSTRAINTS"
+    # R-0915-85 — `PASS_WITH_OPEN_SOURCE_CONSTRAINTS` was a PASS_WITH_WAIVERS
+    # whose waiver rows all cite the same owner. The word is gone; the rows
+    # and the deferral list below are where that fact lives, and they are what
+    # this test goes on to read.
+    assert audit["verdict"] == "PASS_WITH_WAIVERS"
     p0_deferral = next(d for d in audit["open_source_constraints_deferrals"]
                        if d["step_id"] == "P0")
     assert [s["sub_gate"] for s in p0_deferral["p0_thin_input_subgates"]] == \
@@ -369,7 +372,14 @@ def test_a_not_invocable_record_is_never_a_failing_gate(
     assert audit["failed_gates"] == []
     assert audit["gates"] == []
     assert audit["structural_fail_lines"] == []
-    assert rc == 0, "gates that never ran must not force the verdict"
+    # R-0915-85 — "must not FORCE the verdict" is unchanged and is asserted by
+    # the three lines above: no failed gate, no gate row, no structural fail
+    # line. What the run may NOT do is claim a PASS: three gates that could not
+    # be invoked means nothing structural was measured, and the ladder answers
+    # NOT_MEASURED for exactly that. rc 1 is that word reaching the shell; it
+    # is not a FAIL and it names no finding.
+    assert audit["verdict"] == "NOT_MEASURED", audit["verdict"]
+    assert rc == 1, "a run that measured nothing must not exit green"
     # the disclosure is still disclosed — the fix suppresses the MIS-READING
     p0 = next(s for s in report["steps"] if s["id"] == "P0")
     assert any(GI.NOT_INVOCABLE_SENTINEL in r for r in p0["reasons"])
@@ -394,7 +404,18 @@ def test_waived_and_skipped_records_are_not_failures(
     assert audit["failed_gate_count"] == 0
     assert audit["passed_gate_count"] == 1
     assert audit["structural_fail_lines"] == []
-    assert rc == 0
+    # R-0915-85 — the waived and the skipped record are still NOT failures,
+    # which is this test's subject and is asserted on the three counts above.
+    # The run word follows the ladder, and the reason is published with it.
+    # R-0915-85 — one waived record, one skipped record, one PASS. Neither
+    # the waiver nor the skip is a failure, which is this test's subject and
+    # is asserted on the three counts above. The run word is NOT_MEASURED
+    # because only ONE of the umbrella's gates answered about the design;
+    # that is the partial-population rung, not a finding, and rc 1 is that
+    # word reaching the shell.
+    assert audit["verdict"] == "NOT_MEASURED", audit["verdict"]
+    assert audit["failed_gate_count"] == 0
+    assert rc == 1
 
 
 # ═══════ 4. the PASS population — the number that read 0 for years ══════════

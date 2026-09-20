@@ -88,7 +88,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import _blocker_classification as _bc
-import _flow_verdict_tiers as _T
+import verdict as _T
 
 #: A record must carry every one of these. A key that is sometimes absent
 #: forces each consumer to decide what missing means, which is the contract

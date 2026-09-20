@@ -122,7 +122,7 @@ def _project(tmp_path, fields, marker=None, *, write_l20=True, body=None):
 
 def _is_oss_blocked(F, r) -> bool:
     """The exact predicate `main()` uses to build `oss_blocked_skipped`."""
-    return (r.status == "SKIPPED-CONDITION" and r.self_skip_disclosed
+    return (r.status == "NOT_APPLICABLE" and r.self_skip_disclosed
             and (r.id in F._OPEN_SOURCE_CONTAINER_BLOCKED_STEPS
                  or r.id in F._DFT_SIGNOFF_WITHDRAWN_STEPS))
 
@@ -184,7 +184,7 @@ def test_a_design_declaring_no_DFT_gets_a_declared_NA_citing_L20(tmp_path):
     R = _R()
     proj = _project(tmp_path, ABSENT, R._POST_DFT_SKIP_DECLARED)
     r = F.check_step(proj, _steps()["12"], {})
-    assert r.status == "SKIPPED-CONDITION"
+    assert r.status == "NOT_APPLICABLE"
     assert r.self_skip_disclosed is False
     assert not _is_oss_blocked(F, r)
     joined = " ".join(r.reasons)
@@ -210,7 +210,7 @@ def test_even_the_OLD_capability_marker_cannot_reopen_the_deferral(tmp_path):
     R = _R()
     proj = _project(tmp_path, ABSENT, R._POST_DFT_SKIP_OWN)
     r = F.check_step(proj, _steps()["12"], {})
-    assert r.status == "SKIPPED-CONDITION"
+    assert r.status == "NOT_APPLICABLE"
     assert r.self_skip_disclosed is False
     assert not _is_oss_blocked(F, r)
 
@@ -234,7 +234,7 @@ def test_a_design_that_declares_DFT_owes_the_netlist(tmp_path, field,
     fields[field] = asserting
     proj = _project(tmp_path, fields, R._POST_DFT_SKIP_OWN)
     r = F.check_step(proj, _steps()["12"], {})
-    assert r.status == "MISSING", (
+    assert r.status == "FAIL", (
         "a design that declares DFT and produced no post-DFT netlist has an "
         "unmet requirement", r.status, r.reasons)
     assert not _is_oss_blocked(F, r)
@@ -251,7 +251,7 @@ def test_absence_of_a_declaration_is_not_a_declaration_of_absence(tmp_path,
     R = _R()
     proj = _project(tmp_path, ABSENT, R._POST_DFT_SKIP_OWN, **kw)
     r = F.check_step(proj, _steps()["12"], {})
-    assert r.status == "MISSING", (r.status, r.reasons)
+    assert r.status == "FAIL", (r.status, r.reasons)
 
 
 @pytest.mark.parametrize("missing", sorted(ABSENT))
@@ -261,7 +261,7 @@ def test_a_partly_filled_L20_runs_step_12(tmp_path, missing):
     fields = {k: v for k, v in ABSENT.items() if k != missing}
     proj = _project(tmp_path, fields, R._POST_DFT_SKIP_OWN)
     r = F.check_step(proj, _steps()["12"], {})
-    assert r.status == "MISSING", (r.status, r.reasons)
+    assert r.status == "FAIL", (r.status, r.reasons)
 
 
 # ── the runner's own predicate, both directions ───────────────────────────

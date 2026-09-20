@@ -81,7 +81,7 @@ def test_a_waived_prerequisite_with_ticket_and_approver_satisfies_it():
     """THE SPM CASE. The flow itself declared this gap, gave it a ticket, an
     approver and review_required — that is an undertaking to close it, not a
     failure."""
-    assert _satisfied("WAIVED", _full_waiver()) is True
+    assert _satisfied("PASS_WITH_WAIVERS", _full_waiver()) is True
 
 
 @pytest.mark.parametrize("status", ["FAIL", "MISSING", "INCOMPLETE"])
@@ -100,11 +100,11 @@ def test_a_waiver_missing_its_accountability_still_blocks(drop):
     close anything, so it cannot buy a promotion."""
     w = _full_waiver()
     w.pop(drop)
-    assert _satisfied("WAIVED", w) is False, drop
+    assert _satisfied("PASS_WITH_WAIVERS", w) is False, drop
 
 
 def test_a_waived_prerequisite_with_no_waiver_entry_at_all_blocks():
-    assert _satisfied("WAIVED", None) is False
+    assert _satisfied("PASS_WITH_WAIVERS", None) is False
 
 
 def test_the_waiver_entry_the_flow_actually_writes_is_accepted():
@@ -122,7 +122,7 @@ def test_the_waiver_entry_the_flow_actually_writes_is_accepted():
         "_env_unavailable": True,
         "_fpga_skip": True,
     }
-    assert _satisfied("WAIVED", entry) is True
+    assert _satisfied("PASS_WITH_WAIVERS", entry) is True
 
 
 # ── part 2: the table is derived from the flow ───────────────────────────

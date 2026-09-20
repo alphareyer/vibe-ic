@@ -252,7 +252,7 @@ def test_wired_into_phase2_runner(tmp_path):
     assert (rtl_dir / "subtractor.v").is_file()
     # idempotent + collision-safe: re-run emits nothing new.
     r2 = P.step_leaf_typo_aliases(tmp_path)
-    assert r2.status == "SKIP"
+    assert r2.status == "NOT_APPLICABLE"
 
 
 def test_step_skips_when_no_typo(tmp_path):
@@ -264,7 +264,7 @@ def test_step_skips_when_no_typo(tmp_path):
     rtl_dir.mkdir(parents=True)
     (rtl_dir / "counter.v").write_text(_leaf_rtl("counter"))
     r = P.step_leaf_typo_aliases(tmp_path)
-    assert r.status == "SKIP"
+    assert r.status == "NOT_APPLICABLE"
     assert not (rtl_dir / "subtractor.v").exists()
 
 

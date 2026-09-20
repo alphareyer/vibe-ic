@@ -269,7 +269,7 @@ def test_generic_program_first_hook_routes_to_expert_as_incomplete(
 
     step = RUNNER.step_professional_tb_gen(
         tmp_path, "dut_core", "configured-container")
-    assert step.status == "INCOMPLETE", step
+    assert step.status == "NOT_MEASURED", step
     assert step.extras["program_first"] == "professional_tb_gen"
     assert step.extras["fallback_skill"] == "testbench-gen"
     rec = json.loads((tmp_path / "reports/phase2/gates/"

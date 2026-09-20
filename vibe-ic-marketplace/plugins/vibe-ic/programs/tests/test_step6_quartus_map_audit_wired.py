@@ -65,8 +65,10 @@ def _project(tmp_path: Path, *, sof: bool, map_rpt: str | None) -> Path:
 def _emit(proj: Path, compile_status: str | None) -> dict:
     plan = []
     if compile_status is not None:
+        _kw = ({"reason_class": "not_executed"}
+               if compile_status == "NOT_MEASURED" else {})
         plan.append(dr.StepResult("fpga_compile", compile_status, 1.0,
-                                  "sof=top.sof size=10"))
+                                  "sof=top.sof size=10", **_kw))
     dr.step_emit_phase2_manifests(proj, plan, top_name="top")
     return json.loads(
         (proj / "reports/phase2/fpga/quartus_map_audit.json").read_text())
@@ -243,7 +245,10 @@ def test_guard_board_absent_disclosure_still_grants_the_capgap_waiver(tmp_path):
 
 def test_guard_attempted_incomplete_skip_reason_is_preserved(tmp_path):
     proj = _project(tmp_path, sof=False, map_rpt=None)
-    audit = _emit(proj, "SKIP")
+    # R-0915-85 — an ATTEMPTED-but-incomplete compile measured nothing about
+    # the design; the `skip_reason` beside it is what distinguishes it from a
+    # compile that was never attempted, and both are asserted below.
+    audit = _emit(proj, "NOT_MEASURED")
     assert audit["verdict"] == "SKIP"
     assert audit["sof_present"] is False
     assert audit["skip_reason"] == "attempted_incomplete"

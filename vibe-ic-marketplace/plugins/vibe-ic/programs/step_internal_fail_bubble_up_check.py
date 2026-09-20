@@ -293,6 +293,12 @@ def semantic_progress_units(cell: Path) -> List[str]:
     """Trusted parent's exact finite manifest for the default cell argv."""
     return _input_plan(Path(cell))[0].units
 
+# R-0915-85 — `MISSING` is gone from the STEP vocabulary (a declared output that
+# does not exist is `FAIL(missing_artefact)`), and it is kept here because this
+# gate reads the verdict field of ~450 independent GATE PROGRAM reports, which
+# are a different and much larger vocabulary that this ruling does not touch.
+# What IS added is the step vocabulary itself, because a step report written by
+# a migrated producer now lands in this scan too.
 _FAIL_VERDICTS = {"FAIL", "MISSING"}
 
 # Verdict tokens we treat as "honestly accounted for already" — don't
@@ -306,6 +312,12 @@ _NEUTRAL_VERDICTS = {
     "FALLBACK",            # alt-path used; orthogonal to bubble-up
     "WARN", "WARNING",
     "WAIVED", "WAIVED_DEFERRED",
+    # R-0915-85's five, for a report a migrated producer wrote. NOT_MEASURED
+    # and NOT_APPLICABLE are honestly-accounted gaps by construction — each
+    # carries its own reason_class or declared_by — which is exactly what this
+    # set means; PASS_WITH_WAIVERS is the waiver case already here under its
+    # old name.
+    "NOT_MEASURED", "NOT_APPLICABLE", "PASS_WITH_WAIVERS",
 }
 
 
@@ -1852,7 +1864,7 @@ def _main_parsed(args) -> int:
         why = ("no reports/ tree (pre-output project)"
                if not reports_present
                else "reports/ exists but no file in it declares a verdict")
-        print(f"[CANNOT DETERMINE] step_internal_fail_bubble_up: {why}, so no "
+        print(f"[NOT_MEASURED] step_internal_fail_bubble_up: {why}, so no "
               f"report was examined. NOT a pass — a step that crashed before "
               f"writing its report produces exactly this, and it is the state "
               f"this gate exists to notice.", file=sys.stderr)

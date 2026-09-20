@@ -24,7 +24,7 @@ dependency could be marked down. A tree whose analog steps simply FAILED made no
 claim to adjudicate and could not be. Doing nothing was structurally cheaper
 than doing something badly and saying so.
 
-`_flow_verdict_tiers`' own module docstring records this as the flow-POLICY
+`verdict`' own module docstring records this as the flow-POLICY
 question it deliberately left open and called "the owner's to settle".
 
 OWNER POLICY (2026-08-02), vibe-ic#634: THE ANALOG TRACK COUNTS TOWARD
@@ -65,7 +65,7 @@ PROGRAMS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGRAMS))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import _flow_verdict_tiers as TIERS                              # noqa: E402
+import verdict as TIERS                              # noqa: E402
 import test_silence_is_not_cheaper_than_disclosure as THIN       # noqa: E402
 import test_two_gates_over_one_artefact_cannot_disagree as FULL  # noqa: E402
 
@@ -106,7 +106,7 @@ def _flow_audit(project: Path, *extra: str) -> dict:
     # of `PASS_WITH_WAIVERS`). This is the value that becomes the runner's
     # `final_audit` step verdict, so it is what the tests below assert on.
     if "Overall: PASS_WITH_WAIVERS" in p.stdout:
-        rep["_runner_final_audit"] = "WAIVED"
+        rep["_runner_final_audit"] = "PASS_WITH_WAIVERS"
     elif "Overall: PASS" in p.stdout:
         rep["_runner_final_audit"] = "PASS"
     else:
@@ -202,7 +202,14 @@ def test_the_scoping_predicate_lets_exactly_the_not_run_states_through():
         assert TIERS.scoped_into_verdict({"status": word}), (
             f"{word} does not mean the step legitimately did not run, so it "
             f"must reach the verdict")
-    assert TIERS.scoped_into_verdict({"status": "NO-SUCH-TIER-EXISTS"}), (
+    # R-0915-85 — FAIL-CLOSED IS NOW FAIL-LOUD. A word nobody registered used
+    # to default into the verdict, which was the safe answer available while
+    # 23 words were in circulation. `parse` refuses it instead: an unknown
+    # status means a producer was not migrated, and silently scoping it in
+    # would hide that. This is the same property, asserted at its new site.
+    with pytest.raises(TIERS.UnknownVerdictWord):
+        TIERS.scoped_into_verdict({"status": "NO-SUCH-TIER-EXISTS"})
+    assert True, (
         "a status nothing has registered was treated as a legitimate skip — "
         "absent must be CLAIMED, never inherited by a word nobody knows")
 
@@ -377,14 +384,22 @@ def test_an_analog_track_that_produced_nothing_is_not_a_track_that_was_never_ask
     rep_declared = _flow_audit(declared)
     rep_absent = _flow_audit(absent)
 
-    assert rep_declared["counts"].get("FAIL", 0) == 0, (
-        f"PRECONDITION: the declared-but-empty tree has failed steps "
-        f"({rep_declared['counts']}), so this no longer isolates MISSING "
-        f"from FAIL")
-    track = {i: _statuses(rep_declared)[i] for i in _analog_ids(rep_declared)}
-    assert all(s == "MISSING" for s in track.values()), (
+    # R-0915-85 — `MISSING` is `FAIL(missing_artefact)`, so the isolation this
+    # precondition asserts moved from the WORD to the REASON: no step in this
+    # tree failed a gate; every red row is an artefact that does not exist.
+    _gate_defects = [s for s in rep_declared["steps"]
+                     if s.get("status") == "FAIL"
+                     and s.get("reason_class") != "missing_artefact"]
+    assert _gate_defects == [], (
+        f"PRECONDITION: the declared-but-empty tree has a step that FAILED a "
+        f"gate ({_gate_defects}), so this no longer isolates an absent "
+        f"artefact from a defect")
+    track = {s["id"]: (s.get("status"), s.get("reason_class"))
+             for s in rep_declared["steps"]
+             if str(s.get("id")) in set(_analog_ids(rep_declared))}
+    assert all(v == ("FAIL", "missing_artefact") for v in track.values()), (
         f"PRECONDITION: the declared-but-empty track is not uniformly "
-        f"MISSING ({track})")
+        f"FAIL(missing_artefact) ({track})")
 
     assert rep_absent["overall"] == "PASS", rep_absent["overall"]
     assert rep_declared["_runner_final_audit"] == "FAIL", (

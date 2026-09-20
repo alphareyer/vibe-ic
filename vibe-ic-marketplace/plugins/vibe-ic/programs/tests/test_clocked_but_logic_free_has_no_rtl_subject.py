@@ -196,7 +196,7 @@ def test_classifier_keeps_rtl_when_content_exists(tmp_path):
 def test_step_rtl_gen_stops_declaring_an_unservable_handoff(tmp_path):
     res = DOR.step_rtl_gen(_mk_project(tmp_path, _CLOCKED_LOGIC_FREE),
                            "data_converter")
-    assert res.status == "WAIVED"
+    assert res.status == "PASS_WITH_WAIVERS"
     assert res.extras.get("fallback_skill") is None
     assert res.extras.get("deferred_to") == "analog_track"
 
@@ -219,7 +219,7 @@ def test_step_rtl_gen_still_declares_it_when_there_is_a_subject(tmp_path):
     res = DOR.step_rtl_gen(p, "data_converter")
     assert res.extras.get("deferred_to") != "analog_track"
     assert res.extras.get("fallback_skill") == "spec-to-rtl"
-    assert res.status in ("WAIVED", "FAIL"), res.detail
+    assert res.status in ("PASS_WITH_WAIVERS", "FAIL"), res.detail
     if res.status == "FAIL":
         assert "does not state" in (res.detail or ""), res.detail
 
@@ -229,7 +229,7 @@ def test_step_rtl_gen_still_declares_it_when_there_is_a_subject(tmp_path):
 def test_step4_functional_evidence_skips_instead_of_failing(tmp_path):
     p = _mk_project(tmp_path, _CLOCKED_LOGIC_FREE)
     res = DOR.step_step4_functional_evidence(p, "data_converter")
-    assert res.status == "SKIP", res.detail
+    assert res.status == "NOT_APPLICABLE", res.detail
 
 
 def test_step4_still_runs_when_there_is_a_subject(tmp_path):

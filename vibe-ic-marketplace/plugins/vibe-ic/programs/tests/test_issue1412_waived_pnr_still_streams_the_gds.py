@@ -33,8 +33,20 @@ sys.path.insert(0, str(PROG))
 import phase3_one_shot_runner as R  # noqa: E402
 
 
+#: R-0915-85 — the fields each word REQUIRES, supplied here so a fixture can
+#: name a status without also having to remember its obligations. A
+#: NOT_MEASURED with no reason and a NOT_APPLICABLE with no declaration are
+#: refused at the row, which is the point: they are not sayable.
+_OBLIGATION = {
+    "NOT_MEASURED": {"reason_class": "not_executed"},
+    "NOT_APPLICABLE": {"declared_by": "the input declares no PnR"},
+    "PASS_WITH_WAIVERS": {"attribution": "the sign-off engineer"},
+}
+
+
 def _row(status, **extras):
-    return R.StepResult("pnr", status, 1.0, "detail", [], dict(extras))
+    return R.StepResult("pnr", status, 1.0, "detail", [], dict(extras),
+                        **_OBLIGATION.get(status, {}))
 
 
 # ── the predicate ────────────────────────────────────────────────────────────
@@ -46,20 +58,22 @@ def test_passing_pnr_continues_the_chain():
 def test_waived_pnr_with_completed_signoff_writes_continues_the_chain():
     """The #1412 shape. This is the case that was silently dropping the GDS."""
     assert R._pnr_chain_continues(
-        _row("WAIVED", pnr_signoff_writes_complete=True,
+        _row("PASS_WITH_WAIVERS", pnr_signoff_writes_complete=True,
              route_residual_waiver={"ticket": "vibe-ic#1412"})) is True
 
 
 def test_waived_pnr_without_completed_writes_does_NOT_continue():
     """A PnR that died mid-tcl must still stop the chain: WAIVED is not a
     password, the completed writes are."""
-    assert R._pnr_chain_continues(_row("WAIVED")) is False
+    assert R._pnr_chain_continues(_row("PASS_WITH_WAIVERS")) is False
     assert R._pnr_chain_continues(
-        _row("WAIVED", pnr_signoff_writes_complete=False)) is False
+        _row("PASS_WITH_WAIVERS", pnr_signoff_writes_complete=False)) is False
 
 
 def test_failed_blocked_and_absent_pnr_do_not_continue():
-    for st in ("FAIL", "BLOCKED", "SKIP", "ENV_UNAVAILABLE"):
+    # R-0915-85 — BLOCKED and ENV_UNAVAILABLE are both NOT_MEASURED, and
+    # SKIP is NOT_APPLICABLE. Three words, three rows, no duplicates.
+    for st in ("FAIL", "NOT_MEASURED", "NOT_APPLICABLE"):
         assert R._pnr_chain_continues(_row(st)) is False, st
     # even with the flag: a FAILed PnR is not admitted by carrying the key
     assert R._pnr_chain_continues(
@@ -100,7 +114,12 @@ def test_step_pnr_sets_the_evidence_this_predicate_reads():
     elsewhere in this same file family, is why LVS sign-off metrics are
     permanently NOT_MEASURED."""
     src = inspect.getsource(R.step_pnr)
-    assert '_status = "WAIVED"' in src
+    # R-0915-85 — BOTH ENDS OF #1412 IN ONE ASSERTION. The producer wrote
+    # `WAIVED` and `_pnr_chain_continues` tested for it; migrating one and not
+    # the other would have left the chain broken in exactly the way this file
+    # exists to stop, so the word is pinned at the producer and the predicate
+    # is driven above.
+    assert '_status = "PASS_WITH_WAIVERS"' in src
     assert '"pnr_signoff_writes_complete"' in src, (
         "step_pnr no longer records pnr_signoff_writes_complete, so "
         "_pnr_chain_continues can never admit a WAIVED PnR")

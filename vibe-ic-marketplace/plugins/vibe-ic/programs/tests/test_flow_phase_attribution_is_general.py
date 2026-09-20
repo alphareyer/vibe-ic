@@ -58,6 +58,20 @@ def _step(name, status, **extras):
     return s
 
 
+def _marker(name="rtl_repair_retry_iter", **extras):
+    """A repair/retry PROGRESS MARKER row, as the runner records one.
+
+    R-0915-85 — `RTL_REPAIR_RETRY` was a status word for a row that is not an
+    outcome at all. The runner writes the marker as `PASS` carrying
+    `Disclosure.PROGRESS_MARKER`, and the attribution asks the DISCLOSURE, so
+    the fixture has to carry it: a bare `PASS` here would be a gate that
+    decided, which is the exact confusion the word caused.
+    """
+    s = _step(name, "PASS", **extras)
+    s["disclosures"] = ["progress_marker"]
+    return s
+
+
 _PROMPT = ("Design a purely combinational 4-to-1 multiplexer.\n\n"
            "module TopModule (\n  input [3:0] in,\n  input [1:0] sel,\n"
            "  output out\n);\n")
@@ -66,9 +80,9 @@ _PROMPT = ("Design a purely combinational 4-to-1 multiplexer.\n\n"
 # a 4-to-1 multiplexer project: rtl_gen refused, the RTL repair/retry loop fired, rtl_gen
 # then emitted with a NAMED emitter, and four gates failed.
 _REAL_SHAPE = [
-    _step("rtl_gen", "BLOCKED"),
+    _step("rtl_gen", "NOT_MEASURED"),
     _step("reference_tb", "FAIL"),
-    _step("rtl_repair_retry_iter", "RTL_REPAIR_RETRY"),
+    _marker(),
     _step("rtl_gen", "PASS", deterministic_generator="multiplexer"),
     _step("sdc_gen", "FAIL"),
     _step("yosys_synth", "PASS"),
@@ -173,7 +187,7 @@ def test_flow_back_a_plain_design_gets_all_four_phases(tmp_path):
         "changed": True,
         "basis": "rtl_gen status recorded before the first repair marker vs "
                  "the last rtl_gen status recorded",
-        "before": "BLOCKED", "after": "PASS"}
+        "before": "NOT_MEASURED", "after": "PASS"}
 
 
 def test_flow_back_the_cli_writes_a_report_a_plain_user_can_read(tmp_path):
@@ -241,7 +255,7 @@ def test_phase1_sees_supplied_rtl_and_routes_differently(tmp_path):
 
 
 def test_phase2_names_the_ai_skill_when_the_runner_waived(tmp_path):
-    p = _project(tmp_path, [_step("rtl_gen", "WAIVED",
+    p = _project(tmp_path, [_step("rtl_gen", "PASS_WITH_WAIVERS",
                                   fallback_skill="spec-to-rtl")],
                  prompt=_PROMPT)
     r = fpa.attribute(p)["phase2_solving"]
@@ -260,8 +274,8 @@ def test_phase2_separates_a_pass_with_no_named_emitter(tmp_path):
 
 def test_phase2_records_the_earlier_waive_alongside_the_later_emit(tmp_path):
     p = _project(tmp_path, [
-        _step("rtl_gen", "WAIVED", fallback_skill="spec-to-rtl"),
-        _step("rtl_repair_retry_iter", "RTL_REPAIR_RETRY"),
+        _step("rtl_gen", "PASS_WITH_WAIVERS", fallback_skill="spec-to-rtl"),
+        _marker(),
         _step("rtl_gen", "PASS", deterministic_generator="comb_gate"),
     ], prompt=_PROMPT)
     r = fpa.attribute(p)["phase2_solving"]
@@ -293,11 +307,11 @@ def test_phase3_separates_a_gate_that_never_ran_from_one_that_failed(tmp_path):
     p = _project(tmp_path, [
         _step("rtl_gen", "PASS", deterministic_generator="comb_gate"),
         _step("reference_tb", "FAIL"),
-        _step("yosys_synth", "SKIPPED-BY-ENTRY"),
+        _step("yosys_synth", "NOT_APPLICABLE"),
     ], prompt=_PROMPT)
     r = fpa.attribute(p)["phase3_verifying"]
     assert r["failed"] == ["reference_tb"]
-    assert r["not_attempted"] == {"yosys_synth": "SKIPPED-BY-ENTRY"}
+    assert r["not_attempted"] == {"yosys_synth": "NOT_APPLICABLE"}
     assert "yosys_synth" not in r["ran"]
 
 
@@ -325,13 +339,13 @@ def test_phase4_reads_the_mechanism_off_the_step_after_the_marker(tmp_path):
     """PROGRAM and AI_HANDOFF differ ONLY in that next step. Both poles."""
     prog = _project(tmp_path / "a", [
         _step("reference_tb", "FAIL"),
-        _step("rtl_repair_retry_iter", "RTL_REPAIR_RETRY"),
+        _marker(),
         _step("rtl_gen", "PASS", deterministic_generator="vector_ops"),
     ], prompt=_PROMPT)
     ai = _project(tmp_path / "b", [
         _step("reference_tb", "FAIL"),
-        _step("rtl_repair_retry_iter", "RTL_REPAIR_RETRY"),
-        _step("rtl_gen", "WAIVED", fallback_skill="spec-to-rtl"),
+        _marker(),
+        _step("rtl_gen", "PASS_WITH_WAIVERS", fallback_skill="spec-to-rtl"),
     ], prompt=_PROMPT)
     ep = fpa.attribute(prog)["phase4_debugging"]["events"][0]
     ea = fpa.attribute(ai)["phase4_debugging"]["events"][0]
@@ -342,10 +356,10 @@ def test_phase4_reads_the_mechanism_off_the_step_after_the_marker(tmp_path):
 
 
 def test_phase4_calls_blocked_reentry_a_retry_not_a_physical_eco(tmp_path):
-    """No prior candidate failed when rtl_gen was BLOCKED; this is retry."""
+    """No prior candidate failed when rtl_gen could not look; this is retry."""
     p = _project(tmp_path, [
-        _step("rtl_gen", "BLOCKED"),
-        _step("rtl_repair_retry_iter", "RTL_REPAIR_RETRY"),
+        _step("rtl_gen", "NOT_MEASURED"),
+        _marker(),
         _step("rtl_gen", "PASS", deterministic_generator="comb_gate"),
     ], prompt=_PROMPT)
     r = fpa.attribute(p)["phase4_debugging"]

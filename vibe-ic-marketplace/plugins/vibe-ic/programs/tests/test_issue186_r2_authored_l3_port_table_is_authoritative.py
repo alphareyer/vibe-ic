@@ -194,7 +194,7 @@ def test_emitted_top_equals_documented_ports_authored_l3_only(tmp_path):
     f = _stage_rtl(tmp_path)
     _write(tmp_path, "input/docs/L3_external_interface.md", _L3_MD)
     res = R.step_reset_clock_variant_aliases(tmp_path, "dut")
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     assert _emitted_top_ports(f) == _DOC_PORTS
     body = f.read_text()
     assert "__rcvar_inner" not in body
@@ -209,7 +209,7 @@ def test_emitted_top_equals_documented_ports_with_empty_l9_top_ports(tmp_path):
     _write(tmp_path, "phase1/generated_docs/L9_INTEGRATION_SPEC.json",
            json.dumps({"top_module": "dut", "top_ports": [], "ports": []}))
     res = R.step_reset_clock_variant_aliases(tmp_path, "dut")
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     assert _emitted_top_ports(f) == _DOC_PORTS
 
 
@@ -253,7 +253,7 @@ def test_free_text_prompt_still_gets_792_additive(tmp_path):
     # after the ruling every case in this file SKIPs on unchanged bytes and a
     # bare status assertion would no longer tell them apart.
     res = R.step_reset_clock_variant_aliases(tmp_path, "dut")
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     assert "#689" in res.detail, res.detail
     body = f.read_text()
     assert "__rcvar_inner" not in body and "rst_n" not in body
@@ -276,7 +276,7 @@ def test_bridged_description_table_still_gets_792_additive(tmp_path):
     # after the ruling every case in this file SKIPs on unchanged bytes and a
     # bare status assertion would no longer tell them apart.
     res = R.step_reset_clock_variant_aliases(tmp_path, "dut")
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     assert "#689" in res.detail, res.detail
     body = f.read_text()
     assert "__rcvar_inner" not in body and "rst_n" not in body
@@ -291,7 +291,7 @@ def test_no_contract_at_all_still_gets_518_canonical_rename(tmp_path):
     # binding nobody stated. No contract is no authority to rename. Pinned by its
     # own reason so it stays distinguishable from the #689 refusals above.
     res = R.step_reset_clock_variant_aliases(tmp_path, "dut")
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     assert "no authoritative interface requests" in res.detail, res.detail
     body = f.read_text()
     assert body == before, "the ruling promises the authored RTL is unchanged"
@@ -319,7 +319,7 @@ def test_authored_doc_that_documents_both_spellings_keeps_alias(tmp_path):
     # gap between a documented `rst_n` and an RTL that lacks it is the
     # conformance gate's finding, not something the aliaser may paper over.
     res = R.step_reset_clock_variant_aliases(tmp_path, "dut")
-    assert res.status == "SKIP", (res.status, res.detail)
+    assert res.status == "NOT_APPLICABLE", (res.status, res.detail)
     assert "#689" in res.detail, res.detail
     body = f.read_text()
     assert "__rcvar_inner" not in body

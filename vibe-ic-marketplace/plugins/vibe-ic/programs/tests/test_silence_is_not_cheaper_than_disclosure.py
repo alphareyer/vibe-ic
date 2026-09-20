@@ -258,7 +258,7 @@ def test_the_runner_records_the_tier_instead_of_a_plain_pass(tmp_path):
     project = _project(tmp_path, STRUCTURE_ONLY)
     res = R.step_for_block(project, {"name": "blk_alpha", "type": "ldo"},
                            "A4_corner_sweep")
-    assert res.status == "PASS_STRUCTURE_ONLY", (res.status, res.detail)
+    assert res.status == "PASS_WITH_WAIVERS", (res.status, res.detail)
     assert res.extras.get("design_content") == STRUCTURE_ONLY, res.extras
     assert res.extras.get("structure_only") is True, res.extras
     assert (res.extras.get("design_content_source") or "").endswith(

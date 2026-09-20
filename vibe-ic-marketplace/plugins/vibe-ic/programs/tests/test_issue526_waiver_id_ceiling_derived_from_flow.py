@@ -358,8 +358,8 @@ def test_a_waiver_for_step_44_is_actually_honoured(tmp_path):
                 return st.get("status")
         pytest.fail("step 44 absent from the report")
 
-    assert build("bare", False) == "MISSING"
-    assert build("waived", True) == "WAIVED"
+    assert build("bare", False) == "FAIL"
+    assert build("waived", True) == "PASS_WITH_WAIVERS"
 
 
 # ----------------------------------------------------------------------
@@ -428,8 +428,8 @@ def test_consumer_coerced_id_agrees_with_the_REAL_compliance_reader(
     after = [s for s in json.loads(waived_report.read_text())["steps"]
              if s.get("id") == 39][0]["status"]
 
-    assert before == "MISSING"
-    assert after == "WAIVED", (
+    assert before == "FAIL"
+    assert after == "PASS_WITH_WAIVERS", (
         f"the real compliance reader did NOT bind id={sid!r} to step "
         f"{predicted} (step 39 is {after!r}); `_consumer_coerced_id` has "
         f"drifted from `_load_waivers._parse_id`, and the severity rule that "

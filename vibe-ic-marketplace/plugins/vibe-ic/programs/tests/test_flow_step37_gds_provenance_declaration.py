@@ -168,7 +168,7 @@ def test_space_separated_form_still_cannot_reach_the_honest_fail(tmp_path):
     cls = (out.split("reason_class=", 1)[1].split(";", 1)[0].strip()
            if "reason_class=" in out else None)
     assert cls not in _reason_taxonomy().SKIP_ELIGIBLE, out
-    assert _step_tier(project, space_form) == "INCOMPLETE", out
+    assert _step_tier(project, space_form) == "NOT_MEASURED", out
     # ...against the shipped form on the SAME project, which is the point.
     shipped_passed, _ = _fcc._check_program_exit_zero(
         project, _provenance_command())

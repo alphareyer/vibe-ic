@@ -304,7 +304,7 @@ def test_the_row_is_absent_only_when_nothing_was_scanned(tmp_path):
     empty = tmp_path / "empty"
     _pl.rtl_dir(empty).mkdir(parents=True, exist_ok=True)
     res = R.step_determinism_gates(empty, "fifo_wptr")
-    assert res.status == "SKIP", res
+    assert res.status == "NOT_MEASURED", res
     assert (res.extras or {}).get("counter_decode_lookahead_advisory") is None
 
 

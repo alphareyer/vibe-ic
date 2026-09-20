@@ -658,17 +658,25 @@ def _stepdict(sid, gate: Dict[str, Any] | None = None,
 def _expected_missing_status(sid) -> str:
     """The verdict an absent declared output produces for *sid*, read LIVE.
 
-    Normally ``MISSING``. ``_apply_capability_gap`` converts a MISSING on a
-    step registered in ``_PLATFORM_CAPABILITY_GAPS`` into SKIPPED-CONDITION
-    naming the flag. That table is EMPTY today (every gap closed), so this
-    returns MISSING for all 63 steps — but it is read from the module rather
-    than assumed, so re-opening a gap re-points this expectation instead of
-    reddening the sweep for the wrong reason.
+    R-0915-85 — normally ``FAIL``, carrying
+    ``ReasonClass.MISSING_ARTEFACT``. The word was ``MISSING``, and the ruling
+    folded it into FAIL on the stated rule: a DECLARED OUTPUT that does not
+    exist is a defect of the run, not an absence of measurement, and it is the
+    one non-PASS that CASCADES. Nothing about what this dimension MEASURES
+    changed — the same absence produces the same non-green row with the same
+    reason named in the same place.
+
+    ``_apply_capability_gap`` converts it on a step registered in
+    ``_PLATFORM_CAPABILITY_GAPS`` into ``NOT_APPLICABLE`` naming the flag (was
+    ``SKIPPED-CONDITION``). That table is EMPTY today, so this returns FAIL for
+    all 63 steps — but it is read from the module rather than assumed, so
+    re-opening a gap re-points this expectation instead of reddening the sweep
+    for the wrong reason.
     """
     raw = F.step_by_id(sid)["id"]
-    return ("SKIPPED-CONDITION"
+    return ("NOT_APPLICABLE"
             if isinstance(raw, int) and raw in FCC._PLATFORM_CAPABILITY_GAPS
-            else "MISSING")
+            else "FAIL")
 
 
 def _assert_entry_unsatisfied(project: Path, entry: str, sid) -> None:
@@ -711,13 +719,13 @@ def probe_positive(root: Path, sid) -> None:
     project.mkdir(parents=True, exist_ok=True)
     _materialize(project, step)
     result = FCC.check_step(project, step, {})
-    assert result.status != "MISSING", (
+    assert result.status != "FAIL", (
         f"step {sid}: every one of the {len(step.get('required_outputs') or [])} "
         f"declared required_outputs was synthesized as a non-empty file and the "
         f"gate resolved PASS, yet check_step reported {result.status!r} "
         f"— reasons: {_reasons(result)}"
     )
-    assert result.status in ("PASS", "VACUOUS_PASS"), (
+    assert result.status in ("PASS", "NOT_MEASURED"), (
         f"step {sid}: expected a PASS-tier verdict from a satisfied fixture, "
         f"measured {result.status!r} — reasons: {_reasons(result)}. The negative "
         f"half below only means something if the positive half is PASS-tier, "
@@ -1174,7 +1182,7 @@ def test_d8_missing_does_not_preempt_a_disclosed_skip(tmp_path):
         "reason": "d8 fixture: no proof engine wired on this host",
     }))
     result = FCC.check_step(project, step, {})
-    assert result.status == "SKIPPED-CONDITION", (
+    assert result.status == "NOT_APPLICABLE", (
         f"step {sid}: the gate's artefact is absent but a sibling honestly "
         f"self-reports a skip, and declared output {dropped!r} is also absent; "
         f"check_step reported {result.status!r} — reasons: {_reasons(result)}. "
@@ -1200,7 +1208,7 @@ def test_d8_missing_does_not_preempt_an_explicit_waiver(tmp_path):
     waivers = {raw_id: {"reason": "d8 fixture: approved deferral",
                         "approver": "d8-matrix"}}
     result = FCC.check_step(project, step, waivers)
-    assert result.status == "WAIVED", (
+    assert result.status == "PASS_WITH_WAIVERS", (
         f"step {sid}: an explicit waiver is on file for id {raw_id!r} and "
         f"declared output {dropped!r} is absent; check_step reported "
         f"{result.status!r} — reasons: {_reasons(result)}"
@@ -1228,7 +1236,7 @@ def test_d8_env_unavailable_waiver_converts_the_missing_it_produced(tmp_path):
     waivers = {raw_id: {"reason": "d8 fixture: tool absent on host",
                         "approver": "d8-matrix", "_env_unavailable": True}}
     result = FCC.check_step(project, step, waivers)
-    assert result.status == "WAIVED", (
+    assert result.status == "PASS_WITH_WAIVERS", (
         f"step {sid}: ENV_UNAVAILABLE waiver + absent output {dropped!r} "
         f"reported {result.status!r} — reasons: {_reasons(result)}"
     )
@@ -1266,7 +1274,7 @@ def test_d8_vacuous_pass_is_downgraded_too(tmp_path):
     step = _stepdict(sid, gate=gate)
     _materialize(control_dir, step, gate_ok=False)
     control = FCC.check_step(control_dir, step, {})
-    assert control.status == "VACUOUS_PASS", (
+    assert control.status == "NOT_MEASURED", (
         f"step {sid}: the fixture gate was supposed to resolve VACUOUS_PASS "
         f"with all outputs present, measured {control.status!r} — reasons: "
         f"{_reasons(control)}. Without that tier this test measures nothing."
@@ -1344,7 +1352,7 @@ def test_d8_gate_written_json_output_is_refused_as_run_evidence(tmp_path):
         f"deleted it either: the flow declares this path and #2005 removed the "
         f"delete that made the audit mutate the tree it reads"
     )
-    assert result.status not in ("PASS", "VACUOUS_PASS"), (
+    assert result.status not in ("PASS", "NOT_MEASURED"), (
         f"step {sid}: {written!r} exists only because this step's own gate "
         f"wrote it during the audit, yet check_step reported {result.status!r} "
         f"— a done claim resting on the auditor's own document. Reasons: "
@@ -1421,7 +1429,7 @@ def test_d8_missing_output_outranks_the_stub_backed_waiver(tmp_path):
     _write(control, concretize(outs[0]), json.dumps({
         "verdict": "PASS", "deterministic_stub": True}))
     r_control = FCC.check_step(control, step, {})
-    assert r_control.status == "WAIVED", (
+    assert r_control.status == "PASS_WITH_WAIVERS", (
         f"step {sid}: stub-tagged evidence with ALL outputs present reported "
         f"{r_control.status!r}, expected WAIVED (#434) — reasons: "
         f"{_reasons(r_control)}. Without that the comparison below is empty."
@@ -1623,7 +1631,15 @@ REAL_GATE_PASS_TIER_STEPS: Tuple[str, ...] = (
     # decides instead. Steps 2 and 28 STAY in the map below: each is held out
     # by an independent #1978 finding (rc=2 EXECUTION_ERROR typing; zero PERC
     # categories) that this change does not touch and must not launder.
-    "1", "A1", "A2", "A5", "A6", "A8", "32", "35", "38",
+    # 2026-09-16, SHRINK, 9 -> 4 (R-0915-85): A1 / A2 / A5 / A6 / A8 leave and
+    # are RECORDED in REAL_GATE_LEFT_THE_PASS_TIER with the tier they reach —
+    # `NOT_MEASURED`, the word that replaced `VACUOUS_PASS`. This is a NAMING
+    # shrink, not the enforcement shrink this pin watches for: `check_step`'s
+    # required_outputs downgrade now fires on every step that OWES its declared
+    # outputs (everything except NOT_APPLICABLE), so those five cells are
+    # enforced through their own real gate exactly as before. Recorded on both
+    # sides, per this pin's own rule.
+    "1", "32", "35", "38",
 )
 
 #: The steps whose real gate USED to reach a PASS tier on the seeded fixture
@@ -1707,15 +1723,51 @@ REAL_GATE_PASS_TIER_STEPS: Tuple[str, ...] = (
 #: it was ever in the map does not have to be re-derived if it returns:
 #:   38  MISSING     audit-created refusal of `reports/phase3/
 #:                   foundry_handoff_audit.json` (#2005); its gate still PASSes
+# R-0915-85 — the words, re-pointed with the vocabulary. `INCOMPLETE` is
+# `NOT_MEASURED`; `FAIL` is unchanged. A1/A2/A5/A6/A8 JOIN the map here rather
+# than being deleted from the pinned tuple above: their gates report
+# NOT_MEASURED(no_population) — "this gate examined nothing about the design" —
+# which is the same measurement `VACUOUS_PASS` made and a different word for it.
 REAL_GATE_LEFT_THE_PASS_TIER: Dict[str, str] = {
     "D1": "FAIL",
-    "2": "INCOMPLETE",
+    # 2026-09-16 (R-0915-85), INCOMPLETE -> FAIL, and the cause is named as
+    # this map requires. Step 2's own gate is a NESTED
+    # `flow_compliance_check --stage-id stage_phase1`, and `_report_verdict`
+    # now reads that nested run's `overall` word instead of grading it by exit
+    # code. On the seeded fixture the nested scope holds a step whose declared
+    # output is absent — FAIL(missing_artefact) — so the nested run is FAIL and
+    # step 2's gate reports FAIL. Under the old reader the nested word was
+    # invisible and the outer step inherited the weaker INCOMPLETE. The step is
+    # further from a pass tier, not closer.
+    #
+    # 2026-09-17 (R-0915-85), FAIL -> NOT_MEASURED(partial_population), and the
+    # cause is a REPAIR inside this same batch, not a drift. MEASURED by
+    # running step 2's real gate on the seeded fixture: the nested clause
+    # reports `[verdict=FAIL, reason_class=ZERO_DENOMINATOR]` — a nested run
+    # that DECIDED NOTHING — and 9 of this step's 18 clauses examined nothing.
+    # The commit "an ADVISORY clause started FAILING its step, on a nested run
+    # that decided nothing" stopped a nested zero-denominator FAIL from being
+    # read as a defect this gate found, which is the whole point: FAIL says a
+    # gate looked at the design and something was wrong, and a zero denominator
+    # is the sentence "nothing was looked at". Part of the population WAS
+    # examined here, so the reason is `partial_population` and not
+    # `no_population`.
+    #
+    # NEITHER WORD IS GREEN. `verdict.is_non_green` is FAIL | NOT_MEASURED, so
+    # this move takes no step out of any blocking set and the step is no nearer
+    # a PASS tier than it was — which is the property this map exists to watch.
+    "2": "NOT_MEASURED",
     "4": "FAIL",
-    "12": "INCOMPLETE",
-    "14": "INCOMPLETE",
-    "A4": "INCOMPLETE",
-    "28": "INCOMPLETE",
-    "30": "INCOMPLETE",
+    "12": "NOT_MEASURED",
+    "14": "NOT_MEASURED",
+    "A1": "NOT_MEASURED",
+    "A2": "NOT_MEASURED",
+    "A4": "NOT_MEASURED",
+    "A5": "NOT_MEASURED",
+    "A6": "NOT_MEASURED",
+    "A8": "NOT_MEASURED",
+    "28": "NOT_MEASURED",
+    "30": "NOT_MEASURED",
 }
 # 2026-07-28: the SET is unchanged (lost: none, gained: none). This tuple is
 # compared in flow DECLARATION order, and the dimension-5 fix moved A6's yaml
@@ -1732,8 +1784,18 @@ REAL_GATE_LEFT_THE_PASS_TIER: Dict[str, str] = {
 # spelling only one half of it. Adding the word keeps the measured set at the
 # same 18 steps; it does not widen enforcement, it stops a rename from silently
 # narrowing it.
-_PASS_TIER_LABELS = frozenset({"PASS", "VACUOUS_PASS", "VACUOUS-PASS",
-                               "PARTIALLY-VACUOUS", "PARTIALLY_VACUOUS"})
+# R-0915-85 — the PASS TIER is the two green words, and the vacuity spellings
+# are gone with the vocabulary. A step whose gate examined NOTHING about the
+# design now reports `NOT_MEASURED(no_population)`, which is not a pass tier and
+# is not pretending to be one; the five A-steps that wore `VACUOUS_PASS` here
+# therefore LEFT this set and are recorded below with the tier they reach, which
+# is exactly what the shrink guard's own message instructs.
+#
+# The DOWNGRADE still reaches them — `check_step`'s predicate is now "does this
+# step OWE its declared outputs", true for everything except NOT_APPLICABLE — so
+# nothing about dimension 8's enforcement narrowed. What moved is only which
+# word the gate reaches first.
+_PASS_TIER_LABELS = frozenset({"PASS", "PASS_WITH_WAIVERS"})
 
 
 @lru_cache(maxsize=1)
@@ -2122,7 +2184,14 @@ CONTENT_ARM_AS_MEASURED: Dict[str, str] = {
 #: — so nothing about them went unwatched; what changed is which instrument
 #: watches them. If any of the four returns to the PASS tier it will arrive
 #: here unpinned and this test will say so by name.
-CONTENT_ARM_BLIND: Tuple[str, ...] = ("A1",)
+# 2026-09-16, SHRINK, 1 -> 0 (R-0915-85): A1 is NO LONGER BLIND, and the change
+# that taught it is named here as this pin requires. A1's gate reported
+# `VACUOUS_PASS` over a wrong artefact and over a right one alike — one word for
+# "it passed" and "it examined nothing", which is precisely the conflation the
+# ruling deleted. The wrong artefact now reaches `NOT_MEASURED(no_population)`
+# and the right one `PASS`, so the two are gradable apart. Nothing about what
+# the gate READS changed; the tier it reports did.
+CONTENT_ARM_BLIND: Tuple[str, ...] = ()
 
 #: Steps the content arm CANNOT grade because every content-bearing artefact it
 #: rewrites is written by that step's own gate. Not a waiver and not a pass: it
