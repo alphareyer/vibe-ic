@@ -63,6 +63,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 import argparse
 import hashlib
+import functools
 import inspect
 import json
 import math
@@ -60943,6 +60944,50 @@ _POST_RUN_AUDITS = (
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def _restores_the_container_env(fn):
+    """Give `EDA_CONTAINER` back to whoever called this entry point.
+
+    `main` publishes the operator's `--container` choice into `EDA_CONTAINER`,
+    because several PDK-resolution helpers read it from there rather than from
+    the argument threaded through the steps. That is right for the run and for
+    every subprocess the run spawns -- both live entirely inside the call.
+
+    IT WAS NOT SCOPED TO THE CALL, AND THIS PROGRAM IS ALSO IMPORTED. `main()`
+    is invoked IN-PROCESS by the MCP layer and by tests, and the variable
+    outlived the call: `--container` DEFAULTS to a name, so ONE in-process run
+    published a container that then governed every later PDK read in the same
+    interpreter. MEASURED on a8c7a3e74: `_pdk_layer_authority._environment_
+    query` routes a PDK read into a container whenever `EDA_CONTAINER` is set,
+    so `test_the_technology_answers_the_precheck_not_the_declaration` -- whose
+    fixture builds its technology under a `$PDK_ROOT` that exists only on the
+    HOST -- went 41 passed to 9 failed / 32 passed the moment
+    `test_phase3_delivery_admission` (which calls `R.main()` in-process) ran
+    before it in the same session. The gate reported "the technology's own layer
+    table could not be read", which was true of the container and false of the
+    tree under test.
+
+    A DECORATOR AND NOT A WRAPPER FUNCTION, deliberately. Several guards read
+    `inspect.getsource(R.main)` to check that a call site is wired; moving the
+    body into a differently-named function hides it from all of them -- MEASURED,
+    that rename reddened four such cases across two files. `inspect.getsource`
+    follows `functools.wraps`' `__wrapped__`, so those guards keep reading
+    exactly the source they always read.
+    """
+    @functools.wraps(fn)
+    def _scoped(*args, **kwargs):
+        _unset = object()
+        before = os.environ.get("EDA_CONTAINER", _unset)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if before is _unset:
+                os.environ.pop("EDA_CONTAINER", None)
+            else:
+                os.environ["EDA_CONTAINER"] = before
+    return _scoped
+
+
+@_restores_the_container_env
 def main() -> int:
     """The CLI entry point, with its PROCESS-GLOBAL publication scoped to it.
 
