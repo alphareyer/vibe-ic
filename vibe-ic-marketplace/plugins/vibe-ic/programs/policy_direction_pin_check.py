@@ -202,7 +202,40 @@ RC_UNDETERMINED = 2
 # says which site outgrew it. A cap is a COST bound, never a strictness one:
 # raising it can only turn an ABSTAIN into a PINNED or an UNPINNED, both of
 # which are verdicts this gate earned by running.
-DEFAULT_MAX_TEST_FILES = 40
+DEFAULT_MAX_TEST_FILES_FLOOR = 40
+
+#: THE CAP IS DERIVED, NOT STORED (owner ruling, 2026-09-21). A number sized for
+#: one moment falls behind the corpus it bounds, and the failure is invisible
+#: until a site walks past it: the blocking sweep carried `--max-test-files 43`
+#: while this tree's largest selection was 45, so the gate ABSTAINED on
+#: `phase3_one_shot_runner.py:11837` and reported UNDETERMINED after minutes of
+#: work. Re-deriving it by hand is the same mistake with a later date on it.
+#:
+#: So the cap is `max(floor, the largest selection this corpus actually makes)`,
+#: counted at run time. The FLOOR is the only number a caller declares, and it
+#: is an INPUT to the derivation rather than an answer: it keeps a shrinking
+#: corpus from tightening the bound into a surprise. A cap is a COST bound and
+#: never a strictness one — admitting a bigger selection can only turn an
+#: ABSTAIN into a PINNED or an UNPINNED, both verdicts this gate earned by
+#: running — which is why deriving it upward is safe and storing it is not.
+DEFAULT_MAX_TEST_FILES = DEFAULT_MAX_TEST_FILES_FLOOR
+
+
+def derive_max_test_files(sites, tests_dir: Path, floor: int) -> int:
+    """`max(floor, the largest candidate selection this corpus makes)`.
+
+    Pure over `sites` and the tree. Counted once, before any verification, so
+    every site is judged against the same bound — deriving it per site would
+    make the bound the selection itself and the abstention unreachable for a
+    genuinely pathological site as well as for ordinary growth.
+    """
+    largest = 0
+    for site in sites:
+        try:
+            largest = max(largest, len(select_tests(site, tests_dir)))
+        except (OSError, ValueError):            # a site this tree cannot select
+            continue
+    return max(int(floor), largest)
 
 # Five files currently contain the argued sites.  The default deliberately
 # leaves one core per worker plus ample headroom for pytest's own subprocesses;
@@ -1503,8 +1536,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--json", dest="json_out", default=None, help="write the full report here")
     ap.add_argument("--verify-pins", action="store_true",
                     help="flip each argued literal and run the candidate tests (BLOCKING)")
-    ap.add_argument("--max-test-files", type=int, default=DEFAULT_MAX_TEST_FILES,
-                    help="abstain rather than run more candidate test files than this")
+    ap.add_argument("--max-test-files", type=int, default=None,
+                    help=("cost bound on candidate test files per site. "
+                          "DERIVED from the corpus when omitted, which is how "
+                          "the blocking sweep runs it — pass a number only to "
+                          "pin one run, never to record one in a policy file"))
+    ap.add_argument("--max-test-files-floor", type=int,
+                    default=DEFAULT_MAX_TEST_FILES_FLOOR,
+                    help=("the derivation's INPUT: the cap never falls below "
+                          "this, so a shrinking corpus cannot tighten the "
+                          "bound into a surprise"))
     ap.add_argument("--only", default=None,
                     help="verify only sites whose file path contains this substring")
     ap.add_argument("--only-file", default=None,
@@ -1580,6 +1621,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          or int(s["line"]) == args.only_line)]
     else:
         selected = [s for s in argued if (args.only or "") in s["file"]]
+
+    # DERIVED HERE, ONCE, OVER THE WHOLE ARGUED SET — not over `selected`. A
+    # `--only` run must be bounded by the same number the full sweep uses, or
+    # the bound would depend on which slice is being verified and two runs over
+    # one tree could disagree about the same site.
+    if args.max_test_files is None:
+        args.max_test_files = derive_max_test_files(
+            argued, tests_dir, args.max_test_files_floor)
+        print(f"[policy_direction_pin_check] cost bound DERIVED from this "
+              f"corpus: --max-test-files {args.max_test_files} "
+              f"(floor {args.max_test_files_floor}, "
+              f"{len(argued)} argued site(s))", file=sys.stderr)
 
     if args.jobs > 1:
         merged, parallel_problems = verify_pins_parallel(
