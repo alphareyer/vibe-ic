@@ -443,6 +443,108 @@ def expand_side_ports(placement: PadPlacement, params: Dict[str, int]
 
 
 # --------------------------------------------------------------------------- #
+# the design-owned GROUP row, and the ring that follows from it
+# --------------------------------------------------------------------------- #
+# WHY THESE FOUR LIVE HERE AND NOT IN THE PRODUCER (R-0915-101).
+#
+# `io_pad_chip_top_gen` grew them because it was the first consumer that owned
+# both halves the resolution needs -- the design's pad-placement section and
+# the design's declared port list. It is no longer the only one:
+# `slot_pad_budget_check` must budget a DIE against the ring the design
+# declares for itself, and that is the SAME ring, read out of the same two
+# files. Two readers of one document is one reader too many -- they would
+# drift, and the pad they disagreed about would be the pad the budget did not
+# refuse. The producer re-exports each of them under its old private name, so
+# every existing caller and test is unchanged.
+#
+# Words which describe the physical carrier rather than a signal family.
+# They are ignored symmetrically on both the document and port-name sides;
+# no design-specific signal, chip or PDK name belongs here.
+GROUP_CARRIER_WORDS = frozenset({
+    "bus", "buses", "pin", "pins", "port", "ports", "signal", "signals",
+    "control", "controls", "input", "output", "inout", "io", "i", "o",
+    "s",
+})
+GROUP_ATOM_ALIASES = {
+    "address": "addr", "clock": "clk", "reset": "rst",
+}
+
+
+def group_atoms(text: str, *, port_name: bool = False) -> set:
+    """Return conservative identifier atoms for a group statement.
+
+    A port matches a prose group only when *all* of the port's semantic atoms
+    occur in the statement.  This deliberately does not use fuzzy matching:
+    a group which cannot be resolved from the design's own identifiers is a
+    refusal, not permission to invent a side.
+    """
+    atoms = [a.lower() for a in re.findall(r"[A-Za-z][A-Za-z0-9]*", text)]
+    if port_name and atoms and atoms[0] in {"i", "o", "io"}:
+        atoms = atoms[1:]
+    return {
+        GROUP_ATOM_ALIASES.get(a, a) for a in atoms
+        if a not in GROUP_CARRIER_WORDS
+    }
+
+
+def bit_names(port: Dict[str, Any]) -> List[str]:
+    """Every net this port contributes, one per bit, MSB first.
+
+    Matches `expand_side_ports`, which is what the partition is expressed in
+    -- a scalar stays bare, a bus becomes one `name[bit]` per bit.
+    """
+    name = str(port.get("name") or "")
+    try:
+        width = int(port.get("width") or 1)
+    except (TypeError, ValueError):
+        width = 1
+    if width <= 1:
+        return [name]
+    try:
+        msb = int(port.get("msb"))
+        lsb = int(port.get("lsb"))
+    except (TypeError, ValueError):
+        msb, lsb = width - 1, 0
+    step = -1 if msb >= lsb else 1
+    return [f"{name}[{b}]" for b in range(msb, lsb + step, step)]
+
+
+def resolve_declared_pad_groups(
+        placement: "PadPlacement",
+        ports: "Any",
+        ) -> Tuple[Dict[str, List[str]], List[Dict[str, Any]]]:
+    """Resolve design-owned group rows against the design-owned port list.
+
+    Exact backticked signal rows remain the primary representation.  This
+    handles the other legitimate L-doc shape: a side assigned to a named port
+    family such as ``memory data bus``.  The resolver is strict, deterministic
+    and auditable: every semantic atom of a selected port name must be present
+    in the group statement, and a zero-match group is returned unresolved.
+    """
+    by_side: Dict[str, List[str]] = {}
+    records: List[Dict[str, Any]] = []
+    for side, statement in placement.side_groups.items():
+        statement_atoms = group_atoms(statement)
+        matched: List[Dict[str, Any]] = []
+        for port in ports:
+            name = str(port.get("name") or "")
+            port_atoms = group_atoms(name, port_name=True)
+            if port_atoms and port_atoms <= statement_atoms:
+                matched.append(port)
+        nets = [net for port in matched for net in bit_names(port)]
+        records.append({
+            "side": side,
+            "statement": statement,
+            "statement_atoms": sorted(statement_atoms),
+            "matched_ports": [str(p.get("name") or "") for p in matched],
+            "resolved_nets": list(nets),
+        })
+        if nets:
+            by_side[side] = nets
+    return by_side, records
+
+
+# --------------------------------------------------------------------------- #
 # the project's documents
 # --------------------------------------------------------------------------- #
 def discover_docs(project: Path) -> List[Path]:
@@ -505,3 +607,82 @@ def _rel(path: Path, project: Path) -> str:
         return str(path.relative_to(project))
     except ValueError:
         return str(path)
+
+
+# --------------------------------------------------------------------------- #
+# the ring the design declares for itself, derived once (R-0915-101)
+# --------------------------------------------------------------------------- #
+def derive_own_ring(project: Path, ports: Any) -> Dict[str, Any]:
+    """The pad ring THIS DESIGN DECLARES FOR ITSELF, read from its own docs.
+
+    A die binds no operator template, so nothing external states its pad
+    budget; what plays the operator slot's part is the pad-placement section
+    the design wrote in its own L-documents. That section is the source
+    `io_pad_chip_top_gen` already derives `pad_order_by_side` and `SIGNAL_MAP`
+    from at step 15.5ic, and this is the same derivation read by the same
+    functions -- so a phase-2 budget and a phase-3 ring cannot disagree about
+    which pad carries which net.
+
+    `ports` is the design's own declared port list, in `bit_names` shape
+    (``name`` plus ``width``, optionally ``msb``/``lsb``). It is used ONLY to
+    resolve the document's design-owned GROUP rows against identifiers the
+    design itself chose; no port is added to a side the document does not
+    name.
+
+    Returns the same four keys `slot_pad_budget_check.declared_own_ring`
+    returns -- ``measurable``, ``signal_map``, ``instances``, ``keys_present``
+    -- so one inventory counts both rings, plus the provenance a reader needs
+    to see WHERE each pad came from. ``measurable`` is False when the design
+    states no pad placement at all, or when a token in it does not resolve
+    from a declared parameter: a partition this module could only partly read
+    is reported unanswered, never partly invented.
+    """
+    out: Dict[str, Any] = {
+        "measurable": False, "signal_map": {}, "instances": [],
+        "keys_present": [], "source": None, "heading": None,
+        "documents_scanned": [], "documents_unreadable": [],
+        "by_side": {}, "unresolved_tokens": [], "groups": [],
+        "groups_unresolved": [], "parameter_defaults": {},
+    }
+    placement, params, unreadable, scanned = read_project_placement(project)
+    out["documents_scanned"] = list(scanned)
+    out["documents_unreadable"] = list(unreadable)
+    out["parameter_defaults"] = dict(params)
+    if placement is None:
+        return out
+    out["source"] = placement.source
+    out["heading"] = placement.heading
+    exact, unresolved = expand_side_ports(placement, params)
+    out["unresolved_tokens"] = list(unresolved)
+    grouped, records = resolve_declared_pad_groups(placement, ports or [])
+    out["groups"] = records
+    out["groups_unresolved"] = [r["side"] for r in records
+                                if not r["resolved_nets"]]
+    # A TOKEN THIS MODULE COULD NOT RESOLVE STOPS THE RING, not just its own
+    # side: a budget measured against a partition with a hole in it would
+    # report the missing pads as the design's fault instead of the reader's.
+    if unresolved:
+        return out
+    by_side: Dict[str, List[str]] = {}
+    for side in sorted(set(exact) | set(grouped)):
+        nets: List[str] = []
+        for net in list(exact.get(side) or []) + list(grouped.get(side) or []):
+            if net not in nets:
+                nets.append(net)
+        by_side[side] = nets
+    out["by_side"] = by_side
+    # ONE PAD PER NET, which is the design's own rule stated in the same
+    # table, not this module's. The net IS the pad's identity here: an
+    # INSTANCE name is the producer's to choose at 15.5ic, and inventing one
+    # would put a name in a phase-2 report that no netlist carries.
+    nets_ordered: List[str] = []
+    for side in sorted(by_side):
+        for net in by_side[side]:
+            if net not in nets_ordered:
+                nets_ordered.append(net)
+    out["instances"] = nets_ordered
+    out["signal_map"] = {net: net for net in nets_ordered}
+    out["keys_present"] = ([f"{placement.source}:{placement.heading}"]
+                           if nets_ordered else [])
+    out["measurable"] = bool(nets_ordered)
+    return out

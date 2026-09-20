@@ -27,6 +27,33 @@ ring exists — so this step names them and reports UNDECIDED. Measured on run7:
 the design declares neither key, and 15.5ic's own record carries
 `n_ports_on_a_pad: 38`.
 
+SUPERSEDED IN PART BY R-0915-101 (2026-09-21) — read the next paragraph before
+the one above it. The paragraph above describes the DEFERRAL: a die that declared
+no `pad_signal_map` was reported UNDECIDED / BLOCKED_BY_UPSTREAM and pointed at
+step 15.5ic. That answer was not a verdict about the design's pad budget, and it
+cost the whole IC path: `BLOCKED_BY_UPSTREAM` is not skip-eligible, so the P0
+umbrella booked flow step 2 INCOMPLETE and step 4's 10/10 L10 oracles were voided
+beneath it.
+
+R-0915-101 rules that on a DIE the budget IS the die's own pad ring, and that the
+design usually HAS stated that ring — in the pad-placement section of its own
+L-documents, which is where `io_pad_chip_top_gen` already derives
+`pad_order_by_side` and `SIGNAL_MAP` from at 15.5ic. `slot_pad_budget_check` now
+derives it from that same source through the same reader and DECIDES. What
+survives untouched is the law this file was written to protect, and each re-pinned
+case below asserts it explicitly:
+
+  * this step still reads NO artefact a later step produces — asserted on the
+    reader itself (`LPP.DOC_DIRS` is design INPUT only) as well as on the report;
+  * a DIE is still NEVER `NOT_APPLICABLE`;
+  * a die that states its ring NOWHERE still does not pass — it is `UNDECIDED`
+    with a NAMED finding, now classified `ZERO_DENOMINATOR` (a design-input gap)
+    rather than `BLOCKED_BY_UPSTREAM` (a wait on a step that generates the ring
+    FROM the declaration the design did not write).
+
+The three case NAMES that say "deferred" are KEPT so the id set is stable across
+this change; each docstring says what it now asserts.
+
 A HARDMACRO still owes the IP set, and still budgets against an operator slot.
 Both directions are tested here.
 """
@@ -45,6 +72,9 @@ sys.path.insert(0, str(PROGRAMS))
 import phase3_one_shot_runner as R  # noqa: E402
 import slot_pad_budget_check as S  # noqa: E402
 import flow_compliance_check as FCC  # noqa: E402
+import verdict as V  # noqa: E402  the five-word step vocabulary (#2389)
+import _flow_reason_taxonomy as _RT  # noqa: E402  the class -> tier map
+import _l_doc_pad_placement as LPP  # noqa: E402  the ONE ring reader (R-0915-101)
 import _tapeout_declaration as TD  # noqa: E402
 
 RTL = """module spm #(parameter size = 32) (
@@ -122,7 +152,14 @@ def test_an_owner_attested_die_stands_the_ip_producers_down_with_the_citation(tm
     assert "answers.deliverable='DIE'" in cited and "owner" in cited
     assert evidence["declaration_path"] == TD.DECLARATION_REL
     row = R.step_digital_hardmacro_gen(project)
-    assert row.status == "SKIP"
+    # #2389 REDUCED THE STEP VOCABULARY TO FIVE WORDS and `SKIP` is not one of
+    # them (`verdict.Verdict`: PASS / PASS_WITH_WAIVERS / FAIL / NOT_MEASURED /
+    # NOT_APPLICABLE). This row was red on live main 8efd02930 before this lane
+    # touched anything — the WORD moved, the invariant did not. Both are
+    # asserted, the spelling and the MEANING, so the next vocabulary move is
+    # caught as a change of meaning instead of passing on a string.
+    assert row.status == V.Verdict.NOT_APPLICABLE.value
+    assert row.status in V.EXCUSED          # a stand-down, which is the point
     assert row.detail.startswith("DESIGN-DECLARED-N/A")
     assert TD.DECLARATION_REL in row.detail
     rec = json.loads((project / "reports/phase3/digital_hardmacro_gen.json").read_text())
@@ -203,17 +240,29 @@ def test_a_pin_the_declared_ring_never_bonds_is_a_refusal(tmp_path):
 
 
 def test_an_undeclared_ring_is_deferred_to_the_step_that_builds_it(tmp_path):
-    """The ring the flow generates is 15.5ic's output, and step 2 has no
-    legal way to read it. The verdict is real, named, and never a pass."""
+    """R-0915-101 MOVED THIS EXPECTATION. The name is kept so the id set is
+    stable; what it asserts is no longer a DEFERRAL.
+
+    This fixture states its ring in NEITHER place it may be stated: no
+    `pad_signal_map` in the declaration, and no pad-placement section in any
+    design document (the fixture writes no `input/docs`). That is a DESIGN-INPUT
+    GAP, and it is booked as one — `ZERO_DENOMINATOR` with a named finding —
+    not as `BLOCKED_BY_UPSTREAM`, which would send a reader to step 15.5ic for
+    an answer 15.5ic generates FROM this same declaration.
+
+    WHAT SURVIVES UNCHANGED, and is the reason this case exists: it still does
+    not PASS. rc 2, verdict UNDECIDED, the finding names the owner."""
     rc, rep = _run_budget(_project(tmp_path, ring=False))
     assert rc == 2 and rep["verdict"] == "UNDECIDED"
-    assert rep["reason_class"] == "BLOCKED_BY_UPSTREAM"
-    assert rep["own_ring_measured_by"] == {
-        "step": "15.5ic", "gate": "pad_bterm_coincidence_check",
-        "gate_always": "pad_ring_check (BTERM_WITHOUT_PAD)",
-        "evidence": "reports/phase3/pad_bterm_coincidence.json"}
-    assert "circular" in rep["reason"]
+    assert rep["reason_class"] == "ZERO_DENOMINATOR"
+    assert rep["reason_class"] != "BLOCKED_BY_UPSTREAM"
+    assert [f["rule"] for f in rep["findings"]] == ["DIE_DECLARES_NO_PAD_RING"]
+    assert rep["findings"][0]["owner"] == "design input"
+    assert rep["note"].endswith("not a question blocked on an upstream step")
+    # BOTH spellings really are absent — the typed one and the prose one — so
+    # this is the gap and not a reader that failed to look.
     assert rep["declared_ring"]["keys_present"] == []
+    assert rep["derived_ring"]["measurable"] is False
 
 
 def test_a_side_order_without_a_signal_map_is_not_a_budget(tmp_path):
@@ -253,7 +302,22 @@ def test_this_step_reads_no_artefact_a_later_step_produces(tmp_path):
         for i, sig in enumerate(_FULL_RING)]}}))
     rc, rep = _run_budget(project)
     assert rc == 2 and rep["verdict"] == "UNDECIDED", rep
-    assert rep["reason_class"] == "BLOCKED_BY_UPSTREAM"
+    # R-0915-101 moved the CLASS (a design-input gap, not a wait on 15.5ic);
+    # the law this case exists for is untouched and is asserted below on the
+    # reader itself, which is stronger than asserting it on one report.
+    assert rep["reason_class"] == "ZERO_DENOMINATOR"
+    # THE READER, NAMED. Every directory the ring reader scans is design INPUT,
+    # and design input is in step 2's own `blocks_on` closure. A phase-2 or
+    # phase-3 directory appearing here is the defect this case refuses,
+    # whichever report happens to be produced.
+    assert LPP.DOC_DIRS == ("input/docs", "phase1/input_doc",
+                            "phase1/generated_docs")
+    for _dir in LPP.DOC_DIRS:
+        assert _dir.split("/")[0] in {"input", "phase1"}, _dir
+    # and the run's OWN record of what it read names none of it: the planted
+    # phase-3 ring above was not scanned and is nowhere in the report.
+    assert rep["documents_scanned"] == []
+    assert "padring.json" not in json.dumps(rep)
 
 
 def test_a_hardmacro_is_still_budgeted_against_an_operator_slot(tmp_path):
@@ -317,5 +381,16 @@ def test_a_die_is_never_not_applicable_however_the_word_was_written(tmp_path):
         "module other(input clk); endmodule\n")
     rc, rep = _run_budget(blind)
     assert rc == 2 and rep["verdict"] == "UNDECIDED", rep
+    # THE LAW, UNCHANGED BY R-0915-101 and asserted in as many words: whatever
+    # else an unmeasurable die is, it is never NOT_APPLICABLE and never a pass.
+    assert rep["verdict"] != "NOT_APPLICABLE"
     assert rep["budget_basis"] == "37.5self:own_pad_ring"
-    assert rep["reason_class"] == "EXECUTION_ERROR"
+    # THE CLASS MOVED. A die that declares no top-level port is a design-input
+    # gap NAMED AS ONE, not an error in this gate: nothing downstream supplies a
+    # port list the design never wrote, so `EXECUTION_ERROR` sent the reader to
+    # the wrong place. It is still not skip-eligible, so the step is still not
+    # credited — which is what this case has always been here to hold.
+    assert rep["reason_class"] == "ZERO_DENOMINATOR"
+    assert rep["reason_class"] not in _RT.SKIP_ELIGIBLE     # still not credited
+    assert [f["rule"] for f in rep["findings"]] == ["DIE_DECLARES_NO_TOP_PORT"]
+    assert rep["findings"][0]["owner"] == "design input"
