@@ -3688,8 +3688,31 @@ def _declared_io_delay_ns(project: Path, clk_period_ns: float) -> tuple:
     except Exception:
         return (None, "")
     frac = rep.get("fraction")
-    if not frac or not clk_period_ns:
+    if frac and not clk_period_ns:
+        # The design DID declare a fraction; what is missing is the period to
+        # apply it to. That is a different finding and keeps its own (silent)
+        # contract — saying "no I/O delay declared" here would be false.
         return (None, "")
+    if not frac:
+        # SILENCE IS NOT A DECLARATION. With no fraction in the design's own
+        # docs the caller keeps its historical literal, and that literal is the
+        # PLUGIN'S assumption about somebody else's board — not a number this
+        # design ever stated. It was emitted with nothing said about it, so a
+        # reader of the SDC (or of a sign-off report built on it) could not
+        # tell a declared I/O budget from an invented one. The value is
+        # unchanged; what is added is the disclosure.
+        denied = rep.get("denied") or []
+        why = ("the design's own docs state no I/O delay"
+               if not denied else
+               "the design's own docs RETRACT the I/O delay they mention "
+               f"({'; '.join(str(d) for d in denied[:2])})")
+        return (None,
+                "# VIBEIC_IO_DELAY_NOT_DECLARED: " + why + ", so the I/O "
+                "delay below is THIS PLUGIN'S ASSUMPTION, not a design "
+                "declaration.\n#   A boundary path timed against it is timed "
+                "against an external contract nobody wrote down; state the "
+                "budget in the design's constraints section (L9 I/O delay) to "
+                "replace this.\n")
     io_ns = float(clk_period_ns) * float(frac)
     note = ("# VIBEIC_DECLARED_IO_DELAY: the design states its I/O delay as a "
             "fraction of its\n#   own clock period, so it is COMPUTED from the "
@@ -26813,9 +26836,22 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "    set _sdr_pv -1\n"
         "    if {[catch {set _sdr_pv [check_placement -no_abort]} _sdr_pe]} "
         "{ puts \"SDR_DPL_CHECK_NONFATAL: $_sdr_pe\"; set _sdr_tx_error 1; set _sdr_pv -1 }\n"
+        # ONE ESCALATION ONCE WAS NOT ENOUGH. The diamond rung alone left 6
+        # violations on subservient x gf180mcuD as a DIE (r44): the parent duly
+        # REFUSED the candidate as `candidate_placement_illegal`, which is
+        # right — and the repair it was carrying (the one that closes SS setup
+        # on the macro path) was discarded with it, so the design shipped
+        # un-repaired 6 ns slews and missed setup by 13.5 ns. The child now
+        # runs the same displacement ladder every other repair site uses.
+        #
+        # WITHOUT THE CLOCK-BUFFER DOWNSIZE RUNG, deliberately: the child may
+        # not buy legality by weakening a clock tree it inherited — r42
+        # measured that trade at -12.27 ns. A candidate it cannot legalize by
+        # DISPLACEMENT alone stays illegal and the parent still refuses it.
         "    if {[string is integer -strict $_sdr_pv] && $_sdr_pv > 0} {\n"
-        "      if {[catch {detailed_placement -use_diamond_legalizer} _sdr_dp2]} "
-        "{ puts \"SDR_DPL_DIAMOND_NONFATAL: $_sdr_dp2\" }\n"
+        + _build_escalating_legalize_tcl("SDR_DPL", "_sdrl").replace(
+            "\n", "\n  ")
+        + "\n"
         "      if {[catch {set _sdr_pv [check_placement -no_abort]} _sdr_pe2]} "
         "{ set _sdr_pv -1 }\n"
         "    }\n"
