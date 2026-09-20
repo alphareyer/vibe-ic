@@ -21299,8 +21299,23 @@ def _build_check_placement_verdict_tcl(marker: str, var_tag: str = "") -> str:
     )
 
 
+def _indent_tcl(text: str, spaces: int) -> str:
+    """Indent a generated Tcl block so it reads as part of its enclosing body.
+
+    Tcl does not care about leading whitespace, but a human reading a 27000-line
+    generated deck does: an un-indented block pasted inside an `if` looks like a
+    different scope. Blank lines stay blank rather than becoming trailing-space
+    lines, and the result always ends in a newline so the caller can concatenate.
+    """
+    pad = " " * spaces
+    out = "".join((pad + ln if ln.strip() else "") + "\n"
+                  for ln in text.splitlines())
+    return out
+
+
 def _build_escalating_legalize_tcl(marker: str, var_tag: str = "",
-                                   clk_sink_buf: str = "") -> str:
+                                   clk_sink_buf: str = "",
+                                   tie_recover_tcl: str = "") -> str:
     """Legalize with an ESCALATING displacement window, then PROVE it worked.
 
     #295: `repair_design` inserts timing buffers (measured: 564 buffers in 155
@@ -21419,6 +21434,83 @@ def _build_escalating_legalize_tcl(marker: str, var_tag: str = "",
             f"  }}\n"
             f"}}\n"
         )
+    # Tap-cell rung (MEASURED on subservient x gf180mcuD as a DIE, run r46).
+    # Every rung above widens the SEARCH WINDOW, and the window was never the
+    # constraint. The post-route DRV repair's own transaction database
+    # (`sdr_transaction/candidate.odb`) carries 1965 `CORE_WELLTAP` tie cells
+    # spread at a 14 um pitch through all 117 core rows. They are ordinary
+    # placed instances, so they CUT every row into short runs: measured on that
+    # database the largest contiguous free run anywhere in the die is 50 sites
+    # with the ties in place and 780 with them out, and the cells the legalizer
+    # could not place are exactly the wide ones -- `buf_12` needs 38 contiguous
+    # sites, `buf_16` needs 50. Rows that can host a `buf_16` go 0 -> 73 of 117
+    # once the ties are lifted. So `detailed_placement` at +/-3503 sites and
+    # +/-500 rows -- the whole die -- failed on the same 4 instances as the
+    # +/-500 x +/-100 rung, which is the signature of a design with no legal
+    # site rather than one with a site out of reach.
+    #
+    # MEASURED A/B on that same database, default window throughout:
+    #   with ties            check_placement 8 -> detailed_placement -> 10
+    #   ties ripped up       check_placement 8 -> detailed_placement -> 0
+    # and then, re-establishing coverage with the flow's OWN occupancy-aware
+    # well-tie repair (never the fixed-pitch `tapcell`, which re-inserts on top
+    # of the cells just legalized and measured 10 violations back):
+    #   ripup -> legalize -> tie repair (2003 ties, 17 anchors disclosed
+    #   unplaceable by that block's own report) -> legalize -> check 0.
+    #
+    # So the ties come out, the repair legalizes, and the ties go back denser
+    # than they were (2003 >= 1965) with the residual named. The rung is
+    # EMITTED only when the caller passes its PDK's tie-recovery deck and
+    # EXECUTED only when every rung above has failed, so no design that
+    # legalizes today can enter it. It is gated on ending legal AND on tie
+    # coverage not going backwards: if either is untrue the rung claims
+    # nothing and `{marker}_LEGALIZE_FAILED` still fires, because a design
+    # that legalized by losing its well ties has not been legalized.
+    _tapripup = ""
+    if tie_recover_tcl:
+        _tapripup = (
+            f"if {{$_dplok{v} == 0}} {{\n"
+            f"  set _tb{v} 0\n"
+            f"  catch {{\n"
+            f"    set _tblk{v} [ord::get_db_block]\n"
+            f"    foreach _ti{v} [$_tblk{v} getInsts] {{\n"
+            f"      if {{[[$_ti{v} getMaster] getType] eq \"CORE_WELLTAP\"}} "
+            f"{{ incr _tb{v} }}\n"
+            f"    }}\n"
+            f"  }}\n"
+            f"  if {{$_tb{v} > 0 && ![catch {{tapcell_ripup}} _tr{v}]}} {{\n"
+            f"    if {{![catch {{detailed_placement}} _tdp{v}]}} {{\n"
+            f"      set _tlegal{v} 0\n"
+            f"      if {{![catch {{check_placement}} _tcp{v}]}} {{ set "
+            f"_tlegal{v} 1 }}\n"
+            f"      if {{$_tlegal{v} == 1}} {{\n"
+            f"{_indent_tcl(tie_recover_tcl, 8)}"
+            f"        catch {{detailed_placement}}\n"
+            f"        set _ta{v} 0\n"
+            f"        catch {{\n"
+            f"          set _tblk2{v} [ord::get_db_block]\n"
+            f"          foreach _ti2{v} [$_tblk2{v} getInsts] {{\n"
+            f"            if {{[[$_ti2{v} getMaster] getType] eq "
+            f"\"CORE_WELLTAP\"}} {{ incr _ta{v} }}\n"
+            f"          }}\n"
+            f"        }}\n"
+            f"        if {{![catch {{check_placement}} _tcp2{v}] && "
+            f"$_ta{v} >= $_tb{v}}} {{\n"
+            f"          set _dplok{v} 1\n"
+            f"          puts \"{marker}_LEGALIZE_OK disp=tap-ripup "
+            f"ties=${{_tb{v}}}->${{_ta{v}}}\"\n"
+            f"        }} else {{\n"
+            f"          puts \"{marker}_TAP_RIPUP_NOT_RECOVERED: ties "
+            f"${{_tb{v}}}->${{_ta{v}}}; the placement is not claimed legal\"\n"
+            f"        }}\n"
+            f"      }} else {{\n"
+            f"        puts \"{marker}_TAP_RIPUP_DID_NOT_LEGALIZE: the ties "
+            f"were not what blocked this placement\"\n"
+            f"      }}\n"
+            f"    }}\n"
+            f"  }}\n"
+            f"}}\n"
+        )
     return (
         f"set _dplok{v} 0\n"
         # rung 0: the default window, which is right for almost every design.
@@ -21479,6 +21571,7 @@ def _build_escalating_legalize_tcl(marker: str, var_tag: str = "",
         f"    }}\n"
         f"  }}\n"
         f"}}\n"
+        f"{_tapripup}"
         f"if {{$_dplok{v} == 0}} {{ puts \"{marker}_LEGALIZE_FAILED\" }}\n"
     )
 
@@ -25079,7 +25172,8 @@ def _post_route_spef_repair_tcl(out_dir_c: str, tech_lef_c: str,
                                 fork_repair_capable: bool = False,
                                 fanout_root_buffer_cell: Optional[str] = None,
                                 reserved_instance_names:
-                                    Optional[Sequence[str]] = None) -> str:
+                                    Optional[Sequence[str]] = None,
+                                pdk: Optional["PdkConfig"] = None) -> str:
     """ORGANIC #557 / #581 — emit the OpenROAD Tcl for the
     post-detailed-route SPEF extraction (MEASURE-ONLY).
 
@@ -25230,7 +25324,8 @@ def _post_route_spef_repair_tcl(out_dir_c: str, tech_lef_c: str,
             + _v1_8_100_signoff_drv_repair_tcl(
                 out_dir_c, fanout_root_buffer_cell,
                 stage="postroute_drv_repair",
-                reserved_instance_names=reserved_instance_names)
+                reserved_instance_names=reserved_instance_names,
+                pdk=pdk)
             + _pnr_stage_end("postroute_drv_repair") + "\n")
            if fork_repair_capable else
            "  puts \"SDR_SKIP_STOCK_OPENROAD: post-route SPEF DRV repair needs "
@@ -26611,7 +26706,8 @@ def _postroute_sdr_parent_child_call_tcl(out_dir_c: str,
 def _v1_8_100_signoff_drv_repair_tcl(
         out_dir_c: str, fanout_root_buffer_cell: Optional[str] = None,
         *, stage: str = "postroute_drv_repair",
-        reserved_instance_names: Optional[Sequence[str]] = None) -> str:
+        reserved_instance_names: Optional[Sequence[str]] = None,
+        pdk: Optional["PdkConfig"] = None) -> str:
     """Bounded repair-until-clean loop on the sign-off-deck SPEF.
 
     Every step NONFATAL-guarded; any failure leaves the routing as it was and
@@ -26637,6 +26733,15 @@ def _v1_8_100_signoff_drv_repair_tcl(
     repair recipe in the tree and the two would drift — the failure this repo
     has already paid for once with the routing-clear filter.
     """
+    # The tie-recovery deck for the legalize ladder's tap rung. It is the
+    # SAME occupancy-aware well-tie repair the parent runs after its own
+    # tap prune — never the fixed-pitch `tapcell`, which re-inserts on
+    # top of the cells the ladder just legalized (MEASURED: 10 violations
+    # back). Absent a PDK the rung is not emitted at all and this deck is
+    # byte-for-byte what it was.
+    _sdr_tie_recover = (_build_welltie_coverage_repair_tcl(pdk)
+                        if pdk is not None else "")
+
     n = _V1_8_100_DRV_REPAIR_PASSES
     m = _V1_8_100_DRV_REPAIR_MARGIN_PCT
     lo = _V1_8_100_DRV_MIN_WIRE_LEN_UM
@@ -26942,7 +27047,9 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # measured that trade at -12.27 ns. A candidate it cannot legalize by
         # DISPLACEMENT alone stays illegal and the parent still refuses it.
         "    if {[string is integer -strict $_sdr_pv] && $_sdr_pv > 0} {\n"
-        + _build_escalating_legalize_tcl("SDR_DPL", "_sdrl").replace(
+        + _build_escalating_legalize_tcl(
+            "SDR_DPL", "_sdrl",
+            tie_recover_tcl=_sdr_tie_recover).replace(
             "\n", "\n  ")
         + "\n"
         "      if {[catch {set _sdr_pv [check_placement -no_abort]} _sdr_pe2]} "
@@ -31996,7 +32103,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         fanout_root_buffer_cell=_fanout_root_buffer_cell,
         # the child's own residual reroute must protect the SAME bindings the
         # parent's does -- the spares and spare pads are reserved in both.
-        reserved_instance_names=_reserved_names)
+        reserved_instance_names=_reserved_names,
+        pdk=pdk)
 
     # === R8 (v1.9.3) — DRV RE-CONVERGENCE AFTER ANTENNA REPAIR ===
     # MEASURED (R7 iter3): the sign-off DRV loop reported `SDR_CONVERGED: pass 6`
@@ -32028,7 +32136,8 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
                              + _v1_8_100_signoff_drv_repair_tcl(
                                  out_dir_c, _fanout_root_buffer_cell,
                                  stage="postroute_drv_reconverge",
-                                 reserved_instance_names=_reserved_names)
+                                 reserved_instance_names=_reserved_names,
+                                 pdk=pdk)
                              + 'puts "SDR2_END"\n'
                              + _pnr_stage_end("postroute_drv_reconverge")
                              + "\n")
