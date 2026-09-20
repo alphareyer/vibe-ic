@@ -48438,9 +48438,18 @@ def _record_ip_kit_na(project: Path, program: str, rel: str,
         _aa.write_text(report, json.dumps(payload, indent=2) + "\n")
     except OSError:
         pass
-    return StepResult(program, "SKIP", 0.0,
+    # R-0915-85 — THE ROW AND ITS OWN ARTEFACT MUST AGREE. The payload three
+    # lines up already writes `"verdict": "NOT_APPLICABLE"`; the step row said
+    # `SKIP`, a word no reader carries any more, so the two halves of the same
+    # record disagreed and `verdict.validate_step_row` refused the row. The
+    # declaration is the DESIGN's, and `declared_by` names where it was read.
+    # (The payload's own `reason_class: DESIGN_DECLARED_NA` is the GATE reason
+    # taxonomy, a neighbouring vocabulary this ruling does not claim, and is
+    # left exactly as it is.)
+    return StepResult(program, _V.Verdict.NOT_APPLICABLE.value, 0.0,
                       f"DESIGN-DECLARED-N/A — {_IP_KIT_NA_REASON}; {cited}",
-                      [str(report)] if report.is_file() else [])
+                      [str(report)] if report.is_file() else [],
+                      declared_by=cited)
 
 
 def step_digital_hardmacro_gen(project: Path,

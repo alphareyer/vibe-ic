@@ -993,7 +993,13 @@ def test_a_registered_entitled_flag_still_defers(fcc, tmp_path):
     }) + "\n")
     res = fcc.check_step(proj, _step(29), {})
 
-    assert res.status == "SKIPPED-CONDITION", res.reasons
+    # R-0915-85 — the STEP's word is `NOT_APPLICABLE`: the entitled capability
+    # flag is the INPUT declaring there is nothing here to measure. The gate's
+    # OWN record above keeps `"verdict": "SKIPPED-CONDITION"` — that is the
+    # capability/waiver channel `flow_compliance_check` reads, a neighbouring
+    # vocabulary this ruling does not claim, and moving it would be the second
+    # mistake this batch already made once and reverted.
+    assert res.status == "NOT_APPLICABLE", res.reasons
 
 
 def test_undisclosed_absence_is_still_missing(fcc, tmp_path):
