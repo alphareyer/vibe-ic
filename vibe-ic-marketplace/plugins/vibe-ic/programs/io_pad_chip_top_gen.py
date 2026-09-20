@@ -375,92 +375,19 @@ def _declared_test_access(project: Path, ports: Sequence[Dict[str, object]]):
     return additions, sides, record
 
 
-def _bit_names(port: Dict[str, object]) -> List[str]:
-    """Every net this port contributes, one per bit, MSB first.
-
-    Matches `_l_doc_pad_placement.expand_side_ports`, which is what the
-    partition is expressed in -- a scalar stays bare, a bus becomes one
-    `name[bit]` per bit.
-    """
-    name = str(port.get("name") or "")
-    try:
-        width = int(port.get("width") or 1)
-    except (TypeError, ValueError):
-        width = 1
-    if width <= 1:
-        return [name]
-    try:
-        msb = int(port.get("msb"))
-        lsb = int(port.get("lsb"))
-    except (TypeError, ValueError):
-        msb, lsb = width - 1, 0
-    step = -1 if msb >= lsb else 1
-    return [f"{name}[{b}]" for b in range(msb, lsb + step, step)]
-
-
-# Words which describe the physical carrier rather than a signal family.
-# They are ignored symmetrically on both the document and port-name sides;
-# no design-specific signal, chip or PDK name belongs here.
-_GROUP_CARRIER_WORDS = frozenset({
-    "bus", "buses", "pin", "pins", "port", "ports", "signal", "signals",
-    "control", "controls", "input", "output", "inout", "io", "i", "o",
-    "s",
-})
-_GROUP_ATOM_ALIASES = {
-    "address": "addr", "clock": "clk", "reset": "rst",
-}
-
-
-def _group_atoms(text: str, *, port_name: bool = False) -> set[str]:
-    """Return conservative identifier atoms for a group statement.
-
-    A port matches a prose group only when *all* of the port's semantic atoms
-    occur in the statement.  This deliberately does not use fuzzy matching:
-    a group which cannot be resolved from the design's own identifiers is a
-    refusal, not permission to invent a side.
-    """
-    atoms = [a.lower() for a in re.findall(r"[A-Za-z][A-Za-z0-9]*", text)]
-    if port_name and atoms and atoms[0] in {"i", "o", "io"}:
-        atoms = atoms[1:]
-    return {
-        _GROUP_ATOM_ALIASES.get(a, a) for a in atoms
-        if a not in _GROUP_CARRIER_WORDS
-    }
-
-
-def _resolve_declared_pad_groups(
-        placement: "LPP.PadPlacement",
-        ports: Sequence[Dict[str, object]],
-        ) -> Tuple[Dict[str, List[str]], List[Dict[str, object]]]:
-    """Resolve design-owned group rows against the design-owned port list.
-
-    Exact backticked signal rows remain the primary representation.  This
-    handles the other legitimate L-doc shape: a side assigned to a named port
-    family such as ``memory data bus``.  The resolver is strict, deterministic
-    and auditable: every semantic atom of a selected port name must be present
-    in the group statement, and a zero-match group is returned unresolved.
-    """
-    by_side: Dict[str, List[str]] = {}
-    records: List[Dict[str, object]] = []
-    for side, statement in placement.side_groups.items():
-        statement_atoms = _group_atoms(statement)
-        matched: List[Dict[str, object]] = []
-        for port in ports:
-            name = str(port.get("name") or "")
-            port_atoms = _group_atoms(name, port_name=True)
-            if port_atoms and port_atoms <= statement_atoms:
-                matched.append(port)
-        nets = [net for port in matched for net in _bit_names(port)]
-        records.append({
-            "side": side,
-            "statement": statement,
-            "statement_atoms": sorted(statement_atoms),
-            "matched_ports": [str(p.get("name") or "") for p in matched],
-            "resolved_nets": list(nets),
-        })
-        if nets:
-            by_side[side] = nets
-    return by_side, records
+#: MOVED TO `_l_doc_pad_placement` (R-0915-101), for the reason the PDK
+#: terminal reader below was moved to `_pad_ring`: BOTH consumers need the
+#: same answer out of the same document. This one derives the ring at step
+#: 15.5ic; `slot_pad_budget_check` budgets a DIE against that same ring at
+#: step 2. Two readers of one pad-placement section is one reader too many --
+#: they would drift, and the pad they disagreed about would be the pad the
+#: budget did not refuse. Re-exported under their old private names so every
+#: existing caller and test in this module is unchanged.
+_GROUP_CARRIER_WORDS = LPP.GROUP_CARRIER_WORDS
+_GROUP_ATOM_ALIASES = LPP.GROUP_ATOM_ALIASES
+_group_atoms = LPP.group_atoms
+_bit_names = LPP.bit_names
+_resolve_declared_pad_groups = LPP.resolve_declared_pad_groups
 
 
 #: The PDK's own `PAD_PLACE_IO_TERMINALS` reader now lives in `_pad_ring`,

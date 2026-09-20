@@ -136,6 +136,7 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _atomic_artefact import write_json  # noqa: E402  vibe-ic#1082
 import _gate_usage_exit as _usage  # noqa: E402  vibe-ic#712
+import _l_doc_pad_placement as _LPP  # noqa: E402  R-0915-101
 import _flow_reason_taxonomy as _reason_taxonomy  # noqa: E402
 import _submission_template as _ST  # noqa: E402  vibe-ic#2277
 import _tapeout_declaration as _TD  # noqa: E402  vibe-ic#2277
@@ -938,6 +939,53 @@ def declared_own_ring(doc: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return out
 
 
+#: THE MINIMUM COMPLETE SUPPLY PAIR a ring must also carry: one external
+#: POWER pad and one external GROUND pad. The COUNT is a topology fact and is
+#: stated here; WHICH MACRO plays each part is the IO cell library's answer,
+#: read from the PDK by `io_pad_chip_top_gen._derive_supply_pad_pair` at step
+#: 15.5ic. This gate reports the obligation and does NOT let it move the
+#: verdict -- a supply pad it cannot see selected is not a supply pad it may
+#: call missing.
+SUPPLY_PADS_MINIMUM_PAIR = 2
+SUPPLY_PAD_SELECTION_STEP = OWN_RING_STEP
+SUPPLY_PAD_SELECTION_PROGRAM = "io_pad_chip_top_gen"
+
+
+def derived_own_ring(project: str, ports: List[Dict[str, Any]]
+                     ) -> Dict[str, Any]:
+    """The die's own ring, DERIVED from the design's own pad-placement section.
+
+    R-0915-101. A die binds no operator template, so its budget is its own pad
+    ring -- and a design that left `pad_signal_map` NOT_DETERMINED has usually
+    not left the ring unstated: it stated it in prose, in the pad-placement
+    section of its own L-documents, which is exactly where
+    `io_pad_chip_top_gen` derives `pad_order_by_side` and `SIGNAL_MAP` from at
+    step {step}. Read through the SAME function, `_l_doc_pad_placement
+    .derive_own_ring`, so a phase-2 budget and a phase-3 ring cannot disagree
+    about which pad carries which net.
+
+    NO NEW DEPENDENCY, AND NO CIRCULAR ONE. The documents this reads are
+    design INPUT (`input/docs`, `phase1/`), which are in step 2's own
+    `blocks_on` closure; step {step}'s generated DEF is what this gate still
+    does not read.
+
+    `ports` is this gate's OWN port list, parsed from the staged RTL -- the
+    IMPLEMENTED interface. It is used only to resolve the document's
+    design-owned GROUP rows ("SRAM data bus") against identifiers the design
+    itself chose, never to add a port to a side the document does not name.
+    Returned in the same shape `declared_own_ring` returns, so ONE inventory
+    counts both rings.
+    """.format(step=OWN_RING_STEP)
+    try:
+        ring = _LPP.derive_own_ring(Path(project), ports or [])
+    except (OSError, ValueError, TypeError) as exc:
+        # "Could not read it" is not "read it and it was empty".
+        return {"measurable": False, "signal_map": {}, "instances": [],
+                "keys_present": [], "unreadable": str(exc),
+                "documents_scanned": [], "documents_unreadable": []}
+    return ring
+
+
 def declared_ring_inventory(ring: Dict[str, Any],
                             ports: List[Dict[str, Any]]) -> Dict[str, Any]:
     """The die's declared ring, counted AGAINST THE PINS THE DESIGN DECLARES.
@@ -1002,6 +1050,36 @@ def _declared_top_cell(doc: Optional[Dict[str, Any]]) -> Optional[str]:
         return None
     top = _TD.answer(doc, "top_cell")
     return str(top).strip() or None if isinstance(top, str) and top != _TD.NOT_DETERMINED else None
+
+
+#: The design's own integration spec, whose `top_module` is the CORE the
+#: staged RTL carries. `io_pad_chip_top_gen` reads the same field for the same
+#: purpose (its `core_module`), from the same file.
+L9_INTEGRATION_SPEC_REL = os.path.join("phase1", "generated_docs",
+                                       "L9_INTEGRATION_SPEC.json")
+
+
+def _declared_core_module(project: str) -> Optional[str]:
+    """The CORE module the design declares, from its own integration spec.
+
+    MEASURED on subservient x gf180mcuD r46 (a DIE): the tape-out declaration
+    answers `top_cell: chip_top` -- the chip-level wrapper, which step 15.5ic
+    GENERATES -- while the RTL staged at step 2 carries the core,
+    `subservient`. Both answers are right about different modules, and a gate
+    that tries only the first reports "the design declares NO top-level port"
+    about a design that declares eight. The integration spec's `top_module` is
+    the design's own answer to which module the RTL is, read from the file
+    `io_pad_chip_top_gen` reads it from, and it is consulted only AFTER the
+    command line and the declaration have both failed to name a module that is
+    in the staged RTL.
+    """
+    doc = _json_at(project, L9_INTEGRATION_SPEC_REL)
+    if doc is None:
+        return None
+    top = doc.get("top_module")
+    if not isinstance(top, str) or not top.strip():
+        return None
+    return top.strip()
 
 
 def _load_slots(project: str) -> Dict[str, Dict[str, Any]]:
@@ -1187,8 +1265,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     rtl_files = list(a.rtl) or _discover_rtl(a.project)
     ports: Optional[List[Dict[str, Any]]] = None
     defaults_used: Dict[str, int] = {}
-    _tops_to_try = [a.top] + ([_core_top] if _core_top and _core_top != a.top
-                              else [])
+    _l9_core = _declared_core_module(str(a.project))
+    _tops_to_try: List[str] = []
+    for _cand in (a.top, _core_top, _l9_core):
+        if _cand and _cand not in _tops_to_try:
+            _tops_to_try.append(_cand)
     for _top_try in _tops_to_try:
         for f in rtl_files:
             try:
@@ -1214,9 +1295,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 break
         if ports:
             if _top_try != a.top:
-                _top_source = (f"{_TD.DECLARATION_REL}:answers.top_cell — "
-                               f"the design's own answer; {a.top!r} is not in "
-                               f"the staged RTL")
+                _top_source = (
+                    (f"{L9_INTEGRATION_SPEC_REL}:top_module — the design's own "
+                     f"answer for which module the staged RTL is"
+                     if _top_try == _l9_core and _top_try != _core_top
+                     else f"{_TD.DECLARATION_REL}:answers.top_cell — "
+                          f"the design's own answer")
+                    + f"; {a.top!r} is not in the staged RTL")
                 a.top = _top_try
             break
 
@@ -1274,65 +1359,55 @@ def main(argv: Optional[List[str]] = None) -> int:
                "parameter_conflicts": _param_conflicts,
                "note": "a question with two answers has not been answered"}
         rc = 2
-    elif _die_is_its_own_operator and not _declared_ring["measurable"]:
-        # THE RING THIS DIE WILL HAVE IS NOT DECLARED AND IS NOT HERE. It is
-        # generated at 15.5ic and measured against these same declared pins
-        # there. This is a real verdict and never a pass; it is not
-        # NOT_APPLICABLE, because the budget IS owed (R-0915-98(2)) — it is
-        # owed at the step that has the ring.
-        _sides_only = bool(_declared_ring["instances"])
-        rep = {
-            "check": "slot_pad_budget",
-            "verdict": "UNDECIDED",
-            "rc": 2,
-            "reason_class": _reason_taxonomy.BLOCKED_BY_UPSTREAM,
-            "budget_basis": "37.5self:own_pad_ring",
-            "deliverable_source": _die_word_source,
-            "reason": (
-                "this delivery is a DIE and binds no operator template, so the "
-                "die is its own operator and its budget is its own pad ring — "
-                + ("`pad_order_by_side` names "
-                   f"{len(_declared_ring['instances'])} pad instance(s) but "
-                   "`pad_signal_map` is NOT_DETERMINED, so which SIGNAL each "
-                   "pad brings out is unstated and a pad count cannot tell a "
-                   "ring that carries these pins from one that does not"
-                   if _sides_only else
-                   "and the design declares none of it "
-                   f"({', '.join(DECLARED_RING_KEYS)} are NOT_DETERMINED in "
-                   f"{_TD.DECLARATION_REL}), leaving the ring to be generated")
-                + f". That ring is built at step {OWN_RING_STEP}, and the pins "
-                  f"this gate reads are measured against it there — per net "
-                  f"and geometrically — by {OWN_RING_GATE} "
-                  f"({OWN_RING_EVIDENCE_REL}), and by "
-                  f"{OWN_RING_GATE_ALWAYS} whether or not that one runs. "
-                  f"This step does not read that "
-                  f"output (step {OWN_RING_STEP} has step 2 in its own "
-                  f"ancestry, so the dependency would be circular) and cannot "
-                  f"pass in its place"),
-            "own_ring_measured_by": {"step": OWN_RING_STEP,
-                                     "gate": OWN_RING_GATE,
-                                     "gate_always": OWN_RING_GATE_ALWAYS,
-                                     "evidence": OWN_RING_EVIDENCE_REL},
-            "declared_ring": _declared_ring,
-            "note": "a question this step cannot ask has not passed",
-        }
-        rc = 2
     elif _die_is_its_own_operator and not ports:
-        # A die whose declared pins could not be read is UNDECIDED about its
-        # own ring — not "not applicable", and not a pass.
+        # A DIE THAT DECLARES NO TOP PORTS AT ALL is the one undecidable case
+        # R-0915-101 leaves, and it is a DESIGN-INPUT GAP NAMED AS ONE, not an
+        # upstream step to wait for and not an error in this gate. Nothing
+        # downstream will supply a port list the design never wrote: a die
+        # with no interface has no pads to budget, and the thing to fix is the
+        # input.
         rep = {"check": "slot_pad_budget", "verdict": "UNDECIDED", "rc": 2,
-               "reason_class": _reason_taxonomy.EXECUTION_ERROR,
+               "reason_class": _reason_taxonomy.ZERO_DENOMINATOR,
                "reason": (f"this delivery is a DIE and binds no operator "
-                          f"template, so its budget is the pad ring it "
-                          f"declares against the pins it declares — and top "
-                          f"module '{a.top}' was not found in "
-                          f"{rtl_files or '(no --rtl given and no RTL under ' + os.path.join(*_RTL_DIR_REL) + ')'}"),
+                          f"template, so its budget is its own pad ring "
+                          f"measured against the pins it declares — and the "
+                          f"design declares NO top-level port: top module "
+                          f"'{a.top}' was not found in "
+                          f"{rtl_files or '(no --rtl given and no RTL under ' + os.path.join(*_RTL_DIR_REL) + ')'}"
+                          f". A die with no declared interface has no pad to "
+                          f"budget; the incomplete input is named here and no "
+                          f"later step supplies it"),
+               "findings": [{"severity": "ERROR",
+                             "rule": "DIE_DECLARES_NO_TOP_PORT",
+                             "message": (f"no top-level port list could be "
+                                         f"read for top module '{a.top}' from "
+                                         f"{rtl_files or 'no staged RTL'}"),
+                             "owner": "design input"}],
                "budget_basis": "37.5self:own_pad_ring",
                "deliverable_source": _die_word_source,
-               "note": "a question that could not be asked has not passed"}
+               "note": ("a design-input gap, named — not a question blocked "
+                        "on an upstream step")}
         rc = 2
     elif _die_is_its_own_operator:
         _budget = interface_budget(ports)
+        # THE RING THE DESIGN DECLARES, FROM EITHER PLACE IT DECLARES IT
+        # (R-0915-101). `pad_signal_map` in the tape-out declaration is the
+        # typed spelling; the pad-placement section of the design's own
+        # L-documents is the prose one, and it is the spelling every design
+        # measured so far actually used. Both are the DESIGN's own word about
+        # its own ring, both are design INPUT in step 2's `blocks_on` closure,
+        # and both are read here through the reader step 15.5ic's producer
+        # already uses — so this step and that one cannot disagree about which
+        # pad carries which net. The typed spelling wins when present; nothing
+        # about the declared path changes.
+        _ring = _declared_ring
+        _ring_source = "declaration:pad_signal_map"
+        _derived: Optional[Dict[str, Any]] = None
+        if not _ring["measurable"]:
+            _derived = derived_own_ring(str(a.project), ports)
+            if _derived["measurable"]:
+                _ring = _derived
+                _ring_source = "l_doc:pad_placement"
         if _budget["unresolved_width_ports"]:
             rep = {"check": "slot_pad_budget", "verdict": "UNDECIDED", "rc": 2,
                    "reason_class": _reason_taxonomy.ZERO_DENOMINATOR,
@@ -1348,25 +1423,123 @@ def main(argv: Optional[List[str]] = None) -> int:
                    "budget_basis": "37.5self:own_pad_ring",
                    "deliverable_source": _die_word_source}
             rc = 2
+        elif not _ring["measurable"]:
+            # NEITHER SPELLING. The design declares a die, declares pins, and
+            # states its pad ring NOWHERE — not typed, not in prose. That is a
+            # DESIGN-INPUT GAP NAMED AS ONE (R-0915-101), not BLOCKED_BY_UPSTREAM:
+            # the ring step 15.5ic generates is generated FROM this same
+            # declaration, so waiting for it would be waiting for the design to
+            # answer a question only the design can answer.
+            _scanned = (_derived or {}).get("documents_scanned") or []
+            _unread = (_derived or {}).get("documents_unreadable") or []
+            _unresolved_tok = (_derived or {}).get("unresolved_tokens") or []
+            _sides_only = bool(_declared_ring["instances"])
+            rep = {
+                "check": "slot_pad_budget",
+                "verdict": "UNDECIDED",
+                "rc": 2,
+                "reason_class": _reason_taxonomy.ZERO_DENOMINATOR,
+                "budget_basis": "37.5self:own_pad_ring",
+                "deliverable_source": _die_word_source,
+                "reason": (
+                    "this delivery is a DIE and binds no operator template, so "
+                    "the die is its own operator and its budget is its own pad "
+                    "ring — and the design states that ring in neither place it "
+                    "may be stated: "
+                    + ("`pad_order_by_side` names "
+                       f"{len(_declared_ring['instances'])} pad instance(s) but "
+                       "`pad_signal_map` is NOT_DETERMINED, so which SIGNAL each "
+                       "pad brings out is unstated and a pad count cannot tell a "
+                       "ring that carries these pins from one that does not"
+                       if _sides_only else
+                       f"{', '.join(DECLARED_RING_KEYS)} are NOT_DETERMINED in "
+                       f"{_TD.DECLARATION_REL}")
+                    + "; and no pad-placement section was read out of the "
+                      f"{len(_scanned)} design document(s) scanned"
+                    + (f" (a token in it did not resolve from a declared "
+                       f"parameter: {', '.join(_unresolved_tok[:8])})"
+                       if _unresolved_tok else "")
+                    + (f" ({len(_unread)} document(s) could not be read: "
+                       + "; ".join(f"{u.get('file')}: {u.get('reason')}"
+                                   for u in _unread[:4]) + ")"
+                       if _unread else "")
+                    + ". The ring step "
+                    + OWN_RING_STEP
+                    + " generates is generated FROM this same declaration, so "
+                      "this is not a question an upstream step answers — the "
+                      "incomplete input is named here"),
+                "findings": [{"severity": "ERROR",
+                              "rule": "DIE_DECLARES_NO_PAD_RING",
+                              "message": (
+                                  "neither "
+                                  f"{'/'.join(DECLARED_RING_KEYS)} in "
+                                  f"{_TD.DECLARATION_REL} nor a pad-placement "
+                                  "section in the design's own documents "
+                                  "states which pad carries which net"),
+                              "owner": "design input"}],
+                "declared_ring": _declared_ring,
+                "derived_ring": _derived,
+                "documents_scanned": _scanned,
+                "documents_unreadable": _unread,
+                "note": ("a design-input gap, named — not a question blocked "
+                         "on an upstream step"),
+            }
+            rc = 2
         else:
-            _inv = declared_ring_inventory(_declared_ring, ports)
+            _inv = declared_ring_inventory(_ring, ports)
             _fits = _inv["unbonded_count"] == 0
+            # THE ARITHMETIC, STATED (R-0915-101): pads owed, pads the ring
+            # places, and the supply pair the ring must also carry. The supply
+            # COUNT is an obligation this gate states and does NOT decide on:
+            # which macro plays each polarity is the IO cell library's answer,
+            # made at step 15.5ic, and a pad this gate cannot see selected is
+            # not a pad it may call missing.
+            _arith = {
+                "signal_pads_owed": _inv["declared_signal_bits"],
+                "signal_pads_placed_by_the_ring":
+                    _inv["bonded_declared_bits"],
+                "signal_pads_owed_with_no_pad": _inv["unbonded_count"],
+                "ring_capacity_pads": _inv["declared_pads_total"],
+                "supply_pads_owed_minimum": SUPPLY_PADS_MINIMUM_PAIR,
+                "supply_pads_selected": None,
+                "supply_pads_selected_by": {
+                    "step": SUPPLY_PAD_SELECTION_STEP,
+                    "program": SUPPLY_PAD_SELECTION_PROGRAM,
+                    "why_not_here": (
+                        "one external POWER pad and one external GROUND pad is "
+                        "the minimum complete pair and is a topology fact; "
+                        "WHICH macro plays each polarity is read from the PDK "
+                        "IO cell library's LEF pin roles, which this step does "
+                        "not open. Stated as an obligation, and it does not "
+                        "move this verdict"),
+                },
+                "ring_geometric_capacity_pads": None,
+                "ring_geometric_capacity_why_not": (
+                    "how many pads FIT on the die edges needs the die "
+                    "rectangle and the pad master widths; this gate counts the "
+                    "ring the design declares and does not size it"),
+            }
             rep = {
                 "check": "slot_pad_budget",
                 "verdict": "FITS" if _fits else "DOES_NOT_FIT",
                 "rc": 0 if _fits else 1,
                 "budget_basis": "37.5self:own_pad_ring",
+                "ring_source": _ring_source,
                 "basis": (
                     "this delivery is a DIE and binds no operator template, so "
                     "the die is its own operator: the budget is the pad ring "
-                    f"the design declares for itself ({_TD.DECLARATION_REL}, "
-                    f"{_inv['declared_pads_total']} pad(s) from "
+                    "the design declares for itself ("
+                    + (f"{_TD.DECLARATION_REL}, "
+                       if _ring_source == "declaration:pad_signal_map"
+                       else f"{_ring.get('source')}, ")
+                    + f"{_inv['declared_pads_total']} pad(s) from "
                     f"{'+'.join(_inv['declared_by'])}) against the "
                     f"{_inv['declared_signal_bits']} signal bit(s) it declares "
                     f"on top module {a.top!r}. No external slot exists to "
                     "measure against; the operator catalogue on disk is "
                     "information, not a purchase"),
                 "own_ring": _inv,
+                "own_ring_arithmetic": _arith,
                 "own_ring_measured_by": {"step": OWN_RING_STEP,
                                          "gate": OWN_RING_GATE,
                                          "gate_always": OWN_RING_GATE_ALWAYS,
@@ -1376,12 +1549,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "top_source": _top_source,
                 "deliverable_source": _die_word_source,
             }
+            if _derived is not None and _derived.get("measurable"):
+                rep["derived_ring"] = {
+                    k: _derived[k] for k in
+                    ("source", "heading", "by_side", "groups",
+                     "documents_scanned", "documents_unreadable",
+                     "parameter_defaults")
+                    if k in _derived}
             if not _fits:
                 rep["reason"] = (
                     f"{_inv['unbonded_count']} declared signal bit(s) have no "
                     f"pad in the ring this design declares: "
                     + ", ".join(_inv["unbonded_declared_bits"]))
             rc = rep["rc"]
+
     elif _route_na is not None:
         rep = _route_na
         rc = 2
@@ -1461,14 +1642,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         # slot's inventory and says so in its own words, not in the slot
         # report's field names.
         _inv_p = rep.get("own_ring") or {}
+        _ar = rep.get("own_ring_arithmetic") or {}
         print(f"  basis                          : 37.5self — the die is its "
               f"own operator")
+        print(f"  ring the design declares       : {rep.get('ring_source')} "
+              f"({(rep.get('derived_ring') or {}).get('source') or _TD.DECLARATION_REL})")
         print(f"  declared signal bits           : "
               f"{_inv_p.get('declared_signal_bits')}")
-        print(f"  bonded by this run's own ring  : "
-              f"{_inv_p.get('bonded_declared_bits')} of "
-              f"{_inv_p.get('declared_signal_bits')} "
-              f"({_inv_p.get('ring_pads_total')} pad instance(s) placed)")
+        print(f"  signal pads owed vs placed     : "
+              f"{_ar.get('signal_pads_owed')} owed / "
+              f"{_ar.get('signal_pads_placed_by_the_ring')} placed "
+              f"({_ar.get('signal_pads_owed_with_no_pad')} with no pad)")
+        print(f"  ring capacity (declared pads)  : "
+              f"{_ar.get('ring_capacity_pads')}")
+        print(f"  supply pads owed (minimum pair): "
+              f"{_ar.get('supply_pads_owed_minimum')} — selection is step "
+              f"{SUPPLY_PAD_SELECTION_STEP}'s "
+              f"({SUPPLY_PAD_SELECTION_PROGRAM}); does not move this verdict")
         if rep["verdict"] != "FITS":
             print(f"  with no pad                    : "
                   f"{', '.join(_inv_p.get('unbonded_declared_bits') or [])}")
