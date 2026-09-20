@@ -61053,12 +61053,25 @@ def _restores_the_container_env(fn):
     table could not be read", which was true of the container and false of the
     tree under test.
 
-    A DECORATOR AND NOT A WRAPPER FUNCTION, deliberately. Several guards read
-    `inspect.getsource(R.main)` to check that a call site is wired; moving the
-    body into a differently-named function hides it from all of them -- MEASURED,
-    that rename reddened four such cases across two files. `inspect.getsource`
-    follows `functools.wraps`' `__wrapped__`, so those guards keep reading
-    exactly the source they always read.
+    A DECORATOR AND NOT A WRAPPER FUNCTION, deliberately. SIX guards read
+    `main`'s OWN SOURCE to check that a call site is wired, and moving the body
+    into a differently-named function hides it from every one of them.
+
+    THE WRAPPER OUTLIVED THE DECORATOR FOR TWO RELEASES, and both halves were
+    measured. v1.22.17 shipped the repair AS the rename: `test_issue1412_waived_
+    pnr_still_streams_the_gds` 2, `test_phase3_cache_producer_identity` 2,
+    `test_v0_3_41_issue593_pnr_cache_geometry` 1 and
+    `test_steps_view_every_orchestrator` 1 went red on 6363e6d08 -- the last of
+    which asks whether EVERY orchestrator emits its steps view from `main`, and
+    after the rename this one answered no. v1.22.18 then landed this decorator
+    BESIDE that wrapper rather than instead of it, so `main` was decorated AND
+    still delegated to `_run_phase3`: the environment was restored twice and the
+    body stayed where no guard could see it. MEASURED on e6f1ac2a9, the same
+    four cases still red.
+
+    The wrapper is gone and the body is back under `main`. `inspect.getsource`
+    follows `functools.wraps`' `__wrapped__`, so those guards read exactly the
+    source they always read, and the restoration happens once.
     """
     @functools.wraps(fn)
     def _scoped(*args, **kwargs):
@@ -61076,44 +61089,6 @@ def _restores_the_container_env(fn):
 
 @_restores_the_container_env
 def main() -> int:
-    """The CLI entry point, with its PROCESS-GLOBAL publication scoped to it.
-
-    `_run_phase3` below publishes the operator's `--container` choice into
-    `EDA_CONTAINER`, because several PDK-resolution helpers read it from there
-    rather than from the argument threaded through the steps. That is right for
-    the run, and it is right for every subprocess the run spawns -- both live
-    entirely inside this call.
-
-    IT WAS NOT SCOPED TO THIS CALL, AND THIS PROGRAM IS ALSO IMPORTED. `main()`
-    is invoked IN-PROCESS by the MCP layer and by tests, and the variable
-    outlived the call: `--container` DEFAULTS to `vibeic-eda`, so one in-process
-    run published a container name that then governed every later PDK read in
-    the same interpreter. MEASURED on a8c7a3e74: `_pdk_layer_authority.
-    _environment_query` routes a PDK read into a container whenever
-    `EDA_CONTAINER` is set, so `test_the_technology_answers_the_precheck_not_
-    the_declaration` -- which builds its technology under a `$PDK_ROOT` that
-    exists only on the HOST -- went 41 passed to 9 failed / 32 passed the moment
-    `test_phase3_delivery_admission` (which calls `R.main()` in-process) ran
-    before it in the same session. The gate reported "the technology's own layer
-    table could not be read", which was true of the container and false of the
-    tree under test.
-
-    So the value is restored on the way out -- put back exactly, or removed if
-    there was none. Nothing inside the run sees any difference; a caller that
-    RETURNS from this function gets its environment back.
-    """
-    _unset = object()
-    _eda_container_before = os.environ.get("EDA_CONTAINER", _unset)
-    try:
-        return _run_phase3()
-    finally:
-        if _eda_container_before is _unset:
-            os.environ.pop("EDA_CONTAINER", None)
-        else:
-            os.environ["EDA_CONTAINER"] = _eda_container_before
-
-
-def _run_phase3() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("project", type=Path)
     p.add_argument("--top-name", default="chip_top")
