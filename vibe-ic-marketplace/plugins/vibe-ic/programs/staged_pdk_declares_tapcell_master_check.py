@@ -200,6 +200,8 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 # ---------------------------------------------------------------------------
 
+from _atomic_artefact import write_json as _atomic_write_json  # noqa: E402
+
 import argparse                                                     # noqa: E402
 import ast                                                          # noqa: E402
 import json                                                         # noqa: E402
@@ -515,7 +517,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     rep = audit(root)
     if a.json_out:
         try:
-            Path(a.json_out).write_text(json.dumps(rep, indent=2) + "\n")
+            # Through `_atomic_artefact` (#1082): whole or not at all.
+            _atomic_write_json(a.json_out, rep)
         except OSError as exc:
             print(f"[REFUSE] cannot write --json: {exc}")
             return RC_CANNOT_CHECK

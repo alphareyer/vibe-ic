@@ -183,6 +183,8 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 # ---------------------------------------------------------------------------
 
+from _atomic_artefact import write_json as _atomic_write_json  # noqa: E402
+
 import argparse
 import json
 import re
@@ -934,14 +936,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.json:
         try:
-            Path(args.json).write_text(json.dumps({
+            # Through `_atomic_artefact` (#1082): a declared report destination
+            # is written whole or not at all, so a reader that opens it
+            # mid-write cannot see a truncated verdict.
+            _atomic_write_json(args.json, {
                 "tool": TOOL,
                 "root": str(Path(args.root).expanduser()),
                 "verdict": verdict,
                 "count": len(findings),
                 "census": census,
                 "findings": [asdict(f) for f in findings],
-            }, indent=2) + "\n", encoding="utf-8")
+            })
         except OSError as exc:
             print(f"[REFUSE] {TOOL}: cannot write --json: {exc}",
                   file=_sys.stderr)
