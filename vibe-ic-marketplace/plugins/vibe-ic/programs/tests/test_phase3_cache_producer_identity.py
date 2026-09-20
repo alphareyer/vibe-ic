@@ -49,6 +49,7 @@ PROGS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROGS))
 
 import phase3_one_shot_runner as R  # noqa: E402
+from _delivery_declaration import declare_delivery as _declare  # noqa: E402
 
 TOP = "chip_top"
 DIE, UTIL = "200x200", 0.45
@@ -191,6 +192,13 @@ def _project(tmp_path: Path, *, stamp: bool) -> Path:
         R._write_producer_identity(synth, "synth")
         R._write_producer_identity(pnr, "pnr")
         R._write_producer_identity(pnr, "gds")
+    # The SECOND thing this fixture had to catch up with, and the same kind as
+    # the post-DFT netlist above: v1.22.13 (#2376) made Phase 3 refuse a project
+    # with no delivery declaration, BEFORE any step and before the report these
+    # tests read is written, so the six cases here died on a missing file rather
+    # than on the cache verdict they assert. Admission still runs; this supplies
+    # the input a tree that has reached PnR would carry.
+    _declare(tmp_path, "DIE")
     return tmp_path
 
 
