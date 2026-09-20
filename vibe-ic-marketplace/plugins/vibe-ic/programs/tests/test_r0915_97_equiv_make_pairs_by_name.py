@@ -215,3 +215,119 @@ def test_the_selector_is_pure():
         src = inspect.getsource(fn)
         for forbidden in ("open(", "Path(", "subprocess"):
             assert forbidden not in src, (fn.__name__, forbidden)
+
+
+# --------------------------------------------------------------------------
+# R-0915-97(3) — THE RUNNER ACTUALLY RUNS IT.
+#
+# A helper with tests is not a fix until the runner calls it.  These drive the
+# two derivations the runner performs — the gold word probe and pass 1's own
+# unproven list — end to end into the script the runner emits.
+# --------------------------------------------------------------------------
+_PROBE_TEE = "\n".join([r"  \h_reg[%d]" % k for k in range(8)]
+                       + [r"  \w_reg[%d]" % k for k in range(16)])
+_GATE_NETLIST = ("module sha256(clk);\n"
+                 "  wire [255:0] \\h_reg[0] ;\n"
+                 "  wire [511:0] \\w_reg[0] ;\n"
+                 "endmodule\n")
+
+
+def test_the_probe_script_is_the_proofs_own_gold_prologue():
+    """The runner cuts the real script at `design -stash gold` and appends the
+    tee, so there is no second spelling of the gold recipe to drift."""
+    base = L.build_equiv_script(["g.v"], "n.v", "top", None)
+    assert "design -stash gold" in base
+    prologue = base.split("design -stash gold")[0]
+    assert "prep -top top" in prologue and "memory_map" in prologue
+    probe = prologue + "tee -q -o /p/words.txt select -list w:*\n"
+    assert probe.endswith("select -list w:*\n")
+    assert "design -stash gate" not in probe
+
+
+def test_the_probe_helper_emits_prep_memory_map_and_the_tee():
+    ys = L.memory_probe_script("read_verilog -sv g.v", "top", "/p/w.txt")
+    assert ys.splitlines() == ["read_verilog -sv g.v", "prep -top top",
+                               "memory_map",
+                               "tee -q -o /p/w.txt select -list w:*"]
+
+
+def test_the_derivation_chain_puts_the_alias_block_in_the_emitted_script():
+    """(a) THE RED ONE ON icsha2b: gate netlist + probe output -> plan ->
+    script.  On the previous branch nothing called this chain and the script
+    carried no alias block at all."""
+    plan, findings = L.memory_word_alias_plan(
+        L.gold_memory_words(_PROBE_TEE), L.gate_wide_vectors(_GATE_NETLIST))
+    assert findings == [] and len(plan) == 2
+    script = L.build_equiv_script(["g.v"], "n.v", "sha256", None,
+                                  memory_word_aliases=plan)
+    assert "rename \\h_reg[0] \\h_reg__lecwide" in script
+    assert "connect -set \\w_reg[15] \\w_reg__lecwide[511:480]" in script
+    assert "cd sha256" in script and "cd .." in script
+
+
+_P1 = ("Unproven $equiv $auto$equiv_make.cc:295$1: \\clean_d_gold \\clean_d_gate\n"
+       "Found a total of 1 unproven $equiv cells.\n")
+_LOG = (r"Adding EN signal on $auto$ff.cc:266:slice$1 ($_DFF_P_) from module m "
+        r"(D = \clean_d, Q = \clean_q)." "\n")
+
+
+def test_pass1s_unproven_list_is_read_by_name():
+    assert L.unproven_names(_P1) == ["clean_d"]
+    assert L.unproven_names("Found a total of 0 unproven $equiv cells.\n") == []
+
+
+def test_a_second_pass_happens_when_the_q_is_proven():
+    """(b) THE OTHER RED ONE: an EN fold whose D is unproven and whose Q is not
+    in the unproven list yields exactly one candidate, and the script the runner
+    then emits carries `-blacklist`."""
+    cands = L.blacklist_second_pass_plan(_P1, _LOG)
+    assert [c["d"] for c in cands] == ["clean_d"]
+    assert cands[0]["q"] == "clean_q" and "Adding EN signal" in cands[0]["line"]
+    script = L.build_equiv_script(["g.v"], "n.v", "m", None,
+                                  equiv_blacklist_path="/p/bl.txt")
+    assert "equiv_make -blacklist /p/bl.txt gold gate" in script
+
+
+def test_no_second_pass_when_the_q_is_also_unproven():
+    """(c) a real divergence stays red — single pass."""
+    p1 = _P1 + ("Unproven $equiv $auto$equiv_make.cc:295$2: \\clean_q_gold "
+                "\\clean_q_gate\n")
+    assert L.blacklist_second_pass_plan(p1, _LOG) == []
+
+
+def test_no_second_pass_and_no_alias_when_there_is_neither():
+    """(d) neither -> single pass, and the script is byte-identical to today's."""
+    assert L.blacklist_second_pass_plan(_P1, "no folds here\n") == []
+    assert L.memory_word_alias_plan(L.gold_memory_words(""), {}) == ([], [])
+    assert (L.build_equiv_script(["g.v"], "n.v", "t", None)
+            == L.build_equiv_script(["g.v"], "n.v", "t", None,
+                                    memory_word_aliases=[],
+                                    equiv_blacklist_path=""))
+
+
+def test_the_runner_calls_both_derivations():
+    """The complaint that produced this section, as a standing guard: the
+    runner (`main`, which is where the ladder lives) must REFERENCE the
+    helpers, not merely ship them."""
+    src = Path(L.__file__).read_text()
+    body = src[src.index("def main(argv: Optional[List[str]] = None) -> int:"):]
+    for name in ("_memory_alias_plan", "memory_word_alias_plan",
+                 "gate_wide_vectors", "gold_memory_words",
+                 "blacklist_second_pass_plan", "equiv_blacklist_path="):
+        assert name in body, name
+
+
+def test_the_report_publishes_the_alias_and_the_blacklist_evidence():
+    src = Path(L.__file__).read_text()
+    for key in ("lec_memory_word_aliases", "lec_memory_alias_findings",
+                "lec_enable_fold_blacklist", "lec_blacklist_pass"):
+        assert f'report["{key}"]' in src, key
+
+
+def test_the_second_pass_is_not_adopted_when_it_proves_less():
+    """The blanket-blacklist measurement (3717/293 against 4025/3) as a guard:
+    a pass that LOSES proofs must not become the verdict."""
+    src = Path(L.__file__).read_text()
+    i = src.index('_bl_pass["adopted"] = True')
+    window = src[i - 700:i]
+    assert '_p2["proved"] >= _p1["proved"]' in window

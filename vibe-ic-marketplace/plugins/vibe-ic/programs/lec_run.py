@@ -3594,6 +3594,62 @@ def blacklist_candidates(log_text, unproven, proven):
 
 
 
+#: R-0915-97(3) — A HELPER WITH TESTS IS NOT A FIX UNTIL THE RUNNER RUNS IT.
+#: The two derivations below are what turn `memory_word_alias_plan` and
+#: `blacklist_candidates` from definitions into behaviour: the first derives
+#: gold's post-`memory_map` word set BY RUNNING YOSYS on the gold, the way
+#: `paired.ys` did by hand; the second reads pass 1's own unproven list.
+_MEM_PROBE_TEE = "lec_gold_mem_words.txt"
+#: The probe is `prep + memory_map` on the GOLD alone — seconds, not a proof.
+_MEM_PROBE_TIMEOUT_S = 900
+
+
+def memory_probe_script(gold_read_cmd: str, top: str, tee_path: str) -> str:
+    """The pre-pass that asks GOLD what `memory_map` named its words. PURE.
+
+    Identical prologue to the proof's own gold side up to `memory_map`, so the
+    word set it reports is the word set the proof will carry, not an
+    approximation of it.
+    """
+    return (f"{gold_read_cmd}\n"
+            f"prep -top {top}\n"
+            f"memory_map\n"
+            f"tee -q -o {tee_path} select -list w:*\n")
+
+
+def blacklist_second_pass_plan(raw: str, synth_log_text: str
+                               ) -> List[Dict[str, str]]:
+    """Pass 2's candidate list from pass 1's OWN output. PURE.
+
+    `equiv_status` prints a line per UNPROVEN point and nothing per proven one,
+    so "proven" is derived as "the Q of a fold line that is NOT in the unproven
+    list". A `*_d` whose Q is also unproven is a real divergence and is never a
+    candidate. Empty list means NO second pass at all.
+    """
+    un = set(unproven_names(raw))
+    folds = enable_folded_pairs(synth_log_text)
+    proven = {r["q"] for r in folds if r["q"] not in un}
+    return blacklist_candidates(synth_log_text, un, proven)
+
+
+def unproven_names(raw: str) -> List[str]:
+    """The gold-side names of pass 1's unproven `$equiv` cells. PURE.
+
+    `equiv_status` prints one `Unproven $equiv <cell>: \<x>_gold \<x>_gate`
+    line per unproven point and nothing per PROVEN point, so this list is the
+    only per-name evidence the tool gives — which is why the caller derives
+    "proven" as "compared and NOT in this list".
+    """
+    out: List[str] = []
+    for line in (raw or "").splitlines():
+        if "Unproven $equiv" not in line:
+            continue
+        tok = line.split()
+        if len(tok) >= 2 and tok[-2].endswith("_gold"):
+            out.append(tok[-2].lstrip("\\")[: -len("_gold")])
+    return sorted(set(out))
+
+
 def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
                        liberty: Optional[str],
                        blackbox_v: Optional[List[str]] = None,
@@ -5520,12 +5576,68 @@ def main(argv: Optional[List[str]] = None) -> int:
         _scan_fsm_restore["encoding_path"] = str(_scan_enc_path)
         scan_record["fsm_correspondence"] = _scan_fsm_restore
 
+    # R-0915-97(3) — what the alias pre-pass found, published in lec.json.
+    mem_alias_record: List[Dict[str, object]] = []
+    mem_alias_findings: List[str] = []
+    blacklist_record: List[Dict[str, str]] = []
+    blacklist_pass: Dict[str, Any] = {}
+    _mem_plan_cache: Dict[str, Tuple[List[Dict[str, object]], List[str]]] = {}
+
+    # THE ALIAS PLAN, DERIVED BY RUNNING YOSYS, CACHED PER FRONTEND. Lazily on
+    # the first script emission so it is derived with the SAME gold prologue the
+    # proof will use: the probe script IS that prologue, cut at
+    # `design -stash gold`, plus a `tee` of the mapped word list. No second
+    # spelling of the gold recipe can drift from the first.
+    def _memory_alias_plan(frontend: str, slang_prefix: str, defines: str
+                           ) -> Tuple[List[Dict[str, object]], List[str]]:
+        key = f"{frontend}|{slang_prefix}|{defines}"
+        if key in _mem_plan_cache:
+            return _mem_plan_cache[key]
+        plan: List[Dict[str, object]] = []
+        findings: List[str] = []
+        try:
+            wide = gate_wide_vectors(Path(gate_abs).read_text(errors="replace"))
+            if wide:
+                base = build_equiv_script(
+                    gold_files, gate_abs, resolved_top, liberty,
+                    blackbox_v=macro_blackbox_v or None,
+                    gate_is_generic=gate_is_generic, gold_frontend=frontend,
+                    slang_prefix=slang_prefix, gold_defines=defines,
+                    scan_mode=scan_mode, gate_wrapper_v=gate_wrapper_v,
+                    gold_wrapper_v=gold_wrapper_v)
+                prologue = base.split("design -stash gold")[0]
+                tee = rpt_out.parent / _MEM_PROBE_TEE
+                probe = rpt_out.parent / "lec_mem_probe.ys"
+                probe.write_text(prologue
+                                 + f"tee -q -o {tee} select -list w:*\n",
+                                 encoding="utf-8")
+                launched, _raw = run_yosys_equiv(
+                    container, str(probe.resolve()),
+                    timeout=_MEM_PROBE_TIMEOUT_S, workdir=equiv_workdir)
+                if launched and tee.is_file():
+                    plan, findings = memory_word_alias_plan(
+                        gold_memory_words(tee.read_text(errors="replace")),
+                        wide)
+        except OSError as exc:                                 # noqa: BLE001
+            findings = [f"LEC_MEMORY_PROBE_UNREADABLE: {exc}"]
+        _mem_plan_cache[key] = (plan, findings)
+        for f in findings:
+            if f not in mem_alias_findings:
+                mem_alias_findings.append(f)
+        if plan and not mem_alias_record:
+            mem_alias_record.extend(plan)
+        return plan, findings
+
     def _make_script(frontend: str, slang_prefix: str, defines: str, *,
                      checkpoint_dir: Optional[str] = None,
                      resume_from: Optional[Dict] = None,
-                     ladder_rungs: Optional[int] = None) -> str:
+                     ladder_rungs: Optional[int] = None,
+                     equiv_blacklist_path: str = "") -> str:
+        _plan, _ = _memory_alias_plan(frontend, slang_prefix, defines)
         return build_equiv_script(
             gold_files, gate_abs, resolved_top, liberty,
+            memory_word_aliases=_plan,
+            equiv_blacklist_path=equiv_blacklist_path,
             blackbox_v=macro_blackbox_v or None,
             gate_is_generic=gate_is_generic,
             gold_frontend=frontend, slang_prefix=slang_prefix,
@@ -6079,6 +6191,59 @@ def main(argv: Optional[List[str]] = None) -> int:
         # this reason), so a concatenation of the legs is read at the state the
         # ladder finished in, not the state its first leg started from.
         _raw = "".join(_leg_raws)
+        # R-0915-97(3) — PASS 2, EVIDENCE-GATED, AND ONLY WHEN THERE IS
+        # EVIDENCE. Pass 1 has just finished; its unproven list is the only
+        # per-name evidence yosys gives, so "proven" is derived as "compared and
+        # NOT in that list". A candidate needs its Q proven, so a real
+        # divergence (Q unproven too) can never be blacklisted. An empty
+        # candidate set means NO second pass and today's behaviour exactly.
+        _bl_cands = []
+        _synth_log = project / "phase2" / "stage2" / "synth" / "yosys.log"
+        if _leg_raws and _synth_log.is_file():
+            try:
+                _bl_cands = blacklist_second_pass_plan(
+                    _raw, _synth_log.read_text(errors="replace"))
+            except OSError:
+                _bl_cands = []
+        if _bl_cands:
+            _bl_path = rpt_out.parent / "lec_blacklist.txt"
+            _bl_path.write_text("\n".join(c["d"] for c in _bl_cands) + "\n",
+                                encoding="utf-8")
+            _bl_ys = rpt_out.parent / "lec_equiv_blacklist.ys"
+            _bl_ys.write_text(
+                _make_script(frontend, slang_prefix, defines,
+                             equiv_blacklist_path=str(_bl_path.resolve())),
+                encoding="utf-8")
+            _bl_launched, _bl_raw = run_yosys_equiv(
+                container, str(_bl_ys.resolve()),
+                timeout=max(1, budget.next_attempt_budget()),
+                workdir=equiv_workdir)
+            _p1 = final_status_counts(_raw) or {}
+            _p2 = final_status_counts(_bl_raw) or {}
+            for c in _bl_cands:
+                blacklist_record.append({
+                    "name": c["d"], "proven_q": c["q"],
+                    "synth_log_line": c["line"]})
+            _bl_pass = {
+                "blacklisted": [c["d"] for c in _bl_cands],
+                "pass1_proved": _p1.get("proved"),
+                "pass1_unproven": _p1.get("unproven"),
+                "pass2_proved": _p2.get("proved"),
+                "pass2_unproven": _p2.get("unproven"),
+                "script": str(_bl_ys), "launched": _bl_launched,
+            }
+            # THE SECOND PASS ONLY REPLACES THE FIRST WHEN IT PROVED MORE. The
+            # blanket-blacklist measurement (3717/293 against 4025/3) is why:
+            # removing cut points can LOSE proofs, and a pass that loses them
+            # must not become the verdict.
+            if (_bl_launched and _p2.get("proved") is not None
+                    and _p1.get("proved") is not None
+                    and _p2["proved"] >= _p1["proved"]):
+                _raw = _raw + _bl_raw
+                _bl_pass["adopted"] = True
+            else:
+                _bl_pass["adopted"] = False
+            blacklist_pass.update(_bl_pass)
         if _per_rung:
             resume_record["rungs_recorded_this_run"] = _all_recorded
         resume_record["resumed"] = _entry_resume_from is not None
@@ -6510,6 +6675,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "nothing to resume from — a restart starts over, and that is "
                 "a measured fact about this run rather than a default")
     report["lec_resume"] = resume_record
+    # R-0915-97(3) — the alias pre-pass and the blacklist second pass, in the
+    # report, by name. A finding is a FINDING (it names the memory and why no
+    # alias was emitted), and every blacklisted name carries its synth-log line
+    # and its proven Q, which is the evidence that it is not a waiver.
+    if mem_alias_record:
+        report["lec_memory_word_aliases"] = list(mem_alias_record)
+    if mem_alias_findings:
+        report.setdefault("findings", []).extend(mem_alias_findings)
+        report["lec_memory_alias_findings"] = list(mem_alias_findings)
+    if blacklist_record:
+        report["lec_enable_fold_blacklist"] = list(blacklist_record)
+    if blacklist_pass:
+        report["lec_blacklist_pass"] = dict(blacklist_pass)
     # THE PER-RUNG TABLE (vibe-ic#2194): which rung ran in which process, what
     # each one peaked at, and whether the proved set survived every boundary.
     report["lec_ladder"] = ladder_record
