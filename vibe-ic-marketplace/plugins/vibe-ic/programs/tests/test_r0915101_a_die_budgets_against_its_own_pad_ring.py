@@ -369,3 +369,62 @@ def test_the_named_gap_still_reaches_the_umbrella_as_INCOMPLETE():
     assert snippet.startswith("INCOMPLETE:")
     assert "ZERO_DENOMINATOR" in snippet
     assert "BLOCKED_BY_UPSTREAM" not in snippet
+
+
+# --------------------------------------------------------------------------- #
+# the top-resolution fallback, which is a change on BOTH routes and is bounded
+# --------------------------------------------------------------------------- #
+# MEASURED on r46: the declaration answers `top_cell: chip_top` -- the wrapper
+# step 15.5ic GENERATES -- while the RTL staged at step 2 carries the core. The
+# integration spec's own `top_module` is the design's answer for which module
+# the staged RTL is, and it is consulted LAST. These two tests fix the
+# precedence so the fallback can never overrule an answer that already worked.
+def _with_l9(project, top_module):
+    d = project / "phase1" / "generated_docs"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "L9_INTEGRATION_SPEC.json").write_text(json.dumps(
+        {"top_module": top_module, "top_ports": [{"name": "i_clk", "width": 1}]}))
+    return project
+
+
+def test_the_integration_spec_names_the_core_when_the_declaration_names_the_wrapper():
+    """RED before this change: "the design declares NO top-level port" about a
+    design that declares eight, because the only module tried was the wrapper
+    that does not exist until step 15.5ic."""
+    p = _project(top="chip_top")            # the declaration's answer
+    (p / "phase2" / "stage1" / "rtl" / "chip_top.v").unlink()
+    r = p / "phase2" / "stage1" / "rtl"
+    (r / "widget.v").write_text(_RTL)       # the staged RTL is the CORE
+    _with_l9(p, "widget")
+    rc, rep = _run(p)
+    assert rep["verdict"] == "FITS", rep.get("reason")
+    assert rc == 0
+    assert "L9_INTEGRATION_SPEC.json:top_module" in rep["top_source"]
+    assert rep["top"] == "widget"
+
+
+def test_the_integration_spec_is_consulted_LAST_and_overrules_nothing():
+    """Bounded on purpose: a declaration whose `top_cell` IS in the staged RTL
+    still wins, even when the integration spec names a different module."""
+    p = _with_l9(_project(), "some_other_module")
+    rc, rep = _run(p)
+    assert rep["verdict"] == "FITS"
+    assert rep["top"] == _TOP
+    assert "L9_INTEGRATION_SPEC" not in rep["top_source"]
+
+
+def test_the_fallback_reaches_the_SLOT_route_too_and_is_said_so():
+    """This is a change on BOTH routes, not a die-only one: a HARDMACRO that
+    bought a slot and whose declaration names the wrapper is now measured
+    against that slot instead of refusing over an argument. The operator
+    template is still required on that route -- only the top name moved."""
+    p = _project(deliverable="HARDMACRO", top="chip_top",
+                 operator_template={"path": "templates/t.yaml",
+                                    "slot": "slot_1x1"})
+    (p / "phase2" / "stage1" / "rtl" / "chip_top.v").unlink()
+    (p / "phase2" / "stage1" / "rtl" / "widget.v").write_text(_RTL)
+    _with_l9(p, "widget")
+    _, rep = _run(p)
+    assert "largest_digital_signal_pad_count" in rep     # the slot arithmetic
+    assert rep.get("budget_basis") != "37.5self:own_pad_ring"
+    assert rep["verdict"] in ("FITS", "FITS_AFTER_FOLD", "DOES_NOT_FIT")
