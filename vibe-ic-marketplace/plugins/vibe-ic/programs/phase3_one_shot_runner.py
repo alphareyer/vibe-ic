@@ -37799,6 +37799,8 @@ def _ship_repair_should_promote(parsed: dict, repaired_def_ok: bool,
 # branch calls `_drv_promotion_clear` so the two are mutually exclusive and the
 # gate can never read a stale "did not promote" beside a real promotion.
 _DRV_PROMOTION_NOT_RUN = "drv_promotion_not_run.json"
+#: What the promotion says its own DRV number is a number OF.
+_DRV_PROMOTION_CLAIM = "drv_promotion_claim.json"
 
 
 def _drv_promotion_disclose(pnr_out: Path, stage: str, reason: str) -> None:
@@ -37817,6 +37819,57 @@ def _drv_promotion_disclose(pnr_out: Path, stage: str, reason: str) -> None:
             "not_run_stage": stage,
             "reason": reason,
         }, indent=2) + "\n")
+    except OSError:
+        pass
+
+
+def _drv_promotion_claim(project: Path, pnr_out: Path,
+                         parsed: Dict[str, Any]) -> None:
+    """Record WHAT the promotion's DRV number is a number OF.
+
+    `drv_promotion_corroboration_check` compares the promotion's claim against
+    the DRV rows of the multi-corner sign-off report. They are not the same
+    measurement: MEASURED on subservient x gf180mcuD as a DIE (r46) the
+    promotion's own resizer session ended at 5 slew + 6 capacitance = 11 at
+    ITS corner, the sign-off report carries 14 rows across the setup AND hold
+    corners, and the gate read that difference as the promoted route being
+    worse than claimed ("do not ship this route").
+
+    So the promotion states its basis, and — when the sign-off report already
+    exists — RE-MEASURES it with the gate's own counter, so the two read one
+    artefact. The counter is imported from the check module: one implementation
+    of "how many DRV violations does this report show", never a second copy.
+    """
+    rec: Dict[str, Any] = {
+        "program": "step_signoff_spef_repair",
+        "promoted": True,
+        "claim_basis": "resizer in-session STA at the repair corner "
+                       "(RSZ-0034 slew + RSZ-0036 capacitance, last pass)",
+    }
+    try:
+        import drv_promotion_corroboration_check as _dpc
+        rpt = _dpc.find_signoff_report(project)
+        if rpt is not None:
+            rec["signoff_report"] = str(rpt)
+            rec["signoff_drv_at_promotion"] = _dpc.signoff_drv_violations(
+                rpt.read_text(errors="replace"))
+        else:
+            rec["signoff_report"] = None
+            rec["signoff_report_absent_at_promotion"] = True
+            rec["why"] = ("the multi-corner sign-off report is written later "
+                          "in the run (canonicalize), so at promotion time "
+                          "there is no sign-off artefact to measure; the "
+                          "in-session number is the only one that exists and "
+                          "it is NOT comparable to a multi-corner row count")
+    except Exception as exc:                                  # noqa: BLE001
+        rec["claim_record_error"] = repr(exc)
+    for k in ("wns_before", "wns_after_repair", "wns_postroute"):
+        if k in (parsed or {}):
+            rec[k] = parsed[k]
+    try:
+        pnr_out.mkdir(parents=True, exist_ok=True)
+        (pnr_out / _DRV_PROMOTION_CLAIM).write_text(
+            json.dumps(rec, indent=2) + "\n")
     except OSError:
         pass
 
@@ -37999,6 +38052,7 @@ def step_signoff_spef_repair(project: Path, top: str, pdk: "PdkConfig",
         # invocation left, so the marker and the record can never both be
         # readable and the gate can never corroborate against a stale claim.
         _drv_promotion_clear(pnr_out)
+        _drv_promotion_claim(project, pnr_out, parsed)
         shutil.copy2(routed, pnr_out / "routed_base_prerepair.def")
         shutil.copy2(repaired_def, routed)
         _pnr_v = pnr_out / f"{top}_pnr.v"
@@ -46321,6 +46375,44 @@ def _step37_declare_streamout_gds_provenance(project: Path, top: str) -> None:
 # have shipped a measurement this change did not make.
 # ---------------------------------------------------------------------------
 
+#: THE ONE OWNER OF THE CANONICAL POST-ROUTE STA REPORT NAME. Step 23's gate
+#: scope names `post_route_timing.rpt`; the flow writes several sign-off STA
+#: reports and used to fill that alias from ONE of them (the single-corner
+#: SPEF run) and from nothing else. MEASURED on subservient x gf180mcuD as a
+#: DIE (r46): that single-corner run REFUSED itself — its own population
+#: record says `"complete": false`, the drivers of the input ports could not be
+#: classified — so the alias was never written, and `sta_signoff` reported "No
+#: STA report found" about a run whose multi-corner OCV sign-off report
+#: (`sta_mcorner_ocv.rpt`) existed and was being read by `sta_record` in the
+#: same phase. Producer and gate disagreed about which artefact is canonical.
+#:
+#: Order of preference, and every entry is a report this flow already treats as
+#: sign-off. A REFUSED attempt (renamed `.attempt-<uuid>`) is never a basis.
+_CANONICAL_POST_ROUTE_STA_BASES = (
+    ("sta/sta_spef_based.rpt", "single-corner post-route SPEF"),
+    ("sta/sta_mcorner_ocv.rpt", "multi-corner OCV post-route SPEF "
+                                "(setup@slow, hold@fast)"),
+    ("sta/sta_spef_multicorner.rpt", "multi-corner post-route SPEF"),
+    ("pnr/sta.rpt", "pre-SPEF estimate (report_checks)"),
+)
+
+
+def canonical_post_route_sta(stage_dir: Path) -> Tuple[Optional[Path], str]:
+    """(report, basis) — the best post-route STA report this run actually has.
+
+    `stage_dir` is `phase3/stage3`. Returns (None, "") when the run produced
+    none, which is the honest input for a gate that must then refuse.
+    """
+    for rel, basis in _CANONICAL_POST_ROUTE_STA_BASES:
+        cand = stage_dir / rel
+        try:
+            if cand.is_file() and cand.stat().st_size > 0:
+                return cand, basis
+        except OSError:
+            continue
+    return None, ""
+
+
 #: The `--under` scope step 23's yaml clause declares, kept here so the runner's
 #: inline invocation of the same gate reads the same artefacts. Any change must
 #: be made in both places; the test named above fails if they diverge.
@@ -50286,9 +50378,29 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
                 "phase3/stage3/pnr/sta.rpt for comparison.\n"
                 + spef_sta_rpt.read_text())
             written.append(str(post_route_rpt))
-        elif spef_sta_attempt_ok is not False and primary_sta.is_file():
-            post_route_rpt.write_text(primary_sta.read_text())
-            written.append(str(post_route_rpt))
+        else:
+            # THE SINGLE-CORNER RUN IS NOT THE ONLY SIGN-OFF STA THIS FLOW
+            # PRODUCES. When it refuses itself (r46: incomplete driver
+            # population) the run still has its multi-corner OCV report — the
+            # one `sta_corner_record_completeness_check` reads as sign-off —
+            # and leaving the canonical alias absent made `sta_signoff` say
+            # "No STA report found" about a run that had measured its timing.
+            # The alias now names its BASIS, and a refused attempt is never a
+            # basis.
+            _alt, _alt_basis = canonical_post_route_sta(sta_out.parent)
+            if _alt is not None:
+                _why = ("the single-corner SPEF STA refused itself"
+                        if spef_sta_attempt_ok is False else
+                        "no single-corner SPEF STA was produced")
+                post_route_rpt.write_text(
+                    "# post_route_timing.rpt — canonical post-route STA.\n"
+                    f"# Basis: {_alt_basis} ({_alt.name}), because {_why}.\n"
+                    "# STA_ALIAS_BASIS: " + _alt.name + "\n"
+                    + _alt.read_text(errors="replace"))
+                written.append(str(post_route_rpt))
+                notes.append(
+                    f"post_route_timing.rpt written from {_alt.name} "
+                    f"({_alt_basis}) — {_why}")
 
     # --- #527: estimate-vs-SPEF discrepancy surface ----------------------
     # When both bases parse and they disagree (sign flip OR >1 ns delta),
@@ -57074,7 +57186,57 @@ catch {{set_wire_rc -clock -layer {mp}5}}
         }, indent=2) + "\n")
         em_ok = True
     else:
-        notes.append(f"EM PSM produced no 'current' line (rc={rc})")
+        # SAY NOT_MEASURED, BY NAME. Without this the step wrote NOTHING and
+        # only appended a note, so the EM sign-off gate read an artefact with
+        # no density values in it and could only report the ARTEFACT ("No
+        # current density values (Javg/Jpeak/mA/A/cm) found") — never the
+        # CAUSE. MEASURED on subservient x gf180mcuD as a DIE (r46): PSM had
+        # failed outright, `[ERROR PSM-0069] Check connectivity failed on VDD`
+        # after 1000 unconnected-supply-pin warnings, and nothing downstream
+        # said so. A measurement that did not happen must name itself and say
+        # why; it is still NOT a pass.
+        # The SAME one implementation the IR branch uses — read here too,
+        # because that branch may not have run at all (no IR line, no
+        # coverage), and this one must still be able to say why.
+        from psm_analysis_coverage import analysis_coverage as _em_coverage
+        _cov_em = _em_coverage(log, power_nets)
+        _psm_analysed = _cov_em["analysed"]
+        _psm_failed = _cov_em["analysis_failed"]
+        _psm_conn = _cov_em["connectivity"]
+        _psm_unconn = _cov_em["unconnected_instances"]
+        _em_why = (f"PSM analysis FAILED on {', '.join(_psm_failed)}"
+                   if _psm_failed else
+                   f"PSM produced no per-segment current line (rc={rc})")
+        _em_conn = (f"; {len(_psm_unconn)} unconnected supply pin(s) reported, "
+                    f"first: {', '.join(_psm_unconn[:3])}" if _psm_unconn else "")
+        em_rpt.write_text(
+            "# OpenROAD PSM Electromigration (EM) report — emitted by\n"
+            "# phase3_one_shot_runner.\n"
+            "#\n"
+            "EM NOT_MEASURED\n"
+            f"reason: {_em_why}{_em_conn}\n"
+            "current density (Javg/Jpeak): NOT_MEASURED — no segment current "
+            "was produced, so no density is derivable from this run\n"
+            f"power nets asked: {', '.join(power_nets)}\n"
+            f"nets analysed: {', '.join(_psm_analysed) or 'none'}\n"
+            f"nets whose analysis failed: {', '.join(_psm_failed) or 'none'}\n"
+            "\n# === Full PSM/EM stdout (provenance) ===\n" + log[-3000:] +
+            "\n# end of em.rpt\n")
+        _aa.write_text(em_rpt.parent / "em.json", json.dumps({
+            "tool": "openroad-psm",
+            "mode": "electromigration",
+            "power_nets": power_nets,
+            "segments_analysed": 0,
+            "max_segment_current_A": None,
+            "source": str(em_rpt.relative_to(project)),
+            "verdict": "NOT_MEASURED",
+            "not_measured_reason": _em_why + _em_conn,
+            "nets_analysed": _psm_analysed,
+            "nets_analysis_failed": _psm_failed,
+            "connectivity_findings": _psm_conn,
+            "evidence": "analyze_power_grid -enable_em stdout",
+        }, indent=2) + "\n")
+        notes.append(f"EM NOT_MEASURED: {_em_why}{_em_conn}")
     return ir_ok, em_ok
 
 
