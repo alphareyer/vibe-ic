@@ -261,6 +261,37 @@ RUNNER_PROFILE_EXPECTED = {
 }
 
 
+def image_digest_of(image: Any) -> Optional[str]:
+    """The `sha256:…` identity of a runner image reference, or None.
+
+    THE DIGEST IS THE IDENTITY AND THE REPOSITORY IS CONFIGURATION — the same
+    split `_eda_pin` states for the same bytes. Two references that differ only
+    in which registry serves them name ONE image, and a comparability rule that
+    read the whole string would call them different: that is precisely the
+    defect measured on 2026-09-07 (lane czjudgekill), where exporting
+    `VIBEIC_EDA_IMAGE_REPO` turned 1 red into 95 over a tree whose bytes had
+    not moved.
+    """
+    if not isinstance(image, str) or IMAGE_RE.fullmatch(image) is None:
+        return None
+    return image.rsplit("@", 1)[1]
+
+
+def images_are_comparable(base_image: Any, candidate_image: Any) -> bool:
+    """Do two RECORDED runner images name one toolchain?
+
+    The whole of the comparability rule (owner ruling, 2026-09-21), in one
+    place: two arms are comparable exactly when the DIGEST each RECORDED at run
+    time is the same. A different digest is not a fault in either arm and never
+    a refusal — the candidate is measured fresh on its own image and the delta
+    is not charged to it. The reader's own host does not appear in this
+    question, which is the point.
+    """
+    base = image_digest_of(base_image)
+    candidate = image_digest_of(candidate_image)
+    return base is not None and base == candidate
+
+
 def derived_runner() -> dict:
     """The runner row a manifest must carry, built from this file's own rules."""
     return {"schema": 1, "profile_id": RUNNER_PROFILE_ID, "engine": "docker",
@@ -549,13 +580,23 @@ def _runner_profile(value: Any, what: str = "manifest.runner"
     image = row["image"]
     if not isinstance(image, str) or IMAGE_RE.fullmatch(image) is None:
         raise Refusal(f"{what}.image is not an immutable digest reference")
-    # AGAINST THE COMMITTED REFERENCE, never the runtime one: a register is a
-    # committed artefact and can only carry `RUNNER_IMAGE`. The identity it
-    # pins — the digest — is the same digest `RUNNER_IMAGE_RUNTIME` starts, and
-    # that binding is asserted where all four copies are in one place rather
-    # than re-derived here.
-    if image != runner_image():
-        raise Refusal(f"{what}.image is not the BASE-owned runner image")
+    # NOT AGAINST THIS HOST'S IMAGE (owner ruling, 2026-09-21, from R-0915-96:
+    # the image is DECOUPLED, RESOLVED PER RUN and RECORDED IN THE RECEIPT).
+    # This used to read
+    #
+    #     if image != runner_image(): raise Refusal(...)
+    #
+    # which asked a RECORDED artefact whether it matched whatever image the
+    # machine reading it happens to have newest — the pin's semantics, and they
+    # are gone. MEASURED on 8HD-d, 2026-09-20/21: `runner_image()` resolves from
+    # the host, so the answer moved from 943f53b3 to 4e9f54ef inside one session
+    # when `:latest` was re-pulled, and `test_landing_gate_direct_push_tier`
+    # answered 11 red or 3 red at the SAME commit depending on the hour. A test
+    # whose verdict changes when somebody pulls an image is not a test.
+    #
+    # What a receipt owes is that its image is an IMMUTABLE reference (checked
+    # above). Whether two receipts are COMPARABLE is a question about the two of
+    # them, answered by `images_are_comparable` — never about the reader.
     expected = RUNNER_PROFILE_EXPECTED
     for key, expected_value in expected.items():
         if row[key] != expected_value:

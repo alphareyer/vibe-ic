@@ -1082,17 +1082,20 @@ def test_the_cap_abstention_names_the_number_to_raise_it_to(tmp_path):
     assert raised["state"] != "ABSTAIN", raised
 
 
-def test_the_sweep_caps_at_or_above_what_this_corpus_needs():
-    """SLOW (~45 s) AND WORTH IT: it fails in seconds' worth of a suite run
-    where the gate it protects fails after 867 s, and it fails with the number.
+def test_the_sweep_records_the_derivations_INPUT_not_its_answer():
+    """OWNER RULING 2026-09-21: a cap sized for one moment must be DERIVED.
 
-    The cap in `tools/ci/repo_hygiene_gates.sh` is a hand-written literal over a
-    corpus that grows underneath it. Nothing re-derived it, so it fell behind
-    twice. This re-derives the largest candidate selection from the LIVE tree
-    and requires the declared cap to admit it.
+    THIS TEST USED TO RE-DERIVE A LITERAL AND DEMAND THE SWEEP KEEP UP, which
+    is the shape the ruling removed: `--max-test-files 43` fell behind a corpus
+    that reached 45, the gate ABSTAINed on `phase3_one_shot_runner.py:11837`
+    and reported UNDETERMINED after minutes of work, and the only remedy on
+    offer was a hand re-deriving the number — the same mistake with a later
+    date on it.
 
-    It cannot go green by examining nothing: the argued population and the
-    parsed flag are both asserted present before the comparison is made.
+    The cap is now `max(floor, the largest selection this corpus makes)`,
+    counted at run time, so what the old test asserted holds BY CONSTRUCTION
+    (pinned below). What is left to guard is the thing that can still go wrong:
+    a policy file recording the ANSWER again.
     """
     repo_root = PROGRAMS.parents[3]
     sweep = repo_root / "tools" / "ci" / "repo_hygiene_gates.sh"
@@ -1101,21 +1104,50 @@ def test_the_sweep_caps_at_or_above_what_this_corpus_needs():
                  if "policy_direction_pin_check.py" in ln
                  and not ln.lstrip().startswith("#")), None)
     assert line, f"{sweep} no longer invokes this gate; delete this test with it"
-    m = re.search(r"--max-test-files\s+(\d+)", line)
-    assert m, f"the sweep does not declare --max-test-files: {line.strip()}"
-    declared = int(m.group(1))
 
-    report = C.build_report(PROGRAMS)
-    argued = report["argued"]
+    assert not re.search(r"--max-test-files\s+\d", line), (
+        "the sweep records a CAP again. The cap is derived from the corpus at "
+        f"run time and a policy file may declare only the floor: {line.strip()}")
+    m = re.search(r"--max-test-files-floor\s+(\d+)", line)
+    assert m, f"the sweep declares no floor for the derivation: {line.strip()}"
+    assert int(m.group(1)) > 0, line.strip()
+
+
+def test_the_derived_cap_admits_this_corpus_by_construction():
+    """The derivation's property, measured on the live tree.
+
+    It cannot pass by examining nothing: the argued population is asserted
+    non-empty and the derived cap is compared against the LARGEST selection
+    that population actually makes.
+    """
+    argued = C.build_report(PROGRAMS)["argued"]
     assert argued, "no argued direction site was found — empty denominator"
-    sizes = {f"{s['file']}:{s['line']}": len(C.select_tests(s, PROGRAMS / "tests"))
+    tests_dir = PROGRAMS / "tests"
+    sizes = {f"{s['file']}:{s['line']}": len(C.select_tests(s, tests_dir))
              for s in argued}
     worst, largest = max(sizes.items(), key=lambda kv: kv[1])
+    derived = C.derive_max_test_files(argued, tests_dir,
+                                      C.DEFAULT_MAX_TEST_FILES_FLOOR)
+    assert derived >= largest, (worst, largest, derived)
+    assert derived >= C.DEFAULT_MAX_TEST_FILES_FLOOR, derived
 
-    assert declared >= largest, (
-        f"tools/ci/repo_hygiene_gates.sh passes --max-test-files {declared}, "
-        f"but {worst} now selects {largest} candidate test files, so the gate "
-        f"will ABSTAIN on it and report UNDETERMINED after several minutes. "
-        f"Raise the literal in that file to {largest} and re-run the gate; the "
-        f"cap is a cost bound, so admitting the selection can only produce "
-        f"PINNED or UNPINNED.")
+
+def test_the_floor_is_an_input_and_cannot_lower_the_derived_cap():
+    """DIRECTION 1: a floor BELOW the corpus does not tighten the bound.
+
+    The floor exists so a SHRINKING corpus cannot surprise a caller; it is not
+    a way to re-impose a stored number.
+    """
+    tests_dir = PROGRAMS / "tests"
+    argued = C.build_report(PROGRAMS)["argued"]
+    largest = max(len(C.select_tests(s, tests_dir)) for s in argued)
+    assert C.derive_max_test_files(argued, tests_dir, 1) == largest
+
+
+def test_the_floor_holds_when_the_corpus_is_smaller_than_it():
+    """DIRECTION 2: with every selection below the floor, the floor wins —
+    otherwise the floor would be decoration rather than an input."""
+    tests_dir = PROGRAMS / "tests"
+    argued = C.build_report(PROGRAMS)["argued"]
+    huge = 10_000
+    assert C.derive_max_test_files(argued, tests_dir, huge) == huge

@@ -3203,7 +3203,15 @@ run_tolerating_uncheckable "image-gated verifications are not silently skipped" 
 # selection from the live tree and fails when this literal falls behind it, so
 # the next lane that outgrows it gets a named red in seconds instead of an
 # UNDETERMINED after 867 s.
-run "an argued direction is pinned" "$PLUGIN" python3 programs/policy_direction_pin_check.py programs --verify-pins --jobs 6 --max-test-files 43
+# THE CAP IS DERIVED, AND THIS LINE RECORDS ITS INPUT, NOT ITS ANSWER (owner
+# ruling, 2026-09-21). It used to carry `--max-test-files 43`, a number sized
+# for one moment: this tree's largest selection reached 45 and the gate began
+# ABSTAINing on `phase3_one_shot_runner.py:11837`, reporting UNDETERMINED after
+# minutes of work, with nothing to re-derive the literal but a hand. A cap is a
+# COST bound, so the gate now counts the population it sweeps and takes
+# `max(floor, largest selection)`; the FLOOR is the only declaration a policy
+# file is entitled to make about it.
+run "an argued direction is pinned" "$PLUGIN" python3 programs/policy_direction_pin_check.py programs --verify-pins --jobs 6 --max-test-files-floor 40
 
 # vibe-ic#1241 — WIRED HERE, not left to its own test. The audit
 # (`checker_execution_wiring_audit`) named this checker as one that nothing but
