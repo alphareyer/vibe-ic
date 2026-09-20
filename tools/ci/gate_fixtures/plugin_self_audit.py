@@ -44,12 +44,16 @@ green over an empty tree.
 """
 from pathlib import Path
 import ast
+import functools
 import shutil
 import subprocess
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import gate_mutation_fixtures as F  # noqa: E402
+
+sys.path.insert(0, str(F.PROGRAMS))
+import changelog_metric_reproducibility_check as _metric  # noqa: E402
 
 GATE = "plugin self-audit"
 
@@ -73,6 +77,16 @@ def _dispatched_checkers() -> list:
             if stripped.startswith('"') and stripped.endswith('"'):
                 out.append(stripped.strip('"'))
     return out
+
+
+@functools.lru_cache(maxsize=1)
+def _subject_modules() -> tuple:
+    """The `programs/` modules this subject carries, computed ONCE.
+
+    Both arms and the margin derivation below need the same list, and the
+    walk is ~450 `ast.parse` calls — it was being paid three times a run.
+    """
+    return tuple(_import_closure(_dispatched_checkers()))
 
 
 def _import_closure(names) -> list:
@@ -136,12 +150,68 @@ if __name__ == "__main__":
     sys.exit(emit(sys.argv[1], sys.argv[2]))
 '''
 
-#: `12.5` is `NOMINAL_MARGIN_MV` above; `98.7` is computed nowhere in the
-#: subject. `test_the_mutated_number_is_absent_from_the_subject_corpus` in
-#: `test_gate_fixture_plugin_self_audit.py` measures that second claim rather
-#: than asserting it, because the corpus includes the seven copied checkers.
+#: `12.5` is `NOMINAL_MARGIN_MV` in the emitter above, so it is reproducible
+#: from the subject's own source by construction.
 _TRUE_MARGIN = "12.5"
-_FABRICATED_MARGIN = "98.7"
+
+
+def _subject_corpus() -> str:
+    """The text `changelog_metric_reproducibility_check` will search.
+
+    The same set of files the gate's own `_source_corpus` globs out of the
+    subject: every `programs/*.py` the subject carries — the dispatched
+    checkers' import closure, plus this fixture's emitter.
+    """
+    parts = [(F.PROGRAMS / f"{name}.py").read_text(encoding="utf-8",
+                                                   errors="replace")
+             for name in _subject_modules()]
+    parts.append(_EMITTER)
+    return "\n".join(parts)
+
+
+def _derive_fabricated_margin() -> str:
+    """A margin no file in THIS subject computes — derived, never hardcoded.
+
+    WHY IT IS DERIVED. The mutation's whole premise is that the quoted number
+    is absent from the subject's source, and the subject's source is not this
+    fixture's to choose: it is the IMPORT CLOSURE of whatever
+    `run_plugin_self_audit.sh` dispatches, copied byte-for-byte out of the
+    shipped tree. A constant chosen once is a claim about a corpus that keeps
+    growing, and it went stale exactly that way. MEASURED: `98.7` was absent
+    when this fixture landed (v1.13.13, PR #1863) and is present now, in
+    `phase3_one_shot_runner.py`'s prose ("up to 98.7 um"), because 77a4621b7
+    added `staged_pdk_declares_tapcell_master_check` and
+    `signoff_config_parse_failure_is_named_check` to the dispatcher and pulled
+    that module into the closure — 454 modules, 26 MB. The can-fail arm then
+    went GREEN: the gate correctly called the fabricated metric reproducible,
+    because by then it was. Nothing about the gate changed, and nothing about
+    it was wrong; the fixture's premise had quietly stopped being true.
+
+    So the number is chosen against the corpus that exists at run time, with
+    THE GATE'S OWN PREDICATE — `_number_present`, digit-boundary anchored, not
+    a substring test — so the fixture and the thing it drives cannot disagree
+    about what "absent" means. Three decimals, because the search space has to
+    outlast the corpus: a one-decimal mV value collides with ordinary prose.
+
+    REFUSES rather than defaults. Exhausting the space means every candidate
+    is in the corpus, which would be a fact worth stopping for; a fixture that
+    silently fell back to a colliding number is the failure this replaces.
+    """
+    corpus = _subject_corpus()
+    for whole in range(20, 100):
+        for milli in range(1000):
+            candidate = f"{whole}.{milli:03d}"
+            if not _metric._number_present(candidate, corpus):
+                return candidate
+    raise RuntimeError(
+        "no three-decimal margin between 20.000 and 99.999 is absent from the "
+        f"{len(_subject_modules())} module(s) this subject carries, so no "
+        "mutation here can be unreproducible — the fixture cannot be built")
+
+
+#: Computed at import, so `test_the_mutated_number_is_absent_from_the_subject_
+#: corpus` still reads it as the module attribute it always was.
+_FABRICATED_MARGIN = _derive_fabricated_margin()
 
 _CHANGELOG = '''# Changelog
 
@@ -163,7 +233,7 @@ def _tree(work: Path, margin: str) -> Path:
     programs.mkdir(parents=True, exist_ok=True)
     (root / _DISPATCHER_REL).parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(F.REPO_ROOT / _DISPATCHER_REL, root / _DISPATCHER_REL)
-    for name in _import_closure(_dispatched_checkers()):
+    for name in _subject_modules():
         shutil.copyfile(F.PROGRAMS / f"{name}.py", programs / f"{name}.py")
     # `source_chip_agnostic_check` reads its vendor deny list from
     # `programs/tests/chip_deny_list.txt`, resolved beside itself. A plugin
