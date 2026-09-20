@@ -3409,6 +3409,191 @@ def build_scan_wrappers(top: str, rtl_ports: List[Tuple[str, str, str]],
     return gate, gold
 
 
+#: R-0915-97 — EQUIV_MAKE PAIRS BY NAME, AND A MAPPED MEMORY HAS TWO NAMES.
+#:
+#: MEASURED, sha256 x sky130A, lane icsha2, run17's own RTL+netlist pair. The
+#: gold side runs `memory_map`, which splits each memory into WORDS and names
+#: them `\h_reg[0]` .. `\h_reg[7]`, `\w_reg[0]` .. `\w_reg[15]`. The GATE
+#: netlist carries the same storage as ONE WIDE VECTOR under the memory's base
+#: name -- `wire [255:0] \h_reg[0]` (netlist.v:32063) and
+#: `wire [511:0] \w_reg[0]` (:32105). So `h_reg[1..7]` and `w_reg[1..15]` exist
+#: on the gold side and NOWHERE on the gate side: 672 bits of state that
+#: `equiv_make` leaves unpaired, i.e. FREE and unrelated on the two sides.
+#:
+#: Nothing downstream of them can ever be proven -- `e_s_reg <= h_reg[4]` is a
+#: comparison between a gold word and a gate wire that is not the same signal --
+#: and that is exactly the 481 unproven points run17 reported: `dig_reg` 224,
+#: `hh/g/f/d/c/b_reg` 32 each, `e_s_reg` 32, `delta_reg` 32, `e_reg` 1. It is
+#: NOT a logic difference and NOT induction weakness: four ladder arms
+#: (`equiv_struct -icells`, `opt_dff -sat` on both sides, a carry-save
+#: cut-point, `-seq 66/80`) each stopped at 501-1000 unproven, and 0
+#: counterexamples were ever found.
+#:
+#: WITH THE WORDS ALIASED the SAME pair proves in 75 s: "Proved 1570 previously
+#: unproven $equiv cells ... 2209 are proven and 0 are unproven. Equivalence
+#: successfully proven!" -- reproduced in the pinned image on 8HD-6.
+#:
+#: DERIVED, NEVER A DESIGN LITERAL. The word NAMES come from the gold side's own
+#: post-`memory_map` wire list, and the total width from the gate netlist's own
+#: declaration; the word width is their quotient. A gate that already carries
+#: per-word names gets NOTHING emitted, and a gold word with no gate bits to
+#: alias is a FINDING, not a silent skip -- aliasing a word that does not exist
+#: would manufacture agreement, which is the one thing this must never do.
+_MEM_WORD_RE = re.compile(r"^\\?(?P<base>[A-Za-z_][\w$.]*)\[(?P<idx>\d+)\]$")
+_GATE_WIDE_RE = re.compile(
+    r"^\s*wire\s*\[\s*(?P<hi>\d+)\s*:\s*0\s*\]\s*\\(?P<name>\S+)\s*;",
+    re.M)
+
+
+def gold_memory_words(select_list_text: str) -> Dict[str, List[int]]:
+    """`base -> sorted word indices`, from yosys `select -list w:*` output. PURE.
+
+    A family is only a memory word set when it has TWO OR MORE indices: a
+    one-element `x[0]` is an ordinary indexed wire and aliasing it would be a
+    rename with no referent.
+    """
+    fam: Dict[str, List[int]] = {}
+    for raw in (select_list_text or "").splitlines():
+        tok = raw.strip().split()
+        if not tok:
+            continue
+        name = tok[-1].split("/")[-1]
+        m = _MEM_WORD_RE.match(name)
+        if m:
+            fam.setdefault(m.group("base"), []).append(int(m.group("idx")))
+    return {b: sorted(set(v)) for b, v in fam.items() if len(set(v)) > 1}
+
+
+def gate_wide_vectors(netlist_text: str) -> Dict[str, int]:
+    """`\name -> width`, for every wide `wire [hi:0] \name ;` in the gate. PURE."""
+    return {m.group("name"): int(m.group("hi")) + 1
+            for m in _GATE_WIDE_RE.finditer(netlist_text or "")}
+
+
+def memory_word_alias_plan(gold_words: Dict[str, List[int]],
+                           gate_wide: Dict[str, int]
+                           ) -> Tuple[List[Dict[str, object]], List[str]]:
+    """`(plan, findings)` — which memories need per-word aliases on the gate. PURE.
+
+    A memory is in the plan only when the gate carries ONE wide vector named
+    `<base>[0]` whose width is an exact multiple of the gold word count. Every
+    refusal is a FINDING that the caller publishes; none of them is silent.
+    """
+    plan: List[Dict[str, object]] = []
+    findings: List[str] = []
+    for base in sorted(gold_words):
+        idx = gold_words[base]
+        wide_name = f"{base}[0]"
+        total = gate_wide.get(wide_name)
+        if total is None:
+            continue                      # gate already per-word, or no such net
+        if any(f"{base}[{k}]" in gate_wide for k in idx[1:]):
+            continue                      # gate ALREADY carries per-word names
+        if idx != list(range(len(idx))):
+            findings.append(
+                f"LEC_MEMORY_WORDS_NOT_CONTIGUOUS: gold memory {base!r} has word "
+                f"indices {idx}, which are not 0..{len(idx) - 1}; no alias was "
+                f"emitted and the unpaired words stay unpaired")
+            continue
+        if total % len(idx):
+            findings.append(
+                f"LEC_MEMORY_WIDTH_MISMATCH: gate {wide_name!r} is {total} bits "
+                f"and gold splits {base!r} into {len(idx)} words, which does not "
+                f"divide; no alias was emitted")
+            continue
+        width = total // len(idx)
+        plan.append({"base": base, "words": len(idx), "width": width,
+                     "total": total})
+    return plan, findings
+
+
+def memory_word_alias_tcl(plan: List[Dict[str, object]], top: str = "") -> str:
+    """The gate-side alias block for `plan`. PURE; empty string for an empty plan.
+
+    `rename` moves the wide vector out of the way FIRST, so the per-word `x[0]`
+    the gold side expects is free to be created; every word is then a slice of
+    the renamed vector, so the alias adds no state and can only ever express the
+    identity the gate netlist already holds.
+    """
+    if not plan:
+        return ""
+    # `rename`/`add -wire`/`connect` name objects INSIDE a module, so the block
+    # runs in the module's own scope. Without the `cd` yosys answers
+    # "ERROR: Object `\\m[0]' not found!" — measured on the 4x8 fixture.
+    out = ["# R-0915-97 — per-word aliases for memories `memory_map` split on "
+           "the gold side and the gate carries as one wide vector."]
+    if top:
+        out.append(f"cd {top}")
+    for mem in plan:
+        base, n, w = mem["base"], int(mem["words"]), int(mem["width"])
+        out.append(f"rename \\{base}[0] \\{base}__lecwide")
+        for k in range(n):
+            out.append(f"add -wire \\{base}[{k}] {w}")
+            out.append(f"connect -set \\{base}[{k}] "
+                       f"\\{base}__lecwide[{w * k + w - 1}:{w * k}]")
+    if top:
+        out.append("cd ..")
+    return "\n".join(out) + "\n"
+
+
+#: R-0915-97(2) — OPT_DFF MOVES A PUBLIC `*_d` NAME OFF THE FLOP'S REAL D.
+#:
+#: MEASURED on opentitan_aes (lane icaes). Synthesis folds a flop's feedback
+#: leaf into an enable and SAYS SO in its own log:
+#:     Adding EN signal on ... clean_q ... (D = \clean_d, Q = \clean_q)
+#: The PUBLIC `*_d` name is left on the enable-folded mux output -- the netlist
+#: literally carries `assign new_d = clean_d` -- and the flop's true D becomes an
+#: anonymous net. `equiv_make` pairs by NAME, so gold's `clean_d` is paired
+#: against a wire that computes a DIFFERENT function, and no proof can close it:
+#: 38/1 unproven as-is, 38/38 proven with those names blacklisted.
+#:
+#: NOTHING IS WAIVED. The REGISTER (`clean_q`) is compared either way; what is
+#: dropped is a comparison between two internal nets that synthesis renamed
+#: apart. The blacklist is derived from the synth log of the SAME netlist, so it
+#: can only ever name signals this synthesis run itself reported folding, and it
+#: never contains a Q name.
+_EN_FOLD_RE = re.compile(
+    r"Adding (?:EN|SRST|ARST) signal on [^\n]*?\(D = \\(?P<d>[^,)]+),"
+    r"\s*Q = \\(?P<q>[^,)]+)\)")
+
+
+def enable_folded_pairs(log_text):
+    """`[{d, q, line}]` for every EN/SRST/ARST fold the synth log reports. PURE."""
+    out = []
+    for line in (log_text or "").splitlines():
+        m = _EN_FOLD_RE.search(line)
+        if m:
+            out.append({"d": m.group("d").strip(), "q": m.group("q").strip(),
+                        "line": line.strip()})
+    return out
+
+
+def blacklist_candidates(log_text, unproven, proven):
+    """Pass-2 blacklist: the EVIDENCE-GATED subset. PURE, sorted by name.
+
+    BLANKET BLACKLISTING IS WRONG AND THE FULL DESIGN SAYS SO. MEASURED on
+    opentitan_aes: blacklisting ALL 158 folded D names gave 3717 proven / 293
+    UNPROVEN against 4025 / 3 for the flow's own script -- removing those pairs
+    removed the intermediate CUT POINTS the induction relies on. So a name is a
+    candidate only when (a) it is UNPROVEN in pass 1, (b) it is the D of a
+    folding line in the SAME netlist's synth log, and (c) that line's Q is among
+    pass 1's PROVEN cells. (c) is what makes this evidence rather than a waiver:
+    the REGISTER is proven and only the internal net synthesis renamed apart is
+    dropped. A `*_d` whose Q is ALSO unproven is a real divergence and stays red.
+
+    Returns the full record per name -- the D, its Q and the synth-log line --
+    because the report publishes the evidence, not just the decision.
+    """
+    un, pr = set(unproven or ()), set(proven or ())
+    seen, out = set(), []
+    for rec in enable_folded_pairs(log_text):
+        if rec["d"] in un and rec["q"] in pr and rec["d"] not in seen:
+            seen.add(rec["d"])
+            out.append(rec)
+    return sorted(out, key=lambda r: r["d"])
+
+
+
 def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
                        liberty: Optional[str],
                        blackbox_v: Optional[List[str]] = None,
@@ -3417,6 +3602,8 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
                        slang_prefix: str = "",
                        gold_defines: str = "-DSIMULATION -DYOSYS",
                        scan_mode: Optional[Dict] = None,
+                       memory_word_aliases: Optional[List[Dict[str, object]]] = None,
+                       equiv_blacklist_path: str = "",
                        gate_wrapper_v: str = "",
                        gold_wrapper_v: str = "",
                        fsm_encfile: Optional[str] = None,
@@ -3619,11 +3806,20 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
     # metadata keeps #2050's conservative unsplit behavior.
     _splitnets = _equiv_splitnets(fsm_encfile, fsm_preserve_signals)
     _encopt = f" -encfile {fsm_encfile}" if fsm_encfile else ""
-    _restore_words = ""
+    # R-0915-97(2) — names `opt_dff` moved off the flop's real D. Appended, not
+    # substituted: a design with no enable folding gets no option at all and its
+    # emitted script is byte-identical to today's.
+    _blopt = f" -blacklist {equiv_blacklist_path}" if equiv_blacklist_path else ""
+    # R-0915-97 — the gate-side per-word memory aliases, same shape and same
+    # seam as the scan-FSM restore below: `add -wire` + `connect`, emitted into
+    # the gate design before `design -stash gate`. Empty when the caller found
+    # nothing to alias, so a design with no mapped memory is byte-unchanged.
+    _mem_alias = memory_word_alias_tcl(list(memory_word_aliases or []), top)
+    _restore_words = _mem_alias
     if scan_fsm_restore:
         _encopt = f" -encfile {scan_fsm_restore['encoding_path']}"
-        _restore_words = ("# scan FSM encoding sha256: "
-                          + scan_fsm_restore["encoding_sha256"] + "\n")
+        _restore_words += ("# scan FSM encoding sha256: "
+                           + scan_fsm_restore["encoding_sha256"] + "\n")
         for name, bits in sorted(scan_fsm_restore["aliases"].items()):
             _restore_words += f"add -wire \\{name} {len(bits)}\n"
             # connect uses SigSpec's comma-list grammar, not Verilog braces.
@@ -3686,7 +3882,7 @@ def build_equiv_script(gold_files: List[str], gate_netlist: str, top: str,
         f"design -stash gate\n"
         f"design -copy-from gold -as gold {top}\n"
         f"design -copy-from gate -as gate {top}\n"
-        f"equiv_make{_encopt} gold gate {_MITER_MODULE}\n"
+        f"equiv_make{_encopt}{_blopt} gold gate {_MITER_MODULE}\n"
         f"hierarchy -top {_MITER_MODULE}\n"
         # READ-ONLY report pass. It prints the miter's cell histogram, which is
         # the OBSERVABLE `miter_is_stateless` reads to decide whether temporal
