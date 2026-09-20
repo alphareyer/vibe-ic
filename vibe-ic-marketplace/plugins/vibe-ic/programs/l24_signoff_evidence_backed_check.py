@@ -90,9 +90,13 @@ import hashlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import _signoff_drc_format as _sdf
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# BELOW the path bootstrap, not above it: loaded by path (the MCP layer and
+# `programs_load_by_path_check` both do), `programs/` is not on sys.path yet
+# when the module body starts, and a sibling import placed first dies with
+# `No module named '_signoff_drc_format'`.
+import _signoff_drc_format as _sdf  # noqa: E402
 from l_doc_evidence_util import (  # noqa: E402
     EvidenceVerdict,
     find_layer_files,

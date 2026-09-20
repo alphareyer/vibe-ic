@@ -425,8 +425,16 @@ class TestPnrTclEmission:
 
     @needs_tclsh
     def test_injected_tcl_parses_in_tclsh(self, tmp_path):
+        # A REAL out_dir for the arm that EXECUTES the deck. The text
+        # assertions above keep `/out` — they read the emission. This one
+        # runs it, and the deck's post-route tail re-reads the sta.rpt its
+        # own `report_checks >` wrote, exactly as it does in the container,
+        # where the runner always hands OpenROAD a directory that exists.
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
         tcl = mod._build_pnr_tcl_text(
-            **{**_TCL_BASE, "util": 0.75}, repair_tns_percent=100,
+            **{**_TCL_BASE, "util": 0.75, "out_dir_c": str(out_dir)},
+            repair_tns_percent=100,
             cts_cluster_size=20, cts_cluster_diameter=50.0)
         script = tmp_path / "pnr.tcl"
         script.write_text(_STUB + tcl)

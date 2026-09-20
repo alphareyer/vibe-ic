@@ -59,13 +59,19 @@ def _pdk() -> "R.PdkConfig":
     )
 
 
-def _build(**overrides) -> str:
+def _build(out_dir_c: str = "/out", **overrides) -> str:
     """Build the COMPLETE pnr.tcl from the REAL sub-block builders (exactly
     as step_pnr wires them), so the well-formedness / regression pins see
     the true emission — a hand-rolled stand-in could be balanced while the
-    real template is not."""
+    real template is not.
+
+    `out_dir_c` reaches EVERY sub-block, not just the template: the arm that
+    EXECUTES the deck needs a directory that exists, and handing one only to
+    the template would leave the spare-protection and SPEF-repair blocks
+    pointing somewhere else. The default is the container path every
+    emission assertion in this file reads.
+    """
     pdk = _pdk()
-    out_dir_c = "/out"
     plan = R._build_spare_cells_plan(
         2000, 0.02, (10, 10, 290, 290),
         liberty_path="", container="")
@@ -195,7 +201,10 @@ def test_full_tcl_parses_in_tclsh(tmp_path, kw):
     """The emitted TCL must survive a real Tcl parser in EVERY branch — an
     invalid flag line would otherwise break EVERY phase3 run (the template
     is emitted unconditionally)."""
-    tcl = _build(**kw).replace("\nexit\n", "\nputs PNR_TCL_END\n")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    tcl = _build(out_dir_c=str(out_dir), **kw).replace(
+        "\nexit\n", "\nputs PNR_TCL_END\n")
     script = tmp_path / "pnr.tcl"
     script.write_text(_STUB + tcl)
     res = _pr.run([tclsh, str(script)], capture_output=True,

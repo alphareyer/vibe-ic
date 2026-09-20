@@ -201,9 +201,26 @@ run "dynamic load registers before exec" "$ROOT" python3 "$PG/dynamic_module_loa
 # a runner that reads any non-zero as FAIL. Measured: wiring them into
 # `run_plugin_self_audit.sh` turned `gate_fixture_discrimination_check` red,
 # because that gate's CAN-PASS fixture builds a minimal subject with no mcp-eda
-# tree at all. They belong here, under the helper that tolerates CANNOT-CHECK.
-run_tolerating_uncheckable "ESM require is bound"        "$ROOT" python3 "$PG/mcp_esm_require_binding_check.py" "$PLUGIN"
-run_tolerating_uncheckable "MCP program path resolves"   "$ROOT" python3 "$PG/mcp_tool_program_path_resolves_check.py" "$PLUGIN"
+# tree at all.
+#
+# THEY ARE PLAIN `run` HERE, AND THAT IS THE STRONGER WIRING, NOT AN OVERSIGHT.
+# They were wired through `run_tolerating_uncheckable` on the reasoning above,
+# which is a fact about a DIFFERENT script's fixture subject and not about this
+# one: `$PLUGIN` here is a checkout of this repository, which TRACKS the MCP
+# package -- 91 files under `vibe-ic-marketplace/plugins/vibe-ic/mcp-eda/`,
+# 11 of them `.mjs`. MEASURED on a clean checkout at this wiring: both exit 0
+# ("13 ES-module file(s) read"; "22 program-path site(s) across 13 MCP source
+# file(s)"), so the rc 2 arm is not reachable from a tree that has the package,
+# and a tree that does NOT have it is a broken subject this sweep should refuse
+# rather than tolerate. The tolerating channel cost a WIRING ERROR because it
+# arrived with no `uncheckable_until` -- and the repair is not to buy an
+# exemption for a state neither gate can reach here (the dispatcher rejects an
+# `uncheckable_until` on a plain `run` for exactly that reason), it is to stop
+# claiming the tolerance. Both now carry a two-arm fixture under
+# `tools/ci/gate_fixtures/`, which `run` obliges them to and the tolerating
+# channel did not.
+run "ESM require is bound"        "$ROOT" python3 "$PG/mcp_esm_require_binding_check.py" "$PLUGIN"
+run "MCP program path resolves"   "$ROOT" python3 "$PG/mcp_tool_program_path_resolves_check.py" "$PLUGIN"
 # vibe-ic#621 — the JSON manifests were guarded and the PROSE was not: the three
 # READMEs a reader meets first advertised v1.5.12 / v1.4.72 / v1.4.61 against a
 # shipped 1.9.36. Same drift `marketplace_version_sync_check` exists for, one

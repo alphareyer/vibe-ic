@@ -27,10 +27,50 @@ no-op `unknown` as before -- the stub grows only where the deck grew.
 `MASTERS_ABSENT` is the same interpreter with `findMaster` answering NULL, so
 a test can pin what the deck does when a requested master is not in the
 physical database without hand-writing a second stub.
+
+THE FIFTH PRIMITIVE IS OUTPUT REDIRECTION, and it arrived the same way the
+first four did -- the deck grew a dependency and the stand-in had to grow with
+it. v1.22.13 (#2376) emitted `_pnr_sta_corner_binding_tcl`, which RE-READS the
+`sta.rpt` the line above it wrote and stamps each native path with the Liberty
+its Corner selects. In OpenROAD `report_checks ... > file` is not shell
+redirection: the command wrappers rewrite a trailing `> file` / `>> file` into
+`utl::redirect_file_begin`, so the file EXISTS the moment that line runs --
+which is why the deck may open it unconditionally, and why doing so is not a
+#581 hazard. Under the one-line `unknown` stub nothing created it, and the
+deck died at `open ... r` with `couldn't open ".../sta.rpt"` -- MEASURED, 16
+cases across SIX of this directory's deck evaluators, all one cause.
+
+So `unknown` now honours a trailing `>`/`>>` the way OpenROAD does: the target
+is created (truncated, or appended to) and the command's own output goes into
+it. A stubbed command produces no output, so the file is created EMPTY, which
+is the honest stand-in for `report_checks` on a design the stub never linked
+-- and the deck's reader handles an empty report by writing it straight back,
+the same branch a real no-paths report takes. It is NOT a relaxation: nothing
+in a deck is exempted and no assertion moves; a deck that opens a file NOTHING
+redirected into still fails exactly as before.
 """
 from __future__ import annotations
 
-_UNKNOWN = 'proc unknown {args} { return "" }\n'
+# OpenROAD's command wrappers turn a trailing `> file` / `>> file` into a
+# real redirect of that command's output; every other argument is passed
+# through and the command's return value is unchanged. Modelled here in the
+# ONE place every unstubbed command lands, so the deck cannot grow a second
+# redirect site the stand-in does not see.
+_UNKNOWN = r"""
+proc unknown {args} {
+  set n [llength $args]
+  if {$n >= 2} {
+    set redirect [lindex $args [expr {$n - 2}]]
+    if {$redirect eq ">" || $redirect eq ">>"} {
+      set target [lindex $args end]
+      set f [open $target [expr {$redirect eq ">" ? "w" : "a"}]]
+      close $f
+    }
+  }
+  return ""
+}
+"""
+
 
 # `utl::report` under an active `utl::redirectStringBegin` accumulates instead
 # of printing, and `utl::redirectStringEnd` hands the accumulation back --

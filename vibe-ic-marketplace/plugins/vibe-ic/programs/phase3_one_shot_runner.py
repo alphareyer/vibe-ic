@@ -60944,6 +60944,44 @@ _POST_RUN_AUDITS = (
 # Main
 # ---------------------------------------------------------------------------
 def main() -> int:
+    """The CLI entry point, with its PROCESS-GLOBAL publication scoped to it.
+
+    `_run_phase3` below publishes the operator's `--container` choice into
+    `EDA_CONTAINER`, because several PDK-resolution helpers read it from there
+    rather than from the argument threaded through the steps. That is right for
+    the run, and it is right for every subprocess the run spawns -- both live
+    entirely inside this call.
+
+    IT WAS NOT SCOPED TO THIS CALL, AND THIS PROGRAM IS ALSO IMPORTED. `main()`
+    is invoked IN-PROCESS by the MCP layer and by tests, and the variable
+    outlived the call: `--container` DEFAULTS to `vibeic-eda`, so one in-process
+    run published a container name that then governed every later PDK read in
+    the same interpreter. MEASURED on a8c7a3e74: `_pdk_layer_authority.
+    _environment_query` routes a PDK read into a container whenever
+    `EDA_CONTAINER` is set, so `test_the_technology_answers_the_precheck_not_
+    the_declaration` -- which builds its technology under a `$PDK_ROOT` that
+    exists only on the HOST -- went 41 passed to 9 failed / 32 passed the moment
+    `test_phase3_delivery_admission` (which calls `R.main()` in-process) ran
+    before it in the same session. The gate reported "the technology's own layer
+    table could not be read", which was true of the container and false of the
+    tree under test.
+
+    So the value is restored on the way out -- put back exactly, or removed if
+    there was none. Nothing inside the run sees any difference; a caller that
+    RETURNS from this function gets its environment back.
+    """
+    _unset = object()
+    _eda_container_before = os.environ.get("EDA_CONTAINER", _unset)
+    try:
+        return _run_phase3()
+    finally:
+        if _eda_container_before is _unset:
+            os.environ.pop("EDA_CONTAINER", None)
+        else:
+            os.environ["EDA_CONTAINER"] = _eda_container_before
+
+
+def _run_phase3() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("project", type=Path)
     p.add_argument("--top-name", default="chip_top")
