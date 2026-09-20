@@ -718,9 +718,20 @@ def test_MUTANT_composing_the_fixture_image_from_the_env_is_refused_again():
     assert mutant.endswith("@" + P.RUNNER_IMAGE_DIGEST), (
         "the mutation moved the DIGEST as well as the repository; it must move "
         "exactly the one variable this change is about")
-    with pytest.raises(P.Refusal) as caught:
-        P._runner_profile({**_RUNNER, "image": mutant})
-    assert "is not the BASE-owned runner image" in str(caught.value)
+    # RE-PINNED (owner ruling, 2026-09-21). The validator no longer asks a
+    # RECORDED image whether it equals the reader's own — that was the pin, and
+    # the mutant is now simply ACCEPTED, because a repository is configuration
+    # and the digest is identity. What the mutation must still not do is move
+    # the IDENTITY, and that is what is asserted here instead of a refusal:
+    # composing from the environment changes which registry serves the bytes
+    # and nothing about which bytes they are, so the two references stay
+    # COMPARABLE. A test demanding a refusal here would be re-asserting the pin
+    # the ruling removed.
+    P._runner_profile({**_RUNNER, "image": mutant})          # accepted, not refused
+    assert P.images_are_comparable(mutant, _RUNNER_IMAGE), (
+        "composing the image from the environment moved the DIGEST, not only "
+        "the repository — the mutation is no longer the one this arm is about")
+    assert P.image_digest_of(mutant) == P.RUNNER_IMAGE_DIGEST
 
 
 def _pinned_runner_image_composed_from_the_environment() -> str:
@@ -751,7 +762,15 @@ def test_prepare_cannot_replace_the_base_owned_runner_digest(tmp_path):
     _write(repo, P.MANIFEST_PATH, P.canonical_bytes(prepared))
     candidate = _commit(repo, "runner self-authority")
     gates, tests = _worktrees(repo, candidate, tmp_path)
-    with pytest.raises(P.Refusal, match="BASE-owned runner image"):
+    # STILL REFUSED, ON THE GROUND THAT SURVIVES A DECOUPLED IMAGE (owner
+    # ruling, 2026-09-21). A candidate rewriting the runner row is granting
+    # itself a toolchain, and that is a change to the protected WIRING — which
+    # `PREPARE changed the hermetic runner profile` has always refused. What is
+    # gone is the OTHER ground, "your image is not the one this reader has
+    # newest", which refused honest arms whenever the host pulled an image.
+    # The input is unchanged and the refusal is unchanged; only the sentence
+    # naming it moved off the pin.
+    with pytest.raises(P.Refusal, match="hermetic runner profile"):
         P.build_receipt(
             object_repo=repo, base=base, candidate=candidate,
             candidate_gates=gates, candidate_tests=tests)
