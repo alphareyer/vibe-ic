@@ -385,24 +385,49 @@ def _column_roles(rows: List[List[str]]) -> Optional[Tuple[int, int]]:
     non-empty cell parses as an identifier.
     """
     width = max(len(r) for r in rows)
-    addr_col: Optional[int] = None
-    for c in range(width):
-        seen: List[int] = []
-        ok = True
-        for r in rows:
-            cell = r[c] if c < len(r) else ""
-            if not _clean_cell(cell):
+
+    def _address_column(strict: bool) -> Optional[int]:
+        for c in range(width):
+            seen: List[int] = []
+            cells = 0
+            ok = True
+            for r in rows:
+                cell = r[c] if c < len(r) else ""
+                if not _clean_cell(cell):
+                    continue
+                cells += 1
+                parsed = _parse_addr_cell(cell)
+                if parsed is None:
+                    if strict:
+                        ok = False
+                        break
+                    continue
+                seen.append(parsed[0])
+            if not ok or not seen:
                 continue
-            parsed = _parse_addr_cell(cell)
-            if parsed is None:
-                ok = False
-                break
-            seen.append(parsed[0])
-        # Distinct, because two registers cannot share one address. This is
-        # what refuses a `Reset` column that reads 0x0 on every row.
-        if ok and seen and len(set(seen)) == len(seen):
-            addr_col = c
-            break
+            # Distinct, because two registers cannot share one address. This
+            # is what refuses a `Reset` column that reads 0x0 on every row.
+            if len(set(seen)) != len(seen):
+                continue
+            if strict or (len(seen) >= _ADDR_COLUMN_MIN_ROWS
+                          and len(seen) >= cells * _ADDR_COLUMN_MIN_FRACTION):
+                return c
+        return None
+
+    # R-0915-113(7) — TWO PASSES, strict first, so no table that resolves
+    # today resolves differently. The tolerant pass exists for exactly one
+    # shape: a register table in which SOME row states no address. MEASURED
+    # on run24's own L5 table with one address cell blanked, the strict rule
+    # disqualified the address column and the gate then reported "no
+    # documentation this gate opened declares a register row" — one
+    # unaddressed row dropped all 29 registers. Under the ruling that row
+    # must be NOT_COVERED_UNADDRESSED by name, which it cannot be if the
+    # table it sits in is invisible. The tolerant pass keeps DISTINCTNESS
+    # and demands a strong majority, so a `Reset value` column still cannot
+    # win a table the strict pass already resolved.
+    addr_col = _address_column(strict=True)
+    if addr_col is None:
+        addr_col = _address_column(strict=False)
     if addr_col is None:
         return None
     for c in range(width):
@@ -420,6 +445,57 @@ def _column_roles(rows: List[List[str]]) -> Optional[Tuple[int, int]]:
             got = True
         if ok and got:
             return addr_col, c
+    return None
+
+
+#: How much of a column must parse as an address before the TOLERANT pass
+#: will call it one, and the floor below which "a majority" means nothing.
+_ADDR_COLUMN_MIN_FRACTION = 0.6
+_ADDR_COLUMN_MIN_ROWS = 2
+
+#: A width cell states a bit count and, optionally, ONE qualifying word:
+#: `32`, `32 each`, `32 bits`. A description cell never matches, which is what
+#: keeps a sentence out of the width column without reading a header word.
+_WIDTH_CELL_RE = re.compile(r"^(?P<bits>\d{1,5})\s*(?:[A-Za-z\u4e00-\u9fff]+)?$")
+#: How much of a column must parse as a width before the column IS one. A
+#: register table may leave a width blank; a description column will not reach
+#: this fraction.
+_WIDTH_COLUMN_MIN_FRACTION = 0.5
+
+
+def _parse_width_cell(cell: str) -> Optional[int]:
+    """The bit width a cell states, or None."""
+    m = _WIDTH_CELL_RE.match(_clean_cell(cell))
+    if m is None:
+        return None
+    try:
+        bits = int(m.group("bits"))
+    except ValueError:                                      # pragma: no cover
+        return None
+    return bits if bits > 0 else None
+
+
+def _width_column(rows: List[List[str]], addr_col: int,
+                  name_col: int) -> Optional[int]:
+    """The column that states each register's WIDTH, measured per table.
+
+    Measured, never assumed, exactly the way `_column_roles` measures the
+    address and name columns: the first column that is neither of those and
+    whose body cells state a width in at least
+    `_WIDTH_COLUMN_MIN_FRACTION` of the rows. No header word is read, so a
+    table headed in any human language is seen."""
+    if not rows:
+        return None
+    width = max(len(r) for r in rows)
+    for col in range(width):
+        if col in (addr_col, name_col):
+            continue
+        seen = [r[col] for r in rows if col < len(r)]
+        if not seen:
+            continue
+        hits = sum(1 for c in seen if _parse_width_cell(c) is not None)
+        if hits >= max(1, int(len(seen) * _WIDTH_COLUMN_MIN_FRACTION)):
+            return col
     return None
 
 
@@ -445,18 +521,30 @@ def _block_declarations(block: List[str], rel: str) -> List[Dict[str, Any]]:
     if header is not None and addr_col < len(header):
         if _NOT_AN_ADDRESS_HEADING.match(_clean_cell(header[addr_col])):
             return []
+    width_col = _width_column([c for c, _ in body], addr_col, name_col)
     out: List[Dict[str, Any]] = []
     for cells, line in body:
         if addr_col >= len(cells) or name_col >= len(cells):
             continue
         addr = _parse_addr_cell(cells[addr_col])
         names = _parse_name_cell(cells[name_col])
-        if addr is None or not names:
+        if not names:
             continue
+        # R-0915-113(7): a row INSIDE a register table whose name cell parses
+        # and whose address cell does not is a register the document declares
+        # WITHOUT stating its address. It used to be dropped here, which made
+        # it invisible to every count downstream. It is kept, with
+        # `addr_lo=None`, and the coverage rule answers
+        # NOT_COVERED_UNADDRESSED for it BY NAME. Rows outside a block whose
+        # column roles already resolved are untouched: the shape rule that
+        # keeps this harvester off arbitrary tables is unchanged.
         out.append({
             "names": names,
-            "addr_lo": addr[0],
-            "addr_hi": addr[1],
+            "addr_lo": None if addr is None else addr[0],
+            "addr_hi": None if addr is None else addr[1],
+            "width_bits": (_parse_width_cell(cells[width_col])
+                           if width_col is not None
+                           and width_col < len(cells) else None),
             "source_file": rel,
             "line": line.strip()[:160],
         })
@@ -595,6 +683,166 @@ def carried_registers(l4: Dict[str, Any]) -> Tuple[set, set]:
     return names, addrs
 
 
+# ── R-0915-113(7): a population harvested is a population MEASURED ────────
+#
+# THE DEFECT, in this gate's own words, on sha256 x sky130A, FRONT DOOR,
+# run24 at main 8337cc81f:
+#
+#     NOT_MEASURED ... documentation staged under input/ DOES declare a
+#     register map: 7 table row(s) in input/docs/L5_register_map.md naming 29
+#     register(s). The rule was not applied to them, so this gate states no
+#     coverage over that population. L4_REGMAP.registers[] does carry all 29
+#     of those name(s) — but by NAME only, which is not the rule this gate
+#     applies.
+#
+# A gate that harvests a population and then states no coverage over it
+# measures nothing about it, and a NOT_MEASURED at P0 makes `final_audit`
+# NOT_MEASURED under --strict-structural whatever the design does. The repair
+# is to APPLY the rule to that population, not to narrow it.
+#
+# THE RULE IS THE SAME RULE, and it is ADDRESS-BOUND IDENTITY, never name-only
+# presence: a documented register is COVERED when L4 carries it under that
+# name AND at the address the document states AND, when both sides state one,
+# at the same width. Every other outcome is named:
+#
+#   ABSENT_FROM_L4           the document declares it; L4 carries no such name
+#   ADDRESS_MISMATCH         L4 carries the name at a DIFFERENT address —
+#                            both numbers are printed, because this is the
+#                            case a name-only rule reported as covered
+#   WIDTH_MISMATCH           same address, different stated width
+#   NOT_COVERED_UNADDRESSED  the DOCUMENT states no address for the row. Never
+#                            assumed covered and never dropped: the register
+#                            is named and counted in its own bucket, because
+#                            the gap is in the input, not in L4.
+COVERED = "COVERED"
+ABSENT_FROM_L4 = "ABSENT_FROM_L4"
+ADDRESS_MISMATCH = "ADDRESS_MISMATCH"
+WIDTH_MISMATCH = "WIDTH_MISMATCH"
+NOT_COVERED_UNADDRESSED = "NOT_COVERED_UNADDRESSED"
+#: The outcomes that BLOCK. `NOT_COVERED_UNADDRESSED` is not among them: the
+#: document failed to state an address, which is not a defect in L4.
+_BLOCKING_OUTCOMES = (ABSENT_FROM_L4, ADDRESS_MISMATCH, WIDTH_MISMATCH)
+#: Where L4 may record a register's width.
+_WIDTH_KEYS = ("width_bits", "width", "size_bits", "bits", "reg_width")
+
+
+def documentary_bindings(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One entry per declared REGISTER, with the address the document binds it
+    to. A range row binds its i-th name to ``addr_lo + i`` — the document's own
+    arithmetic — and ONLY when the span and the name count agree; a row whose
+    span and count disagree states no address for any of its names rather than
+    an invented one."""
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    for row in rows:
+        names = list(row.get("names") or [])
+        lo, hi = row.get("addr_lo"), row.get("addr_hi")
+        span = None
+        if isinstance(lo, int) and isinstance(hi, int) and hi >= lo:
+            span = hi - lo + 1
+        for i, name in enumerate(names):
+            key = name.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            if not isinstance(lo, int):
+                addr, how = None, "the document states no address for this row"
+            elif hi is None:
+                addr, how = (lo, "stated") if len(names) == 1 else (
+                    None, f"one address for {len(names)} name(s) — which name "
+                          f"it binds is not stated")
+            elif span == len(names):
+                addr, how = lo + i, "stated as a range"
+            else:
+                addr, how = None, (
+                    f"the row spans {span} address(es) for {len(names)} "
+                    f"name(s), so which address each name takes is not stated")
+            out.append({
+                "name": name.strip(),
+                "address": addr,
+                "address_basis": how,
+                "width_bits": row.get("width_bits"),
+                "source_file": row.get("source_file"),
+                "line": row.get("line"),
+            })
+    return out
+
+
+def carried_index(l4: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """``name.lower() -> {"name", "address", "width_bits"}`` from L4."""
+    out: Dict[str, Dict[str, Any]] = {}
+    regs = l4.get("registers")
+    if not isinstance(regs, list):
+        return out
+    for reg in regs:
+        if not isinstance(reg, dict):
+            continue
+        name = None
+        for key in ("name", "declared_name", "register", "reg_name"):
+            v = reg.get(key)
+            if isinstance(v, str) and v.strip():
+                name = v.strip()
+                break
+        if not name:
+            continue
+        addr = None
+        for key in _ADDR_KEYS:
+            addr = _as_int(reg.get(key))
+            if addr is not None:
+                break
+        width = None
+        for key in _WIDTH_KEYS:
+            width = _as_int(reg.get(key))
+            if width is not None:
+                break
+        out.setdefault(name.lower(), {"name": name, "address": addr,
+                                      "width_bits": width})
+    return out
+
+
+def documentary_coverage(bindings: List[Dict[str, Any]],
+                         carried: Dict[str, Dict[str, Any]]
+                         ) -> List[Dict[str, Any]]:
+    """The rule, applied one register at a time. Every entry gets an outcome
+    and a sentence; nothing is dropped and nothing is assumed covered."""
+    out: List[Dict[str, Any]] = []
+    for b in bindings:
+        rec = dict(b)
+        got = carried.get(b["name"].lower())
+        if b["address"] is None:
+            rec["outcome"] = NOT_COVERED_UNADDRESSED
+            rec["why"] = (f"{b['name']}: {b['address_basis']}, so this gate "
+                          f"cannot say whether L4 carries the same binding")
+        elif got is None:
+            rec["outcome"] = ABSENT_FROM_L4
+            rec["why"] = (f"{b['name']} is declared at 0x{b['address']:x} and "
+                          f"L4_REGMAP.registers[] carries no such name")
+        elif got["address"] is None:
+            rec["outcome"] = ADDRESS_MISMATCH
+            rec["why"] = (f"{b['name']} is declared at 0x{b['address']:x}; L4 "
+                          f"carries the name with NO address, which is a name "
+                          f"without the binding")
+        elif got["address"] != b["address"]:
+            rec["outcome"] = ADDRESS_MISMATCH
+            rec["why"] = (f"{b['name']} is declared at 0x{b['address']:x} and "
+                          f"L4 carries it at 0x{got['address']:x}")
+        elif (b["width_bits"] is not None and got["width_bits"] is not None
+                and b["width_bits"] != got["width_bits"]):
+            rec["outcome"] = WIDTH_MISMATCH
+            rec["why"] = (f"{b['name']} at 0x{b['address']:x} is declared "
+                          f"{b['width_bits']} bit(s) wide and L4 carries it "
+                          f"at {got['width_bits']}")
+        else:
+            rec["outcome"] = COVERED
+            rec["why"] = (f"{b['name']} at 0x{b['address']:x}"
+                          + (f", {b['width_bits']} bit(s)"
+                             if b["width_bits"] is not None else ""))
+        rec["l4_address"] = None if got is None else got["address"]
+        rec["l4_width_bits"] = None if got is None else got["width_bits"]
+        out.append(rec)
+    return out
+
+
 def _waived(project: Path) -> Tuple[bool, str]:
     p = project / "waivers.json"
     if not p.is_file():
@@ -658,14 +906,15 @@ def _not_measured(summary: Dict[str, Any], project: Path,
     l4_path = find_l4(project)
     carried_names: set = set()
     absent_names: List[str] = []
+    l4_doc: Dict[str, Any] = {}
     l4_read = False
     l4_state = "absent"
     l4_parse_error = ""
     if l4_path is not None:
         try:
-            l4 = json.loads(l4_path.read_text(encoding="utf-8",
-                                              errors="replace"))
-            carried_names, _addrs = carried_registers(l4)
+            l4_doc = json.loads(l4_path.read_text(encoding="utf-8",
+                                                  errors="replace"))
+            carried_names, _addrs = carried_registers(l4_doc)
             l4_read = True
             l4_state = "read"
         except Exception as exc:                            # noqa: BLE001
@@ -698,21 +947,76 @@ def _not_measured(summary: Dict[str, Any], project: Path,
             f"of those name(s) — but by NAME only, which is not the rule "
             f"this gate applies")
 
+    # R-0915-113(7) — APPLY THE RULE. The sentence this branch used to
+    # print ("the rule was not applied to them, so this gate states no
+    # coverage over that population") is gone: a population harvested is a
+    # population measured. What remains NOT_MEASURED here is the HDL
+    # population, and the verdict now says which population it measured and
+    # which rule it applied to it.
+    bindings = documentary_bindings(doc_rows)
+    carried_by_name = carried_index(l4_doc) if l4_read else {}
+    coverage = documentary_coverage(bindings, carried_by_name) \
+        if l4_read else []
+    by_outcome: Dict[str, List[Dict[str, Any]]] = {}
+    for rec in coverage:
+        by_outcome.setdefault(rec["outcome"], []).append(rec)
+    n_cov = len(by_outcome.get(COVERED, []))
+    blocking = [r for o in _BLOCKING_OUTCOMES for r in by_outcome.get(o, [])]
+    unaddressed = by_outcome.get(NOT_COVERED_UNADDRESSED, [])
+    measured_clause = (
+        f"MEASURED: the documentary population, by ADDRESS-BOUND IDENTITY — "
+        f"a register is covered when L4_REGMAP.registers[] carries it under "
+        f"the declared name, at the declared address, and (when both state "
+        f"one) at the declared width. {n_cov} of {len(bindings)} "
+        f"register(s) covered"
+        + (f"; {len(blocking)} not: "
+           + "; ".join(r["why"] for r in blocking[:_SOURCE_LIST_CAP])
+           + (f" (+{len(blocking) - _SOURCE_LIST_CAP} more)"
+              if len(blocking) > _SOURCE_LIST_CAP else "")
+           if blocking else "")
+        + (f"; {len(unaddressed)} state no address and are "
+           f"{NOT_COVERED_UNADDRESSED}: "
+           + ", ".join(r["name"] for r in unaddressed[:_NAME_LIST_CAP])
+           + (f" (+{len(unaddressed) - _NAME_LIST_CAP} more)"
+              if len(unaddressed) > _NAME_LIST_CAP else "")
+           if unaddressed else ""))
     reason = (
-        f"NOT_MEASURED, which is not NOT_APPLICABLE. This gate's declared "
-        f"side reads ADDRESS-VALUED HDL ENUMS ONLY and no staged input "
-        f"declares one — but documentation staged under input/ DOES declare "
-        f"a register map: {len(doc_rows)} table row(s) in "
-        f"{_sources_shown} naming {len(declared_names)} register(s). "
-        f"The rule was not applied to them, so this gate states no coverage "
-        f"over that population. {carried_clause}.")
+        f"This gate's HDL declared side reads ADDRESS-VALUED HDL "
+        f"DECLARATIONS and no staged input declares one, so the HDL "
+        f"population is NOT_MEASURED. Documentation staged under input/ "
+        f"DOES declare a register map: {len(doc_rows)} table row(s) in "
+        f"{_sources_shown} naming {len(declared_names)} register(s), and "
+        f"that population WAS measured. {measured_clause}."
+        if l4_read else
+        f"This gate's HDL declared side reads ADDRESS-VALUED HDL "
+        f"DECLARATIONS and no staged input declares one. Documentation "
+        f"staged under input/ declares {len(doc_rows)} table row(s) in "
+        f"{_sources_shown} naming {len(declared_names)} register(s), and "
+        f"{carried_clause} — so neither population could be measured.")
 
     attach(summary, Denominator(
-        unit="register address bindings declared by a staged HDL input",
-        examined=0,
+        unit=("register bindings declared by staged documentation"
+              if l4_read else
+              "register address bindings declared by a staged HDL input"),
+        # R-0915-113(7): the rule RAN over this population, so `examined` is
+        # its size. Leaving it at 0 while printing a coverage number would be
+        # the substitution this file exists against, in the other direction.
+        examined=len(bindings) if l4_read else 0,
         considered=len(doc_rows),
         not_applicable_reason=reason,
         details={
+            "documentary_coverage_rule": (
+                "address-bound identity: declared name AND declared address "
+                "AND, when both state one, declared width"),
+            "documentary_registers_measured": len(bindings),
+            "documentary_registers_covered": n_cov,
+            "documentary_outcome_counts": {k: len(v)
+                                           for k, v in sorted(by_outcome.items())},
+            "documentary_coverage": [
+                {k: r[k] for k in ("name", "address", "width_bits",
+                                   "l4_address", "l4_width_bits",
+                                   "outcome", "why", "address_basis")}
+                for r in coverage[:_NAME_LIST_CAP]],
             "documentary_rows": len(doc_rows),
             "documentary_sources": sources[:_SOURCE_LIST_CAP],
             "documentary_source_count": len(sources),
@@ -729,7 +1033,6 @@ def _not_measured(summary: Dict[str, Any], project: Path,
                           "block; no header word and no register spelling "
                           "is read"),
         }))
-    summary["verdict"] = "NOT_MEASURED"
     summary["documentary_rows"] = len(doc_rows)
     summary["documentary_sources"] = sources[:_SOURCE_LIST_CAP]
     summary["documentary_source_count"] = len(sources)
@@ -744,7 +1047,36 @@ def _not_measured(summary: Dict[str, Any], project: Path,
     summary["l4_readable"] = l4_read
     summary["l4_state"] = l4_state
     summary["documentary_census"] = census
-    return 2, summary
+    summary["documentary_registers_measured"] = len(bindings)
+    summary["documentary_registers_covered"] = n_cov
+    summary["documentary_outcome_counts"] = {k: len(v)
+                                             for k, v in sorted(by_outcome.items())}
+    summary["documentary_coverage"] = [
+        {k: r[k] for k in ("name", "address", "width_bits", "l4_address",
+                           "l4_width_bits", "outcome", "why")}
+        for r in coverage[:_NAME_LIST_CAP]]
+    summary["documentary_coverage_rule"] = (
+        "address-bound identity: declared name AND declared address AND, "
+        "when both state one, declared width")
+    # THE VERDICT THE RULE PRODUCES.
+    #   FAIL          a declared binding L4 does not carry, or carries at a
+    #                 different address or width. This is the case a
+    #                 name-only rule reported as covered.
+    #   PASS          every declared register covered, none unaddressed.
+    #   NOT_MEASURED  the residual is rows the DOCUMENT left unaddressed --
+    #                 named, counted, never assumed covered. The coverage it
+    #                 DID measure is stated in the same sentence.
+    if not l4_read:
+        summary["verdict"] = "NOT_MEASURED"
+        return 2, summary
+    if blocking:
+        summary["verdict"] = "FAIL"
+        return 1, summary
+    if unaddressed:
+        summary["verdict"] = "NOT_MEASURED"
+        return 2, summary
+    summary["verdict"] = "PASS"
+    return 0, summary
 
 
 def evaluate(project: Path) -> Tuple[int, Dict[str, Any]]:
@@ -875,6 +1207,24 @@ def render(summary: Dict[str, Any]) -> List[str]:
     den = summary.get("denominator") or {}
     verdict = summary.get("verdict")
     lines: List[str] = []
+    # R-0915-113(7) — the DOCUMENTARY verdict speaks for itself. Falling
+    # through to the HDL wording printed "the input declares 0 register
+    # address binding(s) and L4 carries all 0" over a population of 29 that
+    # had just been measured, which is the same substitution in a new place.
+    if "documentary_registers_measured" in summary:
+        tag = {"PASS": "PASS", "FAIL": "FAIL",
+               "NOT_MEASURED": "NOT_MEASURED"}.get(str(verdict), str(verdict))
+        lines.append(f"[{tag}] {GATE}: "
+                     f"{den.get('not_applicable_reason', '')}")
+        for rec in (summary.get("documentary_coverage") or []):
+            if rec["outcome"] != COVERED:
+                lines.append(f"  • [{rec['outcome']}] {rec['why']}")
+        if verdict == "FAIL":
+            lines.append("")
+            lines.append("  Fix in Phase 1, not by hand: the register the "
+                         "document declares must reach L4.registers[] at the "
+                         "address the document states.")
+        return lines
     if verdict == "NOT_APPLICABLE":
         lines.append(f"[SKIP] {GATE}: "
                      f"{den.get('not_applicable_reason', '')}")
