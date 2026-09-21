@@ -38,6 +38,27 @@ import phase3_one_shot_runner as R  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import _progress_run as _pr  # noqa: E402
 
+
+def _invokes_cmd(text, cmd):
+    """Is `cmd` INVOKED -- the first word of a statement -- in this deck?
+
+    NOT a substring search. R-0915-122's capability probe passes
+    `detailed_route` to `info body` to ask whether this build accepts
+    `-nets`; it never calls it, and a substring scan reads that question as
+    the answer. Same instrument, and the same reason, as `_invokes` in
+    test_r0915_74_a_refused_antenna_repair_rolls_back.py, whose own docstring
+    says "a bare `in` reads the deck's own citation of the defect as the
+    defect".
+    """
+    for ch in "[]{}":
+        text = text.replace(ch, " \n")
+    for stmt in text.replace(";", "\n").splitlines():
+        head = stmt.strip().split()
+        if head and head[0] == cmd:
+            return True
+    return False
+
+
 tclsh = shutil.which("tclsh")
 needs_tclsh = pytest.mark.skipif(tclsh is None, reason="tclsh not installed")
 
@@ -106,8 +127,8 @@ def test_antenna_block_drops_full_global_route():
     than dropped."""
     block = R._antenna_repair_tcl(_pdk())
     cmds = _cmd_lines(block)
-    assert "global_route" not in cmds
-    assert "detailed_route" not in cmds
+    assert not _invokes_cmd(cmds, "global_route")
+    assert not _invokes_cmd(cmds, "detailed_route")
     # the incremental reroute now travels inside the repair call itself
     assert "-reroute" in cmds
 

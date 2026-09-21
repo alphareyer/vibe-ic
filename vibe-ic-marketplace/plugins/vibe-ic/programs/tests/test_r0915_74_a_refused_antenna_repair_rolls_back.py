@@ -126,7 +126,7 @@ def test_the_retired_retry_marker_is_gone_from_the_emitted_deck():
     branch cannot come back unrecorded."""
     t = _code()
     assert "REPAIR_ANTENNA_NONFATAL" not in t
-    assert "detailed_route" not in t
+    assert not _invokes("detailed_route")
 
 
 def _invokes(cmd: str) -> bool:
