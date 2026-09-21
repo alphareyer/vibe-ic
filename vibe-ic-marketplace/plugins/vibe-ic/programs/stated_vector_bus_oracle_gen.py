@@ -232,9 +232,23 @@ def bus_contract(ports: Sequence[Tuple[str, str, str]]
     err = _pick(_ERR_ROLES, outs)
     bus["clk"] = clk[0]
     bus["rst"] = rst[0]
-    # Polarity comes from the design's own name. `_n`/`_ni`/`n` suffix is the
-    # universal spelling of an active-low reset; anything else is active-high.
-    bus["rst_active_low"] = bool(re.search(r"(?i)(_n|_ni|n)$", _norm(rst[0])))
+    # POLARITY COMES FROM THE DESIGN'S OWN IDENTIFIER, and the identifier is
+    # the whole evidence. `_n`/`_ni`/`n` is the universal spelling of an
+    # active-low reset; anything else is active-high.
+    #
+    # R-0915-113(5): this is a FORMAL GRAMMAR, not a sentence. The argument
+    # and its measurement live in `prose_polarity_consulted_check._NOT_PROSE`
+    # under `stated_vector_bus_oracle_gen::bus_contract`; the suffix that
+    # decided it is published beside the answer so a reader can check the
+    # derivation instead of taking it on trust.
+    _rst_norm = _norm(rst[0])
+    _low = re.search(r"(?i)(_n|_ni|n)$", _rst_norm)
+    bus["rst_active_low"] = bool(_low)
+    bus["rst_polarity_evidence"] = (
+        f"the design names the port {rst[0]!r}; its identifier ends "
+        f"{_low.group(0)!r}" if _low else
+        f"the design names the port {rst[0]!r}; its identifier ends in no "
+        f"active-low suffix")
     bus["error"] = err[0] if err else None
     bus["word_bits"] = bus["write_data_bits"]
     return bus, ""
