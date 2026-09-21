@@ -281,6 +281,133 @@ def parse_typedef_enums(text: str) -> List[Dict[str, Any]]:
     return out
 
 
+# --- the SECOND declaration form for an address map (R-0915-113(6)) -------
+#
+# MEASURED, sha256 x sky130A, front door, run24 on main 8337cc81f: the P0
+# umbrella returned NOT_MEASURED because
+# `l4_regmap_declared_register_coverage_check` found no address-valued
+# `typedef enum` and therefore stated no coverage at all -- and NOT_MEASURED
+# at P0 makes `final_audit` NOT_MEASURED under --strict-structural. That
+# design's register addresses are declared, in its own RTL, as
+#
+#     localparam ADDR_NAME0    = 8'h00;
+#     localparam ADDR_NAME1    = 8'h01;
+#     ...                        (9 bindings, 0 enums)
+#
+# and its own register-map document calls `localparam ADDR_*` its documented
+# API. An address-valued `localparam` is the SAME DECLARATION as an
+# address-valued enum member: a name bound to a distinct code in a space far
+# wider than the set. Verilog-2005 has no `typedef enum`, so a whole language
+# generation of designs declares its map this way and none of them was
+# visible here.
+#
+# THE RULE IS NOT WIDENED, ONLY THE FORM IT CAN READ. Every block below goes
+# through `route_enum` -> `address_map_verdict` unchanged, with the SAME four
+# thresholds, and carries `enum_role=None` so it can only ever be decided by
+# the member set's SHAPE -- the name-vocabulary tier is unreachable for it,
+# which is stricter than an enum gets.
+#
+# GROUPING IS BY SOURCE ADJACENCY, the same structural principle the
+# documentary harvester in the coverage gate already uses for a table ("a
+# block of consecutive pipe/grid table lines"). A run of `localparam`
+# declarations whose literals all state the SAME width is one block; a blank
+# line does not break it, and any other non-blank line does. Nothing reads a
+# name, a prefix or a spelling -- which is what keeps `CTRL_INIT_BIT = 0` and
+# `MODE_SHA_224 = 1'b0` out without naming either of them.
+_LOCALPARAM_DECL_RE = re.compile(
+    r"^[ \t]*localparam\b"
+    r"(?:\s+(?:logic|bit|reg|wire|int|integer|signed|unsigned|byte|"
+    r"shortint|longint))*"
+    r"(?:\s*\[[^\]]*\])?"
+    r"\s*(?P<name>[A-Za-z_]\w*)\s*=\s*(?P<literal>[^;]+?)\s*;[ \t]*$")
+
+#: A synthetic type name for a block, so `route_enum`'s contract (a record
+#: must carry one) is met without inventing a design-facing identifier. It
+#: names the FORM and the source position, never anything from the design.
+LOCALPARAM_BLOCK_FORM = "localparam_block"
+
+
+def parse_localparam_address_blocks(text: str) -> List[Dict[str, Any]]:
+    """Every adjacency block of same-width `localparam` code bindings.
+
+    Each record has the same shape a harvested enum has, so every consumer
+    downstream -- `route_enum`, `address_map_verdict`, `value_bindings` --
+    reads it without knowing which form it came from. A literal that states
+    no width (`= 0`, `= 3`) is not a code binding and breaks the block: a
+    bare integer names no code space, and guessing one is what this refuses.
+    """
+    if not isinstance(text, str) or "localparam" not in text:
+        return []
+    clean = _strip_comments(text)
+    blocks: List[Dict[str, Any]] = []
+    run: List[Dict[str, Any]] = []
+    run_width: Optional[int] = None
+    run_start = 0
+
+    def _close() -> None:
+        nonlocal run, run_width
+        if run and run_width:
+            blocks.append({
+                "type_name": f"{LOCALPARAM_BLOCK_FORM}@{run_start}",
+                "base_type": f"localparam [{run_width - 1}:0]",
+                "declared_width": run_width,
+                # SHAPE TIER ONLY. A block has no type name to route by, and
+                # inventing one would let a spelling decide a destination.
+                "enum_role": None,
+                "declaration_form": LOCALPARAM_BLOCK_FORM,
+                "first_line": run_start,
+                "last_line": run[-1]["line"],
+                "members": [{"name": m["name"], "literal": m["literal"],
+                             "value": m["value"]} for m in run],
+            })
+        run = []
+        run_width = None
+
+    for lineno, line in enumerate(clean.splitlines(), start=1):
+        if not line.strip():
+            continue                      # a blank line does not break a block
+        m = _LOCALPARAM_DECL_RE.match(line)
+        parsed = parse_code_literal(m.group("literal")) if m else None
+        width = parsed[0] if parsed else None
+        if m is None or parsed is None or not isinstance(width, int) \
+                or isinstance(width, bool) or width <= 0:
+            _close()
+            continue
+        if run_width is not None and width != run_width:
+            _close()
+        if not run:
+            run_start = lineno
+            run_width = width
+        run.append({"name": m.group("name"),
+                    "literal": " ".join(m.group("literal").split()),
+                    "value": parsed[1], "line": lineno})
+    _close()
+    return blocks
+
+
+def harvest_localparam_address_blocks(extracted: Dict[str, str]
+                                      ) -> List[Dict[str, Any]]:
+    """`parse_localparam_address_blocks` over every staged HDL document."""
+    out: List[Dict[str, Any]] = []
+    for name, text in sorted((extracted or {}).items()):
+        for blk in parse_localparam_address_blocks(text):
+            rec = dict(blk)
+            rec["source_file"] = name
+            rec["type_name"] = f"{blk['type_name']}:{name}"
+            out.append(rec)
+    return out
+
+
+def harvest_declared_address_maps(extracted: Dict[str, str]
+                                  ) -> List[Dict[str, Any]]:
+    """Every DECLARATION FORM an address map can take in staged HDL.
+
+    One door, so the emitter and the coverage denominator cannot disagree
+    about what "the input declares" means."""
+    return (harvest_enums(extracted)
+            + harvest_localparam_address_blocks(extracted))
+
+
 def harvest_enums(extracted: Dict[str, str]) -> List[Dict[str, Any]]:
     """Walk an ``{filename: text}`` map and return every enum declared in
     its HDL-suffixed entries, each stamped with ``source_file``.
@@ -500,8 +627,12 @@ def route_enum(enum: Dict[str, Any]) -> EnumRouting:
 
 
 def routing_inventory(extracted: Dict[str, str]) -> List[EnumRouting]:
-    """One decision per ``typedef enum`` in the staged HDL inputs."""
-    return [route_enum(e) for e in harvest_enums(extracted)]
+    """One decision per declared address-map FORM in the staged HDL inputs.
+
+    R-0915-113(6): `typedef enum` and same-width `localparam` adjacency
+    blocks alike -- one door, so the emitter and the coverage denominator
+    cannot disagree about what the input declares."""
+    return [route_enum(e) for e in harvest_declared_address_maps(extracted)]
 
 
 def routing_summary(inventory: List[EnumRouting]) -> Dict[str, Any]:
@@ -526,7 +657,7 @@ def address_map_enums(extracted: Dict[str, str]) -> List[Dict[str, Any]]:
     a consumer emitting into L4 carries the reason with the data.
     """
     out: List[Dict[str, Any]] = []
-    for enum in harvest_enums(extracted):
+    for enum in harvest_declared_address_maps(extracted):
         decision = route_enum(enum)
         if decision.destination != DEST_L4_REGISTERS:
             continue
