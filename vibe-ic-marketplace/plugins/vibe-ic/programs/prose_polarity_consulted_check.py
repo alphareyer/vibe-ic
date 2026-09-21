@@ -119,6 +119,34 @@ _SEARCH_ATTRS = {"search", "findall", "finditer", "match", "fullmatch"}
 #: The count is printed on every run, clean or not.
 _EXEMPT_REASON_MIN = 80
 _NOT_PROSE: Dict[str, str] = {
+    "stated_vector_bus_oracle_gen::bus_contract":
+        "A PORT SURFACE, not a sentence. The argument is the DUT's own "
+        "`(direction, width, name)` triple list -- `testbench_gen.resolve_dut` "
+        "parsing a Verilog/SystemVerilog module header, or L9's `ports` array, "
+        "which carries the same identifiers. There is no free-text field in "
+        "it, so there is no sentence in which a denial could be written. The "
+        "one `.search` reads an IDENTIFIER, normalised to `[a-z0-9_]`, for the "
+        "universal active-low suffix, and an identifier has no negation form: "
+        "there is no way to spell `this reset is NOT active low` in a "
+        "Verilog name. A reset that is active HIGH is spelled without the "
+        "suffix, and absence is already how this function answers -- it "
+        "publishes `rst_polarity_evidence` naming the suffix it read, or "
+        "naming that it read none. MEASURED, NOT ASSERTED, in "
+        "`test_r0915_113_5_a_port_surface_is_a_grammar_not_a_sentence`, over "
+        "all 21 tokens of `_prose_polarity`'s vocabulary, the CJK spellings "
+        "included, in every place a denial could act on this reader: spliced "
+        "into the WIDTH field, appended to the DIRECTION field, added as an "
+        "extra port, and added as a comment-shaped port -- 84 placements, 0 "
+        "rival answers, 0 refusals, 84 unchanged. Spliced INTO the reset "
+        "identifier the denial is not a denial at all but a RENAME: the port "
+        "`reset_n` is then absent from the input, 16 of 21 publish the port "
+        "the design now declares (0 publish a port the input does not "
+        "declare) and the 5 CJK tokens land in the NAMED refusal, because "
+        "normalisation strips them and the identifier matches no reset role. "
+        "NEGATIVE CONTROLS: renaming `reset_n` to `reset` moves "
+        "`rst_active_low` True -> False, and dropping the chip-select port "
+        "refuses by name (`the DUT declares no cs port`) -- so the zeros are "
+        "about the grammar and not a fixture that could not move.",
     "sta_annotation_population::classify":
         "TWO CLOSED MACHINE GRAMMARS, each checked against its own stated "
         "count. OpenSTA's `report_annotated_delay` banner -- `^Found (\\d+) "
