@@ -78,10 +78,19 @@ def test_welltie_repair_budget_is_the_pdk_max_tap_distance_not_a_literal():
 
 def test_welltie_repair_is_per_row_not_per_euclidean_distance():
     """`wire70` was 7.84 um from a tie in the row below and still violated."""
-    tcl = r._build_welltie_coverage_repair_tcl(_pdk())
+    tcl = r._build_welltie_coverage_repair_tcl(_pdk(), 20.0, "x")
     # the anchor and the tie it is compared against are keyed by the SAME row
     assert "set _wtties $_wttie($_wty)" in tcl
-    assert "abs($_wtt - $_wtcx) <= $_wtd" in tcl
+    # RE-PINNED ON THE EMITTED DISTANCE TEST. The expression this named was
+    # replaced twice -- centre-to-centre (R-0915-104) and then the pitch/2
+    # radius (R-0915-106) -- while the rule it protects never changed: the
+    # comparison is |dx| within one row, and carries NO y term. Asserting the
+    # RULE rather than one spelling of it survives the next correction.
+    dist = [ln for ln in tcl.splitlines()
+            if "abs(" in ln and "_wtcx" in ln and "_wtrad" in ln]
+    assert dist, "no per-row distance test found in the emitted deck"
+    for ln in dist:
+        assert "_wty" not in ln, f"the coverage test took a y term: {ln}"
     # and the tie is created at that row's own y
     assert "$_wtni setLocation $_wtx $_wty" in tcl
 
@@ -130,10 +139,25 @@ def test_welltie_repair_names_no_chip_or_design_literal():
 
 
 def test_welltie_repair_is_wired_before_the_row_fill_in_the_pnr_stage():
-    """It has to run while the row sites are still free."""
-    src = (PROGS / "phase3_one_shot_runner.py").read_text()
-    assert "_build_welltie_coverage_repair_tcl(\n        pdk) + " \
-           "_build_sparse_die_aware_filler_tcl(" in src
+    """It has to run while the row sites are still free.
+
+    RE-PINNED ON THE EMITTED TCL. This used to assert a SOURCE SUBSTRING --
+    the exact two-line spelling of one call and its argument list -- so it went
+    red the moment that call grew a parameter (R-0915-106 gave it the PDK's own
+    pitch), while the invariant it exists for never moved. The invariant is an
+    ORDER IN THE DECK: the coverage repair must appear before the row fill,
+    because it needs free sites. That is what is asserted now, and a call
+    signature may change under it without a false alarm.
+    """
+    pdk = _pdk()
+    repair = r._build_welltie_coverage_repair_tcl(pdk, 20.0, "x")
+    deck = repair + r._build_sparse_die_aware_filler_tcl(
+        ("FILL_1",), slot_pinned_core=False, design_declared_die=False)
+    assert "WELLTIE_COVERAGE_REPAIR" in deck
+    assert "filler_placement" in deck
+    assert deck.index("odb::dbInst_create") < deck.index("filler_placement"), (
+        "the well-tie repair must place its ties while the row sites are "
+        "still free -- after the filler there are none")
 
 
 # ── RB-12: the sign-off gates write what the metrics record reads ────────────

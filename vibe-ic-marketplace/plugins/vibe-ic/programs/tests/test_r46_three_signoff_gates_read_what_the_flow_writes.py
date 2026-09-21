@@ -148,3 +148,45 @@ def test_the_em_record_is_not_a_pass():
     assert '"verdict": "NOT_MEASURED"' in record
     assert '"verdict": "MEASURED"' not in record
     assert "Javg/Jpeak" in record      # the words the EM gate looks for
+
+
+# ── the half that was missing, added after it cost three measurement arms ──
+def test_a_basis_older_than_the_run_is_not_this_runs_measurement(tmp_path):
+    """MEASURED 2026-09-21: three comparison arms re-entered phase 3 on a COPY
+    of an earlier run's project. Their own routes came out clean, so no new
+    multi-corner STA was written -- and the resolver picked the EARLIER run's
+    `sta_mcorner_ocv.rpt` (02:53) and republished its content under a freshly
+    written `post_route_timing.rpt` (11:10). Three arms reported a number none
+    of them had computed."""
+    import os
+    import time as _t
+    stage = tmp_path / "stage3"
+    sta = stage / "sta"
+    sta.mkdir(parents=True)
+    old = sta / "sta_mcorner_ocv.rpt"
+    old.write_text("worst slack max -0.73\n")
+    stale = _t.time() - 3600
+    os.utime(old, (stale, stale))
+    run_started = _t.time() - 60
+    got, basis = R.canonical_post_route_sta(stage, run_started)
+    assert got is None and basis == "", \
+        "a report this run did not write is not this run's evidence"
+    # and the same file, written by this run, IS its evidence
+    os.utime(old, None)
+    got, basis = R.canonical_post_route_sta(stage, run_started)
+    assert got == old and basis
+
+
+def test_without_a_run_stamp_the_resolver_behaves_as_before(tmp_path):
+    """The freshness test is opt-in, so no existing caller changes meaning."""
+    import os
+    import time as _t
+    stage = tmp_path / "stage3"
+    sta = stage / "sta"
+    sta.mkdir(parents=True)
+    old = sta / "sta_mcorner_ocv.rpt"
+    old.write_text("x\n")
+    stale = _t.time() - 3600
+    os.utime(old, (stale, stale))
+    got, _basis = R.canonical_post_route_sta(stage)
+    assert got == old

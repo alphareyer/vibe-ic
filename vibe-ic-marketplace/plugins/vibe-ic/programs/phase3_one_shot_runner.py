@@ -4006,7 +4006,8 @@ def _build_auto_silicon_sdc(project: Path, top: str = "",
 # below close that loop so any regression on tapcell/PDN/decap-fill insertion
 # is caught by pytest, not by another full silicon-handoff run.
 # ---------------------------------------------------------------------------
-def _build_tapcell_tcl(pdk: "PdkConfig") -> str:
+def _build_tapcell_tcl(pdk: "PdkConfig", pitch_um: Optional[float] = None,
+                       pitch_source: str = "") -> str:
     """v0.1.46 — emit OpenROAD full-die `tapcell` insertion Tcl, NONFATAL-guarded.
 
     Returns the inserted block when `pdk.tapcell_master` is set, or a
@@ -4038,6 +4039,11 @@ def _build_tapcell_tcl(pdk: "PdkConfig") -> str:
     neighbourhood) from the nearest tap"). Splitting insertion (here) from the
     locality-based prune (post-placement) fixes it chip-AGNOSTICally.
     """
+    # R-0915-106(a) — the pitch is the PDK's own number when it states one.
+    _pitch = (float(pitch_um) if pitch_um is not None
+              else float(pdk.tapcell_distance_um))
+    _psrc = pitch_source or "registry default"
+
     if not pdk.tapcell_master:
         return ("puts \"TAPCELL_SKIPPED: no tapcell_master configured "
                 "for this PDK; latch-up risk if not handled "
@@ -4047,12 +4053,12 @@ def _build_tapcell_tcl(pdk: "PdkConfig") -> str:
         "# Emitted BEFORE global placement so the placer flows logic around the\n"
         "# FIXED taps; the #684 sparse-die anti-flood prune runs POST-placement\n"
         "# (see _build_tapcell_prune_tcl) once the occupied geometry is real.\n"
-        f"if {{[catch {{tapcell -distance {pdk.tapcell_distance_um} "
+        f"if {{[catch {{tapcell -distance {_pitch} "
         f"-tapcell_master {pdk.tapcell_master}}} _tap_err]}} {{\n"
         f"  puts \"TAPCELL_NONFATAL: $_tap_err\"\n"
         f"}} else {{\n"
         f"  puts \"TAPCELL_INSERTED: master={pdk.tapcell_master} "
-        f"distance={pdk.tapcell_distance_um}um\"\n"
+        f"distance={_pitch}um source={_psrc}\"\n"
         f"}}\n")
 
 
@@ -4397,7 +4403,7 @@ def _build_tapcell_and_placeability_tcl(
     call site) is deliberate: the ordering contract is then testable by calling
     this function, with no need to inspect the emitter's source.
     """
-    return (_build_tapcell_tcl(pdk)
+    return (_build_tapcell_tcl(pdk, *tap_max_distance_um(pdk))
             + _build_unplaceable_master_cap_tcl(cts_masters))
 
 
@@ -4767,7 +4773,254 @@ def _build_tapcell_prune_tcl(pdk: "PdkConfig",
         "}\n")
 
 
-def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig") -> str:
+# ── R-0915-108: the number is the one the FOUNDRY REQUIRES ────────────────
+#
+# THE EVIDENCE THAT DECIDED THIS. `wire70` -- the case the per-row rule was
+# written for -- was a PDK DECK rule, not this plugin's own instrument. Read
+# from the pinned image (0.3.67), gf180mcuD
+# `libs.tech/klayout/tech/drc/rule_decks/comp.rb`:
+#
+#   :558  DF.13_LV  Max distance of Nwell tap (NCOMP inside Nwell)
+#                   from (PCOMP inside Nwell) is 20um
+#   :586  DF.13_MV  ... is 15um
+#   :614  DF.14_LV  Max distance of substrate tap (PCOMP outside Nwell)
+#                   from (NCOMP outside Nwell) is 20um
+#   :634  DF.14_MV  ... is 15um
+#
+# and the spm run's sign-off deck put 60 of its 70 violations on DF.13_MV (41)
+# and DF.14_MV (19). `wire70` and `wire79` sat 7.84 um from a tie ONE ROW BELOW
+# and still violated, because the rule grows the tap INSIDE nwell and the
+# neighbouring row's nwell is a SEPARATE ISLAND. So the per-row rule is
+# grounded in the deck, not in a convention of ours.
+#
+# TWO DIFFERENT NUMBERS LIVE IN THIS PDK and they are not interchangeable:
+# `FP_TAPCELL_DIST` (20) is what the reference FLOW asks its inserter for;
+# DF.13/DF.14 is what the FOUNDRY requires of the finished layout. For a 5 V
+# (medium-voltage) standard-cell library they differ by 5 um, and the one that
+# fires on the design is the foundry's. subservient and spm use
+# `gf180mcu_fd_sc_mcu7t5v0` -- a 5 V library -- so D is 15 um there, and the
+# 14.0 the plugin used to carry (a SKY130 constant) was accidentally close to
+# the right answer for the wrong reason.
+#
+# The class is taken from the design's OWN cells: the standard-cell liberty's
+# `nom_voltage` (see `_pdk_nominal_voltage`). Undetermined reads the STRICTER
+# of the two, because a coverage rule may not fail open.
+_DECK_TAP_RULE_RELS = (
+    "libs.tech/klayout/tech/drc/rule_decks/comp.rb",
+    "libs.tech/klayout/drc/rule_decks/comp.rb",
+)
+#: `# Rule DF.13_MV: ... is 15um.` -- the deck's own sentence, with its number.
+_DECK_TAP_RULE_RE = re.compile(
+    r"#\s*Rule\s+(DF\.1[34]_(?:LV|MV))\s*:[^\n]*?is\s+([0-9]+(?:\.[0-9]+)?)\s*um",
+    re.I)
+#: Above this nominal supply the medium-voltage rules are the ones that fire.
+_MV_VOLTAGE_FLOOR_V = 2.5
+
+
+def uncovered_row_points(row_x0: int, row_x1: int,
+                         tie_centres: "Sequence[int]",
+                         radius: int) -> "List[int]":
+    """The points in ONE ROW that no tie in that row covers. R-0915-108.
+
+    THE SPEC THE EMITTED TCL IS WRITTEN TO. A point is uncovered iff the
+    nearest tie IN ITS OWN ROW is further than `radius`. The extremal such
+    points are exactly three kinds -- the row START, the row END, and the
+    MIDPOINT between each pair of consecutive ties -- so checking those checks
+    every point in the row, exactly, with no grid to fall out of phase with.
+
+    This is the calibration reference: the test that must read 0 on a pristine
+    insertion uses THIS, and a second test asserts the emitted Tcl computes the
+    same three kinds of point against the same predicate, so the spec and the
+    implementation cannot drift apart silently.
+    """
+    centres = sorted(tie_centres)
+    points = [row_x0, row_x1]
+    for a, b in zip(centres, centres[1:]):
+        points.append((a + b) // 2)
+    out = []
+    for px in sorted(set(points)):
+        if not any(abs(t - px) <= radius for t in centres):
+            out.append(px)
+    return out
+
+
+def deck_tap_max_distance_um(pdk: "PdkConfig", container: Optional[str] = None
+                             ) -> "Tuple[Optional[float], str]":
+    """(D, source) — the max tap distance the PDK's DRC deck REQUIRES.
+
+    Returns the value of the DF.13/DF.14 pair for the voltage class of the
+    cells this design actually uses, named with the rules it came from.
+    """
+    root = _pdk_dir_of(pdk)
+    if not root:
+        return None, "no PDK directory resolved for this run"
+    text = ""
+    rel_used = ""
+    for rel in _DECK_TAP_RULE_RELS:
+        text = _read_pdk_text(f"{root.rstrip('/')}/{rel}", container) or ""
+        if text:
+            rel_used = rel
+            break
+    if not text:
+        return None, ("no DRC rule deck found at "
+                      + " or ".join(_DECK_TAP_RULE_RELS))
+    found: Dict[str, float] = {}
+    for rule, value in _DECK_TAP_RULE_RE.findall(text):
+        try:
+            found[rule.upper()] = float(value)
+        except ValueError:
+            continue
+    lv = [v for k, v in found.items() if k.endswith("_LV")]
+    mv = [v for k, v in found.items() if k.endswith("_MV")]
+    if not lv and not mv:
+        return None, f"{rel_used} states no DF.13/DF.14 distance"
+    volts = _pdk_nominal_voltage(pdk, container)
+    if volts is None:
+        both = lv + mv
+        return min(both), (f"{rel_used}: DF.13/DF.14, STRICTER of the two "
+                           f"classes — this library states no nom_voltage, and "
+                           f"a coverage rule may not fail open")
+    if volts >= _MV_VOLTAGE_FLOOR_V and mv:
+        return min(mv), (f"{rel_used}: DF.13_MV/DF.14_MV "
+                         f"(nom_voltage {volts} V >= {_MV_VOLTAGE_FLOOR_V} V, "
+                         f"medium-voltage class)")
+    if lv:
+        return min(lv), (f"{rel_used}: DF.13_LV/DF.14_LV "
+                         f"(nom_voltage {volts} V, low-voltage class)")
+    return min(mv), f"{rel_used}: only the MV rules are stated"
+
+
+def tap_max_distance_um(pdk: "PdkConfig", container: Optional[str] = None
+                        ) -> "Tuple[float, str]":
+    """D — the distance this run will honour, and where the number came from.
+
+    The FOUNDRY's rule first; the reference flow's insertion knob
+    (`FP_TAPCELL_DIST`) only when the deck states nothing; the registry
+    constant last, disclosed as the fallback it is.
+    """
+    env = (os.environ.get(_TAP_PITCH_ENV) or "").strip()
+    if env:
+        try:
+            value = float(env)
+        except ValueError:
+            value = 0.0
+        if value > 0:
+            return value, f"{_TAP_PITCH_ENV} override"
+    deck, why = deck_tap_max_distance_um(pdk, container)
+    if deck is not None:
+        return deck, f"PDK DRC deck ({why})"
+    flow, fwhy = pdk_declared_tapcell_pitch_um(pdk, container)
+    if flow is not None:
+        return flow, (f"PDK reference-flow knob ({fwhy}); the DRC deck states "
+                      f"no DF.13/DF.14 distance")
+    return (float(pdk.tapcell_distance_um),
+            f"registry fallback ({fwhy}); the PDK declares none")
+
+
+#: Where a PDK states its own tap-cell pitch, in its own flow configuration.
+_PDK_TAP_PITCH_RELS = (
+    "libs.tech/librelane/config.tcl",
+    "libs.tech/openlane/config.tcl",
+)
+_PDK_TAP_PITCH_RE = re.compile(
+    r"set\s+::env\(FP_TAPCELL_DIST\)\s+([0-9]+(?:\.[0-9]+)?)")
+
+
+def pdk_declared_tapcell_pitch_um(
+        pdk: "PdkConfig", container: Optional[str] = None
+) -> "Tuple[Optional[float], str]":
+    """(pitch, source) as the PDK ITSELF declares it, or (None, why-not).
+
+    R-0915-106(a). `PdkConfig.tapcell_distance_um` defaults to 14.0 and says so
+    in its own comment: "SKY130 latch-up rule typical". MEASURED on
+    subservient x gf180mcuD: that SKY130 constant was the budget used on a
+    gf180mcuD die, while gf180mcuD declares its own number one directory away --
+    `libs.tech/librelane/config.tcl` line 108, `set ::env(FP_TAPCELL_DIST) 20`.
+    The PDK's KLayout deck states no numeric tap-spacing rule at all
+    (`layers_def.drc` defines `latchup_mk` 137/5 as a MARKER layer it counts),
+    so the PDK's own flow configuration is the authority on the number, and it
+    is not the number we were using.
+
+    A remembered constant from another PDK is exactly what this plugin keeps
+    removing. The registry value survives only as a DISCLOSED fallback for a
+    PDK that declares nothing.
+    """
+    root = _pdk_dir_of(pdk)
+    if not root:
+        return None, "no PDK directory resolved for this run"
+    for rel in _PDK_TAP_PITCH_RELS:
+        path = f"{root.rstrip('/')}/{rel}"
+        text = _read_pdk_text(path, container)
+        if not text:
+            continue
+        m = _PDK_TAP_PITCH_RE.search(text)
+        if not m:
+            continue
+        try:
+            value = float(m.group(1))
+        except ValueError:
+            continue
+        if value > 0:
+            return value, f"{rel}:FP_TAPCELL_DIST"
+    return None, ("no FP_TAPCELL_DIST in "
+                  + " or ".join(_PDK_TAP_PITCH_RELS))
+
+
+#: A MEASUREMENT override, disclosed like every other source. It exists so a
+#: comparison arm can be run without editing shipped code -- the run still
+#: says the number came from an override, so a report produced under one can
+#: never be mistaken for a PDK-declared run.
+_TAP_PITCH_ENV = "VIBEIC_TAP_PITCH_UM"
+
+
+def tapcell_pitch_um(pdk: "PdkConfig", container: Optional[str] = None
+                     ) -> "Tuple[float, str]":
+    """The pitch this run will use, and where the number came from."""
+    env = (os.environ.get(_TAP_PITCH_ENV) or "").strip()
+    if env:
+        try:
+            value = float(env)
+        except ValueError:
+            value = 0.0
+        if value > 0:
+            return value, f"{_TAP_PITCH_ENV} override"
+    declared, why = pdk_declared_tapcell_pitch_um(pdk, container)
+    if declared is not None:
+        return declared, f"PDK-declared ({why})"
+    return (float(pdk.tapcell_distance_um),
+            f"registry fallback ({why}); the PDK declares none")
+
+
+_TAP_RADIUS_ENV = "VIBEIC_TAP_RADIUS_UM"
+
+
+def tapcell_coverage_radius_um(distance_um: float) -> float:
+    """R-0915-108. The coverage radius IS the declared distance.
+
+    R-0915-106(b) read the number as a pitch and halved it. MEASURED on the
+    PRISTINE post-tapcell DEF and it falsified that reading: given
+    `tapcell -distance 20`, OpenROAD placed ties 39.2 um apart WITHIN A ROW
+    (1120 of 1164 gaps), with the first tie 19.6 um in on 56 rows and 39.2 um
+    in on the other 56 -- a two-phase checkerboard. So the tool lays ties at
+    2D in a row and alternates the phase between rows: D is already the
+    maximum point-to-tap distance it builds for, not a pitch to be halved.
+    Counted at radius D/2 the tool's own untouched output read 1346 of 2622
+    points uncovered; the ruler was wrong, not the layout.
+    """
+    env = (os.environ.get(_TAP_RADIUS_ENV) or "").strip()
+    if env:
+        try:
+            value = float(env)
+        except ValueError:
+            value = 0.0
+        if value > 0:
+            return value
+    return distance_um
+
+
+def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig",
+                                       pitch_um: Optional[float] = None,
+                                       pitch_source: str = "") -> str:
     """Emit the post-insertion WELL-TIE COVERAGE REPAIR Tcl.
 
     WHY THIS EXISTS.  `_build_tapcell_prune_tcl` runs at `placed.def` time and
@@ -4806,6 +5059,17 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig") -> str:
     site exists inside the budget is REPORTED, never silently dropped.
     chip-AGNOSTIC: masters, rows, sites and orientation all come from odb.
     """
+    # R-0915-106 — the number is the PDK's own, and it is a PITCH.
+    _pitch = (float(pitch_um) if pitch_um is not None
+              else float(pdk.tapcell_distance_um))
+    # R-0915-108: the radius IS the declared distance. The earlier
+    # pitch/2 reading was corrected by measurement -- `tapcell
+    # -distance D` lays ties 2D apart IN A ROW with the phase
+    # alternating row to row, so D already IS the max point-to-tap
+    # distance the tool builds for.
+    _radius = tapcell_coverage_radius_um(_pitch)
+    _psrc = pitch_source or "caller did not say"
+
     if not pdk.tapcell_master:
         return ("puts \"WELLTIE_COVERAGE_REPAIR_SKIPPED: no tapcell_master "
                 "configured for this PDK\"\n")
@@ -4820,7 +5084,9 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig") -> str:
         "if {[catch {\n"
         "  set _wtblk [ord::get_db_block]\n"
         "  set _wtdbu [[ord::get_db_tech] getDbUnitsPerMicron]\n"
-        f"  set _wtd [expr {{int({pdk.tapcell_distance_um} * $_wtdbu)}}]\n"
+        f"  set _wtpitch [expr {{int({_pitch} * $_wtdbu)}}]\n"
+        f"  set _wtrad [expr {{int({_radius} * $_wtdbu)}}]\n"
+        f"  set _wtd $_wtrad\n"
         "  set _wtm \"\"\n"
         "  foreach _wtl [[ord::get_db] getLibs] {\n"
         f"    set _wtc [$_wtl findMaster {tm}]\n"
@@ -4878,23 +5144,43 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig") -> str:
         "      if {[info exists _wtocc($_wty)]} { set _wtocl $_wtocc($_wty) }\n"
         "      set _wtsw $_wtrsw($_wty)\n"
         "      if {$_wtsw < 1} { set _wtsw 1 }\n"
-        "      foreach {_wtax0 _wtax1} $_wtanc($_wty) {\n"
-        "        set _wtcx [expr {($_wtax0 + $_wtax1) / 2}]\n"
+        # R-0915-108 — THE ANCHORS ARE DERIVED FROM WHERE THE TOOL PUT THE
+        # TIES, and they are EXACT, not sampled.
+        #
+        # A point is uncovered iff the nearest tie IN ITS OWN ROW is further
+        # than D. The extremal such points in a row are therefore exactly
+        # three kinds: the row START, the row END, and the MIDPOINT between
+        # each pair of consecutive ties. Checking those checks every point,
+        # with no grid to be in or out of phase with -- which is what the
+        # earlier pitch grid got wrong: it sampled from the row origin while
+        # OpenROAD's `tapcell` lays a two-phase checkerboard whose first tie
+        # sits D or 2D in (MEASURED: 19.6 um on 56 rows, 39.2 um on the other
+        # 56), so the ruler and the tool disagreed about where to look.
+        #
+        # PER ROW is the deck's own rule, not a convention: DF.13 grows the
+        # tap INSIDE nwell, and the neighbouring row's nwell is a separate
+        # island. `wire70` sat 7.84 um from a tie one row below and violated.
+        "      set _wtc {}\n"
+        "      foreach _wtt $_wtties { lappend _wtc [expr {$_wtt + $_wttw / 2}] }\n"
+        "      set _wtc [lsort -integer $_wtc]\n"
+        "      set _wtpts {}\n"
+        # the two row ends, which the reference insertion does not cover: its
+        # first tie is D or 2D in from the edge and it relies on the adjacent
+        # row's complementary phase, which this PDK's own rule does not credit.
+        "      lappend _wtpts $_wtrx0($_wty) $_wtrx1($_wty)\n"
+        "      for {set _wti 1} {$_wti < [llength $_wtc]} {incr _wti} {\n"
+        "        lappend _wtpts [expr {([lindex $_wtc [expr {$_wti - 1}]] + "
+        "[lindex $_wtc $_wti]) / 2}]\n"
+        "      }\n"
+        "      foreach _wtcx [lsort -integer -unique $_wtpts] {\n"
         "        set _wtok 0\n"
-        # R-0915-104 — ONE COORDINATE CONVENTION. `_wttie` holds each tie's
-        # xMin and `_wtcx` is the anchor's CENTRE, so this test used to
-        # compare a left edge against a centre and was wrong by half a tie
-        # width in one direction. Small against a 14 um budget, but a
-        # coverage rule that is the gate's own success criterion may not be
-        # approximately right.
-        "        foreach _wtt $_wtties {\n"
-        "          if {abs([expr {$_wtt + $_wttw / 2}] - $_wtcx) <= $_wtd} "
-        "{ set _wtok 1; break }\n"
+        "        foreach _wtt $_wtc {\n"
+        "          if {abs($_wtt - $_wtcx) <= $_wtrad} { set _wtok 1; break }\n"
         "        }\n"
         "        if {$_wtok} { continue }\n"
         "        incr _wtneed\n"
         "        set _wtk0 [expr {($_wtcx - $_wtrx0($_wty)) / $_wtsw}]\n"
-        "        set _wtmaxk [expr {$_wtd / $_wtsw}]\n"
+        "        set _wtmaxk [expr {$_wtrad / $_wtsw}]\n"
         "        set _wtplaced 0\n"
         "        for {set _wtj 0} {$_wtj <= $_wtmaxk && !$_wtplaced} "
         "{incr _wtj} {\n"
@@ -4903,7 +5189,8 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig") -> str:
         "            set _wtx [expr {$_wtrx0($_wty) + $_wtk * $_wtsw}]\n"
         "            if {$_wtx < $_wtrx0($_wty)} { continue }\n"
         "            if {[expr {$_wtx + $_wttw}] > $_wtrx1($_wty)} { continue }\n"
-        "            if {abs($_wtx - $_wtcx) > $_wtd} { continue }\n"
+        "            if {abs([expr {$_wtx + $_wttw / 2}] - $_wtcx) > $_wtrad} "
+        "{ continue }\n"
         "            set _wtfree 1\n"
         "            foreach {_wtoa _wtob} $_wtocl {\n"
         "              if {$_wtx < $_wtob && $_wtoa < [expr {$_wtx + $_wttw}]} "
@@ -4917,31 +5204,28 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig") -> str:
         "            $_wtni setLocation $_wtx $_wty\n"
         "            $_wtni setPlacementStatus FIRM\n"
         "            lappend _wtocl $_wtx [expr {$_wtx + $_wttw}]\n"
-        "            lappend _wtties $_wtx\n"
+        "            lappend _wtc [expr {$_wtx + $_wttw / 2}]\n"
+        "            set _wtc [lsort -integer $_wtc]\n"
         "            incr _wtadded\n"
         "            set _wtplaced 1\n"
         "            break\n"
         "          }\n"
         "        }\n"
-        # R-0915-104 — WHY AN ANCHOR FAILED, NOT ONLY WHERE. An anchor whose
-        # window is clipped by the end of its own row is a different problem
-        # from one whose window is full of cells: the first is a floorplan
-        # fact, the second a density one, and a reader who cannot tell them
-        # apart cannot act on either.
-        #
-        # MEASURED, and it refuted the guess that prompted it. Reading the m3
-        # arm's ten x values alone they looked like row-end clipping. With the
-        # cause actually recorded, the m4 arm says 16 of 17 are `occupied` and
-        # exactly ONE is `row_edge_clips_the_window` -- and the occupied ones
-        # repeat at the SAME x (1454880) across many different rows, which is
-        # a column of blocked sites, not a floorplan edge. An x value cannot
-        # tell you which of the two it is; that is why this field exists.
         "        if {!$_wtplaced} {\n"
         "          incr _wtfail\n"
         "          set _wtwhy \"occupied\"\n"
-        "          if {[expr {$_wtcx - $_wtd}] < $_wtrx0($_wty) || "
-        "[expr {$_wtcx + $_wtd + $_wttw}] > $_wtrx1($_wty)} "
+        "          if {[expr {$_wtcx - $_wtrad}] < $_wtrx0($_wty) || "
+        "[expr {$_wtcx + $_wtrad + $_wttw}] > $_wtrx1($_wty)} "
         "{ set _wtwhy \"row_edge_clips_the_window\" }\n"
+        "          foreach _wtin [$_wtblk getInsts] {\n"
+        "            set _wtib [$_wtin getBBox]\n"
+        "            if {[$_wtib yMin] != $_wty} { continue }\n"
+        "            if {$_wtcx >= [$_wtib xMin] && $_wtcx < [$_wtib xMax]} {\n"
+        "              set _wtwhy \"$_wtwhy inside [$_wtin getName] "
+        "([[$_wtin getMaster] getName])\"\n"
+        "              break\n"
+        "            }\n"
+        "          }\n"
         "          lappend _wtfaildesc \"row=$_wty x=$_wtcx ($_wtwhy)\"\n"
         "        }\n"
         "      }\n"
@@ -4965,9 +5249,10 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig") -> str:
         "      # caught.\n"
         "      catch {check_placement} _wtcp\n"
         "    }\n"
-        "    puts \"WELLTIE_COVERAGE_REPAIR: budget="
-        + f"{pdk.tapcell_distance_um}"
-        + "um master=" + tm + " anchor_rows=$_wtrows uncovered_anchors=$_wtneed "
+        "    puts \"WELLTIE_COVERAGE_REPAIR: pitch="
+        + f"{_pitch}"
+        + f"um (source={_psrc}) radius={_radius}um master=" + tm
+        + " anchor_rows=$_wtrows uncovered_anchors=$_wtneed "
         "ties_added=$_wtadded unplaceable=$_wtfail\"\n"
         "  }\n"
         "} _wterr]} {\n"
@@ -26861,8 +27146,12 @@ def _v1_8_100_signoff_drv_repair_tcl(
     # top of the cells the ladder just legalized (MEASURED: 10 violations
     # back). Absent a PDK the rung is not emitted at all and this deck is
     # byte-for-byte what it was.
-    _sdr_tie_recover = (_build_welltie_coverage_repair_tcl(pdk)
-                        if pdk is not None else "")
+    if pdk is not None:
+        _sdr_pitch, _sdr_pitch_src = tap_max_distance_um(pdk)
+        _sdr_tie_recover = _build_welltie_coverage_repair_tcl(
+            pdk, _sdr_pitch, _sdr_pitch_src)
+    else:
+        _sdr_tie_recover = ""
 
     n = _V1_8_100_DRV_REPAIR_PASSES
     m = _V1_8_100_DRV_REPAIR_MARGIN_PCT
@@ -32157,8 +32446,12 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # done) AND the row sites are still free, so a tie the #684 prune could not
     # have known was needed can still be placed. See
     # `_build_welltie_coverage_repair_tcl` for the measurement that motivates it.
+    _tap_pitch, _tap_pitch_src = tap_max_distance_um(pdk, container)
+    print(f"[phase3] tap-cell pitch := {_tap_pitch} um "
+          f"(source: {_tap_pitch_src}); coverage radius "
+          f"{tapcell_coverage_radius_um(_tap_pitch)} um")
     filler_block = _build_welltie_coverage_repair_tcl(
-        pdk) + _build_sparse_die_aware_filler_tcl(
+        pdk, _tap_pitch, _tap_pitch_src) + _build_sparse_die_aware_filler_tcl(
         _filler_masters, slot_pinned_core=fp_rect is not None,
         design_declared_die=bool(_l9_die_note),
         sparse_active_row_fill=bool(
@@ -46718,17 +47011,43 @@ _CANONICAL_POST_ROUTE_STA_BASES = (
 )
 
 
-def canonical_post_route_sta(stage_dir: Path) -> Tuple[Optional[Path], str]:
-    """(report, basis) — the best post-route STA report this run actually has.
+#: When THIS process started. A phase-3 artefact older than this was not
+#: written by this run, whatever its name says.
+_RUN_STARTED_AT = time.time()
+
+
+def canonical_post_route_sta(stage_dir: Path,
+                             not_before: Optional[float] = None
+                             ) -> Tuple[Optional[Path], str]:
+    """(report, basis) — the best post-route STA report THIS RUN actually has.
 
     `stage_dir` is `phase3/stage3`. Returns (None, "") when the run produced
     none, which is the honest input for a gate that must then refuse.
+
+    `not_before` IS THE HALF THAT WAS MISSING, and it is missing because I left
+    it out. MEASURED on 2026-09-21 (lane icsub2, host 8HD-4): three comparison
+    arms re-entered phase 3 on a COPY of an earlier run's project. Their own
+    routes came out clean, so no new multi-corner STA was written -- and this
+    resolver happily picked the earlier run's `sta_mcorner_ocv.rpt` (mtime
+    02:53) and published its content under a freshly-written
+    `post_route_timing.rpt` (mtime 11:10). Three arms then "measured" a number
+    no arm had computed, and the alias header said, truthfully and uselessly,
+    `STA_ALIAS_BASIS: sta_mcorner_ocv.rpt`.
+
+    An alias that republishes a stale basis under a fresh name is worse than no
+    alias: the file's own timestamp asserts a freshness its content does not
+    have. With `not_before` set to the moment the run started, a basis older
+    than the run is REFUSED and the caller gets (None, "") -- the same honest
+    input as "no report", because that is what it is.
     """
     for rel, basis in _CANONICAL_POST_ROUTE_STA_BASES:
         cand = stage_dir / rel
         try:
-            if cand.is_file() and cand.stat().st_size > 0:
-                return cand, basis
+            if not (cand.is_file() and cand.stat().st_size > 0):
+                continue
+            if not_before is not None and cand.stat().st_mtime < not_before:
+                continue
+            return cand, basis
         except OSError:
             continue
     return None, ""
@@ -50708,7 +51027,9 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             # "No STA report found" about a run that had measured its timing.
             # The alias now names its BASIS, and a refused attempt is never a
             # basis.
-            _alt, _alt_basis = canonical_post_route_sta(sta_out.parent)
+            # A basis older than this run is not this run's measurement.
+            _alt, _alt_basis = canonical_post_route_sta(
+                sta_out.parent, _RUN_STARTED_AT)
             if _alt is not None:
                 _why = ("the single-corner SPEF STA refused itself"
                         if spef_sta_attempt_ok is False else
