@@ -66,6 +66,19 @@ if R is None:
 _SRC = (_PROGRAMS / "phase3_one_shot_runner.py").read_text(encoding="utf-8")
 _BODY = "\n".join(l for l in _SRC.splitlines() if not l.lstrip().startswith("#"))
 
+# THE CODE, WITH PROSE BLANKED — the repository's ONE implementation of "a
+# sentence about a call is not a call". `_BODY` drops whole-line comments but
+# keeps docstrings and trailing prose, so a narrative that SPELLS a marker
+# before the site that emits it moves any index-based window onto the story.
+# MEASURED 2026-09-21 on next/icspm11: R-0915-111's comment explains what
+# PG_UNROUTED_SUPPLY cost this flow, two thousand lines above the emission, and
+# `_BODY.index("PG_UNROUTED_SUPPLY")` duly landed on the explanation — the test
+# below went red while the property it guards was untouched. `executable_text`
+# blanks comments and docstrings in place and KEEPS string literals, which is
+# exactly the subject here: the marker lives in an f-string the runner emits.
+import gate_is_wired_check as _giw  # noqa: E402
+_CODE = _giw.executable_text(_PROGRAMS / "phase3_one_shot_runner.py", _SRC)
+
 
 # ── the emitter ───────────────────────────────────────────────────────────
 def test_it_no_longer_reclassifies_a_supply_to_SIGNAL():
@@ -140,6 +153,9 @@ def test_the_verdict_is_reached_BEFORE_the_net_ownership_audit():
 def test_it_is_a_FAIL_not_an_advisory():
     """A supply the PDN failed to build is a result worth reporting, not a note.
     The old behaviour was already 'log it and continue'."""
-    i = _BODY.index("PG_UNROUTED_SUPPLY")
-    seg = _BODY[max(0, i - 300):i + 200]
-    assert '"pnr", "FAIL"' in seg
+    # the CODE site, not the story about it (see `_CODE` above)
+    i = _CODE.index("PG_UNROUTED_SUPPLY")
+    seg = _CODE[max(0, i - 300):i + 200]
+    assert '"pnr", "FAIL"' in seg, (
+        "the unrouted-supply finding must be returned as a FAIL StepResult at "
+        "its own emission site, not logged and walked past")

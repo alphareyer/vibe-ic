@@ -99,6 +99,20 @@ def ppa_functions_in(path: Path):
 # v1.11.18. It may SHRINK freely. Growing it is a decision, not a diff.
 # ======================================================================
 _LEDGER = frozenset({
+    # RECORDED by R-0915-111 (2026-09-21), and recorded together because they
+    # answer one question: "can pdngen build a grid that carries this design's
+    # own measured current". Both are TCL/deck surface of the PnR step, not
+    # PPA analysis: `_pdn_em_stripe_plan` decides the stripe COUNT and width a
+    # deck will ask pdngen for (the EM arithmetic it consumes is derived by
+    # `_pdn_em_width_floor`, which already lives where the ledger wants it),
+    # and `_pdn_grid_built_tcl` emits the post-pdngen check that turns an empty
+    # grid into a verdict. Moving either to `_ppa/power.py` would put deck
+    # emission behind the analysis boundary, which is the split that boundary
+    # exists to prevent. MEASURED cause: spm x gf180mcuD run10, where a widened
+    # strap made pdngen emit no grid ([ERROR PDN-0108]) and the flow found out
+    # two steps later as PG_UNROUTED_SUPPLY.
+    "_pdn_em_stripe_plan",
+    "_pdn_grid_built_tcl",
     # RECORDED after 6c272d392, which added a bounded area retry to
     # `step_synth` and did not make this ledger decision. The three names below
     # are that retry's whole runner surface, and they are recorded TOGETHER

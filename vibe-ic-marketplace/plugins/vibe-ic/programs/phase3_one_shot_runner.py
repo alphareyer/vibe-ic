@@ -6222,7 +6222,20 @@ def _macro_pdn_grid_outcome(
     # min spacing of the strap layer, from the tech LEF's own WIDTH for it
     s_minw = next((w for n, _d, _p, w in layers
                    if n.lower() == str(strap["layer"]).lower()), sw)
-    floor = round(2.0 * sw + s_minw, 3)
+    # R-0915-111 — THE PITCH MUST HOLD TWO STRAPS, NOT ONE. pdngen lays the
+    # power and the ground strap INSIDE one pitch, so the gap it computes is
+    # `pitch/2 - width`, not `pitch - 2*width`. The old floor (2*width +
+    # spacing) agrees with that only while the strap is narrow, which is why
+    # this held until an EM floor widened one. MEASURED on spm x gf180mcuD
+    # (run10, 2026-09-21): the EM floor took Metal5 from 1.6 to 1.96 um, this
+    # plan kept the 4.655 um pitch it had derived for 1.6 (old floor 3.66 <=
+    # 4.655, so it looked legal), and pdngen refused the deck outright —
+    #   [ERROR PDN-0108] Spacing (0.3650 um) specified for layer Metal5 is
+    #   less than minimum spacing (0.4600 um)
+    # = 4.655/2 - 1.96. The run swallowed that as PDN_NONFATAL and shipped a
+    # design with NO special-net geometry on either supply net, which the flow
+    # only noticed two steps later as PG_UNROUTED_SUPPLY, after a 143 s re-run.
+    floor = round(2.0 * (sw + s_minw), 3)
     # Rule 2: the extent that matters is ACROSS the strap — the port's width
     # for a vertical strap, its height for a horizontal one.
     def _across(p: Dict[str, Any]) -> float:
@@ -6238,8 +6251,10 @@ def _macro_pdn_grid_outcome(
             "NO_PORT_WIDE_ENOUGH_FOR_ANY_LEGAL_PITCH",
             f"every macro supply port measures less than {floor}um across the "
             f"{strap['layer']} strap direction, which is the smallest pitch "
-            f"pdngen will accept for that strap (2*width+spacing), so no strap "
-            f"pattern can be guaranteed to cross any of them",
+            f"pdngen will accept for that strap — 2*(width+spacing) = "
+            f"2*({sw}+{s_minw}), because the power and ground straps share one "
+            f"pitch and pdngen measures their gap as pitch/2-width — so no "
+            f"strap pattern can be guaranteed to cross any of them",
             pin_layer=pin_layer,
             candidates=[str(strap["layer"])],
             blocked=_blocked_layers)
@@ -6325,6 +6340,147 @@ def _build_macro_pdn_refusal_tcl(refusals: Sequence[Dict[str, Any]]) -> str:
                 f"grid was built for this master and its OBS was NOT "
                 f"overridden; its supply pins are not reached by this grid.\"\n")
     return out
+
+
+def _pdn_em_stripe_plan(*, i_seg_A: float, drawn_width_um: float,
+                        pitch_um: float, jmax_A_per_um: float,
+                        margin: float, safety: float,
+                        min_spacing_um: float,
+                        min_pitch_um: float = 0.0,
+                        max_width_um: Optional[float] = None,
+                        concentration_k: Optional[float] = None
+                        ) -> Dict[str, Any]:
+    """R-0915-111 — the EM answer as STRIPE COUNT first, width second.
+
+    EM is current PER STRIPE. Two levers reach it and they are not equals:
+
+      * MORE STRIPES (a tighter pitch) divides the current and adds copper
+        without touching a single routing track's width. Its bound is the
+        no-abut floor the corrected arithmetic gives -- `pitch >= 2*(width +
+        spacing)`, because pdngen lays power and ground inside one pitch -- and
+        the PDK's own minimum pitch.
+      * A WIDER STRAP steals tracks, and past a point it is not buildable at
+        all: MEASURED on spm x gf180mcuD (run10), widening Metal5 1.6 -> 1.96um
+        left `pitch/2 - width = 0.3675um` against a 0.46um minimum and pdngen
+        emitted NO GRID ([ERROR PDN-0108]).
+
+    So this walks the pitch down first (halving the spacing between stripes is
+    a doubling of their number), and only then considers width, and only up to
+    `max_width_um` when the technology declares one.
+
+    THE HONEST CAVEAT, CARRIED IN THE RESULT. Dividing the measured worst
+    segment by the stripe multiplier assumes the load is spread over the
+    stripes. It is not, and the run can measure by how much: `concentration_k`
+    = measured worst segment / (I_total / stripes). MEASURED three times on
+    spm x gf180mcuD -- run9, run10q and run10 -- at k = 10.0, because 273 logic
+    cells sit in a 2376um core. k is REPORTED beside the plan, never used to
+    inflate a promise: a caller that needs certainty re-measures after the
+    build, which is what the EM gate already does.
+    """
+    def _w_needed(i: float) -> float:
+        return i * safety / (jmax_A_per_um * max(1e-12, (1.0 - margin)))
+
+    out: Dict[str, Any] = {
+        "i_seg_A": i_seg_A, "drawn_width_um": drawn_width_um,
+        "pitch_um": pitch_um, "jmax_A_per_um": jmax_A_per_um,
+        "margin": margin, "safety_factor": safety,
+        "min_spacing_um": min_spacing_um, "min_pitch_um": min_pitch_um,
+        "max_width_um": max_width_um, "concentration_k": concentration_k,
+        "w_needed_at_drawn_stripes_um": round(_w_needed(i_seg_A), 4),
+    }
+    if _w_needed(i_seg_A) <= drawn_width_um:
+        out.update(verdict="ALREADY_MET", stripe_multiplier=1,
+                   new_pitch_um=pitch_um, new_width_um=drawn_width_um,
+                   reason="the strap as drawn already carries the measured "
+                          "worst segment within Jmax")
+        return out
+
+    # (1) stripes first. `m` is how many times more stripes than drawn.
+    floor_pitch = max(2.0 * (drawn_width_um + min_spacing_um), min_pitch_um)
+    m = 1
+    while True:
+        m += 1
+        new_pitch = pitch_um / m
+        if new_pitch < floor_pitch:
+            m -= 1
+            break
+        if _w_needed(i_seg_A / m) <= drawn_width_um:
+            out.update(verdict="MORE_STRIPES", stripe_multiplier=m,
+                       new_pitch_um=round(new_pitch, 4),
+                       new_width_um=drawn_width_um,
+                       floor_pitch_um=round(floor_pitch, 4),
+                       reason=(f"{m}x the stripes at pitch "
+                               f"{round(new_pitch, 4)}um carries the measured "
+                               f"worst segment within Jmax at the width the "
+                               f"flow already draws; no track is widened"))
+            return out
+    # (2) width second, and only as far as the technology allows.
+    reachable_i = i_seg_A / max(1, m)
+    w_needed = _w_needed(reachable_i)
+    pitch_at_m = pitch_um / max(1, m)
+    w_buildable = max(0.0, pitch_at_m / 2.0 - min_spacing_um)
+    cap = min([x for x in (max_width_um, w_buildable) if x is not None] or [w_buildable])
+    if w_needed <= cap:
+        out.update(verdict="WIDER_STRAP", stripe_multiplier=m,
+                   new_pitch_um=round(pitch_at_m, 4),
+                   new_width_um=round(w_needed, 4),
+                   buildable_width_cap_um=round(cap, 4),
+                   reason=(f"stripes alone stop at {m}x (pitch floor "
+                           f"{round(floor_pitch, 4)}um); the remaining demand "
+                           f"needs {round(w_needed, 4)}um of strap, which the "
+                           f"technology and the pitch still allow "
+                           f"({round(cap, 4)}um)"))
+        return out
+    out.update(verdict="INFEASIBLE", stripe_multiplier=m,
+               new_pitch_um=round(pitch_at_m, 4),
+               required_width_um=round(w_needed, 4),
+               buildable_width_cap_um=round(cap, 4),
+               reason=(f"no (stripes, width) this technology can build "
+                       f"carries {i_seg_A:.4g} A within Jmax "
+                       f"{jmax_A_per_um} A/um at margin {margin}: stripes stop "
+                       f"at {m}x (pitch floor {round(floor_pitch, 4)}um, "
+                       f"PDK minimum {min_pitch_um}um), which still needs "
+                       f"{round(w_needed, 4)}um of strap while the widest this "
+                       f"pitch and technology will build is "
+                       f"{round(cap, 4)}um — widening past that is what makes "
+                       f"pdngen emit no grid at all"))
+    return out
+
+
+def _pdn_grid_built_tcl() -> str:
+    """R-0915-111 — a pdngen that built NO grid is a refusal HERE, by name.
+
+    `pdngen` is wrapped in a `catch` whose failure branch printed
+    `PDN_NONFATAL: <err>` and walked on. MEASURED on spm x gf180mcuD (run10,
+    2026-09-21): an EM-widened Metal5 strap gave pdngen an illegal gap —
+      [ERROR PDN-0108] Spacing (0.3650 um) specified for layer Metal5 is less
+      than minimum spacing (0.4600 um)
+    — pdngen emitted NOTHING, the note scrolled past, and the flow discovered
+    it two steps and 143 s later as `PG_UNROUTED_SUPPLY`, with no GDS, no DRC
+    and no LVS. The tool said exactly what was wrong; the flow lost it.
+
+    So: after pdngen, every net that carries a real POWER/GROUND terminal must
+    own special-net geometry. A net that does not is PDN_GRID_EMPTY, and the
+    message carries pdngen's OWN reason, not a paraphrase of it."""
+    return (
+        "if {[catch {\n"
+        "  set _pg_empty {}\n"
+        "  foreach _n [[ord::get_db_block] getNets] {\n"
+        "    set _t [$_n getSigType]\n"
+        "    if {$_t ne \"POWER\" && $_t ne \"GROUND\"} { continue }\n"
+        "    if {![llength [$_n getITerms]] && ![llength [$_n getBTerms]]} { continue }\n"
+        "    if {![llength [$_n getSWires]]} { lappend _pg_empty [$_n getName] }\n"
+        "  }\n"
+        "  if {[llength $_pg_empty]} {\n"
+        "    set _why [expr {[info exists _pdn_err] && $_pdn_err ne \"\" ? $_pdn_err : \"pdngen reported no error\"}]\n"
+        "    puts \"PDN_GRID_EMPTY: [llength $_pg_empty] supply net(s) carry real terminals and own NO special-net geometry after pdngen: [join $_pg_empty {, }]. pdngen's own reason: $_why\"\n"
+        "    error \"PDN_GRID_EMPTY: [join $_pg_empty {, }] -- pdngen built no grid for them ($_why). A design whose supply nets have terminals and no metal is not powered, and every step after this one would be measuring a layout that cannot work; this is a verdict of the PDN step, not a note.\"\n"
+        "  }\n"
+        "  puts \"PDN_GRID_PRESENT: every supply net that carries a terminal owns special-net geometry\"\n"
+        "} _pdn_chk_err]} {\n"
+        "  if {[string match {PDN_GRID_EMPTY:*} $_pdn_chk_err]} { error $_pdn_chk_err }\n"
+        "  puts \"PDN_GRID_CHECK_NONFATAL: $_pdn_chk_err\"\n"
+        "}\n")
 
 
 def _build_macro_pdn_grid_tcl(plan: Optional[Dict[str, Any]]) -> str:
@@ -7843,7 +7999,10 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
             "  puts \"PDN_NONFATAL: $_pdn_err\"\n"
             "} else {\n"
             "  puts \"PDN_INSERTED: met1 follow-pins + met4/met5 stripes\"\n"
-            "}\n")
+            "}\n"
+            # R-0915-111 — the note above may be the only thing pdngen said;
+            # this is what turns "it said something" into a verdict.
+            + _pdn_grid_built_tcl())
     # Non-sky130 (commercial/custom) PDK: discover the actual power/ground pin
     # names + follow-pin rail width from the cell LEF and emit a met1
     # follow-pins PDN. Without it the bare, unconnected power-rail metal is
@@ -7933,7 +8092,43 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                 if not (st.get("layer") and _sw0):
                     continue
                 _swf, _hit = _em_floor_w(st["layer"], float(_sw0))
+                # R-0915-111 — STRIPES FIRST. A tighter pitch divides the
+                # per-stripe current and steals no track; a wider strap steals
+                # tracks and, past `pitch/2 - width < min spacing`, makes
+                # pdngen emit NO GRID at all (run10: PDN-0108). So ask the
+                # stripe planner whether more stripes reach the same Jmax at
+                # the width already drawn, and take that answer when it does.
+                _plan_em = None
                 if _hit:
+                    _lay_em = (em_floor or {}).get("per_layer", {}).get(
+                        str(st["layer"]).lower(), {})
+                    _iseg = (em_floor or {}).get("max_segment_current_A")
+                    _jm = _lay_em.get("jmax_A_per_um")
+                    if _iseg and _jm and st.get("pitch"):
+                        try:
+                            _plan_em = _pdn_em_stripe_plan(
+                                i_seg_A=float(_iseg),
+                                drawn_width_um=float(_sw0),
+                                pitch_um=float(st["pitch"]),
+                                jmax_A_per_um=float(_jm),
+                                margin=float((em_floor or {}).get("margin", 0.1)),
+                                safety=float((em_floor or {}).get(
+                                    "safety_factor", _EM_MEASURED_SAFETY)),
+                                min_spacing_um=float(
+                                    (em_floor or {}).get("min_spacing_um", {})
+                                    .get(str(st["layer"]).lower(), 0.0)
+                                    if isinstance((em_floor or {}).get("min_spacing_um"), dict)
+                                    else 0.0))
+                        except Exception:
+                            _plan_em = None
+                if _plan_em and _plan_em.get("verdict") == "MORE_STRIPES":
+                    st["pitch"] = float(_plan_em["new_pitch_um"])
+                    st["offset"] = round(
+                        st["pitch"] / _PDN_STRAP_OFFSET_DIV, 3)
+                    _em_widened.append(
+                        f"{st['layer']} {_plan_em['stripe_multiplier']}x "
+                        f"stripes (pitch {st['pitch']}um, width {_sw0} kept)")
+                elif _hit:
                     st["width"] = round(_swf, 3)
                     _np = max(float(st.get("pitch") or 0.0),
                               _PDN_STRAP_MIN_PITCH_X_WIDTH * _swf)
@@ -8158,7 +8353,10 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
             + _ok_marker
             + _sec["report"]
             + _macro_supply_pin_audit_tcl()
-            + "}\n")
+            + "}\n"
+            # R-0915-111 — same verdict on the main path, after the catch, so a
+            # swallowed PDN_NONFATAL can never reach the next step as silence.
+            + _pdn_grid_built_tcl())
     return ("puts \"PDN_SKIPPED: no PDK config for this design; "
             "silicon DOA without external PDN insertion\"\n")
 
