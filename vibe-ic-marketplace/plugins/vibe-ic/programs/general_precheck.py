@@ -497,6 +497,117 @@ def _evidence_tail(text: str, limit: int = 400) -> str:
     return cut[ws + 1:] if ws != -1 else cut
 
 
+#: How many of a delegate's own findings the precheck quotes, and how much of
+#: one finding. Whatever is NOT quoted is COUNTED and the report that holds it
+#: is named -- see `_delegate_reason`.
+_DELEGATE_REASON_MAX_PARTS = 6
+_DELEGATE_REASON_PART_CHARS = 200
+
+
+def _undouble(program: str, text: str) -> str:
+    """Drop a leading `"<program>: "` so the caller may prefix it once.
+
+    R-icgate3 — MEASURED on spm run15
+    (`reports/phase3/tapeout_precheck.json`, findings[2].message):
+
+        drc_report_check refused: drc_report_check: audit re-emitted to ...
+
+    The delegate names itself at the head of its own stderr and the ladder
+    names it again. Two spellings of one fact in eight words is the reader's
+    first impression of the refusal.
+    """
+    text = (text or "").lstrip()
+    for lead in (f"{program}: ", f"{program}:"):
+        if text.startswith(lead):
+            return text[len(lead):].lstrip()
+    return text
+
+
+def _delegate_reason(out: Path, program: str, tail: str) -> str:
+    """The delegate's OWN findings, read back from the report it just wrote.
+
+    R-icgate3 — THE REASON IS ALREADY ON DISK; THE LADDER WAS QUOTING CHATTER.
+    MEASURED on spm run15, `reports/phase3/tapeout_precheck.json`
+    findings[1].message, in full:
+
+        antenna_report_check refused:         "sha256": "c9dc6e...",
+                "is_file": true
+              },
+              ...
+
+    `antenna_report_check` prints its whole report to STDOUT, so
+    `stderr.strip() or stdout.strip()` selected the report text and
+    `_evidence_tail` returned its closing lines -- a JSON fragment, published as
+    the reason a die was refused. The report the delegate had just written to
+    `reports/phase3/general_precheck/precheck_antenna.json` said, on the same
+    bytes:
+
+        ANTENNA_VIOLATIONS_ZERO: Antenna violations present: 4 (net+pin);
+        insert diode or re-route
+
+    and three `ANTENNA_NO_TOOL_SIGNATURE` findings beside it. The same run's
+    two DRC rungs published a housekeeping note about the WRAPPER ("audit
+    re-emitted to ... by the wrapper") while
+    `precheck_magic_drc.json` held `DRC_REAL_VIOLATIONS_FOUND: 10 real DRC
+    violation(s) found across 2 report(s) with a determinable count`.
+
+    A REFUSAL NAMES ITS WHOLE SET. Every finding the delegate recorded is
+    quoted, in its own order; if there are more than the budget above, the
+    number NOT quoted is stated and the report that holds them is named. The
+    console tail survives only as the LAST resort, and then it says it is a
+    tail -- `tail` is chatter whenever the delegate wrote a verdict, and a
+    reader cannot act on chatter.
+    """
+    doc: object = None
+    try:
+        doc = json.loads(out.read_text())
+    except (OSError, ValueError):
+        doc = None
+    parts: List[str] = []
+    unrendered = 0
+    if isinstance(doc, dict):
+        findings = [f for f in (doc.get("findings") or [])]
+        for f in findings[:_DELEGATE_REASON_MAX_PARTS]:
+            if isinstance(f, dict):
+                msg = str(f.get("message", "")).strip()
+                rule = str(f.get("rule", "?"))
+                where = str(f.get("file", "")).strip()
+                part = f"{rule}: {msg[:_DELEGATE_REASON_PART_CHARS]}"
+                if where:
+                    part += f" [{where}]"
+                parts.append(part)
+            else:
+                parts.append(str(f)[:_DELEGATE_REASON_PART_CHARS])
+        unrendered += max(0, len(findings) - _DELEGATE_REASON_MAX_PARTS)
+        if not parts:
+            for key in ("reasons", "reason"):
+                val = doc.get(key)
+                if isinstance(val, str) and val.strip():
+                    parts.append(val.strip()[:_DELEGATE_REASON_PART_CHARS])
+                elif isinstance(val, (list, tuple)):
+                    vals = list(val)
+                    parts.extend(str(r)[:_DELEGATE_REASON_PART_CHARS]
+                                 for r in vals[:_DELEGATE_REASON_MAX_PARTS])
+                    unrendered += max(0, len(vals) - _DELEGATE_REASON_MAX_PARTS)
+                if parts:
+                    break
+    if not parts:
+        # NOT_MEASURED, said as such. The delegate left no readable verdict, so
+        # what follows is its console output and is labelled as that, never as
+        # a reason.
+        cleaned = _undouble(program, tail)
+        if not cleaned:
+            return (f"no reason could be read: {out.name} holds no readable "
+                    f"verdict and the delegate printed nothing")
+        return (f"no verdict readable in {out.name}; its console output ended: "
+                f"{cleaned}")
+    line = "; ".join(parts)
+    if unrendered:
+        line += (f" [+{unrendered} more finding(s) not quoted here \u2014 all of "
+                 f"them in {out.name}]")
+    return line
+
+
 def default_runner(cmd: List[str], timeout: Optional[float]
                    ) -> Tuple[int, str, str]:
     """PROGRESS-supervised delegation to a checker.
@@ -1216,14 +1327,18 @@ def _step_delegate(ev: StepEvidence, step: Step, project: Path,
                           "report_written": out.is_file()})
     if rc == 0:
         ev.verdict = PASS
-        ev.evidence = f"{d.program} exited 0: {tail}" if tail else \
+        _clean = _undouble(d.program, tail)
+        ev.evidence = f"{d.program} exited 0: {_clean}" if _clean else \
             f"{d.program} exited 0"
     elif rc == 1:
         ev.verdict = FAIL
-        ev.evidence = f"{d.program} refused: {tail}"
+        # R-icgate3 — the REASON, read back from the report this delegate just
+        # wrote, not the tail of whatever it happened to echo. See
+        # `_delegate_reason`.
+        ev.evidence = f"{d.program} refused: {_delegate_reason(out, d.program, tail)}"
     else:
         ev.evidence = (f"{d.program} exited rc={rc}, which is neither a pass "
-                       f"nor a refusal: {tail}")
+                       f"nor a refusal: {_undouble(d.program, tail)}")
 
 
 # --------------------------------------------------------------------------- #
