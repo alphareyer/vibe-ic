@@ -662,6 +662,106 @@ _LEDGER = frozenset({
                                     # as a SUBPROCESS against a reachable Jmax
                                     # source. The three `_ppa` modules contain
                                     # no `subprocess` call between them.
+    #
+    # ══════════════════════════════════════════════════════════════════════
+    # RECORDED 2026-09-21 (icslot). FOUR landings added nine PPA-named runner
+    # functions and none made this ledger decision, so the LEDGER is the stale
+    # half, not the runner. Bisected one name at a time:
+    #     c34f56d2a  v1.22.13 (#2376)   5 names
+    #     20ae6cc0e  "signoff: three gates read what the flow actually writes"
+    #                                   2 names
+    #     80ed717cc / a8706bd4f  (DIE floorplan, 2026-09-18)   1 each
+    #
+    # MEASURED for the arguments below, because the entry above this one relies
+    # on a property of `_ppa/area.py` that is NOT true of `_ppa/timing.py`:
+    #     _ppa/area.py     project 0   glob( 0   docker 0   subprocess 0
+    #     _ppa/timing.py   project 50  glob( 1   docker 0   subprocess 0
+    # So "that module has no run-tree reader" is available for the area names
+    # and NOT for the timing ones; the timing arguments are made from
+    # timing.py's OWN stated refusals instead — it is an EXTRACTOR of per-VIEW
+    # rows, text->numbers belongs to `_ppa.backends.opensta`, and a verdict
+    # belongs to `_ppa.feasibility` / `sta_corner_record_completeness_check`.
+    # Neither module invokes a tool: `docker` and `subprocess` are 0 in both.
+    #
+    # 13. THREE TCL/DECK SURFACES OF THE RUNNER'S OWN STA INVOCATION. The
+    # `_pdn_grid_built_tcl` precedent at the top of this ledger decides these:
+    # moving deck emission behind the analysis boundary is the split that
+    # boundary exists to prevent. `_ppa/timing.py` CONSUMES STA artefacts; it
+    # does not author the script that produces them, and it cannot — it has no
+    # `subprocess` or `docker` call to run one with.
+    "_pnr_sta_corner_binding_tcl",  # (report, primary_reads, extra_reads) ->
+                                    # Tcl binding each native path to the
+                                    # primary Liberty the REPORT's own Corner
+                                    # selects. Deck text, not a timing row.
+    "_sta_link_census_tcl",         # () -> Tcl that enumerates actual linked
+                                    # leaf instances, so linking is never
+                                    # inferred from silence.
+    "_emit_declared_process_sta",   # (project, top, pdk, container, spef_path,
+                                    # rpt_out, notes, required) -> one ISOLATED
+                                    # STA invocation per declared process,
+                                    # writing the owned report. A tool dispatch,
+                                    # like `_emit_em_current_authority` above.
+    #
+    # 14. THE READER OF THE RUNNER'S OWN SENTINEL. `_sta_native_census_complete`
+    # is the weakest of these nine on its face -- it DOES turn text into
+    # numbers, which timing.py assigns to `_ppa.backends.opensta` -- and it
+    # stands anyway, for a reason that is about WHOSE text it is: the
+    # `STA_LINK_CENSUS total= linked= missing=` lines it parses are not an STA
+    # artefact dialect at all, they are emitted by `_sta_link_census_tcl`
+    # immediately above. A backend that had to know this flow's private
+    # sentinel format would be a backend coupled to one runner's script. The
+    # completeness boolean it returns is also a verdict, which timing.py
+    # refuses in its own words; the annotation half it cannot answer itself it
+    # already delegates to `sta_annotation_population.classify`.
+    "_sta_native_census_complete",  # (body, def_file) -> bool. Non-vacuous
+                                    # link counts + both native annotation
+                                    # counts, from the runner's own census.
+    #
+    # 15. WHICH ARTEFACT, AND WHAT A NUMBER IS A NUMBER OF — neither is a
+    # number. Both landed in 20ae6cc0e.
+    "canonical_post_route_sta",     # (stage_dir, not_before) -> (report, basis)
+                                    # or (None, ""). SELECTS this run's best
+                                    # post-route STA report by declared basis
+                                    # order and refuses a basis older than the
+                                    # run. Computes no timing figure at all.
+    "_drv_promotion_claim",         # (project, pnr_out, parsed) -> None.
+                                    # Records what the promotion's DRV number
+                                    # is a number OF, and re-measures it with
+                                    # `drv_promotion_corroboration_check`'s own
+                                    # counter — one implementation of "how many
+                                    # DRV violations does this report show",
+                                    # never a second copy. It counts nothing
+                                    # itself.
+    #
+    # 16. FLOORPLAN SIZING INSIDE A RING-PINNED DIE is a PnR input, not an area
+    # verdict. Same class as the `area_retry_*` entry above and decided by the
+    # same rule from `_ppa/area.py`'s own contract: that module is a RECORDS
+    # module with no run-tree reader (measured 0 for `project` and `glob(`),
+    # it takes metric records in and emits a verdict, and its stated rule is
+    # that a proxy comparison can never produce a SMALLER verdict. These two
+    # emit a core INSET for the next PnR attempt to be built from.
+    "ring_die_core_pad",            # (die_w, die_h, ring_core_pad,
+                                    # core_sized_um) -> the RING FLOOR
+                                    # (R-0915-103): on a die PERIMETER-pinned
+                                    # by its own pad ring, the core is the die
+                                    # interior inside that floor.
+    "ring_core_pad_for_util",       # (die_w, die_h, core_w, core_h,
+                                    # actual_util_pct, target_util_pct,
+                                    # ring_core_pad) -> the looser core inset
+                                    # when the CORE is over-utilised inside a
+                                    # ring die, whose die cannot grow.
+    #
+    # 17. A DECLARATION-AUTHORITY QUESTION THAT ONLY MENTIONS `die`. This is
+    # the case the failure message describes as "the name only looks like PPA":
+    # it measures no area and reads no metric. It asks whether a derivation may
+    # supersede an OWNER-DECLARED answer, which is the subject of
+    # `_tapeout_declaration`, not of `_ppa/area.py`.
+    "_declared_answer_is_the_core_this_die_wraps",
+                                    # (project, key, declared, derived) -> bool.
+                                    # True only for `top_cell`, only on a DIE,
+                                    # and only when this flow's own wrapper
+                                    # record proves the declared name is the
+                                    # CORE it wrapped.
     })
 
 
