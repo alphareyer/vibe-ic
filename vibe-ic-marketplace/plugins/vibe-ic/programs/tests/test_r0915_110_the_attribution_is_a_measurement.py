@@ -76,16 +76,20 @@ def test_every_boundary_between_the_check_and_the_reroute_is_probed():
                 "after_postroute_drv_reconverge",
                 "after_postroute_antenna_reconverge",
                 "after_postroute_fill_before_pg_reconnect",
-                "after_pg_reconnect_before_reroute"):
+                "before_pg_reroute"):
         assert f'_pin_access_probe_tcl("{tag}")' in src, tag
 
 
-def test_the_last_probe_sits_immediately_before_the_reroute():
+def test_the_last_probe_sits_INSIDE_the_reroute_block():
+    """MEASURED (int5 arm, 2026-09-21): the probe meant to be the last moment
+    before the re-route was emitted AFTER the whole PG reconnect block
+    (pnr.tcl:25412) while the re-route runs INSIDE it (PG_REROUTE_OWED at
+    :25350). The run died at 25350 and the probe never executed -- 0
+    occurrences in the log. A last-moment check one block too late measures
+    nothing. int6, with it moved, read `before_pg_reroute no_access=0`."""
     src = (Path(__file__).resolve().parents[1]
            / "phase3_one_shot_runner.py").read_text()
-    last = src.index('_pin_access_probe_tcl("after_pg_reconnect_before_reroute")')
-    reroute = src.index('_pnr_stage_begin("postroute_named_violation_reroute")',
-                        last)
-    between = src[last:reroute]
-    assert "block" not in between.replace("_pin_access_probe_tcl", ""), \
-        f"something runs between the last probe and the re-route: {between!r}"
+    probe = src.index('_pin_access_probe_tcl("before_pg_reroute")')
+    reroute = src.index("detailed_route -verbose 0 {*}$_vic_drc_opt", probe)
+    assert "puts" not in src[probe:reroute], \
+        "something runs between the probe and the re-route"

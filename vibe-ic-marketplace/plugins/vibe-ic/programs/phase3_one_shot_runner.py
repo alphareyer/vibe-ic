@@ -9106,8 +9106,16 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         # The same guard every other `detailed_route` site carries, at THIS
         # site: the option must be defined where it is used, including on a
         # PnR resume that deletes the block which defined it first.
-        "  if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
-        "  if {[catch {detailed_route -verbose 0 {*}$_vic_drc_opt} _pgrr_err]} {\n"
+        # R-0915-110 — THE LAST MOMENT IS HERE, INSIDE THIS BLOCK.
+        # MEASURED (int5 arm, 2026-09-21): the probe meant to be "the last
+        # moment before the re-route" was emitted AFTER the whole PG
+        # reconnect block (pnr.tcl:25412) while the re-route runs INSIDE it
+        # (PG_REROUTE_OWED at :25350). The run died at 25350 and that probe
+        # never executed -- 0 occurrences in the log. A last-moment check one
+        # block too late measures nothing.
+        + _pin_access_probe_tcl("before_pg_reroute").replace("\n", "\n  ")
+        + "  if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
+        + "  if {[catch {detailed_route -verbose 0 {*}$_vic_drc_opt} _pgrr_err]} {\n"
         "    puts \"PG_REROUTE_FAILED: $_pgrr_err\"\n"
         "    error \"PG_REROUTE_FAILED: $_pgrr_err -- the PG re-route rips and "
         "re-lays every wire, so a design that survives this error is NOT "
@@ -29148,7 +29156,7 @@ puts "{_PNR_STAGE_MARKER} postroute_fill"
 # may still have created an instance (antenna diodes, a repair buffer), and
 # those terminals must be owned. The re-route inside it runs only when the
 # delta says terminals actually changed, and a failure there is a verdict.
-{_pin_access_probe_tcl("after_postroute_fill_before_pg_reconnect")}{pg_reconnect_block}{_pin_access_probe_tcl("after_pg_reconnect_before_reroute")}{_pnr_stage_begin("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} postroute_named_violation_reroute"
+{_pin_access_probe_tcl("after_postroute_fill_before_pg_reconnect")}{pg_reconnect_block}{_pnr_stage_begin("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} postroute_named_violation_reroute"
 {_named_viol_reroute_block}{_pnr_stage_end("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} write_routed"
 }} else {{
   puts "POSTROUTE_RECONVERGE_DOWNSTREAM_REFUSED: SDR transaction rolled back; skipping antenna/PG/named reroute"
