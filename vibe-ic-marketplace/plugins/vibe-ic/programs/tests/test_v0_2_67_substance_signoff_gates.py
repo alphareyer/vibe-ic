@@ -242,12 +242,28 @@ def _audit(tmp_path, verdict):
         json.dumps({"verdict": verdict}))
 
 
-def test_headline_downgrades_to_completion_audit_fail(tmp_path):
+def test_the_completion_audit_no_longer_downgrades_the_design_verdict(tmp_path):
+    """RE-POINTED UNDER R-0915-126 — the claim CHANGED BY RULING, not by me.
+
+    This asserted `headline == "FAIL"` when the completion audit said FAIL over
+    own-steps PASS_WITH_WAIVERS: the audit's word REPLACED the design's. That is
+    the merge the ruling reverses. One word was carrying two questions — "is
+    this chip right?" and "is this run's paperwork complete?" — and the second
+    silently won, so a chip whose sign-off gates passed still read FAIL on
+    provenance receipts, docs_gen, foundry-handoff mode, waiver staleness,
+    fmeda applicability, formal-skill invocation or the expert handoff.
+
+    NOTHING IS SILENCED: the audit keeps its own verdict, it is published as
+    `audit_verdict`, its failing gates are published as `audit_failed_gates`,
+    and both are asserted here. What it no longer does is overwrite the design.
+    """
     _audit(tmp_path, "FAIL")
     headline, audit_v, note = P3._derive_headline_verdict(
         tmp_path, "PASS_WITH_WAIVERS")
-    assert headline == "FAIL" and audit_v == "FAIL"
-    assert "#437f" in note
+    assert headline == "PASS_WITH_WAIVERS", (
+        "the completion audit overwrote the design verdict: %r" % (headline,))
+    assert audit_v == "FAIL", "the audit's own verdict must still be reported"
+    assert "audit_verdict" in note, note
 
 
 def test_headline_takes_weaker_tier_not_stronger(tmp_path):
