@@ -174,11 +174,41 @@ def _step(gate_cmd: str) -> dict:
 
 
 def test_check_step_routes_an_unclassified_skip_to_INCOMPLETE(tmp_path):
+    """THE CLAIM IS UNCHANGED: a skip nothing classified is INCOMPLETE.
+
+    R-0915-119 moved the SUBJECT, not the rule. This test drove
+    `break_handler_safety_check`, whose rc-2 on this fixture was unclassified
+    — and it no longer is: the checker now ENUMERATES the one RTL file, finds
+    no break signal, and reports `NOT_APPLICABLE_BY_STRUCTURE` with that
+    enumeration, which is a DECIDED skip. Keeping it here would pin the
+    opposite of the ruling. `fpga_wrapper_input_polluter_check` is measured
+    on this same fixture to be still genuinely unclassified, so it carries
+    the claim, and the paired test below pins what the structural one does
+    now — neither assertion is weakened and nothing is dropped."""
+    proj = _minimal_rtl_project(tmp_path)
+    result = _flow.check_step(
+        proj, _step("fpga_wrapper_input_polluter_check ."), waivers={})
+    assert result.status == "NOT_MEASURED", (result.status, result.reasons)
+    assert any("INCOMPLETE" in r for r in result.reasons), result.reasons
+
+
+def test_check_step_routes_a_structural_absence_to_its_own_named_tier(
+        tmp_path):
+    """The other half of the move, and R-0915-119's own requirement that the
+    class be published UNDER ITS OWN NAME. It is not INCOMPLETE — the gate
+    decided — and it is not VACUOUS_PASS either: a vacuous gate examined no
+    subject, while this one enumerated its population and says how many
+    members it walked. It must not borrow DESIGN-DECLARED-N/A's sentence
+    either, because no design declaration was read."""
     proj = _minimal_rtl_project(tmp_path)
     result = _flow.check_step(
         proj, _step("break_handler_safety_check ."), waivers={})
-    assert result.status == "NOT_MEASURED", (result.status, result.reasons)
-    assert any("INCOMPLETE" in r for r in result.reasons), result.reasons
+    assert result.status == "PASS", (result.status, result.reasons)
+    joined = " ".join(result.reasons)
+    assert "NOT_APPLICABLE_BY_STRUCTURE" in joined, result.reasons
+    assert "ENUMERATED its subject population" in joined, result.reasons
+    assert "DESIGN-DECLARED-N/A" not in joined, result.reasons
+    assert "INCOMPLETE" not in joined, result.reasons
 
 
 def test_check_step_keeps_an_examined_gate_in_the_plain_PASS_tier(tmp_path):

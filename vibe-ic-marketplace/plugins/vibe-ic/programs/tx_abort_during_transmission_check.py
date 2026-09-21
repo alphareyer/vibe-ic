@@ -57,6 +57,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 import argparse
 import json
+import _structural_absence as _sa  # R-0915-119
 import re
 import sys
 from dataclasses import dataclass, field, asdict
@@ -119,7 +120,14 @@ def audit(rtl_dir: Path) -> AuditResult:
     tx_files = [f for f in files if _is_tx_module(f)]
 
     if not tx_files:
-        result.summary = {"skipped": True, "reason": "no_tx_modules"}
+        # R-0915-119 — every staged source was opened and classified; this
+        # design has no transmit path, so the question is ANSWERED.
+        result.summary = _sa.attach(
+            {"skipped": True, "reason": "no_tx_modules",
+             "files_scanned": [f.name for f in files]},
+            _sa.absence("RTL source file(s) under the staged rtl directory",
+                        len(files),
+                        detail="none of them is a transmit-path module"))
         result.findings.append(Finding(
             "SKIP", "INFO", "No TX modules detected.",
         ))
@@ -236,6 +244,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                    else "VACUOUS (nothing examined)"
                    if _vx.summary_is_skipped(result.summary) else "PASS")
         print(f"\n{len(errors)} error(s); verdict: {verdict}")
+
+    # R-0915-119 — the evidence must travel on STDOUT too. MEASURED on run25:
+    # the P0 umbrella invokes this checker with no `--json`, so the typed
+    # class in the report is never read and the umbrella sees only the
+    # VACUOUS banner — a clue, not a declaration — and books EXECUTION_ERROR.
+    # Printed on EVERY route, including the `--json` one, because the
+    # umbrella reads stdout either way.
+    if _sa.is_valid((result.summary or {}).get(_sa.EVIDENCE_KEY)):
+        print(_sa.sentence(result.summary[_sa.EVIDENCE_KEY], result.program))
 
     # #515 — routed from the gate's OWN `summary["skipped"]`, never from the
     # printed text. `no_tx_modules` is the dominant outcome across the tracked

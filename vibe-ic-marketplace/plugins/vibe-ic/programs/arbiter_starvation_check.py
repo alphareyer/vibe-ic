@@ -78,6 +78,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import _structural_absence as _sa  # R-0915-119
+
+PROGRAM_NAME = "arbiter_starvation_check"
 from gate_utils import find_rtl_files as _rtl_files
 from gate_utils import read_text as _read
 
@@ -207,6 +210,13 @@ def inspect(project: Path) -> tuple[list[Finding], dict]:
             ))
     if not any_arb:
         summary["skipped_reason"] = "no arbitration patterns found"
+        # R-0915-119: this is not an error and not an incomplete. The RTL was
+        # read and walked; the design simply has no arbiter, so the question
+        # is ANSWERED. The enumeration travels with the claim.
+        _sa.attach(summary, _sa.absence(
+            "RTL file(s) staged for this design", len(rtl_files),
+            names=[str(f.relative_to(project)) for f in rtl_files],
+            detail="no request/grant arbitration pattern in any of them"))
     return findings, summary
 
 
@@ -236,6 +246,16 @@ def main() -> int:
     print(f"=== arbiter_starvation_check ({project.name}) ===")
     if summary["skipped_reason"]:
         print(f"  [skipped] {summary['skipped_reason']}")
+        # R-0915-119 — THE EVIDENCE MUST TRAVEL ON STDOUT TOO. MEASURED on
+        # run25: the P0 umbrella invokes this checker with NO `--json`, so
+        # `_command_json_report` finds nothing and the typed class in the
+        # report is never read. Without this line the umbrella sees only
+        # `[skipped] ...`, which is a clue and not a declaration, and books
+        # EXECUTION_ERROR. `_structural_absence.sentence()` is the one writer
+        # of the accepted shape, and it carries the enumeration.
+        if _sa.is_valid(summary.get(_sa.EVIDENCE_KEY)):
+            print("  " + _sa.sentence(summary[_sa.EVIDENCE_KEY],
+                                      PROGRAM_NAME))
         return 2
     if not findings:
         print(f"  [PASS] {summary['arb_chains_examined']} arbiter "

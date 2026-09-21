@@ -20,9 +20,27 @@ stops a caller.
 """
 from __future__ import annotations
 
+# --- sibling-import path (vibe-ic#2104) ------------------------------------
+# `programs/` is a flat directory whose modules import each other by BARE
+# name. Python puts a file's own directory on `sys.path` only when that file
+# is run as `__main__`; under `importlib.util.spec_from_file_location` — how
+# the gates and much of the suite load a program — it does not. This module
+# imported no sibling until R-0915-119 gave it one, which is why it carried
+# no preamble; `test_issue2104_programs_load_by_path` caught the omission.
+import os as _os                                                    # noqa: E402
+import sys as _sys                                                  # noqa: E402
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# ---------------------------------------------------------------------------
+
+import _structural_absence as _sa  # R-0915-119
+
 import re
 from typing import Any, Mapping, Optional
 
+
+import _structural_absence as _sa  # R-0915-119  # noqa: E402
 
 DESIGN_DECLARED_NA = "DESIGN_DECLARED_NA"
 CAPABILITY_ABSENT = "CAPABILITY_ABSENT"
@@ -51,8 +69,24 @@ ZERO_DENOMINATOR = "ZERO_DENOMINATOR"
 #: absent subject keeps whatever non-green verdict the gate gave it.
 ASKED_BEFORE_PRODUCER = "ASKED_BEFORE_PRODUCER"
 
+#: R-0915-119 — the checker ENUMERATED its subject population and it is
+#: EMPTY. A design with no arbiter has been ANSWERED about arbiters: the gate
+#: is not broken, nothing is unmeasured, and the question is closed. It is a
+#: THIRD STATE, published under its own name, never a PASS.
+#:
+#: It is granted ONLY on the checker's own enumeration, never on its sentence.
+#: `_SUBJECT_ABSENT_RE` below already recognised these messages and the
+#: docstring beside it says why acting on them was wrong — "the sentence was a
+#: better clue than the old default, and a clue is not a declaration". That
+#: stands. What changes is that a checker can now STATE the class and carry
+#: the enumeration that establishes it (`_structural_absence.absence`), and
+#: `infer_nonverdict_reason` refuses the token when the enumeration is absent
+#: or when the subject was FOUND and merely not examined.
+NOT_APPLICABLE_BY_STRUCTURE = _sa.NOT_APPLICABLE_BY_STRUCTURE
+
 REASON_CLASSES = (
     DESIGN_DECLARED_NA,
+    NOT_APPLICABLE_BY_STRUCTURE,
     CAPABILITY_ABSENT,
     EXTERNAL,
     ASKED_BEFORE_PRODUCER,
@@ -65,6 +99,10 @@ REASON_CLASS_SET = frozenset(REASON_CLASSES)
 # Only these classes satisfy the interrogation doctrine's N/A/skip bar.
 SKIP_ELIGIBLE = frozenset({
     DESIGN_DECLARED_NA,
+    # R-0915-119: DECIDED. The same standing R-0915-102(1) gives a
+    # design-declared N/A — the question is answered, so it does not hold the
+    # step at INCOMPLETE. It keeps its OWN name in every published row.
+    NOT_APPLICABLE_BY_STRUCTURE,
     CAPABILITY_ABSENT,
     EXTERNAL,
     ASKED_BEFORE_PRODUCER,
@@ -117,6 +155,14 @@ def report_reason_class(report: Any) -> Optional[str]:
 # could be resolved and 0 .sdc file(s) were read", and it must stay an
 # EXECUTION_ERROR. `read 0` and not `were read`, for the same reason and
 # against the same sentence.
+#: The ONE shape `_structural_absence.sentence()` prints. Anchored on the
+#: class token AND the counts, so a sentence that merely sounds like an
+#: absence cannot reach the decided state.
+_STRUCTURAL_LINE_RE = re.compile(
+    r"\b" + _sa.NOT_APPLICABLE_BY_STRUCTURE + r"\b[^\n]{0,240}?"
+    r"\benumerated\s+(?P<scanned>\d+)\b[^\n]{0,120}?\bfound\s+0\b",
+    re.I)
+
 _ZERO_RE = re.compile(
     r"(?:\bzero[ -]denominator\b|\bexamined\s*[=:]?\s*0\b|"
     r"\bchecked\s*[=:]?\s*0\b|\b0\s*/\s*\d+\s+(?:examined|checked)\b|"
@@ -263,6 +309,21 @@ def _declared_basis(evidence: Mapping[str, Any]) -> bool:
     return (str(evidence.get("skip_kind") or "").lower()
             in DECLARED_ABSENCE_SKIP_KINDS)
 
+def _guard_structural(cls: str, evidence: Any) -> str:
+    """R-0915-119 guards (i) and (ii), applied wherever the token arrives.
+
+    A checker may STATE `NOT_APPLICABLE_BY_STRUCTURE`, and the token alone is
+    not the claim: the ENUMERATION is. Without a valid one the record falls
+    back to the fail-closed default, exactly as it did before the class
+    existed — so a checker that crashes, cannot read its input, or found its
+    subject and examined none of it cannot reach the decided state by writing
+    a word into its report."""
+    if cls != NOT_APPLICABLE_BY_STRUCTURE:
+        return cls
+    return (cls if _sa.is_valid((evidence or {}).get(_sa.EVIDENCE_KEY))
+            else EXECUTION_ERROR)
+
+
 def infer_nonverdict_reason(*, verdict: str = "", message: str = "",
                             evidence: Optional[Mapping[str, Any]] = None,
                             explicit: Any = None) -> str:
@@ -274,11 +335,11 @@ def infer_nonverdict_reason(*, verdict: str = "", message: str = "",
     """
     cls = normalise(explicit)
     if cls:
-        return cls
+        return _guard_structural(cls, evidence)
     ev = dict(evidence or {})
     cls = normalise(ev.get("reason_class"))
     if cls:
-        return cls
+        return _guard_structural(cls, ev)
     skip_kind = str(ev.get("skip_kind") or "").lower()
     if skip_kind == "class-not-applicable":
         return DESIGN_DECLARED_NA
@@ -299,6 +360,22 @@ def infer_nonverdict_reason(*, verdict: str = "", message: str = "",
     if str(verdict).upper() in {"NOT_INVOCABLE", "NOT_FOUND", "CRASHED",
                                 "STALLED", "INVOCATION_ERROR"}:
         return EXECUTION_ERROR
+    # R-0915-119 — THE SECOND CHANNEL, and it is not a prose clue.
+    #
+    # A checker with no `--json` report can still STATE its class, and this
+    # recogniser accepts it ONLY when the same line carries the enumeration
+    # that establishes it: the class token, a scanned COUNT of at least one,
+    # and `found 0`. That is the checker making the claim with its evidence
+    # attached, which is what guard (i) asks for — the prose is the
+    # transport, never the basis. `_sa.sentence()` is the one writer of this
+    # shape, so the claim and its reader cannot drift.
+    m = _STRUCTURAL_LINE_RE.search(str(message or ""))
+    if m:
+        try:
+            if int(m.group("scanned")) >= _sa.MIN_SCANNED:
+                return NOT_APPLICABLE_BY_STRUCTURE
+        except (TypeError, ValueError):      # pragma: no cover
+            pass
     if _ZERO_RE.search(text):
         return ZERO_DENOMINATOR
     if _BLOCKED_RE.search(text):

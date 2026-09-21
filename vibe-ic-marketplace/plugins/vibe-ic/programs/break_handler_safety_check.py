@@ -49,6 +49,11 @@ from pathlib import Path
 from typing import List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# R-0915-119 — AFTER the sibling-path insert above: #2104's contract is
+# that a program loaded by PATH resolves its siblings, and `programs/` is
+# only on sys.path once that line has run.
+import _structural_absence as _sa  # R-0915-119
 from gate_utils import dir_parts_excluded  # shared RTL-scope contract
 import _vacuous_exit as _vx
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)
@@ -140,8 +145,14 @@ def audit(rtl_dir: Path) -> AuditResult:
             break
 
     if not has_break:
-        result.summary = {"skipped": True, "reason": "no_break_signals",
-                          "files_scanned": scanned}
+        # R-0915-119 — every staged source was read and searched; this design
+        # declares no break signal, so the question is ANSWERED.
+        result.summary = _sa.attach(
+            {"skipped": True, "reason": "no_break_signals",
+             "files_scanned": scanned},
+            _sa.absence("RTL source file(s) under the staged rtl directory",
+                        len(scanned), names=scanned,
+                        detail="no break signal in any of them"))
         result.findings.append(Finding(
             "SKIP", "INFO", "No break signals detected — not a break-based protocol.",
         ))
@@ -262,6 +273,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                    else "VACUOUS (nothing examined)"
                    if _vx.summary_is_skipped(result.summary) else "PASS")
         print(f"\n{len(errors)} error(s); verdict: {verdict}")
+
+    # R-0915-119 — the evidence must travel on STDOUT too. MEASURED on run25:
+    # the P0 umbrella invokes this checker with no `--json`, so the typed
+    # class in the report is never read and the umbrella sees only the
+    # VACUOUS banner — a clue, not a declaration — and books EXECUTION_ERROR.
+    # Printed on EVERY route, including the `--json` one, because the
+    # umbrella reads stdout either way.
+    if _sa.is_valid((result.summary or {}).get(_sa.EVIDENCE_KEY)):
+        print(_sa.sentence(result.summary[_sa.EVIDENCE_KEY], result.program))
 
     # #515 — the exit code is routed from the gate's OWN structured
     # conclusion (`summary["skipped"]`), never from the text above. Three of
