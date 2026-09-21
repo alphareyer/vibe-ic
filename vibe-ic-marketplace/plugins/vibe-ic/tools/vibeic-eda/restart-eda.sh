@@ -17,14 +17,16 @@
 #
 # Usage:
 #   ./restart-eda.sh                      # recreate on the newest vibeic-eda image this host holds, BY DIGEST
-#   ./restart-eda.sh 0.2.11               # bare tag  -> vibeic/vibeic-eda:0.2.11
-#   ./restart-eda.sh vibeic/vibeic-eda:latest   # full ref honored as-is (explicit floating opt-in)
+#   ./restart-eda.sh 0.3.67               # bare tag  -> ghcr.io/vibeic/vibeic-eda:0.3.67
+#   ./restart-eda.sh ghcr.io/vibeic/vibeic-eda:latest  # full ref honored as-is (explicit floating opt-in)
 #   FORCE=1 ./restart-eda.sh              # recreate even if an EDA job is running
 #   PULL=1 ./restart-eda.sh               # first install / upgrade: fetch the pinned image if absent
 #
 # Env overrides:
 #   NAME=vibeic-eda            container name to manage
-#   IMAGE_REPO=vibeic/vibeic-eda   repo prepended to a bare tag argument
+#   IMAGE_REPO=<repo>          repo prepended to a bare tag argument; defaults to
+#                              $VIBEIC_EDA_IMAGE_REPO, else ghcr.io/vibeic/vibeic-eda
+#                              (the repository `_eda_pin` resolves, R-0915-96)
 #   DESIGNS_DIR=/path/to/your/designs   existing designs dir mounted at /foss/designs (fresh-container fallback only; must already exist)
 #   RESTART_EDA_PRINT_IMAGE=1  print the resolved image ref and exit (no docker)
 #   PULL=1                     fetch the resolved image when this host does not hold it
@@ -44,7 +46,28 @@
 set -euo pipefail
 
 NAME="${NAME:-vibeic-eda}"
-IMAGE_REPO="${IMAGE_REPO:-vibeic/vibeic-eda}"
+# THE REPOSITORY IS CONFIGURATION, AND THE ONE CONFIG POINT IS ALREADY NAMED.
+# R-0915-96: the DIGEST is the image's identity and the REPOSITORY is where a
+# deployment happens to serve it from, resolved through `VIBEIC_EDA_IMAGE_REPO`
+# with `_eda_pin.IMAGE_REPO_DEFAULT` -- `ghcr.io/vibeic/vibeic-eda` -- beneath
+# it. This script defaulted to the PRE-GHCR name instead, so the plugin's own
+# remedy for a stale container resolved a reference no host holds:
+#
+#   RESTART_EDA_PRINT_IMAGE=1 ./restart-eda.sh 0.3.67
+#     -> vibeic/vibeic-eda:0.3.67        ABSENT on every host measured today
+#        ghcr.io/vibeic/vibeic-eda:0.3.67  is the one that IS present
+#
+# Measured on 8HD-6, 2026-09-21: the dispatcher had to pass the full reference
+# by hand to recreate the shared container. A remedy that cannot name the image
+# it is remedying is not a remedy.
+#
+# PRECEDENCE, and nothing here overrides an operator: an explicit IMAGE_REPO
+# still wins (it is this script's documented knob), then the fleet's own
+# VIBEIC_EDA_IMAGE_REPO -- the SAME variable the resolver and
+# `run_suite_in_eda_image.sh` read, so a host configured once is configured for
+# all three -- and only then the resolver's default. A full reference passed as
+# the argument is still honoured as-is and never touched.
+IMAGE_REPO="${IMAGE_REPO:-${VIBEIC_EDA_IMAGE_REPO:-ghcr.io/vibeic/vibeic-eda}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # EDA tool process names used for the in-flight-job guard.
