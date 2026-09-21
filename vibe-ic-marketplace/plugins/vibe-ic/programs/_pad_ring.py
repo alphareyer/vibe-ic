@@ -1019,14 +1019,45 @@ def parse_pad_site_declarations(text: str) -> Dict[str, Tuple[float, float]]:
     return out
 
 
+
+# ── THE PDK AS THE RUN'S TOOLS SEE IT, NOT AS THIS HOST HAPPENS TO ──────────
+#
+# W5/15.5ic. `phase3_one_shot_runner` passes `--pdk-root` naming a path that
+# resolves INSIDE the EDA container (`/foss/pdks/...`). Every filesystem
+# question below used to be asked of the HOST, so on a host with no PDK the
+# answer was an empty tree list, `lib.resolved` was False, and
+# `pad_ring_check` refused PADRING_MASTERS_UNCORROBORATED -- "no PDK IO cell
+# library resolved" -- about a run whose own in-container command had returned
+# rc 0. MEASURED on the two spm runs the W5 report cites: the pad ring was
+# built and corroborated by the producer, and the audit could not see the
+# library it had used.
+#
+# `_pdk_layer_authority._query` is this tree's ONE seam for "ask the PDK where
+# the run's tools are": with `reader=None` it selects EDA_CONTAINER when one is
+# published and falls back to the local filesystem when none is, and an
+# UNREACHABLE selected container raises OSError rather than answering "absent"
+# -- which is the whole point, since absent is what the caller would otherwise
+# report about a library that is simply somewhere else.
+def _ask(path, operation: str, pattern: str = "", reader=None):
+    from _pdk_layer_authority import _query                   # noqa: PLC0415
+    return _query(Path(path), operation, pattern, reader=reader)
+
+
+def _subdirs(path, reader=None) -> List[Path]:
+    """`sorted(p for p in path.iterdir() if p.is_dir())`, asked of the run's
+    environment. `glob('*')` is the portable form of `iterdir` across that seam."""
+    out = [Path(q) for q in _ask(path, "glob", "*", reader=reader)]
+    return [q for q in sorted(out) if _ask(q, "is_dir", reader=reader)]
+
+
 def _pdk_trees(pdk_root: Optional[str] = None,
-               pdk: Optional[str] = None) -> List[Path]:
+               pdk: Optional[str] = None, reader=None) -> List[Path]:
     """The PDK trees a run may read from, or an empty list for NOT RESOLVED."""
     root_s = pdk_root if pdk_root is not None else os.environ.get("PDK_ROOT")
     if not root_s:
         return []
     root = Path(root_s)
-    if not root.is_dir():
+    if not _ask(root, "is_dir", reader=reader):
         return []
     name = pdk if pdk is not None else os.environ.get("PDK")
     if name:
@@ -1035,12 +1066,12 @@ def _pdk_trees(pdk_root: Optional[str] = None,
         # into a 130-master table drawn from six unrelated processes, which
         # would have corroborated a master no run could ever have used.
         tree = root / name
-        return [tree] if tree.is_dir() else []
-    return sorted(p for p in root.iterdir() if p.is_dir())
+        return [tree] if _ask(tree, "is_dir", reader=reader) else []
+    return _subdirs(root, reader=reader)
 
 
 def discover_io_lefs(pdk_root: Optional[str] = None,
-                     pdk: Optional[str] = None) -> List[Path]:
+                     pdk: Optional[str] = None, reader=None) -> List[Path]:
     """Locate the PDK's IO cell library LEFs by distribution convention.
 
     An empty list means NOT RESOLVED. That is reported as a state of its own
@@ -1049,18 +1080,19 @@ def discover_io_lefs(pdk_root: Optional[str] = None,
     looked up has not been shown to be a PDK cell rather than a drawn one.
     """
     lefs: List[Path] = []
-    for tree in _pdk_trees(pdk_root, pdk):
+    for tree in _pdk_trees(pdk_root, pdk, reader=reader):
         ref = tree / _LIBS_REF
-        if not ref.is_dir():
+        if not _ask(ref, "is_dir", reader=reader):
             continue
-        for lib in sorted(ref.iterdir()):
-            if lib.is_dir() and _IO_LIB_TOKEN in lib.name.lower():
-                lefs.extend(sorted((lib / "lef").glob("*.lef")))
+        for lib in _subdirs(ref, reader=reader):
+            if _IO_LIB_TOKEN in lib.name.lower():
+                lefs.extend(Path(q) for q in
+                            _ask(lib / "lef", "glob", "*.lef", reader=reader))
     return lefs
 
 
 def discover_io_liberty(pdk_root: Optional[str] = None,
-                        pdk: Optional[str] = None) -> List[Path]:
+                        pdk: Optional[str] = None, reader=None) -> List[Path]:
     """The IO cell library's Liberty views, beside the LEFs it ships.
 
     Same distribution convention `discover_io_lefs` uses, one directory over:
@@ -1069,10 +1101,11 @@ def discover_io_liberty(pdk_root: Optional[str] = None,
     back on pin names.
     """
     libs: List[Path] = []
-    for lef in discover_io_lefs(pdk_root, pdk):
+    for lef in discover_io_lefs(pdk_root, pdk, reader=reader):
         d = lef.parent.parent / "lib"
-        if d.is_dir():
-            libs.extend(sorted(d.glob("*.lib")))
+        if _ask(d, "is_dir", reader=reader):
+            libs.extend(Path(q) for q in
+                        _ask(d, "glob", "*.lib", reader=reader))
     seen: Dict[str, Path] = {}
     for lib in libs:
         seen.setdefault(str(lib), lib)
@@ -1080,7 +1113,8 @@ def discover_io_liberty(pdk_root: Optional[str] = None,
 
 
 def discover_io_site_declarations(pdk_root: Optional[str] = None,
-                                  pdk: Optional[str] = None) -> List[Path]:
+                                  pdk: Optional[str] = None,
+                                  reader=None) -> List[Path]:
     """Locate the PDK TECH-view files that DECLARE a pad site.
 
     The sibling of `discover_io_lefs`, and it exists because the LEF view is
@@ -1091,19 +1125,24 @@ def discover_io_site_declarations(pdk_root: Optional[str] = None,
     contents would have to be interpreted.
     """
     found: List[Path] = []
-    for tree in _pdk_trees(pdk_root, pdk):
+    for tree in _pdk_trees(pdk_root, pdk, reader=reader):
         tech = tree / _LIBS_TECH
-        if not tech.is_dir():
+        if not _ask(tech, "is_dir", reader=reader):
             continue
-        for flow in sorted(p for p in tech.iterdir() if p.is_dir()):
-            for lib in sorted(p for p in flow.iterdir() if p.is_dir()):
+        for flow in _subdirs(tech, reader=reader):
+            for lib in _subdirs(flow, reader=reader):
                 if _IO_LIB_TOKEN not in lib.name.lower():
                     continue
                 cfg = lib / _SITE_DECL_FILE
-                if not cfg.is_file():
+                if not _ask(cfg, "is_file", reader=reader):
                     continue
+                # An UNREADABLE declaration is not an absent one, but it is also
+                # not this function's business to judge: it yields no site, and
+                # the caller's own `resolved` state reports the library it could
+                # not read. What must never happen is a container-side read
+                # failure being recorded as "this PDK declares no pad site".
                 try:
-                    text = cfg.read_text(errors="replace")
+                    text = _ask(cfg, "read", reader=reader)
                 except OSError:
                     continue
                 if parse_pad_site_declarations(text):
@@ -1408,14 +1447,21 @@ class IoLibrary:
     """
 
     def __init__(self, lefs: Sequence[Path],
-                 site_declarations: Sequence[Path] = ()):
+                 site_declarations: Sequence[Path] = (), reader=None):
         self.lefs = list(lefs)
         self.masters: Dict[str, Tuple[float, float]] = {}
         self.sites: Dict[str, Dict[str, object]] = {}
+        #: LEF paths that were found but could not be READ. W5/15.5ic: these used
+        #: to be swallowed by `except OSError: continue`, so a library whose
+        #: bytes live in the container produced an EMPTY master table and
+        #: `resolved` False -- indistinguishable from a PDK that ships no IO
+        #: library. A path found and not read is its own fact and is kept here.
+        self.unread_lefs: List[Path] = []
         for lef in self.lefs:
             try:
-                text = lef.read_text(errors="replace")
+                text = _ask(lef, "read", reader=reader)
             except OSError:
+                self.unread_lefs.append(lef)
                 continue
             self.masters.update(parse_lef_macros(text))
             self.sites.update(parse_lef_sites(text))
