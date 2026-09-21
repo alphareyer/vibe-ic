@@ -176,3 +176,67 @@ def test_the_forward_and_feedback_branches_keep_their_polarities():
     pol = a2.sc_branch_polarities(devs, ENTRY[a2.CLOCK_PHASE_ALIASES_KEY])
     assert pol, "no branch resolved a polarity"
     assert all(b["polarity"] == 1 for b in pol.values()), pol
+
+
+# ── the property my own first attempt violated ───────────────────────────
+#
+# MEASURED (lane icadc2, 8hd-3, 60 clocks). Moving a branch capacitor's
+# SUMMING-NODE switches onto the declared phases while leaving that same
+# capacitor's BOTTOM-PLATE switches on the raw clock put the two plates of ONE
+# capacitor in two clock domains 1.5 ns apart. The charge that branch delivered
+# across the rising edge went from +0.02541 sd 0.49949 -- varying with the
+# decision, because it IS the feedback -- to +0.54421 sd 0.00644, a CONSTANT
+# step dumped into the summing node. The integrator ran away to the rail and
+# the bitstream stuck at 96% ones. Every test above still passed.
+
+def _phase_domain(devices, roots):
+    """Nets driven, transitively, by a gate already in the domain. A net whose
+    driver is gated from a declared phase carries that phase's timing even
+    though its name is not a phase name -- the gated DAC clock is exactly
+    that, and it is why this is a reachability question and not a name test."""
+    dom = set(roots)
+    changed = True
+    while changed:
+        changed = False
+        for d in devices:
+            n = d.get("nets") or []
+            if len(n) != 4:
+                continue
+            if str(n[1]) in dom and str(n[0]) not in dom:
+                dom.add(str(n[0]))
+                changed = True
+    return dom
+
+
+def test_both_plates_of_a_branch_capacitor_are_in_one_clock_domain():
+    devices, _ = _expanded()
+    if not DECL:
+        return
+    roots = set(DECL["phases"]) | {
+        str(v["complement_net"]) for v in DECL["phases"].values()}
+    dom = _phase_domain(devices, roots)
+    caps = {d["name"]: [str(x) for x in d["nets"]]
+            for d in devices if len(d.get("nets") or []) == 2}
+    offenders = []
+    for i in (1, 2):
+        for cap in ("cs%d" % i, "cf%d" % i):
+            plates = set(caps[cap])
+            for d in devices:
+                n = d.get("nets") or []
+                if len(n) == 4 and str(n[0]) in plates:
+                    if str(n[1]) not in dom:
+                        offenders.append((cap, d["name"], str(n[1])))
+    assert offenders == [], (
+        "these switches drive a branch capacitor's plate from OUTSIDE the "
+        "declared phase domain, so the two plates of one capacitor move at "
+        "different times: %r" % (offenders,))
+
+
+def test_the_gated_dac_clock_is_gated_from_the_declared_phase():
+    """Named directly as well as by reachability, because this is the one the
+    measurement caught and a reader should be able to find it."""
+    devices, _ = _expanded()
+    gates = {d["name"]: str(d["nets"][1]) for d in devices
+             if len(d.get("nets") or []) == 4}
+    for dev in ("mp_ndac1", "mn_ndac1"):
+        assert gates[dev] == "nph1", (dev, gates[dev])

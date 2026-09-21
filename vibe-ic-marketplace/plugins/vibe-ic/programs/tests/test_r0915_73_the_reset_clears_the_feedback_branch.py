@@ -204,9 +204,20 @@ def test_the_gated_clock_is_the_clock_ANDed_with_the_resets_complement(emitted_i
     """Derived, not asserted by name: the NAND's two inputs must be the clock
     and the reset complement, and its output must be inverted once."""
     gates = {d["name"]: d["nets"] for d in emitted_ir["devices"]}
-    nand_inputs = {gates[n][1] for n in ("mp_ndac1", "mp_ndac2")}
+    # ROUND-ICADC2: RESOLVED through the entry's declared phase aliases. The
+    # property is that this NAND's two inputs are THE SAMPLING PHASE and the
+    # reset complement; `clk` was the mechanism. The gate is now driven from
+    # the declared phase so that both plates of the feedback capacitor move
+    # together -- gating it from raw clk while the summing-node switches ran
+    # on the declared phases railed the integrator (measured: the branch's
+    # rise-edge charge went from +0.02541 sd 0.49949 to +0.54421 sd 0.00644,
+    # i.e. it stopped depending on the decision). An input that is genuinely
+    # not the sampling phase resolves to something else and still fails.
+    _al = a2.LIBRARY["delta_sigma"][a2.CLOCK_PHASE_ALIASES_KEY]
+    _r = lambda n: a2._resolve_phase(n, _al)
+    nand_inputs = {_r(gates[n][1]) for n in ("mp_ndac1", "mp_ndac2")}
     assert nand_inputs == {"clk", "nrstb"}, nand_inputs
-    assert {gates[n][1] for n in ("mn_ndac1", "mn_ndac2")} == {"clk", "nrstb"}
+    assert {_r(gates[n][1]) for n in ("mn_ndac1", "mn_ndac2")} == {"clk", "nrstb"}
     # the n-side is a SERIES pair — that is what makes it an AND and not an OR
     assert gates["mn_ndac1"][2] == gates["mn_ndac2"][0] == "nndacs"
     # one inversion to nckdac, one more to its complement
@@ -247,9 +258,14 @@ def test_the_entry_declares_the_phase_its_gated_clock_carries():
     quantiser's strobe chain, added by R-0915-77 — so the assertion is on the
     pair this commit is about, by membership rather than by equality: a set
     equality here would make every later gate a red in this file."""
+    # ROUND-ICADC2: the gated clock is now declared against the PHASE it is
+    # really gated from, which resolves on to `clk`. Asked as a resolution so
+    # the assertion is about the phase the net carries -- which is what this
+    # test is named for -- and not about how many hops the entry takes to say
+    # it. A genuinely different phase still fails.
     aliases = a2.LIBRARY["delta_sigma"][a2.CLOCK_PHASE_ALIASES_KEY]
-    assert aliases["nckdac"] == "clk"
-    assert aliases["nckdacb"] == "nclkb"
+    assert a2._resolve_phase("nckdac", aliases) == "clk"
+    assert a2._resolve_phase("nckdacb", aliases) == "nclkb"
 
 
 def test_resolving_a_phase_follows_the_alias_and_terminates_on_a_cycle():
