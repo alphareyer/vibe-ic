@@ -3382,6 +3382,25 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
                 # contract, not an empty scan.
                 verdict = "NOT_APPLICABLE"
                 out = f"{_EXECUTED_DECLARED_NA_HINT_PREFIX}{cmd_str}"
+            elif reason_class == _reason_taxonomy.NOT_APPLICABLE_BY_STRUCTURE:
+                # R-0915-119, and the prefix's own docstring is the argument:
+                # "the former examined a typed subject and decided N/A, while
+                # the latter examined no subject". A structural absence
+                # EXAMINED a typed subject — it enumerated the population and
+                # states how many members it walked — so it belongs on the
+                # executed-N/A side, not in the vacuous bucket.
+                #
+                # THE CLASS KEEPS ITS OWN NAME. Collapsing it into
+                # VACUOUS_PASS lost the one thing R-0915-119 requires be
+                # published, and `test_issue515_skip_reaches_vacuous_tier`
+                # caught it: the step row said "vacuous: ... input not
+                # applicable" over a checker that had enumerated 1 file and
+                # reported exactly what it found.
+                verdict = "NOT_APPLICABLE"
+                out = (f"{_EXECUTED_DECLARED_NA_HINT_PREFIX}{cmd_str} — "
+                       f"reason_class="
+                       f"{_reason_taxonomy.NOT_APPLICABLE_BY_STRUCTURE}; "
+                       f"{report_message or ''}".rstrip(" ;"))
             else:
                 verdict = "VACUOUS_PASS"
                 # Downstream aggregation treats everything after the prefix
@@ -3469,6 +3488,16 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
                             project, report, cmd_str)):
                     verdict = "NOT_APPLICABLE"
                     out = f"{_EXECUTED_DECLARED_NA_HINT_PREFIX}{cmd_str}"
+                elif (reason_class
+                      == _reason_taxonomy.NOT_APPLICABLE_BY_STRUCTURE):
+                    # R-0915-119 — the SAME decision at the ledger door, so
+                    # the ledger row and the step tier cannot disagree about
+                    # one gate's own report.
+                    verdict = "NOT_APPLICABLE"
+                    out = (f"{_EXECUTED_DECLARED_NA_HINT_PREFIX}{cmd_str} — "
+                           f"reason_class="
+                           f"{_reason_taxonomy.NOT_APPLICABLE_BY_STRUCTURE}; "
+                           f"{report_message or ''}".rstrip(" ;"))
                 else:
                     verdict = "VACUOUS_PASS"
             else:
@@ -14677,11 +14706,27 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
                 h[len(_EXECUTED_DECLARED_NA_HINT_PREFIX):]
                 for h in executed_declared_na_hints]
             for h in executed_declared_na_hints:
-                result.reasons.append(
-                    "DESIGN-DECLARED-N/A (gate executed; typed design "
-                    "declaration was examined, so this is not empty-scan "
-                    "vacuity): "
-                    f"{h[len(_EXECUTED_DECLARED_NA_HINT_PREFIX):]}")
+                payload = h[len(_EXECUTED_DECLARED_NA_HINT_PREFIX):]
+                # R-0915-119 — TWO WAYS TO BE AN EXECUTED N/A, AND THEY MUST
+                # NOT BORROW EACH OTHER'S SENTENCE. Both examined a typed
+                # subject and decided, which is why they share the tier; what
+                # they examined is different, and saying "typed design
+                # declaration was examined" over a checker that ENUMERATED
+                # THE RTL would be a false account of its evidence. The class
+                # names itself in the payload, so the row names it too.
+                if (_reason_taxonomy.NOT_APPLICABLE_BY_STRUCTURE
+                        in payload):
+                    result.reasons.append(
+                        f"{_reason_taxonomy.NOT_APPLICABLE_BY_STRUCTURE} "
+                        f"(gate executed; it ENUMERATED its subject "
+                        f"population and found none, so this is neither an "
+                        f"empty scan nor a design declaration): {payload}")
+                else:
+                    result.reasons.append(
+                        "DESIGN-DECLARED-N/A (gate executed; typed design "
+                        "declaration was examined, so this is not empty-scan "
+                        "vacuity): "
+                        f"{payload}")
         # WHATEVER TIER WAS CHOSEN, A WAIVER THAT LOST THE TIER RACE IS STILL
         # SAID. `waiver_hints` is held out of `non_hint_reasons` above so a
         # PASS_WITH_WAIVERS gate cannot become a reason a step FAILED — and it
