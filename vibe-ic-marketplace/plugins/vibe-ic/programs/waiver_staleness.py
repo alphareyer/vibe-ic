@@ -69,6 +69,39 @@ DID_NOT_RUN_STATUSES = frozenset({
     "UNAVAILABLE", "TOOL_ABSENT",
 })
 
+#: Statuses that are NEITHER. They do not assert the step ran, and they do not
+#: assert it did not; they record that NO MEASUREMENT WAS TAKEN. The tri-state
+#: this module already returns has a slot for exactly that — `None`, "no
+#: evidence at all" — and until now nothing reached it by this route.
+#:
+#: WHY THIS IS A SEPARATE SET AND NOT A FEW MORE ENTRIES ABOVE. The set above
+#: says, in its own words, that its members "mean the step DID NOT actually
+#: execute". `NOT_MEASURED` does not mean that. Putting it there would make this
+#: guard ASSERT a did-not-run it cannot support, which is the same
+#: credit-a-silence error one direction over — and the reason `tapeout_precheck`
+#: refuses to write NOT_APPLICABLE for a PDK it could not determine.
+#:
+#: MEASURED on the spm runs (8HD-4, `_lane_icspm5`), one design, two runs, the
+#: same three steps, and opposite outcomes:
+#:
+#:   run8   qsf_gen SKIP            fpga_compile SKIP            fpga_burn SKIP
+#:   run13  qsf_gen NOT_APPLICABLE  fpga_compile NOT_MEASURED    fpga_burn NOT_MEASURED
+#:                                  (reason_class=input_absent)
+#:
+#: run8's statuses are all in the set above, so its FPGA waiver held. run13's
+#: `NOT_MEASURED` was not in any set, so the first branch below treated it as
+#: "positive execution evidence — decisive" and the waiver was REFUSED as stale
+#: on every run: "step 'fpga_compile' actually EXECUTED in this run
+#: (status='NOT_MEASURED')" — about a step whose own reason says its INPUT WAS
+#: ABSENT, i.e. it could not start.
+#:
+#: Scoped to what was measured. `NOT_DETERMINED` has the same shape by argument,
+#: but no run in front of me emits it for a waived step, so it is not added on
+#: reasoning alone.
+NO_EXECUTION_EVIDENCE_STATUSES = frozenset({
+    "NOT_MEASURED",
+})
+
 #: Every plausible phase-report location. The runners have rotated the
 #: canonical layout across releases; all are read so the guard cannot be
 #: defeated by a layout change.
@@ -137,7 +170,14 @@ def step_execution_status(project: Path, step_name: str) -> Optional[str]:
     for _p, name, status in _iter_report_steps(project):
         if not _names_match(step_name, name):
             continue
-        if status.upper() not in DID_NOT_RUN_STATUSES:
+        up = status.upper()
+        if up in NO_EXECUTION_EVIDENCE_STATUSES:
+            # Neither decisive nor did-not-run. Keep scanning: another report
+            # may carry real evidence either way, and only if none does is the
+            # honest answer "no evidence". Deliberately does NOT set `seen`,
+            # which is the did-not-run carrier.
+            continue
+        if up not in DID_NOT_RUN_STATUSES:
             return status          # positive execution evidence — decisive
         seen = status
     return seen
@@ -150,7 +190,10 @@ def step_executed(project: Path, step_name: str) -> Optional[bool]:
     status = step_execution_status(project, step_name)
     if status is None:
         return None
-    return status.upper() not in DID_NOT_RUN_STATUSES
+    up = status.upper()
+    if up in NO_EXECUTION_EVIDENCE_STATUSES:
+        return None
+    return up not in DID_NOT_RUN_STATUSES
 
 
 # ---------------------------------------------------------------------------
