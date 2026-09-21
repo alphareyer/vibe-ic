@@ -76,20 +76,25 @@ def test_every_boundary_between_the_check_and_the_reroute_is_probed():
                 "after_postroute_drv_reconverge",
                 "after_postroute_antenna_reconverge",
                 "after_postroute_fill_before_pg_reconnect",
-                "before_pg_reroute"):
+                "after_pg_connect"):
         assert f'_pin_access_probe_tcl("{tag}")' in src, tag
 
 
-def test_the_last_probe_sits_INSIDE_the_reroute_block():
-    """MEASURED (int5 arm, 2026-09-21): the probe meant to be the last moment
-    before the re-route was emitted AFTER the whole PG reconnect block
-    (pnr.tcl:25412) while the re-route runs INSIDE it (PG_REROUTE_OWED at
-    :25350). The run died at 25350 and the probe never executed -- 0
-    occurrences in the log. A last-moment check one block too late measures
-    nothing. int6, with it moved, read `before_pg_reroute no_access=0`."""
+def test_the_last_probe_reports_the_state_after_the_connect():
+    """R-0915-114(a) DELETED the re-route this probe used to precede.
+
+    It was moved inside the PG block because the version emitted after the
+    whole block never executed (int5: 0 occurrences; the run died at the
+    re-route). int6 then read it `before_pg_reroute no_access=0`, which is
+    what proved no placement takes the pin -- and that reading is why the
+    re-route is gone. With nothing left to precede, the probe is retagged for
+    what it now measures: the state after the connect, the last reading this
+    block takes.
+    """
     src = (Path(__file__).resolve().parents[1]
            / "phase3_one_shot_runner.py").read_text()
-    probe = src.index('_pin_access_probe_tcl("before_pg_reroute")')
-    reroute = src.index("detailed_route -verbose 0 {*}$_vic_drc_opt", probe)
-    assert "puts" not in src[probe:reroute], \
-        "something runs between the probe and the re-route"
+    assert '_pin_access_probe_tcl("after_pg_connect")' in src
+    assert '_pin_access_probe_tcl("before_pg_reroute")' not in src
+    tcl = R._build_pg_reconnect_tcl(reroute=True)
+    assert "detailed_route -verbose" not in tcl, \
+        "there is no re-route left in this block for a probe to precede"

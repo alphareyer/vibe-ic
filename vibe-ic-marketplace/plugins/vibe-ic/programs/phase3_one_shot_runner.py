@@ -9110,35 +9110,110 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         "#       adopt script, `dbChip_destroy` + `read_db` restores the wires\n"
         "#       and then kills STA for the rest of the session ([CRITICAL\n"
         "#       ORD-2008]), and the ECO journal restores neither state.\n"
-        "if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
+        # R-0915-114(a) — THIS BLOCK CONNECTS AND CHECKS. IT DOES NOT ROUTE.
+        #
+        # MEASURED on subservient x gf180mcuD as a DIE and reproduced on spm x
+        # gf180mcuD (two ICs, one PDK family, lanes icsub2 and icspm5): this
+        # block used to answer a PG-terminal delta with a rip-and-relay of
+        # EVERY SIGNAL WIRE in the design -- `detailed_route` with no net list,
+        # and the guide wrapper global-routing every net first. That re-route
+        # is the step that fails. On subservient it dies
+        # `[ERROR DRT-1231] Pin u_core/_3245_/ZN does not have access point`;
+        # on spm's first pass it dies DRT-0206 with 99 checkConnectivity breaks
+        # of which ZERO are on a supply net -- they are SIGNAL nets it ripped
+        # and could not re-lay.
+        #
+        # AND IT WAS NEVER OWED. `_vic_pg_on_no_net`, which computes the delta,
+        # counts ONLY terminals whose sigType is POWER or GROUND, so the delta
+        # is PG-only by construction -- ties, fillers, decaps, diodes, spare
+        # cells, whose PG pins reach the rails BY ABUTMENT. And `global_connect`
+        # lays no geometry at all: MEASURED on this design's own database,
+        # 9498 PG shapes before it and 9498 after. The rails the re-route was
+        # told to let "the spacing engine see" already existed and already
+        # abutted those pins.
+        #
+        # So the work owed is a CONNECT and two CHECKS, and the checks are
+        # named refusals rather than a route:
+        #   PG_ABUTMENT_NOT_CONNECTED  a PG terminal still on no net after
+        #                              global_connect, or one whose own pin
+        #                              shape overlaps no wire of its net --
+        #                              that is PDN work (a via or stripe from
+        #                              pdngen's grid), not signal routing, and
+        #                              this step refuses it by name with the
+        #                              instance rather than routing around it.
+        #   PG_DELTA_DRC               the router's own DRV count moved away
+        #                              from what this step inherited.
+        #
+        # Signal-affecting inserts are NOT this block's business: they are
+        # routed inside their own transactional stage. Measured in the same
+        # run, `postroute_antenna_repair` drives the fork's native
+        # `repair_antennas ... -reroute` and, when that degrades, its own
+        # `detailed_route` -- see R-0915-114(b), which makes that stage answer
+        # for its own wires instead of leaving them to this one.
         "set _pg_delta [expr {$_pg_bad_before - $_pg_bad_after}]\n"
         "if {$_pg_delta <= 0} {\n"
-        "  puts \"PG_REROUTE_NOT_OWED: the re-connect changed 0 terminal(s) "
+        "  puts \"PG_CONNECT_NOT_OWED: the re-connect changed 0 terminal(s) "
         "($_pg_bad_before on no net before, $_pg_bad_after after); the routing "
         "this step inherited is kept as it is\"\n"
         "} else {\n"
-        "  puts \"PG_REROUTE_OWED: $_pg_delta terminal(s) gained a net "
-        "($_pg_bad_before -> $_pg_bad_after); re-routing so the spacing engine "
-        "sees their rails\"\n"
-        # The same guard every other `detailed_route` site carries, at THIS
-        # site: the option must be defined where it is used, including on a
-        # PnR resume that deletes the block which defined it first.
-        # R-0915-110 — THE LAST MOMENT IS HERE, INSIDE THIS BLOCK.
-        # MEASURED (int5 arm, 2026-09-21): the probe meant to be "the last
-        # moment before the re-route" was emitted AFTER the whole PG
-        # reconnect block (pnr.tcl:25412) while the re-route runs INSIDE it
-        # (PG_REROUTE_OWED at :25350). The run died at 25350 and that probe
-        # never executed -- 0 occurrences in the log. A last-moment check one
-        # block too late measures nothing.
-        + _pin_access_probe_tcl("before_pg_reroute").replace("\n", "\n  ")
-        + "  if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
-        + "  if {[catch {detailed_route -verbose 0 {*}$_vic_drc_opt} _pgrr_err]} {\n"
-        "    puts \"PG_REROUTE_FAILED: $_pgrr_err\"\n"
-        "    error \"PG_REROUTE_FAILED: $_pgrr_err -- the PG re-route rips and "
-        "re-lays every wire, so a design that survives this error is NOT "
-        "routed; this is a verdict of postroute_fill, not a note\"\n"
+        # R-0915-114(a) deleted the re-route this probe used to precede,
+        # so it is retagged for what it actually measures now: the state
+        # after the connect, which is the last reading this block takes.
+        + _pin_access_probe_tcl("after_pg_connect")
+        + "  puts \"PG_CONNECT_OWED: $_pg_delta terminal(s) gained a net "
+        "($_pg_bad_before -> $_pg_bad_after); this step connects and checks, "
+        "it does not route\"\n"
+        "}\n"
+        # (c) — a PG terminal that reaches no rail is PDN work, by name.
+        "set _pgab_bad {}\n"
+        "catch {\n"
+        "  foreach _pgab_i [[ord::get_db_block] getInsts] {\n"
+        "    foreach _pgab_t [$_pgab_i getITerms] {\n"
+        "      set _pgab_sg [[$_pgab_t getMTerm] getSigType]\n"
+        "      if {$_pgab_sg ne \"POWER\" && $_pgab_sg ne \"GROUND\"} "
+        "{ continue }\n"
+        "      set _pgab_n [$_pgab_t getNet]\n"
+        "      if {$_pgab_n eq \"NULL\"} {\n"
+        "        lappend _pgab_bad \"[$_pgab_i getName]/"
+        "[[$_pgab_t getMTerm] getName] (on no net)\"\n"
+        "        continue\n"
+        "      }\n"
+        "      set _pgab_b [$_pgab_t getBBox]\n"
+        "      set _pgab_hit 0\n"
+        "      foreach _pgab_s [$_pgab_n getSWires] {\n"
+        "        foreach _pgab_w [$_pgab_s getWires] {\n"
+        "          if {[catch {set _pgab_x0 [$_pgab_w xMin]}]} { continue }\n"
+        "          if {$_pgab_x0 <= [$_pgab_b xMax] && "
+        "[$_pgab_w xMax] >= [$_pgab_b xMin] && "
+        "[$_pgab_w yMin] <= [$_pgab_b yMax] && "
+        "[$_pgab_w yMax] >= [$_pgab_b yMin]} { set _pgab_hit 1; break }\n"
+        "        }\n"
+        "        if {$_pgab_hit} { break }\n"
+        "      }\n"
+        "      if {!$_pgab_hit} {\n"
+        "        lappend _pgab_bad \"[$_pgab_i getName]/"
+        "[[$_pgab_t getMTerm] getName] (no rail overlap)\"\n"
+        "      }\n"
+        "    }\n"
         "  }\n"
-        "  puts \"PG_REROUTE_DONE\"\n"
+        "}\n"
+        "if {[llength $_pgab_bad] > 0} {\n"
+        "  error \"PG_ABUTMENT_NOT_CONNECTED: [llength $_pgab_bad] PG "
+        "terminal(s) reach no rail of their own net: "
+        "[join [lrange $_pgab_bad 0 7] {, }] — that is PDN work (a via or "
+        "stripe from pdngen's grid), not signal routing, and this step will "
+        "not route around it\"\n"
+        "}\n"
+        "puts \"PG_ABUTMENT_OK: every PG terminal reaches a rail of its own "
+        "net\"\n"
+        # (2) — the router's own DRV count must not have moved.
+        "set _pgdrc -1\n"
+        "catch { set _pgdrc [detailed_route_num_drvs] }\n"
+        "puts \"PG_DELTA_DRC_COUNT: $_pgdrc\"\n"
+        "if {$_pgdrc > 0} {\n"
+        "  error \"PG_DELTA_DRC: the router reports $_pgdrc DRV(s) after the "
+        "PG re-connect; this step connects and checks, so a non-zero count is "
+        "its verdict, not a note\"\n"
         "}\n") if reroute else ""
     return (
         "# === PG global-connect RE-APPLY + audit (post-instance-creation) ===\n"
@@ -25053,10 +25128,23 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "        break\n"
         "      }\n"
         "      # INCREMENTAL reroute — re-routes ONLY the dirty nets.\n"
+        # R-0915-114(b) — THIS STAGE ANSWERS FOR ITS OWN WIRES.
+        # MEASURED (int6, subservient x gf180mcuD as a DIE): the native
+        # `repair_antennas -reroute` threw DRT-0206, this fallback route then
+        # threw `REPAIR_ANTENNA_REROUTE_NONFATAL: DRT-1231` TWICE, both were
+        # swallowed as notes, and the diodes this stage had just inserted were
+        # left for the PG reconnect block's whole-design rip-and-relay to lay.
+        # R-0915-114(a) deletes that re-route, so a swallowed failure here is
+        # now a stage that inserted cells and never wired them. It is a
+        # VERDICT of this stage, named, with the count of what it inserted.
         "      if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
         "      if {[catch {detailed_route -verbose 0 {*}$_vic_drc_opt} _ra_dr]} {\n"
-        "        puts \"REPAIR_ANTENNA_REROUTE_NONFATAL: $_ra_dr\"\n"
-        "        set _ant_refused \"REPAIR_ANTENNA_REROUTE_NONFATAL: $_ra_dr\"\n"
+        "        puts \"ANTENNA_REROUTE_FAILED: $_ra_dr\"\n"
+        "        error \"ANTENNA_REROUTE_FAILED: $_ra_dr -- this stage "
+        "inserted diodes and could not lay their wires; no other step routes "
+        "them (R-0915-114(a) removed the PG block's whole-design re-route), so "
+        "a design that continues past this is NOT routed\"\n"
+        "        set _ant_refused \"ANTENNA_REROUTE_FAILED: $_ra_dr\"\n"
         "        break\n"
         "      }\n"
         "    }\n"
