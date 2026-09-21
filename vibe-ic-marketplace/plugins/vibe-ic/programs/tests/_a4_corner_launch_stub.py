@@ -33,7 +33,38 @@ def stub_independent_corner_launch(monkeypatch, sweep, fake_docker) -> None:
     """`sweep` is the imported `analog_real_corner_sweep`; `fake_docker` is the
     `(container, cmd, timeout=...) -> CompletedProcess` fake already installed
     as its `_docker`."""
-    monkeypatch.setenv("VIBEIC_ANALOG_CORNER_MEMORY", "32g")
+    # THE ADMISSION ARITHMETIC MUST NOT DEPEND ON THE MACHINE.  Measured
+    # 2026-09-21: `AdmissionLedger.plan` computes
+    #
+    #     budget      = physical_ram_bytes() - headroom      (headroom 16GiB)
+    #     concurrency = (budget - accounted) // reservation
+    #
+    # and `physical_ram_bytes()` is `SC_PHYS_PAGES * SC_PAGE_SIZE` -- the
+    # MACHINE's RAM, which a container does not change.  A declared 32g
+    # reservation is a large share of a mid-size host, so on a machine where
+    # `RAM - 16GiB < 2 * 32g` the sweep really executes ONE corner and derives
+    # the other eight, and the A4 gate then refuses -- correctly:
+    #
+    #     A4_PVT_SWEEP_NOT_MEASURED: ... `full_pvt_sweep_executed: False`;
+    #     corners_executed 1/9
+    #
+    # REPRODUCED ON THE HOST, python 3.10, NO CONTAINER, by changing nothing
+    # but the budget: `VIBEIC_ANALOG_CORNER_HEADROOM=100GiB` turns 2 passed
+    # into 2 failed with exactly that message, on a 125 GiB host.  So the red
+    # reported as "host passes, image fails" is neither about the image nor
+    # about the interpreter: it is about how much RAM the machine has.
+    #
+    # Nothing here is faked away.  This sweep launches NO container and runs NO
+    # ngspice -- `_corner_image` and `_aca.launch` are both stubbed below -- so
+    # the reservation is a fiction either way, and its only job is to let the
+    # admission run.  Declaring a SMALL one, and declaring the headroom instead
+    # of inheriting it, makes the admission's answer a property of this test
+    # rather than of the host it happens to run on.  The admission still
+    # executes, still plans, and can still refuse; its REAL numbers are
+    # measured by `test_issue2236_aggregate_ram_admission.py` against fakes of
+    # its own, exactly as this file's docstring says.
+    monkeypatch.setenv("VIBEIC_ANALOG_CORNER_MEMORY", "64m")
+    monkeypatch.setenv("VIBEIC_ANALOG_CORNER_HEADROOM", "1MiB")
     monkeypatch.setenv("VIBEIC_ANALOG_CORNER_ADMISSION_STATE_DIR",
                        tempfile.mkdtemp(prefix="corner-admission-"))
     monkeypatch.setattr(sweep, "_corner_image", lambda container: "fake-image")
