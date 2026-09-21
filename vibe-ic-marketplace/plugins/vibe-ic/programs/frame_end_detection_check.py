@@ -79,6 +79,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import _structural_absence as _sa  # R-0915-119
 from gate_utils import find_rtl_files as _rtl_files
 from gate_utils import read_text as _read
 
@@ -217,6 +218,10 @@ def inspect(project: Path) -> tuple[list[Finding], dict]:
 
     if not any_rx:
         summary["skipped_reason"] = "no rx_* modules found"
+        # R-0915-119 — enumerated and empty, not unmeasured.
+        _sa.attach(summary, _sa.absence(
+            "RTL file(s) staged for this design", len(rtl_files),
+            detail="no receive-path module in any of them"))
     return findings, summary
 
 

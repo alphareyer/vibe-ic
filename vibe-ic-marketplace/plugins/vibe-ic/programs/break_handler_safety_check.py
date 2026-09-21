@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import _structural_absence as _sa  # R-0915-119
 import re
 import sys
 from dataclasses import dataclass, field, asdict
@@ -140,8 +141,14 @@ def audit(rtl_dir: Path) -> AuditResult:
             break
 
     if not has_break:
-        result.summary = {"skipped": True, "reason": "no_break_signals",
-                          "files_scanned": scanned}
+        # R-0915-119 — every staged source was read and searched; this design
+        # declares no break signal, so the question is ANSWERED.
+        result.summary = _sa.attach(
+            {"skipped": True, "reason": "no_break_signals",
+             "files_scanned": scanned},
+            _sa.absence("RTL source file(s) under the staged rtl directory",
+                        len(scanned), names=scanned,
+                        detail="no break signal in any of them"))
         result.findings.append(Finding(
             "SKIP", "INFO", "No break signals detected — not a break-based protocol.",
         ))

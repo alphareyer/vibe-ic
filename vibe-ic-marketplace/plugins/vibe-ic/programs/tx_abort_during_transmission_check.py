@@ -57,6 +57,7 @@ if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
 
 import argparse
 import json
+import _structural_absence as _sa  # R-0915-119
 import re
 import sys
 from dataclasses import dataclass, field, asdict
@@ -119,7 +120,14 @@ def audit(rtl_dir: Path) -> AuditResult:
     tx_files = [f for f in files if _is_tx_module(f)]
 
     if not tx_files:
-        result.summary = {"skipped": True, "reason": "no_tx_modules"}
+        # R-0915-119 — every staged source was opened and classified; this
+        # design has no transmit path, so the question is ANSWERED.
+        result.summary = _sa.attach(
+            {"skipped": True, "reason": "no_tx_modules",
+             "files_scanned": [f.name for f in files]},
+            _sa.absence("RTL source file(s) under the staged rtl directory",
+                        len(files),
+                        detail="none of them is a transmit-path module"))
         result.findings.append(Finding(
             "SKIP", "INFO", "No TX modules detected.",
         ))

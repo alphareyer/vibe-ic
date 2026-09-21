@@ -97,6 +97,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import _structural_absence as _sa  # R-0915-119
 from gate_utils import find_modules, find_rtl_files as _rtl_files
 from gate_utils import parse_io_ports, read_text as _read
 
@@ -267,6 +268,11 @@ def inspect(project: Path) -> tuple[list[Finding], dict]:
             "no inferred BRAM / megafunction wrappers with registered "
             "outputs detected"
         )
+        # R-0915-119 — the RTL was read and every module walked; this design
+        # infers no BRAM at all.
+        _sa.attach(summary, _sa.absence(
+            "RTL file(s) staged for this design", len(rtl_files),
+            detail="no inferred BRAM / megafunction wrapper in any of them"))
         return findings, summary
 
     l6_wait = _l6_wait_states(project)

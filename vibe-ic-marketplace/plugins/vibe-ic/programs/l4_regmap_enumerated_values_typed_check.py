@@ -82,6 +82,7 @@ chars).
 """
 from __future__ import annotations
 
+import _structural_absence as _sa  # R-0915-119
 import json
 import re
 import sys
@@ -424,6 +425,22 @@ def main() -> int:
             f"none of the {len(pairs)} register field(s) L4 carries is "
             f"multi-bit AND enum-eligible, so the typing rule was never "
             f"applied")
+        # R-0915-119, and guard (ii) is the whole of the distinction here.
+        #
+        #   pairs NON-EMPTY — the fields WERE enumerated and none of them is
+        #     multi-bit enum-eligible. The subject class is structurally
+        #     absent from this design and the question is ANSWERED.
+        #   pairs EMPTY — nothing was enumerated. That is a zero denominator
+        #     and it STAYS one: an empty population establishes nothing, and
+        #     this is exactly the case the ruling singles out.
+        if pairs:
+            print(_sa.sentence(
+                _sa.absence("register field(s) L4 carries", len(pairs),
+                            detail="none of them is multi-bit and "
+                                   "enum-eligible"),
+                "l4_regmap_enumerated_values_typed_check"))
+            print(f"  {_d.line()}")
+            return 2
         print("[SKIP] l4_regmap_enumerated_values_typed_check: "
               f"no multi-bit enum-eligible fields detected — {_d.line()}")
         return 2

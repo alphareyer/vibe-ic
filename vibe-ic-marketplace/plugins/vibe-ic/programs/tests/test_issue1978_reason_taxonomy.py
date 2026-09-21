@@ -24,11 +24,22 @@ def _load_flow():
     return mod
 
 
+import _structural_absence as _sa  # R-0915-119
+
 F = _load_flow()
 
 
 @pytest.fixture
 def one_record_per_reason_class():
+    # R-0915-119 — the evidence a structural absence must carry. Every other
+    # class in this census is established by its own token; this one is
+    # established by the ENUMERATION, so its representative carries one. A row
+    # without it is downgraded to EXECUTION_ERROR by the guard, which is the
+    # behaviour `test_a_structural_row_without_its_enumeration_is_downgraded`
+    # below pins.
+    _structural_ev = {
+        _sa.EVIDENCE_KEY: _sa.absence(
+            "RTL file(s) staged for this design", 3)}
     cases = [
         (T.DESIGN_DECLARED_NA, "SKIP", "the design declares no command protocol"),
         (T.CAPABILITY_ABSENT, "SKIP", "the required simulator is absent"),
@@ -37,15 +48,37 @@ def one_record_per_reason_class():
         # that produces that subject has not run yet in this flow.
         (T.ASKED_BEFORE_PRODUCER, "SKIP",
          "no KLayout DRC artefacts found; phase-3 DRC has not run"),
+        # R-0915-119: the checker ENUMERATED its subject population and it is
+        # empty. Its representative is added here because this census's own
+        # contract is that EVERY class has one — a class with no row would be
+        # a class nothing exercises.
+        (T.NOT_APPLICABLE_BY_STRUCTURE, "SKIP",
+         "enumerated 3 RTL file(s) staged for this design and found 0"),
         (T.BLOCKED_BY_UPSTREAM, "BLOCKED", "the producing step has not run"),
         (T.EXECUTION_ERROR, "INCOMPLETE", "the caller supplied the wrong path"),
         (T.ZERO_DENOMINATOR, "INCOMPLETE", "0 of 13 documents were examined"),
     ]
     return [
-        F._p0_gate_record(f"reason_{i}_check", verdict, message,
-                          reason_class=reason_class)
+        F._p0_gate_record(
+            f"reason_{i}_check", verdict, message,
+            evidence=(dict(_structural_ev)
+                      if reason_class == T.NOT_APPLICABLE_BY_STRUCTURE
+                      else None),
+            reason_class=reason_class)
         for i, (reason_class, verdict, message) in enumerate(cases)
     ]
+
+
+def test_a_structural_row_without_its_enumeration_is_downgraded():
+    """R-0915-119 guard (i), at the record constructor: the class token alone
+    does not make the claim, so a row that carries no enumeration is booked
+    EXECUTION_ERROR and stays INCOMPLETE."""
+    bare = F._p0_gate_record(
+        "bare_structural_check", "SKIP",
+        "enumerated 3 RTL file(s) staged for this design and found 0",
+        reason_class=T.NOT_APPLICABLE_BY_STRUCTURE)
+    assert bare["reason_class"] == T.EXECUTION_ERROR
+    assert bare["verdict"] == "INCOMPLETE"
 
 
 def test_every_reason_class_is_represented_and_machine_readable(

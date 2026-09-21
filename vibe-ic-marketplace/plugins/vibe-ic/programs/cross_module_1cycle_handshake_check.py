@@ -79,6 +79,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import _structural_absence as _sa  # R-0915-119
 from gate_utils import find_modules, find_rtl_files as _rtl_files
 from gate_utils import parse_io_ports, read_text as _read
 
@@ -268,6 +269,12 @@ def inspect(project: Path) -> tuple[list[Finding], dict]:
         summary["skipped_reason"] = (
             "no cross-module 1-cycle pulse races detected"
         )
+        # R-0915-119 — the modules WERE parsed and paired; no such race
+        # exists in this design.
+        _sa.attach(summary, _sa.absence(
+            "module(s) parsed from the staged RTL",
+            max(len(summary.get("modules") or []), 1),
+            detail="no cross-module single-cycle pulse pair among them"))
 
     return findings, summary
 

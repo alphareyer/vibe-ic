@@ -78,6 +78,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import _structural_absence as _sa  # R-0915-119
 from gate_utils import find_rtl_files as _rtl_files
 from gate_utils import read_text as _read
 
@@ -207,6 +208,13 @@ def inspect(project: Path) -> tuple[list[Finding], dict]:
             ))
     if not any_arb:
         summary["skipped_reason"] = "no arbitration patterns found"
+        # R-0915-119: this is not an error and not an incomplete. The RTL was
+        # read and walked; the design simply has no arbiter, so the question
+        # is ANSWERED. The enumeration travels with the claim.
+        _sa.attach(summary, _sa.absence(
+            "RTL file(s) staged for this design", len(rtl_files),
+            names=[str(f.relative_to(project)) for f in rtl_files],
+            detail="no request/grant arbitration pattern in any of them"))
     return findings, summary
 
 
