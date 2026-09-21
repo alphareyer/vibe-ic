@@ -37,7 +37,7 @@ def test_source_namespace():
  assert 'reset_value' not in row
 
 def test_original_partial_contract():
- text=(Path(__file__).resolve().parents[2]/'tests/phase1_fixtures/scalar_reset_binding_local/L4_command_protocol.md').read_text()
+ text=(Path(__file__).resolve().parent/'fixtures/phase1_local/scalar_reset_binding_local/L4_command_protocol.md').read_text()
  row={'name':'CTRL','address_int':8}
  D._v1_6_503_lift_scalar_reset_from_prose([row],{'L4_command_protocol.md':text})
  assert 'reset_value' not in row

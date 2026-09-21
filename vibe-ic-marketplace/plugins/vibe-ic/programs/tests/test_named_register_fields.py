@@ -45,7 +45,7 @@ def test_ambiguity_does_not_bind(tmp_path,text):
  assert not named(rows['STATUS'])
 
 def test_original_documented_bits(tmp_path):
- path=Path(__file__).resolve().parents[2]/'tests/phase1_fixtures/named_register_fields_local/L5_register_map.md'
+ path=Path(__file__).resolve().parent/'fixtures/phase1_local/named_register_fields_local/L5_register_map.md'
  rows=generate(tmp_path,path.read_text())
  assert named(rows['CTRL'])=={'INIT':(0,0),'NEXT':(1,1),'MODE':(2,2)}
  assert named(rows['STATUS'])=={'READY':(0,0),'VALID':(1,1)}
