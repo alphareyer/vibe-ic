@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import _path_layout as _pl  # noqa: E402
 import _sim_results_bridge as _srb  # noqa: E402
 import _l10_execution as _l10x  # R-0915-87(2): the ONE execution reader  # noqa: E402
+import l10_coverage_goal_classify as _cgc  # R-0915-113(4)  # noqa: E402
 
 # The capability-gap token retained on a connectivity-PASS evidence record.
 # A chip-AGNOSTIC capability identifier, NOT a chip/vendor/SKU literal.
@@ -397,6 +398,25 @@ def _declared_l10_case_ids(project: Path) -> "list[str]":
     # still DECLARED and still reported, under its own key.
     rows, _design_na = split_design_declared_na(
         rows, design_selected_options(project))
+    # R-0915-113(4) — a COVERAGE GOAL is not a functional vector.
+    #
+    # MEASURED, sha256 x sky130A, FRONT DOOR, run23 on main 751bed176: this
+    # gate read "only 6 of 11 declared L10 case(s) EXECUTED their own oracle"
+    # and named `random_message_...`, `message_length`, `protocol` and
+    # `mode_switch` among the five. All four declare `kind: coverage_goal`
+    # and state an acceptance PERCENTAGE ("100% PASS") over a named SCOPE,
+    # not a stimulus and an expected value. Nothing can execute an oracle for
+    # an acceptance percentage, so the comparison demanded four things that
+    # can never happen -- the same shape `_split_executable` already closed
+    # for `verification_checklist` rows, one kind later.
+    #
+    # They are still DECLARED, still REPORTED, and NEVER marked executed.
+    # They move to the population that HAS an instrument for them -- the
+    # run's own coverage arm -- and `_coverage_goal_summary` gives each one a
+    # verdict by the NUMBER, or NOT_MEASURED with its scope quoted by name.
+    # NOT_MEASURED is not a pass and this gate still refuses on it, so no row
+    # is satisfied by being un-instrumented.
+    rows, _goals = _cgc.partition(rows)
     for row in rows:
         if isinstance(row, dict):
             name = row.get("name") or row.get("id") or row.get("case")
@@ -462,6 +482,49 @@ def _oracles_that_actually_ran(project: Path) -> dict:
 
 
 
+#: Where the run's coverage arm publishes the numbers a goal is measured
+#: against. Read-only, and absent is NOT_MEASURED, never a pass.
+_COVERAGE_TOTALS_RELS = (
+    "reports/phase2/coverage/coverage_verilator.json",
+    "reports/phase2/coverage/coverage_actual.json",
+)
+
+
+def _coverage_totals(project: Path) -> "tuple[dict, str]":
+    """`(totals, source)` from the run's own coverage arm, or `({}, why)`."""
+    for rel in _COVERAGE_TOTALS_RELS:
+        f = Path(project) / rel
+        if not f.is_file():
+            continue
+        try:
+            doc = json.loads(f.read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue
+        totals = doc.get("totals") if isinstance(doc, dict) else None
+        if isinstance(totals, dict) and totals:
+            return totals, rel
+    return {}, ("the run published no coverage totals under "
+                + " or ".join(_COVERAGE_TOTALS_RELS))
+
+
+def _coverage_goal_summary(project: Path) -> dict:
+    """The COVERAGE-GOAL population and its OWN denominator.
+
+    R-0915-113(4). Separate from the executed-versus-declared comparison and
+    measured by a separate instrument, so the Step-4 record reads as two
+    populations rather than one mixed number."""
+    gd = _pl.generated_docs_dir(project)
+    rows, _process_only = _split_executable(_declared_rows(
+        gd / "L10_TEST_CASES.json", ("test_cases", "cases", "vectors")))
+    rows, _design_na = split_design_declared_na(
+        rows, design_selected_options(project))
+    _vectors, goals = _cgc.partition(rows)
+    totals, source = _coverage_totals(project)
+    summary = _cgc.measure_goals(goals, totals)
+    summary["totals_source"] = source
+    return summary
+
+
 def _oracle_execution_refusal(project: Path, transcript: str) -> "str | None":
     """The refusal a row-count PASS owes, or None when the oracles did run.
 
@@ -471,7 +534,16 @@ def _oracle_execution_refusal(project: Path, transcript: str) -> "str | None":
     at one of two doors is not a predicate.
     """
     ran = _oracles_that_actually_ran(project)
+    goals = _coverage_goal_summary(project)
+    goal_refusal = _cgc.coverage_goal_refusal(goals)
     if ran["declared_count"] == 0:
+        # R-0915-113(4) — the vector denominator being empty says nothing
+        # about the GOAL population. A design that declares only coverage
+        # goals still owes their verdict; returning None here would let an
+        # unmeasured goal ride out on the absence of vectors.
+        if goal_refusal:
+            return (f"{transcript}: this design declares no functional "
+                    f"vector, and {goal_refusal}")
         # NARROW ON PURPOSE. A design that declares no L10 case asks a
         # different question, and this guard does not answer it: the gate's own
         # denominator path already reports "0 functional tests ran for N
@@ -482,7 +554,13 @@ def _oracle_execution_refusal(project: Path, transcript: str) -> "str | None":
         # nothing to compare.
         return None
     if not ran["not_executed_count"]:
-        return None
+        # The vectors all ran. A declared coverage goal that did NOT meet its
+        # stated percentage -- or that this run had no instrument for -- is
+        # still not verified, and saying nothing here would let the goal
+        # population be satisfied by the vector population's success.
+        return (f"{transcript} is a passing transcript and every declared "
+                f"functional vector executed its own oracle, but "
+                f"{goal_refusal}") if goal_refusal else None
     named = ", ".join(f"{r['case']} [{r['state']}]"
                       for r in ran["not_executed"][:6])
     more = ran["not_executed_count"] - 6
@@ -495,6 +573,7 @@ def _oracle_execution_refusal(project: Path, transcript: str) -> "str | None":
         + f". Asked through {ran['asked_through']}"
         + ("" if ran["record_available"]
            else f"; execution record unavailable ({ran['record_reason']})")
+        + (f". Separately, {goal_refusal}" if goal_refusal else "")
     )
 
 
@@ -505,6 +584,11 @@ def _evidence_summary(project: Path) -> dict:
     They put the numbers beside this gate's functional verdict so a reader can
     see, in one record, whether the run checked anything and whether coverage
     was actually measured.
+
+    R-0915-113(4) adds the SECOND population: declared coverage goals, with
+    their own denominator, under `coverage_goals`. A reader must be able to
+    tell "6 of 7 vectors executed" from "0 of 4 goals measured" without
+    subtracting one number from another.
     """
     gd = _pl.generated_docs_dir(project)
     l10 = _list_denominator(
@@ -596,6 +680,10 @@ def _evidence_summary(project: Path) -> dict:
             **_row_kind_denominator(project),
         },
         "functional_test_denominator": functional,
+        # R-0915-113(4) — the SECOND population, with its OWN denominator.
+        # A reader must be able to tell "6 of 7 vectors executed" from "0 of
+        # 4 goals measured" without subtracting one number from another.
+        "coverage_goals": _coverage_goal_summary(project),
         "coverage": coverage,
         "program_first": "professional_tb_gen",
         "expert_fallback": "testbench-gen",
