@@ -8096,6 +8096,28 @@ def _completion_audit_written(project: Path) -> bool:
 #:     FINAL_REPORT.md or flow-compliance JSON in this run)" — it books that
 #:     for the absence of the completion audit's OWN record, which the audit
 #:     it is a component of writes only after it passes.
+def _spef_producer_ran(project: Path) -> bool:
+    """Was step 22 (Parasitic Extraction, RC -> SPEF) reachable in this run?
+
+    NOT "did a SPEF appear" — that is the SUBJECT, and asking it here would make
+    the predicate say "the producer has not run" of a producer that ran and
+    FAILED, which is the opposite finding. The discriminator is step 22's own
+    declared required_input, `phase3/stage3/pnr/routed.def` from step 21: absent,
+    the run never reached the extraction step at all; present, the step was
+    reachable, so an absent SPEF is a real upstream failure and keeps whatever
+    non-green verdict the gate gave it.
+
+    MEASURED on subservient x gf180mcuD, both directions on real runs:
+      r48 (`c24_proj`, phase-2 only)  routed.def absent, 0 *.spef -> asked early
+      r46 (`c22_proj`, full phase 3)  routed.def present, 1 *.spef -> the gate
+                                                                     decides
+    The path comes from `_path_layout`, the same module
+    `spice_correlation_check` reads its extracted dir from, so the gate and this
+    predicate cannot drift about where phase-3 parasitics live.
+    """
+    return (_pl.pnr_dir(project) / "routed.def").is_file()
+
+
 _GATE_SUBJECT_PRODUCED_BY: Dict[str, Tuple[str, Any]] = {
     "klayout_deck_mode_check": (
         "phase-3 DRC (reports/phase3/drc*.json)", _phase3_drc_ran),
@@ -8103,6 +8125,26 @@ _GATE_SUBJECT_PRODUCED_BY: Dict[str, Tuple[str, Any]] = {
         "the completion audit itself "
         "(reports/audit/phase23_completion_audit.json)",
         _completion_audit_written),
+    # R-0915-101 follow-up (lane icslot5). `spice_correlation_check` correlates
+    # post-layout SPICE against the extracted parasitics, so its subject is step
+    # 22's `*.spef` and step 23's STA reports — BOTH phase-3 artefacts. The P0
+    # umbrella runs in the phase-2 audit too, where neither can exist yet, so on
+    # every phase-2 run the gate self-skipped `no_spef` and the prose recogniser
+    # booked BLOCKED_BY_UPSTREAM — not skip-eligible — so a question asked before
+    # its answer could exist made P0 non-green on every digital design at once.
+    # MEASURED on r48: `BLOCKED: spice_correlation_check —
+    # reason_class=BLOCKED_BY_UPSTREAM: examined nothing (reason: no_spef)`.
+    #
+    # ASKED EARLY, NOT UNANSWERED — and the gate is still INVOKED, so the row
+    # stays in P0's population and stays visible as a disclosed skip. Dropping it
+    # from the invoked set instead would make `_structural_measurement_line`
+    # report PARTIAL ("what those N audit is UNCHECKED — not clean"), and
+    # shrinking `registered` to hide that would be narrowing a population to
+    # green a row.
+    "spice_correlation_check": (
+        "step 22 Parasitic Extraction (RC -> SPEF), whose own required_input is "
+        "phase3/stage3/pnr/routed.def from step 21",
+        _spef_producer_ran),
 }
 
 

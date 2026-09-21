@@ -23,9 +23,17 @@ correlate with the STA timing model. Three verification axes:
      (LDO, PLL, OSC, bandgap, ADC, DAC, comparator), verifies that each has
      a corresponding SPICE simulation result.
 
+THE STEP NUMBERS ABOVE WERE WRONG UNTIL 2026-09-21 (lane icslot5) and are
+corrected here because they misdirect a reader: they said 20 and 21, but in
+the canonical flow step 20 is post-CTS hold fixing and 21 is routing. The
+SPEF this gate reads is step 22's declared required_output and the STA
+reports are step 23's. Both are phase-3, which is the whole reason the P0
+umbrella must not treat this gate's phase-2 self-skip as an upstream
+failure — see `_GATE_SUBJECT_PRODUCED_BY['spice_correlation_check']`.
+
 Self-skips when:
-  - No extracted parasitics (SPEF) exist (Step 20 not reached)
-  - No STA results exist (Step 21 not reached)
+  - No extracted parasitics (SPEF) exist (step 22 not reached)
+  - No STA results exist (step 23 not reached)
 
 Usage:
     python3 spice_correlation_check.py <project_dir>
@@ -35,8 +43,8 @@ Exit codes:
     0 = PASS: SPEF + STA both exist and the SPICE evidence correlates with
         the timing model
     1 = FAIL (correlation mismatch or missing analog SPICE)
-    2 = VACUOUS: nothing was examined — the design has not reached Step 20
-        (no SPEF) or Step 21 (no STA), so there is no post-layout timing to
+    2 = VACUOUS: nothing was examined — the design has not reached step 22
+        (no SPEF) or step 23 (no STA), so there is no post-layout timing to
         correlate against. #521: both used to be rc 0, on 197 of the 200
         tracked project roots. Note that the DIFFERENT case — SPEF and STA
         both present but no SPICE run at all — is deliberately NOT vacuous:
@@ -3511,7 +3519,8 @@ def run_audit(project: Path, run_spice: bool = True,
         result.findings.append(Finding(
             rule="SKIP_NO_SPEF",
             severity="INFO",
-            message="No SPEF files found (Step 20 not reached); skipping SPICE gate",
+            message="No SPEF files found (step 22 Parasitic Extraction not "
+                    "reached); skipping SPICE gate",
         ))
         result.summary = {"skipped": True, "reason": "no_spef"}
         return result
@@ -3520,7 +3529,8 @@ def run_audit(project: Path, run_spice: bool = True,
         result.findings.append(Finding(
             rule="SKIP_NO_STA",
             severity="INFO",
-            message="No STA reports found (Step 21 not reached); skipping SPICE gate",
+            message="No STA reports found (step 23 post-route STA not "
+                    "reached); skipping SPICE gate",
         ))
         result.summary = {"skipped": True, "reason": "no_sta"}
         return result
