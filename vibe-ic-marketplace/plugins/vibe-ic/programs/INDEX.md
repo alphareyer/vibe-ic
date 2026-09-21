@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1331
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1331)
+- **Total programs (excluding helpers / shims):** 1332
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1332)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1322 |
+| `any` | 1323 |
 
 ## Alphabetical listing
 
@@ -1040,6 +1040,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `reset_clock_variant_alias` | any | — | Reset/clock spelling proposals and explicit public-interface adaptation. |
 | `reset_dependency_check` | any | — | deterministic compliance check derived from <chip-class> v040 debug. |
 | `reset_discipline_check` | any | — | deterministic reset-discipline lint. |
+| `reset_invariant_oracle_tb_gen` | any | — | RESET-INVARIANT oracle TBs — the family beside the boot-latency one. |
 | `residual_combinational_synth` | any | — | deterministic spec->RTL for the RESIDUAL "other" cluster of tiny combinational VerilogEval problems: the grab-bag left after the named st... |
 | `residual_recognizer` | any | — | routing recognizers for the genuinely-PROSE and VISION element types (the ones with no clean deterministic extractor). Each detects that ... |
 | `response_latency_observability_check` | any | — | LL-5. |
@@ -1403,7 +1404,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1322 programs)
+### `any` (1323 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2414,6 +2415,7 @@ _(no programs in this group)_
 - `reset_clock_variant_alias` — Reset/clock spelling proposals and explicit public-interface adaptation.
 - `reset_dependency_check` — deterministic compliance check derived from <chip-class> v040 debug.
 - `reset_discipline_check` — deterministic reset-discipline lint.
+- `reset_invariant_oracle_tb_gen` — RESET-INVARIANT oracle TBs — the family beside the boot-latency one.
 - `residual_combinational_synth` — deterministic spec->RTL for the RESIDUAL "other" cluster of tiny combinational VerilogEval problems: the grab-bag left after the named st...
 - `residual_recognizer` — routing recognizers for the genuinely-PROSE and VISION element types (the ones with no clean deterministic extractor). Each detects that ...
 - `response_latency_observability_check` — LL-5.

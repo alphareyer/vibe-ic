@@ -793,6 +793,54 @@ def _emit_case_boot_latency_oracle(project: Path, case: dict,
 
 
 
+def _emit_case_reset_invariant_oracle(project: Path, case: dict,
+                                      dut_module: str,
+                                      ports: "List[Tuple[str, str, str]]",
+                                      out_dir: Path,
+                                      report: "dict | None") -> "Path | None":
+    """R-0915-102(2) companion — emit a REAL RESET-INVARIANT oracle TB.
+
+    The boot-latency family owns "within N cycles of reset RELEASE"; this one
+    owns the two invariants stated about reset ASSERT: stored content held
+    across an assert, and a reset GLITCH not racing a bus access. MEASURED on
+    subservient x gf180mcuD, front door, r48: those two cases needed no
+    delivered program at all and fell to the substance floor purely because no
+    emitter owned their family -- which is also why the single case that DID
+    execute was the one the boot-latency emitter grounds.
+
+    Returns None (defer to the substance-floor scaffold) whenever the case's
+    own text does not state one of the two invariants, or the DUT surface
+    offers no port to observe it on -- fail-closed, never fabricates.
+    """
+    name = case.get("name", "")
+    if not _LEGAL_ID_RE.match(str(name)):
+        return None
+    kept = authored_oracle_preserved(out_dir, name, report)
+    if kept is not None:
+        return kept
+    try:
+        import reset_invariant_oracle_tb_gen as _riv  # type: ignore
+    except Exception:
+        return None
+    inputs, outputs, inouts = _classify(ports)
+    try:
+        text = _riv.emit_case_oracle_from_ports(
+            case, dut_module, inputs, outputs, inouts)
+    except Exception as e:  # pragma: no cover — never break the loop
+        if report is not None:
+            report.setdefault("oracle_errors", []).append(
+                {"case": name, "error": str(e)})
+        return None
+    if not text:
+        return None
+    f = Path(out_dir) / f"{name}.v"
+    f.write_text(stamp_generated(text, "_emit_case_reset_invariant_oracle"))
+    if report is not None:
+        report.setdefault("reset_invariant_cases", []).append(
+            {"case": name, "family": _riv.case_family(case)})
+    return f
+
+
 def _emit_case_known_answer_vector(project: Path, case: dict, dut_module: str,
                                    ports: "List[Tuple[str, str, str]]",
                                    out_dir: Path,
@@ -1190,6 +1238,12 @@ def emit_unit_tbs(project: Path, top: str = "chip_top",
             # substance floor. chip-AGNOSTIC, fail-closed (see
             # cpu_boot_latency_oracle_tb_gen.emit_case_oracle_from_ports).
             wrote = _emit_case_boot_latency_oracle(
+                project, c, dut_module, ports, out_dir, report)
+        if wrote is None:
+            # R-0915-102(2) — the reset-ASSERT invariants (content held
+            # across an assert; a reset glitch not racing a bus access).
+            # Beside the release-side family above, same fail-closed rule.
+            wrote = _emit_case_reset_invariant_oracle(
                 project, c, dut_module, ports, out_dir, report)
         if wrote is None:
             # The substance-floor SCAFFOLD stays kind-scoped. It is the part
