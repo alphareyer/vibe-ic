@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1332
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1332)
+- **Total programs (excluding helpers / shims):** 1333
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1333)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1323 |
+| `any` | 1324 |
 
 ## Alphabetical listing
 
@@ -1212,6 +1212,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `staged_pdk_declares_tapcell_master_check` | any | — | a load-bearing sentinel default may not be INHERITED. Every construction site has to SAY it. |
 | `staged_rtl_closure_preflight` | any | — | ORGANIC #586. |
 | `staged_rtl_reused_ip_manifest_emit` | any | — | ORGANIC #732 — auto-emit the keystone SOURCE_MANIFEST.json on the PRE-STAGED-vendor-RTL catalog-glue path. |
+| `stated_vector_bus_oracle_gen` | any | — | drive a STATED vector over the design's own memory-mapped register bus and compare against the STATED answer. |
 | `step_force` | any | — | re-run ONE step without re-running the phase. vibe-ic#1097 S6. |
 | `step_input_scope` | any | — | §4.05 as a MECHANISM: a step cannot read the oracle. vibe-ic#1079. |
 | `step_internal_fail_bubble_up_check` | any | — | anti-fabrication gate (v1.6.44). |
@@ -1404,7 +1405,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1323 programs)
+### `any` (1324 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -2585,6 +2586,7 @@ _(no programs in this group)_
 - `staged_pdk_declares_tapcell_master_check` — a load-bearing sentinel default may not be INHERITED. Every construction site has to SAY it.
 - `staged_rtl_closure_preflight` — ORGANIC #586.
 - `staged_rtl_reused_ip_manifest_emit` — ORGANIC #732 — auto-emit the keystone SOURCE_MANIFEST.json on the PRE-STAGED-vendor-RTL catalog-glue path.
+- `stated_vector_bus_oracle_gen` — drive a STATED vector over the design's own memory-mapped register bus and compare against the STATED answer.
 - `step_force` — re-run ONE step without re-running the phase. vibe-ic#1097 S6.
 - `step_input_scope` — §4.05 as a MECHANISM: a step cannot read the oracle. vibe-ic#1079.
 - `step_internal_fail_bubble_up_check` — anti-fabrication gate (v1.6.44).
