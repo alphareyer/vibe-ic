@@ -14,6 +14,7 @@ The FPGA path at line 3545 already followed the correct pattern
 (emit_final_summary → step_fpga_burn); the --skip-hardware path was
 missing the parallel.
 """
+import ast
 import re
 from pathlib import Path
 
@@ -21,49 +22,106 @@ PROGRAMS = Path(__file__).resolve().parents[1]
 RUNNER = PROGRAMS / "design_one_shot_runner.py"
 
 
+def _call_name(node: ast.Call) -> str:
+    fn = node.func
+    if isinstance(fn, ast.Attribute):
+        return fn.attr
+    if isinstance(fn, ast.Name):
+        return fn.id
+    return ""
+
+
+def _ordering_sites(tree: ast.AST):
+    """(function, audit_linenos, emit_linenos) for every function that appends
+    a `step_final_audit(project, phase=2, ...)`.
+
+    THE SEARCH IS BOUNDED BY THE FUNCTION, NOT BY A CHARACTER COUNT. The
+    previous version of this test asked whether an `emit_final_summary` call
+    appeared within the prior 3000 characters, and its sibling asked about the
+    prior 10 lines. Both are constants standing in for a structural
+    relationship, and both went stale as `design_one_shot_runner.py` grew:
+    MEASURED at 8ef2d9a41, the phase-2 audit append is at line 23281 and FOUR
+    `emit_final_summary(project)` calls precede it in the same function, the
+    nearest at line 23230 — 3181 characters and 51 lines away. So the ordering
+    this module exists to enforce WAS satisfied and both tests reported that it
+    was not.
+
+    Widening the constant would buy green today and go stale on the next
+    landing. This asks the question the docstring actually argues for: within
+    ONE function body, does the summary get regenerated before the audit reads
+    it? Same repair shape as 4bf31a60a, "the cron section is bounded by itself,
+    not by 600 characters".
+    """
+    for fn in (n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+        audits, emits = [], []
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _call_name(node)
+            if name == "step_final_audit":
+                phases = [k.value for k in node.keywords if k.arg == "phase"]
+                if any(isinstance(p, ast.Constant) and p.value == 2
+                       for p in phases):
+                    audits.append(node.lineno)
+            elif name == "emit_final_summary":
+                emits.append(node.lineno)
+        if audits:
+            yield fn.name, sorted(audits), sorted(emits)
+
+
 def test_emit_final_summary_precedes_step_final_audit():
-    """The file must contain `emit_final_summary(...)` lexically BEFORE the
-    `step_final_audit(project, phase=2, ...)` plan-append call."""
-    src = RUNNER.read_text()
-    # Find the line that appends step_final_audit at phase 2
-    audit_pattern = re.compile(r"plan\.append\(\s*step_final_audit\(\s*project,\s*phase=2")
-    m_audit = audit_pattern.search(src)
-    assert m_audit is not None, "step_final_audit(phase=2) call not found"
-    audit_offset = m_audit.start()
-
-    # Find ALL emit_final_summary calls in the file
-    summary_pattern = re.compile(r"_pl\.emit_final_summary\(\s*project")
-    matches = list(summary_pattern.finditer(src))
-    assert matches, "no _pl.emit_final_summary(project, ...) call found"
-
-    # At least one must precede the audit append AND be reasonably close
-    # (within the same function body — say within the prior 3000 chars).
-    preceders = [m for m in matches
-                 if 0 < (audit_offset - m.start()) < 3000]
-    assert preceders, (
-        "no emit_final_summary call within 3000 chars BEFORE "
-        "step_final_audit(phase=2) — the audit will read a stale "
-        "attestation table and FAIL with a phantom gap.")
+    """Within the SAME function, a summary regeneration must precede the
+    phase-2 audit append."""
+    tree = ast.parse(RUNNER.read_text(errors="replace"))
+    sites = list(_ordering_sites(tree))
+    assert sites, "step_final_audit(phase=2) call not found"
+    for fn_name, audits, emits in sites:
+        first_audit = audits[0]
+        before = [e for e in emits if e < first_audit]
+        assert before, (
+            f"in {fn_name}(): no emit_final_summary call precedes "
+            f"step_final_audit(phase=2) at line {first_audit} — the audit "
+            f"will read a stale attestation table and FAIL with a phantom "
+            f"gap. emit_final_summary calls in this function: {emits}")
 
 
-def test_emit_final_summary_is_immediately_before_audit():
-    """Stricter: the immediately-preceding line should mention final_summary
-    so the ordering intent is locally obvious to future readers."""
-    src = RUNNER.read_text()
-    lines = src.splitlines()
-    audit_line_idx = None
-    for i, ln in enumerate(lines):
-        if "plan.append(step_final_audit(project, phase=2" in ln:
-            audit_line_idx = i
-            break
-    assert audit_line_idx is not None
-    # Within the prior 10 lines, find an emit_final_summary mention
-    window = lines[max(0, audit_line_idx - 10):audit_line_idx]
-    found = any("emit_final_summary" in ln for ln in window)
-    assert found, (
-        "the 10 lines immediately before the phase=2 step_final_audit must "
-        "include an _pl.emit_final_summary call so the intent is local. "
-        "Window:\n" + "\n".join(window))
+def test_no_other_step_is_appended_between_the_summary_and_the_audit():
+    """The ordering intent stated as a STRUCTURAL fact instead of a 10-line
+    window: nothing that appends another step may come between the LAST
+    summary regeneration and the phase-2 audit.
+
+    This is what "immediately before" was reaching for. The old spelling asked
+    whether the literal string `emit_final_summary` appeared in the prior TEN
+    LINES, which is a constant, and which said no at 8ef2d9a41 while the
+    nearest call sat 51 lines above — satisfied, and reported unsatisfied. The
+    property that actually protects the attestation table is that no FURTHER
+    step is planned in between, because a step planned in between is what
+    would emit a new artefact after the summary was written and leave the
+    audit reading a stale table.
+    """
+    tree = ast.parse(RUNNER.read_text(errors="replace"))
+    sites = list(_ordering_sites(tree))
+    assert sites, "step_final_audit(phase=2) call not found"
+    for fn_name, audits, emits in sites:
+        first_audit = audits[0]
+        before = [e for e in emits if e < first_audit]
+        assert before, f"in {fn_name}(): no preceding emit_final_summary"
+        last_emit = before[-1]
+        fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and n.name == fn_name)
+        intervening = sorted(
+            {node.lineno: _call_name(node) for node in ast.walk(fn)
+             if isinstance(node, ast.Call)
+             and _call_name(node).startswith("step_")
+             and last_emit < node.lineno < first_audit}.items())
+        assert not intervening, (
+            f"in {fn_name}(): step(s) are planned between the last "
+            f"emit_final_summary (line {last_emit}) and "
+            f"step_final_audit(phase=2) (line {first_audit}); anything that "
+            f"emits an artefact there leaves the audit reading a stale "
+            f"attestation table: {intervening}")
 
 
 def test_fpga_burn_pattern_still_present():
