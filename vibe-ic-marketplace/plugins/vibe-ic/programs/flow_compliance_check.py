@@ -9392,7 +9392,25 @@ def _p0_skip_reason_from_output(gate_name: str, stdout: str,
     lines = (stdout.strip() or stderr.strip()).splitlines()
     informative = [ln.strip() for ln in lines if ln.strip()
                    and not re.match(r"^=+.*=+$", ln.strip())]
-    raw = informative[0] if informative else ""
+    # R-0915-119(2) — THE LINE THAT STATES THE DECISION OUTRANKS THE FIRST
+    # LINE. MEASURED end to end on run26 (front door, main 1429a7752): all
+    # seven structural checkers still reached the record as EXECUTION_ERROR,
+    # and the reason was here. This function returns ONE line and the umbrella
+    # classifies that line; six of the seven print their old banner first
+    # ("[skipped] no arbitration patterns found", "SKIP @ :0: No break signals
+    # detected") and their class SECOND, so the class never reached the
+    # taxonomy. The seventh behaved correctly for the only reason that its
+    # sentence happened to be line one.
+    #
+    # NARROW BY CONSTRUCTION, and neither guard moves: the only line that can
+    # win this way is the exact shape `_structural_absence.sentence()` writes
+    # — the class token AND a scanned count AND `found 0` together — and the
+    # taxonomy still refuses it below the scanned floor and still refuses the
+    # token without its enumeration. A gate that states nothing keeps
+    # informative[0] byte for byte.
+    _stated = _reason_taxonomy.structural_absence_line(
+        stdout.strip() or stderr.strip())
+    raw = _stated or (informative[0] if informative else "")
     if not raw:
         return ""
     line = _P0_SKIP_MARKER.sub("", raw, count=1).strip()
