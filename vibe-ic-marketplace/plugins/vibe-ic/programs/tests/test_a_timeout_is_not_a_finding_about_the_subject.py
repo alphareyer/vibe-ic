@@ -440,12 +440,46 @@ def test_every_site_is_supervised_by_progress():
 # work a runtime bound destroys.
 
 
+def _stage_declared_views(tmp_path) -> None:
+    """The physical views the run DECLARES, staged so they can be read.
+
+    RE-PINNED 2026-09-21. This test used to name four paths it never created and
+    reach the openroad launch anyway. c34f56d2a (v1.22.13, #2376) gave
+    `dynamic_ir_vectored_emit` a pre-flight over its declared views -- every LEF
+    non-empty, no master defined twice, every DEF component master defined by
+    some LEF -- and refuses ERROR_INPUT_VIEWS before launching anything. So the
+    fixture stopped reaching the watchdog path at all and the payload came back
+
+        status ERROR_INPUT_VIEWS
+        reason "missing, empty or unreadable declared LEF: <tmp>/t.lef"
+
+    THE PROGRAM IS RIGHT and the ordering is not the defect: an IR solve over
+    views that cannot describe the design has nothing to measure, and finding
+    that out before starting a long solve is the cheap end of the check. What
+    was wrong is a fixture that only worked while the program skipped it.
+
+    The views are minimal but VALID rather than merely non-empty -- the DEF
+    names a master the cell LEF defines -- so the pre-flight is exercised on its
+    real path instead of being satisfied by an empty COMPONENTS section.
+    """
+    (tmp_path / "t.lef").write_text(
+        "VERSION 5.8 ;\nUNITS\n  DATABASE MICRONS 1000 ;\nEND UNITS\n")
+    (tmp_path / "c.lef").write_text(
+        "VERSION 5.8 ;\nMACRO CELLA\n  CLASS CORE ;\nEND CELLA\n")
+    (tmp_path / "x.def").write_text(
+        "VERSION 5.8 ;\nDESIGN top ;\n"
+        "COMPONENTS 1 ;\n- u1 CELLA ;\nEND COMPONENTS\n"
+        "END DESIGN\n")
+    (tmp_path / "l.lib").write_text("library (l) { }\n")
+
+
 def test_a_wedged_openroad_is_named_as_wedged_and_not_as_a_failed_run(
         tmp_path, monkeypatch):
     """The reason string is what a reader gets. "openroad run failed" is false
     of a solver that was still solving; "made no forward progress ... it was
     doing nothing" is a measurement, and only reachable when it is true."""
     monkeypatch.setattr(DIE._dw, "run_docker_supervised", _StallsDocker())
+    _stage_declared_views(tmp_path)
     out = tmp_path / "dynamic_ir.json"
     rc, payload = DIE.emit(
         def_file=tmp_path / "x.def", tech_lef=tmp_path / "t.lef",
@@ -453,6 +487,9 @@ def test_a_wedged_openroad_is_named_as_wedged_and_not_as_a_failed_run(
         macro_lefs=[], sdc=None, out_json=out, power_net="VDD",
         container="c", metal_prefix="met", static_json=None, budget_pct=5.0,
         period_ns=8.0, steps=50, decap_cap=None)
+    assert payload.get("status") != "ERROR_INPUT_VIEWS", (
+        "the declared views must pass the pre-flight, or this test is measuring "
+        "input validation and not the watchdog: " + str(payload))
     assert payload["dynamic_ir_report_emitted"] is False
     assert "no forward progress" in payload["reason"], payload
     assert "WEDGED" in payload["reason"], payload
