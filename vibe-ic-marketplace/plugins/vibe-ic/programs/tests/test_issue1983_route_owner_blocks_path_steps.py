@@ -144,22 +144,96 @@ def test_checked_in_flow_is_real_artefact_backing_for_the_route_contract():
     assert OWNER in steps
 
 
+def _atoms(entries) -> set:
+    """The ARTEFACT ATOMS a list of flow entries names.
+
+    Through `flow_compliance_check._declared_output_branches`, which is the ONE
+    `" OR "` splitter this flow definition has — the same one `required_outputs`
+    is read with and, since R-0915-98(2), the same one `files_exist` is read
+    with. Comparing a set of ENTRIES against a set of ATOMS is what broke below:
+    an entry may name several accepted spellings of one artefact, so only the
+    atoms are comparable.
+    """
+    out = set()
+    for entry in entries:
+        out.update(FCC._declared_output_branches(entry))
+    return out
+
+
 def test_canonical_flow_names_one_route_owner_and_one_declaration():
-    """Real checked-in artefact backing: no test-only route contract drift."""
+    """Real checked-in artefact backing: no test-only route contract drift.
+
+    #1983'S INVARIANT IS UNCHANGED and is the whole point of this case: the
+    route declaration must be the same artefact set Step 0.5ic is REQUIRED TO
+    PRODUCE. A declaration naming a file the step does not produce is a contract
+    nobody can satisfy, and one missing a file the step does produce leaves a
+    route the predicate cannot see.
+
+    WHAT MOVED IS THE COMPARISON, not the invariant (R-0915-98(2), lane
+    icslot4). The declaration now groups the two CHIP markers into ONE
+    alternative with two accepted spellings — `slots/*.yaml OR SELF_TAPEOUT.txt`
+    — because the exclusivity `exactly_one` measures is IP-TERMINAL vs
+    CHIP-PATH, and a retained operator CATALOGUE is information, not a second
+    route declaration. This comparison predated that dialect: it split the
+    owner's `required_outputs` entry into atoms but read `files_exist`
+    LITERALLY, so it compared {'slots/*.yaml OR SELF_TAPEOUT.txt', ...} against
+    {'slots/*.yaml', 'SELF_TAPEOUT.txt', ...} and reported a drift that is a
+    spelling. BOTH sides now go through the one splitter.
+    """
     steps = _canonical_steps()
     owner = steps[OWNER]
     declaration = owner["condition_declarations"]["delivery_route"]
     assert declaration["exactly_one"] is True
 
-    expected = set(owner["required_outputs"][0].split(" OR "))
-    assert set(declaration["files_exist"]) == expected, (
+    expected = _atoms([owner["required_outputs"][0]])
+    assert _atoms(declaration["files_exist"]) == expected, (
         "the route declaration must be the same artefact set Step 0.5ic is "
         "required to produce")
 
     for sid in PATH_STEPS:
         assert steps[sid]["condition_owner"] == {
             "step": OWNER, "declaration": "delivery_route"}
-        assert set(steps[sid]["condition"]["files_exist"]) <= expected
+        assert _atoms(steps[sid]["condition"]["files_exist"]) <= expected
+
+
+def test_a_declaration_naming_an_artefact_the_step_does_not_produce_still_fails():
+    """THE NEGATIVE CASE the invariant above exists for, kept explicitly so the
+    normalisation cannot quietly become a licence.
+
+    Going through the splitter must not make the comparison accept MORE: an atom
+    the owner does not produce is still a drift, whether it is written on its own
+    or hidden inside an `" OR "` group. Both spellings are checked, because the
+    group is exactly where such an atom could now hide.
+    """
+    produced = _atoms(
+        ["input/submission_template/slots/*.yaml OR "
+         "input/submission_template/NO_TEMPLATE.txt OR "
+         "input/submission_template/SELF_TAPEOUT.txt"])
+
+    # (a) the atom stated on its own
+    bare = ["input/submission_template/slots/*.yaml OR "
+            "input/submission_template/SELF_TAPEOUT.txt",
+            "input/submission_template/NO_TEMPLATE.txt",
+            "input/submission_template/NOT_PRODUCED.txt"]
+    assert _atoms(bare) != produced
+    assert _atoms(bare) - produced == {
+        "input/submission_template/NOT_PRODUCED.txt"}
+
+    # (b) the atom hidden inside a group — the shape the dialect newly permits
+    hidden = ["input/submission_template/slots/*.yaml OR "
+              "input/submission_template/SELF_TAPEOUT.txt OR "
+              "input/submission_template/NOT_PRODUCED.txt",
+              "input/submission_template/NO_TEMPLATE.txt"]
+    assert _atoms(hidden) != produced
+    assert _atoms(hidden) - produced == {
+        "input/submission_template/NOT_PRODUCED.txt"}
+
+    # and a declaration MISSING an atom the owner produces is a drift too
+    short = ["input/submission_template/slots/*.yaml OR "
+             "input/submission_template/SELF_TAPEOUT.txt"]
+    assert _atoms(short) != produced
+    assert produced - _atoms(short) == {
+        "input/submission_template/NO_TEMPLATE.txt"}
 
 
 def test_unresolved_route_blocks_all_four_and_names_owner_verdict(tmp_path):
