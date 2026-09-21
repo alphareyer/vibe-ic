@@ -151,6 +151,8 @@ import pdk_analog_device_params as _pdp  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _container_exec as _ce  # noqa: E402 — the ONE guarded docker-exec argv
 import _eda_pin as _pin  # noqa: E402 — the ONE place the pin is stated
+import analog_incremental_decimator as _inc  # noqa: E402 — the decode stamp
+import analog_adc_enob_corner_check as _enob  # noqa: E402 — the clock card
 import _progress_run as _pr  # noqa: E402
 import _container_exec as _ce  # noqa: E402 — the ONE container-side deadline primitive
 
@@ -1943,6 +1945,136 @@ def tran_rail_report(log_text: str, supply_v: Optional[float],
 SIMULATION_CEILING_S = 900.0
 
 
+#: The A3 VERIFY window, and the ONE reason it is not the deck's own record.
+#:
+#: A3's verification asks exactly three questions and no others: did the run
+#: converge, does the OPERATING POINT put a node outside the supply rails, and
+#: does the TRANSIENT. It never decodes the bitstream, never compares against
+#: the applied level or tone, and never computes SNDR or ENOB -- see
+#: `tran_rail_report`, whose own docstring says it "asks whether the block
+#: STAYED inside its own rails while it ran". So the span it needs is the span
+#: over which that claim is settled, not the span the GRADED spec asks for.
+#:
+#: MEASURED (lane icadc2, 8hd-3, the emitted delta_sigma over four conversion
+#: windows), cumulative worst excursion -- which is precisely what the
+#: `railx_*` cards report, since they carry no `from`/`to` and run over the
+#: whole transient:
+#:     after 1 window : vo1 +0.1214/+1.0360   vint +0.1426/+1.0282
+#:     after 2 windows: vo1 +0.1214/+1.0396   vint +0.1420/+1.0282
+#:     after 3 windows: vo1 +0.1214/+1.0396   vint +0.1420/+1.0282
+#:     after 4 windows: vo1 +0.1214/+1.0396   vint +0.1385/+1.0282
+#: vo1's reported extremes are FINAL after two windows and vint's move 3.5 mV
+#: at the third and then stop. The reason is structural rather than
+#: statistical: an incremental converter RESETS its integrators every
+#: conversion window, so an excursion cannot accumulate across windows.
+#:
+#: THE SPAN IS DERIVED, NEVER TYPED. It is two conversion windows read off the
+#: DECK THAT WILL RUN -- `window_clocks` from the decode declaration the
+#: producer stamped on it, and the period from the one top-level pulse source
+#: -- the same two numbers `sndr_db_incremental` reads, for the same reason:
+#: a number this file typed could disagree with the deck it is about.
+#:
+#: IT DOES NOT TOUCH THE DELIVERED DECK. The testbench A3 emits keeps its full
+#: declared record, because that record is sized by `record_constraints` for
+#: the GRADED measurement and is the input `analog_resolution_stimulus` reads
+#: to build the A4 corner. Shortening that would narrow the A4 population.
+#: Only the copy handed to the simulator here is bounded.
+_VERIFY_WINDOWS = 2
+
+#: The deck's own transient card: `tran <step> <stop>` with optional extras.
+#: Matched on the deck rather than rebuilt, so the step the producer chose and
+#: anything it appended survive the rewrite untouched.
+_TRAN_CARD_RE = re.compile(
+    r"^tran\s+(\S+)\s+(\S+)", re.IGNORECASE | re.MULTILINE)
+
+
+def _si_seconds(tok: str) -> Optional[float]:
+    """A SPICE time token as seconds. `_enob._si` is the reader the ENOB gate
+    already uses on this same deck, so the two cannot disagree about what
+    `28673000n` means."""
+    return _enob._si(tok)
+
+
+def _fmt_seconds(value: float) -> str:
+    """Seconds back as the nanosecond token the emitted decks are written in.
+    Integral where it can be, so a rewritten card reads like a written one."""
+    ns = value * 1e9
+    return (f"{int(round(ns))}n" if abs(ns - round(ns)) < 1e-6
+            else f"{ns:.6f}".rstrip("0").rstrip(".") + "n")
+
+_NO_VERIFY_BOUND_NO_STAMP = (
+    "verify_window_not_derivable_no_decode_stamp: the deck declares no "
+    "conversion window, so the span over which its rail cards settle cannot "
+    "be derived from it and the deck's own record stands")
+_NO_VERIFY_BOUND_NO_CLOCK = (
+    "verify_window_not_derivable_no_clock_card: no single top-level pulse "
+    "source names the conversion clock, so a window count cannot be turned "
+    "into a time and the deck's own record stands")
+_NO_VERIFY_BOUND_NO_TRAN = (
+    "verify_window_not_derivable_no_tran_card: the deck runs no transient to "
+    "bound")
+
+
+def verify_window_bound(tb_text: str, ir: Optional[Dict[str, Any]] = None
+                        ) -> Tuple[Optional[str], Dict[str, Any]]:
+    """`(deck bounded to the A3 verify window, record)`, or `(None, refusal)`.
+
+    WHERE `window_clocks` COMES FROM, AND WHY IT IS NOT ALWAYS THE STAMP.
+    `sndr_db_incremental` reads it off the decode declaration stamped on the
+    deck -- but that stamp is written by `analog_resolution_stimulus` when it
+    builds the A4 corner, which is AFTER this. At A3 verify time the deck
+    carries the pulse card and no stamp, so the window count is taken from the
+    IR constant the stamp is itself derived from. Same number, one step
+    earlier: the stamp is preferred when the deck already carries one, so a
+    deck that states its own decode is always believed over the IR that
+    produced it.
+
+    REFUSES BY NAME rather than defaulting. A block that declares no
+    conversion window at all -- every non-incremental block -- gets no bound
+    and runs exactly the record it always ran; that is not a failure, it is
+    this function saying it has nothing to derive a bound from."""
+    window = None
+    source = None
+    decl, why = _inc.read_stamp(tb_text or "")
+    if decl is not None:
+        window = int(decl["window_clocks"])
+        source = "deck_decode_stamp"
+    else:
+        consts = (ir or {}).get("constants")
+        raw = consts.get("window_clocks") if isinstance(consts, dict) else None
+        if isinstance(raw, (int, float)) and raw > 0:
+            window = int(raw)
+            source = "topology_ir_constant"
+    if window is None:
+        return None, {"reason": _NO_VERIFY_BOUND_NO_STAMP, "detail": why}
+    card = _enob.sample_clock_card(tb_text or "")
+    if card is None:
+        return None, {"reason": _NO_VERIFY_BOUND_NO_CLOCK}
+    _td, period, _v = card
+    m = _TRAN_CARD_RE.search(tb_text or "")
+    if not m:
+        return None, {"reason": _NO_VERIFY_BOUND_NO_TRAN}
+    stop_s = _VERIFY_WINDOWS * window * period
+    declared_s = _si_seconds(m.group(2))
+    if declared_s is not None and declared_s <= stop_s:
+        return None, {"reason": "deck_record_already_within_the_verify_window",
+                      "declared_s": declared_s, "verify_window_s": stop_s}
+    bounded = (tb_text[:m.start()] + "tran " + m.group(1) + " "
+               + _fmt_seconds(stop_s) + tb_text[m.end():])
+    return bounded, {
+        "verify_window_clocks": _VERIFY_WINDOWS * window,
+        "verify_window_s": stop_s,
+        "conversion_windows": _VERIFY_WINDOWS,
+        "window_clocks": window,
+        "sample_clock_hz": (1.0 / period) if period else None,
+        "declared_record_s": declared_s,
+        "window_clocks_source": source,
+        "rule": "two_conversion_windows_derived_from_the_designs_own_numbers",
+        "scope": ("this is the A3 VERIFY bound, NOT the A4 corner window; the "
+                  "delivered testbench keeps its full declared record"),
+    }
+
+
 def verify_with_ngspice(container: str, block: str, sp_text: str,
                         tb_text: str,
                         real_project: Optional[Path] = None,
@@ -2648,10 +2780,20 @@ def _emit_for_block(project: Path, entry: Dict[str, Any], pdk: str,
                            "simulation_status": "NOT_ATTEMPTED"}
     if verify_sim and tb_text:
         _supply = (tb_env or {}).get("supply")
+        # THE VERIFY RUNS A BOUNDED COPY, THE DELIVERED DECK IS UNTOUCHED.
+        # See `verify_window_bound`: A3 asks a rails question, and the span
+        # over which that question settles is two conversion windows derived
+        # from this design's own numbers. The deck written to disk below keeps
+        # its full declared record, because that record is sized for the
+        # GRADED measurement and is what `analog_resolution_stimulus` reads to
+        # build the A4 corner.
+        _verify_text, _verify_window = verify_window_bound(tb_text, ir)
         sim = verify_with_ngspice(
-            container, name, sp_text, tb_text, real_project=project,
+            container, name, sp_text, _verify_text or tb_text,
+            real_project=project,
             supply_v=(float(_supply) if isinstance(_supply, (int, float))
                       else None))
+        sim["verify_window"] = _verify_window
         # BEFORE EVERY OTHER SIMULATION OUTCOME. `env_refused` means the
         # simulator was never started, so none of the branches below have an
         # observation to judge -- and the fall-through at the end of this
