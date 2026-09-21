@@ -13632,6 +13632,103 @@ import _progress_run as _pr  # noqa: E402
 import instrument_calibration as _instrument_calibration  # noqa: E402  R-0915-86(3)
 
 
+#: How much of a refusing producer's own account a step row carries, and where
+#: the whole of it is kept. The budget is a BUDGET, not a silence: whatever is
+#: not rendered is counted and the log that holds all of it is named.
+#:
+#: MEASURED, spm run15 (8HD-4), the two refusals this row exists to carry:
+#: `tapeout_docs_gen` renders to 721 characters and `ic_release_docs_gen` to
+#: 1536. The budget is set above BOTH so the enumeration a reader must act on
+#: reaches the row whole. At 900 the second row dropped its eight named
+#: properties and kept the two paragraphs of prose above them -- disclosed and
+#: pointed at the log, but the wrong end of the account to lose. It still
+#: bounds a producer that runs away: a tool log belongs in a log, not a row.
+_PRODUCER_DETAIL_CHARS = 2000
+_PRODUCER_LOG_DIR_REL = "reports/orchestrator/producers"
+
+
+def _producer_detail(step: str, cp: Any,
+                     project: Optional[Path] = None) -> str:
+    """A producer's WHOLE refusal on the step row, and its log on disk.
+
+    R-icgate3 — TWO DEFECTS, ONE EXPRESSION. Every producer-dispatch row in
+    this runner built its detail as
+
+        detail_lines = (cp.stdout or cp.stderr or "").strip().splitlines()
+        detail = detail_lines[0] if detail_lines else f"rc={cp.returncode}"
+
+    MEASURED on spm run15 (8HD-4, `_lane_icspm5/run15`),
+    `reports/orchestrator/phase3_one_shot.json` steps[28] and steps[29]:
+
+        NOT RELEASABLE — no documents written. 8 propert(ies) are not clean:
+        NOT RELEASABLE — no product documents written. 1 release(s) examined.
+
+    A colon, and nothing after it. Nobody could name the eight.
+
+    1. `detail_lines[0]` — the producers DO enumerate. `tapeout_docs_gen`
+       prints `f"  - {b}"` for every blocker and `ic_release_docs_gen._refuse`
+       prints every artefact refusal and every unclean property, both on the
+       lines AFTER the header. Taking line 0 discards exactly the set the
+       refusal exists to name. Grepping the whole of run15 for
+       `propert(ies) are not clean` returns ONE hit — that header — so the
+       enumeration was not merely unrendered, it was never kept anywhere.
+
+    2. `stdout or stderr` — a producer that writes ANY stdout loses its whole
+       stderr. Both refusals above are written to stderr. Latent on run15
+       (stdout was empty) and reachable by one progress line.
+
+    Both streams are kept, the whole account is written to
+    `reports/orchestrator/producers/<step>.log`, and the row renders as many
+    WHOLE items as the budget holds, then says how many it did not render and
+    where they are. A row that cannot write its log says the enumeration is on
+    the row only — it never claims a file it did not write.
+
+    chip-AGNOSTIC: this reasons about a subprocess's two streams, nothing else.
+    """
+    out = (getattr(cp, "stdout", "") or "").strip()
+    err = (getattr(cp, "stderr", "") or "").strip()
+    whole = "\n".join(t for t in (err, out) if t)
+    if not whole:
+        return f"rc={getattr(cp, 'returncode', '?')}"
+    log_rel = ""
+    if project is not None:
+        try:
+            log_dir = Path(project) / _PRODUCER_LOG_DIR_REL
+            log_dir.mkdir(parents=True, exist_ok=True)
+            # `_aa` (vibe-ic#1082): a half-written log after a crash would be
+            # a shorter refusal that reads as a complete one.
+            _aa.write_text(log_dir / f"{step}.log", whole + "\n")
+            log_rel = f"{_PRODUCER_LOG_DIR_REL}/{step}.log"
+        except OSError:
+            log_rel = ""
+    lines = [ln.strip().lstrip("-*\u2022 ").strip()
+             for ln in whole.splitlines() if ln.strip()]
+    head, rest = lines[0], lines[1:]
+
+    def _render(items: List[str]) -> str:
+        if not items:
+            return head
+        joiner = " " if head.rstrip().endswith(":") else "; "
+        return head + joiner + "; ".join(items)
+
+    shown = list(rest)
+    dropped = 0
+    # WHOLE ITEMS, NEVER BYTES. A byte cut on a joined line ends mid-clause,
+    # which is the sibling defect R-icgate3(a) closes one layer up.
+    while shown and len(_render(shown)) > _PRODUCER_DETAIL_CHARS:
+        shown.pop()
+        dropped += 1
+    line = _render(shown)
+    if dropped:
+        where = (f" \u2014 all of them in {log_rel}" if log_rel else
+                 " \u2014 and this run could not write a producer log, so the "
+                 "rest are not recorded anywhere")
+        line += f" [+{dropped} more line(s) not shown here{where}]"
+    elif log_rel:
+        line += f" [full producer output: {log_rel}]"
+    return line
+
+
 def _run_producer(step: str, cmd: List[str], t0: float, *,
                   noun: str = "producer",
                   ) -> Tuple[Optional[Any], Optional[StepResult]]:
@@ -50579,8 +50676,7 @@ def step_ip_release_docs_gen(
     cp, stopped = _run_producer("ip_release_docs_gen", cmd, t0)
     if stopped is not None:
         return stopped
-    detail_lines = (cp.stdout or cp.stderr or "").strip().splitlines()
-    detail = detail_lines[0] if detail_lines else f"rc={cp.returncode}"
+    detail = _producer_detail("ip_release_docs_gen", cp, project)
     # R-0915-85 — see `step_digital_hardmacro_gen`: rc 1/2 was `SKIP` (the
     # producer declined) and anything else `ENV_UNAVAILABLE` (it could not be
     # launched here). Both are NOT_MEASURED, told apart by the reason.
@@ -51005,8 +51101,7 @@ def step_tapeout_docs_gen(project: Path) -> StepResult:
         return StepResult("tapeout_docs_gen", "NOT_MEASURED",
                           time.time() - t0,
                           f"producer did not complete: {exc}", reason_class=_V.ReasonClass.TOOL_ABSENT)
-    detail_lines = (cp.stdout or cp.stderr or "").strip().splitlines()
-    detail = detail_lines[0] if detail_lines else f"rc={cp.returncode}"
+    detail = _producer_detail("tapeout_docs_gen", cp, project)
     # R-0915-85 — a NOT_MEASURED row NAMES what stopped it. The producer
     # declining (it ran and refused) and the producer not being launchable are
     # different facts, and the rc is what tells them apart.
@@ -51070,8 +51165,7 @@ def step_ic_release_docs_gen(project: Path) -> StepResult:
     cp, stopped = _run_producer("ic_release_docs_gen", cmd, t0)
     if stopped is not None:
         return stopped
-    detail_lines = (cp.stdout or cp.stderr or "").strip().splitlines()
-    detail = detail_lines[0] if detail_lines else f"rc={cp.returncode}"
+    detail = _producer_detail("ic_release_docs_gen", cp, project)
     # R-0915-85 — see `step_digital_hardmacro_gen`: rc 1/2 was `SKIP` (the
     # producer declined) and anything else `ENV_UNAVAILABLE` (it could not be
     # launched here). Both are NOT_MEASURED, told apart by the reason.
