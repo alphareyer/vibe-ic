@@ -106,7 +106,51 @@ def _project(tmp_path: Path, *, cached_die: str, cached_util: float) -> Path:
     # supplies the input a tree that has reached PnR would carry, and DIE is the
     # deliverable these die-geometry and stale-GDS assertions are about.
     _declare(tmp_path, "DIE")
+    # THE THIRD, and the same kind again -- and it is the declaration ABOVE
+    # that reaches it: `declare_delivery` writes `SELF_TAPEOUT.txt`, which is
+    # exactly what makes `_chip_path_requests_pad_ring` true for this project.
+    # `_cached_stage_decision` then applies its pad-ring clause: on a chip path
+    # the PnR cache is valid only while
+    # `reports/phase3/pad_ring_route_evidence.json` still HASH-BINDS the DEF and
+    # the GDS it was written for. Without it the run discloses
+    #
+    #   [pnr] cache invalid -- geometry unchanged (requested die=1500x1500
+    #         util=0.3); producer unchanged (...); chip-path pad-ring route
+    #         evidence absent, stale or hash-mismatched
+    #
+    # and PnR RE-RUNS on the unchanged-geometry arm. That re-run is what the
+    # four cases here were actually failing on, and it costs them two different
+    # ways: `test_unchanged_geometry_still_reuses_the_gds` sees the re-dispatch
+    # it exists to forbid, and the three pad-side cases lose their subject --
+    # `_fake_pnr` rewrites the DEF as `PINS 0`, erasing the pins
+    # `_with_pad_table` had just placed, so the gate reads a DEF with nothing in
+    # it and answers `VACUOUS_PASS: pad-side table present but no DEF pins
+    # matched its patterns`.
+    #
+    # The premise this file states is "everything already exists from the
+    # previous run", and on a DIE that has reached PnR that includes its route
+    # evidence. `test_phase3_cache_producer_identity.py` caught up with the same
+    # clause in the same way and owns its coverage.
+    #
+    # NOTHING IS FAKED and NOTHING IS DISABLED: both hashes are computed from
+    # THIS fixture's own DEF and GDS, so the record binds the bytes it actually
+    # describes, and the clause remains able to fire -- a stale record still
+    # invalidates the cache, which is that clause's own suite's subject.
+    _pad_ring_evidence(tmp_path)
     return tmp_path
+
+
+def _pad_ring_evidence(project: Path) -> Path:
+    """The route evidence a chip-path PnR leaves behind, hash-bound to it."""
+    pnr = R._pl.pnr_dir(project)
+    path = project / "reports" / "phase3" / "pad_ring_route_evidence.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "verdict": "PASS",
+        "gds_source_def_sha256": R._sha256_file(pnr / f"{TOP}.def"),
+        "gds_evidence": {"sha256": R._sha256_file(pnr / f"{TOP}.gds")},
+    }) + "\n")
+    return path
 
 
 def _drive(monkeypatch, project: Path, *, die: str, util: float) -> _Drive:
@@ -358,6 +402,11 @@ def _with_pad_table(project: Path, pins: dict) -> None:
     (docs / "L9_floorplan.md").write_text(_PAD_TABLE_MD, encoding="utf-8")
     (R._pl.pnr_dir(project) / f"{TOP}.def").write_text(
         _def_with_pins(1500000, 1500000, pins))
+    # This helper REPLACES the DEF the fixture bound its route evidence to, so
+    # the binding must follow the bytes. Re-bind rather than widen the check:
+    # the record still describes the exact DEF and GDS on disk, and a record
+    # that does not is still rejected.
+    _pad_ring_evidence(project)
 
 
 def test_pad_side_violation_is_disclosed_as_a_fail_row(tmp_path, monkeypatch):
