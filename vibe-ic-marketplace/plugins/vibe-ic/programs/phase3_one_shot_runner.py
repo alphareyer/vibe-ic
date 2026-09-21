@@ -1317,6 +1317,16 @@ def _docker_exec(container: str, cmd: str, timeout: int = 1800, *,
                  poll_s: Optional[float] = None,
                  abort_probe: Optional[Callable[[], Optional[str]]] = None,
                  outputs: Optional[List[str]] = None,
+                 #: R-0915-123. The TRANSIENT path(s) this call writes to and a
+                 #: later statement renames or removes. Two facts used to share
+                 #: `outputs=`: what the tool ATTESTS it produced, and what
+                 #: ORGANIC-#570 must rename away on a stall/ceiling kill so a
+                 #: half-written artefact is never read as a result. They are
+                 #: not the same list -- a transient must be isolated on a kill
+                 #: and must NOT be attested, because it will not exist at audit
+                 #: time (ORGANIC-443). `outputs=` now means attestation only;
+                 #: `isolate=` carries the transient.
+                 isolate: Optional[List[Path]] = None,
                  inputs: Optional[List[Path]] = None,
                  transcript_path: Optional[Path] = None) -> Tuple[int, str, str]:
     """Run shell cmd inside a Docker container.
@@ -1402,6 +1412,13 @@ def _docker_exec(container: str, cmd: str, timeout: int = 1800, *,
         term_grace_s=_WATCHDOG_TERM_GRACE_S,
         # the caller's OWN domain read, carried through rather than dropped
         abort_probe=abort_probe)
+    # ORGANIC-#570, now wired into the dispatch instead of being repeated by
+    # hand at each call site. A stall kill (`_RC_STALLED`) or the pathological
+    # ceiling (124) leaves whatever the tool had written so far at the canonical
+    # path; renaming it away is what stops a downstream step reading a
+    # half-written artefact as a finished one.
+    if isolate and res_rc in (_RC_STALLED, 124):
+        _docker_timeout_isolate([Path(x) for x in isolate])
     if input_hashes and _hash_declared_outputs(_PROV_SINK, inputs) != input_hashes:
         res_err += (f"\nInput artifacts changed during execution (native rc={res_rc}); "
                     "the output cannot be bound to the published input.\n")
@@ -54323,7 +54340,7 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
         for c, path, tcl in scripts:
             path.write_text(tcl)
             mapped = _to_container_path(str(path), container)
-            rc, out, err = _docker_exec(container, f'sta -no_init -exit {shlex.quote(mapped)} 2>&1', marker=mapped, outputs=[rpt_out], inputs=[netlist, sdc, spef_path, path] + ([_pl.pnr_dir(project) / f'{top}.def'] if (_pl.pnr_dir(project) / f'{top}.def').is_file() else []) + [Path(x) for x in inventory[c] if Path(x).is_file()])
+            rc, out, err = _docker_exec(container, f'sta -no_init -exit {shlex.quote(mapped)} 2>&1', marker=mapped, isolate=[rpt_out], inputs=[netlist, sdc, spef_path, path] + ([_pl.pnr_dir(project) / f'{top}.def'] if (_pl.pnr_dir(project) / f'{top}.def').is_file() else []) + [Path(x) for x in inventory[c] if Path(x).is_file()])
             if rc != 0 or re.search(r'(?mi)^\s*Error(?:\s|:)', out + '\n' + err):
                 return refuse(f'native execution failed rc={rc}; partial report is not complete')
     except (OSError, ValueError) as exc:
@@ -54349,6 +54366,25 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     if measured != {(c, role) for c in required for role in ('SETUP', 'HOLD')}:
         return refuse('native process/role measurements incomplete')
     rpt_out.replace(destination)
+    # R-0915-123 / ORGANIC-443. THE ATTESTATION NAMES THE PATH THAT SURVIVES.
+    # `rpt_out` is a transient: every check above reads it, and the line before
+    # this one renames it onto `destination`, so a declaration of `rpt_out` at
+    # the `_docker_exec` call would name a path that does NOT EXIST at audit
+    # time -- FILE_MISSING against a tool that worked, which is the false
+    # accusation ORGANIC-443 exists to forbid. Declaring `destination` at the
+    # call instead is no better: it does not exist YET, so `_hash_declared_
+    # outputs` would omit it and the receipt would hash nothing at all.
+    # So the declaration is made HERE, after the rename, by the mechanism this
+    # file already has for exactly this shape -- `_log_surviving_artefact`,
+    # whose own docstring says it is what lets "#437(c) still destroy a falsely
+    # clean report" and "ORGANIC-443 still forbid a declared output being
+    # removed later in the same function, because nothing is declared until it
+    # is known to survive". `_emit_multi_corner_sta` already uses it this way.
+    # It is reached only after the native census and every process/role
+    # measurement have passed, so the bytes hashed are bytes this run stands by.
+    _log_surviving_artefact(
+        [destination], produced_by="_emit_declared_process_sta",
+        marker=str(destination))
     return True
 
 
