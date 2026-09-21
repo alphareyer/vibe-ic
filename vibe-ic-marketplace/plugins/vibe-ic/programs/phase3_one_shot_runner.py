@@ -8147,6 +8147,23 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                                     "manufacturing_grid_um", 0.0) or 0.0))
                         except Exception:
                             _plan_em = None
+                if isinstance(em_floor, dict) and _plan_em:
+                    # R-0915-111 — WHAT WAS APPLIED, recorded where the step
+                    # that reports the resize can read it. MEASURED on spm
+                    # (run11b): the deck kept both widths at 1.6um and tripled
+                    # the Metal4 stripes, while the `pdn_em_resize` row said
+                    # "Metal4 1.6->3.95um" — the SHORTFALL the width arithmetic
+                    # derived, not the remedy the flow chose. A reader of that
+                    # row would conclude straps were widened when none were.
+                    em_floor.setdefault("applied", []).append({
+                        "layer": str(st["layer"]),
+                        "verdict": _plan_em.get("verdict"),
+                        "stripe_multiplier": _plan_em.get("stripe_multiplier"),
+                        "pitch_um": _plan_em.get("new_pitch_um"),
+                        "width_um": _plan_em.get("new_width_um"),
+                        "width_kept": (_plan_em.get("new_width_um")
+                                       == float(_sw0)),
+                    })
                 if _plan_em and _plan_em.get("verdict") == "MORE_STRIPES":
                     st["pitch"] = float(_plan_em["new_pitch_um"])
                     # R-0915-111 — THE OFFSET IS BUILT FROM THE PITCH AND MUST
@@ -32741,6 +32758,17 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
               f"{_pdn_em_floor['margin']}; per-layer w_em recorded in "
               "reports/phase3/pdn_em_sizing.json")
     pdn_block = _build_pdn_tcl(pdk, container, em_floor=_pdn_em_floor)
+    # R-0915-111 — the deck records what it APPLIED into the floor dict; persist
+    # it beside the arithmetic so the step that reports the resize reads the
+    # remedy instead of restating the shortfall.
+    if isinstance(_pdn_em_floor, dict) and _pdn_em_floor.get("applied"):
+        try:
+            _szp = _pl.reports_phase3_dir(project) / "pdn_em_sizing.json"
+            _szd = json.loads(_szp.read_text())
+            _szd["applied"] = _pdn_em_floor["applied"]
+            _aa.write_text(_szp, json.dumps(_szd, indent=2) + "\n")
+        except (OSError, ValueError):
+            pass
     # === hard-macro supply-pin auto global-connect ===
     # C4/2026-07-31 — this block is now emitted BEFORE `pdngen`, not
     # after it. Its purpose is to bind each hard macro's POWER/GROUND
@@ -62997,9 +63025,27 @@ def main() -> int:
                     _aa.write_text(_szp, json.dumps(_szd, indent=2) + "\n")
                 except (OSError, ValueError):
                     pass
+                # R-0915-111 — SAY WHAT WAS DONE, not only what was short.
+                _applied = []
+                try:
+                    _applied = (json.loads(
+                        (_pl.reports_phase3_dir(project)
+                         / "pdn_em_sizing.json").read_text()).get("applied")
+                        or [])
+                except (OSError, ValueError):
+                    _applied = []
+                _applied_txt = ""
+                if _applied:
+                    _applied_txt = " APPLIED: " + ", ".join(
+                        (f"{a['layer']} {a['stripe_multiplier']}x stripes at "
+                         f"{a['pitch_um']}um, width {a['width_um']}um KEPT"
+                         if a.get("verdict") == "MORE_STRIPES"
+                         else f"{a['layer']} width -> {a['width_um']}um")
+                        for a in _applied) + "."
                 plan.append(StepResult(
                     "pdn_em_resize", _pnr_redispatched.status, _rz_secs,
-                    f"one-shot EM resize: {_short_txt}; PnR re-run once "
+                    f"one-shot EM resize: SHORT BY {_short_txt}.{_applied_txt}"
+                    f" PnR re-run once "
                     f"({_rz_secs:.0f}s). Bound: one extra pass, sentinel-"
                     f"enforced. Arithmetic in reports/phase3/pdn_em_sizing.json"))
 
