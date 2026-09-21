@@ -141,11 +141,27 @@ def test_plan_picks_one_strap_layer_that_crosses_the_other():
 
 
 def test_pitch_comes_from_the_narrowest_port_a_pattern_can_still_cross():
+    """R-0915-111 (2026-09-21) corrected the FLOOR, not this rule.
+
+    WAS: `floor = 2*width + spacing = 2*1.12 + 0.28 = 2.52`. pdngen lays the
+    power AND the ground strap inside ONE pitch, so the gap it measures is
+    `pitch/2 - width`: the floor is `2*(width + spacing)`. The two agree while
+    the strap is narrow, which is why this pin held until an EM floor widened
+    one — MEASURED on spm x gf180mcuD (run10): a 1.96um Metal5 strap kept the
+    4.655um pitch derived for 1.6um, and pdngen refused the whole deck with
+    `[ERROR PDN-0108] Spacing (0.3650 um) … less than minimum spacing
+    (0.4600 um)` = 4.655/2 - 1.96, emitting no grid at all.
+
+    The rest of the rule is unchanged and still pinned: the narrowest port a
+    pattern can still cross sets the pitch, and slivers below the floor are
+    reported, not silently dropped."""
     plan = _macro_pdn_grid_plan([MACRO_LEF], TECH_LEF, STRIPES, "L1")
-    # floor = 2*width + layer min width  = 2*1.12 + 0.28
-    assert plan["pitch_floor"] == pytest.approx(2.52)
+    # floor = 2*(width + layer min spacing) = 2*(1.12 + 0.28)
+    assert plan["pitch_floor"] == pytest.approx(2.8)
     # the 0.6um slivers are below the floor; the 12um ports set the pitch
     assert plan["pitch"] == pytest.approx(12.0)
+    # and the floor is what pdngen would measure: pitch/2 - width >= spacing
+    assert plan["pitch_floor"] / 2 - 1.12 == pytest.approx(0.28)
 
 
 def test_ports_no_legal_pitch_can_reach_are_reported_not_dropped():
