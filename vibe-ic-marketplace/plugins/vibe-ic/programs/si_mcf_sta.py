@@ -135,6 +135,11 @@ MCF_SETUP_WORST = 2.0    # opposite-switching in-window -> slows victim (max del
 MCF_HOLD_WORST = 0.0     # same-switching in-window -> speeds victim (min delay)
 
 _PROGRAM = "si_mcf_sta"
+
+#: The basis this emitter may disclose: post-route extracted parasitics with the
+#: coupling caps MCF-folded into their victims. `_sta_basis.normalise_basis`
+#: prefix-resolves it to POST_ROUTE, the same way it resolves POST_ROUTE_NO_SPEF.
+_SI_STA_BASIS = "POST_ROUTE_MCF_SPEF"
 _VERSION = "1.0.0"
 
 
@@ -948,6 +953,106 @@ def _pl_import():
     return _pl
 
 
+def _top_from_netlist(netlist_p: Path) -> Optional[str]:
+    """The top module the NETLIST DECLARES, or None.
+
+    THE FALLBACK ONLY: an explicit `top` always wins, and this is consulted when
+    the caller supplied none.
+
+    WHY THE SHARED READER AND NOT A REGEX HERE. This used to be a bare
+    `re.search(r"^\s*module\s+(\w+)", raw)` inside `run`, which made `run` a
+    function that reads a value out of text and writes it into a record — the
+    shape `prose_polarity_consulted_check` flags, and it flagged it the moment
+    this module began publishing a DECLARED report. `gate_utils.find_modules` is
+    the shared module reader every other consumer already uses: it balances the
+    port list and requires a matching `endmodule`, so a bare `module` keyword
+    answers nothing.
+
+    WHAT THAT BUYS, MEASURED rather than assumed — `gate_utils._MODULE_KW_RE` is
+    `^\s*module\s+(\w+)\b`, anchored at LINE START, and a module must close
+    with `endmodule`. Over a netlist carrying a COMPLETE rival module
+    (`module ghost (input a); endmodule`) planted in a block comment, a line
+    comment, and a legal single-line `$display("...")` string, above the real
+    declaration and below it, the answer is `real_one` in all six: a rival in any
+    of those positions is never at line start.
+
+    THE ONE CASE NOT DEFENDED, stated rather than left to be discovered: a quote
+    spanning a raw newline, whose second line begins `module ghost … endmodule`,
+    DOES win. That is not legal Verilog — a string literal cannot contain an
+    unescaped newline — so the input is malformed, and defending it belongs in
+    the shared reader with every other caller, not here. I measured it, I am not
+    claiming it is closed, and `test_a_multiline_quote_is_a_known_limit` pins it
+    so the limit is visible instead of surprising.
+    """
+    if not netlist_p.exists():
+        return None
+    try:
+        import gate_utils                                    # noqa: PLC0415
+        spans = gate_utils.find_modules(
+            netlist_p.read_text(errors="replace"))
+    except (OSError, ImportError, ValueError):
+        return None
+    return spans[0].name if spans else None
+
+def publish_si_sta_report(project: PathLike, out_json_p: Path,
+                          out_json: Optional[PathLike], *, top: str,
+                          spef_name: str, verdict: str,
+                          nom_setup, nom_hold, nom_rc: int,
+                          corners: list) -> Optional[Path]:
+    """Publish the SI STA report with its basis, or write NOTHING. (R-0915-107)
+
+    Until this existed, the three per-corner OpenSTA transcripts landed in the
+    WORK dir as `si_mcf_sta_<tag>.rpt` and nothing published the SI STA report
+    itself, while `_path_layout` carried a routing row for the untagged
+    `si_mcf_sta.rpt` that no writer ever used — so the stage-stamp scan read that
+    row as an emitted, undeclared timing report. Step 27 now DECLARES this report
+    and this function is its producer.
+
+    THE BASIS IS NOT DECORATION. This STA runs over the post-route extracted
+    parasitics with each coupling cap folded into its victim by the Miller
+    factor, so the basis it may state is POST_ROUTE — spelled
+    `POST_ROUTE_MCF_SPEF`, which `_sta_basis.normalise_basis` prefix-resolves to
+    POST_ROUTE exactly as it resolves `POST_ROUTE_NO_SPEF`.
+
+    IF IT CANNOT STATE A BASIS IT WRITES NOTHING, and returns None. A run where
+    no corner reached OpenSTA measured no parasitic timing, so it has no basis to
+    disclose, and a timing report without one is the laundering the stage gate
+    exists to catch. This is a SEPARATE function rather than four lines inside
+    `run` so that clause is a property a test can hold, not an inline condition
+    reachable only through a container.
+
+    IT FOLLOWS `out_json`, NEVER THE SHIPPING PATH. `si_mcf_repair` measures a
+    CANDIDATE through `run` with `out_json` redirected, and the r21 incident this
+    module records is precisely a candidate writing over the shipping run's
+    working set. A redirected destination therefore carries the report with it;
+    only the DEFAULT destination names the canonical artefact, which is what lets
+    a reader — and the stage-stamp scan — see which report this scope publishes.
+    """
+    if nom_rc != 0 or not any(c.get("sta_rc") == 0 for c in corners):
+        return None
+    _pl = _pl_import()
+    out_rpt_p = (Path(out_json).with_suffix(".rpt") if out_json
+                 else _pl.report_path(Path(project), "si_mcf_sta.rpt"))
+    lines = [
+        f"# {_PROGRAM} — SI-aware STA via Miller Coupling Factor bounding",
+        f"STA_BASIS: {_SI_STA_BASIS}",
+        f"design_top: {top}",
+        f"spef: {spef_name}",
+        f"verdict: {verdict}",
+        "",
+        f"nominal (grounded, no fold)   worst setup {nom_setup} ns  "
+        f"worst hold {nom_hold} ns",
+    ]
+    for corner in corners:
+        lines.append(
+            f"mcf {corner.get('corner')!s:12s} worst setup "
+            f"{corner.get('worst_setup_slack_ns')} ns  worst hold "
+            f"{corner.get('worst_hold_slack_ns')} ns")
+    out_rpt_p.parent.mkdir(parents=True, exist_ok=True)
+    out_rpt_p.write_text("\n".join(lines) + "\n")
+    return out_rpt_p
+
+
 def run(project: PathLike, *, container: str = _pin.default_container_name(),
         spef: Optional[str] = None, netlist: Optional[str] = None,
         sdc: Optional[str] = None, liberty: Optional[str] = None,
@@ -977,9 +1082,7 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
         netlist_p = cands[0] if cands else (pnr / "pnr.v")
     sdc_p = Path(sdc) if sdc else (pnr / "constraint.sdc")
     if top is None:
-        mm = re.search(r"^\s*module\s+(\w+)", netlist_p.read_text(errors="replace"),
-                       re.M) if netlist_p.exists() else None
-        top = mm.group(1) if mm else "top"
+        top = _top_from_netlist(netlist_p) or "top"
     if liberty is None:
         libs = sorted((project / "input" / "pdk" / "liberty").glob("*_typ.lib"))
         if not libs:
@@ -1181,6 +1284,14 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
     out_json_p.parent.mkdir(parents=True, exist_ok=True)
     out_json_p.write_text(json.dumps(report, indent=2) + "\n")
     report["out_json"] = str(out_json_p)
+
+    # ── THE SI STA REPORT, PUBLISHED AND STAMPED (R-0915-107) ───────────────
+    published = publish_si_sta_report(
+        project, out_json_p, out_json, top=top, spef_name=spef_p.name,
+        verdict=verdict, nom_setup=nom_setup, nom_hold=nom_hold, nom_rc=nom_rc,
+        corners=corners_out)
+    if published is not None:
+        report["out_rpt"] = str(published)
     return report
 
 

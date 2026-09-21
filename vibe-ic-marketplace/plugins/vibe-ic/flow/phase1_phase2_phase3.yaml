@@ -6535,6 +6535,46 @@ steps:
       # sha256/clean_run_v1427_20260715, spm/v1.5.58_ihp-sg13g2,
       # spm/v1.9.96_gf180mcuD).
       - "reports/phase3/si_mcf_sta.json"
+      # R-0915-107 — THE SI STA REPORT ITSELF, not only its verdict JSON.
+      #
+      # `signoff_report_states_its_stage` disclosed `si_mcf_sta.rpt` as a
+      # timing report emitted but declared by no step. The ruling: an emitted
+      # timing/power report no step declares is DEBT, this one is the
+      # signal-integrity (crosstalk/MCF) STA report, it belongs to step 27, and
+      # its emitter must stamp its basis or not write it at all.
+      #
+      # BOTH HALVES LAND TOGETHER, and they have to. Before this change NOTHING
+      # wrote `reports/phase3/si_mcf_sta.rpt`: `si_mcf_sta.py` ran its three
+      # OpenSTA corners into `si_mcf_sta_<tag>.rpt` inside the WORK dir and
+      # published only the JSON, so `_path_layout`'s routing row for the
+      # untagged name had no writer behind it. `si_mcf_sta.run` now publishes
+      # the report beside its own `out_json` (so a redirected CANDIDATE cannot
+      # overwrite the shipping run — the r21 incident that module records), with
+      # `STA_BASIS: POST_ROUTE_MCF_SPEF`, and writes NOTHING when no corner
+      # reached OpenSTA, because a timing report with no basis is the laundering
+      # the stage gate exists to catch.
+      #
+      # BLAST RADIUS, MEASURED, and it is a real cost the ruling accepted:
+      # `check_step` over step 27 on the subservient r46 run root
+      # (`_lane_icsub2/c22_proj`, a completed phase-3 run) moves
+      #   PASS -> FAIL / missing_artefact
+      #     required_outputs missing: ['reports/phase3/si_mcf_sta.rpt']
+      #     (satisfied 2/3)
+      # because a run that FINISHED before the emitter published this report
+      # cannot retroactively contain it. Note the verdict word: it is
+      # missing_artefact, NOT a basis FAIL — the report is absent, not unstamped.
+      # Every already-completed run root is in that position until it is re-run;
+      # a fresh run produces the stamped report and keeps its verdict.
+      # r48 (`c24_proj`) does NOT move, but not for the reason a first reading
+      # suggests: it is phase-2-only and carries NONE of step 27's three
+      # outputs, so it was ALREADY FAIL / missing_artefact at base. Measured
+      # both sides: base r46 PASS / r48 FAIL, candidate r46 FAIL / r48 FAIL.
+      # One root moves, and it is the completed one.
+      # NOT MEASURED, and not asserted: the 10-run-root figure this step's
+      # `si_mcf_sta.json` entry quotes. Those roots live in `benchmark-data`,
+      # which is not in this clone, so I could not reproduce that population —
+      # "could not read it" is not "read it and it was empty".
+      - "reports/phase3/si_mcf_sta.rpt"
     gate:
       all_of:
         - files_exist: ["reports/phase3/si_crosstalk.rpt", "reports/phase3/si_crosstalk.json"]

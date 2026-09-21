@@ -1102,6 +1102,9 @@
           "alternative": "reports/phase3/si_mcf_sta.json",
           "path": "reports/phase3/si_mcf_sta.json",
           "size_bytes": 2723
+        },
+        "reports/phase3/si_mcf_sta.rpt": {
+          "status": "UNPROVEN"
         }
       }
     },

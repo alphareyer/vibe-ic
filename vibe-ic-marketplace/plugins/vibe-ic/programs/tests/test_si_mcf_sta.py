@@ -19,6 +19,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 _PROGRAMS = Path(__file__).resolve().parents[1]
 if str(_PROGRAMS) not in sys.path:
     sys.path.insert(0, str(_PROGRAMS))
@@ -300,3 +302,173 @@ def test_worst_setup_hold_parse():
 
 def test_worst_setup_hold_missing():
     assert M.worst_setup_hold("no slack here") == (None, None)
+
+
+# ── R-0915-107: the SI STA report is published WITH its basis, or not at all ──
+import _sta_basis  # noqa: E402
+
+
+def _corners(*rcs):
+    return [{"corner": f"mcf_{i}", "worst_setup_slack_ns": 1.0,
+             "worst_hold_slack_ns": 2.0, "sta_rc": rc}
+            for i, rc in enumerate(rcs)]
+
+
+def _publish(tmp_path, *, rcs=(0,), nom_rc=0, out_json=None):
+    out_json_p = (Path(out_json) if out_json
+                  else tmp_path / "reports/phase3/si_mcf_sta.json")
+    out_json_p.parent.mkdir(parents=True, exist_ok=True)
+    return M.publish_si_sta_report(
+        tmp_path, out_json_p, out_json, top="widget", spef_name="w.spef",
+        verdict="PASS", nom_setup=1.0, nom_hold=2.0, nom_rc=nom_rc,
+        corners=_corners(*rcs))
+
+
+def test_the_published_report_states_a_basis_that_resolves(tmp_path):
+    """Step 27 DECLARES this report, so it must exist and must disclose the
+    basis it was measured on — post-route extracted parasitics with the coupling
+    caps MCF-folded. Read through `_sta_basis`, the ONE reader of the stamp, so
+    this asserts what every consumer will see and not a string of its own."""
+    p = _publish(tmp_path)
+    assert p is not None and p.is_file()
+    assert p.name == "si_mcf_sta.rpt"
+    assert _sta_basis.declared_basis(p.read_text()) == "POST_ROUTE"
+
+
+def test_no_corner_reached_opensta_means_no_report(tmp_path):
+    """THE RULING'S OWN CLAUSE: if the emitter cannot state a basis it does not
+    write the report. A run where no corner reached OpenSTA measured no parasitic
+    timing, so it has no basis to disclose — and a timing report without one is
+    the laundering the stage gate exists to catch. Nothing is written, and the
+    absence is the honest artefact."""
+    assert _publish(tmp_path, rcs=(1, 1)) is None
+    assert not (tmp_path / "reports/phase3/si_mcf_sta.rpt").exists()
+
+
+def test_a_failed_nominal_run_also_publishes_nothing(tmp_path):
+    """The nominal grounded corner is the reference the folded corners are read
+    against; without it there is no basis either."""
+    assert _publish(tmp_path, rcs=(0,), nom_rc=1) is None
+    assert not (tmp_path / "reports/phase3/si_mcf_sta.rpt").exists()
+
+
+def test_one_good_corner_among_failures_is_enough_to_publish(tmp_path):
+    """Both directions of the same predicate: the clause withholds the report
+    when NO corner measured, not whenever any corner failed."""
+    p = _publish(tmp_path, rcs=(1, 0))
+    assert p is not None and p.is_file()
+
+
+def test_a_redirected_out_json_carries_the_report_with_it(tmp_path):
+    """The r21 discipline this module already records: `si_mcf_repair` measures a
+    CANDIDATE through `run` with `out_json` redirected, and a candidate must not
+    overwrite the shipping run's working set. So the report follows `out_json`
+    and the canonical path stays untouched."""
+    cand = tmp_path / "txn" / "si_mcf_sta_candidate.json"
+    cand.parent.mkdir(parents=True, exist_ok=True)
+    p = _publish(tmp_path, out_json=cand)
+    assert p == cand.with_suffix(".rpt") and p.is_file()
+    assert not (tmp_path / "reports/phase3/si_mcf_sta.rpt").exists()
+    assert _sta_basis.declared_basis(p.read_text()) == "POST_ROUTE"
+
+
+# ── the top-module read is a DECLARATION read, not a sentence read ────────────
+#
+# The polarity ratchet flagged `si_mcf_sta::run` when this module began
+# publishing a DECLARED report: `top` came from a bare
+# `re.search(r"^\s*module\s+(\w+)", raw)` INSIDE `run`, so `run` was a function
+# that read a value out of text and wrote it into a record. The read now goes
+# through `gate_utils.find_modules`, the shared module reader.
+#
+# WHAT THESE CASES PIN, and it is narrower than the first version of this block
+# claimed. I had added a comment/string stripper and asserted it was what kept a
+# sentence from winning. MEASURED, that was wrong twice over:
+# `gate_utils._MODULE_KW_RE` is `^\s*module\s+(\w+)\b` — anchored at LINE
+# START — and a module must close with `endmodule`, so comment and legal-string
+# rivals were ALREADY defeated without any stripping; and the one rival that does
+# win, a quote spanning a raw newline, was NOT defeated by the stripper either.
+# The stripper was dropped rather than shipped with a docstring it did not earn.
+_RIVAL = "module ghost (input a); endmodule"
+
+_RIVAL_CONTEXTS = (
+    ("block comment", f"/* {_RIVAL} */\n"),
+    ("line comment", f"// {_RIVAL}\n"),
+    ("display string", f'initial $display("{_RIVAL}");\n'),
+    ("localparam string", f'localparam S = "{_RIVAL}";\n'),
+)
+
+_REAL = "module real_one (input a);\nendmodule\n"
+
+
+@pytest.mark.parametrize("label,rival", _RIVAL_CONTEXTS)
+def test_a_complete_rival_module_in_prose_cannot_win_the_top_read(
+        tmp_path, label, rival):
+    """A COMPLETE rival — `module ghost (input a); endmodule`, not a bare keyword
+    — placed ABOVE the real declaration, where a first-match read takes it. The
+    design's own declaration must still be the answer, because none of these
+    puts `module` at line start."""
+    n = tmp_path / f"{label.replace(' ', '_')}.v"
+    n.write_text(rival + _REAL)
+    assert M._top_from_netlist(n) == "real_one", label
+
+
+@pytest.mark.parametrize("label,rival", _RIVAL_CONTEXTS)
+def test_a_complete_rival_below_the_declaration_cannot_win_either(
+        tmp_path, label, rival):
+    """Both directions a denial could act: after the declaration as well as
+    before it."""
+    n = tmp_path / f"below_{label.replace(' ', '_')}.v"
+    n.write_text(_REAL + rival)
+    assert M._top_from_netlist(n) == "real_one", label
+
+
+def test_a_multiline_quote_is_a_known_limit_and_is_recorded_as_one(tmp_path):
+    """THE ONE CASE NOT DEFENDED, pinned so the limit is visible rather than
+    surprising. A quote spanning a raw newline whose second line begins with a
+    complete module DOES win the read. That is not legal Verilog — a string
+    literal cannot contain an unescaped newline — so the netlist is malformed,
+    and closing it belongs in the shared reader with every other caller of
+    `find_modules`, not in this emitter. Asserted in the direction it actually
+    behaves; if the shared reader is ever hardened, this case fails and is the
+    prompt to delete it."""
+    n = tmp_path / "multiline_quote.v"
+    n.write_text(f'initial $display("\n{_RIVAL}");\n' + _REAL)
+    assert M._top_from_netlist(n) == "ghost"
+
+
+def test_the_declaration_is_what_moves_the_answer(tmp_path):
+    """NEGATIVE CONTROL: the answers above must be about the grammar, not a
+    fixture that could not move. Rename the real module and the answer follows
+    it — so the read is reaching the text."""
+    n = tmp_path / "moved.v"
+    n.write_text("module actually_this_one (input a);\nendmodule\n")
+    assert M._top_from_netlist(n) == "actually_this_one"
+
+
+def test_an_unclosed_module_is_not_a_declaration(tmp_path):
+    """THE `endmodule` HALF, pinned with the fixture that actually discriminates.
+    An earlier version of this case used a bare `module\n`, which a plain
+    line-anchored regex ALSO rejects (nothing follows the keyword) — so it held
+    whether or not the reader required a closing `endmodule`, and the mutation
+    that removed that requirement left it green. `module orphan (input a);` with
+    no `endmodule` separates them: a bare regex answers `orphan`, the shared
+    reader answers nothing, and nothing is the honest answer — the caller then
+    falls back to its own default rather than shipping a scraped word as the
+    design's top."""
+    n = tmp_path / "orphan.v"
+    n.write_text("module orphan (input a);\n")
+    assert M._top_from_netlist(n) is None
+
+
+def test_a_bare_module_keyword_answers_nothing(tmp_path):
+    """The weaker sibling of the case above, kept because it is a different
+    input: a keyword with no name at all."""
+    n = tmp_path / "bare.v"
+    n.write_text("module\n")
+    assert M._top_from_netlist(n) is None
+
+
+def test_an_absent_netlist_answers_nothing(tmp_path):
+    """"Could not read it" is not "read it and it declared nothing"; both land on
+    None here, and the caller's default is what names the fallback."""
+    assert M._top_from_netlist(tmp_path / "nope.v") is None
