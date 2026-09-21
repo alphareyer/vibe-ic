@@ -1390,12 +1390,37 @@ steps:
     # missing/conflicting declaration, or any non-PASS owner verdict, leaves
     # every dependent row hard MISSING with blocked-by-upstream attribution.
     condition_declarations:
+      # THE EXCLUSIVITY IS IP-TERMINAL vs CHIP-PATH, AND NOT BETWEEN THE TWO
+      # CHIP MARKERS (R-0915-98(2); lane icslot4, 2026-09-21).
+      #
+      # MEASURED on subservient x gf180mcuD r48, an owner-attested DIE: this
+      # step PASSES and writes BOTH `SELF_TAPEOUT.txt` and the operator's
+      # `slots/*.yaml` catalogue (four files, same mtime, same step). Listed
+      # flat, `exactly_one` then matched TWO and booked `delivery_route`
+      # CONFLICTING, which blocked 15.5ic, 26.5ic, 37.5ip and 37.5ic
+      # by-upstream — the DIE's whole phase-3 entry — on a route the design had
+      # declared unambiguously.
+      #
+      # THE CO-EXISTENCE IS BY DESIGN AND THREE PLACES ALREADY SAY SO. R-98(2):
+      # the slot files on disk are the PDK's live CATALOGUE — information, not
+      # a purchase. `tapeout_declaration_gen`'s own docstring: "37.5ic's
+      # condition is `slots/*.yaml` OR `SELF_TAPEOUT.txt`, `any_of`", and it
+      # retires only `NO_TEMPLATE.txt` on a self tape-out, because IP and CHIP
+      # are what cannot both be true. `_tapeout_declaration.route_of` already
+      # ORDERS the two chip markers rather than treating them as a conflict:
+      # slot files retain the operator obligation, and an owner-consistent DIE
+      # with an explicit operator absence distinguishes a retained catalogue
+      # from a purchase. Only THIS predicate re-derived the route from file
+      # presence alone, and it was the one that disagreed.
+      #
+      # So the chip path is ONE alternative with two accepted spellings, and
+      # the guard is intact: a project carrying the IP terminal AND either chip
+      # marker still matches two alternatives and is still CONFLICTING.
       delivery_route:
         exactly_one: true
         files_exist:
-          - "input/submission_template/slots/*.yaml"
+          - "input/submission_template/slots/*.yaml OR input/submission_template/SELF_TAPEOUT.txt"
           - "input/submission_template/NO_TEMPLATE.txt"
-          - "input/submission_template/SELF_TAPEOUT.txt"
     required_outputs:
       # THE `OR` IS THE HONEST HALF. A design that targets no shuttle still has to
       # SAY so: this flow has no `optional:` key on an input, and a step that

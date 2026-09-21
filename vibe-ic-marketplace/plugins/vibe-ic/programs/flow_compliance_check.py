@@ -12529,8 +12529,25 @@ def _condition_pattern_satisfied(project: Path, pat: str) -> bool:
     declares zero blocks stands the track down, so a corrupt or truncated list
     can never silently delete the analog track.
 
+    ONE PATTERN MAY NAME SEVERAL ACCEPTED SPELLINGS, `" OR "`-joined, and this
+    function now reads that the way the rest of this file already does —
+    through `_declared_output_branches`, the ONE splitter `required_outputs`
+    uses. Two `OR` dialects in one flow definition is one dialect too many: the
+    yaml at step 0.5ic already writes `slots/*.yaml OR NO_TEMPLATE.txt OR
+    SELF_TAPEOUT.txt` in its `required_outputs` and was refused here, because
+    this reader treated the whole joined string as a single literal glob and
+    matched nothing. MEASURED on subservient r48: `_glob_first` returns `[]`
+    for the joined form on a project where BOTH named files exist.
+    (R-0915-101 follow-up, lane icslot4.)
+
     chip-AGNOSTIC: JSON structure only — no chip, vendor, PDK or SKU literal.
     """
+    branches = _declared_output_branches(pat)
+    if len(branches) > 1:
+        # ANY-OF over the branches, and the per-branch semantics below are
+        # unchanged — including the analog content test, which a branch naming
+        # a block list still gets for itself.
+        return any(_condition_pattern_satisfied(project, b) for b in branches)
     hits = _glob_first(project, pat)
     if "analog_block_list" not in pat:
         return bool(hits)
