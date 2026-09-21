@@ -8493,13 +8493,41 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
     physical-only cells' rails are net-owned shapes the spacing engine sees.
     Both halves are NONFATAL-guarded; the audit below is the gate."""
     rr = (
-        "# The physical-only cells' rails are net-owned shapes only NOW, so the\n"
-        "# spacing engine has to see them: re-route incrementally. TritonRoute\n"
-        "# rips up and re-lays only the wires that now violate.\n"
+        "# R-0915-105 — ONLY WHEN THE RE-CONNECT ACTUALLY CHANGED SOMETHING,\n"
+        "# AND NEVER SILENTLY. A whole-design `detailed_route` rips and re-lays\n"
+        "# every wire; issuing one when the re-connect changed nothing spends\n"
+        "# the design's routing on a no-op. MEASURED on a die whose core is\n"
+        "# its ring's whole interior: the re-connect moved 12 terminals of\n"
+        "# 23,766 onto a net, the\n"
+        "# whole-design re-route that followed failed its own connectivity\n"
+        "# check ([ERROR DRT-0206]) -- and the failure was swallowed as\n"
+        "# PG_REROUTE_NONFATAL, leaving 105 signal nets with no wire and the\n"
+        "# run to discover it 3877 log lines later as\n"
+        "# NAMED_VIOL_REROUTE_INCOMPLETE, with no routed.def and drc/lvs never\n"
+        "# dispatched. Two things follow, and both are here:\n"
+        "#   (1) the delta decides. Zero changed terminals, no re-route.\n"
+        "#   (2) a re-route that fails is a VERDICT OF THIS STEP, by name. It\n"
+        "#       is not caught: the design that would continue is not routed,\n"
+        "#       and a rollback is not available -- measured in this repo's own\n"
+        "#       adopt script, `dbChip_destroy` + `read_db` restores the wires\n"
+        "#       and then kills STA for the rest of the session ([CRITICAL\n"
+        "#       ORD-2008]), and the ECO journal restores neither state.\n"
         "if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
-        "if {[catch {detailed_route -verbose 0 {*}$_vic_drc_opt} _pgrr_err]} {\n"
-        "  puts \"PG_REROUTE_NONFATAL: $_pgrr_err\"\n"
+        "set _pg_delta [expr {$_pg_bad_before - $_pg_bad_after}]\n"
+        "if {$_pg_delta <= 0} {\n"
+        "  puts \"PG_REROUTE_NOT_OWED: the re-connect changed 0 terminal(s) "
+        "($_pg_bad_before on no net before, $_pg_bad_after after); the routing "
+        "this step inherited is kept as it is\"\n"
         "} else {\n"
+        "  puts \"PG_REROUTE_OWED: $_pg_delta terminal(s) gained a net "
+        "($_pg_bad_before -> $_pg_bad_after); re-routing so the spacing engine "
+        "sees their rails\"\n"
+        "  if {[catch {detailed_route -verbose 0 {*}$_vic_drc_opt} _pgrr_err]} {\n"
+        "    puts \"PG_REROUTE_FAILED: $_pgrr_err\"\n"
+        "    error \"PG_REROUTE_FAILED: $_pgrr_err -- the PG re-route rips and "
+        "re-lays every wire, so a design that survives this error is NOT "
+        "routed; this is a verdict of postroute_fill, not a note\"\n"
+        "  }\n"
         "  puts \"PG_REROUTE_DONE\"\n"
         "}\n") if reroute else ""
     return (
@@ -8531,11 +8559,27 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         "  puts \"PG_DONTTOUCH_LIFT_NONFATAL: $_pgdt_err\"\n"
         "}\n"
         "puts \"PG_DONTTOUCH_LIFTED: [llength $_pg_dnt]\"\n"
+        "# THE DELTA, measured on the same predicate the audit below uses, so\n"
+        "# the two can never disagree about what 'changed' means.\n"
+        "proc _vic_pg_on_no_net {} {\n"
+        "  set _n 0\n"
+        "  foreach _i [[ord::get_db_block] getInsts] {\n"
+        "    foreach _t [$_i getITerms] {\n"
+        "      set _sg [[$_t getMTerm] getSigType]\n"
+        "      if {$_sg ne \"POWER\" && $_sg ne \"GROUND\"} { continue }\n"
+        "      if {[$_t getNet] eq \"NULL\"} { incr _n }\n"
+        "    }\n"
+        "  }\n"
+        "  return $_n\n"
+        "}\n"
+        "set _pg_bad_before [_vic_pg_on_no_net]\n"
         "if {[catch {global_connect} _pgrc_err]} {\n"
         "  puts \"PG_RECONNECT_NONFATAL: $_pgrc_err\"\n"
         "} else {\n"
         "  puts \"PG_RECONNECT_DONE\"\n"
         "}\n"
+        "set _pg_bad_after [_vic_pg_on_no_net]\n"
+        "puts \"PG_RECONNECT_DELTA: on_no_net $_pg_bad_before -> $_pg_bad_after\"\n"
         "# Restore do-not-touch BEFORE the re-route, so the router cannot resize\n"
         "# or drop a spare that the flow has promised downstream ECO it kept.\n"
         "if {[catch {\n"
@@ -15822,7 +15866,7 @@ _PNR_NONFATAL_STAGES = frozenset({
 # stable, readable stage list in the diagnosis; membership is not a gate.
 _PNR_STAGE_ORDER = (
     "floorplan", "placement", "cts", "hold_repair",
-    "global_route", "detailed_route",
+    "global_route", "preroute_fill", "detailed_route",
     "postroute_drv_repair", "postroute_antenna_repair",
     "postroute_drv_reconverge", "postroute_antenna_reconverge",
     "postroute_fill",
@@ -27957,6 +28001,7 @@ def _build_pnr_tcl_text(*, tech_lef_c: str, cell_lef_c: str,
                         post_reconverge_antenna_block: str = "",
                         tapcell_prune_block: str = "",
                         pg_reconnect_block: str = "",
+                        pg_preconnect_block: str = "",
                         hardmacro_supply_gc_block: str = "",
                         place_pins_block: Optional[str] = None,
                         macro_place_block: str = "",
@@ -28372,6 +28417,21 @@ if {{[catch {{repair_timing -hold}} _rth2_err]}} {{
 # detailed_route fails (open-source iic-osic-tools has it; some custom
 # PDKs without RC files have detailed_route that completes without wire
 # geometry but at least the global_route step does write SPECIALNETS).
+{_pnr_stage_begin("preroute_fill")}
+puts "{_PNR_STAGE_MARKER} preroute_fill"
+# R-0915-105 (owner, 2026-09-21) — PLACE -> FILLERS/TAPS -> PG CONNECT -> ROUTE.
+# Fillers, the well-tie coverage repair and the PG global-connect all CREATE
+# INSTANCES or CHANGE PIN OWNERSHIP, and every one of them used to run AFTER
+# the design was routed — which owed the flow a whole-design re-route to let
+# the spacing engine see rails that had just become net-owned shapes.
+# MEASURED on a die whose core is its ring's whole interior (run9): that
+# re-route failed its
+# own connectivity check ([ERROR DRT-0206]) and was swallowed as
+# PG_REROUTE_NONFATAL, leaving 105 signal nets with no wire, no routed.def, and
+# drc/lvs never dispatched — for a re-connect that had moved 12 terminals of
+# 23,766. Running them HERE owes no re-route at all: the router sees the
+# fillers, the taps and the owned rails from its first pass.
+{filler_block}{pg_preconnect_block}{_pnr_stage_end("preroute_fill")}
 puts "{_PNR_STAGE_MARKER} detailed_route"
 # vibe-ic#1080 — ASK THE ROUTER for its own count instead of scraping it.
 # `push`, not `set`: this Tcl is one session and the metrics stage is global,
@@ -28423,7 +28483,12 @@ puts "{_PNR_STAGE_MARKER} postroute_antenna_reconverge"
 # 2079 decap + 150 fill cells; DRC still 0, worst IR 35 µV (2500× margin).
 # NONFATAL-guarded so PDKs without the masters degrade gracefully.
 puts "{_PNR_STAGE_MARKER} postroute_fill"
-{filler_block}{pg_reconnect_block}{_pnr_stage_begin("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} postroute_named_violation_reroute"
+# R-0915-105 — the fillers and the taps are already in (see `preroute_fill`).
+# What stays here is the RESIDUAL connect + the audit: a step after the route
+# may still have created an instance (antenna diodes, a repair buffer), and
+# those terminals must be owned. The re-route inside it runs only when the
+# delta says terminals actually changed, and a failure there is a verdict.
+{pg_reconnect_block}{_pnr_stage_begin("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} postroute_named_violation_reroute"
 {_named_viol_reroute_block}{_pnr_stage_end("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} write_routed"
 }} else {{
   puts "POSTROUTE_RECONVERGE_DOWNSTREAM_REFUSED: SDR transaction rolled back; skipping antenna/PG/named reroute"
@@ -32104,6 +32169,11 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     # PDK (the audit must run even when the PDN was skipped — that is precisely
     # the case that used to ship silently). See _build_pg_reconnect_tcl.
     pg_reconnect_block = _build_pg_reconnect_tcl()
+    # R-0915-105 — the PRIMARY connect runs before the first detailed route,
+    # where there is no routing to re-route; `reroute=False` is that fact, not
+    # an option. The residual block above keeps the re-route for instances a
+    # later step creates, and only when the delta says one is owed.
+    pg_preconnect_block = _build_pg_reconnect_tcl(reroute=False)
 
     # v0.2.14 — antenna repair + the DRT-0305 PG-net cleanup that must precede
     # routing. Both built by pure helpers so the silicon-critical Tcl is pinned by
@@ -32436,6 +32506,7 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         filler_block=filler_block,
         tapcell_prune_block=tapcell_prune_block,
         pg_reconnect_block=pg_reconnect_block,
+        pg_preconnect_block=pg_preconnect_block,
         hardmacro_supply_gc_block=hardmacro_supply_gc_block,
         place_pins_block=place_pins_block,
         macro_place_block=macro_place_block,
