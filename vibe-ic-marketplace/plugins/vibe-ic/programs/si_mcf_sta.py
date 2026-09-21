@@ -1028,7 +1028,18 @@ def publish_si_sta_report(project: PathLike, out_json_p: Path,
     only the DEFAULT destination names the canonical artefact, which is what lets
     a reader — and the stage-stamp scan — see which report this scope publishes.
     """
-    if nom_rc != 0 or not any(c.get("sta_rc") == 0 for c in corners):
+    # `corners` IS A MAPPING, and reading it as a list is why this published
+    # nothing for a day. `run()` builds `corners_out: Dict[str, dict]` keyed by
+    # corner name, so `for c in corners` iterates the KEYS -- strings -- and
+    # `c.get` raises AttributeError. MEASURED on the spm run18L run (plugin
+    # 1.23.20, a run that PASSED): every corner had `sta_rc` 0 and `nominal.sta_rc`
+    # 0, the JSON was written, this function raised, the shipping caller ignored
+    # the subprocess rc, and step 27 FAILed `missing_artefact` on the report this
+    # function exists to publish. Accept either shape so a future caller passing a
+    # list is not a second silent failure.
+    rows = list(corners.values()) if hasattr(corners, "values") else list(corners)
+    if nom_rc != 0 or not any(
+            isinstance(c, dict) and c.get("sta_rc") == 0 for c in rows):
         return None
     _pl = _pl_import()
     out_rpt_p = (Path(out_json).with_suffix(".rpt") if out_json
@@ -1043,7 +1054,7 @@ def publish_si_sta_report(project: PathLike, out_json_p: Path,
         f"nominal (grounded, no fold)   worst setup {nom_setup} ns  "
         f"worst hold {nom_hold} ns",
     ]
-    for corner in corners:
+    for corner in rows:
         lines.append(
             f"mcf {corner.get('corner')!s:12s} worst setup "
             f"{corner.get('worst_setup_slack_ns')} ns  worst hold "
