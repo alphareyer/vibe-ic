@@ -24041,7 +24041,10 @@ def _repair_design_margin_tcl(marker: str, extra: str = "") -> str:
         f"}} else {{ puts \"{marker.upper()}_MARGIN_APPLIED: {m}\" }}\n")
 
 
-def _routing_integrity_check_tcl(marker_prefix: str = "SHIP") -> str:
+def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
+                                 membership_path: Optional[str] = None,
+                                 stage: Optional[str] = None,
+                                 ) -> str:
     """v1.8.43 — POST-REROUTE routing-integrity CHECK. Emits
     ``<PFX>_UNROUTED_NETS: <n> <up to 12 names>``.
 
@@ -24098,7 +24101,23 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP") -> str:
 
     -- the planted nets come back by name, including a spare-tie net, which is
     the v1.5.65 hazard this check exists for. On the no-pad arm of the same
-    design the two bodies agree exactly, 0/0 before and 5/5 after."""
+    design the two bodies agree exactly, 0/0 before and 5/5 after.
+
+    THE STAGE IS A FIELD, NOT PART OF THE MARKER NAME, and that is a contract
+    this lane already wrote. The two post-route antenna passes are the same
+    stage emitted twice and must differ in NOTHING but the one stage token
+    each pass's probes carry -- `test_splitting_the_reconverge_block_did_not_
+    drop_the_second_antenna_pass` normalises that ONE token and then demands
+    byte-equality. Baking the stage into the marker name (`UNROUTED_PROBE_
+    AFTER_POSTROUTE_ANTENNA_REPAIR_...`) put a SECOND, differently-spelled
+    per-pass token outside that normalisation and broke the equality; the
+    arms caught it on 5b5bd02af. So `stage` is emitted as a field, spelled
+    EXACTLY as `_pin_access_probe_tcl` spells it, and one normalisation now
+    covers both probes. A caller that names no stage gets its previous lines
+    byte-for-byte -- SHIP, SDR, NAMED_VIOL_REROUTE and PAD_CHECK are
+    unchanged, including the `SHIP_UNROUTED_NETS:` line the promotion gate
+    parses."""
+    _st = f"stage={stage} " if stage else ""
     return (
         # Shapes of ONE terminal as {layer x0 y0 x1 y1} records. Empty list ==
         # "could not look", which the caller must not read as "no overlap".
@@ -24150,6 +24169,7 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP") -> str:
         "}\n"
         "if {[catch {\n"
         "  set _unr 0; set _abut 0; set _blind 0; set _unrn {}; set _abn {}\n"
+        "  set _unra {}; set _abna {}\n"
         "  foreach _net [[ord::get_db_block] getNets] {\n"
         "    set _st [$_net getSigType]\n"
         "    if {$_st eq \"POWER\" || $_st eq \"GROUND\"} { continue }\n"
@@ -24186,17 +24206,97 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP") -> str:
         "    } else { incr _blind }\n"
         "    if {$_one} {\n"
         "      incr _abut\n"
+        "      lappend _abna [$_net getName]\n"
         "      if {[llength $_abn] < 12} { lappend _abn [$_net getName] }\n"
         "    } else {\n"
         "      incr _unr\n"
+        # R-0915-121(b): the UNCAPPED membership, for the file. The capped
+        # list above stays exactly as it was -- stdout is a summary and must
+        # not become a net dump -- but "which nets" stopped being answerable
+        # the moment the cap hid them, and two ICs lost a run to that.
+        "      lappend _unra [$_net getName]\n"
         "      if {[llength $_unrn] < 12} { lappend _unrn [$_net getName] }\n"
         "    }\n"
         "  }\n"
-        f"  puts \"{marker_prefix}_UNROUTED_NETS: $_unr [join $_unrn ,]\"\n"
-        f"  puts \"{marker_prefix}_ABUTTED_NETS: $_abut [join $_abn ,]\"\n"
-        f"  puts \"{marker_prefix}_UNROUTED_SHAPE_BLIND: $_blind\"\n"
-        f"}} e]}} {{ puts \"{marker_prefix}_UNROUTED_CHECK_NONFATAL: $e\" }}\n"
+        f"  puts \"{marker_prefix}_UNROUTED_NETS: {_st}$_unr "
+        "[join $_unrn ,]\"\n"
+        f"  puts \"{marker_prefix}_ABUTTED_NETS: {_st}$_abut "
+        "[join $_abn ,]\"\n"
+        f"  puts \"{marker_prefix}_UNROUTED_SHAPE_BLIND: {_st}$_blind\"\n"
+        + (
+            # R-0915-121(b) -- the membership goes to a FILE, uncapped. The
+            # stdout line keeps its 12-name cap: MEASURED, and it is why this
+            # exists. On spm run13 the raise named 86 distinct nets and the
+            # checker later found 84 unwired, and the 12 names the Tcl printed
+            # were NOT among the 86 -- so "are these the same nets?" could not
+            # be answered from the run's own output at all. A file that nobody
+            # reads costs nothing; a cap that hides the answer cost two ICs a
+            # run each.
+            # ONLY WHEN THERE IS SOMETHING TO SAY. Caught by the repo's own
+            # suite_write_guard: the path is relative -- correct for the flow,
+            # whose cwd IS the pnr directory, the same convention
+            # `antenna_iter_*.rpt` already uses -- but several tests execute
+            # the emitted deck with the cwd inside the checkout, and an
+            # unconditional write dropped seven files into the source tree.
+            # A file per boundary per run on a healthy design is clutter
+            # anyway; the stdout counts are the summary and the file is only
+            # needed when it has names in it.
+            "  if {$_unr > 0 && [catch {\n"
+            f"    set _unfh [open {membership_path} w]\n"
+            f"    puts $_unfh \"# {marker_prefix} unrouted-net membership, "
+            "uncapped ([llength $_unra] net(s))\"\n"
+            "    foreach _unnm $_unra { puts $_unfh $_unnm }\n"
+            f"    puts $_unfh \"# {marker_prefix} abutted "
+            "([llength $_abna] net(s))\"\n"
+            "    foreach _unnm $_abna { puts $_unfh \"ABUTTED $_unnm\" }\n"
+            "    close $_unfh\n"
+            "  } _unfe]} {\n"
+            f"    puts \"{marker_prefix}_MEMBERSHIP_UNWRITTEN: $_unfe\"\n"
+            "  } elseif {$_unr > 0} {\n"
+            f"    puts \"{marker_prefix}_MEMBERSHIP: {_st}{membership_path} "
+            "([llength $_unra] unrouted, [llength $_abna] abutted)\"\n"
+            "  }\n"
+            if membership_path else ""
+        )
+        + f"}} e]}} {{ puts \"{marker_prefix}_UNROUTED_CHECK_NONFATAL: $e\" }}\n"
     )
+
+
+def _unrouted_probe_tcl(tag: str) -> str:
+    """R-0915-121(b) -- the UNROUTED-NET probe at a post-route stage boundary.
+
+    THE MISSING INSTRUMENT, and the one whose absence cost two ICs a run each.
+    R-0915-110(b) put a `pin_access` probe between every post-route stage so a
+    pin that loses its last access point can be attributed to the stage that
+    took it. There was no such probe for WIRES, so a stage that destroys the
+    routing of nets it never names was invisible until the sign-off check
+    found the wreckage hundreds of lines later and blamed nothing.
+
+    MEASURED, subservient x gf180mcuD as a DIE (int9/int10, 2026-09-21):
+    `routed_preantenna.def`, the post-route tail's own INPUT, carries 5319 net
+    records of which 33 have no routing and ALL 33 are the I/O nets the
+    abutment clause correctly excuses -- ZERO `u_core/*` among them. The
+    antenna stage's own entry checkpoint `antenna_pre_repair.odb` reads
+    ODB_NOWIRE_MULTITERM 0. By `NAMED_VIOL_REROUTE` the count is 77. The wires
+    were destroyed BETWEEN those two readings and nothing in the run said so.
+    On spm x gf180mcuD (lane icspm5, run13, the same main) the same shape
+    reads 84.
+
+    So this goes beside `_pin_access_probe_tcl` at every boundary: same
+    geometric rule as the sign-off integrity check -- a net with two or more
+    terminals, no wire, and terminals that do not already touch -- with the
+    membership written UNCAPPED to a file named for the boundary. "Intact
+    here, gone there" becomes a measurement the flow makes itself, instead of
+    a question a human has to re-derive from a capped list of twelve.
+
+    MEASURE-ONLY: it counts, names and writes; it never routes, never repairs
+    and never refuses. NONFATAL-guarded by the shared body it reuses.
+    """
+    safe = "".join(c if (c.isalnum() or c in "_-") else "_" for c in tag)
+    return _routing_integrity_check_tcl(
+        "UNROUTED_PROBE",
+        membership_path=f"unrouted_{safe}.txt",
+        stage=safe)
 
 
 def _resizer_bound_flag(pct: Optional[float]) -> str:
@@ -25240,6 +25340,72 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         # accessor is named differently -- the opposite of failing safe.
         "    set _ant_blk \"\"\n"
         "    catch { set _ant_blk [ord::get_db_block] }\n"
+        # R-0915-121(a) -- THE JUDGEMENT'S SCOPE WAS WRONG AND IT COST TWO ICs
+        # A RUN EACH. R-0915-116(2)(ii) asked only whether the nets THIS PASS
+        # TOUCHED were still wired. A native `repair_antennas -reroute` that
+        # rips up wires on nets it added no diode to is invisible to that
+        # question. MEASURED on spm x gf180mcuD (lane icspm5, run13, main
+        # 287e8a7b0): the raise was DRT-0206 with checkConnectivity naming 86
+        # DISTINCT nets, the judgement asked about the ONE net the pass touched
+        # (p__core), found it wired, said SPURIOUS -- and 450 lines later the
+        # sign-off checker found 84 signal nets with two or more terminals and
+        # no wire. MEASURED on subservient x gf180mcuD (int9/int10, this lane):
+        # `routed_preantenna.def` carries 33 wireless multi-terminal nets and
+        # ALL of them are the I/O nets the abutment clause excuses -- ZERO
+        # u_core/* -- and the antenna stage's own entry checkpoint reads
+        # ODB_NOWIRE_MULTITERM 0, while NAMED_VIOL_REROUTE later reads 77.
+        # The wires die inside this stage.
+        #
+        # So the scope becomes EVERY NET THIS PASS COULD HAVE UNWIRED, which
+        # is a superset of the ruling's "every net checkConnectivity named
+        # PLUS every net the pass touched": a census of which non-special
+        # multi-terminal nets HAD a wire before the native call, compared
+        # against the same census after it. It needs no parsing of the tool's
+        # message -- the raise reaches Tcl as "DRT-0206" with no net in it --
+        # and it cannot miss a net the message failed to name.
+        # TWO DAMAGE MODES, MEASURED DISJOINT. icspm5's measure-only probe on
+        # spm run13 settled what the raise actually does: the 86 nets
+        # checkConnectivity NAMED and the 84 the sign-off checker later found
+        # unwired share NOT ONE MEMBER -- |84 n 86| = 0. The 86 still HAVE a
+        # wire whose pieces no longer reach each other (clknet_*,
+        # vibeic_drv_root_net_*, _vibeic_aux_tie_*, x__core[*]); the 84 have NO
+        # wire at all (u_core/_004_.._206_, net20..net239, c[1], s[30]) and are
+        # invisible to the router's message. One native call damaged ~170 nets
+        # in two ways while R-0915-116(2)(ii) looked at one.
+        #
+        # So the census records the wire's SIZE, not merely its presence:
+        # `[$wire length]` is the tool's own dbWire encoding length (MEASURED
+        # available in 0.3.67: `$w length` returns an integer; `getLength`
+        # returns a swig pointer and is useless from Tcl). Gone entirely and
+        # shrunk are then both detectable, and neither needs the net NAMES the
+        # exception does not carry -- the raise reaches Tcl as the bare string
+        # "DRT-0206".
+        #
+        # UNMEASURED IS NOT ZERO: a wire whose length cannot be read records
+        # -1, and a net that goes -1 -> -1 is never called damaged on that
+        # basis; the count of such nets is disclosed.
+        "    array unset _ant_wire0\n"
+        "    set _ant_w0_blind 0\n"
+        "    catch {\n"
+        "      foreach _ant_w0 [$_ant_blk getNets] {\n"
+        "        if {[$_ant_w0 isSpecial]} { continue }\n"
+        "        set _ant_w0w [$_ant_w0 getWire]\n"
+        "        if {$_ant_w0w eq \"NULL\"} { continue }\n"
+        "        set _ant_w0L -1\n"
+        "        if {[catch {set _ant_w0L [$_ant_w0w length]}]} "
+        "{ incr _ant_w0_blind }\n"
+        "        set _ant_wire0([$_ant_w0 getName]) $_ant_w0L\n"
+        "      }\n"
+        "    }\n"
+        # The restore point for THIS pass. R-0915-121(a): a pass judged to
+        # have unwired anything is REFUSED, and refusing it means putting back
+        # what it destroyed -- destroying its diodes by name is not enough
+        # when the damage is other nets' geometry.
+        f"    set _ant_pass_ckpt $_ant_dir/{_ANTENNA_PASS_CHECKPOINT_NAME}\n"
+        "    set _ant_pass_ckpt_ok 0\n"
+        "    if {[catch {write_db $_ant_pass_ckpt} _ant_pc_e]} {\n"
+        "      puts \"ANTENNA_PASS_CHECKPOINT_FAILED: $_ant_pc_e\"\n"
+        "    } else { set _ant_pass_ckpt_ok 1 }\n"
         # NOT `_ant_pre`: that name is already the PRECHECK VIOLATION COUNT
         # (`set _ant_pre [check_antennas]` above). Tcl's `array unset` silently
         # no-ops on a scalar and the first `set _ant_pre(x) 1` then raises
@@ -25302,6 +25468,29 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "        }\n"
         "      }\n"
         "      set _ant_touched [lsort -unique $_ant_touched]\n"
+        # R-0915-121(a): the whole-design half of the scope -- every net that
+        # HAD a wire before this pass and has none after it.
+        "      set _ant_lost {}\n"
+        "      set _ant_shrunk {}\n"
+        "      catch {\n"
+        "        foreach _ant_w1 [$_ant_blk getNets] {\n"
+        "          if {[$_ant_w1 isSpecial]} { continue }\n"
+        "          set _ant_w1n [$_ant_w1 getName]\n"
+        "          if {![info exists _ant_wire0($_ant_w1n)]} { continue }\n"
+        "          set _ant_w1w [$_ant_w1 getWire]\n"
+        "          if {$_ant_w1w eq \"NULL\"} {\n"
+        "            lappend _ant_lost $_ant_w1n\n"
+        "            continue\n"
+        "          }\n"
+        # the fragmented half: the wire is still there and there is LESS of it.
+        "          set _ant_w1L -1\n"
+        "          catch { set _ant_w1L [$_ant_w1w length] }\n"
+        "          if {$_ant_w1L < 0 || $_ant_wire0($_ant_w1n) < 0} "
+        "{ continue }\n"
+        "          if {$_ant_w1L < $_ant_wire0($_ant_w1n)} "
+        "{ lappend _ant_shrunk $_ant_w1n }\n"
+        "        }\n"
+        "      }\n"
         "      set _ant_broken {}\n"
         "      catch {\n"
         "        foreach _ant_tn $_ant_touched {\n"
@@ -25312,16 +25501,28 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "          }\n"
         "        }\n"
         "      }\n"
-        "      if {[llength $_ant_touched] == 0} {\n"
+        "      set _ant_broken [lsort -unique "
+        "[concat $_ant_broken $_ant_lost $_ant_shrunk]]\n"
+        "      puts \"ANTENNA_NATIVE_DAMAGE_CENSUS: [llength $_ant_lost] net(s) "
+        "lost their wire entirely, [llength $_ant_shrunk] kept a wire with less "
+        "of it in it, over [array size _ant_wire0] wired net(s) snapshotted "
+        "($_ant_w0_blind unreadable and therefore NOT judged on size)\"\n"
+        # ORDER MATTERS: a pass that destroyed geometry is REFUSED whether or
+        # not its own inserts are visible. "Unjudged" is only for a pass that
+        # took nothing away AND shows nothing it added.
+        "      if {[llength $_ant_broken] == 0 && [llength $_ant_touched] == 0} {\n"
         "        puts \"ANTENNA_NATIVE_ERROR_UNJUDGED: $_ra_native -- this pass "
         "inserted nothing this step can see, so its connectivity cannot be "
         "judged; the violation stands and no route is run to hide it\"\n"
         "        break\n"
         "      }\n"
         "      if {[llength $_ant_broken] == 0} {\n"
-        "        puts \"ANTENNA_NATIVE_ERROR_SPURIOUS: $_ra_native, but all "
-        "[llength $_ant_touched] net(s) this pass touched are still connected; "
-        "the loop re-measures rather than routing the whole design\"\n"
+        "        puts \"ANTENNA_NATIVE_ERROR_SPURIOUS: $_ra_native, and every "
+        "net that had a wire before this pass still has one, none of them with "
+        "less wire in it than before "
+        "([array size _ant_wire0] checked, [llength $_ant_touched] of them "
+        "touched by this pass); the loop re-measures rather than routing the "
+        "whole design\"\n"
         "        set _ant_refused \"\"\n"
         "        continue\n"
         "      }\n"
@@ -25347,16 +25548,62 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "          incr _ant_rolled\n"
         "        }\n"
         "      }\n"
-        "      puts \"ANTENNA_DIODE_ROLLED_BACK: [llength $_ant_broken] net(s) "
-        "lost their wire under the native repair -- "
-        "[join [lrange $_ant_broken 0 7] {, }] -- so the $_ant_rolled diode(s) "
-        "this pass inserted on them are removed ($_ant_kept kept, on nets that "
-        "kept their wires) and the antenna violation on those nets "
-        "STANDS and is reported by name. This stage does not route the whole "
-        "design to hide it: a legible antenna FAIL at sign-off beats a run with "
-        "no routed.def.\"\n"
-        "      set _ant_refused \"ANTENNA_DIODE_ROLLED_BACK: "
-        "[join [lrange $_ant_broken 0 7] {, }]\"\n"
+        # R-0915-121(a) -- THE PASS IS REFUSED, AND REFUSING IT MEANS PUTTING
+        # BACK WHAT IT DESTROYED. Destroying this pass's diodes by name was
+        # enough while the only damage we could see was on the nets those
+        # diodes sat on. It is not enough for the measured case: on spm run13
+        # the native repair unwired 84 nets it had inserted nothing on, so
+        # there was no diode whose removal restores them. The pre-native
+        # checkpoint is the only thing that does.
+        # R-0915-121(a) SAYS RESTORE; ORD-2008 SAYS NOT HERE, AND ORD-2008 IS
+        # A MEASUREMENT. `read_db` in this session puts the routing back and
+        # then kills the STA network the REST of this session runs on -- the
+        # deck continues into fill, the PG re-connect, the named-violation
+        # check, `write_def routed.def` and then timing. Restoring in place
+        # would trade a wrecked route for a wrecked timing graph, and
+        # `test_the_session_asks_and_does_not_restore_in_place` pins that this
+        # block never tries it. It caught this when I did.
+        #
+        # So the restore is REQUESTED, not performed: the parent re-drives the
+        # tail from the checkpoint in a FRESH process, where `read_db` is the
+        # first thing that happens and there is no STA network to kill. What
+        # R-0915-121(c) changes is WHICH checkpoint is named -- the one taken
+        # immediately before the native call, not the stage-entry one, which
+        # is several stages older and is removed at the end of the flow.
+        "      set _ant_restored 0\n"
+        "      set _ant_full [llength $_ant_broken]\n"
+        "      puts \"ANTENNA_DIODE_ROLLED_BACK: $_ant_full net(s) "
+        "lost wire under the native repair ([llength $_ant_lost] entirely, "
+        "[llength $_ant_shrunk] in part) -- "
+        "[join [lrange $_ant_broken 0 7] {, }] -- restore REQUESTED of the "
+        "parent from $_ant_pass_ckpt (this session does not read_db: ORD-2008 "
+        "-- an in-place restore kills the STA network the rest of this session "
+        "needs), diodes destroyed by name here=$_ant_rolled ($_ant_kept kept), "
+        "and the antenna violation on "
+        "those nets STANDS and is reported by name. This stage does not route "
+        "the whole design to hide it: a legible antenna FAIL at sign-off beats "
+        "a run with no routed.def.\"\n"
+        "      set _ant_refused \"ANTENNA_DIODE_ROLLED_BACK: $_ant_full "
+        "net(s) -- [join [lrange $_ant_broken 0 7] {, }]\"\n"
+        # R-0915-121(b): uncapped membership beside the log, because the
+        # eight names above are a summary and the question "are these the
+        # nets the checker later finds?" has to be answerable. It is emitted
+        # AFTER `set _ant_refused` deliberately: an optional file write must
+        # never sit between an exit's report and the refusal it records --
+        # `test_every_refusal_path_records_the_refusal` reads a window from
+        # the `puts`, and it is right to.
+        "      if {[catch {\n"
+        "        set _ant_mfh [open $_ant_dir/antenna_lost_wires.txt w]\n"
+        "        puts $_ant_mfh \"# nets that lost their wire under "
+        "repair_antennas -reroute, iteration $_i ($_ant_full net(s))\"\n"
+        "        foreach _ant_mn $_ant_broken { puts $_ant_mfh $_ant_mn }\n"
+        "        close $_ant_mfh\n"
+        "      } _ant_mfe]} {\n"
+        "        puts \"ANTENNA_LOST_WIRES_MEMBERSHIP_UNWRITTEN: $_ant_mfe\"\n"
+        "      } else {\n"
+        "        puts \"ANTENNA_LOST_WIRES_MEMBERSHIP: "
+        "$_ant_dir/antenna_lost_wires.txt ($_ant_full net(s))\"\n"
+        "      }\n"
         "      break\n"
         "    }\n"
         f"    puts \"REPAIR_ANTENNA_DONE: diode={pdk.antenna_diode_cell} iter=$_i margin=$_ant_margin\"\n"
@@ -25491,9 +25738,22 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         # it was attempted; the parent records `antenna_repair=NOT_APPLIED` with
         # the refusal named, and a design that fails the antenna spec still fails
         # it. What is removed is the unverified route, not the finding.
+        # R-0915-121(c) -- THE CHECKPOINT NAMED IS THE ONE TAKEN IMMEDIATELY
+        # BEFORE THE NATIVE CALL, when there is one. `$_ant_ckpt` is the
+        # STAGE-ENTRY state: correct while the only damage we could see was the
+        # diodes this stage inserted, wrong once the damage is other nets'
+        # geometry taken by one particular pass, and it is also the file the
+        # flow removes at the end of the run. `$_ant_pass_ckpt` is the exact
+        # state the refused pass started from. The stage-entry checkpoint stays
+        # the fall-back for a refusal raised before any pass wrote its own.
+        "set _ant_rb_ckpt \"\"\n"
+        "if {[info exists _ant_pass_ckpt] && [info exists _ant_pass_ckpt_ok] "
+        "&& $_ant_pass_ckpt_ok} { set _ant_rb_ckpt $_ant_pass_ckpt }\n"
+        "if {$_ant_rb_ckpt eq \"\" && $_ant_ckpt_ok} "
+        "{ set _ant_rb_ckpt $_ant_ckpt }\n"
         "if {$_ant_refused ne \"\"} {\n"
-        "  if {$_ant_ckpt_ok} {\n"
-        "    puts \"ANTENNA_REPAIR_REFUSED_ROLLBACK_REQUEST: checkpoint=$_ant_ckpt "
+        "  if {$_ant_rb_ckpt ne \"\"} {\n"
+        "    puts \"ANTENNA_REPAIR_REFUSED_ROLLBACK_REQUEST: checkpoint=$_ant_rb_ckpt "
         "reason=$_ant_refused\"\n"
         "  } else {\n"
         "    puts \"ANTENNA_REPAIR_REFUSED_NO_CHECKPOINT: reason=$_ant_refused "
@@ -25503,6 +25763,9 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "} elseif {$_ant_ckpt_ok} {\n"
         "  puts \"ANTENNA_REPAIR_APPLIED: no repair or reroute refused\"\n"
         "  catch {file delete -- $_ant_ckpt}\n"
+        # the per-pass checkpoint is only owed while a refusal might need it
+        "  if {[info exists _ant_pass_ckpt]} "
+        "{ catch {file delete -- $_ant_pass_ckpt} }\n"
         "} else {\n"
         # A design that was ALREADY CLEAN never entered the loop, so there was
         # nothing to checkpoint and nothing to refuse. Saying so is not the same
@@ -29467,15 +29730,15 @@ if {{[catch {{write_def {out_dir_c}/routed_preantenna.def}} _cp_err]}} {{
 # route checkpoint — which is what the NONFATAL guard was written to do and
 # cannot.
 puts "{_PNR_STAGE_MARKER} postroute_spef_extract"
-{spef_repair_block}{_pin_access_probe_tcl("after_postroute_spef_extract")}# === v0.2.14 — antenna repair (diode insertion) after detailed_route ===
+{spef_repair_block}{_pin_access_probe_tcl("after_postroute_spef_extract")}{_unrouted_probe_tcl("after_postroute_spef_extract")}# === v0.2.14 — antenna repair (diode insertion) after detailed_route ===
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 {_pnr_stage_begin("postroute_antenna_repair")}
 puts "{_PNR_STAGE_MARKER} postroute_antenna_repair"
-{antenna_repair_block}{_pin_access_probe_tcl("after_postroute_antenna_repair")}{_pnr_stage_end("postroute_antenna_repair")}
-{drv_reconverge_block}{_pin_access_probe_tcl("after_postroute_drv_reconverge")}
+{antenna_repair_block}{_pin_access_probe_tcl("after_postroute_antenna_repair")}{_unrouted_probe_tcl("after_postroute_antenna_repair")}{_pnr_stage_end("postroute_antenna_repair")}
+{drv_reconverge_block}{_pin_access_probe_tcl("after_postroute_drv_reconverge")}{_unrouted_probe_tcl("after_postroute_drv_reconverge")}
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 puts "{_PNR_STAGE_MARKER} postroute_antenna_reconverge"
-{post_reconverge_antenna_block}{_pin_access_probe_tcl("after_postroute_antenna_reconverge")}# === v0.1.48 — decap + filler insertion ===
+{post_reconverge_antenna_block}{_pin_access_probe_tcl("after_postroute_antenna_reconverge")}{_unrouted_probe_tcl("after_postroute_antenna_reconverge")}# === v0.1.48 — decap + filler insertion ===
 # spm pilot Tier 2 EM/decap finding: prior runs (v0.1.25 → v0.1.47) emitted
 # ZERO decap or filler cells. Empty std-cell-row gaps left an MPW-rejecting
 # combination: no dynamic IR margin (no decap), open density-fill rules
@@ -29488,7 +29751,7 @@ puts "{_PNR_STAGE_MARKER} postroute_fill"
 # may still have created an instance (antenna diodes, a repair buffer), and
 # those terminals must be owned. The re-route inside it runs only when the
 # delta says terminals actually changed, and a failure there is a verdict.
-{_pin_access_probe_tcl("after_postroute_fill_before_pg_reconnect")}{pg_reconnect_block}{_pnr_stage_begin("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} postroute_named_violation_reroute"
+{_pin_access_probe_tcl("after_postroute_fill_before_pg_reconnect")}{_unrouted_probe_tcl("after_postroute_fill_before_pg_reconnect")}{pg_reconnect_block}{_pnr_stage_begin("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} postroute_named_violation_reroute"
 {_named_viol_reroute_block}{_pnr_stage_end("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} write_routed"
 }} else {{
   puts "POSTROUTE_RECONVERGE_DOWNSTREAM_REFUSED: SDR transaction rolled back; skipping antenna/PG/named reroute"
@@ -30749,6 +31012,20 @@ _ANTENNA_STAGES = ("postroute_antenna_repair",
 #: The checkpoint file name, stated ONCE. The Tcl writes
 #: `$_ant_dir/antenna_pre_repair.odb` and this is that name.
 _ANTENNA_CHECKPOINT_NAME = "antenna_pre_repair.odb"
+#: R-0915-121(c) -- the SECOND checkpoint this module writes: the state taken
+#: immediately before ONE native `repair_antennas -reroute` call, which is what
+#: a refused pass must be restored from. The stage-entry file above is several
+#: stages older.
+_ANTENNA_PASS_CHECKPOINT_NAME = "antenna_pass_pre.odb"
+#: Both, and ONLY both. The reader below refuses any other name rather than
+#: restoring from a file this module did not write -- that property is why the
+#: check exists and it is unchanged; what changed is that there are now two
+#: files it wrote. MEASURED on int11 (subservient x gf180mcuD as a DIE,
+#: 2026-09-21): the deck named antenna_pass_pre.odb exactly as R-0915-121(c)
+#: requires and the parent refused it for not being antenna_pre_repair.odb, so
+#: the ruling's restore could not happen at all.
+_ANTENNA_CHECKPOINT_NAMES = (_ANTENNA_CHECKPOINT_NAME,
+                             _ANTENNA_PASS_CHECKPOINT_NAME)
 
 
 def antenna_rollback_request(log_text: str) -> Optional[Dict[str, str]]:
@@ -30816,19 +31093,24 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
     # and a basename that is not the one we emit is refused rather than
     # silently redirected.
     ckpt_c = req["checkpoint"]
-    if PurePosixPath(ckpt_c).name != _ANTENNA_CHECKPOINT_NAME:
+    ckpt_name = PurePosixPath(ckpt_c).name
+    if ckpt_name not in _ANTENNA_CHECKPOINT_NAMES:
         rec["status"] = "FAILED"
         rec["antenna_repair"] = "NOT_APPLIED"
         rec["reason"] = (
             f"the antenna repair REFUSED ({req['reason']}) and named "
-            f"{ckpt_c} as its checkpoint, which is not "
-            f"{_ANTENNA_CHECKPOINT_NAME}; refused rather than restored from a "
-            f"file this module did not write")
+            f"{ckpt_c} as its checkpoint, which is none of "
+            f"{', '.join(_ANTENNA_CHECKPOINT_NAMES)}; refused rather than "
+            f"restored from a file this module did not write")
         rec["route_verified"] = False
         rec["rc"] = 1
         return rec
-    ckpt = out_dir / _ANTENNA_CHECKPOINT_NAME
-    ckpt_c = f"{out_dir_c}/{_ANTENNA_CHECKPOINT_NAME}"
+    # The RESTORE USES THE NAME THE DECK GAVE, once that name is one of ours.
+    # It used to rebuild the path from the stage-entry constant regardless of
+    # what the marker said, which silently disagreed with the emitter the
+    # moment there were two checkpoints.
+    ckpt = out_dir / ckpt_name
+    ckpt_c = f"{out_dir_c}/{ckpt_name}"
     if not ckpt.is_file():
         rec["status"] = "FAILED"
         rec["antenna_repair"] = "NOT_APPLIED"

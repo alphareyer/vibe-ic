@@ -1142,10 +1142,36 @@ def test_splitting_the_reconverge_block_did_not_drop_the_second_antenna_pass(
         "`repair_antennas` — it is the load-bearing one, and asking it "
         "directly is what an emptied slot B cannot survive")
     assert slot_b.count(tag_b) == n_tag, (
-        "the SECOND antenna pass's pin-access probe does not name its own "
-        f"stage {n_tag} time(s) — it named {slot_b.count(tag_b)}; two passes "
+        "the SECOND antenna pass's probes do not name their own "
+        f"stage {n_tag} time(s) — they named {slot_b.count(tag_b)}; two passes "
         "whose probes read the same make R-0915-110's attribution unanswerable")
     assert tag_a not in slot_b, "the SECOND pass's probe names the FIRST stage"
+
+    # R-0915-121(b) ADDED A SECOND PER-PASS PROBE, AND IT IS COVERED BY THE
+    # SAME COUNT. The unrouted-net probe sits beside the pin-access probe at
+    # every post-route boundary and also names the stage it follows. It first
+    # shipped with the stage baked into its MARKER NAME
+    # (`UNROUTED_PROBE_AFTER_POSTROUTE_ANTENNA_REPAIR_...`), a second token
+    # spelled differently from the one normalised below -- and the two passes
+    # stopped being re-emissions of each other after 24113 identical
+    # characters. The arms caught it on 5b5bd02af. The marker is now
+    # stage-free and the stage travels as a field spelled EXACTLY as the
+    # pin-access probe spells it, so `n_tag` counts BOTH probes' tags and one
+    # normalisation covers both. That is what these two assertions pin.
+    assert n_tag >= 2, (
+        "each pass carries at least two probes that name their own stage -- "
+        "pin-access (R-0915-110(b)) and unrouted-nets (R-0915-121(b)) -- so "
+        "a count of one means a probe stopped naming its stage")
+    assert f"stage={tag_a}" in slot_a, (
+        "the FIRST pass's unrouted-net probe does not name its stage in the "
+        "field the normalisation covers")
+    assert f"stage={tag_b}" in slot_b, (
+        "the SECOND pass's unrouted-net probe does not name its stage in the "
+        "field the normalisation covers")
+    assert tag_a.upper() not in slot_a and tag_b.upper() not in slot_b, (
+        "a stage token spelled differently from the normalised one is a "
+        "second per-pass difference the byte-equality below cannot absorb -- "
+        "this is exactly how 5b5bd02af broke")
 
     place = "<THE STAGE THIS PROBE FOLLOWS>"
     assert slot_b.replace(tag_b, place) == slot_a.replace(tag_a, place), (

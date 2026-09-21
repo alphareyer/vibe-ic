@@ -58,7 +58,17 @@ def _run(tcl_body: str, tmp_path, *, expected_rc: int = 0) -> str:
     f.write_text(_STUB + '\nset test_rc [catch {\n' + tcl_body
                  + '\n} test_message]\nputs "DESTROYED: $::destroyed"\n'
                  + 'if {$test_rc} {puts stderr $test_message; exit 1}\n')
-    r = _pr.run([_TCLSH, str(f)], capture_output=True, text=True)
+    # cwd IS THE TEMP DIR, not the checkout. These run PRODUCTION decks, and
+    # a production deck writes its reports beside itself -- the flow's cwd is
+    # the pnr directory, which is how `antenna_iter_*.rpt` has always worked.
+    # R-0915-121(b) adds an unrouted-net membership file on the same
+    # convention, and on the first full run of the impacted selection these
+    # call sites dropped `unrouted_named_viol_reroute.txt` and
+    # `unrouted_pad_check.txt` into the source tree, where the repo's own
+    # suite_write_guard found them. The deck is right; running it here was
+    # not.
+    r = _pr.run([_TCLSH, str(f)], capture_output=True, text=True,
+                cwd=str(tmp_path))
     assert r.returncode == expected_rc, r.stderr
     return r.stdout
 
@@ -429,7 +439,8 @@ def _geom_stub(a_shapes, b_shapes, *, b_readable=True) -> str:
 def _integrity(tmp_path, stub: str) -> dict:
     f = tmp_path / "g.tcl"
     f.write_text(stub + p3._routing_integrity_check_tcl("SHIP"))
-    r = _pr.run([_TCLSH, str(f)], capture_output=True, text=True)
+    r = _pr.run([_TCLSH, str(f)], capture_output=True, text=True,
+                cwd=str(tmp_path))
     assert r.returncode == 0, r.stderr
     out = {}
     for line in r.stdout.splitlines():
@@ -519,7 +530,8 @@ def test_pad_recovery_requires_proven_connectivity(
     script.write_text(setup + "\nset status [catch {\n"
                       + pad.strict_integrity_tcl("PAD_CHECK")
                       + '} detail]\nputs "PAD_TEST_RESULT:$status:$detail"\n')
-    run = _pr.run([_TCLSH, str(script)], capture_output=True, text=True)
+    run = _pr.run([_TCLSH, str(script)], capture_output=True, text=True,
+                  cwd=str(tmp_path))
     assert run.returncode == 0, run.stderr
     outcomes = [line for line in run.stdout.splitlines()
                 if line.startswith("PAD_TEST_RESULT:")]
