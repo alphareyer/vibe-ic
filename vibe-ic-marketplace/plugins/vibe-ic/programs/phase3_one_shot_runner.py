@@ -25113,6 +25113,24 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "    }\n"
         "    # PRIMARY: tool-native repair + incremental reroute in ONE call,\n"
         "    # escalating -ratio_margin. -iterations 1 = one pass per outer turn.\n"
+        # R-0915-116(2) — bookkeeping this pass needs to answer for itself:
+        # which instances existed before it, so the diodes it inserts can be
+        # named and rolled back, and the block handle the judgement uses.
+        # The handle itself is taken defensively: if it cannot be had, the
+        # judgement below sees nothing and the pass is UNJUDGED, which stops.
+        # An unguarded call here would abort the whole deck on a build whose
+        # accessor is named differently -- the opposite of failing safe.
+        "    set _ant_blk \"\"\n"
+        "    catch { set _ant_blk [ord::get_db_block] }\n"
+        # NOT `_ant_pre`: that name is already the PRECHECK VIOLATION COUNT
+        # (`set _ant_pre [check_antennas]` above). Tcl's `array unset` silently
+        # no-ops on a scalar and the first `set _ant_pre(x) 1` then raises
+        # "variable isn't array" INSIDE this catch -- the snapshot would have
+        # been empty on every run and every native raise would have read as
+        # UNJUDGED. The instance snapshot gets its own name.
+        "    array unset _ant_pre_inst\n"
+        "    catch { foreach _ant_pi [$_ant_blk getInsts] "
+        "{ set _ant_pre_inst([$_ant_pi getName]) 1 } }\n"
         "    if {[catch {repair_antennas "
         f"{pdk.antenna_diode_cell}"
         " -iterations 1 -ratio_margin $_ant_margin -reroute} _ra_native]} {\n"
@@ -25120,33 +25138,108 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "      # incremental detailed_route of the diode-dirty nets.\n"
         "      puts \"ANTENNA_NATIVE_REROUTE_NONFATAL: $_ra_native\"\n"
         "      set _ant_refused \"ANTENNA_NATIVE_REROUTE_NONFATAL: $_ra_native\"\n"
-        "      if {[catch {repair_antennas "
-        f"{pdk.antenna_diode_cell}"
-        " -iterations 1 -ratio_margin $_ant_margin} _ra_err]} {\n"
-        "        puts \"REPAIR_ANTENNA_NONFATAL: $_ra_err\"\n"
-        "        set _ant_refused \"REPAIR_ANTENNA_NONFATAL: $_ra_err\"\n"
+        # R-0915-116(2) — THE OBJECTIVE IS THE VIOLATION COUNT, AND THE
+        # WHOLE-DESIGN FALLBACK IS DELETED.
+        #
+        # MEASURED on spm x gf180mcuD as a DIE (lane icspm5, run12 on
+        # v1.22.60): base route CONVERGED (DRT-0199 494 -> 201 -> 129 -> 2 -> 0;
+        # DRT-0702 post-route verification 0 violations). The antenna loop then
+        # found ONE violating net (p__core), GRT-0015 inserted ONE diode, the
+        # native `-reroute` raised DRT-0206 -- and GRT-0012 immediately
+        # afterwards reported "Found 0 antenna violations". THE OBJECTIVE WAS
+        # ALREADY MET. The fallback whole-design `detailed_route` then ran on a
+        # finished result and destroyed it (DRT-0206 -> ANTENNA_REROUTE_FAILED).
+        # On subservient the same fallback hit DRT-1231 and cost the run its
+        # routed.def, its DRC, its LVS and its post-route STA.
+        #
+        # So: (i) when the count reads 0 after the native path the loop is
+        # DONE -- no fallback of any kind; (ii) a DRT-0206 out of the native
+        # path is judged by CONNECTIVITY of the nets that path touched, not by
+        # the exception: connected means the error was spurious for this
+        # transaction; broken means roll that net's diode back BY NAME and
+        # report the violation by net; (iii) the whole-design route is gone
+        # from this stage, as R-0915-114(a) removed it from the PG block. A
+        # legible antenna FAIL at sign-off beats a run with no routed.def.
+        # (i) needs no new counter: `$_nv` / `$_ant_now` are re-measured at
+        # the top of every iteration from the checker's own report, so a
+        # native raise only has to STOP ROUTING and let the loop measure.
+        # (ii) the raise is judged by CONNECTIVITY of what this pass touched,
+        # never by the exception alone.
+        "      set _ant_new {}\n"
+        "      set _ant_touched {}\n"
+        "      array unset _ant_inet\n"
+        "      catch {\n"
+        "        foreach _ant_ci [$_ant_blk getInsts] {\n"
+        "          set _ant_cnm [$_ant_ci getName]\n"
+        "          if {[info exists _ant_pre_inst($_ant_cnm)]} { continue }\n"
+        "          lappend _ant_new $_ant_cnm\n"
+        "          set _ant_inet($_ant_cnm) {}\n"
+        "          foreach _ant_ct [$_ant_ci getITerms] {\n"
+        "            set _ant_cn [$_ant_ct getNet]\n"
+        "            if {$_ant_cn eq \"NULL\"} { continue }\n"
+        "            if {[$_ant_cn isSpecial]} { continue }\n"
+        "            lappend _ant_touched [$_ant_cn getName]\n"
+        "            lappend _ant_inet($_ant_cnm) [$_ant_cn getName]\n"
+        "          }\n"
+        "        }\n"
+        "      }\n"
+        "      set _ant_touched [lsort -unique $_ant_touched]\n"
+        "      set _ant_broken {}\n"
+        "      catch {\n"
+        "        foreach _ant_tn $_ant_touched {\n"
+        "          set _ant_tnet [$_ant_blk findNet $_ant_tn]\n"
+        "          if {$_ant_tnet eq \"NULL\"} { continue }\n"
+        "          if {[$_ant_tnet getWire] eq \"NULL\"} {\n"
+        "            lappend _ant_broken $_ant_tn\n"
+        "          }\n"
+        "        }\n"
+        "      }\n"
+        "      if {[llength $_ant_touched] == 0} {\n"
+        "        puts \"ANTENNA_NATIVE_ERROR_UNJUDGED: $_ra_native -- this pass "
+        "inserted nothing this step can see, so its connectivity cannot be "
+        "judged; the violation stands and no route is run to hide it\"\n"
         "        break\n"
         "      }\n"
-        "      # INCREMENTAL reroute — re-routes ONLY the dirty nets.\n"
-        # R-0915-114(b) — THIS STAGE ANSWERS FOR ITS OWN WIRES.
-        # MEASURED (int6, subservient x gf180mcuD as a DIE): the native
-        # `repair_antennas -reroute` threw DRT-0206, this fallback route then
-        # threw `REPAIR_ANTENNA_REROUTE_NONFATAL: DRT-1231` TWICE, both were
-        # swallowed as notes, and the diodes this stage had just inserted were
-        # left for the PG reconnect block's whole-design rip-and-relay to lay.
-        # R-0915-114(a) deletes that re-route, so a swallowed failure here is
-        # now a stage that inserted cells and never wired them. It is a
-        # VERDICT of this stage, named, with the count of what it inserted.
-        "      if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
-        "      if {[catch {detailed_route -verbose 0 {*}$_vic_drc_opt} _ra_dr]} {\n"
-        "        puts \"ANTENNA_REROUTE_FAILED: $_ra_dr\"\n"
-        "        error \"ANTENNA_REROUTE_FAILED: $_ra_dr -- this stage "
-        "inserted diodes and could not lay their wires; no other step routes "
-        "them (R-0915-114(a) removed the PG block's whole-design re-route), so "
-        "a design that continues past this is NOT routed\"\n"
-        "        set _ant_refused \"ANTENNA_REROUTE_FAILED: $_ra_dr\"\n"
-        "        break\n"
+        "      if {[llength $_ant_broken] == 0} {\n"
+        "        puts \"ANTENNA_NATIVE_ERROR_SPURIOUS: $_ra_native, but all "
+        "[llength $_ant_touched] net(s) this pass touched are still connected; "
+        "the loop re-measures rather than routing the whole design\"\n"
+        "        set _ant_refused \"\"\n"
+        "        continue\n"
         "      }\n"
+        # (ii) broken -> roll back THE DIODES FOR THAT NET, by name, and
+        # report. Not the whole pass: an insert whose own nets are all still
+        # wired is a repair that worked, and the ruling rolls back the net
+        # that lost its wire, not the transaction that contained it.
+        "      set _ant_rolled 0\n"
+        "      set _ant_kept 0\n"
+        "      catch {\n"
+        "        foreach _ant_dn $_ant_new {\n"
+        "          set _ant_hit 0\n"
+        "          if {[info exists _ant_inet($_ant_dn)]} {\n"
+        "            foreach _ant_nn $_ant_inet($_ant_dn) {\n"
+        "              if {[lsearch -exact $_ant_broken $_ant_nn] >= 0} "
+        "{ set _ant_hit 1 }\n"
+        "            }\n"
+        "          }\n"
+        "          if {!$_ant_hit} { incr _ant_kept ; continue }\n"
+        "          set _ant_di [$_ant_blk findInst $_ant_dn]\n"
+        "          if {$_ant_di eq \"NULL\"} { continue }\n"
+        "          if {[catch {odb::dbInst_destroy $_ant_di}]} { continue }\n"
+        "          incr _ant_rolled\n"
+        "        }\n"
+        "      }\n"
+        "      puts \"ANTENNA_DIODE_ROLLED_BACK: [llength $_ant_broken] net(s) "
+        "lost their wire under the native repair -- "
+        "[join [lrange $_ant_broken 0 7] {, }] -- so the $_ant_rolled diode(s) "
+        "this pass inserted on them are removed ($_ant_kept kept, on nets that "
+        "kept their wires) and the antenna violation on those nets "
+        "STANDS and is reported by name. This stage does not route the whole "
+        "design to hide it: a legible antenna FAIL at sign-off beats a run with "
+        "no routed.def.\"\n"
+        "      set _ant_refused \"ANTENNA_DIODE_ROLLED_BACK: "
+        "[join [lrange $_ant_broken 0 7] {, }]\"\n"
+        "      break\n"
         "    }\n"
         f"    puts \"REPAIR_ANTENNA_DONE: diode={pdk.antenna_diode_cell} iter=$_i margin=$_ant_margin\"\n"
         "    # Escalate head-room each turn (cap 40) vs reroute re-introduction.\n"

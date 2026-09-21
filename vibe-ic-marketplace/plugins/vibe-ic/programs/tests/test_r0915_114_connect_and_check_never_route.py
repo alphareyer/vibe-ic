@@ -91,16 +91,47 @@ def test_the_emitted_block_is_balanced_tcl():
 
 
 # ── (b) the antenna stage answers for its own wires ───────────────────────
+def _antenna_cmds():
+    """The emitted block's COMMAND lines only -- its Tcl comments record the
+    history of the routes that were deleted from it, names included."""
+    return "\n".join(ln for ln in _antenna_block().splitlines()
+                     if not ln.lstrip().startswith("#"))
+
+
+def _antenna_block():
+    return R._antenna_repair_tcl(R.PdkConfig(
+        name="gf180mcuD", liberty="/l", tech_lef="/t", cell_lef="/c",
+        cell_gds=None, site="S", drc_deck=None, metal_prefix="M",
+        tapcell_master="fx__filltie", antenna_diode_cell="fx__antenna"))
+
+
 def test_the_antenna_stage_no_longer_swallows_its_own_reroute_failure():
-    """MEASURED (int6): the native -reroute threw DRT-0206, this fallback then
+    """MEASURED (int6): the native -reroute threw DRT-0206, the fallback then
     threw DRT-1231 TWICE, both swallowed, and the diodes were left for the PG
-    block's re-route -- which R-0915-114(a) has now deleted."""
-    assert "ANTENNA_REROUTE_FAILED" in SRC
-    # the old name survives only in comments recording the history; no emitted
-    # line puts it any more, which is what "no longer swallows" means.
+    block's re-route -- which R-0915-114(a) deleted.
+
+    R-0915-114(b) answered that by turning the fallback's failure into a
+    RAISED verdict, ANTENNA_REROUTE_FAILED. R-0915-116(2)(iii) goes one step
+    further and deletes the fallback itself -- measured destroying a converged
+    route on spm (run12: GRT-0012 "Found 0 antenna violations", then the
+    fallback, then DRT-0206) and costing subservient its routed.def on int7.
+    So there is no whole-design route left here whose failure could be
+    swallowed OR raised. THE PROPERTY IS UNCHANGED and is asserted on the
+    mechanism that replaced it: the raise is judged by connectivity, and the
+    branch that leaves a mutated route behind RECORDS its refusal rather than
+    printing a note."""
+    # no emitted line swallows a re-route failure as a note ...
     assert 'puts \\"REPAIR_ANTENNA_REROUTE_NONFATAL' not in SRC
-    i = SRC.index("ANTENNA_REROUTE_FAILED")
-    assert "error " in SRC[i - 400:i + 400], "it is a verdict, not a note"
+    # ... and this stage runs no whole-design route at all any more. The
+    # assertions are on the EMITTED BLOCK'S COMMANDS, not on the source file
+    # and not on the deck's comments: both keep the old marker's name in the
+    # note that records why it went.
+    assert "ANTENNA_REROUTE_FAILED" not in _antenna_cmds()
+    assert "detailed_route" not in _antenna_cmds()
+    # the exit that replaced it is a recorded refusal, not a note.
+    t = _antenna_block()
+    i = t.index('puts "ANTENNA_DIODE_ROLLED_BACK')
+    assert "set _ant_refused" in t[i:i + 600]
 
 
 def test_the_antenna_stage_still_tries_its_native_reroute_first():

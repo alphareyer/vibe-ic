@@ -330,16 +330,28 @@ class TestAntennaRepairTcl:
 
     def test_proven_sequence_present(self):
         tcl = runner._antenna_repair_tcl(_fake_pdk_with_diode())
-        # Repair branch: an OUTER loop of check -> repair_antennas -iterations 1 ->
-        # incremental detailed_route, then a FINAL authoritative check_antennas.
+        # Repair branch: an OUTER loop of check -> repair_antennas -iterations 1
+        # (which carries its own incremental reroute via `-reroute`), then a
+        # FINAL authoritative check_antennas.
         # anchor on COMMAND forms (bare keywords also appear in comments).
+        #
+        # R-0915-116(2)(iii): the `catch {detailed_route` anchor that used to
+        # sit between the repair and the final check is GONE -- the degraded
+        # branch's whole-design re-route is deleted from this stage, measured
+        # destroying a converged route on spm (run12) and costing subservient
+        # its routed.def on int7. The ORDER PROPERTY is unchanged on the steps
+        # that remain, and the deleted step is pinned absent below so it
+        # cannot slip back into the middle of the sequence.
         i_loop = tcl.index("for {set _i 0}")
         i_ra = tcl.index("repair_antennas sky130")
-        i_dr = tcl.index("catch {detailed_route")
         i_ck_last = tcl.index("catch {check_antennas}")   # final post-repair check
-        assert i_loop < i_ra < i_dr < i_ck_last, "antenna repair sequence out of order"
+        assert i_loop < i_ra < i_ck_last, "antenna repair sequence out of order"
         assert "-iterations 1" in tcl          # ONE repair pass/turn (no GRT-0121)
         assert "-iterations 5" not in tcl      # the pre-v1.3.46 GRT-0121 form is gone
+        assert "-reroute" in tcl               # the repair carries its own reroute
+        cmds = "\n".join(ln for ln in tcl.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        assert "detailed_route" not in cmds    # R-0915-116(2)(iii)
         assert "ANTENNA_POSTROUTE_DONE" in tcl   # sentinel for the in-session read
 
     def test_no_full_global_route_command(self):
@@ -382,10 +394,17 @@ class TestAntennaRepairTcl:
 
     def test_all_steps_nonfatal_guarded(self):
         # Antenna repair must never abort the PnR — every step is catch-guarded.
-        # (v1.3.46: global_route is dropped, so it is no longer in the set.)
+        # (v1.3.46: global_route is dropped, so it is no longer in the set.
+        #  R-0915-116(2)(iii): `detailed_route` leaves the set the same way —
+        #  a command that is no longer emitted cannot be guarded, and the
+        #  stronger statement, that it is absent, is asserted instead.)
         tcl = runner._antenna_repair_tcl(_fake_pdk_with_diode())
-        for cmd in ("repair_antennas", "detailed_route", "check_antennas"):
+        for cmd in ("repair_antennas", "check_antennas"):
             assert ("catch {" + cmd) in tcl, f"{cmd} not NONFATAL-guarded"
+        cmds = "\n".join(ln for ln in tcl.splitlines()
+                         if not ln.lstrip().startswith("#"))
+        for gone in ("global_route", "detailed_route"):
+            assert gone not in cmds, f"{gone} is a whole-design route here"
 
 
 class TestDontUseTcl:

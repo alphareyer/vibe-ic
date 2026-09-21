@@ -17,6 +17,19 @@ repair -> detailed_route pass (byte-compatible with the pre-fix loop).
 
 These tests pin the emitted-TCL control logic + verdict on SYNTHETIC before/after
 antenna reports (FAIL->PASS), so a blind run auto-covers the escalation.
+
+SUPERSEDED IN ONE PART BY R-0915-116(2) (2026-09-21), NOT IN THE REST. The
+ESCALATION is untouched: native `-reroute` first, `-ratio_margin` 0->40, the
+bounded outer loop, no full `global_route`. What is gone is the DEGRADED
+BRANCH's whole-design `detailed_route`. It was measured destroying finished
+work on two ICs: on spm x gf180mcuD (lane icspm5, run12, v1.22.60) the base
+route had CONVERGED and GRT-0012 read "Found 0 antenna violations" when the
+fallback ran anyway and broke it (DRT-0206); on subservient x gf180mcuD (int7)
+it hit DRT-1231 and cost the run its routed.def, DRC, LVS and post-route STA.
+A raise out of the native path is now JUDGED BY CONNECTIVITY of the nets that
+pass touched. The tests below that pinned the fallback are re-aimed at the
+judgement, under names that say what they now pin; each still fails if the
+whole-design route comes back.
 """
 import shutil
 import sys
@@ -83,22 +96,48 @@ def test_block_escalates_ratio_margin():
 
 def test_block_keeps_incremental_outer_loop_and_no_global_route():
     """Still the bounded incremental OUTER loop; still NO full global_route
-    (the ibex full-reroute timeout); external reroute kept as the fallback."""
+    (the ibex full-reroute timeout).
+
+    R-0915-116(2)(iii): and now no full `detailed_route` either. This line used
+    to read `assert "detailed_route -verbose 0" in cmds` -- the external
+    fallback reroute. It is DELETED from this stage exactly as R-0915-114(a)
+    deleted it from the PG-reconnect block, and for the same measured reason:
+    a whole-design re-route of an already-routed design does not converge
+    (a NO-OP full route of int7's pre-diode database produced 57178 changed
+    net lines and DRT-0206 with 1212 checkConnectivity breaks, 0 of them on a
+    supply net). The assertion is inverted, not dropped, so the fallback
+    cannot come back unnoticed."""
     cmds = _cmd_lines(R._antenna_repair_tcl(_pdk()))
     assert "set _ant_cap" in cmds
     assert "for {set _i 0} {$_i < $_ant_cap} {incr _i}" in cmds
     assert "global_route" not in cmds
-    assert "detailed_route -verbose 0" in cmds        # external fallback reroute
+    assert "detailed_route" not in cmds               # R-0915-116(2)(iii)
     assert "-iterations 5" not in cmds
 
 
-def test_block_has_external_fallback_when_reroute_unsupported():
-    """A build without `-reroute` must degrade to external repair -> reroute,
-    not abort."""
+def test_block_judges_the_raise_instead_of_falling_back_to_a_route():
+    """WAS `test_block_has_external_fallback_when_reroute_unsupported`, which
+    pinned the degraded branch as `repair_antennas` (no -reroute) followed by a
+    whole-design `detailed_route`. R-0915-116(2) replaces that branch: a raise
+    out of the native path is still NON-FATAL and still named, but what follows
+    is a CONNECTIVITY JUDGEMENT of the nets that pass touched -- spurious
+    (everything still wired) lets the loop measure again, broken rolls this
+    pass's diodes back by name and leaves the violation standing.
+
+    CONSEQUENCE, STATED PLAINLY: on a binary that does not support `-reroute`
+    at all (the deployed stock 0.2.5 of ORGANIC #110) the native call inserts
+    nothing, the judgement reads UNJUDGED and the loop STOPS. That path no
+    longer converges. The shipped image is the fork (0.3.67, pinned by digest)
+    and does support `-reroute`, so the shipped flow is unaffected; a stock
+    binary now reports its antenna violation instead of buying a false 0 with
+    a route that unwires the design. See
+    `test_issue110_antenna_stock_escalation_converge.py` for that half."""
     cmds = _cmd_lines(R._antenna_repair_tcl(_pdk()))
-    assert "ANTENNA_NATIVE_REROUTE_NONFATAL" in cmds
-    # the fallback external repair (no -reroute) + detailed_route both present
-    assert "REPAIR_ANTENNA_NONFATAL" in cmds
+    assert "ANTENNA_NATIVE_REROUTE_NONFATAL" in cmds   # still non-fatal, named
+    assert "REPAIR_ANTENNA_NONFATAL" not in cmds       # the no-reroute retry is gone
+    assert "ANTENNA_NATIVE_ERROR_SPURIOUS" in cmds
+    assert "ANTENNA_DIODE_ROLLED_BACK" in cmds
+    assert "ANTENNA_NATIVE_ERROR_UNJUDGED" in cmds
 
 
 def test_block_skips_when_pdk_has_no_diode():
@@ -148,18 +187,25 @@ def test_native_reroute_path_converges_fail_to_pass():
 
 
 @needs_tclsh
-def test_fallback_path_converges_when_reroute_unsupported():
-    """FAIL->PASS on a build WITHOUT `-reroute`: repair_antennas errors when it
-    sees `-reroute`, so the external repair->detailed_route fallback fires and
-    the loop still converges 21 -> 3 -> 0."""
+def test_no_reroute_support_stops_and_reports_instead_of_routing():
+    """WAS `test_fallback_path_converges_when_reroute_unsupported`, which drove
+    the deleted branch and asserted ANTENNA_LOOP_CONVERGED came out of it.
+
+    R-0915-116(2): when `repair_antennas` errors on `-reroute` it has inserted
+    nothing, so there is nothing whose connectivity can be judged -- the pass
+    is UNJUDGED and the loop STOPS. It does not convert an unjudgeable pass
+    into a clean one, and it does not run a whole-design route to try to
+    realise a repair that never happened. The run still completes and still
+    reaches its authoritative post-loop check, which reports the residual."""
     repair_body = ('if {[lsearch $args -reroute] >= 0} '
                    '{ error "unknown option -reroute" }\n  return ""')
     harness = _SIM_HARNESS % ("21 3 0", repair_body)
     res = _run_tclsh(harness + R._antenna_repair_tcl(_pdk()))
     assert res.returncode == 0, res.stderr
-    assert "ANTENNA_NATIVE_REROUTE_NONFATAL" in res.stdout   # fallback engaged
-    assert "ANTENNA_LOOP_CONVERGED" in res.stdout            # still converges
-    assert "ANTENNA_POSTROUTE_DONE" in res.stdout
+    assert "ANTENNA_NATIVE_REROUTE_NONFATAL" in res.stdout   # still named
+    assert "ANTENNA_NATIVE_ERROR_UNJUDGED" in res.stdout     # and judged, not hidden
+    assert "ANTENNA_LOOP_CONVERGED" not in res.stdout        # no false convergence
+    assert "ANTENNA_POSTROUTE_DONE" in res.stdout            # the run still ends
 
 
 @needs_tclsh

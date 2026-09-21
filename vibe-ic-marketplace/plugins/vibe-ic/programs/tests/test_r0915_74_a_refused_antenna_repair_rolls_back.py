@@ -79,24 +79,46 @@ def test_a_failed_checkpoint_is_named_and_not_assumed():
     assert "ANTENNA_PRE_REPAIR_CHECKPOINT_FAILED" in _tcl()
 
 
-@pytest.mark.parametrize("marker", [
-    "ANTENNA_LOOP_CHECK_NONFATAL",
-    "ANTENNA_NATIVE_REROUTE_NONFATAL",
-    "REPAIR_ANTENNA_NONFATAL",
+# The window is per-marker and is the LENGTH OF THAT EXIT'S OWN MESSAGE, not a
+# loosening: every marker below still has to set `_ant_refused` in the same
+# breath as it prints. Only ANTENNA_DIODE_ROLLED_BACK needs more than 260
+# characters, because its message names the nets, the diode count and why no
+# route is run -- 408 characters before the assignment.
+@pytest.mark.parametrize("marker,window", [
+    ("ANTENNA_LOOP_CHECK_NONFATAL", 260),
+    ("ANTENNA_NATIVE_REROUTE_NONFATAL", 260),
+    # WAS "REPAIR_ANTENNA_NONFATAL", the no-`-reroute` retry inside the
+    # degraded branch. R-0915-116(2)(iii) deleted that branch together with
+    # the whole-design `detailed_route` it existed to feed, so the exit no
+    # longer exists to record anything. The exit that REPLACED it -- the
+    # connectivity judgement's broken verdict -- takes its place here, and it
+    # is the one that actually leaves a mutated route behind: it has just
+    # destroyed this pass's diodes.
+    ("ANTENNA_DIODE_ROLLED_BACK", 600),
     # R-0915-114(b): this exit is no longer a note. The stage that inserted
     # the diodes now answers for their wires -- MEASURED (int6): the native
-    # -reroute threw DRT-0206, this fallback threw DRT-1231 TWICE, both were
+    # -reroute threw DRT-0206, the fallback threw DRT-1231 TWICE, both were
     # swallowed, and the diodes were left for the PG block's whole-design
-    # re-route, which R-0915-114(a) has deleted. It is ANTENNA_REROUTE_FAILED
-    # and it is raised, so it is covered by the verdict test below instead.
+    # re-route, which R-0915-114(a) deleted. R-0915-116(2)(iii) then deleted
+    # this stage's own whole-design route, so the raise is judged instead.
 ])
-def test_every_refusal_path_records_the_refusal(marker):
-    """Each of the four exits that leaves a mutated route sets `_ant_refused`.
+def test_every_refusal_path_records_the_refusal(marker, window):
+    """Each of the exits that leaves a mutated route sets `_ant_refused`.
     A path that only prints is a path whose route ships unrolled."""
     t = _code()
     i = t.index(f'puts "{marker}')
-    window = t[i:i + 260]
-    assert "set _ant_refused" in window, window
+    seg = t[i:i + window]
+    assert "set _ant_refused" in seg, seg
+
+
+def test_the_retired_retry_marker_is_gone_from_the_emitted_deck():
+    """The counterpart to the parametrization above: REPAIR_ANTENNA_NONFATAL
+    was dropped from it because R-0915-116(2)(iii) removed the exit, not
+    because the exit stopped recording its refusal. Pin the removal, so the
+    branch cannot come back unrecorded."""
+    t = _code()
+    assert "REPAIR_ANTENNA_NONFATAL" not in t
+    assert "detailed_route" not in t
 
 
 def _invokes(cmd: str) -> bool:
