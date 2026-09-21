@@ -26868,6 +26868,25 @@ def _postroute_sdr_transaction_finish_tcl(
         # beside it. Fail-closed: a build whose ITerms cannot be asked
         # (`getAccessPoints` absent) leaves the count at -1 and the candidate
         # is judged exactly as it was before.
+        # ASK THE ROUTER, NOT THE DATABASE. MEASURED (int3 arm, 2026-09-21):
+        # the first version of this sweep read the ODB's stored access points
+        # and counted ZERO inaccessible pins -- and the adopt path's
+        # `detailed_route` then failed on `u_core/_3245_/ZN` all the same.
+        # Those stored points were computed in an EARLIER routing context; the
+        # router recomputes access from the geometry it is given, and on this
+        # now fully-filled, tie-dense row it finds none. A database that
+        # answers about the past is not evidence about the route to come.
+        #
+        # `pin_access` is OpenROAD's own pass for exactly this question, so it
+        # is run first and the sweep then reads what IT wrote. NONFATAL: a
+        # build without the command, or a pass that throws, leaves the count
+        # at -1 (NOT MEASURED), which does not satisfy the refusal.
+        "    if {[llength [info commands pin_access]] == 0} {\n"
+        "      puts \"SDR_PIN_ACCESS_UNAVAILABLE: this OpenROAD exposes no "
+        "`pin_access`; candidate pin access is NOT MEASURED\"\n"
+        "    } elseif {[catch {pin_access} _sdr_pae]} {\n"
+        "      puts \"SDR_PIN_ACCESS_NONFATAL: $_sdr_pae\"\n"
+        "    }\n"
         "    set _sdr_ap -1\n"
         "    catch {\n"
         "      set _sdr_ap 0\n"

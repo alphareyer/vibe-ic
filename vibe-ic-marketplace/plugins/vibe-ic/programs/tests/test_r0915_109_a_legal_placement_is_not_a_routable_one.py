@@ -44,6 +44,26 @@ def test_the_candidate_is_asked_about_pin_access(tmp_path):
     assert "getAccessPoints" in tcl
 
 
+def test_the_router_is_asked_not_the_database(tmp_path):
+    """MEASURED (int3 arm, 2026-09-21): reading the ODB's STORED access points
+    counted ZERO inaccessible pins and the adopt path's `detailed_route` then
+    failed on `u_core/_3245_/ZN` all the same. Those points were computed in
+    an earlier routing context; the router recomputes access from the geometry
+    it is given. `pin_access` is OpenROAD's own pass for the question, so it
+    runs first and the sweep reads what IT wrote."""
+    tcl = _deck(tmp_path)
+    assert tcl.index("pin_access") < tcl.index("set _sdr_ap -1")
+    assert "SDR_PIN_ACCESS_UNAVAILABLE" in tcl
+    assert "SDR_PIN_ACCESS_NONFATAL" in tcl
+
+
+def test_a_build_without_pin_access_measures_nothing(tmp_path):
+    """Not measured is not clean: the count stays -1 and refuses nothing."""
+    tcl = _deck(tmp_path)
+    assert "[llength [info commands pin_access]] == 0" in tcl
+    assert "is NOT MEASURED" in tcl
+
+
 def test_a_pin_with_no_access_refuses_the_candidate_by_name(tmp_path):
     tcl = _deck(tmp_path)
     assert "candidate_pin_access_lost" in tcl
