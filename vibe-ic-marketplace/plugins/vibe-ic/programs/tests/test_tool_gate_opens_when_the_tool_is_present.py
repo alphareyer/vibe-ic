@@ -469,6 +469,8 @@ NOT_WHICH_GATES = (
     ("test_gf180_family_has_its_own_native_analog_device_template", "_HAVE_PDK",
      "published PDK model-lib file"),
     ("test_l4_systemrdl_export", "_HAVE_RDL", "package import"),
+    ("test_mcp_tool_program_path_resolves_check", "_HAVE_SOURCES",
+     "the plugin's own mcp-eda/src directory"),
     ("test_v1_0_78_issue729_ppa_area_threshold", "_HAVE_CONTAINER", "docker probe"),
     ("test_v1_0_80_issue739_ppa_unreachable_target_escape", "_HAVE_CONTAINER", "docker probe"),
     ("test_v1_0_83_issue756_ppa_disjunctive_clauses", "_HAVE_CONTAINER", "docker probe"),
