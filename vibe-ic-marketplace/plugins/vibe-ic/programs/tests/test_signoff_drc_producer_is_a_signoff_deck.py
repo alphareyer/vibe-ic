@@ -36,6 +36,7 @@ provenance_check = importlib.import_module("provenance_check")
 signoff_ladder_run = importlib.import_module("signoff_ladder_run")
 _sdf = importlib.import_module("_signoff_drc_format")
 runner = importlib.import_module("phase3_one_shot_runner")
+_gdsii = importlib.import_module("_gdsii")
 
 
 # --------------------------------------------------------------------------
@@ -107,14 +108,41 @@ def svrf_report(fails: int = 0, passes: int = 4533) -> str:
     return "\n".join(lines) + "\n"
 
 
-def project(tmp_path, report_text, *, gds_stem=None, name="p"):
+def project(tmp_path, report_text, *, gds_stem=None, name="p", gds_cell=None):
+    """A project with a sign-off DRC report, and optionally a streamed layout.
+
+    THE LAYOUT IS A REAL GDSII STREAM, and it has to be. This fixture used to
+    write six bytes (`b"\x00\x06\x00\x02\x00\x07"`), which was adequate while
+    only the FILENAME mattered. `drc_report_check` now binds a sign-off report to
+    its layout by CONTENT: `_recorded_layout_evidence` parses the bound stream's
+    top cells and refuses a binding whose tops do not equal the report's declared
+    top — and that refusal deliberately does NOT fall through to the filename
+    probe ("cannot fall back to a coincidentally matching filename"), which is
+    the anti-laundering property
+    `test_a_pdk_or_macro_gds_is_not_the_design_layout` asserts below. MEASURED on
+    live main 131f80f99: `gds_top_cells(stub) == []`, the witness read
+    `recorded layout top cells [] differ from report top 'top'`, and the on-disk
+    probe ALONE would have answered `{'tier': 'on_disk', 'topcell_match': True}`
+    — it was never reached. So the two positive cases below were red against a
+    PROGRAM that was right.
+
+    `gds_cell` defaults to `gds_stem`, which is what a streamed design looks
+    like: the file is `<top>.gds` and its top structure is `<top>`. Pass it
+    explicitly to stream a layout whose top cell is something else — the
+    negative direction.
+
+    Built with `_gdsii`, the shared minimal-stream builder the rest of this
+    suite already uses, so there is ONE notion of "a real GDSII stream" and not
+    a second one written into this file.
+    """
     proj = tmp_path / name
     (proj / "reports" / "phase3").mkdir(parents=True)
     (proj / "reports" / "phase3" / "drc_signoff.rpt").write_text(report_text)
     if gds_stem:
         d = proj / "phase3" / "stage3" / "pnr"
         d.mkdir(parents=True)
-        (d / f"{gds_stem}.gds").write_bytes(b"\x00\x06\x00\x02\x00\x07")
+        _gdsii.write_gdsii(d / f"{gds_stem}.gds",
+                           cell=gds_cell if gds_cell is not None else gds_stem)
     return proj
 
 
@@ -272,24 +300,95 @@ def test_a_pdk_or_macro_gds_is_not_the_design_layout(tmp_path):
 
 
 def test_positive_a_deck_report_over_a_streamed_layout_passes(tmp_path):
+    """The PASS is what this case is for, and it is unchanged.
+
+    THE TIER MOVED, `on_disk` -> `invocation`, and it moved because the fixture
+    was repaired rather than because the gate changed its mind. `on_disk` was
+    only ever reachable here while the staged layout was six bytes of non-GDS:
+    the measured receipt bound the report to it, `_recorded_layout_evidence`
+    parsed its top cells, got `[]`, and returned an INVALID binding — which
+    deliberately does not fall through, so the whole probe collapsed to
+    NO_LAYOUT_EVIDENCE. Over a layout that really is one, the same receipt is a
+    VALID binding and earns the strongest tier. Measured lattice (lane icslot6):
+      real GDS + receipt              rc 0  invocation
+      real GDS, no receipt            rc 1  on_disk    + DRC_ZERO_NOT_MEASURED
+      real GDS + provenance, receipt  rc 0  invocation
+      real GDS + provenance, none     rc 1  declared   + DRC_ZERO_NOT_MEASURED
+    `on_disk` and `declared` therefore belong to rc-1 fixtures, and they get
+    their own cases below rather than being asserted from a passing run.
+    """
     proj = project(tmp_path, klayout_rdb(top="top"), gds_stem="top")
     measured_klayout_receipt(proj)
     rc, payload, err = gate(proj, "--signoff")
     assert rc == 0, err
     assert payload["passed"] is True
+    assert payload["summary"]["layout_evidence_tier"] == "invocation"
+    assert payload["summary"]["layout_topcell_match"] is True
+
+
+def test_on_disk_tier_is_what_a_streamout_alone_earns(tmp_path):
+    """The tier the case above used to claim, now exercised by the fixture that
+    actually reaches it: a real streamout and NO invocation binding the report.
+
+    It does not pass, and the reason is the OTHER ruling: v1.20.61's empty-RDB
+    zero is unmeasured without the receipt. Asserted by NAME so this case says
+    which concern owns the rc, and so a future change that started refusing the
+    on-disk tier itself could not hide behind the same rc 1."""
+    proj = project(tmp_path, klayout_rdb(top="top"), gds_stem="top")
+    rc, payload, _ = gate(proj, "--signoff")
+    assert rc == 1
     assert payload["summary"]["layout_evidence_tier"] == "on_disk"
     assert payload["summary"]["layout_topcell_match"] is True
+    assert "DRC_SIGNOFF_NO_LAYOUT_EVIDENCE" not in rules(payload)
+    assert "DRC_ZERO_NOT_MEASURED" in rules(payload)
+
+
+def test_a_streamed_layout_whose_top_cell_is_not_the_reports_is_refused(tmp_path):
+    """The negative direction the repaired fixture makes expressible.
+
+    A parseable GDS in the right place with the right FILENAME, whose top
+    structure is a different cell, is not this report's layout — and the bound
+    receipt must be refused rather than accepted on the strength of the name.
+    This is the same anti-laundering rule as
+    `test_a_pdk_or_macro_gds_is_not_the_design_layout`, one level deeper: there
+    the file was the wrong file, here it is the right file with the wrong
+    contents."""
+    proj = project(tmp_path, klayout_rdb(top="top"), gds_stem="top",
+                   gds_cell="some_other_cell")
+    measured_klayout_receipt(proj)
+    rc, payload, _ = gate(proj, "--signoff")
+    assert rc == 1
+    assert payload["summary"]["layout_evidence_tier"] == "none"
+    assert payload["summary"]["layout_topcell_match"] is False
+    assert "DRC_SIGNOFF_NO_LAYOUT_EVIDENCE" in rules(payload)
 
 
 def test_declared_tier_is_accepted_and_disclosed(tmp_path):
     # Two rulings compose here and neither overrides the other. 8d0e3e23f
     # answers "is there a layout?": a provenance DECLARATION is a real tier,
-    # ranked below `invocation`, and it is accepted -- and DISCLOSED. v1.20.61
-    # answers "was the ZERO measured?": an RDB whose <items> is empty
-    # certifies nothing by itself, so the clean run must also carry the
-    # digest-bound KLayout receipt a real step-31 run writes. That receipt
-    # names the GDS as the deck's INPUT, not as a streamout, so it does not
-    # promote the layout tier: the layout is still only DECLARED.
+    # ranked below `invocation`, and it is ACCEPTED -- and DISCLOSED. v1.20.61
+    # answers "was the ZERO measured?": an RDB whose <items> is empty certifies
+    # nothing by itself, so a clean run must also carry the digest-bound KLayout
+    # receipt a real step-31 run writes.
+    #
+    # THE OLD FIXTURE ASSERTED A COMBINATION THAT IS NOT REACHABLE (lane
+    # icslot6). It carried the receipt AND expected `rc 0` with tier `declared`,
+    # on the stated reasoning that the receipt "names the GDS as the deck's
+    # INPUT, not as a streamout, so it does not promote the layout tier". That
+    # reasoning is contradicted by the code: `_recorded_layout_evidence` looks
+    # for a canonical streamout AMONG THE INPUTS and a valid one yields
+    # `invocation`. It only ever read as `declared` because the staged layout was
+    # six bytes of non-GDS, which made the binding INVALID -- and an invalid
+    # binding does not fall through, so the run actually reached
+    # NO_LAYOUT_EVIDENCE, not `declared`. Measured: with a real layout the
+    # receipt promotes the tier every time, so `declared` and `rc 0` cannot
+    # co-exist.
+    #
+    # WHAT THIS CASE IS FOR SURVIVES INTACT, and is what it now asserts: the
+    # declaration IS accepted as layout evidence -- the gate does not raise
+    # NO_LAYOUT_EVIDENCE over it -- and the weaker tier IS disclosed. The rc is 1
+    # for the OTHER ruling's reason, and that reason is named here so a reader
+    # cannot mistake which concern owns it.
     proj = project(tmp_path, klayout_rdb(top="top"), gds_stem="top")
     gds = proj / "phase3" / "stage3" / "pnr" / "top.gds"
     (proj / "provenance.jsonl").write_text(json.dumps({
@@ -297,14 +396,17 @@ def test_declared_tier_is_accepted_and_disclosed(tmp_path):
         "outputs": {"phase3/stage3/pnr/top.gds":
                     "sha256:" + hashlib.sha256(gds.read_bytes()).hexdigest()}})
         + "\n")
-    measured_klayout_receipt(proj)
     rc, payload, err = gate(proj, "--signoff")
-    assert rc == 0, err
     assert payload["summary"]["layout_evidence_tier"] == "declared"
+    # ACCEPTED: the declaration answers "is there a layout?" on its own.
+    assert "DRC_SIGNOFF_NO_LAYOUT_EVIDENCE" not in rules(payload), err
     # the DISCLOSURE is the point: `declared` is a weaker claim than
     # `invocation` and the artefact must say which one this run earned.
     assert payload["summary"]["layout_evidence_witness"] == \
         "phase3/stage3/pnr/top.gds"
+    # and the rc belongs to the zero-measurement ruling, not to this one
+    assert rc == 1
+    assert "DRC_ZERO_NOT_MEASURED" in rules(payload)
 
 
 def test_violations_still_fail_under_signoff(tmp_path):
