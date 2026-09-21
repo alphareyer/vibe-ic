@@ -26849,6 +26849,52 @@ def _postroute_sdr_transaction_finish_tcl(
     return (
         "  if {$_sdr_tx_ready && $_sdr_tx_mutated} {\n"
         "    puts \"SDR_TRANSACTION_DECISION: error=$_sdr_tx_error route_ok=$_sdr_tx_route_ok router_drc_before=$_sdr_tx_before\"\n"
+        # A LEGAL PLACEMENT IS NOT A ROUTABLE ONE, AND THE LEGALIZER NEVER
+        # ASKS. MEASURED on subservient x gf180mcuD as a DIE, interior-core
+        # tree (2026-09-21): the candidate was ACCEPTED on router DRC and a
+        # clean `check_placement`, and the adopt path then died in its PG
+        # re-route with `[ERROR DRT-1231] Pin u_core/_3245_/ZN does not have
+        # access point` (x6) plus `[ERROR DRT-0206] checkConnectivity error`,
+        # so no routed.def was written, DRC and LVS had no input, and the run
+        # produced no post-route STA at all. `u_core/_3245_` is an original
+        # `aoi221_1` (SOURCE NONE, not a repair insertion) whose ZN carried
+        # exactly ONE access point in the candidate database, in a row with no
+        # free gap on either side of it.
+        #
+        # Pin access is the ROUTER's question and OpenROAD answers it in the
+        # database: an ITerm on a signal net with zero access points cannot be
+        # reached. Asking BEFORE adopting turns a whole-run loss into one
+        # refused candidate, which is the same shape as the placement refusal
+        # beside it. Fail-closed: a build whose ITerms cannot be asked
+        # (`getAccessPoints` absent) leaves the count at -1 and the candidate
+        # is judged exactly as it was before.
+        "    set _sdr_ap -1\n"
+        "    catch {\n"
+        "      set _sdr_ap 0\n"
+        "      foreach _sdr_ai [[ord::get_db_block] getInsts] {\n"
+        "      if {![string match \"CORE*\" [[$_sdr_ai getMaster] getType]]} "
+        "{ continue }\n"
+        "      foreach _sdr_at [$_sdr_ai getITerms] {\n"
+        "        set _sdr_an [$_sdr_at getNet]\n"
+        "        if {$_sdr_an eq \"NULL\"} { continue }\n"
+        "        if {[$_sdr_an isSpecial]} { continue }\n"
+        "        if {[llength [$_sdr_at getAccessPoints]] == 0} {\n"
+        "          if {$_sdr_ap < 8} { puts \"SDR_PIN_NO_ACCESS: "
+        "[$_sdr_ai getName]/[[$_sdr_at getMTerm] getName] "
+        "([[$_sdr_ai getMaster] getName])\" }\n"
+        "          incr _sdr_ap\n"
+        "        }\n"
+        "      }\n"
+        "      }\n"
+        "    }\n"
+        "    puts \"SDR_TRANSACTION_CANDIDATE_PIN_ACCESS: $_sdr_ap\"\n"
+        # ASKED ONCE, BEFORE THE SPLIT, BECAUSE THERE ARE TWO ACCEPT PATHS.
+        # MEASURED (int2 arm, 2026-09-21): the first version of this check
+        # sat in the clean-candidate chain, the run took the ADVISORY accept
+        # instead -- `SDR_TRANSACTION_ACCEPTED_WITH_ADVISORY` -- and the
+        # question was never asked: `SDR_TRANSACTION_CANDIDATE_PIN_ACCESS`
+        # appears 0 times in that run's log and DRT-1231 recurred unchanged.
+        # A guard on one of two doors is not a guard.
         "    if {$_sdr_tx_error || !$_sdr_tx_route_ok} {\n"
         "      puts \"SDR_TRANSACTION_REJECT_CAUSE: nonfatal_during_repair=$_sdr_tx_error candidate_route_failed=[expr {!$_sdr_tx_route_ok}]\"\n"
         "      if {[catch {set _sdr_tx_after [_sdr_tx_count_router_drc $_sdr_tx_cand_report]} _sdr_tx_cand_e]} {\n"
@@ -26859,7 +26905,7 @@ def _postroute_sdr_transaction_finish_tcl(
         "      }\n"
         "      if {$_sdr_tx_route_ok && $_sdr_tx_after >= 0 && "
         "($_sdr_tx_after == 0 || $_sdr_tx_after < $_sdr_tx_before) && "
-        "[info exists _sdr_pv] && $_sdr_pv == 0} {\n"
+        "[info exists _sdr_pv] && $_sdr_pv == 0 && $_sdr_ap <= 0} {\n"
         "        file copy -force $_sdr_tx_cand_report $_sdr_tx_dir/accepted_router.drc.rpt\n"
         "        _sdr_tx_receipt ACCEPTED_WITH_ADVISORY nonfatal_disclosed_router_drc_and_placement_measured_clean "
         "$_sdr_tx_before $_sdr_tx_after\n"
@@ -26867,6 +26913,9 @@ def _postroute_sdr_transaction_finish_tcl(
         "during the pass and the router was then asked: router_drc=$_sdr_tx_before -> "
         "$_sdr_tx_after, placement_violations=$_sdr_pv. The advisory is recorded; it is not a "
         "fact about this geometry.\"\n"
+        "      } elseif {$_sdr_ap > 0} {\n"
+        "        _sdr_tx_reject_candidate candidate_pin_access_lost "
+        "$_sdr_tx_before $_sdr_tx_after\n"
         "      } else {\n"
         "        if {![info exists _sdr_pv]} {\n"
         "          puts \"SDR_TRANSACTION_PLACEMENT_UNMEASURED: the pass did not reach "
@@ -26895,45 +26944,6 @@ def _postroute_sdr_transaction_finish_tcl(
         # above already demands `_sdr_pv == 0`; this branch now refuses a
         # MEASURED non-zero count too (-1 = check_placement itself failed).
         # Core-only r32 children measured 0, so that path is unchanged.
-        # A LEGAL PLACEMENT IS NOT A ROUTABLE ONE, AND THE LEGALIZER NEVER
-        # ASKS. MEASURED on subservient x gf180mcuD as a DIE, interior-core
-        # tree (2026-09-21): the candidate was ACCEPTED on router DRC and a
-        # clean `check_placement`, and the adopt path then died in its PG
-        # re-route with `[ERROR DRT-1231] Pin u_core/_3245_/ZN does not have
-        # access point` (x6) plus `[ERROR DRT-0206] checkConnectivity error`,
-        # so no routed.def was written, DRC and LVS had no input, and the run
-        # produced no post-route STA at all. `u_core/_3245_` is an original
-        # `aoi221_1` (SOURCE NONE, not a repair insertion) whose ZN carried
-        # exactly ONE access point in the candidate database, in a row with no
-        # free gap on either side of it.
-        #
-        # Pin access is the ROUTER's question and OpenROAD answers it in the
-        # database: an ITerm on a signal net with zero access points cannot be
-        # reached. Asking BEFORE adopting turns a whole-run loss into one
-        # refused candidate, which is the same shape as the placement refusal
-        # beside it. Fail-closed: a build whose ITerms cannot be asked
-        # (`getAccessPoints` absent) leaves the count at -1 and the candidate
-        # is judged exactly as it was before.
-        "      set _sdr_ap -1\n"
-        "      catch {\n"
-        "        set _sdr_ap 0\n"
-        "        foreach _sdr_ai [[ord::get_db_block] getInsts] {\n"
-        "          if {![string match \"CORE*\" [[$_sdr_ai getMaster] getType]]} "
-        "{ continue }\n"
-        "          foreach _sdr_at [$_sdr_ai getITerms] {\n"
-        "            set _sdr_an [$_sdr_at getNet]\n"
-        "            if {$_sdr_an eq \"NULL\"} { continue }\n"
-        "            if {[$_sdr_an isSpecial]} { continue }\n"
-        "            if {[llength [$_sdr_at getAccessPoints]] == 0} {\n"
-        "              if {$_sdr_ap < 8} { puts \"SDR_PIN_NO_ACCESS: "
-        "[$_sdr_ai getName]/[[$_sdr_at getMTerm] getName] "
-        "([[$_sdr_ai getMaster] getName])\" }\n"
-        "              incr _sdr_ap\n"
-        "            }\n"
-        "          }\n"
-        "        }\n"
-        "      }\n"
-        "      puts \"SDR_TRANSACTION_CANDIDATE_PIN_ACCESS: $_sdr_ap\"\n"
         "      if {[info exists _sdr_pv] && $_sdr_pv != 0} {\n"
         "        puts \"SDR_TRANSACTION_CANDIDATE_PLACEMENT_VIOLATIONS: $_sdr_pv\"\n"
         "        _sdr_tx_reject_candidate candidate_placement_illegal $_sdr_tx_before $_sdr_tx_after\n"

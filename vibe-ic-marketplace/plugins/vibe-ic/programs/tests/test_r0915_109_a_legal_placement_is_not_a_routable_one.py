@@ -78,11 +78,41 @@ def test_a_build_that_cannot_be_asked_changes_no_verdict(tmp_path):
     assert "catch {" in tcl[i:i + 200], "the whole sweep is guarded"
 
 
-def test_the_placement_refusal_still_comes_first(tmp_path):
-    """An illegal placement keeps its own name; this is a second question."""
+def test_the_question_is_asked_before_the_accept_paths_split(tmp_path):
+    """A GUARD ON ONE OF TWO DOORS IS NOT A GUARD.
+
+    MEASURED (int2 arm, 2026-09-21): the first version of this check sat in
+    the clean-candidate chain; the run took the ADVISORY accept instead
+    (`SDR_TRANSACTION_ACCEPTED_WITH_ADVISORY`), so the question was never
+    asked -- `SDR_TRANSACTION_CANDIDATE_PIN_ACCESS` appears 0 times in that
+    run's log -- and DRT-1231 recurred unchanged.
+    """
     tcl = _deck(tmp_path)
-    assert tcl.index("candidate_placement_illegal") < \
-        tcl.index("candidate_pin_access_lost")
+    split = tcl.index("SDR_TRANSACTION_DECISION")
+    advisory = tcl.index("ACCEPTED_WITH_ADVISORY")
+    asked = tcl.index("set _sdr_ap -1")
+    assert split < asked < advisory
+
+
+def test_both_accept_paths_require_pin_access(tmp_path):
+    tcl = _deck(tmp_path)
+    assert "$_sdr_pv == 0 && $_sdr_ap <= 0} {" in tcl, \
+        "the advisory accept"
+    assert tcl.count("candidate_pin_access_lost") == 2, \
+        "one refusal on each accept path"
+
+
+def test_the_placement_refusal_keeps_its_own_name(tmp_path):
+    """An illegal placement keeps its own name; this is a second question.
+
+    On the CLEAN chain the placement refusal is still asked first; the
+    advisory chain has its own pin-access refusal ahead of that chain, which
+    is why an index comparison over the whole deck no longer expresses this.
+    """
+    tcl = _deck(tmp_path)
+    clean = tcl.index("SDR_TRANSACTION_CANDIDATE_PLACEMENT_VIOLATIONS")
+    assert tcl.index("candidate_placement_illegal", clean) < \
+        tcl.index("candidate_pin_access_lost", clean)
 
 
 def test_the_clean_candidate_path_is_unchanged(tmp_path):
