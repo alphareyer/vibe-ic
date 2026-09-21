@@ -25602,6 +25602,17 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "a run with no routed.def.\"\n"
         "      set _ant_refused \"ANTENNA_DIODE_ROLLED_BACK: $_ant_full "
         "net(s) -- [join [lrange $_ant_broken 0 7] {, }]\"\n"
+        # ONLY MEASURED DAMAGE STOPS THE DECK. `_ant_refused` is also set by
+        # ANTENNA_NATIVE_ERROR_UNJUDGED, and UNJUDGED means the census found
+        # NO net that lost a wire and none that lost part of one -- only that
+        # the pass's own inserts were invisible. There is nothing downstream
+        # can corrupt and nothing to restore, so that path must keep reporting
+        # and let the loop's authoritative check speak. Stopping on it would
+        # also abort the entire deck on any build whose `repair_antennas` does
+        # not accept `-reroute` (the deployed stock 0.2.5 of ORGANIC #110),
+        # where every pass raises and inserts nothing. My own driven tests
+        # caught this.
+        "      set _ant_damage 1\n"
         # R-0915-121(b): uncapped membership beside the log, because the
         # eight names above are a summary and the question "are these the
         # nets the checker later finds?" has to be answerable. It is emitted
@@ -25769,9 +25780,39 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "if {$_ant_rb_ckpt eq \"\" && $_ant_ckpt_ok} "
         "{ set _ant_rb_ckpt $_ant_ckpt }\n"
         "if {$_ant_refused ne \"\"} {\n"
+        "  set ::_vic_antenna_refused 1\n"
         "  if {$_ant_rb_ckpt ne \"\"} {\n"
         "    puts \"ANTENNA_REPAIR_REFUSED_ROLLBACK_REQUEST: checkpoint=$_ant_rb_ckpt "
         "reason=$_ant_refused\"\n"
+        # THE FIRST REFUSAL STOPS THE DECK. MEASURED on int11 (subservient x
+        # gf180mcuD as a DIE, 2026-09-21): the first antenna pass refused with
+        # a CLEAN `antenna_pass_pre.odb` behind it, the refusal was a `puts`,
+        # the deck carried on, and the SECOND antenna slot then rewrote BOTH
+        # checkpoints with post-damage state -- `cmp` says the two .odb files
+        # are byte-identical, 26984114 bytes, both stamped 20:27, both already
+        # carrying the 1437 unrouted nets the first pass created. The parent
+        # was asked to restore from a file that no longer held anything to
+        # restore.
+        #
+        # A refusal means the route in this session is NOT the one the router
+        # verified. Everything after it -- the reconverge slot, fill, the PG
+        # block, the named-violation check, `write_def routed.def` -- would be
+        # work done on a wrecked database, and the one thing it reliably
+        # destroys is the evidence needed to undo it. So the deck stops HERE,
+        # loudly, with the checkpoint intact. The parent's rollback reads the
+        # marker out of the LOG and runs whether or not this deck exited 0
+        # (`_pnr_rollback_refused_antenna_repair` is called on the combined
+        # transcript after the SDR adopt), so stopping costs the run nothing
+        # it would otherwise have had -- and it is what makes the restore
+        # possible at all.
+        "    if {[info exists _ant_damage] && $_ant_damage} {\n"
+        "    error \"ANTENNA_REPAIR_REFUSED_STOP: $_ant_refused -- this "
+        "session's route is NOT the one the router verified and the state that "
+        "can undo it is $_ant_rb_ckpt; the deck stops here so nothing "
+        "downstream overwrites or deletes it (MEASURED int11: a later antenna "
+        "pass rewrote both checkpoints with post-damage state). The parent "
+        "restores from the checkpoint and re-drives the tail.\"\n"
+        "    }\n"
         "  } else {\n"
         "    puts \"ANTENNA_REPAIR_REFUSED_NO_CHECKPOINT: reason=$_ant_refused "
         "-- the pre-repair state was never written, so this route cannot be "
@@ -25779,10 +25820,22 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "  }\n"
         "} elseif {$_ant_ckpt_ok} {\n"
         "  puts \"ANTENNA_REPAIR_APPLIED: no repair or reroute refused\"\n"
-        "  catch {file delete -- $_ant_ckpt}\n"
+        # AND A LATER SUCCESS NEVER SWEEPS AN EARLIER REFUSAL'S EVIDENCE. The
+        # stop above makes this unreachable today; it stays because the two
+        # antenna slots are separate emissions with separate local variables,
+        # and only a deck-global flag can see across them. Deleting the file
+        # the parent was just asked to restore from is the same defect as
+        # overwriting it.
+        "  if {![info exists ::_vic_antenna_refused]} {\n"
+        "    catch {file delete -- $_ant_ckpt}\n"
         # the per-pass checkpoint is only owed while a refusal might need it
-        "  if {[info exists _ant_pass_ckpt]} "
+        "    if {[info exists _ant_pass_ckpt]} "
         "{ catch {file delete -- $_ant_pass_ckpt} }\n"
+        "  } else {\n"
+        "    puts \"ANTENNA_CHECKPOINTS_KEPT: an earlier antenna pass refused, "
+        "so the state it can be rolled back to is not swept by this pass's "
+        "success\"\n"
+        "  }\n"
         "} else {\n"
         # A design that was ALREADY CLEAN never entered the loop, so there was
         # nothing to checkpoint and nothing to refuse. Saying so is not the same
@@ -29754,8 +29807,10 @@ puts "{_PNR_STAGE_MARKER} postroute_antenna_repair"
 {antenna_repair_block}{_pin_access_probe_tcl("after_postroute_antenna_repair")}{_unrouted_probe_tcl("after_postroute_antenna_repair")}{_pnr_stage_end("postroute_antenna_repair")}
 {drv_reconverge_block}{_pin_access_probe_tcl("after_postroute_drv_reconverge")}{_unrouted_probe_tcl("after_postroute_drv_reconverge")}
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
+{_pnr_stage_begin("postroute_antenna_reconverge")}
 puts "{_PNR_STAGE_MARKER} postroute_antenna_reconverge"
-{post_reconverge_antenna_block}{_pin_access_probe_tcl("after_postroute_antenna_reconverge")}{_unrouted_probe_tcl("after_postroute_antenna_reconverge")}# === v0.1.48 — decap + filler insertion ===
+{post_reconverge_antenna_block}{_pin_access_probe_tcl("after_postroute_antenna_reconverge")}{_unrouted_probe_tcl("after_postroute_antenna_reconverge")}{_pnr_stage_end("postroute_antenna_reconverge")}
+# === v0.1.48 — decap + filler insertion ===
 # spm pilot Tier 2 EM/decap finding: prior runs (v0.1.25 → v0.1.47) emitted
 # ZERO decap or filler cells. Empty std-cell-row gaps left an MPW-rejecting
 # combination: no dynamic IR margin (no decap), open density-fill rules

@@ -107,6 +107,9 @@ namespace eval ord { proc get_db_block {} { return ::BLK } }
 namespace eval odb {
   proc dbInst_destroy {i} {
     set n [$i getName]
+    # R-0915-121(3): the deck now STOPS on a refusal, so a probe printed
+    # after it never runs. Each destroy reports itself as it happens.
+    puts "DESTROYED_ONE $n"
     lappend ::destroyed $n
     set x [lsearch $::insts $n]
     if {$x >= 0} { set ::insts [lreplace $::insts $x $x] }
@@ -188,7 +191,8 @@ def test_a_net_the_pass_never_touched_is_still_its_responsibility():
     wired, and unwires nX, which it inserted nothing on. R-0915-116(2)(ii)
     called that SPURIOUS. It is a REFUSAL."""
     r, _ = _drive("5 5 5", inserts=["d1"], unwire=["nX"])
-    assert r.returncode == 0, r.stderr
+    # R-0915-121(3): measured damage STOPS the deck, so it exits non-zero.
+    assert r.returncode != 0, "a refusal must not look like a clean session"
     assert "ANTENNA_NATIVE_ERROR_SPURIOUS" not in r.stdout
     assert "ANTENNA_DIODE_ROLLED_BACK" in r.stdout
     assert "nX" in r.stdout
@@ -241,7 +245,7 @@ def test_a_pass_whose_checkpoint_never_got_written_falls_back_and_says_so():
         p.write_text(script)
         r = subprocess.run([tclsh, str(p)], capture_output=True, text=True,
                            cwd=td)
-    assert r.returncode == 0, r.stderr
+    assert r.returncode != 0, "a refusal must not look like a clean session"
     assert "ANTENNA_PASS_CHECKPOINT_FAILED" in r.stdout
     assert "ANTENNA_REPAIR_REFUSED_ROLLBACK_REQUEST:" in r.stdout
     assert "checkpoint=./antenna_pre_repair.odb" in r.stdout
@@ -276,7 +280,7 @@ def test_a_pass_that_took_a_wire_and_shows_nothing_is_refused_not_unjudged():
     """Unjudged is for a pass that took nothing away AND shows nothing it
     added. A pass that unwired a net has been judged."""
     r, _ = _drive("5 5 5", inserts=[], unwire=["nX"])
-    assert r.returncode == 0, r.stderr
+    assert r.returncode != 0, "a refusal must not look like a clean session"
     assert "ANTENNA_NATIVE_ERROR_UNJUDGED" not in r.stdout
     assert "ANTENNA_DIODE_ROLLED_BACK" in r.stdout
     assert "nX" in r.stdout
@@ -339,7 +343,7 @@ def test_the_emitted_deck_is_balanced_tcl():
 def test_a_net_that_kept_its_wire_with_less_in_it_is_damage_too():
     """The 86-family. nX keeps a wire; the pass takes pieces out of it."""
     r, _ = _drive("5 5 5", inserts=["d1"], unwire=[], shrink=["nX"])
-    assert r.returncode == 0, r.stderr
+    assert r.returncode != 0, "a refusal must not look like a clean session"
     assert "ANTENNA_NATIVE_ERROR_SPURIOUS" not in r.stdout
     assert "ANTENNA_DIODE_ROLLED_BACK" in r.stdout
     assert "nX" in r.stdout

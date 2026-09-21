@@ -34,6 +34,18 @@ def _tcl():
     return R._antenna_repair_tcl(_pdk())
 
 
+# R-0915-121(3) CHANGED WHAT A REFUSED PASS DOES AFTER IT REFUSES, and these
+# driven cases are re-aimed at that. They used to require `returncode == 0`
+# and read a `DESTROYED={...}` probe printed AFTER the emitted block. The deck
+# now STOPS on the first refusal -- measured on int11, a later antenna pass
+# otherwise rewrites both checkpoints with post-damage state and the parent is
+# asked to restore from a file that no longer holds anything to restore -- so
+# a refusal exits non-zero and nothing after the block runs. The evidence is
+# read from what the deck printed BEFORE it stopped (`DESTROYED_ONE <name>`,
+# emitted by each destroy as it happens), and the exit code is now itself an
+# assertion. Every property these cases measured is kept; none is relaxed.
+
+
 def test_the_whole_design_fallback_is_gone():
     """(iii) -- deleted from this stage as R-0915-114(a) deleted it from the
     PG block. It is the step that destroyed a converged route on spm."""
@@ -149,6 +161,9 @@ namespace eval ord { proc get_db_block {} { return ::BLK } }
 namespace eval odb {
   proc dbInst_destroy {i} {
     set n [$i getName]
+    # R-0915-121(3): the deck now STOPS on a refusal, so a probe printed
+    # after it never runs. Each destroy reports itself as it happens.
+    puts "DESTROYED_ONE $n"
     lappend ::destroyed $n
     set x [lsearch $::insts $n]
     if {$x >= 0} { set ::insts [lreplace $::insts $x $x] }
@@ -245,16 +260,19 @@ def test_driven_a_raise_whose_nets_kept_their_wires_lets_the_loop_converge():
     assert "ANTENNA_NATIVE_ERROR_SPURIOUS" in r.stdout
     assert "ANTENNA_LOOP_CONVERGED" in r.stdout
     assert "ANTENNA_DIODE_ROLLED_BACK" not in r.stdout
-    assert "DESTROYED={}" in r.stdout                  # nothing was rolled back
+    assert "DESTROYED_ONE" not in r.stdout            # nothing was rolled back
 
 
 def test_driven_a_raise_that_unwired_a_net_rolls_that_pass_back_and_stops():
     r = _drive("5 5 5", wired=False, inserts=["d1"])
-    assert r.returncode == 0, r.stderr
+    # R-0915-121(3): a refusal STOPS the deck, so it exits non-zero and the
+    # probe that used to print `DESTROYED={...}` after the block never runs.
+    assert r.returncode != 0, "a refusal must not look like a clean session"
     assert "ANTENNA_DIODE_ROLLED_BACK" in r.stdout
     assert "nA" in r.stdout                            # the net is named
-    assert "DESTROYED={d1}" in r.stdout                # the diode, by name
+    assert "DESTROYED_ONE d1" in r.stdout              # the diode, by name
     assert "ANTENNA_LOOP_CONVERGED" not in r.stdout    # the violation stands
+    assert "ANTENNA_REPAIR_REFUSED_STOP" in r.stdout + r.stderr
 
 
 def test_driven_a_pre_existing_instance_is_never_rolled_back():
@@ -262,16 +280,20 @@ def test_driven_a_pre_existing_instance_is_never_rolled_back():
     already there'. If the snapshot is dead the block destroys i1 as well --
     which is exactly what the `_ant_pre` name collision would have done."""
     r = _drive("5 5 5", wired=False, inserts=["d1"])
-    assert "DESTROYED={d1}" in r.stdout
-    assert "i1" not in r.stdout.split("DESTROYED=")[1]
+    assert "DESTROYED_ONE d1" in r.stdout
+    assert "DESTROYED_ONE i1" not in r.stdout
 
 
 def test_driven_a_raise_that_inserted_nothing_visible_is_unjudged_and_stops():
     r = _drive("5 5 5", wired=True, inserts=[])
+    # UNJUDGED does NOT set `_ant_refused`: the pass took nothing away, so
+    # there is nothing to roll back and nothing downstream to protect from.
+    # The deck completes and the violation is reported by the authoritative
+    # post-loop check -- that difference from a REFUSAL is the point.
     assert r.returncode == 0, r.stderr
     assert "ANTENNA_NATIVE_ERROR_UNJUDGED" in r.stdout
     assert "ANTENNA_DIODE_ROLLED_BACK" not in r.stdout
-    assert "DESTROYED={}" in r.stdout
+    assert "DESTROYED_ONE" not in r.stdout
     assert "ANTENNA_LOOP_CONVERGED" not in r.stdout
 
 
@@ -295,8 +317,13 @@ def test_driven_no_whole_design_route_is_ever_reached():
         p.write_text(script)
         r = subprocess.run([tclsh, str(p)], capture_output=True, text=True,
                            cwd=td)
-    assert r.returncode == 0, r.stderr
+    # This scenario is a REFUSAL (wired=0), so R-0915-121(3) stops the deck
+    # and it exits non-zero. What this test measures is unchanged and is the
+    # stronger half: no path through the raise -- stop included -- reaches a
+    # whole-design route.
+    assert r.returncode != 0, "a refusal must not look like a clean session"
     assert "ROUTED_WHOLE_DESIGN" not in r.stdout
+    assert "ANTENNA_REPAIR_REFUSED_STOP" in r.stdout + r.stderr
 
 
 def test_driven_a_diode_on_a_net_that_kept_its_wire_is_not_rolled_back():
@@ -304,7 +331,8 @@ def test_driven_a_diode_on_a_net_that_kept_its_wire_is_not_rolled_back():
     contained them. This pass inserts two: d1 on nA, which loses its wire, and
     d2 on nB, which keeps it. Only d1 goes."""
     r = _drive("5 5 5", wired=False, inserts=["d1", "d2"])
-    assert r.returncode == 0, r.stderr
+    assert r.returncode != 0, "a refusal must not look like a clean session"
     assert "ANTENNA_DIODE_ROLLED_BACK" in r.stdout
-    assert "DESTROYED={d1}" in r.stdout
+    assert "DESTROYED_ONE d1" in r.stdout
+    assert "DESTROYED_ONE d2" not in r.stdout
     assert "1 kept" in r.stdout          # d2, on a net that kept its wire
