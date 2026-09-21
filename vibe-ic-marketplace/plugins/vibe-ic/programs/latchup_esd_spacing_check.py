@@ -198,13 +198,39 @@ def _is_tap_tokened(master: str) -> bool:
     return bool(_p._WELLTAP_TOKEN_RE.search(master.lower()))
 
 
-def _recorded_noncore_masters(def_file: Path) -> set[str]:
+#: Recorded IO LEFs the last `_recorded_noncore_masters` call could not read.
+#: A list rather than a count: a reader chasing a false core screen needs the
+#: path, and "0 exclusions" on its own says nothing about why.
+_unreadable_recorded_lefs: List[str] = []
+
+
+def _recorded_noncore_masters(def_file: Path, reader=None) -> set[str]:
     """Reopen this run's declared IO LEFs; never infer class from pad names.
 
     Unreadable metadata grants no exclusions. Conflicting declarations (even
     within one LEF) cannot remove a master from the conservative core screen.
+
+    W5/28 -- WHERE THOSE LEFS ARE READ. The paths come from this run's own
+    `io_pad_chip_top.json` and they name the PDK as the RUN's tools see it.
+    MEASURED on the two spm runs the W5 report cites: both record 15
+    `io_library_lefs` under `/foss/pdks/ciel/...` and every one of them is
+    host-unreadable, so a host-side read raised on the first and the `except
+    OSError` below returned an EMPTY exclusion set on every run. Every pad was
+    then screened as a core cell.
+
+    The conservative direction is deliberate and is KEPT. What was wrong is that
+    it fired always, and silently: "no exclusions" and "this PDK declares no pad
+    masters" were the same answer. The read now goes through
+    `_pdk_layer_authority._query` -- the container this run published when there
+    is one, the local filesystem when there is not -- and a recorded LEF that
+    cannot be read is NAMED in `_unreadable_recorded_lefs`.
     """
     from _pad_ring import parse_lef_macro_classes
+    # `_pdk_layer_authority._query` IS this tree's environment seam; `_pad_ring`
+    # wraps it for its own readers. Importing it directly keeps this gate's
+    # branch independent of that one.
+    from _pdk_layer_authority import _query as _pdk_read
+    del _unreadable_recorded_lefs[:]
 
     dp = def_file.absolute()
     if len(dp.parents) < 4 or dp.parents[2].name != "phase3":
@@ -226,7 +252,16 @@ def _recorded_noncore_masters(def_file: Path) -> set[str]:
                 lef = project / lef
             # Parse declarations separately: a later duplicate must not silently
             # overwrite an earlier CORE class with PAD/ENDCAP.
-            for body in re.split(r"(?m)(?=^\s*MACRO\s+\S+)", lef.read_text()):
+            try:
+                text = _pdk_read(lef, "read", reader=reader)
+            except OSError:
+                # A recorded LEF that cannot be read grants no exclusions AND is
+                # named, so the caller can disclose it. Returning silently here
+                # is what made an unreachable PDK indistinguishable from a PDK
+                # whose IO library declares nothing.
+                _unreadable_recorded_lefs.append(str(lef))
+                return set()
+            for body in re.split(r"(?m)(?=^\s*MACRO\s+\S+)", text):
                 for master, cls in parse_lef_macro_classes(body).items():
                     classes.setdefault(master, set()).add(cls)
         return {master for master, values in classes.items()
@@ -407,6 +442,16 @@ def _latchup_tap_spacing_check(def_file: Path,
     std = [(x / units, y / units) for _i, m, x, y in geom
            if _is_std_cell(m, noncore)]
     base["lef_noncore_masters"] = sorted(noncore & {m for _i, m, _x, _y in geom})
+    # W5/28: an empty exclusion set has two very different causes and the record
+    # now says which. Without this the screen reported a core population that
+    # included every pad, and nothing in the report said the PDK had not been read.
+    if _unreadable_recorded_lefs:
+        base["lef_noncore_masters_unavailable"] = list(_unreadable_recorded_lefs)
+        base["lef_noncore_masters_unavailable_why"] = (
+            "this run's recorded IO LEF(s) could not be read where this audit "
+            "ran, so no PAD/ENDCAP exclusion was granted and every placed "
+            "master was screened as a core cell. That is the conservative "
+            "direction, NOT a finding that the PDK declares no pad masters")
     taps = [(x / units, y / units) for _i, m, x, y in geom
             if _is_rated_tap(m, rated_tap_masters)]
     unknown_taps = sorted({m for _i, m, _x, _y in geom
