@@ -1006,6 +1006,190 @@ def delivered_case_program(project: Path, stimulus: str) -> "Path | None":
     return None
 
 
+# ── J-1: a delivered testbench binds the DESIGN'S OWN port names ───────────
+#
+# L3:33 says the SRAM signal NAMES and L3:73 says the SRAM bus PROTOCOL are
+# declared by the implementation in its own `declaration.json`; L3:37-41 then
+# writes down a "typical" set. A delivered testbench can only bind the typical
+# set -- it is the only set stated anywhere in the design input -- and the
+# delivered subservient testbenches say so in their own headers: "an
+# implementation that declares a different SRAM signal set or a different read
+# latency will not bind to this file".
+#
+# That is true of the file and must not be true of the FLOW. So the installed
+# copy is bound to what the implementation DECLARED, and the typical set is the
+# fallback used ONLY where the declaration is silent. Nothing here is a hand
+# map from one design's names to another's: the roles come from the
+# declaration, and the typical names are read from the same input table the
+# delivered testbench read.
+#
+# MEASURED on subservient x gf180mcuD, r48: that design's declaration names no
+# SRAM ports at all (it declares `sram_interface_protocol` and
+# `sram_interface_timing` only), so every role falls back and the installed
+# bytes are identical to the delivered ones -- which is the case this must not
+# disturb.
+#: Declaration fields that may carry the SRAM role -> port-name map.
+_SRAM_PORT_FIELDS = ("sram_port_names", "sram_ports", "sram_signal_names")
+#: Declaration fields that may carry the read latency, in clocks.
+_SRAM_READ_LATENCY_KEYS = ("read_data_valid_after_request_cycles",
+                           "read_data_latency_cycles", "read_latency_cycles")
+#: role -> the names L3:37-41 itself writes down (the fallback, in order).
+_SRAM_TYPICAL = {
+    "addr":  ("o_sram_addr",),
+    "wdata": ("o_sram_data", "o_sram_wdata"),
+    "rdata": ("i_sram_data", "i_sram_rdata"),
+    "we":    ("o_sram_we",),
+    "cyc":   ("o_sram_cyc",),
+}
+#: role -> the keys a declaration may use for it.
+_SRAM_ROLE_KEYS = {
+    "addr":  ("addr", "address"),
+    "wdata": ("wdata", "write_data", "data_out", "wr_data"),
+    "rdata": ("rdata", "read_data", "data_in", "rd_data"),
+    "we":    ("we", "write_enable", "wen", "wr_en"),
+    "cyc":   ("cyc", "cycle", "stb", "strobe", "valid"),
+}
+#: A delivered TB that can express a read latency other than one clock says so
+#: in its own header and names the localparam that carries it.
+_TB_LATENCY_PARAM_RE = re.compile(
+    r"^//\s*VIBEIC_TB_READ_LATENCY_PARAM\s*:\s*([A-Za-z_][A-Za-z0-9_]*)\s*$",
+    re.M)
+
+
+def _declaration(project: Path) -> dict:
+    try:
+        obj = json.loads((Path(project) / "plugin_output"
+                          / "declaration.json").read_text(errors="replace"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(obj, dict):
+        return {}
+    return obj.get("fields") if isinstance(obj.get("fields"), dict) else obj
+
+
+def declared_sram_ports(project: Path) -> dict:
+    """role -> declared port name, for the roles the design actually named."""
+    decl = _declaration(project)
+    raw = None
+    for key in _SRAM_PORT_FIELDS:
+        if isinstance(decl.get(key), dict):
+            raw = decl[key]
+            break
+    if not raw:
+        return {}
+    lowered = {str(k).strip().lower(): v for k, v in raw.items()}
+    out = {}
+    for role, keys in _SRAM_ROLE_KEYS.items():
+        for k in keys:
+            v = lowered.get(k)
+            if isinstance(v, str) and _LEGAL_ID_RE.match(v.strip()):
+                out[role] = v.strip()
+                break
+    return out
+
+
+def declared_read_latency(project: Path) -> "int | None":
+    """The read latency in clocks the design declared, or None if it did not."""
+    timing = _declaration(project).get("sram_interface_timing")
+    if not isinstance(timing, dict):
+        return None
+    for k in _SRAM_READ_LATENCY_KEYS:
+        v = timing.get(k)
+        if isinstance(v, bool):
+            continue
+        if isinstance(v, int) and v >= 0:
+            return v
+    return None
+
+
+def _instance_span(text: str, top: str) -> "tuple[int, int] | None":
+    """The byte span of the `<top> <inst> ( ... );` instantiation, or None.
+
+    Only the DUT instance is rewritten. A named port connection `.x(` is
+    instance syntax, but a testbench may instantiate something else too (a
+    memory model, a monitor), and rewriting those would bind the wrong thing.
+    """
+    m = re.search(rf"\b{re.escape(top)}\s+[A-Za-z_][A-Za-z0-9_]*\s*(?:#\s*\([^;]*?\)\s*)?\(",
+                  text)
+    if not m:
+        return None
+    depth = 0
+    for i in range(m.end() - 1, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return (m.start(), i + 1)
+    return None
+
+
+def bind_delivered_tb(text: str, top: str, declared: dict) -> "tuple[str, list]":
+    """Rebind the DUT instance's port names to what the design declared.
+
+    Returns (text, rebindings). Only the PORT side of a named connection is
+    touched -- the testbench's own net names are its own. A role the design did
+    not declare keeps the typical name the testbench already bound, which is
+    the L3:37-41 fallback and is why a silent declaration changes nothing.
+    """
+    if not declared:
+        return text, []
+    span = _instance_span(text, top)
+    if span is None:
+        return text, []
+    head, inst, tail = text[:span[0]], text[span[0]:span[1]], text[span[1]:]
+    rebound = []
+    for role, name in sorted(declared.items()):
+        for typical in _SRAM_TYPICAL.get(role, ()):
+            if typical == name:
+                break
+            pat = re.compile(rf"\.\s*{re.escape(typical)}\s*\(")
+            if pat.search(inst):
+                inst = pat.sub(f".{name}(", inst, count=1)
+                rebound.append({"role": role, "was": typical, "now": name})
+                break
+    return head + inst + tail, rebound
+
+
+def retime_delivered_tb(text: str, declared_latency: "int | None"
+                        ) -> "tuple[str, dict | None]":
+    """Set the testbench's read latency, or say it cannot express it.
+
+    Returns (text, refusal). A declaration that states nothing, or states the
+    one clock L3:37-41 describes, leaves the file untouched -- the delivered
+    testbenches model exactly that. Any other latency needs the testbench to
+    carry a knob and SAY it carries one; a testbench that does not is REFUSED
+    BY NAME rather than installed to sample at a latency the design does not
+    have. A wrong sampling point is a testbench that passes for the wrong
+    reason, which is worse than no testbench at all.
+    """
+    if declared_latency is None or declared_latency == 1:
+        return text, None
+    m = _TB_LATENCY_PARAM_RE.search(text)
+    if not m:
+        return text, {
+            "reason": "tb_cannot_express_declared_read_latency",
+            "declared_read_latency_cycles": declared_latency,
+            "detail": ("the design declares a read latency of "
+                       f"{declared_latency} clock(s); this testbench models "
+                       "the one clock L3:37-41 describes and declares no "
+                       "`// VIBEIC_TB_READ_LATENCY_PARAM :` knob, so it cannot "
+                       "be retimed. Installing it would sample at a latency "
+                       "the design does not have."),
+        }
+    param = m.group(1)
+    pat = re.compile(rf"(localparam\s+(?:integer\s+)?{re.escape(param)}\s*=\s*)"
+                     r"(\d+)(\s*;)")
+    if not pat.search(text):
+        return text, {
+            "reason": "declared_latency_knob_not_found",
+            "declared_read_latency_cycles": declared_latency,
+            "detail": (f"the testbench names `{param}` as its read-latency "
+                       "knob but declares no `localparam` of that name"),
+        }
+    return pat.sub(rf"\g<1>{declared_latency}\g<3>", text, count=1), None
+
+
 def _emit_case_delivered_oracle(project: Path, case: dict, out_dir: Path,
                                 report: "dict | None") -> "Path | None":
     """Install the DELIVERED testbench for this case into the L10 run.
@@ -1027,6 +1211,24 @@ def _emit_case_delivered_oracle(project: Path, case: dict, out_dir: Path,
     except OSError:
         return None
     if not text.strip():
+        return None
+    # J-1 — BIND IT TO THIS IMPLEMENTATION, NOT TO THE TYPICAL SET.
+    # The delivered file can only bind the names L3:37-41 writes down; the
+    # design's own declaration is what the DUT actually has. Rebind the
+    # instance's port side, fall back per role where the declaration is
+    # silent, and refuse by name rather than install a testbench that would
+    # sample at a read latency this design does not have.
+    _top = str(_declaration(project).get("top_module") or "").strip()
+    _rebound: list = []
+    if _top and _LEGAL_ID_RE.match(_top):
+        text, _rebound = bind_delivered_tb(
+            text, _top, declared_sram_ports(project))
+    text, _refusal = retime_delivered_tb(text, declared_read_latency(project))
+    if _refusal is not None:
+        if report is not None:
+            _refusal["case"] = name
+            _refusal["from"] = str(src.relative_to(Path(project)))
+            report.setdefault("delivered_oracle_refusals", []).append(_refusal)
         return None
     dst = Path(out_dir) / f"{name}.v"
     prog = delivered_case_program(project, str(case.get("stimulus", "")))
@@ -1051,7 +1253,10 @@ def _emit_case_delivered_oracle(project: Path, case: dict, out_dir: Path,
             {"case": name,
              "from": str(src.relative_to(Path(project))),
              "program": (str(prog.relative_to(Path(project)))
-                         if prog is not None else None)})
+                         if prog is not None else None),
+             "port_rebindings": _rebound,
+             "bound_by": ("declaration.json" if _rebound
+                          else "L3 typical set (declaration silent)")})
     return dst
 
 
