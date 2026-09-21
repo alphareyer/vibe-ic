@@ -7,10 +7,20 @@ setup at +0.03 ns as a 413 um hardmacro missed by 13.1 ns at SS — on paths
 whose delay is wire. The auto-sizer had already answered the area question and
 its answer was thrown away the moment the ring grew the die.
 
-Both directions: the core-sized rectangle is centred when it is SMALLER than
-the ring's inner rectangle; the ring inset stays the floor (the core can never
-reach under the pads); and nothing moves when nobody auto-sized a core, when
-the core-sized answer is not smaller, or when it is degenerate.
+SUPERSEDED IN PART BY R-0915-103 (owner, 2026-09-21), and the r37 measurement
+above is KEPT because it is real and it is the number at risk. The ruling
+reverses the CENTRING half for a ring-pinned DIE only: the core is now the die
+interior inside the ring floor, because spm x gf180mcuD measured the opposite
+failure on the same PDK — an island core gave a pad->core net no placement ROW
+to repeat in, 2057 buffers against synthesis's 273 cells and zero, and setup
+-1.97 ns at SS, where the same design with the interior as its core closed at
++8.21 ns with 522 buffers. See
+`test_r0915_103_a_ring_pinned_core_is_the_die_interior.py` for that control and
+`ring_die_core_pad`'s own docstring for both measurements side by side.
+
+What is NOT superseded, and is still pinned below: the ring inset is the floor
+(the core can never reach under the pads), the growth helpers refuse past it,
+and a run that auto-sized nothing is untouched.
 """
 from __future__ import annotations
 
@@ -25,11 +35,14 @@ import phase3_one_shot_runner as R  # noqa: E402
 RING_DIE, RING_PAD = 1962, 393      # r37's own numbers
 
 
-def test_the_core_sized_rectangle_is_centred_in_the_ring_die():
+def test_the_core_sized_rectangle_is_no_longer_centred_r0915_103():
+    """WAS: `pad == (RING_DIE - 500)//2 == 731`, the auto-sizer's rectangle
+    centred in the ring's die. R-0915-103 makes the core the interior, so the
+    inset is the ring floor and the core is `die - 2*floor`."""
     pad = R.ring_die_core_pad(RING_DIE, RING_DIE, RING_PAD, (500, 500))
-    assert pad == (RING_DIE - 500) // 2 == 731
-    assert RING_DIE - 2 * pad == 500                      # the core it asked for
-    assert pad > RING_PAD                                 # further in than the ring
+    assert pad == RING_PAD
+    assert RING_DIE - 2 * pad == RING_DIE - 2 * RING_PAD   # the interior
+    assert pad < (RING_DIE - 500) // 2                     # not the island
 
 
 def test_the_ring_inset_is_always_the_floor():
@@ -45,15 +58,16 @@ def test_without_an_auto_sized_core_nothing_moves(sized):
     assert R.ring_die_core_pad(RING_DIE, RING_DIE, RING_PAD, sized) == RING_PAD
 
 
-def test_a_rectangular_answer_uses_its_larger_side():
-    # one inset serves both axes, so the larger side is what must fit
+def test_a_rectangular_answer_changes_nothing_either_r0915_103():
+    # WAS: the larger side decided the inset. The interior is larger than any
+    # answer the auto-sizer can give here, so it holds both axes outright.
     pad = R.ring_die_core_pad(RING_DIE, RING_DIE, RING_PAD, (400, 900))
-    assert RING_DIE - 2 * pad >= 900 and pad == (RING_DIE - 900) // 2
+    assert pad == RING_PAD and RING_DIE - 2 * pad >= 900
 
 
-def test_a_smaller_die_dimension_decides_the_fit():
-    pad = R.ring_die_core_pad(2400, 1962, RING_PAD, (500, 500))
-    assert pad == (1962 - 500) // 2
+def test_a_smaller_die_dimension_no_longer_decides_a_fit_r0915_103():
+    # WAS: the shorter side chose the centring inset. There is no centring now.
+    assert R.ring_die_core_pad(2400, 1962, RING_PAD, (500, 500)) == RING_PAD
 
 
 # ---- and when that core turns out too small, the CORE is what grows --------
