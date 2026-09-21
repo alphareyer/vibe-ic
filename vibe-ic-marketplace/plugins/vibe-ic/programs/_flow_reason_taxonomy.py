@@ -309,6 +309,24 @@ def _declared_basis(evidence: Mapping[str, Any]) -> bool:
     return (str(evidence.get("skip_kind") or "").lower()
             in DECLARED_ABSENCE_SKIP_KINDS)
 
+def structural_absence_line(text: Any) -> Optional[str]:
+    """The line on which a gate STATED a structural absence, if it did.
+
+    R-0915-119(2). The one shape `_structural_absence.sentence()` writes — the
+    class token AND a scanned count AND `found 0` — found ANYWHERE in the
+    gate's output, not only on its first line. The P0 umbrella records one
+    line per skipping gate, and a gate that prints its old banner first and
+    its class second had the class silently dropped; this is what lets the
+    caller pick the line that actually states the decision.
+
+    Returns None when the gate stated nothing, so a caller that finds nothing
+    keeps exactly the line it would have kept before."""
+    for raw in str(text or "").splitlines():
+        if _STRUCTURAL_LINE_RE.search(raw):
+            return raw.strip()
+    return None
+
+
 def _guard_structural(cls: str, evidence: Any) -> str:
     """R-0915-119 guards (i) and (ii), applied wherever the token arrives.
 
