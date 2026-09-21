@@ -338,15 +338,35 @@ def run(project: Path, timeout: int = 900) -> Dict[str, Any]:
     results = [_run_one(project, row, timeout) for row in to_run]
     unexecutable = [r for r in results if not r.get("executed")]
     produced = [r for r in results if r.get("target_exists_after")]
+    # TWO DIFFERENT FACTS WERE COUNTED AS ONE (vibe-ic#619 / RC13). `skipped`
+    # holds both "the run already produced it" and "the run did not perform this
+    # step", and `already_produced_by_the_run` was `len(skipped)` -- so a project
+    # where NOTHING ran reported every clause as already produced. MEASURED on
+    # an empty directory at f19703dfa: "29 declared producer clause(s); 29
+    # already produced by the run, 0 owed, 0 executed", exit 0. Every word of
+    # that sentence except the first number was false.
+    not_performed = [r for r in skipped
+                     if str(r.get("why", "")).startswith(
+                         "the run did not perform this step")]
+    produced_already = [r for r in skipped if r not in not_performed]
+    # THE POPULATION this census measures is the clauses whose step the run
+    # actually PERFORMED. A clause skipped because its step never ran was not
+    # judged; counting it as an answer is what made an empty subject look like a
+    # finished flow.
+    population = len(to_run) + len(produced_already)
     return {
         "program": PROGRAM, "version": VERSION,
         "declared_clauses": len(clauses),
-        "owed": len(to_run), "already_produced_by_the_run": len(skipped),
+        "owed": len(to_run),
+        "already_produced_by_the_run": len(produced_already),
+        "steps_the_run_did_not_perform": len(not_performed),
+        "population": population,
         "executed": len(results) - len(unexecutable),
         "documents_now_present": len(produced),
         "unexecutable": unexecutable,
         "results": results, "skipped": skipped,
-        "verdict": "INCOMPLETE" if unexecutable else "PRODUCED",
+        "verdict": ("ZERO_POPULATION" if population == 0
+                    else "INCOMPLETE" if unexecutable else "PRODUCED"),
     }
 
 
@@ -379,10 +399,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     # bytes of every report that has non-ASCII in a tail. _atomic_artefact's own
     # rule is that a conversion does not alter what gets written.
     atomic_write_text(target, json.dumps(rec, indent=2) + "\n")
+    # THE REFUSAL COMES BEFORE THE FINDINGS BRANCHES, and that placement is the
+    # point: a refusal under `if rc == 0` is switched off by any finding,
+    # including one read from the flow yaml, which says nothing about this tree.
+    # The report is written FIRST (above) because a producer that writes nothing
+    # when it declines cannot be told from one that never ran.
+    if rec["population"] == 0:
+        print(f"[ZERO_POPULATION] {PROGRAM} — none of the "
+              f"{rec['declared_clauses']} declared producer clause(s) could be "
+              f"judged: for every one of them the run left no other declared "
+              f"output on disk, so no step is known to have been performed and "
+              f"this census measured NOTHING about {project}. Not a pass: a "
+              f"verdict over an empty population is the one red a census has.",
+              file=sys.stderr)
+        return 2
     print(f"[{rec['verdict']}] {PROGRAM} — {rec['declared_clauses']} declared "
-          f"producer clause(s); {rec['already_produced_by_the_run']} already "
-          f"produced by the run, {rec['owed']} owed, {rec['executed']} "
-          f"executed, {rec['documents_now_present']} document(s) now present")
+          f"producer clause(s); {rec['population']} judged "
+          f"({rec['already_produced_by_the_run']} already produced by the run, "
+          f"{rec['owed']} owed, {rec['executed']} executed, "
+          f"{rec['documents_now_present']} document(s) now present); "
+          f"{rec['steps_the_run_did_not_perform']} clause(s) NOT judged because "
+          f"the run did not perform their step")
     for r in rec["results"]:
         print(f"  step {r['step']:8} {r['program']:34} rc="
               f"{r.get('rc')} ({r.get('why')})")

@@ -241,12 +241,37 @@ def _drive_on_empty_subject(prog: Path, timeout: int) -> Dict:
             return {"gate": prog.stem, "rc": None,
                     "not_measured": f"could not be driven: {exc}"}
         out = ((r.stdout or "") + (r.stderr or "")).strip()
-        if "unrecognized arguments" in out or "the following arguments are required" in out:
+        # WHY THE TWO CASES ARE SEPARATED (RC13/H2). Both end in an argparse
+        # usage error, and reporting them with one sentence made this gate state
+        # a FALSE cause. MEASURED at f19703dfa on the four censuses it could not
+        # drive: `ppa_contract_build`, `ppa_eco_spare_records` and
+        # `readme_ppa_extractor` all ACCEPT `--root` -- what stopped the probe is
+        # `--declaration/--out`, `--spare-plan/--stage` and `--readme`, arguments
+        # this gate must not invent. Only `ppa_metric_extract` genuinely declares
+        # no subject convention ("unrecognized arguments: --root"). A reader
+        # acting on the old message would have added `--root` to three programs
+        # that already have it.
+        #
+        # Neither case becomes MEASURED: inventing a `--declaration` would be
+        # manufacturing the subject, which is the thing this gate exists to
+        # refuse. What changes is that the disclosure names the true obstacle.
+        if "unrecognized arguments" in out:
             return {"gate": prog.stem, "rc": None,
                     "not_measured": "declares none of the subject conventions "
                                     f"{_SUBJECT_CONVENTIONS} and refused the "
                                     f"positional form, so no empty subject "
                                     f"could be constructed for it"}
+        if "the following arguments are required" in out:
+            _req = out.rsplit("the following arguments are required:", 1)[-1]
+            _req = _req.splitlines()[0].strip() or "(unnamed)"
+            _has = [o for o in _SUBJECT_CONVENTIONS if _accepts(prog, o, timeout)]
+            return {"gate": prog.stem, "rc": None,
+                    "not_measured": (
+                        f"accepts {_has or 'no'} subject convention"
+                        f"{'' if len(_has) == 1 else 's'} but also requires "
+                        f"{_req}, which this probe must not invent — so no empty "
+                        f"subject could be constructed for it without supplying "
+                        f"content the gate would then be measuring itself")}
         return {"gate": prog.stem, "rc": r.returncode,
                 "output_tail": (out.splitlines()[-1][:200] if out
                                 else "(no output at all)")}
