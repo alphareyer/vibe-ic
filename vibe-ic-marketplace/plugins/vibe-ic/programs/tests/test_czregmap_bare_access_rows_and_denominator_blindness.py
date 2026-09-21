@@ -37,6 +37,22 @@ comparison sees everything.
    is NOT narrowed: it still answers "did this literal land anywhere at all",
    and narrowing it would redefine the metric rather than disclose it.
 
+4. THE CZ-07 RESIDUAL, AND ITS CLOSURE. This lane fixed the ACCESS token and
+   left one thing unfixed and disclosed: the two RANGE rows — one row
+   standing for sixteen registers (`0x10-0x1F` / `BLK0 ~ BLK15`) — were not a
+   row this extractor could read at all, so five of the seven documented rows
+   reached L4 and twenty-four names did not. That residual was pinned by a
+   test rather than only written down, precisely so it could not go stale in
+   silence.
+
+   It is now CLOSED, and this is the disclosure saying so. `c34f56d2a`
+   ("v1.22.13: land fourteen collected IC flow fixes (#2376)", 2026-09-20)
+   added `programs/_documented_register_ranges.py` and wired
+   `append_documented_ranges` into `gen_l4_regmap`. MEASURED at 8ef2d9a41:
+   all 29 documented names reach L4. The pin below therefore asserts the
+   NEW truth as a set equality, in both directions, and the claim it enforces
+   is the one it always enforced — the disclosure must equal the reality.
+
 chip-AGNOSTIC: generic widget register vocabulary throughout; single-letter
 read/write notation is register-documentation grammar, not a design's
 spelling. No PDK, vendor, node or part appears.
@@ -147,42 +163,66 @@ _SEVEN_ROW_TABLE = """# Widget register map
 """
 
 
-def test_the_seven_row_shape_carries_five_and_the_two_range_rows_are_the_residual():
-    """The measured shape, by NAME on the parsed result — and the residual
-    this branch does NOT fix, PINNED rather than only written down.
+def test_the_seven_row_shape_now_carries_all_twenty_nine_including_both_range_rows():
+    """The measured shape, by NAME on the parsed result — and the CZ-07
+    residual, now CLOSED, pinned to what is true today rather than to what
+    was true when it was written.
 
-    Before the access fix this table yielded ONE register. After it, FIVE:
-    the two RANGE rows are a different shape — `0x10-0x1F` is not a single
-    hex address and `BLK0 ~ BLK15` is not a single identifier, so neither
-    cell satisfies the row regex at all — and widening the access
-    alternation cannot reach them.
+    THE HISTORY, because a disclosure that loses it is a disclosure nobody
+    can check. Before the access fix this table yielded ONE register. After
+    it, FIVE: the two RANGE rows were a different shape — `0x10-0x1F` is not
+    a single hex address and `BLK0 ~ BLK15` is not a single identifier, so
+    neither cell satisfied the row regex at all, and widening the access
+    alternation could not reach them. That was the CZ-07 residual, and the
+    predecessor of this test pinned it as still-absent while saying, in its
+    own words: "If someone later teaches the extractor address ranges, THIS
+    TEST GOES RED and its author is told to update the disclosure with the
+    fix — which is the intended outcome, not a regression."
 
-    That residual is disclosed in the handback, and a disclosure nothing
-    enforces is the shape this whole lane is about. So it is asserted BOTH
-    ways here: the five that now arrive must arrive, and the range rows must
-    still be absent. If someone later teaches the extractor address ranges,
-    THIS TEST GOES RED and its author is told to update the disclosure with
-    the fix — which is the intended outcome, not a regression.
+    SOMEONE DID, and this is that update. `c34f56d2a` ("v1.22.13: land
+    fourteen collected IC flow fixes (#2376)", 2026-09-20) added
+    `programs/_documented_register_ranges.py` and wired
+    `append_documented_ranges` into `gen_l4_regmap`
+    (`phase1_doc_one_shot_runner.py`, under "Named register ranges declare
+    instances"). MEASURED at 8ef2d9a41 on this very table: all TWENTY-NINE
+    documented names reach L4 — the five scalars plus BLK0..BLK15 and
+    RESULT0..RESULT7. The residual is 0.
+
+    THE CLAIM IS UNCHANGED: the disclosure must equal the reality, and it is
+    asserted BOTH ways. Equality on the whole NAME SET, not a floor and not a
+    count, so this goes red from either direction — if a regression stops the
+    range form being read (the mutation arm
+    `tools/ci/mutation_arm/icfix3a_documented_ranges_separator_unmatchable.patch`
+    does exactly that, and takes 29 names to 5), and equally if the extractor
+    ever invents a name this table does not declare. A count would survive one
+    arrival paired with one departure; a set cannot.
     """
     names = _l4_names(_SEVEN_ROW_TABLE, "widget_seven_regs.md")
-    assert {"IDLOW", "IDHIGH", "REVISION", "CONTROL", "FLAGS"} <= names, (
-        f"the five scalar rows must all reach L4; carried: {sorted(names)}")
-    still_absent = {f"BLK{i}" for i in range(16)} | {
+    scalar_rows = {"IDLOW", "IDHIGH", "REVISION", "CONTROL", "FLAGS"}
+    range_rows = {f"BLK{i}" for i in range(16)} | {
         f"RESULT{i}" for i in range(8)}
-    reached = still_absent & names
-    assert not reached, (
-        "the range rows now reach L4 — the residual CZ-07 disclosed is "
-        f"fixed, and the disclosure must be updated to say so: {sorted(reached)}")
+    assert names == scalar_rows | range_rows, (
+        "the disclosure and the reality have parted. This table declares 29 "
+        "names — 5 scalar rows plus the two RANGE rows — and since c34f56d2a "
+        "(#2376) the extractor reads all of them. "
+        f"missing: {sorted((scalar_rows | range_rows) - names)}; "
+        f"unexpected: {sorted(names - (scalar_rows | range_rows))}")
 
 
-def test_the_residual_is_the_RANGE_FORM_and_not_those_names():
-    """NO-LEAK for the residual claim, and it makes the claim precise.
+def test_those_names_arrive_spelt_out_as_ordinary_rows_too():
+    """NO-LEAK, and it keeps the CZ-07 history checkable after the fix.
 
-    "BLK0..BLK15 do not reach L4" would be a weak statement if those names
-    were simply unparseable. They are not: written as SIXTEEN ORDINARY ROWS
-    the same names all arrive, bare `W` access included. What the extractor
-    cannot read is the RANGE FORM — one row standing for sixteen registers —
-    and that is exactly what the disclosure says.
+    While CZ-07 was open this test made the residual PRECISE: "BLK0..BLK15 do
+    not reach L4" would have been a weak statement if those names were simply
+    unparseable, and they were not — written as SIXTEEN ORDINARY ROWS they all
+    arrived, bare `W` access included. The obstacle was the RANGE FORM, one row
+    standing for sixteen registers, and nothing about the names themselves.
+
+    c34f56d2a (#2376) closed the range form, so the two paths now agree. This
+    control keeps its value either way: it is the arm that says WHICH of the two
+    a future regression broke. If the range-form test above goes red while this
+    one stays green, the range walker regressed; if both go red, the ordinary
+    row path did, which is a different defect with a different owner.
     """
     header = ("# Widget register map\n\n"
               "| Address | Name | R/W | Width | Description |\n"
@@ -193,8 +233,8 @@ def test_the_residual_is_the_RANGE_FORM_and_not_those_names():
     names = _l4_names(spelt, "widget_spelt_regs.md")
     assert {f"BLK{i}" for i in range(16)} <= names, (
         "spelled out as ordinary rows these names must all reach L4 — if "
-        "they do not, the residual is not about the range form at all: "
-        f"{sorted(names)}")
+        "they do not, the ordinary-row path has regressed and CZ-07 was "
+        f"never about the range form at all: {sorted(names)}")
 
 
 def test_the_instrument_names_the_residual_the_extractor_cannot_reach():
