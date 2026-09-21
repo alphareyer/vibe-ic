@@ -36198,6 +36198,43 @@ def _pdk_dir_of(pdk: "PdkConfig") -> str:
     return _pdk_root_c(pdk)
 
 
+def _work_lives_in_container(container: Optional[str]):
+    """The supervision channel for a child whose WORK runs in `container`.
+
+    THE THREE CALL SITES BELOW ALL SAY WHERE THE WORK GOES AND THEN WATCHED
+    SOMEWHERE ELSE. Each hands its child `VIBEIC_EDA_CONTAINER=<container>` so
+    the program resolves KLayout inside THIS run's container — and then
+    supervises the host-side python client, whose CPU, I/O and output all sit
+    flat for as long as KLayout computes in there. `_progress_run`'s own header
+    names this shape (vibe-ic#2083: the client's own signals all sit flat while
+    the tool computes) and ships the remedy: a caller that knows where its work
+    really lives injects a probe that looks THERE.
+
+    MEASURED on spm x gf180mcuD, run8 (2026-09-21, image 0.3.67):
+    `die_finishing_gen` was reaped as `STALLED: no forward progress across 12
+    consecutive looks (15.00s apart, 195.2s elapsed); signals readable:
+    cpu,io,output` — while the work it was doing had ALREADY written
+    `phase3/stage3/pnr/spm.sealed.gds` (95,414,116 B) and
+    `reports/phase3/sealring_verify.json` (`pdk_seal_ring_present`, ring
+    0..3162 um outer / 16..3146 um inner, 201,182 um2 added, core clearance
+    MEASURED with 0 encroaching polygons, verdict PASS). Only its own report,
+    `reports/phase3/die_finishing.json`, was never written, because the process
+    was killed between the verify and the write. `die_finishing_check` then
+    exited rc=2 ("die_finishing_gen has not run"), `tapeout_precheck` booked
+    UNDETERMINED/General.SealRing, and that was one of five sign-off FAILs in a
+    run whose die HAS a verified seal ring.
+
+    THE CEILING IS NOT RAISED AND NOTHING IS RELABELLED. This adds a channel;
+    `fuse_probes` keeps every host-side signal, so the supervisor can only
+    become more patient, never less — a child that has genuinely stopped, in
+    the container and out of it, still stalls on exactly the same evidence.
+    Without a container the return is None, which is the previous behaviour to
+    the byte."""
+    if not container:
+        return None
+    return _cex.container_tree_probe(container)
+
+
 def _die_finishing(project: Path, top: str, pdk: PdkConfig,
                      gds_path: Path,
                      container: Optional[str] = None) -> Tuple[bool, str]:
@@ -36273,7 +36310,8 @@ def _die_finishing(project: Path, top: str, pdk: PdkConfig,
         run_env["VIBEIC_EDA_CONTAINER"] = container
     try:
         cp = _pr.run_best_effort(argv, capture_output=True, text=True,
-                            env=run_env)
+                            env=run_env,
+                            progress_probe=_work_lives_in_container(container))
     except OSError as exc:
         # `subprocess.TimeoutExpired` was in this tuple and can no longer be
         # raised here: the call is progress-supervised and reports a stall as
@@ -36409,7 +36447,8 @@ def _die_density_fill(project: Path, top: str, pdk: PdkConfig,
         run_env["VIBEIC_EDA_CONTAINER"] = container
     try:
         cp = _pr.run_best_effort(argv, capture_output=True, text=True,
-                            env=run_env)
+                            env=run_env,
+                            progress_probe=_work_lives_in_container(container))
     except OSError as exc:                    # see `_die_finishing` above
         return False, f"die density fill NONFATAL: {exc}"
     if cp.returncode != 0:
@@ -36484,7 +36523,8 @@ def _density_metal_fill(project: Path, top: str, pdk: PdkConfig,
             [sys.executable, str(prog), str(project),
              "--gds", str(gds_path), "--config", str(cfg),
              "--cell", top, "--in-place"],
-            capture_output=True, text=True, env=run_env)
+            capture_output=True, text=True, env=run_env,
+            progress_probe=_work_lives_in_container(container))
     except OSError as exc:                    # see `_die_finishing` above
         return False, f"density fill NONFATAL: {exc}"
     if cp.returncode != 0:
