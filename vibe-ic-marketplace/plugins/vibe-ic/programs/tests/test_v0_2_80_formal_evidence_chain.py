@@ -91,7 +91,20 @@ def test_completed_claim_without_property_denominator_fails(tmp_path):
                for row in rep["findings"]), rep
 
 
-def test_completed_claim_that_skipped_required_expert_receipt_fails(tmp_path):
+def test_a_required_expert_fallback_with_no_receipt_is_enumerated_not_failed(tmp_path):
+    """RE-POINTED UNDER R-0915-125, and the claim CHANGED BY RULING, not by me.
+
+    This test used to assert `rc == 1 and verdict == "FAIL"` with
+    EXPERT_FALLBACK_NOT_INVOKED. That encoded a rule the ruling reverses: a FAIL
+    is reserved for a proof that RAN and FAILED, and "nobody invoked the skill"
+    is a fact about the runner's operator, never a design verdict. In a headless,
+    program-only front door nobody invokes `/formal-verify`, so the old clause
+    could never be satisfied — MEASURED on spm run13 and run8 (8HD-4), both
+    digital DIEs: required=True, invoked=False, receipt=None, on every run.
+
+    The obligation does NOT disappear. It is enumerated by id and it still keeps
+    the claim out of COMPLETE — asserted below. What it no longer does is FAIL.
+    """
     f = _formal(tmp_path)
     (f / "assertions.sv").write_text("module asserts; endmodule\n")
     (f / "constraints.sby").write_text(
@@ -110,9 +123,12 @@ def test_completed_claim_that_skipped_required_expert_receipt_fails(tmp_path):
         "evidence": "phase2/stage1/formal/constraints.sby.log",
         "proof_transcript": "phase2/stage1/formal/constraints.sby.log"}))
     rep = FPC.audit(tmp_path)
-    assert rep["rc"] == 1 and rep["verdict"] == "FAIL", rep
-    assert any("EXPERT_FALLBACK_NOT_INVOKED" in row
+    assert rep["verdict"] != "FAIL", (
+        "an un-invoked expert fallback must not FAIL the claim: %r" % (rep,))
+    assert any("EXPERT_FALLBACK_OUTSTANDING" in row
                for row in rep["findings"]), rep
+    assert not any("EXPERT_FALLBACK_NOT_INVOKED" in row
+                   for row in rep["findings"]), rep
 
 
 def test_sby_referencing_missing_files_fails(tmp_path):
