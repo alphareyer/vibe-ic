@@ -3552,6 +3552,57 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
         _ledger_row.get("reason_class"))
 
 
+
+#: Receipt flags a gate clause uses for its own `--json` output.
+_GATE_RECEIPT_FLAGS = ("--json", "--report")
+
+
+def _receipt_off_a_produced_document(argv: List[str], project: Path
+                                    ) -> Tuple[List[str], Optional[str], Any]:
+    """Redirect a gate's receipt when it would OVERWRITE the run's own document.
+
+    R-0915-126 / step 26.5ic: PRODUCER WRITES, GATE READS. Several gate clauses
+    have the form `program_exit_zero: "<gate> . --json <path>"` where `<path>` is
+    ALSO one of that step's `required_outputs`, so evaluating the clause writes
+    the document the run was supposed to produce.
+
+    MEASURED on spm run18L: step 26.5ic's `written.json` records 2 of 2 outputs
+    produced INCLUDING `reports/phase3/die_finishing.json`, and re-running the
+    audit CHANGED that file's md5 -- the auditor overwrote the run's evidence and
+    then refused it. The flow's own clause comment already stated the rule this
+    breaks: "A document the run already produced is left byte-for-byte alone."
+
+    So a receipt whose target already EXISTS goes to a scratch file. The gate runs
+    unchanged and its exit code still decides the clause; only the receipt lands
+    elsewhere. Deliberately narrow: when the target does NOT exist this does
+    nothing, so the `audit_created` disclosure and its refusal -- the honest
+    answer to a genuinely absent producer output -- are untouched.
+
+    Returns `(argv, disclosure_or_None, keepalive)`; `keepalive` must outlive the
+    subprocess call.
+    """
+    for i, tok in enumerate(argv[:-1]):
+        if tok not in _GATE_RECEIPT_FLAGS:
+            continue
+        target = Path(argv[i + 1])
+        abs_target = target if target.is_absolute() else (project / target)
+        try:
+            if not abs_target.is_file():
+                return argv, None, None
+        except OSError:                                    # pragma: no cover
+            return argv, None, None
+        tmp = tempfile.TemporaryDirectory(prefix="gate_receipt_")
+        moved = list(argv)
+        moved[i + 1] = str(Path(tmp.name) / abs_target.name)
+        return moved, (
+            f"RECEIPT REDIRECTED: this clause's {tok} named "
+            f"{target.as_posix()}, which the run had already produced; the "
+            f"gate's own receipt went to a scratch path so the run's document is "
+            f"left byte-for-byte alone (R-0915-126: producer writes, gate reads)"
+        ), tmp
+    return argv, None, None
+
+
 def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutcome:
     """Run program in project dir (with globs expanded relative to project),
     return (passed, output_snippet).
@@ -3587,6 +3638,8 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
     if not argv:
         return _ProgramCheckOutcome(
             False, f"program not found: {cmd_str.split()[0]}", None)
+    argv, _receipt_note, _receipt_tmp = _receipt_off_a_produced_document(
+        argv, project)
     # #525 — per-gate budget from the SHARED resolver (default 900s, env
     # VIBE_IC_GATE_TIMEOUT_S, cap 3600s). The old fixed 300s killed honest
     # slow gates on large SoCs (reset_dependency_check ~6 min on a 7.5MB
@@ -3625,6 +3678,8 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
             raise _GateStalled(_res)
         r = _watchdog.completed_process(argv, _res)
         snippet = output_snippet(r.stdout, r.stderr)
+        if _receipt_note:
+            snippet = f"{snippet}\n{_receipt_note}" if snippet else _receipt_note
         if r.returncode == 0:
             return _ProgramCheckOutcome(True, snippet, r.returncode)
         if r.returncode == 2:
@@ -13318,6 +13373,13 @@ def _gate_json_targets(step: Dict[str, Any]) -> Set[str]:
 # re-taking that measurement, never by adding a key that looks plausible.
 _GATE_DOCUMENT_IDENTITY_KEYS = ("program", "check", "gate", "emitted_by")
 
+#: Keys by which a RUN-written document names the program that PRODUCED it.
+#: R-0915-126 / step 26.5ic: `_GATE_DOCUMENT_IDENTITY_KEYS` reads a `check`
+#: stamp as a sign the auditor wrote a file, but a producer records the check
+#: it RAN under exactly that key -- so a producer's own document looked like
+#: the gate's. These keys are how the document says otherwise.
+_PRODUCER_IDENTITY_KEYS = ("producer", "produced_by", "emitter")
+
 
 def _is_gate_verdict_document(path: Path,
                               gate_programs: Optional[frozenset] = None,
@@ -13487,6 +13549,33 @@ def _is_gate_verdict_document(path: Path,
         # A producer's record IS the document, or survives inside it: the run
         # produced it. A gate that later writes its own verdict beside it does
         # not turn the run's evidence into the auditor's.
+        return False
+    # AN EXPLICIT PRODUCER STAMP IS THE DOCUMENT SAYING WHOSE IT IS, read BEFORE
+    # the fall-through below -- because that fall-through is the exact defect the
+    # 2026-09-15 block above describes: "the stamp matched no name in either set
+    # -- so the comparison fell through to the final `return True` and a
+    # RUN-WRITTEN document was classified as the auditor's".
+    #
+    # MEASURED on spm run18L, step 26.5ic. `reports/phase3/die_finishing.json`
+    # carries NO `program` key; its identity stamps are `check: "die_finishing"`
+    # at the top level and inside `run`. That is the name of the CHECK the
+    # producer ran, it matches neither `die_finishing_gen` nor
+    # `die_finishing_check`, and so a document whose own `run.producer` says
+    # `die_finishing_gen` was refused as self-certified --
+    #   AUDIT-CREATED OUTPUT REFUSED ... written by this step's own gate rather
+    #   than by the run, so the step has no run evidence
+    # -- while the step's own `written.json` recorded 2 of 2 outputs produced.
+    #
+    # Only a producer that is NOT also a gate of this step counts, so a receipt a
+    # gate wrote about itself is still refused: that half of the ruling does not
+    # move.
+    _producer_stamps: List[str] = []
+    for _node in [data] + [_v for _v in data.values() if isinstance(_v, dict)]:
+        for _k in _PRODUCER_IDENTITY_KEYS:
+            _pv = _node.get(_k)
+            if isinstance(_pv, str) and _pv.strip():
+                _producer_stamps.append(_pv.strip())
+    if any(_hits(st, _producers_only) for st in _producer_stamps):
         return False
     if any(_hits(st, _gates_only) for st in stamps):
         return True
