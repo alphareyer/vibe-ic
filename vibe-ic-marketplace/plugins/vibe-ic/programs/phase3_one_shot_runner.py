@@ -48330,6 +48330,53 @@ _ASSUMED_CLOCK_DISCLOSURE_STEP = "sta_clock_disclosure"
 _GATE_REASON_KEYS = ("reasons", "reason")
 
 
+#: How much of one finding's message a step line carries, how much of one
+#: `reason`, how long the whole joined line may be, and how many parts are
+#: rendered. These are BUDGETS, not silences: every clip made under them is
+#: STATED in the line itself, with the amount dropped and the artefact that
+#: holds the whole text. A budget a reader cannot see is indistinguishable
+#: from the producer having said nothing more.
+_GATE_DETAIL_PART_CHARS = 160
+_GATE_DETAIL_REASON_CHARS = 200
+_GATE_DETAIL_LINE_CHARS = 600
+_GATE_DETAIL_MAX_PARTS = 6
+
+
+def _clip_clause(text: str, limit: int) -> str:
+    """`text` shortened to `limit`, cut on a WORD boundary and SAYING SO.
+
+    R-icgate3 — MEASURED on spm run15 (`reports/orchestrator/phase3_one_shot.json`,
+    step `tapeout_precheck`): the step line ended
+
+        ...; UNDETERMINED/General.FlowMar
+
+    and, one clause earlier,
+
+        ...re-emitted to .../precheck_magic_drc.json by the
+
+    Both are a bare `[:n]` landing inside a word. A reader cannot tell a clause
+    that ENDED from one that was CUT, so `General.FlowMar` reads as the whole
+    rule name and `by the` reads as a sentence the producer failed to finish.
+    Neither is true, and neither is actionable.
+
+    The cut is retreated to the last space in the window (only when that space
+    is past the half-way point, so a single long token is not reduced to
+    nothing), trailing punctuation is dropped so the marker does not read as
+    part of the text, and the number of characters NOT shown is stated. Text
+    already inside the budget comes back byte-identical -- this function never
+    touches a clause that fits.
+    """
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    space = head.rfind(" ")
+    if space > limit // 2:
+        head = head[:space]
+    head = head.rstrip(" ,;:.-")
+    return f"{head}\u2026 [+{len(text) - len(head)} char(s) not shown]"
+
+
 def _gate_detail(out_json: Path, stdout: str, stderr: str) -> str:
     """A readable one-line reason, preferring the verdict JSON's own findings.
 
@@ -48361,29 +48408,74 @@ def _gate_detail(out_json: Path, stdout: str, stderr: str) -> str:
     try:
         doc = json.loads(out_json.read_text())
     except (OSError, ValueError):
-        return (stdout or stderr or "").strip()[-600:]
+        return _gate_raw_tail(stdout, stderr)
     parts: List[str] = []
-    for f in (doc.get("findings") or [])[:6]:
+    #: findings/reasons this reader did NOT render, by cause. Counted, never
+    #: dropped in silence -- see `_clip_clause`.
+    unrendered = 0
+    findings = list(doc.get("findings") or [])
+    for f in findings[:_GATE_DETAIL_MAX_PARTS]:
         if isinstance(f, dict):
-            parts.append(f"{f.get('rule', '?')}: {str(f.get('message', ''))[:160]}")
+            parts.append(f"{f.get('rule', '?')}: "
+                         f"{_clip_clause(str(f.get('message', '')), _GATE_DETAIL_PART_CHARS)}")
         else:
-            parts.append(str(f)[:160])
+            parts.append(_clip_clause(str(f), _GATE_DETAIL_PART_CHARS))
+    unrendered += max(0, len(findings) - _GATE_DETAIL_MAX_PARTS)
     for key in _GATE_REASON_KEYS:
         val = doc.get(key)
         if isinstance(val, str):
             # `reason` (singular) is one sentence, not a list of them: a bare
             # string is the value, never something to iterate character-wise.
             if val.strip():
-                parts.append(val.strip()[:200])
+                parts.append(_clip_clause(val, _GATE_DETAIL_REASON_CHARS))
         elif isinstance(val, (list, tuple)):
-            for r in list(val)[:6]:
-                parts.append(str(r)[:200])
+            vals = list(val)
+            for r in vals[:_GATE_DETAIL_MAX_PARTS]:
+                parts.append(_clip_clause(str(r), _GATE_DETAIL_REASON_CHARS))
+            unrendered += max(0, len(vals) - _GATE_DETAIL_MAX_PARTS)
     if not parts:
         verdict = doc.get("verdict") or doc.get("status")
         if verdict:
             parts.append(str(verdict))
-    return ("; ".join(parts) or
-            (stdout or stderr or "").strip()[-600:])[:600]
+    if not parts:
+        return _gate_raw_tail(stdout, stderr)
+    # WHOLE PARTS, NEVER A BYTE CUT. The old `[:600]` on the joined string is
+    # what produced `UNDETERMINED/General.FlowMar`: it cut wherever 600 bytes
+    # fell, which is a point set by how long the EARLIER clauses were. Dropping
+    # whole clauses keeps every clause that is shown complete, and the count of
+    # the ones that are not is stated below.
+    while len(parts) > 1 and len("; ".join(parts)) > _GATE_DETAIL_LINE_CHARS:
+        parts.pop()
+        unrendered += 1
+    line = "; ".join(parts)
+    if unrendered:
+        # The pointer is the artefact's NAME, not its path: #2061 R-04 measured
+        # that echoing a project-rooted path makes one tree's evidence differ
+        # from another's for no reason about the design. The step row's
+        # `output_files` already carries the full path.
+        line += (f" [+{unrendered} more finding(s)/reason(s) not shown here "
+                 f"\u2014 all of them in {out_json.name}]")
+    return line
+
+
+def _gate_raw_tail(stdout: str, stderr: str) -> str:
+    """The last of a gate's console output, MARKED as a tail.
+
+    R-icgate3 — this branch is reached only when the gate wrote no readable
+    verdict JSON, so what comes back is chatter, not a reason. A byte-window on
+    chatter begins mid-token; saying that it is a window, and how much was left
+    out, is the difference between "this is what the gate said" and "this is the
+    end of what the gate said".
+    """
+    text = (stdout or stderr or "").strip()
+    if len(text) <= _GATE_DETAIL_LINE_CHARS:
+        return text
+    tail = text[-_GATE_DETAIL_LINE_CHARS:]
+    nl = tail.find("\n")
+    if nl != -1:
+        tail = tail[nl + 1:]
+    return (f"[no verdict JSON; last {len(tail)} of {len(text)} char(s) of "
+            f"console output] {tail}")
 
 
 # ---------------------------------------------------------------------------
