@@ -46,6 +46,7 @@ FLOW = PROGRAMS.parent / "flow" / "phase1_phase2_phase3.yaml"
 
 sys.path.insert(0, str(PROGRAMS))
 
+import _gdsii  # noqa: E402  the shared minimal-GDSII stream builder
 import _flow_reason_taxonomy as _reason_taxonomy  # noqa: E402
 import _report_check_argv as argv_helper  # noqa: E402
 import drc_report_check as wrapper  # noqa: E402
@@ -428,9 +429,22 @@ def _plant_signoff_evidence(proj: Path):
     layout, and the fixture has to carry what a real run carries or it is
     testing a project that could not exist.
     """
+    # A REAL STREAM, for the reason the docstring above already gives. Six bytes
+    # of non-GDS satisfied this while the gate only read the FILENAME; since the
+    # sign-off tier began binding the report to its layout by CONTENT
+    # (`_recorded_layout_evidence` parses the bound stream's top cells and an
+    # INVALID binding deliberately does not fall through to the filename), a stub
+    # made the evidence tier collapse to `none` and this fixture described a
+    # project that could not exist. MEASURED on live main 61502b1b4:
+    # `gds_top_cells(stub) == []`, tier `none`, DRC_SIGNOFF_NO_LAYOUT_EVIDENCE —
+    # on a fixture whose filename and whose RDB `<top-cell>` already agreed.
+    #
+    # The structure is named for the SAME cell the RDB declares, which is what
+    # the gate compares; built with `_gdsii`, the one shared minimal-stream
+    # builder, so this file does not carry a second notion of "a GDSII stream".
     gds = proj / "phase3" / "stage3" / "pnr"
     gds.mkdir(parents=True, exist_ok=True)
-    (gds / "chip_top.gds").write_bytes(b"\x00\x06\x00\x02\x00\x07")
+    _gdsii.write_gdsii(gds / "chip_top.gds", cell="chip_top")
 
     # v1.20.61 ("a sign-off DRC zero that NOTHING corroborated is
     # NOT_MEASURED, not clean") is right that an RDB with an empty <items>
