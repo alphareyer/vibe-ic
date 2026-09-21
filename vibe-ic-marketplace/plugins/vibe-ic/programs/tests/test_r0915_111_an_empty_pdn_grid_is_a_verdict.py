@@ -185,3 +185,35 @@ def test_the_concentration_caveat_is_carried_not_hidden():
     doc = " ".join((R._pdn_em_stripe_plan.__doc__ or "").split())
     assert "k is REPORTED beside the plan, never used to inflate a promise" in doc
     assert "re-measures after the build" in doc
+
+
+# --------------------------------- the geometry it hands pdngen must be legal
+
+def test_the_pitch_it_returns_lands_on_the_manufacturing_grid():
+    """MEASURED on run11: the first cut halved the pitch to 76.59 um, the
+    caller took its quarter as the offset — 19.148 um — and pdngen refused the
+    deck: `[ERROR PDN-0191] Offset of 19.1480 um does not fit the manufacturing
+    grid of 0.0050 um`. The PDN_GRID_EMPTY check in this same file is what
+    caught it, quoting pdngen, at the PDN step."""
+    g = 0.005
+    p = _plan(grid_um=g)
+    assert p["verdict"] == "MORE_STRIPES"
+    q = p["new_pitch_um"] / g
+    assert abs(q - round(q)) < 1e-6, (p["new_pitch_um"], "pitch off grid")
+    # the offset the caller derives is a quarter of it, and must also land
+    off = p["new_pitch_um"] / 4.0
+    assert abs(off / g - round(off / g)) < 1e-6, (off, "offset off grid")
+
+
+def test_snapping_never_crosses_the_no_abut_floor():
+    """Snapping moves the pitch DOWN — toward more stripes — so it must not be
+    allowed to land under the floor that keeps pdngen able to build at all."""
+    p = _plan(i_seg_A=8.0e-3, grid_um=0.5, min_pitch_um=0.0)
+    if p["verdict"] == "MORE_STRIPES":
+        assert p["new_pitch_um"] >= 2.0 * (1.6 + 0.46) - 1e-9
+
+
+def test_without_a_grid_the_answer_is_what_it_was():
+    """A technology that declares no manufacturing grid is not a reason to
+    invent one: the planner returns the unsnapped pitch, as before."""
+    assert _plan(grid_um=0.0)["new_pitch_um"] == 51.06

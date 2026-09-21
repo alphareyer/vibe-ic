@@ -6348,7 +6348,8 @@ def _pdn_em_stripe_plan(*, i_seg_A: float, drawn_width_um: float,
                         min_spacing_um: float,
                         min_pitch_um: float = 0.0,
                         max_width_um: Optional[float] = None,
-                        concentration_k: Optional[float] = None
+                        concentration_k: Optional[float] = None,
+                        grid_um: float = 0.0
                         ) -> Dict[str, Any]:
     """R-0915-111 — the EM answer as STRIPE COUNT first, width second.
 
@@ -6380,6 +6381,24 @@ def _pdn_em_stripe_plan(*, i_seg_A: float, drawn_width_um: float,
     def _w_needed(i: float) -> float:
         return i * safety / (jmax_A_per_um * max(1e-12, (1.0 - margin)))
 
+    def _snap(v: float) -> float:
+        """On the manufacturing grid, and never BELOW the floor it came from.
+
+        MEASURED on spm x gf180mcuD (run11, 2026-09-21): the first cut of this
+        planner halved the pitch to 76.59 um and the caller took its quarter as
+        the offset — 19.148 um, which is not a multiple of the 0.005 um
+        manufacturing grid, and pdngen refused the whole deck:
+          [ERROR PDN-0191] Offset of 19.1480 um does not fit the manufacturing
+          grid of 0.0050 um
+        The PDN_GRID_EMPTY check added by this same ruling is what caught it,
+        at the PDN step, quoting pdngen. A pitch this function returns must be
+        buildable, so it is snapped DOWN (a tighter pitch is more stripes, and
+        more stripes is the direction this planner is moving) to a multiple of
+        the grid, and the offset the caller derives from it is snapped too."""
+        if grid_um <= 0:
+            return round(v, 4)
+        return round(math.floor(v / grid_um + 1e-9) * grid_um, 6)
+
     out: Dict[str, Any] = {
         "i_seg_A": i_seg_A, "drawn_width_um": drawn_width_um,
         "pitch_um": pitch_um, "jmax_A_per_um": jmax_A_per_um,
@@ -6405,8 +6424,13 @@ def _pdn_em_stripe_plan(*, i_seg_A: float, drawn_width_um: float,
             m -= 1
             break
         if _w_needed(i_seg_A / m) <= drawn_width_um:
+            new_pitch = _snap(new_pitch)
+            if new_pitch < floor_pitch:      # the snap may not cross the floor
+                m -= 1
+                break
             out.update(verdict="MORE_STRIPES", stripe_multiplier=m,
                        new_pitch_um=round(new_pitch, 4),
+                       grid_um=grid_um,
                        new_width_um=drawn_width_um,
                        floor_pitch_um=round(floor_pitch, 4),
                        reason=(f"{m}x the stripes at pitch "
@@ -8118,13 +8142,23 @@ def _build_pdn_tcl(pdk: "PdkConfig", container: Optional[str] = None,
                                     (em_floor or {}).get("min_spacing_um", {})
                                     .get(str(st["layer"]).lower(), 0.0)
                                     if isinstance((em_floor or {}).get("min_spacing_um"), dict)
-                                    else 0.0))
+                                    else 0.0),
+                                grid_um=float((em_floor or {}).get(
+                                    "manufacturing_grid_um", 0.0) or 0.0))
                         except Exception:
                             _plan_em = None
                 if _plan_em and _plan_em.get("verdict") == "MORE_STRIPES":
                     st["pitch"] = float(_plan_em["new_pitch_um"])
-                    st["offset"] = round(
-                        st["pitch"] / _PDN_STRAP_OFFSET_DIV, 3)
+                    # R-0915-111 — THE OFFSET IS BUILT FROM THE PITCH AND MUST
+                    # LAND ON THE MANUFACTURING GRID TOO. run11 measured the
+                    # miss: pitch 76.59 -> offset 19.148 -> [ERROR PDN-0191]
+                    # "Offset of 19.1480 um does not fit the manufacturing grid
+                    # of 0.0050 um", and pdngen built nothing.
+                    _gq = float((em_floor or {}).get(
+                        "manufacturing_grid_um", 0.0) or 0.0)
+                    _off = st["pitch"] / _PDN_STRAP_OFFSET_DIV
+                    st["offset"] = (round(math.floor(_off / _gq + 1e-9) * _gq, 6)
+                                    if _gq > 0 else round(_off, 3))
                     _em_widened.append(
                         f"{st['layer']} {_plan_em['stripe_multiplier']}x "
                         f"stripes (pitch {st['pitch']}um, width {_sw0} kept)")
