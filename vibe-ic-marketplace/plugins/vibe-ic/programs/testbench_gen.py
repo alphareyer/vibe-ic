@@ -891,6 +891,103 @@ def _emit_case_known_answer_vector(project: Path, case: dict, dut_module: str,
 
 
 
+# ── R-0915-113(2): a (message -> digest) vector over the DECLARED bus ─────
+#: L4 is read ONCE per project — the emitter ladder runs per case, and a
+#: register map re-read 11 times is 11 reads of the same file.
+_L4_CACHE: "dict" = {}
+
+
+def _project_regmap(project) -> "dict":
+    """The design's OWN register map, out of its Phase-1 documents.
+
+    Never an oracle tree, never a golden: `phase1/generated_docs/` is the
+    machine reading of the design's own input documents. A project that has no
+    L4 yields `{}` and every stated-vector emission then refuses by name."""
+    key = str(project)
+    if key in _L4_CACHE:
+        return _L4_CACHE[key]
+    import json as _json
+    doc = {}
+    for rel in ("phase1/generated_docs/L4_REGMAP.json",
+                "plugin_output/phase1/generated_docs/L4_REGMAP.json"):
+        f = Path(project) / rel
+        if not f.is_file():
+            continue
+        try:
+            loaded = _json.loads(f.read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(loaded, dict) and loaded.get("registers"):
+            doc = loaded
+            break
+    _L4_CACHE[key] = doc
+    return doc
+
+
+def _emit_case_stated_vector_bus(project: Path, case: dict, dut_module: str,
+                                 ports: "List[Tuple[str, str, str]]",
+                                 out_dir: Path,
+                                 report: "dict | None") -> "Path | None":
+    """R-0915-113(2) — emit a REAL self-checking TB that drives the case's own
+    STATED payload over the design's own memory-mapped register bus and
+    compares the design's own answer window against the case's own STATED
+    literal.
+
+    The family the two known-answer routes fall between. MEASURED, sha256 x
+    sky130A, front door, run20: 11 of 11 L10 cases fell to the substance floor
+    (`VIBEIC_TB_ORACLE: NONE`) and Step 4 read a ZERO functional denominator,
+    while the design's input stated the whole transport — cs/we/address/
+    write_data/read_data in its port table, BLOCK<i>/DIGEST<i> windows and
+    CTRL/STATUS bit roles in its register map — and stated BOTH halves of six
+    of those cases. The port route refuses (no `message` port exists) and the
+    struct-bus route refuses by name (`this driver drives a (plaintext ->
+    ciphertext) block vector; got inputs=['message'] outputs=['digest']`).
+
+    Fail-closed like every sibling: a case that does not state its answer as a
+    literal — an acceptance PERCENTAGE over a coverage scope, or a message
+    LENGTH with no message — returns None with the reason recorded, and the
+    case falls to the substance floor so Step 4 still fails it honestly. No
+    digest, checksum or reference value is ever COMPUTED here."""
+    name = case.get("name", "")
+    if not _LEGAL_ID_RE.match(str(name)):
+        return None
+    kept = authored_oracle_preserved(out_dir, name, report)
+    if kept is not None:
+        return kept
+    try:
+        import stated_vector_bus_oracle_gen as _svb  # type: ignore
+    except Exception:
+        return None
+    l4 = _project_regmap(project)
+    if not l4:
+        if report is not None:
+            report.setdefault("stated_vector_unbound", []).append(
+                {"case": str(name),
+                 "reason": "the project stages no L4 register map"})
+        return None
+    try:
+        text, why = _svb.emit_case_stated_vector_bus(case, l4, dut_module,
+                                                     ports)
+    except Exception as e:  # pragma: no cover — never break the loop
+        if report is not None:
+            report.setdefault("oracle_errors", []).append(
+                {"case": str(name), "error": str(e)})
+        return None
+    if not text:
+        if report is not None:
+            report.setdefault("stated_vector_unbound", []).append(
+                {"case": str(name), "reason": why})
+        return None
+    f = Path(out_dir) / f"{name}.v"
+    f.write_text(stamp_generated(text, "_emit_case_stated_vector_bus"))
+    if report is not None:
+        report.setdefault("stated_vector_cases", []).append(
+            {"case": str(name),
+             "evidence": case.get("evidence") or case.get("citation"),
+             "provenance": "GENERATED_FROM_STATED_VECTOR"})
+    return f
+
+
 # ── R-0915-89(ii): the run must SAY which oracles it did not write ──────────
 #: The three ways a file under `sim/tb/` can have got there.
 ORACLE_SOURCE_AUTHORED = "PRESERVED_AUTHORED"
@@ -1433,6 +1530,13 @@ def emit_unit_tbs(project: Path, top: str = "chip_top",
         if wrote is None:
             wrote = _emit_case_known_answer_vector(project, c, dut_module,
                                                    ports, out_dir, report)
+        if wrote is None:
+            # R-0915-113(2) — the design may state its transport as a plain
+            # memory-mapped register bus and state BOTH halves of the vector
+            # in its own documents. Tried before the closed-form families:
+            # a value the design STATES outranks one this flow re-derives.
+            wrote = _emit_case_stated_vector_bus(project, c, dut_module,
+                                                 ports, out_dir, report)
         if wrote is None:
             wrote = _emit_case_golden_oracle(project, ic_class, c, out_dir,
                                              report)
