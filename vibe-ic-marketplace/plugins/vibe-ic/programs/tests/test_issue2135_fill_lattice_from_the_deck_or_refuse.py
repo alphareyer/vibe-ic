@@ -166,7 +166,40 @@ def test_widening_closes_a_floor_the_constant_width_left_open(tmp_path):
     assert layer["density_after"] >= 0.40
     assert layer["density_after"] > without["density_after"]
     assert len(layer["families_tried"]) > 1
-    assert layer["top_width_um"] > without["top_width_um"]
+
+    # RE-PINNED 2026-09-21. This asserted `layer["top_width_um"] >
+    # without["top_width_um"]` and measured 3.37 > 3.37. The title's claim is
+    # intact -- what changed is which family WINS, and therefore whether the top
+    # width is the discriminator at all.
+    #
+    # 75f3efcaa (2026-09-17, "tile the legal room itself") added a CONFORMAL
+    # family that tiles the free region instead of packing squares into it. It
+    # has no top width -- its key is `conformal_tile_um` -- and when it wins the
+    # producer deliberately keeps `best_top = top_fwd`, so the record reports the
+    # CONFIGURED width and the assertion could never move again.
+    #
+    # MEASURED on this fixture at floor 40.0, per family:
+    #     square    3.37 -> 0.3848      (the constant width, below the floor)
+    #     square    6.74 -> 0.4234      (widening CLEARS 0.40)
+    #     square   13.48/26.96/53.92 -> 0.4234
+    #     conformal 53.92 -> 0.7015     (wins overall)
+    # So the widening does exactly what this test is named for, and it is now
+    # asserted DIRECTLY on the square family rather than through a width that
+    # the winning family does not have.
+    squares = [f["density"] for f in layer["families_tried"]
+               if "conformal_tile_um" not in f]
+    assert squares[0] == without["density_after"], (
+        "the first family must be the constant-width one the floor-less arm ran")
+    assert squares[0] < 0.40 <= max(squares), (
+        f"widening must close the floor the constant width left open: "
+        f"{squares}")
+    widths = [f["top_width_um"] for f in layer["families_tried"]
+              if "conformal_tile_um" not in f]
+    assert max(widths) > without["top_width_um"], widths
+    conformal = [f for f in layer["families_tried"] if "conformal_tile_um" in f]
+    assert conformal and conformal[0]["density"] == layer["density_after"], (
+        "the conformal family is expected to win here; if a square wins, the "
+        "top-width claim above becomes assertable on the record again")
     assert withf["refusals"] == [], "a layer that clears the floor is not refused"
 
 
@@ -181,19 +214,33 @@ def test_a_layer_that_already_clears_the_floor_is_not_touched(tmp_path):
     assert res["refusals"] == []
 
 
+#: The floor that puts THIS fixture in the shortfall class: above what the best
+#: family reaches, below what any legal fill could reach. RE-PINNED from 50.0,
+#: which 75f3efcaa's conformal family now clears outright (0.7015), so the arm
+#: had stopped exercising the refusal path it exists for. MEASURED at
+#: 336c9d3d0: best family 0.7015, ceiling_any_fill 0.7426.
+_SHORTFALL_FLOOR_PCT = 72.0
+
+
 def test_a_shortfall_is_refused_by_name_with_its_numbers(tmp_path):
     """Reachable in principle, not reached by this lattice."""
     pya = _pya_or_skip()
-    res = _run(pya, tmp_path, 16.0, 50.0, "d")
+    res = _run(pya, tmp_path, 16.0, _SHORTFALL_FLOOR_PCT, "d")
     layer = res["layers"][0]
-    assert layer["density_after"] < 0.50
-    assert layer["ceiling_any_fill"] > 0.50, (
-        "fixture must leave room in principle, else this is the other class")
+    _floor = _SHORTFALL_FLOOR_PCT / 100.0
+    # THE CLASS, not two numbers: the run falls short of the floor AND the floor
+    # is below the absolute ceiling. Stated as one chain so a fixture that drifts
+    # out of this class fails here, naming both bounds, instead of silently
+    # exercising UNREACHABLE_BY_ANY_FILL or no refusal at all.
+    assert layer["density_after"] < _floor < layer["ceiling_any_fill"], (
+        f"fixture left the shortfall class: achieved "
+        f"{layer['density_after']}, floor {_floor}, ceiling "
+        f"{layer['ceiling_any_fill']}")
     assert len(res["refusals"]) == 1
     r = res["refusals"][0]
     assert r["layer"] == "m"
     assert r["verdict"] == "NOT_REACHED_BY_THIS_LATTICE"
-    assert r["floor"] == 0.50
+    assert r["floor"] == _floor
     assert r["achieved"] == pytest.approx(layer["density_after"], abs=1e-9)
     assert r["ceiling_any_fill"] == layer["ceiling_any_fill"]
     assert r["space_to_metal_um"] == 2.0
