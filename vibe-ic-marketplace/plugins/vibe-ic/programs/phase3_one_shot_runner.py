@@ -5018,6 +5018,70 @@ def tapcell_coverage_radius_um(distance_um: float) -> float:
     return distance_um
 
 
+#: The probe's own marker. One line per stage boundary, so the attribution is
+#: a measurement in the run's own log rather than a reconstruction afterwards.
+_PIN_ACCESS_PROBE_MARKER = "PIN_ACCESS_PROBE"
+
+
+def _pin_access_probe_tcl(tag: str) -> str:
+    """Ask the ROUTER how many signal pins have no access point, and say when.
+
+    R-0915-110. MEASURED on subservient x gf180mcuD as a DIE (int4 arm,
+    2026-09-21): the SDR candidate check answered `0` inaccessible pins --
+    truthfully, for the context it was asked in -- and the adopt path's PG
+    re-route then died on `[ERROR DRT-1231] Pin u_core/_3245_/ZN does not have
+    access point`. FIVE stages run between those two points
+    (`postroute_spef_extract`, `postroute_antenna_repair` which inserts diodes,
+    `postroute_drv_reconverge`, `postroute_antenna_reconverge`,
+    `postroute_fill`), and an offline probe of `antenna_pre_repair.odb` found
+    the design still CLEAN there: 0 of 14374 signal ITerms without access. So
+    the access is taken by one of the later stages and nothing said which.
+
+    This probe is that answer. It runs `pin_access` -- OpenROAD's own pass, the
+    same authority the candidate check uses -- and reports the count and the
+    first offenders BY NAME at each boundary. Measure-only: it changes no
+    placement and no verdict, so a run that was going to pass still passes.
+
+    Fail-closed as a MEASUREMENT: a build without `pin_access`, or a pass that
+    throws, reports -1 (NOT MEASURED) rather than 0, because "nobody asked" and
+    "nothing is wrong" are different facts.
+    """
+    t = tag
+    return (
+        f"if {{[catch {{\n"
+        f"  set _pap_n -1\n"
+        f"  if {{[llength [info commands pin_access]] > 0}} {{\n"
+        f"    if {{![catch {{pin_access}} _pap_e]}} {{\n"
+        f"      set _pap_n 0\n"
+        f"      set _pap_names {{}}\n"
+        f"      foreach _pap_i [[ord::get_db_block] getInsts] {{\n"
+        f"        if {{![string match \"CORE*\" [[$_pap_i getMaster] getType]]}} "
+        f"{{ continue }}\n"
+        f"        foreach _pap_t [$_pap_i getITerms] {{\n"
+        f"          set _pap_net [$_pap_t getNet]\n"
+        f"          if {{$_pap_net eq \"NULL\"}} {{ continue }}\n"
+        f"          if {{[$_pap_net isSpecial]}} {{ continue }}\n"
+        f"          if {{[llength [$_pap_t getAccessPoints]] == 0}} {{\n"
+        f"            incr _pap_n\n"
+        f"            if {{[llength $_pap_names] < 8}} {{ lappend _pap_names "
+        f"\"[$_pap_i getName]/[[$_pap_t getMTerm] getName]\" }}\n"
+        f"          }}\n"
+        f"        }}\n"
+        f"      }}\n"
+        f"      puts \"{_PIN_ACCESS_PROBE_MARKER}: {t} no_access=$_pap_n "
+        f"[join $_pap_names {{,}}]\"\n"
+        f"    }} else {{\n"
+        f"      puts \"{_PIN_ACCESS_PROBE_MARKER}: {t} no_access=-1 "
+        f"(pin_access threw: $_pap_e)\"\n"
+        f"    }}\n"
+        f"  }} else {{\n"
+        f"    puts \"{_PIN_ACCESS_PROBE_MARKER}: {t} no_access=-1 "
+        f"(this OpenROAD exposes no pin_access)\"\n"
+        f"  }}\n"
+        f"}} _pap_outer]}} {{ puts \"{_PIN_ACCESS_PROBE_MARKER}: {t} "
+        f"no_access=-1 (probe failed: $_pap_outer)\" }}\n")
+
+
 def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig",
                                        pitch_um: Optional[float] = None,
                                        pitch_source: str = "") -> str:
@@ -28831,15 +28895,15 @@ if {{[catch {{write_def {out_dir_c}/routed_preantenna.def}} _cp_err]}} {{
 # route checkpoint — which is what the NONFATAL guard was written to do and
 # cannot.
 puts "{_PNR_STAGE_MARKER} postroute_spef_extract"
-{spef_repair_block}# === v0.2.14 — antenna repair (diode insertion) after detailed_route ===
+{spef_repair_block}{_pin_access_probe_tcl("after_postroute_spef_extract")}# === v0.2.14 — antenna repair (diode insertion) after detailed_route ===
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 {_pnr_stage_begin("postroute_antenna_repair")}
 puts "{_PNR_STAGE_MARKER} postroute_antenna_repair"
-{antenna_repair_block}{_pnr_stage_end("postroute_antenna_repair")}
-{drv_reconverge_block}
+{antenna_repair_block}{_pin_access_probe_tcl("after_postroute_antenna_repair")}{_pnr_stage_end("postroute_antenna_repair")}
+{drv_reconverge_block}{_pin_access_probe_tcl("after_postroute_drv_reconverge")}
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 puts "{_PNR_STAGE_MARKER} postroute_antenna_reconverge"
-{post_reconverge_antenna_block}# === v0.1.48 — decap + filler insertion ===
+{post_reconverge_antenna_block}{_pin_access_probe_tcl("after_postroute_antenna_reconverge")}# === v0.1.48 — decap + filler insertion ===
 # spm pilot Tier 2 EM/decap finding: prior runs (v0.1.25 → v0.1.47) emitted
 # ZERO decap or filler cells. Empty std-cell-row gaps left an MPW-rejecting
 # combination: no dynamic IR margin (no decap), open density-fill rules
@@ -28852,7 +28916,7 @@ puts "{_PNR_STAGE_MARKER} postroute_fill"
 # may still have created an instance (antenna diodes, a repair buffer), and
 # those terminals must be owned. The re-route inside it runs only when the
 # delta says terminals actually changed, and a failure there is a verdict.
-{pg_reconnect_block}{_pnr_stage_begin("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} postroute_named_violation_reroute"
+{_pin_access_probe_tcl("after_postroute_fill_before_pg_reconnect")}{pg_reconnect_block}{_pin_access_probe_tcl("after_pg_reconnect_before_reroute")}{_pnr_stage_begin("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} postroute_named_violation_reroute"
 {_named_viol_reroute_block}{_pnr_stage_end("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} write_routed"
 }} else {{
   puts "POSTROUTE_RECONVERGE_DOWNSTREAM_REFUSED: SDR transaction rolled back; skipping antenna/PG/named reroute"
