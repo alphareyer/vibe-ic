@@ -359,11 +359,83 @@ fi
 # placeholder argument. It is still before the first container start, which is
 # what "before anything is started" has to mean for an argument.
 PLUGIN_DIR="$REPO_ROOT/vibe-ic-marketplace/plugins/vibe-ic"
+
+# ── the OUTPUT paths, checked the same way and for the same reason ─────────
+# vibe-ic#2123 refuses a SELECTOR that would collect nothing because "nothing
+# ran" reads as a clean run. The mirror image is an OUTPUT path the container
+# cannot write, and this harness forwarded those verbatim.
+#
+# MEASURED on this host, pinned image, the SAME one-file selection both times:
+#
+#   without --junitxml                    1 failed, 7 passed        rc 1
+#   with --junitxml under an unmounted
+#     host path                           rc 1, and:
+#       `N failed, M passed` final line   ABSENT
+#       `short test summary info`         0 lines
+#       `FAILED ...` lines                0
+#       the junit XML                     never written
+#
+#     PermissionError: [Errno 13] Permission denied: '<the host dir>'
+#       in pytest_sessionfinish -> os.makedirs
+#
+# The exception is raised in `pytest_sessionfinish` -- AFTER every test has run
+# and BEFORE the terminal reporter writes its summary -- so the run's entire
+# report is destroyed wholesale. The rc is 1, the SAME rc as a real failure, so
+# a caller keying on rc sees "tests failed" and a caller scraping for `N failed`
+# finds NOTHING and reads the run as clean. Both readings are wrong and neither
+# is disclosed. On an all-green selection it is worse: rc 1 with no failure
+# anywhere in the output.
+#
+# This harness mounts exactly $REPO_ROOT, the git common dir, /tmp, the passwd
+# file and (with an engine) the docker socket and CLI. A path anywhere else
+# names a directory that does not exist inside the container, and the read-only
+# parent the mount created refuses to create it.
+#
+# REFUSED BY NAME, NEVER REMAPPED -- the identical-path rule at the top of this
+# file, and #2123's own reasoning: re-resolving a caller's path against a
+# second directory gives one string two meanings and picks one silently.
+_refuse_unwritable_output() {   # $1 = option token, $2 = its value
+  case "$1" in
+    --junitxml|--junit-xml|--log-file|--basetemp) ;;
+    *) return 0 ;;
+  esac
+  [ -n "${2:-}" ] || return 0
+  case "$2" in
+    /*) _oabs="$2" ;;
+    # Relative output paths are resolved by pytest against the working
+    # directory this harness sets, exactly as selectors are.
+    *)  _oabs="$PLUGIN_DIR/$2" ;;
+  esac
+  case "$_oabs/" in
+    "$REPO_ROOT"/*|/tmp/*|"$SCRATCH"/*) return 0 ;;
+  esac
+  die "the output path for '$1' is not writable from inside the container.
+        $1 $2
+    resolved to
+        $_oabs
+    This harness makes exactly these paths visible, at their own addresses:
+        $REPO_ROOT
+        /tmp
+        $SCRATCH
+    and nothing else. pytest creates this file in \`pytest_sessionfinish\` --
+    AFTER every test has run and BEFORE the terminal reporter writes its
+    summary -- so the mkdir fails there and DESTROYS THE RUN'S ENTIRE REPORT:
+    no \`N failed, M passed\` line, no \`short test summary info\`, no
+    \`FAILED\` lines and no XML, while the exit code is 1 -- the same rc as a
+    real test failure. A caller keying on rc reads 'tests failed'; a caller
+    scraping for a failure count finds nothing and reads a clean run. Both are
+    wrong, so this refuses BEFORE the tests run rather than after.
+    Write it under one of the paths above -- $SCRATCH is the one meant for it
+    -- and copy it out afterwards."
+}
+
 PYTEST_ARGS=()
 _await_value=0
+_await_opt=""
 for _arg in "$@"; do
   if [ "$_await_value" = 1 ]; then
-    PYTEST_ARGS+=("$_arg"); _await_value=0; continue
+    _refuse_unwritable_output "$_await_opt" "$_arg"
+    PYTEST_ARGS+=("$_arg"); _await_value=0; _await_opt=""; continue
   fi
   case "$_arg" in
     # Options whose SEPARATE value is not a selector. Their value is passed
@@ -381,7 +453,11 @@ for _arg in "$@"; do
       |--basetemp|--junitxml|--junit-xml|--junit-prefix|--override-ini\
       |--log-file|--log-level|--log-cli-level|--capture|--import-mode\
       |--assert|--ignore-glob|--stall-after)
-      PYTEST_ARGS+=("$_arg"); _await_value=1; continue ;;
+      PYTEST_ARGS+=("$_arg"); _await_value=1; _await_opt="$_arg"; continue ;;
+    # The ATTACHED forms (--junitxml=PATH, --log-file=PATH, --basetemp=PATH)
+    # never reach the branch above, so they are asked here.
+    --*=*) _refuse_unwritable_output "${_arg%%=*}" "${_arg#*=}"
+           PYTEST_ARGS+=("$_arg"); continue ;;
     -*) PYTEST_ARGS+=("$_arg"); continue ;;
   esac
   # A node id is <path>::<node>; only the path half is a filesystem question.
