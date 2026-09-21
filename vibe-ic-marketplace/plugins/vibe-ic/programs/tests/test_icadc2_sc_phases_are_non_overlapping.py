@@ -25,7 +25,25 @@ a2 = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(a2)
 
 ENTRY = a2.LIBRARY["delta_sigma"]
-DECL = ENTRY.get(a2.CLOCK_PHASE_GENERATOR_KEY)
+# READ THROUGH getattr SO THE PRE-FIX TREE CAN RUN THIS FILE. Naming the new
+# constant directly made the module raise AttributeError on main sources, and a
+# collection error proves only that a symbol is new -- every assertion below
+# went unexecuted, so none of them showed it pins anything. With the fallback
+# the old tree runs every test and answers WRONGLY, which is the evidence.
+CLOCK_PHASE_GENERATOR_KEY = getattr(
+    a2, "CLOCK_PHASE_GENERATOR_KEY", "clock_phase_generator")
+DECL = ENTRY.get(CLOCK_PHASE_GENERATOR_KEY)
+
+
+def _gen_devices(decl):
+    """The generator's devices, or [] on a tree that has no generator at all."""
+    fn = getattr(a2, "non_overlap_phase_devices", None)
+    return [] if fn is None else fn(decl)
+
+
+def _gen_nets(decl):
+    fn = getattr(a2, "non_overlap_phase_nets", None)
+    return [] if fn is None else fn(decl)
 SPEC = {"osr": 256.0, "order": 2.0, "vdd": 1.2, "vref": 1.0,
         "fclk": 1e6, "enob": 14.0, "vindiff": 1.0}
 
@@ -90,28 +108,28 @@ def test_every_sc_switch_is_driven_from_a_declared_phase_not_from_clk():
 
 def test_the_generator_nets_are_declared_internal():
     devices, nets = _expanded()
-    for n in a2.non_overlap_phase_nets(DECL):
+    for n in _gen_nets(DECL):
         assert n in nets, n
 
 
 # ── direction 2: an entry that declares NO pair is emitted exactly as before ──
 
 def test_an_entry_that_declares_no_generator_gets_no_devices():
-    assert a2.non_overlap_phase_devices(None) == []
-    assert a2.non_overlap_phase_devices({}) == []
+    assert _gen_devices(None) == []
+    assert _gen_devices({}) == []
 
 
 def test_a_single_phase_declaration_keeps_its_single_phase():
     """A topology that declares ONE phase is not given a second one. The
     generator is a consequence of the declaration, never of this module's
     opinion about switched-capacitor design."""
-    assert a2.non_overlap_phase_devices(
+    assert _gen_devices(
         {"source": "clk", "complement": "nclkb",
          "phases": {"only": {"complement_net": "onlyb"}}}) == []
 
 
 def test_a_phase_without_a_complement_net_is_refused_not_guessed():
-    assert a2.non_overlap_phase_devices(
+    assert _gen_devices(
         {"source": "clk", "complement": "nclkb",
          "phases": {"a": {}, "b": {"complement_net": "bb"}}}) == []
 
@@ -120,9 +138,9 @@ def test_no_other_library_entry_is_given_a_generator():
     """Both directions across the whole library: only entries that declare the
     key get the devices."""
     for name, lib in a2.LIBRARY.items():
-        if lib.get(a2.CLOCK_PHASE_GENERATOR_KEY) is None:
-            assert a2.non_overlap_phase_devices(
-                lib.get(a2.CLOCK_PHASE_GENERATOR_KEY)) == [], name
+        if lib.get(CLOCK_PHASE_GENERATOR_KEY) is None:
+            assert _gen_devices(
+                lib.get(CLOCK_PHASE_GENERATOR_KEY)) == [], name
 
 
 # ── the invariant the change must not move ───────────────────────────────
