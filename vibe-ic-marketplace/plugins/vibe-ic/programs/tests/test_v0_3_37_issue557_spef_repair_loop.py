@@ -128,11 +128,39 @@ def test_pnr_tcl_repair_estimate_runs_after_shipped_artifacts():
         spef_repair_estimate_block="SPEF_REPAIR_ESTIMATE_MARKER\n")
     tcl = R._build_pnr_tcl_text(**kw)
     assert "SPEF_REPAIR_ESTIMATE_MARKER" in tcl
-    assert (tcl.index("write_def /out/routed.def")
-            < tcl.index("write_verilog /out/foo_pnr.v")
-            < tcl.index("report_checks > /out/sta.rpt")
-            < tcl.index("SPEF_REPAIR_ESTIMATE_MARKER")
-            < tcl.index("\nexit"))
+    lines = tcl.splitlines()
+
+    # RE-PINNED 2026-09-21 (R-0915-101 rules). THE ANCHOR IS THE ARTEFACT, NOT
+    # THE FLAGS. c34f56d2a (v1.22.13, #2376, 2026-09-20) changed this very line
+    # from `report_checks > {out}/sta.rpt` to `report_checks -path_delay max >
+    # {out}/sta.rpt` (deliberate: it selects the setup/max path delay
+    # explicitly; a BARE `report_checks` is valid OpenSTA and three other
+    # emitters still use it -- only `-max`/`-min` were Error 514). The old
+    # `tcl.index("report_checks > /out/sta.rpt")` then raised ValueError, so
+    # this ORDER GUARANTEE did not fail -- it ABORTED, and stopped measuring
+    # anything at all. Anchoring on "the line that redirects to sta.rpt" keeps
+    # the claim exactly as strong while a flag added to that command cannot
+    # silently stop it being measured; a missing anchor now says WHICH one.
+    def line_of(what, pred):
+        hits = [i for i, l in enumerate(lines) if pred(l.strip())]
+        assert hits, (f"the pnr TCL has no line that {what}; the order "
+                      f"guarantee below would have measured NOTHING")
+        return hits[0]
+
+    i_routed = line_of("writes routed.def",
+                       lambda l: l == "write_def /out/routed.def")
+    i_netlist = line_of("writes the pnr netlist",
+                        lambda l: l == "write_verilog /out/foo_pnr.v")
+    i_sta = line_of("writes the shipped timing report",
+                    lambda l: (l.startswith("report_checks")
+                               and "> /out/sta.rpt" in l
+                               and ">> /out/sta.rpt" not in l))
+    i_estimate = line_of("carries the estimate block",
+                         lambda l: "SPEF_REPAIR_ESTIMATE_MARKER" in l)
+    i_exit = line_of("exits", lambda l: l == "exit")
+    assert i_routed < i_netlist < i_sta < i_estimate < i_exit, (
+        f"routed.def {i_routed}, netlist {i_netlist}, sta.rpt {i_sta}, "
+        f"estimate {i_estimate}, exit {i_exit}")
 
 
 def test_openroad_postroute_repair_probe(monkeypatch):
