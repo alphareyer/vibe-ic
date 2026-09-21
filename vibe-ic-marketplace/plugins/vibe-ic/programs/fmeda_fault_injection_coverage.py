@@ -44,9 +44,20 @@ DETECTION criterion (general): a fault is COVERED if the mechanism EITHER
 An injection with DETECT=0 AND MATCH=0 is an ESCAPE (undetected) and honestly
 lowers DC.
 
-VACUOUS / NOT-APPLICABLE: a design that declares NO safety mechanism produces
-NOT_APPLICABLE (vacuous pass — this step only fires for safety designs). It is
-NEVER a fabricated pass and NEVER a fake number.
+NOT-APPLICABLE: a design that declares NO safety mechanism produces
+NOT_APPLICABLE — this step only fires for safety designs. It is NEVER a
+fabricated pass and NEVER a fake number.
+
+TWO KINDS OF NOT-APPLICABLE, AND THEY ARE DIFFERENT FACTS (R-0915-119).
+When the RTL WAS READ and its modules enumerated and none of them is an
+ECC / parity / lockstep mechanism, the design has been ANSWERED: the report
+states `NOT_APPLICABLE_BY_STRUCTURE` and carries the enumeration that
+establishes it (`structural_absence`), and the program exits 2 — the repo's
+non-verdict-candidate code, which is the only channel that carries a reason
+class. When NOTHING was enumerated — no `--rtl-dir`, a directory holding no
+HDL, no parseable module — nothing about the design has been established and
+the program keeps its rc-0 disclosed-vacuous answer. An absence must be
+established, never assumed from an input nobody opened.
 
 ASIL floor (single-point-fault-metric SPFM proxy via measured DC):
     ASIL-A : none required (advisory)
@@ -77,9 +88,13 @@ USAGE
 
 EXIT CODES
 ----------
-  0 — DC >= ASIL floor AND baseline valid  (OR NOT_APPLICABLE vacuous skip)
+  0 — DC >= ASIL floor AND baseline valid, OR a DISCLOSED vacuous skip
+      (nothing was enumerated, so nothing is claimed about the design)
   1 — DC < ASIL floor OR baseline invalid (false-alarm / can't encode)
-  2 — usage / IO / tool error
+  2 — NON-VERDICT CANDIDATE: usage / IO / tool error, OR the R-0915-119
+      decided state — the modules were enumerated and none is a safety
+      mechanism. Both are classified by the consumer from the report, never
+      from the number alone.
 """
 from __future__ import annotations
 
@@ -96,12 +111,13 @@ import subprocess  # noqa: F401
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 import _path_layout as _pl  # noqa: E402
+import _structural_absence as _sa  # noqa: E402  R-0915-119
 import _watchdog as _wd  # noqa: E402  progress-stall process supervision
 try:  # sibling module; programs/ is on sys.path when run as a script
     import _docker_memory as _dmem
@@ -419,7 +435,9 @@ def _module_ports(text: str, module: str) -> List[Tuple[str, str, int]]:
 
 
 def detect_safety_mechanism(rtl_dir: Path,
-                            doc_text: str = "") -> Optional[MechanismSpec]:
+                            doc_text: str = "",
+                            census: Optional[Dict[str, Any]] = None
+                            ) -> Optional[MechanismSpec]:
     """Scan an RTL directory (+ optional L23/doc text) for a DECLARED ECC/parity
     safety mechanism and infer the encode/decode modules + protected ports.
     Returns None (→ NOT_APPLICABLE) when no mechanism is unambiguously pinned —
@@ -433,6 +451,16 @@ def detect_safety_mechanism(rtl_dir: Path,
     an explicit safety declaration (ISO-26262 / ASIL / ECC / parity / lockstep)
     in prose/L23, under which even a SEC-only correction-only decoder fires. An
     encoder is a module producing a WIDER output than its input. chip-AGNOSTIC.
+
+    `census`, when a dict is passed, is filled with WHAT THIS SCAN ENUMERATED —
+    the RTL files read and the modules declared in them — as soon as the
+    enumeration exists and BEFORE any of the return-None branches below. It is
+    an out-parameter rather than a second scanner on purpose: R-0915-119 needs
+    the population behind a `None`, and "a second scanner is a second answer
+    waiting to disagree with the first". A caller that passes nothing is
+    byte-unaffected; a caller that passes a dict and gets it back EMPTY has
+    learnt that NOTHING was enumerated (no directory, no HDL), which is the one
+    state that must never reach the decided class.
     """
     if not rtl_dir.is_dir():
         return None
@@ -475,6 +503,14 @@ def detect_safety_mechanism(rtl_dir: Path,
         for mod in _MODULE_RE.findall(code):
             if mod not in mods:
                 mods[mod] = (f, _module_ports(code, mod))
+
+    # WHAT WAS ENUMERATED, recorded before the first post-enumeration
+    # return-None below so the caller can tell "read the RTL and found no
+    # mechanism" from "had no RTL to read". Both answer `None`; only the first
+    # is a structural absence (R-0915-119 guard (i)).
+    if census is not None:
+        census["rtl_files"] = [f.name for f in vfiles]
+        census["modules"] = sorted(mods)
 
     # Find a decoder: has a detect output OR (input wider than a narrower output).
     # RANK candidates rather than breaking on the FIRST by dict/file order.
@@ -1096,6 +1132,46 @@ def _report_path(project: Path, override: Optional[str]) -> Path:
 VACUOUS_TOKEN_MAX_LEN = 200
 
 
+#: The repo's non-verdict-candidate exit code. `flow_compliance_check.
+#: __check_program_exit_zero` reads rc 2 as "this did not fail; classify it",
+#: and that classified channel is the ONLY one that can carry a reason class.
+#: An rc-0 run with a printed token reaches the counted-vacuity bucket and
+#: nothing else, which is why the structural branch below leaves rc 0 behind.
+RC_NON_VERDICT = 2
+
+
+def safety_mechanism_absence(census: Optional[Dict[str, Any]],
+                             rtl_dir_rel: str) -> Optional[Dict[str, Any]]:
+    """The R-0915-119 record for "this design declares no safety mechanism".
+
+    Built ONLY from what `detect_safety_mechanism` actually enumerated. An
+    empty or missing census — no `--rtl-dir`, a directory holding no HDL, a
+    file set that parsed to no module at all — establishes nothing and returns
+    `None`, so the caller keeps the disclosed-vacuous answer it has today.
+    `_structural_absence.absence` refuses a claim with `scanned < 1` in its own
+    right; this returns None rather than letting that raise into a run.
+    """
+    if not isinstance(census, dict):
+        return None
+    modules = census.get("modules") or []
+    files = census.get("rtl_files") or []
+    if not modules:
+        return None
+    try:
+        return _sa.absence(
+            population=f"module(s) declared in {rtl_dir_rel}",
+            scanned=len(modules),
+            found=0,
+            names=modules,
+            # BOUNDED. `_structural_absence.sentence()` is printed whole and
+            # the consumer's stdout window is the last 300 bytes, so a long
+            # detail is a disclosure the window eats.
+            detail=f"no ECC / parity / lockstep declared in any of them",
+        )
+    except ValueError:
+        return None
+
+
 def _vacuous_token_line(verdict: str) -> str:
     """The bounded, line-start `VACUOUS_PASS:` disclosure line."""
     line = (f"VACUOUS_PASS: fmeda diagnostic coverage NOT measured "
@@ -1107,6 +1183,11 @@ def _vacuous_token_line(verdict: str) -> str:
 def run(project: Path, args) -> Tuple[int, dict]:
     # 1) resolve the mechanism spec: explicit flags win; else auto-detect.
     spec: Optional[MechanismSpec] = None
+    # WHAT THE AUTO-DETECT SCAN ENUMERATED. Stays empty on the explicit-flags
+    # path (nothing was scanned there) and on every path that never reached an
+    # enumeration, which is exactly the state that must not reach the decided
+    # class.
+    census: Dict[str, Any] = {}
     if args.dec_module and args.enc_module:
         rtl_files = list(args.rtl_file or [])
         spec = MechanismSpec(
@@ -1199,7 +1280,7 @@ def run(project: Path, args) -> Tuple[int, dict]:
         for cand in (args.doc,):
             if cand and (project / cand).exists():
                 doc += (project / cand).read_text(errors="replace")
-        spec = detect_safety_mechanism(rtl_dir, doc)
+        spec = detect_safety_mechanism(rtl_dir, doc, census=census)
         spec_rtl_rel = []
         if spec is not None:
             # Compile the DETECTED mechanism's OWN files (the enc + dec leaves),
@@ -1220,9 +1301,44 @@ def run(project: Path, args) -> Tuple[int, dict]:
 
     floor = asil_floor(args.asil, args.min_dc)
 
-    # 2) NOT_APPLICABLE → vacuous pass (this step only fires for safety designs)
+    # 2) NO MECHANISM. Two different facts wear this branch and until
+    # R-0915-119 they wore one word.
+    #
+    # THE DEFECT, MEASURED on spm x gf180mcuD (run13, lane icspm5, and
+    # reproduced byte-for-byte on this RTL by lane icgate1, 2026-09-21): FS1's
+    # condition is `files_exist: [phase2/stage1/rtl]`, so the step is
+    # APPLICABLE for every design that has RTL — which is every design. Both
+    # its gate clauses then disclosed `VACUOUS_PASS`, all clauses were vacuous,
+    # and the step resolved
+    #     status=NOT_MEASURED  reason_class=no_population  [vacuity]
+    # for a scan that had READ the design's RTL, enumerated its modules and
+    # ANSWERED the question. "Examined nothing" was a false account of it, and
+    # the completion audit counted the row against the run.
+    #
+    # A design with no ECC/parity/lockstep HAS BEEN ANSWERED about safety
+    # mechanisms — the R-0915-119 shape exactly — so the branch states
+    # NOT_APPLICABLE_BY_STRUCTURE and carries the enumeration that establishes
+    # it. DESIGN_DECLARED_NA is NOT the class here and must not be borrowed:
+    # that one requires a TYPED DESIGN DECLARATION to have been examined
+    # (`_flow_reason_taxonomy._declared_basis`), and no L-doc in the taxonomy
+    # carries a functional-safety declaration — the absence here is derived
+    # from the checker's OWN enumeration, which is the distinction the two
+    # classes exist to keep.
+    #
+    # AND ONLY WHEN THE ENUMERATION EXISTS. `safety_mechanism_absence` returns
+    # None for an rtl-dir that was never opened or held no parseable module, so
+    # the `UNMEASURED_NO_RTL_READ` branch above and every other unread-input
+    # path keep the rc-0 disclosed-vacuous answer they have today. A claim
+    # about a design cannot come out of an input nobody read.
     if spec is None:
         rep = build_report(None, None, args.asil, floor)
+        _absence = safety_mechanism_absence(
+            census, str(args.rtl_dir or "phase2/stage1/rtl"))
+        if _absence is not None:
+            _sa.attach(rep, _absence)
+            rep["reason"] = _sa.sentence(_absence,
+                                         "FMEDA diagnostic coverage")
+            return RC_NON_VERDICT, rep
         return 0, rep
 
     if not spec.enc_module:
@@ -1317,7 +1433,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(rep, indent=2) + "\n")
 
-    if not rep.get("applicable", False):
+    _absence = _sa.evidence_of(rep)
+    if _absence is not None:
+        # R-0915-119's OWN stdout channel, printed alone and last so it lands
+        # whole inside the consumer's `stdout[-300:]` window. It is NOT the
+        # `VACUOUS_PASS:` token and must never be printed beside it: the two
+        # are different claims about the same run — "examined nothing" versus
+        # "enumerated the population and found none" — and a step that
+        # disclosed both would be read by whichever channel the consumer
+        # happens to match first.
+        print(_sa.sentence(_absence, "FMEDA diagnostic coverage"))
+    elif not rep.get("applicable", False):
         # DISCLOSED SKIP, not a plain PASS. This branch exits 0 on every
         # non-safety design — the majority — so it IS the default outcome of
         # the FMEDA step, and until the token below existed the step resolved
