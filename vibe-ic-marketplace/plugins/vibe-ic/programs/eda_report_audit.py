@@ -1652,6 +1652,91 @@ def _measured_klayout_receipt_files(project_dir: Path,
     return bound
 
 
+
+#: How much of a sibling tool log this reader will read to answer "did the deck
+#: mention this rule class at all". Bounded: a log is an unbounded artefact and
+#: this is a diagnostic line, not a measurement.
+_SIBLING_LOG_READ_BYTES = 4_000_000
+
+
+def _category_also_named_beside(cat_regex: "re.Pattern[str]",
+                                files: Sequence[Path],
+                                project_dir: Path) -> str:
+    """The tool log beside a scoped report that DOES name this rule class.
+
+    Returns its project-relative path, or "" if none does.
+
+    Reads ONLY — nothing here enters `cats_found`, the violation count, the
+    verdict or any summary number. It answers one diagnostic question a reader
+    otherwise cannot: was this rule class absent from the REPORT, or absent
+    from the RUN?
+    """
+    seen: set = set()
+    for fp in files:
+        for sib in sorted(Path(fp).parent.glob("*.log")):
+            if sib in seen or sib in set(files):
+                continue
+            seen.add(sib)
+            try:
+                text = sib.open("r", errors="replace").read(
+                    _SIBLING_LOG_READ_BYTES)
+            except OSError:
+                continue
+            if cat_regex.search(text):
+                return _rel(sib, project_dir)
+    return ""
+
+
+def _category_absence_message(cat: str, cat_regex: "re.Pattern[str]",
+                              files: Sequence[Path],
+                              project_dir: Path) -> str:
+    """Why a rule class is not named in the reports — as a fact about the
+    REPORT, never as a claim about the design.
+
+    R-icgate3 — MEASURED on spm run15 (8HD-4, `_lane_icspm5/run15`), step 31's
+    sign-off audit, whose FIRST finding read
+
+        DRC category 'density' not found in reports
+
+    A reader takes that as "density was not checked". It was. The run's own
+    tool log (`reports/phase3/drc_signoff.log`) records
+
+        Selected decks: ... cup, density, df_10, ...
+        Executing rule PL.8 / M1.4 / M2.4 / M3.4 / M4.4 / M5.4
+
+    and the report carries ZERO items for any of them, i.e. all six PASSED.
+    They are missing from the report because this open PDK's density deck calls
+    `extent.output(...)` INSIDE the `if` that detects the violation, so a clean
+    density rule emits no category at all. The report declares 764 rule classes
+    and 762 of them carry zero items, so the format does declare clean rules —
+    these six are the exception, and 11 of the 774 rules the log says executed
+    never declared a class, the six density rules among them.
+
+    The old sentence could only be satisfied by a die that FAILS density: it
+    reported the good outcome as a gap. It stays a WARNING and stays
+    informational (this probe has never gated `passed`); what changes is that
+    it now names the SCOPE it searched and, when the deck's own log names the
+    class, says so — which is the difference between "not checked" and "checked
+    and clean".
+
+    chip-AGNOSTIC: no IC, vendor, SKU or process is reasoned about; the rule
+    class words are this reader's own existing table.
+    """
+    where = ", ".join(sorted(_rel(f, project_dir) for f in files)) or "no report"
+    beside = _category_also_named_beside(cat_regex, files, project_dir)
+    if beside:
+        return (f"DRC category '{cat}' is not named in the report(s) this audit "
+                f"was scoped to ({where}), but the tool's own log beside them "
+                f"({beside}) DOES name it. A report that lists only VIOLATIONS "
+                f"cannot name a rule class that passed, so this is not evidence "
+                f"the class went unchecked — read {beside} for what the deck "
+                f"ran")
+    return (f"DRC category '{cat}' is not named in the report(s) this audit was "
+            f"scoped to ({where}), and no tool log beside them names it either. "
+            f"Whether the deck has a rule of this class cannot be decided from "
+            f"these artefacts")
+
+
 def _check_drc(project_dir: Path) -> AuditResult:
     result = AuditResult(program="eda_report_audit:drc", passed=False)
     # `.lyrdb` IS THE KLAYOUT REPORT DATABASE, and this audit already knows how
@@ -1879,7 +1964,8 @@ def _check_drc(project_dir: Path) -> AuditResult:
         if cat not in cats_found:
             result.findings.append(Finding(
                 rule="DRC_CATEGORY_PRESENT", severity="WARNING",
-                message=f"DRC category '{cat}' not found in reports",
+                message=_category_absence_message(cat, regex, files,
+                                                  project_dir),
                 file=best_file))
     if not cats_found:
         result.findings.append(Finding(
