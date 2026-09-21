@@ -80,6 +80,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import _structural_absence as _sa  # R-0915-119
+
+PROGRAM_NAME = "frame_end_detection_check"
 from gate_utils import find_rtl_files as _rtl_files
 from gate_utils import read_text as _read
 
@@ -251,6 +253,16 @@ def main() -> int:
     print(f"=== frame_end_detection_check ({project.name}) ===")
     if summary["skipped_reason"]:
         print(f"  [skipped] {summary['skipped_reason']}")
+        # R-0915-119 — THE EVIDENCE MUST TRAVEL ON STDOUT TOO. MEASURED on
+        # run25: the P0 umbrella invokes this checker with NO `--json`, so
+        # `_command_json_report` finds nothing and the typed class in the
+        # report is never read. Without this line the umbrella sees only
+        # `[skipped] ...`, which is a clue and not a declaration, and books
+        # EXECUTION_ERROR. `_structural_absence.sentence()` is the one writer
+        # of the accepted shape, and it carries the enumeration.
+        if _sa.is_valid(summary.get(_sa.EVIDENCE_KEY)):
+            print("  " + _sa.sentence(summary[_sa.EVIDENCE_KEY],
+                                      PROGRAM_NAME))
         return 2
     if not findings:
         print(f"  [PASS] {len(summary['rx_modules'])} rx module(s); "

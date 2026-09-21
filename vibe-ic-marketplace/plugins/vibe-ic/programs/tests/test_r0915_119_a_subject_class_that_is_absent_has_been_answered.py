@@ -273,6 +273,33 @@ def test_a_design_that_HAS_a_tx_module_is_still_examined(tmp_path):
     assert cp.returncode != 2 or not report["summary"].get("skipped"), report
 
 
+@pytest.mark.parametrize("mod", PROJECT_CHECKERS + RTL_DIR_CHECKERS)
+def test_the_evidence_travels_on_stdout_when_no_report_is_asked_for(
+        mod, tmp_path):
+    """R-0915-119, MEASURED on run25: the P0 umbrella invokes these checkers
+    with NO `--json`, so `_command_json_report` finds nothing and the typed
+    class in the report is never read. With only the banner on stdout the
+    umbrella booked all seven EXECUTION_ERROR — the run proved the report
+    channel alone is not enough. Both channels now carry the enumeration."""
+    p = _project(tmp_path, PLAIN_RTL)
+    arg = p if mod in PROJECT_CHECKERS else p / "phase2" / "stage1" / "rtl"
+    cp = _run(mod, [arg])                      # no --json on purpose
+    assert CLS in cp.stdout, cp.stdout
+    assert T.infer_nonverdict_reason(message=cp.stdout) == CLS
+
+
+@pytest.mark.parametrize("mod", PROJECT_CHECKERS + RTL_DIR_CHECKERS)
+def test_stdout_says_nothing_structural_when_the_input_is_unreadable(
+        mod, tmp_path):
+    """The same channel, fail-closed: nothing to enumerate prints no claim."""
+    empty = tmp_path / "empty"
+    (empty / "phase2" / "stage1" / "rtl").mkdir(parents=True)
+    arg = empty if mod in PROJECT_CHECKERS else empty / "phase2/stage1/rtl"
+    cp = _run(mod, [arg])
+    assert CLS not in cp.stdout, cp.stdout
+    assert T.infer_nonverdict_reason(message=cp.stdout) != CLS
+
+
 # ── 4. the seventh: guard (ii) is the whole of the distinction ────────────
 def _l4_project(tmp_path: Path, fields) -> Path:
     p = tmp_path / "l4proj"

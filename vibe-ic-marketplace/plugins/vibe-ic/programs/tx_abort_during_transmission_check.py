@@ -245,6 +245,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                    if _vx.summary_is_skipped(result.summary) else "PASS")
         print(f"\n{len(errors)} error(s); verdict: {verdict}")
 
+    # R-0915-119 — the evidence must travel on STDOUT too. MEASURED on run25:
+    # the P0 umbrella invokes this checker with no `--json`, so the typed
+    # class in the report is never read and the umbrella sees only the
+    # VACUOUS banner — a clue, not a declaration — and books EXECUTION_ERROR.
+    # Printed on EVERY route, including the `--json` one, because the
+    # umbrella reads stdout either way.
+    if _sa.is_valid((result.summary or {}).get(_sa.EVIDENCE_KEY)):
+        print(_sa.sentence(result.summary[_sa.EVIDENCE_KEY], result.program))
+
     # #515 — routed from the gate's OWN `summary["skipped"]`, never from the
     # printed text. `no_tx_modules` is the dominant outcome across the tracked
     # corpus (320 of 327 project roots); every one of those was being counted
