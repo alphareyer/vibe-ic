@@ -87,13 +87,18 @@ def test_the_seed_precedes_the_measurement():
 
 
 # ── the coverage repair itself ────────────────────────────────────────────
-def test_the_window_search_runs_both_ways_to_the_pdk_tap_distance():
-    """The coverage rule is a WINDOW around the anchor, not its own site."""
-    deck = R._build_welltie_coverage_repair_tcl(_pdk())
+def test_the_window_search_runs_both_ways_to_the_coverage_radius():
+    """The coverage rule is a WINDOW around the anchor, not its own site.
+
+    The window's SIZE was corrected by R-0915-106(b): the PDK's number is a
+    PITCH, so the radius is pitch/2. The both-directions search this test was
+    written to protect is unchanged.
+    """
+    deck = R._build_welltie_coverage_repair_tcl(_pdk(), 20.0, "x")
     assert "foreach _wtsgn {1 -1}" in deck, "both directions"
-    assert "set _wtmaxk [expr {$_wtd / $_wtsw}]" in deck, \
-        "the window is the PDK tap distance in sites"
-    assert "if {abs($_wtx - $_wtcx) > $_wtd} { continue }" in deck
+    assert "set _wtmaxk [expr {$_wtrad / $_wtsw}]" in deck, \
+        "the window is the coverage RADIUS in sites"
+    assert "> $_wtrad} { continue }" in deck
 
 
 def test_a_site_already_occupied_is_skipped_not_overwritten():
@@ -103,11 +108,16 @@ def test_a_site_already_occupied_is_skipped_not_overwritten():
 
 
 def test_coverage_is_measured_centre_to_centre():
-    """`_wttie` holds each tie's xMin and `_wtcx` is the anchor's CENTRE."""
-    deck = R._build_welltie_coverage_repair_tcl(_pdk())
-    assert "abs([expr {$_wtt + $_wttw / 2}] - $_wtcx) <= $_wtd" in deck
-    assert "if {abs($_wtt - $_wtcx) <= $_wtd}" not in deck, \
-        "the old edge-against-centre comparison is gone"
+    """`_wttie` holds each tie's xMin and `_wtcx` is the anchor point.
+
+    One coordinate convention, as before; the bound it is compared against
+    became the radius under R-0915-106(b).
+    """
+    deck = R._build_welltie_coverage_repair_tcl(_pdk(), 20.0, "x")
+    # R-0915-108 precomputes the tie CENTRES once into `_wtc`, so the
+    # predicate reads centre-against-centre without repeating the arithmetic.
+    assert "lappend _wtc [expr {$_wtt + $_wttw / 2}]" in deck
+    assert "abs($_wtt - $_wtcx) <= $_wtrad" in deck
 
 
 def test_an_unplaceable_anchor_says_why_not_only_where():
