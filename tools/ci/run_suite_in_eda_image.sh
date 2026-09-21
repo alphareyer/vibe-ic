@@ -720,7 +720,7 @@ if _u.find_spec(\"pytest_timeout\") is not None:
                      \"@pytest.mark.timeout(...) bounds are ACTIVE\\n\")
 else:
     # COUNTED FROM THE AST, NOT FROM A GREP. A regex over the source counts
-    # every `mark.timeout(` in a COMMENT or a DOCSTRING too, and this suite
+    # every mark.timeout( in a COMMENT or a DOCSTRING too, and this suite
     # discusses the marker in prose far more often than it uses one: the grep
     # says 49 in 22 files, the AST says 27 call sites in 4. Publishing the
     # grep number would put a figure in a DISCLOSURE that is three times the

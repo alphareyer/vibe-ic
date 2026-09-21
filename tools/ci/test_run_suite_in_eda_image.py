@@ -667,6 +667,42 @@ def test_the_declaration_never_stops_the_run(tmp_path):
     assert "sys.stdout" not in _shipped_timeout_probe()
 
 
+def test_the_precondition_probe_carries_no_bash_active_characters():
+    """A REGRESSION OF MY OWN, landed in #2445 and caught here.
+
+    The probe is a python program written inside a bash DOUBLE-QUOTED word, so
+    bash expands it before python ever sees it. A backtick opens a command
+    substitution and `$` opens a parameter expansion -- in TEXT THAT LOOKS LIKE
+    AN INERT COMMENT. #2445 added the explanatory line
+
+        # every `mark.timeout(` in a COMMENT or a DOCSTRING too, ...
+
+    and every harness run on the fleet then printed, to stderr, before a single
+    test:
+
+        bash: command substitution: line 53: syntax error near unexpected token `newline'
+        bash: command substitution: line 53: `mark.timeout('
+
+    The disclosure itself still printed and the census was right, so nothing
+    went red and nothing said so -- which is exactly why this is pinned by a
+    test rather than by care. A backtick inside that word is not a style
+    question: bash RUNS what is between them, and the next one may sit in code
+    rather than in a comment.
+    """
+    probe = _shipped_timeout_probe()
+    # `_shipped_timeout_probe` has already undone bash's escaping, so anything
+    # left here is what bash would have acted on.
+    assert "`" not in probe, (
+        "backtick(s) in the precondition probe: bash opens a command "
+        "substitution inside the double-quoted word this program is written "
+        "in. Offending line(s): "
+        + repr([l for l in probe.splitlines() if "`" in l]))
+    assert "$" not in probe, (
+        "`$` in the precondition probe: bash expands it inside the "
+        "double-quoted word. Offending line(s): "
+        + repr([l for l in probe.splitlines() if "$" in l]))
+
+
 def test_a_pattern_valued_option_is_not_read_as_a_selector():
     """THE FALSE-REFUSAL CONTROL. `--ignore-glob` takes a PATTERN, and a pattern
     that looks like a path must not be adjudicated as one — a check that refuses
