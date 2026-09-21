@@ -1,35 +1,45 @@
 """vibe-ic#2118 — `_effective_deliverable`'s whole truth table.
 
-THE DEFECT. c34f56d2a (v1.22.13, #2376, 2026-09-20) replaced this resolver's
-trailing `return derived` with `return None` and added an early
-`if not path.exists(): return derived`, so the derivation survived only for a
-MISSING declaration file. Its purpose was sound -- "an unreadable or unattested
-declaration must not regain its refused value through an old router marker" --
-but it reached one case too far: a declaration template that EXISTS and that
-NOBODY HAS ANSWERED YET is neither unreadable nor unattested, and there is no
-refused value to regain.
+RE-PINNED TO R-0915-95 (icrev1, 2026-09-21), NOT WEAKENED. This file was
+written to restore the derivation for one case -- a declaration that EXISTS and
+that NOBODY HAS ANSWERED YET -- on the ground that such a template is neither
+unreadable nor unattested, so #2376 had "reached one case too far". The owner
+ruling it collided with is the one that took `deliverable` off the derivable
+list altogether, and the collision was not seen when this landed: this file's
+own commit message dates the counterpart test file to f5a237d21 (2026-09-07),
+"thirteen days before the landing that reddened it", while
+`test_hardmacro_delivery_ships_no_die_seal_ring.py` had in fact been re-pinned
+to the ruling seventeen hours earlier, in 58ca26548 (2026-09-20 23:11). Since
+then the tree has failed its own rule: two landed tests asserted opposite
+values for one call, and the census carries it as cause C11
+(`assert 'HARDMACRO' is None`).
 
-WHAT THAT COST, measured on this tree before the fix: for a fresh project
-`publish_tapeout_declarations` derived `deliverable` and PUBLISHED it, then said
-of the size rectangle in the very same call
+WHAT THE RE-MEASUREMENT SHOWED, on cbca058b3, 8HD-d, image 0.3.67:
 
-    die_area_um   `deliverable` is NOT_DETERMINED, so whether this run's
-                  rectangle is a die or a macro is not known and neither name
-                  is published
-    macro_area_um (the same)
+  * THE GROUND DOES NOT HOLD. `derived` at the publisher's call site is
+    `_declared_deliverable`, whose only surviving authority is
+    `_ppa/delivery_path` -- a route read from WHICH ROUTER ARTEFACT IS ON DISK.
+    Under a silent declaration the value handed back is therefore the old
+    router marker itself, which is the one thing #2376 exists to refuse. Driven
+    directly: silent declaration with no router artefact -> (None, "the
+    delivery route is NOT_DETERMINED"); the same tree plus
+    `input/submission_template/slots/*.yaml` -> DIE; plus
+    `input/submission_template/NO_TEMPLATE.txt` -> HARDMACRO. The "fresh
+    template" case and the "stale marker" case are the same case.
 
-so `published` came back as ['deliverable', 'top_cell'] and `KLayout.CheckSize`
-was starved of both fields it needs, on every DIE and every HARDMACRO whose
-declaration had not been hand-answered.
+  * THE STATED CONSEQUENCE DOES NOT ARRIVE. This file's premise was that the
+    publisher would then name the size rectangle "on every DIE and every
+    HARDMACRO whose declaration had not been hand-answered -- which is the
+    normal state of a fresh run". Driven WITH the change in place against a
+    real fresh project and the REAL `_declared_deliverable` (the publisher
+    case below monkeypatches that function), `published` came back
+    `['top_cell']` with `die_area_um` and `macro_area_um` both in
+    `not_determined` -- the very symptom the change was for.
 
-WHY `attestation_of` AND NOT `is_answered`. `answer()` returns NOT_DETERMINED
-for BOTH silence and an owner answer with no citation, so `is_answered` alone
-cannot tell the fresh template from the value #2376 refuses. `attestation_of` is
-this tree's ONE reader of "who answered and does that count" and it separates
-them: `ANSWERED_BY_MISSING` is silence; anything else with `declares` False is
-an answer that does not declare, and that one still refuses. `raw_answer` shows
-the difference too and says of itself that it is for disclosure only and never
-for a decision, so it is not used.
+WHAT IS KEPT, and it is most of the file: #2376's refusal of an unattested
+answer, #2425's refusal of an answer with no provenance map at all, the
+unreadable case, and the no-file case. Only the two SILENT-declaration
+assertions move, and they move to the ruling.
 """
 import json
 import sys
@@ -82,15 +92,25 @@ def test_no_declaration_file_uses_the_derivation(tmp_path):
     assert r._effective_deliverable(tmp_path, _DERIVED) == _DERIVED
 
 
-def test_a_template_nobody_answered_uses_the_derivation(tmp_path):
-    """THE RED. Silence is not a refused value."""
+def test_a_template_nobody_answered_is_not_answered_by_the_derivation(tmp_path):
+    """R-0915-95: silence is not an answer, and no derivation fills it.
+
+    The fixture checks below are UNCHANGED -- this really is the silent shape,
+    distinguishable from the two refusals -- and only the verdict moves. Under
+    a silent declaration the `derived` value can only have come from a router
+    artefact on disk, so returning it is returning the old marker.
+    """
     _silent(tmp_path)
     assert td.answer(td.load(tmp_path / td.DECLARATION_REL)[0],
                      "deliverable") == td.NOT_DETERMINED
     assert (td.attestation_of(td.load(tmp_path / td.DECLARATION_REL)[0],
                               "deliverable")["answered_by"]
             == td.ANSWERED_BY_MISSING), "the fixture is not silent"
-    assert r._effective_deliverable(tmp_path, _DERIVED) == _DERIVED
+    assert r._effective_deliverable(tmp_path, _DERIVED) is None
+    # BOTH derivations, so this cannot pass for a function that merely ignores
+    # one particular value.
+    assert r._effective_deliverable(tmp_path, _OTHER) is None
+    assert r._effective_deliverable(tmp_path, None) is None
 
 
 def test_an_attested_answer_outranks_the_derivation(tmp_path):
@@ -147,15 +167,26 @@ def test_an_unreadable_declaration_refuses(tmp_path):
 
 
 # ── and the consequence the publisher cares about ───────────────────────────
-def test_a_silent_declaration_still_gets_its_size_rectangle(tmp_path,
-                                                            monkeypatch):
-    """The end the resolver is a means to: with the deliverable derived, the
-    publisher names the rectangle instead of declining both names."""
+def test_a_silent_declaration_gets_NEITHER_name_even_with_a_route_stated(
+        tmp_path, monkeypatch):
+    """The consequence at the publisher, and it is the sibling file's own rule.
+
+    That file's header already says an undeclared deliverable "publishes
+    NEITHER -- choosing one name would be a guess wearing a derivation's
+    clothes", and the publisher says the same thing in a comment at the call
+    site. This pins it against the strongest available contrary input: the
+    route is STATED through the `_declared_deliverable` mock and the
+    declaration is still silent, so nothing but the declaration can settle it.
+
+    The declared arms of that rule -- a HARDMACRO publishing `macro_*` and a
+    DIE publishing `die_*` -- are in the sibling file and are unchanged; they
+    now declare the deliverable in the fixture instead of relying on the mock.
+    """
     from test_issue2118_a_hardmacro_has_no_die_to_declare import (
         _publisher_project, _publish)
-    project = _publisher_project(tmp_path)
+    project = _publisher_project(tmp_path)          # silent, deliverable=None
     rec = _publish(project, monkeypatch, td.DELIVERABLE_HARDMACRO)
-    assert "macro_area_um" in rec["published"], rec["not_determined"]
-    assert "die_area_um" in rec["not_determined"]
-    why = rec["not_determined"]["die_area_um"]
-    assert "2118" in why and td.DELIVERABLE_HARDMACRO in why, why
+    for key in ("macro_area_um", "macro_origin_um",
+                "die_area_um", "die_origin_um"):
+        assert key not in rec["published"], rec["published"]
+        assert "not known" in rec["not_determined"][key], rec["not_determined"]

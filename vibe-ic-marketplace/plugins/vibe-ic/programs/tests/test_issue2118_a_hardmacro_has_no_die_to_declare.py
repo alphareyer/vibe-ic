@@ -59,10 +59,27 @@ class _Pdk:
     cell_gds = ""
 
 
-def _publisher_project(tmp_path: Path) -> Path:
+def _publisher_project(tmp_path: Path, deliverable: str | None = None) -> Path:
+    """The tree the publisher runs on, with the delivery DECLARED.
+
+    `deliverable` is written as an OWNER-ATTESTED answer, because that is the
+    state every project reaching this publisher is in: since R-0915-95 step
+    0.5ic HALTS until the owner answers it, and `_effective_deliverable` reads
+    the declaration's own answer. The fixture used to leave the declaration
+    blank and state the route through the `_declared_deliverable` mock alone,
+    so the two positive cases below were measuring the DERIVATION rather than
+    the declaration -- and this file's own header says an undeclared deliverable
+    publishes neither name. `deliverable=None` keeps exactly that blank tree for
+    the undeclared case, which is the one test that wants it.
+    """
     (tmp_path / "input" / "submission_template").mkdir(parents=True)
-    (tmp_path / td.DECLARATION_REL).write_text(
-        json.dumps(td.blank_declaration(), indent=2))
+    doc = td.blank_declaration()
+    if deliverable is not None:
+        doc.setdefault("answers", {})["deliverable"] = deliverable
+        doc.setdefault(td.PROVENANCE_KEY, {})["deliverable"] = {
+            "answered_by": td.ANSWERED_BY_OWNER_VALUE,
+            "citation": "the owner's delivery answer at step 0.5ic — fixture"}
+    (tmp_path / td.DECLARATION_REL).write_text(json.dumps(doc, indent=2))
     (tmp_path / "phase3" / "stage3" / "pnr").mkdir(parents=True)
     (tmp_path / "phase3" / "stage3" / "pnr" / "routed.def").write_text(_DEF)
     r._floorplan_rectangles_record(
@@ -90,7 +107,7 @@ def _publish(project, monkeypatch, deliverable):
 
 def test_a_hardmacro_publishes_a_macro_box_and_refuses_the_die_pair_by_name(
         tmp_path, monkeypatch):
-    project = _publisher_project(tmp_path)
+    project = _publisher_project(tmp_path, td.DELIVERABLE_HARDMACRO)
     rec = _publish(project, monkeypatch, td.DELIVERABLE_HARDMACRO)
 
     assert "macro_area_um" in rec["published"], rec
@@ -116,7 +133,7 @@ def test_a_hardmacro_publishes_a_macro_box_and_refuses_the_die_pair_by_name(
 def test_a_die_publishes_exactly_what_it_always_did(tmp_path, monkeypatch):
     """The control. A change that fixed the macro by disturbing the die would
     be a different defect, so the die arm is pinned to the same values."""
-    project = _publisher_project(tmp_path)
+    project = _publisher_project(tmp_path, td.DELIVERABLE_DIE)
     rec = _publish(project, monkeypatch, td.DELIVERABLE_DIE)
 
     assert "die_area_um" in rec["published"] and "die_origin_um" in rec["published"]

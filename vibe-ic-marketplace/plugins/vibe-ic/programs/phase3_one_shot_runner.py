@@ -41221,42 +41221,59 @@ def _effective_deliverable(project: Path,
             got = _td.answer(doc, "deliverable")
             if _td.is_answered(got):
                 return str(got).strip().upper()
-            # SILENCE IS NOT A REFUSED VALUE (vibe-ic#2118, and the half of
-            # #2376 that reached one case too far). #2376 replaced this
-            # function's trailing `return derived` with `return None` so that
-            # an unreadable or UNATTESTED declaration could not regain its
-            # refused value through an old router marker. A template nobody has
-            # answered yet is neither of those: there is no value to regain, and
-            # the publisher's own ordering says the derivation is the fall-back
-            # when the declaration has not spoken.
+            # SILENCE IS NOT AN ANSWER, AND NO DERIVATION FILLS IT
+            # (R-0915-95, the owner ruling of 2026-09-17). A declaration that
+            # EXISTS and does not answer falls through to `return None` below,
+            # exactly as an unreadable or an unattested one does.
             #
-            # WHICH READER DRAWS THAT LINE, and the one I got wrong first.
-            # #2425 used `attestation_of(doc, "deliverable")["answered_by"] ==
-            # ANSWERED_BY_MISSING`. That asks about the PROVENANCE MAP, not
-            # about whether an answer exists: a declaration carrying
-            # `{"answers": {"deliverable": "HARDMACRO"}}` and NO provenance at
-            # all reports `answered_by=missing`, so an UNATTESTED answer was
-            # read as silence and regained its value through the router marker.
-            # That is the precise hole #2376 had closed, reopened from the other
-            # side, and `test_refused_declaration_cannot_fall_back_to_ip_marker`
-            # is what caught it.
+            #   no declaration FILE  -> the derivation (the early exit above)
+            #   answered + attested  -> that answer (returned above)
+            #   answered, unattested -> None; #2376's refusal, unweakened
+            #   unanswered (silent)  -> None
             #
-            # `owner_attestation_refusals` is the reader whose whole purpose is
-            # this line, and it draws it where the module's own words do: it
-            # refuses ONLY a question that IS answered and whose attestation
-            # does not declare ("a value that LOOKS like a declaration, routes
-            # like one, and was not declared by anybody entitled to declare
-            # it"), and it deliberately says nothing about an unanswered one,
-            # "the reason a blank declaration is still a legal one".
+            # THE CASE THIS RESTORES was removed by #2118 (54e9c86e1,
+            # 2026-09-21) on the ground that "a template nobody has answered
+            # yet" is neither unreadable nor unattested, so there is no refused
+            # value to regain. MEASURED on cbca058b3, and the ground does not
+            # hold, because of WHERE `derived` comes from. The publisher's
+            # `derived` is `_declared_deliverable`, whose only surviving
+            # authority is `_ppa/delivery_path` -- a route read from WHICH
+            # ROUTER ARTEFACT IS ON DISK. So under a silent declaration the
+            # value handed back here IS the old router marker, which is the one
+            # thing #2376 exists to refuse. The two cases are not adjacent; they
+            # are the same case:
             #
-            #   answered + attested  -> returned above
-            #   answered, unattested -> REFUSED here, never the derivation
-            #   unanswered (silent)  -> the derivation, which is the fall-back
-            #                           the publisher's own ordering names
-            _refused = {r.get("key")
-                        for r in _td.owner_attestation_refusals(doc)}
-            if "deliverable" not in _refused:
-                return derived
+            #   silent declaration, no router artefact
+            #       _declared_deliverable -> (None, "the delivery route is
+            #       NOT_DETERMINED, so the flow has not said what leaves it")
+            #   silent declaration + `input/submission_template/slots/*.yaml`
+            #       -> ('DIE',  "the flow's own delivery route ...")
+            #   silent declaration + `input/submission_template/NO_TEMPLATE.txt`
+            #       -> ('HARDMACRO', "the flow's own delivery route ...")
+            #
+            # AND #2118'S STATED CONSEQUENCE DOES NOT ARRIVE. It says the
+            # publisher then names the size rectangle "on every DIE and every
+            # HARDMACRO whose declaration had not been hand-answered -- which is
+            # the normal state of a fresh run". Driven on cbca058b3 WITH #2118's
+            # change in place, against a real fresh project and the REAL
+            # `_declared_deliverable` (its own test monkeypatches that function
+            # to state the route):
+            #
+            #   _declared_deliverable -> None
+            #   published             -> ['top_cell']
+            #   die_area_um, macro_area_um -> both in `not_determined`
+            #
+            # i.e. on a genuinely fresh run `derived` is None and the rectangle
+            # is unpublished either way. The only trees the removed branch moves
+            # are the ones carrying a router artefact beside a declaration that
+            # answers nothing -- a reset declaration and a stale marker.
+            #
+            # The publisher's own words at that call site say the same thing:
+            # "publishing both names would be this run asserting a die AND a
+            # macro, and choosing one would be a guess wearing a derivation's
+            # clothes". This function's docstring was never changed to match
+            # #2118 either; it still says the derivation applies ONLY when there
+            # is no declaration, which is again what the code does.
     except Exception:                                          # noqa: BLE001
         pass
     return None
