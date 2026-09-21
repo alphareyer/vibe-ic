@@ -56,9 +56,23 @@ def test_a_terminal_on_no_net_is_refused_by_name():
 
 
 def test_a_terminal_that_overlaps_no_rail_is_refused_by_name():
-    """(c) — a cell placed off the rails owes PDN work, not routing."""
+    """(c) — a cell placed off the rails owes PDN work, not routing.
+
+    R-0915-120 REFINED WHICH TERMINALS THAT IS, NOT WHAT HAPPENS TO THEM. The
+    refusal used to read "(no rail overlap)". A rail is not a pad ring's only
+    abutment partner: MEASURED on int8 (subservient x gf180mcuD as a DIE), of
+    187948 PG terminals 1416 overlapped no rail, every one of them a pad-ring
+    cell in the 393 um band the core PDN correctly does not reach, and 1416 of
+    1416 abutted a same-net PG terminal on another instance — a 100% false
+    refusal that cost that run its routed.def. So the phrase is now "(no rail
+    overlap and no same-net neighbour)": the SET shrank to the terminals that
+    really are floating, and what the block does with them is unchanged — it
+    names them and calls them PDN work, it does not route.
+
+    See `test_r0915_120_a_pad_reaches_its_net_by_its_neighbour.py`, which
+    drives the new clause in both directions."""
     tcl = _pg_block()
-    assert "(no rail overlap)" in tcl
+    assert "(no rail overlap and no same-net neighbour)" in tcl
     assert "that is PDN work" in tcl
     assert "not signal routing" in tcl
 
