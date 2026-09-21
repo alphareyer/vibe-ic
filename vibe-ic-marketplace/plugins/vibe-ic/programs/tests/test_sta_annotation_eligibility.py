@@ -21,7 +21,7 @@ def case(scene,monkeypatch):
   if state['kind']=='unconnected':body+='STA_UNCONNECTED_OUTPUT core_inst/P\n'
   body+='Found 1 unannotated drivers.\n core_inst/P\nFound 0 partially unannotated drivers.\nworst slack max 1\ntns max 0\n'
   body+=f'=== HOLD corner: process={c} ===\nworst slack min 1\ntns min 0\n'
-  out=Path(kw['outputs'][0]);out.parent.mkdir(parents=True,exist_ok=True)
+  out=Path(kw['isolate'][0]);out.parent.mkdir(parents=True,exist_ok=True)
   with out.open('w' if len(s['calls'])==1 else 'a') as f:f.write(body)
   return 0,'',''
  monkeypatch.setattr(p3,'_docker_exec',run)

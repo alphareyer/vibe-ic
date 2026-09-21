@@ -29,7 +29,7 @@ def scene(tmp_path, monkeypatch):
     calls=[]; mode={'rc':0,'omit':False,'negative':False,'omit_census':False}
     def run(container,cmd,**kw):
         text=Path(kw['marker']).read_text();calls.append(text)
-        out=Path(kw['outputs'][0]);out.parent.mkdir(parents=True,exist_ok=True)
+        out=Path(kw['isolate'][0]);out.parent.mkdir(parents=True,exist_ok=True)
         # Only emulate native reports for sections actually requested by Tcl.
         import re
         sections=re.findall(r'=== (SETUP|HOLD) corner: process=(\w+)',text)
