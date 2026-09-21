@@ -655,6 +655,12 @@ def resolve_io_library_views(
         pdk: Optional[str]) -> Tuple[List[Path], List[Path], str, str]:
     """Resolve one identity-bound IO library for this audit.
 
+    W5/15.5ic: every PDK question below goes through `_pad_ring`'s environment
+    seam, so it is asked of the container this run's tools use when phase 3
+    published one. An UNREACHABLE container raises OSError there rather than
+    answering "absent", and this function turns that into its own `why` so the
+    caller can say which of the two happened. See `_pad_ring._ask`.
+
     Precedence is explicit LEFs, then an explicitly/natively named PDK.  When
     only an unnamed root is available, the root may contain several unrelated
     processes; in that case this run's recorded-and-reparsed LEFs are the only
@@ -665,6 +671,26 @@ def resolve_io_library_views(
         lefs = [Path(p) for p in io_lef]
         return (lefs, io_site_declarations_for_lefs(lefs),
                 "explicit --io-lef", "")
+
+    try:
+        return _resolve_from_pdk(project, producer, pdk_root, pdk)
+    except OSError as exc:
+        # THE CONTAINER THE RUN USES WAS SELECTED AND COULD NOT BE REACHED.
+        # An unknown, and a different fact from "this PDK ships no IO library"
+        # -- which is what a host-only read reported about a PDK that was simply
+        # inside the image. The caller prints this reason beside its finding, so
+        # the two are never confused again.
+        return [], [], "", (
+            f"the PDK could not be read where this run's tools run ({exc}); "
+            f"nothing here looked at an IO library, so this is not a finding "
+            f"about what the PDK ships")
+
+
+def _resolve_from_pdk(project: Path, producer: Dict[str, Any],
+                      pdk_root: Optional[str], pdk: Optional[str]
+                      ) -> Tuple[List[Path], List[Path], str, str]:
+    """`resolve_io_library_views` minus the explicit-LEF case, so the PDK
+    questions it asks sit inside one `try` the caller owns."""
 
     # A CLI PDK is caller-owned identity and wins.  Ambient PDK is only a
     # process default: the canonical gate command has no --pdk and may inherit
