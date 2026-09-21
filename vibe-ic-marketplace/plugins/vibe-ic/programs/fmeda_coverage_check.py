@@ -11,9 +11,19 @@ written `verdict`/`ge_floor`. A report that claims PASS while its own counts say
 DC < floor is caught (recomputed verdict wins), and a report that claims a DC
 while `baseline_valid=false` is FAILed (a bogus measurement is not a pass).
 
-  * NOT_APPLICABLE (applicable=false)  → VACUOUS PASS (exit 0). This step only
-    fires for designs that DECLARE a safety mechanism; a non-safety design must
-    skip, never fail.
+  * NOT_APPLICABLE (applicable=false)  → not a verdict. This step only fires
+    for designs that DECLARE a safety mechanism; a non-safety design must skip,
+    never fail. WHICH kind of skip is mirrored from the producer's own report,
+    never re-derived here: when that report carries a valid R-0915-119
+    `structural_absence` record — the RTL was read, its modules enumerated and
+    none of them is a safety mechanism — this gate states the same
+    NOT_APPLICABLE_BY_STRUCTURE with the same enumeration and exits 2 (the
+    non-verdict-candidate code). Every other inapplicable shape — an input
+    nobody read, a mechanism found with no encoder, a missing report — keeps
+    the disclosed VACUOUS PASS at exit 0. Mirroring rather than re-deriving is
+    the point: two gates of one step must not hold two opinions about one
+    design, and a second scanner is a second answer waiting to disagree with
+    the first.
   * applicable=true → recompute DC = detected/injected, compare to the resolved
     ASIL floor, require baseline_valid. Mismatch with the written verdict is
     reported and the RECOMPUTED verdict is authoritative.
@@ -26,12 +36,14 @@ USAGE
       [--min-dc <pct>] [--require] [--json <out>]
 
 EXIT
+  2 — the R-0915-119 decided state, mirrored from the producer's report, or an
+      IO / argument error. Both are NON-VERDICT CANDIDATES the consumer
+      classifies from the report, never from the number alone.
   0 — recomputed PASS, or a DISCLOSED vacuous/soft skip. A vacuous exit prints
       a LINE-START `VACUOUS_PASS:` token — the rc-0 disclosure channel
       `flow_compliance_check._stdout_signals_vacuous` reads — so the step
       resolves to the VACUOUS_PASS tier instead of the plain PASS bucket.
   1 — recomputed FAIL (DC < floor, invalid baseline, or fabricated verdict)
-  2 — IO / argument error
 """
 from __future__ import annotations
 
@@ -45,6 +57,7 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 import _path_layout as _pl  # noqa: E402
+import _structural_absence as _sa  # noqa: E402  R-0915-119
 import fmeda_fault_injection_coverage as fi  # noqa: E402
 
 
@@ -52,6 +65,22 @@ def check(report: dict, asil_override: Optional[str],
           min_dc: Optional[float]) -> dict:
     """Recompute the verdict from raw counts. Pure — the authoritative gate."""
     if not report.get("applicable", False):
+        # THE PRODUCER'S OWN ENUMERATION, MIRRORED — not a second scan. If it
+        # established that the design's modules were walked and none is a
+        # safety mechanism, this gate says the same thing with the same
+        # evidence; if it established nothing, so does this. `evidence_of`
+        # re-validates the record (guards (i) and (ii)) before it is repeated,
+        # so a report carrying only the class token, a malformed enumeration,
+        # or a subject that was FOUND cannot borrow the decided state here.
+        _absence = _sa.evidence_of(report)
+        if _absence is not None:
+            out = {"gate": "fmeda_coverage_check",
+                   "verdict": "NOT_APPLICABLE", "passed": True,
+                   "reason": _sa.sentence(
+                       _absence, "FMEDA diagnostic coverage (recomputed)"),
+                   "mirrored_from": "fmeda_fault_injection_coverage"}
+            _sa.attach(out, _absence)
+            return out
         return {"gate": "fmeda_coverage_check", "verdict": "VACUOUS_PASS",
                 "passed": True,
                 "reason": report.get("reason", "no safety mechanism — N/A")}
@@ -123,11 +152,21 @@ def main(argv=None) -> int:
             return 2
         res = check(report, args.asil, args.min_dc)
         rc = 0 if res["passed"] else 1
+        if _sa.evidence_of(res) is not None:
+            # DECIDED, not vacuous: rc 2 is the only channel that carries a
+            # reason class to `flow_compliance_check`.
+            rc = fi.RC_NON_VERDICT
 
     if args.json:
         Path(args.json).parent.mkdir(parents=True, exist_ok=True)
         Path(args.json).write_text(json.dumps(res, indent=2) + "\n")
-    if res["verdict"] == "VACUOUS_PASS":
+    _absence = _sa.evidence_of(res)
+    if _absence is not None:
+        # Printed ALONE and LAST — R-0915-119's stdout channel, bounded so it
+        # lands whole in the consumer's `stdout[-300:]` window — and never
+        # beside the `VACUOUS_PASS:` token, which makes the opposite claim.
+        print(_sa.sentence(_absence, "FMEDA diagnostic coverage (recomputed)"))
+    elif res["verdict"] == "VACUOUS_PASS":
         # DISCLOSED SKIP. The report already self-declared
         # `verdict="VACUOUS_PASS"`, but no consumer opens the report file, and
         # the old line started `[PASS] fmeda_coverage_check: VACUOUS_PASS ...`

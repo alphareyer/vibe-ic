@@ -21,6 +21,7 @@ from pathlib import Path
 
 PROG_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROG_DIR))
+import _structural_absence as _sa  # noqa: E402
 import fmeda_fault_injection_coverage as fi          # noqa: E402
 import fmeda_coverage_check as gate                  # noqa: E402
 import ci_harness_timeout_ceiling_check as ceiling_check   # noqa: E402
@@ -484,6 +485,19 @@ def test_rtl_with_no_mechanism_keeps_its_honest_not_applicable(tmp_path):
     """The control for the test above: RTL that WAS read and declares no
     safety mechanism still answers NOT_APPLICABLE. The two must not collapse
     into one verdict, or the disclosure carries no information.
+
+    THE EXIT CODE MOVED, DELIBERATELY (R-0915-119, lane icgate1 2026-09-21),
+    and the claim above is UNCHANGED — the verdict assertion is still here and
+    still distinguishes this from `UNMEASURED_NO_RTL_READ`. What is added is
+    the reason this branch differs from that one at all: the modules WERE
+    enumerated and none is a safety mechanism, so the design has been
+    ANSWERED. Only rc 2 — the repo's non-verdict-candidate code — reaches
+    `flow_compliance_check`'s classified channel, which is the only channel
+    that carries a reason class; at rc 0 the step landed on
+    `NOT_MEASURED(no_population)` on every non-safety design. The assertions
+    below are therefore STRICTLY STRONGER than the `rc == 0` they replace:
+    the exit code is pinned to a named constant AND the enumeration behind it
+    is pinned too.
     """
     rtl = tmp_path / "phase2" / "stage1" / "rtl"
     rtl.mkdir(parents=True)
@@ -491,8 +505,13 @@ def test_rtl_with_no_mechanism_keeps_its_honest_not_applicable(tmp_path):
         "module adder(input [7:0] a, input [7:0] b, output [8:0] s);"
         " assign s=a+b; endmodule\n")
     rc, rep = fi.run(tmp_path, _Args())
-    assert rc == 0, rep
+    assert rc == fi.RC_NON_VERDICT, rep
     assert rep["verdict"] == "NOT_APPLICABLE", rep
+    assert rep["verdict"] != "UNMEASURED_NO_RTL_READ", rep
+    ev = _sa.evidence_of(rep)
+    assert ev is not None, rep
+    assert ev["scanned"] >= 1 and ev["found"] == 0, ev
+    assert "adder" in ev["scanned_names"], ev
 
 
 def test_the_vacuous_token_line_survives_the_consumers_stdout_window(tmp_path):

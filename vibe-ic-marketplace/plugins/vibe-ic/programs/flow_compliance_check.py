@@ -106,6 +106,7 @@ import _sim_results_bridge as _srb
 import _sta_supersession                          # R-0915-28 (amended)
 import _gate_invocation
 import _flow_reason_taxonomy as _reason_taxonomy
+import _structural_absence as _sa  # R-0915-119: the reader's half of guard (i)
 import _watchdog
 import l_doc_consumer_contract as _ldoc
 import phase1_post_process as _p1pp  # R-0915-64: the ONE input scanner
@@ -3367,9 +3368,39 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
             verdict = "PASS"
             out = legacy_message
         else:
+            # R-0915-119, THE READER'S HALF OF GUARD (i). The typed class was
+            # read off the report and the ENUMERATION THAT ESTABLISHES IT was
+            # not, so `_guard_structural` — which is handed whatever `evidence`
+            # this call passes — could never see a valid record and fell back
+            # to the fail-closed default. The class was therefore UNREACHABLE
+            # through the report channel: every R-0915-119 checker whose gate
+            # clause names `--json` was downgraded from DECIDED to INCOMPLETE,
+            # while the SAME checker on the SAME tree reached the class when
+            # the clause named no `--json` and only the stdout sentence was
+            # read.
+            #
+            # MEASURED (lane icgate1, 2026-09-21) — `break_handler_safety_check`
+            # over one RTL file, rc 2 both times, report carrying
+            # `{population: 'RTL source file(s) under the staged rtl
+            # directory', scanned: 1, found: 0}`:
+            #     no --json    -> PASS,         NOT_APPLICABLE_BY_STRUCTURE
+            #     with --json  -> NOT_MEASURED, partial_population, and the row
+            #                     read "the gate reports its input was
+            #                     applicable and was NOT examined" over a gate
+            #                     that had examined 1 file and said so.
+            #
+            # STRICTLY CONSERVATIVE, IN ONE DIRECTION ONLY. `_guard_structural`
+            # still refuses the token without a valid enumeration, so this can
+            # only admit a claim the checker positively established; a report
+            # with no `structural_absence` record, a malformed one, or one whose
+            # subject was FOUND keeps exactly the class it has today. The
+            # evidence passed is the enumeration ALONE — not the whole report —
+            # so no other branch of `infer_nonverdict_reason` (`skip_kind`,
+            # `declared_absence_basis`, `reason_class`) changes behaviour here.
             reason_class = _reason_taxonomy.infer_nonverdict_reason(
                 verdict="VACUOUS_PASS",
                 message=report_message or legacy_message,
+                evidence={_sa.EVIDENCE_KEY: _sa.evidence_of(report)},
                 explicit=report_cls)
         if substantive_alternate:
             pass

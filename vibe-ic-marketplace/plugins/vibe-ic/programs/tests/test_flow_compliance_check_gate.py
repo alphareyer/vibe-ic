@@ -948,10 +948,41 @@ def test_issue1980_step14_nested_nonverdict_is_classed_not_skipped(tmp_path):
     assert not re.search(r"\[VACUOUS-PASS\s*\] Step\s+14:", r.stdout)
 
 
-#: The steps that ARE vacuous on the `vac2` fixture below, re-measured for
-#: issue #1980 on 2026-09-01:
-#:   * FS1 — the fixture's RTL declares no ECC/parity/lockstep mechanism, so
-#:     the FMEDA pair measures no diagnostic coverage.
+#: THE VACUITY TOKEN, ANCHORED. `re.search(r"vacuity=(\\d+)")` also matches the
+#: tail of `partial_vacuity=`, and `Disclosure.PARTIAL_VACUITY` sorts BEFORE
+#: `Disclosure.VACUITY`, so on any run disclosing both, the unanchored form
+#: read the partial count and the accuracy assertion compared the wrong number
+#: while still going green. MEASURED 2026-09-21 (lane icgate2): with the tally
+#: deliberately over-counting, the N=1 case stayed GREEN on `partial_vacuity=1`
+#: standing in front of `vacuity=2`. A left-hand guard fixes it; `\\b` would
+#: also do, since `_` is a word character, but the intent is worth spelling.
+_VACUITY_TOKEN = re.compile(r"(?<![A-Za-z0-9_])vacuity=(\d+)")
+
+
+#: The steps that ARE vacuous on the `vac2` fixture below. EMPTY, and the
+#: emptiness is the finding — re-measured 2026-09-21 (lane icgate2, 8HD-d,
+#: image 0.3.67) after R-0915-119.
+#:
+#: FS1 LEFT THIS SET, and it left it by being ANSWERED. It was pinned here for
+#: issue #1980 on 2026-09-01 because the FMEDA pair signalled `VACUOUS_PASS`
+#: over a fixture whose RTL declares no ECC/parity/lockstep mechanism, and
+#: "every executed sub-gate was vacuously satisfied" was then the only sentence
+#: available. R-0915-119 gave the pair a truer one: `detect_safety_mechanism`
+#: READS that RTL, ENUMERATES the modules it declares and finds no such
+#: subject, so the question is DECIDED — `NOT_APPLICABLE_BY_STRUCTURE`, carried
+#: with the enumeration that establishes it. A decided structural absence is
+#: not a vacuous pass, so the tier loses its one member here.
+#:
+#: MEASURED, one fixture, one variable (the tree), both alone at load ~2.5/32:
+#:   main  e8cd3bba1  FS1 = NOT_MEASURED(no_population) [vacuity]   vacuity=1
+#:                    ledger: fmeda_* rc=0 VACUOUS_PASS DESIGN_DECLARED_NA
+#:   after R-0915-119 FS1 = NOT_MEASURED(upstream_failed), observed naming
+#:                    NOT_APPLICABLE_BY_STRUCTURE — and NO `vacuity=` token,
+#:                    because `disclosure_str` joins only non-zero counts.
+#: The counter did not drift; its POPULATION went to zero. So the census below
+#: is re-pinned to the empty set and the accuracy claim it used to carry moves
+#: to `test_wave93_vacuity_counter_equals_the_listing_when_there_are_any`,
+#: where a run that HAS vacuous steps keeps it able to fail in both directions.
 #:
 #: Step 14 deliberately stays outside this set. #1978 classifies its unsafe
 #: non-verdicts as INCOMPLETE, and the delivery/dependency policy leaves the
@@ -959,7 +990,7 @@ def test_issue1980_step14_nested_nonverdict_is_classed_not_skipped(tmp_path):
 #: non-verdict.
 #: Pinned as a SET so that a step JOINING or LEAVING the vacuous tier is a
 #: named, deliberate edit here rather than an invisible drift.
-_VAC2_EXPECTED_VACUOUS_STEPS = {"FS1"}
+_VAC2_EXPECTED_VACUOUS_STEPS: set[str] = set()
 
 
 def _labelled_step_ids(stdout: str, label: str) -> set:
@@ -1000,6 +1031,21 @@ def test_wave93_vacuous_pass_counter_accurate(tmp_path):
       HOW MANY steps land on the vacuous tier, which is precisely the class of
       drift the original assertion existed to catch. So the SET is pinned too,
       by step id, with the reason each member is vacuous written down above.
+
+    R-0915-119 EMPTIED THE SET ON THIS FIXTURE, and the claim is unchanged.
+    FS1 was its one member; the FMEDA pair now ENUMERATES the modules the RTL
+    declares, finds no ECC/parity/lockstep subject and ANSWERS
+    `NOT_APPLICABLE_BY_STRUCTURE`. A decided structural absence is not a
+    vacuous pass, so the population here is legitimately zero and the counter
+    correctly says nothing. What that costs is the ability of the ACCURACY
+    assertion to fail on an UNDER-count: `0 == 0` holds however broken the
+    tally is. So the accuracy claim is kept where it can still be broken, on a
+    run that HAS vacuous steps —
+    `test_wave93_vacuity_counter_equals_the_listing_when_there_are_any` — and
+    what stays here is the zero case: the tally must disclose NOTHING when
+    nothing is on the tier (over-count), and FS1 must have LEFT BY ANSWERING
+    rather than by falling silent (the positive half, asserted on FS1's own
+    block below).
     """
     proj = tmp_path / "vac2"
     (proj / "phase2" / "stage1" / "rtl").mkdir(parents=True)
@@ -1009,25 +1055,11 @@ def test_wave93_vacuous_pass_counter_accurate(tmp_path):
     )
     (proj / "phase2" / "stage2" / "synth" / "netlist.v").write_text("module top(); endmodule\n")
     r = _run(str(proj), "--strict")
-    # Find the summary line
-    counter_lines = [ln for ln in r.stdout.splitlines()
-                     if "disclosed:" in ln and "vacuity=" in ln]
-    assert counter_lines, r.stdout
     # The VACUITY tier specifically — the step line carries its disclosures,
     # and `NOT_MEASURED` now covers every reason nothing was measured, of which
     # vacuity is one.
     labelled = [ln for ln in r.stdout.splitlines()
                 if "[NOT_MEASURED" in ln and "[vacuity" in ln]
-    assert labelled, (
-        "no step is labelled NOT_MEASURED carrying the vacuity disclosure, on "
-        f"a fixture that must produce at least Step 14's no-.ys vacuous "
-        f"pass:\n{r.stdout}")
-    m = re.search(r"vacuity=(\d+)", counter_lines[0])
-    assert m, counter_lines[0]
-    assert int(m.group(1)) == len(labelled), (
-        f"the disclosure line says vacuity={m.group(1)} but the per-step "
-        f"listing labels {len(labelled)} step(s) NOT_MEASURED: "
-        f"{[ln.strip()[:80] for ln in labelled]}\n{counter_lines[0]}")
     seen = {ln.split("Step", 1)[1].split(":", 1)[0].strip()
             for ln in labelled}
     assert seen == _VAC2_EXPECTED_VACUOUS_STEPS, (
@@ -1037,6 +1069,189 @@ def test_wave93_vacuous_pass_counter_accurate(tmp_path):
         f"leaving it means a gate started, or stopped disclosing. Either is a "
         f"deliberate edit — update _VAC2_EXPECTED_VACUOUS_STEPS and say why."
         f"\n{r.stdout}")
+    # ACCURACY, READ AS TWO STATEMENTS SO AN ABSENT TOKEN IS NEVER A ZERO.
+    # `disclosure_str` joins only the NON-ZERO disclosure counts, so the
+    # producer's contract is that the `vacuity=` token is present exactly when
+    # the listing is non-empty and carries that same number. Defaulting a
+    # missing token to 0 would turn "could not read it" into "read it and it
+    # was none", and would let the tally go silent without anything noticing.
+    counter_lines = [ln for ln in r.stdout.splitlines()
+                     if "disclosed:" in ln and _VACUITY_TOKEN.search(ln)]
+    if labelled:
+        assert counter_lines, (
+            f"{len(labelled)} step(s) are labelled on the vacuity tier and "
+            f"the tally discloses no `vacuity=` at all:\n{r.stdout}")
+        m = _VACUITY_TOKEN.search(counter_lines[0])
+        assert m, counter_lines[0]
+        assert int(m.group(1)) == len(labelled), (
+            f"the disclosure line says vacuity={m.group(1)} but the per-step "
+            f"listing labels {len(labelled)} step(s) NOT_MEASURED: "
+            f"{[ln.strip()[:80] for ln in labelled]}\n{counter_lines[0]}")
+    else:
+        assert not counter_lines, (
+            f"no step is labelled on the vacuity tier, yet the tally discloses "
+            f"one: {counter_lines}. A disclosure with no step behind it is the "
+            f"counter inventing a population.\n{r.stdout}")
+    # THE POSITIVE HALF OF THE CENSUS, AND THE REASON THE SET MAY BE EMPTY.
+    # "FS1 is not on the vacuity tier" is also satisfied by FS1 vanishing from
+    # the audit, or by its gates never running — the two ways this could go
+    # quietly wrong. R-0915-119's claim is the opposite of silence: the step is
+    # audited, its gates EXECUTED, and they ANSWERED by enumerating the subject
+    # population and finding none. Pinned on FS1's own block rather than on a
+    # bare substring anywhere in stdout, for the reason given at Step 14 above.
+    lines = r.stdout.splitlines()
+    heads = [i for i, ln in enumerate(lines) if re.search(r"\] Step +FS1:", ln)]
+    assert heads, f"Step FS1 is absent from the audit entirely:\n{r.stdout}"
+    blocks = []
+    for i in heads:
+        j = i + 1
+        while j < len(lines) and not re.search(r"\] Step +", lines[j]):
+            j += 1
+        blocks.append("\n".join(lines[i:j]))
+    fs1 = "\n".join(blocks)
+    assert "NOT_APPLICABLE_BY_STRUCTURE" in fs1, (
+        "FS1 left the vacuity tier without arriving anywhere: no block of its "
+        "own names NOT_APPLICABLE_BY_STRUCTURE, so the absence of a safety "
+        "mechanism is once again unaccounted for rather than answered.\n"
+        + fs1)
+    assert "ENUMERATED its subject population and found none" in fs1, (
+        "FS1 carries the NOT_APPLICABLE_BY_STRUCTURE token without the "
+        "enumeration that establishes it — the class is only ever as good as "
+        "the population the gate says it read.\n" + fs1)
+
+
+
+#: A gate program on disk that writes ONE verdict into the `--json` report it
+#: was handed and exits with the given code. Named by ABSOLUTE path in the
+#: flow, which `_resolve_program_cmd` honours, so nothing is written into the
+#: shipped programs tree. Same device as
+#: `test_issue901_structured_vacuity_reaches_the_step_verdict`, kept local so
+#: this file's claim does not depend on another test module's helpers.
+_VAC_SYNTH_GATE = '''#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+VERDICT, RC, NAME, REASON_CLASS = ({verdict!r}, {rc!r}, {name!r}, {rc_class!r})
+out = None
+argv = sys.argv[1:]
+for i, a in enumerate(argv):
+    if a == "--json" and i + 1 < len(argv):
+        out = argv[i + 1]
+if out:
+    p = Path(out)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = {{"gate": NAME, "verdict": VERDICT}}
+    if REASON_CLASS:
+        payload["reason_class"] = REASON_CLASS
+    p.write_text(json.dumps(payload, indent=1))
+print("[%s] %s" % ("PASS" if RC == 0 else "FAIL", NAME))
+sys.exit(RC)
+'''
+
+
+def _vac_counter_flow(tmp_path, n_vacuous, n_substantive):
+    """A flow of `n_vacuous` steps whose only clause is unanimously vacuous
+    and `n_substantive` steps whose only clause measured something. Returns
+    the flow path; the caller runs it and counts."""
+    gates = tmp_path / "synthetic_gates"
+    gates.mkdir(parents=True, exist_ok=True)
+
+    def gate(name, rc, rc_class):
+        g = gates / f"{name}.py"
+        g.write_text(_VAC_SYNTH_GATE.format(
+            verdict="PASS", rc=rc, name=name, rc_class=rc_class))
+        return g
+
+    ids, body = [], []
+    for i in range(n_vacuous):
+        sid = i + 1
+        # rc=2 with a typed reason class is the LEGACY vacuity channel, and
+        # with no sibling clause the step is unanimous — the exact shape
+        # `test_GUARD_the_legacy_channel_alone_still_gets_the_unanimous_word`
+        # pins as still reaching the tier.
+        g = gate(f"examined_nothing_{i}", 2, "DESIGN_DECLARED_NA")
+        ids.append(str(sid))
+        body.append(
+            f"  - id: {sid}\n"
+            f"    name: \"vacuous step {sid}\"\n"
+            f"    stage: stage1\n"
+            f"    gate:\n"
+            f"      all_of:\n"
+            f"        - program_exit_zero: \"{g} . --json reports/v{i}.json\"\n")
+    for j in range(n_substantive):
+        sid = n_vacuous + j + 1
+        g = gate(f"examined_the_design_{j}", 0, None)
+        ids.append(str(sid))
+        body.append(
+            f"  - id: {sid}\n"
+            f"    name: \"substantive step {sid}\"\n"
+            f"    stage: stage1\n"
+            f"    gate:\n"
+            f"      all_of:\n"
+            f"        - program_exit_zero: \"{g} . --json reports/s{j}.json\"\n")
+    flow = tmp_path / "vac_counter_flow.yaml"
+    flow.write_text(
+        "version: 2\n"
+        "flow_name: vac_counter\n"
+        f"total_steps: {len(ids)}\n"
+        "analog_steps: 0\n"
+        "stages:\n"
+        "  - id: stage1\n"
+        "    name: \"the stage under audit\"\n"
+        f"    steps: [{', '.join(ids)}]\n"
+        "steps:\n" + "".join(body))
+    return flow
+
+
+@pytest.mark.parametrize("n_vacuous,n_substantive", [(1, 0), (2, 0), (2, 1)])
+def test_wave93_vacuity_counter_equals_the_listing_when_there_are_any(
+        tmp_path, n_vacuous, n_substantive):
+    """THE ACCURACY HALF OF WAVE 93, ON A RUN THAT HAS VACUOUS STEPS.
+
+    `test_wave93_vacuous_pass_counter_accurate` carried this claim over the
+    `vac2` fixture while FS1 was vacuous there. R-0915-119 decided FS1's
+    absence by enumeration, so that fixture's vacuity population is now zero
+    and `0 == 0` holds however broken the tally is — an assertion that can only
+    fire on an over-count is half a check, and the half it lost is the one the
+    counter was written for.
+
+    So the claim moves to a venue that cannot go empty under it: a flow built
+    here, of exactly `n_vacuous` unanimously-vacuous steps. The counter on the
+    `disclosed:` line and the per-step listing are computed on different paths
+    from different fields (`disclosure_counts` over every result, versus the
+    `[vacuity` token printed beside each step's own status), which is what
+    makes comparing them worth doing.
+
+    N VARIES ON PURPOSE. A tally that hard-codes 1, drops the last member, or
+    double-counts is invisible at a single N; 1 and 2 separate all three. The
+    third case adds a step that MEASURED something, so a tally that counted
+    steps instead of disclosures is caught too.
+    """
+    proj = tmp_path / "proj"
+    proj.mkdir(parents=True, exist_ok=True)
+    flow = _vac_counter_flow(tmp_path, n_vacuous, n_substantive)
+    r = subprocess.run(
+        [sys.executable, str(PROG), ".", "--flow-def", str(flow)],
+        cwd=proj, capture_output=True, text=True)
+    out = r.stdout + r.stderr
+    labelled = [ln for ln in r.stdout.splitlines()
+                if "[NOT_MEASURED" in ln and "[vacuity" in ln]
+    assert len(labelled) == n_vacuous, (
+        f"built {n_vacuous} unanimously-vacuous step(s); the per-step listing "
+        f"labels {len(labelled)}: {[ln.strip()[:80] for ln in labelled]}\n"
+        f"{out}")
+    counter_lines = [ln for ln in r.stdout.splitlines()
+                     if "disclosed:" in ln and _VACUITY_TOKEN.search(ln)]
+    assert counter_lines, (
+        f"{n_vacuous} step(s) are on the vacuity tier and the tally discloses "
+        f"no `vacuity=` at all\n{out}")
+    m = _VACUITY_TOKEN.search(counter_lines[0])
+    assert m, counter_lines[0]
+    assert int(m.group(1)) == len(labelled) == n_vacuous, (
+        f"the disclosure line says vacuity={m.group(1)}, the per-step listing "
+        f"labels {len(labelled)}, and the flow was built with {n_vacuous}\n"
+        f"{counter_lines[0]}\n{out}")
 
 
 # ─── _expand_globs basics (kept after v1.6.21 legacy-fallback removal) ──
