@@ -4923,6 +4923,19 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig") -> str:
         "            break\n"
         "          }\n"
         "        }\n"
+        # R-0915-104 — WHY AN ANCHOR FAILED, NOT ONLY WHERE. An anchor whose
+        # window is clipped by the end of its own row is a different problem
+        # from one whose window is full of cells: the first is a floorplan
+        # fact, the second a density one, and a reader who cannot tell them
+        # apart cannot act on either.
+        #
+        # MEASURED, and it refuted the guess that prompted it. Reading the m3
+        # arm's ten x values alone they looked like row-end clipping. With the
+        # cause actually recorded, the m4 arm says 16 of 17 are `occupied` and
+        # exactly ONE is `row_edge_clips_the_window` -- and the occupied ones
+        # repeat at the SAME x (1454880) across many different rows, which is
+        # a column of blocked sites, not a floorplan edge. An x value cannot
+        # tell you which of the two it is; that is why this field exists.
         "        if {!$_wtplaced} {\n"
         "          incr _wtfail\n"
         "          set _wtwhy \"occupied\"\n"
