@@ -42,6 +42,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 for _anc in Path(__file__).resolve().parents:
     for _cand in (_anc / "vibe-ic-marketplace" / "plugins" / "vibe-ic" / "programs",
                   _anc / "programs"):
@@ -478,6 +480,89 @@ def test_a_relative_selector_that_does_exist_here_is_not_refused():
              "--", "-q", sel,
              env_extra={"VIBEIC_SUITE_DOCKER_BIN": "/no/such/docker"})
     assert "names nothing this run could collect" not in r.stderr, r.stderr
+    assert "cannot read /etc/passwd" in r.stderr, r.stderr
+
+
+# ── the OUTPUT paths: #2123's rule, asked of what the run WRITES ──────────
+# The selector tests above cover a path the run READS. These cover a path it
+# WRITES, which fails later and louder: pytest creates a `--junitxml` in
+# `pytest_sessionfinish`, AFTER every test has run and BEFORE the terminal
+# reporter writes its summary, so an unwritable one destroys the whole report
+# and still exits 1 -- the same rc as a real failure, with no failure anywhere
+# in the output for a scrape to find.
+
+_UNMOUNTED = "/var/empty/vibeic-harness-selftest-unwritable/out.xml"
+
+
+@pytest.mark.parametrize("opt,val", [
+    ("--junitxml", _UNMOUNTED),
+    ("--junit-xml", _UNMOUNTED),
+    ("--log-file", "/var/empty/vibeic-harness-selftest-unwritable/run.log"),
+    ("--basetemp", "/var/empty/vibeic-harness-selftest-unwritable/bt"),
+])
+def test_an_output_path_the_container_cannot_write_is_refused_by_name(opt, val):
+    """MEASURED before this guard existed, pinned image, the SAME one-file
+    selection with and without the option: without it, `1 failed, 7 passed`
+    and a `FAILED` line; with it, rc still 1 but ZERO `N failed, M passed`
+    lines, ZERO `short test summary info`, ZERO `FAILED` lines and no XML --
+
+        PermissionError: [Errno 13] Permission denied: '<the host dir>'
+          in pytest_sessionfinish -> os.makedirs
+
+    The run's entire report is destroyed. This refuses before the tests run."""
+    r = _run("--no-engine", "--scratch", "/var/tmp/vibeic-harness-selftest",
+             "--", "-q", opt, val, "programs/tests",
+             env_extra=_NO_ENGINE_AT_ALL)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "REFUSED" in r.stderr, r.stderr
+    # BY NAME: the option and the path, as #2123 names the selector.
+    assert opt in r.stderr, r.stderr
+    assert val in r.stderr, r.stderr
+    # and what it costs, so the refusal is not a bare rule
+    assert "pytest_sessionfinish" in r.stderr, r.stderr
+
+
+def test_the_attached_form_of_an_output_option_is_refused_too():
+    """`--junitxml=PATH` never reaches the separate-value branch. A guard that
+    only sees `--junitxml PATH` is one spelling away from being switched off."""
+    r = _run("--no-engine", "--scratch", "/var/tmp/vibeic-harness-selftest",
+             "--", "-q", f"--junitxml={_UNMOUNTED}", "programs/tests",
+             env_extra=_NO_ENGINE_AT_ALL)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "REFUSED" in r.stderr, r.stderr
+    assert _UNMOUNTED in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize("where", ["scratch", "repo", "tmp"])
+def test_an_output_path_under_a_mount_is_not_refused(where, tmp_path):
+    """THE NEGATIVE CONTROL, and the half that keeps this a rule rather than a
+    ban: a guard that refuses EVERY output path would pass the tests above and
+    make the option unusable. All three writable roots this harness mounts
+    must still go through.
+
+    As with the selector control, the engine is named absent so the run stops
+    at the first thing AFTER the output-path question -- reading /etc/passwd
+    out of the image -- and that refusal is the evidence it let this by."""
+    target = {
+        "scratch": "/var/tmp/vibeic-harness-selftest/out.xml",
+        "repo": str(_REPO / "out-selftest.xml"),
+        "tmp": "/tmp/vibeic-harness-selftest-out.xml",
+    }[where]
+    r = _run("--no-engine", "--scratch", "/var/tmp/vibeic-harness-selftest",
+             "--", "-q", f"--junitxml={target}", "programs/tests",
+             env_extra=_NO_ENGINE_AT_ALL)
+    assert "is not writable from inside the container" not in r.stderr, r.stderr
+    assert "cannot read /etc/passwd" in r.stderr, r.stderr
+
+
+def test_a_non_output_attached_option_is_not_read_as_an_output_path():
+    """THE FALSE-REFUSAL CONTROL for the attached-form branch. `--tb=line` and
+    friends take the same `--name=value` shape and must pass straight through;
+    the branch asks the OPTION first and only then the path."""
+    r = _run("--no-engine", "--scratch", "/var/tmp/vibeic-harness-selftest",
+             "--", "-q", "--tb=line", "--maxfail=1", "programs/tests",
+             env_extra=_NO_ENGINE_AT_ALL)
+    assert "is not writable from inside the container" not in r.stderr, r.stderr
     assert "cannot read /etc/passwd" in r.stderr, r.stderr
 
 
