@@ -37,6 +37,7 @@ WHAT THIS FILE REFUSES
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -564,6 +565,106 @@ def test_a_non_output_attached_option_is_not_read_as_an_output_path():
              env_extra=_NO_ENGINE_AT_ALL)
     assert "is not writable from inside the container" not in r.stderr, r.stderr
     assert "cannot read /etc/passwd" in r.stderr, r.stderr
+# ── the TIME BOUND precondition, declared rather than assumed ─────────────
+
+def _shipped_timeout_probe() -> str:
+    """The `python3 -c "..."` precondition block, lifted from the shipped
+    harness and unescaped back into plain Python.
+
+    Lifted rather than restated, for the reason the selector tests are driven
+    rather than read: a copy of this logic in the test would keep passing after
+    the shipped one changed."""
+    text = _HARNESS.read_text(encoding="utf-8")
+    marker = 'python3 -c "\nimport ast, importlib.util as _u'
+    assert marker in text, (
+        f"{_HARNESS} no longer carries the time-bound precondition block. "
+        "Every @pytest.mark.timeout(...) in the suite is INERT in the pinned "
+        "image and this block is the only thing that says so. If it moved, "
+        "point this test at whatever replaced it -- do not delete it.")
+    start = text.index(marker)
+    start = text.index('"', start) + 1
+    end = text.index('\n" || true', start)
+    # Undo exactly what the inner bash undoes for a double-quoted word: a
+    # backslash is literal EXCEPT before " \ $ or a backtick. Collapsing only
+    # \" would leave \\n as a literal backslash-n and the arms would compare
+    # against text the harness never prints.
+    return re.sub(r'\\(["\\$`])', r'\1', text[start:end])
+
+
+def _run_probe(tmp_path, *, plugin_present: bool, markers: str = ""):
+    tests = tmp_path / "programs" / "tests"
+    tests.mkdir(parents=True)
+    (tests / "test_probe_subject.py").write_text(markers, encoding="utf-8")
+    env = dict(os.environ)
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    if plugin_present:
+        (shim / "pytest_timeout.py").write_text("", encoding="utf-8")
+    env["PYTHONPATH"] = str(shim)
+    # `-S` -- site-packages OFF. THE HOST RUNNING THIS TEST MAY HAVE
+    # pytest-timeout INSTALLED, and this one does, so an absent arm that merely
+    # cleared PYTHONPATH would quietly become a second copy of the present arm
+    # and prove nothing. With `-S` the only importable third-party module is
+    # whatever `shim` holds, which is exactly the pinned image condition this
+    # arm is about. The probe itself imports nothing but the standard library,
+    # so `-S` costs it nothing.
+    r = subprocess.run([sys.executable, "-S", "-c", _shipped_timeout_probe()],
+                       capture_output=True, text=True, timeout=60,
+                       cwd=str(tmp_path), env=env)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    return r.stderr
+
+
+def test_an_absent_timeout_plugin_is_declared_and_the_inert_markers_counted(tmp_path):
+    """THE DEFECT. `pytest_timeout` is ABSENT from the pinned image, so pytest
+    treats every `@pytest.mark.timeout(...)` as an unknown mark and runs the
+    test with NO bound -- a wedged test hangs the whole session instead of
+    failing one case, and the author who asked for the bound is never told.
+    vibe-ic#1128: a precondition the tests assume must be DECLARED."""
+    out = _run_probe(tmp_path, plugin_present=False, markers=(
+        "import pytest\n"
+        "pytestmark = pytest.mark.timeout(0)\n"
+        "@pytest.mark.timeout(600)\n"
+        "def test_a(): pass\n"
+        "@pytest.mark.timeout(BUDGET)\n"
+        "def test_b(): pass\n"))
+    assert "pytest-timeout is ABSENT" in out, out
+    assert "INERT" in out, out
+    # The census is BROKEN DOWN and it ADDS UP, so a marker whose argument the
+    # counter cannot read is reported rather than dropped: 3 markers = 1 real
+    # bound + 1 zero + 1 non-literal.
+    assert "3 marker(s) in 1 file(s)" in out, out
+    assert "1 name a real bound" in out, out
+    assert "1 name 0 (no bound asked for)" in out, out
+    assert "1 have a non-literal argument" in out, out
+
+
+def test_a_present_timeout_plugin_is_declared_as_active(tmp_path):
+    """THE OTHER DIRECTION, and the one that keeps the line above a
+    MEASUREMENT rather than a constant: with the plugin importable the same
+    shipped block must say the bounds are active, not print the census."""
+    out = _run_probe(tmp_path, plugin_present=True, markers=(
+        "import pytest\n@pytest.mark.timeout(600)\ndef test_a(): pass\n"))
+    assert "pytest-timeout is present" in out, out
+    assert "ACTIVE" in out, out
+    assert "ABSENT" not in out, out
+    assert "INERT" not in out, out
+
+
+def test_the_declaration_never_stops_the_run(tmp_path):
+    """It DECLARES, it does not refuse. Refusing on an absent plugin would stop
+    every run on the image the fleet currently uses, for a precondition no
+    caller asked for -- the markers are the TESTS own requests. The shipped
+    block is therefore `|| true` and writes only to stderr; if it ever grows a
+    non-zero exit, that is a fleet-wide decision and this test says so."""
+    text = _HARNESS.read_text(encoding="utf-8")
+    probe_end = text.index('\n" || true',
+                           text.index('import ast, importlib.util as _u'))
+    assert probe_end > 0
+    # ...and it writes to stderr only: nothing it prints can be mistaken for a
+    # pytest verdict by a reader scraping stdout.
+    assert "sys.stderr.write" in _shipped_timeout_probe()
+    assert "sys.stdout" not in _shipped_timeout_probe()
 
 
 def test_a_pattern_valued_option_is_not_read_as_a_selector():
