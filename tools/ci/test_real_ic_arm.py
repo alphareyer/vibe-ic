@@ -592,7 +592,27 @@ def test_the_nightly_states_its_cron_line():
     only in somebody's head is a nightly that stops running silently."""
     src = (_ARM.parent / "nightly_real_ic.sh").read_text(encoding="utf-8")
     assert "CRON_TZ=Asia/Taipei" in src
-    assert "nightly_real_ic.sh" in src.split("THE CRON LINE", 1)[1][:600]
+    # THE SECTION IS BOUNDED BY ITSELF, NOT BY A CHARACTER COUNT. This used to
+    # search `src.split("THE CRON LINE", 1)[1][:600]`. A fixed window cannot
+    # tell "the schedule is not stated" from "it is stated more than 600
+    # characters further down": as the section grows the assertion stops proving
+    # its claim, and it says exactly the same thing either way. MEASURED
+    # 2026-09-21 on this tree: the target sits 141 characters past the marker,
+    # 459 inside the window -- so the window has never yet cut anything off, and
+    # a passing run was not evidence that it could not.
+    #
+    # The stated cron line is the COMMENT BLOCK the marker heads, which ends at
+    # the first line that is not a comment. That boundary moves with the file.
+    after = src.split("THE CRON LINE", 1)[1].splitlines()[1:]
+    section = []
+    for line in after:
+        if line.strip() and not line.lstrip().startswith("#"):
+            break
+        section.append(line)
+    section = "\n".join(section)
+    assert section.strip(), "the THE CRON LINE marker heads no comment block"
+    assert "nightly_real_ic.sh" in section, section
+    assert "CRON_TZ=Asia/Taipei" in section, section
 
 
 # ── R-0915-96: the image is RESOLVED once, and an unresolved image REFUSES ──
