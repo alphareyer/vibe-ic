@@ -272,19 +272,48 @@ class AdmissionLedger:
         return total, sum(active.values())
 
     def plan(self, jobs: Iterable[dict], reservation: int):
+        """Jobs may carry their OWN `bytes`, and when they do that is what is
+        planned against.
+
+        WHY (R-0915-117(2), MEASURED on 8hd-3). A corner's footprint is not a
+        property of the host, it is the deck's: saved vectors times the record
+        it runs. One declared reservation for every corner under-estimated the
+        graded delta_sigma deck by about 4x -- 24 GiB declared against 94.8 GiB
+        measured -- so a second corner was admitted that could only have been
+        killed some days in, after the first had also been slowed. The estimate
+        now comes from the deck (`analog_resolution_stimulus.
+        estimated_peak_rss_bytes`), and this is the consumer that had no way to
+        take it.
+
+        HETEROGENEOUS SIZES PLAN AGAINST THE LARGEST, not the mean. Concurrency
+        here is a promise that the jobs can run TOGETHER; the mean is a promise
+        about an average run that no individual job makes. A 0.8 GiB graded
+        deck alongside a 3.4 GiB rails deck is planned as two 3.4 GiB jobs.
+
+        A job without `bytes` uses `reservation`, so every existing caller
+        plans exactly as it did."""
         jobs = list(jobs)
-        if not jobs or reservation <= 0:
+        sizes = [int(j["bytes"]) for j in jobs
+                 if isinstance(j.get("bytes"), (int, float)) and j["bytes"] > 0]
+        derived = len(sizes) == len(jobs) and bool(sizes)
+        unit = max(sizes) if derived else reservation
+        if not jobs or unit <= 0:
             raise AdmissionRefused("every launch plan needs non-empty jobs and a positive reservation")
         with self._locked() as data:
             accounted, active_total = self._accounted_bytes(data)
         budget = self.ram_bytes - self.headroom
         available = max(0, budget - accounted)
-        concurrency = available // reservation
+        concurrency = available // unit
         record = {"timestamp": time.time(), "ram_bytes": self.ram_bytes,
                   "headroom_bytes": self.headroom, "budget_bytes": budget,
                   "docker_active_bytes": active_total, "accounted_reserved_bytes": accounted,
-                  "reservation_bytes": reservation, "jobs": [j["id"] for j in jobs],
-                  "safe_concurrency": concurrency, "swap_bytes": None}
+                  "reservation_bytes": unit, "jobs": [j["id"] for j in jobs],
+                  "safe_concurrency": concurrency, "swap_bytes": None,
+                  "reservation_source": ("derived_from_each_deck"
+                                         if derived else "declared"),
+                  "declared_reservation_bytes": reservation,
+                  "per_job_bytes": ({j["id"]: int(j["bytes"]) for j in jobs}
+                                    if derived else None)}
         self._receipt("plans.jsonl", record)
         return record
 

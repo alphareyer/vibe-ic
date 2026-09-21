@@ -788,3 +788,129 @@ def apply(deck_text: str, spec: Any, topology: Any, dump_ref: str
         lines.insert(record["source_line"], _dec["stamp"])
     record["dump"] = dump_ref
     return "\n".join(lines) + "\n", record
+
+
+# ── R-0915-117(2): ONE CORNER, TWO DECKS ────────────────────────────────────
+#
+# WHY. MEASURED on 8hd-3 (image 0.3.67), two decks identical but for the save
+# list and the rail cards, 21 us each -- the ratio is duration-independent:
+#     122 vectors, 240 railx_* cards : peak RSS 111596 kB, wall 249.3 s
+#       1 vector,    0 railx_* cards : peak RSS  39424 kB, wall 238.4 s
+# giving a fixed cost of 38827 kB and 28.4 kB of storage per saved vector per
+# microsecond of simulated time. Extrapolated to the declared 28.673 ms record
+# that is 94.79 GiB against 0.81 GiB -- 116x -- while the wall moves 1.05x.
+# Cross-checked against a live corner's own RSS slope over 87 samples, which
+# gave 96.9 GiB by a completely different method: the two agree to 2%.
+# ngspice-47 in this image offers only -o / -r / --soa-log, so there is no
+# streaming transient writer and memory is bounded only by vectors x timepoints.
+#
+# WHAT THAT BUYS, AND WHAT IT DOES NOT. It is a MEMORY result, not a speed one.
+# At 0.81 GiB a corner stops being RAM-bound, so a host runs as many corners as
+# it has cores for rather than ONE. The wall per corner is unchanged.
+#
+# THE SPLIT. The cost was A3's rails instrumentation riding on A4's graded
+# record: 120 of the 122 vectors exist only for the `railx_*` cards, and that
+# claim settles in two conversion windows (R-0915-117(1)). So one corner emits
+# two decks from the SAME netlist identity:
+#   RAILS  -- every `railx_*` card and every vector they read, over the bounded
+#             two-window span, derived the same way and never typed. Its receipt
+#             is the rails verdict AT THAT CORNER, which today no corner carries.
+#   GRADED -- the full declared record, retaining ONLY the vectors the receipt
+#             reads. Derived from the receipt's own column contract: the dump is
+#             what `sndr_db_incremental` reads, and the dump is this deck's own
+#             `wrdata` card, so the card names the retention.
+# A corner is PASS only when both decks PASS; a missing deck is NOT_MEASURED by
+# name, never a default.
+_RAILS_MEAS_RE = re.compile(r"(?im)^\s*meas\s+tran\s+railx_\S+.*$")
+_SAVE_RE = re.compile(r"(?im)^\s*\.save\b.*$")
+_WRDATA_CARD_RE = re.compile(r"(?im)^\s*wrdata\s+\S+\s+(.*)$")
+_TRAN_RE = re.compile(r"(?im)^\s*tran\s+(\S+)\s+(\S+)\s*$")
+
+SPLIT_NO_WINDOW = (
+    "rails_deck_window_not_derivable: the deck declares no conversion window, "
+    "so the span over which its rail cards settle cannot be derived from it")
+SPLIT_NO_CLOCK = (
+    "rails_deck_window_not_derivable_no_clock_card: no single top-level pulse "
+    "source names the conversion clock")
+SPLIT_NO_TRAN = "deck_runs_no_transient_to_split"
+SPLIT_NO_WRDATA = (
+    "graded_deck_retention_not_derivable: the deck writes no `wrdata`, so the "
+    "receipt's own column contract names no vector to retain")
+
+#: Storage per saved vector per second of simulated time, MEASURED above.
+#: Stated as a measurement with its provenance rather than a tuning knob, and
+#: overridable for a machine that measures its own.
+RSS_BYTES_PER_VECTOR_SECOND = 28.4 * 1024 * 1e6
+RSS_FIXED_BYTES = 38827 * 1024
+
+
+def rails_deck(deck_text: str, window_clocks: Optional[int] = None
+               ) -> Tuple[Optional[str], Dict[str, Any]]:
+    """The corner's RAILS deck: the instrumentation it already carries, over
+    two conversion windows. Refuses by name rather than defaulting."""
+    decl, why = _inc.read_stamp(deck_text or "")
+    if decl is not None:
+        window = int(decl["window_clocks"])
+    elif isinstance(window_clocks, int) and window_clocks > 0:
+        window = window_clocks
+    else:
+        return None, {"reason": SPLIT_NO_WINDOW, "detail": why}
+    facts = deck_facts(deck_text or "")
+    periods = [s["period_s"] for s in facts["sources"] if s.get("period_s")]
+    if len(periods) != 1:
+        return None, {"reason": SPLIT_NO_CLOCK, "pulse_sources": len(periods)}
+    period = periods[0]
+    m = _TRAN_RE.search(deck_text or "")
+    if not m:
+        return None, {"reason": SPLIT_NO_TRAN}
+    stop = 2 * window * period
+    # Written in the nanosecond token the emitted decks are written in, so a
+    # rewritten card reads like a written one.
+    _ns = stop * 1e9
+    span = (f"{int(round(_ns))}n" if abs(_ns - round(_ns)) < 1e-6
+            else f"{_ns:.6f}".rstrip("0").rstrip(".") + "n")
+    out = (deck_text[:m.start()] + "tran " + m.group(1) + " "
+           + span + deck_text[m.end():])
+    return out, {"claim": "rails", "conversion_windows": 2,
+                 "window_clocks": window, "span_s": stop,
+                 "rail_cards": len(_RAILS_MEAS_RE.findall(deck_text or "")),
+                 "rule": "two_conversion_windows_from_the_decks_own_numbers"}
+
+
+def graded_deck(deck_text: str) -> Tuple[Optional[str], Dict[str, Any]]:
+    """The corner's GRADED deck: the full declared record, retaining only the
+    vectors the receipt reads. The rail cards go to the rails deck, and the
+    vectors that existed only for them go with them."""
+    w = _WRDATA_CARD_RE.search(deck_text or "")
+    if not w:
+        return None, {"reason": SPLIT_NO_WRDATA}
+    kept = re.findall(r"[vi]\([^)]*\)", w.group(1))
+    if not kept:
+        return None, {"reason": SPLIT_NO_WRDATA}
+    out = _RAILS_MEAS_RE.sub("", deck_text or "")
+    out = "\n".join(ln for ln in out.splitlines() if ln.strip())
+    dropped = len(re.findall(r"[vi]\([^)]*\)", _SAVE_RE.search(out).group(0))
+                  ) if _SAVE_RE.search(out) else 0
+    out = _SAVE_RE.sub(".save " + " ".join(kept), out, count=1)
+    return out + "\n", {
+        "claim": "graded", "retained_vectors": kept,
+        "retained": len(kept), "previously_retained": dropped,
+        "rail_cards_removed": len(_RAILS_MEAS_RE.findall(deck_text or "")),
+        "rule": "retention_is_the_decks_own_wrdata_card_which_is_what_the_receipt_reads",
+    }
+
+
+def estimated_peak_rss_bytes(deck_text: str) -> Optional[int]:
+    """What this deck will hold, from ITS OWN numbers: saved vectors times the
+    record it runs. Replaces a declared constant, which under-estimated the
+    graded deck by about 4x and would have admitted a second corner that was
+    later killed. An estimate, and named as one."""
+    m = _TRAN_RE.search(deck_text or "")
+    if not m:
+        return None
+    stop = si(m.group(2))
+    sv = _SAVE_RE.search(deck_text or "")
+    if stop is None or sv is None:
+        return None
+    n = len(re.findall(r"[vi]\([^)]*\)", sv.group(0)))
+    return int(RSS_FIXED_BYTES + RSS_BYTES_PER_VECTOR_SECOND * n * stop)

@@ -2371,8 +2371,20 @@ def _run_pvt_corners(project, container, host_root, sl_dir, btype, block, pdk,
     try:
         reservation, reservation_bytes = _corner_reservation(container)
         ledger = _aca.AdmissionLedger(project)
-        plan = ledger.plan([{"id": f"{block}:{proc}:{tlbl}"}
-                            for proc, tlbl, _deck, _sp in pending], reservation_bytes)
+        # EACH CORNER IS PLANNED AGAINST ITS OWN DECK. A corner's footprint is
+        # saved vectors times the record it runs, which is a property of the
+        # deck and not of the host -- see `AdmissionLedger.plan`. A deck the
+        # estimator cannot read falls back to the declared reservation, and a
+        # single unreadable deck makes the whole plan fall back, so a plan is
+        # never half derived and half declared.
+        _sizes = [_ars.estimated_peak_rss_bytes(_deck)
+                  for _proc, _tlbl, _deck, _sp in pending]
+        _derived = all(isinstance(b, int) and b > 0 for b in _sizes)
+        plan = ledger.plan(
+            [({"id": f"{block}:{proc}:{tlbl}", "bytes": b} if _derived
+              else {"id": f"{block}:{proc}:{tlbl}"})
+             for (proc, tlbl, _deck, _sp), b in zip(pending, _sizes)],
+            reservation_bytes)
         workers = min(len(pending), int(plan["safe_concurrency"]))
     except _aca.AdmissionRefused as exc:
         for proc, tlbl, deck, _sp in pending:
