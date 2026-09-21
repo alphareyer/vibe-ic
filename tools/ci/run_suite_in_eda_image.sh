@@ -690,6 +690,88 @@ fi
       echo "    verdict about this tree." >&2
       exit 2
     fi
+    # ── THE TIME BOUND IS A PRECONDITION, AND IT IS DECLARED ──────────────
+    # MEASURED in the pinned image: `import pytest_timeout` -> ModuleNotFoundError
+    # (and `import xdist` likewise). pytest then treats every
+    # `@pytest.mark.timeout(...)` in the suite as an UNKNOWN MARK: it emits a
+    # PytestUnknownMarkWarning and runs the test with NO BOUND AT ALL. Nothing
+    # in the session has a time bound, so a wedged test hangs the whole run
+    # instead of failing one case -- and the author who wrote the marker has no
+    # way to learn that the bound they asked for does not exist.
+    #
+    # The CALLER-side half of this is already refused: an explicit `--timeout=`
+    # is an unrecognized argument, pytest exits 4, and the rc-4 block below
+    # names it. The MARKER-side half was silent, which is the whole defect --
+    # vibe-ic#1128: a precondition the tests assume must be DECLARED, not
+    # assumed. This declares it, in the SAME interpreter that is about to run
+    # pytest, so the statement is about the environment that actually runs.
+    #
+    # IT DECLARES RATHER THAN REFUSES, deliberately and narrowly. Refusing here
+    # would stop every run on the image the whole fleet currently uses, for a
+    # precondition no caller asked for; and the markers are the TESTS OWN
+    # requests, not the caller. Once the image ships the plugin, a refusal
+    # becomes the right shape and this line becomes the place to put it.
+    # NOTE: this block is inside a single-quoted bash -c body -- an apostrophe
+    # here ends the string.
+    python3 -c "
+import ast, importlib.util as _u, os, re, sys
+if _u.find_spec(\"pytest_timeout\") is not None:
+    sys.stderr.write(\"[DISCLOSURE] pytest-timeout is present in this image: \"
+                     \"@pytest.mark.timeout(...) bounds are ACTIVE\\n\")
+else:
+    # COUNTED FROM THE AST, NOT FROM A GREP. A regex over the source counts
+    # every `mark.timeout(` in a COMMENT or a DOCSTRING too, and this suite
+    # discusses the marker in prose far more often than it uses one: the grep
+    # says 49 in 22 files, the AST says 27 call sites in 4. Publishing the
+    # grep number would put a figure in a DISCLOSURE that is three times the
+    # truth, which is worse than no figure. The regex is kept, but only to
+    # PRE-FILTER: parsing 22 candidate files costs nothing, parsing 3836 would.
+    _any = re.compile(r\"mark\\.timeout\\(\")
+    _f = _t = _b = _z = 0
+    for _root, _dirs, _names in os.walk(\"programs/tests\"):
+        for _n in _names:
+            if not _n.endswith(\".py\"):
+                continue
+            try:
+                _src = open(os.path.join(_root, _n), encoding=\"utf-8\",
+                            errors=\"replace\").read()
+            except OSError:
+                continue
+            if not _any.search(_src):
+                continue
+            try:
+                _tree = ast.parse(_src)
+            except SyntaxError:
+                continue
+            _hits = []
+            for _node in ast.walk(_tree):
+                if (isinstance(_node, ast.Call)
+                        and getattr(_node.func, \"attr\", \"\") == \"timeout\"
+                        and _node.args):
+                    _hits.append(_node.args[0])
+            if not _hits:
+                continue
+            _f += 1
+            _t += len(_hits)
+            for _a in _hits:
+                if isinstance(_a, ast.Constant) and isinstance(_a.value, int):
+                    if _a.value:
+                        _b += 1
+                    else:
+                        _z += 1
+    sys.stderr.write(
+        \"[DISCLOSURE] pytest-timeout is ABSENT from this image: every \"
+        \"@pytest.mark.timeout(...) in this session is INERT -- pytest \"
+        \"reports it as an unknown mark and runs the test with NO bound. \"
+        \"No test in this run has a time bound, so a wedged test hangs the \"
+        \"whole session instead of failing one case. MEASURED here, over \"
+        \"programs/tests: %d marker(s) in %d file(s), of which %d name a \"
+        \"real bound, %d name 0 (no bound asked for) and %d have a \"
+        \"non-literal argument this count cannot read -- all of them inert \"
+        \"either way. An explicit --timeout= is refused separately (pytest \"
+        \"exits 4, unrecognized arguments).\\n\"
+        % (_t, _f, _b, _z, _t - _b - _z))
+" || true
     exec python3 -m pytest "$@"' bash "$@"
 EXIT_RC=$?
 
