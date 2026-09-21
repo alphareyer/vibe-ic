@@ -57,6 +57,26 @@ endmodule
 ```
 """
 
+#: A buggy completion EVERY Verilog dialect refuses, which is what a test about
+#: "buggy completions are blocked" needs. MEASURED in the pinned image with the
+#: gate's own command (`iverilog -g2012 -t null`) and with `-g2005`:
+#:     both -> EXIT 1, "'clk' is not a valid l-value for a procedural assignment."
+#: `WHOLE_ARRAY` below cannot serve that purpose any more -- see the test that
+#: now pins what it actually does.
+BAD_LVALUE = """```verilog
+module arr(input clk, output reg [7:0] q);
+  always @(posedge clk) begin
+    clk <= 1'b0;   // assigning to an input port -- never legal, any dialect
+    q <= 8'd80;
+  end
+endmodule
+```
+"""
+
+#: KEPT, AND NO LONGER USED AS A BLOCKING CASE. Its comment claimed
+#: "icarus-unsupported", and that was true of icarus 13 / Verilog-2005 --- it is
+#: FALSE of the forked iverilog 14.0 this image ships, under the -g2012 the gate
+#: itself runs, because a whole-array assignment IS legal SystemVerilog.
 WHOLE_ARRAY = """```verilog
 module arr(input clk, output reg [7:0] q);
   reg [7:0] mem [0:3];
@@ -162,7 +182,7 @@ def test_buggy_completions_blocked_good_gated_in(tmp_path):
     batch = _write_batch(tmp_path, [
         {"id": "p_good", "completion": GOOD},
         {"id": "p_syntax", "completion": SYNTAX_BUG},
-        {"id": "p_array", "completion": WHOLE_ARRAY},
+        {"id": "p_lvalue", "completion": BAD_LVALUE},
     ])
     out = tmp_path / "responses.jsonl"
     rc = G.main(["--batch", str(batch), "--out", str(out),
@@ -170,12 +190,56 @@ def test_buggy_completions_blocked_good_gated_in(tmp_path):
     assert rc == 1                       # ≥1 blocked
     ids = [r["id"] for r in _read_jsonl(out)]
     assert "p_good" in ids
-    assert "p_syntax" not in ids and "p_array" not in ids
+    assert "p_syntax" not in ids and "p_lvalue" not in ids
     rep = json.loads((tmp_path / "rep.json").read_text())
     verd = {e["id"]: e["verdict"] for e in rep["records"]}
     assert verd["p_syntax"] == "BLOCKED"
-    assert verd["p_array"] == "BLOCKED"
+    assert verd["p_lvalue"] == "BLOCKED"
     assert verd["p_good"] == "PASS"
+
+
+@_NEEDS_SIM
+def test_a_whole_array_assignment_is_accepted_here_and_the_divergence_is_disclosed(
+        tmp_path):
+    """WHAT `WHOLE_ARRAY` ACTUALLY DOES, pinned instead of assumed.
+
+    It used to be a BLOCKING case in the test above, on the strength of a
+    comment reading "icarus-unsupported". That was true of icarus 13 /
+    Verilog-2005 and is FALSE of the forked iverilog this image ships.
+    MEASURED in the pinned image, on the module `WHOLE_ARRAY` carries, with the
+    gate's OWN command and with the older dialect:
+
+        iverilog -g2012 -t null   EXIT 0, no diagnostic at all
+        iverilog -g2005 -t null   EXIT 1, "Assignment to an entire array or to
+                                   an array slice requires SystemVerilog."
+
+    A whole-array assignment IS legal SystemVerilog, so gating it in is the
+    gate being RIGHT, not the gate leaking. The old assertion was pinning a
+    property of a toolchain rather than of the gate, and it went red the moment
+    the fork moved -- while `p_syntax`, a real syntax error, kept being blocked
+    correctly throughout.
+
+    So the case is KEPT and turned the right way round: this asserts that a
+    construct the OFFICIAL scorer may refuse is gated IN here, and that the run
+    DISCLOSES the version difference rather than hiding it. The gate already
+    warns on stderr and records both figures in its report; that disclosure is
+    what makes the divergence auditable, and this pins it.
+    """
+    batch = _write_batch(tmp_path, [{"id": "p_array", "completion": WHOLE_ARRAY}])
+    out = tmp_path / "responses.jsonl"
+    rep = tmp_path / "rep.json"
+    rc = G.main(["--batch", str(batch), "--out", str(out),
+                 "--report", str(rep), "--without-spec-guards"])
+    assert rc == 0, "nothing here is blocked on this toolchain"
+    assert [r["id"] for r in _read_jsonl(out)] == ["p_array"]
+
+    doc = json.loads(rep.read_text())
+    assert doc["records"][0]["verdict"] == "PASS"
+    # THE DISCLOSURE IS THE POINT: the report names the iverilog this run used
+    # AND the scorer the numbers will be compared against, so a divergence is
+    # readable from the artefact rather than inferred from a green row.
+    assert doc["official_scorer"] == "icarus 13 (cvdp-sim)", doc
+    assert doc["iverilog_version"], doc
 
 
 @_NEEDS_SIM
