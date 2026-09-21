@@ -119,6 +119,7 @@ import inspect
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import sys
@@ -339,11 +340,46 @@ def _verbatim_ngspice_container():
         if not ng:
             continue
         for row in mounts.splitlines():
-            parts = row.split("::")
-            if len(parts) == 3 and parts[0] and parts[0] == parts[1] \
-                    and parts[2] == "true" and os.access(parts[0], os.W_OK):
-                return name, Path(parts[0]), ng
+            if usable_verbatim_mount(row):
+                return name, Path(row.split("::")[0]), ng
     return None
+
+
+def usable_verbatim_mount(row: str) -> bool:
+    """Is this `Source::Destination::RW` row a DIRECTORY this run can put a deck in?
+
+    THE DEFECT THIS CLOSES (measured 2026-09-21 on 8HD-6). The condition used to
+    be "Source == Destination, RW true, and `os.access(W_OK)`" -- and
+    `/var/run/docker.sock` satisfies ALL THREE. A socket is verbatim-mounted at
+    its own path, it is writable, and `os.access` says nothing about what KIND
+    of file it is. `run_suite_in_eda_image.sh` binds that socket whenever an
+    engine is present, so whichever container `docker ps` happened to list
+    first could hand this fixture a socket as its `host_root`:
+
+        ERROR at setup of test_ngspice_split_and_non_self_contained_neither_candidate_loads
+        ...
+        return Path(tempfile.mkdtemp(prefix=DECK_DIR_PREFIX, dir=str(host_root)))
+        NotADirectoryError: [Errno 20] Not a directory:
+            '/var/run/docker.sock/.vibeic_issue193_d0z4n3jt'
+
+    An ERROR at setup, not a skip -- so the file reports a red that is about
+    which containers happened to be running, not about the code. It is
+    HOST-STATE DEPENDENT and therefore intermittent: the same file is 17 passed
+    on the same host minutes later, which is exactly why it has to be closed by
+    the PREDICATE rather than waited out.
+
+    `os.path.isdir` is the whole fix, and it is a STRENGTHENING: every mount
+    that was usable before is still usable, because `mkdtemp(dir=...)` has
+    always required a directory. What changes is that a non-directory is now
+    passed over in favour of the next candidate -- or, if none qualifies, the
+    fixture SKIPS by its own declared route instead of dying in setup.
+    """
+    parts = row.split("::")
+    return bool(len(parts) == 3 and parts[0] and parts[0] == parts[1]
+                and parts[2] == "true"
+                # A DIRECTORY, not merely a writable path: see above.
+                and os.path.isdir(parts[0])
+                and os.access(parts[0], os.W_OK))
 
 
 def _simulate(container, ngspice, deck: Path) -> dict:
@@ -435,6 +471,131 @@ def workdir(ngspice_env):
         shutil.rmtree(work, ignore_errors=True)
 
 
+
+
+def test_a_socket_mount_is_never_chosen_as_the_deck_root(tmp_path):
+    """THE DEFECT, driven with a REAL socket and no docker at all.
+
+    `run_suite_in_eda_image.sh` binds `/var/run/docker.sock` at its own path
+    whenever an engine is present, so it is a verbatim, writable mount of every
+    container started that way. The old predicate asked only Source ==
+    Destination, RW, and `os.access(W_OK)`; a socket answers yes to all three,
+    and `mkdtemp` then died in FIXTURE SETUP:
+
+        NotADirectoryError: [Errno 20] Not a directory:
+            '/var/run/docker.sock/.vibeic_issue193_d0z4n3jt'
+
+    That is an ERROR, not a skip, and it is about which containers `docker ps`
+    listed first -- the same file passed 17/17 on the same host minutes later.
+    An intermittent red cannot be closed by re-running it, so it is closed here
+    at the predicate, with a socket this test makes itself.
+    """
+    sock_path = tmp_path / "probe.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        srv.bind(str(sock_path))
+        assert sock_path.exists() and not sock_path.is_dir()
+        assert os.access(str(sock_path), os.W_OK), (
+            "this control needs a WRITABLE socket; without that the old "
+            "predicate would have rejected it for the wrong reason and this "
+            "test would prove nothing")
+
+        row = f"{sock_path}::{sock_path}::true"
+        assert not usable_verbatim_mount(row), (
+            "a socket is verbatim, writable and RW, and it is NOT a directory "
+            "-- choosing it makes the fixture die in setup with "
+            "NotADirectoryError")
+
+        # THE NEGATIVE CONTROL: a rule that rejected everything would pass the
+        # assertion above and switch this fixture off entirely.
+        d = tmp_path / "real_dir"
+        d.mkdir()
+        assert usable_verbatim_mount(f"{d}::{d}::true"), (
+            "an ordinary writable verbatim directory mount MUST still be "
+            "chosen; this is a rule, not a ban")
+    finally:
+        srv.close()
+
+
+def _fake_docker(sock, rows, probe="/usr/bin/ngspice"):
+    """Stand in for `docker ps`, `docker inspect` and the ngspice probe."""
+    class _CP:
+        def __init__(self, out): self.stdout = out; self.stderr = ""; self.returncode = 0
+    def _run(cmd, *a, **k):
+        if cmd[:2] == ["docker", "ps"]:
+            return _CP("c_under_test\n")
+        if cmd[:2] == ["docker", "inspect"]:
+            return _CP(rows)
+        return _CP(probe + "\n")          # the `command -v ngspice` probe
+    return _run
+
+
+def test_the_selector_passes_over_a_socket_and_takes_the_next_mount(
+        tmp_path, monkeypatch):
+    """THE DEFECT AT THE SELECTOR, not just at the predicate.
+
+    This is the shape that actually happened: a container whose FIRST verbatim
+    writable mount is `/var/run/docker.sock` -- which every container the suite
+    harness starts with an engine has. The loop must pass over it and take the
+    next qualifying mount, not return the socket and not give up.
+    """
+    sock = tmp_path / "docker.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        srv.bind(str(sock))
+        good = tmp_path / "scratch"
+        good.mkdir()
+        rows = f"{sock}::{sock}::true\n{good}::{good}::true\n"
+        monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/docker")
+        monkeypatch.setattr(subprocess, "run", _fake_docker(sock, rows))
+
+        got = _verbatim_ngspice_container()
+        assert got is not None, (
+            "a usable directory mount was listed and must be found")
+        _name, host_root, _ng = got
+        assert Path(host_root) == good, (
+            f"the selector chose {host_root!r}. The socket is listed FIRST and "
+            f"is verbatim, RW and writable -- it must be passed over, because "
+            f"mkdtemp under it raises NotADirectoryError in fixture setup.")
+        # and the chosen root really can hold a deck, which is the whole point
+        own_deck_dir(Path(host_root)).rmdir()
+    finally:
+        srv.close()
+
+
+def test_a_container_offering_only_a_socket_yields_no_env_so_the_fixture_skips(
+        tmp_path, monkeypatch):
+    """THE OTHER DIRECTION, and the one that keeps this honest: when the socket
+    is the ONLY candidate there is nothing usable, and the selector must say so
+    by returning None -- which is the fixture's declared SKIP route. Dying in
+    setup with NotADirectoryError is what it used to do instead, and an ERROR
+    is not a skip."""
+    sock = tmp_path / "docker.sock"
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        srv.bind(str(sock))
+        monkeypatch.setattr(shutil, "which", lambda _n: "/usr/bin/docker")
+        monkeypatch.setattr(subprocess, "run",
+                            _fake_docker(sock, f"{sock}::{sock}::true\n"))
+        assert _verbatim_ngspice_container() is None, (
+            "a socket is not a usable deck root; with nothing else offered the "
+            "selector must yield None so the fixture SKIPS")
+    finally:
+        srv.close()
+
+
+def test_the_mount_predicate_still_refuses_what_it_always_refused(tmp_path):
+    """The three original conditions are unchanged -- this fix only ADDED one."""
+    d = tmp_path / "d"
+    d.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    assert not usable_verbatim_mount(f"{d}::{other}::true")   # not verbatim
+    assert not usable_verbatim_mount(f"{d}::{d}::false")      # read-only
+    assert not usable_verbatim_mount(f"::::true")             # empty source
+    assert not usable_verbatim_mount(f"{d}::{d}")             # malformed row
+    assert not usable_verbatim_mount(
+        f"{tmp_path / 'absent'}::{tmp_path / 'absent'}::true")  # does not exist
 
 
 def test_the_deck_directory_is_this_runs_own_not_a_shared_name(tmp_path):
