@@ -165,23 +165,69 @@ _PRECHECK_ACCEPTS = ('PASS',)
 
 
 def _read_shuttle_precheck(project):
-    """(exists, verdict, operator) read straight off 37.5ic's own report.
+    """(exists, is_an_operators, verdict, operator) off 37.5ic's own report.
+
+    `exists` is a fact about the FILE and keeps its old meaning, because the
+    emitted report publishes it as `shuttle_precheck_present`. `is_an_operators`
+    is the new, separate question -- see `_verdict_is_an_operators` -- and it is
+    the one the shuttle-path rules key on. An UNREADABLE report answers True to
+    both: a corrupt file must stay a non-pass on the shuttle path, exactly as
+    before, so a parse failure can never become "there was no operator".
 
     `verdict` is None when the file is present but unparseable — which is NOT
     an accept: an unreadable verdict is reported as NOT_DETERMINED so that a
     corrupt report cannot become a quiet pass."""
     p = project / _SHUTTLE_PRECHECK_REPORT
     if not p.is_file():
-        return False, None, None
+        return False, False, None, None
     try:
         data = json.loads(p.read_text(errors="replace"))
     except (OSError, ValueError):
-        return True, "NOT_DETERMINED", None
+        return True, True, "NOT_DETERMINED", None
     if not isinstance(data, dict):
-        return True, "NOT_DETERMINED", None
+        return True, True, "NOT_DETERMINED", None
     return (True,
+            _verdict_is_an_operators(data),
             data.get("verdict") or "NOT_DETERMINED",
             data.get("shuttle") or data.get("shuttle_id"))
+
+
+def _verdict_is_an_operators(data):
+    """Is this report an OPERATOR'S acceptance, or our own arm saying there is
+    no operator to ask?
+
+    THE FILE'S PRESENCE IS NOT THE ANSWER, and reading it as one is what made a
+    DIE's hand-off fail. `tapeout_precheck` writes this report on every run that
+    reaches 37.5ic, including the runs where its own docstring says the absence
+    is legitimate:
+
+        NOT_APPLICABLE  the registry names no live shuttle for this PDK. THE ONLY
+                        absence that is not a defect -- the owner's "one fewer arm".
+        NOT_DETERMINED  the arm should have run and could not.
+
+    MEASURED on spm run13 and run8 (8HD-4, `_lane_icspm5`), both DIEs:
+
+        verdict                  NOT_APPLICABLE
+        arm_state                NOT_APPLICABLE
+        arm_ran                  false
+        verdict_is_the_operators false
+        shuttle                  null
+        reason   "validated informational catalogue; owner DIE has no operator purchase"
+
+    The report states IN ITS OWN FIELDS that no operator was asked. Treating it
+    as a shuttle hand-off made this gate emit
+    `FOUNDRY_HANDOFF_SHUTTLE_PRECHECK_REFUSED` naming "the shuttle operator
+    (unnamed in the report)" -- an ERROR about a refusal by a party that does not
+    exist, on every digital DIE, however good the layout.
+
+    CONSERVATIVE BY CONSTRUCTION. Only an EXPLICIT `verdict_is_the_operators:
+    false` re-classifies. A report that omits the field is read exactly as
+    before, so no existing kit changes meaning and a silence is never credited
+    as "there was no operator" -- the same rule `tapeout_precheck` applies when
+    it refuses to write NOT_APPLICABLE for a PDK it could not determine.
+    """
+    flag = data.get("verdict_is_the_operators")
+    return flag is not False
 
 
 def _member_alternatives(entry):
@@ -822,11 +868,16 @@ def main(argv=None):
 
     # THE OPERATOR'S REFUSAL. See the block comment at _SHUTTLE_PRECHECK_REPORT.
     # Re-derived from the report on disk, never taken from the kit.
-    precheck_present, precheck_verdict, precheck_operator = \
-        _read_shuttle_precheck(project)
-    evidence_mode = _MODE_SHUTTLE if precheck_present else _MODE_UNDECLARED
+    # `precheck_is_an_operators` is FALSE when 37.5ic ran and reported that
+    # there was no operator to ask (see `_verdict_is_an_operators`). That is not
+    # the shuttle path, so neither the mode nor the operator-refusal rule below
+    # applies to it.
+    precheck_present, precheck_is_an_operators, precheck_verdict, \
+        precheck_operator = _read_shuttle_precheck(project)
+    evidence_mode = (_MODE_SHUTTLE if precheck_is_an_operators
+                     else _MODE_UNDECLARED)
 
-    if precheck_present and precheck_verdict not in _PRECHECK_ACCEPTS:
+    if precheck_is_an_operators and precheck_verdict not in _PRECHECK_ACCEPTS:
         substance_findings.append({
             "severity": "ERROR",
             "rule": "FOUNDRY_HANDOFF_SHUTTLE_PRECHECK_REFUSED",
