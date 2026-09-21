@@ -3633,7 +3633,7 @@ def blacklist_second_pass_plan(raw: str, synth_log_text: str
 
 
 def unproven_names(raw: str) -> List[str]:
-    """The gold-side names of pass 1's unproven `$equiv` cells. PURE.
+    r"""The gold-side names of pass 1's unproven `$equiv` cells. PURE.
 
     `equiv_status` prints one `Unproven $equiv <cell>: \<x>_gold \<x>_gate`
     line per unproven point and nothing per PROVEN point, so this list is the

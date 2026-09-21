@@ -954,7 +954,7 @@ def _pl_import():
 
 
 def _top_from_netlist(netlist_p: Path) -> Optional[str]:
-    """The top module the NETLIST DECLARES, or None.
+    r"""The top module the NETLIST DECLARES, or None.
 
     THE FALLBACK ONLY: an explicit `top` always wins, and this is consulted when
     the caller supplied none.
