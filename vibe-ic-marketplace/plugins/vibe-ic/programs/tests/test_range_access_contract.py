@@ -35,7 +35,7 @@ def test_original_input_l4_consumer(tmp_path):
  0x10-0x1f in this fixture reaches L4 through `append_documented_ranges` as
  BLOCK0..BLOCK15, and that producer carries the table's own token -- which is
  what the L4 register map publishes everywhere else too. MEASURED over every
- corpus under `tests/phase1_fixtures/`: the ordinary table parser emits `R`,
+ corpus under `programs/tests/fixtures/phase1_local/`: the ordinary table parser emits `R`,
  `R/W`, `RW`, i.e. the document's acronym, never a normalised one. The
  `RO`/`WO` vocabulary belongs to `_extract_memmap_range_constants`' synthetic
  MEMMAP_LOW/HIGH constants, and the runner DELIBERATELY does not promote those

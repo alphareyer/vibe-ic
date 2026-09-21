@@ -9,7 +9,7 @@ def emit(tmp_path,text,existing=None):
  report=run(tmp_path);return json.loads(f.read_text())['fields']['coverage_goals'],report
 
 def test_original_acceptance_targets(tmp_path):
- text=(Path(__file__).resolve().parents[2]/'tests/phase1_fixtures/acceptance_targets_local/verification_plan.md').read_text()
+ text=(Path(__file__).resolve().parent/'fixtures/phase1_local/acceptance_targets_local/verification_plan.md').read_text()
  goals,_=emit(tmp_path,text)
  assert len(goals)==5
  g=next(x for x in goals if x['name']=='NIST FIPS-180-4 functional')

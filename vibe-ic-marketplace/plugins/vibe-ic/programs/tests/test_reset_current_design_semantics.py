@@ -33,7 +33,7 @@ def test_reset_producer_and_waveform(case,text,name,sync,polarity):
   assert values==[sync+' '+polarity.replace('_','-')]
 
 def test_verbatim_intake_fixture():
- text=(Path(__file__).resolve().parents[2]/'tests/phase1_fixtures/reset_historical_comparison/reset.md').read_text()
+ text=(Path(__file__).resolve().parent/'fixtures/phase1_local/reset_historical_comparison/reset.md').read_text()
  l9={'ports':[{'name':'reset_n'}]}
  D._v1_6_369_emit_reset_domains(l9,{'L2.md':text})
  assert l9['reset_domains'][0]['sync']=='synchronous'

@@ -34,7 +34,7 @@ def test_a_commented_out_declaration_is_not_this_designs_top(text,expected):
 
 
 def test_full_minimal_l9_producer(tmp_path):
- fixture=Path(__file__).resolve().parents[2]/'tests/phase1_fixtures/explicit_top_context_local/L8_submodule_integration.md'
+ fixture=Path(__file__).resolve().parent/'fixtures/phase1_local/explicit_top_context_local/L8_submodule_integration.md'
  docs={fixture.name:fixture.read_text()}
  inp=tmp_path/'input/docs';inp.mkdir(parents=True);(inp/fixture.name).write_text(docs[fixture.name])
  import json
