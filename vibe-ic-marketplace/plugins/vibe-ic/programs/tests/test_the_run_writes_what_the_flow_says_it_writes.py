@@ -237,21 +237,90 @@ def test_the_runner_invokes_it_before_the_completion_audit_refresh():
         "the producers must write before the audit reads")
 
 
+def _stage_one_performed_step(project: Path) -> str:
+    """Put ONE declared sibling on disk, so the census has a POPULATION.
+
+    RC13: `owed()` judges a clause only when the run is known to have performed
+    its step, evidenced by one of that step's OTHER declared outputs existing.
+    A project with none of them is not a clean run, it is an UNMEASURED one, and
+    `flow_declared_producer_run` now refuses it with ZERO_POPULATION / rc 2
+    rather than reporting every clause as "already produced by the run". These
+    two tests are about what the census SAYS once it has something to judge, so
+    they have to give it something -- the old fixtures were relying on the
+    fail-open to get a verdict at all.
+    """
+    sib = next(s for c in P.declared_producer_clauses()
+               for s in (c.get("siblings") or []) if s and "*" not in s)
+    dst = project / sib
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text("{}\n")
+    return sib
+
+
 def test_a_missing_program_is_NAMED_not_swallowed(tmp_path):
     (tmp_path / "out").mkdir()
     (tmp_path / "out/evidence.txt").write_text("x\n")
+    sib = _stage_one_performed_step(tmp_path)
     rec = P.run(tmp_path)
     # the shipped clauses are what `run` reads; assert the shape of the record
     assert rec["program"] == P.PROGRAM
     assert set(rec) >= {"declared_clauses", "owed", "executed",
-                        "unexecutable", "verdict"}
+                        "unexecutable", "verdict", "population",
+                        "steps_the_run_did_not_perform"}
+    assert rec["population"] > 0, (
+        f"staging {sib} must make at least one clause judgeable")
     assert rec["verdict"] in ("PRODUCED", "INCOMPLETE")
 
 
 def test_the_record_is_written_and_lists_every_decision(tmp_path):
     out = tmp_path / "rec.json"
+    _stage_one_performed_step(tmp_path)
     rc = P.main([str(tmp_path), "--json", str(out)])
-    assert rc in (0, 1)
+    assert rc in (0, 1), "a project with a performed step is judged, not refused"
     rec = json.loads(out.read_text())
     assert rec["declared_clauses"] == len(P.declared_producer_clauses())
     assert len(rec["results"]) + len(rec["skipped"]) == rec["declared_clauses"]
+
+
+# ── RC13 / H2 — a census over an EMPTY population is the one red a census has ──
+#
+# MEASURED at f19703dfa on an empty directory, before the fix:
+#
+#     [PRODUCED] flow_declared_producer_run — 29 declared producer clause(s);
+#     29 already produced by the run, 0 owed, 0 executed, 0 document(s) now
+#     present                                                          rc 0
+#
+# Every word after the first number was false. `owed()` decides a clause is not
+# judgeable when the run left none of that step's OTHER declared outputs on disk,
+# and it put those clauses in `skipped` beside the genuinely-already-produced
+# ones; `already_produced_by_the_run` was `len(skipped)`, so a project where
+# NOTHING ran read as a finished flow. `gate_zero_denominator_refuses_check`
+# caught it as CENSUS_OVER_AN_EMPTY_POPULATION_EXITS_ZERO and named the remedy
+# this implements: refuse with rc 2 BEFORE the findings branches, because a
+# refusal under `if rc == 0` is switched off by any finding -- including one read
+# from the flow yaml, which says nothing about the tree in front of it.
+def test_an_empty_subject_is_refused_not_reported_as_produced(tmp_path):
+    out = tmp_path / "rec.json"
+    rc = P.main([str(tmp_path), "--json", str(out)])
+    assert rc == 2, "an unmeasured project is a disclosed skip, never a pass"
+    rec = json.loads(out.read_text())
+    assert rec["verdict"] == "ZERO_POPULATION"
+    assert rec["population"] == 0
+    assert rec["already_produced_by_the_run"] == 0, (
+        "nothing can have been produced by a run that performed no step")
+    assert rec["steps_the_run_did_not_perform"] == rec["declared_clauses"]
+    # THE REPORT IS STILL WRITTEN. A producer that writes nothing when it
+    # declines cannot be told from one that never ran.
+    assert out.is_file() and rec["program"] == P.PROGRAM
+
+
+def test_the_two_kinds_of_skip_are_counted_apart(tmp_path):
+    """`skipped` holds two different facts and they are reported separately."""
+    _stage_one_performed_step(tmp_path)
+    rec = P.run(tmp_path)
+    assert (rec["already_produced_by_the_run"]
+            + rec["steps_the_run_did_not_perform"]) == len(rec["skipped"])
+    assert rec["population"] == (rec["owed"]
+                                 + rec["already_produced_by_the_run"])
+    assert rec["population"] + rec["steps_the_run_did_not_perform"] == (
+        rec["declared_clauses"])
