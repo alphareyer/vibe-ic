@@ -145,7 +145,12 @@ def test_the_antenna_stage_no_longer_swallows_its_own_reroute_failure():
     # the exit that replaced it is a recorded refusal, not a note.
     t = _antenna_block()
     i = t.index('puts "ANTENNA_DIODE_ROLLED_BACK')
-    assert "set _ant_refused" in t[i:i + 600]
+    # R-0915-121 lengthened that exit's message: it now reports the two damage
+    # modes separately, names the checkpoint the parent is asked to restore
+    # from, and cites ORD-2008 for why this session does not restore in place.
+    # The window is the message's own measured length; the property -- this
+    # exit RECORDS its refusal rather than only printing it -- has not moved.
+    assert "set _ant_refused" in t[i:i + 644]
 
 
 def test_the_antenna_stage_still_tries_its_native_reroute_first():

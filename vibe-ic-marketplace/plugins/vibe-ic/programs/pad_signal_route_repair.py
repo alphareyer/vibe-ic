@@ -46,14 +46,29 @@ def _word(value: str) -> str:
 
 
 def strict_integrity_tcl(marker: str) -> str:
-    """Use the shared geometric connectivity check, refusing unknown or holes."""
-    t = _routing_integrity_check_tcl(marker)
+    """Use the shared geometric connectivity check, refusing unknown or holes.
+
+    R-0915-121(b) -- THE REFUSAL NAMES ITS FILE, BECAUSE TWELVE NAMES ARE NOT
+    THE ANSWER. `$_unrn` is capped at twelve by the shared body, deliberately:
+    stdout is a summary, not a net dump. But this marker is the one that ENDS
+    THE RUN, and on two ICs the twelve it printed could not be matched against
+    the nets the router's own checkConnectivity had named -- on spm run13 the
+    raise named 86 distinct nets, the checker found 84 unwired, and the twelve
+    were not among the 86, so membership was simply unresolvable from the run's
+    own output. The uncapped list now goes to a file and the refusal says where
+    it is; the capped list stays in the message for the reader.
+    """
+    membership = f"unrouted_{marker.lower()}.txt"
+    t = _routing_integrity_check_tcl(marker, membership_path=membership)
     handler = f'puts "{marker}_UNROUTED_CHECK_NONFATAL: $e"'
     if t.count(handler) != 1:
         raise ValueError("Shared integrity failure handler changed")
     t = t.replace(handler,
                   f'error "{marker}_UNROUTED_CHECK_FAILED: $e"')
-    return t + f'if {{$_unr != 0}} {{error "{marker}_INCOMPLETE: $_unr $_unrn"}}\n'
+    return t + (f'if {{$_unr != 0}} {{error "{marker}_INCOMPLETE: $_unr '
+                f'$_unrn -- the full membership of all $_unr net(s) is in '
+                f'{membership} beside this log; the list in this message is '
+                f'capped at 12"}}\n')
 
 
 def normal_recovery_tcl(rpt_path: str,

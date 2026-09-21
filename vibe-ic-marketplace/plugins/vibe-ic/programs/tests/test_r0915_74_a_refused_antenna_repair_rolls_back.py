@@ -83,7 +83,15 @@ def test_a_failed_checkpoint_is_named_and_not_assumed():
 # loosening: every marker below still has to set `_ant_refused` in the same
 # breath as it prints. Only ANTENNA_DIODE_ROLLED_BACK needs more than 260
 # characters, because its message names the nets, the diode count and why no
-# route is run -- 408 characters before the assignment.
+# route is run. R-0915-121 lengthened it again -- it now also reports the two
+# damage modes separately (lost entirely / lost in part), names the checkpoint
+# the parent is asked to restore from, and cites ORD-2008 for why this session
+# does not restore in place. The measured distance is 644, and it is the
+# message's own length and nothing else: the uncapped membership-file write
+# that R-0915-121(b) adds at that exit is emitted AFTER the assignment, so no
+# optional IO sits between an exit's report and the refusal it records. This
+# test is what forced that ordering. The number tracks the message; the
+# PROPERTY it guards has not moved.
 @pytest.mark.parametrize("marker,window", [
     ("ANTENNA_LOOP_CHECK_NONFATAL", 260),
     ("ANTENNA_NATIVE_REROUTE_NONFATAL", 260),
@@ -94,7 +102,7 @@ def test_a_failed_checkpoint_is_named_and_not_assumed():
     # connectivity judgement's broken verdict -- takes its place here, and it
     # is the one that actually leaves a mutated route behind: it has just
     # destroyed this pass's diodes.
-    ("ANTENNA_DIODE_ROLLED_BACK", 600),
+    ("ANTENNA_DIODE_ROLLED_BACK", 644),
     # R-0915-114(b): this exit is no longer a note. The stage that inserted
     # the diodes now answers for their wires -- MEASURED (int6): the native
     # -reroute threw DRT-0206, the fallback threw DRT-1231 TWICE, both were
