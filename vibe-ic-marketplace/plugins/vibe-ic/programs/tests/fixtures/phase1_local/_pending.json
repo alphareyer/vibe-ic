@@ -8,7 +8,7 @@
     "actual": "sync=unknown; normalized=synchronous active-high",
     "version_observed": "d7d1891b41c7a6c07dbbc3a6abaebd5f93f0e699",
     "version_lkg": "",
-    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/reset_historical_comparison/reset.md"
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/reset_historical_comparison/reset.md"
   },
   {
     "issue": "LOCAL:SHA1110_REGISTER_SEMANTICS",
@@ -19,7 +19,7 @@
     "actual": "range endpoints RO; WHOLE_REG fields; CTRL reset_value 0x1",
     "version_observed": "d7d1891b41c7a6c07dbbc3a6abaebd5f93f0e699",
     "version_lkg": "",
-    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/register_contract_local/L5_register_map.md"
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/register_contract_local/L5_register_map.md"
   },
   {
     "issue": "LOCAL:SHA1120_NAMED_FIELDS",
@@ -30,7 +30,7 @@
     "actual": "WHOLE_REG only",
     "version_observed": "d7d1891b41c7a6c07dbbc3a6abaebd5f93f0e699",
     "version_lkg": "",
-    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/named_register_fields_local/L5_register_map.md"
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/named_register_fields_local/L5_register_map.md"
   },
   {
     "issue": "LOCAL:SHA1130_SCALAR_RESET",
@@ -41,7 +41,7 @@
     "actual": "CTRL reset_value0x1 from broad scalar proximity",
     "version_observed": "d7d1891b41c7a6c07dbbc3a6abaebd5f93f0e699",
     "version_lkg": "",
-    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/scalar_reset_binding_local/L4_command_protocol.md"
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/scalar_reset_binding_local/L4_command_protocol.md"
   },
   {
     "issue": "LOCAL:SHA1300_TOP_PRESENCE",
@@ -52,7 +52,7 @@
     "actual": "fallback sha256; no_top_module_in_input true",
     "version_observed": "8a5557dd135204e505a6df22412524f384303082",
     "version_lkg": "",
-    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/explicit_top_context_local/L8_submodule_integration.md"
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/explicit_top_context_local/L8_submodule_integration.md"
   },
   {
     "issue": "LOCAL:SHA1930_DOCUMENTED_RANGES",
@@ -63,7 +63,7 @@
     "actual": "BLOCK/DIGEST name bindings absent; synthetic endpoints not equivalent",
     "version_observed": "43f84790d55b07a2cb9eb5e5ae8911be0e33c3e0",
     "version_lkg": "",
-    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/documented_register_ranges_local/L5_register_map.md"
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/documented_register_ranges_local/L5_register_map.md"
   },
   {
     "issue": "LOCAL:SHA1950_ADDRESS_SPACE_ENDPOINT",
@@ -74,7 +74,7 @@
     "actual": "MEMMAP_HIGH_000000FF and synthetic boundary records emitted as registers",
     "version_observed": "261bd78f2f1e342800b8658de7130f45260a622c",
     "version_lkg": "",
-    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/address_space_endpoints_local/registers.md"
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/address_space_endpoints_local/registers.md"
   },
   {
     "issue": "LOCAL:SHA2000_SCALAR_WIDTH",
@@ -85,7 +85,7 @@
     "actual": "PAYLOAD emitted without width_bits",
     "version_observed": "4972fbf57ab075d803c96fd33ea28f4a7c29cd01",
     "version_lkg": "",
-    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/scalar_register_width_local/registers.md"
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/scalar_register_width_local/registers.md"
   },
   {
     "issue": "LOCAL:SHA2036_CONTINUATION",
@@ -96,7 +96,7 @@
     "actual": "launch write dropped, one procedure split into2, repeat targets no longer local",
     "version_observed": "7f777b34f89bee3dbc4bfc769f03cf93493ac389",
     "version_lkg": "",
-    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/usage_continuation_local/register_usage.md"
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/usage_continuation_local/register_usage.md"
   },
   {
     "issue": "LOCAL:SHA2055_COVERAGE_GOALS",
@@ -107,7 +107,7 @@
     "actual": "all four rows functional_vector, anchor gate counts them executable",
     "version_observed": "46e51026bd67ba986e8ab623e13080f651818375",
     "version_lkg": "",
-    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/coverage_goal_table_local/verification_plan.md"
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/coverage_goal_table_local/verification_plan.md"
   },
   {
     "issue": "LOCAL:SHA2120_L22",
@@ -118,6 +118,6 @@
     "actual": "zero goals; consumer SKIP rc2",
     "version_observed": "f4b278dfd9668a132bd249d126ea1b85b824836e",
     "version_lkg": "",
-    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/tests/phase1_fixtures/acceptance_targets_local/verification_plan.md"
+    "fixture_path": "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/phase1_local/acceptance_targets_local/verification_plan.md"
   }
 ]

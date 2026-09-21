@@ -131,16 +131,32 @@ def test_validate_flags_path_in_filename():
 # emit_fixture — writes the snippet + appends pending sidecar
 # ----------------------------------------------------------------------
 def test_emit_fixture_writes_snippet_and_pending(tmp_path):
-    # The emitter writes under
-    # <repo_root>/vibe-ic-marketplace/plugins/vibe-ic/programs/tests/phase1_fixtures/.
+    # The emitter writes under <repo_root>/vibe-ic-marketplace/plugins/vibe-ic/
+    # programs/tests/fixtures/phase1_local/<project>/.
+    #
+    # THIS COMMENT WAS ALREADY WRONG BEFORE vibe-ic#1391's fix, and that is
+    # itself part of the evidence: it named a directory under `programs/tests`
+    # while the code wrote to `plugins/vibe-ic/tests/phase1_fixtures/`. The
+    # comment had the intent right and nothing checked the code against it, so
+    # the assertion below now pins the DIRECTORY and not merely the file's
+    # existence -- `is_file()` was true at the wrong location too.
     parsed = mod._parse_form_issue(_GOOD_BODY)
     fixture = mod._emit_fixture(tmp_path, parsed, issue_number=5)
     assert fixture.is_file()
+    assert fixture.relative_to(tmp_path).as_posix() == (
+        "vibe-ic-marketplace/plugins/vibe-ic/programs/tests/fixtures/"
+        "phase1_local/spm/datasheet.txt"), fixture.relative_to(tmp_path)
     assert fixture.name == "datasheet.txt"
     assert "line one of the spec" in fixture.read_text()
 
-    pending = (tmp_path / "vibe-ic-marketplace/plugins/vibe-ic/tests"
-               / "phase1_fixtures" / "_pending.json")
+    # vibe-ic#1391: the intake writes INSIDE the pytest testpath, beside the
+    # suite that reads these fixtures. This path is the contract, so it is
+    # asserted here rather than left to whatever the program happens to build.
+    pending = (tmp_path / "vibe-ic-marketplace/plugins/vibe-ic/programs/tests"
+               / "fixtures" / "phase1_local" / "_pending.json")
+    assert "plugins/vibe-ic/tests/" not in str(pending), (
+        "the intake must not write to the phantom tree whose absence "
+        "test_issue1391_thrash_guard_watches_a_path_that_exists.py pins")
     records = json.loads(pending.read_text())
     assert records[-1]["issue"] == 5
     assert records[-1]["project"] == "spm"

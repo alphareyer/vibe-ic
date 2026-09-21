@@ -12,8 +12,15 @@ def test_neutral_continuation_and_repeat():
  assert steps[-1]['source_repeat_steps']=='1-3'
 
 def test_original_prompt_order_and_repeat():
- text=(Path(__file__).resolve().parents[2]/'tests/phase1_fixtures/usage_continuation_local/register_usage.md').read_text()
+ text=(Path(__file__).resolve().parent/'fixtures/phase1_local/usage_continuation_local/register_usage.md').read_text()
  seqs=extract(text);assert len(seqs)==1;steps=seqs[0]['steps'];assert len(steps)==8
+ # H5 -- the MEMBERS, not only how many. `len(steps)==8` is satisfied by eight
+ # of anything: the defect this fixture was filed for (LOCAL:SHA2036) DROPPED an
+ # indented launch write and SPLIT one procedure into two, and a re-split that
+ # still totalled eight would read green. The shape is the claim.
+ assert [(s['step'],s['action_type']) for s in steps]==[
+     (1,'read'),(2,'write'),(3,'write'),(4,'write'),
+     (5,'poll'),(6,'check'),(7,'read'),(8,'repeat')]
  assert 'write ADDR_CTRL bit0 = 1' in steps[3]['action'] and 'OR bit1 = 1' in steps[3]['action']
  assert steps[4]['action_type']=='poll' and steps[6]['action_type']=='read'
  assert steps[7]['repeat_steps']=='2-7' and steps[7]['next_state']=='step 2'

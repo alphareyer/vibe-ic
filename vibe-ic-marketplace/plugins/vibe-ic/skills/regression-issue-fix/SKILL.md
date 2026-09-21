@@ -27,7 +27,7 @@ Three possible outcomes:
 
 | Exit code | Meaning | Next action |
 |---|---|---|
-| 0 + fixture written | Issue meets template; fixture under `tests/phase1_fixtures/<project>/` | Step 2 |
+| 0 + fixture written | Issue meets template; fixture under `programs/tests/fixtures/phase1_local/<project>/` | Step 2 |
 | 0 + `--no-emit-fixture` | Validation only | Re-run without `--no-emit-fixture` to land the fixture |
 | 1 | Issue is missing verbatim input / expected / actual / version | **STOP. Post a comment on the issue asking the verifier to fill the gaps using `.github/ISSUE_TEMPLATE/picker-or-extractor-regression.yml`. Do NOT start guessing.** |
 
@@ -116,7 +116,7 @@ Core agent 已自行驗證並關閉此 issue（已加 core-closed 標籤）。fi
    snippet are bounced back to the verifier with a templated
    ask. No guessing rounds.
 2. **Fixture lands first, fix lands second.** A regression that
-   doesn't reproduce in `tests/phase1_fixtures/` cannot be
+   doesn't reproduce in `programs/tests/fixtures/phase1_local/` cannot be
    fixed reliably; the fixture is part of the issue, not a
    downstream artefact.
 3. **No silent thrash.** The pre-commit guard refuses fixture
@@ -134,7 +134,7 @@ Core agent 已自行驗證並關閉此 issue（已加 core-closed 標籤）。fi
 * Intake program: `programs/regression_issue_intake_check.py`
 * Thrash guard: `programs/picker_fixture_thrash_guard.py` (wired
   into `tools/ci/pre_commit_check.sh`)
-* Fixture suite: `tests/phase1_fixtures/` +
+* Fixture suite: `programs/tests/fixtures/phase1_local/` +
   `tests/test_phase1_fixtures_regression.py`
 * Sibling skill (general bug→backlog): `skills/community-backlog-submit`
 

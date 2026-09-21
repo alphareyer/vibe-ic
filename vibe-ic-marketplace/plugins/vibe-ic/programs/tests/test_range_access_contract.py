@@ -44,7 +44,7 @@ def test_original_input_l4_consumer(tmp_path):
  publishes, and what the consumer resolves it to. Asserting `WO` here asserted
  a second vocabulary into one document, beside a STATUS row spelled `R`.
  """
- root=Path(__file__).resolve().parents[2]/'tests/phase1_fixtures/register_contract_local'
+ root=Path(__file__).resolve().parent/'fixtures/phase1_local/register_contract_local'
  docs={f.name:f.read_text() for f in root.glob('*.md')}
  result=D.gen_l4_regmap(tmp_path,docs)
  l4=json.loads(result.path.read_text());rows=l4['registers']
