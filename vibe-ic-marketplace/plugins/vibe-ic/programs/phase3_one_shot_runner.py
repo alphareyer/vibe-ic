@@ -8522,6 +8522,10 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         "  puts \"PG_REROUTE_OWED: $_pg_delta terminal(s) gained a net "
         "($_pg_bad_before -> $_pg_bad_after); re-routing so the spacing engine "
         "sees their rails\"\n"
+        # The same guard every other `detailed_route` site carries, at THIS
+        # site: the option must be defined where it is used, including on a
+        # PnR resume that deletes the block which defined it first.
+        "  if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
         "  if {[catch {detailed_route -verbose 0 {*}$_vic_drc_opt} _pgrr_err]} {\n"
         "    puts \"PG_REROUTE_FAILED: $_pgrr_err\"\n"
         "    error \"PG_REROUTE_FAILED: $_pgrr_err -- the PG re-route rips and "
