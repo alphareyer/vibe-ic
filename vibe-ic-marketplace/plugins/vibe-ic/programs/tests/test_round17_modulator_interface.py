@@ -127,10 +127,18 @@ def test_the_declared_clock_actually_switches_something():
 
     ROUND 18: `stage` is a LIST of groups now — the integrator cascade and
     the conversion-window counter — so this reads the group the switches are
-    in rather than indexing a dict that no longer exists."""
+    in rather than indexing a dict that no longer exists.
+
+    ROUND-ICADC2: the gate net is RESOLVED through the entry's declared phase
+    aliases before it is compared. The property is "the declared clock
+    switches something"; the literal net name was only ever the mechanism, and
+    an entry that drives its switches from a declared NON-OVERLAPPING phase
+    pair still switches them from `clk`. A gate on a net that is not a clock
+    phase still resolves to itself and still fails."""
     st = a2._stage_groups(ENTRY)[0]
+    aliases = ENTRY.get(a2.CLOCK_PHASE_ALIASES_KEY)
     gated = [d for d in st["devices"] if len(d["nets"]) == 4
-             and d["nets"][1] in ("clk", "nclkb")]
+             and a2._resolve_phase(d["nets"][1], aliases) in ("clk", "nclkb")]
     assert len(gated) >= 4, [d["name"] for d in gated]
 
 

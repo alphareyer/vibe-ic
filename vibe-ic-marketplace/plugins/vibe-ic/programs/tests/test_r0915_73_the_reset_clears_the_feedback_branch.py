@@ -222,7 +222,12 @@ def test_outside_the_reset_the_branch_is_on_the_clock_it_always_was(emitted_ir):
     gates = {d["name"]: d["nets"] for d in emitted_ir["devices"]}
     # the input branch is untouched and still on the raw clock: the two
     # branches must meet at the summing node in the SAME transfer
-    assert gates["mn_cstv1"][1] == "nclkb"
+    # ROUND-ICADC2: RESOLVED through the entry's declared phase aliases. The
+    # property is that the two branches meet at the summing node in the SAME
+    # transfer phase; `nclkb` was the mechanism. A branch moved to a genuinely
+    # different phase still resolves to that phase and still fails here.
+    _al = a2.LIBRARY["delta_sigma"][a2.CLOCK_PHASE_ALIASES_KEY]
+    assert a2._resolve_phase(gates["mn_cstv1"][1], _al) == "nclkb"
     assert gates["mn_dacs1"][1] == "nckdac"
     assert gates["mn_dacr1"][1] == "nckdacb"
 
