@@ -28033,8 +28033,24 @@ def _v1_8_100_signoff_drv_repair_tcl(
         # A pass that reached 0 cannot be beaten, and the loop's own
         # SDR_CONVERGED test only fires on the DRV count at the TOP of the
         # next pass. Stop here on a measured-clean ROUTE.
-        "    if {$_sdr_pass_n == 0} { puts \"SDR_PASS_ROUTE_CLEAN: pass $_sdr_p "
-        "closed at 0 router violations; no later pass can improve on clean\"; break }\n"
+        # ...AND IT MUST NOT SWALLOW THE GIVE-UP. `_sdr_stop` is set by a
+        # partial repair EARLIER in this same pass, and its own disclosure sits
+        # BELOW this break. When both are true -- a pass that gave up on the
+        # repair and then happened to route clean -- this break fired first and
+        # `SDR_STOPPED_AFTER_PARTIAL_REPAIR` was never printed at all, so the
+        # run reported a clean close and said NOTHING about the repair it
+        # abandoned. The loop's behaviour was right (it stopped, one pass); the
+        # DISCLOSURE was missing, and a silent give-up is the exact thing
+        # `test_the_give_up_still_terminates_the_loop` exists to forbid.
+        # Both facts are true, so both are told, and the clean-route break is
+        # otherwise untouched.
+        "    if {$_sdr_pass_n == 0} {\n"
+        "      if {$_sdr_stop} { puts \"SDR_STOPPED_AFTER_PARTIAL_REPAIR: pass "
+        "$_sdr_p completed (legalized + rerouted)\" }\n"
+        "      puts \"SDR_PASS_ROUTE_CLEAN: pass $_sdr_p "
+        "closed at 0 router violations; no later pass can improve on clean\"\n"
+        "      break\n"
+        "    }\n"
         # v1.8.100 r2 — the seed is HELD, not halved. MEASURED (iter1): halving
         # the repeater spacing each pass drove the count 314 -> 747 -> 647 -> 70
         # — over-splitting creates short nets whose OWN pins then violate, the
