@@ -41019,14 +41019,32 @@ def _effective_deliverable(project: Path,
             # the publisher's own ordering says the derivation is the fall-back
             # when the declaration has not spoken.
             #
-            # `attestation_of` is this repo's ONE reader of "who answered and
-            # does that count", and it is what separates the two cases that
-            # `is_answered` alone cannot: SILENCE (`ANSWERED_BY_MISSING`) from
-            # an answer that is present and does not DECLARE. `raw_answer`
-            # would also show the difference and says of itself that it is for
-            # disclosure only and never for a decision, so it is not used here.
-            if (_td.attestation_of(doc, "deliverable").get("answered_by")
-                    == _td.ANSWERED_BY_MISSING):
+            # WHICH READER DRAWS THAT LINE, and the one I got wrong first.
+            # #2425 used `attestation_of(doc, "deliverable")["answered_by"] ==
+            # ANSWERED_BY_MISSING`. That asks about the PROVENANCE MAP, not
+            # about whether an answer exists: a declaration carrying
+            # `{"answers": {"deliverable": "HARDMACRO"}}` and NO provenance at
+            # all reports `answered_by=missing`, so an UNATTESTED answer was
+            # read as silence and regained its value through the router marker.
+            # That is the precise hole #2376 had closed, reopened from the other
+            # side, and `test_refused_declaration_cannot_fall_back_to_ip_marker`
+            # is what caught it.
+            #
+            # `owner_attestation_refusals` is the reader whose whole purpose is
+            # this line, and it draws it where the module's own words do: it
+            # refuses ONLY a question that IS answered and whose attestation
+            # does not declare ("a value that LOOKS like a declaration, routes
+            # like one, and was not declared by anybody entitled to declare
+            # it"), and it deliberately says nothing about an unanswered one,
+            # "the reason a blank declaration is still a legal one".
+            #
+            #   answered + attested  -> returned above
+            #   answered, unattested -> REFUSED here, never the derivation
+            #   unanswered (silent)  -> the derivation, which is the fall-back
+            #                           the publisher's own ordering names
+            _refused = {r.get("key")
+                        for r in _td.owner_attestation_refusals(doc)}
+            if "deliverable" not in _refused:
                 return derived
     except Exception:                                          # noqa: BLE001
         pass
