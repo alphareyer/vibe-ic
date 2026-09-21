@@ -485,6 +485,85 @@ def _phase3_has_run(project: Path) -> bool:
     return d.is_dir() and any(d.rglob("*.json"))
 
 
+def _declared_process_corner_roles(project: Path, native: Any, required: List[str]
+                                   ) -> Tuple[Optional[Dict[str, set]], Optional[str]]:
+    """The sign-off role the RUN ITSELF declared each process corner would serve.
+
+    The flow declares this outright in its own stance artifact
+    (`setup_process_corner` / `hold_process_corner`), and the owning corner-record
+    gate judges a corner for the ROLE it was declared to serve: setup is signed
+    off at the slow corner and hold at the fast one, so demanding hold slack of
+    the slow corner would be a fabricated violation rather than a found one.
+
+    This reads the DECLARATION -- what evidence is owed -- and never a verdict.
+    The evidence itself is still read from the declared audit's native bytes.
+    Returns (None, None) when the run declared no role map covering the required
+    corners, so that an absent declaration keeps the stricter both-roles demand
+    instead of relaxing it.
+    """
+    try:
+        decl = native.read_declarations(project)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None, None
+    rows = decl.get("declared") if isinstance(decl, dict) else None
+    if not isinstance(rows, list):
+        return None, None
+    roles: Dict[str, set] = {}
+    source: Optional[str] = None
+    for row in rows:
+        if not isinstance(row, dict) or row.get("axis") != native.AXIS_PROCESS:
+            continue
+        corner, role = row.get("corner"), row.get("role")
+        if not isinstance(corner, str) or not isinstance(role, str):
+            continue
+        if role.strip().upper() not in ("SETUP", "HOLD"):
+            continue
+        roles.setdefault(corner.strip(), set()).add(role.strip().upper())
+        if source is None and isinstance(row.get("source"), str) and row["source"]:
+            source = row["source"]
+    if not any(c in roles for c in required):
+        return None, None
+    return roles, source
+
+
+def _per_corner_analysis(project: Path, native: Any,
+                         corner: str) -> Optional[Dict[str, Any]]:
+    """The run's own per-corner report for a corner that serves NO sign-off role.
+
+    Such a corner (the declared primary/typical one) is required to have been
+    ANALYSED, not signed off, so its obligation is discharged by the per-corner
+    report the run wrote for it. Read here from those bytes, through the same
+    per-corner discovery the owning corner-record gate uses, so that "it was
+    analysed" stays a reading of the run's output and never another gate's
+    conclusion. Returns None when no such report carries a finite met slack.
+    """
+    import math
+    root = project.resolve()
+    for rel in getattr(native, "_PER_CORNER_DIRS", ()):
+        pc_dir = project / rel
+        if not pc_dir.is_dir():
+            continue
+        for rpt in sorted(pc_dir.glob("sta_*.rpt")):
+            match = native._PER_CORNER_RPT_RE.match(rpt.name)
+            if not match or match.group(1).strip().upper() != corner.strip().upper():
+                continue
+            resolved = rpt.resolve()
+            if not resolved.is_relative_to(root):
+                continue
+            try:
+                body = resolved.read_text(errors="replace")
+            except OSError:
+                continue
+            vals = native.extract_slacks(body)
+            met = [v for v in (vals.get("setup_wns_ns"), vals.get("hold_wns_ns"))
+                   if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            if not met or any(not math.isfinite(v) or v < 0 for v in met):
+                continue
+            return {"corner": corner, "report": str(resolved.relative_to(root)),
+                    "slacks": vals, "role": "no declared sign-off role"}
+    return None
+
+
 def _required_sta_corners(project: Path, required: Any,
                           declared_paths: Tuple[str, ...]) -> Dict[str, Any]:
     """Bind explicit L24 process obligations to the declared audit's native bytes.
@@ -571,10 +650,34 @@ def _required_sta_corners(project: Path, required: Any,
                             roles[corner].add(role)
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
             issues.append(f"{rel}: {exc}")
-    out["covered"] = sorted(c for c, found in roles.items() if found == {"SETUP", "HOLD"})
+    declared_roles, role_source = _declared_process_corner_roles(project, native, required)
+    out["declared_corner_roles"] = (None if declared_roles is None
+                                    else {c: sorted(r) for c, r in declared_roles.items()})
+    out["declared_corner_roles_source"] = role_source
+    covered: List[str] = []
+    out["analysis_only"] = []
+    for corner in required:
+        found = roles.get(corner, set())
+        # No declaration of what each corner serves: keep demanding both roles of
+        # every corner. An absent role map must not make coverage easier.
+        needed = ({"SETUP", "HOLD"} if declared_roles is None
+                  else declared_roles.get(corner, set()))
+        if needed:
+            if needed <= found:
+                covered.append(corner)
+            continue
+        analysed = _per_corner_analysis(project, native, corner)
+        if analysed is None:
+            issues.append(f"{corner} serves no declared sign-off role and the run "
+                          "published no per-corner analysis report for it")
+            continue
+        covered.append(corner)
+        out["analysis_only"].append(analysed)
+    out["covered"] = sorted(set(covered))
     out["missing"] = sorted(set(required) - set(out["covered"]))
     if out["missing"]:
-        issues.append("required corners lack setup/hold evidence: " + ", ".join(out["missing"]))
+        issues.append("required corners lack evidence for the role each was "
+                      "declared to serve: " + ", ".join(out["missing"]))
     return out
 
 
@@ -666,10 +769,23 @@ def _requirements_backed(project: Path, doc: Any, rel: str,
             engine_records: Dict[str, List[Tuple[str, Optional[str]]]] = {
                 str(engine).lower(): [] for engine in required_engines
             }
+            # Which candidate report was read for each engine, and what it
+            # attributed to. A required engine reported as MISSING is a claim
+            # about this run's output, so the record carries the reading that
+            # produced it rather than only its conclusion.
+            attributions: List[Dict[str, Any]] = []
             for path, verdict in found:
                 engine = _report_engine_for_path(project, path)
+                attributions.append({"path": path, "verdict": verdict,
+                                     "attributed_engine": engine})
                 if engine in engine_records:
                     engine_records[engine].append((path, verdict))
+            record["engine_evidence"] = {
+                "required": sorted(engine_records),
+                "reports_read": attributions,
+                "attributed": {engine: [pth for pth, _v in records]
+                               for engine, records in engine_records.items()},
+            }
             missing_engines = sorted(engine for engine, records in engine_records.items()
                                      if not any(verdict not in _ABSENT_VERDICTS
                                                 and verdict is not None
