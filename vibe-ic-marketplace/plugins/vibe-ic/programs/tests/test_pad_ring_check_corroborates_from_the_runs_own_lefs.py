@@ -140,12 +140,24 @@ def test_a_record_that_wrote_nothing_opened_no_library(tmp_path):
     assert lefs == [] and "REFUSE" in why
 
 
-def test_a_path_that_is_not_on_this_host_is_declined_not_assumed(tmp_path):
+def test_a_path_that_resolves_nowhere_is_declined_not_assumed(tmp_path):
     """The recorded paths are the CONTAINER's. A gate run where they do not
-    resolve must say so, not treat the record as if it had read them."""
+    resolve must say so, not treat the record as if it had read them.
+
+    RE-PINNED (W5/15.5ic): the claim is unchanged and the WORDING moved. This
+    asserted "exists on this host", which was the old mechanism speaking -- the
+    inventory was judged with `Path.is_file()` whatever the run's tools could
+    see, so a container-only PDK was declined even when the record was perfectly
+    good. The inventory is now judged where the run's tools look, and with NO
+    container published (this test) that is still the host, so the decline
+    stands. What must never happen is the record being ADOPTED unread, and that
+    is what the assertions below pin.
+    """
     proj = _project(tmp_path, write_lef=False)
     lefs, _d, why = PRC.io_lefs_this_run_recorded(proj, _producer())
-    assert lefs == [] and "exists on this host" in why
+    assert lefs == []
+    assert "incomplete" in why and "refused" in why, why
+    assert "where this run's tools look" in why, why
 
 
 def test_a_partially_unreadable_run_inventory_is_declined(tmp_path):
@@ -287,3 +299,82 @@ def test_no_pdk_or_vendor_literal_is_baked_into_the_fallback(tmp_path):
                src.index("def main(")]
     for literal in ("gf180", "sky130", "sg13", "/foss", "librelane"):
         assert literal not in body, f"{literal!r} baked into the reader"
+
+
+# ── W5/15.5ic: the ARGV-LESS audit invocation resolves the run's own library ──
+#
+# The flow declares step 15.5ic's gate as
+#     pad_ring_check . --json reports/phase3/padring.json
+# with NO --pdk-root and no --pdk, so the recorded inventory is the ONLY
+# identity-bearing choice this gate has. It was judged with host `Path.is_file()`,
+# so on a run whose PDK resolves only inside its container every recorded view
+# read as missing, the fallback was declined, and PADRING_MASTERS_UNCORROBORATED
+# stood over a ring the run had built and routed.
+class _ContainerOnly:
+    """The recorded views exist only where the RUN's tools look."""
+
+    def __init__(self, files):
+        self.files = dict(files)
+
+    def is_dir(self, path):
+        return any(str(f).startswith(str(path).rstrip("/") + "/")
+                   for f in self.files)
+
+    def is_file(self, path):
+        return str(path) in self.files
+
+    def glob(self, root, pattern):
+        import fnmatch
+        return sorted(f for f in self.files
+                      if str(Path(f).parent) == str(root)
+                      and fnmatch.fnmatch(Path(f).name, pattern))
+
+    def read_text(self, path):
+        return self.files.get(str(path))
+
+
+def _container_only_project(tmp_path):
+    """A run record naming views that are absent from this host."""
+    proj = _project(tmp_path, write_lef=False)
+    rec = proj / PRC.DERIVED_CHIP_TOP_REL
+    doc = json.loads(rec.read_text())
+    recorded = [p for p in doc["io_library_lefs"]]
+    assert recorded, "fixture must record at least one view"
+    assert not any(Path(p).is_file() for p in recorded), (
+        "the point of this fixture is that the host cannot see them")
+    return proj, recorded
+
+
+def test_the_argvless_invocation_resolves_the_recorded_views_where_the_run_looks(
+        tmp_path):
+    """THE RED, with no --pdk-root anywhere: same record, same disk, resolved."""
+    proj, recorded = _container_only_project(tmp_path)
+    # the same LEF body every fixture in this file uses, carrying the masters
+    # the producer record claims -- so adoption is earned, not assumed
+    reader = _ContainerOnly({p: _lef(_MASTERS) for p in recorded})
+    lefs, _decls, why = PRC.io_lefs_this_run_recorded(
+        proj, _producer(), reader=reader)
+    assert why == "", why
+    assert [str(q) for q in lefs] == [str(p) for p in recorded]
+    # and through the front door the audit actually calls, argv-less
+    got, _d, source, why2 = PRC.resolve_io_library_views(
+        proj, _producer(), None, None, None, reader=reader)
+    assert [str(q) for q in got] == [str(p) for p in recorded], why2
+    assert "recorded by this run" in source, source
+
+
+def test_a_selected_but_unreachable_view_store_is_an_unknown_not_an_absence(
+        tmp_path):
+    """The fail-closed half: a reader that cannot answer must not read as
+    'the PDK ships nothing'."""
+    proj, recorded = _container_only_project(tmp_path)
+
+    class _Unreachable(_ContainerOnly):
+        def is_file(self, path):
+            raise OSError("the container the run published is gone")
+
+    lefs, _d, why = PRC.io_lefs_this_run_recorded(
+        proj, _producer(), reader=_Unreachable({}))
+    assert lefs == []
+    assert "could not be reached where this run's tools run" in why, why
+    assert "not a finding about the PDK" in why, why

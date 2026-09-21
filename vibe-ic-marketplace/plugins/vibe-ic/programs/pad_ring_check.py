@@ -549,7 +549,8 @@ def declared_masters(producer: Dict[str, Any]) -> List[str]:
     return sorted(set(names))
 
 
-def io_lefs_this_run_recorded(project: Path, producer: Dict[str, Any]
+def io_lefs_this_run_recorded(project: Path, producer: Dict[str, Any],
+                              reader=None
                               ) -> Tuple[List[Path], List[Path], str]:
     """The IO views THIS RUN opened, from its own producer record.
 
@@ -586,23 +587,49 @@ def io_lefs_this_run_recorded(project: Path, producer: Dict[str, Any]
                         f"{doc.get('verdict')!r}, so it opened no library")
     lefs = [Path(x) for x in (doc.get("io_library_lefs") or [])
             if isinstance(x, str)]
-    unreadable = [p for p in lefs if not p.is_file()]
-    if unreadable:
-        shown = ", ".join(str(p) for p in unreadable[:4])
-        if len(unreadable) > 4:
-            shown += f", +{len(unreadable) - 4} more"
+    # W5/15.5ic — WHERE THE RECORDED INVENTORY IS JUDGED. This function exists
+    # because the flow's own clause carries no PDK argument (see above), so the
+    # recorded LEFs are the only identity-bearing choice. They were then checked
+    # with `Path.is_file()` and `Path.read_text()` on the HOST, and the refusal
+    # said so in its own words: "no complete IO LEF inventory exists on this
+    # host". MEASURED on the spm run the W5 report cites: the record names 15 IO
+    # LEF views under a PDK root that resolves only inside the run's container --
+    # all 15 absent from the host, all 15 present where the run's tools look --
+    # so the fallback was declined and `PADRING_MASTERS_UNCORROBORATED` stood
+    # over a ring the run had built and routed (pad_ring_gen PASS, 771 instances
+    # through padring.def -> GDS). No PDK or vendor literal appears here: the
+    # sibling test forbids one in this reader, and rightly.
+    #
+    # The inventory is now judged through `_pad_ring._ask`, the environment seam
+    # `discover_io_lefs` uses: the container this run published when there is
+    # one, the host when there is not. The DOCTRINE is untouched -- an incomplete
+    # inventory is still declined and the refusal still stands -- what changes is
+    # that "incomplete" is decided where the run's tools look.
+    try:
+        missing = [q for q in lefs if not PR._ask(q, "is_file", reader=reader)]
+    except OSError as exc:
+        # Selected-but-unreachable is an unknown, not an absence. Saying "the
+        # PDK ships nothing" on the strength of a docker failure is the mistake
+        # this whole change is about.
         return [], [], (
-            f"{DERIVED_CHIP_TOP_REL} names {len(unreadable)} unreadable or "
+            f"{DERIVED_CHIP_TOP_REL} names {len(lefs)} IO LEF view(s) and they "
+            f"could not be reached where this run's tools run ({exc}); nothing "
+            f"here read an IO library, so this is not a finding about the PDK")
+    if missing:
+        shown = ", ".join(str(q) for q in missing[:4])
+        if len(missing) > 4:
+            shown += f", +{len(missing) - 4} more"
+        return [], [], (
+            f"{DERIVED_CHIP_TOP_REL} names {len(missing)} unreadable or "
             f"missing IO LEF view(s): {shown}; the run inventory is "
-            "incomplete: no complete IO LEF inventory exists on this host "
-            "and is refused")
+            "incomplete where this run's tools look and is refused")
     if not lefs:
         return [], [], (f"{DERIVED_CHIP_TOP_REL} names no IO LEF that exists "
-                        f"on this host")
+                        f"where this run's tools look")
     read_failed = []
     for lef in lefs:
         try:
-            lef.read_text(errors="replace")
+            PR._ask(lef, "read", reader=reader)
         except OSError as exc:
             read_failed.append(f"{lef} ({exc})")
     if read_failed:
@@ -614,7 +641,7 @@ def io_lefs_this_run_recorded(project: Path, producer: Dict[str, Any]
             f"that exist but cannot be read: {shown}; the run inventory is "
             "incomplete and is refused")
     claimed = declared_masters(producer)
-    carried = PR.IoLibrary(lefs).masters
+    carried = PR.IoLibrary(lefs, reader=reader).masters
     absent = [m for m in claimed if m not in carried]
     if absent:
         return [], [], (
@@ -652,7 +679,8 @@ def io_site_declarations_for_lefs(lefs: List[Path]) -> List[Path]:
 def resolve_io_library_views(
         project: Path, producer: Dict[str, Any],
         io_lef: Optional[List[str]], pdk_root: Optional[str],
-        pdk: Optional[str]) -> Tuple[List[Path], List[Path], str, str]:
+        pdk: Optional[str], reader=None
+        ) -> Tuple[List[Path], List[Path], str, str]:
     """Resolve one identity-bound IO library for this audit.
 
     W5/15.5ic: every PDK question below goes through `_pad_ring`'s environment
@@ -673,7 +701,7 @@ def resolve_io_library_views(
                 "explicit --io-lef", "")
 
     try:
-        return _resolve_from_pdk(project, producer, pdk_root, pdk)
+        return _resolve_from_pdk(project, producer, pdk_root, pdk, reader)
     except OSError as exc:
         # THE CONTAINER THE RUN USES WAS SELECTED AND COULD NOT BE REACHED.
         # An unknown, and a different fact from "this PDK ships no IO library"
@@ -687,7 +715,7 @@ def resolve_io_library_views(
 
 
 def _resolve_from_pdk(project: Path, producer: Dict[str, Any],
-                      pdk_root: Optional[str], pdk: Optional[str]
+                      pdk_root: Optional[str], pdk: Optional[str], reader=None
                       ) -> Tuple[List[Path], List[Path], str, str]:
     """`resolve_io_library_views` minus the explicit-LEF case, so the PDK
     questions it asks sit inside one `try` the caller owns."""
@@ -706,7 +734,7 @@ def _resolve_from_pdk(project: Path, producer: Dict[str, Any],
             "an explicit PDK identity with a different run-recorded tree")
 
     recorded, run_decls, recorded_why = io_lefs_this_run_recorded(
-        project, producer)
+        project, producer, reader=reader)
     if recorded:
         return (recorded, run_decls,
                 f"{len(recorded)} IO LEF(s) recorded by this run in "
