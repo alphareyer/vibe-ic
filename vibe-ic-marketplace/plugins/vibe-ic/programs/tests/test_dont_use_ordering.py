@@ -31,6 +31,8 @@ import pathlib
 import re
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import phase3_one_shot_runner as P                            # noqa: E402
 
@@ -57,6 +59,62 @@ _KW = dict(
 #: future pool, so each must run AFTER the exclusion is in force.
 _INSERTERS = ("clock_tree_synthesis", "repair_design", "repair_timing",
               "global_route", "detailed_route", "detailed_placement")
+
+
+# ── A MENTION IS NOT AN INVOCATION ────────────────────────────────────────────
+#
+# MEASURED on live main a9b98b6bf (lane icslot11): this file asserted the
+# ordering with a plain substring search, and it went red reporting
+# "`global_route` appears BEFORE the cell exclusion" at offset 496. Nothing
+# routes there. The template now opens with a ROUTE-GUIDE DISCIPLINE PROLOGUE
+# that WRAPS those two commands:
+#
+#     if {[llength [info commands detailed_route]] == 0 || ... } { ... }
+#     rename global_route _vibeic_real_global_route
+#     proc   global_route {args} { ... }
+#     rename detailed_route _vibeic_real_detailed_route
+#     proc   detailed_route {args} { ... }
+#
+# Every pre-marker occurrence is introspection, a rename, a proc HEADER, a
+# diagnostic string, or the renamed original `_vibeic_real_*`. A `proc` body is
+# not executed where it is written, and installing a wrapper inserts no cell —
+# so #551's invariant was never violated. What broke is the INSTRUMENT: it could
+# not tell "this step runs here" from "this command's name appears here".
+#
+# THE RULE IS CONSERVATIVE ON PURPOSE, and this is the load-bearing choice. The
+# obvious rule — "an invocation is the command in Tcl command position, i.e. the
+# first word of the line" — is WRONG and I measured it before rejecting it:
+# almost every real call in this template is `if {[catch {cmd ...}]}`, so that
+# rule recognises 1 of 33 real invocations and would have turned a guard into a
+# decoration. Errors here must fall on the STRICT side: a mention miscounted as
+# an invocation only makes the test harsher, while a missed invocation silently
+# removes the thing #551 exists to prevent. So this excludes ONLY the contexts
+# that PROVABLY cannot call, and counts everything else.
+_QUOTED = re.compile(r'"[^"\n]*"')
+
+
+def _invokes(line: str, cmd: str) -> bool:
+    """Does this template line CALL `cmd`? Conservative: see the note above."""
+    text = _QUOTED.sub(" ", line)                    # diagnostics are not code
+    text = text.replace(f"_vibeic_real_{cmd}", " ")  # the renamed original
+    if "info commands" in text:                      # introspection
+        return False
+    head = text.strip().split(" ")[0] if text.strip() else ""
+    if head in ("rename", "proc"):                   # renaming / defining
+        return False
+    return re.search(r'(?<![\w:])' + re.escape(cmd) + r'(?![\w:])',
+                     text) is not None
+
+
+def _invocation_lines(template: str, cmd: str):
+    """`(before, after)` line indices that invoke `cmd`, split at the marker."""
+    marker_at = template.index(_MARKER)
+    before, after, offset = [], [], 0
+    for index, line in enumerate(template.split("\n")):
+        if _invokes(line, cmd):
+            (before if offset < marker_at else after).append(index)
+        offset += len(line) + 1
+    return before, after
 
 
 def _pnr_template() -> str:
@@ -109,14 +167,21 @@ def test_the_exclusion_precedes_every_step_that_can_insert_a_cell():
     and a test reading prose would not notice.
     """
     t = _pnr_template()
-    here = t.index(_MARKER)
     for later in _INSERTERS:
-        pos = t.find(later, 0, here)
-        assert pos == -1, (
-            f"`{later}` appears BEFORE the cell exclusion. set_dont_use only "
-            f"governs the optimizer's future pool, so anything it inserts "
-            f"first is baked into the DEF and the exclusion is inert against "
-            f"it (vibe-ic#551: 61 probe cells, DRT-0085, route never finishes)")
+        before, after = _invocation_lines(t, later)
+        assert before == [], (
+            f"`{later}` is INVOKED before the cell exclusion, at template "
+            f"line(s) {before}. set_dont_use only governs the optimizer's "
+            f"future pool, so anything it inserts first is baked into the DEF "
+            f"and the exclusion is inert against it (vibe-ic#551: 61 probe "
+            f"cells, DRT-0085, route never finishes)")
+        # THE DENOMINATOR, so the assertion above cannot pass by vacuity. A
+        # template that stopped calling a step at all would satisfy "nothing
+        # before the marker" while quietly removing the step this ordering is
+        # about — which is the one way this guard could rot into a decoration.
+        assert after, (
+            f"`{later}` is never invoked anywhere in the template, so the "
+            f"ordering assertion above held over an empty population")
 
 
 def test_every_step_this_orders_is_actually_in_the_emitted_tcl():
@@ -172,3 +237,56 @@ def test_the_emitted_exclusion_covers_the_families_that_broke_the_route():
         "both PDK layouts must be globbed — the rename is what broke this once"
     assert "DONT_USE_SKIPPED" in tcl, \
         "a run that excluded nothing must say so rather than look applied"
+
+
+# ── the INSTRUMENT, pinned both ways ──────────────────────────────────────────
+#
+# The ordering assertion above is only as good as `_invokes`, and `_invokes` is
+# the part this lane had to replace. A rule that is too loose reports a defect
+# that is not there (the red that opened this work); one that is too tight
+# removes the guard silently. Both directions are therefore cases of their own,
+# over the SHAPES the shipped template actually contains rather than invented
+# ones — each string below is copied from the emitted Tcl.
+_NOT_AN_INVOCATION = (
+    'if {[llength [info commands detailed_route]] == 0 || '
+    '[llength [info commands global_route]] == 0} {',
+    'rename global_route _vibeic_real_global_route',
+    'proc global_route {args} {',
+    '    return [uplevel 1 _vibeic_real_global_route $args]',
+    '      if {[catch {_vibeic_real_global_route} _rgd_e]} {',
+    '        puts "ROUTE_GUIDES_UNAVAILABLE: global_route returned cleanly"',
+)
+
+_IS_AN_INVOCATION = (
+    'global_route',
+    '  global_route',
+    'if {[catch {global_route} _e]} { puts "X" }',
+)
+
+
+@pytest.mark.parametrize("line", _NOT_AN_INVOCATION)
+def test_a_mention_is_not_read_as_an_invocation(line):
+    """Introspection, a rename, a proc HEADER, the renamed original, and a
+    diagnostic string all NAME the command without calling it. Installing a
+    wrapper inserts no cell, so none of these may trip the ordering guard."""
+    assert _invokes(line, "global_route") is False, line
+
+
+@pytest.mark.parametrize("line", _IS_AN_INVOCATION)
+def test_a_real_call_is_read_as_an_invocation(line):
+    """The direction that matters more. `if {[catch {cmd ...}]}` is how almost
+    every step in this template is actually called — 32 of the 33 real
+    invocations — so a rule keyed on Tcl command position would recognise
+    nearly none of them and the guard would become a decoration."""
+    assert _invokes(line, "global_route") is True, line
+
+
+def test_the_denominator_can_actually_fail():
+    """`assert after` is the anti-vacuity half, and it needs a proven detector:
+    over a template that never calls the command, `_invocation_lines` must
+    report an empty `after` rather than silently satisfying the ordering."""
+    template = f"read_lef /t.lef\n{_MARKER}\ndetailed_placement\n"
+    before, after = _invocation_lines(template, "global_route")
+    assert (before, after) == ([], [])
+    before, after = _invocation_lines(template, "detailed_placement")
+    assert before == [] and after, (before, after)
