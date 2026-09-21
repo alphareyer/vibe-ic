@@ -82,7 +82,6 @@ chars).
 """
 from __future__ import annotations
 
-import _structural_absence as _sa  # R-0915-119
 import json
 import re
 import sys
@@ -90,6 +89,11 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# R-0915-119 — AFTER the sibling-path insert above: #2104's contract is
+# that a program loaded by PATH resolves its siblings, and `programs/` is
+# only on sys.path once that line has run.
+import _structural_absence as _sa  # R-0915-119
 from ic_class_profile import detect_ic_class  # noqa: E402
 # v1.7.72 — for #499. The code-literal reader moved to a shared module
 # so the Phase-1 encoding LIFTER reads exactly the bytes this gate

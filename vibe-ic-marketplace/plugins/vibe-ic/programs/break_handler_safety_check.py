@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import _structural_absence as _sa  # R-0915-119
 import re
 import sys
 from dataclasses import dataclass, field, asdict
@@ -50,6 +49,11 @@ from pathlib import Path
 from typing import List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+# R-0915-119 — AFTER the sibling-path insert above: #2104's contract is
+# that a program loaded by PATH resolves its siblings, and `programs/` is
+# only on sys.path once that line has run.
+import _structural_absence as _sa  # R-0915-119
 from gate_utils import dir_parts_excluded  # shared RTL-scope contract
 import _vacuous_exit as _vx
 from _atomic_artefact import write_text as atomic_write_text  # vibe-ic#1082 (helper from PR #1094)

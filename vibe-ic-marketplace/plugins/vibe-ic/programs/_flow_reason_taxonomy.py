@@ -20,6 +20,22 @@ stops a caller.
 """
 from __future__ import annotations
 
+# --- sibling-import path (vibe-ic#2104) ------------------------------------
+# `programs/` is a flat directory whose modules import each other by BARE
+# name. Python puts a file's own directory on `sys.path` only when that file
+# is run as `__main__`; under `importlib.util.spec_from_file_location` — how
+# the gates and much of the suite load a program — it does not. This module
+# imported no sibling until R-0915-119 gave it one, which is why it carried
+# no preamble; `test_issue2104_programs_load_by_path` caught the omission.
+import os as _os                                                    # noqa: E402
+import sys as _sys                                                  # noqa: E402
+
+if _os.path.dirname(_os.path.abspath(__file__)) not in _sys.path:
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# ---------------------------------------------------------------------------
+
+import _structural_absence as _sa  # R-0915-119
+
 import re
 from typing import Any, Mapping, Optional
 
