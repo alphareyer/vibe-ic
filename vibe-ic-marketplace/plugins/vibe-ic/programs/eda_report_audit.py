@@ -1584,7 +1584,40 @@ def _measured_klayout_receipt_files(project_dir: Path,
         except (OSError, ValueError):
             continue
         report_sha = digest(report)
-        transcript = report.with_suffix(".log")
+        # ONE PATH, USED FOR BOTH HALVES OF THE LOOKUP.
+        #
+        # THE DEFECT, MEASURED (lane icgate1, 2026-09-21) on `spm x gf180mcuD`
+        # run8's own bytes and its own `provenance.jsonl`: the report was
+        # RESOLVED to build `rel` — so the ledger is queried under the
+        # canonical name — while the transcript was taken from the LITERAL path
+        # this loop happened to be handed. Those are two different frames for
+        # one question, and `_discover` decides which by walk order.
+        #
+        # The step-output collector publishes each canonical report a second
+        # time as a SYMLINK under `steps/<phase>/<stage>/<step>/` and publishes
+        # NO `.log` beside it (`ls -la` on that run lists drc_signoff.rpt,
+        # erc.rpt, lvs.json, lvs.rpt, magic_illegal_overlap.json, outputs.json
+        # — no transcript). `_identity` collapses the pair by inode, so exactly
+        # ONE of the two survives discovery and WHICH ONE is decided by
+        # `os.scandir` order — a property of the directory, not of the design.
+        #
+        # SAME tree, SAME ledger, SAME inode, the ONLY variable being which
+        # alias was handed over:
+        #     reports/phase3/drc_signoff.rpt          -> corroborated 1
+        #     steps/.../31_.../drc_signoff.rpt        -> corroborated 0
+        # run8 drew the second, so `receipt_corroborated_files: 0` and
+        # DRC_ZERO_NOT_MEASURED over a real, measured, exit-0, digest-bound
+        # KLayout sign-off whose row the runner had already written
+        # (`phase3_one_shot_runner._rebind_measured_drc_invocation_to_canonical_path`).
+        # A sign-off gate refused a clean layout because of a directory hash.
+        #
+        # NOTHING IS RELAXED. The transcript must still EXIST, its digest must
+        # still equal the digest the ledger declared for it, the report's
+        # digest must still match, and a GDS input must still match on disk.
+        # All this changes is that the file read and the key queried are now
+        # derived from the same `rel` — so an alias cannot answer a question
+        # about a file it is an alias OF.
+        transcript = project_dir / Path(rel).with_suffix(".log")
         log_sha = digest(transcript)
         if not report_sha or not log_sha:
             continue
