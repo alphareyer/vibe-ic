@@ -5215,6 +5215,7 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig",
         # never mistake "the repair did not run" for "nothing was uncovered".
         "    set ::_vibeic_welltie_uncovered -1\n"
         "    set _wtadded 0; set _wtneed 0; set _wtfail 0; set _wtrows 0\n"
+        "    set _wtrowsleft 0\n"
         "    set _wtfaildesc {}\n"
         "    foreach _wty [lsort -integer [array names _wtanc]] {\n"
         "      if {![info exists _wtrx0($_wty)]} { continue }\n"
@@ -5244,6 +5245,30 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig",
         "      set _wtc {}\n"
         "      foreach _wtt $_wtties { lappend _wtc [expr {$_wtt + $_wttw / 2}] }\n"
         "      set _wtc [lsort -integer $_wtc]\n"
+        # ITERATE TO COVERAGE. THE POINT SET IS A FUNCTION OF THE TIES, SO
+        # IT CANNOT BE COMPUTED ONCE AND THEN INSERTED INTO.
+        #
+        # MEASURED on spm run15, the row that DF.13_MV caught. Row y=1642.48
+        # held 75 instances and exactly TWO ties, at x=393.12 and x=2767.52 --
+        # 2374.4 um apart. The anchor set is {row start, row end, midpoint
+        # between each pair of consecutive ties}, so two ties give THREE
+        # points and exactly ONE uncovered: the midpoint at x=1580.88. One tie
+        # was placed there and the row was declared done -- while the two
+        # fresh 1187 um half-gaps that insertion had just created were never
+        # looked at, because `_wtpts` was built before the loop and only
+        # `_wtc` was appended to inside it. That is why the run reported
+        # `uncovered_anchors=75 ties_added=75 unplaceable=0` on rows still
+        # hundreds of microns bare, and why the DRC then found a pactive
+        # 17.91 um from its nearest ntap against a 15.0 um rule.
+        #
+        # So the whole computation repeats until a pass finds nothing
+        # uncovered, or finds something it cannot place -- and the cap is a
+        # cap on PASSES, not a silent stop: whatever is still uncovered when
+        # the loop ends is counted and REFUSED BY NAME below.
+        "      set _wtpass 0\n"
+        "      while {1} {\n"
+        "      incr _wtpass\n"
+        "      set _wtprog 0\n"
         "      set _wtpts {}\n"
         # the two row ends, which the reference insertion does not cover: its
         # first tie is D or 2D in from the edge and it relies on the adjacent
@@ -5253,12 +5278,16 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig",
         "        lappend _wtpts [expr {([lindex $_wtc [expr {$_wti - 1}]] + "
         "[lindex $_wtc $_wti]) / 2}]\n"
         "      }\n"
+        "      set _wtunc {}\n"
         "      foreach _wtcx [lsort -integer -unique $_wtpts] {\n"
         "        set _wtok 0\n"
         "        foreach _wtt $_wtc {\n"
         "          if {abs($_wtt - $_wtcx) <= $_wtrad} { set _wtok 1; break }\n"
         "        }\n"
-        "        if {$_wtok} { continue }\n"
+        "        if {!$_wtok} { lappend _wtunc $_wtcx }\n"
+        "      }\n"
+        "      if {[llength $_wtunc] == 0} { break }\n"
+        "      foreach _wtcx $_wtunc {\n"
         "        incr _wtneed\n"
         "        set _wtk0 [expr {($_wtcx - $_wtrx0($_wty)) / $_wtsw}]\n"
         "        set _wtmaxk [expr {$_wtrad / $_wtsw}]\n"
@@ -5288,6 +5317,7 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig",
         "            lappend _wtc [expr {$_wtx + $_wttw / 2}]\n"
         "            set _wtc [lsort -integer $_wtc]\n"
         "            incr _wtadded\n"
+        "            incr _wtprog\n"
         "            set _wtplaced 1\n"
         "            break\n"
         "          }\n"
@@ -5309,6 +5339,47 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig",
         "          }\n"
         "          lappend _wtfaildesc \"row=$_wty x=$_wtcx ($_wtwhy)\"\n"
         "        }\n"
+        "      }\n"
+        # A pass that placed NOTHING cannot do better next time: the same
+        # points would be recomputed and refused again. Stop, and let the
+        # refusal below name what is still bare -- silence here is how a row
+        # ships with a hole in it.
+        "      if {$_wtprog == 0} { break }\n"
+        # A cap on PASSES, not a silent stop. Each pass at least halves the
+        # widest gap it can reach, so the bound is generous; whatever is left
+        # when it trips is still counted and named.
+        "      if {$_wtpass >= 64} {\n"
+        "        puts \"WELLTIE_COVERAGE_REPAIR_PASS_CAP: row=$_wty stopped "
+        "after $_wtpass passes with [llength $_wtunc] point(s) still "
+        "uncovered; they are counted below, not forgiven\"\n"
+        "        break\n"
+        "      }\n"
+        "      }\n"
+        # THE FINAL STATE IS VERIFIED, NOT ASSUMED. The loop above exits on
+        # "nothing uncovered", on "nothing placeable" or on the pass cap; only
+        # the first of those means the row is covered. Re-deriving the point
+        # set one last time from the ties that actually exist is what turns
+        # ties_added into a claim about the ROW rather than about the loop.
+        "      set _wtvpts {}\n"
+        "      lappend _wtvpts $_wtrx0($_wty) $_wtrx1($_wty)\n"
+        "      for {set _wti 1} {$_wti < [llength $_wtc]} {incr _wti} {\n"
+        "        lappend _wtvpts [expr {([lindex $_wtc [expr {$_wti - 1}]] + "
+        "[lindex $_wtc $_wti]) / 2}]\n"
+        "      }\n"
+        "      set _wtleft 0\n"
+        "      foreach _wtcx [lsort -integer -unique $_wtvpts] {\n"
+        "        set _wtok 0\n"
+        "        foreach _wtt $_wtc {\n"
+        "          if {abs($_wtt - $_wtcx) <= $_wtrad} { set _wtok 1; break }\n"
+        "        }\n"
+        "        if {!$_wtok} { incr _wtleft }\n"
+        "      }\n"
+        "      if {$_wtleft > 0} {\n"
+        "        incr _wtrowsleft\n"
+        "        puts \"WELLTIE_ROW_STILL_UNCOVERED: row=$_wty "
+        "span=$_wtrx0($_wty)..$_wtrx1($_wty) ties=[llength $_wtc] "
+        "points_still_uncovered=$_wtleft radius=$_wtrad -- this row ships "
+        "with a well-tie gap and the PDK's DF.13/DF.14 rule measures it\"\n"
         "      }\n"
         "    }\n"
         "    set ::_vibeic_welltie_uncovered $_wtfail\n"
@@ -5333,7 +5404,8 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig",
         "    puts \"WELLTIE_COVERAGE_REPAIR: pitch="
         + f"{_pitch}"
         + f"um (source={_psrc}) radius={_radius}um master=" + tm
-        + " anchor_rows=$_wtrows uncovered_anchors=$_wtneed "
+        + " anchor_rows=$_wtrows rows_still_uncovered=$_wtrowsleft"
+        + " uncovered_anchors=$_wtneed "
         "ties_added=$_wtadded unplaceable=$_wtfail\"\n"
         "  }\n"
         "} _wterr]} {\n"
