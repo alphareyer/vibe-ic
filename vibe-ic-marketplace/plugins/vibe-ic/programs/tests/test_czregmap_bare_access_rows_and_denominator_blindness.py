@@ -207,14 +207,19 @@ def test_the_instrument_names_the_residual_the_extractor_cannot_reach():
     proj = _docs_project(_SEVEN_ROW_TABLE, carried)
     out = proj / "cov.json"
     cp = _run_cov(proj, out)
-    assert cp.returncode == 2, cp.stdout
+    # R-0915-113(7): the rule now RUNS over what the extractor could not
+    # reach, so the loss is a blocking verdict rather than an observation.
+    assert cp.returncode == 1, cp.stdout
     summary = json.loads(out.read_text())
     absent = summary["documentary_names_absent_from_l4"]
     assert absent == [f"BLK{i}" for i in range(16)] + [
         f"RESULT{i}" for i in range(8)], absent
     assert summary["documentary_declared_name_count"] == 29, summary
-    assert "carries 5 of those 29 name(s); 24 do not appear" in cp.stdout, \
-        cp.stdout
+    assert summary["documentary_registers_measured"] == 29, summary
+    assert summary["documentary_registers_covered"] == 5, summary
+    assert summary["documentary_outcome_counts"]["ABSENT_FROM_L4"] == 24, \
+        summary
+    assert "5 of 29 register(s) covered" in cp.stdout, cp.stdout
 
 
 def test_compound_access_tokens_still_reach_l4():
@@ -263,21 +268,31 @@ _ALL_FIVE = [{"name": n, "address_int": a} for n, a in (
     ("FLAGS", 0x09), ("PUSH", 0x0c))]
 
 
-def test_documented_register_map_is_not_measured_not_not_applicable():
+def test_a_documented_register_map_is_measured_not_skipped():
+    """R-0915-113(7) SUPERSEDES the NOT_MEASURED half of this test.
+
+    It was written when the documentary population was harvested and the rule
+    was never applied to it, and it pinned that honestly: NOT_MEASURED, and
+    `examined == 0` because crediting an unapplied rule with a population is
+    the substitution the denominator contract exists against. The owner ruled
+    that a population harvested is a population MEASURED, so the rule now runs
+    and the same `examined == 0` assertion would pin the opposite defect —
+    a rule that RAN over 5 registers reporting that it examined none.
+
+    Everything else this test pinned is kept, including the no-leak assertion
+    that a documented register map is never announced as SKIP."""
     proj = _docs_project(_BARE_ACCESS_TABLE, _ALL_FIVE)
     out = proj / "cov.json"
     cp = _run_cov(proj, out)
-    assert cp.returncode == 2, cp.stdout
-    assert "[NOT_MEASURED]" in cp.stdout, cp.stdout
+    assert cp.returncode == 0, cp.stdout
+    assert "[PASS]" in cp.stdout, cp.stdout
     assert "[SKIP]" not in cp.stdout, (
         "a documented register map was still announced as SKIP")
     summary = json.loads(out.read_text())
-    assert summary["verdict"] == "NOT_MEASURED", summary["verdict"]
+    assert summary["verdict"] == "PASS", summary["verdict"]
     den = summary["denominator"]
-    # The rule was NOT applied. `examined` must stay 0 — crediting an
-    # unapplied rule with a population is the substitution the whole
-    # denominator contract exists against.
-    assert den["examined"] == 0, den
+    # The rule RAN over the documentary population, so `examined` is its size.
+    assert den["examined"] == 5, den
     assert den["considered"] == 5, den
     assert set(summary["documentary_declared_names"]) == {
         "IDLOW", "IDHIGH", "CONTROL", "FLAGS", "PUSH"}, summary
@@ -290,7 +305,10 @@ def test_the_verdict_names_a_register_the_layer_dropped():
     proj = _docs_project(_BARE_ACCESS_TABLE, kept)
     out = proj / "cov.json"
     cp = _run_cov(proj, out)
-    assert cp.returncode == 2, cp.stdout
+    # R-0915-113(7): naming it is no longer an observation beside a verdict
+    # the rule never reached — it IS the verdict, and it BLOCKS.
+    assert cp.returncode == 1, cp.stdout
+    assert "ABSENT_FROM_L4" in cp.stdout, cp.stdout
     assert "FLAGS" in cp.stdout, (
         "a register the input declares and L4 does not carry was not named: "
         + cp.stdout)
@@ -313,7 +331,7 @@ def test_a_range_row_declares_every_register_in_the_range():
     proj = _docs_project(doc, [{"name": "CONTROL", "address_int": 0}])
     out = proj / "cov.json"
     cp = _run_cov(proj, out)
-    assert cp.returncode == 2, cp.stdout
+    assert cp.returncode == 1, cp.stdout      # R-0915-113(7): now measured
     summary = json.loads(out.read_text())
     names = summary["documentary_declared_names"]
     assert names == ["CONTROL"] + [f"BLK{i}" for i in range(16)], names
@@ -340,7 +358,7 @@ def test_a_name_first_summary_table_declares_its_registers():
     proj = _docs_project(doc, [{"name": "ALERT", "address_int": 0}])
     out = proj / "cov.json"
     cp = _run_cov(proj, out)
-    assert cp.returncode == 2, cp.stdout
+    assert cp.returncode == 1, cp.stdout      # R-0915-113(7): now measured
     summary = json.loads(out.read_text())
     assert summary["documentary_declared_names"] == [
         "ALERT", "KEY_0", "KEY_1", "STATUS"], summary
@@ -429,7 +447,7 @@ def test_a_long_name_list_is_truncated_beside_an_untruncated_count():
     proj = _docs_project(doc, [])
     out = proj / "cov.json"
     cp = _run_cov(proj, out)
-    assert cp.returncode == 2, cp.stdout
+    assert cp.returncode == 1, cp.stdout      # R-0915-113(7): now measured
     summary = json.loads(out.read_text())
     assert len(summary["documentary_declared_names"]) == cap, summary
     assert summary["documentary_declared_name_count"] == n, summary
@@ -500,21 +518,39 @@ def test_a_layer_of_the_wrong_json_type_is_unparseable_not_empty():
     assert json.loads(out.read_text())["l4_state"] == "unparseable"
 
 
-def test_a_layer_carrying_every_documented_name_still_says_the_rule_did_not_run():
-    """The tempting branch. Every documented name IS present, and the honest
-    answer is still NOT_MEASURED: matching by NAME is not the address-binding
-    rule this gate applies, and reporting it as coverage would be the
-    numerator-with-no-denominator shape one level over."""
+def test_name_only_presence_is_still_not_the_rule_and_the_address_decides():
+    """R-0915-113(7) SUPERSEDES this test's premise and KEEPS its point.
+
+    It was written to pin the honest answer when the rule could not run:
+    every documented name IS present, and reporting that as coverage would be
+    the numerator-with-no-denominator shape one level over. The owner ruled
+    the rule must RUN, and the rule is ADDRESS-BOUND IDENTITY — so the claim
+    "matching by NAME is not the rule this gate applies" is no longer a
+    reason to decline a verdict, it is the verdict's own content. Asserted in
+    BOTH directions here, which is more than the superseded form could do:
+    the names at the DECLARED addresses are covered, and the same names at a
+    wrong address are not."""
     proj = _docs_project(_BARE_ACCESS_TABLE, _ALL_FIVE)
     out = proj / "cov.json"
     cp = _run_cov(proj, out)
-    assert cp.returncode == 2, cp.stdout
-    assert "does carry all 5 of those name(s)" in cp.stdout, cp.stdout
-    assert "by NAME only, which is not the rule this gate applies" in cp.stdout
+    assert cp.returncode == 0, cp.stdout
     summary = json.loads(out.read_text())
-    assert summary["verdict"] == "NOT_MEASURED", summary
+    assert summary["verdict"] == "PASS", summary
     assert summary["documentary_names_absent_from_l4"] == [], summary
     assert summary["l4_state"] == "read", summary
+    assert summary["documentary_registers_covered"] == 5, summary
+
+    # the same five NAMES, one of them at a different address
+    moved = [dict(r, address_int=0x77) if r["name"] == "FLAGS" else r
+             for r in _ALL_FIVE]
+    proj2 = _docs_project(_BARE_ACCESS_TABLE, moved)
+    out2 = proj2 / "cov.json"
+    cp2 = _run_cov(proj2, out2)
+    assert cp2.returncode == 1, cp2.stdout
+    assert "ADDRESS_MISMATCH" in cp2.stdout, cp2.stdout
+    assert "0x9" in cp2.stdout and "0x77" in cp2.stdout, cp2.stdout
+    s2 = json.loads(out2.read_text())
+    assert s2["documentary_names_absent_from_l4"] == [], s2
 
 
 def test_no_documented_register_table_stays_not_applicable():
@@ -644,19 +680,25 @@ endpackage
 
 def test_the_umbrella_operator_line_keeps_the_payload_not_the_prefix():
     import flow_compliance_check as FC
-    proj = _docs_project(_BARE_ACCESS_TABLE, _ALL_FIVE)
+    # R-0915-113(7): `_ALL_FIVE` is now a PASS, so the NOT_MEASURED line this
+    # test is about needs a project that still produces one — a documented
+    # row the document leaves unaddressed. The claim under test is unchanged:
+    # the payload survives and the house prefix does not.
+    unaddressed = _BARE_ACCESS_TABLE.replace("| `0x0c` | `PUSH`",
+                                             "| (tbd) | `PUSH`")
+    proj = _docs_project(unaddressed, _ALL_FIVE)
     cp = _run_cov(proj)
     line = FC._p0_skip_reason_from_output(
         "l4_regmap_declared_register_coverage_check", cp.stdout, cp.stderr)
-    # The WORD survives — it is the first thing the reason itself says, so it
-    # does not depend on the bracket marker being kept.
-    assert line.startswith("NOT_MEASURED, which is not NOT_APPLICABLE"), line
+    # The payload's own opening survives, so it does not depend on the
+    # bracket marker being kept.
+    assert line.startswith("This gate's HDL declared side"), line
     # The house prefix does NOT survive: neither the bracket marker nor the
     # gate's own name is repeated into a line that already carries both.
     assert not line.startswith("["), line
     assert "l4_regmap_declared_register_coverage_check" not in line, line
     # And the payload reaches the line rather than being truncated away.
-    assert "documentation staged under" in line, line
+    assert "documentation staged under" in line.lower(), line
 
 
 def test_a_line_without_the_marker_renders_identically():
