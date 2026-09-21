@@ -582,6 +582,26 @@ AI_AWAITING_STATES = frozenset({AI_HANDOFF_EMITTED})
 #: the input WAS applicable), not 3 (`_WAIVER_EXIT_CODE`).
 AWAITING_EXIT_CODE = 4
 
+
+def _program_expectations_digest(applicable) -> str:
+    """SHA256 over the DETERMINISTIC expectations this run decided.
+
+    The program-derived completion's own identity (R-0915-126-D1). It is
+    deliberately NOT a digest of `l_doc_expectations.json`: that file is the
+    AI's answer, the program never writes it, and crediting a program run
+    against the AI's digest would make the two indistinguishable in the record.
+    Canonical JSON so the digest is a function of the expectations and not of
+    dict ordering.
+    """
+    payload = [
+        {"rule": r.get("id") or r.get("rule") or r.get("name"),
+         "expectations": r.get("expectations") or []}
+        for r in applicable
+    ]
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                      separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
 #: The three dispositions, recorded in the report so no consumer has to infer
 #: one from an exit code. Same words as the runner's, on purpose.
 DISPOSITION_CREDITED = "CREDITED"
@@ -3381,7 +3401,60 @@ def evaluate(project: Path) -> Dict[str, Any]:
     # facts, but none is an expert reading with a non-zero denominator. Before
     # #1973 the runner credited all of them because it accepted rc 2 and only
     # checked that this report existed.
-    execution_complete = ai["status"] == AI_CONSUMED and len(converged) > 0
+    # R-0915-126-D1. THE TRACK IS COMPLETE WHEN IT HAS DECIDED ITS
+    # EXPECTATIONS — from EITHER half — and AWAITING now means only "could not
+    # read its own subject".
+    #
+    # What stood here required `AI_CONSUMED` unconditionally, so in a headless,
+    # program-only front-door run — where nobody invokes the expert subagent —
+    # `execution_complete` was False on every run, the verdict was INCOMPLETE
+    # and the exit code was AWAITING (4) forever. MEASURED on spm run13 AND
+    # run8 (8HD-4, `reports/audit/phase1/expert_parse_track.json`):
+    #
+    #     verdict INCOMPLETE · returncode 4 · ai_subtrack HANDOFF_EMITTED
+    #     execution.complete False · observed_ai_consumed 0
+    #
+    # and the pack it emitted holds only the handoff INPUTS
+    # (authoring_schema.json, design_input.txt, ic_expert_agent_handoff.json,
+    # ic_expert_db.md, lessons.md) — `l_doc_expectations.json`, the file the
+    # rc==0 branch of `check_report` hashes, DOES NOT EXIST, because it is the
+    # thing the AI is being asked to author. "Nobody invoked the subagent" is a
+    # fact about the RUNNER'S OPERATOR and it must not be a verdict about the
+    # design's Phase-1 parse.
+    #
+    # The DETERMINISTIC sub-track already decides expectations on its own —
+    # `det_examined` above counts them — and its findings are already reported.
+    # When it has decided at least one, this track HAS measured something and
+    # is DECIDED. The AI half's absence remains recorded, as coverage, by
+    # RULE_AI_SKIPPED above; it is no longer an execution failure.
+    #
+    # The two derivations are KEPT DISTINCT (the same rule as R-0915-125(a)):
+    # an AI answer is credited against `answer_sha256` over the AI's own
+    # `l_doc_expectations.json`, which stays the AI's file and is never written
+    # by the program; a program-derived completion carries its OWN
+    # `program_expectations_sha256` over the deterministic expectations. A
+    # reader can always tell which answered.
+    ai_complete = ai["status"] == AI_CONSUMED and len(converged) > 0
+    # NARROWLY: only when NOTHING WAS EVER ANSWERED. `AI_AWAITING_STATES` is
+    # exactly the hand-off-emitted case — nobody invoked the subagent — and it
+    # is the ONLY one this may stand in for.
+    #
+    # It must NOT cover a refusal. When an answer EXISTS and this consumer
+    # refused it (AI_SCHEMA_MISMATCH, an unparseable answer, an empty reading),
+    # half of a dual track declined to read something real, and no top-line
+    # word on that run may imply it was examined — crediting the deterministic
+    # half there would fix the label and not the lie. That distinction is held
+    # by `test_the_refusal_outranks_a_completely_clean_deterministic_half`,
+    # which caught this exact over-reach when the condition here was merely
+    # `not ai_complete`.
+    program_complete = (not ai_complete
+                        and ai["status"] in AI_AWAITING_STATES
+                        and det_examined > 0)
+    execution_complete = ai_complete or program_complete
+    derivation = ("ai" if ai_complete
+                  else "program" if program_complete else None)
+    program_sha = _program_expectations_digest(applicable) if program_complete \
+        else None
     if not execution_complete:
         # AWAITING vs DEFECT — see AI_AWAITING_STATES. The verdict WORD is
         # INCOMPLETE either way, because neither is coverage; what differs is
@@ -3425,6 +3498,15 @@ def evaluate(project: Path) -> Dict[str, Any]:
             "required_ai_consumed_min": 1,
             "observed_ai_status": ai["status"],
             "observed_ai_consumed": len(converged),
+            # WHICH HALF decided this track: "ai", "program", or null when
+            # neither did. Published so an AI answer and a program-derived one
+            # are never indistinguishable in the record.
+            "derivation": derivation,
+            "deterministic_examined": det_examined,
+            # The program-derived path's OWN digest. `l_doc_expectations.json`
+            # stays the AI's file and is never written here, so a program
+            # completion is verified against this instead.
+            "program_expectations_sha256": program_sha,
         },
         # WHAT IT IS WAITING FOR, in the words of the action that ends the
         # wait — never a bare state name. Null when nothing is being waited
@@ -3605,17 +3687,73 @@ def check_report(project: Path) -> int:
         if not isinstance(ai, dict) or not isinstance(execution, dict):
             raise ValueError("expert execution record is malformed")
         if rc == 0:
+            # R-0915-126-D1: a completed track has DECIDED its expectations,
+            # and TWO derivations can do that. They are checked SEPARATELY and
+            # against DIFFERENT evidence, so a program-derived reading can
+            # never be mistaken for an AI one.
             if (rep.get("verdict") not in ("PASS", "FINDINGS")
-                    or execution.get("complete") is not True
-                    or ai.get("status") != AI_CONSUMED
-                    or type(execution.get("observed_ai_consumed")) is not int
-                    or execution["observed_ai_consumed"] < 1):
+                    or execution.get("complete") is not True):
                 raise ValueError("zero return code contradicts expert execution")
-            answer = target.parent / "expert_parse_track_pack" / "l_doc_expectations.json"
-            if ai.get("answer_sha256") != hashlib.sha256(answer.read_bytes()).hexdigest():
-                raise ValueError("current expert answer has no matching producer reading")
+            # AN ABSENT `derivation` IS THE AI DERIVATION IT ALWAYS WAS.
+            # Before R-0915-126-D1 the ONLY route to rc 0 was AI_CONSUMED with
+            # a matching `answer_sha256`, so a report written by an older
+            # producer — or staged by a fixture that predates this field — is
+            # an AI-derived reading, not an unnameable one. Reading its absence
+            # as "stale" refused reports that were never wrong: MEASURED on the
+            # FIX3I arms, three synthetic intact trees
+            # (test_flow_compliance_check_gate x2,
+            # test_issue1446_incomplete_in_scope_is_not_green) went
+            # "INCOMPLETE: report unavailable or stale: zero return code ..."
+            # at Step D1 and cascaded P0/1 to NOT_MEASURED(upstream_failed).
+            # Those fixtures stage `ai_subtrack.status = AI_CONSUMED` with a
+            # real `answer_sha256` and an `execution` block carrying no
+            # `derivation` — a legitimate AI completion, which is why they are
+            # NOT re-pinned here.
+            #
+            # ONLY A DERIVATION THAT IS PRESENT AND UNRECOGNISED IS REFUSED: a
+            # report that NAMES a derivation this checker does not know is
+            # claiming something it cannot support, and that is a different
+            # fact from saying nothing.
+            derivation = execution.get("derivation")
+            if derivation is None:
+                derivation = "ai"
+            if derivation == "ai":
+                if (ai.get("status") != AI_CONSUMED
+                        or type(execution.get("observed_ai_consumed")) is not int
+                        or execution["observed_ai_consumed"] < 1):
+                    raise ValueError(
+                        "zero return code contradicts expert execution")
+                # `l_doc_expectations.json` is THE AI'S FILE. The program never
+                # writes it, so it is read here only for an AI-derived claim.
+                answer = (target.parent / "expert_parse_track_pack"
+                          / "l_doc_expectations.json")
+                if ai.get("answer_sha256") != hashlib.sha256(
+                        answer.read_bytes()).hexdigest():
+                    raise ValueError(
+                        "current expert answer has no matching producer reading")
+            elif derivation == "program":
+                # The program-derived path answers for ITSELF, against its own
+                # digest over the deterministic expectations it decided.
+                digest = execution.get("program_expectations_sha256")
+                if not isinstance(digest, str) or len(digest) != 64:
+                    raise ValueError(
+                        "a program-derived reading must record its own "
+                        "program_expectations_sha256")
+                if type(execution.get("deterministic_examined")) is not int \
+                        or execution["deterministic_examined"] < 1:
+                    raise ValueError(
+                        "a program-derived reading must have decided at least "
+                        "one deterministic expectation")
+            else:
+                raise ValueError(
+                    f"zero return code with an unrecognised execution "
+                    f"derivation {derivation!r}")
         elif rc == AWAITING_EXIT_CODE and (
-                rep.get("verdict") != "INCOMPLETE" or ai.get("status") != AI_HANDOFF_EMITTED):
+                rep.get("verdict") != "INCOMPLETE"
+                or ai.get("status") != AI_HANDOFF_EMITTED):
+            # R-0915-126-D1: AWAITING now means the producer could not read its
+            # own subject — it is no longer reachable merely because nobody
+            # invoked the subagent.
             raise ValueError("awaiting return code contradicts expert execution")
     except (OSError, ValueError, TypeError) as exc:
         print(f"INCOMPLETE: {PROGRAM} report unavailable or stale: {exc}")
