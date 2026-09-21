@@ -24043,6 +24043,7 @@ def _repair_design_margin_tcl(marker: str, extra: str = "") -> str:
 
 def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
                                  membership_path: Optional[str] = None,
+                                 stage: Optional[str] = None,
                                  ) -> str:
     """v1.8.43 — POST-REROUTE routing-integrity CHECK. Emits
     ``<PFX>_UNROUTED_NETS: <n> <up to 12 names>``.
@@ -24100,7 +24101,23 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
 
     -- the planted nets come back by name, including a spare-tie net, which is
     the v1.5.65 hazard this check exists for. On the no-pad arm of the same
-    design the two bodies agree exactly, 0/0 before and 5/5 after."""
+    design the two bodies agree exactly, 0/0 before and 5/5 after.
+
+    THE STAGE IS A FIELD, NOT PART OF THE MARKER NAME, and that is a contract
+    this lane already wrote. The two post-route antenna passes are the same
+    stage emitted twice and must differ in NOTHING but the one stage token
+    each pass's probes carry -- `test_splitting_the_reconverge_block_did_not_
+    drop_the_second_antenna_pass` normalises that ONE token and then demands
+    byte-equality. Baking the stage into the marker name (`UNROUTED_PROBE_
+    AFTER_POSTROUTE_ANTENNA_REPAIR_...`) put a SECOND, differently-spelled
+    per-pass token outside that normalisation and broke the equality; the
+    arms caught it on 5b5bd02af. So `stage` is emitted as a field, spelled
+    EXACTLY as `_pin_access_probe_tcl` spells it, and one normalisation now
+    covers both probes. A caller that names no stage gets its previous lines
+    byte-for-byte -- SHIP, SDR, NAMED_VIOL_REROUTE and PAD_CHECK are
+    unchanged, including the `SHIP_UNROUTED_NETS:` line the promotion gate
+    parses."""
+    _st = f"stage={stage} " if stage else ""
     return (
         # Shapes of ONE terminal as {layer x0 y0 x1 y1} records. Empty list ==
         # "could not look", which the caller must not read as "no overlap".
@@ -24201,9 +24218,11 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
         "      if {[llength $_unrn] < 12} { lappend _unrn [$_net getName] }\n"
         "    }\n"
         "  }\n"
-        f"  puts \"{marker_prefix}_UNROUTED_NETS: $_unr [join $_unrn ,]\"\n"
-        f"  puts \"{marker_prefix}_ABUTTED_NETS: $_abut [join $_abn ,]\"\n"
-        f"  puts \"{marker_prefix}_UNROUTED_SHAPE_BLIND: $_blind\"\n"
+        f"  puts \"{marker_prefix}_UNROUTED_NETS: {_st}$_unr "
+        "[join $_unrn ,]\"\n"
+        f"  puts \"{marker_prefix}_ABUTTED_NETS: {_st}$_abut "
+        "[join $_abn ,]\"\n"
+        f"  puts \"{marker_prefix}_UNROUTED_SHAPE_BLIND: {_st}$_blind\"\n"
         + (
             # R-0915-121(b) -- the membership goes to a FILE, uncapped. The
             # stdout line keeps its 12-name cap: MEASURED, and it is why this
@@ -24234,7 +24253,7 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
             "  } _unfe]} {\n"
             f"    puts \"{marker_prefix}_MEMBERSHIP_UNWRITTEN: $_unfe\"\n"
             "  } elseif {$_unr > 0} {\n"
-            f"    puts \"{marker_prefix}_MEMBERSHIP: {membership_path} "
+            f"    puts \"{marker_prefix}_MEMBERSHIP: {_st}{membership_path} "
             "([llength $_unra] unrouted, [llength $_abna] abutted)\"\n"
             "  }\n"
             if membership_path else ""
@@ -24275,8 +24294,9 @@ def _unrouted_probe_tcl(tag: str) -> str:
     """
     safe = "".join(c if (c.isalnum() or c in "_-") else "_" for c in tag)
     return _routing_integrity_check_tcl(
-        f"UNROUTED_PROBE_{safe.upper()}",
-        membership_path=f"unrouted_{safe}.txt")
+        "UNROUTED_PROBE",
+        membership_path=f"unrouted_{safe}.txt",
+        stage=safe)
 
 
 def _resizer_bound_flag(pct: Optional[float]) -> str:
@@ -25381,7 +25401,7 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         # have unwired anything is REFUSED, and refusing it means putting back
         # what it destroyed -- destroying its diodes by name is not enough
         # when the damage is other nets' geometry.
-        "    set _ant_pass_ckpt $_ant_dir/antenna_pass_pre.odb\n"
+        f"    set _ant_pass_ckpt $_ant_dir/{_ANTENNA_PASS_CHECKPOINT_NAME}\n"
         "    set _ant_pass_ckpt_ok 0\n"
         "    if {[catch {write_db $_ant_pass_ckpt} _ant_pc_e]} {\n"
         "      puts \"ANTENNA_PASS_CHECKPOINT_FAILED: $_ant_pc_e\"\n"
@@ -25743,6 +25763,9 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "} elseif {$_ant_ckpt_ok} {\n"
         "  puts \"ANTENNA_REPAIR_APPLIED: no repair or reroute refused\"\n"
         "  catch {file delete -- $_ant_ckpt}\n"
+        # the per-pass checkpoint is only owed while a refusal might need it
+        "  if {[info exists _ant_pass_ckpt]} "
+        "{ catch {file delete -- $_ant_pass_ckpt} }\n"
         "} else {\n"
         # A design that was ALREADY CLEAN never entered the loop, so there was
         # nothing to checkpoint and nothing to refuse. Saying so is not the same
@@ -30989,6 +31012,20 @@ _ANTENNA_STAGES = ("postroute_antenna_repair",
 #: The checkpoint file name, stated ONCE. The Tcl writes
 #: `$_ant_dir/antenna_pre_repair.odb` and this is that name.
 _ANTENNA_CHECKPOINT_NAME = "antenna_pre_repair.odb"
+#: R-0915-121(c) -- the SECOND checkpoint this module writes: the state taken
+#: immediately before ONE native `repair_antennas -reroute` call, which is what
+#: a refused pass must be restored from. The stage-entry file above is several
+#: stages older.
+_ANTENNA_PASS_CHECKPOINT_NAME = "antenna_pass_pre.odb"
+#: Both, and ONLY both. The reader below refuses any other name rather than
+#: restoring from a file this module did not write -- that property is why the
+#: check exists and it is unchanged; what changed is that there are now two
+#: files it wrote. MEASURED on int11 (subservient x gf180mcuD as a DIE,
+#: 2026-09-21): the deck named antenna_pass_pre.odb exactly as R-0915-121(c)
+#: requires and the parent refused it for not being antenna_pre_repair.odb, so
+#: the ruling's restore could not happen at all.
+_ANTENNA_CHECKPOINT_NAMES = (_ANTENNA_CHECKPOINT_NAME,
+                             _ANTENNA_PASS_CHECKPOINT_NAME)
 
 
 def antenna_rollback_request(log_text: str) -> Optional[Dict[str, str]]:
@@ -31056,19 +31093,24 @@ def _pnr_rollback_refused_antenna_repair(*, container: str, out_dir: Path,
     # and a basename that is not the one we emit is refused rather than
     # silently redirected.
     ckpt_c = req["checkpoint"]
-    if PurePosixPath(ckpt_c).name != _ANTENNA_CHECKPOINT_NAME:
+    ckpt_name = PurePosixPath(ckpt_c).name
+    if ckpt_name not in _ANTENNA_CHECKPOINT_NAMES:
         rec["status"] = "FAILED"
         rec["antenna_repair"] = "NOT_APPLIED"
         rec["reason"] = (
             f"the antenna repair REFUSED ({req['reason']}) and named "
-            f"{ckpt_c} as its checkpoint, which is not "
-            f"{_ANTENNA_CHECKPOINT_NAME}; refused rather than restored from a "
-            f"file this module did not write")
+            f"{ckpt_c} as its checkpoint, which is none of "
+            f"{', '.join(_ANTENNA_CHECKPOINT_NAMES)}; refused rather than "
+            f"restored from a file this module did not write")
         rec["route_verified"] = False
         rec["rc"] = 1
         return rec
-    ckpt = out_dir / _ANTENNA_CHECKPOINT_NAME
-    ckpt_c = f"{out_dir_c}/{_ANTENNA_CHECKPOINT_NAME}"
+    # The RESTORE USES THE NAME THE DECK GAVE, once that name is one of ours.
+    # It used to rebuild the path from the stage-entry constant regardless of
+    # what the marker said, which silently disagreed with the emitter the
+    # moment there were two checkpoints.
+    ckpt = out_dir / ckpt_name
+    ckpt_c = f"{out_dir_c}/{ckpt_name}"
     if not ckpt.is_file():
         rec["status"] = "FAILED"
         rec["antenna_repair"] = "NOT_APPLIED"

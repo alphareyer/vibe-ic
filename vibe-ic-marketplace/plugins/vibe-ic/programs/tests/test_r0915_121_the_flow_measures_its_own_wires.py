@@ -75,10 +75,43 @@ def test_the_probe_is_measure_only():
             assert forbidden not in cmds, (b, forbidden)
 
 
-def test_the_probe_names_its_boundary_and_its_file():
+def test_the_probe_names_its_boundary_in_a_field_not_in_the_marker():
+    """WAS `test_the_probe_names_its_boundary_and_its_file`, which pinned the
+    stage INTO the marker name (`UNROUTED_PROBE_AFTER_POSTROUTE_ANTENNA_
+    REPAIR_...`). HANDBACK on 5b5bd02af: that put a SECOND per-pass token,
+    differently spelled, outside the one normalisation
+    `test_splitting_the_reconverge_block_did_not_drop_the_second_antenna_pass`
+    applies -- so the two antenna passes stopped being the re-emission of each
+    other and the byte-equality this lane wrote in #2423 broke. The marker is
+    now stage-free and the stage is a FIELD, spelled exactly as the pin-access
+    probe spells it, so one normalisation covers both probes."""
     t = R._unrouted_probe_tcl("after_postroute_antenna_repair")
-    assert "UNROUTED_PROBE_AFTER_POSTROUTE_ANTENNA_REPAIR_UNROUTED_NETS" in t
+    assert "UNROUTED_PROBE_UNROUTED_NETS:" in t
+    assert "stage=after_postroute_antenna_repair" in t
     assert "unrouted_after_postroute_antenna_repair.txt" in t
+    # the stage must NOT be baked into any marker NAME
+    assert "UNROUTED_PROBE_AFTER_POSTROUTE" not in t
+
+
+def test_the_stage_token_is_spelled_as_the_pin_access_probe_spells_it():
+    """THE WHOLE POINT: one token, one normalisation, both probes. If these
+    two ever spell the same boundary differently, the antenna passes differ in
+    two places again and only one of them gets normalised."""
+    for b in BOUNDARIES:
+        pin = R._pin_access_probe_tcl(b)
+        unr = R._unrouted_probe_tcl(b)
+        assert b in pin, b
+        assert b in unr, b
+        # and nothing in the unrouted probe carries a DIFFERENT spelling of it
+        assert b.upper() not in unr, b
+
+
+def test_a_caller_with_no_stage_emits_exactly_what_it_did_before():
+    """SHIP's line is parsed by the promotion gate (`SHIP_UNROUTED_NETS:`),
+    so the stage field must be absent, not empty, when nobody named a stage."""
+    t = R._routing_integrity_check_tcl("SHIP")
+    assert 'puts "SHIP_UNROUTED_NETS: $_unr [join $_unrn ,]"' in t
+    assert "stage=" not in t
 
 
 def test_the_probe_writes_the_membership_uncapped():
@@ -169,6 +202,6 @@ def test_a_boundary_with_nothing_unrouted_still_reports_its_counts():
     """The instrument must not go silent when it has good news -- "no probe
     line" and "a clean boundary" have to stay distinguishable."""
     t = R._unrouted_probe_tcl("after_postroute_antenna_repair")
-    i_counts = t.index("_UNROUTED_NETS: $_unr")
+    i_counts = t.index("UNROUTED_PROBE_UNROUTED_NETS:")
     i_gate = t.index("if {$_unr > 0 && [catch {")
     assert i_counts < i_gate, "the counts are printed before the file is gated"

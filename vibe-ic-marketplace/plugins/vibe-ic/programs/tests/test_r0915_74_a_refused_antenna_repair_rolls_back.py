@@ -311,14 +311,25 @@ def test_a_missing_checkpoint_is_refused_by_name_not_degraded(
 def test_a_checkpoint_this_module_did_not_write_is_refused(
         tmp_path, monkeypatch):
     """A restore point named by a log line is still a restore point: it must be
-    the file this module emits, not whatever the marker says."""
+    a file THIS MODULE EMITS, not whatever the marker says.
+
+    R-0915-121(c) made that TWO files, not one -- the stage-entry checkpoint
+    and the per-pass one taken immediately before a native
+    `repair_antennas -reroute` -- so the refusal now names the set rather than
+    the single old constant. The PROPERTY is unchanged and is what this test
+    still measures: a name outside the set is refused and NOTHING is run.
+    MEASURED on int11 (subservient x gf180mcuD as a DIE, 2026-09-21): with one
+    name in the set the parent refused the deck's own R-0915-121(c) checkpoint
+    and the ruling's restore could not happen at all."""
     rec, calls, _ = _call(
         tmp_path,
         "ANTENNA_REPAIR_REFUSED_ROLLBACK_REQUEST: checkpoint=/w/pnr/other.odb "
         "reason=X", monkeypatch=monkeypatch)
     assert rec["status"] == "FAILED"
-    assert "not antenna_pre_repair.odb" in rec["reason"].replace(
-        "which is not ", "not ")
+    for name in R._ANTENNA_CHECKPOINT_NAMES:
+        assert name in rec["reason"], name
+    assert "refused rather than restored from a file this module did not " \
+        "write" in rec["reason"]
     assert calls == []
 
 

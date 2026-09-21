@@ -403,3 +403,71 @@ def test_the_judgement_reads_the_wires_own_size_not_the_tools_message():
     assert "$_ant_w0w length" in tcl
     assert "_ant_shrunk" in tcl
     assert "_ant_w0_blind" in tcl
+
+
+# ── (c) completed: the parent accepts the checkpoint the deck names ──────────
+#
+# MEASURED on int11 (subservient x gf180mcuD as a DIE, 2026-09-21, tree
+# 5b5bd02af): the deck named `antenna_pass_pre.odb` exactly as R-0915-121(c)
+# requires, and the parent answered
+#
+#   ANTENNA_ROLLBACK FAILED antenna_repair=NOT_APPLIED reason=the antenna
+#   repair REFUSED (...) and named .../antenna_pass_pre.odb as its checkpoint,
+#   which is not antenna_pre_repair.odb; refused rather than restored from a
+#   file this module did not write
+#
+# -- so the ruling's restore could not happen at all. The reader's PROPERTY is
+# right and stays: restore only from a file THIS MODULE WROTE. What changed is
+# that R-0915-121(c) makes that two files, and the reader knew one.
+
+def test_the_parent_accepts_the_per_pass_checkpoint_the_deck_names():
+    log = ("ANTENNA_REPAIR_REFUSED_ROLLBACK_REQUEST: "
+           "checkpoint=/w/pnr/antenna_pass_pre.odb reason=ANTENNA_DIODE_"
+           "ROLLED_BACK: 2237 net(s) -- _vibeic_aux_tie_0014\n")
+    req = R.antenna_rollback_request(log)
+    assert req is not None
+    from pathlib import PurePosixPath
+    assert PurePosixPath(req["checkpoint"]).name in R._ANTENNA_CHECKPOINT_NAMES
+
+
+def test_the_parent_still_accepts_the_stage_entry_checkpoint():
+    """The fall-back path -- a refusal raised before any pass wrote its own."""
+    assert R._ANTENNA_CHECKPOINT_NAME in R._ANTENNA_CHECKPOINT_NAMES
+
+
+def test_a_checkpoint_this_module_never_wrote_is_still_refused():
+    """THE TOOTH THE READER KEEPS. Widening the set to the two files this
+    module writes must not widen it to any path a deck cares to name."""
+    assert "wherever.odb" not in R._ANTENNA_CHECKPOINT_NAMES
+    assert len(R._ANTENNA_CHECKPOINT_NAMES) == 2
+    src = Path(R.__file__).read_text()
+    assert "ckpt_name not in _ANTENNA_CHECKPOINT_NAMES" in src
+    assert "refused rather than " in src
+
+
+def test_the_restore_uses_the_name_the_deck_gave():
+    """It used to rebuild the path from the stage-entry constant whatever the
+    marker said, which silently disagreed with the emitter the moment there
+    were two checkpoints."""
+    src = Path(R.__file__).read_text()
+    assert "ckpt = out_dir / ckpt_name" in src
+    assert 'ckpt_c = f"{out_dir_c}/{ckpt_name}"' in src
+
+
+def test_the_emitter_and_the_reader_state_the_name_once():
+    """A second spelling is a rollback that restores nothing."""
+    tcl = _tcl()
+    assert R._ANTENNA_PASS_CHECKPOINT_NAME in tcl
+    src = Path(R.__file__).read_text()
+    assert src.count(f'"{R._ANTENNA_PASS_CHECKPOINT_NAME}"') == 1
+
+
+@needs_tclsh
+def test_a_pass_that_was_not_refused_drops_its_per_pass_checkpoint():
+    """The per-pass checkpoint is owed only while a refusal might need it;
+    it is a whole database on disk (27 MB on this design)."""
+    r, _ = _drive("5 5 0", inserts=["d1"], unwire=[])
+    assert "ANTENNA_REPAIR_APPLIED" in r.stdout
+    tcl = _tcl()
+    i = tcl.index("ANTENNA_REPAIR_APPLIED")
+    assert "file delete -- $_ant_pass_ckpt" in tcl[i:i + 400]
