@@ -111,7 +111,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as _dc_fields
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import _path_layout as _pl
@@ -260,6 +260,66 @@ def _find_devices_root() -> Path:
 
 PROTOCOL_TB = _find_protocol_tb()
 DEVICES_ROOT = _find_devices_root()
+
+
+
+class _RecordNamesRelocatedCopy(RuntimeError):
+    """The run's own report cited a relocated copy of the project (#2158)."""
+
+
+def _refuse_relocated_copy_in_record(summary: Any, project: Path) -> None:
+    """REFUSE, at the moment of writing, a record that cites a copy of THIS
+    project somewhere else.
+
+    WHY HERE AND NOT ONLY IN THE GATE. `project_outputs_in_tree_check` catches
+    this class, but it runs in final_audit -- after the staging directory has
+    been deleted, forty steps after the sentence was composed, and it can only
+    say that the run is already wrong. run22 (8HD-6, sha256 x sky130A, pass 2)
+    published `/tmp/vibeic-rtl-step-bc6aoiqh/run22/phase2/stage1/fallback_skill.md`
+    in `steps[3].waiver_rows[0].reason` and FAILED there, with the artefact
+    itself sitting in the tree at `phase2/stage1/fallback_skill.md` the whole
+    time. The remap above is the fix; this is the seam that makes a regression
+    of it loud where it happens instead of a dangling reference that outlives
+    the run.
+
+    The shape is `project_outputs_in_tree_check.names_a_relocated_copy` -- that
+    gate's OWN definition, imported, not re-implemented: a pathname carrying
+    this project's directory name as a component and resolving outside this
+    project root. `/foss/...`, `/usr/bin/...`, a PDK root and the pinned plugin
+    worktree carry no such component and are untouched.
+    """
+    import project_outputs_in_tree_check as _poit
+    found: List[str] = []
+
+    def _walk(node: Any, where: str) -> None:
+        if isinstance(node, str):
+            for m in _poit._ANY_ABS_PATH_RE.finditer(node):
+                cand = m.group(1)
+                if _poit.names_a_relocated_copy(cand, project):
+                    found.append(f"{where} -> {cand}")
+        elif isinstance(node, dict):
+            for k, v in node.items():
+                _walk(v, f"{where}.{k}")
+        elif isinstance(node, (list, tuple)):
+            for i, v in enumerate(node):
+                _walk(v, f"{where}[{i}]")
+
+    _walk(summary, "$")
+    if found:
+        raise _RecordNamesRelocatedCopy(
+            "this record names %d relocated cop%s of the project it describes, "
+            "which no reader can follow once the copy is swept — %s. The record "
+            "must name the in-tree path of the artefact the flow KEEPS."
+            % (len(found), "y" if len(found) == 1 else "ies",
+               "; ".join(sorted(found)[:6])))
+
+
+def _write_phase2_report(out: Path, summary: Any, project: Path) -> None:
+    """The ONE seam every phase-2 report is written through, so the refusal
+    above cannot be bypassed by a second `write_text` added later."""
+    _refuse_relocated_copy_in_record(summary, project)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
 
 
 @dataclass
@@ -7268,12 +7328,27 @@ def step_rtl_gen(project: Path, ic_class: str,
                 # All failure-capable result acceptance stays on this side of
                 # finalize(), while the old canonical subtrees still exist.
                 binding.require_current()
-                result.detail = _phase1_remap_stage_value(
-                    result.detail, stage_project, project)
-                result.output_files = _phase1_remap_stage_value(
-                    result.output_files, stage_project, project)
-                result.extras = _phase1_remap_stage_value(
-                    result.extras, stage_project, project)
+                # #2158/#2183 remapped `detail`, `output_files` and `extras`
+                # by NAME. R-0915-85 then put FOUR more text-carrying fields
+                # beside the verdict -- reason_class, declared_by, waiver_rows,
+                # attribution (and disclosures) -- and none of them was added
+                # here, because an enumerated list cannot cover a field that
+                # does not exist yet.
+                #
+                # MEASURED on run22 (8HD-6, sha256 x sky130A, DIE, pass 2): the
+                # SAME hand-off f-string reached the published report three
+                # times, and only two of the three were canonical:
+                #   steps[3].detail                     -> /home/.../run22/...  OK
+                #   steps[3].extras.fallback_skill_path -> /home/.../run22/...  OK
+                #   steps[3].waiver_rows[0].reason      -> /tmp/vibeic-rtl-step-
+                #                                          bc6aoiqh/run22/...   LEAK
+                # so every WAIVE-route project dangled that reference forever
+                # and `project_outputs_in_tree_check` blocked the IC on it.
+                # The population is therefore DERIVED from the dataclass, and a
+                # field added tomorrow is covered on the day it is added.
+                for _rf in _dc_fields(result):
+                    setattr(result, _rf.name, _phase1_remap_stage_value(
+                        getattr(result, _rf.name), stage_project, project))
                 if _stage_rewrites:
                     # Named, not counted: a reader of this run needs to know
                     # WHICH published artefacts had the staging root rewritten
@@ -22473,8 +22548,7 @@ def main() -> int:
                    "steps": [asdict(s) for s in plan],
                    "verdict": "FAIL"}
         out = _pl.report_path(project, "phase2_one_shot.json")
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+        _write_phase2_report(out, summary, project)
         print(f"\n=== design_one_shot_runner DONE — {out}")
         print(f"verdict: FAIL — phase1 precondition unmet")
         return 1
@@ -23252,7 +23326,7 @@ def main() -> int:
     summary["steps_view"], out = _pl.publish_report_then_steps_view(
         project, PROGRAMS_DIR, "design_one_shot_runner", summary,
         "phase2_one_shot.json")
-    out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+    _write_phase2_report(out, summary, project)
     # Record rtl/ as the runner is leaving it, so the NEXT front-door run
     # can tell this tree (generator-produced, safe to regenerate) from one
     # an author has since edited (must be preserved).
@@ -23287,7 +23361,7 @@ def main() -> int:
         # The published record must describe the tree as it is being LEFT, not
         # as it was mid-run.
         summary["steps"] = [asdict(s) for s in plan]
-        out.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
+        _write_phase2_report(out, summary, project)
     print(f"\n=== design_one_shot_runner DONE — {out}")
     print(f"verdict: {summary['verdict']}")
     for s in plan:
