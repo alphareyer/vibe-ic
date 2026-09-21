@@ -9165,7 +9165,37 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         "it does not route\"\n"
         "}\n"
         # (c) — a PG terminal that reaches no rail is PDN work, by name.
+        #
+        # R-0915-120 (2026-09-21) REFINES (c) WITH ITS SECOND ABUTMENT PARTNER.
+        # This test asked only whether a terminal's pin shape overlaps a
+        # rail/stripe of its own net. That is the right question for a core
+        # cell sitting over the PDN grid and the WRONG question for a pad ring:
+        # an IO ring carries VDD/VSS/DVDD/DVSS by PAD-TO-PAD ABUTMENT, which is
+        # the same mechanism R-0915-114 named for ties, fillers, decaps and
+        # spares -- the partner is simply the adjacent pad instead of a stripe,
+        # and the core PDN's stripes correctly do not reach into the pad band.
+        #
+        # MEASURED on int8 (subservient x gf180mcuD as a DIE, 2026-09-21), on
+        # the run's own antenna_pre_repair.odb: 187948 PG terminals, 0 on no
+        # net, and 1416 (0.75%) overlapping no rail -- every single one a
+        # pad-ring cell (908 fill10, 204 fill1, 160 fillnc, 84 bi_24t, 40 in_c,
+        # 16 cor, 2 dvdd, 2 dvss; ZERO standard cells), all of them in the
+        # 393 um pad band. Asked the second question, 1416 of 1416 abut another
+        # PG terminal of the SAME net on a DIFFERENT instance, and 0 touch
+        # nothing. The refusal was a 100% false positive and it cost that run
+        # its routed.def, its DRC, its LVS and its post-route STA.
+        #
+        # So: CONNECTED = overlaps a rail/stripe of its own net OR abuts
+        # another PG terminal of the SAME net on a DIFFERENT instance. A
+        # terminal touching NEITHER still fails by name. The gate keeps every
+        # tooth it had: nothing that was genuinely floating becomes clean,
+        # because a floating terminal has no same-net neighbour either.
+        #
+        # A DIFFERENT net's neighbour does not count, and the same instance's
+        # own other terminal does not count -- a cell whose two PG pins touch
+        # each other is not thereby connected to anything.
         "set _pgab_bad {}\n"
+        "set _pgab_nr {}\n"
         "catch {\n"
         "  foreach _pgab_i [[ord::get_db_block] getInsts] {\n"
         "    foreach _pgab_t [$_pgab_i getITerms] {\n"
@@ -9191,21 +9221,109 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         "        if {$_pgab_hit} { break }\n"
         "      }\n"
         "      if {!$_pgab_hit} {\n"
-        "        lappend _pgab_bad \"[$_pgab_i getName]/"
-        "[[$_pgab_t getMTerm] getName] (no rail overlap)\"\n"
+        "        lappend _pgab_nr [list [$_pgab_i getName] "
+        "[[$_pgab_t getMTerm] getName] [$_pgab_n getName] "
+        "[$_pgab_b xMin] [$_pgab_b yMin] [$_pgab_b xMax] [$_pgab_b yMax]]\n"
         "      }\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+        # R-0915-120's second question, asked ONLY of the no-rail set, so a
+        # design where that set is empty pays nothing for it.
+        "set _pgab_by_abut 0\n"
+        "if {[llength $_pgab_nr] > 0} {\n"
+        "  set _pgab_blk [ord::get_db_block]\n"
+        # A coarse grid over the SAME-NET candidates keeps the partner search
+        # bounded: without it this is 1416 x 187948 box tests. The pitch is
+        # taken from the die so it is PDK- and size-agnostic; the loops span
+        # every cell a box touches, so a box larger than the pitch (a pad is)
+        # is still found.
+        "  set _pgab_g 20000\n"
+        "  catch {\n"
+        "    set _pgab_da [$_pgab_blk getDieArea]\n"
+        "    set _pgab_dw [expr {[$_pgab_da xMax] - [$_pgab_da xMin]}]\n"
+        "    if {$_pgab_dw > 0} { set _pgab_g [expr {($_pgab_dw / 128) + 1}] }\n"
+        "  }\n"
+        "  if {$_pgab_g < 1} { set _pgab_g 1 }\n"
+        "  array unset _pgab_ix\n"
+        "  catch {\n"
+        "    foreach _pgab_i [$_pgab_blk getInsts] {\n"
+        "      set _pgab_in [$_pgab_i getName]\n"
+        "      foreach _pgab_t [$_pgab_i getITerms] {\n"
+        "        set _pgab_sg [[$_pgab_t getMTerm] getSigType]\n"
+        "        if {$_pgab_sg ne \"POWER\" && $_pgab_sg ne \"GROUND\"} "
+        "{ continue }\n"
+        "        set _pgab_n [$_pgab_t getNet]\n"
+        "        if {$_pgab_n eq \"NULL\"} { continue }\n"
+        "        set _pgab_nm [$_pgab_n getName]\n"
+        "        set _pgab_b [$_pgab_t getBBox]\n"
+        "        set _pgab_e [list $_pgab_in [$_pgab_b xMin] [$_pgab_b yMin] "
+        "[$_pgab_b xMax] [$_pgab_b yMax]]\n"
+        "        set _pgab_cx [expr {[$_pgab_b xMin] / $_pgab_g}]\n"
+        "        set _pgab_cX [expr {[$_pgab_b xMax] / $_pgab_g}]\n"
+        "        set _pgab_cy [expr {[$_pgab_b yMin] / $_pgab_g}]\n"
+        "        set _pgab_cY [expr {[$_pgab_b yMax] / $_pgab_g}]\n"
+        "        for {set _pgab_u $_pgab_cx} {$_pgab_u <= $_pgab_cX} "
+        "{incr _pgab_u} {\n"
+        "          for {set _pgab_v $_pgab_cy} {$_pgab_v <= $_pgab_cY} "
+        "{incr _pgab_v} {\n"
+        "            lappend _pgab_ix($_pgab_nm,$_pgab_u,$_pgab_v) $_pgab_e\n"
+        "          }\n"
+        "        }\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "  foreach _pgab_o $_pgab_nr {\n"
+        "    set _pgab_on [lindex $_pgab_o 0]\n"
+        "    set _pgab_om [lindex $_pgab_o 1]\n"
+        "    set _pgab_nm [lindex $_pgab_o 2]\n"
+        "    set _pgab_x0 [lindex $_pgab_o 3]\n"
+        "    set _pgab_y0 [lindex $_pgab_o 4]\n"
+        "    set _pgab_x1 [lindex $_pgab_o 5]\n"
+        "    set _pgab_y1 [lindex $_pgab_o 6]\n"
+        "    set _pgab_hit 0\n"
+        "    set _pgab_cX [expr {$_pgab_x1 / $_pgab_g}]\n"
+        "    set _pgab_cY [expr {$_pgab_y1 / $_pgab_g}]\n"
+        "    for {set _pgab_u [expr {$_pgab_x0 / $_pgab_g}]} "
+        "{$_pgab_u <= $_pgab_cX && !$_pgab_hit} {incr _pgab_u} {\n"
+        "      for {set _pgab_v [expr {$_pgab_y0 / $_pgab_g}]} "
+        "{$_pgab_v <= $_pgab_cY && !$_pgab_hit} {incr _pgab_v} {\n"
+        "        if {![info exists "
+        "_pgab_ix($_pgab_nm,$_pgab_u,$_pgab_v)]} { continue }\n"
+        "        foreach _pgab_c $_pgab_ix($_pgab_nm,$_pgab_u,$_pgab_v) {\n"
+        # the partner must be a DIFFERENT instance -- a cell's own two PG pins
+        # touching each other connect it to nothing.
+        "          if {[lindex $_pgab_c 0] eq $_pgab_on} { continue }\n"
+        "          if {[lindex $_pgab_c 3] < $_pgab_x0} { continue }\n"
+        "          if {[lindex $_pgab_c 1] > $_pgab_x1} { continue }\n"
+        "          if {[lindex $_pgab_c 4] < $_pgab_y0} { continue }\n"
+        "          if {[lindex $_pgab_c 2] > $_pgab_y1} { continue }\n"
+        "          set _pgab_hit 1\n"
+        "          break\n"
+        "        }\n"
+        "      }\n"
+        "    }\n"
+        "    if {$_pgab_hit} {\n"
+        "      incr _pgab_by_abut\n"
+        "    } else {\n"
+        "      lappend _pgab_bad \"$_pgab_on/$_pgab_om (no rail overlap and "
+        "no same-net neighbour)\"\n"
         "    }\n"
         "  }\n"
         "}\n"
         "if {[llength $_pgab_bad] > 0} {\n"
         "  error \"PG_ABUTMENT_NOT_CONNECTED: [llength $_pgab_bad] PG "
-        "terminal(s) reach no rail of their own net: "
+        "terminal(s) reach neither a rail of their own net nor a same-net "
+        "neighbour: "
         "[join [lrange $_pgab_bad 0 7] {, }] — that is PDN work (a via or "
         "stripe from pdngen's grid), not signal routing, and this step will "
         "not route around it\"\n"
         "}\n"
-        "puts \"PG_ABUTMENT_OK: every PG terminal reaches a rail of its own "
-        "net\"\n"
+        "puts \"PG_ABUTMENT_OK: every PG terminal reaches its own net — "
+        "[expr {[llength $_pgab_nr] - $_pgab_by_abut}] by a rail it overlaps "
+        "is not counted here; $_pgab_by_abut of [llength $_pgab_nr] terminal(s) "
+        "that overlap no rail reach the net by abutting a same-net neighbour "
+        "on another instance (R-0915-120)\"\n"
         # (2) — the router's own DRV count must not have moved.
         "set _pgdrc -1\n"
         "catch { set _pgdrc [detailed_route_num_drvs] }\n"
@@ -25113,6 +25231,24 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "    }\n"
         "    # PRIMARY: tool-native repair + incremental reroute in ONE call,\n"
         "    # escalating -ratio_margin. -iterations 1 = one pass per outer turn.\n"
+        # R-0915-116(2) — bookkeeping this pass needs to answer for itself:
+        # which instances existed before it, so the diodes it inserts can be
+        # named and rolled back, and the block handle the judgement uses.
+        # The handle itself is taken defensively: if it cannot be had, the
+        # judgement below sees nothing and the pass is UNJUDGED, which stops.
+        # An unguarded call here would abort the whole deck on a build whose
+        # accessor is named differently -- the opposite of failing safe.
+        "    set _ant_blk \"\"\n"
+        "    catch { set _ant_blk [ord::get_db_block] }\n"
+        # NOT `_ant_pre`: that name is already the PRECHECK VIOLATION COUNT
+        # (`set _ant_pre [check_antennas]` above). Tcl's `array unset` silently
+        # no-ops on a scalar and the first `set _ant_pre(x) 1` then raises
+        # "variable isn't array" INSIDE this catch -- the snapshot would have
+        # been empty on every run and every native raise would have read as
+        # UNJUDGED. The instance snapshot gets its own name.
+        "    array unset _ant_pre_inst\n"
+        "    catch { foreach _ant_pi [$_ant_blk getInsts] "
+        "{ set _ant_pre_inst([$_ant_pi getName]) 1 } }\n"
         "    if {[catch {repair_antennas "
         f"{pdk.antenna_diode_cell}"
         " -iterations 1 -ratio_margin $_ant_margin -reroute} _ra_native]} {\n"
@@ -25120,33 +25256,108 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         "      # incremental detailed_route of the diode-dirty nets.\n"
         "      puts \"ANTENNA_NATIVE_REROUTE_NONFATAL: $_ra_native\"\n"
         "      set _ant_refused \"ANTENNA_NATIVE_REROUTE_NONFATAL: $_ra_native\"\n"
-        "      if {[catch {repair_antennas "
-        f"{pdk.antenna_diode_cell}"
-        " -iterations 1 -ratio_margin $_ant_margin} _ra_err]} {\n"
-        "        puts \"REPAIR_ANTENNA_NONFATAL: $_ra_err\"\n"
-        "        set _ant_refused \"REPAIR_ANTENNA_NONFATAL: $_ra_err\"\n"
+        # R-0915-116(2) — THE OBJECTIVE IS THE VIOLATION COUNT, AND THE
+        # WHOLE-DESIGN FALLBACK IS DELETED.
+        #
+        # MEASURED on spm x gf180mcuD as a DIE (lane icspm5, run12 on
+        # v1.22.60): base route CONVERGED (DRT-0199 494 -> 201 -> 129 -> 2 -> 0;
+        # DRT-0702 post-route verification 0 violations). The antenna loop then
+        # found ONE violating net (p__core), GRT-0015 inserted ONE diode, the
+        # native `-reroute` raised DRT-0206 -- and GRT-0012 immediately
+        # afterwards reported "Found 0 antenna violations". THE OBJECTIVE WAS
+        # ALREADY MET. The fallback whole-design `detailed_route` then ran on a
+        # finished result and destroyed it (DRT-0206 -> ANTENNA_REROUTE_FAILED).
+        # On subservient the same fallback hit DRT-1231 and cost the run its
+        # routed.def, its DRC, its LVS and its post-route STA.
+        #
+        # So: (i) when the count reads 0 after the native path the loop is
+        # DONE -- no fallback of any kind; (ii) a DRT-0206 out of the native
+        # path is judged by CONNECTIVITY of the nets that path touched, not by
+        # the exception: connected means the error was spurious for this
+        # transaction; broken means roll that net's diode back BY NAME and
+        # report the violation by net; (iii) the whole-design route is gone
+        # from this stage, as R-0915-114(a) removed it from the PG block. A
+        # legible antenna FAIL at sign-off beats a run with no routed.def.
+        # (i) needs no new counter: `$_nv` / `$_ant_now` are re-measured at
+        # the top of every iteration from the checker's own report, so a
+        # native raise only has to STOP ROUTING and let the loop measure.
+        # (ii) the raise is judged by CONNECTIVITY of what this pass touched,
+        # never by the exception alone.
+        "      set _ant_new {}\n"
+        "      set _ant_touched {}\n"
+        "      array unset _ant_inet\n"
+        "      catch {\n"
+        "        foreach _ant_ci [$_ant_blk getInsts] {\n"
+        "          set _ant_cnm [$_ant_ci getName]\n"
+        "          if {[info exists _ant_pre_inst($_ant_cnm)]} { continue }\n"
+        "          lappend _ant_new $_ant_cnm\n"
+        "          set _ant_inet($_ant_cnm) {}\n"
+        "          foreach _ant_ct [$_ant_ci getITerms] {\n"
+        "            set _ant_cn [$_ant_ct getNet]\n"
+        "            if {$_ant_cn eq \"NULL\"} { continue }\n"
+        "            if {[$_ant_cn isSpecial]} { continue }\n"
+        "            lappend _ant_touched [$_ant_cn getName]\n"
+        "            lappend _ant_inet($_ant_cnm) [$_ant_cn getName]\n"
+        "          }\n"
+        "        }\n"
+        "      }\n"
+        "      set _ant_touched [lsort -unique $_ant_touched]\n"
+        "      set _ant_broken {}\n"
+        "      catch {\n"
+        "        foreach _ant_tn $_ant_touched {\n"
+        "          set _ant_tnet [$_ant_blk findNet $_ant_tn]\n"
+        "          if {$_ant_tnet eq \"NULL\"} { continue }\n"
+        "          if {[$_ant_tnet getWire] eq \"NULL\"} {\n"
+        "            lappend _ant_broken $_ant_tn\n"
+        "          }\n"
+        "        }\n"
+        "      }\n"
+        "      if {[llength $_ant_touched] == 0} {\n"
+        "        puts \"ANTENNA_NATIVE_ERROR_UNJUDGED: $_ra_native -- this pass "
+        "inserted nothing this step can see, so its connectivity cannot be "
+        "judged; the violation stands and no route is run to hide it\"\n"
         "        break\n"
         "      }\n"
-        "      # INCREMENTAL reroute — re-routes ONLY the dirty nets.\n"
-        # R-0915-114(b) — THIS STAGE ANSWERS FOR ITS OWN WIRES.
-        # MEASURED (int6, subservient x gf180mcuD as a DIE): the native
-        # `repair_antennas -reroute` threw DRT-0206, this fallback route then
-        # threw `REPAIR_ANTENNA_REROUTE_NONFATAL: DRT-1231` TWICE, both were
-        # swallowed as notes, and the diodes this stage had just inserted were
-        # left for the PG reconnect block's whole-design rip-and-relay to lay.
-        # R-0915-114(a) deletes that re-route, so a swallowed failure here is
-        # now a stage that inserted cells and never wired them. It is a
-        # VERDICT of this stage, named, with the count of what it inserted.
-        "      if {![info exists _vic_drc_opt]} { set _vic_drc_opt [list] }\n"
-        "      if {[catch {detailed_route -verbose 0 {*}$_vic_drc_opt} _ra_dr]} {\n"
-        "        puts \"ANTENNA_REROUTE_FAILED: $_ra_dr\"\n"
-        "        error \"ANTENNA_REROUTE_FAILED: $_ra_dr -- this stage "
-        "inserted diodes and could not lay their wires; no other step routes "
-        "them (R-0915-114(a) removed the PG block's whole-design re-route), so "
-        "a design that continues past this is NOT routed\"\n"
-        "        set _ant_refused \"ANTENNA_REROUTE_FAILED: $_ra_dr\"\n"
-        "        break\n"
+        "      if {[llength $_ant_broken] == 0} {\n"
+        "        puts \"ANTENNA_NATIVE_ERROR_SPURIOUS: $_ra_native, but all "
+        "[llength $_ant_touched] net(s) this pass touched are still connected; "
+        "the loop re-measures rather than routing the whole design\"\n"
+        "        set _ant_refused \"\"\n"
+        "        continue\n"
         "      }\n"
+        # (ii) broken -> roll back THE DIODES FOR THAT NET, by name, and
+        # report. Not the whole pass: an insert whose own nets are all still
+        # wired is a repair that worked, and the ruling rolls back the net
+        # that lost its wire, not the transaction that contained it.
+        "      set _ant_rolled 0\n"
+        "      set _ant_kept 0\n"
+        "      catch {\n"
+        "        foreach _ant_dn $_ant_new {\n"
+        "          set _ant_hit 0\n"
+        "          if {[info exists _ant_inet($_ant_dn)]} {\n"
+        "            foreach _ant_nn $_ant_inet($_ant_dn) {\n"
+        "              if {[lsearch -exact $_ant_broken $_ant_nn] >= 0} "
+        "{ set _ant_hit 1 }\n"
+        "            }\n"
+        "          }\n"
+        "          if {!$_ant_hit} { incr _ant_kept ; continue }\n"
+        "          set _ant_di [$_ant_blk findInst $_ant_dn]\n"
+        "          if {$_ant_di eq \"NULL\"} { continue }\n"
+        "          if {[catch {odb::dbInst_destroy $_ant_di}]} { continue }\n"
+        "          incr _ant_rolled\n"
+        "        }\n"
+        "      }\n"
+        "      puts \"ANTENNA_DIODE_ROLLED_BACK: [llength $_ant_broken] net(s) "
+        "lost their wire under the native repair -- "
+        "[join [lrange $_ant_broken 0 7] {, }] -- so the $_ant_rolled diode(s) "
+        "this pass inserted on them are removed ($_ant_kept kept, on nets that "
+        "kept their wires) and the antenna violation on those nets "
+        "STANDS and is reported by name. This stage does not route the whole "
+        "design to hide it: a legible antenna FAIL at sign-off beats a run with "
+        "no routed.def.\"\n"
+        "      set _ant_refused \"ANTENNA_DIODE_ROLLED_BACK: "
+        "[join [lrange $_ant_broken 0 7] {, }]\"\n"
+        "      break\n"
         "    }\n"
         f"    puts \"REPAIR_ANTENNA_DONE: diode={pdk.antenna_diode_cell} iter=$_i margin=$_ant_margin\"\n"
         "    # Escalate head-room each turn (cap 40) vs reroute re-introduction.\n"

@@ -1070,7 +1070,37 @@ def test_splitting_the_reconverge_block_did_not_drop_the_second_antenna_pass(
     `repair_antennas` is now asserted INSIDE slot B as well. The docstring above
     names the hole the substring comparison alone left — an emptied slot B going
     unnoticed because the token still appeared via slot A — and asking slot B
-    directly closes it without depending on the comparison at all."""
+    directly closes it without depending on the comparison at all.
+
+    R-0915-110 / #2420 (v1.22.57) BROKE THE LITERAL BYTE-IDENTITY, LEGITIMATELY,
+    AND THIS TEST NOW PINS THE EXACT SHAPE OF THAT DIFFERENCE INSTEAD OF
+    DENYING IT. R-0915-110(b) put a `pin_access` probe BETWEEN each of the five
+    post-route stages so a pin that loses its last access point can be
+    attributed to the stage that took it. A probe is useless if it cannot say
+    WHICH stage it follows, so each one carries its own stage tag — and the two
+    antenna passes are the same stage emitted twice, so their probes read
+    `after_postroute_antenna_repair` and `after_postroute_antenna_reconverge`.
+    That is the ONLY thing that differs. MEASURED on the real emission: slot A
+    is 18,454 bytes, the diff between the passes is 6 lines, and every one of
+    them is the probe's tag; the repair work is byte-identical. The value of
+    the distinct tags is measured too — on int8 (subservient x gf180mcuD as a
+    DIE, 2026-09-21) the deck printed `after_postroute_antenna_repair
+    no_access=0`, `after_postroute_drv_reconverge no_access=0` and
+    `after_postroute_antenna_reconverge no_access=0` as three separate
+    readings; one shared tag would have made those three lines
+    indistinguishable and R-0915-110's attribution unanswerable.
+
+    So the claim is re-stated, not relaxed: THE SECOND PASS IS THE FIRST WITH
+    ITS OWN STAGE TAG AND NOTHING ELSE. The comparison normalises each pass's
+    tag to the same placeholder and then demands byte-equality, which is
+    STRICTER than the old assertion in one way — it now also pins that each
+    pass's probe names ITS OWN stage, so a probe that names the wrong one, or
+    two probes naming the same one, fails here. An emptied or altered slot B
+    still cannot survive it. Slot B has no END sentinel of its own (only slot A
+    was bracketed, by #2253), so its length is DERIVED rather than searched for:
+    it is slot A's length plus one tag-length delta per occurrence. A slot B
+    that is not the re-emission fails that arithmetic before the comparison
+    even runs."""
     _res, calls, _p = _drive(tmp_path, monkeypatch, first_rc=139,
                              stage="postroute_drv_repair")
     body = calls[0]["body"]
@@ -1090,17 +1120,40 @@ def test_splitting_the_reconverge_block_did_not_drop_the_second_antenna_pass(
     slot_a = body[body.index(a_open) + len(a_open):body.index(a_end)]
     assert slot_a.strip(), "the FIRST antenna pass is empty"
     assert "repair_antennas" in slot_a, "the FIRST antenna pass repairs nothing"
+
+    # R-0915-110(b): each pass's pin-access probe names the stage it follows.
+    tag_a = "after_postroute_antenna_repair"
+    tag_b = "after_postroute_antenna_reconverge"
+    n_tag = slot_a.count(tag_a)
+    assert n_tag, (
+        "the FIRST antenna pass carries no pin-access probe naming its own "
+        "stage — R-0915-110(b) attributes a lost access point to the stage "
+        "that took it, which needs the stage's name in the probe")
+    assert tag_b not in slot_a, "the FIRST pass's probe names the SECOND stage"
+
+    # slot B has no END sentinel; its length is the re-emission's length, which
+    # is slot A's plus one tag-length delta per occurrence. Arithmetic, not a
+    # search — a slot B that is not the re-emission fails it.
+    b_len = len(slot_a) + n_tag * (len(tag_b) - len(tag_a))
     _b0 = body.index(b_open) + len(b_open)
-    slot_b = body[_b0:_b0 + len(slot_a)]
+    slot_b = body[_b0:_b0 + b_len]
     assert "repair_antennas" in slot_b, (
         "the SECOND (post-reconverge) antenna pass does not call "
         "`repair_antennas` — it is the load-bearing one, and asking it "
         "directly is what an emptied slot B cannot survive")
-    assert slot_b == slot_a, (
-        "the SECOND (post-reconverge) antenna pass is not the byte-identical "
-        "re-emission of the first — the split was claimed to change nothing "
-        "about the emitted Tcl, and `repair_antennas` still appearing via the "
-        "first slot is why an emptied second slot went unnoticed")
+    assert slot_b.count(tag_b) == n_tag, (
+        "the SECOND antenna pass's pin-access probe does not name its own "
+        f"stage {n_tag} time(s) — it named {slot_b.count(tag_b)}; two passes "
+        "whose probes read the same make R-0915-110's attribution unanswerable")
+    assert tag_a not in slot_b, "the SECOND pass's probe names the FIRST stage"
+
+    place = "<THE STAGE THIS PROBE FOLLOWS>"
+    assert slot_b.replace(tag_b, place) == slot_a.replace(tag_a, place), (
+        "the SECOND (post-reconverge) antenna pass is not the re-emission of "
+        "the first — the two passes must differ in NOTHING but the stage tag "
+        "each one's pin-access probe carries, and `repair_antennas` still "
+        "appearing via the first slot is why an emptied second slot went "
+        "unnoticed")
 
 
 def test_the_second_antenna_pass_is_breadcrumbed_and_load_bearing(

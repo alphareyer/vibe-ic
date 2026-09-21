@@ -30,6 +30,29 @@ to the pre-antenna base GDS -> the diodes/reroute add ZERO DRC).
 These tests pin the emitted-TCL control logic on SYNTHETIC before/after antenna
 reports, driving the STOCK path (no `-reroute`) so a blind run auto-covers the
 #110 convergence + the clean-design no-op. chip/PDK-AGNOSTIC.
+
+R-0915-116(2)(iii), 2026-09-21 — THE STOCK PATH IS GONE, AND THIS FILE SAYS SO
+RATHER THAN PRETENDING OTHERWISE. The degraded branch's whole-design
+`detailed_route` is deleted from the antenna stage. It was measured destroying
+finished work on two ICs: on spm x gf180mcuD (lane icspm5, run12 on v1.22.60)
+the base route had CONVERGED and GRT-0012 read "Found 0 antenna violations"
+when the fallback ran anyway and broke it (DRT-0206); on subservient x
+gf180mcuD (int7) it hit DRT-1231 and cost the run its routed.def, DRC, LVS and
+post-route STA. A NO-OP full `detailed_route` of int7's own pre-diode database
+produced 57178 changed net lines and DRT-0206 with 1212 checkConnectivity
+breaks, none on a supply net: this router cannot re-lay an already-routed
+design at all, so the fallback was never a repair -- it was a coin flip that
+risked the whole route.
+
+WHAT THAT COSTS, NAMED: on a binary WITHOUT `-reroute` -- the deployed stock
+0.2.5 this file was written against -- the native call now inserts nothing,
+the pass is UNJUDGED, and the loop STOPS with the violation reported. #110's
+21 -> 3 -> 0 trajectory is no longer reachable there. The shipped image is the
+fork (0.3.67, pinned by digest) and DOES support `-reroute`, so the shipped
+flow keeps its convergence through the native incremental path; only a stock
+binary loses it, and it loses it to an honest FAIL rather than to a false 0
+bought by unwiring the design. The convergence tests below are re-aimed at
+that contract under names that say what they now pin.
 """
 import shutil
 import sys
@@ -94,32 +117,49 @@ def _run(script_text: str):
 
 
 @needs_tclsh
-def test_stock_path_converges_the_110_residual():
-    """#110 on the DEPLOYED STOCK binary: check_antennas 21 -> 3 -> 0 must reach
-    ANTENNA_LOOP_CONVERGED via the external fallback (the `-reroute` primary
-    errors every turn), and the authoritative post-loop check reports 0/0 — the
-    exact live trajectory (21 -> 3 -> 0)."""
+def test_stock_path_reports_the_110_residual_instead_of_routing_for_it():
+    """WAS `test_stock_path_converges_the_110_residual`, which asserted that
+    21 -> 3 -> 0 was reached ON STOCK via the external fallback.
+
+    R-0915-116(2)(iii): that fallback is deleted. On stock the `-reroute` call
+    errors, nothing is inserted, the pass is UNJUDGED and the loop stops. The
+    #110 residual is then REPORTED by the authoritative post-loop check rather
+    than repaired. This is a real loss on that binary and it is recorded as
+    one -- see the module docstring. What must never happen is the loop
+    claiming convergence it did not measure, or reaching for a whole-design
+    route to get it."""
     harness = _STOCK_HARNESS % "21 3 0"
     res = _run(harness + R._antenna_repair_tcl(_pdk()))
     assert res.returncode == 0, res.stderr
-    # the fork -reroute is unavailable on stock -> fallback engaged every turn
+    # the fork -reroute is unavailable on stock -> the raise is named, as before
     assert "ANTENNA_NATIVE_REROUTE_NONFATAL" in res.stdout
-    # ...and the loop still CONVERGES (does not plateau at the 3/4 residual)
-    assert "ANTENNA_LOOP_CONVERGED" in res.stdout
+    # ...and judged, not papered over
+    assert "ANTENNA_NATIVE_ERROR_UNJUDGED" in res.stdout
+    assert "ANTENNA_LOOP_CONVERGED" not in res.stdout
     assert "ANTENNA_POSTROUTE_DONE" in res.stdout
+    # the run still reaches its authoritative check and still ends
+    assert "ANTENNA_LOOP_SEQUENCE" in res.stdout
 
 
 @needs_tclsh
-def test_stock_path_escalates_diode_budget_until_clear():
-    """The residual only clears once the margin is escalated (the live run
-    needed margin 10). The emitted trace must show the margin GROWING across
-    turns while the count is still non-zero — i.e. an ESCALATING diode budget,
-    not a fixed one-shot pass."""
-    # never-clearing-at-margin-0 style sequence: still 3 after the first turn,
-    # forcing a second turn at a higher margin.
-    harness = _STOCK_HARNESS % "21 3 3 0"
+def test_the_escalating_diode_budget_survives_on_a_binary_that_has_reroute():
+    """WAS `test_stock_path_escalates_diode_budget_until_clear`, driven on the
+    stock harness whose `-reroute` errors. R-0915-116(2) removed the branch
+    that turned that error back into a repair pass, so the escalation can only
+    be observed where a repair actually happens: on a binary that HAS
+    `-reroute` -- which is what the shipped image is.
+
+    The ESCALATION ITSELF IS UNCHANGED and is what this test still pins: the
+    margin grows 0 -> 10 -> ... across turns while the count is non-zero, so
+    the diode budget is escalating rather than one-shot, and the loop still
+    converges on 21 -> 3 -> 3 -> 0."""
+    fork = _STOCK_HARNESS.replace(
+        '  if {[lsearch $args -reroute] >= 0} { error "STA-0562 unknown flag -reroute" }\n',
+        "")
+    harness = fork % "21 3 3 0"
     res = _run(harness + R._antenna_repair_tcl(_pdk()))
     assert res.returncode == 0, res.stderr
+    assert "ANTENNA_NATIVE_REROUTE_NONFATAL" not in res.stdout  # the fork path
     assert "margin=0" in res.stdout
     assert "margin=10" in res.stdout      # escalated after turn 0
     assert "ANTENNA_LOOP_CONVERGED" in res.stdout
@@ -156,14 +196,24 @@ def test_stock_path_no_false_convergence_when_residual_persists():
     assert "ANTENNA_POSTROUTE_DONE" in res.stdout
 
 
-def test_block_degrades_without_reroute_and_never_full_global_routes():
-    """The stock path must NOT depend on `-reroute` (deployed 0.2.5 lacks it) and
-    must NOT drop a full `global_route` into the loop (the ibex ~1900-net reroute
-    timeout); the realizing reroute stays the incremental `detailed_route`."""
+def test_the_loop_never_full_routes_by_either_command():
+    """WAS `test_block_degrades_without_reroute_and_never_full_global_routes`,
+    which required BOTH the no-`-reroute` retry AND a whole-design
+    `detailed_route` to be present in the emitted deck.
+
+    R-0915-116(2)(iii) deletes both. The half of the old property that still
+    holds -- and that this test now pins on both commands instead of one --
+    is that NO WHOLE-DESIGN ROUTE OF ANY KIND belongs in this loop: not the
+    full `global_route` (the ibex ~1900-net reroute timeout this file was
+    written for), and not the full `detailed_route` (the spm/subservient
+    measurements in the module docstring). The assertions are inverted, not
+    dropped, so neither can return unnoticed."""
     cmds = "\n".join(ln for ln in R._antenna_repair_tcl(_pdk()).splitlines()
                      if not ln.lstrip().startswith("#"))
-    # external fallback present (works on a binary without -reroute)
-    assert "repair_antennas sky130_fd_sc_hd__diode_2 -iterations 1 " \
-           "-ratio_margin $_ant_margin}" in cmds
-    assert "detailed_route -verbose 0" in cmds
     assert "global_route" not in cmds
+    assert "detailed_route" not in cmds
+    # the retry that needed a route to realise it is gone with it
+    assert "repair_antennas sky130_fd_sc_hd__diode_2 -iterations 1 " \
+           "-ratio_margin $_ant_margin}" not in cmds
+    # the native incremental path -- repair AND reroute in one call -- remains
+    assert "-reroute" in cmds

@@ -93,12 +93,23 @@ def test_antenna_block_repair_iterations_is_one_not_five():
 def test_antenna_block_drops_full_global_route():
     """No `global_route` COMMAND inside the antenna block — the full reroute is
     exactly what caused the ibex ~1900-net timeout. (Comments may still explain
-    WHY it was dropped, hence command-line-only scan.)"""
+    WHY it was dropped, hence command-line-only scan.)
+
+    R-0915-116(2)(iii), 2026-09-21: the same now goes for `detailed_route`.
+    This test used to require it PRESENT as the realizing incremental reroute.
+    It never was incremental: 0.3.67's `detailed_route` has no net-subset
+    option, so the call re-laid the whole design — measured on int7's own
+    pre-diode database, a NO-OP full route produced 57178 changed net lines
+    and DRT-0206 with 1212 checkConnectivity breaks, none on a supply net. The
+    realizing reroute is now the one inside `repair_antennas -reroute`, which
+    really is scoped to the diode-dirty nets. The assertion is inverted rather
+    than dropped."""
     block = R._antenna_repair_tcl(_pdk())
     cmds = _cmd_lines(block)
     assert "global_route" not in cmds
-    # incremental reroute IS present (dirty-net-only detailed_route)
-    assert "detailed_route -verbose 0" in cmds
+    assert "detailed_route" not in cmds
+    # the incremental reroute now travels inside the repair call itself
+    assert "-reroute" in cmds
 
 
 def test_antenna_block_check_antennas_break_on_zero():
