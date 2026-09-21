@@ -449,17 +449,39 @@ def test_an_unread_ai_half_is_a_named_finding_not_an_absence(tmp_path):
     rc, out, _ = _run_track(p)
     rep = json.loads(_track_report(p).read_text())
     assert rep["ai_subtrack"]["status"] == "HANDOFF_EMITTED"
-    assert rep["verdict"] == "INCOMPLETE"
-    assert rc != 0, "an unanswered hand-off exited 0 — that reads as credit"
-    assert rc != 1, "the wait and a failed run are one number again"
-    assert rc == T.AWAITING_EXIT_CODE
-    assert rep["execution"]["disposition"] == T.DISPOSITION_AWAITING
-    assert rep["execution"]["complete"] is False
+
+    # ── THE INVARIANT THIS TEST IS ABOUT, UNCHANGED AND ASSERTED FIRST ──────
+    # "a run whose AI half did not read says so, BY NAME, in the findings, OUT
+    # LOUD", and the AI half is given NO credit for a reading it did not do.
     assert rep["denominator"]["deterministic"] > 0, (
         "the fixture stopped exercising the applicable deterministic half")
     assert any(f["rule"] == "EXPERT_TRACK_AI_SUBTRACK_SKIPPED"
                for f in rep["findings"])
     assert "EXPERT_TRACK_AI_SUBTRACK_SKIPPED" in out, "and it must be PRINTED"
+    assert rep["execution"]["observed_ai_consumed"] == 0, (
+        "the AI half read nothing and must be credited with nothing")
+    assert rep["execution"]["derivation"] != "ai", rep["execution"]
+
+    # ── RE-POINTED UNDER R-0915-126-D1 — the claim CHANGED BY RULING ────────
+    # This asserted `verdict == "INCOMPLETE"`, `rc == AWAITING_EXIT_CODE` and
+    # `complete is False`. #2014 D1 had already retargeted the exit code once,
+    # from 1 to 4, so the designed first pass of a two-pass protocol was not a
+    # FAILED run. R-0915-126-D1 finishes that move: in a program-only front
+    # door nobody ever invokes the subagent, so AWAITING never ends and D1 was
+    # red on EVERY run of EVERY design — MEASURED on spm run13 and run8
+    # (rc=4, HANDOFF_EMITTED, observed_ai_consumed=0, and the pack's
+    # `l_doc_expectations.json` never written because it is what the AI is
+    # asked to author).
+    #
+    # The deterministic half DECIDED here, so the track HAS measured something
+    # and is DECIDED — carrying its own `program_expectations_sha256`, never
+    # the AI's `answer_sha256`, so the two derivations stay distinguishable.
+    # AWAITING now survives only for "could not read its own subject".
+    assert rep["execution"]["derivation"] == "program", rep["execution"]
+    assert rep["execution"]["complete"] is True
+    assert rep["verdict"] in ("PASS", "FINDINGS"), rep["verdict"]
+    assert rc == 0, "a track that decided its expectations is not a failed run"
+    assert len(rep["execution"]["program_expectations_sha256"]) == 64
 
 
 def test_expert_track_findings_do_not_block(tmp_path):
