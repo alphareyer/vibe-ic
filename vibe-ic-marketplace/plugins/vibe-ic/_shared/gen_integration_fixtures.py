@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate candidate integration fixtures for critical skills (full_markdown tier).
+r"""Generate candidate integration fixtures for critical skills (full_markdown tier).
 
 For each critical skill, walks its compliance.yaml and emits a markdown
 fixture that satisfies every `pattern` requirement. Algorithm:
