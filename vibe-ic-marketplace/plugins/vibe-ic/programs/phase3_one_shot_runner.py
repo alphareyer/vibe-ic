@@ -18253,28 +18253,49 @@ def ring_core_pad_for_util(die_w: int, die_h: int, core_w: int, core_h: int,
 
 def ring_die_core_pad(die_w: int, die_h: int, ring_core_pad: int,
                       core_sized_um: Optional[Tuple[int, int]]) -> int:
-    """The core inset to use inside a die a PAD RING sized.
+    """The core inset to use inside a die a PAD RING sized: the RING FLOOR.
 
-    A ring's die comes from its PERIMETER (two corner cells plus the pads on
-    the longest side); the area the cells need is a different question, and the
-    auto-sizer already answered it. Returns the inset that CENTRES that
-    core-sized rectangle in the ring's die, or `ring_core_pad` unchanged when
-    that is already as tight (the ring inset is always the floor, so the core
-    can never reach under the pads), when nothing was auto-sized, or when the
-    core-sized rectangle is not smaller than the die.
+    R-0915-103 (owner, 2026-09-21). On a DIE whose die is PERIMETER-pinned by
+    its own pad ring, THE CORE IS THE DIE INTERIOR INSIDE THAT FLOOR — not a
+    utilisation-sized island centred in it. The utilisation of that interior is
+    REPORTED as the density it is; it never shrinks the core, and the growth
+    ladder does not run (a core that starts at the floor cannot grow: both
+    `ring_core_pad_for_util` and `ring_core_pad_one_loosen_rung` already answer
+    None there, and the over-full case still FAILs as PADRING_CORE_TOO_SMALL).
 
-    MEASURED on subservient x gf180mcuD as a DIE (r37): 33 pads forced a
-    1962 um die, `die - 2*393` made the core 1176 um at 10.4 % utilisation, and
-    the netlist that closed setup at +0.03 ns as a 413 um hardmacro missed by
-    13.1 ns at SS. Pure.
+    `core_sized_um` is still taken, and still ignored, because it is the
+    auto-sizer's answer to a DIFFERENT question and the caller reports it.
+
+    TWO MEASUREMENTS, AND THE RULING FOLLOWS THE SECOND. Both are real and they
+    fail in different ways; a reader who sees only one will re-open the other.
+
+      * subservient x gf180mcuD as a DIE (r37), the case this function was
+        written for: 33 pads forced a 1962 um die, `die - 2*393` made the core
+        1176 um at 10.4 % utilisation, and the netlist that closed setup at
+        +0.03 ns as a 413 um hardmacro missed by 13.1 ns at SS, ON PATHS WHOSE
+        DELAY IS WIRE — between the cells.
+      * spm x gf180mcuD as a DIE (run7 vs run8, 2026-09-20/21), measured on the
+        same design, clock, PDK and corner: the island core is what fails, and
+        it fails somewhere else. run8's core was a 228 um island in a 3162 um
+        ring die — 57 placement ROWs, all of them inside x=1467.2 um — so a
+        pad->core net has NO row to repeat in: `RSZ-0035 Found 18 fanout
+        violations` -> `RSZ-0038 Inserted 784 buffers in 19 nets`, 2057 buffers
+        in a netlist synthesis had handed over with 273 cells and ZERO, and the
+        worst SS path spent 21.12 ns of its 28.63 ns arrival in 36 buffer
+        stages carrying 0.770 pF IN TOTAL -> setup -1.97 ns, TNS -19.03, after
+        three PnR restarts and 8 h 22 m. run7, same design, core = the die
+        interior (605 ROWs): 522 buffers, `worst slack max 8.21 / tns max 0.00
+        / wns max 0.00`, and the route converged in 163 s.
+
+    The two are not in conflict about physics — cells must be near what they
+    talk to, and on a ring-pinned die the pads are 1.4 mm away — but they are
+    in conflict about the constant, and R-0915-103 is the ruling on it. The
+    knob subservient's failure belongs to is the PLACER's: both runs already
+    pass `global_placement -routability_driven -timing_driven -density 0.4`,
+    which is untouched by the core rectangle. SUBSERVIENT r37 IS THE NUMBER AT
+    RISK HERE and it must be re-measured on a tree carrying this change.
     """
-    if not core_sized_um:
-        return ring_core_pad
-    want = max(int(core_sized_um[0]), int(core_sized_um[1]))
-    if want <= 0:
-        return ring_core_pad
-    centred = (min(int(die_w), int(die_h)) - want) // 2
-    return centred if centred > ring_core_pad else ring_core_pad
+    return int(ring_core_pad)
 
 
 def ct03_pin_rect(fp_rect: Optional[Sequence[int]],
@@ -31499,12 +31520,23 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
     _ring_floor_pad = core_pad
     _ring_pinned_die = _core_sized_um is not None
     core_pad = ring_die_core_pad(die_w, die_h, core_pad, _core_sized_um)
-    if core_pad != _ring_floor_pad:
-        print(f"[phase3] core := {max(_core_sized_um)} um square centred in "
-              f"the {die_w}x{die_h} um ring die (inset {core_pad} um, ring "
-              f"floor {_ring_floor_pad} um) — the area this netlist asked for "
-              f"at the requested utilisation; the ring's die is a perimeter "
-              f"requirement, not an area one", file=sys.stderr)
+    if _ring_pinned_die:
+        # R-0915-103: the core IS the interior, and the auto-sizer's answer is
+        # REPORTED beside it as the density it implies — never used to shrink
+        # the core. The measured density of this core is GPL's to publish
+        # (`GPL-0019 Utilization`) once the cells are in it; what this step
+        # knows is the area the netlist asked for at the requested utilisation.
+        _interior = min(die_w, die_h) - 2 * _ring_floor_pad
+        _asked = max(_core_sized_um) if _core_sized_um else 0
+        _share = (100.0 * (_asked * _asked) / float(_interior * _interior)
+                  if _interior > 0 and _asked > 0 else 0.0)
+        print(f"[phase3] core := the die interior, {_interior}x{_interior} um "
+              f"inside the {die_w}x{die_h} um ring die (ring floor "
+              f"{_ring_floor_pad} um) — R-0915-103: on a die its own pad ring "
+              f"pins by PERIMETER, the core is the interior. The auto-sizer "
+              f"asked for {_asked}x{_asked} um at the requested utilisation, "
+              f"about {_share:.2f}% of this core: REPORTED as the density it "
+              f"is, never a lever on the rectangle", file=sys.stderr)
 
     core_w = die_w - 2 * core_pad
     core_h = die_h - 2 * core_pad
@@ -32627,6 +32659,13 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         # The band around the core is empty silicon, so the run buys the room
         # instead — bounded by the same upsize budget, and the swap stays in
         # place as the last resort when no room is left.
+        # R-0915-103: on a ring-pinned die the core STARTS at the ring floor,
+        # so there is no band left to buy and `ring_core_pad_one_loosen_rung`
+        # answers None here by its own contract. The swap CTS made stays, which
+        # is what this block already called the last resort when no room is
+        # left. The branch is kept — it is the one place that would grow a core
+        # if a future caller ever entered it with an island — and it is the
+        # reason the rung helper still refuses past the floor.
         if (_ring_pinned_die and _upsize_tries < _PNR_UPSIZE_RETRIES
                 and re.search(r"_CLKBUF_DOWNSIZE swapped=([1-9]\d*)",
                               (out or "") + (err or ""))):
@@ -32894,6 +32933,11 @@ def step_pnr(project: Path, top: str, pdk: PdkConfig,
         if _upsize_tries >= _PNR_UPSIZE_RETRIES:
             break
         if _ring_pinned_die:
+            # R-0915-103 — THE CORE IS ALREADY THE INTERIOR, so this asks a
+            # question whose answer is now always None and the FAIL below is
+            # what a ring-pinned die gets when its cells do not fit: an honest
+            # refusal naming the ring, never a ladder that restarts PnR. (The
+            # three restarts spm's run8 paid for, 8 h 22 m, were this block.)
             # THE DIE IS THE RING'S; THE CORE IS THE REMEDY. Growing a
             # ring-sized die is not available (it is a perimeter requirement,
             # and r40 measured the attempt: 1962 um -> the 2000 um cap -> a FAIL
