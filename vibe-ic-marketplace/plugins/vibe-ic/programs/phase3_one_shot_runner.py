@@ -9341,14 +9341,31 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         "is not counted here; $_pgab_by_abut of [llength $_pgab_nr] terminal(s) "
         "that overlap no rail reach the net by abutting a same-net neighbour "
         "on another instance (R-0915-120)\"\n"
-        # (2) — the router's own DRV count must not have moved.
+        # (2) — the router's own DRV count must not have MOVED. A delta, now
+        # measured as one.
         "set _pgdrc -1\n"
         "catch { set _pgdrc [detailed_route_num_drvs] }\n"
         "puts \"PG_DELTA_DRC_COUNT: $_pgdrc\"\n"
-        "if {$_pgdrc > 0} {\n"
-        "  error \"PG_DELTA_DRC: the router reports $_pgdrc DRV(s) after the "
-        "PG re-connect; this step connects and checks, so a non-zero count is "
-        "its verdict, not a note\"\n"
+        "if {$_pgdrc0 < 0 || $_pgdrc < 0} {\n"
+        # UNMEASURED IS NOT ZERO AND IS NOT A PASS. It is said by name, with
+        # which end of the measurement was missing, so a reader can tell "the
+        # PG block added no DRVs" from "nobody counted".
+        "  puts \"PG_DELTA_DRC_UNKNOWN: the router's DRV counter has no state "
+        "at this point (before=$_pgdrc0 after=$_pgdrc; -1 means "
+        "detailed_route_num_drvs answered DRT-0002, i.e. no detailed route has "
+        "run in THIS session). This step's effect on the DRV count is "
+        "NOT MEASURED -- it is not thereby zero, and this is not a pass\"\n"
+        "} else {\n"
+        "  set _pgddrv [expr {$_pgdrc - $_pgdrc0}]\n"
+        "  puts \"PG_DELTA_DRC_DELTA: $_pgddrv (before=$_pgdrc0 "
+        "after=$_pgdrc)\"\n"
+        "  if {$_pgddrv > 0} {\n"
+        "    error \"PG_DELTA_DRC: the router's DRV count rose by $_pgddrv "
+        "across the PG re-connect ($_pgdrc0 -> $_pgdrc); this step connects "
+        "and checks and lays no geometry, so a RISE is its verdict, not a "
+        "note. The absolute count is NOT the verdict: a count this block "
+        "inherited belongs to whatever stage created it.\"\n"
+        "  }\n"
         "}\n") if reroute else ""
     return (
         "# === PG global-connect RE-APPLY + audit (post-instance-creation) ===\n"
@@ -9367,6 +9384,30 @@ def _build_pg_reconnect_tcl(reroute: bool = True) -> str:
         "# unconnected\". Lift the flag across the connect and restore it exactly\n"
         "# as found, so the protection the rest of the flow relies on is intact\n"
         "# on both sides of this block.\n"
+        # R-0915-114(2) NAMED A DELTA AND READ ONE ABSOLUTE NUMBER. Measured
+        # on spm run16L (icsub2x's tip + icord1's fork binary): this check
+        # raised "PG_DELTA_DRC: the router reports 599 DRV(s) after the PG
+        # re-connect" at openroad.log:1775 -- and the 599 was already there at
+        # line 1317, printed by the SCOPED ROUTE's own post-route verification
+        # (DRT-0701, "599 violation(s) that the routing loop did not report
+        # (0 in-loop)"), some 460 lines earlier. The PG block lays no geometry
+        # at all (MEASURED: 9498 PG shapes before `global_connect` and 9498
+        # after), so it cannot have made them.
+        #
+        # AND IT PASSED SILENTLY EVERYWHERE ELSE FOR THE WRONG REASON.
+        # `detailed_route_num_drvs` is drt SESSION STATE, not a property of the
+        # database: MEASURED on run16L's own checkpoints read fresh with the
+        # FORK binary, every one of sdr_transaction{,_reconverge}/
+        # {pre_repair,candidate}.odb answers DRT-0002. On 0.3.67 the state did
+        # not survive to this point, the catch left -1, and `-1 > 0` is false
+        # -- so an UNMEASURED counter read as a pass on every previous run.
+        #
+        # So: take the count BEFORE the block, take it AFTER, and judge the
+        # DIFFERENCE. Both numbers and the counter regime are disclosed, and a
+        # counter with no state is UNKNOWN BY NAME, never a silent pass.
+        "set _pgdrc0 -1\n"
+        "catch { set _pgdrc0 [detailed_route_num_drvs] }\n"
+        "puts \"PG_DELTA_DRC_BEFORE: $_pgdrc0\"\n"
         "set _pg_dnt {}\n"
         "if {[catch {\n"
         "  foreach _pg_i [[ord::get_db_block] getInsts] {\n"
@@ -23192,7 +23233,10 @@ def _named_violation_reroute_tcl(
         # v1.5.65 hazard, and it was unobservable on this path.
         #
         # Shared geometric measurement is now blocking on this normal entry.
-        + strict_integrity_tcl("NAMED_VIOL_REROUTE").rstrip() + '\n'
+        + strict_integrity_tcl(
+            "NAMED_VIOL_REROUTE",
+            rpt_path.rsplit("/", 1)[0] if "/" in rpt_path else None
+        ).rstrip() + '\n'
         + 'puts "NAMED_VIOL_REROUTE_DONE"\n')
 
 
@@ -24376,7 +24420,7 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
     )
 
 
-def _unrouted_probe_tcl(tag: str) -> str:
+def _unrouted_probe_tcl(tag: str, out_dir_c: Optional[str] = None) -> str:
     """R-0915-121(b) -- the UNROUTED-NET probe at a post-route stage boundary.
 
     THE MISSING INSTRUMENT, and the one whose absence cost two ICs a run each.
@@ -24407,10 +24451,24 @@ def _unrouted_probe_tcl(tag: str) -> str:
     and never refuses. NONFATAL-guarded by the shared body it reuses.
     """
     safe = "".join(c if (c.isalnum() or c in "_-") else "_" for c in tag)
+    # THE PATH IS THE RUN'S OWN DIRECTORY, ABSOLUTE, NOT THE PROCESS CWD.
+    # I argued when this landed that a relative name was safe because "the
+    # flow's cwd IS the pnr directory, the same convention
+    # `antenna_iter_*.rpt` has always used". run16L disproved it: the
+    # spef_extract boundary wrote
+    # /home/reyerchu/_lane_icspm5/unrouted_after_postroute_spef_extract.txt
+    # -- 734 bytes, 6 nets, on the SHARED LANE ROOT at 03:07:20, where the
+    # next run of anything overwrites it. icspm5 had to preserve a copy under
+    # run16L/lane_root_strays/ to keep the evidence at all.
+    #
+    # A membership file whose whole purpose is to say WHICH nets, in THIS run,
+    # cannot live at a path that depends on where the process happened to be
+    # standing. `out_dir_c` is the run's pnr directory as the container sees
+    # it and is already in scope wherever this probe is emitted.
+    name = f"unrouted_{safe}.txt"
+    path = f"{out_dir_c.rstrip('/')}/{name}" if out_dir_c else name
     return _routing_integrity_check_tcl(
-        "UNROUTED_PROBE",
-        membership_path=f"unrouted_{safe}.txt",
-        stage=safe)
+        "UNROUTED_PROBE", membership_path=path, stage=safe)
 
 
 def _resizer_bound_flag(pct: Optional[float]) -> str:
@@ -29941,16 +29999,16 @@ if {{[catch {{write_def {out_dir_c}/routed_preantenna.def}} _cp_err]}} {{
 # route checkpoint — which is what the NONFATAL guard was written to do and
 # cannot.
 puts "{_PNR_STAGE_MARKER} postroute_spef_extract"
-{spef_repair_block}{_pin_access_probe_tcl("after_postroute_spef_extract")}{_unrouted_probe_tcl("after_postroute_spef_extract")}# === v0.2.14 — antenna repair (diode insertion) after detailed_route ===
+{spef_repair_block}{_pin_access_probe_tcl("after_postroute_spef_extract")}{_unrouted_probe_tcl("after_postroute_spef_extract", out_dir_c)}# === v0.2.14 — antenna repair (diode insertion) after detailed_route ===
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 {_pnr_stage_begin("postroute_antenna_repair")}
 puts "{_PNR_STAGE_MARKER} postroute_antenna_repair"
-{antenna_repair_block}{_pin_access_probe_tcl("after_postroute_antenna_repair")}{_unrouted_probe_tcl("after_postroute_antenna_repair")}{_pnr_stage_end("postroute_antenna_repair")}
-{drv_reconverge_block}{_pin_access_probe_tcl("after_postroute_drv_reconverge")}{_unrouted_probe_tcl("after_postroute_drv_reconverge")}
+{antenna_repair_block}{_pin_access_probe_tcl("after_postroute_antenna_repair")}{_unrouted_probe_tcl("after_postroute_antenna_repair", out_dir_c)}{_pnr_stage_end("postroute_antenna_repair")}
+{drv_reconverge_block}{_pin_access_probe_tcl("after_postroute_drv_reconverge")}{_unrouted_probe_tcl("after_postroute_drv_reconverge", out_dir_c)}
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 {_pnr_stage_begin("postroute_antenna_reconverge")}
 puts "{_PNR_STAGE_MARKER} postroute_antenna_reconverge"
-{post_reconverge_antenna_block}{_pin_access_probe_tcl("after_postroute_antenna_reconverge")}{_unrouted_probe_tcl("after_postroute_antenna_reconverge")}{_pnr_stage_end("postroute_antenna_reconverge")}
+{post_reconverge_antenna_block}{_pin_access_probe_tcl("after_postroute_antenna_reconverge")}{_unrouted_probe_tcl("after_postroute_antenna_reconverge", out_dir_c)}{_pnr_stage_end("postroute_antenna_reconverge")}
 # === v0.1.48 — decap + filler insertion ===
 # spm pilot Tier 2 EM/decap finding: prior runs (v0.1.25 → v0.1.47) emitted
 # ZERO decap or filler cells. Empty std-cell-row gaps left an MPW-rejecting
@@ -29964,7 +30022,7 @@ puts "{_PNR_STAGE_MARKER} postroute_fill"
 # may still have created an instance (antenna diodes, a repair buffer), and
 # those terminals must be owned. The re-route inside it runs only when the
 # delta says terminals actually changed, and a failure there is a verdict.
-{_pin_access_probe_tcl("after_postroute_fill_before_pg_reconnect")}{_unrouted_probe_tcl("after_postroute_fill_before_pg_reconnect")}{pg_reconnect_block}{_pnr_stage_begin("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} postroute_named_violation_reroute"
+{_pin_access_probe_tcl("after_postroute_fill_before_pg_reconnect")}{_unrouted_probe_tcl("after_postroute_fill_before_pg_reconnect", out_dir_c)}{pg_reconnect_block}{_pnr_stage_begin("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} postroute_named_violation_reroute"
 {_named_viol_reroute_block}{_pnr_stage_end("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} write_routed"
 }} else {{
   puts "POSTROUTE_RECONVERGE_DOWNSTREAM_REFUSED: SDR transaction rolled back; skipping antenna/PG/named reroute"

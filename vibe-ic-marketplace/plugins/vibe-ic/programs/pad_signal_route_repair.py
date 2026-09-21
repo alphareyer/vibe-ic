@@ -45,7 +45,7 @@ def _word(value: str) -> str:
     return "{" + value + "}"
 
 
-def strict_integrity_tcl(marker: str) -> str:
+def strict_integrity_tcl(marker: str, out_dir_c: str | None = None) -> str:
     """Use the shared geometric connectivity check, refusing unknown or holes.
 
     R-0915-121(b) -- THE REFUSAL NAMES ITS FILE, BECAUSE TWELVE NAMES ARE NOT
@@ -58,7 +58,14 @@ def strict_integrity_tcl(marker: str) -> str:
     own output. The uncapped list now goes to a file and the refusal says where
     it is; the capped list stays in the message for the reader.
     """
-    membership = f"unrouted_{marker.lower()}.txt"
+    # ABSOLUTE, IN THE RUN'S OWN DIRECTORY. A relative name is written
+    # wherever the process happens to stand: on spm run16L the sibling
+    # unrouted probe put its membership file on the SHARED LANE ROOT
+    # (/home/reyerchu/_lane_icspm5/unrouted_after_postroute_spef_extract.txt,
+    # 734 bytes, 6 nets), where the next run of anything overwrites it. The
+    # file that says WHICH nets failed cannot depend on cwd.
+    _name = f"unrouted_{marker.lower()}.txt"
+    membership = (f"{out_dir_c.rstrip('/')}/{_name}" if out_dir_c else _name)
     t = _routing_integrity_check_tcl(marker, membership_path=membership)
     handler = f'puts "{marker}_UNROUTED_CHECK_NONFATAL: $e"'
     if t.count(handler) != 1:

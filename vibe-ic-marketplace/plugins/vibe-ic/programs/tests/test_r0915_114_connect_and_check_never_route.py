@@ -113,10 +113,22 @@ def test_a_moved_drv_count_is_this_steps_verdict():
 
 
 def test_the_drv_count_that_cannot_be_read_refuses_nothing():
-    """-1 is NOT MEASURED; only a positive count is a verdict."""
+    """-1 is NOT MEASURED; only a MEASURED RISE is a verdict.
+
+    R-0915-123 kept the property and fixed what it was applied to. This used
+    to pin `if {$_pgdrc > 0}` -- an ABSOLUTE count, in a check named DELTA.
+    MEASURED on spm run16L: that raised on 599 DRVs the PG block inherited
+    from the scoped route's own post-route verification 460 log lines earlier
+    (DRT-0701), while the block lays no geometry at all. And the -1 arm was
+    worse than it looks: `-1 > 0` is false, so an UNMEASURED counter passed
+    SILENTLY on every run before that. Now both ends are read, the verdict is
+    on the difference, and an unreadable counter is UNKNOWN by name."""
     tcl = _pg_block()
+    assert "set _pgdrc0 -1" in tcl
     assert "set _pgdrc -1" in tcl
-    assert "if {$_pgdrc > 0} {" in tcl
+    assert "if {$_pgdrc0 < 0 || $_pgdrc < 0} {" in tcl
+    assert "PG_DELTA_DRC_UNKNOWN" in tcl
+    assert "if {$_pgddrv > 0} {" in tcl
 
 
 def test_the_emitted_block_is_balanced_tcl():
