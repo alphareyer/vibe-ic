@@ -6,8 +6,8 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 
 ## Stats
 
-- **Total programs (excluding helpers / shims):** 1333
-- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1333)
+- **Total programs (excluding helpers / shims):** 1334
+- **Programs with explicit `_APPLICABLE_CLASSES`:** 9 (of 1334)
 
 ### Per-class applicability counts
 
@@ -19,7 +19,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `pure_analog` | 0 |
 | `bare_fpga` | 0 |
 | `unknown` | 1 |
-| `any` | 1324 |
+| `any` | 1325 |
 
 ## Alphabetical listing
 
@@ -607,6 +607,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `kmap_truth_table_oracle_check` | any | — | prompt-disclosed combinational oracle gate. |
 | `known_answer_vector` | any | — | the L10 case kind for a DECLARED reference output. |
 | `known_answer_vector_tb_gen` | any | — | a SELF-CHECKING TB for a declared vector. |
+| `l10_coverage_goal_classify` | any | — | a coverage GOAL is not a functional vector. |
 | `l10_tb_conformance_check` | any | v0.53 | v0.53 plugin gate |
 | `l10_test_case_oracle_anchor_check` | any | — | BLOCKS (exit 1).  Rationale for blocking, not advising: the readers of |
 | `l10_test_cases_cover_l3_constraints_check` | any | Wave 39 | Spec to enforce (chip-AGNOSTIC): |
@@ -1405,7 +1406,7 @@ _(no programs in this group)_
 
 - `rig_firmware_capability_check` — Wave 58 / BACKLOG-v12 P0.5 plugin gate.  _[Wave 58]_
 
-### `any` (1324 programs)
+### `any` (1325 programs)
 
 - `a2b_protocol_synth` — Automotive Audio Bus (A2B) protocol synth helper.
 - `absence_verdict_names_its_search_space_check` — "not found" must say WHERE it looked.
@@ -1984,6 +1985,7 @@ _(no programs in this group)_
 - `kmap_truth_table_oracle_check` — prompt-disclosed combinational oracle gate.
 - `known_answer_vector` — the L10 case kind for a DECLARED reference output.
 - `known_answer_vector_tb_gen` — a SELF-CHECKING TB for a declared vector.
+- `l10_coverage_goal_classify` — a coverage GOAL is not a functional vector.
 - `l10_tb_conformance_check` — v0.53 plugin gate  _[v0.53]_
 - `l10_test_case_oracle_anchor_check` — BLOCKS (exit 1).  Rationale for blocking, not advising: the readers of
 - `l10_test_cases_cover_l3_constraints_check` — Spec to enforce (chip-AGNOSTIC):  _[Wave 39]_
