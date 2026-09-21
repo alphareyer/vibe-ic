@@ -53643,9 +53643,25 @@ def step_canonicalize_artefacts(project: Path, top: str, pdk: PdkConfig,
             # CZT-11 — supervised, not clocked. A multi-corner SI STA run is
             # long by construction; the 1800 s literal stopped a solve that
             # was still solving and the note below called it a failure.
-            _pr.run(_mcf_cmd, capture_output=True, text=True)
+            _mcf_cp = _pr.run(_mcf_cmd, capture_output=True, text=True)
             if _mcf_json.is_file():
                 written.append(str(_mcf_json))
+            # A PRODUCER THAT DIED IS NOT A PRODUCER THAT DECLINED. The rc was
+            # never read here, and only the JSON's existence was checked -- so
+            # when `si_mcf_sta.py` wrote its JSON and THEN raised, this call
+            # recorded success, the declared `reports/phase3/si_mcf_sta.rpt` was
+            # never published, and the damage surfaced ten steps later as step 27
+            # `missing_artefact` with nothing in the run saying why. MEASURED on
+            # run18L: the traceback appears in no report, no step record and no
+            # log. Non-fatal is kept -- this pass has always been advisory -- but
+            # it is no longer SILENT.
+            if getattr(_mcf_cp, "returncode", 0):
+                _mcf_tail = ((_mcf_cp.stderr or _mcf_cp.stdout or "").strip()
+                             .splitlines() or [""])[-1][:300]
+                notes.append(
+                    f"si_mcf_sta exited rc={_mcf_cp.returncode} AFTER writing "
+                    f"{_mcf_json.name}: {_mcf_tail}. Its declared report may be "
+                    f"absent; this is a producer failure, not a decline")
         except Exception as _mcf_exc:
             notes.append(f"si_mcf_sta non-fatal: {_mcf_exc}")
 
