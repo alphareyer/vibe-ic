@@ -64451,6 +64451,11 @@ def main() -> int:
         # that says FAIL. `steps_verdict` keeps the own-steps view.
         "steps_verdict": steps_verdict,
         "completion_audit_verdict": audit_verdict,
+        # R-0915-126(2): the completion audit travels BESIDE the design
+        # verdict, never merged into it, and it brings its failing gates with
+        # it so "audit FAIL" is never a word without a subject.
+        "audit_verdict": audit_verdict,
+        "audit_failed_gates": _audit_failed_gates(project),
         "declared_signoff_gates": signoff_rollup,
         "verdict": verdict,
     }
@@ -64468,9 +64473,11 @@ def main() -> int:
     out_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n")
 
     print(f"\n=== phase3_one_shot_runner DONE ===")
-    print(f"verdict: {summary['verdict']}"
-          + (f" (steps: {steps_verdict}, completion audit: {audit_verdict})"
-             if audit_verdict else ""))
+    print(f"verdict (design): {summary['verdict']}"
+          + (f" | audit_verdict: {audit_verdict}" if audit_verdict else ""))
+    if summary["audit_failed_gates"]:
+        print("audit gates failing: "
+              + ", ".join(summary["audit_failed_gates"]))
     if signoff_rollup["declared"]:
         print(f"sign-off: {signoff_rollup['line']}")
     for s in plan:
@@ -64502,11 +64509,74 @@ _VERDICT_RANK[_V.Verdict.NOT_APPLICABLE.value] = \
     _VERDICT_RANK[_V.Verdict.PASS.value]
 
 
+def _audit_failed_gates(project: Path) -> List[str]:
+    """The completion audit's own failing gate names, in its own words.
+
+    R-0915-126(3): no gate is deleted or weakened. Every audit gate still runs
+    and still names its finding — this reads those names so they travel BESIDE
+    the design verdict instead of being compressed into it.
+    """
+    audit_path = _pl.report_path(project, "phase23_completion_audit.json")
+    try:
+        doc = json.loads(audit_path.read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(doc, dict):
+        return []
+    names: List[str] = []
+    for key in ("failed_gates", "failing_gates", "findings", "gates"):
+        rows = doc.get(key)
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, str):
+                    names.append(row)
+                elif isinstance(row, dict):
+                    status = str(row.get("status") or row.get("verdict")
+                                 or "").upper()
+                    name = (row.get("gate") or row.get("name")
+                            or row.get("rule") or row.get("id"))
+                    if name and (not status or status not in
+                                 ("PASS", "OK", "NOT_APPLICABLE", "N/A")):
+                        names.append(str(name))
+            if names:
+                break
+    seen, out = set(), []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
 def _derive_headline_verdict(project: Path, steps_verdict: str
                              ) -> tuple:
-    """Return (headline, audit_verdict, note). Reads the freshly-refreshed
-    reports/audit/phase23_completion_audit.json; if absent/unreadable the
-    own-steps verdict stands (with a note saying the audit was absent)."""
+    """Return (headline, audit_verdict, note).
+
+    R-0915-126 — THE HEADLINE IS THE DESIGN'S VERDICT, AND THE AUDIT TRAVELS
+    BESIDE IT.
+
+    What stood here MERGED the two: if the completion audit ranked worse than
+    the run's own steps, the headline was REPLACED by the audit's word. So a
+    chip whose sign-off gates all passed still published FAIL because a
+    paperwork gate — provenance receipts, docs_gen, foundry-handoff mode,
+    waiver staleness, fmeda applicability, formal-skill invocation, the expert
+    handoff — had not been satisfied. One word was being asked to carry two
+    different questions: "is this chip right?" and "is this run's paperwork
+    complete?", and the second silently overrode the first.
+
+    They are now reported separately and NEITHER is discarded:
+      `verdict`       the DESIGN's verdict — the step gates that MEASURE the
+                      chip and its function (sim, LEC, synth, PnR, DRC/LVS/STA,
+                      antenna/EM/IR/density, pad-ring geometry, the tapeout
+                      precheck's physical rungs).
+      `audit_verdict` the completion audit, published alongside, together with
+                      `audit_failed_gates` naming every gate it failed.
+
+    NO GATE IS DELETED OR WEAKENED (R-0915-126(3)). The audit still runs, still
+    reaches its own verdict and still names its findings; what changed is only
+    that its word no longer overwrites the design's. A reader who wants the
+    conjunction can still compute it — from two fields that say which is which.
+    """
     audit_path = _pl.report_path(project, "phase23_completion_audit.json")
     audit_verdict = None
     try:
@@ -64516,13 +64586,15 @@ def _derive_headline_verdict(project: Path, steps_verdict: str
     if not isinstance(audit_verdict, str) or \
             audit_verdict not in _VERDICT_RANK:
         return steps_verdict, audit_verdict, (
-            "completion audit absent/unreadable — headline is the "
-            "own-steps verdict only (#437f)")
+            "completion audit absent/unreadable — the design verdict stands "
+            "on its own steps (R-0915-126)")
     if _VERDICT_RANK[audit_verdict] > _VERDICT_RANK.get(steps_verdict, 2):
-        return audit_verdict, audit_verdict, (
-            f"headline downgraded from own-steps {steps_verdict!r}: the "
-            f"full-flow completion audit says {audit_verdict!r} and the "
-            f"orchestrator must derive from, not contradict, it (#437f)")
+        # NOT a downgrade any more. The disagreement is REPORTED, not merged.
+        return steps_verdict, audit_verdict, (
+            f"design verdict {steps_verdict!r} stands on the step gates that "
+            f"measure the chip; the completion audit separately says "
+            f"{audit_verdict!r} and is published as `audit_verdict` with its "
+            f"failing gates in `audit_failed_gates` (R-0915-126)")
     return steps_verdict, audit_verdict, ""
 
 
