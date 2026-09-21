@@ -326,6 +326,16 @@ _ARM_A_DECLARED = {
     # report, so the arm-A scan reads it exactly as it reads the eight above —
     # the population legitimately GREW and this set had not been told.
     "reports/phase3/sta_spef_based.rpt",             # step 23
+    # R-0915-107 — step 27's SI (crosstalk/MCF) STA report. It was in the
+    # emitted-but-undeclared DISCLOSURE until that ruling: nothing wrote
+    # `reports/phase3/si_mcf_sta.rpt` at all, because `si_mcf_sta.py` ran its
+    # three OpenSTA corners into the WORK dir as `si_mcf_sta_<tag>.rpt` and
+    # published only the verdict JSON, while `_path_layout` carried a routing row
+    # for the untagged name that no writer used. `si_mcf_sta.run` now publishes
+    # it with `STA_BASIS: POST_ROUTE_MCF_SPEF` and step 27 declares it, so it
+    # enters this population exactly as this set's own comment prescribes —
+    # "add it here once its emitter stamps".
+    "reports/phase3/si_mcf_sta.rpt",                 # step 27
 }
 
 #: Of the 8 above, the count whose EMITTER the arm-A scan could identify. Left a
@@ -333,13 +343,34 @@ _ARM_A_DECLARED = {
 #: findings, not the found. It is the number that makes "0 unstamped" mean
 #: something: at 0 the gate refuses (rc=2), and between 0 and 4 it would be
 #: passing over a shrinking read.
-_ARM_A_FOUND = 4
+#: 4 -> 5 under R-0915-107: `si_mcf_sta.py` now NAMES the report it publishes at
+#: its write site, so the arm-A scan can identify its emitter and hold it to the
+#: stamp. Had the destination stayed derived (`out_json_p.with_suffix(".rpt")`)
+#: the report would have been declared while its emitter remained unidentifiable
+#: — measured: population 10, found 4 — which is a declaration the scan cannot
+#: enforce, and the debt this ruling closes would have survived the fix.
+_ARM_A_FOUND = 5
 
 #: Arm B: modules that demonstrate a stamping convention, and the reports they
 #: emit. If a module stops writing its reports, is reclassified as a COPIER, or
 #: fails to parse, these drop and the empty finding set stops meaning anything.
-_ARM_B_MODULES = 1
-_ARM_B_JUDGED = 9
+#: 1 -> 3 modules and 9 -> 11 reports, in TWO separate increments, attributed
+#: rather than adjusted:
+#:
+#:   1 -> 2   `digital_hardmacro_gen.characterise_liberty` began emitting AND
+#:            stamping `sta_mcorner_ocv.rpt`, at 43626797b (2026-09-16,
+#:            "hardmacro: the Liberty carries the run's own timing, or it is
+#:            NOT_MEASURED (R-0915-87 part 3)"), landed by bd308d420 (PR #2343).
+#:            This pin was set at 755c9326e (2026-08-26) and therefore PREDATES
+#:            that landing — `git merge-base --is-ancestor <pin> <that commit>`
+#:            is true — so the pin was stale and the growth is the DESIRED
+#:            direction: a second module ADOPTED the convention. That is the
+#:            1/9 -> 2/10 this test reported as "the sibling arm's population
+#:            moved", and no unstamped sibling appeared with it.
+#:   2 -> 3   `si_mcf_sta.py` joins under R-0915-107, for the same reason: it now
+#:            stamps a timing report it emits.
+_ARM_B_MODULES = 3
+_ARM_B_JUDGED = 11
 
 
 def test_repository_arm_a_is_clean_and_arm_b_reports_the_known_set():

@@ -300,3 +300,71 @@ def test_worst_setup_hold_parse():
 
 def test_worst_setup_hold_missing():
     assert M.worst_setup_hold("no slack here") == (None, None)
+
+
+# ── R-0915-107: the SI STA report is published WITH its basis, or not at all ──
+import _sta_basis  # noqa: E402
+
+
+def _corners(*rcs):
+    return [{"corner": f"mcf_{i}", "worst_setup_slack_ns": 1.0,
+             "worst_hold_slack_ns": 2.0, "sta_rc": rc}
+            for i, rc in enumerate(rcs)]
+
+
+def _publish(tmp_path, *, rcs=(0,), nom_rc=0, out_json=None):
+    out_json_p = (Path(out_json) if out_json
+                  else tmp_path / "reports/phase3/si_mcf_sta.json")
+    out_json_p.parent.mkdir(parents=True, exist_ok=True)
+    return M.publish_si_sta_report(
+        tmp_path, out_json_p, out_json, top="widget", spef_name="w.spef",
+        verdict="PASS", nom_setup=1.0, nom_hold=2.0, nom_rc=nom_rc,
+        corners=_corners(*rcs))
+
+
+def test_the_published_report_states_a_basis_that_resolves(tmp_path):
+    """Step 27 DECLARES this report, so it must exist and must disclose the
+    basis it was measured on — post-route extracted parasitics with the coupling
+    caps MCF-folded. Read through `_sta_basis`, the ONE reader of the stamp, so
+    this asserts what every consumer will see and not a string of its own."""
+    p = _publish(tmp_path)
+    assert p is not None and p.is_file()
+    assert p.name == "si_mcf_sta.rpt"
+    assert _sta_basis.declared_basis(p.read_text()) == "POST_ROUTE"
+
+
+def test_no_corner_reached_opensta_means_no_report(tmp_path):
+    """THE RULING'S OWN CLAUSE: if the emitter cannot state a basis it does not
+    write the report. A run where no corner reached OpenSTA measured no parasitic
+    timing, so it has no basis to disclose — and a timing report without one is
+    the laundering the stage gate exists to catch. Nothing is written, and the
+    absence is the honest artefact."""
+    assert _publish(tmp_path, rcs=(1, 1)) is None
+    assert not (tmp_path / "reports/phase3/si_mcf_sta.rpt").exists()
+
+
+def test_a_failed_nominal_run_also_publishes_nothing(tmp_path):
+    """The nominal grounded corner is the reference the folded corners are read
+    against; without it there is no basis either."""
+    assert _publish(tmp_path, rcs=(0,), nom_rc=1) is None
+    assert not (tmp_path / "reports/phase3/si_mcf_sta.rpt").exists()
+
+
+def test_one_good_corner_among_failures_is_enough_to_publish(tmp_path):
+    """Both directions of the same predicate: the clause withholds the report
+    when NO corner measured, not whenever any corner failed."""
+    p = _publish(tmp_path, rcs=(1, 0))
+    assert p is not None and p.is_file()
+
+
+def test_a_redirected_out_json_carries_the_report_with_it(tmp_path):
+    """The r21 discipline this module already records: `si_mcf_repair` measures a
+    CANDIDATE through `run` with `out_json` redirected, and a candidate must not
+    overwrite the shipping run's working set. So the report follows `out_json`
+    and the canonical path stays untouched."""
+    cand = tmp_path / "txn" / "si_mcf_sta_candidate.json"
+    cand.parent.mkdir(parents=True, exist_ok=True)
+    p = _publish(tmp_path, out_json=cand)
+    assert p == cand.with_suffix(".rpt") and p.is_file()
+    assert not (tmp_path / "reports/phase3/si_mcf_sta.rpt").exists()
+    assert _sta_basis.declared_basis(p.read_text()) == "POST_ROUTE"
