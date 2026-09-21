@@ -81,36 +81,53 @@ def test_the_pre_route_connect_has_no_reroute_because_there_is_no_route_yet():
 # ------------------------------------- (3) delta 0 -> no re-route, and it says so
 
 def test_the_reroute_is_owed_only_when_the_reconnect_changed_terminals():
+    """SUPERSEDED IN ITS REMEDY BY R-0915-114, NOT IN ITS PRINCIPLE.
+
+    R-0915-105 established that the DELTA decides. R-0915-114 measured WHICH
+    delta this can ever be: `_vic_pg_on_no_net` counts ONLY POWER/GROUND
+    terminals, so the delta is PG-only by construction, and `global_connect`
+    lays no geometry (MEASURED: 9498 PG shapes before it and 9498 after). The
+    remedy for such a delta is a CONNECT and two CHECKS, never a whole-design
+    re-route -- which on two ICs and two PDKs is the step that fails.
+
+    The delta machinery this test was written to protect is unchanged; what it
+    now gates is the connect-and-check path.
+    """
     rr = R._build_pg_reconnect_tcl(reroute=True)
     # the delta is measured with the audit's own predicate, not a second one
     assert 'proc _vic_pg_on_no_net' in rr
     assert 'set _pg_bad_before [_vic_pg_on_no_net]' in rr
     assert 'set _pg_bad_after [_vic_pg_on_no_net]' in rr
     assert 'set _pg_delta [expr {$_pg_bad_before - $_pg_bad_after}]' in rr
-    # zero -> the route is kept, and the run SAYS the re-route was not owed
+    # zero -> the route is kept, and the run SAYS nothing was owed
     assert 'if {$_pg_delta <= 0} {' in rr
-    assert 'PG_REROUTE_NOT_OWED' in rr
+    assert 'PG_CONNECT_NOT_OWED' in rr
     body = rr[rr.index('if {$_pg_delta <= 0} {'):]
-    not_owed, owed = body.index("PG_REROUTE_NOT_OWED"), body.index("} else {")
+    not_owed, owed = body.index("PG_CONNECT_NOT_OWED"), body.index("} else {")
     assert not_owed < owed
-    assert "detailed_route" not in body[:owed], (
-        "the zero-delta branch must not route")
+    # and NEITHER branch routes any more
+    assert "detailed_route -verbose" not in rr, (
+        "R-0915-114: this block connects and checks; it does not route")
 
-
-# --------------------------------- (4) a failed re-route is a verdict, not a note
 
 def test_a_failed_reroute_is_a_named_verdict_and_is_never_swallowed():
+    """The NO-SWALLOW principle survives; the thing that may fail changed.
+
+    R-0915-105 refused to let a failed re-route pass as a note. R-0915-114
+    deletes the re-route from this block entirely, so what this block can now
+    fail on are its two CHECKS -- and neither is swallowed: a PG terminal that
+    reaches no rail raises PG_ABUTMENT_NOT_CONNECTED, and a moved DRV count
+    raises PG_DELTA_DRC. The stage that still routes (antenna repair) answers
+    for its own wires with ANTENNA_REROUTE_FAILED, which R-0915-114(b) turned
+    from a swallowed note into a verdict.
+    """
     rr = R._build_pg_reconnect_tcl(reroute=True)
-    assert 'puts "PG_REROUTE_NONFATAL' not in rr, (
-        "the swallow is what lost 105 wires; it must be gone from the EMITTED "
-        "script (the comment that records it may stay)")
-    assert 'error "PG_REROUTE_FAILED:' in rr
-    # the error text names the consequence, so a reader is not sent 3877 lines
-    # away to NAMED_VIOL_REROUTE_INCOMPLETE to find out what happened
-    assert "is NOT " in rr and "routed" in rr
-    # and it is raised INSIDE the owed branch, after the catch
-    owed = rr[rr.index("PG_REROUTE_OWED"):]
-    assert owed.index("catch {detailed_route") < owed.index('error "PG_REROUTE_FAILED:')
+    assert 'puts "PG_REROUTE_NONFATAL' not in rr
+    assert 'error "PG_ABUTMENT_NOT_CONNECTED:' in rr
+    assert 'error "PG_DELTA_DRC:' in rr
+    # each error text names the consequence rather than sending the reader away
+    assert "not signal routing" in rr
+    assert "its verdict, not a note" in rr
 
 
 def test_the_failure_path_does_not_try_to_roll_back():

@@ -83,7 +83,12 @@ def test_a_failed_checkpoint_is_named_and_not_assumed():
     "ANTENNA_LOOP_CHECK_NONFATAL",
     "ANTENNA_NATIVE_REROUTE_NONFATAL",
     "REPAIR_ANTENNA_NONFATAL",
-    "REPAIR_ANTENNA_REROUTE_NONFATAL",
+    # R-0915-114(b): this exit is no longer a note. The stage that inserted
+    # the diodes now answers for their wires -- MEASURED (int6): the native
+    # -reroute threw DRT-0206, this fallback threw DRT-1231 TWICE, both were
+    # swallowed, and the diodes were left for the PG block's whole-design
+    # re-route, which R-0915-114(a) has deleted. It is ANTENNA_REROUTE_FAILED
+    # and it is raised, so it is covered by the verdict test below instead.
 ])
 def test_every_refusal_path_records_the_refusal(marker):
     """Each of the four exits that leaves a mutated route sets `_ant_refused`.
