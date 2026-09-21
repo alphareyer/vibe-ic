@@ -145,7 +145,21 @@ def test_the_emitted_antenna_block_is_valid_tcl(tmp_path: Path):
     exactly what a two-arm falsifier does, and it turned this test red in the
     GREEN arm while a clean serial checkout passed 34 of 34.
     """
-    from tests import _tcl_walk   # noqa: PLC0415
+    # `import _tcl_walk`, NOT `from tests import _tcl_walk` (icfix2, #2434).
+    # `programs/tests/` carries NO `__init__.py`, so it is not a package and
+    # `tests` never names it. The pinned EDA image, however, DOES ship a
+    # top-level one -- `/usr/local/lib/python3.12/dist-packages/tests/`,
+    # containing nothing but an empty `__init__.py` -- so inside the image the
+    # bare form resolved to THAT and died:
+    #
+    #   ImportError: cannot import name '_tcl_walk' from 'tests'
+    #   (/usr/local/lib/python3.12/dist-packages/tests/__init__.py)
+    #
+    # pytest prepends this file's own directory to `sys.path`, which is why the
+    # five other users of this helper all spell it `import _tcl_walk` and are
+    # green. These two were the only ones spelling it the way that depends on
+    # what the environment happens to have installed.
+    import _tcl_walk  # noqa: PLC0415
     out, err, route = _tcl_walk.walk(
         "proc _vic_check {} {\n" + _tcl() + "\n}\nputs TCL_PARSE_OK\n",
         "# deck\n", tmp_path)

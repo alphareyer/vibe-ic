@@ -305,7 +305,21 @@ puts "\nSIGNED_TEXT_END"
 
 
 def _run_walk(tmp_path: Path):
-    from tests import _tcl_walk  # noqa: PLC0415
+    # `import _tcl_walk`, NOT `from tests import _tcl_walk` (icfix2, #2434).
+    # `programs/tests/` carries NO `__init__.py`, so it is not a package and
+    # `tests` never names it. The pinned EDA image, however, DOES ship a
+    # top-level one -- `/usr/local/lib/python3.12/dist-packages/tests/`,
+    # containing nothing but an empty `__init__.py` -- so inside the image the
+    # bare form resolved to THAT and died:
+    #
+    #   ImportError: cannot import name '_tcl_walk' from 'tests'
+    #   (/usr/local/lib/python3.12/dist-packages/tests/__init__.py)
+    #
+    # pytest prepends this file's own directory to `sys.path`, which is why the
+    # five other users of this helper all spell it `import _tcl_walk` and are
+    # green. These two were the only ones spelling it the way that depends on
+    # what the environment happens to have installed.
+    import _tcl_walk  # noqa: PLC0415
     walker = (_sign_proc_source()
               + "set ::BODY " + _tcl_brace(_BODY) + "\n"
               + _WALKER)
