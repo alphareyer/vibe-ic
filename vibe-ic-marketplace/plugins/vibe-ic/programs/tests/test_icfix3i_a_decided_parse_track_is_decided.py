@@ -114,3 +114,42 @@ def test_the_checker_requires_a_derivation_for_a_zero_return_code():
         "check_report must refuse an rc-0 report whose derivation it cannot name")
     assert "program_expectations_sha256" in body, (
         "check_report must verify the program-derived path against its OWN digest")
+
+
+def test_a_legacy_report_with_no_derivation_is_read_as_the_ai_one(tmp_path):
+    """REGRESSION GUARD, from the FIX3I arms.
+
+    My first version made `derivation` mandatory for rc 0, so a report written
+    by an OLDER producer — or staged by a fixture that predates the field —
+    fell through to "unrecognised derivation" and was reported as
+
+        INCOMPLETE: phase1_expert_parse_track report unavailable or stale:
+        zero return code ...
+
+    which cascaded Steps P0/1 to NOT_MEASURED(upstream_failed) on three
+    synthetic INTACT trees (test_flow_compliance_check_gate x2,
+    test_issue1446_incomplete_in_scope_is_not_green). Those fixtures stage a
+    LEGITIMATE AI completion — `AI_CONSUMED` with a real `answer_sha256` and an
+    `execution` block carrying no `derivation`.
+
+    The contract: before R-0915-126-D1 the ONLY route to rc 0 was AI_CONSUMED
+    with a matching digest, so ABSENCE of the field IS the AI derivation. It is
+    not "unnameable" — saying nothing and NAMING something unknown are
+    different facts, and only the second is refused.
+    """
+    import ast
+    src = Path(T.__file__).read_text(errors="replace")
+    body = src.split("def check_report", 1)[1].split("\ndef ", 1)[0]
+    assert 'derivation is None' in body, (
+        "check_report must treat an ABSENT derivation as the legacy AI one")
+    # and the refusal must still exist for a derivation that IS named and unknown
+    assert "unrecognised execution" in body
+
+
+def test_a_named_but_unknown_derivation_is_still_refused():
+    """The other half of that boundary: tolerating absence must not tolerate a
+    report that CLAIMS a derivation this checker cannot verify."""
+    import ast
+    src = Path(T.__file__).read_text(errors="replace")
+    body = src.split("def check_report", 1)[1].split("\ndef ", 1)[0]
+    assert "unrecognised execution" in body and 'derivation!r' in body

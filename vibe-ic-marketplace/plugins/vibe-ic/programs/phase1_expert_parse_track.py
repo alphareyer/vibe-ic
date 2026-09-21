@@ -3694,7 +3694,29 @@ def check_report(project: Path) -> int:
             if (rep.get("verdict") not in ("PASS", "FINDINGS")
                     or execution.get("complete") is not True):
                 raise ValueError("zero return code contradicts expert execution")
+            # AN ABSENT `derivation` IS THE AI DERIVATION IT ALWAYS WAS.
+            # Before R-0915-126-D1 the ONLY route to rc 0 was AI_CONSUMED with
+            # a matching `answer_sha256`, so a report written by an older
+            # producer — or staged by a fixture that predates this field — is
+            # an AI-derived reading, not an unnameable one. Reading its absence
+            # as "stale" refused reports that were never wrong: MEASURED on the
+            # FIX3I arms, three synthetic intact trees
+            # (test_flow_compliance_check_gate x2,
+            # test_issue1446_incomplete_in_scope_is_not_green) went
+            # "INCOMPLETE: report unavailable or stale: zero return code ..."
+            # at Step D1 and cascaded P0/1 to NOT_MEASURED(upstream_failed).
+            # Those fixtures stage `ai_subtrack.status = AI_CONSUMED` with a
+            # real `answer_sha256` and an `execution` block carrying no
+            # `derivation` — a legitimate AI completion, which is why they are
+            # NOT re-pinned here.
+            #
+            # ONLY A DERIVATION THAT IS PRESENT AND UNRECOGNISED IS REFUSED: a
+            # report that NAMES a derivation this checker does not know is
+            # claiming something it cannot support, and that is a different
+            # fact from saying nothing.
             derivation = execution.get("derivation")
+            if derivation is None:
+                derivation = "ai"
             if derivation == "ai":
                 if (ai.get("status") != AI_CONSUMED
                         or type(execution.get("observed_ai_consumed")) is not int
