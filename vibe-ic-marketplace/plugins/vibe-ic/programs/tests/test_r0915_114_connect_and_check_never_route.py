@@ -20,6 +20,27 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import phase3_one_shot_runner as R  # noqa: E402
 
+
+def _invokes_cmd(text, cmd):
+    """Is `cmd` INVOKED -- the first word of a statement -- in this deck?
+
+    NOT a substring search. R-0915-122's capability probe passes
+    `detailed_route` to `info body` to ask whether this build accepts
+    `-nets`; it never calls it, and a substring scan reads that question as
+    the answer. Same instrument, and the same reason, as `_invokes` in
+    test_r0915_74_a_refused_antenna_repair_rolls_back.py, whose own docstring
+    says "a bare `in` reads the deck's own citation of the defect as the
+    defect".
+    """
+    for ch in "[]{}":
+        text = text.replace(ch, " \n")
+    for stmt in text.replace(";", "\n").splitlines():
+        head = stmt.strip().split()
+        if head and head[0] == cmd:
+            return True
+    return False
+
+
 SRC = (Path(__file__).resolve().parents[1]
        / "phase3_one_shot_runner.py").read_text()
 
@@ -141,7 +162,7 @@ def test_the_antenna_stage_no_longer_swallows_its_own_reroute_failure():
     # and not on the deck's comments: both keep the old marker's name in the
     # note that records why it went.
     assert "ANTENNA_REROUTE_FAILED" not in _antenna_cmds()
-    assert "detailed_route" not in _antenna_cmds()
+    assert not _invokes_cmd(_antenna_cmds(), "detailed_route")
     # the exit that replaced it is a recorded refusal, not a note.
     t = _antenna_block()
     i = t.index('puts "ANTENNA_DIODE_ROLLED_BACK')

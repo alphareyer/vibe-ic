@@ -25452,6 +25452,38 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         # judgement below sees nothing and the pass is UNJUDGED, which stops.
         # An unguarded call here would abort the whole deck on a build whose
         # accessor is named differently -- the opposite of failing safe.
+        # R-0915-121 + icord1's fork work: WHICH ROUTER IS THIS, AND CAN IT
+        # SCOPE? Recorded once per pass, because the same deck must be correct
+        # on both images and a reader has to be able to tell which one ran.
+        #
+        # MEASURED (icord1, on run15's own antenna_pass_pre.odb, one patched
+        # binary 26Q3-2625-g79f27347e2): `detailed_route -nets {p__core}` gives
+        # LOST 0, SHRANK 0, 0 of 654 untouched nets changed a byte, antenna 0,
+        # rc 0, 26 s, DRC 621 byte-identical to baseline -- and the SAME binary
+        # without `-nets` reproduces this lane's numbers exactly: LOST 93,
+        # SHRANK 55, GREW 505, DRT-0206. On that build `repair_antennas
+        # -reroute` routes scoped by itself (GRT-0313 antenna-clean after one
+        # pass, only p__core's bytes changed).
+        #
+        # THE CAPABILITY IS ASKED FOR, NOT INFERRED FROM THE VERSION. A version
+        # string is a label; `-nets` in the command's own registered body is
+        # the fact. MEASURED on 0.3.67 in this lane's container:
+        # `ord::openroad_version` = 26Q3-2599-g697a63f1ad and
+        # `info body detailed_route` contains `-verbose` and NOT `-nets`; on
+        # icord1's build it contains `-nets`. The version is recorded anyway,
+        # because it is what a reader cites. Both probes fail SAFE: unknown
+        # version and scoped=0, which keeps today's refuse-and-roll-back.
+        "    set _ant_rv \"UNKNOWN\"\n"
+        "    catch { set _ant_rv [ord::openroad_version] }\n"
+        "    set _ant_scoped 0\n"
+        "    catch {\n"
+        "      if {[string first \"-nets\" [info body detailed_route]] >= 0} "
+        "{ set _ant_scoped 1 }\n"
+        "    }\n"
+        "    puts \"ANTENNA_ROUTER: version=$_ant_rv scoped_reroute=$_ant_scoped"
+        " -- a scoped `-reroute` re-lays only the nets the pass dirtied; an "
+        "unscoped one re-lays the whole design and this stage refuses what it "
+        "damages\"\n"
         "    set _ant_blk \"\"\n"
         "    catch { set _ant_blk [ord::get_db_block] }\n"
         # R-0915-121(a) -- THE JUDGEMENT'S SCOPE WAS WRONG AND IT COST TWO ICs
@@ -25686,6 +25718,18 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         # is several stages older and is removed at the end of the flow.
         "      set _ant_restored 0\n"
         "      set _ant_full [llength $_ant_broken]\n"
+        # THE SAME REFUSAL MEANS DIFFERENT THINGS ON THE TWO IMAGES, so it
+        # says which one it is in. On an unscoped router this is the expected,
+        # measured cost of a whole-design re-lay. On a SCOPED one it is a fork
+        # REGRESSION -- icord1 measured 0 damage there -- and whoever reads the
+        # log should not have to diff two runs to notice that.
+        "      if {$_ant_scoped} {\n"
+        "        puts \"ANTENNA_SCOPED_ROUTER_STILL_DAMAGED: version=$_ant_rv "
+        "reported a net-scoped reroute and still took wire off "
+        "[llength $_ant_broken] net(s) outside the pass -- that is a router "
+        "regression, not the expected cost of an unscoped re-lay; the refusal "
+        "below is the backstop doing its job\"\n"
+        "      }\n"
         "      puts \"ANTENNA_DIODE_ROLLED_BACK: $_ant_full net(s) "
         "lost wire under the native repair ([llength $_ant_lost] entirely, "
         "[llength $_ant_shrunk] in part) -- "

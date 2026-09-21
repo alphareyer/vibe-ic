@@ -28,6 +28,27 @@ from pathlib import Path
 
 import pytest
 
+
+def _invokes_cmd(text, cmd):
+    """Is `cmd` INVOKED -- the first word of a statement -- in this deck?
+
+    NOT a substring search. R-0915-122's capability probe passes
+    `detailed_route` to `info body` to ask whether this build accepts
+    `-nets`; it never calls it, and a substring scan reads that question as
+    the answer. Same instrument, and the same reason, as `_invokes` in
+    test_r0915_74_a_refused_antenna_repair_rolls_back.py, whose own docstring
+    says "a bare `in` reads the deck's own citation of the defect as the
+    defect".
+    """
+    for ch in "[]{}":
+        text = text.replace(ch, " \n")
+    for stmt in text.replace(";", "\n").splitlines():
+        head = stmt.strip().split()
+        if head and head[0] == cmd:
+            return True
+    return False
+
+
 PROGRAMS = Path(__file__).parent.parent
 sys.path.insert(0, str(PROGRAMS))
 
@@ -351,7 +372,7 @@ class TestAntennaRepairTcl:
         assert "-reroute" in tcl               # the repair carries its own reroute
         cmds = "\n".join(ln for ln in tcl.splitlines()
                          if not ln.lstrip().startswith("#"))
-        assert "detailed_route" not in cmds    # R-0915-116(2)(iii)
+        assert not _invokes_cmd(cmds, "detailed_route")  # R-0915-116(2)(iii)
         assert "ANTENNA_POSTROUTE_DONE" in tcl   # sentinel for the in-session read
 
     def test_no_full_global_route_command(self):
@@ -404,7 +425,8 @@ class TestAntennaRepairTcl:
         cmds = "\n".join(ln for ln in tcl.splitlines()
                          if not ln.lstrip().startswith("#"))
         for gone in ("global_route", "detailed_route"):
-            assert gone not in cmds, f"{gone} is a whole-design route here"
+            assert not _invokes_cmd(cmds, gone), \
+                f"{gone} is a whole-design route here"
 
 
 class TestDontUseTcl:
