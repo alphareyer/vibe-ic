@@ -246,6 +246,22 @@ def _derived_ephemeral(path_str: str, project: Path) -> bool:
     The caller has already established that the path resolves OUTSIDE the run
     root, is not a pinned plugin source, and was not claimed by `_PATH_RE`.
     """
+    return (names_a_relocated_copy(path_str, project)
+            and not Path(path_str).exists())
+
+
+def names_a_relocated_copy(path_str: str, project: Path) -> bool:
+    """Conditions (1) and (2) above, WITHOUT the existence test.
+
+    Split out so the RECORD WRITER can refuse this shape at the moment it is
+    written, which is the only moment at which it is certainly still wrong.
+    A writer cannot use `_derived_ephemeral`: at write time the staging copy
+    usually still EXISTS -- it is deleted when the transaction closes, minutes
+    later -- so condition (3) is False exactly when the refusal would do the
+    most good. Existence is the right condition for a gate reading a finished
+    run and the wrong one for the writer, and this is the one definition of the
+    shape they share (vibe-ic#2158's population, one reader, not two parsers).
+    """
     if "//" in path_str:
         return False
     parts = Path(path_str).parts
@@ -254,7 +270,11 @@ def _derived_ephemeral(path_str: str, project: Path) -> bool:
     name = project.name
     if not name or name not in parts[1:]:
         return False
-    return not Path(path_str).exists()
+    try:
+        return Path(path_str).resolve().parent != project.resolve() and (
+            project.resolve() not in Path(path_str).resolve().parents)
+    except OSError:                                     # pragma: no cover
+        return True
 
 
 # `_docker_watchdog.py` owns this exact private namespace.  The file is a
