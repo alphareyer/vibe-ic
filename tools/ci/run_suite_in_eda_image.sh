@@ -163,7 +163,24 @@ _PIN_DIR="$REPO_ROOT/vibe-ic-marketplace/plugins/vibe-ic/programs"
 # finds nothing and the old reader exited 1, which this script turns into
 # `die`. Ask the module, which is the only thing that knows.
 _PIN_PY='import _eda_pin as p; print(p.resolved_image_digest()); print(p.IMAGE_REPO_DEFAULT)'
-_PIN_PARTS="$(cd "$_PIN_DIR" && python3 -c "$_PIN_PY" 2>/dev/null || true)"
+# `-B` AND THE ENV VAR, because this import WRITES INTO THE SUBJECT TREE.
+# vibe-ic#2008. Importing `_eda_pin` from `$_PIN_DIR` leaves
+# `vibe-ic-marketplace/plugins/vibe-ic/programs/__pycache__` behind, and
+# `git status` CANNOT SEE IT (.gitignore) while the attestation drift
+# instrument can -- so an operator who runs the suite and then the hygiene set
+# in the same checkout measures a preflight finding they created by measuring:
+#
+#   [PREFLIGHT] 1 bytecode/cache artefact(s) already sit under the declared
+#   roots ... residue: .../programs/__pycache__
+#
+# MEASURED on a clone made from zero: 0 __pycache__ dirs before, 1 after this
+# one command, `git status --porcelain` 0 lines on both sides. Every other
+# caller in this repo already guards it for exactly this reason --
+# `tools/gatekeeper-land.sh:984` for the full tier and
+# `tools/ci/repo_hygiene_gates.sh` for the hygiene set, both citing #2008 --
+# and this line, the FIRST thing the harness does to the subject, did not.
+# Belt and braces: the env var covers any child, `-B` covers this interpreter.
+_PIN_PARTS="$(cd "$_PIN_DIR" && PYTHONDONTWRITEBYTECODE=1 python3 -B -c "$_PIN_PY" 2>/dev/null || true)"
 _PIN_DIGEST="$(printf '%s\n' "$_PIN_PARTS" | sed -n 1p)"
 _PIN_REPO_DEFAULT="$(printf '%s\n' "$_PIN_PARTS" | sed -n 2p)"
 _PIN_REPO="${VIBEIC_EDA_IMAGE_REPO:-$_PIN_REPO_DEFAULT}"
