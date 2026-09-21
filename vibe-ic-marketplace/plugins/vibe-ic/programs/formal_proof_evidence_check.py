@@ -572,15 +572,61 @@ def audit(project: Path) -> dict:
             "PROOF_TRANSCRIPT_MISSING (#1974): results do not cite the proof "
             "transcript as `proof_transcript`")
     if results.get("expert_fallback_required"):
+        # R-0915-125. THIS NO LONGER FAILS THE CLAIM, and the reason is that a
+        # FAIL is reserved for a proof that RAN and FAILED.
+        #
+        # What stood here asked whether an expert had been INVOKED, and made the
+        # answer a contract violation. In a headless, program-only front-door run
+        # nobody invokes `/formal-verify`, so `expert_fallback_invoked` is False
+        # on every run and this clause could never be satisfied -- the gate was
+        # unpassable by construction, not by evidence. MEASURED on spm run13 AND
+        # run8 (8HD-4, `_lane_icspm5`), both digital DIEs, identically:
+        #
+        #     expert_fallback_required = True
+        #     expert_fallback_invoked  = False
+        #     expert_fallback_receipt  = None
+        #     5 request obligation(s) against a denominator of 6
+        #
+        # "nobody invoked the skill" is a fact about THE RUNNER'S OPERATOR, not
+        # about the design, and it must never become a design verdict.
+        #
+        # The obligations do not disappear: they are already carried as
+        # `unresolved_obligations`, which drives `contract_incomplete` ->
+        # INCOMPLETE below and is REPORTED WITH ITS IDS. An unresolved obligation
+        # keeps the claim from being COMPLETE; it does not make it FAILED.
         receipt_rel = results.get("expert_fallback_receipt")
         receipt_path = project / receipt_rel if isinstance(receipt_rel, str) else None
-        if (results.get("expert_fallback_invoked") is not True
-                or receipt_path is None or not receipt_path.is_file()):
-            contract_ok = False
+        status = str(results.get("expert_fallback_invocation_status") or "").upper()
+        if receipt_path is not None and receipt_path.is_file():
+            # A receipt that EXISTS is still held to its contract. Two
+            # invocation statuses are accepted and they are kept DISTINCT on
+            # purpose (R-0915-125(a)): `INVOKED` is a human/skill answer and
+            # `INVOKED_BY_PROGRAM` is one the runner discharged itself. An AI
+            # answer and a program answer must never be indistinguishable in
+            # the record, so this reads the status rather than collapsing both
+            # into the boolean.
+            if status and status not in ("INVOKED", "INVOKED_BY_PROGRAM"):
+                contract_ok = False
+                rep["findings"].append(
+                    f"EXPERT_RECEIPT_STATUS_UNKNOWN (R-0915-125): the expert "
+                    f"receipt exists but records invocation_status "
+                    f"{status!r}, which is neither INVOKED nor "
+                    f"INVOKED_BY_PROGRAM")
+        else:
+            # NO receipt. Enumeration only (R-0915-125(b)): the ids stay
+            # visible and keep blocking their own layer; nothing is re-routed
+            # and nothing is laundered into a pass.
+            outstanding = [
+                str(row.get("id", "?"))
+                for row in (results.get("unresolved_obligations") or [])
+                if isinstance(row, dict)]
+            rep.setdefault("expert_fallback_outstanding", outstanding)
             rep["findings"].append(
-                "EXPERT_FALLBACK_NOT_INVOKED (#1974): the deterministic floor "
-                "requested formal-verify, but the completed claim has no "
-                "dereferenceable INVOKED expert receipt")
+                "EXPERT_FALLBACK_OUTSTANDING (R-0915-125): the deterministic "
+                "floor requested formal authoring and no expert receipt is "
+                "present. This is NOT a failed proof — it is work not yet "
+                "done, and it is reported by id rather than as a verdict: "
+                + (", ".join(outstanding) if outstanding else "(none enumerated)"))
 
     # (c) evidence pointer dereferences (path-shaped only, #433 convention) -
     ev_ok = True

@@ -1559,9 +1559,18 @@ def _attach_property_contract(results: dict, formal_dir: Path,
         for row in (receipt.get("dispositions") or [])
         if isinstance(row, dict) and str(row.get("id", "")).strip()
     }
+    # R-0915-125(a). TWO invocation statuses, kept DISTINCT in the record:
+    #   INVOKED             a human / the `/formal-verify` skill answered.
+    #   INVOKED_BY_PROGRAM  the runner discharged the obligation ITSELF, and
+    #                       the receipt carries the proof transcript that ran.
+    # They are never collapsed: an AI answer and a program answer must not be
+    # indistinguishable to anyone reading the record afterwards. The raw status
+    # is published alongside the boolean so a consumer can tell them apart
+    # without re-reading the receipt.
+    _invocation_status = str(receipt.get("invocation_status", "")).upper()
     expert_invoked = bool(
         request_obligations
-        and str(receipt.get("invocation_status", "")).upper() == "INVOKED")
+        and _invocation_status in ("INVOKED", "INVOKED_BY_PROGRAM"))
     receipt_unresolved: List[dict] = []
     for requested in request_obligations:
         oid = str(requested["id"])
@@ -1589,6 +1598,11 @@ def _attach_property_contract(results: dict, formal_dir: Path,
     results["unresolved_obligations"] = unresolved
     results["expert_fallback_required"] = bool(request_obligations)
     results["expert_fallback_invoked"] = expert_invoked
+    #: WHICH KIND of answer discharged it, or "" when none has. Published so the
+    #: distinction survives into `formal_proof_evidence_check` and into anything
+    #: that reads results.json later (R-0915-125(a)).
+    results["expert_fallback_invocation_status"] = (
+        _invocation_status if expert_invoked else "")
     results["expert_fallback_receipt"] = (
         str(receipt_path.relative_to(formal_dir.parent.parent.parent))
         if expert_invoked else None)
