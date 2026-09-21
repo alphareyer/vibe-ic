@@ -953,6 +953,47 @@ def _pl_import():
     return _pl
 
 
+def _top_from_netlist(netlist_p: Path) -> Optional[str]:
+    """The top module the NETLIST DECLARES, or None.
+
+    THE FALLBACK ONLY: an explicit `top` always wins, and this is consulted when
+    the caller supplied none.
+
+    WHY THE SHARED READER AND NOT A REGEX HERE. This used to be a bare
+    `re.search(r"^\s*module\s+(\w+)", raw)` inside `run`, which made `run` a
+    function that reads a value out of text and writes it into a record — the
+    shape `prose_polarity_consulted_check` flags, and it flagged it the moment
+    this module began publishing a DECLARED report. `gate_utils.find_modules` is
+    the shared module reader every other consumer already uses: it balances the
+    port list and requires a matching `endmodule`, so a bare `module` keyword
+    answers nothing.
+
+    WHAT THAT BUYS, MEASURED rather than assumed — `gate_utils._MODULE_KW_RE` is
+    `^\s*module\s+(\w+)\b`, anchored at LINE START, and a module must close
+    with `endmodule`. Over a netlist carrying a COMPLETE rival module
+    (`module ghost (input a); endmodule`) planted in a block comment, a line
+    comment, and a legal single-line `$display("...")` string, above the real
+    declaration and below it, the answer is `real_one` in all six: a rival in any
+    of those positions is never at line start.
+
+    THE ONE CASE NOT DEFENDED, stated rather than left to be discovered: a quote
+    spanning a raw newline, whose second line begins `module ghost … endmodule`,
+    DOES win. That is not legal Verilog — a string literal cannot contain an
+    unescaped newline — so the input is malformed, and defending it belongs in
+    the shared reader with every other caller, not here. I measured it, I am not
+    claiming it is closed, and `test_a_multiline_quote_is_a_known_limit` pins it
+    so the limit is visible instead of surprising.
+    """
+    if not netlist_p.exists():
+        return None
+    try:
+        import gate_utils                                    # noqa: PLC0415
+        spans = gate_utils.find_modules(
+            netlist_p.read_text(errors="replace"))
+    except (OSError, ImportError, ValueError):
+        return None
+    return spans[0].name if spans else None
+
 def publish_si_sta_report(project: PathLike, out_json_p: Path,
                           out_json: Optional[PathLike], *, top: str,
                           spef_name: str, verdict: str,
@@ -1041,9 +1082,7 @@ def run(project: PathLike, *, container: str = _pin.default_container_name(),
         netlist_p = cands[0] if cands else (pnr / "pnr.v")
     sdc_p = Path(sdc) if sdc else (pnr / "constraint.sdc")
     if top is None:
-        mm = re.search(r"^\s*module\s+(\w+)", netlist_p.read_text(errors="replace"),
-                       re.M) if netlist_p.exists() else None
-        top = mm.group(1) if mm else "top"
+        top = _top_from_netlist(netlist_p) or "top"
     if liberty is None:
         libs = sorted((project / "input" / "pdk" / "liberty").glob("*_typ.lib"))
         if not libs:
