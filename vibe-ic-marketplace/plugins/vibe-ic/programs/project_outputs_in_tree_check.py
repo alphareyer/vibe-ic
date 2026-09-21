@@ -271,10 +271,17 @@ def names_a_relocated_copy(path_str: str, project: Path) -> bool:
     if not name or name not in parts[1:]:
         return False
     try:
-        return Path(path_str).resolve().parent != project.resolve() and (
-            project.resolve() not in Path(path_str).resolve().parents)
+        cand, root = Path(path_str).resolve(), project.resolve()
     except OSError:                                     # pragma: no cover
         return True
+    # OUTSIDE means neither the root itself nor anything beneath it. The gate's
+    # own caller establishes this before reaching `_derived_ephemeral`; a writer
+    # calling in directly has to establish it here, and the project's OWN path
+    # is the case that makes the difference (it names the project and is not
+    # under itself). MEASURED: without this, three landed runner tests lost
+    # their report entirely, because `"project": str(project)` in the summary
+    # was itself read as a relocated copy.
+    return cand != root and root not in cand.parents
 
 
 # `_docker_watchdog.py` owns this exact private namespace.  The file is a
