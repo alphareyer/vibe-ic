@@ -60,7 +60,10 @@ def test_every_pin_access_boundary_also_measures_wires():
     src = _pnr_src()
     for b in BOUNDARIES:
         assert f'_pin_access_probe_tcl("{b}")' in src, b
-        assert f'_unrouted_probe_tcl("{b}")' in src, b
+        # the unrouted probe now also carries the run's own directory, so the
+        # membership file cannot land wherever the process was standing --
+        # see test_every_boundary_writes_into_the_runs_own_directory.
+        assert f'_unrouted_probe_tcl("{b}", out_dir_c)' in src, b
 
 
 def test_the_probe_is_measure_only():
@@ -205,3 +208,51 @@ def test_a_boundary_with_nothing_unrouted_still_reports_its_counts():
     i_counts = t.index("UNROUTED_PROBE_UNROUTED_NETS:")
     i_gate = t.index("if {$_unr > 0 && [catch {")
     assert i_counts < i_gate, "the counts are printed before the file is gated"
+
+
+# ── the membership file belongs to the RUN, not to the process cwd ──────────
+#
+# MEASURED on spm run16L: the spef_extract boundary wrote
+#   /home/reyerchu/_lane_icspm5/unrouted_after_postroute_spef_extract.txt
+# -- 734 bytes, 6 nets, on the SHARED LANE ROOT at 03:07:20, where the next
+# run of anything overwrites it; icspm5 had to preserve a copy under
+# run16L/lane_root_strays/ to keep the evidence.
+#
+# I argued when this landed that a relative name was safe because "the flow's
+# cwd IS the pnr directory, the same convention `antenna_iter_*.rpt` has
+# always used". That was wrong: it is true at SOME boundaries and not at
+# others, and a file whose whole purpose is to say WHICH nets, in THIS run,
+# cannot depend on where the process happened to be standing.
+
+def test_every_boundary_writes_into_the_runs_own_directory():
+    for b in BOUNDARIES:
+        t = R._unrouted_probe_tcl(b, "/w/proj/phase3/stage3/pnr")
+        assert f"/w/proj/phase3/stage3/pnr/unrouted_{b}.txt" in t, b
+        # and nothing writes a bare relative name
+        assert f"open unrouted_{b}.txt" not in t, b
+
+
+def test_every_call_site_passes_the_run_directory():
+    """A probe that CAN take an absolute path but is called without one is
+    the same defect with an extra step."""
+    src = Path(R.__file__).read_text()
+    for b in BOUNDARIES:
+        assert f'_unrouted_probe_tcl("{b}", out_dir_c)' in src, b
+    import re
+    bare = [m.group(0) for m in
+            re.finditer(r'\{_unrouted_probe_tcl\("[^"]+"\)\}', src)]
+    assert not bare, f"call site(s) omit the run directory: {bare}"
+
+
+def test_the_refusal_site_also_writes_into_the_runs_own_directory():
+    t = PS.strict_integrity_tcl("NAMED_VIOL_REROUTE", "/w/proj/phase3/stage3/pnr")
+    assert "/w/proj/phase3/stage3/pnr/unrouted_named_viol_reroute.txt" in t
+
+
+def test_a_caller_that_gives_no_directory_still_emits_something_readable():
+    """OVER-BREADTH CONTROL: the parameter is optional so the helper stays
+    unit-testable, and the relative fallback must still be a valid path --
+    it is the CALL SITES that must supply the directory, and the test above
+    is what enforces that."""
+    t = R._unrouted_probe_tcl("after_postroute_antenna_repair")
+    assert "unrouted_after_postroute_antenna_repair.txt" in t

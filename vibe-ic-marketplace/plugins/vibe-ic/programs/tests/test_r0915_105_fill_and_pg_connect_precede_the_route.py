@@ -74,7 +74,14 @@ def test_the_new_stage_is_in_the_flows_own_stage_order():
 
 def test_the_pre_route_connect_has_no_reroute_because_there_is_no_route_yet():
     pre = R._build_pg_reconnect_tcl(reroute=False)
-    assert "detailed_route" not in pre
+    # INVOCATION, not substring: R-0915-123 reads the router's DRV COUNTER
+    # (`detailed_route_num_drvs`) to measure this block's delta, and that name
+    # contains the command's name without ever calling it. The property here
+    # is that the pre-route connect runs no ROUTE.
+    assert not any(ln.strip().split()[:1] == ["detailed_route"]
+                   for ln in pre.replace("[", " \n").replace("]", " \n")
+                                .replace("{", " \n").replace("}", " \n")
+                                .replace(";", "\n").splitlines() if ln.strip())
     assert "global_connect" in pre and "PG_NET_OWNERSHIP_AUDIT" in pre
 
 
