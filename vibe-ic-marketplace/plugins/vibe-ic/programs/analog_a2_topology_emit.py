@@ -1475,7 +1475,7 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
         # opposite, and the feedback delay is still derived, not typed.
         "clock_phase_aliases": {"nph1": "clk", "nph2": "nclkb",
                                 "nph1b": "nclkb", "nph2b": "clk",
-                                "nckdac": "clk", "nckdacb": "nclkb",
+                                "nckdac": "nph1", "nckdacb": "nph1b",
                                 # the quantiser's strobe chain: `nqd1` is the
                                 # clock inverted twice off `nclkb`, `nqstb`
                                 # once more — declared beside the devices that
@@ -2151,18 +2151,30 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
             # The loop has made NO DECISION YET for the first step of a
             # conversion, so the honest feedback there is ZERO — and a 1-bit
             # DAC cannot produce zero any other way than by not sampling.
-            # `nckdac` is `clk AND nrstb`: outside the reset it IS the clock
-            # and the branch behaves exactly as it always did.
+            # `nckdac` is `nph1 AND nrstb`: outside the reset it IS the
+            # sampling phase, and the branch behaves exactly as it always did.
+            #
+            # IT IS GATED FROM THE DECLARED PHASE, NOT FROM RAW `clk`, AND THAT
+            # IS LOAD-BEARING. MEASURED (lane icadc2, 8hd-3, 60 clocks): gating
+            # it from `clk` while this capacitor's SUMMING-NODE switches
+            # (`mn_cftv{i}`/`mn_cftc{i}`) ran on the declared phases put the two
+            # plates of ONE capacitor in two clock domains 1.5 ns apart. The
+            # charge this branch delivered across the rising edge went from
+            # +0.02541 with sd 0.49949 -- varying with the decision, because it
+            # IS the feedback -- to +0.54421 with sd 0.00644: a CONSTANT step
+            # dumped into the summing node, the same whatever the bit said. The
+            # first integrator then ran away to the rail and the bitstream stuck
+            # at 96% ones. The sd is the tell, not the mean.
             {"name": "mp_ndac1", "role": "pmos", "function":
              "feedback-branch clock gate, NAND pull-up (clock leg)",
-             "nets": ["nndac", "clk", "vdd", "vdd"], "w": 4.0, "l": 0.15},
+             "nets": ["nndac", "nph1", "vdd", "vdd"], "w": 4.0, "l": 0.15},
             {"name": "mp_ndac2", "role": "pmos", "function":
              "feedback-branch clock gate, NAND pull-up (reset-complement "
              "leg) — either input low holds the gate off",
              "nets": ["nndac", "nrstb", "vdd", "vdd"], "w": 4.0, "l": 0.15},
             {"name": "mn_ndac1", "role": "nmos", "function":
              "feedback-branch clock gate, NAND pull-down (clock leg)",
-             "nets": ["nndac", "clk", "nndacs", "vss"], "w": 4.0, "l": 0.15},
+             "nets": ["nndac", "nph1", "nndacs", "vss"], "w": 4.0, "l": 0.15},
             {"name": "mn_ndac2", "role": "nmos", "function":
              "feedback-branch clock gate, NAND pull-down (reset-complement "
              "leg), stacked — the series pair is the AND",
