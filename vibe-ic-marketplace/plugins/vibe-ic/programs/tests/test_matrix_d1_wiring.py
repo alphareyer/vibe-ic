@@ -480,6 +480,23 @@ def umbrella_gate_names() -> frozenset:
 
 
 @lru_cache(maxsize=1)
+@lru_cache(maxsize=1)
+def dispatch_function_reads() -> frozenset:
+    """Module-level names `_run_structural_rtl_gates` itself READS.
+
+    Derived from that function's own AST, so no container is named here. It is
+    what separates a DISPATCH registry from the other gate-named containers in
+    the same module: the dispatch function reads the ones it iterates to decide
+    what to subprocess, and does not read a table that merely describes gates.
+    """
+    mod = compliance_module()
+    tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+              and n.name == "_run_structural_rtl_gates")
+    return frozenset(n.id for n in ast.walk(fn) if isinstance(n, ast.Name))
+
+
 def umbrella_registry_gate_names() -> frozenset:
     """Registered gates `_run_structural_rtl_gates` itself is responsible for.
 
@@ -488,10 +505,31 @@ def umbrella_registry_gate_names() -> frozenset:
     (`_run_yosys_gates`), so holding the structural runner responsible for
     dispatching them would be an adjacent measurement. They get their own
     driven probe — see `test_probe_direct_dispatch_programs_really_dispatch`.
+
+    ALSO EXCLUDES A CONTAINER THE DISPATCH FUNCTION NEVER READS, and that is a
+    correction rather than a narrowing. `umbrella_registries()` finds a registry
+    by SHAPE — a container of >= MIN_REGISTRY_MEMBERS gate-resolving strings —
+    which is the right rule for picking up a sibling registry without editing
+    this file, and the wrong rule for a table that happens to be KEYED by gate
+    name. MEASURED at dda6e4602: `_GATE_SUBJECT_PRODUCED_BY` is the
+    asked-before-producer roster (R-0915-46/47), mapping a gate to the producer
+    of its SUBJECT, and it reached exactly MIN_REGISTRY_MEMBERS = 3 entries when
+    lane icslot5 added `spice_correlation_check` to it. At 2 entries it was
+    invisible to the rule; at 3 it was admitted, and its third member
+    `gate_evidence_completeness_check` -- which the umbrella cannot dispatch,
+    because its subject is the completion audit the umbrella's own verdict feeds
+    -- became a "registered" gate that never runs. The red was a threshold, not
+    a behaviour change.
+
+    The correction drops exactly ONE name and adds none (247 -> 246, which is
+    `len(_STRUCTURAL_RTL_GATES)`), and `test_the_owned_set_still_covers_every_
+    dispatched_gate` is the control that keeps it honest: anything the real
+    umbrella subprocesses must still be inside this set.
     """
+    reads = dispatch_function_reads()
     acc: Set[str] = set()
     for name, members in umbrella_registries().items():
-        if name == DIRECT_DISPATCH_KEY:
+        if name == DIRECT_DISPATCH_KEY or name not in reads:
             continue
         acc.update(members)
     return frozenset(acc)
@@ -2255,3 +2293,49 @@ def matrix_cell_state(step_id) -> str:
     if waivers.waiver_for(step_id, DIM) is not None:
         return "WAIVED"
     return "ENFORCED"
+
+
+def test_the_owned_set_still_covers_every_dispatched_gate():
+    """THE CONTROL on `umbrella_registry_gate_names`'s registry filter.
+
+    That filter answers "is this container a DISPATCH registry" by asking whether
+    `_run_structural_rtl_gates` reads it. A filter is a place a population can be
+    narrowed, so this pins the direction it must never narrow in: whatever the
+    REAL umbrella actually subprocesses has to be inside the owned set. If the
+    filter ever excluded a container the umbrella genuinely iterates, the gates
+    in it would stop being anybody's responsibility and this fails naming them.
+    """
+    run = umbrella_dispatch()
+    assert run.harness_error is None, run.harness_error
+    assert run.dispatched, "the umbrella subprocessed nothing; nothing to check"
+    owned = umbrella_registry_gate_names()
+    direct = set(umbrella_registries().get(DIRECT_DISPATCH_KEY, ()))
+    unowned = sorted(set(run.dispatched) - set(owned) - direct)
+    assert not unowned, (
+        f"{len(unowned)} gate(s) the umbrella really subprocessed are outside "
+        f"the set this file holds it responsible for, so the registry filter "
+        f"has narrowed the population: {unowned}")
+
+
+def test_the_excluded_container_is_excluded_for_its_stated_reason():
+    """And the other direction: the exclusion is not a hard-coded name.
+
+    `_GATE_SUBJECT_PRODUCED_BY` must be excluded BECAUSE the dispatch function
+    does not read it, not because this file names it. So: the container is still
+    DISCOVERED (the shape rule sees it), it is not read by the dispatch
+    function, and its gate-only member is therefore not owned.
+    """
+    regs = umbrella_registries()
+    roster = "_GATE_SUBJECT_PRODUCED_BY"
+    if roster not in regs:
+        pytest.skip(f"{roster} is no longer shaped like a registry; the "
+                    f"exclusion below has nothing to measure")
+    assert roster not in dispatch_function_reads(), (
+        f"{roster} is now read by _run_structural_rtl_gates, so it IS a "
+        f"dispatch registry and its members must be dispatched or skipped")
+    owned = umbrella_registry_gate_names()
+    only_in_roster = [g for g in regs[roster]
+                      if g not in umbrella_registries()["_STRUCTURAL_RTL_GATES"]]
+    assert only_in_roster, "the roster no longer carries a non-dispatched gate"
+    for gate in only_in_roster:
+        assert gate not in owned, gate
