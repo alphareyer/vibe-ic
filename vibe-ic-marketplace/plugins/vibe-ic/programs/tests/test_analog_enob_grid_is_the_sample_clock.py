@@ -165,10 +165,38 @@ def test_the_nyquist_path_is_untouched():
     assert meta["fft_points"] == 8192, meta      # the old rule, unchanged
     # THE VALUE, pinned, because a method name is a mechanism and the claim
     # here is a PROPERTY: `_resample_pow2` is byte-identical to the one on
-    # main, so this number must be byte-identical too. It was measured on BOTH
-    # arms and agreed, which is what makes this a negative control rather than
-    # a second copy of the defect arm.
-    assert sndr == -10.202180602037778, sndr
+    # main, so this number must not move. It is compared WITHIN A MEASURED
+    # SPREAD rather than for exact equality, and that is not a relaxation of
+    # the claim -- it is the only way to state it truthfully, because the last
+    # bit of this number is an ENVIRONMENT fact and the suite runs in two
+    # environments.
+    #
+    # MEASURED, same tree, same input, same `sndr_db_from_transient`:
+    #
+    #   inside the pinned EDA image (Python 3.12.3)   -10.20218060203778
+    #     -- identical on FOUR images: 0.3.67, 0.3.63, 0.3.47, 0.3.41
+    #   on the bare host 8HD-6      (Python 3.10.12)  -10.202180602037778
+    #
+    # The two differ by 1.7763568394002505e-15 -- EXACTLY ONE ULP at this
+    # magnitude (2**-49). It is a libm/interpreter build difference, not a
+    # change in this repo: an AST diff of `analog_adc_enob_corner_check` across
+    # the only producer commit since this test landed (d61937aaf) changes
+    # `_measure_corner_from_transient` and ADDS `sample_clock_card` /
+    # `sndr_db_incremental`, while `_resample_pow2` and
+    # `sndr_db_from_transient` -- the two this test calls -- are UNCHANGED.
+    #
+    # The original `==` therefore could not be right in both places: it was
+    # green on hosts and RED IN THE IMAGE since the day it landed (measured at
+    # its own landing commit 2a918dd3a: 1 failed, 7 passed).
+    #
+    # `abs_tol=1e-14` is ~5.6 ULP -- wide enough for the measured 1-ULP spread
+    # and nothing else. `rel_tol=0.0` so the bound is exactly this and does not
+    # scale. FOR SCALE, this is not a weakened check: the strict-hold mutation
+    # in `tools/ci/mutation_arm/` moves this number to -12.77681304371659, a
+    # gap of 2.57 dB -- 2.6e14 times the tolerance. Any real movement of the
+    # Nyquist path fails this line; only its last bit may vary.
+    assert math.isclose(sndr, -10.20218060203778,
+                        rel_tol=0.0, abs_tol=1e-14), sndr
 
 
 def test_an_oversampled_deck_with_no_clock_still_refuses_by_name():
