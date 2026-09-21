@@ -40994,6 +40994,24 @@ def _effective_deliverable(project: Path,
             got = _td.answer(doc, "deliverable")
             if _td.is_answered(got):
                 return str(got).strip().upper()
+            # SILENCE IS NOT A REFUSED VALUE (vibe-ic#2118, and the half of
+            # #2376 that reached one case too far). #2376 replaced this
+            # function's trailing `return derived` with `return None` so that
+            # an unreadable or UNATTESTED declaration could not regain its
+            # refused value through an old router marker. A template nobody has
+            # answered yet is neither of those: there is no value to regain, and
+            # the publisher's own ordering says the derivation is the fall-back
+            # when the declaration has not spoken.
+            #
+            # `attestation_of` is this repo's ONE reader of "who answered and
+            # does that count", and it is what separates the two cases that
+            # `is_answered` alone cannot: SILENCE (`ANSWERED_BY_MISSING`) from
+            # an answer that is present and does not DECLARE. `raw_answer`
+            # would also show the difference and says of itself that it is for
+            # disclosure only and never for a decision, so it is not used here.
+            if (_td.attestation_of(doc, "deliverable").get("answered_by")
+                    == _td.ANSWERED_BY_MISSING):
+                return derived
     except Exception:                                          # noqa: BLE001
         pass
     return None
