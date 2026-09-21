@@ -5,7 +5,7 @@ Issue-#5 lesson-learned enforcement: before a debug agent attempts a
 fix on a Phase 1 regression issue, this program verifies the issue
 body carries every mandatory field — verbatim input snippet, expected
 output, actual output, plugin version observed — AND auto-emits the
-drop-in fixture under `tests/phase1_fixtures/<project>/`.
+drop-in fixture under `programs/tests/fixtures/phase1_local/<project>/`.
 
 Mandatory fields (parsed from the GitHub issue body produced by
 `.github/ISSUE_TEMPLATE/picker-or-extractor-regression.yml`):
@@ -24,8 +24,8 @@ missing — the debug agent must NOT start the fix until the verifier
 agent posts a follow-up comment that fills the gaps.
 
 Issues that pass the check get a fixture file written to
-`tests/phase1_fixtures/<project>/<filename>` AND a one-line append
-to `tests/phase1_fixtures/_pending.json` carrying
+`programs/tests/fixtures/phase1_local/<project>/<filename>` AND a one-line append
+to `programs/tests/fixtures/phase1_local/_pending.json` carrying
 `{project, layer, field, expected, actual, version, issue_number}`.
 The debug agent's first action is then `pytest -k <project>` to
 confirm the fixture FAILS on current code.
@@ -200,9 +200,20 @@ def _emit_fixture(repo_root: Path, parsed: Dict[str, str],
     project = parsed["project"]
     fname = parsed["input_filename"]
     snippet = parsed["input_snippet"]
+    # THE WRITER AND THE READER MUST NAME ONE DIRECTORY (vibe-ic#1391).
+    # This wrote to `plugins/vibe-ic/tests/phase1_fixtures/`, which is OUTSIDE
+    # `pytest.ini`'s `testpaths = programs/tests`, so every fixture filed
+    # through the documented intake path landed where no pytest run collects
+    # anything and where `test_phase1_fixtures_regression.py` -- whose
+    # `_FIXTURE_DIR` is `Path(__file__).parent / "phase1_fixtures"` -- never
+    # looks. MEASURED at 3e0ec4d27: 14 files in the writer's directory, 12 in
+    # the reader's, and the two sets DISJOINT. It also re-created the phantom
+    # tree whose absence `test_issue1391_thrash_guard_watches_a_path_that_
+    # exists.py` pins, because that path being untracked is what proves the
+    # anti-thrash guard watches a real one.
     fixtures_dir = (repo_root
-                    / "vibe-ic-marketplace/plugins/vibe-ic/tests"
-                    / "phase1_fixtures" / project)
+                    / "vibe-ic-marketplace/plugins/vibe-ic/programs/tests"
+                    / "fixtures" / "phase1_local" / project)
     fixtures_dir.mkdir(parents=True, exist_ok=True)
     fixture_path = fixtures_dir / fname
     fixture_path.write_text(
@@ -211,8 +222,8 @@ def _emit_fixture(repo_root: Path, parsed: Dict[str, str],
     )
     # Append a pending-record sidecar entry.
     pending_path = (repo_root
-                    / "vibe-ic-marketplace/plugins/vibe-ic/tests"
-                    / "phase1_fixtures" / "_pending.json")
+                    / "vibe-ic-marketplace/plugins/vibe-ic/programs/tests"
+                    / "fixtures" / "phase1_local" / "_pending.json")
     pending: List[dict] = []
     if pending_path.is_file():
         try:
