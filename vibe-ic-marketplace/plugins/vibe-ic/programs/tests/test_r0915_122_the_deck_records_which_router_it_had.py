@@ -117,10 +117,24 @@ proc ::WIRE_nA {method args} { switch -- $method { length { return $::wlen(nA) }
 
 # the two command bodies the probe distinguishes -- the ONLY difference is
 # whether `-nets` appears, which is exactly what the deck asks about.
-_SCOPED_PROC = ('proc detailed_route {args} '
-                '{ # supports -nets <list>\n  return "" }')
-_UNSCOPED_PROC = ('proc detailed_route {args} '
-                  '{ # supports -verbose <level>\n  return "" }')
+# The registered spec (`sta::cmd_args`) and the GENERATED proc body are two
+# different surfaces, and run16L proved they can disagree: icord1's fork takes
+# `-nets` and its generated body does not say so. The fakes cover all four
+# combinations, because the deck must read YES from either one alone.
+_BODY_NETS = ('proc detailed_route {args} '
+              '{ # supports -nets <list>\n  return "" }')
+_BODY_PLAIN = ('proc detailed_route {args} '
+               '{ # supports -verbose <level>\n  return "" }')
+_SPEC_NETS = ('namespace eval sta { variable cmd_args }\n'
+              'array set ::sta::cmd_args '
+              '{detailed_route "[-verbose level] [-nets nets]"}')
+_SPEC_PLAIN = ('namespace eval sta { variable cmd_args }\n'
+               'array set ::sta::cmd_args '
+               '{detailed_route "[-verbose level]"}')
+# the default fakes: a scoped build registers the option, an unscoped one
+# registers neither surface.
+_SCOPED_PROC = _BODY_PLAIN + "\n" + _SPEC_NETS
+_UNSCOPED_PROC = _BODY_PLAIN + "\n" + _SPEC_PLAIN
 
 _HEALTHY = 'return ""'                                   # no raise at all
 _DAMAGING = ('lappend ::insts d1 ; set ::wire(nA) 0 ; '
@@ -255,3 +269,112 @@ def test_the_emitted_deck_is_balanced_tcl():
                      if not l.lstrip().startswith("#"))
     assert sum(l.count("{") - l.count("}") for l in cmds.splitlines()) == 0
     assert sum(l.count("[") - l.count("]") for l in cmds.splitlines()) == 0
+
+
+
+# ── the two surfaces, and the run16L defect ────────────────────────────────
+
+@needs_tclsh
+def test_the_registered_spec_alone_is_enough():
+    """run16L, verbatim: `ANTENNA_ROUTER: version=26Q3-2625-gcb5771c8de
+    scoped_reroute=0` on a binary that DOES take `-nets`. `info body` returns
+    the GENERATED proc, and an option added on the C++ side plus the
+    registered spec need not appear there. `sta::cmd_args` is the store `help`
+    prints from, so that is where a newly-registered option lands."""
+    r = _drive(SCOPED_VERSION, _BODY_PLAIN + "\n" + _SPEC_NETS, _HEALTHY)
+    assert "scoped_reroute=1" in r.stdout
+
+
+@needs_tclsh
+def test_the_generated_body_alone_is_enough():
+    """0.3.67's own shape: the body carries the options and there may be no
+    registered spec to read."""
+    r = _drive(SCOPED_VERSION, _BODY_NETS, _HEALTHY)
+    assert "scoped_reroute=1" in r.stdout
+
+
+@needs_tclsh
+def test_neither_surface_naming_nets_stays_unscoped():
+    r = _drive(UNSCOPED_VERSION, _BODY_PLAIN + "\n" + _SPEC_PLAIN, _HEALTHY)
+    assert "scoped_reroute=0" in r.stdout
+
+
+@needs_tclsh
+def test_an_unreadable_spec_falls_through_to_the_body():
+    """FAIL SAFE, BUT NOT FAIL BLIND: if the spec store is absent the body is
+    still read, and only when BOTH are unreadable is the answer 0."""
+    r = _drive(SCOPED_VERSION, _BODY_NETS, _HEALTHY)   # no sta::cmd_args at all
+    assert "scoped_reroute=1" in r.stdout
+
+
+def test_the_probe_never_calls_the_command_it_asks_about():
+    """`detailed_route -nets {}` answers exactly -- MEASURED STA-0562 on
+    0.3.67 -- and on a build that ACCEPTS it that call would route the design.
+    A capability probe may not have side effects."""
+    tcl = _tcl()
+    i = tcl.index("scoped_reroute")
+    window = tcl[max(0, i - 2500):i]
+    assert "detailed_route -nets" not in window
+
+
+
+# ── the wrapper, which is what actually happened on run16L ─────────────────
+#
+# ROOT CAUSE (icspm5, openroad.log:1280 vs pnr.tcl:12615): this deck's own
+# route-guide discipline does `rename detailed_route _vibeic_real_detailed_route`
+# and installs a wrapper, so `info body detailed_route` returns THE WRAPPER'S
+# body. The router had scoped correctly -- GRT-0325 "re-routing 1 net(s) ...
+# every other net held fixed", DRT-0633 "Scoped detailed routing: 1 named,
+# 654 of 654 held fixed" -- and only the label was wrong.
+
+_WRAPPED = (
+    # the real command, carrying the option, under its renamed identity
+    'proc _vibeic_real_detailed_route {args} '
+    '{ # supports -nets <list>\n  return "" }\n'
+    # the deck's own wrapper, which says nothing about -nets
+    'proc detailed_route {args} '
+    '{ # guides\n  return [uplevel 1 _vibeic_real_detailed_route $args] }')
+
+
+@needs_tclsh
+def test_a_wrapped_detailed_route_is_still_read_as_scoped():
+    """THE run16L CASE. The wrapper shadows the command the probe asks about,
+    so the probe must follow the rename -- as the DRC-option probe in this
+    same deck already does."""
+    r = _drive(SCOPED_VERSION, _WRAPPED, _HEALTHY)
+    assert "scoped_reroute=1" in r.stdout
+
+
+@needs_tclsh
+def test_a_wrapped_unscoped_router_is_still_read_as_unscoped():
+    """OVER-BREADTH CONTROL: following the rename must not make everything
+    look scoped."""
+    wrapped_plain = (
+        'proc _vibeic_real_detailed_route {args} '
+        '{ # supports -verbose <level>\n  return "" }\n'
+        'proc detailed_route {args} '
+        '{ # guides\n  return [uplevel 1 _vibeic_real_detailed_route $args] }')
+    r = _drive(UNSCOPED_VERSION, wrapped_plain, _HEALTHY)
+    assert "scoped_reroute=0" in r.stdout
+
+
+@needs_tclsh
+def test_the_registered_spec_is_keyed_by_the_original_name():
+    """`sta::cmd_args` is filled at definition time, BEFORE any rename, so the
+    spec stays under `detailed_route` while the body moves. Both names are
+    tried against both surfaces for exactly this reason."""
+    wrapped_spec = (
+        'proc _vibeic_real_detailed_route {args} '
+        '{ # guides\n  return "" }\n'
+        'proc detailed_route {args} '
+        '{ # guides\n  return "" }\n'
+        + _SPEC_NETS)
+    r = _drive(SCOPED_VERSION, wrapped_spec, _HEALTHY)
+    assert "scoped_reroute=1" in r.stdout
+
+
+def test_the_probe_follows_the_rename_the_same_way_the_deck_already_does():
+    """The DRC-option probe in this same file resolves the identical rename.
+    A second spelling of the same resolution is how the two drift apart."""
+    src = Path(R.__file__).read_text()
+    assert src.count("info commands _vibeic_real_detailed_route") >= 2

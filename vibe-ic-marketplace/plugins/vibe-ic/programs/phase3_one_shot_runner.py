@@ -25533,10 +25533,66 @@ def _antenna_repair_tcl(pdk: "PdkConfig",
         # version and scoped=0, which keeps today's refuse-and-roll-back.
         "    set _ant_rv \"UNKNOWN\"\n"
         "    catch { set _ant_rv [ord::openroad_version] }\n"
+        # ASK EVERY SURFACE THAT CARRIES THE ARG SPEC, NOT JUST ONE.
+        # MEASURED on run16L (spm, icsub2x's tip + icord1's fork binary
+        # 26Q3-2625-gcb5771c8de): this deck printed `scoped_reroute=0` on a
+        # binary that DOES take `-nets` -- icspm5's pre-launch probe read
+        # NETS_PRESENT on the same binary in the same container. The label was
+        # false, and a false label is worse than no label.
+        #
+        # WHY: `info body` returns the Tcl proc OpenSTA GENERATES, and a new
+        # option added on the C++ side plus the registered spec need not appear
+        # in that generated body. MEASURED on 0.3.67 in this lane's container,
+        # where the true answer is NO and both surfaces agree:
+        #   info body detailed_route            6419 chars, -verbose yes, -nets no
+        #   $::sta::cmd_args(detailed_route)     692 chars, -verbose yes, -nets no
+        # `sta::cmd_args` is the store `help` prints from -- the REGISTERED
+        # spec -- so it is the surface a newly-registered option lands in. Both
+        # are read and either one naming `-nets` is enough; a probe that can
+        # only be wrong in the direction of under-reporting is not good enough
+        # when the whole point is to label the run truthfully.
+        #
+        # NOT asked by trying it: `detailed_route -nets {}` answers exactly
+        # (MEASURED: STA-0562 on 0.3.67) and on a build that ACCEPTS it that
+        # call would route the design. A capability probe may not have side
+        # effects.
+        # AND FOLLOW THE RENAME. ROOT CAUSE of run16L's false label, found by
+        # icspm5 in the deck's own text (openroad.log:1280 against
+        # pnr.tcl:12615): this deck's route-guide discipline does
+        # `rename detailed_route _vibeic_real_detailed_route` and installs a
+        # WRAPPER of its own, so `info body detailed_route` returns THE
+        # WRAPPER'S body -- which naturally says nothing about `-nets`. The
+        # router had scoped correctly all along: GRT-0325 "re-routing 1 net(s)
+        # ... every other net held fixed" and DRT-0633 "Scoped detailed
+        # routing: 1 named, 654 of 654 held fixed".
+        #
+        # THE REPO ALREADY HAD THIS IDIOM AND I DID NOT USE IT: the DRC-option
+        # probe resolves the same rename a few thousand lines up, with the
+        # comment "The real command keeps its body under its new name, so the
+        # probe follows it there when it exists". Same resolution here.
+        #
+        # The registered spec is keyed by the ORIGINAL name -- it is recorded
+        # at definition time, before any rename -- so both names are tried
+        # against both surfaces and any hit is enough.
         "    set _ant_scoped 0\n"
+        "    set _ant_drcmds [list detailed_route]\n"
         "    catch {\n"
-        "      if {[string first \"-nets\" [info body detailed_route]] >= 0} "
+        "      if {[llength [info commands _vibeic_real_detailed_route]] > 0} "
+        "{ set _ant_drcmds [linsert $_ant_drcmds 0 "
+        "_vibeic_real_detailed_route] }\n"
+        "    }\n"
+        "    foreach _ant_drc $_ant_drcmds {\n"
+        "      if {$_ant_scoped} { break }\n"
+        "      catch {\n"
+        "        if {[info exists ::sta::cmd_args($_ant_drc)] && "
+        "[string first \"-nets\" $::sta::cmd_args($_ant_drc)] >= 0} "
         "{ set _ant_scoped 1 }\n"
+        "      }\n"
+        "      if {$_ant_scoped} { break }\n"
+        "      catch {\n"
+        "        if {[string first \"-nets\" [info body $_ant_drc]] >= 0} "
+        "{ set _ant_scoped 1 }\n"
+        "      }\n"
         "    }\n"
         "    puts \"ANTENNA_ROUTER: version=$_ant_rv scoped_reroute=$_ant_scoped"
         " -- a scoped `-reroute` re-lays only the nets the pass dirtied; an "
