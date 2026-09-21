@@ -52331,6 +52331,47 @@ def _v2055_oracle_denial_tier(cell, word):
     return "denied" if _PROSE_DENIAL_CORE_RE.search(word) else "retired"
 
 
+# R-0915-102(1) — AN OPTION ROW CARRIES ITS OWN CONDITION, STRUCTURALLY.
+#
+# MEASURED on subservient x gf180mcuD as a DIE, FRONT DOOR, run r48 (lane
+# icsub2, host 8HD-4, tree 41d3b39b8): three of the ten declared L10 cases --
+# `plugin_m_mul_div`, `plugin_zicsr_csr_access_timer_irq`,
+# `plugin_c_16_bit_compressed` -- are stated CONDITIONALLY by the input's own
+# verification-plan table ("(若 Plugin 選 M) Mul/Div 指令"), and the design's
+# own declaration selects none of those options (`isa_extensions` is
+# ["I", "Zifencei"]). They nevertheless sat in the Step-4 gate's executable
+# denominator as NOT_EXECUTED, so the run was asked to execute three cases the
+# design had declared it does not have.
+#
+# The condition is attached HERE, where the prose already becomes a row, and
+# it is attached as DATA. No consumer re-reads the sentence: a gate that
+# scanned prose for "若 ... 選" would be deciding applicability by its own
+# scan, which R-0915-15 forbids. What the gate gets is a named option and the
+# clause it came from, and it decides that against the design's own
+# declaration.
+#
+# chip-AGNOSTIC: a parenthesised conditional clause containing a selection
+# verb and a short option token. No chip, vendor, ISA or SKU literal -- the
+# option token is whatever the input wrote.
+_L10_APPLIES_WHEN_RE = re.compile(
+    r'[（(]\s*(?:若|如果|如|if|when)[^)）]{0,40}?'
+    r'(?:選|选|select(?:s|ed)?|choose[sn]?|option|enable[ds]?)\s*'
+    r'([A-Za-z][A-Za-z0-9_]{0,15})\s*[)）]')
+
+
+def _applies_when(text: str) -> "Optional[Dict[str, str]]":
+    """The option this row is conditional on, or None.
+
+    Fail-closed in both directions: a row with no parenthesised condition gets
+    nothing, and a condition whose option token cannot be read gets nothing --
+    an unattached condition leaves the row exactly as applicable as it was.
+    """
+    m = _L10_APPLIES_WHEN_RE.search(text or "")
+    if not m:
+        return None
+    return {"option": m.group(1), "stated": m.group(0)}
+
+
 def _harvest_test_cases_from_input_tables(
         extracted: Dict[str, str]) -> List[Dict[str, Any]]:
     """Harvest typed test cases from verification-plan tables in the input
@@ -52540,6 +52581,12 @@ def _harvest_test_cases_from_input_tables(
                             "evidence": (f"input/docs/{fname} "
                                          "(verification-plan table)"),
                         }
+                        # R-0915-102(1) — carry the row's OWN condition.
+                        _aw = _applies_when(
+                            f"{cells[_stim_i]} {_expected}")
+                        if _aw is not None:
+                            _aw["source"] = _case["evidence"]
+                            _case["applies_when"] = _aw
                         # A percent-PASS criterion over a coverage scope is
                         # a plan requirement, not one executable input/output
                         # vector. Require BOTH header roles, so a concrete

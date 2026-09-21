@@ -234,6 +234,104 @@ def _split_executable(rows: list) -> "tuple[list, list]":
     return executable, process_only
 
 
+# ── R-0915-102(1): a case the design DECLARED it does not have ─────────────
+#
+# MEASURED on subservient x gf180mcuD as a DIE, FRONT DOOR, run r48 (lane
+# icsub2, host 8HD-4, tree 41d3b39b8): three of the ten declared L10 cases
+# are stated CONDITIONALLY by the input's own verification-plan table --
+# "(若 Plugin 選 M) Mul/Div 指令" and its Zicsr and C siblings -- and the
+# design's own `plugin_output/declaration.json` records
+# `isa_extensions: ["I", "Zifencei"]`. None of the three options is selected,
+# so the gate was demanding execution of three cases the design had declared
+# it does not have, and the blocking sentence read "only 1 of 10".
+#
+# THE BASIS IS DECLARED, NEVER SCANNED (R-0915-15 stands). This gate does not
+# read the input's prose and does not decide what a sentence means. Phase 1's
+# L10 emitter attaches `applies_when` at the point the prose already becomes a
+# row; here two DECLARED documents are compared -- the case's own condition
+# against the design's own selection -- and nothing else.
+#
+# FAIL-CLOSED IN BOTH DIRECTIONS, which is the whole point of a narrowing:
+#   * no declaration, unreadable declaration, or no selection field  -> decide
+#     NOTHING; every case stays in the denominator exactly as before;
+#   * a case with no `applies_when`                                  -> stays;
+#   * an option the design DID select                                -> stays,
+#     and is still demanded.
+# So the only rows this can remove are ones two declarations agree are absent.
+#: Where the design records which optional features it selected.
+_DECLARATION_REL = "plugin_output/declaration.json"
+#: The selection fields a design may use. A declaration that carries none of
+#: them decides nothing -- it is not an empty selection, it is no statement.
+_SELECTION_FIELDS = ("isa_extensions", "extensions", "selected_options",
+                     "options")
+
+
+def design_selected_options(project: Path) -> "Optional[frozenset]":
+    """The options the DESIGN declares it has, lower-cased, or None.
+
+    None means "the design made no such statement" and is NOT an empty set:
+    an empty set would narrow every conditional row away on a project that
+    simply does not use this field.
+    """
+    try:
+        obj = json.loads((Path(project) / _DECLARATION_REL).read_text(
+            errors="replace"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    fields = obj.get("fields") if isinstance(obj.get("fields"), dict) else obj
+    for key in _SELECTION_FIELDS:
+        value = fields.get(key)
+        if isinstance(value, list):
+            return frozenset(str(v).strip().lower() for v in value if str(v).strip())
+    return None
+
+
+def split_design_declared_na(rows: list,
+                             selected: "Optional[frozenset]") -> "tuple[list, list]":
+    """(applicable, design_declared_na) over declared rows."""
+    if selected is None:
+        return list(rows), []
+    applicable, na = [], []
+    for row in rows:
+        aw = row.get("applies_when") if isinstance(row, dict) else None
+        opt = (aw or {}).get("option") if isinstance(aw, dict) else None
+        if opt and str(opt).strip().lower() not in selected:
+            na.append(row)
+        else:
+            applicable.append(row)
+    return applicable, na
+
+
+def _design_declared_na_disclosure(project: Path) -> dict:
+    """What was narrowed away, by name, and on what declared basis."""
+    selected = design_selected_options(project)
+    rows, _p = _split_executable(_declared_rows(
+        _pl.generated_docs_dir(project) / "L10_TEST_CASES.json",
+        ("test_cases", "cases", "vectors")))
+    _app, na = split_design_declared_na(rows, selected)
+    if selected is None:
+        return {"decided": False,
+                "why": (f"the design states no selection in "
+                        f"{_DECLARATION_REL} (fields tried: "
+                        f"{', '.join(_SELECTION_FIELDS)}) — nothing narrowed")}
+    return {
+        "decided": True,
+        "design_selected": sorted(selected),
+        "declaration": _DECLARATION_REL,
+        "cases": [{"case": r.get("name"),
+                   "option": (r.get("applies_when") or {}).get("option"),
+                   "stated": (r.get("applies_when") or {}).get("stated"),
+                   "source": (r.get("applies_when") or {}).get("source")}
+                  for r in na],
+        "note": ("the case declares an option and the design declares it does "
+                 "not have it; two declared documents agree the case does not "
+                 "apply, so it is not demanded. It is not a waiver and not a "
+                 "pass: nothing about it is claimed verified."),
+    }
+
+
 def _declared_rows(path: Path, keys: "tuple[str, ...]") -> list:
     """The declared list itself, without inventing one on bad input."""
     try:
@@ -294,6 +392,11 @@ def _declared_l10_case_ids(project: Path) -> "list[str]":
     out = []
     rows, _process_only = _split_executable(_declared_rows(
         gd / "L10_TEST_CASES.json", ("test_cases", "cases", "vectors")))
+    # R-0915-102(1) — a case whose declared option the design did not
+    # select is not in the executed-versus-declared comparison. It is
+    # still DECLARED and still reported, under its own key.
+    rows, _design_na = split_design_declared_na(
+        rows, design_selected_options(project))
     for row in rows:
         if isinstance(row, dict):
             name = row.get("name") or row.get("id") or row.get("case")
@@ -480,6 +583,13 @@ def _evidence_summary(project: Path) -> dict:
                 "testbench can drive"),
             "l12_behavioral_sequences": l12,
             "total_declared_rows": l10 + l12,
+            # R-0915-102(1) — still DECLARED, still reported, not
+            # demanded: the case states an option and the design's own
+            # declaration does not select it. Named one by one, with the
+            # clause each came from, so a reader can check the pairing
+            # rather than take the narrowing on trust.
+            "l10_design_declared_na": _design_declared_na_disclosure(
+                project),
             # ORGANIC #2055 — the same two facts the blocking sentence now
             # carries, in machine-readable form. Absent (not zero) when the
             # rows or the producer scope could not be read.
