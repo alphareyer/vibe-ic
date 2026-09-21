@@ -24492,6 +24492,253 @@ def _routing_integrity_check_tcl(marker_prefix: str = "SHIP",
     )
 
 
+def _wire_content_census_tcl(var: str) -> str:
+    """Record every non-special net's wire CONTENT into `<var>` (a Tcl array).
+
+    R-0915-121's boundary probe asks whether a net HAS a wire. That question
+    is blind to the failure that actually happened. MEASURED on spm run17's
+    own two surviving checkpoints:
+
+        sdr_transaction/pre_repair.odb             655 nets, 0 with no wire,
+                                                   32634 wire units
+        sdr_transaction_reconverge/pre_repair.odb  655 nets, 0 with no wire,
+                                                   17857 wire units
+        nets whose wire CONTENT moved: 655 -- 654 shrank, 1 grew
+        the one that grew is p__core, 30 -> 50: the scoped route's own target
+
+    Every net kept a wire, so `0 unrouted at every boundary` was TRUE and
+    useless while 45.3 % of the wire disappeared and 654 of 655 nets lost
+    part of theirs. The content is `[$wire length]`, the tool's own dbWire
+    encoding length -- the same measure R-0915-121's antenna census already
+    uses, which is why THAT census caught its damage and this one did not.
+
+    UNMEASURED IS NOT ZERO: a wire whose length cannot be read records -1 and
+    is never called changed on that basis.
+    """
+    return (
+        f"array unset {var}\n"
+        f"catch {{\n"
+        f"  foreach _wc_n [[ord::get_db_block] getNets] {{\n"
+        f"    if {{[$_wc_n isSpecial]}} {{ continue }}\n"
+        f"    set _wc_w [$_wc_n getWire]\n"
+        f"    if {{$_wc_w eq \"NULL\"}} {{ set {var}([$_wc_n getName]) 0 ; continue }}\n"
+        f"    set _wc_l -1\n"
+        f"    catch {{ set _wc_l [$_wc_w length] }}\n"
+        f"    set {var}([$_wc_n getName]) $_wc_l\n"
+        f"  }}\n"
+        f"}}\n")
+
+
+def _wire_content_compare_tcl(before: str, marker: str,
+                              scope_var: str = "") -> str:
+    """Compare the live DB against a `<before>` census and report the drift.
+
+    `<scope_var>`, when given, names the Tcl list of nets the pass DECLARED it
+    would touch. A net outside that list whose content moved is the failure
+    the scoped-route acceptance is written against -- icord1 measured 654 of
+    654 held byte-identical -- and it sets `<marker>_OK 0`.
+
+    WHEN NO SCOPE IS DECLARED the drift is still measured and still reported,
+    and nothing is called out-of-scope, because with no declared scope there
+    is no such thing. That is a disclosure, not a pass: the numbers are in the
+    log with the worst offenders named, which is exactly what run17 lacked.
+    """
+    return (
+        f"set {marker}_OK 1\n"
+        f"set _wcc_chg 0 ; set _wcc_shr 0 ; set _wcc_grew 0 ; set _wcc_out 0\n"
+        f"set _wcc_b 0 ; set _wcc_a 0 ; set _wcc_names {{}}\n"
+        f"catch {{\n"
+        f"  foreach _wcc_k [array names {before}] {{ incr _wcc_b ${before}($_wcc_k) }}\n"
+        f"  foreach _wcc_n [[ord::get_db_block] getNets] {{\n"
+        f"    if {{[$_wcc_n isSpecial]}} {{ continue }}\n"
+        f"    set _wcc_nm [$_wcc_n getName]\n"
+        f"    set _wcc_w [$_wcc_n getWire]\n"
+        f"    set _wcc_l 0\n"
+        f"    if {{$_wcc_w ne \"NULL\"}} {{ set _wcc_l -1 ; catch {{ set _wcc_l [$_wcc_w length] }} }}\n"
+        f"    if {{$_wcc_l > 0}} {{ incr _wcc_a $_wcc_l }}\n"
+        f"    if {{![info exists {before}($_wcc_nm)]}} {{ continue }}\n"
+        f"    set _wcc_p ${before}($_wcc_nm)\n"
+        f"    if {{$_wcc_p < 0 || $_wcc_l < 0}} {{ continue }}\n"
+        f"    if {{$_wcc_l == $_wcc_p}} {{ continue }}\n"
+        f"    incr _wcc_chg\n"
+        f"    if {{$_wcc_l < $_wcc_p}} {{ incr _wcc_shr }} else {{ incr _wcc_grew }}\n"
+        # `$_wcc_nm(` is an ARRAY REFERENCE to Tcl, not a name followed by a
+        # bracket. Written that way it raises inside the surrounding `catch`
+        # and silently abandons the rest of the census after the FIRST changed
+        # net -- which is how this comparator first reported nets_changed=1 on
+        # a fixture with three. Braced, it is a name.
+        f"    if {{[llength $_wcc_names] < 8}} "
+        f"{{ lappend _wcc_names \"${{_wcc_nm}} $_wcc_p->$_wcc_l\" }}\n"
+        + (f"    if {{[lsearch -exact ${scope_var} $_wcc_nm] < 0}} "
+           f"{{ incr _wcc_out ; set {marker}_OK 0 }}\n" if scope_var else "")
+        + f"  }}\n"
+        f"}}\n"
+        f"puts \"{marker}: nets_changed=$_wcc_chg shrank=$_wcc_shr "
+        f"grew=$_wcc_grew wire_before=$_wcc_b wire_after=$_wcc_a"
+        + (f" outside_declared_scope=$_wcc_out" if scope_var
+           else " (no scope declared: nothing can be out of scope, and this "
+                "is a disclosure, not a pass)")
+        + f" -- [join $_wcc_names {{, }}]\"\n")
+
+
+def _boundary_def_tcl(tag: str, out_dir_c: Optional[str] = None) -> str:
+    """Write this boundary's DEF, so "the route was intact here" is falsifiable.
+
+    MEASURED on spm run17 (main 41a1613e6 + released 0.3.70): the run reported
+    `0 unrouted at every boundary`, antenna repair APPLIED, scoped_reroute=1 --
+    and its routed.def carries 33,557 wire lines against run15's 92,576. Two
+    thirds of the wire is gone and every boundary probe read clean, because a
+    net stripped to a stub still HAS a wire.
+
+    Measured again on run17's own two surviving checkpoints, which is what
+    makes the case airtight:
+
+        sdr_transaction/pre_repair.odb             655 nets, 0 with no wire,
+                                                   32634 wire units
+        sdr_transaction_reconverge/pre_repair.odb  655 nets, 0 with no wire,
+                                                   17857 wire units
+        nets whose wire CONTENT moved: 655 (654 shrank, 1 grew)
+        the one that grew is p__core, 30 -> 50 -- the scoped route's own target
+
+    -45.3 % of the wire, and the instrument said zero.
+
+    AND THE EVIDENCE DOES NOT SURVIVE THE RUN. `antenna_pass_pre.odb` is
+    deleted on the success path -- I added that delete myself, to avoid
+    leaving a 27 MB database per pass -- so on a FINISHED run the claim "the
+    scoped route held 654 nets byte-identical" cannot be checked at all. A DEF
+    is the artefact the byte-comparison acceptance already uses and is a third
+    the size, so each boundary writes one and keeps it.
+    """
+    safe = "".join(c if (c.isalnum() or c in "_-") else "_" for c in tag)
+    name = f"boundary_{safe}.def"
+    path = f"{out_dir_c.rstrip('/')}/{name}" if out_dir_c else name
+    return (
+        f"if {{[catch {{write_def {path}}} _bd_e]}} {{\n"
+        f"  puts \"BOUNDARY_DEF_UNWRITTEN: {safe} -- $_bd_e\"\n"
+        "} else {\n"
+        f"  puts \"BOUNDARY_DEF: stage={safe} {path}\"\n"
+        "}\n")
+
+
+#: Every post-route step the plugin invokes that MUTATES the database and then
+#: lets its result ship. Named here so the bracket, the refusal and the test
+#: that enumerates them all spell the same set once.
+#:
+#: The membership rule is not "does it write the database" -- `write_def`
+#: decides nothing on its own -- it is: DOES THE STEP RUN BEFORE THE ARTEFACT
+#: THIS DECK SHIPS IS WRITTEN. Measured, by reading the six decks that invoke
+#: `extract_parasitics` after `detailed_route`:
+#:
+#:   deck                             extract at   ships at   mutation ships?
+#:   _post_route_spef_repair            27161      routed.def  YES -> bracketed
+#:                                                             (the SHIPPING
+#:                                                             session itself --
+#:                                                             this is the site
+#:                                                             that took spm
+#:                                                             run17's route)
+#:   _build_postroute_timing_repair     25149        25306     YES -> bracketed
+#:   _v1_8_100_signoff_drv_repair       28764        29040     YES -> bracketed
+#:   _ship_signoff_spef_repair          39090        39229     YES -> bracketed
+#:   _ship_cvg_restore                  39325        39357     YES -> bracketed
+#:   _ship_wire_length_escalation       40439        40529     YES -> bracketed
+#:   _si_mcf_repair_child               51776        51764     NO  -- the DEF,
+#:                                                             the ODB and the
+#:                                                             verilog are all
+#:                                                             written BEFORE
+#:                                                             it extracts
+#:
+#: `_si_mcf_repair_child_tcl` is safe BY ORDERING, not by luck, and that is a
+#: property a later edit can silently take away -- so it is asserted by a test
+#: rather than left as a comment.
+_EXTRACTION_BRACKET_SITES = (
+    "postroute_spef_extract",
+    "postroute_timing_repair",
+    "signoff_drv_repair",
+    "ship_signoff_spef_repair",
+    "ship_cvg_restore",
+    "ship_wire_length_escalation",
+)
+
+#: The deck-global an extraction sets when it moved a net it never named. It is
+#: a LIST of site names: a second mutation must not erase the first one's
+#: account, and the refusal names every step that contributed.
+_ROUTE_MUTATION_VAR = "::_vic_route_mutated_by"
+
+
+def _extraction_bracket_tcl(site: str, extract_tcl: str, *,
+                            out_dir_c: Optional[str] = None) -> str:
+    """Bracket ONE DB-mutating post-route step with a per-net wire-content census.
+
+    `extract_parasitics` reads like a measurement and is not. OpenRCX's
+    `orderWires` re-encodes every net through `tmg_conn`, and on spm run17
+    that is what took the wire (fork PR #23, merged 9e331799 -- the fork's
+    RoutingPreserver restores 655/655 nets). R-0915-125 says the flow may not
+    rely on a fork fix to know whether its own database survived a step, and
+    it may not bracket only the antenna pass: EVERY post-route step whose
+    result ships gets the same treatment.
+
+    THE NEGATIVE CONTROL IS RUN17 ITSELF. It reported `0 unrouted at every
+    boundary`, antenna repair APPLIED, scoped_reroute=1 -- measured on its own
+    two surviving checkpoints, 654 of 655 nets SHRANK and the total wire fell
+    32634 -> 17857 (-45.3 %). A census of wire PRESENCE cannot see that. A
+    census of wire CONTENT can, which is why this one is the same
+    `[$wire length]` R-0915-121's antenna census already uses.
+
+    Extraction NAMES NO NET, so every net it moved is a net it did not name,
+    and the refusal is unconditional on drift. The pre-step DEF is written
+    first: it is both the evidence that the route WAS intact here and the
+    artefact a restore reads, and it is named in the refusal so the restore
+    never has to guess.
+    """
+    safe = "".join(c if (c.isalnum() or c in "_-") else "_" for c in site)
+    var = f"_xb_{safe}"[:40]
+    marker = f"EXTRACT_WIRE_DRIFT_{safe.upper()}"
+    pre = (f"{out_dir_c.rstrip('/')}/boundary_before_extract_{safe}.def"
+           if out_dir_c else f"boundary_before_extract_{safe}.def")
+    return (
+        _boundary_def_tcl(f"before_extract_{safe}", out_dir_c)
+        + _wire_content_census_tcl(var)
+        + extract_tcl
+        + _wire_content_compare_tcl(var, marker)
+        + "if {$_wcc_chg > 0} {\n"
+        f"  if {{![info exists {_ROUTE_MUTATION_VAR}]}} "
+        f"{{ set {_ROUTE_MUTATION_VAR} {{}} }}\n"
+        f"  lappend {_ROUTE_MUTATION_VAR} {safe}\n"
+        f"  puts \"EXTRACT_MUTATED_THE_ROUTE: site={safe} "
+        "nets_changed=$_wcc_chg shorter=$_wcc_shr longer=$_wcc_grew "
+        "wire=$_wcc_b->$_wcc_a named_none -- parasitic extraction is supposed "
+        "to READ this database. The route this deck would ship is no longer "
+        f"the one that was verified; restore_from={pre}\"\n"
+        "}\n")
+
+
+def _route_mutation_guard_tcl(body: str, site: str) -> str:
+    """Refuse to ship `body`'s artefact when an unnamed step moved the route.
+
+    THE RESTORE IS THE ARTEFACT THAT IS ALREADY ON DISK. These decks each
+    write their candidate to its OWN path at the end and the consumer reads
+    that path; not writing it leaves the previously verified route exactly
+    where it was, which is what "restore" means here. Every one of these
+    writes is already `catch`-guarded as NONFATAL by its own author, so "the
+    candidate did not appear" is a state the flow was built to survive -- the
+    refusal does not invent a new one.
+
+    It refuses LOUDLY: silence is how run17 shipped a route that had lost two
+    thirds of its wire while every probe read clean.
+    """
+    safe = "".join(c if (c.isalnum() or c in "_-") else "_" for c in site)
+    return (
+        f"if {{[info exists {_ROUTE_MUTATION_VAR}] && "
+        f"[llength ${_ROUTE_MUTATION_VAR}] > 0}} {{\n"
+        f"  puts \"ROUTE_MUTATION_REFUSES_CANDIDATE: site={safe} "
+        f"mutated_by=[join ${_ROUTE_MUTATION_VAR} {{,}}] -- this deck will not "
+        "write a candidate built on a database an unnamed step changed. The "
+        "route already on disk is kept.\"\n"
+        "} else {\n"
+        + body
+        + "}\n")
+
+
 def _unrouted_probe_tcl(tag: str, out_dir_c: Optional[str] = None) -> str:
     """R-0915-121(b) -- the UNROUTED-NET probe at a post-route stage boundary.
 
@@ -25028,7 +25275,13 @@ def _build_postroute_timing_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: st
                 f"    puts \"POSTROUTE_TIMING_REPAIR_REEXTRACT_WROTE {_c}\"\n"
                 "  }\n"
                 "}\n")
-        _reextract = "".join(_re)
+        # R-0915-125 -- bracketed even though this deck already wrote its
+        # artefact: "the extraction changed nothing" is a MEASUREMENT the run
+        # is entitled to, and the SPEF this block writes describes the DEF
+        # above only while that stays true.
+        _reextract = _extraction_bracket_tcl(
+            "postroute_timing_repair", "".join(_re),
+            out_dir_c=postroute_timing_repair_dir_c)
     return (
         "# === ORGANIC #561: post-route timing repair TCL ===\n"
         "# 4 OpenROAD workarounds for safe stand-alone post-route repair iteration:\n"
@@ -25174,10 +25427,19 @@ def _build_postroute_timing_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: st
         "  puts \"POSTROUTE_TIMING_REPAIR_DETAILED_ROUTE_NONFATAL: $_dr_err\"\n"
         "}\n"
         + _refill
-        + _reextract
+        # R-0915-125 -- THE ARTEFACT IS WRITTEN BEFORE THE EXTRACTION, not
+        # after. `extract_parasitics` is a DB-MUTATING step (OpenRCX's
+        # `orderWires` re-encodes every net through `tmg_conn`), and this deck
+        # used to run it between the route it repaired and the DEF it ships,
+        # so the shipped DEF was whatever the extraction left behind. Writing
+        # first makes this deck immune BY ORDERING -- the same shape
+        # `_si_mcf_repair_child_tcl` already had -- and costs nothing: the
+        # re-extraction's only product is the SPEF corners below, which
+        # describe the route in this very DEF.
         + f"write_def {postroute_timing_repair_dir_c}/timing_repaired.def\n"
         f"write_verilog {postroute_timing_repair_dir_c}/{top}_timing_repaired.v\n"
-        f"if {{[catch {{write_sdf{_sdf_corner_flag} {postroute_timing_repair_dir_c}/{top}_timing_repaired.sdf}} "
+        + _reextract
+        + f"if {{[catch {{write_sdf{_sdf_corner_flag} {postroute_timing_repair_dir_c}/{top}_timing_repaired.sdf}} "
         "_sdf_err]} {\n"
         "  puts \"POSTROUTE_TIMING_REPAIR_WRITE_SDF_NONFATAL: $_sdf_err\"\n"
         "}\n"
@@ -27018,10 +27280,44 @@ def _post_route_spef_repair_tcl(out_dir_c: str, tech_lef_c: str,
            "  puts \"SDR_SKIP_STOCK_OPENROAD: post-route SPEF DRV repair needs "
            "the fork post-detailed-route repair fix; extraction only\"\n")
         + "  catch {define_process_corner -ext_model_index 0 X}\n"
-        "  if {[catch {extract_parasitics -ext_model_file $_prs_rules "
-        "-corner_cnt 1 -max_res 50 -coupling_threshold 0.1} _prs_ext]} {\n"
-        "    puts \"SPEF_REPAIR_NONFATAL: extract_parasitics: $_prs_ext\"\n"
+        # R-0915-125 -- EXTRACTION IS A DB-MUTATING STEP AND IS BRACKETED LIKE
+        # ONE. It reads like a measurement and is not: OpenRCX's `orderWires`
+        # re-encodes every net through `tmg_conn`, and on spm run17 that is
+        # what took the wire (fork PR #23, merged 9e331799; the fork's
+        # RoutingPreserver restores 655/655). The flow cannot rely on a fork
+        # fix to know whether its own database survived a step, so it measures.
+        #
+        # The negative control is run17 itself: `0 unrouted at every boundary`
+        # while 654 of 655 nets SHRANK and the total wire fell 32634 -> 17857
+        # (-45.3 %), measured on its own two surviving checkpoints. A census of
+        # wire PRESENCE cannot see that; a census of wire CONTENT can.
+        # THIS IS THE SITE THAT TOOK spm run17's ROUTE. Measured on run17's own
+        # artefacts (2026-09-22, read-only): between the checkpoint written at
+        # openroad.log:1161 and the next stage's at :1423 the wire record count
+        # fell 6503 -> 1069 across 655 of 693 nets (u_core/net12 336 -> 50,
+        # u_core/net8 110 -> 16, u_core/yr 83 -> 14), and the ONLY DB-mutating
+        # parent-session step in that window is the extraction below
+        # (RCX-0045 at :1187). It is bracketed as a step, and a drift here also
+        # arms the refusal every later candidate write reads.
+        + _extraction_bracket_tcl(
+            "postroute_spef_extract",
+            "  if {[catch {extract_parasitics -ext_model_file $_prs_rules "
+            "-corner_cnt 1 -max_res 50 -coupling_threshold 0.1} _prs_ext]} {\n"
+            "    puts \"SPEF_REPAIR_NONFATAL: extract_parasitics: $_prs_ext\"\n"
+            "    set _prs_ext_failed 1\n"
+            "  } else { set _prs_ext_failed 0 }\n",
+            out_dir_c=out_dir_c)
+        + "  if {$_prs_ext_failed} {\n"
         "  } else {\n"
+        + "    if {$_wcc_chg > 0} {\n"
+        "      puts \"SPEF_EXTRACT_MUTATED_THE_ROUTE: extraction changed the "
+        "wire of $_wcc_chg net(s) ($_wcc_shr shorter, $_wcc_grew longer, "
+        "$_wcc_b -> $_wcc_a wire units) and it named none of them. Parasitic "
+        "extraction is supposed to READ this database. A build whose OpenRCX "
+        "re-encodes wires through tmg_conn needs the fork's RoutingPreserver "
+        "(PR #23, 9e331799); this run's SPEF describes a route that is no "
+        "longer the one that was verified.\"\n"
+        "    }\n"
         f"    if {{[catch {{write_spef {out_dir_c}/post_route_repair.spef}} "
         f"_prs_spef_wr]}} {{ puts \"SPEF_WRITE_NONFATAL: $_prs_spef_wr\" }}\n"
         "    puts \"SPEF_MEASURE_COMPLETE\"\n"
@@ -28098,7 +28394,14 @@ def _postroute_sdr_transaction_begin_tcl(
         "  } else {\n"
         "    set _sdr_tx_ready 1\n"
         "    puts \"SDR_TRANSACTION_BEGIN: router_drc=$_sdr_tx_before\"\n"
-        "  }\n"
+        # R-0915-121's boundary probe asks whether a net HAS a wire, which is
+        # blind to a net stripped to a stub. MEASURED on run17's own
+        # checkpoints: across this very transaction 654 of 655 nets SHRANK and
+        # the total wire fell 32634 -> 17857 (-45.3 %) with ZERO nets losing
+        # their wire entirely, so every boundary read clean. The content is
+        # censused here so the decision below can see what the pass did.
+        + _wire_content_census_tcl("_sdr_wire0")
+        + "  }\n"
     )
 
 
@@ -28127,8 +28430,21 @@ def _postroute_sdr_transaction_finish_tcl(
     """
     txn_name = _SDR_TXN_DIRS[stage]
     return (
+        # R-0915-125 -- THE DRIFT IS MEASURED WHETHER OR NOT THERE IS A
+        # CANDIDATE. It used to sit inside the `$_sdr_tx_mutated` branch, and
+        # MEASURED on spm run17 that is exactly why it never printed: both
+        # children came back `mutated=0`, the transaction took the
+        # `NO_CANDIDATE` arm, and the comparison against the checkpoint this
+        # session had just written was skipped -- while the session's own wire
+        # fell from 6503 records to 1069 between that checkpoint
+        # (openroad.log:1161) and the next stage's (:1423). "No candidate" is a
+        # statement about the CHILD; it says nothing about what happened to
+        # this database, and the census is the only thing that does.
+        "  if {$_sdr_tx_ready} {\n"
+        + _wire_content_compare_tcl("_sdr_wire0", "SDR_TRANSACTION_WIRE_DRIFT")
+        + "  }\n"
         "  if {$_sdr_tx_ready && $_sdr_tx_mutated} {\n"
-        "    puts \"SDR_TRANSACTION_DECISION: error=$_sdr_tx_error route_ok=$_sdr_tx_route_ok router_drc_before=$_sdr_tx_before\"\n"
+        + "    puts \"SDR_TRANSACTION_DECISION: error=$_sdr_tx_error route_ok=$_sdr_tx_route_ok router_drc_before=$_sdr_tx_before\"\n"
         # A LEGAL PLACEMENT IS NOT A ROUTABLE ONE, AND THE LEGALIZER NEVER
         # ASKS. MEASURED on subservient x gf180mcuD as a DIE, interior-core
         # tree (2026-09-21): the candidate was ACCEPTED on router DRC and a
@@ -28602,10 +28918,19 @@ def _v1_8_100_signoff_drv_repair_tcl(
         "  if {$_sdr_ok} {\n"
         f"  for {{set _sdr_p 1}} {{$_sdr_p <= {n}}} {{incr _sdr_p}} {{\n"
         "    catch {define_process_corner -ext_model_index 0 X}\n"
-        "    if {[catch {extract_parasitics -ext_model_file $_prs_max "
-        "-corner_cnt 1 -max_res 50 -coupling_threshold 0.1} _sdr_ex]} {\n"
-        "      puts \"SDR_EXTRACT_NONFATAL: $_sdr_ex\"; set _sdr_tx_error 1; break\n"
-        "    }\n"
+        # R-0915-125 -- the pass's own extraction is a DB-MUTATING step and is
+        # bracketed like one. The boundary DEF it writes is overwritten by the
+        # next pass on purpose: the state that matters for a restore is the
+        # transaction's `pre_repair.odb`, and what this file answers is "what
+        # did the LAST pass hand the extraction".
+        + _extraction_bracket_tcl(
+            "signoff_drv_repair",
+            "    if {[catch {extract_parasitics -ext_model_file $_prs_max "
+            "-corner_cnt 1 -max_res 50 -coupling_threshold 0.1} _sdr_ex]} {\n"
+            "      puts \"SDR_EXTRACT_NONFATAL: $_sdr_ex\"; set _sdr_tx_error 1; break\n"
+            "    }\n",
+            out_dir_c=txn_c)
+        + 
         f"    if {{[catch {{write_spef {out_dir_c}/sdr_pass.spef}} _sdr_sw]}} "
         "{ puts \"SDR_SPEFW_NONFATAL: $_sdr_sw\"; set _sdr_tx_error 1; break }\n"
         # R-0915-83 — THE PARASITICS MUST REACH STA, AND IT IS ASSERTED.
@@ -28878,10 +29203,18 @@ def _v1_8_100_signoff_drv_repair_tcl(
         f"    set _sdr_pass_odb {txn_c}/pass${{_sdr_p}}.odb\n"
         "    set _sdr_pass_saved 0\n"
         "    if {$_sdr_pass_n >= 0} {\n"
-        "      if {[catch {write_db $_sdr_pass_odb} _sdr_pw]} {\n"
-        "        puts \"SDR_PASS_CHECKPOINT_NONFATAL pass $_sdr_p: $_sdr_pw\"\n"
-        "      } else { set _sdr_pass_saved 1 }\n"
-        "    }\n"
+        # R-0915-125 -- A PASS BUILT ON A MUTATED DATABASE IS NOT SELECTABLE.
+        # The guard leaves `_sdr_pass_saved` at 0, which is the state this
+        # loop's own author already handles ("a write failure ... leaves the
+        # pass unselectable"), so the transaction falls back to
+        # `pre_repair.odb` -- the restore -- instead of promoting a route an
+        # unnamed step changed.
+        + _route_mutation_guard_tcl(
+            "      if {[catch {write_db $_sdr_pass_odb} _sdr_pw]} {\n"
+            "        puts \"SDR_PASS_CHECKPOINT_NONFATAL pass $_sdr_p: $_sdr_pw\"\n"
+            "      } else { set _sdr_pass_saved 1 }\n",
+            "signoff_drv_repair_pass")
+        + "    }\n"
         "    lappend _sdr_pass_ledger [list $_sdr_p $_sdr_pass_n $_sdr_pass_saved]\n"
         "    puts \"SDR_PASS_RESULT: pass=$_sdr_p router_drc=$_sdr_pass_n "
         "checkpointed=$_sdr_pass_saved\"\n"
@@ -30127,16 +30460,16 @@ if {{[catch {{write_def {out_dir_c}/routed_preantenna.def}} _cp_err]}} {{
 # route checkpoint — which is what the NONFATAL guard was written to do and
 # cannot.
 puts "{_PNR_STAGE_MARKER} postroute_spef_extract"
-{spef_repair_block}{_pin_access_probe_tcl("after_postroute_spef_extract")}{_unrouted_probe_tcl("after_postroute_spef_extract", out_dir_c)}# === v0.2.14 — antenna repair (diode insertion) after detailed_route ===
+{spef_repair_block}{_pin_access_probe_tcl("after_postroute_spef_extract")}{_unrouted_probe_tcl("after_postroute_spef_extract", out_dir_c)}{_boundary_def_tcl("after_postroute_spef_extract", out_dir_c)}# === v0.2.14 — antenna repair (diode insertion) after detailed_route ===
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 {_pnr_stage_begin("postroute_antenna_repair")}
 puts "{_PNR_STAGE_MARKER} postroute_antenna_repair"
-{antenna_repair_block}{_pin_access_probe_tcl("after_postroute_antenna_repair")}{_unrouted_probe_tcl("after_postroute_antenna_repair", out_dir_c)}{_pnr_stage_end("postroute_antenna_repair")}
-{drv_reconverge_block}{_pin_access_probe_tcl("after_postroute_drv_reconverge")}{_unrouted_probe_tcl("after_postroute_drv_reconverge", out_dir_c)}
+{antenna_repair_block}{_pin_access_probe_tcl("after_postroute_antenna_repair")}{_unrouted_probe_tcl("after_postroute_antenna_repair", out_dir_c)}{_boundary_def_tcl("after_postroute_antenna_repair", out_dir_c)}{_pnr_stage_end("postroute_antenna_repair")}
+{drv_reconverge_block}{_pin_access_probe_tcl("after_postroute_drv_reconverge")}{_unrouted_probe_tcl("after_postroute_drv_reconverge", out_dir_c)}{_boundary_def_tcl("after_postroute_drv_reconverge", out_dir_c)}
 if {{![info exists ::_vic_postroute_transaction_failed] || !$::_vic_postroute_transaction_failed}} {{
 {_pnr_stage_begin("postroute_antenna_reconverge")}
 puts "{_PNR_STAGE_MARKER} postroute_antenna_reconverge"
-{post_reconverge_antenna_block}{_pin_access_probe_tcl("after_postroute_antenna_reconverge")}{_unrouted_probe_tcl("after_postroute_antenna_reconverge", out_dir_c)}{_pnr_stage_end("postroute_antenna_reconverge")}
+{post_reconverge_antenna_block}{_pin_access_probe_tcl("after_postroute_antenna_reconverge")}{_unrouted_probe_tcl("after_postroute_antenna_reconverge", out_dir_c)}{_boundary_def_tcl("after_postroute_antenna_reconverge", out_dir_c)}{_pnr_stage_end("postroute_antenna_reconverge")}
 # === v0.1.48 — decap + filler insertion ===
 # spm pilot Tier 2 EM/decap finding: prior runs (v0.1.25 → v0.1.47) emitted
 # ZERO decap or filler cells. Empty std-cell-row gaps left an MPW-rejecting
@@ -30150,7 +30483,7 @@ puts "{_PNR_STAGE_MARKER} postroute_fill"
 # may still have created an instance (antenna diodes, a repair buffer), and
 # those terminals must be owned. The re-route inside it runs only when the
 # delta says terminals actually changed, and a failure there is a verdict.
-{_pin_access_probe_tcl("after_postroute_fill_before_pg_reconnect")}{_unrouted_probe_tcl("after_postroute_fill_before_pg_reconnect", out_dir_c)}{pg_reconnect_block}{_pnr_stage_begin("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} postroute_named_violation_reroute"
+{_pin_access_probe_tcl("after_postroute_fill_before_pg_reconnect")}{_unrouted_probe_tcl("after_postroute_fill_before_pg_reconnect", out_dir_c)}{_boundary_def_tcl("after_postroute_fill_before_pg_reconnect", out_dir_c)}{pg_reconnect_block}{_pnr_stage_begin("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} postroute_named_violation_reroute"
 {_named_viol_reroute_block}{_pnr_stage_end("postroute_named_violation_reroute")}puts "{_PNR_STAGE_MARKER} write_routed"
 }} else {{
   puts "POSTROUTE_RECONVERGE_DOWNSTREAM_REFUSED: SDR transaction rolled back; skipping antenna/PG/named reroute"
@@ -38928,9 +39261,14 @@ def _ship_signoff_spef_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         "set_timing_derate -early 0.95\n"
         "set_timing_derate -late 1.05\n"
         "catch {define_process_corner -ext_model_index 0 X}\n"
-        f"if {{[catch {{extract_parasitics -ext_model_file {max_captable_c} "
-        f"-corner_cnt 1 -max_res 50 -coupling_threshold 0.1}} e]}} {{ "
-        f"puts \"SHIP_EXT_NONFATAL: $e\" }}\n"
+        # R-0915-125 -- DB-MUTATING, and bracketed like one.
+        + _extraction_bracket_tcl(
+            "ship_signoff_spef_repair",
+            f"if {{[catch {{extract_parasitics -ext_model_file {max_captable_c} "
+            f"-corner_cnt 1 -max_res 50 -coupling_threshold 0.1}} e]}} {{ "
+            f"puts \"SHIP_EXT_NONFATAL: $e\" }}\n",
+            out_dir_c=pnr_dir_c)
+        + 
         # write + read the SPEF back so the STA analyses the REAL max-RC
         # parasitics: extract_parasitics populates a NAMED process corner the
         # default analysis ignores (it would silently fall back to the optimistic
@@ -39067,11 +39405,16 @@ def _ship_signoff_spef_repair_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         # landings the base route did not have (measured 13 / 11 / 9 across
         # three runs) and trades a timing FAIL for a DRC FAIL.
         + _min_area_patch_tcl("SHIP_MIN_AREA")
-        + f"if {{[catch {{write_def {pnr_dir_c}/routed_repaired.def}} e]}} {{ "
-        f"puts \"SHIP_WD_NONFATAL: $e\" }}\n"
-        f"if {{[catch {{write_verilog {pnr_dir_c}/{top}_pnr_repaired.v}} e]}} {{ "
-        f"puts \"SHIP_WV_NONFATAL: $e\" }}\n"
-        "puts \"SHIP_SIGNOFF_REPAIR_DONE\"\n"
+        # R-0915-125 -- the repaired candidate is not written when an unnamed
+        # step moved the route it was built on; the route already on disk is
+        # what ships, and the refusal says so by name.
+        + _route_mutation_guard_tcl(
+            f"if {{[catch {{write_def {pnr_dir_c}/routed_repaired.def}} e]}} {{ "
+            f"puts \"SHIP_WD_NONFATAL: $e\" }}\n"
+            f"if {{[catch {{write_verilog {pnr_dir_c}/{top}_pnr_repaired.v}} e]}} {{ "
+            f"puts \"SHIP_WV_NONFATAL: $e\" }}\n",
+            "ship_signoff_spef_repair")
+        + "puts \"SHIP_SIGNOFF_REPAIR_DONE\"\n"
     )
 
 
@@ -39163,9 +39506,14 @@ def _ship_cvg_restore_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         "set_timing_derate -early 0.95\n"
         "set_timing_derate -late 1.05\n"
         "catch {define_process_corner -ext_model_index 0 X}\n"
-        f"if {{[catch {{extract_parasitics -ext_model_file {max_captable_c} "
-        f"-corner_cnt 1 -max_res 50 -coupling_threshold 0.1}} e]}} {{ "
-        f"puts \"SHIP_RESTORE_EXT_NONFATAL: $e\" }}\n"
+        # R-0915-125 -- DB-MUTATING, and bracketed like one.
+        + _extraction_bracket_tcl(
+            "ship_cvg_restore",
+            f"if {{[catch {{extract_parasitics -ext_model_file {max_captable_c} "
+            f"-corner_cnt 1 -max_res 50 -coupling_threshold 0.1}} e]}} {{ "
+            f"puts \"SHIP_RESTORE_EXT_NONFATAL: $e\" }}\n",
+            out_dir_c=pnr_dir_c)
+        + 
         # A SEPARATE SPEF name. Writing the repair session's
         # `signoff_repair_max.spef` would overwrite the parasitics that belong
         # to the run's own evidence with a different design's, and a restore
@@ -39195,11 +39543,16 @@ def _ship_cvg_restore_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         + _routing_integrity_check_tcl("SHIP")
         + f"{refill_block}"
         + _min_area_patch_tcl("SHIP_RESTORE_MIN_AREA")
-        + f"if {{[catch {{write_def {pnr_dir_c}/routed_cvg_restored.def}} e]}} {{ "
-        f"puts \"SHIP_RESTORE_WD_NONFATAL: $e\" }}\n"
-        f"if {{[catch {{write_verilog {pnr_dir_c}/{top}_pnr_cvg_restored.v}} e]}} {{ "
-        f"puts \"SHIP_RESTORE_WV_NONFATAL: $e\" }}\n"
-        "puts \"SHIP_CVG_RESTORE_DONE\"\n"
+        # R-0915-125 -- a RESTORE that ships a database an unnamed step
+        # changed has restored nothing. It refuses, and the checkpoint it was
+        # restoring from is still on disk.
+        + _route_mutation_guard_tcl(
+            f"if {{[catch {{write_def {pnr_dir_c}/routed_cvg_restored.def}} e]}} {{ "
+            f"puts \"SHIP_RESTORE_WD_NONFATAL: $e\" }}\n"
+            f"if {{[catch {{write_verilog {pnr_dir_c}/{top}_pnr_cvg_restored.v}} e]}} {{ "
+            f"puts \"SHIP_RESTORE_WV_NONFATAL: $e\" }}\n",
+            "ship_cvg_restore")
+        + "puts \"SHIP_CVG_RESTORE_DONE\"\n"
     )
 
 
@@ -40277,9 +40630,16 @@ def _ship_wire_length_escalation_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
     refill_block = _build_sparse_die_aware_filler_tcl(filler_masters or [])
     extract_tcl = (
         "catch {remove_fillers}\n"
-        f"if {{[catch {{extract_parasitics -ext_model_file {max_captable_c} "
-        f"-corner_cnt 1 -max_res 50 -coupling_threshold 0.1}} e]}} {{ "
-        f"puts \"SHIP_ESC_EXT_NONFATAL: $e\" }}\n"
+        # R-0915-125 -- DB-MUTATING, and bracketed like one. This block runs
+        # once per escalation round, so the boundary DEF answers "what did the
+        # LAST round hand the extraction".
+        + _extraction_bracket_tcl(
+            "ship_wire_length_escalation",
+            f"if {{[catch {{extract_parasitics -ext_model_file {max_captable_c} "
+            f"-corner_cnt 1 -max_res 50 -coupling_threshold 0.1}} e]}} {{ "
+            f"puts \"SHIP_ESC_EXT_NONFATAL: $e\" }}\n",
+            out_dir_c=pnr_dir_c)
+        + 
         f"catch {{write_spef {pnr_dir_c}/escalation_repair.spef}}\n"
         f"if {{[catch {{read_spef {pnr_dir_c}/escalation_repair.spef}} e]}} "
         f"{{ puts \"SHIP_ESC_RDSPEF_NONFATAL: $e\" }}\n"
@@ -40367,11 +40727,13 @@ def _ship_wire_length_escalation_tcl(top: str, tech_lef_c: str, cell_lef_c: str,
         + refill_block
         + measure_tcl("after")
         + "catch {puts \"SHIP_ESC_WNS_AFTER: [sta::worst_slack -max]\"}\n"
-        f"if {{[catch {{write_def {pnr_dir_c}/routed_escalated.def}} e]}} {{ "
-        f"puts \"SHIP_ESC_WD_NONFATAL: $e\" }}\n"
-        f"if {{[catch {{write_verilog {pnr_dir_c}/{top}_pnr_escalated.v}} e]}} "
-        f"{{ puts \"SHIP_ESC_WV_NONFATAL: $e\" }}\n"
-        "puts \"SHIP_ESC_DONE\"\n"
+        + _route_mutation_guard_tcl(
+            f"if {{[catch {{write_def {pnr_dir_c}/routed_escalated.def}} e]}} {{ "
+            f"puts \"SHIP_ESC_WD_NONFATAL: $e\" }}\n"
+            f"if {{[catch {{write_verilog {pnr_dir_c}/{top}_pnr_escalated.v}} e]}} "
+            f"{{ puts \"SHIP_ESC_WV_NONFATAL: $e\" }}\n",
+            "ship_wire_length_escalation")
+        + "puts \"SHIP_ESC_DONE\"\n"
     )
 
 
