@@ -476,7 +476,16 @@ _P0_EXPECTED = {
         ("BLOCKED", "BLOCKED_BY_UPSTREAM"),
     "otp_image_layer_consistency_check":
         ("BLOCKED", "BLOCKED_BY_UPSTREAM"),
-    "spice_correlation_check": ("BLOCKED", "BLOCKED_BY_UPSTREAM"),
+    # R-0915-46/47 + the landing that added this gate to
+    # `_GATE_SUBJECT_PRODUCED_BY` (R-0915-101, lane icslot5). Its subject is step
+    # 22's extracted `*.spef` and step 23's STA reports — both PHASE-3 — and the
+    # P0 umbrella runs in the phase-2 audit too, so over this RTL-only project
+    # the question is asked before its answer could exist. That is
+    # `ASKED_BEFORE_PRODUCER`, which IS skip-eligible, so the record is a SKIP.
+    # It is NOT a blanket exemption: the class is granted only while the tree
+    # shows the producer has not run, and the test below additionally requires
+    # the CAUSE to be recorded, so a silent SKIP would still fail here.
+    "spice_correlation_check": ("SKIP", "ASKED_BEFORE_PRODUCER"),
     "tristate_active_drive_check": ("SKIP", "DESIGN_DECLARED_NA"),
 }
 
@@ -519,6 +528,44 @@ def test_p0_umbrella_records_the_nonverdict_cause(gate, tmp_path, monkeypatch):
     assert rec["evidence"]["exit_code"] == _vx.RC_VACUOUS, rec
     assert rec["evidence"]["skip_kind"] == "input-missing", rec
     assert _flow._p0_passed_count(records) == 0
+    # AN ASKED-EARLY SKIP MUST CARRY ITS CAUSE. This case's whole purpose is
+    # that the umbrella RECORDS the non-verdict cause, and `ASKED_BEFORE_PRODUCER`
+    # is the one class here that is skip-ELIGIBLE — so without this, a gate could
+    # reach a silent SKIP and the case would still be green. Keyed on the CLASS
+    # rather than on the gate name, so any gate that later joins
+    # `_GATE_SUBJECT_PRODUCED_BY` inherits the same requirement instead of
+    # needing someone to remember it.
+    if expected_class == "ASKED_BEFORE_PRODUCER":
+        early = rec["evidence"]["asked_before_producer"]
+        assert early["kind"] == "asked-before-its-producer-ran", rec
+        assert early["gate"] == gate, rec
+        assert early["producer_has_run"] is False, rec
+        # AND IT NAMES THE PRODUCER'S DECLARED INPUT — the fact that separates
+        # "the producer was never reached" from "it ran and delivered nothing".
+        #
+        # Tied to the PREDICATE, not compared with the roster. Comparing
+        # `early["producer"]` against `_GATE_SUBJECT_PRODUCED_BY[gate][0]` reads
+        # both sides out of the same dict, so it is a tautology with respect to
+        # that dict: MEASURED while proving this case, renaming the roster's
+        # producer prose to "some other step" left it GREEN. What must hold is
+        # that the prose names the artefact the predicate actually reads, so the
+        # named path is created and the predicate is required to FLIP.
+        producer, has_run = _flow._GATE_SUBJECT_PRODUCED_BY[gate]
+        assert early["producer"] == producer, rec
+        assert has_run(proj) is False
+        named = [tok.rstrip(".,;") for tok in producer.replace(",", " ").split()
+                 if "/" in tok and "." in tok.rsplit("/", 1)[-1]]
+        assert named, (
+            "the producer prose must NAME the declared input it is about, or a "
+            f"reader cannot tell what was missing: {producer!r}")
+        for rel in named:
+            target = proj / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"")
+        assert has_run(proj) is True, (
+            "the producer prose names "
+            f"{named!r} but creating those did not satisfy the predicate, so the "
+            "record's explanation and the code's test are about different things")
 
 
 def test_p0_umbrella_still_records_an_examined_gate_as_PASS(tmp_path,
