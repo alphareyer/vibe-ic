@@ -72,13 +72,21 @@ def test_the_rung_runs_only_after_every_displacement_rung_failed():
 
 
 def test_the_rung_claims_nothing_unless_the_ties_come_back():
-    """Legal-but-untied is not legalized. The success test is a conjunction."""
+    """Legal-but-untied is not legalized. The success test is a conjunction.
+
+    The conjunction is unchanged; WHAT IT MEASURES was corrected by owner
+    ruling R-0915-104. This used to require the tie COUNT not to go backwards,
+    which compares a FIXED-PITCH original against a COVERAGE-DRIVEN recovery
+    and gave opposite verdicts on the same design (r46 1965 -> 2003 passed it,
+    the m3 arm 2624 -> 2395 failed it). The rule is COVERAGE, and the rung is
+    no weaker for it: an uncovered anchor still refuses.
+    """
     tcl = R._build_escalating_legalize_tcl(
         "SDR_DPL", "_sdrl", tie_recover_tcl="puts TIE_RECOVER_DECK")
     ok = [ln for ln in tcl.splitlines() if "disp=tap-ripup" in ln]
     assert len(ok) == 1
     guard = tcl[:tcl.index("disp=tap-ripup")]
-    assert "$_ta_sdrl >= $_tb_sdrl" in guard, "tie count must not go backwards"
+    assert "$_tu_sdrl == 0" in guard, "every anchor must be covered"
     assert "check_placement" in guard
     assert "_TAP_RIPUP_NOT_RECOVERED" in tcl
 

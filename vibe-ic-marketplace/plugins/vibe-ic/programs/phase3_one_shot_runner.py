@@ -4862,6 +4862,11 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig") -> str:
         "      }\n"
         "      if {$_wta} { lappend _wtanc($_wty) [$_wtbb xMin] [$_wtbb xMax] }\n"
         "    }\n"
+        # R-0915-104 — PUBLISH the coverage outcome on a canonical global so
+        # a caller reads THIS block's measurement instead of re-deriving it.
+        # Seeded to -1 = NOT MEASURED before anything runs, so a caller can
+        # never mistake "the repair did not run" for "nothing was uncovered".
+        "    set ::_vibeic_welltie_uncovered -1\n"
         "    set _wtadded 0; set _wtneed 0; set _wtfail 0; set _wtrows 0\n"
         "    set _wtfaildesc {}\n"
         "    foreach _wty [lsort -integer [array names _wtanc]] {\n"
@@ -4876,8 +4881,15 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig") -> str:
         "      foreach {_wtax0 _wtax1} $_wtanc($_wty) {\n"
         "        set _wtcx [expr {($_wtax0 + $_wtax1) / 2}]\n"
         "        set _wtok 0\n"
+        # R-0915-104 — ONE COORDINATE CONVENTION. `_wttie` holds each tie's
+        # xMin and `_wtcx` is the anchor's CENTRE, so this test used to
+        # compare a left edge against a centre and was wrong by half a tie
+        # width in one direction. Small against a 14 um budget, but a
+        # coverage rule that is the gate's own success criterion may not be
+        # approximately right.
         "        foreach _wtt $_wtties {\n"
-        "          if {abs($_wtt - $_wtcx) <= $_wtd} { set _wtok 1; break }\n"
+        "          if {abs([expr {$_wtt + $_wttw / 2}] - $_wtcx) <= $_wtd} "
+        "{ set _wtok 1; break }\n"
         "        }\n"
         "        if {$_wtok} { continue }\n"
         "        incr _wtneed\n"
@@ -4911,12 +4923,30 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig") -> str:
         "            break\n"
         "          }\n"
         "        }\n"
+        # R-0915-104 — WHY AN ANCHOR FAILED, NOT ONLY WHERE. An anchor whose
+        # window is clipped by the end of its own row is a different problem
+        # from one whose window is full of cells: the first is a floorplan
+        # fact, the second a density one, and a reader who cannot tell them
+        # apart cannot act on either.
+        #
+        # MEASURED, and it refuted the guess that prompted it. Reading the m3
+        # arm's ten x values alone they looked like row-end clipping. With the
+        # cause actually recorded, the m4 arm says 16 of 17 are `occupied` and
+        # exactly ONE is `row_edge_clips_the_window` -- and the occupied ones
+        # repeat at the SAME x (1454880) across many different rows, which is
+        # a column of blocked sites, not a floorplan edge. An x value cannot
+        # tell you which of the two it is; that is why this field exists.
         "        if {!$_wtplaced} {\n"
         "          incr _wtfail\n"
-        "          lappend _wtfaildesc \"row=$_wty x=$_wtcx\"\n"
+        "          set _wtwhy \"occupied\"\n"
+        "          if {[expr {$_wtcx - $_wtd}] < $_wtrx0($_wty) || "
+        "[expr {$_wtcx + $_wtd + $_wttw}] > $_wtrx1($_wty)} "
+        "{ set _wtwhy \"row_edge_clips_the_window\" }\n"
+        "          lappend _wtfaildesc \"row=$_wty x=$_wtcx ($_wtwhy)\"\n"
         "        }\n"
         "      }\n"
         "    }\n"
+        "    set ::_vibeic_welltie_uncovered $_wtfail\n"
         "    if {$_wtfail > 0} {\n"
         "      puts \"WELLTIE_COVERAGE_REPAIR_UNPLACEABLE: $_wtfail anchor(s) "
         "have no free site within the budget in their own row: "
@@ -21494,14 +21524,37 @@ def _build_escalating_legalize_tcl(marker: str, var_tag: str = "",
             f"\"CORE_WELLTAP\"}} {{ incr _ta{v} }}\n"
             f"          }}\n"
             f"        }}\n"
+            # R-0915-104 — THE INVARIANT IS COVERAGE, NOT COUNT.
+            #
+            # The first version required the tie COUNT not to go backwards.
+            # That compares two different insertion policies: the design's own
+            # `tapcell -distance` is FIXED-PITCH across every row, while the
+            # recovery is COVERAGE-DRIVEN and inserts only where an anchor is
+            # uncovered, so the count almost always drops. MEASURED, same
+            # design and same recovery, opposite verdicts from a number that
+            # was never the rule: on r46's 117-row floorplan it rose
+            # (1965 -> 2003) and the rung claimed success; on the m3 arm's
+            # 135-row floorplan it fell (2624 -> 2395) and the rung refused.
+            #
+            # The rule is that every well-tie anchor is covered within the
+            # PDK's declared maximum tap distance, which is what the repair
+            # block measures and publishes. An UNCOVERED anchor is a latch-up
+            # / DRC risk and is NOT tradeable for timing, so coverage is a hard
+            # conjunct. -1 is the seeded NOT-MEASURED value: a repair that did
+            # not run is not a repair that found nothing.
+            f"        set _tu{v} -1\n"
+            f"        catch {{ set _tu{v} $::_vibeic_welltie_uncovered }}\n"
             f"        if {{![catch {{check_placement}} _tcp2{v}] && "
-            f"$_ta{v} >= $_tb{v}}} {{\n"
+            f"$_tu{v} == 0}} {{\n"
             f"          set _dplok{v} 1\n"
             f"          puts \"{marker}_LEGALIZE_OK disp=tap-ripup "
-            f"ties=${{_tb{v}}}->${{_ta{v}}}\"\n"
+            f"ties=${{_tb{v}}}->${{_ta{v}}} uncovered_anchors=0\"\n"
             f"        }} else {{\n"
-            f"          puts \"{marker}_TAP_RIPUP_NOT_RECOVERED: ties "
-            f"${{_tb{v}}}->${{_ta{v}}}; the placement is not claimed legal\"\n"
+            f"          puts \"{marker}_TAP_RIPUP_NOT_RECOVERED: "
+            f"uncovered_anchors=${{_tu{v}}} (-1 = the coverage repair did not "
+            f"run), ties ${{_tb{v}}}->${{_ta{v}}}; an uncovered well-tie anchor "
+            f"is not tradeable for timing, so the placement is not claimed "
+            f"legal\"\n"
             f"        }}\n"
             f"      }} else {{\n"
             f"        puts \"{marker}_TAP_RIPUP_DID_NOT_LEGALIZE: the ties "
