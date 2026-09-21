@@ -41,6 +41,8 @@ from __future__ import annotations
 # on the base tree: 454 of the 1385 top-level programs died that way. Restore
 # the condition the file is written for. Idempotent, and the same shape the
 # sibling programs that already carry it use.
+import json
+from pathlib import Path
 import os as _os                                                    # noqa: E402
 import sys as _sys                                                  # noqa: E402
 
@@ -292,9 +294,17 @@ def emit_case_register_bus(project, case: dict, dut_module: str,
                     corpus[p.name] = p.read_text(errors="replace")
                 except OSError:
                     pass
+    # R-0915-106 — the author's declared free choices travel with the docs:
+    # a byte order the documents do not state is a DECISION, not a gap.
+    try:
+        _decl = json.loads(
+            (Path(project) / "plugin_output" / "declaration.json")
+            .read_text(errors="replace"))
+    except Exception:                                           # noqa: BLE001
+        _decl = None
     plan, why = _rbd.resolve_register_plan(
         case, _load("L4_REGMAP.json"), _load("L15_ENCODING_TABLES.json"),
-        corpus)
+        corpus, _decl)
     if plan is None:
         return None, why
     reasons = []

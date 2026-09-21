@@ -233,7 +233,62 @@ def bus_contract(package_text: str) -> Tuple[Optional[dict], str]:
             "user_default": (scope + user_default) if user_default else ""}, ""
 
 
-def register_endianness(corpus: Dict[str, str]) -> Tuple[Optional[str], str]:
+#: R-0915-106 — A BYTE ORDER THE DOCS DO NOT STATE IS A FREE CHOICE, NOT A GAP.
+#:
+#: MEASURED, sha256 x sky130A, lane icsha2 run20, front door. All three of the
+#: design's `known_answer_vector` L10 cases refused with
+#:
+#:     no sentence in the design's documents states a byte order OF THE
+#:     REGISTERS
+#:
+#: and the refusal is CORRECT: mapping a hex message onto `BLOCK0..BLOCK15`
+#: needs to know whether BLOCK0 carries the first four bytes or the last, and
+#: `grep -niE 'endian|byte order|位元組|大端|小端|MSB|LSB'` over the whole of
+#: input/docs/*.md matches NOTHING. The docs genuinely do not say.
+#:
+#: That is the definition of a FREE CHOICE — "decisions no downstream tool can
+#: recover by inference … two correct designs disagree on all of them" — and
+#: the flow already has the place to put one: the author's
+#: `plugin_output/declaration.json`. So a declared order is read as EVIDENCE,
+#: and its provenance says so: the emitted TB's header names the declaration,
+#: never a document sentence it did not find.
+#:
+#: FAIL-CLOSED IS PRESERVED IN BOTH DIRECTIONS. A document sentence still WINS
+#: — the design's own prose outranks the author's declaration, and a document
+#: that CONTRADICTS itself still refuses before the declaration is consulted, so
+#: a declaration can never paper over a contradiction. With neither a sentence
+#: nor a declared value the refusal is what it was, word for word.
+_DECLARED_ORDER_KEYS = ("register_byte_order", "byte_order", "endianness")
+
+
+def declared_register_endianness(declaration: Optional[dict]
+                                 ) -> Tuple[Optional[str], str]:
+    """The byte order the AUTHOR declared, or a refusal. PURE.
+
+    Only `big` / `little` are read; anything else is refused by name rather
+    than coerced, because a value this consumer cannot read is a refusal and
+    never a reading of a default.
+    """
+    if not isinstance(declaration, dict):
+        return None, "no declaration was supplied"
+    for key in _DECLARED_ORDER_KEYS:
+        if key not in declaration:
+            continue
+        raw = str(declaration.get(key) or "").strip().lower()
+        order = raw.replace("-endian", "").replace("_endian", "").strip()
+        if order in ("big", "little"):
+            return order, (f"plugin_output/declaration.json: {key} = "
+                           f"{declaration.get(key)!r}")
+        return None, (f"plugin_output/declaration.json declares {key} = "
+                      f"{declaration.get(key)!r}, which is neither 'big' nor "
+                      f"'little'; refused rather than coerced")
+    return None, ("plugin_output/declaration.json declares none of "
+                  + ", ".join(_DECLARED_ORDER_KEYS))
+
+
+def register_endianness(corpus: Dict[str, str],
+                        declaration: Optional[dict] = None
+                        ) -> Tuple[Optional[str], str]:
     """The byte order the design states FOR ITS REGISTERS, or a refusal.
 
     Subject-anchored on purpose. opentitan_aes says "Note that all registers
@@ -250,8 +305,12 @@ def register_endianness(corpus: Dict[str, str]) -> Tuple[Optional[str], str]:
             seen.setdefault(m.group("order").lower(), []).append(
                 f"{fname}: {m.group(0)}")
     if not seen:
+        # R-0915-106 — the docs are silent; ask the author's declaration.
+        order, why = declared_register_endianness(declaration)
+        if order:
+            return order, why
         return None, ("no sentence in the design's documents states a byte "
-                      "order OF THE REGISTERS")
+                      "order OF THE REGISTERS, and " + why)
     if len(seen) > 1:
         return None, ("the design states BOTH byte orders of its registers: "
                       + "; ".join(v[0] for v in seen.values()))
@@ -287,7 +346,9 @@ def _encoding_value(l15: dict, field: str, mnemonic: str) -> Optional[int]:
 
 
 def resolve_register_plan(case: dict, l4: dict, l15: dict,
-                          corpus: Dict[str, str]) -> Tuple[Optional[dict], str]:
+                          corpus: Dict[str, str],
+                          declaration: Optional[dict] = None
+                          ) -> Tuple[Optional[dict], str]:
     """`(plan, reason)` — every address, bit and value this vector needs."""
     regs = [r for r in (l4 or {}).get("registers") or [] if isinstance(r, dict)]
     if not regs:
@@ -318,7 +379,7 @@ def resolve_register_plan(case: dict, l4: dict, l15: dict,
     if conflicts:
         return None, ("the register map contradicts itself: "
                       + "; ".join(conflicts))
-    order, endian_why = register_endianness(corpus)
+    order, endian_why = register_endianness(corpus, declaration)
     if order is None:
         return None, endian_why
     params = case.get("parameters") or {}
