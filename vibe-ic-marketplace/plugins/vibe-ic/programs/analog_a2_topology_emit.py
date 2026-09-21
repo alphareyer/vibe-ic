@@ -1458,7 +1458,24 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
         # The gate this entry builds carries the clock's own phase once the
         # conversion-window reset is released — see `CLOCK_PHASE_ALIASES_KEY`
         # and the devices that build it further down.
-        "clock_phase_aliases": {"nckdac": "clk", "nckdacb": "nclkb",
+        # THE TWO SWITCHED-CAPACITOR PHASES ARE NON-OVERLAPPING. Without this
+        # the summing-node switch opened on the edge the reference switch
+        # closed and 58% of the input signal charge was lost there every
+        # clock -- see `CLOCK_PHASE_GENERATOR_KEY` for the measurement.
+        "clock_phase_generator": {
+            "source": "clk", "complement": "nclkb",
+            "phases": {"nph1": {"complement_net": "nph1b"},
+                       "nph2": {"complement_net": "nph2b"}},
+            "w_pmos": 4.0, "w_nmos": 2.0, "l": 0.5},
+        # `nph1` carries the SAMPLING phase and `nph2` the CHARGE-TRANSFER
+        # phase, so each resolves to the edge its switches used to read
+        # directly. The aliases keep `sc_branch_polarities` and
+        # `derived_feedback_delay` reading the same two phases they always
+        # read: a branch whose plates close on opposite phases is still
+        # opposite, and the feedback delay is still derived, not typed.
+        "clock_phase_aliases": {"nph1": "clk", "nph2": "nclkb",
+                                "nph1b": "nclkb", "nph2b": "clk",
+                                "nckdac": "clk", "nckdacb": "nclkb",
                                 # the quantiser's strobe chain: `nqd1` is the
                                 # clock inverted twice off `nclkb`, `nqstb`
                                 # once more — declared beside the devices that
@@ -2673,24 +2690,24 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
                  "stage {i} SAMPLING switch (n-side): on the clock-high "
                  "phase the stage input is sampled onto the bottom plate "
                  "of cs{i}",
-                 "nets": ["nsmp{i}", "clk", "{in}", "vss"],
+                 "nets": ["nsmp{i}", "nph1", "{in}", "vss"],
                  "w": 2.0, "l": 0.15},
                 {"name": "mp_smp{i}", "role": "pmos", "function":
                  "stage {i} SAMPLING switch (p-side of the transmission "
                  "gate)",
-                 "nets": ["nsmp{i}", "nclkb", "{in}", "vdd"],
+                 "nets": ["nsmp{i}", "nph1b", "{in}", "vdd"],
                  "w": 4.0, "l": 0.15},
                 {"name": "mn_smpb{i}", "role": "nmos", "function":
                  "stage {i} CHARGE-TRANSFER switch (n-side): on the "
                  "clock-low phase the bottom plate is driven to the "
                  "common-mode reference and the sampled charge moves "
                  "into ci{i}",
-                 "nets": ["nsmp{i}", "nclkb", "vcm", "vss"],
+                 "nets": ["nsmp{i}", "nph2", "vcm", "vss"],
                  "w": 2.0, "l": 0.15},
                 {"name": "mp_smpb{i}", "role": "pmos", "function":
                  "stage {i} CHARGE-TRANSFER switch (p-side of the "
                  "transmission gate)",
-                 "nets": ["nsmp{i}", "clk", "vcm", "vdd"],
+                 "nets": ["nsmp{i}", "nph2b", "vcm", "vdd"],
                  "w": 4.0, "l": 0.15},
                 {"name": "cs{i}", "role": "cap", "function":
                  "stage {i} SAMPLING capacitor — the absolute value is the "
@@ -2748,12 +2765,12 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
                  "(n-side): on the charge-transfer phase cs{i}'s upper "
                  "plate reaches the virtual ground and the sampled charge "
                  "moves into ci{i}",
-                 "nets": ["ncst{i}", "nclkb", "vsum{i}", "vss"],
+                 "nets": ["ncst{i}", "nph2", "vsum{i}", "vss"],
                  "w": 2.0, "l": 0.15},
                 {"name": "mp_cstv{i}", "role": "pmos", "function":
                  "stage {i} sampling-capacitor SUMMING-NODE switch "
                  "(p-side of the transmission gate)",
-                 "nets": ["ncst{i}", "clk", "vsum{i}", "vdd"],
+                 "nets": ["ncst{i}", "nph2b", "vsum{i}", "vdd"],
                  "w": 4.0, "l": 0.15},
                 {"name": "mn_cstc{i}", "role": "nmos", "function":
                  "stage {i} sampling-capacitor UPPER-PLATE reference "
@@ -2761,12 +2778,12 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
                  "is held at the common-mode reference and OFF the "
                  "summing node, so the sample is taken against `vcm` and "
                  "the charge already on ci{i} is not disturbed",
-                 "nets": ["ncst{i}", "clk", "vcm", "vss"],
+                 "nets": ["ncst{i}", "nph1", "vcm", "vss"],
                  "w": 2.0, "l": 0.15},
                 {"name": "mp_cstc{i}", "role": "pmos", "function":
                  "stage {i} sampling-capacitor UPPER-PLATE reference "
                  "switch (p-side of the transmission gate)",
-                 "nets": ["ncst{i}", "nclkb", "vcm", "vdd"],
+                 "nets": ["ncst{i}", "nph1b", "vcm", "vdd"],
                  "w": 4.0, "l": 0.15},
                 {"name": "ci{i}", "role": "cap", "function":
                  "stage {i} INTEGRATING capacitor — cs{i}/ci{i} IS this "
@@ -2887,24 +2904,24 @@ LIBRARY: Dict[str, Dict[str, Any]] = {
                  "on the charge-transfer phase cf{i}'s upper plate "
                  "reaches the virtual ground and the fed-back charge "
                  "moves into ci{i}",
-                 "nets": ["ncft{i}", "nclkb", "vsum{i}", "vss"],
+                 "nets": ["ncft{i}", "nph2", "vsum{i}", "vss"],
                  "w": 2.0, "l": 0.15},
                 {"name": "mp_cftv{i}", "role": "pmos", "function":
                  "stage {i} DAC-capacitor SUMMING-NODE switch (p-side of "
                  "the transmission gate)",
-                 "nets": ["ncft{i}", "clk", "vsum{i}", "vdd"],
+                 "nets": ["ncft{i}", "nph2b", "vsum{i}", "vdd"],
                  "w": 4.0, "l": 0.15},
                 {"name": "mn_cftc{i}", "role": "nmos", "function":
                  "stage {i} DAC-capacitor UPPER-PLATE reference switch "
                  "(n-side): while cf{i} samples the selected reference "
                  "end, its upper plate is held at the common-mode "
                  "reference and OFF the summing node",
-                 "nets": ["ncft{i}", "clk", "vcm", "vss"],
+                 "nets": ["ncft{i}", "nph1", "vcm", "vss"],
                  "w": 2.0, "l": 0.15},
                 {"name": "mp_cftc{i}", "role": "pmos", "function":
                  "stage {i} DAC-capacitor UPPER-PLATE reference switch "
                  "(p-side of the transmission gate)",
-                 "nets": ["ncft{i}", "nclkb", "vcm", "vdd"],
+                 "nets": ["ncft{i}", "nph1b", "vcm", "vdd"],
                  "w": 4.0, "l": 0.15},
             ],
             # `{coeff}` is substituted with THIS stage's coefficient before
@@ -4334,6 +4351,113 @@ def _sc_throws(node: str, groups: Dict[frozenset, Dict[str, str]]
 #: one place that can state what its output is.
 CLOCK_PHASE_ALIASES_KEY = "clock_phase_aliases"
 
+#: An entry that declares this key gets its switched-capacitor phases from a
+#: NON-OVERLAPPING generator instead of from one inverter's two edges.
+#:
+#: WHY (MEASURED, lane icadc2 on 8hd-3, probe1/probe2 over 60 clocks): with the
+#: two phases taken as `clk` and a single inverter's `nclkb`, the switch that
+#: holds a sampling capacitor's plate at the SUMMING NODE opens on the very
+#: edge the switch that returns it to `vcm` closes. Bucketing the charge on the
+#: integrating capacitor by sub-interval put -0.06408 Cs*V per clock (sd
+#: 0.01150) in the +/-5 ns around the rising edge while charge was conserved to
+#: -0.00197 across the whole settled sampling phase -- 58% of the input signal
+#: charge, lost every clock, at that one edge. The same bucket on an otherwise
+#: identical deck carrying a BEHAVIOURAL quantiser read -0.06420, so it is the
+#: switch network and not the comparator. The loop then sat at a bitstream
+#: density of 0.5362 where the charge balance of its own measured plate steps
+#: demands 0.6164.
+#:
+#: WHAT IT CHANGES: two phases that are never both asserted, so a switch opens
+#: into a dead time rather than into another switch closing. It does NOT move a
+#: device, resize one, retime the quantiser, or add a dummy -- a dummy would be
+#: a topology this IR does not declare.
+CLOCK_PHASE_GENERATOR_KEY = "clock_phase_generator"
+
+
+def non_overlap_phase_devices(decl: Optional[Dict[str, Any]]
+                              ) -> List[Dict[str, Any]]:
+    """The devices that build one entry's declared non-overlapping phase pair,
+    or `[]` when the entry declares none.
+
+    Cross-coupled: each phase's NOR reads the OTHER phase, so neither can
+    assert until the other has fallen. That is the dead time, and it is a
+    consequence of the connectivity rather than of a delay anyone tuned.
+
+    Every net and width comes off the declaration. An entry that declares a
+    single phase declares no generator and is emitted exactly as before.
+    """
+    if not isinstance(decl, dict):
+        return []
+    src = str(decl.get("source") or "")
+    comp = str(decl.get("complement") or "")
+    ph = decl.get("phases")
+    if not src or not comp or not isinstance(ph, dict) or len(ph) != 2:
+        return []
+    try:
+        (a_name, a), (b_name, b) = [(str(k), ph[k]) for k in ph]
+    except (KeyError, ValueError):
+        return []
+    for d in (a, b):
+        if not isinstance(d, dict) or not d.get("complement_net"):
+            return []
+    wp = float(decl.get("w_pmos", 4.0))
+    wn = float(decl.get("w_nmos", 2.0))
+    ln = float(decl.get("l", 0.5))
+    out: List[Dict[str, Any]] = []
+
+    def nor2(tag: str, inp_a: str, inp_b: str, node: str) -> None:
+        """`node` = NOR(inp_a, inp_b): series p-channel, parallel n-channel."""
+        mid = "n%s_mid" % tag
+        out.extend([
+            {"name": "mp_%sa" % tag, "role": "pmos", "function":
+             "non-overlap NOR (%s), pull-up upper device" % tag,
+             "nets": [mid, inp_a, "vdd", "vdd"], "w": wp, "l": ln},
+            {"name": "mp_%sb" % tag, "role": "pmos", "function":
+             "non-overlap NOR (%s), pull-up lower device -- IN SERIES, so the "
+             "phase can only rise once BOTH inputs are low" % tag,
+             "nets": [node, inp_b, mid, "vdd"], "w": wp, "l": ln},
+            {"name": "mn_%sa" % tag, "role": "nmos", "function":
+             "non-overlap NOR (%s), pull-down (a)" % tag,
+             "nets": [node, inp_a, "vss", "vss"], "w": wn, "l": ln},
+            {"name": "mn_%sb" % tag, "role": "nmos", "function":
+             "non-overlap NOR (%s), pull-down (b)" % tag,
+             "nets": [node, inp_b, "vss", "vss"], "w": wn, "l": ln},
+        ])
+
+    def inv(tag: str, inp: str, node: str) -> None:
+        out.extend([
+            {"name": "mp_%s" % tag, "role": "pmos", "function":
+             "non-overlap phase inverter (%s), pull-up" % tag,
+             "nets": [node, inp, "vdd", "vdd"], "w": wp, "l": ln},
+            {"name": "mn_%s" % tag, "role": "nmos", "function":
+             "non-overlap phase inverter (%s), pull-down" % tag,
+             "nets": [node, inp, "vss", "vss"], "w": wn, "l": ln},
+        ])
+
+    a_b = str(a["complement_net"])
+    b_b = str(b["complement_net"])
+    # phase A rises only when the SOURCE is high and phase B has fallen;
+    # phase B rises only when the source is low and phase A has fallen.
+    nor2("no1", comp, b_name, "n%s_x" % a_name)
+    inv("%s_i0" % a_name, "n%s_x" % a_name, a_b)
+    inv("%s_i1" % a_name, a_b, a_name)
+    nor2("no2", src, a_name, "n%s_x" % b_name)
+    inv("%s_i0" % b_name, "n%s_x" % b_name, b_b)
+    inv("%s_i1" % b_name, b_b, b_name)
+    return out
+
+
+def non_overlap_phase_nets(decl: Optional[Dict[str, Any]]) -> List[str]:
+    """The internal nets `non_overlap_phase_devices` introduces, in the order
+    it creates them. Derived from the same declaration, so the two cannot
+    drift apart."""
+    seen: List[str] = []
+    for d in non_overlap_phase_devices(decl):
+        for n in (d.get("nets") or [])[:1]:
+            if n not in seen and n not in ("vdd", "vss"):
+                seen.append(str(n))
+    return seen
+
 
 def _resolve_phase(net: Optional[str],
                    aliases: Optional[Dict[str, str]]) -> Optional[str]:
@@ -4512,6 +4636,15 @@ def expand_stages(lib: Dict[str, Any], spec_values: Dict[str, float]
     groups = _stage_groups(lib)
     devices = [dict(d) for d in (lib.get("devices") or [])]
     nets = list(lib.get("internal_nets") or [])
+    # The declared non-overlapping phase generator, if this entry declares one.
+    # Emitted here rather than typed into `devices` so the phase nets and the
+    # devices that drive them come from ONE declaration. See
+    # `CLOCK_PHASE_GENERATOR_KEY`.
+    _pg = lib.get(CLOCK_PHASE_GENERATOR_KEY)
+    devices.extend(dict(d) for d in non_overlap_phase_devices(_pg))
+    for _n in non_overlap_phase_nets(_pg):
+        if _n not in nets:
+            nets.append(_n)
     exprs = [dict(e) for e in (lib.get("device_param_exprs") or [])]
     if not groups:
         return devices, nets, exprs, None
