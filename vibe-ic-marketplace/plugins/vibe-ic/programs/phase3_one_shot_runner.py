@@ -5099,6 +5099,24 @@ def _pin_access_probe_tcl(tag: str) -> str:
         f"no_access=-1 (probe failed: $_pap_outer)\" }}\n")
 
 
+#: How many coverage PASSES one row may spend. A BUDGET, not a population:
+#: `_wtpass` counts loop iterations at run time, and there is no set of 64
+#: anything for it to be the size of.
+#:
+#: SPELLED AS A NAMED VALUE IN THE EMITTED SCRIPT, and that is the point.
+#: `emitter_population_pin_check` reads the script a program EMITS and treats
+#: `$X >= <literal>` as a statement that X's population is that literal. Written
+#: `if {$_wtpass >= 64}` the deck therefore said, in the only vocabulary that
+#: gate has, that 64 members are emitted somewhere -- and since `incr _wtpass`
+#: sits at ONE site in a builder called twice, K was a lower bound, 1 < 64 could
+#: not be decided either way, and the shipped tree grew an undecidable
+#: population (`test_the_real_tree_has_no_undecidable_population`, red on main
+#: at 536d1bf11). The gate was right: a cap is not a population, and the deck
+#: should not have been spelling one. Compared against a NAME, the deck states
+#: what it means and the gate has nothing to mis-read.
+_WELLTIE_COVERAGE_PASS_CAP = 64
+
+
 def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig",
                                        pitch_um: Optional[float] = None,
                                        pitch_source: str = "") -> str:
@@ -5266,6 +5284,7 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig",
         # cap on PASSES, not a silent stop: whatever is still uncovered when
         # the loop ends is counted and REFUSED BY NAME below.
         "      set _wtpass 0\n"
+        f"      set _wtcap {_WELLTIE_COVERAGE_PASS_CAP}\n"
         "      while {1} {\n"
         "      incr _wtpass\n"
         "      set _wtprog 0\n"
@@ -5348,10 +5367,10 @@ def _build_welltie_coverage_repair_tcl(pdk: "PdkConfig",
         # A cap on PASSES, not a silent stop. Each pass at least halves the
         # widest gap it can reach, so the bound is generous; whatever is left
         # when it trips is still counted and named.
-        "      if {$_wtpass >= 64} {\n"
+        "      if {$_wtpass >= $_wtcap} {\n"
         "        puts \"WELLTIE_COVERAGE_REPAIR_PASS_CAP: row=$_wty stopped "
-        "after $_wtpass passes with [llength $_wtunc] point(s) still "
-        "uncovered; they are counted below, not forgiven\"\n"
+        "after $_wtpass of $_wtcap passes with [llength $_wtunc] point(s) "
+        "still uncovered; they are counted below, not forgiven\"\n"
         "        break\n"
         "      }\n"
         "      }\n"
