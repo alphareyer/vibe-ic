@@ -83,7 +83,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional, Set, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _path_layout as _pl  # noqa: E402
@@ -207,6 +207,84 @@ def _drc_for_tool(project: Path, tool: str) -> Cell:
     return Cell(total, rel, basis="summary.real_violation_total")
 
 
+#: `Executing deck <name> from <...>/rule_decks/<file>.rb` -- KLayout's own line,
+#: written once per deck it sources. The RULE DECK FILE is the identity used, not
+#: the deck label, because the label is a rule number (V1.1, M2.3a) while the file
+#: names the category.
+_EXECUTED_DECK_RE = re.compile(
+    r"^.*Executing deck\s+\S+\s+from\s+(\S*?/rule_decks/([A-Za-z0-9_]+)\.rb)\s*$",
+    re.M)
+
+#: Where a DRC audit records the files it actually read. A `.log` among them is the
+#: tool transcript; that is where the executed-deck inventory lives.
+_SCOPED_UNDER = "scoped_under"
+
+
+def _executed_rule_decks(project: Path, audit: Dict[str, Any]
+                         ) -> Tuple[Set[str], str]:
+    """({rule-deck file stems the run's DRC log shows executed}, citation).
+
+    R-0915-129. A CLEAN DRC report carries no rule categories at all -- there are
+    no violations to categorise -- so `categories_found` cannot distinguish "the
+    deck did not check density" from "the deck checked density and found nothing".
+    Reading the log settles it, because KLayout writes one
+    `Executing deck ... from .../rule_decks/<category>.rb` line per deck it sources.
+
+    MEASURED on spm run21: `reports/phase3/drc_signoff.log` line 480 is
+    `Executing deck density from .../gf180mcuD/libs.tech/klayout/tech/drc/
+    rule_decks/density.rb`, one of 177 such lines naming 36 distinct rule decks --
+    while `drc_signoff.json`'s `categories_found` is
+    [spacing, width, antenna, via, enclosure] because the report is CLEAN
+    (`real_violation_total: 0`). The sibling `precheck_klayout_drc.json` scopes the
+    log as well as the report and does see density; this reader scoped only the
+    report.
+
+    The log is taken from the audit's OWN `scoped_under` list, so this reads what
+    that report says it covered rather than guessing a filename. Returns an empty
+    set when no log was scoped or none can be read -- and an empty set decides
+    nothing, so a run with no transcript stays NOT_MEASURED.
+    """
+    summary = audit.get("summary") if isinstance(audit.get("summary"), dict) else {}
+    scoped = [r for r in (summary.get(_SCOPED_UNDER) or []) if isinstance(r, str)]
+    logs = [r for r in scoped if r.endswith(".log")]
+    if not logs:
+        # THE TRANSCRIPT IS SCOPED BY A SIBLING, not by this audit. MEASURED on
+        # run21: `drc_signoff.json` scopes only `drc_signoff.rpt`, while
+        # `general_precheck/precheck_klayout_drc.json` scopes that SAME report AND
+        # `drc_signoff.log`. So the log is found by SHARED EVIDENCE -- another DRC
+        # audit in this run that covers one of the same report files -- rather than
+        # by guessing a filename from the report's stem. Binding on the shared
+        # `.rpt` is what makes it the transcript OF THIS REPORT and not of some
+        # other DRC run in the same tree.
+        reports = {r for r in scoped if not r.endswith(".log")}
+        for sibling in sorted(project.glob("reports/**/*drc*.json")):
+            try:
+                doc = json.loads(sibling.read_text(errors="replace"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(doc, dict):
+                continue
+            sib = (doc.get("summary") or {}).get(_SCOPED_UNDER) or []
+            sib = [r for r in sib if isinstance(r, str)]
+            if reports and not (reports & set(sib)):
+                continue
+            logs += [r for r in sib if r.endswith(".log")]
+    decks: Set[str] = set()
+    citation = ""
+    for rel in dict.fromkeys(logs):
+        if not isinstance(rel, str) or not rel.endswith(".log"):
+            continue
+        try:
+            text = (project / rel).read_text(errors="replace")
+        except OSError:
+            continue
+        for line, stem in _EXECUTED_DECK_RE.findall(text):
+            decks.add(stem.lower())
+            if stem.lower() == "density" and not citation:
+                citation = f"{rel}: Executing deck ... from {line}"
+    return decks, citation
+
+
 def _density(project: Path) -> Cell:
     """Density violations, from the sign-off DRC deck that checked for them.
 
@@ -227,9 +305,29 @@ def _density(project: Path) -> Cell:
         if isinstance(total, int) and not isinstance(total, bool):
             return Cell(total, rel, basis="summary.real_violation_total "
                                           "(deck carried a density category)")
+    # THE CLEAN-REPORT CASE, R-0915-129. No report carried the category, which for
+    # a report with ZERO violations says nothing either way. If the run's own DRC
+    # transcript shows the density rule deck EXECUTED and that report's violation
+    # total is 0, then density was checked and found nothing: a MEASURED zero, and
+    # writing NOT_MEASURED over it withholds a number the run produced.
+    for rel in _DRC_AUDITS:
+        d = _json(project, rel)
+        if not d:
+            continue
+        total = (d.get("summary") or {}).get("real_violation_total")
+        if not isinstance(total, int) or isinstance(total, bool) or total != 0:
+            continue
+        decks, citation = _executed_rule_decks(project, d)
+        if "density" in decks:
+            return Cell(0, rel, basis=(
+                "the run's own DRC transcript shows the density rule deck "
+                "EXECUTED over a report with zero violations, so this is a "
+                f"MEASURED zero, not an unchecked one — {citation}"))
     return unmeasured(
-        "no DRC report in this run carries a 'density' rule category, so no "
-        "density violation count was produced by any deck this run ran")
+        "no DRC report in this run carries a 'density' rule category, and no DRC "
+        "transcript this run scoped shows a density rule deck executed over a "
+        "clean report, so no density violation count was produced by any deck "
+        "this run ran")
 
 
 # ── LVS: the audited terminal verdict, and the four counts it implies ────────
