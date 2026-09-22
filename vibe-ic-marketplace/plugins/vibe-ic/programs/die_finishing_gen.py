@@ -802,8 +802,55 @@ def write_finished_def(routed: Path, out: Path,
 
 # ── the die-identification half ─────────────────────────────────────────────
 
+#: Where the DESIGN states its own packaging answer. `package_info: null` beside
+#: `no_package_in_input: true` is a DECLARATION that this design has no package --
+#: not the absence of one. Read from the phase-1 doc track, i.e. the design INPUT.
+_L1_REL = "phase1/generated_docs/L1_DATASHEET.json"
+
+
+def design_declares_no_package(project: Optional[Path]) -> Optional[str]:
+    """The design's own answer to the packaging question, or None if it gave none.
+
+    The config is not the only place this can be settled. MEASURED on spm run20:
+    `L1_DATASHEET.json` carries `package_info: null` AND
+    `no_package_in_input: true`, and the step-0.5ic / operator answers carry a
+    typed `absent_reason` -- "nothing in L1-L9 names an operator, a slot, a
+    submission template or a package" -- with an absence-of-evidence citation.
+    That is an ANSWER, and reading it as silence is the mistake #2118 cost:
+    a declared absence is not a missing declaration.
+
+    By this function's own table below, `packaging declared and not CoB` is
+    NOT_APPLICABLE. A design that declares it has no package is declared and not
+    CoB, so the half settles as NOT_APPLICABLE instead of sitting NOT_DETERMINED
+    forever -- which is what tiered the whole `die_finishing` document INCOMPLETE
+    while its own verdict said PASS and its own reason said the die-ID half "does
+    not gate the seal ring".
+
+    Returns the citation when the design declares no package, else None. Only a
+    POSITIVE declaration counts: an absent or unreadable L1, or one that simply
+    omits the keys, returns None and the half stays NOT_DETERMINED.
+    """
+    if project is None:
+        return None
+    try:
+        doc = json.loads((Path(project) / _L1_REL).read_text(errors="replace"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    fields = doc.get("fields") if isinstance(doc.get("fields"), dict) else doc
+    if fields.get("no_package_in_input") is not True:
+        return None
+    if fields.get("package_info") is not None:
+        return None
+    return (f"{_L1_REL} declares no_package_in_input=true with package_info=null: "
+            f"the design states it has no package, so it is not a chip-on-board "
+            f"submission")
+
+
 def die_id_state(cfg: Dict[str, Any],
-                 ring_check: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+                 ring_check: Optional[Dict[str, Any]],
+                 project: Optional[Path] = None) -> Dict[str, Any]:
     """The die-identification half, reported SEPARATELY and CONDITIONALLY.
 
     THE CONDITION IS THE WHOLE POINT, and it was measured on the operator's own
@@ -838,6 +885,18 @@ def die_id_state(cfg: Dict[str, Any],
     base = {"packaging": packaging, "cells": cells}
 
     if not isinstance(packaging, str) or not packaging.strip():
+        _declared = design_declares_no_package(project)
+        if _declared:
+            return {**base, "state": "NOT_APPLICABLE",
+                    "packaging_basis": _declared,
+                    "reason": (
+                        "die identification is NOT_APPLICABLE: the design itself "
+                        "declares it has no package, so this is not a "
+                        f"chip-on-board submission ({_declared}). The operator's "
+                        "generate_id places its four cells only for "
+                        f"{_COB!r} and is a silent no-op otherwise, so there is "
+                        "nothing here to require. It does not gate the seal "
+                        "ring.")}
         return {**base, "state": "NOT_DETERMINED", "reason": (
             "the packaging choice is not declared, and the die-identification "
             "requirement is CONDITIONAL on it: the operator's own generate_id "
@@ -922,7 +981,8 @@ def run(project: Path, gds: Optional[str], script: Optional[str],
         """
         res: Dict[str, Any] = {"producer": _PRODUCER, "check": _CHECK,
                                "seal_ring": seal,
-                               "die_id": die_id_state(cfg, ring_check)}
+                               "die_id": die_id_state(cfg, ring_check,
+                                                      project=project)}
         state = seal.get("state")
         for stale in (fin_def, skip_marker):
             if stale.is_file():
