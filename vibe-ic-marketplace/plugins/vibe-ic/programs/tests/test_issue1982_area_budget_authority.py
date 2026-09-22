@@ -239,13 +239,32 @@ def test_unset_authority_is_executed_as_an_incomplete_flow_clause(tmp_path):
     flow = yaml.safe_load(FLOW.read_text())
     step = next(s for s in flow["steps"] if str(s.get("id")) == "0.5ic")
     result = FCC.check_step(project, step, {})
-    report = json.loads((project / TD.REPORT_REL).read_text())
+    # WHERE THE GATE'S VERDICT LIVES. `TD.REPORT_REL` is BOTH one of step
+    # 0.5ic's declared `required_outputs` and the `--json` target of its own
+    # clause, which is the collision R-0915-126 rules on: the producer writes
+    # that document and the gate reads it. Since v1.23.23 the gate's receipt is
+    # redirected away from it, so the two are distinct documents -- measured
+    # here, `program` differs: `tapeout_declaration_gen` wrote the declaration,
+    # `tapeout_declaration_check` wrote the verdict. This test used to read the
+    # gate's verdict out of the producer's document and only worked because the
+    # audit overwrote it. `_command_json_report` follows the disclosed redirect.
+    clause = f"tapeout_declaration_check . --json {TD.REPORT_REL}"
+    report = FCC._command_json_report(project, clause)
+    assert report is not None, "the gate's receipt was not readable"
+    assert report["program"] == "tapeout_declaration_check"
     assert report["verdict"] == "INCOMPLETE"
     assert [d["rule"] for d in report["incomplete_dependencies"]] == [
         "SYNTHESIS_AREA_BUDGET_AUTHORITY_UNSET"]
     assert result.status != "PASS"
     assert any("tapeout_declaration_check" in reason
                for reason in result.reasons)
+    # THE NEGATIVE ARM. The producer's document must not gain the gate's verdict:
+    # that is the overwrite this whole family of changes removed, and a test that
+    # tolerated it would let it back in silently.
+    produced = json.loads((project / TD.REPORT_REL).read_text())
+    assert produced["program"] == "tapeout_declaration_gen"
+    assert "verdict" not in produced, (
+        "the audit wrote its verdict into the run's own declared output")
 
 
 def test_a_declared_limit_and_a_different_l19_ceiling_conflict(tmp_path):
