@@ -87,6 +87,7 @@ import fnmatch
 import functools
 import glob
 import hashlib
+import datetime
 import json
 import os
 import re
@@ -3625,6 +3626,194 @@ def _resolved_key(path: Path) -> str:
         return str(path)
 
 
+
+#: R-0915-138 — THE AUDIT'S OWN DOCUMENT IS PUBLISHED, NOT REDIRECTED.
+#:
+#: MEASURED on spm run21, and it is 5.2 seconds of ordering:
+#:   17:59:13.831  reports/phase3/gates/stage3_compliance.json   judged step 31's
+#:                    ninth required_output MISSING ("8 of 9 satisfied")
+#:   17:59:19.052  reports/phase3/perc_sweep.json                produced
+#:   17:59:19.072  reports/audit/flow_declared_producer_run.json  step 31
+#:                    perc_corpus_sweep: why "target absent", rc 0, 3.55 s,
+#:                    target_exists_after TRUE
+#: The stage-3 compliance gate judged the output missing five seconds before the
+#: declared producer wrote it. The FINAL pass re-ran the clause and got the right
+#: answer -- `phase23_completion_audit.json` (18:07) has step 31 with no
+#: missing-output reason, `sweep_reach_check rc=0 PASS`, and step 32 PASS -- but
+#: that answer was REDIRECTED to a scratch path, so the run's published stage-3
+#: evidence is still the 17:59:13 document. Its mtime never moved.
+#:
+#: R-0915-126 PROTECTS PRODUCER DOCUMENTS, and that protection is untouched here.
+#: A compliance report is the AUDITOR's own output: `_is_gate_verdict_document`
+#: reads the emitting program's identity out of the document's own stamp, so a
+#: producer's measurement at the same path is not matched and is never written
+#: over -- which is the negative arm this exception is worth nothing without.
+_SUPERSEDED_SUFFIX = ".superseded-{n}.json"
+
+
+def _superseded_copies(target: Path) -> list:
+    """Every kept copy of a superseded publication of `target`, oldest first."""
+    stem = target.name[:-len(".json")] if target.name.endswith(".json") else target.name
+    try:
+        found = sorted(target.parent.glob(f"{stem}.superseded-*.json"))
+    except OSError:                                        # pragma: no cover
+        return []
+    return found
+
+
+#: The emitter whose documents are the audit's own compliance reports. One name,
+#: because one program writes all of them -- stage2, stage3, stage4 and the
+#: phase-1 stage report are all `flow_compliance_check --json` under a different
+#: `--stage-id`.
+_COMPLIANCE_EMITTER = "flow_compliance_check"
+
+
+def _is_the_audits_own_compliance_report(path: Path) -> bool:
+    """Does the document at `path` self-identify as a compliance report?
+
+    Content, never the name: this repo's own self-document guard is content-based
+    "not name-based", and a name-based reading here would publish over any file a
+    lane happened to call `*_compliance.json`.
+    """
+    try:
+        doc = json.loads(path.read_text(errors="replace"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(doc, dict):
+        return False
+    if str(doc.get("program") or "").strip() != _COMPLIANCE_EMITTER:
+        return False
+    # AND IT MUST CARRY THE THING A STAGE REPORT IS FOR. A stamp alone would also
+    # match a future `flow_compliance_check` document of some other shape; the
+    # per-step rows are what a later pass can have a better answer about.
+    return isinstance(doc.get("steps"), list)
+
+
+def _stale_verdict(doc: Dict[str, Any]) -> Optional[str]:
+    """A document's own verdict, under whichever key it uses."""
+    for key in ("verdict", "overall", "status"):
+        v = doc.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
+def _publish_over_the_audits_own_document(argv: List[str], project: Path
+                                          ) -> Optional[Dict[str, Any]]:
+    """Preserve the stale publication and say what it said, or None.
+
+    Returns the provenance the caller must stamp into the NEW document once the
+    gate has written it: which pass wrote it, when, and what it supersedes.
+
+    THE PASS IS AN ORDINAL, NOT A LABEL, and that is deliberate. The ruling asks
+    for "which pass wrote it (mid-run vs final)"; the audit cannot know whether it
+    is the final one -- nothing tells a compliance invocation that no further
+    invocation will follow -- so recording "final" would be a claim this program
+    cannot support. The ordinal is derived from the kept copies and is exactly as
+    informative for a reader: pass 2 supersedes pass 1, and the last publication
+    is the one at the canonical path.
+    """
+    for i, tok in enumerate(argv[:-1]):
+        if tok not in _GATE_RECEIPT_FLAGS:
+            continue
+        target = Path(argv[i + 1])
+        abs_target = target if target.is_absolute() else (project / target)
+        try:
+            if not abs_target.is_file():
+                return None
+        except OSError:                                    # pragma: no cover
+            return None
+        # THE CLASS IS DECIDED BY WHAT THE DOCUMENT IS, and two cuts of this got
+        # it wrong before landing on the ruling's own words: "a stage compliance
+        # report is the AUDIT'S OWN document".
+        #
+        # Cut 1 asked `_is_gate_verdict_document(target, {clause program}, {})`.
+        # That fires for EVERY gate's verdict document, and with an empty producer
+        # set it published over step 26.5ic's `die_finishing.json` -- a
+        # `die_finishing_gen` PRODUCER document. Measured, and refused.
+        #
+        # Cut 2 passed the step's declared `programs:` as the producer set, which
+        # protects `die_finishing.json` correctly -- and then declines the
+        # compliance report too, because step 37 declares `stage3_compliance`
+        # under `programs:`, so the gate IS the declared producer and content
+        # alone cannot separate the two. Measured: the stale report stayed
+        # published.
+        #
+        # What actually identifies the class is the EMITTER: a compliance report
+        # self-identifies as written by `flow_compliance_check`, whoever invoked
+        # it, and no producer document and no other gate's verdict document does.
+        # `die_finishing.json` carries `check: die_finishing_check`; this carries
+        # `program: flow_compliance_check`. So the negative arm holds BY
+        # CONSTRUCTION rather than by a set that has to be kept right.
+        if not _is_the_audits_own_compliance_report(abs_target):
+            return None
+        try:
+            stale = json.loads(abs_target.read_text(errors="replace"))
+        except (OSError, ValueError):
+            stale = {}
+        n = len(_superseded_copies(abs_target)) + 1
+        keep = abs_target.with_name(
+            abs_target.name[:-len(".json")] + _SUPERSEDED_SUFFIX.format(n=n))
+        try:
+            shutil.copy2(abs_target, keep)
+        except OSError:                                    # pragma: no cover
+            return None
+        return {
+            "path": str(abs_target),
+            "pass": n + 1,
+            "supersedes": {
+                "pass": n,
+                # THE VERDICT UNDER EITHER OF ITS TWO NAMES. A compliance report
+                # spells it `overall`; the other gate documents spell it
+                # `verdict`. Reading only one of them recorded `null` for exactly
+                # the report this ruling is about -- measured on the first cut of
+                # this change.
+                "verdict": (_stale_verdict(stale) if isinstance(stale, dict)
+                            else None),
+                "mtime": _iso_mtime(abs_target),
+                "kept_at": keep.relative_to(project).as_posix()
+                           if keep.is_relative_to(project) else str(keep),
+            },
+        }
+    return None
+
+
+def _iso_mtime(path: Path) -> Optional[str]:
+    try:
+        return datetime.datetime.fromtimestamp(
+            path.stat().st_mtime).isoformat(timespec="milliseconds")
+    except OSError:                                        # pragma: no cover
+        return None
+
+
+def _stamp_publication(provenance: Optional[Dict[str, Any]]) -> None:
+    """Write `published_by` into the document the gate has just re-published.
+
+    NEVER RAISES and never changes a verdict: this is provenance, and a run must
+    not die because its bookkeeping failed. A document the gate did not rewrite
+    keeps whatever stamp it had.
+    """
+    if not provenance:
+        return
+    path = Path(provenance["path"])
+    try:
+        doc = json.loads(path.read_text(errors="replace"))
+        if not isinstance(doc, dict):
+            return
+        doc["published_by"] = {
+            "pass": provenance["pass"],
+            "at": datetime.datetime.now().isoformat(timespec="milliseconds"),
+            "supersedes": provenance["supersedes"],
+            "note": ("this stage report was re-published by a later audit pass: "
+                     "the earlier one is kept beside it and its verdict is named "
+                     "above (R-0915-138). A compliance report is the auditor's "
+                     "own document; a producer's document is never written over"),
+        }
+        path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    except (OSError, ValueError):                          # pragma: no cover
+        return
+
+
 def _receipt_off_a_produced_document(argv: List[str], project: Path
                                     ) -> Tuple[List[str], Optional[str], Any]:
     """Redirect a gate's receipt when it would OVERWRITE the run's own document.
@@ -3727,8 +3916,30 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
     if not argv:
         return _ProgramCheckOutcome(
             False, f"program not found: {cmd_str.split()[0]}", None)
-    argv, _receipt_note, _receipt_tmp = _receipt_off_a_produced_document(
-        argv, project)
+    # R-0915-138 — THE AUDIT'S OWN DOCUMENT IS PUBLISHED, NOT REDIRECTED, and
+    # this is the ONE branch that decides it. When the existing document at the
+    # clause's receipt path is this clause's own previous publication (read from
+    # the document's own identity stamp, never from its name or its mtime), the
+    # redirect is skipped so the later, correct verdict lands at the canonical
+    # path -- and the earlier one is kept beside it with its verdict named.
+    # Measured cost of not doing this, on spm run21: the published stage-3 report
+    # is the 17:59:13 one that judged step 31's ninth output missing five seconds
+    # before the declared producer wrote it, while the later pass's correct answer
+    # went to a scratch directory and was discarded.
+    _publication = _publish_over_the_audits_own_document(argv, project)
+    if _publication is None:
+        argv, _receipt_note, _receipt_tmp = _receipt_off_a_produced_document(
+            argv, project)
+    else:
+        _receipt_note, _receipt_tmp = (
+            f"RE-PUBLISHED: this clause's receipt {Path(_publication['path']).name} "
+            f"is the auditor's own previous publication (pass "
+            f"{_publication['supersedes']['pass']}, verdict "
+            f"{_publication['supersedes']['verdict']}), so the later verdict is "
+            f"written at the canonical path and the earlier document is kept at "
+            f"{_publication['supersedes']['kept_at']} (R-0915-138). A PRODUCER's "
+            f"document is never written over -- that is R-0915-126 and it is "
+            f"untouched"), None
     #: WHERE THE RECEIPT WENT. Every outcome below carries it, because
     #: `_check_program_exit_zero` reads the gate's structured verdict, reason
     #: class and message out of the receipt -- and the path the clause NAMES now
@@ -3745,6 +3956,12 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
 
     def _outcome(passed: bool, output: str,
                  exit_code: Optional[int]) -> _ProgramCheckOutcome:
+        # STAMPED HERE, not at the write site, because the gate is a SUBPROCESS:
+        # this function is the one place every return path funnels through after
+        # it has exited, so the provenance cannot be attached on some paths and
+        # missed on others. `_stamp_publication` never raises and never changes a
+        # verdict.
+        _stamp_publication(_publication)
         return _ProgramCheckOutcome(passed, output, exit_code,
                                     _receipt_path, _receipt_tmp)
     # #525 — per-gate budget from the SHARED resolver (default 900s, env
@@ -19529,6 +19746,26 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.json:
         out = {
+            # R-0915-138 — THE EMITTER STAMPS ITSELF, and until now this was the
+            # one gate document in the flow that did not.
+            #
+            # `_is_gate_verdict_document` reads a document's own identity stamp to
+            # answer "is this the AUDITOR's output or the RUN's", and its
+            # vocabulary was measured across every step whose gate `--json` target
+            # is also a declared required_output: `program` (14), `check` (2),
+            # `gate` (2), `emitted_by` (1). The compliance report carried NONE of
+            # them -- its top-level keys are `flow`, `project`, `strict`, ...,
+            # `overall` -- so the predicate answered False, correctly and
+            # conservatively, and the re-publication path below could not fire for
+            # exactly the document R-0915-138 is about. MEASURED: with the stamp
+            # absent, pass 2 left the stale pass-1 report in place (canonical mtime
+            # unmoved, no superseded copy, no provenance).
+            #
+            # Stamping it is also the honest fix in its own right: a document that
+            # does not say which program wrote it cannot be told from a producer's
+            # measurement at the same path by anything except its name, and this
+            # repo's own guard is content-based "not name-based".
+            "program": "flow_compliance_check",
             "flow": args.flow,
             "project": str(project),
             "strict": not args.lenient,
