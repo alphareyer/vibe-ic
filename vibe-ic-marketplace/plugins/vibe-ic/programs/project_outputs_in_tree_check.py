@@ -232,6 +232,51 @@ _ANY_ABS_PATH_RE = re.compile(
 _MIN_DERIVED_COMPONENTS = 3
 
 
+def preserved_in_the_run_root(path_str: str, project: Path) -> Optional[Path]:
+    """The run-relative artefact `path_str` names, when it IS in the run root.
+
+    A relocated-copy reference is only lost evidence when the evidence is
+    actually gone. The same tree is often named through a SECOND MOUNT -- a run
+    bind-mounted into the EDA container is both
+    `/home/.../run20/phase3/...` on the host and `/foss/designs/run20/phase3/...`
+    inside the image -- and a recorded command line naturally carries the
+    container spelling. The artefact it names can be sitting in the run root the
+    whole time.
+
+    MEASURED on spm run20, `reports/phase3/die_finishing.json`, whose recorded
+    KLayout `argv` carries both of these while the SAME record's `gds_in` gives
+    the host spelling of the first:
+        /foss/designs/run20/phase3/stage3/pnr/spm.gds         <- IS in the tree
+        /foss/designs/run20/phase3/stage3/pnr/spm.sealed.gds  <- is NOT
+    Both were reported as "an ephemeral location this run used and did not
+    preserve". For the first that is false: the evidence is preserved, at the
+    same run-relative path. run18L and run19 recorded the HOST spelling of the
+    identical argv, so they were counted as in-tree self-references and this
+    never showed -- the reference set changed because a PRODUCER changed, not
+    because anything regressed.
+
+    The tail is derived from the run root's own directory NAME, exactly as
+    `names_a_relocated_copy` derives condition (2); no prefix list is consulted.
+    Returns the run-relative path when it exists in the run root, else None --
+    so `spm.sealed.gds` keeps its finding, which is the honest answer: that
+    output was never written, in any of the three runs.
+    """
+    parts = Path(path_str).parts
+    name = project.name
+    if name not in parts:
+        return None
+    # the LAST occurrence: a copy staged under a directory that repeats the name
+    # is still this run, and the tail after the final one is the run-relative path
+    index = len(parts) - 1 - parts[::-1].index(name)
+    if index + 1 >= len(parts):
+        return None
+    tail = Path(*parts[index + 1:])
+    try:
+        return tail if (project / tail).exists() else None
+    except OSError:                                        # pragma: no cover
+        return None
+
+
 def _derived_ephemeral(path_str: str, project: Path) -> bool:
     """True when `path_str` names a relocated copy of THIS run root that is gone.
 
@@ -450,6 +495,11 @@ def main() -> int:
     # are byte-identical to before.
     seen_derived: Set[str] = set()
     ephemeral_derived: List[Tuple[str, str]] = []
+    # A relocated-copy reference whose artefact IS in the run root: the same file
+    # named through a second mount of this tree. Disclosed, never blocking -- the
+    # evidence is not lost, which is the only thing this gate exists to catch.
+    # (file, path, run-relative path that exists)
+    other_mount: List[Tuple[str, str, str]] = []
     for pat in _SCAN_GLOBS:
         for f in project.glob(pat):
             if not f.is_file():
@@ -504,6 +554,11 @@ def main() -> int:
                 if not _derived_ephemeral(p, project):
                     continue
                 seen_derived.add(p)
+                _kept = preserved_in_the_run_root(p, project)
+                if _kept is not None:
+                    other_mount.append(
+                        (str(f.relative_to(project)), p, str(_kept)))
+                    continue
                 if from_log:
                     # Same rule as #622: a log cites transient tool paths by
                     # nature. Disclosed, non-blocking.
@@ -646,6 +701,18 @@ def main() -> int:
                      f"project root {project} — in-tree by definition, "
                      f"non-blocking (the project itself lives at a volatile "
                      f"path; these are its OWN files, not external storage)")
+
+    if other_mount:
+        block = [f"[INFO] project_outputs_in_tree_check: "
+                 f"{len(other_mount)} reference(s) naming THIS run through "
+                 f"another mount of the same tree — non-blocking, because the "
+                 f"artefact is present in the run root at the same run-relative "
+                 f"path, so no evidence is missing (a run bind-mounted into the "
+                 f"EDA container is named both ways, and a recorded command "
+                 f"line carries the container spelling):"]
+        for f_rel, path_s, kept in other_mount:
+            block.append(f"  - {f_rel} → {path_s} (present as {kept})")
+        print("\n".join(block))
 
     if process_markers:
         block = [f"[INFO] project_outputs_in_tree_check: "
