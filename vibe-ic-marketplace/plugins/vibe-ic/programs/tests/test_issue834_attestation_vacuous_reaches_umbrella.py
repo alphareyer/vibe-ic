@@ -42,6 +42,8 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
+import pathlib
+import pytest
 import sys
 from pathlib import Path
 
@@ -101,6 +103,23 @@ def test_no_canonical_artefacts_exits_with_the_vacuous_rc(tmp_path):
         f"{_vx.RC_VACUOUS}, got {r.returncode}. stdout={r.stdout!r}")
 
 
+def _assert_no_executed_pass_for_a_vacuous_run(rec):
+    """#834's property, in ONE place so the mutation arm can drive the same code.
+
+    Factored because the arm below must demonstrate this going RED. An arm that
+    re-states the assertions inline can drift from the test it claims to guard,
+    and an arm that merely describes the mutant proves nothing at all.
+    """
+    assert rec["verdict"] != "PASS", (
+        "a gate that examined nothing must not hold a PASS record — that is "
+        f"what puts it in the executed-PASS numerator. record={rec}")
+    assert rec["verdict"] == "BLOCKED", rec
+    assert rec["reason_class"] == "BLOCKED_BY_UPSTREAM", rec
+    assert rec["evidence"].get("exit_code") == _vx.RC_VACUOUS, rec
+    assert rec["evidence"].get("skip_kind") == "input-missing", rec
+    assert rec["verdict"] != "NOT_INVOCABLE", rec
+
+
 def test_the_vacuous_rc_is_the_one_the_umbrella_reads():
     """Pins the two sides of the contract to ONE constant, not to a literal.
 
@@ -108,7 +127,29 @@ def test_the_vacuous_rc_is_the_one_the_umbrella_reads():
     consumer's own convention constant is what stops a third one appearing.
     """
     assert _vx.RC_VACUOUS == 2
-    assert _GATE_NAME in F._STRUCTURAL_RTL_GATES
+    # RE-PINNED TO THE NEW CONSUMER (R-0915-130), assertion unchanged in kind.
+    # The gate no longer sits in `_STRUCTURAL_RTL_GATES` — membership meant every
+    # mid-run invocation asked it ten minutes before `reports/final_summary.md`
+    # existed — so the thing to assert is that the consumer which DOES ask it
+    # exists and is reached. The property #834 defends is unchanged: the vacuous
+    # rc must arrive at a record, not merely be printed.
+    assert _GATE_NAME not in F._STRUCTURAL_RTL_GATES, (
+        "the gate was moved out of the umbrella by R-0915-130; if it is back in "
+        "the registry it is being asked before its input exists again")
+    assert hasattr(F, "attestation_gate_record"), (
+        "the relocated gate has no consumer, so nothing records its rc")
+    import final_report_generate as _frg
+    _src = pathlib.Path(_frg.__file__).read_text()
+    # THE CALL, not the NAME. A first draft asserted the bare identifier and was
+    # satisfied by the explanatory COMMENT beside the call — so replacing the call
+    # with a literal dict left this green. Assert the invocation, and strip
+    # comments first so no future comment can satisfy it either.
+    _code = "\n".join(
+        line.split("#", 1)[0] for line in _src.splitlines())
+    assert "attestation_gate_record(project)" in _code, (
+        "the late consumer must CALL the record builder, not merely mention it: "
+        "a consumer that prints a verdict without recording it is the pre-#834 "
+        "state, where a vacuous run is counted nowhere")
 
 
 # ---------------------------------------------------------------------------
@@ -174,17 +215,46 @@ def test_umbrella_no_longer_records_an_executed_pass_for_a_vacuous_run(
         "endmodule\n")
     _report(proj, "# summary\n\nNo canonical artefacts yet.\n")
 
-    records = []
-    F._run_structural_rtl_gates(proj, records_out=records)
-    rec = next(r for r in records if r["name"] == _GATE_NAME)
+    # RE-PINNED TO THE NEW CONSUMER. Same record, same four assertions below;
+    # only the machine that produces it moved. `attestation_gate_record` reuses the
+    # umbrella's own `_p0_gate_record` and `infer_nonverdict_reason`, so the rc
+    # mapping still has ONE definition — which is what this file's sibling test
+    # ("two literals in two files drifting apart") exists to prevent.
+    rec = F.attestation_gate_record(proj)
+    assert rec["name"] == _GATE_NAME, rec
 
-    assert rec["verdict"] != "PASS", (
-        "a gate that examined nothing must not hold a PASS record — that is "
-        f"what puts it in the executed-PASS numerator. record={rec}")
-    assert rec["verdict"] == "BLOCKED", rec
-    assert rec["reason_class"] == "BLOCKED_BY_UPSTREAM", rec
-    assert rec["evidence"].get("exit_code") == _vx.RC_VACUOUS, rec
-    assert rec["evidence"].get("skip_kind") == "input-missing", rec
-    # And it must NOT be misread as the caller's own invocation defect: the
-    # gate DID return a verdict about the design.
-    assert rec["verdict"] != "NOT_INVOCABLE", rec
+    # The four assertions live in `_assert_no_executed_pass_for_a_vacuous_run`
+    # so the mutation arm at the end of this file drives the SAME code and can
+    # show it going red. The last one is the point that it must NOT be misread as
+    # the caller's own invocation defect: the gate DID return a verdict.
+    _assert_no_executed_pass_for_a_vacuous_run(rec)
+
+
+def test_a_consumer_that_swallows_the_vacuous_rc_is_red(tmp_path, monkeypatch):
+    """THE MUTATION ARM the move owes, and it must go RED, not describe a mutant.
+
+    A relocated gate is only as good as the record it produces. If the consumer
+    maps a vacuous run onto a PASS — or drops the exit code — the run re-enters the
+    executed-PASS numerator silently, which is the pre-#834 state. So: patch the
+    consumer to swallow the rc, then drive the SAME property helper the test above
+    uses and require it to RAISE. A first draft of this arm merely asserted the
+    mutant's own claim and passed; an arm that cannot fail guards nothing.
+    """
+    proj = tmp_path / "proj"
+    rtl = proj / "phase2" / "stage1" / "rtl"
+    rtl.mkdir(parents=True)
+    (rtl / "top.v").write_text("module top(); endmodule\n")
+    _report(proj, "# summary\n\nNo canonical artefacts yet.\n")
+
+    # the honest consumer satisfies the property
+    _assert_no_executed_pass_for_a_vacuous_run(F.attestation_gate_record(proj))
+
+    # the swallowing consumer must not
+    monkeypatch.setattr(
+        F, "attestation_gate_record",
+        lambda project, gate_name=_GATE_NAME: {
+            "name": gate_name, "verdict": "PASS", "reason_class": "",
+            "message": "", "evidence": {"exit_code": 0}})
+    with pytest.raises(AssertionError):
+        _assert_no_executed_pass_for_a_vacuous_run(
+            F.attestation_gate_record(proj))

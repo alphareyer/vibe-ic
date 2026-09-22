@@ -10101,6 +10101,68 @@ def _p0_passed_count(records: List[Dict[str, Any]]) -> int:
     return sum(1 for r in records if r["verdict"] == "PASS")
 
 
+def attestation_gate_record(project: Path,
+                            gate_name: str = "agent_report_sha256_attestation_check",
+                            ) -> Dict[str, Any]:
+    """Run ONE relocated gate and return the record a roll-up consumes.
+
+    #834 established that this gate's conclusion "has to arrive at the machine
+    that publishes the X-of-Y figure, not merely be printed" -- before that fix
+    the record read `verdict=PASS, exit_code=0` on a project with no artefacts at
+    all. R-0915-130 then moved the gate OUT of `_STRUCTURAL_RTL_GATES`, because
+    membership meant every mid-run invocation asked it ten minutes before its
+    input existed. Both rulings hold only if the gate is asked LATE **and** still
+    RECORDS: a relocated gate that only prints is a gate whose vacuous run is no
+    longer counted anywhere, which is exactly the regression #834 named.
+
+    So this is the consumer at the new position. It reuses the two shared helpers
+    the umbrella's own loop uses -- `_p0_gate_record` for the verdict/class
+    pairing and `infer_nonverdict_reason` for the class -- rather than restating
+    the rc mapping here, because "two literals in two files drifting apart" is
+    the defect #834's first test pins.
+
+    KNOWN LIMIT, stated rather than hidden: the rc -> record mapping for the other
+    arms (rc 1, NOT_INVOCABLE, waivers) still lives INLINE in
+    `_run_structural_rtl_gates`'s per-gate loop. Any future gate moved out of the
+    umbrella faces this same problem, and the durable fix is to extract that
+    mapping so both callers share it. That refactor is not done here.
+    """
+    argv = _resolve_program_cmd(f"{gate_name} .", cwd=project)
+    if not argv:
+        return _p0_gate_record(gate_name, "NOT_INVOCABLE",
+                              f"program not found: {gate_name}",
+                              {"exit_code": None})
+    # Invoked through `_watchdog.run_host_supervised`, the SAME supervised runner
+    # the umbrella's own loop uses -- not a bare subprocess call -- so a gate that
+    # stalls here is bounded exactly as it is there.
+    try:
+        res = _watchdog.run_host_supervised(argv, cwd=str(project),
+                                            stall_grace_s=_pl.gate_timeout_s())
+        cp = _watchdog.completed_process(argv, res)
+        rc, out, err = cp.returncode, cp.stdout, cp.stderr
+    except Exception as exc:                               # pragma: no cover
+        return _p0_gate_record(gate_name, "NOT_INVOCABLE",
+                               f"{type(exc).__name__}: {exc}",
+                               {"exit_code": None})
+    first = _p0_first_line(out or err)
+    if rc == 0:
+        return _p0_gate_record(gate_name, "PASS", "", {"exit_code": 0})
+    if rc == 1:
+        return _p0_gate_record(gate_name, "FAIL", first, {"exit_code": 1})
+    # THE VACUOUS ARM, and the one #834 is about. `RC_VACUOUS` is read from the
+    # convention, never typed as a literal, which is that test's own first
+    # assertion.
+    evidence: Dict[str, Any] = {"exit_code": rc, "skip_kind": "input-missing"}
+    declared = _p0_declared_reason_class(gate_name, project, None)
+    if declared:
+        evidence["reason_class"] = declared
+        evidence["skip_kind"] = "declared-by-gate"
+    reason_class = _reason_taxonomy.infer_nonverdict_reason(
+        verdict="BLOCKED", message=first, evidence=evidence)
+    return _p0_gate_record(gate_name, "BLOCKED", first, evidence,
+                           reason_class=reason_class)
+
+
 def _run_structural_rtl_gates(project: Path,
                               strict_timing: bool = False,
                               allow_thin_input: bool = False,
