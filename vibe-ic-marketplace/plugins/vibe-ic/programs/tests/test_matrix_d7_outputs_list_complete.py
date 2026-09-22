@@ -1602,7 +1602,7 @@ def test_unattributable_findings_are_surfaced_not_dropped():
 
 def test_every_cell_lands_in_exactly_one_state():
   # 2026-09-02: 68 -> 69, step 37.4 (sign-off metrics aggregation) added; the step SET gained exactly that one member and lost none.
-    """69 cells; ENFORCED + WAIVED + NA == 69, and no cell is in two states.
+    """70 cells; ENFORCED + WAIVED + NA == 70, and no cell is in two states.
 
     The census is derived live, not written down: a step added to the yaml
     lands here as ENFORCED and this arithmetic keeps holding, while a waiver
@@ -1624,7 +1624,11 @@ def test_every_cell_lands_in_exactly_one_state():
     # yaml carries 69 step ids, `1.6x` among them and `37.5self` not.
     # A step arriving OR leaving must force a human to say the number out loud.
   # 2026-09-02: 68 -> 69, step 37.4 (sign-off metrics aggregation) added; the step SET gained exactly that one member and lost none.
-    assert len(cells) == len(F.step_ids()) == 69
+    # 2026-09-23: 69 -> 70, step 37.3 (GDS stream-out / finishing fidelity)
+    # added; RE-DERIVED from the live yaml with `len(F.step_ids())`, never
+    # incremented by hand, and the step SET gained exactly that one member and
+    # lost none (measured against origin/main: arrived ['37.3'], departed []).
+    assert len(cells) == len(F.step_ids()) == 70
 
     state = Counter()
     for cell in cells:
@@ -1652,7 +1656,7 @@ def test_every_cell_lands_in_exactly_one_state():
     # yaml carries 69 step ids, `1.6x` among them and `37.5self` not.
     # A step arriving OR leaving must force a human to say the number out loud.
   # 2026-09-02: 68 -> 69, step 37.4 (sign-off metrics aggregation) added; the step SET gained exactly that one member and lost none.
-    assert sum(state.values()) == 69, state
+    assert sum(state.values()) == 70, state
     assert state["NA"] >= 1 and state["ENFORCED"] >= 1, state
     # Waivers must not be the majority strategy: if they ever are, this
     # dimension has stopped enforcing anything and should be redesigned.

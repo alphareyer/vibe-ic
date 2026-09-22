@@ -1322,7 +1322,11 @@ def test_d5_covers_every_cell_exactly_once():
     # (v1.11.18) and this pin was moved for none of them, which is why it
     # was already red on main before the ninth dimension landed.
   # 2026-09-02: 68 -> 69, step 37.4 (sign-off metrics aggregation) added; the step SET gained exactly that one member and lost none.
-    assert len(ids) == len(F.step_ids()) == 69, (
+    # 2026-09-23: 69 -> 70, step 37.3 (GDS stream-out / finishing fidelity)
+    # added; RE-DERIVED from the live yaml with `len(F.step_ids())`, never
+    # incremented by hand, and the step SET gained exactly that one member and
+    # lost none (measured against origin/main: arrived ['37.3'], departed []).
+    assert len(ids) == len(F.step_ids()) == 70, (
         f"parametrized {len(ids)} cells over {len(F.step_ids())} flow steps"
     )
     assert ids == [F.normalize_id(s) for s in F.step_ids()], (
@@ -1387,7 +1391,7 @@ def test_d5_state_census_is_exhaustive():
     # (v1.11.18) and this pin was moved for none of them, which is why it
     # was already red on main before the ninth dimension landed.
   # 2026-09-02: 68 -> 69, step 37.4 (sign-off metrics aggregation) added; the step SET gained exactly that one member and lost none.
-    assert len(F.step_ids()) == 69, (
+    assert len(F.step_ids()) == 70, (
         f"the NA rationale was re-derived over {len(F.step_ids())} steps, not "
         f"63; the population moved and this census states a figure for a grid "
         f"it no longer describes"

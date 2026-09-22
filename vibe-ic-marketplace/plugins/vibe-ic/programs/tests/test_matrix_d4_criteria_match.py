@@ -829,7 +829,11 @@ def test_d4_selfcheck_every_cell_has_exactly_one_disposition():
     # (v1.11.18) and this pin was moved for none of them, which is why it
     # was already red on main before the ninth dimension landed.
   # 2026-09-02: 68 -> 69, step 37.4 (sign-off metrics aggregation) added; the step SET gained exactly that one member and lost none.
-    assert len(cells) == len(F.step_ids()) == 69, (
+    # 2026-09-23: 69 -> 70, step 37.3 (GDS stream-out / finishing fidelity)
+    # added; RE-DERIVED from the live yaml with `len(F.step_ids())`, never
+    # incremented by hand, and the step SET gained exactly that one member and
+    # lost none (measured against origin/main: arrived ['37.3'], departed []).
+    assert len(cells) == len(F.step_ids()) == 70, (
         f"the flow declares {len(F.step_ids())} steps; dimension {DIM} carries "
         f"{len(cells)} cells — the ledger and the yaml have diverged"
     )
@@ -866,7 +870,7 @@ def test_d4_selfcheck_every_cell_has_exactly_one_disposition():
     # (v1.11.18) and this pin was moved for none of them, which is why it
     # was already red on main before the ninth dimension landed.
   # 2026-09-02: 68 -> 69, step 37.4 (sign-off metrics aggregation) added; the step SET gained exactly that one member and lost none.
-    assert len(cells) - len(waived) == 69 and not waived, (
+    assert len(cells) - len(waived) == 70 and not waived, (
         f"{len(cells) - len(waived)} cells are enforced and {len(waived)} are "
         f"waived; this module was reported as enforcing all 63 with no "
         f"waiver. Update the report, or explain the change."

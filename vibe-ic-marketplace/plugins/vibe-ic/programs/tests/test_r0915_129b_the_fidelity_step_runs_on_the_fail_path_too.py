@@ -56,8 +56,13 @@ PROGRAMS = PLUGIN / "programs"
 sys.path.insert(0, str(PROGRAMS))
 
 
+def _flow() -> dict:
+    return yaml.safe_load(
+        (PLUGIN / "flow" / "phase1_phase2_phase3.yaml").read_text())
+
+
 def _step(sid: str) -> dict:
-    d = yaml.safe_load((PLUGIN / "flow" / "phase1_phase2_phase3.yaml").read_text())
+    d = _flow()
 
     def walk(o):
         if isinstance(o, dict):
@@ -74,14 +79,54 @@ def _step(sid: str) -> dict:
 # ── (1) conditional on its subject, not dependent on a verdict ──────────────
 
 def test_the_fidelity_step_has_no_verdict_dependency():
-    """THE DEFECT. `blocks_on: [37]` cascaded it away on the FAIL path."""
-    assert _step("37.3").get("blocks_on") is None
+    """THE DEFECT. `blocks_on: [37]` cascaded it away on the FAIL path.
+
+    Declared as `[]`, not omitted: the flow contract requires every step to carry
+    the key ("every step must declare `blocks_on`, even as an empty list", which
+    the ledger enforces and which omitting it made red on ['37.3']). An empty list
+    is also the better statement — it says "no verdict dependency" out loud.
+    """
+    assert _step("37.3").get("blocks_on") == []
 
 
 def test_the_fidelity_step_is_conditional_on_its_subject():
+    """AND THE SUBJECT IS THE SHIPPED GDS, not the run's attestation about it.
+
+    RE-POINTED, because the first spelling was a defect the matrix named:
+    conditioning on `reports/phase3/pad_ring_route_evidence.json` is a
+    SELF-DISABLING CONDITION -- `flow_condition_reachability_check` measured its
+    absence as loud NOWHERE (T7=None, T3=None, T5=None) -- and the runner writes
+    that file only under `_chip_path_requests_pad_ring`, so every design off the
+    chip pad-ring path had no fidelity check and nothing said so.
+
+    `phase3/stage4/gds/*.gds` is the subject itself and its absence FAILs step 37,
+    which is asserted below rather than described: that is the whole reason this
+    trigger is admissible where the other was not.
+    """
     cond = _step("37.3").get("condition") or {}
-    assert "reports/phase3/pad_ring_route_evidence.json" in (
-        cond.get("files_exist") or []), cond
+    assert "phase3/stage4/gds/*.gds" in (cond.get("files_exist") or []), cond
+    assert "reports/phase3/pad_ring_route_evidence.json" not in (
+        cond.get("files_exist") or []), (
+        "the attestation is the BINDING, not the subject; gating on it silently "
+        "disables this step on every design without a chip pad ring")
+
+
+def test_the_trigger_has_a_loud_absence_somewhere():
+    """WHY THIS TRIGGER IS ADMISSIBLE AND THE OLD ONE WAS NOT, measured through
+    the same index the reachability checker reads.
+
+    A condition may only be gated on an artefact whose disappearance is reported
+    by somebody. `phase3/stage4/gds/*.gds` is a hard `files_exist` in step 37's own
+    gate, so a run missing it FAILED there; the route attestation is in no step's
+    hard set at all.
+    """
+    import flow_condition_reachability_check as R
+    hard = R._build_hard_gate_index(_flow()["steps"])
+    assert hard.get("phase3/stage4/gds/*.gds") == "37", hard.get(
+        "phase3/stage4/gds/*.gds")
+    assert "reports/phase3/pad_ring_route_evidence.json" not in hard, (
+        "if the attestation ever gains a hard clause this test should be "
+        "revisited, not deleted -- the trigger choice was made on this fact")
 
 
 def test_its_sibling_keeps_its_own_dependency():

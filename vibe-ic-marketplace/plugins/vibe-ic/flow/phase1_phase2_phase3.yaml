@@ -8325,13 +8325,30 @@ steps:
     # words: "a metric with no producer, not a metric that cannot be produced".
     #
     # So the step is CONDITIONAL on its subject existing rather than DEPENDENT on
-    # a verdict: with the route attestation present there is a named shipped GDS
-    # to audit and the step runs, PV clean or not; with it absent there is no
-    # subject and the step is NOT_APPLICABLE -- never FAIL/missing_artefact, which
-    # is what a cascaded-away step with a declared output produced here.
+    # a verdict: with a shipped GDS on disk there is something to audit and the
+    # step runs, PV clean or not; with none there is no subject and the step is
+    # NOT_APPLICABLE -- never FAIL/missing_artefact, which is what a cascaded-away
+    # step with a declared output produced here.
+    #
+    # THE TRIGGER IS THE SHIPPED GDS, NOT THE ROUTE ATTESTATION, and the first
+    # draft had it wrong in a way the matrix named precisely. Conditioning on
+    # `reports/phase3/pad_ring_route_evidence.json` was a SELF-DISABLING
+    # CONDITION: `flow_condition_reachability_check` classifies a trigger the flow
+    # itself produces whose absence is loud nowhere (measured: T7=None, T3=None,
+    # T5=None) as exactly the shape where "the artefact is missing" and "the check
+    # was never made" are indistinguishable downstream -- and the runner writes
+    # that attestation ONLY under `_chip_path_requests_pad_ring`, so every design
+    # off the chip pad-ring path silently had no fidelity check at all.
+    #
+    # `phase3/stage4/gds/*.gds` is the subject itself AND has a loud absence: it
+    # is a hard `files_exist` clause in step 37's own gate (T7, step 37), so a run
+    # that reached here without a shipped GDS already FAILED at the step that owed
+    # it. The attestation is still PREFERRED inside the checker -- it decides the
+    # GDS/DEF pairing and refuses on a sha256 that no longer holds -- but it is
+    # the BINDING, not the subject, and the receipt says which of the two it used.
     condition:
       files_exist:
-        - "reports/phase3/pad_ring_route_evidence.json"
+        - "phase3/stage4/gds/*.gds"
     required_outputs:
       - "reports/phase3/gds_xor.json"
     programs:
@@ -8339,11 +8356,18 @@ steps:
     gate:
       all_of:
         - program_exit_zero: "gds_xor_check . --json reports/phase3/gds_xor.json"
-    # NO `blocks_on`, deliberately. `blocks_on` declares a VERDICT dependency and
-    # is what cascaded this step away behind a failed 37; the real requirement is
-    # that the artefacts exist, which the `condition` above states directly and
+    # EMPTY, NOT ABSENT. `blocks_on` declares a VERDICT dependency and a non-empty
+    # one is what cascaded this step away behind a failed 37; the real requirement
+    # is that the artefacts exist, which the `condition` above states directly and
     # checks at evaluation time. Ordering is unaffected: the condition cannot be
     # satisfied before step 37 has written the attestation it names.
+    #
+    # It is declared as `[]` rather than omitted because the flow contract says so
+    # and the ledger enforces it: "every step must declare `blocks_on`, even as an
+    # empty list". Omitting it made that check red on ['37.3'] -- and an empty list
+    # is the better statement anyway: it says "no verdict dependency" out loud
+    # instead of leaving a reader to infer it from a missing key.
+    blocks_on: []
 
   - id: "37.4"
     name: "Sign-off metrics aggregation — the run's own checker verdicts, under the names the release documents read"

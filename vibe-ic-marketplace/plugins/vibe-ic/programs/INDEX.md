@@ -516,6 +516,7 @@ Auto-generated catalog of every `*.py` under `vibe-ic-marketplace/plugins/vibe-i
 | `gds_streamout_layermap_check` | any | — | Deterministic sign-off streamout layer conformance checker. |
 | `gds_substance_check` | any | — | the shipped chip GDS must be a structurally valid GDSII stream carrying layout substance proportional to the design's own placed-instance... |
 | `gds_topcell_name_check` | any | — | Deterministic GDSII top-cell-name verifier. |
+| `gds_xor_check` | any | — | stream-out / finishing fidelity, as a tapeout checklist means it. |
 | `gen_program_inventory` | any | — | single source of truth for every stated count of this plugin's `programs/` population. |
 | `gen_skill_inventory` | any | — | single source of truth for the AI-skill count. |
 | `general_precheck` | any | — | the tape-out precheck for a design with NO operator. |
@@ -1895,6 +1896,7 @@ _(no programs in this group)_
 - `gds_streamout_layermap_check` — Deterministic sign-off streamout layer conformance checker.
 - `gds_substance_check` — the shipped chip GDS must be a structurally valid GDSII stream carrying layout substance proportional to the design's own placed-instance...
 - `gds_topcell_name_check` — Deterministic GDSII top-cell-name verifier.
+- `gds_xor_check` — stream-out / finishing fidelity, as a tapeout checklist means it.
 - `gen_program_inventory` — single source of truth for every stated count of this plugin's `programs/` population.
 - `gen_skill_inventory` — single source of truth for the AI-skill count.
 - `general_precheck` — the tape-out precheck for a design with NO operator.

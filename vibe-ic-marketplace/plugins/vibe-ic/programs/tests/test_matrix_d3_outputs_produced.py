@@ -6262,7 +6262,17 @@ DECLARED_OUTSIDE_THE_PUBLISH_CONTRACT: Tuple[Tuple[str, str], ...] = (
     # so the declaration sits outside what a published cell carries and says so
     # here rather than quietly.
     ("37", "phase3/stage3/pnr/stream_out.log"),
-    ("37", "reports/phase3/pad_ring_route_evidence.json"),
+    # THE ROUTE ATTESTATION, `reports/phase3/pad_ring_route_evidence.json`, was
+    # added here in the same edit and DOES NOT BELONG: `benchmark_evidence_
+    # publish._COPY_SUBTREES` carries `reports`, so a published cell can stage
+    # it and `publishable()` says so. It was declared by step 37 in that edit
+    # for the same W2 reason as the transcript above, but the transcript sits
+    # under `phase3/stage3/pnr/` -- a prefix the publisher does not stage -- and
+    # this one does not. Removing it is not a loosened pin: this population is
+    # DERIVED (`_declared_outside_the_publish_contract`), the derivation never
+    # contained the entry, and asserting it did made the pin claim a publish gap
+    # the publish contract does not have. Measured: 31 entries, and both halves
+    # of the message agree -- JOINED [] and, once this line is gone, LEFT [].
     ("37.5ip", "phase3/stage4/hardmacro/*.gds"),
     ("37.5ip", "phase3/stage4/hardmacro/*.lef"),
     ("37.5ip", "phase3/stage4/hardmacro/*.lib"),

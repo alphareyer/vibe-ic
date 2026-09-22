@@ -97,7 +97,14 @@ except ImportError:                                     # pragma: no cover
 # of any prior step. Giving it a `blocks_on` edge to manufacture a predecessor
 # would declare an ordering constraint that does not exist, which is the defect
 # this checker exists to make visible, inverted.
-DECLARED_ROOTS = {"D1", "0.5ic"}
+# 2026-09-23 — "37.3" JOINS THE ROOTS, and it belongs here rather than in a
+# test: a root is a step with no VERDICT dependency, and 37.3 is conditional
+# on its SUBJECT (the two GDS files its fidelity comparison reads) instead of
+# on step 37 passing. It declares `blocks_on: []` -- present, as the flow
+# contract requires of every step, and empty, which is what makes it a root.
+# MEASURED against origin/main: roots {'0.5ic', 'D1'} -> {'0.5ic', '37.3',
+# 'D1'}; arrived ['37.3'], departed [].
+DECLARED_ROOTS = {"D1", "0.5ic", "37.3"}
 
 
 def load_steps(path: Path) -> Optional[List[dict]]:

@@ -46,6 +46,19 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+# THE DECLARED REPORT IS WRITTEN ATOMICALLY, WITH NO FALLBACK. An earlier
+# revision wrapped this import in a try/except and fell back to
+# `out.write_text(...)`, which is the shape vibe-ic#1082's ratchet refuses --
+# `atomic_artifact_write_check` named it here, at the fallback line, as the one
+# NEW non-atomic declared-report write in 1452 programs. The fallback was worse
+# than a missing import: a reader of this file would believe the write was
+# atomic while the path that actually ran on any host where the import failed
+# left a half-written receipt behind, and `signoff_metrics_aggregate --check`
+# reads this receipt. An unimportable helper is a broken installation and must
+# say so at import time, not degrade the guarantee silently.
+from _atomic_artefact import write_json as _atomic_write_json
+
 GATE = "gds_xor_check"
 REPORT_REL = "reports/phase3/gds_xor.json"
 #: The run's own attestation of which DEF the shipped GDS was streamed from.
@@ -151,14 +164,41 @@ def declared_finishing_layers(project: Path) -> Tuple[Set[int], Set[Tuple[int, i
     return fill_pairs, seal_pairs, prov
 
 
+#: Where the flow itself puts the two artefacts, for a run that attested no pair.
+#: These are the SAME strings the flow declares -- step 37's gate hard-requires
+#: `phase3/stage4/gds/*.gds` and step 21's requires `phase3/stage3/pnr/routed.def`
+#: -- so a project missing either has already FAILED at the step that owed it.
+CANONICAL_GDS_GLOB = "phase3/stage4/gds/*.gds"
+CANONICAL_DEF_REL = "phase3/stage3/pnr/routed.def"
+
+
 def shipped_and_source(project: Path) -> Tuple[Optional[Path], Optional[Path],
                                                Dict[str, Any]]:
     """(shipped GDS, the routed DEF it was streamed from, the run's attestation).
 
-    Both come from `pad_ring_route_evidence.json`, which records the GDS path and
-    sha256 beside `gds_source_def` and ITS sha256. Taking them from there rather
-    than by globbing means the comparison is bound to the pair the run attested,
-    and a tree whose GDS has since changed is detectable.
+    PREFERRED SOURCE: `pad_ring_route_evidence.json`, which records the GDS path
+    and sha256 beside `gds_source_def` and ITS sha256. Taking them from there
+    rather than by globbing binds the comparison to the pair the run attested, and
+    makes a tree whose GDS has since changed detectable.
+
+    BUT THE ATTESTATION IS THE BINDING, NOT THE SUBJECT, and conflating the two
+    was a real defect in the first shape of this step. The runner writes that file
+    only under `_chip_path_requests_pad_ring(project)`, so on every design that is
+    not on the chip pad-ring path there is no attestation -- and the first draft
+    made the STEP conditional on it, which `flow_condition_reachability_check`
+    named for what it is: a SELF-DISABLING CONDITION on an artefact the flow
+    itself produces, where "the file is missing" and "the fidelity check was never
+    made" are indistinguishable to every reader downstream. Its absence is loud
+    NOWHERE (T7=None, T3=None, T5=None, measured).
+
+    So the subject is the TWO ARTEFACTS, which is what the fidelity question is
+    actually about, and both have a loud absence: the shipped GDS is a hard
+    `files_exist` in step 37's own gate and the routed DEF is one in step 21's, so
+    a project missing either FAILED there and never reaches here looking clean.
+    The attestation, when the run wrote one, still decides the pairing and still
+    refuses on a sha256 that no longer holds; when it did not, the canonical flow
+    paths are used and `att["binding"]` says so, so no reader can mistake a
+    convention-bound comparison for an attested one.
     """
     ev = _json(project / ROUTE_EVIDENCE_REL) or {}
     gds_rel = ((ev.get("gds_evidence") or {}).get("path"))
@@ -170,9 +210,33 @@ def shipped_and_source(project: Path) -> Tuple[Optional[Path], Optional[Path],
         "def": def_rel,
         "def_sha256_recorded": ev.get("gds_source_def_sha256"),
         "streamout_engine": (ev.get("gds_evidence") or {}).get("streamout_engine"),
+        "binding": "attested" if isinstance(gds_rel, str) else "",
     }
     gds = (project / gds_rel) if isinstance(gds_rel, str) else None
     dfile = (project / def_rel) if isinstance(def_rel, str) else None
+
+    if gds is None or not gds.is_file():
+        # SORTED, so two candidate GDS files pick the same one on every host: an
+        # unordered glob would make the subject depend on directory order.
+        found = sorted(project.glob(CANONICAL_GDS_GLOB))
+        if found:
+            gds = found[0]
+            att.update(binding="flow-canonical",
+                       gds=str(gds.relative_to(project)),
+                       gds_sha256_recorded=None,
+                       binding_reason=(
+                           f"{ROUTE_EVIDENCE_REL} attested no shipped GDS "
+                           f"(this design is not on the chip pad-ring path), so "
+                           f"the subject is the flow's own declaration "
+                           f"{CANONICAL_GDS_GLOB} -- whose absence FAILs step 37"))
+    if dfile is None or not dfile.is_file():
+        cand = project / CANONICAL_DEF_REL
+        if cand.is_file():
+            dfile = cand
+            att.setdefault("binding_reason", "")
+            att.update(binding=att["binding"] or "flow-canonical",
+                       def_sha256_recorded=None)
+            att["def"] = CANONICAL_DEF_REL
     return gds, dfile, att
 
 
@@ -188,10 +252,26 @@ PREFINISH_REL_FMT = "phase3/stage3/pnr/{top}.prefinish.gds"
 STREAMOUT_SCRIPT_REL = "phase3/stage3/pnr/stream_out.py"
 STREAMOUT_LOG_REL = "phase3/stage3/pnr/stream_out.log"
 
+#: The three field lines of the stream-out transcript that name a library input.
+#:
+#: ANCHORED AT BOTH ENDS, WITH A CLOSED FIELD TYPE, AND THAT IS WHAT MAKES THE
+#: POLARITY QUESTION NOT ARISE HERE. Every one of these lines is written by the
+#: run's own stream-out recipe (`phase3_one_shot_runner`, the stream-out body)
+#: with `print(f"<TOKEN> <verb phrase>: {value}")`, from a value it had already
+#: resolved -- so the grammar has no free-text field in which a denial could be
+#: spelled. The recipe DOES say the negative, and it says it in DIFFERENT
+#: productions that these patterns cannot reach:
+#:     "LEFDEF_MAP not applied (none configured) - legacy numbering"
+#:     "LEFDEF_MAP_CONFIGURED_BUT_ABSENT: ..."
+#:     "MACRO_GDS merged (no DEF master matched): <path>"
+#:     "CELL_GDS manual-substituted <n> std cell(s)"        (no ": <path>" field)
+#: none of which matches `<TOKEN> <the exact verb>: <\S+>$`. A non-match leaves
+#: the key OUT of the env dict, which is exactly what the denial means -- the
+#: re-stream then passes no such variable and reads what the run read.
 _LOG_PATTERNS = (
-    ("LEFDEF_MAP", re.compile(r"^LEFDEF_MAP applied:\s*(\S+)", re.M), False),
-    ("CELL_GDS", re.compile(r"^CELL_GDS manual-substitute[^:]*:\s*(\S+)", re.M), False),
-    ("MACRO_GDS", re.compile(r"^MACRO_GDS manual-substituted[^:]*:\s*(\S+)", re.M), True),
+    ("LEFDEF_MAP", re.compile(r"^LEFDEF_MAP applied:\s*(\S+)\s*$", re.M), False),
+    ("CELL_GDS", re.compile(r"^CELL_GDS manual-substitute \(post-read\):\s*(\S+)\s*$", re.M), False),
+    ("MACRO_GDS", re.compile(r"^MACRO_GDS manual-substituted \d+ macro\(s\):\s*(\S+)\s*$", re.M), True),
 )
 
 
@@ -556,25 +636,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     def finish(verdict: str, rc: int, reason: str) -> int:
         report.update(verdict=verdict, rc=rc, reason=reason)
         out.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            from _atomic_artefact import write_json as _wj
-            _wj(out, report)
-        except Exception:                                  # pragma: no cover
-            out.write_text(json.dumps(report, indent=2) + "\n")
+        _atomic_write_json(out, report)
         print(f"=== {GATE} ({project.name}) ===")
         print(f"  verdict: {verdict}  (rc={rc})")
         print(f"  {reason}")
         return rc
 
+    # NAME BOTH PLACES THAT WERE LOOKED IN. A refusal that cites only the
+    # attestation sends a reader to a file that a design off the chip pad-ring
+    # path never had, and they would read "missing attestation" where the truth is
+    # "no shipped GDS anywhere".
     if shipped is None or not shipped.is_file():
         return finish("NOT_DETERMINED", 1,
-                      f"{ROUTE_EVIDENCE_REL} names no shipped GDS that exists, so "
-                      f"there is nothing to compare; this is an absent input, not "
-                      f"a clean XOR")
+                      f"no shipped GDS exists: neither {ROUTE_EVIDENCE_REL} nor "
+                      f"{CANONICAL_GDS_GLOB} names one on disk, so there is "
+                      f"nothing to compare; this is an absent input, not a clean "
+                      f"XOR")
     if dfile is None or not dfile.is_file():
         return finish("NOT_DETERMINED", 1,
-                      f"{ROUTE_EVIDENCE_REL} names no routed DEF that exists, so "
-                      f"no pre-finishing reference can be streamed")
+                      f"no routed DEF exists: neither {ROUTE_EVIDENCE_REL} nor "
+                      f"{CANONICAL_DEF_REL} names one on disk, so no "
+                      f"pre-finishing reference can be streamed")
 
     # IDENTITY FIRST. The attestation's sha256 is what makes this the pair the run
     # shipped; a GDS that changed since is a different subject and is refused
