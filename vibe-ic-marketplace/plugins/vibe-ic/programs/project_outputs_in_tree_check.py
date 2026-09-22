@@ -479,6 +479,9 @@ def main() -> int:
     # In-tree self-references: absolute paths that resolve INSIDE the project
     # being audited (counted only, never a finding — see _inside_project).
     in_tree_self = 0
+    # (file, path) for an in-tree self-reference whose file is not on disk.
+    # Counted and disclosed; never a finding. See the block that fills it.
+    in_tree_absent: List[Tuple[str, str]] = []
     # #2158 — the DERIVED ephemeral class: an absolute path outside the
     # project root that is not on disk, whatever prefix it carries.
     # (file, path) — always dangling by construction.
@@ -522,6 +525,28 @@ def main() -> int:
                 # project's OWN files as external storage.
                 if _inside_project(p, project):
                     in_tree_self += 1
+                    # DISCLOSED, NEVER BLOCKING. An in-tree self-reference whose
+                    # file is not on disk is a different question from this
+                    # gate's -- "a declared artefact is missing" belongs to the
+                    # per-step `required_outputs` resolution, which is what
+                    # caught step 23's sta_spef_based.rpt and steps 36/38.
+                    #
+                    # MEASURED BEFORE DECIDING, over three completed spm runs:
+                    #   run18L  200 in-tree self-references, 11 absent
+                    #   run19   200                        , 11 absent
+                    #   run20   210                        , 10 absent
+                    # and all 10 of run20's are classified: FIVE are
+                    # directory-shaped DESTINATIONS a record names for a review
+                    # that did not run (reports/*/gates/on_pass_review,
+                    # reports/crosslayer/baseline_rtl) and FIVE are optional or
+                    # prospective artefacts (RESULT.md,
+                    # phase1/ai_deep_review_patches.json,
+                    # phase2/stage1/lessons{.md,_ack.json},
+                    # reports/crosslayer/rewrite_equivalence.json). NOT ONE is a
+                    # declared required_output that went missing. Blocking on
+                    # them would manufacture ten findings per run and close none.
+                    if not Path(p).exists():
+                        in_tree_absent.append((str(f.relative_to(project)), p))
                     continue
                 # R7 — a pinned plugin worktree path is a legitimate plugin
                 # SOURCE, not a volatile project output. Disclose, never FAIL.
@@ -547,6 +572,13 @@ def main() -> int:
                 if _inside_project(p, project):
                     in_tree_self += 1
                     seen_derived.add(p)
+                    # THE SECOND PASS COUNTS TOO. The absent-in-tree disclosure
+                    # is filled from BOTH passes: every one of the ten measured on
+                    # run20 is found here, by `_ANY_ABS_PATH_RE`, not by the
+                    # narrower `_PATH_RE` above -- so filling it in one place only
+                    # would have disclosed nothing at all.
+                    if not Path(p).exists():
+                        in_tree_absent.append((str(f.relative_to(project)), p))
                     continue
                 if _pinned_plugin_root(p) is not None:
                     seen_derived.add(p)
@@ -701,6 +733,17 @@ def main() -> int:
                      f"project root {project} — in-tree by definition, "
                      f"non-blocking (the project itself lives at a volatile "
                      f"path; these are its OWN files, not external storage)")
+
+    if in_tree_absent:
+        block = [f"[INFO] project_outputs_in_tree_check: "
+                 f"{len(in_tree_absent)} in-tree self-reference(s) whose file is "
+                 f"not on disk — non-blocking, and NOT this gate's question: a "
+                 f"path inside the project that is absent is a missing artefact, "
+                 f"which the per-step required_outputs resolution owns. Listed so "
+                 f"the fact is visible without manufacturing a finding:"]
+        for f_rel, path_s in sorted(in_tree_absent, key=lambda r: r[1]):
+            block.append(f"  - {f_rel} → {path_s} (not on disk)")
+        print("\n".join(block))
 
     if other_mount:
         block = [f"[INFO] project_outputs_in_tree_check: "
