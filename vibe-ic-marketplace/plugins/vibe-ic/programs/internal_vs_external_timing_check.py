@@ -66,6 +66,9 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _structural_absence as _sa   # noqa: E402  the class AND its enumeration
+
 RX_NAME_HINTS = ("rx_", "host_", "external_", "host-side", "host_side",
                  "rx_counters", "detect_", "_tdt", "tHW", "tB_", "tDT",
                  "cmd_recv", "host_tx")
@@ -548,14 +551,37 @@ def main() -> int:
         bool(v) and any(tok in str(k).lower() for tok in _PROTO_GROUP_TOKENS)
         for k, v in waveform.items()
     )
-    if (not _has_proto_group) and all(
-            _empty(k) for k in ("timing_windows", "timing_constants",
-                                "waveforms")):
-        msg = ("VACUOUS_PASS: L8_TIMING_WAVEFORM carries no symbol/protocol "
-               "timing content (timing_windows / timing_constants / waveforms "
-               "all empty, or waveforms is a generic diagram with no rx_/tx_ "
-               "symbol groups) — RX/TX timing-split rule is N/A for this "
-               "non-protocol IC.")
+    _CANONICAL = ("timing_windows", "timing_constants", "waveforms")
+    if (not _has_proto_group) and all(_empty(k) for k in _CANONICAL):
+        # THIS ESCAPE INFERS THE ABSENCE; IT IS NOT A DESIGN DECLARATION, and the
+        # two were being reported with one word. The sibling escape above fires
+        # when L2 EXPLICITLY declares `protocol_overview.half_duplex=false` --
+        # there DESIGN_DECLARED_NA is exactly right and it keeps it. This one
+        # fires when L2 says NOTHING and the gate ENUMERATES the L8 document
+        # instead: the three canonical containers, plus every key of `waveform`
+        # scanned for a directional / per-symbol token. Zero found. That is a
+        # structural absence, and R-0915-124/125 require it be NAMED as one WITH
+        # the enumeration behind it -- `_structural_absence.absence()` refuses a
+        # claim that cannot say what it walked, which is the whole guard.
+        #
+        # MEASURED on run21, a signed serial-parallel multiplier: this clause was
+        # one of the two step 2 reported as "PARTIALLY-VACUOUS (2 of 18 gate
+        # clause(s) examined nothing)" while filing DESIGN_DECLARED_NA -- a class
+        # whose own justification comment cites an L2 declaration this branch
+        # never reads. The design genuinely is not a protocol IC and has no RX/TX
+        # timing to split, so the ANSWER was right and only the word was wrong.
+        _scanned_names = list(_CANONICAL) + sorted(
+            str(k) for k in waveform.keys() if str(k) not in _CANONICAL)
+        _absence = _sa.absence(
+            population=("L8_TIMING_WAVEFORM container(s) and group key(s) that "
+                        "could carry half-duplex protocol symbol timing"),
+            scanned=len(_scanned_names),
+            found=0,
+            names=_scanned_names,
+            detail=("no directional (rx_/tx_/host_/dut_/external_/internal_) or "
+                    "per-symbol (H0/H1/BR/IBT, *_counters, *_cycles) content in "
+                    "any of them, so there are no two sides to split"))
+        msg = _sa.sentence(_absence, "internal_vs_external_timing")
         if args.json:
             txt = json.dumps({
                 "source_file": waveform_path,
@@ -563,10 +589,14 @@ def main() -> int:
                 "errors": 0,
                 "findings": [],
                 "verdict": "VACUOUS_PASS",
-                # v1.15.45 (sha256 capture): the design's OWN L2 declaration
-                # rules the rule out — say so in the vocabulary the audit
-                # reads, or a green vacuous record is filed INCOMPLETE.
-                "reason_class": "DESIGN_DECLARED_NA",
+                # v1.15.45 established that a green vacuous record must state a
+                # class the audit reads or be filed INCOMPLETE. That still holds;
+                # what changes is WHICH class, because this branch establishes its
+                # absence by ENUMERATION rather than by reading a declaration.
+                # `attach` writes the class and its evidence where every reader
+                # already looks, so the umbrella's guard (i) can VALIDATE the
+                # claim instead of taking the token on trust.
+                **_sa.attach({}, _absence),
                 "skip_kind": "class-not-applicable",
                 "rationale": msg,
             }, indent=2)
@@ -576,7 +606,20 @@ def main() -> int:
                 Path(args.json).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.json).write_text(txt + "\n")
         else:
-            print(msg)
+            # THE TIER STAYS AT LINE START. `_stdout_signals_vacuous` believes a
+            # vacuous disclosure only where `VACUOUS_PASS` BEGINS a line, and a
+            # clause that invokes this gate WITHOUT `--json` has stdout as its
+            # only channel. Printing the structural sentence alone put
+            # `[NOT_APPLICABLE_BY_STRUCTURE]` first and silently removed the
+            # disclosure, so such a clause would have read a bare PASS -- a
+            # fail-open I introduced, caught by one G-arm red.
+            #
+            # The VERDICT TIER never changed: this branch has always been, and
+            # still is, a VACUOUS_PASS (the JSON above says so). What R-0915-124/125
+            # made precise is the CLASS. So stdout now carries BOTH -- the tier
+            # word the flow reads, then the class and the enumeration a human
+            # needs to check the claim.
+            print(f"VACUOUS_PASS: {msg}")
         return 0
 
     findings = check(waveform, rtl_constants)

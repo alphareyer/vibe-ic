@@ -25,4 +25,17 @@ def test_with_waveform(tmp_path):
     wf.write_text(json.dumps({"waveforms": []}))
     r = _run([str(wf)])
     assert r.returncode == 0
-    assert "VACUOUS_PASS" in r.stdout
+    # THE TIER, and it is NOT re-pinned: this branch was a VACUOUS_PASS before
+    # R-0915-124/125 and still is. `flow_compliance_check._stdout_signals_vacuous`
+    # believes the disclosure only where the token BEGINS a line, and a clause
+    # invoking this gate without `--json` has stdout as its only channel, so the
+    # position is load-bearing and not cosmetic.
+    assert r.stdout.lstrip().startswith("VACUOUS_PASS"), r.stdout
+    # THE CLASS, which is what changed. This fixture stages NO L2 and an L8 empty
+    # of protocol content, so it is the ENUMERATING escape -- the gate infers the
+    # absence rather than reading a declaration -- and R-0915-124/125 require it be
+    # named by structure WITH the enumeration behind it.
+    assert "NOT_APPLICABLE_BY_STRUCTURE" in r.stdout
+    # AND THE EVIDENCE, not merely the token: a class with nothing behind it is
+    # the thing that guard refuses, so assert the enumeration the line carries.
+    assert "enumerated 3" in r.stdout and "found 0" in r.stdout, r.stdout
