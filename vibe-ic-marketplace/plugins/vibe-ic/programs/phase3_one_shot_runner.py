@@ -24827,12 +24827,15 @@ def _unrouted_probe_tcl(tag: str, out_dir_c: Optional[str] = None) -> str:
     # THE PATH IS THE RUN'S OWN DIRECTORY, ABSOLUTE, NOT THE PROCESS CWD.
     # I argued when this landed that a relative name was safe because "the
     # flow's cwd IS the pnr directory, the same convention
-    # `antenna_iter_*.rpt` has always used". run16L disproved it: the
-    # spef_extract boundary wrote
-    # /home/reyerchu/_lane_icspm5/unrouted_after_postroute_spef_extract.txt
+    # `antenna_iter_*.rpt` has always used". run16L (lane icspm5) disproved it:
+    # the spef_extract boundary wrote
+    # <lane root>/unrouted_after_postroute_spef_extract.txt
     # -- 734 bytes, 6 nets, on the SHARED LANE ROOT at 03:07:20, where the
     # next run of anything overwrites it. icspm5 had to preserve a copy under
-    # run16L/lane_root_strays/ to keep the evidence at all.
+    # run16L/lane_root_strays/ to keep the evidence at all. (The citation is
+    # lane-relative: R1 refuses an absolute personal home path in shipped
+    # source, and `shipped_path_portability_check` named this line. Lane, run,
+    # size, net count and time all still identify the measurement.)
     #
     # A membership file whose whole purpose is to say WHICH nets, in THIS run,
     # cannot live at a path that depends on where the process happened to be

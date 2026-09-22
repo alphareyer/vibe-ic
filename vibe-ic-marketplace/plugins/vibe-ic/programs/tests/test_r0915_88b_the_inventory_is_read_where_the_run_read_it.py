@@ -103,8 +103,21 @@ def test_a_recorded_host_path_is_reanchored_to_this_project(tmp_path):
     real = tmp_path / "phase3/stage3/pnr/active_via_legalized.tlef"
     real.parent.mkdir(parents=True, exist_ok=True)
     real.write_text("VERSION 5.8 ;\n")
-    recorded = Path("/home/someone/_lane_other/run21/phase3/stage3/pnr/"
-                    "active_via_legalized.tlef")
+    # DERIVED, NOT A LITERAL HOME DIR. The claim is "an absolute path into
+    # ANOTHER tree", and a sibling of this test's own `tmp_path` is exactly that
+    # on every host -- which is what R1's remedy means by resolving from the
+    # caller's own argument, and the same shape
+    # `test_path_lint_staged_verify_uses_real_root.py` already uses.
+    # The literal this replaced named a fictional user's home directory, which
+    # reads as a real value and pins one machine's layout into a tree everybody
+    # clones -- and the guard scans COMMENTS too, so naming it here would keep
+    # the file red for quoting the thing it removed.
+    outside_the_project = tmp_path.parent / f"outside_{tmp_path.name}_lane_other"
+    recorded = (outside_the_project / "run21/phase3/stage3/pnr/"
+                                      "active_via_legalized.tlef")
+    assert not recorded.is_relative_to(tmp_path), (
+        "the recorded path must be outside the project, or this test proves "
+        "nothing about re-anchoring")
     assert m._reanchored_in_this_project(tmp_path, recorded) == real
 
 
@@ -112,7 +125,10 @@ def test_reanchoring_never_invents_a_file(tmp_path):
     """Existence-tested. A path with no existing tail comes back unchanged so the
     caller's own failure names the real path, not a plausible-looking one."""
     m = _mod("mo_2")
-    recorded = Path("/home/someone/_lane_other/run21/phase3/stage3/pnr/absent.tlef")
+    # Same derivation as the arm above, and for the same reason.
+    outside_the_project = tmp_path.parent / f"outside_{tmp_path.name}_lane_other"
+    recorded = outside_the_project / "run21/phase3/stage3/pnr/absent.tlef"
+    assert not recorded.is_relative_to(tmp_path)
     assert m._reanchored_in_this_project(tmp_path, recorded) == recorded
 
 
