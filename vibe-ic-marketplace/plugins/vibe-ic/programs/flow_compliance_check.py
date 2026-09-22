@@ -3945,6 +3945,39 @@ _STRUCTURE_ONLY_STDOUT_SENTINEL = "STRUCTURE_ONLY:"
 # apart from "nothing applied".
 _SUBSTANTIVE_HINT_PREFIX = "__SUBSTANTIVE_HINT__: "
 _INCOMPLETE_HINT_PREFIX = "__INCOMPLETE_HINT__: "
+
+#: The class a gate DECLARED for itself, as the DISCLOSED_INCOMPLETE site writes
+#: it into the hint: `… [verdict=NOT_MEASURED, reason_class=EXECUTION_ERROR]`.
+_HINT_DECLARED_CLASS_RE = re.compile(r"reason_class=([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _hint_declares_execution_error(hints: List[str]) -> bool:
+    """True iff some incomplete hint carries the producer's own EXECUTION_ERROR.
+
+    MEASURED (run21, icslot51/52): step 2 read `partial_population` -- "the gate
+    reports its input was applicable and was NOT examined" -- over a hint that
+    said, in its own text,
+
+        flow_compliance_check . --stage-id stage_phase1 --strict --json …
+        [verdict=NOT_MEASURED, reason_class=EXECUTION_ERROR]
+
+    The nested stage_phase1 invocation hit an EXECUTION ERROR. Nothing about step
+    2's population was partially examined, and the class that says so was already
+    written into the evidence the step-level reader had in hand -- then discarded
+    for the blanket word. The same shape as AWAITING one layer down: the label a
+    consumer publishes decides where a human looks, and "applicable and NOT
+    examined" sends them to the population when the answer is a crash.
+
+    ONLY `EXECUTION_ERROR`, and only from the producer's own declaration. This is
+    not a general "believe any class in any hint": `_flow_reason_taxonomy` carries
+    classes with no step-level member at all (`BLOCKED_BY_UPSTREAM` is one), and
+    mapping those would be invention rather than reading.
+    """
+    for h in hints:
+        m = _HINT_DECLARED_CLASS_RE.search(h)
+        if m and m.group(1) == _reason_taxonomy.EXECUTION_ERROR:
+            return True
+    return False
 #: R-0915-85 / R-0915-88 — the AWAITING half of the INCOMPLETE tier, carried as
 #: its OWN typed hint so `check_step` can give the step
 #: `NOT_MEASURED(awaiting_agent_pass)` instead of the undifferentiated
@@ -14838,6 +14871,13 @@ def check_step(project: Path, step: Dict[str, Any], waivers: Dict,
             # of to the gate.
             result.reason_class = (
                 _T.ReasonClass.AWAITING_AGENT_PASS.value if awaiting_hints
+                # A DECLARED EXECUTION ERROR IS NOT A SHORT POPULATION. Read from
+                # the producer's own hint, never guessed. AWAITING keeps its
+                # existing precedence: it is a STATED wait, it is the measured
+                # case (D1), and no run has been measured carrying both, so the
+                # order between those two is not asserted further here.
+                else _T.ReasonClass.EXECUTION_ERROR.value
+                if _hint_declares_execution_error(incomplete_hints)
                 else _T.ReasonClass.PARTIAL_POPULATION.value)
             for h in awaiting_hints:
                 result.reasons.append(
