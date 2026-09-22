@@ -212,11 +212,19 @@ def test_a_boundary_with_nothing_unrouted_still_reports_its_counts():
 
 # ── the membership file belongs to the RUN, not to the process cwd ──────────
 #
-# MEASURED on spm run16L: the spef_extract boundary wrote
-#   /home/reyerchu/_lane_icspm5/unrouted_after_postroute_spef_extract.txt
-# -- 734 bytes, 6 nets, on the SHARED LANE ROOT at 03:07:20, where the next
-# run of anything overwrites it; icspm5 had to preserve a copy under
-# run16L/lane_root_strays/ to keep the evidence.
+# MEASURED on spm run16L (lane icspm5): the spef_extract boundary wrote
+#   <lane root>/unrouted_after_postroute_spef_extract.txt
+# -- 734 bytes, 6 nets, at 03:07:20 -- i.e. on the SHARED LANE ROOT rather than
+# in the run, where the next run of anything overwrites it; icspm5 had to
+# preserve a copy under run16L/lane_root_strays/ to keep the evidence.
+#
+# THE CITATION IS LANE-RELATIVE, and that is not cosmetic: an absolute
+# `/home/<user>/...` in shipped source is what R1 refuses -- it pins one
+# machine's layout into a tree everybody clones and reads as a real value rather
+# than an example -- and `test_path_lint_fixtures_are_host_portable` caught this
+# line by name. The measurement is unchanged: the lane, the run, the size, the
+# net count and the time all still identify it, and "<lane root>" is the fact
+# that mattered.
 #
 # I argued when this landed that a relative name was safe because "the flow's
 # cwd IS the pnr directory, the same convention `antenna_iter_*.rpt` has

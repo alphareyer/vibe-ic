@@ -59,11 +59,18 @@ def strict_integrity_tcl(marker: str, out_dir_c: str | None = None) -> str:
     it is; the capped list stays in the message for the reader.
     """
     # ABSOLUTE, IN THE RUN'S OWN DIRECTORY. A relative name is written
-    # wherever the process happens to stand: on spm run16L the sibling
-    # unrouted probe put its membership file on the SHARED LANE ROOT
-    # (/home/reyerchu/_lane_icspm5/unrouted_after_postroute_spef_extract.txt,
-    # 734 bytes, 6 nets), where the next run of anything overwrites it. The
-    # file that says WHICH nets failed cannot depend on cwd.
+    # wherever the process happens to stand: on spm run16L (lane icspm5) the
+    # sibling unrouted probe put its membership file on the SHARED LANE ROOT --
+    # <lane root>/unrouted_after_postroute_spef_extract.txt, 734 bytes, 6 nets --
+    # where the next run of anything overwrites it. The file that says WHICH nets
+    # failed cannot depend on cwd.
+    #
+    # The citation is LANE-RELATIVE because R1 refuses an absolute
+    # personal home path in shipped source: it pins one machine's layout into a
+    # tree everybody clones and reads as a real value rather than an example.
+    # `shipped_path_portability_check` named this line. The measurement is
+    # unchanged -- lane, run, size, net count -- and "<lane root>" is the fact
+    # that mattered.
     _name = f"unrouted_{marker.lower()}.txt"
     membership = (f"{out_dir_c.rstrip('/')}/{_name}" if out_dir_c else _name)
     t = _routing_integrity_check_tcl(marker, membership_path=membership)
