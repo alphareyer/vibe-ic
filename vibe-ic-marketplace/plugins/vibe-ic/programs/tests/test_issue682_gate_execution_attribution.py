@@ -115,13 +115,73 @@ def test_a_PASSING_gate_is_recorded_END_TO_END(tmp_path, monkeypatch):
     assert "PASS" in lines
 
 
+# ──────────────────────────────────────────────────────────────────────
+# READING THE WRAPPER'S OWN SOURCE
+# ──────────────────────────────────────────────────────────────────────
+# THE SLICE WAS THE DEFECT, and it cost a red on main that named the wrong thing.
+#
+# Three tests below used to extract "the wrapper" as the TEXT BETWEEN two `def`
+# names -- `src[index("def _check_program_exit_zero") :
+# index("def __check_program_exit_zero")]`. Nothing keeps those two definitions
+# adjacent. #2501's receipt redirect landed `_resolved_key` and
+# `_receipt_off_a_produced_document` in the gap, and their PROSE says "the readers
+# run AFTER the subprocess" and "subprocess call" -- so
+# `assert "subprocess" not in wrapper` went red on a property that is TRUE.
+#
+# MEASURED on main 1f537b5c0: the wrapper's own source is 213 lines, carries all
+# three hint sentinels, and contains no `subprocess` at all; the slice dragged in
+# 102 further lines defining two unrelated helpers.
+#
+# So the extraction is now by AST -- the function's OWN segment, whatever sits
+# after it -- and the search runs over CODE with comments and string literals
+# blanked. That is strictly stronger than the slice in both directions: a
+# subprocess call added to the wrapper is still caught, and prose about one
+# anywhere in the module is not.
+def _wrapper_source() -> str:
+    """The source of `_check_program_exit_zero` itself, by AST."""
+    import ast
+    src = (_PROGRAMS / "flow_compliance_check.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next((n for n in tree.body
+               if isinstance(n, ast.FunctionDef)
+               and n.name == "_check_program_exit_zero"), None)
+    assert fn is not None, (
+        "flow_compliance_check no longer defines a module-level "
+        "`_check_program_exit_zero`; this whole file is about that wrapper")
+    seg = ast.get_source_segment(src, fn)
+    assert seg, "ast could not return the wrapper's source segment"
+    return seg
+
+
+def _code_only(text: str) -> str:
+    """`text` with comments and string literals blanked, so a token search reads
+    CODE. Length and line structure are preserved so an index into the result
+    still points at the right line."""
+    import io
+    import tokenize
+    out = list(text)
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type in (tokenize.COMMENT, tokenize.STRING):
+                (r1, c1), (r2, c2) = tok.start, tok.end
+                lines = text.splitlines(keepends=True)
+                base = sum(len(l) for l in lines[:r1 - 1])
+                start = base + c1
+                end = (sum(len(l) for l in lines[:r2 - 1]) + c2)
+                for k in range(start, min(end, len(out))):
+                    if out[k] != "\n":
+                        out[k] = " "
+    except (tokenize.TokenError, IndentationError):
+        # A fragment that does not tokenize on its own is returned unchanged:
+        # conservative, since the only cost is a search that also reads prose.
+        return text
+    return "".join(out)
+
+
 def test_the_record_is_not_conditional_on_the_outcome():
     """The same property, read off the source: `_record_gate_execution` must sit
     at the wrapper's body indent, not under any branch."""
-    src = (_PROGRAMS / "flow_compliance_check.py").read_text(encoding="utf-8")
-    i = src.index("def _check_program_exit_zero(project: Path, cmd_str: str)")
-    j = src.index("def __check_program_exit_zero(", i)
-    wrapper = src[i:j]
+    wrapper = _wrapper_source()
     line = next(l for l in wrapper.splitlines()
                 if "_record_gate_execution(cmd_str" in l)
     assert line.startswith("    _ledger_row = _record_gate_execution("), (
@@ -132,10 +192,7 @@ def test_the_evaluator_records_every_return_by_WRAPPING():
     """LOAD-BEARING. Inserting a call at each of the eleven return points leaves
     a return added later unrecorded — and an unrecorded gate is exactly the
     defect. The wrapper cannot be bypassed by a new return."""
-    src = (_PROGRAMS / "flow_compliance_check.py").read_text(encoding="utf-8")
-    i = src.index("def _check_program_exit_zero(project: Path, cmd_str: str)")
-    j = src.index("def __check_program_exit_zero(", i)
-    wrapper = src[i:j]
+    wrapper = _code_only(_wrapper_source())
     assert "__check_program_exit_zero(project, cmd_str)" in wrapper
     assert "_record_gate_execution(cmd_str, rc, verdict, reason_class)" in wrapper
 
@@ -144,14 +201,15 @@ def test_the_verdict_is_read_from_the_snippet_not_re_derived():
     """One classification, not a second that can disagree with the first. A
     parallel derivation here would be a new way for the record to be wrong about
     the run it describes."""
-    src = (_PROGRAMS / "flow_compliance_check.py").read_text(encoding="utf-8")
-    i = src.index("def _check_program_exit_zero(project: Path, cmd_str: str)")
-    j = src.index("def __check_program_exit_zero(", i)
-    wrapper = src[i:j]
+    wrapper = _code_only(_wrapper_source())
     for sentinel in ("_VACUOUS_HINT_PREFIX", "_WAIVER_HINT_PREFIX",
                      "_CRASH_HINT_PREFIX"):
         assert sentinel in wrapper, sentinel
-    assert "subprocess" not in wrapper, "the wrapper must not run anything itself"
+    assert "subprocess" not in wrapper, (
+        "the wrapper must not run anything itself — and this now reads the "
+        "wrapper's OWN code, so a `subprocess` in a comment or a docstring "
+        "anywhere in the module cannot make this red, while a real call added to "
+        "the wrapper still does")
 
 
 def test_main_prints_the_ledger_unconditionally():
@@ -163,3 +221,64 @@ def test_main_prints_the_ledger_unconditionally():
     # it must sit at function-body indent inside main, not under an `if`
     line = body[body.rfind("\n", 0, i) + 1:i + 40]
     assert line.startswith("    for _line"), line
+
+
+# ── the repaired instrument, driven in both directions ─────────────────────
+
+def test_the_extraction_reads_the_wrapper_and_not_its_neighbours():
+    """THE DEFECT THIS REPAIRED, asserted directly. The old slice ran to the next
+    `def` NAME, so anything landed in the gap became "the wrapper"."""
+    import ast
+    src = (_PROGRAMS / "flow_compliance_check.py").read_text(encoding="utf-8")
+    own = _wrapper_source()
+    i = src.index("def _check_program_exit_zero(project: Path, cmd_str: str)")
+    j = src.index("def __check_program_exit_zero(", i)
+    slice_ = src[i:j]
+    assert own in slice_ and len(own) < len(slice_), (
+        "the slice no longer contains extra lines; if the two definitions are "
+        "adjacent again this test is the record of why it must not be relied on")
+    swallowed = ast.parse(slice_[len(own):].strip())
+    names = [n.name for n in swallowed.body if hasattr(n, "name")]
+    assert names, "nothing in the gap — see the assertion above"
+    # and the swallowed prose is what made a TRUE property read red
+    assert "subprocess" in slice_ and "subprocess" not in own
+
+
+def test_a_real_subprocess_call_in_the_wrapper_is_still_caught():
+    """MUTATION. The repair must not be a relaxation: a call added to the
+    wrapper's CODE still reddens the claim."""
+    import pytest
+    own = _wrapper_source()
+    # ANCHORED ON THE FIRST RETURN, whatever it returns: the wrapper's return type
+    # has been renamed once already (`_ProgramCheckOutcome` -> `_ProgramCheckResult`)
+    # and an arm anchored on the name would silently stop mutating.
+    ret = next(l for l in own.splitlines() if l.startswith("    return "))
+    mutated = _code_only(own.replace(
+        ret, "    subprocess.run(['true'])\n" + ret, 1))
+    assert "subprocess" in mutated, (
+        "the mutation did not land — this arm would be measuring nothing")
+    with pytest.raises(AssertionError):
+        assert "subprocess" not in mutated, "the wrapper must not run anything"
+
+
+def test_prose_about_a_subprocess_cannot_redden_the_claim():
+    """The other direction, and it is the one that went red on main: a comment or
+    a docstring mentioning a subprocess is not a subprocess."""
+    wrapper = _wrapper_source()
+    with_prose = wrapper.replace(
+        '    """', '    """A docstring that says subprocess, once.\n\n    ', 1)
+    assert "subprocess" in with_prose
+    assert "subprocess" not in _code_only(with_prose)
+
+
+def test_code_only_blanks_strings_and_keeps_the_line_shape():
+    """`_code_only` is load-bearing for both arms above, so it is driven directly:
+    a token inside a literal is gone, a token in code survives, and the line
+    count does not move (an index into the result still points at the right
+    line)."""
+    src = ('x = "subprocess in a literal"  # and in a comment\n'
+           'import subprocess\n')
+    out = _code_only(src)
+    assert out.count("\n") == src.count("\n")
+    assert out.splitlines()[0].count("subprocess") == 0, out.splitlines()[0]
+    assert "subprocess" in out.splitlines()[1]
