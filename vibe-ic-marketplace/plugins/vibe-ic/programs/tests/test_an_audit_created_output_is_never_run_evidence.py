@@ -50,37 +50,24 @@ A step added tomorrow with a self-written output and no producer any of the thre
 knows is exactly the shape that cost two handbacks, so it is refused here instead
 of being found by an audit on a real run.
 
-AND THE ORDERING DEFECT THIS SWEEP UNCOVERED IS NOT FIXED HERE, because choosing
-which mechanism owns the ordering is a ruling, not a lane's call. run21's own
-mtimes, to the millisecond:
+RETRACTION, AND IT IS MINE. This docstring previously read run21's mtimes — the
+two documents written 17:56:31, `flow_declared_producer_run` at 17:59:19, the
+authorship notes at 18:06 — as evidence that the note arrives ten minutes after
+the file and that the producer runner's second trigger ("or when the audit's own
+authorship note claims the file") is unreachable inside one run. That was inferred
+from timestamps, not measured. Running it on a copy says otherwise: the note is
+born 0.114 s after the file and records its exact `mtime_ns`, and all three
+branches of the runner's rule fire (absent -> produced; audit-claimed ->
+re-produced; written by the run -> left byte-for-byte alone). run21's 18:06 note
+mtimes are a LATER audit pass re-stamping what it refused, which is what
+`_record_audit_created` is for. The measurements are pinned in
+`test_the_authorship_note_is_born_with_the_file_it_claims.py` (R-0915-137) so
+neither property can regress unnoticed.
 
-    17:56:31.628  reports/phase3/foundry_handoff_audit.json   written HERE, and the
-    17:56:31.690  reports/audit/tapeout_checklist.json        authorship note says
-                                                             the AUDIT's own gate
-                                                             was the FIRST process
-                                                             to write it
-    17:59:13.831  reports/phase3/gates/stage3_compliance.json
-    17:59:19.072  reports/audit/flow_declared_producer_run.json
-                       owed 9, executed 9, documents_now_present 9, PRODUCED
-    18:02:17.869  reports/phase3/gates/stage4_compliance.json  refuses both as
-                                                               audit_created
-    18:06         reports/audit/audit_created/*.json           the notes appear
-    18:07:33.338  reports/audit/phase23_completion_audit.json
-
-The producer runner ran, and it was RIGHT not to rewrite those two: its own rule
-is "executed only when its target is ABSENT, or when the audit's own authorship
-note claims the file", and at 17:59 the targets were present and the notes did not
-exist yet — they are written at 18:06. So the second trigger is UNREACHABLE within
-a single run, and the two documents' mtimes are still 17:56:31, the audit's own
-write. Two candidate fixes, both runtime: run the declared producers before any
-audit clause can write these documents, or have the audit write its authorship
-note at the moment it writes the file rather than at the end.
-
-ON THE RULING NUMBER. The dispatcher issued this as R-0915-133, which is already
-carried by `test_r0915_133_an_inferred_absence_is_named_by_structure.py` (landed,
-icslot57). Numbers are the orchestrator's to assign, so this file is named by its
-property instead of by a number that would collide, and the collision is reported
-rather than resolved here.
+The ruling numbers, as the orchestrator corrected them: R-0915-135 = a vacuous
+clause's row carries the callee's classified reason and class; R-0915-136 = an
+audit-created output is never run evidence, which is what THIS file gates;
+R-0915-137 = the two mechanisms above.
 """
 from __future__ import annotations
 
