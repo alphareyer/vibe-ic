@@ -49968,11 +49968,37 @@ def _signoff_not_checked(name: str, t0: float, why: str,
 #: not reach `_aggregate_verdict` or the roll-up. Redefining what "sign-off"
 #: counts is a contract change and is not made as a side effect of wiring a
 #: producer.
+#: Pre-audit producers that drive a LAYOUT tool and take `--container` (not
+#: `--pdk-container`, which names a PDK-view volume for a different question).
+_KLAYOUT_CONTAINER_SIGNOFF_GATES = frozenset({"gds_xor"})
+
 _PRE_AUDIT_PRODUCERS = (
     ("tapeout_checklist", "tapeout_signoff_check.py",
      "reports/audit/tapeout_checklist.json", ("--mode", "tapeout")),
     ("foundry_handoff", "foundry_handoff_package_check.py",
      "reports/phase3/foundry_handoff_audit.json", ()),
+    # R-0915-129 / SLT53B handback — step 37.3's receipt must be PRODUCED, and by
+    # something other than the step's own gate clause. A step whose declared
+    # output IS its gate's product can never satisfy the audit: compliance reads
+    # `required_outputs` BEFORE it runs the clause, so the artefact is missing, the
+    # step reports FAIL/missing_artefact, and the clause that would have written it
+    # never runs. MEASURED on the S arm (spm end-to-end, 0.3.67, the rollback
+    # path) and reproduced locally by failing step 37 on a copy of run21:
+    #     step 37    FAIL
+    #     step 37.3  FAIL          missing_artefact      <- and no receipt
+    #     step 37.4  NOT_MEASURED  upstream_failed
+    #     reports/phase3/gds_xor.json produced: False
+    # BOTH of its inputs were on disk throughout — the retained boundary
+    # (chip_top.prefinish.gds, 73,850,000 B) and the shipped GDS (102,921,972 B).
+    #
+    # Asked HERE it runs on EVERY path, PV clean or not, which is the point: a
+    # fidelity defect is a candidate CAUSE of the DRC violations that failed PV, so
+    # gating the check on PV being clean means it can never help diagnose the
+    # failure it might explain. The step's own yaml `condition` keeps a run with no
+    # subject NOT_APPLICABLE rather than FAIL, and a refusal here is disclosed
+    # without withholding the release, exactly like its two siblings above.
+    ("gds_xor", "gds_xor_check.py",
+     "reports/phase3/gds_xor.json", ()),
 )
 
 
@@ -49989,6 +50015,16 @@ def run_pre_audit_producers(project: Path, container: str = "") -> List[StepResu
         argv = tuple(extra_argv)
         if container and name in _PDK_AWARE_SIGNOFF_GATES:
             argv += ("--pdk-container", container)
+        # A LAYOUT-TOOL GATE NEEDS THE CONTAINER BY ITS OWN FLAG NAME, and
+        # forgetting it is silent: `gds_xor_check` found no runner, refused with
+        # "no KLayout runner reaches this project", and wrote a NOT_DETERMINED
+        # receipt -- on a tree its runner DOES cover (`covers()` returns True for
+        # exactly that path). MEASURED while proving the SLT53B fix: the receipt
+        # appeared, so "produced" looked satisfied, while the comparison had not
+        # run. Two flags, two different gates: the PDK-view readers above take
+        # `--pdk-container`; this one drives KLayout and takes `--container`.
+        if container and name in _KLAYOUT_CONTAINER_SIGNOFF_GATES:
+            argv += ("--container", container)
         rows.append(_run_declared_signoff_gate(project, name, program, out_rel,
                                                argv))
     return rows
