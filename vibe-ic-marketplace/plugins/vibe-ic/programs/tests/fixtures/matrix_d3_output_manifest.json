@@ -1369,11 +1369,11 @@
      "size_bytes": 45348,
      "note": "2026-09-02 \u2014 re-measured against benchmark-data/ic/spm/v1.14.88_gf180mcuD: reports/phase3/gates/stage3_compliance.json tracked at HEAD, non-empty, and attributed to this step by the cell's write ledger. Previously UNPROVEN. Prior note: 2026-08-31 - UNPROVEN. Declared by `29e9c72796` [v1.13.96], which moved the flow yaml without moving this manifest; `d3_manifest_declaration_parity_check` has been reporting it as uncovered ever since (measured red on 781d24727 [v1.14.22] before this change, 7 uncovered paths). The stage-tier `*_com"
     },
-    "phase3/stage3/pnr/stream_out.log": {
+    "phase3/stage3/pnr/*stream_out.log": {
      "status": "UNPROVEN",
      "producer": "phase3_one_shot_runner",
-     "writes": "phase3/stage3/pnr/stream_out.log",
-     "note": "DECLARED 2026-09-22 to close W2 on step 37.3 (the stream-out transcript step 37 writes; step 37.3 reads it to recover the library set for a re-streamed fidelity reference). No admissible run root carried by this repository holds it -- the only one present is v1.10.18_sky130A, which carries none of step 37's three report outputs, including the stage3_compliance.json this step declared before this change. So this cell was ALREADY failing at base for that reason (measured: 'declares 2 required_outputs; 1 are NOT produced'), and these two entries add to an existing gap rather than creating one. UNPROVEN is decided LIVE: the branch re-searches every root and says so the moment one resolves."
+     "writes": "phase3/stage3/pnr/*stream_out.log",
+     "note": "DECLARED 2026-09-22 to close W2 on step 37.3 (the stream-out transcript step 37 writes; step 37.3 reads it to recover the library set for a re-streamed fidelity reference), and RE-MEASURED 2026-09-23 under the GLOB spelling this record now carries. THE KEY CHANGED BECAUSE THE DECLARATION DID, and the reason is the engine: `stream_out.log` is written by the KLAYOUT stream-out only, while the Magic engine beside it writes `<top>.magic_stream_out.log`, so the single name demanded of every Magic-streamed run a file its engine never writes. Step 37 now declares `phase3/stage3/pnr/*stream_out.log`, its own gate asserts the same glob, and `gds_xor_check` reads the same glob -- one set, three readers. This manifest was the THIRD reader and `test_flow_manifest_declaration_parity` named both halves of the drift: the glob had no entry, and the FILE record named a path no step declares any more. Renaming the key is both halves in one move. RE-MEASURED, NOT CARRIED: `resolve_anywhere('phase3/stage3/pnr/*stream_out.log', '37')` returns no hit with the published corpus BOUND (VIBE_IC_BENCHMARK_DATA pointed at a clone; 1 admissible run root, benchmark-data/ic/spm/v1.10.18_sky130A) and none unbound (0 admissible roots) -- the same answer the FILE spelling got, and for the same reason: that root carries none of step 37's report outputs. So this cell was ALREADY failing at base (measured: 'declares 2 required_outputs; 1 are NOT produced') and this entry adds to an existing gap rather than creating one. UNPROVEN is decided LIVE: the branch re-searches every root and says so the moment one resolves -- including a Magic transcript, which the glob can now see and the old key could not."
     },
     "reports/phase3/pad_ring_route_evidence.json": {
      "status": "UNPROVEN",
@@ -1382,7 +1382,7 @@
      "note": "DECLARED 2026-09-22 to close W2 on step 37.3 (the route attestation over step 37's own GDS (path, sha256, bytes, stream-out engine); step 37.3 reads it to learn which artefact the run shipped and refuses on a sha256 mismatch). No admissible run root carried by this repository holds it -- the only one present is v1.10.18_sky130A, which carries none of step 37's three report outputs, including the stage3_compliance.json this step declared before this change. So this cell was ALREADY failing at base for that reason (measured: 'declares 2 required_outputs; 1 are NOT produced'), and these two entries add to an existing gap rather than creating one. UNPROVEN is decided LIVE: the branch re-searches every root and says so the moment one resolves."
     }
    },
-   "_note": "2026-09-22: two outputs DECLARED to close W2 on step 37.3 (stream_out.log, pad_ring_route_evidence.json), both recorded UNPROVEN; see their notes."
+   "_note": "2026-09-22: two outputs DECLARED to close W2 on step 37.3 (*stream_out.log, pad_ring_route_evidence.json), both recorded UNPROVEN; see their notes. 2026-09-23: the transcript entry was re-keyed FILE -> GLOB with the declaration, because the KLayout and Magic stream-out engines write two different names and only a glob is a demand every engine can meet."
   },
   "37.5ip": {
    "verdict": "ENFORCED",
