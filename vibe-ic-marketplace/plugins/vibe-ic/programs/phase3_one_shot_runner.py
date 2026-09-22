@@ -49578,6 +49578,32 @@ _DECLARED_SIGNOFF_GATES = (
     # here as one. What IS measured is the runner's own clean-project fixture
     # (`test_step23_25_signoff_gates_wired`) and the two-sided control in
     # `test_issue2126_assumed_clock_disclosure_is_wired.py`.
+    # STEPS 36 AND 38 -- THE SAME GAP 37.5ic HAD, MEASURED ON spm run20.
+    #
+    # Each of these steps declares its OWN gate as its only producer
+    # (`programs: ["tapeout_signoff_check"]` / `["foundry_handoff_package_check"]`)
+    # and declares that gate's `--json` target among its `required_outputs`. No
+    # one-shot runner invoked either program, so the ONLY process that ever wrote
+    # those documents was the audit's own clause -- and the audit then refused
+    # them, correctly, as self-certified:
+    #   AUDIT-CREATED OUTPUT REFUSED ['reports/audit/tapeout_checklist.json'] --
+    #   present, but written by this step's own gate rather than by the run, so
+    #   the step has no run evidence for it.
+    # The steps could not pass by any route. The run's own write record says the
+    # same thing from the other side: `producer: null`,
+    # `producer_confidence: "unwitnessed"`, `producer_evidence: "mtime falls
+    # inside no logged tool invocation window"` -- and every one of those files
+    # carries the SAME mtime second (11:43:17), the instant the audit ran.
+    #
+    # THIS DOES NOT ADD A BLOCKING QUESTION. Both programs already decide these
+    # steps through the yaml clauses; what was missing is the run producing the
+    # evidence its own flow declares. MEASURED before wiring, on a copy of
+    # run20: both exit rc 0 on that design, so no run that passes today starts
+    # failing here -- what changes is that the document is the RUN's.
+    ("tapeout_checklist", "tapeout_signoff_check.py",
+     "reports/audit/tapeout_checklist.json", ("--mode", "tapeout")),
+    ("foundry_handoff", "foundry_handoff_package_check.py",
+     "reports/phase3/foundry_handoff_audit.json", ()),
     ("sta_clock_disclosure", "sta_assumed_clock_disclosure_check.py",
      "reports/phase3/sta/assumed_clock_disclosure.json", ()),
 )
