@@ -1095,6 +1095,20 @@ def _disclosure_prefixes() -> Tuple[str, ...]:
 #:                           the opposite of the vacuity L1b looks for. A gate
 #:                           claiming substance on a tree containing NOTHING is
 #:                           precisely what this leg exists to charge.
+#:   _AWAITING_HINT_PREFIX   NOT TIER-CHANGING, by construction: the consumer
+#:                           appends it only NESTED INSIDE the branch that
+#:                           appends `_INCOMPLETE_HINT_PREFIX`, so it never
+#:                           occurs alone and the tier move is always that
+#:                           hint's, which this leg already accepts. What the
+#:                           awaiting marker adds is WHICH non-verdict it is --
+#:                           `awaiting_agent_pass` rather than
+#:                           `partial_population`, a reason class, not a bucket.
+#:                           So it is the `_NOT_APPLICABLE_HINT_PREFIX` case
+#:                           ("VISIBLE, NOT TIER-CHANGING ... it makes the
+#:                           non-verdict readable") and excluding it is the
+#:                           conservative direction: it costs no coverage,
+#:                           because the step's INCOMPLETE hint is still read as
+#:                           the disclosure, and it cannot excuse a pass.
 #:   _EXECUTED_DECLARED_NA_HINT_PREFIX  says a gate executed and examined a
 #:                           typed design declaration whose population is zero.
 #:                           The consumer keeps the step in plain PASS because
@@ -1106,7 +1120,7 @@ _EXCLUDED_TIER_HINTS: Tuple[str, ...] = (
     "_RAN_HINT_PREFIX", "_ADVISORY_HINT_PREFIX",
     "_ADVISORY_RECORD_HINT_PREFIX", "_STRUCTURE_ONLY_HINT_PREFIX",
     "_NOT_APPLICABLE_HINT_PREFIX", "_SUBSTANTIVE_HINT_PREFIX",
-    "_EXECUTED_DECLARED_NA_HINT_PREFIX")
+    "_EXECUTED_DECLARED_NA_HINT_PREFIX", "_AWAITING_HINT_PREFIX")
 
 
 def test_d6_executed_declared_na_cannot_excuse_a_pass_on_nothing():
