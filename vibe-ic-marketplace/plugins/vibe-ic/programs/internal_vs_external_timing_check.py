@@ -606,7 +606,20 @@ def main() -> int:
                 Path(args.json).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.json).write_text(txt + "\n")
         else:
-            print(msg)
+            # THE TIER STAYS AT LINE START. `_stdout_signals_vacuous` believes a
+            # vacuous disclosure only where `VACUOUS_PASS` BEGINS a line, and a
+            # clause that invokes this gate WITHOUT `--json` has stdout as its
+            # only channel. Printing the structural sentence alone put
+            # `[NOT_APPLICABLE_BY_STRUCTURE]` first and silently removed the
+            # disclosure, so such a clause would have read a bare PASS -- a
+            # fail-open I introduced, caught by one G-arm red.
+            #
+            # The VERDICT TIER never changed: this branch has always been, and
+            # still is, a VACUOUS_PASS (the JSON above says so). What R-0915-124/125
+            # made precise is the CLASS. So stdout now carries BOTH -- the tier
+            # word the flow reads, then the class and the enumeration a human
+            # needs to check the claim.
+            print(f"VACUOUS_PASS: {msg}")
         return 0
 
     findings = check(waveform, rtl_constants)
