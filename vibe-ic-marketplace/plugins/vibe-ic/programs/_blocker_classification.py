@@ -508,6 +508,35 @@ def classify(step: Any,
         return ("UNCLASSIFIED", "declared-artefact-absent",
                 "a declared artefact is not present; absence records no cause")
 
+    # 10b. AWAITING AN AGENT PASS — the one disclosure tier that DOES name a
+    #      cause to act on, which is why it cannot be left to rule 11.
+    #
+    #      The CLASS stays UNCLASSIFIED, deliberately. This is not a plugin
+    #      defect, not a fact about the design, and not MISSING_CAPABILITY
+    #      either -- that word is defined two hundred lines up as "a named
+    #      TOOL, BOARD or PDK is not here", and a pending two-pass hand-off is
+    #      none of those. This module's own doctrine settles it: where the
+    #      evidence does not DETERMINE one of the three, say so, because "an
+    #      honest hole in the list can be worked; a wrong class cannot".
+    #
+    #      What rule 11 got WRONG is the sentence, not the word. It reports
+    #      "it ran without measuring design-bound content, which names no cause
+    #      to act on" -- and an awaiting step names a very specific cause: the
+    #      hand-off pack is written and a named agent must answer it and the
+    #      gate re-run. A reader sent to "no cause to act on" stops; a reader
+    #      sent to the hand-off finishes the step. MEASURED on run21: step D1,
+    #      the flow's unconditional first step, is the ONE blocker of
+    #      `--stage-id stage_phase1 --strict` and read exactly that false
+    #      sentence.
+    if (_field(step, "reason_class")
+            == _T.ReasonClass.AWAITING_AGENT_PASS.value):
+        return ("UNCLASSIFIED", "awaiting-agent-pass",
+                "the gate completed pass one of a two-pass protocol and "
+                "disclosed that pass two is not a program's to make: the "
+                "hand-off is written and a named agent must answer it and the "
+                "gate be re-run. This names a cause to act on, and it is not "
+                "one of the three classes: no tool, board or PDK is absent")
+
     # 11. The producer's own disclosure tiers. Each says, in a typed status
     #     word, that the step produced something OTHER than a design-bound
     #     measurement — no input applied, or content that came from a library

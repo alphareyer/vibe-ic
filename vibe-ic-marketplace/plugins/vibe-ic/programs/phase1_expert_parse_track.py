@@ -3762,6 +3762,33 @@ def check_report(project: Path) -> int:
     print(f"{prefix}{PROGRAM}: {rep.get('verdict')} — read-only report check; "
           f"producer={producer.get('invoked_by')} "
           f"invocation={producer['invocation_id']} rc={rc}; report: {target}")
+    # SAY THE WORD FOR THE STATE THIS BRANCH JUST PROVED. The `elif` above
+    # accepts `rc == AWAITING_EXIT_CODE` only together with verdict INCOMPLETE
+    # and `ai.status == AI_HANDOFF_EMITTED` -- the awaiting triple, established
+    # right here -- and then this printer said only "INCOMPLETE". The consumer
+    # distinguishes the two tiers by an `AWAITING_AGENT_PASS` token that must
+    # START a line, and the token appeared nowhere in this file, so every step
+    # whose gate is this clause was read as `partial_population`: "the gate
+    # reports its input was applicable and was NOT examined". That is a false
+    # sentence about a run awaiting a two-pass hand-off whose population
+    # answered in full.
+    #
+    # MEASURED (run21, `--stage-id stage_phase1 --strict` rc=1): step D1 is the
+    # only blocker, and all 33 of its gates returned a decisive verdict while
+    # this report says `execution.disposition = "AWAITING"`,
+    # `observed_ai_status = "HANDOFF_EMITTED"`, `observed_ai_consumed = 0`.
+    #
+    # LAST LINE, AT COLUMN 0, AND BOTH OF THOSE ARE LOAD-BEARING. The consumer's
+    # snippet keeps a 300-char HEAD and a 300-char TAIL, so the verdict line
+    # above survives in the head and this one survives in the tail however long
+    # the project path is; and the token is only read when it starts a line.
+    if rc == AWAITING_EXIT_CODE and str(
+            (rep.get("execution") or {}).get("disposition") or "") == "AWAITING":
+        print(f"AWAITING_AGENT_PASS: {ai.get('status')} — "
+              f"{execution.get('observed_ai_consumed')} of "
+              f"{execution.get('required_ai_consumed_min')} required agent "
+              f"answer(s) consumed; the hand-off is written and pass two is not "
+              f"a program's to make")
     return rc
 
 
