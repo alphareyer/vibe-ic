@@ -21057,13 +21057,83 @@ def step_emit_phase2_manifests(project: Path,
 
     # Step 2: lint
     if (project / "reports").is_dir() or by_name.get("yosys_synth", _ABSENT_STEP).status == _V.Verdict.PASS.value:
-        w("reports/phase2/lint/rtl_hygiene.json", {
-            "verdict": "PASS",
-            "source": "yosys_synth (errors-as-fail)",
-            "rtl_files": sorted(p.name for p in rtl_dir.glob("*.sv")) if rtl_dir.is_dir() else [],
-            "evidence": "reports/yosys_synth.log",
-            "rule_set": "yosys-elaborate-noncrit-warn",
-        })
+        # THREE DEFECTS IN FIVE LINES, all measured on run21 (a signed
+        # serial-parallel multiplier that lints clean), where step 2 FAILed
+        # EVIDENCE_MISSING (#433): "reports/phase2/lint/rtl_hygiene.json →
+        # evidence 'reports/yosys_synth.log' missing/empty" over an artefact
+        # declaring `verdict: PASS` with `rtl_files: []`.
+        #
+        # 1. THE GLOB WAS SYSTEMVERILOG-ONLY. `rtl_dir.glob("*.sv")` matched
+        #    ZERO on run21, whose RTL is `phase2/stage1/rtl/spm.v` — plain
+        #    Verilog. The flow's own step-1 gate accepts
+        #    `phase2/stage1/rtl/*.sv` OR `*.v` (any_of), so this producer's idea
+        #    of "the RTL" was narrower than the flow's, and every design whose
+        #    sources are `.v` got an empty list. chip-AGNOSTIC defect: nothing
+        #    about spm caused it.
+        # 2. THE EVIDENCE PATH WAS A CONSTANT NOTHING WRITES. `reports/
+        #    yosys_synth.log` does not exist on run21 and is written by no step;
+        #    the synth transcript this verdict rests on is at
+        #    `_SYNTH_LOG_REL` (`phase2/stage2/synth/yosys.log`), which the run
+        #    DOES carry. A verdict must cite the evidence its own run produced,
+        #    and there is already a named constant for it.
+        # 3. THE VERDICT WAS AN UNCONDITIONAL `PASS`, written merely because a
+        #    `reports/` directory exists. A lint PASS over ZERO files, resting on
+        #    a log that is not there, is precisely the "PASS nothing
+        #    substantiates" that #433 refuses — and it is worse than a FAIL,
+        #    because it reports the design as linted.
+        #
+        # So: lint the RTL the run actually carries, cite the log it actually
+        # wrote, and REFUSE with a named reason rather than pass on nothing. A
+        # design with genuinely no RTL is REFUSED here too, not passed: this
+        # producer reads no declaration that would make an N/A legitimate, and
+        # the refusal names the directory and the patterns it scanned so a
+        # reviewer sees "0 files under phase2/stage1/rtl matching *.v/*.sv"
+        # instead of a green lint over nothing.
+        _lint_rtl = sorted(
+            f.name for pat in ("*.v", "*.sv")
+            for f in (rtl_dir.glob(pat) if rtl_dir.is_dir() else ()))
+        try:
+            _rtl_dir_rel = rtl_dir.relative_to(project).as_posix()
+        except ValueError:                      # pragma: no cover
+            _rtl_dir_rel = str(rtl_dir)
+        _synth_log_present = (project / _SYNTH_LOG_REL).is_file() and \
+            (project / _SYNTH_LOG_REL).stat().st_size > 0
+        if not _lint_rtl:
+            _hyg = {
+                "verdict": "INCOMPLETE",
+                "reason_class": "INPUT_ABSENT",
+                "reason": (
+                    f"no RTL to lint: 0 file(s) under "
+                    f"{_rtl_dir_rel} matching *.v or *.sv"
+                    f"{'' if rtl_dir.is_dir() else ' (the directory does not exist)'}"
+                    f" — a lint verdict over zero files states nothing about "
+                    f"this design, so this refuses instead of passing"),
+                "rtl_files": [],
+                "rule_set": "yosys-elaborate-noncrit-warn",
+            }
+        elif not _synth_log_present:
+            _hyg = {
+                "verdict": "INCOMPLETE",
+                "reason_class": "INPUT_ABSENT",
+                "reason": (
+                    f"{len(_lint_rtl)} RTL file(s) staged, but the synth "
+                    f"transcript this verdict rests on is absent or empty at "
+                    f"{_SYNTH_LOG_REL} — the errors-as-fail reading has no "
+                    f"input, so there is nothing to substantiate a PASS"),
+                "source": "yosys_synth (errors-as-fail)",
+                "rtl_files": _lint_rtl,
+                "evidence": _SYNTH_LOG_REL,
+                "rule_set": "yosys-elaborate-noncrit-warn",
+            }
+        else:
+            _hyg = {
+                "verdict": "PASS",
+                "source": "yosys_synth (errors-as-fail)",
+                "rtl_files": _lint_rtl,
+                "evidence": _SYNTH_LOG_REL,
+                "rule_set": "yosys-elaborate-noncrit-warn",
+            }
+        w("reports/phase2/lint/rtl_hygiene.json", _hyg)
         w("reports/phase2/lint/rom_init_lint.json", {
             "verdict": "PASS",
             "evidence": "otp_image_check step",
