@@ -3301,6 +3301,16 @@ class _ProgramCheckOutcome:
     passed: bool
     output: str
     exit_code: Optional[int]
+    #: Where this clause's receipt actually landed, when
+    #: `_receipt_off_a_produced_document` redirected it away from a document the
+    #: run had already produced. The verdict reader must follow this, NOT the
+    #: path the clause names: that path holds the PRODUCER's document, which
+    #: carries no gate verdict at all.
+    receipt: Optional[str] = None
+    #: The scratch directory holding `receipt`. Kept on the outcome so it
+    #: outlives the subprocess call and is still there when the wrapper reads
+    #: the verdict out of it.
+    receipt_scratch: Any = None
 
     def __iter__(self):
         yield self.passed
@@ -3351,6 +3361,8 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
     ok, out = _inner
     _actual_rc = (_inner.exit_code
                   if isinstance(_inner, _ProgramCheckOutcome) else None)
+    # `_command_json_report` follows the redirect for EVERY reader, this one
+    # included -- see `_RECEIPT_REDIRECTS`.
     report = _command_json_report(project, cmd_str)
     report_cls = _reason_taxonomy.report_reason_class(report)
     report_message = _report_reason_text(report)
@@ -3556,6 +3568,33 @@ def _check_program_exit_zero(project: Path, cmd_str: str) -> tuple[bool, str]:
 #: Receipt flags a gate clause uses for its own `--json` output.
 _GATE_RECEIPT_FLAGS = ("--json", "--report")
 
+#: WHERE EACH REDIRECTED RECEIPT WENT: resolved target path -> (receipt path,
+#: scratch keepalive). Written by `_receipt_off_a_produced_document`, read by
+#: `_command_json_report`.
+#:
+#: A REGISTRY RATHER THAN A PARAMETER, and the reason is measured. SIX call sites
+#: read a clause's report by re-parsing `--json` out of the clause string, and
+#: v1.23.23 taught the cost of fixing one: the advisory classifier at the
+#: enforcement tier still read the target path, so step 14's
+#: `yosys_tiecell_recipe_order_check` -- exit_code 0, its own fresh receipt
+#: saying CLEAN -- was published as the RUN's stale NOT_CHECKED /
+#: EXECUTION_ERROR, and the step disclosed NOT_MEASURED. Threading a parameter
+#: is complete only for as long as nobody adds the seventh reader. Redirecting
+#: inside the shared reader is complete BY CONSTRUCTION.
+#:
+#: The keepalive is held here because the readers run AFTER the subprocess
+#: returns: held in a local it was destroyed first, and the receipt was gone
+#: before anyone could read it.
+_RECEIPT_REDIRECTS: Dict[str, Tuple[str, Any]] = {}
+
+
+def _resolved_key(path: Path) -> str:
+    """One spelling of a path, so the writer and the reader agree on the key."""
+    try:
+        return str(path.resolve())
+    except OSError:                                        # pragma: no cover
+        return str(path)
+
 
 def _receipt_off_a_produced_document(argv: List[str], project: Path
                                     ) -> Tuple[List[str], Optional[str], Any]:
@@ -3594,6 +3633,7 @@ def _receipt_off_a_produced_document(argv: List[str], project: Path
         tmp = tempfile.TemporaryDirectory(prefix="gate_receipt_")
         moved = list(argv)
         moved[i + 1] = str(Path(tmp.name) / abs_target.name)
+        _RECEIPT_REDIRECTS[_resolved_key(abs_target)] = (moved[i + 1], tmp)
         return moved, (
             f"RECEIPT REDIRECTED: this clause's {tok} named "
             f"{target.as_posix()}, which the run had already produced; the "
@@ -3640,6 +3680,24 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
             False, f"program not found: {cmd_str.split()[0]}", None)
     argv, _receipt_note, _receipt_tmp = _receipt_off_a_produced_document(
         argv, project)
+    #: WHERE THE RECEIPT WENT. Every outcome below carries it, because
+    #: `_check_program_exit_zero` reads the gate's structured verdict, reason
+    #: class and message out of the receipt -- and the path the clause NAMES now
+    #: holds the producer's document instead. MEASURED on spm (v1.23.23, S arm):
+    #: step 14 went PASS -> NOT_MEASURED and seven FAILs went to NOT_MEASURED,
+    #: because the redirect moved the receipt and the reader kept reading the
+    #: clause string.
+    _receipt_path: Optional[str] = None
+    if _receipt_note:
+        for _i, _tok in enumerate(argv[:-1]):
+            if _tok in _GATE_RECEIPT_FLAGS:
+                _receipt_path = argv[_i + 1]
+                break
+
+    def _outcome(passed: bool, output: str,
+                 exit_code: Optional[int]) -> _ProgramCheckOutcome:
+        return _ProgramCheckOutcome(passed, output, exit_code,
+                                    _receipt_path, _receipt_tmp)
     # #525 — per-gate budget from the SHARED resolver (default 900s, env
     # VIBE_IC_GATE_TIMEOUT_S, cap 3600s). The old fixed 300s killed honest
     # slow gates on large SoCs (reset_dependency_check ~6 min on a 7.5MB
@@ -3681,11 +3739,11 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
         if _receipt_note:
             snippet = f"{snippet}\n{_receipt_note}" if snippet else _receipt_note
         if r.returncode == 0:
-            return _ProgramCheckOutcome(True, snippet, r.returncode)
+            return _outcome(True, snippet, r.returncode)
         if r.returncode == 2:
             # Treat as vacuous pass — surface the program command so
             # reviewers know which gate vacuously passed.
-            return _ProgramCheckOutcome(
+            return _outcome(
                 True, f"{_VACUOUS_HINT_PREFIX}{cmd_str}\n{snippet}",
                 r.returncode)
         if (r.returncode == _AWAITING_EXIT_CODE
@@ -3708,7 +3766,7 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
             # inherit the tier. The snippet is PASSED THROUGH so the token
             # survives into `out`, and the reason line is prepended so a cut
             # cannot take it.
-            return _ProgramCheckOutcome(
+            return _outcome(
                 True,
                 (f"INCOMPLETE: {_AWAITING_STDOUT_TOKEN} — the gate reached a "
                  f"stated wait, not a verdict (rc {_AWAITING_EXIT_CODE}): a "
@@ -3724,7 +3782,7 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
             # bare PASS) so the WITH_WAIVERS distinction survives the rc-only
             # gate. Requires the stdout sentinel too, so a stray rc=3 from an
             # unrelated program is NOT silently waived.
-            return _ProgramCheckOutcome(
+            return _outcome(
                 True, f"{_WAIVER_HINT_PREFIX}{cmd_str}", r.returncode)
         # The gate exited non-zero. Decide HERE, while the UNTRUNCATED output
         # is still in hand, whether that was a verdict or a crash — see
@@ -3741,7 +3799,7 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
             # `_evaluate_gate`; the snippet goes SECOND so the gate's own
             # output survives it too. The prose sits at the END, where a cut
             # costs nothing: a reader who lost it still has the sentinel.
-            return _ProgramCheckOutcome(
+            return _outcome(
                 False,
                 (f"{_CRASH_HINT_PREFIX}"
                  f"{python_traceback_summary(r.stderr)}\n"
@@ -3751,7 +3809,7 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
                  f"one): {cmd_str}"),
                 r.returncode,
             )
-        return _ProgramCheckOutcome(False, snippet, r.returncode)
+        return _outcome(False, snippet, r.returncode)
     except _GateStalled as stalled:
         # #525's reading stands and is now MEASURED rather than inferred: the
         # gate was killed mid-run, so the step is INCONCLUSIVE and still FAILs
@@ -3759,7 +3817,7 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
         # longer "it has been N seconds", which a correct gate on a busy host
         # reaches just as easily. It is "this gate's process tree did nothing
         # at all for N seconds", which only a wedged gate reaches.
-        return _ProgramCheckOutcome(
+        return _outcome(
             False,
             (f"program STALLED — no CPU, no I/O and no output from "
              f"its process tree for {gate_budget}s, stopped after "
@@ -3770,7 +3828,7 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
             None,
         )
     except Exception as exc:
-        return _ProgramCheckOutcome(
+        return _outcome(
             False, f"program invocation error: {exc}", None)
 
 
@@ -4459,6 +4517,19 @@ _VACUOUS_JSON_VERDICTS = {"NOT_APPLICABLE", "SKIPPED", "SKIP", "VACUOUS",
                           "VACUOUS_PASS", "NO_BUILD", "NOT_RUN"}
 
 
+def _json_report_at(path: Path) -> Optional[Dict[str, Any]]:
+    """One non-empty JSON object at `path`, or None. The shared reader, so a
+    receipt read through the redirect and one read off the clause string are
+    judged by exactly the same rules."""
+    try:
+        if not (path.is_file() and path.stat().st_size > 0):
+            return None
+        data = json.loads(path.read_text(errors="replace"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _command_json_report(project: Path, cmd: str) -> Optional[Dict[str, Any]]:
     """Read the JSON report path named by a gate command, when available."""
     m = re.search(r"--json[= ]+(\S+)", cmd or "")
@@ -4467,13 +4538,16 @@ def _command_json_report(project: Path, cmd: str) -> Optional[Dict[str, Any]]:
     p = Path(m.group(1).strip("'\""))
     if not p.is_absolute():
         p = project / p
-    try:
-        if not (p.is_file() and p.stat().st_size > 0):
-            return None
-        data = json.loads(p.read_text(errors="replace"))
-    except Exception:
-        return None
-    return data if isinstance(data, dict) else None
+    # FOLLOW THE DISCLOSED REDIRECT. When this clause's receipt was moved off a
+    # document the run had already produced, the gate's verdict is in the
+    # scratch receipt; `p` now holds the RUN's own document, whose answer is
+    # older than the invocation being judged.
+    moved = _RECEIPT_REDIRECTS.get(_resolved_key(p))
+    if moved is not None:
+        redirected = _json_report_at(Path(moved[0]))
+        if redirected is not None:
+            return redirected
+    return _json_report_at(p)
 
 
 def _report_proves_executed_design_na(
