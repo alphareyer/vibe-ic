@@ -49842,6 +49842,59 @@ def _signoff_not_checked(name: str, t0: float, why: str,
                       f"{_SIGNOFF_NOT_CHECKED}: {why}", list(outputs), reason_class=_V.ReasonClass.NOT_EXECUTED)
 
 
+#: PRE-AUDIT PRODUCERS: run so the document EXISTS, never folded into the
+#: release roll-up. Same (name, program, output, argv) shape as
+#: `_DECLARED_SIGNOFF_GATES`, deliberately a SEPARATE tuple.
+#:
+#: WHY SEPARATE, AND IT COST A HANDBACK TO LEARN. Steps 36 and 38 each declare
+#: their OWN gate as their only producer and that gate's `--json` target among
+#: their `required_outputs`, and no runner invoked either -- so the only writer
+#: was the audit's own clause, and the audit refused the document as
+#: self-certified ("written by this step's own gate rather than by the run").
+#: The run's write record agreed: `producer: null`, `producer_confidence:
+#: "unwitnessed"`. The fix is that the RUN writes them.
+#:
+#: But `DECLARED_SIGNOFF_STEP_NAMES` is derived from `_DECLARED_SIGNOFF_GATES`,
+#: and `declared_signoff_rollup` exists to "state the sign-off population's
+#: DENOMINATOR" (#544). Putting these two there enlarged that denominator, so a
+#: complete deployment suddenly owed two more documents: MEASURED, the #544
+#: fixtures went to "7 of 10 declared sign-off gate(s) PASSED; 1 FAILED:
+#: tapeout_checklist; 2 NOT CHECKED: sta_corner, foundry_handoff" and five of its
+#: cases -- including `test_a_complete_deployment_with_every_gate_passing_still_
+#: releases` -- introduced reds against main.
+#:
+#: PRODUCING A DOCUMENT IS NOT SIGNING OFF ON IT. What was missing was the
+#: producer, not a new member of the release population; the audit already gates
+#: both steps through their yaml clauses. So these run here and their verdicts do
+#: not reach `_aggregate_verdict` or the roll-up. Redefining what "sign-off"
+#: counts is a contract change and is not made as a side effect of wiring a
+#: producer.
+_PRE_AUDIT_PRODUCERS = (
+    ("tapeout_checklist", "tapeout_signoff_check.py",
+     "reports/audit/tapeout_checklist.json", ("--mode", "tapeout")),
+    ("foundry_handoff", "foundry_handoff_package_check.py",
+     "reports/phase3/foundry_handoff_audit.json", ()),
+)
+
+
+def run_pre_audit_producers(project: Path, container: str = "") -> List[StepResult]:
+    """Write the documents steps 36 and 38 declare, and report them separately.
+
+    The rows come back for the console and the log; the caller does NOT fold them
+    into the plan, so the release verdict and the sign-off denominator are
+    untouched. A refusal here is disclosed and does not withhold the release --
+    these steps' own yaml clauses already decide them in the audit.
+    """
+    rows: List[StepResult] = []
+    for name, program, out_rel, extra_argv in _PRE_AUDIT_PRODUCERS:
+        argv = tuple(extra_argv)
+        if container and name in _PDK_AWARE_SIGNOFF_GATES:
+            argv += ("--pdk-container", container)
+        rows.append(_run_declared_signoff_gate(project, name, program, out_rel,
+                                               argv))
+    return rows
+
+
 def _run_declared_signoff_gate(project: Path, name: str, program: str,
                                out_rel: str,
                                extra_argv: tuple = ()) -> StepResult:
@@ -65392,6 +65445,15 @@ def main() -> int:
     # BEFORE the derived-artefact generators build the hand-off pack and
     # tape-out checklist on top of a sign-off nobody checked.
     plan.extend(step_declared_signoff_gates(project, pdk.name, args.container))
+    # PRE-AUDIT PRODUCERS, run and REPORTED, never planned. Steps 36 and 38 each
+    # declare their own gate as their only producer, so without this the only
+    # writer of their documents is the audit's own clause and the audit refuses
+    # them as self-certified. Deliberately NOT extended into `plan`: see
+    # `_PRE_AUDIT_PRODUCERS` -- these are producers, and producing a document is
+    # not signing off on it. A refusal here is printed and does not withhold the
+    # release, because each step's own yaml clause still decides it in the audit.
+    for _row in run_pre_audit_producers(project, args.container):
+        print(f"[phase3] pre-audit producer {_row.name}: {_row.status}")
 
     # ORDERING (measured on `spm`, image 0.3.46, plugin v1.17.42): the
     # sign-off gates below WRITE three of the reports the sign-off metrics
