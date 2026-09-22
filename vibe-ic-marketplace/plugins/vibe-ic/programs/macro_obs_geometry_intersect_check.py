@@ -272,10 +272,29 @@ def _typed_refusal(json_out: Optional[Path], check: str, reason_class: str,
     return 2
 
 
+#: Set once the inventory has resolved the reader THIS RUN recorded, so the LEF
+#: BODIES can be read where the run read them. Existence alone is not enough: with
+#: the paths resolving but the text still read host-side, this gate parsed only the
+#: one host LEF, found no IO master among 49 placed ones and reported
+#: `DESIGN_DECLARED_NA -> SKIP` -- a PASS tier, on a set it had not read. That is
+#: the fail-open direction, so the content channel has to follow the existence one.
+_ACTIVE_PDK_READER = None
+
+
 def _read_input_text(path: Path) -> str:
     if _ACTIVE_INPUT_PLAN is not None:
         return _ACTIVE_INPUT_PLAN.text_for(path, errors="replace")
-    return Path(path).read_text(errors="replace")
+    try:
+        return Path(path).read_text(errors="replace")
+    except OSError:
+        # Not on this host. A container-side PDK view is READABLE where the run
+        # read it, and the reader the run recorded is the one authority that can
+        # say so -- the same one 15.5ic and the general ladder consult.
+        if _ACTIVE_PDK_READER is not None:
+            text = _ACTIVE_PDK_READER.read_text(str(path))
+            if text is not None:
+                return text
+        raise
 
 
 def _is_default_routed_def(relative: str) -> bool:
@@ -1075,6 +1094,44 @@ def _inventory_declared_paths(proj: Path) -> List[Path]:
     return [Path(x) for x in raw]
 
 
+def _reanchored_in_this_project(project: Path, recorded: Path) -> Path:
+    """A run-produced path re-anchored to THIS project by its longest existing tail.
+
+    The inventory records ABSOLUTE HOST paths for the LEFs the run produced
+    itself (run21's first entry is
+    `<original run root>/phase3/stage3/pnr/active_via_legalized.tlef`). Read on a
+    COPY of that run, or from any tree but the one that made it, those point
+    outside the project -- on a fleet host, into another lane's directory.
+    Existence-tested, so it can never invent a file, and convention-free, so it
+    does not care what the copy is named.
+
+    (`gds_xor_check.reanchored` is the twin of this helper, added on the same day
+    for the same recorded-absolute-path problem in the stream-out transcript's LEF
+    set. They should become one shared helper once both land; they are separate
+    now only because each was measured on its own branch.)
+    """
+    if recorded.exists():
+        return recorded
+    parts = recorded.parts
+    for i in range(1, len(parts)):
+        cand = project.joinpath(*parts[i:])
+        if cand.exists():
+            return cand
+    return recorded
+
+
+def _reader_the_run_recorded(project: Path):
+    """(reader, why) for the volume THIS RUN read its PDK through, or (None, why)."""
+    try:
+        import _pdk_layer_authority as authority
+    except ImportError as exc:                              # pragma: no cover
+        return None, f"PDK authority unavailable: {exc}"
+    try:
+        return authority.reader_the_run_recorded(project)
+    except Exception as exc:                                # pragma: no cover
+        return None, f"PDK authority refused: {exc}"
+
+
 def _recorded_physical_view_lefs(proj: Path):
     """Read the producer's exact PnR LEF list, refusing incomplete records."""
     record = proj / "reports" / "phase3" / "physical_view_inventory.json"
@@ -1095,19 +1152,51 @@ def _recorded_physical_view_lefs(proj: Path):
                                                         for x in raw):
         return [], "physical view inventory has no complete read_lef path list"
     paths = [Path(x) for x in raw]
-    missing = [p for p in paths if not p.is_file()]
+    # RESOLVE EACH RECORDED PATH WHERE THE RUN ACTUALLY READ IT, before asking
+    # whether it is there. MEASURED on run21: this list holds 32 entries — ONE
+    # absolute host path to a LEF the run produced itself, and 31
+    # container-side PDK paths under /foss/pdks/... that exist only INSIDE the
+    # EDA image. A bare host `is_file()` over that list answers "31 LEF view(s)
+    # missing or unreadable" and the step reports NOT_MEASURED, so
+    # `macro_obs_geometry_intersect` has never once examined this design. The
+    # inventory is not at fault: it faithfully records what PnR read. The reader
+    # was looking for container paths on the host.
+    #
+    # Two channels, each for the kind of path it is: run-produced paths are
+    # re-anchored to this project (existence-tested), and PDK paths are asked of
+    # the reader THIS RUN recorded — the same authority 15.5ic and the general
+    # ladder use, so all three agree about where this run's PDK lives.
+    reader, reader_why = _reader_the_run_recorded(proj)
+    global _ACTIVE_PDK_READER
+    _ACTIVE_PDK_READER = reader
+    resolved = [_reanchored_in_this_project(proj, p) for p in paths]
+
+    def _present(path: Path) -> bool:
+        if path.is_file():
+            return True
+        if reader is None:
+            return False
+        try:
+            return bool(reader.is_file(str(path)))
+        except Exception:                                   # pragma: no cover
+            return False
+
+    paths = resolved
+    missing = [p for p in paths if not _present(p)]
     unreadable = []
     for p in paths:
         if p in missing:
             continue
         try:
-            _read_input_text(p)
+            if not _read_input_text(p).strip():
+                unreadable.append(f"{p} (empty)")
         except OSError as exc:
             unreadable.append(f"{p} ({exc})")
     if missing or unreadable:
         details = [*(str(p) for p in missing), *unreadable]
         return [], (f"physical view inventory is incomplete: {len(details)} "
-                    f"LEF view(s) missing or unreadable ({', '.join(details[:6])})")
+                    f"LEF view(s) missing or unreadable ({', '.join(details[:6])})"
+                    f"; the run's own PDK reader was {reader_why or 'not resolved'}")
     return paths, ""
 
 
