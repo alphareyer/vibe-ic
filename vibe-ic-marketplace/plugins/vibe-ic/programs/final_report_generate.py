@@ -2754,6 +2754,40 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not args.no_audit:
         canonical = _pl.report_path(project, "final_summary.md")
         _prewrite_attestation(project, canonical)
+        # R-0915-130 — ASK THE ATTESTATION GATE HERE, where its input exists.
+        # It used to be a member of `flow_compliance_check._STRUCTURAL_RTL_GATES`,
+        # so EVERY invocation asked it — including each stage's mid-run compliance
+        # call, ten minutes before `reports/final_summary.md` was written. On run21
+        # it reported "8 attestation gap(s)" at 17:57:12 against a file written at
+        # 18:07:34, and the completion audit published that stale FAIL one second
+        # before the file appeared. Asked HERE, immediately after the pre-write
+        # above and BEFORE `_render` runs the audit roll-up, it always reads a
+        # finished table.
+        #
+        # The gate is unchanged and its refusals are unchanged: an ABSENT report
+        # is still VACUOUS_PASS naming `agent_report_presence_check` as the owner,
+        # and a report PRESENT but carrying zero sha256 tokens is still
+        # FAIL / NO_ATTESTATION_TABLE. Moving where a question is asked must not
+        # move what counts as an answer, so the verdict is surfaced rather than
+        # swallowed: it goes into the summary the audit then reads, and a real
+        # attestation gap on a FINISHED run still fails exactly as before.
+        try:
+            from agent_report_sha256_attestation_check import audit as _att_audit
+            _att_verdict, _att_findings = _att_audit(project)
+        except Exception as _att_exc:            # pragma: no cover
+            # Bookkeeping must not break a run, and an unreadable gate is not a
+            # clean one: say so rather than imply a pass.
+            _att_verdict, _att_findings = "INCOMPLETE", []
+            print(f"[WARN] attestation gate unavailable: "
+                  f"{type(_att_exc).__name__}: {_att_exc}")
+        if _att_findings:
+            print(f"[{_att_verdict}] agent_report_sha256_attestation_check: "
+                  f"{len(_att_findings)} attestation gap(s) — "
+                  + "; ".join(str(getattr(f, "code", f))[:60]
+                              for f in _att_findings[:4]))
+        else:
+            print(f"[{_att_verdict}] agent_report_sha256_attestation_check: "
+                  f"no attestation gap over the freshly written table")
 
     md = _render(project, run_audit=not args.no_audit,
                  audit_timeout_s=args.audit_timeout,

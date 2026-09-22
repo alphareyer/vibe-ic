@@ -1445,7 +1445,35 @@ _STRUCTURAL_RTL_GATES: tuple[str, ...] = (
     #   only checks the 5 section names; this gate audits the report
     #   content. Real-world signal: v10619-vendor (0 sha256) and
     #   v10627-vendor (1 sha256, missing GDS attestation) both FAIL.
-    "agent_report_sha256_attestation_check",
+    #
+    # R-0915-130 — REMOVED FROM THIS REGISTRY, and asked at the END of the flow
+    # instead (`final_report_generate`, immediately after the attestation table
+    # is written and before the audit roll-up). It is NOT weakened and NOT
+    # waived: the same gate, the same refusals, asked where its input exists.
+    #
+    # Membership here meant EVERY `flow_compliance_check` invocation asked it,
+    # including each stage's mid-run compliance call -- and its input,
+    # `reports/final_summary.md`, is written at the very END of a run. MEASURED on
+    # run21, by that run's own mtimes:
+    #     reports/phase2/gates/stage2_compliance.json   17:57:12  <- asked here
+    #     reports/audit/phase23_completion_audit.json   18:07:33  <- stale FAIL
+    #                                                                 recorded
+    #     reports/final_summary.md                      18:07:34  <- the INPUT
+    # It read its input 10 min 22 s before that input was written and reported
+    # "8 attestation gap(s)"; the completion audit published that FAIL ONE SECOND
+    # before the file appeared. On the finished tree the same gate says "PASS: 10
+    # canonical artefact(s) all attested".
+    #
+    # #461 had already found half of this and fixed only the final invocation:
+    # `_prewrite_attestation` writes the fresh table before `_render` runs the
+    # internal audit, so the gate reading it THERE is sound. The stage-N
+    # invocations never got that pre-write and could not, because at stage 2 the
+    # run has not produced the artefacts to attest.
+    #
+    # Ordering, not a conditional (the ruling is explicit): a completion-signal
+    # escape would add a second way to say "not yet" for a case ordering
+    # removes, and every conditional refusal is a place a finished-but-unattested
+    # run can hide.
     # v1.6.38 — `emitter_failure_mode_check` /
     # `literal_verdict_keyword_check` / `source_chip_agnostic_check` /
     # `changelog_metric_reproducibility_check` are intentionally NOT
