@@ -3787,12 +3787,26 @@ def __check_program_exit_zero(project: Path, cmd_str: str) -> _ProgramCheckOutco
             # inherit the tier. The snippet is PASSED THROUGH so the token
             # survives into `out`, and the reason line is prepended so a cut
             # cannot take it.
+            # THE TOKEN MUST START A LINE, and in the line above it does not.
+            # `_stdout_signals_token` believes a token only where it begins a
+            # line (leading space allowed), so this message NAMES
+            # `AWAITING_AGENT_PASS` mid-sentence after `INCOMPLETE: ` and its own
+            # token test could never see it. The tier was therefore reachable
+            # only when the GATE PROGRAM happened to print the sentinel itself --
+            # and `phase1_expert_parse_track`, the one gate this branch was
+            # written for, printed only `INCOMPLETE:` and did not contain the
+            # word anywhere in its source. A second line, at column 0, makes the
+            # synthesised message self-sufficient: the reader no longer depends
+            # on the producer's stdout surviving the snippet cut, or on the
+            # producer saying the word at all.
             return _outcome(
                 True,
                 (f"INCOMPLETE: {_AWAITING_STDOUT_TOKEN} — the gate reached a "
                  f"stated wait, not a verdict (rc {_AWAITING_EXIT_CODE}): a "
                  f"second pass it cannot perform itself, because only an AGENT "
-                 f"can, has not happened: {cmd_str}\n{snippet}"),
+                 f"can, has not happened: {cmd_str}\n"
+                 f"{_AWAITING_STDOUT_TOKEN}: rc {_AWAITING_EXIT_CODE} with the "
+                 f"INCOMPLETE sentinel — stated by {cmd_str}\n{snippet}"),
                 r.returncode)
         if (r.returncode == _WAIVER_EXIT_CODE
                 and _stdout_signals_waiver(r.stdout)
@@ -4536,6 +4550,30 @@ def _stdout_signals_token(snippet: str, token: str) -> bool:
 #: stdout is exactly that channel (the consumer sees only the last 300 chars).
 _VACUOUS_JSON_VERDICTS = {"NOT_APPLICABLE", "SKIPPED", "SKIP", "VACUOUS",
                           "VACUOUS_PASS", "NO_BUILD", "NOT_RUN"}
+
+
+#: R-0915-88 / #2063 — the AWAITING disposition as a gate's own report states it.
+#: The mirror of `_VACUOUS_JSON_VERDICTS`: a tier read from the FILE, because
+#: stdout is the channel a project-path length can truncate away.
+_AWAITING_EXECUTION_DISPOSITIONS = {"AWAITING"}
+
+
+def _report_signals_awaiting(project: Path, cmd_str: str) -> bool:
+    """True iff the report this clause names says its execution is AWAITING.
+
+    Keyed on `execution.disposition`, which is the producer's own word for "I
+    emitted a hand-off and nobody has consumed it yet" -- not on a name pattern
+    and not on the verdict, because INCOMPLETE is shared by the awaiting tier and
+    by a genuinely short population and telling those apart is the whole point.
+    """
+    report = _command_json_report(project, cmd_str)
+    if not isinstance(report, dict):
+        return False
+    execution = report.get("execution")
+    if not isinstance(execution, dict):
+        return False
+    return str(execution.get("disposition") or "") in \
+        _AWAITING_EXECUTION_DISPOSITIONS
 
 
 def _json_report_at(path: Path) -> Optional[Dict[str, Any]]:
@@ -11185,6 +11223,34 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
             reasons.append(f"{_SUBSTANTIVE_HINT_PREFIX}{_cmd}")
         if passed and _stdout_signals_token(out, _INCOMPLETE_STDOUT_TOKEN):
             reasons.append(f"{_INCOMPLETE_HINT_PREFIX}{_cmd}")
+            # THE SAME ASYMMETRY THE VACUOUS COMMENT ABOVE DESCRIBES, for the
+            # OTHER token. The OPTIONAL clause reader appends this awaiting hint
+            # nested exactly here; the REQUIRED reader never looked for it, so
+            # `AWAITING_AGENT_PASS` was reachable only through an optional slot.
+            # Every step whose awaiting gate is a required `program_exit_zero`
+            # therefore read `partial_population` -- "the gate reports its input
+            # was applicable and was NOT examined" -- which is a false sentence
+            # about a run that is waiting on a two-pass hand-off and whose
+            # population answered in full.
+            #
+            # MEASURED (run21, `--stage-id stage_phase1 --strict` rc=1): step D1
+            # is the ONE blocker, UNCLASSIFIED/partial_population, while all 33
+            # of its gates returned a decisive verdict and
+            # `reports/audit/phase1/expert_parse_track.json` says
+            # `execution.disposition = "AWAITING"`,
+            # `observed_ai_status = "HANDOFF_EMITTED"`, `observed_ai_consumed = 0`.
+            # Nothing about that population is short.
+            #
+            # The REPORT, not just stdout. #887/#901 established that a
+            # disclosure a project-path length can delete is not a disclosure --
+            # the consumer sees only the last 300 chars of stdout -- which is why
+            # the vacuous tier is read from the file through
+            # `_VACUOUS_JSON_VERDICTS`. The awaiting tier is read the same way,
+            # so a producer that states the disposition in its own report is
+            # believed even when the sentence never survives the stdout channel.
+            if (_stdout_signals_token(out, _AWAITING_STDOUT_TOKEN)
+                    or _report_signals_awaiting(project, _cmd)):
+                reasons.append(f"{_AWAITING_HINT_PREFIX}{_cmd}")
         return passed, reasons
 
     # `json_field_true`
@@ -11598,6 +11664,29 @@ def _evaluate_gate(project: Path, gate: Dict[str, Any],
                     # 33's new authority clauses print the token, exit 0, and
                     # before this branch existed `check_step` returned PASS
                     # with the hint absent from `reasons` entirely.
+                    reasons.append(hint)
+                elif hint.startswith(_AWAITING_HINT_PREFIX):
+                    # THE WHITELIST'S OWN WARNING, COME TRUE A FOURTH TIME —
+                    # and this one cost the flow its first step. #599 added the
+                    # INCOMPLETE tier here (the branch above); R-0915-88 added
+                    # the AWAITING tier that SPLITS it, and did not. So the
+                    # awaiting hint was appended by the clause reader and
+                    # dropped at this line, `awaiting_hints` was empty at the
+                    # classifier, and every step whose awaiting gate sits in an
+                    # `all_of` read `partial_population` instead: "the gate
+                    # reports its input was applicable and was NOT examined".
+                    #
+                    # MEASURED (run21, `--stage-id stage_phase1 --strict`,
+                    # rc=1): step D1 is the invocation's ONE blocker,
+                    # UNCLASSIFIED/partial_population, while ALL 33 of its
+                    # gates returned a decisive verdict and
+                    # `reports/audit/phase1/expert_parse_track.json` states
+                    # `execution.disposition = "AWAITING"`,
+                    # `observed_ai_status = "HANDOFF_EMITTED"`,
+                    # `observed_ai_consumed = 0`. Nothing about that population
+                    # is short; the flow is waiting on a pass a program cannot
+                    # make. `AWAITING_AGENT_PASS` was written into the taxonomy
+                    # and was unreachable through the front door.
                     reasons.append(hint)
         return True, reasons
 
