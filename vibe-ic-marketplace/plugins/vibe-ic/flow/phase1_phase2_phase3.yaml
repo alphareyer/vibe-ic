@@ -8309,9 +8309,29 @@ steps:
   - id: "37.3"
     name: "GDS stream-out / finishing fidelity — the shipped GDS XOR'd against this run's own pre-finishing boundary"
     stage: stage4
-    required_inputs:
-      - from: 37
-        path: "phase3/stage4/gds/*.gds"
+    # ITS SUBJECT NEEDS TWO GDS FILES, NOT A CLEAN PV. Whether the shipped GDS
+    # differs from this run's own pre-finishing boundary on the design layers is
+    # answerable from those two artefacts alone; step 37's PV-clean condition is
+    # not an input to it. MEASURED on the S arm (spm end-to-end, 0.3.67, the
+    # rollback path): step 37 FAILed on DRC and this step was cascaded away --
+    # while BOTH inputs sat on disk, `chip_top.prefinish.gds` at 73,850,000 B (the
+    # retained boundary fired) and the shipped GDS at 102,921,972 B. The one run
+    # where the answer matters MOST produced no receipt.
+    #
+    # And it matters most there for a reason that is not bookkeeping: a fidelity
+    # defect -- finishing corrupting design geometry -- is a candidate CAUSE of
+    # the DRC violations that failed PV. Gating this check on PV being clean means
+    # it can never help diagnose the failure it might explain. R-0915-129's own
+    # words: "a metric with no producer, not a metric that cannot be produced".
+    #
+    # So the step is CONDITIONAL on its subject existing rather than DEPENDENT on
+    # a verdict: with the route attestation present there is a named shipped GDS
+    # to audit and the step runs, PV clean or not; with it absent there is no
+    # subject and the step is NOT_APPLICABLE -- never FAIL/missing_artefact, which
+    # is what a cascaded-away step with a declared output produced here.
+    condition:
+      files_exist:
+        - "reports/phase3/pad_ring_route_evidence.json"
     required_outputs:
       - "reports/phase3/gds_xor.json"
     programs:
@@ -8319,7 +8339,11 @@ steps:
     gate:
       all_of:
         - program_exit_zero: "gds_xor_check . --json reports/phase3/gds_xor.json"
-    blocks_on: [37]
+    # NO `blocks_on`, deliberately. `blocks_on` declares a VERDICT dependency and
+    # is what cascaded this step away behind a failed 37; the real requirement is
+    # that the artefacts exist, which the `condition` above states directly and
+    # checks at evaluation time. Ordering is unaffected: the condition cannot be
+    # satisfied before step 37 has written the attestation it names.
 
   - id: "37.4"
     name: "Sign-off metrics aggregation — the run's own checker verdicts, under the names the release documents read"
