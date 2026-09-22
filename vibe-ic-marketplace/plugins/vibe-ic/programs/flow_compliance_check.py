@@ -91,6 +91,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import sys
 import tempfile
 from dataclasses import dataclass, field, asdict
@@ -3633,6 +3634,26 @@ def _receipt_off_a_produced_document(argv: List[str], project: Path
         tmp = tempfile.TemporaryDirectory(prefix="gate_receipt_")
         moved = list(argv)
         moved[i + 1] = str(Path(tmp.name) / abs_target.name)
+        # SEED THE SCRATCH WITH THE DOCUMENT. For several gates this flag names
+        # an INPUT as well as an output: `pad_ring_check`'s own help says the
+        # path is "READ as the producer's claim, then written back with this
+        # gate's verdict beside it". Moving the receipt without carrying the
+        # document took the gate's INPUT away, and it said so exactly --
+        # MEASURED on spm run20, step 15.5ic, with the reader fix already in the
+        # tree: "no pad-ring report at /tmp/.../gate_receipt_u1o69wed/padring.json
+        # -- `pad_ring_gen` did not run. An absent report is not a disclosed
+        # skip". The producer HAD run; the auditor had hidden its output.
+        #
+        # Copying rather than enumerating which gates read their target: a list
+        # is complete only until the next gate is wired, and a gate that ignores
+        # its pre-seeded input is unaffected by finding one there.
+        try:
+            shutil.copy2(abs_target, moved[i + 1])
+        except OSError:                                    # pragma: no cover
+            # Unreadable/uncopyable is the pre-seed state, which is exactly what
+            # a gate with a write-only flag expects. Never a reason to hand the
+            # gate the real path back.
+            pass
         _RECEIPT_REDIRECTS[_resolved_key(abs_target)] = (moved[i + 1], tmp)
         return moved, (
             f"RECEIPT REDIRECTED: this clause's {tok} named "
