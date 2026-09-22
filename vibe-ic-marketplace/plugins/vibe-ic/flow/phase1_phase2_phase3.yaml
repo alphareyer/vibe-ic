@@ -8099,6 +8099,29 @@ steps:
       - stage3_compliance
     required_outputs:
       - "phase3/stage4/gds/*.gds"
+      # THE STREAM-OUT TRANSCRIPT, declared because it is CONSUMED. This step
+      # writes it ("the resolution prints are the only evidence of WHAT went
+      # into the sign-off GDS", at the write site), and step 37.3 reads it to
+      # recover the library set for a re-streamed fidelity reference. An
+      # artefact the flow produces and a gate consumes, declared by no step, is
+      # exactly W2 -- and the matrix named it on 37.3:
+      # "W2:produced_consumed_undeclared phase3/stage3/pnr/stream_out.log --
+      #  the step's own gate asserts this file exists; no step's
+      #  required_outputs names it". Undeclared meant nothing checked it existed,
+      # so its absence would have been invisible until a reader took the
+      # empty-branch.
+      - "phase3/stage3/pnr/stream_out.log"
+      # THE ROUTE ATTESTATION, declared for the same reason and by the same rule.
+      # `step_pad_ring_final_evidence` writes it in this phase-3 pass and it is an
+      # attestation ABOUT THIS STEP'S OWN GDS -- the shipped path, its sha256, its
+      # byte count and the stream-out engine -- so it cannot exist before step 37
+      # and belongs to no earlier step. Step 37.3 reads it to learn WHICH GDS and
+      # WHICH routed DEF the run shipped, and refuses on a sha256 mismatch; that
+      # is what makes the fidelity comparison about the artefact the run attested
+      # rather than whatever file happens to be on disk. W2 named it on 37.3:
+      # "produced by the flow and read by a gate, but no step's required_outputs
+      # names it".
+      - "reports/phase3/pad_ring_route_evidence.json"
       - "reports/phase3/gates/stage3_compliance.json"
     gate:
       all_of:
@@ -8275,11 +8298,14 @@ steps:
   # `--check` refuses a record that no longer states what the run's own reports
   # state, so the XOR must have written its answer first.
   #
-  # BLOCKING via program_exit_zero, and the three outcomes are distinct. A
-  # design-layer difference is rc=1 FAIL. A refusal is rc=2 and also blocks --
-  # the program refuses rather than guesses when the reference it can build is
-  # not faithful to the shipped artefact, and an unverifiable claim is not a
-  # pass. Only a measured 0 on every design layer is rc=0.
+  # BLOCKING via program_exit_zero. A design-layer difference is rc=1, and a
+  # REFUSAL IS ALSO rc=1 -- not rc=2, which this flow maps onto VACUOUS_PASS, a
+  # non-FAIL tier. An earlier draft of this step exited 2 on a refusal and the
+  # matrix's dimension 2 caught it in the words of its own question: "step 37.3
+  # gate CANNOT FAIL on anything a project DID". An unrun XOR is not a zero, so
+  # the refusal blocks; the receipt's `verdict` field keeps NOT_DETERMINED
+  # distinguishable from a measured FAIL for the readers that need the
+  # difference. Only a measured 0 on every design layer is rc=0.
   - id: "37.3"
     name: "GDS stream-out / finishing fidelity — the shipped GDS XOR'd against this run's own pre-finishing boundary"
     stage: stage4

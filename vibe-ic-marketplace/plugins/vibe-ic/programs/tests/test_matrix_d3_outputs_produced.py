@@ -3527,7 +3527,8 @@ def test_d3_manifest_covers_exactly_the_flow_steps():
     # never credited, and only the removal was. Subtracting one from a base that
     # was already two behind is how a hand-moved census drifts while every
     # individual edit to it looks careful.
-    assert len(cells_for(DIM)) == len(live) == 69
+    # 69 -> 70 (2026-09-22): canonical step 37.3 arrived (R-0915-129 metric 2).
+    assert len(cells_for(DIM)) == len(live) == 70
 
 
 @needs_corpus
@@ -3995,7 +3996,7 @@ def test_d3_waivers_meet_the_registry_bar():
 
 
 def test_d3_cell_states_partition_all_steps():
-    """ENFORCED + WAIVED + NA == 69, computed live, with no cell in two states."""
+    """ENFORCED + WAIVED + NA == 70, computed live, with no cell in two states."""
     enforced, waived, na = [], [], []
     for cell in cells_for(DIM):
         sid = cell.step_id
@@ -4034,7 +4035,10 @@ def test_d3_cell_states_partition_all_steps():
     # never credited, and only the removal was. Subtracting one from a base that
     # was already two behind is how a hand-moved census drifts while every
     # individual edit to it looks careful.
-    assert len(enforced) + len(waived) + len(na) == 69, (
+    # NO reclassification — the triple sums 69 -> 70. Step 37.3 arrives
+    # ENFORCED (it declares required_outputs, carries no step-level condition
+    # and holds no waiver); nothing changed state and nothing departed.
+    assert len(enforced) + len(waived) + len(na) == 70, (
         f"enforced={len(enforced)} waived={len(waived)} na={len(na)}"
     )
     # The waived set must equal the registry exactly. This used to union the
@@ -4047,7 +4051,7 @@ def test_d3_cell_states_partition_all_steps():
         f"waived cells {sorted(F.normalize_id(s) for s in waived)} do not match "
         f"the registered waivers {sorted(declared)}"
     )
-    assert (len(enforced), len(waived), len(na)) == (54, 2, 13), (
+    assert (len(enforced), len(waived), len(na)) == (55, 2, 13), (
         f"the ENFORCED/WAIVED/NA split changed to "
         f"({len(enforced)}, {len(waived)}, {len(na)}); it was measured as "
         f"(51, 2, 15) after folding 1.6x into Step 2. A step moving between states "
@@ -4217,6 +4221,18 @@ def test_d3_cell_states_partition_all_steps():
         "unmoved. The step exists because `phase3/final/metrics.json` had five "
         "readers and no writer, which is why 37.5ic could produce none of its "
         "six document outputs for any design."
+        "\n2026-09-22 (icslot53): (54, 2, 13) -> (55, 2, 13), population "
+        "69 -> 70. +1 ENFORCED, NO reclassification: step 37.3 (GDS stream-out "
+        "/ finishing fidelity, R-0915-129 metric 2) ARRIVES. It lands ENFORCED "
+        "on the same three live reads its siblings are classified by \u2014 "
+        "`step_condition('37.3')` is None, it declares one required_output "
+        "(`reports/phase3/gds_xor.json`), and it holds no dimension-3 waiver. "
+        "That entry is recorded UNPROVEN: the producer is new, so no admissible "
+        "run root has produced the path yet, and the UNPROVEN branch re-searches "
+        "every root live. WAIVED and NA unmoved. The step exists because "
+        "`design__xor_difference__count` read NOT_MEASURED for every design "
+        "while the pinned image can run the comparison \u2014 a metric with no "
+        "producer, not a metric that cannot be produced."
     )
 
 
@@ -6236,6 +6252,17 @@ DECLARED_OUTSIDE_THE_PUBLISH_CONTRACT: Tuple[Tuple[str, str], ...] = (
            "phase3/stage3/postroute_timing_repair/no_repair_needed.flag"),
     ("32", "phase3/stage3/postroute_timing_repair/postroute_timing_repair_decision.json"),
     ("34", "phase3/stage3/pnr/filled.def OR phase3/stage3/pnr/metal_fill.done"),
+    # JOINED 2026-09-22, and the reason this pin demands is the SECOND of its
+    # three: THE FLOW MOVED THE DECLARATION. Step 37 always wrote this
+    # transcript -- the write site calls it "the only evidence of WHAT went into
+    # the sign-off GDS" -- but nothing declared it, and step 37.3 CONSUMES it to
+    # recover the library set for a re-streamed fidelity reference. That is W2
+    # (produced, consumed, declared by no step), and the matrix named it on 37.3
+    # by that rule. Declaring it is the fix; the publish scope was NOT widened,
+    # so the declaration sits outside what a published cell carries and says so
+    # here rather than quietly.
+    ("37", "phase3/stage3/pnr/stream_out.log"),
+    ("37", "reports/phase3/pad_ring_route_evidence.json"),
     ("37.5ip", "phase3/stage4/hardmacro/*.gds"),
     ("37.5ip", "phase3/stage4/hardmacro/*.lef"),
     ("37.5ip", "phase3/stage4/hardmacro/*.lib"),

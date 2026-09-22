@@ -537,8 +537,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not out.is_absolute():
         out = (Path.cwd() / out).resolve()
 
+    # rc 1, NOT 2, AND THE DIFFERENCE IS THE WHOLE POINT. This flow maps rc 2
+    # onto VACUOUS_PASS -- a NON-FAIL tier -- so a refusal that exited 2 let the
+    # step pass on a project where the comparison never happened. MEASURED by the
+    # matrix's own dimension 2, which is exactly the question it asks: "step 37.3
+    # gate CANNOT FAIL on anything a project DID: all 1 blocking clause(s)
+    # reached a non-FAIL tier on a deliberately-broken project". An unrun XOR is
+    # not a zero and an unverifiable claim is not a pass, so the refusal BLOCKS;
+    # the `verdict` field, which `signoff_metrics_aggregate` reads, is what keeps
+    # NOT_DETERMINED distinguishable from a measured FAIL.
     report: Dict[str, Any] = {"gate": GATE, "project": str(project),
-                              "verdict": "NOT_DETERMINED", "rc": 2}
+                              "verdict": "NOT_DETERMINED", "rc": 1}
     shipped, dfile, att = shipped_and_source(project)
     report["attestation"] = att
     fill_pairs, seal_pairs, prov = declared_finishing_layers(project)
@@ -558,12 +567,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         return rc
 
     if shipped is None or not shipped.is_file():
-        return finish("NOT_DETERMINED", 2,
+        return finish("NOT_DETERMINED", 1,
                       f"{ROUTE_EVIDENCE_REL} names no shipped GDS that exists, so "
                       f"there is nothing to compare; this is an absent input, not "
                       f"a clean XOR")
     if dfile is None or not dfile.is_file():
-        return finish("NOT_DETERMINED", 2,
+        return finish("NOT_DETERMINED", 1,
                       f"{ROUTE_EVIDENCE_REL} names no routed DEF that exists, so "
                       f"no pre-finishing reference can be streamed")
 
@@ -574,7 +583,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     report["shipped_sha256_live"] = live
     recorded = att.get("gds_sha256_recorded")
     if isinstance(recorded, str) and recorded and recorded != live:
-        return finish("NOT_DETERMINED", 2,
+        return finish("NOT_DETERMINED", 1,
                       f"the shipped GDS changed since the run attested it "
                       f"({ROUTE_EVIDENCE_REL} records {recorded[:16]}..., on disk "
                       f"{live[:16]}...), so this run's own pairing no longer holds")
@@ -582,10 +591,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         import _klayout_launch as _kl
     except ImportError as exc:                             # pragma: no cover
-        return finish("NOT_DETERMINED", 2, f"KLayout launcher unavailable: {exc}")
+        return finish("NOT_DETERMINED", 1, f"KLayout launcher unavailable: {exc}")
     runner = _kl.find_runner(args.container)
     if runner is None or not runner.covers(shipped):
-        return finish("NOT_DETERMINED", 2,
+        return finish("NOT_DETERMINED", 1,
                       "no KLayout runner reaches this project, so the comparison "
                       "was not performed; an unrun XOR is not a zero")
     report["runner"] = {"kind": runner.kind, "detail": runner.detail}
@@ -602,7 +611,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             rc, so, se = stream_reference(runner, Path(scratch), dfile,
                                           reference, timeout)
             if rc != 0 or not reference.is_file():
-                return finish("NOT_DETERMINED", 2,
+                return finish("NOT_DETERMINED", 1,
                               f"re-streaming the pre-finishing reference from "
                               f"{att.get('def')} failed (rc={rc}): "
                               f"{(se or so or '').strip()[:220]}")
@@ -614,9 +623,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         ok, why, stats = reference_is_faithful(so)
         report["census"] = stats
         if done and not ok:
-            return finish("NOT_DETERMINED", 2, f"refusing to compare: {why}")
+            return finish("NOT_DETERMINED", 1, f"refusing to compare: {why}")
         if rc != 0 or not done:
-            return finish("NOT_DETERMINED", 2,
+            return finish("NOT_DETERMINED", 1,
                           f"the XOR did not run to completion (rc={rc}, "
                           f"XOR_DONE={'yes' if done else 'no'}): "
                           f"{(se or so or '').strip()[:200]}")

@@ -1081,9 +1081,13 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D1-BLIND-GATE-PROGRAMS --step 37.4 --jobs 1
             #   -> REDDENED (9.3 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-22 on this branch:
+            #   --replay D1-BLIND-GATE-PROGRAMS --step 37.3 --jobs 1
+            #   -> REDDENED (12.6s)
+            "37.3"),
         measured=Measurement(
-            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=65,
+            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=66,
             stayed_green=(),
             note="4 steps have no executable gate clause at all and are "
                  "structurally out of this entry's reach: 1 and 12 (files_exist "
@@ -1191,10 +1195,14 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D2-BLIND-GATE-PROGRAMS --step 37.4 --jobs 1
             #   -> REDDENED (2.5 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-22 on this branch:
+            #   --replay D2-BLIND-GATE-PROGRAMS --step 37.3 --jobs 1
+            #   -> REDDENED (3.5s, after the rc 2 -> 1 repair)
+            "37.3"),
         measured=Measurement(
             date="2026-08-11",
-            command=_SWEEP_THEN_ONE.replace("{added}", "12") + _THEN_FIVE, reddened=66,
+            command=_SWEEP_THEN_ONE.replace("{added}", "12") + _THEN_FIVE, reddened=67,
             stayed_green=("35",),
             note="60 red = every one of dimension 2's 60 ENFORCED cells, in one "
                  "sweep. The 2 waived cells (1, 35) and the NA cell (P0) are "
@@ -1250,9 +1258,23 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D3-UNDECLARED-ARTEFACT --step 37.4 --jobs 1
             #   -> ALREADY_RED (baseline_rc=1, 15.5 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-22 on this branch against the
+            # published corpus (VIBE_IC_BENCHMARK_DATA pointed at a clone):
+            #   --replay D3-UNDECLARED-ARTEFACT --step 37.3 --jobs 1
+            #   -> ALREADY_RED (baseline_rc=1, 18.4s)
+            # ITS CELL IS RED AT BASELINE, for the reason this dimension's own
+            # history already records for the 2026-08-20 arrivals: the step is NEW,
+            # so no published run has produced `reports/phase3/gds_xor.json` and
+            # the manifest entry is UNPROVEN. That is "the honest reading of a flow
+            # declaring an output nothing produces", not a state to waive away. So
+            # it joins baseline_red and is falsifiable BY DEFINITION rather than by
+            # this replay -- exactly how 26.5ic is recorded above. It clears itself:
+            # the UNPROVEN branch re-searches every admissible root on each run and
+            # says so the moment one carries the receipt.
+            "37.3"),
         measured=Measurement(
-            date="2026-09-02", command=_D3_THEN_LIVE_ONE, reddened=57,
+            date="2026-09-02", command=_D3_THEN_LIVE_ONE, reddened=58,
             baseline_red=("12", "15", "17", "19", "20", "21", "22", "23", "24",
                           "25", "26", "30", "32", "M2", "M3", "M4", "26.5ic", '37.4'),
             stayed_green=("6", "39", "M1"),
@@ -1332,9 +1354,13 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D4-UNGATED-DELIVERABLE --step 37.4 --jobs 1
             #   -> REDDENED (2.4 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-22 on this branch:
+            #   --replay D4-UNGATED-DELIVERABLE --step 37.3 --jobs 1
+            #   -> REDDENED (3.6s)
+            "37.3"),
         measured=Measurement(
-            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=67,
+            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=68,
             baseline_red=("1",),
             note="the 2 steps not reached declare no required_outputs at all "
                  "(FS1, P0) and are carried by D4-CLI-CONTRACT and "
@@ -1366,9 +1392,13 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D4-CLI-CONTRACT --step 37.4 --jobs 1
             #   -> REDDENED (2.4 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-22 on this branch:
+            #   --replay D4-CLI-CONTRACT --step 37.3 --jobs 1
+            #   -> REDDENED (2.8s)
+            "37.3"),
         measured=Measurement(
-            date="2026-08-06", command=_SWEEP, reddened=50,
+            date="2026-08-06", command=_SWEEP, reddened=51,
             stayed_green=("D1", "21", "33"),
             note="carries FS1, the one step with a gate and no required_outputs. "
                  "D1/21/33 stayed green because their first clause's program "
@@ -1430,10 +1460,14 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D5-PHANTOM-EDGE --step 37.4 --jobs 1
             #   -> REDDENED (8.2 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-22 on this branch:
+            #   --replay D5-PHANTOM-EDGE --step 37.3 --jobs 1
+            #   -> REDDENED (9.8s)
+            "37.3"),
         measured=Measurement(
             date="2026-08-11",
-            command=_SWEEP_THEN_ONE.replace("{added}", "P0") + _THEN_FIVE, reddened=69,
+            command=_SWEEP_THEN_ONE.replace("{added}", "P0") + _THEN_FIVE, reddened=70,
             note="63 red = every one of dimension 5's 63 ENFORCED cells, in one "
                  "sweep, each reddening that cell alone. There is no longer an "
                  "NA cell in this dimension. "
@@ -1532,12 +1566,16 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D6-UNCONDITIONAL-OPTIONAL --step 37.4 --jobs 1
             #   -> REDDENED (30.0 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-22 on this branch:
+            #   --replay D6-UNCONDITIONAL-OPTIONAL --step 37.3 --jobs 1
+            #   -> REDDENED (23.9s)
+            "37.3"),
         params={"command":
                 "clock_plan_check . --json reports/phase2/gates/zzmatrixcanary.json"},
         measured=Measurement(
             date="2026-08-06", command=_SWEEP + _THEN_FIVE + _THEN_DT2,
-            reddened=68,
+            reddened=69,
             stayed_green=(),
             note="61 red = every ENFORCED dimension-6 cell except P0, which "
                  "declares no gate to append to and is carried by "
@@ -1670,9 +1708,21 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D7-GATE-PROBES-A-GHOST --step 37.4 --jobs 1
             #   -> REDDENED (66.7 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-22 on this branch against the
+            # published corpus, AFTER the two W2 declarations this change adds:
+            #   --replay D7-GATE-PROBES-A-GHOST --step 37.3 --jobs 1
+            #   -> REDDENED (80.8s)
+            # It was ALREADY_RED before those declarations, and the finding was
+            # this dimension's own W2: the gate consumed
+            # `phase3/stage3/pnr/stream_out.log` and
+            # `reports/phase3/pad_ring_route_evidence.json`, both produced by the
+            # flow and declared by no step. Declaring them on step 37, which
+            # writes them, is what turned the cell falsifiable -- so this pair is
+            # evidence the dimension WORKS, not a formality.
+            "37.3"),
         measured=Measurement(
-            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=64,
+            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=65,
             baseline_red=("D1", "21", "34"),
             stayed_green=("7", "FS1", "23", "M1"),
             note="58 red = every one of dimension 7's 58 ENFORCED cells, in one "
@@ -1831,9 +1881,13 @@ MUTATIONS: Tuple[Mutation, ...] = (
             # canonical step 37.4, replayed 2026-09-03 on this branch:
             #   --replay D8-EMPTY-PROMISE --step 37.4 --jobs 1
             #   -> REDDENED (2.4 s)
-            "37.4"),
+            "37.4",
+            # canonical step 37.3, replayed 2026-09-22 on this branch:
+            #   --replay D8-EMPTY-PROMISE --step 37.3 --jobs 1
+            #   -> REDDENED (6.0s)
+            "37.3"),
         measured=Measurement(
-            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=67,
+            date="2026-08-06", command=_SWEEP + _THEN_FIVE, reddened=68,
             note="61 red = every one of dimension 8's 61 ENFORCED cells, in one "
                  "sweep. The 2 steps not reached (FS1, P0) declare no "
                  "required_outputs and are dimension 8's 2 NA cells. "
