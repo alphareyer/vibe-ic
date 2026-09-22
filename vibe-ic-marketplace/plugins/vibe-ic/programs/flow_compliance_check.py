@@ -9272,6 +9272,41 @@ _P0_NO_RTL_NOTE = ("no RTL directory found — structural gates skipped "
 #: rc-1. Ordered: the first one present supplies the reported line.
 _P0_JSON_ERROR_SEVERITIES = ("ERROR", "FATAL", "CRITICAL", "FAIL")
 
+#: The bracket tags a PLAIN-TEXT gate uses on the line that CARRIES its refusal,
+#: most decisive first. The mirror of `_P0_JSON_ERROR_SEVERITIES` for the other
+#: output shape: same question ("which line decided this?"), same answer shape
+#: ("the first ERROR-class one, else the first").
+_P0_TEXT_REFUSAL_TAGS = ("[FAIL]", "[ERROR]", "[FATAL]", "[CRITICAL]",
+                         "[CANNOT DETERMINE]")
+
+
+def _p0_deciding_text_line(text: str) -> str:
+    """The first line whose tag says IT is the refusal, or "" if none does.
+
+    MEASURED (run21, icslot52): `project_outputs_in_tree_check` exited 1 and the
+    audit recorded
+
+        verdict: FAIL
+        message: "[INFO] project_outputs_in_tree_check: 1 reference(s) naming
+                  THIS run through another mount of the same tree — NON-BLOCKING,
+                  because the artefact is present in the run root ..."
+
+    exactly 200 characters, i.e. the head of stdout. The gate prints its
+    non-blocking disclosures FIRST and its `[FAIL]` line after them, so the
+    record paired a refusal with a sentence that says nothing was wrong. A reader
+    cannot reconcile those, and the one line that would have explained the
+    verdict was discarded.
+
+    This is the SAME defect this module already fixed for the JSON shape one
+    docstring below -- "a refusal whose reason the artefact could not state, in
+    the field a reader goes to for exactly that" -- arriving in plain text.
+    """
+    for tag in _P0_TEXT_REFUSAL_TAGS:
+        for line in text.split("\n"):
+            if line.lstrip().startswith(tag):
+                return line.strip()[:200]
+    return ""
+
 
 def _p0_first_line(full_out: str) -> str:
     """The one line that says WHY a gate refused, from its raw output.
@@ -9295,7 +9330,11 @@ def _p0_first_line(full_out: str) -> str:
         return ""
     fallback = text.split("\n")[0][:200]
     if not text.startswith("{"):
-        return fallback
+        # PREFER THE LINE THAT CARRIES THE REFUSAL. Only ever narrows what is
+        # published to a MORE decisive line of the gate's own output; a gate that
+        # leads with its verdict, or tags nothing, keeps the historical first
+        # line exactly.
+        return _p0_deciding_text_line(text) or fallback
     try:
         report = json.loads(text)
     except (ValueError, TypeError):
