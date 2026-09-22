@@ -576,6 +576,23 @@ _MAGIC_BANNER_RE = re.compile(r"(?i)\bmagic\b")
 #: its tail read too. Bounded, so a huge file is still not held in full twice.
 _MAGIC_TAIL_BYTES = 65536
 
+#: WHAT A MAGIC TRANSCRIPT SAYS ABOUT ITS OWN SUBJECT. A KLayout report
+#: database declares `<top-cell>` and a `<generator>` deck, and both are read
+#: above; a Magic transcript declared neither, so a receipt over one carried
+#: `top_cell: null` and `deck: null` and the sign-off scope could not bind it.
+#: MEASURED on the real IC (SUB2AB2, spm on 0.3.67): the deck RAN and reported
+#: 0 violations, and its receipt still read `design_binding: NOT_DETERMINED`,
+#: `layout_topcell_match: false`, `producers[0].deck: null`.
+#:
+#: These two fields are what this flow's own Magic deck writes, from values it
+#: asked the TOOL for -- `tech filename`, and the top cell it loaded -- so the
+#: classification stays a statement taken from the report's own bytes, which is
+#: the whole discipline of this module. A transcript from anywhere else that
+#: does not carry them classifies exactly as it did before, which is why both
+#: reads fall back to what they read today rather than refusing.
+_MAGIC_TOPCELL_RE = re.compile(r"(?im)^[ \t]*top cell:[ \t]*(\S+)[ \t]*$")
+_MAGIC_DECK_RE = re.compile(r"(?im)^[ \t]*tech file:[ \t]*(/\S*)[ \t]*$")
+
 
 class Producer:
     """What produced a DRC report, decided from the report's own bytes."""
@@ -652,7 +669,11 @@ def classify_text(text: str) -> Producer:
     if (_MAGIC_COUNT_RE.search(head) or _MAGIC_COUNT_RE.search(_tail)
             or (_MAGIC_BANNER_RE.search(head)
                 and (_MAGIC_CMD_RE.search(head) or _MAGIC_CMD_RE.search(_tail)))):
-        return Producer(MAGIC, None, top, "magic DRC transcript", header_tool)
+        mt = _MAGIC_TOPCELL_RE.search(head)
+        md = _MAGIC_DECK_RE.search(head)
+        return Producer(MAGIC, md.group(1) if md else None,
+                        (mt.group(1) if mt else top),
+                        "magic DRC transcript", header_tool)
     return Producer(None, None, top, "no recognised producer signature",
                     header_tool)
 

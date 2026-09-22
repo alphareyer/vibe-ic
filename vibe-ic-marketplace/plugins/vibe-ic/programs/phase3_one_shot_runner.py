@@ -43681,6 +43681,49 @@ _MAGIC_DRC_STYLE = "drc(full)"
 
 _MAGIC_SIGNOFF_DRC_REL = "reports/phase3/drc_signoff_magic.rpt"
 _MAGIC_SIGNOFF_DRC_JSON_REL = "reports/phase3/drc_signoff_magic.json"
+#: Where the deck's own rule CLASSES are stated, so "does this deck have an
+#: antenna rule?" is answered rather than left undecidable.
+_MAGIC_CATEGORY_DISCLOSURE_REL = \
+    "reports/phase3/drc_signoff_magic.categories.json"
+
+#: THE AUDIT'S OWN SIX, restated so this flow can answer the question the audit
+#: asks. `eda_report_audit` derives `categories_found` from the report text with
+#: this vocabulary and emits DRC_CATEGORY_PRESENT for each one it cannot find,
+#: saying "whether the deck has a rule of this class cannot be decided from
+#: these artefacts". MEASURED on the real IC: four of the six were undecidable
+#: that way (density, antenna, via, enclosure) on a deck that genuinely has no
+#: rule of any of them.
+#:
+#: AGREEING WITH THE AUDIT IS THE POINT HERE, not independence -- this table
+#: exists to answer that table's question -- so `test_the_disclosed_classes_are
+#: _the_audits_own_six` reads the audit's source and refuses a drift.
+#:
+#: AND THE ANSWER GOES IN A SIDECAR, NEVER INTO THE TRANSCRIPT. Writing "this
+#: deck has no antenna rule" into the .rpt would put the word `antenna` in it,
+#: the audit would then count the category as NAMED, and the flow would have
+#: silenced a warning by stating the opposite of what it measured.
+_MAGIC_AUDIT_CATEGORIES: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
+    ("spacing", re.compile(r"spac", re.I)),
+    ("width", re.compile(r"width|min\s*width", re.I)),
+    ("density", re.compile(r"density", re.I)),
+    ("antenna", re.compile(r"antenna|\bANT[.-]\d|gate[- ]oxide", re.I)),
+    ("via", re.compile(r"\bvia\b", re.I)),
+    ("enclosure", re.compile(r"enclos", re.I)),
+)
+
+
+def _magic_deck_rule_classes(rules: Sequence[str]) -> Dict[str, int]:
+    """How many of the deck's rule descriptions name each audited class.
+
+    EVERY class is keyed, including the ones with none: a table that omitted
+    the empty ones would leave exactly the question the audit could not decide
+    still undecided. 0 means the technology's `drc` section declares no rule
+    whose description names that class -- which, for this PDK's Magic deck, is
+    the true answer for four of the six."""
+    out: Dict[str, int] = {}
+    for name, pattern in _MAGIC_AUDIT_CATEGORIES:
+        out[name] = sum(1 for r in rules if pattern.search(r))
+    return out
 
 #: Rule CLASSES, as the rule text itself names them. Restated deliberately
 #: rather than imported: `eda_report_audit` derives `categories_found` from
@@ -43700,7 +43743,8 @@ _MAGIC_RULE_CATEGORIES: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
 )
 
 
-def _magic_signoff_drc_tcl(gds_c: str, top: str, rpt_c: str) -> str:
+def _magic_signoff_drc_tcl(gds_c: str, top: str, rpt_c: str,
+                           gds_sha256: str = "") -> str:
     """The Magic deck that checks `gds_c` and writes a sign-off DRC transcript.
 
     EVERY COMMAND HERE WAS MEASURED IN THE PINNED IMAGE FIRST, because the
@@ -43777,10 +43821,54 @@ def _magic_signoff_drc_tcl(gds_c: str, top: str, rpt_c: str) -> str:
         "puts $_fh \"tech file: $_v_file\"\n"
         "puts $_fh \"tech version: $_v_ver\"\n"
         f"puts $_fh \"layout: {gds_c}\"\n"
+        # THE RUNNER'S OWN STAMP, in the one dialect `eda_report_audit` already
+        # reads for exactly this -- `measured_design:`, "the runner asserting
+        # what it fed the tool", which exists because two producers wrote
+        # reports with no design in them at all. MEASURED on the real IC
+        # (SUB2AB2, spm on 0.3.67): the deck RAN and found 0 violations, and
+        # its receipt still read `design_binding: NOT_DETERMINED`, because a
+        # Magic transcript names its design in no dialect that audit knows.
+        f"puts $_fh \"measured_design: {top}\"\n"
         f"puts $_fh \"top cell: {top}\"\n"
-        f"puts $_fh \"drc style requested: {_MAGIC_DRC_STYLE}\"\n"
+        + (f"puts $_fh \"layout sha256: {gds_sha256}\"\n" if gds_sha256
+           else "puts $_fh \"layout sha256: (not computed)\"\n")
+        + f"puts $_fh \"drc style requested: {_MAGIC_DRC_STYLE}\"\n"
         "puts $_fh \"commands: drc check ; drc catchup ; drc listall why ; "
         "drc list count total\"\n"
+        "puts $_fh \"\"\n"
+        # THE RULE LIST IS WRITTEN BY THE DECK, NOT APPENDED AFTERWARDS, and
+        # that is the repair. `_docker_exec` records the sha256 of every
+        # declared OUTPUT at the moment the tool exits; appending to the report
+        # after that made the recorded digest stale, and the sign-off scope on
+        # the real IC said so in as many words -- `layout_evidence_witness:
+        # "recorded DRC report hash differs from current report"`, tier `none`,
+        # DRC_SIGNOFF_NO_LAYOUT_EVIDENCE, on a run whose GDS was sitting at
+        # phase3/stage3/pnr all along. A report still being edited after its
+        # provenance was taken cannot be bound to anything.
+        "set _deckrules {}\n"
+        "set _deckread 0\n"
+        "if {![catch {set _tf [open $_v_file r]}]} {\n"
+        "  set _in 0\n"
+        "  while {[gets $_tf _ln] >= 0} {\n"
+        "    set _st [string trim $_ln]\n"
+        "    if {!$_in} { if {[regexp {^drc\\M} $_st]} { set _in 1 } ; continue }\n"
+        "    if {[regexp {^end\\M} $_st]} { break }\n"
+        "    foreach _m [regexp -all -inline {\"[^\"]{8,}\"} $_ln] {\n"
+        "      lappend _deckrules [string range $_m 1 end-1]\n"
+        "    }\n"
+        "  }\n"
+        "  close $_tf\n"
+        "  set _deckrules [lsort -unique $_deckrules]\n"
+        "  set _deckread 1\n"
+        "}\n"
+        "if {$_deckread} {\n"
+        "  puts $_fh \"deck rules declared by $_v_file (drc section): "
+        "[llength $_deckrules]\"\n"
+        "  foreach _r $_deckrules { puts $_fh \"DECK_RULE: $_r\" }\n"
+        "} else {\n"
+        "  puts $_fh \"DECK_RULES_UNREADABLE: $_v_file could not be opened, so "
+        "this report does not state which rules the deck contains\"\n"
+        "}\n"
         "puts $_fh \"\"\n"
         "set _shapes 0\n"
         "set _rules 0\n"
@@ -43802,45 +43890,6 @@ def _magic_signoff_drc_tcl(gds_c: str, top: str, rpt_c: str) -> str:
         "puts \"MAGIC_SIGNOFF_DRC_END\"\n"
         "flush stdout\n"
         "quit -noprompt\n")
-
-
-#: A rule DESCRIPTION inside a Magic technology's `drc` section: the quoted
-#: string the checker later prints as the reason for a violation. 8 characters
-#: is enough to exclude the one- and two-token operands that share the line.
-_MAGIC_DECK_RULE_RE = re.compile(r'"([^"\n]{8,})"')
-
-
-def _magic_deck_rule_texts(tech_text: str) -> List[str]:
-    """Every rule description the technology's `drc` section declares.
-
-    WHY THE REPORT CARRIES THEM. A CLEAN Magic run writes almost nothing --
-    MEASURED on run19's own GDS, the whole transcript was 618 bytes -- and
-    `eda_report_audit` refused it twice for exactly that: `DRC_CATEGORIES_EXIST`
-    (no rule class is named by a report that names no rule) and
-    `DRC_REPORT_TOO_SMALL` ("suggests a hand-typed stub"). Both findings are
-    right about the artefact and wrong about the run.
-
-    A KLayout report database does not have this problem because it lists every
-    rule it evaluated whether or not the rule fired -- and "which rules ran is
-    the whole content of a sign-off claim" is this repo's own standard for
-    `is_signoff_deck`. So the Magic report states the same thing, taken from
-    the technology the tool itself reported loading: MEASURED on gf180mcuD, 155
-    distinct descriptions, 7 KB, of which 61 name a spacing rule and 26 a width
-    rule. Nothing is padded and nothing is invented: a stub could not carry
-    this without carrying the PDK.
-    """
-    out: List[str] = []
-    inside = False
-    for line in (tech_text or "").splitlines():
-        stripped = line.strip()
-        if not inside:
-            if re.match(r"^drc\b", stripped):
-                inside = True
-            continue
-        if re.match(r"^end\b", stripped):
-            break
-        out.extend(m.group(1) for m in _MAGIC_DECK_RULE_RE.finditer(line))
-    return sorted(dict.fromkeys(out))
 
 
 def _magic_rule_rows(rpt_text: str) -> List[Tuple[int, str]]:
@@ -43933,7 +43982,22 @@ def _run_magic_signoff_drc(project: Path, top: str, physical_top: str,
     tcl.parent.mkdir(parents=True, exist_ok=True)
     gds_c = _to_container_path(str(gds), container)
     rpt_c = _to_container_path(str(out_rpt), container)
-    tcl.write_text(_magic_signoff_drc_tcl(gds_c, physical_top, rpt_c))
+    # THE DIGEST IS TAKEN BEFORE THE TOOL RUNS, of the very file it is handed,
+    # so the transcript can STATE what it read. `_recorded_layout_evidence`
+    # binds a report to its measured input bytes and not to a filename; this
+    # is the same fact in the report itself, for a reader that has only it.
+    _gds_sha = ""
+    try:
+        _h = hashlib.sha256()
+        with gds.open("rb") as _fh_gds:
+            for _chunk in iter(lambda: _fh_gds.read(1024 * 1024), b""):
+                _h.update(_chunk)
+        _gds_sha = _h.hexdigest()
+    except OSError as _exc:
+        row["layout_digest_unreadable"] = f"{type(_exc).__name__}: {_exc}"
+    row["layout_sha256"] = _gds_sha or None
+    tcl.write_text(_magic_signoff_drc_tcl(gds_c, physical_top, rpt_c,
+                                          gds_sha256=_gds_sha))
     tcl_c = _to_container_path(str(tcl), container)
     transcript = out_rpt.with_suffix(".log")
     # NO TIMEOUT, a PROGRESS watchdog. The same discipline the KLayout deck
@@ -43989,20 +44053,39 @@ def _run_magic_signoff_drc(project: Path, top: str, physical_top: str,
     # and no value at all is already disclosed below.
     _tm = re.search(r"^tech file:\s*(/\S*)\s*$", text, re.M)
     _tech_path = _tm.group(1) if _tm else ""
-    _deck_rules: List[str] = []
-    if _tech_path:
-        _rc_t, _tech_text, _ = _docker_exec(
-            container, f"cat {shlex.quote(_tech_path)}", timeout=120)
-        if _rc_t == 0 and _tech_text.strip():
-            _deck_rules = _magic_deck_rule_texts(_tech_text)
+    # THE REPORT IS READ, NEVER WRITTEN TO. The deck writes its own rule list
+    # before it exits, so the bytes whose sha256 `_docker_exec` recorded as
+    # this invocation's output are the bytes that ship. The previous version
+    # appended here, which is why the real IC's receipt read
+    # `recorded DRC report hash differs from current report` and then
+    # DRC_SIGNOFF_NO_LAYOUT_EVIDENCE on a run whose GDS was on disk all along.
+    _deck_rules = [r for _n, r in
+                   ((0, m.group(1)) for m in
+                    re.finditer(r"^DECK_RULE:\s*(.+?)\s*$", text, re.M))]
     if _deck_rules:
-        with out_rpt.open("a") as _fh:
-            _fh.write(f"\ndeck rules declared by {_tech_path} "
-                      f"(drc section): {len(_deck_rules)}\n")
-            for _r in _deck_rules:
-                _fh.write(f"DECK_RULE: {_r}\n")
-        text = out_rpt.read_text(errors="replace")
         row["deck_rules"] = len(_deck_rules)
+        _classes = _magic_deck_rule_classes(_deck_rules)
+        row["deck_rule_classes"] = _classes
+        row["deck_rule_classes_absent"] = sorted(
+            k for k, v in _classes.items() if v == 0)
+        try:
+            _cd = project / _MAGIC_CATEGORY_DISCLOSURE_REL
+            _cd.parent.mkdir(parents=True, exist_ok=True)
+            _cd.write_text(json.dumps({
+                "program": "phase3_one_shot_runner:_run_magic_signoff_drc",
+                "technology": _tech_path,
+                "deck_rules": len(_deck_rules),
+                "classes": _classes,
+                "absent": row["deck_rule_classes_absent"],
+                "note": ("a class with 0 is one the technology's own `drc` "
+                         "section declares no rule for -- not a class this run "
+                         "failed to look at. Derived from the rule "
+                         "descriptions the deck itself wrote into "
+                         + _MAGIC_SIGNOFF_DRC_REL),
+            }, indent=2) + "\n")
+            row["deck_rule_classes_report"] = _MAGIC_CATEGORY_DISCLOSURE_REL
+        except OSError as _exc:
+            row["deck_rule_classes_unwritable"] = f"{type(_exc).__name__}: {_exc}"
     else:
         # NAMED, never silent: a report without the deck's rule list is a
         # weaker artefact and the record says so rather than looking complete.

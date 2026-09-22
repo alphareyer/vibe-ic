@@ -175,7 +175,7 @@ proc box {args} { return "0 0 10 10" }
 proc tech {args} {
   switch -- [lindex $args 0] {
     name     { return TECHNAME }
-    filename { return /pdk/t.tech }
+    filename { return TECHFILE }
     version  { return 1.2.3 }
   }
   return {}
@@ -190,9 +190,22 @@ def _drive_deck(tmp_path):
     if tclsh is None:                                    # pragma: no cover
         pytest.skip("tclsh not installed")
     rpt = tmp_path / "out.rpt"
+    # A technology whose `drc` section the deck must read for itself: the rule
+    # list is written BY THE DECK now, so the fixture has to supply one.
+    tech = tmp_path / "t.tech"
+    tech.write_text(
+        'tech\n format 32\nend\n\n'
+        'drc\n'
+        ' width  m1 23 "Metal1 width < 0.23um (M1.1)"\n'
+        ' spacing m1 m1 23 touching_ok "Metal1 spacing < 0.23um (M1.2)"\n'
+        ' edge4way m2 x 1 "s"\n'
+        'end\n\n'
+        'extract\n style "ngspice extraction style for this technology"\nend\n')
     script = tmp_path / "deck.tcl"
-    script.write_text(_MAGIC_STUBS + R._magic_signoff_drc_tcl(
-        "/c/design.gds", "chip_top", str(rpt)))
+    script.write_text(_MAGIC_STUBS.replace("TECHFILE", str(tech))
+                      + R._magic_signoff_drc_tcl(
+                          "/c/design.gds", "chip_top", str(rpt),
+                          gds_sha256="ab" * 32))
     cp = subprocess.run([tclsh, str(script)], capture_output=True, text=True,
                         cwd=str(tmp_path))
     return cp, rpt
@@ -205,7 +218,7 @@ def test_driven_the_deck_runs_and_writes_a_complete_report(tmp_path):
     assert rpt.is_file()
     text = rpt.read_text()
     for line in ("# Tool: magic", "tech name: TECHNAME",
-                 "tech file: /pdk/t.tech", "tech version: 1.2.3",
+                 "tech version: 1.2.3",
                  "layout: /c/design.gds", "top cell: chip_top",
                  "drc style requested: drc(full)",
                  "RULE: 2 | Rule A spacing", "RULE: 1 | Rule B width",
@@ -449,21 +462,40 @@ end
 """
 
 
-def test_the_deck_rule_list_comes_from_the_technology_that_ran():
-    rules = R._magic_deck_rule_texts(_TECH_SNIPPET)
-    assert rules == ["Metal1 spacing < 0.23um (M1.2)",
-                     "Metal1 width < 0.23um (M1.1)"]
+def _deck_rules_from(tmp_path, tech_text):
+    """The rule list THE DECK writes, given a technology — the extraction now
+    runs inside magic, so the property is asked of the deck rather than of a
+    Python reader that no longer exists."""
+    tclsh = shutil.which("tclsh")
+    if tclsh is None:                                    # pragma: no cover
+        pytest.skip("tclsh not installed")
+    tech = tmp_path / "t.tech"
+    tech.write_text(tech_text)
+    rpt = tmp_path / "out.rpt"
+    script = tmp_path / "deck.tcl"
+    script.write_text(_MAGIC_STUBS.replace("TECHFILE", str(tech))
+                      + R._magic_signoff_drc_tcl("/c/d.gds", "chip_top",
+                                                 str(rpt), gds_sha256="ab" * 32))
+    subprocess.run([tclsh, str(script)], capture_output=True, text=True,
+                   cwd=str(tmp_path))
+    return [m.group(1) for m in
+            re.finditer(r"^DECK_RULE:\s*(.+?)\s*$", rpt.read_text(), re.M)]
 
 
-def test_nothing_outside_the_drc_section_is_taken_for_a_rule():
+def test_the_deck_rule_list_comes_from_the_technology_that_ran(tmp_path):
+    assert _deck_rules_from(tmp_path, _TECH_SNIPPET) == [
+        "Metal1 spacing < 0.23um (M1.2)", "Metal1 width < 0.23um (M1.1)"]
+
+
+def test_nothing_outside_the_drc_section_is_taken_for_a_rule(tmp_path):
     """OVER-BREADTH CONTROL: the `extract` and `tech` sections have quoted
     strings too, and a reader that swept the whole file would describe the
     deck with things that are not rules."""
-    got = " ".join(R._magic_deck_rule_texts(_TECH_SNIPPET))
+    got = " ".join(_deck_rules_from(tmp_path, _TECH_SNIPPET))
     assert "ngspice" not in got, got
     assert "gds write style" not in got, got
-    assert R._magic_deck_rule_texts(
-        'extract\n style "ngspice extraction style here"\nend\n') == []
+    assert _deck_rules_from(
+        tmp_path, 'extract\n style "ngspice extraction style here"\nend\n') == []
 
 
 def test_a_deck_rule_line_is_never_counted_as_a_violation():
