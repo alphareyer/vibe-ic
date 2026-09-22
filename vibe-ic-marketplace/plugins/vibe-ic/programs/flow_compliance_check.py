@@ -1445,7 +1445,35 @@ _STRUCTURAL_RTL_GATES: tuple[str, ...] = (
     #   only checks the 5 section names; this gate audits the report
     #   content. Real-world signal: v10619-vendor (0 sha256) and
     #   v10627-vendor (1 sha256, missing GDS attestation) both FAIL.
-    "agent_report_sha256_attestation_check",
+    #
+    # R-0915-130 — REMOVED FROM THIS REGISTRY, and asked at the END of the flow
+    # instead (`final_report_generate`, immediately after the attestation table
+    # is written and before the audit roll-up). It is NOT weakened and NOT
+    # waived: the same gate, the same refusals, asked where its input exists.
+    #
+    # Membership here meant EVERY `flow_compliance_check` invocation asked it,
+    # including each stage's mid-run compliance call -- and its input,
+    # `reports/final_summary.md`, is written at the very END of a run. MEASURED on
+    # run21, by that run's own mtimes:
+    #     reports/phase2/gates/stage2_compliance.json   17:57:12  <- asked here
+    #     reports/audit/phase23_completion_audit.json   18:07:33  <- stale FAIL
+    #                                                                 recorded
+    #     reports/final_summary.md                      18:07:34  <- the INPUT
+    # It read its input 10 min 22 s before that input was written and reported
+    # "8 attestation gap(s)"; the completion audit published that FAIL ONE SECOND
+    # before the file appeared. On the finished tree the same gate says "PASS: 10
+    # canonical artefact(s) all attested".
+    #
+    # #461 had already found half of this and fixed only the final invocation:
+    # `_prewrite_attestation` writes the fresh table before `_render` runs the
+    # internal audit, so the gate reading it THERE is sound. The stage-N
+    # invocations never got that pre-write and could not, because at stage 2 the
+    # run has not produced the artefacts to attest.
+    #
+    # Ordering, not a conditional (the ruling is explicit): a completion-signal
+    # escape would add a second way to say "not yet" for a case ordering
+    # removes, and every conditional refusal is a place a finished-but-unattested
+    # run can hide.
     # v1.6.38 — `emitter_failure_mode_check` /
     # `literal_verdict_keyword_check` / `source_chip_agnostic_check` /
     # `changelog_metric_reproducibility_check` are intentionally NOT
@@ -10071,6 +10099,68 @@ def _p0_passed_count(records: List[Dict[str, Any]]) -> int:
     bucket-only world could get.
     """
     return sum(1 for r in records if r["verdict"] == "PASS")
+
+
+def attestation_gate_record(project: Path,
+                            gate_name: str = "agent_report_sha256_attestation_check",
+                            ) -> Dict[str, Any]:
+    """Run ONE relocated gate and return the record a roll-up consumes.
+
+    #834 established that this gate's conclusion "has to arrive at the machine
+    that publishes the X-of-Y figure, not merely be printed" -- before that fix
+    the record read `verdict=PASS, exit_code=0` on a project with no artefacts at
+    all. R-0915-130 then moved the gate OUT of `_STRUCTURAL_RTL_GATES`, because
+    membership meant every mid-run invocation asked it ten minutes before its
+    input existed. Both rulings hold only if the gate is asked LATE **and** still
+    RECORDS: a relocated gate that only prints is a gate whose vacuous run is no
+    longer counted anywhere, which is exactly the regression #834 named.
+
+    So this is the consumer at the new position. It reuses the two shared helpers
+    the umbrella's own loop uses -- `_p0_gate_record` for the verdict/class
+    pairing and `infer_nonverdict_reason` for the class -- rather than restating
+    the rc mapping here, because "two literals in two files drifting apart" is
+    the defect #834's first test pins.
+
+    KNOWN LIMIT, stated rather than hidden: the rc -> record mapping for the other
+    arms (rc 1, NOT_INVOCABLE, waivers) still lives INLINE in
+    `_run_structural_rtl_gates`'s per-gate loop. Any future gate moved out of the
+    umbrella faces this same problem, and the durable fix is to extract that
+    mapping so both callers share it. That refactor is not done here.
+    """
+    argv = _resolve_program_cmd(f"{gate_name} .", cwd=project)
+    if not argv:
+        return _p0_gate_record(gate_name, "NOT_INVOCABLE",
+                              f"program not found: {gate_name}",
+                              {"exit_code": None})
+    # Invoked through `_watchdog.run_host_supervised`, the SAME supervised runner
+    # the umbrella's own loop uses -- not a bare subprocess call -- so a gate that
+    # stalls here is bounded exactly as it is there.
+    try:
+        res = _watchdog.run_host_supervised(argv, cwd=str(project),
+                                            stall_grace_s=_pl.gate_timeout_s())
+        cp = _watchdog.completed_process(argv, res)
+        rc, out, err = cp.returncode, cp.stdout, cp.stderr
+    except Exception as exc:                               # pragma: no cover
+        return _p0_gate_record(gate_name, "NOT_INVOCABLE",
+                               f"{type(exc).__name__}: {exc}",
+                               {"exit_code": None})
+    first = _p0_first_line(out or err)
+    if rc == 0:
+        return _p0_gate_record(gate_name, "PASS", "", {"exit_code": 0})
+    if rc == 1:
+        return _p0_gate_record(gate_name, "FAIL", first, {"exit_code": 1})
+    # THE VACUOUS ARM, and the one #834 is about. `RC_VACUOUS` is read from the
+    # convention, never typed as a literal, which is that test's own first
+    # assertion.
+    evidence: Dict[str, Any] = {"exit_code": rc, "skip_kind": "input-missing"}
+    declared = _p0_declared_reason_class(gate_name, project, None)
+    if declared:
+        evidence["reason_class"] = declared
+        evidence["skip_kind"] = "declared-by-gate"
+    reason_class = _reason_taxonomy.infer_nonverdict_reason(
+        verdict="BLOCKED", message=first, evidence=evidence)
+    return _p0_gate_record(gate_name, "BLOCKED", first, evidence,
+                           reason_class=reason_class)
 
 
 def _run_structural_rtl_gates(project: Path,

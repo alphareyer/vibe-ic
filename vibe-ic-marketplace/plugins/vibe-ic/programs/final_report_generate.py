@@ -2754,6 +2754,64 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not args.no_audit:
         canonical = _pl.report_path(project, "final_summary.md")
         _prewrite_attestation(project, canonical)
+        # R-0915-130 — ASK THE ATTESTATION GATE HERE, where its input exists.
+        # It used to be a member of `flow_compliance_check._STRUCTURAL_RTL_GATES`,
+        # so EVERY invocation asked it — including each stage's mid-run compliance
+        # call, ten minutes before `reports/final_summary.md` was written. On run21
+        # it reported "8 attestation gap(s)" at 17:57:12 against a file written at
+        # 18:07:34, and the completion audit published that stale FAIL one second
+        # before the file appeared. Asked HERE, immediately after the pre-write
+        # above and BEFORE `_render` runs the audit roll-up, it always reads a
+        # finished table.
+        #
+        # The gate is unchanged and its refusals are unchanged: an ABSENT report
+        # is still VACUOUS_PASS naming `agent_report_presence_check` as the owner,
+        # and a report PRESENT but carrying zero sha256 tokens is still
+        # FAIL / NO_ATTESTATION_TABLE. Moving where a question is asked must not
+        # move what counts as an answer, so the verdict is surfaced rather than
+        # swallowed: it goes into the summary the audit then reads, and a real
+        # attestation gap on a FINISHED run still fails exactly as before.
+        # A RELOCATED GATE MUST STILL RECORD, not merely print. #834 established
+        # that this gate's conclusion "has to arrive at the machine that publishes
+        # the X-of-Y figure, not merely be printed" — before that fix the record
+        # read `verdict=PASS, exit_code=0` on a project with no artefacts at all.
+        # An earlier tip of this branch called the gate's `audit()` and printed the
+        # result, which relocated the QUESTION and dropped the RECORD: a vacuous
+        # run stopped being counted anywhere, which is the very regression #834
+        # named. So the record is built by `flow_compliance_check
+        # .attestation_gate_record`, which reuses the umbrella's own
+        # `_p0_gate_record` + `infer_nonverdict_reason` so the rc mapping has ONE
+        # definition, and it carries the vacuous rc verbatim
+        # (`evidence.exit_code == RC_VACUOUS`, `skip_kind: input-missing`).
+        try:
+            import flow_compliance_check as _fcc_rec
+            _att_record = _fcc_rec.attestation_gate_record(project)
+            _att_verdict = _att_record["verdict"]
+            _att_findings = ([] if _att_verdict == "PASS"
+                             else [_att_record.get("message") or _att_verdict])
+        except Exception as _att_exc:            # pragma: no cover
+            # Bookkeeping must not break a run, and an unreadable gate is not a
+            # clean one: say so rather than imply a pass.
+            _att_record = {"verdict": "INCOMPLETE", "reason_class": "",
+                           "evidence": {}}
+            _att_verdict, _att_findings = "INCOMPLETE", []
+            print(f"[WARN] attestation gate unavailable: "
+                  f"{type(_att_exc).__name__}: {_att_exc}")
+        if _att_findings:
+            print(f"[{_att_verdict}] agent_report_sha256_attestation_check: "
+                  f"{len(_att_findings)} attestation gap(s) — "
+                  + "; ".join(str(getattr(f, "code", f))[:60]
+                              for f in _att_findings[:4]))
+        else:
+            print(f"[{_att_verdict}] agent_report_sha256_attestation_check: "
+                  f"no attestation gap over the freshly written table")
+        # The RECORD, where a reader of the run can find it: the rc the gate
+        # returned and the class it was booked under, so a vacuous run is visible
+        # as a non-PASS rather than as silence.
+        print(f"  attestation record: verdict={_att_record['verdict']} "
+              f"reason_class={_att_record.get('reason_class') or '-'} "
+              f"exit_code={_att_record.get('evidence', {}).get('exit_code')} "
+              f"skip_kind={_att_record.get('evidence', {}).get('skip_kind') or '-'}")
 
     md = _render(project, run_audit=not args.no_audit,
                  audit_timeout_s=args.audit_timeout,
