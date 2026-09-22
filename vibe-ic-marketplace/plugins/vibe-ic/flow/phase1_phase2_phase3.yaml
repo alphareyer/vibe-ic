@@ -5678,8 +5678,15 @@ steps:
       #     ss and ff process libraries genuinely differ; a single-liberty PDK
       #     legitimately produces none, and its absence is DISCLOSED in
       #     mcorner_ocv_stance.json (`report: null`).
-      #   phase3/stage3/sta/sta_spef_based.rpt — conditional on a non-empty
-      #     SPEF, and extraction has a documented tool-unavailable waiver path.
+      # CORRECTED under R-0915-128. `reports/phase3/sta_spef_based.rpt` IS
+      # declared above, and that declaration is authoritative (R-0915-124: the
+      # deliverable is declared). This comment used to list
+      # `phase3/stage3/sta/sta_spef_based.rpt` as "NOT declared, deliberately
+      # ... conditional on a non-empty SPEF" -- two different paths with opposite
+      # intentions for one artefact, and the prose was the stale half. The report
+      # is PRODUCED and PROMOTED whenever the run declares STA corners: the
+      # emitter writes every declared (corner, role) section and promotes once
+      # the linked-master and annotation censuses pass. No path changes here.
     gate:
       all_of:
         # vibe-ic#1097 S8 — "asked" and "reached" must BOTH be on disk.

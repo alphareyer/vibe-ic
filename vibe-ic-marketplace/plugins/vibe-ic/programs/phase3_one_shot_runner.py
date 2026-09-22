@@ -55566,7 +55566,34 @@ puts $_f "STA_LINK_CENSUS total=$_total linked=$_linked missing=$_missing"
 '''
 
 
-def _sta_native_census_complete(body, def_file=None):
+def _io_masters_for(project):
+    """The IO-cell master names from THIS RUN's own recorded LEF inventory.
+
+    R-0915-128 condition (a): a pad cell's off-die terminal is recognised from
+    the DEF's COMPONENTS master plus this inventory, never from a name. Read
+    through the same recorded-image reader the pad-ring and general-ladder gates
+    use, so the LEFs are read where the run's tools looked. FAIL CLOSED: any
+    failure yields an empty set, which makes the off-die PAD class unavailable
+    and leaves such a driver REQUIRED_OR_UNKNOWN -- an absent inventory can never
+    widen what passes.
+    """
+    try:
+        import json as _json
+        import _pad_ring as _PR
+        import _pdk_layer_authority as _authority
+        record = Path(project) / "reports/phase3/io_pad_chip_top.json"
+        doc = _json.loads(record.read_text(errors="replace"))
+        lefs = [Path(x) for x in (doc.get("io_library_lefs") or [])
+                if isinstance(x, str)]
+        if not lefs:
+            return set()
+        reader, _why = _authority.reader_the_run_recorded(Path(project))
+        return set(_PR.IoLibrary(lefs, reader=reader).masters)
+    except Exception:                                      # pragma: no cover
+        return set()
+
+
+def _sta_native_census_complete(body, def_file=None, io_masters=None):
     """Require explicit non-vacuous link counts and both native annotation counts.
 
     OpenSTA's report_parasitic_annotation emits unannotated and partially
@@ -55582,7 +55609,7 @@ def _sta_native_census_complete(body, def_file=None):
         if def_file is None:
             return False
         from sta_annotation_population import classify
-        if not classify(body, def_file)['complete']:
+        if not classify(body, def_file, io_masters=io_masters)['complete']:
             return False
     total, resolved, unresolved = map(int, linked[0])
     instances = re.findall(r'^STA_LINK_INSTANCE (.+)$', body, re.M)
@@ -55697,12 +55724,14 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
     from sta_annotation_population import classify
     sections = _split_sections(rpt_out.read_text(errors='replace'))
     def_file = _pl.pnr_dir(project) / f'{top}.def'
+    io_masters = _io_masters_for(project)
     for role, corner, body in sections:
         if role == 'SETUP':
-            populations[corner] = classify(body, def_file)
+            populations[corner] = classify(body, def_file, io_masters=io_masters)
     rpt_out.with_name(rpt_out.name + '.population.json').write_text(json.dumps(populations, indent=2) + '\n')
     for role, corner, body in sections:
-        if role == 'SETUP' and not _sta_native_census_complete(body, def_file):
+        if role == 'SETUP' and not _sta_native_census_complete(body, def_file,
+                                                              io_masters=io_masters):
             return refuse(f'{corner}: incomplete linked-master or parasitic annotation census')
         if role in ('SETUP', 'HOLD'):
             value = extract_slacks(body).get('setup_wns_ns' if role == 'SETUP' else 'hold_wns_ns')
@@ -55710,6 +55739,23 @@ def _emit_declared_process_sta(project, top, pdk, container, spef_path,
                 measured.add((corner, role))
     if measured != {(c, role) for c in required for role in ('SETUP', 'HOLD')}:
         return refuse('native process/role measurements incomplete')
+    # R-0915-128 condition (b): the promoted report states, in its own header,
+    # which drivers were excluded from the annotation census and why. A LEADING
+    # COMMENT BLOCK ONLY: `_split_sections` keys on the `=== SETUP/HOLD` headers
+    # and every slack is read from a section body, so the six sections and their
+    # numbers promote byte-for-byte unchanged (condition (d)).
+    _off = {c: (populations.get(c) or {}).get('off_die_drivers') or {}
+            for c in populations}
+    _lines = [f'# STA_ANNOTATION_OFF_DIE {c}: {d["disclosure"]}'
+              for c, d in sorted(_off.items()) if d.get('count')]
+    if _lines:
+        _lines.append('# STA_ANNOTATION_OFF_DIE basis: '
+                      + next(iter(_off.values())).get('basis', ''))
+        try:
+            rpt_out.write_text('\n'.join(_lines) + '\n'
+                               + rpt_out.read_text(errors='replace'))
+        except OSError as exc:                             # pragma: no cover
+            return refuse(f'could not disclose the off-die census: {exc}')
     rpt_out.replace(destination)
     # R-0915-123 / ORGANIC-443. THE ATTESTATION NAMES THE PATH THAT SURVIVES.
     # `rpt_out` is a transient: every check above reads it, and the line before
