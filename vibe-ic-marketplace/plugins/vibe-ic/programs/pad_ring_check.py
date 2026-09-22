@@ -540,60 +540,13 @@ def reader_where_this_run_looked(project: Path, environ=None
                                  ) -> Tuple[Any, str]:
     """The PDK reader for a gate invoked with NO PDK argument, and why.
 
-    W5/15.5ic, LAYER 3. `_pdk_layer_authority._environment_query` asks a
-    container only when the ENVIRONMENT names one. The flow's own clause for
-    this step is `pad_ring_check . --json reports/phase3/padring.json`, and
-    when the completion audit re-runs it nothing names a container -- so the
-    recorded IO inventory was judged against the HOST filesystem, where a
-    PDK root that resolves inside the run's image does not exist. MEASURED on
-    the spm run the W5 report cites: 15 recorded IO LEF views, all 15 absent
-    from the host, all 15 present in the image the run itself recorded, and
-    `PADRING_MASTERS_UNCORROBORATED` stood over a ring the run had built and
-    routed. Absent from this host is not absent from the PDK.
-
-    The run's container is GONE by audit time -- it is removed when the run
-    ends -- so the durable identity is the image digest the run wrote down,
-    with `image_match` true against its own pin. That is read here, and only
-    that: a different image, or a default-named container someone else is
-    running, is a different PDK and would be borrowing an answer.
-
-    Returns (reader, why). `reader` is None for "keep the environment's own
-    behaviour", which is every case where the environment named a container,
-    docker cannot be reached at all, or the run recorded no usable receipt.
+    W5/15.5ic, LAYER 3. Kept as this gate's name for it; the decision itself now
+    lives in `_pdk_layer_authority.reader_the_run_recorded`, because 37.5ic needs
+    exactly the same answer and a second copy is how the two would come to
+    disagree. See that function for the measurement behind it.
     """
-    import _container_exec as cex
-    env = os.environ if environ is None else environ
-    if env.get("EDA_CONTAINER") or env.get("VIBEIC_EDA_CONTAINER"):
-        return None, "the environment names a container; it is asked, as before"
-    if cex.no_container_route():
-        return None, "no docker client here, so there is nothing else to ask"
-    rec = project / CONTAINER_IMAGE_REL
-    if not rec.is_file():
-        return None, f"{CONTAINER_IMAGE_REL} is absent"
-    try:
-        doc = json.loads(rec.read_text(errors="replace"))
-    except (OSError, ValueError) as exc:
-        return None, f"{CONTAINER_IMAGE_REL} is not readable JSON: {exc}"
-    if not isinstance(doc, dict):
-        return None, f"{CONTAINER_IMAGE_REL} is not a JSON object"
-    if doc.get("image_match") is not True:
-        return None, (f"{CONTAINER_IMAGE_REL} records image_match="
-                      f"{doc.get('image_match')!r}, so it does not say the run "
-                      f"read the image it pinned")
-    image = doc.get("require_image") or doc.get("image_ref")
-    # `_eda_pin` OWNS what an image digest looks like and exports the pattern.
-    # Spelling the form here would be a second definition of image identity in
-    # a gate that has no business holding one -- and the NDA literal sweep over
-    # these programs refuses the spelling besides, correctly.
-    import _eda_pin as pin
-    ref, _, digest = str(image or "").rpartition("@")
-    if not isinstance(image, str) or not ref or not pin.DIGEST_RE.match(digest):
-        return None, (f"{CONTAINER_IMAGE_REL} names no image digest; a tag is "
-                      f"not an identity")
     import _pdk_layer_authority as authority
-    return (authority.ImageReader(image),
-            f"the image {CONTAINER_IMAGE_REL} records this run read: {image}")
-
+    return authority.reader_the_run_recorded(project, environ=environ)
 
 
 def declared_masters(producer: Dict[str, Any]) -> List[str]:
